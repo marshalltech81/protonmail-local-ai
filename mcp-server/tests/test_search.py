@@ -17,7 +17,7 @@ import asyncio
 
 import pytest
 from fastmcp.exceptions import ToolError
-from src.tools.search import register_search_tools
+from src.tools.search import _MAX_EVIDENCE_LIMIT, register_search_tools
 
 
 def _handler(fake_server, fake_embed, db):
@@ -792,7 +792,62 @@ class TestGetEvidence:
         chunked_db.hybrid_search = spy  # type: ignore[assignment]
         handler = self._handler(fake_server, fake_embed, chunked_db)
         asyncio.run(handler(query="invoice", limit=9999))
-        assert captured["limit"] == 50
+        assert captured["limit"] == _MAX_EVIDENCE_LIMIT
+
+    def test_ceiling_covers_ask_mailboxs_largest_evidence_set(self):
+        """#449: ask_mailbox can put up to ``_MAX_ASK_THREADS`` threads x
+        ``PROMPT_EVIDENCE_CHUNKS_PER_THREAD`` chunks in its prompt; the
+        audit tool must be able to return all of them. Computed from the
+        shared constants so raising either one fails here first."""
+        from src.lib.sqlite import PROMPT_EVIDENCE_CHUNKS_PER_THREAD
+        from src.tools.intelligence import _MAX_ASK_THREADS
+
+        assert _MAX_EVIDENCE_LIMIT >= _MAX_ASK_THREADS * PROMPT_EVIDENCE_CHUNKS_PER_THREAD
+
+    def test_request_at_ask_mailbox_maximum_is_honoured(self, fake_server, fake_embed, chunked_db):
+        """#449: a ``limit`` equal to ask_mailbox's largest evidence set
+        returns every chunk rather than being clamped to the search cap."""
+        from datetime import UTC, datetime
+
+        from src.lib.sqlite import PROMPT_EVIDENCE_CHUNKS_PER_THREAD, ChunkResult, ThreadResult
+        from src.tools.intelligence import _MAX_ASK_THREADS
+
+        def fake_search(**kwargs):
+            per_thread = kwargs["evidence_per_thread"]
+            return [
+                ThreadResult(
+                    thread_id=f"t{t}",
+                    subject=f"Thread {t}",
+                    participants=[],
+                    folder="INBOX",
+                    date_first=datetime(2024, 1, 1, tzinfo=UTC),
+                    date_last=datetime(2024, 1, 1, tzinfo=UTC),
+                    message_ids=[],
+                    snippet="",
+                    has_attachments=False,
+                    evidence_chunks=[
+                        ChunkResult(
+                            chunk_id=f"c{t}-{i}",
+                            message_id=f"m{t}-{i}",
+                            claimant_id=f"m{t}-{i}#00000000",
+                            thread_id=f"t{t}",
+                            chunk_index=i,
+                            text=f"passage {t}-{i}",
+                            char_start=0,
+                            char_end=12,
+                        )
+                        for i in range(per_thread)
+                    ],
+                )
+                for t in range(kwargs["limit"])
+            ]
+
+        chunked_db.hybrid_search = fake_search  # type: ignore[assignment]
+        handler = self._handler(fake_server, fake_embed, chunked_db)
+        wanted = _MAX_ASK_THREADS * PROMPT_EVIDENCE_CHUNKS_PER_THREAD
+        out = asyncio.run(handler(query="invoice", limit=wanted))
+        assert out.structuredContent["chunk_count"] == wanted
+        assert len(out.structuredContent["threads"]) == _MAX_ASK_THREADS
 
     def test_db_error_returns_evidence_error(self, fake_server, fake_embed, chunked_db):
         def boom(**_kwargs):
