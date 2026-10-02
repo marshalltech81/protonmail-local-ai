@@ -329,6 +329,92 @@ class TestEnumeration:
         whole = _page(everything, has_more=False, filters={"folder": "Sent", "limit": 100})
         assert score_trace(self._scenario(), _trace([whole])).exhausted is True
 
+    @pytest.mark.parametrize(
+        "second",
+        [
+            {"folder": "Sent", "subject": "   ", "limit": 2},
+            {"folder": "Sent", "authority_class": "\t", "limit": 2},
+            {"folder": "  Sent ", "limit": 2},
+            {"folder": "Sent", "date_from": "", "limit": 2},
+        ],
+        ids=["whitespace-subject", "whitespace-authority", "padded-folder", "empty-date"],
+    )
+    def test_filters_the_tool_normalizes_away_continue_the_chain(self, second: dict) -> None:
+        # query_messages strips its string filters and ignores a blank one,
+        # so these pages are the same query and its cursor continues (#502).
+        trace = _trace(
+            [
+                _page(["m1@x.example", "m2@x.example"], has_more=True),
+                _page(["m3@x.example"], has_more=False, cursor="next", filters=second),
+            ]
+        )
+        score = score_trace(self._scenario(), trace)
+        assert score.enumeration_recall == 1.0
+        assert score.exhausted is True
+
+    def test_equivalent_date_forms_continue_the_chain(self) -> None:
+        # The tool binds its cursor to the normalized UTC bounds, so a
+        # date-only bound and its midnight-UTC datetime are one query.
+        scenario = _scenario(
+            category="exhaustive",
+            expected_tools=["query_messages"],
+            expected_arguments={"folder": "Sent", "date_from": "2024-01-01"},
+            max_calls=3,
+            required_evidence=[],
+            expected_messages=["m1@x.example", "m2@x.example"],
+        )
+        trace = _trace(
+            [
+                _page(
+                    ["m1@x.example"],
+                    has_more=True,
+                    filters={"folder": "Sent", "date_from": "2024-01-01T00:00:00Z"},
+                ),
+                _page(
+                    ["m2@x.example"],
+                    has_more=False,
+                    cursor="next",
+                    filters={"folder": "Sent", "date_from": "2024-01-01"},
+                ),
+            ]
+        )
+        score = score_trace(scenario, trace)
+        assert score.enumeration_recall == 1.0
+        assert score.exhausted is True
+
+    def test_a_call_with_a_date_the_tool_rejects_joins_no_chain(self) -> None:
+        # The tool refuses an unparseable date, so the call returned no page.
+        trace = _trace(
+            [
+                _page(
+                    ["m1@x.example", "m2@x.example", "m3@x.example"],
+                    has_more=False,
+                    filters={"folder": "Sent", "date_from": "not a date"},
+                ),
+            ]
+        )
+        score = score_trace(self._scenario(), trace)
+        assert score.enumeration_recall == 0.0
+        assert score.exhausted is False
+
+    def test_a_non_blank_extra_filter_still_starts_its_own_chain(self) -> None:
+        # Only blank values are absent: a real subject is another query, so
+        # its has_more: false does not finish the unfiltered Sent chain.
+        trace = _trace(
+            [
+                _page(["m1@x.example", "m2@x.example"], has_more=True),
+                _page(
+                    ["m3@x.example"],
+                    has_more=False,
+                    cursor="next",
+                    filters={"folder": "Sent", "subject": " report ", "limit": 2},
+                ),
+            ]
+        )
+        score = score_trace(self._scenario(), trace)
+        assert score.enumeration_recall == pytest.approx(2 / 3)
+        assert score.exhausted is False
+
     def test_messages_from_other_tools_do_not_count(self) -> None:
         # Only query_messages enumerates with an exact total; a message
         # read through get_thread was not enumerated.

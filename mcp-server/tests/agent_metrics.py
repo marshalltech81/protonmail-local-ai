@@ -43,6 +43,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from src.lib.sqlite import _normalize_date_range
+
 from tests.retrieval_metrics import evidence_recall
 
 # Result fields holding an ID an answer can cite. ``thread_id`` names a
@@ -55,6 +57,17 @@ ENUMERATING_TOOL = "query_messages"
 # Its arguments that page rather than filter: the agent picks the page
 # size, and the cursor is checked against the previous page.
 _PAGING_ARGUMENTS = ("limit", "cursor")
+# Its string filters that ``Database.query_messages`` strips, a blank one
+# being absent (``src/lib/sqlite.py``).
+_STRIPPED_FILTERS = (
+    "sender",
+    "recipient",
+    "participant",
+    "subject",
+    "text",
+    "folder",
+    "authority_class",
+)
 
 # The synthetic baseline mailbox (indexer/tests/baseline/corpus.py):
 # golden.json writes thread "t05" for "t05.1@baseline.example" and
@@ -162,16 +175,41 @@ def _groups_covered(ids: set[str], groups: list[list[str]]) -> float:
     return evidence_recall(sorted(ids), groups, k=len(ids))
 
 
+def _query_predicates(arguments: dict[str, Any]) -> dict[str, Any]:
+    """The filters of a ``query_messages`` call as the tool reads them
+    when it binds a cursor to them: string filters stripped, blank or
+    ``None`` ones absent, and the date bounds as their UTC ISO instants.
+
+    Raises ``ValueError`` for a date the tool rejects.
+    """
+    filters: dict[str, Any] = {}
+    for name, value in arguments.items():
+        if name in _PAGING_ARGUMENTS:
+            continue
+        if name in _STRIPPED_FILTERS and isinstance(value, str):
+            value = value.strip()
+        if value is None or value == "":
+            continue
+        filters[name] = value
+    if "date_from" in filters or "date_to" in filters:
+        bounds = _normalize_date_range(filters.pop("date_from", None), filters.pop("date_to", None))
+        for name, bound in zip(("date_from", "date_to"), bounds, strict=True):
+            if bound is not None:
+                filters[name] = bound
+    return filters
+
+
 def _enumeration_chains(calls: Sequence[dict], predicates: dict[str, Any]) -> list[list[dict]]:
     """The ``query_messages`` page results of each cursor chain over ``predicates``.
 
-    Only calls whose filters are exactly the expected predicates count
-    (blank filters are ignored, as the tool ignores them). A call with no
-    cursor starts a chain; one whose cursor is the ``next_cursor`` of the
+    Only calls whose filters, normalized as the tool normalizes them
+    (``_query_predicates``), are exactly the expected predicates count.
+    A call with no cursor starts a chain; one whose cursor is the ``next_cursor`` of the
     last page of any chain so far continues that chain, so starting a
     second chain does not orphan the first; a page with any other cursor
     joins no chain.
     """
+    expected = _query_predicates(predicates)
     chains: list[list[dict]] = []
     # Open chains by the cursor that continues them.
     waiting: dict[str, list[dict]] = {}
@@ -179,10 +217,12 @@ def _enumeration_chains(calls: Sequence[dict], predicates: dict[str, Any]) -> li
         if call["tool"] != ENUMERATING_TOOL:
             continue
         arguments = call["arguments"]
-        filters = {
-            k: v for k, v in arguments.items() if k not in _PAGING_ARGUMENTS and v not in (None, "")
-        }
-        if filters != predicates:
+        try:
+            filters = _query_predicates(arguments)
+        except ValueError:
+            # The tool rejects this date filter, so the call listed nothing.
+            continue
+        if filters != expected:
             continue
         cursor = arguments.get("cursor")
         if not cursor:
