@@ -797,7 +797,7 @@ Every failed row records a `last_error_class`:
 | Class | Meaning |
 |---|---|
 | `retryable` | May succeed on a later attempt; `dead` means the attempt budget ran out |
-| `permanent_source_failure` | This file can never be indexed under the current config (oversized, no `Message-ID`, input the embedder rejects) — dead-lettered immediately |
+| `permanent_source_failure` | This file can never be indexed under the current config (oversized, no `Message-ID` or one over 998 characters, input the embedder rejects) — dead-lettered immediately |
 | `operator_action_required` | The embedder rejected a health probe (bad key or model); jobs stay `queued` until you fix the config |
 
 Once the cause of a dead-letter is fixed, requeue with a fresh budget

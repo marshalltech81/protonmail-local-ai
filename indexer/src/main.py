@@ -771,12 +771,15 @@ def _phase1_commit_thread(
         return None
     parse_ms = (time.perf_counter() - t0) * 1000
     if msg is None:
-        # Parser returned None for a terminal reason (no Message-ID).
+        # Parser returned None for a terminal reason (no Message-ID, or
+        # one over ``MESSAGE_ID_MAX_CHARS``).
         # Dead-letter rather than delete the row: the file is never
         # written to ``indexed_files``, so a deleted row would let every
         # Maildir walk re-enqueue and re-parse it forever. The dead row
         # makes the walk skip it and keeps it visible in queue stats.
-        queue.mark_dead_terminal(filepath, stage="parse", error="unindexable: no Message-ID")
+        queue.mark_dead_terminal(
+            filepath, stage="parse", error="unindexable: no Message-ID or one over 998 characters"
+        )
         return None
 
     t0 = time.perf_counter()

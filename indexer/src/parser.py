@@ -74,6 +74,16 @@ _DEFAULT_PARSE_MAX_BYTES = 50_000_000
 # and a ``Re:`` reply to a subject longer than the cap does not.
 SUBJECT_MAX_CHARS = 2000
 
+# Longest Message-ID accepted, in characters, counted after the
+# surrounding whitespace and angle brackets are removed (``_clean_id``):
+# the value stored and used as a thread ID. RFC 5322 caps a line at 998
+# characters, so no conforming ID is longer. A message whose own ID is
+# longer is unindexable, like one without a Message-ID, so a crafted
+# root ID cannot become an unbounded thread ID; longer In-Reply-To and
+# References entries are dropped, since they can never match an
+# indexed ID.
+MESSAGE_ID_MAX_CHARS = 998
+
 # Longest date text read from the top ``Received:`` header, in
 # characters. ``occurred_at`` is the text after the header's last ``;``
 # (RFC 5321 puts the date there), so only the header's last
@@ -331,9 +341,24 @@ def parse_email(path: Path, maildir_root: Path | None = None) -> Message | None:
     if not message_id:
         log.debug(f"Skipping message with no Message-ID: {path}")
         return None
+    if len(message_id) > MESSAGE_ID_MAX_CHARS:
+        # Length only: the ID is sender-controlled.
+        log.debug(
+            "Skipping message with a Message-ID over %d characters (%d): %s",
+            MESSAGE_ID_MAX_CHARS,
+            len(message_id),
+            path,
+        )
+        return None
 
     in_reply_to = _clean_id(msg.get("In-Reply-To", ""))
-    references = [_clean_id(r) for r in msg.get("References", "").split() if r.strip()]
+    if len(in_reply_to) > MESSAGE_ID_MAX_CHARS:
+        in_reply_to = ""
+    references = [
+        ref
+        for ref in (_clean_id(r) for r in msg.get("References", "").split() if r.strip())
+        if len(ref) <= MESSAGE_ID_MAX_CHARS
+    ]
 
     subject = _decode_header(msg.get("Subject", "(no subject)"))[:SUBJECT_MAX_CHARS]
     # Parse From structurally, like To / Cc: decoding the whole header
