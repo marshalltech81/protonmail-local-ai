@@ -405,25 +405,25 @@ on #307):
 answers real knowledge questions, and identify why failures occur.
 
 **Status of Phases 3–5 (2026-10-02).** No phase is complete. Done:
-Phase 3 items 4 and 7, Phase 4 items 1 and 2. Partly done: Phase 3
-items 1, 2, 3, 6 and 8 (item 6 lacks only the #487 measurement),
-Phase 4 item 4, Phase 5 item 2. Not started:
-Phase 3 item 5, Phase 4 item 3, Phase 5 items 1, 3 and 4. Most of
+Phase 3 items 3, 4, 6 and 7 (3 as an experimental tool; 6's budgets
+are retuned once #487 measures them), Phase 4 items 1 and 2. Partly
+done: Phase 3 items 1, 2 and 8, Phase 4 item 4, Phase 5 item 2. Not
+started: Phase 3 item 5, Phase 4 item 3, Phase 5 items 1, 3 and 4. Most of
 what remains needs the real mailbox and providers (the go-live
 checklist) or an owner decision.
 
 | Item | Status | Landed in | Remaining |
 |---|---|---|---|
-| 3.1 Evals | Partly done | #452 (evidence recall vs hit rate), #494 (agent-level trace scoring) | live-client trace replay, abstention, corrections, conflicting sources, latency/cost, held-out set and thresholds (#283) |
+| 3.1 Evals | Partly done | #452 (evidence recall vs hit rate), #494 (agent-level trace scoring), #518 (#502) | live-client trace replay, abstention, corrections, conflicting sources, latency/cost, held-out set and thresholds (#283) |
 | 3.2 Latency | Partly done | #458 (stage timings) | benchmarks, budgets, cancellation (#287); needs real mail |
-| 3.3 `brief_issue` | Built, experimental | #466, #493 (hardening, #471) | accuracy/abstention scoring (#291) |
+| 3.3 `brief_issue` | Done (experimental) | #466, #493 (hardening, #471) | accuracy/abstention scoring (#291) is eval work under 3.1 |
 | 3.4 Injection suite | Done | #448, #534 (#442) | — |
-| 3.5 Thread weighting, rerank | Not started | — | needs real embedder/reranker (#288, #289) |
-| 3.6 Prompt evidence budget | Mostly done | #445 (shared character budget, dedup, coverage note), #496 (whole-prompt token budget, small-model profile) | measure and retune the budgets (#487) |
+| 3.5 Thread weighting, rerank | Not started | #535 (reply subjects in rerank candidate text, groundwork for #289) | needs real embedder/reranker (#288, #289) |
+| 3.6 Prompt evidence budget | Done | #445 (shared character budget, dedup, coverage note), #496 (whole-prompt token budget, small-model profile) | retune the budgets once measured (#487) |
 | 3.7 Filtered semantic recall | Done | #440, #470 | — |
-| 3.8 Citation contract | Partly done | #457, #495 (`ask_mailbox` statement coverage and quote checks) | the same contract for `summarize_thread` and `extract_from_emails`; semantic support (#284) |
+| 3.8 Citation contract | Partly done | #457, #495 (`ask_mailbox` statement coverage and quote checks), #519 and #525 (quote and label edge cases), #532 and #545 (`get_evidence` can audit `ask_mailbox`'s evidence) | the same contract for `summarize_thread` and `extract_from_emails`; semantic support (#284) |
 | 4.1 Entities | Done | #459, #527 (orphan pruning, #464) | — |
-| 4.2 Source authority | Done | #459, #474 (Spam guard) | verdict-header gating after go-live (#463) |
+| 4.2 Source authority | Done | #459, #474 (Spam guard), #523 and #542 (rules file kept private and validated) | verdict-header gating after go-live (#463) |
 | 4.3 Temporal retrieval | Not started | — | — |
 | 4.4 Retention | Mostly done | #451 (mirror default), #475 (Trash hidden from default search) | user-controlled retention; reaped-citation behaviour |
 | 5.1 Hardened `brief_issue` | Not started | — | needs Phase 3 usage on real mail |
@@ -468,8 +468,9 @@ checklist) or an owner decision.
    corrections, contradictions, "as of" questions; "newest is not
    authoritative"). An experimental MCP tool, registered only when
    `MCP_EXPERIMENTAL_TOOLS=true` (off by default; Resolved
-   decisions 12). **Status: built (experimental) in #466, hardened
-   in #493 (#471).** #291's accuracy and abstention scoring remains.
+   decisions 12). **Status: done (experimental): built in #466,
+   hardened in #493 (#471).** Scoring its accuracy and abstention
+   (#291) is eval work under item 1.
 4. **Adversarial injection suite** (hostile fixtures in the synthetic
    mailbox, asserting the Phase 0 serialization holds under real
    tool flows). **Status: done (#448).** The one gap it found,
@@ -495,7 +496,7 @@ checklist) or an owner decision.
    whole-prompt token budget, an evidence-selection policy, dedup,
    and a statement of what was left out. Nothing in the plan covered
    this; #214/#215 fixed only `summarize_thread`'s tail and
-   attachment identity. **Status: mostly done (#445, #496).** One
+   attachment identity. **Status: done (#445, #496).** One
    shared budget, per-thread dedup of long quoted passages, a
    counts-only coverage note, and a whole-prompt token budget for
    every intelligence tool against `INFERENCE_CONTEXT_TOKENS` (an
@@ -785,8 +786,10 @@ Still open from Phases 3–5, all waiting on a real mailbox or the
 owner: #283's remaining eval slices and #291's accuracy scoring;
 #287's budgets and benchmarks; #487's evidence and output budgets;
 #288 and #289, which need a real embedder and reranker; #284 for
-`summarize_thread`, `extract_from_emails` and semantic support; and
-Phase 4 item 3 and Phase 5 items 3–4.
+`summarize_thread`, `extract_from_emails` and semantic support;
+Phase 4 item 3 and item 4's user-controlled retention and
+reaped-citation behaviour; and Phase 5 items 1 (needs real-mail
+use), 2's quote and support verification, and 3–4.
 
 Go-live checklist (do these before more hardening):
 
