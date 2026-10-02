@@ -424,6 +424,46 @@ class TestAssignThread:
         t2 = threader.assign_thread(later)
         assert t2.thread_id == "sub_stale_later@example.com"
 
+    def test_new_thread_spans_the_effective_time(self, threader):
+        """A delivered message's thread is dated by its ``occurred_at``."""
+        sent = datetime(2024, 1, 1, tzinfo=UTC)
+        delivered = datetime(2024, 3, 1, tzinfo=UTC)
+        thread = threader.assign_thread(make_message(date=sent, occurred_at=delivered))
+        assert (thread.date_first, thread.date_last) == (delivered, delivered)
+
+    def test_joined_thread_widens_by_the_effective_time(self, db, threader):
+        root = make_message(message_id="eroot@example.com", date=datetime(2024, 1, 1, tzinfo=UTC))
+        db.upsert_thread(threader.assign_thread(root), [0.0] * EMBEDDING_DIM)
+        reply = make_message(
+            message_id="ereply@example.com",
+            in_reply_to="eroot@example.com",
+            filepath="/maildir/INBOX/cur/ereply",
+            date=datetime(2023, 12, 1, tzinfo=UTC),
+            occurred_at=datetime(2024, 2, 1, tzinfo=UTC),
+        )
+        thread = threader.assign_thread(reply)
+        assert thread.date_first == datetime(2024, 1, 1, tzinfo=UTC)
+        assert thread.date_last == datetime(2024, 2, 1, tzinfo=UTC)
+
+    def test_subject_fallback_window_uses_the_effective_time(self, db, threader):
+        """The proximity window compares effective times: a reply whose
+        ``Date:`` is a year off but which was delivered days after the
+        thread's last activity still joins by subject."""
+        original = make_message(
+            message_id="eff_orig@example.com",
+            subject="Invoice",
+            date=datetime(2024, 1, 1, tzinfo=UTC),
+        )
+        db.upsert_thread(threader.assign_thread(original), [0.0] * EMBEDDING_DIM)
+        later = make_message(
+            message_id="eff_later@example.com",
+            subject="Re: Invoice",
+            filepath="/maildir/INBOX/cur/eff_later",
+            date=datetime(2025, 6, 1, tzinfo=UTC),
+            occurred_at=datetime(2024, 1, 5, tzinfo=UTC),
+        )
+        assert threader.assign_thread(later).thread_id == "eff_orig@example.com"
+
     def test_subject_fallback_does_not_cross_folders(self, db, threader):
         """Subject matching is scoped to the same folder."""
         inbox_msg = make_message(

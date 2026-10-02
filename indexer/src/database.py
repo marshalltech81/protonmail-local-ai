@@ -536,10 +536,15 @@ class Database:
             CREATE INDEX idx_message_thread_map_thread ON message_thread_map(thread_id);
 
             -- One row per indexed message: the authoritative per-message
-            -- record (own headers, send time, folder, source locator and
-            -- content hash) behind exact enumeration and provenance.
-            -- Cascades from ``message_thread_map`` so every existing
-            -- message / thread removal path cleans it up.
+            -- record (own headers, send and delivery time, folder, source
+            -- locator and content hash) behind exact enumeration and
+            -- provenance. Cascades from ``message_thread_map`` so every
+            -- existing message / thread removal path cleans it up.
+            -- ``sent_at`` is the parsed ``Date:`` header; ``occurred_at``
+            -- the date of the topmost ``Received:`` header, NULL when
+            -- absent or unparseable. ``effective_at`` is the message's
+            -- effective time, which every date filter, thread span and
+            -- time ordering uses (docs/architecture.md "Message time").
             CREATE TABLE messages (
                 claimant_id     TEXT PRIMARY KEY,
                 message_id      TEXT NOT NULL,
@@ -548,6 +553,9 @@ class Database:
                 folder          TEXT NOT NULL,
                 subject         TEXT NOT NULL,
                 sent_at         TEXT NOT NULL,
+                occurred_at     TEXT,
+                effective_at    TEXT GENERATED ALWAYS AS (COALESCE(occurred_at, sent_at))
+                                VIRTUAL,
                 in_reply_to     TEXT,
                 references_json TEXT NOT NULL,
                 has_attachments INTEGER NOT NULL,
@@ -562,11 +570,11 @@ class Database:
             -- order so ``LIMIT`` stops the walk instead of every file
             -- claiming the Message-ID being read and sorted (#538).
             CREATE INDEX idx_messages_message ON messages(message_id, claimant_id);
-            CREATE INDEX idx_messages_message_sent
-                ON messages(message_id, sent_at, claimant_id);
-            CREATE INDEX idx_messages_thread_sent ON messages(thread_id, sent_at);
-            CREATE INDEX idx_messages_folder_sent ON messages(folder, sent_at);
-            CREATE INDEX idx_messages_sent ON messages(sent_at);
+            CREATE INDEX idx_messages_message_effective
+                ON messages(message_id, effective_at, claimant_id);
+            CREATE INDEX idx_messages_thread_effective ON messages(thread_id, effective_at);
+            CREATE INDEX idx_messages_folder_effective ON messages(folder, effective_at);
+            CREATE INDEX idx_messages_effective ON messages(effective_at);
             -- Flag renames and cross-folder moves update by filepath.
             CREATE INDEX idx_messages_filepath ON messages(filepath);
 
@@ -786,9 +794,9 @@ class Database:
         incoming_display_subject: str | None = None
         incoming_earliest_date_iso: str | None = None
         if thread.messages:
-            earliest = min(thread.messages, key=lambda m: m.date)
+            earliest = min(thread.messages, key=lambda m: m.effective_date)
             incoming_display_subject = earliest.subject or None
-            incoming_earliest_date_iso = earliest.date.isoformat()
+            incoming_earliest_date_iso = earliest.effective_date.isoformat()
 
         started = False
         try:
@@ -865,7 +873,7 @@ class Database:
             # above, and the snippet should track that same rule.
             snippet = thread.snippet()
             if existing and existing["snippet"] and thread.messages:
-                newest_incoming = max(m.date for m in thread.messages).isoformat()
+                newest_incoming = max(m.effective_date for m in thread.messages).isoformat()
                 if newest_incoming < existing["date_last"]:
                     snippet = existing["snippet"]
             date_last = thread.date_last.isoformat()
@@ -935,17 +943,20 @@ class Database:
 
                 self._write_message_record(cur, msg, thread.thread_id)
 
-            # The thread's range is its messages' ``sent_at`` range. The
-            # merge above can only widen it, so a reprocess that re-dates
-            # a message (a parser fix) would leave the old date as an
-            # endpoint; recompute both from the rows just written.
+            # The thread's range is its messages' effective-time
+            # (``effective_at``) range. The merge above can only widen
+            # it, so a reprocess that re-dates a message (a parser fix)
+            # would leave the old date as an endpoint; recompute both
+            # from the rows just written.
             cur.execute(
                 """
                 UPDATE threads SET
                     date_first = COALESCE(
-                        (SELECT MIN(sent_at) FROM messages WHERE thread_id = :t), date_first),
+                        (SELECT MIN(effective_at) FROM messages WHERE thread_id = :t),
+                        date_first),
                     date_last = COALESCE(
-                        (SELECT MAX(sent_at) FROM messages WHERE thread_id = :t), date_last)
+                        (SELECT MAX(effective_at) FROM messages WHERE thread_id = :t),
+                        date_last)
                 WHERE thread_id = :t
                 """,
                 {"t": thread.thread_id},
@@ -964,7 +975,7 @@ class Database:
                 r[0]
                 for r in cur.execute(
                     "SELECT substr(subject, 1, ?) FROM messages WHERE thread_id = ? "
-                    "ORDER BY sent_at LIMIT ?",
+                    "ORDER BY effective_at LIMIT ?",
                     (FTS_SUBJECT_SCAN_CHARS, thread.thread_id, FTS_SUBJECT_SCAN_ROWS),
                 )
             ]
@@ -1064,9 +1075,9 @@ class Database:
           its parent thread into ranking.
 
         A chunk stores no copy of its message's date: readers take a
-        passage's date from its ``messages`` row (``sent_at``), so a
-        re-dated message whose chunks were not rewritten never shows a
-        stale date (#575).
+        passage's dates from its ``messages`` row (``sent_at``,
+        ``occurred_at``), so a re-dated message whose chunks were not
+        rewritten never shows a stale date (#575).
 
         All inserts / deletes across ``message_chunks``,
         ``message_chunks_fts`` and ``message_chunks_vec`` happen inside
@@ -2149,15 +2160,16 @@ class Database:
             """
             INSERT INTO messages
                 (claimant_id, message_id, thread_id, filepath, folder, subject, sent_at,
-                 in_reply_to, references_json, has_attachments, size_bytes,
+                 occurred_at, in_reply_to, references_json, has_attachments, size_bytes,
                  content_hash, indexed_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(claimant_id) DO UPDATE SET
                 thread_id       = excluded.thread_id,
                 filepath        = excluded.filepath,
                 folder          = excluded.folder,
                 subject         = excluded.subject,
                 sent_at         = excluded.sent_at,
+                occurred_at     = excluded.occurred_at,
                 in_reply_to     = excluded.in_reply_to,
                 references_json = excluded.references_json,
                 has_attachments = excluded.has_attachments,
@@ -2173,6 +2185,7 @@ class Database:
                 msg.folder,
                 msg.subject,
                 msg.date.isoformat(),
+                msg.occurred_at.isoformat() if msg.occurred_at is not None else None,
                 msg.in_reply_to,
                 json.dumps(msg.references),
                 int(bool(msg.has_attachments)),
@@ -2624,7 +2637,11 @@ class Database:
         # subject, or when the thread has no messages (the deletion-reconciler then drops the thread row
         # entirely a few lines below; the value never reaches storage).
         display_subject = next(
-            (m.subject for m in sorted(thread.messages, key=lambda m: m.date) if m.subject),
+            (
+                m.subject
+                for m in sorted(thread.messages, key=lambda m: m.effective_date)
+                if m.subject
+            ),
             None,
         )
 
@@ -2668,7 +2685,8 @@ class Database:
         # as the upsert path reads them; ``fts_subject_text`` caps the
         # rows and characters it examines.
         fts_subject = fts_subject_text(
-            thread.subject, (m.subject for m in sorted(thread.messages, key=lambda m: m.date))
+            thread.subject,
+            (m.subject for m in sorted(thread.messages, key=lambda m: m.effective_date)),
         )
         self._replace_fts_row(cur, thread.thread_id, fts_subject, participants_json, body)
 

@@ -208,7 +208,7 @@ class Threader:
             thread = self.db.get_thread(thread_id)
             if thread:
                 thread.messages.append(message)
-                thread.messages.sort(key=lambda m: m.date)
+                thread.messages.sort(key=lambda m: m.effective_date)
                 # Dedup by canonical address so ``Bob <bob@x>`` does not
                 # shadow ``bob@x`` already in the list. Keep the existing
                 # (richer) display string when a canonical duplicate
@@ -220,8 +220,8 @@ class Threader:
                     if key and key not in seen_canonical:
                         thread.participants.append(addr)
                         seen_canonical.add(key)
-                thread.date_first = min(thread.date_first, message.date)
-                thread.date_last = max(thread.date_last, message.date)
+                thread.date_first = min(thread.date_first, message.effective_date)
+                thread.date_last = max(thread.date_last, message.effective_date)
                 return thread
 
         # Create a new thread rooted at this message
@@ -232,8 +232,8 @@ class Threader:
             participants=self._participants([message]),
             messages=[message],
             folder=message.folder,
-            date_first=message.date,
-            date_last=message.date,
+            date_first=message.effective_date,
+            date_last=message.effective_date,
         )
         return thread
 
@@ -311,7 +311,7 @@ class Threader:
         if not recipients.intersection(thread_canonical):
             return False
 
-        delta = abs(message.date - thread.date_last)
+        delta = abs(message.effective_date - thread.date_last)
         return delta <= SUBJECT_FALLBACK_WINDOW
 
     @staticmethod
