@@ -387,7 +387,52 @@ PER_THREAD_CHAR_BUDGET = 2000
 # otherwise drive huge retrievals and, for intelligence tools, assemble
 # absurdly large prompts that blow past the model context window.
 _MAX_ASK_THREADS = 10
+_DEFAULT_ASK_THREADS = 5
 _MAX_EXTRACT_LIMIT = 50
+
+
+def clamp_ask_threads(max_threads: object) -> int:
+    """``max_threads`` clamped to ``[1, _MAX_ASK_THREADS]`` (default 5 for
+    a non-numeric value), as ``ask_mailbox`` and ``get_evidence`` take it."""
+    return clamp_int(max_threads, default=_DEFAULT_ASK_THREADS, minimum=1, maximum=_MAX_ASK_THREADS)
+
+
+def select_ask_threads(
+    db,
+    query: str,
+    embedding: list[float],
+    *,
+    max_threads: int,
+    folders: list[str] | None,
+    from_addr: str | None,
+    date_from: str | None,
+    date_to: str | None,
+    reranker,
+    has_attachments: bool | None = None,
+) -> list[ThreadResult]:
+    """The threads, and each thread's evidence chunks, ``ask_mailbox``
+    puts in front of its model for ``query``.
+
+    ``get_evidence(max_threads=...)`` calls this too, so the audit runs
+    the same retrieval: ``max_threads`` sizes the lane fetch and the
+    reranker's pool exactly as it does for an answer (#537).
+    ``with_evidence`` attaches the per-message chunks that drove ranking,
+    at most ``PROMPT_EVIDENCE_CHUNKS_PER_THREAD`` per thread.
+    """
+    return db.hybrid_search(
+        query_text=query,
+        query_embedding=embedding,
+        folders=folders,
+        from_addr=from_addr,
+        date_from=date_from,
+        date_to=date_to,
+        has_attachments=has_attachments,
+        limit=max_threads,
+        with_evidence=True,
+        reranker=reranker,
+        evidence_per_thread=PROMPT_EVIDENCE_CHUNKS_PER_THREAD,
+    )
+
 
 # Tail size for ``summarize_thread``'s recent-chunks fetch. The stored
 # ``body_text`` is capped at ``THREAD_BODY_TEXT_MAX_TOKENS`` (4000) and
@@ -1840,7 +1885,7 @@ def register_intelligence_tools(
         # Clamp to [1, _MAX_ASK_THREADS] so a caller-supplied
         # ``max_threads=5000`` (or a non-numeric value) can't expand
         # into a massive prompt or raise before the try/except below.
-        max_threads = clamp_int(max_threads, default=5, minimum=1, maximum=_MAX_ASK_THREADS)
+        max_threads = clamp_ask_threads(max_threads)
         # Reject a bad date range before any provider or retrieval work.
         try:
             validate_date_range(date_from, date_to)
@@ -1849,24 +1894,21 @@ def register_intelligence_tools(
             raise ToolError(f"Error: {e}") from e
 
         try:
-            # Retrieve relevant threads via hybrid search. ``with_evidence``
-            # asks the chunk-aware retrieval lane to attach matching
-            # per-message chunks to each surfaced thread, so the LLM
-            # context below is the precise passages that drove ranking
+            # Retrieve relevant threads via hybrid search, with the
+            # precise passages that drove ranking attached to each thread
             # rather than the truncated accumulated thread body.
             embedding = await embed_query(embed_client, question, expected_embed_dim)
             results = await asyncio.to_thread(
-                db.hybrid_search,
-                query_text=question,
-                query_embedding=embedding,
+                select_ask_threads,
+                db,
+                question,
+                embedding,
+                max_threads=max_threads,
                 folders=folders,
                 from_addr=from_addr,
                 date_from=date_from,
                 date_to=date_to,
-                limit=max_threads,
-                with_evidence=True,
                 reranker=reranker,
-                evidence_per_thread=PROMPT_EVIDENCE_CHUNKS_PER_THREAD,
             )
             count("results", len(results))
 

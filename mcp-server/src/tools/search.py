@@ -20,7 +20,7 @@ from ..lib.sqlite import (
 )
 from ..lib.timings import count, rerank_mode, stage, timed_tool
 from ..lib.validation import clamp_int
-from .intelligence import _MAX_ASK_THREADS
+from .intelligence import _MAX_ASK_THREADS, clamp_ask_threads, select_ask_threads
 from .outputs import (
     HEADER_CHAR_LIMIT,
     MAX_LISTED,
@@ -395,7 +395,8 @@ def register_search_tools(
         date_from: str | None = None,
         date_to: str | None = None,
         has_attachments: bool | None = None,
-        limit: int = 12,
+        max_threads: int | None = None,
+        limit: int | None = None,
         include_scores: bool = False,
     ) -> CallToolResult:
         """
@@ -416,7 +417,9 @@ def register_search_tools(
 
         Pass thread_id to scope evidence to a single thread ("which
         part of this thread mentions the deadline?"); omit it to gather
-        evidence across the whole mailbox.
+        evidence across the whole mailbox. To audit an ask_mailbox
+        answer, pass the same question, filters and max_threads: the
+        result is the evidence that answer retrieved, in the same order.
 
         Args:
             query: The question or topic to gather evidence for.
@@ -424,7 +427,8 @@ def register_search_tools(
                        one thread. Obtain it from search_emails or
                        list_threads — never invent it from a subject.
                        Cannot be combined with folders, from_addr,
-                       date_from, date_to or has_attachments.
+                       date_from, date_to, has_attachments or
+                       max_threads.
             folders: Restrict to threads with a message in these folders,
                      e.g. ["INBOX", "Sent"]. Without it, threads filed
                      only in Trash are left out; name "Trash" to
@@ -435,9 +439,13 @@ def register_search_tools(
             date_from: ISO 8601 date lower bound, e.g. "2024-01-01".
             date_to: ISO 8601 date upper bound, e.g. "2024-12-31".
             has_attachments: True to restrict to threads with attachments.
-            limit: Maximum evidence chunks to return (default 12,
-                   clamped to [1, 60], ask_mailbox's largest
-                   evidence set).
+            max_threads: Rank threads exactly as ask_mailbox does with
+                         this max_threads (clamped to [1, 10]) and
+                         return their evidence. Omit it to rank by
+                         limit instead.
+            limit: Maximum evidence chunks to return (default 12, or
+                   max_threads x 6 when max_threads is given; clamped
+                   to [1, 60], ask_mailbox's largest evidence set).
             include_scores: When true, annotate each thread with the
                             retrieval lanes that matched (thread_fts /
                             chunk_fts / attachment_fts / thread_vec /
@@ -460,6 +468,7 @@ def register_search_tools(
                 "date_from": date_from,
                 "date_to": date_to,
                 "has_attachments": has_attachments,
+                "max_threads": max_threads,
                 "limit": limit,
                 "include_scores": include_scores,
             },
@@ -479,6 +488,7 @@ def register_search_tools(
                     ("date_from", date_from),
                     ("date_to", date_to),
                     ("has_attachments", has_attachments),
+                    ("max_threads", max_threads),
                 )
                 # Blank optionals (``""``, ``[]``) are absent, as on the
                 # mailbox-wide path; ``has_attachments=False`` is a filter.
@@ -493,10 +503,17 @@ def register_search_tools(
                     "them to read this thread's evidence, or drop thread_id to "
                     "search the mailbox with them."
                 )
+        # ``max_threads`` takes ask_mailbox's clamp, so the same argument
+        # ranks the same threads (#537); its default chunk budget is that
+        # many threads' full evidence.
+        default_limit = 12
+        if max_threads is not None:
+            max_threads = clamp_ask_threads(max_threads)
+            default_limit = max_threads * PROMPT_EVIDENCE_CHUNKS_PER_THREAD
         # ``limit`` counts evidence chunks; the ceiling covers ask_mailbox's
         # largest evidence set, and an LLM-inflated value would otherwise
         # drive a large per-thread chunk fetch and an oversized payload.
-        limit = clamp_int(limit, default=12, minimum=1, maximum=_MAX_EVIDENCE_LIMIT)
+        limit = clamp_int(limit, default=default_limit, minimum=1, maximum=_MAX_EVIDENCE_LIMIT)
         # Reject a bad date range before any provider or retrieval work.
         # The thread-scoped path takes no dates (blank ones are ignored
         # above), so only the mailbox-wide path checks them.
@@ -531,21 +548,21 @@ def register_search_tools(
                     )
             else:
                 embedding = await embed_query(embed_client, query, expected_embed_dim)
+                # ask_mailbox's retrieval, with the same per-thread chunk
+                # cap. Without ``max_threads`` the chunk ``limit`` also
+                # sets how many threads are ranked, as it always has.
                 results = await asyncio.to_thread(
-                    db.hybrid_search,
-                    query_text=query,
-                    query_embedding=embedding,
+                    select_ask_threads,
+                    db,
+                    query,
+                    embedding,
+                    max_threads=limit if max_threads is None else max_threads,
                     folders=folders,
                     from_addr=from_addr,
                     date_from=date_from,
                     date_to=date_to,
-                    has_attachments=has_attachments,
-                    limit=limit,
-                    with_evidence=True,
                     reranker=reranker,
-                    # The same per-thread cap as ask_mailbox, so these are
-                    # the chunks its prompt draws on.
-                    evidence_per_thread=PROMPT_EVIDENCE_CHUNKS_PER_THREAD,
+                    has_attachments=has_attachments,
                 )
                 count("results", len(results))
                 # Flatten thread-ranked evidence into a flat chunk budget:

@@ -7,6 +7,11 @@ the front. The documented audit call ``get_evidence(query, thread_id)``
 ordered by vector distance alone, so a cited low-similarity attachment
 chunk in a long thread could fall outside its slice. All data is
 synthetic.
+
+
+``get_evidence(max_threads=N)`` selects threads exactly as
+``ask_mailbox(max_threads=N)`` does, so the mailbox-wide audit returns
+the same evidence set (#537).
 """
 
 import asyncio
@@ -15,8 +20,9 @@ from pathlib import Path
 
 import pytest
 import sqlite_vec
+from fastmcp.exceptions import ToolError
 from src.lib.sqlite import PROMPT_EVIDENCE_CHUNKS_PER_THREAD, Database
-from src.tools.intelligence import register_intelligence_tools
+from src.tools.intelligence import _MAX_ASK_THREADS, register_intelligence_tools
 from src.tools.search import register_search_tools
 
 from tests.conftest import (
@@ -108,7 +114,7 @@ def parity_db(tmp_path: Path) -> Database:
     return Database(str(db_path))
 
 
-def _ask_evidence(db: Database, question: str, **filters) -> dict[str, list[str]]:
+def _ask_evidence(db: Database, question: str, *, reranker=None, **filters) -> dict[str, list[str]]:
     """The per-thread chunk IDs ``ask_mailbox`` puts in front of its model."""
     seen: dict[str, list[str]] = {}
     real = db.hybrid_search
@@ -122,16 +128,18 @@ def _ask_evidence(db: Database, question: str, **filters) -> dict[str, list[str]
     db.hybrid_search = capture  # type: ignore[method-assign]
     try:
         server = FakeMCPServer()
-        register_intelligence_tools(server, db, FakeEmbedClient(), FakeInferenceClient())
+        register_intelligence_tools(
+            server, db, FakeEmbedClient(), FakeInferenceClient(), reranker=reranker
+        )
         asyncio.run(server.tools["ask_mailbox"](question=question, **filters))
     finally:
         del db.hybrid_search
     return seen
 
 
-def _get_evidence(db: Database, query: str, **kwargs) -> dict[str, list[str]]:
+def _get_evidence(db: Database, query: str, *, reranker=None, **kwargs) -> dict[str, list[str]]:
     server = FakeMCPServer()
-    register_search_tools(server, db, FakeEmbedClient())
+    register_search_tools(server, db, FakeEmbedClient(), reranker=reranker)
     out = asyncio.run(server.tools["get_evidence"](query=query, **kwargs))
     return {
         t["thread_id"]: [c["chunk_id"] for c in t["chunks"]]
@@ -197,3 +205,98 @@ class TestEvidenceParity:
         asked_ids = {c for ids in asked.values() for c in ids}
         wide_ids = {c for ids in wide.values() for c in ids}
         assert asked_ids <= wide_ids
+
+
+class _ReverseReranker:
+    """Reranker stub that reverses the RRF order of what it is given, so
+    the result depends on how many candidates ``hybrid_search`` sends."""
+
+    candidates = 1
+
+    def rerank(self, query, documents, top_n):
+        n = len(documents)
+        return [(i, float(i)) for i in reversed(range(n))][:top_n]
+
+
+def _spy_limits(db: Database) -> list[int]:
+    """Record the ``limit`` each ``hybrid_search`` call is given."""
+    limits: list[int] = []
+    real = db.hybrid_search
+
+    def spy(**kwargs):
+        limits.append(kwargs["limit"])
+        return real(**kwargs)
+
+    db.hybrid_search = spy  # type: ignore[method-assign]
+    return limits
+
+
+def _nonempty(groups: dict[str, list[str]]) -> list[tuple[str, list[str]]]:
+    return [(tid, ids) for tid, ids in groups.items() if ids]
+
+
+class TestMailboxWideParity:
+    @pytest.mark.parametrize("max_threads", [1, 2])
+    @pytest.mark.parametrize("with_reranker", [False, True], ids=["no-rerank", "rerank"])
+    @pytest.mark.parametrize(
+        ("question", "filters"),
+        [
+            pytest.param("budget", {}, id="plain"),
+            pytest.param("proposal-quote", {}, id="filename-match"),
+            pytest.param("budget", {"folders": ["INBOX", "Archive"]}, id="filtered"),
+            pytest.param("budget", {"from_addr": "carol@example.org"}, id="sender-filtered"),
+        ],
+    )
+    def test_same_chunks_in_same_order(
+        self, parity_db, question, filters, max_threads, with_reranker
+    ):
+        """Same threads, same per-thread chunks, same order as the
+        evidence ``ask_mailbox`` retrieved for the same arguments."""
+        reranker = _ReverseReranker() if with_reranker else None
+        asked = _ask_evidence(
+            parity_db, question, reranker=reranker, max_threads=max_threads, **filters
+        )
+        assert asked, "the corpus must surface at least one thread"
+        audited = _get_evidence(
+            parity_db, question, reranker=reranker, max_threads=max_threads, **filters
+        )
+        assert _nonempty(audited) == _nonempty(asked)
+
+    def test_reranker_sees_the_same_pool(self, parity_db):
+        """The issue's case: with a reranker, a chunk-sized thread limit
+        sent more candidates to it and changed the top thread."""
+        asked = _ask_evidence(parity_db, "budget", reranker=_ReverseReranker(), max_threads=1)
+        audited = _get_evidence(parity_db, "budget", reranker=_ReverseReranker(), max_threads=1)
+        assert list(audited) == list(asked)
+        legacy = _get_evidence(parity_db, "budget", reranker=_ReverseReranker())
+        assert list(legacy)[0] != list(asked)[0]
+
+    def test_chunk_budget_defaults_to_the_full_evidence_set(self, parity_db):
+        audited = _get_evidence(parity_db, "budget", max_threads=2)
+        assert sum(len(ids) for ids in audited.values()) == PROMPT_EVIDENCE_CHUNKS_PER_THREAD + 3
+
+    def test_explicit_limit_still_caps_chunks(self, parity_db):
+        audited = _get_evidence(parity_db, "budget", max_threads=2, limit=3)
+        assert sum(len(ids) for ids in audited.values()) == 3
+
+    @pytest.mark.parametrize(
+        ("given", "expected"),
+        [(0, 1), (-4, 1), (500, _MAX_ASK_THREADS), ("many", 5), (None, 12)],
+    )
+    def test_thread_limit_is_clamped_like_ask_mailbox(self, parity_db, given, expected):
+        """``max_threads`` takes ask_mailbox's clamp; omitted, the thread
+        limit stays the chunk ``limit`` (default 12), as before."""
+        limits = _spy_limits(parity_db)
+        kwargs = {} if given is None else {"max_threads": given}
+        _get_evidence(parity_db, "budget", **kwargs)
+        assert limits == [expected]
+
+    def test_omitted_max_threads_is_unchanged(self, parity_db):
+        limits = _spy_limits(parity_db)
+        audited = _get_evidence(parity_db, "budget", limit=4)
+        assert limits == [4]
+        assert sum(len(ids) for ids in audited.values()) == 4
+
+    def test_rejected_with_thread_id(self, parity_db):
+        with pytest.raises(ToolError, match="max_threads"):
+            _get_evidence(parity_db, "budget", thread_id="t-quote", max_threads=2)
