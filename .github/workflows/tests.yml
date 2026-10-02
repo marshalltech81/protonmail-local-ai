@@ -38,6 +38,15 @@ jobs:
       - name: Run bridge-smoke.sh tests
         run: bash scripts/tests/bridge_smoke_test.sh
 
+  validate-env-script:
+    name: validate-env script
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Run validate-env.sh tests
+        run: bash scripts/tests/validate_env_test.sh
+
   indexer-pytest:
     name: indexer pytest
     runs-on: ubuntu-latest

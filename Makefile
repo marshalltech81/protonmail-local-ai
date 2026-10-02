@@ -1,4 +1,4 @@
-.PHONY: build build-nocache up down logs first-run update status requeue-dead clean sync sync-indexer sync-mcp test test-indexer test-mcp test-mbsync test-bridge test-bridge-smoke baseline typecheck typecheck-indexer typecheck-mcp bridge-patch-check bridge-smoke bridge-upgrade-check init-secrets validate-env help
+.PHONY: build build-nocache up down logs first-run update status requeue-dead clean sync sync-indexer sync-mcp test test-indexer test-mcp test-mbsync test-bridge test-bridge-smoke test-validate-env baseline typecheck typecheck-indexer typecheck-mcp bridge-patch-check bridge-smoke bridge-upgrade-check init-secrets validate-env help
 
 UV_CACHE_DIR ?= /tmp/uv-cache
 export UV_CACHE_DIR
@@ -26,13 +26,14 @@ help:
 	@echo "  status       Show container and index status"
 	@echo "  requeue-dead Requeue dead-lettered indexing jobs (optional CLASS=retryable|permanent_source_failure|operator_action_required)"
 	@echo "  sync         Sync local uv environments for indexer and mcp-server"
-	@echo "  test         Run indexer, mcp-server, mbsync, Bridge entrypoint and bridge-smoke script tests locally"
+	@echo "  test         Run indexer, mcp-server, mbsync, Bridge entrypoint, bridge-smoke and validate-env script tests locally"
 	@echo "  typecheck    Run mypy over the indexer and mcp-server Python services"
 	@echo "  test-indexer Run indexer unit tests only"
 	@echo "  test-mcp     Run mcp-server unit tests only"
 	@echo "  test-mbsync  Run mbsync entrypoint tests only"
 	@echo "  test-bridge  Run Bridge entrypoint tests only"
 	@echo "  test-bridge-smoke  Run bridge-smoke.sh pass/fail tests (no Docker)"
+	@echo "  test-validate-env  Run validate-env.sh tests against synthetic .env fixtures"
 	@echo "  baseline     Run the retrieval regression baseline (UPDATE=1 rewrites the rank snapshot)"
 	@echo "  clean        Remove all containers and volumes (destructive)"
 	@echo ""
@@ -184,7 +185,7 @@ requeue-dead:
 	docker exec indexer python -m src.requeue_dead $(if $(CLASS),--class $(CLASS),)
 
 # Run unit tests locally using uv
-test: test-indexer test-mcp test-mbsync test-bridge test-bridge-smoke
+test: test-indexer test-mcp test-mbsync test-bridge test-bridge-smoke test-validate-env
 
 test-indexer: sync-indexer
 	cd indexer && uv run pytest -q
@@ -200,6 +201,9 @@ test-bridge:
 
 test-bridge-smoke:
 	bash scripts/tests/bridge_smoke_test.sh
+
+test-validate-env:
+	bash scripts/tests/validate_env_test.sh
 
 # Retrieval regression baseline. Step 1 indexes the synthetic mailbox with
 # the real indexer and a hashed embedder; step 2 checks the golden
