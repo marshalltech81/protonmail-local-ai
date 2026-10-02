@@ -281,6 +281,13 @@ removed_transport_fails_with_migration_steps() {
     done
 }
 
+# An exported value wins over .env, so the steps must say to unset it.
+exported_removed_transport_names_the_shell_export() {
+    setup
+    fails_with 'MCP_TRANSPORT=sse was removed' MCP_TRANSPORT=sse
+    grep -F 'unset MCP_TRANSPORT' "$WORK/output" >/dev/null
+}
+
 unknown_transport_fails() {
     setup 'MCP_TRANSPORT=websocket'
     fails_with "MCP_TRANSPORT must be 'streamable-http' or unset"
@@ -482,6 +489,7 @@ check "an out-of-range MCP_PORT fails" out_of_range_port_fails
 check "a zero-padded MCP_PORT is decimal" zero_padded_port_is_decimal
 check "an unknown INFERENCE_MODE fails" unknown_inference_mode_fails
 check "a removed MCP_TRANSPORT fails with migration steps" removed_transport_fails_with_migration_steps
+check "an exported removed MCP_TRANSPORT names the shell export" exported_removed_transport_names_the_shell_export
 check "an unknown MCP_TRANSPORT fails" unknown_transport_fails
 check "a missing EMBED_MODEL fails" missing_embed_model_fails
 check "an empty embed key fails" empty_embed_key_fails

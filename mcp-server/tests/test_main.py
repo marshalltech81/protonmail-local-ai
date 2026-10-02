@@ -114,6 +114,9 @@ class TestMcpTransport:
         assert f"MCP_TRANSPORT={value.strip().lower()}" in message
         assert "removed" in message
         assert "/sse" in message and "/mcp" in message
+        # Compose and validate-env read an exported value ahead of .env,
+        # so the steps must cover the shell environment too.
+        assert "unset MCP_TRANSPORT" in message
 
     @pytest.mark.parametrize("value", ["websocket", "stdio", "http"])
     def test_unknown_transport_fails_closed(self, monkeypatch, value):

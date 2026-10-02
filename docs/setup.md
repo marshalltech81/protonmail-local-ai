@@ -595,8 +595,11 @@ takes this URL directly:
 
 Connect Claude Desktop through a local stdio-to-Streamable-HTTP bridge
 instead. The npm package `mcp-remote` is one
-(it needs Node.js). Put this in `claude_desktop_config.json` (also in
-[`claude_desktop_config.example.json`](claude_desktop_config.example.json)):
+(it needs Node.js). Add the `protonmail-local-ai` entry below to the
+`mcpServers` object in `claude_desktop_config.json`, keeping any servers
+already there; use the whole example (also in
+[`claude_desktop_config.example.json`](claude_desktop_config.example.json))
+only when the file does not exist yet:
 
 ```json
 {
@@ -641,7 +644,9 @@ connect to `http://localhost:3000/mcp` directly.
 **Upgrading from a release that served `/sse` (breaking change).** The
 legacy HTTP+SSE transport, its `/sse` and `/messages/` endpoints, and
 the `MCP_TRANSPORT` values `sse` and `dual` were removed. Remove
-`MCP_TRANSPORT` from `.env` (or set it to `streamable-http`): `sse` or
+`MCP_TRANSPORT` from `.env`, and run `unset MCP_TRANSPORT` in any shell
+that exports it, since an exported value wins over `.env` (or set it to
+`streamable-http`): `sse` or
 `dual` now fails `make validate-env` and mcp-server startup with these
 steps. Change each client from `http://localhost:3000/sse` to
 `http://localhost:3000/mcp`, and for a client that picks its transport,

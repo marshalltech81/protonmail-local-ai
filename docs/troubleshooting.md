@@ -566,10 +566,12 @@ before #361) stays unindexed until you requeue it.
 
 ## mcp-server exits with "MCP_TRANSPORT=sse was removed"
 
-The `.env` still sets `MCP_TRANSPORT=sse` or `MCP_TRANSPORT=dual` from a
-release that served the legacy SSE transport. Remove the line (or set it
-to `streamable-http`), run `make up`, and change client URLs from `/sse`
-to `/mcp`.
+The `.env` (or the shell you run `make` from) still sets
+`MCP_TRANSPORT=sse` or `MCP_TRANSPORT=dual` from a release that served
+the legacy SSE transport. Remove the line from `.env`, run
+`unset MCP_TRANSPORT` in a shell that exports it (an exported value wins
+over `.env`), or set it to `streamable-http`; then run `make up` and
+change client URLs from `/sse` to `/mcp`.
 
 ## Bridge credentials expired / need to re-authenticate
 

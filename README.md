@@ -131,17 +131,20 @@ claude mcp add --transport http protonmail-local-ai http://localhost:3000/mcp
 Claude Desktop's `claude_desktop_config.json` starts local servers as
 commands, and its Connectors settings reach servers from Anthropic's
 cloud, which cannot reach `localhost`. Connect it through a local
-stdio bridge such as `mcp-remote` instead: copy
+stdio bridge such as `mcp-remote` instead: add the `protonmail-local-ai`
+entry from
 [`docs/claude_desktop_config.example.json`](docs/claude_desktop_config.example.json)
-into `~/Library/Application Support/Claude/claude_desktop_config.json`
-and restart Claude Desktop. See
+to the `mcpServers` object in
+`~/Library/Application Support/Claude/claude_desktop_config.json`,
+keeping any servers already there (copy the whole example only when
+the file does not exist yet), and restart Claude Desktop. See
 [Connect an MCP client](docs/setup.md#7-connect-an-mcp-client) for the
 details and caveats.
 
 **Upgrading from a release that served `/sse`:** the legacy SSE
 transport was removed. Change client URLs from `/sse` to `/mcp`, and
-remove `MCP_TRANSPORT=sse` or `MCP_TRANSPORT=dual` from `.env` (either
-now fails startup).
+remove `MCP_TRANSPORT=sse` or `MCP_TRANSPORT=dual` from `.env` and from
+any shell that exports it (either now fails startup).
 
 ## Usage Examples
 

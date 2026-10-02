@@ -308,8 +308,9 @@ def _check_transport(raw: str) -> None:
     if transport in {"sse", "dual"}:
         raise ValueError(
             f"MCP_TRANSPORT={transport} was removed: Streamable HTTP is the only "
-            "MCP transport. Remove MCP_TRANSPORT from .env (or set it to "
-            "streamable-http) and change MCP client URLs from "
+            "MCP transport. Remove MCP_TRANSPORT from .env and run "
+            "'unset MCP_TRANSPORT' in any shell that exports it (or set it to "
+            "streamable-http), and change MCP client URLs from "
             "http://localhost:<MCP_PORT>/sse to http://localhost:<MCP_PORT>/mcp."
         )
     raise ValueError("MCP_TRANSPORT must be 'streamable-http' or unset")
