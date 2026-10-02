@@ -839,7 +839,10 @@ to be incompatible, and it starts with a backup.
    - `UIDVALIDITY genuinely changed` or `Unable to recover from
      UIDVALIDITY change`: mbsync refuses to sync the affected folders
      and changes nothing in them, and the run counts as a failed sync
-     (repeated failures restart mbsync). The existing state cannot be
+     (repeated failures restart mbsync). The log shows `<folder>` in
+     place of each folder's name
+     ([how to see which](troubleshooting.md#folder-names-in-mbsyncs-log)).
+     The existing state cannot be
      reused. Either switch back (`make down`, then `make up` with the
      old credentials and a pin rotation back), or start the Maildir
      over from the app after backing it up:

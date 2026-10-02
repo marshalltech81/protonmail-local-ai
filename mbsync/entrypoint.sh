@@ -22,7 +22,10 @@ readonly SYNC_ACTIVITY_FILE="${RUNTIME_DIR}/last-sync-activity"
 # Two numbers report_mbsync_errors leaves for run_sync once mbsync's
 # stderr closes: far-side box lines withheld and other lines passed on.
 readonly MBSYNC_ERROR_COUNTS_FILE="${RUNTIME_DIR}/mbsync-error-counts"
-# How long run_sync waits for those counts after mbsync exits.
+# Written by report_mbsync_notices once mbsync's stdout closes, so
+# run_sync can wait for the last of it.
+readonly MBSYNC_NOTICES_DONE_FILE="${RUNTIME_DIR}/mbsync-notices-done"
+# How long run_sync waits for each filter after mbsync exits.
 readonly MBSYNC_ERROR_COUNTS_WAIT_TENTHS=100
 readonly BRIDGE_PASS_FILE="/run/secrets/bridge_pass"
 # State directory persists the pinned Bridge cert fingerprint across
@@ -394,42 +397,177 @@ mark_sync_activity() {
     touch "$SYNC_ACTIVITY_FILE"
 }
 
-report_mbsync_errors() {
-    # Filters mbsync's stderr as it arrives, passing each line on to ours
-    # at once, except a line saying a far-side box cannot be opened: it
-    # names a Proton folder, which is mailbox content, so it is withheld
-    # and counted instead. Only the counts are kept, in memory; at end of
-    # input it writes "<withheld> <passed on>" to MBSYNC_ERROR_COUNTS_FILE.
+filter_mbsync_output() {
+    # Filters one of mbsync's streams ($1: err or out) as it arrives,
+    # passing each line on to ours at once with any Proton folder name in
+    # it replaced: folder names are mailbox content (#570). Only counts
+    # are kept, in memory; at end of input it writes "<withheld> <passed
+    # on>" to the file $2.
     #
-    # isync 1.4.4 (Debian bookworm) writes exactly this line to stderr
-    # when Bridge refuses to open a box, then syncs the remaining boxes
-    # and exits 1. That is what a folder renamed or deleted in Proton
-    # after it synced produces on every run, since Create Near and
-    # Expunge None keep its local copy (#276). An INBOX line is passed on
-    # and counted as another error: INBOX cannot be renamed or deleted,
-    # so Bridge refusing it means Bridge is refusing boxes. One pass,
-    # linear in the output.
-    awk -v far_box='^Error: channel protonmail: far side box .+ cannot be opened[.]$' \
-        -v inbox='Error: channel protonmail: far side box INBOX cannot be opened.' \
-        -v counts="$MBSYNC_ERROR_COUNTS_FILE" '
-        $0 ~ far_box && $0 != inbox { withheld++; next }
-        { other++; print > "/dev/stderr"; fflush("/dev/stderr") }
+    # Redaction is by message shape, from isync 1.4.4's source (Debian
+    # bookworm): each rule is an anchored prefix and suffix of fixed text
+    # around the name, which is replaced whole by <folder> (a box name)
+    # or <path> (a Maildir or sync state path, which holds the folder
+    # name). Text the IMAP server chose (an alert, an error reply), which
+    # may name a folder too, becomes "(server text withheld)". A
+    # sys_error path keeps its ": <strerror>" tail, which holds
+    # no colon. A box named exactly INBOX, a fixed IMAP name, is kept. A
+    # line matching no rule, or whose kept tail would still hold a path
+    # under the Maildir, is cut at the first such path. Any other line is
+    # passed on unchanged. A fixed set of anchored matches per line, each
+    # linear in the line's length.
+    #
+    # On stderr, a line saying a far-side box other than INBOX cannot be
+    # opened is withheld and counted instead. isync writes it when Bridge
+    # refuses to open a box, then syncs the remaining boxes and exits 1:
+    # what a folder renamed or deleted in Proton after it synced produces
+    # on every run, since Create Near and Expunge None keep its local
+    # copy (#276). An INBOX line is passed on and counted as another
+    # error: INBOX cannot be renamed or deleted, so Bridge refusing it
+    # means Bridge is refusing boxes.
+    #
+    # The image's awk is mawk, which reads a pipe in blocks and would hold
+    # lines back until mbsync exits; -W interactive makes it read lines.
+    local awk_cmd=(awk)
+    if command -v mawk >/dev/null; then
+        awk_cmd=(mawk -W interactive)
+    fi
+    # shellcheck disable=SC2016 # an awk program: its $ are awk's
+    "${awk_cmd[@]}" -v stream="$1" -v counts="$2" -v maildir="${MAILDIR_PATH}/" \
+        -v far_box='^Error: channel protonmail: far side box .+ cannot be opened[.]$' \
+        -v inbox='Error: channel protonmail: far side box INBOX cannot be opened.' '
+        function rule(prefix, suffix, replacement, keep_inbox) {
+            n++
+            pre[n] = prefix; suf[n] = suffix; rep[n] = replacement; inbox_ok[n] = keep_inbox
+        }
+        function redact(line,    i, head, rest, name, tail, at) {
+            for (i = 1; i <= n; i++) {
+                if (!match(line, pre[i]))
+                    continue
+                head = substr(line, 1, RLENGTH)
+                rest = substr(line, RLENGTH + 1)
+                if (suf[i] == "") {
+                    name = rest; tail = ""
+                } else if (match(rest, suf[i])) {
+                    name = substr(rest, 1, RSTART - 1); tail = substr(rest, RSTART)
+                } else
+                    continue
+                if (name == "" || index(tail, maildir))
+                    continue
+                if (inbox_ok[i] && name == "INBOX")
+                    return line
+                return head rep[i] tail
+            }
+            at = index(line, maildir)
+            if (at > 0)
+                return substr(line, 1, at - 1) "<path>"
+            return line
+        }
+        BEGIN {
+            q = "\047"; F = "<folder>"; P = "<path>"
+            ch = "^Error: channel protonmail"
+            cut = q " (rest of line withheld)"
+            srv = "(server text withheld)"
+            sys = ": [^:]*$"
+            # Box names: src/sync.c, main.c, drv_imap.c, drv_maildir.c.
+            rule(ch ": (far|near) side box ", " cannot be opened[.]$", F, 1)
+            rule(ch ": both far side ", " cannot be opened[.]$", F " and near side " F, 0)
+            rule("^Warning: channel protonmail: far side box ", " is not empty[.]$",
+                 F " cannot be opened and near side box " F, 0)
+            rule("^Warning: channel protonmail: near side box ", " is not empty[.]$",
+                 F " cannot be opened and far side box " F, 0)
+            rule(ch ": UIDVALIDITY of both far side ", " changed[.]$", F " and near side " F, 0)
+            rule(ch ", (far|near) side box ",
+                 ": UIDVALIDITY genuinely changed [(]at UID [0-9]+[)][.]$", F, 1)
+            rule(ch ", (far|near) side box ", ": Unable to recover from UIDVALIDITY change[.]$", F, 1)
+            rule("^Notice: channel protonmail, (far|near) side box ",
+                 ": Recovered from change of UIDVALIDITY[.]$", F, 1)
+            rule("^(Opening|Creating|Deleting) (far|near) side box ", "[.][.][.]$", F, 1)
+            rule("^Error: channel :protonmail-remote:", " is locked$", "<folders>", 0)
+            rule("^Error: canonical mailbox name " q, q " contains flattened hierarchy delimiter$", F, 0)
+            rule("^Error: flattened mailbox name " q, q " contains canonical hierarchy delimiter$", F, 0)
+            rule("^IMAP warning: ignoring unreasonably long mailbox name " q, "[[][.][.][.]." q "$", F, 0)
+            rule("^IMAP warning: ignoring mailbox " q, q " due to empty name component$", F, 0)
+            rule("^IMAP warning: ignoring mailbox " q, q " due to " q "[.]" q " component$", F, 0)
+            rule("^IMAP warning: ignoring mailbox ", " [(]reserved character " q "/" q " in name[)]$", F, 0)
+            rule("^IMAP error: LIST" q "d mailbox name " q,
+                 q " contains " q "[.][.]" q " component - THIS MIGHT BE AN ATTEMPT TO HACK YOU!$", F, 0)
+            rule("^IMAP error: mailbox name ", " contains server" q "s hierarchy delimiter$", F, 0)
+            # No newline after this one, so the rest of the line is cut.
+            rule("^IMAP error: cannot use unqualified " q, "", F cut, 0)
+            # The command quotes the box; the server reply may repeat it.
+            rule("^IMAP command " q "(SELECT|CREATE|DELETE|APPEND|UID COPY [0-9]+|UID MOVE [0-9]+) ", "", F cut, 0)
+            rule("^Maildir error: accessing subfolder " q,
+                 q ", but store " q "[^" q "]*" q " does not specify SubFolders style$", F, 0)
+            rule("^Maildir error: store " q "[^" q "]*" q ", folder " q,
+                 q ": SubFolders style Maildir[+][+] does not support dots in mailbox names$", F, 0)
+            rule("^Maildir error: found subfolder " q,
+                 q ", but store " q "[^" q "]*" q " does not specify SubFolders style$", F, 0)
+            # Paths: sys_error lines end in ": <strerror>".
+            rule("^Error: cannot create SyncState directory " q, q sys, P, 0)
+            rule("^Maildir (error|warning): cannot remove " q, q sys, P, 0)
+            rule("^Maildir error: cannot (access|create) mailbox " q, q sys, P, 0)
+            rule("^Maildir error: cannot (rename|move) ", sys, P " to " P, 0)
+            rule("^Maildir error: cannot write ", "[.] Disk full[?]$", P, 0)
+            rule("^Error: cannot (create new sync state|create journal|create lock file|read sync state|read journal) ",
+                 sys, P, 0)
+            rule("^Maildir error: cannot (list|access|remove|create directory|create|stat|re-stat|open|read|write|set times for) ",
+                 sys, P, 0)
+            rule("^Maildir error: path ", " is too deeply nested[.] Symlink loop[?]$", P, 0)
+            rule("^Maildir error: " q, q " is no valid mailbox$", P, 0)
+            rule("^Error: invalid SyncState location " q, q "$", P, 0)
+            rule("^Error: (incomplete|malformed|unrecognized) sync state header entry at ", ":[0-9]+$", P, 0)
+            rule("^Error: (incomplete|invalid) sync state entry at ", ":[0-9]+$", P, 0)
+            rule("^Error: (incomplete|malformed|unrecognized) journal entry at ", ":[0-9]+$", P, 0)
+            rule("^Error: journal entry at ", ":[0-9]+ refers to non-existing sync state entry$", P, 0)
+            # Text the IMAP server (Bridge) chose, which may name a
+            # folder: src/drv_imap.c. Cut after the fixed part.
+            rule("^IMAP command " q "[^" q "]*" q " returned an error: (NO|BAD)", "", " " srv, 0)
+            rule("^(Error|Warning) from IMAP server: ", "", srv, 0)
+            rule("^[*][*][*] IMAP ALERT [*][*][*] ", "", srv, 0)
+            rule("^IMAP error: unexpected (BYE response:|reply:|tag) ", "", srv, 0)
+            rule("^IMAP error: (bogus greeting|unrecognized untagged) response ", "", srv, 0)
+            rule("^IMAP warning: unknown system flag ", "", srv, 0)
+            dest = (stream == "err") ? "/dev/stderr" : "/dev/stdout"
+        }
+        stream == "err" && $0 ~ far_box && $0 != inbox { withheld++; next }
+        { other++; printf "%s\n", redact($0) > dest; fflush(dest) }
         END { print withheld + 0, other + 0 > counts; close(counts) }
     '
 }
 
-read_mbsync_error_counts() {
-    # mbsync's stderr closes when it exits, but the filter may still be
-    # finishing. Waits a bounded time for its counts and prints them;
-    # fails if they never arrive, so nothing is tolerated.
+report_mbsync_errors() {
+    # mbsync's stderr: see filter_mbsync_output.
+    filter_mbsync_output err "$MBSYNC_ERROR_COUNTS_FILE"
+}
+
+report_mbsync_notices() {
+    # mbsync's stdout (notices, such as a UIDVALIDITY recovery): redacted
+    # like stderr, never withheld; its counts only mark the end.
+    filter_mbsync_output out "$MBSYNC_NOTICES_DONE_FILE"
+}
+
+wait_for_mbsync_filter() {
+    # mbsync's streams close when it exits, but a filter may still be
+    # finishing. Waits a bounded time for the file a filter writes at end
+    # of input ($1); fails if it never arrives.
     local i
     for ((i = 0; i < MBSYNC_ERROR_COUNTS_WAIT_TENTHS; i++)); do
-        if [[ -s "$MBSYNC_ERROR_COUNTS_FILE" ]]; then
-            cat "$MBSYNC_ERROR_COUNTS_FILE"
+        if [[ -s "$1" ]]; then
             return 0
         fi
         sleep 0.1
     done
+    return 1
+}
+
+read_mbsync_error_counts() {
+    # Prints the stderr filter's counts; fails if they never arrive, so
+    # nothing is tolerated.
+    if wait_for_mbsync_filter "$MBSYNC_ERROR_COUNTS_FILE"; then
+        cat "$MBSYNC_ERROR_COUNTS_FILE"
+        return 0
+    fi
     echo ">>> WARNING: mbsync's error filter did not finish; not classifying this sync's errors." >&2
     return 1
 }
@@ -451,12 +589,17 @@ run_sync() {
     # walks the whole Maildir with no mbsync running, so the heartbeat
     # must be fresh for it), and after the attempt, whatever its outcome.
     local rc=0 counts="" withheld=0 other=0
-    rm -f "$MBSYNC_ERROR_COUNTS_FILE"
+    rm -f "$MBSYNC_ERROR_COUNTS_FILE" "$MBSYNC_NOTICES_DONE_FILE"
     mark_sync_activity
-    # stderr goes through the filter as it is written; run_child still
-    # waits on (and signals) mbsync itself.
-    run_child mbsync -c "$CONFIG_FILE" -a 2> >(report_mbsync_errors) || rc=$?
+    # Both streams go through the filters as they are written; run_child
+    # still waits on (and signals) mbsync itself.
+    run_child mbsync -c "$CONFIG_FILE" -a \
+        > >(report_mbsync_notices) 2> >(report_mbsync_errors) || rc=$?
     mark_sync_activity
+    if ! wait_for_mbsync_filter "$MBSYNC_NOTICES_DONE_FILE"; then
+        echo ">>> WARNING: mbsync's notice filter did not finish." >&2
+    fi
+    rm -f "$MBSYNC_NOTICES_DONE_FILE"
     # Missing counts leave withheld at 0, so nothing is tolerated.
     if counts="$(read_mbsync_error_counts)"; then
         read -r withheld other <<<"$counts"

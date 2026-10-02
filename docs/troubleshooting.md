@@ -306,7 +306,9 @@ Bridge container to inspect; check the app and the connection instead.
   belongs to the previous Bridge. mbsync leaves those folders untouched;
   see step 4 of
   [Switching an existing installation](setup.md#switching-an-existing-installation).
-  These isync errors name the folder.
+  The log shows `<folder>` in place of the folder name; see
+  [Folder names in mbsync's log](#folder-names-in-mbsyncs-log) to find
+  which folders are affected.
 
 ## A Proton folder was renamed or deleted
 
@@ -345,6 +347,47 @@ The warning repeats for as long as the local copy exists. Nothing removes
 it automatically. Removing or moving the folder out of the Maildir yourself
 stops the warning, but its messages then count as deleted for the indexer
 (see [Deletion reconciliation](#deletion-reconciliation-mirror-vs-archive)).
+
+## Folder names in mbsync's log
+
+Folder names are mailbox content, so the entrypoint keeps them out of
+`docker logs mbsync` (#570). Every isync 1.4.4 message that names a folder
+is logged with the name replaced and the rest of the message kept:
+
+- a folder name becomes `<folder>`, for example
+  `Error: channel protonmail, far side box <folder>: UIDVALIDITY genuinely changed (at UID 42).`
+  (`INBOX` is shown as it is);
+- a path in the Maildir or its sync state, which contains the folder name,
+  becomes `<path>`, for example
+  `Maildir error: cannot write <path>: No space left on device`;
+- where isync does not end the message cleanly (an IMAP command that
+  quotes a folder, or a message printed without a line break), the rest of
+  the line is cut: `IMAP command 'CREATE <folder>' (rest of line withheld)`;
+- text Bridge itself returns, which may name a folder too, is withheld
+  after the fixed part, for example
+  `Error from IMAP server: (server text withheld)` or
+  `IMAP command 'UID FETCH 1:5 (UID FLAGS)' returned an error: NO (server text withheld)`.
+
+Redaction does not change how a sync is counted: these errors still fail
+it, and only the far-side `cannot be opened` line
+([above](#a-proton-folder-was-renamed-or-deleted)) is tolerated.
+
+To see which folder a message is about, or Bridge's full reply, run one
+sync by hand. The output of `docker exec` goes to your terminal and is
+not recorded in the container's log:
+
+```bash
+docker exec mbsync mbsync -c /tmp/mbsync/mbsyncrc -a
+```
+
+Add `| grep UIDVALIDITY` to see only UIDVALIDITY errors. Without running a
+sync, the sync state files show which folders mbsync tracks: there is one
+per folder at the Maildir root, named after the folder with `/` written as
+`!`:
+
+```bash
+docker exec mbsync find /maildir -maxdepth 1 -name '.mbsyncstate*'
+```
 
 ## Embedder or inference endpoint unreachable from containers
 
