@@ -784,7 +784,7 @@ as message bodies. Two extra tables sit alongside `message_chunks`:
 | Table | Keyed by | Purpose |
 |---|---|---|
 | `attachments` | attachment_occurrence_id | Per-occurrence row capturing filename + MIME + size as it appeared on a specific email. The occurrence id includes the message, payload hash, filename, and attachment slot so duplicate same-payload files in one email are still represented. |
-| `attachment_extractions` | attachment_id (= sha256 of payload) | Per-content-hash cache of extracted text + status. The expensive work (Tesseract OCR, pypdf parse, DOCX walk) runs at most once per unique payload, including within one indexing batch, where results not yet committed are shared by content hash. Non-success rows are also honored: `empty` / `too_large` short-circuit unconditionally; `unsupported` short-circuits while it also holds for the occurrence at hand (an "OCR disabled" row, for an occurrence that needs OCR — an image, or a PDF whose row the PDF extractor wrote because it found no digital text layer — until OCR is turned on; any other until the occurrence's MIME type or filename selects an extractor, since the same bytes can arrive as `.bin` first and `.txt` later); `failed` short-circuits within a 7-day retry window so a chronic failure stops re-running on every reappearance, but a real fix landed via dependency upgrade can pick the payload up later. The `extractor` column carries a version (`docx@3`); a row written by an older version of a fixed extractor (`extractors.EXTRACTOR_VERSIONS`) is refreshed by re-running that extractor from whichever occurrence of the bytes arrives (whatever its own filename or MIME type), and the indexer re-queues every message carrying those bytes once at startup so their chunks are rebuilt, except dead-lettered messages, which keep their stale chunks until `make requeue-dead` rescues them. Rows from a newer version (after a rollback) are kept. A stale row an OCR extractor wrote (`image-ocr`, `pdf-ocr`) is kept and served while `INDEXER_OCR_ENABLED=false`, since a refresh could only replace its text with "OCR disabled"; it is refreshed once OCR is on. Likewise, once OCR is on, the startup sweep re-queues each message whose occurrence of bytes cached "OCR disabled" would now be OCR'd; an occurrence that selects no extractor (`.bin`) is not re-queued, since its reprocess would serve the same row. |
+| `attachment_extractions` | attachment_id (= sha256 of payload) | Per-content-hash cache of extracted text + status. The expensive work (Tesseract OCR, pypdf parse, DOCX walk) runs at most once per unique payload, including within one indexing batch, where results not yet committed are shared by content hash. Non-success rows are also honored: `empty` / `too_large` short-circuit unconditionally; `unsupported` short-circuits while it also holds for the occurrence at hand (an "OCR disabled" row, for an occurrence that needs OCR — an image, or a PDF whose row the PDF extractor wrote because it found no digital text layer — until OCR is turned on; any other until the occurrence's MIME type or filename selects an extractor, since the same bytes can arrive as `.bin` first and `.txt` later); `failed` short-circuits within a 7-day retry window so a chronic failure stops re-running on every reappearance, but a real fix landed via dependency upgrade can pick the payload up later. The `extractor` column carries a version (`docx@3`); a row written by an older version of a fixed extractor (`extractors.EXTRACTOR_VERSIONS`) is refreshed by re-running that extractor from whichever occurrence of the bytes arrives (whatever its own filename or MIME type), and the indexer re-queues every message carrying those bytes once at startup so their chunks are rebuilt, except dead-lettered messages, which keep their stale chunks until `make requeue-dead` rescues them. Rows from a newer version (after a rollback) are kept. A row is deleted with the last `attachments` row that references it (see *Cascade on message removal*). A stale row an OCR extractor wrote (`image-ocr`, `pdf-ocr`) is kept and served while `INDEXER_OCR_ENABLED=false`, since a refresh could only replace its text with "OCR disabled"; it is refreshed once OCR is on. Likewise, once OCR is on, the startup sweep re-queues each message whose occurrence of bytes cached "OCR disabled" would now be OCR'd; an occurrence that selects no extractor (`.bin`) is not re-queued, since its reprocess would serve the same row. |
 
 Per-occurrence chunks land in `message_chunks` with the
 `attachment_id` column populated. They embed exactly like body chunks
@@ -868,10 +868,19 @@ are not loaded at all.
 When a message is reaped, `_delete_attachments_for_message` drops its
 `attachments` rows and FTS shadows; the `_delete_chunks_for_message`
 cascade also drops the message's attachment chunks (they share the
-`claimant_id` key). Cached extractions in `attachment_extractions` are
-**deliberately preserved** — another message may still reference the
-same content_hash, and even when nothing does today the cached
-extraction means a future re-arrival skips the OCR cost.
+`claimant_id` key). In the same transaction it deletes the cached
+`attachment_extractions` row of each payload no remaining `attachments`
+row references, so a payload's extracted text does not outlive every
+message that carried it (#562). A payload another message still carries
+keeps its row. The cost is the cache for a re-arrival: the same bytes
+arriving after their last carrier was reaped are extracted again. The
+check is one indexed statement per payload the message carried
+(`idx_attachments_attachment_id` and the extraction primary key), so
+it does not scan either table. The rows are deleted, not overwritten:
+with SQLite's default `secure_delete` off, the freed pages keep the old
+bytes in the database file until SQLite reuses them or the file is
+vacuumed. This holds for every row a reap deletes, not only
+extractions (#602).
 
 ## Deletion Reconciliation (mirror by default)
 

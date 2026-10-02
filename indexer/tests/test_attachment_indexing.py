@@ -1156,3 +1156,47 @@ def test_failed_extraction_persists_no_filename_or_parser_text(tmp_path, monkeyp
     assert cached["extraction_error"] == "ValueError"
     for marker in ("SYNTHETIC_FILENAME_MARKER", "SYNTHETIC_EXC_MARKER"):
         assert marker not in caplog.text
+
+
+def test_payload_re_arriving_after_its_last_carrier_was_reaped_is_re_extracted(
+    tmp_path, monkeypatch
+):
+    """Reaping the last message carrying a payload purges its cached
+    extraction (#562), so the same bytes arriving again later are
+    extracted afresh rather than served from the cache."""
+    db = Database(tmp_path / "mail.db")
+    first = make_message(message_id="first@x", filepath="/m/first")
+    keep = make_message(message_id="keep@x", filepath="/m/keep")
+    db.upsert_thread(
+        make_thread(messages=[first, keep], thread_id="t-rearrive"), [0.0] * EMBEDDING_DIM
+    )
+    attachment = _attachment(b"payload that arrives twice")
+    embedder = make_mock_embedder()
+    embedder.embed.return_value = [0.1] * EMBEDDING_DIM
+    kwargs: dict[str, Any] = dict(
+        attachment=attachment,
+        thread_id="t-rearrive",
+        db=db,
+        embedder=embedder,
+        chunk_target_tokens=350,
+        chunk_max_tokens=500,
+        chunk_overlap_tokens=60,
+        ocr_enabled=True,
+        max_bytes=10_000_000,
+        max_ocr_pages=20,
+    )
+    assert _prepare_and_apply(claimant_id="first@x", **kwargs)["extractions_run"] == 1
+
+    db.add_pending_deletion("/m/first", "first@x", "t-rearrive")
+    db.reap_thread_messages(
+        make_thread(messages=[keep], thread_id="t-rearrive"), [0.0] * EMBEDDING_DIM, ["first@x"]
+    )
+    assert db.get_attachment_extraction(attachment.content_hash) is None
+
+    extract = MagicMock(wraps=attachment_indexing.extract_attachment)
+    monkeypatch.setattr(attachment_indexing, "extract_attachment", extract)
+    summary = _prepare_and_apply(claimant_id="keep@x", **kwargs)
+
+    assert summary["extractions_run"] == 1
+    extract.assert_called_once()
+    assert db.get_attachment_extraction(attachment.content_hash) is not None
