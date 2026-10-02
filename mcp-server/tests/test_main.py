@@ -527,12 +527,11 @@ class TestRemoteEndpointWarning:
         caplog.set_level(logging.DEBUG)
         _warn_if_remote_endpoint("INFERENCE_MODE", "openai", url, "retrieved email excerpts")
         [record] = self._warnings(caplog)
-        message = record.getMessage()
-        assert "INFERENCE_MODE=openai" in message
-        assert host in message
-        assert "retrieved email excerpts" in message
-        for part in ("/v1", "SYNTHETIC_QUERY", "frag", ":8443", ":1234", "https://"):
-            assert part not in message
+        # Exact text, so no scheme, port, path, query or fragment survives.
+        assert record.getMessage() == (
+            "Privacy: INFERENCE_MODE=openai sends retrieved email excerpts off this "
+            f"host, to {host}."
+        )
 
     def test_empty_url_warns_about_sdk_default(self, caplog):
         caplog.set_level(logging.DEBUG)
@@ -589,12 +588,14 @@ class TestRemoteEndpointWarning:
             INFERENCE_BASE_URL="",
             RERANK_BASE_URL="https://rerank.example/v2",
         )
-        assert len(warnings) == 3
-        assert sum("EMBED_MODE=openai" in w and "api.openai.com" in w for w in warnings) == 1
-        assert (
-            sum("INFERENCE_MODE=anthropic" in w and "api.anthropic.com" in w for w in warnings) == 1
-        )
-        assert sum("RERANK_MODE=cohere" in w and "rerank.example" in w for w in warnings) == 1
+        # Exact lines: one per layer, each ending at the bare host.
+        assert warnings == [
+            "Privacy: EMBED_MODE=openai sends search query text off this host, to api.openai.com.",
+            "Privacy: INFERENCE_MODE=anthropic sends retrieved email excerpts off this "
+            "host, to api.anthropic.com.",
+            "Privacy: RERANK_MODE=cohere sends search queries and retrieved email "
+            "excerpts off this host, to rerank.example.",
+        ]
 
     def test_main_is_silent_for_host_local_layers(self, monkeypatch, caplog):
         local = "http://host.docker.internal:8001/v1"
