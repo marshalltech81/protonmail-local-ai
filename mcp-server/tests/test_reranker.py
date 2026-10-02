@@ -140,8 +140,8 @@ class TestRerank:
         # A stalled Cohere request must not be allowed to pin the
         # hybrid_search worker thread on the SDK's 300s default —
         # ``RerankConfig.timeout_secs`` flows through to ClientV2 so a
-        # bounded deadline triggers and the rerank stage degrades to
-        # RRF order on timeout.
+        # stalled call times out (per-operation, not a total deadline)
+        # and the rerank stage degrades to RRF order.
         with patch("cohere.ClientV2") as mock_client:
             CohereReranker(
                 RerankConfig(

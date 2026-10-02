@@ -35,13 +35,16 @@ from .security import ProviderResponseError, same_origin_request_hook
 
 log = logging.getLogger("mcp.inference")
 
-# Steady-state ceiling for one completion. Qwen3 in thinking mode can
-# run ~1-2 minutes for a long answer; Anthropic Messages calls usually
-# return faster but reasoning-heavy prompts can stretch. 300 s catches
-# truly stuck calls without false-positiving on slow-but-progressing
-# inference. Operators on slow networks can override via
-# ``INFERENCE_TIMEOUT_SECS``; resolution happens in ``main.py`` so the
-# library code stays env-free for tests.
+# Per-operation HTTP timeout for one completion: each connect, read or
+# write must make progress within it. It is not a total-call deadline —
+# a provider that streams a response in small fragments can keep one
+# call alive past it (a total deadline is tracked by #287). Qwen3 in
+# thinking mode can run ~1-2 minutes for a long answer; Anthropic
+# Messages calls usually return faster but reasoning-heavy prompts can
+# stretch. 300 s catches truly stuck calls without false-positiving on
+# slow-but-progressing inference. Operators on slow networks can
+# override via ``INFERENCE_TIMEOUT_SECS``; resolution happens in
+# ``main.py`` so the library code stays env-free for tests.
 DEFAULT_COMPLETE_TIMEOUT_SECS = 300.0
 
 # Default ``max_tokens``. The Anthropic Messages API requires the
@@ -196,13 +199,17 @@ class _OpenAIBackend:
         # upstream is what guards against an accidental ship-to-OpenAI
         # from a forgotten env var.
         #
-        # ``max_retries=0`` disables SDK-internal retries so
-        # ``timeout_secs`` is the honest wall-clock ceiling for one
-        # ``complete()`` call. Default SDK posture (2 attempts +
-        # exponential backoff) would silently turn a documented
-        # ``INFERENCE_TIMEOUT_SECS=300`` into a ~15 min worst-case hang
-        # — hostile to operators tuning the ceiling and to the calling
-        # agent, which loses context long before the SDK gives up. On a
+        # ``max_retries=0`` disables SDK-internal retries so one
+        # ``complete()`` call makes one request and ``timeout_secs`` is
+        # not multiplied by retries. It is a per-operation HTTP timeout
+        # (each connect, read or write must make progress within it),
+        # not a total-call deadline: a provider that streams a response
+        # in small fragments can keep the call alive past it (#287).
+        # Default SDK posture (2 retries + exponential backoff) would
+        # silently turn a stall on ``INFERENCE_TIMEOUT_SECS=300`` into
+        # a ~15 min hang — hostile to operators tuning the timeout and
+        # to the calling agent, which loses context long before the SDK
+        # gives up. On a
         # transient 5xx the tool surfaces a clean error and the agent
         # (or user) can re-invoke. Parity with ``OpenAIEmbedder`` in the
         # indexer, which also pins ``max_retries=0`` (it owns retries
@@ -319,8 +326,9 @@ class _AnthropicBackend:
         # (the documented contract for INFERENCE_MODE=anthropic).
         # Passing an empty string would override the SDK default with a
         # malformed URL. ``max_retries=0`` for the same reason as
-        # ``_OpenAIBackend``: keep ``timeout_secs`` the honest
-        # wall-clock ceiling.
+        # ``_OpenAIBackend``: retries must not multiply ``timeout_secs``,
+        # which is a per-operation HTTP timeout, not a total-call
+        # deadline.
         #
         # The SDK's HTTP client follows redirects and re-sends the body
         # and ``x-api-key`` to wherever ``Location`` points (#325). The

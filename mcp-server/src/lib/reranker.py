@@ -41,7 +41,10 @@ log = logging.getLogger("mcp.reranker")
 # the pool slot and hang user-visible RAG tools instead of degrading
 # cleanly to RRF order. 60s is well above the typical Cohere rerank
 # latency (~1–5s) and matches the embed default; operators can tune
-# via ``RERANK_TIMEOUT_SECS``.
+# via ``RERANK_TIMEOUT_SECS``. It is a per-operation HTTP timeout (each
+# connect, read or write must make progress within it), not a
+# total-call deadline: a response streamed in small fragments can keep
+# one call alive past it (a total deadline is tracked by #287).
 DEFAULT_RERANK_TIMEOUT_SECS = 60.0
 
 
@@ -105,12 +108,14 @@ class CohereReranker:
         # than we want a hybrid_search worker thread to wait on a
         # stalled Cohere call.
         #
-        # ``max_retries=0`` disables SDK-internal retries so
-        # ``timeout_secs`` is the honest wall-clock ceiling for one
-        # ``rerank()`` call. The SDK default (2 retries + exponential
-        # backoff on 5xx/429 and connection errors) would turn one 503
-        # into three requests and ``RERANK_TIMEOUT_SECS`` into a 3×
-        # longer worst case before the RRF fallback (#483). Parity with
+        # ``max_retries=0`` disables SDK-internal retries so one
+        # ``rerank()`` call makes one request and ``timeout_secs`` (a
+        # per-operation HTTP timeout, not a total-call deadline) is not
+        # multiplied by retries. The SDK default (2 retries +
+        # exponential backoff on 5xx/429 and connection errors) would
+        # turn one 503 into three requests and stack three
+        # ``RERANK_TIMEOUT_SECS`` timeouts before the RRF fallback
+        # (#483). Parity with
         # the inference and embed clients, which also pin
         # ``max_retries=0``; rerank is an optional stage with a
         # fallback, so a retry is the wrong trade.
