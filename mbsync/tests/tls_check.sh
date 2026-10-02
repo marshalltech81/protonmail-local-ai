@@ -95,11 +95,22 @@ fingerprint() {
     openssl x509 -in "$WORK/$1.pem" -outform DER | openssl dgst -sha256 | awk '{print $NF}'
 }
 
+# Succeeds if a container's log has a line matching a pattern. The log is
+# read whole before it is searched: under pipefail, `docker logs | grep -q`
+# fails when grep stops at a match before docker logs has written the
+# rest, which then dies of SIGPIPE, so a line that is there could read as
+# missing, and a check that a line is absent could pass (#588).
+log_has() {
+    local logs
+    logs="$(docker logs "$1" 2>&1)" || return 1
+    grep -q -- "$2" <<<"$logs"
+}
+
 # Waits, boundedly, for a line in a container's log.
 wait_for_log() {
     local container="$1" pattern="$2" i
     for ((i = 0; i < WAIT_SECONDS; i++)); do
-        if docker logs "$container" 2>&1 | grep -q -- "$pattern"; then
+        if log_has "$container" "$pattern"; then
             return 0
         fi
         sleep 1
@@ -119,6 +130,19 @@ wait_for_exit() {
         fi
         sleep 1
     done
+    return 1
+}
+
+# Waits, boundedly, for a non-empty file.
+wait_for_file() {
+    local i
+    for ((i = 0; i < WAIT_SECONDS; i++)); do
+        if [[ -s "$1" ]]; then
+            return 0
+        fi
+        sleep 1
+    done
+    printf '     no %s within %ss\n' "$1" "$WAIT_SECONDS"
     return 1
 }
 
@@ -175,9 +199,9 @@ FP_B="$(fingerprint cert-b)"
 start_stub cert-a
 start_mbsync
 if [[ "$(wait_for_exit "$MBSYNC")" == "1" ]] \
-    && docker logs "$MBSYNC" 2>&1 | grep -q "BRIDGE_CERT_FINGERPRINT is not set" \
-    && docker logs "$MBSYNC" 2>&1 | grep -q "presented: sha256:${FP_A}" \
-    && ! docker logs "$STUB" 2>&1 | grep -q "command=LOGIN" \
+    && wait_for_log "$MBSYNC" "BRIDGE_CERT_FINGERPRINT is not set" \
+    && wait_for_log "$MBSYNC" "presented: sha256:${FP_A}" \
+    && ! log_has "$STUB" "command=LOGIN" \
     && [[ ! -e "$WORK/state/bridge-cert.fingerprint" ]]; then
     pass "without an expected fingerprint, nothing is pinned or sent"
 else
@@ -195,7 +219,7 @@ if wait_for_log "$MBSYNC" "Waiting for ProtonBridge IMAP" && sleep 4 \
         && wait_for_log "$MBSYNC" "Starting sync loop" \
         && [[ -s "$WORK/maildir/.mbsync-last-sync.json" ]] \
         && wait_for_log "$STUB" "stub: login over TLS" \
-        && ! docker logs "$MBSYNC" 2>&1 | grep -q "Initial sync returned a non-zero status"; then
+        && ! log_has "$MBSYNC" "Initial sync returned a non-zero status"; then
         pass "waits for an unavailable Bridge, then pins and syncs over STARTTLS"
     else
         fail "waits for an unavailable Bridge, then pins and syncs over STARTTLS"
@@ -207,9 +231,10 @@ fi
 # 2. Restart, same certificate.
 rm -f "$WORK/maildir/.mbsync-last-sync.json"
 docker restart "$MBSYNC" >/dev/null
+# The log still holds the first run's lines, "Starting sync loop" among
+# them, so this run's sync is shown by its success stamp.
 if wait_for_log "$MBSYNC" "fingerprint matches the pinned value" \
-    && wait_for_log "$MBSYNC" "Starting sync loop" \
-    && [[ -s "$WORK/maildir/.mbsync-last-sync.json" ]]; then
+    && wait_for_file "$WORK/maildir/.mbsync-last-sync.json"; then
     pass "a restart against the same certificate syncs"
 else
     fail "a restart against the same certificate syncs"
@@ -221,7 +246,7 @@ docker stop "$MBSYNC" >/dev/null
 start_stub cert-b
 docker start "$MBSYNC" >/dev/null
 if [[ "$(wait_for_exit "$MBSYNC")" == "1" ]] \
-    && docker logs "$MBSYNC" 2>&1 | grep -q "does not match BRIDGE_CERT_FINGERPRINT — refusing to sync"; then
+    && wait_for_log "$MBSYNC" "does not match BRIDGE_CERT_FINGERPRINT — refusing to sync"; then
     pass "a different certificate is refused by the expected fingerprint"
 else
     fail "a different certificate is refused by the expected fingerprint"
@@ -229,7 +254,7 @@ else
 fi
 start_mbsync "$FP_B"
 if [[ "$(wait_for_exit "$MBSYNC")" == "1" ]] \
-    && docker logs "$MBSYNC" 2>&1 | grep -q "does not match pinned value — refusing to sync"; then
+    && wait_for_log "$MBSYNC" "does not match pinned value — refusing to sync"; then
     pass "a different certificate is refused by the pin"
 else
     fail "a different certificate is refused by the pin"
