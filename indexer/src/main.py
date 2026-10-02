@@ -209,12 +209,13 @@ INDEXER_HEALTH_FILE = Path(os.environ.get("INDEXER_HEALTH_FILE", "/tmp/indexer-h
 
 
 def _int_env(name: str, default: int, minimum: int = 1) -> int:
-    """Read a positive int from the environment with a clamp + fallback.
+    """Read an int >= ``minimum`` from the environment.
 
-    Used for the chunker token budgets so a typo or empty string falls back
-    to the default rather than raising at startup. Mirrors the lenient parse
-    used elsewhere (queue, reconciler) so operators get the same behavior
-    across knobs.
+    Unset or empty yields ``default``. A non-integer or a value below
+    ``minimum`` raises ``ValueError`` naming the variable, so a typo
+    stops startup instead of silently changing behaviour (#481). Same
+    rule as ``queue.load_config_from_env`` and
+    ``reconciler.load_config_from_env``.
     """
     raw = os.environ.get(name, "").strip()
     if not raw:
@@ -222,9 +223,10 @@ def _int_env(name: str, default: int, minimum: int = 1) -> int:
     try:
         value = int(raw)
     except ValueError:
-        log.warning("invalid %s=%r; falling back to %d", name, raw, default)
-        return default
-    return max(minimum, value)
+        raise ValueError(f"{name}={raw!r} is not an integer") from None
+    if value < minimum:
+        raise ValueError(f"{name}={raw!r} must be >= {minimum}")
+    return value
 
 
 # How many texts the embedder client packs into a single
@@ -299,10 +301,21 @@ _ZERO_THREAD_VECTOR = [0.0] * EMBEDDING_DIM
 
 
 def _bool_env(name: str, default: bool) -> bool:
+    """Read a boolean from the environment.
+
+    Unset or empty yields ``default``; any value outside the accepted
+    vocabulary raises ``ValueError`` so a typo such as
+    ``INDEXER_OCR_ENABLED=tru`` stops startup instead of disabling the
+    feature (#481). Same vocabulary as ``reconciler.load_config_from_env``.
+    """
     raw = os.environ.get(name, "").strip().lower()
     if not raw:
         return default
-    return raw in {"1", "true", "yes", "on"}
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name}={raw!r} is not recognized; use true or false")
 
 
 # Attachment extraction — see ``src/extractors/`` for

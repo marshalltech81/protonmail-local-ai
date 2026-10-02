@@ -234,6 +234,77 @@ class TestReadEmbedApiKey:
             main._read_embed_api_key()
 
 
+class TestIntEnv:
+    """``main._int_env`` validates rather than coerces (#481).
+
+    Unset or empty yields the default; a non-integer or a value below
+    the minimum stops startup naming the variable, instead of silently
+    falling back or clamping (``-5`` used to become ``1``).
+    """
+
+    def test_unset_and_empty_yield_default(self, monkeypatch):
+        monkeypatch.delenv("FAKE_INT_VAR", raising=False)
+        assert main._int_env("FAKE_INT_VAR", 7) == 7
+        monkeypatch.setenv("FAKE_INT_VAR", "  ")
+        assert main._int_env("FAKE_INT_VAR", 7) == 7
+
+    def test_valid_values_are_returned(self, monkeypatch):
+        monkeypatch.setenv("FAKE_INT_VAR", " 42 ")
+        assert main._int_env("FAKE_INT_VAR", 7) == 42
+        monkeypatch.setenv("FAKE_INT_VAR", "0")
+        assert main._int_env("FAKE_INT_VAR", 7, minimum=0) == 0
+        monkeypatch.setenv("FAKE_INT_VAR", "60")
+        assert main._int_env("FAKE_INT_VAR", 600, minimum=60) == 60
+
+    @pytest.mark.parametrize("raw", ["-5", "0"])
+    def test_below_minimum_fails(self, monkeypatch, raw):
+        monkeypatch.setenv("FAKE_INT_VAR", raw)
+        with pytest.raises(ValueError, match="FAKE_INT_VAR.*>= 1"):
+            main._int_env("FAKE_INT_VAR", 7)
+
+    def test_below_explicit_minimum_fails(self, monkeypatch):
+        monkeypatch.setenv("FAKE_INT_VAR", "59")
+        with pytest.raises(ValueError, match="FAKE_INT_VAR.*>= 60"):
+            main._int_env("FAKE_INT_VAR", 600, minimum=60)
+
+    @pytest.mark.parametrize("raw", ["tru", "nan", "inf", "1.5", "ten"])
+    def test_non_integer_fails(self, monkeypatch, raw):
+        monkeypatch.setenv("FAKE_INT_VAR", raw)
+        with pytest.raises(ValueError, match="FAKE_INT_VAR.*integer"):
+            main._int_env("FAKE_INT_VAR", 7)
+
+
+class TestBoolEnv:
+    """``main._bool_env`` accepts a fixed vocabulary and rejects the rest (#481).
+
+    ``INDEXER_OCR_ENABLED=tru`` used to read as false and silently
+    disable OCR.
+    """
+
+    def test_unset_and_empty_yield_default(self, monkeypatch):
+        monkeypatch.delenv("FAKE_BOOL_VAR", raising=False)
+        assert main._bool_env("FAKE_BOOL_VAR", True) is True
+        assert main._bool_env("FAKE_BOOL_VAR", False) is False
+        monkeypatch.setenv("FAKE_BOOL_VAR", " ")
+        assert main._bool_env("FAKE_BOOL_VAR", True) is True
+
+    @pytest.mark.parametrize("raw", ["1", "true", "TRUE", "yes", "on", " On "])
+    def test_truthy_values(self, monkeypatch, raw):
+        monkeypatch.setenv("FAKE_BOOL_VAR", raw)
+        assert main._bool_env("FAKE_BOOL_VAR", False) is True
+
+    @pytest.mark.parametrize("raw", ["0", "false", "FALSE", "no", "off", " Off "])
+    def test_falsy_values(self, monkeypatch, raw):
+        monkeypatch.setenv("FAKE_BOOL_VAR", raw)
+        assert main._bool_env("FAKE_BOOL_VAR", True) is False
+
+    @pytest.mark.parametrize("raw", ["tru", "-5", "nan", "inf", "enabled"])
+    def test_unrecognized_values_fail(self, monkeypatch, raw):
+        monkeypatch.setenv("FAKE_BOOL_VAR", raw)
+        with pytest.raises(ValueError, match="FAKE_BOOL_VAR.*not recognized"):
+            main._bool_env("FAKE_BOOL_VAR", True)
+
+
 class TestOnMovedIndexesDestination:
     def test_rename_into_new_indexes_destination(self, tmp_path, monkeypatch):
         """Regression: Maildir delivery writes a file under ``tmp/`` then

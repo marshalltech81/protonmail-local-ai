@@ -96,8 +96,25 @@ require_integer_min() {
     local minimum="$3"
 
     require_integer "$name" "$value"
-    [[ "$value" -ge "$minimum" ]] || {
+    # Force base 10: a zero-padded value such as 08 would otherwise be
+    # read as octal, while the Python loaders parse it as decimal.
+    (( 10#$value >= minimum )) || {
         printf 'ERROR: %s must be >= %s, found %s.\n' "$name" "$minimum" "$value" >&2
+        exit 1
+    }
+}
+
+# Boolean vocabulary shared with the indexer's ``_bool_env`` and the
+# reconciler loader (case-insensitive); anything else stops the indexer
+# at startup, so reject it here first.
+require_bool() {
+    local name="$1"
+    local value="$2"
+    local lowered
+
+    lowered="$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')"
+    [[ "$lowered" =~ ^(1|true|yes|on|0|false|no|off)$ ]] || {
+        printf 'ERROR: %s must be true or false (also 1/0, yes/no, on/off), found %s.\n' "$name" "$value" >&2
         exit 1
     }
 }
@@ -388,13 +405,11 @@ if [[ -n "$INDEXER_PARSE_MAX_BYTES" ]]; then
 fi
 
 # Indexing queue retry knobs. The Python loader (``queue.load_config_from_env``)
-# clamps both to the documented defaults on out-of-range values, but the
-# operator-facing contract is that .env never contains values the indexer
-# would silently override. ``max_attempts <= 0`` dead-letters on first
-# failure; ``base_backoff_seconds <= 0`` schedules immediate retry
-# churn that burns the attempt budget in a tight loop. Reject both
-# here so the operator sees the actual problem instead of a runtime
-# warning buried in indexer logs.
+# stops the indexer at startup on out-of-range values; rejecting them
+# here surfaces the problem before any container starts.
+# ``max_attempts <= 0`` dead-letters on first failure;
+# ``base_backoff_seconds <= 0`` schedules immediate retry churn that
+# burns the attempt budget in a tight loop.
 if [[ -n "$INDEXER_MAX_ATTEMPTS" ]]; then
     require_integer_min "INDEXER_MAX_ATTEMPTS" "$INDEXER_MAX_ATTEMPTS" 1
 fi
@@ -403,6 +418,59 @@ if [[ -n "$INDEXER_RETRY_BASE_SECONDS" ]]; then
 fi
 if [[ -n "$INDEXER_MESSAGE_TIMEOUT_SECONDS" ]]; then
     require_integer_min "INDEXER_MESSAGE_TIMEOUT_SECONDS" "$INDEXER_MESSAGE_TIMEOUT_SECONDS" 0
+fi
+
+# Remaining indexer integer knobs, as NAME:MINIMUM. The minimums match
+# the ``_int_env`` / reconciler ``_int`` calls in indexer/src/main.py
+# and indexer/src/reconciler.py, which stop the indexer at startup on a
+# non-integer or a value below them (#481). Validated only when set so
+# the code defaults stay authoritative otherwise.
+for spec in \
+    EMBED_BATCH_SIZE:1 \
+    INITIAL_INDEX_BATCH_SIZE:1 \
+    INDEXER_STEADY_STATE_BATCH_SIZE:1 \
+    INDEXER_WAL_CHECKPOINT_INTERVAL_SECS:60 \
+    INDEXER_RECOVERY_SWEEP_INTERVAL_SECS:60 \
+    INDEXER_CHUNK_TARGET_TOKENS:1 \
+    INDEXER_CHUNK_MAX_TOKENS:1 \
+    INDEXER_CHUNK_OVERLAP_TOKENS:0 \
+    INDEXER_ATTACHMENT_MAX_BYTES:1 \
+    INDEXER_OCR_MAX_PAGES:1 \
+    INDEXER_OCR_TIMEOUT_SECONDS:0 \
+    INDEXER_PDF_MAX_DIGITAL_PAGES:0 \
+    INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS:0 \
+    INDEXER_DELETION_GRACE_DAYS:0 \
+    INDEXER_DELETION_SWEEP_INTERVAL_SECS:60; do
+    name="${spec%%:*}"
+    value="$(get_env_value "$name")"
+    if [[ -n "$value" ]]; then
+        require_integer_min "$name" "$value" "${spec##*:}"
+    fi
+done
+
+# Indexer booleans: an unrecognised value stops the indexer at startup
+# rather than reading as false (#481). INDEXER_DELETION_ENABLED (the
+# retention mode) uses the same vocabulary.
+for name in \
+    INDEXER_DELETION_ENABLED \
+    INDEXER_ATTACHMENT_EXTRACTION_ENABLED \
+    INDEXER_OCR_ENABLED \
+    INDEXER_DELETION_FORCE \
+    INDEXER_UNLINK_ON_REAP; do
+    value="$(get_env_value "$name")"
+    if [[ -n "$value" ]]; then
+        require_bool "$name" "$value"
+    fi
+done
+
+# Mass-delete brake: a decimal fraction in [0, 1]. The reconciler
+# rejects anything else, including NaN and infinity, at startup.
+INDEXER_DELETION_MAX_BATCH_PCT="$(get_env_value INDEXER_DELETION_MAX_BATCH_PCT)"
+if [[ -n "$INDEXER_DELETION_MAX_BATCH_PCT" ]]; then
+    [[ "$INDEXER_DELETION_MAX_BATCH_PCT" =~ ^(0*\.[0-9]+|0+(\.[0-9]*)?|0*1(\.0*)?)$ ]] || {
+        printf 'ERROR: INDEXER_DELETION_MAX_BATCH_PCT must be a decimal between 0 and 1, found %s.\n' "$INDEXER_DELETION_MAX_BATCH_PCT" >&2
+        exit 1
+    }
 fi
 
 require_integer "SYNC_INTERVAL" "$SYNC_INTERVAL"

@@ -1656,16 +1656,79 @@ class TestLoadConfig:
         with pytest.raises(ValueError, match="INDEXER_DELETION_ENABLED"):
             load_config_from_env({"INDEXER_DELETION_ENABLED": "archive-please"})
 
-    def test_invalid_numeric_falls_back_to_default(self):
-        cfg = load_config_from_env({"INDEXER_DELETION_GRACE_DAYS": "not-a-number"})
+    def test_empty_values_yield_defaults(self):
+        """Unset and empty both mean "use the documented default" (#481)."""
+        cfg = load_config_from_env(
+            {
+                "INDEXER_DELETION_GRACE_DAYS": "",
+                "INDEXER_DELETION_SWEEP_INTERVAL_SECS": " ",
+                "INDEXER_DELETION_MAX_BATCH_PCT": "",
+                "INDEXER_DELETION_FORCE": "",
+                "INDEXER_UNLINK_ON_REAP": "  ",
+            }
+        )
         assert cfg.grace_days == 7
+        assert cfg.sweep_interval_secs == 3600
+        assert cfg.max_batch_pct == pytest.approx(0.05)
+        assert cfg.force is False
+        assert cfg.unlink_on_reap is False
 
-    def test_max_batch_pct_clamped_to_unit_range(self):
-        cfg = load_config_from_env({"INDEXER_DELETION_MAX_BATCH_PCT": "2.5"})
-        assert cfg.max_batch_pct == 1.0
-        cfg = load_config_from_env({"INDEXER_DELETION_MAX_BATCH_PCT": "-0.1"})
-        assert cfg.max_batch_pct == 0.0
-
-    def test_sweep_interval_has_minimum(self):
-        cfg = load_config_from_env({"INDEXER_DELETION_SWEEP_INTERVAL_SECS": "5"})
+    def test_valid_values_are_returned(self):
+        cfg = load_config_from_env(
+            {
+                "INDEXER_DELETION_GRACE_DAYS": "0",
+                "INDEXER_DELETION_SWEEP_INTERVAL_SECS": "60",
+                "INDEXER_DELETION_MAX_BATCH_PCT": "1",
+                "INDEXER_DELETION_FORCE": "YES",
+                "INDEXER_UNLINK_ON_REAP": " on ",
+            }
+        )
+        assert cfg.grace_days == 0
         assert cfg.sweep_interval_secs == 60
+        assert cfg.max_batch_pct == 1.0
+        assert cfg.force is True
+        assert cfg.unlink_on_reap is True
+        cfg = load_config_from_env(
+            {
+                "INDEXER_DELETION_MAX_BATCH_PCT": "0",
+                "INDEXER_DELETION_FORCE": "off",
+                "INDEXER_UNLINK_ON_REAP": "0",
+            }
+        )
+        assert cfg.max_batch_pct == 0.0
+        assert cfg.force is False
+        assert cfg.unlink_on_reap is False
+
+    @pytest.mark.parametrize("name", ["INDEXER_DELETION_FORCE", "INDEXER_UNLINK_ON_REAP"])
+    @pytest.mark.parametrize("raw", ["tru", "-5", "nan", "inf"])
+    def test_unrecognized_boolean_fails(self, name, raw):
+        """A typo used to read as false without a word (#481)."""
+        with pytest.raises(ValueError, match=f"{name}.*not recognized"):
+            load_config_from_env({name: raw})
+
+    @pytest.mark.parametrize(
+        ("name", "raw", "message"),
+        [
+            ("INDEXER_DELETION_GRACE_DAYS", "not-a-number", "integer"),
+            ("INDEXER_DELETION_GRACE_DAYS", "tru", "integer"),
+            ("INDEXER_DELETION_GRACE_DAYS", "nan", "integer"),
+            ("INDEXER_DELETION_GRACE_DAYS", "inf", "integer"),
+            ("INDEXER_DELETION_GRACE_DAYS", "-5", ">= 0"),
+            ("INDEXER_DELETION_SWEEP_INTERVAL_SECS", "-5", ">= 60"),
+            ("INDEXER_DELETION_SWEEP_INTERVAL_SECS", "5", ">= 60"),
+        ],
+    )
+    def test_invalid_integer_fails(self, name, raw, message):
+        """No silent fallback to the default and no clamp to the minimum."""
+        with pytest.raises(ValueError, match=f"{name}.*{message}"):
+            load_config_from_env({name: raw})
+
+    @pytest.mark.parametrize(
+        "raw", ["tru", "nan", "NaN", "inf", "-inf", "-5", "-0.1", "2.5", "1.0001"]
+    )
+    def test_invalid_max_batch_pct_fails(self, raw):
+        """NaN used to pass both range checks and then raise inside every
+        reap sweep, so reaping silently never ran (#481); out-of-range
+        values used to be clamped."""
+        with pytest.raises(ValueError, match="INDEXER_DELETION_MAX_BATCH_PCT.*between 0 and 1"):
+            load_config_from_env({"INDEXER_DELETION_MAX_BATCH_PCT": raw})

@@ -118,11 +118,12 @@ def load_config_from_env(env: dict[str, str] | os._Environ) -> dict[str, int]:
     Exposed as a helper so ``main.py`` and tests share the same parsing
     rather than each re-implementing int coercion with the same default.
 
-    Malformed or out-of-range values fall back to the documented default
-    with a warning rather than raising at startup — matches the lenient
-    parser shape used by ``reconciler.load_config_from_env`` and
-    ``main._int_env`` so a typo in any one knob doesn't crash the
-    indexer. Both knobs are clamped to a minimum of 1:
+    Unset or empty values yield the documented default. A non-integer
+    or a value below the minimum raises ``ValueError`` naming the
+    variable, so a typo stops startup instead of being silently
+    replaced (#481) — the same rule as
+    ``reconciler.load_config_from_env`` and ``main._int_env``. Both
+    knobs require a minimum of 1:
 
     - ``max_attempts <= 0`` would dead-letter every row on the first
       failure (the >= check in ``mark_failed`` matches immediately),
@@ -155,17 +156,9 @@ def _int_env(
     try:
         value = int(raw)
     except ValueError:
-        log.warning("invalid %s=%r; falling back to %d", name, raw, default)
-        return default
+        raise ValueError(f"{name}={raw!r} is not an integer") from None
     if minimum is not None and value < minimum:
-        log.warning(
-            "invalid %s=%r (must be >= %d); falling back to %d",
-            name,
-            value,
-            minimum,
-            default,
-        )
-        return default
+        raise ValueError(f"{name}={raw!r} must be >= {minimum}")
     return value
 
 

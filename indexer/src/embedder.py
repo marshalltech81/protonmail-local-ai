@@ -43,10 +43,10 @@ log = logging.getLogger("indexer.embedder")
 def _float_env(name: str, default: float, minimum: float = 1.0) -> float:
     """Read a float env var with a graceful fallback.
 
-    Mirrors ``main._int_env`` and ``reconciler._int`` / ``_pct``: an
-    empty / unset / malformed value logs a warning and falls back
-    rather than raising at startup. A typo in a tunable knob should
-    not crash the indexer.
+    An empty / unset / malformed value logs a warning and falls back
+    rather than raising at startup. Unlike ``main._int_env`` and the
+    queue and reconciler loaders, which reject invalid values (#481),
+    this warmup deadline keeps the warn-fall-back policy.
 
     ``minimum`` defines the lower bound (default 1.0) — values below
     it are treated as malformed and fall back. ``EMBED_WARMUP_TIMEOUT_SECS``
