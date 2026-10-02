@@ -18,8 +18,8 @@ result always satisfies its schema.
 Everything in these models except IDs is sender-controlled, so the
 responses bound lists and cut long values (``MAX_LISTED``,
 ``HEADER_CHAR_LIMIT``) and report the full count alongside
-(``participant_count``, ``to_count``, ...). The builders bound by
-default; only get_message asks for full headers.
+(``participant_count``, ``to_count``, ...). Every builder bounds them,
+get_message's included (#489).
 """
 
 from datetime import date, datetime
@@ -180,12 +180,11 @@ class ListedMessage(MessageHeaders):
     thread_id: str
 
 
-def message_headers(m: MessageRecord, *, full: bool = False) -> MessageHeaders:
-    """``m``'s headers. Unless ``full``, at most ``MAX_LISTED`` entries per
-    role and References are listed and values are cut at
-    ``HEADER_CHAR_LIMIT``."""
-    people = refs = None if full else MAX_LISTED
-    chars = None if full else HEADER_CHAR_LIMIT
+def message_headers(m: MessageRecord) -> MessageHeaders:
+    """``m``'s headers: at most ``MAX_LISTED`` entries per role and
+    References are listed and values are cut at ``HEADER_CHAR_LIMIT``."""
+    people = refs = MAX_LISTED
+    chars = HEADER_CHAR_LIMIT
 
     def listed(entries: list[ParticipantRecord], limit: int | None) -> list[Participant]:
         return [
@@ -217,9 +216,9 @@ def message_headers(m: MessageRecord, *, full: bool = False) -> MessageHeaders:
     )
 
 
-def listed_message(m: MessageRecord, *, full: bool = False) -> ListedMessage:
+def listed_message(m: MessageRecord) -> ListedMessage:
     """``message_headers`` plus the message's thread ID."""
-    return ListedMessage(**message_headers(m, full=full).model_dump(), thread_id=m.thread_id)
+    return ListedMessage(**message_headers(m).model_dump(), thread_id=m.thread_id)
 
 
 # --- search tools -------------------------------------------------------
@@ -397,7 +396,15 @@ class GetMessageOutput(_Output):
     )
     thread_subject: str
     body: str | None = Field(
-        description="Full indexed body after quoted-reply stripping; null when none is indexed."
+        description="One page of the indexed body after quoted-reply stripping: the "
+        "characters from body_offset, at most 20,000; empty when body_offset is the "
+        "body's end; null when no body is indexed."
+    )
+    body_offset: int = Field(description="Body character this page starts at.")
+    body_total_chars: int = Field(description="Characters in the whole body; 0 when none.")
+    next_offset: int | None = Field(
+        description="Pass as offset for the next page of the body; null when this page "
+        "reaches the end. Paging from 0 to the end returns the whole body."
     )
     indexed_thread_text: str | None = Field(
         description="Parent-thread text or snippet; set only when body is null."

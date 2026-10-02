@@ -51,7 +51,9 @@ types) are cut with a marker. Every tool applies the same cut in its
 prose, the intelligence tools apply it to the headers they send to the
 model, and `get_thread` also cuts bodies. IDs are never cut, since a shortened ID
 would not chain; `get_thread` states the thread ID once rather than on
-every message row. `get_message` returns full headers and the full body.
+every message row. `get_message` bounds headers the same way and pages
+the body by character offset, so every page is bounded and the pages
+together hold the whole body.
 
 A failure (unknown thread or message, invalid argument, provider or
 database error) is an MCP error result (`isError: true`); it carries no
@@ -406,12 +408,11 @@ also carries quoted replies) is shown instead.
 Responses are bounded: messages are paged (the response states the
 thread's message count and the `offset` for the next page), and each
 body is cut at 4,000 characters with a marker stating how many were
-left out — `get_message` returns the full body. Header content is
+left out — `get_message` pages through the full body. Header content is
 sender-controlled, so it is bounded the same way: at most 10 recipients
 per role, 10 thread participants, and 10 References are listed (with a
 "+N more" count), and any header value past 500 characters is cut with
-a marker — `get_message` returns full headers. The page is read from
-one database snapshot.
+a marker. The page is read from one database snapshot.
 
 Messages of the thread reaped under mirror retention are listed by
 claimant ID and reap time in `reaped_messages`; a fully reaped thread
@@ -426,17 +427,41 @@ found` ([Reaped sources](#reaped-sources)).
 | `limit` | int | `10` | Messages per page; clamped to `[1, 50]` |
 
 ### `get_message`
-Return one message's own headers — subject, every From / To / Cc
-entry, send date and, when known, delivery date (`occurred_at`) in
-UTC, folder, In-Reply-To, References, attachment
-flag — with its thread ID and subject, and its full indexed body
-reconstructed from the per-message chunk store (overlap between
-adjacent chunks is removed by character offset). The index keeps no raw
-per-message body, so this is the indexed text **after quoted-reply
-stripping**; it falls back to thread context when no body chunks are
-indexed for the message. Attachment text is not included — use
-`get_evidence` for that. The prose ends its header block with the raw
-source file's path, size, and SHA-256.
+Return one message's own headers — subject, From / To / Cc, send date
+and, when known, delivery date (`occurred_at`) in UTC, folder,
+In-Reply-To, References, attachment flag — with its thread ID and
+subject, and one page of its indexed body reconstructed from the
+per-message chunk store (overlap between adjacent chunks is removed by
+character offset). The index keeps no raw per-message body, so this is
+the indexed text **after quoted-reply stripping**; it falls back to
+thread context when no body chunks are indexed for the message.
+Attachment text is not included — use `get_evidence` for that. The
+prose ends its header block with the raw source file's path, size, and
+SHA-256.
+
+Headers are bounded like every other tool's: at most 10 recipients per
+role and 10 References are listed, with a "+N more" note in the prose
+and the full count in `to_count`, `references_count`, ...; any header
+value past 500 characters (the thread subject included) is cut with a
+marker.
+
+The body is paged by character offset (#489). A page holds at most
+20,000 characters: about 6,700 tokens at the 3 characters per token the
+inference budget counts, a fifth of the default 32,768-token context
+window and half of a full `get_thread` page (10 bodies of 4,000
+characters). The structured output carries the page in `body`, its
+start in `body_offset`, the whole body's length in `body_total_chars`,
+and `next_offset` when more remains (null at the end); the prose states
+the character range shown and the offset for the next call. Calling
+with each `next_offset` in turn, from 0, returns pages whose
+concatenation is the whole body. A cut never splits a code point, and
+one that would separate a combining mark or a zero-width-joined
+character from the character before it moves back (at most 32 code
+points) so the sequence starts the next page. An `offset` equal to the
+body's length returns an empty page; a negative one, or one past the
+end (any offset above 0 when no body is indexed), fails as an invalid
+argument naming `offset`. Each call rebuilds the body from its chunks,
+so a page reflects the index at the time of that call.
 
 `message_id` takes a claimant ID, which names one message, or a bare
 Message-ID, which works while one indexed message carries it. When
@@ -456,6 +481,7 @@ than `Message not found` ([Reaped sources](#reaped-sources)).
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `message_id` | string | required | Claimant ID, or the Message-ID header value |
+| `offset` | int | `0` | Body character to start the page at; pass the previous response's `next_offset` |
 
 ### `list_threads`
 Browse threads in a folder: every thread with at least one message
@@ -563,8 +589,7 @@ message carries its send and delivery dates, folder, attachment flag, subject,
 From / To / Cc (at most 10 per role, with a count of the rest),
 Message-ID, claimant ID, and Thread ID; the structured output adds In-Reply-To and
 up to 10 References. Header values are sender-controlled, so any past
-500 characters is cut with a marker — `get_message` returns full
-headers. The count, the page, and its participants are read in one
+500 characters is cut with a marker. The count, the page, and its participants are read in one
 snapshot.
 
 **Paging.** Keyset pagination on `(effective_at, claimant_id)`: messages
