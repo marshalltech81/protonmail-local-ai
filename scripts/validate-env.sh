@@ -162,6 +162,15 @@ reject_url_userinfo() {
     fi
 }
 
+# Print VALUE without leading or trailing whitespace.
+trim() {
+    local value="$1"
+
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    printf '%s\n' "$value"
+}
+
 # Read a single KEY=VALUE from .env without shell-sourcing.
 # Shell-sourcing would evaluate command substitutions in values, so a
 # malformed or hostile .env line could execute arbitrary commands from the
@@ -170,6 +179,7 @@ reject_url_userinfo() {
 # Semantics:
 #   - last assignment wins (matches `source` behavior)
 #   - comment (#) and blank lines are ignored
+#   - whitespace around the value is dropped, as Compose does
 #   - optional surrounding single or double quotes are stripped
 #   - no variable expansion, no command substitution, no escape processing
 get_env_value() {
@@ -189,7 +199,7 @@ get_env_value() {
     done < "$ENV_FILE"
     [[ -n "$raw" ]] || { printf '\n'; return 0; }
 
-    value="${raw#*=}"
+    value="$(trim "${raw#*=}")"
     # strip a single pair of matching surrounding quotes, if present
     if [[ "$value" =~ ^\"(.*)\"$ ]]; then
         value="${BASH_REMATCH[1]}"
@@ -216,6 +226,24 @@ env_value() {
     else
         get_env_value "$key"
     fi
+}
+
+# env_value with surrounding whitespace removed, for the values the
+# Python services read with ``.strip()``: every number, boolean and mode
+# below. SYNC_INTERVAL (mbsync's shell), MCP_PORT (also Compose's port
+# mapping), URLs and model names are passed on unstripped, so they are
+# read with env_value.
+env_value_stripped() {
+    local value
+
+    value="$(env_value "$1")" || return 2
+    trim "$value"
+}
+
+# The loaders read a mode as ``.strip().lower()`` of the value Compose
+# passes, after Compose has applied the default to an empty one.
+normalize_mode() {
+    trim "$1" | tr '[:upper:]' '[:lower:]'
 }
 
 if [[ "${1:-}" == "--get" ]]; then
@@ -261,30 +289,30 @@ INFERENCE_MODE="$(env_value INFERENCE_MODE)"
 INFERENCE_BASE_URL="$(env_value INFERENCE_BASE_URL)"
 INFERENCE_MODEL="$(env_value INFERENCE_MODEL)"
 INFERENCE_MODEL="${INFERENCE_MODEL:-claude-sonnet-4-6}"
-INFERENCE_TIMEOUT_SECS="$(env_value INFERENCE_TIMEOUT_SECS)"
-INFERENCE_MAX_TOKENS="$(env_value INFERENCE_MAX_TOKENS)"
-INFERENCE_CONTEXT_TOKENS="$(env_value INFERENCE_CONTEXT_TOKENS)"
+INFERENCE_TIMEOUT_SECS="$(env_value_stripped INFERENCE_TIMEOUT_SECS)"
+INFERENCE_MAX_TOKENS="$(env_value_stripped INFERENCE_MAX_TOKENS)"
+INFERENCE_CONTEXT_TOKENS="$(env_value_stripped INFERENCE_CONTEXT_TOKENS)"
 EMBED_MODE="$(env_value EMBED_MODE)"
 EMBED_BASE_URL="$(env_value EMBED_BASE_URL)"
 EMBED_MODEL="$(env_value EMBED_MODEL)"
-EMBED_TIMEOUT_SECS="$(env_value EMBED_TIMEOUT_SECS)"
-EMBED_WARMUP_TIMEOUT_SECS="$(env_value EMBED_WARMUP_TIMEOUT_SECS)"
+EMBED_TIMEOUT_SECS="$(env_value_stripped EMBED_TIMEOUT_SECS)"
+EMBED_WARMUP_TIMEOUT_SECS="$(env_value_stripped EMBED_WARMUP_TIMEOUT_SECS)"
 RERANK_MODE="$(env_value RERANK_MODE)"
 RERANK_BASE_URL="$(env_value RERANK_BASE_URL)"
 RERANK_MODEL="$(env_value RERANK_MODEL)"
-RERANK_CANDIDATES="$(env_value RERANK_CANDIDATES)"
-RERANK_TIMEOUT_SECS="$(env_value RERANK_TIMEOUT_SECS)"
-INDEXER_PARSE_MAX_BYTES="$(env_value INDEXER_PARSE_MAX_BYTES)"
-INDEXER_MAX_ATTEMPTS="$(env_value INDEXER_MAX_ATTEMPTS)"
-INDEXER_RETRY_BASE_SECONDS="$(env_value INDEXER_RETRY_BASE_SECONDS)"
-INDEXER_MESSAGE_TIMEOUT_SECONDS="$(env_value INDEXER_MESSAGE_TIMEOUT_SECONDS)"
+RERANK_CANDIDATES="$(env_value_stripped RERANK_CANDIDATES)"
+RERANK_TIMEOUT_SECS="$(env_value_stripped RERANK_TIMEOUT_SECS)"
+INDEXER_PARSE_MAX_BYTES="$(env_value_stripped INDEXER_PARSE_MAX_BYTES)"
+INDEXER_MAX_ATTEMPTS="$(env_value_stripped INDEXER_MAX_ATTEMPTS)"
+INDEXER_RETRY_BASE_SECONDS="$(env_value_stripped INDEXER_RETRY_BASE_SECONDS)"
+INDEXER_MESSAGE_TIMEOUT_SECONDS="$(env_value_stripped INDEXER_MESSAGE_TIMEOUT_SECONDS)"
 SYNC_INTERVAL="$(env_value SYNC_INTERVAL)"
 SYNC_INTERVAL="${SYNC_INTERVAL:-60}"
 MCP_PORT="$(env_value MCP_PORT)"
 MCP_PORT="${MCP_PORT:-3000}"
 MCP_TRANSPORT="$(env_value MCP_TRANSPORT)"
-MCP_SESSION_IDLE_TIMEOUT_SECS="$(env_value MCP_SESSION_IDLE_TIMEOUT_SECS)"
-MCP_EXPERIMENTAL_TOOLS="$(env_value MCP_EXPERIMENTAL_TOOLS)"
+MCP_SESSION_IDLE_TIMEOUT_SECS="$(env_value_stripped MCP_SESSION_IDLE_TIMEOUT_SECS)"
+MCP_EXPERIMENTAL_TOOLS="$(env_value_stripped MCP_EXPERIMENTAL_TOOLS)"
 
 [[ -n "$BRIDGE_USER" && "$BRIDGE_USER" != "your@proton.me" ]] || {
     echo "ERROR: BRIDGE_USER in .env must be set to the Bridge username from 'bridge --cli info'." >&2
@@ -301,7 +329,7 @@ BRIDGE_COMMIT="$(env_value BRIDGE_COMMIT)"
 }
 
 # ----- INFERENCE -----
-INFERENCE_MODE="${INFERENCE_MODE:-anthropic}"
+INFERENCE_MODE="$(normalize_mode "${INFERENCE_MODE:-anthropic}")"
 [[ "$INFERENCE_MODE" =~ ^(openai|anthropic|none)$ ]] || {
     echo "ERROR: INFERENCE_MODE must be one of: anthropic, openai, none." >&2
     exit 1
@@ -363,7 +391,7 @@ fi
 # retrieval feature and the indexer cannot run without an embedder
 # either. ``EMBED_MODE=openai`` is the only valid value and is kept as
 # a config knob for symmetry with the other layers.
-EMBED_MODE="${EMBED_MODE:-openai}"
+EMBED_MODE="$(normalize_mode "${EMBED_MODE:-openai}")"
 [[ "$EMBED_MODE" == "openai" ]] || {
     echo "ERROR: EMBED_MODE must be 'openai' (the only supported embed mode)." >&2
     exit 1
@@ -405,7 +433,7 @@ if [[ -n "$EMBED_TIMEOUT_SECS" ]]; then
 fi
 
 # ----- RERANK -----
-RERANK_MODE="${RERANK_MODE:-none}"
+RERANK_MODE="$(normalize_mode "${RERANK_MODE:-none}")"
 [[ "$RERANK_MODE" =~ ^(cohere|none)$ ]] || {
     echo "ERROR: RERANK_MODE must be one of: cohere, none." >&2
     exit 1
@@ -484,7 +512,7 @@ for spec in \
     INDEXER_DELETION_GRACE_DAYS:0 \
     INDEXER_DELETION_SWEEP_INTERVAL_SECS:60; do
     name="${spec%%:*}"
-    value="$(env_value "$name")"
+    value="$(env_value_stripped "$name")"
     if [[ -n "$value" ]]; then
         require_integer_min "$name" "$value" "${spec##*:}"
     fi
@@ -499,7 +527,7 @@ for name in \
     INDEXER_OCR_ENABLED \
     INDEXER_DELETION_FORCE \
     INDEXER_UNLINK_ON_REAP; do
-    value="$(env_value "$name")"
+    value="$(env_value_stripped "$name")"
     if [[ -n "$value" ]]; then
         require_bool "$name" "$value"
     fi
@@ -507,7 +535,7 @@ done
 
 # Mass-delete brake: a decimal fraction in [0, 1]. The reconciler
 # rejects anything else, including NaN and infinity, at startup.
-INDEXER_DELETION_MAX_BATCH_PCT="$(env_value INDEXER_DELETION_MAX_BATCH_PCT)"
+INDEXER_DELETION_MAX_BATCH_PCT="$(env_value_stripped INDEXER_DELETION_MAX_BATCH_PCT)"
 if [[ -n "$INDEXER_DELETION_MAX_BATCH_PCT" ]]; then
     [[ "$INDEXER_DELETION_MAX_BATCH_PCT" =~ ^(0*\.[0-9]+|0+(\.[0-9]*)?|0*1(\.0*)?)$ ]] || {
         printf 'ERROR: INDEXER_DELETION_MAX_BATCH_PCT must be a decimal between 0 and 1, found %s.\n' "$INDEXER_DELETION_MAX_BATCH_PCT" >&2
@@ -527,7 +555,7 @@ require_integer "MCP_PORT" "$MCP_PORT"
     exit 1
 }
 
-MCP_TRANSPORT="${MCP_TRANSPORT:-sse}"
+MCP_TRANSPORT="$(normalize_mode "${MCP_TRANSPORT:-sse}")"
 [[ "$MCP_TRANSPORT" =~ ^(sse|streamable-http|dual)$ ]] || {
     echo "ERROR: MCP_TRANSPORT must be 'sse', 'streamable-http', or 'dual'." >&2
     exit 1

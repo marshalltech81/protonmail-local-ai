@@ -222,6 +222,73 @@ loose_secret_mode_fails() {
     fails_with 'must have mode 600'
 }
 
+# --- Whitespace the readers strip (#506) ----------------------------------
+# The Python loaders read these values with .strip() (and modes with
+# .lower()), so a quoted value padded with spaces is valid; Compose
+# itself trims whitespace around an unquoted .env value.
+
+padded_quoted_values_pass() {
+    setup 'INDEXER_OCR_ENABLED=" On "' "INDEXER_DELETION_FORCE=' no '" \
+        'INDEXER_OCR_MAX_PAGES=" 8 "' 'INFERENCE_MAX_TOKENS=" 2048 "' \
+        'INFERENCE_CONTEXT_TOKENS=" 32768 "' 'RERANK_CANDIDATES=" 5 "' \
+        'INDEXER_MAX_ATTEMPTS=" 3 "' 'INDEXER_PARSE_MAX_BYTES=" 0 "' \
+        'INFERENCE_TIMEOUT_SECS=" 1.5 "' 'EMBED_WARMUP_TIMEOUT_SECS=" 600 "' \
+        'INDEXER_DELETION_MAX_BATCH_PCT=" 0.1 "' 'MCP_EXPERIMENTAL_TOOLS=" TRUE "' \
+        'MCP_SESSION_IDLE_TIMEOUT_SECS=" 60 "'
+    passes
+}
+
+padded_and_cased_modes_pass() {
+    setup 'INFERENCE_MODE=" OpenAI "' 'EMBED_MODE=" openai "' \
+        'RERANK_MODE=" None "' 'MCP_TRANSPORT=" Dual "'
+    passes
+}
+
+padded_disabled_mode_disables_the_layer() {
+    setup 'INFERENCE_MODE=" none "'
+    : >"$ROOT/.secrets/inference_api_key.txt"
+    passes
+}
+
+exported_padded_value_passes() {
+    setup
+    passes 'INDEXER_OCR_ENABLED= on ' 'RERANK_TIMEOUT_SECS= 30 '
+}
+
+whitespace_only_number_takes_the_default() {
+    setup 'INDEXER_OCR_MAX_PAGES="   "' 'INFERENCE_MAX_TOKENS="  "'
+    passes
+}
+
+whitespace_only_mode_fails() {
+    # Compose passes the spaces through and the loader strips them to an
+    # empty, unknown mode.
+    setup 'INFERENCE_MODE="   "'
+    fails_with 'INFERENCE_MODE must be one of'
+}
+
+padded_invalid_bool_fails() {
+    setup 'INDEXER_OCR_ENABLED=" tru "'
+    fails_with 'INDEXER_OCR_ENABLED must be true or false'
+}
+
+padded_value_below_minimum_fails() {
+    setup 'INDEXER_OCR_MAX_PAGES=" 0 "'
+    fails_with 'INDEXER_OCR_MAX_PAGES must be >= 1'
+}
+
+padded_quoted_sync_interval_fails() {
+    # mbsync reads SYNC_INTERVAL without stripping it.
+    setup 'SYNC_INTERVAL=" 60 "'
+    fails_with 'SYNC_INTERVAL'
+}
+
+unquoted_values_are_trimmed_like_compose() {
+    setup 'SYNC_INTERVAL=60   ' 'MCP_PORT=  3000' 'INFERENCE_MODE=  ' \
+        'BRIDGE_COMMIT= 04e46eb4fbc1c7ef4425a920bfc352050da0606b '
+    passes
+}
+
 check "keys with Compose defaults may be omitted" keys_with_compose_defaults_may_be_omitted
 check "empty keys with Compose defaults use the default" \
     empty_keys_with_compose_defaults_use_the_default
@@ -249,6 +316,16 @@ check "a one-sided INFERENCE_MAX_TOKENS fails" one_sided_max_tokens_fails
 check "a zero-padded INFERENCE_MAX_TOKENS is decimal" zero_padded_max_tokens_is_decimal
 check "an API key in .env fails" api_key_in_env_fails
 check "a secret file not 600 fails" loose_secret_mode_fails
+check "padded quoted values pass" padded_quoted_values_pass
+check "padded and mixed-case modes pass" padded_and_cased_modes_pass
+check "a padded none disables the layer" padded_disabled_mode_disables_the_layer
+check "an exported padded value passes" exported_padded_value_passes
+check "a whitespace-only number takes the default" whitespace_only_number_takes_the_default
+check "a whitespace-only mode fails" whitespace_only_mode_fails
+check "a padded invalid boolean fails" padded_invalid_bool_fails
+check "a padded value below its minimum fails" padded_value_below_minimum_fails
+check "a padded quoted SYNC_INTERVAL fails" padded_quoted_sync_interval_fails
+check "unquoted values are trimmed like Compose" unquoted_values_are_trimmed_like_compose
 
 if ((FAILURES > 0)); then
     printf '%d test(s) failed\n' "$FAILURES" >&2
