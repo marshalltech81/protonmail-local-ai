@@ -741,8 +741,8 @@ roughly this order; each is its own PR:
 2. #208 and #550 (rendered chunks within `max_tokens`).
 3. #275 and #281 (collision-free folder mapping; no migration with a
    fresh Maildir) and #279 (UIDVALIDITY recovery procedure).
-4. #562 (purge extracted text on reap) and #428 (cap every xlsx part
-   openpyxl loads whole).
+4. #562 (purge extracted text on reap) and ~~#428~~ (done: every xlsx
+   part openpyxl loads whole is capped, 8 MiB each, 16 MiB together).
 5. The Claude Desktop `fastmcp` adapter (replacing `mcp-remote` in
    README, `docs/setup.md`, troubleshooting and the example config)
    and the Codex setup docs.

@@ -127,7 +127,9 @@ class ExtractionResult:
 # cells outside a stale worksheet dimension (#305).
 # xlsx 3: cuts worksheets at an XML node budget before openpyxl parses
 # them (#432).
-EXTRACTOR_VERSIONS: dict[str, int] = {"docx": 3, "image": 2, "pdf": 2, "text": 2, "xlsx": 3}
+# xlsx 4: fails a workbook whose parts openpyxl loads whole are over
+# their caps (#428).
+EXTRACTOR_VERSIONS: dict[str, int] = {"docx": 3, "image": 2, "pdf": 2, "text": 2, "xlsx": 4}
 
 
 def _stamp_extractor(module_name: str, extractor_name: str) -> str:
