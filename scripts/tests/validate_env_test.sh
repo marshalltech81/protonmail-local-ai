@@ -371,6 +371,17 @@ unusable_mcp_token_fails_without_echoing_it() {
     done
 }
 
+# Review round 1: command substitution drops NUL bytes, so a token with
+# one inside must be refused before the file is read into a variable.
+mcp_token_with_nul_byte_fails() {
+    setup
+    printf 'synthetic-marker-xxxxxxx\0xxxxxxxxxxxxxxxx' >"$ROOT/.secrets/mcp_auth_token.txt"
+    fails_with 'MCP bearer token in'
+    if grep -F 'marker' "$WORK/output" >/dev/null; then
+        return 1
+    fi
+}
+
 usable_mcp_token_passes() {
     local token
     setup
@@ -580,6 +591,7 @@ check "a secret file not 600 fails" loose_secret_mode_fails
 check "a missing MCP token file fails" missing_mcp_token_file_fails
 check "an empty MCP token fails" empty_mcp_token_fails
 check "an unusable MCP token fails without echoing it" unusable_mcp_token_fails_without_echoing_it
+check "an MCP token with a NUL byte fails" mcp_token_with_nul_byte_fails
 check "a usable MCP token passes" usable_mcp_token_passes
 check "an MCP token file not 600 fails" loose_mcp_token_mode_fails
 check "an MCP token in .env fails" mcp_token_in_env_fails

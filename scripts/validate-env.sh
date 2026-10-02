@@ -297,12 +297,17 @@ fi
 # mcp-server accepts at startup (#589): at least 32 RFC 6750 b64token
 # characters once surrounding whitespace is stripped, as both of them
 # strip it. ``make init-secrets`` writes 64 hex characters. LC_ALL=C
-# keeps the ranges ASCII. The message never includes the token.
+# keeps the ranges ASCII. Command substitution drops NUL bytes, which
+# mcp-server would keep and reject, so they are counted first. The
+# message never includes the token.
 check_mcp_token() {
-    local LC_ALL=C token
-    token="$(<"$MCP_TOKEN_FILE")"
-    token="${token#"${token%%[![:space:]]*}"}"
-    token="${token%"${token##*[![:space:]]}"}"
+    local LC_ALL=C token="" nul_bytes
+    nul_bytes="$(tr -cd '\000' <"$MCP_TOKEN_FILE" | wc -c)"
+    if ((nul_bytes == 0)); then
+        token="$(<"$MCP_TOKEN_FILE")"
+        token="${token#"${token%%[![:space:]]*}"}"
+        token="${token%"${token##*[![:space:]]}"}"
+    fi
     if ((${#token} < 32)) || [[ ! "$token" =~ ^[A-Za-z0-9._~+/-]+=*$ ]]; then
         printf 'ERROR: MCP bearer token in %s must be at least 32 characters from A-Z a-z 0-9 - . _ ~ + / with optional trailing =. Regenerate it with: (umask 077; openssl rand -hex 32 > .secrets/mcp_auth_token.txt)\n' \
             "$MCP_TOKEN_FILE" >&2
