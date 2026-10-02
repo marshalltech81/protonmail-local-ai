@@ -564,11 +564,12 @@ the first deployment needs a numbered migration like any other.
    for Phase 5. **Status: partly done (#561).** "Message time" is
    defined in `docs/architecture.md`: `sent_at` (the parsed `Date:`
    header) is the only message time, every date filter bounds it, a
-   message, passage or attachment qualifies by its own message's
-   `sent_at`, and under a date range the evidence tools show only
-   passages from messages sent inside it. `occurred_at` stays
-   undefined pending an owner decision (Open decisions 15); #574 and
-   #575 are follow-ups.
+   message or attachment qualifies by its own message's `sent_at`, and
+   under a date range the evidence tools show any passage of a thread
+   whose span overlaps it, each with its own `sent_at` (the pre-#561
+   behaviour, restored; #574 is superseded). `occurred_at` stays
+   undefined pending an owner decision (Open decisions 15); #575 is a
+   follow-up.
 4. **Deletion/retention semantics.** Mirror is the default
    (upstream delete → index delete after the grace window; #451),
    archive (`INDEXER_DELETION_ENABLED=false`) is the opt-in, and
@@ -1245,10 +1246,8 @@ can be revisited with an explicit owner decision.
   only removes the `.eml` when Maildir is mounted read-write
 - mirror retention keeps a reaped attachment's extracted text in
   `attachment_extractions` (#562, Open decisions 18)
-- under a date range the evidence tools can return no passages when
-  span-only threads fill the retrieval lanes (#574), and a chunk's
-  stored date can lag its message's `sent_at` until a failed re-date
-  retries (#575); Open decisions 17
+- a chunk's stored date can lag its message's `sent_at` until a failed
+  re-date retries (#575); Open decisions 17
 - macOS Bridge mode is tested only against a synthetic STARTTLS server
   (#571); the live test is Open decisions 21
 - coverage scope: both services measure `src/` with `src/main.py`
