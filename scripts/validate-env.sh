@@ -569,7 +569,8 @@ fi
 }
 
 require_integer "MCP_PORT" "$MCP_PORT"
-[[ "$MCP_PORT" -ge 1 && "$MCP_PORT" -le 65535 ]] || {
+# Base 10, as Compose and the mcp-server loader read a zero-padded port.
+(( 10#$MCP_PORT >= 1 && 10#$MCP_PORT <= 65535 )) || {
     echo "ERROR: MCP_PORT must be between 1 and 65535." >&2
     exit 1
 }

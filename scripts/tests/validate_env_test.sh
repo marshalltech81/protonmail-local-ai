@@ -233,6 +233,17 @@ zero_padded_sync_interval_fails() {
     fails_with 'SYNC_INTERVAL'
 }
 
+# Compose and the mcp-server loader both read a zero-padded port as
+# decimal (Codex review round 1).
+zero_padded_port_is_decimal() {
+    setup 'MCP_PORT=08080'
+    passes
+    setup
+    passes MCP_PORT=09999
+    setup
+    fails_with 'MCP_PORT must be between 1 and 65535' MCP_PORT=065536
+}
+
 out_of_range_port_fails() {
     setup 'MCP_PORT=70000'
     fails_with 'MCP_PORT must be between 1 and 65535'
@@ -366,6 +377,7 @@ check "a non-numeric timeout fails" non_numeric_timeout_fails
 check "SYNC_INTERVAL=0 fails" zero_sync_interval_fails
 check "a zero-padded SYNC_INTERVAL fails" zero_padded_sync_interval_fails
 check "an out-of-range MCP_PORT fails" out_of_range_port_fails
+check "a zero-padded MCP_PORT is decimal" zero_padded_port_is_decimal
 check "an unknown INFERENCE_MODE fails" unknown_inference_mode_fails
 check "a missing EMBED_MODEL fails" missing_embed_model_fails
 check "an empty embed key fails" empty_embed_key_fails
