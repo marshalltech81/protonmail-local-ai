@@ -107,6 +107,10 @@ jobs:
           # when no .env is present its stale default overrides the
           # Dockerfile ARG and the build produces the OLD Bridge even
           # though both other sites were bumped.
+          #
+          # .env.example is the source of truth; scripts/tests/compose_test.sh
+          # (make test-compose, run on every pull request) fails when the
+          # other two copies of either pin disagree with it.
           sed -i "s|^BRIDGE_VERSION=.*|BRIDGE_VERSION=${new}|" .env.example
           sed -i "s|^ARG BRIDGE_VERSION=.*|ARG BRIDGE_VERSION=${new}|" bridge/Dockerfile
           # Single-quoted pattern so the shell leaves the literal
