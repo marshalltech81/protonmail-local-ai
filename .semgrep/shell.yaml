@@ -80,5 +80,5 @@ rules:
       exclude:
         - ".semgrep/"
     pattern-either:
-      - pattern-regex: (?m)^[^#\n]*\bchmod\s+(-[a-zA-Z]+\s+)*["']?([0-7]?[0-7]{2}[2367]|[ugo]*[ao][ugoa]*[+=][rwxXst]*w[rwxXst]*)["']?(\s|$)
+      - pattern-regex: (?m)^[^#\n]*\bchmod\s+(-[a-zA-Z]+\s+|--([a-z][a-z-]*)?\s+)*["']?([0-7]?[0-7]{2}[2367]|[ugo]*[ao][ugoa]*[+=][rwxXst]*w[rwxXst]*)["']?(\s|$)
       - pattern-regex: (?m)^[^#\n]*\b(mkdir|install)\b(?:[^#\n]|(?<=\S)#|\\\n)*\s(-m\s*|--mode[=\s])["']?([0-7]?[0-7]{2}[2367]|[ugo]*[ao][ugoa]*[+=][rwxXst]*w[rwxXst]*)["']?(\s|$)

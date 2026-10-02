@@ -78,6 +78,14 @@ mkdir -m 1777 "$dir"
 mkdir --mode=777 "$dir"
 # ruleid: shell-world-writable
 install --mode 666 src "$dir/dst"
+# ruleid: shell-world-writable
+chmod --recursive 777 "$dir"
+# ruleid: shell-world-writable
+chmod --verbose -R o+w "$dir"
+# ruleid: shell-world-writable
+chmod -- 0666 "$dir"
+# ok: shell-world-writable
+chmod --recursive 755 "$dir"
 # ok: shell-world-writable
 chmod 600 "$dir"
 # ok: shell-world-writable
