@@ -812,3 +812,84 @@ class TestCanonicalAddrHostileInput:
 
         assert canonical_addr("(" * 1200 + ")" * 1200 + " <bob@example.com>") == ""
         assert canonical_addr("bob@example.com") == "bob@example.com"
+
+
+class TestLongSubjectCap:
+    """#541: subjects are stored at most ``SUBJECT_MAX_CHARS`` characters
+    (cut in ``parse_email``), so the stored thread and message subjects
+    the ``threads_fts`` and rerank subject scans read are bounded, and
+    subject-fallback threading compares the capped subjects."""
+
+    @staticmethod
+    def _parse(tmp_path, name: str, subject: str, day: int, message_id: str):
+        from src.parser import parse_email
+
+        path = tmp_path / "INBOX" / "cur" / f"{name}:2,S"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(
+            b"From: alice@example.com\r\n"
+            b"To: bob@example.com\r\n"
+            b"Subject: " + subject.encode() + b"\r\n"
+            b"Message-ID: <" + message_id.encode() + b">\r\n"
+            b"Date: Mon, 0" + str(day).encode() + b" Jan 2024 12:00:00 +0000\r\n"
+            b"\r\n"
+            b"Body.\r\n"
+        )
+        msg = parse_email(path, maildir_root=tmp_path)
+        assert msg is not None
+        return msg
+
+    def test_stored_subjects_are_bounded(self, tmp_path, db, threader):
+        from src.parser import SUBJECT_MAX_CHARS
+
+        msg = self._parse(tmp_path, "a", "Q" * 3_000_000, 1, "long_a@example.com")
+        t = threader.assign_thread(msg)
+        db.upsert_thread(t, [0.0] * EMBEDDING_DIM)
+
+        stored = db._conn.execute(
+            "SELECT max(length(m.subject)), max(length(t.subject)), "
+            "max(length(t.display_subject)) "
+            "FROM messages m JOIN threads t ON t.thread_id = m.thread_id"
+        ).fetchone()
+        assert tuple(stored) == (SUBJECT_MAX_CHARS,) * 3
+
+    def test_subjects_sharing_the_capped_prefix_compare_equal(self, tmp_path, db, threader):
+        """Documented limitation: two subjects identical in their first
+        ``SUBJECT_MAX_CHARS`` characters are the same subject to the
+        fallback, which still requires the same folder, a shared sender
+        and recipient, and the 60-day window."""
+        from src.parser import SUBJECT_MAX_CHARS
+
+        prefix = "w" * SUBJECT_MAX_CHARS
+        first = self._parse(tmp_path, "a", prefix + " first", 1, "pfx_a@example.com")
+        t1 = threader.assign_thread(first)
+        db.upsert_thread(t1, [0.0] * EMBEDDING_DIM)
+
+        second = self._parse(tmp_path, "b", prefix + " second", 2, "pfx_b@example.com")
+        assert second.subject == first.subject
+        assert threader.assign_thread(second).thread_id == "pfx_a@example.com"
+
+    def test_reply_prefix_past_the_cap_misses_the_subject_fallback(self, tmp_path, db, threader):
+        """Documented limitation: ``Re: `` takes four of the capped
+        characters, so a reply to a subject longer than the cap, with no
+        In-Reply-To / References, no longer matches it by subject."""
+        from src.parser import SUBJECT_MAX_CHARS
+
+        subject = "v" * SUBJECT_MAX_CHARS
+        original = self._parse(tmp_path, "a", subject, 1, "shift_a@example.com")
+        t1 = threader.assign_thread(original)
+        db.upsert_thread(t1, [0.0] * EMBEDDING_DIM)
+
+        reply = self._parse(tmp_path, "b", "Re: " + subject, 2, "shift_b@example.com")
+        assert threader.assign_thread(reply).thread_id == "shift_b@example.com"
+
+    def test_reply_to_a_subject_within_the_cap_still_matches(self, tmp_path, db, threader):
+        from src.parser import SUBJECT_MAX_CHARS
+
+        subject = "u" * (SUBJECT_MAX_CHARS - len("Re: "))
+        original = self._parse(tmp_path, "a", subject, 1, "fits_a@example.com")
+        t1 = threader.assign_thread(original)
+        db.upsert_thread(t1, [0.0] * EMBEDDING_DIM)
+
+        reply = self._parse(tmp_path, "b", "Re: " + subject, 2, "fits_b@example.com")
+        assert threader.assign_thread(reply).thread_id == "fits_a@example.com"

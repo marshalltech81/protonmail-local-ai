@@ -374,8 +374,10 @@ FTS_REPLY_SUBJECTS_MAX_CHARS = 2000
 # Work bound on building that column, applied on every thread rewrite:
 # at most this many stored subjects are examined (oldest first), each
 # cut to this many characters before normalization. The insert/update
-# path applies both in SQL so the rows and bytes it reads are bounded
-# too. Without them each upsert re-read and re-normalized every stored
+# path applies both in SQL; the bytes it reads per row are bounded by
+# the parser storing at most ``SUBJECT_MAX_CHARS`` characters of a
+# subject (#541), since ``substr()`` bounds only what it returns.
+# Without them each upsert re-read and re-normalized every stored
 # subject, quadratic over a long thread of long subjects (#439).
 FTS_SUBJECT_SCAN_ROWS = 200
 FTS_SUBJECT_SCAN_CHARS = 500

@@ -277,7 +277,11 @@ discovery, with **per-message chunks** as the precise unit of retrieval.
    already in the thread and it falls within 60 days of the thread's
    last message. One shared address is not enough: the mailbox owner
    is a recipient of nearly every message and the sender of every
-   outgoing one, so two vendors' "Invoice" mails would otherwise merge
+   outgoing one, so two vendors' "Invoice" mails would otherwise merge.
+   Subjects are compared as stored, cut to `SUBJECT_MAX_CHARS` (2,000)
+   characters (#541): two subjects that agree on their first 2,000
+   characters match, and a `Re:` reply to a longer subject does not.
+   Only crafted mail has such subjects
 3. Each message's body is sliced into paragraph-packed chunks
    (`indexer/src/chunker.py`); each chunk is FTS-indexed and gets its
    own vector embedding stored in `message_chunks_vec`
@@ -424,7 +428,8 @@ before. The MCP tools return `claimant_id` beside `message_id`, and
 Message-ID names several (see `docs/mcp-tools.md`).
 
 Each indexed message gets one row — its own
-subject, `sent_at` (`Date:` header; a missing or unparseable header is
+subject (cut to `SUBJECT_MAX_CHARS`, 2,000 decoded characters, at parse
+time, #541), `sent_at` (`Date:` header; a missing or unparseable header is
 dated at first index and that date is kept when the message is
 reprocessed or its thread rebuilt), folder, `in_reply_to` /
 references, attachment flag, and its source: `filepath` (the Maildir
