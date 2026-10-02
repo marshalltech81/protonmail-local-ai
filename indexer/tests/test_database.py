@@ -2701,6 +2701,30 @@ def test_rename_lookups_use_the_filepath_index(db):
         assert "idx_messages_filepath" in plan, plan
 
 
+@pytest.mark.parametrize(
+    ("sql", "params"),
+    [
+        (
+            "SELECT claimant_id FROM messages m WHERE m.message_id = ? "
+            "ORDER BY m.sent_at, m.claimant_id LIMIT 21",
+            ("a",),
+        ),
+        (
+            "SELECT claimant_id FROM messages WHERE message_id = ? AND claimant_id != ? "
+            "ORDER BY claimant_id LIMIT 21",
+            ("a", "b"),
+        ),
+    ],
+)
+def test_claimant_listings_walk_a_message_id_index_in_order(db, sql, params):
+    """#538: the MCP server's ``get_message`` lists one Message-ID's
+    claimants oldest first, or in claimant-ID order; an index in each
+    order lets ``LIMIT`` stop the walk instead of a sort reading them all."""
+    plan = " ".join(r["detail"] for r in db._conn.execute("EXPLAIN QUERY PLAN " + sql, params))
+    assert "INDEX idx_messages_message" in plan, plan
+    assert "TEMP B-TREE" not in plan, plan
+
+
 MESSAGE_MAP_INDEXES = {
     "idx_message_thread_map_filepath",
     "idx_message_thread_map_thread",

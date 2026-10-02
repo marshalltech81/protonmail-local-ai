@@ -17,13 +17,15 @@ read-only Database, so the tests focus on:
 """
 
 import asyncio
+import re
 import sqlite3
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
+from pathlib import Path
 
 import pytest
 import sqlite_vec
 from fastmcp.exceptions import ToolError
-from src.lib.sqlite import MAX_LISTED_CLAIMANTS, Database
+from src.lib.sqlite import MAX_LISTED_CLAIMANTS, AmbiguousMessageId, Database
 from src.tools.retrieval import register_retrieval_tools
 
 from tests.conftest import _build_schema, _insert_message, _insert_thread, claimant_of
@@ -528,7 +530,9 @@ class TestMessageIdClaimants:
         assert [c for c in claimants if c in text] == listed
         assert text.index(listed[0]) < text.index(listed[-1])
         records = [s for s in statements if "FROM messages m WHERE" in s]
-        assert len(records) == 1 and f"LIMIT {MAX_LISTED_CLAIMANTS + 1} " in records[0]
+        # One claimant-ID lookup and one Message-ID lookup (#538).
+        assert len(records) == 2
+        assert all(f"LIMIT {MAX_LISTED_CLAIMANTS + 1} " in r for r in records)
         assert not [s for s in statements if "FROM message_participants" in s]
 
     def test_bare_message_id_at_the_cap_lists_all(self, fake_server, tmp_path):
@@ -565,6 +569,137 @@ class TestMessageIdClaimants:
         out = asyncio.run(_handlers(fake_server, db)["query_messages"](sender="jane@example.com"))
         assert out.structured_content["total_matches"] == 2
         assert [m["claimant_id"] for m in out.structured_content["messages"]] == [second, first]
+
+
+INDEXER_DATABASE = Path(__file__).resolve().parents[2] / "indexer" / "src" / "database.py"
+
+
+def _messages_indexes(sql_text: str) -> dict[str, str]:
+    """``CREATE INDEX`` statements on ``messages``: name to column list."""
+    return {
+        name: " ".join(cols.split())
+        for name, cols in re.findall(r"CREATE INDEX (\w+)\s+ON messages\(([^)]*)\)", sql_text)
+    }
+
+
+class TestGetMessageIndexWalk:
+    """#538: the claimant listings in ``get_message`` walk an index in
+    the order they return, so ``LIMIT`` stops the walk instead of every
+    file claiming the Message-ID being read and sorted."""
+
+    MESSAGE_ID = "dup@example.com"
+
+    def _flood(self, tmp_path, count):
+        """One full message claiming ``MESSAGE_ID`` plus ``count`` bare
+        ``messages`` rows claiming it too. Returns the db and the full
+        message's claimant ID."""
+        with _open_fixture_db(tmp_path) as (conn, db):
+            _insert_message(
+                conn, message_id=self.MESSAGE_ID, thread_id="t1", sent_at="2024-01-01T09:00:00"
+            )
+            conn.executemany(
+                "INSERT INTO messages (claimant_id, message_id, thread_id, filepath, folder, "
+                "subject, sent_at, references_json, has_attachments, indexed_at) "
+                "VALUES (?, ?, 't1', ?, 'INBOX', 's', ?, '[]', 0, '2024-01-01')",
+                (
+                    (f"{self.MESSAGE_ID}#{i:08x}", self.MESSAGE_ID, f"/f{i}", f"2023-{i % 9 + 1}")
+                    for i in range(count)
+                ),
+            )
+            conn.commit()
+            conn.close()
+        return db, claimant_of(self.MESSAGE_ID)
+
+    @staticmethod
+    def _instrument(db, monkeypatch):
+        """Record each statement ``db`` runs (values inlined) and count
+        the SQLite VM steps it takes."""
+        statements: list[str] = []
+        steps = [0]
+        connect = db._connect
+
+        def tick():
+            steps[0] += 1
+            return 0
+
+        def instrumented():
+            conn = connect()
+            conn.set_trace_callback(statements.append)
+            conn.set_progress_handler(tick, 1)
+            return conn
+
+        monkeypatch.setattr(db, "_connect", instrumented)
+        return statements, steps
+
+    def test_test_schema_mirrors_the_indexer_messages_indexes(self, tmp_path):
+        """The plans below are only evidence if the fixture schema has
+        the indexer's ``messages`` indexes."""
+        with _open_fixture_db(tmp_path) as (conn, _db):
+            mirror = "\n".join(
+                r[0]
+                for r in conn.execute(
+                    "SELECT sql FROM sqlite_master WHERE type = 'index' AND tbl_name = 'messages' "
+                    "AND sql IS NOT NULL"
+                )
+            )
+            conn.close()
+        indexer = _messages_indexes(INDEXER_DATABASE.read_text())
+        assert indexer and _messages_indexes(mirror) == indexer
+
+    @pytest.mark.parametrize("by_claimant", [False, True])
+    def test_listing_queries_walk_an_index_in_order(self, tmp_path, monkeypatch, by_claimant):
+        db, claimant = self._flood(tmp_path, 200)
+        statements, _ = self._instrument(db, monkeypatch)
+        db.get_message_view(claimant if by_claimant else self.MESSAGE_ID)
+        listings = [s for s in statements if "FROM messages" in s]
+        assert listings
+        with closing(sqlite3.connect(db.path)) as conn:
+            for sql in listings:
+                plan = " | ".join(r[3] for r in conn.execute(f"EXPLAIN QUERY PLAN {sql}"))
+                assert "TEMP B-TREE" not in plan, (sql, plan)
+                assert "MULTI-INDEX OR" not in plan, (sql, plan)
+                assert "SCAN" not in plan, (sql, plan)
+
+    @pytest.mark.parametrize("by_claimant", [False, True])
+    def test_work_does_not_grow_with_the_claimant_count(self, tmp_path, monkeypatch, by_claimant):
+        """10,000 files claiming one Message-ID cost no more VM steps
+        than 50: the walk stops at the listing cap."""
+        counts = {}
+        for count in (50, 10_000):
+            (tmp_path / str(count)).mkdir()
+            db, claimant = self._flood(tmp_path / str(count), count)
+            _, steps = self._instrument(db, monkeypatch)
+            db.get_message_view(claimant if by_claimant else self.MESSAGE_ID)
+            counts[count] = steps[0]
+        assert counts[10_000] <= counts[50] * 1.1, counts
+
+    def test_claimant_match_merges_into_the_message_id_listing(self, fake_server, tmp_path):
+        """An identifier that is one message's claimant ID and, crafted,
+        the Message-ID of more than the cap of others lists the oldest
+        ``MAX_LISTED_CLAIMANTS`` of all of them, the claimant included."""
+        victim = claimant_of("victim@example.com")
+        with _open_fixture_db(tmp_path) as (conn, db):
+            _insert_message(
+                conn,
+                message_id="victim@example.com",
+                thread_id="t1",
+                sent_at="2024-01-10T09:00:00+00:00",
+            )
+            for i in range(MAX_LISTED_CLAIMANTS + 5):
+                _insert_message(
+                    conn,
+                    message_id=victim,
+                    variant=f"v{i}",
+                    thread_id="t2",
+                    sent_at=f"2024-01-{i + 1:02d}T10:00:00+00:00",
+                )
+            conn.close()
+        crafted = [claimant_of(victim, f"v{i}") for i in range(MAX_LISTED_CLAIMANTS + 5)]
+        expected = (crafted[:9] + [victim] + crafted[9:])[:MAX_LISTED_CLAIMANTS]
+        view = db.get_message_view(victim)
+        assert isinstance(view, AmbiguousMessageId)
+        assert [r.claimant_id for r in view.claimants] == expected
+        assert view.truncated is True
 
 
 class TestListThreads:

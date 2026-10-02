@@ -2784,13 +2784,22 @@ class Database:
             # One row past the cap tells whether more exist (#456).
             # Participants are read only once one message is chosen: the
             # ambiguity listing needs claimant ID, date and folder alone.
-            records = _message_records(
-                conn,
-                "m.claimant_id = ? OR m.message_id = ?",
-                (identifier, identifier),
-                limit=MAX_LISTED_CLAIMANTS + 1,
-                participants=False,
-            )
+            # Two lookups rather than ``claimant_id = ? OR message_id = ?``:
+            # the OR is planned as two index searches merged in a temp
+            # B-tree, which sorts every file claiming the Message-ID before
+            # ``LIMIT`` applies (#538). The Message-ID lookup walks
+            # ``idx_messages_message_sent`` in listing order and stops at
+            # the limit; merging in the at most one claimant-ID match (once,
+            # should it also match the Message-ID) keeps the OR's result.
+            limit = MAX_LISTED_CLAIMANTS + 1
+            merged = {
+                r.claimant_id: r
+                for where_sql in ("m.claimant_id = ?", "m.message_id = ?")
+                for r in _message_records(
+                    conn, where_sql, (identifier,), limit=limit, participants=False
+                )
+            }
+            records = sorted(merged.values(), key=lambda r: (r.sent_at, r.claimant_id))[:limit]
             if len(records) > 1:
                 return AmbiguousMessageId(
                     message_id=identifier,
