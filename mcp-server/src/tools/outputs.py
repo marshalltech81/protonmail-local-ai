@@ -308,6 +308,28 @@ class ThreadMessage(MessageHeaders):
     body_omitted_chars: int = Field(description="Characters of the body not included.")
 
 
+class RemovedMessage(_Output):
+    claimant_id: str
+    removed_at: str = Field(description="When the index reaped it (ISO 8601 UTC).")
+
+
+# How long the indexer keeps a reaped message's identifier-only record
+# (``indexer/src/database.py`` ``REAPED_RECORD_RETENTION_DAYS``); after
+# it a lookup of the message or thread reads as not found.
+REAPED_RECORD_RETENTION_DAYS = 30
+
+
+def removed_upstream(kind: str, identifier: str, removed_at: str) -> str:
+    """The fixed error for a lookup whose source was reaped: ``kind`` is
+    ``Message`` or ``Thread``. Only the caller's own ID and the reap
+    date appear; the index holds nothing else about the source."""
+    return (
+        f"{kind} removed upstream on {removed_at[:10]} (mirror retention): {identifier}. "
+        "It was deleted in ProtonMail and reaped from the local index, so its "
+        "content is no longer available."
+    )
+
+
 class GetThreadOutput(_Output):
     thread: ThreadSummary
     total_messages: int
@@ -319,6 +341,15 @@ class GetThreadOutput(_Output):
             "Accumulated thread text (with quoted replies) or snippet; set only "
             "when no message of the thread has an indexed body."
         )
+    )
+    removed_messages: list[RemovedMessage] = Field(
+        description="Messages of this thread deleted upstream and reaped from the index "
+        "(mirror retention), oldest removal first; empty in the usual case. A record "
+        f"lasts {REAPED_RECORD_RETENTION_DAYS} days. At most {MAX_LISTED_CLAIMANTS} "
+        "are listed."
+    )
+    removed_messages_truncated: bool = Field(
+        description="True when more removed messages exist than removed_messages lists."
     )
 
 

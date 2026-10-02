@@ -31,6 +31,7 @@ from .outputs import (
     SearchAttachmentsOutput,
     SearchEmailsOutput,
     clip,
+    removed_upstream,
     source,
     thread_summary,
     tool_result,
@@ -515,6 +516,9 @@ def register_search_tools(
             if thread_id:
                 thread = await asyncio.to_thread(db.get_thread, thread_id)
                 if not thread:
+                    removed_at = await asyncio.to_thread(db.reaped_thread_at, thread_id)
+                    if removed_at:
+                        raise ToolError(removed_upstream("Thread", thread_id, removed_at))
                     raise ToolError(f"Thread not found: {thread_id}")
                 embedding = await embed_query(embed_client, query, expected_embed_dim)
                 # The same selection as ask_mailbox: chunks of attachments

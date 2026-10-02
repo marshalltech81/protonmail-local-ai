@@ -67,7 +67,8 @@ embedder (operator-supplied)  sqlite-volume
                                    attachment_extractions
                                  - indexed_files, indexing_jobs,
                                    ingestion_state
-                                 - pending_deletions (reconciler)
+                                 - pending_deletions, reaped_messages
+                                   (reconciler)
                                  - entities, entity_aliases
 
 inference (operator-supplied)
@@ -675,6 +676,25 @@ startup rather than picking a mode.
    remains. Embedding-endpoint failures during rebuild (operator-supplied
    `EMBED_BASE_URL`) cause the reaper to back off and retry on the next
    pass.
+
+**Reaped-source records.** A citation or search hit from an earlier
+answer can name a message or thread the reaper has since removed. So
+that the chain is never silently broken (PLAN Phase 4 item 4), the reap
+transaction writes one `reaped_messages` row per removed message:
+claimant ID, Message-ID, thread ID and reap time, and nothing else (no
+subject, body, participants, attachment names or chunk IDs, which hash
+the passage text). `get_message`, `get_thread` and thread-scoped
+`get_evidence` consult it only after the live lookup finds nothing, and
+answer "removed upstream on <date> (mirror retention)" instead of "not
+found"; `get_thread` on a surviving thread lists its reaped messages
+(see *Sources removed upstream* in `docs/mcp-tools.md`). The
+identifiers come from the sender's Message-ID, so the records are kept
+short: the indexer deletes rows older than 30 days
+(`REAPED_RECORD_RETENTION_DAYS` in `indexer/src/database.py`) at startup
+and on every reconciliation interval, in archive mode too, so rows
+written before a switch to archive still expire. The table holds at
+most the messages reaped in the last 30 days. Answers are not
+persisted, so nothing else refers to a reaped source.
 
 A **mass-delete brake** (`INDEXER_DELETION_MAX_BATCH_PCT`, default 5%) caps
 the fraction of total indexed messages the reaper will touch in a single

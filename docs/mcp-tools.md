@@ -152,6 +152,33 @@ The excluded folder list is `DEFAULT_EXCLUDED_FOLDERS` in
 `mcp-server/src/lib/sqlite.py`, matched exactly as `folders` values
 are.
 
+## Sources removed upstream
+
+Under mirror retention the indexer reaps a message deleted in Proton
+once its grace window passes. A claimant ID, Message-ID or thread ID
+taken from an earlier answer (a citation, a search hit) can then name
+a source the index no longer holds. Such a lookup reports the removal
+instead of reading like an ID that never existed:
+
+- `get_message` fails with `Message removed upstream on <date> (mirror
+  retention): <id>` when every message the ID names was reaped.
+- `get_thread` and `get_evidence` with `thread_id` fail with `Thread
+  removed upstream on <date> (mirror retention): <id>` when the whole
+  thread was reaped.
+- `get_thread` on a thread that survives a partial reap lists the
+  reaped messages' claimant IDs and removal times in
+  `removed_messages` (oldest first, at most 20, with
+  `removed_messages_truncated`), so a cited message missing from the
+  page is accounted for.
+
+The reaped content is gone: the index keeps only the message's
+claimant ID, Message-ID, thread ID and reap time, never its subject,
+body, participants or attachments. These records last 30 days after
+the reap; after that the lookup returns `not found` again. A message
+restored upstream is indexed again under the same claimant ID and
+reads as live. Other tools that take a thread ID (`summarize_thread`)
+are unchanged.
+
 ## Group 1 — Search
 
 ### `search_emails`
@@ -276,7 +303,9 @@ then body chunks, each group by vector distance. With no attachment
 match the order is vector distance alone. At `limit=6` the result is
 the slice `ask_mailbox` gives its model for that thread. This path
 bypasses RRF fusion, so `include_scores` shows per-chunk vector
-distance but no lane provenance.
+distance but no lane provenance. A `thread_id` whose thread was reaped
+fails with `Thread removed upstream` rather than `Thread not found`
+([Sources removed upstream](#sources-removed-upstream)).
 
 ### `search_attachments`
 Locate indexed attachments by filename, MIME type, and extracted
@@ -335,6 +364,11 @@ per role, 10 thread participants, and 10 References are listed (with a
 a marker — `get_message` returns full headers. The page is read from
 one database snapshot.
 
+Messages of the thread reaped under mirror retention are listed by
+claimant ID and removal time in `removed_messages`; a fully reaped
+thread fails with `Thread removed upstream` rather than `Thread not
+found` ([Sources removed upstream](#sources-removed-upstream)).
+
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `thread_id` | string | required | Thread ID from search results |
@@ -365,7 +399,9 @@ says the Message-ID names "more than 20" messages and lists the oldest
 20, and a successful response sets `other_claimants_truncated` (false
 otherwise). Each list walks a `messages` index in its own order and
 stops one row past the cap, so the cost does not grow with the number
-of files claiming the Message-ID.
+of files claiming the Message-ID. An ID whose message was reaped under
+mirror retention fails with `Message removed upstream` rather than
+`Message not found` ([Sources removed upstream](#sources-removed-upstream)).
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|

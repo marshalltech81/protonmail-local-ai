@@ -14,10 +14,14 @@ otherwise-sync test functions, matching the other handler tests.
 """
 
 import asyncio
+import sqlite3
+from contextlib import closing
 
 import pytest
 from fastmcp.exceptions import ToolError
 from src.tools.search import _MAX_EVIDENCE_LIMIT, register_search_tools
+
+from tests.conftest import insert_reaped
 
 
 def _handler(fake_server, fake_embed, db):
@@ -650,6 +654,22 @@ class TestGetEvidence:
     def test_thread_scoped_unknown_thread(self, fake_server, fake_embed, chunked_db):
         handler = self._handler(fake_server, fake_embed, chunked_db)
         assert "Thread not found" in _error(handler(query="invoice", thread_id="no-such-thread"))
+
+    def test_thread_scoped_reaped_thread_reports_removed_upstream(
+        self, fake_server, fake_embed, chunked_db
+    ):
+        """PLAN Phase 4 item 4: a thread cited earlier and since reaped
+        reads as removed upstream, not as an ID that never existed."""
+        with closing(sqlite3.connect(chunked_db.path)) as conn:
+            insert_reaped(
+                conn,
+                message_id="gone@example.com",
+                thread_id="t-gone",
+                reaped_at="2026-09-30T08:15:00+00:00",
+            )
+        handler = self._handler(fake_server, fake_embed, chunked_db)
+        message = _error(handler(query="invoice", thread_id="t-gone"))
+        assert "removed upstream on 2026-09-30 (mirror retention)" in message
 
     def test_blank_query_returns_guidance(self, fake_server, fake_embed, chunked_db):
         handler = self._handler(fake_server, fake_embed, chunked_db)

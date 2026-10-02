@@ -11,7 +11,7 @@ tests do not require a live embedding service.
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from email.message import EmailMessage
 from pathlib import Path
 
@@ -1732,3 +1732,119 @@ class TestLoadConfig:
         values used to be clamped."""
         with pytest.raises(ValueError, match="INDEXER_DELETION_MAX_BATCH_PCT.*between 0 and 1"):
             load_config_from_env({"INDEXER_DELETION_MAX_BATCH_PCT": raw})
+
+
+# ---------------------------------------------------------------------------
+# Reaped-source records (PLAN Phase 4 item 4)
+# ---------------------------------------------------------------------------
+
+
+def _reaped_rows(db: Database) -> list[dict]:
+    return [
+        dict(r)
+        for r in db._conn.execute(
+            "SELECT claimant_id, message_id, thread_id, reaped_at FROM reaped_messages "
+            "ORDER BY claimant_id"
+        )
+    ]
+
+
+class TestReapedMessageRecords:
+    """A reap leaves an identifier-only record per message, so a later
+    lookup of a cited claimant ID or thread ID can say the source was
+    removed upstream rather than that it never existed."""
+
+    def test_full_reap_records_each_reaped_message(self, db, threader, reconciler, maildir):
+        path = maildir / "1700000000.M1.host:2,S"
+        _write_eml(path, "full@example.com")
+        thread_id = _index(path, db, threader)
+        claimant = db.get_thread_messages(thread_id)[0]["claimant_id"]
+        path.rename(maildir / "1700000000.M1.host:2,ST")
+        before = datetime.now(UTC).isoformat()
+
+        reconciler.sweep()
+        assert reconciler.reap()["threads_reaped"] == 1
+
+        rows = _reaped_rows(db)
+        assert [(r["claimant_id"], r["thread_id"]) for r in rows] == [(claimant, thread_id)]
+        assert claimant.startswith(rows[0]["message_id"])
+        assert before <= rows[0]["reaped_at"] <= datetime.now(UTC).isoformat()
+
+    def test_partial_reap_records_only_the_reaped_message(self, db, threader, reconciler, maildir):
+        orig = maildir / "1700000000.M1.host:2,S"
+        _write_eml(orig, "orig@example.com", subject="Budget")
+        thread_id = _index(orig, db, threader)
+        reply = maildir / "1700000001.M2.host:2,S"
+        _write_eml(
+            reply,
+            "reply@example.com",
+            subject="Re: Budget",
+            in_reply_to="orig@example.com",
+            date=datetime(2024, 2, 1, 12, 0, tzinfo=UTC),
+        )
+        _index(reply, db, threader)
+        by_path = {r["filepath"]: r["claimant_id"] for r in db.get_thread_messages(thread_id)}
+        orig.rename(maildir / "1700000000.M1.host:2,ST")
+
+        reconciler.sweep()
+        assert reconciler.reap()["threads_rebuilt"] == 1
+
+        rows = _reaped_rows(db)
+        assert [(r["claimant_id"], r["thread_id"]) for r in rows] == [
+            (by_path[str(orig)], thread_id)
+        ]
+
+    def test_skipped_reap_records_nothing(self, db, threader, reconciler, maildir, monkeypatch):
+        """A reap the transaction re-check abandons (the message was
+        restored after the snapshot) must not leave a removed record."""
+        path = maildir / "1700000000.M1.host:2,S"
+        _write_eml(path, "restored@example.com")
+        _index(path, db, threader)
+        trashed = maildir / "1700000000.M1.host:2,ST"
+        path.rename(trashed)
+        reconciler.sweep()
+        snapshot = db.list_pending_deletions_older_than(datetime.now(UTC).isoformat())
+        trashed.rename(path)
+        db.update_filepath(str(trashed), str(path))
+        db.clear_pending_deletion(str(path))
+        monkeypatch.setattr(db, "list_pending_deletions_older_than", lambda _cutoff: snapshot)
+
+        assert reconciler.reap()["threads_reaped"] == 0
+        assert _reaped_rows(db) == []
+
+    def test_records_hold_identifiers_only(self, db):
+        cols = {r["name"] for r in db._conn.execute("PRAGMA table_info(reaped_messages)")}
+        assert cols == {"claimant_id", "message_id", "thread_id", "reaped_at"}
+
+
+class TestPruneReapedMessages:
+    def _seed(self, db, claimant_id: str, reaped_at: datetime) -> None:
+        with db.transaction():
+            db._conn.execute(
+                "INSERT INTO reaped_messages (claimant_id, message_id, thread_id, reaped_at) "
+                "VALUES (?, ?, ?, ?)",
+                (claimant_id, claimant_id.split("#")[0], "t", reaped_at.isoformat()),
+            )
+
+    def test_prunes_records_past_the_retention_window(self, db):
+        from src.database import REAPED_RECORD_RETENTION_DAYS
+
+        now = datetime(2026, 10, 2, 12, 0, tzinfo=UTC)
+        window = timedelta(days=REAPED_RECORD_RETENTION_DAYS)
+        self._seed(db, "old@example.com#00000001", now - window - timedelta(seconds=1))
+        self._seed(db, "edge@example.com#00000002", now - window + timedelta(seconds=1))
+        self._seed(db, "new@example.com#00000003", now)
+
+        assert db.prune_reaped_messages(now=now) == 1
+
+        assert [r["claimant_id"] for r in _reaped_rows(db)] == [
+            "edge@example.com#00000002",
+            "new@example.com#00000003",
+        ]
+
+    def test_retention_is_short(self):
+        """Identifiers derive from the sender's Message-ID; the record
+        exists to explain a recent citation, not to archive deletions."""
+        from src.database import REAPED_RECORD_RETENTION_DAYS
+
+        assert 0 < REAPED_RECORD_RETENTION_DAYS <= 30

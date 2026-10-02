@@ -733,6 +733,16 @@ def _message_bodies(
 
 
 @dataclass
+class RemovedMessage:
+    """A message removed upstream and reaped from the index: its claimant
+    ID and when it was reaped (ISO 8601 UTC). The indexer keeps nothing
+    else about it."""
+
+    claimant_id: str
+    removed_at: str
+
+
+@dataclass
 class ThreadPage:
     """One page of a thread's messages, read from one snapshot."""
 
@@ -744,6 +754,11 @@ class ThreadPage:
     bodies: dict[str, MessageBody]
     # Whether any message of the whole thread has an indexed body.
     has_bodies: bool
+    # Messages of this thread the indexer reaped (mirror retention) and
+    # still holds a record of, oldest reap first: at most
+    # ``MAX_LISTED_CLAIMANTS``, with ``removed_truncated`` set when more.
+    removed: list[RemovedMessage] = field(default_factory=list)
+    removed_truncated: bool = False
 
 
 # Most claimants of one Message-ID that ``get_message_view`` lists
@@ -2888,6 +2903,20 @@ class Database:
                     (thread_id,),
                 ).fetchone()[0]
             )
+            # A message restored upstream after its reap is indexed again
+            # under the same claimant ID; its stale record is not listed.
+            # ``idx_reaped_messages_thread`` matches the order, so the
+            # walk stops at the limit.
+            removed = [
+                RemovedMessage(claimant_id=r["claimant_id"], removed_at=r["reaped_at"])
+                for r in conn.execute(
+                    "SELECT r.claimant_id, r.reaped_at FROM reaped_messages r "
+                    "WHERE r.thread_id = ? AND NOT EXISTS "
+                    "(SELECT 1 FROM messages m WHERE m.claimant_id = r.claimant_id) "
+                    "ORDER BY r.reaped_at, r.claimant_id LIMIT ?",
+                    (thread_id, MAX_LISTED_CLAIMANTS + 1),
+                )
+            ]
         return ThreadPage(
             thread=self._row_to_result(row),
             total_messages=total,
@@ -2895,7 +2924,34 @@ class Database:
             messages=messages,
             bodies=bodies,
             has_bodies=has_bodies,
+            removed=removed[:MAX_LISTED_CLAIMANTS],
+            removed_truncated=len(removed) > MAX_LISTED_CLAIMANTS,
         )
+
+    def reaped_message_at(self, identifier: str) -> str | None:
+        """When the message a claimant ID or bare Message-ID names was
+        reaped (removed upstream, mirror retention), from the indexer's
+        identifier-only ``reaped_messages`` record: the latest reap when
+        several claimants of one Message-ID went. ``None`` when there is
+        no record: never indexed, or the record has expired. Callers ask
+        only after the live lookup found nothing."""
+        row = self._fetchone(
+            "SELECT MAX(reaped_at) FROM ("
+            "SELECT reaped_at FROM reaped_messages WHERE claimant_id = ? "
+            "UNION ALL SELECT reaped_at FROM reaped_messages WHERE message_id = ?)",
+            (identifier, identifier),
+        )
+        return row[0] if row else None
+
+    def reaped_thread_at(self, thread_id: str) -> str | None:
+        """When the last message of ``thread_id`` was reaped, or ``None``
+        when no record names the thread. Callers ask only after the
+        thread row was not found, so a record means the whole thread
+        was removed upstream."""
+        row = self._fetchone(
+            "SELECT MAX(reaped_at) FROM reaped_messages WHERE thread_id = ?", (thread_id,)
+        )
+        return row[0] if row else None
 
     def get_message_view(self, identifier: str) -> MessageView | AmbiguousMessageId | None:
         """One message's headers, its thread, and its full body, from one

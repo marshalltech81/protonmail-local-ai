@@ -188,6 +188,18 @@ def _build_schema(conn: sqlite3.Connection) -> None:
             indexer_seen_at    TEXT NOT NULL
         );
 
+        -- Identifier-only records of reaped messages (indexer schema).
+        CREATE TABLE reaped_messages (
+            claimant_id TEXT PRIMARY KEY,
+            message_id  TEXT NOT NULL,
+            thread_id   TEXT NOT NULL,
+            reaped_at   TEXT NOT NULL
+        );
+        CREATE INDEX idx_reaped_messages_message ON reaped_messages(message_id);
+        CREATE INDEX idx_reaped_messages_thread
+            ON reaped_messages(thread_id, reaped_at, claimant_id);
+        CREATE INDEX idx_reaped_messages_reaped_at ON reaped_messages(reaped_at);
+
         -- Deterministic entities (indexer ``_run_entity_schema_script``).
         CREATE TABLE entities (
             entity_id       TEXT PRIMARY KEY,
@@ -400,6 +412,26 @@ def claimant_of(message_id: str, variant: str = "") -> str:
     ``message_id``: the Message-ID plus the first eight hex digits of
     the file hash (``indexer/src/parser.py`` ``claimant_id``)."""
     return f"{message_id}#{source_sha256(message_id, variant)[:8]}"
+
+
+def insert_reaped(
+    conn: sqlite3.Connection,
+    *,
+    message_id: str,
+    thread_id: str,
+    reaped_at: str,
+    variant: str = "",
+) -> str:
+    """Record ``message_id`` as reaped the way the indexer's reconciler
+    does (identifiers and the reap time only); returns its claimant ID."""
+    claimant = claimant_of(message_id, variant)
+    conn.execute(
+        "INSERT INTO reaped_messages (claimant_id, message_id, thread_id, reaped_at) "
+        "VALUES (?, ?, ?, ?)",
+        (claimant, message_id, thread_id, reaped_at),
+    )
+    conn.commit()
+    return claimant
 
 
 def _insert_message_record(
