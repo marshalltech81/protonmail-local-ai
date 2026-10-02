@@ -374,8 +374,43 @@ def _derive_folder(path: Path, maildir_root: Path | None) -> str:
     return folder_dir.name
 
 
-def _is_attachment(part: email.message.Message) -> bool:
-    """True when ``part`` is presented as a file rather than as text."""
+def _part_filename(part: email.message.Message) -> str | None:
+    """``part.get_filename()``, falling back to the raw parameter text when
+    its charset cannot decode it.
+
+    ``get_filename()`` decodes an RFC 2231 ``filename*=`` (or ``name*=``)
+    value with ``errors="replace"``. It already falls back to the raw text
+    for a charset label it does not know (``LookupError``), but a codec
+    that refuses ``errors="replace"`` (``idna``, ``undefined``) raises
+    ``UnicodeError``, and a NUL in the label raises ``ValueError``
+    (``UnicodeError`` is one too) (#362). On those, take the same raw text
+    the standard library uses for an unknown label: the parameter that
+    ``get_filename()`` reads, unquoted, without decoding. The exception
+    is reported by type only; its text and the filename are mail content.
+    """
+    try:
+        return part.get_filename()
+    except ValueError as exc:
+        log.warning(
+            "attachment filename charset could not decode it (%s); using the raw parameter",
+            type(exc).__name__,
+        )
+    # The same lookup ``get_filename()`` does: Content-Disposition
+    # ``filename``, else Content-Type ``name``.
+    missing = object()
+    value = part.get_param("filename", missing, "content-disposition")
+    if value is missing:
+        value = part.get_param("name", missing, "content-type")
+    # Only an RFC 2231 ``(charset, language, text)`` value is decoded, so
+    # only that shape can have raised.
+    if not isinstance(value, tuple):
+        return None
+    return email.utils.unquote(value[2]).strip()
+
+
+def _is_attachment(part: email.message.Message, filename: str | None) -> bool:
+    """True when ``part`` (whose ``_part_filename`` is ``filename``) is
+    presented as a file rather than as text."""
     # Content-Disposition values are case-insensitive per RFC 2183.
     # The old ``"attachment" in cd`` check missed ``Attachment``,
     # ``ATTACHMENT``, and similar variants some clients emit,
@@ -393,7 +428,7 @@ def _is_attachment(part: email.message.Message) -> bool:
     # filename-less ``Content-Disposition: attachment`` case, while
     # the filename check covers dispositions that are absent,
     # non-standard, or ``inline`` with a file.
-    return bool(part.get_filename()) or "attachment" in cd
+    return bool(filename) or "attachment" in cd
 
 
 # Nesting levels inside an attached email that are still serialized for
@@ -719,7 +754,8 @@ def _extract_body_and_attachments(
     while stack:
         part, in_attachment, decode_depth, parent, no_body = stack.pop()
         ct = part.get_content_type()
-        is_attachment = _is_attachment(part)
+        filename = _part_filename(part)
+        is_attachment = _is_attachment(part, filename)
         decoded: email.message.Message | None = None
         if is_attachment:
             payload, decoded = _attachment_payload(
@@ -730,7 +766,7 @@ def _extract_body_and_attachments(
             )
             attachments.append(
                 Attachment(
-                    filename=part.get_filename() or "unnamed",
+                    filename=filename or "unnamed",
                     content_type=ct,
                     size=len(payload),
                     payload=payload,
