@@ -566,7 +566,8 @@ sync_loop_counts_failures_but_not_unopenable_far_boxes() {
 # a box name and @P@ a path under the Maildir; both carry a synthetic
 # marker with a space, a colon and quotes. The filters replace them with
 # <folder> and <path> and keep the rest of the message; a tab-separated
-# second column gives the expected line where it differs from that.
+# second column gives the expected line where it differs from that. The
+# last shapes carry text the IMAP server chose, which is withheld whole.
 
 readonly SHAPE_FOLDER="Folders/MarkerZq9: a 'b' (c)"
 
@@ -646,6 +647,17 @@ Maildir error: '@P@' is no valid mailbox
 Maildir warning: ignoring INBOX in @P@
 Maildir notice: removing stale file @P@
 Maildir error: @P@ is too big	Maildir error: <path>
+Error from IMAP server: @F@	Error from IMAP server: (server text withheld)
+Warning from IMAP server: @F@	Warning from IMAP server: (server text withheld)
+*** IMAP ALERT *** @F@	*** IMAP ALERT *** (server text withheld)
+IMAP error: unexpected BYE response: @F@	IMAP error: unexpected BYE response: (server text withheld)
+IMAP error: bogus greeting response @F@	IMAP error: bogus greeting response (server text withheld)
+IMAP error: unrecognized untagged response '@F@'	IMAP error: unrecognized untagged response (server text withheld)
+IMAP error: unexpected reply: @F@	IMAP error: unexpected reply: (server text withheld)
+IMAP error: unexpected tag @F@	IMAP error: unexpected tag (server text withheld)
+IMAP warning: unknown system flag \@F@	IMAP warning: unknown system flag (server text withheld)
+IMAP command 'UID FETCH 1:5 (UID FLAGS)' returned an error: NO @F@	IMAP command 'UID FETCH 1:5 (UID FLAGS)' returned an error: NO (server text withheld)
+IMAP command 'LOGIN <user> <pass>' returned an error: BAD @F@	IMAP command 'LOGIN <user> <pass>' returned an error: BAD (server text withheld)
 EOF
 )"
 readonly FOLDER_SHAPES
@@ -659,7 +671,6 @@ Maildir notice: no UIDVALIDITY, creating new.
 Warning: lost track of 3 pulled message(s)
 Notice: far side store does not support flag(s) 'T'; not propagating.
 Socket error: secure read from protonmail-bridge (172.18.0.2:1143): Connection reset by peer
-IMAP command 'UID FETCH 1:5 (UID FLAGS)' returned an error: NO busy
 Error: channel protonmail: far side box INBOX cannot be opened.
 Error: channel protonmail: near side box INBOX cannot be opened.
 Error: channel protonmail, far side box INBOX: UIDVALIDITY genuinely changed (at UID 42).
@@ -699,7 +710,7 @@ catalogue_shapes_are_redacted_by_class() {
         done
         count=$((count + 1))
     done <<<"$FOLDER_SHAPES"
-    ((count == 75)) || return 1
+    ((count == 86)) || return 1
 }
 
 # shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval

@@ -408,7 +408,9 @@ filter_mbsync_output() {
     # bookworm): each rule is an anchored prefix and suffix of fixed text
     # around the name, which is replaced whole by <folder> (a box name)
     # or <path> (a Maildir or sync state path, which holds the folder
-    # name). A sys_error path keeps its ": <strerror>" tail, which holds
+    # name). Text the IMAP server chose (an alert, an error reply), which
+    # may name a folder too, becomes "(server text withheld)". A
+    # sys_error path keeps its ": <strerror>" tail, which holds
     # no colon. A box named exactly INBOX, a fixed IMAP name, is kept. A
     # line matching no rule, or whose kept tail would still hold a path
     # under the Maildir, is cut at the first such path. Any other line is
@@ -465,6 +467,7 @@ filter_mbsync_output() {
             q = "\047"; F = "<folder>"; P = "<path>"
             ch = "^Error: channel protonmail"
             cut = q " (rest of line withheld)"
+            srv = "(server text withheld)"
             sys = ": [^:]*$"
             # Box names: src/sync.c, main.c, drv_imap.c, drv_maildir.c.
             rule(ch ": (far|near) side box ", " cannot be opened[.]$", F, 1)
@@ -517,6 +520,14 @@ filter_mbsync_output() {
             rule("^Error: (incomplete|invalid) sync state entry at ", ":[0-9]+$", P, 0)
             rule("^Error: (incomplete|malformed|unrecognized) journal entry at ", ":[0-9]+$", P, 0)
             rule("^Error: journal entry at ", ":[0-9]+ refers to non-existing sync state entry$", P, 0)
+            # Text the IMAP server (Bridge) chose, which may name a
+            # folder: src/drv_imap.c. Cut after the fixed part.
+            rule("^IMAP command " q "[^" q "]*" q " returned an error: (NO|BAD)", "", " " srv, 0)
+            rule("^(Error|Warning) from IMAP server: ", "", srv, 0)
+            rule("^[*][*][*] IMAP ALERT [*][*][*] ", "", srv, 0)
+            rule("^IMAP error: unexpected (BYE response:|reply:|tag) ", "", srv, 0)
+            rule("^IMAP error: (bogus greeting|unrecognized untagged) response ", "", srv, 0)
+            rule("^IMAP warning: unknown system flag ", "", srv, 0)
             dest = (stream == "err") ? "/dev/stderr" : "/dev/stdout"
         }
         stream == "err" && $0 ~ far_box && $0 != inbox { withheld++; next }

@@ -362,17 +362,19 @@ is logged with the name replaced and the rest of the message kept:
   `Maildir error: cannot write <path>: No space left on device`;
 - where isync does not end the message cleanly (an IMAP command that
   quotes a folder, or a message printed without a line break), the rest of
-  the line is cut: `IMAP command 'CREATE <folder>' (rest of line withheld)`.
+  the line is cut: `IMAP command 'CREATE <folder>' (rest of line withheld)`;
+- text Bridge itself returns, which may name a folder too, is withheld
+  after the fixed part, for example
+  `Error from IMAP server: (server text withheld)` or
+  `IMAP command 'UID FETCH 1:5 (UID FLAGS)' returned an error: NO (server text withheld)`.
 
 Redaction does not change how a sync is counted: these errors still fail
 it, and only the far-side `cannot be opened` line
-([above](#a-proton-folder-was-renamed-or-deleted)) is tolerated. Text
-Bridge itself returns (`Error from IMAP server: ...`,
-`*** IMAP ALERT *** ...`) is passed on as it is.
+([above](#a-proton-folder-was-renamed-or-deleted)) is tolerated.
 
-To see which folder a message is about, run one sync by hand. The output
-of `docker exec` goes to your terminal and is not recorded in the
-container's log:
+To see which folder a message is about, or Bridge's full reply, run one
+sync by hand. The output of `docker exec` goes to your terminal and is
+not recorded in the container's log:
 
 ```bash
 docker exec mbsync mbsync -c /tmp/mbsync/mbsyncrc -a
