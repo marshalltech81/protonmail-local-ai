@@ -27,7 +27,7 @@ from fastmcp.client.transports import StdioTransport
 from src.main import _build_app
 
 # Synthetic values; neither may appear in anything the adapter writes.
-_TOKEN = "synthetic-adapter-token-9b1e"
+_TOKEN = "synthetic-adapter-token-9b1e-xxxxxxxxxxxxxxxx"
 _MARKER = "synthetic-mail-marker-7f3a"
 _MCP_SERVER_DIR = Path(__file__).resolve().parents[1]
 
@@ -129,6 +129,14 @@ class TestReadToken:
         with pytest.raises(adapter.AdapterConfigError, match="characters outside") as excinfo:
             adapter.read_token(_token_file(tmp_path, token=bad))
         assert _MARKER not in str(excinfo.value)
+
+    def test_equals_sign_only_as_trailing_padding(self, tmp_path):
+        # #589: one b64token rule across mcp-server, validate-env.sh,
+        # mcp-auth-headers.sh and this adapter.
+        with pytest.raises(adapter.AdapterConfigError, match="characters outside"):
+            adapter.read_token(_token_file(tmp_path, token="synthetic=marker-xxxxxxxxxxxxxxxx"))
+        padded = "synthetic-token-xxxxxxxxxxxxxxxx=="
+        assert adapter.read_token(_token_file(tmp_path, token=padded)) == padded
 
 
 class TestServerUrl:
