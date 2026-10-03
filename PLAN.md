@@ -661,8 +661,8 @@ How the first batch was worked, and what to repeat:
   2026-09-30 to keep every claimant rather than pick a winner by
   arrival order (either order is spoofable). Built in #453: every
   per-message row, the chunker's `message_pk`, and attachment
-  occurrence and chunk IDs are keyed by a claimant ID (Message-ID plus `#` and eight hex digits of
-  the file's SHA-256), threads stay keyed by Message-ID, and
+  occurrence and chunk IDs are keyed by a claimant ID (Message-ID plus `#` and sixteen hex digits of
+  the file's SHA-256; eight until #640), threads stay keyed by Message-ID, and
   `get_message` accepts a claimant ID. `attachment_id` deliberately
   stays the payload content hash, so identical payloads share one
   `attachment_extractions` row. Conflicts are exposed, not
@@ -670,7 +670,7 @@ How the first batch was worked, and what to repeat:
   #539 reports conflict counts in `get_mailbox_status`. The earlier
   arrival-order attempt (branch `fix/indexer-message-id-conflicts`)
   was superseded and deleted 2026-10-02; its two unrelated commits
-  had already landed in #246. Open follow-up: #454 (the 32-bit suffix).
+  had already landed in #246. #454 (the 32-bit suffix) is fixed: 64 bits since #640.
 - ~~**#208 chunk overlap exceeds `max_tokens`**~~ — fixed with #550
   before go-live rather than in the Phase 2 reindex bundle (Resolved
   decisions 14): every rendered chunk now fits `max_tokens` (#594).
@@ -722,8 +722,9 @@ per-message text budget (drops text) or a tokenize-once chunker
 Next session, in order (no owner decision needed):
 
 1. P3s from review: #670 (budgeted FTS5 merge), #648 (periodic
-   calibration re-check). (#680 is fixed in #682; #662, #663, #668 and
-   #669 are in #683.)
+   calibration re-check), #685 (reject a `config/` other host accounts
+   can write). (#680 is fixed in #682; #662, #663, #668 and #669 in
+   #683.)
 2. Answer-evaluation follow-ups: #671, #672, #674–#679; then #655–#657.
 
 Needs the owner:
@@ -858,9 +859,9 @@ Next session, in order:
 3. **Then** let real questions drive the eval work (#283, #291) and
    the measurements waiting on real data (#287 budgets, #288, #289).
 
-Backlog filed from review (P3 or edge cases, not scheduled): #454,
-and from 2026-10-02 #524, #526 and #533 (all fixed: #654, #653,
-#667), plus the afternoon's
+Backlog filed from review (P3 or edge cases, not scheduled): #454
+(fixed: #640), and from 2026-10-02 #524, #526 and #533 (all fixed:
+#654, #653, #667), plus the afternoon's
 deferred findings (#562, #574, #575, #577–#582, #584, #588, #589; see
 Known limitations, Maintenance backlog and Open decisions). #442,
 #446, #447, #449, #450, #455, #456, #460, #461, #464, #465, #468,
@@ -1529,7 +1530,7 @@ do not ship persisted claims without them.
     - **#537 `get_evidence` thread count:** add `max_threads`. Done
       2026-10-02 (#559).
     - **#533 look-alike letters in delimiter tags:** defer (superseded
-      2026-10-02 night: fixed in #667; #680 remains).
+      2026-10-02 night: fixed in #667, and #680 in #682).
     - **#526 `authority.toml` on Linux Docker Engine:** stays
       documented; deferred until a Linux deployment (superseded
       2026-10-02 night: fixed in #653).
@@ -1659,7 +1660,9 @@ Bridge health states documented (#664, #274). Later the same night: the chunker'
 splitters no longer re-tokenize every prefix (#684, #673; a crafted
 12 MB marker-dense body went from ~14 min to 10–29 s) and delimiter
 tags with default-ignorable characters such as Hangul fillers are
-escaped (#682, #680). The first slice of the
+escaped (#682, #680); the Linux `authority.toml` checks fail closed
+on a shared UID 1002, a missing `getfacl` or `getent`, and honour
+GID 1002 entries (#683, #662, #663, #668, #669). The first slice of the
 answer-quality evaluation with a separately configured judge, on the
 synthetic corpus only (#658, refs #604). Closed as documented: #603,
 #626; superseded: #434.
