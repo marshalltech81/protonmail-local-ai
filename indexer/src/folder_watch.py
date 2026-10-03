@@ -9,8 +9,8 @@ watchdog ignores ``EACCES``, both when the watch is scheduled and when
 the folder's create event arrives, and the later ``chmod`` adds no watch.
 
 ``FolderWatchRefresher`` records which directories were readable when
-the watch was last scheduled, and their inodes. After each completed
-sync, ``refresh`` walks the folder directories again and, when any
+the watch was last scheduled, and their inodes. After each sync
+attempt's permission repair (#524), ``refresh`` walks the folder directories again and, when any
 directory is readable now that was not then, or was replaced by a new
 directory at the same path (deleting a directory drops its watch),
 re-schedules the watch, which walks the tree again and adds every watch

@@ -285,11 +285,12 @@ sync_setup() {
     MBSYNC_ERROR_COUNTS_FILE="$WORK/mbsync-error-counts-$1"
     MBSYNC_NOTICES_DONE_FILE="$WORK/mbsync-notices-done-$1"
     MBSYNC_ERROR_COUNTS_WAIT_TENTHS=50
+    PERMS_REPAIRED_FILE="$MAILDIR_PATH/.mbsync-perms-repaired"
     mkdir -p "$MAILDIR_PATH"
     : >"$FIND_CALLS"
-    load run_child relax_new_maildir_perms mark_sync_activity filter_mbsync_output \
-        report_mbsync_errors report_mbsync_notices wait_for_mbsync_filter \
-        read_mbsync_error_counts run_sync
+    load run_child relax_new_maildir_perms signal_perms_repaired mark_sync_activity \
+        filter_mbsync_output report_mbsync_errors report_mbsync_notices \
+        wait_for_mbsync_filter read_mbsync_error_counts run_sync
 }
 
 # run_sync is called as `run_sync || rc=$?`, a condition like the
@@ -345,6 +346,44 @@ repair_still_runs_after_a_failed_mbsync() {
     run_sync || rc=$?
     ((rc == 3)) || return 1
     [[ "$(wc -l <"$FIND_CALLS")" -eq 2 ]] || return 1
+}
+
+# --- permission-repair marker (#524) -------------------------------------------
+#
+# The indexer re-watches folders the repair opened when it sees this
+# marker renamed into place. A failed attempt writes no success stamp, so
+# the marker must follow every repair pass, whatever the outcome, and
+# only once the repair has finished.
+
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+repair_marker_follows_every_repair() {
+    local mbsync_status="$1" find_status="$2" expected="$3" rc=0
+    sync_setup "marker-${mbsync_status}-${find_status}"
+    mbsync() { return "$mbsync_status"; }
+    find() {
+        # The marker is not there yet while the repair runs.
+        [[ ! -e "$PERMS_REPAIRED_FILE" ]] || printf 'early\n' >>"$FIND_CALLS"
+        printf 'find\n' >>"$FIND_CALLS"
+        return "$find_status"
+    }
+    run_sync >/dev/null 2>&1 || rc=$?
+    ((rc == expected)) || return 1
+    ! grep -q early "$FIND_CALLS" || return 1
+    [[ -f "$PERMS_REPAIRED_FILE" ]] || return 1
+    # Renamed into place: no temporary file is left behind.
+    [[ "$(command find "$MAILDIR_PATH" -type f | wc -l)" -eq 1 ]] || return 1
+}
+
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+failed_repair_marker_is_warned_and_keeps_the_result() {
+    local rc=0
+    sync_setup marker-mv-fail
+    mbsync() { mbsync_ok; }
+    find() { :; }
+    mv() { return 1; }
+    run_sync >"$WORK/marker-log" 2>&1 || rc=$?
+    ((rc == 0)) || return 1
+    grep -q 'WARNING: could not signal the indexer' "$WORK/marker-log" || return 1
 }
 
 # --- far-side boxes that cannot be opened (#276) ------------------------------
@@ -1697,6 +1736,12 @@ check "activity is marked before mbsync, before the repair and after the sync" \
     activity_is_marked_around_a_successful_sync
 check "activity is marked after a failed mbsync" activity_is_marked_after_a_failed_mbsync
 check "activity is marked after a failed repair" activity_is_marked_after_a_failed_repair
+check "the repair marker follows a successful sync" \
+    repair_marker_follows_every_repair 0 0 0
+check "the repair marker follows a failed mbsync" repair_marker_follows_every_repair 3 0 3
+check "the repair marker follows a failed repair" repair_marker_follows_every_repair 0 1 1
+check "a failed repair marker is warned and keeps the sync's result" \
+    failed_repair_marker_is_warned_and_keeps_the_result
 check "a completed sync still writes the success stamp" \
     success_stamp_is_written_by_a_completed_sync
 check "an empty Maildir passes the layout check" an_empty_maildir_is_accepted

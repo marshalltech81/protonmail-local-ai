@@ -27,6 +27,12 @@ TRASHED_FLAG = "T"
 SYNC_STAMP_NAME = ".mbsync-last-sync.json"
 _SYNC_STAMP_TMP_RE = re.compile(r"^\.mbsync-last-sync\.([0-9T:Z-]+)\.(\d+)\.tmp$")
 
+# Renamed into place at the Maildir root by mbsync/entrypoint.sh
+# (``signal_perms_repaired``) after every permission repair, a failed
+# sync's included, so the indexer re-watches the folders it opened
+# (#524). It marks no successful sync and carries no content.
+PERMS_REPAIRED_NAME = ".mbsync-perms-repaired"
+
 
 @dataclass(frozen=True)
 class SyncStamp:

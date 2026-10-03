@@ -51,8 +51,11 @@ mbsync container
     (a heartbeat touched around every attempt is fresh, or an mbsync or
     its permission repair walk is running), so the indexer and MCP
     server start during a long first sync; freshness comes from the
-    last-sync stamp. Folders that sync creates are watched once the
-    indexer handles that sync's stamp (#516)
+    last-sync stamp
+  - After every permission repair, whatever the sync's outcome,
+    renames an empty `.mbsync-perms-repaired` marker into place at the
+    Maildir root; folders a sync attempt creates are watched once the
+    indexer handles that marker or the stamp (#516, #524)
         │
         │  Maildir files (shared volume, read-only for indexer)
         ▼
@@ -1356,11 +1359,15 @@ eventually rather than omitted until the next container restart.
 
 mbsync creates each folder directory 0700 and makes it readable to
 the indexer's UID only in its post-sync permission repair, which runs
-before the last-sync stamp is written. inotify cannot watch a
-directory the indexer cannot read, and watchdog skips it silently, so
-a folder created during a sync is unwatched when it becomes readable
-(#516). The stamp's rename signals the main loop, which walks the
-folder directories (not `cur`/`new`/`tmp`, so the walk is linear in
+after every sync attempt, failed ones included, and before the
+last-sync stamp is written. inotify cannot watch a directory the
+indexer cannot read, and watchdog skips it silently, so a folder
+created during a sync is unwatched when it becomes readable (#516).
+After each repair mbsync renames an empty `.mbsync-perms-repaired`
+marker into place at the Maildir root, so a failed attempt, which
+writes no stamp, still signals (#524); the marker acknowledges no
+sync. The marker's rename, or the stamp's, signals the main loop,
+which walks the folder directories (not `cur`/`new`/`tmp`, so the walk is linear in
 folders) and, when any directory is readable that was not when the
 watch was last scheduled, or sits at a known path with a new inode
 (deleted and recreated, which drops its watch), or when the watch has
@@ -1369,12 +1376,11 @@ its inode number), unschedules and re-schedules the recursive watch (`FolderWatc
 in the gap between the old and new watch are covered by the rename
 sweep (`sweep_paths`) and a Maildir walk, which also queues the mail
 already in the newly watched folders; if either step fails, both run
-again on the next sync stamp or periodic tick until they succeed. A
-sync that opens no new directory costs only the folder walk. The
-same check also runs with
-the periodic rescan, for a failed sync attempt (whose permission
-repair opens new folders but writes no stamp) and to retry a
-re-schedule that failed.
+again on the next marker, sync stamp or periodic tick until they
+succeed. Each signal re-schedules the watch at most once, and a sync
+attempt that opens no new directory costs only the folder walk. The
+same check also runs with the periodic rescan, for a marker that
+could not be written and to retry a re-schedule that failed.
 
 When deletion reconciliation is enabled, every enqueue path — the
 startup scan, the periodic rescan, the zero-vector recovery sweep, and

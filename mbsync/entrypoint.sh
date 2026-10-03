@@ -49,6 +49,11 @@ readonly MAILDIR_PATH="/maildir"
 # It sits at the Maildir root, outside every cur/new folder, so the
 # indexer never treats it as a message.
 readonly SYNC_STAMP_FILE="${MAILDIR_PATH}/.mbsync-last-sync.json"
+# Renamed into place after every permission repair, whatever the sync's
+# outcome (signal_perms_repaired): the indexer then re-watches folders the
+# repair opened (#524). Read by indexer/src/maildir.py
+# ``PERMS_REPAIRED_NAME``; not a sign of a successful sync.
+readonly PERMS_REPAIRED_FILE="${MAILDIR_PATH}/.mbsync-perms-repaired"
 
 # Owner-only umask for the runtime tmp dir (config + cert material).
 # mbsync itself ignores umask for Maildir writes — it explicitly passes
@@ -404,6 +409,15 @@ relax_new_maildir_perms() {
     find "$MAILDIR_PATH" -type f \! -perm -044 -exec chmod go+r {} + || return 1
 }
 
+signal_perms_repaired() {
+    # Tells the indexer a repair pass has finished, so it re-watches the
+    # folders the pass opened (#524): a failed sync writes no success
+    # stamp to do it. An empty file renamed into place, so the indexer
+    # sees one rename event.
+    local tmp="${PERMS_REPAIRED_FILE}.tmp"
+    : >"$tmp" && mv -f "$tmp" "$PERMS_REPAIRED_FILE"
+}
+
 # PID of the child run_child is waiting on, if any.
 child_pid=""
 
@@ -664,6 +678,12 @@ run_sync() {
     if ! relax_new_maildir_perms; then
         echo ">>> ERROR: could not make new Maildir entries readable to the indexer." >&2
         rc=1
+    fi
+    # After every repair pass, even a failed one, which may still have
+    # opened some folders. Missing it only delays the indexer's re-watch
+    # to the next success stamp or its recovery sweep, so the result stands.
+    if ! signal_perms_repaired; then
+        echo ">>> WARNING: could not signal the indexer to re-watch Maildir folders; it does so at the next successful sync or its recovery sweep." >&2
     fi
     mark_sync_activity
     return "$rc"
