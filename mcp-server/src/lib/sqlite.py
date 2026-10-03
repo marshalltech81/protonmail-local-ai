@@ -629,6 +629,11 @@ class MessageRecord:
     source_file: SourceFile | None = None
     # Delivery time from the top ``Received:`` header; None when unknown.
     occurred_at: str | None = None
+    # Maildir S / F / R flags of the indexed file, as mbsync mirrors
+    # Proton's read, starred and replied state.
+    seen: bool = False
+    flagged: bool = False
+    replied: bool = False
 
     @property
     def effective_at(self) -> str:
@@ -639,7 +644,8 @@ class MessageRecord:
 _MESSAGE_COLUMNS = (
     "m.message_id, m.claimant_id, m.thread_id, m.subject, m.sent_at, m.occurred_at, "
     "m.folder, "
-    "m.has_attachments, m.in_reply_to, m.references_json, " + _SOURCE_COLUMNS
+    "m.has_attachments, m.in_reply_to, m.references_json, m.seen, m.flagged, m.replied, "
+    + _SOURCE_COLUMNS
 )
 
 
@@ -656,6 +662,9 @@ def _row_to_message_record(r) -> MessageRecord:
         in_reply_to=r["in_reply_to"],
         references=json.loads(r["references_json"]),
         source_file=_row_to_source(r),
+        seen=bool(r["seen"]),
+        flagged=bool(r["flagged"]),
+        replied=bool(r["replied"]),
     )
 
 
@@ -1163,6 +1172,16 @@ def _contact_entities(conn: sqlite3.Connection, addresses: list[str]) -> dict[st
         (json.dumps(addresses),),
     ).fetchall()
     return {row["address"]: row for row in rows}
+
+
+# ``list_threads`` filters: the extra condition on the thread's messages
+# in the listed folder. Fixed SQL only; the caller's value picks a key.
+LIST_THREAD_FILTERS = {
+    "all": "",
+    "unread": " AND seen = 0",
+    "flagged": " AND flagged = 1",
+}
+FILTER_TYPE_ERROR = "filter_type must be one of: " + ", ".join(LIST_THREAD_FILTERS)
 
 
 def _append_folder_membership_sql(
@@ -3132,16 +3151,18 @@ class Database:
         started elsewhere would never list (#308). The returned
         ``folder`` stays the thread's representative folder, set when
         the thread was first indexed.
+
+        ``filter_type`` (``LIST_THREAD_FILTERS``) narrows that to threads
+        with an unread (``unread``) or flagged (``flagged``) message in
+        ``folder``.
         """
-        if filter_type != "all":
-            raise ValueError("filter_type must be 'all'; unread/flagged state is not indexed")
+        condition = LIST_THREAD_FILTERS.get(filter_type)
+        if condition is None:
+            raise ValueError(FILTER_TYPE_ERROR)
         rows = self._fetchall(
-            """
-            SELECT * FROM threads
-            WHERE thread_id IN (SELECT thread_id FROM messages WHERE folder = ?)
-            ORDER BY date_last DESC
-            LIMIT ? OFFSET ?
-        """,
+            "SELECT * FROM threads WHERE thread_id IN "  # nosec B608
+            f"(SELECT thread_id FROM messages WHERE folder = ?{condition}) "
+            "ORDER BY date_last DESC LIMIT ? OFFSET ?",
             (folder, limit, offset),
         )
         return [self._row_to_result(r) for r in rows]
@@ -3350,6 +3371,8 @@ class Database:
         date_to: str | None = None,
         has_attachments: bool | None = None,
         authority_class: str | None = None,
+        seen: bool | None = None,
+        flagged: bool | None = None,
         limit: int = 25,
         cursor: str | None = None,
     ) -> MessagePage:
@@ -3374,6 +3397,8 @@ class Database:
           time (``occurred_at``, else ``sent_at``);
           date-only values cover the whole UTC day.
         - ``has_attachments``: the message's own attachment flag.
+        - ``seen`` / ``flagged``: the message's read and flagged state
+          (its Maildir ``S`` / ``F`` flags).
         - ``authority_class``: the class the indexer gave the message's
           From sender (``AUTHORITY_CLASSES``); a message in
           ``AUTHORITY_EXCLUDED_FOLDERS`` never matches.
@@ -3436,6 +3461,10 @@ class Database:
         if has_attachments is not None:
             where.append("m.has_attachments = ?")
             params.append(1 if has_attachments else 0)
+        for column, state in (("seen", seen), ("flagged", flagged)):
+            if state is not None:
+                where.append(f"m.{column} = ?")
+                params.append(1 if state else 0)
         if authority_class:
             where.append(f"m.claimant_id IN ({_SENDER_CLASS_MESSAGES})")
             params.extend([authority_class, *AUTHORITY_EXCLUDED_FOLDERS])
@@ -3445,7 +3474,7 @@ class Database:
         digest = hashlib.sha256(
             json.dumps(
                 [sender, recipient, participant, subject, text, folder]
-                + [date_from_iso, date_to_iso, has_attachments, authority_class]
+                + [date_from_iso, date_to_iso, has_attachments, authority_class, seen, flagged]
             ).encode()
         ).hexdigest()[:16]
         page_where = list(where)

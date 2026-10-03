@@ -272,6 +272,20 @@ class TestSweepPaths:
         assert db.find_message_entry_by_filepath(str(replied)) is not None
         assert db.find_message_entry_by_filepath(str(path)) is None
 
+    def test_heals_read_state_changed_while_offline(self, db, threader, maildir):
+        """A flag change mbsync made while the indexer was down reaches
+        the message's state through the startup sweep."""
+        path = maildir / "1700000000.M9.host:2,"
+        _write_eml(path, "sp-state@example.com")
+        _index(path, db, threader)
+        starred = maildir / "1700000000.M9.host:2,FS"
+        path.rename(starred)
+
+        sweep_paths(db)
+
+        row = db._conn.execute("SELECT filepath, seen, flagged, replied FROM messages").fetchone()
+        assert tuple(row) == (str(starred), 1, 1, 0)
+
     def test_lists_each_folder_once_however_many_files_were_renamed(
         self, db, threader, maildir, monkeypatch
     ):

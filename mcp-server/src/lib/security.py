@@ -117,19 +117,21 @@ def _is_iso_date(v: Any) -> bool:
 # validation, so a name alone proves nothing: ``style`` or
 # ``date_from`` can carry arbitrary text. Enum sets mirror what each tool
 # accepts (search modes: ``tools/search._VALID_SEARCH_MODES``; summary
-# styles: ``summarize_thread``; ``filter_type``: ``Database.list_threads``,
-# which accepts only ``all``). Everything else a tool receives — query
+# styles: ``summarize_thread``; ``filter_type``:
+# ``lib/sqlite.LIST_THREAD_FILTERS``). Everything else a tool receives — query
 # / question text, addresses, names, folders, message and thread IDs
 # (which embed sender domains), MIME types, extraction schemas — can
 # quote exactly what the user wants private and is never logged.
 _LOGGABLE_TOOL_PARAMS: dict[str, Callable[[Any], bool]] = {
     "mode": _one_of("hybrid", "semantic", "keyword"),
     "style": _one_of("brief", "detailed", "action-items", "timeline"),
-    "filter_type": _one_of("all"),
+    "filter_type": _one_of("all", "unread", "flagged"),
     "limit": _is_int,
     "max_threads": _is_int,
     "offset": _is_int,
     "has_attachments": _is_bool,
+    "seen": _is_bool,
+    "flagged": _is_bool,
     "include_scores": _is_bool,
     "extracted_only": _is_bool,
     "include_attachments_metadata": _is_bool,

@@ -571,7 +571,7 @@ time, #541), `sent_at` (`Date:` header; a missing or unparseable header is
 dated at first index and that date is kept when the message is
 reprocessed or its thread rebuilt), `occurred_at` (the top `Received:`
 header's date, or NULL; see Message time), folder, `in_reply_to` /
-references, attachment flag, and its source: `filepath` (the Maildir
+references, attachment flag, read state, and its source: `filepath` (the Maildir
 locator, kept current across flag renames; when a rename crosses
 folders the new `folder` is written in the same transaction, so a failed
 update rolls back whole and the Maildir walk re-indexes the file) plus
@@ -582,6 +582,22 @@ result (see `docs/mcp-tools.md`). `message_participants`
 normalizes From / To / Cc into one row per (message, role, address),
 with `address` canonical and lowercased and the display name kept as
 written; malformed entries with no recoverable address are skipped.
+
+**Read state.** `seen`, `flagged` and `replied` are the `S`, `F` and
+`R` flags in `filepath`'s `:2,<flags>` suffix (`maildir.message_state`,
+built on the same `parse_flags` as the `T` trash check; other letters
+are ignored, and a file without the suffix is unread). mbsync is
+pull-only, but it mirrors a read, star or reply made in Proton by
+renaming the file (`:2,` → `:2,S`, and `new/` → `cur/`), so the flags
+are written wherever `filepath` is: by `upsert_thread` from the parsed
+file's path, and by `update_filepath` in the same `UPDATE` as the new
+locator. Every rename path — the watchdog's `on_moved`, the
+reconciler's `handle_moved` and sweep, and the startup `sweep_paths`
+that heals renames made while the indexer was down — goes through
+`update_filepath`, so a state change is one row update with no reparse
+or re-embed, and the state cannot disagree with the stored path.
+Thread-level questions (`list_threads(filter_type="unread")`) are
+answered from these rows at query time; nothing per-thread is stored.
 An index on `(address, role)` makes "every message from / to X" an
 exact indexed lookup — the basis for exhaustive enumeration, as
 opposed to relevance search. The MCP server's `query_messages`

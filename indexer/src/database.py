@@ -27,6 +27,7 @@ from .entities import (
     person_entity_id,
 )
 from .extractors import OCR_DISABLED_ERROR, SCANNED_PDF_OCR_DISABLED_ERROR
+from .maildir import message_state
 from .threader import (
     FTS_SUBJECT_SCAN_CHARS,
     FTS_SUBJECT_SCAN_ROWS,
@@ -572,6 +573,11 @@ class Database:
                 size_bytes      INTEGER,
                 content_hash    TEXT,
                 indexed_at      TEXT NOT NULL,
+                -- Maildir S / F / R flags of ``filepath`` (maildir.message_state),
+                -- written with it on every insert and rename.
+                seen            INTEGER NOT NULL DEFAULT 0,
+                flagged         INTEGER NOT NULL DEFAULT 0,
+                replied         INTEGER NOT NULL DEFAULT 0,
                 FOREIGN KEY (claimant_id) REFERENCES message_thread_map(claimant_id)
                     ON DELETE CASCADE
             );
@@ -2171,13 +2177,14 @@ class Database:
         UPDATE`` (never ``REPLACE``) keeps the row in place, so the
         participant cascade only fires when the message itself is removed.
         """
+        state = message_state(msg.filepath)
         cur.execute(
             """
             INSERT INTO messages
                 (claimant_id, message_id, thread_id, filepath, folder, subject, sent_at,
                  occurred_at, in_reply_to, references_json, has_attachments, size_bytes,
-                 content_hash, indexed_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 content_hash, indexed_at, seen, flagged, replied)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(claimant_id) DO UPDATE SET
                 thread_id       = excluded.thread_id,
                 filepath        = excluded.filepath,
@@ -2190,7 +2197,10 @@ class Database:
                 has_attachments = excluded.has_attachments,
                 size_bytes      = excluded.size_bytes,
                 content_hash    = excluded.content_hash,
-                indexed_at      = excluded.indexed_at
+                indexed_at      = excluded.indexed_at,
+                seen            = excluded.seen,
+                flagged         = excluded.flagged,
+                replied         = excluded.replied
             """,
             (
                 msg.claimant_id,
@@ -2207,6 +2217,9 @@ class Database:
                 msg.size,
                 msg.content_hash,
                 datetime.now(UTC).isoformat(),
+                int(state.seen),
+                int(state.flagged),
+                int(state.replied),
             ),
         )
         cur.execute("DELETE FROM message_participants WHERE claimant_id = ?", (msg.claimant_id,))
@@ -2340,9 +2353,13 @@ class Database:
                 "UPDATE message_thread_map SET filepath = ? WHERE filepath = ?",
                 (new_path, old_path),
             )
+            # mbsync carries Proton's read / flagged / replied changes as
+            # renames, so the state moves with the path, never re-parsed.
+            state = message_state(new_path)
             cur.execute(
-                "UPDATE messages SET filepath = ? WHERE filepath = ?",
-                (new_path, old_path),
+                "UPDATE messages SET filepath = ?, seen = ?, flagged = ?, replied = ? "
+                "WHERE filepath = ?",
+                (new_path, int(state.seen), int(state.flagged), int(state.replied), old_path),
             )
             if folder is not None:
                 cur.execute(
