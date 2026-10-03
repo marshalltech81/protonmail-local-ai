@@ -404,6 +404,37 @@ class TestSegmentationWorkBound:
         assert len(segments) <= _MAX_FALLBACK_SEGMENTS + 2
         assert len(held) <= _MAX_FALLBACK_SEGMENTS + 2
 
+    def test_merged_runs_are_held_in_one_buffer_per_kind(self, monkeypatch):
+        # Review round 2: past the cap, text is written into one buffer
+        # per kind rather than kept as one string per run, so the memory
+        # held stays close to what splitting the lines costs anyway.
+        import io
+        import tracemalloc
+
+        import src.quoting as quoting
+
+        buffers = 0
+
+        class CountingStringIO(io.StringIO):
+            def __init__(self, *args, **kwargs):
+                nonlocal buffers
+                buffers += 1
+                super().__init__(*args, **kwargs)
+
+        body = "".join(f"-- \ns{i}\n> q{i}\n" for i in range(100_000))
+        tracemalloc.start()
+        body.splitlines(keepends=True)
+        baseline = tracemalloc.get_traced_memory()[1]
+        tracemalloc.stop()
+        monkeypatch.setattr(quoting.io, "StringIO", CountingStringIO)
+        tracemalloc.start()
+        segments = segment_for_embedding(body)
+        peak = tracemalloc.get_traced_memory()[1]
+        tracemalloc.stop()
+        assert buffers <= _MAX_FALLBACK_SEGMENTS + 2
+        assert peak <= 1.3 * baseline
+        assert sorted("".join(s.text for s in segments).split()) == sorted(body.split())
+
     def test_each_line_is_checked_at_most_twice(self, monkeypatch):
         # A body with no body text is scanned at most twice: the body pass,
         # which stops at the first marker, then the fallback classification.

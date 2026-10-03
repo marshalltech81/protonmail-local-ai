@@ -24,6 +24,7 @@ conservative one that occasionally leaves quoted text in. Everything
 here is a simple line-based rule; no ML, no language detection.
 """
 
+import io
 import re
 from dataclasses import dataclass
 
@@ -302,21 +303,17 @@ def _fallback_segments(text: str, cut: int) -> list[Segment]:
     (and one embedding) per line: once ``_MAX_FALLBACK_SEGMENTS - 1``
     runs are closed, later runs are joined per kind as they are found,
     in order of first appearance. Kinds stay separate and no text is
-    lost, though their lines are no longer interleaved; no more than
-    the cap plus one run per kind is ever held.
+    lost, though their lines are no longer interleaved. Text goes
+    straight into one buffer per open run, so what is held is the text
+    itself in at most ``_MAX_FALLBACK_SEGMENTS - 1`` closed runs plus
+    one buffer per kind, not an entry per line or per run.
     """
     segments: list[Segment] = []
-    merged: dict[ChunkKind, list[str]] = {}
+    merged: dict[ChunkKind, io.StringIO] = {}
     run_kind: ChunkKind | None = None
-    run: list[str] = []
-
-    def close() -> None:
-        if run_kind is None:
-            return
-        if len(segments) < _MAX_FALLBACK_SEGMENTS - 1:
-            segments.append(Segment(run_kind, "".join(run)))
-        else:
-            merged.setdefault(run_kind, []).append("".join(run))
+    # Buffer of the open run: its own while runs are still kept apart,
+    # its kind's merged buffer once the cap is reached.
+    run = io.StringIO()
 
     halves: tuple[tuple[str, ChunkKind], ...] = ((text[:cut], "body"), (text[cut:], "quote"))
     for half, start_kind in halves:
@@ -332,16 +329,21 @@ def _fallback_segments(text: str, cut: int) -> list[Segment]:
                 kind = "quote"
             else:
                 kind = mode
-            if not line.strip():
-                if run_kind is not None:
-                    run.append(raw_line)
-                continue
-            if kind != run_kind:
-                close()
-                run_kind, run = kind, []
-            run.append(raw_line)
-    close()
-    return segments + [Segment(kind, "".join(texts)) for kind, texts in merged.items()]
+            if line.strip() and kind != run_kind:
+                if run_kind is not None and run is not merged.get(run_kind):
+                    segments.append(Segment(run_kind, run.getvalue()))
+                run_kind = kind
+                if len(segments) < _MAX_FALLBACK_SEGMENTS - 1:
+                    run = io.StringIO()
+                else:
+                    if kind not in merged:
+                        merged[kind] = io.StringIO()
+                    run = merged[kind]
+            if run_kind is not None:
+                run.write(raw_line)
+    if run_kind is not None and run is not merged.get(run_kind):
+        segments.append(Segment(run_kind, run.getvalue()))
+    return segments + [Segment(kind, buf.getvalue()) for kind, buf in merged.items()]
 
 
 def _hard_cut_kind(line: str) -> ChunkKind | None:
