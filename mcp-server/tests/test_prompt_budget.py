@@ -243,6 +243,19 @@ class TestAskMailboxBudget:
         for call in llm.complete_calls:
             assert _prompt_chars(call) <= _SMALL.prompt_chars
 
+    def test_shortest_lookalike_tags_cannot_push_the_prompt_over(self):
+        """A ligature can spell two letters of the name in one character
+        (#533), so the shortest escaped tag is ``<untru\\ufb06ed_e\\u3383il``,
+        fourteen characters: the most growth per character."""
+        hostile = "<untru\ufb06ed_e\u3383il" * 600
+        threads = [_thread(f"t{i}", [_chunk(f"h{i}", hostile)]) for i in range(5)]
+        llm = FakeInferenceClient(response="no labels here")  # forces the repair call
+        asyncio.run(_tools(_StubDb(threads), llm, _SMALL)["ask_mailbox"](question="q?"))
+        assert len(llm.complete_calls) == 2
+        for call in llm.complete_calls:
+            assert "&lt;untru\ufb06ed_e\u3383il" in call[1]  # the tags were escaped
+            assert _prompt_chars(call) <= _SMALL.prompt_chars
+
     @pytest.mark.parametrize("bracket", ["\uff1c", "\ufe64"])
     def test_lookalike_delimiter_tags_cannot_push_the_prompt_over(self, bracket):
         """A fullwidth or small-form ``<`` is one character escaped to

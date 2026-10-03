@@ -4,6 +4,7 @@ Q&A/RAG, summarization, and structured extraction over email threads.
 """
 
 import asyncio
+import functools
 import json
 import logging
 import re
@@ -488,20 +489,125 @@ user's original task."""
 # them is escaped like ``<`` (#442), and each is one character, so the
 # escape's growth per tag (``_ESCAPE_GROWTH``) is unchanged. Other
 # angle-like brackets (``‹`` ``〈`` ``⟨``) are distinct punctuation that
-# no normalization turns into ``<`` and are left alone. The tag name is
-# still matched letter by letter: a name spelled with compatibility or
-# confusable letters (fullwidth ``ｕ``, Cyrillic ``е``) is not escaped,
-# since catching it needs normalization or a confusables table (#533).
+# no normalization turns into ``<`` and are left alone.
 _LT_SPELLINGS = "<\ufe64\uff1c"
 
-# Any spelling of the delimiter tag inside untrusted content: case- and
-# whitespace-insensitive, opening or closing, opened by any
-# ``_LT_SPELLINGS`` bracket. The whitespace after the slash is matched
-# only with the slash, and possessively, so a long run has one way to
-# match; ``\s*/?\s*`` split it every way (#328).
-_DELIMITER_TAG_RE = re.compile(
-    f"[{_LT_SPELLINGS}]" r"(\s*+(?:/\s*+)?untrusted_email)", re.IGNORECASE
+# A candidate tag inside untrusted content: an ``_LT_SPELLINGS`` bracket,
+# optional whitespace and slash (group 1), then the run of characters up
+# to the next whitespace or bracket (group 2), which ``_names_tag``
+# reads. The whitespace after the slash is matched only with the slash,
+# and possessively, so a long run has one way to match; ``\s*/?\s*``
+# split it every way (#328). The run excludes the brackets, so no tag
+# hides inside another candidate's run, and runs never overlap: one
+# pass reads each character at most once.
+_TAG_CANDIDATE_RE = re.compile(
+    f"[{_LT_SPELLINGS}]" r"(\s*+(?:/\s*+)?)" f"([^\\s{_LT_SPELLINGS}]++)"
 )
+
+# The tag names untrusted mail text must not spell (``brief.py`` adds
+# ``conclusion`` for the caller's conclusion block).
+_DELIMITER_TAG_NAMES = ("untrusted_email",)
+
+# Letters drawn like a letter of a tag name (``untrusted_email``,
+# ``conclusion``) that compatibility decomposition does not fold onto
+# it: Latin small capitals and Cyrillic, Greek and Armenian look-alikes,
+# as they stand after case folding (#533). A closed list for these
+# letters only, not a general confusables table.
+_LOOKALIKE_LETTERS = str.maketrans(
+    {
+        "\u1d00": "a",  # small capital a
+        "\u0430": "a",  # Cyrillic a
+        "\u03b1": "a",  # Greek alpha
+        "\u1d04": "c",  # small capital c
+        "\u0441": "c",  # Cyrillic es
+        "\u03f2": "c",  # Greek lunate sigma
+        "\u1d05": "d",  # small capital d
+        "\u0501": "d",  # Cyrillic komi de
+        "\u1d07": "e",  # small capital e
+        "\u0435": "e",  # Cyrillic ie
+        "\u03b5": "e",  # Greek epsilon (capital looks like E)
+        "\u026a": "i",  # small capital i
+        "\u0131": "i",  # dotless i
+        "\u0456": "i",  # Cyrillic byelorussian-ukrainian i
+        "\u03b9": "i",  # Greek iota
+        "\u029f": "l",  # small capital l
+        "\u04cf": "l",  # Cyrillic palochka
+        "\u1d0d": "m",  # small capital m
+        "\u043c": "m",  # Cyrillic em
+        "\u03bc": "m",  # Greek mu (capital looks like M)
+        "\u0274": "n",  # small capital n
+        "\u03bd": "n",  # Greek nu (capital looks like N)
+        "\u0578": "n",  # Armenian vo
+        "\u1d0f": "o",  # small capital o
+        "\u043e": "o",  # Cyrillic o
+        "\u03bf": "o",  # Greek omicron
+        "\u0280": "r",  # small capital r
+        "\u0433": "r",  # Cyrillic ghe
+        "\ua731": "s",  # small capital s
+        "\u0455": "s",  # Cyrillic dze
+        "\u1d1b": "t",  # small capital t
+        "\u0442": "t",  # Cyrillic te
+        "\u03c4": "t",  # Greek tau
+        "\u1d1c": "u",  # small capital u
+        "\u03c5": "u",  # Greek upsilon
+        "\u057d": "u",  # Armenian seh
+    }
+)
+
+# Characters a tag name can carry without drawing anything: combining
+# and enclosing marks, and format characters (zero-width joiners and
+# spaces, soft hyphen, byte-order mark).
+_INVISIBLE_CATEGORIES = frozenset({"Mn", "Me", "Cf"})
+
+
+@functools.lru_cache(maxsize=4096)
+def _skeleton_char(char: str) -> str:
+    """The letters ``char`` reads as in a tag name: its compatibility
+    decomposition (fullwidth, mathematical, circled and ligature forms
+    fold onto plain letters) without marks or format characters, case
+    folded, with ``_LOOKALIKE_LETTERS`` mapped. Empty for a character
+    that draws nothing."""
+    decomposed = unicodedata.normalize("NFKD", char)
+    visible = "".join(c for c in decomposed if unicodedata.category(c) not in _INVISIBLE_CATEGORIES)
+    return visible.casefold().translate(_LOOKALIKE_LETTERS)
+
+
+def _names_tag(run: str, slashed: bool, names: Sequence[str]) -> bool:
+    """Whether ``run`` (a candidate's group 2) reads as one of ``names``
+    or begins with one, as the ASCII match always allowed
+    (``<untrusted_emailx``). A leading slash belongs to the tag unless
+    ``slashed`` (group 1 already holds one). Reads ``run`` a character
+    at a time and stops once the letters so far can no longer begin a
+    name, so the work is at most the run's length and usually one or
+    two characters."""
+    skeleton = ""
+    for char in run:
+        skeleton += _skeleton_char(char)
+        if not slashed and skeleton.startswith("/"):
+            skeleton = skeleton[1:]
+            slashed = True
+        if any(skeleton.startswith(name) for name in names):
+            return True
+        if not any(name.startswith(skeleton) for name in names):
+            return False
+    return False
+
+
+def _escape_delimiter_tags(text: str, names: Sequence[str] = _DELIMITER_TAG_NAMES) -> str:
+    """``text`` with every tag that spells one of ``names`` neutralized:
+    its bracket becomes ``&lt;``, the rest is kept, so the text stays
+    visible to the model but can no longer act as a tag. Names are
+    matched by the letters they read as (``_skeleton_char``): fullwidth,
+    mathematical, small-capital and Cyrillic or Greek look-alike
+    letters, ligatures, accents and zero-width characters do not hide a
+    tag (#533). Everything else is unchanged."""
+
+    def escape(match: re.Match[str]) -> str:
+        if _names_tag(match[2], "/" in match[1], names):
+            return "&lt;" + match[0][1:]
+        return match[0]
+
+    return _TAG_CANDIDATE_RE.sub(escape, text)
 
 
 def _untrusted_email_block(content: str, *, index: int | None = None) -> str:
@@ -513,15 +619,16 @@ def _untrusted_email_block(content: str, *, index: int | None = None) -> str:
     the fence, where it reads like the user's instruction. Delimiter
     tags inside ``content`` are neutralized by escaping their ``<`` (or
     its fullwidth or small-form look-alike) as ``&lt;`` — the text stays
-    visible to the model but can no longer act as a tag. Tag names
-    spelled with look-alike letters are not caught (#533).
+    visible to the model but can no longer act as a tag. A tag name
+    spelled with compatibility or look-alike letters is escaped too
+    (``_escape_delimiter_tags``, #533).
 
     This is robust serialization, not a complete injection defense: the
     model can still be persuaded by content it reads. The stronger
     guarantee is architectural — the server is read-only and exposes no
     consequential tools to the model reading this content.
     """
-    safe = _DELIMITER_TAG_RE.sub(r"&lt;\1", content)
+    safe = _escape_delimiter_tags(content)
     opening = f'<untrusted_email index="{index}">' if index is not None else "<untrusted_email>"
     return f"{opening}\n{safe}\n</untrusted_email>"
 
@@ -1677,7 +1784,7 @@ def _build_evidence(
                 # Quotes are checked against the text as the model sees it,
                 # with delimiter tags escaped as ``_untrusted_email_block``
                 # escapes them (a tag cannot span a passage's edges).
-                shown = _DELIMITER_TAG_RE.sub(r"&lt;\1", text)
+                shown = _escape_delimiter_tags(text)
                 evidence_map[label] = EvidenceRef(label, thread.thread_id, chunk, char_end, shown)
             used += separator + header_len + len(text)
         if pieces and not parts:
@@ -1750,10 +1857,13 @@ def _evidence_prompt(
 
 # Characters escaping adds to one delimiter tag in untrusted text
 # (``<``, or a one-character look-alike in ``_LT_SPELLINGS``, becomes
-# ``&lt;``), and the fewest characters such a tag has
-# (``<untrusted_email``): escaping can lengthen text by at most 3/16.
+# ``&lt;``), and the fewest characters such a tag has: a bracket and
+# thirteen characters, since a ligature can spell two letters of the
+# name in one (``\ufb06`` "st", ``\u3383`` "mA", #533), as in
+# ``<untru\ufb06ed_e\u3383il``. Escaping can lengthen text by at most
+# 3/14.
 _ESCAPE_GROWTH = len("&lt;") - len("<")
-_MIN_TAG_CHARS = len("<untrusted_email")
+_MIN_TAG_CHARS = 14
 
 
 def _too_large(budget: PromptBudget, fixed_chars: int) -> ToolError:
@@ -1779,14 +1889,14 @@ def _text_budget(budget: PromptBudget, fixed_chars: int, cap: int, texts: Iterab
     ``_untrusted_email_block`` escapes delimiter tags after the text was
     budgeted, so the room also covers that growth: the exact bound
     (``_ESCAPE_GROWTH`` per tag in ``texts``, one linear scan) when it
-    leaves more, else 16/19 of the room, which no amount of escaping
-    can overflow. Hostile text costs at most that 16 % of the room;
+    leaves more, else 14/17 of the room, which no amount of escaping
+    can overflow. Hostile text costs at most that 18 % of the room;
     plain mail costs nothing.
     """
     room = budget.prompt_chars - fixed_chars
     if room < 0:
         raise _too_large(budget, fixed_chars)
-    growth = _ESCAPE_GROWTH * sum(len(_DELIMITER_TAG_RE.findall(text)) for text in texts)
+    growth = sum(len(_escape_delimiter_tags(text)) - len(text) for text in texts)
     worst = room * _MIN_TAG_CHARS // (_MIN_TAG_CHARS + _ESCAPE_GROWTH)
     return min(cap, max(room - growth, worst))
 
@@ -1957,7 +2067,7 @@ def _summarize_context(
     body = f"{body_header}\n{body_text}" if body_header and body_text else body_text
     if evidence_map is not None and body_text:
         evidence_map["E1"] = EvidenceRef(
-            "E1", thread.thread_id, None, None, _DELIMITER_TAG_RE.sub(r"&lt;\1", body_text)
+            "E1", thread.thread_id, None, None, _escape_delimiter_tags(body_text)
         )
     # The tail budget is spent on messages newest-first — the latest
     # reply is what the tail exists for, and one ordinary chunk can fill
@@ -1992,7 +2102,7 @@ def _summarize_context(
                     thread.thread_id,
                     chunk,
                     chunk.char_start + len(text),
-                    _DELIMITER_TAG_RE.sub(r"&lt;\1", text),
+                    _escape_delimiter_tags(text),
                 )
             used += len(header) + len(text) + 3
         if kept:
