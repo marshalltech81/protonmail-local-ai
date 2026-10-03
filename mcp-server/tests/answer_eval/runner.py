@@ -312,48 +312,83 @@ def _thread_word_ok(word: str, allowed: set[str]) -> bool:
     )
 
 
-def corpus_manifest(path: Path = CORPUS_PATH) -> dict[str, tuple[str, set[str]]]:
-    """Claimant ID -> (thread ID, word tokens) for every committed corpus message.
+@dataclass(frozen=True)
+class CorpusMessage:
+    sha256: str  # of the message's bytes, in full
+    thread_id: str
+    tokens: set[str] = field(repr=False)
+
+
+# Shortest claimant hash suffix accepted. The indexer's own length
+# (``parser.CLAIMANT_HASH_CHARS``, 16 today) lives in the other service,
+# so the check accepts any suffix this long or longer that prefixes the
+# message's SHA-256.
+_MIN_CLAIMANT_HASH_CHARS = 8
+_HEX = re.compile(r"[0-9a-f]+")
+
+
+def corpus_manifest(path: Path = CORPUS_PATH) -> dict[str, CorpusMessage]:
+    """Message-ID -> its bytes' SHA-256, thread and word tokens, for every
+    committed corpus message.
 
     Built from the committed ``corpus.py`` (stdlib only, loaded by path:
-    both services own a top-level ``tests`` package). A claimant ID is
-    the Message-ID plus the first eight hex digits of the SHA-256 of the
-    file's bytes, as the indexer derives it, and the corpus serializes
-    byte-identically. The tokens cover the message's headers and every
-    decoded text part, our own trusted bytes.
+    both services own a top-level ``tests`` package), which serializes
+    byte-identically; the indexer's claimant ID is the Message-ID plus a
+    prefix of that SHA-256. The tokens cover every part's headers and
+    every decoded text part, our own trusted bytes.
     """
     spec = importlib.util.spec_from_file_location("answer_eval_baseline_corpus", path)
     if spec is None or spec.loader is None:
         raise NonSyntheticIndexError("the committed synthetic corpus could not be loaded")
     corpus = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(corpus)
-    manifest: dict[str, tuple[str, set[str]]] = {}
+    manifest: dict[str, CorpusMessage] = {}
     for n in sorted(corpus.THREADS):
         for index, msg in enumerate(corpus.THREADS[n]):
             raw = corpus.build_message(n, index, msg)
             message_id = f"t{n:02d}.{index + 1}{BASELINE_DOMAIN}"
-            claimant = f"{message_id}#{hashlib.sha256(raw).hexdigest()[:8]}"
             parsed = email.message_from_bytes(raw, policy=email.policy.default)
             text = [message_id]
             for part in parsed.walk():  # every part's headers: attachment names and types
                 text += [str(v) for v in part.values()]
                 if part.get_content_maintype() == "text":
                     text.append(part.get_content())
-            manifest[claimant] = (f"t{n:02d}.1{BASELINE_DOMAIN}", _tokens(" ".join(text)))
+            manifest[message_id] = CorpusMessage(
+                hashlib.sha256(raw).hexdigest(),
+                f"t{n:02d}.1{BASELINE_DOMAIN}",
+                _tokens(" ".join(text)),
+            )
     return manifest
+
+
+def _claimant_message(claimant: str, manifest: dict[str, CorpusMessage]) -> str | None:
+    """The corpus Message-ID ``claimant`` belongs to, or None when it is
+    not ``<corpus Message-ID>#<prefix of that message's SHA-256>``."""
+    message_id, _, suffix = claimant.rpartition("#")
+    entry = manifest.get(message_id)
+    if (
+        entry is None
+        or len(suffix) < _MIN_CLAIMANT_HASH_CHARS
+        or not _HEX.fullmatch(suffix)
+        or not entry.sha256.startswith(suffix)
+    ):
+        return None
+    return message_id
 
 
 def index_identity(db: Any, manifest_path: Path = CORPUS_PATH) -> dict[str, object]:
     """Fingerprint of the index, refusing anything but the committed corpus.
 
     The evaluation sends evidence to the configured providers, and a
-    real mailbox is out of its scope, so the index must hold exactly the
-    committed corpus's claimant IDs (``corpus_manifest``), and every
+    real mailbox is out of its scope, so the index must hold exactly one
+    claimant per committed corpus message, each its Message-ID plus a
+    prefix of that message's SHA-256 (``corpus_manifest``), and every
     indexed text a prompt can carry may use only words of the corpus
     messages it belongs to: chunk text, message subjects, participants
     (the chunk header's sender), attachment names and types, and thread
-    subjects, display subjects, snippets, bodies and participants. Private text stored under copied baseline IDs fails
-    the second check. Messages name no content.
+    subjects, display subjects, snippets, bodies and participants.
+    Private text stored under copied baseline IDs fails the second
+    check. Messages name no content.
     """
     manifest = corpus_manifest(manifest_path)
     refused = NonSyntheticIndexError(
@@ -362,7 +397,10 @@ def index_identity(db: Any, manifest_path: Path = CORPUS_PATH) -> dict[str, obje
     )
     with closing(db._connect()) as conn:
         claimants = {str(c) for (c,) in conn.execute("SELECT claimant_id FROM messages")}
-        if claimants != set(manifest):
+        owner = {c: _claimant_message(c, manifest) for c in claimants}
+        owned = [m for m in owner.values() if m is not None]
+        # Every claimant a corpus message, every corpus message claimed once.
+        if len(owned) != len(owner) or sorted(owned) != sorted(manifest):
             raise refused
         # Per-message text a prompt can carry: chunk text, and the chunk
         # header's sender and attachment name and type.
@@ -376,14 +414,14 @@ def index_identity(db: Any, manifest_path: Path = CORPUS_PATH) -> dict[str, obje
         )
         for query in per_message:
             for claimant, text in conn.execute(query):
-                if (
-                    claimant not in manifest
-                    or not _tokens(str(text or "")) <= manifest[claimant][1]
-                ):
+                message_id = owner.get(str(claimant))
+                if message_id is None:
+                    raise refused
+                if not _tokens(str(text or "")) <= manifest[message_id].tokens:
                     raise refused
         thread_tokens: dict[str, set[str]] = {}
-        for thread, tokens in manifest.values():
-            thread_tokens.setdefault(thread, set()).update(tokens)
+        for entry in manifest.values():
+            thread_tokens.setdefault(entry.thread_id, set()).update(entry.tokens)
         rows = conn.execute(
             "SELECT thread_id, subject, display_subject, snippet, body_text, participants "
             "FROM threads"

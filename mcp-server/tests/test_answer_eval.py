@@ -65,6 +65,7 @@ from tests.answer_eval.runner import (
     PrecomputedEmbedder,
     RecordingInference,
     RunContext,
+    _claimant_message,
     capture_evidence_maps,
     corpus_manifest,
     index_identity,
@@ -427,12 +428,26 @@ class TestRunner:
         with pytest.raises(ProviderResponseError, match="rebuild"):
             asyncio.run(emb.embed("other"))
 
-    def test_corpus_manifest_names_claimants_from_committed_bytes(self):
+    def test_corpus_manifest_hashes_committed_bytes(self):
         manifest = corpus_manifest()
         assert len(manifest) > 50
-        for claimant, (thread, tokens) in manifest.items():
-            assert re.fullmatch(r"t\d{2}\.\d+@baseline\.example#[0-9a-f]{8}", claimant)
-            assert thread == thread_id_of(claimant.split("@")[0]) and tokens
+        for message_id, entry in manifest.items():
+            assert re.fullmatch(r"t\d{2}\.\d+@baseline\.example", message_id)
+            assert re.fullmatch(r"[0-9a-f]{64}", entry.sha256)
+            assert entry.thread_id == thread_id_of(message_id.split("@")[0]) and entry.tokens
+
+    @pytest.mark.parametrize(
+        ("suffix_chars", "ok"), [(16, True), (8, True), (64, True), (7, False)]
+    )
+    def test_claimant_suffix_length_is_not_hardcoded(self, suffix_chars, ok):
+        """CI on the merge with #640 (16-hex suffixes) refused the index
+        because the manifest assumed 8; any prefix of 8 or more is accepted."""
+        manifest = corpus_manifest()
+        message_id, entry = next(iter(manifest.items()))
+        claimant = f"{message_id}#{entry.sha256[:suffix_chars]}"
+        assert (_claimant_message(claimant, manifest) == message_id) is ok
+        wrong = f"{message_id}#{'0' * 16}"
+        assert _claimant_message(wrong, manifest) is None
 
     def test_non_synthetic_index_is_refused(self, messages_db):
         with pytest.raises(NonSyntheticIndexError):
