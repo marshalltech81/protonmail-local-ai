@@ -1237,7 +1237,7 @@ class TestDelimiterEscapeLookalikeLetters:
 
     @pytest.mark.parametrize("name", list(_LOOKALIKE_NAMES.values()), ids=list(_LOOKALIKE_NAMES))
     @pytest.mark.parametrize("bracket", ["<", "\uff1c", "\ufe64"])
-    @pytest.mark.parametrize("slash", ["", "/", " / ", "\uff0f"])
+    @pytest.mark.parametrize("slash", ["", "/", " / ", "\uff0f", "\uff0f ", " \uff0f\t"])
     def test_lookalike_name_is_escaped(self, name, bracket, slash):
         from src.tools.intelligence import _untrusted_email_block
 
@@ -1254,6 +1254,33 @@ class TestDelimiterEscapeLookalikeLetters:
 
         folded = unicodedata.normalize("NFKC", _untrusted_email_block(f"x </{name}> y <{name}>"))
         assert len(re.findall(r"<\s*/?\s*untrusted_email", folded, re.IGNORECASE)) == 2
+
+    def test_slash_set_is_every_nfkc_spelling_of_slash(self):
+        import sys
+        import unicodedata
+
+        from src.tools.intelligence import _SLASH_SPELLINGS
+
+        spellings = {
+            chr(c)
+            for c in range(sys.maxunicode + 1)
+            if unicodedata.normalize("NFKC", chr(c)) == "/"
+        }
+        assert set(_SLASH_SPELLINGS) == spellings
+
+    def test_every_lookalike_entry_is_reached(self):
+        # Review round 1: an entry whose key normalization changes first
+        # (Greek lunate sigma decomposes to sigma) was never consulted.
+        # Each key, and its capital, reads as its letter.
+        from src.tools.intelligence import _LOOKALIKE_LETTERS, _skeleton_char
+
+        unreached = [
+            (chr(key), spelling)
+            for key, letter in _LOOKALIKE_LETTERS.items()
+            for spelling in {chr(key), chr(key).upper()}
+            if _skeleton_char(spelling) != letter
+        ]
+        assert unreached == []
 
     @pytest.mark.parametrize("content", _NOT_TAGS)
     def test_text_that_names_no_tag_is_unchanged(self, content):

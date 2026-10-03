@@ -492,16 +492,20 @@ user's original task."""
 # no normalization turns into ``<`` and are left alone.
 _LT_SPELLINGS = "<\ufe64\uff1c"
 
+# Every character whose NFKC form is ``/``: ASCII ``/`` and fullwidth
+# ``\uff0f``. Either closes a tag, with whitespace on both sides.
+_SLASH_SPELLINGS = "/\uff0f"
+
 # A candidate tag inside untrusted content: an ``_LT_SPELLINGS`` bracket,
-# optional whitespace and slash (group 1), then the run of characters up
-# to the next whitespace or bracket (group 2), which ``_names_tag``
-# reads. The whitespace after the slash is matched only with the slash,
+# optional whitespace and ``_SLASH_SPELLINGS`` slash (group 1), then the
+# run of characters up to the next whitespace or bracket (group 2),
+# which ``_names_tag`` reads. The whitespace after the slash is matched only with the slash,
 # and possessively, so a long run has one way to match; ``\s*/?\s*``
 # split it every way (#328). The run excludes the brackets, so no tag
 # hides inside another candidate's run, and runs never overlap: one
 # pass reads each character at most once.
 _TAG_CANDIDATE_RE = re.compile(
-    f"[{_LT_SPELLINGS}]" r"(\s*+(?:/\s*+)?)" f"([^\\s{_LT_SPELLINGS}]++)"
+    f"[{_LT_SPELLINGS}]" rf"(\s*+(?:[{_SLASH_SPELLINGS}]\s*+)?)" f"([^\\s{_LT_SPELLINGS}]++)"
 )
 
 # The tag names untrusted mail text must not spell (``brief.py`` adds
@@ -567,7 +571,9 @@ def _skeleton_char(char: str) -> str:
     fold onto plain letters) without marks or format characters, case
     folded, with ``_LOOKALIKE_LETTERS`` mapped. Empty for a character
     that draws nothing."""
-    decomposed = unicodedata.normalize("NFKD", char)
+    # Looked up before normalization too: NFKD turns some entries into
+    # other letters (Greek lunate sigma into sigma).
+    decomposed = unicodedata.normalize("NFKD", char.casefold().translate(_LOOKALIKE_LETTERS))
     visible = "".join(c for c in decomposed if unicodedata.category(c) not in _INVISIBLE_CATEGORIES)
     return visible.casefold().translate(_LOOKALIKE_LETTERS)
 
@@ -603,7 +609,7 @@ def _escape_delimiter_tags(text: str, names: Sequence[str] = _DELIMITER_TAG_NAME
     tag (#533). Everything else is unchanged."""
 
     def escape(match: re.Match[str]) -> str:
-        if _names_tag(match[2], "/" in match[1], names):
+        if _names_tag(match[2], match[1].strip() != "", names):
             return "&lt;" + match[0][1:]
         return match[0]
 
