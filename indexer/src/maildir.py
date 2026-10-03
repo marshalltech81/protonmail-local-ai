@@ -90,6 +90,24 @@ def is_trashed(path: Path | str) -> bool:
     return TRASHED_FLAG in parse_flags(path)
 
 
+@dataclass(frozen=True)
+class MessageState:
+    """A message's read / flagged / replied state as mbsync mirrors it
+    from Proton into the filename (``S``, ``F``, ``R``)."""
+
+    seen: bool
+    flagged: bool
+    replied: bool
+
+
+def message_state(path: Path | str) -> MessageState:
+    """The state the ``:2,<flags>`` suffix of ``path`` records. A file
+    without the suffix (mbsync's ``new/`` deliveries) is unread; other
+    letters, including ``T``, are ignored."""
+    flags = parse_flags(path)
+    return MessageState(seen="S" in flags, flagged="F" in flags, replied="R" in flags)
+
+
 def get_uniq(path: Path | str) -> str:
     """Return the Maildir uniq base name — the portion before ``:2,flags``.
 

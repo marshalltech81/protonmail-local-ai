@@ -42,6 +42,16 @@ readonly BRIDGE_WAIT_MAX_ATTEMPTS=300
 readonly BRIDGE_PROBE_TIMEOUT_SECONDS=2
 readonly CERT_EXTRACT_TIMEOUT_SECONDS=20
 readonly MAX_CONSECUTIVE_SYNC_FAILURES=5
+# Per-run deadline for mbsync (#282). isync's own socket timeout restarts
+# on every byte the server sends, so a server that keeps a command open
+# with keepalives would hold one run forever. Past the deadline run_sync
+# stops mbsync (TERM, then KILL after the grace) and counts a failed
+# sync. The default is a day: a first sync of a large mailbox must never
+# hit it, and a run stopped anyway resumes from isync's sync state rather
+# than starting over. Tune it once the first sync's duration is known
+# (docs/troubleshooting.md). healthcheck.sh repeats both values.
+readonly SYNC_DEADLINE_SECONDS="${SYNC_DEADLINE_SECONDS:-86400}"
+readonly SYNC_KILL_GRACE_SECONDS=30
 readonly BRIDGE_CERT_PIN_ROTATE="${BRIDGE_CERT_PIN_ROTATE:-false}"
 readonly MAILDIR_PATH="/maildir"
 # Last-sync stamp read by the indexer (indexer/src/maildir.py
@@ -76,6 +86,12 @@ require_prerequisites() {
 
     if [[ ! "$SYNC_INTERVAL" =~ ^[1-9][0-9]*$ ]]; then
         echo ">>> ERROR: SYNC_INTERVAL must be a positive integer number of seconds." >&2
+        exit 1
+    fi
+
+    # At most nine digits, so the healthcheck's arithmetic cannot overflow.
+    if [[ ! "$SYNC_DEADLINE_SECONDS" =~ ^[1-9][0-9]{0,8}$ ]]; then
+        echo ">>> ERROR: SYNC_DEADLINE_SECONDS must be a positive integer number of seconds (at most 999999999)." >&2
         exit 1
     fi
 
@@ -651,14 +667,26 @@ run_sync() {
     # Activity is marked before mbsync, again once it ends (the repair
     # walks the whole Maildir with no mbsync running, so the heartbeat
     # must be fresh for it), and after the attempt, whatever its outcome.
+    #
+    # mbsync runs under timeout(1) with the per-run deadline (#282). A run
+    # stopped there fails like any other, so the loop's failure limit
+    # applies and no success stamp is written.
     local rc=0 counts="" withheld=0 other=0
     rm -f "$MBSYNC_ERROR_COUNTS_FILE" "$MBSYNC_NOTICES_DONE_FILE"
     mark_sync_activity
     # Both streams go through the filters as they are written; run_child
-    # still waits on (and signals) mbsync itself.
-    run_child mbsync -c "$CONFIG_FILE" -a \
+    # waits on (and signals) timeout, which passes a stop on to mbsync.
+    run_child timeout --kill-after="${SYNC_KILL_GRACE_SECONDS}s" "${SYNC_DEADLINE_SECONDS}s" \
+        mbsync -c "$CONFIG_FILE" -a \
         > >(report_mbsync_notices) 2> >(report_mbsync_errors) || rc=$?
     mark_sync_activity
+    # 124: stopped by TERM at the deadline; 137: KILLed, after ignoring
+    # TERM for the grace (or by the kernel, which timeout cannot tell).
+    if ((rc == 124)); then
+        echo ">>> ERROR: mbsync did not finish within SYNC_DEADLINE_SECONDS=${SYNC_DEADLINE_SECONDS} and was stopped; counting this sync as failed (see docs/troubleshooting.md)." >&2
+    elif ((rc == 137)); then
+        echo ">>> ERROR: mbsync was killed: it ignored the stop at SYNC_DEADLINE_SECONDS=${SYNC_DEADLINE_SECONDS} for ${SYNC_KILL_GRACE_SECONDS}s, or the kernel killed it; counting this sync as failed." >&2
+    fi
     if ! wait_for_mbsync_filter "$MBSYNC_NOTICES_DONE_FILE"; then
         echo ">>> WARNING: mbsync's notice filter did not finish." >&2
     fi

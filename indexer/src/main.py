@@ -54,6 +54,11 @@ from .chunker import (
     truncate_to_tokens,
 )
 from .database import EMBEDDING_DIM, Database
+from .embed_identity import (
+    CalibrationRequestError,
+    EmbedderIdentityError,
+    verify_or_record_embedder,
+)
 from .embedder import (
     EMBED_FAILURE_CONFIGURATION,
     EMBED_FAILURE_REJECTED_INPUT,
@@ -1999,6 +2004,32 @@ def _validate_embedding_dim(embedder: EmbeddingBackend) -> None:
         )
 
 
+def _check_embedder_identity(db: Database, embedder) -> None:
+    """Record the embedder on a fresh index, else verify it is the one
+    that built the index (``src/embed_identity.py``); exit otherwise.
+
+    A mismatch exits with the fixed message: the operator restores the
+    original embedder or rebuilds the index. A failed calibration request
+    has already been retried by ``embed``'s transient-error policy right
+    after ``wait_for_ready``, so it exits too, with the scrubbed error,
+    and the restart policy tries again, as the dimension probe does.
+    """
+    try:
+        outcome = verify_or_record_embedder(
+            db,
+            embedder,
+            provider=EMBED_MODE,
+            endpoint=embedder.base_url,
+            model=EMBED_MODEL,
+        )
+    except (EmbedderIdentityError, CalibrationRequestError) as exc:
+        raise SystemExit(str(exc)) from None
+    if outcome == "recorded":
+        log.info("Recorded embedder identity for this index (model=%s)", EMBED_MODEL)
+    else:
+        log.info("Embedder identity verified against the index (model=%s)", EMBED_MODEL)
+
+
 def _load_authority_rules(path: Path) -> AuthorityRules:
     """Load the operator rules file, failing closed on a malformed one.
 
@@ -2128,6 +2159,8 @@ def main():
 
     # Verify the running model matches the schema's reserved vector dim.
     _validate_embedding_dim(embedder)
+    # Before anything is indexed: never mix vectors from two embedders.
+    _check_embedder_identity(db, embedder)
 
     # Start watching BEFORE the initial drain. On a large mailbox the
     # drain runs for hours; mail mbsync delivers in that window would

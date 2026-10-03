@@ -2893,6 +2893,9 @@ class TestMessagesTable:
             "size_bytes",
             "content_hash",
             "indexed_at",
+            "seen",
+            "flagged",
+            "replied",
         }
         cols = {r["name"] for r in db._conn.execute("PRAGMA table_info(message_participants)")}
         assert cols == {"claimant_id", "role", "address", "name"}
@@ -3034,16 +3037,71 @@ class TestUpdateFilepathWithFolder:
         assert not db.is_indexed("/md/Archive/cur/m1")
 
 
+class TestMaildirFlagState:
+    """``seen`` / ``flagged`` / ``replied`` follow the stored filepath's
+    ``:2,<flags>`` suffix, written in the same statement as the path."""
+
+    def _flags(self, db):
+        row = db._conn.execute("SELECT filepath, seen, flagged, replied FROM messages").fetchone()
+        return row["filepath"], row["seen"], row["flagged"], row["replied"]
+
+    def test_upsert_records_the_flags_of_the_indexed_file(self, db):
+        msg = make_message(filepath="/md/INBOX/cur/m1:2,FS")
+        db.upsert_thread(make_thread(messages=[msg]), FAKE_EMBEDDING)
+        assert self._flags(db) == ("/md/INBOX/cur/m1:2,FS", 1, 1, 0)
+
+    def test_unsuffixed_new_mail_is_unread(self, db):
+        msg = make_message(filepath="/md/INBOX/new/m1")
+        db.upsert_thread(make_thread(messages=[msg]), FAKE_EMBEDDING)
+        assert self._flags(db) == ("/md/INBOX/new/m1", 0, 0, 0)
+
+    @pytest.mark.parametrize(
+        ("dest", "expected"),
+        [
+            ("/md/INBOX/cur/m1:2,RS", (1, 0, 1)),  # replied
+            ("/md/INBOX/cur/m1:2,", (0, 0, 0)),  # marked unread upstream
+            ("/md/INBOX/cur/m1:2,FST", (1, 1, 0)),  # trashed keeps the rest
+        ],
+    )
+    def test_rename_updates_the_flags(self, db, dest, expected):
+        msg = make_message(filepath="/md/INBOX/new/m1")
+        db.upsert_thread(make_thread(messages=[msg]), FAKE_EMBEDDING)
+        db.update_filepath("/md/INBOX/new/m1", dest)
+        assert self._flags(db) == (dest, *expected)
+
+    def test_cross_folder_move_updates_flags_and_folder(self, db):
+        msg = make_message(filepath="/md/INBOX/cur/m1:2,S")
+        db.upsert_thread(make_thread(messages=[msg]), FAKE_EMBEDDING)
+        db.update_filepath("/md/INBOX/cur/m1:2,S", "/md/Archive/cur/m1:2,FS", folder="Archive")
+        assert self._flags(db) == ("/md/Archive/cur/m1:2,FS", 1, 1, 0)
+        assert db._conn.execute("SELECT folder FROM messages").fetchone()[0] == "Archive"
+
+    def test_reindex_rewrites_the_flags(self, db):
+        """A re-parse of the same file (the claimant is unchanged) takes the
+        flags of the path it was parsed from."""
+        db.upsert_thread(
+            make_thread(messages=[make_message(filepath="/md/INBOX/cur/m1:2,FS")]),
+            FAKE_EMBEDDING,
+        )
+        db.upsert_thread(
+            make_thread(messages=[make_message(filepath="/md/INBOX/cur/m1:2,")]),
+            FAKE_EMBEDDING,
+        )
+        assert self._flags(db) == ("/md/INBOX/cur/m1:2,", 0, 0, 0)
+
+
 def test_rename_lookups_use_the_filepath_index(db):
     """Every flag rename updates ``messages`` by filepath; without an index
     that is a full-table scan under the shared write lock."""
-    for sql in (
-        "UPDATE messages SET filepath = ? WHERE filepath = ?",
-        "UPDATE messages SET folder = ? WHERE filepath = ?",
+    for sql, params in (
+        (
+            "UPDATE messages SET filepath = ?, seen = ?, flagged = ?, replied = ? "
+            "WHERE filepath = ?",
+            ("a", 0, 0, 0, "b"),
+        ),
+        ("UPDATE messages SET folder = ? WHERE filepath = ?", ("a", "b")),
     ):
-        plan = " ".join(
-            r["detail"] for r in db._conn.execute("EXPLAIN QUERY PLAN " + sql, ("a", "b"))
-        )
+        plan = " ".join(r["detail"] for r in db._conn.execute("EXPLAIN QUERY PLAN " + sql, params))
         assert "idx_messages_filepath" in plan, plan
 
 
