@@ -64,12 +64,111 @@ require_mode_600() {
     }
 }
 
+file_owner() {
+    local path="$1"
+    local owner
+
+    if owner=$(stat -c '%u' "$path" 2>/dev/null); then
+        printf '%s\n' "$owner"
+        return 0
+    fi
+    if owner=$(stat -f '%u' "$path" 2>/dev/null); then
+        printf '%s\n' "$owner"
+        return 0
+    fi
+    printf 'ERROR: unable to read the owner of %s on this platform.\n' "$path" >&2
+    return 1
+}
+
+readonly INDEXER_UID=1002
+
+# On Linux with Docker Engine a bind mount keeps host ownership and the
+# kernel checks the indexer's own UID, so a 600 file the operator owns
+# cannot be read in the container (#526). Compose cannot change that:
+# file-based secrets and configs are plain bind mounts that ignore
+# `uid`/`gid`/`mode`. Access is granted on the host instead, with an
+# ACL naming UID 1002 alone (a group would also admit whoever holds
+# that GID on the host). `stat` then shows the ACL mask as group bits,
+# so the mode reads 640 and the ACL itself is checked to be exactly
+# that grant. macOS file sharing serves the file to the container's
+# user, so there the plain 600 stands.
+readonly INDEXER_ONLY_ACL=$'user::rw-\nuser:1002:r--\ngroup::---\nmask::r--\nother::---'
+
+# The indexer must also search config/, the mount root: a directory
+# without the other-search bit (say, from a 077 umask) needs a search
+# ACL for UID 1002 too.
+require_indexer_can_search_on_linux() {
+    local dir="$1"
+    local mode acl
+
+    # POSIX ACL order: the owner entry, then a named-user entry for the
+    # UID (limited by the mask), and only then the other bits.
+    mode="$(file_mode "$dir")"
+    if [[ "$(file_owner "$dir")" == "$INDEXER_UID" ]]; then
+        (((8#$mode & 8#100) != 0)) && return 0
+    else
+        acl=""
+        if command -v getfacl >/dev/null; then
+            acl="$(getfacl --omit-header --numeric --absolute-names "$dir")" || acl=""
+        fi
+        if grep -Eq "^user:${INDEXER_UID}:" <<<"$acl"; then
+            grep -Eq "^user:${INDEXER_UID}:..x" <<<"$acl" && grep -Eq '^mask::..x' <<<"$acl" &&
+                return 0
+        elif (((8#$mode & 8#001) != 0)); then
+            return 0
+        fi
+    fi
+    printf 'ERROR: %s is not searchable by the indexer (UID %s). Run:\n  setfacl -m u:%s:x %s\n' \
+        "$dir" "$INDEXER_UID" "$INDEXER_UID" "$(printf '%q' "$dir")" >&2
+    exit 1
+}
+
+require_indexer_readable_on_linux() {
+    local path="$1"
+    local mode acl account quoted fix
+
+    quoted="$(printf '%q' "$path")"
+    fix="setfacl -b $quoted && chmod 600 $quoted && setfacl -m u:${INDEXER_UID}:r $quoted"
+    mode="$(file_mode "$path")"
+    if [[ "$mode" == "600" ]]; then
+        [[ "$(file_owner "$path")" == "$INDEXER_UID" ]] || {
+            printf 'ERROR: %s is not readable by the indexer (UID %s): on Linux the container sees the host owner and mode. Grant that UID alone read access (needs the acl package):\n  %s\n' \
+                "$path" "$INDEXER_UID" "$fix" >&2
+            exit 1
+        }
+    elif [[ "$mode" == "640" ]]; then
+        command -v getfacl >/dev/null || {
+            printf 'ERROR: getfacl is needed to check the ACL on %s; install the acl package.\n' "$path" >&2
+            exit 1
+        }
+        acl="$(getfacl --omit-header --numeric --absolute-names "$path")"
+        [[ "$acl" == "$INDEXER_ONLY_ACL" ]] || {
+            printf 'ERROR: %s has mode 640; its ACL must grant read to UID %s and no one else. Run:\n  %s\n' \
+                "$path" "$INDEXER_UID" "$fix" >&2
+            exit 1
+        }
+    else
+        printf 'ERROR: %s must have mode 600, with an ACL granting UID %s read, found %s. Run:\n  %s\n' \
+            "$path" "$INDEXER_UID" "$mode" "$fix" >&2
+        exit 1
+    fi
+    require_indexer_can_search_on_linux "$(dirname "$path")"
+    # Either grant also covers host UID 1002, so name any account holding
+    # it, unless that account is the operator's own.
+    if [[ "$(id -u)" != "$INDEXER_UID" ]] && command -v getent >/dev/null &&
+        account="$(getent passwd "$INDEXER_UID")"; then
+        printf 'WARNING: host account %s has UID %s and can read %s if it can reach the directory; keep the checkout under a directory that account cannot enter.\n' \
+            "${account%%:*}" "$INDEXER_UID" "$path" >&2
+    fi
+}
+
 # The optional source-authority rules file holds real addresses and
-# domains, so it is held to the secret files' 600. A symlink is
-# rejected: Compose mounts config/ as a directory, so a link whose
-# target the container cannot reach would pass here and stop the
-# indexer at startup; so is anything else that is not a regular file,
-# which the indexer refuses to open.
+# domains, so it is held to the secret files' 600 (on Linux, 600 plus
+# an ACL for the indexer alone; see above). A symlink is rejected:
+# Compose mounts config/ as a directory, so a link whose target the
+# container cannot reach would pass here and stop the indexer at
+# startup; so is anything else that is not a regular file, which the
+# indexer refuses to open.
 require_private_optional_file() {
     local path="$1"
 
@@ -82,7 +181,11 @@ require_private_optional_file() {
         printf 'ERROR: %s must be a regular file.\n' "$path" >&2
         exit 1
     }
-    require_mode_600 "$path"
+    if [[ "$(uname -s)" == "Linux" ]]; then
+        require_indexer_readable_on_linux "$path"
+    else
+        require_mode_600 "$path"
+    fi
 }
 
 # API keys are wired as Docker secrets (see ``secrets:`` in
