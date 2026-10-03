@@ -639,6 +639,7 @@ def register_search_tools(
                             claimant_id=c.claimant_id,
                             chunk_index=c.chunk_index,
                             source="body" if c.attachment_id is None else "attachment",
+                            kind=c.kind,
                             attachment_id=c.attachment_id,
                             attachment_filename=_clip_optional(c.attachment_filename),
                             attachment_mime=_clip_optional(c.attachment_mime),
@@ -688,6 +689,8 @@ def register_search_tools(
                     fname = clip(chunk.attachment_filename or "attachment", HEADER_CHAR_LIMIT)
                     mime = clip(chunk.attachment_mime or "unknown", HEADER_CHAR_LIMIT)
                     lines.append(f'        Source: attachment "{fname}" ({mime})')
+                elif chunk.kind != "body":
+                    lines.append(f"        Source: message body ({chunk.kind})")
                 else:
                     lines.append("        Source: message body")
                 offsets = f"        Chars {chunk.char_start}-{chunk.char_end}"

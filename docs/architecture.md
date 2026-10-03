@@ -546,6 +546,35 @@ history. Stripping is intentionally conservative: quoted text is still
 searchable through FTS and falls back to the original body when the
 stripped result would be empty.
 
+**Chunk kinds (#646).** Segmentation happens before chunking, so a
+chunk never spans kinds: `segment_for_embedding` (same module) splits
+the body into runs of one kind and `chunker.chunk_segments` chunks each
+run on its own, carrying no overlap across a run boundary.
+`message_chunks.kind` stores the kind, from a closed set checked by the
+chunker and by a `CHECK` constraint:
+
+| Kind | Text |
+|---|---|
+| `body` | the message's own text (what `strip_for_embedding` keeps) |
+| `quote` | `>` lines, reply-header lines, and everything from an Outlook reply block or `-----Original Message-----` on |
+| `signature` | from the RFC 3676 `-- ` delimiter on |
+| `forwarded` | from a forward preamble (`---------- Forwarded message ---------`, `Begin forwarded message:`) on |
+| `calendar` | reserved: nothing produces it yet, since a `text/calendar` part inside a multipart is not body text and has no attachment extractor |
+| `attachment` | text extracted from an attachment (exactly the rows with `attachment_id` set) |
+
+The kinds come from the same line rules `strip_for_embedding` applies;
+there is no new parsing. What is chunked is unchanged: a message with
+body text is chunked as one `body` run, its quotes, signature and
+forwarded text left out as before. Only a message with no body text
+(the fallback case above) is chunked as its non-body runs, each with
+its kind, instead of as one undifferentiated body; its two-line wrapped
+reply headers are dropped there as they are from body text. Such a
+message is chunked as at most 32 runs, after which the remaining runs
+are joined per kind, so a body that alternates kinds line by line
+cannot turn into one chunk per line. Chunk offsets index the
+normalized runs joined by a blank line. Retrieval does not yet use the
+kind; `get_evidence` reports it on each passage.
+
 A reply can rename the conversation and still join it through
 References / In-Reply-To. Its subject, when it differs from the
 thread's after `Re:`/`Fwd:` normalization, is kept searchable (#303):
@@ -919,7 +948,7 @@ as message bodies. Two extra tables sit alongside `message_chunks`:
 | `attachment_extractions` | attachment_id (= sha256 of payload) | Per-content-hash cache of extracted text + status. The expensive work (Tesseract OCR, pypdf parse, DOCX walk) runs at most once per unique payload, including within one indexing batch, where results not yet committed are shared by content hash. Non-success rows are also honored: `empty` / `too_large` short-circuit unconditionally; `unsupported` short-circuits while it also holds for the occurrence at hand (an "OCR disabled" row, for an occurrence that needs OCR — an image, or a PDF whose row the PDF extractor wrote because it found no digital text layer — until OCR is turned on; any other until the occurrence's MIME type or filename selects an extractor, since the same bytes can arrive as `.bin` first and `.txt` later); `failed` short-circuits within a 7-day retry window so a chronic failure stops re-running on every reappearance, but a real fix landed via dependency upgrade can pick the payload up later. The `extractor` column carries a version (`docx@3`); a row written by an older version of a fixed extractor (`extractors.EXTRACTOR_VERSIONS`) is refreshed by re-running that extractor from whichever occurrence of the bytes arrives (whatever its own filename or MIME type), and the indexer re-queues every message carrying those bytes once at startup so their chunks are rebuilt, except dead-lettered messages, which keep their stale chunks until `make requeue-dead` rescues them. Rows from a newer version (after a rollback) are kept. A row is deleted with the last `attachments` row that references it (see *Cascade on message removal*). A stale row an OCR extractor wrote (`image-ocr`, `pdf-ocr`) is kept and served while `INDEXER_OCR_ENABLED=false`, since a refresh could only replace its text with "OCR disabled"; it is refreshed once OCR is on. Likewise, once OCR is on, the startup sweep re-queues each message whose occurrence of bytes cached "OCR disabled" would now be OCR'd; an occurrence that selects no extractor (`.bin`) is not re-queued, since its reprocess would serve the same row. |
 
 Per-occurrence chunks land in `message_chunks` with the
-`attachment_id` column populated. They embed exactly like body chunks
+`attachment_id` column populated and `kind` set to `attachment`. They embed exactly like body chunks
 and surface through the same chunk-vector retrieval lane — so a query
 matching a PDF's contents lifts the parent thread of the email that
 carried it, with zero new MCP search code.

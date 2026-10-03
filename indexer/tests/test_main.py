@@ -5070,7 +5070,7 @@ class TestStageErrorsKeepMailOutOfLastError:
     def test_chunk_failure_persists_type_only(
         self, tmp_path, monkeypatch, caplog, make_exc, type_name
     ):
-        row = self._drain_one(tmp_path, monkeypatch, caplog, "chunk_message", make_exc())
+        row = self._drain_one(tmp_path, monkeypatch, caplog, "chunk_segments", make_exc())
 
         assert row["last_stage"] == "chunk"
         assert row["last_error"] == type_name
@@ -5086,7 +5086,7 @@ class TestStageErrorsKeepMailOutOfLastError:
             tmp_path,
             monkeypatch,
             caplog,
-            "chunk_message",
+            "chunk_segments",
             PermissionError(13, f"{SYNTHETIC_MARKER} denied", f"/x/{SYNTHETIC_MARKER}"),
         )
 
@@ -6628,6 +6628,50 @@ class TestPruneReapedRecords:
         with pytest.raises(_Unreachable):
             main.main()
         assert db._conn.execute("SELECT COUNT(*) FROM reaped_messages").fetchone()[0] == 0
+
+
+class TestChunkKinds:
+    """The pipeline stores each chunk's kind (#646)."""
+
+    def _index(self, tmp_path, files) -> Database:
+        db = Database(tmp_path / "mail.db")
+        queue = _make_queue(db)
+        for path in files:
+            queue.enqueue(str(path), REASON_INITIAL_SCAN)
+        _drain(queue, db, make_mock_embedder(_UNIT_VECTOR), Threader(db))
+        return db
+
+    def _kinds(self, db, message_id: str) -> list[tuple[str, str | None]]:
+        rows = db._conn.execute(
+            "SELECT c.kind, c.attachment_id FROM message_chunks c "
+            "JOIN message_thread_map m ON m.claimant_id = c.claimant_id "
+            "WHERE m.message_id = ? ORDER BY c.attachment_id IS NOT NULL, c.chunk_index",
+            (message_id,),
+        ).fetchall()
+        return [(r["kind"], r["attachment_id"]) for r in rows]
+
+    def test_body_and_attachment_chunks_are_tagged(self, tmp_path):
+        dest = tmp_path / "INBOX" / "cur" / "att.eml"
+        _write_eml_with_text_attachment(dest, "att@example.com")
+        db = self._index(tmp_path, [dest])
+        kinds = self._kinds(db, "att@example.com")
+        assert [k for k, _ in kinds] == ["body", "attachment"]
+        assert kinds[0][1] is None and kinds[1][1] is not None
+
+    def test_message_with_no_body_text_is_chunked_by_kind(self, tmp_path):
+        dest = tmp_path / "INBOX" / "cur" / "fwd.eml"
+        body = "-- \nBob Example\n\nOn Mon, Jan 1, 2024 Alice <alice@example.com> wrote:\n> Hi"
+        _write_eml(dest, "fwd@example.com", body=body)
+        db = self._index(tmp_path, [dest])
+        assert self._kinds(db, "fwd@example.com") == [("signature", None), ("quote", None)]
+
+    def test_quoted_history_is_still_left_out_of_a_reply_with_body_text(self, tmp_path):
+        dest = tmp_path / "INBOX" / "cur" / "reply.eml"
+        _write_eml(dest, "reply@example.com", body="Yes.\n\n> Can we meet?\n-- \nBob")
+        db = self._index(tmp_path, [dest])
+        assert self._kinds(db, "reply@example.com") == [("body", None)]
+        text = db._conn.execute("SELECT text FROM message_chunks").fetchone()["text"]
+        assert text == "Yes."
 
 
 class TestWalMaintenance:

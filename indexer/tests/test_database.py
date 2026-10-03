@@ -14,6 +14,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from src.attachment_indexing import attachment_occurrence_id
+from src.chunker import CHUNK_KINDS, ChunkKind
 from src.database import (
     _PURGE_ORPHAN_EXTRACTION_SQL,
     EMBEDDING_DIM,  # noqa: F401  -- via reuse
@@ -1644,7 +1645,7 @@ class TestReapRewritesThreadRow:
 # ---------------------------------------------------------------------------
 
 
-def _make_chunk(chunk_id: str, index: int = 0, text: str = "chunk text"):
+def _make_chunk(chunk_id: str, index: int = 0, text: str = "chunk text", kind: ChunkKind = "body"):
     """Lightweight ``MessageChunk`` factory for chunk-write tests."""
     from src.chunker import MessageChunk
 
@@ -1655,6 +1656,7 @@ def _make_chunk(chunk_id: str, index: int = 0, text: str = "chunk text"):
         char_start=0,
         char_end=len(text),
         token_est=max(1, len(text) // 4),
+        kind=kind,
     )
 
 
@@ -2272,6 +2274,72 @@ class TestAttachmentExtractionCache:
         assert row["extracted_text"] == "now we have text"
 
 
+class TestChunkKind:
+    """``message_chunks.kind`` holds the chunker's closed kind set (#646)."""
+
+    def _thread(self, db, threader, message_id: str) -> str:
+        thread = threader.assign_thread(make_message(message_id=message_id, filepath="/m/k"))
+        db.upsert_thread(thread, FAKE_EMBEDDING)
+        return thread.thread_id
+
+    def test_kind_is_stored(self, db, threader):
+        thread_id = self._thread(db, threader, "kind1@x")
+        chunks = [
+            _make_chunk("q".ljust(64, "0"), 0, "> quoted", kind="quote"),
+            _make_chunk("s".ljust(64, "0"), 1, "-- \nsig", kind="signature"),
+        ]
+        db.replace_message_chunks(
+            claimant_id="kind1@x",
+            thread_id=thread_id,
+            chunks=chunks,
+            embeddings_by_chunk_id={c.chunk_id: FAKE_EMBEDDING for c in chunks},
+        )
+        rows = db._conn.execute("SELECT kind FROM message_chunks ORDER BY chunk_index").fetchall()
+        assert [r["kind"] for r in rows] == ["quote", "signature"]
+
+    @pytest.mark.parametrize(
+        ("kind", "attachment_id"),
+        [("attachment", None), ("body", "att-hash"), ("quote", "att-hash")],
+    )
+    def test_kind_must_match_its_slice(self, db, threader, kind, attachment_id):
+        thread_id = self._thread(db, threader, "kind2@x")
+        chunk = _make_chunk("k".ljust(64, "0"), kind=kind)
+        with pytest.raises(ValueError, match="does not match its slice"):
+            db.replace_message_chunks(
+                claimant_id="kind2@x",
+                thread_id=thread_id,
+                chunks=[chunk],
+                embeddings_by_chunk_id={chunk.chunk_id: FAKE_EMBEDDING},
+                attachment_id=attachment_id,
+            )
+        assert db._conn.execute("SELECT COUNT(*) FROM message_chunks").fetchone()[0] == 0
+
+    def test_check_constraint_accepts_exactly_the_chunker_kinds(self, db, threader):
+        thread_id = self._thread(db, threader, "kind3@x")
+
+        def insert(chunk_id: str, kind: str) -> None:
+            db._conn.execute(
+                "INSERT INTO message_chunks (chunk_id, claimant_id, thread_id, chunk_index, "
+                "text, char_start, char_end, token_est, chunked_at, kind) "
+                "VALUES (?, 'kind3@x', ?, 0, 't', 0, 1, 1, '', ?)",
+                (chunk_id, thread_id, kind),
+            )
+
+        for kind in CHUNK_KINDS:
+            insert(f"ok-{kind}", kind)
+        for bad in ("headline", "", "Body"):
+            with pytest.raises(sqlite3.IntegrityError):
+                insert(f"bad-{bad}", bad)
+        with pytest.raises(sqlite3.IntegrityError):
+            db._conn.execute(
+                "INSERT INTO message_chunks (chunk_id, claimant_id, thread_id, chunk_index, "
+                "text, char_start, char_end, token_est, chunked_at) "
+                "VALUES ('none', 'kind3@x', ?, 0, 't', 0, 1, 1, '')",
+                (thread_id,),
+            )
+        db._conn.rollback()
+
+
 class TestAttachmentChunkSlicing:
     """Body chunks and attachment chunks must be diffed independently
     so a write of attachment chunks doesn't delete body chunks for the
@@ -2284,7 +2352,7 @@ class TestAttachmentChunkSlicing:
         db.upsert_thread(thread, FAKE_EMBEDDING)
 
         body_chunk = _make_chunk("body-chunk".ljust(64, "0"), 0, "body")
-        att_chunk = _make_chunk("att-chunk".ljust(64, "0"), 0, "attachment")
+        att_chunk = _make_chunk("att-chunk".ljust(64, "0"), 0, "attachment", kind="attachment")
         attachment_id = "att-hash" * 8
 
         db.replace_message_chunks(
@@ -2323,7 +2391,7 @@ class TestAttachmentChunkSlicing:
         db.upsert_thread(thread, FAKE_EMBEDDING)
 
         body = _make_chunk("body2".ljust(64, "0"), 0, "body")
-        att = _make_chunk("att2".ljust(64, "0"), 0, "attachment")
+        att = _make_chunk("att2".ljust(64, "0"), 0, "attachment", kind="attachment")
         att_id = "attID" * 13
 
         db.replace_message_chunks(

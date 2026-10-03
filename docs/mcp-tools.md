@@ -299,6 +299,10 @@ fast synthesis-free path when only the source text is needed.
 Each chunk carries its `chunk_id` (the ID `ask_mailbox` citations
 name), its parent thread, Message-ID and claimant ID, the source
 (message body, or an attachment with filename + MIME type), its
+`kind` (`body`, `quote`, `signature`, `forwarded` or `attachment`;
+`calendar` is reserved; quote, signature and forwarded passages come
+only from messages with no text of their own, and the prose names
+them as `Source: message body (<kind>)`), its
 message's send and delivery dates (`sent_at` and `occurred_at`, the
 same values and format as that message's headers), and the passage's
 character offsets. With `date_from` / `date_to`, threads are selected

@@ -13,28 +13,40 @@ The stored ``body_text`` (FTS index input) is left alone: users
 legitimately search quoted text and signatures, so this transform only
 applies at the embedding boundary.
 
+``segment_for_embedding`` is the form the indexer chunks: the same line
+rules, returned as runs tagged with a chunk kind (body / quote /
+signature / forwarded) so that segmentation happens before chunking and
+no chunk spans kinds (#646).
+
 Heuristics are intentionally narrow. This is a domain-fraught problem
 and an aggressive stripper that eats real body content is worse than a
 conservative one that occasionally leaves quoted text in. Everything
 here is a simple line-based rule; no ML, no language detection.
 """
 
+import io
 import re
+from dataclasses import dataclass
+
+from .chunker import ChunkKind
 
 # Full-line markers that cut the rest of the message. Matched against the
 # line body after stripping the trailing newline — but NOT after stripping
 # trailing whitespace, because the RFC 3676 signature delimiter is
 # literally ``"-- "`` (two dashes, space, newline) and a ``.rstrip()``
 # pass would collapse it into ``"--"`` and miss real signatures.
-_HARD_CUT_PATTERNS: tuple[re.Pattern[str], ...] = (
+#
+# Each marker also names the kind of the text it starts (see
+# ``segment_for_embedding``).
+_HARD_CUT_PATTERNS: tuple[tuple[re.Pattern[str], ChunkKind], ...] = (
     # RFC 3676 signature separator. The trailing space is significant.
-    re.compile(r"^-- $"),
+    (re.compile(r"^-- $"), "signature"),
     # Outlook / Exchange forward or reply header block.
-    re.compile(r"^-{2,}\s*Original Message\s*-{2,}\s*$", re.IGNORECASE),
+    (re.compile(r"^-{2,}\s*Original Message\s*-{2,}\s*$", re.IGNORECASE), "quote"),
     # Gmail / Apple Mail forward header.
-    re.compile(r"^-{2,}\s*Forwarded message\s*-{2,}\s*$", re.IGNORECASE),
+    (re.compile(r"^-{2,}\s*Forwarded message\s*-{2,}\s*$", re.IGNORECASE), "forwarded"),
     # Apple Mail forward preamble.
-    re.compile(r"^Begin forwarded message:\s*$", re.IGNORECASE),
+    (re.compile(r"^Begin forwarded message:\s*$", re.IGNORECASE), "forwarded"),
 )
 
 # Reply-header lines like "On Mon, Jan 1, 2024 at 10:00 AM Alice wrote:".
@@ -145,6 +157,21 @@ _OUTLOOK_BLOCK_PATTERN: re.Pattern[str] = re.compile(
 )
 
 
+# Most segments ``segment_for_embedding`` returns for a body with no body
+# text before merging the rest by kind. Real quote-only or forward-only
+# messages have a handful of runs; the merge adds at most one segment
+# per non-body kind.
+_MAX_FALLBACK_SEGMENTS = 32
+
+
+@dataclass(frozen=True)
+class Segment:
+    """A run of a message body that is all one kind of text."""
+
+    kind: ChunkKind
+    text: str
+
+
 def strip_for_embedding(body_text: str) -> str:
     """Return ``body_text`` with quoted replies and signatures removed.
 
@@ -168,63 +195,162 @@ def strip_for_embedding(body_text: str) -> str:
     """
     if not body_text:
         return body_text
-
-    # Preserve the input for the empty-fallback below: the pre-passes
-    # below mutate a working copy, and returning the mutated form on
-    # fallback would defeat the purpose (an Outlook-only quote would
-    # fall back to an empty string, the exact case the fallback exists
-    # to prevent).
-    original = body_text
-
-    # Pre-pass 1 — collapse two-line wrapped reply headers by removing
-    # the span entirely; the line loop downstream would otherwise see
-    # the first half of the wrapped header as junk content because
-    # ``_REPLY_HEADER_PATTERNS`` only matches single-line attributions.
-    for pattern in _WRAPPED_REPLY_HEADER_PATTERNS:
-        body_text = pattern.sub("", body_text)
-
-    # Pre-pass 2 — Outlook ``From:/Sent:/...`` block. Truncate body_text
-    # at the start of the block so the line loop never sees the quoted
-    # history. Mirrors the behavior of the dashed Outlook delimiter in
-    # ``_HARD_CUT_PATTERNS``.
-    outlook_match = _OUTLOOK_BLOCK_PATTERN.search(body_text)
-    if outlook_match is not None:
-        body_text = body_text[: outlook_match.start()]
-
-    kept: list[str] = []
-    for raw_line in body_text.splitlines():
-        # Hard-cut markers end the loop entirely (signature delimiter,
-        # forward preamble). These mark the structural end of the
-        # new-content portion: anything below is reliably not the
-        # user's reply.
-        if _is_hard_cut(raw_line):
-            break
-        # Reply-header lines like "On ... wrote:" are skipped but do
-        # NOT cut — the user's inline answers may live between the
-        # quoted blocks that follow. Checked before the ``>`` rule so a
-        # marker line still drops even if a client prefixes it with a
-        # quote character.
-        if _is_reply_header(raw_line):
-            continue
-        # Quoted-reply lines. Accept any amount of leading whitespace
-        # before the ``>`` — some mail clients indent quoted blocks.
-        if _is_quoted_line(raw_line):
-            continue
-        kept.append(raw_line)
-
-    stripped = "\n".join(kept).strip()
+    text, cut = _pre_pass(body_text)
+    stripped = _body_lines(text, cut)
     if not stripped:
         # Reply with no detectable "new content" — fall back to the
         # original body so the embedding is never seeded from an empty
         # string. An empty embedding input collapses the vector toward
         # the model's default response and poisons similarity ranking
         # for the whole thread.
-        return original
+        return body_text
     return stripped
 
 
-def _is_hard_cut(line: str) -> bool:
-    return any(pattern.match(line) for pattern in _HARD_CUT_PATTERNS)
+def segment_for_embedding(body_text: str) -> list[Segment]:
+    """Return the kind-tagged segments of ``body_text`` the indexer chunks.
+
+    Segmentation happens before chunking, so a chunk never spans kinds
+    (the chunker chunks each segment on its own). Each line gets a kind
+    from the rules ``strip_for_embedding`` applies:
+
+    - ``quote``: ``>`` lines, reply-header lines, and everything from an
+      Outlook reply block or a ``-----Original Message-----`` line on;
+    - ``signature``: from the RFC 3676 ``-- `` delimiter on;
+    - ``forwarded``: from a forward preamble on;
+    - ``body``: every other line before the first of those markers.
+
+    After a marker, ``>`` and reply-header lines are still ``quote``,
+    a later marker switches the kind, and any other line keeps the
+    current marker's kind.
+
+    When the message has body text, the result is one ``body`` segment
+    holding exactly ``strip_for_embedding``'s output: the other kinds
+    are left out, as before. Only a message with no body text (the
+    case ``strip_for_embedding`` falls back on the whole original) is
+    chunked as its non-body segments, one per run of a kind, so its
+    chunks say what they hold. In that case the two-line reply headers
+    removed by the wrapped-header pre-pass are not part of any segment.
+    """
+    if not body_text:
+        return []
+    text, cut = _pre_pass(body_text)
+    # The body scan stops at the first marker, as before kinds, so a
+    # message with body text costs no more than it did; only a message
+    # with none is classified to its end.
+    stripped = _body_lines(text, cut)
+    if stripped:
+        return [Segment("body", stripped)]
+    return _fallback_segments(text, cut)
+
+
+def _pre_pass(body_text: str) -> tuple[str, int]:
+    """Return ``body_text`` after the pre-passes, and where quoted history starts.
+
+    Pre-pass 1 removes two-line wrapped reply headers entirely; the line
+    loop would otherwise see the first half of the wrapped header as
+    junk content because ``_REPLY_HEADER_PATTERNS`` only matches
+    single-line attributions. Pre-pass 2 finds an Outlook
+    ``From:/Sent:/...`` block: everything from its start (the returned
+    offset, or the text's length when there is none) is quoted history,
+    mirroring the dashed Outlook delimiter in ``_HARD_CUT_PATTERNS``.
+    The block starts a line (``^`` after a ``\n``), so splitting the
+    text before and after it yields the same lines as splitting the
+    whole.
+    """
+    for pattern in _WRAPPED_REPLY_HEADER_PATTERNS:
+        body_text = pattern.sub("", body_text)
+    outlook_match = _OUTLOOK_BLOCK_PATTERN.search(body_text)
+    cut = len(body_text) if outlook_match is None else outlook_match.start()
+    return body_text, cut
+
+
+def _body_lines(text: str, cut: int) -> str:
+    """Return the ``body`` lines of ``text[:cut]``, joined and trimmed."""
+    kept: list[str] = []
+    for raw_line in text[:cut].splitlines():
+        # Hard-cut markers (signature delimiter, forward preamble) end
+        # the loop: they mark the structural end of the new-content
+        # portion, and anything below is reliably not the user's reply.
+        if _hard_cut_kind(raw_line) is not None:
+            break
+        # Reply-header lines like "On ... wrote:" are skipped but do
+        # NOT cut — the user's inline answers may live between the
+        # quoted blocks that follow. Checked before the ``>`` rule so a
+        # marker line still drops even if a client prefixes it with a
+        # quote character. Quoted-reply lines accept any amount of
+        # leading whitespace before the ``>`` (some clients indent).
+        if _is_reply_header(raw_line) or _is_quoted_line(raw_line):
+            continue
+        kept.append(raw_line)
+    return "\n".join(kept).strip()
+
+
+# Line terminators ``str.splitlines`` splits on. A line it returns with
+# ``keepends=True`` ends in at most one of them (``\r\n`` counts as one),
+# so stripping this set removes exactly that terminator.
+_LINE_TERMINATORS = "\n\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029"
+
+
+def _fallback_segments(text: str, cut: int) -> list[Segment]:
+    """Classify every line of a body with no body text into kind runs.
+
+    One pass over the lines (line endings kept), each rule a bounded
+    per-line check. A blank line (every ``body`` line is blank here)
+    joins the run before it, and blank lines before the first run are
+    dropped. Every segment is at least one chunk, so a body that
+    alternates kinds line by line would otherwise turn into one chunk
+    (and one embedding) per line: once ``_MAX_FALLBACK_SEGMENTS - 1``
+    runs are closed, later runs are joined per kind as they are found,
+    in order of first appearance. Kinds stay separate and no text is
+    lost, though their lines are no longer interleaved. Text goes
+    straight into one buffer per open run, so what is held is the text
+    itself in at most ``_MAX_FALLBACK_SEGMENTS - 1`` closed runs plus
+    one buffer per kind, not an entry per line or per run.
+    """
+    segments: list[Segment] = []
+    merged: dict[ChunkKind, io.StringIO] = {}
+    run_kind: ChunkKind | None = None
+    # Buffer of the open run: its own while runs are still kept apart,
+    # its kind's merged buffer once the cap is reached.
+    run = io.StringIO()
+
+    halves: tuple[tuple[str, ChunkKind], ...] = ((text[:cut], "body"), (text[cut:], "quote"))
+    for half, start_kind in halves:
+        mode = start_kind
+        for raw_line in half.splitlines(keepends=True):
+            line = raw_line.rstrip(_LINE_TERMINATORS)
+            # A marker switches the kind of the lines after it; ``>``
+            # and reply-header lines are quotes wherever they appear.
+            marker_kind = _hard_cut_kind(line)
+            if marker_kind is not None:
+                mode = kind = marker_kind
+            elif _is_reply_header(line) or _is_quoted_line(line):
+                kind = "quote"
+            else:
+                kind = mode
+            if line.strip() and kind != run_kind:
+                if run_kind is not None and run is not merged.get(run_kind):
+                    segments.append(Segment(run_kind, run.getvalue()))
+                run_kind = kind
+                if len(segments) < _MAX_FALLBACK_SEGMENTS - 1:
+                    run = io.StringIO()
+                else:
+                    if kind not in merged:
+                        merged[kind] = io.StringIO()
+                    run = merged[kind]
+            if run_kind is not None:
+                run.write(raw_line)
+    if run_kind is not None and run is not merged.get(run_kind):
+        segments.append(Segment(run_kind, run.getvalue()))
+    return segments + [Segment(kind, buf.getvalue()) for kind, buf in merged.items()]
+
+
+def _hard_cut_kind(line: str) -> ChunkKind | None:
+    for pattern, kind in _HARD_CUT_PATTERNS:
+        if pattern.match(line):
+            return kind
+    return None
 
 
 def _is_reply_header(line: str) -> bool:

@@ -124,7 +124,10 @@ def _build_schema(conn: sqlite3.Connection) -> None:
             token_est       INTEGER NOT NULL,
             chunked_at      TEXT NOT NULL,
             fts_rowid       INTEGER,
-            attachment_id   TEXT
+            attachment_id   TEXT,
+            kind            TEXT NOT NULL CHECK (kind IN (
+                                'body', 'quote', 'signature', 'forwarded',
+                                'calendar', 'attachment'))
         );
 
         CREATE VIRTUAL TABLE message_chunks_fts USING fts5(
@@ -264,6 +267,7 @@ def _insert_chunk(
     attachment_id: str | None = None,
     char_start: int = 0,
     variant: str = "",
+    kind: str | None = None,
 ) -> None:
     """Insert one ``message_chunks`` + matching FTS + vec row.
 
@@ -277,6 +281,8 @@ def _insert_chunk(
     ``char_start`` is the chunk's offset in its message body; a
     message's later chunks must set it, since bodies are reconstructed by offset. The chunk
     belongs to the claimant ``claimant_of(message_id, variant)``.
+    ``kind`` defaults to ``attachment`` for an attachment chunk, else
+    ``body``.
     """
     cur = conn.cursor()
     cur.execute("INSERT INTO message_chunks_fts (text) VALUES (?)", (text,))
@@ -290,8 +296,8 @@ def _insert_chunk(
         INSERT INTO message_chunks
             (chunk_id, claimant_id, thread_id, chunk_index, text,
              char_start, char_end, token_est,
-             chunked_at, fts_rowid, attachment_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             chunked_at, fts_rowid, attachment_id, kind)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             chunk_id,
@@ -305,6 +311,7 @@ def _insert_chunk(
             chunked_at,
             fts_rowid,
             attachment_id,
+            kind or ("attachment" if attachment_id is not None else "body"),
         ),
     )
     conn.commit()
