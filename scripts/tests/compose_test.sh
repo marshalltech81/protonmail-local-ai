@@ -112,6 +112,13 @@ def bounded_logging:
   ($base[0].networks | to_entries[]
     | select(($m.networks[.key].name) != .value.name or $m.networks[.key].external == true)
     | "network \(.key): renamed or external"),
+  # A network also keeps its driver, driver options and addressing: a
+  # macvlan with LAN IPAM keeps the name but puts its members on the LAN.
+  # (internal: true, which the hardened overlay sets, is not compared.)
+  ($base[0].networks | to_entries[]
+    | select(($m.networks[.key] // {} | {driver, driver_opts, ipam})
+        != (.value | {driver, driver_opts, ipam}))
+    | "network \(.key): driver settings differ from the base"),
   ([$m.networks // {} | .[] | .name] | group_by(.)[] | select(length > 1)
     | "networks share the engine network \(.[0])"),
   # The same for volumes, which services mount by key; a volume also keeps
@@ -508,6 +515,26 @@ networks:
 EOF
 }
 
+# A macvlan bridge-net keeps its engine name but puts Bridge, bound to
+# 0.0.0.0, on the LAN.
+merged_hardening_rejects_network_driver_changes() {
+    expect_overlay_rejected network-drivers \
+        "network bridge-net: driver settings differ from the base" \
+        "network app-net: driver settings differ from the base" <<'EOF'
+networks:
+  bridge-net:
+    driver: macvlan
+    driver_opts:
+      parent: en0
+    ipam:
+      config:
+        - subnet: 192.168.1.0/24
+  app-net:
+    driver_opts:
+      com.docker.network.bridge.host_binding_ipv4: 0.0.0.0
+EOF
+}
+
 # Services mount volumes by key; a volume's name picks the engine volume
 # and its driver settings what backs it (a local bind to a host path).
 merged_hardening_rejects_renamed_or_rebacked_volumes() {
@@ -691,6 +718,8 @@ check "merged hardening rejects an !override that drops a service" \
 check "merged hardening rejects max-size on a driver other than json-file" \
     merged_hardening_rejects_max_size_on_another_logging_driver
 check "merged hardening rejects renamed or shared networks" merged_hardening_rejects_renamed_networks
+check "merged hardening rejects network driver changes" \
+    merged_hardening_rejects_network_driver_changes
 check "merged hardening rejects renamed, shared or rebacked volumes" \
     merged_hardening_rejects_renamed_or_rebacked_volumes
 check "first run keeps Bridge's log driver at none" first_run_keeps_bridge_logging_disabled
