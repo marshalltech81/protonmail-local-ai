@@ -1555,6 +1555,7 @@ do not ship persisted claims without them.
     - **P3 policy:** small P3s with an agreed fix and no new mechanism
       (e.g. #589, #591) may be fixed before go-live; AGENTS.md's Pull
       Requests rule carries the exception.
+15. **#638 implicit TLS (2026-10-02 night):** mbsync ⇄ Bridge IMAP uses implicit TLS (Bridge's "SSL") in both Bridge modes, with no STARTTLS or plaintext fallback; an approved owner-gated TLS change.
 
 ## Open decisions
 

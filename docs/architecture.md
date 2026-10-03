@@ -26,7 +26,7 @@ ProtonBridge container
   - Exposes local SMTP on port 1025
   - Credentials persisted in bridge-data volume
         │
-        │  IMAP (localhost, internal Docker network)
+        │  IMAP over implicit TLS (internal Docker network)
         ▼
 mbsync container
   - Polls Bridge IMAP every SYNC_INTERVAL seconds in a bounded retry loop
@@ -200,7 +200,18 @@ No container is reachable from outside the machine.
 
 ## Bridge Modes
 
-mbsync syncs from one of two Bridges:
+mbsync syncs from one of two Bridges, in both cases over implicit TLS
+(RFC 8314, Bridge's "SSL" IMAP mode, `SSLType IMAPS`; #638): the TLS
+handshake is the first thing on the connection, so there is no
+plaintext phase in which a STARTTLS offer could be stripped or a
+command or response injected before encryption. The Bridge container
+is patched to always serve IMAP this way (its vault's `IMAPSSL`
+setting is ignored); the macOS app must be set to SSL by the operator.
+Certificate extraction (`openssl s_client` without `-starttls`) and
+isync both speak only implicit TLS, with no fallback: a Bridge still
+serving STARTTLS greets in plaintext, the handshake fails, and mbsync
+stops at startup with `Bridge is not serving implicit TLS` before any
+credential is sent.
 
 - **Bridge container (default).** The source-built `protonmail-bridge`
   service on `bridge-net`. mbsync waits for its health check, connects
@@ -236,13 +247,13 @@ entrypoint renders
 ```text
 Host 127.0.0.1
 Tunnel "exec socat - TCP:host.docker.internal:<port>"
-SSLType STARTTLS
+SSLType IMAPS
 CertificateFile /tmp/mbsync/bridge-cert.pem
 ```
 
 With `Tunnel`, isync runs the command instead of opening a socket to
-`Host`, and keeps `Host` only for the certificate check. STARTTLS and
-verification run end to end between mbsync and the app; `socat` only
+`Host`, and keeps `Host` only for the certificate check. Implicit TLS
+and verification run end to end between mbsync and the app; `socat` only
 relays bytes. (`nc` cannot be the relay: isync waits for the server to
 close the connection after `LOGOUT`, and `nc` does not pass that close
 on unless Bridge sends a TLS close_notify.) The trust anchors are
@@ -253,8 +264,11 @@ for `127.0.0.1`), so a different
 certificate at that address is refused twice, by the pin at startup and
 by isync's chain check on every sync. `mbsync/tests/tls_check.sh` (`make
 test-mbsync-tls`, run in CI) exercises both with a synthetic server
-whose certificate has this shape, along with recovery from a Bridge
-that is down at startup.
+whose certificate has this shape and which speaks implicit TLS, along
+with recovery from a Bridge that is down at startup and the refusal of
+a STARTTLS server without sending credentials. `scripts/bridge-smoke.sh`
+checks that the built Bridge image serves implicit TLS on 1143 and
+greets no plaintext client.
 
 The two modes differ in how the first certificate is trusted. The Bridge
 container is the only other service on `bridge-net`, so mbsync trusts
@@ -558,7 +572,7 @@ per-message record.
 files can claim the same one, by accident or to overwrite another
 message's evidence. Every per-message row is therefore keyed by a
 claimant ID rather than the bare Message-ID: the Message-ID plus `#`
-and the first eight hex digits of the SHA-256 of the file's raw bytes
+and the first sixteen hex digits of the SHA-256 of the file's raw bytes
 (`parser.claimant_id`). The bytes are the identity because nothing that
 happens to a Maildir file changes them: flags and the delivery name
 live in the filename and the folder is the directory, so a flag rename,
@@ -924,11 +938,55 @@ keeps its row. The cost is the cache for a re-arrival: the same bytes
 arriving after their last carrier was reaped are extracted again. The
 check is one indexed statement per payload the message carried
 (`idx_attachments_attachment_id` and the extraction primary key), so
-it does not scan either table. The rows are deleted, not overwritten:
-with SQLite's default `secure_delete` off, the freed pages keep the old
-bytes in the database file until SQLite reuses them or the file is
-vacuumed. This holds for every row a reap deletes, not only
-extractions (#602).
+it does not scan either table.
+
+The indexer's write connection sets `PRAGMA secure_delete = ON` (#602),
+so SQLite overwrites the bytes of every row a reap deletes with zeros,
+including freed overflow pages (long bodies and extractions), instead
+of leaving them in free pages of `mail.db`. The indexer image's SQLite
+(Debian trixie's libsqlite3 3.46.1) is compiled with
+`SQLITE_SECURE_DELETE` and already defaults to ON; a Python whose
+bundled SQLite does not (Homebrew Python 3.14's SQLite 3.53.4 defaults
+to OFF) gets the same behaviour from the explicit pragma, so local runs
+and tests match the container. `FAST` was not used because it leaves
+freed overflow pages unzeroed. sqlite-vec zeroes a deleted
+vector's slot in its chunk blob itself, and a chunk emptied by deletes
+is dropped and its pages zeroed. What the pragma does not cover:
+
+- **WAL window.** The zeroed pages reach `mail.db` at the next
+  checkpoint; until then the main file still holds the old page. The
+  WAL frames written when the row was inserted or updated also still
+  hold its text until the WAL is truncated. SQLite's automatic
+  checkpoint restarts the WAL from the start but does not shrink it,
+  so older frames beyond the new write point linger. The indexer's
+  periodic `wal_checkpoint(TRUNCATE)` (every
+  `INDEXER_WAL_CHECKPOINT_INTERVAL_SECS`, default 600 s) ends both;
+  it reports busy and retries on the next pass while an mcp-server
+  read transaction is open, so the window can be longer under
+  continuous queries.
+- **FTS5 index terms.** The FTS5 tables are contentless, so they hold
+  no message text, but the terms of a deleted row (stemmed words with
+  their row and position lists) stay in live `*_fts_data` segment
+  pages until an FTS5 merge rewrites that segment. These pages are not
+  freed, so `secure_delete` does not touch them (#641).
+- **Pages freed before the pragma.** It zeroes pages as later deletes
+  free them; it does not rewrite pages already on the freelist. A
+  `mail.db` reaped under a SQLite that defaulted OFF (an indexer run
+  outside the container, before #602) can still hold those rows'
+  bytes. The container's SQLite already defaulted ON, so a database
+  only ever written by the indexer image is not affected. To clear an
+  affected file, rebuild the index from Maildir, or, with the indexer
+  stopped, run `VACUUM;` against `mail.db` (it rewrites the file
+  without the freelist and needs free space equal to its size).
+- **Below SQLite.** Truncating the WAL and zeroing pages in place do
+  not reach filesystem free blocks, APFS or volume snapshots, or
+  backups of `mail.db`.
+
+Measured on a 169 MB synthetic index (SQLite 3.53), deleting 1,000
+threads with three chunks each took 3.8-4.0 s with the pragma OFF, ON
+or FAST alike; ON wrote about 8 MB of WAL against 6 MB. Dropping an
+emptied sqlite-vec chunk (up to 1,024 vectors, about 16 MiB at 4,096
+dimensions) writes that many zero bytes once under ON.
 
 The purge only looks at payloads the message being reaped carried. A
 database whose reaps ran before #562 can still hold extraction rows

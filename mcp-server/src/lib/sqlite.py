@@ -622,7 +622,7 @@ class MessageRecord:
 
     ``message_id`` is the RFC 5322 Message-ID, which the sender controls,
     so several indexed files can claim one. ``claimant_id`` tells them
-    apart: the Message-ID plus ``#`` and the first eight hex digits of
+    apart: the Message-ID plus ``#`` and the first sixteen hex digits of
     the file's SHA-256 (#217). Every per-message row is keyed by it."""
 
     message_id: str

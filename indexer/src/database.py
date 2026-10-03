@@ -189,6 +189,14 @@ class Database:
         sqlite_vec.load(conn)
         conn.enable_load_extension(False)
         conn.execute("PRAGMA foreign_keys = ON")
+        # Overwrite deleted content with zeros, so a reaped message's
+        # text does not stay in freed pages of mail.db (#602). Set
+        # explicitly because the default depends on how SQLite was
+        # compiled (Debian's build defaults ON, many others OFF). Per
+        # connection; ON rather than FAST, which leaves freed overflow
+        # pages (long bodies and extractions) unzeroed. FTS5 index
+        # terms and WAL frames are not covered; see docs/architecture.md.
+        conn.execute("PRAGMA secure_delete = ON")
         # Performance tuning
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")

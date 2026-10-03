@@ -2712,6 +2712,61 @@ class TestExtractionPurgeOnRemoval:
         assert "SCAN" not in plan
 
 
+class TestSecureDelete:
+    """The write connection runs with ``PRAGMA secure_delete = ON`` so a
+    reap overwrites the deleted rows' bytes instead of leaving them in
+    freed pages of ``mail.db`` (#602)."""
+
+    # Synthetic marker; long enough that the extraction spills onto
+    # overflow pages, which ``FAST`` returns to the freelist unzeroed.
+    _MARKER = "zq-secure-delete-marker-602"
+
+    def test_write_connection_has_secure_delete_on(self, db):
+        # 1 = ON (0 = OFF, 2 = FAST).
+        assert db._conn.execute("PRAGMA secure_delete").fetchone()[0] == 1
+
+    def _reap_marked_extraction(self, db, threader) -> bytes:
+        """Cache a marked extraction on one message, reap that message
+        through the real reap path, checkpoint the WAL into the main
+        file and return the raw bytes of ``mail.db``."""
+        msgs = [make_message(message_id=m, filepath=f"/m/{m}") for m in ("sd@x", "sd-keep@x")]
+        thread = threader.assign_thread(msgs[0])
+        thread.messages.extend(msgs[1:])
+        db.upsert_thread(thread, FAKE_EMBEDDING)
+        attachment_id = "secure-delete-hash".ljust(64, "0")
+        _attach(db, "sd@x", thread.thread_id, attachment_id)
+        db.store_attachment_extraction(
+            attachment_id=attachment_id,
+            extraction_status="success",
+            extractor="pdf-digital",
+            extracted_text=" ".join([self._MARKER] * 2000),
+            extraction_error=None,
+        )
+        # Land the marker in the main file first, so the reap has to
+        # remove it from there rather than from the WAL alone.
+        assert db.wal_checkpoint_truncate()[0] == 0
+        assert self._MARKER.encode() in db.path.read_bytes()
+
+        assert _reap_message(db, thread, "sd@x") == ["/m/sd@x"]
+
+        assert db.get_attachment_extraction(attachment_id) is None
+        assert db.wal_checkpoint_truncate()[0] == 0
+        return db.path.read_bytes()
+
+    def test_reaped_extraction_bytes_are_gone_from_the_file(self, db, threader):
+        raw = self._reap_marked_extraction(db, threader)
+        assert self._MARKER.encode() not in raw
+
+    @pytest.mark.parametrize("mode", ["OFF", "FAST"])
+    def test_without_secure_delete_on_the_bytes_survive(self, db, threader, mode):
+        """Shows the check above can fail: with the pragma OFF, or FAST
+        (freed overflow pages keep their bytes), the reaped text is
+        still in the file after the checkpoint."""
+        db._conn.execute(f"PRAGMA secure_delete = {mode}")
+        raw = self._reap_marked_extraction(db, threader)
+        assert self._MARKER.encode() in raw
+
+
 class TestWalCheckpoint:
     """``Database.wal_checkpoint_truncate`` shrinks the WAL file.
 
@@ -2934,7 +2989,7 @@ class TestMessagesTable:
         row = db._conn.execute(
             "SELECT * FROM messages WHERE message_id = 'm1@example.com'"
         ).fetchone()
-        assert row["claimant_id"] == "m1@example.com#aaaaaaaa"
+        assert row["claimant_id"] == "m1@example.com#aaaaaaaaaaaaaaaa"
         assert row["thread_id"] == "t1"
         assert row["filepath"] == "/maildir/INBOX/cur/m1"
         assert row["folder"] == "INBOX"

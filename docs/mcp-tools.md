@@ -19,8 +19,8 @@ The search, retrieval, and system tools (Groups 1, 2, and 4) publish an
 so two different indexed files can carry the same one (a reused or
 forged ID). The index keeps both rather than letting one overwrite the
 other, and names each by its claimant ID: the Message-ID plus `#` and
-the first eight hex digits of the raw file's SHA-256, for example
-`<id@x.example>` stored as `id@x.example#3f9a2c1b`. It stays the same
+the first sixteen hex digits of the raw file's SHA-256, for example
+`<id@x.example>` stored as `id@x.example#3f9a2c1b7d40e865`. It stays the same
 across flag renames and folder moves, since those do not change the
 file's bytes. Every message row, evidence chunk, and attachment hit
 carries both `message_id` (the header value) and `claimant_id`.

@@ -201,7 +201,11 @@ fails, `mbsync` now logs a specific cause such as:
 - missing `BRIDGE_USER`
 - missing or empty `/run/secrets/bridge_pass`
 - cert extraction timeout
-- `openssl s_client` handshake errors
+- `openssl s_client` handshake errors. mbsync connects with implicit
+  TLS only (#638). With the Bridge container this means the running
+  Bridge image predates that change, so rebuild it (`make build`, then
+  `make up`); in macOS Bridge mode see
+  [macOS Bridge mode](#macos-bridge-mode-mbsync-cannot-reach-or-verify-the-bridge-app)
 - Bridge TLS cert fingerprint does not match the pinned value (see the
   "Bridge cert pin mismatch" section below)
 
@@ -273,9 +277,15 @@ Bridge container to inspect; check the app and the connection instead.
   connected, and compare its IMAP port with `BRIDGE_IMAP_PORT` in
   `.env` (default 1143). To probe from the container:
   `docker exec mbsync nc -z -w 2 host.docker.internal 1143`.
-- **`Bridge IMAP port is reachable` but `cert extraction failed`.** The
-  app's IMAP connection mode is SSL rather than STARTTLS. Switch it back
-  to STARTTLS in the app's settings.
+- **`Bridge IMAP port is reachable` but `cert extraction failed`, with
+  `If Bridge is not serving implicit TLS`.** The app's IMAP connection
+  mode is STARTTLS (the app's default) rather than SSL; `openssl
+  s_client` then usually reports `wrong version number`. mbsync speaks
+  only implicit TLS (#638) and never falls back, so nothing was sent.
+  Switch the app's IMAP connection mode to SSL in its settings, take the
+  fingerprint again if you have not yet
+  ([Set it up](setup.md#set-it-up), step 3; it does not change with the
+  mode), and `make up-macos-bridge`.
 - **`BRIDGE_CERT_FINGERPRINT is not set`.** This mode does not trust
   the app's certificate on first use, so mbsync stops at startup,
   before it waits for or connects to the app. Take the fingerprint on the Mac
