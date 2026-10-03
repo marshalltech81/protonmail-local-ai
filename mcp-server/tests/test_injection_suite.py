@@ -208,8 +208,8 @@ MAILBOX = [
 
 # Compatibility spellings that NFKC folds onto the real tag. Kept out of
 # MAILBOX: see ``TestCompatibilitySpellings``. The brackets are every
-# character whose NFKC form is ``<`` and are escaped (#442); a fullwidth
-# letter in the name is not (#533).
+# character whose NFKC form is ``<`` and are escaped (#442), and so is a
+# fullwidth letter in the name (#533).
 NFKC_BRACKET_THREAD = {
     "thread_id": "t-nfkc-bracket",
     "subject": "invoice compatibility",
@@ -519,8 +519,8 @@ class TestCompatibilitySpellings:
     """NFKC folds fullwidth and small-form brackets and fullwidth letters
     onto the real tag. Whether a model reads them as the delimiter is
     untested, but nothing stops a sender from trying. Every bracket that
-    folds onto ``<`` is escaped like ``<`` (#442); tag names spelled with
-    compatibility or confusable letters are not (#533)."""
+    folds onto ``<`` is escaped like ``<`` (#442), and so is a tag name
+    spelled with compatibility or look-alike letters (#533)."""
 
     @staticmethod
     def _summarize(tmp_path, thread) -> str:
@@ -547,11 +547,6 @@ class TestCompatibilitySpellings:
         )
         _assert_no_marker(caplog.text)
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="#533: delimiter escaping does not cover tag names spelled with "
-        "compatibility letters",
-    )
     def test_letter_spellings_stay_fenced_after_nfkc(self, tmp_path):
         user = self._summarize(tmp_path, NFKC_LETTER_THREAD)
         _assert_fenced(

@@ -713,8 +713,12 @@ commands. The intelligence tools mitigate this two ways:
    or spacing, opened by `<` or by the fullwidth `＜` or small-form `﹤`
    that NFKC folds onto `<`) is escaped to `&lt;/untrusted_email>` —
    email content cannot close the untrusted region early and smuggle
-   text outside it. A tag name spelled with look-alike letters (a
-   fullwidth `ｕ`, a Cyrillic `е`) is not escaped (#533).
+   text outside it. The tag name is matched by the letters it reads
+   as, not its code points (#533): fullwidth, mathematical, circled and
+   small-capital letters, ligatures, accents, zero-width characters and
+   a closed list of Cyrillic, Greek and Armenian look-alikes for the
+   tag's letters (a Cyrillic `е`, a Greek `ο`) do not hide it. This is
+   a fixed list for the tag names, not a general confusables table.
 
 These are defense-in-depth measures — they do not guarantee immunity.
 Operators running `INFERENCE_MODE=anthropic` should still treat retrieved email
