@@ -141,6 +141,11 @@ def _require_minimum_sqlite() -> None:
         )
 
 
+# Every FTS5 table in the schema, in the order ``optimize_deleted_fts``
+# visits them.
+_FTS_TABLES = ("threads_fts", "message_chunks_fts", "attachments_fts")
+
+
 def _synchronized(fn):
     """Serialize ``Database`` method calls across threads.
 
@@ -172,6 +177,9 @@ class Database:
         self._transaction_depth = 0
         # Operator source-authority rules; empty until ``set_authority_rules``.
         self._authority_rules = AuthorityRules()
+        # FTS5 tables that had a row deleted since their last
+        # ``optimize_deleted_fts`` run (#641). In memory only.
+        self._fts_pending_optimize: set[str] = set()
         path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = self._connect()
         self._closed = False
@@ -196,7 +204,8 @@ class Database:
         # compiled (Debian's build defaults ON, many others OFF). Per
         # connection; ON rather than FAST, which leaves freed overflow
         # pages (long bodies and extractions) unzeroed. FTS5 index
-        # terms and WAL frames are not covered; see docs/architecture.md.
+        # terms are removed by ``optimize_deleted_fts`` (#641); WAL
+        # frames are not covered; see docs/architecture.md.
         conn.execute("PRAGMA secure_delete = ON")
         # Performance tuning
         conn.execute("PRAGMA journal_mode=WAL")
@@ -244,6 +253,40 @@ class Database:
             return 0, 0, 0
         # Row order is (busy, log, checkpointed) per SQLite docs.
         return int(row[0]), int(row[1]), int(row[2])
+
+    def optimize_deleted_fts(self) -> list[str]:
+        """Run FTS5 ``optimize`` on each FTS5 table that had a row
+        deleted since its last run, and return the tables optimized.
+
+        The FTS5 tables are ``contentless_delete=1``: a ``DELETE``
+        records a tombstone and leaves the row's index terms (its words
+        and their positions) in live ``*_fts_data`` segment pages, which
+        ``secure_delete`` never frees and FTS5's ``secure-delete``
+        option does not cover for this table type. ``optimize`` merges
+        every segment into one and drops the deleted terms (#641). It
+        rewrites the whole table, so the main loop calls this at most
+        once per WAL-checkpoint interval, just before the checkpoint.
+
+        The lock is taken per table, so a writer waits for one
+        ``optimize`` at most. A table stays pending if its ``optimize``
+        fails, and the error propagates to the caller.
+        """
+        done: list[str] = []
+        for table in _FTS_TABLES:
+            with self._lock:
+                if table not in self._fts_pending_optimize:
+                    continue
+                try:
+                    self._conn.execute(
+                        f"INSERT INTO {table}({table}) VALUES('optimize')"  # nosec B608 - table from the fixed _FTS_TABLES tuple
+                    )
+                    self._conn.commit()
+                except Exception:
+                    self._conn.rollback()
+                    raise
+                self._fts_pending_optimize.discard(table)
+            done.append(table)
+        return done
 
     def _begin_if_needed(self, cur: sqlite3.Cursor) -> bool:
         if self._transaction_depth > 0:
@@ -1192,6 +1235,7 @@ class Database:
                 fts_rowid = existing_fts_rowids.get(chunk_id)
                 if fts_rowid is not None:
                     cur.execute("DELETE FROM message_chunks_fts WHERE rowid = ?", (fts_rowid,))
+                    self._fts_pending_optimize.add("message_chunks_fts")
                 cur.execute("DELETE FROM message_chunks_vec WHERE chunk_id = ?", (chunk_id,))
                 cur.execute("DELETE FROM message_chunks WHERE chunk_id = ?", (chunk_id,))
 
@@ -1465,6 +1509,7 @@ class Database:
         for row in rows:
             if row["fts_rowid"] is not None:
                 cur.execute("DELETE FROM attachments_fts WHERE rowid = ?", (row["fts_rowid"],))
+                self._fts_pending_optimize.add("attachments_fts")
         cur.execute("DELETE FROM attachments WHERE claimant_id = ?", (claimant_id,))
         for attachment_id in sorted({row["attachment_id"] for row in rows}):
             cur.execute(_PURGE_ORPHAN_EXTRACTION_SQL, (attachment_id, attachment_id))
@@ -1766,8 +1811,8 @@ class Database:
             result.append(list(struct.unpack(f"{count}f", blob)))
         return result
 
-    @staticmethod
     def _delete_chunks_in_batches(
+        self,
         cur: sqlite3.Cursor,
         rows: list[sqlite3.Row],
     ) -> None:
@@ -1801,6 +1846,7 @@ class Database:
                 f"DELETE FROM message_chunks_fts WHERE rowid IN ({placeholders})",  # nosec B608
                 int_batch,
             )
+            self._fts_pending_optimize.add("message_chunks_fts")
         for start in range(0, len(chunk_ids), batch_size):
             str_batch = chunk_ids[start : start + batch_size]
             placeholders = ",".join(["?"] * len(str_batch))
@@ -1856,6 +1902,7 @@ class Database:
         ).fetchone()
         if existing and existing["fts_rowid"] is not None:
             cur.execute("DELETE FROM threads_fts WHERE rowid = ?", (existing["fts_rowid"],))
+            self._fts_pending_optimize.add("threads_fts")
         cur.execute(
             "INSERT INTO threads_fts (subject, participants, body) VALUES (?, ?, ?)",
             (subject, participants_json, body),
@@ -2640,6 +2687,7 @@ class Database:
             ]
             if row and row["fts_rowid"] is not None:
                 cur.execute("DELETE FROM threads_fts WHERE rowid = ?", (row["fts_rowid"],))
+                self._fts_pending_optimize.add("threads_fts")
             cur.execute("DELETE FROM threads_vec WHERE thread_id = ?", (thread_id,))
             self._delete_chunks_for_thread(cur, thread_id)
             # Walk every message in the thread to drop its attachments

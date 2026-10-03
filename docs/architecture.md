@@ -25,6 +25,8 @@ ProtonBridge container
   - Exposes local IMAP on port 1143
   - Exposes local SMTP on port 1025
   - Credentials persisted in bridge-data volume
+  - Healthcheck is a TCP connect to 1143: the listener is up, nothing
+    more (see Health and Readiness Signals)
         │
         │  IMAP over implicit TLS (internal Docker network)
         ▼
@@ -204,6 +206,37 @@ incompatible with any remote provider — the overlay is meant for the
 
 The default stack exposes only `127.0.0.1:3000` for the MCP server.
 No container is reachable from outside the machine.
+
+## Health and Readiness Signals
+
+"Bridge is healthy" does not mean "mail is syncing". The path from
+Proton to a searchable index passes through six states, each reported
+by a different signal, and each later state depends on the earlier
+ones (#274):
+
+| State | Meaning | Reported by | Not proven by it |
+| --- | --- | --- | --- |
+| Bridge listening | Something accepts TCP on Bridge's IMAP port | Bridge container health (`docker compose ps`, `make status`): a TCP connect to `localhost:1143` inside the container every 30 s. macOS Bridge mode has no Bridge container; mbsync's `Bridge IMAP port is reachable` line is the nearest equivalent, and it covers only mbsync's startup | TLS, a logged-in account, any sync |
+| TLS handshake OK | Bridge completes implicit TLS with a certificate that matches mbsync's pin | mbsync startup: certificate extraction, the pin (and `BRIDGE_CERT_FINGERPRINT` in macOS Bridge mode). A failure stops mbsync with a named error before any credential is sent. mbsync's health also requires the extracted certificate, so a healthy mbsync passed this on its current start | That isync accepts the certificate: its own validity and host name checks run on each sync, so an expired certificate that still matches the pin shows as failed syncs. A logged-in account, any sync |
+| Bridge authenticated | An account is logged in to Bridge and accepts mbsync's `LOGIN` | No dedicated signal. Bridge listens, completes TLS and greets with no account logged in, and `vault.enc` exists before any login. The first proof is a successful sync; a rejected login is a failed sync in mbsync's log | — |
+| mbsync syncing | mbsync's sync loop is alive | mbsync container health (liveness: a heartbeat touched around every attempt, or a sync or its permission repair running, up to the run's deadline) | That any sync succeeded: the loop is healthy between failed attempts until five consecutive failures exit it and Docker restarts it |
+| Last successful sync | mbsync completed a sync | The success stamp `.mbsync-last-sync.json` at the Maildir root, written by mbsync. `get_mailbox_status` cannot read Maildir; its `last_sync_at` (and the reason `no successful mail sync has been recorded` or `last successful mail sync was ... ago`) is the last sync the indexer has acknowledged, after queuing that sync's mail, so it can lag the stamp | The stamp alone: that the indexer has read it. `last_sync_at`: that the queued mail is indexed yet |
+| Index current | The indexer has acknowledged a recent sync and has no pending or retrying jobs | `get_mailbox_status` `current` and its reasons (see [Index currency](#index-currency)); `make status` prints the same fields | That every message is indexed: dead-lettered jobs (the `dead` count) do not affect `current`, and their messages may be missing from search until `make requeue-dead`. Nor mail that reached Proton after the last sync |
+
+The Bridge healthcheck stays a TCP connect on purpose. mbsync waits
+for it only to avoid racing Bridge's startup; mbsync's own startup then
+checks TLS and the pin with an error that names the cause, and its sync
+results and stamp report the rest. The Bridge runtime image does carry
+`openssl` (a dependency of `ca-certificates`), so a probe that sees the
+greeting over TLS is possible without new packages, but it would add
+little: the greeting arrives whether or not an account is logged in, so
+it still says nothing about authentication or sync. It would also gate
+mbsync on Bridge answering IMAP, and during Bridge's initial download
+of a large mailbox IMAP can be slow or unresponsive for hours, which
+would turn a long first sync into an unhealthy Bridge and a failed
+`make up`. No healthcheck carries credentials. Symptom-to-layer
+diagnostics are in
+[troubleshooting.md](troubleshooting.md#which-layer-is-failing).
 
 ## Bridge Modes
 
@@ -1030,11 +1063,30 @@ is dropped and its pages zeroed. What the pragma does not cover:
   it reports busy and retries on the next pass while an mcp-server
   read transaction is open, so the window can be longer under
   continuous queries.
-- **FTS5 index terms.** The FTS5 tables are contentless, so they hold
-  no message text, but the terms of a deleted row (stemmed words with
-  their row and position lists) stay in live `*_fts_data` segment
-  pages until an FTS5 merge rewrites that segment. These pages are not
-  freed, so `secure_delete` does not touch them (#641).
+- **FTS5 index terms (between maintenance passes).** The FTS5 tables
+  are contentless, so they hold no message text, but the terms of a
+  deleted row (stemmed words with their row and position lists) stay
+  in live `*_fts_data` segment pages until a merge rewrites that
+  segment. These pages are not freed, so `secure_delete` does not
+  touch them, and FTS5's own `secure-delete` option does not apply to
+  `contentless_delete=1` tables (verified on 3.46.1 and 3.53.4). The
+  indexer therefore runs FTS5 `optimize` (#641): each periodic
+  maintenance pass, just before the `wal_checkpoint(TRUNCATE)`, it
+  optimizes every FTS5 table (`threads_fts`, `message_chunks_fts`,
+  `attachments_fts`) that had a row deleted since its last pass. Reaps
+  delete rows, and so does every thread re-index, which replaces the
+  thread's `threads_fts` row. `optimize` merges the table's segments
+  into one and drops the deleted terms; the checkpoint that follows
+  copies the rewritten pages into `mail.db` and truncates the WAL
+  frames that held the old ones. The indexer's write lock is held for
+  one table's `optimize` at a time, and each pass logs one line,
+  `fts optimize tables=<names> duration=<s>`; a failed `optimize` logs
+  its exception type and the table stays pending for the next pass.
+  So a deleted row's terms stay in the file for up to one interval
+  (longer while a busy checkpoint retries, as above). The pending mark
+  is kept in memory: if the indexer stops before the next pass, the
+  terms stay until a later delete in the same table triggers an
+  `optimize`, which rewrites the whole table and removes them too.
 - **Pages freed before the pragma.** It zeroes pages as later deletes
   free them; it does not rewrite pages already on the freelist. A
   `mail.db` reaped under a SQLite that defaulted OFF (an indexer run
@@ -1053,6 +1105,17 @@ threads with three chunks each took 3.8-4.0 s with the pragma OFF, ON
 or FAST alike; ON wrote about 8 MB of WAL against 6 MB. Dropping an
 emptied sqlite-vec chunk (up to 1,024 vectors, about 16 MiB at 4,096
 dimensions) writes that many zero bytes once under ON.
+
+`optimize` rewrites the whole table, so its cost grows with the index,
+not with the delete. Measured with plain timing on a synthetic index
+the size of a ~50k-message mailbox (167 MB: 20,000 threads of about
+800 words, 150,000 chunks of 200 words, 30,000 attachment names) after
+a reap-sized delete, on both 3.53.4 and the image's 3.46.1:
+`threads_fts` 0.41-0.55 s and about 75 MB of WAL, `message_chunks_fts`
+0.75-0.88 s and about 96 MB, `attachments_fts` 0.01 s and 2 MB. The
+WAL is truncated by the checkpoint that follows. During an active
+sync almost every pass re-indexes a thread, so expect `threads_fts`
+to be optimized each interval while mail arrives.
 
 The purge only looks at payloads the message being reaped carried. A
 database whose reaps ran before #562 can still hold extraction rows

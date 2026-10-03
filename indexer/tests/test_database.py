@@ -2767,6 +2767,157 @@ class TestSecureDelete:
         assert self._MARKER.encode() in raw
 
 
+class TestFtsOptimize:
+    """A deleted row's FTS5 index terms stay in live ``*_fts_data``
+    segment pages, which ``secure_delete`` never frees, until a merge
+    rewrites the segment (#641). FTS5's own ``secure-delete`` option
+    does not apply to ``contentless_delete=1`` tables, so
+    ``optimize_deleted_fts`` runs ``optimize`` on each FTS5 table that
+    had a row deleted since its last run."""
+
+    # Synthetic single-token markers, one per FTS5 table. No other
+    # indexed term starts with ``zq``, so FTS5's prefix compression
+    # keeps each one contiguous in its segment page.
+    _THREAD = "zqthreadmark"
+    _CHUNK = "zqchunkmark"
+    _FILE = "zqfilemark"
+
+    def _index_and_reap(self, db, threader) -> None:
+        """Index a message carrying a marker in each FTS5 table, land
+        it in the main file, then reap it through the real reap path."""
+        marked = make_message(
+            message_id="fts@x", filepath="/m/fts@x", body_text=f"hello {self._THREAD} there"
+        )
+        keep = make_message(message_id="fts-keep@x", filepath="/m/fts-keep@x", body_text="survivor")
+        thread = threader.assign_thread(marked)
+        thread.messages.append(keep)
+        db.upsert_thread(thread, FAKE_EMBEDDING)
+        chunk = _make_chunk("c" * 64, 0, f"chunk {self._CHUNK} text")
+        db.replace_message_chunks(
+            claimant_id="fts@x",
+            thread_id=thread.thread_id,
+            chunks=[chunk],
+            embeddings_by_chunk_id={chunk.chunk_id: FAKE_EMBEDDING},
+        )
+        attachment_id = "fts-optimize-hash".ljust(64, "0")
+        db.upsert_attachment(
+            claimant_id="fts@x",
+            thread_id=thread.thread_id,
+            attachment_id=attachment_id,
+            filename=f"{self._FILE}.pdf",
+            content_type="application/pdf",
+            size_bytes=1,
+            occurrence_id=attachment_occurrence_id(
+                claimant_id="fts@x",
+                content_hash=attachment_id,
+                filename=f"{self._FILE}.pdf",
+                occurrence_index=0,
+            ),
+        )
+        # Indexing a new thread deletes nothing from FTS5.
+        assert db.optimize_deleted_fts() == []
+        assert db.wal_checkpoint_truncate()[0] == 0
+        raw = db.path.read_bytes()
+        for marker in (self._THREAD, self._CHUNK, self._FILE):
+            assert marker.encode() in raw
+        assert _reap_message(db, thread, "fts@x") == ["/m/fts@x"]
+
+    def test_reaped_terms_survive_without_optimize(self, db, threader):
+        """Shows the check below can fail: after the reap and a
+        checkpoint the terms are still in the file."""
+        self._index_and_reap(db, threader)
+        assert db.wal_checkpoint_truncate()[0] == 0
+        raw = db.path.read_bytes()
+        for marker in (self._THREAD, self._CHUNK, self._FILE):
+            assert marker.encode() in raw
+
+    def test_optimize_after_reap_removes_terms_from_the_file(self, db, threader):
+        self._index_and_reap(db, threader)
+        assert db.optimize_deleted_fts() == [
+            "threads_fts",
+            "message_chunks_fts",
+            "attachments_fts",
+        ]
+        assert db.wal_checkpoint_truncate()[0] == 0
+        raw = db.path.read_bytes()
+        for marker in (self._THREAD, self._CHUNK, self._FILE):
+            assert marker.encode() not in raw
+        # Keyword search still works: the survivor matches, the reaped
+        # message does not.
+        assert (
+            db._conn.execute(
+                "SELECT COUNT(*) FROM threads_fts WHERE threads_fts MATCH 'survivor'"
+            ).fetchone()[0]
+            == 1
+        )
+        for table, marker in (
+            ("threads_fts", self._THREAD),
+            ("message_chunks_fts", self._CHUNK),
+            ("attachments_fts", self._FILE),
+        ):
+            assert (
+                db._conn.execute(
+                    f"SELECT COUNT(*) FROM {table} WHERE {table} MATCH ?",  # nosec B608
+                    (marker,),
+                ).fetchone()[0]
+                == 0
+            )
+
+    def _optimize_statements(self, db) -> list[str]:
+        seen: list[str] = []
+        db._conn.set_trace_callback(lambda sql: seen.append(sql) if "optimize" in sql else None)
+        return seen
+
+    def test_no_deletes_no_optimize(self, db):
+        seen = self._optimize_statements(db)
+        db.upsert_thread(make_thread([make_message(message_id="new@x")]), FAKE_EMBEDDING)
+        assert db.optimize_deleted_fts() == []
+        assert seen == []
+
+    def test_optimizes_each_table_once_per_delete_burst(self, db, threader):
+        self._index_and_reap(db, threader)
+        seen = self._optimize_statements(db)
+        assert len(db.optimize_deleted_fts()) == 3
+        assert len(seen) == 3
+        # Nothing deleted since: the next pass does no work.
+        assert db.optimize_deleted_fts() == []
+        assert len(seen) == 3
+
+    def test_thread_reindex_marks_threads_fts(self, db):
+        """``_replace_fts_row`` deletes the old row on every re-index."""
+        thread = make_thread([make_message(message_id="re@x")])
+        db.upsert_thread(thread, FAKE_EMBEDDING)
+        assert db.optimize_deleted_fts() == []
+        db.upsert_thread(thread, FAKE_EMBEDDING)
+        assert db.optimize_deleted_fts() == ["threads_fts"]
+
+    def test_failed_optimize_stays_pending(self, db, threader):
+        self._index_and_reap(db, threader)
+        real = db._conn
+
+        class _Failing:
+            def execute(self, sql, *args):
+                if "optimize" in sql:
+                    raise sqlite3.OperationalError("disk I/O error")
+                return real.execute(sql, *args)
+
+            def __getattr__(self, name):
+                return getattr(real, name)
+
+        db._conn = _Failing()  # type: ignore[assignment]
+        try:
+            with pytest.raises(sqlite3.OperationalError):
+                db.optimize_deleted_fts()
+        finally:
+            db._conn = real
+        assert not real.in_transaction
+        assert db.optimize_deleted_fts() == [
+            "threads_fts",
+            "message_chunks_fts",
+            "attachments_fts",
+        ]
+
+
 class TestWalCheckpoint:
     """``Database.wal_checkpoint_truncate`` shrinks the WAL file.
 
