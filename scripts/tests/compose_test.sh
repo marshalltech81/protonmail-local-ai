@@ -109,6 +109,13 @@ def bounded_logging:
 # join networks by key and the name picks the engine network.
 | ($base[0].services | keys[] | select(. as $k | $m.services | has($k) | not)
     | "\(.): missing from the merged config"),
+  # Every base service also starts with no profile active ($active), as
+  # the Makefile runs Compose. Only the macOS overlay moves one out:
+  # Bridge, into the never-activated container-bridge profile.
+  ($base[0].services | keys[] | . as $k
+    | select($active[0].services | has($k) | not)
+    | select($k != "protonmail-bridge" or $m.services[$k].profiles != ["container-bridge"])
+    | "\($k): not started without a profile"),
   ($base[0].networks | to_entries[]
     | select(($m.networks[.key].name) != .value.name or $m.networks[.key].external == true)
     | "network \(.key): renamed or external"),
@@ -215,11 +222,15 @@ def bounded_logging:
 '
 
 # Renders the given compose files with every profile and fails, listing
-# the violations, unless the merged config keeps the hardening.
+# the violations, unless the merged config keeps the hardening. It also
+# renders them with no profile, as every Makefile target runs them, for
+# the set of services that actually start ($active).
 expect_merged_hardening() {
+    render "$@" || return 1
+    cp "$WORK/config.json" "$WORK/active.json"
     ALL_PROFILES=1 render "$@" || return 1
-    jq -r --slurpfile base "$WORK/base.json" "$HARDENING_VIOLATIONS" "$WORK/config.json" \
-        >"$WORK/violations" || return 1
+    jq -r --slurpfile base "$WORK/base.json" --slurpfile active "$WORK/active.json" \
+        "$HARDENING_VIOLATIONS" "$WORK/config.json" >"$WORK/violations" || return 1
     if [[ -s "$WORK/violations" ]]; then
         cat "$WORK/violations"
         return 1
@@ -515,6 +526,29 @@ networks:
 EOF
 }
 
+# No Makefile target activates a profile, so a service an overlay moves
+# into one silently stops running; only the macOS overlay's Bridge profile
+# is expected.
+merged_hardening_rejects_services_moved_into_a_profile() {
+    expect_overlay_rejected profiled-services \
+        "indexer: not started without a profile" \
+        "mcp-server: not started without a profile" <<'EOF' || return 1
+services:
+  indexer:
+    profiles: [manual]
+  mcp-server:
+    profiles: [manual]
+EOF
+    expect_overlay_rejected profiled-bridge \
+        "protonmail-bridge: not started without a profile" <<'EOF'
+services:
+  protonmail-bridge:
+    profiles: [manual]
+  mbsync:
+    depends_on: !reset {}
+EOF
+}
+
 # A macvlan bridge-net keeps its engine name but puts Bridge, bound to
 # 0.0.0.0, on the LAN.
 merged_hardening_rejects_network_driver_changes() {
@@ -718,6 +752,8 @@ check "merged hardening rejects an !override that drops a service" \
 check "merged hardening rejects max-size on a driver other than json-file" \
     merged_hardening_rejects_max_size_on_another_logging_driver
 check "merged hardening rejects renamed or shared networks" merged_hardening_rejects_renamed_networks
+check "merged hardening rejects services moved into a profile" \
+    merged_hardening_rejects_services_moved_into_a_profile
 check "merged hardening rejects network driver changes" \
     merged_hardening_rejects_network_driver_changes
 check "merged hardening rejects renamed, shared or rebacked volumes" \
