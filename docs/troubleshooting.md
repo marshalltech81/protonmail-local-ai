@@ -732,10 +732,14 @@ UID 1002 alone read access with an ACL (needs the `acl` package):
 
 ```bash
 setfacl -b config/authority.toml && chmod 600 config/authority.toml && setfacl -m u:1002:r config/authority.toml
-make restart-indexer
 ```
 
-Run it again after an editor replaces the file, since the new file has
+Then rerun the command that failed: `make up` on first run (`make
+up-macos-bridge` in [macOS Bridge mode](setup.md#macos-bridge-mode-optional)),
+since no indexer container exists yet for a restart to act on, or
+`make restart-indexer` for a running stack.
+
+Run the `setfacl` line again after an editor replaces the file, since the new file has
 no ACL. If `make up` instead reports that `config` is not searchable by
 the indexer, run the `setfacl -m u:1002:x` command it prints. If it
 reports that another host account has UID 1002, that account could read

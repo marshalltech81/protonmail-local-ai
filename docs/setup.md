@@ -391,7 +391,8 @@ install -m 600 config/authority.toml.example config/authority.toml
 setfacl -m u:1002:r config/authority.toml
 # edit: one table per class, with `addresses` (exact) and/or
 # `domains` (the domain and its subdomains)
-make restart-indexer
+make restart-indexer   # a running stack; on first run, make up
+                       # (make up-macos-bridge in macOS Bridge mode)
 ```
 
 `config/authority.toml` is gitignored: it holds real addresses and
@@ -422,9 +423,11 @@ UID 1002 read access too, so if `getent passwd 1002` names another
 account (and you are not UID 1002), `make up` fails: give that account
 another UID (as root, `usermod -u <new-uid> <account>`) or remove it.
 The indexer must also be able to enter `config/` itself; if the
-directory lacks the search bit for other accounts (a checkout made
-under a `077` umask), `make up` fails and prints `setfacl -m u:1002:x
-config`.
+directory lacks the search bit for the indexer (a checkout made under
+a `077` umask, or a `config/` whose group is GID 1002 without the
+group search bit), `make up` fails and prints `setfacl -m u:1002:x
+config`. This check needs `getfacl` (the `acl` package) unless UID
+1002 owns `config/`.
 An editor that saves by writing a new file drops the ACL; `make
 restart-indexer` then fails with the same command. With rootless
 Docker or `userns-remap` the container's UID 1002 maps to a different
