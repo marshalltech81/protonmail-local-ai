@@ -686,8 +686,8 @@ Triaged against `d30e500` by four parallel agents; every issue is real
 and most reproduced with synthetic input. PRs in the order to land
 them (one test-first commit per issue, `Fixes #N` per issue):
 
-**Handoff 2026-10-03 — start here.** **Ready for go-live once #673's
-fix merges** (below). Every other pre-go-live item has merged: the evening run (#592–#630) and the
+**Handoff 2026-10-03 — start here.** **Ready for go-live.** Every
+pre-go-live item has merged: the evening run (#592–#630) and the
 night run (#639–#667, under Recently Completed, 2026-10-02 night).
 No PR is open.
 
@@ -695,7 +695,12 @@ Go-live (owner): in the Bridge app set the IMAP connection mode to
 **SSL** (implicit TLS, #643; the fingerprint is unchanged and is read
 with `openssl s_client -connect 127.0.0.1:1143 </dev/null | openssl
 x509 -noout -fingerprint -sha256`, no `-starttls`); fill
-`.secrets/bridge_pass.txt` and `.secrets/embed_api_key.txt`; then
+the macOS Bridge mode setup in `docs/setup.md` ("macOS Bridge mode"):
+`.env` needs `BRIDGE_USER` (the app's IMAP username),
+`BRIDGE_CERT_FINGERPRINT`, `EMBED_BASE_URL` and `EMBED_MODEL` (a
+4096-dim model), and `.secrets/` needs `bridge_pass.txt` (the app's
+IMAP password), `embed_api_key.txt` and, for the default
+`INFERENCE_MODE=anthropic`, `inference_api_key.txt`; then
 `make build-macos-bridge` and `make up-macos-bridge` from a fresh
 Maildir and index (the v0 schema and keys changed many times
 tonight). Record the first sync's duration and set
@@ -708,15 +713,17 @@ Right after the first sync:
    `Authentication-Results` format.
 2. #497's live test passes → close #497.
 
-**Go-live blocker:** #673 (P2), the chunker taking ~14 min on a crafted
-12 MB marker-dense body (it predates #659): a crafted message could hold
-the single ingestion worker. Merge its fix before the first sync.
+#673 (the chunker stall on a crafted marker-dense body) is fixed in
+#684: splitting is now linear, and a 12 MB worst case takes 10–29 s,
+about what an ordinary 12 MB body costs. Lowering that further needs a
+per-message text budget (drops text) or a tokenize-once chunker
+(owner decision, below).
 
 Next session, in order (no owner decision needed):
 
-1. P3s from review: #662, #663, #668, #669 (validate-env/docs on
-   Linux), #680 (Hangul fillers in delimiter tags), #670 (budgeted
-   FTS5 merge), #648 (periodic calibration re-check).
+1. P3s from review: #670 (budgeted FTS5 merge), #648 (periodic
+   calibration re-check). (#680 is fixed in #682; #662, #663, #668 and
+   #669 are in #683.)
 2. Answer-evaluation follow-ups: #671, #672, #674–#679; then #655–#657.
 
 Needs the owner:
@@ -740,6 +747,9 @@ Needs the owner:
   `isyncuidmap.db`, `mbsyncstate*`) are skipped silently; reporting
   them needs an extra IMAP listing.
 - **ChatGPT:** needs the hosted-client design after go-live.
+- **Chunking cost ceiling (#684):** a 12 MB body still takes 10–29 s
+  to chunk; a per-message text budget or a tokenize-once chunker would
+  lower it.
 
 **Handoff 2026-10-02, afternoon (superseded).** Both go-live
 blockers are done: #432 (xlsx streaming pre-pass, #572) and MCP
@@ -780,7 +790,7 @@ Operator steps before go-live, in addition to the checklist:
    `make first-run` and `make up` (plain `make build` builds the unused
    Bridge image), with `BRIDGE_CERT_FINGERPRINT` taken from the Bridge
    app (`docs/setup.md`, "macOS Bridge mode"). It is built and tested
-   against a synthetic STARTTLS server only (#571); the owner's live
+   against a synthetic implicit-TLS server only (#571, #643); the owner's live
    test against the real app is the owner's go-live (Resolved decisions 14). #497
    was reopened on 2026-10-02 to close once that live test passes, which
    now uses implicit TLS (#638).
@@ -815,8 +825,8 @@ roughly this order; each is its own PR:
    (done: #610, #630, #620, #614, #616; #607 with #630).
 
 Waiting on real data: #487 (evidence and output budgets), #488
-(container resource budgets) and #282 (the mbsync stall deadline, set
-above the first sync's measured duration). Other open P3s: #490
+(container resource budgets). #282 is fixed (#651) with a provisional
+24 h `SYNC_DEADLINE_SECONDS`; tune it from the first sync's duration. Other open P3s: #490
 (the limitation is documented; a language setting is not built).
 #489 is pre-go-live work by the owner's explicit decision (Resolved
 decisions 14), not under the small-P3 exception.
@@ -849,7 +859,8 @@ Next session, in order:
    the measurements waiting on real data (#287 budgets, #288, #289).
 
 Backlog filed from review (P3 or edge cases, not scheduled): #454,
-and from 2026-10-02 #524, #526 and #533, plus the afternoon's
+and from 2026-10-02 #524, #526 and #533 (all fixed: #654, #653,
+#667), plus the afternoon's
 deferred findings (#562, #574, #575, #577–#582, #584, #588, #589; see
 Known limitations, Maintenance backlog and Open decisions). #442,
 #446, #447, #449, #450, #455, #456, #460, #461, #464, #465, #468,
@@ -939,8 +950,8 @@ Go-live checklist (do these before more hardening):
 Deferred as issues: ~~#362~~ (done: #522, falls back to the raw
 filename parameter when `get_filename()` raises), #428 (xlsx parts openpyxl
 loads whole), #316's index-side remainder (Phase 2 reindex), and the
-mbsync design families (#282; #275, #279 and #281 are done, #276 and
-#277 are done in #521 and #515).
+mbsync design families (all done: #282 in #651; #275, #279 and #281
+in #598 and #606; #276 and #277 in #521 and #515).
 
 Open owner decision: **#267** one-shot rotation. #342 shipped the
 documented limitation (recreate with `BRIDGE_CERT_PIN_ROTATE=false`);
@@ -1335,9 +1346,12 @@ can be revisited with an explicit owner decision.
   only removes the `.eml` when Maildir is mounted read-write
 - a reap overwrites freed pages (`secure_delete` on, #642) and FTS5
   terms are removed by an `optimize` before the next checkpoint (#666),
-  so deleted mail text can stay in the WAL or in FTS5 pages for up to
-  one checkpoint interval (default 600 s), and below SQLite in
-  filesystem free blocks, snapshots and backups
+  so deleted mail text normally leaves the file within one checkpoint
+  interval (default 600 s); it can stay longer when a checkpoint is
+  busy or an `optimize` fails (both retry on later passes) or the
+  indexer restarts first (the pending set is memory-only; the next
+  delete in that table clears it), and below SQLite in filesystem
+  free blocks, snapshots and backups (`docs/architecture.md`)
 - macOS Bridge mode is tested only against a synthetic implicit-TLS
   Bridge server (#571, #643); the owner's go-live is the live test
 - coverage scope: both services measure `src/` with `src/main.py`
@@ -1412,7 +1426,8 @@ do not ship persisted claims without them.
     yet current"; then set #282's stall deadline above the observed
     initial backfill — that duration is the one measurement still
     needed, and #277 lands before #282. #277 implemented in #515;
-    #282 waits on the measurement.
+    #282 implemented in #651 with a provisional 24 h deadline, tuned
+    after the first sync.
 11. **#268 smoke-test scope (2026-09-30):** the minimal fix
     (distinguish the intentional post-marker kill from a fatal exit)
     with #269; the requested IMAP/STARTTLS/SAN/restart checks are the
@@ -1516,8 +1531,10 @@ do not ship persisted claims without them.
     - **#533 look-alike letters in delimiter tags:** defer (superseded
       2026-10-02 night: fixed in #667; #680 remains).
     - **#526 `authority.toml` on Linux Docker Engine:** stays
-      documented; deferred until a Linux deployment.
-    - **#524 folders opened by a failed mbsync attempt:** defer.
+      documented; deferred until a Linux deployment (superseded
+      2026-10-02 night: fixed in #653).
+    - **#524 folders opened by a failed mbsync attempt:** defer
+      (superseded 2026-10-02 night: fixed in #654).
     - **#494 agent-eval scoring:** keep strict argument matching and
       first-call tool selection; build the live-trace recorder after
       go-live.
@@ -1638,7 +1655,11 @@ deadline (#651, #282), re-watch after a failed sync (#654, #524),
 `authority.toml` readable on Linux via an ACL (#653, #526),
 look-alike letters in delimiter tags (#667, #533), the Bash 3.2 test
 fix (#647, #629), merged-Compose check gaps (#665, #631–#637), and
-Bridge health states documented (#664, #274). The first slice of the
+Bridge health states documented (#664, #274). Later the same night: the chunker's
+splitters no longer re-tokenize every prefix (#684, #673; a crafted
+12 MB marker-dense body went from ~14 min to 10–29 s) and delimiter
+tags with default-ignorable characters such as Hangul fillers are
+escaped (#682, #680). The first slice of the
 answer-quality evaluation with a separately configured judge, on the
 synthetic corpus only (#658, refs #604). Closed as documented: #603,
 #626; superseded: #434.
