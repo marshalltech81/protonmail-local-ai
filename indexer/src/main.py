@@ -317,7 +317,8 @@ INITIAL_INDEX_BATCH_SIZE = _int_env("INITIAL_INDEX_BATCH_SIZE", 50)
 # selection.
 STEADY_STATE_BATCH_SIZE = _int_env("INDEXER_STEADY_STATE_BATCH_SIZE", 8)
 
-# How often (seconds) the main loop calls ``Database.wal_checkpoint_truncate``.
+# How often (seconds) the main loop runs ``_run_wal_maintenance``: FTS5
+# ``optimize`` on tables with deletes, then ``Database.wal_checkpoint_truncate``.
 # An open connection does not pin the WAL; only an open read transaction
 # does. SQLite's automatic checkpoint lets the WAL be reused from the
 # start once its frames are checkpointed, but it never shrinks the file,
@@ -2063,6 +2064,41 @@ def _prune_reaped_records(db: Database) -> None:
         log.info("pruned %d expired reaped-message record(s)", pruned)
 
 
+def _run_wal_maintenance(db: Database) -> None:
+    """One WAL-checkpoint-interval maintenance pass.
+
+    First FTS5 ``optimize`` on each FTS5 table that had a row deleted
+    since the last pass (reaps and thread re-indexes both delete), so a
+    deleted row's index terms leave the live segment pages (#641). Then
+    the truncate checkpoint, which copies the rewritten pages into
+    ``mail.db`` and clears the WAL frames that still held the old ones.
+    A failed ``optimize`` leaves its table pending for the next pass
+    and does not skip the checkpoint.
+    """
+    try:
+        started = time.monotonic()
+        tables = db.optimize_deleted_fts()
+        if tables:
+            log.info(
+                "fts optimize tables=%s duration=%.2fs",
+                ",".join(tables),
+                time.monotonic() - started,
+            )
+    except Exception as e:
+        log.error("fts optimize failed: %s", type(e).__name__)
+    try:
+        busy, _log_pages, ckpt_pages = db.wal_checkpoint_truncate()
+        if busy:
+            log.debug(
+                "wal_checkpoint busy=%d (a reader pinned WAL frames; next pass will retry)",
+                busy,
+            )
+        elif ckpt_pages:
+            log.debug("wal_checkpoint truncated %d page(s)", ckpt_pages)
+    except Exception as e:
+        log.error("wal checkpoint failed: %s", e)
+
+
 def _log_reconciler_config(cfg: ReconcilerConfig) -> None:
     if not cfg.enabled:
         log.info(
@@ -2341,20 +2377,10 @@ def main():
             # shrinks the file, so an explicit periodic
             # ``wal_checkpoint(TRUNCATE)`` is what reclaims space. It
             # can only complete when no reader holds an open read
-            # transaction on the WAL (``busy`` below).
+            # transaction on the WAL. The pass first optimizes FTS5
+            # tables with deletes (#641); see ``_run_wal_maintenance``.
             if now - last_wal_checkpoint >= WAL_CHECKPOINT_INTERVAL_SECS:
-                try:
-                    busy, _log_pages, ckpt_pages = db.wal_checkpoint_truncate()
-                    if busy:
-                        log.debug(
-                            "wal_checkpoint busy=%d (a reader pinned WAL frames; "
-                            "next pass will retry)",
-                            busy,
-                        )
-                    elif ckpt_pages:
-                        log.debug("wal_checkpoint truncated %d page(s)", ckpt_pages)
-                except Exception as e:
-                    log.error("wal checkpoint failed: %s", e)
+                _run_wal_maintenance(db)
                 last_wal_checkpoint = now
 
             time.sleep(1)
