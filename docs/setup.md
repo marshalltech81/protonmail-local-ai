@@ -419,9 +419,11 @@ the file to that state:
 `setfacl -b config/authority.toml && chmod 600 config/authority.toml && setfacl -m u:1002:r config/authority.toml`.
 Do not widen the mode or hand the file to a host group instead: GID
 1002 may belong to another account on the host. The ACL grants host
-UID 1002 read access too, so if `getent passwd 1002` names another
-account (and you are not UID 1002), `make up` fails: give that account
-another UID (as root, `usermod -u <new-uid> <account>`) or remove it.
+UID 1002 read access too, so if `getent passwd` names any account other
+than yours with UID 1002 (one sharing your UID counts), `make up` fails:
+give that account another UID (as root, `usermod -u <new-uid>
+<account>`) or remove it. This check needs `getent` (`libc-bin` on
+Debian and Ubuntu).
 The indexer must also be able to enter `config/` itself; if the
 directory lacks the search bit for the indexer (a checkout made under
 a `077` umask, or a `config/` whose group is GID 1002 without the

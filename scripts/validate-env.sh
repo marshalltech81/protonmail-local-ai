@@ -168,9 +168,21 @@ require_indexer_can_search_on_linux() {
     exit 1
 }
 
+# Print the passwd entries for the given key (all of them without one);
+# a key with no entry (status 2) prints nothing.
+passwd_entries() {
+    local status=0
+
+    getent passwd "$@" || status=$?
+    ((status == 0 || status == 2)) || {
+        printf 'ERROR: getent passwd failed with status %s.\n' "$status" >&2
+        exit 1
+    }
+}
+
 require_indexer_readable_on_linux() {
     local path="$1"
-    local mode acl account quoted fix
+    local mode acl account entries quoted fix
 
     quoted="$(printf '%q' "$path")"
     fix="setfacl -b $quoted && chmod 600 $quoted && setfacl -m u:${INDEXER_UID}:r $quoted"
@@ -194,11 +206,20 @@ require_indexer_readable_on_linux() {
         exit 1
     fi
     require_indexer_can_search_on_linux "$(dirname "$path")"
-    # Either grant also covers host UID 1002, so fail when another host
-    # account holds it (the operator's own account is not another).
-    if [[ "$(id -u)" != "$INDEXER_UID" ]] && command -v getent >/dev/null &&
-        account="$(getent passwd "$INDEXER_UID")"; then
-        account="${account%%:*}"
+    # Either grant also covers host UID 1002, so fail when a host account
+    # other than the operator's own holds it, including one sharing the
+    # operator's UID. A lookup by UID finds directory-service accounts
+    # that a listing may leave out but names only one account; the
+    # listing finds a second account with the same UID.
+    command -v getent >/dev/null || {
+        printf 'ERROR: getent is needed to check for another host account with UID %s; install it (libc-bin on Debian and Ubuntu).\n' \
+            "$INDEXER_UID" >&2
+        exit 1
+    }
+    entries="$(passwd_entries "$INDEXER_UID")"$'\n'"$(passwd_entries)"
+    account="$(awk -F: -v uid="$INDEXER_UID" -v me="$(id -un)" \
+        '$3 == uid && $1 != me { print $1; exit }' <<<"$entries")"
+    if [[ -n "$account" ]]; then
         printf 'ERROR: host account %s has UID %s, the indexer'"'"'s UID, so the access granted to the indexer lets that account read %s too. Give the account another UID, or remove it, as root:\n  usermod -u <new-uid> %s\n' \
             "$account" "$INDEXER_UID" "$path" "$(printf '%q' "$account")" >&2
         exit 1

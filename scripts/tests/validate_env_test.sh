@@ -458,7 +458,8 @@ loose_secret_mode_fails() {
 # file and $STUBS/diracl, or else the mode's base entries, for a
 # directory, and `getent passwd 1002`
 # finds an account only when $STUBS/uid1002 exists; `id -u` (the
-# operator) is 4242, or $STUBS/operator-uid when a case writes it.
+# operator, `id -un` "operator") is 4242, or $STUBS/operator-uid when a
+# case writes it; `getent passwd` lists the operator, then `other`.
 stub_host() {
     local os="$1" owner="${2:-}"
     STUBS="$(mktemp -d "$WORK/stubs.XXXXXX")"
@@ -510,28 +511,40 @@ if [[ "$*" == '-u' ]]; then
     printf '4242\n'
     exit 0
 fi
+[[ "$*" == '-un' ]] && { printf 'operator\n'; exit 0; }
 exec /usr/bin/id "$@"
 STUB
+    # The operator's entry comes first, so a direct lookup of a UID the
+    # operator shares with `other` finds only the operator.
     cat >"$STUBS/getent" <<'STUB'
 #!/bin/bash
-[[ "$1 $2" == 'passwd 1002' && -e "$(dirname "$0")/uid1002" ]] || exit 2
-printf 'other:x:1002:1002::/home/other:/bin/bash\n'
+stubs="$(dirname "$0")"
+[[ "$1" == passwd ]] || exit 2
+operator_uid=4242
+[[ -e "$stubs/operator-uid" ]] && operator_uid="$(cat "$stubs/operator-uid")"
+entries="operator:x:$operator_uid:$operator_uid::/home/operator:/bin/bash"
+[[ -e "$stubs/uid1002" ]] && entries+=$'\nother:x:1002:1002::/home/other:/bin/bash'
+if [[ $# -eq 1 ]]; then
+    printf '%s\n' "$entries"
+    exit 0
+fi
+grep -m 1 "^[^:]*:x:$2:" <<<"$entries" || exit 2
 STUB
     chmod 755 "$STUBS"/*
     PATH="$STUBS:$PATH"
 }
 
-# Take getfacl off PATH: drop its stub and link every other command
-# into one directory that leaves it out.
-hide_getfacl() {
-    local bin="$STUBS/bin" dir cmd
+# Take NAME off PATH: drop its stub and link every other command into
+# one directory that leaves it out.
+hide_command() {
+    local name="$1" bin="$STUBS/bin" dir cmd
     local -a dirs
-    rm "$STUBS/getfacl"
+    rm "$STUBS/$name"
     mkdir "$bin"
     IFS=: read -ra dirs <<<"${PATH#"$STUBS:"}"
     for dir in "${dirs[@]}"; do
         for cmd in "$dir"/*; do
-            [[ -x "$cmd" && ! -d "$cmd" && "${cmd##*/}" != getfacl && ! -e "$bin/${cmd##*/}" ]] ||
+            [[ -x "$cmd" && ! -d "$cmd" && "${cmd##*/}" != "$name" && ! -e "$bin/${cmd##*/}" ]] ||
                 continue
             ln -s "$cmd" "$bin/${cmd##*/}"
         done
@@ -683,10 +696,31 @@ linux_operator_holding_uid_1002_passes() {
     stub_host Linux 1002
     setup
     write_authority 600
-    : >"$STUBS/uid1002"
     printf '1002\n' >"$STUBS/operator-uid"
     passes
     ! grep -F 'host account' "$WORK/output"
+}
+
+# Review round 1: another account sharing UID 1002 with the operator
+# reads the file just the same, though a lookup by UID names only the
+# operator.
+linux_account_sharing_operator_uid_1002_fails() {
+    stub_host Linux 1002
+    setup
+    write_authority 600
+    printf '1002\n' >"$STUBS/operator-uid"
+    : >"$STUBS/uid1002"
+    fails_with "$HOST_ACCOUNT_1002_ERROR"
+}
+
+# Review round 1: without getent the account check cannot run.
+linux_missing_getent_fails() {
+    stub_host Linux 4242
+    setup
+    write_authority 640
+    write_acl "${INDEXER_ONLY_ACL[@]}"
+    hide_command getent
+    fails_with 'getent is needed to check for another host account with UID 1002'
 }
 
 # Review round 1: the indexer must also be able to search config/, the
@@ -738,7 +772,7 @@ linux_config_dir_check_without_getfacl_fails() {
     write_authority 600
     chmod 701 "$ROOT/config"
     printf '4242\n' >"$STUBS/dir-owner"
-    hide_getfacl
+    hide_command getfacl
     fails_with "getfacl is needed to check the ACL on $ROOT/config; install the acl package."
     printf '1002\n' >"$STUBS/dir-owner"
     passes
@@ -911,6 +945,9 @@ check "Linux: a host account with UID 1002 fails" linux_host_account_1002_fails
 check "Linux: a UID 1002 owner with a host account fails" \
     linux_owner_1002_with_host_account_fails
 check "Linux: an operator holding UID 1002 passes" linux_operator_holding_uid_1002_passes
+check "Linux: an account sharing the operator's UID 1002 fails" \
+    linux_account_sharing_operator_uid_1002_fails
+check "Linux: a missing getent fails" linux_missing_getent_fails
 check "Linux: an unsearchable config directory fails" linux_unsearchable_config_dir_fails
 check "Linux: the fix command quotes the path" linux_fix_command_quotes_the_path
 check "Linux: a config directory ACL denying UID 1002 fails" \
