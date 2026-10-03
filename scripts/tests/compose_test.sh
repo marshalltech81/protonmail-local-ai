@@ -156,10 +156,12 @@ def bounded_logging:
         and ($svc | IN("protonmail-bridge", "mbsync") | not)
         then "joins bridge-net" else empty end),
     # A service the base does not define must name its non-root user (an
-    # unset user is the image default, possibly root) and gets no secrets.
+    # unset user is the image default, possibly root) and gets no secrets or base volumes.
     (if $bs == null then
         (if $s.user == null then "sets no user" else empty end),
-        (if ($s | list("secrets")) != [] then "uses a secret" else empty end)
+        (if ($s | list("secrets")) != [] then "uses a secret" else empty end),
+        ($s | list("volumes")[] | .source // "" | select(. as $v | $base[0].volumes | has($v))
+            | "mounts the base volume \(.)")
     else
         # Another image or build may default to root, so it must name a
         # user (the root check above rejects a root one).
@@ -181,6 +183,10 @@ def bounded_logging:
             then "mem_limit is missing or above the base" else empty end),
         ($s.networks // {} | keys[] | select(. as $n | $bs.networks // {} | has($n) | not)
             | "joins network \(.), which the base does not give it"),
+        ($s | list("volumes")[] | . as $v
+            | select([$bs | list("volumes")[]
+                | select(.type == $v.type and .source == $v.source and .target == $v.target)] == [])
+            | "mounts \($v.source // $v.type) at \($v.target), which the base does not"),
         ($bs | list("volumes")[] | select(.read_only == true) | .target as $t
             | select([$s | list("volumes")[] | select(.target == $t and .read_only == true)] == [])
             | "volume at \($t) is no longer read-only")
@@ -422,6 +428,29 @@ services:
 EOF
 }
 
+# A named volume is neither a bind nor the docker socket, but mounting
+# another service's volume hands over its data, to an existing service or
+# a new one.
+merged_hardening_rejects_added_volumes() {
+    expect_overlay_rejected added-volumes \
+        "mcp-server: mounts bridge-data at /bridge, which the base does not" \
+        "indexer: mounts sqlite-volume at /extra, which the base does not" \
+        "extra: mounts the base volume bridge-data" <<'EOF'
+services:
+  mcp-server:
+    volumes:
+      - bridge-data:/bridge:ro
+  indexer:
+    volumes:
+      - sqlite-volume:/extra:ro
+  extra:
+    image: example.invalid/extra:1
+    user: "1234:1234"
+    volumes:
+      - bridge-data:/bridge:ro
+EOF
+}
+
 # A decimal UID of zeros is still root.
 merged_hardening_rejects_leading_zero_root_users() {
     expect_overlay_rejected zero-users \
@@ -618,6 +647,7 @@ check "merged hardening rejects the forbidden settings" merged_hardening_rejects
 check "merged hardening rejects redefined secrets" merged_hardening_rejects_redefined_secrets
 check "merged hardening rejects a new image or build without a user" \
     merged_hardening_rejects_a_new_image_without_a_user
+check "merged hardening rejects volumes an overlay adds" merged_hardening_rejects_added_volumes
 check "merged hardening rejects leading-zero root users" \
     merged_hardening_rejects_leading_zero_root_users
 check "merged hardening rejects an !override that drops a service" \
