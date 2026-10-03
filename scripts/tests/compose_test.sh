@@ -110,12 +110,14 @@ def bounded_logging:
 | ($base[0].services | keys[] | select(. as $k | $m.services | has($k) | not)
     | "\(.): missing from the merged config"),
   # Every base service also starts with no profile active ($active), as
-  # the Makefile runs Compose. Only the macOS overlay moves one out:
+  # the Makefile runs Compose, and is not scaled to zero. Only the macOS
+  # overlay ($macos: it is among the rendered files) moves one out:
   # Bridge, into the never-activated container-bridge profile.
-  ($base[0].services | keys[] | . as $k
-    | select($active[0].services | has($k) | not)
-    | select($k != "protonmail-bridge" or $m.services[$k].profiles != ["container-bridge"])
-    | "\($k): not started without a profile"),
+  ($base[0].services | keys[] | . as $k | $active[0].services[$k] as $a
+    | select($a == null or $a.scale == 0 or $a.deploy.replicas == 0)
+    | select($k != "protonmail-bridge" or $macos != true
+        or $m.services[$k].profiles != ["container-bridge"])
+    | "\($k): not started by a plain up"),
   ($base[0].networks | to_entries[]
     | select(($m.networks[.key].name) != .value.name or $m.networks[.key].external == true)
     | "network \(.key): renamed or external"),
@@ -163,7 +165,7 @@ def bounded_logging:
     ("privileged", "cap_add", "devices", "gpus", "device_cgroup_rules", "volumes_from",
      "extends", "network_mode", "pid", "ipc", "uts", "userns_mode", "cgroup", "use_api_socket"
         | select(. as $k | $s | set($k)) | "sets \(.)"),
-    (if ($s.user // "" | tostring | test("^(root|0+)(:|$)")) then "runs as root" else empty end),
+    (if ($s.user // "" | tostring | test("^(root|[+-]?0+)(:|$)")) then "runs as root" else empty end),
     ($s | list("volumes")[] | select((.source // "") | test("docker\\.sock"))
         | "mounts the docker socket"),
     ($s | list("volumes")[] | select(.type == "bind" and .read_only != true)
@@ -226,10 +228,17 @@ def bounded_logging:
 # renders them with no profile, as every Makefile target runs them, for
 # the set of services that actually start ($active).
 expect_merged_hardening() {
+    local file macos=false
+    for file in "$@"; do
+        if [[ "$file" == "$MACOS" ]]; then
+            macos=true
+        fi
+    done
     render "$@" || return 1
     cp "$WORK/config.json" "$WORK/active.json"
     ALL_PROFILES=1 render "$@" || return 1
     jq -r --slurpfile base "$WORK/base.json" --slurpfile active "$WORK/active.json" \
+        --argjson macos "$macos" \
         "$HARDENING_VIOLATIONS" "$WORK/config.json" >"$WORK/violations" || return 1
     if [[ -s "$WORK/violations" ]]; then
         cat "$WORK/violations"
@@ -481,15 +490,21 @@ services:
 EOF
 }
 
-# A decimal UID of zeros is still root.
+# A decimal UID of zeros, signed or not, is still root: Docker parses it
+# with Go's strconv.Atoi.
 merged_hardening_rejects_leading_zero_root_users() {
     expect_overlay_rejected zero-users \
-        "indexer: runs as root" "mbsync: runs as root" <<'EOF'
+        "indexer: runs as root" "mbsync: runs as root" \
+        "mcp-server: runs as root" "protonmail-bridge: runs as root" <<'EOF'
 services:
   indexer:
     user: "00"
   mbsync:
     user: "000:000"
+  mcp-server:
+    user: "-0"
+  protonmail-bridge:
+    user: "+00:+000"
 EOF
 }
 
@@ -531,8 +546,8 @@ EOF
 # is expected.
 merged_hardening_rejects_services_moved_into_a_profile() {
     expect_overlay_rejected profiled-services \
-        "indexer: not started without a profile" \
-        "mcp-server: not started without a profile" <<'EOF' || return 1
+        "indexer: not started by a plain up" \
+        "mcp-server: not started by a plain up" <<'EOF' || return 1
 services:
   indexer:
     profiles: [manual]
@@ -540,12 +555,33 @@ services:
     profiles: [manual]
 EOF
     expect_overlay_rejected profiled-bridge \
-        "protonmail-bridge: not started without a profile" <<'EOF'
+        "protonmail-bridge: not started by a plain up" <<'EOF' || return 1
 services:
   protonmail-bridge:
     profiles: [manual]
   mbsync:
     depends_on: !reset {}
+EOF
+    # The container-bridge profile is allowed only with the macOS overlay,
+    # which also points mbsync at the host app.
+    expect_overlay_rejected container-bridge-profile \
+        "protonmail-bridge: not started by a plain up" <<'EOF' || return 1
+services:
+  protonmail-bridge:
+    profiles: [container-bridge]
+  mbsync:
+    depends_on: !reset {}
+EOF
+    # A service scaled to zero is rendered but starts no container.
+    expect_overlay_rejected scaled-to-zero \
+        "indexer: not started by a plain up" \
+        "mbsync: not started by a plain up" <<'EOF'
+services:
+  indexer:
+    scale: 0
+  mbsync:
+    deploy:
+      replicas: 0
 EOF
 }
 
