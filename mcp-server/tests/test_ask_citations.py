@@ -383,7 +383,7 @@ class TestReviewRound1:
         assert len(chunk.message_sender) <= 2 * _SENDER_FETCH_CHARS + 3
 
     def test_long_attribution_still_leaves_passage_text(self):
-        claimant = "x" * 5_000 + "@example.com#1a2b3c4d"
+        claimant = "x" * 5_000 + "@example.com#1a2b3c4d5e6f7a8b"
         chunk = ChunkResult(
             chunk_id="c-long",
             message_id=claimant.split("#")[0],
@@ -417,8 +417,9 @@ class TestReviewRound1:
         header, _, text = rendered.partition("\n")
         assert header.startswith("[E1 | message ")
         assert len(header) <= _LABELLED_HEADER_MAX_CHARS
-        # The claimant suffix that tells claimants of one Message-ID apart survives.
-        assert claimant[-9:] in header
+        # The whole claimant suffix that tells claimants of one Message-ID
+        # apart survives: "#" plus all sixteen hex digits (#454).
+        assert "…#1a2b3c4d5e6f7a8b |" in header
         assert text.startswith("Signed total: 700 units.")
         assert len(text) >= 2000 - _LABELLED_HEADER_MAX_CHARS - 1
 
