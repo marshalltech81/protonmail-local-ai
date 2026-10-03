@@ -18,6 +18,9 @@
 #     where it names a `build` or an `image`. An overlay that only
 #     adjusts an existing service is not asked to repeat them, but it
 #     cannot set any of the forbidden values above.
+# What a file-by-file scan cannot see, such as an overlay's `!reset` or
+# `!override` clearing inherited hardening, scripts/tests/compose_test.sh
+# checks on the merged config of each overlay combination (#580).
 #
 # Every rule's paths.include lists each file name Docker Compose loads:
 # the docker-compose* names and the newer compose* defaults, which
@@ -438,6 +441,32 @@ rules:
       exclude:
         - ".semgrep/"
     pattern: "volumes_from: $SOURCES"
+
+  - id: compose-include
+    languages: [yaml]
+    severity: ERROR
+    message: >-
+      A top-level `include` imports another file's services, networks and
+      volumes. The fragment can have any name, so these rules may never
+      scan it and the Compose path filters may never trigger on it. Put
+      the services in a docker-compose*.yml overlay instead.
+    paths:
+      include:
+        - "docker-compose*.yml"
+        - "docker-compose*.yaml"
+        - "compose*.yml"
+        - "compose*.yaml"
+      exclude:
+        - ".semgrep/"
+    # Only the root-level key imports anything; a nested `include` (a
+    # label, an x- extension field) is data.
+    patterns:
+      - pattern: "include: $FILES"
+      - pattern-not-inside: |
+          $PARENT:
+            ...
+            include: $FILES
+            ...
 
   - id: compose-bridge-net-member
     languages: [yaml]

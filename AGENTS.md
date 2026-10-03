@@ -806,7 +806,7 @@ Notes:
 - MCP search changes should verify hybrid/RRF behavior where applicable
 - mbsync entrypoint changes should update `mbsync/tests/entrypoint_test.sh`, which loads the real functions with external commands mocked; changes to mbsync's TLS or connection settings should also pass `make test-mbsync-tls` (the shipped image against a synthetic STARTTLS server)
 - changes to `mbsync/mbsyncrc.template` should pass `make test-mbsync-layout` (the shipped image's isync against synthetic Maildir stores: folder layout, and spurious and genuine UIDVALIDITY changes with the documented recovery)
-- Compose changes that touch service selection, dependencies, hardening or ports should keep `scripts/tests/compose_test.sh` passing for both Bridge modes
+- Compose changes that touch service selection, dependencies, hardening or ports should keep `scripts/tests/compose_test.sh` passing for both Bridge modes; it also checks the required hardening on the merged config of every overlay combination the Makefile uses, so a new overlay or combination is added to its list
 - Bridge entrypoint changes should update `bridge/tests/entrypoint_test.sh`, which does the same with a synthetic GPG keyring and pass store
 - `bridge/patch-source.sh` text-patch changes should keep `bridge/tests/patch_source_test.sh` passing; it runs the helper on a synthetic tree under strict (non-GNU) sed escapes, since `make bridge-patch-check` runs it with BSD sed on macOS
 - indexing, chunking, embedding-storage, or retrieval changes should pass `make baseline`; if ranking changes on purpose, regenerate the snapshot with `make baseline UPDATE=1` and explain the snapshot diff in the PR

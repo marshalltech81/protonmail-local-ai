@@ -190,6 +190,9 @@ services:
       - mbsync
 
   sneaky-three:
+    labels:
+      # ok: compose-include
+      include: search-index
     # ruleid: compose-root-user
     user: "0:0"
     # ok: compose-docker-socket
@@ -220,3 +223,7 @@ volumes:
       # ruleid: compose-writable-host-bind-mount
       o: bind
       device: /srv/data
+
+# ruleid: compose-include
+include:
+  - other-compose.yml
