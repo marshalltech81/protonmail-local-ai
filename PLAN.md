@@ -686,8 +686,8 @@ Triaged against `d30e500` by four parallel agents; every issue is real
 and most reproduced with synthetic input. PRs in the order to land
 them (one test-first commit per issue, `Fixes #N` per issue):
 
-**Handoff 2026-10-03 — start here.** **Ready for go-live.** Every
-pre-go-live item has merged: the evening run (#592–#630) and the
+**Handoff 2026-10-03 — start here.** **Ready for go-live once #673's
+fix merges** (below). Every other pre-go-live item has merged: the evening run (#592–#630) and the
 night run (#639–#667, under Recently Completed, 2026-10-02 night).
 No PR is open.
 
@@ -708,14 +708,16 @@ Right after the first sync:
    `Authentication-Results` format.
 2. #497's live test passes → close #497.
 
+**Go-live blocker:** #673 (P2), the chunker taking ~14 min on a crafted
+12 MB marker-dense body (it predates #659): a crafted message could hold
+the single ingestion worker. Merge its fix before the first sync.
+
 Next session, in order (no owner decision needed):
 
-1. **#673 (P2):** the chunker takes ~14 min on a crafted 12 MB
-   marker-dense body (predates #659); bound it per AGENTS.md.
-2. P3s from review: #662, #663, #668, #669 (validate-env/docs on
+1. P3s from review: #662, #663, #668, #669 (validate-env/docs on
    Linux), #680 (Hangul fillers in delimiter tags), #670 (budgeted
    FTS5 merge), #648 (periodic calibration re-check).
-3. Answer-evaluation follow-ups: #671, #672, #674–#679; then #655–#657.
+2. Answer-evaluation follow-ups: #671, #672, #674–#679; then #655–#657.
 
 Needs the owner:
 
@@ -1314,12 +1316,16 @@ can be revisited with an explicit owner decision.
 
 - initial sync may take a long time on large mailboxes
 - attachment OCR assumes English (#490)
-- on Linux Docker Engine the indexer cannot read a mode-600
-  `config/authority.toml` owned by the operator (#526); macOS file
-  sharing (OrbStack, Docker Desktop) is unaffected
+- on Linux Docker Engine the services cannot read their mode-600,
+  operator-owned `.secrets/*.txt` files (#652, owner decision);
+  `config/authority.toml` is handled by an ACL check in `validate-env`
+  (#653). macOS file sharing (OrbStack, Docker Desktop) is unaffected
 - the schema is effectively locked to 4096-dim
-  Qwen3-Embedding-8B-shaped models (hardcoded dim, no stored model
-  identity, vendored tokenizer) — Phase 2
+  Qwen3-Embedding-8B-shaped models (hardcoded dim, vendored
+  tokenizer); the embedder's identity and a calibration vector are
+  stored and checked at startup (#650), so switching models or moving
+  the embed endpoint needs a rebuild until the Phase 2 lifecycle
+  exists; an embedder outage at startup stops the server (#661)
 - audio/video attachment transcription is not supported; PDF / DOCX /
   XLSX / HTML / TXT / images are extracted, chunked, and searchable
 - `list_threads(filter_type=...)` rejects unsupported values cleanly;
@@ -1327,14 +1333,13 @@ can be revisited with an explicit owner decision.
 - deletion reconciliation is on by default (mirror) and not yet validated under
   long-running real-world conditions; `INDEXER_UNLINK_ON_REAP=true`
   only removes the `.eml` when Maildir is mounted read-write
-- a reap deletes rows but does not overwrite them: with SQLite's
-  default `secure_delete` off, freed pages keep a reaped message's
-  bytes in the database file until reused or vacuumed (#602)
-- a database whose reaps ran before #562 keeps the extraction rows
-  those reaps orphaned until it is rebuilt or cleaned by hand (#626;
-  `docs/architecture.md` "Cascade on message removal")
-- macOS Bridge mode is tested only against a synthetic Bridge server (STARTTLS until #638 switches it to implicit TLS)
-  (#571); the owner's go-live is the live test
+- a reap overwrites freed pages (`secure_delete` on, #642) and FTS5
+  terms are removed by an `optimize` before the next checkpoint (#666),
+  so deleted mail text can stay in the WAL or in FTS5 pages for up to
+  one checkpoint interval (default 600 s), and below SQLite in
+  filesystem free blocks, snapshots and backups
+- macOS Bridge mode is tested only against a synthetic implicit-TLS
+  Bridge server (#571, #643); the owner's go-live is the live test
 - coverage scope: both services measure `src/` with `src/main.py`
   omitted. The indexer's `main.py` has grown to hold the whole
   two-phase pipeline, which `tests/test_main.py` exercises but the
