@@ -1209,10 +1209,14 @@ endpoint_setup() {
     load expected_fingerprint validate_bridge_endpoint render_mbsync_config
 }
 
-# The settings either mode must keep: STARTTLS with the extracted
-# certificate, pull-only, no expunge, the folder exclusions.
+# The settings either mode must keep: implicit TLS (#638) with the
+# extracted certificate, pull-only, no expunge, the folder exclusions.
 config_keeps_sync_safety() {
-    grep -qx 'SSLType STARTTLS' "$CONFIG_FILE" || return 1
+    grep -qx 'SSLType IMAPS' "$CONFIG_FILE" || return 1
+    if grep -v '^#' "$CONFIG_FILE" | grep -qi 'starttls'; then
+        echo "the config must not set STARTTLS"
+        return 1
+    fi
     grep -qx 'CertificateFile /tmp/mbsync/bridge-cert.pem' "$CONFIG_FILE" || return 1
     grep -qx 'User synthetic@example.com' "$CONFIG_FILE" || return 1
     grep -qx 'PassCmd "cat /run/secrets/bridge_pass"' "$CONFIG_FILE" || return 1
@@ -1332,7 +1336,12 @@ extraction_reaches_the_host_and_pins_its_cert() {
     BRIDGE_CERT_FINGERPRINT="$(cert_fingerprint "$WORK/cert-a.pem")"
     printf '%s\n' "$WORK/cert-a.pem" >"$SERVED"
     extract_bridge_cert
-    grep -q -- '-connect host.docker.internal:1144 -starttls imap' "$S_CLIENT_CALLS" || return 1
+    grep -q -- '-connect host.docker.internal:1144' "$S_CLIENT_CALLS" || return 1
+    # Implicit TLS (#638): the handshake is the first thing on the wire.
+    if grep -q -- '-starttls' "$S_CLIENT_CALLS"; then
+        echo "extraction must not use STARTTLS"
+        return 1
+    fi
     if grep -q '127.0.0.1' "$S_CLIENT_CALLS"; then
         echo "the certificate name is not an address to connect to"
         return 1
@@ -1343,6 +1352,30 @@ extraction_reaches_the_host_and_pins_its_cert() {
     rm -f "$CERT_FILE"
     extract_bridge_cert
     cmp -s "$CERT_FILE" "$WORK/cert-a.pem" || return 1
+}
+
+# #638: a Bridge serving STARTTLS or plaintext fails the implicit TLS
+# handshake, so s_client yields no certificate. Extraction fails closed
+# with a fixed message naming the fix, and nothing is pinned or kept.
+# shellcheck disable=SC2034 # used by the entrypoint functions loaded with eval
+a_bridge_not_serving_implicit_tls_is_refused() {
+    local err rc=0
+    extract_setup not-tls
+    BRIDGE_CERT_FINGERPRINT="$(cert_fingerprint "$WORK/cert-a.pem")"
+    : >"$WORK/no-cert.pem"
+    printf '%s\n' "$WORK/no-cert.pem" >"$SERVED"
+    err="$(extract_bridge_cert 2>&1)" || rc=$?
+    ((rc == 1)) || return 1
+    [[ ! -e "$PIN_FILE" && ! -e "$CERT_FILE" ]] || return 1
+    [[ "$err" == *"refusing to sync"* ]] || return 1
+    [[ "$err" == *"not serving implicit TLS"* ]] || return 1
+    [[ "$err" == *"IMAP connection mode to SSL"* ]] || return 1
+    # Exactly one s_client attempt: no retry over STARTTLS or plaintext.
+    [[ "$(wc -l <"$S_CLIENT_CALLS" | tr -d '[:space:]')" == "1" ]] || return 1
+    if grep -q -- '-starttls' "$S_CLIENT_CALLS"; then
+        echo "extraction fell back to STARTTLS"
+        return 1
+    fi
 }
 
 a_different_cert_at_the_host_is_refused() {
@@ -1602,6 +1635,8 @@ check "invalid Bridge endpoints are refused" invalid_endpoints_are_refused
 check "extraction reaches the host and pins its cert; a restart is accepted" \
     extraction_reaches_the_host_and_pins_its_cert
 check "a different cert at the pinned host is refused" a_different_cert_at_the_host_is_refused
+check "a Bridge not serving implicit TLS is refused with the fix (#638)" \
+    a_bridge_not_serving_implicit_tls_is_refused
 check "a cert host's first boot without an expected fingerprint is refused, unpinned" \
     first_boot_without_expected_fingerprint_is_refused_unpinned
 check "a cert host's first boot with another expected fingerprint is refused, unpinned" \

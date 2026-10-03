@@ -190,7 +190,7 @@ render_mbsync_config() {
     # With BRIDGE_CERT_HOST (the macOS Bridge app, whose certificate is
     # issued for 127.0.0.1 only), Host is that name and the connection to
     # BRIDGE_HOST:BRIDGE_IMAP_PORT goes through a Tunnel, which isync opens
-    # instead of a socket to Host. STARTTLS, the certificate check and the
+    # instead of a socket to Host. Implicit TLS, the certificate check and the
     # pinned CertificateFile are unchanged: TLS runs end to end between
     # mbsync and Bridge, and socat only relays bytes. socat rather than nc,
     # because isync waits for the server's close after LOGOUT and nc does
@@ -351,15 +351,19 @@ extract_bridge_cert() {
     cert_tmp="$(mktemp "${RUNTIME_DIR}/bridge-cert.XXXXXX")"
     openssl_err_file="$(mktemp "${RUNTIME_DIR}/openssl-s_client.XXXXXX")"
 
+    # Implicit TLS, like mbsyncrc's SSLType IMAPS (#638): the handshake is
+    # the first thing on the connection. A Bridge serving STARTTLS or
+    # plaintext greets in plaintext instead, the handshake fails, and so
+    # does the extraction. There is no second attempt without TLS.
     echo ">>> Extracting Bridge TLS cert from ${BRIDGE_HOST}:${BRIDGE_IMAP_PORT}..."
     if ! timeout "${CERT_EXTRACT_TIMEOUT_SECONDS}s" \
         openssl s_client \
             -connect "${BRIDGE_HOST}:${BRIDGE_IMAP_PORT}" \
-            -starttls imap \
             < /dev/null \
             2>"$openssl_err_file" \
         | openssl x509 > "$cert_tmp"; then
         echo ">>> ERROR: cert extraction failed — refusing to sync without cert pinning." >&2
+        echo ">>> mbsync connects with implicit TLS only. If Bridge is not serving implicit TLS on ${BRIDGE_HOST}:${BRIDGE_IMAP_PORT} (it serves STARTTLS or plaintext), the handshake fails here: with the Bridge container, rebuild it from this version (make build, then make up); in macOS Bridge mode, set the Bridge app's IMAP connection mode to SSL. See docs/troubleshooting.md." >&2
         if [[ -s "$openssl_err_file" ]]; then
             echo ">>> openssl s_client stderr follows:" >&2
             cat "$openssl_err_file" >&2

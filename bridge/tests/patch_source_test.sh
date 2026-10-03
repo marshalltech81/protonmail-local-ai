@@ -41,7 +41,7 @@ check() {
     fi
 }
 
-# Writes the four upstream patch points, indented with tabs as gofmt does,
+# Writes the five upstream patch points, indented with tabs as gofmt does,
 # and mock go / pkg-config / sed executables. $2 picks the sed wrapper:
 #   escape  - `\t` in an argument becomes `t` (strict POSIX / older BSD)
 #   tabs    - additionally, a literal tab becomes `t`, so any tab the
@@ -57,6 +57,8 @@ setup() {
     printf '%s%sAutoUpdate:        true,\n' "$TAB" "$TAB" > "$SRC/internal/vault/types_settings.go"
     printf '%sautoUpdateEnabled := bridge.vault.GetAutoUpdate()\n' "$TAB" \
         > "$SRC/internal/bridge/updates.go"
+    printf 'func (vault *Vault) GetIMAPSSL() bool {\n%sreturn vault.getSafe().Settings.IMAPSSL\n}\n' \
+        "$TAB" > "$SRC/internal/vault/settings.go"
 
     cat > "$BIN/go" <<'EOF'
 #!/bin/bash
@@ -105,10 +107,35 @@ lost_indentation_fails_the_san_guard() {
         "$WORK/mangled.out" || return 1
 }
 
+# #638: the IMAP getter returns true whatever the vault stores, so the
+# Bridge container serves IMAP with implicit TLS for old and new vaults.
+imap_ssl_getter_is_forced_true() {
+    setup imapssl escape
+    run_patch
+    grep -F -x -q -- "${TAB}return true // protonmail-local-ai: IMAP always uses implicit TLS (#638)" \
+        "$SRC/internal/vault/settings.go" || return 1
+    ! grep -q 'Settings.IMAPSSL' "$SRC/internal/vault/settings.go" || return 1
+}
+
+# Upstream changed the getter: the guard fails instead of skipping the hunk.
+changed_imap_ssl_getter_fails_the_guard() {
+    setup imapdrift escape
+    printf 'func (vault *Vault) GetIMAPSSL() bool {\n%sreturn vault.get().Settings.IMAPSSL\n}\n' \
+        "$TAB" > "$SRC/internal/vault/settings.go"
+    local rc=0
+    run_patch >"$WORK/imapdrift.out" 2>&1 || rc=$?
+    cat "$WORK/imapdrift.out"
+    ((rc != 0)) || return 1
+    grep -q 'Patch drift detected: expected 1 match(es) for upstream IMAP SSL getter' \
+        "$WORK/imapdrift.out" || return 1
+}
+
 check "strict sed escapes still insert a tab-indented SAN line (#617)" \
     strict_sed_inserts_tab_indented_san_line
 check "a SAN line without its tab indentation fails the guard (#617)" \
     lost_indentation_fails_the_san_guard
+check "the IMAP SSL getter is forced to implicit TLS (#638)" imap_ssl_getter_is_forced_true
+check "a changed IMAP SSL getter fails the guard (#638)" changed_imap_ssl_getter_fails_the_guard
 
 if ((FAILURES > 0)); then
     printf '%d test(s) failed\n' "$FAILURES" >&2
