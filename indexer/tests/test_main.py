@@ -6469,3 +6469,77 @@ class TestPruneReapedRecords:
         with pytest.raises(_Unreachable):
             main.main()
         assert db._conn.execute("SELECT COUNT(*) FROM reaped_messages").fetchone()[0] == 0
+
+
+class TestWalMaintenance:
+    """``_run_wal_maintenance`` runs FTS5 ``optimize`` on tables with
+    deletes, then the truncate checkpoint, so the checkpoint clears the
+    WAL copies of the rewritten segments (#641)."""
+
+    def test_optimizes_before_checkpoint_and_logs_fixed_line(self, caplog):
+        calls: list[str] = []
+        db = MagicMock()
+        db.optimize_deleted_fts.side_effect = lambda: (
+            calls.append("optimize")
+            or [
+                "threads_fts",
+                "attachments_fts",
+            ]
+        )
+        db.wal_checkpoint_truncate.side_effect = lambda: calls.append("checkpoint") or (0, 0, 0)
+        with caplog.at_level(logging.INFO, logger=main.log.name):
+            main._run_wal_maintenance(db)
+        assert calls == ["optimize", "checkpoint"]
+        lines = [r.getMessage() for r in caplog.records if "fts optimize" in r.getMessage()]
+        assert len(lines) == 1
+        assert lines[0].startswith("fts optimize tables=threads_fts,attachments_fts duration=")
+
+    def test_no_deletes_logs_nothing(self, caplog):
+        db = MagicMock()
+        db.optimize_deleted_fts.return_value = []
+        db.wal_checkpoint_truncate.return_value = (0, 0, 0)
+        with caplog.at_level(logging.DEBUG, logger=main.log.name):
+            main._run_wal_maintenance(db)
+        assert not [r for r in caplog.records if "fts optimize" in r.getMessage()]
+        db.wal_checkpoint_truncate.assert_called_once()
+
+    def test_optimize_failure_logs_type_and_still_checkpoints(self, caplog):
+        db = MagicMock()
+        db.optimize_deleted_fts.side_effect = sqlite3.OperationalError("zq-marker-641")
+        db.wal_checkpoint_truncate.return_value = (0, 0, 0)
+        with caplog.at_level(logging.DEBUG, logger=main.log.name):
+            main._run_wal_maintenance(db)
+        db.wal_checkpoint_truncate.assert_called_once()
+        assert "fts optimize failed: OperationalError" in caplog.text
+        assert "zq-marker-641" not in caplog.text
+
+    def test_real_database_reap_then_maintenance_clears_terms(self, tmp_path):
+        """End to end on a real database: a reaped message's terms stay
+        in the file after the checkpoint alone and are gone after one
+        maintenance pass; keyword search still finds the survivor."""
+        from tests.conftest import make_message, make_thread
+
+        db = Database(tmp_path / "mail.db")
+        try:
+            embedding = [0.1] * EMBEDDING_DIM
+            reaped = make_message(message_id="r@x", filepath="/m/r", body_text="zqmaintmark")
+            keep = make_message(message_id="k@x", filepath="/m/k", body_text="survivor")
+            thread = make_thread([reaped, keep])
+            db.upsert_thread(thread, embedding)
+            db.add_pending_deletion("/m/r", "r@x", thread.thread_id)
+            rebuilt = make_thread([keep], thread_id=thread.thread_id, subject=thread.subject)
+            assert db.reap_thread_messages(rebuilt, embedding, ["r@x"]) == ["/m/r"]
+            assert db.wal_checkpoint_truncate()[0] == 0
+            assert b"zqmaintmark" in db.path.read_bytes()
+
+            main._run_wal_maintenance(db)
+
+            assert b"zqmaintmark" not in db.path.read_bytes()
+            assert (
+                db._conn.execute(
+                    "SELECT COUNT(*) FROM threads_fts WHERE threads_fts MATCH 'survivor'"
+                ).fetchone()[0]
+                == 1
+            )
+        finally:
+            db.close()
