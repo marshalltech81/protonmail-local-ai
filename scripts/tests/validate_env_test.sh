@@ -458,7 +458,7 @@ loose_secret_mode_fails() {
 # file and $STUBS/diracl, or else the mode's base entries, for a
 # directory, and `getent passwd 1002`
 # finds an account only when $STUBS/uid1002 exists; `id -u` (the
-# operator) is 4242.
+# operator) is 4242, or $STUBS/operator-uid when a case writes it.
 stub_host() {
     local os="$1" owner="${2:-}"
     STUBS="$(mktemp -d "$WORK/stubs.XXXXXX")"
@@ -505,7 +505,11 @@ fi
 STUB
     cat >"$STUBS/id" <<'STUB'
 #!/bin/bash
-[[ "$*" == '-u' ]] && { printf '4242\n'; exit 0; }
+if [[ "$*" == '-u' ]]; then
+    [[ -e "$(dirname "$0")/operator-uid" ]] && exec cat "$(dirname "$0")/operator-uid"
+    printf '4242\n'
+    exit 0
+fi
 exec /usr/bin/id "$@"
 STUB
     cat >"$STUBS/getent" <<'STUB'
@@ -649,27 +653,40 @@ linux_loose_authority_file_fails() {
     done
 }
 
-# Host UID 1002 reads the file too, so a host account holding it is
-# named; the check still passes, since the container needs that UID.
-linux_host_account_1002_warns() {
+# #662: host UID 1002 reads the file too, so a host account holding it
+# that is not the operator fails the check, with the fix and without
+# the file's content.
+readonly HOST_ACCOUNT_1002_ERROR='ERROR: host account other has UID 1002, the indexer'"'"'s UID'
+
+linux_host_account_1002_fails() {
     stub_host Linux 4242
     setup
     write_authority 640
     write_acl "${INDEXER_ONLY_ACL[@]}"
     : >"$STUBS/uid1002"
-    passes
-    grep -F 'WARNING: host account other has UID 1002' "$WORK/output"
+    fails_with "$HOST_ACCOUNT_1002_ERROR"
+    grep -F 'usermod -u' "$WORK/output"
+    ! grep -F 'lawfirm.example' "$WORK/output"
 }
 
-# Review round 1: a file UID 1002 owns is readable by that host account
-# too, so the warning applies there as well.
-linux_owner_1002_with_host_account_warns() {
+# A file UID 1002 owns is readable by that host account too.
+linux_owner_1002_with_host_account_fails() {
     stub_host Linux 1002
     setup
     write_authority 600
     : >"$STUBS/uid1002"
+    fails_with "$HOST_ACCOUNT_1002_ERROR"
+}
+
+# The operator's own account holding UID 1002 is no one else.
+linux_operator_holding_uid_1002_passes() {
+    stub_host Linux 1002
+    setup
+    write_authority 600
+    : >"$STUBS/uid1002"
+    printf '1002\n' >"$STUBS/operator-uid"
     passes
-    grep -F 'WARNING: host account other has UID 1002' "$WORK/output"
+    ! grep -F 'host account' "$WORK/output"
 }
 
 # Review round 1: the indexer must also be able to search config/, the
@@ -890,9 +907,10 @@ check "Linux: an authority file owned by UID 1002 passes" linux_authority_file_o
 check "Linux: an ACL granting only UID 1002 read passes" linux_indexer_only_acl_passes
 check "Linux: a broader ACL fails" linux_broader_acl_fails
 check "Linux: an authority file with a loose mode fails" linux_loose_authority_file_fails
-check "Linux: a host account with UID 1002 is warned about" linux_host_account_1002_warns
-check "Linux: a UID 1002 owner with a host account is warned about" \
-    linux_owner_1002_with_host_account_warns
+check "Linux: a host account with UID 1002 fails" linux_host_account_1002_fails
+check "Linux: a UID 1002 owner with a host account fails" \
+    linux_owner_1002_with_host_account_fails
+check "Linux: an operator holding UID 1002 passes" linux_operator_holding_uid_1002_passes
 check "Linux: an unsearchable config directory fails" linux_unsearchable_config_dir_fails
 check "Linux: the fix command quotes the path" linux_fix_command_quotes_the_path
 check "Linux: a config directory ACL denying UID 1002 fails" \

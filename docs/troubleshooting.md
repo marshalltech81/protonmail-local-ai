@@ -737,7 +737,10 @@ make restart-indexer
 
 Run it again after an editor replaces the file, since the new file has
 no ACL. If `make up` instead reports that `config` is not searchable by
-the indexer, run the `setfacl -m u:1002:x` command it prints.
+the indexer, run the `setfacl -m u:1002:x` command it prints. If it
+reports that another host account has UID 1002, that account could read
+the file through the indexer's grant: give it another UID (as root,
+`usermod -u <new-uid> <account>`) or remove it.
 
 Do not `chmod 644`/`640` the file or `chgrp` it instead: either lets
 other host accounts read your rules. See "Source-authority rules"

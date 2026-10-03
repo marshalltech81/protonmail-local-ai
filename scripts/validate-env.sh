@@ -194,18 +194,21 @@ require_indexer_readable_on_linux() {
         exit 1
     fi
     require_indexer_can_search_on_linux "$(dirname "$path")"
-    # Either grant also covers host UID 1002, so name any account holding
-    # it, unless that account is the operator's own.
+    # Either grant also covers host UID 1002, so fail when another host
+    # account holds it (the operator's own account is not another).
     if [[ "$(id -u)" != "$INDEXER_UID" ]] && command -v getent >/dev/null &&
         account="$(getent passwd "$INDEXER_UID")"; then
-        printf 'WARNING: host account %s has UID %s and can read %s if it can reach the directory; keep the checkout under a directory that account cannot enter.\n' \
-            "${account%%:*}" "$INDEXER_UID" "$path" >&2
+        account="${account%%:*}"
+        printf 'ERROR: host account %s has UID %s, the indexer'"'"'s UID, so the access granted to the indexer lets that account read %s too. Give the account another UID, or remove it, as root:\n  usermod -u <new-uid> %s\n' \
+            "$account" "$INDEXER_UID" "$path" "$(printf '%q' "$account")" >&2
+        exit 1
     fi
 }
 
 # The optional source-authority rules file holds real addresses and
 # domains, so it is held to the secret files' 600 (on Linux, 600 plus
-# an ACL for the indexer alone; see above). A symlink is rejected:
+# an ACL for the indexer alone, and no other host account with its
+# UID; see above). A symlink is rejected:
 # Compose mounts config/ as a directory, so a link whose target the
 # container cannot reach would pass here and stop the indexer at
 # startup; so is anything else that is not a regular file, which the
