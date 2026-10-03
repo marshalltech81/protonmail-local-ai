@@ -761,7 +761,8 @@ Operator steps before go-live, in addition to the checklist:
    app (`docs/setup.md`, "macOS Bridge mode"). It is built and tested
    against a synthetic STARTTLS server only (#571); the owner's live
    test against the real app is the owner's go-live (Resolved decisions 14). #497
-   closed when #571 merged.
+   was reopened on 2026-10-02 to close once that live test passes, which
+   now uses implicit TLS (#638).
 
 Open decisions 15–22 were answered on 2026-10-02 (Resolved decisions
 14). The owner runs macOS Bridge mode from a fresh Maildir, so
@@ -1325,9 +1326,7 @@ can be revisited with an explicit owner decision.
 - a database whose reaps ran before #562 keeps the extraction rows
   those reaps orphaned until it is rebuilt or cleaned by hand (#626;
   `docs/architecture.md` "Cascade on message removal")
-- a chunk's stored date can lag its message's `sent_at` until a failed
-  re-date retries, until #575 lands (decided)
-- macOS Bridge mode is tested only against a synthetic STARTTLS server
+- macOS Bridge mode is tested only against a synthetic Bridge server (STARTTLS until #638 switches it to implicit TLS)
   (#571); the owner's go-live is the live test
 - coverage scope: both services measure `src/` with `src/main.py`
   omitted. The indexer's `main.py` has grown to hold the whole
