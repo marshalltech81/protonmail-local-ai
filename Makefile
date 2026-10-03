@@ -1,4 +1,4 @@
-.PHONY: build build-nocache build-macos-bridge up up-macos-bridge down logs first-run update status requeue-dead clean sync sync-indexer sync-mcp test test-indexer test-mcp test-mbsync test-mbsync-tls test-mbsync-layout test-compose test-bridge test-bridge-smoke test-validate-env restart-indexer baseline typecheck typecheck-indexer typecheck-mcp bridge-patch-check bridge-smoke bridge-upgrade-check init-secrets validate-env help
+.PHONY: build build-nocache build-macos-bridge up up-macos-bridge down logs first-run update status requeue-dead clean sync sync-indexer sync-mcp test test-indexer test-mcp test-mbsync test-mbsync-tls test-mbsync-layout test-compose test-bridge test-bridge-smoke test-validate-env restart-indexer baseline eval-answers eval-answers-compare typecheck typecheck-indexer typecheck-mcp bridge-patch-check bridge-smoke bridge-upgrade-check init-secrets validate-env help
 
 UV_CACHE_DIR ?= /tmp/uv-cache
 export UV_CACHE_DIR
@@ -41,6 +41,8 @@ help:
 	@echo "  test-bridge-smoke  Run bridge-smoke.sh pass/fail tests (no Docker)"
 	@echo "  test-validate-env  Run validate-env.sh and mcp-auth-headers.sh tests against synthetic fixtures"
 	@echo "  baseline     Run the retrieval regression baseline (UPDATE=1 rewrites the rank snapshot)"
+	@echo "  eval-answers Opt-in ask_mailbox answer-quality run on the synthetic corpus (calls INFERENCE_* and JUDGE_* providers)"
+	@echo "  eval-answers-compare  Compare two answer-evaluation reports (BASELINE=... CANDIDATE=...)"
 	@echo "  clean        Remove all containers and volumes (destructive)"
 	@echo ""
 
@@ -260,9 +262,28 @@ test-validate-env:
 # any other value (UPDATE=0, UPDATE=no) only checks it.
 baseline: sync-indexer sync-mcp
 	@dir=$$(mktemp -d) && \
-	( cd indexer && uv run python -m tests.baseline.build "$$dir/out" ../mcp-server/tests/baseline/golden.json ) && \
+	( cd indexer && uv run python -m tests.baseline.build "$$dir/out" ../mcp-server/tests/baseline/golden.json ../mcp-server/tests/answer_eval/cases.json ) && \
 	( cd mcp-server && BASELINE_DIR="$$dir/out" uv run pytest -q --no-cov tests/baseline $(if $(filter 1,$(UPDATE)),--update-baseline) ); \
 	status=$$?; rm -rf "$$dir"; exit $$status
+
+# Opt-in answer-quality evaluation of ask_mailbox (#604): builds the
+# synthetic baseline index, runs every case through the real handler with
+# the INFERENCE_* answerer and the optional JUDGE_* judge, and writes a
+# mode-600 report under EVAL_OUT (git-ignored by default). It calls the
+# configured providers, so it is never part of `make test` or CI. EVAL_ARGS
+# passes extra flags (e.g. `--case ask-roof-total --detail <path>`).
+EVAL_OUT ?= $(CURDIR)/.answer-eval
+eval-answers: sync-indexer sync-mcp
+	@dir=$$(mktemp -d) && stamp=$$(date -u +%Y%m%dT%H%M%SZ) && \
+	( cd indexer && uv run python -m tests.baseline.build "$$dir/out" ../mcp-server/tests/baseline/golden.json ../mcp-server/tests/answer_eval/cases.json >/dev/null ) && \
+	( cd mcp-server && uv run python -m tests.answer_eval run --index-dir "$$dir/out" --out "$(EVAL_OUT)/run-$$stamp.json" --source-commit "$$(git rev-parse HEAD)" $(EVAL_ARGS) ); \
+	status=$$?; rm -rf "$$dir"; exit $$status
+
+# Compare two answer-evaluation reports: per-case and per-category changes.
+eval-answers-compare: sync-mcp
+	@if [ -z "$(BASELINE)" ] || [ -z "$(CANDIDATE)" ]; then \
+		echo "usage: make eval-answers-compare BASELINE=<run.json> CANDIDATE=<run.json>"; exit 2; fi
+	cd mcp-server && uv run python -m tests.answer_eval compare "$(abspath $(BASELINE))" "$(abspath $(CANDIDATE))" $(EVAL_ARGS)
 
 typecheck: typecheck-indexer typecheck-mcp
 

@@ -53,3 +53,6 @@ config/authority.toml
 # The ``.example`` companions are tracked as schema/templates.
 mcp-server/tests/eval/queries.json
 mcp-server/tests/eval/eval-queries.md
+
+# Answer-evaluation run reports and detail artifacts (make eval-answers).
+.answer-eval/

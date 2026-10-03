@@ -1682,6 +1682,13 @@ and exporter were present.
 > `Privacy:` warning per enabled layer whose endpoint host is not
 > `127.0.0.1`, `::1`, `localhost` or `host.docker.internal`.
 
+> **Answer evaluation (development tool).** `make eval-answers` runs
+> outside the containers and sends only the committed synthetic corpus
+> (questions, retrieved synthetic passages and the answers) to the
+> `INFERENCE_*` answerer and the separately configured `JUDGE_*` grader.
+> It refuses any index that is not the committed synthetic corpus, so it never
+> reads or sends the mailbox. See `mcp-server/tests/eval/README.md`.
+
 ### MCP client layer (governed by which client you connect)
 
 When the MCP server is consumed by a cloud-backed client, the tool *return

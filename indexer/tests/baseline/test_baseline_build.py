@@ -78,6 +78,18 @@ class TestBuild:
         golden = json.loads(_GOLDEN.read_text(encoding="utf-8"))
         assert set(vectors) == {q["query"] for q in golden["search"]}
 
+    def test_embeds_answer_eval_case_questions(self, tmp_path):
+        cases = tmp_path / "cases.json"
+        question = "Synthetic question about the roof?"
+        cases.write_text(json.dumps({"cases": [{"arguments": {"question": question}}]}))
+        out = tmp_path / "out"
+        build(out, _GOLDEN, cases)
+
+        vectors = json.loads((out / "query_vectors.json").read_text(encoding="utf-8"))
+        golden = json.loads(_GOLDEN.read_text(encoding="utf-8"))
+        assert set(vectors) == {q["query"] for q in golden["search"]} | {question}
+        assert vectors[question] == embed_text(question)
+
     def test_refuses_non_empty_output_dir(self, tmp_path):
         (tmp_path / "leftover").write_text("x")
         with pytest.raises(RuntimeError, match="not empty"):

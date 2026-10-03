@@ -10,7 +10,12 @@ embedder.
 
 Usage, from ``indexer/``:
 
-    uv run python -m tests.baseline.build <out_dir> <golden.json>
+    uv run python -m tests.baseline.build <out_dir> <golden.json> [<cases.json>]
+
+``cases.json`` (optional) is the answer-quality evaluation's case file
+(``mcp-server/tests/answer_eval/cases.json``); each case's
+``arguments.question`` gets a query vector too, so the evaluation can
+run ``ask_mailbox`` against this index.
 """
 
 import json
@@ -37,8 +42,11 @@ def _sorted_walk(root: Path):
     return iter(sorted(files, key=lambda p: p.name))
 
 
-def build(out_dir: Path, golden_path: Path) -> dict[str, int]:
+def build(out_dir: Path, golden_path: Path, cases_path: Path | None = None) -> dict[str, int]:
     """Build ``out_dir/mail.db`` and ``out_dir/query_vectors.json``.
+
+    The query vectors cover the golden search queries and, with
+    ``cases_path``, every answer-evaluation case's question.
 
     Returns the indexing queue's final status counts. Raises
     ``RuntimeError`` if any message failed to index, so a broken corpus
@@ -68,14 +76,18 @@ def build(out_dir: Path, golden_path: Path) -> dict[str, int]:
         raise RuntimeError(f"baseline corpus did not index cleanly: {unfinished}")
 
     golden = json.loads(golden_path.read_text(encoding="utf-8"))
-    queries = sorted({q["query"] for q in golden["search"]})
+    queries = {q["query"] for q in golden["search"]}
+    if cases_path is not None:
+        cases = json.loads(cases_path.read_text(encoding="utf-8"))
+        queries |= {c["arguments"]["question"] for c in cases["cases"]}
     (out_dir / "query_vectors.json").write_text(
-        json.dumps({q: embed_text(q) for q in queries}), encoding="utf-8"
+        json.dumps({q: embed_text(q) for q in sorted(queries)}), encoding="utf-8"
     )
     return stats
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 3:
-        sys.exit("usage: python -m tests.baseline.build <out_dir> <golden.json>")
-    print(build(Path(sys.argv[1]), Path(sys.argv[2])))
+    if len(sys.argv) not in (3, 4):
+        sys.exit("usage: python -m tests.baseline.build <out_dir> <golden.json> [<cases.json>]")
+    cases = Path(sys.argv[3]) if len(sys.argv) == 4 else None
+    print(build(Path(sys.argv[1]), Path(sys.argv[2]), cases))
