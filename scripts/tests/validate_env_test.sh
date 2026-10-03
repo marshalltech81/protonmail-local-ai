@@ -426,6 +426,43 @@ loose_secret_mode_fails() {
 # directory, so a link the container cannot follow would pass here and
 # stop the indexer.
 
+# The authority checks depend on the host: a Linux bind mount keeps host
+# ownership, so the file must grant the indexer (UID 1002) read (#526).
+# stub_host OS [OWNER] puts stub commands first on PATH so every case
+# sees the same host whatever machine runs the tests: `uname -s` prints
+# OS, `stat` reports OWNER as the file owner when given, `getfacl`
+# prints $STUBS/acl (written by write_acl), and `getent passwd 1002`
+# finds an account only when $STUBS/uid1002 exists.
+stub_host() {
+    local os="$1" owner="${2:-}"
+    STUBS="$(mktemp -d "$WORK/stubs.XXXXXX")"
+    printf '#!/bin/bash\nprintf "%%s\\n" %q\n' "$os" >"$STUBS/uname"
+    if [[ -n "$owner" ]]; then
+        cat >"$STUBS/stat" <<STUB
+#!/bin/bash
+for arg in "\$@"; do
+    [[ "\$arg" == '%u' ]] && { printf '%s\\n' $owner; exit 0; }
+done
+exec /usr/bin/stat "\$@"
+STUB
+    fi
+    cat >"$STUBS/getfacl" <<'STUB'
+#!/bin/bash
+cat "$(dirname "$0")/acl"
+STUB
+    cat >"$STUBS/getent" <<'STUB'
+#!/bin/bash
+[[ "$1 $2" == 'passwd 1002' && -e "$(dirname "$0")/uid1002" ]] || exit 2
+printf 'other:x:1002:1002::/home/other:/bin/bash\n'
+STUB
+    chmod 755 "$STUBS"/*
+    PATH="$STUBS:$PATH"
+}
+
+write_acl() {
+    printf '%s\n' "$@" >"$STUBS/acl"
+}
+
 write_authority() {
     mkdir -p "$ROOT/config"
     printf '[counsel]\ndomains = ["lawfirm.example"]\n' >"$ROOT/config/authority.toml"
@@ -433,17 +470,20 @@ write_authority() {
 }
 
 absent_authority_file_passes() {
+    stub_host Darwin
     setup
     passes
 }
 
 private_authority_file_passes() {
+    stub_host Darwin
     setup
     write_authority 600
     passes
 }
 
 loose_authority_file_fails() {
+    stub_host Darwin
     setup
     local mode
     for mode in 644 604 640 660 620 700; do
@@ -453,6 +493,7 @@ loose_authority_file_fails() {
 }
 
 symlinked_authority_file_fails() {
+    stub_host Darwin
     setup
     write_authority 600
     mv "$ROOT/config/authority.toml" "$ROOT/config/rules.toml"
@@ -466,6 +507,7 @@ symlinked_authority_file_fails() {
 # The indexer opens only a regular file, so a 600 directory or FIFO
 # must fail here rather than at indexer startup.
 non_regular_authority_path_fails() {
+    stub_host Darwin
     setup
     mkdir -p "$ROOT/config/authority.toml"
     chmod 600 "$ROOT/config/authority.toml"
@@ -473,6 +515,74 @@ non_regular_authority_path_fails() {
     rmdir "$ROOT/config/authority.toml"
     mkfifo -m 600 "$ROOT/config/authority.toml"
     fails_with 'config/authority.toml must be a regular file'
+}
+
+# On Linux the operator's own 600 file is unreadable to UID 1002, so it
+# fails with the exact command that grants only that UID read.
+linux_operator_owned_authority_file_fails_with_command() {
+    stub_host Linux 4242
+    setup
+    write_authority 600
+    fails_with 'not readable by the indexer (UID 1002)'
+    grep -F "setfacl -b $ROOT/config/authority.toml && chmod 600 $ROOT/config/authority.toml && setfacl -m u:1002:r $ROOT/config/authority.toml" \
+        "$WORK/output"
+}
+
+# A file UID 1002 owns at 600 is readable in the container as it is.
+linux_authority_file_owned_by_indexer_passes() {
+    stub_host Linux 1002
+    setup
+    write_authority 600
+    passes
+}
+
+# The ACL that command leaves: `stat` shows its mask as group bits (640).
+readonly INDEXER_ONLY_ACL=('user::rw-' 'user:1002:r--' 'group::---' 'mask::r--' 'other::---')
+
+linux_indexer_only_acl_passes() {
+    stub_host Linux 4242
+    setup
+    write_authority 640
+    write_acl "${INDEXER_ONLY_ACL[@]}"
+    passes
+    ! grep -F WARNING "$WORK/output"
+}
+
+# Any other ACL behind a 640 mode lets someone else read the file.
+linux_broader_acl_fails() {
+    stub_host Linux 4242
+    setup
+    write_authority 640
+    write_acl 'user::rw-' 'group::r--' 'other::---'
+    fails_with 'ACL must grant read to UID 1002 and no one else'
+    write_acl 'user::rw-' 'user:1002:r--' 'user:1005:r--' 'group::---' 'mask::r--' 'other::---'
+    fails_with 'ACL must grant read to UID 1002 and no one else'
+    write_acl 'user::rw-' 'user:1002:r--' 'group::r--' 'mask::r--' 'other::---'
+    fails_with 'ACL must grant read to UID 1002 and no one else'
+    grep -F 'setfacl -b' "$WORK/output"
+}
+
+# The ACL never makes a world- or group-writable mode acceptable.
+linux_loose_authority_file_fails() {
+    stub_host Linux 4242
+    setup
+    local mode
+    for mode in 644 604 660 620 700; do
+        write_authority "$mode"
+        fails_with "config/authority.toml must have mode 600"
+    done
+}
+
+# Host UID 1002 reads the file too, so a host account holding it is
+# named; the check still passes, since the container needs that UID.
+linux_host_account_1002_warns() {
+    stub_host Linux 4242
+    setup
+    write_authority 640
+    write_acl "${INDEXER_ONLY_ACL[@]}"
+    : >"$STUBS/uid1002"
+    passes
+    grep -F 'WARNING: host account other has UID 1002' "$WORK/output"
 }
 
 # The documented authority edit flow restarts the indexer through
@@ -601,6 +711,13 @@ check "a private authority file passes" private_authority_file_passes
 check "an authority file not 600 fails" loose_authority_file_fails
 check "a symlinked authority file fails" symlinked_authority_file_fails
 check "a non-regular authority path fails" non_regular_authority_path_fails
+check "Linux: an operator-owned 600 authority file fails with the command" \
+    linux_operator_owned_authority_file_fails_with_command
+check "Linux: an authority file owned by UID 1002 passes" linux_authority_file_owned_by_indexer_passes
+check "Linux: an ACL granting only UID 1002 read passes" linux_indexer_only_acl_passes
+check "Linux: a broader ACL fails" linux_broader_acl_fails
+check "Linux: an authority file with a loose mode fails" linux_loose_authority_file_fails
+check "Linux: a host account with UID 1002 is warned about" linux_host_account_1002_warns
 check "make restart-indexer validates before restarting" restart_indexer_validates_first
 check "padded quoted values pass" padded_quoted_values_pass
 check "padded and mixed-case modes pass" padded_and_cased_modes_pass

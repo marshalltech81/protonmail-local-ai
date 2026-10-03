@@ -679,6 +679,24 @@ Once mbsync is healthy, run `make up` again (`make up-macos-bridge` in
 [macOS Bridge mode](setup.md#macos-bridge-mode-optional)): Compose leaves the running
 services as they are and starts the indexer and then the MCP server.
 
+## Indexer cannot read `config/authority.toml` on Linux
+
+On Linux with Docker Engine the indexer (UID 1002) sees the host owner
+and mode of the bind-mounted `config/authority.toml`, so a `600` file
+you own stops it at startup with "could not be read". `make up` and
+`make restart-indexer` catch this first and print the fix, which grants
+UID 1002 alone read access with an ACL (needs the `acl` package):
+
+```bash
+setfacl -b config/authority.toml && chmod 600 config/authority.toml && setfacl -m u:1002:r config/authority.toml
+make restart-indexer
+```
+
+Run it again after an editor replaces the file, since the new file has
+no ACL. Do not `chmod 644`/`640` the file or `chgrp` it instead: either
+lets other host accounts read your rules. See "Source-authority rules"
+in `docs/setup.md`.
+
 ## Indexer refuses to start — "wipe the sqlite-volume"
 
 The indexer fails closed when the database was written by an
