@@ -26,7 +26,7 @@ ProtonBridge container
   - Exposes local SMTP on port 1025
   - Credentials persisted in bridge-data volume
         │
-        │  IMAP (localhost, internal Docker network)
+        │  IMAP over implicit TLS (internal Docker network)
         ▼
 mbsync container
   - Polls Bridge IMAP every SYNC_INTERVAL seconds in a bounded retry loop
@@ -200,7 +200,18 @@ No container is reachable from outside the machine.
 
 ## Bridge Modes
 
-mbsync syncs from one of two Bridges:
+mbsync syncs from one of two Bridges, in both cases over implicit TLS
+(RFC 8314, Bridge's "SSL" IMAP mode, `SSLType IMAPS`; #638): the TLS
+handshake is the first thing on the connection, so there is no
+plaintext phase in which a STARTTLS offer could be stripped or a
+command or response injected before encryption. The Bridge container
+is patched to always serve IMAP this way (its vault's `IMAPSSL`
+setting is ignored); the macOS app must be set to SSL by the operator.
+Certificate extraction (`openssl s_client` without `-starttls`) and
+isync both speak only implicit TLS, with no fallback: a Bridge still
+serving STARTTLS greets in plaintext, the handshake fails, and mbsync
+stops at startup with `Bridge is not serving implicit TLS` before any
+credential is sent.
 
 - **Bridge container (default).** The source-built `protonmail-bridge`
   service on `bridge-net`. mbsync waits for its health check, connects
@@ -236,13 +247,13 @@ entrypoint renders
 ```text
 Host 127.0.0.1
 Tunnel "exec socat - TCP:host.docker.internal:<port>"
-SSLType STARTTLS
+SSLType IMAPS
 CertificateFile /tmp/mbsync/bridge-cert.pem
 ```
 
 With `Tunnel`, isync runs the command instead of opening a socket to
-`Host`, and keeps `Host` only for the certificate check. STARTTLS and
-verification run end to end between mbsync and the app; `socat` only
+`Host`, and keeps `Host` only for the certificate check. Implicit TLS
+and verification run end to end between mbsync and the app; `socat` only
 relays bytes. (`nc` cannot be the relay: isync waits for the server to
 close the connection after `LOGOUT`, and `nc` does not pass that close
 on unless Bridge sends a TLS close_notify.) The trust anchors are
@@ -253,8 +264,11 @@ for `127.0.0.1`), so a different
 certificate at that address is refused twice, by the pin at startup and
 by isync's chain check on every sync. `mbsync/tests/tls_check.sh` (`make
 test-mbsync-tls`, run in CI) exercises both with a synthetic server
-whose certificate has this shape, along with recovery from a Bridge
-that is down at startup.
+whose certificate has this shape and which speaks implicit TLS, along
+with recovery from a Bridge that is down at startup and the refusal of
+a STARTTLS server without sending credentials. `scripts/bridge-smoke.sh`
+checks that the built Bridge image serves implicit TLS on 1143 and
+greets no plaintext client.
 
 The two modes differ in how the first certificate is trusted. The Bridge
 container is the only other service on `bridge-net`, so mbsync trusts

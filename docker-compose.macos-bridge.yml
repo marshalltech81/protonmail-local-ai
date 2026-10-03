@@ -12,7 +12,8 @@
 # TLS: the app's certificate is issued for ``127.0.0.1`` only. isync checks
 # the certificate against the configured Host, so mbsync keeps
 # ``Host 127.0.0.1`` for verification and opens the TCP connection to
-# host.docker.internal through a ``Tunnel`` (socat). STARTTLS, certificate
+# host.docker.internal through a ``Tunnel`` (socat). Implicit TLS (the
+# app's IMAP connection mode must be SSL, #638), certificate
 # verification and the persistent fingerprint pin are unchanged, and the
 # certificate must also match BRIDGE_CERT_FINGERPRINT from .env. See
 # docs/setup.md ("macOS Bridge mode") and docs/architecture.md.

@@ -234,8 +234,8 @@ Important facts:
   and `BRIDGE_CERT_HOST=127.0.0.1`. The app's certificate names only
   `127.0.0.1` and isync 1.4.4 checks Bridge's self-signed CA certificate
   against `Host`, so the entrypoint keeps `Host 127.0.0.1` and connects
-  through an isync `Tunnel` (`socat`); STARTTLS, verification and the
-  pin are unchanged. Because the app's loopback port can be held by
+  through an isync `Tunnel` (`socat`); implicit TLS, verification and
+  the pin are unchanged. Because the app's loopback port can be held by
   another local account while the app is down, this mode does not trust
   on first use: the certificate must match the operator-supplied
   `BRIDGE_CERT_FINGERPRINT` on every start. Never make it work by
@@ -272,6 +272,18 @@ Important facts:
   `--noninteractive` path, asserting no silent install and nothing staged
   (whether the live feed offers a release is up to Proton, so only the
   `go test` forces the gate decision).
+- mbsync reaches Bridge IMAP over implicit TLS (RFC 8314, Bridge's "SSL"
+  mode), never STARTTLS or plaintext, in both Bridge modes (#638,
+  owner-approved 2026-10-02): no plaintext phase precedes the handshake.
+  In the container, a fifth hunk forces `internal/vault` `GetIMAPSSL()` to
+  return `true`, so the IMAP listener uses `tls.Listen` whatever the vault
+  stores (Proton's default and any older vault store `false`); SMTP is
+  unchanged. It is verified by `require_count` guards, a `go test` that
+  reopens a vault storing `IMAPSSL=false`, and a `bridge-smoke.sh` probe
+  asserting a TLS handshake with the IMAP greeting and no plaintext
+  greeting. In macOS Bridge mode the operator sets the app's IMAP
+  connection mode to SSL. mbsync has no STARTTLS fallback: a Bridge still
+  serving STARTTLS fails closed at certificate extraction.
 - Bridge v3 stores credentials and TLS cert material in `vault.enc`
 - the cert is not baked into any image or persisted in a volume — but mbsync's
   entrypoint extracts it from a live connection with `openssl s_client` on
@@ -284,7 +296,7 @@ Operational implications:
 - if you touch Bridge build logic, TLS logic, auth storage, or XDG paths, review setup and recovery behavior first
 - do not assume rebuilding Bridge updates the existing cached cert in `vault.enc`
 - do not replace pass/gpg-based behavior with a weaker shortcut
-- if a future change adds a fourth patch hunk to `bridge/patch-source.sh`,
+- if a future change adds another patch hunk to `bridge/patch-source.sh`,
   follow the existing three-layer pattern: pre/post `require_count` guards,
   add the touched package to `compile_patched_packages`, and (if the patch
   flips a runtime default rather than just a binding/string) add a `go test`
@@ -804,7 +816,7 @@ Notes:
 - threader changes should verify threading, subject fallback, references, and participant handling
 - database changes should verify schema creation, migration, and upsert/query behavior
 - MCP search changes should verify hybrid/RRF behavior where applicable
-- mbsync entrypoint changes should update `mbsync/tests/entrypoint_test.sh`, which loads the real functions with external commands mocked; changes to mbsync's TLS or connection settings should also pass `make test-mbsync-tls` (the shipped image against a synthetic STARTTLS server)
+- mbsync entrypoint changes should update `mbsync/tests/entrypoint_test.sh`, which loads the real functions with external commands mocked; changes to mbsync's TLS or connection settings should also pass `make test-mbsync-tls` (the shipped image against a synthetic implicit-TLS server)
 - changes to `mbsync/mbsyncrc.template` should pass `make test-mbsync-layout` (the shipped image's isync against synthetic Maildir stores: folder layout, and spurious and genuine UIDVALIDITY changes with the documented recovery)
 - Compose changes that touch service selection, dependencies, hardening or ports should keep `scripts/tests/compose_test.sh` passing for both Bridge modes
 - Bridge entrypoint changes should update `bridge/tests/entrypoint_test.sh`, which does the same with a synthetic GPG keyring and pass store
