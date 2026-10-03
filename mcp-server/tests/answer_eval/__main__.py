@@ -20,6 +20,7 @@ import hashlib
 import json
 import logging
 import os
+import sqlite3
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -77,6 +78,11 @@ def _run(args: argparse.Namespace) -> int:
             raise CaseError(f"unknown case ids: {sorted(unknown)}")
         cases = [c for c in cases if c.id in set(args.case)]
 
+    # Check the build's outputs exist before opening anything, so a
+    # mistyped directory is a configuration error, not a new empty file.
+    for name in ("mail.db", "query_vectors.json"):
+        if not (args.index_dir / name).is_file():
+            raise ConfigError(f"--index-dir has no {name}; build it with tests.baseline.build")
     db = Database(str(args.index_dir / "mail.db"))
     index = index_identity(db)  # refuses anything but the synthetic corpus
     vectors = json.loads((args.index_dir / "query_vectors.json").read_text(encoding="utf-8"))
@@ -156,7 +162,11 @@ def _run(args: argparse.Namespace) -> int:
 
 def _load_report(path: Path) -> dict[str, Any]:
     data = json.loads(path.read_text(encoding="utf-8"))
-    if data.get("kind") != "answer_eval_run" or data.get("schema_version") != REPORT_SCHEMA_VERSION:
+    if (
+        not isinstance(data, dict)
+        or data.get("kind") != "answer_eval_run"
+        or data.get("schema_version") != REPORT_SCHEMA_VERSION
+    ):
         raise ConfigError(f"not an answer evaluation report (schema v{REPORT_SCHEMA_VERSION})")
     return data
 
@@ -198,6 +208,11 @@ def main(argv: list[str] | None = None) -> int:
         return _run(args) if args.command == "run" else _compare(args)
     except (CaseError, ConfigError, NonSyntheticIndexError) as e:
         print(f"answer evaluation: {e}", file=sys.stderr)
+        return EXIT_CONFIG
+    except (OSError, json.JSONDecodeError, sqlite3.Error, KeyError, TypeError) as e:
+        # Unreadable or malformed case, report or index files. The type
+        # only: these messages can quote file contents.
+        print(f"answer evaluation: unreadable input ({type(e).__name__})", file=sys.stderr)
         return EXIT_CONFIG
 
 

@@ -303,6 +303,15 @@ class TestConfig:
         explicit = {**env, "JUDGE_BASE_URL": "https://judge.example"}
         assert load_layer("JUDGE", explicit) is not None
 
+    def test_label_tells_configured_endpoints_apart(self):
+        """Review round 2: two remote judges had identical labels."""
+        a = _judge_config(base_url="https://judge-a.example/v1").label()
+        b = _judge_config(base_url="https://judge-b.example/v1").label()
+        assert a["endpoint"] == b["endpoint"] == "remote"
+        assert a["endpoint_id"] != b["endpoint_id"]
+        assert "judge-a" not in json.dumps(a)
+        assert _judge_config(base_url="").label()["endpoint_id"] is None
+
     def test_label_names_no_url_or_key(self):
         cfg = load_layer(
             "JUDGE",
@@ -610,7 +619,7 @@ class TestJudge:
 
     def test_valid_verdict(self):
         case = CASES["ask-padlock"]
-        verdict = parse_verdict(_verdict(case, [["E1"]]), case, {"E1"}, False)
+        verdict = parse_verdict(_verdict(case, [["E1"]]), case, [{"E1"}], False)
         grade = grade_verdict(verdict)
         assert grade.passed and grade.claims["supported"] == 1
 
@@ -618,7 +627,7 @@ class TestJudge:
         case = CASES["ask-padlock"]
         raw = json.loads(_verdict(case, [["E1"]]))
         raw["claims"][0]["explanation"] = "x" * 5000
-        verdict = parse_verdict("```json\n" + json.dumps(raw) + "\n```", case, {"E1"}, False)
+        verdict = parse_verdict("```json\n" + json.dumps(raw) + "\n```", case, [{"E1"}], False)
         assert len(verdict.claims[0].explanation) == 300
 
     @pytest.mark.parametrize(
@@ -632,13 +641,13 @@ class TestJudge:
     def test_malformed_output(self, raw, category):
         case = CASES["ask-padlock"]
         with pytest.raises(JudgeError) as e:
-            parse_verdict(raw, case, {"E1"}, False)
+            parse_verdict(raw, case, [{"E1"}], False)
         assert e.value.category == category
 
     def test_unknown_evidence_id(self):
         case = CASES["ask-padlock"]
         with pytest.raises(JudgeError) as e:
-            parse_verdict(_verdict(case, [["E7"]]), case, {"E1"}, False)
+            parse_verdict(_verdict(case, [["E7"]]), case, [{"E1"}], False)
         assert e.value.category == "judge_unknown_evidence_id"
 
     def test_incomplete_assessments(self):
@@ -650,38 +659,38 @@ class TestJudge:
         )
         for raw in (json.dumps(missing_fact), json.dumps(hidden), _verdict(case, [])):
             with pytest.raises(JudgeError) as e:
-                parse_verdict(raw, case, {"E1"}, False)
+                parse_verdict(raw, case, [{"E1"}], False)
             assert e.value.category == "judge_incomplete_assessment"
 
     def test_empty_assessment_allowed_only_for_an_abstention(self):
         case = CASES["ask-cabin-wifi"]
-        verdict = parse_verdict(_verdict(case, []), case, set(), True)
+        verdict = parse_verdict(_verdict(case, []), case, [], True)
         assert grade_verdict(verdict).passed
 
     def test_inapplicable_dimension_cannot_fail_a_case(self):
         case = CASES["ask-padlock"]
         raw = _verdict(case, [["E1"]], dims={"temporal_reasoning": "fail"})
-        assert grade_verdict(parse_verdict(raw, case, {"E1"}, False)).passed
+        assert grade_verdict(parse_verdict(raw, case, [{"E1"}], False)).passed
 
     def test_groundedness_and_correctness_are_separate(self):
         case = CASES["ask-padlock"]
         ungrounded = grade_verdict(
             parse_verdict(
-                _verdict(case, [["E1"]], verdict="insufficient_evidence"), case, {"E1"}, False
+                _verdict(case, [["E1"]], verdict="insufficient_evidence"), case, [{"E1"}], False
             )
         )
         assert ungrounded.correctness_pass and not ungrounded.groundedness_pass
         wrong = grade_verdict(
-            parse_verdict(_verdict(case, [["E1"]], facts=False), case, {"E1"}, False)
+            parse_verdict(_verdict(case, [["E1"]], facts=False), case, [{"E1"}], False)
         )
         assert wrong.groundedness_pass and not wrong.correctness_pass
         recital = CASES["ask-recital-date"]
         asserted = grade_verdict(
-            parse_verdict(_verdict(recital, [["E1"]], asserted=True), recital, {"E1"}, False)
+            parse_verdict(_verdict(recital, [["E1"]], asserted=True), recital, [{"E1"}], False)
         )
         assert not asserted.correctness_pass and asserted.prohibited_asserted == 1
 
-    def _judge(self, client, case_id="ask-padlock", answer_labels=("E1",), **cfg):
+    def _judge(self, client, case_id="ask-padlock", statements=({"E1"},), **cfg):
         case = CASES[case_id]
         return asyncio.run(
             judge_answer(
@@ -691,7 +700,7 @@ class TestJudge:
                 "It is 2019 [E1].",
                 {"E1": _passage("E1", "t18.2"), "E2": _passage("E2", "t18.1")},
                 False,
-                answer_labels=set(answer_labels),
+                statement_labels=list(statements),
             )
         )
 
@@ -701,6 +710,16 @@ class TestJudge:
         client = ScriptedClient(_verdict(CASES["ask-padlock"], [["E2"]]))
         outcome = self._judge(client)
         assert outcome.error == "judge_unknown_evidence_id" and outcome.grade is None
+
+    def test_judge_labels_must_match_one_statement(self):
+        """Review round 2: the answer cites E1 in one statement and E2 in
+        another; a claim citing both is not any statement's citation."""
+        case = CASES["ask-padlock"]
+        mixed = _verdict(case, [["E1", "E2"]])
+        outcome = self._judge(ScriptedClient(mixed), statements=({"E1"}, {"E2"}))
+        assert outcome.error == "judge_unknown_evidence_id"
+        joint = self._judge(ScriptedClient(mixed), statements=({"E1", "E2"},))
+        assert joint.status == "ok"
 
     def test_judge_call_ok(self):
         client = ScriptedClient(_verdict(CASES["ask-padlock"], [["E1"]]))
@@ -774,7 +793,7 @@ def _identity(**overrides):
         "source_commit": "abc",
         "cases_sha256": "c" * 64,
         "cases_schema_version": 1,
-        "rubric_version": "ask-rubric-1",
+        "rubric_version": "ask-rubric-2",
         "index_sha256": "i" * 64,
         "answerer": {"mode": "openai", "model": "a"},
         "judge": {"mode": "openai", "model": "j"},
@@ -908,6 +927,18 @@ class TestHarnessAndReports:
         assert records[0]["judge"]["error"] == "judge_timeout"
         assert records[0]["timings_ms"]["judge"] < 5000
 
+    def test_judge_errors_stay_in_dimension_and_fact_denominators(self, chunked_db):
+        """Review round 2: an errored assessment dropped out of the
+        dimension and missing-fact rates, raising them."""
+        case = CASES["ask-roof-total"]
+        records, _ = _records(
+            chunked_db, ["14,200 [E1].", "14,200 [E1]."], [_verdict(case, [["E1"]]), "not json"]
+        )
+        judge = build_report(_identity(), records, True)["aggregates"]["all"]["judge"]
+        assert judge["dimension_pass_rates"]["factual_correctness"] == 0.5
+        assert judge["dimension_pass_rates"]["temporal_reasoning"] is None  # n/a for this case
+        assert judge["missing_fact_rate"] == 0.5
+
     def test_failed_cases_count_as_zero_coverage(self):
         """Review round 1: a timed-out case left the coverage means."""
         ok = {"status": "ok", "required_groups": 1, "deterministic": {"retrieval_recall": 1.0}}
@@ -968,10 +999,29 @@ class TestCli:
         index = tmp_path / "index"
         index.mkdir()
         shutil.copy(messages_db.path, index / "mail.db")
+        (index / "query_vectors.json").write_text("{}")
         code = cli.main(["run", "--index-dir", str(index), "--out", str(tmp_path / "r.json")])
         assert code == cli.EXIT_CONFIG
         assert "synthetic" in capsys.readouterr().err
         assert not (tmp_path / "r.json").exists()
+
+    def test_bad_input_files_are_configuration_errors(self, tmp_path, capsys):
+        """Review round 2: these raised tracebacks instead of exit 3."""
+        out = str(tmp_path / "r.json")
+        missing = tmp_path / "no-index"
+        assert cli.main(["run", "--index-dir", str(missing), "--out", out]) == cli.EXIT_CONFIG
+        assert not (missing / "mail.db").exists()
+        bad_cases = tmp_path / "cases.json"
+        bad_cases.write_text("{not json")
+        code = cli.main(
+            ["run", "--index-dir", str(tmp_path), "--out", out, "--cases", str(bad_cases)]
+        )
+        assert code == cli.EXIT_CONFIG
+        for text in ("{not json", "[1, 2]"):
+            report = tmp_path / "bad-report.json"
+            report.write_text(text)
+            assert cli.main(["compare", str(report), str(report)]) == cli.EXIT_CONFIG
+        assert "Traceback" not in capsys.readouterr().err
 
     def test_run_rejects_detail_overwriting_the_report(self, tmp_path, capsys):
         """Review round 1: --detail equal to --out overwrote the report."""

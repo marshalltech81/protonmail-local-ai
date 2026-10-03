@@ -61,7 +61,7 @@ async def evaluate(
                 run.output.answer,
                 run.passages,
                 bool(det.abstained),
-                answer_labels={c.label for c in run.output.citations},
+                statement_labels=[set(s.labels) for s in run.output.statements],
                 timeout_secs=min(judge_config.timeout_secs, remaining),
             )
         semantic_failed = judge.grade is not None and not judge.grade.passed

@@ -111,6 +111,15 @@ def test_index_is_recognized_as_synthetic(baseline_db: Database) -> None:
         "UPDATE threads SET body_text = body_text || ' privatemarker' WHERE rowid = "
         "(SELECT MIN(rowid) FROM threads)",
         "UPDATE threads SET subject = 'privatemarker' WHERE rowid = (SELECT MIN(rowid) FROM threads)",
+        # Review round 2: every other field a prompt carries.
+        "UPDATE threads SET display_subject = 'privatemarker' WHERE rowid = "
+        "(SELECT MIN(rowid) FROM threads)",
+        "UPDATE message_participants SET name = 'privatemarker' WHERE rowid = "
+        "(SELECT MIN(rowid) FROM message_participants)",
+        "UPDATE attachments SET filename = 'privatemarker.pdf' WHERE rowid = "
+        "(SELECT MIN(rowid) FROM attachments)",
+        "UPDATE messages SET subject = 'privatemarker' WHERE rowid = "
+        "(SELECT MIN(rowid) FROM messages)",
         # A message the committed corpus does not have.
         "UPDATE messages SET claimant_id = claimant_id || 'x' WHERE rowid = "
         "(SELECT MIN(rowid) FROM messages)",

@@ -200,7 +200,9 @@ containers or the tool outputs.
 committed synthetic corpus: its claimant IDs must be exactly those
 computed from `indexer/tests/baseline/corpus.py` (Message-ID plus a hash
 of each message's bytes), and every indexed text a prompt can carry
-(chunks, thread subjects, snippets, bodies, participants) may use only
+(chunk text, message subjects and participants, attachment names and
+types, thread subjects, display subjects, snippets, bodies and
+participants) may use only
 words of the corpus messages it belongs to, so private text stored under
 copied baseline IDs is refused too. It never reads or sends a real
 mailbox; a private-mailbox mode would be a separate owner decision.
@@ -296,7 +298,7 @@ the prompt and cited, so a failure is attributed to `retrieval`,
 `prompt_assembly`, `synthesis`, `evaluator_infrastructure` or
 `answer_infrastructure` (several may apply; `unknown` otherwise).
 
-The judge (`judge.py`, rubric `ask-rubric-1`) receives the question,
+The judge (`judge.py`, rubric `ask-rubric-2`) receives the question,
 expected handling, reference facts, prohibited assertions, which
 dimensions apply, every passage the answerer received and the answer;
 the passages and the answer sit in `<untrusted_evidence>` /
@@ -309,8 +311,9 @@ prohibited assertion asserted or not (**correctness**), and `pass |
 fail | not_applicable` for factual correctness, citation support,
 completeness, temporal reasoning, conflict/uncertainty and relevance. A
 claim that matches the reference but not its citations is still
-unsupported. The verdict is validated: a claim label the answer did not
-cite (or no supplied passage has), missing
+unsupported. The verdict is validated: a claim whose labels are not all
+cited by one statement of the answer (the tool's structured
+`statements`, supplied passages only), missing
 facts or dimensions, an applicable dimension marked not applicable, no
 claims for a non-abstaining answer, malformed output, a timeout, a
 cut-off reply, a provider failure or input over the limit are explicit
@@ -323,10 +326,12 @@ The report holds opaque case IDs, categories, check results, fixed
 error categories, counts, rates per split and category, timings and
 safe identity labels: source commit, case-file and index hashes, schema
 and rubric versions, provider mode/model and whether each endpoint is
-host-local, remote or the SDK default (never a URL or key). Every rate's
-denominator is the selected cases (for evidence coverage, those that
-need evidence), so errors and skips count as failures and never improve
-a score. Token usage is not exposed by the inference client and no cost is
+host-local, remote or the SDK default, plus a 12-character hash of a
+configured base URL so two endpoints are told apart (never a URL or
+key). Every rate's denominator is the selected cases (for evidence
+coverage, those that need evidence; for dimension and missing-fact
+rates, every applicable dimension and expected fact), so errors, skips
+and unjudged answers count as failures and never improve a score. Token usage is not exposed by the inference client and no cost is
 computed. `--detail` writes a separate mode-600 artifact with the
 content (answers, passages, prompts, judge claims and explanations);
 both refuse a path inside the repository other than `.answer-eval/`.

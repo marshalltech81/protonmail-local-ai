@@ -41,6 +41,8 @@ def case_record(
         "held_out": case.held_out,
         "answerable": case.answerable,
         "required_groups": len(case.required_evidence),
+        "facts_expected": len(case.expected_facts),
+        "applicable_dimensions": [d for d in DIMENSIONS if case.criteria[d]],
         "review": case.review,
         "status": run.status,
         "error": run.error,
@@ -161,12 +163,17 @@ def aggregate(records: list[dict[str, Any]], judge_configured: bool) -> dict[str
         out["judge"] = None
         return out
     judged = [r["judge"] for r in records if r["judge"]["status"] == "ok"]
+    unjudged = [r for r in records if r["judge"]["status"] != "ok"]
     claims = {v: sum(j["claims"][v] for j in judged) for v in CLAIM_VERDICTS}
     total_claims = sum(claims.values())
-    facts_total = sum(j["facts_total"] for j in judged)
+    # A case the judge did not assess (judge error, failed answer, skip)
+    # keeps its expected facts and applicable dimensions in the
+    # denominators, as missing and failed: an error never raises a rate.
+    facts_total = sum(j["facts_total"] for j in judged) + sum(r["facts_expected"] for r in unjudged)
     dims: dict[str, float | None] = {}
     for d in DIMENSIONS:
         results = [j["dimensions"][d] for j in judged if j["dimensions"][d] != "not_applicable"]
+        results += ["fail" for r in unjudged if d in r["applicable_dimensions"]]
         dims[d] = _rate(results.count("pass"), len(results))
     out["judge"] = {
         "completed": len(judged),

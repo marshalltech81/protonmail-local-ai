@@ -18,6 +18,7 @@ the ``{LAYER}_API_KEY`` environment variable. Keys are never logged,
 written to a report or taken as a command argument.
 """
 
+import hashlib
 import os
 import stat
 import urllib.parse
@@ -77,6 +78,13 @@ class LayerConfig:
             "mode": self.mode,
             "model": self.model,
             "endpoint": self.endpoint_kind(),
+            # Tells two configured endpoints apart without recording the URL
+            # (a hash of the base URL; null for the SDK default).
+            "endpoint_id": (
+                hashlib.sha256(self.base_url.rstrip("/").encode()).hexdigest()[:12]
+                if self.base_url
+                else None
+            ),
             "max_tokens": self.max_tokens,
             "timeout_secs": self.timeout_secs,
         }

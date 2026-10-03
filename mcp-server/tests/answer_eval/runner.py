@@ -334,8 +334,11 @@ def corpus_manifest(path: Path = CORPUS_PATH) -> dict[str, tuple[str, set[str]]]
             message_id = f"t{n:02d}.{index + 1}{BASELINE_DOMAIN}"
             claimant = f"{message_id}#{hashlib.sha256(raw).hexdigest()[:8]}"
             parsed = email.message_from_bytes(raw, policy=email.policy.default)
-            text = [message_id, *(str(v) for v in parsed.values())]
-            text += [p.get_content() for p in parsed.walk() if p.get_content_maintype() == "text"]
+            text = [message_id]
+            for part in parsed.walk():  # every part's headers: attachment names and types
+                text += [str(v) for v in part.values()]
+                if part.get_content_maintype() == "text":
+                    text.append(part.get_content())
             manifest[claimant] = (f"t{n:02d}.1{BASELINE_DOMAIN}", _tokens(" ".join(text)))
     return manifest
 
@@ -346,9 +349,10 @@ def index_identity(db: Any, manifest_path: Path = CORPUS_PATH) -> dict[str, obje
     The evaluation sends evidence to the configured providers, and a
     real mailbox is out of its scope, so the index must hold exactly the
     committed corpus's claimant IDs (``corpus_manifest``), and every
-    indexed text a prompt can carry (chunks, thread subjects, snippets,
-    bodies and participants) may use only words of the corpus messages
-    it belongs to. Private text stored under copied baseline IDs fails
+    indexed text a prompt can carry may use only words of the corpus
+    messages it belongs to: chunk text, message subjects, participants
+    (the chunk header's sender), attachment names and types, and thread
+    subjects, display subjects, snippets, bodies and participants. Private text stored under copied baseline IDs fails
     the second check. Messages name no content.
     """
     manifest = corpus_manifest(manifest_path)
@@ -360,22 +364,37 @@ def index_identity(db: Any, manifest_path: Path = CORPUS_PATH) -> dict[str, obje
         claimants = {str(c) for (c,) in conn.execute("SELECT claimant_id FROM messages")}
         if claimants != set(manifest):
             raise refused
-        for claimant, text in conn.execute("SELECT claimant_id, text FROM message_chunks"):
-            if claimant not in manifest or not _tokens(str(text)) <= manifest[claimant][1]:
-                raise refused
+        # Per-message text a prompt can carry: chunk text, and the chunk
+        # header's sender and attachment name and type.
+        per_message = (
+            "SELECT claimant_id, text FROM message_chunks",
+            "SELECT claimant_id, subject FROM messages",
+            "SELECT claimant_id, coalesce(name, '') || ' ' || coalesce(address, '') "
+            "FROM message_participants",
+            "SELECT claimant_id, coalesce(filename, '') || ' ' || coalesce(content_type, '') "
+            "FROM attachments",
+        )
+        for query in per_message:
+            for claimant, text in conn.execute(query):
+                if (
+                    claimant not in manifest
+                    or not _tokens(str(text or "")) <= manifest[claimant][1]
+                ):
+                    raise refused
         thread_tokens: dict[str, set[str]] = {}
         for thread, tokens in manifest.values():
             thread_tokens.setdefault(thread, set()).update(tokens)
         rows = conn.execute(
-            "SELECT thread_id, subject, snippet, body_text, participants FROM threads"
+            "SELECT thread_id, subject, display_subject, snippet, body_text, participants "
+            "FROM threads"
         )
-        for thread_id, subject, snippet, body_text, participants in rows:
+        for thread_id, subject, display_subject, snippet, body_text, participants in rows:
             allowed = thread_tokens.get(str(thread_id), set())
             try:  # a JSON list, whose \u escapes would split names into odd tokens
                 names = " ".join(str(p) for p in json.loads(participants or "[]"))
             except ValueError, TypeError:
                 names = str(participants)
-            texts = (subject, snippet, body_text, names)
+            texts = (subject, display_subject, snippet, body_text, names)
             words = _tokens(" ".join(str(t or "") for t in texts))
             if not all(_thread_word_ok(w, allowed) for w in words - allowed):
                 raise refused
