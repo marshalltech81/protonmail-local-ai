@@ -161,6 +161,10 @@ def bounded_logging:
         (if $s.user == null then "sets no user" else empty end),
         (if ($s | list("secrets")) != [] then "uses a secret" else empty end)
     else
+        # Another image or build may default to root, so it must name a
+        # user (the root check above rejects a root one).
+        (if ($s.image != $bs.image or $s.build != $bs.build) and $s.user == null
+            then "changes its image or build and sets no user" else empty end),
         ($s | list("secrets")[] | .source as $src
             | select([$bs | list("secrets")[] | select(.source == $src)] == [])
             | "gains secret \($src)"),
@@ -403,6 +407,21 @@ secrets:
 EOF
 }
 
+# Another image may default to root; the base's images set their own user.
+merged_hardening_rejects_a_new_image_without_a_user() {
+    expect_overlay_rejected new-image \
+        "indexer: changes its image or build and sets no user" \
+        "mbsync: changes its image or build and sets no user" <<'EOF'
+services:
+  indexer:
+    build: !reset null
+    image: example.invalid/rootful:1
+  mbsync:
+    build:
+      dockerfile: Dockerfile.rootful
+EOF
+}
+
 # A decimal UID of zeros is still root.
 merged_hardening_rejects_leading_zero_root_users() {
     expect_overlay_rejected zero-users \
@@ -597,6 +616,8 @@ check "merged hardening rejects !override on ports and networks" \
     merged_hardening_rejects_override_ports_and_networks
 check "merged hardening rejects the forbidden settings" merged_hardening_rejects_forbidden_settings
 check "merged hardening rejects redefined secrets" merged_hardening_rejects_redefined_secrets
+check "merged hardening rejects a new image or build without a user" \
+    merged_hardening_rejects_a_new_image_without_a_user
 check "merged hardening rejects leading-zero root users" \
     merged_hardening_rejects_leading_zero_root_users
 check "merged hardening rejects an !override that drops a service" \
