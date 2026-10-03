@@ -206,6 +206,7 @@ class TestMcpAuthToken:
 
         monkeypatch.setattr(main_mod, "MCP_AUTH_TOKEN", token)
         monkeypatch.setattr(main_mod, "Database", self._FakeDatabase)
+        monkeypatch.setattr(main_mod, "run_startup_identity_check", _skip_identity_check)
         monkeypatch.setattr(main_mod, "_run_server", lambda *_: pytest.fail("server started"))
         with pytest.raises(ValueError) as excinfo:
             main_mod.main()
@@ -235,6 +236,7 @@ class TestMcpAuthToken:
 
         monkeypatch.setattr(main_mod, "MCP_AUTH_TOKEN", token)
         monkeypatch.setattr(main_mod, "Database", self._FakeDatabase)
+        monkeypatch.setattr(main_mod, "run_startup_identity_check", _skip_identity_check)
         monkeypatch.setattr(main_mod, "_run_server", lambda *_: pytest.fail("server started"))
         with caplog.at_level(logging.DEBUG), pytest.raises(ValueError) as excinfo:
             main_mod.main()
@@ -347,6 +349,7 @@ class TestContextTokens:
         }.items():
             monkeypatch.setattr(main_mod, name, value)
         monkeypatch.setattr(main_mod, "Database", self._FakeDatabase)
+        monkeypatch.setattr(main_mod, "run_startup_identity_check", _skip_identity_check)
         ran = []
         monkeypatch.setattr(main_mod, "_run_server", lambda *args: ran.append(args))
         main_mod.main()
@@ -482,6 +485,7 @@ class TestInheritedEndpointUserinfo:
             monkeypatch.delenv(name, raising=False)
         monkeypatch.setenv(env_var, _INHERITED_URL)
         monkeypatch.setattr(main_mod, "Database", self._FakeDatabase)
+        monkeypatch.setattr(main_mod, "run_startup_identity_check", _skip_identity_check)
         monkeypatch.setattr(main_mod, "_run_server", lambda *_: None)
         caplog.set_level(logging.DEBUG)
         with pytest.raises(ValueError, match="credentials") as excinfo:
@@ -549,12 +553,17 @@ class TestInheritedEndpointUserinfo:
         for name in ("OPENAI_BASE_URL", "ANTHROPIC_BASE_URL", "CO_API_URL"):
             monkeypatch.delenv(name, raising=False)
         monkeypatch.setattr(main_mod, "Database", self._FakeDatabase)
+        monkeypatch.setattr(main_mod, "run_startup_identity_check", _skip_identity_check)
         ran = []
         monkeypatch.setattr(main_mod, "_run_server", lambda *args: ran.append(args))
         caplog.set_level(logging.INFO)
         main_mod.main()
         assert ran
         assert "https://api.openai.com/v1" in caplog.text
+
+
+def _skip_identity_check(*_args, **_kwargs) -> None:
+    """``main()`` tests run against a fake database with no identity record."""
 
 
 class TestRemoteEndpointWarning:
@@ -625,11 +634,41 @@ class TestRemoteEndpointWarning:
         for name in ("OPENAI_BASE_URL", "ANTHROPIC_BASE_URL", "CO_API_URL"):
             monkeypatch.delenv(name, raising=False)
         monkeypatch.setattr(main_mod, "Database", TestInheritedEndpointUserinfo._FakeDatabase)
+        monkeypatch.setattr(main_mod, "run_startup_identity_check", _skip_identity_check)
         monkeypatch.setattr(main_mod, "_run_server", lambda *_: None)
         caplog.set_level(logging.DEBUG)
         main_mod.main()
         assert _PLACEHOLDER_KEY not in caplog.text
         return [r.getMessage() for r in self._warnings(caplog)]
+
+    def test_main_checks_the_embedder_identity_before_serving(self, monkeypatch, caplog):
+        import src.main as main_mod
+
+        calls = []
+
+        def check(db, make_client, *, provider, secrets, deadline_secs):
+            client = make_client()
+            calls.append((provider, client.base_url, client.model, secrets, deadline_secs))
+
+        monkeypatch.setattr(main_mod, "run_startup_identity_check", check)
+        local = "http://host.docker.internal:8001/v1"
+        monkeypatch.setattr(main_mod, "Database", TestInheritedEndpointUserinfo._FakeDatabase)
+        for name, value in {
+            "MCP_AUTH_TOKEN": _PLACEHOLDER_TOKEN,
+            "EMBED_BASE_URL": local,
+            "EMBED_MODEL": "synthetic",
+            "EMBED_API_KEY": _PLACEHOLDER_KEY,
+            "INFERENCE_MODE": "none",
+            "INFERENCE_API_KEY": "",
+            "RERANK_MODE": "none",
+            "RERANK_API_KEY": "",
+        }.items():
+            monkeypatch.setattr(main_mod, name, value)
+        monkeypatch.setattr(main_mod, "_run_server", lambda *_: None)
+        main_mod.main()
+        assert calls == [
+            ("openai", local, "synthetic", [_PLACEHOLDER_KEY], main_mod.EMBED_TIMEOUT_SECS)
+        ]
 
     def test_main_warns_once_per_remote_layer(self, monkeypatch, caplog):
         warnings = self._run_main(
@@ -773,6 +812,7 @@ class TestExperimentalToolsFlag:
         }.items():
             monkeypatch.setattr(main_mod, name, value)
         monkeypatch.setattr(main_mod, "Database", self._FakeDatabase)
+        monkeypatch.setattr(main_mod, "run_startup_identity_check", _skip_identity_check)
         servers = []
         monkeypatch.setattr(main_mod, "_run_server", lambda server: servers.append(server))
         main_mod.main()

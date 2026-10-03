@@ -689,6 +689,7 @@ class Database:
             );
         """)
         self._run_entity_schema_script(cur)
+        self._run_vector_generation_schema_script(cur)
 
     @staticmethod
     def _run_entity_schema_script(cur: sqlite3.Cursor) -> None:
@@ -728,6 +729,47 @@ class Database:
                 PRIMARY KEY (entity_id, alias)
             )
             """,
+        ):
+            cur.execute(statement)
+
+    @staticmethod
+    def _run_vector_generation_schema_script(cur: sqlite3.Cursor) -> None:
+        """The embedder identity record (PLAN Phase 2 item 1, first slice;
+        see ``src/embed_identity.py``), inside the initial schema's open
+        transaction.
+
+        One row per embedding generation. Today exactly one exists, status
+        ``active``, written on a fresh index. ``endpoint`` is the SDK's
+        resolved base URL without userinfo, query or fragment;
+        ``calibration_vector`` is the float32 embedding of the fixed
+        calibration text whose SHA-256 is ``calibration_sha256``.
+        ``revision``, ``tokenizer``, ``context_window``,
+        ``chunk_config_hash`` and ``label`` are reserved for the
+        generation lifecycle and stay NULL: the OpenAI-compatible
+        embeddings API exposes none of them.
+        """
+        for statement in (
+            """
+            CREATE TABLE vector_generations (
+                generation_id      INTEGER PRIMARY KEY,
+                provider           TEXT NOT NULL,
+                endpoint           TEXT NOT NULL,
+                model              TEXT NOT NULL,
+                revision           TEXT,
+                dimensions         INTEGER NOT NULL,
+                tokenizer          TEXT,
+                context_window     INTEGER,
+                chunk_config_hash  TEXT,
+                label              TEXT,
+                calibration_sha256 TEXT NOT NULL,
+                calibration_vector BLOB NOT NULL,
+                created_at         TEXT NOT NULL,
+                status             TEXT NOT NULL CHECK (status IN
+                    ('building', 'caught-up', 'active', 'retained', 'retired'))
+            )
+            """,
+            "CREATE UNIQUE INDEX idx_vector_generations_active "
+            "ON vector_generations(status) WHERE status = 'active'",
         ):
             cur.execute(statement)
 
@@ -2168,6 +2210,66 @@ class Database:
     def count_total_messages(self) -> int:
         row = self._conn.execute("SELECT COUNT(*) FROM message_thread_map").fetchone()
         return int(row[0]) if row else 0
+
+    @_synchronized
+    def get_active_vector_generation(self) -> dict | None:
+        """The active ``vector_generations`` row, its calibration vector
+        unpacked to floats; ``None`` before the indexer records one.
+
+        Raises on a database from before the table existed: the index
+        must be rebuilt, since nothing records which embedder wrote it.
+        """
+        if (
+            self._conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'vector_generations'"
+            ).fetchone()
+            is None
+        ):
+            raise RuntimeError(
+                "The index predates the embedder identity record. Stop the stack, "
+                "wipe the sqlite-volume and let the indexer rebuild the index from "
+                "Maildir."
+            )
+        row = self._conn.execute(
+            "SELECT * FROM vector_generations WHERE status = 'active'"
+        ).fetchone()
+        if row is None:
+            return None
+        record = dict(row)
+        blob = record["calibration_vector"]
+        record["calibration_vector"] = list(struct.unpack(f"{len(blob) // 4}f", blob))
+        return record
+
+    @_synchronized
+    def record_vector_generation(
+        self,
+        *,
+        provider: str,
+        endpoint: str,
+        model: str,
+        calibration_sha256: str,
+        calibration_vector: list[float],
+    ) -> int:
+        """Insert the active generation; returns its ``generation_id``.
+
+        The partial unique index refuses a second active row.
+        """
+        with self.transaction():
+            cur = self._conn.execute(
+                "INSERT INTO vector_generations (provider, endpoint, model, dimensions, "
+                "calibration_sha256, calibration_vector, created_at, status) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, 'active')",
+                (
+                    provider,
+                    endpoint,
+                    model,
+                    len(calibration_vector),
+                    calibration_sha256,
+                    sqlite_vec.serialize_float32(calibration_vector),
+                    datetime.now(UTC).isoformat(),
+                ),
+            )
+        return int(cur.lastrowid or 0)
 
     @_synchronized
     def get_thread_messages(self, thread_id: str) -> list[sqlite3.Row]:
