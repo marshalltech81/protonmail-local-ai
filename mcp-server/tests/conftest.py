@@ -403,9 +403,9 @@ def source_sha256(message_id: str, variant: str = "") -> str:
 
 def claimant_of(message_id: str, variant: str = "") -> str:
     """The claimant ID the indexer gives the fixture file for
-    ``message_id``: the Message-ID plus the first eight hex digits of
+    ``message_id``: the Message-ID plus the first sixteen hex digits of
     the file hash (``indexer/src/parser.py`` ``claimant_id``)."""
-    return f"{message_id}#{source_sha256(message_id, variant)[:8]}"
+    return f"{message_id}#{source_sha256(message_id, variant)[:16]}"
 
 
 # A reap time inside the read-side retention window, relative to the

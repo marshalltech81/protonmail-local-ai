@@ -662,8 +662,8 @@ class TestFileIdentity:
 
 
 class TestClaimantId:
-    """#217: the per-message key is the Message-ID plus the first eight
-    hex digits of the SHA-256 of the file's raw bytes, so two files
+    """#217: the per-message key is the Message-ID plus the first sixteen
+    hex digits (#454) of the SHA-256 of the file's raw bytes, so two files
     claiming one Message-ID with different content get distinct keys,
     while the same file keeps its key across reparses, flag renames and
     folder moves (none of which change its bytes)."""
@@ -689,7 +689,25 @@ class TestClaimantId:
     def test_is_message_id_plus_raw_bytes_hash_prefix(self, tmp_path):
         msg = self._parse(tmp_path, "INBOX/cur/a:2,S", self._RAW)
         digest = hashlib.sha256(self._RAW).hexdigest()
-        assert msg.claimant_id == f"claimant@example.com#{digest[:8]}"
+        assert msg.claimant_id == f"claimant@example.com#{digest[:16]}"
+
+    def test_files_sharing_a_32_bit_hash_prefix_get_distinct_keys(self, tmp_path):
+        """#454: a 32-bit suffix lets a crafted file that collides on the
+        first eight hex digits take over another claimant's rows. These
+        two bodies (found by a birthday search) share that prefix but
+        not the full hash, and must still get distinct claimant IDs."""
+        head = self._RAW.replace(b"Body.\r\n", b"")
+        first_raw = head + b"Body 8176.\r\n"
+        second_raw = head + b"Body 71374.\r\n"
+        first_digest = hashlib.sha256(first_raw).hexdigest()
+        second_digest = hashlib.sha256(second_raw).hexdigest()
+        assert first_digest[:8] == second_digest[:8]
+        assert first_digest != second_digest
+
+        first = self._parse(tmp_path, "INBOX/cur/a:2,S", first_raw)
+        second = self._parse(tmp_path, "INBOX/cur/b:2,S", second_raw)
+        assert first.message_id == second.message_id
+        assert first.claimant_id != second.claimant_id
 
     def test_independent_of_flags_filename_and_folder(self, tmp_path):
         first = self._parse(tmp_path, "INBOX/cur/a:2,S", self._RAW)

@@ -529,7 +529,7 @@ per-message record.
 files can claim the same one, by accident or to overwrite another
 message's evidence. Every per-message row is therefore keyed by a
 claimant ID rather than the bare Message-ID: the Message-ID plus `#`
-and the first eight hex digits of the SHA-256 of the file's raw bytes
+and the first sixteen hex digits of the SHA-256 of the file's raw bytes
 (`parser.claimant_id`). The bytes are the identity because nothing that
 happens to a Maildir file changes them: flags and the delivery name
 live in the filename and the folder is the directory, so a flag rename,

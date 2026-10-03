@@ -2866,7 +2866,7 @@ class TestMessagesTable:
         row = db._conn.execute(
             "SELECT * FROM messages WHERE message_id = 'm1@example.com'"
         ).fetchone()
-        assert row["claimant_id"] == "m1@example.com#aaaaaaaa"
+        assert row["claimant_id"] == "m1@example.com#aaaaaaaaaaaaaaaa"
         assert row["thread_id"] == "t1"
         assert row["filepath"] == "/maildir/INBOX/cur/m1"
         assert row["folder"] == "INBOX"
