@@ -391,7 +391,8 @@ install -m 600 config/authority.toml.example config/authority.toml
 setfacl -m u:1002:r config/authority.toml
 # edit: one table per class, with `addresses` (exact) and/or
 # `domains` (the domain and its subdomains)
-make restart-indexer
+make restart-indexer   # a running stack; on first run, make up
+                       # (make up-macos-bridge in macOS Bridge mode)
 ```
 
 `config/authority.toml` is gitignored: it holds real addresses and
@@ -418,13 +419,17 @@ the file to that state:
 `setfacl -b config/authority.toml && chmod 600 config/authority.toml && setfacl -m u:1002:r config/authority.toml`.
 Do not widen the mode or hand the file to a host group instead: GID
 1002 may belong to another account on the host. The ACL grants host
-UID 1002 read access too, so if `getent passwd 1002` names another
-account (and you are not UID 1002), `make up` warns, and you should
-keep the checkout under a directory that account cannot enter (such as
-a `700` home directory). The indexer must also be able to enter
-`config/` itself; if the directory lacks the search bit for other
-accounts (a checkout made under a `077` umask), `make up` fails and
-prints `setfacl -m u:1002:x config`.
+UID 1002 read access too, so if `getent passwd` names any account other
+than yours with UID 1002 (one sharing your UID counts), `make up` fails:
+give that account another UID (as root, `usermod -u <new-uid>
+<account>`) or remove it. This check needs `getent` (`libc-bin` on
+Debian and Ubuntu).
+The indexer must also be able to enter `config/` itself; if the
+directory lacks the search bit for the indexer (a checkout made under
+a `077` umask, or a `config/` whose group is GID 1002 without the
+group search bit), `make up` fails and prints `setfacl -m u:1002:x
+config`. This check needs `getfacl` (the `acl` package) unless UID
+1002 owns `config/`.
 An editor that saves by writing a new file drops the ACL; `make
 restart-indexer` then fails with the same command. With rootless
 Docker or `userns-remap` the container's UID 1002 maps to a different

@@ -451,45 +451,113 @@ loose_secret_mode_fails() {
 # ownership, so the file must grant the indexer (UID 1002) read (#526).
 # stub_host OS [OWNER] puts stub commands first on PATH so every case
 # sees the same host whatever machine runs the tests: `uname -s` prints
-# OS, `stat` reports OWNER as the file owner when given, `getfacl`
-# prints $STUBS/acl (written by write_acl) for a file and $STUBS/diracl
-# for a directory, and `getent passwd 1002`
+# OS, `stat` reports OWNER as the owner of files and directories when
+# given ($STUBS/file-owner and $STUBS/dir-owner, which a case may
+# rewrite) and group 4242 ($STUBS/file-group, $STUBS/dir-group),
+# `getfacl` prints $STUBS/acl (written by write_acl) for a
+# file and $STUBS/diracl, or else the mode's base entries, for a
+# directory, and `getent passwd 1002`
 # finds an account only when $STUBS/uid1002 exists; `id -u` (the
-# operator) is 4242.
+# operator, `id -un` "operator") is 4242, or $STUBS/operator-uid when a
+# case writes it ($STUBS/operator-name sets the name); `getent passwd`
+# lists the operator, then `other`, and a lookup by UID fails with
+# status 1 when $STUBS/lookup-error exists.
 stub_host() {
     local os="$1" owner="${2:-}"
     STUBS="$(mktemp -d "$WORK/stubs.XXXXXX")"
     printf '#!/bin/bash\nprintf "%%s\\n" %q\n' "$os" >"$STUBS/uname"
     if [[ -n "$owner" ]]; then
-        cat >"$STUBS/stat" <<STUB
+        printf '%s\n' "$owner" >"$STUBS/file-owner"
+        printf '%s\n' "$owner" >"$STUBS/dir-owner"
+        printf '4242\n' >"$STUBS/file-group"
+        printf '4242\n' >"$STUBS/dir-group"
+        cat >"$STUBS/stat" <<'STUB'
 #!/bin/bash
-for arg in "\$@"; do
-    [[ "\$arg" == '%u' ]] && { printf '%s\\n' $owner; exit 0; }
+kind=file
+[[ -d "${!#}" ]] && kind=dir
+for arg in "$@"; do
+    [[ "$arg" == '%u' ]] && exec cat "$(dirname "$0")/$kind-owner"
+    [[ "$arg" == '%g' ]] && exec cat "$(dirname "$0")/$kind-group"
 done
-exec /usr/bin/stat "\$@"
+exec /usr/bin/stat "$@"
 STUB
     fi
     cat >"$STUBS/getfacl" <<'STUB'
 #!/bin/bash
-if [[ -d "${!#}" ]]; then
-    [[ -e "$(dirname "$0")/diracl" ]] || exit 1
+target="${!#}"
+if [[ ! -d "$target" ]]; then
+    cat "$(dirname "$0")/acl"
+elif [[ -e "$(dirname "$0")/diracl" ]]; then
     cat "$(dirname "$0")/diracl"
 else
-    cat "$(dirname "$0")/acl"
+    # No extended ACL: getfacl prints the mode bits as the base entries.
+    mode="$(/usr/bin/stat -c '%a' "$target" 2>/dev/null || /usr/bin/stat -f '%Lp' "$target")"
+    for entry in user:: group:: other::; do
+        case "$entry" in
+            user::) digit=$(((8#$mode >> 6) & 7)) ;;
+            group::) digit=$(((8#$mode >> 3) & 7)) ;;
+            other::) digit=$((8#$mode & 7)) ;;
+        esac
+        perms=""
+        ((digit & 4)) && perms+=r || perms+=-
+        ((digit & 2)) && perms+=w || perms+=-
+        ((digit & 1)) && perms+=x || perms+=-
+        printf '%s%s\n' "$entry" "$perms"
+    done
 fi
 STUB
     cat >"$STUBS/id" <<'STUB'
 #!/bin/bash
-[[ "$*" == '-u' ]] && { printf '4242\n'; exit 0; }
+if [[ "$*" == '-u' ]]; then
+    [[ -e "$(dirname "$0")/operator-uid" ]] && exec cat "$(dirname "$0")/operator-uid"
+    printf '4242\n'
+    exit 0
+fi
+if [[ "$*" == '-un' ]]; then
+    [[ -e "$(dirname "$0")/operator-name" ]] && exec cat "$(dirname "$0")/operator-name"
+    printf 'operator\n'
+    exit 0
+fi
 exec /usr/bin/id "$@"
 STUB
+    # The operator's entry comes first, so a direct lookup of a UID the
+    # operator shares with `other` finds only the operator.
     cat >"$STUBS/getent" <<'STUB'
 #!/bin/bash
-[[ "$1 $2" == 'passwd 1002' && -e "$(dirname "$0")/uid1002" ]] || exit 2
-printf 'other:x:1002:1002::/home/other:/bin/bash\n'
+stubs="$(dirname "$0")"
+[[ "$1" == passwd ]] || exit 2
+operator_uid=4242 operator_name=operator
+[[ -e "$stubs/operator-uid" ]] && operator_uid="$(cat "$stubs/operator-uid")"
+[[ -e "$stubs/operator-name" ]] && operator_name="$(cat "$stubs/operator-name")"
+entries="$operator_name:x:$operator_uid:$operator_uid::/home/operator:/bin/bash"
+[[ -e "$stubs/uid1002" ]] && entries+=$'\nother:x:1002:1002::/home/other:/bin/bash'
+if [[ $# -eq 1 ]]; then
+    printf '%s\n' "$entries"
+    exit 0
+fi
+[[ -e "$stubs/lookup-error" ]] && exit 1
+grep -m 1 "^[^:]*:x:$2:" <<<"$entries" || exit 2
 STUB
     chmod 755 "$STUBS"/*
     PATH="$STUBS:$PATH"
+}
+
+# Take NAME off PATH: drop its stub and link every other command into
+# one directory that leaves it out.
+hide_command() {
+    local name="$1" bin="$STUBS/bin" dir cmd
+    local -a dirs
+    rm "$STUBS/$name"
+    mkdir "$bin"
+    IFS=: read -ra dirs <<<"${PATH#"$STUBS:"}"
+    for dir in "${dirs[@]}"; do
+        for cmd in "$dir"/*; do
+            [[ -x "$cmd" && ! -d "$cmd" && "${cmd##*/}" != "$name" && ! -e "$bin/${cmd##*/}" ]] ||
+                continue
+            ln -s "$cmd" "$bin/${cmd##*/}"
+        done
+    done
+    PATH="$STUBS:$bin"
 }
 
 write_acl() {
@@ -606,27 +674,83 @@ linux_loose_authority_file_fails() {
     done
 }
 
-# Host UID 1002 reads the file too, so a host account holding it is
-# named; the check still passes, since the container needs that UID.
-linux_host_account_1002_warns() {
+# #662: host UID 1002 reads the file too, so a host account holding it
+# that is not the operator fails the check, with the fix and without
+# the file's content.
+readonly HOST_ACCOUNT_1002_ERROR='ERROR: host account other has UID 1002, the indexer'"'"'s UID'
+
+linux_host_account_1002_fails() {
     stub_host Linux 4242
     setup
     write_authority 640
     write_acl "${INDEXER_ONLY_ACL[@]}"
     : >"$STUBS/uid1002"
-    passes
-    grep -F 'WARNING: host account other has UID 1002' "$WORK/output"
+    fails_with "$HOST_ACCOUNT_1002_ERROR"
+    grep -F 'usermod -u' "$WORK/output"
+    ! grep -F 'lawfirm.example' "$WORK/output"
 }
 
-# Review round 1: a file UID 1002 owns is readable by that host account
-# too, so the warning applies there as well.
-linux_owner_1002_with_host_account_warns() {
+# A file UID 1002 owns is readable by that host account too.
+linux_owner_1002_with_host_account_fails() {
     stub_host Linux 1002
     setup
     write_authority 600
     : >"$STUBS/uid1002"
+    fails_with "$HOST_ACCOUNT_1002_ERROR"
+}
+
+# The operator's own account holding UID 1002 is no one else.
+linux_operator_holding_uid_1002_passes() {
+    stub_host Linux 1002
+    setup
+    write_authority 600
+    printf '1002\n' >"$STUBS/operator-uid"
     passes
-    grep -F 'WARNING: host account other has UID 1002' "$WORK/output"
+    ! grep -F 'host account' "$WORK/output"
+}
+
+# Review round 1: another account sharing UID 1002 with the operator
+# reads the file just the same, though a lookup by UID names only the
+# operator.
+linux_account_sharing_operator_uid_1002_fails() {
+    stub_host Linux 1002
+    setup
+    write_authority 600
+    printf '1002\n' >"$STUBS/operator-uid"
+    : >"$STUBS/uid1002"
+    fails_with "$HOST_ACCOUNT_1002_ERROR"
+}
+
+# Review round 2: a failed lookup by UID stops validation even though
+# the listing that follows it succeeds.
+linux_failed_uid_lookup_fails() {
+    stub_host Linux 4242
+    setup
+    write_authority 640
+    write_acl "${INDEXER_ONLY_ACL[@]}"
+    : >"$STUBS/lookup-error"
+    fails_with 'getent passwd failed with status 1'
+}
+
+# Review round 2: the operator's name is compared as is, so a name
+# with a backslash (winbind's DOMAIN\user) still matches its own entry.
+linux_operator_name_with_backslash_passes() {
+    stub_host Linux 1002
+    setup
+    write_authority 600
+    printf '1002\n' >"$STUBS/operator-uid"
+    printf '%s\n' 'DOMAIN\user' >"$STUBS/operator-name"
+    passes
+}
+
+# Review round 1: without getent the account check cannot run.
+linux_missing_getent_fails() {
+    stub_host Linux 4242
+    setup
+    write_authority 640
+    write_acl "${INDEXER_ONLY_ACL[@]}"
+    hide_command getent
+    fails_with 'getent is needed to check for another host account with UID 1002'
 }
 
 # Review round 1: the indexer must also be able to search config/, the
@@ -667,6 +791,51 @@ linux_config_dir_acl_denying_indexer_fails() {
     printf '%s\n' 'user::rwx' 'user:1002:---' 'group::---' 'mask::---' 'other::--x' \
         >"$STUBS/diracl"
     fails_with 'is not searchable by the indexer (UID 1002)'
+}
+
+# #668: without getfacl the ACL on config/ cannot be read, and a
+# named entry for UID 1002 there could deny what the other bits allow.
+# A config/ UID 1002 owns is decided by its owner bits alone.
+linux_config_dir_check_without_getfacl_fails() {
+    stub_host Linux 1002
+    setup
+    write_authority 600
+    chmod 701 "$ROOT/config"
+    printf '4242\n' >"$STUBS/dir-owner"
+    hide_command getfacl
+    fails_with "getfacl is needed to check the ACL on $ROOT/config; install the acl package."
+    printf '1002\n' >"$STUBS/dir-owner"
+    passes
+}
+
+# #663: the indexer's primary GID is 1002, so a group entry matching it
+# (the owning group, or a named group:1002 entry, each limited by the
+# mask) decides search before the other bits do.
+linux_config_dir_group_entries_decide() {
+    stub_host Linux 4242
+    setup
+    write_authority 640
+    write_acl "${INDEXER_ONLY_ACL[@]}"
+    chmod 701 "$ROOT/config"
+    printf '1002\n' >"$STUBS/dir-group"
+    fails_with 'is not searchable by the indexer (UID 1002)'
+    chmod 711 "$ROOT/config"
+    passes
+    printf '%s\n' 'user::rwx' 'group::--x' 'mask::---' 'other::--x' >"$STUBS/diracl"
+    fails_with 'is not searchable by the indexer (UID 1002)'
+    printf '4242\n' >"$STUBS/dir-group"
+    printf '%s\n' 'user::rwx' 'group::---' 'group:1002:---' 'mask::---' 'other::--x' \
+        >"$STUBS/diracl"
+    fails_with 'is not searchable by the indexer (UID 1002)'
+    printf '%s\n' 'user::rwx' 'group::---' 'group:1002:--x' 'mask::r--' 'other::--x' \
+        >"$STUBS/diracl"
+    fails_with 'is not searchable by the indexer (UID 1002)'
+    printf '%s\n' 'user::rwx' 'group::---' 'group:1002:--x' 'mask::--x' 'other::---' \
+        >"$STUBS/diracl"
+    passes
+    # One matching group entry that grants search is enough.
+    printf '1002\n' >"$STUBS/dir-group"
+    passes
 }
 
 # The documented authority edit flow restarts the indexer through
@@ -802,13 +971,24 @@ check "Linux: an authority file owned by UID 1002 passes" linux_authority_file_o
 check "Linux: an ACL granting only UID 1002 read passes" linux_indexer_only_acl_passes
 check "Linux: a broader ACL fails" linux_broader_acl_fails
 check "Linux: an authority file with a loose mode fails" linux_loose_authority_file_fails
-check "Linux: a host account with UID 1002 is warned about" linux_host_account_1002_warns
-check "Linux: a UID 1002 owner with a host account is warned about" \
-    linux_owner_1002_with_host_account_warns
+check "Linux: a host account with UID 1002 fails" linux_host_account_1002_fails
+check "Linux: a UID 1002 owner with a host account fails" \
+    linux_owner_1002_with_host_account_fails
+check "Linux: an operator holding UID 1002 passes" linux_operator_holding_uid_1002_passes
+check "Linux: an account sharing the operator's UID 1002 fails" \
+    linux_account_sharing_operator_uid_1002_fails
+check "Linux: a missing getent fails" linux_missing_getent_fails
+check "Linux: a failed lookup by UID fails" linux_failed_uid_lookup_fails
+check "Linux: an operator name with a backslash passes" \
+    linux_operator_name_with_backslash_passes
 check "Linux: an unsearchable config directory fails" linux_unsearchable_config_dir_fails
 check "Linux: the fix command quotes the path" linux_fix_command_quotes_the_path
 check "Linux: a config directory ACL denying UID 1002 fails" \
     linux_config_dir_acl_denying_indexer_fails
+check "Linux: the config directory check fails without getfacl" \
+    linux_config_dir_check_without_getfacl_fails
+check "Linux: group entries for GID 1002 on config/ decide search" \
+    linux_config_dir_group_entries_decide
 check "make restart-indexer validates before restarting" restart_indexer_validates_first
 check "padded quoted values pass" padded_quoted_values_pass
 check "padded and mixed-case modes pass" padded_and_cased_modes_pass

@@ -80,7 +80,24 @@ file_owner() {
     return 1
 }
 
+file_group() {
+    local path="$1"
+    local group
+
+    if group=$(stat -c '%g' "$path" 2>/dev/null); then
+        printf '%s\n' "$group"
+        return 0
+    fi
+    if group=$(stat -f '%g' "$path" 2>/dev/null); then
+        printf '%s\n' "$group"
+        return 0
+    fi
+    printf 'ERROR: unable to read the group of %s on this platform.\n' "$path" >&2
+    return 1
+}
+
 readonly INDEXER_UID=1002
+readonly INDEXER_GID=1002
 
 # On Linux with Docker Engine a bind mount keeps host ownership and the
 # kernel checks the indexer's own UID, so a 600 file the operator owns
@@ -94,26 +111,54 @@ readonly INDEXER_UID=1002
 # user, so there the plain 600 stands.
 readonly INDEXER_ONLY_ACL=$'user::rw-\nuser:1002:r--\ngroup::---\nmask::r--\nother::---'
 
+# Print the ACL on PATH, or fail: without it the grant cannot be checked.
+acl_of() {
+    local path="$1"
+
+    command -v getfacl >/dev/null || {
+        printf 'ERROR: getfacl is needed to check the ACL on %s; install the acl package.\n' "$path" >&2
+        exit 1
+    }
+    getfacl --omit-header --numeric --absolute-names "$path" || {
+        printf 'ERROR: unable to read the ACL on %s.\n' "$path" >&2
+        exit 1
+    }
+}
+
+# Succeed when the ACL entry starting with QUALIFIER (such as
+# `user:1002:` or `group::`) grants search, limited by any mask.
+acl_entry_searches() {
+    local acl="$1" qualifier="$2"
+
+    grep -Eq "^${qualifier}..x" <<<"$acl" || return 1
+    ! grep -Eq '^mask::' <<<"$acl" || grep -Eq '^mask::..x' <<<"$acl"
+}
+
 # The indexer must also search config/, the mount root: a directory
 # without the other-search bit (say, from a 077 umask) needs a search
 # ACL for UID 1002 too.
 require_indexer_can_search_on_linux() {
     local dir="$1"
-    local mode acl
+    local mode acl owning_group=""
 
     # POSIX ACL order: the owner entry, then a named-user entry for the
-    # UID (limited by the mask), and only then the other bits.
+    # UID, then the group entries matching the indexer's GID (the owning
+    # group and a named-group entry; one granting search is enough),
+    # and only then the other bits. Entries other than the owner's are
+    # limited by the mask.
     mode="$(file_mode "$dir")"
     if [[ "$(file_owner "$dir")" == "$INDEXER_UID" ]]; then
         (((8#$mode & 8#100) != 0)) && return 0
     else
-        acl=""
-        if command -v getfacl >/dev/null; then
-            acl="$(getfacl --omit-header --numeric --absolute-names "$dir")" || acl=""
-        fi
+        acl="$(acl_of "$dir")"
+        [[ "$(file_group "$dir")" != "$INDEXER_GID" ]] || owning_group="group::"
         if grep -Eq "^user:${INDEXER_UID}:" <<<"$acl"; then
-            grep -Eq "^user:${INDEXER_UID}:..x" <<<"$acl" && grep -Eq '^mask::..x' <<<"$acl" &&
+            acl_entry_searches "$acl" "user:${INDEXER_UID}:" && return 0
+        elif [[ -n "$owning_group" ]] || grep -Eq "^group:${INDEXER_GID}:" <<<"$acl"; then
+            if [[ -n "$owning_group" ]] && acl_entry_searches "$acl" "$owning_group"; then
                 return 0
+            fi
+            acl_entry_searches "$acl" "group:${INDEXER_GID}:" && return 0
         elif (((8#$mode & 8#001) != 0)); then
             return 0
         fi
@@ -123,9 +168,21 @@ require_indexer_can_search_on_linux() {
     exit 1
 }
 
+# Print the passwd entries for the given key (all of them without one);
+# a key with no entry (status 2) prints nothing.
+passwd_entries() {
+    local status=0
+
+    getent passwd "$@" || status=$?
+    ((status == 0 || status == 2)) || {
+        printf 'ERROR: getent passwd failed with status %s.\n' "$status" >&2
+        exit 1
+    }
+}
+
 require_indexer_readable_on_linux() {
     local path="$1"
-    local mode acl account quoted fix
+    local mode acl account entries listing quoted fix
 
     quoted="$(printf '%q' "$path")"
     fix="setfacl -b $quoted && chmod 600 $quoted && setfacl -m u:${INDEXER_UID}:r $quoted"
@@ -137,11 +194,7 @@ require_indexer_readable_on_linux() {
             exit 1
         }
     elif [[ "$mode" == "640" ]]; then
-        command -v getfacl >/dev/null || {
-            printf 'ERROR: getfacl is needed to check the ACL on %s; install the acl package.\n' "$path" >&2
-            exit 1
-        }
-        acl="$(getfacl --omit-header --numeric --absolute-names "$path")"
+        acl="$(acl_of "$path")"
         [[ "$acl" == "$INDEXER_ONLY_ACL" ]] || {
             printf 'ERROR: %s has mode 640; its ACL must grant read to UID %s and no one else. Run:\n  %s\n' \
                 "$path" "$INDEXER_UID" "$fix" >&2
@@ -153,18 +206,34 @@ require_indexer_readable_on_linux() {
         exit 1
     fi
     require_indexer_can_search_on_linux "$(dirname "$path")"
-    # Either grant also covers host UID 1002, so name any account holding
-    # it, unless that account is the operator's own.
-    if [[ "$(id -u)" != "$INDEXER_UID" ]] && command -v getent >/dev/null &&
-        account="$(getent passwd "$INDEXER_UID")"; then
-        printf 'WARNING: host account %s has UID %s and can read %s if it can reach the directory; keep the checkout under a directory that account cannot enter.\n' \
-            "${account%%:*}" "$INDEXER_UID" "$path" >&2
+    # Either grant also covers host UID 1002, so fail when a host account
+    # other than the operator's own holds it, including one sharing the
+    # operator's UID. A lookup by UID finds directory-service accounts
+    # that a listing may leave out but names only one account; the
+    # listing finds a second account with the same UID.
+    command -v getent >/dev/null || {
+        printf 'ERROR: getent is needed to check for another host account with UID %s; install it (libc-bin on Debian and Ubuntu).\n' \
+            "$INDEXER_UID" >&2
+        exit 1
+    }
+    # Each lookup is its own assignment so a failure in either stops
+    # validation; the operator's name reaches awk through ENVIRON, which,
+    # unlike -v, keeps backslashes (winbind's DOMAIN\user).
+    entries="$(passwd_entries "$INDEXER_UID")"
+    listing="$(passwd_entries)"
+    account="$(OPERATOR_NAME="$(id -un)" awk -F: -v uid="$INDEXER_UID" \
+        '$3 == uid && $1 != ENVIRON["OPERATOR_NAME"] { print $1; exit }' <<<"$entries"$'\n'"$listing")"
+    if [[ -n "$account" ]]; then
+        printf 'ERROR: host account %s has UID %s, the indexer'"'"'s UID, so the access granted to the indexer lets that account read %s too. Give the account another UID, or remove it, as root:\n  usermod -u <new-uid> %s\n' \
+            "$account" "$INDEXER_UID" "$path" "$(printf '%q' "$account")" >&2
+        exit 1
     fi
 }
 
 # The optional source-authority rules file holds real addresses and
 # domains, so it is held to the secret files' 600 (on Linux, 600 plus
-# an ACL for the indexer alone; see above). A symlink is rejected:
+# an ACL for the indexer alone, and no other host account with its
+# UID; see above). A symlink is rejected:
 # Compose mounts config/ as a directory, so a link whose target the
 # container cannot reach would pass here and stop the indexer at
 # startup; so is anything else that is not a regular file, which the
