@@ -3,6 +3,32 @@
 Diagnostics and recovery steps for a running stack. For first-time
 installation and configuration, see [`setup.md`](setup.md).
 
+## Which layer is failing
+
+A healthy Bridge container only means its IMAP port accepts TCP
+connections. It does not mean TLS works, an account is logged in, or
+mail is syncing. Each layer has its own signal; the states and signals
+are defined in
+[architecture.md](architecture.md#health-and-readiness-signals). Start
+with `make status`, which shows container health and the
+`get_mailbox_status` fields, then find the symptom below. Only the
+authentication row involves a credential: Bridge's `info` prints the
+Bridge password, so treat its output and `.secrets/bridge_pass.txt` as
+secrets. No other check needs or shows one.
+
+| Symptom | Failing layer | Next safe check |
+| --- | --- | --- |
+| `make up` fails with `container protonmail-bridge is unhealthy`, or Bridge restarts | Bridge listening | `docker compose logs protonmail-bridge`; see [Bridge is up but IMAP is unresponsive](#bridge-is-up-but-imap-is-unresponsive--mbsync-cant-connect) and the Bridge start-up sections below |
+| mbsync logs `Waiting for ProtonBridge IMAP` with no `Bridge IMAP port is reachable` after it, then `Bridge IMAP did not become reachable` | Bridge listening, as mbsync sees it | Default mode: the Bridge container's health and logs. macOS Bridge mode: [the app is running and its port matches](#macos-bridge-mode-mbsync-cannot-reach-or-verify-the-bridge-app) |
+| mbsync stops with `cert extraction failed` | TLS handshake | Run the TLS probe in [Confirm Bridge IMAP answers over TLS](#confirm-bridge-imap-answers-over-tls); a Bridge image from before implicit TLS needs `make build`. macOS Bridge mode: [the app's IMAP mode must be SSL](#macos-bridge-mode-mbsync-cannot-reach-or-verify-the-bridge-app) |
+| mbsync stops with `Bridge cert fingerprint does not match pinned value` or `does not match BRIDGE_CERT_FINGERPRINT` | TLS identity | [Bridge cert pin mismatch](#mbsync-refuses-to-sync--bridge-cert-pin-mismatch) |
+| mbsync is healthy, logs `Initial sync returned a non-zero status` or `Sync failed (n/5 consecutive failures)`, restarts after five; `get_mailbox_status` says `no successful mail sync has been recorded` | Bridge authentication, or the sync itself | Check that `BRIDGE_USER` and `.secrets/bridge_pass.txt` match Bridge's `info` (macOS Bridge mode: the app's IMAP details) and that an account is logged in ([re-authenticate](#bridge-credentials-expired--need-to-re-authenticate); in macOS Bridge mode, in the app); `mbsync -V` in [Verifying mbsync is working](#verifying-mbsync-is-working) names the failing step |
+| `make up` fails with `container mbsync is unhealthy` | mbsync syncing | [`make up` fails — mbsync is unhealthy](#make-up-fails--mbsync-is-unhealthy) |
+| mbsync is healthy, `get_mailbox_status` says `last successful mail sync was ... ago` | Last successful sync (recent syncs failing, or one long run in progress); or the indexer has not acknowledged a newer stamp (see the indexer rows) | `docker compose logs mbsync --tail 50`: repeated `Sync failed` lines, or no `Syncing...` since a long run started ([deadline](#mbsync-stopped-a-sync-at-its-deadline)) |
+| `get_mailbox_status` says `the indexer has not reported` or `the indexer last reported ... ago` | Index current: indexer down or stalled | `docker compose logs indexer --tail 50` and `docker inspect indexer --format='{{json .State.Health}}'` |
+| `get_mailbox_status` says `... waiting to be indexed` | Index current: indexing behind | Normal after a large sync; if it does not fall, see [Tuning indexing retries](#tuning-indexing-retries) |
+| `get_mailbox_status` is current but a message is missing | Index: a dead-lettered message (`current` ignores the `dead` count), or none: the mail reached Proton after the last sync | If the `dead` count is non-zero, fix its cause and run `make requeue-dead` (see [Tuning indexing retries](#tuning-indexing-retries)); otherwise wait one `SYNC_INTERVAL` |
+
 ## Bridge won't start — "Failed to launch exit status 1"
 
 This can happen if the image is outdated. Check:
@@ -128,13 +154,17 @@ restarts it so the failure is visible instead of hanging forever.
 
 **2. Check that Bridge is authenticated**
 
-```bash
-docker exec protonmail-bridge \
-    find /data/config/protonmail/bridge-v3 -type f | sort
-```
-
-If `vault.enc` is missing, Bridge is not authenticated and will not serve IMAP
-at all. Re-run `make first-run` to log in again.
+Neither the container's health nor its files show this. Bridge writes
+`vault.enc` at startup, before any login, and it listens, completes TLS and
+greets IMAP clients with no account logged in. The signal is mbsync: a
+sync that completes (`get_mailbox_status` reports a last sync) proves its
+login was accepted, while a rejected login shows as repeated
+`Sync failed` lines in `docker compose logs mbsync`. To see which accounts
+Bridge holds, stop the stack, run `make first-run` and enter `info` in the
+CLI (see [Bridge credentials expired](#bridge-credentials-expired--need-to-re-authenticate));
+`info` prints the Bridge password, so keep its output private. In macOS
+Bridge mode `make first-run` starts the container Bridge, not the app:
+check the account in the Bridge app instead.
 
 **3. Check the bridge binary is actually running**
 
@@ -164,26 +194,34 @@ Once you see event polling instead of message fetching, IMAP is fully
 responsive. mbsync extracts the Bridge TLS cert itself on its next
 start; then check it with "Verifying mbsync is working" below.
 
-**Confirm IMAP port is actually accepting connections**
+### Confirm Bridge IMAP answers over TLS
 
-Run this from outside the container to verify port 1143 is ready:
+Bridge serves IMAP with implicit TLS (#638), so a plaintext client such as
+`nc` gets no greeting from it. Probe from inside the Bridge container, whose
+image already has `openssl`; nothing is published and no credential is sent:
 
 ```bash
-docker run --rm \
-    --network protonmail-local-ai_bridge-net \
-    debian:bookworm-slim \
-    bash -c "apt-get install -y netcat-openbsd -qq 2>/dev/null && \
-             echo | nc -w 5 protonmail-bridge 1143"
+printf 'a1 LOGOUT\r\n' | docker exec -i protonmail-bridge \
+    timeout 20 openssl s_client -connect localhost:1143 -quiet -ign_eof
 ```
 
-If IMAP is ready you will see the Bridge greeting banner, e.g.:
+The `verify error:num=18:self-signed certificate` line is expected: this
+probe only checks that TLS works and IMAP answers, and trusts nothing (mbsync
+checks the certificate against its pin). If IMAP is ready, the TLS lines are
+followed by the Bridge greeting and the logout, e.g.:
 
 ```
-* OK [CAPABILITY IMAP4rev1 ...] ProtonMail Bridge ready.
+* OK [CAPABILITY AUTH=PLAIN ... IMAP4rev1 ...] Proton Mail Bridge 03.27.00 - gluon session ID 1
+* BYE
+a1 OK LOGOUT
 ```
 
-If the command hangs or exits silently, Bridge is still syncing or the
-process has crashed — check the logs and process steps above.
+A greeting shows the listener and TLS work, not that an account is logged
+in: Bridge greets the same way with no account. A handshake error means the
+running Bridge image does not serve implicit TLS (rebuild it with
+`make build`, then `make up`). A probe that hangs until `timeout` stops it
+means Bridge is still in its initial sync or the process has crashed —
+check the logs and process steps above.
 
 ## Verifying mbsync is working
 
