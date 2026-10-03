@@ -25,6 +25,8 @@ ProtonBridge container
   - Exposes local IMAP on port 1143
   - Exposes local SMTP on port 1025
   - Credentials persisted in bridge-data volume
+  - Healthcheck is a TCP connect to 1143: the listener is up, nothing
+    more (see Health and Readiness Signals)
         │
         │  IMAP over implicit TLS (internal Docker network)
         ▼
@@ -202,6 +204,37 @@ incompatible with any remote provider — the overlay is meant for the
 
 The default stack exposes only `127.0.0.1:3000` for the MCP server.
 No container is reachable from outside the machine.
+
+## Health and Readiness Signals
+
+"Bridge is healthy" does not mean "mail is syncing". The path from
+Proton to a searchable index passes through six states, each reported
+by a different signal, and each later state depends on the earlier
+ones (#274):
+
+| State | Meaning | Reported by | Not proven by it |
+| --- | --- | --- | --- |
+| Bridge listening | Something accepts TCP on Bridge's IMAP port | Bridge container health (`docker compose ps`, `make status`): a TCP connect to `localhost:1143` inside the container every 30 s. macOS Bridge mode has no Bridge container; mbsync's `Waiting for ProtonBridge IMAP` probe is the equivalent | TLS, a logged-in account, any sync |
+| TLS handshake OK | Bridge completes implicit TLS with a certificate mbsync accepts | mbsync startup: certificate extraction, the pin (and `BRIDGE_CERT_FINGERPRINT` in macOS Bridge mode). A failure stops mbsync with a named error before any credential is sent. mbsync's health also requires the extracted certificate, so a healthy mbsync passed this on its current start | A logged-in account, any sync |
+| Bridge authenticated | An account is logged in to Bridge and accepts mbsync's `LOGIN` | No dedicated signal. Bridge listens, completes TLS and greets with no account logged in, and `vault.enc` exists before any login. The first proof is a successful sync; a rejected login is a failed sync in mbsync's log | — |
+| mbsync syncing | mbsync's sync loop is alive | mbsync container health (liveness: a heartbeat touched around every attempt, or a sync or its permission repair running, up to the run's deadline) | That any sync succeeded: the loop is healthy between failed attempts until five consecutive failures exit it and Docker restarts it |
+| Last successful sync | mbsync completed a sync | The success stamp `.mbsync-last-sync.json`, reported by `get_mailbox_status` (`last_sync_at`, and the reason `no successful mail sync has been recorded` or `last successful mail sync was ... ago`) | That the indexer has read it |
+| Index current | The indexer has queued and indexed that sync's mail | `get_mailbox_status` `current` and its reasons (see [Index currency](#index-currency)); `make status` prints the same fields | Mail that reached Proton after the last sync |
+
+The Bridge healthcheck stays a TCP connect on purpose. mbsync waits
+for it only to avoid racing Bridge's startup; mbsync's own startup then
+checks TLS and the pin with an error that names the cause, and its sync
+results and stamp report the rest. The Bridge runtime image does carry
+`openssl` (a dependency of `ca-certificates`), so a probe that sees the
+greeting over TLS is possible without new packages, but it would add
+little: the greeting arrives whether or not an account is logged in, so
+it still says nothing about authentication or sync. It would also gate
+mbsync on Bridge answering IMAP, and during Bridge's initial download
+of a large mailbox IMAP can be slow or unresponsive for hours, which
+would turn a long first sync into an unhealthy Bridge and a failed
+`make up`. No healthcheck carries credentials. Symptom-to-layer
+diagnostics are in
+[troubleshooting.md](troubleshooting.md#which-layer-is-failing).
 
 ## Bridge Modes
 
