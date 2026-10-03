@@ -459,7 +459,9 @@ loose_secret_mode_fails() {
 # directory, and `getent passwd 1002`
 # finds an account only when $STUBS/uid1002 exists; `id -u` (the
 # operator, `id -un` "operator") is 4242, or $STUBS/operator-uid when a
-# case writes it; `getent passwd` lists the operator, then `other`.
+# case writes it ($STUBS/operator-name sets the name); `getent passwd`
+# lists the operator, then `other`, and a lookup by UID fails with
+# status 1 when $STUBS/lookup-error exists.
 stub_host() {
     local os="$1" owner="${2:-}"
     STUBS="$(mktemp -d "$WORK/stubs.XXXXXX")"
@@ -511,7 +513,11 @@ if [[ "$*" == '-u' ]]; then
     printf '4242\n'
     exit 0
 fi
-[[ "$*" == '-un' ]] && { printf 'operator\n'; exit 0; }
+if [[ "$*" == '-un' ]]; then
+    [[ -e "$(dirname "$0")/operator-name" ]] && exec cat "$(dirname "$0")/operator-name"
+    printf 'operator\n'
+    exit 0
+fi
 exec /usr/bin/id "$@"
 STUB
     # The operator's entry comes first, so a direct lookup of a UID the
@@ -520,14 +526,16 @@ STUB
 #!/bin/bash
 stubs="$(dirname "$0")"
 [[ "$1" == passwd ]] || exit 2
-operator_uid=4242
+operator_uid=4242 operator_name=operator
 [[ -e "$stubs/operator-uid" ]] && operator_uid="$(cat "$stubs/operator-uid")"
-entries="operator:x:$operator_uid:$operator_uid::/home/operator:/bin/bash"
+[[ -e "$stubs/operator-name" ]] && operator_name="$(cat "$stubs/operator-name")"
+entries="$operator_name:x:$operator_uid:$operator_uid::/home/operator:/bin/bash"
 [[ -e "$stubs/uid1002" ]] && entries+=$'\nother:x:1002:1002::/home/other:/bin/bash'
 if [[ $# -eq 1 ]]; then
     printf '%s\n' "$entries"
     exit 0
 fi
+[[ -e "$stubs/lookup-error" ]] && exit 1
 grep -m 1 "^[^:]*:x:$2:" <<<"$entries" || exit 2
 STUB
     chmod 755 "$STUBS"/*
@@ -711,6 +719,28 @@ linux_account_sharing_operator_uid_1002_fails() {
     printf '1002\n' >"$STUBS/operator-uid"
     : >"$STUBS/uid1002"
     fails_with "$HOST_ACCOUNT_1002_ERROR"
+}
+
+# Review round 2: a failed lookup by UID stops validation even though
+# the listing that follows it succeeds.
+linux_failed_uid_lookup_fails() {
+    stub_host Linux 4242
+    setup
+    write_authority 640
+    write_acl "${INDEXER_ONLY_ACL[@]}"
+    : >"$STUBS/lookup-error"
+    fails_with 'getent passwd failed with status 1'
+}
+
+# Review round 2: the operator's name is compared as is, so a name
+# with a backslash (winbind's DOMAIN\user) still matches its own entry.
+linux_operator_name_with_backslash_passes() {
+    stub_host Linux 1002
+    setup
+    write_authority 600
+    printf '1002\n' >"$STUBS/operator-uid"
+    printf '%s\n' 'DOMAIN\user' >"$STUBS/operator-name"
+    passes
 }
 
 # Review round 1: without getent the account check cannot run.
@@ -948,6 +978,9 @@ check "Linux: an operator holding UID 1002 passes" linux_operator_holding_uid_10
 check "Linux: an account sharing the operator's UID 1002 fails" \
     linux_account_sharing_operator_uid_1002_fails
 check "Linux: a missing getent fails" linux_missing_getent_fails
+check "Linux: a failed lookup by UID fails" linux_failed_uid_lookup_fails
+check "Linux: an operator name with a backslash passes" \
+    linux_operator_name_with_backslash_passes
 check "Linux: an unsearchable config directory fails" linux_unsearchable_config_dir_fails
 check "Linux: the fix command quotes the path" linux_fix_command_quotes_the_path
 check "Linux: a config directory ACL denying UID 1002 fails" \

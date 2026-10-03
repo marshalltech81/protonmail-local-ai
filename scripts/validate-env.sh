@@ -182,7 +182,7 @@ passwd_entries() {
 
 require_indexer_readable_on_linux() {
     local path="$1"
-    local mode acl account entries quoted fix
+    local mode acl account entries listing quoted fix
 
     quoted="$(printf '%q' "$path")"
     fix="setfacl -b $quoted && chmod 600 $quoted && setfacl -m u:${INDEXER_UID}:r $quoted"
@@ -216,9 +216,13 @@ require_indexer_readable_on_linux() {
             "$INDEXER_UID" >&2
         exit 1
     }
-    entries="$(passwd_entries "$INDEXER_UID")"$'\n'"$(passwd_entries)"
-    account="$(awk -F: -v uid="$INDEXER_UID" -v me="$(id -un)" \
-        '$3 == uid && $1 != me { print $1; exit }' <<<"$entries")"
+    # Each lookup is its own assignment so a failure in either stops
+    # validation; the operator's name reaches awk through ENVIRON, which,
+    # unlike -v, keeps backslashes (winbind's DOMAIN\user).
+    entries="$(passwd_entries "$INDEXER_UID")"
+    listing="$(passwd_entries)"
+    account="$(OPERATOR_NAME="$(id -un)" awk -F: -v uid="$INDEXER_UID" \
+        '$3 == uid && $1 != ENVIRON["OPERATOR_NAME"] { print $1; exit }' <<<"$entries"$'\n'"$listing")"
     if [[ -n "$account" ]]; then
         printf 'ERROR: host account %s has UID %s, the indexer'"'"'s UID, so the access granted to the indexer lets that account read %s too. Give the account another UID, or remove it, as root:\n  usermod -u <new-uid> %s\n' \
             "$account" "$INDEXER_UID" "$path" "$(printf '%q' "$account")" >&2
