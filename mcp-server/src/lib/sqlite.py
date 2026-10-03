@@ -11,6 +11,7 @@ import logging
 import math
 import re
 import sqlite3
+import struct
 import unicodedata
 from contextlib import closing
 from dataclasses import dataclass, field
@@ -3154,6 +3155,38 @@ class Database:
         interval and surfaces a missing/unreadable DB as an exception.
         """
         self._fetchone("SELECT 1")
+
+    def get_active_vector_generation(self) -> dict | None:
+        """The indexer's active ``vector_generations`` row (the embedder
+        identity record, ``lib/embed_identity.py``), its calibration
+        vector unpacked to floats; ``None`` until the indexer records one.
+
+        Raises on a database from before the table existed: the index
+        must be rebuilt, since nothing records which embedder wrote it.
+        """
+        with closing(self._connect()) as conn:
+            if (
+                conn.execute(
+                    "SELECT 1 FROM sqlite_master "
+                    "WHERE type = 'table' AND name = 'vector_generations'"
+                ).fetchone()
+                is None
+            ):
+                raise RuntimeError(
+                    "The index predates the embedder identity record. Stop the "
+                    "stack, wipe the sqlite-volume and let the indexer rebuild the "
+                    "index from Maildir."
+                )
+            row = conn.execute(
+                "SELECT provider, endpoint, model, dimensions, calibration_sha256, "
+                "calibration_vector FROM vector_generations WHERE status = 'active'"
+            ).fetchone()
+        if row is None:
+            return None
+        record = dict(row)
+        blob = record["calibration_vector"]
+        record["calibration_vector"] = list(struct.unpack(f"{len(blob) // 4}f", blob))
+        return record
 
     def get_embedding_dim(self) -> int | None:
         """Return the embedding dimension declared by ``message_chunks_vec``.

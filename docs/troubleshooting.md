@@ -694,6 +694,52 @@ Maildir and Bridge state are untouched. The indexer re-parses and
 re-embeds every message, so the rebuild takes as long as an initial
 index and calls the embedding provider for the whole mailbox.
 
+## Embedder identity mismatch
+
+The indexer or mcp-server exits at startup with "The configured
+embedder is not the one that built this index (...)". The index records
+the embedder that built it (see docs/architecture.md, "Embedder
+identity record"), and the one configured now differs in the fields
+the message lists:
+
+- `EMBED_MODEL`, `endpoint` or `dimensions`: `EMBED_MODEL` or
+  `EMBED_BASE_URL` changed (the endpoint is the resolved URL, so an
+  empty `EMBED_BASE_URL` reads as `https://api.openai.com/v1`, or as
+  `OPENAI_BASE_URL` if set). Both services must use the same values.
+- `calibration vector`: the names match but the server behind them
+  returns different vectors, typically because a host-side server now
+  loads a different model, or a different build of it, under the same
+  name, or a provider alias moved.
+- `calibration text`: the indexer and mcp-server come from different
+  releases, or the index was recorded by another release. Run matching
+  images.
+
+Two ways out:
+
+1. Restore the original embedder: put back the `EMBED_BASE_URL` /
+   `EMBED_MODEL` values and the model the server loads, then
+   `make up`. Nothing is rebuilt.
+2. Keep the new embedder and rebuild the index with it, following
+   "Indexer refuses to start — wipe the sqlite-volume" above. Vectors
+   from two embedders are not comparable, so the old ones cannot be
+   kept. Moving the same server to a new address also needs a
+   rebuild today; switching embedders without one is PLAN.md Phase 2.
+
+The same section covers "The index holds messages but no record of the
+embedder" and "The index predates the embedder identity record": both
+mean an index built before the record existed, so rebuild it.
+
+"The indexer has not recorded the embedder behind this index yet" from
+mcp-server on a fresh install is transient: the indexer records it once
+its embedder answers, and mcp-server's restart picks it up. If it
+persists, check `docker compose logs indexer` for an embedder error.
+
+"Embedder calibration request failed" means the startup calibration
+request to the embedder failed; the message carries the error type and
+status. The service exits and Docker restarts it, so a brief outage
+clears by itself; a 401, 403 or 404 is a credential or model setting to
+fix (see "Embedder or inference endpoint unreachable from containers").
+
 ## Deletion reconciliation (mirror vs archive)
 
 By default the indexer mirrors upstream deletions: a message you delete on

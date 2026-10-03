@@ -78,6 +78,8 @@ embedder (operator-supplied)  sqlite-volume
                                  - pending_deletions, reaped_messages
                                    (reconciler)
                                  - entities, entity_aliases
+                                 - vector_generations (embedder
+                                   identity record)
 
 inference (operator-supplied)
   - INFERENCE_MODE=anthropic →
@@ -285,6 +287,46 @@ query vectors are comparable to indexed vectors. `EMBED_MODE=openai`
 is the only valid value — embed has no disabled mode because
 semantic / hybrid search is the headline retrieval feature and the
 indexer cannot ingest mail without an embedder.
+
+#### Embedder identity record
+
+The index records which embedder built it, so a changed embedder is
+caught at startup instead of mixing incomparable vectors into search.
+On a fresh index the indexer writes one `vector_generations` row,
+status `active`: `EMBED_MODE`, the resolved endpoint (the SDK's
+`base_url` after construction, with userinfo, query and fragment
+dropped), `EMBED_MODEL`, the vector dimensions, and a **calibration
+vector** — the embedding of a fixed synthetic text — with that text's
+SHA-256. The columns for revision, tokenizer, context window, chunk
+configuration hash and label stay NULL: the OpenAI-compatible API
+exposes none of them. This is the first slice of the `vector_generations`
+registry in PLAN.md Phase 2; there is no generation lifecycle yet, so
+the table holds exactly one row.
+
+On every start both services compare their embedder against the row
+(`indexer/src/embed_identity.py`, `mcp-server/src/lib/embed_identity.py`):
+mode, model, endpoint and dimensions must match, and the calibration
+text is re-embedded and must lie within cosine distance 0.01 of the
+stored vector. The vector check catches what the fields cannot: a
+host-side server that reloaded a different model of the same dimension
+under the same name, or a provider alias that moved. Re-embedding one
+text on an unchanged deployment differs by float noise only (zero for a
+deterministic server, well under 1e-3 for GPU-batched providers), while
+unrelated models sit near distance 1, so 0.01 leaves a wide margin
+both ways; a re-quantization of the same model can fall either side of
+it. A mismatch fails startup closed with a fixed message naming the
+differing fields (see docs/troubleshooting.md, "Embedder identity
+mismatch"); the message never quotes a provider response.
+
+The indexer writes the row; mcp-server only reads it. A failed
+calibration request (the indexer's runs right after `wait_for_ready`,
+with the client's usual retries) exits the service with the scrubbed
+error and the restart policy tries again, as for the dimension probe.
+mcp-server exits the same way while the indexer has not yet recorded
+the row (it does so once its embedder answers). The checks run at
+startup only; periodic re-checks are tracked separately. An index that
+holds messages but no row, or predates the table, fails closed with
+rebuild instructions, since nothing says which embedder wrote it.
 
 For inference, `INFERENCE_MODE=anthropic` (default) uses the
 official `anthropic` SDK against the Messages API; leave

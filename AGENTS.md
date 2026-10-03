@@ -111,7 +111,10 @@ Important architecture facts:
   OpenAI-compatible `/v1/embeddings` endpoint: leave `EMBED_BASE_URL`
   empty for OpenAI proper or set it to a host endpoint or alternative
   provider. Indexer + mcp-server must point at the same provider +
-  model so query vectors are comparable to indexed vectors.
+  model so query vectors are comparable to indexed vectors; both check
+  this at startup against the index's `vector_generations` record
+  (`docs/architecture.md`, "Embedder identity record") and fail closed
+  on a mismatch.
   `EMBED_MODE=openai` is the only valid value; embed has no disabled
   mode because semantic / hybrid search is the headline retrieval
   feature and the indexer cannot run without an embedder.
