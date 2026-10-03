@@ -11,7 +11,9 @@ set -Eeuo pipefail
 # functions, and runs in a subshell against a temporary directory. No
 # Bridge, Maildir, or container state is touched.
 #
-# Run: bash mbsync/tests/entrypoint_test.sh
+# Run: bash mbsync/tests/entrypoint_test.sh (`make test-mbsync`). CI and
+# the image run Bash 5; on macOS, `/bin/bash mbsync/tests/entrypoint_test.sh`
+# runs it under Bash 3.2, which it also supports.
 
 ENTRYPOINT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/entrypoint.sh"
 HEALTHCHECK="$(dirname "$ENTRYPOINT")/healthcheck.sh"
@@ -503,7 +505,11 @@ other_errors_are_streamed_while_mbsync_runs() {
                 : >"$seen"
                 break
             fi
-            command sleep 0.1
+            # Not `command sleep`: run_child starts this mock with `&`,
+            # and Bash 3.2 then execs a `command` external in place of
+            # the job's shell, so the mock would end, status 0, after
+            # its first wait.
+            sleep 0.1
         done
         return 1
     }
