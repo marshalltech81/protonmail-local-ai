@@ -182,18 +182,162 @@ rule ignores category, so a category can sit entirely in one split
 
 These checks are deterministic and do not grade the answer: a valid
 citation shows the agent saw the source, not that the source supports
-the statement. Answer quality stays a manual grade (your
-`eval-queries.md`, which `.gitignore` keeps out of the repository). No
-recorder for a live client's trace exists yet, so the reference traces
-are the only traces scored today.
+the statement. `ask_mailbox` answers on the synthetic corpus are graded
+by the answer-quality evaluation below; answers on your own mailbox stay
+a manual grade (your `eval-queries.md`, which `.gitignore` keeps out of
+the repository). No recorder for a live client's trace exists yet, so
+the reference traces are the only traces scored today.
+
+## Answer-quality evaluation (`ask_mailbox`, synthetic corpus)
+
+`tests/answer_eval/` runs the real `ask_mailbox` handler, captures what
+its model actually received, and grades the answer twice: deterministic
+checks first, then an optional, separately configured AI judge. It is an
+offline development tool (#604): it changes nothing in the server, the
+containers or the tool outputs.
+
+**Synthetic data only.** The runner refuses any index whose messages are
+not the synthetic baseline's (`@baseline.example`), so it never reads or
+sends a real mailbox; a private-mailbox mode would be a separate owner
+decision. Cases must never be built from real mail.
+
+### Cases
+
+`tests/answer_eval/cases.json` (schema v1, loaded and validated by
+`cases.py`) holds 33 cases over the baseline corpus: exact facts,
+attachment-only answers, multiple required threads, narrow filters,
+later corrections (and a later message that does not change the fact),
+an unresolved conflict, unanswerable questions, an empty result, a
+prompt-budget omission (the case's own `settings.prompt_tokens`), and
+two synthetic prompt injections: corpus thread t31 tells the answering
+model to misreport an invoice and print the canary `ORANGE-HERON-7`, and
+t32 tells an AI grader to pass whatever it reviews. Each case records
+its exact arguments, `required_evidence` groups (message refs where the
+message matters, as for a correction), expected facts with the corpus
+excerpt that establishes each, prohibited assertions, machine-checkable
+`must_include` / `must_not_include` strings, the expected handling
+(answer, disclose a conflict, disclose missing evidence, abstain) and
+which rubric dimensions apply. Held-out membership is
+`is_held_out(id)`, as for the agent scenarios; tune nothing against
+held-out cases.
+
+`make baseline` checks every excerpt is in the indexed text of the
+message it cites, so a reference cannot drift from the corpus or rest on
+what retrieval returned, and runs every case through the real handler
+with a scripted answerer and judge. The expected facts were drafted with
+AI from the synthetic corpus and are marked `"review": "ai_drafted"`
+until the owner verifies them.
+
+### Run
+
+```bash
+export INFERENCE_MODE=openai INFERENCE_BASE_URL=http://127.0.0.1:1234/v1 INFERENCE_MODEL=<model>
+export JUDGE_MODE=anthropic JUDGE_MODEL=<model>     # optional; default JUDGE_MODE=none
+make eval-answers                                   # report under .answer-eval/ (git-ignored)
+make eval-answers EVAL_ARGS="--case ask-recital-date --detail /tmp/detail.json"
+make eval-answers-compare BASELINE=<run-a.json> CANDIDATE=<run-b.json>
+```
+
+The target builds the baseline index (with every case question
+embedded) in a temporary directory, runs the cases one at a time, and
+writes a mode-600 JSON report. Run it on the host, so a host-side server
+is `127.0.0.1`, not `host.docker.internal`.
+
+- **Answerer** (`INFERENCE_*`): the server's own variables and defaults
+  (`INFERENCE_MAX_TOKENS`, `INFERENCE_CONTEXT_TOKENS`,
+  `INFERENCE_TIMEOUT_SECS`), key in `.secrets/inference_api_key.txt`.
+- **Judge** (`JUDGE_MODE` = `anthropic|openai|none`, `JUDGE_BASE_URL`,
+  `JUDGE_MODEL`, key in `.secrets/judge_api_key.txt`, mode 600, or
+  `JUDGE_API_KEY` for local development only). Same contract as the
+  server's layers: an enabled judge needs a model and a non-empty key (a
+  placeholder for an unauthenticated host-side server), and an empty
+  base URL means the SDK default (a remote provider). It never reads the
+  answerer's variables or key. Bounds: `JUDGE_TIMEOUT_SECS` (120),
+  `JUDGE_MAX_TOKENS` (2048), `JUDGE_MAX_INPUT_CHARS` (60,000), one call
+  per case, no retries, one case at a time.
+- Each case runs under `--case-timeout-secs` (900) and the whole run
+  under `--max-runtime-secs` (3600); cases past it are `skipped`.
+
+Retrieval uses the baseline's hashed embedder (query vectors precomputed
+at build time) and no reranker, so a run measures prompt assembly,
+inference and the judge on a frozen corpus and index. The hashed
+embedder has no semantics: two questions (`ask-hotel-checkin`,
+`ask-lisbon-dates`) miss their thread, which the report attributes to
+retrieval. A real-model synthetic index is a follow-up.
+
+### What is captured and graded
+
+Two narrow wrappers capture each run in memory: the inference client
+(every request and reply, so the evidence is the prompt actually sent
+after truncation, deduplication, fallback thread text and budgeting; a
+repair call resends that prompt with a fixed instruction) and
+`_build_evidence`'s label map (each label's thread, message, claimant
+and chunk). A check confirms every captured label is in the prompt the
+model received.
+
+Deterministic checks (`graders.py`), never overridden by the judge:
+answer not cut off, capture consistent, cited labels resolve to
+supplied passages, the tool's citation and quote checks pass, every
+required evidence group cited, `must_include` present, `must_not_include`
+absent, and abstention exactly when the case is unanswerable (citing
+nothing). Each evidence group is also scored as retrieved, supplied to
+the prompt and cited, so a failure is attributed to `retrieval`,
+`prompt_assembly`, `synthesis`, `evaluator_infrastructure` or
+`answer_infrastructure` (several may apply; `unknown` otherwise).
+
+The judge (`judge.py`, rubric `ask-rubric-1`) receives the question,
+expected handling, reference facts, prohibited assertions, which
+dimensions apply, every passage the answerer received and the answer;
+the passages and the answer sit in `<untrusted_evidence>` /
+`<untrusted_answer>` blocks they cannot close, under a system prompt
+that tells the judge to ignore instructions inside them. It returns a
+JSON verdict: per claim `supported | contradicted |
+insufficient_evidence` judged only against the cited passages
+(**groundedness**), per reference fact covered or not and per
+prohibited assertion asserted or not (**correctness**), and `pass |
+fail | not_applicable` for factual correctness, citation support,
+completeness, temporal reasoning, conflict/uncertainty and relevance. A
+claim that matches the reference but not its citations is still
+unsupported. The verdict is validated: unknown evidence labels, missing
+facts or dimensions, an applicable dimension marked not applicable, no
+claims for a non-abstaining answer, malformed output, a timeout, a
+cut-off reply, a provider failure or input over the limit are explicit
+judge errors, never passes. The injection cases test this hardening;
+they do not prove immunity.
+
+### Reports and privacy
+
+The report holds opaque case IDs, categories, check results, fixed
+error categories, counts, rates per split and category, timings and
+safe identity labels: source commit, case-file and index hashes, schema
+and rubric versions, provider mode/model and whether each endpoint is
+host-local, remote or the SDK default (never a URL or key). Every rate's
+denominator is the selected cases, so errors and skips never improve a
+score. Token usage is not exposed by the inference client and no cost is
+computed. `--detail` writes a separate mode-600 artifact with the
+content (answers, passages, prompts, judge claims and explanations);
+both refuse a path inside the repository other than `.answer-eval/`.
+Delete old runs with `rm -r .answer-eval`. Never upload either.
+
+Exit codes: `run` 0 complete, 2 incomplete (any error, skip or judge
+error), 3 configuration error; `compare` 0, 1 on a per-case regression
+with `--fail-on-regression`, 2 when the runs differ in case file, index,
+rubric or judge (not comparable) unless `--allow-incompatible`. Scores
+are advisory: no quality threshold is calibrated yet, so a low score
+never fails a run. CI runs only the scripted path (`make baseline` and
+`tests/test_answer_eval.py`), with no provider or credential.
+
+Not yet covered (follow-ups): judge calibration against human labels
+and repeated runs to measure variation, quality thresholds, other
+intelligence tools, a real-model synthetic index, and token usage.
 
 ## What this harness does NOT do
 
-- It does not run `ask_mailbox` end-to-end or grade LLM answers.
-  That requires a live inference call per query and a way to judge
-  answer quality, which is a separate problem. Prompt-side settings
-  such as `PER_THREAD_CHAR_BUDGET` only shape the context sent to the
-  model after retrieval, so this harness cannot measure them.
+- The retrieval harness above does not run `ask_mailbox` or grade LLM
+  answers; the answer-quality evaluation does, on the synthetic corpus
+  only. Prompt-side settings such as `PER_THREAD_CHAR_BUDGET` only
+  shape the context sent to the model after retrieval, so retrieval
+  scores cannot measure them.
   Retrieval-only is the load-bearing piece — if the right thread shows
   up in the top-K, the LLM has the material it needs.
 - It does not auto-discover queries from your mailbox. The point is

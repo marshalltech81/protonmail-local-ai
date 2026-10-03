@@ -195,9 +195,12 @@ jobs:
 
       - name: Build baseline index
         working-directory: indexer
-        run: uv run python -m tests.baseline.build "$RUNNER_TEMP/baseline" ../mcp-server/tests/baseline/golden.json
+        run: uv run python -m tests.baseline.build "$RUNNER_TEMP/baseline" ../mcp-server/tests/baseline/golden.json ../mcp-server/tests/answer_eval/cases.json
 
-      - name: Check golden questions and rank snapshot
+      # Also runs the answer-evaluation harness over every case with a
+      # scripted answerer and judge (tests/baseline/test_answer_eval_cases.py):
+      # no provider, credential or network.
+      - name: Check golden questions, rank snapshot and answer-evaluation cases
         working-directory: mcp-server
         env:
           BASELINE_DIR: ${{ runner.temp }}/baseline

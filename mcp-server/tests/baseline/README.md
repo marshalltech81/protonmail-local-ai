@@ -35,6 +35,12 @@ make baseline UPDATE=1   # rewrite snapshot.json after an intended ranking chang
      them.
    - **Rank snapshot, for unchanged behaviour.** The top-10 order of
      every search question must match `snapshot.json`.
+   - **Answer-evaluation cases** (`test_answer_eval_cases.py`). The
+     build also embeds every question in
+     `tests/answer_eval/cases.json`. Each case's fact excerpts must be
+     in the indexed text of the messages they cite, and every case runs
+     through the real `ask_mailbox` handler with a scripted answerer and
+     judge (no network); see `tests/eval/README.md`.
 
 The hashed embedder has no sense of meaning, so the baseline catches
 broken plumbing (ingestion, schema, lanes, fusion, filters). It does
@@ -58,7 +64,9 @@ harness in `tests/eval/` (`tests/retrieval_metrics.py`).
   two threads, the same fact in either of two threads, an answer only
   in an attachment and a correction in a later reply. Threads 29-30
   are conflicting sources (two messages give different dates, neither
-  superseding the other). Adding a thread can lower a recall floor's
+  superseding the other). Threads 31-32 carry synthetic prompt
+  injections for the answer-quality evaluation (one aimed at the
+  answering model, one at an AI grader). Adding a thread can lower a recall floor's
   measured value; re-measure and explain it rather than lowering the
   floor silently.
 - **Unanswerable questions** need terms that appear nowhere in the
