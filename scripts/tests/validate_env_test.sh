@@ -433,7 +433,8 @@ loose_secret_mode_fails() {
 # OS, `stat` reports OWNER as the file owner when given, `getfacl`
 # prints $STUBS/acl (written by write_acl) for a file and $STUBS/diracl
 # for a directory, and `getent passwd 1002`
-# finds an account only when $STUBS/uid1002 exists.
+# finds an account only when $STUBS/uid1002 exists; `id -u` (the
+# operator) is 4242.
 stub_host() {
     local os="$1" owner="${2:-}"
     STUBS="$(mktemp -d "$WORK/stubs.XXXXXX")"
@@ -450,10 +451,16 @@ STUB
     cat >"$STUBS/getfacl" <<'STUB'
 #!/bin/bash
 if [[ -d "${!#}" ]]; then
+    [[ -e "$(dirname "$0")/diracl" ]] || exit 1
     cat "$(dirname "$0")/diracl"
 else
     cat "$(dirname "$0")/acl"
 fi
+STUB
+    cat >"$STUBS/id" <<'STUB'
+#!/bin/bash
+[[ "$*" == '-u' ]] && { printf '4242\n'; exit 0; }
+exec /usr/bin/id "$@"
 STUB
     cat >"$STUBS/getent" <<'STUB'
 #!/bin/bash
@@ -628,6 +635,19 @@ linux_fix_command_quotes_the_path() {
     grep -F "setfacl -b $(printf '%q' "$ROOT/config/authority.toml") &&" "$WORK/output"
 }
 
+# Review round 2: a named-user ACL entry for UID 1002 overrides the
+# other bits, so one without search denies the indexer.
+linux_config_dir_acl_denying_indexer_fails() {
+    stub_host Linux 4242
+    setup
+    write_authority 640
+    write_acl "${INDEXER_ONLY_ACL[@]}"
+    chmod 701 "$ROOT/config"
+    printf '%s\n' 'user::rwx' 'user:1002:---' 'group::---' 'mask::---' 'other::--x' \
+        >"$STUBS/diracl"
+    fails_with 'is not searchable by the indexer (UID 1002)'
+}
+
 # The documented authority edit flow restarts the indexer through
 # `make restart-indexer`, which must run this validator first (#530).
 # A dry run prints the recipes in order without running them.
@@ -765,6 +785,8 @@ check "Linux: a UID 1002 owner with a host account is warned about" \
     linux_owner_1002_with_host_account_warns
 check "Linux: an unsearchable config directory fails" linux_unsearchable_config_dir_fails
 check "Linux: the fix command quotes the path" linux_fix_command_quotes_the_path
+check "Linux: a config directory ACL denying UID 1002 fails" \
+    linux_config_dir_acl_denying_indexer_fails
 check "make restart-indexer validates before restarting" restart_indexer_validates_first
 check "padded quoted values pass" padded_quoted_values_pass
 check "padded and mixed-case modes pass" padded_and_cased_modes_pass

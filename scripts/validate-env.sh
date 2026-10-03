@@ -101,12 +101,20 @@ require_indexer_can_search_on_linux() {
     local dir="$1"
     local mode acl
 
+    # POSIX ACL order: the owner entry, then a named-user entry for the
+    # UID (limited by the mask), and only then the other bits.
     mode="$(file_mode "$dir")"
-    (((8#$mode & 8#001) != 0)) && return 0
-    [[ "$(file_owner "$dir")" == "$INDEXER_UID" ]] && (((8#$mode & 8#100) != 0)) && return 0
-    if command -v getfacl >/dev/null; then
-        acl="$(getfacl --omit-header --numeric --absolute-names "$dir")"
-        if grep -Eq "^user:${INDEXER_UID}:..x" <<<"$acl" && grep -Eq '^mask::..x' <<<"$acl"; then
+    if [[ "$(file_owner "$dir")" == "$INDEXER_UID" ]]; then
+        (((8#$mode & 8#100) != 0)) && return 0
+    else
+        acl=""
+        if command -v getfacl >/dev/null; then
+            acl="$(getfacl --omit-header --numeric --absolute-names "$dir")" || acl=""
+        fi
+        if grep -Eq "^user:${INDEXER_UID}:" <<<"$acl"; then
+            grep -Eq "^user:${INDEXER_UID}:..x" <<<"$acl" && grep -Eq '^mask::..x' <<<"$acl" &&
+                return 0
+        elif (((8#$mode & 8#001) != 0)); then
             return 0
         fi
     fi
