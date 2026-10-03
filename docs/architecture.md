@@ -926,6 +926,15 @@ is dropped and its pages zeroed. What the pragma does not cover:
   their row and position lists) stay in live `*_fts_data` segment
   pages until an FTS5 merge rewrites that segment. These pages are not
   freed, so `secure_delete` does not touch them (#641).
+- **Pages freed before the pragma.** It zeroes pages as later deletes
+  free them; it does not rewrite pages already on the freelist. A
+  `mail.db` reaped under a SQLite that defaulted OFF (an indexer run
+  outside the container, before #602) can still hold those rows'
+  bytes. The container's SQLite already defaulted ON, so a database
+  only ever written by the indexer image is not affected. To clear an
+  affected file, rebuild the index from Maildir, or, with the indexer
+  stopped, run `VACUUM;` against `mail.db` (it rewrites the file
+  without the freelist and needs free space equal to its size).
 - **Below SQLite.** Truncating the WAL and zeroing pages in place do
   not reach filesystem free blocks, APFS or volume snapshots, or
   backups of `mail.db`.
