@@ -82,6 +82,8 @@ services:
       BRIDGE_IMAP_PORT: 1143
       BRIDGE_USER: ${BRIDGE_USER}
       SYNC_INTERVAL: ${SYNC_INTERVAL:-60}
+      # Per-run mbsync deadline (#282); see .env.example.
+      SYNC_DEADLINE_SECONDS: ${SYNC_DEADLINE_SECONDS:-86400}
       # Set to true for one container creation when Bridge's TLS cert is
       # deliberately rotated (e.g. Bridge version upgrade), then recreate
       # mbsync with it false: the value survives restarts of the same

@@ -27,6 +27,7 @@ from .entities import (
     person_entity_id,
 )
 from .extractors import OCR_DISABLED_ERROR, SCANNED_PDF_OCR_DISABLED_ERROR
+from .maildir import message_state
 from .threader import (
     FTS_SUBJECT_SCAN_CHARS,
     FTS_SUBJECT_SCAN_ROWS,
@@ -585,6 +586,11 @@ class Database:
                 size_bytes      INTEGER,
                 content_hash    TEXT,
                 indexed_at      TEXT NOT NULL,
+                -- Maildir S / F / R flags of ``filepath`` (maildir.message_state),
+                -- written with it on every insert and rename.
+                seen            INTEGER NOT NULL DEFAULT 0,
+                flagged         INTEGER NOT NULL DEFAULT 0,
+                replied         INTEGER NOT NULL DEFAULT 0,
                 FOREIGN KEY (claimant_id) REFERENCES message_thread_map(claimant_id)
                     ON DELETE CASCADE
             );
@@ -688,6 +694,7 @@ class Database:
             );
         """)
         self._run_entity_schema_script(cur)
+        self._run_vector_generation_schema_script(cur)
 
     @staticmethod
     def _run_entity_schema_script(cur: sqlite3.Cursor) -> None:
@@ -727,6 +734,47 @@ class Database:
                 PRIMARY KEY (entity_id, alias)
             )
             """,
+        ):
+            cur.execute(statement)
+
+    @staticmethod
+    def _run_vector_generation_schema_script(cur: sqlite3.Cursor) -> None:
+        """The embedder identity record (PLAN Phase 2 item 1, first slice;
+        see ``src/embed_identity.py``), inside the initial schema's open
+        transaction.
+
+        One row per embedding generation. Today exactly one exists, status
+        ``active``, written on a fresh index. ``endpoint`` is the SDK's
+        resolved base URL without userinfo, query or fragment;
+        ``calibration_vector`` is the float32 embedding of the fixed
+        calibration text whose SHA-256 is ``calibration_sha256``.
+        ``revision``, ``tokenizer``, ``context_window``,
+        ``chunk_config_hash`` and ``label`` are reserved for the
+        generation lifecycle and stay NULL: the OpenAI-compatible
+        embeddings API exposes none of them.
+        """
+        for statement in (
+            """
+            CREATE TABLE vector_generations (
+                generation_id      INTEGER PRIMARY KEY,
+                provider           TEXT NOT NULL,
+                endpoint           TEXT NOT NULL,
+                model              TEXT NOT NULL,
+                revision           TEXT,
+                dimensions         INTEGER NOT NULL,
+                tokenizer          TEXT,
+                context_window     INTEGER,
+                chunk_config_hash  TEXT,
+                label              TEXT,
+                calibration_sha256 TEXT NOT NULL,
+                calibration_vector BLOB NOT NULL,
+                created_at         TEXT NOT NULL,
+                status             TEXT NOT NULL CHECK (status IN
+                    ('building', 'caught-up', 'active', 'retained', 'retired'))
+            )
+            """,
+            "CREATE UNIQUE INDEX idx_vector_generations_active "
+            "ON vector_generations(status) WHERE status = 'active'",
         ):
             cur.execute(statement)
 
@@ -2174,6 +2222,66 @@ class Database:
         return int(row[0]) if row else 0
 
     @_synchronized
+    def get_active_vector_generation(self) -> dict | None:
+        """The active ``vector_generations`` row, its calibration vector
+        unpacked to floats; ``None`` before the indexer records one.
+
+        Raises on a database from before the table existed: the index
+        must be rebuilt, since nothing records which embedder wrote it.
+        """
+        if (
+            self._conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'vector_generations'"
+            ).fetchone()
+            is None
+        ):
+            raise RuntimeError(
+                "The index predates the embedder identity record. Stop the stack, "
+                "wipe the sqlite-volume and let the indexer rebuild the index from "
+                "Maildir."
+            )
+        row = self._conn.execute(
+            "SELECT * FROM vector_generations WHERE status = 'active'"
+        ).fetchone()
+        if row is None:
+            return None
+        record = dict(row)
+        blob = record["calibration_vector"]
+        record["calibration_vector"] = list(struct.unpack(f"{len(blob) // 4}f", blob))
+        return record
+
+    @_synchronized
+    def record_vector_generation(
+        self,
+        *,
+        provider: str,
+        endpoint: str,
+        model: str,
+        calibration_sha256: str,
+        calibration_vector: list[float],
+    ) -> int:
+        """Insert the active generation; returns its ``generation_id``.
+
+        The partial unique index refuses a second active row.
+        """
+        with self.transaction():
+            cur = self._conn.execute(
+                "INSERT INTO vector_generations (provider, endpoint, model, dimensions, "
+                "calibration_sha256, calibration_vector, created_at, status) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, 'active')",
+                (
+                    provider,
+                    endpoint,
+                    model,
+                    len(calibration_vector),
+                    calibration_sha256,
+                    sqlite_vec.serialize_float32(calibration_vector),
+                    datetime.now(UTC).isoformat(),
+                ),
+            )
+        return int(cur.lastrowid or 0)
+
+    @_synchronized
     def get_thread_messages(self, thread_id: str) -> list[sqlite3.Row]:
         """All (claimant_id, message_id, filepath) rows for a thread, used to rebuild it."""
         return self._conn.execute(
@@ -2189,13 +2297,14 @@ class Database:
         UPDATE`` (never ``REPLACE``) keeps the row in place, so the
         participant cascade only fires when the message itself is removed.
         """
+        state = message_state(msg.filepath)
         cur.execute(
             """
             INSERT INTO messages
                 (claimant_id, message_id, thread_id, filepath, folder, subject, sent_at,
                  occurred_at, in_reply_to, references_json, has_attachments, size_bytes,
-                 content_hash, indexed_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 content_hash, indexed_at, seen, flagged, replied)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(claimant_id) DO UPDATE SET
                 thread_id       = excluded.thread_id,
                 filepath        = excluded.filepath,
@@ -2208,7 +2317,10 @@ class Database:
                 has_attachments = excluded.has_attachments,
                 size_bytes      = excluded.size_bytes,
                 content_hash    = excluded.content_hash,
-                indexed_at      = excluded.indexed_at
+                indexed_at      = excluded.indexed_at,
+                seen            = excluded.seen,
+                flagged         = excluded.flagged,
+                replied         = excluded.replied
             """,
             (
                 msg.claimant_id,
@@ -2225,6 +2337,9 @@ class Database:
                 msg.size,
                 msg.content_hash,
                 datetime.now(UTC).isoformat(),
+                int(state.seen),
+                int(state.flagged),
+                int(state.replied),
             ),
         )
         cur.execute("DELETE FROM message_participants WHERE claimant_id = ?", (msg.claimant_id,))
@@ -2358,9 +2473,13 @@ class Database:
                 "UPDATE message_thread_map SET filepath = ? WHERE filepath = ?",
                 (new_path, old_path),
             )
+            # mbsync carries Proton's read / flagged / replied changes as
+            # renames, so the state moves with the path, never re-parsed.
+            state = message_state(new_path)
             cur.execute(
-                "UPDATE messages SET filepath = ? WHERE filepath = ?",
-                (new_path, old_path),
+                "UPDATE messages SET filepath = ?, seen = ?, flagged = ?, replied = ? "
+                "WHERE filepath = ?",
+                (new_path, int(state.seen), int(state.flagged), int(state.replied), old_path),
             )
             if folder is not None:
                 cur.execute(

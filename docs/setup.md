@@ -288,7 +288,9 @@ services strip it. It fails fast if:
   matching layer is `none`, so the docker-compose `secrets:` references
   resolve cleanly)
 - `config/authority.toml`, when present, is not a regular file (a symlink
-  counts as not one) or is not `600`
+  counts as not one) or is not `600`; on a Linux host, also when it does
+  not grant the indexer (UID 1002) read access through an ACL naming
+  that UID alone (see "Source-authority rules" below)
 - numeric or enum settings such as `SYNC_INTERVAL`, `MCP_PORT`, `MCP_TRANSPORT`, or `INFERENCE_MODE` are invalid
   (`MCP_TRANSPORT` accepts only `streamable-http` or unset; the removed `sse`
   and `dual` fail with migration steps)
@@ -384,6 +386,9 @@ ranking. Nothing is classified by a model.
 
 ```bash
 install -m 600 config/authority.toml.example config/authority.toml
+# Linux host only (see below): let the indexer's UID 1002, and no one
+# else, read it
+setfacl -m u:1002:r config/authority.toml
 # edit: one table per class, with `addresses` (exact) and/or
 # `domains` (the domain and its subdomains)
 make restart-indexer
@@ -400,10 +405,30 @@ runs as UID 1002, but on macOS the Docker Desktop and OrbStack file
 sharing serves a bind-mounted file to the container's user, so it still
 reads a `600` file you own (the same way the services read the `600`
 secret files). On Linux with Docker Engine the bind mount keeps your
-ownership, so the indexer cannot read a `600` file you own; a safe
-access path there is tracked in #526. Do not widen the mode or hand the
-file to a host group to work around it: GID 1002 may belong to another
-account on the host.
+ownership, so the indexer cannot read a `600` file you own. Compose
+cannot fix that from its side: its file-based `secrets:` and `configs:`
+are plain bind mounts that ignore `uid`, `gid` and `mode`. Instead,
+grant UID 1002 alone read access with a POSIX ACL (the `setfacl` line
+above; install the `acl` package if it is missing). `ls -l` then shows
+`-rw-r-----+`: the group bits are the ACL mask, not the file's group,
+and on Linux `make up` accepts that `640` only when the ACL is exactly
+yours read-write and UID 1002 read-only, with nothing for the group or
+other accounts. Otherwise it fails and prints the command that resets
+the file to that state:
+`setfacl -b config/authority.toml && chmod 600 config/authority.toml && setfacl -m u:1002:r config/authority.toml`.
+Do not widen the mode or hand the file to a host group instead: GID
+1002 may belong to another account on the host. The ACL grants host
+UID 1002 read access too, so if `getent passwd 1002` names another
+account (and you are not UID 1002), `make up` warns, and you should
+keep the checkout under a directory that account cannot enter (such as
+a `700` home directory). The indexer must also be able to enter
+`config/` itself; if the directory lacks the search bit for other
+accounts (a checkout made under a `077` umask), `make up` fails and
+prints `setfacl -m u:1002:x config`.
+An editor that saves by writing a new file drops the ACL; `make
+restart-indexer` then fails with the same command. With rootless
+Docker or `userns-remap` the container's UID 1002 maps to a different
+host UID, which this check does not cover.
 The `config/` directory is mounted
 read-only into the indexer at `/config`, and the path
 `/config/authority.toml` is fixed (there is no environment setting for

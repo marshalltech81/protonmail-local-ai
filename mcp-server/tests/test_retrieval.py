@@ -1211,7 +1211,7 @@ class TestListThreads:
 
     def test_unsupported_filter_type_returns_error_text(self, fake_server, seeded_db):
         handler = _handlers(fake_server, seeded_db)["list_threads"]
-        text = _error(handler(folder="INBOX", filter_type="unread"))
+        text = _error(handler(folder="INBOX", filter_type="replied"))
         assert "Error" in text
         assert "filter_type" in text
 
@@ -1396,7 +1396,7 @@ class TestQueryMessages:
         assert "From: bob@example.com" in text
         assert "To: Jane Doe <jane@example.com>" in text
         assert "Cc: carol@other.org" in text
-        assert "2024-01-11T10:00:00+00:00 | INBOX | attachments" in text
+        assert "2024-01-11T10:00:00+00:00 | INBOX | unread | attachments" in text
 
     def test_no_filters_is_labelled(self, fake_server, messages_db):
         handler = _handlers(fake_server, messages_db)["query_messages"]

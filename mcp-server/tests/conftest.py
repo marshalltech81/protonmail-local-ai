@@ -73,7 +73,10 @@ def _build_schema(conn: sqlite3.Connection) -> None:
             has_attachments INTEGER NOT NULL,
             size_bytes      INTEGER,
             content_hash    TEXT,
-            indexed_at      TEXT NOT NULL
+            indexed_at      TEXT NOT NULL,
+            seen            INTEGER NOT NULL DEFAULT 0,
+            flagged         INTEGER NOT NULL DEFAULT 0,
+            replied         INTEGER NOT NULL DEFAULT 0
         );
 
         -- The indexer's ``messages`` indexes, so query plans match.
@@ -455,6 +458,9 @@ def _insert_message_record(
     references: list[str] | None = None,
     variant: str = "",
     occurred_at: str | None = None,
+    seen: bool = False,
+    flagged: bool = False,
+    replied: bool = False,
 ) -> None:
     """Insert one ``messages`` row and its ``message_participants``.
 
@@ -466,8 +472,8 @@ def _insert_message_record(
         INSERT INTO messages
             (claimant_id, message_id, thread_id, filepath, folder, subject, sent_at,
              occurred_at, in_reply_to, references_json, has_attachments, size_bytes,
-             content_hash, indexed_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 100, ?, ?)
+             content_hash, indexed_at, seen, flagged, replied)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 100, ?, ?, ?, ?, ?)
         """,
         (
             claimant_of(message_id, variant),
@@ -483,6 +489,9 @@ def _insert_message_record(
             1 if has_attachments else 0,
             source_sha256(message_id, variant),
             "2024-01-01T00:00:00+00:00",
+            int(seen),
+            int(flagged),
+            int(replied),
         ),
     )
     for role, value in participants:
@@ -545,6 +554,9 @@ def _insert_message(
     references: list[str] | None = None,
     variant: str = "",
     occurred_at: str | None = None,
+    seen: bool = False,
+    flagged: bool = False,
+    replied: bool = False,
 ) -> None:
     """Insert one message with full per-message control.
 
@@ -605,6 +617,9 @@ def _insert_message(
         references=references,
         variant=variant,
         occurred_at=occurred_at,
+        seen=seen,
+        flagged=flagged,
+        replied=replied,
     )
     conn.commit()
     if body is not None:

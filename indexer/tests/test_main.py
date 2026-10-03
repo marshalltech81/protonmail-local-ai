@@ -556,6 +556,42 @@ class TestOnMovedIndexesDestination:
         assert db.is_indexed(str(renamed_path))
         assert not db.is_indexed(str(original_path))
 
+    def test_flag_rename_updates_read_state_without_reindexing(self, tmp_path):
+        """mbsync carries a read / flag change from Proton as a rename
+        (new/ -> cur/, then ``:2,S`` -> ``:2,FS``). The message's state
+        follows each rename with no parse, embed or duplicate row."""
+        db = Database(tmp_path / "db" / "mail.db")
+        threader = Threader(db)
+        queue = _make_queue(db)
+        delivered = tmp_path / "INBOX" / "new" / "1738500000.state.proton"
+        _write_eml(delivered, "state@example.com")
+        embedder = make_mock_embedder()
+        embedder.embed.return_value = [0.0] * EMBEDDING_DIM
+        handler = main.MaildirHandler(db, queue)
+        handler.on_moved(_FakeEvent(src_path=str(tmp_path / "tmp" / "m"), dest_path=str(delivered)))
+        _drain(queue, db, embedder, threader)
+        assert embedder.embed.call_count == 1
+
+        def state():
+            return [
+                tuple(r)
+                for r in db._conn.execute("SELECT filepath, seen, flagged, replied FROM messages")
+            ]
+
+        assert state() == [(str(delivered), 0, 0, 0)]
+
+        read = tmp_path / "INBOX" / "cur" / "1738500000.state.proton:2,S"
+        read.parent.mkdir(parents=True, exist_ok=True)
+        delivered.rename(read)
+        handler.on_moved(_FakeEvent(src_path=str(delivered), dest_path=str(read)))
+        starred = read.with_name("1738500000.state.proton:2,FS")
+        read.rename(starred)
+        handler.on_moved(_FakeEvent(src_path=str(read), dest_path=str(starred)))
+        _drain(queue, db, embedder, threader)
+
+        assert embedder.embed.call_count == 1
+        assert state() == [(str(starred), 1, 1, 0)]
+
 
 class TestInitialIndexNestedFolders:
     def test_recursive_scan_indexes_nested_folders(self, tmp_path, monkeypatch):
@@ -3669,6 +3705,47 @@ class TestLateFolderWatches:
 
         assert not sync_completed.is_set()
 
+    def test_permission_repair_marker_signals_a_rewatch_but_no_sync(
+        self, tmp_path, db, monkeypatch
+    ):
+        """#524: mbsync renames the marker into place after every
+        permission repair, a failed sync attempt included. It triggers
+        the re-watch, but it is not a completed sync: nothing is
+        acknowledged and nothing is queued."""
+        from watchdog.events import FileMovedEvent
+
+        monkeypatch.setattr(main, "MAILDIR_PATH", tmp_path)
+        sync_completed = main.threading.Event()
+        ingestion_state = main._IngestionStateRecorder(db, tmp_path)
+        handler = main.MaildirHandler(
+            db, _make_queue(db), ingestion_state=ingestion_state, sync_completed=sync_completed
+        )
+        handler.on_moved(
+            FileMovedEvent(
+                str(tmp_path / f"{main.PERMS_REPAIRED_NAME}.tmp"),
+                str(tmp_path / main.PERMS_REPAIRED_NAME),
+            )
+        )
+
+        assert sync_completed.is_set()
+        assert ingestion_state._acked is None
+        assert _job_reasons(db) == {}
+
+    def test_permission_repair_marker_counts_only_at_the_root(self, tmp_path, db, monkeypatch):
+        from watchdog.events import FileMovedEvent
+
+        monkeypatch.setattr(main, "MAILDIR_PATH", tmp_path)
+        sync_completed = main.threading.Event()
+        handler = main.MaildirHandler(db, _make_queue(db), sync_completed=sync_completed)
+        box = tmp_path / "Box" / "cur"
+        handler.on_moved(
+            FileMovedEvent(
+                str(box / f"{main.PERMS_REPAIRED_NAME}.tmp"), str(box / main.PERMS_REPAIRED_NAME)
+            )
+        )
+
+        assert not sync_completed.is_set()
+
     def test_directory_create_marks_the_watch_stale(self, tmp_path, db):
         from watchdog.events import DirCreatedEvent, FileCreatedEvent
 
@@ -3827,6 +3904,88 @@ class TestLateFolderWatches:
             _write_eml(late / "tmp" / "second", "second@example.com")
             (late / "tmp" / "second").rename(late / "new" / "second")
             assert wait_for("second") == main.REASON_ON_MOVED
+        finally:
+            late.chmod(0o755)
+            observer.stop()
+            observer.join()
+
+    @pytest.mark.skipif(
+        not sys.platform.startswith("linux") or os.geteuid() == 0,
+        reason="the EACCES gap is inotify-specific, and root can enter a 000 directory",
+    )
+    def test_failed_sync_attempt_gets_its_folder_watched_without_a_sweep(
+        self, tmp_path, db, monkeypatch
+    ):
+        """#524, against watchdog's real inotify observer: a failed sync
+        attempt still repairs permissions but writes no stamp. The
+        repair marker that follows it re-watches the folder it opened,
+        with no recovery sweep. Each marker costs at most one
+        re-schedule, and none when no directory changed."""
+        import threading
+        import time as _time
+
+        from watchdog.observers import Observer
+
+        schedules: list[str] = []
+
+        class _Counting(Observer):
+            def schedule(self, *a, **kw):
+                schedules.append("schedule")
+                return super().schedule(*a, **kw)
+
+        maildir = tmp_path / "maildir"
+        late = maildir / "Late"
+        for sub in ("cur", "new", "tmp"):
+            (late / sub).mkdir(parents=True)
+        _write_eml(late / "new" / "first", "first@example.com")
+        late.chmod(0o000)
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        queue = _make_queue(db)
+        sync_completed = threading.Event()
+        handler = main.MaildirHandler(db, queue, sync_completed=sync_completed)
+        observer = _Counting()
+        refresher = main.FolderWatchRefresher(maildir, observer, handler)
+        refresher.start()
+        observer.start()
+
+        def wait_for(name: str, timeout: float = 5.0) -> str | None:
+            deadline = _time.monotonic() + timeout
+            while _time.monotonic() < deadline:
+                reason = _job_reasons(db).get(name)
+                if reason is not None:
+                    return reason
+                _time.sleep(0.05)
+            return None
+
+        def signal_repair() -> None:
+            # As mbsync's signal_perms_repaired: an empty file renamed
+            # into place at the Maildir root.
+            tmp = maildir / f"{main.PERMS_REPAIRED_NAME}.tmp"
+            tmp.write_text("")
+            tmp.rename(maildir / main.PERMS_REPAIRED_NAME)
+            assert sync_completed.wait(5)
+            sync_completed.clear()
+
+        try:
+            # The failed attempt repairs permissions; no stamp follows.
+            late.chmod(0o755)
+            signal_repair()
+            assert main._refresh_folder_watches(refresher, db, queue) is True
+            assert schedules == ["schedule", "schedule"]
+            assert _job_reasons(db)["first"] == main.REASON_RESCAN
+            assert not (maildir / main.SYNC_STAMP_NAME).exists()
+
+            _write_eml(late / "tmp" / "second", "second@example.com")
+            (late / "tmp" / "second").rename(late / "new" / "second")
+            assert wait_for("second") == main.REASON_ON_MOVED
+
+            # Another failed attempt that opened nothing: a folder walk,
+            # no re-schedule and no Maildir walk.
+            db._conn.execute("DELETE FROM indexing_jobs")
+            signal_repair()
+            assert main._refresh_folder_watches(refresher, db, queue) is False
+            assert schedules == ["schedule", "schedule"]
+            assert _job_reasons(db) == {}
         finally:
             late.chmod(0o755)
             observer.stop()

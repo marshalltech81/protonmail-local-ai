@@ -27,6 +27,12 @@ TRASHED_FLAG = "T"
 SYNC_STAMP_NAME = ".mbsync-last-sync.json"
 _SYNC_STAMP_TMP_RE = re.compile(r"^\.mbsync-last-sync\.([0-9T:Z-]+)\.(\d+)\.tmp$")
 
+# Renamed into place at the Maildir root by mbsync/entrypoint.sh
+# (``signal_perms_repaired``) after every permission repair, a failed
+# sync's included, so the indexer re-watches the folders it opened
+# (#524). It marks no successful sync and carries no content.
+PERMS_REPAIRED_NAME = ".mbsync-perms-repaired"
+
 
 @dataclass(frozen=True)
 class SyncStamp:
@@ -82,6 +88,24 @@ def parse_flags(path: Path | str) -> set[str]:
 def is_trashed(path: Path | str) -> bool:
     """True iff the file is flagged ``T`` (IMAP \\Deleted / Maildir trashed)."""
     return TRASHED_FLAG in parse_flags(path)
+
+
+@dataclass(frozen=True)
+class MessageState:
+    """A message's read / flagged / replied state as mbsync mirrors it
+    from Proton into the filename (``S``, ``F``, ``R``)."""
+
+    seen: bool
+    flagged: bool
+    replied: bool
+
+
+def message_state(path: Path | str) -> MessageState:
+    """The state the ``:2,<flags>`` suffix of ``path`` records. A file
+    without the suffix (mbsync's ``new/`` deliveries) is unread; other
+    letters, including ``T``, are ignored."""
+    flags = parse_flags(path)
+    return MessageState(seen="S" in flags, flagged="F" in flags, replied="R" in flags)
 
 
 def get_uniq(path: Path | str) -> str:
