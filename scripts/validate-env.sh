@@ -80,7 +80,24 @@ file_owner() {
     return 1
 }
 
+file_group() {
+    local path="$1"
+    local group
+
+    if group=$(stat -c '%g' "$path" 2>/dev/null); then
+        printf '%s\n' "$group"
+        return 0
+    fi
+    if group=$(stat -f '%g' "$path" 2>/dev/null); then
+        printf '%s\n' "$group"
+        return 0
+    fi
+    printf 'ERROR: unable to read the group of %s on this platform.\n' "$path" >&2
+    return 1
+}
+
 readonly INDEXER_UID=1002
+readonly INDEXER_GID=1002
 
 # On Linux with Docker Engine a bind mount keeps host ownership and the
 # kernel checks the indexer's own UID, so a 600 file the operator owns
@@ -108,23 +125,40 @@ acl_of() {
     }
 }
 
+# Succeed when the ACL entry starting with QUALIFIER (such as
+# `user:1002:` or `group::`) grants search, limited by any mask.
+acl_entry_searches() {
+    local acl="$1" qualifier="$2"
+
+    grep -Eq "^${qualifier}..x" <<<"$acl" || return 1
+    ! grep -Eq '^mask::' <<<"$acl" || grep -Eq '^mask::..x' <<<"$acl"
+}
+
 # The indexer must also search config/, the mount root: a directory
 # without the other-search bit (say, from a 077 umask) needs a search
 # ACL for UID 1002 too.
 require_indexer_can_search_on_linux() {
     local dir="$1"
-    local mode acl
+    local mode acl owning_group=""
 
     # POSIX ACL order: the owner entry, then a named-user entry for the
-    # UID (limited by the mask), and only then the other bits.
+    # UID, then the group entries matching the indexer's GID (the owning
+    # group and a named-group entry; one granting search is enough),
+    # and only then the other bits. Entries other than the owner's are
+    # limited by the mask.
     mode="$(file_mode "$dir")"
     if [[ "$(file_owner "$dir")" == "$INDEXER_UID" ]]; then
         (((8#$mode & 8#100) != 0)) && return 0
     else
         acl="$(acl_of "$dir")"
+        [[ "$(file_group "$dir")" != "$INDEXER_GID" ]] || owning_group="group::"
         if grep -Eq "^user:${INDEXER_UID}:" <<<"$acl"; then
-            grep -Eq "^user:${INDEXER_UID}:..x" <<<"$acl" && grep -Eq '^mask::..x' <<<"$acl" &&
+            acl_entry_searches "$acl" "user:${INDEXER_UID}:" && return 0
+        elif [[ -n "$owning_group" ]] || grep -Eq "^group:${INDEXER_GID}:" <<<"$acl"; then
+            if [[ -n "$owning_group" ]] && acl_entry_searches "$acl" "$owning_group"; then
                 return 0
+            fi
+            acl_entry_searches "$acl" "group:${INDEXER_GID}:" && return 0
         elif (((8#$mode & 8#001) != 0)); then
             return 0
         fi

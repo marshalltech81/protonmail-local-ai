@@ -453,7 +453,8 @@ loose_secret_mode_fails() {
 # sees the same host whatever machine runs the tests: `uname -s` prints
 # OS, `stat` reports OWNER as the owner of files and directories when
 # given ($STUBS/file-owner and $STUBS/dir-owner, which a case may
-# rewrite), `getfacl` prints $STUBS/acl (written by write_acl) for a
+# rewrite) and group 4242 ($STUBS/file-group, $STUBS/dir-group),
+# `getfacl` prints $STUBS/acl (written by write_acl) for a
 # file and $STUBS/diracl, or else the mode's base entries, for a
 # directory, and `getent passwd 1002`
 # finds an account only when $STUBS/uid1002 exists; `id -u` (the
@@ -465,12 +466,15 @@ stub_host() {
     if [[ -n "$owner" ]]; then
         printf '%s\n' "$owner" >"$STUBS/file-owner"
         printf '%s\n' "$owner" >"$STUBS/dir-owner"
+        printf '4242\n' >"$STUBS/file-group"
+        printf '4242\n' >"$STUBS/dir-group"
         cat >"$STUBS/stat" <<'STUB'
 #!/bin/bash
 kind=file
 [[ -d "${!#}" ]] && kind=dir
 for arg in "$@"; do
     [[ "$arg" == '%u' ]] && exec cat "$(dirname "$0")/$kind-owner"
+    [[ "$arg" == '%g' ]] && exec cat "$(dirname "$0")/$kind-group"
 done
 exec /usr/bin/stat "$@"
 STUB
@@ -723,6 +727,36 @@ linux_config_dir_check_without_getfacl_fails() {
     passes
 }
 
+# #663: the indexer's primary GID is 1002, so a group entry matching it
+# (the owning group, or a named group:1002 entry, each limited by the
+# mask) decides search before the other bits do.
+linux_config_dir_group_entries_decide() {
+    stub_host Linux 4242
+    setup
+    write_authority 640
+    write_acl "${INDEXER_ONLY_ACL[@]}"
+    chmod 701 "$ROOT/config"
+    printf '1002\n' >"$STUBS/dir-group"
+    fails_with 'is not searchable by the indexer (UID 1002)'
+    chmod 711 "$ROOT/config"
+    passes
+    printf '%s\n' 'user::rwx' 'group::--x' 'mask::---' 'other::--x' >"$STUBS/diracl"
+    fails_with 'is not searchable by the indexer (UID 1002)'
+    printf '4242\n' >"$STUBS/dir-group"
+    printf '%s\n' 'user::rwx' 'group::---' 'group:1002:---' 'mask::---' 'other::--x' \
+        >"$STUBS/diracl"
+    fails_with 'is not searchable by the indexer (UID 1002)'
+    printf '%s\n' 'user::rwx' 'group::---' 'group:1002:--x' 'mask::r--' 'other::--x' \
+        >"$STUBS/diracl"
+    fails_with 'is not searchable by the indexer (UID 1002)'
+    printf '%s\n' 'user::rwx' 'group::---' 'group:1002:--x' 'mask::--x' 'other::---' \
+        >"$STUBS/diracl"
+    passes
+    # One matching group entry that grants search is enough.
+    printf '1002\n' >"$STUBS/dir-group"
+    passes
+}
+
 # The documented authority edit flow restarts the indexer through
 # `make restart-indexer`, which must run this validator first (#530).
 # A dry run prints the recipes in order without running them.
@@ -865,6 +899,8 @@ check "Linux: a config directory ACL denying UID 1002 fails" \
     linux_config_dir_acl_denying_indexer_fails
 check "Linux: the config directory check fails without getfacl" \
     linux_config_dir_check_without_getfacl_fails
+check "Linux: group entries for GID 1002 on config/ decide search" \
+    linux_config_dir_group_entries_decide
 check "make restart-indexer validates before restarting" restart_indexer_validates_first
 check "padded quoted values pass" padded_quoted_values_pass
 check "padded and mixed-case modes pass" padded_and_cased_modes_pass
