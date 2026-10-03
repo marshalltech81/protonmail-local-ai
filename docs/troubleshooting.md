@@ -11,21 +11,23 @@ mail is syncing. Each layer has its own signal; the states and signals
 are defined in
 [architecture.md](architecture.md#health-and-readiness-signals). Start
 with `make status`, which shows container health and the
-`get_mailbox_status` fields, then find the symptom below. None of these
-checks needs a credential.
+`get_mailbox_status` fields, then find the symptom below. Only the
+authentication row involves a credential: Bridge's `info` prints the
+Bridge password, so treat its output and `.secrets/bridge_pass.txt` as
+secrets. No other check needs or shows one.
 
 | Symptom | Failing layer | Next safe check |
 | --- | --- | --- |
 | `make up` fails with `container protonmail-bridge is unhealthy`, or Bridge restarts | Bridge listening | `docker compose logs protonmail-bridge`; see [Bridge is up but IMAP is unresponsive](#bridge-is-up-but-imap-is-unresponsive--mbsync-cant-connect) and the Bridge start-up sections below |
-| mbsync repeats `Waiting for ProtonBridge IMAP`, then `Bridge IMAP did not become reachable` | Bridge listening, as mbsync sees it | Default mode: the Bridge container's health and logs. macOS Bridge mode: [the app is running and its port matches](#macos-bridge-mode-mbsync-cannot-reach-or-verify-the-bridge-app) |
+| mbsync logs `Waiting for ProtonBridge IMAP` with no `Bridge IMAP port is reachable` after it, then `Bridge IMAP did not become reachable` | Bridge listening, as mbsync sees it | Default mode: the Bridge container's health and logs. macOS Bridge mode: [the app is running and its port matches](#macos-bridge-mode-mbsync-cannot-reach-or-verify-the-bridge-app) |
 | mbsync stops with `cert extraction failed` | TLS handshake | Run the TLS probe in [Confirm Bridge IMAP answers over TLS](#confirm-bridge-imap-answers-over-tls); a Bridge image from before implicit TLS needs `make build`. macOS Bridge mode: [the app's IMAP mode must be SSL](#macos-bridge-mode-mbsync-cannot-reach-or-verify-the-bridge-app) |
 | mbsync stops with `Bridge cert fingerprint does not match pinned value` or `does not match BRIDGE_CERT_FINGERPRINT` | TLS identity | [Bridge cert pin mismatch](#mbsync-refuses-to-sync--bridge-cert-pin-mismatch) |
-| mbsync is healthy, logs `Initial sync returned a non-zero status` or `Sync failed (n/5 consecutive failures)`, restarts after five; `get_mailbox_status` says `no successful mail sync has been recorded` | Bridge authentication, or the sync itself | Check that `BRIDGE_USER` and `.secrets/bridge_pass.txt` match Bridge's `info` and that an account is logged in ([re-authenticate](#bridge-credentials-expired--need-to-re-authenticate)); `mbsync -V` in [Verifying mbsync is working](#verifying-mbsync-is-working) names the failing step |
+| mbsync is healthy, logs `Initial sync returned a non-zero status` or `Sync failed (n/5 consecutive failures)`, restarts after five; `get_mailbox_status` says `no successful mail sync has been recorded` | Bridge authentication, or the sync itself | Check that `BRIDGE_USER` and `.secrets/bridge_pass.txt` match Bridge's `info` (macOS Bridge mode: the app's IMAP details) and that an account is logged in ([re-authenticate](#bridge-credentials-expired--need-to-re-authenticate); in macOS Bridge mode, in the app); `mbsync -V` in [Verifying mbsync is working](#verifying-mbsync-is-working) names the failing step |
 | `make up` fails with `container mbsync is unhealthy` | mbsync syncing | [`make up` fails — mbsync is unhealthy](#make-up-fails--mbsync-is-unhealthy) |
-| mbsync is healthy, `get_mailbox_status` says `last successful mail sync was ... ago` | Last successful sync (recent syncs failing, or one long run in progress) | `docker compose logs mbsync --tail 50`: repeated `Sync failed` lines, or no `Syncing...` since a long run started ([deadline](#mbsync-stopped-a-sync-at-its-deadline)) |
+| mbsync is healthy, `get_mailbox_status` says `last successful mail sync was ... ago` | Last successful sync (recent syncs failing, or one long run in progress); or the indexer has not acknowledged a newer stamp (see the indexer rows) | `docker compose logs mbsync --tail 50`: repeated `Sync failed` lines, or no `Syncing...` since a long run started ([deadline](#mbsync-stopped-a-sync-at-its-deadline)) |
 | `get_mailbox_status` says `the indexer has not reported` or `the indexer last reported ... ago` | Index current: indexer down or stalled | `docker compose logs indexer --tail 50` and `docker inspect indexer --format='{{json .State.Health}}'` |
 | `get_mailbox_status` says `... waiting to be indexed` | Index current: indexing behind | Normal after a large sync; if it does not fall, see [Tuning indexing retries](#tuning-indexing-retries) |
-| `get_mailbox_status` is current but recent mail is missing | None: the mail reached Proton after the last sync | Wait one `SYNC_INTERVAL` |
+| `get_mailbox_status` is current but a message is missing | Index: a dead-lettered message (`current` ignores the `dead` count), or none: the mail reached Proton after the last sync | If the `dead` count is non-zero, fix its cause and run `make requeue-dead` (see [Tuning indexing retries](#tuning-indexing-retries)); otherwise wait one `SYNC_INTERVAL` |
 
 ## Bridge won't start — "Failed to launch exit status 1"
 
@@ -159,7 +161,10 @@ sync that completes (`get_mailbox_status` reports a last sync) proves its
 login was accepted, while a rejected login shows as repeated
 `Sync failed` lines in `docker compose logs mbsync`. To see which accounts
 Bridge holds, stop the stack, run `make first-run` and enter `info` in the
-CLI (see [Bridge credentials expired](#bridge-credentials-expired--need-to-re-authenticate)).
+CLI (see [Bridge credentials expired](#bridge-credentials-expired--need-to-re-authenticate));
+`info` prints the Bridge password, so keep its output private. In macOS
+Bridge mode `make first-run` starts the container Bridge, not the app:
+check the account in the Bridge app instead.
 
 **3. Check the bridge binary is actually running**
 
