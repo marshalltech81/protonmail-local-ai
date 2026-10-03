@@ -6,6 +6,7 @@ readonly CONSTANTS_FILE="${REPO_DIR}/internal/constants/constants.go"
 readonly CERTS_FILE="${REPO_DIR}/internal/certs/tls.go"
 readonly SETTINGS_FILE="${REPO_DIR}/internal/vault/types_settings.go"
 readonly UPDATES_FILE="${REPO_DIR}/internal/bridge/updates.go"
+readonly VAULT_SETTINGS_FILE="${REPO_DIR}/internal/vault/settings.go"
 
 # Resolve early so the post-patch compile step can locate bridge/Dockerfile
 # (the source of truth for the pinned Go image) when invoked from a host
@@ -37,6 +38,17 @@ readonly PATCHED_AUTOUPDATE='AutoUpdate:        false,'
 # still announces an available update; installing one stays a manual step.
 readonly UPSTREAM_UPDATE_GATE='autoUpdateEnabled := bridge.vault.GetAutoUpdate()'
 readonly PATCHED_UPDATE_GATE='autoUpdateEnabled := false'
+# mbsync connects with implicit TLS (#638): no plaintext phase before the
+# handshake, so no STARTTLS stripping or pre-TLS injection. Bridge serves
+# IMAP with implicit TLS when the vault's IMAPSSL is true, and Proton's
+# default is false. Every reader goes through Vault.GetIMAPSSL (the IMAP
+# listener and server settings, the CLI, the heartbeat), so forcing that
+# getter covers new vaults and vaults that already store false, which
+# flipping the default alone would not. The CLI toggle still writes the
+# stored value, but nothing reads it. SMTP is left alone: mbsync does
+# not use it.
+readonly UPSTREAM_IMAP_SSL='return vault.getSafe().Settings.IMAPSSL'
+readonly PATCHED_IMAP_SSL='return true // protonmail-local-ai: IMAP always uses implicit TLS (#638)'
 
 # Path to the synthetic Go test file written by verify_autoupdate_default.
 # Tracked at script scope so the EXIT/INT/TERM trap below can clean it up
@@ -45,12 +57,16 @@ readonly PATCHED_UPDATE_GATE='autoUpdateEnabled := false'
 # tree, breaking the next re-run against a reused checkout.
 ASSERT_TEST_FILE=""
 GATE_TEST_FILE=""
+IMAP_SSL_TEST_FILE=""
 cleanup_assert_test_file() {
     if [[ -n "$ASSERT_TEST_FILE" ]]; then
         rm -f "$ASSERT_TEST_FILE"
     fi
     if [[ -n "$GATE_TEST_FILE" ]]; then
         rm -f "$GATE_TEST_FILE"
+    fi
+    if [[ -n "$IMAP_SSL_TEST_FILE" ]]; then
+        rm -f "$IMAP_SSL_TEST_FILE"
     fi
 }
 trap cleanup_assert_test_file EXIT INT TERM
@@ -93,7 +109,8 @@ sed_in_place() {
     fi
 }
 
-if [[ ! -f "$CONSTANTS_FILE" || ! -f "$CERTS_FILE" || ! -f "$SETTINGS_FILE" || ! -f "$UPDATES_FILE" ]]; then
+if [[ ! -f "$CONSTANTS_FILE" || ! -f "$CERTS_FILE" || ! -f "$SETTINGS_FILE" || ! -f "$UPDATES_FILE" \
+    || ! -f "$VAULT_SETTINGS_FILE" ]]; then
     printf 'Bridge source files not found under %s.\n' "$REPO_DIR" >&2
     exit 1
 fi
@@ -106,6 +123,8 @@ require_count "$SETTINGS_FILE" "$UPSTREAM_AUTOUPDATE" "1" "upstream AutoUpdate d
 require_count "$SETTINGS_FILE" "$PATCHED_AUTOUPDATE" "0" "patched AutoUpdate default before patch"
 require_count "$UPDATES_FILE" "$UPSTREAM_UPDATE_GATE" "1" "upstream auto-update gate"
 require_count "$UPDATES_FILE" "$PATCHED_UPDATE_GATE" "0" "patched auto-update gate before patch"
+require_count "$VAULT_SETTINGS_FILE" "$UPSTREAM_IMAP_SSL" "1" "upstream IMAP SSL getter"
+require_count "$VAULT_SETTINGS_FILE" "$PATCHED_IMAP_SSL" "0" "patched IMAP SSL getter before patch"
 
 sed_in_place 's/Host = "127.0.0.1"/Host = "0.0.0.0"/' "$CONSTANTS_FILE"
 sed_in_place \
@@ -114,6 +133,9 @@ sed_in_place \
     "$CERTS_FILE"
 sed_in_place 's/AutoUpdate:        true,/AutoUpdate:        false,/' "$SETTINGS_FILE"
 sed_in_place 's/autoUpdateEnabled := bridge\.vault\.GetAutoUpdate()/autoUpdateEnabled := false/' "$UPDATES_FILE"
+sed_in_place \
+    's|return vault\.getSafe()\.Settings\.IMAPSSL|return true // protonmail-local-ai: IMAP always uses implicit TLS (#638)|' \
+    "$VAULT_SETTINGS_FILE"
 
 require_count "$CONSTANTS_FILE" "$UPSTREAM_HOST" "0" "upstream host binding after patch"
 require_count "$CONSTANTS_FILE" "$PATCHED_HOST" "1" "patched host binding"
@@ -124,6 +146,8 @@ require_count "$SETTINGS_FILE" "$UPSTREAM_AUTOUPDATE" "0" "upstream AutoUpdate d
 require_count "$SETTINGS_FILE" "$PATCHED_AUTOUPDATE" "1" "patched AutoUpdate default"
 require_count "$UPDATES_FILE" "$UPSTREAM_UPDATE_GATE" "0" "upstream auto-update gate after patch"
 require_count "$UPDATES_FILE" "$PATCHED_UPDATE_GATE" "1" "patched auto-update gate"
+require_count "$VAULT_SETTINGS_FILE" "$UPSTREAM_IMAP_SSL" "0" "upstream IMAP SSL getter after patch"
+require_count "$VAULT_SETTINGS_FILE" "$PATCHED_IMAP_SSL" "1" "patched IMAP SSL getter"
 
 # Compile the patched packages to confirm the patches produce valid Go.
 # String-count checks above verify content; this verifies the result compiles.
@@ -461,6 +485,67 @@ GOEOF
         test -count=1 -run TestPatchedAutoUpdateGateIgnoresEnabledVault ./internal/bridge/
 }
 
+# Layer 2 for the IMAP implicit-TLS hunk (#638). A new vault and a reopened
+# vault that stores IMAPSSL=false (Proton's default, and what any vault
+# created before this patch holds) must both report implicit TLS, while the
+# SMTP setting keeps Proton's default.
+verify_imap_ssl_forced() {
+    IMAP_SSL_TEST_FILE="${REPO_DIR}/internal/vault/imapssl_patch_assert_test.go"
+
+    cat > "$IMAP_SSL_TEST_FILE" <<'GOEOF'
+package vault_test
+
+import (
+	"testing"
+
+	"github.com/ProtonMail/gluon/async"
+	"github.com/ProtonMail/proton-bridge/v3/internal/vault"
+	"github.com/stretchr/testify/require"
+)
+
+// TestPatchedIMAPSSLIsForced is generated by bridge/patch-source.sh after the
+// IMAP implicit-TLS hunk is applied. It verifies the IMAP server settings
+// read implicit TLS for a new vault and for a vault that stores
+// IMAPSSL=false, and that SMTP is unchanged.
+func TestPatchedIMAPSSLIsForced(t *testing.T) {
+	dir := t.TempDir()
+	key := []byte("synthetic test key")
+
+	fresh, corrupt, err := vault.New(dir, t.TempDir(), key, async.NoopPanicHandler{})
+	require.NoError(t, err)
+	require.NoError(t, corrupt)
+	require.True(t, fresh.GetIMAPSSL(), "new vault does not serve IMAP with implicit TLS")
+	require.False(t, fresh.GetSMTPSSL(), "SMTP security changed; only IMAP is patched")
+	require.NoError(t, fresh.SetIMAPSSL(false))
+	require.True(t, fresh.GetIMAPSSL(), "stored IMAPSSL=false turned implicit TLS off")
+	require.NoError(t, fresh.Close())
+
+	reopened, corrupt, err := vault.New(dir, t.TempDir(), key, async.NoopPanicHandler{})
+	require.NoError(t, err)
+	require.NoError(t, corrupt)
+	require.True(t, reopened.GetIMAPSSL(), "reopened vault storing IMAPSSL=false does not serve implicit TLS")
+	require.NoError(t, reopened.Close())
+}
+GOEOF
+
+    if host_go_is_usable; then
+        run_go_on_host test -count=1 -run TestPatchedIMAPSSLIsForced ./internal/vault/
+        return
+    fi
+
+    if ! command -v docker >/dev/null 2>&1; then
+        printf 'ERROR: no usable host Go toolchain and no docker on PATH; cannot run the IMAP implicit-TLS assertion.\n' >&2
+        return 1
+    fi
+
+    local go_image
+    go_image="$(resolve_go_image)" || return 1
+
+    printf 'Running IMAP implicit-TLS assertion inside %s...\n' "$go_image"
+    run_go_in_pinned_image "$go_image" \
+        test -count=1 -run TestPatchedIMAPSSLIsForced ./internal/vault/
+}
+
 compile_patched_packages \
     || { printf 'ERROR: post-patch compilation failed in %s.\n' "$REPO_DIR" >&2; exit 1; }
 
@@ -469,5 +554,8 @@ verify_autoupdate_default \
 
 verify_autoupdate_gate \
     || { printf 'ERROR: auto-update gate assertion failed in %s.\n' "$REPO_DIR" >&2; exit 1; }
+
+verify_imap_ssl_forced \
+    || { printf 'ERROR: IMAP implicit-TLS assertion failed in %s.\n' "$REPO_DIR" >&2; exit 1; }
 
 printf 'Bridge source patches applied cleanly in %s.\n' "$REPO_DIR"
