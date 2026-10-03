@@ -686,52 +686,60 @@ Triaged against `d30e500` by four parallel agents; every issue is real
 and most reproduced with synthetic input. PRs in the order to land
 them (one test-first commit per issue, `Fixes #N` per issue):
 
-**Handoff 2026-10-02, night — start here.** Every pre-go-live item
-from Resolved decisions 14 has merged (#592–#630, listed under
-Recently Completed, 2026-10-02 evening). **Not ready for go-live yet.**
-Go-live blockers (owner, 2026-10-02 night), each its own PR, all to
-merge before the first sync:
+**Handoff 2026-10-03 — start here.** **Ready for go-live.** Every
+pre-go-live item has merged: the evening run (#592–#630) and the
+night run (#639–#667, under Recently Completed, 2026-10-02 night).
+No PR is open.
 
-- implicit TLS between mbsync and Bridge in both Bridge modes (#638):
-  Bridge v3.27.0 serves implicit TLS when its IMAP SSL setting is on
-  (`imapsmtpserver/listener.go`); the container Bridge is patched to
-  force it (a fourth hunk, three-layer pattern), mbsync switches with
-  no STARTTLS fallback, and in macOS mode the app's IMAP connection
-  mode is set to SSL before the first sync;
-- the 16-hex claimant-ID suffix (#454, a v0 key change);
-- v0 schema additions that would otherwise need a migration or full
-  re-index later: Maildir flags (#644), chunk `kind` tags (Phase 2
-  item 4), and the embedder identity record (#645, Phase 2 item 1's
-  first slice);
-- pre-go-live bug fixes: #602, #629, #282, #641, #524, #526, #533,
-  #631–#637 and #274. #463 step 2 waits for a real Proton message and
-  is done right after the first sync.
+Go-live (owner): in the Bridge app set the IMAP connection mode to
+**SSL** (implicit TLS, #643; the fingerprint is unchanged and is read
+with `openssl s_client -connect 127.0.0.1:1143 </dev/null | openssl
+x509 -noout -fingerprint -sha256`, no `-starttls`); fill
+`.secrets/bridge_pass.txt` and `.secrets/embed_api_key.txt`; then
+`make build-macos-bridge` and `make up-macos-bridge` from a fresh
+Maildir and index (the v0 schema and keys changed many times
+tonight). Record the first sync's duration and set
+`SYNC_DEADLINE_SECONDS` (default 24 h, #651) to a few times it.
 
-After those, run the go-live checklist below in macOS Bridge mode from
-a fresh Maildir. Rebuild any existing index and Maildir: #597 and #599 edit
-the v0 schema, #594 and #611 change chunked and parsed output, and
-#598 refuses a Maildir synced with the earlier folder layout.
+Right after the first sync:
 
-Still needs the owner (none of these blocks go-live):
+1. Confirm the top `Received:` header is Proton's (`occurred_at`,
+   #599) and build #463 step 2 from Proton's real
+   `Authentication-Results` format.
+2. #497's live test passes → close #497.
 
-- **#602 (decided: set `secure_delete` explicitly):** the container's
-  Debian SQLite is built with `SQLITE_SECURE_DELETE`, so it likely
-  defaults on there already; the PR sets the pragma on every write
-  connection so the guarantee does not depend on how SQLite was built.
-- ~~**#626**~~ and ~~#603~~: closed as documented (owner, 2026-10-02);
-  ~~#434~~ closed as superseded by #572; #629 (Bash 3.2) and #604 (AI
-  judge on the synthetic corpus only) are being built.
+Next session, in order (no owner decision needed):
+
+1. **#673 (P2):** the chunker takes ~14 min on a crafted 12 MB
+   marker-dense body (predates #659); bound it per AGENTS.md.
+2. P3s from review: #662, #663, #668, #669 (validate-env/docs on
+   Linux), #680 (Hangul fillers in delimiter tags), #670 (budgeted
+   FTS5 merge), #648 (periodic calibration re-check).
+3. Answer-evaluation follow-ups: #671, #672, #674–#679; then #655–#657.
+
+Needs the owner:
+
+- **#652 (P2, Linux only):** on Linux Docker Engine the services cannot
+  read their mode-600 `.secrets/*.txt`; a fix changes the secret model.
+  Not relevant to the macOS deployment.
+- **#660:** use chunk kinds in retrieval (store quote/signature
+  chunks, kind filters); changes retrieval and storage.
+- **#661:** keep the SQLite-only tools up when the embedder identity
+  check cannot run (today an embedder outage at startup stops the
+  server).
+- **Evaluation questions from real mail (held, 2026-10-02):** reading
+  the real mailbox to write eval questions sends mail content to the
+  model provider and reverses the synthetic-only eval rule; the
+  alternative is category templates the owner fills in. Revisit after
+  the first sync.
 - **Go toolchain `ARG` (#627):** not done, because Dependabot reads only
-  literal `FROM` lines and keeps the golang image current; drop that
-  half of the backlog item or accept manual golang bumps.
+  literal `FROM` lines; drop it or accept manual golang bumps.
 - **Reserved child-folder names (#598):** six names (`uidvalidity`,
   `isyncuidmap.db`, `mbsyncstate*`) are skipped silently; reporting
   them needs an extra IMAP listing.
 - **ChatGPT:** needs the hosted-client design after go-live.
-- After the first sync: confirm the top `Received:` header is Proton's
-  (`occurred_at`, #599) and check #463's `Authentication-Results` input.
 
-**Handoff 2026-10-02, afternoon (superseded by the night handoff).** Both go-live
+**Handoff 2026-10-02, afternoon (superseded).** Both go-live
 blockers are done: #432 (xlsx streaming pre-pass, #572) and MCP
 endpoint auth (the static bearer token, #573). #277 was fixed in the
 morning (#515). **Superseded the same evening:** Resolved decisions
@@ -1153,9 +1161,11 @@ linked from the Phase 3 items they track.
 
 ## Maintenance backlog (small, ongoing)
 
-- ~~consolidate `BRIDGE_VERSION` to a single source of truth
-  (`.env.example`)~~ (done: #627, a `make test-compose` check that every
-  copy matches, #624); parameterize the Go toolchain as an `ARG` (not
+- ~~keep the `BRIDGE_VERSION`/`BRIDGE_COMMIT` copies consistent~~
+  (done: #627, #624: `.env.example` is the reference and
+  `make test-compose` fails when the `docker-compose.yml` fallbacks or
+  `bridge/Dockerfile` ARG defaults differ; three copies remain, since
+  Compose cannot read `.env.example`); parameterize the Go toolchain as an `ARG` (not
   done: it would stop Dependabot's golang bumps; owner to decide)
 - ~~path filters on `.github/workflows/docker.yml`~~ (done: #627, #623)
 - ~~Bridge build: bounded retry around `go mod download`~~ (done:
@@ -1184,22 +1194,14 @@ linked from the Phase 3 items they track.
   documented in #517, no setting yet)
 - ~~mcp-server: remove the dead `Database.get_thread_message_ids`~~
   (done: already gone from the code)
-- IDs are unbounded: a root Message-ID becomes the thread ID with no
-  length check, and IDs cannot be cut in responses without breaking
-  chaining. **Decided** (Resolved decisions 14, #592): a 998-character
-  Message-ID limit at parse time (RFC 5322 line length), an over-long
-  ID taking the no-`Message-ID` dead-letter path; the hashed thread ID
-  alternative is superseded (done: #611)
+- ~~bound Message-ID length~~ (done: #611, #609; 998 characters at
+  parse time, over-long IDs dead-lettered, over-long references
+  dropped)
 - ~~AGENTS.md commit-hygiene secret check: `grep '^\+'` fails under
   ugrep (a common `grep` alias); use the portable `grep '^[+]'`~~
   (done: #555)
-- ~~Semgrep Compose/shell rules match one file at a time (#566)~~
-  (done: #614 for #578, #579, #581, #582; #616 for #577 and #580), with
-  gaps filed: top-level `include` (#577), `volumes_from` (#578), long
-  `chmod` options before the mode (#579), `!reset`/`!override`
-  clearing inherited hardening (#580, merged-config check decided in Resolved decisions 14), the
-  `compose.yaml`/`compose.yml` default names (#581), and a quoted `#`
-  hiding a `curl`/`wget` TLS flag (#582)
+- ~~close the per-file Semgrep gaps and check the merged Compose
+  config~~ (done: #614, #616, #665; #577–#582, #631–#637)
 - ~~mbsync macOS Bridge mode: report a missing `BRIDGE_CERT_FINGERPRINT`
   at startup, before the Bridge wait (#584)~~ (done: #630)
 - ~~`make test-mbsync-tls` is intermittently flaky on unchanged `main`
@@ -1321,7 +1323,7 @@ can be revisited with an explicit owner decision.
 - audio/video attachment transcription is not supported; PDF / DOCX /
   XLSX / HTML / TXT / images are extracted, chunked, and searchable
 - `list_threads(filter_type=...)` rejects unsupported values cleanly;
-  unread/flagged state remains unindexed
+  read/flagged/replied state is indexed (#649) but draft/forwarded is not
 - deletion reconciliation is on by default (mirror) and not yet validated under
   long-running real-world conditions; `INDEXER_UNLINK_ON_REAP=true`
   only removes the `.eml` when Maildir is mounted read-write
@@ -1506,7 +1508,8 @@ do not ship persisted claims without them.
       decisions 21).
     - **#537 `get_evidence` thread count:** add `max_threads`. Done
       2026-10-02 (#559).
-    - **#533 look-alike letters in delimiter tags:** defer.
+    - **#533 look-alike letters in delimiter tags:** defer (superseded
+      2026-10-02 night: fixed in #667; #680 remains).
     - **#526 `authority.toml` on Linux Docker Engine:** stays
       documented; deferred until a Linux deployment.
     - **#524 folders opened by a failed mbsync attempt:** defer.
@@ -1614,6 +1617,26 @@ do not ship persisted claims without them.
     invariant): resolved 2026-10-02 (Resolved decisions 14).
 
 ## Recently Completed
+
+### 2026-10-02, night — Go-live blockers and pre-go-live bug fixes (#639–#667)
+
+PLAN update (#639). Owner decisions taken during the night: implicit
+TLS between mbsync and Bridge in both Bridge modes (#643, #638; a
+fifth Bridge patch hunk forces Bridge's IMAP SSL setting), the 16-hex
+claimant suffix (#640, #454), and three v0 additions to avoid a later
+migration or re-index: Maildir read/flagged/replied state (#649, #644),
+chunk `kind` tags (#659, #646) and the embedder identity record with a
+calibration vector checked at startup (#650, #645). Bug fixes:
+`secure_delete` set explicitly (#642, #602), FTS5 `optimize` after
+deletes before each checkpoint (#666, #641), an mbsync per-run
+deadline (#651, #282), re-watch after a failed sync (#654, #524),
+`authority.toml` readable on Linux via an ACL (#653, #526),
+look-alike letters in delimiter tags (#667, #533), the Bash 3.2 test
+fix (#647, #629), merged-Compose check gaps (#665, #631–#637), and
+Bridge health states documented (#664, #274). The first slice of the
+answer-quality evaluation with a separately configured judge, on the
+synthetic corpus only (#658, refs #604). Closed as documented: #603,
+#626; superseded: #434.
 
 ### 2026-10-02, evening — Pre-go-live work from Resolved decisions 14 (#592–#630)
 
