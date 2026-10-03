@@ -356,9 +356,9 @@ env_value() {
 
 # env_value with surrounding whitespace removed, for the values the
 # Python services read with ``.strip()``: every number, boolean and mode
-# below. SYNC_INTERVAL (mbsync's shell), MCP_PORT (also Compose's port
-# mapping), URLs and model names are passed on unstripped, so they are
-# read with env_value.
+# below. SYNC_INTERVAL and SYNC_DEADLINE_SECONDS (mbsync's shell),
+# MCP_PORT (also Compose's port mapping), URLs and model names are
+# passed on unstripped, so they are read with env_value.
 env_value_stripped() {
     local value
 
@@ -466,6 +466,8 @@ INDEXER_RETRY_BASE_SECONDS="$(env_value_stripped INDEXER_RETRY_BASE_SECONDS)"
 INDEXER_MESSAGE_TIMEOUT_SECONDS="$(env_value_stripped INDEXER_MESSAGE_TIMEOUT_SECONDS)"
 SYNC_INTERVAL="$(env_value SYNC_INTERVAL)"
 SYNC_INTERVAL="${SYNC_INTERVAL:-60}"
+SYNC_DEADLINE_SECONDS="$(env_value SYNC_DEADLINE_SECONDS)"
+SYNC_DEADLINE_SECONDS="${SYNC_DEADLINE_SECONDS:-86400}"
 MCP_PORT="$(env_value MCP_PORT)"
 MCP_PORT="${MCP_PORT:-3000}"
 MCP_TRANSPORT="$(env_value MCP_TRANSPORT)"
@@ -730,6 +732,14 @@ fi
 # Same pattern as mbsync/entrypoint.sh, which reads the value unstripped.
 [[ "$SYNC_INTERVAL" =~ ^[1-9][0-9]*$ ]] || {
     echo "ERROR: SYNC_INTERVAL must be a positive integer without leading zeros." >&2
+    exit 1
+}
+
+# Same pattern as mbsync/entrypoint.sh and healthcheck.sh, which read the
+# value unstripped; nine digits at most so their arithmetic cannot
+# overflow.
+[[ "$SYNC_DEADLINE_SECONDS" =~ ^[1-9][0-9]{0,8}$ ]] || {
+    echo "ERROR: SYNC_DEADLINE_SECONDS must be a positive integer of seconds without leading zeros, at most 999999999." >&2
     exit 1
 }
 

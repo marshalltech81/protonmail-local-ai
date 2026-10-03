@@ -556,6 +556,42 @@ class TestOnMovedIndexesDestination:
         assert db.is_indexed(str(renamed_path))
         assert not db.is_indexed(str(original_path))
 
+    def test_flag_rename_updates_read_state_without_reindexing(self, tmp_path):
+        """mbsync carries a read / flag change from Proton as a rename
+        (new/ -> cur/, then ``:2,S`` -> ``:2,FS``). The message's state
+        follows each rename with no parse, embed or duplicate row."""
+        db = Database(tmp_path / "db" / "mail.db")
+        threader = Threader(db)
+        queue = _make_queue(db)
+        delivered = tmp_path / "INBOX" / "new" / "1738500000.state.proton"
+        _write_eml(delivered, "state@example.com")
+        embedder = make_mock_embedder()
+        embedder.embed.return_value = [0.0] * EMBEDDING_DIM
+        handler = main.MaildirHandler(db, queue)
+        handler.on_moved(_FakeEvent(src_path=str(tmp_path / "tmp" / "m"), dest_path=str(delivered)))
+        _drain(queue, db, embedder, threader)
+        assert embedder.embed.call_count == 1
+
+        def state():
+            return [
+                tuple(r)
+                for r in db._conn.execute("SELECT filepath, seen, flagged, replied FROM messages")
+            ]
+
+        assert state() == [(str(delivered), 0, 0, 0)]
+
+        read = tmp_path / "INBOX" / "cur" / "1738500000.state.proton:2,S"
+        read.parent.mkdir(parents=True, exist_ok=True)
+        delivered.rename(read)
+        handler.on_moved(_FakeEvent(src_path=str(delivered), dest_path=str(read)))
+        starred = read.with_name("1738500000.state.proton:2,FS")
+        read.rename(starred)
+        handler.on_moved(_FakeEvent(src_path=str(read), dest_path=str(starred)))
+        _drain(queue, db, embedder, threader)
+
+        assert embedder.embed.call_count == 1
+        assert state() == [(str(starred), 1, 1, 0)]
+
 
 class TestInitialIndexNestedFolders:
     def test_recursive_scan_indexes_nested_folders(self, tmp_path, monkeypatch):

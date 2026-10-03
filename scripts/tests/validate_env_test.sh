@@ -248,6 +248,27 @@ zero_padded_sync_interval_fails() {
     fails_with 'SYNC_INTERVAL'
 }
 
+# mbsync's per-run deadline (#282): the entrypoint and healthcheck accept
+# only ^[1-9][0-9]{0,8}$, unstripped; empty or omitted takes the default.
+sync_deadline_values() {
+    local value
+    for value in 1 86400 999999999; do
+        setup "SYNC_DEADLINE_SECONDS=${value}"
+        passes || return 1
+    done
+    setup 'SYNC_DEADLINE_SECONDS='
+    passes || return 1
+    for value in 0 08 -60 1.5 abc '" 60 "' 1000000000; do
+        setup "SYNC_DEADLINE_SECONDS=${value}"
+        fails_with 'SYNC_DEADLINE_SECONDS' || {
+            printf 'accepted %s\n' "$value"
+            return 1
+        }
+    done
+    setup 'SYNC_DEADLINE_SECONDS=86400'
+    fails_with 'SYNC_DEADLINE_SECONDS' SYNC_DEADLINE_SECONDS=0
+}
+
 # Compose and the mcp-server loader both read a zero-padded port as
 # decimal (Codex review round 1).
 zero_padded_port_is_decimal() {
@@ -748,6 +769,7 @@ check "a timeout below 1 fails" timeout_below_one_fails
 check "a non-numeric timeout fails" non_numeric_timeout_fails
 check "SYNC_INTERVAL=0 fails" zero_sync_interval_fails
 check "a zero-padded SYNC_INTERVAL fails" zero_padded_sync_interval_fails
+check "SYNC_DEADLINE_SECONDS accepts only a bounded positive integer" sync_deadline_values
 check "an out-of-range MCP_PORT fails" out_of_range_port_fails
 check "a zero-padded MCP_PORT is decimal" zero_padded_port_is_decimal
 check "an unknown INFERENCE_MODE fails" unknown_inference_mode_fails

@@ -659,7 +659,9 @@ mbsync is healthy while its sync loop is alive: its config and the Bridge
 cert are in place, and either a sync attempt started or ended within three
 `SYNC_INTERVAL`s (plus 30 s) or an `mbsync` process or the permission repair
 walk that follows it (`find`) is running. A long first
-sync is therefore healthy; it is not a reason for this failure. (Images built
+sync is therefore healthy; it is not a reason for this failure. A run still
+going past its deadline (`SYNC_DEADLINE_SECONDS` plus 60 s) is unhealthy:
+see [mbsync stopped a sync at its deadline](#mbsync-stopped-a-sync-at-its-deadline). (Images built
 before this behaviour required a completed sync and failed any first sync
 longer than about three and a half minutes; rebuild with `make build`.)
 
@@ -694,9 +696,58 @@ make restart-indexer
 
 Run it again after an editor replaces the file, since the new file has
 no ACL. If `make up` instead reports that `config` is not searchable by
-the indexer, run the `setfacl -m u:1002:x` command it prints. Do not `chmod 644`/`640` the file or `chgrp` it instead: either
-lets other host accounts read your rules. See "Source-authority rules"
+the indexer, run the `setfacl -m u:1002:x` command it prints.
+
+Do not `chmod 644`/`640` the file or `chgrp` it instead: either lets
+other host accounts read your rules. See "Source-authority rules"
 in `docs/setup.md`.
+
+## mbsync stopped a sync at its deadline
+
+Each mbsync run has a deadline, `SYNC_DEADLINE_SECONDS` (default 86400, a
+day). isync's own 20-second timeout restarts whenever Bridge sends
+anything, so a server that keeps a command open with keepalives could
+otherwise hold one run, and the whole sync loop, forever (#282). Past the
+deadline the entrypoint stops mbsync (TERM, then KILL 30 s later if it is
+still running), logs
+
+```text
+>>> ERROR: mbsync did not finish within SYNC_DEADLINE_SECONDS=86400 and was stopped; counting this sync as failed (see docs/troubleshooting.md).
+```
+
+and counts a failed sync: no success stamp is written, the next attempt
+starts after `SYNC_INTERVAL`, and five failures in a row exit the container
+so Docker restarts it. A stopped run loses nothing already synced: isync
+records each message in its sync state as it goes, so the next run carries
+on from there.
+
+**Tune the deadline after your first sync.** The default is deliberately
+generous because the first sync of a large mailbox is the longest run
+mbsync makes, and its duration is not known in advance. Once the first
+sync has finished, find how long it took from the log timestamps:
+
+```bash
+docker compose logs -t mbsync | grep -E 'Running initial sync|Starting sync loop'
+```
+
+(If the first sync was interrupted or failed, it continued in the next
+`>>> Syncing...` runs; add those up.) Later runs only fetch new mail and
+take seconds, so a few times the first sync's duration is a safe deadline;
+a lower one recovers sooner from a stall. Set it in `.env` and recreate
+mbsync:
+
+```bash
+# .env: e.g. for a first sync of about 2 hours
+SYNC_DEADLINE_SECONDS=21600
+```
+
+```bash
+make up                # or make up-macos-bridge in macOS Bridge mode
+```
+
+Raise it instead if a long catch-up (after mbsync was down for weeks, or a
+large import into Proton) keeps being stopped: the log then shows the
+deadline line on consecutive runs while Bridge is otherwise working.
 
 ## Indexer refuses to start — "wipe the sqlite-volume"
 
@@ -722,6 +773,52 @@ make up                # or make up-macos-bridge in macOS Bridge mode
 Maildir and Bridge state are untouched. The indexer re-parses and
 re-embeds every message, so the rebuild takes as long as an initial
 index and calls the embedding provider for the whole mailbox.
+
+## Embedder identity mismatch
+
+The indexer or mcp-server exits at startup with "The configured
+embedder is not the one that built this index (...)". The index records
+the embedder that built it (see docs/architecture.md, "Embedder
+identity record"), and the one configured now differs in the fields
+the message lists:
+
+- `EMBED_MODEL`, `endpoint` or `dimensions`: `EMBED_MODEL` or
+  `EMBED_BASE_URL` changed (the endpoint is the resolved URL, so an
+  empty `EMBED_BASE_URL` reads as `https://api.openai.com/v1`, or as
+  `OPENAI_BASE_URL` if set). Both services must use the same values.
+- `calibration vector`: the names match but the server behind them
+  returns different vectors, typically because a host-side server now
+  loads a different model, or a different build of it, under the same
+  name, or a provider alias moved.
+- `calibration text`: the indexer and mcp-server come from different
+  releases, or the index was recorded by another release. Run matching
+  images.
+
+Two ways out:
+
+1. Restore the original embedder: put back the `EMBED_BASE_URL` /
+   `EMBED_MODEL` values and the model the server loads, then
+   `make up`. Nothing is rebuilt.
+2. Keep the new embedder and rebuild the index with it, following
+   "Indexer refuses to start — wipe the sqlite-volume" above. Vectors
+   from two embedders are not comparable, so the old ones cannot be
+   kept. Moving the same server to a new address also needs a
+   rebuild today; switching embedders without one is PLAN.md Phase 2.
+
+The same section covers "The index holds messages but no record of the
+embedder" and "The index predates the embedder identity record": both
+mean an index built before the record existed, so rebuild it.
+
+"The indexer has not recorded the embedder behind this index yet" from
+mcp-server on a fresh install is transient: the indexer records it once
+its embedder answers, and mcp-server's restart picks it up. If it
+persists, check `docker compose logs indexer` for an embedder error.
+
+"Embedder calibration request failed" means the startup calibration
+request to the embedder failed; the message carries the error type and
+status. The service exits and Docker restarts it, so a brief outage
+clears by itself; a 401, 403 or 404 is a credential or model setting to
+fix (see "Embedder or inference endpoint unreachable from containers").
 
 ## Deletion reconciliation (mirror vs archive)
 

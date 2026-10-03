@@ -29,7 +29,9 @@ ProtonBridge container
         │  IMAP over implicit TLS (internal Docker network)
         ▼
 mbsync container
-  - Polls Bridge IMAP every SYNC_INTERVAL seconds in a bounded retry loop
+  - Polls Bridge IMAP every SYNC_INTERVAL seconds in a bounded retry loop;
+    each mbsync run has a deadline (SYNC_DEADLINE_SECONDS, default a
+    day) past which it is stopped and counted as a failed sync (#282)
   - Writes Maildir format to maildir-volume
   - Maintains sync state for incremental updates, in each folder's own
     Maildir directory, and writes child folders with a leading dot so no
@@ -49,8 +51,9 @@ mbsync container
     `<folder>` or `<path>` in its place (#570)
   - Healthcheck is liveness only: healthy while the sync loop is alive
     (a heartbeat touched around every attempt is fresh, or an mbsync or
-    its permission repair walk is running), so the indexer and MCP
-    server start during a long first sync; freshness comes from the
+    its permission repair walk is running, up to that run's deadline),
+    so the indexer and MCP server start during a long first sync;
+    freshness comes from the
     last-sync stamp. Folders that sync creates are watched once the
     indexer handles that sync's stamp (#516)
         │
@@ -78,6 +81,8 @@ embedder (operator-supplied)  sqlite-volume
                                  - pending_deletions, reaped_messages
                                    (reconciler)
                                  - entities, entity_aliases
+                                 - vector_generations (embedder
+                                   identity record)
 
 inference (operator-supplied)
   - INFERENCE_MODE=anthropic →
@@ -299,6 +304,49 @@ query vectors are comparable to indexed vectors. `EMBED_MODE=openai`
 is the only valid value — embed has no disabled mode because
 semantic / hybrid search is the headline retrieval feature and the
 indexer cannot ingest mail without an embedder.
+
+#### Embedder identity record
+
+The index records which embedder built it, so a changed embedder is
+caught at startup instead of mixing incomparable vectors into search.
+On a fresh index the indexer writes one `vector_generations` row,
+status `active`: `EMBED_MODE`, the resolved endpoint (the SDK's
+`base_url` after construction, with userinfo, query and fragment
+dropped), `EMBED_MODEL`, the vector dimensions, and a **calibration
+vector** — the embedding of a fixed synthetic text — with that text's
+SHA-256. The columns for revision, tokenizer, context window, chunk
+configuration hash and label stay NULL: the OpenAI-compatible API
+exposes none of them. This is the first slice of the `vector_generations`
+registry in PLAN.md Phase 2; there is no generation lifecycle yet, so
+the table holds exactly one row.
+
+On every start both services compare their embedder against the row
+(`indexer/src/embed_identity.py`, `mcp-server/src/lib/embed_identity.py`):
+mode, model, endpoint and dimensions must match, and the calibration
+text is re-embedded and must lie within cosine distance 0.01 of the
+stored vector. The vector check catches what the fields cannot: a
+host-side server that reloaded a different model of the same dimension
+under the same name, or a provider alias that moved. Re-embedding one
+text on an unchanged deployment differs by float noise only (zero for a
+deterministic server, well under 1e-3 for GPU-batched providers), while
+unrelated models sit near distance 1, so 0.01 leaves a wide margin
+both ways; a re-quantization of the same model can fall either side of
+it. A mismatch fails startup closed with a fixed message naming the
+differing fields (see docs/troubleshooting.md, "Embedder identity
+mismatch"); the message never quotes a provider response.
+
+The indexer writes the row; mcp-server only reads it. A failed
+calibration request (the indexer's runs right after `wait_for_ready`,
+with the client's usual retries) exits the service with the scrubbed
+error and the restart policy tries again, as for the dimension probe.
+mcp-server exits the same way while the indexer has not yet recorded
+the row (it does so once its embedder answers); its calibration request
+is bounded as a whole by `EMBED_TIMEOUT_SECS`. While mcp-server cannot
+verify its embedder, the SQLite-only tools are down with it (#661 tracks
+keeping them up). The checks run at
+startup only; periodic re-checks are tracked separately. An index that
+holds messages but no row, or predates the table, fails closed with
+rebuild instructions, since nothing says which embedder wrote it.
 
 For inference, `INFERENCE_MODE=anthropic` (default) uses the
 official `anthropic` SDK against the Messages API; leave
@@ -585,7 +633,7 @@ time, #541), `sent_at` (`Date:` header; a missing or unparseable header is
 dated at first index and that date is kept when the message is
 reprocessed or its thread rebuilt), `occurred_at` (the top `Received:`
 header's date, or NULL; see Message time), folder, `in_reply_to` /
-references, attachment flag, and its source: `filepath` (the Maildir
+references, attachment flag, read state, and its source: `filepath` (the Maildir
 locator, kept current across flag renames; when a rename crosses
 folders the new `folder` is written in the same transaction, so a failed
 update rolls back whole and the Maildir walk re-indexes the file) plus
@@ -596,6 +644,22 @@ result (see `docs/mcp-tools.md`). `message_participants`
 normalizes From / To / Cc into one row per (message, role, address),
 with `address` canonical and lowercased and the display name kept as
 written; malformed entries with no recoverable address are skipped.
+
+**Read state.** `seen`, `flagged` and `replied` are the `S`, `F` and
+`R` flags in `filepath`'s `:2,<flags>` suffix (`maildir.message_state`,
+built on the same `parse_flags` as the `T` trash check; other letters
+are ignored, and a file without the suffix is unread). mbsync is
+pull-only, but it mirrors a read, star or reply made in Proton by
+renaming the file (`:2,` → `:2,S`, and `new/` → `cur/`), so the flags
+are written wherever `filepath` is: by `upsert_thread` from the parsed
+file's path, and by `update_filepath` in the same `UPDATE` as the new
+locator. Every rename path — the watchdog's `on_moved`, the
+reconciler's `handle_moved` and sweep, and the startup `sweep_paths`
+that heals renames made while the indexer was down — goes through
+`update_filepath`, so a state change is one row update with no reparse
+or re-embed, and the state cannot disagree with the stored path.
+Thread-level questions (`list_threads(filter_type="unread")`) are
+answered from these rows at query time; nothing per-thread is stored.
 An index on `(address, role)` makes "every message from / to X" an
 exact indexed lookup — the basis for exhaustive enumeration, as
 opposed to relevance search. The MCP server's `query_messages`

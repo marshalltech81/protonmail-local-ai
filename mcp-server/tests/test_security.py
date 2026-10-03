@@ -227,19 +227,32 @@ class TestLogToolCall:
             assert f"'{name}'" in caplog.text  # listed as withheld
 
     def test_filter_type_values_list_threads_rejects_are_withheld(self, caplog):
-        """``list_threads`` accepts only ``filter_type="all"`` (unread /
-        flagged state is not indexed), so the allowlist accepts only that
-        value too: anything the tool rejects is withheld by name."""
+        """``list_threads`` accepts ``all``, ``unread`` and ``flagged``,
+        so the allowlist logs exactly those: anything the tool rejects is
+        withheld by name."""
         import logging
 
         logger = logging.getLogger("test-tool-log-filter-type")
         with caplog.at_level(logging.INFO, logger="test-tool-log-filter-type"):
-            for value in ("unread", "flagged"):
+            for value in ("unread", "flagged", "Confidential-marker"):
                 log_tool_call(logger, "list_threads", {"filter_type": value})
         text = caplog.text
-        assert "unread" not in text
-        assert "flagged" not in text
-        assert text.count("withheld=['filter_type']") == 2
+        assert "'filter_type': 'unread'" in text
+        assert "'filter_type': 'flagged'" in text
+        assert "Confidential-marker" not in text
+        assert text.count("withheld=['filter_type']") == 1
+
+    def test_state_filters_log_only_booleans(self, caplog):
+        import logging
+
+        logger = logging.getLogger("test-tool-log-state")
+        with caplog.at_level(logging.INFO, logger="test-tool-log-state"):
+            log_tool_call(logger, "query_messages", {"seen": False, "flagged": True})
+            log_tool_call(logger, "query_messages", {"seen": "Confidential-marker"})
+        text = caplog.text
+        assert "'seen': False" in text
+        assert "'flagged': True" in text
+        assert "Confidential-marker" not in text
 
     def test_valid_metadata_values_are_logged(self, caplog):
         import logging

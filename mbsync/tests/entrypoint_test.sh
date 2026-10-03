@@ -11,10 +11,13 @@ set -Eeuo pipefail
 # functions, and runs in a subshell against a temporary directory. No
 # Bridge, Maildir, or container state is touched.
 #
-# Run: bash mbsync/tests/entrypoint_test.sh
+# Run: bash mbsync/tests/entrypoint_test.sh (`make test-mbsync`). CI and
+# the image run Bash 5; on macOS, `/bin/bash mbsync/tests/entrypoint_test.sh`
+# runs it under Bash 3.2, which it also supports.
 
 ENTRYPOINT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/entrypoint.sh"
 HEALTHCHECK="$(dirname "$ENTRYPOINT")/healthcheck.sh"
+REPO_ROOT="$(dirname "$(dirname "$ENTRYPOINT")")"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 FAILURES=0
@@ -285,11 +288,22 @@ sync_setup() {
     MBSYNC_ERROR_COUNTS_FILE="$WORK/mbsync-error-counts-$1"
     MBSYNC_NOTICES_DONE_FILE="$WORK/mbsync-notices-done-$1"
     MBSYNC_ERROR_COUNTS_WAIT_TENTHS=50
+    SYNC_DEADLINE_SECONDS=86400
+    SYNC_KILL_GRACE_SECONDS=30
     mkdir -p "$MAILDIR_PATH"
     : >"$FIND_CALLS"
     load run_child relax_new_maildir_perms mark_sync_activity filter_mbsync_output \
         report_mbsync_errors report_mbsync_notices wait_for_mbsync_filter \
         read_mbsync_error_counts run_sync
+    # run_sync runs mbsync under timeout(1) (#282). These cases mock
+    # mbsync as a shell function, which timeout cannot exec, so timeout
+    # passes straight through to it here; the deadline cases below run
+    # the real timeout with an mbsync on PATH.
+    timeout() {
+        while [[ "$1" == -* ]]; do shift; done
+        shift
+        "$@"
+    }
 }
 
 # run_sync is called as `run_sync || rc=$?`, a condition like the
@@ -503,7 +517,11 @@ other_errors_are_streamed_while_mbsync_runs() {
                 : >"$seen"
                 break
             fi
-            command sleep 0.1
+            # Not `command sleep`: run_child starts this mock with `&`,
+            # and Bash 3.2 then execs a `command` external in place of
+            # the job's shell, so the mock would end, status 0, after
+            # its first wait.
+            sleep 0.1
         done
         return 1
     }
@@ -875,6 +893,172 @@ success_stamp_is_written_by_a_completed_sync() {
     [[ "$(find "$MAILDIR_PATH" -type f | wc -l)" -eq 1 ]] || return 1
 }
 
+# --- per-run deadline: a stalled mbsync is stopped (#282) --------------------
+#
+# isync's socket timeout restarts on every byte the server sends, so a
+# server that keeps sending untagged keepalives without completing a
+# command holds mbsync forever. run_sync runs it under timeout(1): past
+# SYNC_DEADLINE_SECONDS it gets TERM, and KILL after the grace if it
+# ignores that. The run then counts as a failed sync, so the loop's
+# consecutive-failure limit and exit still apply and no success stamp is
+# written. These cases use the real timeout and an mbsync on PATH that
+# writes a keepalive line every 0.2 s.
+
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+deadline_setup() {
+    sync_setup "deadline-$1"
+    unset -f timeout
+    CHILD_LOG="$WORK/deadline-child-$1"
+    SYNC_LOG="$WORK/deadline-log-$1"
+    : >"$CHILD_LOG"
+    export CHILD_LOG
+    find() { printf 'find\n' >>"$FIND_CALLS"; }
+    mkdir -p "$WORK/bin-deadline-$1"
+    PATH="$WORK/bin-deadline-$1:$PATH"
+    DEADLINE_BIN="$WORK/bin-deadline-$1"
+}
+
+# Writes an mbsync to PATH. $1: what it does on TERM (stop|ignore);
+# $2: how many keepalives it sends before exiting 0 (0 = forever).
+write_keepalive_mbsync() {
+    cat >"$DEADLINE_BIN/mbsync" <<MOCK
+#!/bin/bash
+if [[ "$1" == ignore ]]; then
+    trap 'echo term >>"\$CHILD_LOG"' TERM
+else
+    trap 'echo term >>"\$CHILD_LOG"; exit 143' TERM
+fi
+echo started >>"\$CHILD_LOG"
+n=0
+while [[ "$2" -eq 0 ]] || ((n < $2)); do
+    echo '* OK synthetic keepalive'
+    sleep 0.2
+    n=\$((n + 1))
+done
+exit 0
+MOCK
+    chmod 755 "$DEADLINE_BIN/mbsync"
+}
+
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+stalled_mbsync_is_stopped_at_the_deadline_and_fails() {
+    local start rc=0
+    deadline_setup stalled
+    write_keepalive_mbsync stop 0
+    SYNC_DEADLINE_SECONDS=1
+    SYNC_KILL_GRACE_SECONDS=5
+    start=$SECONDS
+    run_sync >"$SYNC_LOG" 2>&1 || rc=$?
+    cat "$SYNC_LOG"
+    ((rc != 0)) || return 1
+    # Stopped by TERM at the deadline, well before the KILL grace.
+    ((SECONDS - start < 5)) || return 1
+    grep -qx term "$CHILD_LOG" || return 1
+    grep -q 'did not finish within SYNC_DEADLINE_SECONDS=1' "$SYNC_LOG" || return 1
+    # The permission repair still runs for what the run delivered, and
+    # the heartbeat is touched once the attempt is over.
+    [[ "$(wc -l <"$FIND_CALLS")" -eq 2 ]] || return 1
+    [[ -f "$SYNC_ACTIVITY_FILE" ]] || return 1
+}
+
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+mbsync_ignoring_term_is_killed_after_the_grace() {
+    local start rc=0
+    deadline_setup ignores-term
+    write_keepalive_mbsync ignore 0
+    SYNC_DEADLINE_SECONDS=1
+    SYNC_KILL_GRACE_SECONDS=1
+    start=$SECONDS
+    run_sync >"$SYNC_LOG" 2>&1 || rc=$?
+    cat "$SYNC_LOG"
+    ((rc != 0)) || return 1
+    ((SECONDS - start < 10)) || return 1
+    grep -qx term "$CHILD_LOG" || return 1
+    grep -q 'killed' "$SYNC_LOG" || return 1
+}
+
+# A long but valid run that finishes inside the deadline is a success.
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+run_inside_the_deadline_succeeds() {
+    local rc=0
+    deadline_setup inside
+    write_keepalive_mbsync stop 5
+    SYNC_DEADLINE_SECONDS=5
+    run_sync >"$SYNC_LOG" 2>&1 || rc=$?
+    cat "$SYNC_LOG"
+    ((rc == 0)) || return 1
+    if grep -qx term "$CHILD_LOG" || grep -q 'SYNC_DEADLINE_SECONDS' "$SYNC_LOG"; then
+        return 1
+    fi
+}
+
+# The real sync loop around a sync that stalls every time: each stopped
+# run counts as a failure, none writes the success stamp, and the loop
+# exits at the consecutive-failure limit so the container restarts.
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+stalled_syncs_count_to_the_exit_without_a_stamp() {
+    local loop stamps_file="$WORK/deadline-loop-stamps" rc=0
+    deadline_setup loop
+    write_keepalive_mbsync stop 0
+    loop="$(awk '$0 == "while true; do" {p = 1} p {print} p && $0 == "done" {exit}' "$ENTRYPOINT")"
+    [[ -n "$loop" ]] || return 1
+    : >"$stamps_file"
+    sleep() { [[ "$1" == "$SYNC_INTERVAL" ]] || command sleep "$1"; }
+    record_successful_sync() { printf 'stamp\n' >>"$stamps_file"; }
+    SYNC_DEADLINE_SECONDS=1
+    SYNC_KILL_GRACE_SECONDS=5
+    MAX_CONSECUTIVE_SYNC_FAILURES=2
+    SYNC_INTERVAL=3600
+    consecutive_sync_failures=0
+    (eval "$loop") >"$SYNC_LOG" 2>&1 || rc=$?
+    cat "$SYNC_LOG"
+    ((rc == 1)) || return 1
+    [[ "$(grep -c started "$CHILD_LOG")" -eq 2 ]] || return 1
+    [[ ! -s "$stamps_file" ]] || return 1
+    grep -q 'exceeded 2 consecutive failures' "$SYNC_LOG" || return 1
+}
+
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+invalid_deadlines_are_refused_at_startup() {
+    local value pass_file="$WORK/deadline-pass"
+    printf 'synthetic-pass\n' >"$pass_file"
+    BRIDGE_PASS_FILE="$pass_file"
+    BRIDGE_USER="synthetic@example.com"
+    SYNC_INTERVAL=60
+    BRIDGE_HOST="protonmail-bridge"
+    BRIDGE_IMAP_PORT=1143
+    BRIDGE_CERT_HOST=""
+    BRIDGE_CERT_FINGERPRINT=""
+    load expected_fingerprint validate_bridge_endpoint require_prerequisites
+    SYNC_DEADLINE_SECONDS=86400
+    (require_prerequisites) || return 1
+    for value in "" 0 -5 08 1.5 abc " 60" 1000000000; do
+        SYNC_DEADLINE_SECONDS="$value"
+        if (require_prerequisites) 2>"$WORK/deadline-err"; then
+            printf 'accepted %q\n' "$value"
+            return 1
+        fi
+        grep -q 'SYNC_DEADLINE_SECONDS' "$WORK/deadline-err" || return 1
+    done
+}
+
+# The entrypoint, the healthcheck, Compose and validate-env must agree on
+# the default deadline, and the two scripts on the kill grace.
+deadline_defaults_agree() {
+    local file default grace
+    default="$(grep -o 'SYNC_DEADLINE_SECONDS:-[0-9]*' "$ENTRYPOINT")"
+    [[ -n "$default" ]] || return 1
+    for file in "$HEALTHCHECK" "$REPO_ROOT/docker-compose.yml" "$REPO_ROOT/scripts/validate-env.sh"; do
+        grep -qF "$default" "$file" || {
+            printf '%s does not use %s\n' "$file" "$default"
+            return 1
+        }
+    done
+    grace="$(grep -x 'readonly SYNC_KILL_GRACE_SECONDS=[0-9]*' "$ENTRYPOINT")"
+    [[ -n "$grace" ]] || return 1
+    grep -qxF "$grace" "$HEALTHCHECK" || return 1
+}
+
 # --- check_maildir_layout: earlier layouts are refused (#275, #281) -------
 #
 # The Maildir must be started over rather than synced with sync state
@@ -1010,6 +1194,8 @@ health_setup() {
     PROC_DIR="$dir/proc"
     SYNC_INTERVAL=60
     HEALTH_SLACK_SECONDS=30
+    SYNC_DEADLINE_SECONDS=86400
+    SYNC_KILL_GRACE_SECONDS=30
     ACTIVITY_AGE=0
     mkdir -p "$PROC_DIR"
     printf 'synthetic-config\n' >"$CONFIG_FILE"
@@ -1115,6 +1301,37 @@ a_vanished_process_is_skipped() {
     mkdir -p "$PROC_DIR/50/comm"
     add_process 51 mbsync
     check_health
+}
+
+# A run is stopped at its deadline (#282); one still running past the
+# deadline, the kill grace and the slack is not alive, mbsync or not.
+# shellcheck disable=SC2034,SC2329 # used by the healthcheck functions loaded with eval
+run_within_its_deadline_is_healthy() {
+    health_setup within-deadline
+    SYNC_DEADLINE_SECONDS=3600
+    ACTIVITY_AGE=$((3600 + 30 + 30))
+    add_process 42 mbsync
+    check_health
+}
+
+# shellcheck disable=SC2034,SC2329 # used by the healthcheck functions loaded with eval
+run_past_its_deadline_is_unhealthy() {
+    local err
+    health_setup past-deadline
+    SYNC_DEADLINE_SECONDS=3600
+    ACTIVITY_AGE=$((3600 + 30 + 30 + 1))
+    add_process 42 mbsync
+    err="$(unhealthy 2>&1)" || return 1
+    [[ "$err" == *"past its deadline"* ]] || return 1
+}
+
+# shellcheck disable=SC2034,SC2329 # used by the healthcheck functions loaded with eval
+repair_walk_past_the_deadline_is_unhealthy() {
+    health_setup repair-past-deadline
+    SYNC_DEADLINE_SECONDS=3600
+    ACTIVITY_AGE=$((3600 + 30 + 30 + 1))
+    add_process 44 find
+    unhealthy
 }
 
 healthcheck_does_not_read_the_success_stamp() {
@@ -1531,6 +1748,8 @@ stop_setup() {
     MBSYNC_ERROR_COUNTS_FILE="$WORK/mbsync-error-counts-stop-$1"
     MBSYNC_NOTICES_DONE_FILE="$WORK/mbsync-notices-done-stop-$1"
     MBSYNC_ERROR_COUNTS_WAIT_TENTHS=50
+    SYNC_DEADLINE_SECONDS=86400
+    SYNC_KILL_GRACE_SECONDS=30
     mkdir -p "$MAILDIR_PATH" "$WORK/bin-stop-$1"
     : >"$CHILD_LOG"
     # A long-running child that records its start and any TERM it gets.
@@ -1724,6 +1943,19 @@ check "health: an empty cert is unhealthy even while syncing" \
     empty_cert_is_unhealthy_even_while_syncing
 check "health: a vanished process is skipped" a_vanished_process_is_skipped
 check "health: the success stamp is not read" healthcheck_does_not_read_the_success_stamp
+check "health: a run within its deadline is healthy" run_within_its_deadline_is_healthy
+check "health: a run past its deadline is unhealthy" run_past_its_deadline_is_unhealthy
+check "health: a repair walk past the deadline is unhealthy" \
+    repair_walk_past_the_deadline_is_unhealthy
+check "a stalled mbsync is stopped at the deadline and fails" \
+    stalled_mbsync_is_stopped_at_the_deadline_and_fails
+check "an mbsync ignoring TERM is killed after the grace" \
+    mbsync_ignoring_term_is_killed_after_the_grace
+check "a run inside the deadline succeeds" run_inside_the_deadline_succeeds
+check "stalled syncs count to the exit without a success stamp" \
+    stalled_syncs_count_to_the_exit_without_a_stamp
+check "invalid deadlines are refused at startup" invalid_deadlines_are_refused_at_startup
+check "the deadline defaults agree" deadline_defaults_agree
 
 if ((FAILURES > 0)); then
     printf '%d test(s) failed\n' "$FAILURES" >&2

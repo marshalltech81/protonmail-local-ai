@@ -686,7 +686,52 @@ Triaged against `d30e500` by four parallel agents; every issue is real
 and most reproduced with synthetic input. PRs in the order to land
 them (one test-first commit per issue, `Fixes #N` per issue):
 
-**Handoff 2026-10-02, afternoon — start here.** Both go-live
+**Handoff 2026-10-02, night — start here.** Every pre-go-live item
+from Resolved decisions 14 has merged (#592–#630, listed under
+Recently Completed, 2026-10-02 evening). **Not ready for go-live yet.**
+Go-live blockers (owner, 2026-10-02 night), each its own PR, all to
+merge before the first sync:
+
+- implicit TLS between mbsync and Bridge in both Bridge modes (#638):
+  Bridge v3.27.0 serves implicit TLS when its IMAP SSL setting is on
+  (`imapsmtpserver/listener.go`); the container Bridge is patched to
+  force it (a fourth hunk, three-layer pattern), mbsync switches with
+  no STARTTLS fallback, and in macOS mode the app's IMAP connection
+  mode is set to SSL before the first sync;
+- the 16-hex claimant-ID suffix (#454, a v0 key change);
+- v0 schema additions that would otherwise need a migration or full
+  re-index later: Maildir flags (#644), chunk `kind` tags (Phase 2
+  item 4), and the embedder identity record (#645, Phase 2 item 1's
+  first slice);
+- pre-go-live bug fixes: #602, #629, #282, #641, #524, #526, #533,
+  #631–#637 and #274. #463 step 2 waits for a real Proton message and
+  is done right after the first sync.
+
+After those, run the go-live checklist below in macOS Bridge mode from
+a fresh Maildir. Rebuild any existing index and Maildir: #597 and #599 edit
+the v0 schema, #594 and #611 change chunked and parsed output, and
+#598 refuses a Maildir synced with the earlier folder layout.
+
+Still needs the owner (none of these blocks go-live):
+
+- **#602 (decided: set `secure_delete` explicitly):** the container's
+  Debian SQLite is built with `SQLITE_SECURE_DELETE`, so it likely
+  defaults on there already; the PR sets the pragma on every write
+  connection so the guarantee does not depend on how SQLite was built.
+- ~~**#626**~~ and ~~#603~~: closed as documented (owner, 2026-10-02);
+  ~~#434~~ closed as superseded by #572; #629 (Bash 3.2) and #604 (AI
+  judge on the synthetic corpus only) are being built.
+- **Go toolchain `ARG` (#627):** not done, because Dependabot reads only
+  literal `FROM` lines and keeps the golang image current; drop that
+  half of the backlog item or accept manual golang bumps.
+- **Reserved child-folder names (#598):** six names (`uidvalidity`,
+  `isyncuidmap.db`, `mbsyncstate*`) are skipped silently; reporting
+  them needs an extra IMAP listing.
+- **ChatGPT:** needs the hosted-client design after go-live.
+- After the first sync: confirm the top `Received:` header is Proton's
+  (`occurred_at`, #599) and check #463's `Authentication-Results` input.
+
+**Handoff 2026-10-02, afternoon (superseded by the night handoff).** Both go-live
 blockers are done: #432 (xlsx streaming pre-pass, #572) and MCP
 endpoint auth (the static bearer token, #573). #277 was fixed in the
 morning (#515). **Superseded the same evening:** Resolved decisions
@@ -727,7 +772,8 @@ Operator steps before go-live, in addition to the checklist:
    app (`docs/setup.md`, "macOS Bridge mode"). It is built and tested
    against a synthetic STARTTLS server only (#571); the owner's live
    test against the real app is the owner's go-live (Resolved decisions 14). #497
-   closed when #571 merged.
+   was reopened on 2026-10-02 to close once that live test passes, which
+   now uses implicit TLS (#638).
 
 Open decisions 15–22 were answered on 2026-10-02 (Resolved decisions
 14). The owner runs macOS Bridge mode from a fresh Maildir, so
@@ -736,10 +782,11 @@ go-live is its live test.
 **Before go-live (2026-10-02, evening).** Merge these first, in
 roughly this order; each is its own PR:
 
-1. Date-range evidence back to whole overlapping threads (#574
+1. ~~Date-range evidence back to whole overlapping threads (#574
    superseded); then #575 (drop `message_chunks.message_date`); then
-   `occurred_at` with date filters and thread spans on it.
-2. #208 and #550 (rendered chunks within `max_tokens`).
+   `occurred_at` with date filters and thread spans on it~~ (done:
+   #593, #597, #599; #297 closed by #599).
+2. ~~#208 and #550 (rendered chunks within `max_tokens`)~~ (done: #594).
 3. ~~#275 and #281 (collision-free folder mapping; no migration with a
    fresh Maildir)~~ (done 2026-10-02: `SyncState *` and
    `SubFolders Legacy`; an earlier-layout Maildir is refused at start)
@@ -751,9 +798,11 @@ roughly this order; each is its own PR:
 5. ~~The Claude Desktop `fastmcp` adapter and the Codex setup docs~~
    (done: `mcp-server/src/stdio_adapter.py` replaces `mcp-remote`;
    Codex uses `scripts/mcp-auth-headers.sh` as `http_headers_helper`).
-6. #489 (`get_message` paging) and the 998-character Message-ID limit.
-7. Small items: #591, #584, #589, #588, the Semgrep gaps (#578,
-   #579, #581, #582) and #580/#577 (merged-config hardening check).
+6. ~~#489 (`get_message` paging) and the 998-character Message-ID
+   limit~~ (done: #619; #611, closing #609).
+7. ~~Small items: #591, #584, #589, #588, the Semgrep gaps (#578,
+   #579, #581, #582) and #580/#577 (merged-config hardening check)~~
+   (done: #610, #630, #620, #614, #616; #607 with #630).
 
 Waiting on real data: #487 (evidence and output budgets), #488
 (container resource budgets) and #282 (the mbsync stall deadline, set
@@ -1104,22 +1153,20 @@ linked from the Phase 3 items they track.
 
 ## Maintenance backlog (small, ongoing)
 
-- consolidate `BRIDGE_VERSION` to a single source of truth
-  (`.env.example`); parameterize the Go toolchain as an `ARG`
-- path filters on `.github/workflows/docker.yml` (its
-  `timeout-minutes` landed in #512)
-- Bridge build: `go mod download` has no retry, so one blip at
-  `proxy.golang.org` (seen 2026-09-30: an HTTP/2 `INTERNAL_ERROR` on a
-  single module) fails the whole `docker compose build` check. Add a
-  bounded retry around the download (`go mod verify` stays
-  unconditional) or a module cache in the workflow
-- Trivy scan of the Bridge Go module graph in `security.yml` (#272
-  closed as its duplicate; needs an exception policy for upstream
-  Proton dependencies we cannot patch)
+- ~~consolidate `BRIDGE_VERSION` to a single source of truth
+  (`.env.example`)~~ (done: #627, a `make test-compose` check that every
+  copy matches, #624); parameterize the Go toolchain as an `ARG` (not
+  done: it would stop Dependabot's golang bumps; owner to decide)
+- ~~path filters on `.github/workflows/docker.yml`~~ (done: #627, #623)
+- ~~Bridge build: bounded retry around `go mod download`~~ (done:
+  #621, #618; three attempts, `go mod verify` unconditional)
+- ~~Trivy scan of the Bridge Go module graph in `security.yml`~~
+  (done: #615, report only, #608)
 - ~~pin `actions/checkout` to a commit SHA in `bridge.yml`; pinned
   `setup-go` in the patch-drift job~~ (done: #512 pins every action
   by SHA)
-- fix the `\t\t` BSD-sed portability bug in `bridge/patch-source.sh`
+- ~~fix the `\t\t` BSD-sed portability bug in `bridge/patch-source.sh`~~
+  (done: #621, #617)
 - mbsync: ~~move `BRIDGE_USER` to a file-backed secret~~ (dropped:
   it stays in `.env`, Resolved decisions 14); add
   memory/CPU limits (#488; log rotation done in #501); evaluate
@@ -1128,13 +1175,11 @@ linked from the Phase 3 items they track.
   (`protonmail-bridge` first — it holds live Proton credentials; #273
   closed as its duplicate: a measured, operator-overridable memory
   budget, tested against the initial Gluon sync)
-- loud one-shot startup warning when `INFERENCE_MODE` sends retrieved
-  excerpts to a remote provider
-- `get_message`: returns a message's full body and headers with no
-  bound, so one huge message (a pasted log, 12,000 References) is one
-  huge response. **Decided** (Resolved decisions 14, #592): offset
-  paging of the body (default page plus `next_offset`), headers
-  capped; the paging-or-cap choice is superseded (#489)
+- ~~loud one-shot startup warning when `INFERENCE_MODE` sends retrieved
+  excerpts to a remote provider~~ (done: #628, one line per off-host
+  layer in both services, #622)
+- ~~`get_message` body and header bounds~~ (done: #619, #489; offset
+  paging of the body, headers capped)
 - OCR language is fixed to Tesseract's English default (#490;
   documented in #517, no setting yet)
 - ~~mcp-server: remove the dead `Database.get_thread_message_ids`~~
@@ -1144,22 +1189,23 @@ linked from the Phase 3 items they track.
   chaining. **Decided** (Resolved decisions 14, #592): a 998-character
   Message-ID limit at parse time (RFC 5322 line length), an over-long
   ID taking the no-`Message-ID` dead-letter path; the hashed thread ID
-  alternative is superseded
+  alternative is superseded (done: #611)
 - ~~AGENTS.md commit-hygiene secret check: `grep '^\+'` fails under
   ugrep (a common `grep` alias); use the portable `grep '^[+]'`~~
   (done: #555)
-- Semgrep Compose/shell rules match one file at a time (#566), with
+- ~~Semgrep Compose/shell rules match one file at a time (#566)~~
+  (done: #614 for #578, #579, #581, #582; #616 for #577 and #580), with
   gaps filed: top-level `include` (#577), `volumes_from` (#578), long
   `chmod` options before the mode (#579), `!reset`/`!override`
   clearing inherited hardening (#580, merged-config check decided in Resolved decisions 14), the
   `compose.yaml`/`compose.yml` default names (#581), and a quoted `#`
   hiding a `curl`/`wget` TLS flag (#582)
-- mbsync macOS Bridge mode: report a missing `BRIDGE_CERT_FINGERPRINT`
-  at startup, before the Bridge wait (#584)
-- `make test-mbsync-tls` is intermittently flaky on unchanged `main`
-  (#588)
-- validate the MCP auth token's character set at startup and in
-  `validate-env` (#589)
+- ~~mbsync macOS Bridge mode: report a missing `BRIDGE_CERT_FINGERPRINT`
+  at startup, before the Bridge wait (#584)~~ (done: #630)
+- ~~`make test-mbsync-tls` is intermittently flaky on unchanged `main`
+  (#588)~~ (done: #630, with the entrypoint flake #607)
+- ~~validate the MCP auth token's character set at startup and in
+  `validate-env` (#589)~~ (done: #620; 32-character minimum)
 
 ## Not doing (decided 2026-09-26)
 
@@ -1285,9 +1331,7 @@ can be revisited with an explicit owner decision.
 - a database whose reaps ran before #562 keeps the extraction rows
   those reaps orphaned until it is rebuilt or cleaned by hand (#626;
   `docs/architecture.md` "Cascade on message removal")
-- a chunk's stored date can lag its message's `sent_at` until a failed
-  re-date retries, until #575 lands (decided)
-- macOS Bridge mode is tested only against a synthetic STARTTLS server
+- macOS Bridge mode is tested only against a synthetic Bridge server (STARTTLS until #638 switches it to implicit TLS)
   (#571); the owner's go-live is the live test
 - coverage scope: both services measure `src/` with `src/main.py`
   omitted. The indexer's `main.py` has grown to hold the whole
@@ -1570,6 +1614,27 @@ do not ship persisted claims without them.
     invariant): resolved 2026-10-02 (Resolved decisions 14).
 
 ## Recently Completed
+
+### 2026-10-02, evening — Pre-go-live work from Resolved decisions 14 (#592–#630)
+
+Decisions recorded (#592). Dates: whole-thread evidence under a date
+range (#593, #574 superseded), passage dates read from `messages`
+(#597, #575), `occurred_at` from the top `Received:` header with
+filters, spans and ordering on `COALESCE(occurred_at, sent_at)` (#599,
+#297). Chunking within `max_tokens` (#594, #208, #550). xlsx eager
+parts capped (#600, #428). mbsync: collision-free folder layout
+(#598, #275, #281), UIDVALIDITY recovery checked by
+`make test-mbsync-layout` (#606, #279), test flakes and the early
+fingerprint check (#630, #588, #607, #584). Retention: extracted text
+purged on reap (#605, #562). MCP: Claude Desktop stdio adapter
+replacing `mcp-remote` and Codex setup (#601), `get_message` paging
+(#619, #489), token charset (#620, #589), loopback client URLs
+(#625, #612, #613). Parser: 998-character Message-ID limit (#611,
+#609). CI and build: Semgrep gaps (#614), merged-config hardening
+(#616, #577, #580), Bridge Go module scan (#615, #608), Bridge build
+fixes (#621, #617, #618), docker workflow path filters and pin-copy
+check (#627, #623, #624), off-host provider warning (#628, #622).
+Docs sweep (#610, #591, #595, #596).
 
 ### 2026-10-02, afternoon — Go-live blockers closed; Phase 3–5 slices (#558–#587)
 
