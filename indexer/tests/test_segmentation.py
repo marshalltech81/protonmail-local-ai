@@ -364,9 +364,49 @@ class TestKindValidation:
 
 
 class TestSegmentationWorkBound:
-    def test_each_line_is_checked_once(self, monkeypatch):
-        # Segmentation adds no rescans: one marker check and at most one
-        # reply-header check per line, on a large body of short lines.
+    @pytest.mark.parametrize("fn", [strip_for_embedding, segment_for_embedding])
+    def test_body_text_stops_the_scan_at_the_first_marker(self, monkeypatch, fn):
+        # Review round 1: a message with body text then a marker and a
+        # huge tail is not classified past the marker, as before kinds:
+        # only the lines up to the marker are checked.
+        import src.quoting as quoting
+
+        calls = 0
+        real_cut = quoting._hard_cut_kind
+
+        def counting_cut(line):
+            nonlocal calls
+            calls += 1
+            return real_cut(line)
+
+        monkeypatch.setattr(quoting, "_hard_cut_kind", counting_cut)
+        body = "hello\n-- \n" + "x\n" * 200_000
+        result = fn(body)
+        assert result in ("hello", [Segment("body", "hello")])
+        assert calls == 2
+
+    def test_fallback_runs_are_coalesced_while_scanning(self, monkeypatch):
+        # Review round 1: past the cap, runs are merged as they are
+        # found, so no more than the cap plus one run per kind is ever
+        # held, rather than one run per line until the end.
+        import src.quoting as quoting
+
+        held: list[int] = []
+        real_segment = quoting.Segment
+
+        def counting_segment(kind, text):
+            held.append(1)
+            return real_segment(kind, text)
+
+        monkeypatch.setattr(quoting, "Segment", counting_segment)
+        body = "".join(f"-- \ns{i}\n> q{i}\n" for i in range(20_000))
+        segments = segment_for_embedding(body)
+        assert len(segments) <= _MAX_FALLBACK_SEGMENTS + 2
+        assert len(held) <= _MAX_FALLBACK_SEGMENTS + 2
+
+    def test_each_line_is_checked_at_most_twice(self, monkeypatch):
+        # A body with no body text is scanned at most twice: the body pass,
+        # which stops at the first marker, then the fallback classification.
         import time
 
         import src.quoting as quoting
@@ -389,6 +429,6 @@ class TestSegmentationWorkBound:
         segments = segment_for_embedding(body)
         assert time.monotonic() - started < 20.0
         lines = body.count("\n")
-        assert calls["cut"] == lines
-        assert calls["header"] <= lines
+        assert lines < calls["cut"] <= 2 * lines
+        assert calls["header"] <= 2 * lines
         assert len(segments) <= _MAX_FALLBACK_SEGMENTS + 1

@@ -194,7 +194,8 @@ def strip_for_embedding(body_text: str) -> str:
     """
     if not body_text:
         return body_text
-    stripped = _body_of(_classify_lines(body_text))
+    text, cut = _pre_pass(body_text)
+    stripped = _body_lines(text, cut)
     if not stripped:
         # Reply with no detectable "new content" — fall back to the
         # original body so the embedding is never seeded from an empty
@@ -232,101 +233,115 @@ def segment_for_embedding(body_text: str) -> list[Segment]:
     """
     if not body_text:
         return []
-    lines = _classify_lines(body_text)
-    stripped = _body_of(lines)
+    text, cut = _pre_pass(body_text)
+    # The body scan stops at the first marker, as before kinds, so a
+    # message with body text costs no more than it did; only a message
+    # with none is classified to its end.
+    stripped = _body_lines(text, cut)
     if stripped:
         return [Segment("body", stripped)]
-
-    # Fallback: group the lines into runs of one kind. A blank line
-    # (every ``body`` line is blank here) joins the run before it, and
-    # blank lines before the first run are dropped.
-    segments: list[Segment] = []
-    run_kind: ChunkKind | None = None
-    run: list[str] = []
-    for kind, raw_line in lines:
-        if not raw_line.strip():
-            if run_kind is not None:
-                run.append(raw_line)
-            continue
-        if kind != run_kind:
-            if run_kind is not None:
-                segments.append(Segment(run_kind, "".join(run)))
-            run_kind, run = kind, []
-        run.append(raw_line)
-    if run_kind is not None:
-        segments.append(Segment(run_kind, "".join(run)))
-    if len(segments) <= _MAX_FALLBACK_SEGMENTS:
-        return segments
-    # Every segment is at least one chunk, so a body that alternates
-    # kinds line by line would otherwise turn into one chunk (and one
-    # embedding) per line. Past the cap, the remaining runs are joined
-    # per kind, in order of first appearance: kinds stay separate and
-    # no text is lost, though their lines are no longer interleaved.
-    head = segments[: _MAX_FALLBACK_SEGMENTS - 1]
-    rest: dict[ChunkKind, list[str]] = {}
-    for segment in segments[_MAX_FALLBACK_SEGMENTS - 1 :]:
-        rest.setdefault(segment.kind, []).append(segment.text)
-    return head + [Segment(kind, "".join(texts)) for kind, texts in rest.items()]
+    return _fallback_segments(text, cut)
 
 
-def _classify_lines(body_text: str) -> list[tuple[ChunkKind, str]]:
-    """Return each line of ``body_text`` (line ending kept) with its kind.
+def _pre_pass(body_text: str) -> tuple[str, int]:
+    """Return ``body_text`` after the pre-passes, and where quoted history starts.
 
-    The lines are those of ``body_text`` after the wrapped-reply-header
-    pre-pass; see ``segment_for_embedding`` for the kinds. The ``body``
-    lines are exactly the lines ``strip_for_embedding`` keeps. One pass
-    over the lines; each rule is a bounded per-line check.
+    Pre-pass 1 removes two-line wrapped reply headers entirely; the line
+    loop would otherwise see the first half of the wrapped header as
+    junk content because ``_REPLY_HEADER_PATTERNS`` only matches
+    single-line attributions. Pre-pass 2 finds an Outlook
+    ``From:/Sent:/...`` block: everything from its start (the returned
+    offset, or the text's length when there is none) is quoted history,
+    mirroring the dashed Outlook delimiter in ``_HARD_CUT_PATTERNS``.
+    The block starts a line (``^`` after a ``\n``), so splitting the
+    text before and after it yields the same lines as splitting the
+    whole.
     """
-    # Pre-pass 1 — collapse two-line wrapped reply headers by removing
-    # the span entirely; the line loop downstream would otherwise see
-    # the first half of the wrapped header as junk content because
-    # ``_REPLY_HEADER_PATTERNS`` only matches single-line attributions.
     for pattern in _WRAPPED_REPLY_HEADER_PATTERNS:
         body_text = pattern.sub("", body_text)
-
-    # Pre-pass 2 — Outlook ``From:/Sent:/...`` block. Everything from
-    # the start of the block is quoted history, so the lines before it
-    # are classified from ``body`` and the lines from it on from
-    # ``quote``. Mirrors the dashed Outlook delimiter in
-    # ``_HARD_CUT_PATTERNS``. The match starts a line (``^`` after a
-    # ``\n``), so splitting the two halves separately yields the same
-    # lines as splitting the whole.
     outlook_match = _OUTLOOK_BLOCK_PATTERN.search(body_text)
     cut = len(body_text) if outlook_match is None else outlook_match.start()
+    return body_text, cut
 
-    halves: tuple[tuple[str, ChunkKind], ...] = (
-        (body_text[:cut], "body"),
-        (body_text[cut:], "quote"),
-    )
-    classified: list[tuple[ChunkKind, str]] = []
-    for text, start_kind in halves:
+
+def _body_lines(text: str, cut: int) -> str:
+    """Return the ``body`` lines of ``text[:cut]``, joined and trimmed."""
+    kept: list[str] = []
+    for raw_line in text[:cut].splitlines():
+        # Hard-cut markers (signature delimiter, forward preamble) end
+        # the loop: they mark the structural end of the new-content
+        # portion, and anything below is reliably not the user's reply.
+        if _hard_cut_kind(raw_line) is not None:
+            break
+        # Reply-header lines like "On ... wrote:" are skipped but do
+        # NOT cut — the user's inline answers may live between the
+        # quoted blocks that follow. Checked before the ``>`` rule so a
+        # marker line still drops even if a client prefixes it with a
+        # quote character. Quoted-reply lines accept any amount of
+        # leading whitespace before the ``>`` (some clients indent).
+        if _is_reply_header(raw_line) or _is_quoted_line(raw_line):
+            continue
+        kept.append(raw_line)
+    return "\n".join(kept).strip()
+
+
+# Line terminators ``str.splitlines`` splits on. A line it returns with
+# ``keepends=True`` ends in at most one of them (``\r\n`` counts as one),
+# so stripping this set removes exactly that terminator.
+_LINE_TERMINATORS = "\n\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029"
+
+
+def _fallback_segments(text: str, cut: int) -> list[Segment]:
+    """Classify every line of a body with no body text into kind runs.
+
+    One pass over the lines (line endings kept), each rule a bounded
+    per-line check. A blank line (every ``body`` line is blank here)
+    joins the run before it, and blank lines before the first run are
+    dropped. Every segment is at least one chunk, so a body that
+    alternates kinds line by line would otherwise turn into one chunk
+    (and one embedding) per line: once ``_MAX_FALLBACK_SEGMENTS - 1``
+    runs are closed, later runs are joined per kind as they are found,
+    in order of first appearance. Kinds stay separate and no text is
+    lost, though their lines are no longer interleaved; no more than
+    the cap plus one run per kind is ever held.
+    """
+    segments: list[Segment] = []
+    merged: dict[ChunkKind, list[str]] = {}
+    run_kind: ChunkKind | None = None
+    run: list[str] = []
+
+    def close() -> None:
+        if run_kind is None:
+            return
+        if len(segments) < _MAX_FALLBACK_SEGMENTS - 1:
+            segments.append(Segment(run_kind, "".join(run)))
+        else:
+            merged.setdefault(run_kind, []).append("".join(run))
+
+    halves: tuple[tuple[str, ChunkKind], ...] = ((text[:cut], "body"), (text[cut:], "quote"))
+    for half, start_kind in halves:
         mode = start_kind
-        for raw_line in text.splitlines(keepends=True):
-            line = raw_line.splitlines()[0]
-            # Hard-cut markers (signature delimiter, forward preamble)
-            # mark the structural end of the new-content portion:
-            # anything below is reliably not the user's reply.
+        for raw_line in half.splitlines(keepends=True):
+            line = raw_line.rstrip(_LINE_TERMINATORS)
+            # A marker switches the kind of the lines after it; ``>``
+            # and reply-header lines are quotes wherever they appear.
             marker_kind = _hard_cut_kind(line)
             if marker_kind is not None:
-                mode = marker_kind
-                classified.append((marker_kind, raw_line))
-            # Reply-header lines like "On ... wrote:" are not body, but
-            # do NOT end it: the user's inline answers may live between
-            # the quoted blocks that follow. Checked before the ``>``
-            # rule so a marker line still drops even if a client
-            # prefixes it with a quote character. Quoted-reply lines
-            # accept any amount of leading whitespace before the ``>``
-            # (some mail clients indent quoted blocks).
+                mode = kind = marker_kind
             elif _is_reply_header(line) or _is_quoted_line(line):
-                classified.append(("quote", raw_line))
+                kind = "quote"
             else:
-                classified.append((mode, raw_line))
-    return classified
-
-
-def _body_of(lines: list[tuple[ChunkKind, str]]) -> str:
-    """Join the ``body`` lines (line endings dropped) and trim the result."""
-    return "\n".join(raw.splitlines()[0] for kind, raw in lines if kind == "body").strip()
+                kind = mode
+            if not line.strip():
+                if run_kind is not None:
+                    run.append(raw_line)
+                continue
+            if kind != run_kind:
+                close()
+                run_kind, run = kind, []
+            run.append(raw_line)
+    close()
+    return segments + [Segment(kind, "".join(texts)) for kind, texts in merged.items()]
 
 
 def _hard_cut_kind(line: str) -> ChunkKind | None:
