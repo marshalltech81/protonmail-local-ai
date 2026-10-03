@@ -419,8 +419,12 @@ the file to that state:
 Do not widen the mode or hand the file to a host group instead: GID
 1002 may belong to another account on the host. The ACL grants host
 UID 1002 read access too, so if `getent passwd 1002` names another
-account, `make up` warns, and you should keep the checkout under a
-directory that account cannot enter (such as a `700` home directory).
+account (and you are not UID 1002), `make up` warns, and you should
+keep the checkout under a directory that account cannot enter (such as
+a `700` home directory). The indexer must also be able to enter
+`config/` itself; if the directory lacks the search bit for other
+accounts (a checkout made under a `077` umask), `make up` fails and
+prints `setfacl -m u:1002:x config`.
 An editor that saves by writing a new file drops the ACL; `make
 restart-indexer` then fails with the same command. With rootless
 Docker or `userns-remap` the container's UID 1002 maps to a different

@@ -693,7 +693,8 @@ make restart-indexer
 ```
 
 Run it again after an editor replaces the file, since the new file has
-no ACL. Do not `chmod 644`/`640` the file or `chgrp` it instead: either
+no ACL. If `make up` instead reports that `config` is not searchable by
+the indexer, run the `setfacl -m u:1002:x` command it prints. Do not `chmod 644`/`640` the file or `chgrp` it instead: either
 lets other host accounts read your rules. See "Source-authority rules"
 in `docs/setup.md`.
 

@@ -431,7 +431,8 @@ loose_secret_mode_fails() {
 # stub_host OS [OWNER] puts stub commands first on PATH so every case
 # sees the same host whatever machine runs the tests: `uname -s` prints
 # OS, `stat` reports OWNER as the file owner when given, `getfacl`
-# prints $STUBS/acl (written by write_acl), and `getent passwd 1002`
+# prints $STUBS/acl (written by write_acl) for a file and $STUBS/diracl
+# for a directory, and `getent passwd 1002`
 # finds an account only when $STUBS/uid1002 exists.
 stub_host() {
     local os="$1" owner="${2:-}"
@@ -448,7 +449,11 @@ STUB
     fi
     cat >"$STUBS/getfacl" <<'STUB'
 #!/bin/bash
-cat "$(dirname "$0")/acl"
+if [[ -d "${!#}" ]]; then
+    cat "$(dirname "$0")/diracl"
+else
+    cat "$(dirname "$0")/acl"
+fi
 STUB
     cat >"$STUBS/getent" <<'STUB'
 #!/bin/bash
@@ -585,6 +590,44 @@ linux_host_account_1002_warns() {
     grep -F 'WARNING: host account other has UID 1002' "$WORK/output"
 }
 
+# Review round 1: a file UID 1002 owns is readable by that host account
+# too, so the warning applies there as well.
+linux_owner_1002_with_host_account_warns() {
+    stub_host Linux 1002
+    setup
+    write_authority 600
+    : >"$STUBS/uid1002"
+    passes
+    grep -F 'WARNING: host account other has UID 1002' "$WORK/output"
+}
+
+# Review round 1: the indexer must also be able to search config/, the
+# mount root; a 700 directory needs a search ACL for UID 1002.
+linux_unsearchable_config_dir_fails() {
+    stub_host Linux 4242
+    setup
+    write_authority 640
+    write_acl "${INDEXER_ONLY_ACL[@]}"
+    chmod 700 "$ROOT/config"
+    printf '%s\n' 'user::rwx' 'group::---' 'other::---' >"$STUBS/diracl"
+    fails_with 'is not searchable by the indexer (UID 1002)'
+    grep -F "setfacl -m u:1002:x $ROOT/config" "$WORK/output"
+    printf '%s\n' 'user::rwx' 'user:1002:--x' 'group::---' 'mask::--x' 'other::---' \
+        >"$STUBS/diracl"
+    passes
+}
+
+# Review round 1: the printed command quotes the path for the shell.
+linux_fix_command_quotes_the_path() {
+    stub_host Linux 4242
+    setup
+    write_authority 600
+    mv "$ROOT" "$WORK/with space"
+    ROOT="$WORK/with space"
+    fails_with 'not readable by the indexer (UID 1002)'
+    grep -F "setfacl -b $(printf '%q' "$ROOT/config/authority.toml") &&" "$WORK/output"
+}
+
 # The documented authority edit flow restarts the indexer through
 # `make restart-indexer`, which must run this validator first (#530).
 # A dry run prints the recipes in order without running them.
@@ -718,6 +761,10 @@ check "Linux: an ACL granting only UID 1002 read passes" linux_indexer_only_acl_
 check "Linux: a broader ACL fails" linux_broader_acl_fails
 check "Linux: an authority file with a loose mode fails" linux_loose_authority_file_fails
 check "Linux: a host account with UID 1002 is warned about" linux_host_account_1002_warns
+check "Linux: a UID 1002 owner with a host account is warned about" \
+    linux_owner_1002_with_host_account_warns
+check "Linux: an unsearchable config directory fails" linux_unsearchable_config_dir_fails
+check "Linux: the fix command quotes the path" linux_fix_command_quotes_the_path
 check "make restart-indexer validates before restarting" restart_indexer_validates_first
 check "padded quoted values pass" padded_quoted_values_pass
 check "padded and mixed-case modes pass" padded_and_cased_modes_pass

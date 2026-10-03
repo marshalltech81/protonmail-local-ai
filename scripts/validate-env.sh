@@ -94,35 +94,61 @@ readonly INDEXER_UID=1002
 # user, so there the plain 600 stands.
 readonly INDEXER_ONLY_ACL=$'user::rw-\nuser:1002:r--\ngroup::---\nmask::r--\nother::---'
 
+# The indexer must also search config/, the mount root: a directory
+# without the other-search bit (say, from a 077 umask) needs a search
+# ACL for UID 1002 too.
+require_indexer_can_search_on_linux() {
+    local dir="$1"
+    local mode acl
+
+    mode="$(file_mode "$dir")"
+    (((8#$mode & 8#001) != 0)) && return 0
+    [[ "$(file_owner "$dir")" == "$INDEXER_UID" ]] && (((8#$mode & 8#100) != 0)) && return 0
+    if command -v getfacl >/dev/null; then
+        acl="$(getfacl --omit-header --numeric --absolute-names "$dir")"
+        if grep -Eq "^user:${INDEXER_UID}:..x" <<<"$acl" && grep -Eq '^mask::..x' <<<"$acl"; then
+            return 0
+        fi
+    fi
+    printf 'ERROR: %s is not searchable by the indexer (UID %s). Run:\n  setfacl -m u:%s:x %s\n' \
+        "$dir" "$INDEXER_UID" "$INDEXER_UID" "$(printf '%q' "$dir")" >&2
+    exit 1
+}
+
 require_indexer_readable_on_linux() {
     local path="$1"
-    local mode acl account fix
+    local mode acl account quoted fix
 
+    quoted="$(printf '%q' "$path")"
+    fix="setfacl -b $quoted && chmod 600 $quoted && setfacl -m u:${INDEXER_UID}:r $quoted"
     mode="$(file_mode "$path")"
-    fix="setfacl -b $path && chmod 600 $path && setfacl -m u:${INDEXER_UID}:r $path"
     if [[ "$mode" == "600" ]]; then
-        [[ "$(file_owner "$path")" == "$INDEXER_UID" ]] && return 0
-        printf 'ERROR: %s is not readable by the indexer (UID %s): on Linux the container sees the host owner and mode. Grant that UID alone read access (needs the acl package):\n  %s\n' \
-            "$path" "$INDEXER_UID" "$fix" >&2
-        exit 1
-    fi
-    [[ "$mode" == "640" ]] || {
+        [[ "$(file_owner "$path")" == "$INDEXER_UID" ]] || {
+            printf 'ERROR: %s is not readable by the indexer (UID %s): on Linux the container sees the host owner and mode. Grant that UID alone read access (needs the acl package):\n  %s\n' \
+                "$path" "$INDEXER_UID" "$fix" >&2
+            exit 1
+        }
+    elif [[ "$mode" == "640" ]]; then
+        command -v getfacl >/dev/null || {
+            printf 'ERROR: getfacl is needed to check the ACL on %s; install the acl package.\n' "$path" >&2
+            exit 1
+        }
+        acl="$(getfacl --omit-header --numeric --absolute-names "$path")"
+        [[ "$acl" == "$INDEXER_ONLY_ACL" ]] || {
+            printf 'ERROR: %s has mode 640; its ACL must grant read to UID %s and no one else. Run:\n  %s\n' \
+                "$path" "$INDEXER_UID" "$fix" >&2
+            exit 1
+        }
+    else
         printf 'ERROR: %s must have mode 600, with an ACL granting UID %s read, found %s. Run:\n  %s\n' \
             "$path" "$INDEXER_UID" "$mode" "$fix" >&2
         exit 1
-    }
-    command -v getfacl >/dev/null || {
-        printf 'ERROR: getfacl is needed to check the ACL on %s; install the acl package.\n' "$path" >&2
-        exit 1
-    }
-    acl="$(getfacl --omit-header --numeric --absolute-names "$path")"
-    [[ "$acl" == "$INDEXER_ONLY_ACL" ]] || {
-        printf 'ERROR: %s has mode 640; its ACL must grant read to UID %s and no one else. Run:\n  %s\n' \
-            "$path" "$INDEXER_UID" "$fix" >&2
-        exit 1
-    }
-    # The grant also covers host UID 1002, so name any account holding it.
-    if command -v getent >/dev/null && account="$(getent passwd "$INDEXER_UID")"; then
+    fi
+    require_indexer_can_search_on_linux "$(dirname "$path")"
+    # Either grant also covers host UID 1002, so name any account holding
+    # it, unless that account is the operator's own.
+    if [[ "$(id -u)" != "$INDEXER_UID" ]] && command -v getent >/dev/null &&
+        account="$(getent passwd "$INDEXER_UID")"; then
         printf 'WARNING: host account %s has UID %s and can read %s if it can reach the directory; keep the checkout under a directory that account cannot enter.\n' \
             "${account%%:*}" "$INDEXER_UID" "$path" >&2
     fi
