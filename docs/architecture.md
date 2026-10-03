@@ -29,7 +29,9 @@ ProtonBridge container
         │  IMAP (localhost, internal Docker network)
         ▼
 mbsync container
-  - Polls Bridge IMAP every SYNC_INTERVAL seconds in a bounded retry loop
+  - Polls Bridge IMAP every SYNC_INTERVAL seconds in a bounded retry loop;
+    each mbsync run has a deadline (SYNC_DEADLINE_SECONDS, default a
+    day) past which it is stopped and counted as a failed sync (#282)
   - Writes Maildir format to maildir-volume
   - Maintains sync state for incremental updates, in each folder's own
     Maildir directory, and writes child folders with a leading dot so no
@@ -49,8 +51,9 @@ mbsync container
     `<folder>` or `<path>` in its place (#570)
   - Healthcheck is liveness only: healthy while the sync loop is alive
     (a heartbeat touched around every attempt is fresh, or an mbsync or
-    its permission repair walk is running), so the indexer and MCP
-    server start during a long first sync; freshness comes from the
+    its permission repair walk is running, up to that run's deadline),
+    so the indexer and MCP server start during a long first sync;
+    freshness comes from the
     last-sync stamp. Folders that sync creates are watched once the
     indexer handles that sync's stamp (#516)
         │

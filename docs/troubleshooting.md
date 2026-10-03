@@ -649,7 +649,9 @@ mbsync is healthy while its sync loop is alive: its config and the Bridge
 cert are in place, and either a sync attempt started or ended within three
 `SYNC_INTERVAL`s (plus 30 s) or an `mbsync` process or the permission repair
 walk that follows it (`find`) is running. A long first
-sync is therefore healthy; it is not a reason for this failure. (Images built
+sync is therefore healthy; it is not a reason for this failure. A run still
+going past its deadline (`SYNC_DEADLINE_SECONDS` plus 60 s) is unhealthy:
+see [mbsync stopped a sync at its deadline](#mbsync-stopped-a-sync-at-its-deadline). (Images built
 before this behaviour required a completed sync and failed any first sync
 longer than about three and a half minutes; rebuild with `make build`.)
 
@@ -668,6 +670,53 @@ after five consecutive failures, so `docker compose ps` shows the restarts.
 Once mbsync is healthy, run `make up` again (`make up-macos-bridge` in
 [macOS Bridge mode](setup.md#macos-bridge-mode-optional)): Compose leaves the running
 services as they are and starts the indexer and then the MCP server.
+
+## mbsync stopped a sync at its deadline
+
+Each mbsync run has a deadline, `SYNC_DEADLINE_SECONDS` (default 86400, a
+day). isync's own 20-second timeout restarts whenever Bridge sends
+anything, so a server that keeps a command open with keepalives could
+otherwise hold one run, and the whole sync loop, forever (#282). Past the
+deadline the entrypoint stops mbsync (TERM, then KILL 30 s later if it is
+still running), logs
+
+```text
+>>> ERROR: mbsync did not finish within SYNC_DEADLINE_SECONDS=86400 and was stopped; counting this sync as failed (see docs/troubleshooting.md).
+```
+
+and counts a failed sync: no success stamp is written, the next attempt
+starts after `SYNC_INTERVAL`, and five failures in a row exit the container
+so Docker restarts it. A stopped run loses nothing already synced: isync
+records each message in its sync state as it goes, so the next run carries
+on from there.
+
+**Tune the deadline after your first sync.** The default is deliberately
+generous because the first sync of a large mailbox is the longest run
+mbsync makes, and its duration is not known in advance. Once the first
+sync has finished, find how long it took from the log timestamps:
+
+```bash
+docker compose logs -t mbsync | grep -E 'Running initial sync|Starting sync loop'
+```
+
+(If the first sync was interrupted or failed, it continued in the next
+`>>> Syncing...` runs; add those up.) Later runs only fetch new mail and
+take seconds, so a few times the first sync's duration is a safe deadline;
+a lower one recovers sooner from a stall. Set it in `.env` and recreate
+mbsync:
+
+```bash
+# .env: e.g. for a first sync of about 2 hours
+SYNC_DEADLINE_SECONDS=21600
+```
+
+```bash
+make up                # or make up-macos-bridge in macOS Bridge mode
+```
+
+Raise it instead if a long catch-up (after mbsync was down for weeks, or a
+large import into Proton) keeps being stopped: the log then shows the
+deadline line on consecutive runs while Bridge is otherwise working.
 
 ## Indexer refuses to start — "wipe the sqlite-volume"
 
