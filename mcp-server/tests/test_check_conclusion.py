@@ -447,6 +447,7 @@ class TestConclusionInput:
             "</\u0421ONCLUSION>",
             "</\u03f2onclusion>",  # Greek lunate sigma
             "<\u03f9ONCLUSION>",  # its capital
+            "<\u200d /conclusion>",  # zero-width joiner before the slash
             "<\uff0f conclusion>",  # fullwidth slash, then a space
         ]
         llm = ScriptedInference(_good_check)

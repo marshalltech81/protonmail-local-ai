@@ -8,6 +8,7 @@ import functools
 import json
 import logging
 import re
+import sys
 import unicodedata
 from collections.abc import Callable, Container, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
@@ -496,16 +497,44 @@ _LT_SPELLINGS = "<\ufe64\uff1c"
 # ``\uff0f``. Either closes a tag, with whitespace on both sides.
 _SLASH_SPELLINGS = "/\uff0f"
 
+# Characters a tag can carry without drawing anything: combining and
+# enclosing marks, and format characters (zero-width joiners and spaces,
+# soft hyphen, byte-order mark).
+_INVISIBLE_CATEGORIES = frozenset({"Mn", "Me", "Cf"})
+
+
+def _category_class(categories: frozenset[str]) -> str:
+    """A regex character-class body holding every code point in
+    ``categories``, as ranges. Built once at import (about 0.1 s)."""
+    ranges: list[str] = []
+    start = None
+    for code in range(sys.maxunicode + 2):
+        inside = code <= sys.maxunicode and unicodedata.category(chr(code)) in categories
+        if inside and start is None:
+            start = code
+        elif not inside and start is not None:
+            ranges.append(f"\\U{start:08x}-\\U{code - 1:08x}")
+            start = None
+    return "".join(ranges)
+
+
+_INVISIBLE_CLASS = _category_class(_INVISIBLE_CATEGORIES)
+_INVISIBLE_RE = re.compile(f"[{_INVISIBLE_CLASS}]")
+
 # A candidate tag inside untrusted content: an ``_LT_SPELLINGS`` bracket,
-# optional whitespace and ``_SLASH_SPELLINGS`` slash (group 1), then the
-# run of characters up to the next whitespace or bracket (group 2),
-# which ``_names_tag`` reads. The whitespace after the slash is matched only with the slash,
-# and possessively, so a long run has one way to match; ``\s*/?\s*``
-# split it every way (#328). The run excludes the brackets, so no tag
-# hides inside another candidate's run, and runs never overlap: one
-# pass reads each character at most once.
+# optional whitespace or invisible characters and an ``_SLASH_SPELLINGS``
+# slash (group 1), then the run of characters up to the next whitespace
+# or bracket (group 2), which ``_names_tag`` reads. The separator after
+# the slash is matched only with the slash, and possessively, so a long
+# run has one way to match; ``\s*/?\s*`` split it every way (#328). The
+# run excludes the brackets, so no tag hides inside another candidate's
+# run, and runs never overlap: one pass reads each character at most
+# once.
+_TAG_SEPARATOR = rf"[\s{_INVISIBLE_CLASS}]*+"
 _TAG_CANDIDATE_RE = re.compile(
-    f"[{_LT_SPELLINGS}]" rf"(\s*+(?:[{_SLASH_SPELLINGS}]\s*+)?)" f"([^\\s{_LT_SPELLINGS}]++)"
+    f"[{_LT_SPELLINGS}]"
+    f"({_TAG_SEPARATOR}(?:[{_SLASH_SPELLINGS}]{_TAG_SEPARATOR})?)"
+    f"([^\\s{_LT_SPELLINGS}]++)"
 )
 
 # The tag names untrusted mail text must not spell (``brief.py`` adds
@@ -558,11 +587,6 @@ _LOOKALIKE_LETTERS = str.maketrans(
     }
 )
 
-# Characters a tag name can carry without drawing anything: combining
-# and enclosing marks, and format characters (zero-width joiners and
-# spaces, soft hyphen, byte-order mark).
-_INVISIBLE_CATEGORIES = frozenset({"Mn", "Me", "Cf"})
-
 
 @functools.lru_cache(maxsize=4096)
 def _skeleton_char(char: str) -> str:
@@ -609,7 +633,7 @@ def _escape_delimiter_tags(text: str, names: Sequence[str] = _DELIMITER_TAG_NAME
     tag (#533). Everything else is unchanged."""
 
     def escape(match: re.Match[str]) -> str:
-        if _names_tag(match[2], match[1].strip() != "", names):
+        if _names_tag(match[2], any(c in _SLASH_SPELLINGS for c in match[1]), names):
             return "&lt;" + match[0][1:]
         return match[0]
 
