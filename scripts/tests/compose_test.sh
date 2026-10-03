@@ -114,6 +114,18 @@ def bounded_logging:
     | "network \(.key): renamed or external"),
   ([$m.networks // {} | .[] | .name] | group_by(.)[] | select(length > 1)
     | "networks share the engine network \(.[0])"),
+  # The same for volumes, which services mount by key; a volume also keeps
+  # its driver settings, since local driver_opts can back it with a host
+  # path.
+  ($base[0].volumes | to_entries[]
+    | select(($m.volumes[.key].name) != .value.name or $m.volumes[.key].external == true)
+    | "volume \(.key): renamed or external"),
+  ($base[0].volumes | to_entries[]
+    | select(($m.volumes[.key] // {} | {driver, driver_opts})
+        != (.value | {driver, driver_opts}))
+    | "volume \(.key): driver settings differ from the base"),
+  ([$m.volumes // {} | .[] | .name] | group_by(.)[] | select(length > 1)
+    | "volumes share the engine volume \(.[0])"),
   # Services name secrets by key; the top-level definition picks what the
   # container reads (file, environment, external, name), so a secret any
   # service uses keeps the base definition unchanged.
@@ -496,6 +508,30 @@ networks:
 EOF
 }
 
+# Services mount volumes by key; a volume's name picks the engine volume
+# and its driver settings what backs it (a local bind to a host path).
+merged_hardening_rejects_renamed_or_rebacked_volumes() {
+    expect_overlay_rejected volume-names \
+        "volume maildir-volume: renamed or external" "volume sqlite-volume: renamed or external" \
+        "volume mbsync-state: renamed or external" \
+        "volumes share the engine volume shared-volume" \
+        "volume bridge-data: driver settings differ from the base" <<'EOF'
+volumes:
+  maildir-volume:
+    name: shared-volume
+  sqlite-volume:
+    name: shared-volume
+  mbsync-state:
+    external: true
+  bridge-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /srv/data
+EOF
+}
+
 # docker compose config resolves a top-level include (#577), so the merged
 # check sees the services an included fragment brings in.
 merged_hardening_rejects_an_included_service() {
@@ -655,6 +691,8 @@ check "merged hardening rejects an !override that drops a service" \
 check "merged hardening rejects max-size on a driver other than json-file" \
     merged_hardening_rejects_max_size_on_another_logging_driver
 check "merged hardening rejects renamed or shared networks" merged_hardening_rejects_renamed_networks
+check "merged hardening rejects renamed, shared or rebacked volumes" \
+    merged_hardening_rejects_renamed_or_rebacked_volumes
 check "first run keeps Bridge's log driver at none" first_run_keeps_bridge_logging_disabled
 check "merged hardening rejects new users, secrets, hooks and devices" \
     merged_hardening_rejects_new_grants
