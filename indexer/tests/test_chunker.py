@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 from src.chunker import (
     chunk_message,
+    chunk_segments,
     estimate_tokens,
     normalize_body,
 )
@@ -1053,3 +1054,149 @@ class TestRenderedChunkCeiling:
             overlap_tokens=150,
         )
         assert [c.text for c in chunks] == [p1 + "\n\n" + p2, p3]
+
+
+# Shapes that reach the sentence and word splitters (#673): paragraphs
+# over ``max_tokens``, split at sentence ends, then at words. Synthetic
+# text only. Their chunks were pinned on main before the splitters
+# stopped re-tokenizing a growing prefix per sentence and per word.
+_MARKER_UNIT = "-- \nsig line\n> quoted line\nBegin forwarded message:\nfwd line\n"
+SPLIT_SHAPES: dict[str, tuple[str, int, int]] = {
+    "words_one_paragraph": (" ".join(f"w{i % 97}" for i in range(3000)), 40, 60),
+    "sentences_one_paragraph": ("Short one. A bit longer sentence here! Why? " * 300, 40, 60),
+    "punctuation_before_newlines": ("end.\n" * 800 + "wow!!!\n\n" * 3, 40, 60),
+    "lines_of_short_words": ("-- \nsig line\n> q\n" * 600, 40, 60),
+    "long_and_short_words": (" ".join(("x" * (i % 40)) or "y" for i in range(2000)), 40, 60),
+    "emoji_and_cjk_words": (" ".join(["\U0001f600\U0001f680", "这是", "word"] * 700), 40, 60),
+    "multiple_spaces": ("alpha   beta\t\tgamma  \n  delta " * 500, 40, 60),
+    "marker_lines_production_budgets": (_MARKER_UNIT * 2000, 1000, 1500),
+    "words_production_budgets": (" ".join(f"t{i % 1000}" for i in range(20_000)), 1000, 1500),
+}
+SPLIT_PIN_DIGEST = (
+    "4a05068157841cdaf4dbc2b9d5172e8d422276841d1ff1a7122f1dbfc14a5808"  # pragma: allowlist secret
+)
+
+
+def _split_cases() -> list[tuple[dict[str, tuple[str, int, int]], str, int]]:
+    """Every split shape and catalogue shape, with overlap 0 and > 0."""
+    return [
+        (shapes, name, overlap)
+        for shapes in (SPLIT_SHAPES, MAX_TOKENS_SHAPES)
+        for name, (_, target, _) in shapes.items()
+        for overlap in (0, target // 4)
+    ]
+
+
+def _split_pin_digest() -> str:
+    digest = hashlib.sha256()
+    for shapes, name, overlap in _split_cases():
+        body, target, max_tokens = shapes[name]
+        for c in chunk_message(
+            message_pk="m1",
+            body_text=body,
+            target_tokens=target,
+            max_tokens=max_tokens,
+            overlap_tokens=overlap,
+        ):
+            digest.update(f"{name}/{overlap}/{c.chunk_id}/{c.char_start}/{c.char_end}\n".encode())
+    return digest.hexdigest()
+
+
+class TestSplitterWork:
+    """The sentence and word splitters' work is linear in the span (#673)."""
+
+    def test_split_shapes_are_unchanged(self):
+        assert _split_pin_digest() == SPLIT_PIN_DIGEST
+
+    @pytest.mark.parametrize("skew", ["none", "guess_early", "guess_late"])
+    @pytest.mark.parametrize("name", sorted(SPLIT_SHAPES))
+    def test_first_overflow_matches_the_scan_it_replaces(self, monkeypatch, name, skew):
+        # The window only gives a guess; the exact counts settle the cut.
+        # Skewing the window's token offsets moves the guess early (every
+        # token counted twice) or late (every other token dropped), and
+        # the answer is still the first end the old per-end scan found.
+        import re
+        from types import SimpleNamespace
+
+        import src.chunker as chunker
+
+        real = chunker._load_tokenizer()
+
+        class SkewedTokenizer:
+            def encode(self, text, **kwargs):
+                enc = real.encode(text, **kwargs)
+                offsets = list(enc.offsets)
+                if skew == "guess_early":
+                    offsets = [o for o in offsets for _ in range(2)]
+                elif skew == "guess_late":
+                    offsets = offsets[::2]
+                return SimpleNamespace(ids=enc.ids, offsets=offsets)
+
+        text = SPLIT_SHAPES[name][0][:3000]
+        ends = [m.end() for m in re.finditer(r"\S+", text)]
+        starts = [m.start() for m in re.finditer(r"\S+", text)]
+        max_tokens = 20
+
+        def scan(start: int, lo: int) -> int:
+            for i in range(lo, len(ends)):
+                if estimate_tokens(text[start : ends[i]]) > max_tokens:
+                    return i
+            return len(ends)
+
+        monkeypatch.setattr(chunker, "_load_tokenizer", SkewedTokenizer)
+        for k in range(0, len(ends), max(1, len(ends) // 15)):
+            expected = scan(starts[k], k + 1)
+            assert chunker._first_overflow(text, starts[k], ends, k + 1, max_tokens) == expected
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            # #673: quote, signature and forward markers with no body text,
+            # chunked as kind runs. Each run is one paragraph of short words.
+            _MARKER_UNIT * 4000,
+            # The same class in body text: one paragraph of short words,
+            # and one of short sentences.
+            " ".join(f"t{i % 1000}" for i in range(60_000)),
+            " ".join(f"S{i}." for i in range(60_000)),
+        ],
+        ids=["marker_dense_no_body", "short_words", "short_sentences"],
+    )
+    def test_oversized_paragraph_is_tokenized_a_bounded_number_of_times(self, monkeypatch, body):
+        # Splitting a paragraph over ``max_tokens`` used to re-tokenize the
+        # prefix from the chunk start to every sentence end and then every
+        # word end, about 400 times the paragraph at the production
+        # budgets (14 minutes for 12 MB). Count the characters handed to
+        # the tokenizer: a small constant times the body.
+        import time
+
+        import src.chunker as chunker
+        from src.quoting import segment_for_embedding
+
+        real = chunker._load_tokenizer()
+        encoded = 0
+
+        class CountingTokenizer:
+            def encode(self, text, **kwargs):
+                nonlocal encoded
+                encoded += len(text)
+                return real.encode(text, **kwargs)
+
+        monkeypatch.setattr(chunker, "_load_tokenizer", CountingTokenizer)
+        chunker._cached_estimate_tokens.cache_clear()
+        segments = [(s.kind, s.text) for s in segment_for_embedding(body)]
+        started = time.monotonic()
+        chunks = chunk_segments(
+            message_pk="m1",
+            segments=segments,
+            target_tokens=1000,
+            max_tokens=1500,
+            overlap_tokens=150,
+        )
+        assert time.monotonic() - started < 20.0
+        chunker._cached_estimate_tokens.cache_clear()
+        assert encoded <= 12 * len(body)
+        assert all(estimate_tokens(c.text) <= 1500 for c in chunks)
+        # Every word of the body is in a chunk of its segment's kind.
+        words = sorted(w for c in chunks for w in c.text.split())
+        assert set(words) == set(body.split())
+        assert len({c.kind for c in chunks}) == len({k for k, _ in segments})

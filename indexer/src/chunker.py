@@ -30,6 +30,7 @@ Input contract:
 
 """
 
+import bisect
 import hashlib
 import math
 import re
@@ -65,6 +66,12 @@ _PARAGRAPH_RE = re.compile(r"[^\n]+(?:\n(?![ \t]*\n)[^\n]*)*")
 # scanned once rather than retried from every position inside it
 # (quadratic on a long run such as ``"." * 128000 + "x"``).
 _SENTENCE_END_RE = re.compile(r"(?<![.!?])[.!?]+(?=\s|$)")
+
+# Characters per token of the ceiling in the first window
+# ``_first_overflow`` tokenizes to find a split's cut: above the ~3.5
+# chars per token of English text, so one window usually holds the cut.
+# A window short of ``max_tokens`` tokens is doubled until it is not.
+_CUT_WINDOW_CHARS_PER_TOKEN = 4
 
 
 # Tolerance for "vector is already unit-norm". A model that already
@@ -445,17 +452,24 @@ def _split_by_sentence(span: _Span, source: str, max_tokens: int) -> list[_Span]
     if cut_points[-1] != len(text):
         cut_points.append(len(text))
 
+    # Each segment runs from ``cut_points[k]`` to the sentence end before
+    # the first one its text overflows at, or holds its first sentence
+    # alone when that overflows on its own. A last sentence is the tail
+    # whatever it counts, so it is not counted here.
     sub_spans: list[_Span] = []
-    segment_start = cut_points[0]
-    for i in range(1, len(cut_points)):
-        candidate = text[segment_start : cut_points[i]]
-        if estimate_tokens(candidate) > max_tokens and cut_points[i - 1] > segment_start:
-            sub = _make_subspan(span, source, segment_start, cut_points[i - 1])
-            if sub is not None:
-                sub_spans.append(sub)
-            segment_start = cut_points[i - 1]
+    k = 0
+    last = len(cut_points) - 1
+    while k + 1 < last:
+        i = _first_overflow(text, cut_points[k], cut_points, k + 1, max_tokens)
+        cut = max(i - 1, k + 1)
+        if cut >= last:
+            break
+        sub = _make_subspan(span, source, cut_points[k], cut_points[cut])
+        if sub is not None:
+            sub_spans.append(sub)
+        k = cut
 
-    tail = _make_subspan(span, source, segment_start, len(text))
+    tail = _make_subspan(span, source, cut_points[k], len(text))
     if tail is not None:
         sub_spans.append(tail)
 
@@ -490,26 +504,28 @@ def _split_by_word(span: _Span, source: str, max_tokens: int) -> list[_Span]:
     and push the packer back over ``max_tokens``.
     """
     text = span.text
-    words = list(re.finditer(r"\S+", text))
-    if not words:
+    word_ends = [m.end() for m in re.finditer(r"\S+", text)]
+    if not word_ends:
         return [span]
 
     sub_spans: list[_Span] = []
-    # Each segment starts at its first word, or at the tabs that open
-    # that word's line (#433), so the budget counts the kept tabs too.
+    # Each segment starts at its first word (``word_ends[k]``), or at the
+    # tabs that open that word's line (#433), so the budget counts the
+    # kept tabs too. It closes at the word before the first one it
+    # overflows at, so it always holds at least one word: a single
+    # runaway word is emitted on its own rather than never.
     segment_start = _leading_trim(source, span.start, span.end)
-    for i, word in enumerate(words):
-        candidate = text[segment_start : word.end()]
-        # Only close once the current segment already contains at least
-        # one earlier word — otherwise a single runaway word would land
-        # in an empty segment and never be emitted.
-        has_earlier_word = i > 0 and words[i - 1].start() >= segment_start
-        if estimate_tokens(candidate) > max_tokens and has_earlier_word:
-            prev_end = words[i - 1].end()
-            sub = _make_subspan(span, source, segment_start, prev_end)
-            if sub is not None:
-                sub_spans.append(sub)
-            segment_start = prev_end + _leading_trim(source, span.start + prev_end, span.end)
+    k = 0
+    while True:
+        i = _first_overflow(text, segment_start, word_ends, k + 1, max_tokens)
+        if i >= len(word_ends):
+            break
+        prev_end = word_ends[i - 1]
+        sub = _make_subspan(span, source, segment_start, prev_end)
+        if sub is not None:
+            sub_spans.append(sub)
+        segment_start = prev_end + _leading_trim(source, span.start + prev_end, span.end)
+        k = i
 
     tail = _make_subspan(span, source, segment_start, len(text))
     if tail is not None:
@@ -557,6 +573,71 @@ def _split_by_tokens(span: _Span, source: str, max_tokens: int) -> list[_Span]:
         if sub is not None:
             sub_spans.append(sub)
     return sub_spans if sub_spans else [span]
+
+
+def _first_overflow(text: str, start: int, ends: list[int], lo: int, max_tokens: int) -> int:
+    """Return the first ``i >= lo`` whose ``text[start:ends[i]]`` is over ``max_tokens``.
+
+    Returns ``len(ends)`` when none is; ``ends`` are increasing offsets
+    into ``text``. The splitters used to count the prefix up to every
+    sentence or word end in turn, re-tokenizing about the ceiling's worth
+    of text per sentence or word: some 400 times the paragraph at the
+    production budgets (#673). Instead one window from ``start``, a few
+    times the ceiling in size, is tokenized, and its token offsets give a
+    guess: the first end with more than ``max_tokens`` tokens before it.
+    BPE counts are not additive, so a prefix counted on its own can differ
+    from the window's count near the cut. Exact counts then settle it:
+    a gallop from the guess brackets the answer and a binary search
+    finds it, so each cut costs one window plus a few exact counts of
+    about the chunk it emits. The search assumes a longer prefix takes no
+    fewer tokens; where one does, it can return a later overflow than the
+    per-end scan would have, but the prefix to the end before it (when
+    that is ``lo`` or later) was counted exactly and fits, so the ceiling
+    still holds.
+    """
+    n = len(ends)
+    if lo >= n:
+        return n
+    tokenizer = _load_tokenizer()
+    width = _CUT_WINDOW_CHARS_PER_TOKEN * (max_tokens + 1)
+    while True:
+        offsets = tokenizer.encode(text[start : start + width], add_special_tokens=False).offsets
+        if len(offsets) > max_tokens or start + width >= len(text):
+            break
+        width *= 2
+    if len(offsets) > max_tokens:
+        guess = bisect.bisect_left(ends, start + offsets[max_tokens][1], lo)
+    else:
+        guess = n
+
+    def overflows(i: int) -> bool:
+        return estimate_tokens(text[start : ends[i]]) > max_tokens
+
+    # Bracket the answer: ``fits`` is an index known to fit (or
+    # ``lo - 1``), ``over`` one known to overflow (or ``n``).
+    if guess < n and not overflows(guess):
+        fits, over, step = guess, n, 1
+        while fits + step < n:
+            if overflows(fits + step):
+                over = fits + step
+                break
+            fits += step
+            step *= 2
+    else:
+        fits, over, step = lo - 1, guess, 1
+        while over - step >= lo:
+            if not overflows(over - step):
+                fits = over - step
+                break
+            over -= step
+            step *= 2
+    while over - fits > 1:
+        mid = (fits + over) // 2
+        if overflows(mid):
+            over = mid
+        else:
+            fits = mid
+    return over
 
 
 def _leading_trim(source: str, start: int, end: int) -> int:
