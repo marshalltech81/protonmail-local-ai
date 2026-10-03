@@ -502,14 +502,52 @@ _SLASH_SPELLINGS = "/\uff0f"
 # soft hyphen, byte-order mark).
 _INVISIBLE_CATEGORIES = frozenset({"Mn", "Me", "Cf"})
 
+# Unicode's Default_Ignorable_Code_Point property (DerivedCoreProperties.txt,
+# Unicode 16.0), as inclusive ranges: code points a renderer shows as
+# nothing. ``unicodedata`` does not expose the property, so it is listed
+# here. Most entries are already Mn or Cf; the rest are the blank Hangul
+# fillers (Lo: U+115F, U+1160, U+3164, U+FFA0) and code points reserved
+# as ignorable (Cn: U+2065, U+FFF0-FFF8, the unassigned parts of
+# U+E0000-E0FFF). A tag name can carry any of them unseen (#680).
+_DEFAULT_IGNORABLE = (
+    (0x00AD, 0x00AD),
+    (0x034F, 0x034F),
+    (0x061C, 0x061C),
+    (0x115F, 0x1160),
+    (0x17B4, 0x17B5),
+    (0x180B, 0x180F),
+    (0x200B, 0x200F),
+    (0x202A, 0x202E),
+    (0x2060, 0x206F),
+    (0x3164, 0x3164),
+    (0xFE00, 0xFE0F),
+    (0xFEFF, 0xFEFF),
+    (0xFFA0, 0xFFA0),
+    (0xFFF0, 0xFFF8),
+    (0x1BCA0, 0x1BCA3),
+    (0x1D173, 0x1D17A),
+    (0xE0000, 0xE0FFF),
+)
 
-def _category_class(categories: frozenset[str]) -> str:
-    """A regex character-class body holding every code point in
-    ``categories``, as ranges. Built once at import (about 0.1 s)."""
-    ranges: list[str] = []
+
+def _is_invisible(char: str) -> bool:
+    """Whether ``char`` draws nothing: a mark, a format character or a
+    default-ignorable code point."""
+    code = ord(char)
+    return unicodedata.category(char) in _INVISIBLE_CATEGORIES or any(
+        start <= code <= end for start, end in _DEFAULT_IGNORABLE
+    )
+
+
+def _invisible_class() -> str:
+    """A regex character-class body holding every ``_is_invisible`` code
+    point, as ranges: those of ``_INVISIBLE_CATEGORIES`` found by one
+    scan, then ``_DEFAULT_IGNORABLE`` (overlaps are harmless). Built once
+    at import (about 0.1 s)."""
+    ranges = [f"\\U{start:08x}-\\U{end:08x}" for start, end in _DEFAULT_IGNORABLE]
     start = None
     for code in range(sys.maxunicode + 2):
-        inside = code <= sys.maxunicode and unicodedata.category(chr(code)) in categories
+        inside = code <= sys.maxunicode and unicodedata.category(chr(code)) in _INVISIBLE_CATEGORIES
         if inside and start is None:
             start = code
         elif not inside and start is not None:
@@ -518,7 +556,7 @@ def _category_class(categories: frozenset[str]) -> str:
     return "".join(ranges)
 
 
-_INVISIBLE_CLASS = _category_class(_INVISIBLE_CATEGORIES)
+_INVISIBLE_CLASS = _invisible_class()
 _INVISIBLE_RE = re.compile(f"[{_INVISIBLE_CLASS}]")
 
 # A candidate tag inside untrusted content: an ``_LT_SPELLINGS`` bracket,
@@ -592,13 +630,14 @@ _LOOKALIKE_LETTERS = str.maketrans(
 def _skeleton_char(char: str) -> str:
     """The letters ``char`` reads as in a tag name: its compatibility
     decomposition (fullwidth, mathematical, circled and ligature forms
-    fold onto plain letters) without marks or format characters, case
+    fold onto plain letters) without invisible characters
+    (``_is_invisible``: marks, format characters, Hangul fillers), case
     folded, with ``_LOOKALIKE_LETTERS`` mapped. Empty for a character
     that draws nothing."""
     # Looked up before normalization too: NFKD turns some entries into
     # other letters (Greek lunate sigma into sigma).
     decomposed = unicodedata.normalize("NFKD", char.casefold().translate(_LOOKALIKE_LETTERS))
-    visible = "".join(c for c in decomposed if unicodedata.category(c) not in _INVISIBLE_CATEGORIES)
+    visible = "".join(c for c in decomposed if not _is_invisible(c))
     return visible.casefold().translate(_LOOKALIKE_LETTERS)
 
 

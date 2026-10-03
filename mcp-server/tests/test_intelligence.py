@@ -1210,6 +1210,13 @@ _LOOKALIKE_NAMES = {
     "square ma": "untrusted_e\u3383il",
     "fullwidth low line": "untrusted\uff3femail",
     "circled letter": "\u24e4ntrusted_email",
+    # #680: default-ignorable code points outside Mn/Me/Cf.
+    "hangul filler": "untrusted_\u3164email",
+    "hangul choseong filler": "un\u115ftrusted_email",
+    "hangul jungseong filler": "untrusted\u1160_email",
+    "halfwidth hangul filler": "\uffa0untrusted_email",
+    "unassigned default ignorables": "untr\u2065us\ufff0ted_\U000e0000em\U000e01f0ail",
+    "fillers mixed with lookalikes": "\uff55n\u3164tru\u200d\u0455ted\uffa0_e\u3383il",
 }
 
 # Text that resembles a delimiter but names no tag, and ordinary mail
@@ -1228,6 +1235,33 @@ _NOT_TAGS = (
     "<\u03b1\u03b2\u03b3> <\u65e5\u672c\u8a9e>",
     "\u2039untrusted_email\u203a",  # angle quotation mark: not a < spelling
     "<u\u200d" * 3,
+    "<\u3164> <\u115f\u1160\uffa0>",
+    # Korean text with blank fillers outside any tag (#680).
+    "\u3164\u3164 \uc548\ub155 <\ud55c\uae00> a\u3164b \uffa0 untrusted_email",
+)
+
+
+# Unicode 16.0 DerivedCoreProperties.txt Default_Ignorable_Code_Point,
+# as ranges: the reference the escape's invisible set is checked
+# against (#680).
+_DEFAULT_IGNORABLE = (
+    (0x00AD, 0x00AD),
+    (0x034F, 0x034F),
+    (0x061C, 0x061C),
+    (0x115F, 0x1160),
+    (0x17B4, 0x17B5),
+    (0x180B, 0x180F),
+    (0x200B, 0x200F),
+    (0x202A, 0x202E),
+    (0x2060, 0x206F),
+    (0x3164, 0x3164),
+    (0xFE00, 0xFE0F),
+    (0xFEFF, 0xFEFF),
+    (0xFFA0, 0xFFA0),
+    (0xFFF0, 0xFFF8),
+    (0x1BCA0, 0x1BCA3),
+    (0x1D173, 0x1D17A),
+    (0xE0000, 0xE0FFF),
 )
 
 
@@ -1291,6 +1325,10 @@ class TestDelimiterEscapeLookalikeLetters:
             "< \u0301/ ",
             "<\ufeff\uff0f\u2060 ",
             "\uff1c\u00ad \u200c/\u200d\t",
+            "<\u3164/",
+            "</\u115f",
+            "\uff1c\uffa0\uff0f\u1160 ",
+            "<\u200d\u3164 /\U000e0000\u2065",
         ],
     )
     def test_invisible_characters_around_the_slash_do_not_hide_a_tag(self, opening):
@@ -1303,7 +1341,7 @@ class TestDelimiterEscapeLookalikeLetters:
             f"x &lt;{opening[1:]}untrusted_email> y"
         )
 
-    def test_separator_invisibles_are_every_mark_and_format_character(self):
+    def test_separator_invisibles_are_every_mark_format_and_ignorable(self):
         import sys
         import unicodedata
 
@@ -1313,9 +1351,25 @@ class TestDelimiterEscapeLookalikeLetters:
             hex(c)
             for c in range(sys.maxunicode + 1)
             if bool(_INVISIBLE_RE.fullmatch(chr(c)))
-            != (unicodedata.category(chr(c)) in _INVISIBLE_CATEGORIES)
+            != (
+                unicodedata.category(chr(c)) in _INVISIBLE_CATEGORIES
+                or any(start <= c <= end for start, end in _DEFAULT_IGNORABLE)
+            )
         ]
         assert mismatched == []
+
+    def test_every_default_ignorable_draws_nothing_in_a_tag_name(self):
+        # #680: each Default_Ignorable_Code_Point, whatever its
+        # category, is dropped from a tag name's letters.
+        from src.tools.intelligence import _skeleton_char
+
+        kept = [
+            hex(c)
+            for start, end in _DEFAULT_IGNORABLE
+            for c in range(start, end + 1)
+            if _skeleton_char(chr(c))
+        ]
+        assert kept == []
 
     @pytest.mark.parametrize("content", _NOT_TAGS)
     def test_text_that_names_no_tag_is_unchanged(self, content):
@@ -1391,8 +1445,18 @@ class TestLookalikeEscapeBoundedWork:
             ("<" + "\u0301" * 30 + "u") * 12_000,  # marks before every letter
             "<" + " " * 200_000 + "/" + " " * 200_000 + "u" * 10,
             "<" + "\u200d " * 100_000 + "/" + " \u2060" * 100_000 + "u" * 10,
+            "<u" + "\u3164\u115f\u1160\uffa0" * 100_000 + "x",  # #680 filler run
+            "<" + "\u3164 " * 100_000 + "/" + " \uffa0" * 100_000 + "u" * 10,
         ],
-        ids=["ignorable-run", "near-misses", "marks", "whitespace", "invisible-separators"],
+        ids=[
+            "ignorable-run",
+            "near-misses",
+            "marks",
+            "whitespace",
+            "invisible-separators",
+            "filler-run",
+            "filler-separators",
+        ],
     )
     def test_adversarial_input_is_one_linear_pass(self, monkeypatch, content):
         from src.tools.intelligence import _untrusted_email_block

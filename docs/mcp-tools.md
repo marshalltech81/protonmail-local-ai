@@ -715,8 +715,9 @@ commands. The intelligence tools mitigate this two ways:
    email content cannot close the untrusted region early and smuggle
    text outside it. The tag name is matched by the letters it reads
    as, not its code points (#533): fullwidth, mathematical, circled and
-   small-capital letters, ligatures, accents, zero-width characters and
-   a closed list of Cyrillic, Greek and Armenian look-alikes for the
+   small-capital letters, ligatures, accents, zero-width characters,
+   any other Unicode default-ignorable code point such as the blank
+   Hangul fillers (#680), and a closed list of Cyrillic, Greek and Armenian look-alikes for the
    tag's letters (a Cyrillic `е`, a Greek `ο`) do not hide it. This is
    a fixed list for the tag names, not a general confusables table.
 
