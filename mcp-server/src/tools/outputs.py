@@ -244,6 +244,15 @@ class EvidenceChunk(_Output):
     claimant_id: str = Field(description="The chunk's message; pass it to get_message.")
     chunk_index: int
     source: Literal["body", "attachment"]
+    kind: Literal["body", "quote", "signature", "forwarded", "calendar", "attachment"] = Field(
+        description=(
+            "What the passage is: the message's own text (body), quoted history "
+            "(quote), a signature, a forwarded message (forwarded), calendar "
+            "content (calendar, not produced yet) or attachment text (attachment). "
+            "Quote, signature and forwarded passages come only from messages "
+            "with no text of their own."
+        )
+    )
     attachment_id: str | None = Field(
         description="Content-hash attachment ID for attachment chunks."
     )

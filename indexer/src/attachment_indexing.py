@@ -363,6 +363,7 @@ def prepare_attachment_writes(
     chunks = chunk_message(
         message_pk=chunk_pk,
         body_text=text,
+        kind="attachment",
         target_tokens=chunk_target_tokens,
         max_tokens=chunk_max_tokens,
         overlap_tokens=chunk_overlap_tokens,

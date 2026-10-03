@@ -48,7 +48,7 @@ from .attachment_indexing import (
 )
 from .chunker import (
     MessageChunk,
-    chunk_message,
+    chunk_segments,
     estimate_tokens,
     mean_vector,
     truncate_to_tokens,
@@ -88,7 +88,7 @@ from .queue import (
     IndexingQueue,
 )
 from .queue import load_config_from_env as load_queue_config_from_env
-from .quoting import strip_for_embedding
+from .quoting import segment_for_embedding
 from .reconciler import Reconciler, ReconcilerConfig, load_config_from_env, sweep_paths
 from .stall_guard import StallGuard
 from .threader import Thread, Threader, reply_subject_line
@@ -927,9 +927,10 @@ def _phase2a_collect_chunks(
     msg = state.msg
     t0 = time.perf_counter()
     try:
-        body_chunks = chunk_message(
+        # Segment before chunking so no chunk spans kinds (#646).
+        body_chunks = chunk_segments(
             message_pk=msg.claimant_id,
-            body_text=strip_for_embedding(msg.body_text or ""),
+            segments=[(s.kind, s.text) for s in segment_for_embedding(msg.body_text or "")],
             target_tokens=CHUNK_TARGET_TOKENS,
             max_tokens=CHUNK_MAX_TOKENS,
             overlap_tokens=CHUNK_OVERLAP_TOKENS,

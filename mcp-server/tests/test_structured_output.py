@@ -13,9 +13,11 @@ against its tool's schema with jsonschema.
 
 import asyncio
 import json
+import sqlite3
 
 import jsonschema
 import pytest
+import sqlite_vec
 from fastmcp import Client, FastMCP
 from mcp.types import CallToolResult, Tool
 from src.tools.retrieval import register_retrieval_tools
@@ -25,6 +27,7 @@ from src.tools.system import register_system_tools
 from tests.conftest import (
     FakeEmbedClient,
     _insert_attachment,
+    _insert_chunk,
     _insert_message,
     _insert_thread,
     source_sha256,
@@ -140,6 +143,35 @@ class TestChaining:
         attachment = next(c for c in chunks if c["source"] == "attachment")
         assert attachment["attachment_id"] == "m2-att"
         assert attachment["message_id"] == "m2"
+
+    def test_evidence_carries_chunk_kinds(self, messages_db):
+        # #646: each passage says what it is; the prose names a non-body
+        # kind of message text.
+        conn = sqlite3.connect(messages_db.path)
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        _insert_chunk(
+            conn,
+            chunk_id="m1-quote",
+            message_id="m1",
+            thread_id="t1",
+            chunk_index=1,
+            char_start=len("the budget is approved\n\n"),
+            text="> spreadsheet attached earlier",
+            embedding=[1.0, 0.0, 0.0, 0.0],
+            kind="quote",
+        )
+        conn.close()
+        server = _server(messages_db)
+        args = {"query": "spreadsheet", "thread_id": "t1"}
+        evidence = _call(server, "get_evidence", **args)
+        chunks = [c for t in evidence["threads"] for c in t["chunks"]]
+        kinds = {c["chunk_id"]: c["kind"] for c in chunks}
+        assert kinds["m1-quote"] == "quote"
+        assert {kinds[c["chunk_id"]] for c in chunks if c["source"] == "attachment"} == {
+            "attachment"
+        }
+        assert "Source: message body (quote)" in _wire(server, "get_evidence", args).content[0].text
 
 
 class TestQueryMessages:

@@ -18,6 +18,7 @@ from datetime import UTC, date, datetime, time, timedelta
 from email.utils import parseaddr
 from itertools import groupby
 from pathlib import Path
+from typing import Literal
 from urllib.parse import quote
 
 import sqlite_vec
@@ -394,6 +395,10 @@ def _row_to_source(r) -> SourceFile | None:
     )
 
 
+# ``message_chunks.kind`` values; the indexer's ``chunker.CHUNK_KINDS``.
+ChunkKind = Literal["body", "quote", "signature", "forwarded", "calendar", "attachment"]
+
+
 @dataclass
 class ChunkResult:
     """One per-message chunk hit, used as precise evidence for a thread.
@@ -430,6 +435,10 @@ class ChunkResult:
     ``Name <address>`` (or the bare address), so a prompt can attribute
     the passage to its own author; ``None`` for query paths that do not
     SELECT it or a message with no recorded sender.
+
+    ``kind`` is what the chunk's text is (``message_chunks.kind``, #646):
+    ``body``, ``quote``, ``signature``, ``forwarded``, ``calendar`` or
+    ``attachment``.
     """
 
     chunk_id: str
@@ -448,6 +457,7 @@ class ChunkResult:
     message_occurred_at: str | None = None
     source_file: SourceFile | None = None
     message_sender: str | None = None
+    kind: ChunkKind = "body"
 
 
 def _row_to_chunk_result(r) -> ChunkResult:
@@ -478,6 +488,7 @@ def _row_to_chunk_result(r) -> ChunkResult:
         message_occurred_at=(r["message_occurred_at"] if "message_occurred_at" in keys else None),
         source_file=_row_to_source(r),
         message_sender=r["message_sender"] if "message_sender" in keys else None,
+        kind=r["kind"],
     )
 
 
@@ -2389,7 +2400,7 @@ class Database:
                 SELECT
                     c.chunk_id, COALESCE(m.message_id, c.claimant_id) AS message_id,
                     c.claimant_id, c.thread_id, c.chunk_index,
-                    c.text, c.char_start, c.char_end, c.attachment_id,
+                    c.text, c.char_start, c.char_end, c.attachment_id, c.kind,
                     a.filename AS attachment_filename,
                     a.content_type AS attachment_mime,
                     v.distance AS score
@@ -2507,7 +2518,8 @@ class Database:
             sql = (
                 "SELECT c.chunk_id, COALESCE(m.message_id, c.claimant_id) AS message_id, "
                 "c.claimant_id, c.thread_id, c.chunk_index, "
-                "c.text, c.char_start, c.char_end, c.attachment_id, m.sent_at AS message_date, "
+                "c.text, c.char_start, c.char_end, c.attachment_id, c.kind, "
+                "m.sent_at AS message_date, "
                 "m.occurred_at AS message_occurred_at, "
                 "a.filename AS attachment_filename, "
                 "a.content_type AS attachment_mime, "
@@ -2625,7 +2637,7 @@ class Database:
             rows = self._fetchall(
                 "SELECT c.chunk_id, COALESCE(m.message_id, c.claimant_id) AS message_id, "  # nosec B608
                 "c.claimant_id, c.thread_id, c.chunk_index, "
-                "c.text, c.char_start, c.char_end, c.attachment_id, "
+                "c.text, c.char_start, c.char_end, c.attachment_id, c.kind, "
                 "NULL AS attachment_filename, "
                 "NULL AS attachment_mime, "
                 "m.sent_at AS message_date, "

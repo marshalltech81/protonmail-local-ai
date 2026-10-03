@@ -18,20 +18,26 @@ Input contract:
   indexed. Quote stripping, signature trimming, HTML-to-text conversion,
   and any other cleanup live upstream. The chunker does not second-guess
   the body it is handed.
+- Segmentation by kind (``quoting.segment_for_embedding``) also lives
+  upstream: ``chunk_segments`` takes the ``(kind, text)`` segments and
+  chunks each on its own, so a chunk never spans kinds (#646).
 - ``char_start`` / ``char_end`` are offsets into the *normalized* body the
-  chunker produced (CRLF → LF, runs of 3+ blank lines collapsed to 2).
-  Offsets are stable across runs for the same input but are not offsets
-  into the raw ``.eml`` source — map back through the same normalization
-  if that is needed.
+  chunker produced (CRLF → LF, runs of 3+ blank lines collapsed to 2;
+  for several segments, the normalized segments joined by a blank
+  line). Offsets are stable across runs for the same input but are not
+  offsets into the raw ``.eml`` source — map back through the same
+  normalization if that is needed.
 
 """
 
 import hashlib
 import math
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal, get_args
 
 from tokenizers import Tokenizer
 
@@ -131,6 +137,24 @@ def mean_vector(vectors: list[list[float]]) -> list[float]:
     return [s / n for s in sums]
 
 
+# What a chunk's text is (#646). A closed set, stored in
+# ``message_chunks.kind`` under a ``CHECK`` that lists the same values:
+#
+# - ``body``: the message's own text;
+# - ``quote``: quoted history (``>`` lines, reply headers, an Outlook
+#   reply block);
+# - ``signature``: text from the RFC 3676 ``-- `` delimiter on;
+# - ``forwarded``: text from a forward preamble on;
+# - ``calendar``: reserved for calendar content. Nothing produces it
+#   yet: a ``text/calendar`` part is not body text inside a multipart
+#   and has no attachment extractor;
+# - ``attachment``: text extracted from an attachment.
+#
+# ``quoting.segment_for_embedding`` assigns the message-text kinds.
+ChunkKind = Literal["body", "quote", "signature", "forwarded", "calendar", "attachment"]
+CHUNK_KINDS: tuple[ChunkKind, ...] = get_args(ChunkKind)
+
+
 @dataclass(frozen=True)
 class MessageChunk:
     """One retrieval unit produced from a single message body."""
@@ -141,6 +165,7 @@ class MessageChunk:
     char_start: int
     char_end: int
     token_est: int
+    kind: ChunkKind = "body"
 
 
 @dataclass(frozen=True)
@@ -274,6 +299,7 @@ def chunk_message(
     *,
     message_pk: str,
     body_text: str,
+    kind: ChunkKind = "body",
     target_tokens: int = 350,
     max_tokens: int = 500,
     overlap_tokens: int = 60,
@@ -288,17 +314,76 @@ def chunk_message(
     word and then token boundaries to meet it.
     ``overlap_tokens`` is the approximate size of the tail carried from
     the previous chunk into the next — overlap is always carried as whole
-    paragraph-spans, never mid-sentence.
+    paragraph-spans, never mid-sentence. Every chunk gets ``kind``.
+    """
+    return chunk_segments(
+        message_pk=message_pk,
+        segments=[(kind, body_text)],
+        target_tokens=target_tokens,
+        max_tokens=max_tokens,
+        overlap_tokens=overlap_tokens,
+    )
+
+
+def chunk_segments(
+    *,
+    message_pk: str,
+    segments: Iterable[tuple[ChunkKind, str]],
+    target_tokens: int = 350,
+    max_tokens: int = 500,
+    overlap_tokens: int = 60,
+) -> list[MessageChunk]:
+    """Chunk a body made of ``(kind, text)`` segments, one segment at a time.
+
+    Segmentation happens before chunking, so a chunk never spans kinds:
+    each segment is normalized and chunked on its own, with no overlap
+    carried across a segment boundary. ``chunk_index`` runs on across
+    segments. Offsets are into the normalized segments joined by a
+    blank line (``"\n\n"``); for one segment that is just its
+    normalized text, so ``chunk_message`` output is unchanged. Budgets
+    are as in ``chunk_message``. Raises ``ValueError`` on a kind
+    outside ``CHUNK_KINDS``.
     """
     if not (0 < target_tokens <= max_tokens):
         raise ValueError("target_tokens must be > 0 and <= max_tokens")
     if overlap_tokens < 0 or overlap_tokens >= target_tokens:
         raise ValueError("overlap_tokens must be >= 0 and < target_tokens")
 
-    normalized = normalize_body(body_text)
-    if not normalized:
-        return []
+    chunks: list[MessageChunk] = []
+    # Index of the next packed group. A group that renders empty is
+    # skipped with its index, as before segments existed.
+    index = 0
+    # Offset of the current segment in the joined normalized text.
+    offset = 0
+    for kind, text in segments:
+        if kind not in CHUNK_KINDS:
+            raise ValueError("unknown chunk kind")
+        normalized = normalize_body(text)
+        if not normalized:
+            continue
+        for group in _pack_segment(normalized, target_tokens, max_tokens, overlap_tokens):
+            rendered, char_start, char_end = _render_group(normalized, group)
+            if rendered:
+                chunks.append(
+                    MessageChunk(
+                        chunk_id=_chunk_id(message_pk, index, rendered),
+                        chunk_index=index,
+                        text=rendered,
+                        char_start=offset + char_start,
+                        char_end=offset + char_end,
+                        token_est=estimate_tokens(rendered),
+                        kind=kind,
+                    )
+                )
+            index += 1
+        offset += len(normalized) + len("\n\n")
+    return chunks
 
+
+def _pack_segment(
+    normalized: str, target_tokens: int, max_tokens: int, overlap_tokens: int
+) -> list[list[_Span]]:
+    """Return the span groups, one per chunk, of one normalized segment."""
     spans = _paragraph_spans(normalized)
     # Split oversized paragraphs up front so the packer only ever sees
     # spans it can fit under ``max_tokens``. Keeps packing logic simple.
@@ -322,24 +407,7 @@ def chunk_message(
         for run in _fit_rendered(normalized, group, max_tokens):
             if not runs or run[-1].end > runs[-1][-1].end:
                 runs.append(run)
-    packed = runs
-
-    chunks: list[MessageChunk] = []
-    for index, group in enumerate(packed):
-        text, char_start, char_end = _render_group(normalized, group)
-        if not text:
-            continue
-        chunks.append(
-            MessageChunk(
-                chunk_id=_chunk_id(message_pk, index, text),
-                chunk_index=index,
-                text=text,
-                char_start=char_start,
-                char_end=char_end,
-                token_est=estimate_tokens(text),
-            )
-        )
-    return chunks
+    return runs
 
 
 def _paragraph_spans(text: str) -> list[_Span]:

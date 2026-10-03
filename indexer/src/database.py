@@ -455,6 +455,11 @@ class Database:
                 chunked_at      TEXT NOT NULL,
                 fts_rowid       INTEGER,
                 attachment_id   TEXT,
+                -- What the chunk's text is (chunker.CHUNK_KINDS, #646);
+                -- ``attachment`` exactly when attachment_id is set.
+                kind            TEXT NOT NULL CHECK (kind IN (
+                                    'body', 'quote', 'signature', 'forwarded',
+                                    'calendar', 'attachment')),
                 FOREIGN KEY (claimant_id) REFERENCES message_thread_map(claimant_id)
                     ON DELETE CASCADE,
                 FOREIGN KEY (thread_id) REFERENCES threads(thread_id)
@@ -1094,6 +1099,10 @@ class Database:
         one transaction so the three indexes never disagree about which
         chunks exist for a (message, slice) pair.
         """
+        # A body slice holds message-text kinds, an attachment slice
+        # only ``attachment`` chunks (#646).
+        if any((c.kind == "attachment") != (attachment_id is not None) for c in chunks):
+            raise ValueError("chunk kind does not match its slice")
         incoming_ids = {c.chunk_id for c in chunks}
         cur = self._conn.cursor()
 
@@ -1163,8 +1172,8 @@ class Database:
                     INSERT INTO message_chunks
                         (chunk_id, claimant_id, thread_id, chunk_index, text,
                          char_start, char_end, token_est,
-                         chunked_at, fts_rowid, attachment_id)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         chunked_at, fts_rowid, attachment_id, kind)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         chunk.chunk_id,
@@ -1178,6 +1187,7 @@ class Database:
                         now_iso,
                         fts_rowid,
                         attachment_id,
+                        chunk.kind,
                     ),
                 )
 
