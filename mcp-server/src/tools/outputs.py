@@ -162,6 +162,9 @@ class MessageHeaders(_Output):
     )
     folder: str
     has_attachments: bool
+    seen: bool = Field(description="Read in Proton (the file's Maildir S flag).")
+    flagged: bool = Field(description="Starred in Proton (Maildir F flag).")
+    replied: bool = Field(description="Answered in Proton (Maildir R flag).")
     in_reply_to: str | None
     references: list[str] = Field(description="References; may be shortened, see references_count.")
     references_count: int
@@ -203,6 +206,9 @@ def message_headers(m: MessageRecord) -> MessageHeaders:
         occurred_at=m.occurred_at,
         folder=m.folder,
         has_attachments=m.has_attachments,
+        seen=m.seen,
+        flagged=m.flagged,
+        replied=m.replied,
         in_reply_to=None if m.in_reply_to is None else clip(m.in_reply_to, chars),
         references=[clip(r, chars) for r in m.references[:refs]],
         references_count=len(m.references),
@@ -413,6 +419,7 @@ class GetMessageOutput(_Output):
 
 class ListThreadsOutput(_Output):
     folder: str
+    filter_type: str = Field(description="all, unread or flagged, as applied.")
     offset: int
     threads: list[ThreadSummary] = Field(description="Most recent activity first.")
 

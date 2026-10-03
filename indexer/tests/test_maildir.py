@@ -7,9 +7,11 @@ import pytest
 from src.maildir import (
     FLAG_SEPARATOR,
     SYNC_STAMP_NAME,
+    MessageState,
     SyncStamp,
     get_uniq,
     is_trashed,
+    message_state,
     parse_flags,
     parse_sync_stamp_rename,
     read_sync_stamp,
@@ -46,6 +48,41 @@ class TestIsTrashed:
 
     def test_true_when_t_is_sole_flag(self):
         assert is_trashed(Path("msg.host:2,T")) is True
+
+
+class TestMessageState:
+    """Read / flagged / replied state from the ``:2,<flags>`` suffix,
+    through the same ``parse_flags`` the trash check uses."""
+
+    @pytest.mark.parametrize(
+        ("name", "expected"),
+        [
+            # mbsync delivers unseen mail to new/ without a suffix.
+            ("1700000000.M1.host", MessageState(seen=False, flagged=False, replied=False)),
+            ("1700000000.M1.host:2,", MessageState(seen=False, flagged=False, replied=False)),
+            ("1700000000.M1.host:2,S", MessageState(seen=True, flagged=False, replied=False)),
+            ("1700000000.M1.host:2,F", MessageState(seen=False, flagged=True, replied=False)),
+            ("1700000000.M1.host:2,RS", MessageState(seen=True, flagged=False, replied=True)),
+            ("1700000000.M1.host:2,DFPRST", MessageState(seen=True, flagged=True, replied=True)),
+            # Trashed is not read: T says nothing about S.
+            ("1700000000.M1.host:2,T", MessageState(seen=False, flagged=False, replied=False)),
+            ("1700000000.M1.host:2,ST", MessageState(seen=True, flagged=False, replied=False)),
+            # Unknown letters and lowercase keyword letters are ignored,
+            # and flags are case-sensitive.
+            ("1700000000.M1.host:2,Xabc", MessageState(seen=False, flagged=False, replied=False)),
+            ("1700000000.M1.host:2,sfr", MessageState(seen=False, flagged=False, replied=False)),
+            ("1700000000.M1.host:2,aSz", MessageState(seen=True, flagged=False, replied=False)),
+            # Only the last separator carries flags.
+            ("weird:2,SF.host:2,R", MessageState(seen=False, flagged=False, replied=True)),
+        ],
+    )
+    def test_state_from_filename(self, name, expected):
+        assert message_state(Path("/maildir/INBOX/cur") / name) == expected
+
+    def test_directory_names_do_not_count(self):
+        assert message_state("/maildir/x:2,SFR/cur/1700000000.M1.host") == MessageState(
+            seen=False, flagged=False, replied=False
+        )
 
 
 class TestGetUniq:
