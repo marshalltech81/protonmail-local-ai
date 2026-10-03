@@ -633,15 +633,18 @@ successful mail sync has been recorded" until then.
 The indexer watches the Maildir for new files, but it cannot add a watch to
 a folder it could not read when the folder appeared, and making the folder
 readable later does not add one by itself. On a fresh install that is every
-folder from the first sync, INBOX included. After each sync, once mbsync
-writes its last-sync stamp, the indexer checks for directories that became
-readable and, if it finds any, re-creates its watch and queues the mail
-already in them (#516). No restart is needed. The same applies to a folder
+folder from the first sync, INBOX included. After each sync attempt, once
+mbsync has made its files readable and renamed its repair marker
+(`.mbsync-perms-repaired`) into place, the indexer checks for directories
+that became readable and, if it finds any, re-creates its watch and queues
+the mail already in them (#516). No restart is needed. The same applies to a folder
 created in Proton while the stack runs: its mail is indexed after the sync
 that created it, and its later deliveries in real time.
 
-A sync attempt that fails writes no stamp; folders it created are then
-watched at the next successful sync or the next recovery sweep
+A sync attempt that fails writes no last-sync stamp but still writes the
+marker, so folders it created are watched without waiting for a successful
+sync (#524). If the marker cannot be written, mbsync logs a warning and the
+folders are watched at the next successful sync or the next recovery sweep
 (`INDEXER_RECOVERY_SWEEP_INTERVAL_SECS`, default 30 minutes), whichever
 comes first. The check runs in the indexer's main loop. While the
 indexer's startup index is still draining a large backlog, it waits until
