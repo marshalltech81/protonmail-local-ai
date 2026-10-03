@@ -114,6 +114,13 @@ def bounded_logging:
     | "network \(.key): renamed or external"),
   ([$m.networks // {} | .[] | .name] | group_by(.)[] | select(length > 1)
     | "networks share the engine network \(.[0])"),
+  # Services name secrets by key; the top-level definition picks what the
+  # container reads (file, environment, external, name), so a secret any
+  # service uses keeps the base definition unchanged.
+  ([$m.services[] | list("secrets")[] | .source] | unique[] | . as $k
+    | select($base[0].secrets | has($k))
+    | select($m.secrets[$k] != $base[0].secrets[$k])
+    | "secret \($k): differs from the base"),
   ($base[0].services as $b
 | $m.services | to_entries[] | .key as $svc | .value as $s | $b[$svc] as $bs
 | (
@@ -383,6 +390,19 @@ services:
 EOF
 }
 
+# Services name secrets by key; the top-level definition picks the file.
+merged_hardening_rejects_redefined_secrets() {
+    expect_overlay_rejected secret-definitions \
+        "secret embed_api_key: differs from the base" \
+        "secret rerank_api_key: differs from the base" <<'EOF'
+secrets:
+  embed_api_key:
+    file: ./.secrets/bridge_pass.txt
+  rerank_api_key: !override
+    environment: BRIDGE_PASS
+EOF
+}
+
 # A decimal UID of zeros is still root.
 merged_hardening_rejects_leading_zero_root_users() {
     expect_overlay_rejected zero-users \
@@ -576,6 +596,7 @@ check "merged hardening rejects !override of a read-only volume" \
 check "merged hardening rejects !override on ports and networks" \
     merged_hardening_rejects_override_ports_and_networks
 check "merged hardening rejects the forbidden settings" merged_hardening_rejects_forbidden_settings
+check "merged hardening rejects redefined secrets" merged_hardening_rejects_redefined_secrets
 check "merged hardening rejects leading-zero root users" \
     merged_hardening_rejects_leading_zero_root_users
 check "merged hardening rejects an !override that drops a service" \
