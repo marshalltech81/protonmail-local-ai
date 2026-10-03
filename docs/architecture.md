@@ -323,7 +323,10 @@ calibration request (the indexer's runs right after `wait_for_ready`,
 with the client's usual retries) exits the service with the scrubbed
 error and the restart policy tries again, as for the dimension probe.
 mcp-server exits the same way while the indexer has not yet recorded
-the row (it does so once its embedder answers). The checks run at
+the row (it does so once its embedder answers); its calibration request
+is bounded as a whole by `EMBED_TIMEOUT_SECS`. While mcp-server cannot
+verify its embedder, the SQLite-only tools are down with it (#661 tracks
+keeping them up). The checks run at
 startup only; periodic re-checks are tracked separately. An index that
 holds messages but no row, or predates the table, fails closed with
 rebuild instructions, since nothing says which embedder wrote it.

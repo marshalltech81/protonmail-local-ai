@@ -276,3 +276,22 @@ def test_embed_client_aclose_closes_its_http_client():
     client = EmbedClient(base_url=ENDPOINT, model=MODEL, api_key="placeholder")
     asyncio.run(client.aclose())
     assert client.client.is_closed()
+
+
+def test_calibration_has_a_total_deadline(tmp_path):
+    # The client's timeout is per operation; a provider trickling bytes
+    # must not hold startup indefinitely.
+    db = _make_db(tmp_path, _unit(8))
+
+    class _Stalled(_Client):
+        async def embed(self, text: str) -> list[float]:
+            self.calls.append(text)
+            await asyncio.sleep(30)
+            return _unit(8)
+
+    client = _Stalled()
+    with pytest.raises(CalibrationRequestError, match="did not answer within 0.05 s"):
+        asyncio.run(
+            verify_embedder_identity(db, client, provider="openai", secrets=[], deadline_secs=0.05)
+        )
+    assert client.calls == [CALIBRATION_TEXT]

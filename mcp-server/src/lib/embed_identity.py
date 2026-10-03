@@ -25,6 +25,7 @@ import urllib.parse
 from collections.abc import Callable, Iterable
 from typing import Protocol
 
+from .embed import DEFAULT_EMBED_TIMEOUT_SECS
 from .security import safe_provider_exception_text
 from .sqlite import Database
 
@@ -121,9 +122,19 @@ def mismatches(
 
 
 async def verify_embedder_identity(
-    db: Database, client: _EmbedClient, *, provider: str, secrets: Iterable[str]
+    db: Database,
+    client: _EmbedClient,
+    *,
+    provider: str,
+    secrets: Iterable[str],
+    deadline_secs: float = DEFAULT_EMBED_TIMEOUT_SECS,
 ) -> None:
-    """Raise unless ``client`` is the embedder that built the index."""
+    """Raise unless ``client`` is the embedder that built the index.
+
+    ``deadline_secs`` bounds the whole calibration request: the client's
+    own timeout is per operation, so a provider sending a response in
+    small fragments could otherwise hold startup indefinitely.
+    """
     stored = await asyncio.to_thread(db.get_active_vector_generation)
     if stored is None:
         raise EmbedderIdentityError(
@@ -133,7 +144,11 @@ async def verify_embedder_identity(
             '"Embedder identity mismatch".'
         )
     try:
-        vector = await client.embed(CALIBRATION_TEXT)
+        vector = await asyncio.wait_for(client.embed(CALIBRATION_TEXT), deadline_secs)
+    except TimeoutError:
+        raise CalibrationRequestError(
+            f"Embedder calibration request did not answer within {deadline_secs:g} s"
+        ) from None
     except Exception as exc:
         raise CalibrationRequestError(
             "Embedder calibration request failed: "
@@ -161,6 +176,7 @@ def run_startup_identity_check(
     *,
     provider: str,
     secrets: Iterable[str],
+    deadline_secs: float = DEFAULT_EMBED_TIMEOUT_SECS,
 ) -> None:
     """Run ``verify_embedder_identity`` before the server starts; exit on
     failure with the fixed message.
@@ -173,7 +189,9 @@ def run_startup_identity_check(
     async def run() -> None:
         client = make_client()
         try:
-            await verify_embedder_identity(db, client, provider=provider, secrets=secrets)
+            await verify_embedder_identity(
+                db, client, provider=provider, secrets=secrets, deadline_secs=deadline_secs
+            )
         finally:
             await client.aclose()
 

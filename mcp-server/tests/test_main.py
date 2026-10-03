@@ -646,9 +646,9 @@ class TestRemoteEndpointWarning:
 
         calls = []
 
-        def check(db, make_client, *, provider, secrets):
+        def check(db, make_client, *, provider, secrets, deadline_secs):
             client = make_client()
-            calls.append((provider, client.base_url, client.model, secrets))
+            calls.append((provider, client.base_url, client.model, secrets, deadline_secs))
 
         monkeypatch.setattr(main_mod, "run_startup_identity_check", check)
         local = "http://host.docker.internal:8001/v1"
@@ -666,7 +666,9 @@ class TestRemoteEndpointWarning:
             monkeypatch.setattr(main_mod, name, value)
         monkeypatch.setattr(main_mod, "_run_server", lambda *_: None)
         main_mod.main()
-        assert calls == [("openai", local, "synthetic", [_PLACEHOLDER_KEY])]
+        assert calls == [
+            ("openai", local, "synthetic", [_PLACEHOLDER_KEY], main_mod.EMBED_TIMEOUT_SECS)
+        ]
 
     def test_main_warns_once_per_remote_layer(self, monkeypatch, caplog):
         warnings = self._run_main(

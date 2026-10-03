@@ -645,6 +645,7 @@ def main():
         ),
         provider=EMBED_MODE,
         secrets=[k for k in (INFERENCE_API_KEY, EMBED_API_KEY, RERANK_API_KEY) if k],
+        deadline_secs=EMBED_TIMEOUT_SECS,
     )
 
     # FastMCP server — provides the @server.tool() decorator and the
