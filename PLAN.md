@@ -688,15 +688,31 @@ them (one test-first commit per issue, `Fixes #N` per issue):
 
 **Handoff 2026-10-02, night — start here.** Every pre-go-live item
 from Resolved decisions 14 has merged (#592–#630, listed under
-Recently Completed, 2026-10-02 evening). **Not ready for go-live yet:**
-the owner's later decisions add two blockers that must merge before
-the first sync: implicit TLS between mbsync and Bridge (#638) and the
-16-hex claimant-ID suffix (#454, a v0 key change). After both, run the
-go-live checklist below in macOS Bridge mode from a fresh Maildir. Rebuild any existing index and Maildir: #597 and #599 edit
+Recently Completed, 2026-10-02 evening). **Not ready for go-live yet.**
+Go-live blockers (owner, 2026-10-02 night), each its own PR, all to
+merge before the first sync:
+
+- implicit TLS between mbsync and Bridge in both Bridge modes (#638):
+  Bridge v3.27.0 serves implicit TLS when its IMAP SSL setting is on
+  (`imapsmtpserver/listener.go`); the container Bridge is patched to
+  force it (a fourth hunk, three-layer pattern), mbsync switches with
+  no STARTTLS fallback, and in macOS mode the app's IMAP connection
+  mode is set to SSL before the first sync;
+- the 16-hex claimant-ID suffix (#454, a v0 key change);
+- v0 schema additions that would otherwise need a migration or full
+  re-index later: Maildir flags (#644), chunk `kind` tags (Phase 2
+  item 4), and the embedder identity record (#645, Phase 2 item 1's
+  first slice);
+- pre-go-live bug fixes: #602, #629, #282, #641, #524, #526, #533,
+  #631–#637 and #274. #463 step 2 waits for a real Proton message and
+  is done right after the first sync.
+
+After those, run the go-live checklist below in macOS Bridge mode from
+a fresh Maildir. Rebuild any existing index and Maildir: #597 and #599 edit
 the v0 schema, #594 and #611 change chunked and parsed output, and
 #598 refuses a Maildir synced with the earlier folder layout.
 
-Still needs the owner (none blocks go-live):
+Still needs the owner (none of these blocks go-live):
 
 - **#602 (decided: set `secure_delete` explicitly):** the container's
   Debian SQLite is built with `SQLITE_SECURE_DELETE`, so it likely
@@ -711,16 +727,6 @@ Still needs the owner (none blocks go-live):
 - **Reserved child-folder names (#598):** six names (`uidvalidity`,
   `isyncuidmap.db`, `mbsyncstate*`) are skipped silently; reporting
   them needs an extra IMAP listing.
-- **Implicit TLS (decided 2026-10-02 night, in progress):** the owner
-  chose implicit TLS (RFC 8314; Bridge's "SSL" mode) between mbsync and
-  Bridge in both Bridge modes, verified in Bridge v3.27.0's
-  `imapsmtpserver/listener.go`. One PR patches the container Bridge
-  (a fourth hunk, three-layer pattern) and switches mbsync with no
-  STARTTLS fallback; hold the first sync until it merges, then set the
-  app's IMAP connection mode to SSL.
-- **Follow-ups filed from review, not scheduled:** the merged-config
-  check gaps #631–#637 (#616 round 3), #629 (an entrypoint check under
-  macOS Bash 3.2), #603 (UIDVALIDITY recovery in archive mode).
 - **ChatGPT:** needs the hosted-client design after go-live.
 - After the first sync: confirm the top `Received:` header is Proton's
   (`occurred_at`, #599) and check #463's `Authentication-Results` input.
@@ -1152,11 +1158,8 @@ linked from the Phase 3 items they track.
   copy matches, #624); parameterize the Go toolchain as an `ARG` (not
   done: it would stop Dependabot's golang bumps; owner to decide)
 - ~~path filters on `.github/workflows/docker.yml`~~ (done: #627, #623)
-- ~~Bridge build: `go mod download` has no retry~~ (done: #621, #618), so one blip at
-  `proxy.golang.org` (seen 2026-09-30: an HTTP/2 `INTERNAL_ERROR` on a
-  single module) fails the whole `docker compose build` check. Add a
-  bounded retry around the download (`go mod verify` stays
-  unconditional) or a module cache in the workflow
+- ~~Bridge build: bounded retry around `go mod download`~~ (done:
+  #621, #618; three attempts, `go mod verify` unconditional)
 - ~~Trivy scan of the Bridge Go module graph in `security.yml`~~
   (done: #615, report only, #608)
 - ~~pin `actions/checkout` to a commit SHA in `bridge.yml`; pinned
@@ -1175,11 +1178,8 @@ linked from the Phase 3 items they track.
 - ~~loud one-shot startup warning when `INFERENCE_MODE` sends retrieved
   excerpts to a remote provider~~ (done: #628, one line per off-host
   layer in both services, #622)
-- `get_message`: returns a message's full body and headers with no
-  bound, so one huge message (a pasted log, 12,000 References) is one
-  huge response. **Decided** (Resolved decisions 14, #592): offset
-  paging of the body (default page plus `next_offset`), headers
-  capped; the paging-or-cap choice is superseded (#489; done: #619)
+- ~~`get_message` body and header bounds~~ (done: #619, #489; offset
+  paging of the body, headers capped)
 - OCR language is fixed to Tesseract's English default (#490;
   documented in #517, no setting yet)
 - ~~mcp-server: remove the dead `Database.get_thread_message_ids`~~
