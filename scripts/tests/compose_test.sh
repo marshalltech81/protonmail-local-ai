@@ -109,11 +109,46 @@ def bounded_logging:
 # join networks by key and the name picks the engine network.
 | ($base[0].services | keys[] | select(. as $k | $m.services | has($k) | not)
     | "\(.): missing from the merged config"),
+  # Every base service also starts with no profile active ($active), as
+  # the Makefile runs Compose, and is not scaled to zero. Only the macOS
+  # overlay ($macos: it is among the rendered files) moves one out:
+  # Bridge, into the never-activated container-bridge profile.
+  ($base[0].services | keys[] | . as $k | $active[0].services[$k] as $a
+    | select($a == null or $a.scale == 0 or $a.deploy.replicas == 0)
+    | select($k != "protonmail-bridge" or $macos != true
+        or $m.services[$k].profiles != ["container-bridge"])
+    | "\($k): not started by a plain up"),
   ($base[0].networks | to_entries[]
     | select(($m.networks[.key].name) != .value.name or $m.networks[.key].external == true)
     | "network \(.key): renamed or external"),
+  # A network also keeps its driver, driver options and addressing: a
+  # macvlan with LAN IPAM keeps the name but puts its members on the LAN.
+  # (internal: true, which the hardened overlay sets, is not compared.)
+  ($base[0].networks | to_entries[]
+    | select(($m.networks[.key] // {} | {driver, driver_opts, ipam})
+        != (.value | {driver, driver_opts, ipam}))
+    | "network \(.key): driver settings differ from the base"),
   ([$m.networks // {} | .[] | .name] | group_by(.)[] | select(length > 1)
     | "networks share the engine network \(.[0])"),
+  # The same for volumes, which services mount by key; a volume also keeps
+  # its driver settings, since local driver_opts can back it with a host
+  # path.
+  ($base[0].volumes | to_entries[]
+    | select(($m.volumes[.key].name) != .value.name or $m.volumes[.key].external == true)
+    | "volume \(.key): renamed or external"),
+  ($base[0].volumes | to_entries[]
+    | select(($m.volumes[.key] // {} | {driver, driver_opts})
+        != (.value | {driver, driver_opts}))
+    | "volume \(.key): driver settings differ from the base"),
+  ([$m.volumes // {} | .[] | .name] | group_by(.)[] | select(length > 1)
+    | "volumes share the engine volume \(.[0])"),
+  # Services name secrets by key; the top-level definition picks what the
+  # container reads (file, environment, external, name), so a secret any
+  # service uses keeps the base definition unchanged.
+  ([$m.services[] | list("secrets")[] | .source] | unique[] | . as $k
+    | select($base[0].secrets | has($k))
+    | select($m.secrets[$k] != $base[0].secrets[$k])
+    | "secret \($k): differs from the base"),
   ($base[0].services as $b
 | $m.services | to_entries[] | .key as $svc | .value as $s | $b[$svc] as $bs
 | (
@@ -130,7 +165,7 @@ def bounded_logging:
     ("privileged", "cap_add", "devices", "gpus", "device_cgroup_rules", "volumes_from",
      "extends", "network_mode", "pid", "ipc", "uts", "userns_mode", "cgroup", "use_api_socket"
         | select(. as $k | $s | set($k)) | "sets \(.)"),
-    (if ($s.user // "" | tostring | test("^(root|0)(:|$)")) then "runs as root" else empty end),
+    (if ($s.user // "" | tostring | test("^(root|[+-]?0+)(:|$)")) then "runs as root" else empty end),
     ($s | list("volumes")[] | select((.source // "") | test("docker\\.sock"))
         | "mounts the docker socket"),
     ($s | list("volumes")[] | select(.type == "bind" and .read_only != true)
@@ -149,11 +184,17 @@ def bounded_logging:
         and ($svc | IN("protonmail-bridge", "mbsync") | not)
         then "joins bridge-net" else empty end),
     # A service the base does not define must name its non-root user (an
-    # unset user is the image default, possibly root) and gets no secrets.
+    # unset user is the image default, possibly root) and gets no secrets or base volumes.
     (if $bs == null then
         (if $s.user == null then "sets no user" else empty end),
-        (if ($s | list("secrets")) != [] then "uses a secret" else empty end)
+        (if ($s | list("secrets")) != [] then "uses a secret" else empty end),
+        ($s | list("volumes")[] | .source // "" | select(. as $v | $base[0].volumes | has($v))
+            | "mounts the base volume \(.)")
     else
+        # Another image or build may default to root, so it must name a
+        # user (the root check above rejects a root one).
+        (if ($s.image != $bs.image or $s.build != $bs.build) and $s.user == null
+            then "changes its image or build and sets no user" else empty end),
         ($s | list("secrets")[] | .source as $src
             | select([$bs | list("secrets")[] | select(.source == $src)] == [])
             | "gains secret \($src)"),
@@ -170,6 +211,10 @@ def bounded_logging:
             then "mem_limit is missing or above the base" else empty end),
         ($s.networks // {} | keys[] | select(. as $n | $bs.networks // {} | has($n) | not)
             | "joins network \(.), which the base does not give it"),
+        ($s | list("volumes")[] | . as $v
+            | select([$bs | list("volumes")[]
+                | select(.type == $v.type and .source == $v.source and .target == $v.target)] == [])
+            | "mounts \($v.source // $v.type) at \($v.target), which the base does not"),
         ($bs | list("volumes")[] | select(.read_only == true) | .target as $t
             | select([$s | list("volumes")[] | select(.target == $t and .read_only == true)] == [])
             | "volume at \($t) is no longer read-only")
@@ -179,11 +224,22 @@ def bounded_logging:
 '
 
 # Renders the given compose files with every profile and fails, listing
-# the violations, unless the merged config keeps the hardening.
+# the violations, unless the merged config keeps the hardening. It also
+# renders them with no profile, as every Makefile target runs them, for
+# the set of services that actually start ($active).
 expect_merged_hardening() {
+    local file macos=false
+    for file in "$@"; do
+        if [[ "$file" == "$MACOS" ]]; then
+            macos=true
+        fi
+    done
+    render "$@" || return 1
+    cp "$WORK/config.json" "$WORK/active.json"
     ALL_PROFILES=1 render "$@" || return 1
-    jq -r --slurpfile base "$WORK/base.json" "$HARDENING_VIOLATIONS" "$WORK/config.json" \
-        >"$WORK/violations" || return 1
+    jq -r --slurpfile base "$WORK/base.json" --slurpfile active "$WORK/active.json" \
+        --argjson macos "$macos" \
+        "$HARDENING_VIOLATIONS" "$WORK/config.json" >"$WORK/violations" || return 1
     if [[ -s "$WORK/violations" ]]; then
         cat "$WORK/violations"
         return 1
@@ -383,6 +439,75 @@ services:
 EOF
 }
 
+# Services name secrets by key; the top-level definition picks the file.
+merged_hardening_rejects_redefined_secrets() {
+    expect_overlay_rejected secret-definitions \
+        "secret embed_api_key: differs from the base" \
+        "secret rerank_api_key: differs from the base" <<'EOF'
+secrets:
+  embed_api_key:
+    file: ./.secrets/bridge_pass.txt
+  rerank_api_key: !override
+    environment: BRIDGE_PASS
+EOF
+}
+
+# Another image may default to root; the base's images set their own user.
+merged_hardening_rejects_a_new_image_without_a_user() {
+    expect_overlay_rejected new-image \
+        "indexer: changes its image or build and sets no user" \
+        "mbsync: changes its image or build and sets no user" <<'EOF'
+services:
+  indexer:
+    build: !reset null
+    image: example.invalid/rootful:1
+  mbsync:
+    build:
+      dockerfile: Dockerfile.rootful
+EOF
+}
+
+# A named volume is neither a bind nor the docker socket, but mounting
+# another service's volume hands over its data, to an existing service or
+# a new one.
+merged_hardening_rejects_added_volumes() {
+    expect_overlay_rejected added-volumes \
+        "mcp-server: mounts bridge-data at /bridge, which the base does not" \
+        "indexer: mounts sqlite-volume at /extra, which the base does not" \
+        "extra: mounts the base volume bridge-data" <<'EOF'
+services:
+  mcp-server:
+    volumes:
+      - bridge-data:/bridge:ro
+  indexer:
+    volumes:
+      - sqlite-volume:/extra:ro
+  extra:
+    image: example.invalid/extra:1
+    user: "1234:1234"
+    volumes:
+      - bridge-data:/bridge:ro
+EOF
+}
+
+# A decimal UID of zeros, signed or not, is still root: Docker parses it
+# with Go's strconv.Atoi.
+merged_hardening_rejects_leading_zero_root_users() {
+    expect_overlay_rejected zero-users \
+        "indexer: runs as root" "mbsync: runs as root" \
+        "mcp-server: runs as root" "protonmail-bridge: runs as root" <<'EOF'
+services:
+  indexer:
+    user: "00"
+  mbsync:
+    user: "000:000"
+  mcp-server:
+    user: "-0"
+  protonmail-bridge:
+    user: "+00:+000"
+EOF
+}
+
 merged_hardening_rejects_override_dropping_a_service() {
     expect_overlay_rejected override-services "indexer: missing from the merged config" <<'EOF'
 services: !override
@@ -413,6 +538,94 @@ networks:
     name: shared-net
   bridge-net:
     name: shared-net
+EOF
+}
+
+# No Makefile target activates a profile, so a service an overlay moves
+# into one silently stops running; only the macOS overlay's Bridge profile
+# is expected.
+merged_hardening_rejects_services_moved_into_a_profile() {
+    expect_overlay_rejected profiled-services \
+        "indexer: not started by a plain up" \
+        "mcp-server: not started by a plain up" <<'EOF' || return 1
+services:
+  indexer:
+    profiles: [manual]
+  mcp-server:
+    profiles: [manual]
+EOF
+    expect_overlay_rejected profiled-bridge \
+        "protonmail-bridge: not started by a plain up" <<'EOF' || return 1
+services:
+  protonmail-bridge:
+    profiles: [manual]
+  mbsync:
+    depends_on: !reset {}
+EOF
+    # The container-bridge profile is allowed only with the macOS overlay,
+    # which also points mbsync at the host app.
+    expect_overlay_rejected container-bridge-profile \
+        "protonmail-bridge: not started by a plain up" <<'EOF' || return 1
+services:
+  protonmail-bridge:
+    profiles: [container-bridge]
+  mbsync:
+    depends_on: !reset {}
+EOF
+    # A service scaled to zero is rendered but starts no container.
+    expect_overlay_rejected scaled-to-zero \
+        "indexer: not started by a plain up" \
+        "mbsync: not started by a plain up" <<'EOF'
+services:
+  indexer:
+    scale: 0
+  mbsync:
+    deploy:
+      replicas: 0
+EOF
+}
+
+# A macvlan bridge-net keeps its engine name but puts Bridge, bound to
+# 0.0.0.0, on the LAN.
+merged_hardening_rejects_network_driver_changes() {
+    expect_overlay_rejected network-drivers \
+        "network bridge-net: driver settings differ from the base" \
+        "network app-net: driver settings differ from the base" <<'EOF'
+networks:
+  bridge-net:
+    driver: macvlan
+    driver_opts:
+      parent: en0
+    ipam:
+      config:
+        - subnet: 192.168.1.0/24
+  app-net:
+    driver_opts:
+      com.docker.network.bridge.host_binding_ipv4: 0.0.0.0
+EOF
+}
+
+# Services mount volumes by key; a volume's name picks the engine volume
+# and its driver settings what backs it (a local bind to a host path).
+merged_hardening_rejects_renamed_or_rebacked_volumes() {
+    expect_overlay_rejected volume-names \
+        "volume maildir-volume: renamed or external" "volume sqlite-volume: renamed or external" \
+        "volume mbsync-state: renamed or external" \
+        "volumes share the engine volume shared-volume" \
+        "volume bridge-data: driver settings differ from the base" <<'EOF'
+volumes:
+  maildir-volume:
+    name: shared-volume
+  sqlite-volume:
+    name: shared-volume
+  mbsync-state:
+    external: true
+  bridge-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /srv/data
 EOF
 }
 
@@ -564,11 +777,23 @@ check "merged hardening rejects !override of a read-only volume" \
 check "merged hardening rejects !override on ports and networks" \
     merged_hardening_rejects_override_ports_and_networks
 check "merged hardening rejects the forbidden settings" merged_hardening_rejects_forbidden_settings
+check "merged hardening rejects redefined secrets" merged_hardening_rejects_redefined_secrets
+check "merged hardening rejects a new image or build without a user" \
+    merged_hardening_rejects_a_new_image_without_a_user
+check "merged hardening rejects volumes an overlay adds" merged_hardening_rejects_added_volumes
+check "merged hardening rejects leading-zero root users" \
+    merged_hardening_rejects_leading_zero_root_users
 check "merged hardening rejects an !override that drops a service" \
     merged_hardening_rejects_override_dropping_a_service
 check "merged hardening rejects max-size on a driver other than json-file" \
     merged_hardening_rejects_max_size_on_another_logging_driver
 check "merged hardening rejects renamed or shared networks" merged_hardening_rejects_renamed_networks
+check "merged hardening rejects services moved into a profile" \
+    merged_hardening_rejects_services_moved_into_a_profile
+check "merged hardening rejects network driver changes" \
+    merged_hardening_rejects_network_driver_changes
+check "merged hardening rejects renamed, shared or rebacked volumes" \
+    merged_hardening_rejects_renamed_or_rebacked_volumes
 check "first run keeps Bridge's log driver at none" first_run_keeps_bridge_logging_disabled
 check "merged hardening rejects new users, secrets, hooks and devices" \
     merged_hardening_rejects_new_grants
