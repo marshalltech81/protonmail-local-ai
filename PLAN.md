@@ -688,18 +688,23 @@ them (one test-first commit per issue, `Fixes #N` per issue):
 
 **Handoff 2026-10-02, night — start here.** Every pre-go-live item
 from Resolved decisions 14 has merged (#592–#630, listed under
-Recently Completed, 2026-10-02 evening), so the stack is ready for
-the go-live checklist below in macOS Bridge mode from a fresh
-Maildir. Rebuild any existing index and Maildir: #597 and #599 edit
+Recently Completed, 2026-10-02 evening). **Not ready for go-live yet:**
+the owner's later decisions add two blockers that must merge before
+the first sync: implicit TLS between mbsync and Bridge (#638) and the
+16-hex claimant-ID suffix (#454, a v0 key change). After both, run the
+go-live checklist below in macOS Bridge mode from a fresh Maildir. Rebuild any existing index and Maildir: #597 and #599 edit
 the v0 schema, #594 and #611 change chunked and parsed output, and
 #598 refuses a Maildir synced with the earlier folder layout.
 
 Still needs the owner (none blocks go-live):
 
-- **#602:** SQLite `secure_delete` is off, so bytes of reaped rows stay
-  in freed pages until reused or `VACUUM`; the issue lists the options.
-- **#626:** extraction rows orphaned by reaps before #605 are not swept;
-  a rebuild clears them (documented), or approve a startup sweep.
+- **#602 (decided: set `secure_delete` explicitly):** the container's
+  Debian SQLite is built with `SQLITE_SECURE_DELETE`, so it likely
+  defaults on there already; the PR sets the pragma on every write
+  connection so the guarantee does not depend on how SQLite was built.
+- ~~**#626**~~ and ~~#603~~: closed as documented (owner, 2026-10-02);
+  ~~#434~~ closed as superseded by #572; #629 (Bash 3.2) and #604 (AI
+  judge on the synthetic corpus only) are being built.
 - **Go toolchain `ARG` (#627):** not done, because Dependabot reads only
   literal `FROM` lines and keeps the golang image current; drop that
   half of the backlog item or accept manual golang bumps.
