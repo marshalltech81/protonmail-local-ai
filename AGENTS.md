@@ -202,7 +202,7 @@ Do not make any of the following changes unless the repository owner explicitly 
 - Every per-message row (`messages`, `message_thread_map`,
   `message_participants`, `message_chunks`, `attachments`,
   `pending_deletions`) is keyed by the claimant ID — the Message-ID plus
-  `#` and the first eight hex digits of the SHA-256 of the file's raw
+  `#` and the first sixteen hex digits of the SHA-256 of the file's raw
   bytes (`indexer/src/parser.py` `claimant_id`) — never by the bare,
   sender-controlled Message-ID, so two files claiming one Message-ID
   cannot overwrite or delete each other's rows (#217). Thread

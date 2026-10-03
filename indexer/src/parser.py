@@ -167,7 +167,8 @@ class Attachment:
 
 
 # Hex digits of the file hash in a claimant ID (see ``claimant_id``).
-CLAIMANT_HASH_CHARS = 8
+# 64 bits: a 32-bit prefix could be matched by a crafted file (#454).
+CLAIMANT_HASH_CHARS = 16
 
 
 def claimant_id(message_id: str, content_hash: str | None) -> str:

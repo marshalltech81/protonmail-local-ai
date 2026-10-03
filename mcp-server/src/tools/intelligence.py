@@ -1457,13 +1457,19 @@ def _short(value: str) -> str:
     return value if len(value) <= limit else value[: limit - 1] + "…"
 
 
+# A claimant ID's suffix: ``#`` plus sixteen hex digits of the file hash
+# (``indexer/src/parser.py`` ``CLAIMANT_HASH_CHARS``, #454).
+_CLAIMANT_SUFFIX_CHARS = 17
+
+
 def _short_id(claimant_id: str) -> str:
     """A claimant ID cut to ``_LABELLED_FIELD_CHARS`` characters, keeping
     its ``#`` suffix, which tells claimants of one Message-ID apart."""
     limit = _LABELLED_FIELD_CHARS
     if len(claimant_id) <= limit:
         return claimant_id
-    return claimant_id[: limit - 10] + "…" + claimant_id[-9:]
+    keep = _CLAIMANT_SUFFIX_CHARS
+    return claimant_id[: limit - keep - 1] + "…" + claimant_id[-keep:]
 
 
 def _render_chunk_header(chunk: ChunkResult, char_end: int, label: str | None, short: bool) -> str:
