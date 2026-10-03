@@ -214,6 +214,18 @@ services:
     # ok: compose-root-user
     user: "1003:1003"
 
+  sneaky-six:
+    # ruleid: compose-root-user
+    user: "00"
+
+  sneaky-seven:
+    # ruleid: compose-root-user
+    user: "000:000"
+
+  sneaky-eight:
+    # ok: compose-root-user
+    user: "0100"
+
 volumes:
   ok-volume: {}
   bind-volume:

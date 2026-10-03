@@ -130,7 +130,7 @@ def bounded_logging:
     ("privileged", "cap_add", "devices", "gpus", "device_cgroup_rules", "volumes_from",
      "extends", "network_mode", "pid", "ipc", "uts", "userns_mode", "cgroup", "use_api_socket"
         | select(. as $k | $s | set($k)) | "sets \(.)"),
-    (if ($s.user // "" | tostring | test("^(root|0)(:|$)")) then "runs as root" else empty end),
+    (if ($s.user // "" | tostring | test("^(root|0+)(:|$)")) then "runs as root" else empty end),
     ($s | list("volumes")[] | select((.source // "") | test("docker\\.sock"))
         | "mounts the docker socket"),
     ($s | list("volumes")[] | select(.type == "bind" and .read_only != true)
@@ -383,6 +383,18 @@ services:
 EOF
 }
 
+# A decimal UID of zeros is still root.
+merged_hardening_rejects_leading_zero_root_users() {
+    expect_overlay_rejected zero-users \
+        "indexer: runs as root" "mbsync: runs as root" <<'EOF'
+services:
+  indexer:
+    user: "00"
+  mbsync:
+    user: "000:000"
+EOF
+}
+
 merged_hardening_rejects_override_dropping_a_service() {
     expect_overlay_rejected override-services "indexer: missing from the merged config" <<'EOF'
 services: !override
@@ -564,6 +576,8 @@ check "merged hardening rejects !override of a read-only volume" \
 check "merged hardening rejects !override on ports and networks" \
     merged_hardening_rejects_override_ports_and_networks
 check "merged hardening rejects the forbidden settings" merged_hardening_rejects_forbidden_settings
+check "merged hardening rejects leading-zero root users" \
+    merged_hardening_rejects_leading_zero_root_users
 check "merged hardening rejects an !override that drops a service" \
     merged_hardening_rejects_override_dropping_a_service
 check "merged hardening rejects max-size on a driver other than json-file" \

@@ -404,7 +404,7 @@ rules:
       - pattern: "user: $USER"
       - metavariable-regex:
           metavariable: $USER
-          regex: ^["']?(root|0)(:|["']?$)|.*\$
+          regex: ^["']?(root|0+)(:|["']?$)|.*\$
 
   - id: compose-extends
     languages: [yaml]
