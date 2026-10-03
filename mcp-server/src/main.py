@@ -26,6 +26,7 @@ from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from .lib.embed import DEFAULT_EMBED_TIMEOUT_SECS, EmbedClient
+from .lib.embed_identity import run_startup_identity_check
 from .lib.inference import (
     DEFAULT_COMPLETE_TIMEOUT_SECS,
     DEFAULT_CONTEXT_TOKENS,
@@ -630,6 +631,22 @@ def main():
     # indexer has not yet run its schema migrations; the tool layer
     # treats that as skip-validation.
     expected_embed_dim = db.get_embedding_dim()
+
+    # Refuse to serve query vectors from an embedder other than the one
+    # that built the index (#645). A throwaway client: the check runs in
+    # its own event loop, before the server's.
+    run_startup_identity_check(
+        db,
+        lambda: EmbedClient(
+            base_url=EMBED_BASE_URL,
+            model=EMBED_MODEL,
+            api_key=EMBED_API_KEY,
+            timeout_secs=EMBED_TIMEOUT_SECS,
+        ),
+        provider=EMBED_MODE,
+        secrets=[k for k in (INFERENCE_API_KEY, EMBED_API_KEY, RERANK_API_KEY) if k],
+        deadline_secs=EMBED_TIMEOUT_SECS,
+    )
 
     # FastMCP server — provides the @server.tool() decorator and the
     # Streamable HTTP app ``_run_server`` serves, behind the

@@ -1130,9 +1130,9 @@ class TestDirectLookups:
         assert [r.thread_id for r in first] == ["t-beta"]
         assert [r.thread_id for r in second] == ["t-alpha"]
 
-    def test_list_threads_rejects_unindexed_filter_types(self, seeded_db: Database):
+    def test_list_threads_rejects_unknown_filter_types(self, seeded_db: Database):
         with pytest.raises(ValueError, match="filter_type"):
-            seeded_db.list_threads(folder="INBOX", filter_type="unread")
+            seeded_db.list_threads(folder="INBOX", filter_type="replied")
 
 
 class TestDisplaySubjectFallback:

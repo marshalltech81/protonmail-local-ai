@@ -549,3 +549,99 @@ class TestOccurredAt:
         assert f"Delivered: {self.DELIVERED}" in result.content[0].text
         result = _wire(server, "get_message", {"message_id": "sent@example.com"})
         assert "Delivered:" not in result.content[0].text
+
+
+class TestMaildirState:
+    """Read / flagged / replied state the indexer takes from each file's
+    Maildir flags: on every message header, as list_threads filters and
+    as query_messages filters (#644)."""
+
+    @pytest.fixture
+    def server(self, tmp_path):
+        with _open_fixture_db(tmp_path) as (conn, db):
+            for mid, tid, folder, day, state in (
+                ("a1", "t1", "INBOX", 1, {"seen": True, "replied": True}),
+                ("a2", "t1", "INBOX", 2, {}),
+                ("b1", "t2", "INBOX", 3, {"seen": True, "flagged": True}),
+                ("c1", "t3", "INBOX", 4, {"seen": True}),
+                # An unread message outside INBOX does not make its
+                # thread unread in INBOX.
+                ("e1", "t3", "Archive", 6, {}),
+                ("d1", "t4", "Archive", 5, {"flagged": True}),
+            ):
+                _insert_message(
+                    conn,
+                    message_id=mid,
+                    thread_id=tid,
+                    folder=folder,
+                    sent_at=f"2024-01-0{day}T00:00:00+00:00",
+                    from_=["alice@example.com"],
+                    **state,
+                )
+            conn.close()
+            yield _server(db)
+
+    def test_message_headers_carry_the_state(self, server):
+        message = _call(server, "get_message", message_id="a1")["message"]
+        assert (message["seen"], message["flagged"], message["replied"]) == (True, False, True)
+        thread = _call(server, "get_thread", thread_id="t1")["messages"]
+        assert [(m["message_id"], m["seen"], m["flagged"], m["replied"]) for m in thread] == [
+            ("a1", True, False, True),
+            ("a2", False, False, False),
+        ]
+        listed = _call(server, "query_messages", folder="Archive")["messages"]
+        assert {(m["message_id"], m["seen"], m["flagged"]) for m in listed} == {
+            ("d1", False, True),
+            ("e1", False, False),
+        }
+
+    def test_prose_states_the_state(self, server):
+        text = _wire(server, "get_message", {"message_id": "a1"}).content[0].text
+        assert "Status: read, replied" in text
+        text = _wire(server, "get_message", {"message_id": "a2"}).content[0].text
+        assert "Status: unread" in text
+        text = _wire(server, "query_messages", {"folder": "Archive"}).content[0].text
+        assert "Archive | unread | flagged" in text
+
+    @pytest.mark.parametrize(
+        ("folder", "filter_type", "expected"),
+        [
+            ("INBOX", "all", {"t1", "t2", "t3"}),
+            ("INBOX", "unread", {"t1"}),
+            ("INBOX", "flagged", {"t2"}),
+            ("Archive", "unread", {"t3", "t4"}),
+            ("Archive", "flagged", {"t4"}),
+        ],
+    )
+    def test_list_threads_filters(self, server, folder, filter_type, expected):
+        out = _call(server, "list_threads", folder=folder, filter_type=filter_type)
+        assert {t["thread_id"] for t in out["threads"]} == expected
+        assert out["filter_type"] == filter_type
+
+    def test_list_threads_rejects_other_filters(self, server):
+        result = _wire(server, "list_threads", {"filter_type": "replied"})
+        assert result.is_error
+        assert "filter_type must be one of" in result.content[0].text
+
+    @pytest.mark.parametrize(
+        ("args", "expected"),
+        [
+            ({"seen": False}, {"a2", "d1", "e1"}),
+            ({"seen": True}, {"a1", "b1", "c1"}),
+            ({"flagged": True}, {"b1", "d1"}),
+            ({"seen": True, "flagged": True}, {"b1"}),
+        ],
+    )
+    def test_query_messages_filters(self, server, args, expected):
+        out = _call(server, "query_messages", **args)
+        assert {m["message_id"] for m in out["messages"]} == expected
+        assert out["total_matches"] == len(expected)
+        assert out["filters"] == [
+            {"filter": key, "value": value, "match": "equals"} for key, value in args.items()
+        ]
+
+    def test_a_cursor_is_bound_to_the_state_filters(self, server):
+        first = _call(server, "query_messages", seen=False, limit=1)
+        assert first["has_more"]
+        result = _wire(server, "query_messages", {"seen": True, "cursor": first["next_cursor"]})
+        assert result.is_error

@@ -19,8 +19,8 @@ The search, retrieval, and system tools (Groups 1, 2, and 4) publish an
 so two different indexed files can carry the same one (a reused or
 forged ID). The index keeps both rather than letting one overwrite the
 other, and names each by its claimant ID: the Message-ID plus `#` and
-the first eight hex digits of the raw file's SHA-256, for example
-`<id@x.example>` stored as `id@x.example#3f9a2c1b`. It stays the same
+the first sixteen hex digits of the raw file's SHA-256, for example
+`<id@x.example>` stored as `id@x.example#3f9a2c1b7d40e865`. It stays the same
 across flag renames and folder moves, since those do not change the
 file's bytes. Every message row, evidence chunk, and attachment hit
 carries both `message_id` (the header value) and `claimant_id`.
@@ -399,8 +399,8 @@ left out; the tool has no folder filter, so reach them through
 Read a thread by ID as its messages, oldest first. Each message shows
 its own headers (Message-ID, claimant ID, subject, From / To / Cc, send date and,
 when known, delivery date (`occurred_at`) in UTC,
-folder, In-Reply-To, attachment flag; recipient lists past 10 are
-summarized as a count) and its indexed body after quoted-reply
+folder, In-Reply-To, attachment flag, [read state](#read-state);
+recipient lists past 10 are summarized as a count) and its indexed body after quoted-reply
 stripping. Attachment text is not included. When no message body is
 indexed yet, the accumulated thread text (a retrieval artifact that
 also carries quoted replies) is shown instead.
@@ -429,7 +429,7 @@ found` ([Reaped sources](#reaped-sources)).
 ### `get_message`
 Return one message's own headers — subject, From / To / Cc, send date
 and, when known, delivery date (`occurred_at`) in UTC, folder,
-In-Reply-To, References, attachment flag — with its thread ID and
+In-Reply-To, References, attachment flag, [read state](#read-state) — with its thread ID and
 subject, and one page of its indexed body reconstructed from the
 per-message chunk store (overlap between adjacent chunks is removed by
 character offset). The index keeps no raw per-message body, so this is
@@ -483,6 +483,17 @@ than `Message not found` ([Reaped sources](#reaped-sources)).
 | `message_id` | string | required | Claimant ID, or the Message-ID header value |
 | `offset` | int | `0` | Body character to start the page at; pass the previous response's `next_offset` |
 
+### Read state
+
+Every message row (`get_thread`, `get_message`, `query_messages`)
+carries `seen`, `flagged` and `replied`: whether the message is read,
+flagged (starred) and answered in Proton. mbsync mirrors that state into
+the Maildir filename's `:2,` flags (`S`, `F`, `R`) and the indexer
+records it from there, so it is as current as the last sync. A message
+delivered to `new/` without flags reads as unread. The prose shows it as
+`Status: read, flagged, replied` (or `unread`). The server is
+read-only: nothing here changes the state in Proton.
+
 ### `list_threads`
 Browse threads in a folder: every thread with at least one message
 filed in it, newest activity first. A thread's `folder` field is its
@@ -491,10 +502,15 @@ when the thread was first indexed (not updated when messages move). A
 thread listed under `Sent` because of one sent reply can still report
 `INBOX`.
 
+`unread` and `flagged` read each message's [read state](#read-state):
+a thread is listed when one of its messages filed in `folder` is unread
+(or flagged). An unread reply filed elsewhere does not list the thread
+here. The structured output echoes `filter_type`.
+
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `folder` | string | `INBOX` | Folder to list |
-| `filter_type` | string | `all` | Currently only `all`; unread/flagged state is not indexed |
+| `filter_type` | string | `all` | `all`, `unread` (threads with an unread message in `folder`) or `flagged` (threads with a flagged / starred message in `folder`); any other value is an error |
 | `limit` | int | `20` | Number of threads |
 | `offset` | int | `0` | Pagination offset |
 
@@ -564,6 +580,8 @@ questions.
 | `date_from` | string | none | Inclusive ISO 8601 lower bound on the message's effective time (`occurred_at`, else `sent_at`) |
 | `date_to` | string | none | Inclusive upper bound; a date-only value covers the whole UTC day |
 | `has_attachments` | bool | none | The message's own attachment flag, either way |
+| `seen` | bool | none | `true` for messages read in Proton, `false` for unread ([read state](#read-state)) |
+| `flagged` | bool | none | `true` for flagged (starred) messages, `false` for the rest |
 | `authority_class` | string | none | The source-authority class of the message's From sender (any author, for a multi-author From): `counsel`, `management`, `vendor`, `government`, `personal`, `other`, or `unclassified`; a message in Spam never matches; blank is ignored, any other value is an error |
 | `limit` | int | `25` | Messages per page; clamped to `[1, 100]` |
 | `cursor` | string | none | `next_cursor` from the previous page of the same query |
@@ -585,7 +603,7 @@ each filter.
 **Response contract.** The response states the filter interpretation,
 `total_matches` (over the whole set), `returned` with the match range,
 and `has_more`; when more remain it includes `next_cursor`. Each
-message carries its send and delivery dates, folder, attachment flag, subject,
+message carries its send and delivery dates, folder, read state, attachment flag, subject,
 From / To / Cc (at most 10 per role, with a count of the rest),
 Message-ID, claimant ID, and Thread ID; the structured output adds In-Reply-To and
 up to 10 References. Header values are sender-controlled, so any past

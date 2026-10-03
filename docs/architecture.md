@@ -25,11 +25,15 @@ ProtonBridge container
   - Exposes local IMAP on port 1143
   - Exposes local SMTP on port 1025
   - Credentials persisted in bridge-data volume
+  - Healthcheck is a TCP connect to 1143: the listener is up, nothing
+    more (see Health and Readiness Signals)
         │
-        │  IMAP (localhost, internal Docker network)
+        │  IMAP over implicit TLS (internal Docker network)
         ▼
 mbsync container
-  - Polls Bridge IMAP every SYNC_INTERVAL seconds in a bounded retry loop
+  - Polls Bridge IMAP every SYNC_INTERVAL seconds in a bounded retry loop;
+    each mbsync run has a deadline (SYNC_DEADLINE_SECONDS, default a
+    day) past which it is stopped and counted as a failed sync (#282)
   - Writes Maildir format to maildir-volume
   - Maintains sync state for incremental updates, in each folder's own
     Maildir directory, and writes child folders with a leading dot so no
@@ -49,10 +53,13 @@ mbsync container
     `<folder>` or `<path>` in its place (#570)
   - Healthcheck is liveness only: healthy while the sync loop is alive
     (a heartbeat touched around every attempt is fresh, or an mbsync or
-    its permission repair walk is running), so the indexer and MCP
-    server start during a long first sync; freshness comes from the
-    last-sync stamp. Folders that sync creates are watched once the
-    indexer handles that sync's stamp (#516)
+    its permission repair walk is running, up to that run's deadline),
+    so the indexer and MCP server start during a long first sync;
+    freshness comes from the last-sync stamp
+  - After every permission repair, whatever the sync's outcome,
+    renames an empty `.mbsync-perms-repaired` marker into place at the
+    Maildir root; folders a sync attempt creates are watched once the
+    indexer handles that marker or the stamp (#516, #524)
         │
         │  Maildir files (shared volume, read-only for indexer)
         ▼
@@ -78,6 +85,8 @@ embedder (operator-supplied)  sqlite-volume
                                  - pending_deletions, reaped_messages
                                    (reconciler)
                                  - entities, entity_aliases
+                                 - vector_generations (embedder
+                                   identity record)
 
 inference (operator-supplied)
   - INFERENCE_MODE=anthropic →
@@ -198,9 +207,51 @@ incompatible with any remote provider — the overlay is meant for the
 The default stack exposes only `127.0.0.1:3000` for the MCP server.
 No container is reachable from outside the machine.
 
+## Health and Readiness Signals
+
+"Bridge is healthy" does not mean "mail is syncing". The path from
+Proton to a searchable index passes through six states, each reported
+by a different signal, and each later state depends on the earlier
+ones (#274):
+
+| State | Meaning | Reported by | Not proven by it |
+| --- | --- | --- | --- |
+| Bridge listening | Something accepts TCP on Bridge's IMAP port | Bridge container health (`docker compose ps`, `make status`): a TCP connect to `localhost:1143` inside the container every 30 s. macOS Bridge mode has no Bridge container; mbsync's `Bridge IMAP port is reachable` line is the nearest equivalent, and it covers only mbsync's startup | TLS, a logged-in account, any sync |
+| TLS handshake OK | Bridge completes implicit TLS with a certificate that matches mbsync's pin | mbsync startup: certificate extraction, the pin (and `BRIDGE_CERT_FINGERPRINT` in macOS Bridge mode). A failure stops mbsync with a named error before any credential is sent. mbsync's health also requires the extracted certificate, so a healthy mbsync passed this on its current start | That isync accepts the certificate: its own validity and host name checks run on each sync, so an expired certificate that still matches the pin shows as failed syncs. A logged-in account, any sync |
+| Bridge authenticated | An account is logged in to Bridge and accepts mbsync's `LOGIN` | No dedicated signal. Bridge listens, completes TLS and greets with no account logged in, and `vault.enc` exists before any login. The first proof is a successful sync; a rejected login is a failed sync in mbsync's log | — |
+| mbsync syncing | mbsync's sync loop is alive | mbsync container health (liveness: a heartbeat touched around every attempt, or a sync or its permission repair running, up to the run's deadline) | That any sync succeeded: the loop is healthy between failed attempts until five consecutive failures exit it and Docker restarts it |
+| Last successful sync | mbsync completed a sync | The success stamp `.mbsync-last-sync.json` at the Maildir root, written by mbsync. `get_mailbox_status` cannot read Maildir; its `last_sync_at` (and the reason `no successful mail sync has been recorded` or `last successful mail sync was ... ago`) is the last sync the indexer has acknowledged, after queuing that sync's mail, so it can lag the stamp | The stamp alone: that the indexer has read it. `last_sync_at`: that the queued mail is indexed yet |
+| Index current | The indexer has acknowledged a recent sync and has no pending or retrying jobs | `get_mailbox_status` `current` and its reasons (see [Index currency](#index-currency)); `make status` prints the same fields | That every message is indexed: dead-lettered jobs (the `dead` count) do not affect `current`, and their messages may be missing from search until `make requeue-dead`. Nor mail that reached Proton after the last sync |
+
+The Bridge healthcheck stays a TCP connect on purpose. mbsync waits
+for it only to avoid racing Bridge's startup; mbsync's own startup then
+checks TLS and the pin with an error that names the cause, and its sync
+results and stamp report the rest. The Bridge runtime image does carry
+`openssl` (a dependency of `ca-certificates`), so a probe that sees the
+greeting over TLS is possible without new packages, but it would add
+little: the greeting arrives whether or not an account is logged in, so
+it still says nothing about authentication or sync. It would also gate
+mbsync on Bridge answering IMAP, and during Bridge's initial download
+of a large mailbox IMAP can be slow or unresponsive for hours, which
+would turn a long first sync into an unhealthy Bridge and a failed
+`make up`. No healthcheck carries credentials. Symptom-to-layer
+diagnostics are in
+[troubleshooting.md](troubleshooting.md#which-layer-is-failing).
+
 ## Bridge Modes
 
-mbsync syncs from one of two Bridges:
+mbsync syncs from one of two Bridges, in both cases over implicit TLS
+(RFC 8314, Bridge's "SSL" IMAP mode, `SSLType IMAPS`; #638): the TLS
+handshake is the first thing on the connection, so there is no
+plaintext phase in which a STARTTLS offer could be stripped or a
+command or response injected before encryption. The Bridge container
+is patched to always serve IMAP this way (its vault's `IMAPSSL`
+setting is ignored); the macOS app must be set to SSL by the operator.
+Certificate extraction (`openssl s_client` without `-starttls`) and
+isync both speak only implicit TLS, with no fallback: a Bridge still
+serving STARTTLS greets in plaintext, the handshake fails, and mbsync
+stops at startup with `Bridge is not serving implicit TLS` before any
+credential is sent.
 
 - **Bridge container (default).** The source-built `protonmail-bridge`
   service on `bridge-net`. mbsync waits for its health check, connects
@@ -236,13 +287,13 @@ entrypoint renders
 ```text
 Host 127.0.0.1
 Tunnel "exec socat - TCP:host.docker.internal:<port>"
-SSLType STARTTLS
+SSLType IMAPS
 CertificateFile /tmp/mbsync/bridge-cert.pem
 ```
 
 With `Tunnel`, isync runs the command instead of opening a socket to
-`Host`, and keeps `Host` only for the certificate check. STARTTLS and
-verification run end to end between mbsync and the app; `socat` only
+`Host`, and keeps `Host` only for the certificate check. Implicit TLS
+and verification run end to end between mbsync and the app; `socat` only
 relays bytes. (`nc` cannot be the relay: isync waits for the server to
 close the connection after `LOGOUT`, and `nc` does not pass that close
 on unless Bridge sends a TLS close_notify.) The trust anchors are
@@ -253,8 +304,11 @@ for `127.0.0.1`), so a different
 certificate at that address is refused twice, by the pin at startup and
 by isync's chain check on every sync. `mbsync/tests/tls_check.sh` (`make
 test-mbsync-tls`, run in CI) exercises both with a synthetic server
-whose certificate has this shape, along with recovery from a Bridge
-that is down at startup.
+whose certificate has this shape and which speaks implicit TLS, along
+with recovery from a Bridge that is down at startup and the refusal of
+a STARTTLS server without sending credentials. `scripts/bridge-smoke.sh`
+checks that the built Bridge image serves implicit TLS on 1143 and
+greets no plaintext client.
 
 The two modes differ in how the first certificate is trusted. The Bridge
 container is the only other service on `bridge-net`, so mbsync trusts
@@ -285,6 +339,49 @@ query vectors are comparable to indexed vectors. `EMBED_MODE=openai`
 is the only valid value — embed has no disabled mode because
 semantic / hybrid search is the headline retrieval feature and the
 indexer cannot ingest mail without an embedder.
+
+#### Embedder identity record
+
+The index records which embedder built it, so a changed embedder is
+caught at startup instead of mixing incomparable vectors into search.
+On a fresh index the indexer writes one `vector_generations` row,
+status `active`: `EMBED_MODE`, the resolved endpoint (the SDK's
+`base_url` after construction, with userinfo, query and fragment
+dropped), `EMBED_MODEL`, the vector dimensions, and a **calibration
+vector** — the embedding of a fixed synthetic text — with that text's
+SHA-256. The columns for revision, tokenizer, context window, chunk
+configuration hash and label stay NULL: the OpenAI-compatible API
+exposes none of them. This is the first slice of the `vector_generations`
+registry in PLAN.md Phase 2; there is no generation lifecycle yet, so
+the table holds exactly one row.
+
+On every start both services compare their embedder against the row
+(`indexer/src/embed_identity.py`, `mcp-server/src/lib/embed_identity.py`):
+mode, model, endpoint and dimensions must match, and the calibration
+text is re-embedded and must lie within cosine distance 0.01 of the
+stored vector. The vector check catches what the fields cannot: a
+host-side server that reloaded a different model of the same dimension
+under the same name, or a provider alias that moved. Re-embedding one
+text on an unchanged deployment differs by float noise only (zero for a
+deterministic server, well under 1e-3 for GPU-batched providers), while
+unrelated models sit near distance 1, so 0.01 leaves a wide margin
+both ways; a re-quantization of the same model can fall either side of
+it. A mismatch fails startup closed with a fixed message naming the
+differing fields (see docs/troubleshooting.md, "Embedder identity
+mismatch"); the message never quotes a provider response.
+
+The indexer writes the row; mcp-server only reads it. A failed
+calibration request (the indexer's runs right after `wait_for_ready`,
+with the client's usual retries) exits the service with the scrubbed
+error and the restart policy tries again, as for the dimension probe.
+mcp-server exits the same way while the indexer has not yet recorded
+the row (it does so once its embedder answers); its calibration request
+is bounded as a whole by `EMBED_TIMEOUT_SECS`. While mcp-server cannot
+verify its embedder, the SQLite-only tools are down with it (#661 tracks
+keeping them up). The checks run at
+startup only; periodic re-checks are tracked separately. An index that
+holds messages but no row, or predates the table, fails closed with
+rebuild instructions, since nothing says which embedder wrote it.
 
 For inference, `INFERENCE_MODE=anthropic` (default) uses the
 official `anthropic` SDK against the Messages API; leave
@@ -529,7 +626,7 @@ per-message record.
 files can claim the same one, by accident or to overwrite another
 message's evidence. Every per-message row is therefore keyed by a
 claimant ID rather than the bare Message-ID: the Message-ID plus `#`
-and the first eight hex digits of the SHA-256 of the file's raw bytes
+and the first sixteen hex digits of the SHA-256 of the file's raw bytes
 (`parser.claimant_id`). The bytes are the identity because nothing that
 happens to a Maildir file changes them: flags and the delivery name
 live in the filename and the folder is the directory, so a flag rename,
@@ -571,7 +668,7 @@ time, #541), `sent_at` (`Date:` header; a missing or unparseable header is
 dated at first index and that date is kept when the message is
 reprocessed or its thread rebuilt), `occurred_at` (the top `Received:`
 header's date, or NULL; see Message time), folder, `in_reply_to` /
-references, attachment flag, and its source: `filepath` (the Maildir
+references, attachment flag, read state, and its source: `filepath` (the Maildir
 locator, kept current across flag renames; when a rename crosses
 folders the new `folder` is written in the same transaction, so a failed
 update rolls back whole and the Maildir walk re-indexes the file) plus
@@ -582,6 +679,22 @@ result (see `docs/mcp-tools.md`). `message_participants`
 normalizes From / To / Cc into one row per (message, role, address),
 with `address` canonical and lowercased and the display name kept as
 written; malformed entries with no recoverable address are skipped.
+
+**Read state.** `seen`, `flagged` and `replied` are the `S`, `F` and
+`R` flags in `filepath`'s `:2,<flags>` suffix (`maildir.message_state`,
+built on the same `parse_flags` as the `T` trash check; other letters
+are ignored, and a file without the suffix is unread). mbsync is
+pull-only, but it mirrors a read, star or reply made in Proton by
+renaming the file (`:2,` → `:2,S`, and `new/` → `cur/`), so the flags
+are written wherever `filepath` is: by `upsert_thread` from the parsed
+file's path, and by `update_filepath` in the same `UPDATE` as the new
+locator. Every rename path — the watchdog's `on_moved`, the
+reconciler's `handle_moved` and sweep, and the startup `sweep_paths`
+that heals renames made while the indexer was down — goes through
+`update_filepath`, so a state change is one row update with no reparse
+or re-embed, and the state cannot disagree with the stored path.
+Thread-level questions (`list_threads(filter_type="unread")`) are
+answered from these rows at query time; nothing per-thread is stored.
 An index on `(address, role)` makes "every message from / to X" an
 exact indexed lookup — the basis for exhaustive enumeration, as
 opposed to relevance search. The MCP server's `query_messages`
@@ -895,11 +1008,85 @@ keeps its row. The cost is the cache for a re-arrival: the same bytes
 arriving after their last carrier was reaped are extracted again. The
 check is one indexed statement per payload the message carried
 (`idx_attachments_attachment_id` and the extraction primary key), so
-it does not scan either table. The rows are deleted, not overwritten:
-with SQLite's default `secure_delete` off, the freed pages keep the old
-bytes in the database file until SQLite reuses them or the file is
-vacuumed. This holds for every row a reap deletes, not only
-extractions (#602).
+it does not scan either table.
+
+The indexer's write connection sets `PRAGMA secure_delete = ON` (#602),
+so SQLite overwrites the bytes of every row a reap deletes with zeros,
+including freed overflow pages (long bodies and extractions), instead
+of leaving them in free pages of `mail.db`. The indexer image's SQLite
+(Debian trixie's libsqlite3 3.46.1) is compiled with
+`SQLITE_SECURE_DELETE` and already defaults to ON; a Python whose
+bundled SQLite does not (Homebrew Python 3.14's SQLite 3.53.4 defaults
+to OFF) gets the same behaviour from the explicit pragma, so local runs
+and tests match the container. `FAST` was not used because it leaves
+freed overflow pages unzeroed. sqlite-vec zeroes a deleted
+vector's slot in its chunk blob itself, and a chunk emptied by deletes
+is dropped and its pages zeroed. What the pragma does not cover:
+
+- **WAL window.** The zeroed pages reach `mail.db` at the next
+  checkpoint; until then the main file still holds the old page. The
+  WAL frames written when the row was inserted or updated also still
+  hold its text until the WAL is truncated. SQLite's automatic
+  checkpoint restarts the WAL from the start but does not shrink it,
+  so older frames beyond the new write point linger. The indexer's
+  periodic `wal_checkpoint(TRUNCATE)` (every
+  `INDEXER_WAL_CHECKPOINT_INTERVAL_SECS`, default 600 s) ends both;
+  it reports busy and retries on the next pass while an mcp-server
+  read transaction is open, so the window can be longer under
+  continuous queries.
+- **FTS5 index terms (between maintenance passes).** The FTS5 tables
+  are contentless, so they hold no message text, but the terms of a
+  deleted row (stemmed words with their row and position lists) stay
+  in live `*_fts_data` segment pages until a merge rewrites that
+  segment. These pages are not freed, so `secure_delete` does not
+  touch them, and FTS5's own `secure-delete` option does not apply to
+  `contentless_delete=1` tables (verified on 3.46.1 and 3.53.4). The
+  indexer therefore runs FTS5 `optimize` (#641): each periodic
+  maintenance pass, just before the `wal_checkpoint(TRUNCATE)`, it
+  optimizes every FTS5 table (`threads_fts`, `message_chunks_fts`,
+  `attachments_fts`) that had a row deleted since its last pass. Reaps
+  delete rows, and so does every thread re-index, which replaces the
+  thread's `threads_fts` row. `optimize` merges the table's segments
+  into one and drops the deleted terms; the checkpoint that follows
+  copies the rewritten pages into `mail.db` and truncates the WAL
+  frames that held the old ones. The indexer's write lock is held for
+  one table's `optimize` at a time, and each pass logs one line,
+  `fts optimize tables=<names> duration=<s>`; a failed `optimize` logs
+  its exception type and the table stays pending for the next pass.
+  So a deleted row's terms stay in the file for up to one interval
+  (longer while a busy checkpoint retries, as above). The pending mark
+  is kept in memory: if the indexer stops before the next pass, the
+  terms stay until a later delete in the same table triggers an
+  `optimize`, which rewrites the whole table and removes them too.
+- **Pages freed before the pragma.** It zeroes pages as later deletes
+  free them; it does not rewrite pages already on the freelist. A
+  `mail.db` reaped under a SQLite that defaulted OFF (an indexer run
+  outside the container, before #602) can still hold those rows'
+  bytes. The container's SQLite already defaulted ON, so a database
+  only ever written by the indexer image is not affected. To clear an
+  affected file, rebuild the index from Maildir, or, with the indexer
+  stopped, run `VACUUM;` against `mail.db` (it rewrites the file
+  without the freelist and needs free space equal to its size).
+- **Below SQLite.** Truncating the WAL and zeroing pages in place do
+  not reach filesystem free blocks, APFS or volume snapshots, or
+  backups of `mail.db`.
+
+Measured on a 169 MB synthetic index (SQLite 3.53), deleting 1,000
+threads with three chunks each took 3.8-4.0 s with the pragma OFF, ON
+or FAST alike; ON wrote about 8 MB of WAL against 6 MB. Dropping an
+emptied sqlite-vec chunk (up to 1,024 vectors, about 16 MiB at 4,096
+dimensions) writes that many zero bytes once under ON.
+
+`optimize` rewrites the whole table, so its cost grows with the index,
+not with the delete. Measured with plain timing on a synthetic index
+the size of a ~50k-message mailbox (167 MB: 20,000 threads of about
+800 words, 150,000 chunks of 200 words, 30,000 attachment names) after
+a reap-sized delete, on both 3.53.4 and the image's 3.46.1:
+`threads_fts` 0.41-0.55 s and about 75 MB of WAL, `message_chunks_fts`
+0.75-0.88 s and about 96 MB, `attachments_fts` 0.01 s and 2 MB. The
+WAL is truncated by the checkpoint that follows. During an active
+sync almost every pass re-indexes a thread, so expect `threads_fts`
+to be optimized each interval while mail arrives.
 
 The purge only looks at payloads the message being reaped carried. A
 database whose reaps ran before #562 can still hold extraction rows
@@ -1298,11 +1485,15 @@ eventually rather than omitted until the next container restart.
 
 mbsync creates each folder directory 0700 and makes it readable to
 the indexer's UID only in its post-sync permission repair, which runs
-before the last-sync stamp is written. inotify cannot watch a
-directory the indexer cannot read, and watchdog skips it silently, so
-a folder created during a sync is unwatched when it becomes readable
-(#516). The stamp's rename signals the main loop, which walks the
-folder directories (not `cur`/`new`/`tmp`, so the walk is linear in
+after every sync attempt, failed ones included, and before the
+last-sync stamp is written. inotify cannot watch a directory the
+indexer cannot read, and watchdog skips it silently, so a folder
+created during a sync is unwatched when it becomes readable (#516).
+After each repair mbsync renames an empty `.mbsync-perms-repaired`
+marker into place at the Maildir root, so a failed attempt, which
+writes no stamp, still signals (#524); the marker acknowledges no
+sync. The marker's rename, or the stamp's, signals the main loop,
+which walks the folder directories (not `cur`/`new`/`tmp`, so the walk is linear in
 folders) and, when any directory is readable that was not when the
 watch was last scheduled, or sits at a known path with a new inode
 (deleted and recreated, which drops its watch), or when the watch has
@@ -1311,12 +1502,11 @@ its inode number), unschedules and re-schedules the recursive watch (`FolderWatc
 in the gap between the old and new watch are covered by the rename
 sweep (`sweep_paths`) and a Maildir walk, which also queues the mail
 already in the newly watched folders; if either step fails, both run
-again on the next sync stamp or periodic tick until they succeed. A
-sync that opens no new directory costs only the folder walk. The
-same check also runs with
-the periodic rescan, for a failed sync attempt (whose permission
-repair opens new folders but writes no stamp) and to retry a
-re-schedule that failed.
+again on the next marker, sync stamp or periodic tick until they
+succeed. Each signal re-schedules the watch at most once, and a sync
+attempt that opens no new directory costs only the folder walk. The
+same check also runs with the periodic rescan, for a marker that
+could not be written and to retry a re-schedule that failed.
 
 When deletion reconciliation is enabled, every enqueue path — the
 startup scan, the periodic rescan, the zero-vector recovery sweep, and

@@ -22,6 +22,22 @@ mkdir -p "$WORK/bin"
 cat >"$WORK/bin/docker" <<'STUB'
 #!/bin/bash
 set -Eeuo pipefail
+# The implicit-TLS check (#638): the mbsync image name, the detached
+# Bridge it probes, and the probe itself.
+if [[ "$*" == "build -q mbsync" ]]; then
+    printf 'sha256:stub-mbsync\n'
+    exit 0
+fi
+if [[ "${1:-}" == "run" && "${2:-}" == "-d" ]]; then
+    printf 'stub-bridge-container\n'
+    exit 0
+fi
+for arg in "$@"; do
+    if [[ "$arg" == *"SMOKE_TLS_HANDSHAKE"* ]]; then
+        printf '%s\n' "$TLS_OUTPUT"
+        exit "$TLS_STATUS"
+    fi
+done
 for arg in "$@"; do
     if [[ "$arg" == *"updates autoupdates enable"* ]]; then
         printf '%s\n' "$SEEDED_OUTPUT"
@@ -48,11 +64,21 @@ SMOKE_ENTRYPOINT_EXIT=143
 SMOKE_HARNESS_SIGNAL=term'
 readonly SEEDED_PASS
 
+# What the implicit-TLS probe prints when the handshake succeeds, the IMAP
+# greeting arrives over TLS, and a plaintext connection receives nothing.
+TLS_PASS=$'SMOKE_TLS_HANDSHAKE=ok
+SMOKE_TLS_GREETING=yes
+SMOKE_PLAINTEXT_BYTES=0'
+readonly TLS_PASS
+
 # Run the smoke script against the stub; keep its stdout, stderr and status.
-# The seeded-vault run passes unless a case overrides it (arguments 3, 4).
+# The seeded-vault run passes unless a case overrides it (arguments 3, 4),
+# and so does the implicit-TLS probe (TLS_OUTPUT / TLS_STATUS in the
+# environment).
 run_smoke() {
     STUB_OUTPUT="$1" STUB_STATUS="$2" \
-        SEEDED_OUTPUT="${3:-$SEEDED_PASS}" SEEDED_STATUS="${4:-0}" PATH="$WORK/bin:$PATH" \
+        SEEDED_OUTPUT="${3:-$SEEDED_PASS}" SEEDED_STATUS="${4:-0}" \
+        TLS_OUTPUT="${TLS_OUTPUT:-$TLS_PASS}" TLS_STATUS="${TLS_STATUS:-0}" PATH="$WORK/bin:$PATH" \
         bash "$SCRIPT" >"$WORK/stdout" 2>"$WORK/stderr" && SMOKE_STATUS=0 || SMOKE_STATUS=$?
 }
 
@@ -260,6 +286,38 @@ seeding_run_silent_install_fails() {
     fails_with 'queued a silent update install'
 }
 
+# #638: Bridge serves IMAP with implicit TLS.
+implicit_tls_passes() {
+    run_smoke "$MARKER"$'\n'"$CLEAN_EXIT" 0
+    passes
+    grep -F 'Bridge verified serving IMAP with implicit TLS.' "$WORK/stdout"
+}
+
+# The handshake failed: Bridge is serving STARTTLS or plaintext.
+implicit_tls_failed_handshake_fails() {
+    TLS_OUTPUT="${TLS_PASS/SMOKE_TLS_HANDSHAKE=ok/SMOKE_TLS_HANDSHAKE=failed}" \
+        run_smoke "$MARKER"$'\n'"$CLEAN_EXIT" 0
+    fails_with 'not serving implicit TLS'
+}
+
+implicit_tls_without_greeting_fails() {
+    TLS_OUTPUT="${TLS_PASS/SMOKE_TLS_GREETING=yes/SMOKE_TLS_GREETING=no}" \
+        run_smoke "$MARKER"$'\n'"$CLEAN_EXIT" 0
+    fails_with 'no IMAP greeting over implicit TLS'
+}
+
+# Bridge greeted a plaintext client: a STARTTLS listener.
+plaintext_greeting_fails() {
+    TLS_OUTPUT="${TLS_PASS/SMOKE_PLAINTEXT_BYTES=0/SMOKE_PLAINTEXT_BYTES=57}" \
+        run_smoke "$MARKER"$'\n'"$CLEAN_EXIT" 0
+    fails_with 'sent plaintext on the IMAP port'
+}
+
+implicit_tls_failed_probe_fails() {
+    TLS_STATUS=5 run_smoke "$MARKER"$'\n'"$CLEAN_EXIT" 0
+    fails_with 'Implicit TLS check container exited with status 5'
+}
+
 check "the marker then a clean Bridge exit passes" marker_then_clean_exit_passes
 check "the marker then the intended stop passes" marker_then_intended_stop_passes
 check "the marker then the intended kill passes" marker_then_intended_kill_passes
@@ -282,6 +340,11 @@ check "a completion line from the seeding run alone fails" seed_run_completion_a
 check "an enabled vault with an announced update passes" seeded_vault_announced_update_passes
 check "an enabled vault with a silent available event fails" seeded_vault_silent_available_event_fails
 check "a silent install during the seeding run fails" seeding_run_silent_install_fails
+check "Bridge serving implicit TLS passes (#638)" implicit_tls_passes
+check "a failed TLS handshake on the IMAP port fails (#638)" implicit_tls_failed_handshake_fails
+check "no IMAP greeting over implicit TLS fails (#638)" implicit_tls_without_greeting_fails
+check "a plaintext greeting on the IMAP port fails (#638)" plaintext_greeting_fails
+check "a failed implicit-TLS probe container fails (#638)" implicit_tls_failed_probe_fails
 
 if ((FAILURES > 0)); then
     printf '%d test(s) failed\n' "$FAILURES" >&2

@@ -288,7 +288,9 @@ services strip it. It fails fast if:
   matching layer is `none`, so the docker-compose `secrets:` references
   resolve cleanly)
 - `config/authority.toml`, when present, is not a regular file (a symlink
-  counts as not one) or is not `600`
+  counts as not one) or is not `600`; on a Linux host, also when it does
+  not grant the indexer (UID 1002) read access through an ACL naming
+  that UID alone (see "Source-authority rules" below)
 - numeric or enum settings such as `SYNC_INTERVAL`, `MCP_PORT`, `MCP_TRANSPORT`, or `INFERENCE_MODE` are invalid
   (`MCP_TRANSPORT` accepts only `streamable-http` or unset; the removed `sse`
   and `dual` fail with migration steps)
@@ -384,6 +386,9 @@ ranking. Nothing is classified by a model.
 
 ```bash
 install -m 600 config/authority.toml.example config/authority.toml
+# Linux host only (see below): let the indexer's UID 1002, and no one
+# else, read it
+setfacl -m u:1002:r config/authority.toml
 # edit: one table per class, with `addresses` (exact) and/or
 # `domains` (the domain and its subdomains)
 make restart-indexer
@@ -400,10 +405,30 @@ runs as UID 1002, but on macOS the Docker Desktop and OrbStack file
 sharing serves a bind-mounted file to the container's user, so it still
 reads a `600` file you own (the same way the services read the `600`
 secret files). On Linux with Docker Engine the bind mount keeps your
-ownership, so the indexer cannot read a `600` file you own; a safe
-access path there is tracked in #526. Do not widen the mode or hand the
-file to a host group to work around it: GID 1002 may belong to another
-account on the host.
+ownership, so the indexer cannot read a `600` file you own. Compose
+cannot fix that from its side: its file-based `secrets:` and `configs:`
+are plain bind mounts that ignore `uid`, `gid` and `mode`. Instead,
+grant UID 1002 alone read access with a POSIX ACL (the `setfacl` line
+above; install the `acl` package if it is missing). `ls -l` then shows
+`-rw-r-----+`: the group bits are the ACL mask, not the file's group,
+and on Linux `make up` accepts that `640` only when the ACL is exactly
+yours read-write and UID 1002 read-only, with nothing for the group or
+other accounts. Otherwise it fails and prints the command that resets
+the file to that state:
+`setfacl -b config/authority.toml && chmod 600 config/authority.toml && setfacl -m u:1002:r config/authority.toml`.
+Do not widen the mode or hand the file to a host group instead: GID
+1002 may belong to another account on the host. The ACL grants host
+UID 1002 read access too, so if `getent passwd 1002` names another
+account (and you are not UID 1002), `make up` warns, and you should
+keep the checkout under a directory that account cannot enter (such as
+a `700` home directory). The indexer must also be able to enter
+`config/` itself; if the directory lacks the search bit for other
+accounts (a checkout made under a `077` umask), `make up` fails and
+prints `setfacl -m u:1002:x config`.
+An editor that saves by writing a new file drops the ACL; `make
+restart-indexer` then fails with the same command. With rootless
+Docker or `userns-remap` the container's UID 1002 maps to a different
+host UID, which this check does not cover.
 The `config/` directory is mounted
 read-only into the indexer at `/config`, and the path
 `/config/authority.toml` is fixed (there is no environment setting for
@@ -832,7 +857,7 @@ Bridge container is neither built nor started.
 
 ```text
 Proton Mail → Bridge app on macOS (IMAP on 127.0.0.1)
-                  ↑ IMAP + STARTTLS via host.docker.internal
+                  ↑ IMAP over implicit TLS via host.docker.internal
              mbsync container → Maildir → indexer → MCP server
 ```
 
@@ -864,16 +889,22 @@ container.
   logged out, or the Mac sleeps, mbsync waits with its usual bounded
   retries, then exits and Docker restarts it; it syncs again once
   Bridge is back. Freshness is reported by `make status` as usual.
-- The app's IMAP connection mode must be STARTTLS, its default (the
-  connection-mode setting in the app's advanced settings).
+- The app's IMAP connection mode must be **SSL** (implicit TLS), not
+  STARTTLS, the app's default: set it in the app's connection settings
+  ([Set it up](#set-it-up), step 1). mbsync speaks only implicit TLS
+  and has no STARTTLS fallback, so with STARTTLS it stops at startup
+  with `Bridge is not serving implicit TLS`.
 - The app's certificate must be issued for `127.0.0.1`, which is what
   Bridge generates. A certificate you imported into Bridge yourself
   must be too.
 
 ### How TLS is checked
 
-mbsync keeps STARTTLS, certificate verification and the persistent
-fingerprint pin. The app's certificate names only `127.0.0.1`, and the
+mbsync connects with implicit TLS (the app's SSL mode), as it does to
+the Bridge container: the TLS handshake is the first thing on the
+connection, so there is no plaintext phase for anything on the path to
+strip or inject into. It keeps certificate verification and the
+persistent fingerprint pin. The app's certificate names only `127.0.0.1`, and the
 isync shipped in the image (1.4.4) checks a self-signed CA certificate
 like Bridge's against the configured host name, so connecting to
 `host.docker.internal` directly fails with `certificate owner does not
@@ -894,9 +925,12 @@ start.
 
 ### Set it up
 
-1. In the Bridge app, open the account's mailbox details and note the
-   IMAP username, password and port. These are generated by Bridge and
-   differ from your Proton account password.
+1. In the Bridge app, set the IMAP connection mode to **SSL** (in the
+   app's settings, under the IMAP/SMTP connection mode; the SMTP mode
+   does not matter, mbsync does not use SMTP). Then open the account's
+   mailbox details and note the IMAP username, password and port; the
+   port normally stays 1143. These are generated by Bridge and differ
+   from your Proton account password.
 2. `make init-secrets`, then put the username in `.env` and the
    password in the Docker secret, exactly as in step 4 above:
 
@@ -913,13 +947,18 @@ start.
    It is read only in this mode.
 3. Take the app's certificate fingerprint on the Mac and put it in
    `.env`. With the app running and logged in (so it, and nothing else,
-   holds its port), run this in a Mac terminal, replacing 1143 with the
-   app's IMAP port if it differs:
+   holds its port) and its IMAP mode set to SSL (step 1), run this in a
+   Mac terminal, replacing 1143 with the app's IMAP port if it differs:
 
    ```bash
-   openssl s_client -connect 127.0.0.1:1143 -starttls imap </dev/null 2>/dev/null \
+   openssl s_client -connect 127.0.0.1:1143 </dev/null \
        | openssl x509 -noout -fingerprint -sha256
    ```
+
+   There is no `-starttls imap`: the app now speaks TLS from the first
+   byte. If this prints `unable to load certificate` (and `s_client`
+   reports a `wrong version number` error), the app is still in STARTTLS
+   mode; switch it to SSL and run it again.
 
    If your Bridge version can export its TLS certificate (in its
    settings), `openssl x509 -in cert.pem -noout -fingerprint -sha256` on

@@ -61,7 +61,15 @@ fi
 # verify the source layer; this verifies the image actually loads it.
 printf 'Verifying AutoUpdate runtime default in built Bridge image...\n'
 SMOKE_OUT="$(mktemp)"
-trap 'rm -f "$SMOKE_OUT"' EXIT
+# The detached Bridge of the implicit-TLS check, removed on any exit.
+BRIDGE_TLS_CONTAINER=""
+cleanup_smoke() {
+    rm -f "$SMOKE_OUT"
+    if [[ -n "$BRIDGE_TLS_CONTAINER" ]]; then
+        docker rm -f "$BRIDGE_TLS_CONTAINER" >/dev/null || true
+    fi
+}
+trap cleanup_smoke EXIT
 
 SMOKE_STATUS=0
 docker run --rm \
@@ -272,5 +280,83 @@ elif ! entrypoint_ended_cleanly; then
     smoke_fail 'Bridge did not exit cleanly during the seeded-vault check.'
 fi
 printf 'Auto-updater verified off for a vault seeded with AutoUpdate=true.\n'
+
+# End-to-end check for the IMAP implicit-TLS patch (#638). Bridge starts on
+# a fresh vault, which stores Proton's default IMAPSSL=false, and opens the
+# CLI (-i keeps its stdin open, so it stays up). The probe runs from the
+# mbsync image, which has openssl and nc, inside Bridge's network
+# namespace, so nothing is published. It asserts that a TLS handshake on
+# the IMAP port succeeds and carries the IMAP greeting, and that a
+# plaintext client receives nothing: a STARTTLS listener would greet it.
+printf 'Verifying Bridge serves IMAP with implicit TLS...\n'
+# Untagged, by image ID, so no other image name is touched.
+MBSYNC_IMAGE="$(docker build -q mbsync)"
+if [[ -z "$MBSYNC_IMAGE" ]]; then
+    printf 'ERROR: building the mbsync image for the implicit TLS probe gave no image ID.\n' >&2
+    exit 1
+fi
+BRIDGE_TLS_CONTAINER="$(docker run -d -i \
+    --init \
+    --tmpfs /data:uid=1000,gid=1000,mode=700 \
+    --tmpfs /home/bridge:uid=1000,gid=1000,mode=700 \
+    --user 1000:1000 \
+    --entrypoint /bin/sh \
+    "$IMAGE" -c '
+        set -e
+        mkdir -p /data/config /data/local /data/cache /data/gnupg /data/pass
+        chmod 700 /data/config /data/local /data/cache /data/gnupg /data/pass
+        exec /entrypoint.sh
+    ')"
+
+SMOKE_STATUS=0
+docker run --rm \
+    --network "container:${BRIDGE_TLS_CONTAINER}" \
+    --entrypoint /bin/bash \
+    "$MBSYNC_IMAGE" -c '
+        set -u
+        # Wait a bounded time for the IMAP listener.
+        for _ in $(seq 1 60); do
+            if nc -z -w 2 127.0.0.1 1143 2>/dev/null; then
+                break
+            fi
+            sleep 1
+        done
+        # Implicit TLS: the handshake comes first, then the greeting.
+        # LOGOUT makes Bridge close the connection; -ign_eof keeps
+        # s_client reading until it does.
+        TLS_OUT="$(printf "a1 LOGOUT\r\n" \
+            | timeout 20 openssl s_client -connect 127.0.0.1:1143 -ign_eof 2>&1 || true)"
+        if printf "%s\n" "$TLS_OUT" | grep -q -- "-----BEGIN CERTIFICATE-----"; then
+            echo "SMOKE_TLS_HANDSHAKE=ok"
+        else
+            echo "SMOKE_TLS_HANDSHAKE=failed"
+        fi
+        if printf "%s\n" "$TLS_OUT" | grep -q "^\* OK"; then
+            echo "SMOKE_TLS_GREETING=yes"
+        else
+            echo "SMOKE_TLS_GREETING=no"
+        fi
+        # A plaintext client that sends nothing: an implicit TLS server
+        # waits for a ClientHello, a STARTTLS server greets it.
+        PLAIN_BYTES="$(timeout 10 nc -w 3 127.0.0.1 1143 </dev/null | wc -c || true)"
+        echo "SMOKE_PLAINTEXT_BYTES=$(printf "%s" "$PLAIN_BYTES" | tr -d "[:space:]")"
+        echo "--- TLS probe output ---"
+        printf "%s\n" "$TLS_OUT"
+    ' > "$SMOKE_OUT" 2>&1 || SMOKE_STATUS=$?
+{
+    printf '%s\n' '--- entrypoint output ---'
+    docker logs "$BRIDGE_TLS_CONTAINER" 2>&1 || true
+} >> "$SMOKE_OUT"
+
+if [[ "$SMOKE_STATUS" -ne 0 ]]; then
+    smoke_fail "Implicit TLS check container exited with status $SMOKE_STATUS."
+elif ! grep -Fx 'SMOKE_TLS_HANDSHAKE=ok' "$SMOKE_OUT" >/dev/null; then
+    smoke_fail 'TLS handshake on the Bridge IMAP port failed: Bridge is not serving implicit TLS.'
+elif ! grep -Fx 'SMOKE_TLS_GREETING=yes' "$SMOKE_OUT" >/dev/null; then
+    smoke_fail 'Bridge sent no IMAP greeting over implicit TLS.'
+elif ! grep -Fx 'SMOKE_PLAINTEXT_BYTES=0' "$SMOKE_OUT" >/dev/null; then
+    smoke_fail 'Bridge sent plaintext on the IMAP port before a TLS handshake (a STARTTLS listener).'
+fi
+printf 'Bridge verified serving IMAP with implicit TLS.\n'
 
 printf 'Proton Bridge smoke checks passed.\n'

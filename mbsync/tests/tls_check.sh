@@ -2,8 +2,8 @@
 set -Eeuo pipefail
 
 # End-to-end TLS check for the macOS Bridge mode (#497), run against the
-# shipped mbsync image and a synthetic STARTTLS IMAP server (imap_stub.py)
-# whose certificate is shaped like the macOS Bridge app's: self-signed,
+# shipped mbsync image and a synthetic implicit-TLS IMAP server
+# (imap_stub.py, #638) whose certificate is shaped like the macOS Bridge app's: self-signed,
 # CA:TRUE, issued for 127.0.0.1 only. The real entrypoint runs with the
 # overlay's BRIDGE_CERT_HOST=127.0.0.1, reaching the server by another
 # name, as it reaches the app through host.docker.internal.
@@ -13,7 +13,7 @@ set -Eeuo pipefail
 #      trusted: mbsync exits at startup, before the wait for Bridge, so
 #      it neither connects nor pins.
 #   1. mbsync waits while the server is down, then syncs once it is up
-#      (STARTTLS, LOGIN over TLS, first-boot pin, success stamp).
+#      (implicit TLS, LOGIN over TLS, first-boot pin, success stamp).
 #   2. A restart against the same certificate is accepted.
 #   3. A different certificate at that address is refused, by the
 #      expected fingerprint and, with that set to the new certificate,
@@ -22,6 +22,10 @@ set -Eeuo pipefail
 #      other than the one in CertificateFile, and refuses the right
 #      certificate under a name it is not issued for (so the tunnel, not a
 #      disabled check, is what lets 127.0.0.1 through).
+#   5. A server that greets in plaintext and offers STARTTLS (a Bridge
+#      left in its STARTTLS mode) is refused, with no fallback: the
+#      entrypoint stops at certificate extraction with the fix, and isync
+#      itself fails the handshake; neither sends credentials.
 #
 # Needs Docker and openssl. Builds the mbsync image unless MBSYNC_IMAGE
 # names one. Run: bash mbsync/tests/tls_check.sh  (or make test-mbsync-tls)
@@ -66,10 +70,12 @@ make_cert() {
     chmod 644 "$WORK/$1.key" "$WORK/$1.pem"
 }
 
+# start_stub CERT [MODE]: MODE is implicit (the default) or starttls.
 start_stub() {
     docker rm -f "$STUB" >/dev/null 2>&1 || true
     docker run -d --name "$STUB" --network "$NETWORK" -v "$WORK:/work:ro" \
-        "$PYTHON_IMAGE" python /work/imap_stub.py "/work/$1.pem" "/work/$1.key" 1143 >/dev/null
+        "$PYTHON_IMAGE" python /work/imap_stub.py "/work/$1.pem" "/work/$1.key" 1143 \
+        "${2:-implicit}" >/dev/null
 }
 
 # start_mbsync [EXPECTED_FINGERPRINT]
@@ -155,7 +161,7 @@ IMAPAccount check
 ${connection}
 User synthetic@example.com
 PassCmd "echo synthetic"
-SSLType STARTTLS
+SSLType IMAPS
 CertificateFile /work/${certfile}
 
 IMAPStore check-remote
@@ -221,12 +227,12 @@ if wait_for_log "$MBSYNC" "Waiting for ProtonBridge IMAP" && sleep 4 \
         && [[ -s "$WORK/maildir/.mbsync-last-sync.json" ]] \
         && wait_for_log "$STUB" "stub: login over TLS" \
         && ! log_has "$MBSYNC" "Initial sync returned a non-zero status"; then
-        pass "waits for an unavailable Bridge, then pins and syncs over STARTTLS"
+        pass "waits for an unavailable Bridge, then pins and syncs over implicit TLS"
     else
-        fail "waits for an unavailable Bridge, then pins and syncs over STARTTLS"
+        fail "waits for an unavailable Bridge, then pins and syncs over implicit TLS"
     fi
 else
-    fail "waits for an unavailable Bridge, then pins and syncs over STARTTLS"
+    fail "waits for an unavailable Bridge, then pins and syncs over implicit TLS"
 fi
 
 # 2. Restart, same certificate.
@@ -286,6 +292,36 @@ Port 1143" cert-b.pem >"$WORK/isync-name.log" 2>&1 \
 else
     fail "isync refuses the trusted certificate under another name"
     sed 's/^/     /' "$WORK/isync-name.log"
+fi
+
+# 5. A STARTTLS server with the trusted certificate: no fallback (#638).
+# The stub logs "credentials" for a LOGIN or AUTHENTICATE before TLS and
+# "login over TLS" for one after a STARTTLS upgrade.
+start_stub cert-b starttls
+start_mbsync "$FP_B"
+if [[ "$(wait_for_exit "$MBSYNC")" == "1" ]] \
+    && wait_for_log "$MBSYNC" "not serving implicit TLS" \
+    && ! log_has "$MBSYNC" "Running initial sync" \
+    && ! log_has "$STUB" "command=LOGIN" \
+    && ! log_has "$STUB" "command=AUTHENTICATE" \
+    && ! log_has "$STUB" "command=STARTTLS"; then
+    pass "mbsync refuses a STARTTLS server at extraction and sends no credentials"
+else
+    fail "mbsync refuses a STARTTLS server at extraction and sends no credentials"
+    docker logs "$MBSYNC" 2>&1 | tail -n 8 | sed 's/^/     /'
+    docker logs "$STUB" 2>&1 | tail -n 8 | sed 's/^/     /'
+fi
+docker rm -f "$MBSYNC" >/dev/null
+if ! run_isync "$tunnel" cert-b.pem >"$WORK/isync-starttls.log" 2>&1 \
+    && grep -q "secure connect to tunnel" "$WORK/isync-starttls.log" \
+    && ! log_has "$STUB" "command=LOGIN" \
+    && ! log_has "$STUB" "command=AUTHENTICATE" \
+    && ! log_has "$STUB" "command=STARTTLS"; then
+    pass "isync fails the handshake with a STARTTLS server and sends no credentials"
+else
+    fail "isync fails the handshake with a STARTTLS server and sends no credentials"
+    sed 's/^/     /' "$WORK/isync-starttls.log"
+    docker logs "$STUB" 2>&1 | tail -n 8 | sed 's/^/     /'
 fi
 
 if ((FAILURES > 0)); then

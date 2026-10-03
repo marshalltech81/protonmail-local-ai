@@ -12,6 +12,8 @@ from mcp.types import CallToolResult
 
 from ..lib.security import log_tool_call
 from ..lib.sqlite import (
+    FILTER_TYPE_ERROR,
+    LIST_THREAD_FILTERS,
     AmbiguousMessageId,
     InvalidFilterError,
     MessageBody,
@@ -114,7 +116,19 @@ def _header_lines(m: MessageRecord) -> list[str]:
     if m.references:
         headers.append(("References", _join_limited(m.references, _MAX_LISTED_REFERENCES)))
     headers.append(("Attachments", "yes" if m.has_attachments else "no"))
+    headers.append(("Status", ", ".join(_state_words(m))))
     return [f"{label}: {value}" for label, value in headers]
+
+
+def _state_words(m: MessageRecord) -> list[str]:
+    """``m``'s Maildir state in words: read or unread, then flagged and
+    replied when set."""
+    words = ["read" if m.seen else "unread"]
+    if m.flagged:
+        words.append("flagged")
+    if m.replied:
+        words.append("replied")
+    return words
 
 
 def _joins_previous(text: str, i: int) -> bool:
@@ -588,8 +602,11 @@ def register_retrieval_tools(server, db):
 
         Args:
             folder: Folder name (default: INBOX)
-            filter_type: Currently only "all" is supported by the local
-                         index. Other values return a clear validation error.
+            filter_type: "all" (default), "unread" (threads with an
+                         unread message in the folder) or "flagged"
+                         (threads with a flagged / starred message in
+                         the folder). Other values return a validation
+                         error.
             limit: Number of threads to return (default: 20)
             offset: Pagination offset (default: 0)
 
@@ -612,9 +629,9 @@ def register_retrieval_tools(server, db):
         offset = clamp_int(offset, default=0, minimum=0, maximum=1_000_000)
         # Validated here so its fixed message is the only text returned;
         # every other failure below is reported by type (#257).
-        if filter_type != "all":
+        if filter_type not in LIST_THREAD_FILTERS:
             log.warning("list_threads rejected invalid input (filter_type)")
-            raise ToolError("Error: filter_type must be 'all'; unread/flagged state is not indexed")
+            raise ToolError(f"Error: {FILTER_TYPE_ERROR}")
 
         try:
             threads = await asyncio.to_thread(
@@ -626,12 +643,16 @@ def register_retrieval_tools(server, db):
             )
 
             output = ListThreadsOutput(
-                folder=folder, offset=offset, threads=[thread_summary(t) for t in threads]
+                folder=folder,
+                filter_type=filter_type,
+                offset=offset,
+                threads=[thread_summary(t) for t in threads],
             )
+            scope = "" if filter_type == "all" else f" with {filter_type} messages"
             if not threads:
-                return tool_result(f"No threads found in {folder}.", output)
+                return tool_result(f"No threads{scope} found in {folder}.", output)
 
-            lines = [f"Threads in {folder} ({len(threads)} shown):\n"]
+            lines = [f"Threads{scope} in {folder} ({len(threads)} shown):\n"]
             for i, t in enumerate(threads, 1 + offset):
                 participants = ", ".join(clip(p, HEADER_CHAR_LIMIT) for p in t.participants[:2])
                 lines.append(
@@ -664,6 +685,8 @@ def register_retrieval_tools(server, db):
         date_to: str | None = None,
         has_attachments: bool | None = None,
         authority_class: str | None = None,
+        seen: bool | None = None,
+        flagged: bool | None = None,
         limit: int = 25,
         cursor: str | None = None,
     ) -> CallToolResult:
@@ -718,6 +741,8 @@ def register_retrieval_tools(server, db):
                              "personal", "other", or "unclassified"
                              (no rule matched). Spam-folder messages
                              never match.
+            seen: True for messages read in Proton, False for unread.
+            flagged: True for flagged (starred) messages, False for the rest.
             limit: Messages per page (default 25, clamped to [1, 100]).
             cursor: ``next_cursor`` from the previous page of the same query.
 
@@ -738,6 +763,8 @@ def register_retrieval_tools(server, db):
             "date_to": date_to,
             "has_attachments": has_attachments,
             "authority_class": authority_class,
+            "seen": seen,
+            "flagged": flagged,
         }
         log_tool_call(log, "query_messages", {**args, "limit": limit, "cursor": cursor})
         limit = clamp_int(limit, default=25, minimum=1, maximum=_MAX_QUERY_LIMIT)
@@ -788,7 +815,9 @@ def register_retrieval_tools(server, db):
         lines.append("")
 
         for i, m in enumerate(page.messages, first):
-            flags = " | attachments" if m.has_attachments else ""
+            flags = "".join(f" | {w}" for w in _state_words(m) if w != "read")
+            if m.has_attachments:
+                flags += " | attachments"
             delivered = f" | delivered {m.occurred_at}" if m.occurred_at else ""
             lines.append(f"{i}. {m.sent_at}{delivered} | {m.folder}{flags}")
             lines.append(f"   Subject: {clip(m.subject, HEADER_CHAR_LIMIT)}")

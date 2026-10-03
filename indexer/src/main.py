@@ -54,6 +54,11 @@ from .chunker import (
     truncate_to_tokens,
 )
 from .database import EMBEDDING_DIM, Database
+from .embed_identity import (
+    CalibrationRequestError,
+    EmbedderIdentityError,
+    verify_or_record_embedder,
+)
 from .embedder import (
     EMBED_FAILURE_CONFIGURATION,
     EMBED_FAILURE_REJECTED_INPUT,
@@ -68,6 +73,7 @@ from .entities import AuthorityRules, AuthorityRulesError, load_authority_rules
 from .extractors import ExtractionResult, is_stale_extractor
 from .folder_watch import FolderWatchRefresher
 from .maildir import (
+    PERMS_REPAIRED_NAME,
     SYNC_STAMP_NAME,
     SyncStamp,
     is_trashed,
@@ -311,7 +317,8 @@ INITIAL_INDEX_BATCH_SIZE = _int_env("INITIAL_INDEX_BATCH_SIZE", 50)
 # selection.
 STEADY_STATE_BATCH_SIZE = _int_env("INDEXER_STEADY_STATE_BATCH_SIZE", 8)
 
-# How often (seconds) the main loop calls ``Database.wal_checkpoint_truncate``.
+# How often (seconds) the main loop runs ``_run_wal_maintenance``: FTS5
+# ``optimize`` on tables with deletes, then ``Database.wal_checkpoint_truncate``.
 # An open connection does not pin the WAL; only an open read transaction
 # does. SQLite's automatic checkpoint lets the WAL be reused from the
 # start once its frames are checkpointed, but it never shrinks the file,
@@ -518,8 +525,9 @@ class MaildirHandler(FileSystemEventHandler):
         self.queue = queue
         self.reconciler = reconciler
         self.ingestion_state = ingestion_state
-        # Set on each mbsync sync stamp; the main loop then re-watches
-        # folders the sync's permission repair made readable (#516).
+        # Set on each mbsync sync stamp and permission-repair marker; the
+        # main loop then re-watches folders the repair made readable
+        # (#516). The marker follows a failed sync attempt too (#524).
         self.sync_completed = sync_completed
         # Set on every directory the watch reports created: watchdog
         # cannot watch one mbsync created 0700, so the next refresh
@@ -578,6 +586,13 @@ class MaildirHandler(FileSystemEventHandler):
                     self.ingestion_state.acknowledge(stamp)
                 if self.sync_completed is not None:
                     self.sync_completed.set()
+            return
+
+        # mbsync finished a permission repair, possibly for a failed sync
+        # attempt: re-watch, but acknowledge no sync (#524).
+        if dest_path_obj.name == PERMS_REPAIRED_NAME and dest_path_obj.parent == MAILDIR_PATH:
+            if self.sync_completed is not None:
+                self.sync_completed.set()
             return
 
         if self.db.is_indexed(src_path):
@@ -1860,17 +1875,20 @@ def _refresh_folder_watches(
     *,
     skip_trashed: bool = False,
 ) -> bool:
-    """After an mbsync sync, watch the folders it made readable (#516).
+    """After an mbsync sync attempt, watch the folders it made readable
+    (#516).
 
     mbsync creates folders 0700 and opens them to the indexer only in
-    its post-sync permission repair, which the stamp follows, so the
-    watch cannot have been added to a folder created during the sync.
+    its post-sync permission repair, which the repair marker (after
+    every attempt, #524) and the stamp (after a successful one) follow,
+    so the watch cannot have been added to a folder created during the
+    sync.
     When ``folder_watches`` re-schedules the watch, the old watch is
     closed before the new one walks the tree, and events in that gap
     are lost: heal renames, then queue every unindexed message, as at
     startup. That walk also queues mail already delivered into the
     newly watched folders. If either step raises, the re-schedule stays
-    pending and the next call (a sync stamp or the periodic tick) runs
+    pending and the next call (a marker, stamp or periodic tick) runs
     both again, once per call (#529). Returns whether the recovery ran.
     """
     folder_watches.refresh()
@@ -1987,6 +2005,32 @@ def _validate_embedding_dim(embedder: EmbeddingBackend) -> None:
         )
 
 
+def _check_embedder_identity(db: Database, embedder) -> None:
+    """Record the embedder on a fresh index, else verify it is the one
+    that built the index (``src/embed_identity.py``); exit otherwise.
+
+    A mismatch exits with the fixed message: the operator restores the
+    original embedder or rebuilds the index. A failed calibration request
+    has already been retried by ``embed``'s transient-error policy right
+    after ``wait_for_ready``, so it exits too, with the scrubbed error,
+    and the restart policy tries again, as the dimension probe does.
+    """
+    try:
+        outcome = verify_or_record_embedder(
+            db,
+            embedder,
+            provider=EMBED_MODE,
+            endpoint=embedder.base_url,
+            model=EMBED_MODEL,
+        )
+    except (EmbedderIdentityError, CalibrationRequestError) as exc:
+        raise SystemExit(str(exc)) from None
+    if outcome == "recorded":
+        log.info("Recorded embedder identity for this index (model=%s)", EMBED_MODEL)
+    else:
+        log.info("Embedder identity verified against the index (model=%s)", EMBED_MODEL)
+
+
 def _load_authority_rules(path: Path) -> AuthorityRules:
     """Load the operator rules file, failing closed on a malformed one.
 
@@ -2018,6 +2062,41 @@ def _prune_reaped_records(db: Database) -> None:
         return
     if pruned:
         log.info("pruned %d expired reaped-message record(s)", pruned)
+
+
+def _run_wal_maintenance(db: Database) -> None:
+    """One WAL-checkpoint-interval maintenance pass.
+
+    First FTS5 ``optimize`` on each FTS5 table that had a row deleted
+    since the last pass (reaps and thread re-indexes both delete), so a
+    deleted row's index terms leave the live segment pages (#641). Then
+    the truncate checkpoint, which copies the rewritten pages into
+    ``mail.db`` and clears the WAL frames that still held the old ones.
+    A failed ``optimize`` leaves its table pending for the next pass
+    and does not skip the checkpoint.
+    """
+    try:
+        started = time.monotonic()
+        tables = db.optimize_deleted_fts()
+        if tables:
+            log.info(
+                "fts optimize tables=%s duration=%.2fs",
+                ",".join(tables),
+                time.monotonic() - started,
+            )
+    except Exception as e:
+        log.error("fts optimize failed: %s", type(e).__name__)
+    try:
+        busy, _log_pages, ckpt_pages = db.wal_checkpoint_truncate()
+        if busy:
+            log.debug(
+                "wal_checkpoint busy=%d (a reader pinned WAL frames; next pass will retry)",
+                busy,
+            )
+        elif ckpt_pages:
+            log.debug("wal_checkpoint truncated %d page(s)", ckpt_pages)
+    except Exception as e:
+        log.error("wal checkpoint failed: %s", e)
 
 
 def _log_reconciler_config(cfg: ReconcilerConfig) -> None:
@@ -2116,6 +2195,8 @@ def main():
 
     # Verify the running model matches the schema's reserved vector dim.
     _validate_embedding_dim(embedder)
+    # Before anything is indexed: never mix vectors from two embedders.
+    _check_embedder_identity(db, embedder)
 
     # Start watching BEFORE the initial drain. On a large mailbox the
     # drain runs for hours; mail mbsync delivers in that window would
@@ -2229,9 +2310,10 @@ def main():
             except Exception as e:
                 log.error("queue drain failed: %s", _stage_error(e))
 
-            # A sync completed: watch any folder its permission repair
-            # made readable. Cleared first, so a sync that completes
-            # during the refresh triggers another.
+            # A sync attempt's permission repair finished (its marker,
+            # or a success stamp): watch any folder it made readable.
+            # Cleared first, so a signal during the refresh triggers
+            # another.
             if sync_completed.is_set():
                 sync_completed.clear()
                 try:
@@ -2279,9 +2361,8 @@ def main():
                     ingestion_state.acknowledge(stamp)
                 except Exception as e:
                     log.error("periodic Maildir rescan failed: %s", e)
-                # Also re-watch here: a failed sync attempt still opens
-                # the folders it created but writes no stamp, and a
-                # failed re-schedule leaves no watch until the next try.
+                # Also re-watch here: a lost repair marker, or a failed
+                # re-schedule, leaves no watch until the next try.
                 try:
                     _refresh_folder_watches(
                         folder_watches, db, queue, skip_trashed=reconciler is not None
@@ -2296,20 +2377,10 @@ def main():
             # shrinks the file, so an explicit periodic
             # ``wal_checkpoint(TRUNCATE)`` is what reclaims space. It
             # can only complete when no reader holds an open read
-            # transaction on the WAL (``busy`` below).
+            # transaction on the WAL. The pass first optimizes FTS5
+            # tables with deletes (#641); see ``_run_wal_maintenance``.
             if now - last_wal_checkpoint >= WAL_CHECKPOINT_INTERVAL_SECS:
-                try:
-                    busy, _log_pages, ckpt_pages = db.wal_checkpoint_truncate()
-                    if busy:
-                        log.debug(
-                            "wal_checkpoint busy=%d (a reader pinned WAL frames; "
-                            "next pass will retry)",
-                            busy,
-                        )
-                    elif ckpt_pages:
-                        log.debug("wal_checkpoint truncated %d page(s)", ckpt_pages)
-                except Exception as e:
-                    log.error("wal checkpoint failed: %s", e)
+                _run_wal_maintenance(db)
                 last_wal_checkpoint = now
 
             time.sleep(1)

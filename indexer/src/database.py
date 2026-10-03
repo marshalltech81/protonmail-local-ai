@@ -27,6 +27,7 @@ from .entities import (
     person_entity_id,
 )
 from .extractors import OCR_DISABLED_ERROR, SCANNED_PDF_OCR_DISABLED_ERROR
+from .maildir import message_state
 from .threader import (
     FTS_SUBJECT_SCAN_CHARS,
     FTS_SUBJECT_SCAN_ROWS,
@@ -140,6 +141,11 @@ def _require_minimum_sqlite() -> None:
         )
 
 
+# Every FTS5 table in the schema, in the order ``optimize_deleted_fts``
+# visits them.
+_FTS_TABLES = ("threads_fts", "message_chunks_fts", "attachments_fts")
+
+
 def _synchronized(fn):
     """Serialize ``Database`` method calls across threads.
 
@@ -171,6 +177,9 @@ class Database:
         self._transaction_depth = 0
         # Operator source-authority rules; empty until ``set_authority_rules``.
         self._authority_rules = AuthorityRules()
+        # FTS5 tables that had a row deleted since their last
+        # ``optimize_deleted_fts`` run (#641). In memory only.
+        self._fts_pending_optimize: set[str] = set()
         path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = self._connect()
         self._closed = False
@@ -189,6 +198,15 @@ class Database:
         sqlite_vec.load(conn)
         conn.enable_load_extension(False)
         conn.execute("PRAGMA foreign_keys = ON")
+        # Overwrite deleted content with zeros, so a reaped message's
+        # text does not stay in freed pages of mail.db (#602). Set
+        # explicitly because the default depends on how SQLite was
+        # compiled (Debian's build defaults ON, many others OFF). Per
+        # connection; ON rather than FAST, which leaves freed overflow
+        # pages (long bodies and extractions) unzeroed. FTS5 index
+        # terms are removed by ``optimize_deleted_fts`` (#641); WAL
+        # frames are not covered; see docs/architecture.md.
+        conn.execute("PRAGMA secure_delete = ON")
         # Performance tuning
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
@@ -235,6 +253,40 @@ class Database:
             return 0, 0, 0
         # Row order is (busy, log, checkpointed) per SQLite docs.
         return int(row[0]), int(row[1]), int(row[2])
+
+    def optimize_deleted_fts(self) -> list[str]:
+        """Run FTS5 ``optimize`` on each FTS5 table that had a row
+        deleted since its last run, and return the tables optimized.
+
+        The FTS5 tables are ``contentless_delete=1``: a ``DELETE``
+        records a tombstone and leaves the row's index terms (its words
+        and their positions) in live ``*_fts_data`` segment pages, which
+        ``secure_delete`` never frees and FTS5's ``secure-delete``
+        option does not cover for this table type. ``optimize`` merges
+        every segment into one and drops the deleted terms (#641). It
+        rewrites the whole table, so the main loop calls this at most
+        once per WAL-checkpoint interval, just before the checkpoint.
+
+        The lock is taken per table, so a writer waits for one
+        ``optimize`` at most. A table stays pending if its ``optimize``
+        fails, and the error propagates to the caller.
+        """
+        done: list[str] = []
+        for table in _FTS_TABLES:
+            with self._lock:
+                if table not in self._fts_pending_optimize:
+                    continue
+                try:
+                    self._conn.execute(
+                        f"INSERT INTO {table}({table}) VALUES('optimize')"  # nosec B608 - table from the fixed _FTS_TABLES tuple
+                    )
+                    self._conn.commit()
+                except Exception:
+                    self._conn.rollback()
+                    raise
+                self._fts_pending_optimize.discard(table)
+            done.append(table)
+        return done
 
     def _begin_if_needed(self, cur: sqlite3.Cursor) -> bool:
         if self._transaction_depth > 0:
@@ -572,6 +624,11 @@ class Database:
                 size_bytes      INTEGER,
                 content_hash    TEXT,
                 indexed_at      TEXT NOT NULL,
+                -- Maildir S / F / R flags of ``filepath`` (maildir.message_state),
+                -- written with it on every insert and rename.
+                seen            INTEGER NOT NULL DEFAULT 0,
+                flagged         INTEGER NOT NULL DEFAULT 0,
+                replied         INTEGER NOT NULL DEFAULT 0,
                 FOREIGN KEY (claimant_id) REFERENCES message_thread_map(claimant_id)
                     ON DELETE CASCADE
             );
@@ -675,6 +732,7 @@ class Database:
             );
         """)
         self._run_entity_schema_script(cur)
+        self._run_vector_generation_schema_script(cur)
 
     @staticmethod
     def _run_entity_schema_script(cur: sqlite3.Cursor) -> None:
@@ -714,6 +772,47 @@ class Database:
                 PRIMARY KEY (entity_id, alias)
             )
             """,
+        ):
+            cur.execute(statement)
+
+    @staticmethod
+    def _run_vector_generation_schema_script(cur: sqlite3.Cursor) -> None:
+        """The embedder identity record (PLAN Phase 2 item 1, first slice;
+        see ``src/embed_identity.py``), inside the initial schema's open
+        transaction.
+
+        One row per embedding generation. Today exactly one exists, status
+        ``active``, written on a fresh index. ``endpoint`` is the SDK's
+        resolved base URL without userinfo, query or fragment;
+        ``calibration_vector`` is the float32 embedding of the fixed
+        calibration text whose SHA-256 is ``calibration_sha256``.
+        ``revision``, ``tokenizer``, ``context_window``,
+        ``chunk_config_hash`` and ``label`` are reserved for the
+        generation lifecycle and stay NULL: the OpenAI-compatible
+        embeddings API exposes none of them.
+        """
+        for statement in (
+            """
+            CREATE TABLE vector_generations (
+                generation_id      INTEGER PRIMARY KEY,
+                provider           TEXT NOT NULL,
+                endpoint           TEXT NOT NULL,
+                model              TEXT NOT NULL,
+                revision           TEXT,
+                dimensions         INTEGER NOT NULL,
+                tokenizer          TEXT,
+                context_window     INTEGER,
+                chunk_config_hash  TEXT,
+                label              TEXT,
+                calibration_sha256 TEXT NOT NULL,
+                calibration_vector BLOB NOT NULL,
+                created_at         TEXT NOT NULL,
+                status             TEXT NOT NULL CHECK (status IN
+                    ('building', 'caught-up', 'active', 'retained', 'retired'))
+            )
+            """,
+            "CREATE UNIQUE INDEX idx_vector_generations_active "
+            "ON vector_generations(status) WHERE status = 'active'",
         ):
             cur.execute(statement)
 
@@ -1127,6 +1226,7 @@ class Database:
                 fts_rowid = existing_fts_rowids.get(chunk_id)
                 if fts_rowid is not None:
                     cur.execute("DELETE FROM message_chunks_fts WHERE rowid = ?", (fts_rowid,))
+                    self._fts_pending_optimize.add("message_chunks_fts")
                 cur.execute("DELETE FROM message_chunks_vec WHERE chunk_id = ?", (chunk_id,))
                 cur.execute("DELETE FROM message_chunks WHERE chunk_id = ?", (chunk_id,))
 
@@ -1399,6 +1499,7 @@ class Database:
         for row in rows:
             if row["fts_rowid"] is not None:
                 cur.execute("DELETE FROM attachments_fts WHERE rowid = ?", (row["fts_rowid"],))
+                self._fts_pending_optimize.add("attachments_fts")
         cur.execute("DELETE FROM attachments WHERE claimant_id = ?", (claimant_id,))
         for attachment_id in sorted({row["attachment_id"] for row in rows}):
             cur.execute(_PURGE_ORPHAN_EXTRACTION_SQL, (attachment_id, attachment_id))
@@ -1700,8 +1801,8 @@ class Database:
             result.append(list(struct.unpack(f"{count}f", blob)))
         return result
 
-    @staticmethod
     def _delete_chunks_in_batches(
+        self,
         cur: sqlite3.Cursor,
         rows: list[sqlite3.Row],
     ) -> None:
@@ -1735,6 +1836,7 @@ class Database:
                 f"DELETE FROM message_chunks_fts WHERE rowid IN ({placeholders})",  # nosec B608
                 int_batch,
             )
+            self._fts_pending_optimize.add("message_chunks_fts")
         for start in range(0, len(chunk_ids), batch_size):
             str_batch = chunk_ids[start : start + batch_size]
             placeholders = ",".join(["?"] * len(str_batch))
@@ -1790,6 +1892,7 @@ class Database:
         ).fetchone()
         if existing and existing["fts_rowid"] is not None:
             cur.execute("DELETE FROM threads_fts WHERE rowid = ?", (existing["fts_rowid"],))
+            self._fts_pending_optimize.add("threads_fts")
         cur.execute(
             "INSERT INTO threads_fts (subject, participants, body) VALUES (?, ?, ?)",
             (subject, participants_json, body),
@@ -2156,6 +2259,66 @@ class Database:
         return int(row[0]) if row else 0
 
     @_synchronized
+    def get_active_vector_generation(self) -> dict | None:
+        """The active ``vector_generations`` row, its calibration vector
+        unpacked to floats; ``None`` before the indexer records one.
+
+        Raises on a database from before the table existed: the index
+        must be rebuilt, since nothing records which embedder wrote it.
+        """
+        if (
+            self._conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'vector_generations'"
+            ).fetchone()
+            is None
+        ):
+            raise RuntimeError(
+                "The index predates the embedder identity record. Stop the stack, "
+                "wipe the sqlite-volume and let the indexer rebuild the index from "
+                "Maildir."
+            )
+        row = self._conn.execute(
+            "SELECT * FROM vector_generations WHERE status = 'active'"
+        ).fetchone()
+        if row is None:
+            return None
+        record = dict(row)
+        blob = record["calibration_vector"]
+        record["calibration_vector"] = list(struct.unpack(f"{len(blob) // 4}f", blob))
+        return record
+
+    @_synchronized
+    def record_vector_generation(
+        self,
+        *,
+        provider: str,
+        endpoint: str,
+        model: str,
+        calibration_sha256: str,
+        calibration_vector: list[float],
+    ) -> int:
+        """Insert the active generation; returns its ``generation_id``.
+
+        The partial unique index refuses a second active row.
+        """
+        with self.transaction():
+            cur = self._conn.execute(
+                "INSERT INTO vector_generations (provider, endpoint, model, dimensions, "
+                "calibration_sha256, calibration_vector, created_at, status) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, 'active')",
+                (
+                    provider,
+                    endpoint,
+                    model,
+                    len(calibration_vector),
+                    calibration_sha256,
+                    sqlite_vec.serialize_float32(calibration_vector),
+                    datetime.now(UTC).isoformat(),
+                ),
+            )
+        return int(cur.lastrowid or 0)
+
+    @_synchronized
     def get_thread_messages(self, thread_id: str) -> list[sqlite3.Row]:
         """All (claimant_id, message_id, filepath) rows for a thread, used to rebuild it."""
         return self._conn.execute(
@@ -2171,13 +2334,14 @@ class Database:
         UPDATE`` (never ``REPLACE``) keeps the row in place, so the
         participant cascade only fires when the message itself is removed.
         """
+        state = message_state(msg.filepath)
         cur.execute(
             """
             INSERT INTO messages
                 (claimant_id, message_id, thread_id, filepath, folder, subject, sent_at,
                  occurred_at, in_reply_to, references_json, has_attachments, size_bytes,
-                 content_hash, indexed_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 content_hash, indexed_at, seen, flagged, replied)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(claimant_id) DO UPDATE SET
                 thread_id       = excluded.thread_id,
                 filepath        = excluded.filepath,
@@ -2190,7 +2354,10 @@ class Database:
                 has_attachments = excluded.has_attachments,
                 size_bytes      = excluded.size_bytes,
                 content_hash    = excluded.content_hash,
-                indexed_at      = excluded.indexed_at
+                indexed_at      = excluded.indexed_at,
+                seen            = excluded.seen,
+                flagged         = excluded.flagged,
+                replied         = excluded.replied
             """,
             (
                 msg.claimant_id,
@@ -2207,6 +2374,9 @@ class Database:
                 msg.size,
                 msg.content_hash,
                 datetime.now(UTC).isoformat(),
+                int(state.seen),
+                int(state.flagged),
+                int(state.replied),
             ),
         )
         cur.execute("DELETE FROM message_participants WHERE claimant_id = ?", (msg.claimant_id,))
@@ -2340,9 +2510,13 @@ class Database:
                 "UPDATE message_thread_map SET filepath = ? WHERE filepath = ?",
                 (new_path, old_path),
             )
+            # mbsync carries Proton's read / flagged / replied changes as
+            # renames, so the state moves with the path, never re-parsed.
+            state = message_state(new_path)
             cur.execute(
-                "UPDATE messages SET filepath = ? WHERE filepath = ?",
-                (new_path, old_path),
+                "UPDATE messages SET filepath = ?, seen = ?, flagged = ?, replied = ? "
+                "WHERE filepath = ?",
+                (new_path, int(state.seen), int(state.flagged), int(state.replied), old_path),
             )
             if folder is not None:
                 cur.execute(
@@ -2503,6 +2677,7 @@ class Database:
             ]
             if row and row["fts_rowid"] is not None:
                 cur.execute("DELETE FROM threads_fts WHERE rowid = ?", (row["fts_rowid"],))
+                self._fts_pending_optimize.add("threads_fts")
             cur.execute("DELETE FROM threads_vec WHERE thread_id = ?", (thread_id,))
             self._delete_chunks_for_thread(cur, thread_id)
             # Walk every message in the thread to drop its attachments

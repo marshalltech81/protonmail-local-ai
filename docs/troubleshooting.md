@@ -3,6 +3,32 @@
 Diagnostics and recovery steps for a running stack. For first-time
 installation and configuration, see [`setup.md`](setup.md).
 
+## Which layer is failing
+
+A healthy Bridge container only means its IMAP port accepts TCP
+connections. It does not mean TLS works, an account is logged in, or
+mail is syncing. Each layer has its own signal; the states and signals
+are defined in
+[architecture.md](architecture.md#health-and-readiness-signals). Start
+with `make status`, which shows container health and the
+`get_mailbox_status` fields, then find the symptom below. Only the
+authentication row involves a credential: Bridge's `info` prints the
+Bridge password, so treat its output and `.secrets/bridge_pass.txt` as
+secrets. No other check needs or shows one.
+
+| Symptom | Failing layer | Next safe check |
+| --- | --- | --- |
+| `make up` fails with `container protonmail-bridge is unhealthy`, or Bridge restarts | Bridge listening | `docker compose logs protonmail-bridge`; see [Bridge is up but IMAP is unresponsive](#bridge-is-up-but-imap-is-unresponsive--mbsync-cant-connect) and the Bridge start-up sections below |
+| mbsync logs `Waiting for ProtonBridge IMAP` with no `Bridge IMAP port is reachable` after it, then `Bridge IMAP did not become reachable` | Bridge listening, as mbsync sees it | Default mode: the Bridge container's health and logs. macOS Bridge mode: [the app is running and its port matches](#macos-bridge-mode-mbsync-cannot-reach-or-verify-the-bridge-app) |
+| mbsync stops with `cert extraction failed` | TLS handshake | Run the TLS probe in [Confirm Bridge IMAP answers over TLS](#confirm-bridge-imap-answers-over-tls); a Bridge image from before implicit TLS needs `make build`. macOS Bridge mode: [the app's IMAP mode must be SSL](#macos-bridge-mode-mbsync-cannot-reach-or-verify-the-bridge-app) |
+| mbsync stops with `Bridge cert fingerprint does not match pinned value` or `does not match BRIDGE_CERT_FINGERPRINT` | TLS identity | [Bridge cert pin mismatch](#mbsync-refuses-to-sync--bridge-cert-pin-mismatch) |
+| mbsync is healthy, logs `Initial sync returned a non-zero status` or `Sync failed (n/5 consecutive failures)`, restarts after five; `get_mailbox_status` says `no successful mail sync has been recorded` | Bridge authentication, or the sync itself | Check that `BRIDGE_USER` and `.secrets/bridge_pass.txt` match Bridge's `info` (macOS Bridge mode: the app's IMAP details) and that an account is logged in ([re-authenticate](#bridge-credentials-expired--need-to-re-authenticate); in macOS Bridge mode, in the app); `mbsync -V` in [Verifying mbsync is working](#verifying-mbsync-is-working) names the failing step |
+| `make up` fails with `container mbsync is unhealthy` | mbsync syncing | [`make up` fails — mbsync is unhealthy](#make-up-fails--mbsync-is-unhealthy) |
+| mbsync is healthy, `get_mailbox_status` says `last successful mail sync was ... ago` | Last successful sync (recent syncs failing, or one long run in progress); or the indexer has not acknowledged a newer stamp (see the indexer rows) | `docker compose logs mbsync --tail 50`: repeated `Sync failed` lines, or no `Syncing...` since a long run started ([deadline](#mbsync-stopped-a-sync-at-its-deadline)) |
+| `get_mailbox_status` says `the indexer has not reported` or `the indexer last reported ... ago` | Index current: indexer down or stalled | `docker compose logs indexer --tail 50` and `docker inspect indexer --format='{{json .State.Health}}'` |
+| `get_mailbox_status` says `... waiting to be indexed` | Index current: indexing behind | Normal after a large sync; if it does not fall, see [Tuning indexing retries](#tuning-indexing-retries) |
+| `get_mailbox_status` is current but a message is missing | Index: a dead-lettered message (`current` ignores the `dead` count), or none: the mail reached Proton after the last sync | If the `dead` count is non-zero, fix its cause and run `make requeue-dead` (see [Tuning indexing retries](#tuning-indexing-retries)); otherwise wait one `SYNC_INTERVAL` |
+
 ## Bridge won't start — "Failed to launch exit status 1"
 
 This can happen if the image is outdated. Check:
@@ -128,13 +154,17 @@ restarts it so the failure is visible instead of hanging forever.
 
 **2. Check that Bridge is authenticated**
 
-```bash
-docker exec protonmail-bridge \
-    find /data/config/protonmail/bridge-v3 -type f | sort
-```
-
-If `vault.enc` is missing, Bridge is not authenticated and will not serve IMAP
-at all. Re-run `make first-run` to log in again.
+Neither the container's health nor its files show this. Bridge writes
+`vault.enc` at startup, before any login, and it listens, completes TLS and
+greets IMAP clients with no account logged in. The signal is mbsync: a
+sync that completes (`get_mailbox_status` reports a last sync) proves its
+login was accepted, while a rejected login shows as repeated
+`Sync failed` lines in `docker compose logs mbsync`. To see which accounts
+Bridge holds, stop the stack, run `make first-run` and enter `info` in the
+CLI (see [Bridge credentials expired](#bridge-credentials-expired--need-to-re-authenticate));
+`info` prints the Bridge password, so keep its output private. In macOS
+Bridge mode `make first-run` starts the container Bridge, not the app:
+check the account in the Bridge app instead.
 
 **3. Check the bridge binary is actually running**
 
@@ -164,26 +194,34 @@ Once you see event polling instead of message fetching, IMAP is fully
 responsive. mbsync extracts the Bridge TLS cert itself on its next
 start; then check it with "Verifying mbsync is working" below.
 
-**Confirm IMAP port is actually accepting connections**
+### Confirm Bridge IMAP answers over TLS
 
-Run this from outside the container to verify port 1143 is ready:
+Bridge serves IMAP with implicit TLS (#638), so a plaintext client such as
+`nc` gets no greeting from it. Probe from inside the Bridge container, whose
+image already has `openssl`; nothing is published and no credential is sent:
 
 ```bash
-docker run --rm \
-    --network protonmail-local-ai_bridge-net \
-    debian:bookworm-slim \
-    bash -c "apt-get install -y netcat-openbsd -qq 2>/dev/null && \
-             echo | nc -w 5 protonmail-bridge 1143"
+printf 'a1 LOGOUT\r\n' | docker exec -i protonmail-bridge \
+    timeout 20 openssl s_client -connect localhost:1143 -quiet -ign_eof
 ```
 
-If IMAP is ready you will see the Bridge greeting banner, e.g.:
+The `verify error:num=18:self-signed certificate` line is expected: this
+probe only checks that TLS works and IMAP answers, and trusts nothing (mbsync
+checks the certificate against its pin). If IMAP is ready, the TLS lines are
+followed by the Bridge greeting and the logout, e.g.:
 
 ```
-* OK [CAPABILITY IMAP4rev1 ...] ProtonMail Bridge ready.
+* OK [CAPABILITY AUTH=PLAIN ... IMAP4rev1 ...] Proton Mail Bridge 03.27.00 - gluon session ID 1
+* BYE
+a1 OK LOGOUT
 ```
 
-If the command hangs or exits silently, Bridge is still syncing or the
-process has crashed — check the logs and process steps above.
+A greeting shows the listener and TLS work, not that an account is logged
+in: Bridge greets the same way with no account. A handshake error means the
+running Bridge image does not serve implicit TLS (rebuild it with
+`make build`, then `make up`). A probe that hangs until `timeout` stops it
+means Bridge is still in its initial sync or the process has crashed —
+check the logs and process steps above.
 
 ## Verifying mbsync is working
 
@@ -201,7 +239,11 @@ fails, `mbsync` now logs a specific cause such as:
 - missing `BRIDGE_USER`
 - missing or empty `/run/secrets/bridge_pass`
 - cert extraction timeout
-- `openssl s_client` handshake errors
+- `openssl s_client` handshake errors. mbsync connects with implicit
+  TLS only (#638). With the Bridge container this means the running
+  Bridge image predates that change, so rebuild it (`make build`, then
+  `make up`); in macOS Bridge mode see
+  [macOS Bridge mode](#macos-bridge-mode-mbsync-cannot-reach-or-verify-the-bridge-app)
 - Bridge TLS cert fingerprint does not match the pinned value (see the
   "Bridge cert pin mismatch" section below)
 
@@ -273,9 +315,15 @@ Bridge container to inspect; check the app and the connection instead.
   connected, and compare its IMAP port with `BRIDGE_IMAP_PORT` in
   `.env` (default 1143). To probe from the container:
   `docker exec mbsync nc -z -w 2 host.docker.internal 1143`.
-- **`Bridge IMAP port is reachable` but `cert extraction failed`.** The
-  app's IMAP connection mode is SSL rather than STARTTLS. Switch it back
-  to STARTTLS in the app's settings.
+- **`Bridge IMAP port is reachable` but `cert extraction failed`, with
+  `If Bridge is not serving implicit TLS`.** The app's IMAP connection
+  mode is STARTTLS (the app's default) rather than SSL; `openssl
+  s_client` then usually reports `wrong version number`. mbsync speaks
+  only implicit TLS (#638) and never falls back, so nothing was sent.
+  Switch the app's IMAP connection mode to SSL in its settings, take the
+  fingerprint again if you have not yet
+  ([Set it up](setup.md#set-it-up), step 3; it does not change with the
+  mode), and `make up-macos-bridge`.
 - **`BRIDGE_CERT_FINGERPRINT is not set`.** This mode does not trust
   the app's certificate on first use, so mbsync stops at startup,
   before it waits for or connects to the app. Take the fingerprint on the Mac
@@ -623,15 +671,18 @@ successful mail sync has been recorded" until then.
 The indexer watches the Maildir for new files, but it cannot add a watch to
 a folder it could not read when the folder appeared, and making the folder
 readable later does not add one by itself. On a fresh install that is every
-folder from the first sync, INBOX included. After each sync, once mbsync
-writes its last-sync stamp, the indexer checks for directories that became
-readable and, if it finds any, re-creates its watch and queues the mail
-already in them (#516). No restart is needed. The same applies to a folder
+folder from the first sync, INBOX included. After each sync attempt, once
+mbsync has made its files readable and renamed its repair marker
+(`.mbsync-perms-repaired`) into place, the indexer checks for directories
+that became readable and, if it finds any, re-creates its watch and queues
+the mail already in them (#516). No restart is needed. The same applies to a folder
 created in Proton while the stack runs: its mail is indexed after the sync
 that created it, and its later deliveries in real time.
 
-A sync attempt that fails writes no stamp; folders it created are then
-watched at the next successful sync or the next recovery sweep
+A sync attempt that fails writes no last-sync stamp but still writes the
+marker, so folders it created are watched without waiting for a successful
+sync (#524). If the marker cannot be written, mbsync logs a warning and the
+folders are watched at the next successful sync or the next recovery sweep
 (`INDEXER_RECOVERY_SWEEP_INTERVAL_SECS`, default 30 minutes), whichever
 comes first. The check runs in the indexer's main loop. While the
 indexer's startup index is still draining a large backlog, it waits until
@@ -649,7 +700,9 @@ mbsync is healthy while its sync loop is alive: its config and the Bridge
 cert are in place, and either a sync attempt started or ended within three
 `SYNC_INTERVAL`s (plus 30 s) or an `mbsync` process or the permission repair
 walk that follows it (`find`) is running. A long first
-sync is therefore healthy; it is not a reason for this failure. (Images built
+sync is therefore healthy; it is not a reason for this failure. A run still
+going past its deadline (`SYNC_DEADLINE_SECONDS` plus 60 s) is unhealthy:
+see [mbsync stopped a sync at its deadline](#mbsync-stopped-a-sync-at-its-deadline). (Images built
 before this behaviour required a completed sync and failed any first sync
 longer than about three and a half minutes; rebuild with `make build`.)
 
@@ -668,6 +721,74 @@ after five consecutive failures, so `docker compose ps` shows the restarts.
 Once mbsync is healthy, run `make up` again (`make up-macos-bridge` in
 [macOS Bridge mode](setup.md#macos-bridge-mode-optional)): Compose leaves the running
 services as they are and starts the indexer and then the MCP server.
+
+## Indexer cannot read `config/authority.toml` on Linux
+
+On Linux with Docker Engine the indexer (UID 1002) sees the host owner
+and mode of the bind-mounted `config/authority.toml`, so a `600` file
+you own stops it at startup with "could not be read". `make up` and
+`make restart-indexer` catch this first and print the fix, which grants
+UID 1002 alone read access with an ACL (needs the `acl` package):
+
+```bash
+setfacl -b config/authority.toml && chmod 600 config/authority.toml && setfacl -m u:1002:r config/authority.toml
+make restart-indexer
+```
+
+Run it again after an editor replaces the file, since the new file has
+no ACL. If `make up` instead reports that `config` is not searchable by
+the indexer, run the `setfacl -m u:1002:x` command it prints.
+
+Do not `chmod 644`/`640` the file or `chgrp` it instead: either lets
+other host accounts read your rules. See "Source-authority rules"
+in `docs/setup.md`.
+
+## mbsync stopped a sync at its deadline
+
+Each mbsync run has a deadline, `SYNC_DEADLINE_SECONDS` (default 86400, a
+day). isync's own 20-second timeout restarts whenever Bridge sends
+anything, so a server that keeps a command open with keepalives could
+otherwise hold one run, and the whole sync loop, forever (#282). Past the
+deadline the entrypoint stops mbsync (TERM, then KILL 30 s later if it is
+still running), logs
+
+```text
+>>> ERROR: mbsync did not finish within SYNC_DEADLINE_SECONDS=86400 and was stopped; counting this sync as failed (see docs/troubleshooting.md).
+```
+
+and counts a failed sync: no success stamp is written, the next attempt
+starts after `SYNC_INTERVAL`, and five failures in a row exit the container
+so Docker restarts it. A stopped run loses nothing already synced: isync
+records each message in its sync state as it goes, so the next run carries
+on from there.
+
+**Tune the deadline after your first sync.** The default is deliberately
+generous because the first sync of a large mailbox is the longest run
+mbsync makes, and its duration is not known in advance. Once the first
+sync has finished, find how long it took from the log timestamps:
+
+```bash
+docker compose logs -t mbsync | grep -E 'Running initial sync|Starting sync loop'
+```
+
+(If the first sync was interrupted or failed, it continued in the next
+`>>> Syncing...` runs; add those up.) Later runs only fetch new mail and
+take seconds, so a few times the first sync's duration is a safe deadline;
+a lower one recovers sooner from a stall. Set it in `.env` and recreate
+mbsync:
+
+```bash
+# .env: e.g. for a first sync of about 2 hours
+SYNC_DEADLINE_SECONDS=21600
+```
+
+```bash
+make up                # or make up-macos-bridge in macOS Bridge mode
+```
+
+Raise it instead if a long catch-up (after mbsync was down for weeks, or a
+large import into Proton) keeps being stopped: the log then shows the
+deadline line on consecutive runs while Bridge is otherwise working.
 
 ## Indexer refuses to start — "wipe the sqlite-volume"
 
@@ -693,6 +814,52 @@ make up                # or make up-macos-bridge in macOS Bridge mode
 Maildir and Bridge state are untouched. The indexer re-parses and
 re-embeds every message, so the rebuild takes as long as an initial
 index and calls the embedding provider for the whole mailbox.
+
+## Embedder identity mismatch
+
+The indexer or mcp-server exits at startup with "The configured
+embedder is not the one that built this index (...)". The index records
+the embedder that built it (see docs/architecture.md, "Embedder
+identity record"), and the one configured now differs in the fields
+the message lists:
+
+- `EMBED_MODEL`, `endpoint` or `dimensions`: `EMBED_MODEL` or
+  `EMBED_BASE_URL` changed (the endpoint is the resolved URL, so an
+  empty `EMBED_BASE_URL` reads as `https://api.openai.com/v1`, or as
+  `OPENAI_BASE_URL` if set). Both services must use the same values.
+- `calibration vector`: the names match but the server behind them
+  returns different vectors, typically because a host-side server now
+  loads a different model, or a different build of it, under the same
+  name, or a provider alias moved.
+- `calibration text`: the indexer and mcp-server come from different
+  releases, or the index was recorded by another release. Run matching
+  images.
+
+Two ways out:
+
+1. Restore the original embedder: put back the `EMBED_BASE_URL` /
+   `EMBED_MODEL` values and the model the server loads, then
+   `make up`. Nothing is rebuilt.
+2. Keep the new embedder and rebuild the index with it, following
+   "Indexer refuses to start — wipe the sqlite-volume" above. Vectors
+   from two embedders are not comparable, so the old ones cannot be
+   kept. Moving the same server to a new address also needs a
+   rebuild today; switching embedders without one is PLAN.md Phase 2.
+
+The same section covers "The index holds messages but no record of the
+embedder" and "The index predates the embedder identity record": both
+mean an index built before the record existed, so rebuild it.
+
+"The indexer has not recorded the embedder behind this index yet" from
+mcp-server on a fresh install is transient: the indexer records it once
+its embedder answers, and mcp-server's restart picks it up. If it
+persists, check `docker compose logs indexer` for an embedder error.
+
+"Embedder calibration request failed" means the startup calibration
+request to the embedder failed; the message carries the error type and
+status. The service exits and Docker restarts it, so a brief outage
+clears by itself; a 401, 403 or 404 is a credential or model setting to
+fix (see "Embedder or inference endpoint unreachable from containers").
 
 ## Deletion reconciliation (mirror vs archive)
 

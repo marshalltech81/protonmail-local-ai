@@ -114,6 +114,10 @@ class EmbedClient:
         # empty string they typed.
         self.base_url = str(self.client.base_url).rstrip("/")
 
+    async def aclose(self) -> None:
+        """Close the underlying HTTP client."""
+        await self.client.close()
+
     async def embed(self, text: str) -> list[float]:
         """Embed a query string for vector search."""
         resp = await self.client.embeddings.create(
