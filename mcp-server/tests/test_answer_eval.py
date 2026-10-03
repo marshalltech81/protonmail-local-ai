@@ -13,7 +13,9 @@ import asyncio
 import dataclasses
 import json
 import logging
+import re
 import shutil
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -48,6 +50,7 @@ from tests.answer_eval.judge import (
     parse_verdict,
 )
 from tests.answer_eval.report import (
+    _coverage,
     build_report,
     compare_reports,
     is_incomplete,
@@ -63,6 +66,7 @@ from tests.answer_eval.runner import (
     RecordingInference,
     RunContext,
     capture_evidence_maps,
+    corpus_manifest,
     index_identity,
     prompt_budget_for,
     run_case,
@@ -287,6 +291,18 @@ class TestConfig:
             load_layer("JUDGE", env)
         assert "pw@" not in str(e.value)
 
+    @pytest.mark.parametrize(
+        ("mode", "ambient"), [("openai", "OPENAI_BASE_URL"), ("anthropic", "ANTHROPIC_BASE_URL")]
+    )
+    def test_ambient_sdk_endpoint_is_refused(self, mode, ambient):
+        """Review round 1: an empty JUDGE_BASE_URL with the SDK's own
+        endpoint variable set would be reported as the SDK default."""
+        env = {**self.ENV, "JUDGE_MODE": mode, "JUDGE_API_KEY": "k", ambient: "https://x.example"}
+        with pytest.raises(ConfigError, match=ambient):
+            load_layer("JUDGE", env)
+        explicit = {**env, "JUDGE_BASE_URL": "https://judge.example"}
+        assert load_layer("JUDGE", explicit) is not None
+
     def test_label_names_no_url_or_key(self):
         cfg = load_layer(
             "JUDGE",
@@ -402,6 +418,13 @@ class TestRunner:
         with pytest.raises(ProviderResponseError, match="rebuild"):
             asyncio.run(emb.embed("other"))
 
+    def test_corpus_manifest_names_claimants_from_committed_bytes(self):
+        manifest = corpus_manifest()
+        assert len(manifest) > 50
+        for claimant, (thread, tokens) in manifest.items():
+            assert re.fullmatch(r"t\d{2}\.\d+@baseline\.example#[0-9a-f]{8}", claimant)
+            assert thread == thread_id_of(claimant.split("@")[0]) and tokens
+
     def test_non_synthetic_index_is_refused(self, messages_db):
         with pytest.raises(NonSyntheticIndexError):
             index_identity(messages_db)
@@ -510,6 +533,38 @@ class TestDeterministicGraders:
         assert det.checks["citations_resolve"] == FAIL
         assert det.checks["citation_checks"] == FAIL
         assert det.citation_problem_kinds == ["unknown_labels"]
+
+    @pytest.mark.parametrize(
+        ("answer", "ok"),
+        [
+            ("approved for $4,860 after a $1,000 deductible", True),
+            ("approved for $4,860.00 after a $1,000 deductible", True),
+            ("approved for $4,860.50 after a $1,000 deductible", False),
+            ("approved for $14,860 after a $1,000 deductible", False),
+            ("approved for $4,860,000 after a $1,000 deductible", False),
+            ("approved for 4.860 after a $11,000 deductible", False),
+        ],
+    )
+    def test_expected_values_match_whole_values_only(self, answer, ok):
+        """Review round 1: substring matching passed wrong numbers."""
+        case = CASES["ask-claim-payout"]
+        det = grade_run(case, _run(f"{answer} [E1].", [_passage("E1", "t10.3")], ["E1"]))
+        assert det.checks["expected_values"] == (PASS if ok else FAIL)
+
+    @pytest.mark.parametrize(
+        ("case_id", "answer", "ok"),
+        [
+            ("ask-padlock", "The combination is 2019", True),
+            ("ask-padlock", "The combination is 20190", False),
+            ("ask-flight-out", "It leaves June 13th at 18:45", True),
+            ("ask-flight-out", "It leaves June 130 at 18:45", False),
+        ],
+    )
+    def test_value_boundaries(self, case_id, answer, ok):
+        case = CASES[case_id]
+        ref = case.required_evidence[0][0]
+        det = grade_run(case, _run(f"{answer} [E1].", [_passage("E1", ref)], ["E1"]))
+        assert det.checks["expected_values"] == (PASS if ok else FAIL)
 
     def test_thread_text_passage_meets_thread_refs_only(self):
         thread_text = Passage("E1", thread_id_of("t24"), None, None, None, "thread", "text")
@@ -626,7 +681,7 @@ class TestJudge:
         )
         assert not asserted.correctness_pass and asserted.prohibited_asserted == 1
 
-    def _judge(self, client, case_id="ask-padlock", **cfg):
+    def _judge(self, client, case_id="ask-padlock", answer_labels=("E1",), **cfg):
         case = CASES[case_id]
         return asyncio.run(
             judge_answer(
@@ -634,10 +689,18 @@ class TestJudge:
                 _judge_config(**cfg),
                 case,
                 "It is 2019 [E1].",
-                {"E1": _passage("E1", "t18.2")},
+                {"E1": _passage("E1", "t18.2"), "E2": _passage("E2", "t18.1")},
                 False,
+                answer_labels=set(answer_labels),
             )
         )
+
+    def test_judge_may_not_credit_a_label_the_answer_did_not_cite(self):
+        """Review round 1: the answer cites E1; a verdict supporting the
+        claim with E2 (a supplied passage) is rejected, not graded."""
+        client = ScriptedClient(_verdict(CASES["ask-padlock"], [["E2"]]))
+        outcome = self._judge(client)
+        assert outcome.error == "judge_unknown_evidence_id" and outcome.grade is None
 
     def test_judge_call_ok(self):
         client = ScriptedClient(_verdict(CASES["ask-padlock"], [["E1"]]))
@@ -809,6 +872,58 @@ class TestHarnessAndReports:
         assert compare_reports(base, other)["incompatible"] == ["rubric_version"]
         assert "not comparable" in render_comparison(compare_reports(base, other))
 
+    def test_runtime_budget_caps_each_call(self, chunked_db):
+        """Review round 1: a case starting just before the deadline got the
+        full case timeout (900 s)."""
+
+        async def slow(system, user):
+            await asyncio.sleep(30)
+            return "late"
+
+        case = dataclasses.replace(CASES["ask-roof-total"], arguments={"question": "invoice"})
+        ctx = _ctx(chunked_db, ScriptedClient(slow), case_timeout_secs=900.0)
+        start = time.monotonic()
+        records, _ = asyncio.run(evaluate([case], ctx, max_runtime_secs=0.2))
+        assert records[0]["status"] == "timeout"
+        assert time.monotonic() - start < 5
+
+    def test_judge_call_capped_by_remaining_budget(self, chunked_db):
+        async def slow(system, user):
+            await asyncio.sleep(30)
+            return "{}"
+
+        case = dataclasses.replace(
+            CASES["ask-roof-total"], arguments={"question": "invoice"}, required_evidence=()
+        )
+        ctx = _ctx(chunked_db, ScriptedClient("14,200 [E1]."))
+        records, _ = asyncio.run(
+            evaluate(
+                [case],
+                ctx,
+                judge_client=ScriptedClient(slow),
+                judge_config=_judge_config(timeout_secs=600.0),
+                max_runtime_secs=1.0,
+            )
+        )
+        assert records[0]["judge"]["error"] == "judge_timeout"
+        assert records[0]["timings_ms"]["judge"] < 5000
+
+    def test_failed_cases_count_as_zero_coverage(self):
+        """Review round 1: a timed-out case left the coverage means."""
+        ok = {"status": "ok", "required_groups": 1, "deterministic": {"retrieval_recall": 1.0}}
+        failed = {"status": "timeout", "required_groups": 1, "deterministic": {}}
+        no_groups = {"status": "ok", "required_groups": 0, "deterministic": {}}
+        assert _coverage([ok, failed, no_groups], "retrieval_recall") == 0.5
+
+    def test_compare_flags_different_case_selections(self, chunked_db):
+        """Review round 1: different --case selections compared silently."""
+        records, _ = _records(
+            chunked_db, ["14,200 [E1].", "14,200 [E1]."], [None, None], judge=False
+        )
+        both = build_report(_identity(judge=None), records, False)
+        one = build_report(_identity(judge=None), records[:1], False)
+        assert compare_reports(both, one)["incompatible"] == ["case_selection"]
+
     def test_private_json_is_mode_600(self, tmp_path):
         path = tmp_path / "runs" / "r.json"
         write_private_json(path, {"a": 1})
@@ -857,6 +972,13 @@ class TestCli:
         assert code == cli.EXIT_CONFIG
         assert "synthetic" in capsys.readouterr().err
         assert not (tmp_path / "r.json").exists()
+
+    def test_run_rejects_detail_overwriting_the_report(self, tmp_path, capsys):
+        """Review round 1: --detail equal to --out overwrote the report."""
+        out = str(tmp_path / "r.json")
+        code = cli.main(["run", "--index-dir", str(tmp_path), "--out", out, "--detail", out])
+        assert code == cli.EXIT_CONFIG
+        assert "--detail" in capsys.readouterr().err
 
     def test_run_rejects_unknown_case_ids(self, tmp_path, capsys):
         code = cli.main(

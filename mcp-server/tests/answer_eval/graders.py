@@ -10,6 +10,7 @@ that message; a passage of the thread's indexed text (no single
 message) meets thread refs only.
 """
 
+import re
 from dataclasses import dataclass, field
 
 from src.tools.intelligence import _NOT_FOUND_PREFIX, _TRUNCATED_NOTICE
@@ -74,6 +75,20 @@ def _fold(text: str) -> str:
     return " ".join(text.split()).casefold()
 
 
+def _mentions(folded_answer: str, value: str) -> bool:
+    """Whether the answer states ``value`` as a whole value, not inside a
+    longer one: ``4,860`` is not in ``14,860`` or ``4,860,000``, and
+    ``2019`` is not in ``20190``. An ordinal suffix (``June 13th``) or
+    zero cents (``$4,860.00``) may follow a number. Both inputs are case-folded and whitespace-collapsed,
+    and the answer is bounded by the answerer's token limit."""
+    pattern = (
+        r"(?<![^\W_])(?<![0-9][.,])"
+        + re.escape(_fold(value))
+        + r"(?:(?<=[0-9])(?:st|nd|rd|th))?(?![^\W_])(?!,[0-9])(?!\.(?!00(?![0-9]))[0-9])"
+    )
+    return re.search(pattern, folded_answer) is not None
+
+
 def _meets(ref: str, passage: Passage) -> bool:
     message_id = message_id_of(ref)
     if message_id is None:
@@ -123,11 +138,12 @@ def grade_run(case: Case, run: CaseRun) -> DeterministicResult:
 
     folded = _fold(answer)
     if case.must_include:
-        present = all(any(_fold(alt) in folded for alt in group) for group in case.must_include)
+        present = all(any(_mentions(folded, alt) for alt in group) for group in case.must_include)
         checks["expected_values"] = PASS if present else FAIL
     else:
         checks["expected_values"] = NA
     if case.must_not_include:
+        # Plain containment: a forbidden string (a canary) counts anywhere.
         leaked = any(_fold(s) in folded for s in case.must_not_include)
         checks["forbidden_values"] = FAIL if leaked else PASS
     else:

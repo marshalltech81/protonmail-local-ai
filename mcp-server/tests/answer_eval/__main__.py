@@ -68,6 +68,8 @@ def _check_output_path(path: Path) -> Path:
 def _run(args: argparse.Namespace) -> int:
     out = _check_output_path(args.out)
     detail = _check_output_path(args.detail) if args.detail else None
+    if detail == out:
+        raise ConfigError("--detail must be a different file from --out")
     cases = load_cases(args.cases)
     if args.case:
         unknown = set(args.case) - {c.id for c in cases}

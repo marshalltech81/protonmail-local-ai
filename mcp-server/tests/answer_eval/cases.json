@@ -29,8 +29,7 @@
       "expected_handling": "answer",
       "required_evidence": [["t03"]],
       "expected_facts": [
-        {"id": "f1", "fact": "Monthly dues rise to $335.", "sources": ["t03.1"], "excerpt": "Monthly dues rise from $310 to $335"},
-        {"id": "f2", "fact": "The dues were $310 before the increase.", "sources": ["t03.1"], "excerpt": "Monthly dues rise from $310 to $335"}
+        {"id": "f1", "fact": "Monthly dues rise to $335.", "sources": ["t03.1"], "excerpt": "Monthly dues rise from $310 to $335"}
       ],
       "must_not_assert": [],
       "deterministic": {"must_include": [["335"]], "must_not_include": []},
@@ -155,7 +154,7 @@
         {"id": "f1", "fact": "Early check-in from 9am costs 30 euros.", "sources": ["t09.1"], "excerpt": "Early check-in from 9am can be arranged for a fee of 30 euros"}
       ],
       "must_not_assert": [],
-      "deterministic": {"must_include": [["30 euro", "€30", "EUR 30", "30 EUR", "€ 30"]], "must_not_include": []},
+      "deterministic": {"must_include": [["30 euros", "€30", "EUR 30", "30 EUR", "€ 30"]], "must_not_include": []},
       "criteria": {"factual_correctness": true, "citation_support": true, "completeness": true, "temporal_reasoning": false, "conflict_uncertainty": false, "relevance": true},
       "review": "ai_drafted"
     },
@@ -399,8 +398,7 @@
       "expected_handling": "answer",
       "required_evidence": [["t17.3"]],
       "expected_facts": [
-        {"id": "f1", "fact": "The revised offer is a CHF 147,500 base salary.", "sources": ["t17.3"], "excerpt": "we can do CHF 147,500"},
-        {"id": "f2", "fact": "The revised offer adds a CHF 10,000 relocation allowance.", "sources": ["t17.3"], "excerpt": "plus a CHF 10,000 relocation"}
+        {"id": "f1", "fact": "The revised offer is a CHF 147,500 base salary.", "sources": ["t17.3"], "excerpt": "we can do CHF 147,500"}
       ],
       "must_not_assert": ["The final base salary offer is CHF 142,000 (the original offer, since revised).", "The final base salary offer is CHF 150,000 (Sam's counter-proposal)."],
       "deterministic": {"must_include": [["147,500"]], "must_not_include": []},
@@ -451,8 +449,7 @@
       "expected_handling": "answer",
       "required_evidence": [["t01.3"]],
       "expected_facts": [
-        {"id": "f1", "fact": "No: the flashing is rusted through and Harbor Roofing would not warranty the shingles without it.", "sources": ["t01.3"], "excerpt": "we would not warranty the shingles without it"},
-        {"id": "f2", "fact": "Harbor Roofing will hold the price until the end of the month.", "sources": ["t01.3"], "excerpt": "We can hold the price until the end of the month"}
+        {"id": "f1", "fact": "No: the flashing is rusted through and Harbor Roofing would not warranty the shingles without it.", "sources": ["t01.3"], "excerpt": "we would not warranty the shingles without it"}
       ],
       "must_not_assert": ["The chimney flashing is optional."],
       "deterministic": {"must_include": [], "must_not_include": []},

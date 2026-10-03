@@ -1467,7 +1467,7 @@ and exporter were present.
 > outside the containers and sends only the committed synthetic corpus
 > (questions, retrieved synthetic passages and the answers) to the
 > `INFERENCE_*` answerer and the separately configured `JUDGE_*` grader.
-> It refuses any index that is not the synthetic baseline, so it never
+> It refuses any index that is not the committed synthetic corpus, so it never
 > reads or sends the mailbox. See `mcp-server/tests/eval/README.md`.
 
 ### MCP client layer (governed by which client you connect)

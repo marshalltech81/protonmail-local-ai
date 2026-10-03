@@ -33,6 +33,8 @@ from src.lib.inference import (
 )
 
 ENABLED_MODES = frozenset({"anthropic", "openai"})
+# The variable each SDK reads for its endpoint when none is passed.
+_SDK_BASE_URL_VARS = {"anthropic": "ANTHROPIC_BASE_URL", "openai": "OPENAI_BASE_URL"}
 # Hosts that keep a provider call on this machine (as ``main.py``'s
 # privacy warning counts them).
 _HOST_LOCAL = frozenset({"127.0.0.1", "::1", "localhost", "host.docker.internal"})
@@ -139,6 +141,11 @@ def load_layer(
     base_url = env.get(f"{layer}_BASE_URL", "").strip()
     if base_url and "@" in urllib.parse.urlsplit(base_url).netloc:
         raise ConfigError(f"{layer}_BASE_URL must not embed credentials (user:pass@host)")
+    # With an empty base URL the SDK would read its own endpoint variable,
+    # and the report would call a custom endpoint "sdk-default".
+    ambient = _SDK_BASE_URL_VARS[mode]
+    if not base_url and env.get(ambient, "").strip():
+        raise ConfigError(f"{ambient} is set: set {layer}_BASE_URL explicitly instead")
     if mode == "anthropic" and base_url.rstrip("/").endswith("/v1"):
         raise ConfigError(f"{layer}_BASE_URL must not end with '/v1' when {layer}_MODE=anthropic")
     model = env.get(f"{layer}_MODEL", "").strip()

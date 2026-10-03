@@ -1,12 +1,14 @@
 """Run every case: answer, deterministic checks, then the judge.
 
 Cases run one at a time (concurrency 1), each under the case timeout,
-and the whole run under ``max_runtime_secs``: once it is spent, the
+and the whole run under ``max_runtime_secs``, each call capped by what is
+left of it: once it is spent, the
 remaining cases are recorded as ``skipped`` (and unjudged answers as
 ``judge_runtime_budget_exhausted``), which counts against every rate.
 Log lines carry case IDs and fixed categories only.
 """
 
+import dataclasses
 import logging
 import time
 from collections.abc import Callable
@@ -35,17 +37,21 @@ async def evaluate(
     records, details = [], []
     deadline = clock() + max_runtime_secs
     for case in cases:
-        if clock() >= deadline:
+        remaining = deadline - clock()
+        if remaining <= 0:
             run = CaseRun(case.id, status="skipped", error="runtime_budget_exhausted")
         else:
-            run = await run_case(case, ctx)
+            # No call may outlive the run's budget.
+            timeout = min(ctx.case_timeout_secs, remaining)
+            run = await run_case(case, dataclasses.replace(ctx, case_timeout_secs=timeout))
         det = grade_run(case, run)
 
+        remaining = deadline - clock()
         if judge_config is None:
             judge = JudgeOutcome(status="not_configured")
         elif run.status != "ok" or run.output is None:
             judge = JudgeOutcome(status="not_run")
-        elif clock() >= deadline:
+        elif remaining <= 0:
             judge = JudgeOutcome(status="error", error="judge_runtime_budget_exhausted")
         else:
             judge = await judge_answer(
@@ -55,6 +61,8 @@ async def evaluate(
                 run.output.answer,
                 run.passages,
                 bool(det.abstained),
+                answer_labels={c.label for c in run.output.citations},
+                timeout_secs=min(judge_config.timeout_secs, remaining),
             )
         semantic_failed = judge.grade is not None and not judge.grade.passed
         causes = attribute(case, run, det, semantic_failed, judge.status == "error")

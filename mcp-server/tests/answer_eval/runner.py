@@ -25,11 +25,17 @@ Nothing here logs mailbox text; the captures stay on the returned
 """
 
 import asyncio
+import email
+import email.policy
 import hashlib
+import importlib.util
+import json
+import re
 import time
 from collections.abc import Callable, Iterator
 from contextlib import closing, contextmanager
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from fastmcp.exceptions import ToolError
@@ -281,20 +287,97 @@ async def run_case(case: Case, ctx: RunContext) -> CaseRun:
     return run
 
 
-def index_identity(db: Any) -> dict[str, object]:
-    """Fingerprint of the index, refusing anything but the synthetic corpus.
+CORPUS_PATH = Path(__file__).resolve().parents[3] / "indexer" / "tests" / "baseline" / "corpus.py"
+_TOKEN = re.compile(r"[^\W_]+")
 
-    Claimant IDs carry a hash of each file's bytes, so their sorted list
-    identifies the corpus exactly. Every message must be a
-    ``@baseline.example`` message: the evaluation sends evidence to the
-    configured providers, and a real mailbox is out of its scope.
+
+def _tokens(text: str) -> set[str]:
+    return set(_TOKEN.findall(text.casefold()))
+
+
+# The indexer renders a thread's ``body_text`` under a header template
+# (``Subject:``, ``From:``, ``Date:`` with ISO timestamps,
+# ``Participants:``) and cuts it at a token budget, which can split the
+# last word. Thread rows may use those words, ISO date fragments and
+# prefixes of corpus words; chunk text must use corpus words only.
+_THREAD_TEMPLATE_WORDS = frozenset({"subject", "from", "to", "cc", "date", "participants"})
+_ISO_FRAGMENT = re.compile(r"[0-9]+(?:t[0-9]+)?")
+
+
+def _thread_word_ok(word: str, allowed: set[str]) -> bool:
+    return (
+        word in _THREAD_TEMPLATE_WORDS
+        or _ISO_FRAGMENT.fullmatch(word) is not None
+        or any(token.startswith(word) for token in allowed)
+    )
+
+
+def corpus_manifest(path: Path = CORPUS_PATH) -> dict[str, tuple[str, set[str]]]:
+    """Claimant ID -> (thread ID, word tokens) for every committed corpus message.
+
+    Built from the committed ``corpus.py`` (stdlib only, loaded by path:
+    both services own a top-level ``tests`` package). A claimant ID is
+    the Message-ID plus the first eight hex digits of the SHA-256 of the
+    file's bytes, as the indexer derives it, and the corpus serializes
+    byte-identically. The tokens cover the message's headers and every
+    decoded text part, our own trusted bytes.
     """
+    spec = importlib.util.spec_from_file_location("answer_eval_baseline_corpus", path)
+    if spec is None or spec.loader is None:
+        raise NonSyntheticIndexError("the committed synthetic corpus could not be loaded")
+    corpus = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(corpus)
+    manifest: dict[str, tuple[str, set[str]]] = {}
+    for n in sorted(corpus.THREADS):
+        for index, msg in enumerate(corpus.THREADS[n]):
+            raw = corpus.build_message(n, index, msg)
+            message_id = f"t{n:02d}.{index + 1}{BASELINE_DOMAIN}"
+            claimant = f"{message_id}#{hashlib.sha256(raw).hexdigest()[:8]}"
+            parsed = email.message_from_bytes(raw, policy=email.policy.default)
+            text = [message_id, *(str(v) for v in parsed.values())]
+            text += [p.get_content() for p in parsed.walk() if p.get_content_maintype() == "text"]
+            manifest[claimant] = (f"t{n:02d}.1{BASELINE_DOMAIN}", _tokens(" ".join(text)))
+    return manifest
+
+
+def index_identity(db: Any, manifest_path: Path = CORPUS_PATH) -> dict[str, object]:
+    """Fingerprint of the index, refusing anything but the committed corpus.
+
+    The evaluation sends evidence to the configured providers, and a
+    real mailbox is out of its scope, so the index must hold exactly the
+    committed corpus's claimant IDs (``corpus_manifest``), and every
+    indexed text a prompt can carry (chunks, thread subjects, snippets,
+    bodies and participants) may use only words of the corpus messages
+    it belongs to. Private text stored under copied baseline IDs fails
+    the second check. Messages name no content.
+    """
+    manifest = corpus_manifest(manifest_path)
+    refused = NonSyntheticIndexError(
+        "the index is not the committed synthetic baseline corpus; the answer evaluation "
+        "runs only against an index built by tests.baseline.build"
+    )
     with closing(db._connect()) as conn:
-        rows = conn.execute("SELECT claimant_id, message_id FROM messages").fetchall()
-    if not rows or any(not str(m).endswith(BASELINE_DOMAIN) for _, m in rows):
-        raise NonSyntheticIndexError(
-            "the index is not the synthetic baseline corpus; the answer evaluation runs only "
-            "against an index built by tests.baseline.build"
+        claimants = {str(c) for (c,) in conn.execute("SELECT claimant_id FROM messages")}
+        if claimants != set(manifest):
+            raise refused
+        for claimant, text in conn.execute("SELECT claimant_id, text FROM message_chunks"):
+            if claimant not in manifest or not _tokens(str(text)) <= manifest[claimant][1]:
+                raise refused
+        thread_tokens: dict[str, set[str]] = {}
+        for thread, tokens in manifest.values():
+            thread_tokens.setdefault(thread, set()).update(tokens)
+        rows = conn.execute(
+            "SELECT thread_id, subject, snippet, body_text, participants FROM threads"
         )
-    digest = hashlib.sha256("\n".join(sorted(str(c) for c, _ in rows)).encode()).hexdigest()
-    return {"corpus": "synthetic-baseline", "messages": len(rows), "index_sha256": digest}
+        for thread_id, subject, snippet, body_text, participants in rows:
+            allowed = thread_tokens.get(str(thread_id), set())
+            try:  # a JSON list, whose \u escapes would split names into odd tokens
+                names = " ".join(str(p) for p in json.loads(participants or "[]"))
+            except ValueError, TypeError:
+                names = str(participants)
+            texts = (subject, snippet, body_text, names)
+            words = _tokens(" ".join(str(t or "") for t in texts))
+            if not all(_thread_word_ok(w, allowed) for w in words - allowed):
+                raise refused
+    digest = hashlib.sha256("\n".join(sorted(claimants)).encode()).hexdigest()
+    return {"corpus": "synthetic-baseline", "messages": len(claimants), "index_sha256": digest}

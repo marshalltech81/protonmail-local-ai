@@ -196,10 +196,15 @@ checks first, then an optional, separately configured AI judge. It is an
 offline development tool (#604): it changes nothing in the server, the
 containers or the tool outputs.
 
-**Synthetic data only.** The runner refuses any index whose messages are
-not the synthetic baseline's (`@baseline.example`), so it never reads or
-sends a real mailbox; a private-mailbox mode would be a separate owner
-decision. Cases must never be built from real mail.
+**Synthetic data only.** The runner refuses any index that is not the
+committed synthetic corpus: its claimant IDs must be exactly those
+computed from `indexer/tests/baseline/corpus.py` (Message-ID plus a hash
+of each message's bytes), and every indexed text a prompt can carry
+(chunks, thread subjects, snippets, bodies, participants) may use only
+words of the corpus messages it belongs to, so private text stored under
+copied baseline IDs is refused too. It never reads or sends a real
+mailbox; a private-mailbox mode would be a separate owner decision.
+Cases must never be built from real mail.
 
 ### Cases
 
@@ -255,8 +260,12 @@ is `127.0.0.1`, not `host.docker.internal`.
   answerer's variables or key. Bounds: `JUDGE_TIMEOUT_SECS` (120),
   `JUDGE_MAX_TOKENS` (2048), `JUDGE_MAX_INPUT_CHARS` (60,000), one call
   per case, no retries, one case at a time.
+- Either layer with an empty base URL is refused while the SDK's own
+  endpoint variable (`OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL`) is set, so
+  the report's `sdk-default` label is never a custom endpoint.
 - Each case runs under `--case-timeout-secs` (900) and the whole run
-  under `--max-runtime-secs` (3600); cases past it are `skipped`.
+  under `--max-runtime-secs` (3600): every answer and judge call is
+  capped by what is left of it, and cases past it are `skipped`.
 
 Retrieval uses the baseline's hashed embedder (query vectors precomputed
 at build time) and no reranker, so a run measures prompt assembly,
@@ -278,8 +287,10 @@ model received.
 Deterministic checks (`graders.py`), never overridden by the judge:
 answer not cut off, capture consistent, cited labels resolve to
 supplied passages, the tool's citation and quote checks pass, every
-required evidence group cited, `must_include` present, `must_not_include`
-absent, and abstention exactly when the case is unanswerable (citing
+required evidence group cited, `must_include` present as a whole value
+(`4,860` does not match `14,860` or `4,860,000`; an ordinal suffix or
+`.00` may follow a number), `must_not_include` absent anywhere, and
+abstention exactly when the case is unanswerable (citing
 nothing). Each evidence group is also scored as retrieved, supplied to
 the prompt and cited, so a failure is attributed to `retrieval`,
 `prompt_assembly`, `synthesis`, `evaluator_infrastructure` or
@@ -298,7 +309,8 @@ prohibited assertion asserted or not (**correctness**), and `pass |
 fail | not_applicable` for factual correctness, citation support,
 completeness, temporal reasoning, conflict/uncertainty and relevance. A
 claim that matches the reference but not its citations is still
-unsupported. The verdict is validated: unknown evidence labels, missing
+unsupported. The verdict is validated: a claim label the answer did not
+cite (or no supplied passage has), missing
 facts or dimensions, an applicable dimension marked not applicable, no
 claims for a non-abstaining answer, malformed output, a timeout, a
 cut-off reply, a provider failure or input over the limit are explicit
@@ -312,8 +324,9 @@ error categories, counts, rates per split and category, timings and
 safe identity labels: source commit, case-file and index hashes, schema
 and rubric versions, provider mode/model and whether each endpoint is
 host-local, remote or the SDK default (never a URL or key). Every rate's
-denominator is the selected cases, so errors and skips never improve a
-score. Token usage is not exposed by the inference client and no cost is
+denominator is the selected cases (for evidence coverage, those that
+need evidence), so errors and skips count as failures and never improve
+a score. Token usage is not exposed by the inference client and no cost is
 computed. `--detail` writes a separate mode-600 artifact with the
 content (answers, passages, prompts, judge claims and explanations);
 both refuse a path inside the repository other than `.answer-eval/`.
@@ -321,8 +334,8 @@ Delete old runs with `rm -r .answer-eval`. Never upload either.
 
 Exit codes: `run` 0 complete, 2 incomplete (any error, skip or judge
 error), 3 configuration error; `compare` 0, 1 on a per-case regression
-with `--fail-on-regression`, 2 when the runs differ in case file, index,
-rubric or judge (not comparable) unless `--allow-incompatible`. Scores
+with `--fail-on-regression`, 2 when the runs differ in case file, case
+selection, index, rubric or judge (not comparable) unless `--allow-incompatible`. Scores
 are advisory: no quality threshold is calibrated yet, so a low score
 never fails a run. CI runs only the scripted path (`make baseline` and
 `tests/test_answer_eval.py`), with no provider or credential.

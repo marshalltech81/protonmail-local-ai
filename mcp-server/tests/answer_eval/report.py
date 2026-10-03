@@ -40,6 +40,7 @@ def case_record(
         "category": case.category,
         "held_out": case.held_out,
         "answerable": case.answerable,
+        "required_groups": len(case.required_evidence),
         "review": case.review,
         "status": run.status,
         "error": run.error,
@@ -118,6 +119,17 @@ def _rate(numerator: int, denominator: int) -> float | None:
     return round(numerator / denominator, 4) if denominator else None
 
 
+def _coverage(records: list[dict[str, Any]], stage: str) -> float | None:
+    """Mean evidence coverage over every case that needs evidence; a case
+    that did not complete counts as 0, so a failure cannot raise it."""
+    values = [
+        (r["deterministic"][stage] or 0.0) if r["status"] == "ok" else 0.0
+        for r in records
+        if r["required_groups"]
+    ]
+    return _mean(values)
+
+
 def aggregate(records: list[dict[str, Any]], judge_configured: bool) -> dict[str, Any]:
     n = len(records)
     done = [r for r in records if r["status"] == "ok"]
@@ -126,15 +138,9 @@ def aggregate(records: list[dict[str, Any]], judge_configured: bool) -> dict[str
         "cases": n,
         "completed": len(done),
         "deterministic_pass_rate": _rate(sum(d["passed"] for d in det), n),
-        "retrieval_evidence_recall": _mean(
-            [d["retrieval_recall"] for d in det if d["retrieval_recall"] is not None]
-        ),
-        "prompt_evidence_coverage": _mean(
-            [d["prompt_coverage"] for d in det if d["prompt_coverage"] is not None]
-        ),
-        "citation_evidence_coverage": _mean(
-            [d["citation_coverage"] for d in det if d["citation_coverage"] is not None]
-        ),
+        "retrieval_evidence_recall": _coverage(records, "retrieval_recall"),
+        "prompt_evidence_coverage": _coverage(records, "prompt_coverage"),
+        "citation_evidence_coverage": _coverage(records, "citation_coverage"),
         "citation_failure_cases": sum(bool(d["citation_problems"]) for d in det),
         "abstention": {
             "expected": sum(not r["answerable"] for r in records),
@@ -316,6 +322,9 @@ def compare_reports(base: dict[str, Any], cand: dict[str, Any]) -> dict[str, Any
     incompatible = [k for k in _COMPARABLE if bi.get(k) != ci.get(k)]
     if bi.get("judge") != ci.get("judge"):
         incompatible.append("judge")
+    # Aggregates over different populations are not comparable either.
+    if {r["id"] for r in base["cases"]} != {r["id"] for r in cand["cases"]}:
+        incompatible.append("case_selection")
     changed = [k for k in ("answerer", "retrieval", "source_commit") if bi.get(k) != ci.get(k)]
     b_cases = {r["id"]: r for r in base["cases"]}
     c_cases = {r["id"]: r for r in cand["cases"]}

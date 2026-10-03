@@ -223,8 +223,9 @@ def parse_verdict(raw: str, case: Case, known_labels: set[str], answer_abstained
     """Validate the judge's reply against the verdict schema.
 
     Raises ``JudgeError``: ``judge_malformed_output`` for anything that
-    is not the schema, ``judge_unknown_evidence_id`` for a cited label
-    no supplied passage has, ``judge_incomplete_assessment`` for missing
+    is not the schema, ``judge_unknown_evidence_id`` for a claim label
+    outside ``known_labels`` (the supplied passages the answer itself
+    cites), ``judge_incomplete_assessment`` for missing
     facts, prohibited assertions or dimensions, an applicable dimension
     marked not applicable, or no claims for a non-abstaining answer.
     """
@@ -247,7 +248,9 @@ def parse_verdict(raw: str, case: Case, known_labels: set[str], answer_abstained
         if not isinstance(cited, list) or not all(isinstance(x, str) for x in cited):
             raise JudgeError("judge_malformed_output", "claim citations")
         if any(x not in known_labels for x in cited):
-            raise JudgeError("judge_unknown_evidence_id", "a claim cites an unknown label")
+            raise JudgeError(
+                "judge_unknown_evidence_id", "a claim cites a label the answer did not cite"
+            )
         claims.append(
             Claim(_text(c.get("claim")), cited, c["verdict"], _text(c.get("explanation", "")))
         )
@@ -357,18 +360,30 @@ async def judge_answer(
     answer: str,
     passages: dict[str, Passage],
     answer_abstained: bool,
+    *,
+    answer_labels: set[str],
+    timeout_secs: float | None = None,
 ) -> JudgeOutcome:
     """One bounded judge call: input size checked first, one request
-    (no retries) under ``config.timeout_secs``, reply validated."""
+    (no retries) under ``timeout_secs`` (default ``config.timeout_secs``),
+    reply validated.
+
+    ``answer_labels`` are the labels the answer actually cites (the
+    tool's structured citations): a claim the judge attributes to any
+    other label is rejected, so the judge cannot credit a passage the
+    answer never cited.
+    """
     prompt = build_judge_prompt(case, answer, passages)
     outcome = JudgeOutcome(status="error", prompt_chars=len(JUDGE_SYSTEM) + len(prompt))
     if outcome.prompt_chars > config.max_input_chars:
         outcome.error = "judge_input_too_large"
         return outcome
+    timeout = config.timeout_secs if timeout_secs is None else timeout_secs
     start = time.perf_counter()
     try:
-        raw = await asyncio.wait_for(client.complete(JUDGE_SYSTEM, prompt), config.timeout_secs)
-        verdict = parse_verdict(raw, case, set(passages), answer_abstained)
+        raw = await asyncio.wait_for(client.complete(JUDGE_SYSTEM, prompt), timeout)
+        cited = answer_labels & set(passages)
+        verdict = parse_verdict(raw, case, cited, answer_abstained)
     except TimeoutError:
         outcome.error = "judge_timeout"
     except InferenceTruncatedError:

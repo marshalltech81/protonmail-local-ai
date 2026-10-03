@@ -22,10 +22,13 @@ import asyncio
 import json
 import os
 import re
+import shutil
+import sqlite3
 from contextlib import closing
 from pathlib import Path
 
 import pytest
+import sqlite_vec
 from src.lib.inference import PromptBudget
 from src.lib.sqlite import Database
 
@@ -33,7 +36,13 @@ from tests.answer_eval import __main__ as cli
 from tests.answer_eval.cases import DIMENSIONS, Case, load_cases, message_id_of, thread_id_of
 from tests.answer_eval.config import LayerConfig
 from tests.answer_eval.harness import evaluate
-from tests.answer_eval.runner import PrecomputedEmbedder, RunContext, index_identity
+from tests.answer_eval.runner import (
+    NonSyntheticIndexError,
+    PrecomputedEmbedder,
+    RunContext,
+    corpus_manifest,
+    index_identity,
+)
 
 pytestmark = pytest.mark.baseline
 
@@ -90,7 +99,37 @@ def test_case_references_resolve(case: Case, indexed_text: dict[str, str]) -> No
 def test_index_is_recognized_as_synthetic(baseline_db: Database) -> None:
     identity = index_identity(baseline_db)
     assert identity["corpus"] == "synthetic-baseline"
-    assert identity["messages"] > 0
+    assert identity["messages"] == len(corpus_manifest())
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        # Private text under a copied baseline claimant ID.
+        "UPDATE message_chunks SET text = text || ' privatemarker' WHERE rowid = "
+        "(SELECT MIN(rowid) FROM message_chunks)",
+        "UPDATE threads SET body_text = body_text || ' privatemarker' WHERE rowid = "
+        "(SELECT MIN(rowid) FROM threads)",
+        "UPDATE threads SET subject = 'privatemarker' WHERE rowid = (SELECT MIN(rowid) FROM threads)",
+        # A message the committed corpus does not have.
+        "UPDATE messages SET claimant_id = claimant_id || 'x' WHERE rowid = "
+        "(SELECT MIN(rowid) FROM messages)",
+        "DELETE FROM messages WHERE rowid = (SELECT MIN(rowid) FROM messages)",
+    ],
+)
+def test_tampered_index_is_refused(baseline_dir: Path, tmp_path: Path, tamper: str) -> None:
+    """Review round 1: baseline-looking IDs alone are not enough."""
+    copy = tmp_path / "mail.db"
+    shutil.copy(baseline_dir / "mail.db", copy)
+    conn = sqlite3.connect(copy)
+    conn.enable_load_extension(True)
+    sqlite_vec.load(conn)
+    conn.execute("PRAGMA foreign_keys = OFF")
+    conn.execute(tamper)
+    conn.commit()
+    conn.close()
+    with pytest.raises(NonSyntheticIndexError):
+        index_identity(Database(str(copy)))
 
 
 class _OracleAnswerer:
