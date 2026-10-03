@@ -451,9 +451,11 @@ loose_secret_mode_fails() {
 # ownership, so the file must grant the indexer (UID 1002) read (#526).
 # stub_host OS [OWNER] puts stub commands first on PATH so every case
 # sees the same host whatever machine runs the tests: `uname -s` prints
-# OS, `stat` reports OWNER as the file owner when given, `getfacl`
-# prints $STUBS/acl (written by write_acl) for a file and $STUBS/diracl
-# for a directory, and `getent passwd 1002`
+# OS, `stat` reports OWNER as the owner of files and directories when
+# given ($STUBS/file-owner and $STUBS/dir-owner, which a case may
+# rewrite), `getfacl` prints $STUBS/acl (written by write_acl) for a
+# file and $STUBS/diracl, or else the mode's base entries, for a
+# directory, and `getent passwd 1002`
 # finds an account only when $STUBS/uid1002 exists; `id -u` (the
 # operator) is 4242.
 stub_host() {
@@ -461,21 +463,40 @@ stub_host() {
     STUBS="$(mktemp -d "$WORK/stubs.XXXXXX")"
     printf '#!/bin/bash\nprintf "%%s\\n" %q\n' "$os" >"$STUBS/uname"
     if [[ -n "$owner" ]]; then
-        cat >"$STUBS/stat" <<STUB
+        printf '%s\n' "$owner" >"$STUBS/file-owner"
+        printf '%s\n' "$owner" >"$STUBS/dir-owner"
+        cat >"$STUBS/stat" <<'STUB'
 #!/bin/bash
-for arg in "\$@"; do
-    [[ "\$arg" == '%u' ]] && { printf '%s\\n' $owner; exit 0; }
+kind=file
+[[ -d "${!#}" ]] && kind=dir
+for arg in "$@"; do
+    [[ "$arg" == '%u' ]] && exec cat "$(dirname "$0")/$kind-owner"
 done
-exec /usr/bin/stat "\$@"
+exec /usr/bin/stat "$@"
 STUB
     fi
     cat >"$STUBS/getfacl" <<'STUB'
 #!/bin/bash
-if [[ -d "${!#}" ]]; then
-    [[ -e "$(dirname "$0")/diracl" ]] || exit 1
+target="${!#}"
+if [[ ! -d "$target" ]]; then
+    cat "$(dirname "$0")/acl"
+elif [[ -e "$(dirname "$0")/diracl" ]]; then
     cat "$(dirname "$0")/diracl"
 else
-    cat "$(dirname "$0")/acl"
+    # No extended ACL: getfacl prints the mode bits as the base entries.
+    mode="$(/usr/bin/stat -c '%a' "$target" 2>/dev/null || /usr/bin/stat -f '%Lp' "$target")"
+    for entry in user:: group:: other::; do
+        case "$entry" in
+            user::) digit=$(((8#$mode >> 6) & 7)) ;;
+            group::) digit=$(((8#$mode >> 3) & 7)) ;;
+            other::) digit=$((8#$mode & 7)) ;;
+        esac
+        perms=""
+        ((digit & 4)) && perms+=r || perms+=-
+        ((digit & 2)) && perms+=w || perms+=-
+        ((digit & 1)) && perms+=x || perms+=-
+        printf '%s%s\n' "$entry" "$perms"
+    done
 fi
 STUB
     cat >"$STUBS/id" <<'STUB'
@@ -490,6 +511,24 @@ printf 'other:x:1002:1002::/home/other:/bin/bash\n'
 STUB
     chmod 755 "$STUBS"/*
     PATH="$STUBS:$PATH"
+}
+
+# Take getfacl off PATH: drop its stub and link every other command
+# into one directory that leaves it out.
+hide_getfacl() {
+    local bin="$STUBS/bin" dir cmd
+    local -a dirs
+    rm "$STUBS/getfacl"
+    mkdir "$bin"
+    IFS=: read -ra dirs <<<"${PATH#"$STUBS:"}"
+    for dir in "${dirs[@]}"; do
+        for cmd in "$dir"/*; do
+            [[ -x "$cmd" && ! -d "$cmd" && "${cmd##*/}" != getfacl && ! -e "$bin/${cmd##*/}" ]] ||
+                continue
+            ln -s "$cmd" "$bin/${cmd##*/}"
+        done
+    done
+    PATH="$STUBS:$bin"
 }
 
 write_acl() {
@@ -669,6 +708,21 @@ linux_config_dir_acl_denying_indexer_fails() {
     fails_with 'is not searchable by the indexer (UID 1002)'
 }
 
+# #668: without getfacl the ACL on config/ cannot be read, and a
+# named entry for UID 1002 there could deny what the other bits allow.
+# A config/ UID 1002 owns is decided by its owner bits alone.
+linux_config_dir_check_without_getfacl_fails() {
+    stub_host Linux 1002
+    setup
+    write_authority 600
+    chmod 701 "$ROOT/config"
+    printf '4242\n' >"$STUBS/dir-owner"
+    hide_getfacl
+    fails_with "getfacl is needed to check the ACL on $ROOT/config; install the acl package."
+    printf '1002\n' >"$STUBS/dir-owner"
+    passes
+}
+
 # The documented authority edit flow restarts the indexer through
 # `make restart-indexer`, which must run this validator first (#530).
 # A dry run prints the recipes in order without running them.
@@ -809,6 +863,8 @@ check "Linux: an unsearchable config directory fails" linux_unsearchable_config_
 check "Linux: the fix command quotes the path" linux_fix_command_quotes_the_path
 check "Linux: a config directory ACL denying UID 1002 fails" \
     linux_config_dir_acl_denying_indexer_fails
+check "Linux: the config directory check fails without getfacl" \
+    linux_config_dir_check_without_getfacl_fails
 check "make restart-indexer validates before restarting" restart_indexer_validates_first
 check "padded quoted values pass" padded_quoted_values_pass
 check "padded and mixed-case modes pass" padded_and_cased_modes_pass

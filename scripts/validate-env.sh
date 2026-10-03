@@ -94,6 +94,20 @@ readonly INDEXER_UID=1002
 # user, so there the plain 600 stands.
 readonly INDEXER_ONLY_ACL=$'user::rw-\nuser:1002:r--\ngroup::---\nmask::r--\nother::---'
 
+# Print the ACL on PATH, or fail: without it the grant cannot be checked.
+acl_of() {
+    local path="$1"
+
+    command -v getfacl >/dev/null || {
+        printf 'ERROR: getfacl is needed to check the ACL on %s; install the acl package.\n' "$path" >&2
+        exit 1
+    }
+    getfacl --omit-header --numeric --absolute-names "$path" || {
+        printf 'ERROR: unable to read the ACL on %s.\n' "$path" >&2
+        exit 1
+    }
+}
+
 # The indexer must also search config/, the mount root: a directory
 # without the other-search bit (say, from a 077 umask) needs a search
 # ACL for UID 1002 too.
@@ -107,10 +121,7 @@ require_indexer_can_search_on_linux() {
     if [[ "$(file_owner "$dir")" == "$INDEXER_UID" ]]; then
         (((8#$mode & 8#100) != 0)) && return 0
     else
-        acl=""
-        if command -v getfacl >/dev/null; then
-            acl="$(getfacl --omit-header --numeric --absolute-names "$dir")" || acl=""
-        fi
+        acl="$(acl_of "$dir")"
         if grep -Eq "^user:${INDEXER_UID}:" <<<"$acl"; then
             grep -Eq "^user:${INDEXER_UID}:..x" <<<"$acl" && grep -Eq '^mask::..x' <<<"$acl" &&
                 return 0
@@ -137,11 +148,7 @@ require_indexer_readable_on_linux() {
             exit 1
         }
     elif [[ "$mode" == "640" ]]; then
-        command -v getfacl >/dev/null || {
-            printf 'ERROR: getfacl is needed to check the ACL on %s; install the acl package.\n' "$path" >&2
-            exit 1
-        }
-        acl="$(getfacl --omit-header --numeric --absolute-names "$path")"
+        acl="$(acl_of "$path")"
         [[ "$acl" == "$INDEXER_ONLY_ACL" ]] || {
             printf 'ERROR: %s has mode 640; its ACL must grant read to UID %s and no one else. Run:\n  %s\n' \
                 "$path" "$INDEXER_UID" "$fix" >&2
