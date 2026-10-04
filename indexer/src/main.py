@@ -46,6 +46,7 @@ from .attachment_indexing import (
     apply_attachment_writes,
     prepare_attachment_writes,
     reruns_once_ocr_is_on,
+    too_large_fits,
 )
 from .chunker import (
     MessageChunk,
@@ -397,12 +398,20 @@ def _bool_env(name: str, default: bool) -> bool:
 # Attachment extraction — see ``src/extractors/`` for
 # per-format implementations and ``.env.example`` for the operator-
 # facing reference. Defaults are conservative: OCR enabled (most
-# valuable for scanned receipts and screenshots), 10 MB attachment
-# cap (skips huge backup zips), 20-page OCR cap (bounds CPU on
-# scanned books).
+# valuable for scanned receipts and screenshots), 32 MiB attachment
+# cap (skips huge backup zips but reads the 10-30 MB scanned reports
+# common in real mail, #693), 20-page OCR cap (bounds CPU on scanned
+# books). The cap bounds only extraction: the parser has already
+# decoded the payload, and an ``.eml`` under the default
+# ``INDEXER_PARSE_MAX_BYTES`` (50 MB) carries at most ~36 MB of
+# base64-encoded attachment, so a much larger default would admit
+# little more.
+_DEFAULT_ATTACHMENT_MAX_BYTES = 32 * 1024 * 1024
 INDEXER_ATTACHMENT_EXTRACTION_ENABLED = _bool_env("INDEXER_ATTACHMENT_EXTRACTION_ENABLED", True)
 INDEXER_OCR_ENABLED = _bool_env("INDEXER_OCR_ENABLED", True)
-INDEXER_ATTACHMENT_MAX_BYTES = _int_env("INDEXER_ATTACHMENT_MAX_BYTES", 10_000_000, minimum=1)
+INDEXER_ATTACHMENT_MAX_BYTES = _int_env(
+    "INDEXER_ATTACHMENT_MAX_BYTES", _DEFAULT_ATTACHMENT_MAX_BYTES, minimum=1
+)
 INDEXER_OCR_MAX_PAGES = _int_env("INDEXER_OCR_MAX_PAGES", 20, minimum=1)
 # Per-page OCR time ceiling. Tesseract is single-threaded and a
 # crafted high-noise image (still inside ``INDEXER_ATTACHMENT_MAX_BYTES``)
@@ -1112,6 +1121,12 @@ def _phase2a_collect_chunks(
                 fallback_text = "(empty thread)"
             state.subject_fallback_offset = len(all_texts)
             all_texts.append(fallback_text)
+    except MemoryError, RecursionError:
+        # Host pressure, which the extraction dispatcher re-raises: let it
+        # escape the step with its ``begin_attempt`` charge held, as for a
+        # process that dies mid-step, rather than spend the attempt as an
+        # ordinary ``chunk`` failure.
+        raise
     except Exception as e:
         # Phase 2a is "extract + chunk" only — no DB writes. A failure
         # here marks this message failed but leaves Phase 1's thread
@@ -1798,11 +1813,15 @@ def _requeue_stale_extractions(db: Database, queue: IndexingQueue) -> int:
     replaces the row, which keeps that once-only too. The same holds for
     a "no extractor" row whose occurrence's MIME type or filename now
     selects one, as when a release starts routing an extension such as
-    ``.heic`` (#691); that does not depend on OCR. Like the zero-vector
-    recovery sweep, files already queued or dead-lettered are left
-    alone. Skipped entirely when attachment extraction is disabled,
-    since the drain would not re-stamp the rows. Returns the number of
-    files re-queued.
+    ``.heic`` (#691); that does not depend on OCR. A ``too_large`` row
+    whose payload fits under the current ``INDEXER_ATTACHMENT_MAX_BYTES``
+    (the operator raised the cap) is re-extracted from any occurrence, so
+    every message carrying the bytes is re-queued; the re-run rewrites
+    the row, and bytes still over the cap are never re-queued (#693).
+    Like the zero-vector recovery sweep, files already queued or
+    dead-lettered are left alone. Skipped entirely when attachment
+    extraction is disabled, since the drain would not re-stamp the rows.
+    Returns the number of files re-queued.
     """
     if not INDEXER_ATTACHMENT_EXTRACTION_ENABLED:
         return 0
@@ -1819,6 +1838,11 @@ def _requeue_stale_extractions(db: Database, queue: IndexingQueue) -> int:
         for row in db.find_no_extractor_attachments()
         if reruns_once_ocr_is_on(row["extraction_error"], row["content_type"], row["filename"])
     )
+    filepaths.update(
+        row["filepath"]
+        for row in db.find_too_large_attachments()
+        if too_large_fits(row["size_bytes"], INDEXER_ATTACHMENT_MAX_BYTES)
+    )
     if INDEXER_OCR_ENABLED:
         filepaths.update(
             row["filepath"]
@@ -1834,7 +1858,8 @@ def _requeue_stale_extractions(db: Database, queue: IndexingQueue) -> int:
     if re_enqueued:
         log.info(
             "re-queued %d message(s) whose attachments were extracted by an older "
-            "extractor version (%s), skipped while OCR was off, or had no extractor.",
+            "extractor version (%s), skipped while OCR was off, had no extractor, "
+            "or now fit under INDEXER_ATTACHMENT_MAX_BYTES.",
             re_enqueued,
             ", ".join(sorted(stale)) or "none",
         )

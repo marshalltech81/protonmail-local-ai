@@ -123,7 +123,16 @@ def reruns_once_ocr_is_on(error: str | None, content_type: str, filename: str) -
     return not _unsupported_still_holds(error, occurrence, ocr_enabled=True)
 
 
-def _cache_hit_short_circuits(cached: dict, attachment: Attachment, ocr_enabled: bool) -> bool:
+def too_large_fits(size: int, max_bytes: int) -> bool:
+    """Whether bytes of ``size`` cached as ``too_large`` now fit under
+    ``max_bytes``, the same comparison ``extractors.extract`` makes, so
+    re-extracting them can no longer record ``too_large``."""
+    return size <= max_bytes
+
+
+def _cache_hit_short_circuits(
+    cached: dict, attachment: Attachment, ocr_enabled: bool, max_bytes: int
+) -> bool:
     """Return True when ``cached`` should short-circuit re-extraction.
 
     ``STATUS_SUCCESS`` rows with non-empty text are the obvious hit. The
@@ -132,10 +141,10 @@ def _cache_hit_short_circuits(cached: dict, attachment: Attachment, ocr_enabled:
 
     * ``STATUS_EMPTY`` — the payload genuinely had no text. Re-running
       will produce the same empty result.
-    * ``STATUS_TOO_LARGE`` — the size cap is runtime config; if it
-      changed, the operator restarted the indexer and the cache is the
-      wrong place to resolve the version skew (a future schema bump or
-      explicit cache clear handles it).
+    * ``STATUS_TOO_LARGE`` — while the payload still exceeds
+      ``max_bytes``. Once the operator raises the cap far enough for it
+      to fit, the row is stale and the payload is extracted (#693);
+      ``too_large_fits`` is the same predicate for the startup sweep.
     * ``STATUS_UNSUPPORTED`` — while ``_unsupported_still_holds`` for
       this occurrence: re-run once OCR is re-enabled, or when this
       occurrence's metadata selects an extractor.
@@ -150,7 +159,7 @@ def _cache_hit_short_circuits(cached: dict, attachment: Attachment, ocr_enabled:
     if status == STATUS_EMPTY:
         return True
     if status == STATUS_TOO_LARGE:
-        return True
+        return not too_large_fits(len(attachment.payload), max_bytes)
     if status == STATUS_UNSUPPORTED:
         return _unsupported_still_holds(cached["extraction_error"], attachment, ocr_enabled)
     if status == STATUS_FAILED:
@@ -250,7 +259,7 @@ def _resolve_extracted_text(
     if (
         cached is not None
         and refresh_module is None
-        and _cache_hit_short_circuits(cached, attachment, ocr_enabled)
+        and _cache_hit_short_circuits(cached, attachment, ocr_enabled, max_bytes)
     ):
         # Successful hits return the stored text; non-success hits
         # (empty / unsupported / too_large / failed-within-window)

@@ -1442,6 +1442,23 @@ class Database:
         ).fetchall()
 
     @_synchronized
+    def find_too_large_attachments(self) -> list[sqlite3.Row]:
+        """Every attachment occurrence whose cached extraction is
+        ``too_large``, with its message's Maildir filepath and the
+        payload's size in bytes. Occurrences share the row by content
+        hash, so all of them carry the same size."""
+        return self._conn.execute(
+            """
+            SELECT m.filepath, a.size_bytes
+            FROM attachment_extractions e
+            JOIN attachments a ON a.attachment_id = e.attachment_id
+            JOIN message_thread_map m ON m.claimant_id = a.claimant_id
+            WHERE e.extraction_status = 'too_large'
+            ORDER BY m.filepath
+            """
+        ).fetchall()
+
+    @_synchronized
     def get_attachment_extraction(self, attachment_id: str) -> sqlite3.Row | None:
         """Return the cached extraction row for an attachment, or None.
 
