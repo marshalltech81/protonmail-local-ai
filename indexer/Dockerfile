@@ -30,7 +30,7 @@ COPY src/ ./src/
 FROM python:3.14-slim-trixie@sha256:51dafde81dbdb6ebde285137a295cf18a47ca95234fe388a343719cb97305b3d
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    # Attachment text extraction (schema v10). Tesseract supplies the OCR
+    # Attachment text extraction. Tesseract supplies the OCR
     # path used by image attachments and the scanned-PDF fallback in
     # src/extractors/{image,pdf}.py; Poppler's pdftoppm is what pdf2image
     # shells out to when rendering each PDF page to a PIL image. English

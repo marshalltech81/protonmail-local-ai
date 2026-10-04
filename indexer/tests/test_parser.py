@@ -596,7 +596,7 @@ class TestDeriveFolderLegacyLayout:
 
 
 # ---------------------------------------------------------------------------
-# parse_email — file identity (schema v7)
+# parse_email — file identity
 # ---------------------------------------------------------------------------
 
 

@@ -255,10 +255,11 @@ def parse_email(path: Path, maildir_root: Path | None = None) -> Message | None:
 
     ``maildir_root`` — when provided, the folder is derived as the relative
     path from the root to the directory that contains ``cur/``/``new/``.
-    mbsync ``SubFolders Verbatim`` can nest folders more than one level
-    deep (``Clients/ABC``, ``Archive/2023``); without the root, nested
-    folders collapse to only the leaf directory name and unrelated threads
-    can be merged by the subject-only fallback.
+    mbsync's ``SubFolders Legacy`` layout nests folders more than one level
+    deep as dotted child directories (``Folders/.Clients/.ABC`` is
+    ``Folders/Clients/ABC``; see ``_derive_folder``); without the root,
+    nested folders collapse to only the leaf directory name and unrelated
+    threads can be merged by the subject-only fallback.
 
     When ``maildir_root`` is not provided the folder falls back to the
     leaf name (``path.parent.parent.name``).

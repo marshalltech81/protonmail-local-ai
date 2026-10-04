@@ -1,4 +1,4 @@
-"""Tests for src/queue.py — durable indexing queue (schema v8).
+"""Tests for src/queue.py — durable indexing queue (``indexing_jobs``).
 
 Covers the retry / backoff / dead-letter state machine, re-enqueue
 semantics for previously-failed rows, and the ``claim_batch`` ordering
