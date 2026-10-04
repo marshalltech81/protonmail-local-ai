@@ -6,7 +6,9 @@ The embedder wraps the official ``openai`` SDK with a custom
 deterministic without hitting a live provider.
 """
 
+import logging
 import time
+import traceback
 from types import SimpleNamespace
 
 import httpx2
@@ -464,7 +466,7 @@ class TestWaitForReady:
             raise _api_status_error(401)
 
         _patch_warmup(emb, fake_create)
-        with pytest.raises(APIStatusError):
+        with pytest.raises(RuntimeError, match="status=401"):
             emb.wait_for_ready(timeout=5)
 
     def test_times_out_when_never_responds(self, monkeypatch):
@@ -521,7 +523,7 @@ class TestWaitForReady:
         # Timeout chosen well above the simulated 11s of probe sleeps
         # (10 fast x 0.5s + 2 slow x 3.0s = 11s) so the deadline check
         # never fires under the patched clock.
-        with pytest.raises(APIStatusError):
+        with pytest.raises(RuntimeError, match="status=400"):
             emb.wait_for_ready(timeout=60)
         # First FAST_PROBE_COUNT sleeps should use the fast interval;
         # subsequent sleeps should use the slow interval.
@@ -532,6 +534,76 @@ class TestWaitForReady:
         assert sleeps[emb._FAST_PROBE_COUNT :] == [emb._SLOW_PROBE_INTERVAL_SECS] * (
             len(sleeps) - emb._FAST_PROBE_COUNT
         )
+
+
+_MARKER = "MARKER-686"
+
+
+def _marked_status_error(status_code: int) -> APIStatusError:
+    """A status error whose provider body and message carry ``_MARKER``,
+    as the SDK builds one from a JSON error response (#686)."""
+    body = {"error": {"message": f"provider text {_MARKER}", "type": "invalid_request_error"}}
+    return APIStatusError(
+        message=f"Error code: {status_code} - {body}",
+        response=httpx2.Response(
+            status_code, json=body, request=httpx2.Request("POST", "http://x")
+        ),
+        body=body,
+    )
+
+
+def _assert_scrubbed(exc: BaseException, caplog, status_code: int) -> None:
+    rendered = "".join(traceback.format_exception(exc))
+    for text in (str(exc), repr(exc), rendered, caplog.text):
+        assert _MARKER not in text
+    assert f"APIStatusError: status={status_code}" in str(exc)
+    assert exc.__cause__ is None
+    assert exc.__suppress_context__ or exc.__context__ is None
+
+
+class TestWaitForReadyScrubsProviderText:
+    """``wait_for_ready`` is the one startup embed call that reached the
+    container log without ``scrub_embed_error``: a non-transient status
+    error propagated with the provider's response body, and the deadline
+    error embedded the last error's repr (#686)."""
+
+    def test_non_transient_status_error_keeps_only_type_and_status(self, caplog):
+        caplog.set_level(logging.DEBUG)
+        emb = _make_embedder()
+        calls = {"n": 0}
+
+        def fake_create(**_kwargs):
+            calls["n"] += 1
+            raise _marked_status_error(402)
+
+        _patch_warmup(emb, fake_create)
+        with pytest.raises(RuntimeError) as exc_info:
+            emb.wait_for_ready(timeout=5)
+        assert calls["n"] == 1
+        _assert_scrubbed(exc_info.value, caplog, 402)
+        assert "API key" in str(exc_info.value)
+
+    def test_deadline_error_keeps_only_type_and_status(self, monkeypatch, caplog):
+        caplog.set_level(logging.DEBUG)
+        clock = {"t": 1000.0}
+
+        def fake_sleep(s: float) -> None:
+            clock["t"] += s
+
+        monkeypatch.setattr(time, "sleep", fake_sleep)
+        monkeypatch.setattr(time, "monotonic", lambda: clock["t"])
+        emb = _make_embedder()
+        calls = {"n": 0}
+
+        def fake_create(**_kwargs):
+            calls["n"] += 1
+            raise _marked_status_error(503)
+
+        _patch_warmup(emb, fake_create)
+        with pytest.raises(RuntimeError, match="did not become ready") as exc_info:
+            emb.wait_for_ready(timeout=2)
+        assert calls["n"] >= 2
+        _assert_scrubbed(exc_info.value, caplog, 503)
 
 
 class TestL2Normalize:

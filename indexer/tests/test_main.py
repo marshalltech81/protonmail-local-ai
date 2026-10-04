@@ -18,11 +18,14 @@ import logging
 import os
 import sqlite3
 import sys
+import traceback
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import httpx2
 import pytest
+from openai import APIStatusError
 from src import main, parser
 from src.database import EMBEDDING_DIM, Database
 from src.maildir import SyncStamp
@@ -1244,6 +1247,26 @@ class TestValidateEmbeddingDim:
         with pytest.raises(SystemExit) as exc_info:
             main._validate_embedding_dim(embedder)
         assert str(EMBEDDING_DIM) in str(exc_info.value)
+
+    def test_probe_failure_exits_without_provider_text(self, caplog):
+        """The dimension probe runs right after ``wait_for_ready``; a
+        failure there exits with type and status only, not the
+        provider's response body (#686)."""
+        caplog.set_level(logging.DEBUG)
+        body = {"error": {"message": "provider text MARKER-686"}}
+        embedder = make_mock_embedder()
+        embedder.embed.side_effect = APIStatusError(
+            message=f"Error code: 402 - {body}",
+            response=httpx2.Response(402, json=body, request=httpx2.Request("POST", "http://x")),
+            body=body,
+        )
+        with pytest.raises(SystemExit) as exc_info:
+            main._validate_embedding_dim(embedder)
+        exc = exc_info.value
+        rendered = "".join(traceback.format_exception(exc))
+        for text in (str(exc), repr(exc), rendered, caplog.text):
+            assert "MARKER-686" not in text
+        assert "APIStatusError: status=402" in str(exc)
 
 
 class TestIndexOneFileChunking:
