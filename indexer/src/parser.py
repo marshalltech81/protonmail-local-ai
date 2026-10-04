@@ -450,7 +450,41 @@ def _derive_folder(path: Path, maildir_root: Path | None) -> str:
     return folder_dir.name
 
 
+# RFC 5322 2.2.3 folding: a line break followed by a space or tab. One
+# linear pass, no backtracking.
+_FOLD_RE = re.compile(r"\r?\n(?=[ \t])")
+
+
+def _unfold(text: str) -> str:
+    """Unfold header text (RFC 5322 2.2.3): remove each line break that
+    is followed by a space or tab, keeping the whitespace.
+
+    The standard library keeps a fold that falls inside a quoted string,
+    a comment or a parameter value, so a display name or filename folded
+    there would keep the line break (#688).
+    """
+    return _FOLD_RE.sub("", text)
+
+
 def _part_filename(part: email.message.Message) -> str | None:
+    """``_raw_part_filename`` read from the part's headers unfolded (#688).
+
+    The headers are unfolded before ``get_filename()`` decodes them, so a
+    line break an RFC 2231 value percent-encodes (``%0A%20``) stays
+    filename content; only syntactic folds are removed. The unfolded
+    Content-Disposition and Content-Type values go on a throwaway message,
+    copied raw (``raw_items()``; the compat32 policy stores and fetches
+    them unchanged), so the part itself is never modified: attached emails
+    are re-serialized later.
+    """
+    headers = email.message.Message()
+    for name, value in part.raw_items():
+        if name.lower() in ("content-disposition", "content-type"):
+            headers[name] = _unfold(value)
+    return _raw_part_filename(headers)
+
+
+def _raw_part_filename(part: email.message.Message) -> str | None:
     """``part.get_filename()``, falling back to the raw parameter text when
     its charset cannot decode it.
 
@@ -1195,6 +1229,10 @@ def _parse_addrs(value: str | email.header.Header) -> list[str]:
     if len(text) > _MAX_ADDRESS_HEADER_CHARS:
         log.debug("address header over %d chars; recipients not parsed", _MAX_ADDRESS_HEADER_CHARS)
         return []
+    # Unfold once, before anything parses the text: the standard library
+    # keeps a fold inside a quoted string or comment, and a CRLF there
+    # can even change the parsed address (#688).
+    text = _unfold(text)
     protected, restore = _protect_encoded_words(text)
     addresses = []
     for element in _split_address_list(protected):

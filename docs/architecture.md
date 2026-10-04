@@ -694,6 +694,14 @@ result (see `docs/mcp-tools.md`). `message_participants`
 normalizes From / To / Cc into one row per (message, role, address),
 with `address` canonical and lowercased and the display name kept as
 written; malformed entries with no recoverable address are skipped.
+Address headers are unfolded (RFC 5322 §2.2.3: a line break followed by
+a space or tab is removed, the whitespace kept) before they are parsed,
+and the Content-Disposition / Content-Type headers an attachment
+filename is read from are unfolded the same way before RFC 2231
+decoding, so a header folded inside a quoted name or a `filename` /
+`name` parameter leaves no line break in the stored value, while a line
+break the sender percent-encodes in the filename is kept (#688). An index built before this keeps the
+old values until the affected messages are re-indexed.
 
 **Read state.** `seen`, `flagged` and `replied` are the `S`, `F` and
 `R` flags in `filepath`'s `:2,<flags>` suffix (`maildir.message_state`,

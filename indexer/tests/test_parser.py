@@ -11,6 +11,7 @@ import email.utils
 import hashlib
 import logging
 import quopri
+import re
 import textwrap
 import time
 from datetime import UTC, datetime
@@ -2490,6 +2491,116 @@ def test_parse_addrs_output_is_always_a_parseaddr_fixed_point():
 
 
 # ---------------------------------------------------------------------------
+# Folded address header shape catalogue (#688)
+# ---------------------------------------------------------------------------
+#
+# Each shape is an address header with ``{eol}`` where the line is folded,
+# and the (display name, address) pairs the parser records. Invariant:
+# folding never changes an address, and no recorded display name keeps a
+# line break: the header is unfolded (RFC 5322 2.2.3) before it is parsed.
+
+_FOLDED_ADDRESS_SHAPES = {
+    "fold-inside-quoted-name": (
+        '"Jane{eol} Doe (ACME)" <jane@example.com>',
+        [("Jane Doe (ACME)", "jane@example.com")],
+    ),
+    "fold-inside-unquoted-phrase": (
+        "Jane{eol} Doe <jane@example.com>",
+        [("Jane Doe", "jane@example.com")],
+    ),
+    "fold-between-name-and-angle-addr": (
+        "Jane Doe{eol} <jane@example.com>",
+        [("Jane Doe", "jane@example.com")],
+    ),
+    "fold-between-encoded-words": (
+        "=?utf-8?q?Jane?={eol} =?utf-8?q?_Doe?= <jane@example.com>",
+        [("Jane Doe", "jane@example.com")],
+    ),
+    "fold-between-quoted-encoded-words": (
+        '"=?utf-8?q?Jane?={eol} =?utf-8?q?_Doe?=" <jane@example.com>',
+        [("Jane Doe", "jane@example.com")],
+    ),
+    "fold-inside-comment-name": (
+        "jane@example.com (Jane{eol} Doe)",
+        [("Jane Doe", "jane@example.com")],
+    ),
+    "fold-in-each-of-several-addresses": (
+        '"Ann{eol}\tLee" <ann@example.com>,{eol} "Bo{eol} Kim" <bo@example.org>, carl@example.net',
+        [("Ann Lee", "ann@example.com"), ("Bo Kim", "bo@example.org"), ("", "carl@example.net")],
+    ),
+    "fold-inside-8bit-quoted-name": (
+        '"J\u00f6rg{eol} Doe" <jorg@example.com>',
+        [("J\u00f6rg Doe", "jorg@example.com")],
+    ),
+}
+
+
+def _folded_address_eml(tmp_path: Path, header: str, eol: str) -> Path:
+    folder = tmp_path / "INBOX" / "cur"
+    folder.mkdir(parents=True)
+    path = folder / "folded.eml"
+    lines = [
+        f"From: {header}",
+        f"To: {header}",
+        f"Cc: {header}",
+        "Message-ID: <folded@example.test>",
+        "Date: Mon, 01 Jan 2024 12:00:00 +0000",
+        "",
+        "Body.",
+        "",
+    ]
+    path.write_bytes(eol.join(lines).encode())
+    return path
+
+
+@pytest.mark.parametrize("eol", ["\r\n", "\n"], ids=["crlf", "lf"])
+@pytest.mark.parametrize("shape", sorted(_FOLDED_ADDRESS_SHAPES))
+def test_folded_address_header_shape_catalogue(tmp_path, shape, eol):
+    from email.utils import parseaddr
+
+    template, expected = _FOLDED_ADDRESS_SHAPES[shape]
+    header = template.format(eol=eol)
+    assert [parseaddr(a) for a in _parse_addrs(header)] == expected
+    # End to end: as parse_email reads the header from a file (a raw
+    # 8-bit header arrives as an ``email.header.Header``).
+    msg = parse_email(_folded_address_eml(tmp_path, header, eol))
+    assert msg is not None
+    for parsed in (msg.from_addrs, msg.to_addrs, msg.cc_addrs):
+        pairs = [parseaddr(a) for a in parsed]
+        assert [addr for _, addr in pairs] == [addr for _, addr in expected]
+        assert not any("\r" in name or "\n" in name for name, _ in pairs)
+        assert pairs == expected
+
+
+def test_unfolding_a_long_folded_address_header_is_one_linear_pass(monkeypatch):
+    """#688: unfolding runs once over the whole header, before the split,
+    so a header folded at every opportunity costs one pass, not one per
+    element or per fold."""
+    from email.utils import parseaddr
+
+    from src import parser
+
+    calls: list[int] = []
+    unfold = parser._unfold
+
+    def counting(text: str) -> str:
+        calls.append(len(text))
+        return unfold(text)
+
+    monkeypatch.setattr(parser, "_unfold", counting)
+    one = '"N{i}\r\n x\r\n\ty" <u{i}@example.com>,\r\n '
+    header = "".join(one.format(i=i) for i in range(6000))
+    assert len(header) < parser._MAX_ADDRESS_HEADER_CHARS
+    started = time.perf_counter()
+    out = _parse_addrs(header)
+    assert time.perf_counter() - started < 10
+    assert calls == [len(header)]
+    assert len(out) == 6000
+    assert parseaddr(out[-1]) == ("N5999 x y", "u5999@example.com")
+    assert not any("\r" in a or "\n" in a for a in out)
+
+
+# ---------------------------------------------------------------------------
 # Body assembly shape catalogue (#295)
 # ---------------------------------------------------------------------------
 #
@@ -2916,6 +3027,84 @@ _FILENAME_SHAPES = {
         b'Content-Disposition: attachment; filename="=?utf-8?q?r=C3=A9sum=C3=A9.pdf?="',
         "=?utf-8?q?r=C3=A9sum=C3=A9.pdf?=",
     ),
+    # #688: a header folded inside the filename parameter. Unfolding
+    # (RFC 5322 2.2.3) removes the line break and keeps the whitespace
+    # after it; the standard library alone kept both.
+    "fold-quoted-crlf": (
+        b"Content-Type: application/pdf\r\n"
+        b'Content-Disposition: attachment; filename="report\r\n 10-22.pdf"',
+        "report 10-22.pdf",
+    ),
+    "fold-quoted-lf": (
+        b"Content-Type: application/pdf\r\n"
+        b'Content-Disposition: attachment; filename="report\n 10-22.pdf"',
+        "report 10-22.pdf",
+    ),
+    "fold-quoted-tab": (
+        b"Content-Type: application/pdf\r\n"
+        b'Content-Disposition: attachment; filename="report\r\n\t10-22.pdf"',
+        "report\t10-22.pdf",
+    ),
+    "fold-rfc2231-continuation": (
+        b"Content-Type: application/pdf\r\n"
+        b'Content-Disposition: attachment;\r\n filename*0="rep\r\n ort";\r\n filename*1="x.pdf"',
+        "rep ortx.pdf",
+    ),
+    "fold-rfc2231-extended": (
+        b"Content-Type: application/pdf\r\n"
+        b"Content-Disposition: attachment; filename*=utf-8''rep\r\n ort.pdf",
+        "rep ort.pdf",
+    ),
+    "fold-rfc2231-extended-continuation": (
+        b"Content-Type: application/pdf\r\n"
+        b"Content-Disposition: attachment; filename*0*=utf-8''rep%20\r\n ort;\r\n filename*1*=x.pdf",
+        "rep  ortx.pdf",
+    ),
+    "fold-rfc2231-idna": (
+        b"Content-Type: application/pdf\r\n"
+        b"Content-Disposition: attachment; filename*=idna''rep\n ort.pdf",
+        "rep ort.pdf",
+    ),
+    "fold-content-type-name": (
+        b'Content-Type: application/pdf; name="rep\r\n ort.pdf"',
+        "rep ort.pdf",
+    ),
+    "fold-between-encoded-words": (
+        b"Content-Type: application/pdf\r\n"
+        b'Content-Disposition: attachment; filename="=?utf-8?q?rep?=\r\n =?utf-8?q?ort.pdf?="',
+        "=?utf-8?q?rep?= =?utf-8?q?ort.pdf?=",
+    ),
+    # #688 review round 1: only syntactic folds are removed. A line break
+    # an RFC 2231 value percent-encodes is filename content and survives.
+    "rfc2231-percent-encoded-lf-space": (
+        b"Content-Type: application/pdf\r\n"
+        b"Content-Disposition: attachment; filename*=utf-8''a%0A%20b.txt",
+        "a\n b.txt",
+    ),
+    "rfc2231-percent-encoded-crlf-space": (
+        b"Content-Type: application/pdf\r\n"
+        b"Content-Disposition: attachment; filename*=utf-8''a%0D%0A%20b.txt",
+        "a\r\n b.txt",
+    ),
+    "rfc2231-percent-encoded-lf-space-idna": (
+        b"Content-Type: application/pdf\r\n"
+        b"Content-Disposition: attachment; filename*=idna''a%0A%20b.txt",
+        "a\n b.txt",
+    ),
+    "8bit-raw": (
+        b"Content-Type: application/pdf\r\n"
+        b'Content-Disposition: attachment; filename="r\xc3\xa9sum\xc3\xa9.pdf"',
+        "r\ufffd\ufffdsum\ufffd\ufffd.pdf",
+    ),
+    "fold-8bit-raw": (
+        b"Content-Type: application/pdf\r\n"
+        b'Content-Disposition: attachment; filename="r\xc3\xa9sum\xc3\xa9\r\n .pdf"',
+        "r\ufffd\ufffdsum\ufffd\ufffd .pdf",
+    ),
+    "no-filename": (
+        b"Content-Type: application/pdf\r\nContent-Disposition: attachment",
+        "unnamed",
+    ),
 }
 
 
@@ -2962,8 +3151,12 @@ def test_attachment_filename_matches_stdlib_or_its_unknown_charset_fallback(shap
 
     headers, _ = _FILENAME_SHAPES[shape]
     part = email.message_from_bytes(headers + b"\r\n\r\nAAAA\r\n")
+    before = (part.as_bytes(), list(part.raw_items()))
+    # #688: the standard library reads the header as folded. Its value on
+    # the same header unfolded first (RFC 5322 2.2.3) is the ground truth.
+    headers = re.sub(rb"\r?\n(?=[ \t])", b"", headers)
     try:
-        stdlib = part.get_filename()
+        stdlib = email.message_from_bytes(headers + b"\r\n\r\nAAAA\r\n").get_filename()
     except ValueError:
         unknown = headers
         for label in (b"idna", b"undefined", b"utf-8\x00"):
@@ -2971,6 +3164,11 @@ def test_attachment_filename_matches_stdlib_or_its_unknown_charset_fallback(shap
         assert unknown != headers
         stdlib = email.message_from_bytes(unknown + b"\r\n\r\nAAAA\r\n").get_filename()
     assert _part_filename(part) == stdlib
+    if shape.startswith("fold-"):
+        assert stdlib is not None
+        assert "\r" not in stdlib and "\n" not in stdlib
+    # The part itself is never changed: attached emails are re-serialized.
+    assert (part.as_bytes(), list(part.raw_items())) == before
 
 
 def test_undecodable_filename_is_not_logged(tmp_path, caplog):
