@@ -430,8 +430,8 @@ decision (Open decisions).
 | 3.7 Filtered semantic recall | Done | #440, #470 | — |
 | 3.8 Citation contract | Partly done | #457, #495 (`ask_mailbox` statement coverage and quote checks), #519 and #525 (quote and label edge cases), #532 and #545 (thread-scoped `get_evidence` parity), #559 (mailbox-wide parity, #537), #565 (`summarize_thread`, `extract_from_emails`) | semantic support only (#284) |
 | 4.1 Entities | Done | #459, #527 (orphan pruning, #464) | — |
-| 4.2 Source authority | Done | #459, #474 (Spam guard), #523 and #542 (rules file kept private and validated) | verdict-header gating after go-live (#463) |
-| 4.3 Temporal retrieval | Mostly done | #561 (`sent_at` defined and used consistently), #593 (whole-thread evidence under a date range), #597 (#575), `occurred_at` with filters and thread spans on the effective time (#297) | checking against real mail that the top `Received:` is Proton's (go-live); bitemporal claims (Phase 5) |
+| 4.2 Source authority | Done | #459, #474 (Spam guard), #523 and #542 (rules file kept private and validated) | verdict gating (#463): decided 2026-10-04 (downgrade on DMARC fail plus a `sender_authenticated` flag); both forged-header tests passed (Proton strips a forged `Authentication-Results` and overwrites `X-Pm-Origin`); left: build it with a schema migration and a Maildir backfill |
+| 4.3 Temporal retrieval | Mostly done | #561 (`sent_at` defined and used consistently), #593 (whole-thread evidence under a date range), #597 (#575), `occurred_at` with filters and thread spans on the effective time (#297) | bitemporal claims (Phase 5); the top `Received:` was confirmed as Proton's on live mail (2026-10-04) |
 | 4.4 Retention | Mostly done | #451 (mirror default), #475 (Trash hidden from default search), #564 and #583 (reaped sources reported for 30 days), the invariant restated (#610), #562 (extracted text purged on reap) | user-controlled retention |
 | 5.1 Hardened `brief_issue` | Not started | — | needs Phase 3 usage on real mail |
 | 5.2 Support/contradict | Built, experimental | #467 (`check_conclusion`), #493 (evidence-slot refill), #558 (quote verification, also for `brief_issue`) | semantic support (#284) |
@@ -686,7 +686,113 @@ Triaged against `d30e500` by four parallel agents; every issue is real
 and most reproduced with synthetic input. PRs in the order to land
 them (one test-first commit per issue, `Fixes #N` per issue):
 
-**Handoff 2026-10-03 — start here.** **Ready for go-live.** Every
+**Handoff 2026-10-04 — start here.** **Live.** The stack has run in
+macOS Bridge mode since 2026-10-03 (#497's live test passed; closed).
+The initial index finished 2026-10-04 04:53 UTC: 33,038 messages
+indexed; 34 T-flagged (trashed) files skipped by design under mirror
+mode. The first full sync took about 17 minutes (from the Bridge app's
+local cache), so the operator `.env` sets `SYNC_DEADLINE_SECONDS=3600`.
+
+Deployed images: mcp-server at `cb9df36` (#696's participant filter is
+live). **The indexer is stopped until the rebuild** (owner,
+2026-10-04): its go-live image predates #703 and #704, so new mail with
+PDFs or images could write document internals or a provider response
+body to `docker logs`. mbsync keeps syncing into Maildir and
+mcp-server keeps serving the existing index; mail that arrives
+meanwhile is indexed by the rebuild.
+
+Verified on live mail (counts only): the top `Received:` header is
+Proton's on every received message, so `occurred_at` holds; Sent mail
+has no `Received:` and falls back to `sent_at`. Proton's
+`Authentication-Results` headers form one contiguous block; Proton
+strips a forged one carrying its authserv-id and overwrites a forged
+`X-Pm-Origin` (evidence, the owner's decision and both test results on
+#463).
+
+Merged since go-live: #709 (#707) and #711 (#693), plus the PRs under
+Recently Completed. Open: #710 (#687, subject in first-chunk vectors;
+needs the rebuild), in its Codex rounds.
+
+Next, in order:
+
+1. Merge #710 (owner go-ahead).
+2. **One-time rebuild, as soon as #710 is in:** build the indexer and
+   mcp-server images (`make build-macos-bridge`); in `.env` set
+   `INDEXER_OCR_ENABLED=true` and drop the 50 MB
+   `INDEXER_ATTACHMENT_MAX_BYTES` override (the parse cap limits it to
+   about 36.5 MB anyway; #711's default is 32 MiB); then follow
+   `docs/troubleshooting.md`, "Indexer refuses to start — wipe the
+   sqlite-volume": `make down` first (Docker will not remove a mounted
+   volume), remove only the SQLite volume (Maildir and Bridge state
+   stay), `make up-macos-bridge`. Expect a full re-extract (OCR on) and
+   re-embed. #699 (newest mail first) would make the rebuild usable
+   sooner if decided first.
+3. **#463 sender authentication, now unblocked:** the owner ran the
+   forged-header test on 2026-10-04 (an external Gmail account sending a
+   forged `Authentication-Results: mail.protonmail.ch; dmarc=pass`
+   header through `swaks`). Gmail's sent copy kept the forged header;
+   the copy delivered into Maildir had only Proton's usual four
+   (`dmarc`, `spf`, `arc`, `dkim`, authserv-id `mail.protonmail.ch`). So
+   Proton's inbound MTA or Bridge strips a sender-supplied header
+   carrying Proton's authserv-id (RFC 8601 §5). This was one test over
+   one path, so the parser still reads only Proton authserv-ids
+   (`mail.protonmail.ch`, `mailinNNN.protonmail.ch`) and treats
+   anything else as `none`. Build as decided: the DMARC result from
+   those headers, `fail` leaves the sender unclassified, and a
+   `sender_authenticated` flag (pass / none / fail / internal) wherever
+   the authority class is shown. Two points settled since the decision:
+   - **`X-Pm-Origin: internal` is trusted, as tested.** A second owner
+     test on 2026-10-04 sent a forged `X-Pm-Origin: internal` from the
+     external account; Gmail's sent copy kept it, and the copy delivered
+     into Maildir had exactly one `X-Pm-Origin`, set to `external`, in
+     the same position. Proton overwrites the sender's value, so
+     `internal` counts as authenticated (Proton-to-Proton mail carries
+     no `Authentication-Results`). One test over one path: accept only
+     the exact values `internal` / `external` from a single
+     `X-Pm-Origin` header, and treat a missing, duplicated or unexpected
+     value as `none`.
+   - **The backfill is not a SQL migration.** The migration runner
+     executes only numbered `.sql` files, and the database stores no
+     `Authentication-Results` or `X-Pm-Origin`. So the `SCHEMA_VERSION`
+     bump and forward migration add the column, and a separate bounded
+     application-level step re-reads each indexed message's headers from
+     Maildir (or re-queues them) to fill it; until it finishes, existing
+     rows have no verdict.
+
+   It lands after the rebuild (details on #463).
+4. **Mirror-mode reap check:** the rebuild deletes today's 68
+   `pending_deletions` rows, and a fresh index skips files that are
+   already T-flagged, so no reap follows from them. Validate reaping on
+   a message after the rebuild has indexed it, and note that deleting
+   it in Proton is not enough: Proton moves it to Trash, so the INBOX
+   copy is tombstoned but a Trash copy with the same Message-ID is
+   indexed and keeps the message in the index (`docs/architecture.md`,
+   "Trash under mirror"). Delete it, then purge it from Trash (empty
+   Trash or delete it permanently); it is reaped once that purge has
+   synced and `INDEXER_DELETION_GRACE_DAYS` (7) have passed. (The #463 test message
+   cannot serve: it arrived while the indexer was stopped and was
+   deleted before the rebuild, so the fresh index skips its T-flagged
+   file.)
+
+Small, no decision needed: #705 (blank filter in `search_emails`); the
+extractor's own `max_bytes` fallback still says 10 MB (the indexer
+always passes the cap; now safe to tidy, #709 has merged); `ask_mailbox` should name the
+resolved `participant` in its prompt (a "this person" question scoped
+by participant alone leaves the model guessing who).
+
+Needs the owner: #701 (hybrid RRF guaranteed slot for a strong
+single-lane keyword hit; a new mechanism), #697/#698/#699 (indexing
+throughput), #692 (Starred duplicates), #694, #695, #691's fontTools
+(waits on py-pdf/pypdf#4156, filed 2026-10-04: pypdf re-parses an
+embedded CFF font per resource per page; 40 s vs 0.03 s on a 1.2 MB
+synthetic PDF), evaluation questions from real mail, #661, #660, #652.
+
+Measured on the live index, worth acting on: `ask_mailbox` dropped
+8–22 retrieved passages per answer to its evidence budget (#487), and
+one query-time embed timed out during a DeepInfra latency spike (#697,
+#287).
+
+**Handoff 2026-10-03 (superseded).** **Ready for go-live.** Every
 pre-go-live item has merged: the evening run (#592–#630) and the
 night run (#639–#667, under Recently Completed, 2026-10-02 night).
 No PR is open.
@@ -1353,8 +1459,9 @@ can be revisited with an explicit owner decision.
   indexer restarts first (the pending set is memory-only; the next
   delete in that table clears it), and below SQLite in filesystem
   free blocks, snapshots and backups (`docs/architecture.md`)
-- macOS Bridge mode is tested only against a synthetic implicit-TLS
-  Bridge server (#571, #643); the owner's go-live is the live test
+- macOS Bridge mode is tested in CI only against a synthetic
+  implicit-TLS Bridge server (#571, #643); the owner's go-live
+  (2026-10-03) was its live test and passed (#497)
 - coverage scope: both services measure `src/` with `src/main.py`
   omitted. The indexer's `main.py` has grown to hold the whole
   two-phase pipeline, which `tests/test_main.py` exercises but the
@@ -1640,6 +1747,23 @@ do not ship persisted claims without them.
     invariant): resolved 2026-10-02 (Resolved decisions 14).
 
 ## Recently Completed
+
+### 2026-10-04 — First live run: go-live fixes (#700–#708)
+
+The stack went live 2026-10-03 in macOS Bridge mode; the initial index
+of 33,038 messages finished 2026-10-04. Merged on the owner's go-ahead:
+#700 (DeepInfra's embeddings input cap is 1024, not 100), #703 (#686:
+embedder warmup and dimension-probe errors no longer print the
+provider's response body), #704 (#690: pypdf, Pillow and openpyxl stop
+writing document internals to the indexer log), #702 (#696:
+`participant` and `from_name` on `ask_mailbox`, `extract_from_emails`
+and `get_evidence`; the ranking half moved to #701), #706 (#691:
+`cryptography`, so owner-password-only PDFs extract; `pdf` extractor
+3), #708 (#691: `pillow-heif`, HEIC/HEIF OCR, the owner accepting the
+bundled libheif/libde265 risk; `image` extractor 3; extension-routed
+no-extractor rows re-queue once). fontTools is held back on
+py-pdf/pypdf#4156; #691 stays open for it. Issues filed: #701, #705,
+#707. Closed as done: #497 (live test), #689 (OCR, not chunking).
 
 ### 2026-10-02, night — Go-live blockers and pre-go-live bug fixes (#639–#667)
 

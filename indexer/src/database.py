@@ -82,9 +82,10 @@ def _dedupe_by_canonical(addrs: list[str]) -> list[str]:
 # Fresh installs apply ``_apply_initial_schema`` directly and stamp the
 # current version; existing installs run the migration runner to catch
 # up. See ``src/migrations/runner.py`` for the file layout and
-# transactional guarantees. Until the first deployment, schema changes
-# fold into ``_apply_initial_schema`` instead, with no migration and no
-# bump (owner, 2026-10-01).
+# transactional guarantees. Before the first deployment, schema changes
+# folded into ``_apply_initial_schema`` with no migration and no bump
+# (owner, 2026-10-01). The first deployment was 2026-10-03, so every
+# schema change now needs the bump and a migration.
 SCHEMA_VERSION = 0
 SCHEMA_APPLICATION_ID = 0x504D4149  # "PMAI"
 
