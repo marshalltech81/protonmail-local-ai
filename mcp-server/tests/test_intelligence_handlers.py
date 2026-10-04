@@ -1134,6 +1134,33 @@ class TestPersonFilters:
         assert llm.complete_calls == []
 
     @pytest.mark.parametrize("tool", _PERSON_TOOLS)
+    @pytest.mark.parametrize("blank", ["", " ", "\t"])
+    def test_blank_person_filters_are_absent(self, fake_server, person_db, tool, blank):
+        # Review round 1 (#702): a client that sends unset optionals as
+        # whitespace must not filter on a substring " " or look up " ".
+        called: list = []
+        person_db.find_contact = lambda *a, **_k: called.append(a) or []  # type: ignore[assignment]
+        captured: dict = {}
+        original = person_db.hybrid_search
+
+        def spy(**kwargs):
+            captured.update(kwargs)
+            return original(**kwargs)
+
+        person_db.hybrid_search = spy  # type: ignore[assignment]
+        _person_call(
+            fake_server,
+            person_db,
+            FakeInferenceClient(response="null"),
+            tool,
+            participant=blank,
+            from_name=blank,
+        )
+        assert called == []
+        assert captured["participant"] is None
+        assert captured.get("from_addr") is None
+
+    @pytest.mark.parametrize("tool", _PERSON_TOOLS)
     @pytest.mark.parametrize("field", ["participant", "from_name"])
     def test_person_filter_values_are_not_logged(self, fake_server, person_db, caplog, tool, field):
         import logging

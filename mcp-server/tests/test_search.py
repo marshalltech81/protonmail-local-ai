@@ -601,6 +601,96 @@ class TestParticipantParam:
         assert captured.get("participant") == "bob@example.com"
 
 
+class TestGetEvidencePersonFilters:
+    """Review round 1 (#702): get_evidence reproduces a person-scoped
+    ask_mailbox retrieval, so it resolves ``from_name`` the same way
+    (the public find_contact tool cannot: it has no senders_only), and
+    blank person filters are absent rather than a substring of " "."""
+
+    def _tool(self, fake_server, fake_embed, db):
+        register_search_tools(fake_server, db, fake_embed)
+        return fake_server.tools["get_evidence"]
+
+    def _spy(self, db, attr):
+        captured: dict = {}
+        original = getattr(db, attr)
+
+        def spy(**kwargs):
+            captured.update(kwargs)
+            return original(**kwargs)
+
+        setattr(db, attr, spy)
+        return captured
+
+    def test_from_name_resolves_as_ask_mailbox_does(self, fake_server, fake_embed, seeded_db):
+        lookups: list = []
+        original = seeded_db.find_contact
+
+        def spy(query, limit, *, senders_only=False, folders=None):
+            lookups.append((query, limit, senders_only, folders))
+            return original(query, limit, senders_only=senders_only, folders=folders)
+
+        seeded_db.find_contact = spy  # type: ignore[assignment]
+        captured = self._spy(seeded_db, "hybrid_search")
+        tool = self._tool(fake_server, fake_embed, seeded_db)
+        asyncio.run(tool(query="invoice", from_name="alice", folders=["INBOX"]))
+        assert lookups == [("alice", 1, True, ["INBOX"])]
+        assert captured.get("from_addr") == "alice@example.com"
+
+    def test_explicit_from_addr_wins_over_from_name(self, fake_server, fake_embed, seeded_db):
+        called: list = []
+        seeded_db.find_contact = lambda *a, **_k: called.append(a) or []  # type: ignore[assignment]
+        captured = self._spy(seeded_db, "hybrid_search")
+        tool = self._tool(fake_server, fake_embed, seeded_db)
+        asyncio.run(tool(query="invoice", from_addr="carol@example.com", from_name="alice"))
+        assert called == []
+        assert captured.get("from_addr") == "carol@example.com"
+
+    def test_unmatched_from_name_returns_no_evidence(self, fake_server, fake_embed, seeded_db):
+        captured = self._spy(seeded_db, "hybrid_search")
+        tool = self._tool(fake_server, fake_embed, seeded_db)
+        out = asyncio.run(tool(query="invoice", from_name="zzznosuchcontact"))
+        text = _text(out)
+        assert "no contact matched from_name" in text
+        assert "zzznosuchcontact" in text
+        assert out.structured_content["chunk_count"] == 0
+        assert captured == {}
+
+    def test_from_name_lookup_error_is_a_tool_error(self, fake_server, fake_embed, seeded_db):
+        def boom(_query, _limit, *, senders_only=False, folders=None):
+            raise RuntimeError("simulated find_contact failure")
+
+        seeded_db.find_contact = boom  # type: ignore[assignment]
+        tool = self._tool(fake_server, fake_embed, seeded_db)
+        assert "Evidence error" in _error(tool(query="invoice", from_name="alice"))
+
+    def test_from_name_rejected_with_thread_id(self, fake_server, fake_embed, chunked_db):
+        tool = self._tool(fake_server, fake_embed, chunked_db)
+        message = _error(tool(query="invoice", thread_id="t-alpha", from_name="alice"))
+        assert "cannot be combined with thread_id" in message
+        assert "from_name" in message
+
+    def test_thread_id_description_names_every_rejected_filter(
+        self, fake_server, fake_embed, seeded_db
+    ):
+        tool = self._tool(fake_server, fake_embed, seeded_db)
+        doc = " ".join((tool.__doc__ or "").split())
+        sentence = doc.split("Cannot be combined with", 1)[1].split(".", 1)[0]
+        for name in ("folders", "from_addr", "from_name", "participant", "max_threads"):
+            assert name in sentence
+
+    @pytest.mark.parametrize("blank", ["", " ", "\t"])
+    def test_blank_person_filters_are_absent(self, fake_server, fake_embed, seeded_db, blank):
+        called: list = []
+        seeded_db.find_contact = lambda *a, **_k: called.append(a) or []  # type: ignore[assignment]
+        captured = self._spy(seeded_db, "hybrid_search")
+        tool = self._tool(fake_server, fake_embed, seeded_db)
+        asyncio.run(tool(query="invoice", participant=blank, from_name=blank))
+        assert called == []
+        assert captured.get("participant") is None
+        assert captured.get("from_addr") is None
+
+
 class TestGetEvidence:
     """``get_evidence`` returns the retrieved source passages with full
     provenance and no LLM synthesis."""

@@ -23,6 +23,7 @@ from ..lib.timings import count, rerank_mode, stage, timed_tool
 from ..lib.validation import clamp_int
 from .intelligence import (
     _MAX_ASK_THREADS,
+    blank_to_none,
     clamp_ask_threads,
     resolve_from_name,
     select_ask_threads,
@@ -395,6 +396,7 @@ def register_search_tools(
         limit: int | None = None,
         include_scores: bool = False,
         participant: str | None = None,
+        from_name: str | None = None,
     ) -> CallToolResult:
         """
         Return the exact indexed passages (evidence chunks) that back a
@@ -416,8 +418,7 @@ def register_search_tools(
         part of this thread mentions the deadline?"); omit it to gather
         evidence across the whole mailbox. To audit an ask_mailbox
         answer, pass the same question, filters and max_threads and
-        leave limit unset (for an answer scoped with from_name, pass the
-        address find_contact resolves the name to as from_addr): the result is the evidence that answer
+        leave limit unset: the result is the evidence that answer
         retrieved, in the same order. A smaller limit keeps the first
         limit chunks of it.
 
@@ -427,15 +428,15 @@ def register_search_tools(
                        one thread. Obtain it from search_emails or
                        list_threads — never invent it from a subject.
                        Cannot be combined with folders, from_addr,
-                       date_from, date_to, has_attachments or
-                       max_threads.
+                       from_name, participant, date_from, date_to,
+                       has_attachments or max_threads.
             folders: Restrict to threads with a message in these folders,
                      e.g. ["INBOX", "Sent"]. Without it, threads filed
                      only in Trash are left out; name "Trash" to
                      include them.
             from_addr: Restrict to a sender ADDRESS or domain
                        ("jane@example.com", "@example.com"). For a
-                       person's name, resolve it via find_contact first.
+                       person's name, use from_name.
             date_from: ISO 8601 date lower bound, e.g. "2024-01-01".
                        A thread qualifies when its span (its messages'
                        occurred_at, else sent_at) overlaps the range,
@@ -447,6 +448,10 @@ def register_search_tools(
             participant: Restrict to threads where this person appears
                          in ANY role (sender, To or Cc), as in
                          search_emails and ask_mailbox.
+            from_name: Restrict to mail FROM a named person or role,
+                       resolved to a sender address exactly as
+                       ask_mailbox and search_emails resolve it. If
+                       both are given, from_addr wins.
             max_threads: Rank threads exactly as ask_mailbox does with
                          this max_threads (clamped to [1, 10]) and
                          return their evidence. Omit it to rank by
@@ -477,11 +482,14 @@ def register_search_tools(
                 "date_to": date_to,
                 "has_attachments": has_attachments,
                 "participant": participant,
+                "from_name": from_name,
                 "max_threads": max_threads,
                 "limit": limit,
                 "include_scores": include_scores,
             },
         )
+        from_name = blank_to_none(from_name)
+        participant = blank_to_none(participant)
         if not query or not query.strip():
             raise ToolError("Provide a query to gather evidence for.")
         if thread_id:
@@ -498,6 +506,7 @@ def register_search_tools(
                     ("date_to", date_to),
                     ("has_attachments", has_attachments),
                     ("participant", participant),
+                    ("from_name", from_name),
                     ("max_threads", max_threads),
                 )
                 # Blank optionals (``""``, ``[]``) are absent, as on the
@@ -568,6 +577,18 @@ def register_search_tools(
                         (clip(thread.subject, HEADER_CHAR_LIMIT), thread_id, None, None, chunks)
                     )
             else:
+                # ``from_name`` resolves as in ask_mailbox, so an answer
+                # scoped with it can be audited; an explicit ``from_addr``
+                # wins, and no match is an empty result, never a search
+                # without the filter.
+                if from_name and not from_addr:
+                    from_addr = await resolve_from_name(db, from_name, folders)
+                    if from_addr is None:
+                        return tool_result(
+                            f"No evidence found for: '{query}' "
+                            f"(no contact matched from_name={from_name!r})",
+                            EvidenceOutput(chunk_count=0, threads=[]),
+                        )
                 embedding = await embed_query(embed_client, query, expected_embed_dim)
                 # ask_mailbox's retrieval, with the same per-thread chunk
                 # cap. Without ``max_threads`` the chunk ``limit`` also

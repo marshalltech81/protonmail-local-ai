@@ -443,6 +443,13 @@ def select_ask_threads(
     )
 
 
+def blank_to_none(value: str | None) -> str | None:
+    """``value``, or ``None`` when it is blank. Clients often send an
+    unset optional as ``""`` or whitespace; as a person filter that would
+    match any participant string containing a space, or look up " "."""
+    return value if value is not None and value.strip() else None
+
+
 async def resolve_from_name(db, from_name: str, folders: list[str] | None) -> str | None:
     """The sender address ``from_name`` names, or ``None`` if no contact
     matches: ``find_contact``'s top match counted over From-line senders
@@ -2426,6 +2433,8 @@ def register_intelligence_tools(
         # ``max_threads=5000`` (or a non-numeric value) can't expand
         # into a massive prompt or raise before the try/except below.
         max_threads = clamp_ask_threads(max_threads)
+        from_name = blank_to_none(from_name)
+        participant = blank_to_none(participant)
         # Reject a bad date range before any provider or retrieval work.
         try:
             validate_date_range(date_from, date_to)
@@ -2829,6 +2838,8 @@ def register_intelligence_tools(
         # ``limit`` would otherwise fan out into that many model calls
         # or raise before the try/except below.
         limit = clamp_int(limit, default=20, minimum=1, maximum=_MAX_EXTRACT_LIMIT)
+        from_name = blank_to_none(from_name)
+        participant = blank_to_none(participant)
         # Provenance would overwrite a requested field of the same name,
         # so such a schema is refused before any provider work (#329).
         # The message names only the fixed reserved names.

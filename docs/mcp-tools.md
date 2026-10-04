@@ -316,13 +316,14 @@ chunks (extracted PDF / OCR / document text) are included — unlike
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `query` | string | required | The question or topic to gather evidence for |
-| `thread_id` | string | none | Scope evidence to one thread; omit to search the whole mailbox. Rejected in combination with `folders`, `from_addr`, `participant`, `date_from`, `date_to`, `has_attachments` or `max_threads`, which select threads |
+| `thread_id` | string | none | Scope evidence to one thread; omit to search the whole mailbox. Rejected in combination with `folders`, `from_addr`, `from_name`, `participant`, `date_from`, `date_to`, `has_attachments` or `max_threads`, which select threads |
 | `folders` | list | all but Trash | Scope to threads with a message in any of these folders (the membership `list_threads` uses). Without it, threads filed only in Trash are left out; name `"Trash"` to include them ([Trash](#trash-is-left-out-by-default)) |
 | `from_addr` | string | none | Filter by sender address or domain |
 | `date_from` | string | none | ISO 8601 date lower bound |
 | `date_to` | string | none | ISO 8601 date upper bound |
 | `has_attachments` | bool | none | Restrict to threads with attachments |
 | `participant` | string | none | Any role: From, To, or Cc, as in `search_emails` and `ask_mailbox` |
+| `from_name` | string | none | Sender name or role, resolved through `find_contact` exactly as `ask_mailbox` resolves it, so an answer scoped with it can be audited (the `find_contact` tool counts every role, so its top match can differ). An unmatched name returns no evidence. `from_addr` wins if both are given |
 | `max_threads` | int | none | Rank threads exactly as `ask_mailbox` does with this `max_threads` and return their evidence; clamped to `[1, 10]` like `ask_mailbox`'s. Omit it to rank by `limit` instead |
 | `limit` | int | `12`, or `max_threads` × 6 | Max evidence chunks to return (with `max_threads`, a smaller value keeps the first `limit` chunks of the audit set in rank order); clamped to `[1, 60]`, the most `ask_mailbox` can put in one prompt (10 threads × 6 chunks), so the cap never cuts below an answer's evidence set |
 | `include_scores` | bool | `false` | Annotate each thread with the retrieval lanes that matched (`thread_fts` / `chunk_fts` / `attachment_fts` / `thread_vec` / `chunk_vec` / `rerank`) and each chunk with its vector distance |
@@ -344,9 +345,7 @@ A selected thread with no indexed chunks is listed in its place with
 an empty `chunks` list, since `ask_mailbox` shows the model that
 thread's indexed text instead; read it with `get_thread`.
 `has_attachments` is not an `ask_mailbox` filter; leave it unset for an
-audit. `get_evidence` takes no `from_name`: to audit an answer scoped
-with it, pass the address `find_contact` resolves the name to (its top
-match with `senders_only`) as `from_addr`. Without `max_threads`, `limit` also sets how many threads are
+audit. Without `max_threads`, `limit` also sets how many threads are
 ranked, so the result can surface different threads from an answer
 (more so with a reranker), and when the top threads are short the
 budget takes passages from lower-ranked threads.
@@ -756,7 +755,10 @@ description tells the calling model to resolve the person with
 evidence to the threads the person is on, including those they only
 received. `from_name` is sender-only, like `from_addr`. An unmatched
 `from_name` returns an empty answer naming it, with no model call,
-rather than searching without the filter.
+rather than searching without the filter. A blank `participant` or
+`from_name` (`""` or whitespace, as some clients send unset optionals)
+is treated as absent, here and in `extract_from_emails` and
+`get_evidence`.
 
 `max_threads` is clamped to `[1, 10]` at the tool boundary so an
 inflated caller-supplied value cannot expand into an oversized prompt
