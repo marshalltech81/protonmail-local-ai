@@ -86,13 +86,11 @@ class Reconciler:
         self,
         db: Database,
         embedder: EmbeddingBackend,
-        threader: Threader,
         config: ReconcilerConfig,
         maildir_root: Path | None = None,
     ):
         self.db = db
         self.embedder = embedder
-        self.threader = threader
         self.config = config
         # Passed through to parse_email when re-reading survivors so nested
         # folder paths (``Clients/ABC``) are preserved during thread rebuild.

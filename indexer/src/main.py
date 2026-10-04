@@ -2254,9 +2254,7 @@ def main():
     _log_reconciler_config(reconciler_config)
     reconciler: Reconciler | None = None
     if reconciler_config.enabled:
-        reconciler = Reconciler(
-            db, embedder, threader, reconciler_config, maildir_root=MAILDIR_PATH
-        )
+        reconciler = Reconciler(db, embedder, reconciler_config, maildir_root=MAILDIR_PATH)
 
     # Wait for the embedder to answer, then warm the model.
     embedder.wait_for_ready()

@@ -2018,7 +2018,6 @@ class TestReprocessKeepsFirstDate:
         reconciler = Reconciler(
             db,
             embedder,
-            threader,
             ReconcilerConfig(
                 enabled=True,
                 grace_days=0,
@@ -4680,7 +4679,6 @@ class TestReapedMessagesStayDeleted:
         reconciler = Reconciler(
             db,
             embedder,
-            threader,
             ReconcilerConfig(
                 enabled=True,
                 grace_days=0,
@@ -6027,7 +6025,6 @@ class TestMessageRecordsEndToEnd:
             reconciler = Reconciler(
                 db,
                 make_mock_embedder(_UNIT_VECTOR),
-                Threader(db),
                 ReconcilerConfig(
                     enabled=True,
                     grace_days=7,
@@ -6110,7 +6107,6 @@ class TestMessageRecordsEndToEnd:
         reconciler = Reconciler(
             db,
             embedder,
-            threader,
             ReconcilerConfig(
                 enabled=True,
                 grace_days=0,
@@ -6327,7 +6323,6 @@ class TestTrashedFilesWithReconciliation:
         reconciler = Reconciler(
             db,
             make_mock_embedder(_UNIT_VECTOR),
-            Threader(db),
             ReconcilerConfig(
                 enabled=True,
                 grace_days=7,
@@ -6833,7 +6828,6 @@ class TestMessageIdClaimants:
         reconciler = Reconciler(
             db,
             embedder,
-            threader,
             ReconcilerConfig(
                 enabled=True,
                 grace_days=0,
@@ -6865,13 +6859,12 @@ class TestReapLeavesNoContent:
     _SUBJECT = "Zqxsubjectmarker quarterly"
     _BODY = "Zqxbodymarker paragraph text."
 
-    def _reconciler(self, db, embedder, threader, maildir):
+    def _reconciler(self, db, embedder, maildir):
         from src.reconciler import Reconciler, ReconcilerConfig
 
         return Reconciler(
             db,
             embedder,
-            threader,
             ReconcilerConfig(
                 enabled=True,
                 grace_days=0,
@@ -6939,7 +6932,7 @@ class TestReapLeavesNoContent:
             assert db._conn.execute("SELECT COUNT(*) FROM threads").fetchone()[0] == 1
         assert {"threads", "message_chunks"} <= self._tables_holding(db, ["zqxbodymarker"])
         root.rename(inbox / "1700000000.M1.host:2,ST")
-        return db, self._reconciler(db, embedder, threader, maildir)
+        return db, self._reconciler(db, embedder, maildir)
 
     def test_full_reap_leaves_only_identifiers(self, tmp_path, monkeypatch):
         db, reconciler = self._index(tmp_path, monkeypatch, with_reply=False)
