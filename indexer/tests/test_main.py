@@ -6579,6 +6579,37 @@ class TestReplySubjectSearchable:
         inputs = [t for call in embedder.embed_batch.call_args_list for t in call.args[0]]
         assert inputs == ["Body only."]
 
+    def test_missing_subject_header_adds_no_prefix(self, tmp_path):
+        """The parser fills an absent Subject with the "(no subject)"
+        placeholder; it must not reach the vectors as if it were text."""
+        path = tmp_path / "INBOX" / "cur" / "headerless.eml"
+        path.parent.mkdir(parents=True)
+        path.write_text(
+            "From: alice@example.com\r\nTo: bob@example.com\r\n"
+            "Message-ID: <headerless@example.com>\r\n"
+            "Date: Mon, 01 Jan 2024 12:00:00 +0000\r\n"
+            "Content-Type: text/plain; charset=utf-8\r\n\r\nBody only.\r\n",
+            encoding="utf-8",
+        )
+        db = Database(tmp_path / "mail.db")
+        embedder = make_mock_embedder(_UNIT_VECTOR)
+        assert _index_one(path, db, embedder, Threader(db))[0]
+        inputs = [t for call in embedder.embed_batch.call_args_list for t in call.args[0]]
+        assert inputs == ["Body only."]
+
+    @pytest.mark.parametrize("subject", ["(no subject)", "Re: (No Subject)", "Fwd:  "])
+    def test_placeholder_or_prefix_only_subject_adds_no_prefix(self, tmp_path, subject):
+        """A literal "(no subject)" cannot be told apart from the parser's
+        placeholder, so it is treated as absent too, as is a reply to a
+        subjectless message or a subject that is only a prefix."""
+        path = tmp_path / "INBOX" / "cur" / "placeholder.eml"
+        _write_eml(path, "placeholder@example.com", subject, body="Body only.")
+        db = Database(tmp_path / "mail.db")
+        embedder = make_mock_embedder(_UNIT_VECTOR)
+        assert _index_one(path, db, embedder, Threader(db))[0]
+        inputs = [t for call in embedder.embed_batch.call_args_list for t in call.args[0]]
+        assert inputs == ["Body only."]
+
     def test_reindexing_the_reply_embeds_nothing_new(self, tmp_path):
         db, embedder, threader, (_root, changed, _same), _ = self._index_thread(tmp_path)
         before = embedder.embed_batch.call_count

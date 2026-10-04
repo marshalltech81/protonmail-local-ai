@@ -593,7 +593,9 @@ thread's after `Re:`/`Fwd:` normalization, is kept searchable (#303):
   (#687), so a topic named only in a subject reaches the chunk vector
   and the thread vector. The prefix is cut so the input stays within
   `INDEXER_CHUNK_MAX_TOKENS` and dropped when the chunk alone is at that
-  ceiling or the subject is blank. The stored chunk text, offsets and
+  ceiling, the subject is blank, or it is the parser's `(no subject)`
+  placeholder for a missing header (a literal `(no subject)` or a
+  reply to one counts the same). The stored chunk text, offsets and
   chunk ID stay body-only, since chunks are the authoritative body store
   (`get_message`, `query_messages(text=...)`). Because the chunk ID does
   not cover the embedding input, an index built before #687 keeps its

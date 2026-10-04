@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 from email.utils import parseaddr
 from itertools import islice
 
-from .parser import Message
+from .parser import NO_SUBJECT, Message
 
 # Reply / forward prefixes the subject normalizer strips before grouping.
 # Hoisted to module level so the compiled regex is reused across every
@@ -418,7 +418,8 @@ def fts_subject_text(thread_subject: str, subjects: Iterable[str]) -> str:
 
 def subject_embed_line(msg: Message) -> str | None:
     """``Subject: <msg.subject>``, or ``None`` when the subject is blank
-    after normalization.
+    after normalization or is the parser's ``NO_SUBJECT`` placeholder
+    (a missing header, a literal "(no subject)", or a reply to one).
 
     The indexer puts it in front of the message's first body chunk in
     the embedding input only, so the subject is in the chunk vector and
@@ -428,6 +429,6 @@ def subject_embed_line(msg: Message) -> str | None:
     chunk text, its offsets and its ID stay body-only: chunks are the
     authoritative body store.
     """
-    if not _normalize_subject(msg.subject):
+    if _normalize_subject(msg.subject) in ("", NO_SUBJECT):
         return None
     return f"Subject: {msg.subject}"
