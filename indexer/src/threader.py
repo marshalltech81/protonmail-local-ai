@@ -100,8 +100,8 @@ SUBJECT_FALLBACK_WINDOW = timedelta(days=60)
 # Cap for the stored thread body text (the thread-level FTS input; the
 # thread vector is the mean of its chunk vectors, not an embedding of
 # this text). Used by both the fresh insert path
-# (``Thread.text_for_embedding``, a historical name) and the
-# accumulation path in ``Database._compute_body``. Defining a single
+# (``Thread.build_body_text``) and the accumulation path in
+# ``Database._compute_body``. Defining a single
 # constant keeps brand-new threads and later-updated threads on the
 # same footing: without it, a reply that arrives after the initial
 # insert could expand the stored body well past what the insert path
@@ -119,7 +119,7 @@ THREAD_BODY_TEXT_MAX_TOKENS = 4000
 # thread-wide cap above) because this is a crude per-message limiter to
 # stop one outlier from dominating the thread's FTS contribution before
 # the thread-wide token cap fires. The two paths that build body_text
-# (``Thread.text_for_embedding`` on fresh insert,
+# (``Thread.build_body_text`` on fresh insert,
 # ``Database._compute_body`` on update) must share this constant so a
 # thread's FTS coverage does not depend on whether it arrived as one
 # message or as a sequence of replies — the previous shape kept fresh
@@ -140,16 +140,15 @@ class Thread:
     date_first: datetime
     date_last: datetime
 
-    def text_for_embedding(self) -> str:
+    def build_body_text(self) -> str:
         """
         Build the thread's stored ``body_text`` (its FTS input).
 
-        The name is historical: thread vectors are now the mean of the
-        thread's chunk vectors, so this text is no longer embedded.
-        Includes subject, participants, and all message bodies, trimmed
-        to ``THREAD_BODY_TEXT_MAX_TOKENS`` real BPE tokens to match the
-        cap the accumulation path in ``Database._compute_body`` applies
-        on update.
+        Thread vectors are the mean of the thread's chunk vectors, so
+        this text is not embedded. Includes subject, participants, and
+        all message bodies, trimmed to ``THREAD_BODY_TEXT_MAX_TOKENS``
+        real BPE tokens to match the cap the accumulation path in
+        ``Database._compute_body`` applies on update.
         """
         from .chunker import truncate_to_tokens
 

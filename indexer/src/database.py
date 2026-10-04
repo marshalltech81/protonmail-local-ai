@@ -830,7 +830,7 @@ class Database:
     def _compute_body(thread, existing) -> str:
         """Pure function: body_text given the incoming thread and existing row.
 
-        On insert, ``text_for_embedding()`` already sees all messages. On
+        On insert, ``build_body_text()`` already sees all messages. On
         update, ``thread.messages`` only holds the newly-arrived message,
         so append its content to the stored ``body_text`` rather than
         regenerating from scratch.
@@ -843,7 +843,7 @@ class Database:
                 m for m in thread.messages if m.claimant_id not in existing_claimant_ids
             ]
             if new_messages:
-                # Per-message char cap shared with ``Thread.text_for_embedding``
+                # Per-message char cap shared with ``Thread.build_body_text``
                 # so a thread that arrived as one message gets the same FTS
                 # body coverage as a thread that arrived as a sequence of
                 # replies.
@@ -857,7 +857,7 @@ class Database:
                     THREAD_BODY_TEXT_MAX_TOKENS,
                 )
             return existing["body_text"]
-        return thread.text_for_embedding()
+        return thread.build_body_text()
 
     @_synchronized
     def upsert_thread(self, thread, embedding: list[float]):
@@ -2862,7 +2862,7 @@ class Database:
         date_first = thread.date_first.isoformat()
         date_last = thread.date_last.isoformat()
         has_attachments = int(any(m.has_attachments for m in thread.messages))
-        body = thread.text_for_embedding()
+        body = thread.build_body_text()
         # display_subject: derive from the surviving messages — the
         # first original subject, in date order, that is non-empty, so a
         # blank oldest survivor does not drop the label.

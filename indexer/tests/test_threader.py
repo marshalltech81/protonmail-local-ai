@@ -1,7 +1,7 @@
 """
 Tests for src/threader.py.
 
-Covers: Thread.text_for_embedding, Thread.snippet, Threader.assign_thread
+Covers: Thread.build_body_text, Thread.snippet, Threader.assign_thread
 (new thread, In-Reply-To match, References match, subject fallback),
 and participant deduplication.
 """
@@ -17,7 +17,7 @@ from src.threader import Thread, Threader, _normalize_subject, canonical_addr
 from tests.conftest import make_message, make_thread
 
 # ---------------------------------------------------------------------------
-# Thread.text_for_embedding
+# Thread.build_body_text
 # ---------------------------------------------------------------------------
 
 
@@ -63,17 +63,17 @@ class TestFtsSubjectText:
 class TestTextForEmbedding:
     def test_includes_subject_and_participants(self):
         thread = make_thread(subject="project update")
-        text = thread.text_for_embedding()
+        text = thread.build_body_text()
         assert "Subject: project update" in text
         assert "Participants:" in text
 
     def test_includes_message_body(self):
         msg = make_message(body_text="This is the body content.")
         thread = make_thread(messages=[msg])
-        assert "This is the body content." in thread.text_for_embedding()
+        assert "This is the body content." in thread.build_body_text()
 
     def test_per_message_body_truncated_at_shared_char_cap(self):
-        # ``Thread.text_for_embedding`` caps each message's body
+        # ``Thread.build_body_text`` caps each message's body
         # contribution at ``PER_MESSAGE_BODY_CAP_CHARS`` so one outlier
         # message cannot dominate the thread's FTS body before the
         # thread-wide token cap fires. ``Database._compute_body`` (the
@@ -86,7 +86,7 @@ class TestTextForEmbedding:
         long_body = "x" * (PER_MESSAGE_BODY_CAP_CHARS + 1000)
         msg = make_message(body_text=long_body)
         thread = make_thread(messages=[msg])
-        text = thread.text_for_embedding()
+        text = thread.build_body_text()
         assert "x" * PER_MESSAGE_BODY_CAP_CHARS in text
         assert "x" * (PER_MESSAGE_BODY_CAP_CHARS + 1) not in text
 
@@ -114,7 +114,7 @@ class TestTextForEmbedding:
             for i in range(40)
         ]
         thread = make_thread(messages=msgs)
-        assert estimate_tokens(thread.text_for_embedding()) <= THREAD_BODY_TEXT_MAX_TOKENS
+        assert estimate_tokens(thread.build_body_text()) <= THREAD_BODY_TEXT_MAX_TOKENS
 
     def test_multiple_messages_all_represented(self):
         msg1 = make_message(
@@ -130,7 +130,7 @@ class TestTextForEmbedding:
             date=datetime(2024, 1, 2, tzinfo=UTC),
         )
         thread = make_thread(messages=[msg1, msg2])
-        text = thread.text_for_embedding()
+        text = thread.build_body_text()
         assert "First message content." in text
         assert "Second message content." in text
 
@@ -144,7 +144,7 @@ class TestTextForEmbedding:
             date_first=datetime(2024, 1, 1, tzinfo=UTC),
             date_last=datetime(2024, 1, 1, tzinfo=UTC),
         )
-        text = thread.text_for_embedding()
+        text = thread.build_body_text()
         assert "Subject: no messages" in text
 
 
