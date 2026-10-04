@@ -170,6 +170,7 @@ services:
       EMBED_BASE_URL: ${EMBED_BASE_URL}
       EMBED_MODEL: ${EMBED_MODEL}
       EMBED_BATCH_SIZE: ${EMBED_BATCH_SIZE:-64}
+      EMBED_CONCURRENCY: ${EMBED_CONCURRENCY:-1}
       # Cross-message batch size for the initial-index drainer. See
       # .env.example for the two-phase pipeline that this tunes.
       INITIAL_INDEX_BATCH_SIZE: ${INITIAL_INDEX_BATCH_SIZE:-50}

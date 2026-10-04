@@ -733,6 +733,7 @@ fi
 # the code defaults stay authoritative otherwise.
 for spec in \
     EMBED_BATCH_SIZE:1 \
+    EMBED_CONCURRENCY:1 \
     INITIAL_INDEX_BATCH_SIZE:1 \
     INDEXER_STEADY_STATE_BATCH_SIZE:1 \
     INDEXER_WAL_CHECKPOINT_INTERVAL_SECS:60 \

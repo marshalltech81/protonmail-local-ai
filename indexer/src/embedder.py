@@ -24,6 +24,7 @@ import os
 import time
 import urllib.parse
 from collections.abc import Callable
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from typing import Protocol
 
 from openai import (
@@ -260,10 +261,14 @@ class OpenAIEmbedder:
         *,
         api_key: str,
         batch_size: int = 64,
+        concurrency: int = 1,
         request_timeout: float = 120.0,
     ):
+        if concurrency < 1:
+            raise ValueError("embedder concurrency must be >= 1")
         self.model = model
         self.batch_size = batch_size
+        self.concurrency = concurrency
 
         # ``api_key`` is required (non-empty) — startup validation in
         # ``main._validate_embed_config`` rejects an empty value before
@@ -456,13 +461,49 @@ class OpenAIEmbedder:
         """
         if not texts:
             return []
-        out: list[list[float]] = []
-        for i in range(0, len(texts), self.batch_size):
-            chunk = texts[i : i + self.batch_size]
-            out.extend(self._embed_one_batch(chunk))
-            if on_batch_complete is not None:
-                on_batch_complete()
-        return out
+        chunks = [texts[i : i + self.batch_size] for i in range(0, len(texts), self.batch_size)]
+        if self.concurrency == 1 or len(chunks) == 1:
+            out: list[list[float]] = []
+            for chunk in chunks:
+                out.extend(self._embed_one_batch(chunk))
+                if on_batch_complete is not None:
+                    on_batch_complete()
+            return out
+        return self._embed_chunks_concurrently(chunks, on_batch_complete)
+
+    def _embed_chunks_concurrently(
+        self,
+        chunks: list[list[str]],
+        on_batch_complete: Callable[[], None] | None,
+    ) -> list[list[float]]:
+        """Embed ``chunks`` with up to ``concurrency`` requests in flight (#713).
+
+        Only this thread submits requests, and only as earlier ones
+        finish, so after the first failure nothing new starts. Requests
+        still in flight are waited for (each is bounded by the request
+        timeout and its retries) and their results discarded; the
+        failure then propagates as on the sequential path.
+        ``on_batch_complete`` runs here, not on a pool thread, because
+        the indexer's callback writes SQLite.
+        """
+        results: list[list[list[float]] | None] = [None] * len(chunks)
+        pending: dict[Future[list[list[float]]], int] = {}
+        next_chunk = 0
+        with ThreadPoolExecutor(max_workers=self.concurrency) as pool:
+            while next_chunk < len(chunks) or pending:
+                while next_chunk < len(chunks) and len(pending) < self.concurrency:
+                    pending[pool.submit(self._embed_one_batch, chunks[next_chunk])] = next_chunk
+                    next_chunk += 1
+                done, _ = wait(pending, return_when=FIRST_COMPLETED)
+                for future in done:
+                    # ``result()`` re-raises the request's exception;
+                    # leaving the ``with`` block waits for the rest.
+                    results[pending.pop(future)] = future.result()
+                    if on_batch_complete is not None:
+                        on_batch_complete()
+        return [
+            vec for chunk_vectors in results if chunk_vectors is not None for vec in chunk_vectors
+        ]
 
     @retry(
         stop=stop_after_attempt(3),
