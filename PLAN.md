@@ -430,7 +430,7 @@ decision (Open decisions).
 | 3.7 Filtered semantic recall | Done | #440, #470 | — |
 | 3.8 Citation contract | Partly done | #457, #495 (`ask_mailbox` statement coverage and quote checks), #519 and #525 (quote and label edge cases), #532 and #545 (thread-scoped `get_evidence` parity), #559 (mailbox-wide parity, #537), #565 (`summarize_thread`, `extract_from_emails`) | semantic support only (#284) |
 | 4.1 Entities | Done | #459, #527 (orphan pruning, #464) | — |
-| 4.2 Source authority | Done | #459, #474 (Spam guard), #523 and #542 (rules file kept private and validated) | verdict gating (#463): decided 2026-10-04 (downgrade on DMARC fail plus a `sender_authenticated` flag); the forged-header test passed (Proton strips a forged `Authentication-Results`); left: prove `X-Pm-Origin` can't be forged, then build it with a schema migration and a Maildir backfill |
+| 4.2 Source authority | Done | #459, #474 (Spam guard), #523 and #542 (rules file kept private and validated) | verdict gating (#463): decided 2026-10-04 (downgrade on DMARC fail plus a `sender_authenticated` flag); both forged-header tests passed (Proton strips a forged `Authentication-Results` and overwrites `X-Pm-Origin`); left: build it with a schema migration and a Maildir backfill |
 | 4.3 Temporal retrieval | Mostly done | #561 (`sent_at` defined and used consistently), #593 (whole-thread evidence under a date range), #597 (#575), `occurred_at` with filters and thread spans on the effective time (#297) | bitemporal claims (Phase 5); the top `Received:` was confirmed as Proton's on live mail (2026-10-04) |
 | 4.4 Retention | Mostly done | #451 (mirror default), #475 (Trash hidden from default search), #564 and #583 (reaped sources reported for 30 days), the invariant restated (#610), #562 (extracted text purged on reap) | user-controlled retention |
 | 5.1 Hardened `brief_issue` | Not started | — | needs Phase 3 usage on real mail |
@@ -704,9 +704,10 @@ meanwhile is indexed by the rebuild.
 Verified on live mail (counts only): the top `Received:` header is
 Proton's on every received message, so `occurred_at` holds; Sent mail
 has no `Received:` and falls back to `sent_at`. Proton's
-`Authentication-Results` headers form one contiguous block, and Proton
-strips a forged one carrying its authserv-id (evidence, the owner's
-decision and the test result on #463).
+`Authentication-Results` headers form one contiguous block; Proton
+strips a forged one carrying its authserv-id and overwrites a forged
+`X-Pm-Origin` (evidence, the owner's decision and both test results on
+#463).
 
 Merged since go-live: #709 (#707) and #711 (#693), plus the PRs under
 Recently Completed. Open: #710 (#687, subject in first-chunk vectors;
@@ -739,15 +740,17 @@ Next, in order:
    anything else as `none`. Build as decided: the DMARC result from
    those headers, `fail` leaves the sender unclassified, and a
    `sender_authenticated` flag (pass / none / fail / internal) wherever
-   the authority class is shown. Two requirements remain:
-   - **`X-Pm-Origin: internal` is not yet proven safe.** The test
-     covered only `Authentication-Results`, and every header is
-     sender-controlled until shown otherwise. Before `internal` counts
-     as authenticated (Proton-to-Proton mail carries no
-     `Authentication-Results`), repeat the test with a forged
-     `X-Pm-Origin: internal` from an external account and confirm
-     Proton overwrites it (the delivered copy says `external`). Until
-     then, treat `internal` as `none`.
+   the authority class is shown. Two points settled since the decision:
+   - **`X-Pm-Origin: internal` is trusted, as tested.** A second owner
+     test on 2026-10-04 sent a forged `X-Pm-Origin: internal` from the
+     external account; Gmail's sent copy kept it, and the copy delivered
+     into Maildir had exactly one `X-Pm-Origin`, set to `external`, in
+     the same position. Proton overwrites the sender's value, so
+     `internal` counts as authenticated (Proton-to-Proton mail carries
+     no `Authentication-Results`). One test over one path: accept only
+     the exact values `internal` / `external` from a single
+     `X-Pm-Origin` header, and treat a missing, duplicated or unexpected
+     value as `none`.
    - **The backfill is not a SQL migration.** The migration runner
      executes only numbered `.sql` files, and the database stores no
      `Authentication-Results` or `X-Pm-Origin`. So the `SCHEMA_VERSION`
