@@ -694,9 +694,12 @@ mode. The first full sync took about 17 minutes (from the Bridge app's
 local cache), so the operator `.env` sets `SYNC_DEADLINE_SECONDS=3600`.
 
 Deployed images: mcp-server at `cb9df36` (#696's participant filter is
-live). The indexer still runs the go-live image, deliberately: starting
-the new one triggers the `pdf`/`image` re-extraction sweep, which the
-planned rebuild would pay again.
+live). **The indexer is stopped until the rebuild** (owner,
+2026-10-04): its go-live image predates #703 and #704, so new mail with
+PDFs or images could write document internals or a provider response
+body to `docker logs`. mbsync keeps syncing into Maildir and
+mcp-server keeps serving the existing index; mail that arrives
+meanwhile is indexed by the rebuild.
 
 Verified on live mail (counts only): the top `Received:` header is
 Proton's on every received message, so `occurred_at` holds; Sent mail
@@ -704,35 +707,43 @@ has no `Received:` and falls back to `sent_at`. Proton's
 `Authentication-Results` headers form one contiguous block at the top
 (evidence and the owner's decision on #463).
 
-Open PRs, each in its own Codex rounds: #709 (#707, host-pressure
-errors escape the PDF extractor), #710 (#687, subject in first-chunk
-vectors; needs the rebuild), #711 (#693, re-extract too_large rows
-that now fit; 32 MiB default cap).
+Merged since go-live: #709 (#707) and #711 (#693), plus the PRs under
+Recently Completed. Open: #710 (#687, subject in first-chunk vectors;
+needs the rebuild), in its Codex rounds.
 
 Next, in order:
 
-1. Merge #709, #710, #711 (owner go-ahead each).
-2. **#463 forged-header test (owner):** send one message from an
+1. Merge #710 (owner go-ahead).
+2. **One-time rebuild, as soon as #710 is in:** build the indexer and
+   mcp-server images (`make build-macos-bridge`); in `.env` set
+   `INDEXER_OCR_ENABLED=true` and drop the 50 MB
+   `INDEXER_ATTACHMENT_MAX_BYTES` override (the parse cap limits it to
+   about 36.5 MB anyway; #711's default is 32 MiB); then follow
+   `docs/troubleshooting.md`, "Indexer refuses to start — wipe the
+   sqlite-volume": `make down` first (Docker will not remove a mounted
+   volume), remove only the SQLite volume (Maildir and Bridge state
+   stay), `make up-macos-bridge`. Expect a full re-extract (OCR on) and
+   re-embed. #699 (newest mail first) would make the rebuild usable
+   sooner if decided first.
+3. **#463 forged-header test (owner):** send one message from an
    external account carrying a forged
    `Authentication-Results: mail.protonmail.ch; dmarc=pass` header and
    check whether Proton strips it. Decided 2026-10-04: downgrade on
-   DMARC fail plus a `sender_authenticated` flag. The verdict is read
-   at parse time, so build it before the rebuild or plan a backfill.
-   The first deployment has happened, so this needs a `SCHEMA_VERSION`
-   bump and a forward migration (v0 folding ended at deployment).
-3. **One-time rebuild:** build the indexer and mcp-server images; in
-   `.env` set `INDEXER_OCR_ENABLED=true` and drop the 50 MB
-   `INDEXER_ATTACHMENT_MAX_BYTES` override (the parse cap limits it to
-   about 36.5 MB anyway; #711's default is 32 MiB); remove only the
-   SQLite volume (Maildir stays); `make up-macos-bridge`. Expect a full
-   re-extract (OCR on) and re-embed. #699 (newest mail first) would make
-   the rebuild usable sooner if decided first.
-4. Watch the first real mirror-mode reap: 68 tombstoned Trash messages
-   pass their 7-day grace around 2026-10-11.
+   DMARC fail plus a `sender_authenticated` flag. It need not hold the
+   rebuild: the verdict is read at parse time, so landing it afterwards
+   means a migration that backfills it by re-reading headers. The first
+   deployment has happened, so it needs a `SCHEMA_VERSION` bump and a
+   forward migration either way.
+4. **Mirror-mode reap check:** the rebuild deletes today's 68
+   `pending_deletions` rows, and a fresh index skips files that are
+   already T-flagged, so no reap follows from them. Validate reaping on
+   the first message deleted after the rebuild instead: it is indexed,
+   then tombstoned when mbsync flags it, then reaped once
+   `INDEXER_DELETION_GRACE_DAYS` (7) pass.
 
 Small, no decision needed: #705 (blank filter in `search_emails`); the
 extractor's own `max_bytes` fallback still says 10 MB (the indexer
-always passes the cap; tidy after #709); `ask_mailbox` should name the
+always passes the cap; now safe to tidy, #709 has merged); `ask_mailbox` should name the
 resolved `participant` in its prompt (a "this person" question scoped
 by participant alone leaves the model guessing who).
 
