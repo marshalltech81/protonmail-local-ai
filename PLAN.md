@@ -685,7 +685,69 @@ Triaged against `d30e500` by four parallel agents; every issue is real
 and most reproduced with synthetic input. PRs in the order to land
 them (one test-first commit per issue, `Fixes #N` per issue):
 
-**Handoff 2026-10-04 — start here.** **Live.** The stack has run in
+**Handoff 2026-10-04 evening — start here.** **Live, index empty.**
+The stack runs with the Bridge app on the host, now the only mode
+(#717: plain `make build` / `make up`; `make up-macos-bridge`,
+`first-run` and `update` are gone). **Only mbsync is running.** On the
+owner's request (13:30 UTC) the indexer and mcp-server containers were
+removed and `protonmail-local-ai_sqlite-volume` was deleted, part-way
+through the one-time rebuild (started 12:44 UTC on 1d6f98f images, OCR
+off, 13,800 of 32,988 messages at ~6–7 messages/s, no errors). Maildir
+and mbsync-state are intact. Search is unavailable until the next
+rebuild. `main` is at f23c113.
+
+Merged since the morning handoff: #714 (#713, `EMBED_CONCURRENCY`),
+#715 (#705), #717 (#716, Bridge container removed), #718 (#688, header
+and filename unfolding, before RFC 2231 decoding), #737 (#723, #725,
+#727), #738 (#722, #724, #726), #739 (#721, `INDEXER_UNLINK_ON_REAP`
+removed; `validate-env` rejects a leftover setting), #740 (#734, #735),
+#741 (#732, #733), #742 (#729, #730, #731). Open: #743 (#736, pin the
+Hadolint pre-commit hook by digest; also fixes `.hadolint.yaml`, whose
+`ignore:` key Hadolint never read), in its first Codex round.
+
+Next, in order:
+
+1. **#743:** answer its Codex round; merge on the owner's go-ahead.
+2. **Decide #719 first if the embedding model or vector size may
+   change** (owner: on hold). It proposes detecting the vector size
+   from the embedder, `EMBED_TOKENIZER` with a startup check against the
+   provider's `usage.prompt_tokens`, and optional
+   `EMBED_MAX_INPUT_TOKENS`. A host-side tokenizer fetch during
+   `make up` was discussed but not added to the issue.
+3. **Rebuild (no wipe needed, the volume is already gone):** `make build`;
+   in `.env` set `EMBED_CONCURRENCY=4` and `INITIAL_INDEX_BATCH_SIZE=500`
+   (measured on the aborted run: ~24 s of each ~26 s, 200-message batch
+   was 3–4 sequential embed requests at `EMBED_BATCH_SIZE=256`); keep
+   `INDEXER_OCR_ENABLED=false` and `INDEXER_ATTACHMENT_MAX_BYTES=50000000`
+   (owner, 2026-10-04: not yet); `make up`. Then verify: containers
+   healthy, the embedder identity check passes, the queue drains with no
+   ERROR lines; report pace, ETA and final counts by folder; confirm
+   search through `/mcp`.
+4. **#463 sender authentication**, after the rebuild; unchanged from
+   the morning handoff below and the decision on #463.
+5. **Mirror-mode reap check** on a message the rebuild has indexed
+   (delete it in Proton, then purge it from Trash; see item 4 of the
+   morning handoff).
+
+Parked for the owner (all on hold, no work started):
+
+- #728: delete the Maildir files of mail deleted in Proton, from the
+  mbsync side (mirror mode only, grace longer than the index's 7 days,
+  a mass-delete brake). The owner wants deleted mail eventually removed
+  locally; #739 only removed the indexer's non-working option. First
+  step: verify in the synthetic Maildir harness that pull-only mbsync
+  with `Expunge None` does not re-download a removed `T` file.
+- #698: extraction/OCR process pool; needed before turning OCR on.
+- #692 (Starred duplicates); closing #652 and #685 as Linux-only now
+  that Linux is unsupported; #701; #697's remaining items; #699; #720
+  (P3 race left by #714); reranking (#289: measure on the rebuilt index
+  first).
+
+Still small, no decision needed: the extractor's own `max_bytes`
+fallback still says 10 MB; `ask_mailbox` should name the resolved
+`participant` in its prompt.
+
+**Handoff 2026-10-04 (superseded).** **Live.** The stack has run in
 macOS Bridge mode since 2026-10-03 (#497's live test passed; closed).
 The initial index finished 2026-10-04 04:53 UTC: 33,038 messages
 indexed; 34 T-flagged (trashed) files skipped by design under mirror
