@@ -1,4 +1,4 @@
-.PHONY: build build-nocache up down logs status requeue-dead clean sync sync-indexer sync-mcp test test-indexer test-mcp test-mbsync test-mbsync-tls test-mbsync-layout test-compose test-validate-env restart-indexer baseline eval-answers eval-answers-compare typecheck typecheck-indexer typecheck-mcp init-secrets validate-env help
+.PHONY: build build-nocache up down logs status requeue-dead clean sync sync-indexer sync-mcp test test-indexer test-mcp test-mbsync test-mbsync-tls test-mbsync-layout test-compose test-validate-env test-make-status restart-indexer baseline eval-answers eval-answers-compare typecheck typecheck-indexer typecheck-mcp init-secrets validate-env help
 
 UV_CACHE_DIR ?= /tmp/uv-cache
 export UV_CACHE_DIR
@@ -22,7 +22,7 @@ help:
 	@echo "  status       Show container and index status"
 	@echo "  requeue-dead Requeue dead-lettered indexing jobs (optional CLASS=retryable|permanent_source_failure|operator_action_required)"
 	@echo "  sync         Sync local uv environments for indexer and mcp-server"
-	@echo "  test         Run indexer, mcp-server, mbsync, Compose and validate-env script tests locally"
+	@echo "  test         Run indexer, mcp-server, mbsync, Compose, validate-env and make status script tests locally"
 	@echo "  typecheck    Run mypy over the indexer and mcp-server Python services"
 	@echo "  test-indexer Run indexer unit tests only"
 	@echo "  test-mcp     Run mcp-server unit tests only"
@@ -31,6 +31,7 @@ help:
 	@echo "  test-mbsync-layout  Run the mbsync Maildir layout and UIDVALIDITY checks with synthetic stores (needs Docker)"
 	@echo "  test-compose Run Compose rendering and merged-hardening tests"
 	@echo "  test-validate-env  Run validate-env.sh and mcp-auth-headers.sh tests against synthetic fixtures"
+	@echo "  test-make-status  Run make status tests against a fake docker (no daemon)"
 	@echo "  baseline     Run the retrieval regression baseline (UPDATE=1 rewrites the rank snapshot)"
 	@echo "  eval-answers Opt-in ask_mailbox answer-quality run on the synthetic corpus (calls INFERENCE_* and JUDGE_* providers)"
 	@echo "  eval-answers-compare  Compare two answer-evaluation reports (BASELINE=... CANDIDATE=...)"
@@ -135,17 +136,27 @@ sync-indexer:
 sync-mcp:
 	cd mcp-server && uv sync --locked --dev
 
-# Show running containers and mailbox (sync + index) status
+# Show running containers and mailbox (sync + index) status. Fails when
+# mcp-server is not running, when the check cannot run (its stderr is
+# shown), or when the helper reports status=error, which carries only an
+# exception type (#732, #733). An index that is not current still passes.
 status:
 	@echo ""
 	@echo "=== Containers ==="
 	docker compose ps
 	@echo ""
 	@echo "=== Mailbox ==="
+	@running=$$(docker ps --quiet --filter 'name=^mcp-server$$' --filter status=running) || exit 1; \
+	if [ -z "$$running" ]; then \
+		echo "  MCP server is not running; start the stack with make up." >&2; \
+		exit 1; \
+	fi
 	docker exec mcp-server python -c \
-		"from src.tools.system import get_mailbox_status; \
-		 import json; print(json.dumps(get_mailbox_status(), indent=2))" \
-		2>/dev/null || echo "  MCP server not running or index not ready."
+		"import json, sys; \
+		 from src.tools.system import get_mailbox_status; \
+		 status = get_mailbox_status(); \
+		 print(json.dumps(status, indent=2)); \
+		 sys.exit(status['status'] != 'ok')"
 	@echo ""
 
 # Requeue dead-lettered indexing jobs once their cause is fixed.
@@ -154,7 +165,7 @@ requeue-dead:
 	docker exec indexer python -m src.requeue_dead $(if $(CLASS),--class $(CLASS),)
 
 # Run unit tests locally using uv
-test: test-indexer test-mcp test-mbsync test-compose test-validate-env
+test: test-indexer test-mcp test-mbsync test-compose test-validate-env test-make-status
 
 test-indexer: sync-indexer
 	cd indexer && uv run pytest -q
@@ -177,6 +188,9 @@ test-compose:
 test-validate-env:
 	bash scripts/tests/validate_env_test.sh
 	bash scripts/tests/mcp_auth_headers_test.sh
+
+test-make-status:
+	bash scripts/tests/make_status_test.sh
 
 # Retrieval regression baseline. Step 1 indexes the synthetic mailbox with
 # the real indexer and a hashed embedder; step 2 checks the golden
