@@ -129,9 +129,11 @@ class ExtractionResult:
 # them (#432).
 # xlsx 4: fails a workbook whose parts openpyxl loads whole are over
 # their caps (#428).
+# pdf 3: opens AES-encrypted PDFs that need no open password, which
+# failed with ``DependencyError`` before ``cryptography`` was added (#691).
 # image 3: opens HEIC/HEIF photos, which failed with
 # ``UnidentifiedImageError`` before pillow-heif was added (#691).
-EXTRACTOR_VERSIONS: dict[str, int] = {"docx": 3, "image": 3, "pdf": 2, "text": 2, "xlsx": 4}
+EXTRACTOR_VERSIONS: dict[str, int] = {"docx": 3, "image": 3, "pdf": 3, "text": 2, "xlsx": 4}
 
 
 def _stamp_extractor(module_name: str, extractor_name: str) -> str:

@@ -971,6 +971,14 @@ lazy-imported so a missing optional dependency (e.g. `python-docx`
 not in this image) downgrades to `unsupported` rather than crashing
 the indexer at startup.
 
+Encrypted PDFs: `pypdf` opens an encrypted PDF with the empty user
+password, so an owner-password-only PDF (print or copy restrictions,
+no open password, common for statements and legal letters) extracts
+like any other, including AES-encrypted ones, which use the
+`cryptography` package (#691). No other password is tried. A PDF that
+needs a real open password is recorded as `failed` with
+`FileNotDecryptedError` and stays searchable by filename only.
+
 The parsing libraries log and warn with values read from the
 attachment (pypdf's font dictionaries and encoding names, openpyxl's
 cell values, Pillow's TIFF tags), so the indexer's logging setup

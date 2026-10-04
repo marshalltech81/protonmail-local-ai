@@ -2374,7 +2374,7 @@ class TestPdfDigitalExtractor:
         )
 
         assert result.status == STATUS_FAILED
-        assert result.extractor == "pdf@2"
+        assert result.extractor == "pdf@3"
         assert result.text is None
         assert result.error == "RuntimeError"
 
@@ -2717,7 +2717,7 @@ class TestPdfPageLevelOcr:
         work = self._fake_ocr(monkeypatch, tmp_path)
         result = self._extract("ds")
         assert result.status == STATUS_SUCCESS
-        assert result.extractor == "pdf-ocr@2"
+        assert result.extractor == "pdf-ocr@3"
         assert result.text is not None
         assert self.DIGITAL.format(n=1) in result.text
         assert self.SCANNED in result.text
@@ -2756,13 +2756,13 @@ class TestPdfPageLevelOcr:
     def test_digital_pdf_renders_nothing(self, monkeypatch, tmp_path):
         work = self._fake_ocr(monkeypatch, tmp_path)
         result = self._extract("dd")
-        assert result.extractor == "pdf-digital@2"
+        assert result.extractor == "pdf-digital@3"
         assert work["renders"] == [] and work["ocr_calls"] == 0
 
     def test_scanned_pdf_still_ocrs_every_page_within_the_cap(self, monkeypatch, tmp_path):
         work = self._fake_ocr(monkeypatch, tmp_path)
         result = self._extract("sss")
-        assert result.extractor == "pdf-ocr@2"
+        assert result.extractor == "pdf-ocr@3"
         assert work["renders"] == [(1, 3)]
         assert work["ocr_calls"] == 3
 
@@ -2770,7 +2770,7 @@ class TestPdfPageLevelOcr:
         work = self._fake_ocr(monkeypatch, tmp_path)
         result = self._extract("ds", ocr_enabled=False)
         assert result.status == STATUS_SUCCESS
-        assert result.extractor == "pdf-digital@2"
+        assert result.extractor == "pdf-digital@3"
         assert work["renders"] == [] and work["ocr_calls"] == 0
 
     def test_ocr_failure_on_a_mixed_pdf_keeps_the_digital_text(self, monkeypatch, tmp_path, caplog):
@@ -2780,7 +2780,7 @@ class TestPdfPageLevelOcr:
         self._fake_ocr(monkeypatch, tmp_path, fail=True)
         result = self._extract("ds")
         assert result.status == STATUS_SUCCESS
-        assert result.extractor == "pdf-digital@2"
+        assert result.extractor == "pdf-digital@3"
         assert result.text == self.DIGITAL.format(n=1)
         assert "RuntimeError" in caplog.text
         assert "SYNTHETIC_OCR_MARKER" not in caplog.text
@@ -2907,21 +2907,127 @@ class TestPdfPageLevelOcr:
 
 
 class TestPdfExtractorVersion:
-    """#292 changes what the PDF extractor returns for the same bytes, so
-    rows it wrote before the fix (unversioned) must be re-extracted."""
+    """#292 changed what the PDF extractor returns for the same bytes, and
+    #691 makes AES-encrypted PDFs that need no open password extract
+    instead of failing, so rows written before either must re-extract."""
 
-    @pytest.mark.parametrize("name", ["pdf-digital", "pdf-ocr", "pdf"])
+    @pytest.mark.parametrize(
+        "name", ["pdf-digital", "pdf-ocr", "pdf", "pdf-digital@2", "pdf-ocr@2", "pdf@2"]
+    )
     def test_pre_bump_pdf_rows_are_stale(self, name):
         from src.extractors import EXTRACTOR_VERSIONS, stale_extractor_module
 
-        assert EXTRACTOR_VERSIONS["pdf"] == 2
+        assert EXTRACTOR_VERSIONS["pdf"] == 3
         assert stale_extractor_module(name) == "pdf"
 
-    @pytest.mark.parametrize("name", ["pdf-digital@2", "pdf-ocr@2", "pdf@2"])
+    @pytest.mark.parametrize("name", ["pdf-digital@3", "pdf-ocr@3", "pdf@3"])
     def test_current_pdf_rows_are_not_stale(self, name):
         from src.extractors import stale_extractor_module
 
         assert stale_extractor_module(name) is None
+
+
+def _encrypted_pdf(text: str, *, user_password: str, algorithm: str) -> bytes:
+    """A one-page digital PDF encrypted with pypdf. An empty
+    ``user_password`` is the owner-password-only shape (print/copy
+    restrictions, no open password)."""
+    import io
+
+    from pypdf import PdfWriter
+    from pypdf.generic import ContentStream, DictionaryObject, NameObject
+
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=612, height=792)
+    stream = ContentStream(None, writer)
+    stream._data = f"BT /F1 12 Tf 72 720 Td ({text}) Tj ET".encode()
+    page[NameObject("/Contents")] = stream
+    font = DictionaryObject(
+        {
+            NameObject("/Type"): NameObject("/Font"),
+            NameObject("/Subtype"): NameObject("/Type1"),
+            NameObject("/BaseFont"): NameObject("/Helvetica"),
+        }
+    )
+    page[NameObject("/Resources")] = DictionaryObject(
+        {NameObject("/Font"): DictionaryObject({NameObject("/F1"): font})}
+    )
+    writer.encrypt(
+        user_password=user_password,
+        owner_password="synthetic-owner-password",  # pragma: allowlist secret
+        algorithm=algorithm,
+    )
+    buf = io.BytesIO()
+    writer.write(buf)
+    return buf.getvalue()
+
+
+class TestEncryptedPdf:
+    """#691: pypdf needs ``cryptography`` for AES. An owner-password-only
+    PDF opens with the empty user password and extracts like any other;
+    one that needs a real open password is recorded as a failure by type,
+    and no password is ever guessed."""
+
+    # Long enough to clear the digital-text floor, so OCR never runs.
+    MARKER = "SYNTHETIC_OWNER_ONLY_MARKER with enough digital text to clear the floor"
+
+    @pytest.mark.parametrize("algorithm", ["AES-128", "AES-256", "RC4-128"])
+    def test_owner_password_only_pdf_extracts(self, algorithm, monkeypatch):
+        from src.extractors import pdf
+
+        monkeypatch.setattr(pdf, "_extract_ocr", lambda *a, **kw: pytest.fail("OCR must not run"))
+        payload = _encrypted_pdf(self.MARKER, user_password="", algorithm=algorithm)
+
+        result = extract(content_type="application/pdf", filename="statement.pdf", payload=payload)
+
+        assert result.status == STATUS_SUCCESS
+        assert result.extractor == "pdf-digital@3"
+        assert result.text == self.MARKER
+
+    @pytest.mark.parametrize("algorithm", ["AES-128", "AES-256"])
+    def test_pdf_needing_an_open_password_fails_by_type(self, algorithm, monkeypatch, caplog):
+        from src.extractors import pdf
+
+        caplog.set_level("DEBUG")
+        monkeypatch.setattr(pdf, "_extract_ocr", lambda *a, **kw: pytest.fail("OCR must not run"))
+        payload = _encrypted_pdf(
+            "SYNTHETIC_USER_PW_MARKER with enough digital text to clear the floor",
+            user_password="SYNTHETIC_USER_PASSWORD",  # pragma: allowlist secret
+            algorithm=algorithm,
+        )
+
+        result = extract(content_type="application/pdf", filename="locked.pdf", payload=payload)
+
+        assert result.status == STATUS_FAILED
+        assert result.extractor == "pdf@3"
+        assert result.error == "FileNotDecryptedError"
+        assert result.text is None
+        for marker in ("SYNTHETIC_USER_PW_MARKER", "SYNTHETIC_USER_PASSWORD", "synthetic-owner"):
+            assert marker not in caplog.text
+            assert marker not in (result.error or "")
+
+    def test_only_the_empty_user_password_is_tried(self, monkeypatch):
+        """No password guessing: the reader is opened with no password
+        (pypdf then tries the empty one) and never ``decrypt``ed."""
+        import pypdf
+        from src.extractors import pdf
+
+        opened: list[dict] = []
+
+        class RecordingReader(pypdf.PdfReader):
+            def __init__(self, stream, *args, **kwargs):
+                opened.append(dict(kwargs, args=args))
+                super().__init__(stream, *args, **kwargs)
+
+            def decrypt(self, password):
+                pytest.fail("the extractor must not try passwords")
+
+        monkeypatch.setattr(pdf.pypdf, "PdfReader", RecordingReader)
+        payload = _encrypted_pdf(self.MARKER, user_password="SYNTHETIC_PW", algorithm="AES-256")
+
+        result = extract(content_type="application/pdf", filename="locked.pdf", payload=payload)
+
+        assert result.status == STATUS_FAILED
+        assert opened == [{"args": ()}]
 
 
 class TestImageExtractor:
