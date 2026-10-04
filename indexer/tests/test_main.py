@@ -3595,6 +3595,132 @@ class TestRequeueNewlyDispatchedExtensions:
         assert self._queued(db) == {}
 
 
+class TestRequeueTooLargeThatNowFits:
+    """#693: attachments cached ``too_large`` under a smaller
+    ``INDEXER_ATTACHMENT_MAX_BYTES`` must be read once the operator raises
+    the cap. The startup sweep re-queues, once, every message carrying
+    bytes whose size now fits; bytes still over the cap stay ``too_large``
+    and are never re-queued."""
+
+    _write_eml = staticmethod(TestRequeueOcrDisabledExtractions._write_eml)
+    _drain = TestRequeueOcrDisabledExtractions._drain
+    _queued = staticmethod(TestRequeueOcrDisabledExtractions._queued)
+
+    def _index_under_cap(self, tmp_path, monkeypatch, messages, cap):
+        maildir = tmp_path / "maildir"
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        db = Database(tmp_path / "mail.db")
+        queue = _make_queue(db)
+        paths = {}
+        for name, payload in messages.items():
+            path = maildir / "INBOX" / "cur" / f"{name}.eml"
+            self._write_eml(path, f"{name}@example.com", payload, "text/plain", f"{name}.txt")
+            queue.enqueue(str(path), REASON_INITIAL_SCAN)
+            paths[name] = str(path)
+        monkeypatch.setattr(main, "INDEXER_ATTACHMENT_MAX_BYTES", cap)
+        self._drain(db, queue)
+        return db, queue, paths
+
+    @staticmethod
+    def _statuses(db) -> list[str]:
+        rows = db._conn.execute(
+            "SELECT extraction_status FROM attachment_extractions ORDER BY extraction_status"
+        ).fetchall()
+        return [r["extraction_status"] for r in rows]
+
+    def test_newly_fitting_rows_are_requeued_once(self, tmp_path, monkeypatch):
+        from src import attachment_indexing
+
+        db, queue, paths = self._index_under_cap(
+            tmp_path,
+            monkeypatch,
+            {
+                "fits": b"fitting words " * 300,  # 4,200 bytes
+                "still_big": b"oversized words " * 600,  # 9,600 bytes
+                "dead": b"dead letter words " * 200,  # 3,600 bytes
+            },
+            cap=1_000,
+        )
+        assert self._statuses(db) == ["too_large"] * 3
+        queue.enqueue(paths["dead"], REASON_INITIAL_SCAN)
+        for _ in range(queue.max_attempts):
+            queue.mark_failed(paths["dead"], stage="embed", error="x")
+        assert queue.is_dead(paths["dead"])
+
+        # Same cap: nothing fits yet.
+        assert main._requeue_stale_extractions(db, queue) == 0
+        assert self._queued(db) == {}
+
+        monkeypatch.setattr(main, "INDEXER_ATTACHMENT_MAX_BYTES", 5_000)
+        assert main._requeue_stale_extractions(db, queue) == 1
+        assert self._queued(db) == {paths["fits"]: REASON_REEXTRACT}
+
+        extractor = MagicMock(side_effect=attachment_indexing.extract_attachment)
+        monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
+        self._drain(db, queue)
+        assert extractor.call_count == 1
+        assert self._statuses(db) == ["success", "too_large", "too_large"]
+
+        # The fitting row was rewritten and the oversized one still does
+        # not fit, so later startups re-queue nothing.
+        assert main._requeue_stale_extractions(db, queue) == 0
+        assert main._requeue_stale_extractions(db, queue) == 0
+        assert self._queued(db) == {}
+
+    def test_every_message_carrying_the_bytes_is_requeued(self, tmp_path, monkeypatch):
+        """The row is shared by content hash, so each message carrying the
+        bytes indexed no text for them and is rebuilt."""
+        payload = b"shared words " * 300
+        db, queue, paths = self._index_under_cap(
+            tmp_path, monkeypatch, {"first": payload, "second": payload}, cap=1_000
+        )
+        monkeypatch.setattr(main, "INDEXER_ATTACHMENT_MAX_BYTES", len(payload))
+        assert main._requeue_stale_extractions(db, queue) == 2
+        assert self._queued(db) == {
+            paths["first"]: REASON_REEXTRACT,
+            paths["second"]: REASON_REEXTRACT,
+        }
+
+    def test_pending_rows_and_disabled_extraction_are_left_alone(self, tmp_path, monkeypatch):
+        db, queue, paths = self._index_under_cap(
+            tmp_path, monkeypatch, {"fits": b"fitting words " * 300}, cap=1_000
+        )
+        monkeypatch.setattr(main, "INDEXER_ATTACHMENT_MAX_BYTES", 5_000)
+        monkeypatch.setattr(main, "INDEXER_ATTACHMENT_EXTRACTION_ENABLED", False)
+        assert main._requeue_stale_extractions(db, queue) == 0
+        monkeypatch.setattr(main, "INDEXER_ATTACHMENT_EXTRACTION_ENABLED", True)
+        queue.enqueue(paths["fits"], REASON_INITIAL_SCAN)
+        assert main._requeue_stale_extractions(db, queue) == 0
+        assert self._queued(db) == {paths["fits"]: REASON_INITIAL_SCAN}
+
+
+class TestAttachmentMaxBytesDefault:
+    """#693: the default cap is 32 MiB, the same in the code, Compose and
+    ``.env.example``, and an attachment that size fits in an ``.eml``
+    under the default ``INDEXER_PARSE_MAX_BYTES`` and the parser's decode
+    budget, so it can reach the extractor at all."""
+
+    _DEFAULT = 32 * 1024 * 1024
+    _REPO = Path(__file__).resolve().parents[2]
+
+    def test_code_default(self):
+        assert main._DEFAULT_ATTACHMENT_MAX_BYTES == self._DEFAULT
+        if "INDEXER_ATTACHMENT_MAX_BYTES" not in os.environ:
+            assert main.INDEXER_ATTACHMENT_MAX_BYTES == self._DEFAULT
+
+    def test_compose_and_env_example_match(self):
+        compose = (self._REPO / "docker-compose.yml").read_text()
+        assert f"${{INDEXER_ATTACHMENT_MAX_BYTES:-{self._DEFAULT}}}" in compose
+        env_example = (self._REPO / ".env.example").read_text()
+        assert f"\nINDEXER_ATTACHMENT_MAX_BYTES={self._DEFAULT}\n" in env_example
+
+    def test_fits_under_the_parse_caps(self):
+        # base64 turns each 57 bytes into a 76-character line plus CRLF.
+        encoded = -(-self._DEFAULT // 57) * 78
+        assert encoded < parser._DEFAULT_PARSE_MAX_BYTES
+        assert self._DEFAULT <= parser.MAX_DECODED_ATTACHMENT_BYTES
+
+
 class TestPeriodicRecoverySkipsDeadLetter:
     """``_recover_zero_vector_threads(resurrect_dead=False)`` must
     preserve the durable queue's bounded-retry contract.
