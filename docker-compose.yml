@@ -205,7 +205,6 @@ services:
       INDEXER_DELETION_SWEEP_INTERVAL_SECS: ${INDEXER_DELETION_SWEEP_INTERVAL_SECS:-3600}
       INDEXER_DELETION_MAX_BATCH_PCT: ${INDEXER_DELETION_MAX_BATCH_PCT:-0.05}
       INDEXER_DELETION_FORCE: ${INDEXER_DELETION_FORCE:-false}
-      INDEXER_UNLINK_ON_REAP: ${INDEXER_UNLINK_ON_REAP:-false}
       # Attachment extraction knobs. Code defaults already match these
       # values; explicit wiring is here so operator overrides in .env
       # actually reach the container env (otherwise compose interpolates
@@ -228,11 +227,8 @@ services:
       # explicit binding.
       INDEXER_PARSE_MAX_BYTES: ${INDEXER_PARSE_MAX_BYTES:-50000000}
     volumes:
-      # Maildir is mounted read-only by default: the indexer's job is to read
-      # .eml files and build the SQLite index. INDEXER_UNLINK_ON_REAP needs
-      # write access to actually remove reaped files; with the default ro
-      # mount the unlink call logs a warning and the index still cleans up
-      # correctly, the files just stay on disk.
+      # Maildir is mounted read-only: the indexer only reads .eml files to
+      # build the SQLite index. The files belong to mbsync.
       - maildir-volume:/maildir:ro
       - sqlite-volume:/data
       # Operator config, read-only. The indexer reads the optional

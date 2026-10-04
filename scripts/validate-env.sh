@@ -783,13 +783,20 @@ for name in \
     INDEXER_DELETION_ENABLED \
     INDEXER_ATTACHMENT_EXTRACTION_ENABLED \
     INDEXER_OCR_ENABLED \
-    INDEXER_DELETION_FORCE \
-    INDEXER_UNLINK_ON_REAP; do
+    INDEXER_DELETION_FORCE; do
     value="$(env_value_stripped "$name")"
     if [[ -n "$value" ]]; then
         require_bool "$name" "$value"
     fi
 done
+
+# INDEXER_UNLINK_ON_REAP was removed (#721): the indexer only reads the
+# Maildir, which mbsync owns, so a leftover value from .env.example
+# (false included) is rejected rather than silently ignored.
+if [[ -n "$(get_env_value INDEXER_UNLINK_ON_REAP)" ]]; then
+    echo "ERROR: INDEXER_UNLINK_ON_REAP was removed: the indexer never deletes Maildir files (see #728). Delete the line from .env." >&2
+    exit 1
+fi
 
 # Mass-delete brake: a decimal fraction in [0, 1]. The reconciler
 # rejects anything else, including NaN and infinity, at startup.

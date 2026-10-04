@@ -453,6 +453,16 @@ mcp_token_in_env_fails() {
     fails_with 'MCP_AUTH_TOKEN must be stored in'
 }
 
+# INDEXER_UNLINK_ON_REAP was removed (#721): the indexer never deletes
+# Maildir files. Any value left in .env, false included, stops the run.
+removed_unlink_on_reap_fails() {
+    local value
+    for value in true false; do
+        setup "INDEXER_UNLINK_ON_REAP=$value"
+        fails_with 'INDEXER_UNLINK_ON_REAP was removed: the indexer never deletes Maildir files (see #728). Delete the line from .env.'
+    done
+}
+
 mcp_token_failure_does_not_echo_the_value() {
     setup
     chmod 644 "$ROOT/.secrets/mcp_auth_token.txt"
@@ -988,6 +998,7 @@ check "an MCP token with a NUL byte fails" mcp_token_with_nul_byte_fails
 check "a usable MCP token passes" usable_mcp_token_passes
 check "an MCP token file not 600 fails" loose_mcp_token_mode_fails
 check "an MCP token in .env fails" mcp_token_in_env_fails
+check "a removed INDEXER_UNLINK_ON_REAP fails" removed_unlink_on_reap_fails
 check "an MCP token failure does not echo the token" mcp_token_failure_does_not_echo_the_value
 check "an absent authority file passes" absent_authority_file_passes
 check "a private authority file passes" private_authority_file_passes

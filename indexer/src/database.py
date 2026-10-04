@@ -2808,8 +2808,8 @@ class Database:
         ``message_thread_map`` and ``pending_deletions`` still hold rows
         for the reaped messages.
 
-        Returns the filepaths that were removed, so the caller can perform
-        any on-disk unlink work outside the transaction, or ``None``,
+        Returns the filepaths that were removed from the index (the files
+        themselves stay on disk), or ``None``,
         changing nothing, when a reaped message is no longer tombstoned
         (the watcher restored it after the reaper read its tombstones) or,
         with ``grace_cutoff``, its tombstone is newer than that.

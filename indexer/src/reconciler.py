@@ -77,7 +77,6 @@ class ReconcilerConfig:
     sweep_interval_secs: int
     max_batch_pct: float
     force: bool
-    unlink_on_reap: bool
 
 
 class Reconciler:
@@ -363,20 +362,15 @@ class Reconciler:
         dead_ids = {t["claimant_id"] for t in tombs}
         all_rows = self.db.get_thread_messages(thread_id)
         survivor_rows = [r for r in all_rows if r["claimant_id"] not in dead_ids]
-        dead_filepaths = {t["filepath"] for t in tombs} | {
-            r["filepath"] for r in all_rows if r["claimant_id"] in dead_ids
-        }
 
         if not survivor_rows:
-            # Whole thread gone. Drop everything, then optionally unlink files.
+            # Whole thread gone. Drop everything; the .eml files stay on
+            # disk because the indexer never deletes Maildir files.
             if not self.db.delete_thread_completely(thread_id, grace_cutoff=cutoff):
                 log.info(
                     "reaper: a thread changed since its tombstones were read; retrying next pass",
                 )
                 return False, False
-            if self.config.unlink_on_reap:
-                for fp in dead_filepaths:
-                    self._safe_unlink(fp)
             log.info("reaped a thread (%d messages)", len(tombs))
             self._clear_blocked(thread_id)
             return True, False
@@ -517,9 +511,6 @@ class Reconciler:
                 "were read; retrying next pass",
             )
             return False, False
-        if self.config.unlink_on_reap:
-            for fp in removed_filepaths:
-                self._safe_unlink(fp)
         log.info(
             "rebuilt a thread: removed %d message(s), %d survive",
             len(tombs),
@@ -534,12 +525,6 @@ class Reconciler:
 
     def _total_messages(self) -> int:
         return self.db.count_total_messages()
-
-    def _safe_unlink(self, path: str) -> None:
-        try:
-            Path(path).unlink(missing_ok=True)
-        except OSError as e:
-            log.warning("reaper: failed to unlink %s: %s", path, e)
 
 
 def sweep_paths(db: Database) -> dict:
@@ -661,5 +646,4 @@ def load_config_from_env(env: Mapping[str, str]) -> ReconcilerConfig:
         sweep_interval_secs=_int("INDEXER_DELETION_SWEEP_INTERVAL_SECS", 3600, minimum=60),
         max_batch_pct=_pct("INDEXER_DELETION_MAX_BATCH_PCT", 0.05),
         force=_bool("INDEXER_DELETION_FORCE", False),
-        unlink_on_reap=_bool("INDEXER_UNLINK_ON_REAP", False),
     )

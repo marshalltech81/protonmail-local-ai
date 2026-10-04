@@ -2025,7 +2025,6 @@ class TestReprocessKeepsFirstDate:
                 sweep_interval_secs=60,
                 max_batch_pct=1.0,
                 force=False,
-                unlink_on_reap=False,
             ),
             maildir_root=maildir,
         )
@@ -4653,11 +4652,12 @@ class TestMainStartupAndLoop:
 
 
 class TestReapedMessagesStayDeleted:
-    """Deletion reconciliation with the default ``unlink_on_reap=False``
-    keeps a reaped message's T-flagged ``.eml`` on disk. That file is no
-    longer indexed or queued, so any enqueue path that treats "on disk
-    but not indexed" as undiscovered mail would resurrect it into
-    search — and the next sweep would start a fresh grace window."""
+    """Deletion reconciliation keeps a reaped message's T-flagged
+    ``.eml`` on disk: the indexer never deletes Maildir files. That
+    file is no longer indexed or queued, so any enqueue path that
+    treats "on disk but not indexed" as undiscovered mail would
+    resurrect it into search — and the next sweep would start a fresh
+    grace window."""
 
     def _indexed_then_reaped(self, tmp_path, monkeypatch):
         from src.reconciler import Reconciler, ReconcilerConfig
@@ -4687,7 +4687,6 @@ class TestReapedMessagesStayDeleted:
                 sweep_interval_secs=60,
                 max_batch_pct=1.0,
                 force=False,
-                unlink_on_reap=False,
             ),
             maildir_root=maildir,
         )
@@ -6035,7 +6034,6 @@ class TestMessageRecordsEndToEnd:
                     sweep_interval_secs=60,
                     max_batch_pct=1.0,
                     force=False,
-                    unlink_on_reap=False,
                 ),
                 maildir_root=maildir,
             )
@@ -6119,7 +6117,6 @@ class TestMessageRecordsEndToEnd:
                 sweep_interval_secs=60,
                 max_batch_pct=1.0,
                 force=False,
-                unlink_on_reap=False,
             ),
             maildir_root=maildir,
         )
@@ -6337,7 +6334,6 @@ class TestTrashedFilesWithReconciliation:
                 sweep_interval_secs=60,
                 max_batch_pct=1.0,
                 force=False,
-                unlink_on_reap=False,
             ),
         )
         queue.enqueue(str(live), REASON_INITIAL_SCAN)
@@ -6844,7 +6840,6 @@ class TestMessageIdClaimants:
                 sweep_interval_secs=60,
                 max_batch_pct=1.0,
                 force=False,
-                unlink_on_reap=False,
             ),
             maildir_root=maildir,
         )
@@ -6883,7 +6878,6 @@ class TestReapLeavesNoContent:
                 sweep_interval_secs=60,
                 max_batch_pct=1.0,
                 force=False,
-                unlink_on_reap=False,
             ),
             maildir_root=maildir,
         )

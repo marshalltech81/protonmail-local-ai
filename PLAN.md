@@ -1451,8 +1451,9 @@ can be revisited with an explicit owner decision.
 - `list_threads(filter_type=...)` rejects unsupported values cleanly;
   read/flagged/replied state is indexed (#649) but draft/forwarded is not
 - deletion reconciliation is on by default (mirror) and not yet validated under
-  long-running real-world conditions; `INDEXER_UNLINK_ON_REAP=true`
-  only removes the `.eml` when Maildir is mounted read-write
+  long-running real-world conditions; the indexer never deletes Maildir
+  files, so a reaped message's `.eml` stays on disk (#728 tracks
+  deleting them on the mbsync side)
 - a reap overwrites freed pages (`secure_delete` on, #642) and FTS5
   terms are removed by an `optimize` before the next checkpoint (#666),
   so deleted mail text normally leaves the file within one checkpoint
@@ -1754,6 +1755,16 @@ do not ship persisted claims without them.
     invariant): resolved 2026-10-02 (Resolved decisions 14).
 
 ## Recently Completed
+
+### 2026-10-04 — `INDEXER_UNLINK_ON_REAP` removed (#721)
+
+Owner decision (2026-10-04, option B): the setting could not work in
+the shipped configuration (the indexer mounts `/maildir` read-only and
+the files belong to mbsync's UID 1001), so it is gone rather than
+fixed. The indexer never deletes Maildir files; a reaped message's
+`.eml` stays on disk. `scripts/validate-env.sh` stops `make up` with a
+fixed message when `.env` still sets it. Deleting the files of mail
+deleted in Proton moves to the mbsync side: #728.
 
 ### 2026-10-04 — Bridge container removed; the host Bridge app is the only mode (#716)
 

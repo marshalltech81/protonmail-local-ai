@@ -572,10 +572,9 @@ class MaildirHandler(FileSystemEventHandler):
 
     def _is_reaped_or_deleted(self, path: str | Path) -> bool:
         # With deletion reconciliation enabled, a T-flagged file is
-        # deleted upstream. After a reap (``unlink_on_reap=False``) its
-        # .eml stays on disk unindexed; enqueueing it would resurrect
-        # the message into search. Same rule as the Maildir walk's
-        # ``skip_trashed``.
+        # deleted upstream. After a reap its .eml always stays on disk
+        # unindexed; enqueueing it would resurrect the message into
+        # search. Same rule as the Maildir walk's ``skip_trashed``.
         return self.reconciler is not None and is_trashed(path)
 
     def on_created(self, event):
@@ -1899,8 +1898,8 @@ def _enqueue_unindexed_messages(
 
     ``skip_trashed`` must be True whenever deletion reconciliation is
     enabled. A T-flagged file is then deleted upstream: after the
-    reaper removes it from the index (``unlink_on_reap=False`` keeps the
-    .eml on disk) it is unindexed and unqueued, and enqueueing it would
+    reaper removes it from the index (a reaped message's .eml always
+    stays on disk) it is unindexed and unqueued, and enqueueing it would
     resurrect the message into search. With reconciliation disabled the
     index is append-only and trashed files are indexed like any other.
 
@@ -2176,12 +2175,11 @@ def _log_reconciler_config(cfg: ReconcilerConfig) -> None:
         return
     log.info(
         "Deletion reconciliation: enabled "
-        "(mirror mode; grace=%dd, sweep=%ds, max_batch=%.1f%%, force=%s, unlink=%s)",
+        "(mirror mode; grace=%dd, sweep=%ds, max_batch=%.1f%%, force=%s)",
         cfg.grace_days,
         cfg.sweep_interval_secs,
         cfg.max_batch_pct * 100,
         cfg.force,
-        cfg.unlink_on_reap,
     )
 
 
