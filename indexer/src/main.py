@@ -1121,6 +1121,12 @@ def _phase2a_collect_chunks(
                 fallback_text = "(empty thread)"
             state.subject_fallback_offset = len(all_texts)
             all_texts.append(fallback_text)
+    except MemoryError, RecursionError:
+        # Host pressure, which the extraction dispatcher re-raises: let it
+        # escape the step with its ``begin_attempt`` charge held, as for a
+        # process that dies mid-step, rather than spend the attempt as an
+        # ordinary ``chunk`` failure.
+        raise
     except Exception as e:
         # Phase 2a is "extract + chunk" only — no DB writes. A failure
         # here marks this message failed but leaves Phase 1's thread
