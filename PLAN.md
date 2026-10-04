@@ -49,17 +49,16 @@ semantics are an explicit roadmap item (Phase 4).
 
 ## Current State
 
-The stack runs four containers:
+The stack runs three containers beside the Proton Mail Bridge app:
 
-- **ProtonBridge** — Docker, headless, IMAP/SMTP on `bridge-net` only;
-  or, in the optional macOS Bridge mode (#571), the Proton Mail Bridge
-  app on the Mac, reached through `host.docker.internal` with a
-  required certificate fingerprint.
+- **Proton Mail Bridge** — the official app on the host (#497, #571;
+  the only mode since the Bridge container was removed, #716), IMAP
+  on the host's loopback, reached through `host.docker.internal`.
+  Tested on macOS; Linux is not supported.
 - **mbsync** — Docker, pulls into Maildir, `chmod go+r` after each
-  sync; with the Bridge container, TOFU cert pinning with an explicit
-  rotation flag; in macOS Bridge mode, no TOFU: the certificate must
-  match the operator-supplied `BRIDGE_CERT_FINGERPRINT` on every
-  start.
+  sync; no TOFU: the certificate must match the operator-supplied
+  `BRIDGE_CERT_FINGERPRINT` on every start, then a persistent pin
+  with an explicit rotation flag.
 - **indexer** — Docker, parses Maildir, threads, embeds via any
   OpenAI-compatible `/v1/embeddings` provider (operator-supplied),
   writes SQLite. Schema v0 (the squashed, renumbered baseline,
@@ -717,14 +716,16 @@ Next, in order:
 
 1. Merge #710 (owner go-ahead).
 2. **One-time rebuild, as soon as #710 is in:** build the indexer and
-   mcp-server images (`make build-macos-bridge`); in `.env` set
+   mcp-server images (`make build`; after #716 there is no
+   `make build-macos-bridge`, and `make build` no longer builds a
+   Bridge image); in `.env` set
    `INDEXER_OCR_ENABLED=true` and drop the 50 MB
    `INDEXER_ATTACHMENT_MAX_BYTES` override (the parse cap limits it to
    about 36.5 MB anyway; #711's default is 32 MiB); then follow
    `docs/troubleshooting.md`, "Indexer refuses to start — wipe the
    sqlite-volume": `make down` first (Docker will not remove a mounted
    volume), remove only the SQLite volume (Maildir and Bridge state
-   stay), `make up-macos-bridge`. Expect a full re-extract (OCR on) and
+   stay), `make up` (formerly `make up-macos-bridge`). Expect a full re-extract (OCR on) and
    re-embed. #699 (newest mail first) would make the rebuild usable
    sooner if decided first.
 3. **#463 sender authentication, now unblocked:** the owner ran the
@@ -1286,7 +1287,8 @@ linked from the Phase 3 items they track.
   `make test-compose` fails when the `docker-compose.yml` fallbacks or
   `bridge/Dockerfile` ARG defaults differ; three copies remain, since
   Compose cannot read `.env.example`); parameterize the Go toolchain as an `ARG` (not
-  done: it would stop Dependabot's golang bumps; owner to decide)
+  done: it would stop Dependabot's golang bumps; owner to decide;
+  obsolete: the Bridge container and its Go build were removed, #716)
 - ~~path filters on `.github/workflows/docker.yml`~~ (done: #627, #623)
 - ~~Bridge build: bounded retry around `go mod download`~~ (done:
   #621, #618; three attempts, `go mod verify` unconditional)
@@ -1302,9 +1304,8 @@ linked from the Phase 3 items they track.
   memory/CPU limits (#488; log rotation done in #501); evaluate
   runtime package pinning
 - resource limits for the remaining Compose services (#488)
-  (`protonmail-bridge` first — it holds live Proton credentials; #273
-  closed as its duplicate: a measured, operator-overridable memory
-  budget, tested against the initial Gluon sync)
+  (#273 closed as its duplicate; its Bridge-container budget is
+  obsolete since #716)
 - ~~loud one-shot startup warning when `INFERENCE_MODE` sends retrieved
   excerpts to a remote provider~~ (done: #628, one line per off-host
   layer in both services, #622)
@@ -1377,8 +1378,9 @@ can be revisited with an explicit owner decision.
   item 4)
 - parser/chunk generation coexistence machinery (the pipeline
   manifest preserves stage identity meanwhile)
-- extracting the Bridge container into a standalone repo (only
-  relevant if generic-IMAP decoupling is pursued)
+- ~~extracting the Bridge container into a standalone repo (only
+  relevant if generic-IMAP decoupling is pursued)~~ (obsolete: the
+  Bridge container was removed, #716)
 - attachment download support (needs the read-only action-path
   decision it was always gated on)
 - ~~per-message received date~~ (done: `occurred_at`, #599; Resolved
@@ -1415,14 +1417,14 @@ can be revisited with an explicit owner decision.
 
 - Python services use per-service `uv` projects with pinned
   `pyproject.toml` + `uv.lock`. Both meet a 90% coverage floor in CI.
-- Bridge built from upstream Proton source via `make build-nogui`; a
-  patch-drift check + smoke test gate version bumps.
+- Bridge is the official Proton Mail Bridge app on the host, which
+  updates itself (#716); mbsync requires its certificate fingerprint on
+  every start.
 - All long-running services run as non-root with `cap_drop: ["ALL"]`,
   `no-new-privileges`, read-only root filesystems, `pids_limit`,
   `init: true`, and Docker log rotation (#501).
 - Bridge password lives in `.secrets/bridge_pass.txt` (Docker
-  Compose secret), never `.env`. `make first-run` uses
-  `logging: driver: none` to keep credentials out of Docker logs.
+  Compose secret), never `.env`.
 - Deletion reconciliation (mirror) is on by default
   (`INDEXER_DELETION_ENABLED=false` selects archive) with a grace
   window, mass-delete brake, and atomic reap-or-rollback.
@@ -1459,9 +1461,13 @@ can be revisited with an explicit owner decision.
   indexer restarts first (the pending set is memory-only; the next
   delete in that table clears it), and below SQLite in filesystem
   free blocks, snapshots and backups (`docs/architecture.md`)
-- macOS Bridge mode is tested in CI only against a synthetic
+- the Bridge app connection is tested in CI only against a synthetic
   implicit-TLS Bridge server (#571, #643); the owner's go-live
   (2026-10-03) was its live test and passed (#497)
+- Linux hosts are not supported out of the box: `host.docker.internal`
+  (`host-gateway`) reaches the docker bridge address, not the host
+  loopback the Bridge app binds (#716); Windows Docker Desktop is
+  untested
 - coverage scope: both services measure `src/` with `src/main.py`
   omitted. The indexer's `main.py` has grown to hold the whole
   two-phase pipeline, which `tests/test_main.py` exercises but the
@@ -1474,8 +1480,9 @@ Large mailboxes may take hours before useful indexing begins.
 Do not assume indexing bugs until Bridge internal sync has completed.
 
 ### Bridge TLS and cert behavior
-Bridge cert behavior is tied to `vault.enc` and patched SAN handling.
-Do not modify this casually.
+The Bridge app's certificate is issued for `127.0.0.1` only; mbsync
+checks it against that name through a tunnel and requires
+`BRIDGE_CERT_FINGERPRINT`. Do not modify this casually.
 
 ### Schema sensitivity
 Changes to SQLite schema, embedding dimensions, or thread model can
@@ -1747,6 +1754,23 @@ do not ship persisted claims without them.
     invariant): resolved 2026-10-02 (Resolved decisions 14).
 
 ## Recently Completed
+
+### 2026-10-04 — Bridge container removed; the host Bridge app is the only mode (#716)
+
+Owner decisions (2026-10-04): the source-built `protonmail-bridge`
+container is gone and the official Proton Mail Bridge app on the host
+(formerly the optional "macOS Bridge mode", #497) is the only
+supported setup. (1) What `docker-compose.macos-bridge.yml` did is
+folded into `docker-compose.yml`, so `make build` / `make up` run it;
+the overlay, `docker-compose.first-run.yml`, the `bridge/` directory,
+the Bridge scripts, workflows and CI jobs, the `bridge-data` volume and
+the `first-run`, `*-macos-bridge`, `bridge-*`, `test-bridge*` and
+`update` targets were removed, with no aliases. (2) The setup is called
+"the Bridge app on the host": tested on macOS, Windows Docker Desktop
+untested, Linux unsupported. (3) Dated history and decision records
+stay as written. mbsync's container-mode trust-on-first-use branch went
+with it: `BRIDGE_CERT_FINGERPRINT` is now required unconditionally,
+by `validate-env.sh` as well as the entrypoint.
 
 ### 2026-10-04 — First live run: go-live fixes (#700–#708)
 

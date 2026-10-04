@@ -127,11 +127,11 @@ services:
   # An overlay-style service (no build or image) is not asked to repeat
   # the required hardening.
   # ok: compose-service-missing-read-only, compose-service-missing-no-new-privileges, compose-service-missing-cap-drop-all, compose-service-missing-pids-limit, compose-service-missing-logging
-  protonmail-bridge:
+  overlay-only:
     environment:
-      BRIDGE_FORCE_CLI: "true"
+      LOG_LEVEL: debug
     networks:
-      - bridge-net
+      - app-net
     # ok: compose-logging-unbounded
     logging:
       driver: none

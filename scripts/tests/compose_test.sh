@@ -1,10 +1,9 @@
 #!/bin/bash
 set -Eeuo pipefail
 
-# Rendering checks for docker-compose.yml with and without the macOS Bridge
-# overlay (#497): which services run, mbsync's Bridge dependency and
-# endpoint, the hardening and exposure settings the overlay must keep, and
-# that the Bridge pin copies match .env.example.
+# Rendering checks for docker-compose.yml (#497): which services run,
+# mbsync's endpoint (the Bridge app on the host), and the hardening and
+# exposure settings every service keeps.
 # The hardening is also checked on the merged config of every overlay
 # combination the Makefile and docs use (#580): Semgrep reads each file on
 # its own, so it cannot see an overlay's ``!reset`` or ``!override``.
@@ -19,9 +18,7 @@ trap 'rm -rf "$WORK"' EXIT
 FAILURES=0
 
 readonly BASE="docker-compose.yml"
-readonly MACOS="docker-compose.macos-bridge.yml"
 readonly HARDENED="docker-compose.hardened.yml"
-readonly FIRST_RUN="docker-compose.first-run.yml"
 
 # Renders the given compose files as JSON into $WORK/config.json. The
 # environment is fixed so an operator's shell or .env cannot change the
@@ -76,7 +73,7 @@ check() {
     fi
 }
 
-# Hardening every service keeps, in either mode, plus the one published
+# Hardening every service keeps, plus the one published
 # port: mcp-server on the host's loopback.
 expect_hardening_and_exposure() {
     expect '[.services[] | .read_only] | all' || return 1
@@ -110,13 +107,9 @@ def bounded_logging:
 | ($base[0].services | keys[] | select(. as $k | $m.services | has($k) | not)
     | "\(.): missing from the merged config"),
   # Every base service also starts with no profile active ($active), as
-  # the Makefile runs Compose, and is not scaled to zero. Only the macOS
-  # overlay ($macos: it is among the rendered files) moves one out:
-  # Bridge, into the never-activated container-bridge profile.
+  # the Makefile runs Compose, and is not scaled to zero.
   ($base[0].services | keys[] | . as $k | $active[0].services[$k] as $a
     | select($a == null or $a.scale == 0 or $a.deploy.replicas == 0)
-    | select($k != "protonmail-bridge" or $macos != true
-        or $m.services[$k].profiles != ["container-bridge"])
     | "\($k): not started by a plain up"),
   ($base[0].networks | to_entries[]
     | select(($m.networks[.key].name) != .value.name or $m.networks[.key].external == true)
@@ -181,7 +174,7 @@ def bounded_logging:
     (if ($s.deploy.resources.reservations.devices // []) != []
         then "reserves devices" else empty end),
     (if ($s.networks // {} | has("bridge-net"))
-        and ($svc | IN("protonmail-bridge", "mbsync") | not)
+        and $svc != "mbsync"
         then "joins bridge-net" else empty end),
     # A service the base does not define must name its non-root user (an
     # unset user is the image default, possibly root) and gets no secrets or base volumes.
@@ -228,17 +221,10 @@ def bounded_logging:
 # renders them with no profile, as every Makefile target runs them, for
 # the set of services that actually start ($active).
 expect_merged_hardening() {
-    local file macos=false
-    for file in "$@"; do
-        if [[ "$file" == "$MACOS" ]]; then
-            macos=true
-        fi
-    done
     render "$@" || return 1
     cp "$WORK/config.json" "$WORK/active.json"
     ALL_PROFILES=1 render "$@" || return 1
     jq -r --slurpfile base "$WORK/base.json" --slurpfile active "$WORK/active.json" \
-        --argjson macos "$macos" \
         "$HARDENING_VIOLATIONS" "$WORK/config.json" >"$WORK/violations" || return 1
     if [[ -s "$WORK/violations" ]]; then
         cat "$WORK/violations"
@@ -267,34 +253,10 @@ expect_overlay_rejected() {
 }
 
 # Every combination the Makefile targets and the overlays' usage notes
-# run: make up/build (base), make first-run, the hardened overlay, the
-# macOS Bridge targets, and macOS mode with the hardened overlay.
+# run: make up/build (base) and the hardened overlay.
 merged_hardening_holds_for_every_overlay_combination() {
     expect_merged_hardening "$BASE" || return 1
-    expect_merged_hardening "$BASE" "$FIRST_RUN" || return 1
     expect_merged_hardening "$BASE" "$HARDENED" || return 1
-    expect_merged_hardening "$BASE" "$MACOS" || return 1
-    expect_merged_hardening "$BASE" "$MACOS" "$HARDENED" || return 1
-}
-
-# make first-run must keep Bridge's log driver at none: its `info` output
-# holds the Bridge credentials. Bounded logging alone would accept json-file.
-first_run_logging_disabled() {
-    render "$BASE" "$FIRST_RUN" "$@" || return 1
-    expect '.services["protonmail-bridge"].logging.driver == "none"'
-}
-
-first_run_keeps_bridge_logging_disabled() {
-    first_run_logging_disabled || return 1
-    cat >"$WORK/first-run-logging.yml" <<'EOF'
-services:
-  protonmail-bridge:
-    logging: !reset null
-EOF
-    if first_run_logging_disabled "$WORK/first-run-logging.yml" >/dev/null; then
-        printf 'a reset first-run log driver passed\n'
-        return 1
-    fi
 }
 
 # Settings the base never uses, so its own render cannot vouch for them:
@@ -356,9 +318,9 @@ EOF
 
 merged_hardening_rejects_reset_pids_limit_and_logging() {
     expect_overlay_rejected reset-pids-limit \
-        "protonmail-bridge: pids_limit is unbounded" <<'EOF' || return 1
+        "indexer: pids_limit is unbounded" <<'EOF' || return 1
 services:
-  protonmail-bridge:
+  indexer:
     pids_limit: !reset null
 EOF
     expect_overlay_rejected reset-logging "mbsync: logging is unbounded" <<'EOF'
@@ -428,7 +390,7 @@ services:
     devices: ["/dev/fuse:/dev/fuse"]
     network_mode: host
     networks: !reset null
-    volumes_from: [protonmail-bridge]
+    volumes_from: [mbsync]
     user: "0:0"
     pids_limit: 4096
     security_opt: [seccomp:unconfined]
@@ -472,13 +434,13 @@ EOF
 # a new one.
 merged_hardening_rejects_added_volumes() {
     expect_overlay_rejected added-volumes \
-        "mcp-server: mounts bridge-data at /bridge, which the base does not" \
+        "mcp-server: mounts mbsync-state at /state, which the base does not" \
         "indexer: mounts sqlite-volume at /extra, which the base does not" \
-        "extra: mounts the base volume bridge-data" <<'EOF'
+        "extra: mounts the base volume mbsync-state" <<'EOF'
 services:
   mcp-server:
     volumes:
-      - bridge-data:/bridge:ro
+      - mbsync-state:/state:ro
   indexer:
     volumes:
       - sqlite-volume:/extra:ro
@@ -486,7 +448,7 @@ services:
     image: example.invalid/extra:1
     user: "1234:1234"
     volumes:
-      - bridge-data:/bridge:ro
+      - mbsync-state:/state:ro
 EOF
 }
 
@@ -495,15 +457,13 @@ EOF
 merged_hardening_rejects_leading_zero_root_users() {
     expect_overlay_rejected zero-users \
         "indexer: runs as root" "mbsync: runs as root" \
-        "mcp-server: runs as root" "protonmail-bridge: runs as root" <<'EOF'
+        "mcp-server: runs as root" <<'EOF'
 services:
   indexer:
     user: "00"
   mbsync:
     user: "000:000"
   mcp-server:
-    user: "-0"
-  protonmail-bridge:
     user: "+00:+000"
 EOF
 }
@@ -542,35 +502,19 @@ EOF
 }
 
 # No Makefile target activates a profile, so a service an overlay moves
-# into one silently stops running; only the macOS overlay's Bridge profile
-# is expected.
+# into one silently stops running.
 merged_hardening_rejects_services_moved_into_a_profile() {
     expect_overlay_rejected profiled-services \
         "indexer: not started by a plain up" \
+        "mbsync: not started by a plain up" \
         "mcp-server: not started by a plain up" <<'EOF' || return 1
 services:
   indexer:
     profiles: [manual]
+  mbsync:
+    profiles: [manual]
   mcp-server:
     profiles: [manual]
-EOF
-    expect_overlay_rejected profiled-bridge \
-        "protonmail-bridge: not started by a plain up" <<'EOF' || return 1
-services:
-  protonmail-bridge:
-    profiles: [manual]
-  mbsync:
-    depends_on: !reset {}
-EOF
-    # The container-bridge profile is allowed only with the macOS overlay,
-    # which also points mbsync at the host app.
-    expect_overlay_rejected container-bridge-profile \
-        "protonmail-bridge: not started by a plain up" <<'EOF' || return 1
-services:
-  protonmail-bridge:
-    profiles: [container-bridge]
-  mbsync:
-    depends_on: !reset {}
 EOF
     # A service scaled to zero is rendered but starts no container.
     expect_overlay_rejected scaled-to-zero \
@@ -585,8 +529,7 @@ services:
 EOF
 }
 
-# A macvlan bridge-net keeps its engine name but puts Bridge, bound to
-# 0.0.0.0, on the LAN.
+# A macvlan bridge-net keeps its engine name but puts mbsync on the LAN.
 merged_hardening_rejects_network_driver_changes() {
     expect_overlay_rejected network-drivers \
         "network bridge-net: driver settings differ from the base" \
@@ -611,8 +554,7 @@ merged_hardening_rejects_renamed_or_rebacked_volumes() {
     expect_overlay_rejected volume-names \
         "volume maildir-volume: renamed or external" "volume sqlite-volume: renamed or external" \
         "volume mbsync-state: renamed or external" \
-        "volumes share the engine volume shared-volume" \
-        "volume bridge-data: driver settings differ from the base" <<'EOF'
+        "volumes share the engine volume shared-volume" <<'EOF' || return 1
 volumes:
   maildir-volume:
     name: shared-volume
@@ -620,7 +562,11 @@ volumes:
     name: shared-volume
   mbsync-state:
     external: true
-  bridge-data:
+EOF
+    expect_overlay_rejected volume-drivers \
+        "volume mbsync-state: driver settings differ from the base" <<'EOF'
+volumes:
+  mbsync-state:
     driver: local
     driver_opts:
       type: none
@@ -650,39 +596,17 @@ include:
 EOF
 }
 
-default_mode_runs_the_bridge_container() {
+the_base_runs_mbsync_indexer_and_mcp_server() {
     render "$BASE"
-    expect '.services | keys == ["indexer", "mbsync", "mcp-server", "protonmail-bridge"]' || return 1
-    expect '.services.mbsync.depends_on["protonmail-bridge"].condition == "service_healthy"' || return 1
-    expect '.services.mbsync.environment.BRIDGE_HOST == "protonmail-bridge"' || return 1
-    expect '.services.mbsync.environment.BRIDGE_IMAP_PORT == "1143"' || return 1
-    expect '.services.mbsync.environment | has("BRIDGE_CERT_HOST") | not' || return 1
-    expect '.services.mbsync.environment | has("BRIDGE_CERT_FINGERPRINT") | not' || return 1
-    expect_hardening_and_exposure
-}
-
-# BRIDGE_IMAP_PORT in .env is for the macOS app; the Bridge container
-# always listens on 1143.
-default_mode_ignores_the_macos_port_override() {
-    BRIDGE_IMAP_PORT=1144 render "$BASE"
-    expect '.services.mbsync.environment.BRIDGE_IMAP_PORT == "1143"' || return 1
-}
-
-macos_mode_starts_only_mbsync_indexer_and_mcp_server() {
-    render "$BASE" "$MACOS"
     expect '.services | keys == ["indexer", "mbsync", "mcp-server"]' || return 1
-    expect '.volumes | has("bridge-data") | not' || return 1
-}
-
-macos_mode_drops_only_the_bridge_dependency() {
-    render "$BASE" "$MACOS"
+    # Bridge runs on the host, outside Compose: nothing for mbsync to wait on.
     expect '(.services.mbsync.depends_on // {}) == {}' || return 1
     expect '.services.indexer.depends_on.mbsync.condition == "service_healthy"' || return 1
     expect '.services["mcp-server"].depends_on.indexer.condition == "service_healthy"' || return 1
 }
 
-macos_mode_points_mbsync_at_the_host_app() {
-    render "$BASE" "$MACOS"
+mbsync_points_at_the_host_app() {
+    render "$BASE"
     expect '.services.mbsync.environment.BRIDGE_HOST == "host.docker.internal"' || return 1
     expect '.services.mbsync.environment.BRIDGE_IMAP_PORT == "1143"' || return 1
     expect '.services.mbsync.environment.BRIDGE_CERT_HOST == "127.0.0.1"' || return 1
@@ -692,18 +616,18 @@ macos_mode_points_mbsync_at_the_host_app() {
     expect '.services.mbsync.environment.BRIDGE_CERT_FINGERPRINT == ""' || return 1
 }
 
-macos_mode_takes_the_expected_fingerprint_from_the_environment() {
-    BRIDGE_CERT_FINGERPRINT="ab:cd" render "$BASE" "$MACOS"
+mbsync_takes_the_expected_fingerprint_from_the_environment() {
+    BRIDGE_CERT_FINGERPRINT="ab:cd" render "$BASE"
     expect '.services.mbsync.environment.BRIDGE_CERT_FINGERPRINT == "ab:cd"' || return 1
 }
 
-macos_mode_takes_the_port_from_the_environment() {
-    BRIDGE_IMAP_PORT=1144 render "$BASE" "$MACOS"
+mbsync_takes_the_port_from_the_environment() {
+    BRIDGE_IMAP_PORT=1144 render "$BASE"
     expect '.services.mbsync.environment.BRIDGE_IMAP_PORT == "1144"' || return 1
 }
 
-macos_mode_keeps_mbsync_hardening_and_exposure() {
-    render "$BASE" "$MACOS"
+mbsync_keeps_its_hardening_and_no_port_is_exposed() {
+    render "$BASE"
     expect_hardening_and_exposure || return 1
     expect '.services.mbsync.secrets | map(.source) == ["bridge_pass"]' || return 1
     expect '.services.mbsync.networks | keys == ["bridge-net"]' || return 1
@@ -714,33 +638,11 @@ macos_mode_keeps_mbsync_hardening_and_exposure() {
     expect '.services.mbsync | has("extra_hosts") | not' || return 1
 }
 
-macos_mode_composes_with_the_hardened_overlay() {
-    render "$BASE" "$MACOS" "$HARDENED"
+the_base_composes_with_the_hardened_overlay() {
+    render "$BASE" "$HARDENED"
     expect '.services | keys == ["indexer", "mbsync", "mcp-server"]' || return 1
     expect '.networks["app-net"].internal' || return 1
     expect '.services.mbsync.environment.BRIDGE_HOST == "host.docker.internal"' || return 1
-}
-
-# .env.example is the source of truth for the Bridge pin. Compose and the
-# Dockerfile cannot read it, so the docker-compose.yml build-arg fallbacks
-# (used when .env leaves a key unset) and the bridge/Dockerfile ARG
-# defaults are copies that must equal it.
-bridge_pin_copies_match_env_example() {
-    local name source copy
-    render "$BASE"
-    for name in BRIDGE_VERSION BRIDGE_COMMIT; do
-        source="$(grep -E "^${name}=" "$ROOT_DIR/.env.example" | head -n 1 | cut -d= -f2-)"
-        [[ -n "$source" ]] || {
-            printf '%s is missing from .env.example\n' "$name"
-            return 1
-        }
-        expect ".services[\"protonmail-bridge\"].build.args.${name} == \"${source}\"" || return 1
-        copy="$(grep -E "^ARG ${name}=" "$ROOT_DIR/bridge/Dockerfile" | head -n 1 | cut -d= -f2-)"
-        [[ "$copy" == "$source" ]] || {
-            printf 'bridge/Dockerfile ARG %s=%s, .env.example has %s\n' "$name" "$copy" "$source"
-            return 1
-        }
-    done
 }
 
 # The base file's own render, every profile included: what the merged
@@ -748,21 +650,15 @@ bridge_pin_copies_match_env_example() {
 ALL_PROFILES=1 render "$BASE"
 cp "$WORK/config.json" "$WORK/base.json"
 
-check "default mode runs the Bridge container and waits for its health" \
-    default_mode_runs_the_bridge_container
-check "default mode ignores the macOS port override" default_mode_ignores_the_macos_port_override
-check "macOS mode starts only mbsync, indexer and mcp-server" \
-    macos_mode_starts_only_mbsync_indexer_and_mcp_server
-check "macOS mode drops only mbsync's Bridge dependency" macos_mode_drops_only_the_bridge_dependency
-check "macOS mode points mbsync at the host app" macos_mode_points_mbsync_at_the_host_app
-check "macOS mode takes the IMAP port from the environment" \
-    macos_mode_takes_the_port_from_the_environment
-check "macOS mode takes the expected fingerprint from the environment" \
-    macos_mode_takes_the_expected_fingerprint_from_the_environment
-check "macOS mode keeps mbsync's hardening and exposes no new port" \
-    macos_mode_keeps_mbsync_hardening_and_exposure
-check "macOS mode composes with the hardened overlay" macos_mode_composes_with_the_hardened_overlay
-check "Bridge pin copies match .env.example" bridge_pin_copies_match_env_example
+check "the base runs mbsync, indexer and mcp-server, with no Bridge dependency" \
+    the_base_runs_mbsync_indexer_and_mcp_server
+check "mbsync points at the host app" mbsync_points_at_the_host_app
+check "mbsync takes the IMAP port from the environment" mbsync_takes_the_port_from_the_environment
+check "mbsync takes the expected fingerprint from the environment" \
+    mbsync_takes_the_expected_fingerprint_from_the_environment
+check "mbsync keeps its hardening and no new port is exposed" \
+    mbsync_keeps_its_hardening_and_no_port_is_exposed
+check "the base composes with the hardened overlay" the_base_composes_with_the_hardened_overlay
 check "merged hardening holds for every overlay combination" \
     merged_hardening_holds_for_every_overlay_combination
 check "merged hardening rejects !reset on security_opt" merged_hardening_rejects_reset_security_opt
@@ -794,7 +690,6 @@ check "merged hardening rejects network driver changes" \
     merged_hardening_rejects_network_driver_changes
 check "merged hardening rejects renamed, shared or rebacked volumes" \
     merged_hardening_rejects_renamed_or_rebacked_volumes
-check "first run keeps Bridge's log driver at none" first_run_keeps_bridge_logging_disabled
 check "merged hardening rejects new users, secrets, hooks and devices" \
     merged_hardening_rejects_new_grants
 check "merged hardening rejects a service a top-level include brings in" \

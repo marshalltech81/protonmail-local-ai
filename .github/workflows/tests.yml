@@ -59,32 +59,6 @@ jobs:
       - name: Run Compose rendering tests
         run: bash scripts/tests/compose_test.sh
 
-  bridge-entrypoint:
-    name: Bridge entrypoint
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Run entrypoint tests
-        run: bash bridge/tests/entrypoint_test.sh
-
-      - name: Run patch-source tests
-        run: bash bridge/tests/patch_source_test.sh
-
-      - name: Run Dockerfile module-step tests
-        run: bash bridge/tests/dockerfile_test.sh
-
-  bridge-smoke-script:
-    name: bridge smoke script
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Run bridge-smoke.sh tests
-        run: bash scripts/tests/bridge_smoke_test.sh
-
   validate-env-script:
     name: validate-env script
     runs-on: ubuntu-latest

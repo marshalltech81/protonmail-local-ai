@@ -17,6 +17,7 @@ FAILURES=0
 
 # A .env that passes, with the keys Compose defaults left out.
 readonly BASE_ENV='BRIDGE_USER=placeholder@example.invalid
+BRIDGE_CERT_FINGERPRINT=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 EMBED_MODEL=placeholder-embed-model'
 
 # Create a fresh root holding the script, BASE_ENV plus any extra lines
@@ -143,12 +144,12 @@ keys_with_compose_defaults_may_be_omitted() {
 }
 
 empty_keys_with_compose_defaults_use_the_default() {
-    setup 'BRIDGE_VERSION=' 'SYNC_INTERVAL=' 'MCP_PORT=' 'INFERENCE_MODEL='
+    setup 'SYNC_INTERVAL=' 'MCP_PORT=' 'INFERENCE_MODEL='
     passes
 }
 
 explicit_values_still_pass() {
-    setup 'BRIDGE_VERSION=v3.27.0' 'SYNC_INTERVAL=60' 'MCP_PORT=3000' \
+    setup 'SYNC_INTERVAL=60' 'MCP_PORT=3000' \
         'INFERENCE_MODEL=placeholder-model'
     passes
 }
@@ -329,6 +330,30 @@ empty_embed_key_fails() {
 placeholder_bridge_user_fails() {
     setup 'BRIDGE_USER=your@proton.me'
     fails_with 'BRIDGE_USER'
+}
+
+# mbsync never trusts the Bridge app's certificate on first use, so the
+# expected fingerprint is required and must be a SHA-256 (#497).
+missing_bridge_cert_fingerprint_fails() {
+    setup 'BRIDGE_CERT_FINGERPRINT='
+    fails_with 'BRIDGE_CERT_FINGERPRINT'
+}
+
+malformed_bridge_cert_fingerprint_fails() {
+    local value
+    for value in abc 'aa:bb' "$(printf 'g%.0s' {1..64})" "$(printf 'a%.0s' {1..63})"; do
+        setup "BRIDGE_CERT_FINGERPRINT=$value"
+        fails_with 'BRIDGE_CERT_FINGERPRINT'
+    done
+}
+
+openssl_form_bridge_cert_fingerprint_passes() {
+    local colon_form
+    colon_form="$(printf 'AB:%.0s' {1..31})AB"
+    setup "BRIDGE_CERT_FINGERPRINT=\"sha256 Fingerprint=${colon_form}\""
+    passes
+    setup "BRIDGE_CERT_FINGERPRINT=${colon_form}"
+    passes
 }
 
 one_sided_max_tokens_fails() {
@@ -915,7 +940,7 @@ padded_quoted_sync_interval_fails() {
 
 unquoted_values_are_trimmed_like_compose() {
     setup 'SYNC_INTERVAL=60   ' 'MCP_PORT=  3000' 'INFERENCE_MODE=  ' \
-        'BRIDGE_COMMIT= 04e46eb4fbc1c7ef4425a920bfc352050da0606b '
+        'BRIDGE_CERT_FINGERPRINT= bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb '
     passes
 }
 
@@ -948,6 +973,10 @@ check "an unknown MCP_TRANSPORT fails" unknown_transport_fails
 check "a missing EMBED_MODEL fails" missing_embed_model_fails
 check "an empty embed key fails" empty_embed_key_fails
 check "the placeholder BRIDGE_USER fails" placeholder_bridge_user_fails
+check "a missing BRIDGE_CERT_FINGERPRINT fails" missing_bridge_cert_fingerprint_fails
+check "a malformed BRIDGE_CERT_FINGERPRINT fails" malformed_bridge_cert_fingerprint_fails
+check "a BRIDGE_CERT_FINGERPRINT in openssl's form passes" \
+    openssl_form_bridge_cert_fingerprint_passes
 check "a one-sided INFERENCE_MAX_TOKENS fails" one_sided_max_tokens_fails
 check "a zero-padded INFERENCE_MAX_TOKENS is decimal" zero_padded_max_tokens_is_decimal
 check "an API key in .env fails" api_key_in_env_fails

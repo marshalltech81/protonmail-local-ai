@@ -4,10 +4,11 @@
 
 This repository provides a privacy-first AI search and intelligence layer for ProtonMail.
 
-The stack consists of four containers:
+The stack consists of the official Proton Mail Bridge app on the host
+and three containers:
 
-- ProtonBridge (container; in the optional macOS Bridge mode, the
-  official Proton Mail Bridge app on the Mac instead)
+- Proton Mail Bridge (the official app, on the host, outside Compose;
+  owner decision 2026-10-04: the Bridge container was removed)
 - mbsync (container)
 - indexer (container)
 - MCP server (container)
@@ -50,7 +51,7 @@ Before making non-trivial changes, read:
 
 - `PLAN.md` for current implementation priorities and active work
 - `docs/architecture.md` for system design and data flow
-- `docs/setup.md` before changing Bridge, first-run flow, TLS, or credentials
+- `docs/setup.md` before changing Bridge, first-time setup, TLS, or credentials
 - `docs/troubleshooting.md` before changing Bridge, mbsync, TLS, or recovery behavior
 - `docs/mcp-tools.md` before changing MCP tool behavior
 
@@ -60,8 +61,8 @@ If a change touches container boundaries, TLS, Bridge auth, mbsync behavior, ind
 
 High-level data flow:
 
-1. ProtonBridge connects to ProtonMail.
-2. mbsync pulls from Bridge into Maildir.
+1. The Proton Mail Bridge app on the host connects to ProtonMail.
+2. mbsync pulls from Bridge (via `host.docker.internal`) into Maildir.
 3. indexer parses Maildir messages, builds conversation threads, generates embeddings via an OpenAI-compatible `/v1/embeddings` endpoint (operator-supplied), and writes SQLite.
 4. MCP server reads from SQLite and exposes tools over Streamable HTTP at `/mcp`.
 5. Only the MCP server is exposed to the host on `localhost:3000` by default.
@@ -131,9 +132,6 @@ Do not make any of the following changes unless the repository owner explicitly 
 ### Platform and base image constraints
 
 - Do not switch runtime images to Alpine.
-- Do not introduce distroless images for Bridge.
-- Do not add Qt dependencies to Bridge.
-- Bridge must continue using `make build-nogui`.
 
 ### Network and exposure constraints
 
@@ -148,10 +146,12 @@ Do not make any of the following changes unless the repository owner explicitly 
 - Do not give `mcp-server` direct IMAP access to Bridge.
 - Do not give `indexer` direct IMAP access to Bridge.
 - mbsync is the only container that should talk directly to Bridge IMAP.
-- In the optional macOS Bridge mode (`docker-compose.macos-bridge.yml`,
-  #497) mbsync reaches the Bridge app on the Mac's loopback through
-  `host.docker.internal`; the same no-LAN-IP, no-host-networking and
-  no-published-port rules apply.
+- mbsync reaches the Bridge app on the host's loopback (`127.0.0.1`)
+  through `host.docker.internal` (#497); the same no-LAN-IP,
+  no-host-networking and no-published-port rules apply. Do not rebind
+  the app beyond `127.0.0.1` or add `network_mode: host` to make it
+  reachable (for example on Linux, which is not supported).
+
 ### Mail sync and safety constraints
 
 - Do not change mbsync to write back to Proton.
@@ -231,81 +231,44 @@ Bridge has special behavior and must be handled carefully.
 
 Important facts:
 
-- Bridge is built from Proton source using `make build-nogui`.
-- The optional macOS Bridge mode (#497, owner-approved 2026-10-02)
-  replaces the Bridge container with the official Bridge app on the
-  Mac: the overlay gives `protonmail-bridge` an unused profile, drops
-  mbsync's dependency on it, and sets `BRIDGE_HOST=host.docker.internal`
-  and `BRIDGE_CERT_HOST=127.0.0.1`. The app's certificate names only
+- Bridge is the official Proton Mail Bridge app on the host, outside
+  Compose (#497; the only mode since the Bridge container was removed,
+  owner, 2026-10-04). It binds IMAP to the host's `127.0.0.1`; login,
+  credentials and updates are managed in the app. `docker-compose.yml`
+  sets mbsync's `BRIDGE_HOST=host.docker.internal` and
+  `BRIDGE_CERT_HOST=127.0.0.1`. The app's certificate names only
   `127.0.0.1` and isync 1.4.4 checks Bridge's self-signed CA certificate
   against `Host`, so the entrypoint keeps `Host 127.0.0.1` and connects
-  through an isync `Tunnel` (`socat`); implicit TLS, verification and
-  the pin are unchanged. Because the app's loopback port can be held by
-  another local account while the app is down, this mode does not trust
-  on first use: the certificate must match the operator-supplied
-  `BRIDGE_CERT_FINGERPRINT` on every start. Never make it work by
-  relaxing the check. Details:
-  `docs/architecture.md` "Bridge Modes"; checked by
+  through an isync `Tunnel` (`socat`); implicit TLS and verification run
+  end to end. Because the app's loopback port can be held by another
+  local account while the app is down, mbsync never trusts on first use:
+  the certificate must match the operator-supplied
+  `BRIDGE_CERT_FINGERPRINT` (required; `validate-env.sh` and the
+  entrypoint both refuse to start without it) on every start, before the
+  persistent pin is consulted and before the password is sent. Never
+  make it work by relaxing the check. Details: `docs/architecture.md`
+  "Bridge"; checked by `mbsync/tests/entrypoint_test.sh`,
   `mbsync/tests/tls_check.sh` and `scripts/tests/compose_test.sh`.
-- Bridge runs as non-root user `bridge` with UID 1000.
-- all required XDG variables must be set or Bridge may fall back to unexpected paths
-- Bridge account detection checks for:
-  `$XDG_CONFIG_HOME/protonmail/bridge-v3/vault.enc`
-- Bridge binds to `0.0.0.0` via a source patch so mbsync can reach it from another container
-- Bridge TLS SANs are patched so the cert is valid for `protonmail-bridge` and `localhost`
-- Bridge's in-process auto-updater is patched off by two hunks. The vault
-  default `AutoUpdate: true` is patched to `false` for new vaults, and the
-  install gate in `internal/bridge/updates.go` `handleUpdate()` is forced
-  to treat auto-update as disabled, so a vault created before the default
-  patch, which still stores `AutoUpdate: true`, is covered too (#245).
-  Bridge still fetches the signed
-  `proton.me/download/bridge/linux/x86/v1/version.json` at startup and
-  hourly, and announces a newer release, but it no longer downloads one
-  (the Qt/GUI variant — exactly what `build-nogui` exists to avoid) or
-  stages it under `/data/local/protonmail/bridge-v3/updates/<version>/`.
-  The image ships no launcher, so a staged build would not run, but it
-  would be unpinned code on the data volume. The `Vault loaded` log line
-  still reports the stored `autoUpdate` value; on an old vault that is
-  `"true"` even though the gate ignores it. Each hunk is verified at
-  three layers: source string-count guards in `bridge/patch-source.sh`;
-  synthetic `go test`s run during the build, one against
-  `internal/vault.newDefaultSettings` and one that reopens a vault storing
-  `AutoUpdate: true`, offers an eligible release and asserts no silent
-  install is queued; and in `scripts/bridge-smoke.sh`, the
-  `"Vault loaded ... autoUpdate=\"false\""` assertion for a fresh vault
-  plus a CLI-seeded `AutoUpdate: true` vault restarted on the
-  `--noninteractive` path, asserting no silent install and nothing staged
-  (whether the live feed offers a release is up to Proton, so only the
-  `go test` forces the gate decision).
+- Platforms: tested on macOS (OrbStack, Docker Desktop), where
+  `host.docker.internal` forwards to the host's loopback; Windows Docker
+  Desktop is expected to work the same way but is untested; Linux is
+  not supported out of the box, because `host-gateway` reaches the
+  docker bridge address, not the loopback the app binds.
 - mbsync reaches Bridge IMAP over implicit TLS (RFC 8314, Bridge's "SSL"
-  mode), never STARTTLS or plaintext, in both Bridge modes (#638,
-  owner-approved 2026-10-02): no plaintext phase precedes the handshake.
-  In the container, a fifth hunk forces `internal/vault` `GetIMAPSSL()` to
-  return `true`, so the IMAP listener uses `tls.Listen` whatever the vault
-  stores (Proton's default and any older vault store `false`); SMTP is
-  unchanged. It is verified by `require_count` guards, a `go test` that
-  reopens a vault storing `IMAPSSL=false`, and a `bridge-smoke.sh` probe
-  asserting a TLS handshake with the IMAP greeting and no plaintext
-  greeting. In macOS Bridge mode the operator sets the app's IMAP
-  connection mode to SSL. mbsync has no STARTTLS fallback: a Bridge still
-  serving STARTTLS fails closed at certificate extraction.
-- Bridge v3 stores credentials and TLS cert material in `vault.enc`
+  mode), never STARTTLS or plaintext (#638, owner-approved 2026-10-02):
+  no plaintext phase precedes the handshake. The operator sets the
+  app's IMAP connection mode to SSL. mbsync has no STARTTLS fallback: a
+  Bridge still serving STARTTLS fails closed at certificate extraction.
 - the cert is not baked into any image or persisted in a volume — but mbsync's
   entrypoint extracts it from a live connection with `openssl s_client` on
   every container start and writes it to a tmpfs file at
-  `/tmp/mbsync/bridge-cert.pem` for the duration of the run
-- mbsync cert extraction is done from a live connection with `openssl s_client`
+  `/tmp/mbsync/bridge-cert.pem` for the duration of the run; only its
+  SHA-256 fingerprint is persisted (the pin, in the `mbsync-state` volume)
 
 Operational implications:
 
-- if you touch Bridge build logic, TLS logic, auth storage, or XDG paths, review setup and recovery behavior first
-- do not assume rebuilding Bridge updates the existing cached cert in `vault.enc`
-- do not replace pass/gpg-based behavior with a weaker shortcut
-- if a future change adds another patch hunk to `bridge/patch-source.sh`,
-  follow the existing three-layer pattern: pre/post `require_count` guards,
-  add the touched package to `compile_patched_packages`, and (if the patch
-  flips a runtime default rather than just a binding/string) add a `go test`
-  assertion plus an end-to-end log/behavior check in `bridge-smoke.sh`
+- if you touch mbsync's TLS logic, the fingerprint check or the pin, review
+  setup and recovery behavior first
 
 ## Secret Handling
 
@@ -334,9 +297,11 @@ Secrets are a hard boundary.
 
 ### Credential-specific rules
 
-- `BRIDGE_USER` comes from Bridge CLI `info` (or, in macOS Bridge mode, the
-  Bridge app's IMAP details), not the Proton account password
-- `BRIDGE_PASS` belongs in `.secrets/bridge_pass.txt`, not `.env`
+- `BRIDGE_USER` comes from the Bridge app's IMAP details, not the Proton
+  account password
+- `BRIDGE_PASS` (the app's IMAP password) belongs in
+  `.secrets/bridge_pass.txt`, not `.env`. `BRIDGE_CERT_FINGERPRINT` is
+  not secret and belongs in `.env`
 - Each operator-supplied layer has one Docker secret:
   `.secrets/inference_api_key.txt`, `.secrets/embed_api_key.txt`,
   `.secrets/rerank_api_key.txt`. Each file must exist with mode 600
@@ -502,7 +467,7 @@ When creating commits in this repository:
 - avoid mixing unrelated changes into one commit when separate commits would read more clearly in history
 
 Examples:
-- `fix(bridge): patch TLS cert SAN for protonmail-bridge`
+- `fix(mbsync): require the Bridge cert fingerprint on every start`
 - `docs(setup): add mbsync verification steps`
 - `chore(pre-commit): add detect-secrets baseline`
 - `style: apply pre-commit autofixes across repo`
@@ -537,9 +502,7 @@ Examples:
 
 ```bash
 make build
-make first-run
 make up
-make up-macos-bridge   # optional macOS Bridge mode instead of first-run + up
 make logs
 make status
 make clean
@@ -553,7 +516,6 @@ All Dockerfiles in this repository must follow these rules:
 
 - every runtime image runs as a dedicated non-root user with explicit UID/GID
 - current expected UIDs are:
-  - `bridge=1000`
   - `mbsync=1001`
   - `indexer=1002`
   - `mcp=1003`
@@ -597,42 +559,6 @@ When changing Docker Compose service definitions or runtime behavior:
 - add resource controls such as memory limits, `pids_limit`, and log rotation when practical
 - keep container-to-container network access as narrow as the architecture allows
 - prefer degraded modes over broadening privileges, relaxing confinement, or exposing more of the host
-
-## Go Build Conventions
-
-Bridge is the only Go service in this repository. When modifying the Bridge
-build in `bridge/Dockerfile` or any future Go service, follow these rules:
-
-### Build target
-
-- invoke `make build-nogui` using Proton's upstream Makefile without injecting
-  custom `GOFLAGS`, `CGO_CFLAGS`, or `CGO_LDFLAGS`
-- Proton is a security company; their upstream build configuration reflects their
-  own security requirements — do not second-guess it by layering additional flags
-- if a future evaluation concludes that specific additional flags are warranted,
-  document the rationale clearly and get explicit owner approval before adding them
-
-### Toolchain version safety
-
-- set `GOTOOLCHAIN=local` as a builder-stage `ENV`; this prevents the Go
-  toolchain from auto-downloading a different Go version at build time if `go.mod`
-  carries a `toolchain` directive requesting a newer version — the pinned base
-  image is the source of truth and must not be silently overridden
-
-### Module integrity
-
-- run `go mod download && go mod verify` after cloning source and before building;
-  `go mod verify` confirms every cached module matches its checksum in `go.sum`,
-  failing the build if any module has been tampered with or corrupted
-- the download may be retried a bounded number of times against transient
-  proxy errors (three attempts today, #618), but `go mod verify` always runs
-  after it and a persistent download failure still fails the build;
-  `bridge/tests/dockerfile_test.sh` checks both
-
-### CGO build mode
-
-- never build with `CGO_ENABLED=0`; Bridge links against libfido2 and libsecret
-  and requires cgo at build time
 
 ## Bash Conventions
 
@@ -679,25 +605,11 @@ set -Eeuo pipefail
 
 ## Service Responsibilities
 
-### `bridge/`
-
-Purpose:
-
-- runs ProtonBridge
-- manages Bridge auth/keychain bootstrap
-- provides IMAP/SMTP endpoints internally
-
-Notes:
-
-- runtime must support `pass` and `gpg`
-- keep non-root operation intact
-- preserve XDG path behavior
-
 ### `mbsync/`
 
 Purpose:
 
-- syncs Bridge mail into Maildir
+- syncs mail from the Bridge app on the host into Maildir
 
 Notes:
 
@@ -787,10 +699,6 @@ Notes:
   beside it. A rule change gets matching cases in its fixture
   (`.semgrep/compose.test.yml`, `.semgrep/shell.sh`).
 - for Dockerfile, build, or container-runtime changes, run the smallest relevant `docker compose build ...` subset when practical
-- for Bridge build, patch, or version-bump changes, run `make bridge-upgrade-check`;
-  the report-only "Bridge Go module scan" job in `.github/workflows/security.yml`
-  lists advisories in Proton's Go modules at the pinned `BRIDGE_COMMIT` in its
-  job summary and never fails CI
 - prefer real `.eml` fixtures for parser tests
 - integration tests should mock IMAP rather than hitting a live Bridge instance
 - add or update tests when behavior changes
@@ -823,9 +731,7 @@ Notes:
 - MCP search changes should verify hybrid/RRF behavior where applicable
 - mbsync entrypoint changes should update `mbsync/tests/entrypoint_test.sh`, which loads the real functions with external commands mocked; changes to mbsync's TLS or connection settings should also pass `make test-mbsync-tls` (the shipped image against a synthetic implicit-TLS server)
 - changes to `mbsync/mbsyncrc.template` should pass `make test-mbsync-layout` (the shipped image's isync against synthetic Maildir stores: folder layout, and spurious and genuine UIDVALIDITY changes with the documented recovery)
-- Compose changes that touch service selection, dependencies, hardening or ports should keep `scripts/tests/compose_test.sh` passing for both Bridge modes; it also checks the required hardening on the merged config of every overlay combination the Makefile uses, and that every base service starts with no profile active (only macOS mode moves Bridge into a profile), so a new overlay, combination or profile-activating target is added to its list
-- Bridge entrypoint changes should update `bridge/tests/entrypoint_test.sh`, which does the same with a synthetic GPG keyring and pass store
-- `bridge/patch-source.sh` text-patch changes should keep `bridge/tests/patch_source_test.sh` passing; it runs the helper on a synthetic tree under strict (non-GNU) sed escapes, since `make bridge-patch-check` runs it with BSD sed on macOS
+- Compose changes that touch service selection, dependencies, hardening or ports should keep `scripts/tests/compose_test.sh` passing; it also checks the required hardening on the merged config of every overlay combination the Makefile uses, and that every base service starts with no profile active, so a new overlay, combination or profile-activating target is added to its list
 - indexing, chunking, embedding-storage, or retrieval changes should pass `make baseline`; if ranking changes on purpose, regenerate the snapshot with `make baseline UPDATE=1` and explain the snapshot diff in the PR
 - `ask_mailbox` prompt or answer-path changes can be compared with the opt-in `make eval-answers` / `make eval-answers-compare` (synthetic corpus only, calls the configured `INFERENCE_*` and `JUDGE_*` providers, never in CI; see `mcp-server/tests/eval/README.md`)
 - before opening PRs that touch TLS, auth, logging, subprocess execution, or credential handling, run `bandit -r src/` and resolve any findings rated medium or higher (a CI job in `.github/workflows/security.yml` enforces this at medium+ severity for both services)
@@ -839,7 +745,6 @@ make test-mbsync
 make test-mbsync-tls
 make test-mbsync-layout
 make test-compose
-make test-bridge
 make baseline
 make typecheck
 ```
@@ -849,7 +754,7 @@ make typecheck
 Update docs when changing:
 
 - architecture
-- setup and first-run flow
+- setup and first-time setup flow
 - TLS/cert handling
 - MCP tool behavior
 - schema or migration behavior
@@ -870,7 +775,8 @@ Stop and ask for direction before proceeding if a proposed change would:
 - change schema shape or embedding dimensions
 - allow writeback sync to Proton
 - remove TLS verification or other security controls
-- replace the current Bridge build/runtime assumptions
+- replace the current Bridge runtime assumptions (the official app on
+  the host, reached over implicit TLS with a required fingerprint)
 - disable or weaken TLS verification in any service (`CERT_NONE`, `check_hostname = False`)
 - suppress or remove credential redaction from any log or error path
 - add hand-written parsing of attacker-controlled input (MIME, headers,
@@ -896,7 +802,6 @@ Suggested companion files:
 ## Repository Map
 
 ```text
-bridge/        ProtonBridge container
 mbsync/        Mail sync container
 indexer/       Parser, threader, embeddings, SQLite writer
 mcp-server/    MCP server and tool layer

@@ -34,13 +34,6 @@ updates:
 
   # Docker base images
   - package-ecosystem: docker
-    directory: /bridge
-    schedule:
-      interval: weekly
-      day: monday
-    labels: [dependencies, docker]
-
-  - package-ecosystem: docker
     directory: /mbsync
     schedule:
       interval: weekly

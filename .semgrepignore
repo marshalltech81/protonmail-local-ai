@@ -1,6 +1,6 @@
 # Replaces Semgrep's default ignore list, which skips test/ and tests/
-# directories: the shell test harnesses (bridge/tests, mbsync/tests,
-# scripts/tests) are scanned too. The rule fixtures under .semgrep/ are
+# directories: the shell test harnesses (mbsync/tests, scripts/tests)
+# are scanned too. The rule fixtures under .semgrep/ are
 # kept out by each rule's paths.exclude instead, so `semgrep test` still
 # reads them.
 :include .gitignore
