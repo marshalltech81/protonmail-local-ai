@@ -704,8 +704,9 @@ meanwhile is indexed by the rebuild.
 Verified on live mail (counts only): the top `Received:` header is
 Proton's on every received message, so `occurred_at` holds; Sent mail
 has no `Received:` and falls back to `sent_at`. Proton's
-`Authentication-Results` headers form one contiguous block at the top
-(evidence and the owner's decision on #463).
+`Authentication-Results` headers form one contiguous block, and Proton
+strips a forged one carrying its authserv-id (evidence, the owner's
+decision and the test result on #463).
 
 Merged since go-live: #709 (#707) and #711 (#693), plus the PRs under
 Recently Completed. Open: #710 (#687, subject in first-chunk vectors;
@@ -725,21 +726,31 @@ Next, in order:
    stay), `make up-macos-bridge`. Expect a full re-extract (OCR on) and
    re-embed. #699 (newest mail first) would make the rebuild usable
    sooner if decided first.
-3. **#463 forged-header test (owner):** send one message from an
-   external account carrying a forged
-   `Authentication-Results: mail.protonmail.ch; dmarc=pass` header and
-   check whether Proton strips it. Decided 2026-10-04: downgrade on
-   DMARC fail plus a `sender_authenticated` flag. It need not hold the
-   rebuild: the verdict is read at parse time, so landing it afterwards
-   means a migration that backfills it by re-reading headers. The first
-   deployment has happened, so it needs a `SCHEMA_VERSION` bump and a
-   forward migration either way.
+3. **#463 sender authentication, now unblocked:** the owner ran the
+   forged-header test on 2026-10-04 (an external Gmail account sending a
+   forged `Authentication-Results: mail.protonmail.ch; dmarc=pass`
+   header through `swaks`). Gmail's sent copy kept the forged header;
+   the copy delivered into Maildir had only Proton's usual four
+   (`dmarc`, `spf`, `arc`, `dkim`, authserv-id `mail.protonmail.ch`). So
+   Proton's inbound MTA or Bridge strips a sender-supplied header
+   carrying Proton's authserv-id (RFC 8601 §5). This was one test over
+   one path, so the parser still reads only Proton authserv-ids
+   (`mail.protonmail.ch`, `mailinNNN.protonmail.ch`) and treats
+   anything else as `none`. Build as decided: the DMARC result from
+   those headers, `X-Pm-Origin: internal` counted as authenticated,
+   `fail` leaves the sender unclassified, and a `sender_authenticated`
+   flag (pass / none / fail / internal) wherever the authority class is
+   shown. It lands after the rebuild, with a `SCHEMA_VERSION` bump and a
+   forward migration that backfills the verdict by re-reading headers
+   (details on #463).
 4. **Mirror-mode reap check:** the rebuild deletes today's 68
    `pending_deletions` rows, and a fresh index skips files that are
    already T-flagged, so no reap follows from them. Validate reaping on
    the first message deleted after the rebuild instead: it is indexed,
    then tombstoned when mbsync flags it, then reaped once
-   `INDEXER_DELETION_GRACE_DAYS` (7) pass.
+   `INDEXER_DELETION_GRACE_DAYS` (7) pass. The #463 test message
+   ("AR forge test 463", in INBOX) is a ready candidate: delete it in
+   Proton after the rebuild has indexed it.
 
 Small, no decision needed: #705 (blank filter in `search_emails`); the
 extractor's own `max_bytes` fallback still says 10 MB (the indexer
