@@ -243,8 +243,11 @@ _EXT_DISPATCH: dict[str, str] = {
     ".bmp": "image",
     ".webp": "image",
     ".gif": "image",
+    # Still HEIF images; pillow-heif also registers the sequence
+    # extensions ``.heics`` / ``.heifs``, which are not routed by name.
     ".heic": "image",
     ".heif": "image",
+    ".hif": "image",
 }
 
 # Image MIME types are routed to the image extractor unless OCR is

@@ -3593,12 +3593,39 @@ class TestHeicImages:
             ("application/octet-stream", "IMG_0001.heic"),
             ("application/octet-stream", "photo.HEIF"),
             ("", "photo.heic"),
+            # Review round 1: ``.hif`` (Canon / Fujifilm cameras) is a
+            # still HEIF that pillow-heif registers too.
+            ("application/octet-stream", "IMG_0001.HIF"),
+            ("", "photo.hif"),
         ],
     )
     def test_heic_routes_to_the_image_extractor(self, content_type, filename):
         from src.extractors import resolved_extractor_module
 
         assert resolved_extractor_module(content_type, filename) == "image"
+
+    @pytest.mark.parametrize("filename", ["burst.heics", "burst.heifs"])
+    def test_heif_sequence_extensions_are_not_routed(self, filename):
+        """``.heics`` / ``.heifs`` are image sequences (track-based, often
+        with no still primary image). They are not routed by extension; a
+        sequence sent with an ``image/`` MIME type still reaches the image
+        extractor, which reads at most its primary image."""
+        from src.extractors import resolved_extractor_module
+
+        assert resolved_extractor_module("application/octet-stream", filename) is None
+        assert resolved_extractor_module("image/heic-sequence", filename) == "image"
+
+    def test_extension_dispatch_covers_every_still_heif_extension_pillow_registers(self):
+        from PIL import Image
+        from src.extractors import (
+            _EXT_DISPATCH,
+            image,  # noqa: F401 - registers the opener
+        )
+
+        heif = {ext for ext, fmt in Image.registered_extensions().items() if fmt == "HEIF"}
+        sequences = {".heics", ".heifs"}
+        assert sequences <= heif
+        assert {ext for ext in heif - sequences if _EXT_DISPATCH.get(ext) != "image"} == set()
 
     def test_heic_photo_is_decoded_and_ocrd(self, monkeypatch):
         from src.extractors import image as image_module

@@ -26,7 +26,7 @@ from .entities import (
     organization_domain,
     person_entity_id,
 )
-from .extractors import OCR_DISABLED_ERROR, SCANNED_PDF_OCR_DISABLED_ERROR
+from .extractors import NO_EXTRACTOR_ERROR, OCR_DISABLED_ERROR, SCANNED_PDF_OCR_DISABLED_ERROR
 from .maildir import message_state
 from .threader import (
     FTS_SUBJECT_SCAN_CHARS,
@@ -1421,6 +1421,24 @@ class Database:
             ORDER BY m.filepath
             """,
             (OCR_DISABLED_ERROR, SCANNED_PDF_OCR_DISABLED_ERROR),
+        ).fetchall()
+
+    @_synchronized
+    def find_no_extractor_attachments(self) -> list[sqlite3.Row]:
+        """Every attachment occurrence whose cached extraction is the
+        "no extractor for this content type or filename extension"
+        result, with the same columns as ``find_ocr_disabled_attachments``."""
+        return self._conn.execute(
+            """
+            SELECT m.filepath, a.filename, a.content_type, e.extraction_error
+            FROM attachment_extractions e
+            JOIN attachments a ON a.attachment_id = e.attachment_id
+            JOIN message_thread_map m ON m.claimant_id = a.claimant_id
+            WHERE e.extraction_status = 'unsupported'
+              AND e.extraction_error = ?
+            ORDER BY m.filepath
+            """,
+            (NO_EXTRACTOR_ERROR,),
         ).fetchall()
 
     @_synchronized

@@ -3497,6 +3497,104 @@ class TestRequeueOcrDisabledExtractions:
         assert self._queued(db) == {paths["photo"]: REASON_INITIAL_SCAN}
 
 
+class TestRequeueNewlyDispatchedExtensions:
+    """#691 review round 1: an attachment whose only routing hint is its
+    filename extension (a ``.heic`` sent as ``application/octet-stream``)
+    was cached ``unsupported`` with no extractor before that extension
+    dispatched. The row carries no extractor version, so the ``image``
+    bump cannot mark it stale; the startup sweep must re-queue messages
+    whose occurrence now selects an extractor, once."""
+
+    _write_eml = staticmethod(TestRequeueOcrDisabledExtractions._write_eml)
+    _drain = TestRequeueOcrDisabledExtractions._drain
+    _queued = staticmethod(TestRequeueOcrDisabledExtractions._queued)
+
+    def _index_before_heic_dispatch(self, tmp_path, monkeypatch, messages):
+        from src import extractors
+
+        maildir = tmp_path / "maildir"
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        db = Database(tmp_path / "mail.db")
+        queue = _make_queue(db)
+        paths = {}
+        for name, (payload, ctype, filename) in messages.items():
+            path = maildir / "INBOX" / "cur" / f"{name}.eml"
+            self._write_eml(path, f"{name}@example.com", payload, ctype, filename)
+            queue.enqueue(str(path), REASON_INITIAL_SCAN)
+            paths[name] = str(path)
+        monkeypatch.setattr(main, "INDEXER_OCR_ENABLED", True)
+        monkeypatch.delitem(extractors._EXT_DISPATCH, ".heic")
+        self._drain(db, queue)
+        # The upgrade: ``.heic`` dispatches again.
+        monkeypatch.setitem(extractors._EXT_DISPATCH, ".heic", "image")
+        return db, queue, paths
+
+    def test_occurrence_whose_extension_now_dispatches_is_requeued_once(
+        self, tmp_path, monkeypatch
+    ):
+        from src import attachment_indexing
+        from src.extractors import NO_EXTRACTOR_ERROR, STATUS_SUCCESS, ExtractionResult
+
+        db, queue, paths = self._index_before_heic_dispatch(
+            tmp_path,
+            monkeypatch,
+            {
+                "photo": (b"synthetic heic bytes", "application/octet-stream", "IMG_0001.HEIC"),
+                "blob": (b"synthetic other bytes", "application/octet-stream", "blob.bin"),
+            },
+        )
+        rows = db._conn.execute(
+            "SELECT extraction_status, extractor, extraction_error FROM attachment_extractions"
+        ).fetchall()
+        assert [tuple(r) for r in rows] == [("unsupported", None, NO_EXTRACTOR_ERROR)] * 2
+        assert self._queued(db) == {}
+
+        assert main._requeue_stale_extractions(db, queue) == 1
+        assert self._queued(db) == {paths["photo"]: REASON_REEXTRACT}
+
+        extractor = MagicMock(
+            return_value=ExtractionResult(
+                status=STATUS_SUCCESS, extractor="image-ocr@3", text="photo words", error=None
+            )
+        )
+        monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
+        self._drain(db, queue)
+        assert extractor.call_count == 1
+
+        # The row is rewritten, so the next startup finds nothing; the
+        # ``.bin`` occurrence still selects no extractor and is never queued.
+        assert main._requeue_stale_extractions(db, queue) == 0
+        assert self._queued(db) == {}
+
+    def test_requeued_whatever_the_ocr_setting(self, tmp_path, monkeypatch):
+        """Selecting an extractor does not depend on OCR: with OCR off the
+        re-run records "OCR disabled", which the OCR sweep picks up later."""
+        db, queue, paths = self._index_before_heic_dispatch(
+            tmp_path,
+            monkeypatch,
+            {"photo": (b"synthetic heic bytes", "application/octet-stream", "IMG_0001.heic")},
+        )
+        monkeypatch.setattr(main, "INDEXER_OCR_ENABLED", False)
+        assert main._requeue_stale_extractions(db, queue) == 1
+        assert self._queued(db) == {paths["photo"]: REASON_REEXTRACT}
+
+    def test_pending_dead_and_disabled_extraction_are_left_alone(self, tmp_path, monkeypatch):
+        db, queue, paths = self._index_before_heic_dispatch(
+            tmp_path,
+            monkeypatch,
+            {"photo": (b"synthetic heic bytes", "application/octet-stream", "IMG_0001.heic")},
+        )
+        monkeypatch.setattr(main, "INDEXER_ATTACHMENT_EXTRACTION_ENABLED", False)
+        assert main._requeue_stale_extractions(db, queue) == 0
+        monkeypatch.setattr(main, "INDEXER_ATTACHMENT_EXTRACTION_ENABLED", True)
+        queue.enqueue(paths["photo"], REASON_INITIAL_SCAN)
+        for _ in range(queue.max_attempts):
+            queue.mark_failed(paths["photo"], stage="embed", error="x")
+        assert queue.is_dead(paths["photo"])
+        assert main._requeue_stale_extractions(db, queue) == 0
+        assert self._queued(db) == {}
+
+
 class TestPeriodicRecoverySkipsDeadLetter:
     """``_recover_zero_vector_threads(resurrect_dead=False)`` must
     preserve the durable queue's bounded-retry contract.
