@@ -3362,3 +3362,196 @@ class TestMailContentStaysOutOfLogsAndErrors:
         assert "PDF OCR fallback failed" in caplog.text
         self._assert_absent("SYNTHETIC_OCR_MARKER", caplog, result)
         self._assert_absent("SYNTHETIC_FILENAME_MARKER", caplog, result)
+
+
+@pytest.fixture
+def library_logger_levels():
+    """Start the pypdf and PIL loggers at NOTSET and restore their levels
+    afterwards, so a test can show the library logs before the guard
+    runs. ``setLevel`` (not attribute assignment) clears the logging
+    module's per-logger level cache."""
+    import logging
+
+    loggers = [logging.getLogger(name) for name in ("pypdf", "PIL")]
+    saved = [logger.level for logger in loggers]
+    for logger in loggers:
+        logger.setLevel(logging.NOTSET)
+    yield
+    for logger, level in zip(loggers, saved, strict=True):
+        logger.setLevel(level)
+
+
+def _pdf_with_marker_font() -> bytes:
+    """A one-page digital PDF whose font names a marker base font and a
+    marker encoding pypdf does not implement, so pypdf's ``_cmap`` logger
+    reports the encoding name it read from the document."""
+    import io
+
+    from pypdf import PdfWriter
+    from pypdf.generic import ContentStream, DictionaryObject, NameObject
+
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=612, height=792)
+    stream = ContentStream(None, writer)
+    stream._data = b"BT /F1 12 Tf 72 720 Td (Invoice number 42 with enough digital text) Tj ET"
+    page[NameObject("/Contents")] = stream
+    font = DictionaryObject(
+        {
+            NameObject("/Type"): NameObject("/Font"),
+            NameObject("/Subtype"): NameObject("/Type1"),
+            NameObject("/BaseFont"): NameObject("/MARKER690+Helvetica"),
+            NameObject("/Encoding"): NameObject("/MARKER690Encoding"),
+        }
+    )
+    page[NameObject("/Resources")] = DictionaryObject(
+        {NameObject("/Font"): DictionaryObject({NameObject("/F1"): font})}
+    )
+    buf = io.BytesIO()
+    writer.write(buf)
+    return buf.getvalue()
+
+
+def _xlsx_with_out_of_range_date() -> bytes:
+    """A workbook whose date-formatted cell holds a serial value outside
+    the date range, so openpyxl warns with the value it read."""
+    import io
+
+    import openpyxl
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws["A1"] = 987654321690.0
+    ws["A1"].number_format = "yyyy-mm-dd"
+    ws["A2"] = "hello"
+    buf = io.BytesIO()
+    wb.save(buf)
+    wb.close()
+    return buf.getvalue()
+
+
+def _tiff_with_bad_tag_count() -> bytes:
+    """A TIFF whose ImageWidth tag has two entries: Pillow warns with the
+    tag number and the count read from the file, then fails to open it."""
+    import struct
+
+    entries = [(256, 3, 2, 0), (257, 3, 1, 10), (258, 3, 1, 8), (262, 3, 1, 1)]
+    ifd = struct.pack("<H", len(entries))
+    for tag, typ, count, value in entries:
+        ifd += struct.pack("<HHII", tag, typ, count, value)
+    data = b"II*\x00" + struct.pack("<I", 8) + ifd + b"\x00\x00\x00\x00"
+    return data.ljust(300, b"\x00")
+
+
+class TestDocumentLibraryOutputIsSilenced:
+    """#690: pypdf, Pillow and openpyxl log or warn with values read from
+    the document (font dictionaries, encoding names, cell values, TIFF
+    tags). The indexer's logging setup silences them; the dispatcher's
+    own fixed-text logging and ``failed`` status still report outcomes.
+
+    Each test first runs the extraction without the guard to show the
+    library does emit the document value, then with it."""
+
+    XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+    def test_logging_setup_raises_library_logger_levels(self):
+        import importlib
+        import logging
+
+        # The module-level setup runs when ``src.main`` is imported.
+        importlib.import_module("src.main")
+        assert logging.getLogger("pypdf").level == logging.CRITICAL
+        assert logging.getLogger("PIL").level == logging.CRITICAL
+
+    def test_pypdf_document_values_stay_out_of_the_log(self, caplog, library_logger_levels):
+        import warnings
+
+        from src import main
+
+        payload = _pdf_with_marker_font()
+        caplog.set_level("DEBUG")
+        before = extract(content_type="application/pdf", filename="a.pdf", payload=payload)
+        assert "MARKER690" in caplog.text
+        assert "pypdf._cmap" in caplog.text
+
+        caplog.clear()
+        with warnings.catch_warnings():
+            main.quiet_document_libraries()
+            after = extract(content_type="application/pdf", filename="a.pdf", payload=payload)
+
+        assert after == before
+        assert after.status == STATUS_SUCCESS
+        assert after.text == "Invoice number 42 with enough digital text"
+        assert "MARKER690" not in caplog.text
+        assert "pypdf" not in caplog.text
+        assert "Advanced encoding" not in caplog.text
+
+    def test_openpyxl_cell_values_stay_out_of_warnings(self):
+        import warnings
+
+        from src import main
+
+        payload = _xlsx_with_out_of_range_date()
+        with warnings.catch_warnings(record=True) as control:
+            warnings.simplefilter("always")
+            before = extract(content_type=self.XLSX, filename="a.xlsx", payload=payload)
+        assert any("987654321690" in str(w.message) for w in control)
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            main.quiet_document_libraries()
+            after = extract(content_type=self.XLSX, filename="a.xlsx", payload=payload)
+
+        assert after == before
+        assert after.status == STATUS_SUCCESS
+        assert not [w for w in caught if "987654321690" in str(w.message)]
+        assert not [w for w in caught if "openpyxl" in w.filename]
+
+    def test_pillow_tag_values_stay_out_and_failure_still_surfaces(
+        self, caplog, library_logger_levels
+    ):
+        import warnings
+
+        from src import main
+
+        payload = _tiff_with_bad_tag_count()
+        caplog.set_level("DEBUG")
+        with warnings.catch_warnings(record=True) as control:
+            warnings.simplefilter("always")
+            before = extract(content_type="image/tiff", filename="a.tiff", payload=payload)
+        assert any("Metadata Warning" in str(w.message) for w in control)
+
+        caplog.clear()
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            main.quiet_document_libraries()
+            after = extract(content_type="image/tiff", filename="a.tiff", payload=payload)
+
+        assert after == before
+        # The failure is still reported, by the dispatcher's own
+        # fixed-text log line and status, not by the silenced library.
+        assert after.status == STATUS_FAILED
+        assert after.error == "UnidentifiedImageError"
+        assert "UnidentifiedImageError" in caplog.text
+        assert not [w for w in caught if "Metadata Warning" in str(w.message)]
+        assert not [w for w in caught if "/PIL/" in w.filename]
+
+    def test_decompression_bomb_still_fails_under_the_guard(self, monkeypatch):
+        """The image extractor promotes ``DecompressionBombWarning`` to an
+        error in its own ``catch_warnings`` scope; the guard's Pillow
+        ``ignore`` filter must not swallow it."""
+        import io
+        import warnings
+
+        from PIL import Image
+        from src import main
+
+        monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 1500)
+        buf = io.BytesIO()
+        Image.new("RGB", (50, 50), color="white").save(buf, format="PNG")
+
+        with warnings.catch_warnings():
+            main.quiet_document_libraries()
+            result = extract(content_type="image/png", filename="a.png", payload=buf.getvalue())
+
+        assert result.status == STATUS_FAILED
+        assert result.error == "DecompressionBombWarning"

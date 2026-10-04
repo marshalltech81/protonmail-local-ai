@@ -32,6 +32,7 @@ import sqlite3
 import threading
 import time
 import urllib.parse
+import warnings
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -105,6 +106,25 @@ logging.basicConfig(
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
 )
 log = logging.getLogger("indexer")
+
+
+def quiet_document_libraries() -> None:
+    """Keep third-party document parsers' per-document output out of the log.
+
+    pypdf and Pillow log, and openpyxl and Pillow warn, with values read
+    from the attachment: font dictionaries, encoding names, cell values,
+    TIFF tags (#690). The extractors' own fixed-text logging and the
+    ``attachment_extractions`` status still report every outcome. The
+    image extractor's ``DecompressionBombWarning``-to-error filter is set
+    inside its own ``catch_warnings`` scope, so it still takes precedence.
+    """
+    for name in ("pypdf", "PIL"):
+        logging.getLogger(name).setLevel(logging.CRITICAL)
+    for package in ("openpyxl", "PIL"):
+        warnings.filterwarnings("ignore", module=rf"{package}(\.|$)")
+
+
+quiet_document_libraries()
 
 MAILDIR_PATH = Path(os.environ.get("MAILDIR_PATH", "/maildir"))
 SQLITE_PATH = Path(os.environ.get("SQLITE_PATH", "/data/mail.db"))
