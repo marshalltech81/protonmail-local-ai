@@ -433,7 +433,7 @@ def test_cached_too_large_extraction_is_re_run_once_the_payload_fits(tmp_path, m
             "claimant_id": "message@example.com",
             "thread_id": "thread-1",
             "db": db,
-            "embedder": make_mock_embedder(),
+            "embedder": make_mock_embedder([0.1] * EMBEDDING_DIM),
             "chunk_target_tokens": 350,
             "chunk_max_tokens": 500,
             "chunk_overlap_tokens": 60,
