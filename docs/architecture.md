@@ -519,11 +519,13 @@ on per-row magnitude.
 The stored `body_text` on `threads` still feeds FTS5 over the full
 accumulated thread content (users legitimately search quoted text and
 signatures). Chunk inputs are first passed through
-`strip_for_embedding` (`indexer/src/quoting.py`) so chunk vectors track
-substantive content of each reply rather than accumulated quoted
-history. Stripping is intentionally conservative: quoted text is still
-searchable through FTS and falls back to the original body when the
-stripped result would be empty.
+`segment_for_embedding` (`indexer/src/quoting.py`), which keeps a
+message's own text as its `body` and leaves quotes, signatures and
+forwarded text out of it, so chunk vectors track substantive content of
+each reply rather than accumulated quoted history. Stripping is
+intentionally conservative: quoted text is still searchable through FTS,
+and a message with no body text falls back to its whole original body
+rather than an empty embedding input.
 
 **Chunk kinds (#646).** Segmentation happens before chunking, so a
 chunk never spans kinds: `segment_for_embedding` (same module) splits
@@ -534,17 +536,17 @@ chunker and by a `CHECK` constraint:
 
 | Kind | Text |
 |---|---|
-| `body` | the message's own text (what `strip_for_embedding` keeps) |
+| `body` | the message's own text: every other line before the first marker, with `>` and reply-header lines left out |
 | `quote` | `>` lines, reply-header lines, and everything from an Outlook reply block or `-----Original Message-----` on |
 | `signature` | from the RFC 3676 `-- ` delimiter on |
 | `forwarded` | from a forward preamble (`---------- Forwarded message ---------`, `Begin forwarded message:`) on |
 | `calendar` | reserved: nothing produces it yet, since a `text/calendar` part inside a multipart is not body text and has no attachment extractor |
 | `attachment` | text extracted from an attachment (exactly the rows with `attachment_id` set) |
 
-The kinds come from the same line rules `strip_for_embedding` applies;
-there is no new parsing. What is chunked is unchanged: a message with
-body text is chunked as one `body` run, its quotes, signature and
-forwarded text left out as before. Only a message with no body text
+The kinds come from the line rules above; there is no new parsing.
+What is chunked is unchanged: a message with body text is chunked as
+one `body` run, its quotes, signature and forwarded text left out as
+before. Only a message with no body text
 (the fallback case above) is chunked as its non-body runs, each with
 its kind, instead of as one undifferentiated body; its two-line wrapped
 reply headers are dropped there as they are from body text. Such a

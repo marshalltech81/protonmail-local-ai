@@ -2,10 +2,11 @@
 Shape catalogue for body segmentation before chunking (#646).
 
 Pins what the embedding path chunks for each shape of body: the text
-``strip_for_embedding`` keeps and the chunk IDs (which bind each chunk's
-index and text) that ``chunk_message`` produces from it. The digests
-were taken on ``main`` before chunk kinds were added, so a shape whose
-digest moves is a shape whose stored chunks moved. Synthetic text only.
+the path before chunk kinds chunked as one body (``_historical_input``)
+and the chunk IDs (which bind each chunk's index and text) that
+``chunk_message`` produces from it. The digests were taken on ``main``
+before chunk kinds were added, so a shape whose digest moves is a shape
+whose stored chunks moved. Synthetic text only.
 """
 
 import hashlib
@@ -24,7 +25,6 @@ from src.quoting import (
     _MAX_FALLBACK_SEGMENTS,
     Segment,
     segment_for_embedding,
-    strip_for_embedding,
 )
 
 from tests.test_chunker import MAX_TOKENS_SHAPES, _catalogue_cases
@@ -106,8 +106,20 @@ SHAPES: dict[str, str] = {
 _TARGET, _MAX, _OVERLAP = 60, 90, 15
 
 
+def _historical_input(body: str) -> str:
+    """Return the text the path before chunk kinds chunked as one body.
+
+    That is the ``body`` segment when there is one, else the whole
+    original: with no body text, the old entry point fell back on it.
+    """
+    segments = segment_for_embedding(body)
+    if [s.kind for s in segments] == ["body"]:
+        return segments[0].text
+    return body
+
+
 def _pin(body: str) -> str:
-    stripped = strip_for_embedding(body)
+    stripped = _historical_input(body)
     chunks = chunk_message(
         message_pk="m1",
         body_text=stripped,
@@ -178,8 +190,8 @@ def _production_chunks(body: str):
     return segments, chunks
 
 
-# Shapes with no body text: ``strip_for_embedding`` falls back on the whole
-# original, which the indexer now chunks as its kind runs, so these move.
+# Shapes with no body text: the path before chunk kinds fell back on the
+# whole original, which the indexer now chunks as its kind runs, so these move.
 FALLBACK_KINDS: dict[str, list[str]] = {
     "empty": [],
     "whitespace_only": [],
@@ -200,7 +212,7 @@ class TestProductionPathMatchesPin:
     def test_body_shape_is_one_body_segment_with_pinned_chunks(self, name):
         body = SHAPES[name]
         segments, chunks = _production_chunks(body)
-        assert segments == [Segment("body", strip_for_embedding(body))]
+        assert [s.kind for s in segments] == ["body"]
         digest = hashlib.sha256(segments[0].text.encode())
         for c in chunks:
             digest.update(b"\x00" + c.chunk_id.encode())
@@ -242,7 +254,7 @@ class TestFallbackSegments:
     @pytest.mark.parametrize("name", sorted(MIXED_FALLBACK))
     def test_runs_get_their_kinds(self, name):
         body, kinds = MIXED_FALLBACK[name]
-        assert strip_for_embedding(body) == body  # a fallback shape
+        assert "body" not in kinds  # a fallback shape
         assert [s.kind for s in segment_for_embedding(body)] == kinds
 
     @pytest.mark.parametrize("name", sorted(MIXED_FALLBACK))
@@ -364,8 +376,7 @@ class TestKindValidation:
 
 
 class TestSegmentationWorkBound:
-    @pytest.mark.parametrize("fn", [strip_for_embedding, segment_for_embedding])
-    def test_body_text_stops_the_scan_at_the_first_marker(self, monkeypatch, fn):
+    def test_body_text_stops_the_scan_at_the_first_marker(self, monkeypatch):
         # Review round 1: a message with body text then a marker and a
         # huge tail is not classified past the marker, as before kinds:
         # only the lines up to the marker are checked.
@@ -381,8 +392,7 @@ class TestSegmentationWorkBound:
 
         monkeypatch.setattr(quoting, "_hard_cut_kind", counting_cut)
         body = "hello\n-- \n" + "x\n" * 200_000
-        result = fn(body)
-        assert result in ("hello", [Segment("body", "hello")])
+        assert segment_for_embedding(body) == [Segment("body", "hello")]
         assert calls == 2
 
     def test_fallback_runs_are_coalesced_while_scanning(self, monkeypatch):
