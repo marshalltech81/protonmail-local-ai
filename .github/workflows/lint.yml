@@ -31,8 +31,11 @@ jobs:
           python-version: "3.14"
           cache: "pip"
 
+      # Exact pin for the pre-commit runner itself (the hook revs are pinned
+      # in .pre-commit-config.yaml). Dependabot does not track a pip install
+      # in a run step, so bump this version by hand.
       - name: Install pre-commit
-        run: python -m pip install pre-commit
+        run: python -m pip install pre-commit==4.6.2
 
       - name: Run pre-commit
         run: pre-commit run --all-files --show-diff-on-failure
@@ -68,12 +71,30 @@ jobs:
         with:
           python-version: "3.14"
 
+      # The Ruff version comes from the ruff-pre-commit rev in
+      # .pre-commit-config.yaml, the single source of truth, so this job and
+      # the pre-commit hook always run the same Ruff. Without an explicit
+      # version, ruff-action would install the latest release. Fail if the
+      # rev cannot be read rather than fall back to an unpinned Ruff.
+      - name: Read Ruff version from .pre-commit-config.yaml
+        id: ruff-version
+        run: |
+          version="$(awk '/repo: https:\/\/github.com\/astral-sh\/ruff-pre-commit$/ { found = 1; next } found && /rev:/ { print $2; exit }' .pre-commit-config.yaml)"
+          version="${version#v}"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            printf 'Could not read an exact ruff-pre-commit rev from .pre-commit-config.yaml\n' >&2
+            exit 1
+          fi
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+
       - uses: astral-sh/ruff-action@278981a28ce3188b1e39527901f38254bf3aac89 # v4.1.0
         with:
+          version: ${{ steps.ruff-version.outputs.version }}
           args: "check ."
 
       - uses: astral-sh/ruff-action@278981a28ce3188b1e39527901f38254bf3aac89 # v4.1.0
         with:
+          version: ${{ steps.ruff-version.outputs.version }}
           args: "format --check ."
 
   compileall:
