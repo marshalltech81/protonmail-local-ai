@@ -37,6 +37,7 @@
     {"id": "vec-passenger", "query": "pasenger", "required_evidence": [["t08"]], "max_rank": 3, "vector_only": true},
     {"id": "multi-kayak", "query": "tandem kayak boats cost headcount", "required_evidence": [["t21"], ["t22"]], "max_rank": 1},
     {"id": "multi-painting", "query": "exterior painting quote crew start date", "required_evidence": [["t25"], ["t26"]], "max_rank": 1},
+    {"id": "subject-only-topic", "query": "Bluewater leaving", "required_evidence": [["t33"]], "max_rank": 3},
     {"id": "multi-lisbon-trip", "query": "Lisbon trip flight and hotel dates", "required_evidence": [["t08"], ["t09"]], "max_rank": 2},
     {"id": "alt-cabin-address", "query": "cabin street address Hemlock Ridge", "required_evidence": [["t27", "t28"]], "max_rank": 1},
     {"id": "attach-only-rent", "query": "new monthly rent", "required_evidence": [["t23"]], "max_rank": 3, "evidence": "$2,140"},

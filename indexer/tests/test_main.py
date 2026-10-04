@@ -6216,9 +6216,35 @@ class TestReplySubjectSearchable:
         for text in texts[1:]:
             assert text in inputs
         assert [t for t in inputs if self.TOKEN in t] == [prefix + texts[0]]
-        # Unchanged subjects add nothing.
-        assert "Body of root@example.com." in inputs
-        assert "Body of same@example.com." in inputs
+
+    def test_unchanged_subjects_reach_the_embed_input_too(self, tmp_path):
+        """#687: the root and a reply keeping the thread subject carry
+        their own subject as well, so a topic named only in the subject
+        is in a vector. Stored chunks stay body-only."""
+        db, *_, inputs = self._index_thread(tmp_path)
+        assert "Subject: Budget review\n\nBody of root@example.com." in inputs
+        assert "Subject: RE: Fwd: budget  review\n\nBody of same@example.com." in inputs
+        assert "Body of root@example.com." not in inputs
+        stored = {r[0] for r in db._conn.execute("SELECT text FROM message_chunks")}
+        assert not any("Subject:" in t for t in stored)
+
+    def test_single_message_thread_embeds_its_subject(self, tmp_path):
+        path = tmp_path / "INBOX" / "cur" / "solo.eml"
+        _write_eml(path, "solo@example.com", "Re: Dana leaving", body="Thanks, will pass it on.")
+        db = Database(tmp_path / "mail.db")
+        embedder = make_mock_embedder(_UNIT_VECTOR)
+        assert _index_one(path, db, embedder, Threader(db))[0]
+        inputs = [t for call in embedder.embed_batch.call_args_list for t in call.args[0]]
+        assert inputs == ["Subject: Re: Dana leaving\n\nThanks, will pass it on."]
+
+    def test_blank_subject_adds_no_prefix(self, tmp_path):
+        path = tmp_path / "INBOX" / "cur" / "blank.eml"
+        _write_eml(path, "blank@example.com", "  ", body="Body only.")
+        db = Database(tmp_path / "mail.db")
+        embedder = make_mock_embedder(_UNIT_VECTOR)
+        assert _index_one(path, db, embedder, Threader(db))[0]
+        inputs = [t for call in embedder.embed_batch.call_args_list for t in call.args[0]]
+        assert inputs == ["Body only."]
 
     def test_reindexing_the_reply_embeds_nothing_new(self, tmp_path):
         db, embedder, threader, (_root, changed, _same), _ = self._index_thread(tmp_path)
