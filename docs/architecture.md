@@ -588,16 +588,21 @@ thread's after `Re:`/`Fwd:` normalization, is kept searchable (#303):
   `FTS_SUBJECT_SCAN_ROWS` subjects of the thread, each cut to
   `FTS_SUBJECT_SCAN_CHARS` characters, so a change first seen past
   those bounds is not added.
-- Semantic: the embedding input of the reply's first body chunk is
-  prefixed with `Subject: <its subject>`, cut so the input stays within
+- Semantic: the embedding input of every message's first body chunk,
+  renamed reply or not, is prefixed with `Subject: <its subject>`
+  (#687), so a topic named only in a subject reaches the chunk vector
+  and the thread vector. The prefix is cut so the input stays within
   `INDEXER_CHUNK_MAX_TOKENS` and dropped when the chunk alone is at that
-  ceiling. The stored chunk text, offsets and chunk ID stay body-only,
-  since chunks are the authoritative body store (`get_message`,
-  `query_messages(text=...)`).
+  ceiling or the subject is blank. The stored chunk text, offsets and
+  chunk ID stay body-only, since chunks are the authoritative body store
+  (`get_message`, `query_messages(text=...)`). Because the chunk ID does
+  not cover the embedding input, an index built before #687 keeps its
+  old vectors until it is rebuilt from Maildir.
 
-A renamed reply with no body text (for example attachment-only) has no
-body chunk to carry the prefix, so its subject is keyword-searchable
-only, with no semantic representation.
+A message with no body text (for example attachment-only) has no body
+chunk to carry the prefix, so its subject is keyword-searchable only,
+with no semantic representation unless the thread has no chunks at all
+and falls back to a subject-only vector.
 
 **Message body assembly (#295, #298):** a message's body text is every
 non-blank inline `text/plain` and `text/html` part outside attachments
