@@ -479,9 +479,10 @@ class OpenAIEmbedder:
         """Embed ``chunks`` with up to ``concurrency`` requests in flight (#713).
 
         Only this thread submits requests, and only as earlier ones
-        finish. Before refilling a slot it collects every request that
-        has finished, not only those ``wait`` reported, so a failure
-        that finished alongside a success stops new requests. Requests
+        finish. Immediately before each new request it collects every
+        request that has finished, after the callbacks for earlier ones
+        have run, so a failure that finished alongside a success or
+        during a callback stops new requests. Requests
         still in flight are waited for (each is bounded by the request
         timeout and its retries) and their results discarded; the
         failure then propagates as on the sequential path.
@@ -493,16 +494,22 @@ class OpenAIEmbedder:
         next_chunk = 0
         with ThreadPoolExecutor(max_workers=self.concurrency) as pool:
             while next_chunk < len(chunks) or pending:
-                # ``result()`` re-raises the request's exception; leaving
-                # the ``with`` block waits for the rest.
-                for future in [f for f in pending if f.done()]:
-                    results[pending.pop(future)] = future.result()
-                    if on_batch_complete is not None:
-                        on_batch_complete()
-                while next_chunk < len(chunks) and len(pending) < self.concurrency:
+                # Collect until a pass finds nothing finished, so the
+                # check below runs after every callback. ``result()``
+                # re-raises the request's exception; leaving the ``with``
+                # block waits for the rest.
+                finished = [f for f in pending if f.done()]
+                while finished:
+                    for future in finished:
+                        results[pending.pop(future)] = future.result()
+                        if on_batch_complete is not None:
+                            on_batch_complete()
+                    finished = [f for f in pending if f.done()]
+                if next_chunk < len(chunks) and len(pending) < self.concurrency:
+                    # One request per pass, each after a fresh collect.
                     pending[pool.submit(self._embed_one_batch, chunks[next_chunk])] = next_chunk
                     next_chunk += 1
-                if pending:
+                elif pending:
                     wait(pending, return_when=FIRST_COMPLETED)
         return [
             vec for chunk_vectors in results if chunk_vectors is not None for vec in chunk_vectors
