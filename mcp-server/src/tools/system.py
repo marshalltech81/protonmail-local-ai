@@ -214,6 +214,8 @@ def get_mailbox_status() -> dict:
 
     Opens the local SQLite index directly (in read-only URI mode, same as
     the running MCP server) and returns the same fields the tool does.
+    On failure it reports the exception type alone, as the tool does: the
+    message can quote stored values (#732).
     """
     import os
 
@@ -222,5 +224,5 @@ def get_mailbox_status() -> dict:
     try:
         output = _mailbox_status(Database(os.environ.get("SQLITE_PATH", "/data/mail.db")))
     except Exception as e:
-        return {"status": "error", "error": str(e)}
+        return {"status": "error", "error": f"Mailbox status error: {type(e).__name__}"}
     return {"status": "ok", **output.model_dump(mode="json")}
