@@ -1280,7 +1280,7 @@ class TestFindContact:
         handler = _handlers(fake_server, seeded_db)["find_contact"]
         out = asyncio.run(handler(query="alice"))
         assert "Organization: example.com" in _text(out)
-        assert out.structuredContent["contacts"][0]["organization"] == "example.com"
+        assert out.structured_content["contacts"][0]["organization"] == "example.com"
 
     def test_no_match_returns_empty_sentinel(self, fake_server, seeded_db):
         handler = _handlers(fake_server, seeded_db)["find_contact"]
@@ -1332,7 +1332,7 @@ class TestFindContact:
         seeded_db.find_contact = many  # type: ignore[assignment]
         handler = _handlers(fake_server, seeded_db)["find_contact"]
         out = asyncio.run(handler(query="alias"))
-        contact = out.structuredContent["contacts"][0]
+        contact = out.structured_content["contacts"][0]
         assert contact["name_count"] == 30
         assert contact["thread_count"] == 30
         assert len(contact["names"]) == MAX_LISTED

@@ -1345,12 +1345,13 @@ class TestDelimiterEscapeLookalikeLetters:
         import sys
         import unicodedata
 
-        from src.tools.intelligence import _INVISIBLE_CATEGORIES, _INVISIBLE_RE
+        from src.tools.intelligence import _INVISIBLE_CATEGORIES, _INVISIBLE_CLASS
 
+        invisible_re = re.compile(f"[{_INVISIBLE_CLASS}]")
         mismatched = [
             hex(c)
             for c in range(sys.maxunicode + 1)
-            if bool(_INVISIBLE_RE.fullmatch(chr(c)))
+            if bool(invisible_re.fullmatch(chr(c)))
             != (
                 unicodedata.category(chr(c)) in _INVISIBLE_CATEGORIES
                 or any(start <= c <= end for start, end in _DEFAULT_IGNORABLE)

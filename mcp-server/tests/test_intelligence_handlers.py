@@ -929,7 +929,7 @@ class TestFailuresAreErrorResults:
         args = {**_TOOL_ARGS[tool], "date_from": "2025-01-01", "date_to": "2024-01-01"}
         llm = FakeInferenceClient()
         result = _wire_call(seeded_db, llm, tool, args)
-        assert result.isError
+        assert result.is_error
         assert "date_from must not be after date_to" in result.content[0].text
         assert llm.complete_calls == []
 

@@ -588,7 +588,6 @@ def _invisible_class() -> str:
 
 
 _INVISIBLE_CLASS = _invisible_class()
-_INVISIBLE_RE = re.compile(f"[{_INVISIBLE_CLASS}]")
 
 # A candidate tag inside untrusted content: an ``_LT_SPELLINGS`` bracket,
 # optional whitespace or invisible characters and an ``_SLASH_SPELLINGS``
@@ -947,19 +946,6 @@ def _sort_labels(labels: Iterable[str], known: Container[str]) -> tuple[list[str
             seen.add(label)
             (used if label in known else unknown).append(label)
     return used, unknown
-
-
-def _check_citations(answer: str, known: Container[str]) -> tuple[list[str], list[str]]:
-    """Labels ``answer`` cites, split into those in ``known`` and the
-    rest, each in first-cited order without repeats. One linear scan."""
-    return _sort_labels(
-        (
-            label
-            for match in _CITATION_RE.finditer(answer)
-            for label in _LABEL_RE.findall(match.group(1))
-        ),
-        known,
-    )
 
 
 # --- statement coverage and quote checks (#284) --------------------------

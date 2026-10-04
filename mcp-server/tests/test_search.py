@@ -1072,8 +1072,8 @@ class TestGetEvidence:
         handler = self._handler(fake_server, fake_embed, chunked_db)
         wanted = _MAX_ASK_THREADS * PROMPT_EVIDENCE_CHUNKS_PER_THREAD
         out = asyncio.run(handler(query="invoice", limit=wanted))
-        assert out.structuredContent["chunk_count"] == wanted
-        assert len(out.structuredContent["threads"]) == _MAX_ASK_THREADS
+        assert out.structured_content["chunk_count"] == wanted
+        assert len(out.structured_content["threads"]) == _MAX_ASK_THREADS
 
     def test_db_error_returns_evidence_error(self, fake_server, fake_embed, chunked_db):
         def boom(**_kwargs):
@@ -1424,14 +1424,14 @@ class TestFolderFilterMatchesListThreads:
         listed = {t.thread_id for t in cross_folder_db.list_threads(folder=folder)}
         handler = _handler(fake_server, fake_embed, cross_folder_db)
         out = asyncio.run(handler(query="ledger", mode=mode, folders=[folder]))
-        assert {r["thread_id"] for r in out.structuredContent["results"]} == listed
+        assert {r["thread_id"] for r in out.structured_content["results"]} == listed
 
     @pytest.mark.parametrize("folder", FOLDERS)
     def test_get_evidence_mailbox_wide(self, fake_server, fake_embed, cross_folder_db, folder):
         listed = {t.thread_id for t in cross_folder_db.list_threads(folder=folder)}
         register_search_tools(fake_server, cross_folder_db, fake_embed)
         out = asyncio.run(fake_server.tools["get_evidence"](query="ledger", folders=[folder]))
-        assert {t["thread_id"] for t in out.structuredContent["threads"]} == listed
+        assert {t["thread_id"] for t in out.structured_content["threads"]} == listed
 
 
 @pytest.mark.parametrize(

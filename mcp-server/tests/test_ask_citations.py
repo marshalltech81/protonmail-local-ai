@@ -28,7 +28,6 @@ from src.tools.intelligence import (
     EvidenceRef,
     _build_evidence,
     _check_answer,
-    _check_citations,
     register_intelligence_tools,
 )
 from src.tools.search import register_search_tools
@@ -200,11 +199,10 @@ class TestPromptLabels:
 
 
 class TestValidation:
-    def test_check_citations_reports_used_and_unknown(self):
-        known = {"E1", "E2"}
-        used, unknown = _check_citations("a [E2] b [E1, E9] c [E2] d [E10;E1]", known)
-        assert used == ["E2", "E1"]
-        assert unknown == ["E9", "E10"]
+    def test_check_answer_reports_used_and_unknown(self):
+        check = _check_answer("a [E2] b [E1, E9] c [E2] d [E10;E1]", _evidence("E1", "E2"))
+        assert check.used == ["E2", "E1"]
+        assert check.unknown == ["E9", "E10"]
 
     def test_valid_answer_returns_citations_without_repair(self, cite_db):
         llm = FakeInferenceClient(response="The budget is 700 units [E1].")
@@ -509,6 +507,16 @@ def _ref(
         message_date="2024-03-01T09:00:00+00:00",
     )
     return EvidenceRef(label, "t", chunk, len(text), text)
+
+
+def _evidence(*labels: str) -> dict[str, EvidenceRef]:
+    """Supplied passages under ``labels``, for checks that read labels only."""
+    return {
+        label: _ref(
+            label, "Shipping moved.", message=f"{label}@example.com", sender="a@example.com"
+        )
+        for label in labels
+    }
 
 
 # Two senders, each with a body chunk at index 0, and two attachments
@@ -1189,9 +1197,11 @@ class TestLongLabels:
 
     @pytest.mark.parametrize("label", ["E1", "E12", "E123", "E1234"])
     def test_one_to_four_digit_labels_are_read_as_before(self, label):
-        known = {"E1", "E12", "E123", "E1234"}
-        assert _check_citations(f"Moved [{label}].", known) == ([label], [])
-        assert _check_citations(f"Moved [{label}, E9].", known) == ([label], ["E9"])
+        known = _evidence("E1", "E12", "E123", "E1234")
+        check = _check_answer(f"Moved [{label}].", known)
+        assert (check.used, check.unknown) == ([label], [])
+        check = _check_answer(f"Moved [{label}, E9].", known)
+        assert (check.used, check.unknown) == ([label], ["E9"])
 
     @pytest.mark.parametrize(
         ("answer", "used", "unknown"),
@@ -1202,7 +1212,8 @@ class TestLongLabels:
         ],
     )
     def test_a_label_of_five_or_more_digits_is_unknown(self, answer, used, unknown):
-        assert _check_citations(answer, {"E1", "E2"}) == (used, unknown)
+        check = _check_answer(answer, _evidence("E1", "E2"))
+        assert (check.used, check.unknown) == (used, unknown)
 
     def test_a_statement_citing_only_a_long_label_is_invalid_not_uncited(self):
         check = _check_answer("Shipping was on Friday [E1]. It moved again [E10000].", _EVIDENCE)
