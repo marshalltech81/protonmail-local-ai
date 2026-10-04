@@ -135,9 +135,10 @@ before.
   thread with one message in Trash and a reply in INBOX stays, and its
   Trash message's passages can still appear as evidence. Passing
   `folders` replaces the default, so `folders=["Trash"]` searches
-  Trash and `folders=["INBOX", "Trash"]` both. `search_emails`
-  resolves `from_name` over the same scope, so a sender whose mail is
-  all in Trash is not chosen for a default search.
+  Trash and `folders=["INBOX", "Trash"]` both. `search_emails`,
+  `ask_mailbox` and `extract_from_emails` resolve `from_name` over the
+  same scope, so a sender whose mail is all in Trash is not chosen for a
+  default search.
 - Message tools leave out the messages filed in Trash: `query_messages`
   without `folder` (pass `folder="Trash"` to list them) and
   `search_attachments`, which has no folder filter.
@@ -315,12 +316,13 @@ chunks (extracted PDF / OCR / document text) are included — unlike
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `query` | string | required | The question or topic to gather evidence for |
-| `thread_id` | string | none | Scope evidence to one thread; omit to search the whole mailbox. Rejected in combination with `folders`, `from_addr`, `date_from`, `date_to`, `has_attachments` or `max_threads`, which select threads |
+| `thread_id` | string | none | Scope evidence to one thread; omit to search the whole mailbox. Rejected in combination with `folders`, `from_addr`, `participant`, `date_from`, `date_to`, `has_attachments` or `max_threads`, which select threads |
 | `folders` | list | all but Trash | Scope to threads with a message in any of these folders (the membership `list_threads` uses). Without it, threads filed only in Trash are left out; name `"Trash"` to include them ([Trash](#trash-is-left-out-by-default)) |
 | `from_addr` | string | none | Filter by sender address or domain |
 | `date_from` | string | none | ISO 8601 date lower bound |
 | `date_to` | string | none | ISO 8601 date upper bound |
 | `has_attachments` | bool | none | Restrict to threads with attachments |
+| `participant` | string | none | Any role: From, To, or Cc, as in `search_emails` and `ask_mailbox` |
 | `max_threads` | int | none | Rank threads exactly as `ask_mailbox` does with this `max_threads` and return their evidence; clamped to `[1, 10]` like `ask_mailbox`'s. Omit it to rank by `limit` instead |
 | `limit` | int | `12`, or `max_threads` × 6 | Max evidence chunks to return (with `max_threads`, a smaller value keeps the first `limit` chunks of the audit set in rank order); clamped to `[1, 60]`, the most `ask_mailbox` can put in one prompt (10 threads × 6 chunks), so the cap never cuts below an answer's evidence set |
 | `include_scores` | bool | `false` | Annotate each thread with the retrieval lanes that matched (`thread_fts` / `chunk_fts` / `attachment_fts` / `thread_vec` / `chunk_vec` / `rerank`) and each chunk with its vector distance |
@@ -342,7 +344,9 @@ A selected thread with no indexed chunks is listed in its place with
 an empty `chunks` list, since `ask_mailbox` shows the model that
 thread's indexed text instead; read it with `get_thread`.
 `has_attachments` is not an `ask_mailbox` filter; leave it unset for an
-audit. Without `max_threads`, `limit` also sets how many threads are
+audit. `get_evidence` takes no `from_name`: to audit an answer scoped
+with it, pass the address `find_contact` resolves the name to (its top
+match with `senders_only`) as `from_addr`. Without `max_threads`, `limit` also sets how many threads are
 ranked, so the result can surface different threads from an answer
 (more so with a reranker), and when the top threads are short the
 budget takes passages from lower-ranked threads.
@@ -732,11 +736,27 @@ Retrieves relevant threads and synthesizes an answer.
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `question` | string | required | Your question in plain English |
-| `from_addr` | string | none | Scope to a specific sender |
+| `from_addr` | string | none | Scope to a sender address or domain |
+| `from_name` | string | none | Scope to mail from a named person or role; resolved through `find_contact` exactly as in [`search_emails`](#search_emails). `from_addr` wins if both are given |
+| `participant` | string | none | Scope to threads where this person appears in **any** role — From, To, or Cc, as in `search_emails`. Accepts an address, a domain (`@example.com`), or a name fragment |
 | `date_from` | string | none | Date lower bound |
 | `date_to` | string | none | Date upper bound |
 | `folders` | list | all but Trash | Scope to threads with a message in any of these folders (the membership `list_threads` uses). Without it, threads filed only in Trash are left out; name `"Trash"` to include them ([Trash](#trash-is-left-out-by-default)) |
 | `max_threads` | int | `5` | Context threads to use |
+
+**Questions about a person
+([#696](https://github.com/marshalltech81/protonmail-local-ai/issues/696)).**
+Retrieval ranks by text. A person named only in the From / To / Cc
+headers of their threads matches only the thread keyword lane, and
+threads that mention the name in their bodies outrank them in hybrid
+fusion ([#701](https://github.com/marshalltech81/protonmail-local-ai/issues/701)),
+so "who is Dana Example?" can come back "Not found". The tool
+description tells the calling model to resolve the person with
+`find_contact` and pass the address as `participant`, which keeps the
+evidence to the threads the person is on, including those they only
+received. `from_name` is sender-only, like `from_addr`. An unmatched
+`from_name` returns an empty answer naming it, with no model call,
+rather than searching without the filter.
 
 `max_threads` is clamped to `[1, 10]` at the tool boundary so an
 inflated caller-supplied value cannot expand into an oversized prompt
@@ -932,6 +952,8 @@ extracted.
 | `date_from` | string | none | Date lower bound |
 | `date_to` | string | none | Date upper bound |
 | `limit` | int | `20` | Max threads to search |
+| `from_name` | string | none | Scope to mail from a named person or role; resolved through `find_contact` as in [`search_emails`](#search_emails). An unmatched name returns no records and makes no model call |
+| `participant` | string | none | Scope to threads where this person appears in **any** role — From, To, or Cc, as in `search_emails` |
 
 **Example schema:**
 ```json

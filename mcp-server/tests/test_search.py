@@ -590,6 +590,16 @@ class TestParticipantParam:
         asyncio.run(handler(query="invoice", mode="semantic", participant="bob@example.com"))
         assert captured.get("participant") == "bob@example.com"
 
+    def test_participant_forwarded_to_get_evidence(self, fake_server, fake_embed, seeded_db):
+        # get_evidence audits ask_mailbox's retrieval (#537), so it takes
+        # the participant filter ask_mailbox takes (#696).
+        captured = self._spy(seeded_db, "hybrid_search")
+        register_search_tools(fake_server, seeded_db, fake_embed)
+        asyncio.run(
+            fake_server.tools["get_evidence"](query="invoice", participant="bob@example.com")
+        )
+        assert captured.get("participant") == "bob@example.com"
+
 
 class TestGetEvidence:
     """``get_evidence`` returns the retrieved source passages with full
@@ -627,6 +637,7 @@ class TestGetEvidence:
             {"date_to": "2000-01-01"},
             {"has_attachments": True},
             {"has_attachments": False},
+            {"participant": "bob@example.test"},
         ],
     )
     def test_thread_scoped_rejects_retrieval_filters(

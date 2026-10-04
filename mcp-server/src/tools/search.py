@@ -21,7 +21,12 @@ from ..lib.sqlite import (
 )
 from ..lib.timings import count, rerank_mode, stage, timed_tool
 from ..lib.validation import clamp_int
-from .intelligence import _MAX_ASK_THREADS, clamp_ask_threads, select_ask_threads
+from .intelligence import (
+    _MAX_ASK_THREADS,
+    clamp_ask_threads,
+    resolve_from_name,
+    select_ask_threads,
+)
 from .outputs import (
     HEADER_CHAR_LIMIT,
     MAX_LISTED,
@@ -242,41 +247,27 @@ def register_search_tools(
             raise ToolError(f"Search error: {e}") from e
 
         # Resolve ``from_name`` -> canonical SENDER address via
-        # find_contact. Skipped when the caller already passed a
-        # strict ``from_addr`` — explicit always beats lookup. We
-        # restrict find_contact to ``senders_only=True`` because the
-        # next step plugs the resolved address into
-        # hybrid_search(from_addr=...), which filters by From-line
-        # address. Resolving over the broader participants set could
-        # promote a frequent recipient/CC contact (a name on every
-        # mailing-list reply but never a sender) and leave the
-        # search returning zero matches. Ranking by sender count
-        # picks the right Smith for the "messages from Smith" intent.
-        # Senders are counted over the search's folder scope (``folders``,
-        # else the default Trash exclusion), so the lookup cannot pick a
-        # sender whose threads the search would then filter out.
-        # When the lookup yields nothing, short-circuit with an
+        # find_contact (``resolve_from_name``). Skipped when the caller
+        # already passed a strict ``from_addr`` — explicit always beats
+        # lookup. When the lookup yields nothing, short-circuit with an
         # honest empty result rather than silently dropping the
         # filter and returning unrelated threads.
         resolved_from_addr = None
         if from_name and not from_addr:
             try:
-                with stage("contact_lookup"):
-                    contacts = await asyncio.to_thread(
-                        db.find_contact, from_name, 1, senders_only=True, folders=folders
-                    )
+                resolved_from_addr = await resolve_from_name(db, from_name, folders)
             except Exception as e:
                 # Local-DB work, but a conversion error can quote stored
                 # mail: the same classification as provider failures (#257).
                 safe_error = safe_provider_exception_text(e, secrets)
                 log.error("search_emails: find_contact lookup failed: %s", safe_error)
                 raise ToolError(f"Search error: {safe_error}") from e
-            if not contacts:
+            if resolved_from_addr is None:
                 return tool_result(
                     f"No results found for: '{query}' (no contact matched from_name={from_name!r})",
                     SearchEmailsOutput(mode=mode, resolved_from_addr=None, results=[]),
                 )
-            from_addr = resolved_from_addr = contacts[0]["email"]
+            from_addr = resolved_from_addr
 
         try:
             # All three modes accept the same filter set; keyword and
@@ -403,6 +394,7 @@ def register_search_tools(
         max_threads: int | None = None,
         limit: int | None = None,
         include_scores: bool = False,
+        participant: str | None = None,
     ) -> CallToolResult:
         """
         Return the exact indexed passages (evidence chunks) that back a
@@ -424,7 +416,8 @@ def register_search_tools(
         part of this thread mentions the deadline?"); omit it to gather
         evidence across the whole mailbox. To audit an ask_mailbox
         answer, pass the same question, filters and max_threads and
-        leave limit unset: the result is the evidence that answer
+        leave limit unset (for an answer scoped with from_name, pass the
+        address find_contact resolves the name to as from_addr): the result is the evidence that answer
         retrieved, in the same order. A smaller limit keeps the first
         limit chunks of it.
 
@@ -451,6 +444,9 @@ def register_search_tools(
                        fall outside the range.
             date_to: ISO 8601 date upper bound, e.g. "2024-12-31".
             has_attachments: True to restrict to threads with attachments.
+            participant: Restrict to threads where this person appears
+                         in ANY role (sender, To or Cc), as in
+                         search_emails and ask_mailbox.
             max_threads: Rank threads exactly as ask_mailbox does with
                          this max_threads (clamped to [1, 10]) and
                          return their evidence. Omit it to rank by
@@ -480,6 +476,7 @@ def register_search_tools(
                 "date_from": date_from,
                 "date_to": date_to,
                 "has_attachments": has_attachments,
+                "participant": participant,
                 "max_threads": max_threads,
                 "limit": limit,
                 "include_scores": include_scores,
@@ -500,6 +497,7 @@ def register_search_tools(
                     ("date_from", date_from),
                     ("date_to", date_to),
                     ("has_attachments", has_attachments),
+                    ("participant", participant),
                     ("max_threads", max_threads),
                 )
                 # Blank optionals (``""``, ``[]``) are absent, as on the
@@ -586,6 +584,7 @@ def register_search_tools(
                     date_to=date_to,
                     reranker=reranker,
                     has_attachments=has_attachments,
+                    participant=participant,
                 )
                 count("results", len(results))
                 # Flatten thread-ranked evidence into a flat chunk budget:
