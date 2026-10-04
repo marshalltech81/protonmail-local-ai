@@ -1795,7 +1795,10 @@ def _requeue_stale_extractions(db: Database, queue: IndexingQueue) -> int:
     they all indexed the shared stale text. An "OCR disabled" row has no
     extractor to refresh it from another occurrence, so only messages
     whose own occurrence re-runs extraction are re-queued; the re-run
-    replaces the row, which keeps that once-only too. Like the zero-vector
+    replaces the row, which keeps that once-only too. The same holds for
+    a "no extractor" row whose occurrence's MIME type or filename now
+    selects one, as when a release starts routing an extension such as
+    ``.heic`` (#691); that does not depend on OCR. Like the zero-vector
     recovery sweep, files already queued or dead-lettered are left
     alone. Skipped entirely when attachment extraction is disabled,
     since the drain would not re-stamp the rows. Returns the number of
@@ -1809,6 +1812,13 @@ def _requeue_stale_extractions(db: Database, queue: IndexingQueue) -> int:
         if is_stale_extractor(name, ocr_enabled=INDEXER_OCR_ENABLED)
     ]
     filepaths = set(db.find_filepaths_with_extractors(stale))
+    # For a "no extractor" row the predicate is only "this occurrence now
+    # selects an extractor"; the OCR setting plays no part in it.
+    filepaths.update(
+        row["filepath"]
+        for row in db.find_no_extractor_attachments()
+        if reruns_once_ocr_is_on(row["extraction_error"], row["content_type"], row["filename"])
+    )
     if INDEXER_OCR_ENABLED:
         filepaths.update(
             row["filepath"]
@@ -1824,7 +1834,7 @@ def _requeue_stale_extractions(db: Database, queue: IndexingQueue) -> int:
     if re_enqueued:
         log.info(
             "re-queued %d message(s) whose attachments were extracted by an older "
-            "extractor version (%s) or skipped while OCR was off.",
+            "extractor version (%s), skipped while OCR was off, or had no extractor.",
             re_enqueued,
             ", ".join(sorted(stale)) or "none",
         )

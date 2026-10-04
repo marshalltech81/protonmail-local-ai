@@ -3205,7 +3205,7 @@ class TestMultipageTiff:
         assert result.status == STATUS_SUCCESS
         assert result.text is not None
         assert result.text.split() == ["PAGE_0", "PAGE_1", "PAGE_2"]
-        assert result.extractor == "image-ocr@2"
+        assert result.extractor == "image-ocr@3"
 
     def test_pages_are_capped_by_max_ocr_pages(self, monkeypatch):
         seen = self._ocr_by_color(monkeypatch)
@@ -3661,3 +3661,211 @@ class TestDocumentLibraryOutputIsSilenced:
 
         assert result.status == STATUS_FAILED
         assert result.error == "DecompressionBombWarning"
+
+
+def _heic(size: tuple[int, int] = (64, 48), color: str = "red") -> bytes:
+    """A synthetic HEIC, encoded with the libheif bundled in pillow-heif."""
+    import io
+
+    import pillow_heif
+    from PIL import Image
+
+    buf = io.BytesIO()
+    pillow_heif.from_pillow(Image.new("RGB", size, color)).save(buf, quality=90)
+    return buf.getvalue()
+
+
+def _png(size: tuple[int, int] = (64, 48), color: str = "red") -> bytes:
+    import io
+
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.new("RGB", size, color).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+class TestHeicImages:
+    """#691: iPhone HEIC/HEIF photos open through pillow-heif's Pillow
+    plugin and go through exactly the guards every other image does: the
+    dispatcher's byte cap, the process-wide pixel cap and decompression-bomb
+    handling, and the OCR page and time bounds."""
+
+    @pytest.mark.parametrize(
+        ("content_type", "filename"),
+        [
+            ("image/heic", "IMG_0001.HEIC"),
+            ("image/heif", "photo.heif"),
+            ("application/octet-stream", "IMG_0001.heic"),
+            ("application/octet-stream", "photo.HEIF"),
+            ("", "photo.heic"),
+            # Review round 1: ``.hif`` (Canon / Fujifilm cameras) is a
+            # still HEIF that pillow-heif registers too.
+            ("application/octet-stream", "IMG_0001.HIF"),
+            ("", "photo.hif"),
+        ],
+    )
+    def test_heic_routes_to_the_image_extractor(self, content_type, filename):
+        from src.extractors import resolved_extractor_module
+
+        assert resolved_extractor_module(content_type, filename) == "image"
+
+    @pytest.mark.parametrize("filename", ["burst.heics", "burst.heifs"])
+    def test_heif_sequence_extensions_are_not_routed(self, filename):
+        """``.heics`` / ``.heifs`` are image sequences (track-based, often
+        with no still primary image). They are not routed by extension; a
+        sequence sent with an ``image/`` MIME type still reaches the image
+        extractor, which reads at most its primary image."""
+        from src.extractors import resolved_extractor_module
+
+        assert resolved_extractor_module("application/octet-stream", filename) is None
+        assert resolved_extractor_module("image/heic-sequence", filename) == "image"
+
+    def test_extension_dispatch_covers_every_still_heif_extension_pillow_registers(self):
+        from PIL import Image
+        from src.extractors import (
+            _EXT_DISPATCH,
+            image,  # noqa: F401 - registers the opener
+        )
+
+        heif = {ext for ext, fmt in Image.registered_extensions().items() if fmt == "HEIF"}
+        sequences = {".heics", ".heifs"}
+        assert sequences <= heif
+        assert {ext for ext in heif - sequences if _EXT_DISPATCH.get(ext) != "image"} == set()
+
+    def test_heic_photo_is_decoded_and_ocrd(self, monkeypatch):
+        from src.extractors import image as image_module
+
+        seen: list[tuple[tuple[int, int], tuple[int, int, int]]] = []
+
+        def fake_ocr(img, **kwargs):
+            rgb = img.convert("RGB")
+            seen.append((rgb.size, rgb.getpixel((32, 24))))
+            assert kwargs == {"timeout": 7.0}
+            return "SYNTHETIC_HEIC_TEXT"
+
+        monkeypatch.setattr(image_module.pytesseract, "image_to_string", fake_ocr)
+
+        result = extract(
+            content_type="application/octet-stream",
+            filename="IMG_0001.HEIC",
+            payload=_heic(),
+            ocr_timeout_seconds=7,
+        )
+
+        assert result.status == STATUS_SUCCESS
+        assert result.extractor == "image-ocr@3"
+        assert result.text == "SYNTHETIC_HEIC_TEXT"
+        # One page OCR'd, decoded at its real size and (lossy) colour.
+        assert len(seen) == 1
+        size, (r, g, b) = seen[0]
+        assert size == (64, 48)
+        assert r > 200 and g < 60 and b < 60
+
+    @pytest.mark.parametrize(
+        ("make", "content_type"), [(_png, "image/png"), (_heic, "image/heic")], ids=["png", "heic"]
+    )
+    def test_oversized_payload_is_skipped_before_decoding(self, make, content_type, monkeypatch):
+        from src.extractors import image as image_module
+
+        monkeypatch.setattr(
+            image_module.pytesseract,
+            "image_to_string",
+            lambda *a, **kw: pytest.fail("an oversized image must not be OCR'd"),
+        )
+        payload = make()
+
+        result = extract(
+            content_type=content_type,
+            filename="photo",
+            payload=payload,
+            max_bytes=len(payload) - 1,
+        )
+
+        assert result.status == STATUS_TOO_LARGE
+        assert result.extractor is None
+
+    @pytest.mark.parametrize(
+        ("cap", "error"),
+        [(1500, "DecompressionBombWarning"), (100, "DecompressionBombError")],
+    )
+    def test_pixel_bomb_heic_fails_like_a_png_without_decoding(self, cap, error, monkeypatch):
+        """50x50 = 2500 pixels: 1.67x a 1500 cap is the warning band the
+        extractor promotes to an error, 25x a 100 cap is Pillow's hard
+        error. Both reject from the header size, before any HEVC decode."""
+        from PIL import Image
+        from pillow_heif.as_plugin import HeifImageFile
+        from src.extractors import image as image_module
+
+        payloads = {"png": _png((50, 50)), "heic": _heic((50, 50))}
+        decodes: list[int] = []
+        real_load = HeifImageFile.load
+
+        def counting_load(self):
+            decodes.append(1)
+            return real_load(self)
+
+        monkeypatch.setattr(HeifImageFile, "load", counting_load)
+        monkeypatch.setattr(
+            image_module.pytesseract,
+            "image_to_string",
+            lambda *a, **kw: pytest.fail("a pixel bomb must not be OCR'd"),
+        )
+        monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", cap)
+
+        results = {
+            kind: extract(content_type=f"image/{kind}", filename=f"a.{kind}", payload=payload)
+            for kind, payload in payloads.items()
+        }
+
+        assert results["heic"] == results["png"]
+        assert results["heic"].status == STATUS_FAILED
+        assert results["heic"].error == error
+        assert results["heic"].extractor == "image@3"
+        assert decodes == []
+
+    def test_only_the_primary_heif_image_is_ocrd(self, monkeypatch):
+        """A HEIF holding several top-level images is not a TIFF: like an
+        animated GIF, only the primary image is read, so the OCR work per
+        file stays one page."""
+        import io
+
+        import pillow_heif
+        from PIL import Image
+        from src.extractors import image as image_module
+
+        heif = pillow_heif.from_pillow(Image.new("RGB", (32, 32), "red"))
+        for color in ("green", "blue"):
+            heif.add_from_pillow(Image.new("RGB", (32, 32), color))
+        buf = io.BytesIO()
+        heif.save(buf)
+        calls: list[int] = []
+
+        def fake_ocr(img, **kwargs):
+            calls.append(1)
+            return "page"
+
+        monkeypatch.setattr(image_module.pytesseract, "image_to_string", fake_ocr)
+
+        result = extract(content_type="image/heif", filename="burst.heif", payload=buf.getvalue())
+
+        assert result.status == STATUS_SUCCESS
+        assert calls == [1]
+
+    def test_auxiliary_heif_images_are_not_decoded(self):
+        """Only the HEIF opener is registered, with thumbnails, depth and
+        auxiliary images off, so a photo's extra images cost no decode."""
+        import pillow_heif
+        from src.extractors import image  # noqa: F401 - registers the opener
+
+        assert pillow_heif.options.THUMBNAILS is False
+        assert pillow_heif.options.DEPTH_IMAGES is False
+        assert pillow_heif.options.AUX_IMAGES is False
+
+    def test_image_version_3_rows_are_current(self):
+        from src.extractors import EXTRACTOR_VERSIONS, stale_extractor_module
+
+        assert EXTRACTOR_VERSIONS["image"] == 3
+        assert stale_extractor_module("image@2") == "image"
+        assert stale_extractor_module("image-ocr@2") == "image"
+        assert stale_extractor_module("image-ocr@3") is None
