@@ -971,6 +971,15 @@ lazy-imported so a missing optional dependency (e.g. `python-docx`
 not in this image) downgrades to `unsupported` rather than crashing
 the indexer at startup.
 
+The parsing libraries log and warn with values read from the
+attachment (pypdf's font dictionaries and encoding names, openpyxl's
+cell values, Pillow's TIFF tags), so the indexer's logging setup
+(`quiet_document_libraries` in `indexer/src/main.py`) raises the
+`pypdf` and `PIL` loggers to `CRITICAL` and ignores warnings raised
+inside `openpyxl` and `PIL` (#690). Outcomes stay visible through the
+extractors' own fixed-text log lines and the `attachment_extractions`
+status.
+
 ### OCR
 
 PDFs and images route through Tesseract when `INDEXER_OCR_ENABLED=true`
