@@ -430,8 +430,8 @@ decision (Open decisions).
 | 3.7 Filtered semantic recall | Done | #440, #470 | — |
 | 3.8 Citation contract | Partly done | #457, #495 (`ask_mailbox` statement coverage and quote checks), #519 and #525 (quote and label edge cases), #532 and #545 (thread-scoped `get_evidence` parity), #559 (mailbox-wide parity, #537), #565 (`summarize_thread`, `extract_from_emails`) | semantic support only (#284) |
 | 4.1 Entities | Done | #459, #527 (orphan pruning, #464) | — |
-| 4.2 Source authority | Done | #459, #474 (Spam guard), #523 and #542 (rules file kept private and validated) | verdict-header gating after go-live (#463) |
-| 4.3 Temporal retrieval | Mostly done | #561 (`sent_at` defined and used consistently), #593 (whole-thread evidence under a date range), #597 (#575), `occurred_at` with filters and thread spans on the effective time (#297) | checking against real mail that the top `Received:` is Proton's (go-live); bitemporal claims (Phase 5) |
+| 4.2 Source authority | Done | #459, #474 (Spam guard), #523 and #542 (rules file kept private and validated) | verdict-header gating (#463): Proton's header format read off live mail and decided 2026-10-04 (downgrade on DMARC fail plus a `sender_authenticated` flag), pending the owner's forged-header test |
+| 4.3 Temporal retrieval | Mostly done | #561 (`sent_at` defined and used consistently), #593 (whole-thread evidence under a date range), #597 (#575), `occurred_at` with filters and thread spans on the effective time (#297) | bitemporal claims (Phase 5); the top `Received:` was confirmed as Proton's on live mail (2026-10-04) |
 | 4.4 Retention | Mostly done | #451 (mirror default), #475 (Trash hidden from default search), #564 and #583 (reaped sources reported for 30 days), the invariant restated (#610), #562 (extracted text purged on reap) | user-controlled retention |
 | 5.1 Hardened `brief_issue` | Not started | — | needs Phase 3 usage on real mail |
 | 5.2 Support/contradict | Built, experimental | #467 (`check_conclusion`), #493 (evidence-slot refill), #558 (quote verification, also for `brief_issue`) | semantic support (#284) |
@@ -686,7 +686,69 @@ Triaged against `d30e500` by four parallel agents; every issue is real
 and most reproduced with synthetic input. PRs in the order to land
 them (one test-first commit per issue, `Fixes #N` per issue):
 
-**Handoff 2026-10-03 — start here.** **Ready for go-live.** Every
+**Handoff 2026-10-04 — start here.** **Live.** The stack has run in
+macOS Bridge mode since 2026-10-03 (#497's live test passed; closed).
+The initial index finished 2026-10-04 04:53 UTC: 33,038 messages
+indexed; 34 T-flagged (trashed) files skipped by design under mirror
+mode. The first full sync took about 17 minutes (from the Bridge app's
+local cache), so the operator `.env` sets `SYNC_DEADLINE_SECONDS=3600`.
+
+Deployed images: mcp-server at `cb9df36` (#696's participant filter is
+live). The indexer still runs the go-live image, deliberately: starting
+the new one triggers the `pdf`/`image` re-extraction sweep, which the
+planned rebuild would pay again.
+
+Verified on live mail (counts only): the top `Received:` header is
+Proton's on every received message, so `occurred_at` holds; Sent mail
+has no `Received:` and falls back to `sent_at`. Proton's
+`Authentication-Results` headers form one contiguous block at the top
+(evidence and the owner's decision on #463).
+
+Open PRs, each in its own Codex rounds: #709 (#707, host-pressure
+errors escape the PDF extractor), #710 (#687, subject in first-chunk
+vectors; needs the rebuild), #711 (#693, re-extract too_large rows
+that now fit; 32 MiB default cap).
+
+Next, in order:
+
+1. Merge #709, #710, #711 (owner go-ahead each).
+2. **#463 forged-header test (owner):** send one message from an
+   external account carrying a forged
+   `Authentication-Results: mail.protonmail.ch; dmarc=pass` header and
+   check whether Proton strips it. Decided 2026-10-04: downgrade on
+   DMARC fail plus a `sender_authenticated` flag. The verdict is read
+   at parse time, so build it before the rebuild or plan a backfill.
+   The first deployment has happened, so this needs a `SCHEMA_VERSION`
+   bump and a forward migration (v0 folding ended at deployment).
+3. **One-time rebuild:** build the indexer and mcp-server images; in
+   `.env` set `INDEXER_OCR_ENABLED=true` and drop the 50 MB
+   `INDEXER_ATTACHMENT_MAX_BYTES` override (the parse cap limits it to
+   about 36.5 MB anyway; #711's default is 32 MiB); remove only the
+   SQLite volume (Maildir stays); `make up-macos-bridge`. Expect a full
+   re-extract (OCR on) and re-embed. #699 (newest mail first) would make
+   the rebuild usable sooner if decided first.
+4. Watch the first real mirror-mode reap: 68 tombstoned Trash messages
+   pass their 7-day grace around 2026-10-11.
+
+Small, no decision needed: #705 (blank filter in `search_emails`); the
+extractor's own `max_bytes` fallback still says 10 MB (the indexer
+always passes the cap; tidy after #709); `ask_mailbox` should name the
+resolved `participant` in its prompt (a "this person" question scoped
+by participant alone leaves the model guessing who).
+
+Needs the owner: #701 (hybrid RRF guaranteed slot for a strong
+single-lane keyword hit; a new mechanism), #697/#698/#699 (indexing
+throughput), #692 (Starred duplicates), #694, #695, #691's fontTools
+(waits on py-pdf/pypdf#4156, filed 2026-10-04: pypdf re-parses an
+embedded CFF font per resource per page; 40 s vs 0.03 s on a 1.2 MB
+synthetic PDF), evaluation questions from real mail, #661, #660, #652.
+
+Measured on the live index, worth acting on: `ask_mailbox` dropped
+8–22 retrieved passages per answer to its evidence budget (#487), and
+one query-time embed timed out during a DeepInfra latency spike (#697,
+#287).
+
+**Handoff 2026-10-03 (superseded).** **Ready for go-live.** Every
 pre-go-live item has merged: the evening run (#592–#630) and the
 night run (#639–#667, under Recently Completed, 2026-10-02 night).
 No PR is open.
@@ -1353,8 +1415,9 @@ can be revisited with an explicit owner decision.
   indexer restarts first (the pending set is memory-only; the next
   delete in that table clears it), and below SQLite in filesystem
   free blocks, snapshots and backups (`docs/architecture.md`)
-- macOS Bridge mode is tested only against a synthetic implicit-TLS
-  Bridge server (#571, #643); the owner's go-live is the live test
+- macOS Bridge mode is tested in CI only against a synthetic
+  implicit-TLS Bridge server (#571, #643); the owner's go-live
+  (2026-10-03) was its live test and passed (#497)
 - coverage scope: both services measure `src/` with `src/main.py`
   omitted. The indexer's `main.py` has grown to hold the whole
   two-phase pipeline, which `tests/test_main.py` exercises but the
@@ -1640,6 +1703,23 @@ do not ship persisted claims without them.
     invariant): resolved 2026-10-02 (Resolved decisions 14).
 
 ## Recently Completed
+
+### 2026-10-04 — First live run: go-live fixes (#700–#708)
+
+The stack went live 2026-10-03 in macOS Bridge mode; the initial index
+of 33,038 messages finished 2026-10-04. Merged on the owner's go-ahead:
+#700 (DeepInfra's embeddings input cap is 1024, not 100), #703 (#686:
+embedder warmup and dimension-probe errors no longer print the
+provider's response body), #704 (#690: pypdf, Pillow and openpyxl stop
+writing document internals to the indexer log), #702 (#696:
+`participant` and `from_name` on `ask_mailbox`, `extract_from_emails`
+and `get_evidence`; the ranking half moved to #701), #706 (#691:
+`cryptography`, so owner-password-only PDFs extract; `pdf` extractor
+3), #708 (#691: `pillow-heif`, HEIC/HEIF OCR, the owner accepting the
+bundled libheif/libde265 risk; `image` extractor 3; extension-routed
+no-extractor rows re-queue once). fontTools is held back on
+py-pdf/pypdf#4156; #691 stays open for it. Issues filed: #701, #705,
+#707. Closed as done: #497 (live test), #689 (OCR, not chunking).
 
 ### 2026-10-02, night — Go-live blockers and pre-go-live bug fixes (#639–#667)
 

@@ -194,7 +194,9 @@ Do not make any of the following changes unless the repository owner explicitly 
   Until the first deployment, schema changes fold into the v0
   `_apply_initial_schema` with no migration file and no
   `SCHEMA_VERSION` bump (owner, 2026-10-01); a database built before
-  such a change is rebuilt from Maildir.
+  such a change is rebuilt from Maildir. The first deployment was
+  2026-10-03, so schema changes now take the `SCHEMA_VERSION` bump and
+  migration file described above.
 - Do not change embedding dimensions or model assumptions without verifying schema and context-window implications.
 - Do not change chunk ID derivation away from the deterministic
   `sha256(message_pk || index || text)` shape — re-runs depend on identical
