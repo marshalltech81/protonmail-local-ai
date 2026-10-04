@@ -980,6 +980,24 @@ inside `openpyxl` and `PIL` (#690). Outcomes stay visible through the
 extractors' own fixed-text log lines and the `attachment_extractions`
 status.
 
+HEIC / HEIF photos (the iPhone default) are images like any other:
+`image/heic`, `image/heif` and the `.heic` / `.heif` extensions route
+to the image extractor, which opens them through the `pillow-heif`
+Pillow plugin (#691). They go through the same byte cap, pixel cap and
+decompression-bomb handling as other images; Pillow checks the size in
+the header before anything is decoded. Only the primary image is OCR'd;
+thumbnails, depth maps and auxiliary images are not decoded.
+
+`pillow-heif` bundles its own copies of the native libheif and libde265
+(HEVC) decoders, plus a libx265 encoder that is never used. Both
+decoders have a long record of memory-safety CVEs and run inside the
+indexer process on attacker-supplied files. The owner accepted that
+risk on 2026-10-04. Debian security updates do not cover the bundled
+copies: a fix arrives only by bumping `pillow-heif`. Dependabot and
+Trivy see only the `pillow-heif` version, not the bundled libraries, so
+watch libheif and libde265 advisories and bump `pillow-heif` when a
+release picks up a fix.
+
 ### OCR
 
 PDFs and images route through Tesseract when `INDEXER_OCR_ENABLED=true`

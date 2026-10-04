@@ -592,11 +592,11 @@ class TestDocxExtractor:
         from src import extractors
 
         monkeypatch.setattr(extractors, "EXTRACTOR_VERSIONS", {"image": 2, "pdf": 3})
-        assert extractors._stamp_extractor("image", "image-ocr") == "image-ocr@3"
+        assert extractors._stamp_extractor("image", "image-ocr") == "image-ocr@2"
         assert extractors._stamp_extractor("pdf", "pdf-digital") == "pdf-digital@3"
         assert extractors._stamp_extractor("text", "text") == "text"
         assert extractors.stale_extractor_module("image-ocr") == "image"
-        assert extractors.stale_extractor_module("image-ocr@3") is None
+        assert extractors.stale_extractor_module("image-ocr@2") is None
         assert extractors.stale_extractor_module("pdf-ocr@2") == "pdf"
         assert extractors.stale_extractor_module("text") is None
         assert extractors.stale_extractor_module(None) is None

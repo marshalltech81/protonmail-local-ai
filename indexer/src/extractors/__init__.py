@@ -129,7 +129,9 @@ class ExtractionResult:
 # them (#432).
 # xlsx 4: fails a workbook whose parts openpyxl loads whole are over
 # their caps (#428).
-EXTRACTOR_VERSIONS: dict[str, int] = {"docx": 3, "image": 2, "pdf": 2, "text": 2, "xlsx": 4}
+# image 3: opens HEIC/HEIF photos, which failed with
+# ``UnidentifiedImageError`` before pillow-heif was added (#691).
+EXTRACTOR_VERSIONS: dict[str, int] = {"docx": 3, "image": 3, "pdf": 2, "text": 2, "xlsx": 4}
 
 
 def _stamp_extractor(module_name: str, extractor_name: str) -> str:
@@ -241,6 +243,8 @@ _EXT_DISPATCH: dict[str, str] = {
     ".bmp": "image",
     ".webp": "image",
     ".gif": "image",
+    ".heic": "image",
+    ".heif": "image",
 }
 
 # Image MIME types are routed to the image extractor unless OCR is

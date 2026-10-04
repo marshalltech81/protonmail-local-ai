@@ -24,6 +24,14 @@ re-do the save/restore dance. This module promotes the milder
 ``DecompressionBombWarning`` to an error inside ``extract()`` so a
 between-cap-and-2x-cap image surfaces as a ``failed`` extraction row
 rather than passing through with a log line.
+
+HEIC / HEIF (iPhone photos) open through pillow-heif's Pillow plugin
+(#691), registered below at import, so they pass the same byte cap,
+pixel cap and bomb handling as every other format: Pillow checks the
+size from the header before libheif decodes anything. Only the primary
+image is read; thumbnails, depth maps and auxiliary images are not
+decoded. pillow-heif bundles its own libheif and libde265, which Debian
+security updates do not cover (owner accepted, 2026-10-04).
 """
 
 from __future__ import annotations
@@ -32,8 +40,14 @@ import io
 import warnings
 from collections.abc import Callable
 
+import pillow_heif
 import pytesseract
 from PIL import Image, ImageOps
+
+# HEIF opener only (pillow-heif 1.x has no AVIF plugin); skip decoding a
+# photo's thumbnails, depth maps and auxiliary images, which OCR never
+# reads.
+pillow_heif.register_heif_opener(thumbnails=False, depth_images=False, aux_images=False)
 
 
 def extract(
