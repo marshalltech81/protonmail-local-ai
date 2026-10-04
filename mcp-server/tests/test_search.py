@@ -601,6 +601,69 @@ class TestParticipantParam:
         assert captured.get("participant") == "bob@example.com"
 
 
+class TestSearchEmailsBlankPersonFilters:
+    """#705: search_emails treats a blank or padded ``participant`` /
+    ``from_name`` as get_evidence does (#702): blank means absent, and
+    padding is stripped, in every mode."""
+
+    _METHODS = {
+        "hybrid": "hybrid_search",
+        "keyword": "keyword_search",
+        "semantic": "semantic_search",
+    }
+
+    def _spy(self, db, attr):
+        captured: dict = {}
+        original = getattr(db, attr)
+
+        def spy(**kwargs):
+            captured.update(kwargs)
+            return original(**kwargs)
+
+        setattr(db, attr, spy)
+        return captured
+
+    @pytest.mark.parametrize("mode", ["hybrid", "keyword", "semantic"])
+    @pytest.mark.parametrize("blank", ["", " ", "\t"])
+    def test_blank_person_filters_are_absent(self, fake_server, fake_embed, seeded_db, mode, blank):
+        called: list = []
+        seeded_db.find_contact = lambda *a, **_k: called.append(a) or []  # type: ignore[assignment]
+        captured = self._spy(seeded_db, self._METHODS[mode])
+        handler = _handler(fake_server, fake_embed, seeded_db)
+        asyncio.run(handler(query="invoice", mode=mode, participant=blank, from_name=blank))
+        assert called == []
+        assert captured.get("participant") is None
+        assert captured.get("from_addr") is None
+
+    def test_blank_filters_return_the_same_results_as_none(
+        self, fake_server, fake_embed, seeded_db
+    ):
+        handler = _handler(fake_server, fake_embed, seeded_db)
+        unfiltered = _text(asyncio.run(handler(query="invoice")))
+        blank = _text(asyncio.run(handler(query="invoice", participant=" ", from_name=" ")))
+        assert blank == unfiltered
+
+    @pytest.mark.parametrize("mode", ["hybrid", "keyword", "semantic"])
+    def test_padded_participant_is_stripped(self, fake_server, fake_embed, seeded_db, mode):
+        captured = self._spy(seeded_db, self._METHODS[mode])
+        handler = _handler(fake_server, fake_embed, seeded_db)
+        asyncio.run(handler(query="invoice", mode=mode, participant=" @example.com "))
+        assert captured.get("participant") == "@example.com"
+
+    def test_padded_from_name_is_stripped_before_lookup(self, fake_server, fake_embed, seeded_db):
+        lookups: list = []
+        original = seeded_db.find_contact
+
+        def spy(query, limit, *, senders_only=False, folders=None):
+            lookups.append(query)
+            return original(query, limit, senders_only=senders_only, folders=folders)
+
+        seeded_db.find_contact = spy  # type: ignore[assignment]
+        handler = _handler(fake_server, fake_embed, seeded_db)
+        asyncio.run(handler(query="invoice", from_name=" alice "))
+        assert lookups == ["alice"]
+
+
 class TestGetEvidencePersonFilters:
     """Review round 1 (#702): get_evidence reproduces a person-scoped
     ask_mailbox retrieval, so it resolves ``from_name`` the same way
