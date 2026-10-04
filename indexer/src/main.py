@@ -2017,7 +2017,12 @@ def _validate_embedding_dim(embedder: EmbeddingBackend) -> None:
     ``upsert_thread`` with a cryptic sqlite-vec error. Fail fast at
     startup with a clear, actionable message instead.
     """
-    probe = embedder.embed("dimension probe")
+    try:
+        probe = embedder.embed("dimension probe")
+    except Exception as exc:
+        # The SDK error carries the provider's response body; exit with
+        # type + status only, like the calibration request (#686).
+        raise SystemExit(f"Embedder dimension probe failed: {scrub_embed_error(exc)}") from None
     if len(probe) != EMBEDDING_DIM:
         raise SystemExit(
             f"Embedder produced {len(probe)}-dim vectors, but the SQLite "

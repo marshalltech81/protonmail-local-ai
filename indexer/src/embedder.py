@@ -401,8 +401,15 @@ class OpenAIEmbedder:
                 if not _is_transient_embed_error(e):
                     # 4xx config errors and any other non-transient
                     # error surface immediately so the operator fixes
-                    # config rather than waiting out the timeout.
-                    raise
+                    # config rather than waiting out the timeout. The
+                    # SDK error carries the provider's response body,
+                    # so keep only type + status, and ``from None`` so
+                    # the traceback does not chain the original (#686).
+                    raise RuntimeError(
+                        f"embedder at {self.base_url} rejected the warmup request "
+                        f"({scrub_embed_error(e)}); check the provider account, "
+                        f"API key and EMBED_MODEL"
+                    ) from None
                 last_err = e
             probe_attempt += 1
             # Fast cadence for the first few probes catches a remote
@@ -414,9 +421,10 @@ class OpenAIEmbedder:
             else:
                 interval = self._SLOW_PROBE_INTERVAL_SECS
             time.sleep(interval)
+        last = scrub_embed_error(last_err) if last_err is not None else "none"
         raise RuntimeError(
             f"embedder at {self.base_url} did not become ready within {timeout}s "
-            f"(last error: {last_err!r})"
+            f"(last error: {last})"
         )
 
     def embed(self, text: str) -> list[float]:
