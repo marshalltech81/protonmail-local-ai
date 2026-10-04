@@ -1,3 +1,9 @@
-ignore:
+# hadolint 2.x reads `ignored:`; an `ignore:` key is silently skipped.
+ignored:
   - DL3008  # apt-get version pinning is impractical on Debian stable
   - DL3059  # consecutive RUN instructions are intentional for layer caching
+  # Non-numeric USER is deliberate: every image creates its service account
+  # with an explicit --uid/--gid in the same Dockerfile, so the name always
+  # resolves from the image's own /etc/passwd. Keep in sync with the
+  # hadolint job in .github/workflows/lint.yml.
+  - DL3066
