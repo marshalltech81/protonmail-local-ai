@@ -948,19 +948,6 @@ def _sort_labels(labels: Iterable[str], known: Container[str]) -> tuple[list[str
     return used, unknown
 
 
-def _check_citations(answer: str, known: Container[str]) -> tuple[list[str], list[str]]:
-    """Labels ``answer`` cites, split into those in ``known`` and the
-    rest, each in first-cited order without repeats. One linear scan."""
-    return _sort_labels(
-        (
-            label
-            for match in _CITATION_RE.finditer(answer)
-            for label in _LABEL_RE.findall(match.group(1))
-        ),
-        known,
-    )
-
-
 # --- statement coverage and quote checks (#284) --------------------------
 #
 # The answer is cut into statements and its quotations are found with
