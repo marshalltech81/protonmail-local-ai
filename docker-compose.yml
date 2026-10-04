@@ -1,8 +1,6 @@
 # Log rotation shared by every service: the json-file driver keeps at most
 # three 10 MiB files per container. Without it a service inherits the
 # daemon's policy, which on stock json-file is unbounded (#484).
-# docker-compose.first-run.yml swaps Bridge to ``driver: none``; Compose
-# drops these options when the driver changes, so none of them leak.
 x-logging: &default-logging
   driver: json-file
   options:
@@ -12,51 +10,25 @@ x-logging: &default-logging
 services:
 
   # ---------------------------------------------------------------------------
-  # ProtonBridge
-  # Decrypts ProtonMail and exposes IMAP/SMTP on the internal network.
-  # Build from official Proton source using the no-GUI target.
-  # First run requires interactive login: make first-run
-  # ---------------------------------------------------------------------------
-  protonmail-bridge:
-    build:
-      context: ./bridge
-      args:
-        BRIDGE_VERSION: ${BRIDGE_VERSION:-v3.27.0}
-        BRIDGE_COMMIT: ${BRIDGE_COMMIT:-04e46eb4fbc1c7ef4425a920bfc352050da0606b}
-    image: protonmail-local-ai/bridge
-    container_name: protonmail-bridge
-    restart: unless-stopped
-    stop_grace_period: 30s
-    # Run tini (Docker's built-in init) as PID 1 so signals are forwarded
-    # to the bridge binary on `docker stop` and any orphaned child
-    # processes are reaped instead of accumulating as zombies.
-    init: true
-    read_only: true
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
-    pids_limit: 256
-    tmpfs:
-      - /tmp
-      # The read-only rootfs makes /home/bridge ephemeral too; set ownership
-      # here so the non-root bridge user can still write to its runtime home.
-      - /home/bridge:uid=1000,gid=1000,mode=700
-    volumes:
-      - bridge-data:/data
-    logging: *default-logging
-    networks:
-      - bridge-net
-    healthcheck:
-      test: ["CMD", "bash", "-c", ": > /dev/tcp/localhost/1143"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 45s
-
-  # ---------------------------------------------------------------------------
   # mbsync
-  # Syncs email from Bridge IMAP to local Maildir in real time.
+  # Syncs email from the Proton Mail Bridge app's IMAP to local Maildir.
+  #
+  # Bridge is the official app running on the host, outside Compose; mbsync
+  # reaches it through ``host.docker.internal``. The app stays bound to the
+  # host's loopback interface; no port is published and no host networking
+  # is used. Tested on macOS (OrbStack, Docker Desktop), where
+  # host.docker.internal forwards to the host's loopback. Linux is not
+  # supported: there host.docker.internal reaches the docker bridge
+  # address, not the loopback the app listens on. See docs/setup.md.
+  #
+  # TLS: the app's certificate is issued for ``127.0.0.1`` only. isync
+  # checks the certificate against the configured Host, so mbsync keeps
+  # ``Host 127.0.0.1`` for verification and opens the TCP connection to
+  # host.docker.internal through a ``Tunnel`` (socat). Implicit TLS (the
+  # app's IMAP connection mode must be SSL, #638), certificate
+  # verification and the persistent fingerprint pin apply, and the
+  # certificate must also match BRIDGE_CERT_FINGERPRINT from .env on
+  # every start. See docs/architecture.md ("Bridge").
   # ---------------------------------------------------------------------------
   mbsync:
     build:
@@ -74,21 +46,30 @@ services:
     pids_limit: 128
     tmpfs:
       - /tmp
-    depends_on:
-      protonmail-bridge:
-        condition: service_healthy
+    # Bridge runs outside Compose, so there is no health check to wait for;
+    # the entrypoint's bounded IMAP wait covers an app that is not running.
     environment:
-      BRIDGE_HOST: protonmail-bridge
-      BRIDGE_IMAP_PORT: 1143
+      BRIDGE_HOST: host.docker.internal
+      # The app's IMAP port, shown with its IMAP credentials.
+      BRIDGE_IMAP_PORT: ${BRIDGE_IMAP_PORT:-1143}
+      # The name the app's certificate is issued for (its CN). The
+      # entrypoint verifies the certificate against this name and connects
+      # to BRIDGE_HOST:BRIDGE_IMAP_PORT through a tunnel.
+      BRIDGE_CERT_HOST: 127.0.0.1
+      # Required: the SHA-256 fingerprint of the app's certificate, taken
+      # on the host (docs/setup.md). Another local account could hold the
+      # app's loopback port while it is down, so the first certificate is
+      # never trusted on first use.
+      BRIDGE_CERT_FINGERPRINT: ${BRIDGE_CERT_FINGERPRINT:-}
       BRIDGE_USER: ${BRIDGE_USER}
       SYNC_INTERVAL: ${SYNC_INTERVAL:-60}
       # Per-run mbsync deadline (#282); see .env.example.
       SYNC_DEADLINE_SECONDS: ${SYNC_DEADLINE_SECONDS:-86400}
-      # Set to true for one container creation when Bridge's TLS cert is
-      # deliberately rotated (e.g. Bridge version upgrade), then recreate
-      # mbsync with it false: the value survives restarts of the same
-      # container. mbsync refuses to sync on a fingerprint mismatch
-      # otherwise. See docs/troubleshooting.md.
+      # Set to true for one container creation when the app's TLS cert is
+      # deliberately rotated (and BRIDGE_CERT_FINGERPRINT updated to it),
+      # then recreate mbsync with it false: the value survives restarts of
+      # the same container. mbsync refuses to sync on a fingerprint
+      # mismatch otherwise. See docs/troubleshooting.md.
       BRIDGE_CERT_PIN_ROTATE: ${BRIDGE_CERT_PIN_ROTATE:-false}
     volumes:
       - maildir-volume:/maildir
@@ -390,14 +371,13 @@ services:
 # Back up sqlite-volume to preserve your search index.
 # =============================================================================
 volumes:
-  bridge-data:       # Bridge credentials, config, and cache
   maildir-volume:    # Raw email in Maildir format
   mbsync-state:      # Persistent mbsync state (pinned Bridge cert fingerprint)
   sqlite-volume:     # SQLite database (FTS5 + vector index)
 
 # =============================================================================
 # Networks
-# Bridge-facing traffic is isolated from the application network.
+# mbsync's traffic to the Bridge app is isolated from the application network.
 # Only the MCP server port is exposed to the host (localhost only).
 # =============================================================================
 networks:

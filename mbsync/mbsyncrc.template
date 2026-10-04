@@ -5,23 +5,21 @@
 # startup by envsubst. Do not put real credentials here — committed to git.
 #
 # Variables substituted at runtime (see render_mbsync_config in entrypoint.sh):
-#   ${MBSYNC_IMAP_HOST}    — the name Bridge's certificate is checked against:
-#                            BRIDGE_HOST, or BRIDGE_CERT_HOST when set
-#   ${MBSYNC_IMAP_CONNECT} — "Port <BRIDGE_IMAP_PORT>" to connect to that
-#                            host, or a Tunnel to BRIDGE_HOST:BRIDGE_IMAP_PORT
-#                            when BRIDGE_CERT_HOST is set (macOS Bridge app)
-#   ${BRIDGE_USER}         — Bridge IMAP username (from bridge --cli → info,
-#                            or the macOS Bridge app's mailbox details)
+#   ${MBSYNC_IMAP_HOST}    — the name Bridge's certificate is checked against
+#                            (BRIDGE_CERT_HOST)
+#   ${MBSYNC_IMAP_CONNECT} — a Tunnel to BRIDGE_HOST:BRIDGE_IMAP_PORT, the
+#                            Bridge app on the host
+#   ${BRIDGE_USER}         — Bridge IMAP username (from the Bridge app's
+#                            IMAP details)
 # =============================================================================
 
-# IMAP Account — connection to ProtonBridge local IMAP server.
+# IMAP Account — connection to the Proton Mail Bridge app's IMAP server.
 # PassCmd avoids credentials appearing in docker inspect or process list.
 # SSLType IMAPS: implicit TLS (RFC 8314, Bridge's "SSL" mode, #638). The
 # TLS handshake is the first thing on the connection, so there is no
 # plaintext phase to strip or inject into, and isync never falls back to
-# STARTTLS or plaintext. Bridge serves it on the IMAP port (1143): the
-# Bridge container is patched to always do so, and the macOS Bridge app's
-# IMAP connection mode must be set to SSL.
+# STARTTLS or plaintext. Bridge serves it on the IMAP port once the
+# Bridge app's IMAP connection mode is set to SSL.
 # Leave SSLVersions unset so isync/OpenSSL can negotiate the strongest
 # supported protocol instead of pinning the connection to TLS 1.2.
 # CertificateFile: extracted automatically at container startup by entrypoint.sh.

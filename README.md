@@ -21,7 +21,7 @@ host-side server you install yourself.
 
 | Component | Role |
 |---|---|
-| ProtonBridge | Decrypts ProtonMail, exposes local IMAP/SMTP. Built from source in a container by default; the optional [macOS Bridge mode](docs/setup.md#macos-bridge-mode-optional) uses the official Bridge app on your Mac instead |
+| Proton Mail Bridge | The official Bridge app, running on the host (not in a container): decrypts ProtonMail and exposes IMAP on the host's loopback. See [platform support](docs/setup.md#platform-support) |
 | mbsync | Incremental pull-only sync to local Maildir, every `SYNC_INTERVAL` seconds |
 | Indexer | Parses threads, generates embeddings, builds SQLite index |
 | Embedder (operator-supplied) | OpenAI-compatible `/v1/embeddings` returning 4096-dim vectors (the schema's fixed width — e.g. Qwen3-Embedding-8B). Point `EMBED_BASE_URL` at a remote provider (DeepInfra, OpenRouter) or a host-side server you install yourself (LM Studio, vLLM, TEI, `mlx_lm.server`) |
@@ -31,7 +31,13 @@ host-side server you install yourself.
 
 ## Prerequisites
 
-- **Docker Desktop** for Mac (or Linux with Docker Engine)
+- **OrbStack or Docker Desktop** on macOS. Windows with Docker Desktop
+  is expected to work the same way but is untested; Linux is not
+  supported out of the box, because there `host.docker.internal` does
+  not reach the host loopback the Bridge app listens on (see
+  [platform support](docs/setup.md#platform-support))
+- **[Proton Mail Bridge](https://proton.me/mail/bridge)** app installed
+  on the same machine and signed in
 - **Claude Desktop** with MCP support
 - **Proton Mail paid account** (required for Bridge access)
 
@@ -57,24 +63,29 @@ Docker Compose requires before starting. You will fill them in during setup.
 make build
 ```
 
-### 3. First-time Bridge login (one time only)
+### 3. Connect the Bridge app
 
-```bash
-make first-run
-# Inside the CLI:
-#   login  → enter Proton credentials + 2FA
-#   info   → copy Bridge username into .env
-#            write Bridge password to .secrets/bridge_pass.txt
-#   exit
-```
-
-After `info`, write the Bridge password to the secret file with owner-only
+In the Bridge app, set the IMAP connection mode to **SSL** and note the
+account's IMAP username and password. Put the username in `.env`
+(`BRIDGE_USER`) and the password in the secret file with owner-only
 permissions:
 
 ```bash
 printf '%s' 'bridge-generated-pass' > .secrets/bridge_pass.txt
 chmod 600 .secrets/bridge_pass.txt
 ```
+
+Then take the app's certificate fingerprint on the host and set it as
+`BRIDGE_CERT_FINGERPRINT` in `.env` (required; mbsync never trusts the
+certificate on first use):
+
+```bash
+openssl s_client -connect 127.0.0.1:1143 </dev/null \
+    | openssl x509 -noout -fingerprint -sha256
+```
+
+See [`docs/setup.md`](docs/setup.md#4-set-up-the-proton-mail-bridge-app)
+for the details.
 
 ### 4. Configure your embedder and inference provider
 
@@ -108,7 +119,8 @@ make up
 make logs  # verify everything is running
 ```
 
-`make up` now runs a security preflight first: it validates `.env`, checks that
+`make up` now runs a security preflight first: it validates `.env` (including
+`BRIDGE_CERT_FINGERPRINT`), checks that
 the Bridge password secret exists and is non-empty, and enforces `600`
 permissions on secret files before Docker Compose starts the stack.
 If a service doesn't come up, see
@@ -259,38 +271,14 @@ Most users accept the Claude-Desktop-as-frontend tradeoff because the
 alternative is much less useful, but it is a real tradeoff and it is not
 the same posture as "everything stays local."
 
-## Updating Bridge
+## Updating and re-authenticating Bridge
 
-When Proton releases a new Bridge version:
-
-```bash
-# 1. Update BRIDGE_VERSION and BRIDGE_COMMIT in .env — the build refuses a
-#    tag that doesn't resolve to BRIDGE_COMMIT (see .env.example for the
-#    one-line git ls-remote lookup)
-# 2. Verify the local patch and runtime assumptions still hold
-make bridge-upgrade-check
-# 3. Rebuild and restart
-make update
-```
-
-## Bridge Re-authentication
-
-If Bridge credentials expire or you change your Proton password:
-
-```bash
-make down
-docker volume rm protonmail-local-ai_bridge-data
-make first-run   # log in again
-# update BRIDGE_USER in .env
-# write the new Bridge password to .secrets/bridge_pass.txt
-make up
-```
-
-Your email index is preserved in a separate volume — only Bridge credentials are reset.
-
-The new Bridge vault comes with a new TLS cert, so `mbsync` then refuses
-to sync because the cert no longer matches its saved pin. Accept the new
-cert with the two-step rotation in
+The Bridge app updates itself, and you sign in again in the app. If its
+IMAP password changes, write the new one to `.secrets/bridge_pass.txt`
+and run `make up`. If the app presents a new TLS cert (after a reset or
+reinstall), `mbsync` refuses to sync until you set
+`BRIDGE_CERT_FINGERPRINT` to the new fingerprint and accept the cert
+with the two-step rotation in
 [docs/troubleshooting.md](docs/troubleshooting.md#mbsync-refuses-to-sync--bridge-cert-pin-mismatch):
 recreate `mbsync` once with `BRIDGE_CERT_PIN_ROTATE=true`, then again
 with `BRIDGE_CERT_PIN_ROTATE=false` so pin enforcement is back on.
@@ -301,15 +289,8 @@ with `BRIDGE_CERT_PIN_ROTATE=false` so pin enforcement is back on.
 make build        # Build all Docker images
 make validate-env # Check .env values and secret permissions before startup
 make up           # Start the full stack
-make build-macos-bridge  # Build for macOS Bridge mode (no Bridge container)
-make up-macos-bridge     # Start against the Bridge app on your Mac
 make down         # Stop the full stack
 make logs         # Tail all logs
-make first-run    # One-time Bridge login
-make bridge-patch-check   # Verify Bridge patch points against upstream source
-make bridge-smoke         # Build and smoke test the Bridge image
-make bridge-upgrade-check # Run both Bridge upgrade guard checks
-make update       # Update Bridge to new version
 make status       # Container status and whether the index is current
 make requeue-dead # Requeue dead-lettered indexing jobs once the cause is fixed
 make clean        # Remove everything (destructive)

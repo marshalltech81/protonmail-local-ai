@@ -2,15 +2,32 @@
 
 ## Prerequisites
 
-- macOS with Docker Desktop installed and running
+- macOS with OrbStack or Docker Desktop installed and running
+- The official [Proton Mail Bridge](https://proton.me/mail/bridge) app,
+  installed on the same Mac and signed in (Bridge requires a paid
+  Proton plan)
 - Claude Desktop installed
-- Proton Mail paid account (Bridge requires a paid plan)
 - Git configured with SSH key for GitHub
 
-Already running the Proton Mail Bridge app on your Mac? The optional
-[macOS Bridge mode](#macos-bridge-mode-optional) syncs from it instead
-of the Bridge container; it replaces the Bridge build and login in
-steps 3–4 and the `make up` in step 6.
+### Platform support
+
+The stack syncs from the Proton Mail Bridge app running on the host.
+mbsync, the indexer and the MCP server run in containers; mbsync reaches
+the app through `host.docker.internal`.
+
+- **macOS** (OrbStack or Docker Desktop): tested. There
+  `host.docker.internal` forwards to the Mac's loopback interface, which
+  is where the app listens.
+- **Windows** (Docker Desktop): expected to work the same way, since
+  Docker Desktop forwards `host.docker.internal` to the host's loopback
+  there too, but untested.
+- **Linux**: not supported out of the box. On Docker Engine,
+  `host.docker.internal` (mapped to `host-gateway`) reaches the docker
+  bridge address, not the host loopback the app binds, so mbsync cannot
+  reach the app.
+
+The app stays bound to the host's loopback interface: no port is
+published, no LAN address is used and no container uses host networking.
 
 ## Step-by-Step Setup
 
@@ -27,8 +44,8 @@ cd protonmail-local-ai
 cp .env.example .env
 ```
 
-Edit `.env` — you can leave `BRIDGE_USER` blank for now.
-You will fill it in after the Bridge login step.
+Edit `.env` — you can leave `BRIDGE_USER` and `BRIDGE_CERT_FINGERPRINT`
+blank for now. You will fill them in from the Bridge app in step 4.
 
 Create the secrets directory and placeholder files:
 
@@ -43,7 +60,7 @@ token, all with `600` permissions. Docker Compose requires all five
 files to exist before starting. You will overwrite the placeholders
 with real values only as needed:
 
-- `bridge_pass.txt` — after the Bridge login step below
+- `bridge_pass.txt` — the Bridge app's IMAP password, in step 4 below
 - `inference_api_key.txt` — required (non-empty) whenever
   `INFERENCE_MODE` is enabled (`anthropic` or `openai`). For a remote
   provider, use the provider's real key. When pointing
@@ -78,82 +95,98 @@ with real values only as needed:
 make build
 ```
 
-The Bridge image compiles from the official Proton source (`make build-nogui`).
-This takes approximately 3–5 minutes on first build.
-Subsequent builds use Docker layer cache and are much faster.
+### 4. Set up the Proton Mail Bridge app
 
-### 4. First-time Bridge login
+The Bridge app must stay running and signed in. While it is closed,
+signed out, or the Mac sleeps, mbsync waits with its usual bounded
+retries, then exits and Docker restarts it; it syncs again once Bridge
+is back. Freshness is reported by `make status` as usual.
 
-Your credentials persist in the `bridge-data` Docker volume, so this step
-normally runs once. `make first-run` always opens the interactive CLI, so if
-a login is interrupted, run it again and finish the `login` step.
+1. Sign in to your Proton account in the Bridge app. Then, in the app's
+   settings, set the IMAP connection mode to **SSL** (implicit TLS)
+   under the IMAP/SMTP connection mode; the SMTP mode does not matter,
+   mbsync does not use SMTP. STARTTLS, the app's default, does not
+   work: mbsync speaks only implicit TLS and has no STARTTLS fallback,
+   so with STARTTLS it stops at startup with
+   `Bridge is not serving implicit TLS`.
+2. Open the account's mailbox details and note the IMAP username,
+   password and port; the port normally stays 1143. These are generated
+   by Bridge and differ from your Proton account password. Put the
+   username in `.env`:
 
-```bash
-make first-run
-```
+   ```bash
+   BRIDGE_USER=your@proton.me          # the app's IMAP username
+   ```
 
-Inside the interactive Bridge CLI:
+   Write the password into the Docker secret file:
 
-```
->>> login
-# Enter your Proton email address
-# Enter your Proton account password
-# Enter your 2FA code if enabled
+   ```bash
+   printf '%s' 'bridge-generated-pass' > .secrets/bridge_pass.txt
+   chmod 600 .secrets/bridge_pass.txt
+   ```
 
->>> info
-# Note the Username and Password shown — these are your Bridge credentials
-# They are different from your Proton account password
+   Do not put the Bridge password in `.env` — it is passed to the mbsync
+   container exclusively via Docker Compose secrets, mounted at
+   `/run/secrets/bridge_pass`. If the app's IMAP port is not 1143, set
+   `BRIDGE_IMAP_PORT` in `.env`.
+3. Take the app's certificate fingerprint and put it in `.env`
+   (required). With the app running and signed in (so it, and nothing
+   else, holds its port) and its IMAP mode set to SSL (sub-step 1), run
+   this in a terminal on the host, replacing 1143 with the app's IMAP
+   port if it differs:
 
->>> exit
-```
+   ```bash
+   openssl s_client -connect 127.0.0.1:1143 </dev/null \
+       | openssl x509 -noout -fingerprint -sha256
+   ```
 
-Copy the displayed `Username` into your `.env` file:
+   There is no `-starttls imap`: the app speaks TLS from the first
+   byte. If this prints `unable to load certificate` (and `s_client`
+   reports a `wrong version number` error), the app is still in STARTTLS
+   mode; switch it to SSL and run it again.
 
-```bash
-BRIDGE_USER=your@proton.me          # from info → Username
-```
+   If your Bridge version can export its TLS certificate (in its
+   settings), `openssl x509 -in cert.pem -noout -fingerprint -sha256` on
+   the exported `cert.pem` gives the same value without a network
+   connection. Then:
 
-Write the `Password` into the Docker secret file:
+   ```bash
+   BRIDGE_CERT_FINGERPRINT=AB:CD:...   # the value after "Fingerprint="
+   ```
 
-```bash
-printf '%s' 'bridge-generated-pass' > .secrets/bridge_pass.txt
-chmod 600 .secrets/bridge_pass.txt
-```
+   Colon-separated or bare hex, any case, and the whole
+   `sha256 Fingerprint=…` line are all accepted. The value is not
+   secret. The app's certificate must be issued for `127.0.0.1`, which
+   is what Bridge generates; a certificate you imported into Bridge
+   yourself must be too.
 
-Do not put the Bridge password in `.env` — it is passed to the mbsync container
-exclusively via Docker Compose secrets, mounted at `/run/secrets/bridge_pass`.
+#### How TLS is checked
 
-**Why this step is manual (design note)**
+mbsync connects with implicit TLS (the app's SSL mode): the TLS
+handshake is the first thing on the connection, so there is no
+plaintext phase for anything on the path to strip or inject into. It
+keeps certificate verification and the persistent fingerprint pin. The
+app's certificate names only `127.0.0.1`, and the isync shipped in the
+image (1.4.4) checks a self-signed CA certificate like Bridge's against
+the configured host name, so connecting to `host.docker.internal`
+directly fails with `certificate owner does not match hostname`.
+`docker-compose.yml` therefore sets `BRIDGE_CERT_HOST=127.0.0.1`: the
+generated `mbsyncrc` keeps `Host 127.0.0.1` for the certificate check
+and reaches `host.docker.internal:<port>` through an isync `Tunnel`
+(`socat`), which only relays bytes. TLS still runs end to end between
+mbsync and the app. See [architecture.md](architecture.md#bridge) for
+the details.
 
-The Bridge password lives inside `vault.enc`, which is encrypted with a key held
-in the GPG-backed `pass` store. It would be technically possible to automate
-extraction by reimplementing the vault format (msgpack framing, AES-256-GCM,
-sha256 key derivation). This is intentionally avoided for two reasons:
-
-1. **Fragility.** The vault format is a Bridge internal. Proton can change the
-   framing, cipher parameters, or key derivation in any release without notice.
-   External decryption code would break silently or produce garbage.
-
-2. **Unnecessary.** The Bridge CLI's `info` command already reads the vault
-   through the supported code path and prints the Bridge credentials. The
-   manual copy from that output is a one-time, human-in-the-loop step that
-   is appropriate for a first-run flow requiring interactive login anyway.
-
-To see the credentials again later, reopen the CLI the same way. Stop the
-stack first so only one Bridge uses the `bridge-data` volume:
-
-```bash
-make down
-make first-run   # opens the CLI even though you are logged in
-# >>> info       # copy the Username and Password, then
-# >>> exit
-make up
-```
-
-`make first-run` disables Docker logging for the session, so the credentials
-`info` prints stay out of the Docker log files. The Bridge entrypoint takes no
-command: `docker compose run --rm protonmail-bridge <command>` exits with an
-error instead of running it.
+The app listens on an unprivileged port on the host's loopback, which
+another local account can hold while the app is not running. mbsync
+therefore does not trust the first certificate it sees: you give it the
+app's fingerprint in `BRIDGE_CERT_FINGERPRINT`, and it refuses any other
+certificate, before the pin and before the password is sent, on every
+start. Without `BRIDGE_CERT_FINGERPRINT`, `make validate-env` (and so
+`make up`) refuses to start, and mbsync itself refuses at startup,
+before it waits for or connects to the app. With a value that does not
+match, mbsync refuses before logging in and pins nothing; its log shows
+the fingerprint it was presented.
 
 ### 5. Configure your embedder and inference providers
 
@@ -261,11 +294,12 @@ make up
 `make up` now validates `.env` and the secret files first. It checks the
 values Compose will use: a variable exported in your shell overrides `.env`,
 and a key left empty or out takes its `docker-compose.yml` default, so
-`BRIDGE_VERSION`, `SYNC_INTERVAL`, `MCP_PORT` and (in `anthropic` mode)
+`SYNC_INTERVAL`, `MCP_PORT` and (in `anthropic` mode)
 `INFERENCE_MODEL` may be omitted. A secret file holding only whitespace counts as empty, since the
 services strip it. It fails fast if:
 
 - `BRIDGE_USER` is still unset or left at the placeholder value
+- `BRIDGE_CERT_FINGERPRINT` is unset or not a SHA-256 fingerprint
 - `.secrets/bridge_pass.txt` is missing, empty, or not `600`
 - any enabled layer's secret file is missing, empty, or not `600`:
   `inference_api_key.txt` when `INFERENCE_MODE` is `anthropic` or
@@ -302,7 +336,6 @@ make logs
 ```
 
 You should see:
-- `protonmail-bridge` — "Account found. Starting Bridge as user 'bridge'..."
 - `mbsync` — "Bridge IMAP port is reachable.", then "Bridge cert
   fingerprint matches the pinned value." (or "First boot — pinned Bridge
   cert fingerprint ..." on the first start), then "Running initial sync..."
@@ -338,18 +371,7 @@ The MCP server is read-only:
 
 On first run, Bridge must download and decrypt your full mailbox from Proton's
 servers before mbsync can pull anything. This can take a long time for large
-mailboxes. Watch sync progress with:
-
-```bash
-docker run --rm \
-    -v protonmail-local-ai_bridge-data:/data:ro \
-    debian:bookworm-slim \
-    bash -c 'find /data/local/protonmail/bridge-v3/logs -name "*.log" | sort | tail -1 | xargs tail -f'
-```
-
-Bridge writes sync progress into its structured log file in the `bridge-data`
-volume.
-
+mailboxes; the Bridge app shows its own sync progress.
 
 ### Reranker toggle
 
@@ -363,8 +385,7 @@ leave empty for the Cohere SDK default.
 
 The MCP server reads the rerank settings once at startup, so a change
 takes effect only when the `mcp-server` container is recreated. After
-editing `.env`, run `make up` (`make up-macos-bridge` in
-[macOS Bridge mode](#macos-bridge-mode-optional)): Compose recreates every container whose
+editing `.env`, run `make up`: Compose recreates every container whose
 configuration changed. `docker compose restart` is not enough, because
 a restarted container keeps the environment it was created with. If
 the stack was started with an overlay (such as
@@ -392,7 +413,6 @@ setfacl -m u:1002:r config/authority.toml
 # edit: one table per class, with `addresses` (exact) and/or
 # `domains` (the domain and its subdomains)
 make restart-indexer   # a running stack; on first run, make up
-                       # (make up-macos-bridge in macOS Bridge mode)
 ```
 
 `config/authority.toml` is gitignored: it holds real addresses and
@@ -537,87 +557,12 @@ mean a schema rollback plus a full reindex from Maildir.
 
 ## Updating Bridge
 
-When you bump `BRIDGE_VERSION` in `.env`, also set `BRIDGE_COMMIT` to the commit
-that release tag points at. Proton's release tags are lightweight (unsigned), so
-the build pins the exact commit and refuses a tag that resolves to anything
-else — a re-pointed upstream tag cannot change what gets compiled:
-
-```bash
-git ls-remote https://github.com/ProtonMail/proton-bridge.git 'refs/tags/v3.28.0*'
-# use the ^{} line when present (annotated tag); otherwise the only line
-```
-
-Then validate the upstream patch points and the rebuilt image before restarting
-the service:
-
-```bash
-make bridge-upgrade-check
-make update
-```
-
-`make update` runs `make bridge-upgrade-check` first and stops if it fails.
-For a bump made in this repository, the Security Scan workflow's report-only
-"Bridge Go module scan" job lists the known advisories in Proton's Go modules
-at the `BRIDGE_COMMIT` pinned in `.env.example` (job summary, with a warning
-when the `bridge/Dockerfile` or `docker-compose.yml` default disagrees; it
-never fails CI, and it reruns weekly).
-If the check fails, do not work around it. A commit mismatch is often a
-pin mistake to correct (see below). For patch drift, a smoke failure, or a
-moved upstream tag, stay on the working release — and because `.env`
-already holds the candidate `BRIDGE_VERSION` and `BRIDGE_COMMIT` by then,
-that means putting both back:
-
-1. Restore the previous `BRIDGE_VERSION` and `BRIDGE_COMMIT` in `.env`.
-2. If the failure came from the smoke step (it runs after the patch check
-   passes), it has already rebuilt the local `protonmail-local-ai/bridge`
-   image from the candidate. The running container is unaffected, but the
-   next `make up` or container recreation would use the rejected image, so
-   rebuild the known-good one: `docker compose build protonmail-bridge`.
-   Do not restart Bridge until that build finishes.
-
-By failure:
-
-- **Patch drift** (`make bridge-patch-check`): the upstream source no longer
-  matches what `bridge/patch-source.sh` expects — usually Proton moved or
-  reworded the code around a patch point. Stay on the previous release
-  and wait for a repo update that re-targets the patches;
-  do not hand-edit the upstream source or skip the check.
-- **Smoke failure** (`make bridge-smoke`): the patched image built but does
-  not start as expected (for example, the `autoUpdate="false"` vault marker
-  is missing from its log, or Bridge exits non-zero or logs a fatal error
-  around it). Treat it the same way — stay on the previous release.
-- **Commit mismatch**: `BRIDGE_VERSION` does not resolve to
-  `BRIDGE_COMMIT`. What to do depends on whether the pin was already
-  verified for this version:
-  - **Pin just edited** — usually a local mistake: `BRIDGE_VERSION` was
-    bumped without `BRIDGE_COMMIT` (an unset `BRIDGE_COMMIT` falls back to
-    the previous release's commit), or the annotated tag object's SHA was
-    copied instead of the `^{}` line. Correct it from the `git ls-remote`
-    lookup above. Proton's tags are unsigned, so before building, check that
-    the commit is the one the release shipped with — for example, that its
-    date matches the release date on Proton's GitHub releases page.
-  - **Pin previously verified for this version** — the upstream tag has
-    moved. Do not copy the new commit from `git ls-remote`; that is the
-    unverified source the pin exists to block. Stay on the previous
-    release (steps above) until you know why the tag moved.
-
-Things to expect after an upgrade:
-
-- **Gluon cache.** Bridge keeps its IMAP cache (Gluon) in the `bridge-data`
-  volume under `/data/local`. If a new version cannot use the existing
-  cache, Bridge re-downloads the mailbox from Proton, which can take hours
-  on a large mailbox; IMAP is unresponsive until it finishes. See "Bridge is
-  up but IMAP is unresponsive" in [`troubleshooting.md`](troubleshooting.md)
-  for how to tell a re-sync is in progress.
-- **Vault path.** `bridge/entrypoint.sh` detects an existing account by
-  looking for `/data/config/protonmail/bridge-v3/vault.enc`. The `bridge-v3`
-  segment is tied to Bridge's major version. If a future major version
-  stores its vault elsewhere, account detection fails and the container
-  drops to the interactive CLI on every restart. Check the vault path
-  before adopting a new Bridge major version.
-- **Cert pin.** A new Bridge version can present a new TLS cert, which
-  mbsync treats as a pin mismatch. See "mbsync refuses to sync — Bridge cert
-  pin mismatch" in [`troubleshooting.md`](troubleshooting.md).
+The Bridge app updates itself; nothing in this repository pins or
+builds it. If an update (or a reinstall) gives the app a new TLS
+certificate, mbsync refuses to sync until you set
+`BRIDGE_CERT_FINGERPRINT` to the new fingerprint and accept it once:
+see "mbsync refuses to sync — Bridge cert pin mismatch" in
+[`troubleshooting.md`](troubleshooting.md).
 
 ### 7. Connect an MCP client
 
@@ -826,7 +771,7 @@ restart Claude Desktop.
 
 **Upgrading from a release without MCP authentication.** Run
 `make init-secrets` (it creates only the missing token file), then
-`make up` (`make up-macos-bridge` in macOS Bridge mode), then add the header to each client as above. Until a client
+`make up`, then add the header to each client as above. Until a client
 sends the token, its requests get `401`.
 
 **Upgrading from a release that served `/sse` (breaking change).** The
@@ -852,175 +797,31 @@ resources until a restart. A client that comes back after that gets
 `404` for the old session ID and starts a new session; raise the value
 in `.env` if a client of yours does not reconnect on its own.
 
-## macOS Bridge mode (optional)
+## Switching to another Bridge installation
 
-By default the stack runs its own Bridge, built from Proton's source in
-the `protonmail-bridge` container. If you already run the official
-Proton Mail Bridge app on your Mac, mbsync can sync from that instead.
-mbsync, the indexer and the MCP server still run in containers; the
-Bridge container is neither built nor started.
-
-```text
-Proton Mail → Bridge app on macOS (IMAP on 127.0.0.1)
-                  ↑ IMAP over implicit TLS via host.docker.internal
-             mbsync container → Maildir → indexer → MCP server
-```
-
-The mode is a Compose overlay, `docker-compose.macos-bridge.yml`, with
-Makefile targets that always pass it:
-
-| Default (Bridge container) | macOS Bridge mode |
-|---|---|
-| `make build` | `make build-macos-bridge` |
-| `make first-run` | log in in the Bridge app |
-| `make up` | `make up-macos-bridge` |
-| `make update` | the app updates itself |
-
-`make down`, `make logs`, `make status`, `make restart-indexer` and
-`make requeue-dead` work in either mode. Any other `docker compose`
-command must pass both files
-(`docker compose -f docker-compose.yml -f docker-compose.macos-bridge.yml …`):
-without the overlay, Compose recreates mbsync pointed at the Bridge
-container.
-
-### Requirements and limits
-
-- macOS with OrbStack. Containers reach the Mac through
-  `host.docker.internal`, which OrbStack (and Docker Desktop) provide;
-  the mode was checked on OrbStack. Bridge stays bound to the Mac's
-  loopback interface: no port is published, no LAN address is used and
-  no container uses host networking.
-- The Bridge app must stay running and logged in. While it is closed,
-  logged out, or the Mac sleeps, mbsync waits with its usual bounded
-  retries, then exits and Docker restarts it; it syncs again once
-  Bridge is back. Freshness is reported by `make status` as usual.
-- The app's IMAP connection mode must be **SSL** (implicit TLS), not
-  STARTTLS, the app's default: set it in the app's connection settings
-  ([Set it up](#set-it-up), step 1). mbsync speaks only implicit TLS
-  and has no STARTTLS fallback, so with STARTTLS it stops at startup
-  with `Bridge is not serving implicit TLS`.
-- The app's certificate must be issued for `127.0.0.1`, which is what
-  Bridge generates. A certificate you imported into Bridge yourself
-  must be too.
-
-### How TLS is checked
-
-mbsync connects with implicit TLS (the app's SSL mode), as it does to
-the Bridge container: the TLS handshake is the first thing on the
-connection, so there is no plaintext phase for anything on the path to
-strip or inject into. It keeps certificate verification and the
-persistent fingerprint pin. The app's certificate names only `127.0.0.1`, and the
-isync shipped in the image (1.4.4) checks a self-signed CA certificate
-like Bridge's against the configured host name, so connecting to
-`host.docker.internal` directly fails with `certificate owner does not
-match hostname`. The overlay therefore sets `BRIDGE_CERT_HOST=127.0.0.1`:
-the generated `mbsyncrc` keeps `Host 127.0.0.1` for the certificate
-check and reaches `host.docker.internal:<port>` through an isync
-`Tunnel` (`socat`), which only relays bytes. TLS still runs end to end
-between mbsync and the app. See
-[architecture.md](architecture.md#bridge-modes) for the details.
-
-Unlike the Bridge container, which sits alone on its own Docker network,
-the app listens on an unprivileged port on the Mac's loopback, which
-another local account can hold while the app is not running. mbsync
-therefore does not trust the first certificate it sees: you give it the
-app's fingerprint in `BRIDGE_CERT_FINGERPRINT`, and it refuses any other
-certificate, before the pin and before the password is sent, on every
-start.
-
-### Set it up
-
-1. In the Bridge app, set the IMAP connection mode to **SSL** (in the
-   app's settings, under the IMAP/SMTP connection mode; the SMTP mode
-   does not matter, mbsync does not use SMTP). Then open the account's
-   mailbox details and note the IMAP username, password and port; the
-   port normally stays 1143. These are generated by Bridge and differ
-   from your Proton account password.
-2. `make init-secrets`, then put the username in `.env` and the
-   password in the Docker secret, exactly as in step 4 above:
-
-   ```bash
-   BRIDGE_USER=your@proton.me          # the app's IMAP username
-   ```
-
-   ```bash
-   printf '%s' 'bridge-generated-pass' > .secrets/bridge_pass.txt
-   chmod 600 .secrets/bridge_pass.txt
-   ```
-
-   If the app's IMAP port is not 1143, set `BRIDGE_IMAP_PORT` in `.env`.
-   It is read only in this mode.
-3. Take the app's certificate fingerprint on the Mac and put it in
-   `.env`. With the app running and logged in (so it, and nothing else,
-   holds its port) and its IMAP mode set to SSL (step 1), run this in a
-   Mac terminal, replacing 1143 with the app's IMAP port if it differs:
-
-   ```bash
-   openssl s_client -connect 127.0.0.1:1143 </dev/null \
-       | openssl x509 -noout -fingerprint -sha256
-   ```
-
-   There is no `-starttls imap`: the app now speaks TLS from the first
-   byte. If this prints `unable to load certificate` (and `s_client`
-   reports a `wrong version number` error), the app is still in STARTTLS
-   mode; switch it to SSL and run it again.
-
-   If your Bridge version can export its TLS certificate (in its
-   settings), `openssl x509 -in cert.pem -noout -fingerprint -sha256` on
-   the exported `cert.pem` gives the same value without a network
-   connection. Then:
-
-   ```bash
-   BRIDGE_CERT_FINGERPRINT=AB:CD:...   # the value after "Fingerprint="
-   ```
-
-   Colon-separated or bare hex, any case, and the whole
-   `sha256 Fingerprint=…` line are all accepted. The value is not
-   secret.
-4. Configure the embedder and inference providers (step 5 of the main setup).
-5. Build and start:
-
-   ```bash
-   make build-macos-bridge
-   make up-macos-bridge
-   ```
-
-6. Check the certificate was pinned and the first sync ran:
-
-   ```bash
-   docker logs mbsync
-   ```
-
-   Without `BRIDGE_CERT_FINGERPRINT`, mbsync refuses at startup, before
-   it waits for or connects to the app. With a value that does not
-   match, it refuses before logging in and pins nothing; the log shows
-   the fingerprint it was presented.
-
-### Switching an existing installation
-
-An installation that already synced from the Bridge container (or the
-reverse) has three pieces of state tied to the old Bridge. None of the
-steps below deletes mail; the last one is only for state that turns out
-to be incompatible, and it starts with a backup.
+An installation that already synced from one Bridge (for example before
+reinstalling the app or moving to another Mac) has three pieces of
+state tied to the old Bridge. None of the steps below deletes mail; the last one is
+only for state that turns out to be incompatible, and it starts with a
+backup.
 
 1. **Stop the stack**: `make down`.
-2. **Credentials.** The app's IMAP username and password differ from the
-   container's. Replace `BRIDGE_USER` and `.secrets/bridge_pass.txt`
-   with the app's (the container Bridge's stay in its `bridge-data`
-   volume, which this mode leaves untouched).
-3. **Certificate pin.** Set `BRIDGE_CERT_FINGERPRINT` to the app's
-   fingerprint (step 3 of "Set it up"). The app presents a different
-   certificate from the Bridge container, so the first start still
-   refuses to sync with `Bridge cert fingerprint does not match pinned
-   value`. Accept the app's certificate once and turn enforcement back
-   on (a rotation in this mode accepts only the certificate matching
+2. **Credentials.** The new Bridge's IMAP username and password differ
+   from the old one's. Replace `BRIDGE_USER` and
+   `.secrets/bridge_pass.txt` with the new ones (step 4.2 of the setup).
+3. **Certificate pin.** Set `BRIDGE_CERT_FINGERPRINT` to the new
+   Bridge's fingerprint (step 4.3). It presents a different
+   certificate from the old one, so the first start still refuses to
+   sync with `Bridge cert fingerprint does not match pinned value`.
+   Accept the new certificate once and turn enforcement back on (a
+   rotation accepts only the certificate matching
    `BRIDGE_CERT_FINGERPRINT`):
 
    ```bash
-   make up-macos-bridge                              # refused: pin mismatch
-   BRIDGE_CERT_PIN_ROTATE=true make up-macos-bridge  # re-pins, then syncs
-   docker logs mbsync                                # check the "rotating pin" warning
-   make up-macos-bridge                              # recreates mbsync with rotation off
+   make up                              # refused: pin mismatch
+   BRIDGE_CERT_PIN_ROTATE=true make up  # re-pins, then syncs
+   docker logs mbsync                   # check the "rotating pin" warning
+   make up                              # recreates mbsync with rotation off
    ```
 
    The last command recreates mbsync because its environment changed;
@@ -1042,14 +843,12 @@ to be incompatible, and it starts with a backup.
      ([how to see which](troubleshooting.md#folder-names-in-mbsyncs-log)).
      The existing state cannot be
      reused. Either switch back (`make down`, then `make up` with the
-     old credentials and a pin rotation back), or back up the Maildir
-     and start it over, with the index, from the app, as in
+     old credentials, fingerprint and a pin rotation back), or back up
+     the Maildir and start it over, with the index, from the new Bridge,
+     as in
      [mbsync reports a UIDVALIDITY change](troubleshooting.md#mbsync-reports-a-uidvalidity-change).
    - `Recovered from change of UIDVALIDITY`: the change was spurious;
      isync checked the messages and kept the state. Nothing to do.
-
-The same steps apply when switching back to the Bridge container, with
-`make up` and `make first-run`'s credentials.
 
 ## Troubleshooting
 

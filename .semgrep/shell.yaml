@@ -6,8 +6,7 @@
 #
 # The rules are line regexes (`languages: [regex]`) rather than bash
 # patterns: Semgrep's bash parser rejects several of the repo's scripts
-# (validate-env.sh, bridge/tests/entrypoint_test.sh, part of
-# mbsync/entrypoint.sh), and a structural rule silently skips what it
+# (validate-env.sh, part of mbsync/entrypoint.sh), and a structural rule silently skips what it
 # cannot parse. A regex reads every line.
 #
 # The TLS and pipe-to-shell rules skip only lines that start with `#`

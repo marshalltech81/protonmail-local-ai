@@ -11,10 +11,6 @@ repos:
         exclude: '^indexer/src/data/.*/tokenizer\.json$'
       - id: check-merge-conflict
       - id: check-yaml
-        # Compose's `!reset` tag has no constructor in a plain YAML
-        # loader. CI validates this overlay with `docker compose config`
-        # (.github/workflows/docker.yml) instead.
-        exclude: '^docker-compose\.macos-bridge\.yml$'
       - id: check-json
       - id: end-of-file-fixer
       - id: trailing-whitespace

@@ -185,7 +185,7 @@ rules:
     message: >-
       This logging configuration does not bound the log size. Use
       `logging: *default-logging` (json-file with a positive `max-size`),
-      or `driver: none` as docker-compose.first-run.yml does for Bridge.
+      or `driver: none`.
     paths:
       include:
         - "docker-compose*.yml"
@@ -472,9 +472,9 @@ rules:
     languages: [yaml]
     severity: ERROR
     message: >-
-      Service `$SVC` joins bridge-net. Only protonmail-bridge and mbsync
-      may reach Bridge (AGENTS.md: mbsync is the only container that
-      talks to Bridge IMAP; indexer and mcp-server get no access).
+      Service `$SVC` joins bridge-net. Only mbsync may reach Bridge
+      (AGENTS.md: mbsync is the only container that talks to Bridge
+      IMAP; indexer and mcp-server get no access).
     paths:
       include:
         - "docker-compose*.yml"
@@ -509,7 +509,7 @@ rules:
             ...
       - metavariable-regex:
           metavariable: $SVC
-          regex: ^(?!(protonmail-bridge|mbsync)$)
+          regex: ^(?!mbsync$)
 
   # ---------------------------------------------------------------------------
   # Required hardening for every defined service (one that names a build

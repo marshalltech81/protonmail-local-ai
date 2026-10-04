@@ -3,9 +3,8 @@
 # =============================================================================
 FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251
 
-# socat relays the IMAP connection to the macOS Bridge app through
-# mbsync's Tunnel (BRIDGE_CERT_HOST, see entrypoint.sh); it is unused in
-# the default Bridge-container mode.
+# socat relays the IMAP connection to the Bridge app on the host through
+# mbsync's Tunnel (BRIDGE_CERT_HOST, see entrypoint.sh).
 RUN apt-get update && apt-get install -y --no-install-recommends \
     isync \
     ca-certificates \
@@ -17,8 +16,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # -----------------------------------------------------------------------------
 # Non-root user
-# UID 1001 — distinct from bridge (UID 1000) and from indexer (UID
-# 1002). mbsync owns every file under /maildir; the indexer reads via
+# UID 1001 — distinct from indexer (UID 1002) and mcp (UID 1003).
+# mbsync owns every file under /maildir; the indexer reads via
 # "other" perms after the entrypoint's post-sync chmod relaxes
 # Maildir files from the default 0600 to 0644. This keeps cross-UID
 # defense-in-depth (a parser/extractor exploit in the indexer cannot

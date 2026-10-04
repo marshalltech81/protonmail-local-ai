@@ -507,12 +507,12 @@ reject_secret_in_env "MCP_AUTH_TOKEN" "$MCP_TOKEN_FILE"
 # Values resolve as Compose interpolates them: a variable exported in the
 # calling shell, else .env, else the ``${VAR:-default}`` fallback that
 # docker-compose.yml gives it (applied below, after each read). So a
-# key Compose defaults (BRIDGE_VERSION, SYNC_INTERVAL, MCP_PORT,
-# INFERENCE_MODEL) may be left out of .env, and ``SYNC_INTERVAL=0 make
-# up`` is checked as 0. BRIDGE_VERSION has nothing to check beyond its
-# default. INFERENCE_MODEL's default is an Anthropic model, so it only
+# key Compose defaults (SYNC_INTERVAL, MCP_PORT, INFERENCE_MODEL) may be
+# left out of .env, and ``SYNC_INTERVAL=0 make up`` is checked as 0.
+# INFERENCE_MODEL's default is an Anthropic model, so it only
 # satisfies the required-model contract in anthropic mode (see below).
 BRIDGE_USER="$(env_value BRIDGE_USER)"
+BRIDGE_CERT_FINGERPRINT="$(env_value BRIDGE_CERT_FINGERPRINT)"
 INFERENCE_MODE="$(env_value INFERENCE_MODE)"
 INFERENCE_BASE_URL="$(env_value INFERENCE_BASE_URL)"
 INFERENCE_MODEL="$(env_value INFERENCE_MODEL)"
@@ -544,16 +544,18 @@ MCP_SESSION_IDLE_TIMEOUT_SECS="$(env_value_stripped MCP_SESSION_IDLE_TIMEOUT_SEC
 MCP_EXPERIMENTAL_TOOLS="$(env_value_stripped MCP_EXPERIMENTAL_TOOLS)"
 
 [[ -n "$BRIDGE_USER" && "$BRIDGE_USER" != "your@proton.me" ]] || {
-    echo "ERROR: BRIDGE_USER in .env must be set to the Bridge username from 'bridge --cli info'." >&2
+    echo "ERROR: BRIDGE_USER in .env must be set to the username from the Bridge app's IMAP details." >&2
     exit 1
 }
 
-# Optional (docker-compose.yml carries the default pin). When set, it must
-# be a full commit SHA: the Bridge build refuses a tag that resolves to
-# anything else, so a typo here would only surface deep inside the build.
-BRIDGE_COMMIT="$(env_value BRIDGE_COMMIT)"
-[[ -z "$BRIDGE_COMMIT" || "$BRIDGE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || {
-    echo "ERROR: BRIDGE_COMMIT in .env must be a full 40-character lowercase commit SHA." >&2
+# Required: mbsync never trusts the Bridge app's certificate on first use
+# and refuses to start without it (mbsync/entrypoint.sh
+# validate_bridge_endpoint, which accepts the same forms: openssl's
+# "sha256 Fingerprint=AB:CD:..." line, its value, or bare hex).
+BRIDGE_CERT_FINGERPRINT_HEX="${BRIDGE_CERT_FINGERPRINT##*=}"
+BRIDGE_CERT_FINGERPRINT_HEX="$(printf '%s' "${BRIDGE_CERT_FINGERPRINT_HEX//:/}" | tr '[:upper:]' '[:lower:]')"
+[[ "$BRIDGE_CERT_FINGERPRINT_HEX" =~ ^[0-9a-f]{64}$ ]] || {
+    echo "ERROR: BRIDGE_CERT_FINGERPRINT in .env must be the SHA-256 fingerprint of the Bridge app's certificate: 64 hex digits, with or without colons (docs/setup.md, step 4.3)." >&2
     exit 1
 }
 

@@ -1,11 +1,11 @@
 #!/bin/bash
 set -Eeuo pipefail
 
-# End-to-end TLS check for the macOS Bridge mode (#497), run against the
-# shipped mbsync image and a synthetic implicit-TLS IMAP server
-# (imap_stub.py, #638) whose certificate is shaped like the macOS Bridge app's: self-signed,
-# CA:TRUE, issued for 127.0.0.1 only. The real entrypoint runs with the
-# overlay's BRIDGE_CERT_HOST=127.0.0.1, reaching the server by another
+# End-to-end TLS check for the Bridge app on the host (#497), run against
+# the shipped mbsync image and a synthetic implicit-TLS IMAP server
+# (imap_stub.py, #638) whose certificate is shaped like the Bridge app's: self-signed,
+# CA:TRUE, issued for 127.0.0.1 only. The real entrypoint runs with
+# Compose's BRIDGE_CERT_HOST=127.0.0.1, reaching the server by another
 # name, as it reaches the app through host.docker.internal.
 #
 # Checks:

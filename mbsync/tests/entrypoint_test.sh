@@ -727,7 +727,7 @@ Maildir notice: sleeping due to recent directory modification.
 Maildir notice: no UIDVALIDITY, creating new.
 Warning: lost track of 3 pulled message(s)
 Notice: far side store does not support flag(s) 'T'; not propagating.
-Socket error: secure read from protonmail-bridge (172.18.0.2:1143): Connection reset by peer
+Socket error: secure read from tunnel: Connection reset by peer
 Error: channel protonmail: far side box INBOX cannot be opened.
 Error: channel protonmail: near side box INBOX cannot be opened.
 Error: channel protonmail, far side box INBOX: UIDVALIDITY genuinely changed (at UID 42).
@@ -1064,10 +1064,10 @@ invalid_deadlines_are_refused_at_startup() {
     BRIDGE_PASS_FILE="$pass_file"
     BRIDGE_USER="synthetic@example.com"
     SYNC_INTERVAL=60
-    BRIDGE_HOST="protonmail-bridge"
+    BRIDGE_HOST="host.docker.internal"
     BRIDGE_IMAP_PORT=1143
-    BRIDGE_CERT_HOST=""
-    BRIDGE_CERT_FINGERPRINT=""
+    BRIDGE_CERT_HOST="127.0.0.1"
+    BRIDGE_CERT_FINGERPRINT="$FP_OLD"
     load expected_fingerprint validate_bridge_endpoint require_prerequisites
     SYNC_DEADLINE_SECONDS=86400
     (require_prerequisites) || return 1
@@ -1442,13 +1442,11 @@ refused_probes_fail_after_the_attempts_with_nc_stderr() {
     [[ "$err" == *"synthetic-refused"* ]] || return 1
 }
 
-# --- Bridge endpoint: container default and macOS app (#497) ----------------
+# --- Bridge endpoint: the Bridge app on the host (#497) ---------------------
 #
-# Without BRIDGE_CERT_HOST mbsync connects to BRIDGE_HOST and checks the
-# certificate against that name. With it (the macOS overlay), the name
-# checked is BRIDGE_CERT_HOST and the connection to BRIDGE_HOST goes
-# through a tunnel. Certificate extraction and the pin always use the
-# address mbsync actually connects to.
+# The name checked is BRIDGE_CERT_HOST and the connection to BRIDGE_HOST
+# goes through a tunnel. Certificate extraction and the pin always use
+# the address mbsync actually connects to.
 
 TEMPLATE="$(dirname "$ENTRYPOINT")/mbsyncrc.template"
 readonly TEMPLATE
@@ -1457,15 +1455,15 @@ readonly TEMPLATE
 endpoint_setup() {
     TEMPLATE_FILE="$TEMPLATE"
     CONFIG_FILE="$WORK/mbsyncrc-$1"
-    BRIDGE_HOST="protonmail-bridge"
+    BRIDGE_HOST="host.docker.internal"
     BRIDGE_IMAP_PORT=1143
-    BRIDGE_CERT_HOST=""
-    BRIDGE_CERT_FINGERPRINT=""
+    BRIDGE_CERT_HOST="127.0.0.1"
+    BRIDGE_CERT_FINGERPRINT="$FP_OLD"
     export BRIDGE_USER="synthetic@example.com"
     load expected_fingerprint validate_bridge_endpoint render_mbsync_config
 }
 
-# The settings either mode must keep: implicit TLS (#638) with the
+# The settings the config must keep: implicit TLS (#638) with the
 # extracted certificate, pull-only, no expunge, the folder exclusions.
 config_keeps_sync_safety() {
     grep -qx 'SSLType IMAPS' "$CONFIG_FILE" || return 1
@@ -1484,18 +1482,6 @@ config_keeps_sync_safety() {
     grep -qx 'SyncState \*' "$CONFIG_FILE" || return 1
     grep -qx 'SubFolders Legacy' "$CONFIG_FILE" || return 1
     [[ "$(stat -c %a "$CONFIG_FILE" 2>/dev/null || stat -f %Lp "$CONFIG_FILE")" == "600" ]] || return 1
-}
-
-default_config_connects_directly_to_the_bridge_container() {
-    endpoint_setup default
-    render_mbsync_config
-    grep -qx 'Host protonmail-bridge' "$CONFIG_FILE" || return 1
-    grep -qx 'Port 1143' "$CONFIG_FILE" || return 1
-    if grep -q '^Tunnel' "$CONFIG_FILE"; then
-        echo "the container mode must not tunnel"
-        return 1
-    fi
-    config_keeps_sync_safety
 }
 
 # shellcheck disable=SC2034 # used by the entrypoint functions loaded with eval
@@ -1517,8 +1503,8 @@ cert_host_config_checks_that_name_and_tunnels_to_the_host() {
 valid_endpoints_are_accepted() {
     endpoint_setup valid
     validate_bridge_endpoint || return 1
-    BRIDGE_HOST="host.docker.internal" BRIDGE_IMAP_PORT=65535 BRIDGE_CERT_HOST="127.0.0.1" \
-        BRIDGE_CERT_FINGERPRINT="$FP_OLD" validate_bridge_endpoint
+    BRIDGE_HOST="bridge.example" BRIDGE_IMAP_PORT=65535 BRIDGE_CERT_HOST="localhost" \
+        validate_bridge_endpoint
 }
 
 # The values are written into mbsyncrc and, with a tunnel, into the shell
@@ -1535,8 +1521,7 @@ invalid_endpoints_are_refused() {
             return 1
         fi
         # With a valid fingerprint, so only the host can be refused.
-        if BRIDGE_CERT_HOST="$value" BRIDGE_CERT_FINGERPRINT="$FP_OLD" validate_bridge_endpoint 2>/dev/null \
-            && [[ -n "$value" ]]; then
+        if BRIDGE_CERT_HOST="$value" BRIDGE_CERT_FINGERPRINT="$FP_OLD" validate_bridge_endpoint 2>/dev/null; then
             printf 'BRIDGE_CERT_HOST %q accepted\n' "$value"
             return 1
         fi
@@ -1578,7 +1563,7 @@ extract_setup() {
         extract_bridge_cert
 }
 
-# Synthetic certificates shaped like the macOS app's: self-signed, CN
+# Synthetic certificates shaped like the Bridge app's: self-signed, CN
 # 127.0.0.1. Generated once for all cases.
 make_synthetic_cert() {
     openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj "/CN=127.0.0.1" \
@@ -1651,8 +1636,7 @@ a_different_cert_at_the_host_is_refused() {
     [[ "$(cat "$PIN_FILE")" == "$pinned" ]] || return 1
 }
 
-# Review round 1: with a cert host (the macOS app), the app's loopback
-# port can be held by another local account while the app is down, so
+# Review round 1: the app's loopback port can be held by another local account while the app is down, so
 # the first certificate is not trusted on first use: it must match the
 # fingerprint the operator took from the app, and nothing is pinned or
 # sent before it does.
@@ -1703,8 +1687,8 @@ expected_fingerprint_in_openssl_form_is_accepted_and_pinned() {
     extract_bridge_cert
 }
 
-# Rotation does not lift the expected fingerprint: in the macOS mode a
-# rotation accepts only the certificate the operator configured.
+# Rotation does not lift the expected fingerprint: a rotation accepts
+# only the certificate the operator configured.
 # shellcheck disable=SC2034 # used by the entrypoint functions loaded with eval
 rotation_with_a_cert_host_still_needs_the_expected_fingerprint() {
     local pinned
@@ -1726,25 +1710,10 @@ rotation_with_a_cert_host_still_needs_the_expected_fingerprint() {
     [[ "$(cat "$PIN_FILE")" == "$BRIDGE_CERT_FINGERPRINT" ]] || return 1
 }
 
-# The Bridge container is alone on bridge-net; its mode keeps trust on
-# first use and needs no expected fingerprint.
-# shellcheck disable=SC2034 # used by the entrypoint functions loaded with eval
-container_mode_needs_no_expected_fingerprint() {
-    extract_setup container-tofu
-    BRIDGE_HOST="protonmail-bridge"
-    BRIDGE_IMAP_PORT=1143
-    BRIDGE_CERT_HOST=""
-    BRIDGE_CERT_FINGERPRINT=""
-    printf '%s\n' "$WORK/cert-a.pem" >"$SERVED"
-    extract_bridge_cert
-    [[ "$(cat "$PIN_FILE")" == "$(cert_fingerprint "$WORK/cert-a.pem")" ]] || return 1
-}
-
 # shellcheck disable=SC2034 # used by the entrypoint functions loaded with eval
 malformed_expected_fingerprint_is_refused_at_startup() {
     local value
     endpoint_setup bad-fingerprint
-    BRIDGE_CERT_HOST="127.0.0.1"
     for value in "abc" "$(printf 'g%.0s' {1..64})" "$(printf 'a%.0s' {1..63})" \
         "$(printf 'a%.0s' {1..65})" "$(printf 'a%.0s' {1..64});id"; do
         if BRIDGE_CERT_FINGERPRINT="$value" validate_bridge_endpoint 2>/dev/null; then
@@ -1755,20 +1724,20 @@ malformed_expected_fingerprint_is_refused_at_startup() {
     BRIDGE_CERT_FINGERPRINT="$(printf 'a%.0s' {1..64})" validate_bridge_endpoint
 }
 
-# A cert host without the expected fingerprint is refused by the startup
-# check, before the wait for Bridge (#584); the container mode needs none.
+# A missing expected fingerprint is refused by the startup check, before
+# the wait for Bridge (#584).
 # shellcheck disable=SC2034 # used by the entrypoint functions loaded with eval
 missing_expected_fingerprint_is_refused_at_startup() {
     local err
     endpoint_setup missing-fingerprint
     validate_bridge_endpoint || return 1
-    BRIDGE_CERT_HOST="127.0.0.1"
+    BRIDGE_CERT_FINGERPRINT=""
     if err="$(validate_bridge_endpoint 2>&1)"; then
-        echo "a cert host without BRIDGE_CERT_FINGERPRINT was accepted"
+        echo "a missing BRIDGE_CERT_FINGERPRINT was accepted"
         return 1
     fi
     [[ "$err" == *"BRIDGE_CERT_FINGERPRINT is not set"* ]] || return 1
-    [[ "$err" == *"docs/setup.md, macOS Bridge mode, step 3"* ]] || return 1
+    [[ "$err" == *"docs/setup.md, step 4.3"* ]] || return 1
 }
 
 # --- shutdown signals reach the active child (#280) -------------------------
@@ -1884,9 +1853,7 @@ check "hung probes are cut off by the per-attempt bound" \
 check "a reachable Bridge returns after one probe" reachable_bridge_returns_after_one_probe
 check "refused probes fail after the attempts with nc's stderr" \
     refused_probes_fail_after_the_attempts_with_nc_stderr
-check "the default config connects directly to the Bridge container" \
-    default_config_connects_directly_to_the_bridge_container
-check "a cert host config checks that name and tunnels to the host" \
+check "the config checks the cert host name and tunnels to the host" \
     cert_host_config_checks_that_name_and_tunnels_to_the_host
 check "valid Bridge endpoints are accepted" valid_endpoints_are_accepted
 check "invalid Bridge endpoints are refused" invalid_endpoints_are_refused
@@ -1895,15 +1862,14 @@ check "extraction reaches the host and pins its cert; a restart is accepted" \
 check "a different cert at the pinned host is refused" a_different_cert_at_the_host_is_refused
 check "a Bridge not serving implicit TLS is refused with the fix (#638)" \
     a_bridge_not_serving_implicit_tls_is_refused
-check "a cert host's first boot without an expected fingerprint is refused, unpinned" \
+check "a first boot without an expected fingerprint is refused, unpinned" \
     first_boot_without_expected_fingerprint_is_refused_unpinned
-check "a cert host's first boot with another expected fingerprint is refused, unpinned" \
+check "a first boot with another expected fingerprint is refused, unpinned" \
     first_boot_with_another_expected_fingerprint_is_refused_unpinned
 check "an expected fingerprint in openssl's form is accepted and pinned" \
     expected_fingerprint_in_openssl_form_is_accepted_and_pinned
-check "rotation with a cert host still needs the expected fingerprint" \
+check "rotation still needs the expected fingerprint" \
     rotation_with_a_cert_host_still_needs_the_expected_fingerprint
-check "the container mode needs no expected fingerprint" container_mode_needs_no_expected_fingerprint
 check "a malformed expected fingerprint is refused at startup" \
     malformed_expected_fingerprint_is_refused_at_startup
 check "a missing expected fingerprint is refused at startup" \

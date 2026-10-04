@@ -3,11 +3,10 @@
 ## Overview
 
 protonmail-local-ai is a containerised, privacy-first AI search and
-intelligence layer for ProtonMail. The four containers (Bridge, mbsync,
-indexer, mcp-server) all run locally; storage, sync, and indexing
-never leave the host. In the optional macOS Bridge mode the official
-Bridge app on the Mac replaces the Bridge container (see
-[Bridge Modes](#bridge-modes)). Embedding and inference are operator-supplied
+intelligence layer for ProtonMail. The official Proton Mail Bridge app
+runs on the host (see [Bridge](#bridge)) and three containers (mbsync,
+indexer, mcp-server) run beside it; storage, sync, and indexing never
+leave the host. Embedding and inference are operator-supplied
 external dependencies — the project itself ships no model-serving
 components, and whether they run on the host (LM Studio, vLLM,
 `mlx_lm.server`, etc.) or against a remote provider is a deployment
@@ -20,15 +19,12 @@ ProtonMail Cloud (encrypted)
         │
         │  HTTPS (E2E encrypted by Proton)
         ▼
-ProtonBridge container
+Proton Mail Bridge app (on the host, outside Compose)
   - Decrypts email using your private key
-  - Exposes local IMAP on port 1143
-  - Exposes local SMTP on port 1025
-  - Credentials persisted in bridge-data volume
-  - Healthcheck is a TCP connect to 1143: the listener is up, nothing
-    more (see Health and Readiness Signals)
+  - Exposes IMAP on the host's loopback (127.0.0.1, port 1143 by default)
+  - Login, credentials and updates are managed in the app
         │
-        │  IMAP over implicit TLS (internal Docker network)
+        │  IMAP over implicit TLS via host.docker.internal (socat tunnel)
         ▼
 mbsync container
   - Polls Bridge IMAP every SYNC_INTERVAL seconds in a bounded retry loop;
@@ -40,9 +36,10 @@ mbsync container
     folder name can collide with another or with Maildir's own
     directories (#275, #281; see [Maildir layout](#maildir-layout));
     refuses to start on a Maildir synced with the earlier layout
-  - Pins Bridge TLS cert on first boot (SHA-256 fingerprint stored in
-    mbsync-state volume); refuses to sync on mismatch unless the operator
-    sets BRIDGE_CERT_PIN_ROTATE=true for a legitimate rotation
+  - Requires Bridge's TLS cert to match BRIDGE_CERT_FINGERPRINT on every
+    start, then pins it (SHA-256 fingerprint stored in mbsync-state
+    volume); refuses to sync on mismatch unless the operator sets
+    BRIDGE_CERT_PIN_ROTATE=true for a legitimate rotation
   - Fails closed if cert extraction or repeated sync attempts fail
   - After each successful sync, writes a last-sync stamp
     (`.mbsync-last-sync.json`) at the Maildir root. A sync whose only
@@ -129,7 +126,7 @@ MCP client (host machine; Claude Desktop via the repo's stdio adapter)
 
 | Container / process | Reads from | Writes to | Exposes |
 |---|---|---|---|
-| `protonmail-bridge` (default mode; the macOS app in [macOS Bridge mode](#bridge-modes)) | ProtonMail Cloud | `bridge-data` vol | IMAP 1143, SMTP 1025 (internal) |
+| Proton Mail Bridge app (on the host, [Bridge](#bridge)) | ProtonMail Cloud | its own data on the host | IMAP on the host's `127.0.0.1` |
 | `mbsync` | Bridge IMAP | `maildir-volume` | nothing |
 | `indexer` | `maildir-volume`, embedder | `sqlite-volume` | nothing |
 | `mcp-server` | `sqlite-volume`, embedder, inference provider, optional reranker | nothing | HTTP 3000 (localhost only) |
@@ -141,8 +138,8 @@ MCP client (host machine; Claude Desktop via the repo's stdio adapter)
 
 | Volume | Contents | Back up? |
 |---|---|---|
-| `bridge-data` | Bridge credentials and TLS cert (`vault.enc` under `/data/config`), GPG key (`/data/gnupg`), pass store (`/data/pass`), Gluon IMAP cache and logs (`/data/local`), cache (`/data/cache`) | Yes — back up `/data/config`, `/data/gnupg`, and `/data/pass` together: `vault.enc` cannot be decrypted without the GPG key, so a backup missing `gnupg/` is useless, and the Bridge entrypoint refuses to start over it. `/data/local` and `/data/cache` can be omitted — Bridge rebuilds them from Proton — but rebuilding the Gluon cache re-downloads the whole mailbox, which can take hours. Losing the whole volume means re-login plus that full re-download. |
 | `maildir-volume` | Raw email in Maildir format | Optional — mbsync can re-sync |
+| `mbsync-state` | mbsync's pinned Bridge certificate fingerprint | No — re-pinned from `BRIDGE_CERT_FINGERPRINT` |
 | `sqlite-volume` | SQLite index (FTS5 + vectors) | Optional — indexer can rebuild |
 
 ### Maildir layout
@@ -184,14 +181,14 @@ stores.
 Container logs are not in a volume. Every service uses the `json-file`
 driver capped at three 10 MiB files (the `x-logging` block in
 `docker-compose.yml`), so a long backfill cannot grow a log without
-limit on the host. `make first-run` replaces Bridge's driver with
-`none` so the credentials `info` prints are never written to disk.
+limit on the host.
 
 ## Networking
 
 The stack uses two isolated bridge networks:
 
-- `bridge-net` for ProtonBridge ↔ `mbsync`
+- `bridge-net` for `mbsync` alone; it reaches the Bridge app on the
+  host through `host.docker.internal`
 - `app-net` for `indexer` ↔ `mcp-server`. Both reach the
   operator-supplied embedder, inference, and (optional) reranker —
   either at remote URLs or, when the operator runs a host-side server,
@@ -216,57 +213,43 @@ ones (#274):
 
 | State | Meaning | Reported by | Not proven by it |
 | --- | --- | --- | --- |
-| Bridge listening | Something accepts TCP on Bridge's IMAP port | Bridge container health (`docker compose ps`, `make status`): a TCP connect to `localhost:1143` inside the container every 30 s. macOS Bridge mode has no Bridge container; mbsync's `Bridge IMAP port is reachable` line is the nearest equivalent, and it covers only mbsync's startup | TLS, a logged-in account, any sync |
-| TLS handshake OK | Bridge completes implicit TLS with a certificate that matches mbsync's pin | mbsync startup: certificate extraction, the pin (and `BRIDGE_CERT_FINGERPRINT` in macOS Bridge mode). A failure stops mbsync with a named error before any credential is sent. mbsync's health also requires the extracted certificate, so a healthy mbsync passed this on its current start | That isync accepts the certificate: its own validity and host name checks run on each sync, so an expired certificate that still matches the pin shows as failed syncs. A logged-in account, any sync |
-| Bridge authenticated | An account is logged in to Bridge and accepts mbsync's `LOGIN` | No dedicated signal. Bridge listens, completes TLS and greets with no account logged in, and `vault.enc` exists before any login. The first proof is a successful sync; a rejected login is a failed sync in mbsync's log | — |
+| Bridge listening | Something accepts TCP on Bridge's IMAP port | mbsync's `Bridge IMAP port is reachable` line; it covers only mbsync's startup (the Bridge app runs outside Compose, so there is no Bridge health check) | TLS, a logged-in account, any sync |
+| TLS handshake OK | Bridge completes implicit TLS with a certificate that matches mbsync's pin | mbsync startup: certificate extraction, `BRIDGE_CERT_FINGERPRINT` and the pin. A failure stops mbsync with a named error before any credential is sent. mbsync's health also requires the extracted certificate, so a healthy mbsync passed this on its current start | That isync accepts the certificate: its own validity and host name checks run on each sync, so an expired certificate that still matches the pin shows as failed syncs. A logged-in account, any sync |
+| Bridge authenticated | An account is logged in to Bridge and accepts mbsync's `LOGIN` | No dedicated signal. Bridge listens, completes TLS and greets with no account logged in. The first proof is a successful sync; a rejected login is a failed sync in mbsync's log | — |
 | mbsync syncing | mbsync's sync loop is alive | mbsync container health (liveness: a heartbeat touched around every attempt, or a sync or its permission repair running, up to the run's deadline) | That any sync succeeded: the loop is healthy between failed attempts until five consecutive failures exit it and Docker restarts it |
 | Last successful sync | mbsync completed a sync | The success stamp `.mbsync-last-sync.json` at the Maildir root, written by mbsync. `get_mailbox_status` cannot read Maildir; its `last_sync_at` (and the reason `no successful mail sync has been recorded` or `last successful mail sync was ... ago`) is the last sync the indexer has acknowledged, after queuing that sync's mail, so it can lag the stamp | The stamp alone: that the indexer has read it. `last_sync_at`: that the queued mail is indexed yet |
 | Index current | The indexer has acknowledged a recent sync and has no pending or retrying jobs | `get_mailbox_status` `current` and its reasons (see [Index currency](#index-currency)); `make status` prints the same fields | That every message is indexed: dead-lettered jobs (the `dead` count) do not affect `current`, and their messages may be missing from search until `make requeue-dead`. Nor mail that reached Proton after the last sync |
 
-The Bridge healthcheck stays a TCP connect on purpose. mbsync waits
-for it only to avoid racing Bridge's startup; mbsync's own startup then
-checks TLS and the pin with an error that names the cause, and its sync
-results and stamp report the rest. The Bridge runtime image does carry
-`openssl` (a dependency of `ca-certificates`), so a probe that sees the
-greeting over TLS is possible without new packages, but it would add
-little: the greeting arrives whether or not an account is logged in, so
-it still says nothing about authentication or sync. It would also gate
-mbsync on Bridge answering IMAP, and during Bridge's initial download
-of a large mailbox IMAP can be slow or unresponsive for hours, which
-would turn a long first sync into an unhealthy Bridge and a failed
-`make up`. No healthcheck carries credentials. Symptom-to-layer
-diagnostics are in
+mbsync's own startup checks TLS and the pin with an error that names
+the cause, and its sync results and stamp report the rest. No
+healthcheck carries credentials. Symptom-to-layer diagnostics are in
 [troubleshooting.md](troubleshooting.md#which-layer-is-failing).
 
-## Bridge Modes
+## Bridge
 
-mbsync syncs from one of two Bridges, in both cases over implicit TLS
-(RFC 8314, Bridge's "SSL" IMAP mode, `SSLType IMAPS`; #638): the TLS
-handshake is the first thing on the connection, so there is no
-plaintext phase in which a STARTTLS offer could be stripped or a
-command or response injected before encryption. The Bridge container
-is patched to always serve IMAP this way (its vault's `IMAPSSL`
-setting is ignored); the macOS app must be set to SSL by the operator.
-Certificate extraction (`openssl s_client` without `-starttls`) and
-isync both speak only implicit TLS, with no fallback: a Bridge still
-serving STARTTLS greets in plaintext, the handshake fails, and mbsync
-stops at startup with `Bridge is not serving implicit TLS` before any
-credential is sent.
+mbsync syncs from the official Proton Mail Bridge app running on the
+host (#497), over implicit TLS (RFC 8314, Bridge's "SSL" IMAP mode,
+`SSLType IMAPS`; #638): the TLS handshake is the first thing on the
+connection, so there is no plaintext phase in which a STARTTLS offer
+could be stripped or a command or response injected before encryption.
+The operator sets the app's IMAP connection mode to SSL. Certificate
+extraction (`openssl s_client` without `-starttls`) and isync both
+speak only implicit TLS, with no fallback: a Bridge still serving
+STARTTLS greets in plaintext, the handshake fails, and mbsync stops at
+startup with `Bridge is not serving implicit TLS` before any credential
+is sent.
 
-- **Bridge container (default).** The source-built `protonmail-bridge`
-  service on `bridge-net`. mbsync waits for its health check, connects
-  to `protonmail-bridge:1143`, and checks the certificate against that
-  name, which the build's TLS patch adds to Bridge's certificate.
-- **Proton Mail Bridge app on macOS (optional, #497).**
-  `docker-compose.macos-bridge.yml` gives `protonmail-bridge` a profile
-  that is never activated (so it is neither built nor started), removes
-  mbsync's dependency on it, and points mbsync at
-  `host.docker.internal:${BRIDGE_IMAP_PORT:-1143}`, where OrbStack
-  forwards to the app on the Mac's loopback interface. mbsync stays on
-  `bridge-net` with its hardening unchanged; the indexer still waits
-  for mbsync's health check. No port is published and no host
-  networking is used. Login and updates happen in the app. Setup and
-  migration: [setup.md](setup.md#macos-bridge-mode-optional).
+mbsync reaches the app at
+`host.docker.internal:${BRIDGE_IMAP_PORT:-1143}`, which OrbStack and
+Docker Desktop forward to the app on the host's loopback interface.
+mbsync sits alone on `bridge-net` with its usual hardening; there is no
+Bridge service in Compose for it to wait on, so its bounded IMAP wait
+covers an app that is not running, and the indexer waits for mbsync's
+health check. No port is published and no host networking is used.
+Login and updates happen in the app. On Linux, `host.docker.internal`
+(`host-gateway`) reaches the docker bridge address rather than the host
+loopback the app binds, so this setup is not supported there (see
+[setup.md](setup.md#platform-support)).
 
 The app's certificate is upstream Bridge's: self-signed, `CA:TRUE`,
 common name and only subject alternative name `127.0.0.1`. isync 1.4.4
@@ -281,7 +264,7 @@ owner does not match hostname`. Overriding `localhost` with
 `extra_hosts` would not help either: the certificate has no `localhost`
 name, and only the literal `127.0.0.1` matches.
 
-The overlay therefore sets `BRIDGE_CERT_HOST=127.0.0.1`, and the
+`docker-compose.yml` therefore sets `BRIDGE_CERT_HOST=127.0.0.1`, and the
 entrypoint renders
 
 ```text
@@ -299,25 +282,21 @@ close the connection after `LOGOUT`, and `nc` does not pass that close
 on unless Bridge sends a TLS close_notify.) The trust anchors are
 unchanged: `CertificateFile` holds only the certificate the entrypoint
 extracted and checked against the persistent pin (isync also loads the
-system CA store in both modes, and public CAs do not issue certificates
+system CA store, and public CAs do not issue certificates
 for `127.0.0.1`), so a different
 certificate at that address is refused twice, by the pin at startup and
 by isync's chain check on every sync. `mbsync/tests/tls_check.sh` (`make
 test-mbsync-tls`, run in CI) exercises both with a synthetic server
 whose certificate has this shape and which speaks implicit TLS, along
 with recovery from a Bridge that is down at startup and the refusal of
-a STARTTLS server without sending credentials. `scripts/bridge-smoke.sh`
-checks that the built Bridge image serves implicit TLS on 1143 and
-greets no plaintext client.
+a STARTTLS server without sending credentials.
 
-The two modes differ in how the first certificate is trusted. The Bridge
-container is the only other service on `bridge-net`, so mbsync trusts
-the certificate it sees on first boot and pins it. The app listens on an
-unprivileged port on the Mac's loopback, which another local account can
-hold while the app is not running, so trust on first use would pin that
-account's certificate and send it the Bridge password. With
-`BRIDGE_CERT_HOST` set, the entrypoint therefore also requires
-`BRIDGE_CERT_FINGERPRINT`, taken from the app on the Mac, and refuses any
+The first certificate is never trusted on first use. The app listens on
+an unprivileged port on the host's loopback, which another local account
+can hold while the app is not running, so trust on first use would pin
+that account's certificate and send it the Bridge password. The
+entrypoint therefore requires `BRIDGE_CERT_FINGERPRINT`, taken from the
+app on the host, and refuses any
 other certificate on every start, before the pin is consulted (a
 rotation accepts only that certificate) and before mbsync logs in. An
 unset `BRIDGE_CERT_FINGERPRINT` stops mbsync at startup, before it waits

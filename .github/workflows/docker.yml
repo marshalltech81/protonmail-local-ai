@@ -1,14 +1,13 @@
 name: Docker
 
-# Runs only when a build input changes: the four build contexts, the
-# Compose files, .env.example (copied to .env, it carries BRIDGE_VERSION
-# and BRIDGE_COMMIT), the Makefile (make init-secrets) and this file. The
-# main ruleset requires no status checks, so a skipped run blocks no merge.
+# Runs only when a build input changes: the three build contexts, the
+# Compose files, .env.example (copied to .env), the Makefile (make
+# init-secrets) and this file. The main ruleset requires no status
+# checks, so a skipped run blocks no merge.
 on:
   push:
     branches: [main]
     paths:
-      - "bridge/**"
       - "mbsync/**"
       - "indexer/**"
       - "mcp-server/**"
@@ -19,7 +18,6 @@ on:
   pull_request:
     branches: [main]
     paths:
-      - "bridge/**"
       - "mbsync/**"
       - "indexer/**"
       - "mcp-server/**"
@@ -57,9 +55,6 @@ jobs:
       - name: Validate docker compose configuration
         run: docker compose config --quiet
 
-      - name: Validate the macOS Bridge overlay
-        run: docker compose -f docker-compose.yml -f docker-compose.macos-bridge.yml config --quiet
-
   build-images:
     name: docker compose build
     runs-on: ubuntu-latest
@@ -75,4 +70,4 @@ jobs:
           printf 'placeholder-bridge-pass' > .secrets/bridge_pass.txt
 
       - name: Build local images
-        run: docker compose build protonmail-bridge mbsync indexer mcp-server
+        run: docker compose build mbsync indexer mcp-server

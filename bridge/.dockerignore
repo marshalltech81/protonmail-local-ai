@@ -1,6 +1,0 @@
-# Build context: bridge/
-# Only Dockerfile and entrypoint.sh are needed.
-.dockerignore
-*.md
-# Entrypoint tests run in CI, not in the image
-tests/
