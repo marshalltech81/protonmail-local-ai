@@ -2628,6 +2628,77 @@ class TestPdfDigitalExtractor:
         assert captured == {}
 
 
+class TestPdfDigitalPageErrors:
+    """#707: the per-page ``except Exception`` in ``_extract_digital_pages``
+    also caught ``MemoryError`` and ``RecursionError``, so host pressure
+    became a skipped page and the document could be cached as a success.
+    Both must reach the dispatcher, which re-raises them; any other
+    per-page error still skips that page only."""
+
+    PAGE_TEXT = "Synthetic page {n} text that is long enough to count as digital."
+
+    def _fake_reader(self, monkeypatch, error):
+        """Three pages, the middle one raising ``error``; returns the list
+        of page indexes whose ``extract_text`` ran."""
+        from src.extractors import pdf
+
+        calls: list[int] = []
+        page_text = self.PAGE_TEXT
+
+        class Page:
+            def __init__(self, index):
+                self.index = index
+
+            def extract_text(self):
+                calls.append(self.index)
+                if self.index == 1:
+                    raise error("SYNTHETIC_PAGE_MARKER")
+                return page_text.format(n=self.index)
+
+        class FakeReader:
+            def __init__(self, stream):
+                self.pages = [Page(0), Page(1), Page(2)]
+
+        monkeypatch.setattr(pdf.pypdf, "PdfReader", FakeReader)
+        return calls
+
+    @pytest.mark.parametrize("error", [MemoryError, RecursionError])
+    def test_host_pressure_on_a_page_propagates_from_the_extractor(self, monkeypatch, error):
+        from src.extractors import pdf
+
+        calls = self._fake_reader(monkeypatch, error)
+        progress: list[None] = []
+        with pytest.raises(error):
+            pdf._extract_digital_pages(b"%PDF-1.7", on_progress=lambda: progress.append(None))
+        # Extraction stops at the failing page: the page after it is not read.
+        assert calls == [0, 1]
+        assert len(progress) == 1
+
+    @pytest.mark.parametrize("error", [MemoryError, RecursionError])
+    def test_host_pressure_on_a_page_propagates_from_the_dispatcher(self, monkeypatch, error):
+        calls = self._fake_reader(monkeypatch, error)
+        with pytest.raises(error):
+            extract(
+                content_type="application/pdf",
+                filename="synthetic.pdf",
+                payload=b"%PDF-1.7",
+                ocr_enabled=False,
+            )
+        assert calls == [0, 1]
+
+    def test_ordinary_page_error_skips_only_that_page(self, monkeypatch):
+        calls = self._fake_reader(monkeypatch, ValueError)
+        result = extract(
+            content_type="application/pdf",
+            filename="synthetic.pdf",
+            payload=b"%PDF-1.7",
+            ocr_enabled=False,
+        )
+        assert calls == [0, 1, 2]
+        assert result.status == STATUS_SUCCESS
+        assert result.text == (self.PAGE_TEXT.format(n=0) + "\n\n" + self.PAGE_TEXT.format(n=2))
+
+
 class TestPdfPageLevelOcr:
     """#292: the 40-character floor applied to the whole document, so a
     PDF with one digital page and one scanned page never OCR'd the
