@@ -588,7 +588,6 @@ def _invisible_class() -> str:
 
 
 _INVISIBLE_CLASS = _invisible_class()
-_INVISIBLE_RE = re.compile(f"[{_INVISIBLE_CLASS}]")
 
 # A candidate tag inside untrusted content: an ``_LT_SPELLINGS`` bracket,
 # optional whitespace or invisible characters and an ``_SLASH_SPELLINGS``
