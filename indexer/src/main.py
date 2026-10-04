@@ -265,7 +265,8 @@ def _int_env(name: str, default: int, minimum: int = 1) -> int:
 # ``/v1/embeddings`` HTTP call. Larger batches amortize per-request
 # overhead — meaningful for remote providers, marginal for a host-side
 # server on loopback. The provider's own per-request input cap is the
-# upper bound (DeepInfra accepts 100; OpenAI accepts 2048).
+# upper bound (DeepInfra accepts 1024, per the ``input`` maxLength in
+# its OpenAI-compatible embeddings API reference; OpenAI accepts 2048).
 EMBED_BATCH_SIZE = _int_env("EMBED_BATCH_SIZE", 64)
 
 
