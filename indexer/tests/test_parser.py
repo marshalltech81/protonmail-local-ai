@@ -3074,6 +3074,37 @@ _FILENAME_SHAPES = {
         b'Content-Disposition: attachment; filename="=?utf-8?q?rep?=\r\n =?utf-8?q?ort.pdf?="',
         "=?utf-8?q?rep?= =?utf-8?q?ort.pdf?=",
     ),
+    # #688 review round 1: only syntactic folds are removed. A line break
+    # an RFC 2231 value percent-encodes is filename content and survives.
+    "rfc2231-percent-encoded-lf-space": (
+        b"Content-Type: application/pdf\r\n"
+        b"Content-Disposition: attachment; filename*=utf-8''a%0A%20b.txt",
+        "a\n b.txt",
+    ),
+    "rfc2231-percent-encoded-crlf-space": (
+        b"Content-Type: application/pdf\r\n"
+        b"Content-Disposition: attachment; filename*=utf-8''a%0D%0A%20b.txt",
+        "a\r\n b.txt",
+    ),
+    "rfc2231-percent-encoded-lf-space-idna": (
+        b"Content-Type: application/pdf\r\n"
+        b"Content-Disposition: attachment; filename*=idna''a%0A%20b.txt",
+        "a\n b.txt",
+    ),
+    "8bit-raw": (
+        b"Content-Type: application/pdf\r\n"
+        b'Content-Disposition: attachment; filename="r\xc3\xa9sum\xc3\xa9.pdf"',
+        "r\ufffd\ufffdsum\ufffd\ufffd.pdf",
+    ),
+    "fold-8bit-raw": (
+        b"Content-Type: application/pdf\r\n"
+        b'Content-Disposition: attachment; filename="r\xc3\xa9sum\xc3\xa9\r\n .pdf"',
+        "r\ufffd\ufffdsum\ufffd\ufffd .pdf",
+    ),
+    "no-filename": (
+        b"Content-Type: application/pdf\r\nContent-Disposition: attachment",
+        "unnamed",
+    ),
 }
 
 
@@ -3120,6 +3151,7 @@ def test_attachment_filename_matches_stdlib_or_its_unknown_charset_fallback(shap
 
     headers, _ = _FILENAME_SHAPES[shape]
     part = email.message_from_bytes(headers + b"\r\n\r\nAAAA\r\n")
+    before = (part.as_bytes(), list(part.raw_items()))
     # #688: the standard library reads the header as folded. Its value on
     # the same header unfolded first (RFC 5322 2.2.3) is the ground truth.
     headers = re.sub(rb"\r?\n(?=[ \t])", b"", headers)
@@ -3132,7 +3164,11 @@ def test_attachment_filename_matches_stdlib_or_its_unknown_charset_fallback(shap
         assert unknown != headers
         stdlib = email.message_from_bytes(unknown + b"\r\n\r\nAAAA\r\n").get_filename()
     assert _part_filename(part) == stdlib
-    assert stdlib is None or ("\r" not in stdlib and "\n" not in stdlib)
+    if shape.startswith("fold-"):
+        assert stdlib is not None
+        assert "\r" not in stdlib and "\n" not in stdlib
+    # The part itself is never changed: attached emails are re-serialized.
+    assert (part.as_bytes(), list(part.raw_items())) == before
 
 
 def test_undecodable_filename_is_not_logged(tmp_path, caplog):

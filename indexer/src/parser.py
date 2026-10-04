@@ -467,14 +467,21 @@ def _unfold(text: str) -> str:
 
 
 def _part_filename(part: email.message.Message) -> str | None:
-    """``_raw_part_filename`` unfolded (#688). ``get_filename()`` reads
-    the header itself and passes a fold inside the parameter value through
-    verbatim, so unfolding its result equals unfolding the header first
-    (the filename catalogue tests check this). The one difference: a line
-    break plus whitespace that an RFC 2231 value percent-encodes
-    (``%0A%20``) is removed as well."""
-    filename = _raw_part_filename(part)
-    return _unfold(filename) if filename else filename
+    """``_raw_part_filename`` read from the part's headers unfolded (#688).
+
+    The headers are unfolded before ``get_filename()`` decodes them, so a
+    line break an RFC 2231 value percent-encodes (``%0A%20``) stays
+    filename content; only syntactic folds are removed. The unfolded
+    Content-Disposition and Content-Type values go on a throwaway message,
+    copied raw (``raw_items()``; the compat32 policy stores and fetches
+    them unchanged), so the part itself is never modified: attached emails
+    are re-serialized later.
+    """
+    headers = email.message.Message()
+    for name, value in part.raw_items():
+        if name.lower() in ("content-disposition", "content-type"):
+            headers[name] = _unfold(value)
+    return _raw_part_filename(headers)
 
 
 def _raw_part_filename(part: email.message.Message) -> str | None:
