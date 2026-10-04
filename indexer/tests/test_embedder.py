@@ -7,8 +7,10 @@ deterministic without hitting a live provider.
 """
 
 import logging
+import threading
 import time
 import traceback
+from concurrent.futures import ALL_COMPLETED
 from types import SimpleNamespace
 
 import httpx2
@@ -388,6 +390,241 @@ class TestOpenAIEmbedder:
         emb._embed_one_batch.retry.wait = lambda *_args, **_kwargs: 0  # type: ignore[attr-defined]
         assert emb.embed_batch(["x"]) == [[1.0]]
         assert attempts["n"] == 2
+
+
+class TestEmbedConcurrency:
+    """``concurrency`` > 1 keeps that many requests of one ``embed_batch``
+    call in flight (#713); 1 keeps the sequential path."""
+
+    @staticmethod
+    def _echo_create(calls: list[list[str]] | None = None, delay: float = 0.0):
+        # One distinct vector per text (``float(text)``) so a misaligned
+        # reassembly shows up in the output.
+        def fake_create(**kwargs):
+            if calls is not None:
+                calls.append(list(kwargs["input"]))
+            if delay:
+                time.sleep(delay)
+            return _embed_response([[float(t), 1.0] for t in kwargs["input"]])
+
+        return fake_create
+
+    def test_rejects_concurrency_below_one(self):
+        with pytest.raises(ValueError, match="concurrency"):
+            _make_embedder(concurrency=0)
+
+    def test_default_concurrency_sends_requests_on_the_calling_thread(self):
+        emb = _make_embedder(batch_size=1)
+        threads: list[int] = []
+
+        def fake_create(**kwargs):
+            threads.append(threading.get_ident())
+            return _embed_response([[1.0]] * len(kwargs["input"]))
+
+        _patch_create(emb, fake_create)
+        emb.embed_batch(["1", "2", "3"])
+        assert threads == [threading.get_ident()] * 3
+
+    def test_requests_overlap_up_to_concurrency(self):
+        # Two requests meet at a barrier: a sequential path would time it
+        # out. The peak in-flight count shows the pool never exceeds the
+        # limit across six requests.
+        emb = _make_embedder(batch_size=1, concurrency=2)
+        barrier = threading.Barrier(2, timeout=5)
+        lock = threading.Lock()
+        state = {"now": 0, "peak": 0, "calls": 0}
+
+        def fake_create(**kwargs):
+            with lock:
+                state["now"] += 1
+                state["calls"] += 1
+                state["peak"] = max(state["peak"], state["now"])
+                first_two = state["calls"] <= 2
+            if first_two:
+                barrier.wait()
+            time.sleep(0.01)
+            with lock:
+                state["now"] -= 1
+            return _embed_response([[float(t), 1.0] for t in kwargs["input"]])
+
+        _patch_create(emb, fake_create)
+        texts = [str(i) for i in range(6)]
+        out = emb.embed_batch(texts)
+        assert state["calls"] == 6
+        assert state["peak"] == 2
+        assert out == [l2_normalize([float(t), 1.0]) for t in texts]
+
+    def test_reassembles_vectors_in_input_order_when_requests_finish_out_of_order(self):
+        emb = _make_embedder(batch_size=2, concurrency=3)
+
+        def fake_create(**kwargs):
+            # The first request finishes last.
+            if kwargs["input"][0] == "1":
+                time.sleep(0.05)
+            return _embed_response([[float(t), 1.0] for t in kwargs["input"]])
+
+        _patch_create(emb, fake_create)
+        texts = [str(i) for i in range(1, 7)]
+        assert emb.embed_batch(texts) == [l2_normalize([float(t), 1.0]) for t in texts]
+
+    def test_on_batch_complete_fires_per_request_on_the_calling_thread(self):
+        # The indexer's callback touches SQLite (``queue.note_progress``),
+        # so it must not run on a pool thread.
+        emb = _make_embedder(batch_size=2, concurrency=3)
+        _patch_create(emb, self._echo_create())
+        ticks: list[int] = []
+        emb.embed_batch(
+            [str(i) for i in range(5)],
+            on_batch_complete=lambda: ticks.append(threading.get_ident()),
+        )
+        assert ticks == [threading.get_ident()] * 3
+
+    def test_first_failure_raises_and_submits_no_further_requests(self):
+        # Requests are submitted only as earlier ones finish, so after the
+        # first failure nothing new starts: of six requests at concurrency
+        # 2, only the two submitted up front ever run.
+        emb = _make_embedder(batch_size=1, concurrency=2)
+        emb._embed_one_batch.retry.wait = lambda *_a, **_kw: 0  # type: ignore[attr-defined]
+        calls: list[str] = []
+        lock = threading.Lock()
+        second_started = threading.Event()
+
+        def fake_create(**kwargs):
+            with lock:
+                calls.append(kwargs["input"][0])
+            if kwargs["input"][0] == "0":
+                # Fail only once both up-front requests are in flight.
+                assert second_started.wait(timeout=5)
+                raise _api_status_error(400)
+            second_started.set()
+            time.sleep(0.05)
+            return _embed_response([[1.0]])
+
+        _patch_create(emb, fake_create)
+        ticks = {"n": 0}
+
+        def on_tick():
+            ticks["n"] += 1
+
+        with pytest.raises(APIStatusError):
+            emb.embed_batch([str(i) for i in range(6)], on_batch_complete=on_tick)
+        assert sorted(calls) == ["0", "1"]
+        # The failed request never ticks; the one still in flight is
+        # waited for but its result is discarded.
+        assert ticks["n"] <= 1
+
+    def test_failure_finished_alongside_a_reported_success_stops_new_requests(self, monkeypatch):
+        # Review round 1: ``wait`` can report one finished request while
+        # another has already failed. The failure must be seen before the
+        # freed slot is refilled. The patched ``wait`` reproduces that
+        # interleaving: it waits for both requests but reports only the
+        # successful one.
+        import src.embedder as embedder_module
+
+        real_wait = embedder_module.wait
+        first_call = [True]
+
+        def wait_reporting_only_success(fs, return_when=None):
+            if not first_call[0]:
+                return real_wait(fs, return_when=return_when)
+            first_call[0] = False
+            done, _ = real_wait(fs, return_when=ALL_COMPLETED)
+            succeeded = {f for f in done if f.exception() is None}
+            return succeeded, set(fs) - succeeded
+
+        monkeypatch.setattr(embedder_module, "wait", wait_reporting_only_success)
+        emb = _make_embedder(batch_size=1, concurrency=2)
+        emb._embed_one_batch.retry.wait = lambda *_a, **_kw: 0  # type: ignore[attr-defined]
+        calls: list[str] = []
+        lock = threading.Lock()
+
+        second_started = threading.Event()
+
+        def fake_create(**kwargs):
+            with lock:
+                calls.append(kwargs["input"][0])
+            if kwargs["input"][0] == "1":
+                second_started.set()
+                raise _api_status_error(400)
+            # Finish only once both requests are in flight.
+            assert second_started.wait(timeout=5)
+            return _embed_response([[1.0]])
+
+        _patch_create(emb, fake_create)
+        with pytest.raises(APIStatusError):
+            emb.embed_batch([str(i) for i in range(4)])
+        assert sorted(calls) == ["0", "1"]
+
+    def test_failure_during_the_progress_callback_stops_new_requests(self):
+        # Review round 2: a request that fails while ``on_batch_complete``
+        # runs (the indexer's writes SQLite) must be seen before the
+        # freed slot is refilled. Request "1" fails only once the
+        # callback for request "0" has started, and the callback returns
+        # only after that failure is recorded.
+        emb = _make_embedder(batch_size=1, concurrency=2)
+        emb._embed_one_batch.retry.wait = lambda *_a, **_kw: 0  # type: ignore[attr-defined]
+        callback_started = threading.Event()
+        second_started = threading.Event()
+        calls: list[str] = []
+        lock = threading.Lock()
+        failed: list = []
+
+        def fake_create(**kwargs):
+            text = kwargs["input"][0]
+            with lock:
+                calls.append(text)
+            if text == "1":
+                second_started.set()
+                assert callback_started.wait(timeout=5)
+                raise _api_status_error(400)
+            # Finish only once both requests are in flight.
+            assert second_started.wait(timeout=5)
+            return _embed_response([[1.0]])
+
+        _patch_create(emb, fake_create)
+        original = emb._embed_one_batch
+
+        def tracked(chunk):
+            try:
+                return original(chunk)
+            except Exception:
+                failed.append(chunk)
+                raise
+
+        emb._embed_one_batch = tracked  # type: ignore[method-assign]
+
+        def on_tick():
+            if not callback_started.is_set():
+                callback_started.set()
+                deadline = time.monotonic() + 5
+                while not failed and time.monotonic() < deadline:
+                    time.sleep(0.001)
+                # Let the pool record the exception on the future.
+                time.sleep(0.05)
+
+        with pytest.raises(APIStatusError):
+            emb.embed_batch([str(i) for i in range(4)], on_batch_complete=on_tick)
+        assert sorted(calls) == ["0", "1"]
+
+    def test_each_concurrent_request_keeps_its_own_retry(self):
+        emb = _make_embedder(batch_size=1, concurrency=2)
+        emb._embed_one_batch.retry.wait = lambda *_a, **_kw: 0  # type: ignore[attr-defined]
+        attempts: dict[str, int] = {}
+        lock = threading.Lock()
+
+        def fake_create(**kwargs):
+            text = kwargs["input"][0]
+            with lock:
+                attempts[text] = attempts.get(text, 0) + 1
+                first = attempts[text] == 1
+            if text == "2" and first:
+                raise _api_status_error(429)
+            return _embed_response([[float(text), 1.0]])
+
+        _patch_create(emb, fake_create)
+        texts = ["1", "2", "3"]
+        assert emb.embed_batch(texts) == [l2_normalize([float(t), 1.0]) for t in texts]
+        assert attempts == {"1": 1, "2": 2, "3": 1}
 
 
 class TestRetryPredicate:

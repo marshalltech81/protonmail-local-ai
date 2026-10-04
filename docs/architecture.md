@@ -1347,7 +1347,11 @@ selection and failure isolation behave identically:
   new chunk's text across the batch. ~25k single-message HTTP
   round-trips collapse to ~500 multi-message ones at the default
   `INITIAL_INDEX_BATCH_SIZE=50`, plus the embedder client's own
-  per-call chunking via `EMBED_BATCH_SIZE` (default 64).
+  per-call chunking via `EMBED_BATCH_SIZE` (default 64). With
+  `EMBED_CONCURRENCY` above 1 (default 1) those requests overlap: up to
+  that many are in flight, a new one is sent only as one finishes, and
+  vectors are reassembled in input order. The first failure stops new
+  requests and fails the call as on the sequential path (#713).
 - **Phase 2c (per message)**: write chunks/vectors/attachments inside
   one per-message transaction, then replace the Phase 1 seed thread
   vector with the real mean-of-chunks vector (or the subject-fallback

@@ -290,6 +290,12 @@ def _int_env(name: str, default: int, minimum: int = 1) -> int:
 # its OpenAI-compatible embeddings API reference; OpenAI accepts 2048).
 EMBED_BATCH_SIZE = _int_env("EMBED_BATCH_SIZE", 64)
 
+# How many of those requests one embed call keeps in flight (#713). A
+# remote provider spends most of the indexing time computing vectors, so
+# overlapping requests shortens a large index; 1 sends them one after
+# another, which suits a host-side server that serves one at a time.
+EMBED_CONCURRENCY = _int_env("EMBED_CONCURRENCY", 1)
+
 
 # Chunker token budgets — see ``chunker.chunk_message`` for semantics.
 # Defaults are sized for the MLX-served Qwen3-Embedding-8B context
@@ -2199,6 +2205,7 @@ def main():
         model=EMBED_MODEL,
         api_key=EMBED_API_KEY,
         batch_size=EMBED_BATCH_SIZE,
+        concurrency=EMBED_CONCURRENCY,
     )
     # Log the resolved wire endpoint after construction. ``EMBED_BASE_URL=""``
     # intentionally means "use the SDK default" (OpenAI proper); printing
@@ -2208,10 +2215,11 @@ def main():
     # the URL back from the SDK after fallback resolution, matching the
     # mcp-server inference / rerank log lines.
     log.info(
-        "  Embedder: %s (model=%s, batch=%d)",
+        "  Embedder: %s (model=%s, batch=%d, concurrency=%d)",
         embedder.base_url,
         EMBED_MODEL,
         EMBED_BATCH_SIZE,
+        EMBED_CONCURRENCY,
     )
     if EMBED_API_KEY:
         log.info("  Embedder API key: present (Bearer auth enabled)")
