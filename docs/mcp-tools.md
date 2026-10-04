@@ -1313,4 +1313,8 @@ liveness in the `ingestion_state` table that this tool reads (see
 
 The same helper powers ``make status`` on the host: the Makefile target
 invokes the module-level ``get_mailbox_status`` directly against the
-shared SQLite index, so it reports what MCP clients see.
+shared SQLite index, so it reports what MCP clients see. On failure the
+helper reports only the exception type, as the tool does, and
+``make status`` exits non-zero when mcp-server is not running, when the
+check cannot run (its error output is shown), or when the helper reports
+``status: error``; an index that is merely not current still exits zero.

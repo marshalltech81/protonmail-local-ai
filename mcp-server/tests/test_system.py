@@ -139,3 +139,19 @@ class TestGetMailboxStatusStandalone:
         status = get_mailbox_status()
         assert status["status"] == "error"
         assert "error" in status
+
+    def test_error_reports_type_name_without_exception_text(self, seeded_db, monkeypatch, caplog):
+        # #732: a malformed stored value makes fromisoformat raise a
+        # ValueError quoting it; only the type name may be reported.
+        marker = "SYNTHETIC_STATUS_PRIVATE_MARKER_839"
+        write_ingestion(
+            seeded_db.path,
+            sync_completed_at=marker,
+            sync_interval_secs=60,
+            indexer_seen_at=datetime.now(UTC).isoformat(),
+        )
+        monkeypatch.setenv("SQLITE_PATH", seeded_db.path)
+        with caplog.at_level("DEBUG"):
+            status = get_mailbox_status()
+        assert status == {"status": "error", "error": "Mailbox status error: ValueError"}
+        assert marker not in caplog.text

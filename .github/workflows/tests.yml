@@ -71,6 +71,9 @@ jobs:
       - name: Run mcp-auth-headers.sh tests
         run: bash scripts/tests/mcp_auth_headers_test.sh
 
+      - name: Run make status tests
+        run: bash scripts/tests/make_status_test.sh
+
   indexer-pytest:
     name: indexer pytest
     runs-on: ubuntu-latest
