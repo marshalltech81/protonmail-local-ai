@@ -450,7 +450,34 @@ def _derive_folder(path: Path, maildir_root: Path | None) -> str:
     return folder_dir.name
 
 
+# RFC 5322 2.2.3 folding: a line break followed by a space or tab. One
+# linear pass, no backtracking.
+_FOLD_RE = re.compile(r"\r?\n(?=[ \t])")
+
+
+def _unfold(text: str) -> str:
+    """Unfold header text (RFC 5322 2.2.3): remove each line break that
+    is followed by a space or tab, keeping the whitespace.
+
+    The standard library keeps a fold that falls inside a quoted string,
+    a comment or a parameter value, so a display name or filename folded
+    there would keep the line break (#688).
+    """
+    return _FOLD_RE.sub("", text)
+
+
 def _part_filename(part: email.message.Message) -> str | None:
+    """``_raw_part_filename`` unfolded (#688). ``get_filename()`` reads
+    the header itself and passes a fold inside the parameter value through
+    verbatim, so unfolding its result equals unfolding the header first
+    (the filename catalogue tests check this). The one difference: a line
+    break plus whitespace that an RFC 2231 value percent-encodes
+    (``%0A%20``) is removed as well."""
+    filename = _raw_part_filename(part)
+    return _unfold(filename) if filename else filename
+
+
+def _raw_part_filename(part: email.message.Message) -> str | None:
     """``part.get_filename()``, falling back to the raw parameter text when
     its charset cannot decode it.
 
@@ -1195,6 +1222,10 @@ def _parse_addrs(value: str | email.header.Header) -> list[str]:
     if len(text) > _MAX_ADDRESS_HEADER_CHARS:
         log.debug("address header over %d chars; recipients not parsed", _MAX_ADDRESS_HEADER_CHARS)
         return []
+    # Unfold once, before anything parses the text: the standard library
+    # keeps a fold inside a quoted string or comment, and a CRLF there
+    # can even change the parsed address (#688).
+    text = _unfold(text)
     protected, restore = _protect_encoded_words(text)
     addresses = []
     for element in _split_address_list(protected):
