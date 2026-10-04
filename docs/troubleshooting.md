@@ -868,6 +868,17 @@ status. The service exits and Docker restarts it, so a brief outage
 clears by itself; a 401, 403 or 404 is a credential or model setting to
 fix (see "Embedder or inference endpoint unreachable from containers").
 
+"embedder at ... rejected the warmup request (APIStatusError:
+status=402)" from the indexer means the embedder refused its first
+request; "Embedder dimension probe failed" is the same for the probe
+right after it. Startup errors carry the error type and status code,
+never the provider's response text, so read the status: 401 or 403 is
+the API key, 402 is the provider account (no balance or billing), 404
+is usually `EMBED_MODEL`. The indexer exits and Docker restarts it
+until the account or setting is fixed. "did not become ready within
+...s (last error: ...)" means every attempt within the connect
+deadline failed with a connection error, a timeout, a 5xx, 408 or 429.
+
 ## Deletion reconciliation (mirror vs archive)
 
 By default the indexer mirrors upstream deletions: a message you delete on
