@@ -1766,6 +1766,92 @@ class TestStallGuardProgress:
         assert any("attachment text" in t for t in all_texts)
 
 
+class TestHostPressureEscapesPhase2a:
+    """#707 review round 1: the PDF extractor and the dispatcher re-raise
+    ``MemoryError`` / ``RecursionError``, but Phase 2a's ``except
+    Exception`` turned them into a ``chunk`` failure, spending the
+    message's attempt as an ordinary error. They must escape the step
+    with the ``begin_attempt`` charge still held, as ``IndexingQueue``
+    documents for a process that dies mid-step."""
+
+    @staticmethod
+    def _write_eml_with_pdf(path: Path, message_id: str) -> None:
+        import base64
+
+        payload = base64.b64encode(b"%PDF-1.7 synthetic").decode("ascii")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            f"From: alice@example.com\r\n"
+            f"To: bob@example.com\r\n"
+            f"Subject: Synthetic PDF\r\n"
+            f"Message-ID: <{message_id}>\r\n"
+            f"Date: Mon, 01 Jan 2024 12:00:00 +0000\r\n"
+            f"MIME-Version: 1.0\r\n"
+            f"Content-Type: multipart/mixed; boundary=frontier\r\n"
+            f"\r\n"
+            f"--frontier\r\n"
+            f"Content-Type: text/plain; charset=utf-8\r\n"
+            f"\r\n"
+            f"Body of {message_id}.\r\n"
+            f"\r\n"
+            f"--frontier\r\n"
+            f"Content-Type: application/pdf; name=doc.pdf\r\n"
+            f"Content-Disposition: attachment; filename=doc.pdf\r\n"
+            f"Content-Transfer-Encoding: base64\r\n"
+            f"\r\n"
+            f"{payload}\r\n"
+            f"--frontier--\r\n",
+            encoding="utf-8",
+        )
+
+    @pytest.mark.parametrize("error", [MemoryError, RecursionError])
+    def test_host_pressure_on_a_pdf_page_escapes_the_drain_with_the_charge_held(
+        self, tmp_path, monkeypatch, error
+    ):
+        from src.extractors import pdf
+
+        calls: list[int] = []
+
+        class Page:
+            def __init__(self, index):
+                self.index = index
+
+            def extract_text(self):
+                calls.append(self.index)
+                if self.index == 1:
+                    raise error("SYNTHETIC_PAGE_MARKER")
+                return f"Synthetic page {self.index} text long enough to count as digital."
+
+        class FakeReader:
+            def __init__(self, stream):
+                self.pages = [Page(0), Page(1), Page(2)]
+
+        monkeypatch.setattr(pdf.pypdf, "PdfReader", FakeReader)
+
+        dest = tmp_path / "INBOX" / "new" / "pdf.eml"
+        self._write_eml_with_pdf(dest, "pdf@example.com")
+        db = Database(tmp_path / "mail.db")
+        queue = _make_queue(db)
+        queue.enqueue(str(dest), REASON_INITIAL_SCAN)
+        embedder = make_mock_embedder()
+
+        with pytest.raises(error):
+            _drain(queue, db, embedder, Threader(db), batch_size=1, max_passes=1)
+
+        # Extraction stopped at the failing page, and nothing after it ran:
+        # no extraction cached, no embed call.
+        assert calls == [0, 1]
+        assert db._conn.execute("SELECT COUNT(*) FROM attachment_extractions").fetchone()[0] == 0
+        embedder.embed_batch.assert_not_called()
+        # The row is still queued with the Phase 2a charge held and marked
+        # interrupted, not recorded as a ``chunk`` failure.
+        row = db._conn.execute(
+            "SELECT status, attempts, last_stage FROM indexing_jobs WHERE filepath = ?",
+            (str(dest),),
+        ).fetchone()
+        assert tuple(row) == ("queued", 1, "interrupted")
+
+
 class TestReprocessKeepsThreadMembership:
     def test_reprocessed_reply_keeps_its_thread_and_chunks_consistent(self, tmp_path):
         """Regression (#204): reply B indexed before its parent A gets its
@@ -3593,6 +3679,132 @@ class TestRequeueNewlyDispatchedExtensions:
         assert queue.is_dead(paths["photo"])
         assert main._requeue_stale_extractions(db, queue) == 0
         assert self._queued(db) == {}
+
+
+class TestRequeueTooLargeThatNowFits:
+    """#693: attachments cached ``too_large`` under a smaller
+    ``INDEXER_ATTACHMENT_MAX_BYTES`` must be read once the operator raises
+    the cap. The startup sweep re-queues, once, every message carrying
+    bytes whose size now fits; bytes still over the cap stay ``too_large``
+    and are never re-queued."""
+
+    _write_eml = staticmethod(TestRequeueOcrDisabledExtractions._write_eml)
+    _drain = TestRequeueOcrDisabledExtractions._drain
+    _queued = staticmethod(TestRequeueOcrDisabledExtractions._queued)
+
+    def _index_under_cap(self, tmp_path, monkeypatch, messages, cap):
+        maildir = tmp_path / "maildir"
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        db = Database(tmp_path / "mail.db")
+        queue = _make_queue(db)
+        paths = {}
+        for name, payload in messages.items():
+            path = maildir / "INBOX" / "cur" / f"{name}.eml"
+            self._write_eml(path, f"{name}@example.com", payload, "text/plain", f"{name}.txt")
+            queue.enqueue(str(path), REASON_INITIAL_SCAN)
+            paths[name] = str(path)
+        monkeypatch.setattr(main, "INDEXER_ATTACHMENT_MAX_BYTES", cap)
+        self._drain(db, queue)
+        return db, queue, paths
+
+    @staticmethod
+    def _statuses(db) -> list[str]:
+        rows = db._conn.execute(
+            "SELECT extraction_status FROM attachment_extractions ORDER BY extraction_status"
+        ).fetchall()
+        return [r["extraction_status"] for r in rows]
+
+    def test_newly_fitting_rows_are_requeued_once(self, tmp_path, monkeypatch):
+        from src import attachment_indexing
+
+        db, queue, paths = self._index_under_cap(
+            tmp_path,
+            monkeypatch,
+            {
+                "fits": b"fitting words " * 300,  # 4,200 bytes
+                "still_big": b"oversized words " * 600,  # 9,600 bytes
+                "dead": b"dead letter words " * 200,  # 3,600 bytes
+            },
+            cap=1_000,
+        )
+        assert self._statuses(db) == ["too_large"] * 3
+        queue.enqueue(paths["dead"], REASON_INITIAL_SCAN)
+        for _ in range(queue.max_attempts):
+            queue.mark_failed(paths["dead"], stage="embed", error="x")
+        assert queue.is_dead(paths["dead"])
+
+        # Same cap: nothing fits yet.
+        assert main._requeue_stale_extractions(db, queue) == 0
+        assert self._queued(db) == {}
+
+        monkeypatch.setattr(main, "INDEXER_ATTACHMENT_MAX_BYTES", 5_000)
+        assert main._requeue_stale_extractions(db, queue) == 1
+        assert self._queued(db) == {paths["fits"]: REASON_REEXTRACT}
+
+        extractor = MagicMock(side_effect=attachment_indexing.extract_attachment)
+        monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
+        self._drain(db, queue)
+        assert extractor.call_count == 1
+        assert self._statuses(db) == ["success", "too_large", "too_large"]
+
+        # The fitting row was rewritten and the oversized one still does
+        # not fit, so later startups re-queue nothing.
+        assert main._requeue_stale_extractions(db, queue) == 0
+        assert main._requeue_stale_extractions(db, queue) == 0
+        assert self._queued(db) == {}
+
+    def test_every_message_carrying_the_bytes_is_requeued(self, tmp_path, monkeypatch):
+        """The row is shared by content hash, so each message carrying the
+        bytes indexed no text for them and is rebuilt."""
+        payload = b"shared words " * 300
+        db, queue, paths = self._index_under_cap(
+            tmp_path, monkeypatch, {"first": payload, "second": payload}, cap=1_000
+        )
+        monkeypatch.setattr(main, "INDEXER_ATTACHMENT_MAX_BYTES", len(payload))
+        assert main._requeue_stale_extractions(db, queue) == 2
+        assert self._queued(db) == {
+            paths["first"]: REASON_REEXTRACT,
+            paths["second"]: REASON_REEXTRACT,
+        }
+
+    def test_pending_rows_and_disabled_extraction_are_left_alone(self, tmp_path, monkeypatch):
+        db, queue, paths = self._index_under_cap(
+            tmp_path, monkeypatch, {"fits": b"fitting words " * 300}, cap=1_000
+        )
+        monkeypatch.setattr(main, "INDEXER_ATTACHMENT_MAX_BYTES", 5_000)
+        monkeypatch.setattr(main, "INDEXER_ATTACHMENT_EXTRACTION_ENABLED", False)
+        assert main._requeue_stale_extractions(db, queue) == 0
+        monkeypatch.setattr(main, "INDEXER_ATTACHMENT_EXTRACTION_ENABLED", True)
+        queue.enqueue(paths["fits"], REASON_INITIAL_SCAN)
+        assert main._requeue_stale_extractions(db, queue) == 0
+        assert self._queued(db) == {paths["fits"]: REASON_INITIAL_SCAN}
+
+
+class TestAttachmentMaxBytesDefault:
+    """#693: the default cap is 32 MiB, the same in the code, Compose and
+    ``.env.example``, and an attachment that size fits in an ``.eml``
+    under the default ``INDEXER_PARSE_MAX_BYTES`` and the parser's decode
+    budget, so it can reach the extractor at all."""
+
+    _DEFAULT = 32 * 1024 * 1024
+    _REPO = Path(__file__).resolve().parents[2]
+
+    def test_code_default(self):
+        assert main._DEFAULT_ATTACHMENT_MAX_BYTES == self._DEFAULT
+        if "INDEXER_ATTACHMENT_MAX_BYTES" not in os.environ:
+            assert main.INDEXER_ATTACHMENT_MAX_BYTES == self._DEFAULT
+
+    def test_compose_and_env_example_match(self):
+        compose = (self._REPO / "docker-compose.yml").read_text()
+        assert f"${{INDEXER_ATTACHMENT_MAX_BYTES:-{self._DEFAULT}}}" in compose
+        env_example = (self._REPO / ".env.example").read_text()
+        assert f"\nINDEXER_ATTACHMENT_MAX_BYTES={self._DEFAULT}\n" in env_example
+
+    def test_fits_under_the_parse_caps(self):
+        # base64 turns each 57 bytes into a 76-character line plus CRLF.
+        encoded = -(-self._DEFAULT // 57) * 78
+        assert encoded < parser._DEFAULT_PARSE_MAX_BYTES
+        assert self._DEFAULT <= parser.MAX_DECODED_ATTACHMENT_BYTES
 
 
 class TestPeriodicRecoverySkipsDeadLetter:

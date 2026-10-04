@@ -352,7 +352,7 @@ def _seed_thread_for_cache_test(tmp_path):
 
 
 def _run_process_with_cached_status(
-    db, attachment, status, monkeypatch, *, error=None, ocr_enabled=True
+    db, attachment, status, monkeypatch, *, error=None, ocr_enabled=True, max_bytes=10_000_000
 ):
     db.store_attachment_extraction(
         attachment_id=attachment.content_hash,
@@ -375,7 +375,7 @@ def _run_process_with_cached_status(
         chunk_max_tokens=500,
         chunk_overlap_tokens=60,
         ocr_enabled=ocr_enabled,
-        max_bytes=10_000_000,
+        max_bytes=max_bytes,
         max_ocr_pages=20,
     )
     return summary, extractor
@@ -394,18 +394,68 @@ def test_cached_empty_extraction_is_honored(tmp_path, monkeypatch):
     extractor.assert_not_called()
 
 
-def test_cached_too_large_extraction_is_honored(tmp_path, monkeypatch):
-    """A ``too_large`` cache row implies the payload exceeds the
-    operator's size cap. Re-running on every reappearance is wasted
-    cycles unless the cap is widened (which requires a redeploy and
-    can be paired with a cache clear).
-    """
+def test_cached_too_large_extraction_is_honored_while_still_over_the_cap(tmp_path, monkeypatch):
+    """A ``too_large`` cache row whose payload still exceeds the current
+    cap is honored: re-running would only record ``too_large`` again."""
     db = _seed_thread_for_cache_test(tmp_path)
+    attachment = _attachment()
     summary, extractor = _run_process_with_cached_status(
-        db, _attachment(), STATUS_TOO_LARGE, monkeypatch
+        db, attachment, STATUS_TOO_LARGE, monkeypatch, max_bytes=attachment.size - 1
     )
     assert summary["extractions_reused"] == 1
+    assert summary["extractions_run"] == 0
     extractor.assert_not_called()
+
+
+def test_cached_too_large_extraction_is_re_run_once_the_payload_fits(tmp_path, monkeypatch):
+    """#693: after the operator raises ``INDEXER_ATTACHMENT_MAX_BYTES``, a
+    ``too_large`` row for a payload at or below the new cap is stale. The
+    attachment is extracted and the row rewritten, so the next occurrence
+    is served from the cache."""
+    for label, slack in (("at the cap", 0), ("under the cap", 1)):
+        db = _seed_thread_for_cache_test(tmp_path / label)
+        attachment = _attachment()
+        db.store_attachment_extraction(
+            attachment_id=attachment.content_hash,
+            extraction_status=STATUS_TOO_LARGE,
+            extractor=None,
+            extracted_text=None,
+            extraction_error=f"payload {attachment.size} bytes exceeds cap 10",
+        )
+        extractor = MagicMock(
+            return_value=ExtractionResult(
+                status=STATUS_SUCCESS, extractor="text@2", text="now extracted", error=None
+            )
+        )
+        monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
+        kwargs: dict[str, Any] = {
+            "attachment": attachment,
+            "claimant_id": "message@example.com",
+            "thread_id": "thread-1",
+            "db": db,
+            "embedder": make_mock_embedder([0.1] * EMBEDDING_DIM),
+            "chunk_target_tokens": 350,
+            "chunk_max_tokens": 500,
+            "chunk_overlap_tokens": 60,
+            "ocr_enabled": True,
+            "max_bytes": attachment.size + slack,
+            "max_ocr_pages": 20,
+        }
+        summary = _prepare_and_apply(**kwargs)
+
+        assert summary["extractions_run"] == 1, label
+        assert extractor.call_count == 1, label
+        assert extractor.call_args.kwargs["max_bytes"] == attachment.size + slack
+        row = db.get_attachment_extraction(attachment.content_hash)
+        assert row["extraction_status"] == STATUS_SUCCESS, label
+        assert db.get_chunk_ids_for_message(
+            "message@example.com", attachment_id=attachment.content_hash
+        ), label
+
+        # The rewritten row is a plain cache hit from now on.
+        summary = _prepare_and_apply(**kwargs)
+        assert summary["extractions_reused"] == 1, label
+        assert extractor.call_count == 1, label
 
 
 def test_cached_unsupported_for_unknown_mime_is_honored(tmp_path, monkeypatch):

@@ -179,6 +179,9 @@ def _extract_digital_pages(
             break
         try:
             text = page.extract_text() or ""
+        except MemoryError, RecursionError:
+            # Host pressure, not this page: the dispatcher re-raises it.
+            raise
         except Exception as exc:  # noqa: BLE001
             # Per-page failures (broken cross-ref tables, cipher
             # entries pypdf chokes on) shouldn't abort the whole doc.

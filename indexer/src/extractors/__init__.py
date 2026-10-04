@@ -133,7 +133,10 @@ class ExtractionResult:
 # failed with ``DependencyError`` before ``cryptography`` was added (#691).
 # image 3: opens HEIC/HEIF photos, which failed with
 # ``UnidentifiedImageError`` before pillow-heif was added (#691).
-EXTRACTOR_VERSIONS: dict[str, int] = {"docx": 3, "image": 3, "pdf": 3, "text": 2, "xlsx": 4}
+# pdf 4: lets ``MemoryError`` / ``RecursionError`` on a page escape as
+# host pressure; before, the page was skipped and the PDF could be
+# cached as a success with that page's text missing (#707).
+EXTRACTOR_VERSIONS: dict[str, int] = {"docx": 3, "image": 3, "pdf": 4, "text": 2, "xlsx": 4}
 
 
 def _stamp_extractor(module_name: str, extractor_name: str) -> str:
