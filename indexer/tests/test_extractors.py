@@ -2374,7 +2374,7 @@ class TestPdfDigitalExtractor:
         )
 
         assert result.status == STATUS_FAILED
-        assert result.extractor == "pdf@3"
+        assert result.extractor == "pdf@4"
         assert result.text is None
         assert result.error == "RuntimeError"
 
@@ -2788,7 +2788,7 @@ class TestPdfPageLevelOcr:
         work = self._fake_ocr(monkeypatch, tmp_path)
         result = self._extract("ds")
         assert result.status == STATUS_SUCCESS
-        assert result.extractor == "pdf-ocr@3"
+        assert result.extractor == "pdf-ocr@4"
         assert result.text is not None
         assert self.DIGITAL.format(n=1) in result.text
         assert self.SCANNED in result.text
@@ -2827,13 +2827,13 @@ class TestPdfPageLevelOcr:
     def test_digital_pdf_renders_nothing(self, monkeypatch, tmp_path):
         work = self._fake_ocr(monkeypatch, tmp_path)
         result = self._extract("dd")
-        assert result.extractor == "pdf-digital@3"
+        assert result.extractor == "pdf-digital@4"
         assert work["renders"] == [] and work["ocr_calls"] == 0
 
     def test_scanned_pdf_still_ocrs_every_page_within_the_cap(self, monkeypatch, tmp_path):
         work = self._fake_ocr(monkeypatch, tmp_path)
         result = self._extract("sss")
-        assert result.extractor == "pdf-ocr@3"
+        assert result.extractor == "pdf-ocr@4"
         assert work["renders"] == [(1, 3)]
         assert work["ocr_calls"] == 3
 
@@ -2841,7 +2841,7 @@ class TestPdfPageLevelOcr:
         work = self._fake_ocr(monkeypatch, tmp_path)
         result = self._extract("ds", ocr_enabled=False)
         assert result.status == STATUS_SUCCESS
-        assert result.extractor == "pdf-digital@3"
+        assert result.extractor == "pdf-digital@4"
         assert work["renders"] == [] and work["ocr_calls"] == 0
 
     def test_ocr_failure_on_a_mixed_pdf_keeps_the_digital_text(self, monkeypatch, tmp_path, caplog):
@@ -2851,7 +2851,7 @@ class TestPdfPageLevelOcr:
         self._fake_ocr(monkeypatch, tmp_path, fail=True)
         result = self._extract("ds")
         assert result.status == STATUS_SUCCESS
-        assert result.extractor == "pdf-digital@3"
+        assert result.extractor == "pdf-digital@4"
         assert result.text == self.DIGITAL.format(n=1)
         assert "RuntimeError" in caplog.text
         assert "SYNTHETIC_OCR_MARKER" not in caplog.text
@@ -2978,20 +2978,33 @@ class TestPdfPageLevelOcr:
 
 
 class TestPdfExtractorVersion:
-    """#292 changed what the PDF extractor returns for the same bytes, and
+    """#292 changed what the PDF extractor returns for the same bytes,
     #691 makes AES-encrypted PDFs that need no open password extract
-    instead of failing, so rows written before either must re-extract."""
+    instead of failing, and #707 stops caching a success with pages
+    dropped by host pressure, so rows written before any of them must
+    re-extract."""
 
     @pytest.mark.parametrize(
-        "name", ["pdf-digital", "pdf-ocr", "pdf", "pdf-digital@2", "pdf-ocr@2", "pdf@2"]
+        "name",
+        [
+            "pdf-digital",
+            "pdf-ocr",
+            "pdf",
+            "pdf-digital@2",
+            "pdf-ocr@2",
+            "pdf@2",
+            "pdf-digital@3",
+            "pdf-ocr@3",
+            "pdf@3",
+        ],
     )
     def test_pre_bump_pdf_rows_are_stale(self, name):
         from src.extractors import EXTRACTOR_VERSIONS, stale_extractor_module
 
-        assert EXTRACTOR_VERSIONS["pdf"] == 3
+        assert EXTRACTOR_VERSIONS["pdf"] == 4
         assert stale_extractor_module(name) == "pdf"
 
-    @pytest.mark.parametrize("name", ["pdf-digital@3", "pdf-ocr@3", "pdf@3"])
+    @pytest.mark.parametrize("name", ["pdf-digital@4", "pdf-ocr@4", "pdf@4"])
     def test_current_pdf_rows_are_not_stale(self, name):
         from src.extractors import stale_extractor_module
 
@@ -3051,7 +3064,7 @@ class TestEncryptedPdf:
         result = extract(content_type="application/pdf", filename="statement.pdf", payload=payload)
 
         assert result.status == STATUS_SUCCESS
-        assert result.extractor == "pdf-digital@3"
+        assert result.extractor == "pdf-digital@4"
         assert result.text == self.MARKER
 
     @pytest.mark.parametrize("algorithm", ["AES-128", "AES-256"])
@@ -3069,7 +3082,7 @@ class TestEncryptedPdf:
         result = extract(content_type="application/pdf", filename="locked.pdf", payload=payload)
 
         assert result.status == STATUS_FAILED
-        assert result.extractor == "pdf@3"
+        assert result.extractor == "pdf@4"
         assert result.error == "FileNotDecryptedError"
         assert result.text is None
         for marker in ("SYNTHETIC_USER_PW_MARKER", "SYNTHETIC_USER_PASSWORD", "synthetic-owner"):

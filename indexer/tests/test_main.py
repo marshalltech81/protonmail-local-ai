@@ -1766,6 +1766,92 @@ class TestStallGuardProgress:
         assert any("attachment text" in t for t in all_texts)
 
 
+class TestHostPressureEscapesPhase2a:
+    """#707 review round 1: the PDF extractor and the dispatcher re-raise
+    ``MemoryError`` / ``RecursionError``, but Phase 2a's ``except
+    Exception`` turned them into a ``chunk`` failure, spending the
+    message's attempt as an ordinary error. They must escape the step
+    with the ``begin_attempt`` charge still held, as ``IndexingQueue``
+    documents for a process that dies mid-step."""
+
+    @staticmethod
+    def _write_eml_with_pdf(path: Path, message_id: str) -> None:
+        import base64
+
+        payload = base64.b64encode(b"%PDF-1.7 synthetic").decode("ascii")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            f"From: alice@example.com\r\n"
+            f"To: bob@example.com\r\n"
+            f"Subject: Synthetic PDF\r\n"
+            f"Message-ID: <{message_id}>\r\n"
+            f"Date: Mon, 01 Jan 2024 12:00:00 +0000\r\n"
+            f"MIME-Version: 1.0\r\n"
+            f"Content-Type: multipart/mixed; boundary=frontier\r\n"
+            f"\r\n"
+            f"--frontier\r\n"
+            f"Content-Type: text/plain; charset=utf-8\r\n"
+            f"\r\n"
+            f"Body of {message_id}.\r\n"
+            f"\r\n"
+            f"--frontier\r\n"
+            f"Content-Type: application/pdf; name=doc.pdf\r\n"
+            f"Content-Disposition: attachment; filename=doc.pdf\r\n"
+            f"Content-Transfer-Encoding: base64\r\n"
+            f"\r\n"
+            f"{payload}\r\n"
+            f"--frontier--\r\n",
+            encoding="utf-8",
+        )
+
+    @pytest.mark.parametrize("error", [MemoryError, RecursionError])
+    def test_host_pressure_on_a_pdf_page_escapes_the_drain_with_the_charge_held(
+        self, tmp_path, monkeypatch, error
+    ):
+        from src.extractors import pdf
+
+        calls: list[int] = []
+
+        class Page:
+            def __init__(self, index):
+                self.index = index
+
+            def extract_text(self):
+                calls.append(self.index)
+                if self.index == 1:
+                    raise error("SYNTHETIC_PAGE_MARKER")
+                return f"Synthetic page {self.index} text long enough to count as digital."
+
+        class FakeReader:
+            def __init__(self, stream):
+                self.pages = [Page(0), Page(1), Page(2)]
+
+        monkeypatch.setattr(pdf.pypdf, "PdfReader", FakeReader)
+
+        dest = tmp_path / "INBOX" / "new" / "pdf.eml"
+        self._write_eml_with_pdf(dest, "pdf@example.com")
+        db = Database(tmp_path / "mail.db")
+        queue = _make_queue(db)
+        queue.enqueue(str(dest), REASON_INITIAL_SCAN)
+        embedder = make_mock_embedder()
+
+        with pytest.raises(error):
+            _drain(queue, db, embedder, Threader(db), batch_size=1, max_passes=1)
+
+        # Extraction stopped at the failing page, and nothing after it ran:
+        # no extraction cached, no embed call.
+        assert calls == [0, 1]
+        assert db._conn.execute("SELECT COUNT(*) FROM attachment_extractions").fetchone()[0] == 0
+        embedder.embed_batch.assert_not_called()
+        # The row is still queued with the Phase 2a charge held and marked
+        # interrupted, not recorded as a ``chunk`` failure.
+        row = db._conn.execute(
+            "SELECT status, attempts, last_stage FROM indexing_jobs WHERE filepath = ?",
+            (str(dest),),
+        ).fetchone()
+        assert tuple(row) == ("queued", 1, "interrupted")
+
+
 class TestReprocessKeepsThreadMembership:
     def test_reprocessed_reply_keeps_its_thread_and_chunks_consistent(self, tmp_path):
         """Regression (#204): reply B indexed before its parent A gets its
