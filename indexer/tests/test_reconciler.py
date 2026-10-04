@@ -50,7 +50,6 @@ def _default_config(**overrides) -> ReconcilerConfig:
         "sweep_interval_secs": 60,
         "max_batch_pct": 1.0,
         "force": False,
-        "unlink_on_reap": False,
     }
     base.update(overrides)
     return ReconcilerConfig(**base)
@@ -189,10 +188,10 @@ class TestSweep:
         restored the file and cleared its tombstone, and the sweep
         recorded a new tombstone under the obsolete trashed path. Later
         sweeps look only at the live path, so the reaper deleted the
-        restored message (and, with ``unlink_on_reap``, its file)."""
+        restored message."""
         import src.reconciler as reconciler_module
 
-        rec = Reconciler(db, embedder, threader, _default_config(unlink_on_reap=True))
+        rec = Reconciler(db, embedder, threader, _default_config())
         path = maildir / "1700000000.M1.host:2,S"
         _write_eml(path, "restored@example.com")
         thread_id = _index(path, db, threader)
@@ -218,7 +217,6 @@ class TestSweep:
         rec.sweep()
         assert rec.reap()["threads_reaped"] == 0
         assert db.get_thread(thread_id) is not None
-        assert path.exists()
 
     def test_move_during_sweep_does_not_tombstone_the_old_path(
         self, db, threader, embedder, maildir, monkeypatch
@@ -426,10 +424,10 @@ class TestReap:
         the file was briefly at B, and the watcher moved it back to A
         before the tombstone was written. The map holds A again, so the
         tombstone passes the path check; with a zero grace window the
-        next reap deleted the live message and unlinked its file."""
+        next reap deleted the live message."""
         import src.reconciler as reconciler_module
 
-        rec = Reconciler(db, embedder, threader, _default_config(unlink_on_reap=True))
+        rec = Reconciler(db, embedder, threader, _default_config())
         path = maildir / "1700000000.M1.host:2,S"
         _write_eml(path, "aba@example.com")
         thread_id = _index(path, db, threader)
@@ -452,7 +450,6 @@ class TestReap:
 
         assert rec.reap()["threads_reaped"] == 0
         assert db.get_thread(thread_id) is not None
-        assert path.exists()
         assert count_pending_deletions(db) == 0
 
     def test_live_checks_list_each_directory_once(
@@ -493,7 +490,7 @@ class TestReap:
         """A tombstone left under a dead path by the #301 race before its
         fix: the message now maps to a live, untrashed file, so the
         reaper clears the tombstone instead of deleting the message."""
-        rec = Reconciler(db, embedder, threader, _default_config(unlink_on_reap=True))
+        rec = Reconciler(db, embedder, threader, _default_config())
         path = maildir / "1700000000.M1.host:2,S"
         _write_eml(path, "orphan@example.com")
         thread_id = _index(path, db, threader)
@@ -507,7 +504,6 @@ class TestReap:
 
         assert rec.reap()["threads_reaped"] == 0
         assert db.get_thread(thread_id) is not None
-        assert path.exists()
         assert count_pending_deletions(db) == 0
 
     def test_full_reap_when_last_message_tombstoned(self, db, threader, reconciler, maildir):
@@ -1161,19 +1157,40 @@ class TestReap:
         assert type(exc).__name__ in caplog.text
         assert all(r.exc_info is None for r in caplog.records)
 
-    def test_unlinks_files_when_unlink_on_reap_enabled(self, db, threader, embedder, maildir):
-        cfg = _default_config(unlink_on_reap=True)
-        rec = Reconciler(db, embedder, threader, cfg)
+    def test_reap_keeps_the_eml_on_disk(self, db, threader, reconciler, maildir):
+        """#721: the indexer never deletes Maildir files. Neither a
+        whole-thread reap nor a partial rebuild removes a reaped
+        message's .eml; mbsync owns the files (#728)."""
+        alone = maildir / "1700000000.M1.host:2,S"
+        _write_eml(alone, "alone@example.com", subject="Alone")
+        _index(alone, db, threader)
+        orig = maildir / "1700000001.M2.host:2,S"
+        _write_eml(orig, "orig@example.com", subject="Budget")
+        _index(orig, db, threader)
+        reply = maildir / "1700000002.M3.host:2,S"
+        _write_eml(
+            reply,
+            "reply@example.com",
+            subject="Re: Budget",
+            in_reply_to="orig@example.com",
+            date=datetime(2024, 2, 1, tzinfo=UTC),
+        )
+        _index(reply, db, threader)
+        alone_trashed = maildir / "1700000000.M1.host:2,ST"
+        alone.rename(alone_trashed)
+        orig_trashed = maildir / "1700000001.M2.host:2,ST"
+        orig.rename(orig_trashed)
+        reconciler.sweep()
 
-        path = maildir / "1700000000.M1.host:2,S"
-        _write_eml(path, "u1@example.com")
-        _index(path, db, threader)
-        trashed = maildir / "1700000000.M1.host:2,ST"
-        path.rename(trashed)
-        rec.sweep()
-        assert trashed.exists()
-        rec.reap()
-        assert trashed.exists() is False
+        result = reconciler.reap()
+
+        assert result["threads_reaped"] == 1
+        assert result["threads_rebuilt"] == 1
+        assert db.find_message_entry_by_filepath(str(alone_trashed)) is None
+        assert db.find_message_entry_by_filepath(str(orig_trashed)) is None
+        assert alone_trashed.exists()
+        assert orig_trashed.exists()
+        assert reply.exists()
 
     def test_reap_chunkless_fallback_uses_survivor_subject(
         self, db, threader, embedder, reconciler, maildir
@@ -1647,7 +1664,7 @@ class TestLoadConfig:
         assert cfg.sweep_interval_secs == 3600
         assert cfg.max_batch_pct == pytest.approx(0.05)
         assert cfg.force is False
-        assert cfg.unlink_on_reap is False
+        assert not hasattr(cfg, "unlink_on_reap")
 
     def test_enabled_parses_truthy_values(self):
         for val in ("1", "true", "TRUE", "yes", "on"):
@@ -1676,14 +1693,12 @@ class TestLoadConfig:
                 "INDEXER_DELETION_SWEEP_INTERVAL_SECS": " ",
                 "INDEXER_DELETION_MAX_BATCH_PCT": "",
                 "INDEXER_DELETION_FORCE": "",
-                "INDEXER_UNLINK_ON_REAP": "  ",
             }
         )
         assert cfg.grace_days == 7
         assert cfg.sweep_interval_secs == 3600
         assert cfg.max_batch_pct == pytest.approx(0.05)
         assert cfg.force is False
-        assert cfg.unlink_on_reap is False
 
     def test_valid_values_are_returned(self):
         cfg = load_config_from_env(
@@ -1692,26 +1707,22 @@ class TestLoadConfig:
                 "INDEXER_DELETION_SWEEP_INTERVAL_SECS": "60",
                 "INDEXER_DELETION_MAX_BATCH_PCT": "1",
                 "INDEXER_DELETION_FORCE": "YES",
-                "INDEXER_UNLINK_ON_REAP": " on ",
             }
         )
         assert cfg.grace_days == 0
         assert cfg.sweep_interval_secs == 60
         assert cfg.max_batch_pct == 1.0
         assert cfg.force is True
-        assert cfg.unlink_on_reap is True
         cfg = load_config_from_env(
             {
                 "INDEXER_DELETION_MAX_BATCH_PCT": "0",
                 "INDEXER_DELETION_FORCE": "off",
-                "INDEXER_UNLINK_ON_REAP": "0",
             }
         )
         assert cfg.max_batch_pct == 0.0
         assert cfg.force is False
-        assert cfg.unlink_on_reap is False
 
-    @pytest.mark.parametrize("name", ["INDEXER_DELETION_FORCE", "INDEXER_UNLINK_ON_REAP"])
+    @pytest.mark.parametrize("name", ["INDEXER_DELETION_FORCE"])
     @pytest.mark.parametrize("raw", ["tru", "-5", "nan", "inf"])
     def test_unrecognized_boolean_fails(self, name, raw):
         """A typo used to read as false without a word (#481)."""

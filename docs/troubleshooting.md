@@ -747,7 +747,8 @@ reconciliation fault (see *Trash is left out by default* in
 `docs/mcp-tools.md`).
 See the `Indexer — deletion reconciliation` block in
 `.env.example` for all knobs (grace window, sweep interval, mass-delete
-brake, unlink-on-reap).
+brake). The reaper never deletes Maildir files: a reaped message's
+`.eml` stays on disk (#728 tracks deleting them on the mbsync side).
 
 The indexer reads these settings once at startup, so a change takes
 effect only when the `indexer` container is recreated. After editing
@@ -763,7 +764,7 @@ To confirm the new value reached the container:
 docker compose exec indexer env | grep '^INDEXER_DELETION_'
 ```
 
-Defaults — 7-day grace window, 5% mass-delete brake, no file unlink — are
+Defaults — 7-day grace window, 5% mass-delete brake — are
 the safe starting point. Quick checks in mirror mode:
 
 ```bash

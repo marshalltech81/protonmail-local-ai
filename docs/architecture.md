@@ -1248,8 +1248,11 @@ cleanups.
 
 `mbsync` keeps `Expunge None` regardless — the reaper cleans up the local
 index; it does not change mbsync's pull-only, no-destructive-delete posture
-on the Maildir itself. Because reaped `.eml` files normally remain on disk,
-the indexer's enqueue paths skip `T`-flagged files while reconciliation is
+on the Maildir itself. The indexer never deletes Maildir files: its
+`/maildir` mount is read-only and the files belong to mbsync, so a
+reaped message's `.eml` stays on disk (deleting the files of mail
+deleted in Proton is tracked on the mbsync side in #728). Because of
+that, the indexer's enqueue paths skip `T`-flagged files while reconciliation is
 enabled so a reaped message is never re-indexed (see *Ingestion
 completeness*).
 
@@ -1582,9 +1585,10 @@ the watchdog's `on_created` / new-delivery `on_moved` branches — skips
 has been `T`-flagged since it was queued (the reaper owns that message):
 a message still in the index keeps its job parked, which the reap
 deletes or, if mbsync clears the flag first, the rename moves back to the
-live path and makes due at once; a trashed file never indexed has its job dropped. A reaped message's `.eml` stays on disk under the default
-`INDEXER_UNLINK_ON_REAP=false` and is no longer indexed or queued, so
-treating it as undiscovered mail would resurrect it into search (and
+live path and makes due at once; a trashed file never indexed has its job dropped. A reaped message's `.eml` stays on disk (the indexer never deletes
+Maildir files; see #728 for local file deletion) and is no longer
+indexed or queued, so treating it as undiscovered mail would resurrect
+it into search (and
 the next sweep would start a fresh grace window). If mbsync later
 clears the `T` flag because the message was restored upstream, the
 file is live mail again and is re-indexed normally. With
