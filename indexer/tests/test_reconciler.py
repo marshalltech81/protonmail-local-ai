@@ -102,8 +102,8 @@ def embedder() -> FakeEmbedder:
 
 
 @pytest.fixture
-def reconciler(db: Database, embedder: FakeEmbedder, threader: Threader) -> Reconciler:
-    return Reconciler(db, embedder, threader, _default_config())
+def reconciler(db: Database, embedder: FakeEmbedder) -> Reconciler:
+    return Reconciler(db, embedder, _default_config())
 
 
 # ---------------------------------------------------------------------------
@@ -191,7 +191,7 @@ class TestSweep:
         restored message."""
         import src.reconciler as reconciler_module
 
-        rec = Reconciler(db, embedder, threader, _default_config())
+        rec = Reconciler(db, embedder, _default_config())
         path = maildir / "1700000000.M1.host:2,S"
         _write_eml(path, "restored@example.com")
         thread_id = _index(path, db, threader)
@@ -227,7 +227,7 @@ class TestSweep:
         reaper deleted the moved message."""
         import src.reconciler as reconciler_module
 
-        rec = Reconciler(db, embedder, threader, _default_config())
+        rec = Reconciler(db, embedder, _default_config())
         path = maildir / "1700000000.M1.host:2,S"
         _write_eml(path, "moved@example.com")
         thread_id = _index(path, db, threader)
@@ -401,7 +401,7 @@ class TestHandleMoved:
 class TestReap:
     def test_does_not_reap_inside_grace_window(self, db, threader, embedder, maildir):
         cfg = _default_config(grace_days=7)
-        rec = Reconciler(db, embedder, threader, cfg)
+        rec = Reconciler(db, embedder, cfg)
 
         path = maildir / "1700000000.M1.host:2,S"
         _write_eml(path, "g1@example.com")
@@ -427,7 +427,7 @@ class TestReap:
         next reap deleted the live message."""
         import src.reconciler as reconciler_module
 
-        rec = Reconciler(db, embedder, threader, _default_config())
+        rec = Reconciler(db, embedder, _default_config())
         path = maildir / "1700000000.M1.host:2,S"
         _write_eml(path, "aba@example.com")
         thread_id = _index(path, db, threader)
@@ -479,7 +479,7 @@ class TestReap:
             return real_iterdir(self)
 
         monkeypatch.setattr(Path, "iterdir", counting_iterdir)
-        rec = Reconciler(db, embedder, threader, _default_config(force=True))
+        rec = Reconciler(db, embedder, _default_config(force=True))
         assert rec.reap()["threads_reaped"] == 20
         assert listed
         assert len(listed) == len(set(listed))
@@ -490,7 +490,7 @@ class TestReap:
         """A tombstone left under a dead path by the #301 race before its
         fix: the message now maps to a live, untrashed file, so the
         reaper clears the tombstone instead of deleting the message."""
-        rec = Reconciler(db, embedder, threader, _default_config())
+        rec = Reconciler(db, embedder, _default_config())
         path = maildir / "1700000000.M1.host:2,S"
         _write_eml(path, "orphan@example.com")
         thread_id = _index(path, db, threader)
@@ -604,7 +604,7 @@ class TestReap:
         matching any tombstone by message ID deleted it at once."""
         from src.queue import REASON_INITIAL_SCAN, IndexingQueue
 
-        rec = Reconciler(db, embedder, threader, _default_config(grace_days=7))
+        rec = Reconciler(db, embedder, _default_config(grace_days=7))
         path = maildir / "1700000000.M1.host:2,S"
         _write_eml(path, "again@example.com")
         thread_id = _index(path, db, threader)
@@ -634,7 +634,7 @@ class TestReap:
         restored message. The rename and the clear are now one write."""
         from src.queue import REASON_INITIAL_SCAN, IndexingQueue
 
-        rec = Reconciler(db, embedder, threader, _default_config())
+        rec = Reconciler(db, embedder, _default_config())
         path = maildir / "1700000000.M1.host:2,S"
         _write_eml(path, "restoring@example.com")
         thread_id = _index(path, db, threader)
@@ -1570,7 +1570,7 @@ class TestMassDeleteBrake:
             p.rename(t)
 
         cfg = _default_config(grace_days=0, max_batch_pct=0.05)
-        rec = Reconciler(db, embedder, threader, cfg)
+        rec = Reconciler(db, embedder, cfg)
         rec.sweep()
 
         # Age all tombstones so they are past the grace window
@@ -1595,7 +1595,7 @@ class TestMassDeleteBrake:
             p.rename(t)
 
         cfg = _default_config(grace_days=0, max_batch_pct=0.05)
-        rec = Reconciler(db, embedder, threader, cfg)
+        rec = Reconciler(db, embedder, cfg)
         rec.sweep()
         db._conn.execute("UPDATE pending_deletions SET marked_at = '2000-01-01T00:00:00+00:00'")
         db._conn.commit()
@@ -1623,7 +1623,7 @@ class TestMassDeleteBrake:
         paths[11].rename(trashed)
 
         cfg = _default_config(grace_days=0, max_batch_pct=0.05)
-        rec = Reconciler(db, embedder, threader, cfg)
+        rec = Reconciler(db, embedder, cfg)
         rec.sweep()
 
         result = rec.reap()
@@ -1639,7 +1639,7 @@ class TestMassDeleteBrake:
             p.rename(t)
 
         cfg = _default_config(grace_days=0, max_batch_pct=0.05, force=True)
-        rec = Reconciler(db, embedder, threader, cfg)
+        rec = Reconciler(db, embedder, cfg)
         rec.sweep()
         db._conn.execute("UPDATE pending_deletions SET marked_at = '2000-01-01T00:00:00+00:00'")
         db._conn.commit()

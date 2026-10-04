@@ -3233,12 +3233,14 @@ class Database:
         ``_chunk_vector_search`` swallows, silently degrading search
         to keyword-only.
 
-        Returns ``None`` when ``message_chunks_vec`` doesn't exist
-        yet — a fresh install where mcp-server starts before the
-        indexer has run its schema migrations. Callers treat ``None``
-        as "skip validation"; semantic / hybrid queries then fail at
-        the DB layer with the missing-table message, which is the
-        right operator-visible signal for that state.
+        Returns ``None`` when ``message_chunks_vec`` is missing or its
+        DDL declares no recognisable ``FLOAT[N]``; callers treat
+        ``None`` as "skip validation". This is a defensive contract
+        for a direct call or a malformed database: the server itself
+        does not serve on a fresh install the indexer has not built,
+        because the embedder identity startup check
+        (``lib/embed_identity.py``) fails closed until the indexer has
+        recorded its embedder.
         """
         row = self._fetchone(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name='message_chunks_vec'"

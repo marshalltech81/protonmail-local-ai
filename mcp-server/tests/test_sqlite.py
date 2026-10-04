@@ -107,10 +107,11 @@ class TestGetEmbeddingDim:
         import sqlite3
 
         db_path = tmp_path / "no-vec.db"
-        # Build a DB that has the file but no ``message_chunks_vec`` —
-        # represents a fresh-install / pre-indexer state where
-        # mcp-server starts but the indexer has not yet run its
-        # schema migrations.
+        # Build a DB that has the file but no ``message_chunks_vec``.
+        # The server never serves such a database (the embedder
+        # identity startup check fails closed first); this pins the
+        # helper's defensive contract for a direct call or a malformed
+        # database.
         sqlite3.connect(str(db_path)).close()
         db = Database(str(db_path))
         assert db.get_embedding_dim() is None

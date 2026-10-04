@@ -155,10 +155,11 @@ async def embed_query(client, text: str, expected_dim: int | None) -> list[float
     instead of a clear "your embedder is wrong" signal.
 
     ``expected_dim`` is read from ``Database.get_embedding_dim()`` at
-    startup. ``None`` means the vec table doesn't exist yet (fresh
-    install pre-indexer-run), in which case there's nothing to compare
-    against and we pass the vector through; the DB layer will surface
-    the missing-table case naturally.
+    startup. ``None`` means the helper found no declared dim (a missing
+    or unrecognised vec table), in which case there's nothing to compare
+    against and we pass the vector through. The server does not start
+    on a fresh install the indexer has not built: the embedder identity
+    startup check fails closed first.
 
     Raises ``ProviderResponseError`` on mismatch with a message naming the
     operator-controllable knobs (``EMBED_BASE_URL`` / ``EMBED_MODEL``)

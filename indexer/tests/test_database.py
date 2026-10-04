@@ -714,7 +714,7 @@ class TestUpsertThreadUpdate:
         assert "Second message" in row["snippet"]
 
     def test_per_message_body_cap_matches_across_insert_and_update_paths(self, db, threader):
-        # Both the fresh-insert path (``Thread.text_for_embedding``) and
+        # Both the fresh-insert path (``Thread.build_body_text``) and
         # the accumulation path (``Database._compute_body``) must apply
         # the SAME per-message char cap. The previous shape used 500 chars
         # on insert and 2000 chars on update — meaning a thread that
@@ -769,7 +769,7 @@ class TestUpsertThreadUpdate:
     def test_accumulated_body_capped_at_token_budget(self, db, threader):
         # The accumulated thread body must respect the same token-based
         # cap (``THREAD_BODY_TEXT_MAX_TOKENS``) on update that the
-        # fresh-insert ``Thread.text_for_embedding`` applies. Without
+        # fresh-insert ``Thread.build_body_text`` applies. Without
         # the shared cap, replies arriving after the initial insert
         # could expand the stored body well past what the insert path
         # would have kept, drifting FTS / embedding inputs across the

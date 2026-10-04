@@ -627,9 +627,10 @@ def main():
     # tool layer can reject wrong-shaped query vectors before they reach
     # sqlite-vec MATCH (where the broad ``except`` in
     # ``_chunk_vector_search`` would otherwise swallow them as a silent
-    # "no results"). ``None`` is expected on a fresh install where the
-    # indexer has not yet run its schema migrations; the tool layer
-    # treats that as skip-validation.
+    # "no results"). The tool layer treats ``None`` as skip-validation,
+    # but a fresh install the indexer has not built never gets that far:
+    # the identity check below exits until the indexer has recorded its
+    # embedder.
     expected_embed_dim = db.get_embedding_dim()
 
     # Refuse to serve query vectors from an embedder other than the one
