@@ -3448,7 +3448,7 @@ class TestRequeueOcrDisabledExtractions:
 
         extractor = MagicMock(
             return_value=ExtractionResult(
-                status=STATUS_SUCCESS, extractor="image-ocr@2", text="scanned words", error=None
+                status=STATUS_SUCCESS, extractor="image-ocr@3", text="scanned words", error=None
             )
         )
         monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
