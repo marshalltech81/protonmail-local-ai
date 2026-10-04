@@ -479,7 +479,9 @@ class OpenAIEmbedder:
         """Embed ``chunks`` with up to ``concurrency`` requests in flight (#713).
 
         Only this thread submits requests, and only as earlier ones
-        finish, so after the first failure nothing new starts. Requests
+        finish. Before refilling a slot it collects every request that
+        has finished, not only those ``wait`` reported, so a failure
+        that finished alongside a success stops new requests. Requests
         still in flight are waited for (each is bounded by the request
         timeout and its retries) and their results discarded; the
         failure then propagates as on the sequential path.
@@ -491,16 +493,17 @@ class OpenAIEmbedder:
         next_chunk = 0
         with ThreadPoolExecutor(max_workers=self.concurrency) as pool:
             while next_chunk < len(chunks) or pending:
-                while next_chunk < len(chunks) and len(pending) < self.concurrency:
-                    pending[pool.submit(self._embed_one_batch, chunks[next_chunk])] = next_chunk
-                    next_chunk += 1
-                done, _ = wait(pending, return_when=FIRST_COMPLETED)
-                for future in done:
-                    # ``result()`` re-raises the request's exception;
-                    # leaving the ``with`` block waits for the rest.
+                # ``result()`` re-raises the request's exception; leaving
+                # the ``with`` block waits for the rest.
+                for future in [f for f in pending if f.done()]:
                     results[pending.pop(future)] = future.result()
                     if on_batch_complete is not None:
                         on_batch_complete()
+                while next_chunk < len(chunks) and len(pending) < self.concurrency:
+                    pending[pool.submit(self._embed_one_batch, chunks[next_chunk])] = next_chunk
+                    next_chunk += 1
+                if pending:
+                    wait(pending, return_when=FIRST_COMPLETED)
         return [
             vec for chunk_vectors in results if chunk_vectors is not None for vec in chunk_vectors
         ]

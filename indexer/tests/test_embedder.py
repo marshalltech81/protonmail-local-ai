@@ -10,6 +10,7 @@ import logging
 import threading
 import time
 import traceback
+from concurrent.futures import ALL_COMPLETED
 from types import SimpleNamespace
 
 import httpx2
@@ -507,6 +508,43 @@ class TestEmbedConcurrency:
         # The failed request never ticks; the one still in flight is
         # waited for but its result is discarded.
         assert ticks["n"] <= 1
+
+    def test_failure_finished_alongside_a_reported_success_stops_new_requests(self, monkeypatch):
+        # Review round 1: ``wait`` can report one finished request while
+        # another has already failed. The failure must be seen before the
+        # freed slot is refilled. The patched ``wait`` reproduces that
+        # interleaving: it waits for both requests but reports only the
+        # successful one.
+        import src.embedder as embedder_module
+
+        real_wait = embedder_module.wait
+        first_call = [True]
+
+        def wait_reporting_only_success(fs, return_when=None):
+            if not first_call[0]:
+                return real_wait(fs, return_when=return_when)
+            first_call[0] = False
+            done, _ = real_wait(fs, return_when=ALL_COMPLETED)
+            succeeded = {f for f in done if f.exception() is None}
+            return succeeded, set(fs) - succeeded
+
+        monkeypatch.setattr(embedder_module, "wait", wait_reporting_only_success)
+        emb = _make_embedder(batch_size=1, concurrency=2)
+        emb._embed_one_batch.retry.wait = lambda *_a, **_kw: 0  # type: ignore[attr-defined]
+        calls: list[str] = []
+        lock = threading.Lock()
+
+        def fake_create(**kwargs):
+            with lock:
+                calls.append(kwargs["input"][0])
+            if kwargs["input"][0] == "1":
+                raise _api_status_error(400)
+            return _embed_response([[1.0]])
+
+        _patch_create(emb, fake_create)
+        with pytest.raises(APIStatusError):
+            emb.embed_batch([str(i) for i in range(4)])
+        assert sorted(calls) == ["0", "1"]
 
     def test_each_concurrent_request_keeps_its_own_retry(self):
         emb = _make_embedder(batch_size=1, concurrency=2)
