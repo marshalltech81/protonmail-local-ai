@@ -99,7 +99,7 @@ from .queue import load_config_from_env as load_queue_config_from_env
 from .quoting import segment_for_embedding
 from .reconciler import Reconciler, ReconcilerConfig, load_config_from_env, sweep_paths
 from .stall_guard import StallGuard
-from .threader import Thread, Threader, reply_subject_line
+from .threader import Thread, Threader, subject_embed_line
 from .timings import StageTimings, TimingAggregator, format_summary
 
 logging.basicConfig(
@@ -910,7 +910,7 @@ def _phase1_commit_thread(
 
 
 def _chunk_embed_input(subject_line: str, chunk_text: str) -> str:
-    """Embedding input for a reply's first body chunk: ``subject_line``
+    """Embedding input for a message's first body chunk: ``subject_line``
     then the chunk text, within ``CHUNK_MAX_TOKENS`` (#439).
 
     The subject is attacker-controlled and unbounded, so it is cut to
@@ -989,12 +989,12 @@ def _phase2a_collect_chunks(
         # chunks, so the fallback below is reserved for that case too.
         clears_chunks = bool(stored_ids) and not body_chunks
         new_body_offsets: list[int] = []
-        # A reply that changed the subject carries it into the embedding
-        # input of its first body chunk only (#303). The stored chunk
+        # Every message carries its subject into the embedding input of
+        # its first body chunk only (#303, #687). The stored chunk
         # text, offsets and ID stay body-only, since chunks are the
         # authoritative body store; keyword search gets the subject from
         # the thread's FTS subject column instead.
-        subject_line = reply_subject_line(msg, state.thread.subject)
+        subject_line = subject_embed_line(msg)
         for c in new_body:
             new_body_offsets.append(len(all_texts))
             if subject_line and c.chunk_index == 0:

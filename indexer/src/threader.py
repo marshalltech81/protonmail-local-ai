@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 from email.utils import parseaddr
 from itertools import islice
 
-from .parser import Message
+from .parser import NO_SUBJECT, Message
 
 # Reply / forward prefixes the subject normalizer strips before grouping.
 # Hoisted to module level so the compiled regex is reused across every
@@ -416,17 +416,19 @@ def fts_subject_text(thread_subject: str, subjects: Iterable[str]) -> str:
     return "\n".join(parts)
 
 
-def reply_subject_line(msg: Message, thread_subject: str) -> str | None:
-    """``Subject: <msg.subject>`` when the message's subject differs
-    from the thread's after normalization, else ``None``.
+def subject_embed_line(msg: Message) -> str | None:
+    """``Subject: <msg.subject>``, or ``None`` when the subject is blank
+    after normalization or is the parser's ``NO_SUBJECT`` placeholder
+    (a missing header, a literal "(no subject)", or a reply to one).
 
     The indexer puts it in front of the message's first body chunk in
-    the embedding input only, so a reply that changed the subject
-    carries it into its chunk vector (#303). The stored chunk text,
-    its offsets and its ID stay body-only: chunks are the authoritative
-    body store. A subject that normalizes to the thread's adds nothing.
+    the embedding input only, so the subject is in the chunk vector and
+    the thread vector, their mean (#303, #687). Every message carries
+    its own subject, not only a reply that changed it: a topic named
+    only in the subject would otherwise be in no vector. The stored
+    chunk text, its offsets and its ID stay body-only: chunks are the
+    authoritative body store.
     """
-    normalized = _normalize_subject(msg.subject)
-    if not normalized or normalized == _normalize_subject(thread_subject):
+    if _normalize_subject(msg.subject) in ("", NO_SUBJECT):
         return None
     return f"Subject: {msg.subject}"
