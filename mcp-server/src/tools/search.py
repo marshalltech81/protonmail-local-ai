@@ -98,7 +98,8 @@ def register_search_tools(
     ``Database.get_embedding_dim()``). When set, every embed call is
     validated against it so a misconfigured ``EMBED_MODEL`` surfaces
     as an actionable error instead of silently degrading to keyword
-    search. ``None`` skips the check (fresh install pre-indexer-run).
+    search. ``None`` skips the check (no declared dim found; see
+    ``Database.get_embedding_dim``).
     """
     secrets = list(secret_values or ())
     # Config identifier for the per-call timing line.
