@@ -255,10 +255,11 @@ def parse_email(path: Path, maildir_root: Path | None = None) -> Message | None:
 
     ``maildir_root`` — when provided, the folder is derived as the relative
     path from the root to the directory that contains ``cur/``/``new/``.
-    mbsync ``SubFolders Verbatim`` can nest folders more than one level
-    deep (``Clients/ABC``, ``Archive/2023``); without the root, nested
-    folders collapse to only the leaf directory name and unrelated threads
-    can be merged by the subject-only fallback.
+    mbsync's ``SubFolders Legacy`` layout nests folders more than one level
+    deep as dotted child directories (``Folders/.Clients/.ABC`` is
+    ``Folders/Clients/ABC``; see ``_derive_folder``); without the root,
+    nested folders collapse to only the leaf directory name and unrelated
+    threads can be merged by the subject-only fallback.
 
     When ``maildir_root`` is not provided the folder falls back to the
     leaf name (``path.parent.parent.name``).
@@ -1287,8 +1288,6 @@ def _parse_received_date(msg: email.message.Message) -> datetime | None:
             return None
         date_text = tail[semicolon + 1 :].encode("ascii", "ignore").decode("ascii")
         dt = email.utils.parsedate_to_datetime(date_text)
-        if dt is None:
-            return None
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=UTC)
         # Inside the guard: a date near year 9999 with a negative
@@ -1336,9 +1335,6 @@ def _parse_date(value: str) -> datetime | None:
         # (empty string, single-token gibberish, malformed timezone);
         # ``parse_email`` substitutes current UTC so threader doesn't crash.
         log.warning("unparseable Date header; using now()")
-        return None
-    if dt is None:
-        log.warning("Date header parsed to None; using now()")
         return None
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=UTC)

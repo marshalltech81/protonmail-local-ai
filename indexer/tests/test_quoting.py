@@ -2,32 +2,40 @@
 Tests for src/quoting.py.
 
 Covers quoted-reply stripping, signature cut-offs, forward markers, and
-the empty-result fallback used to keep the embedding input non-empty.
+the segments a message with no body text is chunked as, through
+``segment_for_embedding``, the entry point the indexer chunks.
 """
 
 import time
 
 import pytest
-from src.quoting import strip_for_embedding
+from src.quoting import Segment, segment_for_embedding
+
+
+def _embedded_body(body: str) -> str:
+    """Return the text of the one ``body`` segment the indexer chunks for ``body``."""
+    segments = segment_for_embedding(body)
+    assert [s.kind for s in segments] == ["body"]
+    return segments[0].text
 
 
 class TestQuotedLineStripping:
     def test_drops_plain_quoted_line(self):
         body = "New reply text.\n> quoted reply from earlier"
-        assert strip_for_embedding(body) == "New reply text."
+        assert _embedded_body(body) == "New reply text."
 
     def test_drops_nested_quoted_lines(self):
         body = "New reply.\n> level one\n>> level two\n>>> level three"
-        assert strip_for_embedding(body) == "New reply."
+        assert _embedded_body(body) == "New reply."
 
     def test_drops_quoted_lines_with_leading_whitespace(self):
         """Some clients indent quoted blocks by a space or tab."""
         body = "New reply.\n  > indented quote\n\t> tab-indented quote"
-        assert strip_for_embedding(body) == "New reply."
+        assert _embedded_body(body) == "New reply."
 
     def test_preserves_non_quoted_content(self):
         body = "Line one.\nLine two.\nLine three."
-        assert strip_for_embedding(body) == "Line one.\nLine two.\nLine three."
+        assert _embedded_body(body) == "Line one.\nLine two.\nLine three."
 
 
 class TestSignatureCutoff:
@@ -36,14 +44,14 @@ class TestSignatureCutoff:
         signature delimiter. Everything below is a signature and should
         not contribute to the embedding."""
         body = "New reply.\n-- \nJane Doe\nSenior Engineer\nCompany Inc."
-        assert strip_for_embedding(body) == "New reply."
+        assert _embedded_body(body) == "New reply."
 
     def test_delimiter_without_trailing_space_is_not_cut(self):
         """The RFC 3676 marker requires the trailing space. A literal
         ``--`` line alone is used for horizontal rules and must not
         trigger a signature cut."""
         body = "New reply.\n--\nLooks like a separator but is not a sig."
-        result = strip_for_embedding(body)
+        result = _embedded_body(body)
         assert "separator" in result
 
 
@@ -56,7 +64,7 @@ class TestForwardAndReplyMarkers:
             "Sent: Monday\n"
             "Subject: Old thread"
         )
-        assert strip_for_embedding(body) == "New reply text."
+        assert _embedded_body(body) == "New reply text."
 
     def test_gmail_forwarded_marker_cuts(self):
         body = (
@@ -65,11 +73,11 @@ class TestForwardAndReplyMarkers:
             "From: alice@example.com\n"
             "Subject: Original"
         )
-        assert strip_for_embedding(body) == "Check this out."
+        assert _embedded_body(body) == "Check this out."
 
     def test_apple_begin_forwarded_marker_cuts(self):
         body = "Forwarding for your records.\nBegin forwarded message:\nFrom: alice@example.com"
-        assert strip_for_embedding(body) == "Forwarding for your records."
+        assert _embedded_body(body) == "Forwarding for your records."
 
     def test_on_wrote_marker_drops_quoted_history(self):
         body = (
@@ -77,14 +85,14 @@ class TestForwardAndReplyMarkers:
             "On Mon, Jan 1, 2024 at 10:00 AM Alice <alice@example.com> wrote:\n"
             "> Please confirm receipt."
         )
-        assert strip_for_embedding(body) == "Thanks, that works."
+        assert _embedded_body(body) == "Thanks, that works."
 
     def test_on_wrote_only_matches_bounded_line(self):
         """A line that merely contains 'wrote:' somewhere should not be
         treated as a reply header. The pattern requires the full
         single-line ``On ... wrote:`` form."""
         body = "I wrote the following report on Monday as requested."
-        result = strip_for_embedding(body)
+        result = _embedded_body(body)
         assert "wrote the following report" in result
 
 
@@ -105,7 +113,7 @@ class TestInlineReplies:
             "> Will you be in office?\n"
             "No, remote."
         )
-        result = strip_for_embedding(body)
+        result = _embedded_body(body)
         # User's inline answers must survive the strip.
         assert "Probably Friday." in result
         assert "No, remote." in result
@@ -126,7 +134,7 @@ class TestInlineReplies:
             "> Any concerns about the budget?\n"
             "None."
         )
-        result = strip_for_embedding(body)
+        result = _embedded_body(body)
         assert "Short version: yes, ship it." in result
         assert "Yes, fine." in result
         assert "None." in result
@@ -152,7 +160,7 @@ class TestNonEnglishReplyHeaders:
             "Am Mo., 1. Jan. 2024 um 10:00 schrieb Alice <alice@example.com>:\n"
             "> Bitte um Bestätigung."
         )
-        assert strip_for_embedding(body) == "Danke, passt so."
+        assert _embedded_body(body) == "Danke, passt so."
 
     def test_french_a_ecrit_header_drops_quoted_history(self):
         # French convention is "a écrit :" with a non-breaking space
@@ -162,7 +170,7 @@ class TestNonEnglishReplyHeaders:
             "Le lun. 1 janv. 2024 à 10:00, Alice <alice@example.com> a écrit :\n"
             "> Pouvez-vous confirmer ?"
         )
-        assert strip_for_embedding(body) == "Merci, c'est bon."
+        assert _embedded_body(body) == "Merci, c'est bon."
 
     def test_spanish_escribio_header_drops_quoted_history(self):
         body = (
@@ -170,7 +178,7 @@ class TestNonEnglishReplyHeaders:
             "El lun., 1 ene 2024 a las 10:00, Alice <alice@example.com> escribió:\n"
             "> Por favor confirma."
         )
-        assert strip_for_embedding(body) == "Gracias, perfecto."
+        assert _embedded_body(body) == "Gracias, perfecto."
 
     def test_italian_ha_scritto_header_drops_quoted_history(self):
         body = (
@@ -178,7 +186,7 @@ class TestNonEnglishReplyHeaders:
             "Il giorno lun 1 gen 2024 alle ore 10:00 Alice <alice@example.com> ha scritto:\n"
             "> Conferma per favore."
         )
-        assert strip_for_embedding(body) == "Va bene, grazie."
+        assert _embedded_body(body) == "Va bene, grazie."
 
     def test_dutch_schreef_header_drops_quoted_history(self):
         body = (
@@ -186,7 +194,7 @@ class TestNonEnglishReplyHeaders:
             "Op ma 1 jan. 2024 om 10:00 schreef Alice <alice@example.com>:\n"
             "> Bevestig graag."
         )
-        assert strip_for_embedding(body) == "Akkoord, bedankt."
+        assert _embedded_body(body) == "Akkoord, bedankt."
 
     def test_german_inline_answers_are_preserved(self):
         # Non-English reply headers must also be a SKIP, not a hard cut,
@@ -198,7 +206,7 @@ class TestNonEnglishReplyHeaders:
             "> Bist du im Büro?\n"
             "Nein, remote."
         )
-        result = strip_for_embedding(body)
+        result = _embedded_body(body)
         assert "Wahrscheinlich am Freitag." in result
         assert "Nein, remote." in result
         assert "schrieb" not in result
@@ -209,7 +217,7 @@ class TestNonEnglishReplyHeaders:
         # A line that merely contains the verb in prose, not as the
         # closing keyword of a reply header, must survive.
         body = "Ich schrieb gestern einen langen Bericht über das Thema."
-        result = strip_for_embedding(body)
+        result = _embedded_body(body)
         assert "schrieb gestern einen langen Bericht" in result
 
 
@@ -227,7 +235,7 @@ class TestWrappedReplyHeaders:
             "wrote:\n"
             "> Please confirm."
         )
-        result = strip_for_embedding(body)
+        result = _embedded_body(body)
         assert "Thanks for the heads up." in result
         assert "wrote:" not in result
         assert "verylongdomain" not in result
@@ -240,7 +248,7 @@ class TestWrappedReplyHeaders:
             "schrieb:\n"
             "> Bitte um Bestätigung."
         )
-        result = strip_for_embedding(body)
+        result = _embedded_body(body)
         assert "Vielen Dank." in result
         assert "schrieb:" not in result
         assert "verylongdomain" not in result
@@ -250,7 +258,7 @@ class TestWrappedReplyHeaders:
         # pre-pass must NOT collapse — otherwise an unrelated body line
         # starting with "On" could pull its successor in.
         body = "On Monday I sent the report,\nbut did not hear back.\nToday I followed up."
-        result = strip_for_embedding(body)
+        result = _embedded_body(body)
         assert "On Monday I sent the report," in result
         assert "but did not hear back." in result
         assert "Today I followed up." in result
@@ -273,7 +281,7 @@ class TestOutlookBlockCut:
             "\n"
             "Please approve the attached invoice."
         )
-        assert strip_for_embedding(body) == "Approved, thanks."
+        assert _embedded_body(body) == "Approved, thanks."
 
     def test_outlook_from_date_block_cuts(self):
         # Some Outlook configurations emit ``Date:`` rather than
@@ -285,7 +293,7 @@ class TestOutlookBlockCut:
             "Date: Monday, January 1, 2024 10:00 AM\n"
             "Subject: Status"
         )
-        assert strip_for_embedding(body) == "Looks good."
+        assert _embedded_body(body) == "Looks good."
 
     def test_outlook_block_with_blank_line_still_cuts(self):
         # A blank line between ``From:`` and ``Sent:`` is common when
@@ -299,13 +307,13 @@ class TestOutlookBlockCut:
             "Sent: Monday, January 1, 2024 10:00 AM\n"
             "Subject: Status"
         )
-        assert strip_for_embedding(body) == "Reply text."
+        assert _embedded_body(body) == "Reply text."
 
     def test_prose_mentioning_from_is_not_falsely_cut(self):
         # A body that mentions "From: someone" in prose, without a
         # following ``Sent:`` or ``Date:`` line, must survive.
         body = "The note read: From: Anonymous.\nThat was all it said.\nStrange."
-        result = strip_for_embedding(body)
+        result = _embedded_body(body)
         assert "From: Anonymous" in result
         assert "That was all it said." in result
         assert "Strange." in result
@@ -324,7 +332,7 @@ class TestOutlookBlockCut:
             "Location: Zoom Room A\n"
             "Notes: please join 5 min early."
         )
-        result = strip_for_embedding(body)
+        result = _embedded_body(body)
         assert "Meeting schedule:" in result
         assert "From: Alice (host)" in result
         assert "Date: 2026-01-01" in result
@@ -347,7 +355,7 @@ class TestOutlookBlockCut:
             "\n"
             "Body of original."
         )
-        assert strip_for_embedding(body) == "Looks good."
+        assert _embedded_body(body) == "Looks good."
 
 
 class TestReplyHeaderFalsePositives:
@@ -369,7 +377,7 @@ class TestReplyHeaderFalsePositives:
             "Wir müssen die Lieferung beschleunigen.\n"
             "Bitte um schnelle Rückmeldung."
         )
-        result = strip_for_embedding(body)
+        result = _embedded_body(body)
         assert "Am Montag schrieb der Manager folgendes:" in result
         assert "Wir müssen die Lieferung beschleunigen." in result
         assert "Bitte um schnelle Rückmeldung." in result
@@ -382,14 +390,14 @@ class TestReplyHeaderFalsePositives:
             "We moeten de levering versnellen.\n"
             "Graag snelle reactie."
         )
-        result = strip_for_embedding(body)
+        result = _embedded_body(body)
         assert "Op de markt schreef de manager:" in result
         assert "We moeten de levering versnellen." in result
         assert "Graag snelle reactie." in result
 
     def test_french_prose_with_a_ecrit_is_not_cut(self):
         body = "Le directeur a écrit :\nVeuillez accélérer la livraison."
-        result = strip_for_embedding(body)
+        result = _embedded_body(body)
         assert "Le directeur a écrit :" in result
         assert "Veuillez accélérer la livraison." in result
 
@@ -418,7 +426,7 @@ class TestReplyHeaderWorkBound:
     def test_long_lead_word_line_is_linear(self, line):
         # Unbounded, each of these takes minutes; bounded, milliseconds.
         started = time.perf_counter()
-        result = strip_for_embedding(line + "\nNew reply text.")
+        result = _embedded_body(line + "\nNew reply text.")
         assert time.perf_counter() - started < 1.0
         assert "New reply text." in result
 
@@ -430,7 +438,7 @@ class TestReplyHeaderWorkBound:
             "<firstname.lastname@mail.subdomain.example.co.uk> wrote:\n"
             "> earlier text"
         )
-        assert strip_for_embedding(body) == "Thanks, see below."
+        assert _embedded_body(body) == "Thanks, see below."
 
 
 class TestWrappedReplyHeaderCRLF:
@@ -446,7 +454,7 @@ class TestWrappedReplyHeaderCRLF:
             "wrote:\r\n"
             "> Please confirm."
         )
-        result = strip_for_embedding(body)
+        result = _embedded_body(body)
         assert "Thanks for the heads up." in result
         assert "wrote:" not in result
         assert "verylongdomain" not in result
@@ -459,33 +467,29 @@ class TestWrappedReplyHeaderCRLF:
             "schrieb:\r\n"
             "> Bitte um Bestätigung."
         )
-        result = strip_for_embedding(body)
+        result = _embedded_body(body)
         assert "Vielen Dank." in result
         assert "schrieb:" not in result
         assert "verylongdomain" not in result
 
 
-class TestEmptyFallback:
-    def test_empty_input_returns_empty(self):
-        assert strip_for_embedding("") == ""
+class TestNoBodyText:
+    def test_empty_input_has_no_segments(self):
+        assert segment_for_embedding("") == []
 
-    def test_reply_that_is_only_quoted_returns_original(self):
-        """If the stripper would produce an empty string — e.g. a reply
-        that is literally just the Gmail reply header and a quoted
-        thread — return the original body so the embedding has some
-        content to ground on rather than an empty vector seed."""
+    def test_reply_that_is_only_quoted_is_one_quote_segment(self):
+        """A reply that is literally just the Gmail reply header and a
+        quoted thread has no body text, so the whole original is chunked,
+        tagged as a quote, rather than an empty embedding input."""
         body = (
             "On Mon, Jan 1, 2024 at 10:00 AM Alice <alice@example.com> wrote:\n"
             "> Original question text."
         )
-        # Stripped form is empty (the marker cuts before the quoted
-        # line would have been dropped anyway). The fallback keeps the
-        # original body intact.
-        assert strip_for_embedding(body) == body
+        assert segment_for_embedding(body) == [Segment("quote", body)]
 
-    def test_reply_of_only_quoted_lines_returns_original(self):
+    def test_reply_of_only_quoted_lines_is_one_quote_segment(self):
         body = "> line one\n> line two\n> line three"
-        assert strip_for_embedding(body) == body
+        assert segment_for_embedding(body) == [Segment("quote", body)]
 
 
 class TestRealisticCombinations:
@@ -503,7 +507,7 @@ class TestRealisticCombinations:
             ">\n"
             "> Alice"
         )
-        result = strip_for_embedding(body)
+        result = _embedded_body(body)
         assert "Wednesday" in result
         assert "Thanks," in result
         assert "Bob" in result
@@ -522,4 +526,4 @@ class TestRealisticCombinations:
             "\n"
             "Please approve the attached invoice."
         )
-        assert strip_for_embedding(body) == "Approved."
+        assert _embedded_body(body) == "Approved."

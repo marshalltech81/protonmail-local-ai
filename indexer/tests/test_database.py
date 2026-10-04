@@ -472,8 +472,9 @@ class TestUpsertThreadUpdate:
         assert row["display_subject"] == "Today's Meeting"
 
     def test_display_subject_backfills_when_legacy_row_was_null(self, db):
-        """A pre-v13 row has ``display_subject = NULL``. The next upsert
-        that supplies a non-NULL value backfills it. After that, normal
+        """A row with ``display_subject = NULL`` (as rows written before
+        the column was populated had) is backfilled by the next upsert
+        that supplies a non-NULL value. After that, normal
         date-ordered precedence applies."""
         thread = make_thread()
         db.upsert_thread(thread, FAKE_EMBEDDING)
@@ -883,7 +884,7 @@ class TestIsIndexed:
 
 
 # ---------------------------------------------------------------------------
-# File identity on indexed_files (schema v7)
+# File identity on indexed_files
 # ---------------------------------------------------------------------------
 
 
@@ -948,16 +949,16 @@ class TestIndexedFileIdentity:
 
 
 # ---------------------------------------------------------------------------
-# FTS behavior — contentless_delete + fts_rowid (schema v3)
+# FTS behavior — contentless_delete + fts_rowid
 # ---------------------------------------------------------------------------
 
 
 class TestFtsRowidAndReplacement:
     def test_upsert_update_replaces_fts_row_instead_of_accumulating(self, db, threader):
         """Body-text updates must DELETE the prior FTS row so stale tokens do
-        not linger in the search index. Regression test for the pre-v3 bug
-        where DELETE silently no-op'd on contentless tables without
-        ``contentless_delete=1``.
+        not linger in the search index. Regression test for the bug, before
+        the schema renumbering, where DELETE silently no-op'd on contentless
+        tables without ``contentless_delete=1``.
         """
         msg = make_message(
             message_id="upd@x",
@@ -1641,7 +1642,7 @@ class TestReapRewritesThreadRow:
 
 
 # ---------------------------------------------------------------------------
-# Schema v9 — message_chunks tables and the diff-based chunk write
+# message_chunks tables and the diff-based chunk write
 # ---------------------------------------------------------------------------
 
 
@@ -2091,7 +2092,7 @@ class TestChunkCascadeOnMessageRemoval:
 
 
 # ---------------------------------------------------------------------------
-# Schema v12 — attachments + attachment_extractions + enforced sidecar parents
+# attachments + attachment_extractions + enforced sidecar parents
 # ---------------------------------------------------------------------------
 
 

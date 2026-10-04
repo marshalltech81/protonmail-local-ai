@@ -373,8 +373,7 @@ class TestSenderFilter:
     def test_from_addr_only_matches_senders(self, seeded_db: Database):
         """Regression: from_addr used to check participants (From + To + Cc),
         so "from alice" matched threads where alice was merely a recipient.
-        With schema v6 senders populated, the filter now matches senders
-        only.
+        With senders populated, the filter now matches senders only.
         """
         # alice sent t-alpha; alice is only a recipient on t-beta.
         results = seeded_db.keyword_search("invoice lunch", from_addr="alice@example.com")
@@ -1186,8 +1185,8 @@ class TestDisplaySubjectFallback:
             thread_id="t-legacy",
             subject="legacy lowercased subject",
             participants=["a@example.com"],
-            # display_subject left None — simulates a v12 row carried
-            # forward through the v13 migration without a refresh.
+            # display_subject left None — simulates a row written before
+            # the column was populated and not refreshed since.
         )
         conn.close()
 
@@ -1944,7 +1943,7 @@ class TestBodyTextLoadedIntoResult:
 
 
 # ---------------------------------------------------------------------------
-# Schema v9 — chunk vector lane and chunk-aware hybrid search
+# Chunk vector lane and chunk-aware hybrid search
 # ---------------------------------------------------------------------------
 
 

@@ -174,13 +174,13 @@ class TestParseEmail:
 
     @pytest.mark.parametrize(
         "branch",
-        ["unparseable", "type_error", "parsed_none"],
+        ["unparseable", "type_error"],
     )
     def test_fallback_date_value_not_logged(self, tmp_path, monkeypatch, caplog, branch):
         """#257: the Date header is attacker-controlled mail content, so no
         fallback branch may log it. ``parsedate_to_datetime`` on 3.14
-        raises only ``ValueError`` for a ``str``; the other two branches
-        are reached by stubbing it."""
+        raises only ``ValueError`` for a ``str``; the ``TypeError`` branch
+        is reached by stubbing it."""
         marker = "SYNTHETIC-DATE-MARKER-257"
         if branch == "type_error":
 
@@ -188,8 +188,6 @@ class TestParseEmail:
                 raise TypeError(marker)
 
             monkeypatch.setattr(email.utils, "parsedate_to_datetime", _raise_type_error)
-        elif branch == "parsed_none":
-            monkeypatch.setattr(email.utils, "parsedate_to_datetime", lambda _value: None)
         path = tmp_path / "INBOX" / "cur" / "marker.eml"
         path.parent.mkdir(parents=True)
         path.write_bytes(
@@ -598,7 +596,7 @@ class TestDeriveFolderLegacyLayout:
 
 
 # ---------------------------------------------------------------------------
-# parse_email — file identity (schema v7)
+# parse_email — file identity
 # ---------------------------------------------------------------------------
 
 

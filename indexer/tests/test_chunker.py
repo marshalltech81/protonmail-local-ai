@@ -19,7 +19,7 @@ from src.chunker import (
     estimate_tokens,
     normalize_body,
 )
-from src.quoting import strip_for_embedding
+from src.quoting import segment_for_embedding
 
 FIXTURES = Path(__file__).parent / "fixtures" / "chunker"
 
@@ -602,12 +602,16 @@ class TestFixtures:
 
     def test_quoted_reply_fixture_uses_stripped_body(self):
         """The chunker is body-agnostic: it indexes whatever it is handed.
-        For quoted replies we strip first (matching the embedding path in
-        ``main.py``) so the chunks contain only the new content. The test
-        documents that intended caller pattern."""
+        For quoted replies the indexer segments first (``main.py`` chunks
+        ``segment_for_embedding``'s runs with ``chunk_segments``) so the
+        chunks contain only the new content. The test documents that
+        caller pattern."""
         raw_body = _load_body("quoted_reply.eml")
-        stripped = strip_for_embedding(raw_body)
-        chunks = chunk_message(message_pk="fix-quoted", body_text=stripped)
+        segments = segment_for_embedding(raw_body)
+        chunks = chunk_segments(
+            message_pk="fix-quoted", segments=[(s.kind, s.text) for s in segments]
+        )
+        assert {c.kind for c in chunks} == {"body"}
         joined = "\n".join(c.text for c in chunks)
         assert "Sounds good, ship it" in joined
         # The quoted history must not survive into the chunks.

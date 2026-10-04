@@ -1,5 +1,5 @@
 """
-Quoted-reply and signature stripping for embedding input.
+Quoted-reply and signature segmentation for embedding input.
 
 Each reply carries the quoted history before it, so by the tenth message
 a thread's chunks — and the thread vector averaged from them — are
@@ -13,10 +13,10 @@ The stored ``body_text`` (FTS index input) is left alone: users
 legitimately search quoted text and signatures, so this transform only
 applies at the embedding boundary.
 
-``segment_for_embedding`` is the form the indexer chunks: the same line
-rules, returned as runs tagged with a chunk kind (body / quote /
-signature / forwarded) so that segmentation happens before chunking and
-no chunk spans kinds (#646).
+``segment_for_embedding`` is the entry point the indexer chunks: it
+applies the line rules below and returns runs tagged with a chunk kind
+(body / quote / signature / forwarded), so that segmentation happens
+before chunking and no chunk spans kinds (#646).
 
 Heuristics are intentionally narrow. This is a domain-fraught problem
 and an aggressive stripper that eats real body content is worse than a
@@ -172,47 +172,11 @@ class Segment:
     text: str
 
 
-def strip_for_embedding(body_text: str) -> str:
-    """Return ``body_text`` with quoted replies and signatures removed.
-
-    Intended for the embedding path only. The output is a best-effort
-    approximation of the "new content" portion of the message:
-
-    - lines beginning with ``>`` (any depth) are dropped;
-    - reply-header lines (``On ... wrote:``) are dropped but the loop
-      continues past them so inline answers between quoted blocks
-      survive;
-    - anything from the first hard-cut marker onward (signature
-      delimiter, forward preamble) is dropped;
-    - surrounding whitespace is trimmed from the result.
-
-    When the stripped result is empty (a reply that is literally just
-    "On ... wrote:" followed by the quoted thread, or a top-posted
-    reply that is entirely below a forward marker), the original
-    ``body_text`` is returned so the embedding has *something* to go on
-    rather than an empty string, which degrades the nearest-neighbor
-    search for the thread as a whole.
-    """
-    if not body_text:
-        return body_text
-    text, cut = _pre_pass(body_text)
-    stripped = _body_lines(text, cut)
-    if not stripped:
-        # Reply with no detectable "new content" — fall back to the
-        # original body so the embedding is never seeded from an empty
-        # string. An empty embedding input collapses the vector toward
-        # the model's default response and poisons similarity ranking
-        # for the whole thread.
-        return body_text
-    return stripped
-
-
 def segment_for_embedding(body_text: str) -> list[Segment]:
     """Return the kind-tagged segments of ``body_text`` the indexer chunks.
 
     Segmentation happens before chunking, so a chunk never spans kinds
-    (the chunker chunks each segment on its own). Each line gets a kind
-    from the rules ``strip_for_embedding`` applies:
+    (the chunker chunks each segment on its own). Each line gets a kind:
 
     - ``quote``: ``>`` lines, reply-header lines, and everything from an
       Outlook reply block or a ``-----Original Message-----`` line on;
@@ -224,13 +188,16 @@ def segment_for_embedding(body_text: str) -> list[Segment]:
     a later marker switches the kind, and any other line keeps the
     current marker's kind.
 
-    When the message has body text, the result is one ``body`` segment
-    holding exactly ``strip_for_embedding``'s output: the other kinds
-    are left out, as before. Only a message with no body text (the
-    case ``strip_for_embedding`` falls back on the whole original) is
-    chunked as its non-body segments, one per run of a kind, so its
-    chunks say what they hold. In that case the two-line reply headers
-    removed by the wrapped-header pre-pass are not part of any segment.
+    When the message has body text, the result is one ``body`` segment:
+    its ``body`` lines, joined and with surrounding whitespace trimmed.
+    The other kinds are left out, so inline answers between quoted
+    blocks are kept while the quoted history, signature and forwarded
+    text do not dominate the message's chunk vectors. Only a message
+    with no body text is chunked as its non-body segments, one per run
+    of a kind, so its chunks say what they hold rather than the
+    embedding being seeded from an empty string. In that case the
+    two-line reply headers removed by the wrapped-header pre-pass are
+    not part of any segment.
     """
     if not body_text:
         return []
