@@ -20,16 +20,19 @@ repos:
     hooks:
       - id: actionlint
 
-  - repo: https://github.com/hadolint/hadolint
-    rev: v2.15.1
+  # Hadolint v2.15.1, pinned by digest to the image the hadolint job in
+  # .github/workflows/lint.yml uses (hadolint-action v3.5.0's Dockerfile).
+  # The upstream remote hook pulls ghcr.io/hadolint/hadolint untagged, i.e.
+  # :latest (#736). Dependabot does not track a local hook: bump the tag and
+  # digest by hand with each hadolint upgrade. Ignored rules and why are in
+  # .hadolint.yaml, which hadolint reads from the repository root.
+  - repo: local
     hooks:
       - id: hadolint-docker
-        # DL3066 (non-numeric USER) is ignored deliberately: every image
-        # creates its service account with an explicit --uid/--gid in the
-        # same Dockerfile, so the name always resolves from the image's own
-        # /etc/passwd. Keep this in sync with the hadolint job in
-        # .github/workflows/lint.yml.
-        args: ['--ignore', 'DL3008', '--ignore', 'DL3059', '--ignore', 'DL3066']
+        name: Lint Dockerfiles
+        language: docker_image
+        types: [dockerfile]
+        entry: ghcr.io/hadolint/hadolint:v2.15.1-debian@sha256:9a3944b7fddcb947d1ffd90829ac1a6e5c30479223358f249d8b96c7d0019e27 hadolint
 
   - repo: https://github.com/shellcheck-py/shellcheck-py
     rev: v0.11.0.1
