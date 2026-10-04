@@ -416,6 +416,7 @@ def select_ask_threads(
     date_to: str | None,
     reranker,
     has_attachments: bool | None = None,
+    participant: str | None = None,
 ) -> list[ThreadResult]:
     """The threads, and each thread's evidence chunks, ``ask_mailbox``
     puts in front of its model for ``query``.
@@ -434,11 +435,41 @@ def select_ask_threads(
         date_from=date_from,
         date_to=date_to,
         has_attachments=has_attachments,
+        participant=participant,
         limit=max_threads,
         with_evidence=True,
         reranker=reranker,
         evidence_per_thread=PROMPT_EVIDENCE_CHUNKS_PER_THREAD,
     )
+
+
+def blank_to_none(value: str | None) -> str | None:
+    """``value`` stripped, or ``None`` when it is blank. Clients often
+    send an unset optional as ``""`` or whitespace; as a person filter
+    that would match any participant string containing a space, or look
+    up " ". Padding would also defeat the bare-name and domain substring
+    match (``" Dana "`` matches no ``"Dana Example <...>"``)."""
+    return (value.strip() or None) if value is not None else None
+
+
+async def resolve_from_name(db, from_name: str, folders: list[str] | None) -> str | None:
+    """The sender address ``from_name`` names, or ``None`` if no contact
+    matches: ``find_contact``'s top match counted over From-line senders
+    only, within the caller's folder scope (``folders``, else the default
+    Trash exclusion).
+
+    The resolved address becomes a sender-only ``from_addr`` filter, so
+    the lookup counts senders only: over all participants a frequent
+    recipient could outrank the sender and leave the filter matching
+    nothing. Scoping it like the search keeps it from picking a sender
+    whose threads the search would then filter out. ``search_emails``,
+    ``ask_mailbox`` and ``extract_from_emails`` share it.
+    """
+    with stage("contact_lookup"):
+        contacts = await asyncio.to_thread(
+            db.find_contact, from_name, 1, senders_only=True, folders=folders
+        )
+    return contacts[0]["email"] if contacts else None
 
 
 # Tail size for ``summarize_thread``'s recent-chunks fetch. The stored
@@ -2289,6 +2320,8 @@ def register_intelligence_tools(
         date_to: str | None = None,
         folders: list[str] | None = None,
         max_threads: int = 5,
+        from_name: str | None = None,
+        participant: str | None = None,
     ) -> CallToolResult:
         """
         Synthesize an answer from email threads — including the
@@ -2333,11 +2366,24 @@ def register_intelligence_tools(
         ("summarize vendor reimbursements"). Don't reword the user's
         prompt; pass it through as-is.
 
+        Questions about a PERSON ("who is Dana Example?", "what have I
+        discussed with Dana?"): call find_contact with the name first,
+        then pass the address of the person meant as ``participant``.
+        Retrieval ranks by message text, and a person named only in the
+        From / To / Cc headers of their threads is easily outranked by
+        other threads that mention the name in passing; the filter
+        keeps the evidence to the threads the person is actually on.
+        find_contact ranks contacts across all folders, Trash included,
+        so when you also pass ``folders`` its top address may have no
+        thread in them: if that returns nothing, try the next matching
+        contact, or pass the name itself as participant (it then matches
+        any participant with that name inside the folder scope).
+
         Args:
             question: Natural language question or topic phrase
-            from_addr: Optionally scope to a specific sender (canonical
-                       email; resolve via find_contact if you only
-                       have a name)
+            from_addr: Optionally scope to a sender ADDRESS or domain
+                       ("jane@example.com", "@example.com"). For a
+                       name, use ``from_name`` or ``participant``.
             date_from: Optionally scope to emails after this date (ISO 8601)
                        A thread qualifies when its span (its
                        messages' occurred_at, else sent_at) overlaps
@@ -2350,6 +2396,19 @@ def register_intelligence_tools(
                      threads filed only in Trash are left out; name
                      "Trash" to include them.
             max_threads: Maximum threads to use as context (default: 5)
+            from_name: Optionally scope to mail FROM a named person or
+                       role ("Jane Smith", "the accountant"), as in
+                       search_emails: resolved through find_contact
+                       to the most active matching sender's address
+                       and applied as ``from_addr``. Sender-only, so
+                       threads where the person only received mail are
+                       left out; use ``participant`` for those. If
+                       both are given, ``from_addr`` wins.
+            participant: Optionally scope to threads where this person
+                         appears in ANY role — sender, To, or Cc, as
+                         in search_emails. Accepts an address, a domain
+                         (@example.com), or a bare name fragment;
+                         prefer the address find_contact returns.
 
         Returns:
             A synthesized answer whose statements cite evidence labels
@@ -2369,6 +2428,8 @@ def register_intelligence_tools(
             {
                 "question": question,
                 "from_addr": from_addr,
+                "from_name": from_name,
+                "participant": participant,
                 "date_from": date_from,
                 "date_to": date_to,
                 "folders": folders,
@@ -2379,6 +2440,8 @@ def register_intelligence_tools(
         # ``max_threads=5000`` (or a non-numeric value) can't expand
         # into a massive prompt or raise before the try/except below.
         max_threads = clamp_ask_threads(max_threads)
+        from_name = blank_to_none(from_name)
+        participant = blank_to_none(participant)
         # Reject a bad date range before any provider or retrieval work.
         try:
             validate_date_range(date_from, date_to)
@@ -2387,6 +2450,26 @@ def register_intelligence_tools(
             raise ToolError(f"Error: {e}") from e
 
         try:
+            # ``from_name`` resolves to a sender address as in
+            # search_emails; an explicit ``from_addr`` wins. No match is
+            # an honest empty answer, never a search without the filter.
+            if from_name and not from_addr:
+                from_addr = await resolve_from_name(db, from_name, folders)
+                if from_addr is None:
+                    no_contact = (
+                        "No relevant emails found to answer your question "
+                        f"(no contact matched from_name={from_name!r})."
+                    )
+                    return tool_result(
+                        no_contact,
+                        AskMailboxOutput(
+                            answer=no_contact,
+                            citations=[],
+                            citation_problems=[],
+                            repair_attempted=False,
+                            threads=[],
+                        ),
+                    )
             # Retrieve relevant threads via hybrid search, with the
             # precise passages that drove ranking attached to each thread
             # rather than the truncated accumulated thread body.
@@ -2402,6 +2485,7 @@ def register_intelligence_tools(
                 date_from=date_from,
                 date_to=date_to,
                 reranker=reranker,
+                participant=participant,
             )
             count("results", len(results))
 
@@ -2677,6 +2761,8 @@ def register_intelligence_tools(
         date_from: str | None = None,
         date_to: str | None = None,
         limit: int = 20,
+        from_name: str | None = None,
+        participant: str | None = None,
     ) -> CallToolResult:
         """
         Extract structured data from indexed emails matching a query.
@@ -2691,6 +2777,15 @@ def register_intelligence_tools(
         statement can be extracted. For prose answers across threads
         use ask_mailbox; for one specific thread use summarize_thread
         or get_thread.
+
+        To extract from one PERSON's mail, call find_contact with the
+        name first and pass the address of the person meant as
+        ``participant`` (or ``from_name`` for mail they sent): ranking
+        by text alone misses threads that name the person only in their
+        headers. find_contact ranks contacts across all folders, Trash
+        included, so when you also pass ``folders`` its top address may
+        have no thread in them: if that returns nothing, try the next
+        matching contact, or pass the name itself as participant.
 
         Args:
             query: What to search for e.g. "invoices", "meeting confirmations"
@@ -2714,6 +2809,17 @@ def register_intelligence_tools(
                        outside the range.
             date_to: Optional date upper bound (ISO 8601)
             limit: Max threads to search through (default: 20)
+            from_name: Optionally scope to mail FROM a named person or
+                       role, as in search_emails: resolved through
+                       find_contact to the most active matching
+                       sender's address. Sender-only; use
+                       ``participant`` for threads the person only
+                       received.
+            participant: Optionally scope to threads where this person
+                         appears in ANY role — sender, To, or Cc, as
+                         in search_emails. Accepts an address, a domain
+                         (@example.com), or a bare name fragment;
+                         prefer the address find_contact returns.
 
         Returns:
             A JSON array of extracted records found in the available
@@ -2734,6 +2840,8 @@ def register_intelligence_tools(
                 "date_from": date_from,
                 "date_to": date_to,
                 "limit": limit,
+                "from_name": from_name,
+                "participant": participant,
             },
         )
         # Clamp to [1, _MAX_EXTRACT_LIMIT]. Structured extraction loops
@@ -2741,6 +2849,8 @@ def register_intelligence_tools(
         # ``limit`` would otherwise fan out into that many model calls
         # or raise before the try/except below.
         limit = clamp_int(limit, default=20, minimum=1, maximum=_MAX_EXTRACT_LIMIT)
+        from_name = blank_to_none(from_name)
+        participant = blank_to_none(participant)
         # Provenance would overwrite a requested field of the same name,
         # so such a schema is refused before any provider work (#329).
         # The message names only the fixed reserved names.
@@ -2759,6 +2869,24 @@ def register_intelligence_tools(
             raise ToolError(f"Error: {e}") from e
 
         try:
+            # ``from_name`` resolves to a sender address as in
+            # search_emails. No match is an honest empty result, never a
+            # search without the filter.
+            from_addr = None
+            if from_name:
+                from_addr = await resolve_from_name(db, from_name, folders)
+                if from_addr is None:
+                    return tool_result(
+                        f"No matching emails found (no contact matched from_name={from_name!r}).",
+                        ExtractFromEmailsOutput(
+                            records=[],
+                            citations=[],
+                            fields=[],
+                            citation_problems=[],
+                            notice=None,
+                            threads=[],
+                        ),
+                    )
             embedding = await embed_query(embed_client, query, expected_embed_dim)
             # ``with_evidence`` attaches the chunk(s) that ranked each
             # thread, so the per-thread extraction prompt below sees the
@@ -2771,8 +2899,10 @@ def register_intelligence_tools(
                 query_text=query,
                 query_embedding=embedding,
                 folders=folders,
+                from_addr=from_addr,
                 date_from=date_from,
                 date_to=date_to,
+                participant=participant,
                 limit=limit,
                 with_evidence=True,
                 reranker=reranker,

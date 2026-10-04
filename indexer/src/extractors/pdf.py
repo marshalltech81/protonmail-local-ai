@@ -32,6 +32,13 @@ the OCR-disabled sentinel, which is re-run once OCR is on. A PDF with
 usable digital text records ``pdf-digital`` even if some pages are
 scanned, and that row is not re-run when OCR is turned on later: its
 scanned pages stay unread until the next ``pdf`` version bump.
+
+Encrypted PDFs: ``pypdf`` opens an encrypted file with the empty user
+password, so an owner-password-only PDF (print / copy restrictions, no
+open password) extracts like any other; AES needs ``cryptography``
+(#691). No other password is ever tried. A PDF that needs a real open
+password raises ``FileNotDecryptedError`` when its pages are read, and
+the dispatcher records that as a ``failed`` row by type.
 """
 
 from __future__ import annotations

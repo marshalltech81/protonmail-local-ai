@@ -2374,7 +2374,7 @@ class TestPdfDigitalExtractor:
         )
 
         assert result.status == STATUS_FAILED
-        assert result.extractor == "pdf@2"
+        assert result.extractor == "pdf@3"
         assert result.text is None
         assert result.error == "RuntimeError"
 
@@ -2717,7 +2717,7 @@ class TestPdfPageLevelOcr:
         work = self._fake_ocr(monkeypatch, tmp_path)
         result = self._extract("ds")
         assert result.status == STATUS_SUCCESS
-        assert result.extractor == "pdf-ocr@2"
+        assert result.extractor == "pdf-ocr@3"
         assert result.text is not None
         assert self.DIGITAL.format(n=1) in result.text
         assert self.SCANNED in result.text
@@ -2756,13 +2756,13 @@ class TestPdfPageLevelOcr:
     def test_digital_pdf_renders_nothing(self, monkeypatch, tmp_path):
         work = self._fake_ocr(monkeypatch, tmp_path)
         result = self._extract("dd")
-        assert result.extractor == "pdf-digital@2"
+        assert result.extractor == "pdf-digital@3"
         assert work["renders"] == [] and work["ocr_calls"] == 0
 
     def test_scanned_pdf_still_ocrs_every_page_within_the_cap(self, monkeypatch, tmp_path):
         work = self._fake_ocr(monkeypatch, tmp_path)
         result = self._extract("sss")
-        assert result.extractor == "pdf-ocr@2"
+        assert result.extractor == "pdf-ocr@3"
         assert work["renders"] == [(1, 3)]
         assert work["ocr_calls"] == 3
 
@@ -2770,7 +2770,7 @@ class TestPdfPageLevelOcr:
         work = self._fake_ocr(monkeypatch, tmp_path)
         result = self._extract("ds", ocr_enabled=False)
         assert result.status == STATUS_SUCCESS
-        assert result.extractor == "pdf-digital@2"
+        assert result.extractor == "pdf-digital@3"
         assert work["renders"] == [] and work["ocr_calls"] == 0
 
     def test_ocr_failure_on_a_mixed_pdf_keeps_the_digital_text(self, monkeypatch, tmp_path, caplog):
@@ -2780,7 +2780,7 @@ class TestPdfPageLevelOcr:
         self._fake_ocr(monkeypatch, tmp_path, fail=True)
         result = self._extract("ds")
         assert result.status == STATUS_SUCCESS
-        assert result.extractor == "pdf-digital@2"
+        assert result.extractor == "pdf-digital@3"
         assert result.text == self.DIGITAL.format(n=1)
         assert "RuntimeError" in caplog.text
         assert "SYNTHETIC_OCR_MARKER" not in caplog.text
@@ -2907,21 +2907,127 @@ class TestPdfPageLevelOcr:
 
 
 class TestPdfExtractorVersion:
-    """#292 changes what the PDF extractor returns for the same bytes, so
-    rows it wrote before the fix (unversioned) must be re-extracted."""
+    """#292 changed what the PDF extractor returns for the same bytes, and
+    #691 makes AES-encrypted PDFs that need no open password extract
+    instead of failing, so rows written before either must re-extract."""
 
-    @pytest.mark.parametrize("name", ["pdf-digital", "pdf-ocr", "pdf"])
+    @pytest.mark.parametrize(
+        "name", ["pdf-digital", "pdf-ocr", "pdf", "pdf-digital@2", "pdf-ocr@2", "pdf@2"]
+    )
     def test_pre_bump_pdf_rows_are_stale(self, name):
         from src.extractors import EXTRACTOR_VERSIONS, stale_extractor_module
 
-        assert EXTRACTOR_VERSIONS["pdf"] == 2
+        assert EXTRACTOR_VERSIONS["pdf"] == 3
         assert stale_extractor_module(name) == "pdf"
 
-    @pytest.mark.parametrize("name", ["pdf-digital@2", "pdf-ocr@2", "pdf@2"])
+    @pytest.mark.parametrize("name", ["pdf-digital@3", "pdf-ocr@3", "pdf@3"])
     def test_current_pdf_rows_are_not_stale(self, name):
         from src.extractors import stale_extractor_module
 
         assert stale_extractor_module(name) is None
+
+
+def _encrypted_pdf(text: str, *, user_password: str, algorithm: str) -> bytes:
+    """A one-page digital PDF encrypted with pypdf. An empty
+    ``user_password`` is the owner-password-only shape (print/copy
+    restrictions, no open password)."""
+    import io
+
+    from pypdf import PdfWriter
+    from pypdf.generic import ContentStream, DictionaryObject, NameObject
+
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=612, height=792)
+    stream = ContentStream(None, writer)
+    stream._data = f"BT /F1 12 Tf 72 720 Td ({text}) Tj ET".encode()
+    page[NameObject("/Contents")] = stream
+    font = DictionaryObject(
+        {
+            NameObject("/Type"): NameObject("/Font"),
+            NameObject("/Subtype"): NameObject("/Type1"),
+            NameObject("/BaseFont"): NameObject("/Helvetica"),
+        }
+    )
+    page[NameObject("/Resources")] = DictionaryObject(
+        {NameObject("/Font"): DictionaryObject({NameObject("/F1"): font})}
+    )
+    writer.encrypt(
+        user_password=user_password,
+        owner_password="synthetic-owner-password",  # pragma: allowlist secret
+        algorithm=algorithm,
+    )
+    buf = io.BytesIO()
+    writer.write(buf)
+    return buf.getvalue()
+
+
+class TestEncryptedPdf:
+    """#691: pypdf needs ``cryptography`` for AES. An owner-password-only
+    PDF opens with the empty user password and extracts like any other;
+    one that needs a real open password is recorded as a failure by type,
+    and no password is ever guessed."""
+
+    # Long enough to clear the digital-text floor, so OCR never runs.
+    MARKER = "SYNTHETIC_OWNER_ONLY_MARKER with enough digital text to clear the floor"
+
+    @pytest.mark.parametrize("algorithm", ["AES-128", "AES-256", "RC4-128"])
+    def test_owner_password_only_pdf_extracts(self, algorithm, monkeypatch):
+        from src.extractors import pdf
+
+        monkeypatch.setattr(pdf, "_extract_ocr", lambda *a, **kw: pytest.fail("OCR must not run"))
+        payload = _encrypted_pdf(self.MARKER, user_password="", algorithm=algorithm)
+
+        result = extract(content_type="application/pdf", filename="statement.pdf", payload=payload)
+
+        assert result.status == STATUS_SUCCESS
+        assert result.extractor == "pdf-digital@3"
+        assert result.text == self.MARKER
+
+    @pytest.mark.parametrize("algorithm", ["AES-128", "AES-256"])
+    def test_pdf_needing_an_open_password_fails_by_type(self, algorithm, monkeypatch, caplog):
+        from src.extractors import pdf
+
+        caplog.set_level("DEBUG")
+        monkeypatch.setattr(pdf, "_extract_ocr", lambda *a, **kw: pytest.fail("OCR must not run"))
+        payload = _encrypted_pdf(
+            "SYNTHETIC_USER_PW_MARKER with enough digital text to clear the floor",
+            user_password="SYNTHETIC_USER_PASSWORD",  # pragma: allowlist secret
+            algorithm=algorithm,
+        )
+
+        result = extract(content_type="application/pdf", filename="locked.pdf", payload=payload)
+
+        assert result.status == STATUS_FAILED
+        assert result.extractor == "pdf@3"
+        assert result.error == "FileNotDecryptedError"
+        assert result.text is None
+        for marker in ("SYNTHETIC_USER_PW_MARKER", "SYNTHETIC_USER_PASSWORD", "synthetic-owner"):
+            assert marker not in caplog.text
+            assert marker not in (result.error or "")
+
+    def test_only_the_empty_user_password_is_tried(self, monkeypatch):
+        """No password guessing: the reader is opened with no password
+        (pypdf then tries the empty one) and never ``decrypt``ed."""
+        import pypdf
+        from src.extractors import pdf
+
+        opened: list[dict] = []
+
+        class RecordingReader(pypdf.PdfReader):
+            def __init__(self, stream, *args, **kwargs):
+                opened.append(dict(kwargs, args=args))
+                super().__init__(stream, *args, **kwargs)
+
+            def decrypt(self, password):
+                pytest.fail("the extractor must not try passwords")
+
+        monkeypatch.setattr(pdf.pypdf, "PdfReader", RecordingReader)
+        payload = _encrypted_pdf(self.MARKER, user_password="SYNTHETIC_PW", algorithm="AES-256")
+
+        result = extract(content_type="application/pdf", filename="locked.pdf", payload=payload)
+
+        assert result.status == STATUS_FAILED
+        assert opened == [{"args": ()}]
 
 
 class TestImageExtractor:
@@ -3099,7 +3205,7 @@ class TestMultipageTiff:
         assert result.status == STATUS_SUCCESS
         assert result.text is not None
         assert result.text.split() == ["PAGE_0", "PAGE_1", "PAGE_2"]
-        assert result.extractor == "image-ocr@2"
+        assert result.extractor == "image-ocr@3"
 
     def test_pages_are_capped_by_max_ocr_pages(self, monkeypatch):
         seen = self._ocr_by_color(monkeypatch)
@@ -3362,3 +3468,404 @@ class TestMailContentStaysOutOfLogsAndErrors:
         assert "PDF OCR fallback failed" in caplog.text
         self._assert_absent("SYNTHETIC_OCR_MARKER", caplog, result)
         self._assert_absent("SYNTHETIC_FILENAME_MARKER", caplog, result)
+
+
+@pytest.fixture
+def library_logger_levels():
+    """Start the pypdf and PIL loggers at NOTSET and restore their levels
+    afterwards, so a test can show the library logs before the guard
+    runs. ``setLevel`` (not attribute assignment) clears the logging
+    module's per-logger level cache."""
+    import logging
+
+    loggers = [logging.getLogger(name) for name in ("pypdf", "PIL")]
+    saved = [logger.level for logger in loggers]
+    for logger in loggers:
+        logger.setLevel(logging.NOTSET)
+    yield
+    for logger, level in zip(loggers, saved, strict=True):
+        logger.setLevel(level)
+
+
+def _pdf_with_marker_font() -> bytes:
+    """A one-page digital PDF whose font names a marker base font and a
+    marker encoding pypdf does not implement, so pypdf's ``_cmap`` logger
+    reports the encoding name it read from the document."""
+    import io
+
+    from pypdf import PdfWriter
+    from pypdf.generic import ContentStream, DictionaryObject, NameObject
+
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=612, height=792)
+    stream = ContentStream(None, writer)
+    stream._data = b"BT /F1 12 Tf 72 720 Td (Invoice number 42 with enough digital text) Tj ET"
+    page[NameObject("/Contents")] = stream
+    font = DictionaryObject(
+        {
+            NameObject("/Type"): NameObject("/Font"),
+            NameObject("/Subtype"): NameObject("/Type1"),
+            NameObject("/BaseFont"): NameObject("/MARKER690+Helvetica"),
+            NameObject("/Encoding"): NameObject("/MARKER690Encoding"),
+        }
+    )
+    page[NameObject("/Resources")] = DictionaryObject(
+        {NameObject("/Font"): DictionaryObject({NameObject("/F1"): font})}
+    )
+    buf = io.BytesIO()
+    writer.write(buf)
+    return buf.getvalue()
+
+
+def _xlsx_with_out_of_range_date() -> bytes:
+    """A workbook whose date-formatted cell holds a serial value outside
+    the date range, so openpyxl warns with the value it read."""
+    import io
+
+    import openpyxl
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws["A1"] = 987654321690.0
+    ws["A1"].number_format = "yyyy-mm-dd"
+    ws["A2"] = "hello"
+    buf = io.BytesIO()
+    wb.save(buf)
+    wb.close()
+    return buf.getvalue()
+
+
+def _tiff_with_bad_tag_count() -> bytes:
+    """A TIFF whose ImageWidth tag has two entries: Pillow warns with the
+    tag number and the count read from the file, then fails to open it."""
+    import struct
+
+    entries = [(256, 3, 2, 0), (257, 3, 1, 10), (258, 3, 1, 8), (262, 3, 1, 1)]
+    ifd = struct.pack("<H", len(entries))
+    for tag, typ, count, value in entries:
+        ifd += struct.pack("<HHII", tag, typ, count, value)
+    data = b"II*\x00" + struct.pack("<I", 8) + ifd + b"\x00\x00\x00\x00"
+    return data.ljust(300, b"\x00")
+
+
+class TestDocumentLibraryOutputIsSilenced:
+    """#690: pypdf, Pillow and openpyxl log or warn with values read from
+    the document (font dictionaries, encoding names, cell values, TIFF
+    tags). The indexer's logging setup silences them; the dispatcher's
+    own fixed-text logging and ``failed`` status still report outcomes.
+
+    Each test first runs the extraction without the guard to show the
+    library does emit the document value, then with it."""
+
+    XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+    def test_logging_setup_raises_library_logger_levels(self):
+        import importlib
+        import logging
+
+        # The module-level setup runs when ``src.main`` is imported.
+        importlib.import_module("src.main")
+        assert logging.getLogger("pypdf").level == logging.CRITICAL
+        assert logging.getLogger("PIL").level == logging.CRITICAL
+
+    def test_pypdf_document_values_stay_out_of_the_log(self, caplog, library_logger_levels):
+        import warnings
+
+        from src import main
+
+        payload = _pdf_with_marker_font()
+        caplog.set_level("DEBUG")
+        before = extract(content_type="application/pdf", filename="a.pdf", payload=payload)
+        assert "MARKER690" in caplog.text
+        assert "pypdf._cmap" in caplog.text
+
+        caplog.clear()
+        with warnings.catch_warnings():
+            main.quiet_document_libraries()
+            after = extract(content_type="application/pdf", filename="a.pdf", payload=payload)
+
+        assert after == before
+        assert after.status == STATUS_SUCCESS
+        assert after.text == "Invoice number 42 with enough digital text"
+        assert "MARKER690" not in caplog.text
+        assert "pypdf" not in caplog.text
+        assert "Advanced encoding" not in caplog.text
+
+    def test_openpyxl_cell_values_stay_out_of_warnings(self):
+        import warnings
+
+        from src import main
+
+        payload = _xlsx_with_out_of_range_date()
+        with warnings.catch_warnings(record=True) as control:
+            warnings.simplefilter("always")
+            before = extract(content_type=self.XLSX, filename="a.xlsx", payload=payload)
+        assert any("987654321690" in str(w.message) for w in control)
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            main.quiet_document_libraries()
+            after = extract(content_type=self.XLSX, filename="a.xlsx", payload=payload)
+
+        assert after == before
+        assert after.status == STATUS_SUCCESS
+        assert not [w for w in caught if "987654321690" in str(w.message)]
+        assert not [w for w in caught if "openpyxl" in w.filename]
+
+    def test_pillow_tag_values_stay_out_and_failure_still_surfaces(
+        self, caplog, library_logger_levels
+    ):
+        import warnings
+
+        from src import main
+
+        payload = _tiff_with_bad_tag_count()
+        caplog.set_level("DEBUG")
+        with warnings.catch_warnings(record=True) as control:
+            warnings.simplefilter("always")
+            before = extract(content_type="image/tiff", filename="a.tiff", payload=payload)
+        assert any("Metadata Warning" in str(w.message) for w in control)
+
+        caplog.clear()
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            main.quiet_document_libraries()
+            after = extract(content_type="image/tiff", filename="a.tiff", payload=payload)
+
+        assert after == before
+        # The failure is still reported, by the dispatcher's own
+        # fixed-text log line and status, not by the silenced library.
+        assert after.status == STATUS_FAILED
+        assert after.error == "UnidentifiedImageError"
+        assert "UnidentifiedImageError" in caplog.text
+        assert not [w for w in caught if "Metadata Warning" in str(w.message)]
+        assert not [w for w in caught if "/PIL/" in w.filename]
+
+    def test_decompression_bomb_still_fails_under_the_guard(self, monkeypatch):
+        """The image extractor promotes ``DecompressionBombWarning`` to an
+        error in its own ``catch_warnings`` scope; the guard's Pillow
+        ``ignore`` filter must not swallow it."""
+        import io
+        import warnings
+
+        from PIL import Image
+        from src import main
+
+        monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 1500)
+        buf = io.BytesIO()
+        Image.new("RGB", (50, 50), color="white").save(buf, format="PNG")
+
+        with warnings.catch_warnings():
+            main.quiet_document_libraries()
+            result = extract(content_type="image/png", filename="a.png", payload=buf.getvalue())
+
+        assert result.status == STATUS_FAILED
+        assert result.error == "DecompressionBombWarning"
+
+
+def _heic(size: tuple[int, int] = (64, 48), color: str = "red") -> bytes:
+    """A synthetic HEIC, encoded with the libheif bundled in pillow-heif."""
+    import io
+
+    import pillow_heif
+    from PIL import Image
+
+    buf = io.BytesIO()
+    pillow_heif.from_pillow(Image.new("RGB", size, color)).save(buf, quality=90)
+    return buf.getvalue()
+
+
+def _png(size: tuple[int, int] = (64, 48), color: str = "red") -> bytes:
+    import io
+
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.new("RGB", size, color).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+class TestHeicImages:
+    """#691: iPhone HEIC/HEIF photos open through pillow-heif's Pillow
+    plugin and go through exactly the guards every other image does: the
+    dispatcher's byte cap, the process-wide pixel cap and decompression-bomb
+    handling, and the OCR page and time bounds."""
+
+    @pytest.mark.parametrize(
+        ("content_type", "filename"),
+        [
+            ("image/heic", "IMG_0001.HEIC"),
+            ("image/heif", "photo.heif"),
+            ("application/octet-stream", "IMG_0001.heic"),
+            ("application/octet-stream", "photo.HEIF"),
+            ("", "photo.heic"),
+            # Review round 1: ``.hif`` (Canon / Fujifilm cameras) is a
+            # still HEIF that pillow-heif registers too.
+            ("application/octet-stream", "IMG_0001.HIF"),
+            ("", "photo.hif"),
+        ],
+    )
+    def test_heic_routes_to_the_image_extractor(self, content_type, filename):
+        from src.extractors import resolved_extractor_module
+
+        assert resolved_extractor_module(content_type, filename) == "image"
+
+    @pytest.mark.parametrize("filename", ["burst.heics", "burst.heifs"])
+    def test_heif_sequence_extensions_are_not_routed(self, filename):
+        """``.heics`` / ``.heifs`` are image sequences (track-based, often
+        with no still primary image). They are not routed by extension; a
+        sequence sent with an ``image/`` MIME type still reaches the image
+        extractor, which reads at most its primary image."""
+        from src.extractors import resolved_extractor_module
+
+        assert resolved_extractor_module("application/octet-stream", filename) is None
+        assert resolved_extractor_module("image/heic-sequence", filename) == "image"
+
+    def test_extension_dispatch_covers_every_still_heif_extension_pillow_registers(self):
+        from PIL import Image
+        from src.extractors import (
+            _EXT_DISPATCH,
+            image,  # noqa: F401 - registers the opener
+        )
+
+        heif = {ext for ext, fmt in Image.registered_extensions().items() if fmt == "HEIF"}
+        sequences = {".heics", ".heifs"}
+        assert sequences <= heif
+        assert {ext for ext in heif - sequences if _EXT_DISPATCH.get(ext) != "image"} == set()
+
+    def test_heic_photo_is_decoded_and_ocrd(self, monkeypatch):
+        from src.extractors import image as image_module
+
+        seen: list[tuple[tuple[int, int], tuple[int, int, int]]] = []
+
+        def fake_ocr(img, **kwargs):
+            rgb = img.convert("RGB")
+            seen.append((rgb.size, rgb.getpixel((32, 24))))
+            assert kwargs == {"timeout": 7.0}
+            return "SYNTHETIC_HEIC_TEXT"
+
+        monkeypatch.setattr(image_module.pytesseract, "image_to_string", fake_ocr)
+
+        result = extract(
+            content_type="application/octet-stream",
+            filename="IMG_0001.HEIC",
+            payload=_heic(),
+            ocr_timeout_seconds=7,
+        )
+
+        assert result.status == STATUS_SUCCESS
+        assert result.extractor == "image-ocr@3"
+        assert result.text == "SYNTHETIC_HEIC_TEXT"
+        # One page OCR'd, decoded at its real size and (lossy) colour.
+        assert len(seen) == 1
+        size, (r, g, b) = seen[0]
+        assert size == (64, 48)
+        assert r > 200 and g < 60 and b < 60
+
+    @pytest.mark.parametrize(
+        ("make", "content_type"), [(_png, "image/png"), (_heic, "image/heic")], ids=["png", "heic"]
+    )
+    def test_oversized_payload_is_skipped_before_decoding(self, make, content_type, monkeypatch):
+        from src.extractors import image as image_module
+
+        monkeypatch.setattr(
+            image_module.pytesseract,
+            "image_to_string",
+            lambda *a, **kw: pytest.fail("an oversized image must not be OCR'd"),
+        )
+        payload = make()
+
+        result = extract(
+            content_type=content_type,
+            filename="photo",
+            payload=payload,
+            max_bytes=len(payload) - 1,
+        )
+
+        assert result.status == STATUS_TOO_LARGE
+        assert result.extractor is None
+
+    @pytest.mark.parametrize(
+        ("cap", "error"),
+        [(1500, "DecompressionBombWarning"), (100, "DecompressionBombError")],
+    )
+    def test_pixel_bomb_heic_fails_like_a_png_without_decoding(self, cap, error, monkeypatch):
+        """50x50 = 2500 pixels: 1.67x a 1500 cap is the warning band the
+        extractor promotes to an error, 25x a 100 cap is Pillow's hard
+        error. Both reject from the header size, before any HEVC decode."""
+        from PIL import Image
+        from pillow_heif.as_plugin import HeifImageFile
+        from src.extractors import image as image_module
+
+        payloads = {"png": _png((50, 50)), "heic": _heic((50, 50))}
+        decodes: list[int] = []
+        real_load = HeifImageFile.load
+
+        def counting_load(self):
+            decodes.append(1)
+            return real_load(self)
+
+        monkeypatch.setattr(HeifImageFile, "load", counting_load)
+        monkeypatch.setattr(
+            image_module.pytesseract,
+            "image_to_string",
+            lambda *a, **kw: pytest.fail("a pixel bomb must not be OCR'd"),
+        )
+        monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", cap)
+
+        results = {
+            kind: extract(content_type=f"image/{kind}", filename=f"a.{kind}", payload=payload)
+            for kind, payload in payloads.items()
+        }
+
+        assert results["heic"] == results["png"]
+        assert results["heic"].status == STATUS_FAILED
+        assert results["heic"].error == error
+        assert results["heic"].extractor == "image@3"
+        assert decodes == []
+
+    def test_only_the_primary_heif_image_is_ocrd(self, monkeypatch):
+        """A HEIF holding several top-level images is not a TIFF: like an
+        animated GIF, only the primary image is read, so the OCR work per
+        file stays one page."""
+        import io
+
+        import pillow_heif
+        from PIL import Image
+        from src.extractors import image as image_module
+
+        heif = pillow_heif.from_pillow(Image.new("RGB", (32, 32), "red"))
+        for color in ("green", "blue"):
+            heif.add_from_pillow(Image.new("RGB", (32, 32), color))
+        buf = io.BytesIO()
+        heif.save(buf)
+        calls: list[int] = []
+
+        def fake_ocr(img, **kwargs):
+            calls.append(1)
+            return "page"
+
+        monkeypatch.setattr(image_module.pytesseract, "image_to_string", fake_ocr)
+
+        result = extract(content_type="image/heif", filename="burst.heif", payload=buf.getvalue())
+
+        assert result.status == STATUS_SUCCESS
+        assert calls == [1]
+
+    def test_auxiliary_heif_images_are_not_decoded(self):
+        """Only the HEIF opener is registered, with thumbnails, depth and
+        auxiliary images off, so a photo's extra images cost no decode."""
+        import pillow_heif
+        from src.extractors import image  # noqa: F401 - registers the opener
+
+        assert pillow_heif.options.THUMBNAILS is False
+        assert pillow_heif.options.DEPTH_IMAGES is False
+        assert pillow_heif.options.AUX_IMAGES is False
+
+    def test_image_version_3_rows_are_current(self):
+        from src.extractors import EXTRACTOR_VERSIONS, stale_extractor_module
+
+        assert EXTRACTOR_VERSIONS["image"] == 3
+        assert stale_extractor_module("image@2") == "image"
+        assert stale_extractor_module("image-ocr@2") == "image"
+        assert stale_extractor_module("image-ocr@3") is None

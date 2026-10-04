@@ -32,6 +32,7 @@ import sqlite3
 import threading
 import time
 import urllib.parse
+import warnings
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -105,6 +106,25 @@ logging.basicConfig(
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
 )
 log = logging.getLogger("indexer")
+
+
+def quiet_document_libraries() -> None:
+    """Keep third-party document parsers' per-document output out of the log.
+
+    pypdf and Pillow log, and openpyxl and Pillow warn, with values read
+    from the attachment: font dictionaries, encoding names, cell values,
+    TIFF tags (#690). The extractors' own fixed-text logging and the
+    ``attachment_extractions`` status still report every outcome. The
+    image extractor's ``DecompressionBombWarning``-to-error filter is set
+    inside its own ``catch_warnings`` scope, so it still takes precedence.
+    """
+    for name in ("pypdf", "PIL"):
+        logging.getLogger(name).setLevel(logging.CRITICAL)
+    for package in ("openpyxl", "PIL"):
+        warnings.filterwarnings("ignore", module=rf"{package}(\.|$)")
+
+
+quiet_document_libraries()
 
 MAILDIR_PATH = Path(os.environ.get("MAILDIR_PATH", "/maildir"))
 SQLITE_PATH = Path(os.environ.get("SQLITE_PATH", "/data/mail.db"))
@@ -265,7 +285,8 @@ def _int_env(name: str, default: int, minimum: int = 1) -> int:
 # ``/v1/embeddings`` HTTP call. Larger batches amortize per-request
 # overhead — meaningful for remote providers, marginal for a host-side
 # server on loopback. The provider's own per-request input cap is the
-# upper bound (DeepInfra accepts 100; OpenAI accepts 2048).
+# upper bound (DeepInfra accepts 1024, per the ``input`` maxLength in
+# its OpenAI-compatible embeddings API reference; OpenAI accepts 2048).
 EMBED_BATCH_SIZE = _int_env("EMBED_BATCH_SIZE", 64)
 
 
@@ -1774,7 +1795,10 @@ def _requeue_stale_extractions(db: Database, queue: IndexingQueue) -> int:
     they all indexed the shared stale text. An "OCR disabled" row has no
     extractor to refresh it from another occurrence, so only messages
     whose own occurrence re-runs extraction are re-queued; the re-run
-    replaces the row, which keeps that once-only too. Like the zero-vector
+    replaces the row, which keeps that once-only too. The same holds for
+    a "no extractor" row whose occurrence's MIME type or filename now
+    selects one, as when a release starts routing an extension such as
+    ``.heic`` (#691); that does not depend on OCR. Like the zero-vector
     recovery sweep, files already queued or dead-lettered are left
     alone. Skipped entirely when attachment extraction is disabled,
     since the drain would not re-stamp the rows. Returns the number of
@@ -1788,6 +1812,13 @@ def _requeue_stale_extractions(db: Database, queue: IndexingQueue) -> int:
         if is_stale_extractor(name, ocr_enabled=INDEXER_OCR_ENABLED)
     ]
     filepaths = set(db.find_filepaths_with_extractors(stale))
+    # For a "no extractor" row the predicate is only "this occurrence now
+    # selects an extractor"; the OCR setting plays no part in it.
+    filepaths.update(
+        row["filepath"]
+        for row in db.find_no_extractor_attachments()
+        if reruns_once_ocr_is_on(row["extraction_error"], row["content_type"], row["filename"])
+    )
     if INDEXER_OCR_ENABLED:
         filepaths.update(
             row["filepath"]
@@ -1803,7 +1834,7 @@ def _requeue_stale_extractions(db: Database, queue: IndexingQueue) -> int:
     if re_enqueued:
         log.info(
             "re-queued %d message(s) whose attachments were extracted by an older "
-            "extractor version (%s) or skipped while OCR was off.",
+            "extractor version (%s), skipped while OCR was off, or had no extractor.",
             re_enqueued,
             ", ".join(sorted(stale)) or "none",
         )
@@ -1996,7 +2027,12 @@ def _validate_embedding_dim(embedder: EmbeddingBackend) -> None:
     ``upsert_thread`` with a cryptic sqlite-vec error. Fail fast at
     startup with a clear, actionable message instead.
     """
-    probe = embedder.embed("dimension probe")
+    try:
+        probe = embedder.embed("dimension probe")
+    except Exception as exc:
+        # The SDK error carries the provider's response body; exit with
+        # type + status only, like the calibration request (#686).
+        raise SystemExit(f"Embedder dimension probe failed: {scrub_embed_error(exc)}") from None
     if len(probe) != EMBEDDING_DIM:
         raise SystemExit(
             f"Embedder produced {len(probe)}-dim vectors, but the SQLite "

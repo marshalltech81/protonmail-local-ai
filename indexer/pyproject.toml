@@ -26,9 +26,11 @@ dependencies = [
     # there means a missing one downgrades to ``unsupported`` rather
     # than crashing the indexer.
     "pypdf==6.19.0",               # digital PDF text layer
+    "cryptography==50.0.2",        # pypdf AES decryption (owner-password-only PDFs)
     "pdf2image==1.17.0",           # render PDF pages → PIL.Image (needs Poppler)
     "pytesseract==0.3.13",         # OCR via Tesseract binary
     "pillow==12.3.0",              # image loading + EXIF rotation for OCR
+    "pillow-heif==1.8.0",          # HEIC/HEIF opener for Pillow (bundles libheif + libde265)
     "python-docx==1.2.0",          # DOCX paragraph + table walk
     "openpyxl==3.1.5",             # XLSX read-only workbook walk
     "defusedxml==0.7.1",           # XML-bomb defense for python-docx + openpyxl

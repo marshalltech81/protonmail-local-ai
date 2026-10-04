@@ -956,3 +956,259 @@ class TestFailuresAreErrorResults:
         for tool in ("ask_mailbox", "extract_from_emails"):
             result = _wire_call(seeded_db, FakeInferenceClient(), tool, _TOOL_ARGS[tool])
             assert not result.is_error
+
+
+# --- person filters (#696) ------------------------------------------------
+#
+# A synthetic person, "Dana Example <dana@example.com>", is named only in
+# the headers of her two threads: she sent one and only received the
+# other. Two unrelated threads mention "Dana" in their bodies and sit on
+# the query vector, so without a filter they are the evidence a person
+# question gets.
+
+_DANA = "Dana Example <dana@example.com>"
+_ME = "Sam Rivera <sam@home.example>"
+_HAZEL = "Hazel Quinn <hazel@bakery.example>"
+_DESK = "Front Desk <desk@gym.example>"
+_DANA_THREADS = {"t-dana-sent", "t-dana-received"}
+_DISTRACTOR_TEXT = "Dana at the counter will have the cake boxed by noon"
+
+
+@pytest.fixture
+def person_db(tmp_path):
+    import sqlite3
+
+    import sqlite_vec
+    from src.lib.sqlite import Database
+
+    from tests.conftest import _build_schema, _insert_chunk, _insert_thread
+
+    db_path = tmp_path / "person.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.enable_load_extension(True)
+    sqlite_vec.load(conn)
+    conn.enable_load_extension(False)
+    _build_schema(conn)
+    threads = [
+        # (thread_id, participants, senders, body, embedding)
+        ("t-dana-sent", [_DANA, _ME], [_DANA], "revised figures attached", [0.0, 0.0, 0.0, 1.0]),
+        ("t-dana-received", [_ME, _DANA], [_ME], "see you thursday", [0.0, 0.0, 1.0, 0.0]),
+        ("t-bakery", [_HAZEL, _ME], [_HAZEL], _DISTRACTOR_TEXT, [1.0, 0.0, 0.0, 0.0]),
+        ("t-gym", [_DESK, _ME], [_DESK], "Dana at the desk takes card payments", [0.9, 0.1, 0, 0]),
+    ]
+    for thread_id, participants, senders, body, embedding in threads:
+        _insert_thread(
+            conn,
+            thread_id=thread_id,
+            subject=f"subject of {thread_id}",
+            participants=participants,
+            senders=senders,
+            body_text=body,
+            snippet=body,
+            embedding=embedding,
+        )
+        _insert_chunk(
+            conn,
+            chunk_id=f"{thread_id}-c0",
+            message_id=thread_id,
+            thread_id=thread_id,
+            text=body,
+            embedding=embedding,
+        )
+    conn.close()
+    return Database(str(db_path))
+
+
+def _person_call(fake_server, db, inference, tool: str, **kwargs):
+    handlers = _handlers(fake_server, db, FakeEmbedClient(), inference)
+    if tool == "ask_mailbox":
+        args: dict = {"question": "Who is Dana Example?"}
+    else:
+        args = {"query": "Who is Dana Example?", "schema": {"role": "string"}}
+    return asyncio.run(handlers[tool](**args, **kwargs))
+
+
+def _searched(out) -> set[str]:
+    return {t["thread_id"] for t in out.structured_content["threads"]}
+
+
+_PERSON_TOOLS = ["ask_mailbox", "extract_from_emails"]
+
+
+class TestPersonFilters:
+    """``participant`` and ``from_name`` on ``ask_mailbox`` and
+    ``extract_from_emails`` (#696), with ``search_emails``' semantics."""
+
+    @pytest.mark.parametrize("tool", _PERSON_TOOLS)
+    def test_unfiltered_question_reaches_the_distractors(self, fake_server, person_db, tool):
+        # The premise: without a filter the body mentions are the evidence.
+        out = _person_call(fake_server, person_db, FakeInferenceClient(response="null"), tool)
+        assert {"t-bakery", "t-gym"} <= _searched(out)
+
+    @pytest.mark.parametrize("tool", _PERSON_TOOLS)
+    def test_participant_restricts_evidence_to_the_persons_threads(
+        self, fake_server, person_db, tool
+    ):
+        llm = FakeInferenceClient(response="null")
+        out = _person_call(fake_server, person_db, llm, tool, participant="dana@example.com")
+        # Both of her threads, including the one she only received.
+        assert _searched(out) == _DANA_THREADS
+        prompts = "\n".join(user for _system, user in llm.complete_calls)
+        assert _DISTRACTOR_TEXT not in prompts
+        assert "see you thursday" in prompts
+
+    @pytest.mark.parametrize("tool", _PERSON_TOOLS)
+    def test_from_name_resolves_to_a_sender_through_find_contact(
+        self, fake_server, person_db, tool
+    ):
+        lookups: list = []
+        original = person_db.find_contact
+
+        def spy(query, limit, *, senders_only=False, folders=None):
+            lookups.append((query, limit, senders_only, folders))
+            return original(query, limit, senders_only=senders_only, folders=folders)
+
+        person_db.find_contact = spy  # type: ignore[assignment]
+        out = _person_call(
+            fake_server, person_db, FakeInferenceClient(response="null"), tool, from_name="Dana"
+        )
+        assert lookups == [("Dana", 1, True, None)]
+        # Sender-only, as in search_emails: the thread she only received is out.
+        assert _searched(out) == {"t-dana-sent"}
+
+    @pytest.mark.parametrize("tool", _PERSON_TOOLS)
+    def test_from_name_resolves_over_the_folder_scope(self, fake_server, person_db, tool):
+        seen: dict = {}
+        original = person_db.find_contact
+
+        def spy(query, limit, *, senders_only=False, folders=None):
+            seen["folders"] = folders
+            return original(query, limit, senders_only=senders_only, folders=folders)
+
+        person_db.find_contact = spy  # type: ignore[assignment]
+        _person_call(
+            fake_server,
+            person_db,
+            FakeInferenceClient(response="null"),
+            tool,
+            from_name="Dana",
+            folders=["INBOX"],
+        )
+        assert seen["folders"] == ["INBOX"]
+
+    @pytest.mark.parametrize("tool", _PERSON_TOOLS)
+    def test_unmatched_from_name_returns_empty_without_inference(
+        self, fake_server, person_db, tool
+    ):
+        llm = FakeInferenceClient()
+        out = _person_call(fake_server, person_db, llm, tool, from_name="zzznosuchcontact")
+        text = _all_text(out)
+        assert "no contact matched from_name" in text
+        assert "zzznosuchcontact" in text
+        assert out.structured_content["threads"] == []
+        assert llm.complete_calls == []
+
+    def test_ask_mailbox_explicit_from_addr_wins_over_from_name(self, fake_server, person_db):
+        called: list = []
+        person_db.find_contact = lambda *a, **_k: called.append(a) or []  # type: ignore[assignment]
+        out = _person_call(
+            fake_server,
+            person_db,
+            FakeInferenceClient(response="null"),
+            "ask_mailbox",
+            from_addr="dana@example.com",
+            from_name="Hazel",
+        )
+        assert called == []
+        assert _searched(out) == {"t-dana-sent"}
+
+    @pytest.mark.parametrize("tool", _PERSON_TOOLS)
+    def test_lookup_failure_is_a_tool_error(self, fake_server, person_db, tool):
+        def boom(_query, _limit, *, senders_only=False, folders=None):
+            raise RuntimeError("simulated find_contact failure")
+
+        person_db.find_contact = boom  # type: ignore[assignment]
+        llm = FakeInferenceClient()
+        with pytest.raises(ToolError):
+            _person_call(fake_server, person_db, llm, tool, from_name="Dana")
+        assert llm.complete_calls == []
+
+    @pytest.mark.parametrize("tool", _PERSON_TOOLS)
+    @pytest.mark.parametrize("blank", ["", " ", "\t"])
+    def test_blank_person_filters_are_absent(self, fake_server, person_db, tool, blank):
+        # Review round 1 (#702): a client that sends unset optionals as
+        # whitespace must not filter on a substring " " or look up " ".
+        called: list = []
+        person_db.find_contact = lambda *a, **_k: called.append(a) or []  # type: ignore[assignment]
+        captured: dict = {}
+        original = person_db.hybrid_search
+
+        def spy(**kwargs):
+            captured.update(kwargs)
+            return original(**kwargs)
+
+        person_db.hybrid_search = spy  # type: ignore[assignment]
+        _person_call(
+            fake_server,
+            person_db,
+            FakeInferenceClient(response="null"),
+            tool,
+            participant=blank,
+            from_name=blank,
+        )
+        assert called == []
+        assert captured["participant"] is None
+        assert captured.get("from_addr") is None
+
+    @pytest.mark.parametrize("tool", _PERSON_TOOLS)
+    @pytest.mark.parametrize(
+        "padded", ["  Dana Example  ", " dana@example.com ", "\t@example.com "]
+    )
+    def test_padded_participant_is_stripped(self, fake_server, person_db, tool, padded):
+        # Review round 2 (#702): the substring fallback used the padded
+        # value, so " Dana Example " matched no participant string.
+        out = _person_call(
+            fake_server, person_db, FakeInferenceClient(response="null"), tool, participant=padded
+        )
+        assert _searched(out) == _DANA_THREADS
+
+    @pytest.mark.parametrize("tool", _PERSON_TOOLS)
+    def test_padded_from_name_is_stripped(self, fake_server, person_db, tool):
+        lookups: list = []
+        original = person_db.find_contact
+
+        def spy(query, limit, *, senders_only=False, folders=None):
+            lookups.append(query)
+            return original(query, limit, senders_only=senders_only, folders=folders)
+
+        person_db.find_contact = spy  # type: ignore[assignment]
+        _person_call(
+            fake_server, person_db, FakeInferenceClient(response="null"), tool, from_name=" Dana "
+        )
+        assert lookups == ["Dana"]
+
+    @pytest.mark.parametrize("tool", _PERSON_TOOLS)
+    def test_person_guidance_covers_the_folder_scope(self, fake_server, person_db, tool):
+        # Review round 2 (#702): find_contact ranks contacts over every
+        # folder, so with ``folders`` set its top address may have no
+        # thread in scope; the description says what to do then.
+        handlers = _handlers(fake_server, person_db, FakeEmbedClient(), FakeInferenceClient())
+        doc = " ".join((handlers[tool].__doc__ or "").split())
+        assert "find_contact ranks contacts across all folders" in doc
+        assert "pass the name itself as participant" in doc
+
+    @pytest.mark.parametrize("tool", _PERSON_TOOLS)
+    @pytest.mark.parametrize("field", ["participant", "from_name"])
+    def test_person_filter_values_are_not_logged(self, fake_server, person_db, caplog, tool, field):
+        import logging
+
+        with caplog.at_level(logging.DEBUG):
+            _person_call(
+                fake_server,
+                person_db,
+                FakeInferenceClient(response="null"),
+                tool,
+                **{field: "private-person-sentinel"},
+            )
+        assert "private-person-sentinel" not in caplog.text
+        assert field in caplog.text
