@@ -748,9 +748,11 @@ Next, in order:
    already T-flagged, so no reap follows from them. Validate reaping on
    the first message deleted after the rebuild instead: it is indexed,
    then tombstoned when mbsync flags it, then reaped once
-   `INDEXER_DELETION_GRACE_DAYS` (7) pass. The #463 test message
-   ("AR forge test 463", in INBOX) is a ready candidate: delete it in
-   Proton after the rebuild has indexed it.
+   `INDEXER_DELETION_GRACE_DAYS` (7) pass. Any message deleted in
+   Proton after the rebuild has indexed it will do. (The #463 test
+   message no longer can: it arrived while the indexer was stopped and
+   was deleted before the rebuild, so the fresh index skips its
+   T-flagged file.)
 
 Small, no decision needed: #705 (blank filter in `search_emails`); the
 extractor's own `max_bytes` fallback still says 10 MB (the indexer
