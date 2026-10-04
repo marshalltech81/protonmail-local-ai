@@ -63,7 +63,7 @@ jobs:
     name: validate-env script
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Run validate-env.sh tests
         run: bash scripts/tests/validate_env_test.sh
