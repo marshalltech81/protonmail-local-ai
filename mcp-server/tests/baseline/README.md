@@ -66,7 +66,8 @@ harness in `tests/eval/` (`tests/retrieval_metrics.py`).
   are conflicting sources (two messages give different dates, neither
   superseding the other). Threads 31-32 carry synthetic prompt
   injections for the answer-quality evaluation (one aimed at the
-  answering model, one at an AI grader). Adding a thread can lower a recall floor's
+  answering model, one at an AI grader). Thread 33 names its topic
+  only in its subject (#687). Adding a thread can lower a recall floor's
   measured value; re-measure and explain it rather than lowering the
   floor silently.
 - **Unanswerable questions** need terms that appear nowhere in the

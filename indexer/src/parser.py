@@ -74,6 +74,10 @@ _DEFAULT_PARSE_MAX_BYTES = 50_000_000
 # and a ``Re:`` reply to a subject longer than the cap does not.
 SUBJECT_MAX_CHARS = 2000
 
+# Stored as the subject of a message with no Subject header. A literal
+# "(no subject)" header parses to the same value and cannot be told apart.
+NO_SUBJECT = "(no subject)"
+
 # Longest Message-ID accepted, in characters, counted after the
 # surrounding whitespace and angle brackets are removed (``_clean_id``):
 # the value stored and used as a thread ID. RFC 5322 caps a line at 998
@@ -361,7 +365,7 @@ def parse_email(path: Path, maildir_root: Path | None = None) -> Message | None:
         if len(ref) <= MESSAGE_ID_MAX_CHARS
     ]
 
-    subject = _decode_header(msg.get("Subject", "(no subject)"))[:SUBJECT_MAX_CHARS]
+    subject = _decode_header(msg.get("Subject", NO_SUBJECT))[:SUBJECT_MAX_CHARS]
     # Parse From structurally, like To / Cc: decoding the whole header
     # first turns an encoded name with a comma ("=?utf-8?q?Doe=2C_Jane?=")
     # into an unquoted "Doe, Jane <...>" that no longer parses as one
