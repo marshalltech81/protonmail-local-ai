@@ -216,7 +216,7 @@ contents of a returned thread, follow up with `get_thread` or
 | `date_from` | string | none | ISO 8601 date lower bound |
 | `date_to` | string | none | ISO 8601 date upper bound |
 | `has_attachments` | bool | none | Filter by attachment presence |
-| `participant` | string | none | Filter to threads where this person appears in **any** role — From, To, or Cc. Distinct from `from_addr`/`from_name`, which are sender-only. Accepts an address, a domain (`@example.com`), or a name fragment |
+| `participant` | string | none | Filter to threads where this person appears in **any** role — From, To, or Cc. Distinct from `from_addr`/`from_name`, which are sender-only. Accepts an address, a domain (`@example.com`), or a name fragment. Blank means no filter; padding is stripped |
 | `limit` | int | `10` | Max threads to return |
 | `authority_class` | string | none | Keep threads with a message whose From sender carries this source-authority class: `counsel`, `management`, `vendor`, `government`, `personal`, `other`, or `unclassified`. Assigned by the operator's rules file (`docs/setup.md`); a filter only, never a ranking weight. Spam-folder messages never count, so a thread matches only through its non-Spam messages. Blank is ignored; any other value is an error |
 
@@ -762,7 +762,7 @@ folder scope. `from_name` is sender-only, like `from_addr`. An unmatched
 rather than searching without the filter. A blank `participant` or
 `from_name` (`""` or whitespace, as some clients send unset optionals)
 is treated as absent, and a padded one is stripped, here and in
-`extract_from_emails` and `get_evidence`.
+`search_emails`, `extract_from_emails` and `get_evidence`.
 
 `max_threads` is clamped to `[1, 10]` at the tool boundary so an
 inflated caller-supplied value cannot expand into an oversized prompt

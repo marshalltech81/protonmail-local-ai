@@ -246,6 +246,10 @@ def register_search_tools(
         except InvalidFilterError as e:
             log.warning("search_emails rejected invalid %s", e.field_name)
             raise ToolError(f"Search error: {e}") from e
+        # A blank person filter is absent and padding is stripped, as in
+        # get_evidence and ask_mailbox (#702, #705).
+        from_name = blank_to_none(from_name)
+        participant = blank_to_none(participant)
 
         # Resolve ``from_name`` -> canonical SENDER address via
         # find_contact (``resolve_from_name``). Skipped when the caller
