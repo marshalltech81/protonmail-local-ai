@@ -444,10 +444,12 @@ def select_ask_threads(
 
 
 def blank_to_none(value: str | None) -> str | None:
-    """``value``, or ``None`` when it is blank. Clients often send an
-    unset optional as ``""`` or whitespace; as a person filter that would
-    match any participant string containing a space, or look up " "."""
-    return value if value is not None and value.strip() else None
+    """``value`` stripped, or ``None`` when it is blank. Clients often
+    send an unset optional as ``""`` or whitespace; as a person filter
+    that would match any participant string containing a space, or look
+    up " ". Padding would also defeat the bare-name and domain substring
+    match (``" Dana "`` matches no ``"Dana Example <...>"``)."""
+    return (value.strip() or None) if value is not None else None
 
 
 async def resolve_from_name(db, from_name: str, folders: list[str] | None) -> str | None:
@@ -2366,11 +2368,16 @@ def register_intelligence_tools(
 
         Questions about a PERSON ("who is Dana Example?", "what have I
         discussed with Dana?"): call find_contact with the name first,
-        then pass the address it returns as ``participant``. Retrieval
-        ranks by message text, and a person named only in the From /
-        To / Cc headers of their threads is easily outranked by other
-        threads that mention the name in passing; the filter keeps the
-        evidence to the threads the person is actually on.
+        then pass the address of the person meant as ``participant``.
+        Retrieval ranks by message text, and a person named only in the
+        From / To / Cc headers of their threads is easily outranked by
+        other threads that mention the name in passing; the filter
+        keeps the evidence to the threads the person is actually on.
+        find_contact ranks contacts across all folders, Trash included,
+        so when you also pass ``folders`` its top address may have no
+        thread in them: if that returns nothing, try the next matching
+        contact, or pass the name itself as participant (it then matches
+        any participant with that name inside the folder scope).
 
         Args:
             question: Natural language question or topic phrase
@@ -2772,9 +2779,13 @@ def register_intelligence_tools(
         or get_thread.
 
         To extract from one PERSON's mail, call find_contact with the
-        name first and pass the address it returns as ``participant``
-        (or ``from_name`` for mail they sent): ranking by text alone
-        misses threads that name the person only in their headers.
+        name first and pass the address of the person meant as
+        ``participant`` (or ``from_name`` for mail they sent): ranking
+        by text alone misses threads that name the person only in their
+        headers. find_contact ranks contacts across all folders, Trash
+        included, so when you also pass ``folders`` its top address may
+        have no thread in them: if that returns nothing, try the next
+        matching contact, or pass the name itself as participant.
 
         Args:
             query: What to search for e.g. "invoices", "meeting confirmations"

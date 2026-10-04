@@ -1161,6 +1161,43 @@ class TestPersonFilters:
         assert captured.get("from_addr") is None
 
     @pytest.mark.parametrize("tool", _PERSON_TOOLS)
+    @pytest.mark.parametrize(
+        "padded", ["  Dana Example  ", " dana@example.com ", "\t@example.com "]
+    )
+    def test_padded_participant_is_stripped(self, fake_server, person_db, tool, padded):
+        # Review round 2 (#702): the substring fallback used the padded
+        # value, so " Dana Example " matched no participant string.
+        out = _person_call(
+            fake_server, person_db, FakeInferenceClient(response="null"), tool, participant=padded
+        )
+        assert _searched(out) == _DANA_THREADS
+
+    @pytest.mark.parametrize("tool", _PERSON_TOOLS)
+    def test_padded_from_name_is_stripped(self, fake_server, person_db, tool):
+        lookups: list = []
+        original = person_db.find_contact
+
+        def spy(query, limit, *, senders_only=False, folders=None):
+            lookups.append(query)
+            return original(query, limit, senders_only=senders_only, folders=folders)
+
+        person_db.find_contact = spy  # type: ignore[assignment]
+        _person_call(
+            fake_server, person_db, FakeInferenceClient(response="null"), tool, from_name=" Dana "
+        )
+        assert lookups == ["Dana"]
+
+    @pytest.mark.parametrize("tool", _PERSON_TOOLS)
+    def test_person_guidance_covers_the_folder_scope(self, fake_server, person_db, tool):
+        # Review round 2 (#702): find_contact ranks contacts over every
+        # folder, so with ``folders`` set its top address may have no
+        # thread in scope; the description says what to do then.
+        handlers = _handlers(fake_server, person_db, FakeEmbedClient(), FakeInferenceClient())
+        doc = " ".join((handlers[tool].__doc__ or "").split())
+        assert "find_contact ranks contacts across all folders" in doc
+        assert "pass the name itself as participant" in doc
+
+    @pytest.mark.parametrize("tool", _PERSON_TOOLS)
     @pytest.mark.parametrize("field", ["participant", "from_name"])
     def test_person_filter_values_are_not_logged(self, fake_server, person_db, caplog, tool, field):
         import logging

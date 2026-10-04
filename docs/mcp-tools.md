@@ -753,12 +753,16 @@ so "who is Dana Example?" can come back "Not found". The tool
 description tells the calling model to resolve the person with
 `find_contact` and pass the address as `participant`, which keeps the
 evidence to the threads the person is on, including those they only
-received. `from_name` is sender-only, like `from_addr`. An unmatched
+received. `find_contact` ranks contacts across every folder, Trash
+included, so with `folders` set its top address can have no thread in
+scope; the description tells the model to try the next matching contact
+or pass the name itself as `participant`, which then matches within the
+folder scope. `from_name` is sender-only, like `from_addr`. An unmatched
 `from_name` returns an empty answer naming it, with no model call,
 rather than searching without the filter. A blank `participant` or
 `from_name` (`""` or whitespace, as some clients send unset optionals)
-is treated as absent, here and in `extract_from_emails` and
-`get_evidence`.
+is treated as absent, and a padded one is stripped, here and in
+`extract_from_emails` and `get_evidence`.
 
 `max_threads` is clamped to `[1, 10]` at the tool boundary so an
 inflated caller-supplied value cannot expand into an oversized prompt

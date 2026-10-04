@@ -679,6 +679,13 @@ class TestGetEvidencePersonFilters:
         for name in ("folders", "from_addr", "from_name", "participant", "max_threads"):
             assert name in sentence
 
+    def test_padded_participant_is_stripped(self, fake_server, fake_embed, seeded_db):
+        # Review round 2 (#702): a padded value broke the substring match.
+        captured = self._spy(seeded_db, "hybrid_search")
+        tool = self._tool(fake_server, fake_embed, seeded_db)
+        asyncio.run(tool(query="invoice", participant=" @example.com "))
+        assert captured.get("participant") == "@example.com"
+
     @pytest.mark.parametrize("blank", ["", " ", "\t"])
     def test_blank_person_filters_are_absent(self, fake_server, fake_embed, seeded_db, blank):
         called: list = []
