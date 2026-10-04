@@ -721,6 +721,6 @@ class TestWire:
 
         tools, result = asyncio.run(run())
         assert "EXPERIMENTAL" in (tools["brief_issue"].description or "")
-        assert tools["brief_issue"].outputSchema is not None
+        assert tools["brief_issue"].output_schema is not None
         assert not result.is_error
         assert result.structured_content["status"] == "ok"

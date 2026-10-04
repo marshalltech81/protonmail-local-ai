@@ -156,4 +156,4 @@ class TestEventLoopResponsiveness:
 
         out = asyncio.run(scenario())
         assert released_by_loop == [True]
-        assert out.structuredContent["total_threads"] == 3
+        assert out.structured_content["total_threads"] == 3
