@@ -197,18 +197,29 @@ chat-completions endpoint for inference.
 
 **Required-vars contract (all three layers):**
 
-For every enabled layer (`*_MODE` != `none`), `{LAYER}_API_KEY` and
-`{LAYER}_MODEL` must be non-empty; `{LAYER}_BASE_URL` is optional.
-Leaving `{LAYER}_BASE_URL` empty uses the SDK's documented default
-(OpenAI proper for `openai`/`embed` modes, Anthropic API for
-`anthropic` mode, Cohere API for `cohere` mode). The required
-`{LAYER}_API_KEY` is the explicit-intent signal — an operator with a
-real `sk-...` has unambiguously chosen their provider, so a typo or
-forgotten env var can't accidentally ship inbox content to a remote
-provider. Operators pointing at an unauthenticated host-side server
-(LM Studio, vLLM, `mlx_lm.server`, TEI) set `{LAYER}_BASE_URL` to
-the host endpoint and supply any non-empty placeholder string (e.g.
+For every enabled layer (`*_MODE` != `none`; embed is always
+enabled), `{LAYER}_API_KEY`, `{LAYER}_MODEL` and `{LAYER}_BASE_URL`
+must be non-empty. `{LAYER}_BASE_URL` is the provider's URL, or the
+literal `default` (any case) to use the SDK's documented default
+endpoint (OpenAI proper for `openai`/`embed` modes, Anthropic API for
+`anthropic` mode, Cohere API for `cohere` mode). An empty
+`{LAYER}_BASE_URL` stops `make up` and the services at startup, before
+any request: an API key is not a choice of provider, because the
+request (with mail text) reaches the provider before it checks the key
+(#750). Operators pointing at an unauthenticated host-side server (LM
+Studio, vLLM, `mlx_lm.server`, TEI) set `{LAYER}_BASE_URL` to the host
+endpoint and supply any non-empty placeholder string (e.g.
 `unauthenticated`) for `{LAYER}_API_KEY`.
+
+`INFERENCE_MODE` defaults to `none`, so a fresh install sends nothing
+to an inference provider until you choose one below.
+
+> **Migration (#750).** An existing `.env` with an enabled layer and an
+> empty or missing `*_BASE_URL` must add `*_BASE_URL=default` (or the
+> provider's URL), or `make up`, the indexer and the MCP server refuse
+> to start. An `.env` that relied on the old `INFERENCE_MODE` default
+> (`anthropic`) without setting it must now set `INFERENCE_MODE`
+> explicitly to keep the intelligence tools.
 
 **Embedder** — required, indexer cannot run without it.
 
@@ -228,37 +239,38 @@ EMBED_MODEL=mlx-community/Qwen3-Embedding-8B-mxfp8
 
 Alternative providers that also serve a 4096-dim Qwen3-Embedding-8B
 (DeepInfra, OpenRouter) are listed under "Pointing at a different
-embedder provider" below. Leaving `EMBED_BASE_URL` empty is
-contract-supported (it falls back to OpenAI proper via the SDK default),
-but OpenAI's public embedding catalog has no 4096-dim model today
+embedder provider" below. `EMBED_BASE_URL=default` is
+contract-supported (OpenAI proper via the SDK default), but OpenAI's
+public embedding catalog has no 4096-dim model today
 (`text-embedding-3-large` is 3072-dim, `-3-small` is 1536-dim), so the
-empty-URL path is not a usable recipe without a schema migration.
+`default` path is not a usable recipe without a schema migration.
 
 **Inference** — choose one mode:
 
 ```bash
-# Anthropic-compatible via the official anthropic SDK (default).
-# Leave INFERENCE_BASE_URL empty to hit api.anthropic.com.
+# Anthropic-compatible via the official anthropic SDK.
+# INFERENCE_BASE_URL=default hits api.anthropic.com.
 # Note: the Anthropic SDK appends '/v1/messages' itself, so when you
-# DO set INFERENCE_BASE_URL (compatible gateway, region override),
-# the value must NOT end with '/v1'.
+# set a URL (compatible gateway, region override), it must NOT end
+# with '/v1'.
 INFERENCE_MODE=anthropic
-INFERENCE_BASE_URL=                       # optional; leave empty for Anthropic default
+INFERENCE_BASE_URL=default                # required; `default` = api.anthropic.com
 INFERENCE_MODEL=claude-sonnet-4-6
 # write the key to .secrets/inference_api_key.txt (required, non-empty)
 
 # OpenAI-compatible via the official openai SDK.
-# Leave INFERENCE_BASE_URL empty to hit api.openai.com/v1, or set it
-# to any /v1 base URL (host-side server, alternative provider).
+# INFERENCE_BASE_URL=default hits api.openai.com/v1; or set it to
+# any /v1 base URL (host-side server, alternative provider).
 INFERENCE_MODE=openai
-INFERENCE_BASE_URL=                       # optional; leave empty for OpenAI proper
+INFERENCE_BASE_URL=default                # required; `default` = OpenAI proper
 INFERENCE_MODEL=gpt-4
 # write the key to .secrets/inference_api_key.txt (required, non-empty)
 # For unauthenticated host servers, use any placeholder string
 # (e.g. `unauthenticated`) — the compat server ignores the bearer
 # header but the key must be non-empty so the startup contract holds.
 
-# Disabled — intelligence tools are not registered.
+# Disabled (the default) — intelligence tools are not registered,
+# and INFERENCE_BASE_URL is not needed.
 INFERENCE_MODE=none
 ```
 
@@ -275,10 +287,10 @@ them with the tool of your choice (LM Studio, vLLM, TEI,
 RERANK_MODE=none
 
 # Cohere via the official cohere SDK.
-# Leave RERANK_BASE_URL empty for the SDK default; set it for
-# proxies, gateways, or region overrides.
+# RERANK_BASE_URL=default uses the SDK default (api.cohere.com); set
+# a URL for proxies, gateways, or region overrides.
 RERANK_MODE=cohere
-RERANK_BASE_URL=
+RERANK_BASE_URL=default
 RERANK_MODEL=rerank-v4.0-pro
 # write the key to .secrets/rerank_api_key.txt
 ```
@@ -309,10 +321,10 @@ services strip it. It fails fast if:
   and so does a token shorter than 32 characters or outside the RFC 6750
   set described above).
   For unauthenticated host-side servers, write any non-empty placeholder
-  string (e.g. `unauthenticated`). **`{LAYER}_BASE_URL` may be empty
-  for any enabled layer — empty means "use the SDK default" (OpenAI
-  proper, Anthropic API, Cohere API) and validation does NOT fail
-  on an empty URL.**
+  string (e.g. `unauthenticated`).
+- any enabled layer's `{LAYER}_BASE_URL` is empty: set the provider's
+  URL, or `default` for the SDK's default endpoint (OpenAI proper,
+  Anthropic API, Cohere API); see the migration note in step 5
 - any enabled layer's `{LAYER}_MODEL` is empty (model is always
   required — no SDK has a default model; in `anthropic` mode an empty
   `INFERENCE_MODEL` takes the Compose default `claude-sonnet-4-6`, which
@@ -383,8 +395,8 @@ post-RRF stage with no schema dependency, so turning it on or off
 leaves indexing and embeddings untouched.
 The default is `none`; to use it, set `RERANK_MODE=cohere`, set
 `RERANK_MODEL` (e.g. `rerank-v4.0-pro`), and write the API key to
-`.secrets/rerank_api_key.txt`. `RERANK_BASE_URL` is optional —
-leave empty for the Cohere SDK default.
+`.secrets/rerank_api_key.txt`, and set `RERANK_BASE_URL` (`default`
+for the Cohere SDK default, or a proxy URL).
 
 The MCP server reads the rerank settings once at startup, so a change
 takes effect only when the `mcp-server` container is recreated. After
@@ -495,7 +507,7 @@ a single env change away. Examples:
 ```bash
 # Host-side server (mlx_lm.server, LM Studio, vLLM, TEI, etc.) —
 # the privacy-preserving option; mail content never leaves the host.
-# (An empty EMBED_BASE_URL is the default and selects OpenAI proper.)
+# (EMBED_BASE_URL=default selects OpenAI proper; empty fails startup.)
 EMBED_BASE_URL=http://host.docker.internal:8001/v1
 EMBED_MODEL=mlx-community/Qwen3-Embedding-8B-mxfp8
 # put any placeholder string (e.g. `unauthenticated`) in
@@ -516,17 +528,17 @@ OpenAI proper is not currently a usable embed provider here: their
 public embedding catalog has no 4096-dim model
 (`text-embedding-3-large` is 3072-dim, `text-embedding-3-small` is
 1536-dim), and the schema reserves a fixed 4096-dim vector. The
-empty-`EMBED_BASE_URL` / SDK-default path remains documented for
+`EMBED_BASE_URL=default` / SDK-default path remains documented for
 symmetry with `INFERENCE_MODE=openai`, but using OpenAI as the
 embedder would require a schema migration to a different vector
 width — it is not a copy-paste config swap today.
 
 After changing provider:
 
-1. Set the new vars in `.env`. `EMBED_BASE_URL` is required for every
-   provider listed above (no compatible OpenAI-proper embed model
-   exists today, so the empty-URL / SDK-default path has no usable
-   recipe to copy).
+1. Set the new vars in `.env`. `EMBED_BASE_URL` is always required;
+   every provider listed above needs its URL (no compatible
+   OpenAI-proper embed model exists today, so the `default` /
+   SDK-default path has no usable recipe to copy).
 2. Write the API key to `.secrets/embed_api_key.txt` (`chmod 600`).
    `make init-secrets` creates an empty placeholder; the key is
    required (non-empty). For an unauthenticated host-side server, use

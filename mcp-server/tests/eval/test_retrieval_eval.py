@@ -56,6 +56,7 @@ from pathlib import Path
 import pytest
 from src.lib.embed import EmbedClient, embed_query
 from src.lib.sqlite import Database
+from src.main import _resolve_base_url
 
 from tests.retrieval_metrics import first_hit_rank, group_ranks
 
@@ -174,16 +175,18 @@ def eval_embedder(eval_db: Database):
     actually means hybrid retrieval is working — not "keyword-only
     silently passing as hybrid."
     """
-    base_url = os.environ.get("EMBED_BASE_URL", "")
     model = os.environ.get("EMBED_MODEL")
     api_key = os.environ.get("EMBED_API_KEY")
     if not model or not api_key:
         pytest.skip(
-            "Hybrid eval requires a real embedder. Set EMBED_MODEL and "
-            "EMBED_API_KEY (and EMBED_BASE_URL if not OpenAI proper) to "
+            "Hybrid eval requires a real embedder. Set EMBED_MODEL, "
+            "EMBED_API_KEY and EMBED_BASE_URL (a URL, or 'default' for "
+            "OpenAI proper) to "
             "exercise the chunk-vec + thread-vec lanes; otherwise only "
             "the keyword-eval cases run."
         )
+    # Same rule as the server: empty fails, ``default`` is the SDK default (#750).
+    base_url = _resolve_base_url("EMBED_BASE_URL", os.environ.get("EMBED_BASE_URL", ""), "openai")
     client = EmbedClient(base_url=base_url, model=model, api_key=api_key)
     expected_dim = eval_db.get_embedding_dim()
 

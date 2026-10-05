@@ -73,8 +73,8 @@ The stack runs three containers beside the Proton Mail Bridge app:
 - **mcp-server** — Docker, hybrid five-lane search (thread FTS, chunk
   FTS, attachment FTS, thread vec, chunk vec → RRF, optional Cohere
   rerank), exhaustive `query_messages` enumeration, and intelligence
-  tools. `INFERENCE_MODE=anthropic` (default,
-  `claude-sonnet-4-6`) or `openai`; Streamable HTTP at `/mcp` is the
+  tools. `INFERENCE_MODE=none` (default since #750), `anthropic`
+  (`claude-sonnet-4-6`) or `openai`; Streamable HTTP at `/mcp` is the
   only transport (#498), behind a static bearer token; localhost:3000
   only.
 
@@ -177,7 +177,7 @@ bundle path. Neither touches a source file or a migration.
    - **Identity and selection.** The registry records a generation's
      resolved endpoint (the SDK's `client.base_url` after
      construction, credential-sanitized — not the configured value,
-     which is empty when the SDK inherits `OPENAI_BASE_URL`), model,
+     which may be the literal `default`), model,
      dimension and any exposed revision, **plus a non-secret
      configuration label**, because two credentials at one gateway can
      route to different deployments behind identical public fields.
@@ -1171,13 +1171,15 @@ Go-live checklist (do these before more hardening):
 2. Choose providers and fill `.env` / `.secrets` (see
    `docs/setup.md`). The embedder must return 4096-dim vectors (the
    schema is fixed at 4096); OpenAI's public models return 3072 or
-   1536, so an empty `EMBED_BASE_URL` (OpenAI proper) fails the
+   1536, so `EMBED_BASE_URL=default` (OpenAI proper) fails the
    indexer's startup probe. Use a 4096-dim model such as the
    Qwen3-Embedding-8B family on a host-side server: `EMBED_BASE_URL`,
    `EMBED_MODEL`, `.secrets/embed_api_key.txt`. For inference set
-   `INFERENCE_MODE`, `INFERENCE_MODEL` (the default is an Anthropic
-   model id), `INFERENCE_BASE_URL` for a non-default provider, and
-   `.secrets/inference_api_key.txt`; for a small local model, set
+   `INFERENCE_MODE` (the default is `none`), `INFERENCE_MODEL` (the
+   default is an Anthropic model id), `INFERENCE_BASE_URL` (the
+   provider's URL, or `default` for the SDK's own endpoint; empty fails
+   startup, #750), and `.secrets/inference_api_key.txt`; for a small
+   local model, set
    `INFERENCE_CONTEXT_TOKENS` to its context window (default 32768).
    Leave `RERANK_MODE=none` to start.
 3. `make build`, then `make first-run` and log in to Proton in the

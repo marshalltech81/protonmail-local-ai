@@ -455,11 +455,12 @@ _INHERITED_URL = (
 )
 
 
-class TestInheritedEndpointUserinfo:
-    """An empty ``*_BASE_URL`` lets the SDK fall back to its own env var
-    (``OPENAI_BASE_URL``, ``ANTHROPIC_BASE_URL``, ``CO_API_URL``). The
-    userinfo guard must cover that inherited URL too, so an embedded
-    credential never reaches the startup log or an error (#326)."""
+class TestDefaultIgnoresAmbientEndpoints:
+    """``*_BASE_URL=default`` pins each SDK to its official endpoint
+    (Codex round 1 on #773). The SDKs' own variables (``OPENAI_BASE_URL``,
+    ``ANTHROPIC_BASE_URL``, ``CO_API_URL``) would otherwise choose the
+    destination when no ``base_url`` is passed, so a stray one, even one
+    carrying a credential, must neither redirect mail nor reach a log."""
 
     class _FakeDatabase:
         def __init__(self, _path):
@@ -468,97 +469,34 @@ class TestInheritedEndpointUserinfo:
         def get_embedding_dim(self):
             return 4
 
-    def _run_main(self, monkeypatch, caplog, env_var, **config):
-        import src.main as main_mod
-
-        defaults = {
-            "EMBED_BASE_URL": "",
-            "EMBED_MODEL": "synthetic",
-            "MCP_AUTH_TOKEN": _PLACEHOLDER_TOKEN,
-            "EMBED_API_KEY": _PLACEHOLDER_KEY,
-            "INFERENCE_MODE": "none",
-            "RERANK_MODE": "none",
-        }
-        for name, value in {**defaults, **config}.items():
-            monkeypatch.setattr(main_mod, name, value)
-        for name in ("OPENAI_BASE_URL", "ANTHROPIC_BASE_URL", "CO_API_URL"):
-            monkeypatch.delenv(name, raising=False)
-        monkeypatch.setenv(env_var, _INHERITED_URL)
-        monkeypatch.setattr(main_mod, "Database", self._FakeDatabase)
-        monkeypatch.setattr(main_mod, "run_startup_identity_check", _skip_identity_check)
-        monkeypatch.setattr(main_mod, "_run_server", lambda *_: None)
-        caplog.set_level(logging.DEBUG)
-        with pytest.raises(ValueError, match="credentials") as excinfo:
-            main_mod.main()
-        assert _URL_CREDENTIAL_MARKER not in str(excinfo.value)
-        assert _URL_CREDENTIAL_MARKER not in caplog.text
-        return str(excinfo.value)
-
-    def test_inherited_embed_url_with_userinfo_is_rejected(self, monkeypatch, caplog):
-        message = self._run_main(monkeypatch, caplog, "OPENAI_BASE_URL")
-        assert "EMBED_BASE_URL" in message
-
-    @pytest.mark.parametrize(
-        ("mode", "env_var"),
-        [("openai", "OPENAI_BASE_URL"), ("anthropic", "ANTHROPIC_BASE_URL")],
-    )
-    def test_inherited_inference_url_with_userinfo_is_rejected(
-        self, monkeypatch, caplog, mode, env_var
-    ):
-        message = self._run_main(
-            monkeypatch,
-            caplog,
-            env_var,
-            EMBED_BASE_URL="http://host.docker.internal:8001/v1",
-            INFERENCE_MODE=mode,
-            INFERENCE_BASE_URL="",
-            INFERENCE_MODEL="synthetic",
-            INFERENCE_API_KEY=_PLACEHOLDER_KEY,
-        )
-        assert "INFERENCE_BASE_URL" in message
-
-    def test_inherited_rerank_url_with_userinfo_is_rejected(self, monkeypatch, caplog):
-        message = self._run_main(
-            monkeypatch,
-            caplog,
-            "CO_API_URL",
-            EMBED_BASE_URL="http://host.docker.internal:8001/v1",
-            RERANK_MODE="cohere",
-            RERANK_BASE_URL="",
-            RERANK_MODEL="synthetic",
-            RERANK_API_KEY=_PLACEHOLDER_KEY,
-        )
-        assert "RERANK_BASE_URL" in message
-
-    def test_empty_base_urls_without_inherited_urls_still_start(self, monkeypatch, caplog):
-        """The contract that an empty base URL selects the SDK default
-        is preserved when no inherited URL carries userinfo."""
+    def test_default_starts_and_ignores_every_ambient_sdk_url(self, monkeypatch, caplog):
         import src.main as main_mod
 
         for name, value in {
-            "EMBED_BASE_URL": "",
+            "EMBED_BASE_URL": "default",
             "EMBED_MODEL": "synthetic",
             "MCP_AUTH_TOKEN": _PLACEHOLDER_TOKEN,
             "EMBED_API_KEY": _PLACEHOLDER_KEY,
             "INFERENCE_MODE": "anthropic",
-            "INFERENCE_BASE_URL": "",
+            "INFERENCE_BASE_URL": "default",
             "INFERENCE_MODEL": "synthetic",
             "INFERENCE_API_KEY": _PLACEHOLDER_KEY,
             "RERANK_MODE": "cohere",
-            "RERANK_BASE_URL": "",
+            "RERANK_BASE_URL": "default",
             "RERANK_MODEL": "synthetic",
             "RERANK_API_KEY": _PLACEHOLDER_KEY,
         }.items():
             monkeypatch.setattr(main_mod, name, value)
         for name in ("OPENAI_BASE_URL", "ANTHROPIC_BASE_URL", "CO_API_URL"):
-            monkeypatch.delenv(name, raising=False)
+            monkeypatch.setenv(name, _INHERITED_URL)
         monkeypatch.setattr(main_mod, "Database", self._FakeDatabase)
         monkeypatch.setattr(main_mod, "run_startup_identity_check", _skip_identity_check)
         ran = []
         monkeypatch.setattr(main_mod, "_run_server", lambda *args: ran.append(args))
-        caplog.set_level(logging.INFO)
+        caplog.set_level(logging.DEBUG)
         main_mod.main()
         assert ran
+        assert _URL_CREDENTIAL_MARKER not in caplog.text
         assert "https://api.openai.com/v1" in caplog.text
 
 
@@ -633,7 +571,7 @@ class TestRemoteEndpointWarning:
             monkeypatch.setattr(main_mod, name, value)
         for name in ("OPENAI_BASE_URL", "ANTHROPIC_BASE_URL", "CO_API_URL"):
             monkeypatch.delenv(name, raising=False)
-        monkeypatch.setattr(main_mod, "Database", TestInheritedEndpointUserinfo._FakeDatabase)
+        monkeypatch.setattr(main_mod, "Database", TestDefaultIgnoresAmbientEndpoints._FakeDatabase)
         monkeypatch.setattr(main_mod, "run_startup_identity_check", _skip_identity_check)
         monkeypatch.setattr(main_mod, "_run_server", lambda *_: None)
         caplog.set_level(logging.DEBUG)
@@ -652,7 +590,7 @@ class TestRemoteEndpointWarning:
 
         monkeypatch.setattr(main_mod, "run_startup_identity_check", check)
         local = "http://host.docker.internal:8001/v1"
-        monkeypatch.setattr(main_mod, "Database", TestInheritedEndpointUserinfo._FakeDatabase)
+        monkeypatch.setattr(main_mod, "Database", TestDefaultIgnoresAmbientEndpoints._FakeDatabase)
         for name, value in {
             "MCP_AUTH_TOKEN": _PLACEHOLDER_TOKEN,
             "EMBED_BASE_URL": local,
@@ -674,8 +612,8 @@ class TestRemoteEndpointWarning:
         warnings = self._run_main(
             monkeypatch,
             caplog,
-            EMBED_BASE_URL="",
-            INFERENCE_BASE_URL="",
+            EMBED_BASE_URL="default",
+            INFERENCE_BASE_URL="default",
             RERANK_BASE_URL="https://rerank.example/v2",
         )
         # Exact lines: one per layer, each ending at the bare host.
@@ -712,7 +650,182 @@ class TestRemoteEndpointWarning:
         assert warnings == []
 
 
+class TestExplicitProviderEndpoint:
+    """#750 (owner decision 2026-10-05): an API key is not consent to the
+    SDK's default endpoint, because the request body (mail text) is sent
+    before the provider checks the key. Every enabled layer must name
+    its endpoint: a URL, or ``default`` for the SDK's own endpoint. An
+    empty value fails startup before any SDK client is built."""
+
+    _LOCAL = "http://host.docker.internal:8001/v1"
+
+    def _record_sdk_clients(self, monkeypatch) -> list[tuple[str, dict]]:
+        """Wrap each SDK constructor so a test can see what was built
+        (and with which ``base_url``) without changing what it builds."""
+        import anthropic
+        import cohere
+        import openai
+
+        built: list[tuple[str, dict]] = []
+        for module, attr in ((openai, "AsyncOpenAI"), (anthropic, "AsyncAnthropic")):
+            real = getattr(module, attr)
+
+            def recording(*args, _real=real, _attr=attr, **kwargs):
+                built.append((_attr, kwargs))
+                return _real(*args, **kwargs)
+
+            monkeypatch.setattr(module, attr, recording)
+        real_cohere = cohere.ClientV2
+
+        def recording_cohere(*args, **kwargs):
+            built.append(("ClientV2", kwargs))
+            return real_cohere(*args, **kwargs)
+
+        monkeypatch.setattr(cohere, "ClientV2", recording_cohere)
+        return built
+
+    def _configure(self, monkeypatch, **config):
+        import src.main as main_mod
+
+        defaults = {
+            "MCP_AUTH_TOKEN": _PLACEHOLDER_TOKEN,
+            "EMBED_BASE_URL": self._LOCAL,
+            "EMBED_MODEL": "synthetic",
+            "EMBED_API_KEY": _PLACEHOLDER_KEY,
+            "INFERENCE_MODE": "anthropic",
+            "INFERENCE_BASE_URL": "http://host.docker.internal:8002",
+            "INFERENCE_MODEL": "synthetic",
+            "INFERENCE_API_KEY": _PLACEHOLDER_KEY,
+            "RERANK_MODE": "cohere",
+            "RERANK_BASE_URL": "http://127.0.0.1:8003",
+            "RERANK_MODEL": "synthetic",
+            "RERANK_API_KEY": _PLACEHOLDER_KEY,
+        }
+        for name, value in {**defaults, **config}.items():
+            monkeypatch.setattr(main_mod, name, value)
+        for name in ("OPENAI_BASE_URL", "ANTHROPIC_BASE_URL", "CO_API_URL"):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setattr(main_mod, "run_startup_identity_check", _skip_identity_check)
+        monkeypatch.setattr(main_mod, "_run_server", lambda *_: None)
+        return main_mod
+
+    @pytest.mark.parametrize("empty", ["", "   "])
+    @pytest.mark.parametrize(
+        ("name", "config", "host"),
+        [
+            ("EMBED_BASE_URL", {}, "api.openai.com"),
+            ("INFERENCE_BASE_URL", {"INFERENCE_MODE": "anthropic"}, "api.anthropic.com"),
+            ("INFERENCE_BASE_URL", {"INFERENCE_MODE": "openai"}, "api.openai.com"),
+            ("RERANK_BASE_URL", {}, "api.cohere.com"),
+        ],
+    )
+    def test_empty_url_fails_before_any_client_is_built(
+        self, monkeypatch, caplog, empty, name, config, host
+    ):
+        built = self._record_sdk_clients(monkeypatch)
+        main_mod = self._configure(monkeypatch, **config, **{name: empty})
+        opened: list[str] = []
+        monkeypatch.setattr(main_mod, "Database", lambda path: opened.append(path))
+        caplog.set_level(logging.DEBUG)
+        with pytest.raises(ValueError) as excinfo:
+            main_mod.main()
+        assert str(excinfo.value) == (
+            f"{name} is empty: set it to the provider's URL, or to `default` to use "
+            f"the SDK's default endpoint (sends mail to {host})."
+        )
+        # No SDK client, so no request can have been made, and no index.
+        assert built == []
+        assert opened == []
+        assert _PLACEHOLDER_KEY not in str(excinfo.value)
+        assert _PLACEHOLDER_KEY not in caplog.text
+
+    @pytest.mark.parametrize("default", ["default", " Default "])
+    @pytest.mark.parametrize(
+        ("mode", "inference_sdk", "inference_host"),
+        [
+            ("anthropic", "AsyncAnthropic", "api.anthropic.com"),
+            ("openai", "AsyncOpenAI", "api.openai.com"),
+        ],
+    )
+    def test_default_pins_each_sdk_client_to_its_official_url(
+        self, monkeypatch, caplog, default, mode, inference_sdk, inference_host
+    ):
+        built = self._record_sdk_clients(monkeypatch)
+        # A stray SDK endpoint variable must not redirect ``default``
+        # (Codex round 1 on #773).
+        for name in ("OPENAI_BASE_URL", "ANTHROPIC_BASE_URL", "CO_API_URL"):
+            monkeypatch.setenv(name, "https://ambient.example/v1")
+        main_mod = self._configure(
+            monkeypatch,
+            EMBED_BASE_URL=default,
+            INFERENCE_MODE=mode,
+            INFERENCE_BASE_URL=default,
+            RERANK_BASE_URL=default,
+        )
+        monkeypatch.setattr(main_mod, "Database", TestDefaultIgnoresAmbientEndpoints._FakeDatabase)
+        caplog.set_level(logging.INFO)
+        main_mod.main()
+        assert [sdk for sdk, _ in built] == ["AsyncOpenAI", inference_sdk, "ClientV2"]
+        assert [kwargs.get("base_url") for _, kwargs in built] == [
+            "https://api.openai.com/v1",
+            f"https://{inference_host}" + ("/v1" if mode == "openai" else ""),
+            "https://api.cohere.com",
+        ]
+        # The privacy warnings name each SDK's default host.
+        warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert warnings == [
+            "Privacy: EMBED_MODE=openai sends search query text off this host, to api.openai.com.",
+            f"Privacy: INFERENCE_MODE={mode} sends retrieved email excerpts off this "
+            f"host, to {inference_host}.",
+            "Privacy: RERANK_MODE=cohere sends search queries and retrieved email "
+            "excerpts off this host, to api.cohere.com.",
+        ]
+
+    def test_real_urls_are_passed_to_each_sdk(self, monkeypatch, caplog):
+        built = self._record_sdk_clients(monkeypatch)
+        main_mod = self._configure(monkeypatch, INFERENCE_MODE="openai")
+        monkeypatch.setattr(main_mod, "Database", TestDefaultIgnoresAmbientEndpoints._FakeDatabase)
+        main_mod.main()
+        assert [(sdk, kwargs["base_url"]) for sdk, kwargs in built] == [
+            ("AsyncOpenAI", self._LOCAL),
+            ("AsyncOpenAI", "http://host.docker.internal:8002"),
+            ("ClientV2", "http://127.0.0.1:8003"),
+        ]
+
+    def test_disabled_layers_need_no_url(self, monkeypatch):
+        built = self._record_sdk_clients(monkeypatch)
+        main_mod = self._configure(
+            monkeypatch,
+            INFERENCE_MODE="none",
+            INFERENCE_BASE_URL="",
+            RERANK_MODE="none",
+            RERANK_BASE_URL="",
+        )
+        monkeypatch.setattr(main_mod, "Database", TestDefaultIgnoresAmbientEndpoints._FakeDatabase)
+        main_mod.main()
+        assert [sdk for sdk, _ in built] == ["AsyncOpenAI"]
+
+    def test_inference_mode_defaults_to_none(self, monkeypatch):
+        import importlib
+
+        import src.main as main_mod
+
+        monkeypatch.delenv("INFERENCE_MODE", raising=False)
+        try:
+            assert importlib.reload(main_mod).INFERENCE_MODE == "none"
+        finally:
+            importlib.reload(main_mod)
+
+
 class TestRequireEnv:
+    @pytest.mark.parametrize("var", ["EMBED_MODEL", "INFERENCE_MODEL", "RERANK_MODEL"])
+    def test_whitespace_only_value_is_missing_and_values_are_trimmed(self, var):
+        """Codex round 2 on #773: required values are non-empty after
+        trimming, and the trimmed value is what reaches the client."""
+        with pytest.raises(ValueError, match=var):
+            _require_env("X_MODE", "openai", var, "   ")
+        assert _require_env("X_MODE", "openai", var, "  model-a  ") == "model-a"
+
     def test_passes_through_present_value(self):
         assert _require_env("INFERENCE_MODE", "openai", "INFERENCE_BASE_URL", "https://x") == (
             "https://x"

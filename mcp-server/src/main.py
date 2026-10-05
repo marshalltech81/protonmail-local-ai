@@ -133,8 +133,10 @@ def _require_env(mode_name: str, mode: str, var_name: str, value: str) -> str:
 
     This is the no-fallback rule: choosing a mode is intentional. A mode
     selected without its required vars surfaces as a startup error, never
-    a silent reroute to a different provider.
+    a silent reroute to a different provider. Values are non-empty after
+    trimming (#750), and the trimmed value is returned.
     """
+    value = value.strip()
     if not value:
         raise ValueError(f"{var_name} must be set when {mode_name}={mode!r}")
     return value
@@ -169,7 +171,8 @@ SQLITE_PATH = os.environ.get("SQLITE_PATH", "/data/mail.db")
 # variable. The same shape applies across all three:
 #
 #   {LAYER}_MODE      = anthropic|openai|none / openai / cohere|none
-#   {LAYER}_BASE_URL  = endpoint URL — OPTIONAL (empty = SDK default)
+#   {LAYER}_BASE_URL  = endpoint URL, or ``default`` for the SDK's own
+#                       endpoint (required, non-empty; #750)
 #   {LAYER}_MODEL     = model id (required, no SDK default exists)
 #   {LAYER}_API_KEY   = bearer credential (required, non-empty)
 #
@@ -183,14 +186,14 @@ SQLITE_PATH = os.environ.get("SQLITE_PATH", "/data/mail.db")
 # Validation is strict and fail-closed: a chosen mode without its
 # required vars raises at startup. There is no inter-mode fallback —
 # choosing ``anthropic`` and forgetting the API key surfaces here, not
-# silently as a reroute to the OpenAI-shaped client. ``*_BASE_URL`` is
-# the one var that may be empty: empty means "use the SDK's documented
-# default" (OpenAI proper for openai/embed modes, Anthropic API for
-# anthropic mode, Cohere API for cohere mode). The required
-# ``*_API_KEY`` is the explicit-intent signal — an operator with a
-# real ``sk-...`` has unambiguously chosen their provider, so we
-# trust an empty base URL as "I want the SDK default" rather than
-# "I forgot to configure."
+# silently as a reroute to the OpenAI-shaped client. ``*_BASE_URL``
+# must name the endpoint: a URL, or ``default`` for the SDK's
+# documented default (OpenAI proper for openai/embed modes, Anthropic
+# API for anthropic mode, Cohere API for cohere mode). An empty value
+# is a startup error (``_resolve_base_url``): an API key is not consent
+# to the SDK's default endpoint, because the request body (mail text)
+# is sent before the provider checks the key (owner decision
+# 2026-10-05, #750).
 def _float_env(name: str, default: float, minimum: float = 0.0) -> float:
     """Read a finite float of at least ``minimum`` from the environment.
 
@@ -264,6 +267,48 @@ def _reject_url_userinfo(name: str, value: str) -> str:
     return value
 
 
+# The literal ``*_BASE_URL`` value that selects the provider's official
+# endpoint, compared trimmed and case-insensitively; that endpoint's
+# host per mode, named in the startup error and the privacy warning; and
+# the URL ``default`` resolves to. The URL is passed to the SDK
+# explicitly: left out, each SDK would read its own variable first
+# (``OPENAI_BASE_URL``, ``ANTHROPIC_BASE_URL``, ``CO_API_URL``), which
+# could send mail somewhere the operator did not choose (Codex round 1
+# on #773).
+_SDK_DEFAULT_BASE_URL = "default"
+_SDK_DEFAULT_HOSTS = {
+    "anthropic": "api.anthropic.com",
+    "openai": "api.openai.com",
+    "cohere": "api.cohere.com",
+}
+_SDK_DEFAULT_URLS = {
+    "anthropic": "https://api.anthropic.com",
+    "openai": "https://api.openai.com/v1",
+    "cohere": "https://api.cohere.com",
+}
+
+
+def _resolve_base_url(name: str, raw: str, mode: str) -> str:
+    """Return an enabled layer's base URL; ``default`` returns the
+    provider's official URL (``_SDK_DEFAULT_URLS``).
+
+    The official URL is passed to the SDK explicitly, so the SDK's own
+    endpoint variable cannot redirect it (Codex round 1 on #773). An empty
+    (or blank) value fails startup with fixed text naming the variable,
+    both fixes and the host ``default`` would send mail to; it never
+    echoes a value (#750).
+    """
+    value = raw.strip()
+    if not value:
+        raise ValueError(
+            f"{name} is empty: set it to the provider's URL, or to `default` to use "
+            f"the SDK's default endpoint (sends mail to {_SDK_DEFAULT_HOSTS[mode]})."
+        )
+    if value.lower() == _SDK_DEFAULT_BASE_URL:
+        return _SDK_DEFAULT_URLS[mode]
+    return value
+
+
 # Endpoint hosts that keep a provider call on this machine: the host's
 # loopback, or OrbStack's route from a container to it.
 _HOST_LOCAL_HOSTS = frozenset({"127.0.0.1", "::1", "localhost", "host.docker.internal"})
@@ -289,12 +334,12 @@ def _warn_if_remote_endpoint(mode_setting: str, mode: str, url: str, sends: str)
 
 
 INFERENCE_MODE = _normalize_mode(
-    "INFERENCE_MODE", os.environ.get("INFERENCE_MODE", "anthropic"), _INFERENCE_MODES
+    "INFERENCE_MODE", os.environ.get("INFERENCE_MODE", "none"), _INFERENCE_MODES
 )
 INFERENCE_BASE_URL = _reject_url_userinfo(
     "INFERENCE_BASE_URL", os.environ.get("INFERENCE_BASE_URL", "")
 )
-INFERENCE_MODEL = os.environ.get("INFERENCE_MODEL", "")
+INFERENCE_MODEL = os.environ.get("INFERENCE_MODEL", "").strip()
 INFERENCE_API_KEY = _read_secret("inference_api_key", "INFERENCE_API_KEY")
 INFERENCE_TIMEOUT_SECS = _float_env(
     "INFERENCE_TIMEOUT_SECS", DEFAULT_COMPLETE_TIMEOUT_SECS, minimum=1.0
@@ -308,13 +353,13 @@ INFERENCE_CONTEXT_TOKENS = _int_env("INFERENCE_CONTEXT_TOKENS", DEFAULT_CONTEXT_
 
 EMBED_MODE = _normalize_mode("EMBED_MODE", os.environ.get("EMBED_MODE", "openai"), _EMBED_MODES)
 EMBED_BASE_URL = _reject_url_userinfo("EMBED_BASE_URL", os.environ.get("EMBED_BASE_URL", ""))
-EMBED_MODEL = os.environ.get("EMBED_MODEL", "")
+EMBED_MODEL = os.environ.get("EMBED_MODEL", "").strip()
 EMBED_API_KEY = _read_secret("embed_api_key", "EMBED_API_KEY")
 EMBED_TIMEOUT_SECS = _float_env("EMBED_TIMEOUT_SECS", DEFAULT_EMBED_TIMEOUT_SECS, minimum=1.0)
 
 RERANK_MODE = _normalize_mode("RERANK_MODE", os.environ.get("RERANK_MODE", "none"), _RERANK_MODES)
 RERANK_BASE_URL = _reject_url_userinfo("RERANK_BASE_URL", os.environ.get("RERANK_BASE_URL", ""))
-RERANK_MODEL = os.environ.get("RERANK_MODEL", "")
+RERANK_MODEL = os.environ.get("RERANK_MODEL", "").strip()
 RERANK_API_KEY = _read_secret("rerank_api_key", "RERANK_API_KEY")
 RERANK_CANDIDATES = _int_env("RERANK_CANDIDATES", 20, minimum=1)
 RERANK_TIMEOUT_SECS = _float_env("RERANK_TIMEOUT_SECS", DEFAULT_RERANK_TIMEOUT_SECS, minimum=1.0)
@@ -556,28 +601,35 @@ def main():
     # chosen mode with missing config raises here so the operator sees a
     # precise error rather than a runtime fallback to a different
     # provider.
-    # Every enabled layer requires its API key (non-empty) at startup —
-    # this is the explicit-intent signal. An operator with a real
-    # ``sk-...`` has unambiguously chosen their provider, so an empty
-    # ``*_BASE_URL`` is interpreted as "I want the SDK default" rather
-    # than "I forgot to configure"; the required ``*_API_KEY`` is what
-    # guards against an accidental ship-to-OpenAI/Anthropic from a
-    # forgotten env var (a typo can't produce a real bearer credential).
-    # ``*_MODEL`` is always required because no SDK has a default model
-    # — empty ``model`` always fails at request time.
+    # Every enabled layer must name its endpoint before any SDK client
+    # is built: an empty ``*_BASE_URL`` fails here, ``default`` resolves
+    # to ``""`` (the SDK's own endpoint). Checked for all layers first
+    # so no client exists, and no request is possible, when any of them
+    # is ambiguous (#750). Disabled layers need no URL.
+    embed_base_url = _resolve_base_url("EMBED_BASE_URL", EMBED_BASE_URL, EMBED_MODE)
+    inference_base_url = ""
+    if INFERENCE_MODE != "none":
+        inference_base_url = _resolve_base_url(
+            "INFERENCE_BASE_URL", INFERENCE_BASE_URL, INFERENCE_MODE
+        )
+    rerank_base_url = ""
+    if RERANK_MODE != "none":
+        rerank_base_url = _resolve_base_url("RERANK_BASE_URL", RERANK_BASE_URL, RERANK_MODE)
+    # Every enabled layer also requires its API key (non-empty) at
+    # startup; for an unauthenticated host-side server any placeholder
+    # works. ``*_MODEL`` is always required because no SDK has a default
+    # model — empty ``model`` always fails at request time.
     _require_env("EMBED_MODE", EMBED_MODE, "EMBED_MODEL", EMBED_MODEL)
     _require_env("EMBED_MODE", EMBED_MODE, "EMBED_API_KEY", EMBED_API_KEY)
     embed_client = EmbedClient(
-        base_url=EMBED_BASE_URL,
+        base_url=embed_base_url,
         model=EMBED_MODEL,
         api_key=EMBED_API_KEY,
         timeout_secs=EMBED_TIMEOUT_SECS,
     )
-    # An empty ``*_BASE_URL`` lets the SDK read its own env var
-    # (``OPENAI_BASE_URL``, ``ANTHROPIC_BASE_URL``, ``CO_API_URL``),
-    # which bypasses the config-load userinfo guard above. Re-check the
-    # resolved endpoint before it reaches the startup log or an error.
-    _reject_url_userinfo("EMBED_BASE_URL (or the SDK's OPENAI_BASE_URL)", embed_client.base_url)
+    # Re-check the endpoint the client resolved before it reaches the
+    # startup log or an error.
+    _reject_url_userinfo("EMBED_BASE_URL", embed_client.base_url)
 
     inference_client: InferenceClient | None = None
     prompt_budget: PromptBudget | None = None
@@ -589,30 +641,24 @@ def main():
         )
         inference_client = InferenceClient.create(
             mode=INFERENCE_MODE,
-            base_url=INFERENCE_BASE_URL,
+            base_url=inference_base_url,
             model=INFERENCE_MODEL,
             api_key=INFERENCE_API_KEY,
             max_tokens=INFERENCE_MAX_TOKENS,
             timeout_secs=INFERENCE_TIMEOUT_SECS,
         )
-        _reject_url_userinfo(
-            "INFERENCE_BASE_URL (or the SDK's OPENAI_BASE_URL / ANTHROPIC_BASE_URL)",
-            inference_client.base_url,
-        )
+        _reject_url_userinfo("INFERENCE_BASE_URL", inference_client.base_url)
 
     reranker: CohereReranker | None = None
     if RERANK_MODE == "cohere":
         _require_env("RERANK_MODE", RERANK_MODE, "RERANK_MODEL", RERANK_MODEL)
         _require_env("RERANK_MODE", RERANK_MODE, "RERANK_API_KEY", RERANK_API_KEY)
-        # The Cohere SDK exposes its resolved URL only through private
-        # API, so check the env var it falls back to directly.
-        _reject_url_userinfo(
-            "RERANK_BASE_URL (or the SDK's CO_API_URL)",
-            RERANK_BASE_URL or os.environ.get("CO_API_URL", ""),
-        )
+        # Always set: ``default`` resolves to Cohere's official URL.
+        rerank_endpoint = rerank_base_url
+        _reject_url_userinfo("RERANK_BASE_URL", rerank_endpoint)
         reranker = CohereReranker(
             RerankConfig(
-                base_url=RERANK_BASE_URL,
+                base_url=rerank_base_url,
                 model=RERANK_MODEL,
                 api_key=RERANK_API_KEY,
                 candidates=RERANK_CANDIDATES,
@@ -639,7 +685,7 @@ def main():
     run_startup_identity_check(
         db,
         lambda: EmbedClient(
-            base_url=EMBED_BASE_URL,
+            base_url=embed_base_url,
             model=EMBED_MODEL,
             api_key=EMBED_API_KEY,
             timeout_secs=EMBED_TIMEOUT_SECS,
@@ -722,10 +768,9 @@ def main():
     log.info(f"  SQLite:   {SQLITE_PATH}")
     log.info(f"  Embed mode:     {EMBED_MODE}")
     # Surface the resolved wire endpoint, not the raw env var.
-    # ``EMBED_BASE_URL=""`` intentionally means "use the SDK default"
-    # (OpenAI proper) — printing the empty string hides that an
-    # unauthenticated host-side server isn't actually being used and
-    # the request is going to api.openai.com. ``EmbedClient.base_url``
+    # ``EMBED_BASE_URL=default`` means "use the SDK default" (OpenAI
+    # proper) — printing the raw value would hide that the request is
+    # going to api.openai.com. ``EmbedClient.base_url``
     # reads the URL back from the SDK after fallback resolution,
     # matching the inference / rerank log lines below.
     log.info(f"  Embed:          {embed_client.base_url} (model={EMBED_MODEL})")
@@ -741,7 +786,7 @@ def main():
     log.info(f"  Rerank mode:    {RERANK_MODE}")
     if reranker is not None:
         log.info(
-            f"  Rerank:         {RERANK_BASE_URL or '(SDK default)'} "
+            f"  Rerank:         {rerank_endpoint} "
             f"(model={RERANK_MODEL}, candidates={RERANK_CANDIDATES})"
         )
     log.info(f"  Transport: streamable-http at {_STREAMABLE_HTTP_PATH} (bearer token required)")
@@ -758,7 +803,7 @@ def main():
         _warn_if_remote_endpoint(
             "RERANK_MODE",
             RERANK_MODE,
-            RERANK_BASE_URL or os.environ.get("CO_API_URL", ""),
+            rerank_endpoint,
             "search queries and retrieved email excerpts",
         )
 

@@ -366,6 +366,27 @@ trim() {
     printf '%s\n' "$value"
 }
 
+# Print an enabled layer's base URL, trimmed, or nothing for ``default``
+# (any case), which selects the SDK's own endpoint. An empty value exits:
+# an API key is not consent to the SDK's default endpoint, because the
+# request body (mail text) is sent before the provider checks the key
+# (owner decision 2026-10-05, #750). The services apply the same rule.
+# Callers assign the output, so the exit status stops the script.
+resolve_base_url() {
+    local name="$1"
+    local value
+    local sdk_host="$3"
+
+    value="$(trim "$2")"
+    if [[ -z "$value" ]]; then
+        printf "ERROR: %s is empty: set it to the provider's URL, or to \`default\` to use the SDK's default endpoint (sends mail to %s).\n" "$name" "$sdk_host" >&2
+        exit 1
+    fi
+    if [[ "$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')" != "default" ]]; then
+        printf '%s\n' "$value"
+    fi
+}
+
 # Read a single KEY=VALUE from .env without shell-sourcing.
 # Shell-sourcing would evaluate command substitutions in values, so a
 # malformed or hostile .env line could execute arbitrary commands from the
@@ -516,17 +537,18 @@ BRIDGE_CERT_FINGERPRINT="$(env_value BRIDGE_CERT_FINGERPRINT)"
 INFERENCE_MODE="$(env_value INFERENCE_MODE)"
 INFERENCE_BASE_URL="$(env_value INFERENCE_BASE_URL)"
 INFERENCE_MODEL="$(env_value INFERENCE_MODEL)"
+INFERENCE_MODEL_TRIMMED="$(env_value_stripped INFERENCE_MODEL)"
 INFERENCE_TIMEOUT_SECS="$(env_value_stripped INFERENCE_TIMEOUT_SECS)"
 INFERENCE_MAX_TOKENS="$(env_value_stripped INFERENCE_MAX_TOKENS)"
 INFERENCE_CONTEXT_TOKENS="$(env_value_stripped INFERENCE_CONTEXT_TOKENS)"
 EMBED_MODE="$(env_value EMBED_MODE)"
 EMBED_BASE_URL="$(env_value EMBED_BASE_URL)"
-EMBED_MODEL="$(env_value EMBED_MODEL)"
+EMBED_MODEL="$(env_value_stripped EMBED_MODEL)"
 EMBED_TIMEOUT_SECS="$(env_value_stripped EMBED_TIMEOUT_SECS)"
 EMBED_WARMUP_TIMEOUT_SECS="$(env_value_stripped EMBED_WARMUP_TIMEOUT_SECS)"
 RERANK_MODE="$(env_value RERANK_MODE)"
 RERANK_BASE_URL="$(env_value RERANK_BASE_URL)"
-RERANK_MODEL="$(env_value RERANK_MODEL)"
+RERANK_MODEL="$(env_value_stripped RERANK_MODEL)"
 RERANK_CANDIDATES="$(env_value_stripped RERANK_CANDIDATES)"
 RERANK_TIMEOUT_SECS="$(env_value_stripped RERANK_TIMEOUT_SECS)"
 INDEXER_PARSE_MAX_BYTES="$(env_value_stripped INDEXER_PARSE_MAX_BYTES)"
@@ -560,7 +582,7 @@ BRIDGE_CERT_FINGERPRINT_HEX="$(printf '%s' "${BRIDGE_CERT_FINGERPRINT_HEX//:/}" 
 }
 
 # ----- INFERENCE -----
-INFERENCE_MODE="$(normalize_mode "${INFERENCE_MODE:-anthropic}")"
+INFERENCE_MODE="$(normalize_mode "${INFERENCE_MODE:-none}")"
 [[ "$INFERENCE_MODE" =~ ^(openai|anthropic|none)$ ]] || {
     echo "ERROR: INFERENCE_MODE must be one of: anthropic, openai, none." >&2
     exit 1
@@ -569,18 +591,22 @@ INFERENCE_MODE="$(normalize_mode "${INFERENCE_MODE:-anthropic}")"
 if [[ "$INFERENCE_MODE" != "none" ]]; then
     # An empty INFERENCE_MODEL becomes Compose's ``claude-sonnet-4-6``,
     # which an OpenAI-compatible endpoint does not serve, so openai mode
-    # must name its model.
-    [[ -n "$INFERENCE_MODEL" || "$INFERENCE_MODE" == "anthropic" ]] || {
+    # must name its model. Only an empty value takes that default:
+    # Compose passes blank space through, which the services read as
+    # missing (models are non-empty after trimming, #750).
+    [[ -n "$INFERENCE_MODEL_TRIMMED" || ( "$INFERENCE_MODE" == "anthropic" && -z "$INFERENCE_MODEL" ) ]] || {
         echo "ERROR: INFERENCE_MODEL must be set when INFERENCE_MODE=$INFERENCE_MODE." >&2
         exit 1
     }
-    # ``INFERENCE_BASE_URL`` may be empty for any enabled mode. Empty
-    # means "use the SDK default" — Anthropic Messages API for
-    # ``anthropic`` mode (``api.anthropic.com``) and OpenAI proper for
-    # ``openai`` mode (``api.openai.com/v1``). The required
-    # ``INFERENCE_API_KEY`` (checked below) is the explicit-intent
-    # signal that makes empty-URL unambiguous — a typo can't produce a
-    # real bearer credential.
+    # ``INFERENCE_BASE_URL`` must be a URL or ``default``: the SDK's
+    # default endpoint, Anthropic Messages API for ``anthropic`` mode
+    # (``api.anthropic.com``) and OpenAI proper for ``openai`` mode
+    # (``api.openai.com/v1``). Empty fails (#750).
+    if [[ "$INFERENCE_MODE" == "anthropic" ]]; then
+        INFERENCE_BASE_URL="$(resolve_base_url INFERENCE_BASE_URL "$INFERENCE_BASE_URL" api.anthropic.com)"
+    else
+        INFERENCE_BASE_URL="$(resolve_base_url INFERENCE_BASE_URL "$INFERENCE_BASE_URL" api.openai.com)"
+    fi
     # Optional inference tuning knobs. Validate only when set so the
     # defaults in mcp-server/src/main.py remain authoritative when the
     # operator leaves the value blank. ``INFERENCE_TIMEOUT_SECS`` must
@@ -618,7 +644,7 @@ if [[ "$INFERENCE_MODE" != "none" ]]; then
         if [[ "$INFERENCE_MODE" == "anthropic" && "${INFERENCE_BASE_URL%/}" == */v1 ]]; then
             echo "ERROR: INFERENCE_BASE_URL must not end with '/v1' when INFERENCE_MODE=anthropic." >&2
             echo "       The Anthropic SDK appends '/v1/messages' itself. Drop the trailing '/v1'" >&2
-            echo "       (e.g. 'https://api.anthropic.com'), or leave the var empty for the SDK default." >&2
+            echo "       (e.g. 'https://api.anthropic.com'), or set it to 'default' for the SDK default." >&2
             exit 1
         fi
     fi
@@ -635,12 +661,11 @@ EMBED_MODE="$(normalize_mode "${EMBED_MODE:-openai}")"
     exit 1
 }
 
-# ``EMBED_BASE_URL`` may be empty: an empty value means "use the SDK
-# default" (OpenAI proper, via the openai SDK's documented fallback).
-# Symmetric with the inference layer. The required ``EMBED_API_KEY``
-# (checked below) is the explicit-intent signal that makes empty-URL
-# unambiguous. ``EMBED_MODEL`` is always required because no SDK has a
-# default model — empty model always fails at request time.
+# ``EMBED_BASE_URL`` must be a URL or ``default`` (OpenAI proper, via
+# the openai SDK's documented fallback); empty fails (#750). Symmetric
+# with the inference layer. ``EMBED_MODEL`` is always required because
+# no SDK has a default model — empty model always fails at request time.
+EMBED_BASE_URL="$(resolve_base_url EMBED_BASE_URL "$EMBED_BASE_URL" api.openai.com)"
 if [[ -n "$EMBED_BASE_URL" ]]; then
     [[ "$EMBED_BASE_URL" =~ ^https?:// ]] || {
         echo "ERROR: EMBED_BASE_URL must start with http:// or https://." >&2
@@ -682,6 +707,8 @@ if [[ "$RERANK_MODE" != "none" ]]; then
         echo "ERROR: RERANK_MODEL must be set when RERANK_MODE=$RERANK_MODE." >&2
         exit 1
     }
+    # A URL for a proxy or gateway, or ``default`` for the Cohere API.
+    RERANK_BASE_URL="$(resolve_base_url RERANK_BASE_URL "$RERANK_BASE_URL" api.cohere.com)"
     if [[ -n "$RERANK_BASE_URL" ]]; then
         [[ "$RERANK_BASE_URL" =~ ^https?:// ]] || {
             echo "ERROR: RERANK_BASE_URL must start with http:// or https://." >&2

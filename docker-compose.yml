@@ -139,11 +139,11 @@ services:
       HOME: /home/indexer
       MAILDIR_PATH: /maildir
       SQLITE_PATH: /data/mail.db
-      # OpenAI-compatible embedder via the openai SDK. EMBED_MODEL and
-      # EMBED_API_KEY are required; EMBED_BASE_URL is optional and an
-      # empty value selects the SDK default (``https://api.openai.com/v1``).
-      # Set EMBED_BASE_URL to point at any other provider that speaks
-      # /v1/embeddings (DeepInfra, OpenRouter, LM Studio, vLLM, TEI, or
+      # OpenAI-compatible embedder via the openai SDK. EMBED_MODEL,
+      # EMBED_API_KEY and EMBED_BASE_URL are required. The value
+      # ``default`` selects the SDK default (``https://api.openai.com/v1``)
+      # and an empty value fails startup (#750). Otherwise set it to
+      # any provider that speaks /v1/embeddings (DeepInfra, OpenRouter, LM Studio, vLLM, TEI, or
       # a host-side mlx_lm.server). Indexer + mcp-server must point at
       # the same provider + model so vectors are comparable.
       # ``EMBED_MODE=openai`` is the only valid value.
@@ -273,16 +273,17 @@ services:
     environment:
       SQLITE_PATH: /data/mail.db
       # INFERENCE_MODE selects the inference client/SDK. For any enabled
-      # mode INFERENCE_MODEL and INFERENCE_API_KEY are required;
-      # INFERENCE_BASE_URL is optional and an empty value selects the
-      # SDK's documented default.
-      # - anthropic (default): Anthropic Messages API via the official
-      #   anthropic SDK. Empty INFERENCE_BASE_URL -> api.anthropic.com.
+      # mode INFERENCE_MODEL, INFERENCE_API_KEY and INFERENCE_BASE_URL
+      # are required; INFERENCE_BASE_URL=default selects the SDK's
+      # documented default and an empty value fails startup (#750).
+      # - anthropic: Anthropic Messages API via the official anthropic
+      #   SDK. INFERENCE_BASE_URL=default -> api.anthropic.com.
       # - openai: OpenAI-compatible chat completions via the official
-      #   openai SDK. Empty INFERENCE_BASE_URL -> api.openai.com/v1;
-      #   set it for any other provider or a host-side server.
-      # - none: intelligence tools are not registered.
-      INFERENCE_MODE: ${INFERENCE_MODE:-anthropic}
+      #   openai SDK. INFERENCE_BASE_URL=default -> api.openai.com/v1;
+      #   set a URL for any other provider or a host-side server.
+      # - none (default): intelligence tools are not registered, and
+      #   nothing is sent to an inference provider.
+      INFERENCE_MODE: ${INFERENCE_MODE:-none}
       INFERENCE_BASE_URL: ${INFERENCE_BASE_URL}
       INFERENCE_MODEL: ${INFERENCE_MODEL:-claude-sonnet-4-6}
       # Per-operation HTTP timeout for inference completions (seconds):

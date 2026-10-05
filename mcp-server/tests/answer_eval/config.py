@@ -4,15 +4,17 @@ Two layers, each in the repository's ``{LAYER}_MODE`` / ``_BASE_URL`` /
 ``_MODEL`` / ``_API_KEY`` shape and read independently:
 
 - ``INFERENCE_*``: the answering model under test, as the server reads
-  it (``anthropic`` or ``openai``; the evaluation needs one).
+  it (``anthropic`` or ``openai``; the evaluation needs one, and the
+  mode defaults to ``none`` as for the server).
 - ``JUDGE_*``: the grader (``anthropic``, ``openai`` or ``none``, the
   default). It never reads the answerer's variables or key file, so the
   judge cannot silently inherit the answerer's provider or credential,
   and there is no fallback between modes.
 
-An enabled layer needs a non-empty model and key; an empty base URL
-means the SDK's documented default (Anthropic API, OpenAI proper), as
-for the server's layers. The key comes from ``<secrets_dir>/<layer>
+An enabled layer needs a non-empty model, key and base URL; the base
+URL ``default`` means the SDK's documented default (Anthropic API,
+OpenAI proper) and an empty one is refused, as for the server's layers
+(#750). The key comes from ``<secrets_dir>/<layer>
 _api_key.txt``, which must be mode 600, or, for local development only,
 the ``{LAYER}_API_KEY`` environment variable. Keys are never logged,
 written to a report or taken as a command argument.
@@ -34,8 +36,10 @@ from src.lib.inference import (
 )
 
 ENABLED_MODES = frozenset({"anthropic", "openai"})
-# The variable each SDK reads for its endpoint when none is passed.
+# The variable each SDK reads for its endpoint when none is passed, and
+# the host it uses when that variable is unset too.
 _SDK_BASE_URL_VARS = {"anthropic": "ANTHROPIC_BASE_URL", "openai": "OPENAI_BASE_URL"}
+_SDK_DEFAULT_HOSTS = {"anthropic": "api.anthropic.com", "openai": "api.openai.com"}
 # Hosts that keep a provider call on this machine (as ``main.py``'s
 # privacy warning counts them).
 _HOST_LOCAL = frozenset({"127.0.0.1", "::1", "localhost", "host.docker.internal"})
@@ -136,10 +140,9 @@ def load_layer(
 ) -> LayerConfig | None:
     """The ``layer``'s configuration, or ``None`` when its mode is ``none``.
 
-    ``INFERENCE`` must be enabled; ``JUDGE`` defaults to ``none``.
+    Both modes default to ``none``; ``INFERENCE`` must be enabled.
     """
-    default_mode = "anthropic" if layer == "INFERENCE" else "none"
-    mode = env.get(f"{layer}_MODE", default_mode).strip().lower()
+    mode = env.get(f"{layer}_MODE", "none").strip().lower()
     if mode == "none":
         if layer == "INFERENCE":
             raise ConfigError("the answer evaluation needs INFERENCE_MODE=anthropic or openai")
@@ -147,9 +150,16 @@ def load_layer(
     if mode not in ENABLED_MODES:
         raise ConfigError(f"{layer}_MODE must be one of: anthropic, none, openai")
     base_url = env.get(f"{layer}_BASE_URL", "").strip()
+    if not base_url:
+        raise ConfigError(
+            f"{layer}_BASE_URL is empty: set it to the provider's URL, or to `default` "
+            f"to use the SDK's default endpoint (sends prompts to {_SDK_DEFAULT_HOSTS[mode]})."
+        )
+    if base_url.lower() == "default":
+        base_url = ""
     if base_url and "@" in urllib.parse.urlsplit(base_url).netloc:
         raise ConfigError(f"{layer}_BASE_URL must not embed credentials (user:pass@host)")
-    # With an empty base URL the SDK would read its own endpoint variable,
+    # With ``default`` the SDK would read its own endpoint variable,
     # and the report would call a custom endpoint "sdk-default".
     ambient = _SDK_BASE_URL_VARS[mode]
     if not base_url and env.get(ambient, "").strip():

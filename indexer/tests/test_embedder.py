@@ -140,12 +140,10 @@ class TestOpenAIEmbedder:
         assert emb.base_url == "http://x:8001/v1"
 
     def test_empty_base_url_falls_back_to_sdk_default(self):
-        # ``EMBED_BASE_URL=""`` is intentional: it means "use the SDK
-        # default" (OpenAI proper). The required non-empty
-        # ``EMBED_API_KEY`` is the explicit-intent signal that makes
-        # the interpretation unambiguous. Symmetric with the
-        # mcp-server ``EmbedClient`` and ``_OpenAIBackend`` behavior,
-        # and with ``INFERENCE_MODE=anthropic``'s empty-URL fallback.
+        # An empty ``base_url`` is what startup passes for an explicit
+        # ``EMBED_BASE_URL=default`` (#750): "use the SDK default"
+        # (OpenAI proper). Symmetric with the mcp-server
+        # ``EmbedClient`` and ``_OpenAIBackend`` behavior.
         emb = _make_embedder(base_url="")
         # After construction the SDK has resolved its fallback chain
         # (``OPENAI_BASE_URL`` env → ``https://api.openai.com/v1``).
@@ -157,7 +155,7 @@ class TestOpenAIEmbedder:
         assert emb.base_url.startswith("https://api.openai.com/")
 
     def test_inherited_endpoint_with_userinfo_is_rejected(self, monkeypatch, caplog):
-        """#339: an empty ``EMBED_BASE_URL`` lets the SDK read
+        """#339: ``EMBED_BASE_URL=default`` lets the SDK read
         ``OPENAI_BASE_URL``, which skipped the startup userinfo check, and
         the resolved URL reaches the startup log and error messages. The
         embedder rejects it once resolved, without echoing the URL."""

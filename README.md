@@ -25,7 +25,7 @@ host-side server you install yourself.
 | mbsync | Incremental pull-only sync to local Maildir, every `SYNC_INTERVAL` seconds |
 | Indexer | Parses threads, generates embeddings, builds SQLite index |
 | Embedder (operator-supplied) | OpenAI-compatible `/v1/embeddings` returning 4096-dim vectors (the schema's fixed width — e.g. Qwen3-Embedding-8B). Point `EMBED_BASE_URL` at a remote provider (DeepInfra, OpenRouter) or a host-side server you install yourself (LM Studio, vLLM, TEI, `mlx_lm.server`) |
-| Inference (operator-supplied) | Anthropic-compatible Messages API by default (`INFERENCE_MODE=anthropic`); switch to `INFERENCE_MODE=openai` for any OpenAI-compatible chat-completions endpoint at `INFERENCE_BASE_URL` |
+| Inference (operator-supplied) | Off by default (`INFERENCE_MODE=none`); `INFERENCE_MODE=anthropic` for an Anthropic-compatible Messages API, or `INFERENCE_MODE=openai` for any OpenAI-compatible chat-completions endpoint, at `INFERENCE_BASE_URL` |
 | SQLite (FTS5 + sqlite-vec) | Hybrid keyword + vector search index |
 | MCP Server | Exposes tools to MCP clients over Streamable HTTP at `127.0.0.1:3000/mcp` |
 
@@ -98,11 +98,17 @@ Edit `.env` to point at the providers you want to use:
   The schema reserves a fixed 4096-dim vector — pick a model that
   produces 4096-dim vectors (Qwen3-Embedding-8B variants) or run a
   schema migration.
-- `INFERENCE_MODE` — `anthropic` (default) uses the official
-  `anthropic` SDK against the Messages API; `openai` uses the
-  official `openai` SDK against any OpenAI-compatible chat-completions
-  endpoint at `INFERENCE_BASE_URL`; `none` skips the intelligence
-  tools.
+- `INFERENCE_MODE` — `none` (default) skips the intelligence
+  tools; `anthropic` uses the official `anthropic` SDK against the
+  Messages API; `openai` uses the official `openai` SDK against any
+  OpenAI-compatible chat-completions endpoint at `INFERENCE_BASE_URL`.
+- Every enabled layer's `{LAYER}_BASE_URL` is required: the provider's
+  URL, or `default` for the SDK's default endpoint (api.anthropic.com,
+  api.openai.com, api.cohere.com). An empty value stops startup
+  (#750). **Upgrading:** an existing `.env` with an enabled layer and
+  an empty `*_BASE_URL` must add `*_BASE_URL=default` (or the URL), and
+  one that relied on the old `INFERENCE_MODE=anthropic` default must
+  set it explicitly.
 - `RERANK_MODE` — `cohere` enables Cohere rerank via the official
   `cohere` SDK; `none` (default) returns RRF order directly.
 - API keys go in `.secrets/inference_api_key.txt`,
@@ -216,7 +222,8 @@ The MCP server's intelligence tools (`ask_mailbox`, `summarize_thread`,
 
 | Mode | What happens to retrieved email content |
 |---|---|
-| `anthropic` (default) | Sent to the Anthropic-compatible Messages API at `INFERENCE_BASE_URL`. Requires `.secrets/inference_api_key.txt`. |
+| `none` (default) | Intelligence tools are not registered; nothing is sent to an inference provider. |
+| `anthropic` | Sent to the Anthropic-compatible Messages API at `INFERENCE_BASE_URL` (`default` = api.anthropic.com). Requires `.secrets/inference_api_key.txt`. |
 | `openai` | Sent to the OpenAI-compatible chat-completions endpoint at `INFERENCE_BASE_URL`. If that endpoint is a host-side server you install yourself (LM Studio, vLLM, `mlx_lm.server`), retrieved chunks stay on your machine; if it's a remote provider, they ship to that provider. |
 
 Reranking is a separate, opt-in stage of hybrid search, controlled by
@@ -264,8 +271,8 @@ still send queries and retrieved email content to the embed, inference
 and (when enabled) rerank endpoints you configured, and the indexer
 sends message text to the embed endpoint. Nothing leaves your laptop
 only when every enabled layer's `{LAYER}_BASE_URL` points at a
-host-side server; an empty base URL selects the SDK's remote default
-(Anthropic, OpenAI or Cohere).
+host-side server; the value `default` selects the SDK's remote default
+(Anthropic, OpenAI or Cohere), and an empty one fails startup.
 
 Most users accept the Claude-Desktop-as-frontend tradeoff because the
 alternative is much less useful, but it is a real tradeoff and it is not
