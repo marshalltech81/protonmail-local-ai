@@ -760,11 +760,17 @@ steps, and once at startup before the embedder wait). Images rebuilt
 from `main`; mbsync restarted on the new image; `/maildir/Starred`
 removed and confirmed absent after a sync. Open: #749 (#720, no embed
 request after a concurrent failure). #748 filed (P3, test-only, from
-#745 round 3). Nothing else in the backlog changes what the index
-stores in a way that would need a re-embed later, so the rebuild is not
-blocked; record peak memory, tmpfs and disk growth during it (#488) and
-check completeness by queue status (pending, retrying, dead, skipped),
-not health alone.
+#745 round 3). **The rebuild waits only on #754** (oldest-first
+initial scan, below); nothing else in the backlog changes what the
+index stores in a way that would need a re-embed later. During it,
+record peak memory, tmpfs and disk growth (#488). At the end, check
+completeness rather than health alone: `get_mailbox_status` queue
+counts (`pending`, `retrying` and `dead` must be 0 or explained), and
+account for Maildir files that were not indexed on purpose. Those
+leave no queue row: T-flagged (trashed) files the walk skips in mirror
+mode, files with no `Message-ID`, and files that moved mid-index (the
+indexer's `skipped:` log lines; the renamed file is indexed under its
+new path).
 
 #699 (index order), decided by the owner: the initial scan indexes
 **oldest first** across every folder, with no setting (#754). Newest
