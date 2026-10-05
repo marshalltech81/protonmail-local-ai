@@ -140,8 +140,8 @@ in `tests/test_agent_metrics.py`; `tests/test_agent_eval.py` also
 mutates reference traces into the failures the new categories exist
 to catch and checks each is caught.
 
-Four categories need more than thread-level scoring (the fourth,
-counting, has its own section below):
+Five categories need more than thread-level scoring (counting and
+outstanding items have their own sections below):
 
 - **Corrections** (`correction`): a later reply corrects an earlier
   message (the recital date in `t24`, the revised salary offer in
@@ -232,6 +232,77 @@ separately.
 - Incomplete indexing cannot be exercised on the fully built baseline
   index, so whether an answer discloses it is untested.
 
+### Outstanding items (`outstanding_items`, #798)
+
+"What outstanding items do Avery Cole or Blair Reed owe me, including
+anything that needs follow-up, since January 1, 2026?", asked on
+2026-10-05 (America/New_York) about corpus threads 46-65: fourteen
+matters of a fictional owners' association (a letter sent but
+compliance unchecked, an invoice paid but its allocation open, half of
+a two-part question answered, a closure in another thread from
+management, a reopened matter, answers below a signature delimiter, an
+attachment-only due date, a disputed status, a revised due date, a
+phone call with no recorded outcome, an identity decoy, a prompt
+injection) plus the paging, cap, extraction and date boundaries. The
+held-out variant `marina-counsel-follow-ups` (threads 66-74) asks the
+same about Sasha Ortiz and Emery Vance with different names, wording,
+thread structure and evidence placement.
+
+The ground truth is in `outstanding_items.json`, beside the scenarios
+and never given to an answering agent (only the scenario's `question`
+is). It is scored at the next-action level: each action has an owner,
+a status (`open`, `waiting`, `disputed`, `unknown`, or `closed` to be
+excluded), a due date only where the mail supports one, the messages a
+conclusion must cite, superseded evidence, and `known_loss` where the
+tools cannot return its evidence. The trace's answer records, like
+`count` and `abstained`, structured fields: `items` (outstanding
+actions, each naming its ground-truth `action` with `owner`, `status`,
+`due` and `cited`), `excluded` (actions found closed, with `cited`),
+`complete` (a claim that nothing was left unread) and `limitations`
+(messages it could not read). Matching a live answer's prose to action
+IDs is a labelling step this harness does not automate.
+
+Scores (`tests/agent_metrics.py`): action recall and precision (a
+duplicate item for one action, an item for a closed action or one
+outside the truth is a false item; a `known_loss` action counts as
+found when listed or when one of its sources is named in
+`limitations`), owner and status accuracy, closures supported (an
+outstanding action excluded or marked closed fails), deadlines
+supported (a due date other than the truth's, a superseded one
+included, fails; leaving one out does not), conclusion citation
+support (each conclusion cites a required source of its action, and a
+superseded source is not one), required evidence coverage (every
+required source the tools can return is in some result, so one only
+on a later `query_messages` page counts only once that page is read),
+forbidden sources avoided (the decoy, the injection, mail outside the
+window), full reads (as for counting), and completeness-claim
+truthfulness (`complete: true` fails while a completeness blocker
+exists, coverage is short or a full read is unfinished; otherwise every
+blocker must be named in `limitations`).
+
+`tests/test_agent_eval.py` mutates the reference trace into each
+failure the scenario exists to catch: a skipped page, a superseded due
+date cited, a wrong owner, a closure because the letter went out, the
+injection followed, the decoy merged, a quoted request counted twice,
+the adopted policy counted as outstanding, completeness claimed despite
+the failed extraction, and a long message read to page 1. Each is
+caught; without the outstanding-items scorer, nine of the ten are not.
+
+Layer A, `tests/baseline/test_outstanding_items_baseline.py`, runs in
+`make baseline` and checks on the built index which layers hold each
+decisive passage (see `tests/baseline/README.md`).
+
+**What this case does not prove.** The reference traces are scripted
+from the real tools' output on the built index; they show the scorers
+catch these mistakes, not that any agent avoids them. Two planted facts
+are unreachable through every tool today, and the traces disclose them
+as limitations instead of finding them: Blair's answers below the
+`-- ` signature delimiter (t54.2) and Sasha's update inside a forward
+(t67.1), both dropped from the indexed body (#795). The corpus cannot
+express a delayed delivery (`occurred_at`): the answer-evaluation
+runner's synthetic-index check requires every message's `occurred_at`
+to be null, so the date boundary is tested on `sent_at` only.
+
 ### Held-out split
 
 About one scenario in four is held out: `is_held_out` in
@@ -253,6 +324,31 @@ by the answer-quality evaluation below; answers on your own mailbox stay
 a manual grade (your `eval-queries.md`, which `.gitignore` keeps out of
 the repository). No recorder for a live client's trace exists yet, so
 the reference traces are the only traces scored today.
+
+### Live agent runs (layer C): not implemented
+
+No live tool-using agent harness exists (#283, #775, #798). Every
+scored trace is scripted, so nothing here measures what a real agent
+does with the tools; `make eval-answers` runs only `ask_mailbox`'s own
+model, not an agent choosing tools.
+
+The smallest extension, proposed and not built:
+
+- A recorder: a pass-through MCP server in front of an mcp-server
+  instance serving the synthetic baseline index (`make baseline`'s
+  build, never a real mailbox). For each `tools/call` it appends the
+  tool name, arguments and the result's `structuredContent` to a trace
+  in the format above, and nothing else.
+- An opt-in make target (for example `make eval-agent`) that builds the
+  index, starts the server and recorder on loopback, and lets the
+  operator point a tool-using client at it with a scenario's
+  `question`. Provider calls happen only under that target, through the
+  client's own configured model; CI never runs it.
+- The answer's structured fields (`items`, `excluded`, `complete`,
+  `limitations`, `count`, `abstained`) are labelled by hand after the
+  run (or by a later structured-output step), then the trace is scored
+  by `score_trace`. Recorded traces stay git-ignored, like
+  `.answer-eval/`.
 
 ## Answer-quality evaluation (`ask_mailbox`, synthetic corpus)
 

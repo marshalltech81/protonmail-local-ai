@@ -1,5 +1,5 @@
 {
-  "_comment": "Golden questions for the synthetic baseline mailbox (indexer/tests/baseline/corpus.py). Thread refs 'tNN' mean 'tNN.1@baseline.example'; message refs 'tNN.M' mean 'tNN.M@baseline.example'. required_evidence is a list of groups: every group is required, and any one thread in a group satisfies it. max_rank (1-based) bounds the first hit from any group; groups missing from the top 10 lower evidence recall instead. The recall floors are the hashed embedder's measured values rounded down: wiring checks, not semantic quality. vector_only questions must be answerable only by the vector lanes. unanswerable questions have no answer in the corpus: none of their absent_terms occurs in any message's subject, body or attachment (case-insensitive), and an abstaining agent must have asked for one of them.",
+  "_comment": "Golden questions for the synthetic baseline mailbox (indexer/tests/baseline/corpus.py). Thread refs 'tNN' mean 'tNN.1@baseline.example'; message refs 'tNN.M' mean 'tNN.M@baseline.example'. required_evidence is a list of groups: every group is required, and any one thread in a group satisfies it. max_rank (1-based) bounds the first hit from any group; groups missing from the top 10 lower evidence recall instead. The recall floors are the hashed embedder's measured values rounded down: wiring checks, not semantic quality. vector_only questions must be answerable only by the vector lanes. unanswerable questions have no answer in the corpus: none of their absent_terms occurs in any message's subject, body or attachment (case-insensitive), and an abstaining agent must have asked for one of them. evidence_queries are get_evidence queries the outstanding-items reachability checks (#798) make; the build embeds them and they rank nothing in the snapshot.",
   "floors": {
     "mrr": 0.9,
     "evidence_recall_at_10": 1.0,
@@ -49,11 +49,12 @@
     {"id": "sender", "args": {"sender": "adjuster@keystoneins.example"}, "expect": ["t10.1", "t10.3"]},
     {"id": "recipient", "args": {"recipient": "bookclub@readers.example"}, "expect": ["t13.1", "t13.2"]},
     {"id": "participant-cc", "args": {"participant": "ravi@neighbors.example"}, "expect": ["t18.1", "t18.2", "t20.2"]},
-    {"id": "folder-sent", "args": {"folder": "Sent"}, "expect": ["t01.2", "t02.2", "t05.2", "t06.2", "t10.2", "t11.2", "t15.2", "t17.2", "t18.1", "t20.2"]},
-    {"id": "has-attachments", "args": {"has_attachments": true}, "expect": ["t01.1", "t03.1", "t10.2", "t14.1", "t23.1"]},
+    {"id": "folder-sent", "args": {"folder": "Sent", "date_to": "2025-12-31"}, "expect": ["t01.2", "t02.2", "t05.2", "t06.2", "t10.2", "t11.2", "t15.2", "t17.2", "t18.1", "t20.2"], "_comment": "Bounded to before 2026 since the outstanding-items threads (46-74, #798) added 2026 sent mail."},
+    {"id": "has-attachments", "args": {"has_attachments": true, "date_to": "2025-12-31"}, "expect": ["t01.1", "t03.1", "t10.2", "t14.1", "t23.1"], "_comment": "Bounded like folder-sent."},
     {"id": "date-range", "args": {"date_from": "2024-05-01", "date_to": "2024-05-31"}, "expect": ["t08.1", "t09.1", "t13.1", "t13.2", "t17.1", "t17.2", "t17.3"]},
     {"id": "text-stemmed", "args": {"text": "resurfacing"}, "expect": ["t04.1", "t05.1"]}
   ],
+  "evidence_queries": ["stipulated dismissal filing", "berth-lease template comments", "engagement amendment scope"],
   "unanswerable": [
     {"id": "cabin-wifi", "absent_terms": ["wifi", "wi-fi", "wireless", "internet"]},
     {"id": "electrician-quote", "absent_terms": ["electric", "breaker"]}

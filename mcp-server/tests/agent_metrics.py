@@ -41,7 +41,12 @@ synthetic mailbox) and a trace of the calls an agent made, score
   ``next_offset`` to a page with none;
 - **forbidden text**: whether ``answer.text`` is free of every
   ``forbidden_answer_text`` string (case-insensitive substring; a value
-  reformatted with spaces or dashes is not caught).
+  reformatted with spaces or dashes is not caught);
+- **outstanding items** (scenarios with an ``outstanding`` ground
+  truth, #798): action recall and precision, owner and status
+  accuracy, supported closures and deadlines, conclusion citation
+  support, required evidence coverage, forbidden sources avoided and
+  completeness-claim truthfulness (``_score_outstanding``).
 
 Nothing here judges whether the answer's prose is right: answer quality
 is graded by hand (``tests/eval/README.md``). A valid citation shows
@@ -124,6 +129,51 @@ def is_held_out(scenario_id: str) -> bool:
 
 
 @dataclass(frozen=True)
+class OutstandingAction:
+    """One next action in an outstanding-items ground truth (#798).
+
+    ``status`` is ``open``, ``waiting``, ``disputed``, ``unknown`` (all
+    outstanding) or ``closed`` (to be excluded). ``due`` is the due date
+    the mail supports (ISO date), or ``None`` when it supports none.
+    ``required_sources`` are message IDs a conclusion about the action
+    must cite (any one of them); ``superseded_sources`` hold evidence a
+    later message replaced, which never supports it. ``known_loss`` names
+    the issue under which the tools cannot return the action's evidence;
+    such an action counts as found when the answer lists it or names one
+    of its sources among its limitations.
+    """
+
+    id: str
+    owner: str
+    status: str
+    due: str | None
+    required_sources: list[str]
+    superseded_sources: list[str] = field(default_factory=list)
+    known_loss: str | None = None
+
+    @property
+    def outstanding(self) -> bool:
+        return self.status != "closed"
+
+
+@dataclass(frozen=True)
+class OutstandingTruth:
+    """Ground truth of an outstanding-items scenario.
+
+    ``forbidden_sources`` are messages no conclusion may cite (a decoy
+    sharing counsel's display name, a prompt injection, mail outside the
+    window). ``completeness_blockers`` are messages whose decisive
+    content the tools cannot return (a failed attachment extraction,
+    text the indexer stripped): an answer must name each among its
+    limitations and must not claim to be complete.
+    """
+
+    actions: list[OutstandingAction]
+    forbidden_sources: list[str] = field(default_factory=list)
+    completeness_blockers: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
 class Scenario:
     """One question an agent should answer with the tools.
 
@@ -152,6 +202,7 @@ class Scenario:
     expected_answer_messages: list[str] = field(default_factory=list)
     full_read_messages: list[str] = field(default_factory=list)
     forbidden_answer_text: list[str] = field(default_factory=list)
+    outstanding: OutstandingTruth | None = None
 
 
 @dataclass(frozen=True)
@@ -176,6 +227,16 @@ class AgentScore:
     answer_count_correct: bool | None = None
     full_read_recall: float | None = None
     forbidden_text_absent: bool | None = None
+    action_recall: float | None = None
+    action_precision: float | None = None
+    owner_accuracy: float | None = None
+    status_accuracy: float | None = None
+    closures_supported: bool | None = None
+    deadlines_supported: bool | None = None
+    conclusion_citation_support: float | None = None
+    required_evidence_coverage: float | None = None
+    forbidden_sources_avoided: bool | None = None
+    completeness_claim_truthful: bool | None = None
 
     @property
     def failures(self) -> list[str]:
@@ -189,6 +250,10 @@ class AgentScore:
             "answer_messages_exact",
             "answer_count_correct",
             "forbidden_text_absent",
+            "closures_supported",
+            "deadlines_supported",
+            "forbidden_sources_avoided",
+            "completeness_claim_truthful",
         ):
             if getattr(self, name) is False:
                 failed.append(name)
@@ -199,6 +264,12 @@ class AgentScore:
             "message_citation_recall",
             "enumeration_recall",
             "full_read_recall",
+            "action_recall",
+            "action_precision",
+            "owner_accuracy",
+            "status_accuracy",
+            "conclusion_citation_support",
+            "required_evidence_coverage",
         ):
             value = getattr(self, name)
             if value is not None and value < 1.0:
@@ -364,6 +435,107 @@ def _fully_read(calls: Sequence[dict]) -> set[str]:
     return read
 
 
+def _score_outstanding(
+    truth: OutstandingTruth,
+    answer: dict,
+    message_of: dict[str, str],
+    full_read_recall: float | None,
+) -> dict[str, Any]:
+    """The outstanding-items scores of ``answer`` (see ``score_trace``).
+
+    The answer lists ``items`` (outstanding next actions) and
+    ``excluded`` (actions it found closed), each naming its ground-truth
+    ``action`` and the IDs it ``cited``; items also give ``owner``,
+    ``status`` and ``due``. ``complete`` is the answer's claim that
+    nothing was left unread, and ``limitations`` names the messages it
+    could not read. A cited or named ID counts as the message a tool
+    result returned it with; anything else names nothing.
+    """
+    by_id = {a.id: a for a in truth.actions}
+    outstanding = [a for a in truth.actions if a.outstanding]
+    items: list[dict] = answer.get("items", [])
+    excluded: list[dict] = answer.get("excluded", [])
+
+    def messages(ids: list[str]) -> set[str]:
+        return {message_of[i] for i in ids if i in message_of}
+
+    limitations = messages(answer.get("limitations", []))
+
+    # Each outstanding action once; a second item for it (a duplicate task
+    # from a request quoted in several replies) or an item for a closed,
+    # unknown or forbidden action is a false item.
+    first_item: dict[str, dict] = {}
+    for item in items:
+        action = by_id.get(item.get("action", ""))
+        if action is not None and action.outstanding and action.id not in first_item:
+            first_item[action.id] = item
+    found = [
+        a
+        for a in outstanding
+        if a.id in first_item or (a.known_loss and limitations & set(a.required_sources))
+    ]
+    matched = [(by_id[a], item) for a, item in first_item.items()]
+
+    # Closing an outstanding action: listing it as excluded, or as an item
+    # whose status says closed.
+    closures_supported = not any(
+        (a := by_id.get(entry.get("action", ""))) is not None and a.outstanding
+        for entry in excluded
+    ) and not any(item.get("status") == "closed" for _, item in matched)
+
+    # A due date the ground truth does not hold (a superseded one, or one
+    # on an action with none) is invented; leaving one out is not.
+    deadlines_supported = all(
+        item.get("due") is None
+        or ((a := by_id.get(item.get("action", ""))) is not None and item["due"] == a.due)
+        for item in items
+    )
+
+    # Every conclusion must cite a required source of its action; a
+    # superseded source is not one.
+    conclusions = items + excluded
+    supported = sum(
+        1
+        for entry in conclusions
+        if (a := by_id.get(entry.get("action", ""))) is not None
+        and messages(entry.get("cited", [])) & set(a.required_sources)
+    )
+    cited = set().union(*(messages(e.get("cited", [])) for e in conclusions))
+
+    # Every required source the tools can return must be in some result;
+    # one only on a later query page counts only once that page was read.
+    required = {m for a in truth.actions if not a.known_loss for m in a.required_sources}
+    seen = set(message_of.values())
+    coverage = len(required & seen) / len(required) if required else 1.0
+
+    blockers = set(truth.completeness_blockers)
+    if answer.get("complete") is True:
+        truthful = not blockers and coverage == 1.0 and full_read_recall in (None, 1.0)
+    else:
+        truthful = blockers <= limitations
+
+    return {
+        "action_recall": len(found) / len(outstanding) if outstanding else 1.0,
+        "action_precision": len(first_item) / len(items) if items else None,
+        "owner_accuracy": (
+            sum(item.get("owner") == a.owner for a, item in matched) / len(matched)
+            if matched
+            else None
+        ),
+        "status_accuracy": (
+            sum(item.get("status") == a.status for a, item in matched) / len(matched)
+            if matched
+            else None
+        ),
+        "closures_supported": closures_supported,
+        "deadlines_supported": deadlines_supported,
+        "conclusion_citation_support": supported / len(conclusions) if conclusions else None,
+        "required_evidence_coverage": coverage,
+        "forbidden_sources_avoided": not cited & set(truth.forbidden_sources),
+        "completeness_claim_truthful": truthful,
+    }
+
+
 def score_trace(scenario: Scenario, trace: dict) -> AgentScore:
     """Score one trace against its scenario."""
     if trace.get("scenario") != scenario.id:
@@ -465,6 +637,10 @@ def score_trace(scenario: Scenario, trace: dict) -> AgentScore:
             value.casefold() in text for value in scenario.forbidden_answer_text
         )
 
+    outstanding: dict[str, Any] = {}
+    if scenario.outstanding is not None:
+        outstanding = _score_outstanding(scenario.outstanding, answer, message_of, full_read_recall)
+
     signatures = [json.dumps([c["tool"], c["arguments"]], sort_keys=True) for c in calls]
     repeated = len(signatures) - len(set(signatures))
 
@@ -487,6 +663,7 @@ def score_trace(scenario: Scenario, trace: dict) -> AgentScore:
         answer_count_correct=answer_count_correct,
         full_read_recall=full_read_recall,
         forbidden_text_absent=forbidden_text_absent,
+        **outstanding,
     )
 
 
@@ -520,6 +697,16 @@ def _aggregates(scores: Sequence[AgentScore]) -> list[str]:
         f"Answer count correct: {_rate(present('answer_count_correct'))}",
         f"Full-read recall:    {_mean(present('full_read_recall'))}",
         f"Forbidden text absent: {_rate(present('forbidden_text_absent'))}",
+        f"Action recall:       {_mean(present('action_recall'))}",
+        f"Action precision:    {_mean(present('action_precision'))}",
+        f"Owner accuracy:      {_mean(present('owner_accuracy'))}",
+        f"Status accuracy:     {_mean(present('status_accuracy'))}",
+        f"Closures supported:  {_rate(present('closures_supported'))}",
+        f"Deadlines supported: {_rate(present('deadlines_supported'))}",
+        f"Conclusion citation support: {_mean(present('conclusion_citation_support'))}",
+        f"Required evidence coverage: {_mean(present('required_evidence_coverage'))}",
+        f"Forbidden sources avoided: {_rate(present('forbidden_sources_avoided'))}",
+        f"Completeness claim truthful: {_rate(present('completeness_claim_truthful'))}",
         f"Extra calls:         {sum(s.extra_calls for s in scores)}",
         f"Repeated calls:      {sum(s.repeated_calls for s in scores)}",
         f"Clean:               {_rate([not s.failures for s in scores])}",
@@ -576,6 +763,10 @@ def load_scenarios(path: Path, golden_path: Path) -> list[Scenario]:
     may then name no golden question; ``full_read_messages`` must be
     among them, and ``forbidden_answer_text`` must be non-blank strings.
     ``make baseline`` checks these against the index.
+
+    An ``outstanding_items`` row names no golden question and no
+    counting fields: its ground truth, full reads included, is read from
+    ``OUTSTANDING_TRUTH_FILE`` beside ``path`` (``_load_outstanding``).
     """
     golden = json.loads(golden_path.read_text(encoding="utf-8"))
     searches = {q["id"]: q for q in golden["search"]}
@@ -607,9 +798,21 @@ def load_scenarios(path: Path, golden_path: Path) -> list[Scenario]:
         ):
             raise ValueError(f"{sid}: forbidden_answer_text must be non-blank strings")
         golden_refs = sum(ref is not None for ref in (search_ref, enum_ref, unanswerable_ref))
-        # A counting scenario's answer set is checked against the index
-        # directly (tests/baseline), so it needs no golden question.
-        if golden_refs > 1 or (golden_refs == 0 and not answer_refs):
+        outstanding: OutstandingTruth | None = None
+        full_read_ids = [f"{m}{_BASELINE_DOMAIN}" for m in full_read_refs]
+        if row["category"] == OUTSTANDING_CATEGORY:
+            if golden_refs or answer_refs or full_read_refs:
+                raise ValueError(
+                    f"{sid}: an outstanding-items scenario takes its truth from "
+                    f"{OUTSTANDING_TRUTH_FILE} only"
+                )
+            outstanding, full_read_ids = _load_outstanding(
+                sid, path.parent / OUTSTANDING_TRUTH_FILE
+            )
+        # A counting scenario's answer set, and an outstanding-items
+        # scenario's truth, are checked against the index directly
+        # (tests/baseline), so neither needs a golden question.
+        if golden_refs > 1 or (golden_refs == 0 and not answer_refs and outstanding is None):
             raise ValueError(
                 f"{sid}: give one of golden_search, golden_enumerate or golden_unanswerable"
             )
@@ -664,11 +867,86 @@ def load_scenarios(path: Path, golden_path: Path) -> list[Scenario]:
                 abstain_terms=list(abstain_terms),
                 held_out=is_held_out(sid),
                 expected_answer_messages=[f"{m}{_BASELINE_DOMAIN}" for m in answer_refs],
-                full_read_messages=[f"{m}{_BASELINE_DOMAIN}" for m in full_read_refs],
+                full_read_messages=full_read_ids,
                 forbidden_answer_text=list(forbidden),
+                outstanding=outstanding,
             )
         )
     return scenarios
+
+
+OUTSTANDING_CATEGORY = "outstanding_items"
+# Beside the scenario file; never part of what an answering agent reads.
+OUTSTANDING_TRUTH_FILE = "outstanding_items.json"
+OWNERS = frozenset(
+    {
+        "avery_cole",
+        "blair_reed",
+        "sasha_ortiz",
+        "emery_vance",
+        "jordan",
+        "management",
+        "jordan_or_management",
+        "unknown",
+    }
+)
+STATUSES = frozenset({"open", "waiting", "disputed", "unknown", "closed"})
+_ISO_DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+
+
+def load_outstanding_truth(path: Path, sid: str) -> dict:
+    """The raw ground-truth entry for scenario ``sid`` (layer A reads its
+    ``evidence``; ``_load_outstanding`` the rest)."""
+    truth = json.loads(path.read_text(encoding="utf-8"))["scenarios"]
+    if sid not in truth:
+        raise ValueError(f"{sid}: no ground truth in {path.name}")
+    return truth[sid]
+
+
+def _load_outstanding(sid: str, path: Path) -> tuple[OutstandingTruth, list[str]]:
+    """Scenario ``sid``'s ground truth and full-read message IDs, validated
+    for shape: every ref a message ref, every owner and status from the
+    fixed vocabulary, every due date an ISO date, every action ID unique.
+    ``make baseline`` checks the refs against the index."""
+    entry = load_outstanding_truth(path, sid)
+
+    def ids(refs: object, name: str) -> list[str]:
+        if not isinstance(refs, list) or not all(
+            isinstance(r, str) and _MESSAGE_REF.fullmatch(r) for r in refs
+        ):
+            raise ValueError(f"{sid}: {name} must be a list of message refs like 't24.2'")
+        return [f"{r}{_BASELINE_DOMAIN}" for r in refs]
+
+    actions = []
+    for row in entry["actions"]:
+        aid = row["id"]
+        if row["owner"] not in OWNERS or row["status"] not in STATUSES:
+            raise ValueError(f"{sid}: {aid} has an unknown owner or status")
+        due = row["due"]
+        if due is not None and not (isinstance(due, str) and _ISO_DATE.fullmatch(due)):
+            raise ValueError(f"{sid}: {aid} due must be an ISO date or null")
+        required = ids(row["required_sources"], f"{aid} required_sources")
+        if not required:
+            raise ValueError(f"{sid}: {aid} needs a required source")
+        actions.append(
+            OutstandingAction(
+                id=aid,
+                owner=row["owner"],
+                status=row["status"],
+                due=due,
+                required_sources=required,
+                superseded_sources=ids(row.get("superseded_sources", []), f"{aid} superseded"),
+                known_loss=row.get("known_loss"),
+            )
+        )
+    if len({a.id for a in actions}) != len(actions):
+        raise ValueError(f"{sid}: duplicate action id")
+    truth = OutstandingTruth(
+        actions=actions,
+        forbidden_sources=ids(entry["forbidden_sources"], "forbidden_sources"),
+        completeness_blockers=ids(entry["completeness_blockers"], "completeness_blockers"),
+    )
+    return truth, ids(entry["full_read_messages"], "full_read_messages")
 
 
 def _message_refs(sid: str, row: dict, name: str) -> list[str]:

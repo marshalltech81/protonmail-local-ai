@@ -40,6 +40,28 @@ make baseline UPDATE=1   # rewrite snapshot.json after an intended ranking chang
      value must be in an expected answer message, and the obvious
      `query_messages(text=...)` lookups must list at least one decoy
      while reaching every expected message.
+   - **Outstanding-items reachability**
+     (`test_outstanding_items_baseline.py`, #798). For each decisive
+     passage in `tests/eval/outstanding_items.json`, the layers that
+     hold it on the built index must match the recorded matrix: the
+     `.eml`, the thread text (`threads.body_text`: 2,000 characters per
+     message, 4,000 tokens per thread), the message's chunks,
+     `get_message` (all pages), `get_thread` (all pages, bodies cut at
+     4,000 characters) and, for attachments, `get_evidence` and
+     `search_attachments`. A passage no tool returns is a strict xfail
+     naming its issue (#795 today), so a fix flips it. Boundary checks:
+     a Blair Reed participant lookup of more than 100 messages with
+     required evidence on page 2, a 56-message thread with the decisive
+     message past the first `get_thread` page and past the thread text,
+     a report past `get_thread`'s body cut, a message past the first
+     `get_message` page, a quoted request that a text lookup lists only
+     where it was written, an address lookup that keeps an identity
+     decoy apart while a display-name lookup merges it, a December 31
+     New York send that a date-only bound counts as 2026 (UTC) and a
+     New York-midnight bound does not, a failed PDF extraction
+     (listed, no text), and an attachment-only due date the body tools
+     never show. `golden.json`'s `evidence_queries` are the
+     `get_evidence` queries it embeds at build time.
    - **Rank snapshot, for unchanged behaviour.** The top-10 order of
      every search question must match `snapshot.json`.
    - **Answer-evaluation cases** (`test_answer_eval_cases.py`). The
@@ -81,7 +103,12 @@ harness in `tests/eval/` (`tests/retrieval_metrics.py`).
   (#283): four genuine one-time PIN and email verification messages
   (t41's PIN is past the first 20,000-character `get_message` page)
   and four decoys sharing their obvious words (tofu, access-PIN
-  boilerplate, security advice). Adding a thread can lower a recall floor's
+  boilerplate, security advice). Threads 46-74 back the
+  outstanding-items scenarios (#798): an owners' association's
+  correspondence with its attorneys in 2026 (dev, 46-65) and a marina
+  co-op's (held out, 66-74). Because they add 2026 sent mail and
+  attachments, the `folder-sent` and `has-attachments` enumerations
+  are bounded to before 2026. Adding a thread can lower a recall floor's
   measured value; re-measure and explain it rather than lowering the
   floor silently.
 - **Unanswerable questions** need terms that appear nowhere in the
