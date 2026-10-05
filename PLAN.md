@@ -799,6 +799,24 @@ recommended after the rebuild):
    staged rebuild with controlled cutover before any live generations
    (#719, Phase 2 note below); deferred while the model is unchanged.
 
+A second letter from the same reviewer (2026-10-05) added three more,
+each to be measured on the rebuilt index before any change:
+
+7. Evidence scope: filters select whole threads, so a passage from a
+   message that does not satisfy the filter (another sender, another
+   date, Trash) can be cited as the answer. #755, owner decision
+   (proposed: label passages in-scope or context).
+8. Subject-fallback threading: the 60-day window slides with the
+   thread's latest message, so recurring same-subject mail can chain
+   into one thread spanning years. #756, owner decision (smallest
+   option: anchor the window to the thread's first message).
+9. Coverage gate: `src/main.py` is excluded in both services; counted,
+   it is 93% (indexer) and 99% (mcp-server), so the exclusion can go.
+   #757, small.
+
+After the rebuild, the measurements for #752 (threads still split),
+#755 and #756 come before any of their fixes.
+
 Still small, no decision needed: the extractor's own `max_bytes`
 fallback still says 10 MB; `ask_mailbox` should name the resolved
 `participant` in its prompt.
