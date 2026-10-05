@@ -120,6 +120,13 @@ def test_index_is_recognized_as_synthetic(baseline_db: Database) -> None:
         "(SELECT MIN(rowid) FROM attachments)",
         "UPDATE messages SET subject = 'privatemarker' WHERE rowid = "
         "(SELECT MIN(rowid) FROM messages)",
+        # #671: dates reach the prompt through the labelled chunk header.
+        "UPDATE messages SET sent_at = 'privatemarker' WHERE rowid = "
+        "(SELECT MIN(rowid) FROM messages)",
+        "UPDATE messages SET sent_at = '2031-01-01T00:00:00+00:00' WHERE rowid = "
+        "(SELECT MIN(rowid) FROM messages)",
+        "UPDATE messages SET occurred_at = '2031-01-01T00:00:00+00:00' WHERE rowid = "
+        "(SELECT MIN(rowid) FROM messages)",
         # A message the committed corpus does not have.
         "UPDATE messages SET claimant_id = claimant_id || 'x' WHERE rowid = "
         "(SELECT MIN(rowid) FROM messages)",

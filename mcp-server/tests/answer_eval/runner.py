@@ -27,6 +27,7 @@ Nothing here logs mailbox text; the captures stay on the returned
 import asyncio
 import email
 import email.policy
+import email.utils
 import hashlib
 import importlib.util
 import json
@@ -35,6 +36,7 @@ import time
 from collections.abc import Callable, Iterator
 from contextlib import closing, contextmanager
 from dataclasses import dataclass, field
+from datetime import UTC
 from pathlib import Path
 from typing import Any
 
@@ -316,6 +318,7 @@ def _thread_word_ok(word: str, allowed: set[str]) -> bool:
 class CorpusMessage:
     sha256: str  # of the message's bytes, in full
     thread_id: str
+    sent_at: str  # ``messages.sent_at`` as the indexer stores it
     tokens: set[str] = field(repr=False)
 
 
@@ -335,7 +338,10 @@ def corpus_manifest(path: Path = CORPUS_PATH) -> dict[str, CorpusMessage]:
     both services own a top-level ``tests`` package), which serializes
     byte-identically; the indexer's claimant ID is the Message-ID plus a
     prefix of that SHA-256. The tokens cover every part's headers and
-    every decoded text part, our own trusted bytes.
+    every decoded text part, our own trusted bytes. ``sent_at`` is the
+    ``Date:`` header as the indexer normalizes it (``parser._parse_date``:
+    UTC, ISO format); the corpus writes no ``Received:`` header, so the
+    indexer stores no ``occurred_at``.
     """
     spec = importlib.util.spec_from_file_location("answer_eval_baseline_corpus", path)
     if spec is None or spec.loader is None:
@@ -348,6 +354,9 @@ def corpus_manifest(path: Path = CORPUS_PATH) -> dict[str, CorpusMessage]:
             raw = corpus.build_message(n, index, msg)
             message_id = f"t{n:02d}.{index + 1}{BASELINE_DOMAIN}"
             parsed = email.message_from_bytes(raw, policy=email.policy.default)
+            sent = email.utils.parsedate_to_datetime(str(parsed["Date"]))
+            if sent.tzinfo is None:
+                sent = sent.replace(tzinfo=UTC)
             text = [message_id]
             for part in parsed.walk():  # every part's headers: attachment names and types
                 text += [str(v) for v in part.values()]
@@ -356,6 +365,7 @@ def corpus_manifest(path: Path = CORPUS_PATH) -> dict[str, CorpusMessage]:
             manifest[message_id] = CorpusMessage(
                 hashlib.sha256(raw).hexdigest(),
                 f"t{n:02d}.1{BASELINE_DOMAIN}",
+                sent.astimezone(UTC).isoformat(),
                 _tokens(" ".join(text)),
             )
     return manifest
@@ -382,13 +392,14 @@ def index_identity(db: Any, manifest_path: Path = CORPUS_PATH) -> dict[str, obje
     The evaluation sends evidence to the configured providers, and a
     real mailbox is out of its scope, so the index must hold exactly one
     claimant per committed corpus message, each its Message-ID plus a
-    prefix of that message's SHA-256 (``corpus_manifest``), and every
-    indexed text a prompt can carry may use only words of the corpus
-    messages it belongs to: chunk text, message subjects, participants
-    (the chunk header's sender), attachment names and types, and thread
-    subjects, display subjects, snippets, bodies and participants.
-    Private text stored under copied baseline IDs fails the second
-    check. Messages name no content.
+    prefix of that message's SHA-256 (``corpus_manifest``); each
+    message's dates (the labelled chunk header's) must be the corpus
+    message's; and every indexed text a prompt can carry may use only
+    words of the corpus messages it belongs to: chunk text, message
+    subjects, participants (the chunk header's sender), attachment names
+    and types, and thread subjects, display subjects, snippets, bodies
+    and participants. Private text stored under copied baseline IDs
+    fails the last two checks. Messages name no content.
     """
     manifest = corpus_manifest(manifest_path)
     refused = NonSyntheticIndexError(
@@ -402,6 +413,14 @@ def index_identity(db: Any, manifest_path: Path = CORPUS_PATH) -> dict[str, obje
         # Every claimant a corpus message, every corpus message claimed once.
         if len(owned) != len(owner) or sorted(owned) != sorted(manifest):
             raise refused
+        # Dates as the indexer stores them: no Received header, so no
+        # occurred_at.
+        for claimant, sent_at, occurred_at in conn.execute(
+            "SELECT claimant_id, sent_at, occurred_at FROM messages"
+        ):
+            message_id = owner[str(claimant)]
+            if message_id is None or (sent_at, occurred_at) != (manifest[message_id].sent_at, None):
+                raise refused
         # Per-message text a prompt can carry: chunk text, and the chunk
         # header's sender and attachment name and type.
         per_message = (
