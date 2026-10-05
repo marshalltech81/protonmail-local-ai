@@ -22,6 +22,7 @@ from src.lib.inference import (
     DEFAULT_CONTEXT_TOKENS,
     DEFAULT_MAX_TOKENS,
     PromptBudget,
+    default_token_budget,
     estimate_tokens,
 )
 from src.lib.sqlite import ChunkResult, ThreadResult
@@ -151,8 +152,20 @@ class TestPromptBudget:
 
     def test_defaults_match_the_inference_defaults(self):
         budget = PromptBudget()
-        assert budget.context_tokens == DEFAULT_CONTEXT_TOKENS == 48000
-        assert budget.max_output_tokens == DEFAULT_MAX_TOKENS == 16000
+        assert budget.context_tokens == DEFAULT_CONTEXT_TOKENS == 32768
+        assert budget.max_output_tokens == DEFAULT_MAX_TOKENS == 1024
+
+    @pytest.mark.parametrize(
+        ("mode", "expected"),
+        [("anthropic", (16000, 48000)), ("openai", (1024, 32768)), ("none", (1024, 32768))],
+    )
+    def test_defaults_per_inference_mode(self, mode, expected):
+        """#764: Claude models count thinking against max_tokens, so
+        anthropic mode gets a larger reply and window; openai mode keeps
+        the provider-neutral defaults a 32k local model fits."""
+        assert default_token_budget(mode) == expected
+        max_tokens, context = expected
+        assert context - max_tokens >= DEFAULT_CONTEXT_TOKENS - DEFAULT_MAX_TOKENS
 
     @pytest.mark.parametrize(("context", "output"), [(1024, 1024), (2048, 1024), (4096, 4000)])
     def test_a_window_without_room_for_a_prompt_is_rejected(self, context, output):

@@ -50,22 +50,39 @@ DEFAULT_COMPLETE_TIMEOUT_SECS = 300.0
 # Default ``max_tokens``. The Anthropic Messages API requires the
 # field; the OpenAI Chat Completions API accepts it too (most
 # OpenAI-compatible servers — vLLM, mlx_lm.server, LM Studio,
-# DeepInfra — honor it). 16000 leaves room for a model that thinks
-# before it answers (current Claude models count thinking against it)
-# and for detailed summaries; it is a ceiling, not a target. Operator
+# DeepInfra — honor it). 1024 fits brief summaries and per-thread
+# extraction; raise for detailed summaries on long threads. Operator
 # overrides via ``INFERENCE_MAX_TOKENS``.
-DEFAULT_MAX_TOKENS = 16000
+DEFAULT_MAX_TOKENS = 1024
 
 # Default model context window in tokens: the prompt and the reply
-# together must fit in it (#285). 48,000 less the 16,000-token reply
-# leaves about the prompt room the earlier 32,768 / 1,024 defaults did;
-# hosted models have more. At this default the per-tool character caps,
-# not the window, bound every prompt, so prompts are what they were
-# before the window was counted. An operator running a small local model
-# sets ``INFERENCE_CONTEXT_TOKENS`` to its window and lowers
-# ``INFERENCE_MAX_TOKENS`` to fit (the small-model profile), and
-# evidence is cut to fit.
-DEFAULT_CONTEXT_TOKENS = 48000
+# together must fit in it (#285). 32,768 is the native window of the
+# smaller current open models; hosted models have more. At this default
+# the per-tool character caps, not the window, bound every prompt, so
+# prompts are what they were before the window was counted. An operator
+# running a small local model sets ``INFERENCE_CONTEXT_TOKENS`` to its
+# window (the small-model profile), and evidence is cut to fit.
+DEFAULT_CONTEXT_TOKENS = 32768
+
+# Anthropic-mode defaults (#764). Current Claude models think before
+# they answer and count the thinking against ``max_tokens``, so 1024
+# cuts answers short. The window grows with the reply so the prompt room
+# (window less reply) stays at least what the defaults above leave and
+# the per-tool character caps still bind first. Hosted Claude windows
+# are far larger. openai mode keeps the defaults above: a 32k local
+# model must still fit the whole request.
+ANTHROPIC_DEFAULT_MAX_TOKENS = 16000
+ANTHROPIC_DEFAULT_CONTEXT_TOKENS = 48000
+
+
+def default_token_budget(mode: str) -> tuple[int, int]:
+    """The ``(max_tokens, context_tokens)`` defaults for an inference
+    mode, used when ``INFERENCE_MAX_TOKENS`` / ``INFERENCE_CONTEXT_TOKENS``
+    are unset."""
+    if mode == "anthropic":
+        return ANTHROPIC_DEFAULT_MAX_TOKENS, ANTHROPIC_DEFAULT_CONTEXT_TOKENS
+    return DEFAULT_MAX_TOKENS, DEFAULT_CONTEXT_TOKENS
+
 
 # Characters per token assumed when counting a prompt. mcp-server ships
 # no tokenizer, so a prompt's length is estimated from its characters.
