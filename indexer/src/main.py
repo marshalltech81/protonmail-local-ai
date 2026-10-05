@@ -191,30 +191,36 @@ def _warn_if_remote_endpoint(mode_setting: str, mode: str, url: str, sends: str)
     )
 
 
-# The literal ``EMBED_BASE_URL`` value that selects the SDK's default
-# endpoint, compared trimmed and case-insensitively.
+# The literal ``EMBED_BASE_URL`` value that selects OpenAI's official
+# endpoint, compared trimmed and case-insensitively, and the URL it
+# resolves to. The URL is passed to the SDK explicitly: left out, the
+# SDK would read ``OPENAI_BASE_URL`` first, which could send mail
+# somewhere the operator did not choose (Codex round 1 on #773).
 _SDK_DEFAULT_BASE_URL = "default"
+_OPENAI_DEFAULT_URL = "https://api.openai.com/v1"
 
 
-def _resolve_base_url(name: str, raw: str, sdk_default_host: str) -> str:
-    """Return an enabled layer's base URL, or ``""`` for ``default``.
+def _resolve_base_url(name: str, raw: str, default_url: str) -> str:
+    """Return an enabled layer's base URL; ``default`` returns
+    ``default_url``, the provider's official endpoint.
 
     An API key is not consent to the SDK's default endpoint: the request
     body (mail text) is sent before the provider checks the key, so a
     placeholder key plus a forgotten URL would ship mail to a cloud
     provider (owner decision 2026-10-05, #750). An empty value therefore
-    fails startup; ``default`` returns ``""``, which the embedder treats
-    as "omit ``base_url``" exactly as an empty value used to. The error
-    is fixed text and never echoes a value.
+    fails startup. ``default`` resolves to the official URL, passed to
+    the SDK explicitly so ``OPENAI_BASE_URL`` cannot redirect it. The
+    error is fixed text and never echoes a value.
     """
     value = raw.strip()
     if not value:
+        host = urllib.parse.urlsplit(default_url).hostname
         raise ValueError(
             f"{name} is empty: set it to the provider's URL, or to `default` to use "
-            f"the SDK's default endpoint (sends mail to {sdk_default_host})."
+            f"the SDK's default endpoint (sends mail to {host})."
         )
     if value.lower() == _SDK_DEFAULT_BASE_URL:
-        return ""
+        return default_url
     return value
 
 
@@ -240,7 +246,7 @@ def _validate_embed_config() -> str:
         raise ValueError("EMBED_MODEL must be set when EMBED_MODE='openai'")
     if not EMBED_API_KEY:
         raise ValueError("EMBED_API_KEY must be set when EMBED_MODE='openai'")
-    base_url = _resolve_base_url("EMBED_BASE_URL", EMBED_BASE_URL, "api.openai.com")
+    base_url = _resolve_base_url("EMBED_BASE_URL", EMBED_BASE_URL, _OPENAI_DEFAULT_URL)
     # Reject URLs that embed a ``user:pass@host`` userinfo authority.
     # The resolved base URL flows into the startup log line naming the
     # wire endpoint, so embedded credentials would leak to container
@@ -2278,12 +2284,10 @@ def main():
         batch_size=EMBED_BATCH_SIZE,
         concurrency=EMBED_CONCURRENCY,
     )
-    # Log the resolved wire endpoint after construction. ``EMBED_BASE_URL=default``
-    # means "use the SDK default" (OpenAI proper); printing the raw env
-    # value would hide that the indexer is actually pointing at
-    # api.openai.com. ``OpenAIEmbedder.base_url`` reads
-    # the URL back from the SDK after fallback resolution, matching the
-    # mcp-server inference / rerank log lines.
+    # Log the wire endpoint after construction: ``EMBED_BASE_URL=default``
+    # is logged as the official URL it resolves to, not the raw value.
+    # ``OpenAIEmbedder.base_url`` reads the URL back from the SDK,
+    # matching the mcp-server inference / rerank log lines.
     log.info(
         "  Embedder: %s (model=%s, batch=%d, concurrency=%d)",
         embedder.base_url,

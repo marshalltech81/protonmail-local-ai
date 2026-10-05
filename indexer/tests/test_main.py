@@ -1142,13 +1142,14 @@ class TestValidateEmbedConfig:
         assert "sk-real" not in str(excinfo.value)
 
     @pytest.mark.parametrize("value", ["default", " Default ", "DEFAULT"])
-    def test_default_selects_the_sdk_default(self, monkeypatch, value):
-        # ``default`` resolves to the empty base URL the embedder treats
-        # as "omit ``base_url`` and let the SDK use its own endpoint".
+    def test_default_selects_the_official_endpoint(self, monkeypatch, value):
+        # ``default`` is pinned to OpenAI's own URL, so the SDK's
+        # ``OPENAI_BASE_URL`` cannot redirect it (Codex round 1 on #773).
+        monkeypatch.setenv("OPENAI_BASE_URL", "https://ambient.example/v1")
         monkeypatch.setattr(main, "EMBED_BASE_URL", value)
         monkeypatch.setattr(main, "EMBED_MODEL", "Qwen/Qwen3-Embedding-8B")
         monkeypatch.setattr(main, "EMBED_API_KEY", "sk-real")  # pragma: allowlist secret
-        assert main._validate_embed_config() == ""
+        assert main._validate_embed_config() == "https://api.openai.com/v1"
 
     def test_real_url_is_returned(self, monkeypatch):
         monkeypatch.setattr(main, "EMBED_BASE_URL", "http://host.docker.internal:8001/v1")
@@ -1254,11 +1255,12 @@ class TestMainEmbedEndpoint:
         return sdk_calls
 
     @pytest.mark.parametrize("value", ["default", " Default "])
-    def test_default_builds_the_sdk_client_without_a_base_url(
+    def test_default_pins_the_sdk_client_to_the_official_url(
         self, tmp_path, monkeypatch, caplog, value
     ):
+        monkeypatch.setenv("OPENAI_BASE_URL", "https://ambient.example/v1")
         [kwargs] = self._run_to_embedder(tmp_path, monkeypatch, caplog, value)
-        assert "base_url" not in kwargs
+        assert kwargs["base_url"] == "https://api.openai.com/v1"
         # The privacy warning names the SDK's default host.
         assert (
             "Privacy: EMBED_MODE=openai sends email text off this host, to api.openai.com."

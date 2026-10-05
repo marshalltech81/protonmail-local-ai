@@ -1,0 +1,2 @@
+[mcp_servers.protonmail-local-ai]
+url = "http://127.0.0.1:3000/mcp"

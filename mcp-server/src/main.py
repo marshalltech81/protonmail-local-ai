@@ -265,22 +265,33 @@ def _reject_url_userinfo(name: str, value: str) -> str:
     return value
 
 
-# The literal ``*_BASE_URL`` value that selects the SDK's default
-# endpoint, compared trimmed and case-insensitively; and that endpoint's
-# host per mode, named in the startup error and the privacy warning.
+# The literal ``*_BASE_URL`` value that selects the provider's official
+# endpoint, compared trimmed and case-insensitively; that endpoint's
+# host per mode, named in the startup error and the privacy warning; and
+# the URL ``default`` resolves to. The URL is passed to the SDK
+# explicitly: left out, each SDK would read its own variable first
+# (``OPENAI_BASE_URL``, ``ANTHROPIC_BASE_URL``, ``CO_API_URL``), which
+# could send mail somewhere the operator did not choose (Codex round 1
+# on #773).
 _SDK_DEFAULT_BASE_URL = "default"
 _SDK_DEFAULT_HOSTS = {
     "anthropic": "api.anthropic.com",
     "openai": "api.openai.com",
     "cohere": "api.cohere.com",
 }
+_SDK_DEFAULT_URLS = {
+    "anthropic": "https://api.anthropic.com",
+    "openai": "https://api.openai.com/v1",
+    "cohere": "https://api.cohere.com",
+}
 
 
 def _resolve_base_url(name: str, raw: str, mode: str) -> str:
-    """Return an enabled layer's base URL, or ``""`` for ``default``.
+    """Return an enabled layer's base URL; ``default`` returns the
+    provider's official URL (``_SDK_DEFAULT_URLS``).
 
-    ``""`` is what each client treats as "omit ``base_url`` and use the
-    SDK's own endpoint", exactly as an empty value used to. An empty
+    The official URL is passed to the SDK explicitly, so the SDK's own
+    endpoint variable cannot redirect it (Codex round 1 on #773). An empty
     (or blank) value fails startup with fixed text naming the variable,
     both fixes and the host ``default`` would send mail to; it never
     echoes a value (#750).
@@ -292,7 +303,7 @@ def _resolve_base_url(name: str, raw: str, mode: str) -> str:
             f"the SDK's default endpoint (sends mail to {_SDK_DEFAULT_HOSTS[mode]})."
         )
     if value.lower() == _SDK_DEFAULT_BASE_URL:
-        return ""
+        return _SDK_DEFAULT_URLS[mode]
     return value
 
 
@@ -614,11 +625,9 @@ def main():
         api_key=EMBED_API_KEY,
         timeout_secs=EMBED_TIMEOUT_SECS,
     )
-    # ``*_BASE_URL=default`` lets the SDK read its own env var
-    # (``OPENAI_BASE_URL``, ``ANTHROPIC_BASE_URL``, ``CO_API_URL``),
-    # which bypasses the config-load userinfo guard above. Re-check the
-    # resolved endpoint before it reaches the startup log or an error.
-    _reject_url_userinfo("EMBED_BASE_URL (or the SDK's OPENAI_BASE_URL)", embed_client.base_url)
+    # Re-check the endpoint the client resolved before it reaches the
+    # startup log or an error.
+    _reject_url_userinfo("EMBED_BASE_URL", embed_client.base_url)
 
     inference_client: InferenceClient | None = None
     prompt_budget: PromptBudget | None = None
@@ -636,24 +645,15 @@ def main():
             max_tokens=INFERENCE_MAX_TOKENS,
             timeout_secs=INFERENCE_TIMEOUT_SECS,
         )
-        _reject_url_userinfo(
-            "INFERENCE_BASE_URL (or the SDK's OPENAI_BASE_URL / ANTHROPIC_BASE_URL)",
-            inference_client.base_url,
-        )
+        _reject_url_userinfo("INFERENCE_BASE_URL", inference_client.base_url)
 
     reranker: CohereReranker | None = None
     if RERANK_MODE == "cohere":
         _require_env("RERANK_MODE", RERANK_MODE, "RERANK_MODEL", RERANK_MODEL)
         _require_env("RERANK_MODE", RERANK_MODE, "RERANK_API_KEY", RERANK_API_KEY)
-        # The Cohere SDK exposes its resolved URL only through private
-        # API, so resolve it the way the SDK does: the configured URL,
-        # else the env var it falls back to, else its default host.
-        rerank_endpoint = (
-            rerank_base_url
-            or os.environ.get("CO_API_URL", "")
-            or f"https://{_SDK_DEFAULT_HOSTS['cohere']}"
-        )
-        _reject_url_userinfo("RERANK_BASE_URL (or the SDK's CO_API_URL)", rerank_endpoint)
+        # Always set: ``default`` resolves to Cohere's official URL.
+        rerank_endpoint = rerank_base_url
+        _reject_url_userinfo("RERANK_BASE_URL", rerank_endpoint)
         reranker = CohereReranker(
             RerankConfig(
                 base_url=rerank_base_url,
