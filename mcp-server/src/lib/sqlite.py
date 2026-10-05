@@ -1482,8 +1482,11 @@ class Database:
         # operator who tightened ``RERANK_CANDIDATES`` for latency
         # would silently cap recall on bigger callers like
         # ``extract_from_emails(limit=50)``.
+        # The window also holds the keyword slot, so a small
+        # ``RERANK_CANDIDATES`` cannot cut the promoted hit before the
+        # reranker sees it.
         if reranker is not None:
-            candidates_n = max(limit, reranker.candidates)
+            candidates_n = max(limit, reranker.candidates, _KEYWORD_SLOT_RANK)
         else:
             candidates_n = limit
         candidates = filtered[:candidates_n]
@@ -2090,10 +2093,16 @@ class Database:
         _tag_lane_ranks(chunk_hits, "chunk_fts")
         _tag_lane_ranks(attachment_hits, "attachment_fts")
         with timings.stage("fusion"):
-            fused = self._reciprocal_rank_fusion_threads(thread_hits, chunk_hits, attachment_hits)
-            # Before the cut to ``limit``: a hit only the thread lane
-            # matches can fuse below it and would never reach the caller.
-            return _promote_top_keyword_hit(fused)[:limit]
+            fused = _promote_top_keyword_hit(
+                self._reciprocal_rank_fusion_threads(thread_hits, chunk_hits, attachment_hits)
+            )
+            # Every thread keyword hit is kept past the cut to ``limit``
+            # (at most ``limit`` more, in fused order). The sender,
+            # participant and authority filters run after this cut, so
+            # the slot must still be able to find the best hit they leave.
+            kept = fused[:limit]
+            kept += [r for r in fused[limit:] if "thread_fts" in r.lane_ranks]
+            return kept
 
     def _thread_keyword_search(
         self,

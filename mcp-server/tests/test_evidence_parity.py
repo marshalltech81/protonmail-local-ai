@@ -264,7 +264,27 @@ class TestMailboxWideParity:
 
     def test_reranker_sees_the_same_pool(self, parity_db):
         """The issue's case: with a reranker, a chunk-sized thread limit
-        sent more candidates to it and changed the top thread."""
+        sent more candidates to it and changed the top thread.
+
+        Two more matching threads make the pool larger than the rerank
+        window's floor (the keyword slot, #701), so the two limits still
+        send different candidate counts."""
+        conn = sqlite3.connect(parity_db.path)
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        for n in (1, 2):
+            _insert_thread(
+                conn,
+                thread_id=f"t-extra-{n}",
+                subject=f"budget note {n}",
+                participants=["erin@example.net"],
+                senders=["erin@example.net"],
+                body_text=f"budget note {n} text",
+                embedding=[1.0, 0.0, 0.0, 0.0],
+            )
+        conn.commit()
+        conn.close()
         asked = _ask_evidence(parity_db, "budget", reranker=_ReverseReranker(), max_threads=1)
         audited = _get_evidence(parity_db, "budget", reranker=_ReverseReranker(), max_threads=1)
         assert list(audited) == list(asked)

@@ -3798,7 +3798,51 @@ class TestKeywordSlot:
             patch.object(seeded_db, "_attachment_keyword_search", return_value=list(others)),
         ):
             fused = seeded_db._keyword_search("anything", 3)
-        assert [r.thread_id for r in fused] == ["t1", "t2", "t0"]
+        # t3, a thread keyword hit past the cut, is kept after it.
+        assert [r.thread_id for r in fused] == ["t1", "t2", "t0", "t3"]
+
+    def test_keyword_list_keeps_thread_hits_past_its_cut_for_later_filters(
+        self, seeded_db: Database
+    ):
+        """Sender, participant and authority filters run after the
+        keyword list is cut, so every thread keyword hit stays in it:
+        the slot then finds the best hit the filters leave."""
+        from unittest.mock import patch
+
+        thread_lane = self._ranked(0, 1, 2, 3, 4)
+        for r in thread_lane:
+            r.senders = ["other@example.com"]
+        thread_lane[4].senders = ["wanted@example.com"]
+        # The other lanes agree on t0..t3, so t4 fuses last.
+        others = thread_lane[:4]
+        with (
+            patch.object(seeded_db, "_thread_keyword_search", return_value=thread_lane),
+            patch.object(seeded_db, "_chunk_keyword_search", return_value=list(others)),
+            patch.object(seeded_db, "_attachment_keyword_search", return_value=list(others)),
+        ):
+            fused = seeded_db._keyword_search("anything", 3)
+            kept = seeded_db.keyword_search("anything", from_addr="wanted@example.com", limit=1)
+        assert [r.thread_id for r in fused[:3]] == ["t0", "t1", "t2"]
+        assert {"t3", "t4"} <= {r.thread_id for r in fused}
+        assert [r.thread_id for r in kept] == ["t4"]
+
+    def test_small_rerank_window_still_holds_the_slot(self, seeded_db: Database):
+        """With RERANK_CANDIDATES below the slot, the reranker still
+        gets the promoted hit among its candidates."""
+        from unittest.mock import patch
+
+        keyword = self._ranked(1, 2, 3, 0)
+        reranker = _IndexScoringReranker({}, candidates=1)
+        with (
+            patch.object(seeded_db, "_keyword_search", return_value=keyword),
+            patch.object(seeded_db, "_vector_lanes", return_value=([], [])),
+        ):
+            results = seeded_db.hybrid_search(
+                "anything", [0.0, 0.0, 0.0, 0.0], limit=1, reranker=reranker
+            )
+        assert reranker._last_docs is not None
+        assert len(reranker._last_docs) == 3
+        assert len(results) == 1
 
 
 class TestLaneProvenance:
