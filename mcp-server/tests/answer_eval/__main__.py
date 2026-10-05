@@ -22,6 +22,7 @@ import json
 import logging
 import math
 import os
+import re
 import sqlite3
 import sys
 from datetime import UTC, datetime
@@ -170,6 +171,73 @@ def _run(args: argparse.Namespace) -> int:
     return EXIT_INCOMPLETE if is_incomplete(report) else EXIT_OK
 
 
+# Case IDs and categories as cases.json writes them: the only report
+# strings ``compare`` prints.
+_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
+_COUNT_KEYS = ("selected", "completed", "errors", "skipped")
+_SPLIT_RATES = ("deterministic_pass_rate", "prompt_evidence_coverage", "answer_ms_mean")
+_JUDGE_RATES = ("correctness_pass_rate", "groundedness_pass_rate")
+
+
+def _is_rate(value: Any) -> bool:
+    return value is None or (
+        isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(value)
+    )
+
+
+def _is_name(value: Any) -> bool:
+    return isinstance(value, str) and _NAME.fullmatch(value) is not None
+
+
+def _judge_ok(judge: Any, rates: tuple[str, ...]) -> bool:
+    return judge is None or (isinstance(judge, dict) and all(_is_rate(judge.get(k)) for k in rates))
+
+
+def _report_shape_ok(data: dict[str, Any]) -> bool:
+    """Every field ``compare`` reads or prints has the type the harness
+    writes (#677): counts are non-negative integers, rates finite numbers
+    or null, flags booleans, and case IDs and categories plain names, so
+    a wrong-typed value is refused instead of printed."""
+    counts, aggregates, cases = data.get("counts"), data.get("aggregates"), data.get("cases")
+    if not isinstance(data.get("identity"), dict) or not isinstance(counts, dict):
+        return False
+    if not all(
+        isinstance(counts.get(k), int) and not isinstance(counts[k], bool) and counts[k] >= 0
+        for k in _COUNT_KEYS
+    ):
+        return False
+    if not isinstance(aggregates, dict) or not isinstance(aggregates.get("by_category"), dict):
+        return False
+    for split in ("dev", "held_out"):
+        agg = aggregates.get(split)
+        if not isinstance(agg, dict) or not all(
+            k in agg and _is_rate(agg[k]) for k in _SPLIT_RATES
+        ):
+            return False
+        if not _judge_ok(agg.get("judge"), _JUDGE_RATES):
+            return False
+    for name, cat in aggregates["by_category"].items():
+        if not _is_name(name) or not isinstance(cat, dict):
+            return False
+        if not _is_rate(cat.get("deterministic_pass_rate")) or not _judge_ok(
+            cat.get("judge"), ("correctness_pass_rate",)
+        ):
+            return False
+    if not isinstance(cases, list):
+        return False
+    for case in cases:
+        if not (
+            isinstance(case, dict)
+            and _is_name(case.get("id"))
+            and _is_name(case.get("category"))
+            and isinstance(case.get("held_out"), bool)
+            and isinstance(case.get("deterministic"), dict)
+            and isinstance(case.get("judge"), dict)
+        ):
+            return False
+    return True
+
+
 def _load_report(path: Path) -> dict[str, Any]:
     data = json.loads(path.read_text(encoding="utf-8"))
     if (
@@ -178,13 +246,15 @@ def _load_report(path: Path) -> dict[str, Any]:
         or data.get("schema_version") != REPORT_SCHEMA_VERSION
     ):
         raise ConfigError(f"not an answer evaluation report (schema v{REPORT_SCHEMA_VERSION})")
+    if not _report_shape_ok(data):
+        raise ConfigError("malformed answer evaluation report")
     return data
 
 
 def _compare(args: argparse.Namespace) -> int:
     base, cand = _load_report(args.baseline), _load_report(args.candidate)
-    # _load_report checks only the labels; a nested value of the wrong
-    # shape or a missing key surfaces here. Fixed text only: the
+    # _load_report checks the labels and the shape of what compare reads;
+    # anything it does not model surfaces here. Fixed text only: the
     # exceptions' messages can quote report contents.
     try:
         cmp = compare_reports(base, cand)

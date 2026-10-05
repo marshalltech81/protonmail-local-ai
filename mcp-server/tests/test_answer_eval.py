@@ -1089,13 +1089,24 @@ class TestCli:
             (["cases", 0, "id"], ["MARKER-677"]),
             (["cases", 0, "judge"], ["MARKER-677"]),
             (["cases", 0, "deterministic"], None),
+            # Codex round 1 on #761: wrong-typed values that print fine.
+            (["counts", "selected"], "MARKER-677"),
+            (["counts", "errors"], -1),
+            (["aggregates", "dev", "deterministic_pass_rate"], "MARKER-677"),
+            (["aggregates", "held_out", "answer_ms_mean"], True),
+            (["aggregates", "by_category", "CATEGORY", "deterministic_pass_rate"], "MARKER-677"),
+            (["aggregates", "by_category", "MARKER-677 x"], {"deterministic_pass_rate": None}),
+            (["cases", 0, "id"], "MARKER-677 x"),
+            (["cases", 0, "category"], "MARKER-677 x"),
+            (["cases", 0, "held_out"], "MARKER-677"),
         ],
     )
     def test_compare_rejects_malformed_nested_shapes(
         self, chunked_db, tmp_path, capsys, path, value
     ):
         """#677: a well-labelled report with a malformed nested shape (for
-        example ``identity: []``) raised a traceback instead of exit 3."""
+        example ``identity: []``) raised a traceback instead of exit 3, and
+        a wrong-typed value that prints fine reached the output."""
         good = self._report(chunked_db, tmp_path, "a.json")
         data = json.loads(good.read_text())
         # The one category the report holds.
