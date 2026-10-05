@@ -1351,3 +1351,46 @@ class TestOutstandingItems:
         assert "Completeness claim truthful: 0.00% (0/1)" in out
         clean = summarize([score_trace(_scenario(), _trace([_search(["a.1@x.example"])]))])
         assert "Action recall:       n/a" in clean
+
+
+class TestOutstandingCitationSets:
+    """Review round 2: the top-level ``cited`` and the conclusions' own
+    ``cited`` lists must be one set, and every citation metric reads it."""
+
+    def test_matching_lists_are_consistent(self) -> None:
+        score = score_trace(_outstanding(), _outstanding_trace())
+        assert score.citations_consistent is True
+
+    def test_an_empty_top_level_list_fails(self) -> None:
+        trace = _outstanding_trace()
+        trace["answer"]["cited"] = []
+        score = score_trace(_outstanding(), trace)
+        assert score.citations_consistent is False
+        assert "citations_consistent" in score.failures
+        # Validity still reads the conclusions' citations.
+        assert score.citation_validity == 1.0
+
+    def test_a_forbidden_source_cited_only_at_top_level_fails(self) -> None:
+        trace = _outstanding_trace()
+        trace["answer"]["cited"].append(_claim("x.1@x.example"))
+        score = score_trace(_outstanding(), trace)
+        assert score.citations_consistent is False
+        assert score.forbidden_sources_avoided is False
+
+    def test_an_invalid_id_cited_only_in_a_conclusion_lowers_validity(self) -> None:
+        answer = _outstanding_answer()
+        answer["items"][0]["cited"].append("a.2@x.example#ffffffff")
+        trace = _outstanding_trace(answer)
+        trace["answer"]["cited"] = [c for c in trace["answer"]["cited"] if "#ffff" not in c]
+        score = score_trace(_outstanding(), trace)
+        assert score.citations_consistent is False
+        assert score.citation_validity is not None and score.citation_validity < 1.0
+
+    def test_order_and_repeats_do_not_matter(self) -> None:
+        trace = _outstanding_trace()
+        trace["answer"]["cited"] = list(reversed(trace["answer"]["cited"])) * 2
+        assert score_trace(_outstanding(), trace).citations_consistent is True
+
+    def test_none_for_other_scenarios(self) -> None:
+        score = score_trace(_scenario(), _trace([_search(["a.1@x.example"])]))
+        assert score.citations_consistent is None

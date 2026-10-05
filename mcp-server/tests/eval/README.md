@@ -290,6 +290,11 @@ passage with `source: attachment`: no tool returns a whole attachment
 (#796), and a `search_attachments` snippet is a preview the scorer
 cannot check holds the evidence, since traces carry IDs, not text.
 
+The answer's top-level `cited` and its conclusions' own `cited` lists
+must be the same set (*citations consistent*), and citation validity
+and forbidden sources are scored over their union, so a citation left
+out of either list, or a decoy cited in only one, still fails.
+
 `tests/test_agent_eval.py` mutates the reference trace into each
 failure the scenario exists to catch: a skipped page, a superseded due
 date cited, a wrong owner, a closure because the letter went out, the

@@ -241,6 +241,7 @@ class AgentScore:
     conclusion_citation_support: float | None = None
     required_evidence_coverage: float | None = None
     forbidden_sources_avoided: bool | None = None
+    citations_consistent: bool | None = None
     completeness_claim_truthful: bool | None = None
 
     @property
@@ -259,6 +260,7 @@ class AgentScore:
             "deadlines_supported",
             "forbidden_sources_avoided",
             "completeness_claim_truthful",
+            "citations_consistent",
         ):
             if getattr(self, name) is False:
                 failed.append(name)
@@ -483,6 +485,7 @@ def _content_reads(calls: Sequence[dict]) -> tuple[set[str], set[str]]:
 def _score_outstanding(
     truth: OutstandingTruth,
     answer: dict,
+    all_cited: list[str],
     calls: Sequence[dict],
     message_of: dict[str, str],
     full_read_recall: float | None,
@@ -558,7 +561,9 @@ def _score_outstanding(
         if (a := by_id.get(entry.get("action", ""))) is not None
         and messages(entry.get("cited", [])) & set(a.required_sources) & read
     )
-    cited = set().union(*(messages(e.get("cited", [])) for e in conclusions))
+    # The canonical citation set (top-level and per-conclusion, see
+    # ``score_trace``), so a forbidden source cited anywhere counts.
+    cited = messages(all_cited)
 
     # Every required source the tools can return must have been read; one
     # named only on a later query page is read only after that page.
@@ -600,6 +605,20 @@ def score_trace(scenario: Scenario, trace: dict) -> AgentScore:
     calls: list[dict] = trace.get("calls", [])
     answer: dict = trace.get("answer", {})
     cited: list[str] = answer.get("cited", [])
+    # An outstanding-items answer cites in two places: the top-level list
+    # and each conclusion's own list. Invariant: the two are one set, and
+    # every citation metric reads that set (their union), so a citation
+    # in only one place is both a ``citations_consistent`` failure and
+    # still scored (validity, forbidden sources).
+    citations_consistent: bool | None = None
+    if scenario.outstanding is not None:
+        own = [
+            c
+            for entry in answer.get("items", []) + answer.get("excluded", [])
+            for c in entry.get("cited", [])
+        ]
+        citations_consistent = set(cited) == set(own)
+        cited = list(dict.fromkeys(cited + own))
     abstained = answer.get("abstained") is True
     seen, thread_of, message_of = _returned_ids(calls)
 
@@ -697,7 +716,7 @@ def score_trace(scenario: Scenario, trace: dict) -> AgentScore:
     outstanding: dict[str, Any] = {}
     if scenario.outstanding is not None:
         outstanding = _score_outstanding(
-            scenario.outstanding, answer, calls, message_of, full_read_recall
+            scenario.outstanding, answer, cited, calls, message_of, full_read_recall
         )
 
     signatures = [json.dumps([c["tool"], c["arguments"]], sort_keys=True) for c in calls]
@@ -722,6 +741,7 @@ def score_trace(scenario: Scenario, trace: dict) -> AgentScore:
         answer_count_correct=answer_count_correct,
         full_read_recall=full_read_recall,
         forbidden_text_absent=forbidden_text_absent,
+        citations_consistent=citations_consistent,
         **outstanding,
     )
 
@@ -766,6 +786,7 @@ def _aggregates(scores: Sequence[AgentScore]) -> list[str]:
         f"Required evidence coverage: {_mean(present('required_evidence_coverage'))}",
         f"Forbidden sources avoided: {_rate(present('forbidden_sources_avoided'))}",
         f"Completeness claim truthful: {_rate(present('completeness_claim_truthful'))}",
+        f"Citations consistent: {_rate(present('citations_consistent'))}",
         f"Extra calls:         {sum(s.extra_calls for s in scores)}",
         f"Repeated calls:      {sum(s.repeated_calls for s in scores)}",
         f"Clean:               {_rate([not s.failures for s in scores])}",

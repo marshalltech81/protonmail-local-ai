@@ -345,6 +345,22 @@ def _stop_long_message_at_page_one(trace: dict) -> None:
     ]
 
 
+def _empty_top_level_citations(trace: dict) -> None:
+    trace["answer"]["cited"] = []
+
+
+def _decoy_cited_only_at_top_level(trace: dict) -> None:
+    decoy = {"message_id": f"t60.1{_D}", "claimant_id": f"t60.1{_D}#00006001"}
+    trace["calls"].append(
+        {
+            "tool": "query_messages",
+            "arguments": {"participant": "Avery Cole", "limit": 100},
+            "result": {"has_more": False, "next_cursor": None, "messages": [decoy]},
+        }
+    )
+    trace["answer"]["cited"].append(decoy["claimant_id"])
+
+
 def _drop_tool_calls(*tools: str) -> Callable[[dict], None]:
     """Drop every call to ``tools``, keeping the answer's citations."""
 
@@ -394,6 +410,14 @@ _OUTSTANDING_FAILURES: list[tuple[str, Callable[[dict], None], list[str]]] = [
         "cites-an-attachment-it-never-read",
         _drop_tool_calls("get_evidence", "search_attachments"),
         ["required_evidence_coverage", "conclusion_citation_support"],
+    ),
+    # Review round 2: the top-level and per-conclusion citation lists must
+    # agree, and every citation metric reads both.
+    ("empties-the-top-level-citations", _empty_top_level_citations, ["citations_consistent"]),
+    (
+        "cites-the-decoy-only-at-top-level",
+        _decoy_cited_only_at_top_level,
+        ["citations_consistent", "forbidden_sources_avoided"],
     ),
 ]
 
