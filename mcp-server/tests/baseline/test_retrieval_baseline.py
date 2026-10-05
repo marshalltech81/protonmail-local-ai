@@ -96,11 +96,14 @@ def _order_ties(hits: list[ThreadResult]) -> list[ThreadResult]:
     This keeps the snapshot from depending on how the lanes happened to
     insert tied threads. Only adjacent results are reordered: the keyword
     slot (#701) places a hit above higher-scored results on purpose, so
-    a tie on either side of it must not move across it.
+    a tie on either side of it must not move across it. The promoted hit
+    is a run of its own even when its score equals its neighbours' (#748).
     """
     return [
         r
-        for _, run in itertools.groupby(hits, key=lambda r: r.score)
+        for _, run in itertools.groupby(
+            hits, key=lambda r: (r.score, "keyword_slot" in r.lane_ranks)
+        )
         for r in sorted(run, key=lambda r: r.thread_id)
     ]
 
@@ -122,6 +125,31 @@ def test_order_ties_keeps_ties_on_their_side_of_the_slot() -> None:
 
     hits = [hit("b", 0.5), hit("a", 0.5), hit("slot", 0.1), hit("c", 0.5), hit("d", 0.4)]
     assert [r.thread_id for r in _order_ties(hits)] == ["a", "b", "slot", "c", "d"]
+
+
+def test_order_ties_keeps_a_tied_slot_hit_in_place() -> None:
+    """#748: a promoted hit whose fused score equals its neighbours'
+    must not join their run and be re-sorted below rank 3."""
+
+    def hit(thread_id: str, score: float, slot: bool = False) -> ThreadResult:
+        result = ThreadResult(
+            thread_id=thread_id,
+            subject="s",
+            participants=[],
+            folder="INBOX",
+            date_first=datetime(2024, 1, 1, tzinfo=UTC),
+            date_last=datetime(2024, 1, 2, tzinfo=UTC),
+            message_ids=[thread_id],
+            snippet="",
+            has_attachments=False,
+            score=score,
+        )
+        if slot:
+            result.lane_ranks["keyword_slot"] = 2
+        return result
+
+    hits = [hit("b", 0.5), hit("a", 0.5), hit("z", 0.5, slot=True), hit("c", 0.5)]
+    assert [r.thread_id for r in _order_ties(hits)] == ["a", "b", "z", "c"]
 
 
 def _refs(hits: list[ThreadResult]) -> list[str]:
