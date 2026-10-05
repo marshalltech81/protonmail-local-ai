@@ -345,8 +345,9 @@ INITIAL_INDEX_BATCH_SIZE = _int_env("INITIAL_INDEX_BATCH_SIZE", 50)
 # selection.
 STEADY_STATE_BATCH_SIZE = _int_env("INDEXER_STEADY_STATE_BATCH_SIZE", 8)
 
-# How often (seconds) the main loop runs ``_run_wal_maintenance``: FTS5
-# ``optimize`` on tables with deletes, then ``Database.wal_checkpoint_truncate``.
+# How often (seconds) the main loop runs ``_run_wal_maintenance``: the
+# FTS5 scrub of tables a reap deleted from, then
+# ``Database.wal_checkpoint_truncate``.
 # An open connection does not pin the WAL; only an open read transaction
 # does. SQLite's automatic checkpoint lets the WAL be reused from the
 # start once its frames are checkpointed, but it never shrinks the file,
@@ -2134,25 +2135,24 @@ def _prune_reaped_records(db: Database) -> None:
 def _run_wal_maintenance(db: Database) -> None:
     """One WAL-checkpoint-interval maintenance pass.
 
-    First FTS5 ``optimize`` on each FTS5 table that had a row deleted
-    since the last pass (reaps and thread re-indexes both delete), so a
-    deleted row's index terms leave the live segment pages (#641). Then
-    the truncate checkpoint, which copies the rewritten pages into
-    ``mail.db`` and clears the WAL frames that still held the old ones.
-    A failed ``optimize`` leaves its table pending for the next pass
-    and does not skip the checkpoint.
+    First the FTS5 scrub of each table a reap deleted from since the
+    last pass, so a reaped message's index terms leave the live segment
+    pages (#641, #670). Then the truncate checkpoint, which copies the
+    rewritten pages into ``mail.db`` and clears the WAL frames that
+    still held the old ones. A failed scrub leaves its table pending for
+    the next pass and does not skip the checkpoint.
     """
     try:
         started = time.monotonic()
-        tables = db.optimize_deleted_fts()
+        tables = db.scrub_reaped_fts()
         if tables:
             log.info(
-                "fts optimize tables=%s duration=%.2fs",
+                "fts scrub tables=%s duration=%.2fs",
                 ",".join(tables),
                 time.monotonic() - started,
             )
     except Exception as e:
-        log.error("fts optimize failed: %s", type(e).__name__)
+        log.error("fts scrub failed: %s", type(e).__name__)
     try:
         busy, _log_pages, ckpt_pages = db.wal_checkpoint_truncate()
         if busy:
@@ -2198,6 +2198,9 @@ def main():
     # Needs only the database: run before the embedder wait and the
     # initial index, which can take hours or never finish (#576).
     _prune_reaped_records(db)
+    # Every table starts pending, so this pass scrubs them all once: it
+    # covers a reap whose scrub the last run did not reach (#670).
+    _run_wal_maintenance(db)
     embedder = OpenAIEmbedder(
         base_url=EMBED_BASE_URL,
         model=EMBED_MODEL,
@@ -2328,6 +2331,8 @@ def main():
         except Exception as e:
             log.error("startup reconciliation failed: %s", e)
     _prune_reaped_records(db)
+    # Scrubs what the startup reap above deleted (#670).
+    _run_wal_maintenance(db)
 
     last_reconcile = time.monotonic()
     last_recovery_sweep = time.monotonic()
@@ -2443,8 +2448,9 @@ def main():
             # shrinks the file, so an explicit periodic
             # ``wal_checkpoint(TRUNCATE)`` is what reclaims space. It
             # can only complete when no reader holds an open read
-            # transaction on the WAL. The pass first optimizes FTS5
-            # tables with deletes (#641); see ``_run_wal_maintenance``.
+            # transaction on the WAL. The pass first scrubs the FTS5
+            # tables a reap deleted from (#641, #670); see
+            # ``_run_wal_maintenance``.
             if now - last_wal_checkpoint >= WAL_CHECKPOINT_INTERVAL_SECS:
                 _run_wal_maintenance(db)
                 last_wal_checkpoint = now

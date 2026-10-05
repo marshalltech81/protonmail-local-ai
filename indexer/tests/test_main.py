@@ -7006,6 +7006,40 @@ class TestPruneReapedRecords:
             main.main()
         assert db._conn.execute("SELECT COUNT(*) FROM reaped_messages").fetchone()[0] == 0
 
+    def test_startup_scrubs_before_the_embedder_wait(self, tmp_path, monkeypatch):
+        """#670: a reap whose scrub the last run did not reach is covered
+        by the scrub every opened database owes. It needs only the
+        database, so it runs before an embedder that never answers can
+        hold ``main`` in ``wait_for_ready``."""
+        db = Database(tmp_path / "mail.db")
+        scrubbed: list[list[str]] = []
+        real_scrub = db.scrub_reaped_fts
+
+        def spy():
+            scrubbed.append(real_scrub())
+            return scrubbed[-1]
+
+        monkeypatch.setattr(db, "scrub_reaped_fts", spy)
+
+        class _Unreachable(Exception):
+            pass
+
+        def never_ready():
+            raise _Unreachable
+
+        embedder = make_mock_embedder()
+        embedder.wait_for_ready = never_ready
+        embedder.base_url = "http://host.docker.internal:8001/v1"
+        monkeypatch.setattr(main, "_validate_embed_config", lambda: None)
+        monkeypatch.setattr(main, "Database", lambda path: db)
+        monkeypatch.setattr(main, "OpenAIEmbedder", lambda **kw: embedder)
+        monkeypatch.setattr(main, "touch_health_file", lambda: None)
+        monkeypatch.setattr(main, "StallGuard", MagicMock())
+        monkeypatch.setattr(main, "initial_index", lambda *a, **kw: pytest.fail("indexed"))
+        with pytest.raises(_Unreachable):
+            main.main()
+        assert scrubbed == [["threads_fts", "message_chunks_fts", "attachments_fts"]]
+
 
 class TestChunkKinds:
     """The pipeline stores each chunk's kind (#646)."""
@@ -7052,15 +7086,15 @@ class TestChunkKinds:
 
 
 class TestWalMaintenance:
-    """``_run_wal_maintenance`` runs FTS5 ``optimize`` on tables with
-    deletes, then the truncate checkpoint, so the checkpoint clears the
-    WAL copies of the rewritten segments (#641)."""
+    """``_run_wal_maintenance`` scrubs the FTS5 tables a reap deleted
+    from, then runs the truncate checkpoint, so the checkpoint clears
+    the WAL copies of the rewritten segments (#641, #670)."""
 
-    def test_optimizes_before_checkpoint_and_logs_fixed_line(self, caplog):
+    def test_scrubs_before_checkpoint_and_logs_fixed_line(self, caplog):
         calls: list[str] = []
         db = MagicMock()
-        db.optimize_deleted_fts.side_effect = lambda: (
-            calls.append("optimize")
+        db.scrub_reaped_fts.side_effect = lambda: (
+            calls.append("scrub")
             or [
                 "threads_fts",
                 "attachments_fts",
@@ -7069,28 +7103,28 @@ class TestWalMaintenance:
         db.wal_checkpoint_truncate.side_effect = lambda: calls.append("checkpoint") or (0, 0, 0)
         with caplog.at_level(logging.INFO, logger=main.log.name):
             main._run_wal_maintenance(db)
-        assert calls == ["optimize", "checkpoint"]
-        lines = [r.getMessage() for r in caplog.records if "fts optimize" in r.getMessage()]
+        assert calls == ["scrub", "checkpoint"]
+        lines = [r.getMessage() for r in caplog.records if "fts scrub" in r.getMessage()]
         assert len(lines) == 1
-        assert lines[0].startswith("fts optimize tables=threads_fts,attachments_fts duration=")
+        assert lines[0].startswith("fts scrub tables=threads_fts,attachments_fts duration=")
 
     def test_no_deletes_logs_nothing(self, caplog):
         db = MagicMock()
-        db.optimize_deleted_fts.return_value = []
+        db.scrub_reaped_fts.return_value = []
         db.wal_checkpoint_truncate.return_value = (0, 0, 0)
         with caplog.at_level(logging.DEBUG, logger=main.log.name):
             main._run_wal_maintenance(db)
-        assert not [r for r in caplog.records if "fts optimize" in r.getMessage()]
+        assert not [r for r in caplog.records if "fts scrub" in r.getMessage()]
         db.wal_checkpoint_truncate.assert_called_once()
 
-    def test_optimize_failure_logs_type_and_still_checkpoints(self, caplog):
+    def test_scrub_failure_logs_type_and_still_checkpoints(self, caplog):
         db = MagicMock()
-        db.optimize_deleted_fts.side_effect = sqlite3.OperationalError("zq-marker-641")
+        db.scrub_reaped_fts.side_effect = sqlite3.OperationalError("zq-marker-641")
         db.wal_checkpoint_truncate.return_value = (0, 0, 0)
         with caplog.at_level(logging.DEBUG, logger=main.log.name):
             main._run_wal_maintenance(db)
         db.wal_checkpoint_truncate.assert_called_once()
-        assert "fts optimize failed: OperationalError" in caplog.text
+        assert "fts scrub failed: OperationalError" in caplog.text
         assert "zq-marker-641" not in caplog.text
 
     def test_real_database_reap_then_maintenance_clears_terms(self, tmp_path):
