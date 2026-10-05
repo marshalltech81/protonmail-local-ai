@@ -2,17 +2,17 @@
 
 ## Purpose
 
-This file tracks the current working plan for the repository.
+This file records **direction, roadmap and decisions**: what the
+system is for, the order of the roadmap phases and why, the owner's
+rulings, what is not done or deferred, and the known limitations.
 
-Use this file for:
-- active priorities
-- ordered implementation work
-- blockers and open decisions
-- short-term backlog
-
-Do not use this file for permanent architectural rules.
-Permanent constraints belong in `AGENTS.md`.
-Detailed design and operational docs belong in `docs/`.
+Current work lives in **GitHub issues**, grouped by milestone (one per
+remaining phase, plus operations) and labelled `P0`–`P3` for priority
+and `decision` for questions waiting on the owner. Work logs, review
+rounds and PR chronology stay in issues, PRs and git history. A PR
+edits this file only when a decision, a roadmap item's status or
+scope, or a known limitation changes. Permanent constraints belong in
+`AGENTS.md`; design and operational detail in `docs/`.
 
 ## Current Objective
 
@@ -40,579 +40,296 @@ knowledge layer.
 This direction was adopted 2026-09-26 after two independent
 clean-room code reviews (Claude, ChatGPT) converged on the same
 findings, and it **supersedes** the former scope line that froze the
-MCP API surface. Adding `query_messages`, structured outputs, and
-message-first-class retrieval objects is now in scope; see Phase 1.
+MCP API surface.
 
 "Immutable" means source content is never mutated beneath derived
 knowledge — not that users can never delete. Deletion/retention
-semantics are an explicit roadmap item (Phase 4).
+semantics are a roadmap item (Phase 4 item 4).
 
 ## Current State
 
+Live since the first deployment on 2026-10-03. The index was rebuilt
+from Maildir on 2026-10-05 with the initial scan oldest first (#754),
+OCR off until #698 is decided.
+
 The stack runs three containers beside the Proton Mail Bridge app:
 
-- **Proton Mail Bridge** — the official app on the host (#497, #571;
-  the only mode since the Bridge container was removed, #716), IMAP
-  on the host's loopback, reached through `host.docker.internal`.
-  Tested on macOS; Linux is not supported.
-- **mbsync** — Docker, pulls into Maildir, `chmod go+r` after each
-  sync; no TOFU: the certificate must match the operator-supplied
-  `BRIDGE_CERT_FINGERPRINT` on every start, then a persistent pin
-  with an explicit rotation flag.
-- **indexer** — Docker, parses Maildir, threads, embeds via any
-  OpenAI-compatible `/v1/embeddings` provider (operator-supplied),
-  writes SQLite. Schema v0 (the squashed, renumbered baseline,
-  including the `message_thread_map` lookup indexes): 4096-dim L2-unit-norm
-  vectors, passage dates read from `messages` (#575),
-  `indexing_jobs.last_error_class`, per-message `messages` +
-  `message_participants`. Initial scan and steady-state both
-  drain a durable `indexing_jobs` queue through one two-phase batched
-  path (Phase 1 commits thread membership with a three-case
-  seed-vector chain; Phase 2b batch-embeds; Phase 2c commits chunks /
-  attachments / final thread vector per message transactionally).
-- **mcp-server** — Docker, hybrid five-lane search (thread FTS, chunk
-  FTS, attachment FTS, thread vec, chunk vec → RRF, optional Cohere
-  rerank), exhaustive `query_messages` enumeration, and intelligence
-  tools. `INFERENCE_MODE=none` (default since #750), `anthropic`
-  (`claude-sonnet-4-6`) or `openai`; Streamable HTTP at `/mcp` is the
-  only transport (#498), behind a static bearer token; localhost:3000
-  only.
+- **Proton Mail Bridge** — the official app on the host (#497; the only
+  mode since the Bridge container was removed, #716), IMAP on the
+  host's loopback over implicit TLS, reached through
+  `host.docker.internal`. Tested on macOS; Linux is not supported.
+- **mbsync** — pull-only into Maildir, `chmod go+r` after each sync;
+  no trust on first use: the certificate must match the
+  operator-supplied `BRIDGE_CERT_FINGERPRINT` on every start, then a
+  persistent pin.
+- **indexer** — parses Maildir, threads, embeds through any
+  OpenAI-compatible `/v1/embeddings` provider, writes SQLite (schema
+  v0, with numbered migrations for any change since the first
+  deployment; 4096-dim L2-normalized vectors; per-message records
+  keyed by claimant ID).
+  Initial scan and steady state drain one durable `indexing_jobs`
+  queue through a two-phase batched path.
+- **mcp-server** — hybrid five-lane search (thread FTS, chunk FTS,
+  attachment FTS, thread vec, chunk vec → RRF, optional Cohere
+  rerank), exhaustive `query_messages`, and intelligence tools
+  (`INFERENCE_MODE=none` by default, #750). Streamable HTTP at `/mcp`
+  only, behind a static bearer token, on localhost:3000.
 
-Inference and embedding endpoints are operator-supplied — the project
+Inference and embedding endpoints are operator-supplied; the project
 ships no model-serving components. Host-side servers keep retrieval
 traffic on the box; remote providers cross that boundary. Both
-postures documented, neither provisioned.
+postures are documented, neither is provisioned.
 
 ## Roadmap
 
+Phases run in order; a later phase starts only when the earlier one's
+exit criterion holds, except where a decision below moves a slice
+ahead. Remaining work is linked by issue; each phase has a milestone.
+
 ### Phase 0 — Corpus integrity and security invariants
+
+**Status: done (2026-09-27).** Follow-ups: milestone *Corpus and
+contract follow-ups*.
 
 **Exit criterion:** every source that exists in the synchronized
 Maildir eventually reaches one visible terminal ingestion state, and
 transient infrastructure failures never cause permanent source
 omission.
 
-1. ~~**Watcher-before-drain.**~~ Done 2026-09-26 (see Recently
-   Completed).
-2. ~~**Periodic Maildir reconciliation.**~~ Done 2026-09-26 (see
-   Recently Completed).
-3. ~~**Failure taxonomy.**~~ Done 2026-09-26 (see Recently
-   Completed).
-4. ~~**Batch failure isolation.**~~ Done 2026-09-26.
-5. ~~**Outage circuit breaker.**~~ Done 2026-09-26.
-6. ~~**`requeue-dead` command.**~~ Done 2026-09-26.
-7. ~~**Robust untrusted-content serialization.**~~ Done 2026-09-27.
-8. ~~**Logging privacy.**~~ Done 2026-09-27.
-9. ~~**Fix `MCP_PORT` wiring.**~~ Done 2026-09-27.
-10. ~~**Pin Bridge source by commit SHA.**~~ Done 2026-09-27.
-11. ~~Small carryover (health threshold, fenced JSON).~~ Done 2026-09-27.
+Items, all done: 1 watcher-before-drain; 2 periodic Maildir
+reconciliation; 3 failure taxonomy; 4 batch failure isolation;
+5 outage circuit breaker; 6 `requeue-dead`; 7 robust
+untrusted-content serialization; 8 logging privacy; 9 `MCP_PORT`
+wiring; 10 Bridge source pinned by commit (obsolete since #716);
+11 health threshold and fenced JSON.
+
+Follow-ups on corpus completeness and correctness:
+
+- threading: #752 (replies indexed before their root stay split;
+  count split threads on the rebuilt index first), #756 (subject
+  fallback chains recurring same-subject mail)
+- attachment coverage: #691 (optional decoders; fontTools waits on
+  py-pdf/pypdf#4156), #694, #695, #490 (OCR language)
+- bounded work: #781
+- index-side Unicode normalization left from #316: #782
 
 ### Phase 1 — Truthful MCP contract
+
+**Status: done (2026-10-02).**
 
 **Exit criterion:** an unfamiliar LLM can query the corpus without
 guessing about semantics, completeness, or identity.
 
-1. ~~**`query_messages`**~~ — Done 2026-09-27 (see Recently
-   Completed).
-2. ~~**Structured MCP output**~~ Done 2026-09-28 (see Recently
-   Completed).
-3. ~~**Message-first-class.**~~ Done 2026-09-28 (see Recently
-   Completed). Received date deferred (see Deferred).
-4. ~~**Honest `get_mailbox_status`**~~ Done 2026-09-28 (see Recently
-   Completed).
-5. ~~**MCP endpoint auth**~~ Done 2026-10-02 (#573; #568, #569): `/mcp`
-   requires the local static bearer token from the `mcp_auth_token`
-   Docker secret (Resolved decisions 13). The trust condition narrows
-   to "processes running as the operator are trusted".
-6. ~~**Delete the dead action/IMAP surface.**~~ Done 2026-09-28 (see
-   Recently Completed).
-7. ~~**Source integrity exposure.**~~ Done 2026-09-28 (see Recently
-   Completed).
-8. ~~**Doc-drift sweep.**~~ Done 2026-09-28 (see Recently Completed).
+1. `query_messages` — done.
+2. Structured MCP output — done.
+3. Message-first-class retrieval — done.
+4. Honest `get_mailbox_status` — done.
+5. MCP endpoint auth — done (#573): `/mcp` requires the static bearer
+   token (Resolved decisions 13).
+6. Dead action/IMAP surface deleted — done.
+7. Source integrity exposure — done.
+8. Doc-drift sweep — done.
+
+Follow-up: #755 (filters select whole threads, so a passage from a
+message outside the filter can be cited; owner decision).
 
 ### Phase 1.5 — Minimal regression baseline
 
-Done 2026-09-28 (see Recently Completed): `make baseline`, CI job
+**Status: done (2026-09-28).** `make baseline` and the CI job
 `retrieval baseline`. Phase 2 must demonstrate behavior preservation
-against it: refactor PRs (items 1–3) show no snapshot diff; item 4
-shows a reviewed snapshot diff with golden checks still passing.
+against it: refactor PRs show no snapshot diff; behaviour changes show
+a reviewed snapshot diff with golden checks still passing.
 
 ### Phase 2 — Swappable embedding / vector generations
 
-> **First milestone narrowed (2026-10-05, external review; #719).**
-> Before building the live-generation lifecycle below, measure rebuild
-> duration, resources and acceptable downtime, and ship a validated
-> staged rebuild with a controlled cutover, recording dimension and
-> tokenizer explicitly. Pursue live generations only if measurements
-> show the maintenance window is unacceptable, without weakening their
-> consistency requirements.
+**Status: in progress (first slice only).** Milestone *Phase 2*.
 
 **Exit criterion:** changing embedding models never requires altering
 the source corpus (the Maildir) or the versioned schema — no numbered
-migration and no `SCHEMA_VERSION` bump. Everything derived — vectors
-first, but the chunk index too — is disposable and regenerable: a
-context-compatible model switch regenerates vectors only, creating
-and later dropping runtime-managed `gNN` tables that are exempt from
-`SCHEMA_VERSION` (the exception recorded under item 2); an
-incompatible one regenerates chunks and vectors through the reindex
-bundle path. Neither touches a source file or a migration.
+migration and no `SCHEMA_VERSION` bump. Everything derived is
+disposable and regenerable: a context-compatible model switch
+regenerates vectors only (runtime-managed `gNN` tables exempt from
+`SCHEMA_VERSION`, item 2); an incompatible one regenerates chunks and
+vectors through the staged rebuild below.
 
-1. **`vector_generations` registry** — generation_id, provider,
-   resolved endpoint, model, revision, dimensions, tokenizer, context
-   window, chunk_config_hash, created_at, status (building /
-   caught-up / active / retained / retired). Dimension read from
-   metadata, never a constant; pass the `dimensions` request param
-   where the provider supports it.
-2. **Per-generation vec tables and the blue/green lifecycle** —
-   `vec_chunks_gNN` and `vec_threads_gNN` (sqlite-vec bakes dimension
-   into DDL), built for a candidate, validated, switched atomically,
-   retained for rollback, retired. Seven review rounds on this plan
-   (2026-09-30, PR #307) turned that sentence into a protocol with a
-   state machine, and each round's findings were consequences of the
-   previous round's additions — the sign that it needs a design
-   document, not a longer bullet. **Deliverable before any
-   implementation:** `docs/design/vector-generations.md`, reviewed on
-   its own PR, satisfying every requirement below; the reviews that
-   produced them are on #307.
-   - **Identity and selection.** The registry records a generation's
-     resolved endpoint (the SDK's `client.base_url` after
-     construction, credential-sanitized — not the configured value,
-     which may be the literal `default`), model,
-     dimension and any exposed revision, **plus a non-secret
-     configuration label**, because two credentials at one gateway can
-     route to different deployments behind identical public fields.
-     None of those fields fingerprints the model's *output*: a
-     host-side server can reload a different same-dimensional model
-     under the same name, and a provider can move an unversioned
-     alias. So the registry also stores a **calibration vector** — the
-     embedding of a fixed synthetic text taken when the generation is
-     created — and both services re-embed that text at startup and
-     periodically; a distance beyond tolerance means the deployment
-     behind the generation has changed, and the service refuses to
-     write to or query it until a new generation is built.
-     **At most two generations are live at once** (active plus one of
-     building or retained), and the registry refuses to start a build
-     while a retained generation exists, since only two configuration
-     sets are available. Both services receive both sets (`EMBED_*`
-     and `EMBED_NEXT_*`, each with its own Docker secret); the
-     registry's active generation names the live one; each service selects the
-     client whose label and identity match, at startup and on every
-     semantic query, and **fails closed unless every live generation**
-     (active, building, retained) **has a matching client** — not
-     merely one of them, or the indexer could not dual-write. Activation
-     is a registry change plus a restart or reload, never a
-     configuration edit.
-   - **Vector-only or rechunk.** A model switch reuses the stored
-     chunks only when the candidate tokenizer counts every document
-     input — every stored chunk and every chunkless thread's
-     display-subject fallback text — within the candidate's input
-     window, verified by counting; otherwise it is a rechunk through
-     the reindex bundle below. Queries are the other input: today a
-     tool's query string reaches `embed_query` unbounded, so the
-     switch also fixes a supported query length, enforced on the query
-     side from the active generation's window, or a query that fit the
-     old model fails after activation and disables the semantic path.
-   - **Validation gate.** The Phase 1.5 baseline runs on a hashed test
-     embedder and proves wiring only. Activation requires #283's
-     evidence-recall eval against the old and candidate generations
-     with query vectors from their respective real embedders.
-   - **One generation per query.** Read the active ID, embed the query
-     **outside any transaction** (a read mark held across a provider
-     call blocks WAL truncation — the May bug), then open a snapshot,
-     re-read the ID, and run both dense lanes in it; re-embed once and
-     retry if the ID changed, else fail closed.
-   - **Synchronized with ingestion.** Dual-writing into every live
-     generation is enabled and durably queued **before** the build
-     watermark is recorded (or ingestion pauses across an atomic
-     catch-up-and-enable), so nothing falls between backfill and
-     dual-write; and backfill is **ordered behind concurrent
-     mutations** — a monotonic sequence with conditional writes, or a
-     replay of every post-snapshot mutation before the candidate is
-     marked caught-up — so a stale backfill read of a chunk that
-     ingestion has since replaced or deleted can never overwrite the
-     newer state or leave an orphan vector. Every new or changed chunk, every **deletion** (reaps
-     and reprocessing), and every survivor-thread mean recomputation
-     apply to all live generations in one transaction — orphan vectors
-     would otherwise consume the candidate window. The lifecycle is
-     active A + candidate B → retained A + active B; the retained
-     generation stays written for its rollback window and is retired
-     only when that closes. Thread vectors are rebuilt with the
-     candidate model, using the display-subject fallback for chunkless
-     threads so none drops out on activation.
-   - **Schema and secrets: two recorded exceptions.** The `gNN` tables
-     are created and dropped at run time, which the schema rule (every
-     change bumps `SCHEMA_VERSION` and ships a migration) does not
-     allow: the registry and lifecycle arrive by one numbered
-     migration; the tables it manages are runtime-managed derived
-     storage, registered there, outside `SCHEMA_VERSION`, failing
-     closed at startup on registry/table disagreement. And the second
-     Docker secret for the embed layer breaks the one-secret-per-layer
-     credential contract in AGENTS.md's Architecture Summary. Both are
-     owner-approved exceptions (2026-09-30) that the design PR records
-     in AGENTS.md before any wiring lands.
-3. **Stage-aware pipeline manifest.** One active generation
-   operationally, but the identifier is not opaque: a canonical
-   manifest records parser / normalizer / chunker / embedding
-   identity + config hashes, and
-   `pipeline_config_hash = sha256(canonical_manifest)`. This
-   preserves the ability to decide later whether a change means
-   re-embed only, rechunk + re-embed, or reparse + rechunk +
-   re-embed — without building parser/chunk generation coexistence
-   machinery now.
+**First milestone narrowed (2026-10-05, external review; #719).**
+Before building the live-generation lifecycle, measure rebuild
+duration, resources and acceptable downtime, and ship a validated
+staged rebuild with a controlled cutover, recording dimension and
+tokenizer explicitly. Pursue live generations only if measurements
+show the maintenance window is unacceptable, without weakening their
+consistency requirements. Deferred while the embedding model is
+unchanged (owner, 2026-10-05).
+
+1. **`vector_generations` registry** — provider, resolved endpoint,
+   model, revision, dimensions, tokenizer, context window,
+   chunk_config_hash, status (building / caught-up / active /
+   retained / retired). Dimension read from metadata, never a
+   constant. **First slice done** (#650): the embedder identity record
+   and calibration vector, checked at startup by both services.
+   Remaining: #719 (detected size, tokenizer), #648 (periodic
+   calibration re-check), #661 (keep SQLite-only tools up when the
+   check cannot run).
+2. **Per-generation vec tables and the blue/green lifecycle** — only if
+   #719's measurements call for it (design notes on #719). Seven review
+   rounds on PR #307 showed it needs a reviewed design document,
+   `docs/design/vector-generations.md`, before any implementation. It
+   must cover: generation identity (resolved endpoint, model,
+   dimension, revision, a non-secret configuration label, and a
+   calibration vector re-checked at startup and periodically, refusing
+   reads and writes on drift); at most two live generations, both
+   services holding both configuration sets (`EMBED_*`,
+   `EMBED_NEXT_*`) and failing closed unless every live generation has
+   a matching client, activation by registry change plus restart;
+   reusing stored chunks only when the candidate tokenizer fits every
+   stored input, by counting, with a supported query length; #283's
+   evidence-recall eval as the activation gate; one generation per
+   query (embed outside any transaction, re-read the ID in the
+   snapshot, retry once, else fail closed); dual-writes enabled before
+   the build watermark, backfill ordered behind concurrent mutations,
+   and every chunk change, deletion and survivor mean applied to all
+   live generations in one transaction. Two owner-approved exceptions
+   (2026-09-30), recorded in AGENTS.md by the design PR: runtime `gNN`
+   tables outside `SCHEMA_VERSION`, and a second embed Docker secret.
+3. **Stage-aware pipeline manifest** — a canonical manifest of parser /
+   normalizer / chunker / embedding identity and config hashes,
+   `pipeline_config_hash = sha256(canonical_manifest)`, so a change can
+   be classified as re-embed, rechunk or reparse without building
+   coexistence machinery (#786).
 4. **Chunk `kind` tags** (body / quote / signature / forwarded /
-   calendar) as chunker metadata, with the invariant that **semantic
-   segmentation happens before chunking** — a chunk never spans
-   kinds. `quoting.py` already segments pre-chunk; this codifies it
-   and lets the embedder skip/deprioritize by kind. No
-   `content_blocks` table until a non-chunking consumer needs one.
-5. **Spike: retire the hand-rolled address parsing behind the
-   existing bounds** (added 2026-09-30 after PR #260; reduced on
-   review from a parser migration). `parser.py` uses the legacy
-   `compat32` parser, and its header helpers work around it:
-   `_split_address_list` / `_parse_addrs` / `_format_address`,
-   `_decode_encoded_word_runs`, `str()` around `Header` values, and
-   `_is_attachment`. The modern API (`email.policy.default`,
-   `EmailMessage`, `email.headerregistry`) was proposed as the
-   replacement, and review established what it cannot replace, each
-   point verified on 3.14:
-   - the **initial parse stays `compat32`**: the default policy parses
-     structured headers during `message_from_bytes`, and a
-     `Content-Type` `name=` holding a few hundred nested comments
-     (about 1 KB) raises `RecursionError` there, before any guard;
-   - the **encoded-word scanner stays**: the default policy's decoding
-     is quadratic on malformed `=?…?` runs (0.28 s at 8,000 prefixes,
-     4.1 s at 32,000);
-   - the **address pre-screen stays**: reading `.addresses` recurses
-     on about a thousand nested comments, mishandles malformed group
-     syntax (a bogus empty `<>` address), and a large list enters
-     `headerregistry` before a wrapper can look at it;
-   - the **attachment classifier stays**: a filename-bearing `text/*`
-     part with no `Content-Disposition` is an attachment here but
-     `is_attachment()` says no and `get_body()` returns it, while
-     `iter_attachments()` yields the second of two bare `text/plain`
-     body candidates;
-   - **`_safe_decode` stays**: `get_content()` raises `LookupError` on
-     an unknown body charset.
-   What is left is one targeted change: keep `_split_address_list` —
-   it *is* the pre-screen, the linear structural split that keeps
-   large lists, nested comments and group syntax out of any
-   whole-header stdlib parse, and the raw-header cap alone does not
-   replace it — and parse each element it yields with
-   `email.headerregistry` instead of `_parse_addrs`, possibly retiring
-   `_format_address` too. The work
-   is a differential, not a rewrite: every parser fixture and every
-   shape in the encoding parity test (plus the filename-only text part
-   and repeated body candidates) run through both the old helpers and
-   the new call, comparing addresses, names, body selection,
-   attachment classification and identity; a helper is retired only
-   where the differential is equivalent and its bounds survive, with
-   a work-bound regression for each hostile input above. If the
-   differential retires nothing without a new bound, close this item
-   and record why. Any retired helper lands with the Phase 2 reindex,
-   since a parse change can alter bodies and attachment identity.
+   calendar), with semantic segmentation before chunking. **Tags
+   stored** (#659, in v0); using them in retrieval is #660.
+5. **Spike: retire hand-rolled address parsing behind the existing
+   bounds** (#787). Review established on 3.14 that the
+   initial `compat32` parse, the encoded-word scanner, the address
+   pre-screen (`_split_address_list`), the attachment classifier and
+   `_safe_decode` all stay. What is left: parse each element
+   `_split_address_list` yields with `email.headerregistry` instead of
+   `_parse_addrs`, possibly retiring `_format_address`, as a
+   differential over every parser fixture and encoding-parity shape. A
+   helper is retired only where the differential is equivalent and its
+   bounds survive; if nothing retires without a new bound, close it
+   and record why. A retired helper lands with a rebuild.
 
-**Reindex bundle.** Fixes that change chunk IDs, bodies or message
-identity share one rebuild with the first Phase 2 generation, never one
-reindex each. One rebuild, not one PR: each fix is its own reviewed PR
-per the review rules, and a fix that would change bodies or IDs for
-newly ingested mail before the rebuild is gated behind the pipeline
-configuration so the live index stays internally consistent until the
-single staged rebuild picks all of them up. The fixes: chunk overlap past `max_tokens` (#208) and whitespace
-between split pieces rendered back into a chunk past `max_tokens`
-(#550), both moved to pre-go-live work and done (#594); and #297's
-second half, the
-undated-mail date chain, **superseded** by Resolved decisions 14:
-`occurred_at` comes from the top `Received:` header only (NULL
-otherwise, no Maildir-timestamp or `now()` synthesis), filters fall
-back to `sent_at`, and undated mail keeps its first persisted
-`sent_at` (#297's first half, already a batch-1 guard).
-The all-zero chunk repair (#304) left the bundle: #349 rejects
-all-zero provider embeddings and no index older than that guard
-exists. Reply
-subjects (#303), the whitespace-only plain alternative (#298) and
-sequential inline text parts (#295) left the bundle on 2026-10-01:
-with no live index yet they land directly (see "Result quality
-first"). So did Message-ID conflicts (#217), folded into the v0 schema
-rather than shipped as a migration.
+**Rebuild bundle.** Fixes that change chunk IDs, bodies or message
+identity share one rebuild rather than one each, each still its own
+reviewed PR, gated behind the pipeline configuration if it must land
+before the rebuild. Everything bundled so far landed directly before
+go-live (#208, #550, #297, #298, #295, #303, #217; #304 unneeded after
+#349). Open: #782.
 
-**Sequencing (decided 2026-09-30, per #283).** Phase 2's blue/green
-lifecycle validates a new generation against the old, which needs a
-measurement that distinguishes evidence recall from hit rate. So the
-Phase 1.5 baseline plus #283's evidence-recall eval run before the
-first generation is built: a slice of Phase 3 item 1 moves ahead of
-Phase 2.
+**Sequencing (2026-09-30, #283).** The blue/green lifecycle validates
+a generation against the old one, which needs evidence recall, not hit
+rate; so the Phase 1.5 baseline plus #283's evidence-recall slice
+(done, #452) precede the first generation.
 
-**Two kinds of reindex.** Items 1–2 version the vec tables only; the
-chunk index stays keyed by deterministic chunk IDs. A context-compatible
-model switch is therefore a **table switch inside the live file**, and
-the lifecycle is proved on that first, on the unchanged corpus. The
-reindex bundle above changes chunk IDs, so it is a **staged rebuild
-with a file swap**, which the design document specifies as well; the
-plan records only what it must satisfy (each point from a review round
-on #307):
-- no in-place rebuild: a running MCP server must never see half-rebuilt
-  FTS data or vectors that no longer join, so the new image builds
-  `mail.next.db` from the source corpus alongside the live file, and
-  validation and the eval slice run against the staged file;
-- the staged file is complete at cutover: mbsync and the live indexer
-  are quiesced, a **final watermark is taken after that quiescence**,
-  and the candidate indexer drains through it before the swap — the
-  build-time watermark is not enough, since mail added, changed or
-  reaped after it would be lost or resurrected; and an empty runnable
-  queue is not completeness, because the queue parks persistent
-  failures as `dead`, so cutover validation reconciles every source
-  file against the staged database and rejects unresolved or
-  dead-lettered work unless the operator has approved each as a
-  terminal skip;
-- **both** databases have their writers stopped and their WALs
-  successfully checkpointed before either main file is renamed (the
-  staged file is in WAL mode too, and a rename would orphan
-  `mail.next.db-wal`); the MCP server is stopped and its in-flight
-  requests drained before that checkpoint, and restarted only once the
-  new file is installed and validated — it opens `mail.db` read-only
-  per request, so a request could otherwise keep serving the old inode
-  after the swap or open the path while neither file carries the live
-  name;
-- the swap is crash-consistent: the retained file is kept by a hard
-  link taken first, the staged file then replaces the live name in a
-  **single atomic rename**, and the directory is `fsync`ed — never a
-  remove-then-rename pair that leaves an interval with no `mail.db` —
-  and startup recognises and resolves a half-finished cutover (a
-  marker written before the swap and cleared after) rather than
-  finding an indeterminate state; the ordering is durable at every
-  step — marker and retained link `fsync`ed before the rename, the
-  directory synced after it, and the marker's removal synced too — so
-  a crash between the rename and the sync cannot leave the new live
-  entry without its rollback target or marker;
-- rollback is the reverse swap onto the previous image tag, and it is
-  only valid if the retained file is either kept synchronized with
-  ingestion for the rollback window or caught up under the same
-  quiescence — with reconciliation and the queue fully drained —
-  before the MCP server is started on it; the indexer touches its
-  health file before `initial_index`, so "start the old image" alone
-  would serve a stale database while catch-up runs;
-- the live database is **never migrated in place**: a bundled schema
-  change, if the bundle ever carries one, is applied only to the
-  staged file by the rebuild image, and the live indexer runs the
-  previous image until cutover —
-  a behaviour gate alone cannot defer the migration runner, and a
-  retained file already on the forward-only schema would make the
-  reverse swap unusable;
-- a rebuild of the previous `pipeline_config_hash` is *not* a rollback:
-  a bundle that carries a forward-only migration makes the previous
-  image fail closed on the new schema, and the new image lacks the old
-  algorithms; the manifest records which stages changed, not a way to
-  recreate code, and chunk/FTS coexistence machinery stays deferred;
-- the bundle's cost is measured on a representative **staged full
-  rebuild** (reparse, extraction unless the cache is safely seeded,
-  FTS, thread and message rows, embedding); the vector-only
-  generation's timing is only an embedding lower bound. The gate also
-  covers **peak storage**: two complete databases, their vector tables
-  and WALs, and the extraction cache must fit with headroom, since a
-  full data volume also fails the live indexer's commits, so a
-  conservative free-space preflight runs before staging begins.
+**Two kinds of reindex.** A context-compatible model switch is a
+table switch inside the live file (items 1–2). A chunk-ID change is a
+**staged rebuild with a file swap**: the new image builds
+`mail.next.db` from the source corpus beside the live file and is
+validated there; at cutover mbsync and the indexer are quiesced, a
+final watermark is drained, and every source file is reconciled
+(unresolved or dead-lettered work rejected unless the operator approves
+each skip); both writers stop and both WALs are checkpointed, and the
+MCP server is drained, before any rename; the swap is crash-consistent
+(hard link to retain the old file, one atomic rename, directory
+`fsync`, a durable marker startup resolves); rollback is the reverse
+swap onto the previous image, valid only if the retained file is kept
+in sync; the live database is never migrated in place, and rebuilding
+an old `pipeline_config_hash` is not a rollback; the gate measures a
+representative full rebuild including peak storage, with a free-space
+preflight.
 
 ### Phase 3 — Measurement and product vertical slice
+
+**Status: in progress.** Milestone *Phase 3*.
 
 **Exit criterion:** we can objectively measure whether the system
 answers real knowledge questions, and identify why failures occur.
 
-**Status of Phases 3–5 (2026-10-02, afternoon).** No phase is
-complete. Done: Phase 3 items 3, 4, 6 and 7 (3 as an experimental
-tool; 6's budgets are retuned once #487 measures them), Phase 4 items
-1 and 2. Partly done: Phase 3 items 1, 2 and 8, Phase 4 items 3 and 4,
-Phase 5 item 2. Not started: Phase 3 item 5, Phase 5 items 1, 3 and 4.
-What remains needs the real mailbox and providers (the go-live
-checklist), a model judge for semantic support (#284), or an owner
-decision (Open decisions).
-
-| Item | Status | Landed in | Remaining |
-|---|---|---|---|
-| 3.1 Evals | Partly done | #452 (evidence recall vs hit rate), #494 (agent-level trace scoring), #518 (#502), #560 (abstention, corrections, conflicting sources, held-out split) | pass thresholds, live-client trace replay, latency/cost (#283) |
-| 3.2 Latency | Partly done | #458 (stage timings) | benchmarks, budgets, cancellation (#287); needs real mail |
-| 3.3 `brief_issue` | Done (experimental) | #466, #493 (hardening, #471) | accuracy/abstention scoring (#291) is eval work under 3.1 |
-| 3.4 Injection suite | Done | #448, #534 (#442) | — |
-| 3.5 Thread weighting, rerank | Not started | #535 (reply subjects in rerank candidate text, groundwork for #289) | needs real embedder/reranker (#288, #289) |
-| 3.6 Prompt evidence budget | Done | #445 (shared character budget, dedup, coverage note), #496 (whole-prompt token budget, small-model profile) | retune the budgets once measured (#487) |
-| 3.7 Filtered semantic recall | Done | #440, #470 | — |
-| 3.8 Citation contract | Partly done | #457, #495 (`ask_mailbox` statement coverage and quote checks), #519 and #525 (quote and label edge cases), #532 and #545 (thread-scoped `get_evidence` parity), #559 (mailbox-wide parity, #537), #565 (`summarize_thread`, `extract_from_emails`) | semantic support only (#284) |
-| 4.1 Entities | Done | #459, #527 (orphan pruning, #464) | — |
-| 4.2 Source authority | Done | #459, #474 (Spam guard), #523 and #542 (rules file kept private and validated) | verdict gating (#463): decided 2026-10-04 (downgrade on DMARC fail plus a `sender_authenticated` flag); both forged-header tests passed (Proton strips a forged `Authentication-Results` and overwrites `X-Pm-Origin`); left: build it with a schema migration and a Maildir backfill |
-| 4.3 Temporal retrieval | Mostly done | #561 (`sent_at` defined and used consistently), #593 (whole-thread evidence under a date range), #597 (#575), `occurred_at` with filters and thread spans on the effective time (#297) | bitemporal claims (Phase 5); the top `Received:` was confirmed as Proton's on live mail (2026-10-04) |
-| 4.4 Retention | Mostly done | #451 (mirror default), #475 (Trash hidden from default search), #564 and #583 (reaped sources reported for 30 days), the invariant restated (#610), #562 (extracted text purged on reap) | user-controlled retention |
-| 5.1 Hardened `brief_issue` | Not started | — | needs Phase 3 usage on real mail |
-| 5.2 Support/contradict | Built, experimental | #467 (`check_conclusion`), #493 (evidence-slot refill), #558 (quote verification, also for `brief_issue`) | semantic support (#284) |
-| 5.3 Position as of date | Not started | — | — |
-| 5.4 Persisted claims | Not started (by design) | — | only after 5.1–5.3 |
-
-1. **Agent-level evals** on the synthetic mailbox: tool-selection
-   accuracy, argument accuracy, retrieval recall, citation accuracy,
-   pagination completeness, unnecessary-call counts. Extends the
-   retrieval-only harness in `mcp-server/tests/eval/` (Recall@10 /
-   MRR, opt-in; see its README for the invocation) to the agent level; the old
-   `scripts/eval_run.py` batch runner was removed with Open WebUI.
-   Tracked by **#283**, whose substantive addition is separating
-   jointly-required-evidence recall from any-hit rate (today's
-   "Recall@10" is the latter); its first slice precedes Phase 2 (see
-   Phase 2, Sequencing). **Status: partly done.** The first slice
-   landed in #452 (required-evidence groups, evidence recall@10
-   reported apart from hit@10 and MRR); #494 added deterministic
-   agent-level scoring of tool-call traces on synthetic scenarios;
-   #560 added abstention, correction and conflicting-source scenarios
-   and a stable held-out split. Known limits of #560: abstention is
-   credited only on a strict match of a golden absent term, and the
-   held-out rule ignores category, so the dev split has no
-   conflicting-source scenario. Remaining: pass thresholds, replaying
-   a live client's traces, latency and cost; answer quality stays a
-   manual grade.
+1. **Agent-level evals** on the synthetic mailbox — tool selection,
+   arguments, retrieval and evidence recall (apart from hit rate),
+   citation accuracy, pagination, unnecessary calls. **Partly done**
+   (#452, #494, #560; answer evaluation #658). Remaining: #283 (pass
+   thresholds, live-client trace replay, latency and cost), #604,
+   #655, #656, #657, #770, #771; real-mail failures to explain: #774,
+   #776. Evals use the synthetic corpus only; questions from real
+   mail would send mail to the model provider and wait on an owner
+   decision (held 2026-10-02, #785). Answer quality
+   stays a manual grade.
 2. **Latency instrumentation before performance redesign.** Stage
-   timers through the query path (query_embedding / per-lane FTS+KNN /
-   fusion / rerank / evidence_fetch / inference / total). `ask_mailbox`
-   exceeded 60s client timeouts on a populated mailbox before the v15
-   index fix and has not been re-measured since — measure before
-   touching KNN architecture; if inference dominates,
-   vector work won't fix the user problem. Then set request-level
-   deadlines. (Project history endorses this: the 400s search hang
-   was three wrong theories until the query plan was measured.)
-   Tracked by **#287** (adds content-safe telemetry, cold/warm
-   benchmarks, cancellation of thread-offloaded work). **Status:
-   partly done.** Stage timings landed in #458; benchmarks, budgets
-   and cancellation wait on a real mailbox.
-3. **Experimental ephemeral `brief_issue`.** Chronology, actors,
-   positions, decisions, open questions, conflicting evidence — every
-   assertion cited, **nothing persisted**. This is the proving ground
-   for what a durable ontology should eventually contain; its
-   failures drive Phase 4. Tracked by **#291** (chronology,
-   corrections, contradictions, "as of" questions; "newest is not
-   authoritative"). An experimental MCP tool, registered only when
-   `MCP_EXPERIMENTAL_TOOLS=true` (off by default; Resolved
-   decisions 12). **Status: done (experimental): built in #466,
-   hardened in #493 (#471).** Scoring its accuracy and abstention
-   (#291) is eval work under item 1.
-4. **Adversarial injection suite** (hostile fixtures in the synthetic
-   mailbox, asserting the Phase 0 serialization holds under real
-   tool flows). **Status: done (#448).** The one gap it found,
-   #442, is fixed (#534).
-5. Unparked by the eval harness:
-   - **Thread-vector weighting** — attachment chunks currently
-     dominate the thread-vector mean (a 50-chunk PDF on a 5-chunk
-     thread is ~91% of the coarse vector). Options: keep
-     mean-of-all / weight body vs attachment / cap per-source
-     contribution. Decide from eval data distinguishing
-     "asked about the PDF" vs "asked about the email" queries;
-     touches `get_thread_chunk_embeddings` and the reconciler's
-     survivor-mean path.
-   - **Rerank value experiment** — `RERANK_MODE=cohere` vs `none` on
-     the golden set.
-   Tracked by **#288** (thread-vector policy, with versioning and a
-   recompute spec) and **#289** (rerank, including candidate-text
-   representation; recommendation only, default stays off).
-   **Status: not started;** both need a real embedder and reranker.
-6. **Prompt context budget with coverage disclosure** (#286 is
-   item 7; this is **#285**): replace the fixed 2,000-character
-   per-thread fill and 3-chunks-per-candidate slice with a
-   whole-prompt token budget, an evidence-selection policy, dedup,
-   and a statement of what was left out. Nothing in the plan covered
-   this; #214/#215 fixed only `summarize_thread`'s tail and
-   attachment identity. **Status: done (#445, #496).** One
-   shared budget, per-thread dedup of long quoted passages, a
-   counts-only coverage note, and a whole-prompt token budget for
-   every intelligence tool against `INFERENCE_CONTEXT_TOKENS` (an
-   estimate, no tokenizer; a small local model sets it to its
-   window). Measuring and retuning the budgets is #487.
-7. **Semantic recall under selective filters** (**#286**): the vector
-   lanes run unfiltered and sender/date/folder filters apply
-   afterwards, so a selective filter can empty the candidate window.
-   Measure the loss, then choose a bounded remedy (eligible-subset
-   scoring, filter pushdown, or candidate expansion). **Status: done
-   (#440, #470)** with candidate expansion; eligible-subset scoring
-   is the next step if the evals still show loss.
-8. **A validated citation contract for today's answers** (**#284**):
-   stable evidence IDs and per-message identity in `ask_mailbox`
-   prompts, a structured claim→citation map checked against the
-   evidence, bounded repair. The plan verified quotes only for
-   Phase 5's persisted claims; ephemeral answers need it first.
-   Depends on #217's identity decision (landed in #453). First slice
-   in #457 (labelled evidence, label validation, one repair);
-   statement-level coverage and quote verification for `ask_mailbox`
-   in #495; mailbox-wide `get_evidence` reproduces `ask_mailbox`'s
-   evidence with `max_threads` (#559, #537); `summarize_thread` and
-   `extract_from_emails` carry the same labels, checks and single
-   repair (#565). **Status: partly done;** only semantic support
-   (checking that a cited passage supports its statement, which needs
-   a model judge) remains.
+   timings done (#458). Remaining: benchmarks, request-level budgets
+   and cancellation on real mail (#287). Measure before touching KNN
+   architecture: if inference dominates, vector work will not help.
+3. **Experimental ephemeral `brief_issue`** — chronology, actors,
+   positions, decisions, open questions, conflicting evidence, every
+   assertion cited, nothing persisted; behind
+   `MCP_EXPERIMENTAL_TOOLS=true` (Resolved decisions 12). **Done
+   (experimental)** (#466, #493). Accuracy and abstention scoring:
+   #291.
+4. **Adversarial injection suite** — hostile fixtures asserting the
+   Phase 0 serialization holds under real tool flows. **Done** (#448,
+   #534).
+5. **Thread-vector weighting and rerank value** — attachment chunks
+   dominate the thread-vector mean; reranking is unmeasured. **Not
+   started**; needs a real embedder and reranker: #288, #289, #766.
+6. **Prompt context budget with coverage disclosure.** **Done** (#445,
+   #496). Retune from measurements: #487 (live answers dropped 8–22
+   passages to the budget).
+7. **Semantic recall under selective filters.** **Done** (#440, #470)
+   with candidate expansion; eligible-subset scoring is next if evals
+   still show loss.
+8. **A validated citation contract for today's answers** — stable
+   evidence IDs, claim→citation checks, quote verification, one
+   repair, in every citing tool. **Partly done** (#457, #495, #559,
+   #565). Remaining: semantic support (a model judge), #284.
+
+Also in this milestone: #779, #764 (default
+inference model).
 
 ### Phase 4 — Deterministic knowledge scaffolding
 
-Items 1 and 2 were built before go-live (#459), so their tables are
-in the v0 schema. Any Phase 4 schema change after
-the first deployment needs a numbered migration like any other.
+**Status: mostly done.** Milestone *Phase 4*. Items 1 and 2 were built
+before go-live, so their tables are in the v0 schema; any later
+Phase 4 schema change needs a numbered migration.
 
 1. **Entity resolution, phase 1 (deterministic):** address
-   canonicalization, display-name clustering, domain→organization
-   mapping; `entities` / `entity_aliases` relational tables.
-   Deterministic only (Resolved decisions 12): two addresses are never
-   merged by display name, and no model-suggested merges or
-   confirmation flow are built. **Status: done (#459);** entities
-   and aliases orphaned by a reap are pruned (#464, #527).
+   canonicalization, display-name clustering, domain→organization;
+   never merged by display name alone, no model-suggested merges
+   (Resolved decisions 12). **Done** (#459, #527).
 2. **Source authority metadata:** `source_type` / `authority_class`
-   as explicit, filterable metadata with provenance, assigned only
-   from an operator rules file (domain/address → class; Resolved
-   decisions 12). There is no model classifier: it would send mail
-   to the inference provider from the indexer. **Never silently
-   folded into ranking weights** — authority is contextual; reasoning distinguishes "a
-   vendor represented X" from "the executed agreement states X".
-   **Status: done (#459).** The From address is unauthenticated: the
-   Spam guard landed in #474 and gating on Proton's verdict header is
-   decided after go-live (#463).
-3. **Richer temporal retrieval:** capture and expose
-   occurred_at/sent_at consistently; bitemporal claim modeling waits
-   for Phase 5. **Status: mostly done.** "Message time" is defined in
-   `docs/architecture.md`: `sent_at` (the parsed `Date:` header),
-   `occurred_at` (the top `Received:` header's date, NULL when absent
-   or unparseable) and the effective time `COALESCE(occurred_at,
-   sent_at)`, which every date filter, thread span and time ordering
-   uses; a message or attachment qualifies by its own message's
-   effective time, and under a date range the evidence tools show any
-   passage of a thread whose span overlaps it, each with its own
-   `sent_at` and `occurred_at` (#593; #574 superseded). Passage dates
-   are read from `messages` (#597, #575). Left: check against real
-   mail that the top `Received:` is Proton's (go-live).
-4. **Deletion/retention semantics.** Mirror is the default
-   (upstream delete → index delete after the grace window; #451),
-   archive (`INDEXER_DELETION_ENABLED=false`) is the opt-in, and
-   Trash stays indexed but is hidden from default search (decided
-   2026-10-01, #441). Still to define: user-controlled retention.
-   Provenance defines behavior when a citation's source is reaped:
-   the source reads as removed (not found after the record expires),
-   and its text is never kept (restated 2026-10-02, Resolved
-   decisions 14). **Status: mostly done** (#451 mirror default,
-   #475 Trash hidden from default search). Reaped sources are
-   reported (#564, #583): looking up a reaped message or thread
-   reports "reaped from the index" rather than "not found", and
-   `get_thread` lists a surviving thread's reaped messages, from
-   content-free `reaped_messages` records kept 30 days; after that, or
-   an index rebuild, a reaped ID reads as "not found", which the
-   restated invariant accepts. A reap also deletes the extracted
-   text of each attachment payload no remaining message carries
-   (#562). Remaining: user-controlled retention.
+   from an operator rules file only (Resolved decisions 12), filterable,
+   **never silently folded into ranking weights**. **Done** (#459;
+   Spam guard #474). Remaining: verdict gating on Proton's
+   authentication headers, #463 (decided, Resolved decisions 19).
+3. **Richer temporal retrieval:** `sent_at`, `occurred_at` (top
+   `Received:`, confirmed as Proton's on live mail) and the effective
+   time `COALESCE(occurred_at, sent_at)` for every filter, span and
+   ordering (`docs/architecture.md`, "Message time"). **Done** (#593,
+   #597, #599). Bitemporal claims wait for Phase 5.
+4. **Deletion/retention semantics.** Mirror is the default, archive
+   (`INDEXER_DELETION_ENABLED=false`) the opt-in, Trash indexed but
+   hidden from default search. A reaped source reads as removed for 30
+   days, then not found, and its text is never kept (Resolved
+   decisions 14). **Mostly done** (#451, #475, #562, #564, #583).
+   Remaining: user-controlled retention (#784), local
+   deletion of deleted mail's files (#728), and validating reaping on
+   live mail (#783).
 
 ### Phase 5 — Knowledge reasoning
 
-1. Hardened `brief_issue` (informed by Phase 3 usage). **Status: not
-   started;** needs Phase 3 usage on real mail.
+**Status: not started, except item 2.** Milestone *Phase 5*.
+
+1. Hardened `brief_issue`, informed by Phase 3 usage on real mail.
+   **Not started** (#788).
 2. Support / contradict / qualify / supersede analysis as a
-   query-time tool ("here is a conclusion for the Board packet —
-   find evidence that supports, contradicts, qualifies, or
-   supersedes it"). Experimental, behind `MCP_EXPERIMENTAL_TOOLS`
-   like `brief_issue`. **Status: built (experimental) as
-   `check_conclusion` (#467);** quotes are verified against the cited
-   passages in it and in `brief_issue` (#558). Semantic support
-   remains (#284).
+   query-time tool, experimental like `brief_issue`. **Built
+   (experimental)** as `check_conclusion` (#467), with quote
+   verification (#558). Remaining: semantic support, #284.
 3. Temporal position/change reasoning ("position as of date X" vs
-   "current position"). **Status: not started.**
+   "current position"). **Not started** (#789).
 4. **Only then** evaluate persisted claims/events — and only under
-   these rules (**Status: not started, by design**):
+   these rules (**not started, by design**; no issue until 1–3 land):
    - every cited span is **verbatim-verified against chunk text at
      write time**; fabricated quotes are rejected mechanically
    - derived claims are **never re-indexed as retrieval content**
@@ -633,848 +350,12 @@ knowledge-base poisoning (a crafted email minting a `decision` row
 every future brief cites). The mailbox contains adversarial-capable
 input by definition.
 
-## Open review findings (next session starts here)
-
-Codex filed code-review findings as GitHub issues on 2026-09-28. Many
-break the Phase 0 exit criterion (a source must reach one visible
-terminal state) or the Phase 1 truthful-contract criterion, so they
-come before Phase 2 work. The first batch (#202–#223) is done: 18 of 22
-closed in PRs #229, #236, #241, #246, #247, #248, #249 (see Recently
-Completed).
-
-How the first batch was worked, and what to repeat:
-
-1. **Verify before fixing.** Parallel agents, one per code area, checked
-   every claim against current `main`. Every issue was real, but severity
-   and likelihood were often misjudged (#203 and #204 far more likely
-   than stated; #217 overrated; #202 overstated for a single sheet).
-2. **Batch by area.** Small PRs grouped by code area, with one test-first
-   commit per issue and a `Fixes #N` line per issue so a merge closes
-   it. Behaviour-changing or schema-adjacent fixes get their own PR.
-3. **Expect Codex rounds.** Every PR took 1–5 rounds, and later rounds
-   found gaps in the fixes themselves. Record each round in the PR body
-   and PLAN, and resolve threads only once fixed or deferred by the owner.
-4. **Guards in the loop, mechanisms out of it** (learned on #260,
-   fourteen rounds). A finding that needs a check, cap or fallback is fixed in
-   the round. One that needs a new mechanism — new parsing of untrusted
-   input above all — is a stop-and-ask, with "document the limitation"
-   as the default; three rounds on one mechanism means re-scope. Before
-   fixing a "wrong" derived value (a hash, a size), ask what consumes
-   it. Before rewriting a walk, pin the old behaviour with tests.
-
-### Carried over from the first batch
-
-- ~~**#217 Message-ID conflicts**~~ — **resolved.** Decided
-  2026-09-30 to keep every claimant rather than pick a winner by
-  arrival order (either order is spoofable). Built in #453: every
-  per-message row, the chunker's `message_pk`, and attachment
-  occurrence and chunk IDs are keyed by a claimant ID (Message-ID plus `#` and sixteen hex digits of
-  the file's SHA-256; eight until #640), threads stay keyed by Message-ID, and
-  `get_message` accepts a claimant ID. `attachment_id` deliberately
-  stays the payload content hash, so identical payloads share one
-  `attachment_extractions` row. Conflicts are exposed, not
-  resolved: #536 and #544 bound `get_message`'s claimant listing, and
-  #539 reports conflict counts in `get_mailbox_status`. The earlier
-  arrival-order attempt (branch `fix/indexer-message-id-conflicts`)
-  was superseded and deleted 2026-10-02; its two unrelated commits
-  had already landed in #246. #454 (the 32-bit suffix) is fixed: 64 bits since #640.
-- ~~**#208 chunk overlap exceeds `max_tokens`**~~ — fixed with #550
-  before go-live rather than in the Phase 2 reindex bundle (Resolved
-  decisions 14): every rendered chunk now fits `max_tokens` (#594).
-- ~~**#209 single-part MIME attachment decoded as body**~~ (done with
-  #230 in item 8 below), ~~**#210 stale
-  unsupported-extraction cache entry**~~ (done in item 10 below) — low frequency, about 10 and 5
-  lines; fix them when next in `parser.py` / `attachment_indexing.py`,
-  or together as one small PR.
-
-### Second batch (#224–#245) — verified 2026-09-28
-
-Triaged against `d30e500` by four parallel agents; every issue is real
-and most reproduced with synthetic input. PRs in the order to land
-them (one test-first commit per issue, `Fixes #N` per issue):
-
-**Handoff 2026-10-04 evening — start here.** **Live, index empty.**
-The stack runs with the Bridge app on the host, now the only mode
-(#717: plain `make build` / `make up`; `make up-macos-bridge`,
-`first-run` and `update` are gone). **Only mbsync is running.** On the
-owner's request (13:30 UTC) the indexer and mcp-server containers were
-removed and `protonmail-local-ai_sqlite-volume` was deleted, part-way
-through the one-time rebuild (started 12:44 UTC on 1d6f98f images, OCR
-off, 13,800 of 32,988 messages at ~6–7 messages/s, no errors). Maildir
-and mbsync-state are intact. Search is unavailable until the next
-rebuild. `main` is at f23c113.
-
-Merged since the morning handoff: #714 (#713, `EMBED_CONCURRENCY`),
-#715 (#705), #717 (#716, Bridge container removed), #718 (#688, header
-and filename unfolding, before RFC 2231 decoding), #737 (#723, #725,
-#727), #738 (#722, #724, #726), #739 (#721, `INDEXER_UNLINK_ON_REAP`
-removed; `validate-env` rejects a leftover setting), #740 (#734, #735),
-#741 (#732, #733), #742 (#729, #730, #731). Open: #743 (#736, pin the
-Hadolint pre-commit hook by digest; also fixes `.hadolint.yaml`, whose
-`ignore:` key Hadolint never read), in its first Codex round.
-
-Next, in order:
-
-1. **#743:** answer its Codex round; merge on the owner's go-ahead.
-2. **Decide #719 first if the embedding model or vector size may
-   change** (owner: on hold). It proposes detecting the vector size
-   from the embedder, `EMBED_TOKENIZER` with a startup check against the
-   provider's `usage.prompt_tokens`, and optional
-   `EMBED_MAX_INPUT_TOKENS`. A host-side tokenizer fetch during
-   `make up` was discussed but not added to the issue.
-3. **Rebuild (no wipe needed, the volume is already gone):** `make build`;
-   in `.env` set `EMBED_CONCURRENCY=4` and `INITIAL_INDEX_BATCH_SIZE=500`
-   (measured on the aborted run: ~24 s of each ~26 s, 200-message batch
-   was 3–4 sequential embed requests at `EMBED_BATCH_SIZE=256`); keep
-   `INDEXER_OCR_ENABLED=false` and `INDEXER_ATTACHMENT_MAX_BYTES=50000000`
-   (owner, 2026-10-04: not yet); `make up`. Then verify: containers
-   healthy, the embedder identity check passes, the queue drains with no
-   ERROR lines; report pace, ETA and final counts by folder; confirm
-   search through `/mcp`.
-4. **#463 sender authentication**, after the rebuild; unchanged from
-   the morning handoff below and the decision on #463.
-5. **Mirror-mode reap check** on a message the rebuild has indexed
-   (delete it in Proton, then purge it from Trash; see item 4 of the
-   morning handoff).
-
-Parked for the owner (all on hold, no work started):
-
-- #728: delete the Maildir files of mail deleted in Proton, from the
-  mbsync side (mirror mode only, grace longer than the index's 7 days,
-  a mass-delete brake). The owner wants deleted mail eventually removed
-  locally; #739 only removed the indexer's non-working option. First
-  step: verify in the synthetic Maildir harness that pull-only mbsync
-  with `Expunge None` does not re-download a removed `T` file.
-- #698: extraction/OCR process pool; needed before turning OCR on.
-- #697's remaining items; #699; #720 (P3 race left by #714);
-  reranking (#289: measure on the rebuilt index first).
-
-Resolved since this handoff (owner, 2026-10-04): #692 (`Starred`
-excluded from the sync, #746; remove the leftover `/maildir/Starred`
-before the rebuild), #652 and #685 (closed as not planned: Linux-only),
-#701 (keyword slot, #745).
-
-**Update 2026-10-05.** Merged: #745 (#701), #746 (#692), #747 (#670:
-the FTS scrub runs only after reaps and chunk replacements, in bounded
-steps, and once at startup before the embedder wait). Images rebuilt
-from `main`; mbsync restarted on the new image; `/maildir/Starred`
-removed and confirmed absent after a sync. Open: #749 (#720, no embed
-request after a concurrent failure). #748 filed (P3, test-only, from
-#745 round 3). **The rebuild waits only on #754** (oldest-first
-initial scan, below). Nothing else in the backlog needs a full
-re-embed later; turning OCR on (after #698) will re-queue the messages
-whose image or scanned-PDF attachments were skipped while it was off
-and embed their new attachment chunks, a targeted pass with its own
-provider cost. During the rebuild, record peak memory, tmpfs and disk
-growth (#488). At the end, check completeness rather than health
-alone: `get_mailbox_status` queue counts (`pending` and `retrying`
-must reach 0; every `dead` row explained, which includes files with no
-`Message-ID`, dead-lettered by design), and account for Maildir files
-that leave no queue row on purpose: T-flagged (trashed) files the walk
-skips in mirror mode, and files that moved mid-index (the indexer's
-`skipped:` log lines; the renamed file is indexed under its new path).
-
-#699 (index order), decided by the owner: the initial scan indexes
-**oldest first** across every folder, with no setting (#754). Newest
-first changed the final index on the synthetic baseline (49 threads
-instead of 37): replies indexed before their root stay split (#752,
-bug). On the live Maildir, the old folder-by-folder walk put about
-10,000 of 21,662 replies ahead of every message they reference, so the
-index wiped on 2026-10-04 was very likely affected; oldest first puts
-none. **Merge #754 before the rebuild.** #752 (merge a late parent into
-its replies' thread) stays open at lower priority: after the rebuild,
-count how many threads are still split, then decide; newest first can
-return as an option once it lands.
-
-**External review (2026-10-04/05).** An outside reviewer endorsed the
-architecture and raised six tradeoffs, now tracked as follows (order
-recommended after the rebuild):
-
-1. Provider destination intent: an API key is not consent to the SDK's
-   default endpoint, since the request body leaves before the key is
-   checked. #750, owner decision (proposed: an empty `*_BASE_URL` fails;
-   the default needs an explicit value).
-2. Review cap: verified P0/P1 or self-introduced regressions must be
-   fixed, removed or explicitly accepted, even after round two. #751,
-   owner decision (AGENTS.md change).
-3. Keep SQLite-only tools up during an embedder outage: #661 (scope and
-   tests added), with #648.
-4. Local deletion as an explicit retention policy: #728 (policy
-   questions added); first step the synthetic mbsync check.
-5. Attachment extraction as failure isolation, not only throughput:
-   #698 (worker access and limits added); before OCR is turned on.
-6. Model portability: measure the rebuild first, then a validated
-   staged rebuild with controlled cutover before any live generations
-   (#719, Phase 2 note below); deferred while the model is unchanged.
-
-A second letter from the same reviewer (2026-10-05) added three more,
-each to be measured on the rebuilt index before any change:
-
-7. Evidence scope: filters select whole threads, so a passage from a
-   message that does not satisfy the filter (another sender, another
-   date, Trash) can be cited as the answer. #755, owner decision
-   (proposed: label passages in-scope or context).
-8. Subject-fallback threading: the 60-day window slides with the
-   thread's latest message, so recurring same-subject mail can chain
-   into one thread spanning years. #756, owner decision (smallest
-   option: anchor the window to the thread's first message).
-9. Coverage gate: `src/main.py` is excluded in both services; counted,
-   it is 93% (indexer) and 99% (mcp-server), so the exclusion can go.
-   #757, small.
-
-After the rebuild, the measurements for #752 (threads still split),
-#755 and #756 come before any of their fixes.
-
-Still small, no decision needed: the extractor's own `max_bytes`
-fallback still says 10 MB; `ask_mailbox` should name the resolved
-`participant` in its prompt.
-
-**Handoff 2026-10-04 (superseded).** **Live.** The stack has run in
-macOS Bridge mode since 2026-10-03 (#497's live test passed; closed).
-The initial index finished 2026-10-04 04:53 UTC: 33,038 messages
-indexed; 34 T-flagged (trashed) files skipped by design under mirror
-mode. The first full sync took about 17 minutes (from the Bridge app's
-local cache), so the operator `.env` sets `SYNC_DEADLINE_SECONDS=3600`.
-
-Deployed images: mcp-server at `cb9df36` (#696's participant filter is
-live). **The indexer is stopped until the rebuild** (owner,
-2026-10-04): its go-live image predates #703 and #704, so new mail with
-PDFs or images could write document internals or a provider response
-body to `docker logs`. mbsync keeps syncing into Maildir and
-mcp-server keeps serving the existing index; mail that arrives
-meanwhile is indexed by the rebuild.
-
-Verified on live mail (counts only): the top `Received:` header is
-Proton's on every received message, so `occurred_at` holds; Sent mail
-has no `Received:` and falls back to `sent_at`. Proton's
-`Authentication-Results` headers form one contiguous block; Proton
-strips a forged one carrying its authserv-id and overwrites a forged
-`X-Pm-Origin` (evidence, the owner's decision and both test results on
-#463).
-
-Merged since go-live: #709 (#707) and #711 (#693), plus the PRs under
-Recently Completed. Open: #710 (#687, subject in first-chunk vectors;
-needs the rebuild), in its Codex rounds.
-
-Next, in order:
-
-1. Merge #710 (owner go-ahead).
-2. **One-time rebuild, as soon as #710 is in:** build the indexer and
-   mcp-server images (`make build`; after #716 there is no
-   `make build-macos-bridge`, and `make build` no longer builds a
-   Bridge image); in `.env` set
-   `INDEXER_OCR_ENABLED=true` and drop the 50 MB
-   `INDEXER_ATTACHMENT_MAX_BYTES` override (the parse cap limits it to
-   about 36.5 MB anyway; #711's default is 32 MiB); then follow
-   `docs/troubleshooting.md`, "Indexer refuses to start — wipe the
-   sqlite-volume": `make down` first (Docker will not remove a mounted
-   volume), remove only the SQLite volume (Maildir and Bridge state
-   stay), `make up` (formerly `make up-macos-bridge`). Expect a full re-extract (OCR on) and
-   re-embed. #699 (newest mail first) would make the rebuild usable
-   sooner if decided first.
-3. **#463 sender authentication, now unblocked:** the owner ran the
-   forged-header test on 2026-10-04 (an external Gmail account sending a
-   forged `Authentication-Results: mail.protonmail.ch; dmarc=pass`
-   header through `swaks`). Gmail's sent copy kept the forged header;
-   the copy delivered into Maildir had only Proton's usual four
-   (`dmarc`, `spf`, `arc`, `dkim`, authserv-id `mail.protonmail.ch`). So
-   Proton's inbound MTA or Bridge strips a sender-supplied header
-   carrying Proton's authserv-id (RFC 8601 §5). This was one test over
-   one path, so the parser still reads only Proton authserv-ids
-   (`mail.protonmail.ch`, `mailinNNN.protonmail.ch`) and treats
-   anything else as `none`. Build as decided: the DMARC result from
-   those headers, `fail` leaves the sender unclassified, and a
-   `sender_authenticated` flag (pass / none / fail / internal) wherever
-   the authority class is shown. Two points settled since the decision:
-   - **`X-Pm-Origin: internal` is trusted, as tested.** A second owner
-     test on 2026-10-04 sent a forged `X-Pm-Origin: internal` from the
-     external account; Gmail's sent copy kept it, and the copy delivered
-     into Maildir had exactly one `X-Pm-Origin`, set to `external`, in
-     the same position. Proton overwrites the sender's value, so
-     `internal` counts as authenticated (Proton-to-Proton mail carries
-     no `Authentication-Results`). One test over one path: accept only
-     the exact values `internal` / `external` from a single
-     `X-Pm-Origin` header, and treat a missing, duplicated or unexpected
-     value as `none`.
-   - **The backfill is not a SQL migration.** The migration runner
-     executes only numbered `.sql` files, and the database stores no
-     `Authentication-Results` or `X-Pm-Origin`. So the `SCHEMA_VERSION`
-     bump and forward migration add the column, and a separate bounded
-     application-level step re-reads each indexed message's headers from
-     Maildir (or re-queues them) to fill it; until it finishes, existing
-     rows have no verdict.
-
-   It lands after the rebuild (details on #463).
-4. **Mirror-mode reap check:** the rebuild deletes today's 68
-   `pending_deletions` rows, and a fresh index skips files that are
-   already T-flagged, so no reap follows from them. Validate reaping on
-   a message after the rebuild has indexed it, and note that deleting
-   it in Proton is not enough: Proton moves it to Trash, so the INBOX
-   copy is tombstoned but a Trash copy with the same Message-ID is
-   indexed and keeps the message in the index (`docs/architecture.md`,
-   "Trash under mirror"). Delete it, then purge it from Trash (empty
-   Trash or delete it permanently); it is reaped once that purge has
-   synced and `INDEXER_DELETION_GRACE_DAYS` (7) have passed. (The #463 test message
-   cannot serve: it arrived while the indexer was stopped and was
-   deleted before the rebuild, so the fresh index skips its T-flagged
-   file.)
-
-Small, no decision needed: #705 (blank filter in `search_emails`); the
-extractor's own `max_bytes` fallback still says 10 MB (the indexer
-always passes the cap; now safe to tidy, #709 has merged); `ask_mailbox` should name the
-resolved `participant` in its prompt (a "this person" question scoped
-by participant alone leaves the model guessing who).
-
-Needs the owner: #701 (hybrid RRF guaranteed slot for a strong
-single-lane keyword hit; a new mechanism), #697/#698/#699 (indexing
-throughput), #692 (Starred duplicates), #694, #695, #691's fontTools
-(waits on py-pdf/pypdf#4156, filed 2026-10-04: pypdf re-parses an
-embedded CFF font per resource per page; 40 s vs 0.03 s on a 1.2 MB
-synthetic PDF), evaluation questions from real mail, #661, #660, #652.
-
-Measured on the live index, worth acting on: `ask_mailbox` dropped
-8–22 retrieved passages per answer to its evidence budget (#487), and
-one query-time embed timed out during a DeepInfra latency spike (#697,
-#287).
-
-**Handoff 2026-10-03 (superseded).** **Ready for go-live.** Every
-pre-go-live item has merged: the evening run (#592–#630) and the
-night run (#639–#667, under Recently Completed, 2026-10-02 night).
-No PR is open.
-
-Go-live (owner): in the Bridge app set the IMAP connection mode to
-**SSL** (implicit TLS, #643; the fingerprint is unchanged and is read
-with `openssl s_client -connect 127.0.0.1:1143 </dev/null | openssl
-x509 -noout -fingerprint -sha256`, no `-starttls`); fill
-the macOS Bridge mode setup in `docs/setup.md` ("macOS Bridge mode"):
-`.env` needs `BRIDGE_USER` (the app's IMAP username),
-`BRIDGE_CERT_FINGERPRINT`, `EMBED_BASE_URL` and `EMBED_MODEL` (a
-4096-dim model), and `.secrets/` needs `bridge_pass.txt` (the app's
-IMAP password), `embed_api_key.txt` and, for the default
-`INFERENCE_MODE=anthropic`, `inference_api_key.txt`; then
-`make build-macos-bridge` and `make up-macos-bridge` from a fresh
-Maildir and index (the v0 schema and keys changed many times
-tonight). Record the first sync's duration and set
-`SYNC_DEADLINE_SECONDS` (default 24 h, #651) to a few times it.
-
-Right after the first sync:
-
-1. Confirm the top `Received:` header is Proton's (`occurred_at`,
-   #599) and build #463 step 2 from Proton's real
-   `Authentication-Results` format.
-2. #497's live test passes → close #497.
-
-#673 (the chunker stall on a crafted marker-dense body) is fixed in
-#684: splitting is now linear, and a 12 MB worst case takes 10–29 s,
-about what an ordinary 12 MB body costs. Lowering that further needs a
-per-message text budget (drops text) or a tokenize-once chunker
-(owner decision, below).
-
-Next session, in order (no owner decision needed):
-
-1. P3s from review: #670 (budgeted FTS5 merge), #648 (periodic
-   calibration re-check), #685 (reject a `config/` other host accounts
-   can write). (#680 is fixed in #682; #662, #663, #668 and #669 in
-   #683.)
-2. Answer-evaluation follow-ups: #671, #672, #674–#679; then #655–#657.
-
-Needs the owner:
-
-- **#652 (P2, Linux only):** on Linux Docker Engine the services cannot
-  read their mode-600 `.secrets/*.txt`; a fix changes the secret model.
-  Not relevant to the macOS deployment.
-- **#660:** use chunk kinds in retrieval (store quote/signature
-  chunks, kind filters); changes retrieval and storage.
-- **#661:** keep the SQLite-only tools up when the embedder identity
-  check cannot run (today an embedder outage at startup stops the
-  server).
-- **Evaluation questions from real mail (held, 2026-10-02):** reading
-  the real mailbox to write eval questions sends mail content to the
-  model provider and reverses the synthetic-only eval rule; the
-  alternative is category templates the owner fills in. Revisit after
-  the first sync.
-- **Go toolchain `ARG` (#627):** not done, because Dependabot reads only
-  literal `FROM` lines; drop it or accept manual golang bumps.
-- **Reserved child-folder names (#598):** six names (`uidvalidity`,
-  `isyncuidmap.db`, `mbsyncstate*`) are skipped silently; reporting
-  them needs an extra IMAP listing.
-- **ChatGPT:** needs the hosted-client design after go-live.
-- **Chunking cost ceiling (#684):** a 12 MB body still takes 10–29 s
-  to chunk; a per-message text budget or a tokenize-once chunker would
-  lower it.
-
-**Handoff 2026-10-02, afternoon (superseded).** Both go-live
-blockers are done: #432 (xlsx streaming pre-pass, #572) and MCP
-endpoint auth (the static bearer token, #573). #277 was fixed in the
-morning (#515). **Superseded the same evening:** Resolved decisions
-14 adds pre-go-live work, so the stack is not ready for go-live
-until the list under "Before go-live (2026-10-02, evening)" below is
-merged. What landed this afternoon is under Recently
-Completed (2026-10-02, afternoon); the Phase 3–5 status table under
-Phase 3 is current.
-
-Operator steps before go-live, in addition to the checklist:
-
-1. **Rebuild any existing index from Maildir** (the volume wipe in
-   `docs/troubleshooting.md`, "Indexer refuses to start"; in macOS
-   Bridge mode finish with `make up-macos-bridge`, not the `make up`
-   that procedure ends with, which would switch back to the Bridge
-   container; #591 fixes the procedure). #527, #544
-   and #564 edited the v0 schema (#564 added `reaped_messages`; a
-   database built before it fails `get_thread` and every reap), and
-   #546, #547 and #548 change parsed or chunked text; none of these
-   reaches an existing database.
-2. **`make init-secrets`** (which `make up` also runs) creates the
-   missing `.secrets/mcp_auth_token.txt` (mode 600); `validate-env`
-   rejects a missing, empty or non-600 token file. Run it before
-   writing the client configuration in step 3, which reads the token.
-3. **Update the MCP client:** the URL is now
-   `http://127.0.0.1:${MCP_PORT}/mcp` (default port 3000; Streamable
-   HTTP only, #563; remove any
-   `MCP_TRANSPORT=sse` or `dual` from `.env`) and every request needs
-   the bearer header. Claude Code uses `scripts/mcp-auth-headers.sh` as
-   its `headersHelper` and Codex as its `http_headers_helper`; Claude
-   Desktop uses the repo-owned `fastmcp` adapter,
-   `mcp-server/src/stdio_adapter.py` (Resolved decisions 14;
-   `docs/setup.md` step 7). Never put the token in a command argument.
-4. **macOS Bridge mode (optional):** `make build-macos-bridge` and
-   `make up-macos-bridge` replace the checklist's `make build`,
-   `make first-run` and `make up` (plain `make build` builds the unused
-   Bridge image), with `BRIDGE_CERT_FINGERPRINT` taken from the Bridge
-   app (`docs/setup.md`, "macOS Bridge mode"). It is built and tested
-   against a synthetic implicit-TLS server only (#571, #643); the owner's live
-   test against the real app is the owner's go-live (Resolved decisions 14). #497
-   was reopened on 2026-10-02 to close once that live test passes, which
-   now uses implicit TLS (#638).
-
-Open decisions 15–22 were answered on 2026-10-02 (Resolved decisions
-14). The owner runs macOS Bridge mode from a fresh Maildir, so
-go-live is its live test.
-
-**Before go-live (2026-10-02, evening).** Merge these first, in
-roughly this order; each is its own PR:
-
-1. ~~Date-range evidence back to whole overlapping threads (#574
-   superseded); then #575 (drop `message_chunks.message_date`); then
-   `occurred_at` with date filters and thread spans on it~~ (done:
-   #593, #597, #599; #297 closed by #599).
-2. ~~#208 and #550 (rendered chunks within `max_tokens`)~~ (done: #594).
-3. ~~#275 and #281 (collision-free folder mapping; no migration with a
-   fresh Maildir)~~ (done 2026-10-02: `SyncState *` and
-   `SubFolders Legacy`; an earlier-layout Maildir is refused at start)
-   and ~~#279 (UIDVALIDITY recovery procedure)~~ (done 2026-10-02:
-   documented and checked by `make test-mbsync-layout`).
-4. ~~#562~~ (done: a reap deletes the extracted text of payloads no
-   remaining message carries) and ~~#428~~ (done: every xlsx
-   part openpyxl loads whole is capped, 8 MiB each, 16 MiB together).
-5. ~~The Claude Desktop `fastmcp` adapter and the Codex setup docs~~
-   (done: `mcp-server/src/stdio_adapter.py` replaces `mcp-remote`;
-   Codex uses `scripts/mcp-auth-headers.sh` as `http_headers_helper`).
-6. ~~#489 (`get_message` paging) and the 998-character Message-ID
-   limit~~ (done: #619; #611, closing #609).
-7. ~~Small items: #591, #584, #589, #588, the Semgrep gaps (#578,
-   #579, #581, #582) and #580/#577 (merged-config hardening check)~~
-   (done: #610, #630, #620, #614, #616; #607 with #630).
-
-Waiting on real data: #487 (evidence and output budgets), #488
-(container resource budgets). #282 is fixed (#651) with a provisional
-24 h `SYNC_DEADLINE_SECONDS`; tune it from the first sync's duration. Other open P3s: #490
-(the limitation is documented; a language setting is not built).
-#489 is pre-go-live work by the owner's explicit decision (Resolved
-decisions 14), not under the small-P3 exception.
-
-**Handoff 2026-10-02, morning.** #277 was fixed (#515); the overnight
-fixes (#515–#548) and the owner's answers to Open decisions 3–14
-(Resolved decisions 13) are recorded under Recently Completed and
-Resolved decisions.
-
-**Handoff 2026-10-01, end of the second session.**
-Every PR from the session is merged (#436–#479); no PR is open and
-`main` is green. Beyond the result-quality and Phase 3–5 work listed
-below, the session also hid Trash from default search (#475), kept
-Spam out of authority filters (#474), and updated every dependency to
-its latest stable release (#479; Bridge stays on v3.27.0 because
-v3.27.1 is a pre-release). The Phase 3–5 status table under Phase 3
-is current.
-
-Next session, in order:
-1. **Go live** with the checklist below. For embeddings, DeepInfra
-   direct (`EMBED_BASE_URL=https://api.deepinfra.com/v1/openai`,
-   `EMBED_MODEL=Qwen/Qwen3-Embedding-8B`, about $0.01 per million
-   tokens) or a host-side server; avoid routers that may switch the
-   deployment behind the model name, since index and query vectors
-   must come from one deployment. Set `MCP_EXPERIMENTAL_TOOLS=true` to
-   try `brief_issue` and `check_conclusion`.
-2. **After the first sync:** check one real message for Proton's
-   topmost `Authentication-Results` header, the input to #463 step 2.
-3. **Then** let real questions drive the eval work (#283, #291) and
-   the measurements waiting on real data (#287 budgets, #288, #289).
-
-Backlog filed from review (P3 or edge cases, not scheduled): #454
-(fixed: #640), and from 2026-10-02 #524, #526 and #533 (all fixed:
-#654, #653, #667), plus the afternoon's
-deferred findings (#562, #574, #575, #577–#582, #584, #588, #589; see
-Known limitations, Maintenance backlog and Open decisions). #442,
-#446, #447, #449, #450, #455, #456, #460, #461, #464, #465, #468,
-#471, #477, #478, #499, #500, #502, #537, #541, #570, #576 and #585
-are fixed; #433 too, and #550 joins the reindex bundle.
-
-**Status 2026-10-01 (end of the first session).**
-Focus has moved from hardening to running the stack for real
-(owner, 2026-10-01). Merged this session: the cleanup batch
-#365–#400 (#402–#410), the whole #257 sweep (#364, #363, #401, #412,
-#411, #413), MCP fixes #312–#334 and #308/#309/#415 (#416–#420), the
-`fastmcp` 4.0.10 migration closing #317 (#421), Bridge first run
-#242/#266/#270 with the first Bridge test harness (#423), the Bridge
-smoke check #268/#269 (#422), mbsync #271/#280 (#419) and its Bash 3.2
-harness fix #425 (#427), #361 (#414), and docx@3 #299 (#426).
-
-The PRs open at that handoff (#424, #429, #430) have merged.
-
-**Result quality first (owner, 2026-10-01, later the same day).** Work
-now targets the quality of returned results, without edge cases or
-P3s. No live index exists yet, so the reindex bundle's body and text
-fixes land directly rather than waiting for the Phase 2 rebuild:
-#298, #295 and #303. Alongside them: filtered semantic recall (#286),
-the first #283 evidence-recall slice, and the `ask_mailbox` evidence
-budget (#285). #208 and #297 stay in the bundle; each needs an
-unusual setting or undated mail to show up. #217 and #304 leave it
-too (see Resolved decisions 12 and the bundle paragraph).
-
-Landed the same day: #298 (#438), #303 (#439), #286 (#440), #295
-(#444), #285 (#445), the adversarial injection suite (#448), the
-first #283 slice (#452), #217 (#453), mirror retention (#451) and
-#287's stage timings (#458). Then the Phase 3–5 work: the #284
-citation contract (#457), Phase 4 entities and source authority
-(#459), authority in the filtered-search widening (#470), and the
-experimental `brief_issue` (#466) and `check_conclusion` (#467) tools.
-Edge cases from their reviews are filed as #446, #447, #449, #450,
-#454, #455, #456, #460, #461, #464, #465, #468, #469 (fixed in #470)
-and #471. The two owner decisions from the run are settled
-(2026-10-01): #441 hides Trash from default search (#475), and #463's
-first step keeps Spam mail out of authority filters (#474), with
-verdict-header gating decided after go-live.
-
-Still open from Phases 3–5 (updated 2026-10-02, afternoon), all
-waiting on a real mailbox, a model judge or the owner: #283's pass
-thresholds, live trace replay and latency/cost, and #291's accuracy
-scoring; #287's budgets and benchmarks; #487's evidence and output
-budgets; #288 and #289, which need a real embedder and reranker;
-#284's semantic support (for every tool that cites); Phase 4 item 3's
-real-mail check of the top `Received:` header and item 4's
-user-controlled retention; and Phase 5
-items 1 (needs real-mail use), 2's semantic support, and 3–4.
-
-Go-live checklist (do these before more hardening):
-
-1. ~~Merge #424, #429, #430.~~ (done)
-2. Choose providers and fill `.env` / `.secrets` (see
-   `docs/setup.md`). The embedder must return 4096-dim vectors (the
-   schema is fixed at 4096); OpenAI's public models return 3072 or
-   1536, so `EMBED_BASE_URL=default` (OpenAI proper) fails the
-   indexer's startup probe. Use a 4096-dim model such as the
-   Qwen3-Embedding-8B family on a host-side server: `EMBED_BASE_URL`,
-   `EMBED_MODEL`, `.secrets/embed_api_key.txt`. For inference set
-   `INFERENCE_MODE` (the default is `none`), `INFERENCE_MODEL` (the
-   default is an Anthropic model id), `INFERENCE_BASE_URL` (the
-   provider's URL, or `default` for the SDK's own endpoint; empty fails
-   startup, #750), and `.secrets/inference_api_key.txt`; for a small
-   local model, set
-   `INFERENCE_CONTEXT_TOKENS` to its context window (default 32768).
-   Leave `RERANK_MODE=none` to start.
-3. `make build`, then `make first-run` and log in to Proton in the
-   Bridge CLI (`login`, then `info` for `BRIDGE_USER` and the bridge
-   password into `.secrets/bridge_pass.txt`), `exit`.
-4. `make up` (it runs `make validate-env` first, which needs the Bridge
-   credentials from step 3); watch `make logs` for the mbsync initial sync and the
-   indexer's progress; `make status` until the index is current.
-   Record how long the initial sync takes: #282's stall deadline is
-   set above it (#277 landed in #515).
-5. Point an MCP client at `http://127.0.0.1:${MCP_PORT}/mcp` with the
-   bearer token from `.secrets/mcp_auth_token.txt` (Claude Code
-   and Codex through `scripts/mcp-auth-headers.sh`; Claude Desktop
-   through `mcp-server/src/stdio_adapter.py`; see
-   `docs/setup.md` step 7), and try
-   real questions by hand; `mcp-server/tests/eval/README.md` covers turning
-   the good ones into a retrieval eval.
-6. Let what breaks set the next priorities; then the #283 eval slice,
-   which must precede the first Phase 2 generation as its validation
-   gate, then the Phase 2 reindex bundle.
-
-Deferred as issues: ~~#362~~ (done: #522, falls back to the raw
-filename parameter when `get_filename()` raises), #428 (xlsx parts openpyxl
-loads whole), #316's index-side remainder (Phase 2 reindex), and the
-mbsync design families (all done: #282 in #651; #275, #279 and #281
-in #598 and #606; #276 and #277 in #521 and #515).
-
-Open owner decision: **#267** one-shot rotation. #342 shipped the
-documented limitation (recreate with `BRIDGE_CERT_PIN_ROTATE=false`);
-the alternatives are a flag that holds the expected new fingerprint, or
-a consumed marker in `/state`.
-
-Before `make up`: the operator's `.env` and `.secrets` use current
-names, but the embedding provider (`EMBED_MODEL`, `EMBED_BASE_URL`,
-`.secrets/embed_api_key.txt`) still needs configuring. Any index
-volume from before the v0 renumber must be rebuilt from Maildir (see
-`docs/troubleshooting.md`, "Indexer refuses to start").
-
-Next, in order (each item is a batch-1 guard unless noted; reproduce
-first, one test-first commit per issue, keep three PRs in flight):
-
-1. ~~Rest of the MCP "errors reported as success" cluster: #318,
-   #321, #332, then #310 + #329 + #315 together, then #314~~ (done:
-   #356–#360).
-2. ~~The cleanup batch above (C1–C8, then #395)~~ (done: #402–#410).
-3. ~~#257 sweep, split by boundary~~ (done: parser #364, `last_error`
-   #363, attachments #401, MCP provider errors #412 with a dedicated
-   `ProviderResponseError` and caller text classified like the log,
-   MCP SQLite logs #411; AGENTS.md updated in this closing PR).
-4. MCP: ~~#320, #334, #312, #330, #333, #313, #324, #331, #308,
-   #309, #415~~ (done: #416–#420); ~~#317~~ (done: #421, the `fastmcp`
-   4.0.10 migration with an explicit session idle timeout); #316's
-   remainder needs the Phase 2 reindex.
-5. ~~mbsync #271, #280~~ (done: #419). Parser: ~~#361~~ (done: #414);
-   ~~#362~~ (done: #522).
-6. ~~Bridge entrypoint (#242, #266, #270) and smoke check (#268,
-   #269)~~ (done: #423, #422); the updater gate (#245) is #429.
-7. Then the go-live checklist above, the Phase 1.5/#283 eval slice,
-   the mbsync design work, and Phase 2.
-
-How this session worked, worth repeating: fixes were prepared by
-background agents, one per issue in its own `git worktree` off
-`origin/main`, committing locally only; each diff was reviewed before
-its PR opened, and rebased on `main` first (several hit stale test
-helpers or neighbouring PLAN strikes). Codex inline findings are
-matched to a round by `original_commit_id`, not by timestamp.
-
-1. **Done (#251).** **#238** invalid date filters leak withheld input into logs — five
-   handlers logged the `ValueError` quoting the value. Fixed with a
-   dedicated `InvalidFilterError` the handlers log by field name only.
-2. **Done (#252).** **#239** (P1) reply-attribution regexes are quadratic, and wider than
-   filed: all six languages, and `wrote:` mid-line too. A 1 MB line
-   blocks the worker for minutes. Fixed: skip lines over 300 chars in
-   `_is_reply_header`.
-3. **Done (#255, 5 Codex rounds).** **#228 + #226** (#228 P1) DOCX walker rewrite: iterate serialized cells once
-   (no `gridSpan` expansion), skip vMerge continuations, recurse into
-   nested and header/footer tables via `iter_inner_content()`. No
-   character budget needed: work is now linear in the XML, and lxml's
-   256-element depth limit bounds the recursion. Also lands the cache
-   versioning (`EXTRACTOR_VERSIONS`, `docx@2`): an older version is a
-   cache miss and startup re-queues the affected messages once. Review
-   rounds settled the refresh semantics: any occurrence of a stale row
-   re-runs the module that wrote it (`extract(module_override=...)`),
-   the sweep re-queues every message carrying the bytes except
-   dead-lettered ones (those keep their stale chunks until an operator
-   runs `make requeue-dead`), and a plan
-   without usable text clears the attachment's chunk slice.
-4. **Done (#253).** **#224** malformed 200 provider responses leak mailbox text (embedder
-   index errors reach logs and `indexing_jobs.last_error`; reranker
-   `int()`/`float()` errors reach logs). Fixed-text diagnostics only.
-5. **Done (#254).** **#232** non-finite embeddings: sqlite-vec stores NaN; the row gets
-   a NULL distance (thread lane raised on `float(None)`, chunk lanes
-   scored it as a perfect match). Rejected at the embedder,
-   `l2_normalize` and the MCP query embed; MCP skips non-finite
-   distances. No startup repair sweep: in a realistic index these rows
-   sort last, reaching results only when `k` nears the row count, and
-   detecting them costs a full vector scan (15–30 s at 20k threads).
-   Already-stored rows are repaired by the Phase 2 reindex.
-6. **Done (#258).** **#233 + #225** MCP robustness: guard `parseaddr` in the mcp-server's
-   `canonical_addr` (the indexer copy already does); validate reranker
-   indices (unique, in range) before mutating any candidate.
-7. **Done (#259).** **#243** header clipping sweep (subject, participant names,
-   attachment filename/MIME, reranker `_candidate_text`). Separate from
-   the `get_message` / ID-length backlog items below.
-8. **Done (#260).** **#230 + #209** parser MIME traversal: nothing inside an
-   attachment is a body candidate, attachments inside attachments are
-   still recorded, and a single-part or attachment-labelled root is
-   classified. An attached email is identified by the hash of its
-   serialized form (deterministic, the same across transfer encodings),
-   not of its raw bytes; every one used to hash to `sha256(b"")`. Exact
-   raw-byte identity was tried and reverted (see Deferred), since
-   nothing extracts `message/rfc822`.
-9. **Done (#262).** **#231 + #234** multipage TIFF (honour the ignored `max_ocr_pages`),
-   UTF-16 BOM / NUL detection. Bump the `image` and `text` modules in
-   `EXTRACTOR_VERSIONS` (from item 3; owner approved 2026-09-29) so
-   their stale cache rows re-extract. **Land #237 (item 10) first:**
-   without a per-batch cache, the startup re-queue re-runs OCR once per
-   message carrying the same stale payload in a batch (PR #255 round 2).
-10. **Done (#261).** **#237 + #210** extraction cache semantics: per-batch cache keyed
-    by content hash, and re-run an `unsupported` row when an extractor
-    now resolves.
-11. **Done (#263).** **#244** reaping leaves `indexing_jobs`, and the rename fix moves
-    pending jobs onto the `T`-flagged path, so an embedder outage past
-    the grace period resurrects deleted mail. Delete the job in both
-    removal paths; skip trashed files at drain time.
-12. **Done (#264).** **#227 + #240** mbsync: functions called under `if` run without
-    errexit, so a failed `chmod` / fingerprint write still reports
-    success. Check each step; write the pin via temp file + `mv`.
-13. **#242** (decided 2026-09-30) no non-interactive way to tell an
-    empty vault from a logged-in one. Set `BRIDGE_FORCE_CLI=true` in
-    `docker-compose.first-run.yml`. Lands with #266 (bootstrap runs
-    key-gen before the vault check) and #270 (the documented `su`
-    shortcut cannot work), which restructure the same `LOGGED_IN`
-    branch; the first Bridge entrypoint PR also creates a shell test
-    harness like `mbsync/tests/entrypoint_test.sh`.
-14. **#245** (decided 2026-09-30) impact is lower than filed: with no
-    launcher a downloaded update is staged in `/data` but never
-    executed; the exposure is unpinned fetches and code on disk. Fix is
-    a fourth patch hunk forcing the `updates.go` gate off (three-layer
-    rule applies), the only fix that holds for every vault. AGENTS.md's
-    "silently bypass" wording was corrected in #256.
-
-### Third batch (#266–#334) — triaged 2026-09-30
-
-69 issues filed from a whole-repository review. Triaged by four
-parallel agents reading (not reproducing) one area each; every claim
-was judged plausible against the source, and severity is miscalibrated
-in the usual direction (#301 and #306 need rare conditions; #293 and
-#294 are cheap to trigger). **This queue is provisional:** rule 1
-above applies to every item — reproduce the claim on the current head
-in the PR that fixes it, and drop or re-scope an item whose claim does
-not hold. Decisions 6–11 in Resolved decisions were taken on the same
-basis: each states a direction conditional on its finding reproducing,
-and a decision whose finding fails to reproduce is void, not binding.
-Order of work, chosen to minimise reindexes:
-
-1. **No-reindex guards, small PRs by area.** Indexer: ~~the quadratic
-   subject normalizer (#293)~~ (done: offset scan, one slice); ~~the first half of #297 (keep the first
-   persisted date on reprocess, so an undated message is never
-   re-dated before the Phase 2 rebuild)~~ (done: a fallback date
-   defers to the stored `sent_at` on reprocess and reap rebuild); ~~the all-zero embedding guard (#304, fixed
-   message, no values logged)~~ (done: rejected at the indexer embedder
-   and the MCP query embed); ~~tombstone revalidation on restore
-   (#301)~~ (done: a tombstone is refused for a path the message no
-   longer maps to); ~~`message_thread_map` lookup indexes as migration `0022`
-   (#302, index-only)~~ (done: filepath and thread_id indexes); ~~the unbounded recovery parameter list
-   (#306)~~ (done: recovery lookups bind IDs in batches of 500);
-   and ~~the #257 sweep (classify parse-stage and provider exceptions
-   at their boundary, `caplog` marker tests)~~ (done: #364, #363, #401,
-   #412, #411, #413). MCP: ~~the two quadratic
-   regexes (#327, #328)~~ (done: one way to match each whitespace run);
-   ~~the privacy trio — redirects that would
-   forward prompts and API keys (#325), inherited endpoint userinfo
-   in the startup log (#326), the read-only URI bypass (#311)~~
-   (done: same-origin request hook on the Anthropic backend, userinfo
-   check on the resolved endpoint, percent-encoded URI path); the
-   "errors reported as success" cluster — ~~intelligence tools
-   returning `Error:` prose as `isError=false` (#319, the unfinished
-   half of Phase 1 item 2; `docs/mcp-tools.md` already promises
-   otherwise)~~ (done: failures and unknown threads are raised as
-   `ToolError`), ~~semantic search on missing vec tables (#318)~~
-   (done: semantic mode errors when neither vector lane answers),
-   ~~malformed provider content rendered as a summary (#321)~~ (done:
-   non-text or blank content is an error in both backends), ~~future
-   timestamps marking the index current (#332)~~ (done: a stamp over
-   2 minutes ahead is a not-current reason), ~~schema-violating
-   extraction records (#310), overwritten `_date`/`_source_thread`
-   fields (#329), the missing search instruction in extraction
-   prompts (#315)~~ (done: records failing a bounded required-field
-   and JSON-type check are dropped and reported, a schema declaring a
-   provenance name is refused, and the query reaches the prompt as the
-   request), and ~~typo'd thread IDs summarizing an unrelated
-   thread by domain-token overlap (#314: narrow the fallback rather
-   than parse IDs)~~ (done: an input containing `@` never reaches
-   the subject fallback); ~~the name-matching cluster (#313, #324,
-   #331)~~ (done: #418) and its FTS analogue (#316, query side done in
-   #418; the rest needs the Phase 2 reindex); ~~date filters (#312,
-   #330); degraded-lane honesty (#333)~~ (done: #416); event-loop
-   hygiene (~~#320, #334~~ done in #417; ~~#317~~ done in #421, the
-   `fastmcp` migration); ~~folder discovery hiding reply-only folders (#308); the
-   attachment-lane duplicate before MIME filters (#309)~~ (done: #420); ~~docs (#322,
-   #323)~~ (done: #403, #404). mbsync:
-   ~~the empty pin re-TOFU (#278)~~ (done: only an absent pin is a
-   first boot) and ~~the rotation flag surviving restarts (#267,
-   docs)~~ (done: documented recreate-with-false; one-shot
-   authorization not built), ~~the unbounded connect probe (#271), and
-   signal forwarding to the sync child (#280)~~ (done: #419). Bridge:
-   ~~the smoke-test one-liner (#269) with #268's minimal fix, the
-   entrypoint PR (#242, #266, #270)~~ (done: #422, #423), and the
-   ~~updater-gate PR (#245, with its enabled-vault test; #429) — before
-   the eval slice, since existing vaults make unpinned update requests
-   until #245 lands~~ (done: #429).
-2. **Extractor version bumps, one PR per module** so each cache
-   refresh happens once: ~~`xlsx` (#294's shared-string budget — a
-   behaviour change for the same bytes, so it lands with the bump
-   rather than as a guard, or cached rows would keep the old result —
-   #296 empty cells, #305 stale dimensions; add `xlsx` to
-   `EXTRACTOR_VERSIONS`)~~ (done: `xlsx@2` with a 10M-character text
-   budget, column-preserving rows and `reset_dimensions()`),
-   ~~`docx` 2→3 (#299 first-page and even-page headers)~~ (done: #426), ~~`pdf`
-   (#292 page-level OCR selection — add `pdf`), with #300 (enabling
-   OCR re-queues skipped images) alongside since it shares the
-   OCR-disabled sentinel~~ (done: #430).
-3. **Design work before code**, both mbsync: the retained near-side
-   state family (#275, #276, #279, #281) and the sync-supervision
-   pair (#277, #282; their small siblings #271 and #280 are batch-1
-   guards above and are not repeated here); see Resolved decisions 9
-   and 10 for the chosen direction and the one measurement still
-   needed. #276 (#521), #277 (#515), #275, #279 and #281 are done;
-   #282 waits for the first-sync measurement.
-4. **The Phase 2 reindex bundle** (see Phase 2): #208, #550 and #297's
-   second half moved to pre-go-live work (Resolved decisions 14);
-   #208 and #550 are done (#594), #297's second half too (#599). #303, #298, #295 and #217 landed directly instead
-   (2026-10-01, no live index yet), and #304's repair is unneeded
-   (#349).
-
-Follow-ups filed 2026-09-30 from the privacy trio, both batch-1 guards
-(done, both reproduced): #339 (indexer logs an SDK-inherited embed URL
-without the userinfo check, counterpart of #326) and #340 (OpenAI SDK
-clients re-send request bodies on cross-origin redirects, counterpart
-of #325; reuse #337's same-origin hook).
-
-Closed as duplicates of plan lines: #272 and #273 (Maintenance
-backlog), #290 (Phase 2 items 1–3). Roadmap issues #283–#291 are
-linked from the Phase 3 items they track.
-
-## Maintenance backlog (small, ongoing)
-
-- ~~keep the `BRIDGE_VERSION`/`BRIDGE_COMMIT` copies consistent~~
-  (done: #627, #624: `.env.example` is the reference and
-  `make test-compose` fails when the `docker-compose.yml` fallbacks or
-  `bridge/Dockerfile` ARG defaults differ; three copies remain, since
-  Compose cannot read `.env.example`); parameterize the Go toolchain as an `ARG` (not
-  done: it would stop Dependabot's golang bumps; owner to decide;
-  obsolete: the Bridge container and its Go build were removed, #716)
-- ~~path filters on `.github/workflows/docker.yml`~~ (done: #627, #623)
-- ~~Bridge build: bounded retry around `go mod download`~~ (done:
-  #621, #618; three attempts, `go mod verify` unconditional)
-- ~~Trivy scan of the Bridge Go module graph in `security.yml`~~
-  (done: #615, report only, #608)
-- ~~pin `actions/checkout` to a commit SHA in `bridge.yml`; pinned
-  `setup-go` in the patch-drift job~~ (done: #512 pins every action
-  by SHA)
-- ~~fix the `\t\t` BSD-sed portability bug in `bridge/patch-source.sh`~~
-  (done: #621, #617)
-- mbsync: ~~move `BRIDGE_USER` to a file-backed secret~~ (dropped:
-  it stays in `.env`, Resolved decisions 14); add
-  memory/CPU limits (#488; log rotation done in #501); evaluate
-  runtime package pinning
-- resource limits for the remaining Compose services (#488)
-  (#273 closed as its duplicate; its Bridge-container budget is
-  obsolete since #716)
-- ~~loud one-shot startup warning when `INFERENCE_MODE` sends retrieved
-  excerpts to a remote provider~~ (done: #628, one line per off-host
-  layer in both services, #622)
-- ~~`get_message` body and header bounds~~ (done: #619, #489; offset
-  paging of the body, headers capped)
-- OCR language is fixed to Tesseract's English default (#490;
-  documented in #517, no setting yet)
-- ~~mcp-server: remove the dead `Database.get_thread_message_ids`~~
-  (done: already gone from the code)
-- ~~bound Message-ID length~~ (done: #611, #609; 998 characters at
-  parse time, over-long IDs dead-lettered, over-long references
-  dropped)
-- ~~AGENTS.md commit-hygiene secret check: `grep '^\+'` fails under
-  ugrep (a common `grep` alias); use the portable `grep '^[+]'`~~
-  (done: #555)
-- ~~close the per-file Semgrep gaps and check the merged Compose
-  config~~ (done: #614, #616, #665; #577–#582, #631–#637)
-- ~~mbsync macOS Bridge mode: report a missing `BRIDGE_CERT_FINGERPRINT`
-  at startup, before the Bridge wait (#584)~~ (done: #630)
-- ~~`make test-mbsync-tls` is intermittently flaky on unchanged `main`
-  (#588)~~ (done: #630, with the entrypoint flake #607)
-- ~~validate the MCP auth token's character set at startup and in
-  `validate-env` (#589)~~ (done: #620; 32-character minimum)
+### Operations and hardening
+
+Not a phase: the running deployment's resource, throughput, privacy
+and supply-chain work. Milestone *Operations and hardening*: #488,
+#697, #698, #777, #778, #765, #767, #768, #769,
+#780.
 
 ## Not doing (decided 2026-09-26)
 
@@ -1488,81 +369,58 @@ can be revisited with an explicit owner decision.
   anything." The never-registered code was deleted 2026-09-28.
 - **Live-IMAP retrieval fallback for mcp-server.** A stale index
   answers "the index is not current" — it never silently switches
-  data sources. (This was the last consumer argument for the deleted
-  `imap.py`.)
+  data sources.
 - **Per-session inference-mode toggle.** Complexity with no pull;
   per-deployment is enough.
 - **Guarded live Bridge integration CI.** Requires a dedicated paid
   Proton test account and hardens the ingestion edge rather than the
-  product. The synthetic mailbox (Phase 1.5/3) buys more quality per
-  hour. The old design notes live in git history if ever revived.
-- **The bulk of the former Bridge ops list** (~25 items: BATS tests
-  for entrypoint.sh, custom seccomp profile, OCI image labels,
-  smoke-test ownership / `bash --version` / version-string checks,
-  `# syntax` parser directive, assorted doc micro-items). Bridge is
-  the project's existential *liability* — three sed patches on a
-  vendor's source, on their release schedule — so it gets
-  maintenance, not investment. The items that survived are in the
-  Maintenance backlog; the doc-shaped ones folded into Phase 1's doc
-  sweep. Boundary principle: the knowledge system knows nothing
-  about Proton Bridge — the stable contract is
-  Bridge → mbsync → **Maildir** (product boundary) → indexer, which
-  leaves room for Maildir/mbox import or other mail connectors later
-  without touching the knowledge architecture.
-- **mypy → pyright migration** — unchanged policy: wait for a real
-  trigger (mypy slowness, a missed bug, cross-project friction), not
-  a pre-emptive sweep.
+  product. The synthetic mailbox buys more quality per hour.
+- **Investment in Bridge operations.** Bridge is the project's
+  existential *liability*, so it gets maintenance, not investment;
+  since #716 it is the vendor's app on the host. Boundary principle:
+  the knowledge system knows nothing about Proton Bridge — the stable
+  contract is Bridge → mbsync → **Maildir** (product boundary) →
+  indexer, which leaves room for Maildir/mbox import or other mail
+  connectors later.
+- **mypy → pyright migration** — wait for a real trigger (mypy
+  slowness, a missed bug, cross-project friction), not a pre-emptive
+  sweep.
 
 ## Deferred (not dead — revisit on a real trigger)
 
 - audio/video transcription via Whisper (model storage + compute
-  cost; needs a clear use case)
+  cost; trigger: a clear use case)
 - near-duplicate handling; saved queries / persistent monitors;
-  waiting-on-me / unanswered-thread views — cheap *after*
-  `query_messages` + knowledge scaffolding exist; premature now
-- `content_blocks` as a persisted table (pull-not-push; see Phase 2
-  item 4)
+  waiting-on-me / unanswered-thread views (trigger: knowledge
+  scaffolding in daily use)
+- `content_blocks` as a persisted table (trigger: a non-chunking
+  consumer needs it; Phase 2 item 4)
 - parser/chunk generation coexistence machinery (the pipeline
   manifest preserves stage identity meanwhile)
-- ~~extracting the Bridge container into a standalone repo (only
-  relevant if generic-IMAP decoupling is pursued)~~ (obsolete: the
-  Bridge container was removed, #716)
-- attachment download support (needs the read-only action-path
+- attachment download support (trigger: the read-only action-path
   decision it was always gated on)
-- ~~per-message received date~~ (done: `occurred_at`, #599; Resolved
-  decisions 14 landed it in the v0 schema rather than with the Phase 2
-  reindex, so the scheduling below is superseded): the sender controls `Date:`, so a
-  trustworthy timeline needs the receiving server's timestamp (top
-  `Received:` header; Maildir mtime is sync time, not delivery). Needs
-  a schema bump plus a re-parse of every `.eml`, so land it with the
-  Phase 2 reindex or when Phase 4/5 temporal reasoning needs it. First
-  verify Bridge-delivered messages keep `Received:` headers (sent mail
-  likely has none)
 - replacing the stdlib MIME parser (decided 2026-09-30 on PR #260):
-  Python's `email` package never exposes a part's raw byte offsets and
-  parses a transfer-encoded `message/rfc822` (forbidden by RFC 2046,
-  but sent) before decoding it, so an attached email's identity is the
-  hash of its re-serialized form (line endings and folding normalized),
-  not of its raw bytes. Encodings agree on that form for every shape a
-  25-case parity test covers, after the transport text was rebuilt
-  from the parser's raw tuples; the one residual is an inner email
-  declaring `multipart/*` with no usable boundary (malformed), which
-  compat32 parses differently nested and standalone. A hand-rolled
-  boundary slicer was tried and reverted after four Codex rounds of
-  real findings (quadratic and memory-heavy on hostile input, bare-CR
-  endings, depth caps). Every maintained Python parser
-  wraps the stdlib; `flanker` is unmaintained (last release 2019). The
-  one real candidate is Stalwart's Rust `mail-parser` (RFC-conformant,
-  no dependencies, exposes part offsets, built for hostile mail) via a
-  homegrown pyo3 binding and a Rust build stage in the indexer image —
-  an architecture change with a full reindex. Revisit if hostile-mail
-  robustness becomes a goal in its own right (Phase 3's adversarial
-  suite is the natural trigger), not for a bug fix
+  Python's `email` package never exposes raw part offsets, so an
+  attached email's identity is the hash of its re-serialized form; a
+  hand-rolled boundary slicer was reverted after four review rounds.
+  The one real candidate is Stalwart's Rust `mail-parser` via pyo3 —
+  an architecture change with a full reindex. Trigger: hostile-mail
+  robustness becomes a goal in its own right, not a bug fix
+- hosted or remote MCP clients (ChatGPT connectors, other devices):
+  need the design in Resolved decisions 13 and a privacy-posture
+  update in AGENTS.md first. Trigger: the owner wants such a client
+- a cheaper chunking ceiling (#684 made splitting linear; a 12 MB body
+  still takes 10–29 s): a per-message text budget or a tokenize-once
+  chunker. Trigger: a real stall on live mail
+- newest-first initial indexing as an option. Trigger: #752 lands
+- reporting child folders skipped under isync's reserved names
+  (needs an extra IMAP listing). Trigger: a real report
 
-## Operational baseline (unchanged)
+## Operational baseline
 
 - Python services use per-service `uv` projects with pinned
-  `pyproject.toml` + `uv.lock`. Both meet a 90% coverage floor in CI.
+  `pyproject.toml` + `uv.lock`. Both meet a 90% coverage floor in CI,
+  `src/main.py` included (#757).
 - Bridge is the official Proton Mail Bridge app on the host, which
   updates itself (#716); mbsync requires its certificate fingerprint on
   every start.
@@ -1581,44 +439,39 @@ can be revisited with an explicit owner decision.
 ## Known limitations
 
 - initial sync may take a long time on large mailboxes
-- attachment OCR assumes English (#490)
-- on Linux Docker Engine the services cannot read their mode-600,
-  operator-owned `.secrets/*.txt` files (#652, owner decision);
-  `config/authority.toml` is handled by an ACL check in `validate-env`
-  (#653). macOS file sharing (OrbStack, Docker Desktop) is unaffected
+- attachment OCR assumes English (#490); OCR is off on the live
+  deployment until #698
+- Linux hosts are not supported out of the box: `host.docker.internal`
+  (`host-gateway`) reaches the docker bridge address, not the host
+  loopback the Bridge app binds (#716), and the services cannot read
+  their mode-600 `.secrets/*.txt` (#652, closed as Linux-only); Windows
+  Docker Desktop is untested
 - the schema is effectively locked to 4096-dim
   Qwen3-Embedding-8B-shaped models (hardcoded dim, vendored
   tokenizer); the embedder's identity and a calibration vector are
-  stored and checked at startup (#650), so switching models or moving
-  the embed endpoint needs a rebuild until the Phase 2 lifecycle
-  exists; an embedder outage at startup stops the server (#661)
-- audio/video attachment transcription is not supported; PDF / DOCX /
-  XLSX / HTML / TXT / images are extracted, chunked, and searchable
+  checked at startup (#650), so switching models or moving the embed
+  endpoint needs a rebuild (#719); an embedder outage at startup stops
+  the server (#661)
+- audio/video and calendar attachments are not extracted (#695);
+  PDF / DOCX / XLSX / HTML / TXT / images are
 - `list_threads(filter_type=...)` rejects unsupported values cleanly;
   read/flagged/replied state is indexed (#649) but draft/forwarded is not
-- deletion reconciliation is on by default (mirror) and not yet validated under
+- deletion reconciliation (mirror) is not yet validated under
   long-running real-world conditions; the indexer never deletes Maildir
-  files, so a reaped message's `.eml` stays on disk (#728 tracks
-  deleting them on the mbsync side)
-- a reap overwrites freed pages (`secure_delete` on, #642) and FTS5
-  terms are removed by an `optimize` before the next checkpoint (#666),
-  so deleted mail text normally leaves the file within one checkpoint
-  interval (default 600 s); it can stay longer when a checkpoint is
-  busy or an `optimize` fails (both retry on later passes) or the
-  indexer restarts first (the pending set is memory-only; the next
-  delete in that table clears it), and below SQLite in filesystem
-  free blocks, snapshots and backups (`docs/architecture.md`)
-- the Bridge app connection is tested in CI only against a synthetic
-  implicit-TLS Bridge server (#571, #643); the owner's go-live
-  (2026-10-03) was its live test and passed (#497)
-- Linux hosts are not supported out of the box: `host.docker.internal`
-  (`host-gateway`) reaches the docker bridge address, not the host
-  loopback the Bridge app binds (#716); Windows Docker Desktop is
-  untested
-- coverage scope: both services measure `src/` with `src/main.py`
-  omitted. The indexer's `main.py` has grown to hold the whole
-  two-phase pipeline, which `tests/test_main.py` exercises but the
-  coverage figure does not count — re-scope when touching it
+  files, so a reaped message's `.eml` stays on disk (#728)
+- a reap overwrites freed pages (`secure_delete`, #642) and FTS5 terms
+  are removed by an `optimize` before the next checkpoint (#666), so
+  deleted mail text normally leaves the file within one checkpoint
+  interval; it can stay longer when a checkpoint is busy, an
+  `optimize` fails or the indexer restarts first, and below SQLite in
+  filesystem free blocks, snapshots and backups (`docs/architecture.md`)
+- keyword search does not match precomposed letters with two
+  diacritics or composed vs decomposed Hangul across forms (#316's
+  index-side remainder, pinned by xfail tests; #782)
+- a child folder named after one of isync's own files is not synced
+  and nothing reports it (`docs/architecture.md`)
+- chunking a very large crafted body still takes tens of seconds
+  (#684; Deferred)
 
 ## Blockers and Risks
 
@@ -1643,1076 +496,164 @@ do not ship persisted claims without them.
 
 ## Resolved decisions
 
-1. **Read-only policy surface (resolved 2026-09-26):** the MCP server
-   is fully read-only — no action tools, no SMTP path, no draft/move/
-   flag operations. The unregistered action/IMAP code was deleted
-   (2026-09-28) rather than maintained as hypothetical capability.
-2. **Live Bridge integration lane (resolved 2026-09-26):** not doing
-   (see Not doing).
+Numbers are stable; code, tests and docs cite them. Entries about the
+removed Bridge container are kept as history.
+
+1. **Read-only MCP server (2026-09-26):** no action tools, SMTP path or
+   draft/move/flag operations; the unregistered action/IMAP code was
+   deleted rather than kept as hypothetical capability.
+2. **Live Bridge integration lane (2026-09-26):** not doing (see Not
+   doing).
 3. **#242 first-run retry (2026-09-30):** `BRIDGE_FORCE_CLI=true` in
-   the first-run overlay, landing with #266 and #270.
-4. **#245 auto-update in existing vaults (2026-09-30):** a fourth
-   Bridge patch hunk forcing the `updates.go` gate off, under the
-   three-layer rule — with one addition to the pattern: the existing
-   layers prove only the new-vault default, so the `go test` for this
-   hunk must exercise the patched gate with an **enabled** existing
-   setting (`AutoUpdate: true`) and prove the version fetch and staging
-   path is not entered, and the smoke test asserts the same from the
-   log on a vault seeded that way where seeding is feasible.
-5. **#217 Message-ID conflicts (2026-09-30):** keep both claimants;
-   expose, do not resolve by arrival order; a stable claimant
-   identifier goes through the MCP contract first. Phase 2 reindex
-   bundle. Superseded 2026-10-01: lands directly in the v0 schema; the
-   identifier is the Message-ID plus a short content-hash suffix.
+   the first-run overlay. Obsolete since #716.
+4. **#245 Bridge auto-update in existing vaults (2026-09-30):** a
+   patch hunk forcing the update gate off, tested with the setting
+   enabled. Obsolete since #716.
+5. **#217 Message-ID conflicts (2026-09-30):** keep every claimant and
+   expose conflicts; never pick a winner by arrival order, which is
+   spoofable. Landed in v0 (2026-10-01) as the claimant ID.
 6. **#292 mixed digital/scanned PDFs (2026-09-30):** page-level OCR
-   selection with a `pdf` extractor version bump, together with #300.
-7. **#295 sequential inline text parts (2026-09-30):** document the
-   limitation now (queued as cleanup batch C7, since the note belongs
-   in `docs/architecture.md`); revisit with the Phase 2 reindex
-   bundle. Superseded 2026-10-01: fixed directly while no live index
-   exists (#444).
-8. **#297 undated mail (2026-09-30):** keep the first persisted date on
-   reprocess now; with the Phase 2 reindex, a deterministic chain —
-   top `Received:`, else the Maildir filename timestamp, else the
-   previously persisted date — so a rebuild never re-dates a message
-   (see the Phase 2 reindex bundle).
-9. **#276 and family, retained near-side mbsync state (2026-09-30):**
-   tolerate a far-side box that cannot be opened (warn, keep syncing
-   the rest) rather than far-only patterns or `Remove Near`, which
-   deletes local mail. ~~#275 and #281 change the on-disk layout and wait
-   for a real report~~ (superseded by Resolved decisions 14: done
-   before go-live, #598). #276 implemented in #521.
-10. **#277/#282 health during a long first sync (2026-09-30):**
-    separate liveness (process alive, progress observed) from
-    freshness (the success stamp), so a first sync is "healthy, not
-    yet current"; then set #282's stall deadline above the observed
-    initial backfill — that duration is the one measurement still
-    needed, and #277 lands before #282. #277 implemented in #515;
-    #282 implemented in #651 with a provisional 24 h deadline, tuned
-    after the first sync.
-11. **#268 smoke-test scope (2026-09-30):** the minimal fix
-    (distinguish the intentional post-marker kill from a fatal exit)
-    with #269; the requested IMAP/STARTTLS/SAN/restart checks are the
-    live-Bridge lane declined in Not doing.
-12. **Owner decisions for result quality and Phases 3–5 (2026-10-01):**
-    - Until the first deployment, schema changes fold into the v0
-      initial schema (#436) with no migration: the Phase 4 tables and
-      #217.
-    - Retention ships as **mirror** (an upstream delete removes the
-      message from the index); archive is the opt-in. Was open
-      decision 1.
-    - `brief_issue` debuts as an **experimental MCP tool**.
-      Experimental tools, including Phase 5's query-time
-      support/contradict analysis, are off unless
-      `MCP_EXPERIMENTAL_TOOLS=true`. Was open decision 2.
-    - #217's claimant identifier is the Message-ID plus a short
-      content-hash suffix; the bare Message-ID keeps working when
-      only one message claims it.
-    - Source authority comes from an operator rules file only (a
-      gitignored domain/address → class map); there is no model
-      classifier in the indexer, which would send mail to the
-      inference provider.
-    - Entity resolution is deterministic only, so model-suggested
-      merges and a confirmation flow are not built.
-13. **Owner answers to the 2026-10-02 open decisions:** (were open
-    decisions 3–14)
-    - **MCP endpoint auth (Phase 1 item 5):** ship the local static
-      bearer token before go-live, built after #498 lands, since both
-      touch `mcp-server/src/main.py`. Done 2026-10-02 (#573; design
-      notes #568, #569). The token stops other local
-      accounts and browser-origin requests that cannot read the
-      secret; it does not stop code running as the operator's own user
-      (a malicious package can read the mode-600 file), so the trust
-      condition narrows to "processes running as the operator are
-      trusted". Check that the MCP client can send a bearer header
-      before building it. Design (decided):
-      - Docker secret `.secrets/mcp_auth_token.txt` (mode 600) read
-        via `_read_secret`; the env-var fallback stays a non-container
-        local-dev convenience only, never the Compose path.
-        Constant-time compare; fail closed on an empty token.
-      - It plugs into standalone fastmcp's auth provider, composed
-        through `_build_app` in `mcp-server/src/main.py`, the one app
-        (`server.http_app(path="/mcp", transport="streamable-http",
-        ...)`) the server builds since #498 (#568, #569). `_build_app`
-        sets a `TokenVerifier` subclass comparing with
-        `hmac.compare_digest` as `server.auth`; `http_app` then wraps
-        the `/mcp` route in fastmcp's `RequireAuthMiddleware`, which
-        answers 401 before the session manager, while `custom_route`
-        endpoints such as `/health` stay unauthenticated and
-        `_HostOriginGuard` still runs. fastmcp's
-        `StaticTokenVerifier` is not used: its dict lookup is not
-        constant-time.
-      - Not chosen, and each needs its own owner decision and a
-        privacy-posture update in AGENTS.md first, because both send
-        mailbox content off the host (Cloudflare adds a third-party
-        transit hop): own devices over a private network (gate outside
-        the app with Tailscale, a reverse proxy or Cloudflare Access,
-        the static token as defence in depth) and hosted clients
-        (claude.ai / ChatGPT connectors; an OAuth 2.1 resource server
-        validating tokens from an external IdP). Either must add the
-        approved external Host (and HTTPS Origin) to the
-        `TransportSecuritySettings` allowlist in
-        `mcp-server/src/main.py`, which accepts only localhost,
-        loopback and `mcp-server`, so proxied requests fail before
-        they reach auth. Add each approved name narrowly and keep
-        DNS-rebinding protection on. The hosted option must also set
-        `AuthSettings.resource_server_url` to the externally visible
-        MCP URL, because the SDK registers the RFC 9728
-        protected-resource metadata route and the `resource_metadata`
-        challenge parameter only when that URL is set; without them
-        connectors cannot discover the authorization server, and the
-        proxy must expose that well-known route. In standalone fastmcp
-        that is a `RemoteAuthProvider` with a `base_url` (or
-        `resource_base_url`), which registers the same metadata route
-        and challenge parameter.
-    - **#432 xlsx duplicate cells:** option (c), a streaming pre-pass
-      that counts raw `<c>` nodes and cuts the sheet before an
-      over-budget row, public APIs only. It changes the extracted
-      text, so it bumps the xlsx entry in `EXTRACTOR_VERSIONS`. Done
-      2026-10-02 (#572; xlsx 2→3).
-    - **#498 Streamable HTTP as the only transport:** go. Breaking:
-      clients move from `/sse` to `/mcp`, and an explicit `sse` or
-      `dual` fails startup with a migration message; it changes the
-      AGENTS.md default-transport rule. Confirm the MCP client
-      connects over `/mcp` first. Done 2026-10-02 (#563).
-    - **#497 Bridge app on macOS:** go now rather than after go-live.
-      An optional overlay that skips the Bridge container and points
-      mbsync at `host.docker.internal`; the container stays the
-      default. Switching an existing Maildir needs the documented
-      migration (credentials, certificate pin, UIDVALIDITY). The
-      macOS app's certificate is issued for `localhost` and
-      `127.0.0.1`, not `host.docker.internal`, so the first step is a
-      certificate-valid connection path (never a TLS bypass). Built
-      2026-10-02 (#571): `make up-macos-bridge`, a required
-      `BRIDGE_CERT_FINGERPRINT` (no trust on first use), and
-      verification under `BRIDGE_CERT_HOST=127.0.0.1` through a `socat`
-      tunnel. The live test against the real app is pending (Open
-      decisions 21).
-    - **#537 `get_evidence` thread count:** add `max_threads`. Done
-      2026-10-02 (#559).
-    - **#533 look-alike letters in delimiter tags:** defer (superseded
-      2026-10-02 night: fixed in #667, and #680 in #682).
-    - **#526 `authority.toml` on Linux Docker Engine:** stays
-      documented; deferred until a Linux deployment (superseded
-      2026-10-02 night: fixed in #653).
-    - **#524 folders opened by a failed mbsync attempt:** defer
-      (superseded 2026-10-02 night: fixed in #654).
-    - **#494 agent-eval scoring:** keep strict argument matching and
-      first-call tool selection; build the live-trace recorder after
-      go-live.
-    - **#496 token counting:** keep the 3-characters-per-token
-      estimate.
-    - **#495 CJK handling:** keep the CJK terminators and word counts.
-    - **Compose and shell scanning (#491/#512):** build it, filed as
-      #556. Done 2026-10-02 (#566, Semgrep with repo-owned rules);
-      per-file matching gaps are #577–#582.
-    - **#287 request cancellation:** waits for real-mail measurements
-      before it is designed or built.
-
-14. **Owner answers to the 2026-10-02 evening walkthrough:** (were open
-    decisions 15–22, plus backlog items that needed a call)
-    - **`occurred_at` (was 15):** define it now, in the v0 schema, as
-      the delivery time from the top `Received:` header (the text after
-      its last `;`, parsed with `email.utils.parsedate_to_datetime`;
-      NULL when absent or unparseable, never a fallback to `Date:`).
-      Check against real mail that the top `Received:` is Proton's.
-      Covers #297's undated-mail chain.
-    - **Date filters:** `date_from` / `date_to` bound `occurred_at`,
-      falling back to `sent_at` when it is NULL. Thread spans
-      (`threads.date_first` / `date_last`) are derived from the same
-      effective time, so thread admission and passage dates agree.
-    - **Date-range evidence (was 16):** restore whole overlapping
-      threads: under a date range, any passage of a thread whose span
-      overlaps the range may be shown, as before #561. Each passage
-      keeps its own `sent_at` so out-of-range dates stay visible.
-      `search_attachments` keeps matching on the carrying message's
-      date.
-    - **#574 (was 17):** superseded by the revert above; close it.
-    - **#575 (was 17):** drop `message_chunks.message_date` from the v0
-      schema; readers join `messages` for a passage's date, so there is
-      one source and nothing to drift.
-    - **#562 (was 18):** purge `attachment_extractions` rows no
-      `attachments` row references, in the reap transaction.
-    - **#580 (was 19):** check hardening on the merged config: extend
-      `scripts/tests/compose_test.sh` to assert it on
-      `docker compose config` output for every overlay combination.
-      Also covers #577's `include`.
-    - **MCP clients (was 20):** the owner will use Claude Code, Codex,
-      Claude Desktop and ChatGPT desktop.
-      - Codex: document its `url` + `bearer_token_env_var` setup, with
-        the token loaded from the secret file, never a command argument.
-      - Claude Desktop: replace `mcp-remote` with a short adapter in
-        this repo built on the pinned `fastmcp` proxy, reading the
-        token from the secret file (confirm header support first).
-      - ChatGPT: its connectors call from OpenAI's servers over public
-        HTTPS, so it needs the hosted-client design (tunnel, OAuth,
-        Host allowlist, AGENTS.md privacy update). Revisit after
-        go-live.
-    - **#497 live test (was 21):** the owner runs macOS Bridge mode at
-      go-live, starting with a fresh Maildir (no migration); go-live is
-      the live test.
-    - **Reaped-citation invariant (was 22):** keep the 30-day,
-      content-free record (option a). Message-IDs embed sender domains,
-      so a permanent record would be a list of deleted mail's domains
-      and dates. Restate the invariant: a reaped source reads as
-      removed for 30 days, then not found, and its text is never kept.
-    - **#428:** cap every xlsx part openpyxl loads whole rather than
-      streams (shared strings, workbook, content types and styles, and
-      also core/custom properties, theme, external links and
-      chartsheets; the implementation confirms the list from openpyxl's
-      loader); worksheets keep #572's streaming budget. It changes the
-      extracted text or status for the same bytes, so it bumps
-      `EXTRACTOR_VERSIONS["xlsx"]`.
-    - **#275 / #281:** full collision-free folder-mapping redesign,
-      before go-live so no state migration is needed (fresh Maildir).
-    - **#279:** write and test the UIDVALIDITY recovery procedure before
-      go-live. Done: back up the Maildir, then start it and the index
-      over (docs/troubleshooting.md); upstream-deleted mail then
-      survives only in the backup (#603).
-    - **#267:** not relevant to macOS Bridge mode (the pin is the
-      operator-supplied fingerprint); the documented limitation stands.
-    - **#489:** `get_message` pages the body with an offset (default
-      page plus `next_offset`), headers capped. An explicit owner
-      decision for go-live, separate from the small-P3 exception
-      (it is a new mechanism).
-    - **Message-ID length:** limit to 998 characters at parse time; an
-      over-long ID takes the existing no-`Message-ID` dead-letter path.
-    - **`BRIDGE_USER`:** stays in `.env` (an identifier, not a
-      credential); backlog item dropped.
-    - **Bridge Go module scan:** report only, on Bridge builds and
-      version bumps; never blocks CI.
-    - **#208 / #550:** fix now, before the go-live rebuild, instead of
-      waiting for the Phase 2 bundle.
+   selection with a `pdf` extractor version bump, with #300.
+7. **#295 sequential inline text parts (2026-09-30):** document, then
+   revisit with the reindex. Superseded 2026-10-01: fixed directly
+   (#444) while no live index existed.
+8. **#297 undated mail (2026-09-30):** keep the first persisted date
+   on reprocess. Its date chain was superseded by 14 (`occurred_at`).
+9. **#276 retained near-side mbsync state (2026-09-30):** warn about a
+   far-side box that cannot be opened and keep syncing the rest, never
+   `Remove Near`, which deletes local mail. Done (#521); #275/#281 per
+   14.
+10. **#277/#282 first-sync health (2026-09-30):** separate liveness
+    from freshness, so a first sync is "healthy, not yet current", and
+    set the stall deadline above the observed backfill. Done (#515,
+    #651); `SYNC_DEADLINE_SECONDS` is tuned per mailbox.
+11. **#268 Bridge smoke-test scope (2026-09-30):** the minimal fix;
+    deeper live checks are the lane in Not doing. Obsolete since #716.
+12. **Result quality and Phases 3–5 (2026-10-01):**
+    - until the first deployment, schema changes fold into v0 with no
+      migration (ended 2026-10-03);
+    - retention ships as **mirror**; archive is the opt-in;
+    - `brief_issue` and Phase 5's support/contradict analysis are
+      **experimental tools**, off unless `MCP_EXPERIMENTAL_TOOLS=true`;
+    - #217's claimant ID is the Message-ID plus a short content-hash
+      suffix; the bare Message-ID works while only one message claims it;
+    - source authority comes only from an operator rules file: a model
+      classifier would send mail to the inference provider;
+    - entity resolution is deterministic only.
+13. **Open decisions of 2026-10-02:**
+    - **MCP endpoint auth:** a local static bearer token from a Docker
+      secret, compared in constant time, failing closed when empty, so
+      `/mcp` answers 401 before any session and `/health` stays open
+      (design in AGENTS.md, `mcp-server/`; done, #573). Trust condition:
+      "processes running as the operator are trusted". Not chosen, each
+      needing its own owner decision and an AGENTS.md privacy update
+      because mail would leave the host: a private-network gateway and
+      hosted clients (an OAuth 2.1 resource server). Either must add the
+      external Host/Origin narrowly to the transport-security allowlist;
+      the hosted one must also set the protected-resource URL
+      (`AuthSettings.resource_server_url` / fastmcp `RemoteAuthProvider`).
+    - **#432:** a streaming pre-pass counting raw xlsx `<c>` nodes, with
+      an `xlsx` version bump (done, #572).
+    - **#498:** Streamable HTTP at `/mcp` is the only transport (done,
+      #563).
+    - **#497:** the Bridge app on the host through a certificate-valid
+      path, never a TLS bypass (done, #571; the only mode since #716).
+    - **#537:** `get_evidence` gains `max_threads` (done, #559).
+    - **#533, #526, #524:** deferred; fixed later (#667, #653, #654).
+    - **#494:** keep strict argument matching and first-call tool
+      selection; the live-trace recorder comes after go-live (#283).
+    - **#496:** keep the 3-characters-per-token estimate.
+    - **#495:** keep the CJK terminators and word counts.
+    - **Compose and shell scanning:** build it (done, #566).
+    - **#287 request cancellation:** designed only after real-mail
+      measurements.
+14. **Evening walkthrough of 2026-10-02:**
+    - **`occurred_at`** is the top `Received:` header's date, NULL when
+      absent or unparseable, never `Date:`; date filters and thread
+      spans use `COALESCE(occurred_at, sent_at)`.
+    - **Date-range evidence:** any passage of a thread whose span
+      overlaps the range, each with its own dates (#574 superseded);
+      passage dates are read from `messages` (#575).
+    - **#562:** purge unreferenced `attachment_extractions` rows in the
+      reap transaction.
+    - **#580:** check hardening on the merged config of every overlay
+      combination (covers #577).
+    - **MCP clients:** Claude Code, Codex, Claude Desktop (a repo-owned
+      `fastmcp` stdio adapter instead of `mcp-remote`) and ChatGPT
+      desktop, whose connectors need the hosted-client design
+      (Deferred).
+    - **#497 live test:** go-live with a fresh Maildir is the live test
+      (passed 2026-10-03).
+    - **Reaped-citation invariant:** a 30-day, content-free record (a
+      permanent one would list deleted mail's domains); a reaped source
+      reads as removed for 30 days, then not found, and its text is
+      never kept.
+    - **#428:** cap every xlsx part openpyxl loads whole, with a version
+      bump.
+    - **#275/#281:** collision-free folder mapping before go-live;
+      **#279:** a tested UIDVALIDITY recovery procedure before go-live.
+    - **#267:** not relevant once the pin is the operator-supplied
+      fingerprint; the documented limitation stands.
+    - **#489:** `get_message` pages the body by offset, headers capped.
+    - **Message-ID length:** 998 characters; longer takes the
+      no-`Message-ID` dead-letter path.
+    - **`BRIDGE_USER`** stays in `.env`: an identifier, not a credential.
+    - **Bridge Go module scan:** report only (obsolete since #716).
+    - **#208/#550:** fix before the go-live rebuild, not in the bundle.
     - **P3 policy:** small P3s with an agreed fix and no new mechanism
-      (e.g. #589, #591) may be fixed before go-live; AGENTS.md's Pull
-      Requests rule carries the exception.
-15. **#638 implicit TLS (2026-10-02 night):** mbsync ⇄ Bridge IMAP uses implicit TLS (Bridge's "SSL") in both Bridge modes, with no STARTTLS or plaintext fallback; an approved owner-gated TLS change.
-
-## Open decisions
-
-1. ~~Default deletion/retention mode~~ and 2. ~~`brief_issue` as an
-   MCP tool or a script~~: resolved 2026-10-01 (Resolved decisions 12).
-3. ~~Items 3–14~~ (MCP endpoint auth, #432, #498, #497, #537, #533,
-   #526, #524, #494, #496, #495 and Compose scanning): resolved
-   2026-10-02 (Resolved decisions 13).
-
-15. ~~Items 15–22~~ (`occurred_at`, date-range evidence, #574/#575,
-    #562, #580, `mcp-remote`, the #497 live test, the reaped-citation
-    invariant): resolved 2026-10-02 (Resolved decisions 14).
-
-## Recently Completed
-
-### 2026-10-04 — `INDEXER_UNLINK_ON_REAP` removed (#721)
-
-Owner decision (2026-10-04, option B): the setting could not work in
-the shipped configuration (the indexer mounts `/maildir` read-only and
-the files belong to mbsync's UID 1001), so it is gone rather than
-fixed. The indexer never deletes Maildir files; a reaped message's
-`.eml` stays on disk. `scripts/validate-env.sh` stops `make up` with a
-fixed message when `.env` still sets it. Deleting the files of mail
-deleted in Proton moves to the mbsync side: #728.
-
-### 2026-10-04 — Bridge container removed; the host Bridge app is the only mode (#716)
-
-Owner decisions (2026-10-04): the source-built `protonmail-bridge`
-container is gone and the official Proton Mail Bridge app on the host
-(formerly the optional "macOS Bridge mode", #497) is the only
-supported setup. (1) What `docker-compose.macos-bridge.yml` did is
-folded into `docker-compose.yml`, so `make build` / `make up` run it;
-the overlay, `docker-compose.first-run.yml`, the `bridge/` directory,
-the Bridge scripts, workflows and CI jobs, the `bridge-data` volume and
-the `first-run`, `*-macos-bridge`, `bridge-*`, `test-bridge*` and
-`update` targets were removed, with no aliases. (2) The setup is called
-"the Bridge app on the host": tested on macOS, Windows Docker Desktop
-untested, Linux unsupported. (3) Dated history and decision records
-stay as written. mbsync's container-mode trust-on-first-use branch went
-with it: `BRIDGE_CERT_FINGERPRINT` is now required unconditionally,
-by `validate-env.sh` as well as the entrypoint.
-
-### 2026-10-04 — First live run: go-live fixes (#700–#708)
-
-The stack went live 2026-10-03 in macOS Bridge mode; the initial index
-of 33,038 messages finished 2026-10-04. Merged on the owner's go-ahead:
-#700 (DeepInfra's embeddings input cap is 1024, not 100), #703 (#686:
-embedder warmup and dimension-probe errors no longer print the
-provider's response body), #704 (#690: pypdf, Pillow and openpyxl stop
-writing document internals to the indexer log), #702 (#696:
-`participant` and `from_name` on `ask_mailbox`, `extract_from_emails`
-and `get_evidence`; the ranking half moved to #701), #706 (#691:
-`cryptography`, so owner-password-only PDFs extract; `pdf` extractor
-3), #708 (#691: `pillow-heif`, HEIC/HEIF OCR, the owner accepting the
-bundled libheif/libde265 risk; `image` extractor 3; extension-routed
-no-extractor rows re-queue once). fontTools is held back on
-py-pdf/pypdf#4156; #691 stays open for it. Issues filed: #701, #705,
-#707. Closed as done: #497 (live test), #689 (OCR, not chunking).
-
-### 2026-10-02, night — Go-live blockers and pre-go-live bug fixes (#639–#667)
-
-PLAN update (#639). Owner decisions taken during the night: implicit
-TLS between mbsync and Bridge in both Bridge modes (#643, #638; a
-fifth Bridge patch hunk forces Bridge's IMAP SSL setting), the 16-hex
-claimant suffix (#640, #454), and three v0 additions to avoid a later
-migration or re-index: Maildir read/flagged/replied state (#649, #644),
-chunk `kind` tags (#659, #646) and the embedder identity record with a
-calibration vector checked at startup (#650, #645). Bug fixes:
-`secure_delete` set explicitly (#642, #602), FTS5 `optimize` after
-deletes before each checkpoint (#666, #641), an mbsync per-run
-deadline (#651, #282), re-watch after a failed sync (#654, #524),
-`authority.toml` readable on Linux via an ACL (#653, #526),
-look-alike letters in delimiter tags (#667, #533), the Bash 3.2 test
-fix (#647, #629), merged-Compose check gaps (#665, #631–#637), and
-Bridge health states documented (#664, #274). Later the same night: the chunker's
-splitters no longer re-tokenize every prefix (#684, #673; a crafted
-12 MB marker-dense body went from ~14 min to 10–29 s) and delimiter
-tags with default-ignorable characters such as Hangul fillers are
-escaped (#682, #680); the Linux `authority.toml` checks fail closed
-on a shared UID 1002, a missing `getfacl` or `getent`, and honour
-GID 1002 entries (#683, #662, #663, #668, #669). The first slice of the
-answer-quality evaluation with a separately configured judge, on the
-synthetic corpus only (#658, refs #604). Closed as documented: #603,
-#626; superseded: #434.
-
-### 2026-10-02, evening — Pre-go-live work from Resolved decisions 14 (#592–#630)
-
-Decisions recorded (#592). Dates: whole-thread evidence under a date
-range (#593, #574 superseded), passage dates read from `messages`
-(#597, #575), `occurred_at` from the top `Received:` header with
-filters, spans and ordering on `COALESCE(occurred_at, sent_at)` (#599,
-#297). Chunking within `max_tokens` (#594, #208, #550). xlsx eager
-parts capped (#600, #428). mbsync: collision-free folder layout
-(#598, #275, #281), UIDVALIDITY recovery checked by
-`make test-mbsync-layout` (#606, #279), test flakes and the early
-fingerprint check (#630, #588, #607, #584). Retention: extracted text
-purged on reap (#605, #562). MCP: Claude Desktop stdio adapter
-replacing `mcp-remote` and Codex setup (#601), `get_message` paging
-(#619, #489), token charset (#620, #589), loopback client URLs
-(#625, #612, #613). Parser: 998-character Message-ID limit (#611,
-#609). CI and build: Semgrep gaps (#614), merged-config hardening
-(#616, #577, #580), Bridge Go module scan (#615, #608), Bridge build
-fixes (#621, #617, #618), docker workflow path filters and pin-copy
-check (#627, #623, #624), off-host provider warning (#628, #622).
-Docs sweep (#610, #591, #595, #596).
-
-### 2026-10-02, afternoon — Go-live blockers closed; Phase 3–5 slices (#558–#587)
-
-Go-live blockers: xlsx worksheets are cut at an XML node budget by a
-streaming pre-pass before openpyxl parses them, `xlsx` 2→3 in
-`EXTRACTOR_VERSIONS` (#432, PR #572); `/mcp` requires a static bearer
-token, the `mcp_auth_token` Docker secret created by
-`make init-secrets`, checked in constant time with 401 before any
-session, `/health` open, and clients given the header from a file
-(Claude Code's `headersHelper` script, `mcp-remote --header-file`)
-(Phase 1 item 5, #568, #569, PR #573). MCP: Streamable HTTP at `/mcp`
-is the only transport, and `MCP_TRANSPORT=sse` or `dual` fails startup
-(#498, PR #563). Phase 3–5: quote verification for `check_conclusion`
-and `brief_issue` (5.2, PR #558); `get_evidence` `max_threads`, giving
-mailbox-wide parity with `ask_mailbox` (#537, PR #559); abstention,
-correction and conflicting-source eval scenarios and a held-out split
-(3.1, PR #560); "Message time" defined, with `sent_at` the only message
-time and date ranges scoping evidence to in-range messages (4.3, PR
-#561); reaped sources reported as reaped from the index, from
-`reaped_messages` records kept 30 days and pruned before the embedder
-wait (4.4, PR #564; #576, PR #583); the citation contract for
-`summarize_thread` and `extract_from_emails` (3.8, PR #565).
-Bridge and mbsync: the optional macOS Bridge mode (#497, PR #571);
-folder names and Bridge text redacted from all mbsync output, which
-also made the filter stream under mawk (#570, PR #586); the TLS check
-keeps its bind mounts at 700 (#585, PR #587). CI: Semgrep scans every
-`docker-compose*.yml` file and shell script with repo-owned rules
-(#556, PR #566; default `compose.yaml`/`compose.yml` names are not
-covered, #581).
-Deferred findings filed: #562, #574, #575, #577–#582, #584, #588, #589.
-
-### 2026-10-02 — Overnight fixes; first-deployment blocker closed (#515–#548)
-
-mbsync: the healthcheck reports liveness, so a long first sync is
-healthy and no longer blocks the indexer and MCP server (#277, PR
-#515, Resolved decisions 10); a far-side folder that can no longer be
-opened is warned about and the rest keeps syncing (#276, PR #521,
-Resolved decisions 9). Indexer: folders that become readable after a
-sync are watched without a restart (#516, PR #520; #528 and #529, PR
-#540); entities and aliases orphaned by a reap are pruned (#464, PR
-#527); an undecodable attachment filename falls back to the raw
-parameter (#362, PR #522); stored subjects are capped at 2,000
-characters, so the subject scans read bounded rows (#541, PR #547); a
-`multipart/related` whose root is labelled as an attachment no longer
-promotes a later part into the body (#450, PR #548); chunk splits keep
-the tabs that open a line, so xlsx columns survive a split (#433, PR
-#546; #550 filed for the Phase 2 bundle); an xlsx sheet title is charged before it is
-copied (#435, PR #543); the subject-scan test asserts the SQL bound
-(#478, PR #531); OCR's English-only limit is documented (#490, PR
-#517). Setup: `config/authority.toml` is kept at mode 600 and checked
-by `validate-env` (#468, PR #523), and `make restart-indexer` runs that
-check before a restart (#530, PR #542). MCP: citation labels of any
-length (#465, PR #525); fullwidth and small-form brackets escaped in
-delimiter tags (#442, PR #534); changed reply subjects reach the
-reranker, with the README privacy table updated (#447, PR #535);
-`get_message` caps and bounds its claimant listings (#456, PR #536;
-#538, PR #544); `get_mailbox_status` reports Message-ID conflicts as
-counts (#455, PR #539); `get_evidence` can return `ask_mailbox`'s full
-evidence set and floats attachment-matched chunks like it (#449, PR
-#532; #461, PR #545); the quote check reports overlong quotes and keeps
-combining marks with their base letter (#499, #500, PR #519); the
-agent eval normalizes `query_messages` filters as the tool does (#502,
-PR #518). #432 is parked for an owner decision.
-
-### 2026-10-01 — Phase 3 slices and defaults-audit fixes (#493–#512)
-
-Phase 3, one PR per slice: `brief_issue` hardening, with chunkless
-evidence slots refilled (also in `check_conclusion`), a repair for
-empty briefs that claim sufficient evidence, and strict chronology
-dates (#471, PR #493); deterministic agent-level scoring of tool-call
-traces on synthetic scenarios (#283, PR #494); statement-level
-citation coverage and quote verification in `ask_mailbox` (#284, PR
-#495); and a whole-prompt token budget for every intelligence tool
-against the new `INFERENCE_CONTEXT_TOKENS` (#285, PR #496). Fixes
-from a Codex defaults audit of the configuration: log rotation on
-every Compose service (#484, PR #501); indexer config loaders reject
-invalid values at startup instead of coercing them (#481, PR #503);
-Cohere SDK retries disabled, so a failed rerank falls back to RRF
-after one attempt (#483, PR #504); the indexer heartbeat refreshed during
-attachment extraction and OCR (#485, PR #505); provider timeouts
-documented as per-operation, not total deadlines (#486, PR #508);
-chunk budgets checked against each other at startup (#507, PR #509);
-`PYTHONDONTWRITEBYTECODE` set and FastMCP telemetry off in the MCP
-server (#492, PR #511); and CI job timeouts, cancellation of
-superseded PR runs, every action pinned by SHA, and `make baseline`
-accepting only `UPDATE=1` (#491, PR #512).
-
-### 2026-09-30 — Second review batch, items 6–12 (#258–#264)
-
-Seven PRs, one per item, each with a test-first commit per issue.
-MCP: a hostile stored sender no longer aborts sender-filtered searches
-and an invalid rerank ranking falls back to RRF order (#233, #225, PR
-#258); every tool and prompt cuts sender-controlled headers (#243, PR
-#259). Indexer: attachment boundaries in MIME traversal, with attached
-emails identified by their serialized form and transfer encodings
-made to agree on it (#230, #209, PR #260, fifteen Codex rounds — see
-the review-method notes above and the parser-policy candidate in
-Phase 2); extraction results shared within a batch and `unsupported`
-rows re-checked per occurrence (#237, #210, PR #261); every TIFF page
-OCR'd and UTF-16 text decoded, with `image` and `text` extractor
-versions bumped (#231, #234, PR #262); queued work can no longer
-resurrect reaped mail, with tombstones re-checked inside the reap
-transaction (#244, PR #263, six rounds). mbsync fails closed when the
-cert pin cannot be saved or the Maildir permission repair fails, with a
-shell test harness and CI job (#240, #227, PR #264). Lessons from the
-review loop went into AGENTS.md and here (PRs #265, #307).
-
-### 2026-09-29 — Second review batch, items 1–5 (#251–#255)
-
-Triage of #224–#245 (four parallel agents) confirmed every issue; see
-the ordered list under Open review findings. Merged: rejected date
-filters logged by field name only (#238, PR #251); reply-header regexes
-skip lines over 300 chars (#239, PR #252); malformed provider responses
-no longer quote their values in logs or `last_error` (#224, PR #253);
-NaN/inf embeddings rejected at the embedder, `l2_normalize` and the MCP
-query embed, and skipped on read (#232, PR #254); DOCX walker reads each
-cell once and walks nested and header/footer tables (#228, #226, PR
-#255). #255 also added `EXTRACTOR_VERSIONS` cache versioning and a
-startup re-queue; five Codex rounds shaped its refresh semantics
-(recorded in item 3). AGENTS.md gained an "Untrusted Mail Content"
-section and a PR review section (#256); remaining logging gaps are
-#257. Item 6 (PR #258): the MCP `canonical_addr` degrades an
-unparseable stored sender to "no address" instead of aborting the
-search (#233), and `_apply_rerank` falls back to RRF order on an
-out-of-range or repeated rerank index (#225).
-
-### 2026-09-28 — Right text reaches the model (#214, #215, #223)
-
-`summarize_thread` spends its recent-chunk tail budget newest-first and
-renders oldest-first (#214): one ordinary chunk filled the budget, so the
-newest reply was the first thing dropped. Evidence for a thread surfaced
-by an attachment filename match leads with that attachment's chunks,
-then other attachments, then body (#215); only the thread was
-remembered, so other attachments could fill the three slots. Both vector
-lanes clamp KNN `k` to sqlite-vec's 4096 (#223): a large
-`RERANK_CANDIDATES` with a filter asked for 8000 and silently lost the
-chunk lane. No schema change; `make baseline` unchanged. Review round 1
-(Codex): matched attachments are ranked by BM25, since the index holds
-MIME types and query words are OR'd ("proposal-quote pdf" matched every
-PDF); and a chunk cut to fit the tail keeps its beginning, so an
-oversized newest reply keeps the answer it opens with. Round 2: the
-budget goes to messages newest-first but reads each message from its
-first chunk, so a long newest email's last chunk cannot crowd out its
-opening.
-
-### 2026-09-28 — MCP results no longer overclaim (#219, #220, #222)
-
-Three places where a tool's answer claimed more than it had. Neither
-inference backend checked why generation stopped (#222): output cut off
-at `max_tokens` now raises `InferenceTruncatedError` with the partial
-text, `extract_from_emails` counts truncated and non-JSON threads apart
-from a valid `null` and says how many could not be extracted (instead
-of "No structured data … found"), and `ask_mailbox` / `summarize_thread`
-mark a cut-off answer. `search_attachments`' text lane ranks each
-attachment by its best chunk before its LIMIT (#220), so one long
-document no longer hides other matches (a MATERIALIZED CTE, since
-`bm25()` is not allowed in a grouped query). `get_evidence` rejects
-`thread_id` combined with thread-selecting filters (#219) instead of
-silently ignoring them. No schema change; `make baseline` unchanged.
-Review round 1 (Codex): valid JSON of another shape (a string, a
-number, a list of non-objects) now counts as a failed extraction;
-blank optional filters (`from_addr=""`) are absent on the thread-scoped
-path, as on the mailbox-wide one; and an OpenAI `content_filter` or
-Anthropic `refusal` stop is an error rather than a finished answer.
-Review round 2: the attachment text lane applies its filters before
-grouping (a filtered search no longer aggregates every matching chunk
-in the mailbox), and an Anthropic `model_context_window_exceeded` stop
-counts as truncation. Round 3: a mixed array's objects are kept but
-the thread counts as incompletely extracted.
-
-### 2026-09-28 — Subject fallback needs a shared correspondent pair (#205)
-
-The headerless subject fallback accepted any one shared address, and
-the mailbox owner is a recipient of nearly every message, so two
-vendors' "Invoice" mails merged into one thread. It now requires the
-incoming sender and one of its other recipients to both be thread
-participants. That also stops the owner's same-subject notes to
-different people from merging. Monthly mail between the same pair
-(invoices from one vendor) still chains while each falls within 60 days
-of the last; not in #205's scope. `make baseline` unchanged: the
-synthetic corpus has no shared-recipient-only case. Threads already
-merged split only on reindex. No schema change. Review round 1
-(Codex): a multi-author From counted only its first author, in the
-check and in thread participants, so a co-author's follow-up split off;
-every author now counts.
-
-### 2026-09-28 — Thread reprocessing (#204)
-
-Reprocessing an already-indexed message no longer re-resolves its
-thread from headers (#204): a reply indexed before its parent, when
-reprocessed, moved to the parent's thread in the map while its chunks
-and the old thread row still claimed it. The startup rename sweep now
-runs before the initial walk, so files mbsync renamed while the indexer
-was down are no longer reprocessed as new mail at all. Databases
-already split by #204 keep the inconsistency until the Phase 2 reindex.
-The Message-ID conflict fix (#217) moved to its own PR after review
-showed takeover needs a real design. No schema change; `make baseline`
-unchanged. Review round 3 (Codex): moving the sweep onto the startup
-path exposed that it rescanned a folder for every stale path (quadratic
-in files renamed while the indexer was down); each sweep now lists a
-directory at most once.
-
-### 2026-09-28 — Ingestion completeness fixes (#203, #206, #207, #212, #213)
-
-Five Codex findings where valid mail could silently lose indexing, or
-the indexer could fail to start. A Maildir rename now moves the file's
-`indexing_jobs` row with it (#203): a reply whose Phase 2 was deferred
-by an embedder outage lost its job on a flag rename and was left
-without chunks and with no pending or dead row. `PermissionError` at
-parse is deferred every 60 s without spending an attempt for a day
-after enqueue (#212): mbsync relaxes permissions only after a whole
-sync, so a long sync dead-lettered valid mail. The deletion reaper
-picks survivors by message ID rather than a tombstone snapshot's path
-(#213), so a flag rename mid-reap can no longer leave a deleted
-message's text in its thread, and it scrubs embedding errors in its log
-(#206). The initial schema and its version stamp are created in one
-transaction (#207), so an interrupted first start no longer blocks every
-later one. Known limit (#203): a rename during that message's own step
-leaves the moved row one extra attempt and one run alone. No schema
-change; `make baseline` unchanged.
-
-### 2026-09-28 — Interrupted messages dead-letter (#235)
-
-A message that crashed or hung the single worker never reached
-`mark_failed`, so it was re-claimed at the same attempt count after
-every restart, forever (and a hang never restarted at all: Compose does
-not restart unhealthy containers). The one message whose parse or
-chunk/extraction step is running now carries one attempt while it runs
-(`begin_attempt`), refunded when the step returns or its outcome is
-recorded; a process that dies mid-step leaves only that message
-charged, never its batchmates, and exhausted rows are dead-lettered
-with `last_stage = 'interrupted'`. A stall guard thread exits the
-indexer when one step runs past `INDEXER_MESSAGE_TIMEOUT_SECONDS`
-(default 3600, `0` disables) so the restart policy recovers it. The
-refund is deliberately not in a `finally`: `MemoryError` /
-`RecursionError` re-raised by the extractors must keep the charge. No
-schema change. Review round 1 (Codex): the charge and refund were
-read-then-write, so a concurrent re-enqueue from the watchdog thread
-could be overwritten with a stale count or dead status (now conditional
-SQL under the connection lock); the stall guard could exit on a stale
-in-flight reading after the step had already refunded (it now decides
-and exits holding a lock the refund takes); and an OOM from a whole
-batch's footprint was blamed on the row it landed on, replayed in the
-same order after each restart until a valid message was dead-lettered
-(a row left marked `interrupted` now runs alone first). Review round 2
-(Codex): a kill during the bulk embed or vector commit came after every
-charge was refunded, so the same batch could crash forever (several
-survivors are now marked `interrupted` without a charge before the
-embed; a lone survivor stays charged through it); and the 3600 s limit
-bounded a whole message, below three legitimately slow scanned PDFs
-(each attachment now restarts the guard's clock). Review round 3
-(Codex): a lone survivor is watched through the bulk embed, where a
-large message's many embed requests only refreshed the heartbeat, so a
-healthy message on a slow embedder could be killed; each completed
-embed request now also restarts the guard's clock.
-
-### 2026-09-28 — Bounded indexer work on hostile input (#202, #211, #216, #218, #221)
-
-Five Codex findings where one crafted message could stall the single
-indexing worker or silently blank later bodies. The chunker's sentence
-regex is linear on long punctuation runs; Subject and raw-From
-encoded-words decode in one linear pass (plain text next to an
-encoded-word no longer gains doubled spaces); each HTML body and
-attachment gets a fresh `HTML2Text`, since a shared one carried an
-unclosed `<style>` into later documents; XLSX extraction stops at
-20M visited cells, padding included; PDF OCR lowers its DPI so the
-largest page fits 10M pixels (failing closed when page sizes are
-unreadable), and `INDEXER_OCR_TIMEOUT_SECONDS` also bounds the Poppler
-render. Remaining gap: pdf2image does not pass that timeout to its
-`pdfinfo` page-count call. Separately, a job that hangs or kills the
-worker is re-claimed without spending an attempt, so it never reaches
-`dead`; that fix is a queue-semantics change of its own. No schema
-change; `make baseline` unchanged. Review round 1 (Codex): the pixel
-budget counted page area, not the rounded whole-pixel sides Poppler
-allocates, so a sliver page kept 200 dpi at 1 x 40M pixels; and
-whitespace was dropped next to a malformed encoded-word look-alike
-(`ok =?utf-8?x?bad?=` fused), now only inside runs of valid words
-(display names too).
-
-### 2026-09-28 — Retrieval regression baseline (Phase 1.5)
-
-A 20-thread, 37-message synthetic mailbox
-(`indexer/tests/baseline/corpus.py`, reserved `.example` domains, text
-and HTML attachments, a forward, cross-folder replies, distractor
-threads) is indexed by the real `initial_index` with a deterministic
-hashed embedder (words + character trigrams → 4096 dims), then queried
-through mcp-server's real `hybrid_search` (no reranker) and
-`query_messages`. Two layers:
-
-- **Golden checks** (`mcp-server/tests/baseline/golden.json`): 29
-  search questions with a per-question max rank, evidence-substring
-  checks for attachment and multi-message cases, and four
-  vector-only questions (misspellings / re-split compounds that porter
-  stemming does not map back, asserted to be found with no `*_fts`
-  lane) plus an MRR floor; 7 enumeration questions with exact message
-  sets.
-- **Rank snapshot** (`snapshot.json`): top-10 order per question, exact
-  score ties ordered by thread ID; any change fails until regenerated
-  with `make baseline UPDATE=1`.
-
-Verified both layers bite: disabling the vector lanes fails the
-vector-only questions, MRR and the snapshot; changing RRF `k` fails only
-the snapshot. The two services cannot share a process (both are a
-top-level `src` package), so the indexer step also writes the query
-vectors and mcp-server never re-implements the embedder. The hashed
-embedder measures plumbing, not semantic quality — that stays with
-Phase 3's evals. No schema change, no new dependencies.
-
-### 2026-09-28 — Source integrity exposure (Phase 1 item 7)
-
-Every message row (`get_thread`, `get_message`, `query_messages`),
-evidence chunk (`get_evidence`), and attachment hit
-(`search_attachments`) now carries `source_file`: `source_type`
-(`maildir_message`), `locator` (the raw file's `/maildir/...` path),
-`sha256` and `size_bytes` of the raw file, and `indexed_at`, read from
-`messages` in the same query as the result. An attachment's source is
-the message file that carries it. `get_message`'s prose names the
-source file too. The chain is answer → evidence chunk → `message_id` →
-`source_file` → raw bytes. Two departures from the planned field list:
-no separate `source_id`, since the SHA-256 already is the content
-identity and a second name for it would add nothing; and `indexed_at`
-rather than `ingested_at`, because the indexer rewrites the record
-whenever the thread is re-indexed, so it is not a first-ingest time.
-No schema change.
-
-### 2026-09-28 — Doc-drift sweep (Phase 1 item 8)
-
-`architecture.md`'s search section now describes the five retrieval
-lanes the code runs, in two RRF stages: three FTS5 lanes
-(`thread_fts`, `chunk_fts`, `attachment_fts`) fuse into the keyword
-list, which then fuses with `thread_vec` and `chunk_vec`. Its data-flow
-table list covers the chunk, message, attachment, queue, and ingestion
-tables. README drops "Agentic" and "Real-time" and states the 4096-dim
-embedder requirement instead of "any compliant provider". The
-Troubleshooting half of `setup.md` moved to `docs/troubleshooting.md`.
-Bridge doc nits: the `bridge-data` volume row now separates auth
-material (`config` + `gnupg` + `pass`, backed up together) from the
-Gluon cache (optional but hours to rebuild); `setup.md` says what to do
-when `make bridge-upgrade-check` fails and what to expect after an
-upgrade (Gluon re-sync, the `bridge-v3` vault path, cert pin rotation).
-
-### 2026-09-28 — Honest `get_mailbox_status` (Phase 1 item 4)
-
-`get_mailbox_status` replaces `get_index_status` and `get_sync_status`
-(and `make status` uses its helper). It returns `current` with one
-reason per failed condition: mbsync completed a sync within three
-intervals (5-minute floor), the indexer reported within 10 minutes,
-and nothing is pending or retrying. Dead messages are reported but do
-not block `current`. It also returns the last sync time, indexer
-liveness, queue counts (pending / retrying / dead), and the existing
-counts and date range, all from one read snapshot. mcp-server still
-reads only SQLite: after each successful sync mbsync writes
-`.mbsync-last-sync.json` at the Maildir root, renamed into place from a
-temporary file named after that sync. The indexer acknowledges a sync
-only once its deliveries are queued (when its watcher handles that
-rename, which comes after the sync's delivery events, or after a
-Maildir walk that started later), and records the latest acknowledged
-sync with its own liveness in the one-row `ingestion_state` table on
-each health heartbeat, at most every 30 s. Schema v21, first
-post-squash migration `0021_ingestion_state.sql`. mbsync now rejects a
-non-integer `SYNC_INTERVAL` at startup. Known gap: a missed filesystem
-event is invisible to `current` until the periodic rescan enqueues it.
-Review round 1 (Codex): the indexer copied whatever stamp was on disk,
-which can run ahead of the watcher's queue (now acknowledged per
-rename event / walk); liveness was refreshed once per drain pass, so a
-long OCR batch could exceed the 10-minute threshold (now on every
-health heartbeat); jobs deferred during an embedder outage keep
-`attempts = 0` and were counted as pending (now retrying, by failure
-class); two test `type: ignore`s replaced with `monkeypatch`; dead
-messages were described as not searchable, but one that fails after
-Phase 1 keeps its keyword-searchable thread text (now "incompletely
-indexed").
-Review round 2 (Claude): mcp-server restarted on this build before the
-indexer ran migration 0021 failed the whole status tool on the missing
-table; it now reports "the indexer has not reported" instead.
-
-### 2026-09-28 — Structured MCP output (Phase 1 item 2)
-
-The eleven search / retrieval / evidence / status tools declare a
-Pydantic output model (`src/tools/outputs.py`) as their `outputSchema`
-and return it as `structuredContent` beside the unchanged prose, so IDs
-(thread → message → attachment) and paging state (`next_offset`,
-`next_cursor`, `total_matches`) are typed fields. Structured output
-keeps the prose's bounds on sender-controlled headers, with full counts
-alongside. Failures are now raised and reach clients as `isError`
-results instead of success results carrying error prose. Previously
-FastMCP had wrapped every `list[TextContent]` return as
-`{"result": [...]}` structured content, a second copy of the prose;
-the intelligence tools still do. A contract test drives every tool
-through a real `FastMCP` and validates each result against its
-published schema. `pydantic` is now a declared dependency (same pinned
-version `mcp` already resolved). No schema change. Review round 1: the
-structured `query_messages` rows newly exposed In-Reply-To and
-References with no length cut (a 2 MB response at `limit=1`); every
-header value in its prose and structured output is now cut at 500
-characters, as in `get_thread`, which also closes the backlog item for
-its unbounded subjects and display names. Review round 2 (Codex
-security review): `get_thread` repeated the sender-controlled thread ID
-(the root Message-ID) on every message row, and `search_emails` /
-`list_threads` / `search_attachments` listed 10 uncut participants or
-senders where the prose shows 2–3. Message rows now carry `thread_id`
-only where they can span threads (`query_messages`, `get_message`), and
-the shared builders cut by default, with `get_message` the only
-full-value caller.
-
-### 2026-09-28 — Dead action/IMAP surface deleted (Phase 1 item 6)
-
-Removed the never-registered mail-changing tools (`tools/actions.py`),
-the live Bridge IMAP/SMTP client (`lib/imap.py`), their tests and
-`FakeIMAP` fixture, and the `aioimaplib` dependency. `MCP_READ_ONLY`
-is gone from `main.py`, compose, `.env.example`, and
-`validate-env.sh`: it only chose a log line, and a flag that suggests
-the server can be made writable contradicts the read-only decision.
-`get_sync_status` lost its never-enabled Bridge reachability probe
-(`bridge_enabled`); mcp-server is not on `bridge-net`, so the probe
-could never have worked. mcp-tools.md moves the action tools to a
-design-only appendix and renumbers System to Group 4; README, setup,
-architecture, and AGENTS.md now describe the server as read-only
-rather than "read-only by default".
-
-### 2026-09-28 — Message-first-class retrieval (Phase 1 item 3)
-
-`get_message` renders the message's own headers from `messages` +
-`message_participants` — subject, every From / To / Cc entry, UTC send
-date, folder, In-Reply-To, References, attachment flag — instead of
-parent-thread participants and date range. `get_thread` renders the
-thread's messages oldest first (`sent_at`, then `message_id`), each
-with its own headers (recipients capped at 10 per role) and its body
-reconstructed from its own body chunks in one grouped query; the
-accumulated `body_text`, which repeats quoted replies, is shown only
-when no message body is indexed yet. Received date is not captured by
-the parser or schema; deferred (see Deferred). No schema change.
-Review round 1: `get_thread` is bounded (message pages of 10, max 50,
-with a next-`offset` line; bodies cut at 4,000 characters with an
-omitted-count marker, and chunks past the cut are never read — the
-first version loaded every chunk of every message, where the old
-`body_text` was capped at 4,000 tokens); bodies are rebuilt by
-`char_start` offset so the chunker's deliberate overlap is not shown
-twice (also a pre-existing `get_message` bug); and both tools read
-thread, messages, participants, and bodies in one read transaction.
-Review round 2: header content bypassed that bound (12,000 folded
-References rendered 550K characters); `get_thread` now lists at most 10
-References and thread participants and cuts every header value at 500
-characters with a marker, leaving full headers to `get_message`.
-
-### 2026-09-27 — `query_messages` (Phase 1 item 1)
-
-New MCP tool enumerating every message that matches all given
-predicates — sender / recipient (To or Cc) / participant, subject
-substring, body `text` (every word, FTS with stemming, words may span
-chunks; attachments and stripped quotes excluded), folder, inclusive
-`sent_at` bounds, attachment flag — with an exact `total_matches`,
-`returned` range, `has_more`, and a cursor. Newest first, keyset-paged
-on `(sent_at, message_id)` with a row-value predicate that seeks
-`idx_messages_sent` (the OR expansion sorted every earlier row: 34 ms
-vs 0.06 ms at 200K messages); cursors are bound to a digest of their
-filters and rejected, not silently restarted, when reused elsewhere.
-Count, page, and participants come from one read snapshot. A full
-address matches canonically through the `(address, role)` index;
-anything else is a Unicode case-insensitive substring of address or
-display name (a `mcp_lower` SQL function, since SQLite's `lower()` is
-ASCII-only), and the response names the mode used. `find_contact` now
-aggregates `message_participants` instead of parsing every thread's
-participant JSON, reporting every display name a contact was written
-with; its `senders_only` mode (used by `search_emails(from_name=...)`)
-keeps aggregating `threads.senders`, the exact set that search's sender
-filter checks, so resolution can never pick an address the filter rejects. `search_emails` /
-`list_threads` descriptions route "all" / "how many" questions to the
-new tool. Review round 1: rejected-input errors are no longer logged
-with the input they quote; empty pages state `returned: 0` /
-`has_more: false`. `text` is split into words by FTS5's own unicode61
-tokenizer (a throwaway in-memory table read through `fts5vocab`), so
-query words always match the index's boundaries: three rounds of
-hand-rolled splitting each drifted (combining marks, NFC-composing
-Greek and Hangul, underscores, private-use characters), and every drift
-silently changed exhaustive counts. No schema change.
-
-### 2026-09-27 — Phase 1 foundation: per-message records
-
-Schema v20 (baseline, folded while no deployed database exists):
-`messages` (one row per indexed message: headers, `sent_at`, folder,
-source `filepath` / `size_bytes` / `content_hash`) and
-`message_participants` (normalized From / To / Cc, indexed by canonical
-address). Written in `upsert_thread`'s transaction; removal cascades
-from `message_thread_map`, so reaps and thread deletes need no new
-code. Review round 1 fixed two pre-existing gaps it exposed: the parser
-re-quotes display names when they contain RFC 5322 specials (a
-`"Doe, Jane" <addr>` recipient previously lost its quotes and failed
-canonicalization, dropping it from participants — thread-level lists
-included), and the watcher's rename fast path records the new folder on
-cross-folder moves. Round 2: the quoting uses an encoding-free formatter,
-not `formataddr` (which raised on non-ASCII addresses, failing the whole
-message, and RFC 2047-encoded Unicode names); raw 8-bit address headers
-are decoded before splitting; and the folder is written inside
-`update_filepath`'s transaction so a failed move rolls back whole and
-stays recoverable by the Maildir walk. Round 3: a malformed encoded-word display
-name falls back to its raw text instead of dead-lettering the message,
-and From is parsed structurally into `from_addrs` (every author), so an
-encoded sender name with a comma or a multi-author From no longer loses
-the sender. A 27-case table-driven address corpus (parse -> index, end to
-end) then found one more pre-existing loss: Python 3.14's strict
-`getaddresses` rejects a whole header containing an empty list element
-(`a@x, , b@x` or a trailing comma), dropping every recipient; the parser
-now recovers such headers by removing the empty elements and
-strict-parsing again. Round 4: display names decode only their RFC 2047
-encoded-word tokens (linear scan, adjacent words joined, names over 998
-chars kept raw), leaving existing Unicode untouched; a token that fails
-or decodes to invalid Unicode (lone surrogate, NUL charset label) keeps
-its raw text. Rounds 5-6 removed a `strict=False` lenient fallback that
-had briefly replaced that recovery: it raised `RecursionError` on deeply
-unmatched comment parentheses and ran in quadratic time on large rejected
-headers; all parsing is strict again. Round 7: decoded names containing
-control characters (a CR let `Mallory@...\r` be read as the address)
-keep their raw text; `_format_address` enforces an identity invariant (if
-the serialized string parses to a different address, the name is
-dropped); and blank-element cleanup is a linear, escape-aware scan that
-never touches quoted strings, comments, or domain literals (the regex
-version rewrote `"a, ,b"@x` into a different mailbox). Round 8 replaced the
-patchwork with one design: encoded-words are swapped for opaque
-placeholders before structural parsing (their contents can never become
-syntax — recursion, quadratic groups, and a fabricated
-`bob@example.com_` sender all traced to that), the list is split at top
-level in one linear escape-aware pass (groups flattened, empty elements
-dropped), each element is parsed strictly on its own under size budgets
-and fails safe, and decoding is bounded per encoded-word rather than per
-name. `messages(filepath)` is indexed for the rename path. Round 9 closed the
-last reparse hole: a restored encoded-word could re-create a
-nested-paren bomb in the address and blow up the unguarded identity
-re-parse (dead-lettering the message). Restore/decode/format now run
-inside the per-element failure boundary, and every emitted address must
-re-parse to itself (`parseaddr` fixed point, ≤998 chars) or be
-discarded. `canonical_addr` and mcp-server's `find_contact` entry parse
-are also guarded — hostile strings that reach them via the `from_addr`
-fallback or already-indexed participants degrade to "no address" instead
-of aborting threading or breaking every contact lookup.
-Prerequisite for Phase 1 items 1 (`query_messages`), 3
-(message-first-class retrieval), and 7 (source integrity exposure).
-
-### 2026-09-27 — Phase 0 hardening (items 7–11); Phase 0 complete
-
-- **Untrusted-content serialization (7).** One helper,
-  `_untrusted_email_block`, builds every `<untrusted_email>` block and
-  escapes any delimiter-shaped text in the content (case- and
-  spacing-insensitive), so a hostile subject, participant, or body can
-  no longer close the fence early. Injection fixtures push a hostile
-  thread through all three intelligence tools and assert exactly one
-  real closing tag with the injected text inside it.
-- **Logging privacy (8).** All ten mcp-server tool handlers log through
-  `log_tool_call`: content-free parameters plus the *names* of withheld
-  ones (query, addresses, folders, IDs, schema never reach logs); an
-  allowlisted field's value is logged only if it passes that field's
-  check (enum member, integer, boolean, ISO date), since LLM-supplied
-  arguments arrive unvalidated (review round 1). The
-  find_contact error no longer echoes `from_name`. Indexer stage errors
-  persist `Type: message` via `_stage_error`, never `repr()` — a
-  `UnicodeDecodeError` repr embeds the decoded email bytes.
-- **`MCP_PORT` (9).** Compose maps `${MCP_PORT}` to `${MCP_PORT}`; a
-  non-default port previously pointed at a container port nothing
-  listened on.
-- **Bridge commit pin (10).** Proton's release tags are lightweight, so
-  there is no tag signature to verify; `BRIDGE_COMMIT` pins the commit
-  and the clone step fails unless `BRIDGE_VERSION` resolves to it. The
-  weekly bump workflow resolves and moves the commit with the version
-  across all three pin sites; `validate-env.sh` checks its format.
-  `bridge-patch-drift.sh` verifies the same pin right after its clone —
-  it runs before the image build in `make bridge-upgrade-check`, and its
-  patch helper compiles and `go test`s upstream code on the host
-  (review round 1).
-- **Carryovers (11).** Extraction unwraps ```json-fenced model output
-  instead of silently skipping the thread. Indexer health threshold
-  90 s → 600 s, and the heartbeat is refreshed before each health probe
-  and each isolated message, bounding the silent window to one embed
-  request's retry cycle (~6.5 min).
-
-### 2026-09-26 — Failure taxonomy, isolation, outage breaker, requeue-dead (Phase 0 items 3–6)
-
-Phase 0 exit criterion met: transient infrastructure failures can no
-longer cause permanent source omission. Every queue failure now
-records `last_error_class` (`retryable` / `permanent_source_failure` /
-`operator_action_required`; schema v19). When a
-batch embed fails, a one-string health probe separates an outage from
-a bad input: an outage defers every in-flight job without spending
-attempts and opens a circuit breaker (30 s doubling to 10 min, shared
-by the initial drain and the main loop); a healthy probe re-embeds
-each message alone, so good batchmates index in the same pass and
-only the bad input is charged (5xx on that input → retries; outright
-rejection → immediate `permanent_source_failure`). A passing probe
-only describes one tiny request, so every failure during isolation is
-attributed by `classify_embed_failure` (separate from the HTTP retry
-predicate): transport / 408 / 429 and 401 / 403 / 404 defer the
-remaining messages and open the breaker; only 400 / 413 / 422 are
-terminal; 5xx re-probes before charging an attempt (review round 1
-found a mid-isolation 401 or persistent 429 could dead-letter valid
-mail). A rejected multi-input request is re-sent one input per request
-before anything is charged, so a provider request-size limit below
-`EMBED_BATCH_SIZE` can't dead-letter valid mail either (review round 2). 429 and 408 now
-count as transient in `_is_transient_embed_error`, so rate limits
-back off instead of reading as misconfiguration. The same change squashed
-migration history through v19 into `_apply_initial_schema` (no
-deployed database existed): migrations `0013`–`0018` and the v14
-destructive-migration guard (`INDEXER_MIGRATION_V14_FORCE`) were
-deleted, `SCHEMA_BASELINE_VERSION = 19` marks the new floor, and older
-databases fail closed with rebuild instructions. The runner stays for
-future migrations, starting at `0020`. With no pre-v18 rows possible,
-`message_chunks.message_date` became `NOT NULL`, the indexer's NULL
-backfill was removed, and mcp-server's `COALESCE(message_date,
-chunked_at)` legacy fallback was dropped. `make requeue-dead
-[CLASS=...]` (`src/requeue_dead.py`) replaces the raw-SQL rescue.
-Pausing during an outage also pauses Phase 1, so new mail is not
-keyword-searchable until the embedder returns (deliberate: avoids
-hammering a down provider).
-
-### 2026-09-26 — Ingestion completeness (Phase 0 items 1–2)
-
-The watchdog observer now starts before the initial drain, so mail
-delivered during a long initial index is enqueued instead of
-invisible until the next restart. The Maildir walk was extracted
-into `_enqueue_unindexed_messages` and now also runs periodically
-(on `INDEXER_RECOVERY_SWEEP_INTERVAL_SECS`, reason `rescan`) as the
-eventual-completeness backstop for missed events. The walk skips
-indexed, dead-lettered, **and already-queued** files — the last is a
-behavior change for the startup scan too: a restart no longer resets
-an in-flight retry cascade to zero attempts (previously a crash-
-looping container could retry a failing file forever without it ever
-reaching `dead`). Messages the parser rejects outright (no
-Message-ID) are now dead-lettered with `unindexable: no Message-ID`
-instead of having their row deleted: they were never marked indexed,
-so the periodic walk would otherwise re-parse them every interval
-forever, and they previously ended in no visible state at all.
-With deletion reconciliation enabled, every enqueue path (startup
-scan, periodic rescan, watchdog new-delivery branches) skips
-`T`-flagged files; otherwise a reaped message — whose `.eml` stays
-on disk under `INDEXER_UNLINK_ON_REAP=false` — was resurrected into
-search by the rescan (also by restarts and by mbsync flag renames,
-both pre-existing). Caught in review; covered by
-`TestReapedMessagesStayDeleted` (reap → rescan → drain, restart,
-flag rename, upstream undelete). Tests: `TestEnqueueUnindexedMessages`,
-`TestMainStartupAndLoop` (first `main()` wiring coverage; the
-ordering test was mutation-checked against the old ordering).
-
-### 2026-09-26 — Direction adoption + roadmap rewrite
-
-Two independent clean-room code reviews (Claude, ChatGPT) converged:
-retrieval engine and hardening are strong; corpus-integrity defects
-(watchdog blind window, batch dead-lettering), MCP contract gaps
-(no enumeration primitive, prose-only output), and embedding-model
-lock-in are the priority. This PLAN.md was rewritten around the
-knowledge-corpus objective. Stale backlog entries swept in the same
-pass: "consider an attachments-search MCP tool", "attachment-aware
-retrieval with provenance", and "dual retrieval units" (all shipped
-as `search_attachments` / `get_evidence` / the chunk lane on
-2026-05-15); "reference `make init-secrets` in README/setup" and
-"replace `echo -n` with `printf` in setup.md" (already done in docs).
-
-### 2026-05-15 — get_evidence + search_attachments
-
-Owner-directed retrieval pair on the existing thread + chunk +
-attachment tables, no schema change. `get_evidence` returns ranked
-evidence chunks with thread/message/attachment provenance, char
-offsets, and dates — no LLM synthesis; `thread_id` scopes to one
-thread. `search_attachments` locates attachments via two FTS lanes
-(filename/MIME + extracted text) with structured filters.
-`get_message` reconstructs per-message bodies from the chunk store.
-`search_emails` gained a `participant` filter. RRF fusion records
-per-lane provenance (`lane_ranks`) as additive observability.
-
-### 2026-05-13 — RAG quality: quote stripping + retrieval followups
-
-Inline-reply quote stripping rewritten two-pass (`On … wrote:` reply
-headers no longer hard-cut inline answers), extended to five
-non-English attribution shapes, Gmail wrapped headers, and Outlook
-bare `From:/Sent:` blocks (`test_quoting.py`, 573 indexer tests
-passing). Codex-flagged retrieval gaps fixed: evidence ranking now
-carries attachment provenance and floats attachment chunks when the
-thread won via attachment-FTS; `summarize_thread` merges accumulated
-body with a recent-chunk tail so long threads keep their newest
-replies; the retrieval eval requires a real embedder instead of
-silently degrading to keyword-only; `semantic_search` fuses the
-chunk-vec lane. One finding deliberately parked pending eval data:
-thread-vector weighting across body vs attachment chunks (now Phase
-3 item 5).
-
-### 2026-05-08 — Operator-supplied providers + pipeline unification
-
-`mlx-service/` / `mlx-lm-server/` removed — the project ships no
-model-serving components; operators supply an OpenAI-compatible
-embedder and choose Anthropic-compatible or OpenAI-compatible
-inference (`INFERENCE_MODE`), reranking opt-in (`RERANK_MODE`).
-Same period (PRs #95–#100): OpenAI-wire embedder client everywhere;
-cross-message embed batching (~25k single-message round-trips →
-~500); three-case seed-vector priority chain hardened against
-Phase 2 failures; single unified batched pipeline; L2-unit-norm
-storage invariant with v17 backfill; token-based body cap using the
-bundled Qwen3 tokenizer; Ollama/OWUI scaffolding removed.
-
-### 2026-05-04 — Hybrid-search index fix (schema v15) and WAL fixes
-
-Missing `fts_rowid` indexes caused `SCAN <base>` plans on FTS5 JOINs
-(~1.1B row comparisons per query; 5–7 min searches). v15 migration
-added the indexes + `ANALYZE`: `hybrid_search` ~400s → ~0.5s.
-Separately, mcp-server's shared read-only connection pinned the WAL
-read mark and blocked checkpoints (159 MB WAL observed); production
-reads now open per-access connections. `RERANK_CANDIDATES` tuned to
-20. Misdiagnosis history preserved in project memory
-(`project_fts5_join_missing_index.md`, `project_mcp_wal_pinning.md`).
-
-### Earlier — repository simplification
-
-Schema v1→v12 migration debt collapsed into one
-`_apply_initial_schema` (~1,200 lines deleted); `backfill.py`
-removed; Maildir handoff simplified to post-sync `chmod go+r` with
-UID separation and `:ro` mount preserved; `senders → participants`
-fallback removed.
+      may be fixed before go-live (AGENTS.md).
+15. **#638 implicit TLS (2026-10-02 night):** mbsync ⇄ Bridge IMAP uses
+    implicit TLS, with no STARTTLS or plaintext fallback; an approved,
+    owner-gated TLS change.
+16. **v0 additions before go-live (2026-10-02 night):** Maildir
+    read/flagged/replied state (#649), chunk `kind` tags (#659) and the
+    embedder identity record with a calibration vector (#650) went into
+    v0 to avoid a later migration; the claimant suffix grew to 16 hex
+    digits (#640).
+17. **Result quality first (2026-10-01):** work targets returned-result
+    quality ahead of edge cases and P3s; with no live index yet, the
+    reindex bundle's body fixes landed directly.
+18. **Bridge container removed (2026-10-04, #716):** the official app
+    on the host is the only setup, folded into `docker-compose.yml` with
+    no aliases; macOS tested, Windows untested, Linux unsupported;
+    dated history stays as written; `BRIDGE_CERT_FINGERPRINT` is always
+    required.
+19. **#463 sender authentication (2026-10-04):** a DMARC `fail` in
+    Proton's own `Authentication-Results` leaves the sender
+    unclassified, and a `sender_authenticated` flag (pass / none / fail
+    / internal) is shown with the authority class. A single
+    `X-Pm-Origin` with the exact value `internal` counts as
+    authenticated (Proton overwrote a forged one in the owner's test).
+    The backfill is an application step after the migration, not SQL.
+20. **`INDEXER_UNLINK_ON_REAP` removed (2026-10-04, #721):** it could
+    not work against the read-only Maildir mount; the indexer never
+    deletes Maildir files, and local deletion belongs to mbsync (#728).
+21. **Smaller rulings of 2026-10-04:** Proton's virtual `Starred` is
+    left out of the sync (#746); #652 and #685 closed as Linux-only;
+    the best thread keyword hit is guaranteed a top-three place in
+    hybrid RRF (#701, #745); the initial scan indexes **oldest first**
+    across folders, with no setting (#754), since newest first split
+    replies from their roots (#752).
+22. **Explicit provider destination (2026-10-05, #750):** every enabled
+    layer's `*_BASE_URL` is a URL or the literal `default`; an API key
+    is not consent to the SDK's default endpoint. `INFERENCE_MODE`
+    defaults to `none`.
+23. **Late review findings (2026-10-05, #751):** a verified
+    round-three-or-later finding still blocks the merge when it is
+    P0/P1 or introduced by the PR (AGENTS.md).
+24. **Phase 2 first milestone narrowed (2026-10-05, #719):** measure,
+    then a validated staged rebuild, before any live generations;
+    deferred while the embedding model is unchanged.
+25. **Work tracking (2026-10-05):** PLAN.md keeps direction, roadmap and
+    decisions; work is tracked in GitHub issues with milestones and
+    `P0`–`P3` / `decision` labels.
 
 ## Notes for Agents
 
 - Read `AGENTS.md` before making changes.
-- Treat this file as the current execution plan, not as permission to
-  ignore architectural constraints.
-- The Current Objective section supersedes any older scope statement
-  that froze the MCP API surface; Phases 0–5 are the priority order.
-- When a task is completed, move it to `Recently Completed` or remove
-  it.
-- Keep this file concise and current.
+- Find current work in GitHub issues (milestones, `P0`–`P3`,
+  `decision`); this file is direction, not a queue.
+- The Current Objective supersedes any older scope statement that
+  froze the MCP API surface; Phases 0–5 are the priority order.
+- Edit this file only when a decision, roadmap status or known
+  limitation changes; keep it concise.
