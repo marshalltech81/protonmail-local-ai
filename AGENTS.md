@@ -493,6 +493,14 @@ Examples:
   linked from a reply on its thread, and the thread resolved as
   deferred; the PR is then ready for the owner's merge go-ahead once
   CI is green (the go-ahead rule below still applies).
+- Exception (owner, 2026-10-05, #751): a verified round-three-or-later
+  finding still blocks the merge when it is P0/P1, or when the PR
+  itself introduced it (in its first commit or any fix round), at any
+  severity. Fix it in the PR, revert the change that caused it, or have
+  the owner accept it explicitly as a stated risk, recorded in the PR
+  description and a linked issue. A P2/P3 finding the PR did not
+  introduce keeps the cap. Record which applied in the "Review round N"
+  section.
 - File P3 findings as issues rather than fixing them ahead of
   go-live or P1/P2 work. Exception (owner, 2026-10-02): a small P3
   with an agreed fix and no new mechanism may be fixed before go-live.
