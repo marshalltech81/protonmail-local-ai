@@ -127,6 +127,9 @@ def test_index_is_recognized_as_synthetic(baseline_db: Database) -> None:
         "(SELECT MIN(rowid) FROM messages)",
         "UPDATE messages SET occurred_at = '2031-01-01T00:00:00+00:00' WHERE rowid = "
         "(SELECT MIN(rowid) FROM messages)",
+        # #674: the stored Message-ID is each passage's origin in the judge prompt.
+        "UPDATE messages SET message_id = 'privatemarker@private.example' WHERE rowid = "
+        "(SELECT MIN(rowid) FROM messages)",
         # A message the committed corpus does not have.
         "UPDATE messages SET claimant_id = claimant_id || 'x' WHERE rowid = "
         "(SELECT MIN(rowid) FROM messages)",

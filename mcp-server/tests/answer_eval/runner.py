@@ -393,7 +393,8 @@ def index_identity(db: Any, manifest_path: Path = CORPUS_PATH) -> dict[str, obje
     real mailbox is out of its scope, so the index must hold exactly one
     claimant per committed corpus message, each its Message-ID plus a
     prefix of that message's SHA-256 (``corpus_manifest``); each
-    message's dates (the labelled chunk header's) must be the corpus
+    message's stored Message-ID (a passage's origin in the judge prompt)
+    and dates (the labelled chunk header's) must be the corpus
     message's; and every indexed text a prompt can carry may use only
     words of the corpus messages it belongs to: chunk text, message
     subjects, participants (the chunk header's sender), attachment names
@@ -413,13 +414,17 @@ def index_identity(db: Any, manifest_path: Path = CORPUS_PATH) -> dict[str, obje
         # Every claimant a corpus message, every corpus message claimed once.
         if len(owned) != len(owner) or sorted(owned) != sorted(manifest):
             raise refused
-        # Dates as the indexer stores them: no Received header, so no
-        # occurred_at.
-        for claimant, sent_at, occurred_at in conn.execute(
-            "SELECT claimant_id, sent_at, occurred_at FROM messages"
+        # The claimant's own Message-ID, and its dates as the indexer
+        # stores them: no Received header, so no occurred_at.
+        for claimant, stored_id, sent_at, occurred_at in conn.execute(
+            "SELECT claimant_id, message_id, sent_at, occurred_at FROM messages"
         ):
             message_id = owner[str(claimant)]
-            if message_id is None or (sent_at, occurred_at) != (manifest[message_id].sent_at, None):
+            if message_id is None or (stored_id, sent_at, occurred_at) != (
+                message_id,
+                manifest[message_id].sent_at,
+                None,
+            ):
                 raise refused
         # Per-message text a prompt can carry: chunk text, and the chunk
         # header's sender and attachment name and type.
