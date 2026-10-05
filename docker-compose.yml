@@ -285,7 +285,7 @@ services:
       #   nothing is sent to an inference provider.
       INFERENCE_MODE: ${INFERENCE_MODE:-none}
       INFERENCE_BASE_URL: ${INFERENCE_BASE_URL}
-      INFERENCE_MODEL: ${INFERENCE_MODEL:-claude-sonnet-4-6}
+      INFERENCE_MODEL: ${INFERENCE_MODEL:-claude-sonnet-5-5}
       # Per-operation HTTP timeout for inference completions (seconds):
       # each connect, read or write must make progress within it; it
       # is not a total-call deadline. Default 300 absorbs

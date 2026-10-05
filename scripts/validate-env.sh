@@ -589,7 +589,7 @@ INFERENCE_MODE="$(normalize_mode "${INFERENCE_MODE:-none}")"
 }
 
 if [[ "$INFERENCE_MODE" != "none" ]]; then
-    # An empty INFERENCE_MODEL becomes Compose's ``claude-sonnet-4-6``,
+    # An empty INFERENCE_MODEL becomes Compose's ``claude-sonnet-5-5``,
     # which an OpenAI-compatible endpoint does not serve, so openai mode
     # must name its model. Only an empty value takes that default:
     # Compose passes blank space through, which the services read as
