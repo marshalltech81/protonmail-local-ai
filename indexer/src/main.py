@@ -2198,6 +2198,9 @@ def main():
     # Needs only the database: run before the embedder wait and the
     # initial index, which can take hours or never finish (#576).
     _prune_reaped_records(db)
+    # Every table starts pending, so this pass scrubs them all once: it
+    # covers a reap whose scrub the last run did not reach (#670).
+    _run_wal_maintenance(db)
     embedder = OpenAIEmbedder(
         base_url=EMBED_BASE_URL,
         model=EMBED_MODEL,
@@ -2328,9 +2331,7 @@ def main():
         except Exception as e:
             log.error("startup reconciliation failed: %s", e)
     _prune_reaped_records(db)
-    # Every table starts pending, so this pass scrubs them all once: it
-    # covers a reap whose scrub the last run did not reach, and the
-    # startup reap above (#670).
+    # Scrubs what the startup reap above deleted (#670).
     _run_wal_maintenance(db)
 
     last_reconcile = time.monotonic()

@@ -7006,6 +7006,40 @@ class TestPruneReapedRecords:
             main.main()
         assert db._conn.execute("SELECT COUNT(*) FROM reaped_messages").fetchone()[0] == 0
 
+    def test_startup_scrubs_before_the_embedder_wait(self, tmp_path, monkeypatch):
+        """#670: a reap whose scrub the last run did not reach is covered
+        by the scrub every opened database owes. It needs only the
+        database, so it runs before an embedder that never answers can
+        hold ``main`` in ``wait_for_ready``."""
+        db = Database(tmp_path / "mail.db")
+        scrubbed: list[list[str]] = []
+        real_scrub = db.scrub_reaped_fts
+
+        def spy():
+            scrubbed.append(real_scrub())
+            return scrubbed[-1]
+
+        monkeypatch.setattr(db, "scrub_reaped_fts", spy)
+
+        class _Unreachable(Exception):
+            pass
+
+        def never_ready():
+            raise _Unreachable
+
+        embedder = make_mock_embedder()
+        embedder.wait_for_ready = never_ready
+        embedder.base_url = "http://host.docker.internal:8001/v1"
+        monkeypatch.setattr(main, "_validate_embed_config", lambda: None)
+        monkeypatch.setattr(main, "Database", lambda path: db)
+        monkeypatch.setattr(main, "OpenAIEmbedder", lambda **kw: embedder)
+        monkeypatch.setattr(main, "touch_health_file", lambda: None)
+        monkeypatch.setattr(main, "StallGuard", MagicMock())
+        monkeypatch.setattr(main, "initial_index", lambda *a, **kw: pytest.fail("indexed"))
+        with pytest.raises(_Unreachable):
+            main.main()
+        assert scrubbed == [["threads_fts", "message_chunks_fts", "attachments_fts"]]
+
 
 class TestChunkKinds:
     """The pipeline stores each chunk's kind (#646)."""

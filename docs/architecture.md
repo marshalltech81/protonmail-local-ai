@@ -1133,7 +1133,9 @@ is dropped and its pages zeroed. What the pragma does not cover:
   terms stay in the file for up to one interval (longer while a busy
   checkpoint retries, as above). The pending mark is kept in memory,
   so every table starts pending: the indexer scrubs all three once at
-  startup, which covers a reap whose scrub a restart cut short.
+  startup, right after opening the database and before it waits for
+  the embedder, which covers a reap whose scrub a restart cut short
+  even while the embedder is down.
 - **Pages freed before the pragma.** It zeroes pages as later deletes
   free them; it does not rewrite pages already on the freelist. A
   `mail.db` reaped under a SQLite that defaulted OFF (an indexer run
