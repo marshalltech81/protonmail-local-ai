@@ -31,17 +31,29 @@ synthetic mailbox) and a trace of the calls an agent made, score
   cursor chain over exactly the expected filters (any page size), and
   whether that chain's last page said ``has_more: false``;
 - **unnecessary calls**: calls over the scenario's budget, and calls
-  identical (tool and arguments) to an earlier one.
+  identical (tool and arguments) to an earlier one;
+- **counting** (scenarios listing ``expected_answer_messages``): whether
+  the answer cites exactly those messages (a decoy cited or a message
+  left out fails; two IDs of one message count once), and whether its
+  ``count`` is a JSON integer equal to their number;
+- **full reads**: the fraction of ``full_read_messages`` whose body the
+  ``get_message`` results cover from offset 0 through each
+  ``next_offset`` to a page with none;
+- **forbidden text**: whether ``answer.text`` is free of every
+  ``forbidden_answer_text`` string (case-insensitive substring; a value
+  reformatted with spaces or dashes is not caught).
 
 Nothing here judges whether the answer's prose is right: answer quality
 is graded by hand (``tests/eval/README.md``). A valid citation shows
 the agent saw the source, not that the source supports the statement.
 
 A trace is JSON: ``{"scenario": id, "calls": [{"tool", "arguments",
-"result"}], "answer": {"text", "cited": [ids], "abstained": bool}}``
-where ``result`` is the call's ``structuredContent`` and ``abstained``
-(optional, false when absent) is the agent's structured statement that
-the mailbox does not answer the question. IDs are read from the result fields
+"result"}], "answer": {"text", "cited": [ids], "abstained": bool,
+"count": int}}`` where ``result`` is the call's ``structuredContent``,
+``abstained`` (optional, false when absent) is the agent's structured
+statement that the mailbox does not answer the question, and ``count``
+(counting scenarios) is the number of messages the answer reports. IDs
+are read from the result fields
 named in ``ID_FIELDS`` at any depth, so the scorers follow every tool's
 output shape without a per-tool parser; arguments never count as
 retrieved.
@@ -69,6 +81,10 @@ ID_FIELDS = ("thread_id", "message_id", "claimant_id", "chunk_id")
 # ``query_messages`` fields that say whether an enumeration is complete.
 PAGING_FIELDS = ("has_more", "next_cursor", "messages")
 ENUMERATING_TOOL = "query_messages"
+# ``get_message`` fields that say which body page a result holds: the
+# message, the page's start and the next page's start (``None`` at the end).
+READ_FIELDS = ("message", "body_offset", "next_offset")
+READING_TOOL = "get_message"
 # Its arguments that page rather than filter: the agent picks the page
 # size, and the cursor is checked against the previous page.
 _PAGING_ARGUMENTS = ("limit", "cursor")
@@ -133,6 +149,9 @@ class Scenario:
     unanswerable: bool = False
     abstain_terms: list[str] = field(default_factory=list)
     held_out: bool = False
+    expected_answer_messages: list[str] = field(default_factory=list)
+    full_read_messages: list[str] = field(default_factory=list)
+    forbidden_answer_text: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -153,12 +172,24 @@ class AgentScore:
     extra_calls: int
     repeated_calls: int
     held_out: bool = False
+    answer_messages_exact: bool | None = None
+    answer_count_correct: bool | None = None
+    full_read_recall: float | None = None
+    forbidden_text_absent: bool | None = None
 
     @property
     def failures(self) -> list[str]:
         """Names of the metrics this trace did not get full marks on."""
         failed = []
-        for name in ("tool_selected", "arguments_correct", "abstention_correct", "exhausted"):
+        for name in (
+            "tool_selected",
+            "arguments_correct",
+            "abstention_correct",
+            "exhausted",
+            "answer_messages_exact",
+            "answer_count_correct",
+            "forbidden_text_absent",
+        ):
             if getattr(self, name) is False:
                 failed.append(name)
         for name in (
@@ -167,6 +198,7 @@ class AgentScore:
             "citation_recall",
             "message_citation_recall",
             "enumeration_recall",
+            "full_read_recall",
         ):
             value = getattr(self, name)
             if value is not None and value < 1.0:
@@ -292,6 +324,46 @@ def _enumeration_chains(calls: Sequence[dict], predicates: dict[str, Any]) -> li
     return chains
 
 
+def _fully_read(calls: Sequence[dict]) -> set[str]:
+    """Message IDs whose body some ``get_message`` results cover from the
+    first page to the last.
+
+    Pages are read from the results (``READ_FIELDS``), never from the
+    arguments, and chained per claimant ID: the page at offset 0, then the
+    page starting at its ``next_offset``, and so on until a page whose
+    ``next_offset`` is ``None``. A skipped or missing page breaks the chain.
+    """
+    pages: dict[str, dict[int, int | None]] = defaultdict(dict)
+    message_of: dict[str, str] = {}
+    for call in calls:
+        if call["tool"] != READING_TOOL:
+            continue
+        result = call.get("result") or {}
+        message = result.get("message")
+        offset = result.get("body_offset")
+        if (
+            not isinstance(message, dict)
+            or not isinstance(offset, int)
+            or "next_offset" not in result
+        ):
+            continue
+        claimant, message_id = message.get("claimant_id"), message.get("message_id")
+        if isinstance(claimant, str) and isinstance(message_id, str):
+            pages[claimant][offset] = result["next_offset"]
+            message_of[claimant] = message_id
+    read: set[str] = set()
+    for claimant, chain in pages.items():
+        start: int | None = 0
+        # Each step moves forward, so the walk ends within len(chain) steps.
+        while isinstance(start, int) and start in chain:
+            following = chain[start]
+            if following is None:
+                read.add(message_of[claimant])
+                break
+            start = following if isinstance(following, int) and following > start else None
+    return read
+
+
 def score_trace(scenario: Scenario, trace: dict) -> AgentScore:
     """Score one trace against its scenario."""
     if trace.get("scenario") != scenario.id:
@@ -358,6 +430,41 @@ def score_trace(scenario: Scenario, trace: dict) -> AgentScore:
             )
             enumeration_recall, exhausted = max((enumeration_recall, exhausted), chain_score)
 
+    # A counting answer must cite exactly the expected messages: a decoy
+    # cited or a message left out fails. A cited ID counts as the message
+    # a result returned it with, so two IDs of one message are one message.
+    # An ID no result returned as a message fails, even when it equals a
+    # returned thread ID: a root's Message-ID is also its thread's ID.
+    answer_messages_exact: bool | None = None
+    answer_count_correct: bool | None = None
+    if scenario.expected_answer_messages:
+        expected_answers = set(scenario.expected_answer_messages)
+        answer_messages_exact = (
+            all(c in message_of for c in cited)
+            and {message_of[c] for c in cited} == expected_answers
+        )
+        count = answer.get("count")
+        # Only a JSON integer counts (``True`` is an int in Python).
+        answer_count_correct = (
+            isinstance(count, int)
+            and not isinstance(count, bool)
+            and count == len(expected_answers)
+        )
+
+    full_read_recall: float | None = None
+    if scenario.full_read_messages:
+        read = _fully_read(calls)
+        full_read_recall = sum(m in read for m in scenario.full_read_messages) / len(
+            scenario.full_read_messages
+        )
+
+    forbidden_text_absent: bool | None = None
+    if scenario.forbidden_answer_text:
+        text = str(answer.get("text", "")).casefold()
+        forbidden_text_absent = not any(
+            value.casefold() in text for value in scenario.forbidden_answer_text
+        )
+
     signatures = [json.dumps([c["tool"], c["arguments"]], sort_keys=True) for c in calls]
     repeated = len(signatures) - len(set(signatures))
 
@@ -376,6 +483,10 @@ def score_trace(scenario: Scenario, trace: dict) -> AgentScore:
         extra_calls=max(0, len(calls) - scenario.max_calls),
         repeated_calls=repeated,
         held_out=scenario.held_out,
+        answer_messages_exact=answer_messages_exact,
+        answer_count_correct=answer_count_correct,
+        full_read_recall=full_read_recall,
+        forbidden_text_absent=forbidden_text_absent,
     )
 
 
@@ -405,6 +516,10 @@ def _aggregates(scores: Sequence[AgentScore]) -> list[str]:
         f"Abstention correct:  {_rate([s.abstention_correct for s in scores])}",
         f"Enumeration recall:  {_mean(present('enumeration_recall'))}",
         f"Enumeration exhausted: {_rate(present('exhausted'))}",
+        f"Answer set exact:    {_rate(present('answer_messages_exact'))}",
+        f"Answer count correct: {_rate(present('answer_count_correct'))}",
+        f"Full-read recall:    {_mean(present('full_read_recall'))}",
+        f"Forbidden text absent: {_rate(present('forbidden_text_absent'))}",
         f"Extra calls:         {sum(s.extra_calls for s in scores)}",
         f"Repeated calls:      {sum(s.repeated_calls for s in scores)}",
         f"Clean:               {_rate([not s.failures for s in scores])}",
@@ -456,6 +571,11 @@ def load_scenarios(path: Path, golden_path: Path) -> list[Scenario]:
     message refs (``"t24.2"``); each message must belong to a thread in
     the golden question's evidence, so the baseline has shown it can be
     found. A row's ``held_out`` flag must agree with ``is_held_out``.
+
+    A counting row lists ``expected_answer_messages`` (message refs) and
+    may then name no golden question; ``full_read_messages`` must be
+    among them, and ``forbidden_answer_text`` must be non-blank strings.
+    ``make baseline`` checks these against the index.
     """
     golden = json.loads(golden_path.read_text(encoding="utf-8"))
     searches = {q["id"]: q for q in golden["search"]}
@@ -477,7 +597,19 @@ def load_scenarios(path: Path, golden_path: Path) -> list[Scenario]:
         search_ref = row.get("golden_search")
         enum_ref = row.get("golden_enumerate")
         unanswerable_ref = row.get("golden_unanswerable")
-        if sum(ref is not None for ref in (search_ref, enum_ref, unanswerable_ref)) != 1:
+        answer_refs = _message_refs(sid, row, "expected_answer_messages")
+        full_read_refs = _message_refs(sid, row, "full_read_messages")
+        if not set(full_read_refs) <= set(answer_refs):
+            raise ValueError(f"{sid}: full_read_messages must be in expected_answer_messages")
+        forbidden = row.get("forbidden_answer_text", [])
+        if not isinstance(forbidden, list) or not all(
+            isinstance(text, str) and text.strip() for text in forbidden
+        ):
+            raise ValueError(f"{sid}: forbidden_answer_text must be non-blank strings")
+        golden_refs = sum(ref is not None for ref in (search_ref, enum_ref, unanswerable_ref))
+        # A counting scenario's answer set is checked against the index
+        # directly (tests/baseline), so it needs no golden question.
+        if golden_refs > 1 or (golden_refs == 0 and not answer_refs):
             raise ValueError(
                 f"{sid}: give one of golden_search, golden_enumerate or golden_unanswerable"
             )
@@ -511,9 +643,9 @@ def load_scenarios(path: Path, golden_path: Path) -> list[Scenario]:
             q = enumerations[enum_ref]
             arguments = dict(q["args"])
             messages = [f"{m}{_BASELINE_DOMAIN}" for m in q["expect"]]
-        elif unanswerable_ref not in unanswerables:
-            raise ValueError(f"{sid}: no golden unanswerable question {unanswerable_ref!r}")
-        else:
+        elif unanswerable_ref is not None:
+            if unanswerable_ref not in unanswerables:
+                raise ValueError(f"{sid}: no golden unanswerable question {unanswerable_ref!r}")
             abstain_terms = unanswerables[unanswerable_ref]["absent_terms"]
         scenarios.append(
             Scenario(
@@ -531,6 +663,24 @@ def load_scenarios(path: Path, golden_path: Path) -> list[Scenario]:
                 unanswerable=unanswerable_ref is not None,
                 abstain_terms=list(abstain_terms),
                 held_out=is_held_out(sid),
+                expected_answer_messages=[f"{m}{_BASELINE_DOMAIN}" for m in answer_refs],
+                full_read_messages=[f"{m}{_BASELINE_DOMAIN}" for m in full_read_refs],
+                forbidden_answer_text=list(forbidden),
             )
         )
     return scenarios
+
+
+def _message_refs(sid: str, row: dict, name: str) -> list[str]:
+    """Row field ``name``: absent, or a non-empty list of message refs
+    like ``"t41.1"``. Shape only: ``make baseline`` checks each is an
+    indexed message (test_agent_required_citations_exist)."""
+    refs = row.get(name)
+    if refs is None:
+        return []
+    if not isinstance(refs, list) or not refs:
+        raise ValueError(f"{sid}: {name} must be a non-empty list of message refs")
+    for ref in refs:
+        if not isinstance(ref, str) or not _MESSAGE_REF.fullmatch(ref):
+            raise ValueError(f"{sid}: {ref!r} is not a message ref like 't24.2'")
+    return list(refs)

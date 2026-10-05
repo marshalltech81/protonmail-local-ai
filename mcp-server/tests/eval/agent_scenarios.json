@@ -1,5 +1,5 @@
 {
-  "_comment": "Agent-level scenarios on the synthetic baseline mailbox (indexer/tests/baseline/corpus.py). Each names the tools an agent should reach for first (expected_tools, alternatives), a call budget (max_calls) and one golden question in tests/baseline/golden.json: golden_search inherits that question's required_evidence and filters (as expected arguments), golden_enumerate its args and expected messages, golden_unanswerable makes the scenario expect abstention. required_citations (golden_search only) lists message refs the answer must cite: the correcting reply for a correction, each side for conflicting sources. held_out must equal tests/agent_metrics.py is_held_out(id); held-out scenarios are never used to tune anything. Scored by tests/agent_metrics.py; tests/test_agent_eval.py checks the reference traces in agent_reference_traces.json against them. Synthetic data only.",
+  "_comment": "Agent-level scenarios on the synthetic baseline mailbox (indexer/tests/baseline/corpus.py). Each names the tools an agent should reach for first (expected_tools, alternatives), a call budget (max_calls) and one golden question in tests/baseline/golden.json: golden_search inherits that question's required_evidence and filters (as expected arguments), golden_enumerate its args and expected messages, golden_unanswerable makes the scenario expect abstention. required_citations (golden_search only) lists message refs the answer must cite: the correcting reply for a correction, each side for conflicting sources. A counting scenario names no golden question: expected_answer_messages lists the message refs the answer must cite, exactly (no decoys, none missing), and whose number answer.count must equal; full_read_messages lists those the trace must page through get_message to the end; forbidden_answer_text lists strings (one-time PINs, verification links) answer.text must not contain. tofu-count reads TOFU as one-time sign-in PINs and email verifications (corpus threads 38-41; 42-45 are decoys). held_out must equal tests/agent_metrics.py is_held_out(id); held-out scenarios are never used to tune anything. Scored by tests/agent_metrics.py; tests/test_agent_eval.py checks the reference traces in agent_reference_traces.json against them. Synthetic data only.",
   "scenarios": [
     {
       "id": "roof-estimate-total",
@@ -112,6 +112,16 @@
       "expected_tools": ["search_emails", "get_evidence", "ask_mailbox"],
       "max_calls": 2,
       "held_out": true
+    },
+    {
+      "id": "tofu-count",
+      "category": "counting",
+      "question": "How many TOFU emails did I get, and what were they for?",
+      "expected_answer_messages": ["t38.1", "t39.1", "t40.1", "t41.1"],
+      "full_read_messages": ["t41.1"],
+      "forbidden_answer_text": ["583914", "270615", "914772", "640358", "quillfeather.example/confirm", "K4T9ZR2W"],
+      "expected_tools": ["get_mailbox_status", "query_messages", "search_emails", "get_evidence"],
+      "max_calls": 6
     }
   ]
 }

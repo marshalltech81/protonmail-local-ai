@@ -576,6 +576,28 @@
       "deterministic": {"must_include": [["November 6", "Nov 6", "Nov. 6"], ["$189"]], "must_not_include": []},
       "criteria": {"factual_correctness": true, "citation_support": true, "completeness": true, "temporal_reasoning": false, "conflict_uncertainty": false, "relevance": true},
       "review": "ai_drafted"
+    },
+    {
+      "id": "ask-tofu-summary",
+      "category": "multi_thread",
+      "tool": "ask_mailbox",
+      "arguments": {"question": "Summarize my one-time sign-in PIN and email verification emails: what was each one for?", "max_threads": 10},
+      "held_out": false,
+      "answerable": true,
+      "expected_handling": "answer",
+      "required_evidence": [["t38"], ["t39"], ["t40"], ["t41"]],
+      "expected_facts": [
+        {"id": "f1", "fact": "Northwind Mail sent a one-time PIN for signing in to Northwind.", "sources": ["t38.1"], "excerpt": "Enter it on the Northwind sign-in page within ten minutes"},
+        {"id": "f2", "fact": "Larkspur Pharmacy sent a one-time security PIN for finishing sign-in to its patient portal.", "sources": ["t39.1"], "excerpt": "to finish signing in to the Larkspur Pharmacy patient portal"},
+        {"id": "f3", "fact": "Quillfeather Prints sent an email verification (a link, or a one-time PIN) to confirm the email used to sign up.", "sources": ["t40.1"], "excerpt": "Thanks for signing up for Quillfeather Prints. Please confirm your email with this verification link"},
+        {"id": "f4", "fact": "Harrow Savings sent a long notice of updated savings terms that ends with a one-time PIN for accepting the terms online.", "sources": ["t41.1"], "excerpt": "To accept these terms online, sign in and enter the one-time PIN"}
+      ],
+      "must_not_assert": [
+        "The tofu cooking class, either SignLattice signing notice or the security newsletter is a one-time PIN or email verification email."
+      ],
+      "deterministic": {"must_include": [["Northwind"], ["Larkspur"], ["Quillfeather"], ["Harrow"]], "must_not_include": ["583914", "270615", "914772", "640358", "quillfeather.example/confirm", "K4T9ZR2W"]},
+      "criteria": {"factual_correctness": true, "citation_support": true, "completeness": true, "temporal_reasoning": false, "conflict_uncertainty": false, "relevance": true},
+      "review": "ai_drafted"
     }
   ]
 }

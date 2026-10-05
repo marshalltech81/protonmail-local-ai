@@ -25,18 +25,24 @@ checks two layers:
 Skipped unless ``BASELINE_DIR`` is set; ``make baseline`` runs both steps.
 """
 
+import asyncio
 import email
 import email.policy
 import itertools
 import json
 import os
+from collections.abc import Awaitable, Callable
 from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import cast
 
 import pytest
+from mcp.types import CallToolResult
 from src.lib.sqlite import Database, ThreadResult
+from src.tools.retrieval import register_retrieval_tools
 
+from tests.conftest import FakeMCPServer
 from tests.retrieval_metrics import evidence_recall, first_hit_rank, group_ranks
 
 pytestmark = pytest.mark.baseline
@@ -241,19 +247,90 @@ def test_unanswerable_golden(baseline_dir: Path, u: dict) -> None:
         assert not any(term.casefold() in t for t in texts), f"{u['id']}: {term!r} is in the corpus"
 
 
+AGENT_SCENARIOS = json.loads(AGENT_SCENARIOS_PATH.read_text(encoding="utf-8"))["scenarios"]
+COUNTING_SCENARIOS = [s for s in AGENT_SCENARIOS if s.get("expected_answer_messages")]
+
+
 def test_agent_required_citations_exist(baseline_db: Database) -> None:
-    # The correction and conflict scenarios in tests/eval/agent_scenarios.json
-    # name messages by ref; each must be an indexed message in its ref's thread.
-    scenarios = json.loads(AGENT_SCENARIOS_PATH.read_text(encoding="utf-8"))["scenarios"]
+    # The correction, conflict and counting scenarios in
+    # tests/eval/agent_scenarios.json name messages by ref; each must be an
+    # indexed message in its ref's thread.
     with closing(baseline_db._connect()) as conn:
         thread_of = {
             _message_ref(m): _thread_ref(t)
             for m, t in conn.execute("SELECT message_id, thread_id FROM messages")
         }
-    refs = [ref for s in scenarios for g in s.get("required_citations", []) for ref in g]
+    refs = [ref for s in AGENT_SCENARIOS for g in s.get("required_citations", []) for ref in g]
     assert refs, "no scenario lists required_citations"
-    for ref in refs:
+    counted = [
+        ref
+        for s in COUNTING_SCENARIOS
+        for ref in s["expected_answer_messages"] + s.get("full_read_messages", [])
+    ]
+    assert counted, "no scenario lists expected_answer_messages"
+    for ref in refs + counted:
         assert thread_of.get(ref) == ref.split(".")[0], f"{ref} is not an indexed message"
+
+
+def _read_body_pages(baseline_db: Database, message_id: str) -> list[dict]:
+    """Every ``get_message`` body page of ``message_id``, via the real tool."""
+    server = FakeMCPServer()
+    register_retrieval_tools(server, baseline_db)
+    get_message = cast(Callable[..., Awaitable[CallToolResult]], server.tools["get_message"])
+    pages: list[dict] = []
+    offset: int | None = 0
+    while offset is not None:
+        result = asyncio.run(get_message(message_id=message_id, offset=offset))
+        page = cast(dict, result.structured_content)
+        pages.append(page)
+        offset = page["next_offset"]
+    return pages
+
+
+@pytest.mark.parametrize("s", COUNTING_SCENARIOS, ids=lambda s: s["id"])
+def test_agent_full_read_passage_is_past_the_first_page(baseline_db: Database, s: dict) -> None:
+    """Each full-read message holds one of its scenario's forbidden values
+    (the PIN the answer must not repeat) only after the first body page,
+    so an agent that stops at page 1 never sees it."""
+    assert s.get("full_read_messages"), s["id"]
+    for ref in s["full_read_messages"]:
+        pages = _read_body_pages(baseline_db, f"{ref}{_DOMAIN}")
+        assert len(pages) > 1, f"{ref}: the body fits one page"
+        first, rest = pages[0]["body"], "".join(p["body"] for p in pages[1:])
+        assert any(v in rest and v not in first for v in s["forbidden_answer_text"]), ref
+
+
+@pytest.mark.parametrize("s", COUNTING_SCENARIOS, ids=lambda s: s["id"])
+def test_agent_forbidden_text_is_in_the_answer_messages(baseline_db: Database, s: dict) -> None:
+    """Every forbidden value is real: some expected answer message's body
+    holds it, so leaking it means copying it from the mail."""
+    bodies = "".join(
+        p["body"]
+        for ref in s["expected_answer_messages"]
+        for p in _read_body_pages(baseline_db, f"{ref}{_DOMAIN}")
+    )
+    for value in s["forbidden_answer_text"]:
+        assert value in bodies, value
+
+
+# The words an agent would look up for the counting scenario; each must
+# list at least one decoy, or the scenario's exact-set check tests nothing.
+_COUNTING_TRAPS = {"tofu-count": ["tofu", "PIN", "verification"]}
+
+
+@pytest.mark.parametrize("s", COUNTING_SCENARIOS, ids=lambda s: s["id"])
+def test_agent_counting_trap_is_real(baseline_db: Database, s: dict) -> None:
+    expected = set(s["expected_answer_messages"])
+    listed: set[str] = set()
+    for word in _COUNTING_TRAPS[s["id"]]:
+        page = baseline_db.query_messages(text=word, limit=100)
+        found = {_message_ref(m.message_id) for m in page.messages}
+        assert found - expected, f"{word!r} lists no decoy"
+        listed |= found
+    # The lookups between them reach every genuine message, so the answer
+    # set is findable with the obvious words; telling it from the decoys
+    # is the agent's job.
+    assert expected <= listed
 
 
 def test_rank_snapshot(

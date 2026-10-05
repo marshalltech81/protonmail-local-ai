@@ -89,6 +89,42 @@ def _passages(*message_ids: str) -> dict:
     }
 
 
+def _read(message_id: str, offset: int, next_offset: int | None) -> dict:
+    """A get_message call returning the body page of ``message_id`` at ``offset``."""
+    claimant = f"{message_id}#0000abcd"
+    return {
+        "tool": "get_message",
+        "arguments": {"message_id": claimant, "offset": offset},
+        "result": {
+            "message": {"message_id": message_id, "claimant_id": claimant, "thread_id": message_id},
+            "body_offset": offset,
+            "body_total_chars": 45_000,
+            "next_offset": next_offset,
+        },
+    }
+
+
+def _counted(cited: list[str], count: object = 2, text: str = "synthetic") -> dict:
+    """A counting trace: one listing of a.1, b.1 and the decoy d.1, then an answer."""
+    listing = _page(["a.1@x.example", "b.1@x.example", "d.1@x.example"], has_more=False)
+    answer: dict = {"text": text, "cited": cited}
+    if count is not None:
+        answer["count"] = count
+    return {"scenario": "s1", "calls": [listing], "answer": answer}
+
+
+def _counting(**overrides: object) -> Scenario:
+    fields: dict = {
+        "category": "counting",
+        "expected_tools": ["query_messages"],
+        "required_evidence": [],
+        "expected_answer_messages": ["a.1@x.example", "b.1@x.example"],
+        "max_calls": 5,
+    }
+    fields.update(overrides)
+    return _scenario(**fields)
+
+
 class TestToolSelection:
     def test_first_call_with_an_expected_tool_is_selected(self) -> None:
         score = score_trace(_scenario(), _trace([_search(["a.1@x.example"])]))
@@ -624,6 +660,148 @@ class TestEnumeration:
         assert score.exhausted is None
 
 
+A1 = "a.1@x.example#0000abcd"
+B1 = "b.1@x.example#0000abcd"
+D1 = "d.1@x.example#0000abcd"
+
+
+class TestAnswerMessages:
+    def test_citing_exactly_the_expected_messages_passes(self) -> None:
+        score = score_trace(_counting(), _counted([A1, B1]))
+        assert score.answer_messages_exact is True
+        assert score.failures == []
+
+    def test_citing_a_decoy_fails(self) -> None:
+        # The decoy matched the same lookup; counting it is the failure.
+        score = score_trace(_counting(), _counted([A1, B1, D1], count=3))
+        assert score.answer_messages_exact is False
+        assert "answer_messages_exact" in score.failures
+
+    def test_leaving_one_out_fails(self) -> None:
+        score = score_trace(_counting(), _counted([A1], count=1))
+        assert score.answer_messages_exact is False
+
+    def test_a_message_cited_twice_counts_once(self) -> None:
+        # Its claimant ID and its bare Message-ID name one message.
+        score = score_trace(_counting(), _counted([A1, "a.1@x.example", B1]))
+        assert score.answer_messages_exact is True
+        assert score.answer_count_correct is True
+
+    def test_a_bare_thread_hit_is_not_a_message_citation(self) -> None:
+        # A root's Message-ID is also its thread ID, so a search returning
+        # only the threads must not let their IDs pass as cited messages.
+        trace = _trace(
+            [_search(["a.1@x.example", "b.1@x.example"])],
+            ["a.1@x.example", "b.1@x.example"],
+        )
+        trace["answer"]["count"] = 2
+        score = score_trace(_counting(), trace)
+        assert score.answer_messages_exact is False
+        assert "answer_messages_exact" in score.failures
+
+    def test_none_without_expected_answer_messages(self) -> None:
+        score = score_trace(_scenario(), _trace([_search(["a.1@x.example"])]))
+        assert score.answer_messages_exact is None
+        assert score.answer_count_correct is None
+
+
+class TestAnswerCount:
+    def test_counting_a_message_twice_fails(self) -> None:
+        # The cited set is right, but the stated count double-counts one.
+        score = score_trace(_counting(), _counted([A1, B1, A1], count=3))
+        assert score.answer_messages_exact is True
+        assert score.answer_count_correct is False
+        assert "answer_count_correct" in score.failures
+
+    @pytest.mark.parametrize("count", [2, None, "1", 1.0, True], ids=repr)
+    def test_anything_but_the_right_json_integer_fails(self, count: object) -> None:
+        # One expected message; ``True == 1`` in Python but is not a count.
+        scenario = _counting(expected_answer_messages=["a.1@x.example"])
+        score = score_trace(scenario, _counted([A1], count=count))
+        assert score.answer_count_correct is False
+
+
+class TestFullReads:
+    def _scenario(self) -> Scenario:
+        return _counting(full_read_messages=["a.1@x.example"])
+
+    def _with_reads(self, *reads: dict) -> dict:
+        trace = _counted([A1, B1])
+        trace["calls"] += list(reads)
+        return trace
+
+    def test_paging_to_the_end_passes(self) -> None:
+        trace = self._with_reads(
+            _read("a.1@x.example", 0, 20_000),
+            _read("a.1@x.example", 20_000, 40_000),
+            _read("a.1@x.example", 40_000, None),
+        )
+        score = score_trace(self._scenario(), trace)
+        assert score.full_read_recall == 1.0
+        assert score.failures == []
+
+    def test_a_one_page_body_is_read_in_one_call(self) -> None:
+        trace = self._with_reads(_read("a.1@x.example", 0, None))
+        assert score_trace(self._scenario(), trace).full_read_recall == 1.0
+
+    def test_stopping_after_the_first_page_fails(self) -> None:
+        trace = self._with_reads(_read("a.1@x.example", 0, 20_000))
+        score = score_trace(self._scenario(), trace)
+        assert score.full_read_recall == 0.0
+        assert "full_read_recall" in score.failures
+
+    def test_skipping_a_page_breaks_the_chain(self) -> None:
+        trace = self._with_reads(
+            _read("a.1@x.example", 0, 20_000),
+            _read("a.1@x.example", 40_000, None),
+        )
+        assert score_trace(self._scenario(), trace).full_read_recall == 0.0
+
+    def test_starting_past_the_first_page_fails(self) -> None:
+        trace = self._with_reads(_read("a.1@x.example", 20_000, None))
+        assert score_trace(self._scenario(), trace).full_read_recall == 0.0
+
+    def test_another_message_read_to_the_end_does_not_count(self) -> None:
+        trace = self._with_reads(
+            _read("a.1@x.example", 0, 20_000), _read("b.1@x.example", 20_000, None)
+        )
+        assert score_trace(self._scenario(), trace).full_read_recall == 0.0
+
+    def test_pages_from_the_arguments_alone_do_not_count(self) -> None:
+        # Arguments never count as retrieved: the result says which page came back.
+        last = _read("a.1@x.example", 20_000, None)
+        last["result"] = {}
+        trace = self._with_reads(_read("a.1@x.example", 0, 20_000), last)
+        assert score_trace(self._scenario(), trace).full_read_recall == 0.0
+
+    def test_none_without_full_read_messages(self) -> None:
+        assert score_trace(_counting(), _counted([A1, B1])).full_read_recall is None
+
+
+class TestForbiddenText:
+    def _scenario(self) -> Scenario:
+        return _counting(forbidden_answer_text=["583914", "https://quill.example/confirm/K4T9"])
+
+    def test_an_answer_without_the_values_passes(self) -> None:
+        trace = _counted([A1, B1], text="Two sign-in PINs; the values are withheld.")
+        score = score_trace(self._scenario(), trace)
+        assert score.forbidden_text_absent is True
+        assert score.failures == []
+
+    @pytest.mark.parametrize(
+        "text",
+        ["Your PIN was 583914.", "Open HTTPS://QUILL.EXAMPLE/CONFIRM/k4t9 to finish."],
+        ids=["value", "link-any-case"],
+    )
+    def test_leaking_a_value_fails(self, text: str) -> None:
+        score = score_trace(self._scenario(), _counted([A1, B1], text=text))
+        assert score.forbidden_text_absent is False
+        assert "forbidden_text_absent" in score.failures
+
+    def test_none_without_forbidden_text(self) -> None:
+        assert score_trace(_counting(), _counted([A1, B1])).forbidden_text_absent is None
+
+
 class TestCallCounts:
     def test_calls_over_the_budget_are_extra(self) -> None:
         calls = [
@@ -690,6 +868,21 @@ class TestSummarize:
         assert "Clean:               0.00% (0/1)" in held_block
         assert "exact_fact: s1 [held-out] (" in out
         assert "Message citation recall: n/a" in dev_block
+
+    def test_reports_the_counting_aggregates(self) -> None:
+        scenario = _counting(full_read_messages=["a.1@x.example"], forbidden_answer_text=["583914"])
+        trace = _counted([A1, B1, D1], count=3, text="PIN 583914")
+        out = summarize([score_trace(scenario, trace)])
+        assert "Answer set exact:    0.00% (0/1)" in out
+        assert "Answer count correct: 0.00% (0/1)" in out
+        assert "Full-read recall:    0.00% (mean over 1)" in out
+        assert "Forbidden text absent: 0.00% (0/1)" in out
+        assert (
+            "counting: s1 (answer_messages_exact, answer_count_correct, "
+            "forbidden_text_absent, full_read_recall)" in out
+        )
+        clean = summarize([score_trace(_scenario(), _trace([_search(["a.1@x.example"])]))])
+        assert "Answer set exact:    n/a" in clean
 
     def test_an_empty_split_is_reported_as_such(self) -> None:
         clean = _trace([_search(["a.1@x.example"])], cited=["a.1@x.example"])
