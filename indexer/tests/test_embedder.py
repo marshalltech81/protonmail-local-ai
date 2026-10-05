@@ -655,6 +655,50 @@ class TestEmbedConcurrency:
         assert _FailBeforeThirdSubmit.submits == 3
         assert sorted(calls) == ["0", "1"]
 
+    def test_a_retry_after_another_request_failed_is_not_sent(self):
+        """Codex round 2 on #749: the failure check runs right before
+        every provider call, retries included. Request "1" hits a
+        transient error and backs off; while it waits, request "0"
+        fails. When "1" wakes, its retry must not reach the provider."""
+        emb = _make_embedder(batch_size=1, concurrency=2)
+        req = httpx2.Request("POST", "http://x")
+        calls: list[str] = []
+        lock = threading.Lock()
+        first_attempt_of_1 = threading.Event()
+        zero_failed = threading.Event()
+
+        def fake_create(**kwargs):
+            text = kwargs["input"][0]
+            with lock:
+                calls.append(text)
+            if text == "0":
+                assert first_attempt_of_1.wait(timeout=5)
+                raise _api_status_error(400)
+            first_attempt_of_1.set()
+            raise APIConnectionError(request=req)
+
+        _patch_create(emb, fake_create)
+
+        def backoff_until_zero_failed(retry_state):
+            # Request "1" sleeps here; "0" fails meanwhile.
+            assert zero_failed.wait(timeout=5)
+            return 0
+
+        emb._embed_one_batch.retry.wait = backoff_until_zero_failed  # type: ignore[attr-defined]
+        original = emb._embed_one_batch
+
+        def tracked(chunk):
+            try:
+                return original(chunk)
+            except APIStatusError:
+                zero_failed.set()
+                raise
+
+        emb._embed_one_batch = tracked  # type: ignore[method-assign]
+        with pytest.raises(APIStatusError):
+            emb.embed_batch(["0", "1"])
+        assert sorted(calls) == ["0", "1"]
+
     def test_each_concurrent_request_keeps_its_own_retry(self):
         emb = _make_embedder(batch_size=1, concurrency=2)
         emb._embed_one_batch.retry.wait = lambda *_a, **_kw: 0  # type: ignore[attr-defined]

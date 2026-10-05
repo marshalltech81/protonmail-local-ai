@@ -18,6 +18,7 @@ callers in ``main.py``, ``reconciler.py``, and ``attachment_indexing.py``
 stay backend-agnostic and tests can substitute a duck-typed fake.
 """
 
+import contextvars
 import logging
 import math
 import os
@@ -98,6 +99,15 @@ class _SkippedAfterFailure(Exception):
     """A concurrent embed request that found an earlier request failed
     and did not call the provider (#720). Never propagates: the failure
     that caused it is raised in its place."""
+
+
+# Set on a pool thread for the duration of one concurrent request (#720):
+# the event an ``embed_batch`` call's requests share, set when one fails.
+# ``_embed_one_batch`` checks it before every provider call, so retries
+# are covered too. Unset (``None``) on the sequential path.
+_CONCURRENT_FAILURE: contextvars.ContextVar[threading.Event | None] = contextvars.ContextVar(
+    "_CONCURRENT_FAILURE", default=None
+)
 
 
 def scrub_embed_error(exc: BaseException) -> str:
@@ -490,10 +500,12 @@ class OpenAIEmbedder:
         request that has finished, after the callbacks for earlier ones
         have run, so a failure that finished alongside a success or
         during a callback stops new requests. A failure can still be
-        recorded after that collection and before the submit, so each
-        request also checks, on its pool thread, that none has failed
-        before it calls the provider, and skips the call if one has
-        (#720): no request starts after a failure is recorded. Requests
+        recorded after that collection and before the submit, and a
+        request in retry backoff can wake after one, so each request also
+        checks, right before every provider call (each retry included),
+        that none has failed, and skips the call if one has (#720). A
+        request that is past that check when another fails is in flight,
+        like one already sending. Requests
         still in flight are waited for (each is bounded by the request
         timeout and its retries) and their results discarded; the
         failure then propagates as on the sequential path.
@@ -506,13 +518,16 @@ class OpenAIEmbedder:
         failed = threading.Event()
 
         def embed_unless_failed(texts: list[str]) -> list[list[float]]:
-            if failed.is_set():
-                raise _SkippedAfterFailure
+            token = _CONCURRENT_FAILURE.set(failed)
             try:
                 return self._embed_one_batch(texts)
+            except _SkippedAfterFailure:
+                raise
             except BaseException:
                 failed.set()
                 raise
+            finally:
+                _CONCURRENT_FAILURE.reset(token)
 
         with ThreadPoolExecutor(max_workers=self.concurrency) as pool:
             while next_chunk < len(chunks) or pending:
@@ -554,6 +569,10 @@ class OpenAIEmbedder:
         reraise=True,
     )
     def _embed_one_batch(self, texts: list[str]) -> list[list[float]]:
+        # Every attempt, retries included: see ``_CONCURRENT_FAILURE``.
+        failure = _CONCURRENT_FAILURE.get()
+        if failure is not None and failure.is_set():
+            raise _SkippedAfterFailure
         resp = self.client.embeddings.create(
             model=self.model,
             input=texts,
