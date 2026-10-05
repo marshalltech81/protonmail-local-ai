@@ -818,6 +818,14 @@ class TestExplicitProviderEndpoint:
 
 
 class TestRequireEnv:
+    @pytest.mark.parametrize("var", ["EMBED_MODEL", "INFERENCE_MODEL", "RERANK_MODEL"])
+    def test_whitespace_only_value_is_missing_and_values_are_trimmed(self, var):
+        """Codex round 2 on #773: required values are non-empty after
+        trimming, and the trimmed value is what reaches the client."""
+        with pytest.raises(ValueError, match=var):
+            _require_env("X_MODE", "openai", var, "   ")
+        assert _require_env("X_MODE", "openai", var, "  model-a  ") == "model-a"
+
     def test_passes_through_present_value(self):
         assert _require_env("INFERENCE_MODE", "openai", "INFERENCE_BASE_URL", "https://x") == (
             "https://x"

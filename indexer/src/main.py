@@ -164,7 +164,7 @@ def _normalize_embed_mode(raw: str) -> str:
 
 EMBED_MODE = _normalize_embed_mode(os.environ.get("EMBED_MODE", "openai"))
 EMBED_BASE_URL = os.environ.get("EMBED_BASE_URL", "")
-EMBED_MODEL = os.environ.get("EMBED_MODEL", "")
+EMBED_MODEL = os.environ.get("EMBED_MODEL", "").strip()
 
 
 # Endpoint hosts that keep a provider call on this machine: the host's
@@ -242,7 +242,7 @@ def _validate_embed_config() -> str:
     ``mlx_lm.server``, TEI) supply any placeholder string for
     ``EMBED_API_KEY``; the compat server ignores the bearer header.
     """
-    if not EMBED_MODEL:
+    if not EMBED_MODEL.strip():
         raise ValueError("EMBED_MODEL must be set when EMBED_MODE='openai'")
     if not EMBED_API_KEY:
         raise ValueError("EMBED_API_KEY must be set when EMBED_MODE='openai'")

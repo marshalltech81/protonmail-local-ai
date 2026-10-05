@@ -133,8 +133,10 @@ def _require_env(mode_name: str, mode: str, var_name: str, value: str) -> str:
 
     This is the no-fallback rule: choosing a mode is intentional. A mode
     selected without its required vars surfaces as a startup error, never
-    a silent reroute to a different provider.
+    a silent reroute to a different provider. Values are non-empty after
+    trimming (#750), and the trimmed value is returned.
     """
+    value = value.strip()
     if not value:
         raise ValueError(f"{var_name} must be set when {mode_name}={mode!r}")
     return value
@@ -337,7 +339,7 @@ INFERENCE_MODE = _normalize_mode(
 INFERENCE_BASE_URL = _reject_url_userinfo(
     "INFERENCE_BASE_URL", os.environ.get("INFERENCE_BASE_URL", "")
 )
-INFERENCE_MODEL = os.environ.get("INFERENCE_MODEL", "")
+INFERENCE_MODEL = os.environ.get("INFERENCE_MODEL", "").strip()
 INFERENCE_API_KEY = _read_secret("inference_api_key", "INFERENCE_API_KEY")
 INFERENCE_TIMEOUT_SECS = _float_env(
     "INFERENCE_TIMEOUT_SECS", DEFAULT_COMPLETE_TIMEOUT_SECS, minimum=1.0
@@ -351,13 +353,13 @@ INFERENCE_CONTEXT_TOKENS = _int_env("INFERENCE_CONTEXT_TOKENS", DEFAULT_CONTEXT_
 
 EMBED_MODE = _normalize_mode("EMBED_MODE", os.environ.get("EMBED_MODE", "openai"), _EMBED_MODES)
 EMBED_BASE_URL = _reject_url_userinfo("EMBED_BASE_URL", os.environ.get("EMBED_BASE_URL", ""))
-EMBED_MODEL = os.environ.get("EMBED_MODEL", "")
+EMBED_MODEL = os.environ.get("EMBED_MODEL", "").strip()
 EMBED_API_KEY = _read_secret("embed_api_key", "EMBED_API_KEY")
 EMBED_TIMEOUT_SECS = _float_env("EMBED_TIMEOUT_SECS", DEFAULT_EMBED_TIMEOUT_SECS, minimum=1.0)
 
 RERANK_MODE = _normalize_mode("RERANK_MODE", os.environ.get("RERANK_MODE", "none"), _RERANK_MODES)
 RERANK_BASE_URL = _reject_url_userinfo("RERANK_BASE_URL", os.environ.get("RERANK_BASE_URL", ""))
-RERANK_MODEL = os.environ.get("RERANK_MODEL", "")
+RERANK_MODEL = os.environ.get("RERANK_MODEL", "").strip()
 RERANK_API_KEY = _read_secret("rerank_api_key", "RERANK_API_KEY")
 RERANK_CANDIDATES = _int_env("RERANK_CANDIDATES", 20, minimum=1)
 RERANK_TIMEOUT_SECS = _float_env("RERANK_TIMEOUT_SECS", DEFAULT_RERANK_TIMEOUT_SECS, minimum=1.0)

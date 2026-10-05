@@ -537,17 +537,18 @@ BRIDGE_CERT_FINGERPRINT="$(env_value BRIDGE_CERT_FINGERPRINT)"
 INFERENCE_MODE="$(env_value INFERENCE_MODE)"
 INFERENCE_BASE_URL="$(env_value INFERENCE_BASE_URL)"
 INFERENCE_MODEL="$(env_value INFERENCE_MODEL)"
+INFERENCE_MODEL_TRIMMED="$(env_value_stripped INFERENCE_MODEL)"
 INFERENCE_TIMEOUT_SECS="$(env_value_stripped INFERENCE_TIMEOUT_SECS)"
 INFERENCE_MAX_TOKENS="$(env_value_stripped INFERENCE_MAX_TOKENS)"
 INFERENCE_CONTEXT_TOKENS="$(env_value_stripped INFERENCE_CONTEXT_TOKENS)"
 EMBED_MODE="$(env_value EMBED_MODE)"
 EMBED_BASE_URL="$(env_value EMBED_BASE_URL)"
-EMBED_MODEL="$(env_value EMBED_MODEL)"
+EMBED_MODEL="$(env_value_stripped EMBED_MODEL)"
 EMBED_TIMEOUT_SECS="$(env_value_stripped EMBED_TIMEOUT_SECS)"
 EMBED_WARMUP_TIMEOUT_SECS="$(env_value_stripped EMBED_WARMUP_TIMEOUT_SECS)"
 RERANK_MODE="$(env_value RERANK_MODE)"
 RERANK_BASE_URL="$(env_value RERANK_BASE_URL)"
-RERANK_MODEL="$(env_value RERANK_MODEL)"
+RERANK_MODEL="$(env_value_stripped RERANK_MODEL)"
 RERANK_CANDIDATES="$(env_value_stripped RERANK_CANDIDATES)"
 RERANK_TIMEOUT_SECS="$(env_value_stripped RERANK_TIMEOUT_SECS)"
 INDEXER_PARSE_MAX_BYTES="$(env_value_stripped INDEXER_PARSE_MAX_BYTES)"
@@ -590,8 +591,10 @@ INFERENCE_MODE="$(normalize_mode "${INFERENCE_MODE:-none}")"
 if [[ "$INFERENCE_MODE" != "none" ]]; then
     # An empty INFERENCE_MODEL becomes Compose's ``claude-sonnet-4-6``,
     # which an OpenAI-compatible endpoint does not serve, so openai mode
-    # must name its model.
-    [[ -n "$INFERENCE_MODEL" || "$INFERENCE_MODE" == "anthropic" ]] || {
+    # must name its model. Only an empty value takes that default:
+    # Compose passes blank space through, which the services read as
+    # missing (models are non-empty after trimming, #750).
+    [[ -n "$INFERENCE_MODEL_TRIMMED" || ( "$INFERENCE_MODE" == "anthropic" && -z "$INFERENCE_MODEL" ) ]] || {
         echo "ERROR: INFERENCE_MODEL must be set when INFERENCE_MODE=$INFERENCE_MODE." >&2
         exit 1
     }

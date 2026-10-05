@@ -979,6 +979,16 @@ whitespace_only_number_takes_the_default() {
     passes
 }
 
+whitespace_only_models_fail() {
+    # Codex round 2 on #773: models must be non-empty after trimming.
+    setup 'EMBED_MODEL="   "'
+    fails_with 'EMBED_MODEL must be set'
+    setup 'INFERENCE_MODEL="   "'
+    fails_with 'INFERENCE_MODEL must be set'
+    setup 'RERANK_MODE=cohere' 'RERANK_MODEL="   "' 'RERANK_BASE_URL=default'
+    fails_with 'RERANK_MODEL must be set'
+}
+
 whitespace_only_mode_fails() {
     # Compose passes the spaces through and the loader strips them to an
     # empty, unknown mode.
@@ -1094,6 +1104,7 @@ check "padded and mixed-case modes pass" padded_and_cased_modes_pass
 check "a padded none disables the layer" padded_disabled_mode_disables_the_layer
 check "an exported padded value passes" exported_padded_value_passes
 check "a whitespace-only number takes the default" whitespace_only_number_takes_the_default
+check "whitespace-only models fail" whitespace_only_models_fail
 check "a whitespace-only mode fails" whitespace_only_mode_fails
 check "a padded invalid boolean fails" padded_invalid_bool_fails
 check "a padded value below its minimum fails" padded_value_below_minimum_fails

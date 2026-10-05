@@ -1167,6 +1167,15 @@ class TestValidateEmbedConfig:
         with pytest.raises(ValueError, match="EMBED_MODEL"):
             main._validate_embed_config()
 
+    def test_whitespace_only_model_raises(self, monkeypatch):
+        """Codex round 2 on #773: the contract is non-empty after
+        trimming, so blank space is as missing as an empty value."""
+        monkeypatch.setattr(main, "EMBED_BASE_URL", "http://x/v1")
+        monkeypatch.setattr(main, "EMBED_MODEL", "   ")
+        monkeypatch.setattr(main, "EMBED_API_KEY", "sk-real")  # pragma: allowlist secret
+        with pytest.raises(ValueError, match="EMBED_MODEL"):
+            main._validate_embed_config()
+
     def test_empty_api_key_raises(self, monkeypatch):
         # The startup contract: every enabled operator-supplied layer
         # needs a non-empty key. Operators pointing at an unauthenticated host-side server supply any
