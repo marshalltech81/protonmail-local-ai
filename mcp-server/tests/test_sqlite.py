@@ -3798,37 +3798,65 @@ class TestKeywordSlot:
             patch.object(seeded_db, "_attachment_keyword_search", return_value=list(others)),
         ):
             fused = seeded_db._keyword_search("anything", 3)
-        # t3, a thread keyword hit past the cut, is kept after it.
-        assert [r.thread_id for r in fused] == ["t1", "t2", "t0", "t3"]
+        # With no post-fusion filter, the list is cut at its limit.
+        assert [r.thread_id for r in fused] == ["t1", "t2", "t0"]
 
     def test_keyword_list_keeps_thread_hits_past_its_cut_for_later_filters(
         self, seeded_db: Database
     ):
         """Sender, participant and authority filters run after the
-        keyword list is cut, so every thread keyword hit stays in it:
-        the slot then finds the best hit the filters leave."""
+        keyword list is cut, so with one of them the cut extends through
+        the last thread keyword hit, each result at its own fused
+        position: the slot then finds the best hit the filters leave,
+        and the outer fusion credits no hit above its rank."""
         from unittest.mock import patch
 
         thread_lane = self._ranked(0, 1, 2, 3, 4)
         for r in thread_lane:
             r.senders = ["other@example.com"]
         thread_lane[4].senders = ["wanted@example.com"]
-        # The other lanes agree on t0..t3, so t4 fuses last.
-        others = thread_lane[:4]
+        # The other lanes agree on t0..t3 and add a chunk-only thread,
+        # so t4 fuses last, below t9.
+        extra = self._ranked(None)[0]
+        extra.thread_id = "t9"
+        others = [*thread_lane[:4], extra]
         with (
             patch.object(seeded_db, "_thread_keyword_search", return_value=thread_lane),
             patch.object(seeded_db, "_chunk_keyword_search", return_value=list(others)),
             patch.object(seeded_db, "_attachment_keyword_search", return_value=list(others)),
         ):
-            fused = seeded_db._keyword_search("anything", 3)
-            kept = seeded_db.keyword_search("anything", from_addr="wanted@example.com", limit=1)
-        assert [r.thread_id for r in fused[:3]] == ["t0", "t1", "t2"]
-        assert {"t3", "t4"} <= {r.thread_id for r in fused}
-        assert [r.thread_id for r in kept] == ["t4"]
+            plain = seeded_db._keyword_search("anything", 3)
+            kept = seeded_db._keyword_search("anything", 3, keep_thread_hits=True)
+            found = seeded_db.keyword_search("anything", from_addr="wanted@example.com", limit=1)
+        assert [r.thread_id for r in plain] == ["t0", "t1", "t2"]
+        assert [r.thread_id for r in kept] == ["t0", "t1", "t2", "t3", "t9", "t4"]
+        assert [r.thread_id for r in found] == ["t4"]
 
-    def test_small_rerank_window_still_holds_the_slot(self, seeded_db: Database):
-        """With RERANK_CANDIDATES below the slot, the reranker still
-        gets the promoted hit among its candidates."""
+    def test_hybrid_keeps_thread_hits_only_with_a_post_fusion_filter(self, seeded_db: Database):
+        from unittest.mock import patch
+
+        calls: list[bool] = []
+
+        def spy(*args, keep_thread_hits=False, **kwargs):
+            calls.append(keep_thread_hits)
+            return []
+
+        with (
+            patch.object(seeded_db, "_keyword_search", side_effect=spy),
+            patch.object(seeded_db, "_vector_lanes", return_value=([], [])),
+        ):
+            seeded_db.hybrid_search("q", [0.0] * 4, limit=5)
+            seeded_db.hybrid_search("q", [0.0] * 4, limit=5, folders=["INBOX"])
+            seeded_db.hybrid_search("q", [0.0] * 4, limit=5, from_addr="a@example.com")
+            seeded_db.hybrid_search("q", [0.0] * 4, limit=5, participant="a@example.com")
+            seeded_db.hybrid_search("q", [0.0] * 4, limit=5, authority_class="counsel")
+        assert calls == [False, False, True, True, True]
+
+    def test_rerank_window_honours_rerank_candidates(self, seeded_db: Database):
+        """The slot never widens the rerank window: every candidate is
+        sent to the rerank provider, so ``RERANK_CANDIDATES`` is a
+        ceiling on what leaves the host. A window below the slot can cut
+        the promoted hit; that is documented."""
         from unittest.mock import patch
 
         keyword = self._ranked(1, 2, 3, 0)
@@ -3841,7 +3869,7 @@ class TestKeywordSlot:
                 "anything", [0.0, 0.0, 0.0, 0.0], limit=1, reranker=reranker
             )
         assert reranker._last_docs is not None
-        assert len(reranker._last_docs) == 3
+        assert len(reranker._last_docs) == 1
         assert len(results) == 1
 
 

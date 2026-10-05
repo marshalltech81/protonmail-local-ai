@@ -443,12 +443,15 @@ moved up to rank 3 and the rest keep their order. This is applied to
 the keyword list before it is cut to its fetch size (the list
 `mode=keyword` returns and the outer fusion reads), and again after the
 post-fusion filters in keyword and hybrid mode, where the hit is the
-best one the filters left. The cut keeps every `thread_fts` hit past
-it, so a sender, participant or authority filter, which runs after the
-cut, still finds that hit. It runs before the rerank window is cut, and
-the window holds at least three candidates whatever
-`RERANK_CANDIDATES` is, so a reranker sees the hit and decides its
-final position. The moved
+best one the filters left. A sender, participant or authority filter
+runs after the keyword list is cut, so with one of them the cut extends
+through the last `thread_fts` hit, every result at its own fused
+position (the outer fusion credits each by that position). It runs
+before the rerank window is cut, so a reranker sees the hit and decides
+its final position. The slot never widens that window, since every
+candidate in it is sent to the rerank provider: with
+`RERANK_CANDIDATES` and `limit` both below 3, the window can cut the
+promoted hit before the reranker sees it. The moved
 thread keeps its fused score and carries `keyword_slot` in its lane
 provenance. Only one thread is moved per query; there is no strength
 test, so a common-word query also gets its top thread keyword hit in

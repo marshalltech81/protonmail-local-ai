@@ -1419,6 +1419,7 @@ class Database:
             date_from=date_from,
             date_to=date_to,
             has_attachments=has_attachments,
+            keep_thread_hits=bool(from_addr or participant or authority_class),
         )
         # Per-message chunks. Oversample heavily because many chunks
         # may belong to a single thread — without enough chunks the lane
@@ -1482,11 +1483,12 @@ class Database:
         # operator who tightened ``RERANK_CANDIDATES`` for latency
         # would silently cap recall on bigger callers like
         # ``extract_from_emails(limit=50)``.
-        # The window also holds the keyword slot, so a small
-        # ``RERANK_CANDIDATES`` cannot cut the promoted hit before the
-        # reranker sees it.
+        # The keyword slot never widens it: every candidate is sent to
+        # the rerank provider, so ``RERANK_CANDIDATES`` caps what leaves
+        # the host. Below the slot's rank the window can cut the promoted
+        # hit (docs/architecture.md, "Keyword slot").
         if reranker is not None:
-            candidates_n = max(limit, reranker.candidates, _KEYWORD_SLOT_RANK)
+            candidates_n = max(limit, reranker.candidates)
         else:
             candidates_n = limit
         candidates = filtered[:candidates_n]
@@ -1665,6 +1667,7 @@ class Database:
             date_from=date_from,
             date_to=date_to,
             has_attachments=has_attachments,
+            keep_thread_hits=bool(from_addr or participant or authority_class),
         )
         with timings.stage("fusion"):
             filtered = self._apply_filters(
@@ -2054,7 +2057,16 @@ class Database:
         date_from: str | None = None,
         date_to: str | None = None,
         has_attachments: bool | None = None,
+        keep_thread_hits: bool = False,
     ) -> list[ThreadResult]:
+        """The three keyword lanes fused into one list, cut to ``limit``.
+
+        ``keep_thread_hits`` is for callers that filter by sender,
+        participant or authority after this cut: the cut then extends
+        through the last thread keyword hit, every result at its own
+        fused position, so the keyword slot can still find the best hit
+        those filters leave (#701).
+        """
         with timings.stage("thread_fts"):
             thread_hits = self._thread_keyword_search(
                 query,
@@ -2096,13 +2108,13 @@ class Database:
             fused = _promote_top_keyword_hit(
                 self._reciprocal_rank_fusion_threads(thread_hits, chunk_hits, attachment_hits)
             )
-            # Every thread keyword hit is kept past the cut to ``limit``
-            # (at most ``limit`` more, in fused order). The sender,
-            # participant and authority filters run after this cut, so
-            # the slot must still be able to find the best hit they leave.
-            kept = fused[:limit]
-            kept += [r for r in fused[limit:] if "thread_fts" in r.lane_ranks]
-            return kept
+            if not keep_thread_hits:
+                return fused[:limit]
+            # Positions are kept, not compacted: the outer fusion credits
+            # each result by its place in this list. At most three times
+            # ``limit`` results, the lanes' combined size.
+            last = max((i for i, r in enumerate(fused) if "thread_fts" in r.lane_ranks), default=-1)
+            return fused[: max(limit, last + 1)]
 
     def _thread_keyword_search(
         self,
