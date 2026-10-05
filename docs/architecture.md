@@ -1118,18 +1118,25 @@ is dropped and its pages zeroed. What the pragma does not cover:
   one segment, which drops the deleted terms, those of earlier deletes
   included; the checkpoint that follows copies the rewritten pages
   into `mail.db` and truncates the WAL frames that held the old ones.
-  Only reaps mark a table. A re-index also deletes a row (a thread's
-  `threads_fts` row on every new reply, a message's chunks when they
-  change), but it replaces live mail with a newer version of itself,
-  so nothing private is left behind, and FTS5's automerge keeps the
+  A reap marks the tables it deleted from, and so does a message's
+  chunk replacement, which happens only when the extractor or chunker
+  output changes (for example after an `EXTRACTOR_VERSIONS` bump),
+  since the replaced text may be what the fix removed. A thread
+  re-index does not: it replaces the thread's `threads_fts` row on
+  every new reply with a newer version of the same live mail, so
+  nothing private is left behind, and FTS5's automerge keeps the
   superseded rows in check (measured: 20,000 re-indexes with no scrub
   left the index about 20% above its fully merged size, not growing).
-  The merge runs in steps (FTS5 `merge` with a page budget, each step
-  committed on its own), so the indexer's write lock is held for one
-  step at a time. Each pass logs one line,
+  The merge runs in steps, each committed on its own, so the indexer's
+  write lock is held for one step at a time: the first FTS5 `merge`
+  has a negative page budget and starts the merge, and later ones
+  continue it with a positive budget, as the FTS5 documentation gives,
+  so a segment indexing writes between steps cannot restart it. Each pass logs one line,
   `fts scrub tables=<names> duration=<s>`; a failed step logs its
   exception type and the table stays pending for the next pass, as
-  does one not finished within the step cap. So a reaped message's
+  does one not finished within the step cap, which continues its merge
+  there; a reap in between starts a new merge, which also takes in the
+  segments written since the old one began. So a reaped message's
   terms stay in the file for up to one interval (longer while a busy
   checkpoint retries, as above). The pending mark is kept in memory,
   so every table starts pending: the indexer scrubs all three once at

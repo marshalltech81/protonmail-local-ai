@@ -2899,11 +2899,15 @@ class TestFtsScrub:
         assert db.scrub_reaped_fts() == []
         assert seen == []
 
-    def test_chunk_reindex_marks_nothing(self, db):
+    def test_chunk_replacement_marks_message_chunks_fts(self, db):
+        """A message's chunks change only when the extractor or chunker
+        output does (chunk IDs are deterministic), for example after an
+        ``EXTRACTOR_VERSIONS`` bump. The replaced text may be what the fix
+        removed, so its terms are scrubbed too."""
         assert db.scrub_reaped_fts() == self._ALL
         thread = make_thread([make_message(message_id="ch@x")])
         db.upsert_thread(thread, FAKE_EMBEDDING)
-        first = _make_chunk("a" * 64, 0, "first version")
+        first = _make_chunk("a" * 64, 0, "first zqoldextract version")
         second = _make_chunk("b" * 64, 0, "second version")
         for chunk in (first, second):
             db.replace_message_chunks(
@@ -2913,6 +2917,22 @@ class TestFtsScrub:
                 embeddings_by_chunk_id={chunk.chunk_id: FAKE_EMBEDDING},
             )
         assert db._conn.execute("SELECT COUNT(*) FROM message_chunks").fetchone()[0] == 1
+        assert db.scrub_reaped_fts() == ["message_chunks_fts"]
+        assert db.wal_checkpoint_truncate()[0] == 0
+        assert b"zqoldextract" not in db.path.read_bytes()
+
+    def test_unchanged_chunks_mark_nothing(self, db):
+        assert db.scrub_reaped_fts() == self._ALL
+        thread = make_thread([make_message(message_id="same@x")])
+        db.upsert_thread(thread, FAKE_EMBEDDING)
+        chunk = _make_chunk("a" * 64, 0, "same text")
+        for _ in range(2):
+            db.replace_message_chunks(
+                claimant_id="same@x",
+                thread_id=thread.thread_id,
+                chunks=[chunk],
+                embeddings_by_chunk_id={chunk.chunk_id: FAKE_EMBEDDING},
+            )
         assert db.scrub_reaped_fts() == []
 
     def test_reopened_database_scrubs_every_table_once(self, db, threader):
@@ -2986,6 +3006,118 @@ class TestFtsScrub:
         assert len(seen) <= len(self._ALL)
         monkeypatch.setattr("src.database._FTS_SCRUB_MAX_STEPS", 10_000)
         assert "threads_fts" in db.scrub_reaped_fts()
+
+    def _budgets(self, db) -> list[int]:
+        """The page budget of every ``merge`` step, in order."""
+        budgets: list[int] = []
+
+        def trace(sql: str) -> None:
+            if "'merge'" in sql:
+                budgets.append(int(sql.rsplit(",", 1)[1].strip(" )")))
+
+        db._conn.set_trace_callback(trace)
+        return budgets
+
+    def _segments(self, db, n: int) -> None:
+        for i in range(n):
+            db.upsert_thread(
+                make_thread([make_message(message_id=f"seg{i}@x", body_text=f"words {i}")]),
+                FAKE_EMBEDDING,
+            )
+
+    def test_first_step_starts_the_merge_and_later_steps_continue_it(
+        self, db, threader, monkeypatch
+    ):
+        """Only the first step has a negative budget: a negative step
+        restarts the merge whenever a new segment has been written."""
+        self._index_and_reap(db, threader)
+        self._segments(db, 12)
+        monkeypatch.setattr("src.database._FTS_SCRUB_STEP_PAGES", 1)
+        budgets = self._budgets(db)
+        assert db.scrub_reaped_fts() == self._ALL
+        threads = budgets[: next(i for i, b in enumerate(budgets[1:], 1) if b < 0)]
+        assert len(threads) > 1
+        assert threads[0] == -1
+        assert all(b == 1 for b in threads[1:])
+
+    def test_writes_between_steps_do_not_stop_the_scrub_finishing(self, db, threader, monkeypatch):
+        """Indexing writes a new segment between unlocked steps; the
+        scrub still finishes within the cap and removes the terms."""
+        self._index_and_reap(db, threader)
+        # Twenty segments of 100 rows each in every table, so the merge
+        # takes several 20-page steps.
+        words = [f"w{i}" for i in range(3000)]
+        rows = (" ".join(words[(r * 7 + j) % 3000] for j in range(200)) for r in range(10**6))
+        for _ in range(20):
+            with db.transaction():
+                for _ in range(100):
+                    text = next(rows)
+                    db._conn.execute("INSERT INTO threads_fts (body) VALUES (?)", (text,))
+                    db._conn.execute("INSERT INTO message_chunks_fts (text) VALUES (?)", (text,))
+                    db._conn.execute("INSERT INTO attachments_fts (filename) VALUES (?)", (text,))
+        monkeypatch.setattr("src.database._FTS_SCRUB_STEP_PAGES", 20)
+        monkeypatch.setattr("src.database._FTS_SCRUB_MAX_STEPS", 200)
+        real_lock = db._lock
+        written = [0]
+
+        class _WriterBetweenSteps:
+            """The database lock, plus a concurrent writer's segment in
+            every table each time the scrub lets go of it."""
+
+            def __enter__(self):
+                real_lock.acquire()
+                return self
+
+            def __exit__(self, *exc):
+                real_lock.release()
+                written[0] += 1
+                with real_lock:
+                    for table, column in (
+                        ("threads_fts", "body"),
+                        ("message_chunks_fts", "text"),
+                        ("attachments_fts", "filename"),
+                    ):
+                        db._conn.execute(
+                            f"INSERT INTO {table} ({column}) VALUES (?)",  # nosec B608
+                            (f"writer {written[0]}",),
+                        )
+                    db._conn.commit()
+
+        db._lock = _WriterBetweenSteps()  # type: ignore[assignment]
+        try:
+            assert db.scrub_reaped_fts() == self._ALL
+        finally:
+            db._lock = real_lock
+        assert written[0] > 3
+        assert db.wal_checkpoint_truncate()[0] == 0
+        raw = db.path.read_bytes()
+        for marker in (self._THREAD, self._CHUNK, self._FILE):
+            assert marker.encode() not in raw
+
+    def test_capped_scrub_continues_next_pass_and_a_new_reap_restarts_it(
+        self, db, threader, monkeypatch
+    ):
+        """A capped table resumes its merge with a positive budget; a
+        reap in between restarts it with a negative one, so segments
+        written after the merge began are merged too."""
+        self._index_and_reap(db, threader)
+        self._segments(db, 12)
+        monkeypatch.setattr("src.database._FTS_SCRUB_STEP_PAGES", 1)
+        monkeypatch.setattr("src.database._FTS_SCRUB_MAX_STEPS", 1)
+        budgets = self._budgets(db)
+        assert "threads_fts" not in db.scrub_reaped_fts()
+        assert budgets[0] == -1
+        budgets.clear()
+        db.scrub_reaped_fts()
+        assert budgets[0] == 1
+        budgets.clear()
+        keep = make_message(message_id="k2@x", filepath="/m/k2", body_text="kept")
+        gone = make_message(message_id="g2@x", filepath="/m/g2", body_text="gone")
+        thread = make_thread([gone, keep])
+        db.upsert_thread(thread, FAKE_EMBEDDING)
+        assert _reap_message(db, thread, "g2@x") == ["/m/g2"]
+        db.scrub_reaped_fts()
+        assert budgets[0] == -1
 
     def test_failed_scrub_stays_pending(self, db, threader):
         self._index_and_reap(db, threader)

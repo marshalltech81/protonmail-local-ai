@@ -195,6 +195,9 @@ class Database:
         # table starts pending: the first pass after the database is
         # opened also covers a reap whose scrub a restart cut short.
         self._fts_pending_scrub: set[str] = set(_FTS_TABLES)
+        # Pending tables whose merge a capped pass started: the next
+        # step continues it with a positive budget (#670).
+        self._fts_scrub_started: set[str] = set()
         path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = self._connect()
         self._closed = False
@@ -283,13 +286,20 @@ class Database:
         replaces live mail with a newer version of itself, and FTS5's
         automerge keeps its superseded rows in check (#670).
 
-        The merge runs in steps (``'merge'`` with a negative page
-        budget, the incremental form of ``optimize``), each committed
-        under the lock on its own, so a writer waits for one step at
-        most. A table is finished when a step changes fewer than two
-        rows, as the FTS5 documentation specifies. One not finished
-        within ``_FTS_SCRUB_MAX_STEPS``, or whose step fails, stays
-        pending; a failure propagates to the caller.
+        The merge runs in steps, the incremental form of ``optimize``
+        the FTS5 documentation gives: the first ``'merge'`` with a
+        negative page budget starts it, and each later one continues it
+        with a positive budget, so a segment indexing writes between
+        steps cannot restart it. Each step is committed under the lock on
+        its own, so a writer waits for one step at most. A table is
+        finished when a step changes fewer than two rows. One not
+        finished within ``_FTS_SCRUB_MAX_STEPS`` stays pending and
+        continues its merge on the next pass; one whose step fails stays
+        pending, and the failure propagates to the caller.
+
+        Only a reap marks a table, and a message's chunk replacement,
+        which happens only when the extractor or chunker output changes
+        (the replaced text may be what a fix removed).
         """
         done: list[str] = []
         for table in _FTS_TABLES:
@@ -297,23 +307,34 @@ class Database:
                 continue
             for _ in range(_FTS_SCRUB_MAX_STEPS):
                 with self._lock:
+                    started = table in self._fts_scrub_started
+                    budget = _FTS_SCRUB_STEP_PAGES if started else -_FTS_SCRUB_STEP_PAGES
                     before = self._conn.total_changes
                     try:
                         self._conn.execute(
                             f"INSERT INTO {table}({table}, rank) VALUES('merge', ?)",  # nosec B608 - table from the fixed _FTS_TABLES tuple
-                            (-_FTS_SCRUB_STEP_PAGES,),
+                            (budget,),
                         )
                         self._conn.commit()
                     except Exception:
                         self._conn.rollback()
                         raise
+                    self._fts_scrub_started.add(table)
                     finished = self._conn.total_changes - before < 2
                     if finished:
                         self._fts_pending_scrub.discard(table)
+                        self._fts_scrub_started.discard(table)
                 if finished:
                     done.append(table)
                     break
         return done
+
+    def _mark_fts_scrub(self, table: str) -> None:
+        """Mark ``table`` for ``scrub_reaped_fts``. A merge already under
+        way may not cover the segment this delete touched (one written
+        after it began), so the next step starts a new one."""
+        self._fts_pending_scrub.add(table)
+        self._fts_scrub_started.discard(table)
 
     def _begin_if_needed(self, cur: sqlite3.Cursor) -> bool:
         if self._transaction_depth > 0:
@@ -1262,6 +1283,10 @@ class Database:
                 fts_rowid = existing_fts_rowids.get(chunk_id)
                 if fts_rowid is not None:
                     cur.execute("DELETE FROM message_chunks_fts WHERE rowid = ?", (fts_rowid,))
+                    # Chunks change only when the extractor or chunker
+                    # output does; the replaced text may be what a fix
+                    # removed (#670).
+                    self._mark_fts_scrub("message_chunks_fts")
                 cur.execute("DELETE FROM message_chunks_vec WHERE chunk_id = ?", (chunk_id,))
                 cur.execute("DELETE FROM message_chunks WHERE chunk_id = ?", (chunk_id,))
 
@@ -1570,7 +1595,7 @@ class Database:
         for row in rows:
             if row["fts_rowid"] is not None:
                 cur.execute("DELETE FROM attachments_fts WHERE rowid = ?", (row["fts_rowid"],))
-                self._fts_pending_scrub.add("attachments_fts")
+                self._mark_fts_scrub("attachments_fts")
         cur.execute("DELETE FROM attachments WHERE claimant_id = ?", (claimant_id,))
         for attachment_id in sorted({row["attachment_id"] for row in rows}):
             cur.execute(_PURGE_ORPHAN_EXTRACTION_SQL, (attachment_id, attachment_id))
@@ -1907,7 +1932,7 @@ class Database:
                 f"DELETE FROM message_chunks_fts WHERE rowid IN ({placeholders})",  # nosec B608
                 int_batch,
             )
-            self._fts_pending_scrub.add("message_chunks_fts")
+            self._mark_fts_scrub("message_chunks_fts")
         for start in range(0, len(chunk_ids), batch_size):
             str_batch = chunk_ids[start : start + batch_size]
             placeholders = ",".join(["?"] * len(str_batch))
@@ -2747,7 +2772,7 @@ class Database:
             ]
             if row and row["fts_rowid"] is not None:
                 cur.execute("DELETE FROM threads_fts WHERE rowid = ?", (row["fts_rowid"],))
-                self._fts_pending_scrub.add("threads_fts")
+                self._mark_fts_scrub("threads_fts")
             cur.execute("DELETE FROM threads_vec WHERE thread_id = ?", (thread_id,))
             self._delete_chunks_for_thread(cur, thread_id)
             # Walk every message in the thread to drop its attachments
@@ -2849,7 +2874,7 @@ class Database:
                 return None
             self._rewrite_thread_row(cur, thread, embedding)
             # The replaced thread row held the reaped messages' words.
-            self._fts_pending_scrub.add("threads_fts")
+            self._mark_fts_scrub("threads_fts")
             mentions = self._participant_mentions(cur, reaped_claimant_ids)
             for cid in reaped_claimant_ids:
                 fp = self._remove_message_row(cur, cid)
