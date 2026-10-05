@@ -310,8 +310,11 @@ class TestKeywordSearchFilterPushdown:
     def test_date_filter_pushed_into_sql(self, seeded_db: Database):
         """Pushing the date filter into SQL means pre-March threads never
         enter the ranked window — no need to over-fetch and drop them."""
+        # Unfiltered, this query ranks the February thread t-gamma first,
+        # so with limit=1 a filter applied after the LIMIT would return
+        # nothing; pushed into SQL, the best March thread survives (#758).
         results = seeded_db._keyword_search(
-            "march invoice lunch meeting", limit=10, date_from="2024-03-01"
+            "invoice lunch meeting", limit=1, date_from="2024-03-01"
         )
         assert all(r.thread_id != "t-gamma" for r in results)  # Feb thread excluded
         assert all(
@@ -319,10 +322,14 @@ class TestKeywordSearchFilterPushdown:
             >= __import__("datetime").datetime.fromisoformat("2024-03-01T00:00:00+00:00")
             for r in results
         )
+        assert [r.thread_id for r in results] == ["t-alpha"]
 
     def test_has_attachments_filter_pushed_into_sql(self, seeded_db: Database):
-        results = seeded_db._keyword_search("invoice lunch meeting", limit=10, has_attachments=True)
+        # As above: t-gamma (no attachments) ranks first unfiltered, so a
+        # post-LIMIT filter at limit=1 would return nothing.
+        results = seeded_db._keyword_search("invoice lunch meeting", limit=1, has_attachments=True)
         assert all(r.has_attachments for r in results)
+        assert [r.thread_id for r in results] == ["t-alpha"]
 
     def test_like_fallback_honors_filters(self, seeded_db: Database, monkeypatch):
         """Force FTS to raise so the LIKE fallback runs, and verify filters
@@ -488,8 +495,11 @@ class TestKeywordSearch:
         ``folders``, silently returning unfiltered results."""
         # t-alpha and t-beta both have "alice@example.com" as a participant;
         # restrict by sender that only appears in t-gamma ("Archive").
-        results = seeded_db.keyword_search("meeting", from_addr="dave@example.com")
+        # "meeting invoice" also matches t-alpha (another sender), so
+        # dropping the sender filter changes the result (#758).
+        results = seeded_db.keyword_search("meeting invoice", from_addr="dave@example.com")
         assert all(any("dave@example.com" in p.lower() for p in r.participants) for r in results)
+        assert [r.thread_id for r in results] == ["t-gamma"]
 
     def test_keyword_search_honors_date_filter(self, seeded_db: Database):
         # t-gamma is in Archive with date_last 2024-02-15; restrict to
@@ -500,6 +510,7 @@ class TestKeywordSearch:
         )
         assert all(r.date_last.isoformat() >= "2024-03-01T00:00:00+00:00" for r in results)
         assert not any(r.thread_id == "t-gamma" for r in results)
+        assert {r.thread_id for r in results} == {"t-alpha", "t-beta"}
 
     def test_keyword_search_honors_has_attachments_filter(self, seeded_db: Database):
         only_with = seeded_db.keyword_search("march invoice lunch meeting", has_attachments=True)
@@ -513,6 +524,7 @@ class TestKeywordSearch:
             from_addr="dave@example.com",
         )
         assert all(any("dave@example.com" in p.lower() for p in r.participants) for r in results)
+        assert [r.thread_id for r in results] == ["t-gamma"]
 
     def test_semantic_search_honors_date_filter(self, seeded_db: Database):
         results = seeded_db.semantic_search(
@@ -520,6 +532,7 @@ class TestKeywordSearch:
             date_from="2024-03-01T00:00:00+00:00",
         )
         assert all(r.date_last.isoformat() >= "2024-03-01T00:00:00+00:00" for r in results)
+        assert {r.thread_id for r in results} == {"t-alpha", "t-beta"}
 
     def test_folder_filter_restricts_results(self, seeded_db: Database):
         # "meeting" appears only in the Archive thread

@@ -706,7 +706,7 @@ Notes:
 ### Coverage expectations
 
 - both `indexer` and `mcp-server` enforce a 90% coverage floor via `--cov-fail-under=90` in each service's `pyproject.toml`; a PR that drops coverage below 90% will fail CI
-- for `indexer`, coverage scope is `src/` with `src/main.py` omitted (it holds service bootstrap and the two-phase indexing pipeline; `tests/test_main.py` exercises the pipeline, but it does not count toward the figure); for `mcp-server`, coverage scope is `src/` with `src/main.py` omitted — tool handlers run against the `FakeMCPServer` stub in `tests/conftest.py`, and `main.py`'s testable helpers are unit-tested directly
+- for both `indexer` and `mcp-server`, coverage scope is all of `src/`, `src/main.py` included (#757): the indexer's `main.py` holds the two-phase indexing pipeline (exercised by `tests/test_main.py`), and the MCP server's holds the auth and app wiring; tool handlers run against the `FakeMCPServer` stub in `tests/conftest.py`. A path that genuinely cannot run under test gets a narrow `# pragma: no cover` with its reason, not a file-wide exclusion
 - when coverage drops, add tests rather than lowering the threshold or widening `omit`
 - CI runs `pytest --cov` in `.github/workflows/tests.yml` and uploads `coverage.xml` as an artifact per service
 

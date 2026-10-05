@@ -88,13 +88,10 @@ filterwarnings = [
 [tool.coverage.run]
 branch = true
 source = ["src"]
+# src/main.py counts (#757): it holds the two-phase indexing pipeline
+# as well as the service bootstrap, and tests/test_main.py exercises it.
 omit = [
     "tests/*",
-    # main.py holds the service bootstrap (logging, embedder wait,
-    # watchdog registration) and the two-phase indexing pipeline.
-    # tests/test_main.py exercises the pipeline, but the file is
-    # excluded from the coverage figure.
-    "src/main.py",
 ]
 
 [tool.coverage.report]
