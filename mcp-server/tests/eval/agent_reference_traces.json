@@ -1,5 +1,5 @@
 {
-  "_comment": "Scripted reference traces, one per scenario in agent_scenarios.json: the calls a good agent makes on the synthetic baseline mailbox, each call's structuredContent trimmed to the fields the scorers read, and the IDs the answer cites, with abstained: true where the answer says the mailbox holds no answer. tests/test_agent_eval.py requires each to score with no failures. Claimant-ID hash suffixes are placeholders, not the real file hashes.",
+  "_comment": "Scripted reference traces, one per scenario in agent_scenarios.json: the calls a good agent makes on the synthetic baseline mailbox, each call's structuredContent trimmed to the fields the scorers read, and the IDs the answer cites, with abstained: true where the answer says the mailbox holds no answer. A counting trace's answer also records count, the number of messages it reports, as a JSON integer. tests/test_agent_eval.py requires each to score with no failures. Claimant-ID hash suffixes are placeholders, not the real file hashes.",
   "traces": [
     {
       "scenario": "roof-estimate-total",
@@ -202,6 +202,57 @@
         }
       ],
       "answer": {"text": "No electrician quote is in the mailbox.", "cited": [], "abstained": true}
+    },
+    {
+      "scenario": "tofu-count",
+      "calls": [
+        {
+          "tool": "get_mailbox_status",
+          "arguments": {},
+          "result": {"current": true, "not_current_reasons": []}
+        },
+        {
+          "tool": "query_messages",
+          "arguments": {"text": "PIN"},
+          "result": {"total_matches": 7, "returned": 7, "offset": 0, "has_more": false, "next_cursor": null, "messages": [
+            {"message_id": "t45.1@baseline.example", "claimant_id": "t45.1@baseline.example#00000451", "thread_id": "t45.1@baseline.example"},
+            {"message_id": "t44.1@baseline.example", "claimant_id": "t44.1@baseline.example#00000441", "thread_id": "t44.1@baseline.example"},
+            {"message_id": "t43.1@baseline.example", "claimant_id": "t43.1@baseline.example#00000431", "thread_id": "t43.1@baseline.example"},
+            {"message_id": "t41.1@baseline.example", "claimant_id": "t41.1@baseline.example#00000411", "thread_id": "t41.1@baseline.example"},
+            {"message_id": "t40.1@baseline.example", "claimant_id": "t40.1@baseline.example#00000401", "thread_id": "t40.1@baseline.example"},
+            {"message_id": "t39.1@baseline.example", "claimant_id": "t39.1@baseline.example#00000391", "thread_id": "t39.1@baseline.example"},
+            {"message_id": "t38.1@baseline.example", "claimant_id": "t38.1@baseline.example#00000381", "thread_id": "t38.1@baseline.example"}
+          ]}
+        },
+        {
+          "tool": "query_messages",
+          "arguments": {"text": "verification"},
+          "result": {"total_matches": 4, "returned": 4, "offset": 0, "has_more": false, "next_cursor": null, "messages": [
+            {"message_id": "t45.1@baseline.example", "claimant_id": "t45.1@baseline.example#00000451", "thread_id": "t45.1@baseline.example"},
+            {"message_id": "t44.1@baseline.example", "claimant_id": "t44.1@baseline.example#00000441", "thread_id": "t44.1@baseline.example"},
+            {"message_id": "t43.1@baseline.example", "claimant_id": "t43.1@baseline.example#00000431", "thread_id": "t43.1@baseline.example"},
+            {"message_id": "t40.1@baseline.example", "claimant_id": "t40.1@baseline.example#00000401", "thread_id": "t40.1@baseline.example"}
+          ]}
+        },
+        {
+          "tool": "query_messages",
+          "arguments": {"text": "tofu"},
+          "result": {"total_matches": 1, "returned": 1, "offset": 0, "has_more": false, "next_cursor": null, "messages": [
+            {"message_id": "t42.1@baseline.example", "claimant_id": "t42.1@baseline.example#00000421", "thread_id": "t42.1@baseline.example"}
+          ]}
+        },
+        {
+          "tool": "get_message",
+          "arguments": {"message_id": "t41.1@baseline.example#00000411"},
+          "result": {"message": {"message_id": "t41.1@baseline.example", "claimant_id": "t41.1@baseline.example#00000411", "thread_id": "t41.1@baseline.example"}, "body_offset": 0, "body_total_chars": 21285, "next_offset": 20000}
+        },
+        {
+          "tool": "get_message",
+          "arguments": {"message_id": "t41.1@baseline.example#00000411", "offset": 20000},
+          "result": {"message": {"message_id": "t41.1@baseline.example", "claimant_id": "t41.1@baseline.example#00000411", "thread_id": "t41.1@baseline.example"}, "body_offset": 20000, "body_total_chars": 21285, "next_offset": null}
+        }
+      ],
+      "answer": {"text": "Four, reading TOFU as one-time sign-in PINs and email verifications: a Northwind Mail sign-in PIN (December 3), a Larkspur Pharmacy portal security PIN (December 5), a Quillfeather Prints email verification with a link and a PIN (December 7), and a PIN for accepting Harrow Savings' updated terms, at the end of a long notice (December 9). Not counted: a cooking class about tofu, two SignLattice signing notices whose shared boilerplate mentions an access PIN, and a security newsletter. The count comes from lookups for PIN, verification and tofu, so a message using other words could be missing.", "cited": ["t38.1@baseline.example#00000381", "t39.1@baseline.example#00000391", "t40.1@baseline.example#00000401", "t41.1@baseline.example#00000411"], "count": 4}
     }
   ]
 }

@@ -41,6 +41,19 @@ Talbot" writes about a contract markup and the body never names them,
 while t35-t37 (a bakery, a hiking group, a gym) each mention "Wren"
 once in the body. Keep "Wren" and "Talbot" out of every other thread.
 
+Threads 38-45 back the counting scenario ``tofu-count`` (#283): "TOFU"
+mail read as one-time sign-in PINs and email verifications. t38 and t39
+are one-time sign-in PINs, t40 an email verification (link plus PIN, so
+it matches a "verification" and a "PIN" lookup), and t41 a long terms
+notice whose one-time PIN sits past the first 20,000-character
+``get_message`` body page. The decoys share the obvious words: t42 is a
+cooking class about tofu, t43 and t44 are signing notices with the same
+access-PIN boilerplate, and t45 is a security newsletter about never
+sharing a PIN. They say "PIN" because "code" is reserved (above). Their
+words avoid every golden search query's words and every
+``unanswerable`` question's ``absent_terms``; keep "tofu", "PIN" and
+the PIN values out of every other thread.
+
 Thread IDs are the root Message-IDs: ``t<NN>.1@baseline.example``.
 """
 
@@ -74,6 +87,71 @@ class Msg:
 
 def thread_id(n: int) -> str:
     return f"t{n:02d}.1@{DOMAIN}"
+
+
+# The clauses of t41's long terms notice, numbered and repeated until the
+# body passes ``_LONG_NOTICE_PIN_AFTER`` characters, so its one-time PIN
+# is on the second ``get_message`` body page (20,000 characters each).
+# ``make baseline`` checks the PIN really is past the first page.
+_LONG_NOTICE_CLAUSES = (
+    "Interest on Harrow Savings balances is calculated daily and paid on the "
+    "last business day of each calendar quarter. Rates can change at any "
+    "time, and the current rate is shown in the rates table inside the "
+    "online banking portal.",
+    "Withdrawals from Harrow savings are limited to six per "
+    "statement cycle. A seventh withdrawal in the same cycle converts the "
+    "savings to a checking product with different terms. Transfers between "
+    "your own Harrow products count toward this limit.",
+    "Statements arrive through the portal unless you request paper copies. "
+    "Paper statements are mailed to the postal location on file within five "
+    "business days of the cycle end.",
+    "Savings with no customer activity for twenty-four months are marked "
+    "dormant. Dormant savings keep earning interest but cannot send "
+    "outgoing transfers until you contact Harrow Savings and confirm your "
+    "identity.",
+    "Report an unauthorized transaction within sixty days of the statement "
+    "that first shows it. Harrow Savings acknowledges each dispute within "
+    "two business days and resolves most within ten business days.",
+    "On joint savings each owner may make withdrawals and transfers alone. "
+    "Either owner may close the savings, and both owners are responsible for "
+    "any overdrawn balance.",
+    "Harrow Savings shares customer information only as described in its "
+    "privacy notice, which you can read at any branch or in the portal. You "
+    "may opt out of marketing messages at any time.",
+    "Harrow Savings posts changes to these terms in the portal at least "
+    "thirty days before they take effect. Keeping the savings open after "
+    "that point means you accept the changed terms.",
+)
+_LONG_NOTICE_PIN_AFTER = 21_000
+
+
+def _long_notice_body() -> str:
+    paragraphs = [
+        "Hello Sam,\n\nHarrow Savings has updated the terms of your savings. "
+        "The full terms follow; please read them before the end of "
+        "January."
+    ]
+    section = 0
+    while sum(len(p) + 2 for p in paragraphs) < _LONG_NOTICE_PIN_AFTER:
+        clause = _LONG_NOTICE_CLAUSES[section % len(_LONG_NOTICE_CLAUSES)]
+        section += 1
+        paragraphs.append(f"Section {section}. {clause}")
+    paragraphs.append(
+        "To accept these terms online, sign in and enter the one-time PIN "
+        "640358 when the portal asks for it. The PIN expires in 30 minutes."
+        "\n\nHarrow Savings"
+    )
+    return "\n\n".join(paragraphs)
+
+
+# The shared boilerplate of the two signing notices (t43, t44).
+_SIGNING_BOILERPLATE = (
+    "Security notice: this envelope may ask for an access PIN before it "
+    "opens, and identity verification may be required before you sign. The "
+    "sender gives you that PIN separately; SignLattice never sends it by "
+    "email. Never share your access PIN, and do not forward this email, "
+    "because anyone with the link can open the envelope."
+)
 
 
 THREADS: dict[int, list[Msg]] = {
@@ -758,6 +836,111 @@ THREADS: dict[int, list[Msg]] = {
             "Hi Sam,\n\nYour locker renewal is due at the end of the month. Wren "
             "covers the front desk on weekday mornings and can take the payment "
             "in person.\n\nIronworks Gym",
+        ),
+    ],
+    38: [
+        Msg(
+            "INBOX",
+            "Tue, 03 Dec 2024 07:12:00 +0000",
+            "Northwind Mail Security <security@northwindmail.example>",
+            ME,
+            "Your Northwind sign-in PIN",
+            "Hi Sam,\n\nYour one-time sign-in PIN is 583914. Enter it on the "
+            "Northwind sign-in page within ten minutes; it works once.\n\nIf you "
+            "did not try to sign in, ignore this message.\n\nNorthwind Mail Security",
+        ),
+    ],
+    39: [
+        Msg(
+            "INBOX",
+            "Thu, 05 Dec 2024 18:40:00 +0000",
+            "Larkspur Pharmacy <noreply@larkspurpharmacy.example>",
+            ME,
+            "Larkspur Pharmacy portal: your security PIN",
+            "Hello Sam,\n\nUse the security PIN 270615 to finish signing in to the "
+            "Larkspur Pharmacy patient portal. This one-time PIN expires in 15 "
+            "minutes and works once. Our staff will never ask you for it.\n\n"
+            "Larkspur Pharmacy",
+        ),
+    ],
+    40: [
+        Msg(
+            "INBOX",
+            "Sat, 07 Dec 2024 10:05:00 +0000",
+            "Quillfeather Prints <welcome@quillfeather.example>",
+            ME,
+            "Confirm your email for Quillfeather Prints",
+            "Hi Sam,\n\nThanks for signing up for Quillfeather Prints. Please "
+            "confirm your email with this verification link:\n\n"
+            "https://quillfeather.example/confirm/K4T9ZR2W\n\nOr type the one-time "
+            "PIN 914772 on the sign-up page. The link and the PIN expire in 24 "
+            "hours.\n\nQuillfeather Prints",
+        ),
+    ],
+    41: [
+        Msg(
+            "INBOX",
+            "Mon, 09 Dec 2024 09:00:00 +0000",
+            "Harrow Savings <notices@harrowsavings.example>",
+            ME,
+            "Updated savings terms from Harrow Savings",
+            _long_notice_body(),
+        ),
+    ],
+    42: [
+        Msg(
+            "INBOX",
+            "Tue, 10 Dec 2024 16:30:00 +0000",
+            "Saffron Kitchen Studio <classes@saffronkitchen.example>",
+            ME,
+            "Thursday class: crispy tofu three ways",
+            "Hi Sam,\n\nThis Thursday we press and marinate firm tofu, then pan-fry "
+            "it with ginger and scallions, bake a sesame tofu sheet, and finish "
+            "with silken tofu in a chilled soy dressing. Bring an apron; knives "
+            "are provided.\n\nSaffron Kitchen Studio",
+        ),
+    ],
+    43: [
+        Msg(
+            "INBOX",
+            "Wed, 11 Dec 2024 11:00:00 +0000",
+            "SignLattice <notify@signlattice.example>",
+            ME,
+            "Storage unit agreement ready for your signature",
+            "Hi Sam,\n\nOakmere Storage sent you a storage unit agreement to "
+            "review and sign.\n\nReview and sign: "
+            "https://signlattice.example/envelope/7Q2LX\n\n"
+            f"{_SIGNING_BOILERPLATE}\n\nSignLattice",
+        ),
+    ],
+    44: [
+        Msg(
+            "INBOX",
+            "Fri, 13 Dec 2024 14:20:00 +0000",
+            "SignLattice <notify@signlattice.example>",
+            ME,
+            "Membership agreement ready for your signature",
+            "Hi Sam,\n\nKestrel Fitness sent you a membership agreement to review "
+            "and sign.\n\nReview and sign: "
+            "https://signlattice.example/envelope/9M4TB\n\n"
+            f"{_SIGNING_BOILERPLATE}\n\nSignLattice",
+        ),
+    ],
+    45: [
+        Msg(
+            "INBOX",
+            "Sun, 15 Dec 2024 08:00:00 +0000",
+            "Bulwark Security Digest <digest@bulwarksecurity.example>",
+            ME,
+            "Five habits that keep your logins safe",
+            "This month's tips:\n\n1. Never share a one-time PIN with anyone, even "
+            "a caller saying they work for your bank. A real bank will never "
+            "ask for it.\n2. Treat any unexpected verification email with "
+            "suspicion; open the site yourself instead of following the link.\n"
+            "3. Turn on two-step sign-in wherever a site supports it.\n"
+            "4. Use a different secret phrase for every site and keep them in "
+            "a manager.\n5. Review your recent sign-in activity once a month.\n\n"
+            "Bulwark Security Digest",
         ),
     ],
 }

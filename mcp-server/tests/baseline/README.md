@@ -33,6 +33,13 @@ make baseline UPDATE=1   # rewrite snapshot.json after an intended ranking chang
      that must occur in no message's subject, body or attachment; the
      abstention scenarios in `tests/eval/agent_scenarios.json` rest on
      them.
+   - **Agent scenario references.** Every message a scenario names must
+     be indexed in its thread. For a counting scenario, each full-read
+     message must hold a forbidden value only past its first
+     `get_message` body page (read with the real tool), every forbidden
+     value must be in an expected answer message, and the obvious
+     `query_messages(text=...)` lookups must list at least one decoy
+     while reaching every expected message.
    - **Rank snapshot, for unchanged behaviour.** The top-10 order of
      every search question must match `snapshot.json`.
    - **Answer-evaluation cases** (`test_answer_eval_cases.py`). The
@@ -70,7 +77,11 @@ harness in `tests/eval/` (`tests/retrieval_metrics.py`).
   answering model, one at an AI grader). Thread 33 names its topic
   only in its subject (#687). Thread 34 names its sender only in the
   From header, and threads 35-37 mention that first name once in their
-  bodies (#701). Adding a thread can lower a recall floor's
+  bodies (#701). Threads 38-45 back the counting scenario `tofu-count`
+  (#283): four genuine one-time PIN and email verification messages
+  (t41's PIN is past the first 20,000-character `get_message` page)
+  and four decoys sharing their obvious words (tofu, access-PIN
+  boilerplate, security advice). Adding a thread can lower a recall floor's
   measured value; re-measure and explain it rather than lowering the
   floor silently.
 - **Unanswerable questions** need terms that appear nowhere in the

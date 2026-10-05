@@ -131,7 +131,8 @@ listed by one `query_messages` cursor chain over exactly the expected
 filters as the tool normalizes them (strings stripped, blank ones
 absent, dates as UTC bounds), any page size, and whether that chain's last page said
 `has_more: false`), message citation recall (see below), abstention
-(see below), and calls over budget or repeated. `summarize` prints
+(see below), the counting metrics (see below), and calls over budget or
+repeated. `summarize` prints
 every aggregate, and the clean rate, separately for the dev and
 held-out splits, then the failing scenarios by category with held-out
 ones tagged. Failure cases for each scorer are
@@ -139,7 +140,8 @@ in `tests/test_agent_metrics.py`; `tests/test_agent_eval.py` also
 mutates reference traces into the failures the new categories exist
 to catch and checks each is caught.
 
-Three categories need more than thread-level scoring:
+Four categories need more than thread-level scoring (the fourth,
+counting, has its own section below):
 
 - **Corrections** (`correction`): a later reply corrects an earlier
   message (the recital date in `t24`, the revised salary offer in
@@ -165,6 +167,70 @@ Three categories need more than thread-level scoring:
   fails if its answer abstains. Only a JSON `true` counts. List
   synonyms in `absent_terms` (matching is a case-insensitive
   substring), because a lookup that uses none of them fails.
+
+### Counting (`counting`)
+
+A "how many, and what were they" question, where the obvious lookups
+also match messages that do not belong in the answer. It regresses a
+real failure on an operator's mailbox (no content from it is in the
+repository): asked about "TOFU" mail (one-time codes and email
+verifications), an assistant counted keyword matches as relevant
+messages (food mentioning tofu, repeated document-signing boilerplate,
+general security advice), counted a message twice because it matched
+two searches, read only the first page of a long body (`get_message`
+returns 20,000-character pages with `next_offset`) and stated its
+estimate too confidently.
+
+`tofu-count` asks "How many TOFU emails did I get, and what were they
+for?" over corpus threads 38-45 (`indexer/tests/baseline/corpus.py`):
+four genuine messages (two one-time sign-in PINs, an email verification
+that matches both a "PIN" and a "verification" lookup, and a long terms
+notice whose PIN is on the second body page) and four decoys (a tofu
+cooking class, two signing notices sharing access-PIN boilerplate, a
+security newsletter). The corpus says "PIN" because "code" is reserved
+for a vector-only golden question. A counting scenario names no golden
+question; instead it lists:
+
+- `expected_answer_messages`: message refs the answer must cite
+  **exactly**: a decoy cited or a message missing fails *answer set
+  exact*. A cited ID counts as the message a result returned it with, so
+  a message cited twice (or by two IDs) counts once. The answer also
+  records `"count"`, a JSON integer like `abstained`, which must equal
+  the set's size (*answer count correct*); a missing, string, float or
+  boolean count fails.
+- `full_read_messages` (a subset of the above): for each, the trace's
+  `get_message` results must cover the body from offset 0 through each
+  `next_offset` to a page with none (*full-read recall*). Pages are read
+  from the results, not the arguments, and a skipped page breaks the
+  chain. Every call precedes the answer in a trace, so "before citing
+  it" holds whenever the chain exists.
+- `forbidden_answer_text`: strings (the PINs and the verification link)
+  `answer.text` must not contain, case-insensitively (*forbidden text
+  absent*). A value reformatted with spaces or dashes is not caught.
+
+`make baseline` checks every ref is an indexed message, that each
+full-read message holds a forbidden value only past its first
+`get_message` page (read with the real tool), that every forbidden value
+is in an expected message's body, and that `query_messages(text=...)`
+for each of "tofu", "PIN" and "verification" lists at least one decoy
+while the three together reach every genuine message.
+`tests/test_agent_eval.py` mutates the reference trace into each
+observed mistake (keyword matches counted, a decoy cited, a message
+counted twice, a long body read to page 1 only, a wrong or missing
+count, a PIN or the link repeated) and checks each is caught. The
+`ask_mailbox` case `ask-tofu-summary` (below) covers summary accuracy
+separately.
+
+**What this case does not prove.**
+
+- The reference trace is scripted. It shows the scorers catch these
+  mistakes, not that a live agent avoids them; no recorder for a live
+  client's trace exists yet (#283).
+- Whether the answer explains its reading of "TOFU", and how confident
+  it sounds, are prose, which the agent scorers do not grade. The
+  answer-quality judge grades only `ask_mailbox` answers.
+- Incomplete indexing cannot be exercised on the fully built baseline
+  index, so whether an answer discloses it is untested.
 
 ### Held-out split
 
@@ -215,8 +281,10 @@ Cases must never be built from real mail.
 ### Cases
 
 `tests/answer_eval/cases.json` (schema v1, loaded and validated by
-`cases.py`) holds 33 cases over the baseline corpus: exact facts,
-attachment-only answers, multiple required threads, narrow filters,
+`cases.py`) holds 34 cases over the baseline corpus: exact facts,
+attachment-only answers, multiple required threads (including
+`ask-tofu-summary`, a summary of the four genuine messages of the
+counting scenario that must not repeat their PINs or link), narrow filters,
 later corrections (and a later message that does not change the fact),
 an unresolved conflict, unanswerable questions, an empty result, a
 prompt-budget omission (the case's own `settings.prompt_tokens`), and

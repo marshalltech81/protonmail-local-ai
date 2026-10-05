@@ -13,7 +13,8 @@ and the IDs its answer cites. Each must score with no failures, which
 pins the scorers against the scenario set; their failure cases are in
 ``tests/test_agent_metrics.py``, and ``test_failure_traces_are_caught``
 mutates reference traces into the failures the correction, conflict and
-abstention scenarios exist to catch. ``HELD_OUT_IDS`` pins the held-out
+abstention scenarios exist to catch, and ``test_counting_failures_are_caught``
+into the mistakes the counting scenario regresses (#283). ``HELD_OUT_IDS`` pins the held-out
 split. The contract tests below keep the
 scenarios and traces in step with the real tool signatures and output
 fields.
@@ -38,6 +39,7 @@ from src.tools.system import register_system_tools
 from tests.agent_metrics import (
     ID_FIELDS,
     PAGING_FIELDS,
+    READ_FIELDS,
     Scenario,
     is_held_out,
     load_scenarios,
@@ -98,6 +100,9 @@ def test_scenarios_cover_corrections_conflicts_and_abstention() -> None:
         assert all(not m.split("@")[0].endswith(".1") for g in s.required_citations for m in g)
     for s in by_category["conflicting_sources"]:
         assert len(s.required_citations) >= 2, s.id
+    for s in by_category["counting"]:
+        # An exact answer set with at least one long message read in full.
+        assert s.expected_answer_messages and s.full_read_messages and s.forbidden_answer_text
     assert by_category["unanswerable"]
     for s in by_category["unanswerable"]:
         assert s.unanswerable and not s.required_evidence and not s.required_citations
@@ -177,6 +182,67 @@ def test_failure_traces_are_caught(
     assert failure in score.failures, score
 
 
+_D = "@baseline.example"
+
+
+def _cite(trace: dict, *threads: int, count: int) -> None:
+    """Add a citation of message 1 of each of ``threads`` and restate the count."""
+    trace["answer"]["cited"] += [f"t{n}.1{_D}#00000{n}1" for n in threads]
+    trace["answer"]["count"] = count
+
+
+# The mistakes the counting scenario regresses against (#283), each made
+# on the reference trace: counting keyword matches, a message counted
+# twice, a long body read only to its first page, a wrong or missing
+# count, and a one-time PIN or verification link repeated in the answer.
+_COUNTING_FAILURES: list[tuple[str, Callable[[dict], None], str]] = [
+    # Every message the "PIN" lookup listed, the decoys included.
+    ("counts-keyword-matches", lambda t: _cite(t, 43, 44, 45, count=7), "answer_messages_exact"),
+    # The cooking class, found by looking up "tofu" literally.
+    ("cites-food-decoy", lambda t: _cite(t, 42, count=5), "answer_messages_exact"),
+    # One signing notice; its boilerplate mentions an access PIN.
+    ("cites-signing-boilerplate", lambda t: _cite(t, 43, count=5), "answer_messages_exact"),
+    # t40 matched both the "PIN" and the "verification" lookup.
+    ("counts-a-message-twice", lambda t: _cite(t, 40, count=5), "answer_count_correct"),
+    ("stops-after-page-one", lambda t: t["calls"].pop(), "full_read_recall"),
+    ("wrong-count", lambda t: t["answer"].update(count=3), "answer_count_correct"),
+    ("count-missing", lambda t: t["answer"].pop("count"), "answer_count_correct"),
+    (
+        "leaks-a-pin",
+        lambda t: t["answer"].update(text=t["answer"]["text"] + " The Harrow PIN is 640358."),
+        "forbidden_text_absent",
+    ),
+    (
+        "leaks-a-link",
+        lambda t: t["answer"].update(
+            text=t["answer"]["text"] + " Confirm at https://quillfeather.example/confirm/K4T9ZR2W"
+        ),
+        "forbidden_text_absent",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("change", "failure"),
+    [(change, failure) for _, change, failure in _COUNTING_FAILURES],
+    ids=[name for name, _, _ in _COUNTING_FAILURES],
+)
+def test_counting_failures_are_caught(change: Callable[[dict], None], failure: str) -> None:
+    trace = copy.deepcopy(TRACE_BY_SCENARIO["tofu-count"])
+    change(trace)
+    score = score_trace(SCENARIOS["tofu-count"], trace)
+    assert failure in score.failures, score
+
+
+def test_a_message_cited_twice_is_one_answer_message() -> None:
+    """The duplicate mutation fails on the count alone: the cited set is
+    still exactly the expected one, so the count scorer is what catches it."""
+    trace = copy.deepcopy(TRACE_BY_SCENARIO["tofu-count"])
+    _cite(trace, 40, count=5)
+    score = score_trace(SCENARIOS["tofu-count"], trace)
+    assert score.failures == ["answer_count_correct"]
+
+
 @pytest.mark.parametrize("scenario_id", ["cabin-wifi", "electrician-quote"])
 def test_abstaining_after_an_unrelated_lookup_is_caught(scenario_id: str) -> None:
     trace = copy.deepcopy(TRACE_BY_SCENARIO[scenario_id])
@@ -227,6 +293,7 @@ def test_scorers_read_fields_the_output_models_publish() -> None:
     assert {"thread_id", "message_id", "claimant_id"} <= set(outputs.ListedMessage.model_fields)
     assert {"chunk_id", "thread_id"} <= set(outputs.Citation.model_fields)
     assert "chunk_id" in outputs.EvidenceChunk.model_fields
+    assert set(READ_FIELDS) <= set(outputs.GetMessageOutput.model_fields)
 
 
 class TestLoadScenarios:
@@ -334,6 +401,50 @@ class TestLoadScenarios:
             self._load(tmp_path, [self._row(id=held)])
         (s,) = self._load(tmp_path, [self._row(id=held, held_out=True)])
         assert s.held_out is True
+
+    def _counting_row(self, **overrides: object) -> dict:
+        row = self._row(
+            category="counting",
+            expected_answer_messages=["t38.1", "t41.1"],
+            full_read_messages=["t41.1"],
+            forbidden_answer_text=["640358"],
+            golden_search=None,
+        )
+        row.update(overrides)
+        return {k: v for k, v in row.items() if v is not None}
+
+    def test_counting_row_needs_no_golden_question(self, tmp_path: Path) -> None:
+        (s,) = self._load(tmp_path, [self._counting_row()])
+        assert s.expected_answer_messages == ["t38.1@baseline.example", "t41.1@baseline.example"]
+        assert s.full_read_messages == ["t41.1@baseline.example"]
+        assert s.forbidden_answer_text == ["640358"]
+        assert s.required_evidence == [] and s.expected_messages == []
+        assert s.unanswerable is False
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {"expected_answer_messages": ["t38"]},
+            {"expected_answer_messages": []},
+            {"full_read_messages": ["t39.1"]},
+            {"expected_answer_messages": None},
+            {"forbidden_answer_text": [""]},
+            {"forbidden_answer_text": [640358]},
+            {"golden_search": "multi-kayak", "golden_enumerate": "sender"},
+        ],
+        ids=[
+            "answer-thread-ref",
+            "answer-empty",
+            "full-read-not-cited",
+            "full-read-without-answer-set",
+            "forbidden-blank",
+            "forbidden-not-a-string",
+            "two-golden-references",
+        ],
+    )
+    def test_bad_counting_rows_are_rejected(self, tmp_path: Path, overrides: dict) -> None:
+        with pytest.raises(ValueError, match="s3"):
+            self._load(tmp_path, [self._counting_row(**overrides)])
 
     def test_duplicate_ids_are_rejected(self, tmp_path: Path) -> None:
         with pytest.raises(ValueError, match="s3"):
