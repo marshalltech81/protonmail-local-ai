@@ -83,10 +83,15 @@ def results(baseline_dir: Path, baseline_db: Database) -> dict[str, list[ThreadR
             with_evidence="evidence" in q,
             **q.get("filters", {}),
         )
-        # Results arrive sorted by fused score; ordering exact ties by
-        # thread ID keeps the snapshot from depending on how the lanes
-        # happened to insert tied threads.
-        out[q["id"]] = sorted(hits, key=lambda r: (-r.score, r.thread_id))
+        # Ordering exact score ties by thread ID keeps the snapshot from
+        # depending on how the lanes happened to insert tied threads.
+        # Tied threads are grouped at the first of their positions, not
+        # re-sorted by score: the keyword slot (#701) places a hit above
+        # higher-scored results on purpose.
+        first_pos: dict[float, int] = {}
+        for pos, r in enumerate(hits):
+            first_pos.setdefault(r.score, pos)
+        out[q["id"]] = sorted(hits, key=lambda r: (first_pos[r.score], r.thread_id))
     return out
 
 

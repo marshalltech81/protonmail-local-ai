@@ -48,9 +48,10 @@ not measure semantic quality.
 
 The recall floors are the values the hashed embedder reaches, rounded
 down, so losing any one required source fails them. They are wiring
-checks, not quality targets: `multi-lisbon-trip` finds the flight
-thread but not the hotel thread, which has only "Lisbon" in common
-with the query, and the multi-source floor records that. Hit rate,
+checks, not quality targets. Both are 1.0 since the keyword slot
+(#701): before it, `multi-lisbon-trip` found the flight thread but not
+the hotel thread, which has only "Lisbon" in common with the query.
+Hit rate,
 MRR and evidence recall share their definitions with the opt-in eval
 harness in `tests/eval/` (`tests/retrieval_metrics.py`).
 
@@ -67,7 +68,9 @@ harness in `tests/eval/` (`tests/retrieval_metrics.py`).
   superseding the other). Threads 31-32 carry synthetic prompt
   injections for the answer-quality evaluation (one aimed at the
   answering model, one at an AI grader). Thread 33 names its topic
-  only in its subject (#687). Adding a thread can lower a recall floor's
+  only in its subject (#687). Thread 34 names its sender only in the
+  From header, and threads 35-37 mention that first name once in their
+  bodies (#701). Adding a thread can lower a recall floor's
   measured value; re-measure and explain it rather than lowering the
   floor silently.
 - **Unanswerable questions** need terms that appear nowhere in the

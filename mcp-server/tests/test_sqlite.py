@@ -3716,6 +3716,91 @@ class TestAddrMatchHelpers:
         assert not _matches_sender(r, "b@example.com")
 
 
+class TestKeywordSlot:
+    """The thread keyword lane's best hit is guaranteed a place in the top
+    three (#701): RRF otherwise buries a thread only that lane matches."""
+
+    @staticmethod
+    def _ranked(*thread_fts_ranks):
+        """Results in fused order; each carries its thread_fts rank, or
+        none when that lane did not match it."""
+        from datetime import UTC, datetime
+
+        from src.lib.sqlite import ThreadResult
+
+        results = []
+        for i, lane_rank in enumerate(thread_fts_ranks):
+            r = ThreadResult(
+                thread_id=f"t{i}",
+                subject="s",
+                participants=[],
+                folder="INBOX",
+                date_first=datetime(2024, 1, 1, tzinfo=UTC),
+                date_last=datetime(2024, 1, 2, tzinfo=UTC),
+                message_ids=[f"t{i}"],
+                snippet="",
+                has_attachments=False,
+            )
+            if lane_rank is not None:
+                r.lane_ranks["thread_fts"] = lane_rank
+            results.append(r)
+        return results
+
+    def test_buried_top_keyword_hit_moves_to_rank_three(self):
+        from src.lib.sqlite import _promote_top_keyword_hit
+
+        results = self._ranked(1, 2, None, 3, None, 0, 4)
+        promoted = _promote_top_keyword_hit(results)
+        # t5 held thread_fts rank 0 at fused position 6; the others keep
+        # their relative order.
+        assert [r.thread_id for r in promoted] == ["t0", "t1", "t5", "t2", "t3", "t4", "t6"]
+        assert promoted[2].lane_ranks["keyword_slot"] == 2
+
+    def test_hit_already_in_top_three_is_left_alone(self):
+        from src.lib.sqlite import _promote_top_keyword_hit
+
+        results = self._ranked(1, 0, 2, 3)
+        promoted = _promote_top_keyword_hit(results)
+        assert [r.thread_id for r in promoted] == ["t0", "t1", "t2", "t3"]
+        assert all("keyword_slot" not in r.lane_ranks for r in promoted)
+
+    def test_best_surviving_hit_is_promoted_when_lane_top_was_filtered_out(self):
+        from src.lib.sqlite import _promote_top_keyword_hit
+
+        # thread_fts rank 0 is absent (a post-fusion filter removed it).
+        results = self._ranked(None, None, None, 5, 2)
+        promoted = _promote_top_keyword_hit(results)
+        assert [r.thread_id for r in promoted] == ["t0", "t1", "t4", "t2", "t3"]
+
+    def test_no_thread_keyword_hits_changes_nothing(self):
+        from src.lib.sqlite import _promote_top_keyword_hit
+
+        results = self._ranked(None, None, None, None)
+        assert [r.thread_id for r in _promote_top_keyword_hit(results)] == [
+            "t0",
+            "t1",
+            "t2",
+            "t3",
+        ]
+
+    def test_keyword_list_keeps_the_hit_through_its_fetch_cut(self, seeded_db: Database):
+        """The slot is taken before the keyword list is cut to its fetch
+        limit, or a buried hit would never reach hybrid fusion."""
+        from unittest.mock import patch
+
+        thread_lane = self._ranked(0, 1, 2, 3)
+        # The other two keyword lanes agree on t1..t3 and never match t0,
+        # so plain RRF ranks t0 last.
+        others = [thread_lane[1], thread_lane[2], thread_lane[3]]
+        with (
+            patch.object(seeded_db, "_thread_keyword_search", return_value=thread_lane),
+            patch.object(seeded_db, "_chunk_keyword_search", return_value=list(others)),
+            patch.object(seeded_db, "_attachment_keyword_search", return_value=list(others)),
+        ):
+            fused = seeded_db._keyword_search("anything", 3)
+        assert [r.thread_id for r in fused] == ["t1", "t2", "t0"]
+
+
 class TestLaneProvenance:
     """RRF fusion records which lanes lifted each thread into ranking, as
     pure observability for get_evidence(include_scores=True). These tests

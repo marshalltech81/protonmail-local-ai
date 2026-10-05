@@ -272,9 +272,8 @@ is `127.0.0.1`, not `host.docker.internal`.
 Retrieval uses the baseline's hashed embedder (query vectors precomputed
 at build time) and no reranker, so a run measures prompt assembly,
 inference and the judge on a frozen corpus and index. The hashed
-embedder has no semantics: two questions (`ask-hotel-checkin`,
-`ask-lisbon-dates`) miss their thread, which the report attributes to
-retrieval. A real-model synthetic index is a follow-up.
+embedder has no semantics: one question (`ask-lisbon-dates`) misses
+its thread, which the report attributes to retrieval. A real-model synthetic index is a follow-up.
 
 ### What is captured and graded
 

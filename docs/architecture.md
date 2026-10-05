@@ -410,6 +410,9 @@ User query
     ├─ optional: post-fusion filter (folder / sender / participant / date /
     │   attachments)
     │
+    ├─ keyword slot: the best thread_fts hit is moved up to rank 3 if it
+    │   fused lower
+    │
     ├─ optional rerank stage (RERANK_MODE=cohere, default none):
     │   take the fused top max(limit, RERANK_CANDIDATES (default 20)), score each
     │   candidate against the query via the Cohere rerank API (official
@@ -429,6 +432,23 @@ many similar sibling chunks would dominate by accumulated score rather
 than by relevance. `get_evidence(include_scores=True)` reports which
 lanes (`thread_fts` / `chunk_fts` / `attachment_fts` / `thread_vec` /
 `chunk_vec` / `rerank`) each returned thread matched.
+
+**Keyword slot (#701).** RRF with k=60 scores adjacent ranks almost
+alike, so a thread that only `thread_fts` matches strongly (a person
+named only in the headers, a topic named only in the subject) fuses
+below threads that match weakly in several lanes, and no lane weight
+short of keyword-only ordering changes that. So the best `thread_fts`
+hit is guaranteed a place in the top three: if it fused lower, it is
+moved up to rank 3 and the rest keep their order. This is applied to
+the keyword list before it is cut to its fetch size (the list
+`mode=keyword` returns and the outer fusion reads), and again after the
+post-fusion filters in keyword and hybrid mode, where the hit is the
+best one the filters left. It runs before the rerank window is cut, so
+a reranker sees the hit and decides its final position. The moved
+thread keeps its fused score and carries `keyword_slot` in its lane
+provenance. Only one thread is moved per query; there is no strength
+test, so a common-word query also gets its top thread keyword hit in
+the top three.
 
 Folder, date, and attachment-flag filters are pushed into the FTS
 lanes' SQL so deep-ranked matches are not truncated before they could
