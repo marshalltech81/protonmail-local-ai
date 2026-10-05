@@ -139,6 +139,14 @@ shows a reviewed snapshot diff with golden checks still passing.
 
 ### Phase 2 — Swappable embedding / vector generations
 
+> **First milestone narrowed (2026-10-05, external review; #719).**
+> Before building the live-generation lifecycle below, measure rebuild
+> duration, resources and acceptable downtime, and ship a validated
+> staged rebuild with a controlled cutover, recording dimension and
+> tokenizer explicitly. Pursue live generations only if measurements
+> show the maintenance window is unacceptable, without weakening their
+> consistency requirements.
+
 **Exit criterion:** changing embedding models never requires altering
 the source corpus (the Maildir) or the versioned schema — no numbered
 migration and no `SCHEMA_VERSION` bump. Everything derived — vectors
@@ -745,6 +753,47 @@ Resolved since this handoff (owner, 2026-10-04): #692 (`Starred`
 excluded from the sync, #746; remove the leftover `/maildir/Starred`
 before the rebuild), #652 and #685 (closed as not planned: Linux-only),
 #701 (keyword slot, #745).
+
+**Update 2026-10-05.** Merged: #745 (#701), #746 (#692), #747 (#670:
+the FTS scrub runs only after reaps and chunk replacements, in bounded
+steps, and once at startup before the embedder wait). Images rebuilt
+from `main`; mbsync restarted on the new image; `/maildir/Starred`
+removed and confirmed absent after a sync. Open: #749 (#720, no embed
+request after a concurrent failure). #748 filed (P3, test-only, from
+#745 round 3). Nothing else in the backlog changes what the index
+stores in a way that would need a re-embed later, so the rebuild is not
+blocked; record peak memory, tmpfs and disk growth during it (#488) and
+check completeness by queue status (pending, retrying, dead, skipped),
+not health alone.
+
+#699 (index order): `INITIAL_INDEX_ORDER` is implemented on
+`feat/699-index-order` (not pushed), but newest-first changed the final
+index on the synthetic baseline (49 threads instead of 37): replies
+indexed before their root stay split. Filed as #752 (bug; threading is
+a stop-and-ask area). Oldest-first and today's walk order give the
+correct result. Owner decision pending on shipping oldest-only (or
+oldest as the default) until #752 is fixed.
+
+**External review (2026-10-04/05).** An outside reviewer endorsed the
+architecture and raised six tradeoffs, now tracked as follows (order
+recommended after the rebuild):
+
+1. Provider destination intent: an API key is not consent to the SDK's
+   default endpoint, since the request body leaves before the key is
+   checked. #750, owner decision (proposed: an empty `*_BASE_URL` fails;
+   the default needs an explicit value).
+2. Review cap: verified P0/P1 or self-introduced regressions must be
+   fixed, removed or explicitly accepted, even after round two. #751,
+   owner decision (AGENTS.md change).
+3. Keep SQLite-only tools up during an embedder outage: #661 (scope and
+   tests added), with #648.
+4. Local deletion as an explicit retention policy: #728 (policy
+   questions added); first step the synthetic mbsync check.
+5. Attachment extraction as failure isolation, not only throughput:
+   #698 (worker access and limits added); before OCR is turned on.
+6. Model portability: measure the rebuild first, then a validated
+   staged rebuild with controlled cutover before any live generations
+   (#719, Phase 2 note below); deferred while the model is unchanged.
 
 Still small, no decision needed: the extractor's own `max_bytes`
 fallback still says 10 MB; `ask_mailbox` should name the resolved
