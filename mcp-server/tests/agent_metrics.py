@@ -433,11 +433,16 @@ def score_trace(scenario: Scenario, trace: dict) -> AgentScore:
     # A counting answer must cite exactly the expected messages: a decoy
     # cited or a message left out fails. A cited ID counts as the message
     # a result returned it with, so two IDs of one message are one message.
+    # An ID no result returned as a message fails, even when it equals a
+    # returned thread ID: a root's Message-ID is also its thread's ID.
     answer_messages_exact: bool | None = None
     answer_count_correct: bool | None = None
     if scenario.expected_answer_messages:
         expected_answers = set(scenario.expected_answer_messages)
-        answer_messages_exact = {message_of.get(c, c) for c in cited} == expected_answers
+        answer_messages_exact = (
+            all(c in message_of for c in cited)
+            and {message_of[c] for c in cited} == expected_answers
+        )
         count = answer.get("count")
         # Only a JSON integer counts (``True`` is an int in Python).
         answer_count_correct = (

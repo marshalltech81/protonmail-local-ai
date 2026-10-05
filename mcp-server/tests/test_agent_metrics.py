@@ -687,6 +687,18 @@ class TestAnswerMessages:
         assert score.answer_messages_exact is True
         assert score.answer_count_correct is True
 
+    def test_a_bare_thread_hit_is_not_a_message_citation(self) -> None:
+        # A root's Message-ID is also its thread ID, so a search returning
+        # only the threads must not let their IDs pass as cited messages.
+        trace = _trace(
+            [_search(["a.1@x.example", "b.1@x.example"])],
+            ["a.1@x.example", "b.1@x.example"],
+        )
+        trace["answer"]["count"] = 2
+        score = score_trace(_counting(), trace)
+        assert score.answer_messages_exact is False
+        assert "answer_messages_exact" in score.failures
+
     def test_none_without_expected_answer_messages(self) -> None:
         score = score_trace(_scenario(), _trace([_search(["a.1@x.example"])]))
         assert score.answer_messages_exact is None
