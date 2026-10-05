@@ -590,6 +590,23 @@ class TestDeterministicGraders:
         det = grade_run(case, _run(f"{answer} [E1].", [_passage("E1", ref)], ["E1"]))
         assert det.checks["expected_values"] == (PASS if ok else FAIL)
 
+    @pytest.mark.parametrize(
+        ("answer", "ok"),
+        [
+            ("Four chaperone volunteers are needed", True),
+            ("The slip asks for 4 chaperone volunteers", True),
+            ("The slip asks for 14 chaperone volunteers", False),
+            ("Three chaperone volunteers are needed", False),
+            ("The slip asks for chaperone volunteers", False),
+        ],
+    )
+    def test_chaperone_count_is_checked_without_a_judge(self, answer, ok):
+        """#678: with no value check, any citing answer passed under
+        ``JUDGE_MODE=none``."""
+        case = CASES["ask-chaperones"]
+        det = grade_run(case, _run(f"{answer} [E1].", [_passage("E1", "t14.1")], ["E1"]))
+        assert det.checks["expected_values"] == (PASS if ok else FAIL)
+
     def test_thread_text_passage_meets_thread_refs_only(self):
         thread_text = Passage("E1", thread_id_of("t24"), None, None, None, "thread", "text")
         det = grade_run(CASES["ask-recital-date"], _run("August 11 [E1].", [thread_text], ["E1"]))

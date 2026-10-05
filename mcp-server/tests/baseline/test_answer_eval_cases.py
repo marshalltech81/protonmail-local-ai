@@ -35,6 +35,7 @@ from src.lib.sqlite import Database
 from tests.answer_eval import __main__ as cli
 from tests.answer_eval.cases import DIMENSIONS, Case, load_cases, message_id_of, thread_id_of
 from tests.answer_eval.config import LayerConfig
+from tests.answer_eval.graders import _fold, _mentions
 from tests.answer_eval.harness import evaluate
 from tests.answer_eval.runner import (
     NonSyntheticIndexError,
@@ -159,7 +160,11 @@ class _OracleAnswerer:
             return "Not found in the provided emails: nothing in them answers this."
         labels = dict(_LABEL.findall(user))  # label -> claimant ID
         blocks = re.split(r"(?=\[E\d+ \|)", user)
-        passages = {b.split(" |", 1)[0][1:]: b.casefold() for b in blocks if b.startswith("[E")}
+        # Each passage's text without its header, whose message ID and
+        # date would otherwise match short values such as "4".
+        passages = {
+            b.split(" |", 1)[0][1:]: _fold(b.split("]", 1)[1]) for b in blocks if b.startswith("[E")
+        }
         sentences = []
         for group in self.case.required_evidence:
             wanted = {_ref_message(r) for r in group}
@@ -168,7 +173,7 @@ class _OracleAnswerer:
                 sentences.append(f"This passage bears on the question [{hit}].")
         for group in self.case.must_include:
             value = group[0]
-            hit = next((lbl for lbl, text in passages.items() if value.casefold() in text), None)
+            hit = next((lbl for lbl, text in passages.items() if _mentions(text, value)), None)
             mark = f"[{hit}]" if hit else "[unsupported]"
             sentences.append(f"The value is {value} {mark}.")
         if not any("[E" in s for s in sentences):
