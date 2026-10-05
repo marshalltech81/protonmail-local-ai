@@ -761,16 +761,18 @@ from `main`; mbsync restarted on the new image; `/maildir/Starred`
 removed and confirmed absent after a sync. Open: #749 (#720, no embed
 request after a concurrent failure). #748 filed (P3, test-only, from
 #745 round 3). **The rebuild waits only on #754** (oldest-first
-initial scan, below); nothing else in the backlog changes what the
-index stores in a way that would need a re-embed later. During it,
-record peak memory, tmpfs and disk growth (#488). At the end, check
-completeness rather than health alone: `get_mailbox_status` queue
-counts (`pending`, `retrying` and `dead` must be 0 or explained), and
-account for Maildir files that were not indexed on purpose. Those
-leave no queue row: T-flagged (trashed) files the walk skips in mirror
-mode, files with no `Message-ID`, and files that moved mid-index (the
-indexer's `skipped:` log lines; the renamed file is indexed under its
-new path).
+initial scan, below). Nothing else in the backlog needs a full
+re-embed later; turning OCR on (after #698) will re-queue the messages
+whose image or scanned-PDF attachments were skipped while it was off
+and embed their new attachment chunks, a targeted pass with its own
+provider cost. During the rebuild, record peak memory, tmpfs and disk
+growth (#488). At the end, check completeness rather than health
+alone: `get_mailbox_status` queue counts (`pending` and `retrying`
+must reach 0; every `dead` row explained, which includes files with no
+`Message-ID`, dead-lettered by design), and account for Maildir files
+that leave no queue row on purpose: T-flagged (trashed) files the walk
+skips in mirror mode, and files that moved mid-index (the indexer's
+`skipped:` log lines; the renamed file is indexed under its new path).
 
 #699 (index order), decided by the owner: the initial scan indexes
 **oldest first** across every folder, with no setting (#754). Newest
