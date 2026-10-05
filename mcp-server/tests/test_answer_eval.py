@@ -13,6 +13,7 @@ import asyncio
 import dataclasses
 import json
 import logging
+import os
 import re
 import shutil
 import time
@@ -975,6 +976,38 @@ class TestHarnessAndReports:
         write_private_json(path, {"a": 1})
         assert path.stat().st_mode & 0o777 == 0o600
         assert path.parent.stat().st_mode & 0o777 == 0o700
+
+    def test_private_json_restricts_an_existing_file_before_writing(self, tmp_path, monkeypatch):
+        """#679: O_CREAT's mode applies only on create, so an existing 0644
+        report stayed world-readable while the new content was written, and
+        a descriptor opened on it earlier could read the new content."""
+        path = tmp_path / "r.json"
+        path.write_text("old")
+        path.chmod(0o644)
+        modes = []
+        real_dump = json.dump
+
+        def observing_dump(obj, fh, **kwargs):
+            # The mode of the file the content is going into, as it is written.
+            modes.append(os.fstat(fh.fileno()).st_mode & 0o777)
+            return real_dump(obj, fh, **kwargs)
+
+        monkeypatch.setattr(json, "dump", observing_dump)
+        with path.open() as earlier_reader:
+            write_private_json(path, {"a": 1})
+            assert earlier_reader.read() == "old"
+        assert modes == [0o600]
+        assert path.stat().st_mode & 0o777 == 0o600
+        assert json.loads(path.read_text()) == {"a": 1}
+        assert [p.name for p in tmp_path.iterdir()] == ["r.json"]
+
+    def test_private_json_failed_write_keeps_the_old_file(self, tmp_path):
+        path = tmp_path / "r.json"
+        write_private_json(path, {"a": 1})
+        with pytest.raises(TypeError):
+            write_private_json(path, {"a": object()})
+        assert json.loads(path.read_text()) == {"a": 1}
+        assert [p.name for p in tmp_path.iterdir()] == ["r.json"]
 
 
 class TestCli:

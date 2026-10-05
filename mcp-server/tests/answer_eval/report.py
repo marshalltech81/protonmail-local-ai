@@ -13,6 +13,7 @@ never improve a score.
 
 import json
 import os
+import tempfile
 from pathlib import Path
 from statistics import fmean
 from typing import Any
@@ -249,11 +250,19 @@ def build_report(
 def write_private_json(path: Path, data: Any) -> None:
     """Write ``data`` as JSON, mode 600, creating the directory mode 700."""
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        json.dump(data, fh, indent=2, sort_keys=True)
-        fh.write("\n")
-    os.chmod(path, 0o600)
+    # Write a new mode-600 file and rename it over the target: rewriting
+    # an existing file in place would put the content in a file that may
+    # be world-readable, or already open in another process, while it is
+    # written.
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, indent=2, sort_keys=True)
+            fh.write("\n")
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
 
 
 def _fmt(value: Any) -> str:
