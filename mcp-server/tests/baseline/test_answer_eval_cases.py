@@ -269,8 +269,8 @@ def test_supplied_evidence_lets_a_correct_answer_pass(case: Case, records: dict[
 def test_cases_missing_evidence_are_the_known_ones(records: dict[str, dict]) -> None:
     """Which cases lose evidence before the model sees it.
 
-    The hashed embedder has no semantics, so two natural-language
-    questions miss their thread; the prompt-budget case loses one source
+    The hashed embedder has no semantics, so one natural-language
+    question misses its thread; the prompt-budget case loses one source
     to its budget by design. A change here is a retrieval or prompt
     assembly change: explain it in the PR and update the sets.
     """
@@ -280,7 +280,6 @@ def test_cases_missing_evidence_are_the_known_ones(records: dict[str, dict]) -> 
         if r["deterministic"]["prompt_coverage"] not in (None, 1.0)
     }
     assert lost == {
-        "ask-hotel-checkin": ["retrieval"],
         "ask-lisbon-dates": ["retrieval"],
         "ask-kayak-tight-budget": ["prompt_assembly"],
     }

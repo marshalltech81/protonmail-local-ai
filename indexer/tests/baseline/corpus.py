@@ -36,6 +36,11 @@ reply "Re: Bluewater leaving" whose short body never mentions it, while
 t04 and t05 mention Bluewater in their bodies. Keep "leaving" out of
 every other thread.
 
+Thread 34 names its sender only in the From header (#701): "Wren
+Talbot" writes about a contract markup and the body never names them,
+while t35-t37 (a bakery, a hiking group, a gym) each mention "Wren"
+once in the body. Keep "Wren" and "Talbot" out of every other thread.
+
 Thread IDs are the root Message-IDs: ``t<NN>.1@baseline.example``.
 """
 
@@ -704,6 +709,55 @@ THREADS: dict[int, list[Msg]] = {
             ME,
             "Re: Bluewater leaving",
             "Thanks for the heads-up, Sam. Noted on our side.\n\nFacilities Committee",
+        ),
+    ],
+    34: [
+        Msg(
+            "INBOX",
+            "Mon, 18 Nov 2024 09:05:00 +0000",
+            "Wren Talbot <wren@talbotlaw.example>",
+            ME,
+            "Contract markup for Thursday",
+            "Sam,\n\nMy markup of the draft is attached in the portal. The indemnity "
+            "clause in section 9 still needs your initials, and I struck the "
+            "arbitration paragraph as we discussed. Bring questions on Thursday.\n\n"
+            "Best regards",
+        ),
+    ],
+    35: [
+        Msg(
+            "INBOX",
+            "Tue, 19 Nov 2024 07:40:00 +0000",
+            "Marigold Bakery <orders@marigoldbakery.example>",
+            ME,
+            "Your sourdough order is ready",
+            "Hi Sam,\n\nYour two sourdough loaves and the almond croissants are "
+            "boxed. Wren at the counter has them under your name until we close "
+            "at 5pm.\n\nMarigold Bakery",
+        ),
+    ],
+    36: [
+        Msg(
+            "INBOX",
+            "Wed, 20 Nov 2024 18:15:00 +0000",
+            "Foothill Hikers <hello@foothillhikers.example>",
+            ME,
+            "Saturday hike: Granite Saddle loop",
+            "Hello hikers,\n\nSaturday's walk is the Granite Saddle loop, about "
+            "seven miles. Meet at the trailhead lot at 8am. Wren is bringing the "
+            "spare trekking poles, so ask if you need a pair.\n\nFoothill Hikers",
+        ),
+    ],
+    37: [
+        Msg(
+            "INBOX",
+            "Thu, 21 Nov 2024 12:00:00 +0000",
+            "Ironworks Gym <frontdesk@ironworksgym.example>",
+            ME,
+            "Locker renewal reminder",
+            "Hi Sam,\n\nYour locker renewal is due at the end of the month. Wren "
+            "covers the front desk on weekday mornings and can take the payment "
+            "in person.\n\nIronworks Gym",
         ),
     ],
 }

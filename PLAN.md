@@ -738,10 +738,13 @@ Parked for the owner (all on hold, no work started):
   step: verify in the synthetic Maildir harness that pull-only mbsync
   with `Expunge None` does not re-download a removed `T` file.
 - #698: extraction/OCR process pool; needed before turning OCR on.
-- #692 (Starred duplicates); closing #652 and #685 as Linux-only now
-  that Linux is unsupported; #701; #697's remaining items; #699; #720
-  (P3 race left by #714); reranking (#289: measure on the rebuilt index
-  first).
+- #697's remaining items; #699; #720 (P3 race left by #714);
+  reranking (#289: measure on the rebuilt index first).
+
+Resolved since this handoff (owner, 2026-10-04): #692 (`Starred`
+excluded from the sync, #746; remove the leftover `/maildir/Starred`
+before the rebuild), #652 and #685 (closed as not planned: Linux-only),
+#701 (keyword slot, #745).
 
 Still small, no decision needed: the extractor's own `max_bytes`
 fallback still says 10 MB; `ask_mailbox` should name the resolved

@@ -27,9 +27,11 @@ Skipped unless ``BASELINE_DIR`` is set; ``make baseline`` runs both steps.
 
 import email
 import email.policy
+import itertools
 import json
 import os
 from contextlib import closing
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -83,11 +85,43 @@ def results(baseline_dir: Path, baseline_db: Database) -> dict[str, list[ThreadR
             with_evidence="evidence" in q,
             **q.get("filters", {}),
         )
-        # Results arrive sorted by fused score; ordering exact ties by
-        # thread ID keeps the snapshot from depending on how the lanes
-        # happened to insert tied threads.
-        out[q["id"]] = sorted(hits, key=lambda r: (-r.score, r.thread_id))
+        out[q["id"]] = _order_ties(hits)
     return out
+
+
+def _order_ties(hits: list[ThreadResult]) -> list[ThreadResult]:
+    """Order each run of adjacent equal scores by thread ID, keeping the
+    returned order otherwise.
+
+    This keeps the snapshot from depending on how the lanes happened to
+    insert tied threads. Only adjacent results are reordered: the keyword
+    slot (#701) places a hit above higher-scored results on purpose, so
+    a tie on either side of it must not move across it.
+    """
+    return [
+        r
+        for _, run in itertools.groupby(hits, key=lambda r: r.score)
+        for r in sorted(run, key=lambda r: r.thread_id)
+    ]
+
+
+def test_order_ties_keeps_ties_on_their_side_of_the_slot() -> None:
+    def hit(thread_id: str, score: float) -> ThreadResult:
+        return ThreadResult(
+            thread_id=thread_id,
+            subject="s",
+            participants=[],
+            folder="INBOX",
+            date_first=datetime(2024, 1, 1, tzinfo=UTC),
+            date_last=datetime(2024, 1, 2, tzinfo=UTC),
+            message_ids=[thread_id],
+            snippet="",
+            has_attachments=False,
+            score=score,
+        )
+
+    hits = [hit("b", 0.5), hit("a", 0.5), hit("slot", 0.1), hit("c", 0.5), hit("d", 0.4)]
+    assert [r.thread_id for r in _order_ties(hits)] == ["a", "b", "slot", "c", "d"]
 
 
 def _refs(hits: list[ThreadResult]) -> list[str]:

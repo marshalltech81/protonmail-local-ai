@@ -1,9 +1,9 @@
 {
-  "_comment": "Golden questions for the synthetic baseline mailbox (indexer/tests/baseline/corpus.py). Thread refs 'tNN' mean 'tNN.1@baseline.example'; message refs 'tNN.M' mean 'tNN.M@baseline.example'. required_evidence is a list of groups: every group is required, and any one thread in a group satisfies it. max_rank (1-based) bounds the first hit from any group; groups missing from the top 10 lower evidence recall instead. The recall floors are the hashed embedder's measured values rounded down: wiring checks, not semantic quality (multi-lisbon-trip finds the flight, not the hotel). vector_only questions must be answerable only by the vector lanes. unanswerable questions have no answer in the corpus: none of their absent_terms occurs in any message's subject, body or attachment (case-insensitive), and an abstaining agent must have asked for one of them.",
+  "_comment": "Golden questions for the synthetic baseline mailbox (indexer/tests/baseline/corpus.py). Thread refs 'tNN' mean 'tNN.1@baseline.example'; message refs 'tNN.M' mean 'tNN.M@baseline.example'. required_evidence is a list of groups: every group is required, and any one thread in a group satisfies it. max_rank (1-based) bounds the first hit from any group; groups missing from the top 10 lower evidence recall instead. The recall floors are the hashed embedder's measured values rounded down: wiring checks, not semantic quality. vector_only questions must be answerable only by the vector lanes. unanswerable questions have no answer in the corpus: none of their absent_terms occurs in any message's subject, body or attachment (case-insensitive), and an abstaining agent must have asked for one of them.",
   "floors": {
     "mrr": 0.9,
-    "evidence_recall_at_10": 0.98,
-    "multi_source_evidence_recall_at_10": 0.87
+    "evidence_recall_at_10": 1.0,
+    "multi_source_evidence_recall_at_10": 1.0
   },
   "search": [
     {"id": "roof-estimate", "query": "roof repair estimate", "required_evidence": [["t01"]], "max_rank": 1},
@@ -38,6 +38,7 @@
     {"id": "multi-kayak", "query": "tandem kayak boats cost headcount", "required_evidence": [["t21"], ["t22"]], "max_rank": 1},
     {"id": "multi-painting", "query": "exterior painting quote crew start date", "required_evidence": [["t25"], ["t26"]], "max_rank": 1},
     {"id": "subject-only-topic", "query": "Bluewater leaving", "required_evidence": [["t33"]], "max_rank": 3},
+    {"id": "header-only-person", "query": "Who is Wren Talbot?", "required_evidence": [["t34"]], "max_rank": 3},
     {"id": "multi-lisbon-trip", "query": "Lisbon trip flight and hotel dates", "required_evidence": [["t08"], ["t09"]], "max_rank": 2},
     {"id": "alt-cabin-address", "query": "cabin street address Hemlock Ridge", "required_evidence": [["t27", "t28"]], "max_rank": 1},
     {"id": "attach-only-rent", "query": "new monthly rent", "required_evidence": [["t23"]], "max_rank": 3, "evidence": "$2,140"},

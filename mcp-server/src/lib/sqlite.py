@@ -159,6 +159,14 @@ DEFAULT_EXCLUDED_FOLDERS = ("Trash",)
 # even on dense matches.
 _CHUNK_LANE_OVERSAMPLE = 10
 
+# 1-based rank guaranteed to the thread keyword lane's best hit in the
+# fused keyword and hybrid lists (#701). RRF with k=60 scores adjacent
+# ranks almost alike, so a thread only ``thread_fts`` matches (a person
+# named only in the headers, a topic named only in the subject) loses to
+# threads that match weakly in several lanes, and no lane weight short
+# of keyword-only ordering fixes that.
+_KEYWORD_SLOT_RANK = 3
+
 # Evidence chunks per thread that ``ask_mailbox`` puts in its prompt and
 # ``get_evidence`` returns from the same retrieval, so the audit tool
 # shows the passages the model saw (#285). Chunks are per-message, so a
@@ -520,9 +528,12 @@ class ThreadResult:
     # ``attachment_fts`` (BM25), ``thread_vec`` / ``chunk_vec`` (dense),
     # and ``rerank`` (final cross-encoder position when a reranker ran).
     # Populated additively by the RRF fusion as pure observability — it
-    # never feeds back into scoring or ordering — and surfaced by
+    # never feeds back into scoring — and surfaced by
     # ``get_evidence(include_scores=True)``. Empty for retrieval paths
     # that bypass fusion (e.g. a thread addressed directly by ID).
+    # ``thread_fts`` alone also selects the hit ``_promote_top_keyword_hit``
+    # moves up, which then carries ``keyword_slot`` (the 0-based position
+    # it was given).
     lane_ranks: dict[str, int] = field(default_factory=dict)
 
 
@@ -537,6 +548,32 @@ def _tag_lane_ranks(results: list[ThreadResult], lane: str) -> list[ThreadResult
     for rank, result in enumerate(results):
         result.lane_ranks[lane] = rank
     return results
+
+
+def _promote_top_keyword_hit(results: list[ThreadResult]) -> list[ThreadResult]:
+    """Give the best thread keyword hit a place in the top
+    ``_KEYWORD_SLOT_RANK`` of a fused list (#701).
+
+    The hit is the result with the lowest ``thread_fts`` rank still in
+    ``results``, so after a post-fusion filter it is the best survivor.
+    If it already ranks within the slot, nothing changes; otherwise it
+    moves up to the slot's last position and the rest keep their order.
+    Its score is left as fused, so it can sit above higher-scored
+    results; ``lane_ranks["keyword_slot"]`` marks why.
+    """
+    slot = _KEYWORD_SLOT_RANK - 1
+    best_pos: int | None = None
+    for pos, result in enumerate(results):
+        rank = result.lane_ranks.get("thread_fts")
+        if rank is None:
+            continue
+        if best_pos is None or rank < results[best_pos].lane_ranks["thread_fts"]:
+            best_pos = pos
+    if best_pos is None or best_pos <= slot:
+        return results
+    hit = results[best_pos]
+    hit.lane_ranks["keyword_slot"] = slot
+    return [*results[:slot], hit, *results[slot:best_pos], *results[best_pos + 1 :]]
 
 
 @dataclass
@@ -1382,6 +1419,7 @@ class Database:
             date_from=date_from,
             date_to=date_to,
             has_attachments=has_attachments,
+            keep_thread_hits=bool(from_addr or participant or authority_class),
         )
         # Per-message chunks. Oversample heavily because many chunks
         # may belong to a single thread — without enough chunks the lane
@@ -1431,6 +1469,9 @@ class Database:
                 participant,
                 authority_class,
             )
+            # Before the rerank window is cut, so a reranker sees the
+            # promoted hit and has the last word on its position.
+            filtered = _promote_top_keyword_hit(filtered)
         timings.count("filtered", len(filtered))
 
         # Decide how many candidates to keep before any rerank. The
@@ -1442,6 +1483,10 @@ class Database:
         # operator who tightened ``RERANK_CANDIDATES`` for latency
         # would silently cap recall on bigger callers like
         # ``extract_from_emails(limit=50)``.
+        # The keyword slot never widens it: every candidate is sent to
+        # the rerank provider, so ``RERANK_CANDIDATES`` caps what leaves
+        # the host. Below the slot's rank the window can cut the promoted
+        # hit (docs/architecture.md, "Keyword slot").
         if reranker is not None:
             candidates_n = max(limit, reranker.candidates)
         else:
@@ -1622,6 +1667,7 @@ class Database:
             date_from=date_from,
             date_to=date_to,
             has_attachments=has_attachments,
+            keep_thread_hits=bool(from_addr or participant or authority_class),
         )
         with timings.stage("fusion"):
             filtered = self._apply_filters(
@@ -1634,6 +1680,7 @@ class Database:
                 participant,
                 authority_class,
             )
+            filtered = _promote_top_keyword_hit(filtered)
         timings.count("filtered", len(filtered))
         return filtered[:limit]
 
@@ -2010,7 +2057,16 @@ class Database:
         date_from: str | None = None,
         date_to: str | None = None,
         has_attachments: bool | None = None,
+        keep_thread_hits: bool = False,
     ) -> list[ThreadResult]:
+        """The three keyword lanes fused into one list, cut to ``limit``.
+
+        ``keep_thread_hits`` is for callers that filter by sender,
+        participant or authority after this cut: the cut then extends
+        through the last thread keyword hit, every result at its own
+        fused position, so the keyword slot can still find the best hit
+        those filters leave (#701).
+        """
         with timings.stage("thread_fts"):
             thread_hits = self._thread_keyword_search(
                 query,
@@ -2049,9 +2105,16 @@ class Database:
         _tag_lane_ranks(chunk_hits, "chunk_fts")
         _tag_lane_ranks(attachment_hits, "attachment_fts")
         with timings.stage("fusion"):
-            return self._reciprocal_rank_fusion_threads(thread_hits, chunk_hits, attachment_hits)[
-                :limit
-            ]
+            fused = _promote_top_keyword_hit(
+                self._reciprocal_rank_fusion_threads(thread_hits, chunk_hits, attachment_hits)
+            )
+            if not keep_thread_hits:
+                return fused[:limit]
+            # Positions are kept, not compacted: the outer fusion credits
+            # each result by its place in this list. At most three times
+            # ``limit`` results, the lanes' combined size.
+            last = max((i for i, r in enumerate(fused) if "thread_fts" in r.lane_ranks), default=-1)
+            return fused[: max(limit, last + 1)]
 
     def _thread_keyword_search(
         self,

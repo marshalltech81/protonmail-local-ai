@@ -326,7 +326,7 @@ chunks (extracted PDF / OCR / document text) are included — unlike
 | `from_name` | string | none | Sender name or role, resolved through `find_contact` exactly as `ask_mailbox` resolves it, so an answer scoped with it can be audited (the `find_contact` tool counts every role, so its top match can differ). An unmatched name returns no evidence. `from_addr` wins if both are given |
 | `max_threads` | int | none | Rank threads exactly as `ask_mailbox` does with this `max_threads` and return their evidence; clamped to `[1, 10]` like `ask_mailbox`'s. Omit it to rank by `limit` instead |
 | `limit` | int | `12`, or `max_threads` × 6 | Max evidence chunks to return (with `max_threads`, a smaller value keeps the first `limit` chunks of the audit set in rank order); clamped to `[1, 60]`, the most `ask_mailbox` can put in one prompt (10 threads × 6 chunks), so the cap never cuts below an answer's evidence set |
-| `include_scores` | bool | `false` | Annotate each thread with the retrieval lanes that matched (`thread_fts` / `chunk_fts` / `attachment_fts` / `thread_vec` / `chunk_vec` / `rerank`) and each chunk with its vector distance |
+| `include_scores` | bool | `false` | Annotate each thread with the retrieval lanes that matched (`thread_fts` / `chunk_fts` / `attachment_fts` / `thread_vec` / `chunk_vec` / `rerank`; `keyword_slot` marks a thread moved up as the best thread keyword hit) and each chunk with its vector distance |
 
 The mailbox-wide path runs the same hybrid retrieval as `ask_mailbox`
 (the same code), with the same cap of six chunks per thread, and
@@ -748,8 +748,10 @@ Retrieves relevant threads and synthesizes an answer.
 Retrieval ranks by text. A person named only in the From / To / Cc
 headers of their threads matches only the thread keyword lane, and
 threads that mention the name in their bodies outrank them in hybrid
-fusion ([#701](https://github.com/marshalltech81/protonmail-local-ai/issues/701)),
-so "who is Dana Example?" can come back "Not found". The tool
+fusion. The keyword slot
+([#701](https://github.com/marshalltech81/protonmail-local-ai/issues/701))
+keeps only the single best such thread in the top three, so "who is
+Dana Example?" can still miss the person's other threads. The tool
 description tells the calling model to resolve the person with
 `find_contact` and pass the address as `participant`, which keeps the
 evidence to the threads the person is on, including those they only

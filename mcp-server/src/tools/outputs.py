@@ -291,7 +291,8 @@ class EvidenceThread(_Output):
     lane_ranks: dict[str, int] | None = Field(
         description=(
             "Only with include_scores on the mailbox-wide path: retrieval lane -> "
-            "0-based rank the thread held in that lane before fusion."
+            "0-based rank the thread held in that lane before fusion. keyword_slot "
+            "marks a thread moved up as the best thread keyword hit."
         )
     )
     retrieval_score: float | None = Field(description="Only with include_scores.")

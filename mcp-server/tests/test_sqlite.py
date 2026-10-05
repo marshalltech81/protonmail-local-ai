@@ -3716,6 +3716,163 @@ class TestAddrMatchHelpers:
         assert not _matches_sender(r, "b@example.com")
 
 
+class TestKeywordSlot:
+    """The thread keyword lane's best hit is guaranteed a place in the top
+    three (#701): RRF otherwise buries a thread only that lane matches."""
+
+    @staticmethod
+    def _ranked(*thread_fts_ranks):
+        """Results in fused order; each carries its thread_fts rank, or
+        none when that lane did not match it."""
+        from datetime import UTC, datetime
+
+        from src.lib.sqlite import ThreadResult
+
+        results = []
+        for i, lane_rank in enumerate(thread_fts_ranks):
+            r = ThreadResult(
+                thread_id=f"t{i}",
+                subject="s",
+                participants=[],
+                folder="INBOX",
+                date_first=datetime(2024, 1, 1, tzinfo=UTC),
+                date_last=datetime(2024, 1, 2, tzinfo=UTC),
+                message_ids=[f"t{i}"],
+                snippet="",
+                has_attachments=False,
+            )
+            if lane_rank is not None:
+                r.lane_ranks["thread_fts"] = lane_rank
+            results.append(r)
+        return results
+
+    def test_buried_top_keyword_hit_moves_to_rank_three(self):
+        from src.lib.sqlite import _promote_top_keyword_hit
+
+        results = self._ranked(1, 2, None, 3, None, 0, 4)
+        promoted = _promote_top_keyword_hit(results)
+        # t5 held thread_fts rank 0 at fused position 6; the others keep
+        # their relative order.
+        assert [r.thread_id for r in promoted] == ["t0", "t1", "t5", "t2", "t3", "t4", "t6"]
+        assert promoted[2].lane_ranks["keyword_slot"] == 2
+
+    def test_hit_already_in_top_three_is_left_alone(self):
+        from src.lib.sqlite import _promote_top_keyword_hit
+
+        results = self._ranked(1, 0, 2, 3)
+        promoted = _promote_top_keyword_hit(results)
+        assert [r.thread_id for r in promoted] == ["t0", "t1", "t2", "t3"]
+        assert all("keyword_slot" not in r.lane_ranks for r in promoted)
+
+    def test_best_surviving_hit_is_promoted_when_lane_top_was_filtered_out(self):
+        from src.lib.sqlite import _promote_top_keyword_hit
+
+        # thread_fts rank 0 is absent (a post-fusion filter removed it).
+        results = self._ranked(None, None, None, 5, 2)
+        promoted = _promote_top_keyword_hit(results)
+        assert [r.thread_id for r in promoted] == ["t0", "t1", "t4", "t2", "t3"]
+
+    def test_no_thread_keyword_hits_changes_nothing(self):
+        from src.lib.sqlite import _promote_top_keyword_hit
+
+        results = self._ranked(None, None, None, None)
+        assert [r.thread_id for r in _promote_top_keyword_hit(results)] == [
+            "t0",
+            "t1",
+            "t2",
+            "t3",
+        ]
+
+    def test_keyword_list_keeps_the_hit_through_its_fetch_cut(self, seeded_db: Database):
+        """The slot is taken before the keyword list is cut to its fetch
+        limit, or a buried hit would never reach hybrid fusion."""
+        from unittest.mock import patch
+
+        thread_lane = self._ranked(0, 1, 2, 3)
+        # The other two keyword lanes agree on t1..t3 and never match t0,
+        # so plain RRF ranks t0 last.
+        others = [thread_lane[1], thread_lane[2], thread_lane[3]]
+        with (
+            patch.object(seeded_db, "_thread_keyword_search", return_value=thread_lane),
+            patch.object(seeded_db, "_chunk_keyword_search", return_value=list(others)),
+            patch.object(seeded_db, "_attachment_keyword_search", return_value=list(others)),
+        ):
+            fused = seeded_db._keyword_search("anything", 3)
+        # With no post-fusion filter, the list is cut at its limit.
+        assert [r.thread_id for r in fused] == ["t1", "t2", "t0"]
+
+    def test_keyword_list_keeps_thread_hits_past_its_cut_for_later_filters(
+        self, seeded_db: Database
+    ):
+        """Sender, participant and authority filters run after the
+        keyword list is cut, so with one of them the cut extends through
+        the last thread keyword hit, each result at its own fused
+        position: the slot then finds the best hit the filters leave,
+        and the outer fusion credits no hit above its rank."""
+        from unittest.mock import patch
+
+        thread_lane = self._ranked(0, 1, 2, 3, 4)
+        for r in thread_lane:
+            r.senders = ["other@example.com"]
+        thread_lane[4].senders = ["wanted@example.com"]
+        # The other lanes agree on t0..t3 and add a chunk-only thread,
+        # so t4 fuses last, below t9.
+        extra = self._ranked(None)[0]
+        extra.thread_id = "t9"
+        others = [*thread_lane[:4], extra]
+        with (
+            patch.object(seeded_db, "_thread_keyword_search", return_value=thread_lane),
+            patch.object(seeded_db, "_chunk_keyword_search", return_value=list(others)),
+            patch.object(seeded_db, "_attachment_keyword_search", return_value=list(others)),
+        ):
+            plain = seeded_db._keyword_search("anything", 3)
+            kept = seeded_db._keyword_search("anything", 3, keep_thread_hits=True)
+            found = seeded_db.keyword_search("anything", from_addr="wanted@example.com", limit=1)
+        assert [r.thread_id for r in plain] == ["t0", "t1", "t2"]
+        assert [r.thread_id for r in kept] == ["t0", "t1", "t2", "t3", "t9", "t4"]
+        assert [r.thread_id for r in found] == ["t4"]
+
+    def test_hybrid_keeps_thread_hits_only_with_a_post_fusion_filter(self, seeded_db: Database):
+        from unittest.mock import patch
+
+        calls: list[bool] = []
+
+        def spy(*args, keep_thread_hits=False, **kwargs):
+            calls.append(keep_thread_hits)
+            return []
+
+        with (
+            patch.object(seeded_db, "_keyword_search", side_effect=spy),
+            patch.object(seeded_db, "_vector_lanes", return_value=([], [])),
+        ):
+            seeded_db.hybrid_search("q", [0.0] * 4, limit=5)
+            seeded_db.hybrid_search("q", [0.0] * 4, limit=5, folders=["INBOX"])
+            seeded_db.hybrid_search("q", [0.0] * 4, limit=5, from_addr="a@example.com")
+            seeded_db.hybrid_search("q", [0.0] * 4, limit=5, participant="a@example.com")
+            seeded_db.hybrid_search("q", [0.0] * 4, limit=5, authority_class="counsel")
+        assert calls == [False, False, True, True, True]
+
+    def test_rerank_window_honours_rerank_candidates(self, seeded_db: Database):
+        """The slot never widens the rerank window: every candidate is
+        sent to the rerank provider, so ``RERANK_CANDIDATES`` is a
+        ceiling on what leaves the host. A window below the slot can cut
+        the promoted hit; that is documented."""
+        from unittest.mock import patch
+
+        keyword = self._ranked(1, 2, 3, 0)
+        reranker = _IndexScoringReranker({}, candidates=1)
+        with (
+            patch.object(seeded_db, "_keyword_search", return_value=keyword),
+            patch.object(seeded_db, "_vector_lanes", return_value=([], [])),
+        ):
+            results = seeded_db.hybrid_search(
+                "anything", [0.0, 0.0, 0.0, 0.0], limit=1, reranker=reranker
+            )
+        assert reranker._last_docs is not None
+        assert len(reranker._last_docs) == 1
+        assert len(results) == 1
+
+
 class TestLaneProvenance:
     """RRF fusion records which lanes lifted each thread into ranking, as
     pure observability for get_evidence(include_scores=True). These tests
