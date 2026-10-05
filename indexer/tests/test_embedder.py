@@ -10,7 +10,7 @@ import logging
 import threading
 import time
 import traceback
-from concurrent.futures import ALL_COMPLETED
+from concurrent.futures import ALL_COMPLETED, wait
 from types import SimpleNamespace
 
 import httpx2
@@ -610,8 +610,8 @@ class TestEmbedConcurrency:
         """#720: a request that fails after the calling thread's last
         check and before the next submit must not let that next request
         reach the provider. The patched pool's third ``submit`` lets
-        request "0" fail and waits until the failure is recorded before
-        submitting request "2"."""
+        request "0" fail and waits until its future is done, which is
+        after the failure is recorded, before submitting request "2"."""
         import src.embedder as embedder_module
 
         emb = _make_embedder(batch_size=1, concurrency=2)
@@ -619,7 +619,6 @@ class TestEmbedConcurrency:
         calls: list[str] = []
         lock = threading.Lock()
         release_first = threading.Event()
-        first_failed = threading.Event()
 
         def fake_create(**kwargs):
             text = kwargs["input"][0]
@@ -631,30 +630,24 @@ class TestEmbedConcurrency:
             return _embed_response([[1.0]])
 
         _patch_create(emb, fake_create)
-        original = emb._embed_one_batch
-
-        def tracked(chunk):
-            try:
-                return original(chunk)
-            except Exception:
-                first_failed.set()
-                raise
-
-        emb._embed_one_batch = tracked  # type: ignore[method-assign]
 
         real_pool = embedder_module.ThreadPoolExecutor
 
         class _FailBeforeThirdSubmit(real_pool):
             submits = 0
+            futures: list = []
 
             def submit(self, fn, /, *args, **kwargs):
                 type(self).submits += 1
                 if type(self).submits == 3:
                     release_first.set()
-                    assert first_failed.wait(timeout=5)
-                    # Let the failing worker finish recording it.
-                    time.sleep(0.05)
-                return super().submit(fn, *args, **kwargs)
+                    # Done only once the worker has recorded the failure
+                    # and re-raised it: no timing assumption.
+                    done, _ = wait([type(self).futures[0]], timeout=5)
+                    assert done
+                future = super().submit(fn, *args, **kwargs)
+                type(self).futures.append(future)
+                return future
 
         monkeypatch.setattr(embedder_module, "ThreadPoolExecutor", _FailBeforeThirdSubmit)
         with pytest.raises(APIStatusError):
