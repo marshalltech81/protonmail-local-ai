@@ -182,7 +182,8 @@ class _OracleAnswerer:
 
 
 class _StubJudge:
-    """Approves every claim the answer cites; never touches the network."""
+    """Approves one claim per numbered statement that cites a passage,
+    naming that statement and its labels; never touches the network."""
 
     def __init__(self) -> None:
         self.case: Case | None = None
@@ -190,14 +191,21 @@ class _StubJudge:
     async def complete(self, system: str, user: str) -> str:
         case = self.case
         assert case is not None
-        answer = user.split("<untrusted_answer>", 1)[1]
-        cited = sorted(set(re.findall(r"\[(E\d+)\]", answer)))
+        statements = re.findall(r'<untrusted_answer statement="(\d+)">\n(.*?)\n</untrusted', user)
+        claims = [
+            {
+                "claim": "c",
+                "statement": int(index),
+                "cited": sorted(set(re.findall(r"\[(E\d+)\]", text))),
+                "verdict": "supported",
+                "explanation": "ok",
+            }
+            for index, text in statements
+            if "[E" in text
+        ]
         return json.dumps(
             {
-                "claims": [
-                    {"claim": "c", "cited": [lbl], "verdict": "supported", "explanation": "ok"}
-                    for lbl in cited
-                ],
+                "claims": claims,
                 "facts": [{"id": f.id, "covered": True} for f in case.expected_facts],
                 "prohibited": [
                     {"index": i, "asserted": False} for i in range(1, len(case.must_not_assert) + 1)

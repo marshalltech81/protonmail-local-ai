@@ -297,22 +297,25 @@ the prompt and cited, so a failure is attributed to `retrieval`,
 `prompt_assembly`, `synthesis`, `evaluator_infrastructure` or
 `answer_infrastructure` (several may apply; `unknown` otherwise).
 
-The judge (`judge.py`, rubric `ask-rubric-2`) receives the question,
+The judge (`judge.py`, rubric `ask-rubric-3`) receives the question,
 expected handling, reference facts, prohibited assertions, which
-dimensions apply, every passage the answerer received and the answer;
-the passages and the answer sit in `<untrusted_evidence>` /
+dimensions apply, every passage the answerer received, the answer and
+the answer's structured `statements` numbered from 1; the passages, the
+answer and each statement sit in `<untrusted_evidence>` /
 `<untrusted_answer>` blocks they cannot close, under a system prompt
 that tells the judge to ignore instructions inside them. It returns a
-JSON verdict: per claim `supported | contradicted |
-insufficient_evidence` judged only against the cited passages
-(**groundedness**), per reference fact covered or not and per
+JSON verdict: per claim the number of the statement it comes from
+(`statement`), the labels that statement cites (`cited`) and
+`supported | contradicted | insufficient_evidence` judged only against
+the cited passages (**groundedness**), per reference fact covered or not and per
 prohibited assertion asserted or not (**correctness**), and `pass |
 fail | not_applicable` for factual correctness, citation support,
 completeness, temporal reasoning, conflict/uncertainty and relevance. A
 claim that matches the reference but not its citations is still
-unsupported. The verdict is validated: a claim whose labels are not all
-cited by one statement of the answer (the tool's structured
-`statements`, supplied passages only), missing
+unsupported. The verdict is validated: a claim whose `statement` is not
+the number of one of the answer's statements, or whose labels that
+statement does not all cite (supplied passages only), so the judge
+cannot support one statement with a passage cited for another, missing
 facts or dimensions, an applicable dimension marked not applicable, no
 claims for a non-abstaining answer, malformed output, a timeout, a
 cut-off reply, a provider failure or input over the limit are explicit
