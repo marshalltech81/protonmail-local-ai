@@ -1099,6 +1099,13 @@ class TestCli:
             (["cases", 0, "id"], "MARKER-677 x"),
             (["cases", 0, "category"], "MARKER-677 x"),
             (["cases", 0, "held_out"], "MARKER-677"),
+            # Codex round 2 on #761: the flags compare turns into
+            # regressions and improvements.
+            (["cases", 0, "status"], ["MARKER-677"]),
+            (["cases", 0, "deterministic", "passed"], "MARKER-677"),
+            (["cases", 0, "judge", "status"], ["MARKER-677"]),
+            (["cases", 0, "judge", "groundedness_pass"], "MARKER-677"),
+            (["cases", 0, "judge", "correctness_pass"], "MARKER-677"),
         ],
     )
     def test_compare_rejects_malformed_nested_shapes(
@@ -1125,6 +1132,18 @@ class TestCli:
             assert cli.main(["compare", *argv]) == cli.EXIT_CONFIG
             out, err = capsys.readouterr()
             assert err == "answer evaluation: malformed answer evaluation report\n"
+            assert "MARKER-677" not in out + err
+
+    def test_compare_rejects_a_non_utf8_report(self, chunked_db, tmp_path, capsys):
+        """Codex round 2 on #761: invalid UTF-8 raised an uncaught
+        UnicodeDecodeError instead of exit 3."""
+        good = self._report(chunked_db, tmp_path, "a.json")
+        bad = tmp_path / "bad.json"
+        bad.write_bytes(b'{"kind": "answer_eval_run", "x": "\xff\xfeMARKER-677"}')
+        for argv in ([str(good), str(bad)], [str(bad), str(good)]):
+            assert cli.main(["compare", *argv]) == cli.EXIT_CONFIG
+            out, err = capsys.readouterr()
+            assert err == "answer evaluation: unreadable input (UnicodeDecodeError)\n"
             assert "MARKER-677" not in out + err
 
     def test_run_rejects_detail_overwriting_the_report(self, tmp_path, capsys):

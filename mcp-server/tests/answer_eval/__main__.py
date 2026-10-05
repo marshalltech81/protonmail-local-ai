@@ -185,6 +185,10 @@ def _is_rate(value: Any) -> bool:
     )
 
 
+def _is_flag(value: Any) -> bool:
+    return value is None or isinstance(value, bool)
+
+
 def _is_name(value: Any) -> bool:
     return isinstance(value, str) and _NAME.fullmatch(value) is not None
 
@@ -196,8 +200,9 @@ def _judge_ok(judge: Any, rates: tuple[str, ...]) -> bool:
 def _report_shape_ok(data: dict[str, Any]) -> bool:
     """Every field ``compare`` reads or prints has the type the harness
     writes (#677): counts are non-negative integers, rates finite numbers
-    or null, flags booleans, and case IDs and categories plain names, so
-    a wrong-typed value is refused instead of printed."""
+    or null, flags booleans (or null), statuses strings, and case IDs and
+    categories plain names, so a wrong-typed value is refused instead of
+    printed or turned into a regression or improvement."""
     counts, aggregates, cases = data.get("counts"), data.get("aggregates"), data.get("cases")
     if not isinstance(data.get("identity"), dict) or not isinstance(counts, dict):
         return False
@@ -231,8 +236,18 @@ def _report_shape_ok(data: dict[str, Any]) -> bool:
             and _is_name(case.get("id"))
             and _is_name(case.get("category"))
             and isinstance(case.get("held_out"), bool)
+            and isinstance(case.get("status"), str)
             and isinstance(case.get("deterministic"), dict)
             and isinstance(case.get("judge"), dict)
+        ):
+            return False
+        # The flags ``_case_flags`` compares (#677, Codex round 2 on #761).
+        judge = case["judge"]
+        if not (
+            _is_flag(case["deterministic"].get("passed"))
+            and isinstance(judge.get("status"), str)
+            and _is_flag(judge.get("groundedness_pass"))
+            and _is_flag(judge.get("correctness_pass"))
         ):
             return False
     return True
@@ -297,7 +312,7 @@ def main(argv: list[str] | None = None) -> int:
     except (CaseError, ConfigError, NonSyntheticIndexError) as e:
         print(f"answer evaluation: {e}", file=sys.stderr)
         return EXIT_CONFIG
-    except (OSError, json.JSONDecodeError, sqlite3.Error, KeyError, TypeError) as e:
+    except (OSError, UnicodeError, json.JSONDecodeError, sqlite3.Error, KeyError, TypeError) as e:
         # Unreadable or malformed case, report or index files. The type
         # only: these messages can quote file contents.
         print(f"answer evaluation: unreadable input ({type(e).__name__})", file=sys.stderr)
