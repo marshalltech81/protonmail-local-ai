@@ -134,6 +134,18 @@ def test_index_is_recognized_as_synthetic(baseline_db: Database) -> None:
         "UPDATE messages SET claimant_id = claimant_id || 'x' WHERE rowid = "
         "(SELECT MIN(rowid) FROM messages)",
         "DELETE FROM messages WHERE rowid = (SELECT MIN(rowid) FROM messages)",
+        # #675: a consistent index whose claimant suffixes are 8 hex
+        # digits, not the indexer's 16.
+        "".join(
+            f"UPDATE {table} SET claimant_id = substr(claimant_id, 1, instr(claimant_id, '#') + 8);"
+            for table in (
+                "messages",
+                "message_thread_map",
+                "message_participants",
+                "message_chunks",
+                "attachments",
+            )
+        ),
     ],
 )
 def test_tampered_index_is_refused(baseline_dir: Path, tmp_path: Path, tamper: str) -> None:
@@ -144,7 +156,7 @@ def test_tampered_index_is_refused(baseline_dir: Path, tmp_path: Path, tamper: s
     conn.enable_load_extension(True)
     sqlite_vec.load(conn)
     conn.execute("PRAGMA foreign_keys = OFF")
-    conn.execute(tamper)
+    conn.executescript(tamper)
     conn.commit()
     conn.close()
     with pytest.raises(NonSyntheticIndexError):

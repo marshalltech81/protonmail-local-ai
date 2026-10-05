@@ -198,8 +198,9 @@ containers or the tool outputs.
 
 **Synthetic data only.** The runner refuses any index that is not the
 committed synthetic corpus: its claimant IDs must be exactly those
-computed from `indexer/tests/baseline/corpus.py` (Message-ID plus a hash
-of each message's bytes), each message's stored Message-ID and its sent
+computed from `indexer/tests/baseline/corpus.py` (Message-ID plus the
+first `CLAIMANT_HASH_CHARS` hex digits, read from `indexer/src/parser.py`,
+of the SHA-256 of each message's bytes), each message's stored Message-ID and its sent
 and delivery dates must be the corpus message's (the dates as the
 indexer normalizes them), and every indexed
 text a prompt can carry
