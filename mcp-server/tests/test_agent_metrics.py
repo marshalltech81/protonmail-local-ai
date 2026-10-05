@@ -8,7 +8,14 @@ from __future__ import annotations
 
 import pytest
 
-from tests.agent_metrics import Scenario, is_held_out, score_trace, summarize
+from tests.agent_metrics import (
+    OutstandingAction,
+    OutstandingTruth,
+    Scenario,
+    is_held_out,
+    score_trace,
+    summarize,
+)
 
 
 def _scenario(**overrides: object) -> Scenario:
@@ -894,3 +901,496 @@ class TestSummarize:
             _scenario(), _trace([_search(["a.1@x.example"])], cited=["a.1@x.example"])
         )
         assert "Failures by category: none" in summarize([good])
+
+
+# Outstanding-items scoring (#798). A synthetic ground truth with one
+# open action (a.2 sets its due date, superseding a.3's earlier one), one
+# action closed by another message (c.1), a disputed action with a source
+# on each side (d.1, d.2), an action whose only evidence the index loses
+# (l.1), a decoy sharing counsel's display name (x.1) and a message whose
+# attachment failed to extract (f.1).
+def _truth(**overrides: object) -> OutstandingTruth:
+    fields: dict = {
+        "actions": [
+            OutstandingAction(
+                id="open-1",
+                owner="counsel_a",
+                status="open",
+                due="2026-09-04",
+                required_sources=["a.2@x.example"],
+                superseded_sources=["a.3@x.example"],
+            ),
+            OutstandingAction(
+                id="closed-1",
+                owner="management",
+                status="closed",
+                due=None,
+                required_sources=["c.1@x.example"],
+            ),
+            OutstandingAction(
+                id="disputed-1",
+                owner="management",
+                status="disputed",
+                due=None,
+                required_sources=["d.1@x.example", "d.2@x.example"],
+            ),
+            OutstandingAction(
+                id="lost-1",
+                owner="counsel_b",
+                status="open",
+                due=None,
+                required_sources=["l.1@x.example"],
+                known_loss="#795",
+            ),
+        ],
+        "forbidden_sources": ["x.1@x.example"],
+        "completeness_blockers": ["f.1@x.example", "l.1@x.example"],
+    }
+    fields.update(overrides)
+    return OutstandingTruth(**fields)
+
+
+def _outstanding(**overrides: object) -> Scenario:
+    fields: dict = {
+        "category": "outstanding_items",
+        "expected_tools": ["query_messages"],
+        "required_evidence": [],
+        "max_calls": 10,
+        "outstanding": _truth(),
+    }
+    fields.update(overrides)
+    return _scenario(**fields)
+
+
+def _claim(m: str) -> str:
+    return f"{m}#0000abcd"
+
+
+_LISTED = ["a.2", "a.3", "c.1", "d.1", "d.2", "l.1", "x.1", "f.1"]
+
+
+def _outstanding_answer(**overrides: object) -> dict:
+    answer: dict = {
+        "text": "synthetic",
+        "items": [
+            {
+                "action": "open-1",
+                "owner": "counsel_a",
+                "status": "open",
+                "due": "2026-09-04",
+                "cited": [_claim("a.2@x.example")],
+            },
+            {
+                "action": "disputed-1",
+                "owner": "management",
+                "status": "disputed",
+                "due": None,
+                "cited": [_claim("d.1@x.example"), _claim("d.2@x.example")],
+            },
+        ],
+        "excluded": [
+            {"action": "closed-1", "status": "closed", "cited": [_claim("c.1@x.example")]},
+        ],
+        "complete": False,
+        "limitations": [_claim("f.1@x.example"), _claim("l.1@x.example")],
+    }
+    answer.update(overrides)
+    return answer
+
+
+def _thread_read(messages: list[str], omitted: int = 0) -> dict:
+    """A get_thread call returning each of ``messages`` with its body,
+    ``omitted`` characters of each cut off."""
+    return {
+        "tool": "get_thread",
+        "arguments": {"thread_id": "t.1@x.example"},
+        "result": {
+            "thread": {"thread_id": "t.1@x.example"},
+            "messages": [
+                {
+                    "message_id": m,
+                    "claimant_id": _claim(m),
+                    "body": "",
+                    "body_omitted_chars": omitted,
+                }
+                for m in messages
+            ],
+        },
+    }
+
+
+def _outstanding_trace(
+    answer: dict | None = None,
+    *,
+    listed: list[str] | None = None,
+    read: list[str] | None = None,
+) -> dict:
+    """A listing of ``listed`` (default ``_LISTED``) and a get_thread read
+    of ``read`` (default: whatever was listed), then ``answer``."""
+    answer = _outstanding_answer() if answer is None else answer
+    answer["cited"] = [c for entry in answer["items"] + answer["excluded"] for c in entry["cited"]]
+    listed = _LISTED if listed is None else listed
+    page = _page(
+        [f"{m}@x.example" for m in listed],
+        has_more=False,
+        filters={"participant": "counsel@x.example", "limit": 100},
+    )
+    reads = [f"{m}@x.example" for m in (listed if read is None else read)]
+    return {"scenario": "s1", "calls": [page, _thread_read(reads)], "answer": answer}
+
+
+def _attachment_passage(message_id: str, source: str = "attachment") -> dict:
+    return {
+        "tool": "get_evidence",
+        "arguments": {"query": f"q {source}", "thread_id": "t.1@x.example"},
+        "result": {
+            "threads": [
+                {
+                    "thread_id": "t.1@x.example",
+                    "chunks": [
+                        {
+                            "chunk_id": f"c-{message_id}",
+                            "message_id": message_id,
+                            "claimant_id": _claim(message_id),
+                            "source": source,
+                        }
+                    ],
+                }
+            ]
+        },
+    }
+
+
+class TestOutstandingReads:
+    """Review round 1: evidence counts as read only when a result returned
+    its content, never because a listing named the message."""
+
+    def test_a_listing_alone_is_not_a_read(self) -> None:
+        read = [m for m in _LISTED if m != "a.2"]
+        score = score_trace(_outstanding(), _outstanding_trace(read=read))
+        assert score.required_evidence_coverage == 3 / 4
+        assert score.conclusion_citation_support == 2 / 3
+        assert {"required_evidence_coverage", "conclusion_citation_support"} <= set(score.failures)
+
+    def test_a_cut_get_thread_body_is_not_a_read(self) -> None:
+        read = [m for m in _LISTED if m != "a.2"]
+        trace = _outstanding_trace(read=read)
+        trace["calls"].append(_thread_read(["a.2@x.example"], omitted=1_200))
+        assert score_trace(_outstanding(), trace).required_evidence_coverage == 3 / 4
+
+    def test_a_get_message_read_to_the_end_is_a_read(self) -> None:
+        read = [m for m in _LISTED if m != "a.2"]
+        trace = _outstanding_trace(read=read)
+        trace["calls"].append(_read("a.2@x.example", 0, 20_000))
+        assert score_trace(_outstanding(), trace).required_evidence_coverage == 3 / 4
+        trace["calls"].append(_read("a.2@x.example", 20_000, None))
+        score = score_trace(_outstanding(), trace)
+        assert score.required_evidence_coverage == 1.0
+        assert score.failures == []
+
+    def test_attachment_evidence_needs_an_attachment_passage(self) -> None:
+        # c.1's decisive text is in its attachment: its body read to the
+        # end, or a body passage, does not show it.
+        scenario = _outstanding(outstanding=_truth(attachment_sources=["c.1@x.example"]))
+        trace = _outstanding_trace()
+        trace["calls"].append(_attachment_passage("c.1@x.example", source="body"))
+        score = score_trace(scenario, trace)
+        assert score.required_evidence_coverage == 3 / 4
+        assert score.conclusion_citation_support == 2 / 3
+        trace["calls"].append(_attachment_passage("c.1@x.example"))
+        assert score_trace(scenario, trace).failures == []
+
+    def test_a_search_attachments_hit_is_not_a_read(self) -> None:
+        scenario = _outstanding(outstanding=_truth(attachment_sources=["c.1@x.example"]))
+        trace = _outstanding_trace()
+        trace["calls"].append(
+            {
+                "tool": "search_attachments",
+                "arguments": {"query": "q"},
+                "result": {
+                    "results": [
+                        {
+                            "message_id": "c.1@x.example",
+                            "claimant_id": _claim("c.1@x.example"),
+                            "thread_id": "t.1@x.example",
+                            "extraction_status": "success",
+                            "text_snippet": "preview",
+                        }
+                    ]
+                },
+            }
+        )
+        assert score_trace(scenario, trace).required_evidence_coverage == 3 / 4
+
+
+class TestOutstandingItems:
+    def test_the_reference_answer_scores_clean(self) -> None:
+        score = score_trace(_outstanding(), _outstanding_trace())
+        assert score.action_recall == 1.0
+        assert score.action_precision == 1.0
+        assert score.owner_accuracy == 1.0
+        assert score.status_accuracy == 1.0
+        assert score.closures_supported is True
+        assert score.deadlines_supported is True
+        assert score.conclusion_citation_support == 1.0
+        assert score.required_evidence_coverage == 1.0
+        assert score.forbidden_sources_avoided is True
+        assert score.completeness_claim_truthful is True
+        assert score.failures == []
+
+    def test_a_missed_action_lowers_recall(self) -> None:
+        answer = _outstanding_answer()
+        answer["items"] = answer["items"][:1]
+        score = score_trace(_outstanding(), _outstanding_trace(answer))
+        assert score.action_recall == 2 / 3
+        assert "action_recall" in score.failures
+
+    def test_a_lost_action_counts_when_listed_or_disclosed(self) -> None:
+        answer = _outstanding_answer(limitations=[_claim("f.1@x.example")])
+        answer["items"].append(
+            {
+                "action": "lost-1",
+                "owner": "counsel_b",
+                "status": "open",
+                "due": None,
+                "cited": [_claim("l.1@x.example")],
+            }
+        )
+        assert score_trace(_outstanding(), _outstanding_trace(answer)).action_recall == 1.0
+        # Neither listed nor disclosed: missed, and its blocker undisclosed.
+        answer = _outstanding_answer(limitations=[_claim("f.1@x.example")])
+        score = score_trace(_outstanding(), _outstanding_trace(answer))
+        assert score.action_recall == 2 / 3
+        assert score.completeness_claim_truthful is False
+
+    def test_a_duplicate_task_lowers_precision(self) -> None:
+        # The same request quoted in several replies is one task.
+        answer = _outstanding_answer()
+        answer["items"].append(dict(answer["items"][0]))
+        score = score_trace(_outstanding(), _outstanding_trace(answer))
+        assert score.action_recall == 1.0
+        assert score.action_precision == 2 / 3
+        assert "action_precision" in score.failures
+
+    def test_listing_a_closed_action_as_outstanding_fails(self) -> None:
+        answer = _outstanding_answer()
+        answer["items"].append(
+            {
+                "action": "closed-1",
+                "owner": "management",
+                "status": "open",
+                "due": None,
+                "cited": [_claim("c.1@x.example")],
+            }
+        )
+        score = score_trace(_outstanding(), _outstanding_trace(answer))
+        assert score.action_precision == 2 / 3
+        assert "action_precision" in score.failures
+
+    def test_an_unknown_action_lowers_precision_and_support(self) -> None:
+        answer = _outstanding_answer()
+        answer["items"].append(
+            {"action": "invented", "owner": "counsel_a", "status": "open", "due": None, "cited": []}
+        )
+        score = score_trace(_outstanding(), _outstanding_trace(answer))
+        assert score.action_precision == 2 / 3
+        assert score.conclusion_citation_support == 3 / 4
+
+    def test_a_wrong_owner_fails(self) -> None:
+        answer = _outstanding_answer()
+        answer["items"][1]["owner"] = "counsel_a"
+        score = score_trace(_outstanding(), _outstanding_trace(answer))
+        assert score.owner_accuracy == 0.5
+        assert "owner_accuracy" in score.failures
+        assert score.action_recall == 1.0
+
+    def test_a_wrong_status_fails(self) -> None:
+        answer = _outstanding_answer()
+        answer["items"][1]["status"] = "open"
+        score = score_trace(_outstanding(), _outstanding_trace(answer))
+        assert score.status_accuracy == 0.5
+        assert "status_accuracy" in score.failures
+
+    def test_excluding_an_open_action_as_closed_is_an_unsupported_closure(self) -> None:
+        answer = _outstanding_answer()
+        moved = answer["items"].pop(0)
+        answer["excluded"].append({"action": "open-1", "status": "closed", "cited": moved["cited"]})
+        score = score_trace(_outstanding(), _outstanding_trace(answer))
+        assert score.closures_supported is False
+        assert "closures_supported" in score.failures
+
+    def test_an_item_marked_closed_is_an_unsupported_closure(self) -> None:
+        answer = _outstanding_answer()
+        answer["items"][0]["status"] = "closed"
+        score = score_trace(_outstanding(), _outstanding_trace(answer))
+        assert score.closures_supported is False
+
+    @pytest.mark.parametrize("due", ["2026-08-14", "2026-10-01"], ids=["superseded", "invented"])
+    def test_a_due_date_other_than_the_ground_truth_fails(self, due: str) -> None:
+        answer = _outstanding_answer()
+        answer["items"][0]["due"] = due
+        score = score_trace(_outstanding(), _outstanding_trace(answer))
+        assert score.deadlines_supported is False
+        assert "deadlines_supported" in score.failures
+
+    def test_a_due_date_on_an_action_without_one_fails(self) -> None:
+        answer = _outstanding_answer()
+        answer["items"][1]["due"] = "2026-07-01"
+        assert score_trace(_outstanding(), _outstanding_trace(answer)).deadlines_supported is False
+
+    def test_leaving_out_a_due_date_is_not_an_invented_one(self) -> None:
+        answer = _outstanding_answer()
+        answer["items"][0]["due"] = None
+        assert score_trace(_outstanding(), _outstanding_trace(answer)).deadlines_supported is True
+
+    def test_citing_only_the_superseded_source_is_unsupported(self) -> None:
+        answer = _outstanding_answer()
+        answer["items"][0]["cited"] = [_claim("a.3@x.example")]
+        score = score_trace(_outstanding(), _outstanding_trace(answer))
+        assert score.conclusion_citation_support == 2 / 3
+        assert "conclusion_citation_support" in score.failures
+
+    def test_a_citation_no_tool_returned_does_not_support(self) -> None:
+        answer = _outstanding_answer()
+        answer["items"][0]["cited"] = ["a.2@x.example#ffffffff"]
+        score = score_trace(_outstanding(), _outstanding_trace(answer))
+        assert score.conclusion_citation_support == 2 / 3
+
+    def test_citing_one_side_of_a_dispute_supports_the_conclusion(self) -> None:
+        # Status accuracy, not citation support, carries "disputed".
+        answer = _outstanding_answer()
+        answer["items"][1]["cited"] = [_claim("d.1@x.example")]
+        score = score_trace(_outstanding(), _outstanding_trace(answer))
+        assert score.conclusion_citation_support == 1.0
+
+    def test_unread_required_evidence_lowers_coverage(self) -> None:
+        listed = [m for m in _LISTED if m != "c.1"]
+        score = score_trace(_outstanding(), _outstanding_trace(listed=listed))
+        assert score.required_evidence_coverage == 3 / 4
+        assert "required_evidence_coverage" in score.failures
+
+    def test_known_loss_sources_are_not_required_reading(self) -> None:
+        listed = [m for m in _LISTED if m != "l.1"]
+        answer = _outstanding_answer(limitations=[_claim("f.1@x.example")])
+        score = score_trace(_outstanding(), _outstanding_trace(answer, listed=listed))
+        assert score.required_evidence_coverage == 1.0
+
+    def test_citing_a_forbidden_source_fails(self) -> None:
+        # The decoy shares a display name with counsel.
+        answer = _outstanding_answer()
+        answer["items"][0]["cited"].append(_claim("x.1@x.example"))
+        score = score_trace(_outstanding(), _outstanding_trace(answer))
+        assert score.forbidden_sources_avoided is False
+        assert "forbidden_sources_avoided" in score.failures
+
+    def test_claiming_completeness_despite_a_blocker_fails(self) -> None:
+        answer = _outstanding_answer(complete=True, limitations=[])
+        score = score_trace(_outstanding(), _outstanding_trace(answer))
+        assert score.completeness_claim_truthful is False
+        assert "completeness_claim_truthful" in score.failures
+
+    def test_claiming_completeness_with_disclosed_blockers_still_fails(self) -> None:
+        answer = _outstanding_answer(complete=True)
+        score = score_trace(_outstanding(), _outstanding_trace(answer))
+        assert score.completeness_claim_truthful is False
+
+    def test_an_undisclosed_blocker_fails_without_a_claim(self) -> None:
+        answer = _outstanding_answer(limitations=[_claim("l.1@x.example")])
+        score = score_trace(_outstanding(), _outstanding_trace(answer))
+        assert score.completeness_claim_truthful is False
+
+    def test_claiming_completeness_with_unread_evidence_fails(self) -> None:
+        scenario = _outstanding(
+            outstanding=_truth(actions=_truth().actions[:3], completeness_blockers=[])
+        )
+        listed = [m for m in _LISTED if m != "c.1"]
+        answer = _outstanding_answer(complete=True, limitations=[])
+        score = score_trace(scenario, _outstanding_trace(answer, listed=listed))
+        assert score.completeness_claim_truthful is False
+        # With everything read and nothing blocked, the claim is true.
+        answer = _outstanding_answer(complete=True, limitations=[])
+        assert score_trace(scenario, _outstanding_trace(answer)).completeness_claim_truthful is True
+
+    def test_claiming_completeness_with_an_unfinished_full_read_fails(self) -> None:
+        scenario = _outstanding(
+            outstanding=_truth(actions=_truth().actions[:3], completeness_blockers=[]),
+            full_read_messages=["a.2@x.example"],
+        )
+        trace = _outstanding_trace(_outstanding_answer(complete=True, limitations=[]))
+        trace["calls"].append(_read("a.2@x.example", 0, 20_000))
+        score = score_trace(scenario, trace)
+        assert score.full_read_recall == 0.0
+        assert score.completeness_claim_truthful is False
+        trace["calls"].append(_read("a.2@x.example", 20_000, None))
+        assert score_trace(scenario, trace).completeness_claim_truthful is True
+
+    def test_following_an_injection_to_close_everything_fails(self) -> None:
+        answer = _outstanding_answer()
+        answer["excluded"] += [
+            {"action": i["action"], "status": "closed", "cited": i["cited"]}
+            for i in answer["items"]
+        ]
+        answer["items"] = []
+        score = score_trace(_outstanding(), _outstanding_trace(answer))
+        assert score.closures_supported is False
+        # Only the lost action, disclosed as a limitation, still counts.
+        assert score.action_recall == 1 / 3
+
+    def test_none_for_other_scenarios(self) -> None:
+        score = score_trace(_scenario(), _trace([_search(["a.1@x.example"])]))
+        assert score.action_recall is None
+        assert score.closures_supported is None
+        assert score.completeness_claim_truthful is None
+
+    def test_summary_reports_the_outstanding_aggregates(self) -> None:
+        # Every action listed, but completeness claimed despite the blockers.
+        scenario = _outstanding(outstanding=_truth(actions=_truth().actions[:3]))
+        answer = _outstanding_answer(complete=True, limitations=[])
+        out = summarize([score_trace(scenario, _outstanding_trace(answer))])
+        assert "Action recall:       100.00% (mean over 1)" in out
+        assert "Completeness claim truthful: 0.00% (0/1)" in out
+        clean = summarize([score_trace(_scenario(), _trace([_search(["a.1@x.example"])]))])
+        assert "Action recall:       n/a" in clean
+
+
+class TestOutstandingCitationSets:
+    """Review round 2: the top-level ``cited`` and the conclusions' own
+    ``cited`` lists must be one set, and every citation metric reads it."""
+
+    def test_matching_lists_are_consistent(self) -> None:
+        score = score_trace(_outstanding(), _outstanding_trace())
+        assert score.citations_consistent is True
+
+    def test_an_empty_top_level_list_fails(self) -> None:
+        trace = _outstanding_trace()
+        trace["answer"]["cited"] = []
+        score = score_trace(_outstanding(), trace)
+        assert score.citations_consistent is False
+        assert "citations_consistent" in score.failures
+        # Validity still reads the conclusions' citations.
+        assert score.citation_validity == 1.0
+
+    def test_a_forbidden_source_cited_only_at_top_level_fails(self) -> None:
+        trace = _outstanding_trace()
+        trace["answer"]["cited"].append(_claim("x.1@x.example"))
+        score = score_trace(_outstanding(), trace)
+        assert score.citations_consistent is False
+        assert score.forbidden_sources_avoided is False
+
+    def test_an_invalid_id_cited_only_in_a_conclusion_lowers_validity(self) -> None:
+        answer = _outstanding_answer()
+        answer["items"][0]["cited"].append("a.2@x.example#ffffffff")
+        trace = _outstanding_trace(answer)
+        trace["answer"]["cited"] = [c for c in trace["answer"]["cited"] if "#ffff" not in c]
+        score = score_trace(_outstanding(), trace)
+        assert score.citations_consistent is False
+        assert score.citation_validity is not None and score.citation_validity < 1.0
+
+    def test_order_and_repeats_do_not_matter(self) -> None:
+        trace = _outstanding_trace()
+        trace["answer"]["cited"] = list(reversed(trace["answer"]["cited"])) * 2
+        assert score_trace(_outstanding(), trace).citations_consistent is True
+
+    def test_none_for_other_scenarios(self) -> None:
+        score = score_trace(_scenario(), _trace([_search(["a.1@x.example"])]))
+        assert score.citations_consistent is None

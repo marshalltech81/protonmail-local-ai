@@ -76,7 +76,9 @@ class TestBuild:
 
         vectors = json.loads((out / "query_vectors.json").read_text(encoding="utf-8"))
         golden = json.loads(_GOLDEN.read_text(encoding="utf-8"))
-        assert set(vectors) == {q["query"] for q in golden["search"]}
+        assert set(vectors) == {q["query"] for q in golden["search"]} | set(
+            golden["evidence_queries"]
+        )
 
     def test_embeds_answer_eval_case_questions(self, tmp_path):
         cases = tmp_path / "cases.json"
@@ -87,7 +89,9 @@ class TestBuild:
 
         vectors = json.loads((out / "query_vectors.json").read_text(encoding="utf-8"))
         golden = json.loads(_GOLDEN.read_text(encoding="utf-8"))
-        assert set(vectors) == {q["query"] for q in golden["search"]} | {question}
+        assert set(vectors) == {q["query"] for q in golden["search"]} | set(
+            golden["evidence_queries"]
+        ) | {question}
         assert vectors[question] == embed_text(question)
 
     def test_refuses_non_empty_output_dir(self, tmp_path):

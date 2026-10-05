@@ -45,8 +45,9 @@ def _sorted_walk(root: Path):
 def build(out_dir: Path, golden_path: Path, cases_path: Path | None = None) -> dict[str, int]:
     """Build ``out_dir/mail.db`` and ``out_dir/query_vectors.json``.
 
-    The query vectors cover the golden search queries and, with
-    ``cases_path``, every answer-evaluation case's question.
+    The query vectors cover the golden search queries and evidence
+    queries and, with ``cases_path``, every answer-evaluation case's
+    question.
 
     Returns the indexing queue's final status counts. Raises
     ``RuntimeError`` if any message failed to index, so a broken corpus
@@ -76,7 +77,9 @@ def build(out_dir: Path, golden_path: Path, cases_path: Path | None = None) -> d
         raise RuntimeError(f"baseline corpus did not index cleanly: {unfinished}")
 
     golden = json.loads(golden_path.read_text(encoding="utf-8"))
-    queries = {q["query"] for q in golden["search"]}
+    # ``evidence_queries`` are get_evidence lookups the outstanding-items
+    # reachability checks make (#798); they rank nothing in the snapshot.
+    queries = {q["query"] for q in golden["search"]} | set(golden.get("evidence_queries", []))
     if cases_path is not None:
         cases = json.loads(cases_path.read_text(encoding="utf-8"))
         queries |= {c["arguments"]["question"] for c in cases["cases"]}

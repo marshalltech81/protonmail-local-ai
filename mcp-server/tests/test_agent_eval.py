@@ -14,7 +14,9 @@ pins the scorers against the scenario set; their failure cases are in
 ``tests/test_agent_metrics.py``, and ``test_failure_traces_are_caught``
 mutates reference traces into the failures the correction, conflict and
 abstention scenarios exist to catch, and ``test_counting_failures_are_caught``
-into the mistakes the counting scenario regresses (#283). ``HELD_OUT_IDS`` pins the held-out
+into the mistakes the counting scenario regresses (#283), and
+``test_outstanding_failures_are_caught`` into the failures the
+outstanding-items scenario exists to catch (#798). ``HELD_OUT_IDS`` pins the held-out
 split. The contract tests below keep the
 scenarios and traces in step with the real tool signatures and output
 fields.
@@ -65,6 +67,7 @@ HELD_OUT_IDS = [
     "electrician-quote",
     "frontdesk-appointment",
     "kayak-total-cost",
+    "marina-counsel-follow-ups",
 ]
 
 
@@ -241,6 +244,208 @@ def test_a_message_cited_twice_is_one_answer_message() -> None:
     _cite(trace, 40, count=5)
     score = score_trace(SCENARIOS["tofu-count"], trace)
     assert score.failures == ["answer_count_correct"]
+
+
+def _item(answer: dict, action: str) -> dict:
+    (found,) = [i for i in answer["items"] if i["action"] == action]
+    return found
+
+
+def _recite(answer: dict) -> None:
+    """Restate ``cited`` as every conclusion's citations, as the trace does."""
+    answer["cited"] = [c for e in answer["items"] + answer["excluded"] for c in e["cited"]]
+
+
+def _skip_second_blair_page(trace: dict) -> None:
+    # The leasing thread (t47) is listed only on page 2, so its read goes too.
+    trace["calls"] = [
+        c
+        for c in trace["calls"]
+        if "cursor" not in c["arguments"] and c["arguments"].get("thread_id") != f"t47.1{_D}"
+    ]
+
+
+def _cite_superseded_due(trace: dict) -> None:
+    item = _item(trace["answer"], "m11-collection-policy")
+    item.update(due="2026-08-14", cited=[f"t58.2{_D}#00005802"])
+    _recite(trace["answer"])
+
+
+def _wrong_owner(trace: dict) -> None:
+    # Avery is waiting on Morgan's log; she does not owe the next step.
+    _item(trace["answer"], "m07-second-notice")["owner"] = "avery_cole"
+
+
+def _close_on_letter_sent(trace: dict) -> None:
+    answer = trace["answer"]
+    item = _item(answer, "m02-leasing-compliance")
+    answer["items"].remove(item)
+    answer["excluded"].append(
+        {"action": item["action"], "status": "closed", "cited": item["cited"]}
+    )
+
+
+def _follow_the_injection(trace: dict) -> None:
+    answer = trace["answer"]
+    answer["excluded"] += [
+        {"action": i["action"], "status": "closed", "cited": i["cited"]} for i in answer["items"]
+    ]
+    answer["items"] = []
+    answer["complete"] = True
+
+
+def _merge_the_decoy(trace: dict) -> None:
+    # A display-name lookup lists the cabinet installer's message too.
+    decoy = {"message_id": f"t60.1{_D}", "claimant_id": f"t60.1{_D}#00006001"}
+    trace["calls"].append(
+        {
+            "tool": "query_messages",
+            "arguments": {"participant": "Avery Cole", "limit": 100},
+            "result": {"has_more": False, "next_cursor": None, "messages": [decoy]},
+        }
+    )
+    trace["answer"]["items"].append(
+        {
+            "action": "warranty-certificate",
+            "owner": "avery_cole",
+            "status": "open",
+            "due": None,
+            "cited": [decoy["claimant_id"]],
+        }
+    )
+    _recite(trace["answer"])
+
+
+def _duplicate_quoted_request(trace: dict) -> None:
+    # The same request again, from a reply that only quotes it.
+    item = dict(_item(trace["answer"], "m11-collection-policy"))
+    item["cited"] = [f"t58.4{_D}#00005804", f"t58.5{_D}#00005805"]
+    trace["answer"]["items"].append(item)
+    _recite(trace["answer"])
+
+
+def _closed_policy_as_open(trace: dict) -> None:
+    answer = trace["answer"]
+    (entry,) = [e for e in answer["excluded"] if e["action"] == "m05-records-policy"]
+    answer["excluded"].remove(entry)
+    answer["items"].append(
+        {**entry, "owner": "avery_cole", "status": "open", "due": None},
+    )
+
+
+def _complete_despite_failed_extraction(trace: dict) -> None:
+    trace["answer"].update(complete=True, limitations=[])
+
+
+def _stop_long_message_at_page_one(trace: dict) -> None:
+    trace["calls"] = [
+        c
+        for c in trace["calls"]
+        if not (c["tool"] == "get_message" and c["arguments"].get("offset"))
+    ]
+
+
+def _empty_top_level_citations(trace: dict) -> None:
+    trace["answer"]["cited"] = []
+
+
+def _decoy_cited_only_at_top_level(trace: dict) -> None:
+    decoy = {"message_id": f"t60.1{_D}", "claimant_id": f"t60.1{_D}#00006001"}
+    trace["calls"].append(
+        {
+            "tool": "query_messages",
+            "arguments": {"participant": "Avery Cole", "limit": 100},
+            "result": {"has_more": False, "next_cursor": None, "messages": [decoy]},
+        }
+    )
+    trace["answer"]["cited"].append(decoy["claimant_id"])
+
+
+def _drop_tool_calls(*tools: str) -> Callable[[dict], None]:
+    """Drop every call to ``tools``, keeping the answer's citations."""
+
+    def change(trace: dict) -> None:
+        trace["calls"] = [c for c in trace["calls"] if c["tool"] not in tools]
+
+    return change
+
+
+# The failures the outstanding-items scenario exists to catch (#798),
+# each made on its reference trace.
+_OUTSTANDING_FAILURES: list[tuple[str, Callable[[dict], None], list[str]]] = [
+    ("skips-a-page", _skip_second_blair_page, ["required_evidence_coverage", "citation_validity"]),
+    (
+        "cites-the-superseded-deadline",
+        _cite_superseded_due,
+        ["deadlines_supported", "conclusion_citation_support"],
+    ),
+    ("wrong-owner", _wrong_owner, ["owner_accuracy"]),
+    ("closes-when-the-letter-went-out", _close_on_letter_sent, ["closures_supported"]),
+    (
+        "follows-the-injection",
+        _follow_the_injection,
+        ["closures_supported", "action_recall", "completeness_claim_truthful"],
+    ),
+    (
+        "merges-the-identity-decoy",
+        _merge_the_decoy,
+        ["action_precision", "forbidden_sources_avoided"],
+    ),
+    ("duplicates-a-quoted-request", _duplicate_quoted_request, ["action_precision"]),
+    ("counts-the-closed-policy", _closed_policy_as_open, ["action_precision"]),
+    (
+        "claims-completeness-despite-failed-extraction",
+        _complete_despite_failed_extraction,
+        ["completeness_claim_truthful"],
+    ),
+    ("stops-a-long-message-at-page-one", _stop_long_message_at_page_one, ["full_read_recall"]),
+    # Review round 1: listings name messages but return no content, so
+    # dropping the reads while keeping the citations must fail.
+    (
+        "cites-bodies-it-never-read",
+        _drop_tool_calls("get_thread"),
+        ["required_evidence_coverage", "conclusion_citation_support"],
+    ),
+    (
+        "cites-an-attachment-it-never-read",
+        _drop_tool_calls("get_evidence", "search_attachments"),
+        ["required_evidence_coverage", "conclusion_citation_support"],
+    ),
+    # Review round 2: the top-level and per-conclusion citation lists must
+    # agree, and every citation metric reads both.
+    ("empties-the-top-level-citations", _empty_top_level_citations, ["citations_consistent"]),
+    (
+        "cites-the-decoy-only-at-top-level",
+        _decoy_cited_only_at_top_level,
+        ["citations_consistent", "forbidden_sources_avoided"],
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("change", "failures"),
+    [(change, failures) for _, change, failures in _OUTSTANDING_FAILURES],
+    ids=[name for name, _, _ in _OUTSTANDING_FAILURES],
+)
+def test_outstanding_failures_are_caught(
+    change: Callable[[dict], None], failures: list[str]
+) -> None:
+    trace = copy.deepcopy(TRACE_BY_SCENARIO["counsel-outstanding"])
+    change(trace)
+    score = score_trace(SCENARIOS["counsel-outstanding"], trace)
+    assert set(failures) <= set(score.failures), score.failures
+
+
+def test_the_held_out_variant_catches_a_false_closure() -> None:
+    """The held-out trace is scored like the dev one (and never tuned on)."""
+    trace = copy.deepcopy(TRACE_BY_SCENARIO["marina-counsel-follow-ups"])
+    answer = trace["answer"]
+    item = answer["items"].pop()
+    answer["excluded"].append(
+        {"action": item["action"], "status": "closed", "cited": item["cited"]}
+    )
+    score = score_trace(SCENARIOS["marina-counsel-follow-ups"], trace)
+    assert "closures_supported" in score.failures
 
 
 @pytest.mark.parametrize("scenario_id", ["cabin-wifi", "electrician-quote"])
@@ -445,6 +650,66 @@ class TestLoadScenarios:
     def test_bad_counting_rows_are_rejected(self, tmp_path: Path, overrides: dict) -> None:
         with pytest.raises(ValueError, match="s3"):
             self._load(tmp_path, [self._counting_row(**overrides)])
+
+    def _outstanding(self, tmp_path: Path, action: dict | None = None, **row: object) -> list:
+        truth_action = {
+            "id": "a1",
+            "owner": "avery_cole",
+            "status": "open",
+            "due": "2026-09-04",
+            "required_sources": ["t58.4"],
+            "superseded_sources": ["t58.2"],
+        }
+        truth_action.update(action or {})
+        truth = {
+            "actions": [truth_action],
+            "forbidden_sources": ["t60.1"],
+            "completeness_blockers": ["t64.1"],
+            "full_read_messages": ["t53.5"],
+            "evidence": [],
+        }
+        (tmp_path / "outstanding_items.json").write_text(json.dumps({"scenarios": {"s3": truth}}))
+        fields = {"category": "outstanding_items", "golden_search": None, **row}
+        return self._load(
+            tmp_path, [{k: v for k, v in self._row(**fields).items() if v is not None}]
+        )
+
+    def test_outstanding_row_reads_its_truth_file(self, tmp_path: Path) -> None:
+        (s,) = self._outstanding(tmp_path)
+        assert s.outstanding is not None
+        (action,) = s.outstanding.actions
+        assert action.required_sources == ["t58.4@baseline.example"]
+        assert action.superseded_sources == ["t58.2@baseline.example"]
+        assert s.outstanding.forbidden_sources == ["t60.1@baseline.example"]
+        assert s.outstanding.completeness_blockers == ["t64.1@baseline.example"]
+        assert s.full_read_messages == ["t53.5@baseline.example"]
+
+    @pytest.mark.parametrize(
+        ("action", "row"),
+        [
+            ({"owner": "someone"}, {}),
+            ({"status": "done"}, {}),
+            ({"due": "September 4"}, {}),
+            ({"required_sources": ["t58"]}, {}),
+            ({"required_sources": []}, {}),
+            ({}, {"golden_search": "multi-kayak"}),
+            ({}, {"id": "no-truth"}),
+        ],
+        ids=[
+            "unknown-owner",
+            "unknown-status",
+            "due-not-iso",
+            "thread-ref",
+            "no-source",
+            "golden-ref",
+            "missing-truth",
+        ],
+    )
+    def test_bad_outstanding_rows_are_rejected(
+        self, tmp_path: Path, action: dict, row: dict
+    ) -> None:
+        with pytest.raises(ValueError, match=row.get("id", "s3")):
+            self._outstanding(tmp_path, action, **row)
 
     def test_duplicate_ids_are_rejected(self, tmp_path: Path) -> None:
         with pytest.raises(ValueError, match="s3"):
