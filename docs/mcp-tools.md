@@ -706,13 +706,15 @@ format (`output_config.format`), so the API returns JSON matching it
 rather than JSON the server has to find in prose (#808).
 `brief_issue` and `check_conclusion` send constant schemas matching
 their reply shapes; `extract_from_emails` builds one from the caller's
-schema (see [its section](#extract_from_emails)). The prompts, the
-token budgeting and the checks on each reply are unchanged.
+schema (see [its section](#extract_from_emails)). The `brief_issue` and
+`check_conclusion` prompts are unchanged; `extract_from_emails`' prompt
+asks for the `{"records": [...]}` wrapper instead of an object or
+`null` (see its section). The token budgeting and the checks on each
+reply are unchanged.
 
 A model or gateway without structured outputs rejects the request with
-status 400 (per Anthropic's model list at the time of writing,
-`claude-sonnet-4-6` lacks them; Sonnet 5.5, Sonnet 5, Opus 4.8 and
-later, and Haiku 4.5 have them). The tool call then fails with a
+status 400 (check Anthropic's structured-output compatibility list;
+`claude-sonnet-4-6` and the current Sonnet and Opus models have them). The tool call then fails with a
 fixed-text error naming `INFERENCE_STRUCTURED_OUTPUT=false`; the
 request is not retried without the format, and only the error type and
 status are logged. Set `INFERENCE_STRUCTURED_OUTPUT=false` for such a
@@ -1053,13 +1055,18 @@ nested schemas:
   `null`) or `null`;
 - every declared field is required (`null` when the thread has no
   value), no other field is allowed, and `_evidence` is a closed object
-  with one list of labels (or `null`) per field.
+  with one list of labels per field (empty when no passage gave it).
 
 A schema that declares an `object` field, an array whose `items` is not
 a scalar type, a property shaped only by `properties`, `items`, a
 combinator (`anyOf`, `oneOf`, `allOf`) or `$ref`, a shorthand field
 given as an object or other non-type value, a type list naming a
-non-JSON type, or no fields at all cannot be expressed this way: those
+non-JSON type, or no fields at all cannot be expressed this way. Nor
+can a type list mixing `array` with another type, or a schema of more
+than 8 fields (counting `required` names with no property): Anthropic
+refuses schemas over 16 union-typed parameters and schemas whose
+compiled grammar is too large, a limit that depends on the shape
+(measured 2026-10-05, every mix of up to 8 fields was accepted). Those
 calls are sent
 without the format, the reply is read as above, and the response adds
 a fixed-text note saying so. The records then go through the same

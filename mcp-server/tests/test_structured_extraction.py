@@ -19,9 +19,13 @@ import time
 import pytest
 from fastmcp.exceptions import ToolError
 from src.lib.inference import InferenceClient
+from src.tools.brief import BRIEF_JSON_SCHEMA, CHECK_JSON_SCHEMA
 from src.tools.intelligence import (
+    MAX_STRUCTURED_FIELDS,
+    MAX_UNION_PARAMS,
     _strict_record_schema,
     _strict_records_schema,
+    _union_param_count,
     register_intelligence_tools,
 )
 
@@ -66,7 +70,10 @@ _CATALOGUE = [
     ({"names": "array"}, {"names": _ARRAY}),
     ({"amount": ["number", "null"]}, {"amount": _nullable("number")}),
     ({"id": ["string", "integer"]}, {"id": _nullable("string", "integer")}),
-    ({"tags": ["array", "string"]}, {"tags": {"anyOf": [_ARRAY["anyOf"][0], *_STRING["anyOf"]]}}),
+    # An array mixed with another type makes Anthropic's grammar too large
+    # (measured 2026-10-05: eight such fields refused), so it is sent as today.
+    ({"tags": ["array", "string"]}, None),
+    ({"tags": ["array", "null"]}, {"tags": _ARRAY}),
     ({"nothing": "null"}, {"nothing": {"anyOf": [{"type": "null"}]}}),
     ({"address": "object"}, None),
     ({"address": {"street": "string"}}, None),
@@ -118,10 +125,7 @@ _CATALOGUE = [
 def _evidence(fields) -> dict:
     return {
         "type": "object",
-        "properties": {
-            name: {"anyOf": [{"type": "array", "items": {"type": "string"}}, {"type": "null"}]}
-            for name in fields
-        },
+        "properties": {name: {"type": "array", "items": {"type": "string"}} for name in fields},
         "required": list(fields),
         "additionalProperties": False,
     }
@@ -161,13 +165,98 @@ class TestConversion:
         assert _strict_record_schema({"properties": {"rows": deep}}) is None
 
     def test_conversion_is_linear_in_the_field_count(self):
+        """A schema far past the union limit is refused after one pass,
+        quickly, and the pass did the work: each field was converted."""
         schema = {f"field_{i}": "string" for i in range(20_000)}
         start = time.perf_counter()
-        converted = _strict_record_schema(schema)
+        record = _strict_record_schema(schema, limited=False)
         assert time.perf_counter() - start < 2.0
-        assert converted is not None
-        assert len(converted["properties"]) == 20_001
-        assert len(converted["properties"]["_evidence"]["properties"]) == 20_000
+        assert record is not None
+        assert len(record["properties"]) == 20_001
+        assert len(record["properties"]["_evidence"]["properties"]) == 20_000
+        assert _union_param_count(record) == 20_000
+        start = time.perf_counter()
+        assert _strict_record_schema(schema) is None
+        assert time.perf_counter() - start < 2.0
+
+
+class TestProviderLimits:
+    """Anthropic refuses a structured-output schema with more than 16
+    union-typed (anyOf or type-list) parameters, and one whose compiled
+    grammar is too large; the second limit is unpublished and depends on
+    the schema's shape (measured 2026-10-05: 15 scalar fields accepted, 16
+    refused; 10 scalar plus 3 array fields refused). Every mix of up to 8
+    fields was accepted on Sonnet 5.5, Sonnet 4.6 and Opus 5.5, except
+    type lists mixing an array with another type, so more fields, or such
+    a list, is sent without the format, as before #808. Evidence label
+    lists are plain arrays and add no union."""
+
+    def test_limits(self):
+        assert MAX_UNION_PARAMS == 16
+        assert MAX_STRUCTURED_FIELDS == 8
+
+    @pytest.mark.parametrize(
+        ("schema", "unions"),
+        [
+            ({f"f{i}": "string" for i in range(8)}, 8),
+            ({f"f{i}": "array" for i in range(8)}, 16),
+            ({**{f"s{i}": "string" for i in range(4)}, **{f"a{i}": "array" for i in range(4)}}, 12),
+            ({f"m{i}": ["string", "number", "integer", "boolean"] for i in range(8)}, 8),
+            ({"properties": {f"f{i}": {"type": "number"} for i in range(8)}}, 8),
+            ({"properties": {"a": {"type": "string"}}, "required": [f"r{i}" for i in range(7)]}, 8),
+        ],
+    )
+    def test_at_the_limit_is_structured(self, schema, unions):
+        wrapper = _strict_records_schema(schema)
+        assert wrapper is not None
+        assert _union_param_count(wrapper) == unions <= MAX_UNION_PARAMS
+
+    @pytest.mark.parametrize(
+        "schema",
+        [
+            {f"f{i}": "string" for i in range(9)},
+            {f"f{i}": "array" for i in range(9)},
+            {"properties": {f"f{i}": {"type": "number"} for i in range(9)}},
+            {"properties": {"a": {"type": "string"}}, "required": [f"r{i}" for i in range(8)]},
+            {"tags": ["array", "number"]},
+        ],
+    )
+    def test_over_the_limit_is_sent_as_today(self, schema):
+        assert _strict_records_schema(schema) is None
+
+    def test_union_cap_applies_without_the_field_cap(self):
+        """The union count is its own check: 9 array fields are 18 unions."""
+        record = _strict_record_schema({f"f{i}": "array" for i in range(9)}, limited=False)
+        assert record is not None
+        assert _union_param_count(record) == 18 > MAX_UNION_PARAMS
+
+    def test_evidence_lists_add_no_unions(self):
+        record = _strict_record_schema({"vendor": "string", "amount": "number"})
+        assert record is not None
+        assert _union_param_count(record["properties"]["_evidence"]) == 0
+
+    @pytest.mark.parametrize("schema", [BRIEF_JSON_SCHEMA, CHECK_JSON_SCHEMA])
+    def test_fixed_schemas_are_within_the_limit(self, schema):
+        assert _union_param_count(schema) <= MAX_UNION_PARAMS
+
+    def test_counting_is_linear(self):
+        """The count walks the server-built schema once."""
+        deep: dict = {"type": "string"}
+        for _ in range(50_000):
+            deep = {"anyOf": [deep, {"type": "null"}]}
+        start = time.perf_counter()
+        assert _union_param_count(deep) == 50_000
+        assert time.perf_counter() - start < 2.0
+
+    def test_over_the_limit_extraction_is_sent_as_today_and_says_so(self, seeded_db):
+        llm = FakeInferenceClient(complete_responses=["null"] * 3, structured_output=True)
+        out = _run(seeded_db, llm, {f"f{i}": "string" for i in range(9)})
+        assert llm.json_schemas == [None] * 3
+        for _system, user in llm.complete_calls:
+            assert user.endswith(_LEGACY_ASK)
+        notice = out.structured_content["notice"]
+        assert notice is not None
+        assert "INFERENCE_STRUCTURED_OUTPUT" in notice
 
 
 def _run(seeded_db, llm, schema):

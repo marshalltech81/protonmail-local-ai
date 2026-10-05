@@ -857,6 +857,8 @@ def _strict_field(declared: object) -> dict | None:
         return _NULLABLE_STRING if len(names) == 1 else None
     if "object" in names:
         return None
+    if "array" in names and len(set(names) - {"array", "null"}) > 0:
+        return None  # an array mixed with another type: too large a grammar
     branches = [
         {"type": "array", "items": _ANY_SCALAR} if n == "array" else {"type": n}
         for n in dict.fromkeys(names)
@@ -880,7 +882,37 @@ def _strict_property(sub: object) -> dict | None:
     return _strict_field(sub["type"])
 
 
-def _strict_record_schema(schema: dict) -> dict | None:
+# Anthropic refuses a structured-output schema with more than 16
+# union-typed parameters (anyOf, or a list of types) with a 400; measured
+# 2026-10-05: 16 accepted, 18 refused.
+MAX_UNION_PARAMS = 16
+# It also refuses a schema whose compiled grammar is too large, a limit it
+# does not publish and that depends on the schema's shape (2026-10-05: 15
+# scalar fields accepted, 16 refused; 10 scalar and 3 array fields
+# refused). Every mix of up to 8 fields was accepted on Sonnet 5.5,
+# Sonnet 4.6 and Opus 5.5, except type lists mixing an array with another
+# type, which the conversion refuses; more fields are sent as before #808.
+MAX_STRUCTURED_FIELDS = 8
+
+
+def _union_param_count(schema: object) -> int:
+    """How many union-typed parameters ``schema`` has: nodes with an
+    ``anyOf`` or a list ``type``. One iterative pass over a schema the
+    server built, so a deep one cannot recurse."""
+    count = 0
+    stack = [schema]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dict):
+            if "anyOf" in node or isinstance(node.get("type"), list):
+                count += 1
+            stack.extend(node.values())
+        elif isinstance(node, list):
+            stack.extend(node)
+    return count
+
+
+def _strict_record_schema(schema: dict, limited: bool = True) -> dict | None:
     """The strict schema of one record for the caller's ``schema``, or None
     when it cannot be expressed strictly (the call is then sent without a
     format, as before #808).
@@ -889,7 +921,12 @@ def _strict_record_schema(schema: dict) -> dict | None:
     shorthand keys, or JSON Schema ``properties`` then any ``required``
     names they lack (a required-only field becomes a nullable string). No
     nested caller schema is walked. The record also carries the closed
-    ``_evidence`` object, one nullable list of labels per field."""
+    ``_evidence`` object, one list of labels per field (empty for none;
+    not nullable, so it adds no union). With ``limited`` (the default),
+    a record over the provider's limits is None too: more than
+    ``MAX_STRUCTURED_FIELDS`` fields, or more than ``MAX_UNION_PARAMS``
+    union-typed parameters (each nullable field has one, an array field
+    two). The field count stops the pass as soon as it is exceeded."""
     fields: dict[str, dict] = {}
     if _is_json_schema(schema):
         properties = schema.get("properties")
@@ -899,31 +936,40 @@ def _strict_record_schema(schema: dict) -> dict | None:
             if converted is None:
                 return None
             fields[name] = converted
+            if limited and len(fields) > MAX_STRUCTURED_FIELDS:
+                return None
         required = schema.get("required")
         for name in required if isinstance(required, list) else []:
             if isinstance(name, str) and name not in fields:
                 fields[name] = _NULLABLE_STRING
+                if limited and len(fields) > MAX_STRUCTURED_FIELDS:
+                    return None
     else:
         for name, declared in schema.items():
             converted = _strict_field(declared)
             if converted is None:
                 return None
             fields[name] = converted
+            if limited and len(fields) > MAX_STRUCTURED_FIELDS:
+                return None
     if not fields:
         return None  # a free-form object: nothing to hold the reply to
-    labels = {"anyOf": [{"type": "array", "items": {"type": "string"}}, {"type": "null"}]}
+    labels = {"type": "array", "items": {"type": "string"}}
     evidence = {
         "type": "object",
         "properties": dict.fromkeys(fields, labels),
         "required": list(fields),
         "additionalProperties": False,
     }
-    return {
+    record = {
         "type": "object",
         "properties": {**fields, _EVIDENCE_FIELD: evidence},
         "required": [*fields, _EVIDENCE_FIELD],
         "additionalProperties": False,
     }
+    if limited and _union_param_count(record) > MAX_UNION_PARAMS:
+        return None
+    return record
 
 
 def _strict_records_schema(schema: dict) -> dict | None:
@@ -3061,7 +3107,8 @@ def register_intelligence_tools(
             # Fixed text: structured outputs were on but not used.
             schema_note = (
                 "Structured-output note: the schema declares a field structured outputs "
-                "cannot express (an object or a nested shape), so the replies were requested "
+                "cannot express (an object, a nested shape or a type list mixing an array), "
+                "or more than 8 fields, so the replies were requested "
                 "and read as plain JSON, without INFERENCE_STRUCTURED_OUTPUT's schema guarantee."
                 if inference_client.structured_output and records_schema is None
                 else ""
