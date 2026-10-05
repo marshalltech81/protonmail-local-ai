@@ -65,8 +65,8 @@ _MAX_THREAD_PAGE = 50
 _THREAD_BODY_CHAR_LIMIT = 4000
 # One get_message body page (#489): about 6,700 tokens at the 3
 # characters per token the inference budget counts
-# (``lib/inference.py`` ``CHARS_PER_TOKEN``), a fifth of the default
-# 32,768-token window and half of a full get_thread page (10 bodies of
+# (``lib/inference.py`` ``CHARS_PER_TOKEN``), about a seventh of the
+# default 48,000-token window and half of a full get_thread page (10 bodies of
 # 4,000 characters). Five get_thread body cuts, so a long message reads in
 # a few calls.
 _MESSAGE_BODY_PAGE_CHARS = 20_000

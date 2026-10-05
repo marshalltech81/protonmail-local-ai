@@ -454,8 +454,8 @@ marker.
 
 The body is paged by character offset (#489). A page holds at most
 20,000 characters: about 6,700 tokens at the 3 characters per token the
-inference budget counts, a fifth of the default 32,768-token context
-window and half of a full `get_thread` page (10 bodies of 4,000
+inference budget counts, about a seventh of the default 48,000-token
+context window and half of a full `get_thread` page (10 bodies of 4,000
 characters). The structured output carries the page in `body`, its
 start in `body_offset`, the whole body's length in `body_total_chars`,
 and `next_offset` when more remains (null at the end); the prose states
@@ -666,7 +666,7 @@ These character caps are one bound; the model window is the other
 security notice, provenance headers, the question, schema or
 conclusion, the coverage note, and (for the tools that can make one)
 room for the repair instruction. It must fit in
-`INFERENCE_CONTEXT_TOKENS` (default 32768) less `INFERENCE_MAX_TOKENS`
+`INFERENCE_CONTEXT_TOKENS` (default 48000) less `INFERENCE_MAX_TOKENS` (default 16000)
 of reply and 64 tokens of chat-template overhead. mcp-server has no
 tokenizer, so a prompt is counted at three characters per token, which
 over-counts English prose (about four per token) by a third. Text that
@@ -679,7 +679,7 @@ for that as well.
 At the default window the character caps above bind first, so prompts
 are what they were before the window was counted. For a small local
 model, set `INFERENCE_CONTEXT_TOKENS` to its window (for example 8192
-or 4096): the evidence budget shrinks to what fits, and the coverage
+or 4096) and lower `INFERENCE_MAX_TOKENS` to fit: the evidence budget shrinks to what fits, and the coverage
 note reports what was left out or cut. `summarize_thread` keeps at
 least a 2:1 share for its body and recent-message sections and gives
 room one does not need to the other. `extract_from_emails` adds a
@@ -1142,7 +1142,7 @@ first one when it parsed; otherwise the raw reply is returned with
 `status: "invalid_json"`. A reply cut off at `INFERENCE_MAX_TOKENS` is
 not repaired and comes back with `status: "truncated"`; a brief needs
 more output than an `ask_mailbox` answer, so raise
-`INFERENCE_MAX_TOKENS` (for example to 4096) when that happens. Only
+`INFERENCE_MAX_TOKENS` when that happens (the default is 16000). Only
 counts are logged.
 
 Structured output:

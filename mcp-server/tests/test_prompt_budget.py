@@ -151,8 +151,8 @@ class TestPromptBudget:
 
     def test_defaults_match_the_inference_defaults(self):
         budget = PromptBudget()
-        assert budget.context_tokens == DEFAULT_CONTEXT_TOKENS == 32768
-        assert budget.max_output_tokens == DEFAULT_MAX_TOKENS
+        assert budget.context_tokens == DEFAULT_CONTEXT_TOKENS == 48000
+        assert budget.max_output_tokens == DEFAULT_MAX_TOKENS == 16000
 
     @pytest.mark.parametrize(("context", "output"), [(1024, 1024), (2048, 1024), (4096, 4000)])
     def test_a_window_without_room_for_a_prompt_is_rejected(self, context, output):

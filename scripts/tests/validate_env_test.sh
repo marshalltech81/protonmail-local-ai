@@ -411,8 +411,8 @@ openssl_form_bridge_cert_fingerprint_passes() {
 }
 
 one_sided_max_tokens_fails() {
-    setup 'INFERENCE_MAX_TOKENS=40000'
-    fails_with 'INFERENCE_CONTEXT_TOKENS (32768 when unset)'
+    setup 'INFERENCE_MAX_TOKENS=47000'
+    fails_with 'INFERENCE_CONTEXT_TOKENS (48000 when unset)'
 }
 
 zero_padded_max_tokens_is_decimal() {

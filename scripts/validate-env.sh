@@ -627,8 +627,8 @@ if [[ "$INFERENCE_MODE" != "none" ]]; then
     if [[ -n "$INFERENCE_CONTEXT_TOKENS" ]]; then
         require_integer_min "INFERENCE_CONTEXT_TOKENS" "$INFERENCE_CONTEXT_TOKENS" 1
     fi
-    require_integer_min "INFERENCE_CONTEXT_TOKENS (32768 when unset)" \
-        "${INFERENCE_CONTEXT_TOKENS:-32768}" "$(( 10#${INFERENCE_MAX_TOKENS:-1024} + 1088 ))"
+    require_integer_min "INFERENCE_CONTEXT_TOKENS (48000 when unset)" \
+        "${INFERENCE_CONTEXT_TOKENS:-48000}" "$(( 10#${INFERENCE_MAX_TOKENS:-16000} + 1088 ))"
     if [[ -n "$INFERENCE_BASE_URL" ]]; then
         [[ "$INFERENCE_BASE_URL" =~ ^https?:// ]] || {
             echo "ERROR: INFERENCE_BASE_URL must start with http:// or https://." >&2

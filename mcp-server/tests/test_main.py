@@ -320,8 +320,8 @@ class TestContextTokens:
             monkeypatch.delenv("INFERENCE_CONTEXT_TOKENS", raising=False)
             importlib.reload(main_mod)
 
-    def test_defaults_to_32k(self, monkeypatch):
-        assert self._load(monkeypatch, None) == 32768
+    def test_defaults_to_48k(self, monkeypatch):
+        assert self._load(monkeypatch, None) == 48000
 
     def test_operator_value_is_used(self, monkeypatch):
         assert self._load(monkeypatch, "8192") == 8192

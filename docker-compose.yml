@@ -295,13 +295,13 @@ services:
       # Output token cap. Required by the Anthropic Messages API; the
       # OpenAI Chat Completions API accepts it too and most compatible
       # servers (vLLM, mlx_lm.server, LM Studio, DeepInfra) honor it.
-      # Default 1024 fits "brief" / "action-items" summaries; raise
-      # for "detailed" summaries on long threads or for
-      # extract_from_emails over rich schemas.
-      INFERENCE_MAX_TOKENS: ${INFERENCE_MAX_TOKENS:-1024}
+      # Default 16000 leaves room for models that think before they
+      # answer (thinking counts against it); it is a ceiling, not a
+      # target. Lower it for a small local model.
+      INFERENCE_MAX_TOKENS: ${INFERENCE_MAX_TOKENS:-16000}
       # Model context window in tokens; prompts plus INFERENCE_MAX_TOKENS
       # of reply are fitted into it. Set a small local model's window.
-      INFERENCE_CONTEXT_TOKENS: ${INFERENCE_CONTEXT_TOKENS:-32768}
+      INFERENCE_CONTEXT_TOKENS: ${INFERENCE_CONTEXT_TOKENS:-48000}
       MCP_PORT: ${MCP_PORT:-3000}
       # Only "streamable-http" (or empty) is accepted. Still passed through
       # so an old .env with the removed "sse" or "dual" fails startup with

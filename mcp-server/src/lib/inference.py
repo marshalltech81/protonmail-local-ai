@@ -50,19 +50,22 @@ DEFAULT_COMPLETE_TIMEOUT_SECS = 300.0
 # Default ``max_tokens``. The Anthropic Messages API requires the
 # field; the OpenAI Chat Completions API accepts it too (most
 # OpenAI-compatible servers — vLLM, mlx_lm.server, LM Studio,
-# DeepInfra — honor it). 1024 fits brief summaries and per-thread
-# extraction; raise for detailed summaries on long threads. Operator
+# DeepInfra — honor it). 16000 leaves room for a model that thinks
+# before it answers (current Claude models count thinking against it)
+# and for detailed summaries; it is a ceiling, not a target. Operator
 # overrides via ``INFERENCE_MAX_TOKENS``.
-DEFAULT_MAX_TOKENS = 1024
+DEFAULT_MAX_TOKENS = 16000
 
 # Default model context window in tokens: the prompt and the reply
-# together must fit in it (#285). 32,768 is the native window of the
-# smaller current open models; hosted models have more. At this default
-# the per-tool character caps, not the window, bound every prompt, so
-# prompts are what they were before the window was counted. An operator
-# running a small local model sets ``INFERENCE_CONTEXT_TOKENS`` to its
-# window (the small-model profile), and evidence is cut to fit.
-DEFAULT_CONTEXT_TOKENS = 32768
+# together must fit in it (#285). 48,000 less the 16,000-token reply
+# leaves about the prompt room the earlier 32,768 / 1,024 defaults did;
+# hosted models have more. At this default the per-tool character caps,
+# not the window, bound every prompt, so prompts are what they were
+# before the window was counted. An operator running a small local model
+# sets ``INFERENCE_CONTEXT_TOKENS`` to its window and lowers
+# ``INFERENCE_MAX_TOKENS`` to fit (the small-model profile), and
+# evidence is cut to fit.
+DEFAULT_CONTEXT_TOKENS = 48000
 
 # Characters per token assumed when counting a prompt. mcp-server ships
 # no tokenizer, so a prompt's length is estimated from its characters.
