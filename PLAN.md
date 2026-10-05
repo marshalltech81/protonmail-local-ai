@@ -766,13 +766,17 @@ blocked; record peak memory, tmpfs and disk growth during it (#488) and
 check completeness by queue status (pending, retrying, dead, skipped),
 not health alone.
 
-#699 (index order): `INITIAL_INDEX_ORDER` is implemented on
-`feat/699-index-order` (not pushed), but newest-first changed the final
-index on the synthetic baseline (49 threads instead of 37): replies
-indexed before their root stay split. Filed as #752 (bug; threading is
-a stop-and-ask area). Oldest-first and today's walk order give the
-correct result. Owner decision pending on shipping oldest-only (or
-oldest as the default) until #752 is fixed.
+#699 (index order), decided by the owner: the initial scan indexes
+**oldest first** across every folder, with no setting (#754). Newest
+first changed the final index on the synthetic baseline (49 threads
+instead of 37): replies indexed before their root stay split (#752,
+bug). On the live Maildir, the old folder-by-folder walk put about
+10,000 of 21,662 replies ahead of every message they reference, so the
+index wiped on 2026-10-04 was very likely affected; oldest first puts
+none. **Merge #754 before the rebuild.** #752 (merge a late parent into
+its replies' thread) stays open at lower priority: after the rebuild,
+count how many threads are still split, then decide; newest first can
+return as an option once it lands.
 
 **External review (2026-10-04/05).** An outside reviewer endorsed the
 architecture and raised six tradeoffs, now tracked as follows (order
