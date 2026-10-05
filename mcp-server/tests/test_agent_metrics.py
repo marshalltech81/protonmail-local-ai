@@ -998,15 +998,129 @@ def _outstanding_answer(**overrides: object) -> dict:
     return answer
 
 
-def _outstanding_trace(answer: dict | None = None, *, listed: list[str] | None = None) -> dict:
+def _thread_read(messages: list[str], omitted: int = 0) -> dict:
+    """A get_thread call returning each of ``messages`` with its body,
+    ``omitted`` characters of each cut off."""
+    return {
+        "tool": "get_thread",
+        "arguments": {"thread_id": "t.1@x.example"},
+        "result": {
+            "thread": {"thread_id": "t.1@x.example"},
+            "messages": [
+                {
+                    "message_id": m,
+                    "claimant_id": _claim(m),
+                    "body": "",
+                    "body_omitted_chars": omitted,
+                }
+                for m in messages
+            ],
+        },
+    }
+
+
+def _outstanding_trace(
+    answer: dict | None = None,
+    *,
+    listed: list[str] | None = None,
+    read: list[str] | None = None,
+) -> dict:
+    """A listing of ``listed`` (default ``_LISTED``) and a get_thread read
+    of ``read`` (default: whatever was listed), then ``answer``."""
     answer = _outstanding_answer() if answer is None else answer
     answer["cited"] = [c for entry in answer["items"] + answer["excluded"] for c in entry["cited"]]
+    listed = _LISTED if listed is None else listed
     page = _page(
-        [f"{m}@x.example" for m in (_LISTED if listed is None else listed)],
+        [f"{m}@x.example" for m in listed],
         has_more=False,
         filters={"participant": "counsel@x.example", "limit": 100},
     )
-    return {"scenario": "s1", "calls": [page], "answer": answer}
+    reads = [f"{m}@x.example" for m in (listed if read is None else read)]
+    return {"scenario": "s1", "calls": [page, _thread_read(reads)], "answer": answer}
+
+
+def _attachment_passage(message_id: str, source: str = "attachment") -> dict:
+    return {
+        "tool": "get_evidence",
+        "arguments": {"query": f"q {source}", "thread_id": "t.1@x.example"},
+        "result": {
+            "threads": [
+                {
+                    "thread_id": "t.1@x.example",
+                    "chunks": [
+                        {
+                            "chunk_id": f"c-{message_id}",
+                            "message_id": message_id,
+                            "claimant_id": _claim(message_id),
+                            "source": source,
+                        }
+                    ],
+                }
+            ]
+        },
+    }
+
+
+class TestOutstandingReads:
+    """Review round 1: evidence counts as read only when a result returned
+    its content, never because a listing named the message."""
+
+    def test_a_listing_alone_is_not_a_read(self) -> None:
+        read = [m for m in _LISTED if m != "a.2"]
+        score = score_trace(_outstanding(), _outstanding_trace(read=read))
+        assert score.required_evidence_coverage == 3 / 4
+        assert score.conclusion_citation_support == 2 / 3
+        assert {"required_evidence_coverage", "conclusion_citation_support"} <= set(score.failures)
+
+    def test_a_cut_get_thread_body_is_not_a_read(self) -> None:
+        read = [m for m in _LISTED if m != "a.2"]
+        trace = _outstanding_trace(read=read)
+        trace["calls"].append(_thread_read(["a.2@x.example"], omitted=1_200))
+        assert score_trace(_outstanding(), trace).required_evidence_coverage == 3 / 4
+
+    def test_a_get_message_read_to_the_end_is_a_read(self) -> None:
+        read = [m for m in _LISTED if m != "a.2"]
+        trace = _outstanding_trace(read=read)
+        trace["calls"].append(_read("a.2@x.example", 0, 20_000))
+        assert score_trace(_outstanding(), trace).required_evidence_coverage == 3 / 4
+        trace["calls"].append(_read("a.2@x.example", 20_000, None))
+        score = score_trace(_outstanding(), trace)
+        assert score.required_evidence_coverage == 1.0
+        assert score.failures == []
+
+    def test_attachment_evidence_needs_an_attachment_passage(self) -> None:
+        # c.1's decisive text is in its attachment: its body read to the
+        # end, or a body passage, does not show it.
+        scenario = _outstanding(outstanding=_truth(attachment_sources=["c.1@x.example"]))
+        trace = _outstanding_trace()
+        trace["calls"].append(_attachment_passage("c.1@x.example", source="body"))
+        score = score_trace(scenario, trace)
+        assert score.required_evidence_coverage == 3 / 4
+        assert score.conclusion_citation_support == 2 / 3
+        trace["calls"].append(_attachment_passage("c.1@x.example"))
+        assert score_trace(scenario, trace).failures == []
+
+    def test_a_search_attachments_hit_is_not_a_read(self) -> None:
+        scenario = _outstanding(outstanding=_truth(attachment_sources=["c.1@x.example"]))
+        trace = _outstanding_trace()
+        trace["calls"].append(
+            {
+                "tool": "search_attachments",
+                "arguments": {"query": "q"},
+                "result": {
+                    "results": [
+                        {
+                            "message_id": "c.1@x.example",
+                            "claimant_id": _claim("c.1@x.example"),
+                            "thread_id": "t.1@x.example",
+                            "extraction_status": "success",
+                            "text_snippet": "preview",
+                        }
+                    ]
+                },
+            }
+        )
+        assert score_trace(scenario, trace).required_evidence_coverage == 3 / 4
 
 
 class TestOutstandingItems:

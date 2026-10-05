@@ -45,7 +45,9 @@ synthetic mailbox) and a trace of the calls an agent made, score
 - **outstanding items** (scenarios with an ``outstanding`` ground
   truth, #798): action recall and precision, owner and status
   accuracy, supported closures and deadlines, conclusion citation
-  support, required evidence coverage, forbidden sources avoided and
+  support and required evidence coverage (both counting only sources a
+  result returned the content of, ``_content_reads``), forbidden sources
+  avoided and
   completeness-claim truthfulness (``_score_outstanding``).
 
 Nothing here judges whether the answer's prose is right: answer quality
@@ -171,6 +173,9 @@ class OutstandingTruth:
     actions: list[OutstandingAction]
     forbidden_sources: list[str] = field(default_factory=list)
     completeness_blockers: list[str] = field(default_factory=list)
+    # Sources whose decisive text is in an attachment, so only an
+    # attachment passage of theirs reads it (``_content_reads``).
+    attachment_sources: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -435,9 +440,50 @@ def _fully_read(calls: Sequence[dict]) -> set[str]:
     return read
 
 
+def _content_reads(calls: Sequence[dict]) -> tuple[set[str], set[str]]:
+    """Message IDs whose whole body, and those with an attachment passage,
+    some result returned.
+
+    A listing (``query_messages``, ``list_threads``, ``find_contact``,
+    ``search_emails``) names messages but returns no content, so it reads
+    nothing. A body is read when ``get_message`` pages it from offset 0 to
+    the end (``_fully_read``) or a ``get_thread`` row returns it uncut
+    (``body`` a string, ``body_omitted_chars`` 0): evidence past a cut needs
+    ``get_message``. Attachment text is read only through a ``get_evidence``
+    passage whose ``source`` is ``attachment``: no tool returns a whole
+    attachment (#796), and a ``search_attachments`` snippet is a preview
+    the scorer cannot check holds the evidence, since traces carry IDs, not
+    text.
+    """
+    bodies = _fully_read(calls)
+    attachments: set[str] = set()
+    for call in calls:
+        result = call.get("result") or {}
+        if call["tool"] == "get_thread":
+            for row in result.get("messages", []):
+                if (
+                    isinstance(row, dict)
+                    and isinstance(row.get("message_id"), str)
+                    and isinstance(row.get("body"), str)
+                    and row.get("body_omitted_chars") == 0
+                ):
+                    bodies.add(row["message_id"])
+        elif call["tool"] == "get_evidence":
+            for thread in result.get("threads", []):
+                for chunk in thread.get("chunks", []) if isinstance(thread, dict) else []:
+                    if (
+                        isinstance(chunk, dict)
+                        and chunk.get("source") == "attachment"
+                        and isinstance(chunk.get("message_id"), str)
+                    ):
+                        attachments.add(chunk["message_id"])
+    return bodies, attachments
+
+
 def _score_outstanding(
     truth: OutstandingTruth,
     answer: dict,
+    calls: Sequence[dict],
     message_of: dict[str, str],
     full_read_recall: float | None,
 ) -> dict[str, Any]:
@@ -491,22 +537,33 @@ def _score_outstanding(
         for item in items
     )
 
-    # Every conclusion must cite a required source of its action; a
-    # superseded source is not one.
+    # A source counts as read only when a result returned its content: an
+    # attachment passage for an attachment source, the whole body for any
+    # other (``_content_reads``). A listing that only names it reads nothing.
+    bodies, attachment_passages = _content_reads(calls)
+    attachment_sources = set(truth.attachment_sources)
+    read = {
+        m
+        for a in truth.actions
+        for m in a.required_sources
+        if m in (attachment_passages if m in attachment_sources else bodies)
+    }
+
+    # Every conclusion must cite a required source of its action that the
+    # trace read; a superseded source is not one.
     conclusions = items + excluded
     supported = sum(
         1
         for entry in conclusions
         if (a := by_id.get(entry.get("action", ""))) is not None
-        and messages(entry.get("cited", [])) & set(a.required_sources)
+        and messages(entry.get("cited", [])) & set(a.required_sources) & read
     )
     cited = set().union(*(messages(e.get("cited", [])) for e in conclusions))
 
-    # Every required source the tools can return must be in some result;
-    # one only on a later query page counts only once that page was read.
+    # Every required source the tools can return must have been read; one
+    # named only on a later query page is read only after that page.
     required = {m for a in truth.actions if not a.known_loss for m in a.required_sources}
-    seen = set(message_of.values())
-    coverage = len(required & seen) / len(required) if required else 1.0
+    coverage = len(required & read) / len(required) if required else 1.0
 
     blockers = set(truth.completeness_blockers)
     if answer.get("complete") is True:
@@ -639,7 +696,9 @@ def score_trace(scenario: Scenario, trace: dict) -> AgentScore:
 
     outstanding: dict[str, Any] = {}
     if scenario.outstanding is not None:
-        outstanding = _score_outstanding(scenario.outstanding, answer, message_of, full_read_recall)
+        outstanding = _score_outstanding(
+            scenario.outstanding, answer, calls, message_of, full_read_recall
+        )
 
     signatures = [json.dumps([c["tool"], c["arguments"]], sort_keys=True) for c in calls]
     repeated = len(signatures) - len(set(signatures))
@@ -945,6 +1004,11 @@ def _load_outstanding(sid: str, path: Path) -> tuple[OutstandingTruth, list[str]
         actions=actions,
         forbidden_sources=ids(entry["forbidden_sources"], "forbidden_sources"),
         completeness_blockers=ids(entry["completeness_blockers"], "completeness_blockers"),
+        # The evidence list says which passages sit in an attachment.
+        attachment_sources=ids(
+            [e["ref"] for e in entry.get("evidence", []) if e.get("source") == "attachment"],
+            "attachment evidence refs",
+        ),
     )
     return truth, ids(entry["full_read_messages"], "full_read_messages")
 

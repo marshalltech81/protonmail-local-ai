@@ -257,7 +257,12 @@ def _recite(answer: dict) -> None:
 
 
 def _skip_second_blair_page(trace: dict) -> None:
-    trace["calls"] = [c for c in trace["calls"] if "cursor" not in c["arguments"]]
+    # The leasing thread (t47) is listed only on page 2, so its read goes too.
+    trace["calls"] = [
+        c
+        for c in trace["calls"]
+        if "cursor" not in c["arguments"] and c["arguments"].get("thread_id") != f"t47.1{_D}"
+    ]
 
 
 def _cite_superseded_due(trace: dict) -> None:
@@ -340,6 +345,15 @@ def _stop_long_message_at_page_one(trace: dict) -> None:
     ]
 
 
+def _drop_tool_calls(*tools: str) -> Callable[[dict], None]:
+    """Drop every call to ``tools``, keeping the answer's citations."""
+
+    def change(trace: dict) -> None:
+        trace["calls"] = [c for c in trace["calls"] if c["tool"] not in tools]
+
+    return change
+
+
 # The failures the outstanding-items scenario exists to catch (#798),
 # each made on its reference trace.
 _OUTSTANDING_FAILURES: list[tuple[str, Callable[[dict], None], list[str]]] = [
@@ -369,6 +383,18 @@ _OUTSTANDING_FAILURES: list[tuple[str, Callable[[dict], None], list[str]]] = [
         ["completeness_claim_truthful"],
     ),
     ("stops-a-long-message-at-page-one", _stop_long_message_at_page_one, ["full_read_recall"]),
+    # Review round 1: listings name messages but return no content, so
+    # dropping the reads while keeping the citations must fail.
+    (
+        "cites-bodies-it-never-read",
+        _drop_tool_calls("get_thread"),
+        ["required_evidence_coverage", "conclusion_citation_support"],
+    ),
+    (
+        "cites-an-attachment-it-never-read",
+        _drop_tool_calls("get_evidence", "search_attachments"),
+        ["required_evidence_coverage", "conclusion_citation_support"],
+    ),
 ]
 
 
