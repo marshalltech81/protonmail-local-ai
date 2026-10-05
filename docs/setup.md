@@ -350,6 +350,9 @@ a small `curl` against `$EMBED_BASE_URL`, `$INFERENCE_BASE_URL`, or
 `$RERANK_BASE_URL` if a layer's container is failing to start.
 
 The initial index scan may take several minutes depending on mailbox size.
+It indexes the oldest mail first across every folder, so each message
+is indexed before the replies to it and conversations thread correctly
+(#752); recent mail becomes searchable last, near the end of the scan.
 
 mbsync's first sync can take hours for a large mailbox. mbsync reports
 healthy as soon as that sync is running, so the indexer and MCP server

@@ -2080,7 +2080,27 @@ class Database:
     # -------------------------------------------------------------------------
 
     @_synchronized
-    def queue_enqueue(self, *, filepath: str, reason: str, status: str, now_iso: str) -> None:
+    def queue_redate_untried(self, *, filepath: str, due_iso: str) -> None:
+        """Set a queued, never-tried row's due time (#699). Rows with an
+        attempt, an error or a parked stage keep theirs."""
+        self._conn.execute(
+            "UPDATE indexing_jobs SET next_attempt_at = ? "
+            "WHERE filepath = ? AND status = 'queued' AND attempts = 0 "
+            "AND last_error_class IS NULL AND last_stage IS NULL",
+            (due_iso, filepath),
+        )
+        self._conn.commit()
+
+    @_synchronized
+    def queue_enqueue(
+        self,
+        *,
+        filepath: str,
+        reason: str,
+        status: str,
+        now_iso: str,
+        due_iso: str | None = None,
+    ) -> None:
         self._conn.execute(
             """
             INSERT OR REPLACE INTO indexing_jobs
@@ -2089,7 +2109,7 @@ class Database:
                  created_at, updated_at, next_attempt_at)
             VALUES (?, ?, ?, 0, NULL, NULL, NULL, ?, ?, ?)
             """,
-            (filepath, reason, status, now_iso, now_iso, now_iso),
+            (filepath, reason, status, now_iso, now_iso, due_iso or now_iso),
         )
         self._conn.commit()
 

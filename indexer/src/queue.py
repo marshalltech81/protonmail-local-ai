@@ -187,8 +187,13 @@ class IndexingQueue:
 
     # ----- writes --------------------------------------------------------
 
-    def enqueue(self, filepath: str, reason: str) -> None:
+    def enqueue(self, filepath: str, reason: str, *, due_at: datetime | None = None) -> None:
         """Queue ``filepath`` for indexing, resetting any prior state.
+
+        ``due_at`` (a past time) sets where the row sorts in the queue,
+        which hands rows out by due time: the initial scan passes each
+        message's own time so its backlog is indexed oldest first and
+        ahead of mail queued as it arrives (#699). Default: now.
 
         A newly-observed event (watchdog rename, initial-scan discovery)
         is fresh intent — even if a previous attempt marked the row
@@ -203,7 +208,15 @@ class IndexingQueue:
             reason=reason,
             status=STATUS_QUEUED,
             now_iso=now_iso,
+            due_iso=due_at.isoformat() if due_at is not None else None,
         )
+
+    def redate_untried(self, filepath: str, due_at: datetime) -> None:
+        """Move a queued row that has never been tried to ``due_at``, as
+        ``enqueue(due_at=)`` would have placed it (#699). A row with an
+        attempt, an error or a parked stage keeps its due time, so a retry
+        backoff or a trashed-file park is not cut short."""
+        self.db.queue_redate_untried(filepath=filepath, due_iso=due_at.isoformat())
 
     def claim_batch(self, limit: int) -> list[sqlite3.Row]:
         """Return up to ``limit`` distinct oldest-due queued rows.

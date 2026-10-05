@@ -1386,6 +1386,30 @@ health-file refresh all interleave cleanly with indexing work. Both
 paths share the Phase 1 / Phase 2 implementation so seed-vector
 selection and failure isolation behave identically:
 
+**Initial scan order (#699, #752).** The queue hands out rows by due
+time (`next_attempt_at`), and the initial scan queues each unindexed
+message due at its own effective time (the topmost `Received:`, else
+`Date:`, read from its header block only by `message_sort_time`),
+capped at the walk's start; undated and future-dated messages are due
+at the start. So the backlog is indexed oldest first across every
+folder, mail the watcher queues while the scan runs is due when it
+arrives and follows the backlog, and rows already queued and never
+tried (left by an interrupted scan or by a version before this order)
+are re-dated the same way, so they interleave by date with newly found
+mail; rows in a retry backoff or parked as trashed keep their due
+time. This keeps each message
+ahead of the replies to it: the threader joins a reply to an indexed
+parent through `In-Reply-To` / `References`, but never merges a parent
+into a thread its replies started earlier, so a reply indexed first
+leaves the conversation split. The previous folder-by-folder walk order
+(Sent before INBOX) put about 10,000 of the live mailbox's 21,662
+replies ahead of every message they reference; oldest first puts none.
+Reading the header blocks takes about 12 s for 33,000 messages. Newest
+first, which would make recent mail searchable sooner, is not offered:
+it would split threads until #752's merge-on-arrival exists (owner
+decision, 2026-10-05). Periodic rescans keep walk order and read no
+headers.
+
 - **Phase 1 (per message)**: parse → thread → `upsert_thread` with a
   seed thread vector chosen by a three-case priority chain:
   1. Thread has chunk vectors → `mean(chunks)`. Canonical seed for

@@ -82,7 +82,13 @@ from .maildir import (
     parse_sync_stamp_rename,
     read_sync_stamp,
 )
-from .parser import Message, OversizedMessageError, _derive_folder, parse_email
+from .parser import (
+    Message,
+    OversizedMessageError,
+    _derive_folder,
+    message_sort_time,
+    parse_email,
+)
 from .queue import (
     ERROR_CLASS_OPERATOR,
     ERROR_CLASS_RETRYABLE,
@@ -334,6 +340,7 @@ _check_chunk_budgets(CHUNK_TARGET_TOKENS, CHUNK_MAX_TOKENS, CHUNK_OVERLAP_TOKENS
 # points at a remote provider (~150 ms RTT each), marginal against a
 # host-side server on loopback.
 INITIAL_INDEX_BATCH_SIZE = _int_env("INITIAL_INDEX_BATCH_SIZE", 50)
+
 
 # Steady-state (post-initial-scan) batch size for the main-loop drain.
 # Smaller than the initial-scan size because steady-state typically sees
@@ -1879,6 +1886,7 @@ def _enqueue_unindexed_messages(
     reason: str,
     *,
     skip_trashed: bool = False,
+    oldest_first: bool = False,
 ) -> int:
     """Walk the Maildir and enqueue every message not yet indexed.
 
@@ -1904,10 +1912,21 @@ def _enqueue_unindexed_messages(
     resurrect the message into search. With reconciliation disabled the
     index is append-only and trashed files are indexed like any other.
 
+    ``oldest_first`` queues each file due at its message time, capped at
+    the walk's start (undated and future-dated files: the start), so the
+    queue hands the backlog out oldest first across every folder (#699,
+    #752). Mail the watcher queues meanwhile is due when it arrives, so
+    it follows the backlog. Files already queued and never tried are
+    re-dated the same way, so rows an earlier scan or an earlier version
+    left (due at their enqueue time) interleave by date with the new
+    ones. Otherwise walk order is kept and no headers are read.
+
     Returns the number of files enqueued.
     """
-    enqueued = 0
     skipped_dead = 0
+    candidates: list[Path] = []
+    already_queued: list[Path] = []
+    walk_started = datetime.now(UTC)
     for filepath in _iter_maildir_messages(root):
         path_str = str(filepath)
         if db.is_indexed(path_str):
@@ -1918,9 +1937,23 @@ def _enqueue_unindexed_messages(
             skipped_dead += 1
             continue
         if queue.has_pending_row(path_str):
+            if oldest_first:
+                already_queued.append(filepath)
             continue
-        queue.enqueue(path_str, reason)
-        enqueued += 1
+        candidates.append(filepath)
+    due: dict[Path, datetime] = {}
+    if oldest_first:
+        for p in [*candidates, *already_queued]:
+            t = message_sort_time(p)
+            due[p] = min(t, walk_started) if t is not None else walk_started
+        for p in already_queued:
+            queue.redate_untried(str(p), due[p])
+        # Equal due times keep this order (rowid), so undated files and
+        # same-second messages stay in path order.
+        candidates.sort(key=lambda p: (due[p], str(p)))
+    for filepath in candidates:
+        queue.enqueue(str(filepath), reason, due_at=due.get(filepath))
+    enqueued = len(candidates)
     if enqueued or skipped_dead:
         log.info(
             "Maildir walk (%s): enqueued %d message(s), skipped %d dead-lettered.",
@@ -2006,7 +2039,21 @@ def initial_index(
     # service load per dead file per restart.
     stamp = ingestion_state.read_stamp() if ingestion_state is not None else None
     _enqueue_unindexed_messages(
-        db, queue, MAILDIR_PATH, REASON_INITIAL_SCAN, skip_trashed=skip_trashed
+        db,
+        queue,
+        MAILDIR_PATH,
+        REASON_INITIAL_SCAN,
+        skip_trashed=skip_trashed,
+        # Oldest first, so a message is indexed before the replies to it:
+        # the threader joins a reply to an indexed parent but never merges
+        # a parent into replies indexed before it (#752). Walk order goes
+        # folder by folder (Sent before INBOX on the live mailbox), which
+        # put about 10,000 of 21,662 replies ahead of every message they
+        # reference; oldest first puts none. Reading each header block
+        # costs about 12 s for 33,000 messages. Newest first would make
+        # recent mail searchable sooner but splits threads until #752's
+        # merge exists (owner decision, 2026-10-05).
+        oldest_first=True,
     )
     if ingestion_state is not None:
         ingestion_state.acknowledge(stamp)
