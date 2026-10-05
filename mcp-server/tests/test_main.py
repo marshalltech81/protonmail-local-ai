@@ -305,7 +305,7 @@ class TestContextTokens:
         def get_embedding_dim(self):
             return 4
 
-    def _load(self, monkeypatch, value):
+    def _load(self, monkeypatch, value, mode=None, attr="INFERENCE_CONTEXT_TOKENS"):
         import importlib
 
         import src.main as main_mod
@@ -314,14 +314,28 @@ class TestContextTokens:
             monkeypatch.delenv("INFERENCE_CONTEXT_TOKENS", raising=False)
         else:
             monkeypatch.setenv("INFERENCE_CONTEXT_TOKENS", value)
+        monkeypatch.delenv("INFERENCE_MAX_TOKENS", raising=False)
+        if mode is not None:
+            monkeypatch.setenv("INFERENCE_MODE", mode)
         try:
-            return importlib.reload(main_mod).INFERENCE_CONTEXT_TOKENS
+            return getattr(importlib.reload(main_mod), attr)
         finally:
             monkeypatch.delenv("INFERENCE_CONTEXT_TOKENS", raising=False)
+            monkeypatch.delenv("INFERENCE_MODE", raising=False)
             importlib.reload(main_mod)
 
     def test_defaults_to_32k(self, monkeypatch):
         assert self._load(monkeypatch, None) == 32768
+
+    @pytest.mark.parametrize(
+        ("mode", "context", "max_tokens"),
+        [("anthropic", 48000, 16000), ("openai", 32768, 1024), ("none", 32768, 1024)],
+    )
+    def test_defaults_follow_the_inference_mode(self, monkeypatch, mode, context, max_tokens):
+        """#764: the Claude-sized defaults apply in anthropic mode only;
+        a 32k local model in openai mode keeps a request that fits it."""
+        assert self._load(monkeypatch, None, mode) == context
+        assert self._load(monkeypatch, None, mode, "INFERENCE_MAX_TOKENS") == max_tokens
 
     def test_operator_value_is_used(self, monkeypatch):
         assert self._load(monkeypatch, "8192") == 8192

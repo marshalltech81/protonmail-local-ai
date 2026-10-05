@@ -293,6 +293,24 @@ class TestConfig:
         )
         assert "sk-marker" not in str(e.value)
 
+    @pytest.mark.parametrize(
+        ("mode", "max_tokens", "context"),
+        [("anthropic", 16000, 48000), ("openai", 1024, 32768)],
+    )
+    def test_answerer_token_defaults_follow_the_mode(self, mode, max_tokens, context):
+        """#764: the answerer gets the server's per-mode defaults."""
+        cfg = load_layer(
+            "INFERENCE",
+            {
+                "INFERENCE_MODE": mode,
+                "INFERENCE_BASE_URL": "default",
+                "INFERENCE_MODEL": "m",
+                "INFERENCE_API_KEY": "k",  # pragma: allowlist secret
+            },
+        )
+        assert cfg is not None
+        assert (cfg.max_tokens, cfg.context_tokens) == (max_tokens, context)
+
     @pytest.mark.parametrize("value", ["default", " Default "])
     def test_default_selects_the_sdk_default(self, value):
         cfg = load_layer("JUDGE", {**self.ENV, "JUDGE_BASE_URL": value, "JUDGE_API_KEY": "k"})

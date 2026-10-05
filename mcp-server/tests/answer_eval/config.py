@@ -30,9 +30,8 @@ from pathlib import Path
 
 from src.lib.inference import (
     DEFAULT_COMPLETE_TIMEOUT_SECS,
-    DEFAULT_CONTEXT_TOKENS,
-    DEFAULT_MAX_TOKENS,
     InferenceClient,
+    default_token_budget,
 )
 
 ENABLED_MODES = frozenset({"anthropic", "openai"})
@@ -180,8 +179,9 @@ def load_layer(
         )
     if layer == "INFERENCE":
         timeout = _number(env, "INFERENCE_TIMEOUT_SECS", DEFAULT_COMPLETE_TIMEOUT_SECS, 1.0)
-        max_tokens = int(_number(env, "INFERENCE_MAX_TOKENS", DEFAULT_MAX_TOKENS, 1))
-        context = int(_number(env, "INFERENCE_CONTEXT_TOKENS", DEFAULT_CONTEXT_TOKENS, 1))
+        default_max, default_context = default_token_budget(mode)
+        max_tokens = int(_number(env, "INFERENCE_MAX_TOKENS", default_max, 1))
+        context = int(_number(env, "INFERENCE_CONTEXT_TOKENS", default_context, 1))
         max_input = 0
         structured = env.get("INFERENCE_STRUCTURED_OUTPUT", "").strip().lower()
         if structured not in {"", "true", "false"}:

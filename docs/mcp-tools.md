@@ -666,7 +666,9 @@ These character caps are one bound; the model window is the other
 security notice, provenance headers, the question, schema or
 conclusion, the coverage note, and (for the tools that can make one)
 room for the repair instruction. It must fit in
-`INFERENCE_CONTEXT_TOKENS` (default 32768) less `INFERENCE_MAX_TOKENS`
+`INFERENCE_CONTEXT_TOKENS` less `INFERENCE_MAX_TOKENS` (defaults 32768 and 1024, or
+48000 and 16000 in `INFERENCE_MODE=anthropic`, where current Claude models
+count their thinking against the reply limit)
 of reply and 64 tokens of chat-template overhead. mcp-server has no
 tokenizer, so a prompt is counted at three characters per token, which
 over-counts English prose (about four per token) by a third. Text that
@@ -1199,7 +1201,8 @@ first one when it parsed; otherwise the raw reply is returned with
 `status: "invalid_json"`. A reply cut off at `INFERENCE_MAX_TOKENS` is
 not repaired and comes back with `status: "truncated"`; a brief needs
 more output than an `ask_mailbox` answer, so raise
-`INFERENCE_MAX_TOKENS` (for example to 4096) when that happens. Only
+`INFERENCE_MAX_TOKENS` (for example to 4096; anthropic mode defaults to
+16000) when that happens. Only
 counts are logged.
 
 Structured output:

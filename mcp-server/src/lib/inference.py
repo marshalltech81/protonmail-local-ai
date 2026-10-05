@@ -68,6 +68,26 @@ DEFAULT_MAX_TOKENS = 1024
 # window (the small-model profile), and evidence is cut to fit.
 DEFAULT_CONTEXT_TOKENS = 32768
 
+# Anthropic-mode defaults (#764). Current Claude models think before
+# they answer and count the thinking against ``max_tokens``, so 1024
+# cuts answers short. The window grows with the reply so the prompt room
+# (window less reply) stays at least what the defaults above leave and
+# the per-tool character caps still bind first. Hosted Claude windows
+# are far larger. openai mode keeps the defaults above: a 32k local
+# model must still fit the whole request.
+ANTHROPIC_DEFAULT_MAX_TOKENS = 16000
+ANTHROPIC_DEFAULT_CONTEXT_TOKENS = 48000
+
+
+def default_token_budget(mode: str) -> tuple[int, int]:
+    """The ``(max_tokens, context_tokens)`` defaults for an inference
+    mode, used when ``INFERENCE_MAX_TOKENS`` / ``INFERENCE_CONTEXT_TOKENS``
+    are unset."""
+    if mode == "anthropic":
+        return ANTHROPIC_DEFAULT_MAX_TOKENS, ANTHROPIC_DEFAULT_CONTEXT_TOKENS
+    return DEFAULT_MAX_TOKENS, DEFAULT_CONTEXT_TOKENS
+
+
 # Characters per token assumed when counting a prompt. mcp-server ships
 # no tokenizer, so a prompt's length is estimated from its characters.
 # English prose averages about four characters per token on current

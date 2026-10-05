@@ -29,10 +29,9 @@ from .lib.embed import DEFAULT_EMBED_TIMEOUT_SECS, EmbedClient
 from .lib.embed_identity import run_startup_identity_check
 from .lib.inference import (
     DEFAULT_COMPLETE_TIMEOUT_SECS,
-    DEFAULT_CONTEXT_TOKENS,
-    DEFAULT_MAX_TOKENS,
     InferenceClient,
     PromptBudget,
+    default_token_budget,
 )
 from .lib.reranker import DEFAULT_RERANK_TIMEOUT_SECS, CohereReranker, RerankConfig
 from .lib.sqlite import Database
@@ -347,12 +346,15 @@ INFERENCE_API_KEY = _read_secret("inference_api_key", "INFERENCE_API_KEY")
 INFERENCE_TIMEOUT_SECS = _float_env(
     "INFERENCE_TIMEOUT_SECS", DEFAULT_COMPLETE_TIMEOUT_SECS, minimum=1.0
 )
-INFERENCE_MAX_TOKENS = _int_env("INFERENCE_MAX_TOKENS", DEFAULT_MAX_TOKENS, minimum=1)
+# Unset values take the mode's defaults: larger in anthropic mode, where
+# thinking counts against max_tokens (#764).
+_DEFAULT_MAX_TOKENS, _DEFAULT_CONTEXT_TOKENS = default_token_budget(INFERENCE_MODE)
+INFERENCE_MAX_TOKENS = _int_env("INFERENCE_MAX_TOKENS", _DEFAULT_MAX_TOKENS, minimum=1)
 # The model's context window in tokens; every intelligence prompt plus
 # INFERENCE_MAX_TOKENS of reply is fitted into it (#285). Set it to a
 # small local model's window; ``PromptBudget`` rejects a window with too
 # little room left for a prompt at startup.
-INFERENCE_CONTEXT_TOKENS = _int_env("INFERENCE_CONTEXT_TOKENS", DEFAULT_CONTEXT_TOKENS, minimum=1)
+INFERENCE_CONTEXT_TOKENS = _int_env("INFERENCE_CONTEXT_TOKENS", _DEFAULT_CONTEXT_TOKENS, minimum=1)
 # In anthropic mode the JSON tools (extract_from_emails, brief_issue,
 # check_conclusion) send their reply schema as a structured-output format
 # (#808). Set false for a model or gateway without structured outputs.
