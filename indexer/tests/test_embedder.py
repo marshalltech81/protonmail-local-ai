@@ -606,6 +606,62 @@ class TestEmbedConcurrency:
             emb.embed_batch([str(i) for i in range(4)], on_batch_complete=on_tick)
         assert sorted(calls) == ["0", "1"]
 
+    def test_failure_between_the_last_check_and_submit_sends_no_request(self, monkeypatch):
+        """#720: a request that fails after the calling thread's last
+        check and before the next submit must not let that next request
+        reach the provider. The patched pool's third ``submit`` lets
+        request "0" fail and waits until the failure is recorded before
+        submitting request "2"."""
+        import src.embedder as embedder_module
+
+        emb = _make_embedder(batch_size=1, concurrency=2)
+        emb._embed_one_batch.retry.wait = lambda *_a, **_kw: 0  # type: ignore[attr-defined]
+        calls: list[str] = []
+        lock = threading.Lock()
+        release_first = threading.Event()
+        first_failed = threading.Event()
+
+        def fake_create(**kwargs):
+            text = kwargs["input"][0]
+            with lock:
+                calls.append(text)
+            if text == "0":
+                assert release_first.wait(timeout=5)
+                raise _api_status_error(400)
+            return _embed_response([[1.0]])
+
+        _patch_create(emb, fake_create)
+        original = emb._embed_one_batch
+
+        def tracked(chunk):
+            try:
+                return original(chunk)
+            except Exception:
+                first_failed.set()
+                raise
+
+        emb._embed_one_batch = tracked  # type: ignore[method-assign]
+
+        real_pool = embedder_module.ThreadPoolExecutor
+
+        class _FailBeforeThirdSubmit(real_pool):
+            submits = 0
+
+            def submit(self, fn, /, *args, **kwargs):
+                type(self).submits += 1
+                if type(self).submits == 3:
+                    release_first.set()
+                    assert first_failed.wait(timeout=5)
+                    # Let the failing worker finish recording it.
+                    time.sleep(0.05)
+                return super().submit(fn, *args, **kwargs)
+
+        monkeypatch.setattr(embedder_module, "ThreadPoolExecutor", _FailBeforeThirdSubmit)
+        with pytest.raises(APIStatusError):
+            emb.embed_batch([str(i) for i in range(4)])
+        assert _FailBeforeThirdSubmit.submits == 3
+        assert sorted(calls) == ["0", "1"]
+
     def test_each_concurrent_request_keeps_its_own_retry(self):
         emb = _make_embedder(batch_size=1, concurrency=2)
         emb._embed_one_batch.retry.wait = lambda *_a, **_kw: 0  # type: ignore[attr-defined]

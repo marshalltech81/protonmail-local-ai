@@ -21,6 +21,7 @@ stay backend-agnostic and tests can substitute a duck-typed fake.
 import logging
 import math
 import os
+import threading
 import time
 import urllib.parse
 from collections.abc import Callable
@@ -91,6 +92,12 @@ class EmbedResponseError(RuntimeError):
     Messages are fixed text plus counts: response fields can echo the
     submitted email text, so their values are never quoted.
     """
+
+
+class _SkippedAfterFailure(Exception):
+    """A concurrent embed request that found an earlier request failed
+    and did not call the provider (#720). Never propagates: the failure
+    that caused it is raised in its place."""
 
 
 def scrub_embed_error(exc: BaseException) -> str:
@@ -482,7 +489,11 @@ class OpenAIEmbedder:
         finish. Immediately before each new request it collects every
         request that has finished, after the callbacks for earlier ones
         have run, so a failure that finished alongside a success or
-        during a callback stops new requests. Requests
+        during a callback stops new requests. A failure can still be
+        recorded after that collection and before the submit, so each
+        request also checks, on its pool thread, that none has failed
+        before it calls the provider, and skips the call if one has
+        (#720): no request starts after a failure is recorded. Requests
         still in flight are waited for (each is bounded by the request
         timeout and its retries) and their results discarded; the
         failure then propagates as on the sequential path.
@@ -492,6 +503,17 @@ class OpenAIEmbedder:
         results: list[list[list[float]] | None] = [None] * len(chunks)
         pending: dict[Future[list[list[float]]], int] = {}
         next_chunk = 0
+        failed = threading.Event()
+
+        def embed_unless_failed(texts: list[str]) -> list[list[float]]:
+            if failed.is_set():
+                raise _SkippedAfterFailure
+            try:
+                return self._embed_one_batch(texts)
+            except BaseException:
+                failed.set()
+                raise
+
         with ThreadPoolExecutor(max_workers=self.concurrency) as pool:
             while next_chunk < len(chunks) or pending:
                 # Collect until a pass finds nothing finished, so the
@@ -501,13 +523,23 @@ class OpenAIEmbedder:
                 finished = [f for f in pending if f.done()]
                 while finished:
                     for future in finished:
-                        results[pending.pop(future)] = future.result()
+                        index = pending.pop(future)
+                        try:
+                            results[index] = future.result()
+                        except _SkippedAfterFailure:
+                            # The failure that skipped it is still
+                            # pending and is raised when collected.
+                            continue
                         if on_batch_complete is not None:
                             on_batch_complete()
                     finished = [f for f in pending if f.done()]
-                if next_chunk < len(chunks) and len(pending) < self.concurrency:
+                if (
+                    next_chunk < len(chunks)
+                    and len(pending) < self.concurrency
+                    and not failed.is_set()
+                ):
                     # One request per pass, each after a fresh collect.
-                    pending[pool.submit(self._embed_one_batch, chunks[next_chunk])] = next_chunk
+                    pending[pool.submit(embed_unless_failed, chunks[next_chunk])] = next_chunk
                     next_chunk += 1
                 elif pending:
                     wait(pending, return_when=FIRST_COMPLETED)
