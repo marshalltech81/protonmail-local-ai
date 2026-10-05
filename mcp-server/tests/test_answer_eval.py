@@ -1045,6 +1045,24 @@ class TestCli:
         assert code == cli.EXIT_CONFIG
         assert "--detail" in capsys.readouterr().err
 
+    @pytest.mark.parametrize("flag", ["--max-runtime-secs", "--case-timeout-secs"])
+    @pytest.mark.parametrize("value", ["nan", "inf", "-inf", "0", "-5"])
+    def test_run_rejects_non_finite_or_non_positive_limits(
+        self, tmp_path, capsys, monkeypatch, flag, value
+    ):
+        """#676: nan/inf disabled the run bound and wrote NaN/Infinity into
+        the report identity. Rejected before any file or provider is opened."""
+
+        def no_provider(*_a, **_k):
+            raise AssertionError("a provider was configured")
+
+        monkeypatch.setattr(cli, "load_layer", no_provider)
+        out = tmp_path / "r.json"
+        code = cli.main(["run", "--index-dir", str(tmp_path), "--out", str(out), f"{flag}={value}"])
+        assert code == cli.EXIT_CONFIG
+        assert f"{flag} must be a finite number greater than 0" in capsys.readouterr().err
+        assert not out.exists()
+
     def test_run_rejects_unknown_case_ids(self, tmp_path, capsys):
         code = cli.main(
             [

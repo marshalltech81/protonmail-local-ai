@@ -267,7 +267,9 @@ is `127.0.0.1`, not `host.docker.internal`.
   the report's `sdk-default` label is never a custom endpoint.
 - Each case runs under `--case-timeout-secs` (900) and the whole run
   under `--max-runtime-secs` (3600): every answer and judge call is
-  capped by what is left of it, and cases past it are `skipped`.
+  capped by what is left of it, and cases past it are `skipped`. Both
+  must be finite numbers greater than 0 (a configuration error
+  otherwise).
 
 Retrieval uses the baseline's hashed embedder (query vectors precomputed
 at build time) and no reranker, so a run measures prompt assembly,

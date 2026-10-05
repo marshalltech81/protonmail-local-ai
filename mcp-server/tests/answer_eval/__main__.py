@@ -19,6 +19,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 import os
 import sqlite3
 import sys
@@ -67,6 +68,14 @@ def _check_output_path(path: Path) -> Path:
 
 
 def _run(args: argparse.Namespace) -> int:
+    # argparse's float accepts nan and inf: nan disables the run bound
+    # and both write non-standard JSON into the report identity.
+    for flag, value in (
+        ("--case-timeout-secs", args.case_timeout_secs),
+        ("--max-runtime-secs", args.max_runtime_secs),
+    ):
+        if not (math.isfinite(value) and value > 0):
+            raise ConfigError(f"{flag} must be a finite number greater than 0")
     out = _check_output_path(args.out)
     detail = _check_output_path(args.detail) if args.detail else None
     if detail == out:
