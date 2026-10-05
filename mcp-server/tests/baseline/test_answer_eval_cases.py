@@ -154,6 +154,7 @@ class _OracleAnswerer:
 
     def __init__(self, case: Case) -> None:
         self.case = case
+        self.unsupported: list[list[str]] = []
 
     async def complete(self, system: str, user: str) -> str:
         if not self.case.answerable:
@@ -172,8 +173,18 @@ class _OracleAnswerer:
             if hit:
                 sentences.append(f"This passage bears on the question [{hit}].")
         for group in self.case.must_include:
-            value = group[0]
-            hit = next((lbl for lbl, text in passages.items() if _mentions(text, value)), None)
+            # The first alternative some passage states, so the group's
+            # order (e.g. "4 chaperones" before the source's "chaperone
+            # volunteers needed: 4") does not decide whether it is found.
+            found = (
+                (value, lbl)
+                for value in group
+                for lbl, text in passages.items()
+                if _mentions(text, value)
+            )
+            value, hit = next(found, (group[0], None))
+            if hit is None:
+                self.unsupported.append(group)
             mark = f"[{hit}]" if hit else "[unsupported]"
             sentences.append(f"The value is {value} {mark}.")
         if not any("[E" in s for s in sentences):
@@ -232,15 +243,21 @@ def _judge_config() -> LayerConfig:
     )
 
 
+# Value groups the scripted answerer found in no passage, per case.
+_ORACLE_MISSES: dict[str, list[list[str]]] = {}
+
+
 def _evaluate_all(baseline_dir: Path, baseline_db: Database) -> list[dict]:
     vectors = json.loads((baseline_dir / "query_vectors.json").read_text(encoding="utf-8"))
     records = []
     judge = _StubJudge()
     for case in CASES:
+        oracle = _OracleAnswerer(case)
+        _ORACLE_MISSES[case.id] = oracle.unsupported
         ctx = RunContext(
             db=baseline_db,
             embed_client=PrecomputedEmbedder(vectors),
-            inference_client=_OracleAnswerer(case),
+            inference_client=oracle,
             prompt_budget=PromptBudget(),
             expected_embed_dim=baseline_db.get_embedding_dim(),
         )
@@ -277,6 +294,25 @@ def test_supplied_evidence_lets_a_correct_answer_pass(case: Case, records: dict[
         # the stage that lost it, not on synthesis.
         assert not det["passed"]
         assert {"retrieval", "prompt_assembly"} & set(r["attribution"]), r["attribution"]
+
+
+def test_answerer_finds_every_value_where_evidence_arrived(records: dict[str, dict]) -> None:
+    """Codex round 2 on #763: whenever the evidence reached the prompt,
+    the scripted answerer must cite a passage for every ``must_include``
+    group a source states; an ``[unsupported]`` value would let the
+    baseline pass without showing the value is in cited evidence. A
+    group is stated when one of its values is in a fact excerpt (quoted
+    from its source, checked above); a computed value such as a total is
+    not, and no passage can hold it."""
+    by_id = {c.id: c for c in CASES}
+    for cid, r in records.items():
+        if r["deterministic"]["prompt_coverage"] not in (None, 1.0):
+            continue
+        excerpts = [_fold(f.excerpt) for f in by_id[cid].expected_facts]
+        stated = [
+            g for g in _ORACLE_MISSES[cid] if any(_mentions(e, v) for e in excerpts for v in g)
+        ]
+        assert stated == [], cid
 
 
 def test_cases_missing_evidence_are_the_known_ones(records: dict[str, dict]) -> None:
