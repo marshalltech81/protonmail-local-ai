@@ -78,15 +78,12 @@ branch = true
 # Coverage scope is the full mcp-server package. Tool handlers run
 # against a FakeMCPServer stub (see ``tests/conftest.py::FakeMCPServer``)
 # so handler logic is exercised without standing up the real FastMCP
-# transport. ``src/main.py`` is excluded as a whole: it is the service
-# bootstrap (env wiring, tool registration, serving with uvicorn),
-# covered by docker-compose integration. Its helpers (``_read_secret``,
-# ``_float_env``, ``_build_app``, the ``/health`` route) are unit-tested
-# directly but do not count toward the figure.
+# transport. ``src/main.py`` counts too (#757): its auth and app wiring
+# (``_build_app``, the bearer-token verifier, the Host/Origin guard) and
+# helpers are unit-tested directly, so a gap there shows in the figure.
 source = ["src"]
 omit = [
     "tests/*",
-    "src/main.py",
 ]
 
 [tool.coverage.report]
