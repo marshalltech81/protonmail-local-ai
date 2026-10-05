@@ -120,10 +120,32 @@ def test_index_is_recognized_as_synthetic(baseline_db: Database) -> None:
         "(SELECT MIN(rowid) FROM attachments)",
         "UPDATE messages SET subject = 'privatemarker' WHERE rowid = "
         "(SELECT MIN(rowid) FROM messages)",
+        # #671: dates reach the prompt through the labelled chunk header.
+        "UPDATE messages SET sent_at = 'privatemarker' WHERE rowid = "
+        "(SELECT MIN(rowid) FROM messages)",
+        "UPDATE messages SET sent_at = '2031-01-01T00:00:00+00:00' WHERE rowid = "
+        "(SELECT MIN(rowid) FROM messages)",
+        "UPDATE messages SET occurred_at = '2031-01-01T00:00:00+00:00' WHERE rowid = "
+        "(SELECT MIN(rowid) FROM messages)",
+        # #674: the stored Message-ID is each passage's origin in the judge prompt.
+        "UPDATE messages SET message_id = 'privatemarker@private.example' WHERE rowid = "
+        "(SELECT MIN(rowid) FROM messages)",
         # A message the committed corpus does not have.
         "UPDATE messages SET claimant_id = claimant_id || 'x' WHERE rowid = "
         "(SELECT MIN(rowid) FROM messages)",
         "DELETE FROM messages WHERE rowid = (SELECT MIN(rowid) FROM messages)",
+        # #675: a consistent index whose claimant suffixes are 8 hex
+        # digits, not the indexer's 16.
+        "".join(
+            f"UPDATE {table} SET claimant_id = substr(claimant_id, 1, instr(claimant_id, '#') + 8);"
+            for table in (
+                "messages",
+                "message_thread_map",
+                "message_participants",
+                "message_chunks",
+                "attachments",
+            )
+        ),
     ],
 )
 def test_tampered_index_is_refused(baseline_dir: Path, tmp_path: Path, tamper: str) -> None:
@@ -134,7 +156,7 @@ def test_tampered_index_is_refused(baseline_dir: Path, tmp_path: Path, tamper: s
     conn.enable_load_extension(True)
     sqlite_vec.load(conn)
     conn.execute("PRAGMA foreign_keys = OFF")
-    conn.execute(tamper)
+    conn.executescript(tamper)
     conn.commit()
     conn.close()
     with pytest.raises(NonSyntheticIndexError):

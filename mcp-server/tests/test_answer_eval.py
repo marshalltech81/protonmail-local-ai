@@ -67,6 +67,7 @@ from tests.answer_eval.runner import (
     RunContext,
     _claimant_message,
     capture_evidence_maps,
+    claimant_hash_chars,
     corpus_manifest,
     index_identity,
     prompt_budget_for,
@@ -437,17 +438,23 @@ class TestRunner:
             assert entry.thread_id == thread_id_of(message_id.split("@")[0]) and entry.tokens
 
     @pytest.mark.parametrize(
-        ("suffix_chars", "ok"), [(16, True), (8, True), (64, True), (7, False)]
+        ("suffix_chars", "ok"), [(16, True), (8, False), (15, False), (17, False), (64, False)]
     )
-    def test_claimant_suffix_length_is_not_hardcoded(self, suffix_chars, ok):
-        """CI on the merge with #640 (16-hex suffixes) refused the index
-        because the manifest assumed 8; any prefix of 8 or more is accepted."""
+    def test_claimant_suffix_is_the_indexers_exact_length(self, suffix_chars, ok):
+        """#675: only the indexer's ``CLAIMANT_HASH_CHARS`` (16), read
+        from its source, is accepted; #640 changed it from 8 once."""
         manifest = corpus_manifest()
         message_id, entry = next(iter(manifest.items()))
         claimant = f"{message_id}#{entry.sha256[:suffix_chars]}"
         assert (_claimant_message(claimant, manifest) == message_id) is ok
         wrong = f"{message_id}#{'0' * 16}"
         assert _claimant_message(wrong, manifest) is None
+
+    def test_claimant_hash_chars_fails_closed_without_the_constant(self, tmp_path):
+        parser = tmp_path / "parser.py"
+        parser.write_text('CLAIMANT_HASH_CHARS = "16"\nOTHER = 16\n', encoding="utf-8")
+        with pytest.raises(NonSyntheticIndexError):
+            claimant_hash_chars(parser)
 
     def test_non_synthetic_index_is_refused(self, messages_db):
         with pytest.raises(NonSyntheticIndexError):
