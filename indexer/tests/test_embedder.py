@@ -455,17 +455,28 @@ class TestEmbedConcurrency:
         assert out == [l2_normalize([float(t), 1.0]) for t in texts]
 
     def test_reassembles_vectors_in_input_order_when_requests_finish_out_of_order(self):
+        # The first request finishes only after the other two have (an
+        # event, not a sleep, #758), and the test checks that it did.
         emb = _make_embedder(batch_size=2, concurrency=3)
+        lock = threading.Lock()
+        finished: list[str] = []
+        others_done = threading.Event()
 
         def fake_create(**kwargs):
-            # The first request finishes last.
-            if kwargs["input"][0] == "1":
-                time.sleep(0.05)
+            first = kwargs["input"][0]
+            if first == "1":
+                assert others_done.wait(timeout=5)
+            with lock:
+                finished.append(first)
+                if len(finished) == 2 and "1" not in finished:
+                    others_done.set()
             return _embed_response([[float(t), 1.0] for t in kwargs["input"]])
 
         _patch_create(emb, fake_create)
         texts = [str(i) for i in range(1, 7)]
         assert emb.embed_batch(texts) == [l2_normalize([float(t), 1.0]) for t in texts]
+        assert finished[-1] == "1"
+        assert sorted(finished) == ["1", "3", "5"]
 
     def test_on_batch_complete_fires_per_request_on_the_calling_thread(self):
         # The indexer's callback touches SQLite (``queue.note_progress``),

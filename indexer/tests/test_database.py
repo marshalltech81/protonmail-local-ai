@@ -774,20 +774,28 @@ class TestUpsertThreadUpdate:
         # could expand the stored body well past what the insert path
         # would have kept, drifting FTS / embedding inputs across the
         # two code paths.
+        #
+        # The input must exceed the cap (#758): a repeated word is about
+        # one token per word, so each body is ~280 tokens and the 21
+        # messages total about 6,000, well past 4,000. Markers show which
+        # end the cut keeps: the head (the root) stays, the newest reply
+        # goes.
         from src.chunker import estimate_tokens
         from src.threader import THREAD_BODY_TEXT_MAX_TOKENS
 
+        filler = " ".join(["ledger"] * 300)
         original = make_message(
             message_id="long_orig@example.com",
-            body_text="A" * 500,
+            body_text=f"zqfirstmark {filler}",
         )
         t1 = threader.assign_thread(original)
         db.upsert_thread(t1, FAKE_EMBEDDING)
 
         for i in range(20):
+            marker = "zqlastmark " if i == 19 else ""
             reply = make_message(
                 message_id=f"long_reply_{i}@example.com",
-                body_text="B" * 500,
+                body_text=f"{marker}{filler}",
                 in_reply_to="long_orig@example.com",
                 filepath=f"/maildir/INBOX/cur/reply_{i}",
                 date=datetime(2024, 1, i + 2, tzinfo=UTC),
@@ -798,7 +806,12 @@ class TestUpsertThreadUpdate:
         row = db._conn.execute(
             "SELECT body_text FROM threads WHERE thread_id = 'long_orig@example.com'"
         ).fetchone()
-        assert estimate_tokens(row["body_text"]) <= THREAD_BODY_TEXT_MAX_TOKENS
+        body = row["body_text"]
+        assert estimate_tokens(body) <= THREAD_BODY_TEXT_MAX_TOKENS
+        # Cut near the cap, not far below it: truncation happened.
+        assert estimate_tokens(body) > THREAD_BODY_TEXT_MAX_TOKENS - 300
+        assert "zqfirstmark" in body
+        assert "zqlastmark" not in body
 
 
 # ---------------------------------------------------------------------------

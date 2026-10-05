@@ -267,21 +267,26 @@ class TestAssignThread:
         assert t2.thread_id == "root@example.com"
 
     def test_references_matched_most_recent_first(self, db, threader):
-        """Most recent reference (last in list) is checked first."""
-        msg_a = make_message(message_id="a@example.com")
-        t_a = threader.assign_thread(msg_a)
-        db.upsert_thread(t_a, [0.0] * EMBEDDING_DIM)
+        """Most recent reference (last in list) is checked first: with two
+        references that both resolve to distinct threads, the last one
+        wins (#758)."""
+        for mid, path in (
+            ("a@example.com", "/maildir/INBOX/cur/a"),
+            ("c@example.com", "/maildir/INBOX/cur/c"),
+        ):
+            msg = make_message(message_id=mid, subject=f"Topic {mid}", filepath=path)
+            db.upsert_thread(threader.assign_thread(msg), [0.0] * EMBEDDING_DIM)
+        assert db.find_thread_by_message_id("a@example.com") == "a@example.com"
+        assert db.find_thread_by_message_id("c@example.com") == "c@example.com"
 
         msg_b = make_message(
             message_id="b@example.com",
             subject="Re: Hello world",
-            references=["unknown@example.com", "a@example.com"],
+            references=["unknown@example.com", "a@example.com", "c@example.com"],
             filepath="/maildir/INBOX/cur/b",
             date=datetime(2024, 1, 2, tzinfo=UTC),
         )
-        t_b = threader.assign_thread(msg_b)
-        # Should join thread rooted at a@example.com via the last reference
-        assert t_b.thread_id == "a@example.com"
+        assert threader.assign_thread(msg_b).thread_id == "c@example.com"
 
     def test_falls_back_to_subject_matching(self, db, threader):
         original = make_message(
