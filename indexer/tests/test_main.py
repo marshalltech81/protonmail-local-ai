@@ -3888,6 +3888,87 @@ class TestEnqueueUnindexedMessages:
         db = Database(tmp_path / "mail.db")
         return maildir, inbox, db, _make_queue(db)
 
+    def _claim_order(self, db, queue) -> list[str]:
+        return [Path(r["filepath"]).name for r in queue.claim_batch(100)]
+
+    def _three_folders(self, maildir):
+        """One message per folder, written so walk order differs from
+        date order; Sent mail has no ``Received:`` header."""
+        _write_eml(
+            maildir / "Archive" / "cur" / "old",
+            "old@example.com",
+            received="Mon, 01 Jan 2018 09:00:00 +0000",
+        )
+        _write_eml(
+            maildir / "Sent" / "cur" / "mid",
+            "mid@example.com",
+            date="Wed, 01 Jan 2020 09:00:00 +0000",
+        )
+        _write_eml(
+            maildir / "INBOX" / "cur" / "new",
+            "new@example.com",
+            received="Thu, 01 Jan 2026 09:00:00 +0000",
+        )
+        (maildir / "INBOX" / "cur" / "undated").write_bytes(
+            b"Message-ID: <u@example.com>\r\n\r\nx\r\n"
+        )
+
+    def test_oldest_first_queues_by_message_time_across_folders(self, tmp_path, monkeypatch):
+        """#699/#752: the queue hands out the oldest message first,
+        whatever folder it is in (walk order here is Archive, INBOX,
+        Sent); undated last."""
+        maildir, _inbox, db, queue = self._setup(tmp_path, monkeypatch)
+        self._three_folders(maildir)
+        main._enqueue_unindexed_messages(
+            db, queue, maildir, main.REASON_INITIAL_SCAN, oldest_first=True
+        )
+        assert self._claim_order(db, queue) == ["old", "mid", "new", "undated"]
+
+    def test_reply_in_sent_is_indexed_after_the_message_it_answers(self, tmp_path, monkeypatch):
+        """#752: a reply walked before the message it answers (here in an
+        earlier folder) still lands in the same thread, because the
+        initial scan indexes oldest first."""
+        maildir, _inbox, db, queue = self._setup(tmp_path, monkeypatch)
+        _write_eml(
+            maildir / "AAA-Sent" / "cur" / "reply",
+            "reply@example.com",
+            subject="Re: Dinner",
+            in_reply_to="root@example.com",
+            references=["root@example.com"],
+            date="Tue, 02 Jan 2024 09:00:00 +0000",
+            from_addr="bob@example.com",
+            to_addr="alice@example.com",
+        )
+        _write_eml(
+            maildir / "INBOX" / "cur" / "root",
+            "root@example.com",
+            subject="Dinner",
+            received="Mon, 01 Jan 2024 09:00:00 +0000",
+        )
+        main.initial_index(db, make_mock_embedder(_UNIT_VECTOR), Threader(db), queue)
+        assert db.find_thread_by_message_id("reply@example.com") == db.find_thread_by_message_id(
+            "root@example.com"
+        )
+
+    def test_no_order_reads_no_headers(self, tmp_path, monkeypatch):
+        """A rescan keeps walk order and reads no message headers."""
+        maildir, _inbox, db, queue = self._setup(tmp_path, monkeypatch)
+        self._three_folders(maildir)
+        monkeypatch.setattr(main, "message_sort_time", lambda p: pytest.fail("read headers"))
+        assert main._enqueue_unindexed_messages(db, queue, maildir, main.REASON_RESCAN) == 4
+
+    def test_initial_index_queues_oldest_first(self, tmp_path, monkeypatch):
+        flags: list[bool] = []
+
+        def walk(*args, oldest_first=False, **kwargs):
+            flags.append(oldest_first)
+            return 0
+
+        monkeypatch.setattr(main, "_enqueue_unindexed_messages", walk)
+        db = Database(tmp_path / "mail.db")
+        main.initial_index(db, make_mock_embedder(), Threader(db), _make_queue(db))
+        assert flags == [True]
+
     def test_enqueues_file_that_arrived_without_an_event(self, tmp_path, monkeypatch):
         maildir, inbox, db, queue = self._setup(tmp_path, monkeypatch)
         missed = inbox / "missed.eml"

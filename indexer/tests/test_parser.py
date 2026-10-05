@@ -3185,3 +3185,120 @@ def test_undecodable_filename_is_not_logged(tmp_path, caplog):
     assert len(warnings) == 1
     assert "UnicodeError" in warnings[0].getMessage()
     assert marker not in caplog.text
+
+
+class TestMessageSortTime:
+    """``message_sort_time`` orders a first full index (#699): the
+    message's effective time from its header block alone."""
+
+    def _write(self, path, headers: list[str], body: bytes = b"body\r\n") -> None:
+        path.write_bytes("\r\n".join(headers).encode() + b"\r\n\r\n" + body)
+
+    def test_prefers_the_top_received_date(self, tmp_path):
+        from src.parser import message_sort_time
+
+        path = tmp_path / "m"
+        self._write(
+            path,
+            [
+                "Received: from a by mail.example.org; Tue, 02 Jan 2024 10:00:00 +0000",
+                "Received: from b by c; Mon, 01 Jan 2024 09:00:00 +0000",
+                "Date: Sun, 31 Dec 2023 08:00:00 +0000",
+                "Message-ID: <x@example.com>",
+            ],
+        )
+        assert message_sort_time(path) == datetime(2024, 1, 2, 10, 0, tzinfo=UTC)
+
+    def test_falls_back_to_date_like_sent_mail(self, tmp_path):
+        from src.parser import message_sort_time
+
+        path = tmp_path / "m"
+        self._write(path, ["Date: Sun, 31 Dec 2023 08:00:00 -0500", "Message-ID: <x@example.com>"])
+        assert message_sort_time(path) == datetime(2023, 12, 31, 13, 0, tzinfo=UTC)
+
+    def test_matches_parse_email_effective_date(self, tmp_path):
+        from src.parser import message_sort_time, parse_email
+
+        for name, headers in (
+            ("received", ["Received: from a by b; Tue, 02 Jan 2024 10:00:00 +0000"]),
+            ("date", []),
+        ):
+            path = tmp_path / name
+            self._write(
+                path,
+                [
+                    *headers,
+                    "Date: Sun, 31 Dec 2023 08:00:00 +0000",
+                    "Message-ID: <x@example.com>",
+                    "From: a@example.com",
+                ],
+            )
+            message = parse_email(path, tmp_path)
+            assert message is not None
+            assert message_sort_time(path) == message.effective_date
+
+    def test_no_usable_date_is_none(self, tmp_path):
+        from src.parser import message_sort_time
+
+        path = tmp_path / "m"
+        self._write(path, ["Date: not a date", "Message-ID: <x@example.com>"])
+        assert message_sort_time(path) is None
+        assert message_sort_time(tmp_path / "missing") is None
+
+    def test_reads_only_the_header_block(self, tmp_path, monkeypatch):
+        """A large body is not read: the read stops at the blank line."""
+        from src import parser
+
+        path = tmp_path / "m"
+        self._write(path, ["Date: Sun, 31 Dec 2023 08:00:00 +0000"], body=b"x" * (4 * 1024 * 1024))
+        read = _count_reads(monkeypatch)
+        assert parser.message_sort_time(path) is not None
+        assert sum(read) <= parser._SORT_READ_CHUNK
+
+    def test_a_huge_header_block_is_read_up_to_the_cap(self, tmp_path, monkeypatch):
+        """Synthetic worst case: an 8 MB folded header and no blank
+        line. The read stops at ``SORT_HEADER_MAX_BYTES``, quickly."""
+        import time
+
+        from src import parser
+
+        path = tmp_path / "m"
+        path.write_bytes(
+            b"Date: Sun, 31 Dec 2023 08:00:00 +0000\r\nX-Pad: "
+            + b"a\r\n b" * (8 * 1024 * 1024 // 5)
+        )
+        read = _count_reads(monkeypatch)
+        started = time.monotonic()
+        assert parser.message_sort_time(path) is not None
+        assert time.monotonic() - started < 2
+        assert sum(read) == parser.SORT_HEADER_MAX_BYTES
+
+
+def _count_reads(monkeypatch) -> list[int]:
+    """Record the size of every read ``message_sort_time`` makes."""
+    import builtins
+
+    sizes: list[int] = []
+    real_open = builtins.open
+
+    class _Counting:
+        def __init__(self, f):
+            self._f = f
+
+        def read(self, n=-1):
+            data = self._f.read(n)
+            sizes.append(len(data))
+            return data
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self._f.close()
+
+    def counting_open(file, mode="r", *args, **kwargs):
+        f = real_open(file, mode, *args, **kwargs)
+        return _Counting(f) if "b" in mode else f
+
+    monkeypatch.setattr("src.parser.open", counting_open, raising=False)
+    return sizes

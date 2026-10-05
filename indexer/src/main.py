@@ -82,7 +82,13 @@ from .maildir import (
     parse_sync_stamp_rename,
     read_sync_stamp,
 )
-from .parser import Message, OversizedMessageError, _derive_folder, parse_email
+from .parser import (
+    Message,
+    OversizedMessageError,
+    _derive_folder,
+    message_sort_time,
+    parse_email,
+)
 from .queue import (
     ERROR_CLASS_OPERATOR,
     ERROR_CLASS_RETRYABLE,
@@ -334,6 +340,7 @@ _check_chunk_budgets(CHUNK_TARGET_TOKENS, CHUNK_MAX_TOKENS, CHUNK_OVERLAP_TOKENS
 # points at a remote provider (~150 ms RTT each), marginal against a
 # host-side server on loopback.
 INITIAL_INDEX_BATCH_SIZE = _int_env("INITIAL_INDEX_BATCH_SIZE", 50)
+
 
 # Steady-state (post-initial-scan) batch size for the main-loop drain.
 # Smaller than the initial-scan size because steady-state typically sees
@@ -1879,6 +1886,7 @@ def _enqueue_unindexed_messages(
     reason: str,
     *,
     skip_trashed: bool = False,
+    oldest_first: bool = False,
 ) -> int:
     """Walk the Maildir and enqueue every message not yet indexed.
 
@@ -1904,10 +1912,15 @@ def _enqueue_unindexed_messages(
     resurrect the message into search. With reconciliation disabled the
     index is append-only and trashed files are indexed like any other.
 
+    ``oldest_first`` queues the files by message time, oldest first
+    across every folder (undated last), which sets the order the queue
+    hands them out in (#699, #752); otherwise walk order is kept and no
+    headers are read.
+
     Returns the number of files enqueued.
     """
-    enqueued = 0
     skipped_dead = 0
+    candidates: list[Path] = []
     for filepath in _iter_maildir_messages(root):
         path_str = str(filepath)
         if db.is_indexed(path_str):
@@ -1919,8 +1932,18 @@ def _enqueue_unindexed_messages(
             continue
         if queue.has_pending_row(path_str):
             continue
-        queue.enqueue(path_str, reason)
-        enqueued += 1
+        candidates.append(filepath)
+    if oldest_first:
+        times = {p: message_sort_time(p) for p in candidates}
+
+        def sort_key(p: Path) -> tuple[bool, float, str]:
+            t = times[p]
+            return (t is None, t.timestamp() if t is not None else 0.0, str(p))
+
+        candidates.sort(key=sort_key)
+    for filepath in candidates:
+        queue.enqueue(str(filepath), reason)
+    enqueued = len(candidates)
     if enqueued or skipped_dead:
         log.info(
             "Maildir walk (%s): enqueued %d message(s), skipped %d dead-lettered.",
@@ -2006,7 +2029,21 @@ def initial_index(
     # service load per dead file per restart.
     stamp = ingestion_state.read_stamp() if ingestion_state is not None else None
     _enqueue_unindexed_messages(
-        db, queue, MAILDIR_PATH, REASON_INITIAL_SCAN, skip_trashed=skip_trashed
+        db,
+        queue,
+        MAILDIR_PATH,
+        REASON_INITIAL_SCAN,
+        skip_trashed=skip_trashed,
+        # Oldest first, so a message is indexed before the replies to it:
+        # the threader joins a reply to an indexed parent but never merges
+        # a parent into replies indexed before it (#752). Walk order goes
+        # folder by folder (Sent before INBOX on the live mailbox), which
+        # put about 10,000 of 21,662 replies ahead of every message they
+        # reference; oldest first puts none. Reading each header block
+        # costs about 12 s for 33,000 messages. Newest first would make
+        # recent mail searchable sooner but splits threads until #752's
+        # merge exists (owner decision, 2026-10-05).
+        oldest_first=True,
     )
     if ingestion_state is not None:
         ingestion_state.acknowledge(stamp)

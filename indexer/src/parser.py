@@ -10,6 +10,7 @@ import email
 import email.errors
 import email.header
 import email.message
+import email.parser
 import email.utils
 import hashlib
 import logging
@@ -97,6 +98,13 @@ MESSAGE_ID_MAX_CHARS = 998
 # A ``;`` further back means a date text longer than the cap, which is
 # read as unparseable (``None``).
 RECEIVED_DATE_MAX_CHARS = 256
+
+# Most bytes ``message_sort_time`` reads from one file, in chunks of
+# ``_SORT_READ_CHUNK``, stopping at the blank line that ends the
+# headers. Proton's own headers (ARC, DKIM, its ``Received:`` chain) fit
+# well inside; a header block longer than this is read up to the cap.
+SORT_HEADER_MAX_BYTES = 64 * 1024
+_SORT_READ_CHUNK = 8 * 1024
 
 
 def _parse_max_bytes() -> int:
@@ -1303,6 +1311,54 @@ def _parse_received_date(msg: email.message.Message) -> datetime | None:
         OverflowError,
     ) as exc:
         log.debug("Received header date unreadable (%s)", type(exc).__name__)
+        return None
+
+
+def message_sort_time(path: Path) -> datetime | None:
+    """The time that orders a first full index (#699): the message's
+    effective time as ``parse_email`` derives it (the topmost
+    ``Received:``, else ``Date:``), from its header block alone.
+
+    Reads at most ``SORT_HEADER_MAX_BYTES`` and parses only those bytes
+    with the standard library's header parser, so the work is bounded
+    whatever the file's size. Returns ``None`` when the file cannot be
+    read or neither header gives a date. Nothing is logged: the message
+    is parsed in full, and any problem reported, when it is indexed.
+    """
+    head = b""
+    try:
+        with open(path, "rb") as f:
+            while len(head) < SORT_HEADER_MAX_BYTES:
+                chunk = f.read(min(_SORT_READ_CHUNK, SORT_HEADER_MAX_BYTES - len(head)))
+                if not chunk:
+                    break
+                # The blank line can straddle two chunks.
+                start = max(0, len(head) - 3)
+                head += chunk
+                if b"\n\n" in head[start:] or b"\n\r\n" in head[start:]:
+                    break
+    except OSError:
+        return None
+    try:
+        msg = email.parser.BytesHeaderParser().parsebytes(head)
+        occurred = _parse_received_date(msg)
+        if occurred is not None:
+            return occurred
+        # As ``parse_email`` reads ``Date:``, without its warning.
+        date_text = str(msg.get("Date", "")).encode("ascii", "ignore").decode("ascii")
+        dt = email.utils.parsedate_to_datetime(date_text)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=UTC)
+        return dt.astimezone(UTC)
+    except (
+        email.errors.MessageError,
+        email.errors.MessageDefect,
+        UnicodeError,
+        LookupError,
+        ValueError,
+        TypeError,
+        OverflowError,
+    ):
         return None
 
 
