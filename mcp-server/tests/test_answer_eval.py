@@ -13,6 +13,7 @@ import asyncio
 import dataclasses
 import json
 import logging
+import os
 import re
 import shutil
 import time
@@ -1072,6 +1073,38 @@ class TestHarnessAndReports:
         assert path.stat().st_mode & 0o777 == 0o600
         assert path.parent.stat().st_mode & 0o777 == 0o700
 
+    def test_private_json_restricts_an_existing_file_before_writing(self, tmp_path, monkeypatch):
+        """#679: O_CREAT's mode applies only on create, so an existing 0644
+        report stayed world-readable while the new content was written, and
+        a descriptor opened on it earlier could read the new content."""
+        path = tmp_path / "r.json"
+        path.write_text("old")
+        path.chmod(0o644)
+        modes = []
+        real_dump = json.dump
+
+        def observing_dump(obj, fh, **kwargs):
+            # The mode of the file the content is going into, as it is written.
+            modes.append(os.fstat(fh.fileno()).st_mode & 0o777)
+            return real_dump(obj, fh, **kwargs)
+
+        monkeypatch.setattr(json, "dump", observing_dump)
+        with path.open() as earlier_reader:
+            write_private_json(path, {"a": 1})
+            assert earlier_reader.read() == "old"
+        assert modes == [0o600]
+        assert path.stat().st_mode & 0o777 == 0o600
+        assert json.loads(path.read_text()) == {"a": 1}
+        assert [p.name for p in tmp_path.iterdir()] == ["r.json"]
+
+    def test_private_json_failed_write_keeps_the_old_file(self, tmp_path):
+        path = tmp_path / "r.json"
+        write_private_json(path, {"a": 1})
+        with pytest.raises(TypeError):
+            write_private_json(path, {"a": object()})
+        assert json.loads(path.read_text()) == {"a": 1}
+        assert [p.name for p in tmp_path.iterdir()] == ["r.json"]
+
 
 class TestCli:
     def _report(self, chunked_db, tmp_path, name, **identity):
@@ -1134,12 +1167,105 @@ class TestCli:
             assert cli.main(["compare", str(report), str(report)]) == cli.EXIT_CONFIG
         assert "Traceback" not in capsys.readouterr().err
 
+    @pytest.mark.parametrize(
+        "path, value",
+        [
+            (["identity"], ["MARKER-677"]),
+            (["identity"], "MARKER-677"),
+            (["counts"], ["MARKER-677"]),
+            (["counts", "selected"], None),  # removed
+            (["aggregates"], ["MARKER-677"]),
+            (["aggregates", "dev"], ["MARKER-677"]),
+            (["aggregates", "held_out"], None),
+            (["aggregates", "by_category"], ["MARKER-677"]),
+            (["aggregates", "by_category", "CATEGORY"], ["MARKER-677"]),
+            (["aggregates", "by_category", "CATEGORY", "judge"], ["MARKER-677"]),
+            (["cases"], {"MARKER-677": 1}),
+            (["cases", 0], ["MARKER-677"]),
+            (["cases", 0, "id"], ["MARKER-677"]),
+            (["cases", 0, "judge"], ["MARKER-677"]),
+            (["cases", 0, "deterministic"], None),
+            # Codex round 1 on #761: wrong-typed values that print fine.
+            (["counts", "selected"], "MARKER-677"),
+            (["counts", "errors"], -1),
+            (["aggregates", "dev", "deterministic_pass_rate"], "MARKER-677"),
+            (["aggregates", "held_out", "answer_ms_mean"], True),
+            (["aggregates", "by_category", "CATEGORY", "deterministic_pass_rate"], "MARKER-677"),
+            (["aggregates", "by_category", "MARKER-677 x"], {"deterministic_pass_rate": None}),
+            (["cases", 0, "id"], "MARKER-677 x"),
+            (["cases", 0, "category"], "MARKER-677 x"),
+            (["cases", 0, "held_out"], "MARKER-677"),
+            # Codex round 2 on #761: the flags compare turns into
+            # regressions and improvements.
+            (["cases", 0, "status"], ["MARKER-677"]),
+            (["cases", 0, "deterministic", "passed"], "MARKER-677"),
+            (["cases", 0, "judge", "status"], ["MARKER-677"]),
+            (["cases", 0, "judge", "groundedness_pass"], "MARKER-677"),
+            (["cases", 0, "judge", "correctness_pass"], "MARKER-677"),
+        ],
+    )
+    def test_compare_rejects_malformed_nested_shapes(
+        self, chunked_db, tmp_path, capsys, path, value
+    ):
+        """#677: a well-labelled report with a malformed nested shape (for
+        example ``identity: []``) raised a traceback instead of exit 3, and
+        a wrong-typed value that prints fine reached the output."""
+        good = self._report(chunked_db, tmp_path, "a.json")
+        data = json.loads(good.read_text())
+        # The one category the report holds.
+        path = [data["cases"][0]["category"] if k == "CATEGORY" else k for k in path]
+        *parents, last = path
+        node = data
+        for key in parents:
+            node = node[key]
+        if value is None:
+            del node[last]
+        else:
+            node[last] = value
+        bad = tmp_path / "bad.json"
+        bad.write_text(json.dumps(data))
+        for argv in ([str(good), str(bad)], [str(bad), str(good)]):
+            assert cli.main(["compare", *argv]) == cli.EXIT_CONFIG
+            out, err = capsys.readouterr()
+            assert err == "answer evaluation: malformed answer evaluation report\n"
+            assert "MARKER-677" not in out + err
+
+    def test_compare_rejects_a_non_utf8_report(self, chunked_db, tmp_path, capsys):
+        """Codex round 2 on #761: invalid UTF-8 raised an uncaught
+        UnicodeDecodeError instead of exit 3."""
+        good = self._report(chunked_db, tmp_path, "a.json")
+        bad = tmp_path / "bad.json"
+        bad.write_bytes(b'{"kind": "answer_eval_run", "x": "\xff\xfeMARKER-677"}')
+        for argv in ([str(good), str(bad)], [str(bad), str(good)]):
+            assert cli.main(["compare", *argv]) == cli.EXIT_CONFIG
+            out, err = capsys.readouterr()
+            assert err == "answer evaluation: unreadable input (UnicodeDecodeError)\n"
+            assert "MARKER-677" not in out + err
+
     def test_run_rejects_detail_overwriting_the_report(self, tmp_path, capsys):
         """Review round 1: --detail equal to --out overwrote the report."""
         out = str(tmp_path / "r.json")
         code = cli.main(["run", "--index-dir", str(tmp_path), "--out", out, "--detail", out])
         assert code == cli.EXIT_CONFIG
         assert "--detail" in capsys.readouterr().err
+
+    @pytest.mark.parametrize("flag", ["--max-runtime-secs", "--case-timeout-secs"])
+    @pytest.mark.parametrize("value", ["nan", "inf", "-inf", "0", "-5"])
+    def test_run_rejects_non_finite_or_non_positive_limits(
+        self, tmp_path, capsys, monkeypatch, flag, value
+    ):
+        """#676: nan/inf disabled the run bound and wrote NaN/Infinity into
+        the report identity. Rejected before any file or provider is opened."""
+
+        def no_provider(*_a, **_k):
+            raise AssertionError("a provider was configured")
+
+        monkeypatch.setattr(cli, "load_layer", no_provider)
+        out = tmp_path / "r.json"
+        code = cli.main(["run", "--index-dir", str(tmp_path), "--out", str(out), f"{flag}={value}"])
+        assert code == cli.EXIT_CONFIG
+        assert f"{flag} must be a finite number greater than 0" in capsys.readouterr().err
+        assert not out.exists()
 
     def test_run_rejects_unknown_case_ids(self, tmp_path, capsys):
         code = cli.main(

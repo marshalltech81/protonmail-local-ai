@@ -8,7 +8,8 @@
   errors), 3 configuration or contract error before any provider call.
 - ``compare``: 0 compared, 1 a per-case regression with
   ``--fail-on-regression``, 2 the runs are not comparable (different
-  cases, index or judge/rubric) without ``--allow-incompatible``.
+  cases, index or judge/rubric) without ``--allow-incompatible``, 3 a
+  report is unreadable or malformed.
 
 Quality is advisory until thresholds are calibrated: ``run`` never
 fails on a low score.
@@ -19,7 +20,9 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 import os
+import re
 import sqlite3
 import sys
 from datetime import UTC, datetime
@@ -67,6 +70,14 @@ def _check_output_path(path: Path) -> Path:
 
 
 def _run(args: argparse.Namespace) -> int:
+    # argparse's float accepts nan and inf: nan disables the run bound
+    # and both write non-standard JSON into the report identity.
+    for flag, value in (
+        ("--case-timeout-secs", args.case_timeout_secs),
+        ("--max-runtime-secs", args.max_runtime_secs),
+    ):
+        if not (math.isfinite(value) and value > 0):
+            raise ConfigError(f"{flag} must be a finite number greater than 0")
     out = _check_output_path(args.out)
     detail = _check_output_path(args.detail) if args.detail else None
     if detail == out:
@@ -160,6 +171,88 @@ def _run(args: argparse.Namespace) -> int:
     return EXIT_INCOMPLETE if is_incomplete(report) else EXIT_OK
 
 
+# Case IDs and categories as cases.json writes them: the only report
+# strings ``compare`` prints.
+_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
+_COUNT_KEYS = ("selected", "completed", "errors", "skipped")
+_SPLIT_RATES = ("deterministic_pass_rate", "prompt_evidence_coverage", "answer_ms_mean")
+_JUDGE_RATES = ("correctness_pass_rate", "groundedness_pass_rate")
+
+
+def _is_rate(value: Any) -> bool:
+    return value is None or (
+        isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(value)
+    )
+
+
+def _is_flag(value: Any) -> bool:
+    return value is None or isinstance(value, bool)
+
+
+def _is_name(value: Any) -> bool:
+    return isinstance(value, str) and _NAME.fullmatch(value) is not None
+
+
+def _judge_ok(judge: Any, rates: tuple[str, ...]) -> bool:
+    return judge is None or (isinstance(judge, dict) and all(_is_rate(judge.get(k)) for k in rates))
+
+
+def _report_shape_ok(data: dict[str, Any]) -> bool:
+    """Every field ``compare`` reads or prints has the type the harness
+    writes (#677): counts are non-negative integers, rates finite numbers
+    or null, flags booleans (or null), statuses strings, and case IDs and
+    categories plain names, so a wrong-typed value is refused instead of
+    printed or turned into a regression or improvement."""
+    counts, aggregates, cases = data.get("counts"), data.get("aggregates"), data.get("cases")
+    if not isinstance(data.get("identity"), dict) or not isinstance(counts, dict):
+        return False
+    if not all(
+        isinstance(counts.get(k), int) and not isinstance(counts[k], bool) and counts[k] >= 0
+        for k in _COUNT_KEYS
+    ):
+        return False
+    if not isinstance(aggregates, dict) or not isinstance(aggregates.get("by_category"), dict):
+        return False
+    for split in ("dev", "held_out"):
+        agg = aggregates.get(split)
+        if not isinstance(agg, dict) or not all(
+            k in agg and _is_rate(agg[k]) for k in _SPLIT_RATES
+        ):
+            return False
+        if not _judge_ok(agg.get("judge"), _JUDGE_RATES):
+            return False
+    for name, cat in aggregates["by_category"].items():
+        if not _is_name(name) or not isinstance(cat, dict):
+            return False
+        if not _is_rate(cat.get("deterministic_pass_rate")) or not _judge_ok(
+            cat.get("judge"), ("correctness_pass_rate",)
+        ):
+            return False
+    if not isinstance(cases, list):
+        return False
+    for case in cases:
+        if not (
+            isinstance(case, dict)
+            and _is_name(case.get("id"))
+            and _is_name(case.get("category"))
+            and isinstance(case.get("held_out"), bool)
+            and isinstance(case.get("status"), str)
+            and isinstance(case.get("deterministic"), dict)
+            and isinstance(case.get("judge"), dict)
+        ):
+            return False
+        # The flags ``_case_flags`` compares (#677, Codex round 2 on #761).
+        judge = case["judge"]
+        if not (
+            _is_flag(case["deterministic"].get("passed"))
+            and isinstance(judge.get("status"), str)
+            and _is_flag(judge.get("groundedness_pass"))
+            and _is_flag(judge.get("correctness_pass"))
+        ):
+            return False
+    return True
+
+
 def _load_report(path: Path) -> dict[str, Any]:
     data = json.loads(path.read_text(encoding="utf-8"))
     if (
@@ -168,12 +261,22 @@ def _load_report(path: Path) -> dict[str, Any]:
         or data.get("schema_version") != REPORT_SCHEMA_VERSION
     ):
         raise ConfigError(f"not an answer evaluation report (schema v{REPORT_SCHEMA_VERSION})")
+    if not _report_shape_ok(data):
+        raise ConfigError("malformed answer evaluation report")
     return data
 
 
 def _compare(args: argparse.Namespace) -> int:
-    cmp = compare_reports(_load_report(args.baseline), _load_report(args.candidate))
-    print(render_comparison(cmp))
+    base, cand = _load_report(args.baseline), _load_report(args.candidate)
+    # _load_report checks the labels and the shape of what compare reads;
+    # anything it does not model surfaces here. Fixed text only: the
+    # exceptions' messages can quote report contents.
+    try:
+        cmp = compare_reports(base, cand)
+        rendered = render_comparison(cmp)
+    except AttributeError, KeyError, TypeError:
+        raise ConfigError("malformed answer evaluation report") from None
+    print(rendered)
     if args.out:
         write_private_json(_check_output_path(args.out), cmp)
     if cmp["incompatible"] and not args.allow_incompatible:
@@ -209,7 +312,7 @@ def main(argv: list[str] | None = None) -> int:
     except (CaseError, ConfigError, NonSyntheticIndexError) as e:
         print(f"answer evaluation: {e}", file=sys.stderr)
         return EXIT_CONFIG
-    except (OSError, json.JSONDecodeError, sqlite3.Error, KeyError, TypeError) as e:
+    except (OSError, UnicodeError, json.JSONDecodeError, sqlite3.Error, KeyError, TypeError) as e:
         # Unreadable or malformed case, report or index files. The type
         # only: these messages can quote file contents.
         print(f"answer evaluation: unreadable input ({type(e).__name__})", file=sys.stderr)
