@@ -25,7 +25,9 @@ set -Eeuo pipefail
 #      deep nesting) each get their own directory.
 #   4. Child names that would land on isync's own files in their parent's
 #      directory (.mbsyncstate*, .uidvalidity, .isyncuidmap.db) are left
-#      out by the channel's Patterns; their parent still syncs.
+#      out by the channel's Patterns; their parent still syncs. So is
+#      Proton's virtual top-level Starred folder (#692), while a custom
+#      folder of that name (Folders/Starred) still syncs.
 #   5. A spurious UIDVALIDITY change (new UIDVALIDITY, the same message at
 #      every UID) is recovered by isync itself, with local state in place:
 #      nothing is downloaded twice and no local file changes.
@@ -248,7 +250,8 @@ fi
 TAGS=()
 for name in "Folders/Kept" "Folders/Kept/mbsyncstate" "Folders/Kept/mbsyncstate.journal" \
     "Folders/Kept/mbsyncstate.new" "Folders/Kept/mbsyncstate.lock" \
-    "Folders/Kept/isyncuidmap.db" "Folders/Kept/mbsyncstate/Below"; do
+    "Folders/Kept/isyncuidmap.db" "Folders/Kept/mbsyncstate/Below" \
+    "Starred" "Folders/Starred"; do
     deliver "$name"
 done
 ok=1
@@ -261,7 +264,7 @@ done
 for entry in "${TAGS[@]}"; do
     name="${entry%%|*}"
     tag="${entry#*|}"
-    if [[ "$name" == "Folders/Kept" ]]; then
+    if [[ "$name" == "Folders/Kept" || "$name" == "Folders/Starred" ]]; then
         expected=1
     else
         expected=0
@@ -273,9 +276,9 @@ for entry in "${TAGS[@]}"; do
 done
 if ((ok)) && located "Folders/Kept" "${TAGS[0]#*|}" \
     && [[ -f "$WORK/maildir/Folders/.Kept/.mbsyncstate" ]]; then
-    pass "folders named after isync's own files are skipped; their parent syncs"
+    pass "folders named after isync's own files and the virtual Starred folder are skipped; their parent and Folders/Starred sync"
 else
-    fail "folders named after isync's own files are skipped; their parent syncs"
+    fail "folders named after isync's own files and the virtual Starred folder are skipped; their parent and Folders/Starred sync"
 fi
 
 # 5 and 6: UIDVALIDITY changes (#279). Each case has stores of its own

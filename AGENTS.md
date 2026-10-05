@@ -157,7 +157,7 @@ Do not make any of the following changes unless the repository owner explicitly 
 - Do not change mbsync to write back to Proton.
 - `mbsyncrc.template` must remain pull-only.
 - Do not remove `Expunge None`.
-- Do not add `All Mail` or `Labels/*` to mbsync Patterns.
+- Do not add `All Mail`, `Labels/*` or the top-level `Starred` to mbsync Patterns.
 - Do not weaken or bypass TLS verification casually.
 
 ### TLS and connection security constraints
