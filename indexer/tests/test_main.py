@@ -7052,15 +7052,15 @@ class TestChunkKinds:
 
 
 class TestWalMaintenance:
-    """``_run_wal_maintenance`` runs FTS5 ``optimize`` on tables with
-    deletes, then the truncate checkpoint, so the checkpoint clears the
-    WAL copies of the rewritten segments (#641)."""
+    """``_run_wal_maintenance`` scrubs the FTS5 tables a reap deleted
+    from, then runs the truncate checkpoint, so the checkpoint clears
+    the WAL copies of the rewritten segments (#641, #670)."""
 
-    def test_optimizes_before_checkpoint_and_logs_fixed_line(self, caplog):
+    def test_scrubs_before_checkpoint_and_logs_fixed_line(self, caplog):
         calls: list[str] = []
         db = MagicMock()
-        db.optimize_deleted_fts.side_effect = lambda: (
-            calls.append("optimize")
+        db.scrub_reaped_fts.side_effect = lambda: (
+            calls.append("scrub")
             or [
                 "threads_fts",
                 "attachments_fts",
@@ -7069,28 +7069,28 @@ class TestWalMaintenance:
         db.wal_checkpoint_truncate.side_effect = lambda: calls.append("checkpoint") or (0, 0, 0)
         with caplog.at_level(logging.INFO, logger=main.log.name):
             main._run_wal_maintenance(db)
-        assert calls == ["optimize", "checkpoint"]
-        lines = [r.getMessage() for r in caplog.records if "fts optimize" in r.getMessage()]
+        assert calls == ["scrub", "checkpoint"]
+        lines = [r.getMessage() for r in caplog.records if "fts scrub" in r.getMessage()]
         assert len(lines) == 1
-        assert lines[0].startswith("fts optimize tables=threads_fts,attachments_fts duration=")
+        assert lines[0].startswith("fts scrub tables=threads_fts,attachments_fts duration=")
 
     def test_no_deletes_logs_nothing(self, caplog):
         db = MagicMock()
-        db.optimize_deleted_fts.return_value = []
+        db.scrub_reaped_fts.return_value = []
         db.wal_checkpoint_truncate.return_value = (0, 0, 0)
         with caplog.at_level(logging.DEBUG, logger=main.log.name):
             main._run_wal_maintenance(db)
-        assert not [r for r in caplog.records if "fts optimize" in r.getMessage()]
+        assert not [r for r in caplog.records if "fts scrub" in r.getMessage()]
         db.wal_checkpoint_truncate.assert_called_once()
 
-    def test_optimize_failure_logs_type_and_still_checkpoints(self, caplog):
+    def test_scrub_failure_logs_type_and_still_checkpoints(self, caplog):
         db = MagicMock()
-        db.optimize_deleted_fts.side_effect = sqlite3.OperationalError("zq-marker-641")
+        db.scrub_reaped_fts.side_effect = sqlite3.OperationalError("zq-marker-641")
         db.wal_checkpoint_truncate.return_value = (0, 0, 0)
         with caplog.at_level(logging.DEBUG, logger=main.log.name):
             main._run_wal_maintenance(db)
         db.wal_checkpoint_truncate.assert_called_once()
-        assert "fts optimize failed: OperationalError" in caplog.text
+        assert "fts scrub failed: OperationalError" in caplog.text
         assert "zq-marker-641" not in caplog.text
 
     def test_real_database_reap_then_maintenance_clears_terms(self, tmp_path):

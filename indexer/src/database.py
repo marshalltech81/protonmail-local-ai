@@ -142,9 +142,21 @@ def _require_minimum_sqlite() -> None:
         )
 
 
-# Every FTS5 table in the schema, in the order ``optimize_deleted_fts``
+# Every FTS5 table in the schema, in the order ``scrub_reaped_fts``
 # visits them.
 _FTS_TABLES = ("threads_fts", "message_chunks_fts", "attachments_fts")
+
+# One ``scrub_reaped_fts`` step: FTS5 ``merge`` with this page budget,
+# committed on its own so the write lock is free between steps (#670).
+# Measured on a 20,000-thread synthetic table (plain timing, SQLite
+# 3.46.1 and 3.53.4): 9 steps of at most 0.2 s and a 17 MB WAL peak,
+# against 1.2 s and 69 MB for one ``optimize``.
+_FTS_SCRUB_STEP_PAGES = 2000
+
+# Steps one pass may spend on one table before leaving it pending for
+# the next pass. 1,000 steps of 2,000 pages is far beyond any index this
+# project expects; the cap only keeps a pass from running unbounded.
+_FTS_SCRUB_MAX_STEPS = 1000
 
 
 def _synchronized(fn):
@@ -178,9 +190,11 @@ class Database:
         self._transaction_depth = 0
         # Operator source-authority rules; empty until ``set_authority_rules``.
         self._authority_rules = AuthorityRules()
-        # FTS5 tables that had a row deleted since their last
-        # ``optimize_deleted_fts`` run (#641). In memory only.
-        self._fts_pending_optimize: set[str] = set()
+        # FTS5 tables a reap deleted from since their last
+        # ``scrub_reaped_fts`` (#641, #670). In memory only, so every
+        # table starts pending: the first pass after the database is
+        # opened also covers a reap whose scrub a restart cut short.
+        self._fts_pending_scrub: set[str] = set(_FTS_TABLES)
         path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = self._connect()
         self._closed = False
@@ -205,7 +219,7 @@ class Database:
         # compiled (Debian's build defaults ON, many others OFF). Per
         # connection; ON rather than FAST, which leaves freed overflow
         # pages (long bodies and extractions) unzeroed. FTS5 index
-        # terms are removed by ``optimize_deleted_fts`` (#641); WAL
+        # terms are removed by ``scrub_reaped_fts`` (#641); WAL
         # frames are not covered; see docs/architecture.md.
         conn.execute("PRAGMA secure_delete = ON")
         # Performance tuning
@@ -255,38 +269,50 @@ class Database:
         # Row order is (busy, log, checkpointed) per SQLite docs.
         return int(row[0]), int(row[1]), int(row[2])
 
-    def optimize_deleted_fts(self) -> list[str]:
-        """Run FTS5 ``optimize`` on each FTS5 table that had a row
-        deleted since its last run, and return the tables optimized.
+    def scrub_reaped_fts(self) -> list[str]:
+        """Merge each FTS5 table a reap deleted from into one segment,
+        and return the tables finished.
 
         The FTS5 tables are ``contentless_delete=1``: a ``DELETE``
         records a tombstone and leaves the row's index terms (its words
         and their positions) in live ``*_fts_data`` segment pages, which
         ``secure_delete`` never frees and FTS5's ``secure-delete``
-        option does not cover for this table type. ``optimize`` merges
-        every segment into one and drops the deleted terms (#641). It
-        rewrites the whole table, so the main loop calls this at most
-        once per WAL-checkpoint interval, just before the checkpoint.
+        option does not cover for this table type. Merging every
+        segment into one drops the deleted terms (#641), those of
+        earlier deletes included. Only a reap marks a table: a re-index
+        replaces live mail with a newer version of itself, and FTS5's
+        automerge keeps its superseded rows in check (#670).
 
-        The lock is taken per table, so a writer waits for one
-        ``optimize`` at most. A table stays pending if its ``optimize``
-        fails, and the error propagates to the caller.
+        The merge runs in steps (``'merge'`` with a negative page
+        budget, the incremental form of ``optimize``), each committed
+        under the lock on its own, so a writer waits for one step at
+        most. A table is finished when a step changes fewer than two
+        rows, as the FTS5 documentation specifies. One not finished
+        within ``_FTS_SCRUB_MAX_STEPS``, or whose step fails, stays
+        pending; a failure propagates to the caller.
         """
         done: list[str] = []
         for table in _FTS_TABLES:
-            with self._lock:
-                if table not in self._fts_pending_optimize:
-                    continue
-                try:
-                    self._conn.execute(
-                        f"INSERT INTO {table}({table}) VALUES('optimize')"  # nosec B608 - table from the fixed _FTS_TABLES tuple
-                    )
-                    self._conn.commit()
-                except Exception:
-                    self._conn.rollback()
-                    raise
-                self._fts_pending_optimize.discard(table)
-            done.append(table)
+            if table not in self._fts_pending_scrub:
+                continue
+            for _ in range(_FTS_SCRUB_MAX_STEPS):
+                with self._lock:
+                    before = self._conn.total_changes
+                    try:
+                        self._conn.execute(
+                            f"INSERT INTO {table}({table}, rank) VALUES('merge', ?)",  # nosec B608 - table from the fixed _FTS_TABLES tuple
+                            (-_FTS_SCRUB_STEP_PAGES,),
+                        )
+                        self._conn.commit()
+                    except Exception:
+                        self._conn.rollback()
+                        raise
+                    finished = self._conn.total_changes - before < 2
+                    if finished:
+                        self._fts_pending_scrub.discard(table)
+                if finished:
+                    done.append(table)
+                    break
         return done
 
     def _begin_if_needed(self, cur: sqlite3.Cursor) -> bool:
@@ -1236,7 +1262,6 @@ class Database:
                 fts_rowid = existing_fts_rowids.get(chunk_id)
                 if fts_rowid is not None:
                     cur.execute("DELETE FROM message_chunks_fts WHERE rowid = ?", (fts_rowid,))
-                    self._fts_pending_optimize.add("message_chunks_fts")
                 cur.execute("DELETE FROM message_chunks_vec WHERE chunk_id = ?", (chunk_id,))
                 cur.execute("DELETE FROM message_chunks WHERE chunk_id = ?", (chunk_id,))
 
@@ -1545,7 +1570,7 @@ class Database:
         for row in rows:
             if row["fts_rowid"] is not None:
                 cur.execute("DELETE FROM attachments_fts WHERE rowid = ?", (row["fts_rowid"],))
-                self._fts_pending_optimize.add("attachments_fts")
+                self._fts_pending_scrub.add("attachments_fts")
         cur.execute("DELETE FROM attachments WHERE claimant_id = ?", (claimant_id,))
         for attachment_id in sorted({row["attachment_id"] for row in rows}):
             cur.execute(_PURGE_ORPHAN_EXTRACTION_SQL, (attachment_id, attachment_id))
@@ -1882,7 +1907,7 @@ class Database:
                 f"DELETE FROM message_chunks_fts WHERE rowid IN ({placeholders})",  # nosec B608
                 int_batch,
             )
-            self._fts_pending_optimize.add("message_chunks_fts")
+            self._fts_pending_scrub.add("message_chunks_fts")
         for start in range(0, len(chunk_ids), batch_size):
             str_batch = chunk_ids[start : start + batch_size]
             placeholders = ",".join(["?"] * len(str_batch))
@@ -1938,7 +1963,6 @@ class Database:
         ).fetchone()
         if existing and existing["fts_rowid"] is not None:
             cur.execute("DELETE FROM threads_fts WHERE rowid = ?", (existing["fts_rowid"],))
-            self._fts_pending_optimize.add("threads_fts")
         cur.execute(
             "INSERT INTO threads_fts (subject, participants, body) VALUES (?, ?, ?)",
             (subject, participants_json, body),
@@ -2723,7 +2747,7 @@ class Database:
             ]
             if row and row["fts_rowid"] is not None:
                 cur.execute("DELETE FROM threads_fts WHERE rowid = ?", (row["fts_rowid"],))
-                self._fts_pending_optimize.add("threads_fts")
+                self._fts_pending_scrub.add("threads_fts")
             cur.execute("DELETE FROM threads_vec WHERE thread_id = ?", (thread_id,))
             self._delete_chunks_for_thread(cur, thread_id)
             # Walk every message in the thread to drop its attachments
@@ -2824,6 +2848,8 @@ class Database:
                 self._conn.rollback()
                 return None
             self._rewrite_thread_row(cur, thread, embedding)
+            # The replaced thread row held the reaped messages' words.
+            self._fts_pending_scrub.add("threads_fts")
             mentions = self._participant_mentions(cur, reaped_claimant_ids)
             for cid in reaped_claimant_ids:
                 fp = self._remove_message_row(cur, cid)

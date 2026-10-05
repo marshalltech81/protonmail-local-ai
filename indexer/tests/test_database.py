@@ -2768,13 +2768,16 @@ class TestSecureDelete:
         assert self._MARKER.encode() in raw
 
 
-class TestFtsOptimize:
+class TestFtsScrub:
     """A deleted row's FTS5 index terms stay in live ``*_fts_data``
     segment pages, which ``secure_delete`` never frees, until a merge
     rewrites the segment (#641). FTS5's own ``secure-delete`` option
     does not apply to ``contentless_delete=1`` tables, so
-    ``optimize_deleted_fts`` runs ``optimize`` on each FTS5 table that
-    had a row deleted since its last run."""
+    ``scrub_reaped_fts`` merges each FTS5 table a reap deleted from into
+    one segment, in bounded steps (#670). A re-index of live mail marks
+    nothing: FTS5's automerge keeps its superseded rows in check. Each
+    table is scrubbed once after the database is opened, which covers a
+    reap whose scrub a restart cut short."""
 
     # Synthetic single-token markers, one per FTS5 table. No other
     # indexed term starts with ``zq``, so FTS5's prefix compression
@@ -2782,10 +2785,13 @@ class TestFtsOptimize:
     _THREAD = "zqthreadmark"
     _CHUNK = "zqchunkmark"
     _FILE = "zqfilemark"
+    _ALL = ["threads_fts", "message_chunks_fts", "attachments_fts"]
 
     def _index_and_reap(self, db, threader) -> None:
         """Index a message carrying a marker in each FTS5 table, land
         it in the main file, then reap it through the real reap path."""
+        # The scrub every opened database owes once.
+        assert db.scrub_reaped_fts() == self._ALL
         marked = make_message(
             message_id="fts@x", filepath="/m/fts@x", body_text=f"hello {self._THREAD} there"
         )
@@ -2816,14 +2822,14 @@ class TestFtsOptimize:
             ),
         )
         # Indexing a new thread deletes nothing from FTS5.
-        assert db.optimize_deleted_fts() == []
+        assert db.scrub_reaped_fts() == []
         assert db.wal_checkpoint_truncate()[0] == 0
         raw = db.path.read_bytes()
         for marker in (self._THREAD, self._CHUNK, self._FILE):
             assert marker.encode() in raw
         assert _reap_message(db, thread, "fts@x") == ["/m/fts@x"]
 
-    def test_reaped_terms_survive_without_optimize(self, db, threader):
+    def test_reaped_terms_survive_without_scrub(self, db, threader):
         """Shows the check below can fail: after the reap and a
         checkpoint the terms are still in the file."""
         self._index_and_reap(db, threader)
@@ -2832,13 +2838,9 @@ class TestFtsOptimize:
         for marker in (self._THREAD, self._CHUNK, self._FILE):
             assert marker.encode() in raw
 
-    def test_optimize_after_reap_removes_terms_from_the_file(self, db, threader):
+    def test_scrub_after_reap_removes_terms_from_the_file(self, db, threader):
         self._index_and_reap(db, threader)
-        assert db.optimize_deleted_fts() == [
-            "threads_fts",
-            "message_chunks_fts",
-            "attachments_fts",
-        ]
+        assert db.scrub_reaped_fts() == self._ALL
         assert db.wal_checkpoint_truncate()[0] == 0
         raw = db.path.read_bytes()
         for marker in (self._THREAD, self._CHUNK, self._FILE):
@@ -2864,41 +2866,134 @@ class TestFtsOptimize:
                 == 0
             )
 
-    def _optimize_statements(self, db) -> list[str]:
+    def _merge_statements(self, db) -> list[str]:
         seen: list[str] = []
-        db._conn.set_trace_callback(lambda sql: seen.append(sql) if "optimize" in sql else None)
+        db._conn.set_trace_callback(lambda sql: seen.append(sql) if "'merge'" in sql else None)
         return seen
 
-    def test_no_deletes_no_optimize(self, db):
-        seen = self._optimize_statements(db)
+    def test_no_deletes_no_scrub(self, db):
+        assert db.scrub_reaped_fts() == self._ALL
+        seen = self._merge_statements(db)
         db.upsert_thread(make_thread([make_message(message_id="new@x")]), FAKE_EMBEDDING)
-        assert db.optimize_deleted_fts() == []
+        assert db.scrub_reaped_fts() == []
         assert seen == []
 
-    def test_optimizes_each_table_once_per_delete_burst(self, db, threader):
+    def test_scrubs_each_table_once_per_reap(self, db, threader):
         self._index_and_reap(db, threader)
-        seen = self._optimize_statements(db)
-        assert len(db.optimize_deleted_fts()) == 3
-        assert len(seen) == 3
-        # Nothing deleted since: the next pass does no work.
-        assert db.optimize_deleted_fts() == []
-        assert len(seen) == 3
+        seen = self._merge_statements(db)
+        assert db.scrub_reaped_fts() == self._ALL
+        steps = len(seen)
+        assert steps >= 3
+        # Nothing reaped since: the next pass does no work.
+        assert db.scrub_reaped_fts() == []
+        assert len(seen) == steps
 
-    def test_thread_reindex_marks_threads_fts(self, db):
-        """``_replace_fts_row`` deletes the old row on every re-index."""
+    def test_thread_reindex_marks_nothing(self, db):
+        """A re-index replaces live mail with a newer version of itself:
+        its superseded row needs no scrub."""
+        assert db.scrub_reaped_fts() == self._ALL
         thread = make_thread([make_message(message_id="re@x")])
         db.upsert_thread(thread, FAKE_EMBEDDING)
-        assert db.optimize_deleted_fts() == []
+        seen = self._merge_statements(db)
         db.upsert_thread(thread, FAKE_EMBEDDING)
-        assert db.optimize_deleted_fts() == ["threads_fts"]
+        assert db.scrub_reaped_fts() == []
+        assert seen == []
 
-    def test_failed_optimize_stays_pending(self, db, threader):
+    def test_chunk_reindex_marks_nothing(self, db):
+        assert db.scrub_reaped_fts() == self._ALL
+        thread = make_thread([make_message(message_id="ch@x")])
+        db.upsert_thread(thread, FAKE_EMBEDDING)
+        first = _make_chunk("a" * 64, 0, "first version")
+        second = _make_chunk("b" * 64, 0, "second version")
+        for chunk in (first, second):
+            db.replace_message_chunks(
+                claimant_id="ch@x",
+                thread_id=thread.thread_id,
+                chunks=[chunk],
+                embeddings_by_chunk_id={chunk.chunk_id: FAKE_EMBEDDING},
+            )
+        assert db._conn.execute("SELECT COUNT(*) FROM message_chunks").fetchone()[0] == 1
+        assert db.scrub_reaped_fts() == []
+
+    def test_reopened_database_scrubs_every_table_once(self, db, threader):
+        """A reap whose scrub a restart cut short is covered by the scrub
+        every opened database runs once."""
+        self._index_and_reap(db, threader)
+        path = db.path
+        db.close()
+        reopened = Database(path)
+        try:
+            assert reopened.scrub_reaped_fts() == self._ALL
+            assert reopened.wal_checkpoint_truncate()[0] == 0
+            raw = path.read_bytes()
+            for marker in (self._THREAD, self._CHUNK, self._FILE):
+                assert marker.encode() not in raw
+            assert reopened.scrub_reaped_fts() == []
+        finally:
+            reopened.close()
+
+    def test_scrub_runs_in_bounded_committed_steps(self, db, threader, monkeypatch):
+        """Each step writes about ``_FTS_SCRUB_STEP_PAGES`` pages and
+        commits, so the write lock is free between steps."""
+        self._index_and_reap(db, threader)
+        # Enough segments that a one-page step needs several steps.
+        for n in range(12):
+            db.upsert_thread(
+                make_thread([make_message(message_id=f"seg{n}@x", body_text=f"words {n}")]),
+                FAKE_EMBEDDING,
+            )
+        monkeypatch.setattr("src.database._FTS_SCRUB_STEP_PAGES", 1)
+        seen = self._merge_statements(db)
+        commits: list[bool] = []
+        real_commit = db._conn.commit
+
+        class _Conn:
+            def commit(self):
+                commits.append(db._lock._is_owned())
+                return real_commit()
+
+            def __getattr__(self, name):
+                return getattr(real, name)
+
+        real = db._conn
+        db._conn = _Conn()  # type: ignore[assignment]
+        try:
+            assert db.scrub_reaped_fts() == self._ALL
+        finally:
+            db._conn = real
+        assert len(seen) > 3
+        assert len(commits) == len(seen)
+        assert all(commits)
+        assert db.wal_checkpoint_truncate()[0] == 0
+        raw = db.path.read_bytes()
+        for marker in (self._THREAD, self._CHUNK, self._FILE):
+            assert marker.encode() not in raw
+
+    def test_step_cap_leaves_the_table_pending(self, db, threader, monkeypatch):
+        """A table that has not finished within ``_FTS_SCRUB_MAX_STEPS``
+        stays pending for the next pass."""
+        self._index_and_reap(db, threader)
+        for n in range(12):
+            db.upsert_thread(
+                make_thread([make_message(message_id=f"cap{n}@x", body_text=f"words {n}")]),
+                FAKE_EMBEDDING,
+            )
+        monkeypatch.setattr("src.database._FTS_SCRUB_STEP_PAGES", 1)
+        monkeypatch.setattr("src.database._FTS_SCRUB_MAX_STEPS", 1)
+        seen = self._merge_statements(db)
+        done = db.scrub_reaped_fts()
+        assert "threads_fts" not in done
+        assert len(seen) <= len(self._ALL)
+        monkeypatch.setattr("src.database._FTS_SCRUB_MAX_STEPS", 10_000)
+        assert "threads_fts" in db.scrub_reaped_fts()
+
+    def test_failed_scrub_stays_pending(self, db, threader):
         self._index_and_reap(db, threader)
         real = db._conn
 
         class _Failing:
             def execute(self, sql, *args):
-                if "optimize" in sql:
+                if "'merge'" in sql:
                     raise sqlite3.OperationalError("disk I/O error")
                 return real.execute(sql, *args)
 
@@ -2908,15 +3003,11 @@ class TestFtsOptimize:
         db._conn = _Failing()  # type: ignore[assignment]
         try:
             with pytest.raises(sqlite3.OperationalError):
-                db.optimize_deleted_fts()
+                db.scrub_reaped_fts()
         finally:
             db._conn = real
         assert not real.in_transaction
-        assert db.optimize_deleted_fts() == [
-            "threads_fts",
-            "message_chunks_fts",
-            "attachments_fts",
-        ]
+        assert db.scrub_reaped_fts() == self._ALL
 
 
 class TestWalCheckpoint:
