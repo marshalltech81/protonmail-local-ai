@@ -211,6 +211,13 @@ class IndexingQueue:
             due_iso=due_at.isoformat() if due_at is not None else None,
         )
 
+    def redate_untried(self, filepath: str, due_at: datetime) -> None:
+        """Move a queued row that has never been tried to ``due_at``, as
+        ``enqueue(due_at=)`` would have placed it (#699). A row with an
+        attempt, an error or a parked stage keeps its due time, so a retry
+        backoff or a trashed-file park is not cut short."""
+        self.db.queue_redate_untried(filepath=filepath, due_iso=due_at.isoformat())
+
     def claim_batch(self, limit: int) -> list[sqlite3.Row]:
         """Return up to ``limit`` distinct oldest-due queued rows.
 

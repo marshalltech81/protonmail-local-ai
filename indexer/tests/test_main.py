@@ -3972,6 +3972,49 @@ class TestEnqueueUnindexedMessages:
         )
         assert self._claim_order(db, queue) == ["old", "mid"]
 
+    def test_rows_queued_before_this_order_existed_are_redated(self, tmp_path, monkeypatch):
+        """Codex round 2 on #754: an upgrade can leave initial-scan rows
+        queued by the old walk order, due at their enqueue time. The
+        oldest-first walk re-dates every untried queued row to its
+        message time, so an old parent queued that way still goes
+        before a newly found reply."""
+        maildir, _inbox, db, queue = self._setup(tmp_path, monkeypatch)
+        root = maildir / "INBOX" / "cur" / "root"
+        _write_eml(root, "root@example.com", received="Mon, 01 Jan 2024 09:00:00 +0000")
+        queue.enqueue(str(root), main.REASON_INITIAL_SCAN)  # the old version, due now
+        _write_eml(
+            maildir / "Sent" / "cur" / "reply",
+            "reply@example.com",
+            in_reply_to="root@example.com",
+            date="Tue, 02 Jan 2024 09:00:00 +0000",
+        )
+        assert (
+            main._enqueue_unindexed_messages(
+                db, queue, maildir, main.REASON_INITIAL_SCAN, oldest_first=True
+            )
+            == 1
+        )
+        assert self._claim_order(db, queue) == ["root", "reply"]
+
+    def test_a_retrying_row_keeps_its_backoff(self, tmp_path, monkeypatch):
+        """Only untried rows are re-dated: a row in its retry cascade
+        stays due when its backoff ends."""
+        maildir, _inbox, db, queue = self._setup(tmp_path, monkeypatch)
+        old = maildir / "INBOX" / "cur" / "old"
+        _write_eml(old, "old@example.com", received="Mon, 01 Jan 2018 09:00:00 +0000")
+        queue.enqueue(str(old), main.REASON_INITIAL_SCAN)
+        queue.mark_failed(str(old), stage="embed", error="EmbedResponseError: fixed text")
+        before = db._conn.execute(
+            "SELECT next_attempt_at FROM indexing_jobs WHERE filepath = ?", (str(old),)
+        ).fetchone()[0]
+        main._enqueue_unindexed_messages(
+            db, queue, maildir, main.REASON_INITIAL_SCAN, oldest_first=True
+        )
+        after = db._conn.execute(
+            "SELECT next_attempt_at FROM indexing_jobs WHERE filepath = ?", (str(old),)
+        ).fetchone()[0]
+        assert after == before
+
     def test_a_future_dated_message_is_due_now(self, tmp_path, monkeypatch):
         """A sender-controlled date in the future must not hold a row
         back: its due time is capped at the scan's start."""

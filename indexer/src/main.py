@@ -1916,14 +1916,16 @@ def _enqueue_unindexed_messages(
     the walk's start (undated and future-dated files: the start), so the
     queue hands the backlog out oldest first across every folder (#699,
     #752). Mail the watcher queues meanwhile is due when it arrives, so
-    it follows the backlog, and a resumed scan's files interleave by date
-    with the rows an earlier scan left. Otherwise walk order is kept and
-    no headers are read.
+    it follows the backlog. Files already queued and never tried are
+    re-dated the same way, so rows an earlier scan or an earlier version
+    left (due at their enqueue time) interleave by date with the new
+    ones. Otherwise walk order is kept and no headers are read.
 
     Returns the number of files enqueued.
     """
     skipped_dead = 0
     candidates: list[Path] = []
+    already_queued: list[Path] = []
     walk_started = datetime.now(UTC)
     for filepath in _iter_maildir_messages(root):
         path_str = str(filepath)
@@ -1935,13 +1937,17 @@ def _enqueue_unindexed_messages(
             skipped_dead += 1
             continue
         if queue.has_pending_row(path_str):
+            if oldest_first:
+                already_queued.append(filepath)
             continue
         candidates.append(filepath)
     due: dict[Path, datetime] = {}
     if oldest_first:
-        for p in candidates:
+        for p in [*candidates, *already_queued]:
             t = message_sort_time(p)
             due[p] = min(t, walk_started) if t is not None else walk_started
+        for p in already_queued:
+            queue.redate_untried(str(p), due[p])
         # Equal due times keep this order (rowid), so undated files and
         # same-second messages stay in path order.
         candidates.sort(key=lambda p: (due[p], str(p)))

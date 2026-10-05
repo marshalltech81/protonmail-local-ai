@@ -1393,9 +1393,11 @@ message due at its own effective time (the topmost `Received:`, else
 capped at the walk's start; undated and future-dated messages are due
 at the start. So the backlog is indexed oldest first across every
 folder, mail the watcher queues while the scan runs is due when it
-arrives and follows the backlog, and a scan resumed after a restart
-interleaves newly found mail by date with the rows an earlier scan
-left. This keeps each message
+arrives and follows the backlog, and rows already queued and never
+tried (left by an interrupted scan or by a version before this order)
+are re-dated the same way, so they interleave by date with newly found
+mail; rows in a retry backoff or parked as trashed keep their due
+time. This keeps each message
 ahead of the replies to it: the threader joins a reply to an indexed
 parent through `In-Reply-To` / `References`, but never merges a parent
 into a thread its replies started earlier, so a reply indexed first
