@@ -3924,6 +3924,68 @@ class TestEnqueueUnindexedMessages:
         )
         assert self._claim_order(db, queue) == ["old", "mid", "new", "undated"]
 
+    def test_mail_delivered_during_the_scan_is_queued_after_the_backlog(
+        self, tmp_path, monkeypatch
+    ):
+        """Codex round 1 on #754: the watcher runs during the initial
+        scan, so mail delivered while it reads headers is queued at once.
+        The backlog is due at each message's own time, so it is still
+        handed out first."""
+        maildir, _inbox, db, queue = self._setup(tmp_path, monkeypatch)
+        self._three_folders(maildir)
+        real = main.message_sort_time
+        delivered: list[bool] = []
+
+        def sort_time_with_a_delivery(path):
+            if not delivered:
+                delivered.append(True)
+                live = maildir / "INBOX" / "new" / "live"
+                _write_eml(live, "live@example.com")
+                queue.enqueue(str(live), main.REASON_ON_CREATED)
+            return real(path)
+
+        monkeypatch.setattr(main, "message_sort_time", sort_time_with_a_delivery)
+        main._enqueue_unindexed_messages(
+            db, queue, maildir, main.REASON_INITIAL_SCAN, oldest_first=True
+        )
+        assert self._claim_order(db, queue) == ["old", "mid", "new", "undated", "live"]
+
+    def test_a_resumed_scan_interleaves_with_the_queued_backlog(self, tmp_path, monkeypatch):
+        """A scan resumed after a restart queues newly found mail by
+        date among the rows the earlier scan left, not ahead of them."""
+        maildir, _inbox, db, queue = self._setup(tmp_path, monkeypatch)
+        _write_eml(
+            maildir / "INBOX" / "cur" / "mid",
+            "mid@example.com",
+            received="Wed, 01 Jan 2020 09:00:00 +0000",
+        )
+        main._enqueue_unindexed_messages(
+            db, queue, maildir, main.REASON_INITIAL_SCAN, oldest_first=True
+        )
+        _write_eml(
+            maildir / "Archive" / "cur" / "old",
+            "old@example.com",
+            received="Mon, 01 Jan 2018 09:00:00 +0000",
+        )
+        main._enqueue_unindexed_messages(
+            db, queue, maildir, main.REASON_INITIAL_SCAN, oldest_first=True
+        )
+        assert self._claim_order(db, queue) == ["old", "mid"]
+
+    def test_a_future_dated_message_is_due_now(self, tmp_path, monkeypatch):
+        """A sender-controlled date in the future must not hold a row
+        back: its due time is capped at the scan's start."""
+        maildir, _inbox, db, queue = self._setup(tmp_path, monkeypatch)
+        _write_eml(
+            maildir / "Sent" / "cur" / "future",
+            "future@example.com",
+            date="Fri, 01 Jan 2100 09:00:00 +0000",
+        )
+        main._enqueue_unindexed_messages(
+            db, queue, maildir, main.REASON_INITIAL_SCAN, oldest_first=True
+        )
+        assert self._claim_order(db, queue) == ["future"]
+
     def test_reply_in_sent_is_indexed_after_the_message_it_answers(self, tmp_path, monkeypatch):
         """#752: a reply walked before the message it answers (here in an
         earlier folder) still lands in the same thread, because the

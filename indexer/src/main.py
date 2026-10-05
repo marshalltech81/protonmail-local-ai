@@ -1912,15 +1912,19 @@ def _enqueue_unindexed_messages(
     resurrect the message into search. With reconciliation disabled the
     index is append-only and trashed files are indexed like any other.
 
-    ``oldest_first`` queues the files by message time, oldest first
-    across every folder (undated last), which sets the order the queue
-    hands them out in (#699, #752); otherwise walk order is kept and no
-    headers are read.
+    ``oldest_first`` queues each file due at its message time, capped at
+    the walk's start (undated and future-dated files: the start), so the
+    queue hands the backlog out oldest first across every folder (#699,
+    #752). Mail the watcher queues meanwhile is due when it arrives, so
+    it follows the backlog, and a resumed scan's files interleave by date
+    with the rows an earlier scan left. Otherwise walk order is kept and
+    no headers are read.
 
     Returns the number of files enqueued.
     """
     skipped_dead = 0
     candidates: list[Path] = []
+    walk_started = datetime.now(UTC)
     for filepath in _iter_maildir_messages(root):
         path_str = str(filepath)
         if db.is_indexed(path_str):
@@ -1933,16 +1937,16 @@ def _enqueue_unindexed_messages(
         if queue.has_pending_row(path_str):
             continue
         candidates.append(filepath)
+    due: dict[Path, datetime] = {}
     if oldest_first:
-        times = {p: message_sort_time(p) for p in candidates}
-
-        def sort_key(p: Path) -> tuple[bool, float, str]:
-            t = times[p]
-            return (t is None, t.timestamp() if t is not None else 0.0, str(p))
-
-        candidates.sort(key=sort_key)
+        for p in candidates:
+            t = message_sort_time(p)
+            due[p] = min(t, walk_started) if t is not None else walk_started
+        # Equal due times keep this order (rowid), so undated files and
+        # same-second messages stay in path order.
+        candidates.sort(key=lambda p: (due[p], str(p)))
     for filepath in candidates:
-        queue.enqueue(str(filepath), reason)
+        queue.enqueue(str(filepath), reason, due_at=due.get(filepath))
     enqueued = len(candidates)
     if enqueued or skipped_dead:
         log.info(

@@ -1386,11 +1386,16 @@ health-file refresh all interleave cleanly with indexing work. Both
 paths share the Phase 1 / Phase 2 implementation so seed-vector
 selection and failure isolation behave identically:
 
-**Initial scan order (#699, #752).** The queue hands out rows in the
-order they were queued, and the initial scan queues unindexed mail
-oldest first across every folder, by each message's effective time
-(the topmost `Received:`, else `Date:`, read from its header block only
-by `message_sort_time`; undated messages last). This keeps each message
+**Initial scan order (#699, #752).** The queue hands out rows by due
+time (`next_attempt_at`), and the initial scan queues each unindexed
+message due at its own effective time (the topmost `Received:`, else
+`Date:`, read from its header block only by `message_sort_time`),
+capped at the walk's start; undated and future-dated messages are due
+at the start. So the backlog is indexed oldest first across every
+folder, mail the watcher queues while the scan runs is due when it
+arrives and follows the backlog, and a scan resumed after a restart
+interleaves newly found mail by date with the rows an earlier scan
+left. This keeps each message
 ahead of the replies to it: the threader joins a reply to an indexed
 parent through `In-Reply-To` / `References`, but never merges a parent
 into a thread its replies started earlier, so a reply indexed first

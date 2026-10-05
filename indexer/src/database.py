@@ -2080,7 +2080,15 @@ class Database:
     # -------------------------------------------------------------------------
 
     @_synchronized
-    def queue_enqueue(self, *, filepath: str, reason: str, status: str, now_iso: str) -> None:
+    def queue_enqueue(
+        self,
+        *,
+        filepath: str,
+        reason: str,
+        status: str,
+        now_iso: str,
+        due_iso: str | None = None,
+    ) -> None:
         self._conn.execute(
             """
             INSERT OR REPLACE INTO indexing_jobs
@@ -2089,7 +2097,7 @@ class Database:
                  created_at, updated_at, next_attempt_at)
             VALUES (?, ?, ?, 0, NULL, NULL, NULL, ?, ?, ?)
             """,
-            (filepath, reason, status, now_iso, now_iso, now_iso),
+            (filepath, reason, status, now_iso, now_iso, due_iso or now_iso),
         )
         self._conn.commit()
 
