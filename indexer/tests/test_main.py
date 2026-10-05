@@ -1107,8 +1107,8 @@ class TestDrainQueueRetryAndDeadLetter:
 class TestValidateEmbedConfig:
     """``_validate_embed_config`` enforces the per-layer startup contract
     before the indexer constructs the embedder client: ``EMBED_MODEL``
-    and ``EMBED_API_KEY`` must be non-empty, while an empty
-    ``EMBED_BASE_URL`` is allowed and selects the SDK default.
+    and ``EMBED_API_KEY`` must be non-empty, and ``EMBED_BASE_URL`` must
+    name the endpoint: a URL, or ``default`` for the SDK default (#750).
 
     Pre-tightening, ``EMBED_API_KEY`` could be empty and the indexer
     would happily start, only failing at the first embed call against
@@ -1124,17 +1124,37 @@ class TestValidateEmbedConfig:
         # No raise == pass.
         main._validate_embed_config()
 
-    def test_empty_base_url_passes(self, monkeypatch):
-        # Empty ``EMBED_BASE_URL`` is intentional: it means "use the
-        # SDK default" (OpenAI proper). The required non-empty
-        # ``EMBED_API_KEY`` is the explicit-intent signal — an
-        # operator with a real ``sk-...`` has unambiguously chosen
-        # their provider, so we trust the SDK fallback. Symmetric with
-        # ``INFERENCE_MODE=anthropic``'s empty-URL behavior.
-        monkeypatch.setattr(main, "EMBED_BASE_URL", "")
+    @pytest.mark.parametrize("value", ["", "   "])
+    def test_empty_base_url_raises(self, monkeypatch, value):
+        # #750: an API key is not consent to the SDK's default endpoint,
+        # because the request body (mail text) is sent before the
+        # provider checks the key. An empty URL fails closed, naming
+        # both fixes and where ``default`` sends mail, never the key.
+        monkeypatch.setattr(main, "EMBED_BASE_URL", value)
         monkeypatch.setattr(main, "EMBED_MODEL", "Qwen/Qwen3-Embedding-8B")
         monkeypatch.setattr(main, "EMBED_API_KEY", "sk-real")  # pragma: allowlist secret
-        main._validate_embed_config()
+        with pytest.raises(ValueError) as excinfo:
+            main._validate_embed_config()
+        assert str(excinfo.value) == (
+            "EMBED_BASE_URL is empty: set it to the provider's URL, or to `default` "
+            "to use the SDK's default endpoint (sends mail to api.openai.com)."
+        )
+        assert "sk-real" not in str(excinfo.value)
+
+    @pytest.mark.parametrize("value", ["default", " Default ", "DEFAULT"])
+    def test_default_selects_the_sdk_default(self, monkeypatch, value):
+        # ``default`` resolves to the empty base URL the embedder treats
+        # as "omit ``base_url`` and let the SDK use its own endpoint".
+        monkeypatch.setattr(main, "EMBED_BASE_URL", value)
+        monkeypatch.setattr(main, "EMBED_MODEL", "Qwen/Qwen3-Embedding-8B")
+        monkeypatch.setattr(main, "EMBED_API_KEY", "sk-real")  # pragma: allowlist secret
+        assert main._validate_embed_config() == ""
+
+    def test_real_url_is_returned(self, monkeypatch):
+        monkeypatch.setattr(main, "EMBED_BASE_URL", "http://host.docker.internal:8001/v1")
+        monkeypatch.setattr(main, "EMBED_MODEL", "qwen-embed")
+        monkeypatch.setattr(main, "EMBED_API_KEY", "unauthenticated")
+        assert main._validate_embed_config() == "http://host.docker.internal:8001/v1"
 
     def test_missing_model_raises(self, monkeypatch):
         # ``EMBED_MODEL`` stays required: no SDK has a default model,
@@ -1148,10 +1168,7 @@ class TestValidateEmbedConfig:
 
     def test_empty_api_key_raises(self, monkeypatch):
         # The startup contract: every enabled operator-supplied layer
-        # needs a non-empty key. The key is the explicit-intent signal
-        # that lets us trust an empty ``EMBED_BASE_URL`` as "use the
-        # SDK default" rather than "I forgot to configure." Operators
-        # pointing at an unauthenticated host-side server supply any
+        # needs a non-empty key. Operators pointing at an unauthenticated host-side server supply any
         # placeholder (``unauthenticated``) rather than leaving the
         # secret file empty.
         monkeypatch.setattr(main, "EMBED_BASE_URL", "http://x/v1")
@@ -1184,6 +1201,76 @@ class TestValidateEmbedConfig:
         monkeypatch.setattr(main, "EMBED_API_KEY", "sk-real")  # pragma: allowlist secret
         with pytest.raises(ValueError, match="EMBED_BASE_URL.*credentials"):
             main._validate_embed_config()
+
+
+class TestMainEmbedEndpoint:
+    """#750: ``main()`` resolves ``EMBED_BASE_URL`` before it opens the
+    database or builds the embedder, so an empty value cannot reach the
+    SDK's default endpoint."""
+
+    class _Stop(Exception):
+        pass
+
+    def _configure(self, monkeypatch, base_url):
+        monkeypatch.setattr(main, "EMBED_BASE_URL", base_url)
+        monkeypatch.setattr(main, "EMBED_MODEL", "synthetic-embed")
+        monkeypatch.setattr(main, "EMBED_API_KEY", "unauthenticated")
+        monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+
+    def test_empty_url_fails_before_any_client_or_database(self, monkeypatch):
+        self._configure(monkeypatch, "")
+        built: list[str] = []
+        monkeypatch.setattr(main, "Database", lambda path: built.append("database"))
+        monkeypatch.setattr(main, "OpenAIEmbedder", lambda **kw: built.append("embedder"))
+        # The SDK constructor itself, in case anything bypasses the wrapper.
+        monkeypatch.setattr("src.embedder.OpenAI", lambda **kw: built.append("sdk"))
+        with pytest.raises(ValueError, match="EMBED_BASE_URL is empty"):
+            main.main()
+        assert built == []
+
+    def _run_to_embedder(self, tmp_path, monkeypatch, caplog, base_url):
+        """Run ``main()`` with the real ``OpenAIEmbedder`` until just after
+        it is built; return the kwargs the SDK constructor received."""
+        self._configure(monkeypatch, base_url)
+        from openai import OpenAI as real_openai
+
+        sdk_calls: list[dict] = []
+
+        def recording_openai(**kwargs):
+            sdk_calls.append(kwargs)
+            return real_openai(**kwargs)
+
+        monkeypatch.setattr("src.embedder.OpenAI", recording_openai)
+        db = Database(tmp_path / "mail.db")
+        monkeypatch.setattr(main, "Database", lambda path: db)
+
+        def stop(_db):
+            raise self._Stop
+
+        monkeypatch.setattr(main, "Threader", stop)
+        caplog.set_level(logging.INFO)
+        with pytest.raises(self._Stop):
+            main.main()
+        return sdk_calls
+
+    @pytest.mark.parametrize("value", ["default", " Default "])
+    def test_default_builds_the_sdk_client_without_a_base_url(
+        self, tmp_path, monkeypatch, caplog, value
+    ):
+        [kwargs] = self._run_to_embedder(tmp_path, monkeypatch, caplog, value)
+        assert "base_url" not in kwargs
+        # The privacy warning names the SDK's default host.
+        assert (
+            "Privacy: EMBED_MODE=openai sends email text off this host, to api.openai.com."
+            in caplog.text
+        )
+
+    def test_real_url_is_passed_to_the_sdk(self, tmp_path, monkeypatch, caplog):
+        [kwargs] = self._run_to_embedder(
+            tmp_path, monkeypatch, caplog, "http://host.docker.internal:8001/v1/"
+        )
+        assert kwargs["base_url"] == "http://host.docker.internal:8001/v1"
+        assert "Privacy:" not in caplog.text
 
 
 class TestWarnIfRemoteEndpoint:

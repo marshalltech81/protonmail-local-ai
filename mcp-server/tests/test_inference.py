@@ -52,7 +52,8 @@ class TestFactory:
 
     def test_anthropic_with_empty_base_url_omits_kwarg_so_sdk_default_applies(self, monkeypatch):
         # The Anthropic SDK's default endpoint is the documented contract
-        # for INFERENCE_MODE=anthropic when INFERENCE_BASE_URL is empty.
+        # for INFERENCE_MODE=anthropic with INFERENCE_BASE_URL=default,
+        # which ``main.py`` passes as an empty ``base_url`` (#750).
         # The backend must NOT substitute a hardcoded URL constant or
         # pass an empty ``base_url`` kwarg — either would override the
         # SDK default. Verify the kwarg is genuinely ABSENT from the
@@ -78,7 +79,7 @@ class TestFactory:
         )
         assert isinstance(c._backend, _AnthropicBackend)
         # The contract: no ``base_url`` kwarg reaches AsyncAnthropic
-        # when the operator left INFERENCE_BASE_URL empty. ``api_key``
+        # for INFERENCE_BASE_URL=default (an empty ``base_url``). ``api_key``
         # and ``timeout`` still flow through.
         assert "base_url" not in captured["kwargs"]
         assert captured["kwargs"]["api_key"] == "sk-ant-test"  # pragma: allowlist secret
@@ -146,12 +147,10 @@ class TestFactory:
             )
 
     def test_openai_with_empty_base_url_falls_back_to_sdk_default(self, monkeypatch):
-        # ``INFERENCE_BASE_URL=""`` for ``INFERENCE_MODE=openai`` means
-        # "use the SDK default" (OpenAI proper). The required non-empty
-        # ``INFERENCE_API_KEY`` upstream is the explicit-intent signal:
-        # an operator with a real ``sk-...`` has unambiguously chosen
-        # their provider, so we trust the documented SDK fallback.
-        # Symmetric with ``_AnthropicBackend``'s empty-URL path and
+        # An empty ``base_url`` is what ``main.py`` passes for an
+        # explicit ``INFERENCE_BASE_URL=default`` with
+        # ``INFERENCE_MODE=openai`` (#750): "use the SDK default"
+        # (OpenAI proper). Symmetric with ``_AnthropicBackend``'s empty-URL path and
         # with ``EmbedClient`` / ``OpenAIEmbedder``.
         #
         # Intercept ``AsyncOpenAI`` to confirm ``base_url`` is NOT

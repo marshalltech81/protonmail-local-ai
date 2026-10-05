@@ -175,13 +175,7 @@ class _OpenAIBackend:
         self.max_tokens = max_tokens
         # ``api_key`` is required (non-empty) — startup validation in
         # ``main.py`` rejects an empty value before reaching this
-        # constructor. The key is the explicit-intent signal: an
-        # operator with a real ``sk-...`` in
-        # ``.secrets/inference_api_key.txt`` has unambiguously chosen
-        # their provider, so we trust them to also have set
-        # ``base_url`` to the right place (or to have left it empty
-        # because they want the SDK default, which is OpenAI proper).
-        # For unauthenticated host-side servers (LM Studio, vLLM,
+        # constructor. For unauthenticated host-side servers (LM Studio, vLLM,
         # ``mlx_lm.server``) the operator supplies any placeholder
         # string; compat servers ignore the bearer header. Keeping the
         # substitution out of this constructor means the audit trail
@@ -195,9 +189,9 @@ class _OpenAIBackend:
         # literal). Symmetric with the ``_AnthropicBackend`` empty-URL
         # path and with ``EmbedClient``. Passing an empty string through
         # would defeat the fallback because the SDK only treats
-        # ``None`` as "missing." The required ``INFERENCE_API_KEY``
-        # upstream is what guards against an accidental ship-to-OpenAI
-        # from a forgotten env var.
+        # ``None`` as "missing." ``main.py`` passes an empty value only
+        # for an explicit ``INFERENCE_BASE_URL=default``; an empty
+        # ``INFERENCE_BASE_URL`` fails startup (#750).
         #
         # ``max_retries=0`` disables SDK-internal retries so one
         # ``complete()`` call makes one request and ``timeout_secs`` is
@@ -317,13 +311,13 @@ class _AnthropicBackend:
                 "INFERENCE_BASE_URL must not end with '/v1' when "
                 "INFERENCE_MODE=anthropic — the Anthropic SDK appends "
                 "'/v1/messages' itself. Drop the trailing '/v1' "
-                "(e.g. use 'https://api.anthropic.com', or leave the "
-                "var empty to use the SDK default)."
+                "(e.g. use 'https://api.anthropic.com', or set it to "
+                "'default' to use the SDK default)."
             )
 
         # Pass ``base_url`` only when explicitly set so the SDK's real
-        # default URL is used when the operator left the env var empty
-        # (the documented contract for INFERENCE_MODE=anthropic).
+        # default URL is used when the operator set
+        # ``INFERENCE_BASE_URL=default`` (``main.py`` resolves it to "").
         # Passing an empty string would override the SDK default with a
         # malformed URL. ``max_retries=0`` for the same reason as
         # ``_OpenAIBackend``: retries must not multiply ``timeout_secs``,

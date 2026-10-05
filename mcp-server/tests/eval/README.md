@@ -243,7 +243,7 @@ until the owner verifies them.
 
 ```bash
 export INFERENCE_MODE=openai INFERENCE_BASE_URL=http://127.0.0.1:1234/v1 INFERENCE_MODEL=<model>
-export JUDGE_MODE=anthropic JUDGE_MODEL=<model>     # optional; default JUDGE_MODE=none
+export JUDGE_MODE=anthropic JUDGE_BASE_URL=default JUDGE_MODEL=<model>  # optional; default JUDGE_MODE=none
 make eval-answers                                   # report under .answer-eval/ (git-ignored)
 make eval-answers EVAL_ARGS="--case ask-recital-date --detail /tmp/detail.json"
 make eval-answers-compare BASELINE=<run-a.json> CANDIDATE=<run-b.json>
@@ -257,16 +257,19 @@ is `127.0.0.1`, not `host.docker.internal`.
 - **Answerer** (`INFERENCE_*`): the server's own variables and defaults
   (`INFERENCE_MAX_TOKENS`, `INFERENCE_CONTEXT_TOKENS`,
   `INFERENCE_TIMEOUT_SECS`), key in `.secrets/inference_api_key.txt`.
+  `INFERENCE_MODE` defaults to `none`, as for the server, so the run
+  needs it set.
 - **Judge** (`JUDGE_MODE` = `anthropic|openai|none`, `JUDGE_BASE_URL`,
   `JUDGE_MODEL`, key in `.secrets/judge_api_key.txt`, mode 600, or
   `JUDGE_API_KEY` for local development only). Same contract as the
   server's layers: an enabled judge needs a model and a non-empty key (a
-  placeholder for an unauthenticated host-side server), and an empty
-  base URL means the SDK default (a remote provider). It never reads the
+  placeholder for an unauthenticated host-side server), and a base URL:
+  the endpoint, or `default` for the SDK default (a remote provider);
+  an empty one is refused (#750). It never reads the
   answerer's variables or key. Bounds: `JUDGE_TIMEOUT_SECS` (120),
   `JUDGE_MAX_TOKENS` (2048), `JUDGE_MAX_INPUT_CHARS` (60,000), one call
   per case, no retries, one case at a time.
-- Either layer with an empty base URL is refused while the SDK's own
+- Either layer with the base URL `default` is refused while the SDK's own
   endpoint variable (`OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL`) is set, so
   the report's `sdk-default` label is never a custom endpoint.
 - Each case runs under `--case-timeout-secs` (900) and the whole run

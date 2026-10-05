@@ -73,8 +73,8 @@ The stack runs three containers beside the Proton Mail Bridge app:
 - **mcp-server** — Docker, hybrid five-lane search (thread FTS, chunk
   FTS, attachment FTS, thread vec, chunk vec → RRF, optional Cohere
   rerank), exhaustive `query_messages` enumeration, and intelligence
-  tools. `INFERENCE_MODE=anthropic` (default,
-  `claude-sonnet-4-6`) or `openai`; Streamable HTTP at `/mcp` is the
+  tools. `INFERENCE_MODE=none` (default since #750), `anthropic`
+  (`claude-sonnet-4-6`) or `openai`; Streamable HTTP at `/mcp` is the
   only transport (#498), behind a static bearer token; localhost:3000
   only.
 

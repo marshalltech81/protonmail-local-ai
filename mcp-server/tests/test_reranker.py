@@ -111,12 +111,9 @@ class TestRerank:
         assert r.rerank("q", ["a", "b"], top_n=5) == []
 
     def test_empty_base_url_omits_kwarg_so_sdk_default_applies(self):
-        # ``RERANK_BASE_URL=""`` means "use the SDK default"
-        # (``https://api.cohere.com``). The required non-empty
-        # ``RERANK_API_KEY`` upstream is the explicit-intent signal —
-        # an operator with a real Cohere key has unambiguously chosen
-        # their provider, so we trust the documented SDK fallback.
-        # Symmetric with how ``EmbedClient``, ``OpenAIEmbedder``, and
+        # An empty ``base_url`` is what ``main.py`` passes for an
+        # explicit ``RERANK_BASE_URL=default`` (#750): "use the SDK
+        # default" (``https://api.cohere.com``). Symmetric with how ``EmbedClient``, ``OpenAIEmbedder``, and
         # ``_OpenAIBackend`` treat empty base URLs.
         #
         # The base_url kwarg must be GENUINELY ABSENT from the SDK

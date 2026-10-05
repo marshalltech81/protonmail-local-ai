@@ -81,36 +81,42 @@ Important architecture facts:
   the chosen mode. `mode=none` disables a layer. Missing required
   vars are a startup error — there is no inter-mode fallback.
 - **The required-vars contract is uniform and intentional:** for any
-  enabled layer, `{LAYER}_API_KEY` and `{LAYER}_MODEL` must be
-  non-empty; `{LAYER}_BASE_URL` may be empty. An empty base URL
-  means "use the SDK's documented default" — Anthropic Messages API
-  for `INFERENCE_MODE=anthropic`, OpenAI proper
-  (`https://api.openai.com/v1`) for `INFERENCE_MODE=openai`, OpenAI
-  proper for `EMBED_MODE=openai`, Cohere API for `RERANK_MODE=cohere`.
-  **The required `{LAYER}_API_KEY` is the explicit-intent signal**: an
-  operator with a real `sk-...` in `.secrets/<layer>_api_key.txt` has
-  unambiguously chosen their provider, so an empty base URL is
-  interpreted as "I want the SDK default" rather than "I forgot to
-  configure." A typo or forgotten env var can't ship inbox content to
-  a remote provider because it can't produce a real bearer credential.
-  Operators pointing at an unauthenticated host-side server (LM
-  Studio, vLLM, `mlx_lm.server`, TEI) set `{LAYER}_BASE_URL` to the
-  host endpoint and supply any non-empty placeholder string (e.g.
-  `unauthenticated`) for `{LAYER}_API_KEY`; the compat server ignores
-  the bearer header.
+  enabled layer (inference when `INFERENCE_MODE` is not `none`, embed
+  always, rerank when `RERANK_MODE` is not `none`), `{LAYER}_API_KEY`,
+  `{LAYER}_MODEL` and `{LAYER}_BASE_URL` must be non-empty after
+  trimming. **The destination is always explicit** (owner decision
+  2026-10-05, #750): `{LAYER}_BASE_URL` is the endpoint URL, or the
+  literal `default` (trimmed, case-insensitive) for the SDK's
+  documented default endpoint — Anthropic Messages API
+  (`api.anthropic.com`) for `INFERENCE_MODE=anthropic`, OpenAI proper
+  (`https://api.openai.com/v1`) for `INFERENCE_MODE=openai` and
+  `EMBED_MODE=openai`, Cohere API (`api.cohere.com`) for
+  `RERANK_MODE=cohere`. An empty value is a startup error in
+  `scripts/validate-env.sh`, the indexer and mcp-server, raised before
+  any provider client is built, with fixed text naming the variable
+  and both fixes. An API key is not the intent signal: the request
+  body (mail text) reaches the provider before it checks the key, so a
+  placeholder or stale key plus a forgotten URL would still ship mail.
+  Disabled layers (`mode=none`) need no base URL. Operators pointing
+  at an unauthenticated host-side server (LM Studio, vLLM,
+  `mlx_lm.server`, TEI) set `{LAYER}_BASE_URL` to the host endpoint
+  and supply any non-empty placeholder string (e.g. `unauthenticated`)
+  for `{LAYER}_API_KEY`; the compat server ignores the bearer header.
 - inference is selected by `INFERENCE_MODE` (`anthropic|openai|none`).
-  `anthropic` (default) uses the official `anthropic` SDK against the
-  Messages API; leave `INFERENCE_BASE_URL` empty for the SDK default
-  (`https://api.anthropic.com`). `openai` uses the official `openai`
-  SDK against any OpenAI-compatible chat-completions endpoint: leave
-  `INFERENCE_BASE_URL` empty for OpenAI proper, or set it to a host
+  `none` is the default (#750), so a fresh install sends nothing to an
+  inference provider until one is chosen. `anthropic` uses the
+  official `anthropic` SDK against the Messages API
+  (`INFERENCE_BASE_URL=default` for `https://api.anthropic.com`).
+  `openai` uses the official `openai` SDK against any
+  OpenAI-compatible chat-completions endpoint: `INFERENCE_BASE_URL=default`
+  for OpenAI proper, or set it to a host
   endpoint (LM Studio, vLLM, `mlx_lm.server` — containers reach a
   host-side server via OrbStack's `host.docker.internal`) or to an
   alternative provider (DeepInfra, OpenRouter, etc.). `none` skips
   registration of the intelligence tools.
 - embeddings go through the official `openai` SDK against any
-  OpenAI-compatible `/v1/embeddings` endpoint: leave `EMBED_BASE_URL`
-  empty for OpenAI proper or set it to a host endpoint or alternative
+  OpenAI-compatible `/v1/embeddings` endpoint: `EMBED_BASE_URL=default`
+  for OpenAI proper, or set it to a host endpoint or alternative
   provider. Indexer + mcp-server must point at the same provider +
   model so query vectors are comparable to indexed vectors; both check
   this at startup against the index's `vector_generations` record
@@ -122,8 +128,8 @@ Important architecture facts:
 - reranking is opt-in (`RERANK_MODE=none` by default). `RERANK_MODE=cohere`
   uses the official `cohere` SDK against the Cohere rerank API; set
   `RERANK_MODEL` (e.g. `rerank-v4.0-pro`) and provide
-  `RERANK_API_KEY`. Leave `RERANK_BASE_URL` empty for the SDK
-  default; set it only for proxies / gateways / region overrides.
+  `RERANK_API_KEY`. `RERANK_BASE_URL=default` for the SDK default;
+  set a URL for proxies / gateways / region overrides.
 
 ## Non-Negotiable Constraints
 

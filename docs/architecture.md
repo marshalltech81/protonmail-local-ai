@@ -132,7 +132,7 @@ MCP client (host machine; Claude Desktop via the repo's stdio adapter)
 | `mcp-server` | `sqlite-volume`, embedder, inference provider, optional reranker | nothing | HTTP 3000 (localhost only) |
 | Embedder (operator-supplied) | indexer + mcp-server requests | depends on provider | OpenAI-compatible `/v1/embeddings` at `EMBED_BASE_URL`. A host-side server reachable via `host.docker.internal`, or a remote provider. |
 | Inference (operator-supplied) | mcp-server intelligence-tool requests | depends on provider | Anthropic Messages API or OpenAI `/v1/chat/completions` selected by `INFERENCE_MODE`. |
-| Reranker (operator-supplied, optional) | mcp-server hybrid-search requests | Cohere | Cohere rerank API via the official `cohere` SDK when `RERANK_MODE=cohere`. `RERANK_BASE_URL` optional (empty = SDK default). |
+| Reranker (operator-supplied, optional) | mcp-server hybrid-search requests | Cohere | Cohere rerank API via the official `cohere` SDK when `RERANK_MODE=cohere`. `RERANK_BASE_URL` required (`default` = SDK default). |
 
 ## Docker Volumes
 
@@ -369,20 +369,29 @@ startup only; periodic re-checks are tracked separately. An index that
 holds messages but no row, or predates the table, fails closed with
 rebuild instructions, since nothing says which embedder wrote it.
 
-For inference, `INFERENCE_MODE=anthropic` (default) uses the
-official `anthropic` SDK against the Messages API; leave
-`INFERENCE_BASE_URL` empty for the SDK default.
-`INFERENCE_MODE=openai` uses the official `openai` SDK against any
-OpenAI-compatible chat-completions endpoint at `INFERENCE_BASE_URL`.
-`INFERENCE_MODE=none` skips registration of the intelligence tools.
+Every enabled layer must name its endpoint: `{LAYER}_BASE_URL` is a
+URL, or `default` for the SDK's documented default endpoint. An empty
+value fails startup in `validate-env.sh`, the indexer and mcp-server
+before any provider client is built (owner decision 2026-10-05, #750):
+the request body, with mail text, reaches a provider before it checks
+the API key, so a key is not a choice of provider. The rule is defined
+once in `AGENTS.md` (Architecture Summary).
+
+For inference, `INFERENCE_MODE=anthropic` uses the official
+`anthropic` SDK against the Messages API (`INFERENCE_BASE_URL=default`
+for the SDK default). `INFERENCE_MODE=openai` uses the official
+`openai` SDK against any OpenAI-compatible chat-completions endpoint at
+`INFERENCE_BASE_URL`. `INFERENCE_MODE=none` (the default) skips
+registration of the intelligence tools and sends nothing to an
+inference provider.
 Experimental tools (currently `brief_issue` and `check_conclusion`) are
 registered only when `MCP_EXPERIMENTAL_TOOLS=true` and inference is
 enabled; they send the same kind of retrieved excerpts to the inference
 endpoint and store nothing (see `docs/mcp-tools.md`, Experimental tools).
 
 Reranking is opt-in via `RERANK_MODE`. `RERANK_MODE=cohere` uses
-the official `cohere` SDK against the Cohere rerank API; leave
-`RERANK_BASE_URL` empty for the SDK default. `RERANK_MODE=none`
+the official `cohere` SDK against the Cohere rerank API
+(`RERANK_BASE_URL=default` for the SDK default). `RERANK_MODE=none`
 (default) returns RRF order directly.
 
 When operator-installed servers run on the host, they should bind to
@@ -1790,7 +1799,8 @@ and exporter were present.
 | Reranking — `RERANK_BASE_URL` points at a remote provider | Retrieval queries | Candidate thread subjects, up to five changed reply subjects each, and retrieved chunks → provider |
 | Q&A — `INFERENCE_MODE=openai`, host-side `INFERENCE_BASE_URL` | Retrieval local | Never |
 | Q&A — `INFERENCE_MODE=openai`, remote `INFERENCE_BASE_URL` | Retrieval local | Retrieved chunks → OpenAI-compatible provider |
-| Q&A — `INFERENCE_MODE=anthropic` (default) | Retrieval local | Retrieved chunks → Anthropic-compatible provider |
+| Q&A — `INFERENCE_MODE=anthropic` | Retrieval local | Retrieved chunks → Anthropic-compatible provider |
+| Q&A — `INFERENCE_MODE=none` (default) | ✅ | Never (intelligence tools not registered) |
 
 > **Note on remote providers.** Pointing any of these at a remote
 > provider ships data over the network: every email body chunk
@@ -1799,9 +1809,12 @@ and exporter were present.
 > through the inference and reranker endpoints. This is a deliberate
 > departure from a fully-local posture; choose the provider URLs
 > accordingly. To keep all retrieval traffic on the box, point each
-> URL at a host-side server you install yourself. Startup logs one
-> `Privacy:` warning per enabled layer whose endpoint host is not
-> `127.0.0.1`, `::1`, `localhost` or `host.docker.internal`.
+> URL at a host-side server you install yourself. A URL is never
+> chosen implicitly: an empty `{LAYER}_BASE_URL` fails startup, and
+> the SDK's default remote endpoint needs the explicit value `default`
+> (#750). Startup logs one `Privacy:` warning per enabled layer whose
+> endpoint host is not `127.0.0.1`, `::1`, `localhost` or
+> `host.docker.internal`, naming the SDK's default host for `default`.
 
 > **Answer evaluation (development tool).** `make eval-answers` runs
 > outside the containers and sends only the committed synthetic corpus
@@ -1869,9 +1882,11 @@ Resolved decisions 13) and is not supported.
 
 Set `INFERENCE_MODE` in `.env`:
 
-- `anthropic` (default) — Anthropic-compatible Messages API via
-  `INFERENCE_BASE_URL`. Retrieved email chunks are sent to
-  that provider.
+- `none` (default) — the intelligence tools are not registered and
+  nothing is sent to an inference provider.
+- `anthropic` — Anthropic-compatible Messages API via
+  `INFERENCE_BASE_URL` (`default` for api.anthropic.com). Retrieved
+  email chunks are sent to that provider.
 - `openai` — OpenAI-compatible chat completions via
   `INFERENCE_BASE_URL`. Point this at a remote provider or at
   a host-side server you install yourself; only the latter keeps

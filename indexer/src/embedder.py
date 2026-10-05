@@ -229,12 +229,11 @@ class OpenAIEmbedder:
     like ``http://host.docker.internal:8001/v1`` and ``api_key`` is any
     operator-supplied placeholder string (e.g. ``unauthenticated``);
     compat servers ignore the auth header. For DeepInfra, ``base_url``
-    is ``https://api.deepinfra.com/v1/openai``. For OpenAI proper,
-    ``base_url`` may be left empty so the SDK's documented fallback
-    fires (``OPENAI_BASE_URL`` env → ``https://api.openai.com/v1``);
-    ``api_key`` (always required, non-empty) is the explicit-intent
-    signal that makes empty-base_url unambiguous. The class itself is
-    provider-agnostic.
+    is ``https://api.deepinfra.com/v1/openai``. An empty ``base_url``
+    lets the SDK's documented fallback fire (``OPENAI_BASE_URL`` env →
+    ``https://api.openai.com/v1``); startup passes it only when the
+    operator set ``EMBED_BASE_URL=default`` (``main._resolve_base_url``,
+    #750). The class itself is provider-agnostic.
 
     ``api_key`` must be non-empty — startup validation in
     ``main._validate_embed_config`` enforces that contract before the
@@ -289,12 +288,7 @@ class OpenAIEmbedder:
 
         # ``api_key`` is required (non-empty) — startup validation in
         # ``main._validate_embed_config`` rejects an empty value before
-        # this constructor runs. The key is the explicit-intent signal:
-        # an operator with a real ``sk-...`` in
-        # ``.secrets/embed_api_key.txt`` has unambiguously chosen their
-        # provider, so an empty ``base_url`` is interpreted as "I want
-        # the SDK default (OpenAI proper)" rather than "I forgot to
-        # configure." For unauthenticated host-side servers the
+        # this constructor runs. For unauthenticated host-side servers the
         # operator supplies any placeholder string; compat servers
         # ignore the bearer header. Keeping the substitution out of
         # this constructor means the credential actually sent is
@@ -304,10 +298,10 @@ class OpenAIEmbedder:
         #
         # ``base_url`` may be empty: omit the kwarg so the SDK's
         # documented fallback chain fires (``OPENAI_BASE_URL`` env →
-        # ``https://api.openai.com/v1`` literal). The required
-        # ``EMBED_API_KEY`` upstream guards against accidental
-        # ship-to-OpenAI from a forgotten env var — a typo can't
-        # produce a real bearer credential.
+        # ``https://api.openai.com/v1`` literal). Startup passes an
+        # empty value only for an explicit ``EMBED_BASE_URL=default``;
+        # an empty ``EMBED_BASE_URL`` fails there (#750), because the
+        # body is sent before a provider checks the key.
         #
         # ``max_retries=0`` because retry policy is owned by the
         # tenacity wrapper below — the SDK's built-in retry would

@@ -10,9 +10,9 @@ top-K. The cutoff is the caller's ``limit``, passed through
 ``RERANK_MODE`` selects the provider:
 
 - ``cohere``: Cohere's hosted rerank API via the official ``cohere``
-  SDK. ``RERANK_BASE_URL`` overrides the SDK default for proxies /
-  gateways; leave empty to hit the SDK default
-  (``https://api.cohere.com``).
+  SDK. ``RERANK_BASE_URL`` is required: ``default`` for the SDK
+  default (``https://api.cohere.com``), or a URL for proxies /
+  gateways (#750).
 - ``none``: rerank disabled. ``main.py`` does not instantiate this
   client and ``hybrid_search`` skips the rerank stage.
 
@@ -87,10 +87,9 @@ class CohereReranker:
 
     Same shape as the other three SDK-using clients (``EmbedClient``,
     ``OpenAIEmbedder``, ``_OpenAIBackend``): ``api_key`` and ``model``
-    are required upstream; ``base_url`` is optional. An empty
-    ``RERANK_BASE_URL`` means "use the SDK default"
-    (``https://api.cohere.com``) — the required ``RERANK_API_KEY`` is
-    the explicit-intent signal. Set ``RERANK_BASE_URL`` only for
+    are required upstream; an empty ``base_url`` means "use the SDK
+    default" (``https://api.cohere.com``), which ``main.py`` passes only
+    for an explicit ``RERANK_BASE_URL=default`` (#750). Set a URL for
     proxies, gateways, or EU region overrides.
     """
 
@@ -137,10 +136,10 @@ class CohereReranker:
         # field reflects the SDK's resolved URL. The Cohere SDK only
         # exposes the resolved URL via ``_client_wrapper.get_base_url()``
         # (private API across SDK versions), so this client doesn't
-        # mirror that field. The startup log line in ``main.py`` already
-        # handles the empty-config case explicitly
-        # (``RERANK_BASE_URL or '(SDK default)'``), so the diagnostic
-        # surface is covered without reaching into SDK internals.
+        # mirror that field. ``main.py`` resolves the endpoint the way
+        # the SDK does (configured URL, then ``CO_API_URL``, then
+        # ``https://api.cohere.com``) for its log line and privacy
+        # warning, without reaching into SDK internals.
 
     def rerank(
         self,

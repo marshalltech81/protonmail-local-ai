@@ -704,8 +704,8 @@ identity record"), and the one configured now differs in the fields
 the message lists:
 
 - `EMBED_MODEL`, `endpoint` or `dimensions`: `EMBED_MODEL` or
-  `EMBED_BASE_URL` changed (the endpoint is the resolved URL, so an
-  empty `EMBED_BASE_URL` reads as `https://api.openai.com/v1`, or as
+  `EMBED_BASE_URL` changed (the endpoint is the resolved URL, so
+  `EMBED_BASE_URL=default` reads as `https://api.openai.com/v1`, or as
   `OPENAI_BASE_URL` if set). Both services must use the same values.
 - `calibration vector`: the names match but the server behind them
   returns different vectors, typically because a host-side server now

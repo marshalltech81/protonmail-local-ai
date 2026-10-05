@@ -15,10 +15,15 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 FAILURES=0
 
-# A .env that passes, with the keys Compose defaults left out.
+# A .env that passes, with the keys Compose defaults left out except
+# INFERENCE_MODE, which enables the inference layer so its checks run
+# (its default is none since #750).
 readonly BASE_ENV='BRIDGE_USER=placeholder@example.invalid
 BRIDGE_CERT_FINGERPRINT=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-EMBED_MODEL=placeholder-embed-model'
+EMBED_BASE_URL=http://host.docker.internal:8001/v1
+EMBED_MODEL=placeholder-embed-model
+INFERENCE_MODE=anthropic
+INFERENCE_BASE_URL=default'
 
 # Create a fresh root holding the script, BASE_ENV plus any extra lines
 # (later assignments win), and secret files with placeholder contents.
@@ -166,6 +171,55 @@ openai_mode_requires_a_model() {
     setup 'INFERENCE_MODEL=placeholder-model'
     fails_with 'INFERENCE_MODEL must be set when INFERENCE_MODE=openai' \
         INFERENCE_MODE=openai INFERENCE_MODEL=
+}
+
+# --- Explicit provider endpoint (#750) ------------------------------------
+# An enabled layer's *_BASE_URL must be a URL or `default` (the SDK's own
+# endpoint); empty fails before any container starts.
+
+readonly EMPTY_URL_FIX="is empty: set it to the provider's URL, or to \`default\` to use the SDK's default endpoint"
+
+empty_base_url_fails_for_each_enabled_layer() {
+    setup 'EMBED_BASE_URL='
+    fails_with "EMBED_BASE_URL $EMPTY_URL_FIX (sends mail to api.openai.com)."
+    setup 'EMBED_BASE_URL="   "'
+    fails_with "EMBED_BASE_URL $EMPTY_URL_FIX (sends mail to api.openai.com)."
+    setup 'INFERENCE_BASE_URL='
+    fails_with "INFERENCE_BASE_URL $EMPTY_URL_FIX (sends mail to api.anthropic.com)."
+    setup 'INFERENCE_MODE=openai' 'INFERENCE_MODEL=placeholder-model' 'INFERENCE_BASE_URL='
+    fails_with "INFERENCE_BASE_URL $EMPTY_URL_FIX (sends mail to api.openai.com)."
+    setup 'RERANK_MODE=cohere' 'RERANK_MODEL=placeholder-rerank'
+    printf 'placeholder\n' >"$ROOT/.secrets/rerank_api_key.txt"
+    fails_with "RERANK_BASE_URL $EMPTY_URL_FIX (sends mail to api.cohere.com)."
+}
+
+default_base_url_passes_for_each_layer() {
+    setup 'EMBED_BASE_URL=default' 'INFERENCE_BASE_URL=" Default "' \
+        'RERANK_MODE=cohere' 'RERANK_MODEL=placeholder-rerank' 'RERANK_BASE_URL=DEFAULT'
+    printf 'placeholder\n' >"$ROOT/.secrets/rerank_api_key.txt"
+    passes
+    setup 'INFERENCE_MODE=openai' 'INFERENCE_MODEL=placeholder-model'
+    passes
+}
+
+disabled_layers_need_no_base_url() {
+    setup 'INFERENCE_MODE=none' 'INFERENCE_BASE_URL=' 'RERANK_MODE=none'
+    : >"$ROOT/.secrets/inference_api_key.txt"
+    passes
+}
+
+unset_inference_mode_means_none() {
+    setup
+    # A .env without INFERENCE_MODE or INFERENCE_BASE_URL, and no key.
+    grep -v '^INFERENCE_' "$ROOT/.env" >"$ROOT/.env.tmp"
+    mv "$ROOT/.env.tmp" "$ROOT/.env"
+    : >"$ROOT/.secrets/inference_api_key.txt"
+    passes
+}
+
+exported_empty_base_url_overrides_env() {
+    setup
+    fails_with "EMBED_BASE_URL $EMPTY_URL_FIX" EMBED_BASE_URL=
 }
 
 # --- Shell exports win over .env, as in Compose (#482) --------------------
@@ -964,6 +1018,11 @@ check "an exported valid value overrides an invalid .env" exported_valid_value_o
 check "an exported empty value takes the Compose default" \
     exported_empty_value_takes_the_compose_default
 check "an exported mode overrides .env" exported_mode_overrides_env
+check "an empty base URL fails for each enabled layer" empty_base_url_fails_for_each_enabled_layer
+check "a base URL of default passes for each layer" default_base_url_passes_for_each_layer
+check "disabled layers need no base URL" disabled_layers_need_no_base_url
+check "an unset INFERENCE_MODE means none" unset_inference_mode_means_none
+check "an exported empty base URL overrides .env" exported_empty_base_url_overrides_env
 check "a whitespace-only embed key fails" whitespace_only_embed_key_fails
 check "a newline-only inference key fails" newline_only_inference_key_fails
 check "a whitespace-only Bridge password fails" whitespace_only_bridge_pass_fails

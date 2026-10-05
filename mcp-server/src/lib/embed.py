@@ -48,12 +48,7 @@ class EmbedClient:
 
         self.model = model
         # ``api_key`` is required (non-empty) — startup validation in
-        # ``main.py`` rejects an empty value before reaching here. The
-        # key is the explicit-intent signal: an operator with a real
-        # ``sk-...`` in ``.secrets/embed_api_key.txt`` has unambiguously
-        # chosen their provider, so we trust them to also have set
-        # ``base_url`` to the right place (or to have left it empty
-        # because they want the SDK default, which is OpenAI proper).
+        # ``main.py`` rejects an empty value before reaching here.
         # For unauthenticated host-side servers (LM Studio, vLLM,
         # ``mlx_lm.server``, TEI) the operator supplies any placeholder
         # string in the secret file; compat servers ignore the bearer
@@ -67,9 +62,10 @@ class EmbedClient:
         # (``OPENAI_BASE_URL`` env → ``https://api.openai.com/v1``
         # literal). Passing the empty string through would defeat the
         # fallback because the SDK only treats ``None`` as "missing."
-        # The required ``EMBED_API_KEY`` upstream is what guards
-        # against an accidental ship-to-OpenAI from a forgotten env
-        # var — a typo can't produce a real bearer credential.
+        # ``main.py`` passes an empty value only for an explicit
+        # ``EMBED_BASE_URL=default``; an empty ``EMBED_BASE_URL`` fails
+        # startup (#750), because the body is sent before a provider
+        # checks the key.
         #
         # ``max_retries=0`` disables SDK-internal retries so one
         # ``embed()`` call makes one request and ``timeout_secs`` is

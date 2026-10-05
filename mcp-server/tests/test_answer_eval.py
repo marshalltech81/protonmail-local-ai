@@ -250,7 +250,7 @@ class TestCases:
 
 
 class TestConfig:
-    ENV = {"JUDGE_MODE": "openai", "JUDGE_MODEL": "judge-model"}
+    ENV = {"JUDGE_MODE": "openai", "JUDGE_BASE_URL": "default", "JUDGE_MODEL": "judge-model"}
 
     def _secrets(self, tmp_path: Path, name: str, value: str, mode: int = 0o600) -> Path:
         tmp_path.joinpath(name).write_text(value + "\n")
@@ -263,6 +263,43 @@ class TestConfig:
     def test_answerer_is_required(self):
         with pytest.raises(ConfigError, match="INFERENCE_MODE"):
             load_layer("INFERENCE", {"INFERENCE_MODE": "none"})
+
+    def test_answerer_mode_defaults_to_none(self):
+        """#750: INFERENCE_MODE defaults to none, as for the server."""
+        with pytest.raises(ConfigError, match="INFERENCE_MODE"):
+            load_layer("INFERENCE", {"INFERENCE_MODEL": "m", "INFERENCE_API_KEY": "k"})
+
+    @pytest.mark.parametrize("layer", ["INFERENCE", "JUDGE"])
+    @pytest.mark.parametrize(
+        ("mode", "host"), [("anthropic", "api.anthropic.com"), ("openai", "api.openai.com")]
+    )
+    @pytest.mark.parametrize("empty", [None, "", "  "])
+    def test_empty_base_url_fails(self, layer, mode, host, empty):
+        """#750: an enabled layer names its endpoint; empty is not the
+        SDK default. The error names the variable, both fixes and the
+        default host, never the key."""
+        env = {
+            f"{layer}_MODE": mode,
+            f"{layer}_MODEL": "m",
+            f"{layer}_API_KEY": "sk-marker",  # pragma: allowlist secret
+        }
+        if empty is not None:
+            env[f"{layer}_BASE_URL"] = empty
+        with pytest.raises(ConfigError) as e:
+            load_layer(layer, env)
+        assert str(e.value) == (
+            f"{layer}_BASE_URL is empty: set it to the provider's URL, or to `default` "
+            f"to use the SDK's default endpoint (sends prompts to {host})."
+        )
+        assert "sk-marker" not in str(e.value)
+
+    @pytest.mark.parametrize("value", ["default", " Default "])
+    def test_default_selects_the_sdk_default(self, value):
+        cfg = load_layer("JUDGE", {**self.ENV, "JUDGE_BASE_URL": value, "JUDGE_API_KEY": "k"})
+        assert cfg is not None
+        assert cfg.base_url == ""
+        assert cfg.endpoint_kind() == "sdk-default"
+        assert cfg.client().base_url.startswith("https://api.openai.com/")
 
     def test_key_file_is_read_and_must_be_mode_600(self, tmp_path):
         secrets = self._secrets(tmp_path, "judge_api_key.txt", "file-key")
@@ -288,7 +325,11 @@ class TestConfig:
         with pytest.raises(ConfigError, match="judge_api_key"):
             load_layer("JUDGE", env, tmp_path)
         with pytest.raises(ConfigError, match="JUDGE_MODEL"):
-            load_layer("JUDGE", {"JUDGE_MODE": "openai", "INFERENCE_MODEL": "m"}, tmp_path)
+            load_layer(
+                "JUDGE",
+                {"JUDGE_MODE": "openai", "JUDGE_BASE_URL": "default", "INFERENCE_MODEL": "m"},
+                tmp_path,
+            )
 
     @pytest.mark.parametrize(
         ("extra", "message"),
@@ -313,7 +354,7 @@ class TestConfig:
         ("mode", "ambient"), [("openai", "OPENAI_BASE_URL"), ("anthropic", "ANTHROPIC_BASE_URL")]
     )
     def test_ambient_sdk_endpoint_is_refused(self, mode, ambient):
-        """Review round 1: an empty JUDGE_BASE_URL with the SDK's own
+        """Review round 1: JUDGE_BASE_URL=default with the SDK's own
         endpoint variable set would be reported as the SDK default."""
         env = {**self.ENV, "JUDGE_MODE": mode, "JUDGE_API_KEY": "k", ambient: "https://x.example"}
         with pytest.raises(ConfigError, match=ambient):

@@ -8,15 +8,13 @@ The embedder is operator-supplied: any OpenAI-compatible provider
 works (OpenAI proper, remote alternatives like DeepInfra / OpenRouter,
 or a host-side server the operator installs themselves: LM Studio,
 vLLM, ``mlx_lm.server``, TEI). Configure via ``EMBED_MODEL`` +
-``EMBED_API_KEY`` Docker secret (both required, non-empty);
-``EMBED_BASE_URL`` is optional — leave it empty to use the openai
-SDK's documented default (OpenAI proper), or set it to point at any
-other endpoint. The required ``EMBED_API_KEY`` is the explicit-intent
-signal that makes an empty ``EMBED_BASE_URL`` unambiguous: an
-operator with a real ``sk-...`` has unambiguously chosen their
-provider. Operators pointing at an unauthenticated host-side server
-set ``EMBED_BASE_URL`` to the host endpoint and supply any
-placeholder string for the key. ``EMBED_MODE`` is the wire-shape
+``EMBED_API_KEY`` Docker secret + ``EMBED_BASE_URL`` (all required,
+non-empty). ``EMBED_BASE_URL`` is the endpoint URL, or ``default`` to
+use the openai SDK's documented default (OpenAI proper); an empty
+value fails startup, because an API key is not consent to the SDK's
+default endpoint (#750). Operators pointing at an unauthenticated
+host-side server set ``EMBED_BASE_URL`` to the host endpoint and
+supply any placeholder string for the key. ``EMBED_MODE`` is the wire-shape
 selector kept for symmetry with the other layers; only ``openai`` is
 valid today.
 
@@ -144,12 +142,11 @@ AUTHORITY_RULES_PATH = Path("/config/authority.toml")
 # provider. Set ``EMBED_MODEL`` to a model id served at the chosen
 # endpoint; the schema reserves a fixed 4096-dim vector so pick a
 # 4096-dim model (Qwen3-Embedding-8B variants) or run a schema
-# migration. Set ``EMBED_BASE_URL`` to point at any compliant /v1 base
-# URL, or leave it empty to use the openai SDK's documented default
-# (OpenAI proper at ``https://api.openai.com/v1``). The bearer
-# credential is loaded from the ``embed_api_key`` Docker secret or
-# ``EMBED_API_KEY`` env and is required (non-empty); the key is the
-# explicit-intent signal that makes empty-URL unambiguous, and
+# migration. Set ``EMBED_BASE_URL`` to any compliant /v1 base URL, or
+# to ``default`` to use the openai SDK's documented default (OpenAI
+# proper at ``https://api.openai.com/v1``); empty fails startup (#750).
+# The bearer credential is loaded from the ``embed_api_key`` Docker
+# secret or ``EMBED_API_KEY`` env and is required (non-empty);
 # unauthenticated host-side servers accept any placeholder string.
 # ``EMBED_MODE`` is kept as a config knob for symmetry with
 # ``INFERENCE_MODE`` / ``RERANK_MODE`` but only accepts ``openai``
@@ -194,8 +191,36 @@ def _warn_if_remote_endpoint(mode_setting: str, mode: str, url: str, sends: str)
     )
 
 
-def _validate_embed_config() -> None:
-    """Raise at startup when the embedder is misconfigured.
+# The literal ``EMBED_BASE_URL`` value that selects the SDK's default
+# endpoint, compared trimmed and case-insensitively.
+_SDK_DEFAULT_BASE_URL = "default"
+
+
+def _resolve_base_url(name: str, raw: str, sdk_default_host: str) -> str:
+    """Return an enabled layer's base URL, or ``""`` for ``default``.
+
+    An API key is not consent to the SDK's default endpoint: the request
+    body (mail text) is sent before the provider checks the key, so a
+    placeholder key plus a forgotten URL would ship mail to a cloud
+    provider (owner decision 2026-10-05, #750). An empty value therefore
+    fails startup; ``default`` returns ``""``, which the embedder treats
+    as "omit ``base_url``" exactly as an empty value used to. The error
+    is fixed text and never echoes a value.
+    """
+    value = raw.strip()
+    if not value:
+        raise ValueError(
+            f"{name} is empty: set it to the provider's URL, or to `default` to use "
+            f"the SDK's default endpoint (sends mail to {sdk_default_host})."
+        )
+    if value.lower() == _SDK_DEFAULT_BASE_URL:
+        return ""
+    return value
+
+
+def _validate_embed_config() -> str:
+    """Raise at startup when the embedder is misconfigured; return the
+    base URL to build the embedder with (``""`` for the SDK default).
 
     Validation runs in ``main()`` rather than at module load so test
     files can ``from src import main`` to import helper functions
@@ -204,14 +229,10 @@ def _validate_embed_config() -> None:
     surface is identical.
 
     ``EMBED_API_KEY`` is required (non-empty); ``EMBED_MODEL`` is too.
-    ``EMBED_BASE_URL`` may be empty: that is interpreted as "use the
-    SDK default" (OpenAI proper via the openai SDK), and the required
-    ``EMBED_API_KEY`` is the explicit-intent signal that makes the
-    interpretation unambiguous — an operator with a real ``sk-...``
-    has unambiguously chosen their provider. Symmetric with how
-    ``INFERENCE_MODE=anthropic`` and ``INFERENCE_MODE=openai`` treat
-    empty ``INFERENCE_BASE_URL``. Operators pointing at an
-    unauthenticated host-side server (LM Studio, vLLM,
+    ``EMBED_BASE_URL`` must be a URL or ``default`` (OpenAI proper via
+    the openai SDK); empty fails (``_resolve_base_url``, #750), the same
+    rule the mcp-server applies to every enabled layer. Operators
+    pointing at an unauthenticated host-side server (LM Studio, vLLM,
     ``mlx_lm.server``, TEI) supply any placeholder string for
     ``EMBED_API_KEY``; the compat server ignores the bearer header.
     """
@@ -219,6 +240,7 @@ def _validate_embed_config() -> None:
         raise ValueError("EMBED_MODEL must be set when EMBED_MODE='openai'")
     if not EMBED_API_KEY:
         raise ValueError("EMBED_API_KEY must be set when EMBED_MODE='openai'")
+    base_url = _resolve_base_url("EMBED_BASE_URL", EMBED_BASE_URL, "api.openai.com")
     # Reject URLs that embed a ``user:pass@host`` userinfo authority.
     # The resolved base URL flows into the startup log line naming the
     # wire endpoint, so embedded credentials would leak to container
@@ -226,11 +248,12 @@ def _validate_embed_config() -> None:
     # Docker-secrets file (``.secrets/embed_api_key.txt``). Mirrors the
     # same guard in ``scripts/validate-env.sh`` so a deployment that
     # skipped that script still fails closed instead of leaking.
-    if EMBED_BASE_URL and "@" in urllib.parse.urlsplit(EMBED_BASE_URL).netloc:
+    if base_url and "@" in urllib.parse.urlsplit(base_url).netloc:
         raise ValueError(
             "EMBED_BASE_URL must not embed credentials (user:pass@host). Put "
             "the API key in .secrets/embed_api_key.txt instead."
         )
+    return base_url
 
 
 def _read_embed_api_key() -> str:
@@ -2231,7 +2254,7 @@ def _log_reconciler_config(cfg: ReconcilerConfig) -> None:
 
 
 def main():
-    _validate_embed_config()
+    embed_base_url = _validate_embed_config()
     log.info("Starting indexer...")
     log.info("  Maildir: %s", MAILDIR_PATH)
     log.info("  SQLite:  %s", SQLITE_PATH)
@@ -2249,17 +2272,16 @@ def main():
     # covers a reap whose scrub the last run did not reach (#670).
     _run_wal_maintenance(db)
     embedder = OpenAIEmbedder(
-        base_url=EMBED_BASE_URL,
+        base_url=embed_base_url,
         model=EMBED_MODEL,
         api_key=EMBED_API_KEY,
         batch_size=EMBED_BATCH_SIZE,
         concurrency=EMBED_CONCURRENCY,
     )
-    # Log the resolved wire endpoint after construction. ``EMBED_BASE_URL=""``
-    # intentionally means "use the SDK default" (OpenAI proper); printing
-    # the raw env value would hide that the indexer is actually pointing
-    # at api.openai.com when the operator forgot to wire an
-    # unauthenticated host-side server. ``OpenAIEmbedder.base_url`` reads
+    # Log the resolved wire endpoint after construction. ``EMBED_BASE_URL=default``
+    # means "use the SDK default" (OpenAI proper); printing the raw env
+    # value would hide that the indexer is actually pointing at
+    # api.openai.com. ``OpenAIEmbedder.base_url`` reads
     # the URL back from the SDK after fallback resolution, matching the
     # mcp-server inference / rerank log lines.
     log.info(
