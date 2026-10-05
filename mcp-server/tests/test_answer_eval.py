@@ -613,11 +613,18 @@ class TestDeterministicGraders:
             ("The slip asks for 14 chaperone volunteers", False),
             ("Three chaperone volunteers are needed", False),
             ("The slip asks for chaperone volunteers", False),
+            ("The trip needs four chaperones", True),
+            ("It says: chaperone volunteers needed: 4", True),
+            # Codex round 1 on #763: a 4 that is not the count.
+            ("The 4th-grade class needs three chaperones", False),
+            ("On May 4 the trip needs three chaperones", False),
+            ("Room 4 needs three chaperone volunteers", False),
         ],
     )
     def test_chaperone_count_is_checked_without_a_judge(self, answer, ok):
         """#678: with no value check, any citing answer passed under
-        ``JUDGE_MODE=none``."""
+        ``JUDGE_MODE=none``. The value is tied to what it counts, so an
+        ordinal or an unrelated 4 does not satisfy it."""
         case = CASES["ask-chaperones"]
         det = grade_run(case, _run(f"{answer} [E1].", [_passage("E1", "t14.1")], ["E1"]))
         assert det.checks["expected_values"] == (PASS if ok else FAIL)
