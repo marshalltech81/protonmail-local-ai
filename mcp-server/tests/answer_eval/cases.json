@@ -189,7 +189,7 @@
         {"id": "f1", "fact": "Four chaperone volunteers are needed.", "sources": ["t14.1"], "excerpt": "Chaperone volunteers needed: 4"}
       ],
       "must_not_assert": [],
-      "deterministic": {"must_include": [], "must_not_include": []},
+      "deterministic": {"must_include": [["4 chaperones", "four chaperones", "4 chaperone volunteers", "four chaperone volunteers", "4 volunteers", "four volunteers", "chaperone volunteers needed: 4"]], "must_not_include": []},
       "criteria": {"factual_correctness": true, "citation_support": true, "completeness": true, "temporal_reasoning": false, "conflict_uncertainty": false, "relevance": true},
       "review": "ai_drafted"
     },

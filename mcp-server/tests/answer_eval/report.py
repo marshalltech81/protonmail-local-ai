@@ -105,7 +105,8 @@ def detail_record(case: Case, run: CaseRun, judge: JudgeOutcome) -> dict[str, An
             for c in run.calls
         ],
         "judge_claims": [
-            {"claim": c.claim, "cited": c.cited, "verdict": c.verdict} for c in verdict.claims
+            {"claim": c.claim, "statement": c.statement, "cited": c.cited, "verdict": c.verdict}
+            for c in verdict.claims
         ]
         if verdict
         else None,
