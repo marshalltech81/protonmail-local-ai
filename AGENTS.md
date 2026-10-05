@@ -49,7 +49,8 @@ When making changes, follow these priorities in order:
 
 Before making non-trivial changes, read:
 
-- `PLAN.md` for current implementation priorities and active work
+- `PLAN.md` for direction, roadmap and decisions; current work is in
+  GitHub issues (milestones, `P0`–`P3` and `decision` labels)
 - `docs/architecture.md` for system design and data flow
 - `docs/setup.md` before changing Bridge, first-time setup, TLS, or credentials
 - `docs/troubleshooting.md` before changing Bridge, mbsync, TLS, or recovery behavior
@@ -799,11 +800,10 @@ Stop and ask for direction before proceeding if a proposed change would:
 
 ## Out of Scope for Root AGENTS.md
 
-The following should live in separate docs instead of this file:
+The following should live elsewhere instead of this file:
 
-- backlog items
-- implementation queue
-- future-project list
+- backlog items and the implementation queue: GitHub issues
+- roadmap, future-project list and owner decisions: `PLAN.md`
 - one-time recovery procedures
 - long troubleshooting walkthroughs
 
