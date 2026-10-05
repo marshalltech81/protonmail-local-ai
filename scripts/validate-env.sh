@@ -589,7 +589,7 @@ INFERENCE_MODE="$(normalize_mode "${INFERENCE_MODE:-none}")"
 }
 
 if [[ "$INFERENCE_MODE" != "none" ]]; then
-    # An empty INFERENCE_MODEL becomes Compose's ``claude-sonnet-4-6``,
+    # An empty INFERENCE_MODEL becomes Compose's ``claude-sonnet-5-5``,
     # which an OpenAI-compatible endpoint does not serve, so openai mode
     # must name its model. Only an empty value takes that default:
     # Compose passes blank space through, which the services read as
@@ -627,8 +627,15 @@ if [[ "$INFERENCE_MODE" != "none" ]]; then
     if [[ -n "$INFERENCE_CONTEXT_TOKENS" ]]; then
         require_integer_min "INFERENCE_CONTEXT_TOKENS" "$INFERENCE_CONTEXT_TOKENS" 1
     fi
-    require_integer_min "INFERENCE_CONTEXT_TOKENS (32768 when unset)" \
-        "${INFERENCE_CONTEXT_TOKENS:-32768}" "$(( 10#${INFERENCE_MAX_TOKENS:-1024} + 1088 ))"
+    # Unset values take mcp-server's per-mode defaults (#764,
+    # ``default_token_budget`` in mcp-server/src/lib/inference.py).
+    default_max_tokens=1024 default_context_tokens=32768
+    if [[ "$INFERENCE_MODE" == "anthropic" ]]; then
+        default_max_tokens=16000 default_context_tokens=48000
+    fi
+    require_integer_min "INFERENCE_CONTEXT_TOKENS (${default_context_tokens} when unset)" \
+        "${INFERENCE_CONTEXT_TOKENS:-$default_context_tokens}" \
+        "$(( 10#${INFERENCE_MAX_TOKENS:-$default_max_tokens} + 1088 ))"
     if [[ -n "$INFERENCE_BASE_URL" ]]; then
         [[ "$INFERENCE_BASE_URL" =~ ^https?:// ]] || {
             echo "ERROR: INFERENCE_BASE_URL must start with http:// or https://." >&2

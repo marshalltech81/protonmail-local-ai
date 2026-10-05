@@ -255,7 +255,7 @@ public embedding catalog has no 4096-dim model today
 # with '/v1'.
 INFERENCE_MODE=anthropic
 INFERENCE_BASE_URL=default                # required; `default` = api.anthropic.com
-INFERENCE_MODEL=claude-sonnet-4-6
+INFERENCE_MODEL=claude-sonnet-5-5
 # write the key to .secrets/inference_api_key.txt (required, non-empty)
 
 # OpenAI-compatible via the official openai SDK.
@@ -327,7 +327,7 @@ services strip it. It fails fast if:
   Anthropic API, Cohere API); see the migration note in step 5
 - any enabled layer's `{LAYER}_MODEL` is empty (model is always
   required — no SDK has a default model; in `anthropic` mode an empty
-  `INFERENCE_MODEL` takes the Compose default `claude-sonnet-4-6`, which
+  `INFERENCE_MODEL` takes the Compose default `claude-sonnet-5-5`, which
   `openai` mode cannot use)
 - inference / embed / rerank secret placeholder files are missing or not `600`
   (validation requires the files to exist with `600` permissions even when the

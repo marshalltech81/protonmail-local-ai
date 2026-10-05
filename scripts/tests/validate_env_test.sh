@@ -411,7 +411,15 @@ openssl_form_bridge_cert_fingerprint_passes() {
 }
 
 one_sided_max_tokens_fails() {
-    setup 'INFERENCE_MAX_TOKENS=40000'
+    setup 'INFERENCE_MAX_TOKENS=47000'
+    fails_with 'INFERENCE_CONTEXT_TOKENS (48000 when unset)'
+}
+
+# #764: openai mode keeps the provider-neutral 32768 window, so a reply
+# that anthropic mode's 48000 window would hold still fails here.
+openai_one_sided_max_tokens_fails() {
+    setup 'INFERENCE_MODE=openai' 'INFERENCE_BASE_URL=http://host.docker.internal:1234/v1' \
+        'INFERENCE_MODEL=placeholder-model' 'INFERENCE_MAX_TOKENS=40000'
     fails_with 'INFERENCE_CONTEXT_TOKENS (32768 when unset)'
 }
 
@@ -1057,6 +1065,7 @@ check "a malformed BRIDGE_CERT_FINGERPRINT fails" malformed_bridge_cert_fingerpr
 check "a BRIDGE_CERT_FINGERPRINT in openssl's form passes" \
     openssl_form_bridge_cert_fingerprint_passes
 check "a one-sided INFERENCE_MAX_TOKENS fails" one_sided_max_tokens_fails
+check "openai mode keeps the 32768 window default" openai_one_sided_max_tokens_fails
 check "a zero-padded INFERENCE_MAX_TOKENS is decimal" zero_padded_max_tokens_is_decimal
 check "an API key in .env fails" api_key_in_env_fails
 check "a secret file not 600 fails" loose_secret_mode_fails

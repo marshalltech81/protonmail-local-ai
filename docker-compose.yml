@@ -285,7 +285,7 @@ services:
       #   nothing is sent to an inference provider.
       INFERENCE_MODE: ${INFERENCE_MODE:-none}
       INFERENCE_BASE_URL: ${INFERENCE_BASE_URL}
-      INFERENCE_MODEL: ${INFERENCE_MODEL:-claude-sonnet-4-6}
+      INFERENCE_MODEL: ${INFERENCE_MODEL:-claude-sonnet-5-5}
       # Per-operation HTTP timeout for inference completions (seconds):
       # each connect, read or write must make progress within it; it
       # is not a total-call deadline. Default 300 absorbs
@@ -295,13 +295,14 @@ services:
       # Output token cap. Required by the Anthropic Messages API; the
       # OpenAI Chat Completions API accepts it too and most compatible
       # servers (vLLM, mlx_lm.server, LM Studio, DeepInfra) honor it.
-      # Default 1024 fits "brief" / "action-items" summaries; raise
-      # for "detailed" summaries on long threads or for
-      # extract_from_emails over rich schemas.
-      INFERENCE_MAX_TOKENS: ${INFERENCE_MAX_TOKENS:-1024}
+      # Unset (empty) takes mcp-server's per-mode default: 16000 in
+      # anthropic mode, where thinking counts against it, and 1024 in
+      # openai mode (#764). It is a ceiling, not a target.
+      INFERENCE_MAX_TOKENS: ${INFERENCE_MAX_TOKENS:-}
       # Model context window in tokens; prompts plus INFERENCE_MAX_TOKENS
-      # of reply are fitted into it. Set a small local model's window.
-      INFERENCE_CONTEXT_TOKENS: ${INFERENCE_CONTEXT_TOKENS:-32768}
+      # of reply are fitted into it. Unset takes 48000 in anthropic mode
+      # and 32768 in openai mode. Set a small local model's window.
+      INFERENCE_CONTEXT_TOKENS: ${INFERENCE_CONTEXT_TOKENS:-}
       MCP_PORT: ${MCP_PORT:-3000}
       # Only "streamable-http" (or empty) is accepted. Still passed through
       # so an old .env with the removed "sse" or "dual" fails startup with
