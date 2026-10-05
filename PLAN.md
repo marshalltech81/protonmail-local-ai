@@ -139,6 +139,14 @@ shows a reviewed snapshot diff with golden checks still passing.
 
 ### Phase 2 — Swappable embedding / vector generations
 
+> **First milestone narrowed (2026-10-05, external review; #719).**
+> Before building the live-generation lifecycle below, measure rebuild
+> duration, resources and acceptable downtime, and ship a validated
+> staged rebuild with a controlled cutover, recording dimension and
+> tokenizer explicitly. Pursue live generations only if measurements
+> show the maintenance window is unacceptable, without weakening their
+> consistency requirements.
+
 **Exit criterion:** changing embedding models never requires altering
 the source corpus (the Maildir) or the versioned schema — no numbered
 migration and no `SCHEMA_VERSION` bump. Everything derived — vectors
@@ -745,6 +753,77 @@ Resolved since this handoff (owner, 2026-10-04): #692 (`Starred`
 excluded from the sync, #746; remove the leftover `/maildir/Starred`
 before the rebuild), #652 and #685 (closed as not planned: Linux-only),
 #701 (keyword slot, #745).
+
+**Update 2026-10-05.** Merged: #745 (#701), #746 (#692), #747 (#670:
+the FTS scrub runs only after reaps and chunk replacements, in bounded
+steps, and once at startup before the embedder wait). Images rebuilt
+from `main`; mbsync restarted on the new image; `/maildir/Starred`
+removed and confirmed absent after a sync. Open: #749 (#720, no embed
+request after a concurrent failure). #748 filed (P3, test-only, from
+#745 round 3). **The rebuild waits only on #754** (oldest-first
+initial scan, below). Nothing else in the backlog needs a full
+re-embed later; turning OCR on (after #698) will re-queue the messages
+whose image or scanned-PDF attachments were skipped while it was off
+and embed their new attachment chunks, a targeted pass with its own
+provider cost. During the rebuild, record peak memory, tmpfs and disk
+growth (#488). At the end, check completeness rather than health
+alone: `get_mailbox_status` queue counts (`pending` and `retrying`
+must reach 0; every `dead` row explained, which includes files with no
+`Message-ID`, dead-lettered by design), and account for Maildir files
+that leave no queue row on purpose: T-flagged (trashed) files the walk
+skips in mirror mode, and files that moved mid-index (the indexer's
+`skipped:` log lines; the renamed file is indexed under its new path).
+
+#699 (index order), decided by the owner: the initial scan indexes
+**oldest first** across every folder, with no setting (#754). Newest
+first changed the final index on the synthetic baseline (49 threads
+instead of 37): replies indexed before their root stay split (#752,
+bug). On the live Maildir, the old folder-by-folder walk put about
+10,000 of 21,662 replies ahead of every message they reference, so the
+index wiped on 2026-10-04 was very likely affected; oldest first puts
+none. **Merge #754 before the rebuild.** #752 (merge a late parent into
+its replies' thread) stays open at lower priority: after the rebuild,
+count how many threads are still split, then decide; newest first can
+return as an option once it lands.
+
+**External review (2026-10-04/05).** An outside reviewer endorsed the
+architecture and raised six tradeoffs, now tracked as follows (order
+recommended after the rebuild):
+
+1. Provider destination intent: an API key is not consent to the SDK's
+   default endpoint, since the request body leaves before the key is
+   checked. #750, owner decision (proposed: an empty `*_BASE_URL` fails;
+   the default needs an explicit value).
+2. Review cap: verified P0/P1 or self-introduced regressions must be
+   fixed, removed or explicitly accepted, even after round two. #751,
+   owner decision (AGENTS.md change).
+3. Keep SQLite-only tools up during an embedder outage: #661 (scope and
+   tests added), with #648.
+4. Local deletion as an explicit retention policy: #728 (policy
+   questions added); first step the synthetic mbsync check.
+5. Attachment extraction as failure isolation, not only throughput:
+   #698 (worker access and limits added); before OCR is turned on.
+6. Model portability: measure the rebuild first, then a validated
+   staged rebuild with controlled cutover before any live generations
+   (#719, Phase 2 note below); deferred while the model is unchanged.
+
+A second letter from the same reviewer (2026-10-05) added three more,
+each to be measured on the rebuilt index before any change:
+
+7. Evidence scope: filters select whole threads, so a passage from a
+   message that does not satisfy the filter (another sender, another
+   date, Trash) can be cited as the answer. #755, owner decision
+   (proposed: label passages in-scope or context).
+8. Subject-fallback threading: the 60-day window slides with the
+   thread's latest message, so recurring same-subject mail can chain
+   into one thread spanning years. #756, owner decision (smallest
+   option: anchor the window to the thread's first message).
+9. Coverage gate: `src/main.py` is excluded in both services; counted,
+   it is 93% (indexer) and 99% (mcp-server), so the exclusion can go.
+   #757, small.
+
+After the rebuild, the measurements for #752 (threads still split),
+#755 and #756 come before any of their fixes.
 
 Still small, no decision needed: the extractor's own `max_bytes`
 fallback still says 10 MB; `ask_mailbox` should name the resolved
