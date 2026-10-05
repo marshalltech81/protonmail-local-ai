@@ -8,7 +8,8 @@
   errors), 3 configuration or contract error before any provider call.
 - ``compare``: 0 compared, 1 a per-case regression with
   ``--fail-on-regression``, 2 the runs are not comparable (different
-  cases, index or judge/rubric) without ``--allow-incompatible``.
+  cases, index or judge/rubric) without ``--allow-incompatible``, 3 a
+  report is unreadable or malformed.
 
 Quality is advisory until thresholds are calibrated: ``run`` never
 fails on a low score.
@@ -181,8 +182,16 @@ def _load_report(path: Path) -> dict[str, Any]:
 
 
 def _compare(args: argparse.Namespace) -> int:
-    cmp = compare_reports(_load_report(args.baseline), _load_report(args.candidate))
-    print(render_comparison(cmp))
+    base, cand = _load_report(args.baseline), _load_report(args.candidate)
+    # _load_report checks only the labels; a nested value of the wrong
+    # shape or a missing key surfaces here. Fixed text only: the
+    # exceptions' messages can quote report contents.
+    try:
+        cmp = compare_reports(base, cand)
+        rendered = render_comparison(cmp)
+    except AttributeError, KeyError, TypeError:
+        raise ConfigError("malformed answer evaluation report") from None
+    print(rendered)
     if args.out:
         write_private_json(_check_output_path(args.out), cmp)
     if cmp["incompatible"] and not args.allow_incompatible:

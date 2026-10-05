@@ -1038,6 +1038,51 @@ class TestCli:
             assert cli.main(["compare", str(report), str(report)]) == cli.EXIT_CONFIG
         assert "Traceback" not in capsys.readouterr().err
 
+    @pytest.mark.parametrize(
+        "path, value",
+        [
+            (["identity"], ["MARKER-677"]),
+            (["identity"], "MARKER-677"),
+            (["counts"], ["MARKER-677"]),
+            (["counts", "selected"], None),  # removed
+            (["aggregates"], ["MARKER-677"]),
+            (["aggregates", "dev"], ["MARKER-677"]),
+            (["aggregates", "held_out"], None),
+            (["aggregates", "by_category"], ["MARKER-677"]),
+            (["aggregates", "by_category", "CATEGORY"], ["MARKER-677"]),
+            (["aggregates", "by_category", "CATEGORY", "judge"], ["MARKER-677"]),
+            (["cases"], {"MARKER-677": 1}),
+            (["cases", 0], ["MARKER-677"]),
+            (["cases", 0, "id"], ["MARKER-677"]),
+            (["cases", 0, "judge"], ["MARKER-677"]),
+            (["cases", 0, "deterministic"], None),
+        ],
+    )
+    def test_compare_rejects_malformed_nested_shapes(
+        self, chunked_db, tmp_path, capsys, path, value
+    ):
+        """#677: a well-labelled report with a malformed nested shape (for
+        example ``identity: []``) raised a traceback instead of exit 3."""
+        good = self._report(chunked_db, tmp_path, "a.json")
+        data = json.loads(good.read_text())
+        # The one category the report holds.
+        path = [data["cases"][0]["category"] if k == "CATEGORY" else k for k in path]
+        *parents, last = path
+        node = data
+        for key in parents:
+            node = node[key]
+        if value is None:
+            del node[last]
+        else:
+            node[last] = value
+        bad = tmp_path / "bad.json"
+        bad.write_text(json.dumps(data))
+        for argv in ([str(good), str(bad)], [str(bad), str(good)]):
+            assert cli.main(["compare", *argv]) == cli.EXIT_CONFIG
+            out, err = capsys.readouterr()
+            assert err == "answer evaluation: malformed answer evaluation report\n"
+            assert "MARKER-677" not in out + err
+
     def test_run_rejects_detail_overwriting_the_report(self, tmp_path, capsys):
         """Review round 1: --detail equal to --out overwrote the report."""
         out = str(tmp_path / "r.json")

@@ -341,7 +341,8 @@ Delete old runs with `rm -r .answer-eval`. Never upload either.
 Exit codes: `run` 0 complete, 2 incomplete (any error, skip or judge
 error), 3 configuration error; `compare` 0, 1 on a per-case regression
 with `--fail-on-regression`, 2 when the runs differ in case file, case
-selection, index, rubric or judge (not comparable) unless `--allow-incompatible`. Scores
+selection, index, rubric or judge (not comparable) unless `--allow-incompatible`,
+3 when a report is unreadable or malformed. Scores
 are advisory: no quality threshold is calibrated yet, so a low score
 never fails a run. CI runs only the scripted path (`make baseline` and
 `tests/test_answer_eval.py`), with no provider or credential.
