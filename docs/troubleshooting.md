@@ -294,6 +294,28 @@ A Proton child folder named `uidvalidity`, `isyncuidmap.db`,
 directory would be a file isync keeps in its parent's directory. Nothing
 is logged for it. Rename the folder in Proton to sync it.
 
+## A `Starred` folder is left from an earlier sync
+
+Proton's `Starred` is a virtual folder: a second copy of each starred
+message. mbsync no longer syncs it (#692), but it never deletes local
+mail, so a Maildir synced before that change keeps its `/maildir/Starred`
+directory, and the indexer indexes every folder it finds there. The
+starred messages then appear twice: `query_messages` counts both copies,
+and `get_mailbox_status` lists them under `conflicting_message_ids`.
+
+After updating mbsync (`make build`, `make up`), remove the leftover
+directory once. Only the top-level `Starred` is virtual; a custom folder
+is `/maildir/Folders/.Starred` and is not touched:
+
+```bash
+docker exec mbsync rm -rf /maildir/Starred
+```
+
+The real copies, and their starred flag, are unaffected. If the index
+already held the duplicates, deletion reconciliation removes them after
+its grace period (`INDEXER_DELETION_GRACE_DAYS`); in archive mode
+(`INDEXER_DELETION_ENABLED=false`) they stay until the index is rebuilt.
+
 ## mbsync refuses an earlier Maildir layout
 
 ```text

@@ -1476,9 +1476,10 @@ config_keeps_sync_safety() {
     grep -qx 'PassCmd "cat /run/secrets/bridge_pass"' "$CONFIG_FILE" || return 1
     grep -qx 'Sync Pull' "$CONFIG_FILE" || return 1
     grep -qx 'Expunge None' "$CONFIG_FILE" || return 1
-    # All Mail and Labels/* stay out; anything after them only leaves out
-    # more (child folders named after isync's own files, #281).
-    grep -qxE 'Patterns \* !"All Mail" !"Labels/\*"( !"\*/[^"*]+(/\*)?")*' "$CONFIG_FILE" || return 1
+    # All Mail, Labels/* and Starred (#692) stay out; anything after them
+    # only leaves out more (child folders named after isync's own files,
+    # #281).
+    grep -qxE 'Patterns \* !"All Mail" !"Labels/\*" !"Starred"( !"\*/[^"*]+(/\*)?")*' "$CONFIG_FILE" || return 1
     grep -qx 'SyncState \*' "$CONFIG_FILE" || return 1
     grep -qx 'SubFolders Legacy' "$CONFIG_FILE" || return 1
     [[ "$(stat -c %a "$CONFIG_FILE" 2>/dev/null || stat -f %Lp "$CONFIG_FILE")" == "600" ]] || return 1

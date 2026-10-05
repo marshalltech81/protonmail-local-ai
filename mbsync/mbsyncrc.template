@@ -51,6 +51,10 @@ SubFolders Legacy
 # Channel — connects remote Bridge IMAP to local Maildir.
 # Patterns excludes All Mail and Labels/* — these are virtual folders in
 # Bridge v3's Gluon IMAP library that cause IMAP CLOSE errors on expunge.
+# It excludes the top-level Starred folder too, which is also virtual: a
+# second copy of each starred message, whose star already arrives as the
+# F flag on the real copy (#692). A custom folder named Starred is
+# Folders/Starred and still syncs.
 # It also leaves out a child folder, and everything below it, named after
 # a file isync keeps in its parent's directory: under SubFolders Legacy
 # its directory would be that file (.uidvalidity, .isyncuidmap.db, and the
@@ -67,7 +71,7 @@ SubFolders Legacy
 Channel protonmail
 Far :protonmail-remote:
 Near :protonmail-local:
-Patterns * !"All Mail" !"Labels/*" !"*/uidvalidity" !"*/uidvalidity/*" !"*/isyncuidmap.db" !"*/isyncuidmap.db/*" !"*/mbsyncstate" !"*/mbsyncstate/*" !"*/mbsyncstate.journal" !"*/mbsyncstate.journal/*" !"*/mbsyncstate.new" !"*/mbsyncstate.new/*" !"*/mbsyncstate.lock" !"*/mbsyncstate.lock/*"
+Patterns * !"All Mail" !"Labels/*" !"Starred" !"*/uidvalidity" !"*/uidvalidity/*" !"*/isyncuidmap.db" !"*/isyncuidmap.db/*" !"*/mbsyncstate" !"*/mbsyncstate/*" !"*/mbsyncstate.journal" !"*/mbsyncstate.journal/*" !"*/mbsyncstate.new" !"*/mbsyncstate.new/*" !"*/mbsyncstate.lock" !"*/mbsyncstate.lock/*"
 Create Near
 SyncState *
 Sync Pull

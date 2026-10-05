@@ -159,6 +159,13 @@ mbsync writes one Maildir per Proton folder (`mbsync/mbsyncrc.template`):
   in `.mbsyncstate` (with `.journal`, `.new` and `.lock` while a sync runs)
   in the folder's own directory, next to isync's `.uidvalidity`, so no two
   folders can share a state file (#275).
+- **Virtual folders:** `All Mail`, `Labels/*` and the top-level `Starred`
+  are views in Proton, not places: Bridge lists each message there as
+  well as in its real folder. The channel's `Patterns` leave them out, so
+  each message is synced and indexed once. A star still arrives, as the
+  Maildir `F` flag on the real copy (`flagged` in the MCP tools); a label
+  does not. A custom folder named `Starred` is `Folders/Starred` and
+  syncs.
 - **Names isync needs for itself:** a child folder named `uidvalidity`,
   `isyncuidmap.db`, `mbsyncstate`, `mbsyncstate.journal`, `mbsyncstate.new`
   or `mbsyncstate.lock` would be one of those files, so the channel's
