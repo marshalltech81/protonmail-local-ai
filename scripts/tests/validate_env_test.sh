@@ -1001,6 +1001,24 @@ padded_invalid_bool_fails() {
     fails_with 'INDEXER_OCR_ENABLED must be true or false'
 }
 
+# INFERENCE_STRUCTURED_OUTPUT (#808): true or false in any case, padded
+# or empty; anything else fails, as mcp-server's startup does.
+structured_output_values_pass() {
+    local value
+    for value in true false TRUE False '" false "' '""'; do
+        setup "INFERENCE_STRUCTURED_OUTPUT=$value"
+        passes || return 1
+    done
+}
+
+structured_output_invalid_value_fails() {
+    local value
+    for value in yes 1 off '" tru "'; do
+        setup "INFERENCE_STRUCTURED_OUTPUT=$value"
+        fails_with "INFERENCE_STRUCTURED_OUTPUT must be 'true' or 'false'." || return 1
+    done
+}
+
 padded_value_below_minimum_fails() {
     setup 'INDEXER_OCR_MAX_PAGES=" 0 "'
     fails_with 'INDEXER_OCR_MAX_PAGES must be >= 1'
@@ -1107,6 +1125,8 @@ check "a whitespace-only number takes the default" whitespace_only_number_takes_
 check "whitespace-only models fail" whitespace_only_models_fail
 check "a whitespace-only mode fails" whitespace_only_mode_fails
 check "a padded invalid boolean fails" padded_invalid_bool_fails
+check "INFERENCE_STRUCTURED_OUTPUT true/false values pass" structured_output_values_pass
+check "an invalid INFERENCE_STRUCTURED_OUTPUT fails" structured_output_invalid_value_fails
 check "a padded value below its minimum fails" padded_value_below_minimum_fails
 check "a padded quoted SYNC_INTERVAL fails" padded_quoted_sync_interval_fails
 check "unquoted values are trimmed like Compose" unquoted_values_are_trimmed_like_compose

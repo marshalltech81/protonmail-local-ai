@@ -403,6 +403,31 @@ class TestConfig:
         assert client.mode == "openai"
         assert client.base_url == "http://127.0.0.1:9/v1"
 
+    _ANSWERER = {
+        "INFERENCE_MODE": "anthropic",
+        "INFERENCE_BASE_URL": "default",
+        "INFERENCE_MODEL": "answer-model",
+        "INFERENCE_API_KEY": "k",  # pragma: allowlist secret
+    }
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [(None, True), ("", True), ("TRUE", True), ("false", False), (" False ", False)],
+    )
+    def test_structured_output_setting_is_read_as_the_server_reads_it(self, value, expected):
+        """#808: eval runs build the answerer as the server does."""
+        env = dict(self._ANSWERER)
+        if value is not None:
+            env["INFERENCE_STRUCTURED_OUTPUT"] = value
+        cfg = load_layer("INFERENCE", env)
+        assert cfg is not None
+        assert cfg.structured_output is expected
+        assert cfg.client().structured_output is expected
+
+    def test_invalid_structured_output_setting_is_refused(self):
+        with pytest.raises(ConfigError, match="INFERENCE_STRUCTURED_OUTPUT"):
+            load_layer("INFERENCE", {**self._ANSWERER, "INFERENCE_STRUCTURED_OUTPUT": "yes"})
+
 
 # ----------------------------------------------------------------- runner
 

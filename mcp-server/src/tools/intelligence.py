@@ -826,6 +826,135 @@ def _record_conforms(record: dict, schema: dict) -> bool:
     )
 
 
+# --- Structured outputs (#808) ---------------------------------------------
+#
+# In anthropic mode with INFERENCE_STRUCTURED_OUTPUT on, each per-thread
+# extraction call sends a strict JSON schema built from the caller's schema
+# and the reply is {"records": [<record>, ...]}. Structured outputs need
+# every object closed (additionalProperties false); every declared field is
+# required and nullable instead of optional.
+
+_SCALAR_TYPES = ("string", "number", "integer", "boolean")
+_NULLABLE_STRING = {"anyOf": [{"type": "string"}, {"type": "null"}]}
+# An array field's items: any JSON scalar. Nested caller item schemas are
+# not converted (one pass, no recursion).
+_ANY_SCALAR = {"anyOf": [*({"type": t} for t in _SCALAR_TYPES), {"type": "null"}]}
+# Keys that make a property without a ``type`` a structured shape rather
+# than a free value, which the conversion does not express.
+_STRUCTURE_KEYS = ("properties", "items", "anyOf", "oneOf", "allOf", "$ref")
+
+
+def _strict_field(declared: object) -> dict | None:
+    """The strict, nullable schema of one field declared with ``declared``
+    (a type name or a list of them), or None when it cannot be expressed:
+    an object, a non-string declaration, or a list naming something that
+    is not a JSON type. A single unknown name ("dollar amount") cannot be
+    checked, so any value passes today; it becomes a nullable string."""
+    names = declared if isinstance(declared, list) else [declared]
+    if not names or not all(isinstance(n, str) for n in names):
+        return None
+    if any(n not in _JSON_TYPE_CHECKS for n in names):
+        return _NULLABLE_STRING if len(names) == 1 else None
+    if "object" in names:
+        return None
+    branches = [
+        {"type": "array", "items": _ANY_SCALAR} if n == "array" else {"type": n}
+        for n in dict.fromkeys(names)
+        if n != "null"
+    ]
+    return {"anyOf": [*branches, {"type": "null"}]}
+
+
+def _strict_property(sub: object) -> dict | None:
+    """``_strict_field`` for one JSON Schema property. One level only: an
+    array's ``items`` is looked at, never walked."""
+    if not isinstance(sub, dict):
+        return None
+    if "type" not in sub:
+        if any(key in sub for key in _STRUCTURE_KEYS):
+            return None
+        return _NULLABLE_STRING  # only described (description, enum, ...)
+    items = sub.get("items")
+    if items is not None and not (isinstance(items, dict) and items.get("type") in _SCALAR_TYPES):
+        return None
+    return _strict_field(sub["type"])
+
+
+def _strict_record_schema(schema: dict) -> dict | None:
+    """The strict schema of one record for the caller's ``schema``, or None
+    when it cannot be expressed strictly (the call is then sent without a
+    format, as before #808).
+
+    One bounded pass over the declared fields, in declaration order:
+    shorthand keys, or JSON Schema ``properties`` then any ``required``
+    names they lack (a required-only field becomes a nullable string). No
+    nested caller schema is walked. The record also carries the closed
+    ``_evidence`` object, one nullable list of labels per field."""
+    fields: dict[str, dict] = {}
+    if _is_json_schema(schema):
+        properties = schema.get("properties")
+        properties = properties if isinstance(properties, dict) else {}
+        for name, sub in properties.items():
+            converted = _strict_property(sub)
+            if converted is None:
+                return None
+            fields[name] = converted
+        required = schema.get("required")
+        for name in required if isinstance(required, list) else []:
+            if isinstance(name, str) and name not in fields:
+                fields[name] = _NULLABLE_STRING
+    else:
+        for name, declared in schema.items():
+            converted = _strict_field(declared)
+            if converted is None:
+                return None
+            fields[name] = converted
+    if not fields:
+        return None  # a free-form object: nothing to hold the reply to
+    labels = {"anyOf": [{"type": "array", "items": {"type": "string"}}, {"type": "null"}]}
+    evidence = {
+        "type": "object",
+        "properties": dict.fromkeys(fields, labels),
+        "required": list(fields),
+        "additionalProperties": False,
+    }
+    return {
+        "type": "object",
+        "properties": {**fields, _EVIDENCE_FIELD: evidence},
+        "required": [*fields, _EVIDENCE_FIELD],
+        "additionalProperties": False,
+    }
+
+
+def _strict_records_schema(schema: dict) -> dict | None:
+    """The reply schema of one structured extraction call,
+    ``{"records": [<record>, ...]}`` (the top level must be an object), or
+    None when the record cannot be expressed strictly."""
+    record = _strict_record_schema(schema)
+    if record is None:
+        return None
+    return {
+        "type": "object",
+        "properties": {"records": {"type": "array", "items": record}},
+        "required": ["records"],
+        "additionalProperties": False,
+    }
+
+
+def _drop_unrequired_nulls(record: dict, schema: dict) -> dict:
+    """A structured record with each null its caller's JSON Schema did not
+    require removed. The strict schema makes every field required and
+    nullable, so a null there stands for the omitted field, which
+    ``_record_conforms`` accepts, while a typed null would fail it. A null
+    in a required field is kept and still fails. Shorthand records are
+    unchanged: the shorthand check already passes a null."""
+    if not _is_json_schema(schema):
+        return record
+    required = schema.get("required")
+    kept = {n for n in required if isinstance(n, str)} if isinstance(required, list) else set()
+    return {k: v for k, v in record.items() if v is not None or k in kept}
+
+
 # Appended to a prose answer the model stopped writing at max_tokens.
 _TRUNCATED_NOTICE = (
     "\n\n[Answer cut off at the INFERENCE_MAX_TOKENS limit; raise it for a complete answer.]"
@@ -2245,10 +2374,12 @@ def register_intelligence_tools(
     secret_values = list(secret_values or ())
     prompt_budget = prompt_budget or PromptBudget()
 
-    async def llm_complete(system: str, user: str) -> str:
+    async def llm_complete(system: str, user: str, json_schema: dict | None = None) -> str:
         count("inference_calls", 1)
         with stage("inference"):
-            return await inference_client.complete(system, user)
+            if json_schema is None:
+                return await inference_client.complete(system, user)
+            return await inference_client.complete(system, user, json_schema=json_schema)
 
     async def llm_complete_prose(system: str, user: str) -> str:
         """``llm_complete`` for prose answers: a reply cut off at
@@ -2921,6 +3052,20 @@ def register_intelligence_tools(
                 return output(["No matching emails found."])
 
             schema_str = json.dumps(schema, indent=2)
+            # Structured outputs (#808): the reply schema each call sends,
+            # or None for a request sent as before (the setting off, openai
+            # mode, or a schema the conversion cannot express strictly).
+            records_schema = (
+                _strict_records_schema(schema) if inference_client.structured_output else None
+            )
+            # Fixed text: structured outputs were on but not used.
+            schema_note = (
+                "Structured-output note: the schema declares a field structured outputs "
+                "cannot express (an object or a nested shape), so the replies were requested "
+                "and read as plain JSON, without INFERENCE_STRUCTURED_OUTPUT's schema guarantee."
+                if inference_client.structured_output and records_schema is None
+                else ""
+            )
             # Threads whose answer says nothing about their data: cut off
             # at max_tokens, or not a JSON object / array of objects.
             # Counted apart from a valid ``null`` (or ``[]``) so a failure
@@ -2949,9 +3094,16 @@ def register_intelligence_tools(
                         f"Body:\n{body}"
                     )
                     + "\n\n"
-                    "Return a JSON object matching the schema, with its "
-                    f'"{_EVIDENCE_FIELD}" object naming the labels each value came from, '
-                    "or null if no relevant data found."
+                    + (
+                        'Return a JSON object {"records": [...]} holding one record per item '
+                        f'of relevant data, each matching the schema with its "{_EVIDENCE_FIELD}" '
+                        "object naming the labels each value came from; use null for a field "
+                        "with no value, and an empty records list if no relevant data found."
+                        if records_schema is not None
+                        else "Return a JSON object matching the schema, with its "
+                        f'"{_EVIDENCE_FIELD}" object naming the labels each value came from, '
+                        "or null if no relevant data found."
+                    )
                 )
 
             # Each thread's evidence budget, sized so its complete prompt
@@ -2987,7 +3139,7 @@ def register_intelligence_tools(
                 user_prompt = render(thread, body)
 
                 try:
-                    result_str = await llm_complete(EXTRACT_SYSTEM, user_prompt)
+                    result_str = await llm_complete(EXTRACT_SYSTEM, user_prompt, records_schema)
                 except InferenceTruncatedError:
                     truncated += 1
                     continue
@@ -2997,6 +3149,17 @@ def register_intelligence_tools(
                 except json.JSONDecodeError:
                     unparseable += 1
                     continue
+                if records_schema is not None:
+                    # The reply is {"records": [...]}; an empty list is the
+                    # model's "no relevant data". Any other shape is no answer.
+                    wrapped = record.get("records") if isinstance(record, dict) else None
+                    if not isinstance(wrapped, list):
+                        unparseable += 1
+                        continue
+                    record = [
+                        _drop_unrequired_nulls(item, schema) if isinstance(item, dict) else item
+                        for item in wrapped
+                    ]
                 # Accept both a single object and a JSON array of objects.
                 # The prompt asks for an object, but models occasionally
                 # return an array when the schema implies multiple items
@@ -3060,6 +3223,8 @@ def register_intelligence_tools(
                 if window_cut
                 else ""
             )
+            # The structured-output note goes wherever the evidence note does.
+            window_note = " ".join(note for note in (window_note, schema_note) if note)
             if failed:
                 reasons = []
                 if truncated:

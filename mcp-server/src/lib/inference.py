@@ -31,7 +31,11 @@ import logging
 from dataclasses import dataclass
 from typing import Protocol
 
-from .security import ProviderResponseError, same_origin_request_hook
+from .security import (
+    ProviderResponseError,
+    safe_provider_exception_text,
+    same_origin_request_hook,
+)
 
 log = logging.getLogger("mcp.inference")
 
@@ -82,6 +86,15 @@ TEMPLATE_RESERVE_TOKENS = 64
 # template reserves. The longest system prompt (brief_issue's) alone is
 # about 940 estimated tokens, so a smaller allowance is a misconfiguration.
 MIN_PROMPT_TOKENS = 1024
+
+# Fixed text for a provider 400 on a call that carried a structured-output
+# schema (#808). The model or gateway may not support structured outputs;
+# there is no retry without the format, so the operator decides.
+STRUCTURED_OUTPUT_REJECTED = (
+    "Inference provider rejected a structured-output request with status 400 "
+    "(mode=anthropic). If the model or gateway does not support structured "
+    "outputs, set INFERENCE_STRUCTURED_OUTPUT=false."
+)
 
 
 @dataclass(frozen=True)
@@ -152,11 +165,16 @@ class _Backend(Protocol):
     and rerank lines — important in a privacy-sensitive deployment
     where the operator needs the startup log to name exactly where
     retrieved email excerpts are being sent.
+
+    ``structured_output`` says whether a ``json_schema`` passed to
+    ``complete`` is sent to the provider as a structured-output format
+    (#808); a backend that never sends one sets it ``False``.
     """
 
     base_url: str
+    structured_output: bool
 
-    async def complete(self, system: str, user: str) -> str: ...
+    async def complete(self, system: str, user: str, json_schema: dict | None = None) -> str: ...
 
 
 class _OpenAIBackend:
@@ -173,6 +191,9 @@ class _OpenAIBackend:
 
         self.model = model
         self.max_tokens = max_tokens
+        # Structured outputs are not sent in openai mode (#807): support for
+        # ``response_format`` differs across the servers this mode targets.
+        self.structured_output = False
         # ``api_key`` is required (non-empty) — startup validation in
         # ``main.py`` rejects an empty value before reaching this
         # constructor. For unauthenticated host-side servers (LM Studio, vLLM,
@@ -237,7 +258,8 @@ class _OpenAIBackend:
         # talking to.
         self.base_url = str(self.client.base_url).rstrip("/")
 
-    async def complete(self, system: str, user: str) -> str:
+    async def complete(self, system: str, user: str, json_schema: dict | None = None) -> str:
+        # ``json_schema`` is ignored: openai mode is #807.
         resp = await self.client.chat.completions.create(
             model=self.model,
             messages=[
@@ -291,11 +313,16 @@ class _AnthropicBackend:
         api_key: str,
         max_tokens: int,
         timeout_secs: float,
+        structured_output: bool = True,
     ) -> None:
         from anthropic import AsyncAnthropic, DefaultAsyncHttpxClient
 
         self.model = model
         self.max_tokens = max_tokens
+        # INFERENCE_STRUCTURED_OUTPUT (#808): send a caller's JSON schema as
+        # ``output_config.format``. Off for a model or gateway without
+        # structured outputs.
+        self.structured_output = structured_output
         # The Anthropic SDK appends ``/v1/messages`` to ``base_url``
         # itself, so a base URL such as ``https://api.anthropic.com/v1``
         # would produce a request to ``.../v1/v1/messages`` — every
@@ -355,13 +382,35 @@ class _AnthropicBackend:
         # name what the backend is actually talking to.
         self.base_url = str(self.client.base_url).rstrip("/")
 
-    async def complete(self, system: str, user: str) -> str:
-        resp = await self.client.messages.create(
-            model=self.model,
-            max_tokens=self.max_tokens,
-            system=system,
-            messages=[{"role": "user", "content": user}],
-        )
+    async def complete(self, system: str, user: str, json_schema: dict | None = None) -> str:
+        if json_schema is None or not self.structured_output:
+            resp = await self.client.messages.create(
+                model=self.model,
+                max_tokens=self.max_tokens,
+                system=system,
+                messages=[{"role": "user", "content": user}],
+            )
+        else:
+            from anthropic import BadRequestError
+
+            try:
+                resp = await self.client.messages.create(
+                    model=self.model,
+                    max_tokens=self.max_tokens,
+                    system=system,
+                    messages=[{"role": "user", "content": user}],
+                    output_config={"format": {"type": "json_schema", "schema": json_schema}},
+                )
+            except BadRequestError as e:
+                # A model or gateway without structured outputs rejects the
+                # format. Log type and status only (the body can echo the
+                # prompt), keep the SDK error out of the chain, and name the
+                # setting; there is no retry without the format (#808).
+                log.warning(
+                    "Inference provider rejected a structured-output request: %s",
+                    safe_provider_exception_text(e),
+                )
+                raise ProviderResponseError(STRUCTURED_OUTPUT_REJECTED) from None
         # The Messages API returns a list of content blocks. Concatenate
         # every text block so a future model that emits multiple text
         # blocks (or thinking + text) lands the full answer rather than
@@ -415,6 +464,11 @@ class InferenceClient:
         # resolved default ("https://api.anthropic.com" /
         # "https://api.openai.com/v1") rather than logged as "SDK default."
         self.base_url = backend.base_url
+        # Whether a ``json_schema`` passed to ``complete`` is sent as a
+        # structured-output format: anthropic mode with
+        # INFERENCE_STRUCTURED_OUTPUT on (#808). Tools read it to word
+        # their prompt and parse the reply to match.
+        self.structured_output = backend.structured_output
 
     @classmethod
     def create(
@@ -426,6 +480,7 @@ class InferenceClient:
         api_key: str,
         max_tokens: int = DEFAULT_MAX_TOKENS,
         timeout_secs: float = DEFAULT_COMPLETE_TIMEOUT_SECS,
+        structured_output: bool = True,
     ) -> InferenceClient:
         if mode == "openai":
             return cls(
@@ -446,10 +501,14 @@ class InferenceClient:
                     api_key=api_key,
                     max_tokens=max_tokens,
                     timeout_secs=timeout_secs,
+                    structured_output=structured_output,
                 ),
                 mode,
             )
         raise ValueError(f"InferenceClient: unsupported mode {mode!r}")
 
-    async def complete(self, system: str, user: str) -> str:
-        return await self._backend.complete(system, user)
+    async def complete(self, system: str, user: str, *, json_schema: dict | None = None) -> str:
+        """The model's reply. ``json_schema`` (a strict JSON schema whose
+        top level is an object) is sent as a structured-output format when
+        ``structured_output`` is on, and ignored otherwise."""
+        return await self._backend.complete(system, user, json_schema)

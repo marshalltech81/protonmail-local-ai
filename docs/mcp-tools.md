@@ -694,6 +694,31 @@ thread's headers) cannot fit, the tool returns an error naming the two
 settings before any model call. A window that leaves fewer than 1024
 prompt tokens after `INFERENCE_MAX_TOKENS` fails startup.
 
+### Structured outputs
+
+`extract_from_emails`, `brief_issue` and `check_conclusion` ask the model
+for JSON. With `INFERENCE_MODE=anthropic` and
+`INFERENCE_STRUCTURED_OUTPUT=true` (the default), each of their calls
+also sends the reply's JSON schema as an Anthropic structured-output
+format (`output_config.format`), so the API returns JSON matching it
+rather than JSON the server has to find in prose (#808).
+`brief_issue` and `check_conclusion` send constant schemas matching
+their reply shapes; `extract_from_emails` builds one from the caller's
+schema (see [its section](#extract_from_emails)). The prompts, the
+token budgeting and the checks on each reply are unchanged.
+
+A model or gateway without structured outputs rejects the request with
+status 400 (per Anthropic's model list at the time of writing,
+`claude-sonnet-4-6` lacks them; Sonnet 5.5, Sonnet 5, Opus 4.8 and
+later, and Haiku 4.5 have them). The tool call then fails with a
+fixed-text error naming `INFERENCE_STRUCTURED_OUTPUT=false`; the
+request is not retried without the format, and only the error type and
+status are logged. Set `INFERENCE_STRUCTURED_OUTPUT=false` for such a
+model to get the plain-JSON requests. Any value other than `true` or
+`false` (in any case; unset or empty is `true`) fails startup.
+`INFERENCE_MODE=openai` ignores the setting and never sends a format
+(#807).
+
 ### Prompt-injection hardening
 
 Email is attacker-controlled input: any external sender can attempt to
@@ -1009,6 +1034,38 @@ second item says how many of the searched threads could not be
 extracted and why; if none were extracted the response says so rather
 than "No structured data … found", which is reserved for every thread
 answering `null` or `[]`.
+
+**Structured outputs (#808).** With
+[structured outputs](#structured-outputs) on, each call sends a strict
+schema and the model answers `{"records": [<record>, ...]}`; an empty
+`records` list is its "no relevant data", in place of `null` / `[]`,
+and a reply of any other shape counts as failed. The record schema is
+built from yours in one pass over the declared fields, without walking
+nested schemas:
+
+- `string`, `number`, `integer` and `boolean` fields (or a list of these
+  and `null`) take that type or `null`;
+- a descriptive type (`"dollar amount"`), a property with no `type`, or
+  a `required` name with no property takes a string or `null`;
+- an `array` field takes a list of scalars (strings, numbers, booleans,
+  `null`) or `null`;
+- every declared field is required (`null` when the thread has no
+  value), no other field is allowed, and `_evidence` is a closed object
+  with one list of labels (or `null`) per field.
+
+A schema that declares an `object` field, an array whose `items` is not
+a scalar type, a property shaped only by `properties`, `items`, a
+combinator (`anyOf`, `oneOf`, `allOf`) or `$ref`, a shorthand field
+given as an object or other non-type value, a type list naming a
+non-JSON type, or no fields at all cannot be expressed this way: those
+calls are sent
+without the format, the reply is read as above, and the response adds
+a fixed-text note saying so. The records then go through the same
+schema check and citation checks as without structured outputs. In the
+JSON Schema form a `null` in a property your schema does not require
+stands for the omitted field and is dropped before the check; a `null`
+in a required property still fails it. Shorthand records keep their
+`null` fields.
 
 **Citations (#284).** Each thread's passages are labelled as in
 `ask_mailbox`, numbered across the whole call (the second thread's

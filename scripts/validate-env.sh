@@ -564,6 +564,7 @@ MCP_PORT="${MCP_PORT:-3000}"
 MCP_TRANSPORT="$(env_value MCP_TRANSPORT)"
 MCP_SESSION_IDLE_TIMEOUT_SECS="$(env_value_stripped MCP_SESSION_IDLE_TIMEOUT_SECS)"
 MCP_EXPERIMENTAL_TOOLS="$(env_value_stripped MCP_EXPERIMENTAL_TOOLS)"
+INFERENCE_STRUCTURED_OUTPUT="$(env_value_stripped INFERENCE_STRUCTURED_OUTPUT)"
 
 [[ -n "$BRIDGE_USER" && "$BRIDGE_USER" != "your@proton.me" ]] || {
     echo "ERROR: BRIDGE_USER in .env must be set to the username from the Bridge app's IMAP details." >&2
@@ -885,6 +886,15 @@ fi
 MCP_EXPERIMENTAL_TOOLS_LC="$(printf '%s' "$MCP_EXPERIMENTAL_TOOLS" | tr '[:upper:]' '[:lower:]')"
 [[ "$MCP_EXPERIMENTAL_TOOLS_LC" =~ ^(true|false)?$ ]] || {
     echo "ERROR: MCP_EXPERIMENTAL_TOOLS must be 'true' or 'false'." >&2
+    exit 1
+}
+
+# Structured outputs for the JSON tools in anthropic mode (#808); empty
+# is the default, true. mcp-server/src/main.py reads it at every start,
+# whatever INFERENCE_MODE, and fails on any other value.
+INFERENCE_STRUCTURED_OUTPUT_LC="$(printf '%s' "$INFERENCE_STRUCTURED_OUTPUT" | tr '[:upper:]' '[:lower:]')"
+[[ "$INFERENCE_STRUCTURED_OUTPUT_LC" =~ ^(true|false)?$ ]] || {
+    echo "ERROR: INFERENCE_STRUCTURED_OUTPUT must be 'true' or 'false'." >&2
     exit 1
 }
 

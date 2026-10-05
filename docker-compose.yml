@@ -302,6 +302,10 @@ services:
       # Model context window in tokens; prompts plus INFERENCE_MAX_TOKENS
       # of reply are fitted into it. Set a small local model's window.
       INFERENCE_CONTEXT_TOKENS: ${INFERENCE_CONTEXT_TOKENS:-32768}
+      # anthropic mode only: "true" sends the JSON tools' reply schema as
+      # a structured-output format; set "false" for a model or gateway
+      # without structured outputs. Any other value fails startup.
+      INFERENCE_STRUCTURED_OUTPUT: ${INFERENCE_STRUCTURED_OUTPUT:-true}
       MCP_PORT: ${MCP_PORT:-3000}
       # Only "streamable-http" (or empty) is accepted. Still passed through
       # so an old .env with the removed "sse" or "dual" fails startup with

@@ -436,7 +436,8 @@ is `127.0.0.1`, not `host.docker.internal`.
 
 - **Answerer** (`INFERENCE_*`): the server's own variables and defaults
   (`INFERENCE_MAX_TOKENS`, `INFERENCE_CONTEXT_TOKENS`,
-  `INFERENCE_TIMEOUT_SECS`), key in `.secrets/inference_api_key.txt`.
+  `INFERENCE_TIMEOUT_SECS`, `INFERENCE_STRUCTURED_OUTPUT`), key in
+  `.secrets/inference_api_key.txt`.
   `INFERENCE_MODE` defaults to `none`, as for the server, so the run
   needs it set.
 - **Judge** (`JUDGE_MODE` = `anthropic|openai|none`, `JUDGE_BASE_URL`,
