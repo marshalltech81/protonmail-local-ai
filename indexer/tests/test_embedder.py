@@ -454,29 +454,42 @@ class TestEmbedConcurrency:
         assert state["peak"] == 2
         assert out == [l2_normalize([float(t), 1.0]) for t in texts]
 
-    def test_reassembles_vectors_in_input_order_when_requests_finish_out_of_order(self):
-        # The first request finishes only after the other two have (an
-        # event, not a sleep, #758), and the test checks that it did.
+    def test_reassembles_vectors_in_input_order_when_requests_finish_out_of_order(
+        self, monkeypatch
+    ):
+        # The first request returns only once the other two requests'
+        # futures are done (#758), so completion order really is 3, 5, 1:
+        # an event set inside the fake would fire before those futures
+        # complete. The patched pool keeps the futures it hands out.
+        import src.embedder as embedder_module
+
         emb = _make_embedder(batch_size=2, concurrency=3)
-        lock = threading.Lock()
-        finished: list[str] = []
-        others_done = threading.Event()
+        real_pool = embedder_module.ThreadPoolExecutor
+
+        class _KeepFutures(real_pool):
+            futures: list = []
+
+            def submit(self, fn, /, *args, **kwargs):
+                future = super().submit(fn, *args, **kwargs)
+                type(self).futures.append(future)
+                return future
+
+        monkeypatch.setattr(embedder_module, "ThreadPoolExecutor", _KeepFutures)
+        others_done_first: list[bool] = []
 
         def fake_create(**kwargs):
-            first = kwargs["input"][0]
-            if first == "1":
-                assert others_done.wait(timeout=5)
-            with lock:
-                finished.append(first)
-                if len(finished) == 2 and "1" not in finished:
-                    others_done.set()
+            if kwargs["input"][0] == "1":
+                deadline = time.monotonic() + 5
+                while len(_KeepFutures.futures) < 3 and time.monotonic() < deadline:
+                    time.sleep(0.001)
+                done, _ = wait(_KeepFutures.futures[1:3], timeout=5)
+                others_done_first.append(len(done) == 2)
             return _embed_response([[float(t), 1.0] for t in kwargs["input"]])
 
         _patch_create(emb, fake_create)
         texts = [str(i) for i in range(1, 7)]
         assert emb.embed_batch(texts) == [l2_normalize([float(t), 1.0]) for t in texts]
-        assert finished[-1] == "1"
-        assert sorted(finished) == ["1", "3", "5"]
+        assert others_done_first == [True]
 
     def test_on_batch_complete_fires_per_request_on_the_calling_thread(self):
         # The indexer's callback touches SQLite (``queue.note_progress``),
