@@ -10,7 +10,7 @@ import logging
 import threading
 import time
 import traceback
-from concurrent.futures import ALL_COMPLETED
+from concurrent.futures import ALL_COMPLETED, wait
 from types import SimpleNamespace
 
 import httpx2
@@ -604,6 +604,99 @@ class TestEmbedConcurrency:
 
         with pytest.raises(APIStatusError):
             emb.embed_batch([str(i) for i in range(4)], on_batch_complete=on_tick)
+        assert sorted(calls) == ["0", "1"]
+
+    def test_failure_between_the_last_check_and_submit_sends_no_request(self, monkeypatch):
+        """#720: a request that fails after the calling thread's last
+        check and before the next submit must not let that next request
+        reach the provider. The patched pool's third ``submit`` lets
+        request "0" fail and waits until its future is done, which is
+        after the failure is recorded, before submitting request "2"."""
+        import src.embedder as embedder_module
+
+        emb = _make_embedder(batch_size=1, concurrency=2)
+        emb._embed_one_batch.retry.wait = lambda *_a, **_kw: 0  # type: ignore[attr-defined]
+        calls: list[str] = []
+        lock = threading.Lock()
+        release_first = threading.Event()
+
+        def fake_create(**kwargs):
+            text = kwargs["input"][0]
+            with lock:
+                calls.append(text)
+            if text == "0":
+                assert release_first.wait(timeout=5)
+                raise _api_status_error(400)
+            return _embed_response([[1.0]])
+
+        _patch_create(emb, fake_create)
+
+        real_pool = embedder_module.ThreadPoolExecutor
+
+        class _FailBeforeThirdSubmit(real_pool):
+            submits = 0
+            futures: list = []
+
+            def submit(self, fn, /, *args, **kwargs):
+                type(self).submits += 1
+                if type(self).submits == 3:
+                    release_first.set()
+                    # Done only once the worker has recorded the failure
+                    # and re-raised it: no timing assumption.
+                    done, _ = wait([type(self).futures[0]], timeout=5)
+                    assert done
+                future = super().submit(fn, *args, **kwargs)
+                type(self).futures.append(future)
+                return future
+
+        monkeypatch.setattr(embedder_module, "ThreadPoolExecutor", _FailBeforeThirdSubmit)
+        with pytest.raises(APIStatusError):
+            emb.embed_batch([str(i) for i in range(4)])
+        assert _FailBeforeThirdSubmit.submits == 3
+        assert sorted(calls) == ["0", "1"]
+
+    def test_a_retry_after_another_request_failed_is_not_sent(self):
+        """Codex round 2 on #749: the failure check runs right before
+        every provider call, retries included. Request "1" hits a
+        transient error and backs off; while it waits, request "0"
+        fails. When "1" wakes, its retry must not reach the provider."""
+        emb = _make_embedder(batch_size=1, concurrency=2)
+        req = httpx2.Request("POST", "http://x")
+        calls: list[str] = []
+        lock = threading.Lock()
+        first_attempt_of_1 = threading.Event()
+        zero_failed = threading.Event()
+
+        def fake_create(**kwargs):
+            text = kwargs["input"][0]
+            with lock:
+                calls.append(text)
+            if text == "0":
+                assert first_attempt_of_1.wait(timeout=5)
+                raise _api_status_error(400)
+            first_attempt_of_1.set()
+            raise APIConnectionError(request=req)
+
+        _patch_create(emb, fake_create)
+
+        def backoff_until_zero_failed(retry_state):
+            # Request "1" sleeps here; "0" fails meanwhile.
+            assert zero_failed.wait(timeout=5)
+            return 0
+
+        emb._embed_one_batch.retry.wait = backoff_until_zero_failed  # type: ignore[attr-defined]
+        original = emb._embed_one_batch
+
+        def tracked(chunk):
+            try:
+                return original(chunk)
+            except APIStatusError:
+                zero_failed.set()
+                raise
+
+        emb._embed_one_batch = tracked  # type: ignore[method-assign]
+        with pytest.raises(APIStatusError):
+            emb.embed_batch(["0", "1"])
         assert sorted(calls) == ["0", "1"]
 
     def test_each_concurrent_request_keeps_its_own_retry(self):
