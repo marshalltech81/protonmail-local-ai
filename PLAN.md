@@ -647,6 +647,10 @@ removed Bridge container are kept as history.
 25. **Work tracking (2026-10-05):** PLAN.md keeps direction, roadmap and
     decisions; work is tracked in GitHub issues with milestones and
     `P0`–`P3` / `decision` labels.
+26. **No bulk mail export (2026-10-05):** agents do not copy mail out of
+    the Maildir and index volumes in bulk for testing or analysis without
+    the owner's consent for that run; analysis goes through the MCP
+    tools in memory (AGENTS.md, "Do not export mail in bulk").
 
 ## Notes for Agents
 

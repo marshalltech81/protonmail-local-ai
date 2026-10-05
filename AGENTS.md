@@ -416,6 +416,28 @@ content is as private as a credential.
 - Test with a synthetic marker: assert it is absent from `caplog` and
   from any persisted error.
 
+### Do not export mail in bulk
+
+Mailbox content lives in two places: the Maildir volume and the
+SQLite index volume. Do not copy mail out of them in bulk (bodies,
+headers, attachment text, or files derived from them, such as candidate
+lists, labels or spreadsheets) onto the host or anywhere else for
+testing, evaluation or analysis without the owner's explicit consent
+for that run (owner, 2026-10-05). A `/tmp` dump of every inbox body
+is exactly what this forbids.
+
+- Analyse through the MCP tools and keep results in memory; screen
+  on the server with `query_messages` filters (`text`, `sender`, dates)
+  rather than downloading every body to screen locally.
+- With consent, write only where the owner agreed, with mode 700
+  directories and 600 files, delete the data when the run ends, and
+  report what was written and that it was removed.
+- Reading mail also sends it to the model: say how much mail a task
+  will read before reading it in bulk, and prefer the smallest sample
+  that answers the question.
+- Committed tests and fixtures stay synthetic, as above; never derive
+  them from real mail.
+
 ### Bound the work per input
 
 - Parsing, regex, and extraction work must be bounded per input
