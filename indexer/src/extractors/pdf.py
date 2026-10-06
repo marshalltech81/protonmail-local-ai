@@ -18,8 +18,9 @@ Two paths share one entry point:
 The OCR fallback is gated by ``ocr_enabled`` and bounded by
 ``max_ocr_pages``, counted over the pages selected for OCR, so a
 500-page scanned book attachment does not monopolise CPU. Pages beyond
-the cap are never rendered; the truncation logs a WARNING with the
-counts (#871) but is not recorded. If the pages within the cap yield
+the cap are never rendered; the truncation logs a rate-limited
+WARNING with the counts and is counted in the attachments aggregate
+(#871), but is not recorded. If the pages within the cap yield
 text, the dispatcher caches an ordinary ``success`` that cannot be
 told apart from a complete extraction; if they yield none, the usual
 ``empty`` (or short digital-text ``success``) applies. The result is
@@ -52,7 +53,7 @@ from collections.abc import Callable
 
 import pypdf
 
-from . import note_pdf_page_failed
+from . import note_ocr_capped, note_pdf_page_failed, warn_rate_limited
 
 log = logging.getLogger("indexer.extractor.pdf")
 
@@ -117,8 +118,13 @@ def extract(
     # first ``max_ocr_pages`` of them.
     ocr_pages = [i for i, text in enumerate(digital_pages) if len(text) < _MIN_DIGITAL_CHARS]
     if 0 < max_ocr_pages < len(ocr_pages):
-        # The pages past the cap are never read (#871).
-        log.warning("pdf OCR capped at %d of %d scanned pages", max_ocr_pages, len(ocr_pages))
+        # The pages past the cap are never read (#871): counted for the
+        # attachments aggregate, and the line is rate limited, since one
+        # message can carry many capped PDFs (review round 2 on #884).
+        note_ocr_capped(len(ocr_pages) - max_ocr_pages)
+        warn_rate_limited(
+            log, "pdf OCR capped at %d of %d scanned pages", max_ocr_pages, len(ocr_pages)
+        )
         ocr_pages = ocr_pages[:max_ocr_pages]
     if not ocr_pages:
         return digital_text, "pdf-digital"

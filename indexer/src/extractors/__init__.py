@@ -88,22 +88,27 @@ ZIP_MAX_UNCOMPRESSED_BYTES = 200 * 1024 * 1024
 # * ``pdf_pages_failed``: PDF pages whose text layer pypdf could not read.
 #   The PDF extractor skips such a page (one DEBUG line each) and counts
 #   it here, so a parser regression is visible without a line per page.
-# * ``failed_warnings_suppressed``: failed extractions whose WARNING the
-#   rate limit below withheld.
+# * ``ocr_capped_pdfs`` / ``ocr_pages_skipped``: scanned PDFs whose OCR
+#   stopped at ``max_ocr_pages``, and the scanned pages left unread.
+# * ``warnings_suppressed``: per-attachment WARNINGs (failed extraction,
+#   OCR cap) that the rate limit below withheld.
 #
 # Kept in this always-imported module because ``pdf`` is imported lazily.
-# Two integers and a window start: the state stays bounded.
+# A few integers and a window start: the state stays bounded.
 _counts_lock = Lock()
 _pdf_pages_failed = 0
-_failed_warnings_suppressed = 0
+_ocr_capped_pdfs = 0
+_ocr_pages_skipped = 0
+_warnings_suppressed = 0
 
-# At most this many failed-extraction WARNINGs per window (review round 1
-# on #884): a sender can attach many distinct malformed files, and one
-# line each could flood the retained log. The rest are counted.
-_FAILED_WARNINGS_PER_WINDOW = 20
-_FAILED_WARNING_WINDOW_SECS = 300.0
-_failed_warning_window: float | None = None
-_failed_warnings_in_window = 0
+# At most this many per-attachment WARNINGs per window, shared by every
+# kind (review rounds 1 and 2 on #884): a sender can attach many distinct
+# malformed or over-long files, and one line each could flood the
+# retained log. The rest are counted.
+_WARNINGS_PER_WINDOW = 20
+_WARNING_WINDOW_SECS = 300.0
+_warning_window: float | None = None
+_warnings_in_window = 0
 
 
 def note_pdf_page_failed() -> None:
@@ -113,37 +118,53 @@ def note_pdf_page_failed() -> None:
         _pdf_pages_failed += 1
 
 
+def note_ocr_capped(pages_skipped: int) -> None:
+    """Count one PDF whose OCR stopped at the page cap, and its unread
+    scanned pages."""
+    global _ocr_capped_pdfs, _ocr_pages_skipped
+    with _counts_lock:
+        _ocr_capped_pdfs += 1
+        _ocr_pages_skipped += pages_skipped
+
+
 def drain_extractor_counts() -> dict[str, int]:
-    """Return ``pdf_pages_failed`` and ``failed_warnings_suppressed``
-    since the last call, and reset them."""
-    global _pdf_pages_failed, _failed_warnings_suppressed
+    """Return the counts above since the last call, and reset them."""
+    global _pdf_pages_failed, _ocr_capped_pdfs, _ocr_pages_skipped, _warnings_suppressed
     with _counts_lock:
         counts = {
             "pdf_pages_failed": _pdf_pages_failed,
-            "failed_warnings_suppressed": _failed_warnings_suppressed,
+            "ocr_capped_pdfs": _ocr_capped_pdfs,
+            "ocr_pages_skipped": _ocr_pages_skipped,
+            "warnings_suppressed": _warnings_suppressed,
         }
-        _pdf_pages_failed = _failed_warnings_suppressed = 0
+        _pdf_pages_failed = _ocr_capped_pdfs = _ocr_pages_skipped = _warnings_suppressed = 0
     return counts
+
+
+def warn_rate_limited(logger: logging.Logger, msg: str, *args: object) -> None:
+    """Log one per-attachment WARNING unless this window's budget is
+    spent; then count it as suppressed. ``args`` must be counts, module
+    names, type names or fixed text."""
+    global _warning_window, _warnings_in_window, _warnings_suppressed
+    now = time.monotonic()
+    with _counts_lock:
+        if _warning_window is None or now - _warning_window >= _WARNING_WINDOW_SECS:
+            _warning_window = now
+            _warnings_in_window = 0
+        if _warnings_in_window >= _WARNINGS_PER_WINDOW:
+            _warnings_suppressed += 1
+            return
+        _warnings_in_window += 1
+    logger.warning(msg, *args)
 
 
 def _warn_failed(module_name: str, dispatch_via: str, reason: str) -> None:
     """Log a failed extraction at WARNING (it drops the attachment out of
-    search), unless this window's budget is spent; then count it as
-    suppressed. ``reason`` is an exception type name or fixed text."""
-    global _failed_warning_window, _failed_warnings_in_window, _failed_warnings_suppressed
-    now = time.monotonic()
-    with _counts_lock:
-        if (
-            _failed_warning_window is None
-            or now - _failed_warning_window >= _FAILED_WARNING_WINDOW_SECS
-        ):
-            _failed_warning_window = now
-            _failed_warnings_in_window = 0
-        if _failed_warnings_in_window >= _FAILED_WARNINGS_PER_WINDOW:
-            _failed_warnings_suppressed += 1
-            return
-        _failed_warnings_in_window += 1
-    log.warning("extractor %s failed (dispatch_via=%s): %s", module_name, dispatch_via, reason)
+    search), rate limited. ``reason`` is an exception type name or fixed
+    text."""
+    warn_rate_limited(
+        log, "extractor %s failed (dispatch_via=%s): %s", module_name, dispatch_via, reason
+    )
 
 
 @dataclass(frozen=True)

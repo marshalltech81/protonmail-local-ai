@@ -1311,7 +1311,9 @@ class TestAttachmentOutcomeCounts:
         return dict.fromkeys(attachment_indexing.ATTACHMENT_OUTCOMES, 0) | {
             "cached": 0,
             "pdf_pages_failed": 0,
-            "failed_warnings_suppressed": 0,
+            "ocr_capped_pdfs": 0,
+            "ocr_pages_skipped": 0,
+            "warnings_suppressed": 0,
         }
 
     @staticmethod
@@ -1405,11 +1407,14 @@ class TestAttachmentOutcomeCounts:
             "ocr_disabled": 2,
             "cached": 4,
             "pdf_pages_failed": 5,
-            "failed_warnings_suppressed": 6,
+            "ocr_capped_pdfs": 7,
+            "ocr_pages_skipped": 8,
+            "warnings_suppressed": 6,
         }
         assert attachment_indexing.format_attachment_outcomes(counts) == (
             "attachments n=6 success=3 failed=1 unsupported=0 too_large=0 "
-            "ocr_disabled=2 empty=0 cached=4 pdf_pages_failed=5 failed_warnings_suppressed=6"
+            "ocr_disabled=2 empty=0 cached=4 pdf_pages_failed=5 ocr_capped_pdfs=7 "
+            "ocr_pages_skipped=8 warnings_suppressed=6"
         )
 
     @pytest.mark.parametrize(
@@ -1423,7 +1428,9 @@ class TestAttachmentOutcomeCounts:
             ("too_large", True),
             ("ocr_disabled", True),
             ("pdf_pages_failed", True),
-            ("failed_warnings_suppressed", True),
+            ("ocr_capped_pdfs", True),
+            ("ocr_pages_skipped", True),
+            ("warnings_suppressed", True),
         ],
     )
     def test_degraded_counts(self, field, degraded):

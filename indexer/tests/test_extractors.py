@@ -209,7 +209,7 @@ class TestFailedOutcomesAreLogged:
 
     def test_failed_warnings_are_rate_limited(self, monkeypatch, caplog):
         """Review round 1 (security): many distinct malformed attachments
-        each logged a WARNING. The first ``_FAILED_WARNINGS_PER_WINDOW`` per
+        each logged a WARNING. The first ``_WARNINGS_PER_WINDOW`` per
         window are logged; the rest are counted for the aggregate. The
         extraction results are unchanged."""
         from src import extractors
@@ -217,7 +217,7 @@ class TestFailedOutcomesAreLogged:
         caplog.set_level("INFO")
         clock = {"now": 1000.0}
         monkeypatch.setattr(extractors.time, "monotonic", lambda: clock["now"])
-        monkeypatch.setattr(extractors, "_FAILED_WARNINGS_PER_WINDOW", 2)
+        monkeypatch.setattr(extractors, "_WARNINGS_PER_WINDOW", 2)
 
         def boom(payload, **opts):
             raise ValueError("SYNTHETIC_EXC_MARKER")
@@ -237,17 +237,17 @@ class TestFailedOutcomesAreLogged:
         assert {r.status for r in results} == {STATUS_FAILED}
         assert {r.error for r in results} == {"ValueError"}
         assert len(warnings()) == 2
-        assert extractors.drain_extractor_counts()["failed_warnings_suppressed"] == 3
+        assert extractors.drain_extractor_counts()["warnings_suppressed"] == 3
 
         # Within the window the budget stays spent.
-        clock["now"] += extractors._FAILED_WARNING_WINDOW_SECS - 1
+        clock["now"] += extractors._WARNING_WINDOW_SECS - 1
         failures(1)
         assert len(warnings()) == 2
         # A new window logs again.
         clock["now"] += 2
         failures(3)
         assert len(warnings()) == 4
-        assert extractors.drain_extractor_counts()["failed_warnings_suppressed"] == 2
+        assert extractors.drain_extractor_counts()["warnings_suppressed"] == 2
         assert "SYNTHETIC_EXC_MARKER" not in caplog.text
 
     def test_extractor_exception_logs_a_warning(self, monkeypatch, caplog):
@@ -3074,14 +3074,41 @@ class TestPdfPageLevelOcr:
         assert "SYNTHETIC_FILENAME_MARKER" not in caplog.text
         assert self.SCANNED not in caplog.text
 
+    def test_page_cap_warnings_are_rate_limited_and_counted(self, monkeypatch, tmp_path, caplog):
+        """Review round 2 on #884: one message can carry many capped
+        PDFs, and a WARNING each could flood the log. The cap line shares
+        the extractor warning limit; every capped PDF and skipped page is
+        counted for the attachments aggregate, whether its line was
+        logged or suppressed. Results are unchanged."""
+        from src import extractors
+
+        caplog.set_level("INFO")
+        self._fake_ocr(monkeypatch, tmp_path)
+        monkeypatch.setattr(extractors, "_WARNINGS_PER_WINDOW", 2)
+        extractors.drain_extractor_counts()
+        results = [self._extract("d" + "s" * 30, max_ocr_pages=5) for _ in range(5)]
+        assert {(r.status, r.extractor) for r in results} == {(STATUS_SUCCESS, "pdf-ocr@4")}
+        lines = [r for r in caplog.records if "OCR capped" in r.getMessage()]
+        assert [r.levelname for r in lines] == ["WARNING", "WARNING"]
+        assert extractors.drain_extractor_counts() == {
+            "pdf_pages_failed": 0,
+            "ocr_capped_pdfs": 5,
+            "ocr_pages_skipped": 5 * 25,
+            "warnings_suppressed": 3,
+        }
+
     @pytest.mark.parametrize("layout, cap", [("sss", 3), ("sss", 20), ("s" * 30, 0), ("dd", 1)])
     def test_no_cap_warning_when_every_scanned_page_is_read(
         self, monkeypatch, tmp_path, caplog, layout, cap
     ):
         caplog.set_level("INFO")
         self._fake_ocr(monkeypatch, tmp_path)
+        from src import extractors
+
+        extractors.drain_extractor_counts()
         self._extract(layout, max_ocr_pages=cap)
         assert "OCR capped" not in caplog.text
+        assert extractors.drain_extractor_counts()["ocr_capped_pdfs"] == 0
 
     def test_page_cap_counts_pages_across_runs(self, monkeypatch, tmp_path):
         work = self._fake_ocr(monkeypatch, tmp_path)
@@ -3928,7 +3955,9 @@ class TestMailContentStaysOutOfLogsAndErrors:
         assert pdf._extract_digital_pages(b"%PDF-1.7") == ["", "digital words", ""]
         assert extractors.drain_extractor_counts() == {
             "pdf_pages_failed": 2,
-            "failed_warnings_suppressed": 0,
+            "ocr_capped_pdfs": 0,
+            "ocr_pages_skipped": 0,
+            "warnings_suppressed": 0,
         }
         assert extractors.drain_extractor_counts()["pdf_pages_failed"] == 0
 

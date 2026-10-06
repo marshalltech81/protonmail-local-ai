@@ -95,8 +95,8 @@ def _reset_extractor_warning_budget(monkeypatch):
     test a fresh window so earlier tests cannot spend its budget."""
     from src import extractors
 
-    monkeypatch.setattr(extractors, "_failed_warning_window", None)
-    monkeypatch.setattr(extractors, "_failed_warnings_in_window", 0)
+    monkeypatch.setattr(extractors, "_warning_window", None)
+    monkeypatch.setattr(extractors, "_warnings_in_window", 0)
 
 
 @pytest.fixture

@@ -984,22 +984,27 @@ only, never filenames or text (`make logs`):
   <ExceptionType>` (WARNING), per extraction that fails: an encrypted
   PDF that needs a password, a Tesseract error or timeout, a DOCX or
   XLSX the parser rejects, or (`zip uncompressed-size cap exceeded`) a
-  DOCX or XLSX that would decompress past its cap. At most 20 of these
-  are logged per 5 minutes; the rest are counted as
-  `failed_warnings_suppressed` in the attachments line below. Many of
-  these at once usually means the OCR toolchain or a parser library is
+  DOCX or XLSX that would decompress past its cap. Many of these at
+  once usually means the OCR toolchain or a parser library is
   broken, not the mail. A failed result is cached for 7 days, then
   retried when the same bytes arrive again.
 - `pdf OCR capped at <N> of <M> scanned pages` (WARNING): a scanned
   PDF had more pages without a text layer than `INDEXER_OCR_MAX_PAGES`;
-  the pages past the cap are not read. Raising the cap applies only to
-  PDFs extracted afterwards, since the result is cached.
+  the pages past the cap are not read. Every capped PDF is also counted
+  in the attachments line below (`ocr_capped_pdfs`, `ocr_pages_skipped`).
+  Raising the cap applies only to PDFs extracted afterwards, since the
+  result is cached.
+- These per-attachment WARNINGs (failed extractions and OCR caps
+  together) are capped at 20 per 5 minutes, so one message carrying
+  many bad or long attachments cannot flood the log. The rest are
+  counted as `warnings_suppressed` in the attachments line below.
 - `attachments n=<total> success= failed= unsupported= too_large=
-  ocr_disabled= empty= cached= pdf_pages_failed=
-  failed_warnings_suppressed=`: the attachments of the messages
-  committed since the previous line, by outcome. It is a WARNING when
-  any of `failed`, `unsupported`, `too_large`, `ocr_disabled`,
-  `pdf_pages_failed` or `failed_warnings_suppressed` is above zero
+  ocr_disabled= empty= cached= pdf_pages_failed= ocr_capped_pdfs=
+  ocr_pages_skipped= warnings_suppressed=`: the attachments of the
+  messages committed since the previous line, by outcome. It is a
+  WARNING when any of `failed`, `unsupported`, `too_large`,
+  `ocr_disabled`, `pdf_pages_failed`, `ocr_capped_pdfs`,
+  `ocr_pages_skipped` or `warnings_suppressed` is above zero
   (some attachment text is not searchable), and INFO otherwise.
   - When it is logged: during the initial index, with the timing summary
     once at least 25 messages have been drained since the last one (each
@@ -1018,9 +1023,13 @@ only, never filenames or text (`make logs`):
     whose text layer pypdf could not read; each is skipped (and OCR'd
     when it is a scanned-page candidate and OCR is on). A steady rise
     across ordinary PDFs points at a pypdf regression.
+    `ocr_capped_pdfs` counts scanned PDFs whose OCR stopped at
+    `INDEXER_OCR_MAX_PAGES`, and `ocr_pages_skipped` the scanned pages
+    they left unread.
   - How retries count: the outcomes are counted once per committed
     message, so a message retried after an embedder outage counts once.
-    `pdf_pages_failed`, `failed_warnings_suppressed` and the failure
+    The extraction counts (`pdf_pages_failed`, `ocr_capped_pdfs`,
+    `ocr_pages_skipped`, `warnings_suppressed`) and the per-attachment
     WARNINGs count every extraction attempt, retries included.
 
 The parser also caps the work one message can cost. A cap that loses

@@ -84,7 +84,8 @@ class AttachmentOutcomeCounts:
     Per-attachment lines would flood the log; ``failed`` extractions also
     log their own rate-limited WARNING. ``drain`` also reports the
     extractors' per-attempt counts (``extractors.drain_extractor_counts``:
-    ``pdf_pages_failed`` and ``failed_warnings_suppressed``). Counts
+    ``pdf_pages_failed``, ``ocr_capped_pdfs``, ``ocr_pages_skipped`` and
+    ``warnings_suppressed``). Counts
     only: no filename, type or text.
     """
 
@@ -114,7 +115,14 @@ class AttachmentOutcomeCounts:
 attachment_outcomes = AttachmentOutcomeCounts()
 
 # Fields of the summary line after ``n``, in order.
-_SUMMARY_FIELDS = (*ATTACHMENT_OUTCOMES, "cached", "pdf_pages_failed", "failed_warnings_suppressed")
+_SUMMARY_FIELDS = (
+    *ATTACHMENT_OUTCOMES,
+    "cached",
+    "pdf_pages_failed",
+    "ocr_capped_pdfs",
+    "ocr_pages_skipped",
+    "warnings_suppressed",
+)
 # Counts that mean attachment text is missing from search: the line is
 # then a WARNING (review round 1 on #884).
 _DEGRADED_FIELDS = (
@@ -123,7 +131,9 @@ _DEGRADED_FIELDS = (
     STATUS_TOO_LARGE,
     "ocr_disabled",
     "pdf_pages_failed",
-    "failed_warnings_suppressed",
+    "ocr_capped_pdfs",
+    "ocr_pages_skipped",
+    "warnings_suppressed",
 )
 
 
