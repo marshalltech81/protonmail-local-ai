@@ -48,6 +48,7 @@ from .extractors import (
     STATUS_TOO_LARGE,
     STATUS_UNSUPPORTED,
     ExtractionResult,
+    drain_pdf_pages_failed,
     resolved_extractor_module,
     stale_extractor_module,
 )
@@ -79,7 +80,9 @@ class AttachmentOutcomeCounts:
     (``cached`` counts the latter too), so the INFO line the indexer
     logs with each timing summary shows how much of the mail's
     attachments is searchable. Per-attachment lines would flood the
-    log; ``failed`` extractions also log their own WARNING. Counts
+    log; ``failed`` extractions also log their own WARNING. ``drain``
+    also reports ``pdf_pages_failed``, the PDF pages whose text layer
+    pypdf could not read (``extractors.drain_pdf_pages_failed``). Counts
     only: no filename, type or text.
     """
 
@@ -97,10 +100,13 @@ class AttachmentOutcomeCounts:
                 self._counts["cached"] += 1
 
     def drain(self) -> dict[str, int]:
-        """Return every outcome's count plus ``cached``, and reset them."""
+        """Return every outcome's count plus ``cached`` and
+        ``pdf_pages_failed``, and reset them."""
         with self._lock:
             counts, self._counts = self._counts, Counter()
-        return {name: counts[name] for name in (*ATTACHMENT_OUTCOMES, "cached")}
+        drained = {name: counts[name] for name in (*ATTACHMENT_OUTCOMES, "cached")}
+        drained["pdf_pages_failed"] = drain_pdf_pages_failed()
+        return drained
 
 
 attachment_outcomes = AttachmentOutcomeCounts()
@@ -113,7 +119,9 @@ def format_attachment_outcomes(counts: dict[str, int]) -> str:
     if not total:
         return ""
     parts = [f"attachments n={total}"]
-    parts.extend(f"{name}={counts[name]}" for name in (*ATTACHMENT_OUTCOMES, "cached"))
+    parts.extend(
+        f"{name}={counts[name]}" for name in (*ATTACHMENT_OUTCOMES, "cached", "pdf_pages_failed")
+    )
     return " ".join(parts)
 
 

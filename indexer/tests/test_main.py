@@ -3699,7 +3699,7 @@ class TestRequeueOcrDisabledExtractions:
             (
                 "INFO",
                 "attachments n=2 success=0 failed=0 unsupported=0 too_large=0 "
-                "ocr_disabled=2 empty=0 cached=0",
+                "ocr_disabled=2 empty=0 cached=0 pdf_pages_failed=0",
             )
         ]
         assert "SYNTHETIC_FILENAME_MARKER" not in caplog.text

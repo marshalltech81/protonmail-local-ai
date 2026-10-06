@@ -36,6 +36,7 @@ import os
 import zipfile
 from collections.abc import Callable
 from dataclasses import dataclass
+from threading import Lock
 
 import defusedxml
 from PIL import Image
@@ -79,6 +80,30 @@ log = logging.getLogger("indexer.extractor")
 # python-docx / openpyxl get a chance to expand it. 200 MB covers any
 # realistic spreadsheet while keeping memory bounded.
 ZIP_MAX_UNCOMPRESSED_BYTES = 200 * 1024 * 1024
+
+# PDF pages whose text layer pypdf could not read since the last drain.
+# The PDF extractor skips such a page (one DEBUG line each) and counts it
+# here; the indexer reports the count in its periodic INFO attachments
+# aggregate (#871), so a parser regression is visible without a line per
+# page. Kept in this always-imported module because ``pdf`` is imported
+# lazily.
+_pdf_pages_failed = 0
+_pdf_pages_failed_lock = Lock()
+
+
+def note_pdf_page_failed() -> None:
+    """Count one PDF page whose text layer could not be read."""
+    global _pdf_pages_failed
+    with _pdf_pages_failed_lock:
+        _pdf_pages_failed += 1
+
+
+def drain_pdf_pages_failed() -> int:
+    """Return the pages counted since the last call, and reset the count."""
+    global _pdf_pages_failed
+    with _pdf_pages_failed_lock:
+        count, _pdf_pages_failed = _pdf_pages_failed, 0
+    return count
 
 
 @dataclass(frozen=True)

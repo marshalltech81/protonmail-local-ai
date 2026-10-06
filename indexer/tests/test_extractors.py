@@ -3855,6 +3855,30 @@ class TestMailContentStaysOutOfLogsAndErrors:
         assert "ValueError" in caplog.text
         assert "SYNTHETIC_PYPDF_MARKER" not in caplog.text
 
+    def test_pypdf_page_failures_are_counted(self, monkeypatch):
+        """#871: each page pypdf cannot read is counted for the INFO
+        attachments aggregate; the pages returned are unchanged."""
+        from src import extractors
+        from src.extractors import pdf
+
+        class BadPage:
+            def extract_text(self):
+                raise ValueError("SYNTHETIC_PYPDF_MARKER")
+
+        class GoodPage:
+            def extract_text(self):
+                return "  digital words  "
+
+        class FakeReader:
+            def __init__(self, stream):
+                self.pages = [BadPage(), GoodPage(), BadPage()]
+
+        monkeypatch.setattr(pdf.pypdf, "PdfReader", FakeReader)
+        extractors.drain_pdf_pages_failed()
+        assert pdf._extract_digital_pages(b"%PDF-1.7") == ["", "digital words", ""]
+        assert extractors.drain_pdf_pages_failed() == 2
+        assert extractors.drain_pdf_pages_failed() == 0
+
     def test_ocr_fallback_failure_logs_and_persists_type_only(self, monkeypatch, caplog):
         from src.extractors import pdf
 

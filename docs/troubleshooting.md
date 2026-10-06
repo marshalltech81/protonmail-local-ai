@@ -993,13 +993,17 @@ only, never filenames or text (`make logs`):
   the pages past the cap are not read. Raising the cap applies only to
   PDFs extracted afterwards, since the result is cached.
 - `attachments n=<total> success= failed= unsupported= too_large=
-  ocr_disabled= empty= cached=` (INFO), with each timing summary (about
+  ocr_disabled= empty= cached= pdf_pages_failed=` (INFO), with each timing summary (about
   every 25 messages): the attachments seen since the previous line, by
   outcome. `cached` counts those served from the extraction cache
   instead of extracted again. `unsupported` is a type no extractor
   reads, `too_large` is over `INDEXER_ATTACHMENT_MAX_BYTES`, and
   `ocr_disabled` is an image or scanned PDF skipped while
   `INDEXER_OCR_ENABLED=false` (re-extracted once OCR is turned on).
+  `pdf_pages_failed` counts PDF pages whose text layer pypdf could not
+  read; each is skipped (and OCR'd when it is a scanned-page candidate
+  and OCR is on). A steady rise across ordinary PDFs points at a pypdf
+  regression.
 
 The parser also caps the work one message can cost, and a cap that
 drops content logs one INFO line for that message, with its Maildir

@@ -15,6 +15,7 @@ from src.attachment_indexing import (
 from src.database import EMBEDDING_DIM, Database
 from src.extractors import (
     NO_EXTRACTOR_ERROR,
+    SCANNED_PDF_OCR_DISABLED_ERROR,
     STATUS_EMPTY,
     STATUS_FAILED,
     STATUS_SUCCESS,
@@ -1303,7 +1304,10 @@ class TestAttachmentOutcomeCounts:
 
     @staticmethod
     def _zero() -> dict[str, int]:
-        return dict.fromkeys(attachment_indexing.ATTACHMENT_OUTCOMES, 0) | {"cached": 0}
+        return dict.fromkeys(attachment_indexing.ATTACHMENT_OUTCOMES, 0) | {
+            "cached": 0,
+            "pdf_pages_failed": 0,
+        }
 
     @staticmethod
     def _drain() -> dict[str, int]:
@@ -1367,11 +1371,48 @@ class TestAttachmentOutcomeCounts:
         assert self._drain() == self._zero() | {"ocr_disabled": 2, "cached": 1}
 
     def test_summary_line(self):
-        counts = self._zero() | {"success": 3, "failed": 1, "ocr_disabled": 2, "cached": 4}
+        counts = self._zero() | {
+            "success": 3,
+            "failed": 1,
+            "ocr_disabled": 2,
+            "cached": 4,
+            "pdf_pages_failed": 5,
+        }
         assert attachment_indexing.format_attachment_outcomes(counts) == (
             "attachments n=6 success=3 failed=1 unsupported=0 too_large=0 "
-            "ocr_disabled=2 empty=0 cached=4"
+            "ocr_disabled=2 empty=0 cached=4 pdf_pages_failed=5"
         )
+
+    def test_pdf_pages_pypdf_could_not_read_are_counted(self, tmp_path, monkeypatch, caplog):
+        """A PDF page whose text layer pypdf cannot read is skipped
+        (DEBUG per page); the aggregate counts those pages at INFO. The
+        extraction result is unchanged: these pages give no digital text,
+        so with OCR off the PDF is recorded as needing OCR."""
+        from src.extractors import pdf
+
+        caplog.set_level("DEBUG")
+
+        class BadPage:
+            def extract_text(self):
+                raise ValueError("SYNTHETIC_PYPDF_MARKER")
+
+        class FakeReader:
+            def __init__(self, stream):
+                self.pages = [BadPage(), BadPage()]
+
+        monkeypatch.setattr(pdf.pypdf, "PdfReader", FakeReader)
+        self._drain()
+        db = _setup_db_for_attachment(tmp_path)
+        attachment = _attachment(
+            b"%PDF-1.7", content_type="application/pdf", filename="SYNTHETIC_FILENAME_MARKER.pdf"
+        )
+        plan = prepare_attachment_writes(db=db, **_kwargs(attachment, ocr_enabled=False))
+        assert plan.status == STATUS_UNSUPPORTED
+        assert plan.extraction_to_persist is not None
+        assert plan.extraction_to_persist.error == SCANNED_PDF_OCR_DISABLED_ERROR
+        assert self._drain() == self._zero() | {"ocr_disabled": 1, "pdf_pages_failed": 2}
+        for marker in ("SYNTHETIC_PYPDF_MARKER", "SYNTHETIC_FILENAME_MARKER"):
+            assert marker not in caplog.text
 
     def test_no_summary_line_without_attachments(self):
         assert attachment_indexing.format_attachment_outcomes(self._zero()) == ""

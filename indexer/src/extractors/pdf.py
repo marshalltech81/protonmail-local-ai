@@ -52,6 +52,8 @@ from collections.abc import Callable
 
 import pypdf
 
+from . import note_pdf_page_failed
+
 log = logging.getLogger("indexer.extractor.pdf")
 
 # Minimum extracted-character count below which we treat a page's
@@ -188,6 +190,8 @@ def _extract_digital_pages(
             # Per-page failures (broken cross-ref tables, cipher
             # entries pypdf chokes on) shouldn't abort the whole doc.
             log.debug("pypdf page extract failed: %s", type(exc).__name__)
+            # Counted for the INFO attachments aggregate (#871).
+            note_pdf_page_failed()
             text = ""
         pages.append(text.strip())
         if on_progress is not None:
