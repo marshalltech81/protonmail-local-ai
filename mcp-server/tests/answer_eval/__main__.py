@@ -5,7 +5,9 @@
 
 - ``run``: 0 every case completed (and was judged, with a judge), 2 the
   evaluation is incomplete (errors, timeouts, skipped cases, judge
-  errors), 3 configuration or contract error before any provider call.
+  errors, or a provider's billing or credit refusal, which stops the run
+  without a report), 3 configuration or contract error before any
+  provider call, including a run larger than ``EVAL_MAX_CALLS``.
 - ``compare``: 0 compared, 1 a per-case regression with
   ``--fail-on-regression``, 2 the runs are not comparable (different
   cases, index or judge/rubric) without ``--allow-incompatible``, 3 a
@@ -25,6 +27,7 @@ import os
 import re
 import sqlite3
 import sys
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -55,6 +58,7 @@ from tests.answer_eval.report import (
 from tests.answer_eval.runner import (
     NonSyntheticIndexError,
     PrecomputedEmbedder,
+    ProviderBillingError,
     RunContext,
     index_identity,
 )
@@ -78,6 +82,40 @@ def _check_output_path(path: Path, base: Path) -> Path:
     return resolved
 
 
+def _plan_calls(selected: int, env: Mapping[str, str]) -> None:
+    """Print the provider calls the run will make and apply
+    ``EVAL_MAX_CALLS`` (#839), before the index build or any call.
+
+    Each case makes one answer call, plus one citation-repair call when
+    its first answer fails the citation check, and one judge call unless
+    ``JUDGE_MODE=none``. The cap applies to the most the run can make.
+    The model names are the operator's own settings.
+    """
+    judge_mode = env.get("JUDGE_MODE", "none").strip().lower()
+    answer_model = env.get("INFERENCE_MODEL", "").strip() or "(INFERENCE_MODEL unset)"
+    if judge_mode == "none":
+        judge_calls, judge = 0, "0 judge calls (JUDGE_MODE=none)"
+    else:
+        judge_model = env.get("JUDGE_MODEL", "").strip() or "(JUDGE_MODEL unset)"
+        judge_calls, judge = selected, f"{selected} judge calls to {judge_model}"
+    most = 2 * selected + judge_calls
+    print(
+        f"Planned provider calls: {selected} answer calls to {answer_model} (up to {selected} "
+        f"more for citation repairs) and {judge}; at most {most} provider calls.",
+        file=sys.stderr,
+    )
+    raw = env.get("EVAL_MAX_CALLS", "").strip()
+    if not raw:
+        return
+    if not re.fullmatch(r"[0-9]+", raw) or int(raw) < 1:
+        raise ConfigError("EVAL_MAX_CALLS must be a whole number of at least 1")
+    if most > int(raw):
+        raise ConfigError(
+            f"this run can make {most} provider calls, more than EVAL_MAX_CALLS={int(raw)}: "
+            "select fewer cases with --case, or raise the cap"
+        )
+
+
 def _run(args: argparse.Namespace) -> int:
     # argparse's float accepts nan and inf: nan disables the run bound
     # and both write non-standard JSON into the report identity.
@@ -97,6 +135,7 @@ def _run(args: argparse.Namespace) -> int:
         if unknown:
             raise CaseError(f"unknown case ids: {sorted(unknown)}")
         cases = [c for c in cases if c.id in set(args.case)]
+    _plan_calls(len(cases), os.environ)
     if args.preflight:
         # make runs this before building the index, so a bad argument
         # fails in seconds (#814).
@@ -359,6 +398,10 @@ def main(argv: list[str] | None = None) -> int:
     except (CaseError, ConfigError, NonSyntheticIndexError) as e:
         print(f"answer evaluation: {e}", file=sys.stderr)
         return EXIT_CONFIG
+    except ProviderBillingError as e:
+        # Fixed text (runner.ProviderBillingError), never the provider's.
+        print(f"answer evaluation: {e}", file=sys.stderr)
+        return EXIT_INCOMPLETE
     except (OSError, UnicodeError, json.JSONDecodeError, sqlite3.Error, KeyError, TypeError) as e:
         # Unreadable or malformed case, report or index files. The type
         # only: these messages can quote file contents.

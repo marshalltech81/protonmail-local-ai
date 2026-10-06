@@ -20,6 +20,9 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
+import anthropic
+import httpx2
+import openai
 import pytest
 from src.lib.inference import (
     TEMPLATE_RESERVE_TOKENS,
@@ -68,6 +71,7 @@ from tests.answer_eval.runner import (
     NonSyntheticIndexError,
     Passage,
     PrecomputedEmbedder,
+    ProviderBillingError,
     RecordingInference,
     RunContext,
     _claimant_message,
@@ -75,6 +79,7 @@ from tests.answer_eval.runner import (
     claimant_hash_chars,
     corpus_manifest,
     index_identity,
+    is_billing_error,
     prompt_budget_for,
     run_case,
 )
@@ -1959,3 +1964,181 @@ class TestCli:
             ]
         )
         assert code == cli.EXIT_CONFIG
+
+
+# ------------------------------------------------------------- cost guard
+
+
+def _sdk_error(sdk: str, status: int, error_type: str) -> Exception:
+    """The exception the real SDK raises for ``status`` with an error body
+    of ``error_type``; the body's message carries the privacy marker."""
+    error = {"type": error_type, "message": f"provider text {MARKER}"}
+
+    def handler(_request: httpx2.Request) -> httpx2.Response:
+        body = {"type": "error", "error": error} if sdk == "anthropic" else {"error": error}
+        return httpx2.Response(status, json=body)
+
+    http = httpx2.Client(transport=httpx2.MockTransport(handler))
+    try:
+        if sdk == "anthropic":
+            anthropic.Anthropic(
+                api_key="k", base_url="http://127.0.0.1:9", max_retries=0, http_client=http
+            ).messages.create(model="m", max_tokens=1, messages=[{"role": "user", "content": "q"}])
+        else:
+            openai.OpenAI(
+                api_key="k", base_url="http://127.0.0.1:9/v1", max_retries=0, http_client=http
+            ).chat.completions.create(model="m", messages=[{"role": "user", "content": "q"}])
+    except Exception as e:
+        return e
+    raise AssertionError("the SDK did not raise")
+
+
+_BILLING = ("anthropic", 402, "billing_error")
+
+
+def _cases(n: int):
+    case = dataclasses.replace(
+        CASES["ask-roof-total"], arguments={"question": "invoice"}, required_evidence=()
+    )
+    return [dataclasses.replace(case, id=f"ask-unit-{i}") for i in range(n)]
+
+
+class TestCostGuard:
+    """#839: the planned call count before a run, the EVAL_MAX_CALLS cap,
+    and a stop on a provider's billing or credit error."""
+
+    @pytest.mark.parametrize(
+        "sdk, status, error_type, billing",
+        [
+            ("anthropic", 402, "billing_error", True),
+            ("openai", 429, "insufficient_quota", True),
+            # Same status, other type; same type, other status.
+            ("anthropic", 402, "api_error", False),
+            ("anthropic", 400, "billing_error", False),
+            ("anthropic", 400, "invalid_request_error", False),
+            ("anthropic", 429, "rate_limit_error", False),
+            ("openai", 429, "requests", False),
+            ("openai", 402, "insufficient_quota", False),
+            ("openai", 401, "invalid_api_key", False),
+        ],
+    )
+    def test_billing_errors_are_matched_by_status_and_type(self, sdk, status, error_type, billing):
+        assert is_billing_error(_sdk_error(sdk, status, error_type)) is billing
+
+    def test_non_sdk_errors_are_never_billing_errors(self):
+        class APIStatusError(Exception):
+            status_code = 402
+            type = "billing_error"
+
+        assert not is_billing_error(APIStatusError())
+        assert not is_billing_error(RuntimeError("billing_error"))
+
+    def test_answerer_billing_error_stops_the_run(self, chunked_db, caplog):
+        inference = ScriptedClient(_sdk_error(*_BILLING))
+        with caplog.at_level(logging.DEBUG), pytest.raises(ProviderBillingError) as raised:
+            asyncio.run(
+                evaluate(
+                    _cases(3),
+                    _ctx(chunked_db, inference),
+                    judge_client=ScriptedClient("{}"),
+                    judge_config=_judge_config(),
+                )
+            )
+        # One call, then no case after it reaches the provider.
+        assert len(inference.calls) == 1
+        assert str(raised.value) == ProviderBillingError("answering").args[0]
+        assert raised.value.__cause__ is None and raised.value.__suppress_context__
+        assert MARKER not in caplog.text + str(raised.value)
+
+    def test_judge_billing_error_stops_the_run(self, chunked_db, caplog):
+        inference = ScriptedClient("14,200 [E1].")
+        judge = ScriptedClient(_sdk_error("openai", 429, "insufficient_quota"))
+        with caplog.at_level(logging.DEBUG), pytest.raises(ProviderBillingError) as raised:
+            asyncio.run(
+                evaluate(
+                    _cases(3),
+                    _ctx(chunked_db, inference),
+                    judge_client=judge,
+                    judge_config=_judge_config(),
+                )
+            )
+        assert len(inference.calls) == 1 and len(judge.calls) == 1
+        assert "judge" in str(raised.value)
+        assert raised.value.__cause__ is None and raised.value.__suppress_context__
+        assert MARKER not in caplog.text + str(raised.value)
+
+    def test_other_provider_errors_are_still_recorded_per_case(self, chunked_db):
+        inference = ScriptedClient(_sdk_error("anthropic", 400, "invalid_request_error"))
+        records, _ = asyncio.run(evaluate(_cases(2), _ctx(chunked_db, inference)))
+        assert [r["status"] for r in records] == ["tool_error", "tool_error"]
+        assert len(inference.calls) == 2
+
+    def test_cli_reports_the_stop_in_fixed_text(self, tmp_path, monkeypatch, capsys):
+        def stopped(_args):
+            raise ProviderBillingError("answering")
+
+        monkeypatch.setattr(cli, "_run", stopped)
+        code = cli.main(["run", "--index-dir", str(tmp_path), "--out", str(tmp_path / "r.json")])
+        assert code == cli.EXIT_INCOMPLETE
+        err = capsys.readouterr().err
+        assert err == f"answer evaluation: {ProviderBillingError('answering')}\n"
+        assert "no report was written" in err
+
+    def _preflight(self, tmp_path, monkeypatch, env, *cases):
+        def no_provider(*_a, **_k):
+            raise AssertionError("a provider was configured")
+
+        monkeypatch.setattr(cli, "load_layer", no_provider)
+        for var in ("INFERENCE_MODEL", "JUDGE_MODE", "JUDGE_MODEL", "EVAL_MAX_CALLS"):
+            monkeypatch.delenv(var, raising=False)
+        for var, value in env.items():
+            monkeypatch.setenv(var, value)
+        argv = ["run", "--preflight", "--index-dir", str(tmp_path / "not-built")]
+        argv += ["--out", str(tmp_path / "r.json")]
+        for case in cases:
+            argv += ["--case", case]
+        return cli.main(argv)
+
+    _JUDGED = {"INFERENCE_MODEL": "stub-answerer", "JUDGE_MODE": "openai", "JUDGE_MODEL": "stub-j"}
+
+    def test_preflight_prints_the_planned_calls_and_models(self, tmp_path, monkeypatch, capsys):
+        code = self._preflight(tmp_path, monkeypatch, self._JUDGED, "ask-roof-total", "ask-padlock")
+        assert code == cli.EXIT_OK
+        assert capsys.readouterr().err == (
+            "Planned provider calls: 2 answer calls to stub-answerer (up to 2 more for "
+            "citation repairs) and 2 judge calls to stub-j; at most 6 provider calls.\n"
+        )
+
+    def test_no_judge_calls_without_a_judge(self, tmp_path, monkeypatch, capsys):
+        env = {"INFERENCE_MODEL": "stub-answerer", "JUDGE_MODEL": "ignored"}
+        assert self._preflight(tmp_path, monkeypatch, env, "ask-roof-total") == cli.EXIT_OK
+        err = capsys.readouterr().err
+        assert "0 judge calls (JUDGE_MODE=none)" in err and "at most 2 provider calls" in err
+        assert "ignored" not in err
+
+    def test_every_selected_case_is_counted(self, tmp_path, monkeypatch, capsys):
+        assert self._preflight(tmp_path, monkeypatch, self._JUDGED) == cli.EXIT_OK
+        n = len(CASES)
+        assert f"{n} answer calls" in capsys.readouterr().err
+
+    def test_cap_refuses_a_larger_run_before_any_call(self, tmp_path, monkeypatch, capsys):
+        env = {**self._JUDGED, "EVAL_MAX_CALLS": "5"}
+        code = self._preflight(tmp_path, monkeypatch, env, "ask-roof-total", "ask-padlock")
+        assert code == cli.EXIT_CONFIG
+        assert "6 provider calls, more than EVAL_MAX_CALLS=5" in capsys.readouterr().err
+        # The full run refuses before opening the index or any provider.
+        argv = ["run", "--index-dir", str(tmp_path / "not-built"), "--out", str(tmp_path / "r")]
+        assert cli.main([*argv, "--case", "ask-roof-total", "--case", "ask-padlock"]) == 3
+        assert "EVAL_MAX_CALLS=5" in capsys.readouterr().err
+        assert not (tmp_path / "not-built").exists()
+
+    def test_cap_allows_a_run_within_it(self, tmp_path, monkeypatch, capsys):
+        env = {**self._JUDGED, "EVAL_MAX_CALLS": " 6 "}
+        code = self._preflight(tmp_path, monkeypatch, env, "ask-roof-total", "ask-padlock")
+        assert code == cli.EXIT_OK
+
+    @pytest.mark.parametrize("value", ["0", "-1", "abc", "1.5", "²", "1e3"])
+    def test_invalid_cap_is_a_configuration_error(self, tmp_path, monkeypatch, capsys, value):
+        env = {**self._JUDGED, "EVAL_MAX_CALLS": value}
+        assert self._preflight(tmp_path, monkeypatch, env, "ask-roof-total") == cli.EXIT_CONFIG
+        assert "EVAL_MAX_CALLS must be a whole number of at least 1" in capsys.readouterr().err
