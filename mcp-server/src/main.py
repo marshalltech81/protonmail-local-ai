@@ -7,11 +7,14 @@ connection to Bridge.
 """
 
 import asyncio
+import hashlib
 import hmac
+import json
 import logging
 import math
 import os
 import re
+import secrets
 import threading
 import time
 import urllib.parse
@@ -720,6 +723,67 @@ def _run_server(server: FastMCP) -> None:
     uvicorn.Server(config).run()
 
 
+# A source commit as the Makefile passes it (``git rev-parse --short
+# HEAD``, plus ``-dirty``): anything else is logged as ``unknown``, so a
+# stray value cannot add text or a line to the log.
+_GIT_COMMIT_PATTERN = re.compile(r"[0-9A-Za-z._-]{1,64}")
+
+
+def _git_commit() -> str:
+    """The commit the image was built from (``GIT_COMMIT``, baked in by
+    the Dockerfile), or ``unknown``."""
+    value = os.environ.get("GIT_COMMIT", "").strip()
+    return value if _GIT_COMMIT_PATTERN.fullmatch(value) else "unknown"
+
+
+def _identity_settings() -> dict[str, object]:
+    """The settings the startup config hash covers, named one by one.
+
+    Non-secret values only: modes, endpoints, models and limits. Never
+    an API key, ``MCP_AUTH_TOKEN`` or any other secret, and never the
+    whole environment, so a rotated key or token does not change the
+    hash.
+    """
+    return {
+        "INFERENCE_MODE": INFERENCE_MODE,
+        "INFERENCE_BASE_URL": INFERENCE_BASE_URL.strip(),
+        "INFERENCE_MODEL": INFERENCE_MODEL,
+        "INFERENCE_TIMEOUT_SECS": INFERENCE_TIMEOUT_SECS,
+        "INFERENCE_MAX_TOKENS": INFERENCE_MAX_TOKENS,
+        "INFERENCE_CONTEXT_TOKENS": INFERENCE_CONTEXT_TOKENS,
+        "INFERENCE_STRUCTURED_OUTPUT": INFERENCE_STRUCTURED_OUTPUT,
+        "EMBED_MODE": EMBED_MODE,
+        "EMBED_BASE_URL": EMBED_BASE_URL.strip(),
+        "EMBED_MODEL": EMBED_MODEL,
+        "EMBED_TIMEOUT_SECS": EMBED_TIMEOUT_SECS,
+        "RERANK_MODE": RERANK_MODE,
+        "RERANK_BASE_URL": RERANK_BASE_URL.strip(),
+        "RERANK_MODEL": RERANK_MODEL,
+        "RERANK_CANDIDATES": RERANK_CANDIDATES,
+        "RERANK_TIMEOUT_SECS": RERANK_TIMEOUT_SECS,
+        "MCP_PORT": MCP_PORT,
+        "MCP_SESSION_IDLE_TIMEOUT_SECS": MCP_SESSION_IDLE_TIMEOUT_SECS,
+        "MCP_EXPERIMENTAL_TOOLS": MCP_EXPERIMENTAL_TOOLS,
+    }
+
+
+def _log_startup_identity(db: Database) -> None:
+    """Log one line naming what is running (#887): the source commit, a
+    random ID for this start, the schema version the index carries
+    (``none`` when it has none) and the first 12 hex digits of a SHA-256
+    over ``_identity_settings``. The schema version lives in the
+    indexer; this service has no version of its own to compare."""
+    settings = json.dumps(_identity_settings(), sort_keys=True)
+    stored = db.get_schema_version()
+    log.info(
+        "Startup identity: service=mcp-server commit=%s boot=%s schema_stored=%s config=%s",
+        _git_commit(),
+        secrets.token_hex(6),
+        "none" if stored is None else stored,
+        hashlib.sha256(settings.encode("utf-8")).hexdigest()[:12],
+    )
+
+
 def main():
     # No MCP endpoint is served without its bearer token.
     _require_auth_token(MCP_AUTH_TOKEN)
@@ -800,6 +864,8 @@ def main():
 
     # Env validated — now open the SQLite index.
     db = Database(SQLITE_PATH)
+    # Before the embedder identity check, which can stop startup.
+    _log_startup_identity(db)
 
     # Read the declared embedding dim from ``message_chunks_vec`` so the
     # tool layer can reject wrong-shaped query vectors before they reach

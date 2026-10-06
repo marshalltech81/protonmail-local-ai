@@ -3499,6 +3499,18 @@ class Database:
             return None
         return int(match.group(1))
 
+    def get_schema_version(self) -> int | None:
+        """The schema version the indexer stamped, for the startup
+        identity line (#887); ``None`` when the table or its row is
+        missing."""
+        table = self._fetchone(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_version'"
+        )
+        if table is None:
+            return None
+        row = self._fetchone("SELECT version FROM schema_version")
+        return None if row is None else int(row["version"])
+
     def get_mailbox_status(self) -> dict:
         """Index counts, queue depth, and the indexer's ``ingestion_state``
         row (``None`` until the indexer first reports), read in one

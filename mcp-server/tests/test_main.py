@@ -305,6 +305,9 @@ class TestContextTokens:
         def get_embedding_dim(self):
             return 4
 
+        def get_schema_version(self):
+            return 0
+
     def _load(self, monkeypatch, value, mode=None, attr="INFERENCE_CONTEXT_TOKENS"):
         import importlib
 
@@ -482,6 +485,9 @@ class TestDefaultIgnoresAmbientEndpoints:
 
         def get_embedding_dim(self):
             return 4
+
+        def get_schema_version(self):
+            return 0
 
     def test_default_starts_and_ignores_every_ambient_sdk_url(self, monkeypatch, caplog):
         import src.main as main_mod
@@ -893,6 +899,9 @@ class TestExperimentalToolsFlag:
 
         def get_embedding_dim(self):
             return 4
+
+        def get_schema_version(self):
+            return 0
 
     def _load(self, monkeypatch, value):
         import importlib
