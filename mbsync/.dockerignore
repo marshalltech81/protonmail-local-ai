@@ -6,3 +6,5 @@
 *.pem
 # Entrypoint tests run in CI, not in the image
 tests/
+# Local uv cache (Makefile UV_CACHE_DIR) — never part of a build context
+.uv-cache/

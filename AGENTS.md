@@ -825,6 +825,12 @@ make baseline
 make typecheck
 ```
 
+The `make` targets that run `uv` export `UV_CACHE_DIR` as `.uv-cache/`
+under the checkout (ignored by git, the service `.dockerignore` files
+and Semgrep), so parallel checkouts or worktrees never share one cache
+(#896); each fills its own once. Set `UV_CACHE_DIR` explicitly to
+override it.
+
 ## Documentation Expectations
 
 Update docs when changing:

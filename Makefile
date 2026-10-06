@@ -1,6 +1,10 @@
 .PHONY: build build-nocache up down logs status requeue-dead clean sync sync-indexer sync-mcp test test-indexer test-mcp test-mbsync test-mbsync-tls test-mbsync-layout test-compose test-validate-env test-make-status restart-indexer baseline eval-answers eval-answers-compare typecheck typecheck-indexer typecheck-mcp init-secrets validate-env help
 
-UV_CACHE_DIR ?= /tmp/uv-cache
+# Per-checkout uv cache (#896): a cache shared between checkouts or
+# worktrees running make targets at the same time fails with missing-file
+# errors while another uv process writes to it. Ignored by git, Docker
+# build contexts and Semgrep; `?=` lets an explicit UV_CACHE_DIR win.
+UV_CACHE_DIR ?= $(CURDIR)/.uv-cache
 export UV_CACHE_DIR
 
 # =============================================================================
