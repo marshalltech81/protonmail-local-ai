@@ -94,7 +94,7 @@ included, declares the same three MCP safety hints plus its own
 human-readable `title` (#899):
 
 ```json
-{"title": "Search emails", "readOnlyHint": true, "destructiveHint": false, "openWorldHint": false}
+{"title": "Search Emails", "readOnlyHint": true, "destructiveHint": false, "openWorldHint": false}
 ```
 
 Each tool is read-only, non-destructive and closed-world. Without these

@@ -2817,7 +2817,7 @@ def register_intelligence_tools(
 
     @server.tool(
         output_schema=AskMailboxOutput.model_json_schema(),
-        annotations=read_only("Ask the mailbox"),
+        annotations=read_only("Ask the Mailbox"),
     )
     @timed_tool("ask_mailbox", **timing_config)
     async def ask_mailbox(
@@ -3171,7 +3171,7 @@ def register_intelligence_tools(
 
     @server.tool(
         output_schema=SummarizeThreadOutput.model_json_schema(),
-        annotations=read_only("Summarize thread"),
+        annotations=read_only("Summarize Thread"),
     )
     @timed_tool("summarize_thread", **timing_config)
     async def summarize_thread(
@@ -3404,7 +3404,7 @@ def register_intelligence_tools(
 
     @server.tool(
         output_schema=ExtractFromEmailsOutput.model_json_schema(),
-        annotations=read_only("Extract from emails"),
+        annotations=read_only("Extract from Emails"),
     )
     @timed_tool("extract_from_emails", **timing_config)
     async def extract_from_emails(

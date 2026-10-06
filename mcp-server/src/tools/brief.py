@@ -751,7 +751,7 @@ def register_experimental_tools(
 
     @server.tool(
         output_schema=BriefIssueOutput.model_json_schema(),
-        annotations=read_only("Brief an issue (experimental)"),
+        annotations=read_only("Brief an Issue (Experimental)"),
     )
     @timed_tool("brief_issue", **timing_config)
     async def brief_issue(
@@ -996,7 +996,7 @@ def register_experimental_tools(
 
     @server.tool(
         output_schema=CheckConclusionOutput.model_json_schema(),
-        annotations=read_only("Check a conclusion (experimental)"),
+        annotations=read_only("Check a Conclusion (Experimental)"),
     )
     @timed_tool("check_conclusion", **timing_config)
     async def check_conclusion(

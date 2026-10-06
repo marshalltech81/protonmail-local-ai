@@ -181,7 +181,7 @@ def _conflict_lines(out: MailboxStatusOutput) -> list[str]:
 def register_system_tools(server, db):
     @server.tool(
         output_schema=MailboxStatusOutput.model_json_schema(),
-        annotations=read_only("Get mailbox status"),
+        annotations=read_only("Get Mailbox Status"),
     )
     @timings.timed_tool("get_mailbox_status")
     async def get_mailbox_status() -> CallToolResult:

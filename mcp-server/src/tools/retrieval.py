@@ -234,7 +234,7 @@ def register_retrieval_tools(server, db):
 
     @server.tool(
         output_schema=GetThreadOutput.model_json_schema(),
-        annotations=read_only("Get thread"),
+        annotations=read_only("Get Thread"),
     )
     @timings.timed_tool("get_thread")
     async def get_thread(
@@ -444,7 +444,7 @@ def register_retrieval_tools(server, db):
 
     @server.tool(
         output_schema=GetMessageOutput.model_json_schema(),
-        annotations=read_only("Get message"),
+        annotations=read_only("Get Message"),
     )
     @timings.timed_tool("get_message")
     async def get_message(
@@ -663,7 +663,7 @@ def register_retrieval_tools(server, db):
 
     @server.tool(
         output_schema=ListThreadsOutput.model_json_schema(),
-        annotations=read_only("List threads"),
+        annotations=read_only("List Threads"),
     )
     @timings.timed_tool("list_threads")
     async def list_threads(
@@ -766,7 +766,7 @@ def register_retrieval_tools(server, db):
 
     @server.tool(
         output_schema=QueryMessagesOutput.model_json_schema(),
-        annotations=read_only("Query messages"),
+        annotations=read_only("Query Messages"),
     )
     @timings.timed_tool("query_messages")
     async def query_messages(
@@ -993,7 +993,7 @@ def register_retrieval_tools(server, db):
 
     @server.tool(
         output_schema=FindContactOutput.model_json_schema(),
-        annotations=read_only("Find contact"),
+        annotations=read_only("Find Contact"),
     )
     @timings.timed_tool("find_contact")
     async def find_contact(
@@ -1080,7 +1080,7 @@ def register_retrieval_tools(server, db):
 
     @server.tool(
         output_schema=ListFoldersOutput.model_json_schema(),
-        annotations=read_only("List folders"),
+        annotations=read_only("List Folders"),
     )
     @timings.timed_tool("list_folders")
     async def list_folders() -> CallToolResult:

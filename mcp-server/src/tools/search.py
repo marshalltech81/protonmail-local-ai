@@ -121,7 +121,7 @@ def register_search_tools(
 
     @server.tool(
         output_schema=SearchEmailsOutput.model_json_schema(),
-        annotations=read_only("Search emails"),
+        annotations=read_only("Search Emails"),
     )
     @timed_tool("search_emails", **timing_config)
     async def search_emails(
@@ -422,7 +422,7 @@ def register_search_tools(
 
     @server.tool(
         output_schema=EvidenceOutput.model_json_schema(),
-        annotations=read_only("Get evidence passages"),
+        annotations=read_only("Get Evidence Passages"),
     )
     @timed_tool("get_evidence", **timing_config)
     async def get_evidence(
@@ -788,7 +788,7 @@ def register_search_tools(
 
     @server.tool(
         output_schema=SearchAttachmentsOutput.model_json_schema(),
-        annotations=read_only("Search attachments"),
+        annotations=read_only("Search Attachments"),
     )
     @timed_tool("search_attachments")
     async def search_attachments(

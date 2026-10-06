@@ -28,21 +28,21 @@ from tests.conftest import FakeEmbedClient, FakeInferenceClient
 # ``test_every_registered_tool_is_classified`` until it is classified
 # deliberately and added here.
 EXPECTED_TITLES = {
-    "search_emails": "Search emails",
-    "get_evidence": "Get evidence passages",
-    "search_attachments": "Search attachments",
-    "get_thread": "Get thread",
-    "get_message": "Get message",
-    "list_threads": "List threads",
-    "query_messages": "Query messages",
-    "find_contact": "Find contact",
-    "list_folders": "List folders",
-    "get_mailbox_status": "Get mailbox status",
-    "ask_mailbox": "Ask the mailbox",
-    "summarize_thread": "Summarize thread",
-    "extract_from_emails": "Extract from emails",
-    "brief_issue": "Brief an issue (experimental)",
-    "check_conclusion": "Check a conclusion (experimental)",
+    "search_emails": "Search Emails",
+    "get_evidence": "Get Evidence Passages",
+    "search_attachments": "Search Attachments",
+    "get_thread": "Get Thread",
+    "get_message": "Get Message",
+    "list_threads": "List Threads",
+    "query_messages": "Query Messages",
+    "find_contact": "Find Contact",
+    "list_folders": "List Folders",
+    "get_mailbox_status": "Get Mailbox Status",
+    "ask_mailbox": "Ask the Mailbox",
+    "summarize_thread": "Summarize Thread",
+    "extract_from_emails": "Extract from Emails",
+    "brief_issue": "Brief an Issue (Experimental)",
+    "check_conclusion": "Check a Conclusion (Experimental)",
 }
 
 
@@ -88,8 +88,9 @@ def test_tool_declares_read_only_closed_world_annotations(empty_db, name):
 
 def test_annotations_leave_names_descriptions_and_schemas_unchanged(empty_db, monkeypatch):
     """The listing must differ from one built without annotations only
-    in ``annotations`` and the display ``title``, which FastMCP takes
-    from ``annotations.title`` (without one it title-cases the name)."""
+    in ``annotations`` and, where the wording differs from the name, the
+    display ``title``: FastMCP takes it from ``annotations.title``, and
+    without one title-cases the name."""
 
     def listing(server: FastMCP) -> dict[str, Tool]:
         async def run():
@@ -115,6 +116,8 @@ def test_annotations_leave_names_descriptions_and_schemas_unchanged(empty_db, mo
         other = unannotated[name]
         assert other.annotations is None, name
         assert tool.title == EXPECTED_TITLES[name]
+        if name.replace("_", " ").title() == EXPECTED_TITLES[name]:
+            assert tool.title == other.title, name
         unchanged = {"annotations", "title"}
         assert tool.model_dump(exclude=unchanged) == other.model_dump(exclude=unchanged), name
         assert {"name", "description", "inputSchema", "outputSchema"} <= set(
