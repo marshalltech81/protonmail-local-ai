@@ -28,7 +28,6 @@ a pass.
 
 import asyncio
 import json
-import re
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -36,7 +35,7 @@ from typing import Any
 
 from src.lib.inference import InferenceTruncatedError
 from src.lib.security import safe_provider_exception_text
-from src.tools.intelligence import _strip_code_fence
+from src.tools.intelligence import _escape_delimiter_tags, _strip_code_fence
 from src.tools.outputs import AnswerStatement
 
 from tests.answer_eval.cases import DIMENSIONS, Case
@@ -145,16 +144,14 @@ _HANDLING_TEXT = {
     "its place.",
 }
 
-# Any spelling of a judge delimiter tag inside untrusted text, opened by
-# "<" or a one-character look-alike, as the server's own email blocks
-# escape theirs (``intelligence._DELIMITER_TAG_RE``).
-_JUDGE_TAG_RE = re.compile(
-    r"[<﹤＜](\s*+(?:/\s*+)?untrusted_(?:evidence|answer|email))", re.IGNORECASE
-)
+# The judge's delimiter tags. Untrusted text is escaped with the
+# server's own hardened escaper, so a tag spelled with zero-width,
+# compatibility or look-alike characters is caught too (#533).
+_JUDGE_TAG_NAMES = ("untrusted_evidence", "untrusted_answer", "untrusted_email")
 
 
 def _fence(content: str) -> str:
-    return _JUDGE_TAG_RE.sub(r"&lt;\1", content)
+    return _escape_delimiter_tags(content, _JUDGE_TAG_NAMES)
 
 
 def _label_key(label: str) -> int:
