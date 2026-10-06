@@ -433,9 +433,26 @@ export JUDGE_MODE=anthropic JUDGE_BASE_URL=default JUDGE_MODEL=<model>  # option
 # export JUDGE_MODE=claude-cli JUDGE_MODEL=<model>   # Claude Code, Claude subscription
 # export JUDGE_MODE=codex-cli JUDGE_MODEL=<model>    # Codex CLI, ChatGPT subscription
 make eval-answers                                   # report under .answer-eval/ (git-ignored)
-make eval-answers EVAL_ARGS="--case ask-recital-date --detail /tmp/detail.json"
+make eval-answers EVAL_ARGS="--case ask-recital-date --detail .answer-eval/detail.json"
 make eval-answers-compare BASELINE=<run-a.json> CANDIDATE=<run-b.json>
 ```
+
+The targets read settings only from the environment, not from `.env`.
+To keep eval settings between runs, put the `export`-free assignments
+(`INFERENCE_MODE=...`, `JUDGE_MODEL=...`, `JUDGE_MAX_TOKENS=...`) in
+`.env.eval` at the repository root, which is git-ignored, and load it
+into the shell before `make`:
+
+```bash
+set -a; . ./.env.eval; set +a
+make eval-answers
+```
+
+Keep keys out of it: they stay in `.secrets/inference_api_key.txt` and
+`.secrets/judge_api_key.txt` (mode 600). Relative `--out` and `--detail`
+paths in `EVAL_ARGS` resolve against the repository root (make passes
+`--path-base`), and the target checks the arguments before it builds
+the index, so a refused path or unknown `--case` fails in seconds.
 
 The target builds the baseline index (with every case question
 embedded) in a temporary directory, runs the cases one at a time, and
@@ -456,8 +473,13 @@ is `127.0.0.1`, not `host.docker.internal`.
   the endpoint, or `default` for the SDK default (a remote provider);
   an empty one is refused (#750). It never reads the
   answerer's variables or key. Bounds: `JUDGE_TIMEOUT_SECS` (120),
-  `JUDGE_MAX_TOKENS` (2048), `JUDGE_MAX_INPUT_CHARS` (60,000), one call
-  per case, no retries, one case at a time.
+  `JUDGE_MAX_TOKENS` (16000 for `JUDGE_MODE=anthropic`, 2048 otherwise),
+  `JUDGE_MAX_INPUT_CHARS` (60,000), one call per case, no retries, one
+  case at a time. Current Claude models think before the verdict and the
+  thinking counts against `JUDGE_MAX_TOKENS`, so the anthropic default
+  matches the answerer's (#805, #813); 2048 cut verdicts short. A
+  Claude Fable 5.1 judgement at the 16000 ceiling took 14–24 s, well
+  inside the 120 s timeout.
 - **Subscription judges** (`JUDGE_MODE=claude-cli` or `codex-cli`, #806):
   each judge call runs a vendor CLI once, so it uses the subscription's
   limits, which interactive use shares, instead of API credit. They run
@@ -587,7 +609,11 @@ required evidence group cited, `must_include` present as a whole value
 (`4,860` does not match `14,860` or `4,860,000`; an ordinal suffix or
 `.00` may follow a number), `must_not_include` absent anywhere, and
 abstention exactly when the case is unanswerable (citing
-nothing). A `disclose_missing` case is graded on the tool's whole
+nothing). `must_include` checks that a value is present, not that the
+answer asserts it (#770): negation and correction are invisible to it,
+so "it does not need four chaperones; it needs three" passes a case
+expecting `four chaperones`. Correctness needs the judge; with
+`JUDGE_MODE=none` a deterministic pass is a floor, not a verdict. A `disclose_missing` case is graded on the tool's whole
 disclosure (#820): when a required group was retrieved but left out of
 the prompt or reached it only cut short of its evidence (the case's fact
 excerpt no longer in the kept text), the server's `coverage_note`

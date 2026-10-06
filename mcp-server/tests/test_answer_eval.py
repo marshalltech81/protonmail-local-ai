@@ -30,6 +30,7 @@ from src.lib.security import ProviderResponseError
 from src.tools import intelligence
 from src.tools.outputs import AnswerStatement
 
+from tests.agent_metrics import is_held_out
 from tests.answer_eval import __main__ as cli
 from tests.answer_eval.cases import (
     CASES_PATH,
@@ -324,6 +325,17 @@ class TestConfig:
         )
         assert cfg is not None
         assert (cfg.max_tokens, cfg.context_tokens) == (max_tokens, context)
+
+    @pytest.mark.parametrize(("mode", "max_tokens"), [("anthropic", 16000), ("openai", 2048)])
+    def test_judge_token_default_follows_the_mode(self, mode, max_tokens):
+        """#813: Claude judges think before the verdict, and thinking
+        counts against max_tokens, so anthropic mode defaults to 16000;
+        an explicit JUDGE_MAX_TOKENS still wins."""
+        env = {**self.ENV, "JUDGE_MODE": mode, "JUDGE_API_KEY": "k"}
+        cfg = load_layer("JUDGE", env)
+        assert cfg is not None and cfg.max_tokens == max_tokens
+        cfg = load_layer("JUDGE", {**env, "JUDGE_MAX_TOKENS": "4096"})
+        assert cfg is not None and cfg.max_tokens == 4096
 
     @pytest.mark.parametrize("value", ["default", " Default "])
     def test_default_selects_the_sdk_default(self, value):
@@ -1610,6 +1622,54 @@ class TestCli:
         assert not out.exists()
         assert ".answer-eval" in capsys.readouterr().err
 
+    def test_relative_report_paths_resolve_against_the_path_base(
+        self, chunked_db, tmp_path, monkeypatch, capsys
+    ):
+        """#814: make runs the CLI from mcp-server/, so a relative
+        ``.answer-eval/x.json`` landed in mcp-server/ and was refused.
+        ``--path-base`` (the repository root, from make) resolves it."""
+        monkeypatch.chdir(cli.REPO_ROOT / "mcp-server")
+        rel = [
+            "--out",
+            ".answer-eval/run-814.json",
+            "--detail",
+            ".answer-eval/detail-814.json",
+        ]
+        base = ["run", "--preflight", "--index-dir", str(tmp_path / "none"), *rel]
+        assert cli.main(base) == cli.EXIT_CONFIG
+        capsys.readouterr()
+        assert cli.main([*base, "--path-base", str(cli.REPO_ROOT)]) == cli.EXIT_OK
+        assert not (cli.REPO_ROOT / ".answer-eval" / "run-814.json").exists()
+        # A relative path outside the repository resolves too.
+        out = tmp_path / "r.json"
+        assert cli.main([*base[:4], "--out", "r.json", "--path-base", str(tmp_path)]) == 0
+        assert not out.exists()
+        # compare's --out follows the same rule.
+        a = self._report(chunked_db, tmp_path, "a.json")
+        argv = ["compare", str(a), str(a), "--out", "c.json", "--path-base", str(tmp_path)]
+        assert cli.main(argv) == cli.EXIT_OK
+        assert (tmp_path / "c.json").exists()
+
+    def test_preflight_checks_paths_before_the_index_exists(self, tmp_path, monkeypatch, capsys):
+        """#814: make checks the arguments before building the index, so a
+        bad report path fails in seconds; nothing is opened or written."""
+
+        def no_provider(*_a, **_k):
+            raise AssertionError("a provider was configured")
+
+        monkeypatch.setattr(cli, "load_layer", no_provider)
+        missing = str(tmp_path / "not-built-yet")
+        out = tmp_path / "r.json"
+        argv = ["run", "--preflight", "--index-dir", missing, "--out", str(out)]
+        assert cli.main(argv) == cli.EXIT_OK
+        assert not out.exists() and not (tmp_path / "not-built-yet").exists()
+        inside = str(cli.REPO_ROOT / "mcp-server" / "run.json")
+        argv = ["run", "--preflight", "--index-dir", missing, "--out", inside]
+        assert cli.main(argv) == cli.EXIT_CONFIG
+        assert ".answer-eval" in capsys.readouterr().err
+        argv = ["run", "--preflight", "--index-dir", missing, "--out", str(out), "--case", "nope"]
+        assert cli.main(argv) == cli.EXIT_CONFIG
+
     def test_run_refuses_a_non_synthetic_index(self, messages_db, tmp_path, capsys):
         index = tmp_path / "index"
         index.mkdir()
@@ -1673,6 +1733,15 @@ class TestCli:
             (["cases", 0, "judge", "status"], ["MARKER-677"]),
             (["cases", 0, "judge", "groundedness_pass"], "MARKER-677"),
             (["cases", 0, "judge", "correctness_pass"], "MARKER-677"),
+            # #771: an integer too large for a float raised OverflowError.
+            (["aggregates", "dev", "answer_ms_mean"], 10**400),
+            (["aggregates", "by_category", "CATEGORY", "deterministic_pass_rate"], -(10**400)),
+            # #771: an empty judge object hid both sides' judge rates.
+            (["aggregates", "dev", "judge"], {}),
+            (["aggregates", "held_out", "judge"], {"correctness_pass_rate": None}),
+            (["aggregates", "by_category", "CATEGORY", "judge"], {}),
+            # #771: a case ID the case loader refuses (over 64 characters).
+            (["cases", 0, "id"], "ask-" + "a" * 61),
         ],
     )
     def test_compare_rejects_malformed_nested_shapes(
@@ -1700,6 +1769,44 @@ class TestCli:
             out, err = capsys.readouterr()
             assert err == "answer evaluation: malformed answer evaluation report\n"
             assert "MARKER-677" not in out + err
+
+    def test_compare_rejects_duplicate_case_ids(self, chunked_db, tmp_path, capsys):
+        """#771: compare kept the last row per ID, so the order of
+        conflicting duplicates decided whether a regression showed."""
+        good = self._report(chunked_db, tmp_path, "a.json")
+        data = json.loads(good.read_text())
+        dup = json.loads(json.dumps(data["cases"][0]))
+        dup["deterministic"]["passed"] = not dup["deterministic"]["passed"]
+        data["cases"].append(dup)
+        bad = tmp_path / "bad.json"
+        bad.write_text(json.dumps(data))
+        for argv in ([str(good), str(bad)], [str(bad), str(good)]):
+            assert cli.main(["compare", *argv]) == cli.EXIT_CONFIG
+            assert capsys.readouterr().err == (
+                "answer evaluation: malformed answer evaluation report\n"
+            )
+
+    def test_loader_and_report_share_the_case_id_rule(self, chunked_db, tmp_path):
+        """#771: the report check limited case IDs to 64 characters and the
+        loader did not, so a valid --cases file wrote a report compare
+        called malformed. One rule now serves both."""
+        longest, too_long = "ask-" + "a" * 60, "ask-" + "a" * 61
+        data = json.loads(CASES_PATH.read_text())
+        row = next(r for r in data["cases"] if r["id"] == "ask-roof-total")
+        path = tmp_path / "cases.json"
+        for cid, ok in ((longest, True), (too_long, False)):
+            row["id"], row["held_out"] = cid, is_held_out(cid)
+            path.write_text(json.dumps(data))
+            if ok:
+                assert any(c.id == cid for c in load_cases(path))
+            else:
+                with pytest.raises(CaseError, match="malformed id"):
+                    load_cases(path)
+        report = self._report(chunked_db, tmp_path, "a.json")
+        rows = json.loads(report.read_text())
+        rows["cases"][0]["id"] = longest
+        report.write_text(json.dumps(rows))
+        assert cli.main(["compare", str(report), str(report)]) == cli.EXIT_OK
 
     def test_compare_rejects_a_non_utf8_report(self, chunked_db, tmp_path, capsys):
         """Codex round 2 on #761: invalid UTF-8 raised an uncaught

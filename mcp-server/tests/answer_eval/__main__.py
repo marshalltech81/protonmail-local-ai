@@ -32,7 +32,13 @@ from typing import Any
 from src.lib.inference import PromptBudget
 from src.lib.sqlite import Database
 
-from tests.answer_eval.cases import CASES_PATH, CASES_SCHEMA_VERSION, CaseError, load_cases
+from tests.answer_eval.cases import (
+    CASES_PATH,
+    CASES_SCHEMA_VERSION,
+    CaseError,
+    is_case_id,
+    load_cases,
+)
 from tests.answer_eval.cli_judge import ClaudeCliClient
 from tests.answer_eval.config import ConfigError, LayerConfig, load_layer
 from tests.answer_eval.harness import evaluate
@@ -60,8 +66,10 @@ REPORT_DIR = REPO_ROOT / ".answer-eval"
 EXIT_OK, EXIT_REGRESSION, EXIT_INCOMPLETE, EXIT_CONFIG = 0, 1, 2, 3
 
 
-def _check_output_path(path: Path) -> Path:
-    resolved = path.resolve()
+def _check_output_path(path: Path, base: Path) -> Path:
+    """``path`` resolved against ``base`` (``--path-base``) when relative,
+    refused inside the repository unless under ``.answer-eval/``."""
+    resolved = (base / path).resolve()
     inside_repo = REPO_ROOT == resolved or REPO_ROOT in resolved.parents
     if inside_repo and REPORT_DIR not in resolved.parents:
         raise ConfigError(
@@ -79,8 +87,8 @@ def _run(args: argparse.Namespace) -> int:
     ):
         if not (math.isfinite(value) and value > 0):
             raise ConfigError(f"{flag} must be a finite number greater than 0")
-    out = _check_output_path(args.out)
-    detail = _check_output_path(args.detail) if args.detail else None
+    out = _check_output_path(args.out, args.path_base)
+    detail = _check_output_path(args.detail, args.path_base) if args.detail else None
     if detail == out:
         raise ConfigError("--detail must be a different file from --out")
     cases = load_cases(args.cases)
@@ -89,6 +97,10 @@ def _run(args: argparse.Namespace) -> int:
         if unknown:
             raise CaseError(f"unknown case ids: {sorted(unknown)}")
         cases = [c for c in cases if c.id in set(args.case)]
+    if args.preflight:
+        # make runs this before building the index, so a bad argument
+        # fails in seconds (#814).
+        return EXIT_OK
 
     # Check the build's outputs exist before opening anything, so a
     # mistyped directory is a configuration error, not a new empty file.
@@ -184,8 +196,8 @@ def _judge_label(judge: LayerConfig | None, client: Any) -> dict[str, Any] | Non
     return label
 
 
-# Case IDs and categories as cases.json writes them: the only report
-# strings ``compare`` prints.
+# Categories as cases.json writes them; with case IDs (``is_case_id``)
+# the only report strings ``compare`` prints.
 _NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
 _COUNT_KEYS = ("selected", "completed", "errors", "skipped")
 _SPLIT_RATES = ("deterministic_pass_rate", "prompt_evidence_coverage", "answer_ms_mean")
@@ -193,9 +205,12 @@ _JUDGE_RATES = ("correctness_pass_rate", "groundedness_pass_rate")
 
 
 def _is_rate(value: Any) -> bool:
-    return value is None or (
-        isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(value)
-    )
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        # math.isfinite raises OverflowError on an int beyond float (#771).
+        return abs(value) <= sys.float_info.max
+    return value is None or (isinstance(value, float) and math.isfinite(value))
 
 
 def _is_flag(value: Any) -> bool:
@@ -207,7 +222,10 @@ def _is_name(value: Any) -> bool:
 
 
 def _judge_ok(judge: Any, rates: tuple[str, ...]) -> bool:
-    return judge is None or (isinstance(judge, dict) and all(_is_rate(judge.get(k)) for k in rates))
+    # Every rate key present: ``judge: {}`` would read as all-null (#771).
+    return judge is None or (
+        isinstance(judge, dict) and all(k in judge and _is_rate(judge[k]) for k in rates)
+    )
 
 
 def _report_shape_ok(data: dict[str, Any]) -> bool:
@@ -243,10 +261,12 @@ def _report_shape_ok(data: dict[str, Any]) -> bool:
             return False
     if not isinstance(cases, list):
         return False
+    seen: set[str] = set()
     for case in cases:
         if not (
             isinstance(case, dict)
-            and _is_name(case.get("id"))
+            and is_case_id(case.get("id"))
+            and case["id"] not in seen
             and _is_name(case.get("category"))
             and isinstance(case.get("held_out"), bool)
             and isinstance(case.get("status"), str)
@@ -254,6 +274,8 @@ def _report_shape_ok(data: dict[str, Any]) -> bool:
             and isinstance(case.get("judge"), dict)
         ):
             return False
+        # compare keys cases by ID, so a duplicate would hide a row (#771).
+        seen.add(case["id"])
         # The flags ``_case_flags`` compares (#677, Codex round 2 on #761).
         judge = case["judge"]
         if not (
@@ -291,7 +313,7 @@ def _compare(args: argparse.Namespace) -> int:
         raise ConfigError("malformed answer evaluation report") from None
     print(rendered)
     if args.out:
-        write_private_json(_check_output_path(args.out), cmp)
+        write_private_json(_check_output_path(args.out, args.path_base), cmp)
     if cmp["incompatible"] and not args.allow_incompatible:
         return EXIT_INCOMPLETE
     if cmp["regressions"] and args.fail_on_regression:
@@ -312,12 +334,24 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--source-commit", default=None)
     run.add_argument("--case-timeout-secs", type=float, default=900.0)
     run.add_argument("--max-runtime-secs", type=float, default=3600.0)
+    run.add_argument(
+        "--preflight",
+        action="store_true",
+        help="check the arguments and report paths, then exit before opening the index",
+    )
     cmp = sub.add_parser("compare", help="compare two run reports")
     cmp.add_argument("baseline", type=Path)
     cmp.add_argument("candidate", type=Path)
     cmp.add_argument("--out", type=Path, help="also write the comparison as JSON")
     cmp.add_argument("--fail-on-regression", action="store_true")
     cmp.add_argument("--allow-incompatible", action="store_true")
+    for p in (run, cmp):
+        p.add_argument(
+            "--path-base",
+            type=Path,
+            default=Path.cwd(),
+            help="directory relative --out/--detail paths resolve against (make: the repo root)",
+        )
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
     try:
