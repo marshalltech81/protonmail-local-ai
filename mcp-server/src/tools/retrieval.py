@@ -237,6 +237,13 @@ def register_retrieval_tools(server, db):
         Get one thread's messages by thread ID, oldest first — each
         message's own headers and body; no attachment content.
 
+        Start with ``limit=1`` to learn ``total_messages``. Before bulk
+        thread/body paging, disclose how many messages you plan to read
+        and that their content goes to the calling model, which may be
+        remote. Read only what the task needs within the requested or
+        approved scope; ask before expanding it. A full audit needs all
+        relevant pages, while a narrower question may need fewer reads.
+
         Pages by message: the response states the thread's message
         count and, when more remain, the ``offset`` for the next call.
         Each body is cut at 4,000 characters, with a marker saying how

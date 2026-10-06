@@ -106,6 +106,11 @@ def _registered_tools() -> dict[str, Callable[..., Any]]:
         ("search_attachments", "anything other than ``success``"),
         ("search_attachments", "``too_large``, ``empty`` or null"),
         ("search_attachments", "fewer than 50 results"),
+        ("get_thread", "Start with ``limit=1``"),
+        ("get_thread", "Before bulk thread/body paging"),
+        ("get_thread", "requested or approved scope"),
+        ("search_attachments", "Before a no-query coverage scan"),
+        ("search_attachments", "maximum number of attachment previews"),
     ],
 )
 def test_exhaustive_workflow_guidance_is_in_registered_descriptions(tool, guidance) -> None:

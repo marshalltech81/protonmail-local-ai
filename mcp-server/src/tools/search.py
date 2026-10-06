@@ -762,6 +762,12 @@ def register_search_tools(
         tool LOCATES attachments and previews their extracted text; none
         of the three returns the whole document.
 
+        Before a no-query coverage scan, disclose the filters and planned
+        maximum number of attachment previews; those previews go to the
+        calling model, which may be remote. Use the smallest sufficient
+        ``limit`` and stay within the requested or approved scope; ask
+        before expanding it. The tool does not report an exact total.
+
         Check each result's ``extraction_status``: anything other than
         ``success`` (``failed``, ``unsupported``, ``too_large``, ``empty`` or null)
         means no extracted text is available, not that the attachment

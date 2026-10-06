@@ -377,6 +377,11 @@ passages of its extracted text, each capped at 1600 characters) or
 locates attachments and previews their extracted text; none of the
 three returns the whole document.
 
+Before a no-query coverage scan, disclose the filters and planned maximum
+number of attachment previews; these reach the calling model, which may
+be remote. Use the smallest sufficient `limit`, remain within the requested
+or approved scope and ask before expanding it. There is no exact total.
+
 Check `extraction_status`: any value other than `success` (`failed`,
 `unsupported`, `too_large`, `empty` or null) means no extracted text is
 available, not absence of relevant content. To assess coverage,
@@ -439,6 +444,12 @@ until null too. Report unread message or body pages, `reaped_messages`
 and `reaped_messages_truncated` as coverage limits: paging cannot recover
 removed messages. Separate page snapshots also mean concurrent indexing
 can change the conversation during the run.
+
+Start with `limit=1` to learn `total_messages`. Before bulk thread or body
+paging, disclose how many messages will be read and that their content
+reaches the calling model, which may be remote. Read only what the task
+needs within the requested or approved scope; ask before expanding it.
+A full audit needs all relevant pages; a narrower question may need fewer.
 
 Messages of the thread reaped under mirror retention are listed by
 claimant ID and reap time in `reaped_messages`; a fully reaped thread
