@@ -250,6 +250,8 @@ def _load_cli_judge(mode: str, env: Mapping[str, str]) -> LayerConfig:
     model = env.get("JUDGE_MODEL", "").strip()
     if not model:
         raise ConfigError(f"JUDGE_MODEL must be set when JUDGE_MODE={mode}")
+    if not cli_judge.platform_supported():
+        raise ConfigError(f"JUDGE_MODE={mode} runs on macOS or Linux only")
     name = cli_judge.EXECUTABLES[mode]
     path = cli_judge.find_executable(name)
     if path is None:

@@ -455,7 +455,9 @@ is `127.0.0.1`, not `host.docker.internal`.
   per case, no retries, one case at a time.
 - **Subscription judges** (`JUDGE_MODE=claude-cli` or `codex-cli`, #806):
   each judge call runs a vendor CLI once, so it uses the subscription's
-  limits, which interactive use shares, instead of API credit. Both
+  limits, which interactive use shares, instead of API credit. They run
+  on macOS or Linux only (the timeout kills the CLI's process group).
+  Both
   need `JUDGE_MODEL` and the CLI on `PATH`, read no key, take no base
   URL (unset or `default`), send the prompt on stdin, run in a fresh
   empty directory, and are killed with every process they started (the

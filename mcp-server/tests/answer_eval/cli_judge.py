@@ -182,7 +182,9 @@ CODEX_DISABLED_FEATURES = (
 
 _LOGGED_OUT_RE = re.compile(r"not logged in|/login", re.IGNORECASE)
 _CODEX_LOGGED_OUT_RE = re.compile(r"401|unauthorized|not logged in", re.IGNORECASE)
-_USAGE_LIMIT_RE = re.compile(r"usage limit|usage_limit|limit reached|hit your limit", re.IGNORECASE)
+# Usage-specific wording only: "Context limit reached" is the model's
+# context window, not the subscription.
+_USAGE_LIMIT_RE = re.compile(r"usage limit|usage_limit|hit your limit", re.IGNORECASE)
 _TOKEN_CAP_RE = re.compile(r"output token maximum", re.IGNORECASE)
 # A version number, with any prerelease or build suffix kept.
 _VERSION_RE = re.compile(r"\d+(?:\.\d+)+(?:[-+][0-9A-Za-z.-]+)?")
@@ -232,6 +234,12 @@ def version_at_least(version: str, minimum: tuple[int, ...]) -> bool:
 
 def _not_json(name: str) -> CliJudgeError:
     return CliJudgeError("judge_provider_error", f"{name} CLI output is not the expected JSON")
+
+
+def platform_supported() -> bool:
+    """POSIX only: each call runs in its own process group so a timeout
+    can stop everything the CLI started."""
+    return os.name == "posix"
 
 
 def find_executable(name: str = EXECUTABLE) -> str | None:

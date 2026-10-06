@@ -147,6 +147,14 @@ class TestConfig:
             load_layer("JUDGE", self.ENV)
         assert str(e.value) == "JUDGE_MODE=claude-cli needs the claude CLI (Claude Code) on PATH"
 
+    @pytest.mark.parametrize("mode", ["claude-cli", "codex-cli"])
+    def test_non_posix_host_is_refused(self, monkeypatch, mode):
+        """Review round 6: the process-group kill is POSIX-only, so on
+        Windows every call would fail after the answerer had run."""
+        monkeypatch.setattr(cli_judge.os, "name", "nt")
+        with pytest.raises(ConfigError, match="macOS or Linux"):
+            load_layer("JUDGE", {"JUDGE_MODE": mode, "JUDGE_MODEL": "m"})
+
     def test_relative_path_is_resolved(self, fake_claude, monkeypatch):
         """Review round 1: a relative PATH entry broke in the temp workdir."""
         exe, _, _ = fake_claude
@@ -381,6 +389,9 @@ class TestClient:
         ("stdout", "rc", "detail"),
         [
             (_reply(f"API Error: {MARKER}", is_error=True), 1, "claude CLI reported an error"),
+            # Review round 6: a context-window error is not the subscription's
+            # usage limit.
+            (_reply("Context limit reached", is_error=True), 1, "claude CLI reported an error"),
             (f"not json {MARKER}", 0, "claude CLI output is not the expected JSON"),
             (json.dumps({"result": 3}), 0, "claude CLI output is not the expected JSON"),
             ("", 2, "claude CLI output is not the expected JSON"),
@@ -409,6 +420,28 @@ class TestClient:
         with pytest.raises(ProcessLookupError):
             os.kill(call["pid"], 0)
         assert not os.path.exists(call["cwd"])
+
+
+def test_timeout_does_not_hang_on_unread_output(tmp_path):
+    """Review round 6 pin: a CLI writing until it is killed must not
+    hold the timeout open on unread output. Since gh-119710 (CPython
+    3.13+), ``Process.wait()`` returns once the process exits, drained
+    pipes or not; this fails if that ever stops holding."""
+    script = tmp_path / "chatty"
+    script.write_text(
+        f"#!{sys.executable}\nimport os\nwhile True:\n    os.write(1, b'x' * 65536)\n"
+    )
+    script.chmod(0o700)
+
+    async def go():
+        inner = cli_judge._run_cli([str(script)], "", str(tmp_path), dict(os.environ))
+        # The outer bound only stops the test if the cleanup hangs.
+        await asyncio.wait_for(asyncio.wait_for(inner, 1.0), 20.0)
+
+    start = time.perf_counter()
+    with pytest.raises(TimeoutError):
+        _run(go())
+    assert time.perf_counter() - start < 10
 
 
 def test_timeout_kills_the_whole_process_tree(tmp_path):
@@ -863,6 +896,7 @@ class TestCodexClient:
         ("stdout", "rc", "detail"),
         [
             (_codex_failed(f"stream error {MARKER}"), 1, "codex CLI reported an error"),
+            (_codex_failed("Context limit reached"), 1, "codex CLI reported an error"),
             (f"not json {MARKER}", 0, "codex CLI output is not the expected JSON"),
             (_events({"type": "turn.started"}), 0, "codex CLI output is not the expected JSON"),
             (_events({"type": "turn.completed"}), 0, "codex CLI output is not the expected JSON"),
