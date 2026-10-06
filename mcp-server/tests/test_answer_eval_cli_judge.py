@@ -341,6 +341,19 @@ class TestClient:
         assert env["NODE_EXTRA_CA_CERTS"] == str((tmp_path / "ca.pem").resolve())
         assert env["SSL_CERT_FILE"] == str((tmp_path / "ca.pem").resolve())
 
+    def test_cert_dir_list_is_resolved_entry_by_entry(self, fake_claude, monkeypatch, tmp_path):
+        """Review round 10: SSL_CERT_DIR is a colon-separated directory
+        list (OpenSSL); each relative entry is made absolute on its own,
+        and empty entries are dropped."""
+        exe, _, calls = fake_claude
+        (tmp_path / "extra-certs").mkdir()
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("SSL_CERT_DIR", os.pathsep.join(["/corp/certs", "", "extra-certs"]))
+        _run(_client(exe).complete("s", "u"))
+        assert calls()[0]["env"]["SSL_CERT_DIR"] == os.pathsep.join(
+            ["/corp/certs", str((tmp_path / "extra-certs").resolve())]
+        )
+
     def test_relative_home_is_resolved(self, fake_claude, monkeypatch, tmp_path):
         """Review round 7: with no CLAUDE_CONFIG_DIR the login is under
         ~/.claude, and a relative HOME named another directory once the

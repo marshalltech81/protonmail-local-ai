@@ -212,7 +212,10 @@ class CliJudgeError(Exception):
 
 # Path-valued variables made absolute: each call runs in a temporary
 # directory, where a relative path would name something else.
-_PATH_VARS = ("HOME", "CLAUDE_CONFIG_DIR", "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "SSL_CERT_DIR")
+_PATH_VARS = ("HOME", "CLAUDE_CONFIG_DIR", "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE")
+# Directory lists (OpenSSL's SSL_CERT_DIR is separated like PATH): each
+# entry is made absolute on its own and empty entries are dropped.
+_PATH_LIST_VARS = ("SSL_CERT_DIR",)
 
 
 def _allowed_env(*extra: str) -> dict[str, str]:
@@ -226,6 +229,10 @@ def _allowed_env(*extra: str) -> dict[str, str]:
     for name in _PATH_VARS:
         if env.get(name, "").strip():
             env[name] = str(Path(env[name]).resolve())
+    for name in _PATH_LIST_VARS:
+        if env.get(name, "").strip():
+            entries = (e for e in env[name].split(os.pathsep) if e.strip())
+            env[name] = os.pathsep.join(str(Path(e).resolve()) for e in entries)
     return env
 
 
