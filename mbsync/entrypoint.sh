@@ -358,7 +358,7 @@ extract_bridge_cert() {
     cert_tmp="$(mktemp "${RUNTIME_DIR}/bridge-cert.XXXXXX")"
     openssl_err_file="$(mktemp "${RUNTIME_DIR}/openssl-s_client.XXXXXX")"
 
-    # Implicit TLS, like mbsyncrc's SSLType IMAPS (#638): the handshake is
+    # Implicit TLS, like mbsyncrc's TLSType IMAPS (#638): the handshake is
     # the first thing on the connection. A Bridge serving STARTTLS or
     # plaintext greets in plaintext instead, the handshake fails, and so
     # does the extraction. There is no second attempt without TLS.

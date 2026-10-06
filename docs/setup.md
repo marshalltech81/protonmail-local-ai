@@ -167,7 +167,7 @@ handshake is the first thing on the connection, so there is no
 plaintext phase for anything on the path to strip or inject into. It
 keeps certificate verification and the persistent fingerprint pin. The
 app's certificate names only `127.0.0.1`, and the isync shipped in the
-image (1.4.4) checks a self-signed CA certificate like Bridge's against
+image (1.5.1) checks a self-signed CA certificate like Bridge's against
 the configured host name, so connecting to `host.docker.internal`
 directly fails with `certificate owner does not match hostname`.
 `docker-compose.yml` therefore sets `BRIDGE_CERT_HOST=127.0.0.1`: the

@@ -39,6 +39,10 @@ set -Eeuo pipefail
 #      download every message again next to its old copy, with different
 #      bytes, and to leave the old copy out of later deletions: why the
 #      procedure does not use it.
+#   7. A far folder that vanishes after it synced (#276) fails each sync
+#      with the one error line the entrypoint withholds and tolerates;
+#      the rest still syncs and the local copy is kept. Runs before 5 and
+#      6, which switch to stores of their own.
 #
 # Needs Docker. Builds the mbsync image unless MBSYNC_IMAGE names one.
 # Run: bash mbsync/tests/layout_check.sh  (or make test-mbsync-layout)
@@ -281,6 +285,45 @@ else
     fail "folders named after isync's own files and the virtual Starred folder are skipped; their parent and Folders/Starred sync"
 fi
 
+# 7. #276: a far folder that disappears after it synced (renamed or
+# deleted in Proton). Its local copy is kept (Create Near, Expunge None),
+# so isync tries to open it on every run: it names it in one error line,
+# whose exact wording the entrypoint withholds and counts
+# (filter_mbsync_output), syncs the other folders and exits 1.
+TAGS=()
+deliver "Folders/Vanishing"
+deliver INBOX
+ok=1
+if ! sync_once vanish-setup; then
+    ok=0
+    sed 's/^/     /' "$WORK/sync-vanish-setup.log"
+fi
+rm -rf "$(far_path "Folders/Vanishing")"
+deliver INBOX
+for run in first second; do
+    if sync_once "vanish-${run}"; then
+        ok=0
+        printf '     the %s sync after the far folder vanished succeeded\n' "$run"
+    fi
+    if [[ "$(grep -cE '^(Error|Warning)' "$WORK/sync-vanish-${run}.log")" != 1 ]] \
+        || ! grep -qxF 'Error: channel protonmail: far side box Folders/Vanishing cannot be opened anymore.' \
+            "$WORK/sync-vanish-${run}.log"; then
+        ok=0
+        sed 's/^/     /' "$WORK/sync-vanish-${run}.log"
+    fi
+done
+for entry in "${TAGS[@]}"; do
+    if [[ "$(copies "${entry#*|}")" != 1 ]]; then
+        ok=0
+        printf '     %s: %s copies of %s\n' "${entry%%|*}" "$(copies "${entry#*|}")" "${entry#*|}"
+    fi
+done
+if ((ok)); then
+    pass "a vanished far folder fails each sync with one error line naming it; the rest syncs and its local copy is kept"
+else
+    fail "a vanished far folder fails each sync with one error line naming it; the rest syncs and its local copy is kept"
+fi
+
 # 5 and 6: UIDVALIDITY changes (#279). Each case has stores of its own
 # with populated local state: synced INBOX mail, a message deleted on the
 # far side whose local copy is kept with the T flag (Expunge None), and a
@@ -404,7 +447,7 @@ if uv_prepare genuine; then
             ok=0
             printf '     the %s sync after the change succeeded\n' "$run"
         fi
-        if ! grep -qxF 'Error: channel protonmail, far side box INBOX: UIDVALIDITY genuinely changed (at UID 1).' \
+        if ! grep -qxF 'Error: channel protonmail, far side box INBOX (at UID 1): UIDVALIDITY genuinely changed.' \
             "$WORK/sync-genuine-${run}.log"; then
             ok=0
             sed 's/^/     /' "$WORK/sync-genuine-${run}.log"

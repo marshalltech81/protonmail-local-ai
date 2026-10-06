@@ -1506,7 +1506,7 @@ endpoint_setup() {
 # The settings the config must keep: implicit TLS (#638) with the
 # extracted certificate, pull-only, no expunge, the folder exclusions.
 config_keeps_sync_safety() {
-    grep -qx 'SSLType IMAPS' "$CONFIG_FILE" || return 1
+    grep -qx 'TLSType IMAPS' "$CONFIG_FILE" || return 1
     if grep -v '^#' "$CONFIG_FILE" | grep -qi 'starttls'; then
         echo "the config must not set STARTTLS"
         return 1

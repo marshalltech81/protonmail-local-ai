@@ -152,9 +152,11 @@ mbsync writes one Maildir per Proton folder (`mbsync/mbsyncrc.template`):
   `/.` and its name. `Folders/Clients/cur` is
   `/maildir/Folders/.Clients/.cur`, so a child can never land on its
   parent's own `cur`, `new` or `tmp` (#281), and a name keeps its dots
-  (`SubFolders Maildir++` refuses them). Names reach isync 1.4.4 as Bridge
-  lists them, modified UTF-7 included, and become directory names as they
-  are.
+  (`SubFolders Maildir++` refuses them). isync 1.5.1 decodes the
+  modified UTF-7 names Bridge lists into UTF-8 (`Folders/Caf&AOk-` is
+  `Folders/Café`, `Folders/A&-B` is `Folders/A&B`), and the decoded names
+  become directory names as they are. isync 1.4.4, in the image before,
+  kept the modified UTF-7 names undecoded.
 - **Sync state:** `SyncState *`. Each folder's UIDVALIDITY and UIDs live
   in `.mbsyncstate` (with `.journal`, `.new` and `.lock` while a sync runs)
   in the folder's own directory, next to isync's `.uidvalidity`, so no two
@@ -236,7 +238,7 @@ healthcheck carries credentials. Symptom-to-layer diagnostics are in
 
 mbsync syncs from the official Proton Mail Bridge app running on the
 host (#497), over implicit TLS (RFC 8314, Bridge's "SSL" IMAP mode,
-`SSLType IMAPS`; #638): the TLS handshake is the first thing on the
+`TLSType IMAPS`; #638): the TLS handshake is the first thing on the
 connection, so there is no plaintext phase in which a STARTTLS offer
 could be stripped or a command or response injected before encryption.
 The operator sets the app's IMAP connection mode to SSL. Certificate
@@ -259,8 +261,9 @@ loopback the app binds, so this setup is not supported there (see
 [setup.md](setup.md#platform-support)).
 
 The app's certificate is upstream Bridge's: self-signed, `CA:TRUE`,
-common name and only subject alternative name `127.0.0.1`. isync 1.4.4
-(the version in the mbsync image) loads `CertificateFile` like this
+common name and only subject alternative name `127.0.0.1`. isync 1.5.1
+(the version in the mbsync image, Debian trixie; 1.4.4 behaves the same)
+loads `CertificateFile` like this
 (`src/socket.c`): a non-CA certificate in the file is trusted as the
 exact server certificate, whatever its name, but a CA certificate goes
 into the verification store, after which the chain must verify and the
@@ -277,7 +280,7 @@ entrypoint renders
 ```text
 Host 127.0.0.1
 Tunnel "exec socat - TCP:host.docker.internal:<port>"
-SSLType IMAPS
+TLSType IMAPS
 CertificateFile /tmp/mbsync/bridge-cert.pem
 ```
 
