@@ -961,9 +961,11 @@ Embedder retries and outages:
   text or message content missing from search"); the rest are counted
   as `suppressed_lines` on the queue heartbeat (below).
 - `embed request recovered on attempt <n>/3` (INFO): the retried
-  request went through. A retry line with no recovery line after it
-  is a request that failed all three attempts (see the ERROR lines
-  below). Same budget as the retry line.
+  request went through. It is logged whenever a retry line of that
+  request was, budget or not, so a retry line with no recovery line
+  after it is a request that failed all three attempts (see the ERROR
+  lines below). When every retry line of a request was withheld, the
+  recovery is withheld with them.
 - `embedder unavailable (...)` or `embedder rejected credentials or
   model (...)` (ERROR): a batch failed after its retries and a probe
   confirmed the embedder itself is down; indexing pauses (see "Tuning

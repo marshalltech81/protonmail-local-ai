@@ -1097,6 +1097,10 @@ class TestRedirectPolicy:
         assert _CHUNK_MARKER in seen[1].content.decode()
 
 
+def main_log() -> logging.Logger:
+    return logging.getLogger("indexer.test_filler")
+
+
 class TestRetryLogging:
     """#873: each retry of an embed request is logged, so a rate limit
     that slows indexing leaves a trace even when the retry succeeds."""
@@ -1173,6 +1177,65 @@ class TestRetryLogging:
             (logging.INFO, "embed request recovered on attempt 2/3"),
         ]
         assert self._MARKER not in caplog.text
+
+    def test_recovery_is_logged_whenever_its_retry_line_was(self, caplog):
+        """Codex round 3 on #904: with the shared budget spent by the
+        retry line itself, the recovery must still follow it, or the
+        retry line is the last word on a request that went through. A
+        request whose retry line was withheld has nothing to answer."""
+        from src import extractors
+
+        caplog.set_level(logging.DEBUG)
+        emb = _make_embedder()
+        attempts = {"n": 0}
+
+        def flaky_once(**_kwargs):
+            attempts["n"] += 1
+            if attempts["n"] % 2:
+                raise self._status_error(503)
+            return _embed_response([[1.0]])
+
+        _patch_create(emb, flaky_once)
+        emb._embed_one_batch.retry.wait = lambda *_a, **_kw: 0  # type: ignore[attr-defined]
+        # Spend all but one slot; the last slot goes to the retry line.
+        for _ in range(extractors._WARNINGS_PER_WINDOW - 1):
+            extractors.warn_rate_limited(main_log(), "filler", attachment=False)
+        caplog.clear()
+
+        emb.embed_batch(["x"])  # retry logged on the last slot, recovery follows
+        emb.embed_batch(["y"])  # retry withheld, so no recovery either
+
+        lines = [
+            r.getMessage()
+            for r in caplog.records
+            if r.getMessage().startswith(("embed retry", "embed request recovered"))
+        ]
+        assert lines == [
+            "embed retry attempt=2/3 after APIStatusError: status=503",
+            "embed request recovered on attempt 2/3",
+        ]
+        assert extractors.drain_suppressed_lines() == 1
+
+    def test_a_logged_retry_does_not_leak_into_the_next_request(self, caplog):
+        """The flag a logged retry sets is per request: a request that
+        exhausts its retries must not make the next first-try success
+        log a recovery."""
+        caplog.set_level(logging.DEBUG)
+        emb = _make_embedder()
+        attempts = {"n": 0}
+
+        def fail_three_then_pass(**_kwargs):
+            attempts["n"] += 1
+            if attempts["n"] <= 3:
+                raise self._status_error(503)
+            return _embed_response([[1.0]])
+
+        _patch_create(emb, fail_three_then_pass)
+        emb._embed_one_batch.retry.wait = lambda *_a, **_kw: 0  # type: ignore[attr-defined]
+        with pytest.raises(APIStatusError):
+            emb.embed_batch(["x"])
+        emb.embed_batch(["y"])
+        assert "embed request recovered" not in caplog.text
 
     def test_a_request_that_exhausts_its_retries_logs_no_recovery(self, caplog):
         caplog.set_level(logging.DEBUG)

@@ -184,6 +184,13 @@ EMBED_FAILURE_UNCERTAIN = "uncertain"
 _EMBED_ATTEMPTS = 3
 
 
+# Whether the request now running on this thread had an ``embed retry``
+# line logged (not withheld by the rate limit). Each thread runs one
+# request at a time, attempts in sequence, so a thread-local flag is
+# per request; ``_retry_embed_attempt`` resets it on the first attempt.
+_retry_line_logged = threading.local()
+
+
 def _log_embed_retry(retry_state: RetryCallState) -> None:
     """tenacity ``before_sleep``: log each retry of an embed request
     (#873), so a rate limit or a flaky provider that slows indexing is
@@ -195,7 +202,7 @@ def _log_embed_retry(retry_state: RetryCallState) -> None:
     outcome = retry_state.outcome
     exc = outcome.exception() if outcome is not None else None
     next_attempt = retry_state.attempt_number + 1
-    warn_rate_limited(
+    logged = warn_rate_limited(
         log,
         "embed retry attempt=%d/%d after %s",
         next_attempt,
@@ -204,6 +211,8 @@ def _log_embed_retry(retry_state: RetryCallState) -> None:
         level=logging.WARNING if next_attempt >= _EMBED_ATTEMPTS else logging.INFO,
         attachment=False,
     )
+    if logged:
+        _retry_line_logged.flag = True
 
 
 def _retry_embed_attempt(retry_state: RetryCallState) -> bool:
@@ -211,21 +220,24 @@ def _retry_embed_attempt(retry_state: RetryCallState) -> bool:
     one callback tenacity runs after a successful attempt too, so a
     success that follows a retry logs its recovery here (#873); otherwise
     the ``embed retry`` line would be the last word on a request that in
-    fact went through. Rate limited like the retry line it answers."""
+    fact went through. The recovery is logged whenever a retry line of
+    this request was, so a logged retry always gets its answer even
+    with the shared budget spent (at most one line per logged retry);
+    when every retry line was withheld, there is nothing to answer and
+    the recovery is withheld with them (Codex round 3 on #904)."""
     outcome = retry_state.outcome
     if outcome is None:
         return False
+    if retry_state.attempt_number == 1:
+        _retry_line_logged.flag = False
     exc = outcome.exception()
     if exc is not None:
         return _is_transient_embed_error(exc)
-    if retry_state.attempt_number > 1:
-        warn_rate_limited(
-            log,
+    if retry_state.attempt_number > 1 and getattr(_retry_line_logged, "flag", False):
+        log.info(
             "embed request recovered on attempt %d/%d",
             retry_state.attempt_number,
             _EMBED_ATTEMPTS,
-            level=logging.INFO,
-            attachment=False,
         )
     return False
 

@@ -190,13 +190,13 @@ def warn_rate_limited(
     *args: object,
     level: int = logging.WARNING,
     attachment: bool = True,
-) -> None:
+) -> bool:
     """Log one repeated line (a WARNING unless ``level`` says otherwise)
     unless this window's budget is spent; then count it as suppressed:
     in ``warnings_suppressed`` for an attachment line (the default), or
     in the heartbeat's ``suppressed_lines`` for any other indexer line
     (``attachment=False``). ``args`` must be counts, module names, type
-    names or fixed text."""
+    names or fixed text. Returns whether the line was logged."""
     global _warning_window, _warnings_in_window, _warnings_suppressed, _suppressed_lines
     now = time.monotonic()
     with _counts_lock:
@@ -208,9 +208,10 @@ def warn_rate_limited(
                 _warnings_suppressed += 1
             else:
                 _suppressed_lines += 1
-            return
+            return False
         _warnings_in_window += 1
     logger.log(level, msg, *args)
+    return True
 
 
 def _warn_failed(module_name: str, dispatch_via: str, reason: str) -> None:
