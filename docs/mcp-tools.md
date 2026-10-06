@@ -381,6 +381,8 @@ Before a no-query coverage scan, disclose the filters and planned maximum
 number of attachment previews; these reach the calling model, which may
 be remote. Use the smallest sufficient `limit`, remain within the requested
 or approved scope and ask before expanding it. There is no exact total.
+`from_addr` selects threads, so previews can come from other participants;
+include that conversation scope in the disclosure.
 
 Check `extraction_status`: any value other than `success` (`failed`,
 `unsupported`, `too_large`, `empty` or null) means no extracted text is
@@ -468,6 +470,13 @@ found` ([Reaped sources](#reaped-sources)).
 | `limit` | int | `10` | Messages per page; clamped to `[1, 50]` |
 
 ### `get_message`
+Before calling, disclose that this content read may also return bounded
+parent-thread context when the message has no indexed body, including
+other messages outside the requested sender/date scope. This context
+reaches the calling model, which may be remote. If that exceeds the
+requested or approved scope, ask before the call: a message ID or body
+offset does not prevent the context fallback.
+
 Return one message's own headers — subject, From / To / Cc, send date
 and, when known, delivery date (`occurred_at`) in UTC, folder,
 In-Reply-To, References, attachment flag, [read state](#read-state) — with its thread ID and
@@ -680,6 +689,12 @@ paging or reading bodies, tell the user the scope and how many messages
 will be read: tool results go to the calling model, which may be remote.
 Prefer the smallest sufficient sample when it answers the question;
 a sample cannot establish an exhaustive content audit.
+
+Subsequent body reads can also return parent-thread context beyond these
+message filters. Include that possible context in the pre-read scope
+disclosure, and ask before a content call would exceed the requested or
+approved scope. Filtering the list does not restrict the context returned
+by `get_message` or `get_thread`.
 
 A count of the exact filter criteria needs only `total_matches`; reading
 every page is necessary when classifying or examining each message.

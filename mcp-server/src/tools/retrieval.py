@@ -425,6 +425,13 @@ def register_retrieval_tools(server, db):
         Get one message's own headers and indexed body, one page of the
         body at a time.
 
+        Before calling, disclose that this content read may also return
+        bounded parent-thread context when the message has no indexed body,
+        including other messages outside the requested sender/date scope.
+        This context reaches the calling model, which may be remote. If
+        that exceeds the requested or approved scope, ask before this call;
+        a message ID or body offset does not prevent the context fallback.
+
         Headers come from the message itself: subject, From / To / Cc,
         send date and (when known) delivery date (UTC), folder,
         In-Reply-To, References, and the attachment flag. Headers are
@@ -735,6 +742,11 @@ def register_retrieval_tools(server, db):
         calling model, which may be remote. Prefer the smallest sufficient
         sample when it answers the question; a sample cannot establish
         an exhaustive content audit.
+        Subsequent body reads can also return parent-thread context beyond
+        these message filters. Include that possible context in the pre-read
+        scope disclosure; ask before a content call would exceed the
+        requested or approved scope. Filtering this list does not restrict
+        the context returned by ``get_message`` or ``get_thread``.
 
         Paging: the response states ``total_matches``, how many were
         returned, and ``has_more``. When ``has_more`` is true, call

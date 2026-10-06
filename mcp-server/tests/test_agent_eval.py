@@ -114,6 +114,11 @@ def _registered_tools() -> dict[str, Callable[..., Any]]:
         ("get_thread", "requested or approved scope"),
         ("search_attachments", "Before a no-query coverage scan"),
         ("search_attachments", "maximum number of attachment previews"),
+        ("get_message", "Before calling"),
+        ("get_message", "other messages outside the requested sender/date scope"),
+        ("get_message", "ask before this call"),
+        ("query_messages", "body reads can also return parent-thread context"),
+        ("search_attachments", "previews can come from other participants"),
     ],
 )
 def test_exhaustive_workflow_guidance_is_in_registered_descriptions(tool, guidance) -> None:

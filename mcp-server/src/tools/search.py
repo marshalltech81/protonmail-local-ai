@@ -767,6 +767,8 @@ def register_search_tools(
         calling model, which may be remote. Use the smallest sufficient
         ``limit`` and stay within the requested or approved scope; ask
         before expanding it. The tool does not report an exact total.
+        ``from_addr`` selects threads, so previews can come from other
+        participants; include that conversation scope in the disclosure.
 
         Check each result's ``extraction_status``: anything other than
         ``success`` (``failed``, ``unsupported``, ``too_large``, ``empty`` or null)
