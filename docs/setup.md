@@ -816,13 +816,17 @@ below. They use the project's Maildir volume
 shows yours).
 
 1. Back up the affected directories into a separate Docker volume (it
-   stays in Docker's storage, like the original):
+   stays in Docker's storage, like the original). The archive holds
+   complete messages, so the volume root is mode 700 and the archive
+   mode 600:
 
    ```bash
    docker run --rm -v protonmail-local-ai_maildir-volume:/maildir:ro \
      -v mbsync-utf7-backup:/backup debian:trixie-slim sh -c \
-     'cd /maildir && find . -mindepth 1 -type d -name "*&*" -prune -print0 |
-      tar --null -cf /backup/encoded-folders.tar -T -'
+     'umask 077 && chmod 700 /backup && cd /maildir &&
+      find . -mindepth 1 -type d -name "*&*" -prune -print0 |
+      tar --null -cf /backup/encoded-folders.tar -T - &&
+      chmod 600 /backup/encoded-folders.tar'
    ```
 
 2. Save this script as `utf7-migrate.py`. It renames every directory
@@ -830,11 +834,15 @@ shows yours).
    subfolders, sync state and messages all move with their folder.
    Without `--apply` it only prints the plan, with your folder names, to
    your terminal. It renames nothing if any target already exists, or if
-   a name is not modified UTF-7 (for example, when run after upgrading),
-   and running it again changes nothing.
+   a name is not modified UTF-7 (for example, when run after upgrading).
+   Apply it once only: a second run could decode a name twice (`A&--B`
+   becomes `A&-B`, then `A&B`), so `--apply` records a marker in the
+   backup volume and the script refuses to run again.
 
    ```python
    import base64, binascii, os, re, sys
+
+   MARKER = "/backup/utf7-migration-applied"
 
 
    def dec(s):
@@ -851,6 +859,11 @@ shows yours).
        )
 
 
+   if os.path.exists(MARKER):
+       sys.exit(
+           "stopped: the migration was already applied; running it again "
+           "could decode a name twice. Nothing was renamed"
+       )
    plan = []
    for r, ds, _ in os.walk("/maildir", topdown=False):
        for d in ds:
@@ -870,6 +883,7 @@ shows yours).
    if clash:
        sys.exit(f"stopped: {len(clash)} target(s) already exist; nothing was renamed")
    if sys.argv[1:] == ["--apply"]:
+       open(MARKER, "x").close()
        for src, dst in plan:
            os.rename(src, dst)
        print(f"renamed {len(plan)} directories")
@@ -878,24 +892,29 @@ shows yours).
 3. Review the plan, then apply it:
 
    ```bash
-   docker run --rm -v "$PWD/utf7-migrate.py:/m.py:ro" \
+   docker run --rm -v "$PWD/utf7-migrate.py:/m.py:ro" -v mbsync-utf7-backup:/backup \
      -v protonmail-local-ai_maildir-volume:/maildir:ro python:3.14-slim-trixie python /m.py
-   docker run --rm -v "$PWD/utf7-migrate.py:/m.py:ro" \
+   docker run --rm -v "$PWD/utf7-migrate.py:/m.py:ro" -v mbsync-utf7-backup:/backup \
      -v protonmail-local-ai_maildir-volume:/maildir python:3.14-slim-trixie python /m.py --apply
    ```
 
-4. Rebuild the index from the Maildir, since every renamed directory
+4. Build the new images with the updated checkout: `make build`. This is
+   required: `make up` does not rebuild, and starting the old 1.4.4
+   image on the renamed folders would recreate the encoded directories
+   and download their mail again.
+
+5. Rebuild the index from the Maildir, since every renamed directory
    changes its messages' file paths. Follow `docs/troubleshooting.md`,
-   "Indexer refuses to start — wipe the sqlite-volume". It removes only
-   the index and runs `make up`, which builds the 1.5.1 image if you
-   have already pulled the new checkout (otherwise run `make build`
-   first).
+   "Indexer refuses to start — wipe the sqlite-volume", which removes
+   only the index and runs `make up`.
 
 The first 1.5.1 sync then finds each folder under its decoded name with
 its sync state. A folder gone from Proton stays, reported as a far-side
 box that "cannot be opened anymore", as before. Keep the backup volume
 until the first sync and the rebuilt index look complete, then remove
-it (`docker volume rm mbsync-utf7-backup`).
+it (`docker volume rm mbsync-utf7-backup`). That also removes the
+script's "already applied" marker, so do not run the script again
+afterwards.
 
 **Upgrading from a release that served `/sse` (breaking change).** The
 legacy HTTP+SSE transport, its `/sse` and `/messages/` endpoints, and
