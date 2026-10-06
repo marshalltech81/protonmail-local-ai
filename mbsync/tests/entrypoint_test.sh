@@ -2081,6 +2081,106 @@ check "stalled syncs count to the exit without a success stamp" \
 check "invalid deadlines are refused at startup" invalid_deadlines_are_refused_at_startup
 check "the deadline defaults agree" deadline_defaults_agree
 
+# --- startup identity line (#887) -------------------------------------------
+#
+# One line names the image's source commit, a random boot ID and a hash of
+# the non-secret settings. The Bridge user, password and fingerprint stand
+# in as secrets: they must neither reach the line nor change the hash.
+
+IDENTITY_RE='^>>> Startup identity: service=mbsync commit=([^ ]+) boot=([0-9a-f]{12}) config=([0-9a-f]{12})$'
+readonly IDENTITY_RE
+
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+identity_setup() {
+    BRIDGE_HOST="host.docker.internal"
+    BRIDGE_IMAP_PORT=1143
+    BRIDGE_CERT_HOST="127.0.0.1"
+    SYNC_INTERVAL=60
+    SYNC_DEADLINE_SECONDS=86400
+    BRIDGE_USER="synthetic-identity-marker@example.com"
+    BRIDGE_CERT_FINGERPRINT="$FP_OLD"
+    BRIDGE_PASS_FILE="$WORK/identity-pass"
+    printf 'synthetic-identity-marker-pass\n' >"$BRIDGE_PASS_FILE"
+    GIT_COMMIT="abc1234-dirty"
+    load log_startup_identity
+}
+
+# Prints "<commit> <boot> <config>" from one call, after checking the format.
+identity_fields() {
+    local line
+    line="$(log_startup_identity)"
+    if [[ ! "$line" =~ $IDENTITY_RE ]]; then
+        printf 'unexpected line: %s\n' "$line" >&2
+        return 1
+    fi
+    printf '%s %s %s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}"
+}
+
+identity_line_has_the_expected_format() {
+    local first second
+    identity_setup
+    first="$(identity_fields)"
+    second="$(identity_fields)"
+    [[ "${first%% *}" == "abc1234-dirty" ]] || return 1
+    # Each start gets its own boot ID; the settings did not change.
+    [[ "$(cut -d' ' -f2 <<<"$first")" != "$(cut -d' ' -f2 <<<"$second")" ]] || return 1
+    [[ "${first##* }" == "${second##* }" ]] || return 1
+}
+
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+unusable_commit_is_logged_as_unknown() {
+    local value fields
+    identity_setup
+    unset GIT_COMMIT
+    fields="$(identity_fields)"
+    [[ "${fields%% *}" == "unknown" ]] || return 1
+    for value in "" "  " "abc 123" $'abc\nforged line' "$(printf 'x%.0s' {1..65})"; do
+        GIT_COMMIT="$value"
+        fields="$(identity_fields)"
+        [[ "${fields%% *}" == "unknown" ]] || {
+            printf 'accepted %q\n' "$value"
+            return 1
+        }
+    done
+}
+
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+secrets_do_not_change_the_hash_or_reach_the_line() {
+    local before after changed output
+    identity_setup
+    before="$(identity_fields)"
+    BRIDGE_USER="synthetic-identity-marker-other@example.com"
+    printf 'synthetic-identity-marker-other-pass\n' >"$BRIDGE_PASS_FILE"
+    BRIDGE_CERT_FINGERPRINT="$FP_NEW"
+    after="$(identity_fields)"
+    [[ "${before##* }" == "${after##* }" ]] || return 1
+    output="$(log_startup_identity 2>&1)"
+    if grep -q 'identity-marker' <<<"$output"; then
+        printf 'a secret marker reached the line\n'
+        return 1
+    fi
+    # A named setting does change it, so the hash is not a constant.
+    SYNC_INTERVAL=120
+    changed="$(identity_fields)"
+    [[ "${changed##* }" != "${before##* }" ]] || return 1
+}
+
+the_identity_line_follows_validation_and_precedes_any_connection() {
+    local validate_line identity_line wait_line
+    validate_line="$(grep -n '^require_prerequisites$' "$ENTRYPOINT" | cut -d: -f1)"
+    identity_line="$(grep -n '^log_startup_identity$' "$ENTRYPOINT" | cut -d: -f1)"
+    wait_line="$(grep -n '^wait_for_bridge_imap$' "$ENTRYPOINT" | cut -d: -f1)"
+    [[ -n "$validate_line" && -n "$identity_line" && -n "$wait_line" ]] || return 1
+    ((validate_line < identity_line && identity_line < wait_line)) || return 1
+}
+
+check "the identity line has the expected format" identity_line_has_the_expected_format
+check "an unusable commit is logged as unknown" unusable_commit_is_logged_as_unknown
+check "secrets do not change the hash or reach the identity line" \
+    secrets_do_not_change_the_hash_or_reach_the_line
+check "the identity line follows validation and precedes any connection" \
+    the_identity_line_follows_validation_and_precedes_any_connection
+
 if ((FAILURES > 0)); then
     printf '%d test(s) failed\n' "$FAILURES" >&2
     exit 1

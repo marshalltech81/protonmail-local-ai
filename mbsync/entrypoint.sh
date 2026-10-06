@@ -98,6 +98,23 @@ require_prerequisites() {
     validate_bridge_endpoint || exit 1
 }
 
+log_startup_identity() {
+    # One line naming what is running (#887): the source commit baked into
+    # the image (GIT_COMMIT; anything but a plain token is "unknown"), a
+    # random ID for this start, and the first 12 hex digits of a SHA-256
+    # over the non-secret settings named below. BRIDGE_USER, the password
+    # and the certificate fingerprint are not inputs.
+    local commit="${GIT_COMMIT:-unknown}" boot config
+    if [[ ! "$commit" =~ ^[0-9A-Za-z._-]{1,64}$ ]]; then
+        commit="unknown"
+    fi
+    boot="$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')"
+    config="$(printf 'BRIDGE_HOST=%s\nBRIDGE_IMAP_PORT=%s\nBRIDGE_CERT_HOST=%s\nSYNC_INTERVAL=%s\nSYNC_DEADLINE_SECONDS=%s\n' \
+        "$BRIDGE_HOST" "$BRIDGE_IMAP_PORT" "$BRIDGE_CERT_HOST" "$SYNC_INTERVAL" "$SYNC_DEADLINE_SECONDS" | sha256sum)"
+    printf '>>> Startup identity: service=mbsync commit=%s boot=%s config=%s\n' \
+        "$commit" "$boot" "${config:0:12}"
+}
+
 validate_bridge_endpoint() {
     # These values are written into mbsyncrc and, with a tunnel, into the
     # shell command isync runs for it, so only a plain host name or IPv4
@@ -776,6 +793,7 @@ record_successful_sync() {
 # =============================================================================
 install_signal_handlers
 require_prerequisites
+log_startup_identity
 check_maildir_layout || exit 1
 
 # BRIDGE_CERT_PIN_ROTATE is an opt-in for accepting one legitimate
