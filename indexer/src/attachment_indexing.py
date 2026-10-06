@@ -199,7 +199,6 @@ class AttachmentWritePlan:
     occurrence_id: str
     status: str
     extraction_to_persist: ExtractionResult | None
-    extraction_reused: bool
     chunks: list[MessageChunk] = field(default_factory=list)
     embeddings_by_chunk_id: dict[str, list[float]] = field(default_factory=dict)
     # Whether a plan without text clears the attachment's stored chunks.
@@ -220,8 +219,8 @@ def _resolve_extracted_text(
     max_pdf_pages: int | None = None,
     batch_extractions: dict[str, ExtractionResult] | None = None,
     on_progress: Callable[[], None] | None = None,
-) -> tuple[str | None, str, ExtractionResult | None, bool]:
-    """Return ``(text, status, extraction_to_persist, extraction_reused)``.
+) -> tuple[str | None, str, ExtractionResult | None]:
+    """Return ``(text, status, extraction_to_persist)``.
 
     A successful cache hit short-circuits and returns the stored text
     with ``extraction_to_persist=None`` so the apply phase does not
@@ -243,7 +242,7 @@ def _resolve_extracted_text(
         or _unsupported_still_holds(pending.error, attachment, ocr_enabled)
     ):
         text = pending.text if pending.status == STATUS_SUCCESS else None
-        return text, pending.status, pending, True
+        return text, pending.status, pending
 
     cached = db.get_attachment_extraction(attachment.content_hash)
     # A row written by an older version of a since-fixed extractor would
@@ -266,7 +265,7 @@ def _resolve_extracted_text(
         # return ``None`` text so the caller skips chunking but the
         # apply phase also skips re-persisting an unchanged row.
         text = cached["extracted_text"] if cached["extraction_status"] == STATUS_SUCCESS else None
-        return text, cached["extraction_status"], None, True
+        return text, cached["extraction_status"], None
 
     result = extract_attachment(
         content_type=attachment.content_type,
@@ -284,7 +283,7 @@ def _resolve_extracted_text(
     if batch_extractions is not None:
         batch_extractions[attachment.content_hash] = result
     text = result.text if result.status == STATUS_SUCCESS else None
-    return text, result.status, result, False
+    return text, result.status, result
 
 
 def prepare_attachment_writes(
@@ -337,7 +336,7 @@ def prepare_attachment_writes(
         occurrence_index=occurrence_index,
     )
 
-    text, status, extraction_to_persist, extraction_reused = _resolve_extracted_text(
+    text, status, extraction_to_persist = _resolve_extracted_text(
         attachment=attachment,
         db=db,
         ocr_enabled=ocr_enabled,
@@ -361,7 +360,6 @@ def prepare_attachment_writes(
             occurrence_id=occurrence_id,
             status=status,
             extraction_to_persist=extraction_to_persist,
-            extraction_reused=extraction_reused,
         )
 
     # Chunk the extracted text and embed. The chunker takes
@@ -397,7 +395,6 @@ def prepare_attachment_writes(
         occurrence_id=occurrence_id,
         status=status,
         extraction_to_persist=extraction_to_persist,
-        extraction_reused=extraction_reused,
         chunks=chunks,
         embeddings_by_chunk_id=embeddings_by_chunk_id,
     )
@@ -409,7 +406,7 @@ def apply_attachment_writes(
     claimant_id: str,
     thread_id: str,
     db: Database,
-) -> dict[str, int]:
+) -> None:
     """Persist a prepared attachment plan. DB writes only.
 
     Designed to be called inside the indexer's outer
@@ -429,15 +426,7 @@ def apply_attachment_writes(
       text so any chunk hit lifts the parent thread of the email that
       carried it.
     """
-    summary = {
-        "occurrences_inserted": 0,
-        "extractions_reused": 1 if plan.extraction_reused else 0,
-        "extractions_run": 0 if plan.extraction_reused else 1,
-        "chunks_inserted": 0,
-        "chunks_kept": 0,
-    }
-
-    if db.upsert_attachment(
+    db.upsert_attachment(
         claimant_id=claimant_id,
         thread_id=thread_id,
         attachment_id=plan.attachment.content_hash,
@@ -445,8 +434,7 @@ def apply_attachment_writes(
         content_type=plan.attachment.content_type,
         size_bytes=plan.attachment.size,
         occurrence_id=plan.occurrence_id,
-    ):
-        summary["occurrences_inserted"] = 1
+    )
 
     if plan.extraction_to_persist is not None:
         result = plan.extraction_to_persist
@@ -466,7 +454,7 @@ def apply_attachment_writes(
         # message indexed the stale text. Costs one indexed SELECT when
         # there is nothing to delete.
         if not plan.clears_stale_chunks:
-            return summary
+            return
         db.replace_message_chunks(
             claimant_id=claimant_id,
             thread_id=thread_id,
@@ -474,15 +462,12 @@ def apply_attachment_writes(
             embeddings_by_chunk_id={},
             attachment_id=plan.attachment.content_hash,
         )
-        return summary
+        return
 
-    write_summary = db.replace_message_chunks(
+    db.replace_message_chunks(
         claimant_id=claimant_id,
         thread_id=thread_id,
         chunks=plan.chunks,
         embeddings_by_chunk_id=plan.embeddings_by_chunk_id,
         attachment_id=plan.attachment.content_hash,
     )
-    summary["chunks_inserted"] = write_summary["inserted"]
-    summary["chunks_kept"] = write_summary["kept"]
-    return summary
