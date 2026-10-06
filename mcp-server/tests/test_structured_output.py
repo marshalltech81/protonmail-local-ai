@@ -817,6 +817,8 @@ class TestPendingDeletion:
         # The reconciler also tombstones a file that is only missing
         # locally, so the text must not claim the cause was Proton.
         assert "deleted in Proton or its file is missing locally" in text
+        # Archive mode never reaps, so removal is promised only under mirror.
+        assert "mirror retention removes it after the grace period" in text
         text = _wire(server, "get_message", {"message_id": "live"}).content[0].text
         assert "Pending deletion" not in text
         text = _wire(server, "query_messages", {}).content[0].text

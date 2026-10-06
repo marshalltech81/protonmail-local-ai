@@ -183,8 +183,8 @@ class ListedMessage(MessageHeaders):
     thread_id: str
     pending_deletion: bool = Field(
         description="Deleted in Proton (the file's Maildir T flag) or its file missing "
-        "locally, and waiting out the grace period before mirror retention removes it from the "
-        "index; still listed and counted until then."
+        "locally. Mirror retention removes it from the index after the grace period; archive "
+        "mode never does. Still listed and counted until removed."
     )
 
 
