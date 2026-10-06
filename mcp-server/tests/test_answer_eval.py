@@ -696,6 +696,34 @@ class TestDeterministicGraders:
         assert det.checks["omission_disclosed"] == PASS
         assert det.checks["required_evidence_cited"] == FAIL
 
+    def test_coverage_note_does_not_excuse_a_retrieval_miss(self):
+        """Review round 1: the note reports retrieved passages the budget
+        left out, so it cannot disclose a group retrieval never found. An
+        abstention with t22 unretrieved fails, and the miss is attributed
+        to retrieval, even though t21's omission was disclosed."""
+        case = CASES["ask-kayak-tight-budget"]
+        run = _run(
+            "Not found in the provided emails.",
+            [],
+            [],
+            retrieved=[thread_id_of("t21")],
+            coverage_note=self._NOTE,
+        )
+        det = grade_run(case, run)
+        assert det.checks["omission_disclosed"] == PASS
+        assert det.checks["required_evidence_cited"] == FAIL
+        assert det.checks["abstention"] == FAIL
+        assert "retrieval" in attribute(case, run, det, False, False)
+        # Nothing retrieved at all: no budget omission for a note to report.
+        none = grade_run(
+            case,
+            _run(
+                "Not found in the provided emails.", [], [], retrieved=[], coverage_note=self._NOTE
+            ),
+        )
+        assert none.checks["omission_disclosed"] == NA
+        assert none.checks["abstention"] == FAIL
+
     def test_disclosure_needs_no_note_when_all_evidence_fit(self):
         case = CASES["ask-kayak-tight-budget"]
         passages = [_passage("E1", "t21"), _passage("E2", "t22")]

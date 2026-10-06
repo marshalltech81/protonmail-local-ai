@@ -10,10 +10,11 @@ that message; a passage of the thread's indexed text (no single
 message) meets thread refs only.
 
 A ``disclose_missing`` case is graded on the tool's whole disclosure
-(#820): when a required group never reached the prompt, the server's
-``coverage_note`` is what reports it, so a non-null note is the
-disclosure, the unsupplied groups are excused from citation and an
-abstention may stand. A group that was supplied must still be cited.
+(#820): when a required group was retrieved but left out of the prompt,
+the server's ``coverage_note`` is what reports it, so a non-null note is
+the disclosure, those groups are excused from citation and an abstention
+may stand. A group that was supplied must still be cited, and the note
+cannot disclose a group retrieval never found.
 """
 
 import re
@@ -130,9 +131,10 @@ def grade_run(case: Case, run: CaseRun) -> DeterministicResult:
         )
 
     checks = result.checks
-    # Evidence the model never received, reported by the server's note.
+    # Retrieved evidence the prompt budget left out, which is all the
+    # server's note can report: a group retrieval missed stays a miss.
     omission = case.expected_handling == "disclose_missing" and any(
-        not g.supplied for g in result.groups
+        g.retrieved and not g.supplied for g in result.groups
     )
     disclosed = omission and out.coverage_note is not None
     if omission:
@@ -147,7 +149,7 @@ def grade_run(case: Case, run: CaseRun) -> DeterministicResult:
     checks["citations_resolve"] = PASS if resolves else FAIL
     checks["citation_checks"] = FAIL if out.citation_problems else PASS
     if case.answerable:
-        met = all(g.cited or (disclosed and not g.supplied) for g in result.groups)
+        met = all(g.cited or (disclosed and g.retrieved and not g.supplied) for g in result.groups)
         checks["required_evidence_cited"] = PASS if met else FAIL
     else:
         checks["required_evidence_cited"] = NA
@@ -167,7 +169,9 @@ def grade_run(case: Case, run: CaseRun) -> DeterministicResult:
 
     result.abstained = is_abstention(answer)
     if case.answerable:
-        checks["abstention"] = FAIL if result.abstained and not disclosed else PASS
+        # Abstaining is the disclosure only when no group was lost to retrieval.
+        whole = disclosed and all(g.retrieved for g in result.groups)
+        checks["abstention"] = FAIL if result.abstained and not whole else PASS
     else:
         checks["abstention"] = PASS if result.abstained and not out.citations else FAIL
     return result
