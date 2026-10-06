@@ -1000,9 +1000,23 @@ problem.
    `sh -c`). With `bearer_token_env_var` instead,
    check that the variable is exported in the shell that starts Codex.
 
-The server logs a request with a wrong token as `Auth error returned:
-invalid_token (status=401)` and never logs the token or the
-`Authorization` header.
+The server logs every rejected request once at WARNING as
+`rejected request: reason=<reason>` (#878), and never logs the token,
+the `Authorization` header or the Host and Origin values:
+
+- `missing_token`: no `Authorization` header (`401`). The client is
+  not configured to send the token at all.
+- `invalid_token`: a header with a wrong token or another scheme
+  (`401`); fastmcp also logs `Auth error returned: invalid_token
+  (status=401)`. Follow the steps above.
+- `bad_host`: a Host other than `localhost`, `127.0.0.1`, `[::1]` or
+  `mcp-server` (`421`). Point the client at `http://127.0.0.1:3000/mcp`.
+- `bad_origin`: a browser `Origin` outside the same names over `http`
+  (`403`), usually a web page trying to reach the server.
+
+A steady stream of `bad_origin` or `invalid_token` lines your own
+clients do not explain means something on this machine is probing the
+server: a browser page, or a process under another local account.
 
 ## mcp-server exits with "The MCP bearer token is missing or empty"
 

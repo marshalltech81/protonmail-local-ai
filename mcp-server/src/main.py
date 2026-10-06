@@ -23,7 +23,7 @@ from mcp.server.transport_security import TransportSecurityMiddleware, Transport
 from starlette.middleware import Middleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
-from starlette.types import ASGIApp, Receive, Scope, Send
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from .lib.embed import DEFAULT_EMBED_TIMEOUT_SECS, EmbedClient
 from .lib.embed_identity import run_startup_identity_check
@@ -112,6 +112,24 @@ class _DropToolErrorDetail(logging.Filter):
 
 
 logging.getLogger("fastmcp.server.server").addFilter(_DropToolErrorDetail())
+
+
+class _DropRawHostOriginWarning(logging.Filter):
+    """Drop the MCP SDK's Host/Origin rejection warnings (#878).
+
+    ``mcp.server.transport_security`` logs a rejected request's raw Host
+    or Origin header, text any client chose. ``_HostOriginGuard`` logs
+    the rejection itself with a fixed reason instead. Other records from
+    the logger pass unchanged.
+    """
+
+    _PREFIXES = ("Invalid Host header", "Invalid Origin header", "Missing Host header")
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not str(record.msg).startswith(self._PREFIXES)
+
+
+logging.getLogger("mcp.server.transport_security").addFilter(_DropRawHostOriginWarning())
 
 
 _INFERENCE_MODES = frozenset({"anthropic", "openai", "none"})
@@ -462,6 +480,14 @@ class _HostOriginGuard:
     server's own socket address as a Host and any loopback Origin on any
     scheme, which this allowlist does not. It runs ahead of the Streamable
     HTTP session manager, so a rejected request creates no session.
+
+    It also logs every rejected request once at WARNING with a fixed
+    reason (#878): ``bad_host`` or ``bad_origin`` for its own 421 or 403,
+    and ``missing_token`` or ``invalid_token`` for the 401 the bearer
+    check answers further in, told apart by whether an
+    ``Authorization`` header was sent. Only the response status is
+    read; the token and the header values are never logged, and the
+    responses are unchanged.
     """
 
     def __init__(self, app: ASGIApp) -> None:
@@ -469,14 +495,31 @@ class _HostOriginGuard:
         self._validator = TransportSecurityMiddleware(_TRANSPORT_SECURITY)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] == "http":
-            # ``is_post=False``: the transports check a POST's
-            # Content-Type themselves.
-            error = await self._validator.validate_request(Request(scope), is_post=False)
-            if error is not None:
-                await error(scope, receive, send)
-                return
-        await self.app(scope, receive, send)
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        # ``is_post=False``: the transports check a POST's
+        # Content-Type themselves.
+        request = Request(scope)
+        error = await self._validator.validate_request(request, is_post=False)
+        if error is not None:
+            # The validator answers 421 for the Host and 403 for the Origin.
+            _log_rejection("bad_host" if error.status_code == 421 else "bad_origin")
+            await error(scope, receive, send)
+            return
+        has_auth = "authorization" in request.headers
+
+        async def send_and_log(message: Message) -> None:
+            if message["type"] == "http.response.start" and message["status"] == 401:
+                _log_rejection("invalid_token" if has_auth else "missing_token")
+            await send(message)
+
+        await self.app(scope, receive, send_and_log)
+
+
+def _log_rejection(reason: str) -> None:
+    """One WARNING per rejected request; ``reason`` is a fixed literal."""
+    log.warning("rejected request: reason=%s", reason)
 
 
 _MISSING_AUTH_TOKEN = (

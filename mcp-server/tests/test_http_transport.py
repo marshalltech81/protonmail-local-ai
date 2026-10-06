@@ -558,3 +558,80 @@ class TestBearerAuth:
             _http_session_calls(_app(), [("ping", {})])
         assert marker not in caplog.text
         assert _TOKEN not in caplog.text
+
+
+_HOST_MARKER = "synthetic-host-marker-3b9e.example"
+
+
+def _rejections(caplog) -> list[str]:
+    """The reason of each ``rejected request`` WARNING, in order."""
+    reasons = []
+    for record in caplog.records:
+        message = record.getMessage()
+        if message.startswith("rejected request"):
+            assert record.levelno == logging.WARNING
+            assert message.startswith("rejected request: reason=")
+            reasons.append(message.removeprefix("rejected request: reason="))
+    return reasons
+
+
+class TestRejectionLogging:
+    """#878: every rejected request logs one WARNING with a fixed reason,
+    never the token or a Host/Origin value; the MCP SDK's own warning,
+    which quotes the raw value, is suppressed. The responses are
+    unchanged (the tests above pin them)."""
+
+    def test_missing_token(self, caplog):
+        with caplog.at_level(logging.INFO):
+            assert _mcp_status(_app(), headers=_UNAUTHENTICATED_POST_HEADERS) == 401
+        assert _rejections(caplog) == ["missing_token"]
+
+    @pytest.mark.parametrize(
+        "value",
+        [f"Bearer {_MARKER}", f"Basic {_MARKER}", _MARKER, f"Bearer {_TOKEN}x"],
+    )
+    def test_invalid_token(self, caplog, value):
+        with caplog.at_level(logging.INFO):
+            headers = dict(_POST_HEADERS, authorization=value)
+            assert _mcp_status(_app(), headers=headers) == 401
+        assert _rejections(caplog) == ["invalid_token"]
+        assert _MARKER not in caplog.text
+        assert _TOKEN not in caplog.text
+
+    @pytest.mark.parametrize("host", [_HOST_MARKER, f"{_HOST_MARKER}:3000", None])
+    def test_bad_host(self, caplog, host):
+        with caplog.at_level(logging.DEBUG):
+            assert _mcp_status(_app(), host=host) == 421
+        assert _rejections(caplog) == ["bad_host"]
+        assert _HOST_MARKER not in caplog.text
+        assert not [r for r in caplog.records if r.name == "mcp.server.transport_security"]
+
+    def test_bad_origin(self, caplog):
+        with caplog.at_level(logging.DEBUG):
+            assert _mcp_status(_app(), origin=f"http://{_HOST_MARKER}") == 403
+        assert _rejections(caplog) == ["bad_origin"]
+        assert _HOST_MARKER not in caplog.text
+        assert not [r for r in caplog.records if r.name == "mcp.server.transport_security"]
+
+    def test_bad_host_on_health(self, caplog):
+        app = _app()
+        with caplog.at_level(logging.INFO):
+            status = _with_lifespan(app, lambda: _status(app, "GET", "/health", host=_HOST_MARKER))
+        assert status == 421
+        assert _rejections(caplog) == ["bad_host"]
+        assert _HOST_MARKER not in caplog.text
+
+    def test_accepted_requests_log_no_rejection(self, caplog):
+        app = _app()
+        with caplog.at_level(logging.INFO):
+            assert _mcp_status(app) == 200
+            assert _with_lifespan(app, lambda: _status(app, "GET", "/health")) == 200
+            _http_session_calls(_app(), [("ping", {})])
+        assert _rejections(caplog) == []
+        assert _TOKEN not in caplog.text
+
+    def test_other_sdk_warnings_still_pass(self, caplog):
+        """The filter drops only the Host/Origin records."""
+        with caplog.at_level(logging.INFO):
+            logging.getLogger("mcp.server.transport_security").warning("unrelated warning")
+        assert "unrelated warning" in caplog.text
