@@ -278,6 +278,17 @@ class SearchEmailsOutput(_Output):
     results: list[ThreadSummary] = Field(description="Threads, best match first.")
 
 
+EvidenceScope = Literal["in_scope", "context"]
+
+_SCOPE_DESCRIPTION = (
+    "in_scope: the passage's message meets every message-level filter of the request "
+    "(sender, participant, date range on its own delivery date, else sent date, and the "
+    "folder it is filed in; without folders, any folder but Trash). context: another "
+    "message of a thread the filters selected, or a thread's combined text. A request "
+    "without filters (get_evidence with thread_id) labels every passage in_scope."
+)
+
+
 class EvidenceChunk(_Output):
     chunk_id: str = Field(
         description="Stable ID of the passage; ask_mailbox citations name it (chunk_id)."
@@ -319,6 +330,7 @@ class EvidenceChunk(_Output):
         description="The raw file of message_id (for an attachment chunk, the message "
         "carrying the attachment); null when none is recorded."
     )
+    scope: EvidenceScope = Field(description=_SCOPE_DESCRIPTION)
 
 
 class EvidenceThread(_Output):
@@ -606,6 +618,14 @@ class Citation(_Output):
     char_end: int | None = Field(
         description="End offset of the part of the passage the model was shown."
     )
+    scope: EvidenceScope | None = Field(
+        default=None,
+        description=_SCOPE_DESCRIPTION.replace(
+            "A request without filters (get_evidence with thread_id) labels every passage "
+            "in_scope.",
+            "Null for tools that do not label passages.",
+        ),
+    )
 
 
 class CitationProblem(_Output):
@@ -615,16 +635,20 @@ class CitationProblem(_Output):
         "uncited_statements",
         "unmatched_quotes",
         "misattributed_quotes",
+        "context_only_citations",
     ] = Field(
         description="unknown_labels: the answer cites labels no supplied passage has. "
         "no_citations: the answer cites nothing and does not say the evidence lacks an answer. "
         "uncited_statements: statements that cite no supplied passage and are not marked "
         "[unsupported] or [uncertain]. unmatched_quotes: quotes found in no supplied passage. "
-        "misattributed_quotes: quotes found in a supplied passage other than the ones cited."
+        "misattributed_quotes: quotes found in a supplied passage other than the ones cited. "
+        "context_only_citations: every cited passage is context, none in scope (the citation's "
+        "scope)."
     )
     labels: list[str] = Field(
         description="The unknown labels; for misattributed_quotes, the labels of the passages "
-        "the quotes were found in. Empty otherwise."
+        "the quotes were found in; for context_only_citations, the cited labels. Empty "
+        "otherwise."
     )
     statements: list[int] = Field(
         default=[], description="uncited_statements: 0-based indexes into statements."

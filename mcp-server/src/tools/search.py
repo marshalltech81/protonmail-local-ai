@@ -15,6 +15,7 @@ from ..lib.sqlite import (
     PROMPT_EVIDENCE_CHUNKS_PER_THREAD,
     InvalidFilterError,
     ReapedSource,
+    ScopeLabels,
     VectorLanesUnavailableError,
     normalize_authority_class,
     validate_date_range,
@@ -34,6 +35,7 @@ from .outputs import (
     AttachmentHit,
     EvidenceChunk,
     EvidenceOutput,
+    EvidenceScope,
     EvidenceThread,
     SearchAttachmentsOutput,
     SearchEmailsOutput,
@@ -75,6 +77,15 @@ _VALID_SEARCH_MODES = frozenset({"hybrid", "semantic", "keyword"})
 # already paragraph-bounded by the indexer; this is a defensive ceiling so
 # one pathologically long attachment chunk can't bloat the tool response.
 _EVIDENCE_CHUNK_CHARS = 1600
+
+
+def _chunk_scope(chunk, scope: ScopeLabels | None) -> EvidenceScope:
+    """A ``get_evidence`` chunk's scope label (#755): ``in_scope`` when
+    its message is in ``scope.claimants``, or when there is no scope
+    (the thread path, which takes no filters)."""
+    if scope is None or chunk.claimant_id in scope.claimants:
+        return "in_scope"
+    return "context"
 
 
 def register_search_tools(
@@ -465,7 +476,10 @@ def register_search_tools(
                        occurred_at, else sent_at) overlaps the range,
                        and any of its passages may be returned; check
                        each chunk's occurred_at and sent_at, which can
-                       fall outside the range.
+                       fall outside the range. Each chunk's scope is
+                       in_scope when its own message meets every
+                       sender, participant, date and folder filter,
+                       as ask_mailbox labels it, else context.
             date_to: ISO 8601 date upper bound, e.g. "2024-12-31".
             has_attachments: True to restrict to threads with attachments.
             participant: Restrict to threads where this person appears
@@ -570,6 +584,9 @@ def register_search_tools(
         # thread_score | None, chunks). ``lane_ranks`` is None for the
         # thread-scoped path because that path bypasses RRF fusion.
         groups: list[tuple[str, str, dict[str, int] | None, float | None, list]] = []
+        # Scope labels of the mailbox-wide path (#755); the thread path
+        # has no filters, so every passage there is in scope.
+        scope: ScopeLabels | None = None
         try:
             if thread_id:
                 thread = await asyncio.to_thread(db.get_thread_or_reaped, thread_id)
@@ -652,6 +669,17 @@ def register_search_tools(
                     subject = clip(r.subject, HEADER_CHAR_LIMIT)
                     groups.append((subject, r.thread_id, r.lane_ranks, r.score, chunks))
                     taken += len(chunks)
+                # Each passage labelled as ask_mailbox labels it.
+                with stage("scope_labels"):
+                    scope = await asyncio.to_thread(
+                        db.message_scope,
+                        [tid for _, tid, _, _, _ in groups],
+                        folders=folders,
+                        from_addr=from_addr,
+                        participant=participant,
+                        date_from=date_from,
+                        date_to=date_to,
+                    )
         except ToolError:
             raise
         except InvalidFilterError as e:
@@ -694,6 +722,7 @@ def register_search_tools(
                             text_truncated=len(c.text) > _EVIDENCE_CHUNK_CHARS,
                             vector_distance=c.score if include_scores else None,
                             source_file=source(c.source_file),
+                            scope=_chunk_scope(c, scope),
                         )
                         for c in chunks
                     ],
@@ -725,8 +754,10 @@ def register_search_tools(
                 msg_date = (chunk.message_date or "")[:10] or "unknown date"
                 if chunk.message_occurred_at:
                     msg_date += f" (delivered {chunk.message_occurred_at[:10]})"
+                in_scope = _chunk_scope(chunk, scope) == "in_scope"
                 lines.append(
                     f"    --- chunk {chunk.chunk_index} | msg {chunk.claimant_id} | {msg_date}"
+                    f" | {'in scope' if in_scope else 'context'}"
                 )
                 if chunk.attachment_id is not None:
                     fname = clip(chunk.attachment_filename or "attachment", HEADER_CHAR_LIMIT)

@@ -25,7 +25,7 @@ from src.lib.inference import (
     default_token_budget,
     estimate_tokens,
 )
-from src.lib.sqlite import ChunkResult, ThreadResult
+from src.lib.sqlite import ChunkResult, ScopeLabels, ThreadResult
 from src.tools.brief import (
     _BRIEF_REPAIR_INSTRUCTION,
     _CHECK_REPAIR_INSTRUCTION,
@@ -129,6 +129,14 @@ class _StubDb:
     def get_recent_chunks_for_thread(self, _thread_id, _limit):
         return list(self._recent)
 
+    def message_scope(self, thread_ids, **_filters):
+        # Every message in scope, so each labelled header carries the
+        # longer of its two scope fields (#755).
+        return ScopeLabels(
+            claimants={c.claimant_id for t in self._threads for c in t.evidence_chunks},
+            whole_threads=set(thread_ids),
+        )
+
 
 def _tools(db, inference, budget: PromptBudget | None = None, *, experimental=False):
     server = FakeMCPServer()
@@ -224,7 +232,10 @@ class TestAskMailboxBudget:
         threads = _long_threads(n=10, chunks=6)
         llm = FakeInferenceClient(response="ok [E1]")
         asyncio.run(_tools(_StubDb(threads), llm)["ask_mailbox"](question="q?", max_threads=10))
-        expected, _ = _build_evidence(threads, PER_THREAD_CHAR_BUDGET * 10, evidence_map={})
+        scope = _StubDb(threads).message_scope([t.thread_id for t in threads])
+        expected, _ = _build_evidence(
+            threads, PER_THREAD_CHAR_BUDGET * 10, evidence_map={}, scope=scope
+        )
         _system, user = llm.complete_calls[0]
         for rendered in expected:
             assert rendered in user

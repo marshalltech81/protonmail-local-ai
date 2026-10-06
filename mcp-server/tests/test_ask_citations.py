@@ -21,7 +21,7 @@ import pytest
 import sqlite_vec
 import src.tools.intelligence as intelligence
 from fastmcp import Client, FastMCP
-from src.lib.sqlite import _SENDER_FETCH_CHARS, ChunkResult, Database, ThreadResult
+from src.lib.sqlite import _SENDER_FETCH_CHARS, ChunkResult, Database, ScopeLabels, ThreadResult
 from src.tools.intelligence import (
     _LABELLED_HEADER_MAX_CHARS,
     ASK_SYSTEM,
@@ -380,7 +380,9 @@ class TestReviewRound1:
         # The row itself is bounded: name and address each cut in SQL.
         assert len(chunk.message_sender) <= 2 * _SENDER_FETCH_CHARS + 3
 
-    def test_long_attribution_still_leaves_passage_text(self):
+    # With a scope label (#755) the header stays within the bound too.
+    @pytest.mark.parametrize("in_scope", [None, True, False])
+    def test_long_attribution_still_leaves_passage_text(self, in_scope):
         claimant = "x" * 5_000 + "@example.com#1a2b3c4d5e6f7a8b"
         chunk = ChunkResult(
             chunk_id="c-long",
@@ -410,10 +412,18 @@ class TestReviewRound1:
             evidence_chunks=[chunk],
         )
         evidence_map: dict[str, EvidenceRef] = {}
-        [rendered], _ = _build_evidence([thread], 2000, evidence_map=evidence_map)
+        scope = (
+            None
+            if in_scope is None
+            else ScopeLabels(claimants={claimant} if in_scope else set(), whole_threads=set())
+        )
+        [rendered], _ = _build_evidence([thread], 2000, evidence_map=evidence_map, scope=scope)
         assert list(evidence_map) == ["E1"]
+        assert evidence_map["E1"].in_scope is in_scope
         header, _, text = rendered.partition("\n")
         assert header.startswith("[E1 | message ")
+        if in_scope is not None:
+            assert f"| {'in scope' if in_scope else 'context'} | chunk 0" in header
         assert len(header) <= _LABELLED_HEADER_MAX_CHARS
         # The whole claimant suffix that tells claimants of one Message-ID
         # apart survives: "#" plus all sixteen hex digits (#454).
@@ -717,7 +727,9 @@ class TestQuoteChecks:
         # seeded_db threads have no chunks, so each is shown by its text.
         probe = FakeInferenceClient(response="x [E1].")
         _ask(seeded_db, probe)
-        shown = probe.complete_calls[0][1].split("[E1 | thread text]\n", 1)[1]
+        shown = re.split(
+            r"\[E1 \| thread text \| [a-z ]+\]\n", probe.complete_calls[0][1], maxsplit=1
+        )[1]
         words = " ".join(shown.split()[:4])
         assert len(words.split()) == 4
         out = _ask(seeded_db, FakeInferenceClient(response=f'It says "{words}" [E1].'))

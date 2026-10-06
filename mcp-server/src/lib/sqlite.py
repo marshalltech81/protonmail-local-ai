@@ -885,6 +885,21 @@ def _reaped_at(conn: sqlite3.Connection, *lookups: tuple[str, str]) -> str | Non
 
 
 @dataclass
+class ScopeLabels:
+    """Which messages of some retrieved threads meet a request's
+    message-level filters (#755), from ``Database.message_scope``.
+
+    ``claimants`` holds the claimant IDs of the messages that meet every
+    filter; any other message's passages are context. ``whole_threads``
+    holds the threads every indexed message of which meets them, so a
+    passage of a thread's combined text is in scope only there.
+    """
+
+    claimants: set[str]
+    whole_threads: set[str]
+
+
+@dataclass
 class ThreadPage:
     """One page of a thread's messages, read from one snapshot."""
 
@@ -3035,6 +3050,78 @@ class Database:
                 ).fetchall()
                 found.update(r["thread_id"] for r in rows)
         return found
+
+    def message_scope(
+        self,
+        thread_ids: list[str],
+        *,
+        folders: list[str] | None = None,
+        from_addr: str | None = None,
+        participant: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+    ) -> ScopeLabels:
+        """Label the messages of ``thread_ids`` by whether each meets every
+        message-level filter of a mailbox-wide request (#755).
+
+        The filters select whole threads (``_apply_filters``); this asks
+        the same question of each message on its own, from its indexed
+        metadata, with ``query_messages``'s per-message predicates:
+
+        - ``from_addr``: the message's From role; ``participant``: its
+          From, To or Cc, every recipient counted however long the list
+          (``address_match_mode``: an address by canonical equality, a
+          domain or name fragment by substring).
+        - ``date_from`` / ``date_to``: its effective time (``occurred_at``,
+          else ``sent_at``) within the bounds.
+        - ``folders``: the folder it is filed in now, so a moved message
+          is labelled by where it was moved to. Without ``folders``, the
+          default scope: any folder but ``DEFAULT_EXCLUDED_FOLDERS``.
+
+        Labels only: nothing here selects or ranks. One connection; the
+        thread list is batched under ``_IN_CLAUSE_BATCH_SIZE``.
+        """
+        params: list = []
+        clauses: list[str] = []
+        if from_addr:
+            clauses.append(_participant_clause(from_addr, ("from",), params))
+        if participant:
+            clauses.append(_participant_clause(participant, ("from", "to", "cc"), params))
+        if folders:
+            clauses.append(f"m.folder IN ({','.join('?' * len(folders))})")
+            params.extend(folders)
+        else:
+            clauses.append(f"m.folder NOT IN ({','.join('?' * len(DEFAULT_EXCLUDED_FOLDERS))})")
+            params.extend(DEFAULT_EXCLUDED_FOLDERS)
+        date_from_iso, date_to_iso = _normalize_date_range(date_from, date_to)
+        if date_from_iso is not None:
+            clauses.append("m.effective_at >= ?")
+            params.append(date_from_iso)
+        if date_to_iso is not None:
+            clauses.append("m.effective_at <= ?")
+            params.append(date_to_iso)
+        predicate = " AND ".join(clauses)
+
+        claimants: set[str] = set()
+        seen_threads: set[str] = set()
+        partial_threads: set[str] = set()
+        with closing(self._connect()) as conn:
+            for start in range(0, len(thread_ids), _IN_CLAUSE_BATCH_SIZE):
+                batch = thread_ids[start : start + _IN_CLAUSE_BATCH_SIZE]
+                id_marks = ",".join("?" * len(batch))
+                rows = conn.execute(
+                    "SELECT m.claimant_id, m.thread_id, "  # nosec B608
+                    f"COALESCE(({predicate}), 0) AS in_scope FROM messages m "
+                    f"WHERE m.thread_id IN ({id_marks})",
+                    [*params, *batch],
+                ).fetchall()
+                for row in rows:
+                    seen_threads.add(row["thread_id"])
+                    if row["in_scope"]:
+                        claimants.add(row["claimant_id"])
+                    else:
+                        partial_threads.add(row["thread_id"])
+        return ScopeLabels(claimants=claimants, whole_threads=seen_threads - partial_threads)
 
     # -------------------------------------------------------------------------
     # Direct lookups
