@@ -137,8 +137,13 @@ message outside the filter can be cited). Decided: label passages
 labels in `ask_mailbox` and `get_evidence`, the prompt's scope line
 naming the filters (#779), the context-only citation check and the
 context label on the `get_message` / `get_thread` thread-text
-fallback. Answer-eval measurement against the post-#837 baseline is
-pending.
+fallback. Measured over three runs per side against the post-#837
+baseline (same judge): judge correctness 99 to 108 of 114 case-runs,
+groundedness 94 to 103, deterministic passes 92 to 96; the
+narrow-filter cases rise from 13 to 20 of 21 on correctness. In the
+decoy cases the answer now gives the in-scope value and names the
+decoy as context; the deterministic `must_not_include` check still
+fails them, since it sees only the value's presence (#770).
 
 ### Phase 1.5 — Minimal regression baseline
 
@@ -267,12 +272,13 @@ answers real knowledge questions, and identify why failures occur.
    and `disclose_missing` grading on the server's coverage note (#820,
    #822). Its judge can run on the Claude or Codex subscription CLIs
    (#806, #810). One run varies by about ±1–2 cases, so comparisons use
-   three runs per side, per case. The #755 baseline is 29, 27 and 28 of
-   38.
+   three runs per side, per case. The judge sees each passage's header
+   (sender, date, scope label; #837, rubric 5); the current baseline is
+   32, 30 and 30 of 38 deterministic passes before #755's labels and 32
+   of 38 in each run after them.
 
    Remaining: #283 (pass thresholds, live-client trace replay, latency
-   and cost), #655, #656, #657, #770, #771, #813, #814, #818, #826,
-   #834, #837 (the judge cannot see passage headers), #839 (eval cost
+   and cost), #655, #656, #657, #818, #826, #834, #839 (eval cost
    guard). Real-mail failures to explain: #774, #776. Evals use the synthetic corpus only; questions from real
    mail would send mail to the model provider and wait on an owner
    decision (held 2026-10-02, #785). Answer quality
@@ -508,8 +514,9 @@ can be revisited with an explicit owner decision.
 - tool descriptions ask an agent to tell the user before bulk or
   out-of-scope reads but cannot enforce it; a filtered read can still
   return passages and parent-thread context from messages outside the
-  filter, labelled `context` (#755), and whether the scope labels
-  improve answers is not yet measured
+  filter, labelled `context` (#755); the model is told to answer from
+  in-scope passages, which it follows on the synthetic decoys but
+  cannot be forced to
 
 ## Blockers and Risks
 
