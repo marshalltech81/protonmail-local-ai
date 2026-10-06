@@ -43,8 +43,10 @@ from .attachment_indexing import (
     AttachmentWritePlan,
     apply_attachment_writes,
     attachment_outcomes,
+    attachment_outcomes_degraded,
     format_attachment_outcomes,
     prepare_attachment_writes,
+    record_committed_outcomes,
     reruns_once_ocr_is_on,
     too_large_fits,
 )
@@ -715,15 +717,41 @@ class MaildirHandler(FileSystemEventHandler):
 # after each attachment page read.
 TIMING_LOG_EVERY = 25
 
+# In steady state the summaries are also logged when a drain empties the
+# queue, and at least this often while counts are pending, so a small
+# burst's attachment outcomes are not held back until unrelated mail
+# arrives (review round 1 on #884).
+SUMMARY_MAX_INTERVAL_SECS = 300.0
+
 
 def _log_attachment_outcomes() -> None:
-    """Log the attachments seen since the last call by outcome, and reset
-    the counts; nothing when there were none. Logged with each timing
-    summary, so failed or skipped extractions are visible at INFO without
-    a line per attachment (#871)."""
-    line = format_attachment_outcomes(attachment_outcomes.drain())
-    if line:
+    """Log the attachments committed since the last call by outcome, and
+    reset the counts; nothing when there were none. Logged with each
+    timing summary, so failed or skipped extractions are visible without
+    a line per attachment (#871). WARNING when any count means text is
+    missing from search, else INFO."""
+    counts = attachment_outcomes.drain()
+    line = format_attachment_outcomes(counts)
+    if not line:
+        return
+    if attachment_outcomes_degraded(counts):
+        log.warning(line)
+    else:
         log.info(line)
+
+
+def _steady_state_summary_due(
+    *, drained: int, drained_since_log: int, batch_size: int, seconds_since_summary: float
+) -> bool:
+    """Whether the steady-state loop logs its summaries now: every
+    ``TIMING_LOG_EVERY`` drained messages; when a drain that followed
+    drained work came back short of a full batch (the queue has no more
+    ready jobs); or once ``SUMMARY_MAX_INTERVAL_SECS`` have passed."""
+    if drained_since_log >= TIMING_LOG_EVERY:
+        return True
+    if drained_since_log and drained < batch_size:
+        return True
+    return seconds_since_summary >= SUMMARY_MAX_INTERVAL_SECS
 
 
 def _iter_maildir_messages(root: Path):
@@ -1259,6 +1287,9 @@ def _phase2c_commit_vectors(
                 db.replace_thread_vector(thread.thread_id, vectors[state.subject_fallback_offset])
     except Exception as e:
         return False, _stage_error(e)
+    # Counted once committed, so a message prepared again after an
+    # embedder outage is counted once (review round 1 on #884).
+    record_committed_outcomes(state.attach_plans)
     return True, None
 
 
@@ -1510,6 +1541,7 @@ def _drain_queue_batched(
     max_passes: int | None = None,
     breaker: _EmbedOutageBreaker | None = None,
     skip_trashed: bool = False,
+    summary_every: int | None = None,
 ) -> int:
     """Drain the queue in two-phase batches.
 
@@ -1536,6 +1568,12 @@ def _drain_queue_batched(
     the main loop pass ``max_passes=1`` so each tick interleaves
     cleanly with the reconciler sweep, WAL checkpoint, and health-file
     refresh instead of starving them on a long burst.
+
+    ``summary_every`` (``initial_index`` passes ``TIMING_LOG_EVERY``)
+    logs the timing summary and the attachments aggregate after each
+    batch that brings the messages since the last summary to at least
+    that many. ``None`` logs nothing here: the steady-state loop logs
+    them itself (``_steady_state_summary_due``).
 
     ``skip_trashed`` (set whenever deletion reconciliation is enabled;
     see ``_enqueue_unindexed_messages``) never indexes a claimed job
@@ -1564,6 +1602,7 @@ def _drain_queue_batched(
       others succeed.
     """
     processed = 0
+    summarized = 0
     passes = 0
     while True:
         if max_passes is not None and passes >= max_passes:
@@ -1735,11 +1774,12 @@ def _drain_queue_batched(
             # the rest are deferred and the breaker is open.
             break
 
-        if processed and processed % TIMING_LOG_EVERY < batch_size:
+        if summary_every is not None and processed - summarized >= summary_every:
             line = format_summary(timing_aggregator.summary())
             if line:
                 log.info(line)
             _log_attachment_outcomes()
+            summarized = processed
 
     return processed
 
@@ -2130,6 +2170,7 @@ def initial_index(
         timing_aggregator=timing_aggregator,
         breaker=breaker,
         skip_trashed=skip_trashed,
+        summary_every=TIMING_LOG_EVERY,
     )
     # Always emit a final summary at the end of the initial scan, even
     # if the count was not a multiple of ``TIMING_LOG_EVERY`` — the
@@ -2409,6 +2450,7 @@ def main():
     last_wal_checkpoint = time.monotonic()
     timing_aggregator = TimingAggregator(window=200)
     drained_since_log = 0
+    last_summary = time.monotonic()
     try:
         while True:
             touch_health_file()
@@ -2434,8 +2476,16 @@ def main():
                     skip_trashed=reconciler is not None,
                 )
                 drained_since_log += drained
-                if drained_since_log >= TIMING_LOG_EVERY:
-                    line = format_summary(timing_aggregator.summary())
+                now = time.monotonic()
+                if _steady_state_summary_due(
+                    drained=drained,
+                    drained_since_log=drained_since_log,
+                    batch_size=STEADY_STATE_BATCH_SIZE,
+                    seconds_since_summary=now - last_summary,
+                ):
+                    # The timing ring holds recent messages, not ones
+                    # since the last line: skip it when none were drained.
+                    line = format_summary(timing_aggregator.summary()) if drained_since_log else ""
                     if line:
                         # Tag the periodic timing summary with current
                         # queue depth so operators see when work is
@@ -2449,6 +2499,7 @@ def main():
                         )
                     _log_attachment_outcomes()
                     drained_since_log = 0
+                    last_summary = now
             except Exception as e:
                 log.error("queue drain failed: %s", _stage_error(e))
 

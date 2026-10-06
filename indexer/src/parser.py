@@ -27,19 +27,26 @@ from typing import Any
 
 import html2text
 
+from .extractors import resolved_extractor_module
+
 log = logging.getLogger("indexer.parser")
 
 # The per-message work caps that drop content, by the fixed name the
 # parse logs them under (#872), in log order. Each counts the parts,
-# headers or addresses it dropped from one message:
+# headers or addresses it dropped from one message. A container
+# attachment counts only when content is lost (review round 1 on #884):
+# its decoded tree goes unwalked (the attachments inside a transfer-
+# encoded attached email), or its emptied payload is one an extractor
+# would read (a container named ``.txt``). An identity-encoded container
+# is still walked, so the attachments inside it are kept.
 #
 # * ``attached_depth`` / ``attached_fields``: a container attachment
 #   past ``MAX_ATTACHED_MESSAGE_DEPTH`` or the message's
-#   ``MAX_ATTACHED_MESSAGE_FIELDS`` budget keeps an empty payload;
+#   ``MAX_ATTACHED_MESSAGE_FIELDS`` budget;
 # * ``transport_decode``: a transfer-encoded attached email that does
-#   not decode keeps an empty payload;
-# * ``decoded_bytes``: one past ``MAX_DECODED_ATTACHMENT_BYTES`` does too;
-# * ``container_serialize``: a container the generator refuses does too;
+#   not decode;
+# * ``decoded_bytes``: one past ``MAX_DECODED_ATTACHMENT_BYTES``;
+# * ``container_serialize``: a container the generator refuses;
 # * ``body_parts``: text parts past ``MAX_BODY_TEXT_PARTS`` are left out
 #   of the body;
 # * ``address_header``: an address header over
@@ -430,8 +437,9 @@ def parse_email(path: Path, maildir_root: Path | None = None) -> Message | None:
     body_text, attachments = _extract_body_and_attachments(msg, caps=caps)
     if caps:
         # Fixed names and counts only, with the Maildir path: the
-        # message is indexed with this content missing (#872).
-        log.info(
+        # message is indexed with this content missing (#872), so
+        # WARNING.
+        log.warning(
             "parser work caps dropped content from %s: %s",
             path,
             ",".join(f"{name}={caps[name]}" for name in PARSE_CAPS if caps[name]),
@@ -655,6 +663,7 @@ def _attachment_payload(
     serialize_containers: bool,
     budget: _SerializationBudget,
     caps: Counter[str],
+    payload_read: bool,
     decode_depth: int = 0,
 ) -> tuple[bytes, email.message.Message | None]:
     """The bytes an attachment carries, and, for a transfer-encoded
@@ -685,8 +694,10 @@ def _attachment_payload(
     empty payload: such errors quote the input, so they are never
     allowed to escape into a job's recorded error.
 
-    Every empty payload a cap or a failure leaves is counted in
-    ``caps`` under its ``PARSE_CAPS`` name.
+    A cap or failure that loses content is counted in ``caps`` under
+    its ``PARSE_CAPS`` name: always when a decoded tree is left unwalked,
+    and for an emptied payload only when ``payload_read`` (an extractor
+    would read this attachment's payload).
     """
     if not part.is_multipart():
         return _decoded_payload(part), None
@@ -733,18 +744,23 @@ def _attachment_payload(
         try:
             return _serialized_body(part), part
         except email.errors.MessageError, UnicodeError:
-            caps["container_serialize"] += 1
+            # The decoded tree is still walked: only the payload is lost.
+            if payload_read:
+                caps["container_serialize"] += 1
             return b"", part
     if not serialize_containers:
         return b"", None
     # The part's own tree is one level deeper than the email it carries.
+    # The caller still walks it, so only the payload is lost.
     if _nesting_exceeds(part, MAX_ATTACHED_MESSAGE_DEPTH + 1, budget):
-        caps[_nesting_cap(budget)] += 1
+        if payload_read:
+            caps[_nesting_cap(budget)] += 1
         return b"", None
     try:
         return _serialized_body(part), None
     except email.errors.MessageError, UnicodeError:
-        caps["container_serialize"] += 1
+        if payload_read:
+            caps["container_serialize"] += 1
         return b"", None
 
 
@@ -949,6 +965,7 @@ def _extract_body_and_attachments(
                 serialize_containers=not in_attachment,
                 budget=budget,
                 caps=caps,
+                payload_read=resolved_extractor_module(ct, filename or "unnamed") is not None,
                 decode_depth=decode_depth,
             )
             attachments.append(

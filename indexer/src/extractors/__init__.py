@@ -33,6 +33,7 @@ from __future__ import annotations
 import importlib
 import logging
 import os
+import time
 import zipfile
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -81,29 +82,68 @@ log = logging.getLogger("indexer.extractor")
 # realistic spreadsheet while keeping memory bounded.
 ZIP_MAX_UNCOMPRESSED_BYTES = 200 * 1024 * 1024
 
-# PDF pages whose text layer pypdf could not read since the last drain.
-# The PDF extractor skips such a page (one DEBUG line each) and counts it
-# here; the indexer reports the count in its periodic INFO attachments
-# aggregate (#871), so a parser regression is visible without a line per
-# page. Kept in this always-imported module because ``pdf`` is imported
-# lazily.
+# Counts the indexer reports in its periodic attachments aggregate
+# (#871), per extraction attempt, since the last drain:
+#
+# * ``pdf_pages_failed``: PDF pages whose text layer pypdf could not read.
+#   The PDF extractor skips such a page (one DEBUG line each) and counts
+#   it here, so a parser regression is visible without a line per page.
+# * ``failed_warnings_suppressed``: failed extractions whose WARNING the
+#   rate limit below withheld.
+#
+# Kept in this always-imported module because ``pdf`` is imported lazily.
+# Two integers and a window start: the state stays bounded.
+_counts_lock = Lock()
 _pdf_pages_failed = 0
-_pdf_pages_failed_lock = Lock()
+_failed_warnings_suppressed = 0
+
+# At most this many failed-extraction WARNINGs per window (review round 1
+# on #884): a sender can attach many distinct malformed files, and one
+# line each could flood the retained log. The rest are counted.
+_FAILED_WARNINGS_PER_WINDOW = 20
+_FAILED_WARNING_WINDOW_SECS = 300.0
+_failed_warning_window: float | None = None
+_failed_warnings_in_window = 0
 
 
 def note_pdf_page_failed() -> None:
     """Count one PDF page whose text layer could not be read."""
     global _pdf_pages_failed
-    with _pdf_pages_failed_lock:
+    with _counts_lock:
         _pdf_pages_failed += 1
 
 
-def drain_pdf_pages_failed() -> int:
-    """Return the pages counted since the last call, and reset the count."""
-    global _pdf_pages_failed
-    with _pdf_pages_failed_lock:
-        count, _pdf_pages_failed = _pdf_pages_failed, 0
-    return count
+def drain_extractor_counts() -> dict[str, int]:
+    """Return ``pdf_pages_failed`` and ``failed_warnings_suppressed``
+    since the last call, and reset them."""
+    global _pdf_pages_failed, _failed_warnings_suppressed
+    with _counts_lock:
+        counts = {
+            "pdf_pages_failed": _pdf_pages_failed,
+            "failed_warnings_suppressed": _failed_warnings_suppressed,
+        }
+        _pdf_pages_failed = _failed_warnings_suppressed = 0
+    return counts
+
+
+def _warn_failed(module_name: str, dispatch_via: str, reason: str) -> None:
+    """Log a failed extraction at WARNING (it drops the attachment out of
+    search), unless this window's budget is spent; then count it as
+    suppressed. ``reason`` is an exception type name or fixed text."""
+    global _failed_warning_window, _failed_warnings_in_window, _failed_warnings_suppressed
+    now = time.monotonic()
+    with _counts_lock:
+        if (
+            _failed_warning_window is None
+            or now - _failed_warning_window >= _FAILED_WARNING_WINDOW_SECS
+        ):
+            _failed_warning_window = now
+            _failed_warnings_in_window = 0
+        if _failed_warnings_in_window >= _FAILED_WARNINGS_PER_WINDOW:
+            _failed_warnings_suppressed += 1
+            return
+        _failed_warnings_in_window += 1
+    log.warning("extractor %s failed (dispatch_via=%s): %s", module_name, dispatch_via, reason)
 
 
 @dataclass(frozen=True)
@@ -378,11 +418,7 @@ def extract(
             # A ``failed`` row drops the attachment out of search, so it
             # is visible at WARNING (#871); fixed text, as the error
             # names only sizes.
-            log.warning(
-                "extractor %s failed (dispatch_via=%s): zip uncompressed-size cap exceeded",
-                module_name,
-                dispatch_via,
-            )
+            _warn_failed(module_name, dispatch_via, "zip uncompressed-size cap exceeded")
             return ExtractionResult(
                 status=STATUS_FAILED,
                 extractor=_stamp_extractor(module_name, module_name),
@@ -415,13 +451,8 @@ def extract(
         # excluded above precisely because they are not per-payload.
         # Parser exceptions quote the document (text, member names), so
         # only the type is logged and persisted (#257). WARNING, since
-        # the attachment drops out of search (#871).
-        log.warning(
-            "extractor %s failed (dispatch_via=%s): %s",
-            module_name,
-            dispatch_via,
-            type(exc).__name__,
-        )
+        # the attachment drops out of search (#871), rate limited.
+        _warn_failed(module_name, dispatch_via, type(exc).__name__)
         return ExtractionResult(
             status=STATUS_FAILED,
             extractor=_stamp_extractor(module_name, module_name),

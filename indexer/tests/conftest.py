@@ -89,6 +89,16 @@ def count_pending_deletions(db: Database) -> int:
     return int(db._conn.execute("SELECT COUNT(*) FROM pending_deletions").fetchone()[0])
 
 
+@pytest.fixture(autouse=True)
+def _reset_extractor_warning_budget(monkeypatch):
+    """The failed-extraction WARNING rate limit is process-wide; give each
+    test a fresh window so earlier tests cannot spend its budget."""
+    from src import extractors
+
+    monkeypatch.setattr(extractors, "_failed_warning_window", None)
+    monkeypatch.setattr(extractors, "_failed_warnings_in_window", 0)
+
+
 @pytest.fixture
 def db(tmp_path: Path) -> Database:
     database = Database(tmp_path / "test.db")

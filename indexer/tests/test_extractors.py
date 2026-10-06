@@ -200,6 +200,56 @@ class TestFailedOutcomesAreLogged:
     so it logs a WARNING naming the extractor module and the exception
     type; never the filename, the member names or the exception text."""
 
+    @pytest.fixture(autouse=True)
+    def _fresh_counts(self):
+        # The warning window is reset per test by ``conftest``.
+        from src import extractors
+
+        extractors.drain_extractor_counts()
+
+    def test_failed_warnings_are_rate_limited(self, monkeypatch, caplog):
+        """Review round 1 (security): many distinct malformed attachments
+        each logged a WARNING. The first ``_FAILED_WARNINGS_PER_WINDOW`` per
+        window are logged; the rest are counted for the aggregate. The
+        extraction results are unchanged."""
+        from src import extractors
+
+        caplog.set_level("INFO")
+        clock = {"now": 1000.0}
+        monkeypatch.setattr(extractors.time, "monotonic", lambda: clock["now"])
+        monkeypatch.setattr(extractors, "_FAILED_WARNINGS_PER_WINDOW", 2)
+
+        def boom(payload, **opts):
+            raise ValueError("SYNTHETIC_EXC_MARKER")
+
+        monkeypatch.setattr(extractors, "_safe_import", lambda module_name: boom)
+
+        def failures(n):
+            return [
+                extract(content_type="text/plain", filename="a.txt", payload=b"%d" % i)
+                for i in range(n)
+            ]
+
+        def warnings():
+            return [r for r in caplog.records if r.name == "indexer.extractor"]
+
+        results = failures(5)
+        assert {r.status for r in results} == {STATUS_FAILED}
+        assert {r.error for r in results} == {"ValueError"}
+        assert len(warnings()) == 2
+        assert extractors.drain_extractor_counts()["failed_warnings_suppressed"] == 3
+
+        # Within the window the budget stays spent.
+        clock["now"] += extractors._FAILED_WARNING_WINDOW_SECS - 1
+        failures(1)
+        assert len(warnings()) == 2
+        # A new window logs again.
+        clock["now"] += 2
+        failures(3)
+        assert len(warnings()) == 4
+        assert extractors.drain_extractor_counts()["failed_warnings_suppressed"] == 2
+        assert "SYNTHETIC_EXC_MARKER" not in caplog.text
+
     def test_extractor_exception_logs_a_warning(self, monkeypatch, caplog):
         caplog.set_level("INFO")
 
@@ -3874,10 +3924,13 @@ class TestMailContentStaysOutOfLogsAndErrors:
                 self.pages = [BadPage(), GoodPage(), BadPage()]
 
         monkeypatch.setattr(pdf.pypdf, "PdfReader", FakeReader)
-        extractors.drain_pdf_pages_failed()
+        extractors.drain_extractor_counts()
         assert pdf._extract_digital_pages(b"%PDF-1.7") == ["", "digital words", ""]
-        assert extractors.drain_pdf_pages_failed() == 2
-        assert extractors.drain_pdf_pages_failed() == 0
+        assert extractors.drain_extractor_counts() == {
+            "pdf_pages_failed": 2,
+            "failed_warnings_suppressed": 0,
+        }
+        assert extractors.drain_extractor_counts()["pdf_pages_failed"] == 0
 
     def test_ocr_fallback_failure_logs_and_persists_type_only(self, monkeypatch, caplog):
         from src.extractors import pdf

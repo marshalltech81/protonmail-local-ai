@@ -3317,15 +3317,18 @@ _CAP_HEAD = (
     b"Date: Mon, 28 Sep 2026 12:00:00 +0000\r\nMIME-Version: 1.0\r\n"
 )
 _CAP_FILENAME = b'Content-Disposition: attachment; filename="SYNTHETIC_FILENAME_MARKER.eml"\r\n'
+# A container named ``.txt`` is extracted as text, so an empty payload
+# loses that text; one named ``.eml`` selects no extractor (review round 1).
+_TXT_FILENAME = b'Content-Disposition: attachment; filename="SYNTHETIC_FILENAME_MARKER.txt"\r\n'
 
 
-def _with_attachment(headers: bytes, body: bytes) -> bytes:
+def _with_attachment(headers: bytes, body: bytes, disposition: bytes = _CAP_FILENAME) -> bytes:
     """A message whose body is PARENT_BODY plus one attachment part with
     ``headers`` (beside the marker filename) and ``body``."""
     return (
         _CAP_HEAD + b'Content-Type: multipart/mixed; boundary="b"\r\n\r\n'
         b"--b\r\nContent-Type: text/plain\r\n\r\nPARENT_BODY\r\n"
-        b"--b\r\n" + headers + _CAP_FILENAME + b"\r\n" + body + b"\r\n--b--\r\n"
+        b"--b\r\n" + headers + disposition + b"\r\n" + body + b"\r\n--b--\r\n"
     )
 
 
@@ -3386,7 +3389,7 @@ def _chain_stops_at_the_depth_cap(msg) -> bool:
 # is the parse result before the caps were logged.
 _CAP_SHAPES = {
     "attached_depth": (
-        _with_attachment(b"Content-Type: message/rfc822\r\n", _nested_rfc822(21)),
+        _with_attachment(b"Content-Type: message/rfc822\r\n", _nested_rfc822(21), _TXT_FILENAME),
         False,
         "attached_depth=1",
         _only_attachment_is_empty,
@@ -3396,6 +3399,7 @@ _CAP_SHAPES = {
             b"Content-Type: message/delivery-status\r\n",
             b"Reporting-MTA: dns; mx.example.test\r\n"
             + b"X-Field: SYNTHETIC_HEADER_MARKER\r\n" * 20_000,
+            _TXT_FILENAME,
         ),
         False,
         "attached_fields=1",
@@ -3445,6 +3449,7 @@ _CAP_SHAPES = {
         _with_attachment(
             b"Content-Type: message/rfc822\r\n",
             b"From: a@example.test\r\nX: SYNTHETIC_HEADER_MARKER\x0brest\r\n\r\nhello",
+            _TXT_FILENAME,
         ),
         False,
         "container_serialize=1",
@@ -3456,6 +3461,7 @@ _CAP_SHAPES = {
             base64.encodebytes(
                 b"From: a@example.test\r\nX: SYNTHETIC_HEADER_MARKER\x0brest\r\n\r\nhello"
             ),
+            _TXT_FILENAME,
         ),
         False,
         "container_serialize=1",
@@ -3516,15 +3522,16 @@ def test_cap_shape_parse_result_is_pinned(tmp_path, monkeypatch, shape):
 
 
 @pytest.mark.parametrize("shape", sorted(_CAP_SHAPES))
-def test_cap_that_drops_content_logs_one_info_line(tmp_path, monkeypatch, caplog, shape):
-    """#872: a message a work cap cut is logged once at INFO with its
-    Maildir path and the caps that fired, by fixed name and count; no
-    header value, filename or text."""
+def test_cap_that_drops_content_logs_one_warning(tmp_path, monkeypatch, caplog, shape):
+    """#872: a message a work cap cut is logged once with its Maildir
+    path and the caps that fired, by fixed name and count; no header
+    value, filename or text. WARNING, since content is lost (review
+    round 1)."""
     caplog.set_level("DEBUG")
     _, path = _parse_cap_shape(tmp_path, monkeypatch, shape)
     lines = [r for r in caplog.records if "parser work caps" in r.getMessage()]
     assert [(r.levelname, r.getMessage()) for r in lines] == [
-        ("INFO", f"parser work caps dropped content from {path}: {_CAP_SHAPES[shape][2]}")
+        ("WARNING", f"parser work caps dropped content from {path}: {_CAP_SHAPES[shape][2]}")
     ]
     for marker in ("SYNTHETIC_HEADER_MARKER", "SYNTHETIC_FILENAME_MARKER", "SYNTHETIC_TEXT_MARKER"):
         assert marker not in caplog.text
@@ -3562,4 +3569,69 @@ def test_message_within_every_cap_logs_no_cap_line(tmp_path, caplog):
     (folder / "ok.eml").write_bytes(raw)
     msg = parse_email(folder / "ok.eml")
     assert msg is not None and msg.attachments[0].payload != b""
+    assert "parser work caps" not in caplog.text
+
+
+def _nested_rfc822_with_note(levels: int) -> bytes:
+    """``levels`` identity-encoded attached emails around a message that
+    carries a ``note.txt`` attachment."""
+    leaf = (
+        b'Content-Type: multipart/mixed; boundary="n"\r\n\r\n'
+        b"--n\r\nContent-Type: text/plain\r\n\r\nSYNTHETIC_TEXT_MARKER\r\n"
+        b'--n\r\nContent-Type: text/plain\r\nContent-Disposition: attachment; filename="note.txt"'
+        b"\r\n\r\nNOTE_BODY\r\n--n--\r\n"
+    )
+    return b"Content-Type: message/rfc822\r\n\r\n" * (levels - 1) + leaf
+
+
+# Review round 1: caps that empty an identity-encoded container's payload
+# lose nothing when no extractor would read that payload (``.eml``): the
+# walk still descends into the container and keeps the attachments inside
+# it. Likewise a decoded container the generator refuses is still walked.
+# Each shape's parse result is pinned (unchanged from before the caps
+# were logged) and no cap line is logged.
+_NO_LOSS_SHAPES = {
+    "identity_depth_keeps_inner_attachment": (
+        _with_attachment(b"Content-Type: message/rfc822\r\n", _nested_rfc822_with_note(21)),
+        lambda msg: (
+            [(a.filename, a.payload) for a in msg.attachments]
+            == [("SYNTHETIC_FILENAME_MARKER.eml", b""), ("note.txt", b"NOTE_BODY")]
+        ),
+    ),
+    "identity_fields": (
+        _with_attachment(
+            b"Content-Type: message/rfc822\r\n",
+            b"From: a@example.test\r\n" + b"X-Field: SYNTHETIC_HEADER_MARKER\r\n" * 20_000,
+        ),
+        _only_attachment_is_empty,
+    ),
+    "identity_serialize": (
+        _with_attachment(
+            b"Content-Type: message/rfc822\r\n",
+            b"From: a@example.test\r\nX: SYNTHETIC_HEADER_MARKER\x0brest\r\n\r\nhello",
+        ),
+        _only_attachment_is_empty,
+    ),
+    "decoded_serialize": (
+        _with_attachment(
+            _BASE64_RFC822,
+            base64.encodebytes(
+                b"From: a@example.test\r\nX: SYNTHETIC_HEADER_MARKER\x0brest\r\n\r\nhello"
+            ),
+        ),
+        _only_attachment_is_empty,
+    ),
+}
+
+
+@pytest.mark.parametrize("shape", sorted(_NO_LOSS_SHAPES))
+def test_cap_that_loses_nothing_logs_no_cap_line(tmp_path, caplog, shape):
+    caplog.set_level("DEBUG")
+    raw, pinned = _NO_LOSS_SHAPES[shape]
+    folder = tmp_path / "INBOX" / "cur"
+    folder.mkdir(parents=True)
+    (folder / "m.eml").write_bytes(raw)
+    msg = parse_email(folder / "m.eml")
+    assert msg is not None
+    assert pinned(msg)
     assert "parser work caps" not in caplog.text
