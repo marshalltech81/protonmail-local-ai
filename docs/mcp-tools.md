@@ -445,11 +445,15 @@ and `reaped_messages_truncated` as coverage limits: paging cannot recover
 removed messages. Separate page snapshots also mean concurrent indexing
 can change the conversation during the run.
 
-Start with `limit=1` to learn `total_messages`. Before bulk thread or body
-paging, disclose how many messages will be read and that their content
-reaches the calling model, which may be remote. Read only what the task
-needs within the requested or approved scope; ask before expanding it.
-A full audit needs all relevant pages; a narrower question may need fewer.
+For a potentially exhaustive review, disclose the target thread and planned
+content read before the first call, including transfer to the calling model,
+which may be remote. This is not a metadata probe: even `limit=1` can return
+accumulated thread context when per-message bodies are absent. State that
+the initial read can include the whole conversation's indexed context.
+After disclosure, use `limit=1` only if the count is not already known, to
+learn `total_messages`. Before bulk thread or body paging, disclose how many
+messages will be read. Stay within the requested or approved scope and ask
+before expanding it. A narrower task may need only one page.
 
 Messages of the thread reaped under mirror retention are listed by
 claimant ID and reap time in `reaped_messages`; a fully reaped thread
