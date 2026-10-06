@@ -417,6 +417,26 @@ content is as private as a credential.
 - Test with a synthetic marker: assert it is absent from `caplog` and
   from any persisted error.
 
+### Make degraded behaviour visible
+
+The services log at INFO; a DEBUG line is not visibility.
+
+- Every fallback, cap, skip, retry or partial result that changes what
+  is indexed or answered logs at INFO or above (WARNING when it lowers
+  quality or loses data), with counts, fixed text, type names and
+  config values only, as the rules above require. When per-item lines
+  would flood the log, log an aggregate per interval or per call.
+- A tool call that degraded says so on its own log line (the timing
+  line), not only in a standalone warning that cannot be joined to it.
+- An error raised to the caller (including `ToolError`) is logged with
+  its fixed-text cause, not only `outcome=error`.
+- A recovery is logged as well as the failure (a breaker that closes,
+  a retry that succeeds), so an outage has a visible end.
+- A healthcheck or status field must not report a component as live
+  when a thread or dependency it relies on has stopped.
+- Tests assert the line appears with the expected counts, and that a
+  synthetic mail marker does not.
+
 ### Do not export mail in bulk
 
 Mailbox content lives in two places: the Maildir volume and the
@@ -476,6 +496,7 @@ When working in this repo:
 - keep comments and code aligned
 - make multi-step logic easy to follow in code by keeping the flow explicit and adding brief comments or docstrings where the steps would otherwise be unclear
 - update docs when behavior changes
+- make a new fallback, cap, skip or retry visible in the logs (see "Make degraded behaviour visible")
 - always review the relevant documentation after code, config, workflow, or runtime changes and adjust it so the repository docs stay in sync with the implementation
 - if code or config changes create likely doc drift, update the relevant docs or explicitly suggest the needed doc or `AGENTS.md` follow-up
 - avoid introducing new dependencies without a clear need
