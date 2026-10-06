@@ -186,6 +186,20 @@ class TestConfig:
         with pytest.raises(ConfigError, match="managed-mcp.json"):
             load_layer("JUDGE", self.ENV)
 
+    @pytest.mark.parametrize("version", ["2.1.210 (Claude Code)", "1.0.0", "no version"])
+    def test_old_claude_is_refused(self, fake_claude, monkeypatch, version):
+        """Review round 4: before 2.1.211, nested .claude/rules files
+        loaded despite --setting-sources ""."""
+        exe, _, _ = fake_claude
+        old = exe.parent / "claude-old"
+        old.write_text(
+            exe.read_text().replace('print("9.8.7 (Claude Code)")', f"print({version!r})")
+        )
+        old.chmod(0o700)
+        monkeypatch.setattr(cli_judge.shutil, "which", lambda name: str(old))
+        with pytest.raises(ConfigError, match="2.1.211 or newer"):
+            load_layer("JUDGE", self.ENV)
+
     def test_managed_instructions_are_refused(self, tmp_path, monkeypatch):
         """Review round 2: an organization-wide CLAUDE.md, or claudeMd in
         managed settings, loads into every session whatever the flags."""
@@ -299,6 +313,16 @@ class TestClient:
         assert env["PATH"] == os.environ["PATH"] and env["HOME"] == os.environ["HOME"]
         assert env["CLAUDE_CONFIG_DIR"] == str(tmp_path)  # where the login lives
         assert env["LC_ALL"] == "C.UTF-8"
+
+    def test_relative_config_dir_is_resolved(self, fake_claude, monkeypatch, tmp_path):
+        """Review round 4: a relative CLAUDE_CONFIG_DIR named a different
+        directory from inside the temporary working directory."""
+        exe, _, calls = fake_claude
+        (tmp_path / "claude-config").mkdir()
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", "claude-config")
+        _run(_client(exe).complete("s", "u"))
+        assert calls()[0]["env"]["CLAUDE_CONFIG_DIR"] == str((tmp_path / "claude-config").resolve())
 
     def test_served_model_is_recorded(self, fake_claude):
         exe, _, _ = fake_claude
@@ -673,6 +697,12 @@ class TestCodexConfig:
         (home / "auth.json").unlink()
         with pytest.raises(ConfigError, match="auth.json"):
             load_layer("JUDGE", self.ENV)
+
+    @pytest.mark.parametrize("value", ["lots", "10"])
+    def test_token_cap_is_not_read(self, value):
+        """Review round 4: JUDGE_MAX_TOKENS does not apply to Codex, so a
+        leftover value cannot block startup."""
+        assert load_layer("JUDGE", {**self.ENV, "JUDGE_MAX_TOKENS": value}) is not None
 
     def test_label_records_the_cli_and_no_token_cap(self):
         cfg = load_layer("JUDGE", self.ENV)

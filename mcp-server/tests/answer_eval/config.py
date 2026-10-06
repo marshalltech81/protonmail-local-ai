@@ -257,14 +257,18 @@ def _load_cli_judge(mode: str, env: Mapping[str, str]) -> LayerConfig:
             f"JUDGE_MODE={mode} needs the {name} CLI ({cli_judge.PRODUCTS[mode]}) on PATH"
         )
     version = cli_judge.cli_version(path)
+    floor = cli_judge.CODEX_MIN_VERSION if mode == "codex-cli" else cli_judge.CLAUDE_MIN_VERSION
+    if not cli_judge.version_at_least(version, floor):
+        minimum = ".".join(map(str, floor))
+        raise ConfigError(f"JUDGE_MODE={mode} needs the {name} CLI {minimum} or newer")
     auth_file = ""
     if mode == "codex-cli":
-        if not cli_judge.version_at_least(version, cli_judge.CODEX_MIN_VERSION):
-            minimum = ".".join(map(str, cli_judge.CODEX_MIN_VERSION))
-            raise ConfigError(f"JUDGE_MODE={mode} needs the codex CLI {minimum} or newer")
         auth_file = _check_codex_login(mode, path)
+        # Codex has no output-token setting, so JUDGE_MAX_TOKENS is not read.
+        max_tokens = JUDGE_DEFAULT_MAX_TOKENS
     else:
         _check_claude_login(mode, path)
+        max_tokens = int(_number(env, "JUDGE_MAX_TOKENS", JUDGE_DEFAULT_MAX_TOKENS, 256))
     return LayerConfig(
         layer="JUDGE",
         mode=mode,
@@ -272,7 +276,7 @@ def _load_cli_judge(mode: str, env: Mapping[str, str]) -> LayerConfig:
         model=model,
         api_key="",
         timeout_secs=_number(env, "JUDGE_TIMEOUT_SECS", JUDGE_DEFAULT_TIMEOUT_SECS, 1.0),
-        max_tokens=int(_number(env, "JUDGE_MAX_TOKENS", JUDGE_DEFAULT_MAX_TOKENS, 256)),
+        max_tokens=max_tokens,
         context_tokens=0,
         max_input_chars=int(
             _number(env, "JUDGE_MAX_INPUT_CHARS", JUDGE_DEFAULT_MAX_INPUT_CHARS, 1000)

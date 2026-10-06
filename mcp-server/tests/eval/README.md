@@ -481,7 +481,10 @@ is `127.0.0.1`, not `host.docker.internal`.
   prompt. `--bare` is not used
   because it accepts only an API key. A set `ANTHROPIC_API_KEY` would
   take the call off the subscription (the allowlist keeps it out), and
-  `DISABLE_AUTOUPDATER=1` keeps one CLI version for the whole run. Before any case runs, `claude auth
+  `DISABLE_AUTOUPDATER=1` keeps one CLI version for the whole run.
+  Claude Code before 2.1.211 is refused, since its `--setting-sources ""`
+  still loaded nested `.claude/rules` files, and a relative
+  `CLAUDE_CONFIG_DIR` is made absolute before the calls change directory. Before any case runs, `claude auth
   status` must report a claude.ai (subscription) login, not a Console
   (API-billed) one. A machine with an enterprise `managed-mcp.json` is
   refused, since Claude Code exits on `--strict-mcp-config` there, and so
@@ -523,8 +526,8 @@ is `127.0.0.1`, not `host.docker.internal`.
   the same file store, must report a ChatGPT login: an API-key login bills API usage, and a logged-out CLI
   still sends the prompt before the server refuses it. A login kept in
   the keyring instead of `auth.json` is refused, since it cannot be
-  linked. Codex has no output-token setting, so `JUDGE_MAX_TOKENS` does
-  not apply (the identity records `max_tokens: null`) and the timeout
+  linked. Codex has no output-token setting, so `JUDGE_MAX_TOKENS` is not
+  read (the identity records `max_tokens: null`) and the timeout
   bounds the call. `ANSWER_EVAL_LIVE_CODEX=1 uv run pytest
   tests/test_answer_eval_cli_judge.py -k live_codex` makes one real call
   to check that planted `AGENTS.md` files, the global `AGENTS.md` and an

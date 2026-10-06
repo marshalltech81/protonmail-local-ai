@@ -29,7 +29,9 @@ routes it through a cloud account, ``CLAUDE_CODE_EFFORT_LEVEL`` or
 ``MAX_THINKING_TOKENS`` change the judge's reasoning unrecorded, and
 ``OTEL_*`` telemetry can export the whole prompt. Claude keeps
 ``CLAUDE_CONFIG_DIR`` (where its login lives) and gets auto-updates
-off, so one run cannot mix CLI versions. Before the run, ``claude auth status`` (in
+off, so one run cannot mix CLI versions. Claude Code before 2.1.211,
+whose ``--setting-sources ""`` still loaded nested ``.claude/rules``
+files, is refused. Before the run, ``claude auth status`` (in
 the same environment) must report the subscription login. An enterprise
 ``managed-mcp.json`` (under which ``--strict-mcp-config`` exits at
 startup) and managed instructions (an organization-wide ``CLAUDE.md``
@@ -125,6 +127,9 @@ _ENV_ALLOWLIST = frozenset(
 )
 # The oldest Codex the judge's flags and features were checked against.
 CODEX_MIN_VERSION = (0, 160, 1)
+# The first Claude Code whose --setting-sources "" also keeps nested
+# .claude/rules files out.
+CLAUDE_MIN_VERSION = (2, 1, 211)
 # ``claude auth status``'s ``authMethod`` for a Claude subscription.
 SUBSCRIPTION_AUTH_METHOD = "claude.ai"
 # Where an enterprise ``managed-mcp.json`` lives (macOS, Linux).
@@ -267,9 +272,12 @@ async def _run_cli(argv: list[str], stdin: str, cwd: str, env: dict[str, str]) -
 
 
 def claude_env(max_tokens: int | None = None) -> dict[str, str]:
-    """The CLI's environment: the allowlist and ``CLAUDE_CONFIG_DIR``,
-    with auto-updates off."""
+    """The CLI's environment: the allowlist and ``CLAUDE_CONFIG_DIR``
+    (absolute: each call runs in a temporary directory), with
+    auto-updates off."""
     env = _allowed_env("CLAUDE_CONFIG_DIR")
+    if env.get("CLAUDE_CONFIG_DIR", "").strip():
+        env["CLAUDE_CONFIG_DIR"] = str(Path(env["CLAUDE_CONFIG_DIR"]).resolve())
     env["DISABLE_AUTOUPDATER"] = "1"
     if max_tokens is not None:
         env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = str(max_tokens)
