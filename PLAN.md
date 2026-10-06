@@ -482,12 +482,16 @@ can be revisited with an explicit owner decision.
 - deletion reconciliation (mirror) is not yet validated under
   long-running real-world conditions; the indexer never deletes Maildir
   files, so a reaped message's `.eml` stays on disk (#728)
-- a reap overwrites freed pages (`secure_delete`, #642) and FTS5 terms
-  are removed by an `optimize` before the next checkpoint (#666), so
-  deleted mail text normally leaves the file within one checkpoint
-  interval; it can stay longer when a checkpoint is busy, an
-  `optimize` fails or the indexer restarts first, and below SQLite in
-  filesystem free blocks, snapshots and backups (`docs/architecture.md`)
+- a reap overwrites freed pages (`secure_delete`, #642), and the next
+  maintenance pass removes the reaped FTS5 terms with a stepped merge
+  (the incremental form of `optimize`) before its checkpoint (#666,
+  #670). There is no fixed deletion time. The merge is capped per pass,
+  so a table it does not finish stays pending and its deleted terms
+  stay in the file across further passes until a pass completes it. A
+  failed merge step, a busy checkpoint, or a restart that interrupts a
+  merge in progress also delays removal. A restart before the pass does
+  not: the indexer scrubs every table at startup. Below SQLite, deleted text can outlive both in
+  filesystem free blocks, snapshots and backups (`docs/architecture.md`).
 - keyword search does not match precomposed letters with two
   diacritics or composed vs decomposed Hangul across forms (#316's
   index-side remainder, pinned by xfail tests; #782)

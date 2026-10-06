@@ -1177,9 +1177,17 @@ is dropped and its pages zeroed. What the pragma does not cover:
   exception type and the table stays pending for the next pass, as
   does one not finished within the step cap, which continues its merge
   there; a reap in between starts a new merge, which also takes in the
-  segments written since the old one began. So a reaped message's
-  terms stay in the file for up to one interval (longer while a busy
-  checkpoint retries, as above). The pending mark is kept in memory,
+  segments written since the old one began. So there is no fixed
+  deletion time. A reaped message's terms usually leave the file at the
+  first pass after the reap, once that pass's merge finishes and its
+  checkpoint copies the rewritten pages. They stay across further
+  passes while the merge is unfinished (a table needing more than the
+  per-pass cap of `_FTS_SCRUB_MAX_STEPS` steps of `_FTS_SCRUB_STEP_PAGES`
+  pages, 1,000 x 2,000 today, continues on later passes) or its step
+  fails, and longer while a busy checkpoint retries, as above. Merge
+  completion, the checkpoint and storage below SQLite (free blocks,
+  snapshots, backups) are separate stages, and only the first two are
+  under the indexer's control. The pending mark is kept in memory,
   so every table starts pending: the indexer scrubs all three once at
   startup, right after opening the database and before it waits for
   the embedder, which covers a reap whose scrub a restart cut short
@@ -1777,8 +1785,10 @@ columns are populated lazily on the next reindex of the file.
 
 ## Privacy Model
 
-Three layers, each with its own boundary. The README has the operator-facing
-walkthrough; the table below is the per-operation reference.
+Three layers, each with its own boundary, plus the host's disk, where
+everything is stored unencrypted (see At rest). The README has the
+operator-facing walkthrough; the tables below are the per-operation
+reference.
 
 ### Storage and processing layer (always local)
 
@@ -1788,6 +1798,61 @@ walkthrough; the table below is the per-operation reference.
 | Vector index | ✅ (SQLite) | Never |
 | Keyword search | ✅ (SQLite FTS5) | Never |
 | Send/Move/Flag | Disabled by default | Never |
+
+### At rest (on the host's disk)
+
+Bridge decrypts mail locally, and this project then keeps it as plain
+files. Proton's server-side protections do not cover these copies, and
+the project adds no encryption of its own:
+
+| Data | Where | Stored |
+|---|---|---|
+| Every message as an `.eml` file, attachments included | `maildir-volume` | Unencrypted |
+| The index: thread and message text, chunks, extracted attachment text, participants, vectors | `sqlite-volume` (`mail.db` and its WAL) | Unencrypted |
+| Sync state, folder names and the Bridge certificate pin | `mbsync-state` and the Maildir | Unencrypted |
+| Credentials: the Bridge IMAP password, the MCP bearer token, provider API keys | `.secrets/*.txt` in the checkout | Unencrypted (mode 600) |
+| Operator configuration naming real people: source-authority rules (addresses, domains), the Bridge username | `config/authority.toml`, `.env` in the checkout | Unencrypted |
+
+Protecting them is the host's job, which makes it a setup requirement:
+
+- **Full-disk encryption** (FileVault on macOS). OrbStack and Docker
+  Desktop keep Docker volumes inside a virtual-machine disk image, by
+  default on the startup disk, which FileVault covers. The protection
+  holds only where the data actually is: a Docker disk image moved to
+  another drive (Docker Desktop allows it), or a checkout (with
+  `.secrets/`) on another drive, needs that drive encrypted too.
+  Without it, anyone with the disk can read the mailbox.
+- **An unlocked, logged-in machine exposes them.** Code running as the
+  operator's user, or as root, can read the volumes. This is the same
+  trust condition as the MCP bearer token ("processes running as the
+  operator are trusted", see Endpoint authentication). Full-disk
+  encryption protects a powered-off machine, or one restarted and not
+  yet unlocked at login. A screen lock does not re-lock FileVault, so a
+  logged-in session that is only screen-locked is not protected by it.
+- **Backups.** Any backup of these volumes, or of a Maildir archive
+  (`docs/troubleshooting.md`), holds the whole mailbox: keep it
+  encrypted (for example an encrypted Time Machine destination) and
+  never inside the checkout. A backup of the checkout itself carries
+  every git-ignored file, and any of them can hold private data:
+  credentials (`.secrets/`, `*.pem`, `*.key`), addresses
+  (`config/authority.toml`, `.env`), eval queries grounded in the real
+  mailbox (`mcp-server/tests/eval/queries.json`, `eval-queries.md`),
+  local Maildir or data copies (`maildir/`, `data/`) and logs. So
+  protect a checkout backup like the volumes, or leave out every ignored
+  file (`git status --ignored` lists them). Rotating credentials after an
+  exposure covers `.secrets/`, but nothing takes back the addresses or
+  the mailbox-derived queries.
+- **Deleted mail.** Mail deleted in Proton stays on disk. A reap removes
+  the message from the index, but its `.eml`, attachments included,
+  stays in the Maildir indefinitely: mbsync never expunges
+  (`Expunge None`) and the indexer's Maildir mount is read-only, so
+  removing those files is undecided (#728). Below that, deleted text can
+  also persist in free blocks, snapshots and backups (see "Cascade on
+  message removal" and "Deletion Reconciliation" above).
+
+Application-level encryption of the index (for example SQLCipher) is
+out of scope: sqlite-vec would need to work with it, and the indexer
+would need its key without a person present.
 
 The MCP server switches off FastMCP's OpenTelemetry instrumentation at
 startup (`telemetry_mode = "off"`, overriding any `FASTMCP_TELEMETRY_MODE`),

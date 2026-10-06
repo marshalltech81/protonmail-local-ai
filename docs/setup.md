@@ -8,6 +8,18 @@
   Proton plan)
 - Claude Desktop installed
 - Git configured with SSH key for GitHub
+- Full-disk encryption on the Mac (FileVault, in System Settings >
+  Privacy & Security). The stack stores your decrypted mail, its search
+  index and sync state as unencrypted files; FileVault is what protects
+  them on a lost or stolen Mac that is powered off (or restarted and not
+  yet unlocked at login), not during a logged-in or screen-locked
+  session. OrbStack and Docker Desktop keep the
+  Docker volumes inside a virtual-machine disk image, by default on the
+  Mac's startup disk, which FileVault covers. Check where yours actually
+  is: if the Docker disk image was moved (Docker Desktop allows it) or
+  the checkout, which holds `.secrets/`, lives on another drive, that
+  drive must be encrypted too. See `docs/architecture.md`, "At rest (on
+  the host's disk)".
 
 ### Platform support
 

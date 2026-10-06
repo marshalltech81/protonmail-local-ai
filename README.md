@@ -40,6 +40,9 @@ host-side server you install yourself.
   on the same machine and signed in
 - **Claude Desktop** with MCP support
 - **Proton Mail paid account** (required for Bridge access)
+- **Full-disk encryption** on the host (FileVault on macOS). The stack
+  keeps your decrypted mail and its search index unencrypted on disk;
+  see [at rest](docs/architecture.md#at-rest-on-the-hosts-disk)
 
 > **Apple Silicon / ARM64**: fully supported. The stack builds and runs natively on aarch64.
 
@@ -219,6 +222,18 @@ endpoint is not host-local (`127.0.0.1`, `::1`, `localhost`,
 
 The MCP server itself binds to `127.0.0.1:3000` only — nothing else on your
 network can reach it.
+
+**At rest, these copies are unencrypted.** Bridge decrypts your mail, and
+the Maildir, the search index and mbsync's sync state are then ordinary
+files in Docker volumes; Proton's protections do not cover them. The
+credentials in `.secrets/`, and the addresses in `config/authority.toml`
+and `.env`, are plaintext files too. Mail you delete in
+Proton stays in the Maildir (#728). Turn on full-disk encryption
+(FileVault), and encrypt any backup of the volumes or the checkout.
+FileVault protects a powered-off machine, not a logged-in session,
+even a screen-locked one: while you are logged in, code running as your
+user can read them. See
+[at rest](docs/architecture.md#at-rest-on-the-hosts-disk).
 
 ### 2. Project-internal model layers — controlled by `INFERENCE_MODE` and `RERANK_MODE`
 
