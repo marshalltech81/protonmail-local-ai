@@ -361,10 +361,14 @@ it. A mismatch fails startup closed with a fixed message naming the
 differing fields (see docs/troubleshooting.md, "Embedder identity
 mismatch"); the message never quotes a provider response.
 
-The indexer writes the row; mcp-server only reads it. A failed
-calibration request (the indexer's runs right after `wait_for_ready`,
-with the client's usual retries) exits the service with the scrubbed
-error and the restart policy tries again, as for the dimension probe.
+The indexer writes the row; mcp-server only reads it. The indexer's
+calibration vector is also its startup width check (#841): a vector
+that is not 4096 wide exits with "Embedder produced N-dim vectors"
+before the row is read or written, so a fresh index never records an
+embedder whose vectors it cannot store. A failed calibration request
+(the indexer's runs right after `wait_for_ready`, with the client's
+usual retries) exits the service with the scrubbed error and the
+restart policy tries again.
 mcp-server exits the same way while the indexer has not yet recorded
 the row (it does so once its embedder answers); its calibration request
 is bounded as a whole by `EMBED_TIMEOUT_SECS`. While mcp-server cannot
@@ -1096,7 +1100,7 @@ scanned pages are not re-read when OCR is turned on later.
 | `INDEXER_OCR_ENABLED` | `true` | Disables all OCR paths (image + PDF fallback) |
 | `INDEXER_ATTACHMENT_MAX_BYTES` | `33554432` (32 MiB) | Skip very large attachments — bounds CPU/memory for huge zips. Sized for the 10–30 MB scanned PDFs common in real mail; an `.eml` under the default `INDEXER_PARSE_MAX_BYTES` (50 MB) carries at most ~36 MB of base64-encoded attachment. Raising it re-queues, once at startup, the messages whose attachments were cached `too_large` and now fit |
 | `INDEXER_OCR_MAX_PAGES` | `20` | Cap pages OCR'd per PDF or multipage TIFF |
-| `INDEXER_OCR_TIMEOUT_SECONDS` | `60` | Per-page Tesseract timeout — bounds runaway OCR on a crafted high-noise image — and the deadline for rendering a scanned PDF's pages with Poppler. Set `0` to disable both. |
+| `INDEXER_OCR_TIMEOUT_SECONDS` | `60` | Per-page Tesseract timeout — bounds runaway OCR on a crafted high-noise image — and the deadline for rendering a scanned PDF's pages with Poppler. pdf2image's own page count before each render takes no timeout, so the indexer first times one bounded page count: one over half the deadline is an OCR timeout, and each render's timeout holds back that time. A page count much slower on pdf2image's call than on the timed one can still overrun (#868). Set `0` to disable both. |
 | `INDEXER_PDF_MAX_DIGITAL_PAGES` | `500` | Cap pages walked by the digital pypdf path — protects against text-only PDFs with thousands of pages. Set `0` to disable. |
 | `INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS` | `2000000` (~500 pages) | Truncate extracted text before persisting in `attachment_extractions`. Bounds SQLite row size for very long OCR'd PDFs. Set to `0` to disable. The XLSX extractor also stops at 10,000,000 characters of its own, whatever this is set to, so shared strings repeated across many cells cannot expand without limit (#294). |
 

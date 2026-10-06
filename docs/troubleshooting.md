@@ -749,9 +749,10 @@ fix (see "Embedder or inference endpoint unreachable from containers").
 
 "embedder at ... rejected the warmup request (APIStatusError:
 status=402)" from the indexer means the embedder refused its first
-request; "Embedder dimension probe failed" is the same for the probe
-right after it. Startup errors carry the error type and status code,
-never the provider's response text, so read the status: 401 or 403 is
+request; "Embedder calibration request failed" is the same for the
+calibration request right after it. Startup errors carry the error
+type and status code, never the provider's response text, so read the
+status: 401 or 403 is
 the API key, 402 is the provider account (no balance or billing), 404
 is usually `EMBED_MODEL`. The indexer exits and Docker restarts it
 until the account or setting is fixed. "did not become ready within

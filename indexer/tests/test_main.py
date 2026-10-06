@@ -28,12 +28,13 @@ import pytest
 from openai import APIStatusError
 from src import main, parser
 from src.database import EMBEDDING_DIM, Database
+from src.embed_identity import CALIBRATION_TEXT
 from src.maildir import SyncStamp
 from src.queue import REASON_INITIAL_SCAN, REASON_REEXTRACT, IndexingQueue
 from src.threader import Threader
 from src.timings import TimingAggregator
 
-from tests.conftest import make_mock_embedder
+from tests.conftest import make_message, make_mock_embedder, make_thread
 
 # Captured before any test monkeypatches the name, so the sorted
 # wrapper installed by ``_run`` still walks the real Maildir.
@@ -1329,37 +1330,42 @@ class TestWarnIfRemoteEndpoint:
         assert self._warnings(caplog) == []
 
 
-class TestValidateEmbeddingDim:
-    def test_matching_dim_passes_silently(self):
-        embedder = make_mock_embedder()
-        embedder.embed.return_value = [0.0] * EMBEDDING_DIM
-        main._validate_embedding_dim(embedder)
-        embedder.embed.assert_called_once()
+class TestStartupWidthCheck:
+    """The startup width check rides on the calibration request (#841)."""
 
-    def test_mismatched_dim_raises_systemexit(self):
+    def _embedder(self, vector=None):
+        embedder = make_mock_embedder(vector)
+        embedder.base_url = "http://host.docker.internal:8001/v1"
+        return embedder
+
+    def test_matching_dim_passes_with_one_request(self, tmp_path):
+        embedder = self._embedder([0.1] * EMBEDDING_DIM)
+        main._check_embedder_identity(Database(tmp_path / "mail.db"), embedder)
+        embedder.embed.assert_called_once_with(CALIBRATION_TEXT)
+
+    def test_mismatched_dim_raises_systemexit(self, tmp_path):
         """A 1024-dim model (e.g. mxbai-embed-large) against a 4096-reserved
         schema must fail fast at startup rather than surface later as a
         cryptic sqlite-vec insert error."""
-        embedder = make_mock_embedder()
-        embedder.embed.return_value = [0.0] * (EMBEDDING_DIM + 256)
+        embedder = self._embedder([0.0] * (EMBEDDING_DIM + 256))
         with pytest.raises(SystemExit) as exc_info:
-            main._validate_embedding_dim(embedder)
+            main._check_embedder_identity(Database(tmp_path / "mail.db"), embedder)
         assert str(EMBEDDING_DIM) in str(exc_info.value)
 
-    def test_probe_failure_exits_without_provider_text(self, caplog):
-        """The dimension probe runs right after ``wait_for_ready``; a
+    def test_request_failure_exits_without_provider_text(self, tmp_path, caplog):
+        """The calibration request runs right after ``wait_for_ready``; a
         failure there exits with type and status only, not the
         provider's response body (#686)."""
         caplog.set_level(logging.DEBUG)
         body = {"error": {"message": "provider text MARKER-686"}}
-        embedder = make_mock_embedder()
+        embedder = self._embedder()
         embedder.embed.side_effect = APIStatusError(
             message=f"Error code: 402 - {body}",
             response=httpx2.Response(402, json=body, request=httpx2.Request("POST", "http://x")),
             body=body,
         )
         with pytest.raises(SystemExit) as exc_info:
-            main._validate_embedding_dim(embedder)
+            main._check_embedder_identity(Database(tmp_path / "mail.db"), embedder)
         exc = exc_info.value
         rendered = "".join(traceback.format_exception(exc))
         for text in (str(exc), repr(exc), rendered, caplog.text):
@@ -1495,6 +1501,34 @@ class TestIndexOneFileChunking:
 
         # The second pass should not have triggered any new embed calls.
         assert embedder.embed.call_count == first_call_count
+
+    def test_attachment_stored_chunk_ids_are_looked_up_once(self, tmp_path, monkeypatch):
+        """#845: preparing an attachment does not diff stored chunk IDs;
+        the batched pipeline does it once per occurrence, then embeds."""
+        db = Database(tmp_path / "db" / "mail.db")
+        threader = Threader(db)
+        dest = tmp_path / "INBOX" / "cur" / "msg.eml"
+        _write_eml_with_text_attachment(dest, "attachment-lookup@x")
+
+        lookups: list[str | None] = []
+        real_lookup = db.get_chunk_ids_for_message
+
+        def counting_lookup(claimant_id, attachment_id=None):
+            lookups.append(attachment_id)
+            return real_lookup(claimant_id, attachment_id=attachment_id)
+
+        monkeypatch.setattr(db, "get_chunk_ids_for_message", counting_lookup)
+        monkeypatch.setattr(main, "MAILDIR_PATH", tmp_path)
+        embedder = make_mock_embedder([0.1] * EMBEDDING_DIM)
+
+        ok, _, _ = _index_one(dest, db, embedder, threader)
+
+        assert ok
+        attachment_lookups = [a for a in lookups if a is not None]
+        assert len(attachment_lookups) == 1
+        assert _chunk_ids(db, "attachment-lookup@x")
+        embedded = [t for call in embedder.embed_batch.call_args_list for t in call.args[0]]
+        assert embedded.count("attachment text that should be chunked") == 1
 
     def test_attachment_embed_failure_does_not_persist_partial_chunks(self, tmp_path):
         """A failing attachment embed must surface as a retryable
@@ -4698,17 +4732,19 @@ class TestMainStartupAndLoop:
         synced=False,
         refresh=None,
         embed_url="http://host.docker.internal:8001/v1",
+        embed_vector=None,
     ):
         events: list[str] = []
+        self._events = events
         db = Database(tmp_path / "mail.db")
         self._db = db
         monkeypatch.setattr(main, "_ingestion_state", None)
         monkeypatch.setattr(main, "MAILDIR_PATH", tmp_path / "maildir")
         monkeypatch.setattr(main, "_validate_embed_config", lambda: None)
-        monkeypatch.setattr(main, "_validate_embedding_dim", lambda e: None)
         monkeypatch.setattr(main, "Database", lambda path: db)
-        embedder = make_mock_embedder()
+        embedder = make_mock_embedder(embed_vector or [0.1] * EMBEDDING_DIM)
         embedder.base_url = embed_url
+        self._embedder = embedder
         monkeypatch.setattr(main, "OpenAIEmbedder", lambda **kw: embedder)
         monkeypatch.setattr(main, "touch_health_file", lambda: None)
         monkeypatch.setattr(main, "sweep_paths", lambda db: events.append("sweep_paths"))
@@ -4777,6 +4813,91 @@ class TestMainStartupAndLoop:
         monkeypatch.setattr(main.time, "sleep", _stop)
         main.main()
         return events
+
+    # --- startup embedder checks (#841) ------------------------------------
+    # Wrong vector width and a changed embedder identity each stop startup
+    # before indexing, on a fresh index and on one that already records
+    # its embedder.
+
+    def _record_identity(self, tmp_path, monkeypatch, vector):
+        db = Database(tmp_path / "mail.db")
+        embedder = make_mock_embedder(vector)
+        embedder.base_url = "http://host.docker.internal:8001/v1"
+        main._check_embedder_identity(db, embedder)
+        db.close()
+
+    def _generations(self):
+        return self._db._conn.execute("SELECT model, dimensions FROM vector_generations").fetchall()
+
+    def _assert_stopped_before_indexing(self, tmp_path, monkeypatch, vector):
+        with pytest.raises(SystemExit) as info:
+            self._run_main(tmp_path, monkeypatch, sweep_due=False, embed_vector=vector)
+        assert not any(e.startswith("initial_index") for e in self._events)
+        return str(info.value.code)
+
+    def test_fresh_index_with_wrong_width_stops_before_recording(self, tmp_path, monkeypatch):
+        message = self._assert_stopped_before_indexing(
+            tmp_path, monkeypatch, [0.1] * (EMBEDDING_DIM + 256)
+        )
+        assert message == (
+            f"Embedder produced {EMBEDDING_DIM + 256}-dim vectors, but the SQLite "
+            f"schema reserves {EMBEDDING_DIM}-dim (threads_vec "
+            f"FLOAT[{EMBEDDING_DIM}]). Either switch to a model that "
+            f"outputs {EMBEDDING_DIM}-dim vectors, or migrate the schema."
+        )
+        assert self._generations() == []
+
+    def test_existing_index_with_wrong_width_stops_with_the_width_message(
+        self, tmp_path, monkeypatch
+    ):
+        self._record_identity(tmp_path, monkeypatch, [0.1] * EMBEDDING_DIM)
+        message = self._assert_stopped_before_indexing(
+            tmp_path, monkeypatch, [0.1] * (EMBEDDING_DIM - 1)
+        )
+        assert message.startswith(f"Embedder produced {EMBEDDING_DIM - 1}-dim vectors")
+        assert [tuple(r) for r in self._generations()] == [(main.EMBED_MODEL, EMBEDDING_DIM)]
+
+    def test_existing_index_with_another_embedder_stops_with_the_identity_message(
+        self, tmp_path, monkeypatch
+    ):
+        recorded = [0.0] * EMBEDDING_DIM
+        recorded[0] = 1.0
+        self._record_identity(tmp_path, monkeypatch, recorded)
+        other = [0.0] * EMBEDDING_DIM
+        other[1] = 1.0
+        message = self._assert_stopped_before_indexing(tmp_path, monkeypatch, other)
+        assert "not the one that built this index" in message
+        assert "calibration vector: cosine distance" in message
+
+    def test_fresh_index_holding_messages_stops_with_the_identity_message(
+        self, tmp_path, monkeypatch
+    ):
+        db = Database(tmp_path / "mail.db")
+        db.upsert_thread(
+            make_thread(messages=[make_message(message_id="m@example.com")]),
+            [0.0] * EMBEDDING_DIM,
+        )
+        db.close()
+        message = self._assert_stopped_before_indexing(tmp_path, monkeypatch, [0.1] * EMBEDDING_DIM)
+        assert "holds messages but no record of the embedder" in message
+        assert self._generations() == []
+
+    def test_fresh_index_records_the_embedder_and_indexes(self, tmp_path, monkeypatch):
+        events = self._run_main(
+            tmp_path, monkeypatch, sweep_due=False, embed_vector=[0.1] * EMBEDDING_DIM
+        )
+        assert any(e.startswith("initial_index") for e in events)
+        assert [tuple(r) for r in self._generations()] == [(main.EMBED_MODEL, EMBEDDING_DIM)]
+
+    def test_startup_probes_the_embedder_once(self, tmp_path, monkeypatch):
+        """#841: the width check reuses the calibration vector, so startup
+        makes one embed request, on a fresh index and on a recorded one."""
+        for _ in range(2):
+            self._run_main(
+                tmp_path, monkeypatch, sweep_due=False, embed_vector=[0.1] * EMBEDDING_DIM
+            )
+            assert [c.args for c in self._embedder.embed.call_args_list] == [(CALIBRATION_TEXT,)]
+            self._db.close()
 
     def test_stall_guard_starts_before_initial_drain(self, tmp_path, monkeypatch):
         """#235: the guard must be watching during the initial drain,

@@ -42,12 +42,27 @@ def _attachment(
     )
 
 
-def _prepare_and_apply(*, db: Database, thread_id: str, **prepare_kwargs: Any) -> None:
+def _embed_new_chunks(plan: Any, *, db: Database, claimant_id: str, embedder: Any) -> None:
+    """Fill ``plan.embeddings_by_chunk_id`` the way ``main.py``'s batched
+    pipeline does: diff the plan's chunks against the stored chunk IDs
+    and embed only the new ones, in one ``embed_batch`` call."""
+    stored = db.get_chunk_ids_for_message(claimant_id, attachment_id=plan.attachment.content_hash)
+    new_chunks = [c for c in plan.chunks if c.chunk_id not in stored]
+    if new_chunks:
+        vectors = embedder.embed_batch([c.text for c in new_chunks])
+        plan.embeddings_by_chunk_id = {c.chunk_id: v for c, v in zip(new_chunks, vectors)}
+
+
+def _prepare_and_apply(
+    *, db: Database, thread_id: str, embedder: Any = None, **prepare_kwargs: Any
+) -> None:
     """Run one attachment through the indexer's two phases the way
-    ``main.py`` does: ``prepare_attachment_writes`` outside the write
-    transaction, then ``apply_attachment_writes`` inside
-    ``db.transaction()``."""
+    ``main.py`` does: ``prepare_attachment_writes`` and the embed step
+    outside the write transaction, then ``apply_attachment_writes``
+    inside ``db.transaction()``."""
     plan = prepare_attachment_writes(db=db, **prepare_kwargs)
+    if embedder is not None:
+        _embed_new_chunks(plan, db=db, claimant_id=prepare_kwargs["claimant_id"], embedder=embedder)
     with db.transaction():
         apply_attachment_writes(
             plan=plan,
@@ -227,7 +242,6 @@ def test_stale_ocr_row_is_served_while_ocr_is_off(tmp_path, monkeypatch):
     monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
     plan = prepare_attachment_writes(
         db=db,
-        embedder=None,
         **_kwargs(attachment, claimant_id="message@example.com", ocr_enabled=False),
     )
     extractor.assert_not_called()
@@ -814,13 +828,14 @@ def _kwargs(attachment, **overrides):
 
 
 class TestPrepareApplyBoundary:
-    """``prepare_attachment_writes`` must do all extraction + embedding
-    before any DB write happens, and ``apply_attachment_writes`` must
-    do only DB writes — no extractor, no embedding service. This boundary
-    is what keeps the SQLite write transaction off the critical path of
-    slow embedding service HTTP roundtrips."""
+    """``prepare_attachment_writes`` must do all extraction + chunking
+    before any DB write happens, leaving embedding to the caller's
+    batched step, and ``apply_attachment_writes`` must do only DB
+    writes — no extractor, no embedding service. This boundary is what
+    keeps the SQLite write transaction off the critical path of slow
+    embedding service HTTP roundtrips."""
 
-    def test_prepare_does_not_call_extract_or_embed_when_cache_hits(self, tmp_path, monkeypatch):
+    def test_prepare_does_not_call_extract_when_cache_hits(self, tmp_path, monkeypatch):
         db = _setup_db_for_attachment(tmp_path)
         attachment = _attachment()
         db.store_attachment_extraction(
@@ -833,15 +848,14 @@ class TestPrepareApplyBoundary:
 
         extractor = MagicMock()
         monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
-        embedder = make_mock_embedder()
-        embedder.embed.return_value = [0.1] * EMBEDDING_DIM
 
-        plan = prepare_attachment_writes(db=db, embedder=embedder, **_kwargs(attachment))
+        plan = prepare_attachment_writes(db=db, **_kwargs(attachment))
 
         extractor.assert_not_called()
-        # Embed still runs for new chunks even on a cache hit (the chunks
-        # are derived from the cached text and may be new).
-        assert embedder.embed.called
+        # The chunks come from the cached text; embedding them is left
+        # to the caller's batched step (#845).
+        assert [c.text for c in plan.chunks] == ["cached body"]
+        assert plan.embeddings_by_chunk_id == {}
         assert plan.extraction_to_persist is None
 
     def test_apply_does_no_extraction_or_embedding(self, tmp_path, monkeypatch):
@@ -849,7 +863,9 @@ class TestPrepareApplyBoundary:
         attachment = _attachment()
         embedder = make_mock_embedder()
         embedder.embed.return_value = [0.1] * EMBEDDING_DIM
-        plan = prepare_attachment_writes(db=db, embedder=embedder, **_kwargs(attachment))
+        plan = prepare_attachment_writes(db=db, **_kwargs(attachment))
+        _embed_new_chunks(plan, db=db, claimant_id="msg@x", embedder=embedder)
+        assert plan.embeddings_by_chunk_id
 
         # Ensure the apply phase does not touch the extractor or embedder.
         extractor = MagicMock()
@@ -874,15 +890,8 @@ class TestMultiOccurrenceDeterminism:
         ``attachments`` rows so every forwarded copy can coexist."""
         db = _setup_db_for_attachment(tmp_path)
         attachment = _attachment()
-        embedder = make_mock_embedder()
-        embedder.embed.return_value = [0.1] * EMBEDDING_DIM
-
-        plan_a = prepare_attachment_writes(
-            db=db, embedder=embedder, **_kwargs(attachment, occurrence_index=0)
-        )
-        plan_b = prepare_attachment_writes(
-            db=db, embedder=embedder, **_kwargs(attachment, occurrence_index=1)
-        )
+        plan_a = prepare_attachment_writes(db=db, **_kwargs(attachment, occurrence_index=0))
+        plan_b = prepare_attachment_writes(db=db, **_kwargs(attachment, occurrence_index=1))
         assert plan_a.occurrence_id != plan_b.occurrence_id
 
     def test_same_inputs_yield_same_occurrence_id(self, tmp_path):
@@ -890,15 +899,8 @@ class TestMultiOccurrenceDeterminism:
         occurrence ID so the apply phase's upsert is idempotent."""
         db = _setup_db_for_attachment(tmp_path)
         attachment = _attachment()
-        embedder = make_mock_embedder()
-        embedder.embed.return_value = [0.1] * EMBEDDING_DIM
-
-        plan_a = prepare_attachment_writes(
-            db=db, embedder=embedder, **_kwargs(attachment, occurrence_index=0)
-        )
-        plan_b = prepare_attachment_writes(
-            db=db, embedder=embedder, **_kwargs(attachment, occurrence_index=0)
-        )
+        plan_a = prepare_attachment_writes(db=db, **_kwargs(attachment, occurrence_index=0))
+        plan_b = prepare_attachment_writes(db=db, **_kwargs(attachment, occurrence_index=0))
         assert plan_a.occurrence_id == plan_b.occurrence_id
 
     def test_replay_skips_re_embedding_existing_chunks(self, tmp_path):
@@ -1072,7 +1074,6 @@ def test_batch_results_are_shared_but_do_not_block_a_supported_occurrence(tmp_pa
     def prepare(filename, content_type):
         return prepare_attachment_writes(
             db=db,
-            embedder=None,
             batch_extractions=batch,
             **_kwargs(_attachment(payload, filename=filename, content_type=content_type)),
         )
@@ -1140,7 +1141,6 @@ def test_batch_ocr_disabled_result_does_not_block_a_non_ocr_occurrence(tmp_path,
     for filename, content_type in (("scan.png", "image/png"), ("doc.txt", "text/plain")):
         plan = prepare_attachment_writes(
             db=db,
-            embedder=None,
             batch_extractions=batch,
             **_kwargs(
                 _attachment(payload, filename=filename, content_type=content_type),
@@ -1161,7 +1161,7 @@ def test_unsupported_attachment_log_omits_filename_and_mime(tmp_path, caplog):
         content_type="application/x-SYNTHETIC_MIME_MARKER",
     )
 
-    plan = prepare_attachment_writes(db=db, embedder=None, **_kwargs(attachment))
+    plan = prepare_attachment_writes(db=db, **_kwargs(attachment))
     with db.transaction():
         apply_attachment_writes(
             plan=plan,
@@ -1191,7 +1191,7 @@ def test_failed_extraction_persists_no_filename_or_parser_text(tmp_path, monkeyp
     db = _setup_db_for_attachment(tmp_path)
     attachment = _attachment(filename="SYNTHETIC_FILENAME_MARKER.pdf", content_type="")
 
-    plan = prepare_attachment_writes(db=db, embedder=None, **_kwargs(attachment))
+    plan = prepare_attachment_writes(db=db, **_kwargs(attachment))
     with db.transaction():
         apply_attachment_writes(
             plan=plan,
