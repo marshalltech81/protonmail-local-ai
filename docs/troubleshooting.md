@@ -993,7 +993,11 @@ only, never filenames or text (`make logs`):
   the pages past the cap are not read. Every capped PDF is also counted
   in the attachments line below (`ocr_capped_pdfs`, `ocr_pages_skipped`).
   Raising the cap applies only to PDFs extracted afterwards, since the
-  result is cached.
+  result is cached. Known limitation (#891): the cap is logged and
+  counted on the first extraction only. A later message carrying the
+  same PDF is served from the extraction cache and reports a plain
+  `success`, with no cap line and no `ocr_capped_pdfs` count, although
+  the cached text still lacks the unread pages.
 - These per-attachment WARNINGs (failed extractions and OCR caps
   together) are capped at 20 per 5 minutes, so one message carrying
   many bad or long attachments cannot flood the log. The rest are
@@ -1003,9 +1007,10 @@ only, never filenames or text (`make logs`):
   ocr_pages_skipped= warnings_suppressed=`: the attachments of the
   messages committed since the previous line, by outcome. It is a
   WARNING when any of `failed`, `unsupported`, `too_large`,
-  `ocr_disabled`, `pdf_pages_failed`, `ocr_capped_pdfs`,
-  `ocr_pages_skipped` or `warnings_suppressed` is above zero
-  (some attachment text is not searchable), and INFO otherwise.
+  `ocr_disabled`, `ocr_capped_pdfs`, `ocr_pages_skipped` or
+  `warnings_suppressed` is above zero (some attachment text is not
+  searchable), and INFO otherwise. `pdf_pages_failed` alone does not
+  make it a WARNING (see below).
   - When it is logged: during the initial index, with the timing summary
     once at least 25 messages have been drained since the last one (each
     batch, at the default `INITIAL_INDEX_BATCH_SIZE=50`), and once at
@@ -1019,10 +1024,12 @@ only, never filenames or text (`make logs`):
     `INDEXER_ATTACHMENT_MAX_BYTES`, and `ocr_disabled` is an image or
     scanned PDF skipped while `INDEXER_OCR_ENABLED=false` (re-extracted
     once OCR is turned on).
-  - What the extraction counts mean: `pdf_pages_failed` counts PDF pages
-    whose text layer pypdf could not read; each is skipped (and OCR'd
-    when it is a scanned-page candidate and OCR is on). A steady rise
-    across ordinary PDFs points at a pypdf regression.
+  - What the extraction counts mean: `pdf_pages_failed` is a diagnostic
+    count of PDF pages whose text layer pypdf could not read. With OCR
+    on, such a page is OCR'd (within `INDEXER_OCR_MAX_PAGES`) and its
+    text may be recovered, so the count alone does not mean text is
+    missing. A steady rise across ordinary PDFs points at a pypdf
+    regression.
     `ocr_capped_pdfs` counts scanned PDFs whose OCR stopped at
     `INDEXER_OCR_MAX_PAGES`, and `ocr_pages_skipped` the scanned pages
     they left unread.

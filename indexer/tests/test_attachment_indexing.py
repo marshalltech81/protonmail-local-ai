@@ -1427,7 +1427,9 @@ class TestAttachmentOutcomeCounts:
             ("unsupported", True),
             ("too_large", True),
             ("ocr_disabled", True),
-            ("pdf_pages_failed", True),
+            # A page pypdf cannot read may still be OCR-recovered: a
+            # diagnostic count, not lost text (review round 3).
+            ("pdf_pages_failed", False),
             ("ocr_capped_pdfs", True),
             ("ocr_pages_skipped", True),
             ("warnings_suppressed", True),

@@ -124,13 +124,14 @@ _SUMMARY_FIELDS = (
     "warnings_suppressed",
 )
 # Counts that mean attachment text is missing from search: the line is
-# then a WARNING (review round 1 on #884).
+# then a WARNING (review round 1 on #884). ``pdf_pages_failed`` is left
+# out: a page pypdf cannot read is OCR'd when OCR is on and may be
+# recovered, so it is a diagnostic count (review round 3).
 _DEGRADED_FIELDS = (
     STATUS_FAILED,
     STATUS_UNSUPPORTED,
     STATUS_TOO_LARGE,
     "ocr_disabled",
-    "pdf_pages_failed",
     "ocr_capped_pdfs",
     "ocr_pages_skipped",
     "warnings_suppressed",
