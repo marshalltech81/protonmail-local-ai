@@ -18,6 +18,7 @@ import os
 import quopri
 import re
 import secrets
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -27,6 +28,36 @@ from typing import Any
 import html2text
 
 log = logging.getLogger("indexer.parser")
+
+# The per-message work caps that drop content, by the fixed name the
+# parse logs them under (#872), in log order. Each counts the parts,
+# headers or addresses it dropped from one message:
+#
+# * ``attached_depth`` / ``attached_fields``: a container attachment
+#   past ``MAX_ATTACHED_MESSAGE_DEPTH`` or the message's
+#   ``MAX_ATTACHED_MESSAGE_FIELDS`` budget keeps an empty payload;
+# * ``transport_decode``: a transfer-encoded attached email that does
+#   not decode keeps an empty payload;
+# * ``decoded_bytes``: one past ``MAX_DECODED_ATTACHMENT_BYTES`` does too;
+# * ``container_serialize``: a container the generator refuses does too;
+# * ``body_parts``: text parts past ``MAX_BODY_TEXT_PARTS`` are left out
+#   of the body;
+# * ``address_header``: an address header over
+#   ``_MAX_ADDRESS_HEADER_CHARS`` loses all its recipients;
+# * ``address_element`` / ``address_length``: one address-list element
+#   over ``_MAX_ADDRESS_ELEMENT_CHARS``, or an address over
+#   ``_MAX_ADDRESS_CHARS``, is dropped.
+PARSE_CAPS: tuple[str, ...] = (
+    "attached_depth",
+    "attached_fields",
+    "transport_decode",
+    "decoded_bytes",
+    "container_serialize",
+    "body_parts",
+    "address_header",
+    "address_element",
+    "address_length",
+)
 
 
 class OversizedMessageError(Exception):
@@ -374,15 +405,18 @@ def parse_email(path: Path, maildir_root: Path | None = None) -> Message | None:
         if len(ref) <= MESSAGE_ID_MAX_CHARS
     ]
 
+    # Work caps that drop content, counted by ``PARSE_CAPS`` name and
+    # logged once below.
+    caps: Counter[str] = Counter()
     subject = _decode_header(msg.get("Subject", NO_SUBJECT))[:SUBJECT_MAX_CHARS]
     # Parse From structurally, like To / Cc: decoding the whole header
     # first turns an encoded name with a comma ("=?utf-8?q?Doe=2C_Jane?=")
     # into an unquoted "Doe, Jane <...>" that no longer parses as one
     # address, and a multi-author From would be read as a single address.
-    from_addrs = _parse_addrs(msg.get("From", ""))
+    from_addrs = _parse_addrs(msg.get("From", ""), caps)
     from_addr = from_addrs[0] if from_addrs else _decode_header(msg.get("From", ""))
-    to_addrs = _parse_addrs(msg.get("To", ""))
-    cc_addrs = _parse_addrs(msg.get("Cc", ""))
+    to_addrs = _parse_addrs(msg.get("To", ""), caps)
+    cc_addrs = _parse_addrs(msg.get("Cc", ""), caps)
     # A raw 8-bit Date header comes back as an ``email.header.Header``,
     # which ``parsedate_to_datetime`` cannot split (#361). A Date header
     # is ASCII by RFC 5322, so drop anything else from its text: a
@@ -393,7 +427,15 @@ def parse_email(path: Path, maildir_root: Path | None = None) -> Message | None:
     date = parsed_date if parsed_date is not None else datetime.now(UTC)
     occurred_at = _parse_received_date(msg)
 
-    body_text, attachments = _extract_body_and_attachments(msg)
+    body_text, attachments = _extract_body_and_attachments(msg, caps=caps)
+    if caps:
+        # Fixed names and counts only, with the Maildir path: the
+        # message is indexed with this content missing (#872).
+        log.info(
+            "parser work caps dropped content from %s: %s",
+            path,
+            ",".join(f"{name}={caps[name]}" for name in PARSE_CAPS if caps[name]),
+        )
 
     folder = _derive_folder(path, maildir_root)
 
@@ -612,6 +654,7 @@ def _attachment_payload(
     *,
     serialize_containers: bool,
     budget: _SerializationBudget,
+    caps: Counter[str],
     decode_depth: int = 0,
 ) -> tuple[bytes, email.message.Message | None]:
     """The bytes an attachment carries, and, for a transfer-encoded
@@ -641,6 +684,9 @@ def _attachment_payload(
     (a header it refuses, 8-bit bytes in a transport form) keeps the
     empty payload: such errors quote the input, so they are never
     allowed to escape into a job's recorded error.
+
+    Every empty payload a cap or a failure leaves is counted in
+    ``caps`` under its ``PARSE_CAPS`` name.
     """
     if not part.is_multipart():
         return _decoded_payload(part), None
@@ -656,41 +702,57 @@ def _attachment_payload(
         # The parser read the transport form as MIME whatever the label
         # (one child for an attached email, one per block for a delivery
         # report), so check that tree's depth before rebuilding it.
-        if decode_depth >= MAX_ATTACHED_MESSAGE_DEPTH or _nesting_exceeds(
-            part, MAX_ATTACHED_MESSAGE_DEPTH + 1, budget
-        ):
+        if decode_depth >= MAX_ATTACHED_MESSAGE_DEPTH:
+            caps["attached_depth"] += 1
+            return b"", None
+        if _nesting_exceeds(part, MAX_ATTACHED_MESSAGE_DEPTH + 1, budget):
+            caps[_nesting_cap(budget)] += 1
             return b"", None
         try:
             transport = _transport_text(part)
         except email.errors.MessageError, UnicodeError:
+            caps["transport_decode"] += 1
             return b"", None
         budget.decodable -= len(transport)
         if budget.decodable < 0:
+            caps["decoded_bytes"] += 1
             return b"", None
         content_type = str(part.get("Content-Type", "message/rfc822"))
         decoded = _decode_transport_form(transport, encoding, content_type)
         if decoded is None:
+            caps["transport_decode"] += 1
             return b"", None
         # From here the decoded container is the part: the same depth
         # check, serialization and traversal as an identity-encoded one.
         part = decoded
         if _nesting_exceeds(part, MAX_ATTACHED_MESSAGE_DEPTH + 1, budget):
+            caps[_nesting_cap(budget)] += 1
             return b"", None
         if not serialize_containers:
             return b"", part
         try:
             return _serialized_body(part), part
         except email.errors.MessageError, UnicodeError:
+            caps["container_serialize"] += 1
             return b"", part
     if not serialize_containers:
         return b"", None
     # The part's own tree is one level deeper than the email it carries.
     if _nesting_exceeds(part, MAX_ATTACHED_MESSAGE_DEPTH + 1, budget):
+        caps[_nesting_cap(budget)] += 1
         return b"", None
     try:
         return _serialized_body(part), None
     except email.errors.MessageError, UnicodeError:
+        caps["container_serialize"] += 1
         return b"", None
+
+
+def _nesting_cap(budget: _SerializationBudget) -> str:
+    """Which cap a ``_nesting_exceeds`` that returned True hit: the
+    message's field budget once it is spent (it stays spent), else the
+    depth cap."""
+    return "attached_fields" if budget.remaining < 0 else "attached_depth"
 
 
 def _transport_text(container: email.message.Message) -> bytes:
@@ -851,7 +913,12 @@ def _assemble_body(nodes: list[_BodyNode]) -> str:
 
 def _extract_body_and_attachments(
     msg: email.message.Message,
+    caps: Counter[str] | None = None,
 ) -> tuple[str, list[Attachment]]:
+    """The message's body text and attachments. ``caps`` (when given)
+    counts the content a work cap dropped, by ``PARSE_CAPS`` name."""
+    if caps is None:
+        caps = Counter()
     attachments: list[Attachment] = []
     nodes: list[_BodyNode] = []
     text_parts = 0
@@ -881,6 +948,7 @@ def _extract_body_and_attachments(
                 part,
                 serialize_containers=not in_attachment,
                 budget=budget,
+                caps=caps,
                 decode_depth=decode_depth,
             )
             attachments.append(
@@ -929,7 +997,7 @@ def _extract_body_and_attachments(
                     if isinstance(c, email.message.Message)
                 )
             continue
-        if node is None or text_parts >= MAX_BODY_TEXT_PARTS:
+        if node is None:
             continue
         # A single-part message's text is its body whatever the text
         # subtype (text/calendar, text/enriched); inside a multipart only
@@ -942,6 +1010,9 @@ def _extract_body_and_attachments(
         if not is_html and not (
             ct == "text/plain" or (part is msg and part.get_content_maintype() == "text")
         ):
+            continue
+        if text_parts >= MAX_BODY_TEXT_PARTS:
+            caps["body_parts"] += 1
             continue
         text_parts += 1
         text = _safe_decode(_decoded_payload(part), part.get_content_charset() or "utf-8")
@@ -1220,7 +1291,7 @@ def _split_address_list(text: str) -> list[str]:
     return [element.strip() for element in elements if element.strip()]
 
 
-def _parse_addrs(value: str | email.header.Header) -> list[str]:
+def _parse_addrs(value: str | email.header.Header, caps: Counter[str] | None = None) -> list[str]:
     """Parse an address header into one parseable string per address.
 
     Raw 8-bit headers (UTF-8 written directly in the header) arrive as
@@ -1230,13 +1301,17 @@ def _parse_addrs(value: str | email.header.Header) -> list[str]:
     on its own; display names are decoded only after the address is
     fixed, so name content can never become address syntax. Every step
     fails safe: an element that cannot be parsed costs only that
-    recipient, never the message.
+    recipient, never the message. ``caps`` (when given) counts the
+    recipients a work cap dropped, by ``PARSE_CAPS`` name.
     """
+    if caps is None:
+        caps = Counter()
     if not value:
         return []
     text = _decode_header(value) if isinstance(value, email.header.Header) else value
     if len(text) > _MAX_ADDRESS_HEADER_CHARS:
         log.debug("address header over %d chars; recipients not parsed", _MAX_ADDRESS_HEADER_CHARS)
+        caps["address_header"] += 1
         return []
     # Unfold once, before anything parses the text: the standard library
     # keeps a fold inside a quoted string or comment, and a CRLF there
@@ -1246,6 +1321,7 @@ def _parse_addrs(value: str | email.header.Header) -> list[str]:
     addresses = []
     for element in _split_address_list(protected):
         if len(element) > _MAX_ADDRESS_ELEMENT_CHARS:
+            caps["address_element"] += 1
             continue
         try:
             name, addr = email.utils.parseaddr(element)
@@ -1259,7 +1335,10 @@ def _parse_addrs(value: str | email.header.Header) -> list[str]:
             # that is not a parseaddr fixed point (an unsafe restored
             # encoded-word, say) is discarded HERE, inside the failure
             # boundary, not handed to an unguarded reparser later.
-            if len(addr) > _MAX_ADDRESS_CHARS or email.utils.parseaddr(addr)[1] != addr:
+            if len(addr) > _MAX_ADDRESS_CHARS:
+                caps["address_length"] += 1
+                continue
+            if email.utils.parseaddr(addr)[1] != addr:
                 continue
             name = _decode_display_name(restore(name)) if name else ""
             formatted = _format_address(name, addr)

@@ -924,7 +924,7 @@ class TestDrainQueueRetryAndDeadLetter:
         # propagates out and the worker marks the queue row failed.
         from src import parser
 
-        def boom(msg):
+        def boom(msg, **_kwargs):
             raise RuntimeError("simulated html2text runaway")
 
         monkeypatch.setattr(parser, "_extract_body_and_attachments", boom)

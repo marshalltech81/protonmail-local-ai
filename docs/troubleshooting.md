@@ -973,7 +973,7 @@ thread) is not a token limit: no setting changes it, so it logs no
 warning. It is counted as `evidence_capped_threads` on the call's
 `mcp.timings` line instead.
 
-## Attachment text missing from search
+## Attachment text or message content missing from search
 
 An attachment whose text could not be extracted is still indexed by
 filename and type, but its contents are not searchable. The indexer
@@ -1000,6 +1000,27 @@ only, never filenames or text (`make logs`):
   reads, `too_large` is over `INDEXER_ATTACHMENT_MAX_BYTES`, and
   `ocr_disabled` is an image or scanned PDF skipped while
   `INDEXER_OCR_ENABLED=false` (re-extracted once OCR is turned on).
+
+The parser also caps the work one message can cost, and a cap that
+drops content logs one INFO line for that message, with its Maildir
+path and the caps that fired, by name and count:
+`parser work caps dropped content from <path>: body_parts=5,address_header=1`.
+The message is still indexed, without that content:
+
+| Cap | What was dropped |
+|---|---|
+| `attached_depth` | An attached email nested more than 20 levels deep: recorded with an empty payload, so it shares one content hash with every other empty one |
+| `attached_fields` | The same, once the message's attached emails exceed the per-message part and header budget |
+| `transport_decode` | A base64 or quoted-printable attached email that does not decode: empty payload, and the attachments inside it are not read |
+| `decoded_bytes` | The same, past 64 MB of decoded attached emails per message |
+| `container_serialize` | An attached email the serializer refuses (a malformed header): empty payload |
+| `body_parts` | Text parts past the 200th, left out of the body |
+| `address_header` | Every recipient of a `From`, `To` or `Cc` header over 256,000 characters |
+| `address_element` | One address-list entry over 128,000 characters |
+| `address_length` | One address over 998 characters |
+
+The caps bound what crafted mail can cost the single indexing worker,
+so they are not configurable. Ordinary mail does not reach them.
 
 ## Claude Desktop doesn't see the tools
 

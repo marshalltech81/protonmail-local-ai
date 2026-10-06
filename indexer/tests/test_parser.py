@@ -3306,3 +3306,260 @@ def _count_reads(monkeypatch) -> list[int]:
 
     monkeypatch.setattr("src.parser.open", counting_open, raising=False)
     return sizes
+
+
+# ---------------------------------------------------------------------------
+# Parser work caps are logged (#872)
+# ---------------------------------------------------------------------------
+
+_CAP_HEAD = (
+    b"Message-ID: <caps@example.test>\r\nFrom: sender@example.test\r\n"
+    b"Date: Mon, 28 Sep 2026 12:00:00 +0000\r\nMIME-Version: 1.0\r\n"
+)
+_CAP_FILENAME = b'Content-Disposition: attachment; filename="SYNTHETIC_FILENAME_MARKER.eml"\r\n'
+
+
+def _with_attachment(headers: bytes, body: bytes) -> bytes:
+    """A message whose body is PARENT_BODY plus one attachment part with
+    ``headers`` (beside the marker filename) and ``body``."""
+    return (
+        _CAP_HEAD + b'Content-Type: multipart/mixed; boundary="b"\r\n\r\n'
+        b"--b\r\nContent-Type: text/plain\r\n\r\nPARENT_BODY\r\n"
+        b"--b\r\n" + headers + _CAP_FILENAME + b"\r\n" + body + b"\r\n--b--\r\n"
+    )
+
+
+def _nested_rfc822(levels: int) -> bytes:
+    leaf = b"Content-Type: text/plain\r\n\r\nSYNTHETIC_TEXT_MARKER\r\n"
+    return b"Content-Type: message/rfc822\r\n\r\n" * (levels - 1) + leaf
+
+
+def _addresses(to: bytes) -> bytes:
+    return _CAP_HEAD + b"To: " + to + b"\r\nContent-Type: text/plain\r\n\r\nPARENT_BODY\r\n"
+
+
+_INNER_EMAIL = (
+    b"From: a@example.test\r\nSubject: SYNTHETIC_HEADER_MARKER\r\n\r\nSYNTHETIC_TEXT_MARKER\r\n"
+)
+_LONG_LOCAL = b"SYNTHETIC_HEADER_MARKER" + b"x" * 1000
+
+
+def _only_attachment_is_empty(msg) -> bool:
+    return msg.body_text == "PARENT_BODY" and [a.payload for a in msg.attachments] == [b""]
+
+
+_BASE64_RFC822 = b"Content-Type: message/rfc822\r\nContent-Transfer-Encoding: base64\r\n"
+
+
+def _base64_chain(levels: int) -> bytes:
+    """An attached email holding a base64 attached email, ``levels`` deep."""
+    inner = _INNER_EMAIL
+    for i in range(levels):
+        inner = (
+            b'MIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary="c%d"\r\n\r\n'
+            b"--c%d\r\n"
+            % (i, i)
+            + _BASE64_RFC822
+            + _CAP_FILENAME
+            + b"\r\n"
+            + base64.encodebytes(inner)
+            + b"--c%d--\r\n" % i
+        )
+    return _with_attachment(_BASE64_RFC822, base64.encodebytes(inner))
+
+
+def _chain_stops_at_the_depth_cap(msg) -> bool:
+    # The top attachment and one per decoded level are recorded, the last
+    # at the decode-depth cap and never decoded; only the top one is
+    # serialized.
+    payloads = [a.payload for a in msg.attachments]
+    return (
+        msg.body_text == "PARENT_BODY"
+        and len(payloads) == 21
+        and payloads[0] != b""
+        and payloads[1:] == [b""] * 20
+    )
+
+
+# Each shape fires one cap. ``small_decode_budget`` lowers the decoded-byte
+# budget (64 MB by default) so a small fixture can exhaust it. ``pinned``
+# is the parse result before the caps were logged.
+_CAP_SHAPES = {
+    "attached_depth": (
+        _with_attachment(b"Content-Type: message/rfc822\r\n", _nested_rfc822(21)),
+        False,
+        "attached_depth=1",
+        _only_attachment_is_empty,
+    ),
+    "attached_fields": (
+        _with_attachment(
+            b"Content-Type: message/delivery-status\r\n",
+            b"Reporting-MTA: dns; mx.example.test\r\n"
+            + b"X-Field: SYNTHETIC_HEADER_MARKER\r\n" * 20_000,
+        ),
+        False,
+        "attached_fields=1",
+        _only_attachment_is_empty,
+    ),
+    "attached_depth_decoded": (
+        _with_attachment(
+            _BASE64_RFC822, base64.encodebytes(b"MIME-Version: 1.0\r\n" + _nested_rfc822(21))
+        ),
+        False,
+        "attached_depth=1",
+        _only_attachment_is_empty,
+    ),
+    "attached_depth_decode_chain": (
+        _base64_chain(25),
+        False,
+        "attached_depth=1",
+        _chain_stops_at_the_depth_cap,
+    ),
+    "transport_decode_base64": (
+        _with_attachment(
+            b"Content-Type: message/rfc822\r\nContent-Transfer-Encoding: base64\r\n", b"A"
+        ),
+        False,
+        "transport_decode=1",
+        _only_attachment_is_empty,
+    ),
+    "transport_decode_8bit": (
+        _with_attachment(
+            b"Content-Type: message/rfc822\r\nContent-Transfer-Encoding: quoted-printable\r\n",
+            b"From: a@example.test\r\nSubject: SYNTHETIC_HEADER_MARKER caf\xc3\xa9\r\n\r\nhello",
+        ),
+        False,
+        "transport_decode=1",
+        _only_attachment_is_empty,
+    ),
+    "decoded_bytes": (
+        _with_attachment(
+            b"Content-Type: message/rfc822\r\nContent-Transfer-Encoding: base64\r\n",
+            base64.encodebytes(_INNER_EMAIL),
+        ),
+        True,
+        "decoded_bytes=1",
+        _only_attachment_is_empty,
+    ),
+    "container_serialize": (
+        _with_attachment(
+            b"Content-Type: message/rfc822\r\n",
+            b"From: a@example.test\r\nX: SYNTHETIC_HEADER_MARKER\x0brest\r\n\r\nhello",
+        ),
+        False,
+        "container_serialize=1",
+        _only_attachment_is_empty,
+    ),
+    "container_serialize_decoded": (
+        _with_attachment(
+            _BASE64_RFC822,
+            base64.encodebytes(
+                b"From: a@example.test\r\nX: SYNTHETIC_HEADER_MARKER\x0brest\r\n\r\nhello"
+            ),
+        ),
+        False,
+        "container_serialize=1",
+        _only_attachment_is_empty,
+    ),
+    "body_parts": (
+        _CAP_HEAD
+        + b'Content-Type: multipart/mixed; boundary="b"\r\n\r\n'
+        + b"".join(b"--b\r\nContent-Type: text/plain\r\n\r\nS%d\r\n" % i for i in range(205))
+        + b"--b--\r\n",
+        False,
+        "body_parts=5",
+        lambda msg: msg.body_text.split("\n\n") == [f"S{i}" for i in range(200)],
+    ),
+    "address_header": (
+        _addresses(b"bob@example.test, " + b"SYNTHETIC_HEADER_MARKER@example.test, " * 7_000),
+        False,
+        "address_header=1",
+        lambda msg: msg.to_addrs == [] and msg.body_text == "PARENT_BODY",
+    ),
+    "address_element": (
+        _addresses(b"bob@example.test, " + b"SYNTHETIC_HEADER_MARKER" * 6_000 + b"@example.test"),
+        False,
+        "address_element=1",
+        lambda msg: msg.to_addrs == ["bob@example.test"],
+    ),
+    "address_length": (
+        _addresses(_LONG_LOCAL + b"@example.test, bob@example.test, " + _LONG_LOCAL + b"@x.test"),
+        False,
+        "address_length=2",
+        lambda msg: msg.to_addrs == ["bob@example.test"],
+    ),
+}
+
+
+def _parse_cap_shape(tmp_path, monkeypatch, shape: str):
+    from src import parser
+
+    raw, small_decode_budget, _, _ = _CAP_SHAPES[shape]
+    if small_decode_budget:
+        budget = parser._SerializationBudget
+        monkeypatch.setattr(parser, "_SerializationBudget", lambda: budget(decodable=10))
+    folder = tmp_path / "INBOX" / "cur"
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / "caps.eml"
+    path.write_bytes(raw)
+    msg = parse_email(path)
+    assert msg is not None
+    return msg, path
+
+
+@pytest.mark.parametrize("shape", sorted(_CAP_SHAPES))
+def test_cap_shape_parse_result_is_pinned(tmp_path, monkeypatch, shape):
+    """The parse result each cap produces, pinned before the caps were
+    logged: counting them must not change it."""
+    msg, _ = _parse_cap_shape(tmp_path, monkeypatch, shape)
+    assert _CAP_SHAPES[shape][3](msg)
+
+
+@pytest.mark.parametrize("shape", sorted(_CAP_SHAPES))
+def test_cap_that_drops_content_logs_one_info_line(tmp_path, monkeypatch, caplog, shape):
+    """#872: a message a work cap cut is logged once at INFO with its
+    Maildir path and the caps that fired, by fixed name and count; no
+    header value, filename or text."""
+    caplog.set_level("DEBUG")
+    _, path = _parse_cap_shape(tmp_path, monkeypatch, shape)
+    lines = [r for r in caplog.records if "parser work caps" in r.getMessage()]
+    assert [(r.levelname, r.getMessage()) for r in lines] == [
+        ("INFO", f"parser work caps dropped content from {path}: {_CAP_SHAPES[shape][2]}")
+    ]
+    for marker in ("SYNTHETIC_HEADER_MARKER", "SYNTHETIC_FILENAME_MARKER", "SYNTHETIC_TEXT_MARKER"):
+        assert marker not in caplog.text
+
+
+def test_several_caps_share_one_line_in_a_fixed_order(tmp_path, caplog):
+    caplog.set_level("INFO")
+    raw = (
+        _CAP_HEAD
+        + b"To: bob@example.test, "
+        + _LONG_LOCAL
+        + b"@example.test\r\n"
+        + b'Content-Type: multipart/mixed; boundary="b"\r\n\r\n'
+        + b"".join(b"--b\r\nContent-Type: text/plain\r\n\r\nS%d\r\n" % i for i in range(202))
+        + b"--b\r\nContent-Type: message/rfc822\r\nContent-Transfer-Encoding: base64\r\n"
+        + _CAP_FILENAME
+        + b"\r\nA\r\n--b--\r\n"
+    )
+    folder = tmp_path / "INBOX" / "cur"
+    folder.mkdir(parents=True)
+    path = folder / "many.eml"
+    path.write_bytes(raw)
+    assert parse_email(path) is not None
+    assert [r.getMessage() for r in caplog.records if "parser work caps" in r.getMessage()] == [
+        f"parser work caps dropped content from {path}: "
+        "transport_decode=1,body_parts=2,address_length=1"
+    ]
+
+
+def test_message_within_every_cap_logs_no_cap_line(tmp_path, caplog):
+    caplog.set_level("DEBUG")
+    raw = _with_attachment(b"Content-Type: message/rfc822\r\n", _INNER_EMAIL)
+    folder = tmp_path / "INBOX" / "cur"
+    folder.mkdir(parents=True)
+    (folder / "ok.eml").write_bytes(raw)
+    msg = parse_email(folder / "ok.eml")
+    assert msg is not None and msg.attachments[0].payload != b""
+    assert "parser work caps" not in caplog.text
