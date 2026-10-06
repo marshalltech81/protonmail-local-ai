@@ -461,9 +461,14 @@ is `127.0.0.1`, not `host.docker.internal`.
   settings, `CLAUDE.md` files, hooks or plugins (`--setting-sources ""`),
   no MCP servers (`--strict-mcp-config`), no saved session, and the
   judge system prompt, with the prompt on stdin. `--bare` is not used
-  because it accepts only an API key. `ANTHROPIC_*` variables are removed
-  from the CLI's environment, since a set `ANTHROPIC_API_KEY` would take
-  the call off the subscription. `JUDGE_MAX_TOKENS` becomes
+  because it accepts only an API key. `ANTHROPIC_*` variables and every
+  `CLAUDE_CODE_USE_*` provider switch are removed from the CLI's
+  environment, since a set `ANTHROPIC_API_KEY` or a switch would take
+  the call off the subscription, and `DISABLE_AUTOUPDATER=1` keeps one
+  CLI version for the whole run. Before any case runs, `claude auth
+  status` must report a claude.ai (subscription) login, not a Console
+  (API-billed) one, and a machine with an enterprise `managed-mcp.json`
+  is refused, since Claude Code exits on `--strict-mcp-config` there. `JUDGE_MAX_TOKENS` becomes
   `CLAUDE_CODE_MAX_OUTPUT_TOKENS`: when a reply reaches it, the CLI makes
   its own continuation attempts (up to about four times the cap) before
   failing, which counts as `judge_truncated`. A logged-out CLI and a

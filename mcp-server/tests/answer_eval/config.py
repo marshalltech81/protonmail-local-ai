@@ -244,6 +244,19 @@ def _load_cli_judge(mode: str, env: Mapping[str, str]) -> LayerConfig:
     path = cli_judge.find_executable()
     if path is None:
         raise ConfigError(f"JUDGE_MODE={mode} needs the claude CLI (Claude Code) on PATH")
+    if cli_judge.managed_mcp_present():
+        raise ConfigError(
+            f"JUDGE_MODE={mode} cannot run under an enterprise managed-mcp.json: "
+            "Claude Code refuses --strict-mcp-config there"
+        )
+    method = cli_judge.auth_method(path)
+    if method is None:
+        raise ConfigError(f"JUDGE_MODE={mode}: the claude CLI is not logged in (run `claude`)")
+    if method != cli_judge.SUBSCRIPTION_AUTH_METHOD:
+        raise ConfigError(
+            f"JUDGE_MODE={mode}: the claude CLI login is not a Claude subscription "
+            "(log in with `claude auth login` and a claude.ai account)"
+        )
     return LayerConfig(
         layer="JUDGE",
         mode=mode,

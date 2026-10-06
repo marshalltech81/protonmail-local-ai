@@ -34,6 +34,13 @@ here = os.path.dirname(os.path.abspath(__file__))
 if sys.argv[1:] == ["--version"]:
     print("9.8.7 (Claude Code)")
     sys.exit(0)
+if sys.argv[1:] == ["auth", "status"]:
+    with open(os.path.join(here, "auth_calls.jsonl"), "a") as f:
+        f.write(json.dumps(dict(os.environ)) + "\\n")
+    status = os.path.join(here, "auth_status.json")
+    print(open(status).read() if os.path.exists(status) else
+          json.dumps({{"loggedIn": True, "authMethod": "claude.ai"}}))
+    sys.exit(0)
 behaviour = json.load(open(os.path.join(here, "behaviour.json")))
 record = {{
     "argv": sys.argv[1:],
@@ -103,6 +110,7 @@ class TestConfig:
     def _on_path(self, fake_claude, monkeypatch):
         exe, _, _ = fake_claude
         monkeypatch.setattr(cli_judge.shutil, "which", lambda name: str(exe))
+        monkeypatch.setattr(cli_judge, "MANAGED_MCP_PATHS", ())
 
     def test_needs_no_key_or_base_url(self, tmp_path):
         cfg = load_layer("JUDGE", self.ENV, tmp_path)
@@ -135,6 +143,45 @@ class TestConfig:
         with pytest.raises(ConfigError) as e:
             load_layer("JUDGE", self.ENV)
         assert str(e.value) == "JUDGE_MODE=claude-cli needs the claude CLI (Claude Code) on PATH"
+
+    def test_relative_path_is_resolved(self, fake_claude, monkeypatch):
+        """Review round 1: a relative PATH entry broke in the temp workdir."""
+        exe, _, _ = fake_claude
+        monkeypatch.chdir(exe.parent)
+        monkeypatch.setattr(cli_judge.shutil, "which", lambda name: "./claude")
+        cfg = load_layer("JUDGE", self.ENV)
+        assert cfg is not None and cfg.cli_path == str(exe.resolve())
+
+    @pytest.mark.parametrize(
+        ("status", "message"),
+        [
+            ({"loggedIn": False}, "is not logged in"),
+            ({"loggedIn": True, "authMethod": "console"}, "not a Claude subscription"),
+            ("not json", "is not logged in"),
+        ],
+    )
+    def test_subscription_login_is_required(self, fake_claude, monkeypatch, status, message):
+        """Review round 1: a Console (API-billed) login passed as a
+        subscription judge. The preflight runs in the judge's own
+        sanitized environment."""
+        exe, _, _ = fake_claude
+        text = status if isinstance(status, str) else json.dumps(status)
+        (exe.parent / "auth_status.json").write_text(text)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-marker")  # pragma: allowlist secret
+        with pytest.raises(ConfigError, match=message) as e:
+            load_layer("JUDGE", self.ENV)
+        assert "sk-ant-marker" not in str(e.value)
+        env = json.loads((exe.parent / "auth_calls.jsonl").read_text().splitlines()[-1])
+        assert "ANTHROPIC_API_KEY" not in env
+
+    def test_managed_mcp_config_is_refused(self, tmp_path, monkeypatch):
+        """Review round 1: with an enterprise managed-mcp.json,
+        --strict-mcp-config exits at startup on every call."""
+        managed = tmp_path / "managed-mcp.json"
+        managed.write_text("{}")
+        monkeypatch.setattr(cli_judge, "MANAGED_MCP_PATHS", (managed,))
+        with pytest.raises(ConfigError, match="managed-mcp.json"):
+            load_layer("JUDGE", self.ENV)
 
     def test_label_records_the_cli_and_its_version(self):
         cfg = load_layer("JUDGE", self.ENV)
@@ -195,13 +242,17 @@ class TestClient:
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-marker")  # pragma: allowlist secret
         monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://proxy.example")
         monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "tok-marker")
-        monkeypatch.setenv("CLAUDE_CODE_USE_BEDROCK", "1")
+        for selector in ("BEDROCK", "MANTLE", "ANTHROPIC_AWS", "SOME_FUTURE_PROVIDER"):
+            monkeypatch.setenv(f"CLAUDE_CODE_USE_{selector}", "1")
         monkeypatch.setenv("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "99")
         _run(_client(exe).complete("s", "u"))
         env = calls()[0]["env"]
         assert not any(k.startswith("ANTHROPIC_") for k in env)
-        assert "CLAUDE_CODE_USE_BEDROCK" not in env
+        # Review round 1: every provider selector, not a fixed list.
+        assert not any(k.startswith("CLAUDE_CODE_USE_") for k in env)
         assert env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == "4096"
+        # Review round 1: no CLI update between cases of one run.
+        assert env["DISABLE_AUTOUPDATER"] == "1"
 
     def test_served_model_is_recorded(self, fake_claude):
         exe, _, _ = fake_claude

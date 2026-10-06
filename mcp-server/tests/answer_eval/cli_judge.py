@@ -16,9 +16,14 @@ so every call is isolated to the judge prompt alone:
   key, never the subscription login, so it is not used.
 
 The prompt goes on stdin, never the process list. ``ANTHROPIC_*`` and
-the cloud-provider switches are removed from the CLI's environment: a
-set ``ANTHROPIC_API_KEY`` takes the call off the subscription (a bad
-one hangs the CLI). ``JUDGE_MAX_TOKENS`` becomes
+every ``CLAUDE_CODE_USE_*`` provider switch are removed from the CLI's
+environment: a set ``ANTHROPIC_API_KEY`` takes the call off the
+subscription (a bad one hangs the CLI), and a provider switch routes it
+through a cloud account. Auto-updates are off, so one run cannot mix
+CLI versions. Before the run, ``claude auth status`` (in the same
+environment) must report the subscription login, and an enterprise
+``managed-mcp.json``, under which ``--strict-mcp-config`` exits at
+startup, is refused. ``JUDGE_MAX_TOKENS`` becomes
 ``CLAUDE_CODE_MAX_OUTPUT_TOKENS``; on hitting it the CLI makes its own
 continuation attempts (not ours to turn off) before reporting the cap,
 which the judge records as ``judge_truncated``.
@@ -35,16 +40,22 @@ import re
 import shutil
 import subprocess
 import tempfile
+from pathlib import Path
 
 from src.lib.inference import InferenceTruncatedError
 
 EXECUTABLE = "claude"
 VERSION_TIMEOUT_SECS = 30.0
 
-# Variables that would move the call off the subscription login.
-_STRIPPED_ENV_PREFIXES = ("ANTHROPIC_",)
-_STRIPPED_ENV = frozenset(
-    {"CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY"}
+# Variables that would move the call off the subscription login: API
+# credentials and endpoints, and every cloud-provider switch.
+_STRIPPED_ENV_PREFIXES = ("ANTHROPIC_", "CLAUDE_CODE_USE_")
+# ``claude auth status``'s ``authMethod`` for a Claude subscription.
+SUBSCRIPTION_AUTH_METHOD = "claude.ai"
+# Where an enterprise ``managed-mcp.json`` lives (macOS, Linux).
+MANAGED_MCP_PATHS = (
+    Path("/Library/Application Support/ClaudeCode/managed-mcp.json"),
+    Path("/etc/claude-code/managed-mcp.json"),
 )
 
 _LOGGED_OUT_RE = re.compile(r"not logged in|/login", re.IGNORECASE)
@@ -66,7 +77,45 @@ class CliJudgeError(Exception):
 
 
 def find_executable() -> str | None:
-    return shutil.which(EXECUTABLE)
+    """The CLI's absolute path: each call runs in a temporary directory,
+    where a relative ``PATH`` entry would no longer resolve."""
+    path = shutil.which(EXECUTABLE)
+    return str(Path(path).resolve()) if path else None
+
+
+def claude_env(max_tokens: int | None = None) -> dict[str, str]:
+    """The CLI's environment: the caller's, minus anything that would
+    move the call off the subscription, with auto-updates off."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith(_STRIPPED_ENV_PREFIXES)}
+    env["DISABLE_AUTOUPDATER"] = "1"
+    if max_tokens is not None:
+        env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = str(max_tokens)
+    return env
+
+
+def auth_method(executable: str) -> str | None:
+    """``authMethod`` from ``claude auth status`` in the judge's
+    environment, or ``None`` when logged out or unreadable."""
+    try:
+        out = subprocess.run(  # nosec B603 - fixed argument list, no shell
+            [executable, "auth", "status"],
+            capture_output=True,
+            text=True,
+            timeout=VERSION_TIMEOUT_SECS,
+            check=False,
+            env=claude_env(),
+        ).stdout
+        status = json.loads(out)
+    except OSError, subprocess.TimeoutExpired, ValueError:
+        return None
+    if not isinstance(status, dict) or status.get("loggedIn") is not True:
+        return None
+    method = status.get("authMethod")
+    return method if isinstance(method, str) else ""
+
+
+def managed_mcp_present() -> bool:
+    return any(path.exists() for path in MANAGED_MCP_PATHS)
 
 
 def cli_version(executable: str) -> str:
@@ -125,15 +174,6 @@ class ClaudeCliClient:
             "--no-session-persistence",
         ]
 
-    def _env(self) -> dict[str, str]:
-        env = {
-            k: v
-            for k, v in os.environ.items()
-            if not k.startswith(_STRIPPED_ENV_PREFIXES) and k not in _STRIPPED_ENV
-        }
-        env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = str(self.max_tokens)
-        return env
-
     async def complete(self, system: str, user: str) -> str:
         with tempfile.TemporaryDirectory(prefix="judge-", dir=self.workdir_parent) as workdir:
             proc = await asyncio.create_subprocess_exec(
@@ -142,7 +182,7 @@ class ClaudeCliClient:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
                 cwd=workdir,
-                env=self._env(),
+                env=claude_env(self.max_tokens),
             )
             try:
                 stdout, _ = await proc.communicate(user.encode())
