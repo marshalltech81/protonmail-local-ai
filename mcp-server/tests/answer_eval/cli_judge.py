@@ -80,6 +80,13 @@ they are refused; a cloud-managed enterprise layer cannot be seen from
 here. Codex has
 no output-token setting, so ``JUDGE_MAX_TOKENS`` does not apply; the
 judge's timeout bounds the call.
+
+Known limitation (#827): Codex also registers tools a model's catalog
+entry advertises (``experimental_supported_tools``), and no setting
+turns those off. In Codex 0.160.1 ``gpt-6-astra``, ``gpt-6-sol`` and
+``gpt-6-luna`` advertise ``clock`` and ``send_user_message_async``, so
+with them the judge is not tool-free; use a model that advertises none
+(``gpt-5.5`` does not).
 """
 
 import asyncio

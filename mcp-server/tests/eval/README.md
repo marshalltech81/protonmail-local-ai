@@ -538,6 +538,11 @@ is `127.0.0.1`, not `host.docker.internal`.
   tests/test_answer_eval_cli_judge.py -k live_codex` makes one real call
   to check that planted `AGENTS.md` files, the global `AGENTS.md` and an
   `OPENAI_API_KEY` never reach it and that it cannot read a file.
+  **Known limitation (#827):** Codex also registers tools that a model's
+  catalog entry advertises, and no setting turns those off. In Codex
+  0.160.1, `gpt-6-astra`, `gpt-6-sol` and `gpt-6-luna` advertise `clock`
+  and `send_user_message_async`, so with those models the judge is not
+  tool-free. Pick a model that advertises none, such as `gpt-5.5`.
 - Either layer with the base URL `default` is refused while the SDK's own
   endpoint variable (`OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL`) is set, so
   the report's `sdk-default` label is never a custom endpoint.
