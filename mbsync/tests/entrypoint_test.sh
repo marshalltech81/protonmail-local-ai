@@ -403,15 +403,19 @@ failed_repair_marker_is_warned_and_keeps_the_result() {
 # --- far-side boxes that cannot be opened (#276) ------------------------------
 #
 # A Proton folder renamed or deleted after it synced keeps its local copy
-# (Create Near, Expunge None), so isync 1.4.4 tries to open the vanished
+# (Create Near, Expunge None), so isync 1.5.1 tries to open the vanished
 # far-side box on every run, prints the line below on stderr, syncs the
-# other boxes and exits 1. That run is a degraded success: warned with a
+# other boxes and exits 1 (mbsync/tests/layout_check.sh runs the image's
+# isync through it). isync 1.4.4 wrote the same line without "anymore";
+# both wordings are tolerated. That run is a degraded success: warned with a
 # count, not counted as a failure. Folder names are mailbox content, so a
 # synthetic marker stands in for one and must never reach the log.
 
 readonly FAR_BOX_MARKER="Folders/MarkerZq9-276"
-FAR_BOX_LINE="Error: channel protonmail: far side box ${FAR_BOX_MARKER} cannot be opened."
+FAR_BOX_LINE="Error: channel protonmail: far side box ${FAR_BOX_MARKER} cannot be opened anymore."
 readonly FAR_BOX_LINE
+FAR_BOX_LINE_144="Error: channel protonmail: far side box ${FAR_BOX_MARKER} cannot be opened."
+readonly FAR_BOX_LINE_144
 
 # A mock mbsync: writes stdout line $1 (if any), each stderr line in
 # MOCK_STDERR (newline-separated), then returns MOCK_RC.
@@ -448,7 +452,7 @@ unopenable_far_box_only_is_a_warned_success() {
     find() { printf 'find\n' >>"$FIND_CALLS"; }
     MOCK_RC=1
     MOCK_STDOUT="Maildir notice: sleeping due to recent directory modification."
-    MOCK_STDERR="${FAR_BOX_LINE}"$'\n'"${FAR_BOX_LINE/MarkerZq9-276/MarkerZq9-other}"
+    MOCK_STDERR="${FAR_BOX_LINE}"$'\n'"${FAR_BOX_LINE_144/MarkerZq9-276/MarkerZq9-other}"
     run_sync_logged far-only
     ((SYNC_RC == 0)) || return 1
     grep -q 'WARNING: 2 far-side folder' "$SYNC_LOG" || return 1
@@ -480,10 +484,13 @@ unopenable_far_inbox_still_fails() {
     mbsync() { mock_mbsync_output; }
     find() { :; }
     MOCK_RC=1
-    MOCK_STDERR="${FAR_BOX_LINE}"$'\n'"Error: channel protonmail: far side box INBOX cannot be opened."
+    MOCK_STDERR="${FAR_BOX_LINE}"$'\n'"Error: channel protonmail: far side box INBOX cannot be opened anymore."
+    MOCK_STDERR+=$'\n'"Error: channel protonmail: far side box INBOX cannot be opened."
     run_sync_logged far-inbox
     ((SYNC_RC == 1)) || return 1
+    grep -qxF "Error: channel protonmail: far side box INBOX cannot be opened anymore." "$SYNC_LOG" || return 1
     grep -qxF "Error: channel protonmail: far side box INBOX cannot be opened." "$SYNC_LOG" || return 1
+    grep -q 'WARNING: 1 far-side folder' "$SYNC_LOG" || return 1
     marker_not_logged
 }
 
@@ -524,9 +531,11 @@ near_miss_line_is_not_tolerated() {
     find() { :; }
     MOCK_RC=1
     MOCK_STDERR="Error: channel protonmail: near side box ${FAR_BOX_MARKER} cannot be opened."
+    MOCK_STDERR+=$'\n'"Error: channel protonmail: near side box ${FAR_BOX_MARKER} cannot be opened anymore."
     run_sync_logged far-near-miss
     ((SYNC_RC == 1)) || return 1
     grep -qxF "Error: channel protonmail: near side box <folder> cannot be opened." "$SYNC_LOG" || return 1
+    grep -qxF "Error: channel protonmail: near side box <folder> cannot be opened anymore." "$SYNC_LOG" || return 1
     if grep -q WARNING "$SYNC_LOG"; then
         return 1
     fi
@@ -615,11 +624,13 @@ sync_loop_counts_failures_but_not_unopenable_far_boxes() {
 
 # --- folder names in other mbsync output (#570) -------------------------------
 #
-# Besides the far-side line above, isync 1.4.4 names a folder in many
+# Besides the far-side line above, isync names a folder in many
 # messages: UIDVALIDITY errors (likely after switching Bridge instances),
 # other box errors, and every message quoting a Maildir or sync state path
-# (the path holds the folder name). Each shape below comes from isync
-# 1.4.4's source (src/sync.c, main.c, drv_imap.c, drv_maildir.c). @F@ is
+# (the path holds the folder name). Each shape below comes from isync's
+# source: first 1.4.4's (src/sync.c, main.c, drv_imap.c, drv_maildir.c),
+# then the shapes 1.5.1, the image's version, added or reworded
+# (src/sync.c, sync_state.c, drv_imap.c, drv_maildir.c). @F@ is
 # a box name and @P@ a path under the Maildir; both carry a synthetic
 # marker with a space, a colon and quotes. The filters replace them with
 # <folder> and <path> and keep the rest of the message; a tab-separated
@@ -631,8 +642,8 @@ readonly SHAPE_FOLDER="Folders/MarkerZq9: a 'b' (c)"
 FOLDER_SHAPES="$(cat <<'EOF'
 Error: channel protonmail: near side box @F@ cannot be opened.
 Error: channel protonmail: both far side @F@ and near side @F@ cannot be opened.
-Warning: channel protonmail: far side box @F@ cannot be opened and near side box @F@ is not empty.
-Warning: channel protonmail: near side box @F@ cannot be opened and far side box @F@ is not empty.
+Warning: channel protonmail: far side box @F@ cannot be opened and near side box @F@ is not empty.	Warning: channel protonmail: far side box <folder> cannot be opened anymore, and near side box <folder> is not empty.
+Warning: channel protonmail: near side box @F@ cannot be opened and far side box @F@ is not empty.	Warning: channel protonmail: near side box <folder> cannot be opened anymore, and far side box <folder> is not empty.
 Error: channel protonmail: UIDVALIDITY of both far side @F@ and near side @F@ changed.
 Error: channel protonmail, far side box @F@: UIDVALIDITY genuinely changed (at UID 42).
 Error: channel protonmail, near side box @F@: UIDVALIDITY genuinely changed (at UID 7).
@@ -715,6 +726,32 @@ IMAP error: unexpected tag @F@	IMAP error: unexpected tag (server text withheld)
 IMAP warning: unknown system flag \@F@	IMAP warning: unknown system flag (server text withheld)
 IMAP command 'UID FETCH 1:5 (UID FLAGS)' returned an error: NO @F@	IMAP command 'UID FETCH 1:5 (UID FLAGS)' returned an error: NO (server text withheld)
 IMAP command 'LOGIN <user> <pass>' returned an error: BAD @F@	IMAP command 'LOGIN <user> <pass>' returned an error: BAD (server text withheld)
+Error: channel protonmail: near side box @F@ cannot be opened anymore.
+Warning: channel protonmail: far side box @F@ cannot be opened anymore, and near side box @F@ is not empty.
+Warning: channel protonmail: near side box @F@ cannot be opened anymore, and far side box @F@ is not empty.
+Error: channel protonmail, far side box @F@ (at UID 42): UIDVALIDITY genuinely changed.
+Error: channel protonmail, near side box @F@ (at UID 7): UIDVALIDITY genuinely changed.
+Error: channel protonmail, far side box @F@ (at UID 42): Unable to recover from both-sided UIDVALIDITY change, as it is genuine on at least one side.
+IMAP error: invalid modified-UTF-7 string '@F@'.
+IMAP error: invalid UTF-8 string '@F@'
+IMAP error: cannot use unqualified '@F@'. Did you mean INBOX?	IMAP error: cannot use unqualified '<folder>' (rest of line withheld)
+IMAP command 'SELECT "@F@"' returned an error: @F@	IMAP command 'SELECT <folder>' (rest of line withheld)
+IMAP command 'APPEND "@F@" (\Seen) {12+}' returned an error: [TOOBIG] @F@	IMAP command 'APPEND <folder>' (rest of line withheld)
+IMAP command 'UID FETCH 1:5 (UID FLAGS)' returned an error: @F@	IMAP command 'UID FETCH 1:5 (UID FLAGS)' returned an error: (server text withheld)
+IMAP command 'LOGIN <user> <pass>' returned an error: @F@	IMAP command 'LOGIN <user> <pass>' returned an error: (server text withheld)
+IMAP error: malformed sequence number '@F@'	IMAP error: malformed sequence number (server text withheld)
+Maildir error: empty mailbox name under @P@ - did you forget the trailing slash?
+Maildir error: cannot write UIDVALIDITY in @P@
+Maildir notice: no UIDVALIDITY in @P@, creating new.
+Maildir error: cannot fcntl lock UIDVALIDITY in @P@.
+Maildir error: cannot fstat UID database in @P@: Bad file descriptor
+Maildir error: cannot read UIDVALIDITY in @P@.
+Maildir error: duplicate UID 9 in @P@.
+Maildir notice: duplicate UID in @P@; changing UIDVALIDITY.
+Maildir error: UID 9 is beyond highest assigned UID 4 in @P@.
+Maildir error: malformed X-TUID header in @P@
+Maildir error: @P@ is too big	Maildir error: <path>
+Error: state file @P@ does not match ExpireSide setting
 EOF
 )"
 readonly FOLDER_SHAPES
@@ -730,6 +767,9 @@ Notice: far side store does not support flag(s) 'T'; not propagating.
 Socket error: secure read from tunnel: Connection reset by peer
 Error: channel protonmail: far side box INBOX cannot be opened.
 Error: channel protonmail: near side box INBOX cannot be opened.
+Error: channel protonmail: far side box INBOX cannot be opened anymore.
+Error: channel protonmail: near side box INBOX cannot be opened anymore.
+Error: channel protonmail, far side box INBOX (at UID 42): UIDVALIDITY genuinely changed.
 Error: channel protonmail, far side box INBOX: UIDVALIDITY genuinely changed (at UID 42).
 Notice: channel protonmail, near side box INBOX: Recovered from change of UIDVALIDITY.
 EOF
@@ -767,7 +807,7 @@ catalogue_shapes_are_redacted_by_class() {
         done
         count=$((count + 1))
     done <<<"$FOLDER_SHAPES"
-    ((count == 86)) || return 1
+    ((count == 112)) || return 1
 }
 
 # shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval

@@ -467,8 +467,9 @@ filter_mbsync_output() {
     # are kept, in memory; at end of input it writes "<withheld> <passed
     # on>" to the file $2.
     #
-    # Redaction is by message shape, from isync 1.4.4's source (Debian
-    # bookworm): each rule is an anchored prefix and suffix of fixed text
+    # Redaction is by message shape, from isync 1.5.1's source (Debian
+    # trixie, the image's version) and the 1.4.4 shapes it reworded,
+    # which are kept: each rule is an anchored prefix and suffix of fixed text
     # around the name, which is replaced whole by <folder> (a box name)
     # or <path> (a Maildir or sync state path, which holds the folder
     # name). Text the IMAP server chose (an alert, an error reply), which
@@ -481,7 +482,8 @@ filter_mbsync_output() {
     # linear in the line's length.
     #
     # On stderr, a line saying a far-side box other than INBOX cannot be
-    # opened is withheld and counted instead. isync writes it when Bridge
+    # opened (1.5.1 adds "anymore" when the box synced before) is
+    # withheld and counted instead. isync writes it when Bridge
     # refuses to open a box, then syncs the remaining boxes and exits 1:
     # what a folder renamed or deleted in Proton after it synced produces
     # on every run, since Create Near and Expunge None keep its local
@@ -497,8 +499,8 @@ filter_mbsync_output() {
     fi
     # shellcheck disable=SC2016 # an awk program: its $ are awk's
     "${awk_cmd[@]}" -v stream="$1" -v counts="$2" -v maildir="${MAILDIR_PATH}/" \
-        -v far_box='^Error: channel protonmail: far side box .+ cannot be opened[.]$' \
-        -v inbox='Error: channel protonmail: far side box INBOX cannot be opened.' '
+        -v far_box='^Error: channel protonmail: far side box .+ cannot be opened( anymore)?[.]$' \
+        -v inbox='^Error: channel protonmail: far side box INBOX cannot be opened( anymore)?[.]$' '
         function rule(prefix, suffix, replacement, keep_inbox) {
             n++
             pre[n] = prefix; suf[n] = suffix; rep[n] = replacement; inbox_ok[n] = keep_inbox
@@ -532,17 +534,23 @@ filter_mbsync_output() {
             cut = q " (rest of line withheld)"
             srv = "(server text withheld)"
             sys = ": [^:]*$"
-            # Box names: src/sync.c, main.c, drv_imap.c, drv_maildir.c.
-            rule(ch ": (far|near) side box ", " cannot be opened[.]$", F, 1)
+            # Box names: src/sync.c, main.c (1.5.1: main_sync.c),
+            # drv_imap.c, drv_maildir.c.
+            rule(ch ": (far|near) side box ", " cannot be opened( anymore)?[.]$", F, 1)
             rule(ch ": both far side ", " cannot be opened[.]$", F " and near side " F, 0)
             rule("^Warning: channel protonmail: far side box ", " is not empty[.]$",
-                 F " cannot be opened and near side box " F, 0)
+                 F " cannot be opened anymore, and near side box " F, 0)
             rule("^Warning: channel protonmail: near side box ", " is not empty[.]$",
-                 F " cannot be opened and far side box " F, 0)
+                 F " cannot be opened anymore, and far side box " F, 0)
             rule(ch ": UIDVALIDITY of both far side ", " changed[.]$", F " and near side " F, 0)
             rule(ch ", (far|near) side box ",
                  ": UIDVALIDITY genuinely changed [(]at UID [0-9]+[)][.]$", F, 1)
             rule(ch ", (far|near) side box ", ": Unable to recover from UIDVALIDITY change[.]$", F, 1)
+            rule(ch ", (far|near) side box ",
+                 " [(]at UID [0-9]+[)]: UIDVALIDITY genuinely changed[.]$", F, 1)
+            rule(ch ", (far|near) side box ",
+                 " [(]at UID [0-9]+[)]: Unable to recover from both-sided UIDVALIDITY change, as it is genuine on at least one side[.]$",
+                 F, 1)
             rule("^Notice: channel protonmail, (far|near) side box ",
                  ": Recovered from change of UIDVALIDITY[.]$", F, 1)
             rule("^(Opening|Creating|Deleting) (far|near) side box ", "[.][.][.]$", F, 1)
@@ -556,7 +564,10 @@ filter_mbsync_output() {
             rule("^IMAP error: LIST" q "d mailbox name " q,
                  q " contains " q "[.][.]" q " component - THIS MIGHT BE AN ATTEMPT TO HACK YOU!$", F, 0)
             rule("^IMAP error: mailbox name ", " contains server" q "s hierarchy delimiter$", F, 0)
-            # No newline after this one, so the rest of the line is cut.
+            rule("^IMAP error: invalid modified-UTF-7 string " q, q "[.]$", F, 0)
+            rule("^IMAP error: invalid UTF-8 string " q, q "$", F, 0)
+            # 1.4.4 wrote no newline after this one, so the rest of the
+            # line is cut.
             rule("^IMAP error: cannot use unqualified " q, "", F cut, 0)
             # The command quotes the box; the server reply may repeat it.
             rule("^IMAP command " q "(SELECT|CREATE|DELETE|APPEND|UID COPY [0-9]+|UID MOVE [0-9]+) ", "", F cut, 0)
@@ -566,7 +577,21 @@ filter_mbsync_output() {
                  q ": SubFolders style Maildir[+][+] does not support dots in mailbox names$", F, 0)
             rule("^Maildir error: found subfolder " q,
                  q ", but store " q "[^" q "]*" q " does not specify SubFolders style$", F, 0)
-            # Paths: sys_error lines end in ": <strerror>".
+            # Paths (1.5.1 drv_maildir.c and sync_state.c). Before the
+            # generic "cannot <verb>" rules below, whose strerror match
+            # would end inside a path holding ": ".
+            rule("^Maildir error: empty mailbox name under ",
+                 " - did you forget the trailing slash[?]$", P, 0)
+            rule("^Maildir error: cannot write UIDVALIDITY in ", "", P, 0)
+            rule("^Maildir error: cannot (fcntl lock|read) UIDVALIDITY in ", "[.]$", P, 0)
+            rule("^Maildir error: cannot fstat UID database in ", sys, P, 0)
+            rule("^Maildir notice: no UIDVALIDITY in ", ", creating new[.]$", P, 0)
+            rule("^Maildir error: duplicate UID [0-9]+ in ", "[.]$", P, 0)
+            rule("^Maildir notice: duplicate UID in ", "; changing UIDVALIDITY[.]$", P, 0)
+            rule("^Maildir error: UID [0-9]+ is beyond highest assigned UID [0-9]+ in ", "[.]$", P, 0)
+            rule("^Maildir error: malformed X-TUID header in ", "", P, 0)
+            rule("^Error: state file ", " does not match ExpireSide setting$", P, 0)
+            # sys_error lines end in ": <strerror>".
             rule("^Error: cannot create SyncState directory " q, q sys, P, 0)
             rule("^Maildir (error|warning): cannot remove " q, q sys, P, 0)
             rule("^Maildir error: cannot (access|create) mailbox " q, q sys, P, 0)
@@ -586,6 +611,9 @@ filter_mbsync_output() {
             # Text the IMAP server (Bridge) chose, which may name a
             # folder: src/drv_imap.c. Cut after the fixed part.
             rule("^IMAP command " q "[^" q "]*" q " returned an error: (NO|BAD)", "", " " srv, 0)
+            # 1.5.1 drops the NO or BAD.
+            rule("^IMAP command " q "[^" q "]*" q " returned an error: ", "", srv, 0)
+            rule("^IMAP error: malformed sequence number ", "", srv, 0)
             rule("^(Error|Warning) from IMAP server: ", "", srv, 0)
             rule("^[*][*][*] IMAP ALERT [*][*][*] ", "", srv, 0)
             rule("^IMAP error: unexpected (BYE response:|reply:|tag) ", "", srv, 0)
@@ -593,7 +621,7 @@ filter_mbsync_output() {
             rule("^IMAP warning: unknown system flag ", "", srv, 0)
             dest = (stream == "err") ? "/dev/stderr" : "/dev/stdout"
         }
-        stream == "err" && $0 ~ far_box && $0 != inbox { withheld++; next }
+        stream == "err" && $0 ~ far_box && $0 !~ inbox { withheld++; next }
         # One string, so each line is one write: mawk writes the parts
         # of a format separately, and the other filter may share dest.
         { other++; printf "%s", redact($0) "\n" > dest; fflush(dest) }
