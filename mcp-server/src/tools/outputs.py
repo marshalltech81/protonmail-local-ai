@@ -181,6 +181,11 @@ class ListedMessage(MessageHeaders):
     """A message's headers where rows may span threads."""
 
     thread_id: str
+    pending_deletion: bool = Field(
+        description="Deleted in Proton (the file's Maildir T flag) or its file missing "
+        "locally. Mirror retention removes it from the index after the grace period; archive "
+        "mode never does. Still listed and counted until removed."
+    )
 
 
 def message_headers(m: MessageRecord) -> MessageHeaders:
@@ -223,8 +228,12 @@ def message_headers(m: MessageRecord) -> MessageHeaders:
 
 
 def listed_message(m: MessageRecord) -> ListedMessage:
-    """``message_headers`` plus the message's thread ID."""
-    return ListedMessage(**message_headers(m).model_dump(), thread_id=m.thread_id)
+    """``message_headers`` plus the message's thread ID and deletion state."""
+    return ListedMessage(
+        **message_headers(m).model_dump(),
+        thread_id=m.thread_id,
+        pending_deletion=m.pending_deletion,
+    )
 
 
 # --- search tools -------------------------------------------------------

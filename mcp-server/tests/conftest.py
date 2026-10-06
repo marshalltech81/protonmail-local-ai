@@ -192,6 +192,16 @@ def _build_schema(conn: sqlite3.Connection) -> None:
             indexer_seen_at    TEXT NOT NULL
         );
 
+        -- Reconciler tombstones (indexer schema): files T-flagged or
+        -- missing, awaiting the reaper under mirror retention.
+        CREATE TABLE pending_deletions (
+            filepath    TEXT PRIMARY KEY,
+            claimant_id TEXT NOT NULL,
+            thread_id   TEXT NOT NULL,
+            marked_at   TEXT NOT NULL
+        );
+        CREATE INDEX idx_pending_deletions_thread ON pending_deletions(thread_id);
+
         -- Identifier-only records of reaped messages (indexer schema).
         CREATE TABLE reaped_messages (
             claimant_id TEXT PRIMARY KEY,
