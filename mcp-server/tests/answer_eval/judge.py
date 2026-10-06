@@ -135,9 +135,9 @@ _HANDLING_TEXT = {
     "disclose_missing": "Part of the needed evidence may be missing from what the assistant "
     "received. The tool reports evidence it left out in its own coverage note, below: grade "
     "the answer and that note together. Together they must say what could not be "
-    "established, and the answer must not guess. A reference fact whose evidence is not "
-    "among the passages the assistant received counts as covered when the note or the "
-    "answer discloses that evidence was left out.",
+    "established, and the answer must not guess. Only a reference fact listed as left out "
+    "below counts as covered when the note or the answer discloses that evidence was left "
+    "out; every other reference fact must be stated.",
     "abstain": "The mailbox holds no answer: the answer must say so and assert nothing in "
     "its place.",
 }
@@ -164,6 +164,7 @@ def build_judge_prompt(
     passages: dict[str, Passage],
     statements: Sequence[str],
     coverage_note: str | None = None,
+    omitted_facts: Sequence[str] = (),
 ) -> str:
     """The judge's user message. Trusted case text outside the tags;
     every passage, the answer and each of its numbered statements (the
@@ -171,7 +172,9 @@ def build_judge_prompt(
 
     A ``disclose_missing`` case also gets the tool's ``coverage_note``
     (#820): fixed server text with counts, never model output, so it
-    sits outside the tags and is labelled as the tool's."""
+    sits outside the tags and is labelled as the tool's. With it come the
+    reference facts the budget left out or cut (``omitted_facts``,
+    ``graders.budget_omitted_facts``), the only ones the note can excuse."""
     lines = [
         f"Question: {case.question}",
         "",
@@ -180,6 +183,10 @@ def build_judge_prompt(
     if case.expected_handling == "disclose_missing":
         note = _fence(coverage_note) if coverage_note else "none"
         lines.append(f"Server coverage note (written by the tool, not the assistant): {note}")
+        left_out = ", ".join(omitted_facts) or "none"
+        lines.append(
+            f"Reference facts whose evidence the tool retrieved but left out or cut: {left_out}"
+        )
     lines += ["", "Reference facts (verified):"]
     lines += [f"- {f.id}: {f.fact}" for f in case.expected_facts] or ["- none"]
     lines += ["", "Prohibited assertions:"]
@@ -190,7 +197,11 @@ def build_judge_prompt(
     ]
     lines += ["", "Evidence passages the assistant received (UNTRUSTED):"]
     if not passages:
-        lines.append("(none: the search returned nothing)")
+        # The budget can leave out every retrieved passage; the note says so.
+        if coverage_note:
+            lines.append("(none supplied: the prompt budget left them out)")
+        else:
+            lines.append("(none: the search returned nothing)")
     for label in sorted(passages, key=_label_key):
         p = passages[label]
         origin = p.message_id or p.thread_id
@@ -413,6 +424,7 @@ async def judge_answer(
     *,
     statements: Sequence[AnswerStatement],
     coverage_note: str | None = None,
+    omitted_facts: Sequence[str] = (),
     timeout_secs: float | None = None,
 ) -> JudgeOutcome:
     """One bounded judge call: input size checked first, one request
@@ -424,9 +436,11 @@ async def judge_answer(
     and a claim whose labels that statement does not all cite is
     rejected, so the judge cannot credit a passage the answer cited for
     something else. ``coverage_note`` is the tool's own omission notice
-    (``build_judge_prompt``).
+    and ``omitted_facts`` the facts it may excuse (``build_judge_prompt``).
     """
-    prompt = build_judge_prompt(case, answer, passages, [s.text for s in statements], coverage_note)
+    prompt = build_judge_prompt(
+        case, answer, passages, [s.text for s in statements], coverage_note, omitted_facts
+    )
     outcome = JudgeOutcome(status="error", prompt_chars=len(JUDGE_SYSTEM) + len(prompt))
     if outcome.prompt_chars > config.max_input_chars:
         outcome.error = "judge_input_too_large"

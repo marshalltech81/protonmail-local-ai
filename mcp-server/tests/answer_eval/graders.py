@@ -11,10 +11,11 @@ message) meets thread refs only.
 
 A ``disclose_missing`` case is graded on the tool's whole disclosure
 (#820): when a required group was retrieved but left out of the prompt,
-the server's ``coverage_note`` is what reports it, so a non-null note is
-the disclosure, those groups are excused from citation and an abstention
-may stand. A group that was supplied must still be cited, and the note
-cannot disclose a group retrieval never found.
+or reached it only cut short, the server's ``coverage_note`` is what
+reports it, so a non-null note is the disclosure, those groups are
+excused from citation and an abstention may stand. A group supplied
+whole must still be cited, and the note cannot disclose a group
+retrieval never found.
 """
 
 import re
@@ -47,6 +48,7 @@ class GroupStatus:
     retrieved: bool
     supplied: bool
     cited: bool
+    whole: bool = False  # supplied by a passage not cut to fit the budget
 
 
 @dataclass
@@ -108,6 +110,24 @@ def is_abstention(answer: str) -> bool:
     return stripped.startswith(_NOT_FOUND_PREFIX) or stripped.startswith(_NO_RESULTS)
 
 
+def budget_omitted_facts(case: Case, run: CaseRun) -> list[str]:
+    """IDs of the reference facts whose evidence the tool retrieved but the
+    prompt budget left out or cut: no source of the fact reached the prompt
+    in a whole passage, and some source's thread was retrieved. These are
+    the only facts a ``coverage_note`` can disclose; a fact retrieval never
+    found is not among them."""
+    if run.output is None:
+        return []
+    retrieved = {t.thread_id for t in run.output.threads}
+    whole = [p for p in run.passages.values() if not p.truncated]
+    return [
+        f.id
+        for f in case.expected_facts
+        if any(thread_id_of(s) in retrieved for s in f.sources)
+        and not any(_meets(s, p) for s in f.sources for p in whole)
+    ]
+
+
 def grade_run(case: Case, run: CaseRun) -> DeterministicResult:
     """Grade one completed run; a run that did not complete gets no checks
     (its status already counts it as an error)."""
@@ -127,14 +147,15 @@ def grade_run(case: Case, run: CaseRun) -> DeterministicResult:
                 retrieved=any(thread_id_of(ref) in retrieved for ref in group),
                 supplied=any(_meets(ref, p) for ref in group for p in supplied),
                 cited=any(_meets(ref, p) for ref in group for p in cited),
+                whole=any(_meets(ref, p) for ref in group for p in supplied if not p.truncated),
             )
         )
 
     checks = result.checks
-    # Retrieved evidence the prompt budget left out, which is all the
-    # server's note can report: a group retrieval missed stays a miss.
+    # Retrieved evidence the prompt budget left out or cut, which is all
+    # the server's note can report: a group retrieval missed stays a miss.
     omission = case.expected_handling == "disclose_missing" and any(
-        g.retrieved and not g.supplied for g in result.groups
+        g.retrieved and not g.whole for g in result.groups
     )
     disclosed = omission and out.coverage_note is not None
     if omission:
@@ -149,7 +170,7 @@ def grade_run(case: Case, run: CaseRun) -> DeterministicResult:
     checks["citations_resolve"] = PASS if resolves else FAIL
     checks["citation_checks"] = FAIL if out.citation_problems else PASS
     if case.answerable:
-        met = all(g.cited or (disclosed and g.retrieved and not g.supplied) for g in result.groups)
+        met = all(g.cited or (disclosed and g.retrieved and not g.whole) for g in result.groups)
         checks["required_evidence_cited"] = PASS if met else FAIL
     else:
         checks["required_evidence_cited"] = NA
@@ -170,8 +191,8 @@ def grade_run(case: Case, run: CaseRun) -> DeterministicResult:
     result.abstained = is_abstention(answer)
     if case.answerable:
         # Abstaining is the disclosure only when no group was lost to retrieval.
-        whole = disclosed and all(g.retrieved for g in result.groups)
-        checks["abstention"] = FAIL if result.abstained and not whole else PASS
+        excused = disclosed and all(g.retrieved for g in result.groups)
+        checks["abstention"] = FAIL if result.abstained and not excused else PASS
     else:
         checks["abstention"] = PASS if result.abstained and not out.citations else FAIL
     return result

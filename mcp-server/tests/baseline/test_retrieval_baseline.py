@@ -363,33 +363,58 @@ def test_rank_snapshot_survives_near_tied_vector_distances(
 ) -> None:
     """#755: a corpus edit left one golden question's snapshot on a knife
     edge, where two chunk distances one float32 step apart came back
-    swapped on Linux and moved a thread past its neighbour. Swap every
-    adjacent near-tied pair of different threads in the vector lanes, one
-    at a time, and require the snapshot order to stay the same, so such
-    an edit fails here on any platform rather than only in CI."""
+    swapped on Linux and moved a thread past its neighbour. Two kinds of
+    near-tie are tried, one at a time, and the snapshot order must hold:
+    an adjacent pair of different threads inside a vector lane is
+    swapped, and, since another platform can also admit a different row
+    at a lane's ``k`` cutoff (review round 2), each search fetches one
+    extra row and a near-tied pair across the cutoff is exchanged. Such
+    an edit then fails here on any platform rather than only in CI."""
     vectors = json.loads(
         (Path(os.environ["BASELINE_DIR"]) / "query_vectors.json").read_text(encoding="utf-8")
     )
     fuse = baseline_db._reciprocal_rank_fusion
-    state: dict = {}
+    state: dict = {"cutoffs": 0}
+
+    def near(a, b) -> bool:
+        return abs(a.score - b.score) < _NEAR_TIE and a.thread_id != b.thread_id
+
+    def cut_aware(lane: str, search):
+        def run_search(embedding, k):
+            rows = search(embedding, k + 1)
+            if rows is None or len(rows) <= k:
+                return rows
+            kept, beyond = rows[:k], rows[k]
+            state["cutoffs"] += 1
+            if state["probe"] == ("cut", lane, k):
+                return [*kept[:-1], beyond]
+            if state["probe"] is None and near(kept[-1], beyond):
+                state["ties"].append(("cut", lane, k))
+            return kept
+
+        return run_search
 
     def swapping_fusion(bm25, vec, chunks):
         lanes = {"vec": list(vec), "chunk": list(chunks)}
-        if "swap" in state:
-            name, i = state["swap"]
+        probe = state["probe"]
+        if probe is not None and probe[0] == "swap":
+            _, name, i = probe
             lanes[name][i - 1], lanes[name][i] = lanes[name][i], lanes[name][i - 1]
-        else:
-            state["ties"] = [
-                (name, i)
+        elif probe is None:
+            state["ties"] += [
+                ("swap", name, i)
                 for name, lane in lanes.items()
                 for i in range(1, len(lane))
-                if abs(lane[i].score - lane[i - 1].score) < _NEAR_TIE
-                and lane[i].thread_id != lane[i - 1].thread_id
+                if near(lane[i - 1], lane[i])
             ]
         return fuse(bm25, lanes["vec"], lanes["chunk"])
 
+    monkeypatch.setattr(baseline_db, "_vector_search", cut_aware("vec", baseline_db._vector_search))
+    monkeypatch.setattr(
+        baseline_db, "_chunk_vector_search", cut_aware("chunk", baseline_db._chunk_vector_search)
+    )
     monkeypatch.setattr(baseline_db, "_reciprocal_rank_fusion", swapping_fusion)
-    swaps, flips = 0, []
+    probes, flips = 0, []
     for q in GOLDEN["search"]:
 
         def run(q=q) -> list[str]:
@@ -402,13 +427,15 @@ def test_rank_snapshot_survives_near_tied_vector_distances(
             )
             return _refs(_order_ties(hits))
 
-        state.clear()
+        state.update(probe=None, ties=[])
         expected = run()
-        for tie in state["ties"]:
-            state["swap"] = tie
-            swaps += 1
+        for tie in list(state["ties"]):
+            state["probe"] = tie
+            probes += 1
             if run() != expected:
                 flips.append((q["id"], *tie))
-    # The hashed embedder leaves near-ties in many lanes; check some were tried.
-    assert swaps > 0
+    # The hashed embedder leaves near-ties in many lanes; check some were
+    # tried, and that every full lane was compared across its cutoff.
+    assert probes > 0
+    assert state["cutoffs"] > 0
     assert flips == [], f"snapshot order depends on a near-tied distance: {flips}"

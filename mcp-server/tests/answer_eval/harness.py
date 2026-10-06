@@ -16,7 +16,7 @@ from typing import Any
 
 from tests.answer_eval.cases import Case
 from tests.answer_eval.config import LayerConfig
-from tests.answer_eval.graders import attribute, grade_run
+from tests.answer_eval.graders import attribute, budget_omitted_facts, grade_run
 from tests.answer_eval.judge import JudgeOutcome, judge_answer
 from tests.answer_eval.report import case_record, detail_record
 from tests.answer_eval.runner import CaseRun, RunContext, run_case
@@ -63,6 +63,7 @@ async def evaluate(
                 bool(det.abstained),
                 statements=run.output.statements,
                 coverage_note=run.output.coverage_note,
+                omitted_facts=budget_omitted_facts(case, run),
                 timeout_secs=min(judge_config.timeout_secs, remaining),
             )
         semantic_failed = judge.grade is not None and not judge.grade.passed

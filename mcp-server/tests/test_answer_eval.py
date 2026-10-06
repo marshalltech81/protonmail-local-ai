@@ -41,7 +41,7 @@ from tests.answer_eval.cases import (
     thread_id_of,
 )
 from tests.answer_eval.config import ConfigError, LayerConfig, load_layer
-from tests.answer_eval.graders import FAIL, NA, PASS, attribute, grade_run
+from tests.answer_eval.graders import FAIL, NA, PASS, attribute, budget_omitted_facts, grade_run
 from tests.answer_eval.harness import evaluate
 from tests.answer_eval.judge import (
     JUDGE_SYSTEM,
@@ -76,6 +76,7 @@ from tests.answer_eval.runner import (
     prompt_budget_for,
     run_case,
 )
+from tests.answer_eval.runner import _passage as runner_passage
 from tests.conftest import FakeEmbedClient
 
 CASES = {c.id: c for c in load_cases()}
@@ -85,10 +86,19 @@ MARKER = "PRIVACY-MARKER-604"
 # ---------------------------------------------------------------- helpers
 
 
-def _passage(label: str, ref: str, text: str = "passage text", source: str = "body") -> Passage:
+def _passage(
+    label: str, ref: str, text: str = "passage text", source: str = "body", truncated: bool = False
+) -> Passage:
     message = message_id_of(ref) or thread_id_of(ref)
     return Passage(
-        label, thread_id_of(ref), message, f"{message}#0000abcd", f"chunk-{label}", source, text
+        label,
+        thread_id_of(ref),
+        message,
+        f"{message}#0000abcd",
+        f"chunk-{label}",
+        source,
+        text,
+        truncated,
     )
 
 
@@ -476,6 +486,22 @@ class TestRunner:
         assert run.calls[0].system == intelligence.ASK_SYSTEM
         assert set(run.timings_ms) >= {"answer_total", "inference", "query_embedding"}
 
+    def test_cut_passage_is_marked_truncated(self):
+        """Review round 2: a passage cut to fit is captured as truncated."""
+        chunk = SimpleNamespace(
+            message_id="m@x", claimant_id="m@x#1", chunk_id="c1", attachment_id=None, char_end=900
+        )
+        cut = runner_passage(
+            SimpleNamespace(label="E1", thread_id="t", chunk=chunk, char_end=400, text="a")
+        )
+        whole = runner_passage(
+            SimpleNamespace(label="E2", thread_id="t", chunk=chunk, char_end=900, text="a")
+        )
+        thread = runner_passage(
+            SimpleNamespace(label="E3", thread_id="t", chunk=None, char_end=None, text="a")
+        )
+        assert (cut.truncated, whole.truncated, thread.truncated) == (True, False, False)
+
     def test_repair_call_is_recorded(self, chunked_db):
         case = dataclasses.replace(CASES["ask-roof-total"], arguments={"question": "invoice"})
         inference = ScriptedClient("No citation here.", "Invoice 12345 [E1].")
@@ -723,6 +749,38 @@ class TestDeterministicGraders:
         )
         assert none.checks["omission_disclosed"] == NA
         assert none.checks["abstention"] == FAIL
+
+    def test_cut_required_passage_counts_as_a_disclosed_omission(self):
+        """Review round 2: t21's passage reached the prompt but was cut to
+        fit, and t22's was left out; the note reports both, so a correct
+        abstention passes."""
+        case = CASES["ask-kayak-tight-budget"]
+        run = _run(
+            "Not found in the provided emails.",
+            [_passage("E1", "t21", truncated=True)],
+            [],
+            retrieved=[thread_id_of("t21"), thread_id_of("t22")],
+            coverage_note=self._NOTE,
+        )
+        det = grade_run(case, run)
+        assert det.checks["omission_disclosed"] == PASS
+        assert det.checks["required_evidence_cited"] == PASS
+        assert det.checks["abstention"] == PASS
+        assert det.prompt_coverage == 0.5  # the cut passage still reached the prompt
+
+    def test_budget_omitted_facts_exclude_retrieval_misses(self):
+        """Review round 2: only facts whose evidence was retrieved and then
+        left out or cut by the budget may be credited to the note."""
+        case = CASES["ask-kayak-tight-budget"]
+        cut = _run(
+            "x",
+            [_passage("E1", "t21", truncated=True)],
+            [],
+            retrieved=[thread_id_of("t21"), thread_id_of("t22")],
+        )
+        assert budget_omitted_facts(case, cut) == ["f1", "f2"]
+        missed = _run("x", [_passage("E1", "t21.1")], [], retrieved=[thread_id_of("t21")])
+        assert budget_omitted_facts(case, missed) == []
 
     def test_disclosure_needs_no_note_when_all_evidence_fit(self):
         case = CASES["ask-kayak-tight-budget"]
@@ -1000,6 +1058,29 @@ class TestJudge:
         bare = build_judge_prompt(case, "Not found in the provided emails.", {}, [])
         assert "Server coverage note (written by the tool, not the assistant): none" in bare
         assert "coverage note" not in build_judge_prompt(CASES["ask-padlock"], "a", {}, [])
+
+    def test_prompt_names_the_facts_the_budget_left_out(self):
+        """Review round 2: the note may excuse only the listed facts, so a
+        retrieval miss is never credited as disclosed."""
+        case = CASES["ask-kayak-tight-budget"]
+        prompt = build_judge_prompt(
+            case, "a", {}, [], coverage_note="Evidence note: 1 left out.", omitted_facts=["f2"]
+        )
+        head = prompt.split("<untrusted", 1)[0]
+        assert "Reference facts whose evidence the tool retrieved but left out or cut: f2" in head
+        assert "only a reference fact listed as left out" in prompt.casefold()
+        bare = build_judge_prompt(case, "a", {}, [], coverage_note="Evidence note: 1 left out.")
+        assert "Reference facts whose evidence the tool retrieved but left out or cut: none" in bare
+
+    def test_empty_prompt_is_not_described_as_an_empty_search(self):
+        """Review round 2: with every passage left out by the budget, the
+        prompt must not also say the search returned nothing."""
+        case = CASES["ask-kayak-tight-budget"]
+        prompt = build_judge_prompt(case, "a", {}, [], coverage_note="Evidence note: 3 left out.")
+        assert "the search returned nothing" not in prompt
+        assert "(none supplied: the prompt budget left them out)" in prompt
+        empty = build_judge_prompt(CASES["ask-cabin-wifi"], "a", {}, [])
+        assert "(none: the search returned nothing)" in empty
 
     def test_judge_call_passes_the_coverage_note(self):
         case_id = "ask-kayak-tight-budget"

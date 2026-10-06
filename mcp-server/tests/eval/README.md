@@ -486,11 +486,11 @@ required evidence group cited, `must_include` present as a whole value
 abstention exactly when the case is unanswerable (citing
 nothing). A `disclose_missing` case is graded on the tool's whole
 disclosure (#820): when a required group was retrieved but left out of
-the prompt, the server's `coverage_note` must be present
-(`omission_disclosed`), those groups are excused from citation and an
-abstention may stand; a group that was supplied must still be cited,
-and a group retrieval never found is never excused (the note reports
-only budget omissions). Each evidence group is also scored as retrieved, supplied to
+the prompt or reached it only cut short, the server's `coverage_note`
+must be present (`omission_disclosed`), those groups are excused from
+citation and an abstention may stand; a group supplied whole must still
+be cited, and a group retrieval never found is never excused (the note
+reports only budget omissions). Each evidence group is also scored as retrieved, supplied to
 the prompt and cited, so a failure is attributed to `retrieval`,
 `prompt_assembly`, `synthesis`, `evaluator_infrastructure` or
 `answer_infrastructure` (several may apply; `unknown` otherwise).
@@ -498,7 +498,8 @@ the prompt and cited, so a failure is attributed to `retrieval`,
 The judge (`judge.py`, rubric `ask-rubric-4`) receives the question,
 expected handling (for `disclose_missing`, with the tool's
 `coverage_note`, labelled as server text and graded together with the
-answer), reference facts, prohibited assertions, which
+answer, and the reference facts whose evidence was retrieved but left
+out or cut, the only ones the note can excuse), reference facts, prohibited assertions, which
 dimensions apply, every passage the answerer received, the answer and
 the answer's structured `statements` numbered from 1; the passages, the
 answer and each statement sit in `<untrusted_evidence>` /
