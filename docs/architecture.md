@@ -863,7 +863,7 @@ result qualifies depends on its unit:
 | Result | Qualifies when | Sorted by |
 |---|---|---|
 | Thread (`search_emails`; the threads `get_evidence`, `ask_mailbox`, `extract_from_emails`, `brief_issue` and `check_conclusion` retrieve) | Its `[date_first, date_last]` span (effective times) overlaps the range | Relevance |
-| Evidence passage of a retrieved thread (same tools except `search_emails`, mailbox-wide path) | Its thread qualifies; the passage's own dates may fall outside the range | Relevance within the thread |
+| Evidence passage of a retrieved thread (same tools except `search_emails`, mailbox-wide path) | Its thread qualifies; the passage's own dates may fall outside the range, and `ask_mailbox` and `get_evidence` then label it `context` | Relevance within the thread |
 | Message (`query_messages`) | Its effective time is in the range | Effective time, newest first |
 | Attachment (`search_attachments`) | The carrying message's effective time is in the range | Relevance; with no query, effective time, newest first |
 
@@ -879,7 +879,12 @@ outside it, and a thread whose span straddles a short range with no
 message inside it still qualifies. Each passage carries its own
 message's `sent_at` and `occurred_at` (on `get_evidence` chunks and
 on citations), so a model can see which passages fall outside the
-range. The attachment-name bias that leads a thread's evidence with
+range. `ask_mailbox` and `get_evidence` also label each passage
+`in scope` or `context` by whether its own message's effective time
+(and sender, participant and folder) meets every filter (#755,
+`docs/mcp-tools.md`, "Evidence scope"); `ask_mailbox` states the
+filters in its prompt and asks the model to answer from in-scope
+passages. The attachment-name bias that leads a thread's evidence with
 the file the query names is not date-scoped either: it orders
 passages within a qualifying thread. Ranking lanes are not date-scoped
 per passage: a passage outside the range can still lift its thread's
