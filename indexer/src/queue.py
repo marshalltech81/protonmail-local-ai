@@ -105,8 +105,13 @@ STAGE_PARSE = "parse"
 STAGE_EMBED = "embed"
 STAGE_TRASHED = "trashed"
 DEFER_STAGES = (STAGE_PARSE, STAGE_EMBED, STAGE_TRASHED)
-# ``_stage_error``'s rendering of a ``PermissionError`` starts with this.
-_PERMISSION_ERROR_PREFIX = "PermissionError"
+# ``last_error`` of a job deferred because mbsync has not opened the file
+# to the indexer yet (``main._phase1_commit_thread``). Fixed text, and
+# distinct from ``_stage_error``'s rendering of the same
+# ``PermissionError`` (``PermissionError: [Errno 13] ...``), which a job
+# past its deferral window writes on the normal retry path, so the
+# heartbeat tells the two apart (Codex round 2 on #904).
+PERMISSION_DEFERRED_ERROR = "PermissionError: deferred until mbsync opens the file"
 
 # Written by ``begin_attempt`` while a message's step runs and cleared
 # when it returns, so a row still carrying it after a restart was being
@@ -522,10 +527,11 @@ class IndexingQueue:
         """Counts for the queue heartbeat line (#874), in one query.
 
         ``pending`` rows have never failed; ``deferred_permission`` rows
-        last failed to parse on a permission error (mbsync has not opened
-        the file yet); ``parked_trashed`` rows are trashed files waiting
-        to be reaped; ``retrying`` is every other queued row (failures,
-        embedder deferrals, a row interrupted mid-step). ``oldest_due_age``
+        were last deferred because mbsync has not opened the file yet;
+        ``parked_trashed`` rows are trashed files waiting to be reaped;
+        ``retrying`` is every other queued row (failures, including a
+        permission error past its deferral window, embedder deferrals,
+        a row interrupted mid-step). ``oldest_due_age``
         is how long, in seconds, the longest-waiting due row has been due
         (0 when none is due): it grows while draining is stalled.
         """
@@ -533,7 +539,7 @@ class IndexingQueue:
         counts, oldest_due = self.db.queue_heartbeat_counts(
             now_iso=now.isoformat(),
             permission_stage=STAGE_PARSE,
-            permission_error_prefix=_PERMISSION_ERROR_PREFIX,
+            permission_deferred_error=PERMISSION_DEFERRED_ERROR,
             trashed_stage=STAGE_TRASHED,
         )
         age = 0

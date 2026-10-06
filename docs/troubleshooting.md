@@ -959,7 +959,7 @@ Embedder retries and outages:
   struggling and indexing is slowing down. These lines share the
   20-per-5-minutes budget of the attachment WARNINGs (see "Attachment
   text or message content missing from search"); the rest are counted
-  in that section's `warnings_suppressed`.
+  as `suppressed_lines` on the queue heartbeat (below).
 - `embed request recovered on attempt <n>/3` (INFO): the retried
   request went through. A retry line with no recovery line after it
   is a request that failed all three attempts (see the ERROR lines
@@ -969,9 +969,10 @@ Embedder retries and outages:
   confirmed the embedder itself is down; indexing pauses (see "Tuning
   indexing retries").
 - `embedder recovered after <n> failure(s), paused <s>s; indexing
-  resumed` (INFO): the first successful embed after an outage. `<n>`
-  is the number of times the pause was extended, `<s>` how long
-  indexing was paused in all.
+  resumed` (INFO): the first successful embed request after an outage.
+  `<n>` is the number of times the pause was extended, `<s>` how long
+  indexing was paused in all. A batch with nothing new to embed sends
+  no request and does not count.
 
 Each recurring step below logs a failure every time it fails, and one
 `<step> recovered after <n> failure(s) over <s>s` line (INFO) on its
@@ -997,17 +998,23 @@ Queue and maintenance (all INFO unless noted):
 
 - `queue: pending=<n> retrying=<n> deferred_permission=<n>
   parked_trashed=<n> dead=<n> oldest_due_age=<s>s; deferrals since last
-  heartbeat: parse=<n> embed=<n> trashed=<n>`, every 5 minutes, during
-  the initial index too. `pending` jobs have never failed; `retrying`
-  jobs failed or were deferred by an embedder outage;
-  `deferred_permission` jobs could not be read yet (mbsync opens new
-  files to the indexer only after its sync; deferred for up to 24 h);
+  heartbeat: parse=<n> embed=<n> trashed=<n>; suppressed_lines=<n>`,
+  every 5 minutes, during the initial index too. `pending` jobs have
+  never failed; `retrying` jobs failed or were deferred by an embedder
+  outage; `deferred_permission` jobs could not be read yet (mbsync
+  opens new files to the indexer only after its sync; deferred for up
+  to 24 h, after which a still-unreadable file takes the normal retry
+  path and counts as `retrying` until it is dead);
   `parked_trashed` jobs belong to trashed messages waiting for the
   reaper, which is normal in mirror mode, not a failure. A growing
   `oldest_due_age` means due jobs are not being drained (an embedder
   outage pauses draining; see above). The deferral counts are `defer`
-  calls since the previous heartbeat, by stage. `queue heartbeat
-  failed: <type>` (WARNING) if the counts could not be read.
+  calls since the previous heartbeat, by stage. `suppressed_lines` is
+  how many embed retry and recovery, health-file and ingestion-state
+  lines the shared rate limit withheld since the previous heartbeat
+  (counted apart from the attachment WARNINGs, so they never make the
+  attachments line a WARNING). `queue heartbeat failed: <type>`
+  (WARNING) if the counts could not be read.
 - `re-queued <n> message(s) whose attachments were extracted by an
   older extractor version (...); skipped <n> dead-lettered (run make
   requeue-dead to refresh them).`, at startup after an extractor
@@ -1193,8 +1200,9 @@ only, never filenames or text (`make logs`):
   minutes, so a stream of crafted mail cannot flood the log. The rest
   are counted as `warnings_suppressed` in the attachments line below.
   The budget is shared with the embed retry, health-file and
-  ingestion-state lines (see "Indexer health in the log"), so
-  `warnings_suppressed` can also count those.
+  ingestion-state lines (see "Indexer health in the log"), but those
+  are counted as `suppressed_lines` on the queue heartbeat, never
+  here.
 - `attachments n=<total> success= failed= unsupported= too_large=
   ocr_disabled= empty= cached= pdf_pages_failed=
   pdf_pages_unrecovered= ocr_capped_pdfs= ocr_pages_skipped=

@@ -20,6 +20,7 @@ from src.database import Database
 from src.folder_watch import FolderWatchRefresher
 from src.queue import (
     ERROR_CLASS_RETRYABLE,
+    PERMISSION_DEFERRED_ERROR,
     REASON_INITIAL_SCAN,
     STAGE_EMBED,
     STAGE_PARSE,
@@ -143,7 +144,10 @@ class TestHealthFileRecovery:
         assert len(_messages(caplog, "health file refresh failed")) == (
             extractors._WARNINGS_PER_WINDOW
         )
-        assert extractors.drain_extractor_counts()["warnings_suppressed"] == 5
+        # Codex round 2 on #904: not an attachment line, so it must not
+        # turn the attachments aggregate into a WARNING.
+        assert extractors.drain_extractor_counts()["warnings_suppressed"] == 0
+        assert extractors.drain_suppressed_lines() == 5
 
 
 class TestIngestionStateRecovery:
@@ -304,7 +308,8 @@ class TestPruneRecovery:
 def _seed_queue(tmp_path) -> tuple[Database, IndexingQueue, datetime]:
     """One row in each heartbeat bucket, paths carrying the marker:
     two never tried (one due two minutes ago), one retrying, one
-    deferred for permissions, one parked trashed file, one dead."""
+    retrying a permission error past its deferral window, one deferred
+    for permissions, one parked trashed file, one dead."""
     db = Database(tmp_path / "mail.db")
     queue = IndexingQueue(db, max_attempts=3, base_backoff_seconds=0)
     now = datetime.now(UTC)
@@ -313,11 +318,17 @@ def _seed_queue(tmp_path) -> tuple[Database, IndexingQueue, datetime]:
     queue.enqueue(path % "new", REASON_INITIAL_SCAN)
     queue.enqueue(path % "retry", REASON_INITIAL_SCAN)
     queue.mark_failed(path % "retry", stage="db_write", error="OperationalError")
+    queue.enqueue(path % "perm_retry", REASON_INITIAL_SCAN)
+    queue.mark_failed(
+        path % "perm_retry",
+        stage=STAGE_PARSE,
+        error="PermissionError: [Errno 13] Permission denied",
+    )
     queue.enqueue(path % "perm", REASON_INITIAL_SCAN)
     queue.defer(
         path % "perm",
         stage=STAGE_PARSE,
-        error="PermissionError: [Errno 13] Permission denied",
+        error=PERMISSION_DEFERRED_ERROR,
         error_class=ERROR_CLASS_RETRYABLE,
         delay_seconds=60,
     )
@@ -340,7 +351,7 @@ class TestQueueHeartbeatCounts:
         counts = queue.heartbeat_counts(now=now + timedelta(seconds=5))
         assert counts == {
             "pending": 2,
-            "retrying": 1,
+            "retrying": 2,
             "deferred_permission": 1,
             "parked_trashed": 1,
             "dead": 1,
@@ -389,8 +400,9 @@ class TestQueueHeartbeatLine:
         assert len(lines) == 1
         assert lines[0].levelno == logging.INFO
         assert re.fullmatch(
-            r"queue: pending=2 retrying=1 deferred_permission=1 parked_trashed=1 dead=1 "
-            r"oldest_due_age=1\d\ds; deferrals since last heartbeat: parse=1 embed=0 trashed=1",
+            r"queue: pending=2 retrying=2 deferred_permission=1 parked_trashed=1 dead=1 "
+            r"oldest_due_age=1\d\ds; deferrals since last heartbeat: parse=1 embed=0 trashed=1; "
+            r"suppressed_lines=0",
             lines[0].getMessage(),
         )
 
@@ -398,8 +410,28 @@ class TestQueueHeartbeatLine:
         main._maybe_log_queue_heartbeat(queue)
         lines = _messages(caplog, "queue: ")
         assert len(lines) == 2
-        assert lines[1].getMessage().endswith("parse=0 embed=0 trashed=0")
+        assert lines[1].getMessage().endswith("parse=0 embed=0 trashed=0; suppressed_lines=0")
         assert MARKER not in caplog.text
+        db.close()
+
+    def test_reports_suppressed_indexer_lines_since_the_last_heartbeat(
+        self, tmp_path, caplog, clock
+    ):
+        caplog.set_level(logging.INFO)
+        from src import extractors
+
+        db, queue, _now = _seed_queue(tmp_path)
+        for _ in range(extractors._WARNINGS_PER_WINDOW + 3):
+            extractors.warn_rate_limited(main.log, "synthetic repeated line", attachment=False)
+        caplog.clear()
+
+        main._maybe_log_queue_heartbeat(queue)
+        clock["t"] += main.QUEUE_HEARTBEAT_INTERVAL_SECS
+        main._maybe_log_queue_heartbeat(queue)
+        lines = [r.getMessage() for r in _messages(caplog, "queue: ")]
+        assert lines[0].endswith("; suppressed_lines=3")
+        assert lines[1].endswith("; suppressed_lines=0")
+        assert extractors.drain_extractor_counts()["warnings_suppressed"] == 0
         db.close()
 
     def test_a_failed_count_query_logs_its_type(self, tmp_path, monkeypatch, caplog):

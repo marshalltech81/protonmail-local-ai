@@ -84,6 +84,7 @@ from .entities import AuthorityRules, AuthorityRulesError, load_authority_rules
 from .extractors import (
     DEFAULT_MAX_BYTES,
     ExtractionResult,
+    drain_suppressed_lines,
     is_stale_extractor,
     warn_rate_limited,
 )
@@ -107,6 +108,7 @@ from .queue import (
     ERROR_CLASS_OPERATOR,
     ERROR_CLASS_RETRYABLE,
     INTERRUPTED_STAGE,
+    PERMISSION_DEFERRED_ERROR,
     REASON_INITIAL_SCAN,
     REASON_ON_CREATED,
     REASON_ON_MOVED,
@@ -733,7 +735,7 @@ def _extraction_heartbeat() -> None:
         touch_health_file()
     except OSError as e:
         # Once per attachment page while the file cannot be written.
-        warn_rate_limited(log, "health file refresh failed: %s", type(e).__name__)
+        warn_rate_limited(log, "health file refresh failed: %s", type(e).__name__, attachment=False)
 
 
 class _IngestionStateRecorder:
@@ -798,7 +800,11 @@ class _IngestionStateRecorder:
             # Retried on every heartbeat until a write succeeds.
             _streaks[INGESTION_STATE_RECORDING].failed()
             warn_rate_limited(
-                log, "recording ingestion state failed: %s", type(e).__name__, level=logging.ERROR
+                log,
+                "recording ingestion state failed: %s",
+                type(e).__name__,
+                level=logging.ERROR,
+                attachment=False,
             )
             return
         _streaks[INGESTION_STATE_RECORDING].succeeded()
@@ -1011,9 +1017,14 @@ def _maybe_log_queue_heartbeat(queue: IndexingQueue) -> None:
         log.warning("queue heartbeat failed: %s", type(e).__name__)
         return
     d = queue.drain_deferrals()
+    # ``suppressed_lines``: repeated indexer lines (embed retries and
+    # recoveries, health-file and ingestion-state failures) the shared
+    # rate limit withheld since the last heartbeat; the attachment
+    # WARNINGs it withheld are in the attachments line instead.
     log.info(
         "queue: pending=%d retrying=%d deferred_permission=%d parked_trashed=%d dead=%d "
-        "oldest_due_age=%ds; deferrals since last heartbeat: parse=%d embed=%d trashed=%d",
+        "oldest_due_age=%ds; deferrals since last heartbeat: parse=%d embed=%d trashed=%d; "
+        "suppressed_lines=%d",
         c["pending"],
         c["retrying"],
         c["deferred_permission"],
@@ -1023,6 +1034,7 @@ def _maybe_log_queue_heartbeat(queue: IndexingQueue) -> None:
         d[STAGE_PARSE],
         d[STAGE_EMBED],
         d[STAGE_TRASHED],
+        drain_suppressed_lines(),
     )
 
 
@@ -1185,10 +1197,12 @@ def _phase1_commit_thread(
         # attempt. A fault that outlasts any sync falls through to the
         # normal retry path so it still ends in a visible dead row.
         if _enqueued_within(row, PERMISSION_DEFER_WINDOW_SECS):
+            # Fixed deferral text, not ``_stage_error(e)``: the heartbeat
+            # tells a deferral from a retry by it (#874).
             queue.defer(
                 filepath,
                 stage=STAGE_PARSE,
-                error=_stage_error(e),
+                error=PERMISSION_DEFERRED_ERROR,
                 error_class=ERROR_CLASS_RETRYABLE,
                 delay_seconds=PERMISSION_DEFER_SECS,
             )
@@ -2033,7 +2047,10 @@ def _drain_queue_batched(
             vectors, survivors, paused = _embed_each_message(
                 survivors, all_texts, embedder, queue, breaker
             )
-        if breaker is not None and not paused:
+        # A batch with nothing to embed sent no request, so it proves
+        # nothing about the provider: it neither closes the breaker nor
+        # logs its recovery (Codex round 2 on #904).
+        if breaker is not None and not paused and all_texts:
             breaker.record_success()
         embed_ms = (time.perf_counter() - t_embed_start) * 1000
         # Attribute embed time evenly across the batch for telemetry.

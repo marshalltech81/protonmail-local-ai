@@ -202,6 +202,7 @@ def _log_embed_retry(retry_state: RetryCallState) -> None:
         _EMBED_ATTEMPTS,
         scrub_embed_error(exc) if exc is not None else "unknown error",
         level=logging.WARNING if next_attempt >= _EMBED_ATTEMPTS else logging.INFO,
+        attachment=False,
     )
 
 
@@ -224,6 +225,7 @@ def _retry_embed_attempt(retry_state: RetryCallState) -> bool:
             retry_state.attempt_number,
             _EMBED_ATTEMPTS,
             level=logging.INFO,
+            attachment=False,
         )
     return False
 

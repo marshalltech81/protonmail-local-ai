@@ -1204,4 +1204,8 @@ class TestRetryLogging:
 
         logged = [r for r in caplog.records if r.getMessage().startswith("embed retry")]
         assert len(logged) == extractors._WARNINGS_PER_WINDOW
-        assert extractors.drain_extractor_counts()["warnings_suppressed"] == requests
+        # Codex round 2 on #904: suppressed embed lines are counted apart
+        # from the attachment WARNINGs, so they never make the attachments
+        # aggregate a WARNING.
+        assert extractors.drain_extractor_counts()["warnings_suppressed"] == 0
+        assert extractors.drain_suppressed_lines() == requests

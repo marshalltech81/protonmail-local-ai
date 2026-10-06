@@ -97,9 +97,13 @@ ZIP_MAX_UNCOMPRESSED_BYTES = 200 * 1024 * 1024
 #   counted here so the parser's per-message line can be rate limited
 #   without losing a message (review round 5 on #884).
 # * ``warnings_suppressed``: per-item WARNINGs (failed extraction, OCR
-#   cap, parser cap) that the rate limit below withheld, and the
-#   repeated indexer lines that share it (embed retries, health-file and
-#   ingestion-state failures, #873).
+#   cap, parser cap) that the rate limit below withheld.
+# * ``_suppressed_lines``: the repeated indexer lines that share the
+#   rate limit (embed retries and recoveries, health-file and
+#   ingestion-state failures, #873), withheld. Counted apart from the
+#   attachment WARNINGs, and reported on the queue heartbeat, because a
+#   suppressed embed line says nothing about attachment text (Codex
+#   round 2 on #904).
 #
 # Kept in this always-imported module because ``pdf`` is imported lazily.
 # A few integers and a window start: the state stays bounded.
@@ -110,6 +114,7 @@ _ocr_capped_pdfs = 0
 _ocr_pages_skipped = 0
 _parser_caps_messages = 0
 _warnings_suppressed = 0
+_suppressed_lines = 0
 
 # At most this many per-attachment WARNINGs per window, shared by every
 # kind (review rounds 1 and 2 on #884): a sender can attach many distinct
@@ -169,20 +174,40 @@ def drain_extractor_counts() -> dict[str, int]:
     return counts
 
 
+def drain_suppressed_lines() -> int:
+    """Return the non-attachment lines withheld since the last call, and
+    reset the count (reported on the queue heartbeat)."""
+    global _suppressed_lines
+    with _counts_lock:
+        n = _suppressed_lines
+        _suppressed_lines = 0
+    return n
+
+
 def warn_rate_limited(
-    logger: logging.Logger, msg: str, *args: object, level: int = logging.WARNING
+    logger: logging.Logger,
+    msg: str,
+    *args: object,
+    level: int = logging.WARNING,
+    attachment: bool = True,
 ) -> None:
     """Log one repeated line (a WARNING unless ``level`` says otherwise)
-    unless this window's budget is spent; then count it as suppressed.
-    ``args`` must be counts, module names, type names or fixed text."""
-    global _warning_window, _warnings_in_window, _warnings_suppressed
+    unless this window's budget is spent; then count it as suppressed:
+    in ``warnings_suppressed`` for an attachment line (the default), or
+    in the heartbeat's ``suppressed_lines`` for any other indexer line
+    (``attachment=False``). ``args`` must be counts, module names, type
+    names or fixed text."""
+    global _warning_window, _warnings_in_window, _warnings_suppressed, _suppressed_lines
     now = time.monotonic()
     with _counts_lock:
         if _warning_window is None or now - _warning_window >= _WARNING_WINDOW_SECS:
             _warning_window = now
             _warnings_in_window = 0
         if _warnings_in_window >= _WARNINGS_PER_WINDOW:
-            _warnings_suppressed += 1
+            if attachment:
+                _warnings_suppressed += 1
+            else:
+                _suppressed_lines += 1
             return
         _warnings_in_window += 1
     logger.log(level, msg, *args)

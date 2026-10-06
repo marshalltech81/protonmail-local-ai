@@ -2336,7 +2336,7 @@ class Database:
         *,
         now_iso: str,
         permission_stage: str,
-        permission_error_prefix: str,
+        permission_deferred_error: str,
         trashed_stage: str,
     ) -> tuple[dict[str, int], str | None]:
         """Rows per heartbeat bucket and the earliest due time among due
@@ -2347,7 +2347,7 @@ class Database:
             SELECT CASE
                        WHEN status = 'dead' THEN 'dead'
                        WHEN last_stage = :trashed THEN 'parked_trashed'
-                       WHEN last_stage = :perm_stage AND last_error LIKE :perm_like
+                       WHEN last_stage = :perm_stage AND last_error = :perm_deferred
                            THEN 'deferred_permission'
                        WHEN last_error IS NULL THEN 'pending'
                        ELSE 'retrying'
@@ -2361,7 +2361,7 @@ class Database:
             {
                 "trashed": trashed_stage,
                 "perm_stage": permission_stage,
-                "perm_like": permission_error_prefix + "%",
+                "perm_deferred": permission_deferred_error,
                 "now": now_iso,
             },
         ).fetchall()
