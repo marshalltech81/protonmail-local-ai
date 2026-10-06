@@ -3045,7 +3045,70 @@ class TestPdfPageLevelOcr:
 
         pdf._extract_ocr(self._pdf("sdsds"), pages=[0, 2, 4], ocr_timeout_seconds=45)
         assert work["pdfinfo_timeouts"] == [45]
-        assert work["timeouts"] == [35, 35, 35]
+        # Each render's timeout also holds back the page-count time, for
+        # the unbounded ``pdfinfo`` pdf2image runs inside it (#867 review).
+        assert work["timeouts"] == [25, 25, 25]
+
+    def _slow_page_count(self, monkeypatch, tmp_path, seconds, *, render_seconds=0.0):
+        from src.extractors import pdf
+
+        work = self._fake_ocr(monkeypatch, tmp_path)
+        clock = {"now": 0.0}
+        real_pdfinfo = __import__("pdf2image").pdfinfo_from_bytes
+        real_convert = __import__("pdf2image").convert_from_bytes
+
+        def slow_pdfinfo(payload, **kwargs):
+            clock["now"] += seconds
+            return real_pdfinfo(payload, **kwargs)
+
+        def slow_convert(payload, **kwargs):
+            clock["now"] += seconds + render_seconds
+            return real_convert(payload, **kwargs)
+
+        monkeypatch.setattr("pdf2image.pdfinfo_from_bytes", slow_pdfinfo)
+        monkeypatch.setattr("pdf2image.convert_from_bytes", slow_convert)
+        monkeypatch.setattr(pdf.time, "monotonic", lambda: clock["now"])
+        return work
+
+    def test_page_count_over_half_the_budget_is_an_ocr_timeout(self, monkeypatch, tmp_path):
+        """#867 review round 1: pdf2image repeats the page count, unbounded,
+        inside the render, so a page count taking most of the budget
+        would roughly double the deadline. Over half the budget, OCR stops
+        as on a timeout and nothing is rendered."""
+        from src.extractors import pdf
+
+        work = self._slow_page_count(monkeypatch, tmp_path, 27.0)  # 60% of 45
+        with pytest.raises(TimeoutError):
+            pdf._extract_ocr(self._pdf("ss"), pages=[0, 1], ocr_timeout_seconds=45)
+        assert work["pdfinfo_timeouts"] == [45]
+        assert work["renders"] == [] and work["ocr_calls"] == 0
+
+    @pytest.mark.parametrize(
+        ("layout", "status", "extractor"),
+        [("ds", STATUS_SUCCESS, "pdf-digital@4"), ("ss", STATUS_FAILED, "pdf@4")],
+    )
+    def test_slow_page_count_degrades_like_a_timeout(
+        self, monkeypatch, tmp_path, layout, status, extractor
+    ):
+        work = self._slow_page_count(monkeypatch, tmp_path, 27.0)
+        result = self._extract(layout, ocr_timeout_seconds=45)
+        assert (result.status, result.extractor) == (status, extractor)
+        if status == STATUS_FAILED:
+            assert result.error == "TimeoutError"
+        assert len(work["pdfinfo_timeouts"]) == 1
+        assert work["renders"] == [] and work["ocr_calls"] == 0
+
+    def test_page_count_reserve_stops_a_run_that_cannot_fit(self, monkeypatch, tmp_path):
+        """Poppler time stays within the budget: the inner page count is
+        charged up front, so no run starts without room for it."""
+        from src.extractors import pdf
+
+        # 10 s page count, 10 s render: 10 + (10 + 10) + (10 + 10) = 50 > 45.
+        work = self._slow_page_count(monkeypatch, tmp_path, 10.0, render_seconds=10.0)
+        with pytest.raises(TimeoutError):
+            pdf._extract_ocr(self._pdf("sdsds"), pages=[0, 2, 4], ocr_timeout_seconds=45)
+        assert work["timeouts"] == [25, 5]
+        assert work["renders"] == [(1, 1), (3, 3)]
 
     @pytest.mark.parametrize(
         ("layout", "status", "extractor"),

@@ -205,9 +205,10 @@ def _extract_ocr(
 
     Each run of consecutive pages is one Poppler call, so no page outside
     ``pages`` is rendered. The render timeout is one budget shared by
-    the page count and the runs, counting only time spent in Poppler,
-    so the whole render stays bounded as when it was one call; Tesseract time is bounded per
-    page by its own timeout. Each run is OCR'd before the next is
+    the runs, counting only time spent in Poppler, so the whole render
+    stays bounded as when it was one call; Tesseract time is bounded per
+    page by its own timeout. pdf2image's own page count before each
+    render takes no timeout; see the comment at the page-count guard. Each run is OCR'd before the next is
     rendered, so at most one run's page images are held at once.
 
     Uses ``pdf2image`` (Poppler) for rendering and ``pytesseract`` for
@@ -252,16 +253,25 @@ def _extract_ocr(
         # so a slow page does not eat the entire budget for the rest.
         tesseract_kwargs["timeout"] = float(ocr_timeout_seconds)
 
+    page_count_seconds = 0.0
     if render_budget is not None:
         # pdf2image runs Poppler's ``pdfinfo`` for the page count before
-        # each render without passing it the timeout (#781). Run it once
-        # here under the render budget first: ``pdfinfo`` reads the same
-        # bytes each time, so a crafted PDF that stalls it stalls here
-        # and raises ``PDFPopplerTimeoutError``, which degrades like a
-        # hung render. pdf2image types the timeout as whole seconds.
+        # each render and passes it no timeout (#781). Time one bounded
+        # run of it here first (pdf2image types the timeout as whole
+        # seconds); a PDF that stalls it raises ``PDFPopplerTimeoutError``
+        # here, which degrades like a hung render. ``pdfinfo`` takes about
+        # as long each time on the same bytes, so each render's timeout
+        # holds back that time for the unbounded call inside it, and a
+        # page count over half the budget leaves no room for one render:
+        # that is an OCR timeout too. The remaining gap, a ``pdfinfo``
+        # much slower on the inner call than on this one, would need
+        # bypassing pdf2image (#868).
         started = time.monotonic()
         pdfinfo_from_bytes(payload, timeout=math.ceil(render_budget))
-        render_budget -= time.monotonic() - started
+        page_count_seconds = time.monotonic() - started
+        if page_count_seconds * 2 > render_budget:
+            raise TimeoutError("PDF OCR render budget exhausted")
+        render_budget -= page_count_seconds
 
     # ``dir="/tmp"`` keeps the temp dir on the writable tmpfs (the
     # hardened image's only writable path). ``TemporaryDirectory``
@@ -278,12 +288,13 @@ def _extract_ocr(
             }
             if render_budget is not None:
                 # The same budget bounds the whole Poppler render, so a
-                # hung render cannot block the worker. (pdf2image does not
-                # pass it to its page-count ``pdfinfo`` call; the bounded
-                # call above has already run ``pdfinfo`` on these bytes.)
-                if render_budget <= 0:
+                # hung render cannot block the worker. The render's own
+                # timeout leaves room for pdf2image's unbounded page
+                # count (see above).
+                render_timeout = render_budget - page_count_seconds
+                if render_timeout <= 0:
                     raise TimeoutError("PDF OCR render budget exhausted")
-                convert_kwargs["timeout"] = render_budget
+                convert_kwargs["timeout"] = render_timeout
             started = time.monotonic()
             images = convert_from_bytes(payload, **convert_kwargs)  # type: ignore[arg-type]
             if render_budget is not None:
