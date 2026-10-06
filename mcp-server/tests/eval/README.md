@@ -482,10 +482,20 @@ with `--case` (in `EVAL_ARGS`) to cut the count. A case skipped at run
 time because the runtime budget ran out makes no calls. Under `make`,
 the line prints twice: once for the argument check, once for the run.
 
+The API modes make one request per call (the SDKs' own retries are
+off), so their figure is exact. A CLI judge (`claude-cli`, `codex-cli`)
+is counted per launch instead, and the line says "judge CLI launches":
+one launch can make several model requests against the subscription
+(the claude CLI retries a reply cut off at `JUDGE_MAX_TOKENS` on its
+own), and neither CLI has a flag that caps them (Claude Code 2.1.291
+and Codex 0.160.1 were checked). For those modes the figure, and the
+cap below, count launches, not model requests.
+
 - `EVAL_MAX_CALLS` (optional, a whole number of at least 1) caps the
   run: when the most calls it can make (the "at most" figure, repairs
   included) exceed it, the run exits 3 before the index is built or any
-  provider is called. `make eval-answers EVAL_MAX_CALLS=80` or an
+  provider is called. With a CLI judge it caps answer calls plus judge
+  CLI launches, as above. `make eval-answers EVAL_MAX_CALLS=80` or an
   exported variable both work. Unset means no cap.
 - A provider's billing or credit refusal stops the run at once with
   `answer evaluation: the answering provider refused a call for

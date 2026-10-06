@@ -43,7 +43,7 @@ from tests.answer_eval.cases import (
     load_cases,
 )
 from tests.answer_eval.cli_judge import ClaudeCliClient
-from tests.answer_eval.config import ConfigError, LayerConfig, load_layer
+from tests.answer_eval.config import CLI_MODES, ConfigError, LayerConfig, load_layer
 from tests.answer_eval.harness import evaluate
 from tests.answer_eval.judge import RUBRIC_VERSION
 from tests.answer_eval.report import (
@@ -90,18 +90,33 @@ def _plan_calls(selected: int, env: Mapping[str, str]) -> None:
     its first answer fails the citation check, and one judge call unless
     ``JUDGE_MODE=none``. The cap applies to the most the run can make.
     The model names are the operator's own settings.
+
+    The API clients make one request per call (SDK retries are off). A
+    CLI judge (``claude-cli``, ``codex-cli``) is counted per launch: one
+    launch can make several model requests (the claude CLI retries a
+    reply cut off at its token limit) and neither CLI has a flag that
+    caps them, so for those modes the figures are launches, not provider
+    calls.
     """
     judge_mode = env.get("JUDGE_MODE", "none").strip().lower()
     answer_model = env.get("INFERENCE_MODEL", "").strip() or "(INFERENCE_MODEL unset)"
+    judge_model = env.get("JUDGE_MODEL", "").strip() or "(JUDGE_MODEL unset)"
+    unit = "provider calls"
     if judge_mode == "none":
         judge_calls, judge = 0, "0 judge calls (JUDGE_MODE=none)"
+    elif judge_mode in CLI_MODES:
+        unit = "answer calls and judge CLI launches"
+        judge_calls, judge = (
+            selected,
+            f"{selected} judge CLI launches of {judge_mode} with {judge_model} (a launch can "
+            "make several model requests, which nothing here counts or caps)",
+        )
     else:
-        judge_model = env.get("JUDGE_MODEL", "").strip() or "(JUDGE_MODEL unset)"
         judge_calls, judge = selected, f"{selected} judge calls to {judge_model}"
     most = 2 * selected + judge_calls
     print(
         f"Planned provider calls: {selected} answer calls to {answer_model} (up to {selected} "
-        f"more for citation repairs) and {judge}; at most {most} provider calls.",
+        f"more for citation repairs) and {judge}; at most {most} {unit}.",
         file=sys.stderr,
     )
     raw = env.get("EVAL_MAX_CALLS", "").strip()
@@ -111,7 +126,7 @@ def _plan_calls(selected: int, env: Mapping[str, str]) -> None:
         raise ConfigError("EVAL_MAX_CALLS must be a whole number of at least 1")
     if most > int(raw):
         raise ConfigError(
-            f"this run can make {most} provider calls, more than EVAL_MAX_CALLS={int(raw)}: "
+            f"this run can make {most} {unit}, more than EVAL_MAX_CALLS={int(raw)}: "
             "select fewer cases with --case, or raise the cap"
         )
 

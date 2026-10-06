@@ -2141,6 +2141,32 @@ class TestCostGuard:
             "citation repairs) and 2 judge calls to stub-j; at most 6 provider calls.\n"
         )
 
+    @pytest.mark.parametrize("mode", ["claude-cli", "codex-cli"])
+    def test_cli_judge_is_counted_in_launches_not_provider_calls(
+        self, tmp_path, monkeypatch, capsys, mode
+    ):
+        """Codex review round 2 on #866: a CLI judge launch can make more
+        than one model request (the claude CLI retries a reply cut off at
+        its token limit) and neither CLI offers a flag to cap that, so the
+        plan and the cap count CLI launches, not provider calls."""
+        env = {"INFERENCE_MODEL": "stub-answerer", "JUDGE_MODE": mode, "JUDGE_MODEL": "stub-j"}
+        code = self._preflight(tmp_path, monkeypatch, env, "ask-roof-total", "ask-padlock")
+        assert code == cli.EXIT_OK
+        assert capsys.readouterr().err == (
+            "Planned provider calls: 2 answer calls to stub-answerer (up to 2 more for "
+            f"citation repairs) and 2 judge CLI launches of {mode} with stub-j (a launch can "
+            "make several model requests, which nothing here counts or caps); at most 6 "
+            "answer calls and judge CLI launches.\n"
+        )
+        code = self._preflight(
+            tmp_path, monkeypatch, {**env, "EVAL_MAX_CALLS": "5"}, "ask-roof-total", "ask-padlock"
+        )
+        assert code == cli.EXIT_CONFIG
+        assert (
+            "this run can make 6 answer calls and judge CLI launches, more than EVAL_MAX_CALLS=5"
+            in capsys.readouterr().err
+        )
+
     def test_no_judge_calls_without_a_judge(self, tmp_path, monkeypatch, capsys):
         env = {"INFERENCE_MODEL": "stub-answerer", "JUDGE_MODEL": "ignored"}
         assert self._preflight(tmp_path, monkeypatch, env, "ask-roof-total") == cli.EXIT_OK
