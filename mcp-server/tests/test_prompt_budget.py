@@ -13,7 +13,6 @@ synthetic.
 
 import asyncio
 import logging
-import re
 from datetime import UTC, datetime
 
 import pytest
@@ -41,6 +40,7 @@ from src.tools.intelligence import (
     PER_THREAD_CHAR_BUDGET,
     REPAIR_RESERVE_CHARS,
     _build_evidence,
+    _schema_reserve_chars,
     _summarize_context,
     register_intelligence_tools,
 )
@@ -553,27 +553,32 @@ class TestExperimentalBudget:
             assert _prompt_chars(call) <= _SMALL.prompt_chars
 
 
-_LIMIT_LINE = re.compile(
-    r"^token limit hit: tool=(?P<tool>\w+) limits=(?P<limits>[\w,]+) (?P<counts>(?:\w+=\d+ ?)+)$"
-)
+_LIMIT_PREFIX = "token limit hit: "
 
 
 def _limit_lines(caplog) -> list[dict]:
-    """Every ``token limit hit`` WARNING, parsed: tool, limits, counts."""
+    """Every ``token limit hit`` WARNING, parsed: tool, limits, counts.
+
+    Split on spaces and ``=`` rather than matched with a regex, so the
+    parse is linear whatever the line holds."""
     lines = []
     for record in caplog.records:
         message = record.getMessage()
         if not message.startswith("token limit hit"):
             continue
         assert record.levelno == logging.WARNING
-        match = _LIMIT_LINE.match(message)
-        assert match, message
-        counts = dict(pair.split("=") for pair in match["counts"].split())
+        assert message.startswith(_LIMIT_PREFIX), message
+        pairs = [field.split("=") for field in message.removeprefix(_LIMIT_PREFIX).split(" ")]
+        assert all(len(pair) == 2 for pair in pairs), message
+        fields = dict(pairs)
+        tool = fields.pop("tool")
+        limits = fields.pop("limits")
+        assert tool.isidentifier() and all(v.isdigit() for v in fields.values()), message
         lines.append(
             {
-                "tool": match["tool"],
-                "limits": match["limits"].split(","),
-                "counts": {k: int(v) for k, v in counts.items()},
+                "tool": tool,
+                "limits": limits.split(","),
+                "counts": {k: int(v) for k, v in fields.items()},
             }
         )
     return lines
@@ -891,4 +896,146 @@ class TestPerThreadCapCount:
         )
         asyncio.run(tools[tool](**args))
         assert _capped(caplog) == 3
+        assert _MARKER not in caplog.text
+
+
+def _long_summary_thread() -> tuple[ThreadResult, list[ChunkResult]]:
+    thread = _thread("t1", [], body=f"{_MARKER} body " + "b" * 20_000)
+    recent = [_chunk(f"r{k}", f"{_MARKER} recent {k} " + "r" * 2000, index=k) for k in range(4)]
+    return thread, recent
+
+
+class TestReviewRound1:
+    """Codex review round 1 on #883, and the coordinator's P3."""
+
+    # Item 2: summarize_thread's context cut by the window.
+    def test_summarize_context_cut_by_the_window_is_an_evidence_budget_hit(self, caplog):
+        caplog.set_level(logging.INFO)
+        thread, recent = _long_summary_thread()
+        small = PromptBudget(context_tokens=3072, max_output_tokens=1024)
+        llm = FakeInferenceClient(response="summary [E1]")
+        asyncio.run(
+            _tools(_StubDb([thread], recent), llm, small)["summarize_thread"](thread_id="t1")
+        )
+        line = _one_limit_line(caplog)
+        assert line["tool"] == "summarize_thread"
+        assert line["limits"] == ["evidence_budget"]
+        counts = line["counts"]
+        # What the default cap shows, with the labelled headers the tool uses.
+        full = len(_summarize_context(thread, recent, evidence_map={}))
+        assert counts["context_chars_wanted"] == full
+        assert 0 < counts["context_chars_kept"] < full
+        assert _one_line(caplog)["counts"]["token_limit_evidence_budget"] == 1
+        assert _MARKER not in caplog.text
+
+    def test_summarize_default_window_logs_no_context_cut(self, caplog):
+        caplog.set_level(logging.INFO)
+        thread, recent = _long_summary_thread()
+        llm = FakeInferenceClient(response="summary [E1]")
+        asyncio.run(_tools(_StubDb([thread], recent), llm)["summarize_thread"](thread_id="t1"))
+        assert _limit_lines(caplog) == []
+
+    # Item 3: an answer cut at max_tokens with nothing to show.
+    def test_ask_mailbox_empty_partial_logs_output_max_tokens(self, caplog):
+        caplog.set_level(logging.INFO)
+        llm = FakeInferenceClient(complete_responses=[InferenceTruncatedError(partial="  ")])
+        with pytest.raises(ToolError):
+            asyncio.run(
+                _tools(_StubDb(_short_threads()), llm)["ask_mailbox"](question=f"{_MARKER}?")
+            )
+        line = _one_limit_line(caplog)
+        assert line["tool"] == "ask_mailbox"
+        assert line["limits"] == ["output_max_tokens"]
+        assert line["counts"]["outputs_cut"] == 1
+        timing = _one_line(caplog)
+        assert timing["outcome"] == "error"
+        assert timing["counts"]["token_limit_output_max_tokens"] == 1
+        assert _MARKER not in caplog.text
+
+    def test_ask_mailbox_empty_partial_keeps_the_window_cut(self, caplog):
+        caplog.set_level(logging.INFO)
+        llm = FakeInferenceClient(complete_responses=[InferenceTruncatedError(partial="")])
+        with pytest.raises(ToolError):
+            asyncio.run(_tools(_StubDb(_long_threads()), llm, _SMALL)["ask_mailbox"](question="q?"))
+        assert _one_limit_line(caplog)["limits"] == ["evidence_budget", "output_max_tokens"]
+
+    def test_summarize_thread_empty_partial_logs_output_max_tokens(self, caplog):
+        caplog.set_level(logging.INFO)
+        thread = _thread("t1", [], body=f"{_MARKER} body")
+        llm = FakeInferenceClient(complete_responses=[InferenceTruncatedError(partial="")])
+        with pytest.raises(ToolError):
+            asyncio.run(_tools(_StubDb([thread]), llm)["summarize_thread"](thread_id="t1"))
+        line = _one_limit_line(caplog)
+        assert line["tool"] == "summarize_thread"
+        assert line["limits"] == ["output_max_tokens"]
+        assert line["counts"]["outputs_cut"] == 1
+        assert _MARKER not in caplog.text
+
+    # Item 4: every limit hit is marked on the call's own timing line.
+    def test_token_limits_are_marked_on_the_timing_line(self, caplog):
+        caplog.set_level(logging.INFO)
+        llm = FakeInferenceClient(complete_responses=[InferenceTruncatedError(partial="p [E1]")])
+        asyncio.run(_tools(_StubDb(_long_threads()), llm, _SMALL)["ask_mailbox"](question="q?"))
+        counts = _one_line(caplog)["counts"]
+        assert counts["token_limit_evidence_budget"] == 1
+        assert counts["token_limit_output_max_tokens"] == 1
+        assert "token_limit_prompt_over_budget" not in counts
+
+    def test_prompt_over_budget_is_marked_on_the_timing_line(self, caplog):
+        caplog.set_level(logging.INFO)
+        with pytest.raises(ToolError):
+            asyncio.run(
+                _tools(_StubDb(_long_threads(n=1)), FakeInferenceClient(), _SMALL)["ask_mailbox"](
+                    question="why " * 3000
+                )
+            )
+        timing = _one_line(caplog)
+        assert timing["outcome"] == "error"
+        assert timing["counts"] == {"results": 1, "token_limit_prompt_over_budget": 1}
+
+    def test_no_limit_leaves_no_timing_marker(self, caplog):
+        caplog.set_level(logging.INFO)
+        tools = _tools(_StubDb(_short_threads()), FakeInferenceClient(response="ok [E1]"))
+        asyncio.run(tools["ask_mailbox"](question="q?"))
+        assert not [k for k in _one_line(caplog)["counts"] if k.startswith("token_limit_")]
+
+    # Item 6: the structured-output schema counts toward the prompt.
+    def test_extract_prompt_tokens_include_the_structured_schema(self, caplog):
+        caplog.set_level(logging.INFO)
+        threads = [_thread("t1", [_chunk("c1", f"{_MARKER} " + "x" * 9000)])]
+        # Room for the schema reserve, while the passage is still cut.
+        small = PromptBudget(context_tokens=2800, max_output_tokens=1024)
+        llm = FakeInferenceClient(response='{"records": []}', structured_output=True)
+        asyncio.run(
+            _tools(_StubDb(threads), llm, small)["extract_from_emails"](
+                query=_MARKER, schema={"amount": "number"}
+            )
+        )
+        (system, user), schema = llm.complete_calls[0], llm.json_schemas[0]
+        assert schema is not None
+        reserve = _schema_reserve_chars(schema)
+        assert reserve > 0
+        expected = -(-(len(system) + len(user) + reserve) // CHARS_PER_TOKEN)
+        assert _one_limit_line(caplog)["counts"]["prompt_tokens"] == expected
+        assert _MARKER not in caplog.text
+
+    # Coordinator P3: a dropped thread with the cap trimming the rest is
+    # counted once, as the cap, not also as window-cut passages.
+    def test_dropped_thread_with_cap_trim_is_not_counted_twice(self, caplog):
+        caplog.set_level(logging.INFO)
+        threads = [
+            _thread(f"t{i}", [_chunk(f"c{i}", f"{_MARKER} " + "x" * 9000)]) for i in range(2)
+        ]
+        for t in threads:
+            t.subject = f"{_MARKER} " + "h" * 600
+            t.participants = [f"{_MARKER} " + "h" * 600] * 3
+        budget = PromptBudget(context_tokens=3480, max_output_tokens=1024)
+        llm = FakeInferenceClient(response="ok [E1]")
+        asyncio.run(_tools(_StubDb(threads), llm, budget)["ask_mailbox"](question="q?"))
+        line = _one_limit_line(caplog)
+        assert line["limits"] == ["evidence_budget"]
+        assert line["counts"]["threads_dropped"] == 1
+        assert line["counts"]["passages_omitted"] == 0
+        assert line["counts"]["passages_truncated"] == 0
+        assert _capped(caplog) == 1
         assert _MARKER not in caplog.text

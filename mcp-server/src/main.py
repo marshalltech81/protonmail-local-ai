@@ -12,7 +12,10 @@ import logging
 import math
 import os
 import re
+import threading
+import time
 import urllib.parse
+from collections.abc import Callable
 from pathlib import Path
 
 import fastmcp
@@ -517,9 +520,68 @@ class _HostOriginGuard:
         await self.app(scope, receive, send_and_log)
 
 
+class _RejectionLog:
+    """Rate-limited logging of rejected requests (#878, Codex review
+    round 1 on #883).
+
+    A prober can send rejected requests as fast as it likes, so not
+    every one gets a line. In each window of ``interval`` seconds the
+    first rejection per reason is logged as ``rejected request:
+    reason=<reason>``; every rejection is counted. When a rejection
+    arrives after the window ended, a window that had more than one
+    rejection for some reason is reported as one ``rejected requests in
+    the last <N>s: <reason>=<count> ...`` line, N being the seconds the
+    window actually covered, and a new window starts. A window with no
+    later rejection is never summarised; its first lines are already
+    logged.
+
+    State is one counter per fixed reason, so it is bounded whatever the
+    traffic. The lock makes ``record`` safe from any thread; it never
+    awaits, so it is safe on the event loop too. Logging happens outside
+    the lock.
+    """
+
+    REASONS = ("missing_token", "invalid_token", "bad_host", "bad_origin")
+
+    def __init__(self, interval: float, clock: Callable[[], float] = time.monotonic) -> None:
+        self._interval = interval
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._window_start: float | None = None
+        self._counts = dict.fromkeys(self.REASONS, 0)
+
+    def record(self, reason: str) -> None:
+        if reason not in self._counts:
+            raise ValueError("unknown rejection reason")
+        summary: tuple[int, dict[str, int]] | None = None
+        with self._lock:
+            now = self._clock()
+            if self._window_start is None or now - self._window_start >= self._interval:
+                if self._window_start is not None and any(n > 1 for n in self._counts.values()):
+                    summary = (int(now - self._window_start), dict(self._counts))
+                self._window_start = now
+                self._counts = dict.fromkeys(self.REASONS, 0)
+            self._counts[reason] += 1
+            first = self._counts[reason] == 1
+        if summary is not None:
+            elapsed, counts = summary
+            log.warning(
+                "rejected requests in the last %ds: %s",
+                elapsed,
+                " ".join(f"{name}={n}" for name, n in counts.items() if n),
+            )
+        if first:
+            log.warning("rejected request: reason=%s", reason)
+
+
+# Seconds per rejection-log window.
+_REJECTION_LOG_INTERVAL_SECS = 60.0
+_REJECTIONS = _RejectionLog(_REJECTION_LOG_INTERVAL_SECS)
+
+
 def _log_rejection(reason: str) -> None:
-    """One WARNING per rejected request; ``reason`` is a fixed literal."""
-    log.warning("rejected request: reason=%s", reason)
+    """Record one rejected request; ``reason`` is a fixed literal."""
+    _REJECTIONS.record(reason)
 
 
 _MISSING_AUTH_TOKEN = (
