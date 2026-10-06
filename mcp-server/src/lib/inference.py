@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Literal, Protocol
 
 from .security import (
     ProviderResponseError,
@@ -160,6 +160,10 @@ def estimate_tokens(text: str) -> int:
     return -(-len(text) // CHARS_PER_TOKEN)
 
 
+# Why a reply stopped early (``InferenceTruncatedError.reason``).
+TruncationReason = Literal["max_tokens", "context_window"]
+
+
 class InferenceTruncatedError(ProviderResponseError):
     """The model stopped at ``max_tokens`` before finishing its answer.
 
@@ -167,14 +171,21 @@ class InferenceTruncatedError(ProviderResponseError):
     cut-off answer is worth: prose can be shown with a notice, while a
     cut-off JSON record is a failed extraction, never an empty one. The
     message itself carries no response content, so it is safe to log.
+
+    ``reason`` is a fixed value naming the stop: ``max_tokens`` (the
+    reply reached ``INFERENCE_MAX_TOKENS``) or ``context_window``
+    (Anthropic's ``model_context_window_exceeded``: the model's own
+    window filled first). The message is the same for both, so what the
+    caller sees does not change; the reason is for the server log.
     """
 
-    def __init__(self, partial: str) -> None:
+    def __init__(self, partial: str, reason: TruncationReason = "max_tokens") -> None:
         super().__init__(
             "Inference output hit the max_tokens limit before finishing "
             "(raise INFERENCE_MAX_TOKENS)"
         )
         self.partial = partial
+        self.reason: TruncationReason = reason
 
 
 class _Backend(Protocol):
@@ -452,8 +463,10 @@ class _AnthropicBackend:
                 parts.append(text)
         result = "".join(parts)
         stop_reason = getattr(resp, "stop_reason", None)
-        if stop_reason in ("max_tokens", "model_context_window_exceeded"):
+        if stop_reason == "max_tokens":
             raise InferenceTruncatedError(result)
+        if stop_reason == "model_context_window_exceeded":
+            raise InferenceTruncatedError(result, reason="context_window")
         if stop_reason == "refusal":
             raise ProviderResponseError("Inference provider refused to answer (mode=anthropic)")
         # A blank result means the response contained no answer text

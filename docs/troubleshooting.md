@@ -910,18 +910,31 @@ request is over budget (`prompt_over_budget`), for example:
 token limit hit: tool=ask_mailbox limits=evidence_budget outputs_cut=0 threads_dropped=1 passages_omitted=6 passages_truncated=1 prompt_tokens=2950 prompt_budget_tokens=3008 max_tokens=1024
 ```
 
-The caller was told too (a truncation notice, a coverage note or an
-error). The line carries counts and settings only. `limits` names
-which limits the call hit:
+The line carries counts and settings only. Not every limit reaches
+the caller: a cut reply carries a truncation notice, the evidence that
+`ask_mailbox` and `extract_from_emails` leave out is disclosed in their
+coverage or evidence note, and `prompt_over_budget` is an error, but a
+`summarize_thread` context trimmed by the window (`evidence_budget`
+below) is in this log line only. `limits` names which limits the call
+hit:
 
 - `output_max_tokens`: the model stopped at `INFERENCE_MAX_TOKENS`, so
-  the answer or summary was cut off (`outputs_cut` counts the cut
-  replies; for `extract_from_emails`, the threads whose reply was
-  lost). A reply cut before any text fails the call with an error, and
-  the line is still logged. Raise `INFERENCE_MAX_TOKENS`. The reply
-  reserve comes out of `INFERENCE_CONTEXT_TOKENS`, so raise that by the
-  same amount if the model's window allows, or the prompt allowance
-  shrinks.
+  the answer or summary was cut off (`outputs_cut` counts every cut
+  reply, whatever stopped it; for `extract_from_emails`, the threads
+  whose reply was lost). A reply cut before any text fails the call
+  with an error, and the line is still logged. When the repair reply
+  was the one cut, `prompt_tokens` is the repair prompt. Raise
+  `INFERENCE_MAX_TOKENS`. The reply reserve comes out of
+  `INFERENCE_CONTEXT_TOKENS`, so raise that by the same amount if the
+  model's window allows, or the prompt allowance shrinks.
+- `context_window`: the model's own context window filled before the
+  reply reached `INFERENCE_MAX_TOKENS` (Anthropic's
+  `model_context_window_exceeded` stop; `context_window_cuts` counts
+  these replies). Raising `INFERENCE_MAX_TOKENS` does not help.
+  `INFERENCE_CONTEXT_TOKENS` is set larger than the model's real
+  window: lower it to that window, or choose a model with a larger
+  one. The caller sees the same truncation notice as for
+  `output_max_tokens`.
 - `evidence_budget`: the model window, not the fixed per-thread cap,
   left out passages (`passages_omitted`), cut them short
   (`passages_truncated`) or dropped lower-ranked threads
@@ -1032,8 +1045,9 @@ each reason was rejected only once). The reasons:
 - `missing_token`: no `Authorization` header (`401`). The client is
   not configured to send the token at all.
 - `invalid_token`: a header with a wrong token or another scheme
-  (`401`); fastmcp also logs `Auth error returned: invalid_token
-  (status=401)`. Follow the steps above.
+  (`401`). fastmcp's own per-request `Auth error returned` line is
+  filtered out, so this rate-limited line is the record. Follow the
+  steps above.
 - `bad_host`: a Host other than `localhost`, `127.0.0.1`, `[::1]` or
   `mcp-server` (`421`). Point the client at `http://127.0.0.1:3000/mcp`.
 - `bad_origin`: a browser `Origin` outside the same names over `http`

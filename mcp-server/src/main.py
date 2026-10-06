@@ -135,6 +135,23 @@ class _DropRawHostOriginWarning(logging.Filter):
 logging.getLogger("mcp.server.transport_security").addFilter(_DropRawHostOriginWarning())
 
 
+class _DropPerRequestAuthError(logging.Filter):
+    """Drop fastmcp's per-request ``Auth error returned`` INFO line.
+
+    fastmcp logs it for every rejected bearer token, so a prober could
+    fill the log with it. ``_RejectionLog`` records the same rejection
+    (``invalid_token``), rate-limited (Codex review round 2 on #883).
+    The 401 response is unchanged, and other records from the logger
+    pass.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not str(record.msg).startswith("Auth error returned")
+
+
+logging.getLogger("fastmcp.server.auth.middleware").addFilter(_DropPerRequestAuthError())
+
+
 _INFERENCE_MODES = frozenset({"anthropic", "openai", "none"})
 _EMBED_MODES = frozenset({"openai"})
 _RERANK_MODES = frozenset({"cohere", "none"})

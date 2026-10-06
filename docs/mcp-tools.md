@@ -131,7 +131,8 @@ tool=search_emails outcome=ok total_ms=41.7 stages_ms={'query_embedding': 22.4, 
   per thread) left out or cut. It is a design cap, not a token limit,
   so no setting raises it and it logs no warning; a cut made by the
   model window is the `token limit hit` warning instead.
-- `token_limit_output_max_tokens`, `token_limit_evidence_budget` and
+- `token_limit_output_max_tokens`, `token_limit_context_window`,
+  `token_limit_evidence_budget` and
   `token_limit_prompt_over_budget` mark a call that hit that token
   limit; the call also logs a
   [`token limit hit`](troubleshooting.md#the-log-shows-token-limit-hit)

@@ -740,6 +740,23 @@ class TestRejectionRateLimit:
         ]
         assert _rejections(caplog) == ["invalid_token", "invalid_token"]
 
+    def test_fastmcp_auth_error_line_is_dropped(self, caplog, rejection_clock):
+        """Codex review round 2 on #883: fastmcp's own per-request
+        ``Auth error returned`` line would flood the log the rate limit
+        protects, so it is filtered; the responses are unchanged."""
+        app = _app()
+        wrong = dict(_POST_HEADERS, authorization="Bearer wrong-token")
+        with caplog.at_level(logging.DEBUG):
+            for _ in range(3):
+                assert _mcp_status(app, headers=wrong) == 401
+        assert "Auth error returned" not in caplog.text
+        assert _rejections(caplog) == ["invalid_token"]
+
+    def test_other_fastmcp_auth_records_still_pass(self, caplog):
+        with caplog.at_level(logging.INFO):
+            logging.getLogger("fastmcp.server.auth.middleware").info("unrelated auth record")
+        assert "unrelated auth record" in caplog.text
+
     def test_state_is_bounded_to_the_fixed_reasons(self):
         with pytest.raises(ValueError):
             main_mod._REJECTIONS.record("attacker-chosen")
