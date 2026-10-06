@@ -969,6 +969,23 @@ Queue and maintenance (all INFO unless noted):
   periodic Maildir watch refresh; `watches` is the number of
   directories readable when the watch was last scheduled.
 
+WAL and storage, after each WAL maintenance pass (at startup and every
+`INDEXER_WAL_CHECKPOINT_INTERVAL_SECS`, 10 minutes by default):
+
+- `storage: db=<MB>MB wal=<MB>MB free_disk=<MB>MB` (INFO): the size of
+  `mail.db`, of its `-wal` file, and the free space on the volume
+  holding them, in MiB (rounded down). `storage: size check failed
+  (<type>)` (WARNING) if they could not be read.
+- `wal checkpoint blocked <n> times in a row; WAL=<pages> pages`
+  (WARNING), from the third blocked checkpoint in a row (30 minutes at
+  the default interval) and on every blocked pass after it. Something
+  is holding a read transaction open on the database (a long query in
+  mcp-server, or an `sqlite3` shell left open), so the WAL cannot be
+  truncated and keeps growing; watch `wal=` in the storage line. A
+  single blocked pass is normal and logged at DEBUG only.
+- `wal checkpoint unblocked after <n> blocked pass(es)` (INFO): the
+  first checkpoint that completed after a warned run.
+
 ## Reading a tool call's log line
 
 Every MCP tool logs one completion line per call on the `mcp.timings`

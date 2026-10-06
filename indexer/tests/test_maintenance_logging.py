@@ -618,3 +618,105 @@ class TestWatchRefreshSummary:
         assert refresher.watched_dirs == 0
         refresher.start()
         assert refresher.watched_dirs == 3
+
+
+# --- #875: WAL checkpoint and storage ------------------------------------
+
+
+def _busy_db(tmp_path, monkeypatch, results):
+    """A real database whose checkpoint returns ``results`` in turn."""
+    db = Database(tmp_path / f"{MARKER}.db")
+    outcomes = list(results)
+    monkeypatch.setattr(db, "wal_checkpoint_truncate", lambda: outcomes.pop(0))
+    return db
+
+
+class TestWalBusyStreak:
+    def test_warns_from_the_kth_busy_pass_then_logs_the_recovery(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        caplog.set_level(logging.INFO)
+        k = main.WAL_BUSY_WARN_AFTER
+        db = _busy_db(tmp_path, monkeypatch, [(1, 40 + i, 0) for i in range(k + 1)] + [(0, 0, 0)])
+        caplog.clear()  # the database's own startup line names its path
+        for _ in range(k + 2):
+            main._run_wal_maintenance(db)
+
+        warnings = [
+            (r.levelno, r.getMessage()) for r in _messages(caplog, "wal checkpoint blocked")
+        ]
+        assert warnings == [
+            (logging.WARNING, f"wal checkpoint blocked {k} times in a row; WAL={40 + k - 1} pages"),
+            (logging.WARNING, f"wal checkpoint blocked {k + 1} times in a row; WAL={40 + k} pages"),
+        ]
+        assert [r.getMessage() for r in _messages(caplog, "wal checkpoint unblocked")] == [
+            f"wal checkpoint unblocked after {k + 1} blocked pass(es)"
+        ]
+        assert MARKER not in caplog.text
+        db.close()
+
+    def test_a_short_busy_run_neither_warns_nor_logs_recovery(self, tmp_path, monkeypatch, caplog):
+        caplog.set_level(logging.INFO)
+        k = main.WAL_BUSY_WARN_AFTER
+        db = _busy_db(tmp_path, monkeypatch, [(1, 5, 0)] * (k - 1) + [(0, 0, 0)])
+        for _ in range(k):
+            main._run_wal_maintenance(db)
+        assert not _messages(caplog, "wal checkpoint blocked")
+        assert not _messages(caplog, "wal checkpoint unblocked")
+        db.close()
+
+
+class TestStorageLine:
+    def test_logs_sizes_once_per_pass(self, tmp_path, caplog):
+        caplog.set_level(logging.INFO)
+        db = Database(tmp_path / f"{MARKER}.db")
+        caplog.clear()  # the database's own startup line names its path
+        main._run_wal_maintenance(db)
+        lines = _messages(caplog, "storage: ")
+        assert len(lines) == 1
+        assert lines[0].levelno == logging.INFO
+        assert re.fullmatch(r"storage: db=\d+MB wal=\d+MB free_disk=\d+MB", lines[0].getMessage())
+        assert MARKER not in caplog.text
+        db.close()
+
+    def test_sizes_are_in_mebibytes(self, tmp_path, monkeypatch, caplog):
+        caplog.set_level(logging.INFO)
+        db = Database(tmp_path / "mail.db")
+        sizes = {str(db.path): 5 * 1024 * 1024 + 1, f"{db.path}-wal": 3 * 1024 * 1024}
+        monkeypatch.setattr(main.os, "stat", lambda p: SimpleNamespace(st_size=sizes[str(p)]))
+        monkeypatch.setattr(
+            main.shutil, "disk_usage", lambda _p: SimpleNamespace(free=7 * 1024 * 1024)
+        )
+        main._log_storage(db)
+        assert [r.getMessage() for r in _messages(caplog, "storage: ")] == [
+            "storage: db=5MB wal=3MB free_disk=7MB"
+        ]
+        db.close()
+
+    def test_a_missing_wal_is_zero(self, tmp_path, monkeypatch, caplog):
+        caplog.set_level(logging.INFO)
+        db = Database(tmp_path / "mail.db")
+        real_stat = main.os.stat
+
+        def stat(p):
+            if str(p).endswith("-wal"):
+                raise FileNotFoundError(2, "missing", str(p))
+            return real_stat(p)
+
+        monkeypatch.setattr(main.os, "stat", stat)
+        main._log_storage(db)
+        (line,) = _messages(caplog, "storage: ")
+        assert " wal=0MB " in line.getMessage()
+        db.close()
+
+    def test_a_stat_failure_logs_its_type(self, tmp_path, monkeypatch, caplog):
+        db = Database(tmp_path / "mail.db")
+
+        def stat(p):
+            raise PermissionError(13, "denied", MARKER)
+
+        monkeypatch.setattr(main.os, "stat", stat)
+        main._log_storage(db)
+        assert "storage: size check failed (PermissionError)" in caplog.text
+        assert MARKER not in caplog.text
+        db.close()

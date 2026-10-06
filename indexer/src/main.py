@@ -26,6 +26,7 @@ off. See ``src/reconciler.py``.
 
 import logging
 import os
+import shutil
 import sqlite3
 import threading
 import time
@@ -2421,6 +2422,35 @@ def _prune_reaped_records(db: Database) -> None:
         log.info("pruned %d expired reaped-message record(s)", pruned)
 
 
+# A checkpoint blocked this many passes in a row (30 minutes at the
+# default interval) logs a WARNING: a reader holding a transaction open
+# pins the WAL, which then grows without bound (#875).
+WAL_BUSY_WARN_AFTER = 3
+_wal_busy_passes = 0
+_MIB = 1024 * 1024
+
+
+def _log_storage(db: Database) -> None:
+    """Log the database and WAL file sizes and the free space on their
+    volume (#875): two ``stat`` calls and a ``statvfs``."""
+    try:
+        db_bytes = os.stat(db.path).st_size
+        try:
+            wal_bytes = os.stat(f"{db.path}-wal").st_size
+        except FileNotFoundError:
+            wal_bytes = 0
+        free_bytes = shutil.disk_usage(Path(db.path).parent).free
+    except OSError as e:
+        log.warning("storage: size check failed (%s)", type(e).__name__)
+        return
+    log.info(
+        "storage: db=%dMB wal=%dMB free_disk=%dMB",
+        db_bytes // _MIB,
+        wal_bytes // _MIB,
+        free_bytes // _MIB,
+    )
+
+
 def _run_wal_maintenance(db: Database) -> None:
     """One WAL-checkpoint-interval maintenance pass.
 
@@ -2429,8 +2459,11 @@ def _run_wal_maintenance(db: Database) -> None:
     pages (#641, #670). Then the truncate checkpoint, which copies the
     rewritten pages into ``mail.db`` and clears the WAL frames that
     still held the old ones. A failed scrub leaves its table pending for
-    the next pass and does not skip the checkpoint.
+    the next pass and does not skip the checkpoint. A checkpoint blocked
+    ``WAL_BUSY_WARN_AFTER`` passes in a row warns, and the pass that
+    unblocks it logs that; every pass ends with the storage line.
     """
+    global _wal_busy_passes
     try:
         started = time.monotonic()
         tables = db.scrub_reaped_fts()
@@ -2443,19 +2476,32 @@ def _run_wal_maintenance(db: Database) -> None:
     except Exception as e:
         log.error("fts scrub failed: %s", type(e).__name__)
     try:
-        busy, _log_pages, ckpt_pages = db.wal_checkpoint_truncate()
-        if busy:
-            log.debug(
-                "wal_checkpoint busy=%d (a reader pinned WAL frames; next pass will retry)",
-                busy,
-            )
-        elif ckpt_pages:
-            log.debug("wal_checkpoint truncated %d page(s)", ckpt_pages)
+        busy, log_pages, ckpt_pages = db.wal_checkpoint_truncate()
     except Exception as e:
         _streaks[WAL_CHECKPOINT].failed()
         log.error("wal checkpoint failed: %s", type(e).__name__)
-        return
-    _streaks[WAL_CHECKPOINT].succeeded()
+    else:
+        _streaks[WAL_CHECKPOINT].succeeded()
+        if busy:
+            _wal_busy_passes += 1
+            if _wal_busy_passes >= WAL_BUSY_WARN_AFTER:
+                log.warning(
+                    "wal checkpoint blocked %d times in a row; WAL=%d pages",
+                    _wal_busy_passes,
+                    log_pages,
+                )
+            else:
+                log.debug(
+                    "wal_checkpoint busy=%d (a reader pinned WAL frames; next pass will retry)",
+                    busy,
+                )
+        else:
+            if _wal_busy_passes >= WAL_BUSY_WARN_AFTER:
+                log.info("wal checkpoint unblocked after %d blocked pass(es)", _wal_busy_passes)
+            _wal_busy_passes = 0
+            if ckpt_pages:
+                log.debug("wal_checkpoint truncated %d page(s)", ckpt_pages)
+    _log_storage(db)
 
 
 def _run_watch_refresh(

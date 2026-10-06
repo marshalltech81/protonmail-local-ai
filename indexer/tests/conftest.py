@@ -108,6 +108,8 @@ def _reset_extractor_warning_budget(monkeypatch):
         )
         # And the queue heartbeat's interval (#874).
         monkeypatch.setattr(main, "_last_queue_heartbeat", None)
+        # And the WAL checkpoint's busy streak (#875).
+        monkeypatch.setattr(main, "_wal_busy_passes", 0)
 
 
 @pytest.fixture
