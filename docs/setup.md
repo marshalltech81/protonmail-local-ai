@@ -811,9 +811,16 @@ upgrading. The migration renames those directories to the names 1.5.1
 expects and never deletes anything. That matters: with `Expunge None`,
 a folder or subfolder you renamed or deleted in Proton survives only in
 the Maildir. Stop the stack (`make down`) and work through the steps
-below. They use the project's Maildir volume
-(`protonmail-local-ai_maildir-volume` by default; `docker volume ls`
-shows yours).
+below from the checkout, in one shell. They read your stack's Maildir
+volume name from the resolved Compose config, with the same project name
+(`-p` or `COMPOSE_PROJECT_NAME`) the stack runs under, and name the
+backup volume after it:
+
+```bash
+maildir=$(docker compose config --format json \
+  | python3 -c 'import json, sys; print(json.load(sys.stdin)["volumes"]["maildir-volume"]["name"])')
+backup="${maildir}-utf7-backup"
+```
 
 1. Back up the affected directories into a separate Docker volume (it
    stays in Docker's storage, like the original). The archive holds
@@ -821,8 +828,8 @@ shows yours).
    mode 600:
 
    ```bash
-   docker run --rm -v protonmail-local-ai_maildir-volume:/maildir:ro \
-     -v mbsync-utf7-backup:/backup debian:trixie-slim sh -c \
+   docker run --rm -v "$maildir":/maildir:ro \
+     -v "$backup":/backup debian:trixie-slim sh -c \
      'umask 077 && chmod 700 /backup && cd /maildir &&
       find . -mindepth 1 -type d -name "*&*" -prune -print0 |
       tar --null -cf /backup/encoded-folders.tar -T - &&
@@ -831,7 +838,10 @@ shows yours).
 
 2. Save this script as `utf7-migrate.py`. It renames every directory
    whose name holds modified UTF-7 to its decoded name, deepest first, so
-   subfolders, sync state and messages all move with their folder.
+   subfolders, sync state and messages all move with their folder. Within
+   a folder it moves every source to a temporary name before giving any
+   its final name, since one folder's target can be another's current
+   name (`A&-` becomes `A&` while `A&--` becomes `A&-`).
    Without `--apply` it only prints the plan, with your folder names, to
    your terminal. It renames nothing if any target already exists, or if
    a name is not modified UTF-7 (for example, when run after upgrading).
@@ -864,9 +874,10 @@ shows yours).
            "stopped: the migration was already applied; running it again "
            "could decode a name twice. Nothing was renamed"
        )
-   plan = []
-   for r, ds, _ in os.walk("/maildir", topdown=False):
-       for d in ds:
+   # Each parent's renames, deepest parent first, planned on the tree as it is.
+   batches = {}
+   for parent, dirs, _ in os.walk("/maildir"):
+       for d in dirs:
            if "&" in d:
                try:
                    new = dec(d)
@@ -876,26 +887,38 @@ shows yours).
                        "run this only before upgrading; nothing was renamed"
                    )
                if new != d:
-                   plan.append((os.path.join(r, d), os.path.join(r, new)))
-   for src, dst in plan:
-       print(src, "->", dst)
-   clash = [dst for _, dst in plan if os.path.exists(dst)]
+                   batches.setdefault(parent, []).append((d, new))
+   order = sorted(batches, key=lambda p: p.count(os.sep), reverse=True)
+   clash = 0
+   for parent in order:
+       sources = {src for src, _ in batches[parent]}
+       for src, dst in batches[parent]:
+           print(os.path.join(parent, src), "->", os.path.join(parent, dst))
+           # A target that is another source here is moved out of the way first.
+           if os.path.exists(os.path.join(parent, dst)) and dst not in sources:
+               clash += 1
    if clash:
-       sys.exit(f"stopped: {len(clash)} target(s) already exist; nothing was renamed")
+       sys.exit(f"stopped: {clash} target(s) already exist; nothing was renamed")
    if sys.argv[1:] == ["--apply"]:
        open(MARKER, "x").close()
-       for src, dst in plan:
-           os.rename(src, dst)
-       print(f"renamed {len(plan)} directories")
+       for parent in order:
+           staged = []
+           for i, (src, dst) in enumerate(batches[parent]):
+               tmp = os.path.join(parent, f".utf7-migrating-{i}")
+               os.rename(os.path.join(parent, src), tmp)
+               staged.append((tmp, os.path.join(parent, dst)))
+           for tmp, dst in staged:
+               os.rename(tmp, dst)
+       print(f"renamed {sum(len(b) for b in batches.values())} directories")
    ```
 
 3. Review the plan, then apply it:
 
    ```bash
-   docker run --rm -v "$PWD/utf7-migrate.py:/m.py:ro" -v mbsync-utf7-backup:/backup \
-     -v protonmail-local-ai_maildir-volume:/maildir:ro python:3.14-slim-trixie python /m.py
-   docker run --rm -v "$PWD/utf7-migrate.py:/m.py:ro" -v mbsync-utf7-backup:/backup \
-     -v protonmail-local-ai_maildir-volume:/maildir python:3.14-slim-trixie python /m.py --apply
+   docker run --rm -v "$PWD/utf7-migrate.py:/m.py:ro" -v "$backup":/backup \
+     -v "$maildir":/maildir:ro python:3.14-slim-trixie python /m.py
+   docker run --rm -v "$PWD/utf7-migrate.py:/m.py:ro" -v "$backup":/backup \
+     -v "$maildir":/maildir python:3.14-slim-trixie python /m.py --apply
    ```
 
 4. Build the new images with the updated checkout: `make build`. This is
@@ -912,7 +935,7 @@ The first 1.5.1 sync then finds each folder under its decoded name with
 its sync state. A folder gone from Proton stays, reported as a far-side
 box that "cannot be opened anymore", as before. Keep the backup volume
 until the first sync and the rebuilt index look complete, then remove
-it (`docker volume rm mbsync-utf7-backup`). That also removes the
+it (`docker volume rm "$backup"`). That also removes the
 script's "already applied" marker, so do not run the script again
 afterwards.
 
