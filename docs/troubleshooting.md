@@ -9,8 +9,9 @@ A Bridge app that accepts TCP connections on its IMAP port does not
 mean TLS works, an account is logged in, or mail is syncing. Each layer has its own signal; the states and signals
 are defined in
 [architecture.md](architecture.md#health-and-readiness-signals). Start
-with `make status`, which shows container health and the
-`get_mailbox_status` fields, then find the symptom below. Only the
+with `make status`, which shows container health, each provider layer
+as LOCAL or REMOTE (host name only) with the no-egress overlay state,
+and the `get_mailbox_status` fields, then find the symptom below. Only the
 authentication row involves a credential: the Bridge app's IMAP details
 show the Bridge password, so treat them and `.secrets/bridge_pass.txt`
 as secrets. No other check needs or shows one.

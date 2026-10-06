@@ -298,7 +298,7 @@ make validate-env # Check .env values and secret permissions before startup
 make up           # Start the full stack
 make down         # Stop the full stack
 make logs         # Tail all logs
-make status       # Container status and whether the index is current
+make status       # Containers, privacy posture (LOCAL or REMOTE per layer) and index currency
 make requeue-dead # Requeue dead-lettered indexing jobs once the cause is fixed
 make clean        # Remove everything (destructive)
 ```
