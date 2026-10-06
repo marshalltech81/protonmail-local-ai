@@ -76,6 +76,10 @@ floor; with them, a plain `pytest -m eval` selects no tests. `-s` keeps
 pytest from capturing the summary block printed by `test_eval_summary`.
 Without `MCP_EVAL_DB`, every test skips.
 
+Each query with expected evidence costs one embed call and one hybrid
+search per run: the per-query hybrid test and the summary share the
+results in memory (#840). Nothing is cached between runs.
+
 ## Comparing two configurations
 
 The summary block ends with a per-query table of first-hit rank and
