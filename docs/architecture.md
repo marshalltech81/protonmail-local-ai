@@ -1177,9 +1177,17 @@ is dropped and its pages zeroed. What the pragma does not cover:
   exception type and the table stays pending for the next pass, as
   does one not finished within the step cap, which continues its merge
   there; a reap in between starts a new merge, which also takes in the
-  segments written since the old one began. So a reaped message's
-  terms stay in the file for up to one interval (longer while a busy
-  checkpoint retries, as above). The pending mark is kept in memory,
+  segments written since the old one began. So there is no fixed
+  deletion time. A reaped message's terms usually leave the file at the
+  first pass after the reap, once that pass's merge finishes and its
+  checkpoint copies the rewritten pages. They stay across further
+  passes while the merge is unfinished (a table needing more than the
+  per-pass cap of `_FTS_SCRUB_MAX_STEPS` steps of `_FTS_SCRUB_STEP_PAGES`
+  pages, 1,000 x 2,000 today, continues on later passes) or its step
+  fails, and longer while a busy checkpoint retries, as above. Merge
+  completion, the checkpoint and storage below SQLite (free blocks,
+  snapshots, backups) are separate stages, and only the first two are
+  under the indexer's control. The pending mark is kept in memory,
   so every table starts pending: the indexer scrubs all three once at
   startup, right after opening the database and before it waits for
   the embedder, which covers a reap whose scrub a restart cut short
