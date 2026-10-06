@@ -17,7 +17,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeGuard
 
 from src.lib.inference import MIN_PROMPT_TOKENS
 
@@ -65,7 +65,7 @@ class CaseError(ValueError):
     fields only (both ours), never case text."""
 
 
-def is_case_id(value: object) -> bool:
+def is_case_id(value: object) -> TypeGuard[str]:
     """A well-formed case ID: the one rule for case files and for the
     reports ``compare`` reads (#771)."""
     return (
