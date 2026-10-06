@@ -57,7 +57,8 @@ Find it with `docker compose logs <service> | grep 'Startup identity'`.
 - `config` is the first 12 hex digits of a SHA-256 over the service's
   non-secret settings, named one by one in code: modes, endpoints,
   model names and limits (indexer and mcp-server, `_identity_settings`
-  in `src/main.py`), or `BRIDGE_HOST`, `BRIDGE_IMAP_PORT`,
+  in `src/main.py`; the indexer's include the effective
+  `INDEXER_PARSE_MAX_BYTES` and `EMBED_WARMUP_TIMEOUT_SECS`), or `BRIDGE_HOST`, `BRIDGE_IMAP_PORT`,
   `BRIDGE_CERT_HOST`, `SYNC_INTERVAL` and `SYNC_DEADLINE_SECONDS`
   (mbsync). It changes when one of those settings changes and is
   otherwise stable across restarts. API keys, the MCP bearer token, the

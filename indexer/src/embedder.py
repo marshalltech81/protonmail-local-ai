@@ -87,6 +87,13 @@ def _float_env(name: str, default: float, minimum: float = 1.0) -> float:
     return value
 
 
+def warmup_timeout_secs() -> float:
+    """The effective ``EMBED_WARMUP_TIMEOUT_SECS``: what
+    ``OpenAIEmbedder.wait_for_ready`` uses, and an input of the startup
+    config hash (#887)."""
+    return _float_env("EMBED_WARMUP_TIMEOUT_SECS", OpenAIEmbedder.DEFAULT_WARMUP_TIMEOUT_SECS)
+
+
 class EmbedResponseError(RuntimeError):
     """A successful embeddings response failed our integrity checks.
 
@@ -381,10 +388,7 @@ class OpenAIEmbedder:
         any non-SDK exception. 5xx and the SDK's connection / timeout
         families retry until the connect deadline.
         """
-        warmup_timeout = _float_env(
-            "EMBED_WARMUP_TIMEOUT_SECS",
-            self.DEFAULT_WARMUP_TIMEOUT_SECS,
-        )
+        warmup_timeout = warmup_timeout_secs()
         log.info(
             "Waiting for embedder at %s (model=%s, connect_timeout=%ds, warmup_timeout=%.0fs)...",
             self.base_url,

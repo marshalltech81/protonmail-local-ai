@@ -83,6 +83,8 @@ def test_config_hash_covers_only_the_named_non_secret_settings():
         "EMBED_MODEL",
         "EMBED_BATCH_SIZE",
         "EMBED_CONCURRENCY",
+        "EMBED_WARMUP_TIMEOUT_SECS",
+        "INDEXER_PARSE_MAX_BYTES",
         "INDEXER_CHUNK_TARGET_TOKENS",
         "INDEXER_CHUNK_MAX_TOKENS",
         "INDEXER_CHUNK_OVERLAP_TOKENS",
@@ -126,6 +128,27 @@ def test_changing_the_api_key_does_not_change_the_hash(tmp_path, monkeypatch, ca
         db.close()
     assert before == after
     assert changed != before
+
+
+@pytest.mark.parametrize(
+    ("name", "value", "effective"),
+    [
+        # 0 disables the per-message parse cap.
+        ("INDEXER_PARSE_MAX_BYTES", "0", 0),
+        ("EMBED_WARMUP_TIMEOUT_SECS", "30", 30.0),
+    ],
+)
+def test_settings_read_outside_main_change_the_hash(monkeypatch, name, value, effective):
+    """Codex review round 1 on #893: the parse cap and the warmup timeout
+    are read by ``parser.py`` and ``embedder.py``; the hash takes the
+    effective value from the same readers."""
+    monkeypatch.delenv(name, raising=False)
+    before = main._identity_settings(_QUEUE_CFG, _RECONCILER_CFG)
+    monkeypatch.setenv(name, value)
+    after = main._identity_settings(_QUEUE_CFG, _RECONCILER_CFG)
+    assert after[name] == effective
+    assert before[name] != after[name]
+    assert main._config_hash(before) != main._config_hash(after)
 
 
 def test_main_logs_the_identity_line_once(tmp_path, monkeypatch, caplog):

@@ -73,6 +73,7 @@ from .embedder import (
     OpenAIEmbedder,
     classify_embed_failure,
     scrub_embed_error,
+    warmup_timeout_secs,
 )
 from .entities import AuthorityRules, AuthorityRulesError, load_authority_rules
 from .extractors import DEFAULT_MAX_BYTES, ExtractionResult, is_stale_extractor
@@ -89,6 +90,7 @@ from .parser import (
     Message,
     OversizedMessageError,
     _derive_folder,
+    _parse_max_bytes,
     message_sort_time,
     parse_email,
 )
@@ -2258,6 +2260,10 @@ def _identity_settings(
         "EMBED_MODEL": EMBED_MODEL,
         "EMBED_BATCH_SIZE": EMBED_BATCH_SIZE,
         "EMBED_CONCURRENCY": EMBED_CONCURRENCY,
+        # Read elsewhere; taken from the same readers so the value
+        # hashed is the one in effect (Codex round 1 on #893).
+        "EMBED_WARMUP_TIMEOUT_SECS": warmup_timeout_secs(),
+        "INDEXER_PARSE_MAX_BYTES": _parse_max_bytes(),
         "INDEXER_CHUNK_TARGET_TOKENS": CHUNK_TARGET_TOKENS,
         "INDEXER_CHUNK_MAX_TOKENS": CHUNK_MAX_TOKENS,
         "INDEXER_CHUNK_OVERLAP_TOKENS": CHUNK_OVERLAP_TOKENS,
@@ -2283,6 +2289,12 @@ def _identity_settings(
     }
 
 
+def _config_hash(settings: dict[str, object]) -> str:
+    """First 12 hex digits of a SHA-256 over ``settings`` as sorted JSON."""
+    canonical = json.dumps(settings, sort_keys=True)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:12]
+
+
 def _log_startup_identity(
     db: Database, queue_cfg: dict[str, int], reconciler_cfg: ReconcilerConfig
 ) -> None:
@@ -2290,7 +2302,6 @@ def _log_startup_identity(
     random ID for this start, the code's schema version and the one the
     index carried when it was opened (``none`` for a new index), and the
     first 12 hex digits of a SHA-256 over ``_identity_settings``."""
-    settings = json.dumps(_identity_settings(queue_cfg, reconciler_cfg), sort_keys=True)
     stored = db.stored_schema_version
     log.info(
         "Startup identity: service=indexer commit=%s boot=%s schema_code=%d "
@@ -2299,7 +2310,7 @@ def _log_startup_identity(
         secrets.token_hex(6),
         SCHEMA_VERSION,
         "none" if stored is None else stored,
-        hashlib.sha256(settings.encode("utf-8")).hexdigest()[:12],
+        _config_hash(_identity_settings(queue_cfg, reconciler_cfg)),
     )
 
 
