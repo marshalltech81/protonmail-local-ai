@@ -609,7 +609,11 @@ required evidence group cited, `must_include` present as a whole value
 (`4,860` does not match `14,860` or `4,860,000`; an ordinal suffix or
 `.00` may follow a number), `must_not_include` absent anywhere, and
 abstention exactly when the case is unanswerable (citing
-nothing). A `disclose_missing` case is graded on the tool's whole
+nothing). `must_include` checks that a value is present, not that the
+answer asserts it (#770): negation and correction are invisible to it,
+so "it does not need four chaperones; it needs three" passes a case
+expecting `four chaperones`. Correctness needs the judge; with
+`JUDGE_MODE=none` a deterministic pass is a floor, not a verdict. A `disclose_missing` case is graded on the tool's whole
 disclosure (#820): when a required group was retrieved but left out of
 the prompt or reached it only cut short of its evidence (the case's fact
 excerpt no longer in the kept text), the server's `coverage_note`
