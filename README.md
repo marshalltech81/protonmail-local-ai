@@ -172,8 +172,8 @@ details and caveats.
 **Upgrading to the isync 1.5.1 mbsync image:** folders whose names
 have a non-ASCII character or `&` move to a new directory name, and
 would be downloaded and indexed a second time. Check and migrate them
-first, and do not delete such a folder without the backup step, since
-a folder already gone from Proton exists only in the Maildir. See
+first, by renaming, never deleting: a folder already gone from Proton
+exists only in the Maildir. See
 [the upgrade note](docs/setup.md) ("Upgrading to the isync 1.5.1 mbsync
 image").
 
