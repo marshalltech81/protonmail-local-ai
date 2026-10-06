@@ -706,6 +706,23 @@ of the address or display name; the display name compares casefolded
 (Unicode caseless). The response names the mode used for
 each filter.
 
+**Matched addresses.** For each `sender`, `recipient` or `participant`
+filter, `address_matches` reports `distinct_addresses`, the number of
+distinct canonical addresses the filter matched in its roles across the
+whole result set (not just the page), and `addresses`, at most 10 of
+them, most matching messages first, each cut at 500 characters. Above
+1, a name or fragment matched several addresses, possibly different
+people who share a display name; the text form states the count and
+says so, and the addresses themselves are in the structured output
+only. An exact-address filter reports 1 (0 when nothing matched)
+without an extra query. A substring filter takes one grouped query over
+the participant rows it matches within the result set, read in the
+same snapshot as `total_matches`; on a synthetic 50,000-message corpus
+(175,000 participant rows) that added about 13 ms for a name, and
+about 160 ms for a fragment matching every participant row. Results,
+`total_matches` and paging are unchanged. Nothing about the addresses
+is logged.
+
 When the exact address is unknown, enumerate name-substring matches in the
 requested sender/recipient role and folder with `query_messages`, following
 the disclosure and paging guidance below. `find_contact` is capped and

@@ -202,6 +202,32 @@ class TestQueryMessages:
         ]
 
 
+class TestQueryMessagesAddressMatches:
+    """#801: the structured output lists, per address filter, how many
+    distinct addresses it matched over the whole set."""
+
+    def test_name_filter_reports_both_namesakes(self, namesakes_db):
+        page = _call(_server(namesakes_db), "query_messages", sender="Avery Cole", limit=1)
+        assert page["total_matches"] == 3
+        assert page["returned"] == 1
+        assert page["address_matches"] == [
+            {
+                "filter": "sender",
+                "distinct_addresses": 2,
+                "addresses": ["avery@one.example", "a.cole@two.example"],
+            }
+        ]
+
+    def test_exact_filter_reports_one(self, namesakes_db):
+        page = _call(_server(namesakes_db), "query_messages", sender="avery@one.example")
+        assert page["address_matches"] == [
+            {"filter": "sender", "distinct_addresses": 1, "addresses": ["avery@one.example"]}
+        ]
+
+    def test_without_address_filters_the_list_is_empty(self, namesakes_db):
+        assert _call(_server(namesakes_db), "query_messages")["address_matches"] == []
+
+
 class TestDateBoundsEcho:
     """Each date-filtered tool echoes the UTC instants its bounds resolved
     to (#802): a date-only bound is a UTC day, an offset bound is the

@@ -966,6 +966,49 @@ def messages_db(tmp_path):
     yield db
 
 
+@pytest.fixture
+def namesakes_db(tmp_path):
+    """Two synthetic senders sharing the display name "Avery Cole" (#801).
+
+    n1 and n3 come from avery@one.example, n2 from a.cole@two.example;
+    n4 is from another sender and addressed to avery@one.example.
+    """
+    path = tmp_path / "mcp-namesakes.db"
+    conn = sqlite3.connect(str(path))
+    conn.enable_load_extension(True)
+    sqlite_vec.load(conn)
+    conn.enable_load_extension(False)
+    _build_schema(conn)
+    for n, sender in enumerate(
+        [
+            "Avery Cole <avery@one.example>",
+            "Avery Cole <a.cole@two.example>",
+            "Avery Cole <avery@one.example>",
+        ],
+        1,
+    ):
+        _insert_message(
+            conn,
+            message_id=f"n{n}",
+            thread_id=f"tn{n}",
+            sent_at=f"2024-01-0{n}T09:00:00+00:00",
+            subject=f"Note {n}",
+            from_=[sender],
+            to=["me@example.com"],
+        )
+    _insert_message(
+        conn,
+        message_id="n4",
+        thread_id="tn4",
+        sent_at="2024-01-04T09:00:00+00:00",
+        subject="Note 4",
+        from_=["Blake Ray <blake@one.example>"],
+        to=["Avery Cole <avery@one.example>"],
+    )
+    conn.close()
+    yield Database(str(path))
+
+
 # Real indexer chunker output (``chunk_message(target_tokens=40,
 # max_tokens=60, overlap_tokens=20)``) for OVERLAP_BODY: adjacent chunks
 # repeat trailing paragraphs, and "Same line again." legitimately occurs

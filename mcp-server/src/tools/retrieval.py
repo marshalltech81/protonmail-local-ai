@@ -28,6 +28,7 @@ from ..lib.validation import clamp_int
 from .outputs import (
     HEADER_CHAR_LIMIT,
     MAX_LISTED,
+    AddressFilterMatch,
     Contact,
     FilterUse,
     FindContactOutput,
@@ -815,7 +816,10 @@ def register_retrieval_tools(server, db):
             sender: From address. A full address ("jane@example.com")
                     matches exactly; anything else ("@example.com",
                     "Jane") is a case-insensitive substring of the
-                    address or display name. The response states which.
+                    address or display name. The response states which,
+                    and how many distinct addresses the filter matched
+                    across all matches; above 1, a name may cover
+                    different people.
             recipient: To or Cc, matched like ``sender``.
             participant: Any role (From, To, or Cc), matched like ``sender``.
             subject: Case-insensitive substring of the message subject.
@@ -893,6 +897,14 @@ def register_retrieval_tools(server, db):
         uses = _filter_uses(args)
         output = QueryMessagesOutput(
             filters=uses,
+            address_matches=[
+                AddressFilterMatch(
+                    filter=name,
+                    distinct_addresses=match.distinct,
+                    addresses=[clip(a, HEADER_CHAR_LIMIT) for a in match.addresses],
+                )
+                for name, match in page.address_matches.items()
+            ],
             date_bounds=bounds,
             total_matches=page.total_matches,
             returned=len(page.messages),
@@ -905,6 +917,14 @@ def register_retrieval_tools(server, db):
         if bounds_line := describe_date_bounds(bounds):
             lines.append(bounds_line)
         lines.append(f"total_matches: {page.total_matches}")
+        # Counts only: the addresses themselves are in the structured
+        # output (#801).
+        for name, match in page.address_matches.items():
+            noun = "address" if match.distinct == 1 else "addresses"
+            line = f"{name} matched {match.distinct} distinct {noun} across all matches"
+            if match.distinct > 1:
+                line += " (possibly different people; filter by one exact address to separate them)"
+            lines.append(line)
         if not page.messages:
             lines.append("returned: 0")
             lines.append("has_more: false")

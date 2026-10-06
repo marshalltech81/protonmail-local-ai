@@ -982,6 +982,22 @@ class AmbiguousMessageId:
     truncated: bool = False
 
 
+# Addresses listed per ``query_messages`` address filter (#801), like
+# the other header lists; ``AddressMatches.distinct`` counts them all.
+MAX_LISTED_MATCHED_ADDRESSES = 10
+
+
+@dataclass
+class AddressMatches:
+    """The distinct canonical addresses one sender / recipient /
+    participant filter matched over a query's whole result set (#801):
+    ``distinct`` counts them, ``addresses`` lists at most
+    ``MAX_LISTED_MATCHED_ADDRESSES``, most matching messages first."""
+
+    distinct: int
+    addresses: list[str]
+
+
 @dataclass
 class MessagePage:
     """One page of an exhaustive enumeration.
@@ -989,6 +1005,9 @@ class MessagePage:
     ``total_matches`` counts every message matching the predicates, not
     just this page; ``offset`` is how many matches earlier pages returned.
     ``next_cursor`` is ``None`` exactly when ``has_more`` is false.
+    ``address_matches`` maps each given address filter (``sender``,
+    ``recipient``, ``participant``) to the addresses it matched over the
+    whole set, read in the same snapshot as ``total_matches``.
     """
 
     total_matches: int
@@ -996,6 +1015,7 @@ class MessagePage:
     messages: list[MessageRecord]
     has_more: bool
     next_cursor: str | None
+    address_matches: dict[str, AddressMatches] = field(default_factory=dict)
 
 
 # Each ``text`` term is its own FTS subquery; bound the count so one call
@@ -1059,12 +1079,57 @@ def _participant_clause(value: str, roles: tuple[str, ...], params: list) -> str
             "m.claimant_id IN (SELECT claimant_id FROM message_participants "  # nosec B608
             f"WHERE address = ? AND role IN ({role_sql}))"
         )
+    return (
+        "m.claimant_id IN (SELECT claimant_id FROM message_participants "  # nosec B608
+        f"WHERE {_substring_participant_rows(value, roles, params)})"
+    )
+
+
+def _substring_participant_rows(value: str, roles: tuple[str, ...], params: list) -> str:
+    """SQL selecting the ``message_participants`` rows in ``roles`` whose
+    address or display name contains ``value``; appends the bound values
+    to ``params``."""
+    role_sql = ",".join(["?"] * len(roles))
     # Addresses are stored lowercased; names fold with ``mcp_casefold``.
     params.extend([*roles, value.strip().lower(), value.strip().casefold()])
     return (
-        "m.claimant_id IN (SELECT claimant_id FROM message_participants "  # nosec B608
-        f"WHERE role IN ({role_sql}) "
-        "AND (instr(address, ?) > 0 OR instr(mcp_casefold(name), ?) > 0))"
+        f"role IN ({role_sql}) "  # nosec B608
+        "AND (instr(address, ?) > 0 OR instr(mcp_casefold(name), ?) > 0)"
+    )
+
+
+def _address_matches(
+    conn: sqlite3.Connection,
+    value: str,
+    roles: tuple[str, ...],
+    where_sql: str,
+    where_params: list,
+    total: int,
+) -> AddressMatches:
+    """The distinct addresses the address filter ``value`` matched in
+    ``roles`` over the messages ``where_sql`` selects (#801), on the
+    caller's read transaction.
+
+    An exact address matches only itself, so it needs no query. A
+    substring is one grouped query over the participant rows it matches
+    within the result set: the same row scan the filter already costs,
+    with the window count taken before the list's ``LIMIT``.
+    """
+    if address_match_mode(value) == "exact":
+        addresses = [canonical_addr(value)] if total else []
+        return AddressMatches(distinct=len(addresses), addresses=addresses)
+    params: list = []
+    rows_sql = _substring_participant_rows(value, roles, params)
+    rows = conn.execute(
+        "SELECT address, COUNT(*) OVER () FROM ("  # nosec B608
+        "SELECT p.address AS address, COUNT(DISTINCT p.claimant_id) AS n "
+        f"FROM message_participants p WHERE {rows_sql} "
+        f"AND p.claimant_id IN (SELECT m.claimant_id FROM messages m WHERE {where_sql}) "
+        "GROUP BY p.address) ORDER BY n DESC, address LIMIT ?",
+        [*params, *where_params, MAX_LISTED_MATCHED_ADDRESSES],
+    ).fetchall()
+    return AddressMatches(
+        distinct=rows[0][1] if rows else 0, addresses=[address for address, _ in rows]
     )
 
 
@@ -3628,13 +3693,17 @@ class Database:
 
         where: list[str] = []
         params: list = []
-        for value, roles in (
-            (sender, ("from",)),
-            (recipient, ("to", "cc")),
-            (participant, ("from", "to", "cc")),
-        ):
-            if value:
-                where.append(_participant_clause(value, roles, params))
+        address_filters = [
+            (name, value, roles)
+            for name, value, roles in (
+                ("sender", sender, ("from",)),
+                ("recipient", recipient, ("to", "cc")),
+                ("participant", participant, ("from", "to", "cc")),
+            )
+            if value
+        ]
+        for _, value, roles in address_filters:
+            where.append(_participant_clause(value, roles, params))
         if subject:
             where.append("instr(mcp_casefold(m.subject), ?) > 0")
             params.append(subject.casefold())
@@ -3710,6 +3779,10 @@ class Database:
                 "SELECT COUNT(*) FROM messages m WHERE " + where_sql,  # nosec B608
                 params,
             ).fetchone()[0]
+            address_matches = {
+                name: _address_matches(conn, value, roles, where_sql, params, total)
+                for name, value, roles in address_filters
+            }
             rows = conn.execute(
                 f"SELECT {_MESSAGE_COLUMNS} FROM messages m WHERE "  # nosec B608
                 + page_where_sql
@@ -3728,6 +3801,7 @@ class Database:
             messages=records,
             has_more=has_more,
             next_cursor=_encode_cursor(digest, records[-1], next_offset) if has_more else None,
+            address_matches=address_matches,
         )
 
     # -------------------------------------------------------------------------

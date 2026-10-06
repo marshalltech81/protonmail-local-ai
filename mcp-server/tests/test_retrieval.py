@@ -1390,6 +1390,24 @@ class TestQueryMessages:
         assert "sender=jane@example.com (exact address)" in text
         assert "recipient='@other.org' (substring of address or name)" in text
 
+    def test_states_how_many_addresses_a_name_matched(self, fake_server, namesakes_db, caplog):
+        # #801: two people share the display name; the text says so and
+        # nothing about the addresses reaches the log.
+        handler = _handlers(fake_server, namesakes_db)["query_messages"]
+        with caplog.at_level("DEBUG"):
+            text = _text(asyncio.run(handler(sender="Avery Cole")))
+        assert "total_matches: 3" in text
+        assert "sender matched 2 distinct addresses" in text
+        assert "possibly different people" in text
+        for marker in ("Avery Cole", "one.example", "two.example"):
+            assert marker not in caplog.text
+
+    def test_single_matched_address_is_stated_without_a_warning(self, fake_server, namesakes_db):
+        handler = _handlers(fake_server, namesakes_db)["query_messages"]
+        text = _text(asyncio.run(handler(sender="avery@one.example")))
+        assert "sender matched 1 distinct address" in text
+        assert "possibly different people" not in text
+
     def test_renders_participants_by_role(self, fake_server, messages_db):
         handler = _handlers(fake_server, messages_db)["query_messages"]
         text = _text(asyncio.run(handler(subject="Re: Budget")))
