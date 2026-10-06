@@ -71,6 +71,13 @@ class EmbedderIdentityError(RuntimeError):
     """
 
 
+class EmbedderDimensionError(RuntimeError):
+    """The calibration vector is not as wide as the schema's vector columns.
+
+    The message names the two widths only.
+    """
+
+
 class CalibrationRequestError(RuntimeError):
     """The calibration embed request failed (outage or configuration).
 
@@ -149,17 +156,28 @@ def verify_or_record_embedder(
     provider: str,
     endpoint: str,
     model: str,
+    dimensions: int | None = None,
 ) -> str:
     """Record the embedder on a fresh index, else verify it matches.
 
     Returns ``"recorded"`` or ``"verified"``. Raises
-    ``EmbedderIdentityError`` on a mismatch, or when the index already
-    holds messages but no record (nothing says which embedder wrote its
-    vectors, so the current one is never assumed), and
-    ``CalibrationRequestError`` when the calibration request fails.
+    ``EmbedderDimensionError`` when ``dimensions`` is given and the
+    calibration vector has another width, before the record is read or
+    written, so a fresh index never records an embedder it cannot store
+    vectors from; ``EmbedderIdentityError`` on a mismatch, or when the
+    index already holds messages but no record (nothing says which
+    embedder wrote its vectors, so the current one is never assumed);
+    and ``CalibrationRequestError`` when the calibration request fails.
     """
     endpoint = sanitize_endpoint(endpoint)
     vector = _calibrate(embedder)
+    if dimensions is not None and len(vector) != dimensions:
+        raise EmbedderDimensionError(
+            f"Embedder produced {len(vector)}-dim vectors, but the SQLite "
+            f"schema reserves {dimensions}-dim (threads_vec "
+            f"FLOAT[{dimensions}]). Either switch to a model that "
+            f"outputs {dimensions}-dim vectors, or migrate the schema."
+        )
     stored = db.get_active_vector_generation()
     if stored is None:
         if db.count_total_messages():

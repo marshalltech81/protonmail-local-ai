@@ -361,10 +361,14 @@ it. A mismatch fails startup closed with a fixed message naming the
 differing fields (see docs/troubleshooting.md, "Embedder identity
 mismatch"); the message never quotes a provider response.
 
-The indexer writes the row; mcp-server only reads it. A failed
-calibration request (the indexer's runs right after `wait_for_ready`,
-with the client's usual retries) exits the service with the scrubbed
-error and the restart policy tries again, as for the dimension probe.
+The indexer writes the row; mcp-server only reads it. The indexer's
+calibration vector is also its startup width check (#841): a vector
+that is not 4096 wide exits with "Embedder produced N-dim vectors"
+before the row is read or written, so a fresh index never records an
+embedder whose vectors it cannot store. A failed calibration request
+(the indexer's runs right after `wait_for_ready`, with the client's
+usual retries) exits the service with the scrubbed error and the
+restart policy tries again.
 mcp-server exits the same way while the indexer has not yet recorded
 the row (it does so once its embedder answers); its calibration request
 is bounded as a whole by `EMBED_TIMEOUT_SECS`. While mcp-server cannot

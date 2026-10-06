@@ -15,12 +15,13 @@ import httpx
 import openai
 import pytest
 from src import main
-from src.database import Database
+from src.database import EMBEDDING_DIM, Database
 from src.embed_identity import (
     CALIBRATION_MAX_COSINE_DISTANCE,
     CALIBRATION_SHA256,
     CALIBRATION_TEXT,
     CalibrationRequestError,
+    EmbedderDimensionError,
     EmbedderIdentityError,
     cosine_distance,
     sanitize_endpoint,
@@ -239,6 +240,29 @@ def test_built_index_without_record_fails_closed(db):
     assert _rows(db) == []
 
 
+def test_wrong_width_fails_before_a_fresh_index_records(db):
+    # #841: the calibration vector doubles as the width check, so a fresh
+    # index must not record an embedder whose vectors it cannot store.
+    embedder = _Embedder(_unit(16))
+    with pytest.raises(EmbedderDimensionError) as info:
+        verify_or_record_embedder(
+            db, embedder, provider="openai", endpoint=ENDPOINT, model=MODEL, dimensions=8
+        )
+    assert str(info.value).startswith("Embedder produced 16-dim vectors")
+    assert "reserves 8-dim" in str(info.value)
+    assert embedder.calls == [CALIBRATION_TEXT]
+    assert _rows(db) == []
+
+
+def test_wrong_width_fails_before_a_recorded_index_is_compared(db):
+    _record(db, _Embedder(_unit(8)))
+    with pytest.raises(EmbedderDimensionError):
+        verify_or_record_embedder(
+            db, _Embedder(_unit(8)), provider="openai", endpoint=ENDPOINT, model=MODEL, dimensions=4
+        )
+    assert [row["dimensions"] for row in _rows(db)] == [8]
+
+
 def test_index_from_before_the_record_fails_with_rebuild_message(db):
     db._conn.execute("DROP TABLE vector_generations")
     db._conn.commit()
@@ -278,7 +302,7 @@ def test_calibration_provider_error_is_scrubbed(db, caplog, status):
 
 def test_main_check_exits_with_fixed_message_on_mismatch(db, monkeypatch, caplog):
     caplog.set_level(logging.DEBUG)
-    embedder = _Embedder(_unit(8))
+    embedder = _Embedder(_unit(EMBEDDING_DIM))
     embedder.base_url = ENDPOINT  # type: ignore[attr-defined]
     monkeypatch.setattr(main, "EMBED_MODEL", MODEL)
     main._check_embedder_identity(db, embedder)

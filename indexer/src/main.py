@@ -56,6 +56,7 @@ from .chunker import (
 from .database import EMBEDDING_DIM, Database
 from .embed_identity import (
     CalibrationRequestError,
+    EmbedderDimensionError,
     EmbedderIdentityError,
     verify_or_record_embedder,
 )
@@ -2126,38 +2127,20 @@ def initial_index(
     log.info("Initial index complete: %d job(s) processed.", processed)
 
 
-def _validate_embedding_dim(embedder: EmbeddingBackend) -> None:
-    """Probe the running embedder once at startup and verify its output
-    dimension matches the schema-reserved ``EMBEDDING_DIM``.
-
-    Mismatched dimensions would otherwise fail on the first
-    ``upsert_thread`` with a cryptic sqlite-vec error. Fail fast at
-    startup with a clear, actionable message instead.
-    """
-    try:
-        probe = embedder.embed("dimension probe")
-    except Exception as exc:
-        # The SDK error carries the provider's response body; exit with
-        # type + status only, like the calibration request (#686).
-        raise SystemExit(f"Embedder dimension probe failed: {scrub_embed_error(exc)}") from None
-    if len(probe) != EMBEDDING_DIM:
-        raise SystemExit(
-            f"Embedder produced {len(probe)}-dim vectors, but the SQLite "
-            f"schema reserves {EMBEDDING_DIM}-dim (threads_vec "
-            f"FLOAT[{EMBEDDING_DIM}]). Either switch to a model that "
-            f"outputs {EMBEDDING_DIM}-dim vectors, or migrate the schema."
-        )
-
-
 def _check_embedder_identity(db: Database, embedder) -> None:
     """Record the embedder on a fresh index, else verify it is the one
     that built the index (``src/embed_identity.py``); exit otherwise.
+
+    The calibration vector is also the startup width check: a model whose
+    vectors are not ``EMBEDDING_DIM`` wide would otherwise fail on the
+    first ``upsert_thread`` with a cryptic sqlite-vec error, so it exits
+    here with a clear message, before a fresh index records anything.
 
     A mismatch exits with the fixed message: the operator restores the
     original embedder or rebuilds the index. A failed calibration request
     has already been retried by ``embed``'s transient-error policy right
     after ``wait_for_ready``, so it exits too, with the scrubbed error,
-    and the restart policy tries again, as the dimension probe does.
+    and the restart policy tries again.
     """
     try:
         outcome = verify_or_record_embedder(
@@ -2166,8 +2149,9 @@ def _check_embedder_identity(db: Database, embedder) -> None:
             provider=EMBED_MODE,
             endpoint=embedder.base_url,
             model=EMBED_MODEL,
+            dimensions=EMBEDDING_DIM,
         )
-    except (EmbedderIdentityError, CalibrationRequestError) as exc:
+    except (EmbedderDimensionError, EmbedderIdentityError, CalibrationRequestError) as exc:
         raise SystemExit(str(exc)) from None
     if outcome == "recorded":
         log.info("Recorded embedder identity for this index (model=%s)", EMBED_MODEL)
@@ -2335,9 +2319,8 @@ def main():
     # Wait for the embedder to answer, then warm the model.
     embedder.wait_for_ready()
 
-    # Verify the running model matches the schema's reserved vector dim.
-    _validate_embedding_dim(embedder)
-    # Before anything is indexed: never mix vectors from two embedders.
+    # Before anything is indexed: one calibration request checks the
+    # vector width and never lets vectors from two embedders mix.
     _check_embedder_identity(db, embedder)
 
     # Start watching BEFORE the initial drain. On a large mailbox the
