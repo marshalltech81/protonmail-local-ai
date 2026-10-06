@@ -40,7 +40,7 @@ from .lib.inference import (
     default_token_budget,
 )
 from .lib.reranker import DEFAULT_RERANK_TIMEOUT_SECS, CohereReranker, RerankConfig
-from .lib.sqlite import Database
+from .lib.sqlite import Database, read_stored_schema_version
 from .tools.brief import register_experimental_tools
 from .tools.intelligence import register_intelligence_tools
 from .tools.retrieval import register_retrieval_tools
@@ -767,24 +767,26 @@ def _identity_settings() -> dict[str, object]:
     }
 
 
-def _log_startup_identity(db: Database) -> None:
+def _log_startup_identity(stored_schema: str) -> None:
     """Log one line naming what is running (#887): the source commit, a
     random ID for this start, the schema version the index carries
-    (``none`` when it has none) and the first 12 hex digits of a SHA-256
-    over ``_identity_settings``. The schema version lives in the
+    (``read_stored_schema_version``) and the first 12 hex digits of a
+    SHA-256 over ``_identity_settings``. The schema version lives in the
     indexer; this service has no version of its own to compare."""
     settings = json.dumps(_identity_settings(), sort_keys=True)
-    stored = db.get_schema_version()
     log.info(
         "Startup identity: service=mcp-server commit=%s boot=%s schema_stored=%s config=%s",
         _git_commit(),
         secrets.token_hex(6),
-        "none" if stored is None else stored,
+        stored_schema,
         hashlib.sha256(settings.encode("utf-8")).hexdigest()[:12],
     )
 
 
 def main():
+    # First, before anything that can stop startup (the token, provider
+    # config, the index open), so a crash loop still says what is running.
+    _log_startup_identity(read_stored_schema_version(SQLITE_PATH))
     # No MCP endpoint is served without its bearer token.
     _require_auth_token(MCP_AUTH_TOKEN)
 
@@ -864,8 +866,6 @@ def main():
 
     # Env validated — now open the SQLite index.
     db = Database(SQLITE_PATH)
-    # Before the embedder identity check, which can stop startup.
-    _log_startup_identity(db)
 
     # Read the declared embedding dim from ``message_chunks_vec`` so the
     # tool layer can reject wrong-shaped query vectors before they reach

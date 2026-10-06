@@ -5,10 +5,12 @@ rebuild or restart can be told apart."""
 
 import logging
 import re
+import sqlite3
+from contextlib import closing
 
 import pytest
 from src import main
-from src.database import SCHEMA_VERSION, Database
+from src.database import SCHEMA_APPLICATION_ID, SCHEMA_VERSION, Database
 from src.reconciler import ReconcilerConfig
 
 from tests import test_main
@@ -16,7 +18,7 @@ from tests import test_main
 _LINE = re.compile(
     r"Startup identity: service=indexer commit=(?P<commit>\S+) "
     r"boot=(?P<boot>[0-9a-f]{12}) schema_code=(?P<code>\d+) "
-    r"schema_stored=(?P<stored>\d+|none) config=(?P<config>[0-9a-f]{12})"
+    r"schema_stored=(?P<stored>\d+|none|unreadable) config=(?P<config>[0-9a-f]{12})"
 )
 _SECRET_MARKER = "synthetic-secret-marker-887"  # pragma: allowlist secret
 _QUEUE_CFG = {"max_attempts": 5, "base_backoff_seconds": 30}
@@ -29,10 +31,10 @@ def _identity_records(caplog) -> list[logging.LogRecord]:
     return [r for r in caplog.records if r.getMessage().startswith("Startup identity:")]
 
 
-def _log(db: Database, caplog) -> re.Match[str]:
+def _log(path, caplog) -> re.Match[str]:
     caplog.clear()
     caplog.set_level(logging.DEBUG)
-    main._log_startup_identity(db, _QUEUE_CFG, _RECONCILER_CFG)
+    main._log_startup_identity(main._read_stored_schema_version(path), _QUEUE_CFG, _RECONCILER_CFG)
     [record] = _identity_records(caplog)
     assert record.levelno == logging.INFO
     match = _LINE.fullmatch(record.getMessage())
@@ -40,22 +42,25 @@ def _log(db: Database, caplog) -> re.Match[str]:
     return match
 
 
-def test_line_format_on_a_fresh_and_a_reopened_index(tmp_path, monkeypatch, caplog):
+def _stamp(path, version: int, application_id: int = SCHEMA_APPLICATION_ID) -> None:
+    """A database file carrying only the schema stamp."""
+    with closing(sqlite3.connect(path)) as conn:
+        conn.execute("CREATE TABLE schema_version (version INTEGER PRIMARY KEY)")
+        conn.execute("INSERT INTO schema_version VALUES (?)", (version,))
+        conn.execute(f"PRAGMA application_id = {application_id}")
+        conn.commit()
+
+
+def test_line_format_before_and_after_the_index_exists(tmp_path, monkeypatch, caplog):
     monkeypatch.setenv("GIT_COMMIT", "abc1234-dirty")
-    db = Database(tmp_path / "mail.db")
-    try:
-        fresh = _log(db, caplog)
-    finally:
-        db.close()
+    path = tmp_path / "mail.db"
+    fresh = _log(path, caplog)
     assert fresh["commit"] == "abc1234-dirty"
     assert fresh["code"] == str(SCHEMA_VERSION)
-    # A new index had no stored version when the indexer opened it.
+    # No index yet: nothing is stored.
     assert fresh["stored"] == "none"
-    db = Database(tmp_path / "mail.db")
-    try:
-        reopened = _log(db, caplog)
-    finally:
-        db.close()
+    Database(path).close()
+    reopened = _log(path, caplog)
     assert reopened["stored"] == str(SCHEMA_VERSION)
     # Each start gets its own boot ID; the settings did not change.
     assert reopened["boot"] != fresh["boot"]
@@ -68,11 +73,64 @@ def test_missing_or_unusable_commit_is_logged_as_unknown(tmp_path, monkeypatch, 
         monkeypatch.delenv("GIT_COMMIT", raising=False)
     else:
         monkeypatch.setenv("GIT_COMMIT", value)
-    db = Database(tmp_path / "mail.db")
-    try:
-        assert _log(db, caplog)["commit"] == "unknown"
-    finally:
-        db.close()
+    assert _log(tmp_path / "mail.db", caplog)["commit"] == "unknown"
+
+
+class TestReadStoredSchemaVersion:
+    """Codex review round 3 on #893: the stored version is read read-only
+    before ``Database`` opens and migrates the file, so the identity line
+    is logged even when that open fails."""
+
+    def test_missing_file_is_none_and_is_not_created(self, tmp_path):
+        path = tmp_path / "mail.db"
+        assert main._read_stored_schema_version(path) == "none"
+        assert not path.exists()
+
+    def test_file_without_the_stamp_is_none(self, tmp_path):
+        path = tmp_path / "mail.db"
+        with closing(sqlite3.connect(path)) as conn:
+            conn.execute("CREATE TABLE other (x INTEGER)")
+        assert main._read_stored_schema_version(path) == "none"
+
+    def test_a_newer_version_is_read_and_left_alone(self, tmp_path):
+        path = tmp_path / "mail.db"
+        _stamp(path, SCHEMA_VERSION + 1)
+        before = path.read_bytes()
+        assert main._read_stored_schema_version(path) == str(SCHEMA_VERSION + 1)
+        assert path.read_bytes() == before
+
+    def test_a_file_sqlite_cannot_read_is_unreadable(self, tmp_path):
+        path = tmp_path / "mail.db"
+        path.write_bytes(b"not a database" * 100)
+        assert main._read_stored_schema_version(path) == "unreadable"
+
+
+@pytest.mark.parametrize(
+    ("version", "application_id"),
+    [
+        # Newer than the code: a downgrade, refused.
+        (SCHEMA_VERSION + 1, SCHEMA_APPLICATION_ID),
+        # Predates the application-ID stamp: refused with rebuild steps.
+        (SCHEMA_VERSION, 0),
+    ],
+)
+def test_identity_is_logged_before_a_refused_open(
+    tmp_path, monkeypatch, caplog, version, application_id
+):
+    path = tmp_path / "mail.db"
+    _stamp(path, version, application_id)
+    monkeypatch.setattr(main, "SQLITE_PATH", path)
+    monkeypatch.setattr(main, "EMBED_BASE_URL", "http://host.docker.internal:8001/v1")
+    monkeypatch.setattr(main, "EMBED_MODEL", "synthetic-embed")
+    monkeypatch.setattr(main, "EMBED_API_KEY", _SECRET_MARKER)
+    caplog.set_level(logging.DEBUG)
+    with pytest.raises(RuntimeError):
+        main.main()
+    [record] = _identity_records(caplog)
+    match = _LINE.fullmatch(record.getMessage())
+    assert match
+    assert match["stored"] == str(version)
+    assert _SECRET_MARKER not in caplog.text
 
 
 def test_config_hash_covers_only_the_named_non_secret_settings():
@@ -112,20 +170,17 @@ def test_config_hash_covers_only_the_named_non_secret_settings():
 
 
 def test_changing_the_api_key_does_not_change_the_hash(tmp_path, monkeypatch, caplog):
-    db = Database(tmp_path / "mail.db")
-    try:
-        monkeypatch.setattr(main, "EMBED_API_KEY", _SECRET_MARKER + "-a")
-        monkeypatch.setenv("EMBED_API_KEY", _SECRET_MARKER + "-a")
-        before = _log(db, caplog)["config"]
-        monkeypatch.setattr(main, "EMBED_API_KEY", _SECRET_MARKER + "-b")
-        monkeypatch.setenv("EMBED_API_KEY", _SECRET_MARKER + "-b")
-        after = _log(db, caplog)["config"]
-        assert _SECRET_MARKER not in caplog.text
-        # A named setting does change it, so the hash is not a constant.
-        monkeypatch.setattr(main, "EMBED_MODEL", "synthetic-other-model")
-        changed = _log(db, caplog)["config"]
-    finally:
-        db.close()
+    path = tmp_path / "mail.db"
+    monkeypatch.setattr(main, "EMBED_API_KEY", _SECRET_MARKER + "-a")
+    monkeypatch.setenv("EMBED_API_KEY", _SECRET_MARKER + "-a")
+    before = _log(path, caplog)["config"]
+    monkeypatch.setattr(main, "EMBED_API_KEY", _SECRET_MARKER + "-b")
+    monkeypatch.setenv("EMBED_API_KEY", _SECRET_MARKER + "-b")
+    after = _log(path, caplog)["config"]
+    assert _SECRET_MARKER not in caplog.text
+    # A named setting does change it, so the hash is not a constant.
+    monkeypatch.setattr(main, "EMBED_MODEL", "synthetic-other-model")
+    changed = _log(path, caplog)["config"]
     assert before == after
     assert changed != before
 

@@ -52,10 +52,14 @@ Find it with `docker compose logs <service> | grep 'Startup identity'`.
   and the next come from the same run, so a restart shows up as a new
   value.
 - `schema_code` (indexer only) is the schema version the code expects.
-  `schema_stored` is the version the index carried: for the indexer,
-  when it opened the file, before any migration (`none` for a new
-  index); for mcp-server, the version it reads. A `schema_stored`
-  below `schema_code` on the indexer means migrations ran on this start.
+  `schema_stored` is the version stamped in the index file, read
+  read-only before the service opens it (and, for the indexer, before
+  any migration): `none` when there is no index yet, `unreadable` when
+  SQLite cannot read the file. The line is logged before anything that
+  can stop startup, so it is there even when the index is refused (a
+  `schema_stored` above `schema_code` is a downgrade) or a migration
+  fails. A `schema_stored` below `schema_code` on the indexer means
+  migrations run on this start.
 - `config` is the first 12 hex digits of a SHA-256 over the service's
   non-secret settings, named one by one in code: modes, endpoints,
   model names and limits (indexer and mcp-server, `_identity_settings`

@@ -1347,6 +1347,30 @@ def _append_folder_membership_sql(
     params.extend(folders)
 
 
+def read_stored_schema_version(path: str) -> str:
+    """The schema version the indexer stamped, for the startup identity
+    line (#887). Read read-only, without the ``Database`` checks that can
+    stop startup, so the line is logged first (Codex round 3 on #893).
+
+    ``none`` when the file, table or row is missing; ``unreadable`` when
+    SQLite cannot read it. Never creates the file.
+    """
+    if not Path(path).exists():
+        return "none"
+    try:
+        uri = f"file:{quote(str(path))}?mode=ro"
+        with closing(sqlite3.connect(uri, uri=True)) as conn:
+            table = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_version'"
+            ).fetchone()
+            if table is None:
+                return "none"
+            row = conn.execute("SELECT version FROM schema_version").fetchone()
+        return "none" if row is None else str(int(row[0]))
+    except sqlite3.Error, TypeError, ValueError:
+        return "unreadable"
+
+
 class Database:
     """Read-only handle to the indexer's SQLite output.
 
@@ -3498,18 +3522,6 @@ class Database:
         if match is None:
             return None
         return int(match.group(1))
-
-    def get_schema_version(self) -> int | None:
-        """The schema version the indexer stamped, for the startup
-        identity line (#887); ``None`` when the table or its row is
-        missing."""
-        table = self._fetchone(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_version'"
-        )
-        if table is None:
-            return None
-        row = self._fetchone("SELECT version FROM schema_version")
-        return None if row is None else int(row["version"])
 
     def get_mailbox_status(self) -> dict:
         """Index counts, queue depth, and the indexer's ``ingestion_state``

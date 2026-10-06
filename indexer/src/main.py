@@ -36,6 +36,7 @@ import time
 import urllib.parse
 import warnings
 from collections.abc import Callable
+from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -2295,21 +2296,45 @@ def _config_hash(settings: dict[str, object]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:12]
 
 
+def _read_stored_schema_version(path: Path) -> str:
+    """The schema version stamped in the index file, read read-only
+    before ``Database`` opens and migrates it, so the identity line is
+    logged even when that open fails (Codex round 3 on #893).
+
+    Never creates or migrates the file. ``none`` when the file, table or
+    row is missing; ``unreadable`` when SQLite cannot read it (the open
+    that follows reports why).
+    """
+    if not path.exists():
+        return "none"
+    try:
+        with closing(sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)) as conn:
+            table = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_version'"
+            ).fetchone()
+            if table is None:
+                return "none"
+            row = conn.execute("SELECT version FROM schema_version").fetchone()
+        return "none" if row is None else str(int(row[0]))
+    except sqlite3.Error, TypeError, ValueError:
+        return "unreadable"
+
+
 def _log_startup_identity(
-    db: Database, queue_cfg: dict[str, int], reconciler_cfg: ReconcilerConfig
+    stored_schema: str, queue_cfg: dict[str, int], reconciler_cfg: ReconcilerConfig
 ) -> None:
     """Log one line naming what is running (#887): the source commit, a
     random ID for this start, the code's schema version and the one the
-    index carried when it was opened (``none`` for a new index), and the
-    first 12 hex digits of a SHA-256 over ``_identity_settings``."""
-    stored = db.stored_schema_version
+    index file carries before any migration
+    (``_read_stored_schema_version``), and the first 12 hex digits of a
+    SHA-256 over ``_identity_settings``."""
     log.info(
         "Startup identity: service=indexer commit=%s boot=%s schema_code=%d "
         "schema_stored=%s config=%s",
         _git_commit(),
         secrets.token_hex(6),
         SCHEMA_VERSION,
-        "none" if stored is None else stored,
+        stored_schema,
         _config_hash(_identity_settings(queue_cfg, reconciler_cfg)),
     )
 
@@ -2332,6 +2357,13 @@ def _log_reconciler_config(cfg: ReconcilerConfig) -> None:
 
 
 def main():
+    # The identity line comes first, before anything that can stop
+    # startup (embed config, authority rules, the database open and its
+    # migrations), so a crash loop still says what is running (#887).
+    # The two env readers raise only on a malformed value of their own.
+    queue_cfg = load_queue_config_from_env(os.environ)
+    reconciler_config = load_config_from_env(os.environ)
+    _log_startup_identity(_read_stored_schema_version(SQLITE_PATH), queue_cfg, reconciler_config)
     embed_base_url = _validate_embed_config()
     log.info("Starting indexer...")
     log.info("  Maildir: %s", MAILDIR_PATH)
@@ -2374,7 +2406,6 @@ def main():
     threader = Threader(db)
     touch_health_file()
 
-    queue_cfg = load_queue_config_from_env(os.environ)
     queue = IndexingQueue(
         db,
         max_attempts=queue_cfg["max_attempts"],
@@ -2398,9 +2429,7 @@ def main():
             queue_depth["dead"],
         )
 
-    reconciler_config = load_config_from_env(os.environ)
     _log_reconciler_config(reconciler_config)
-    _log_startup_identity(db, queue_cfg, reconciler_config)
     reconciler: Reconciler | None = None
     if reconciler_config.enabled:
         reconciler = Reconciler(db, embedder, reconciler_config, maildir_root=MAILDIR_PATH)
