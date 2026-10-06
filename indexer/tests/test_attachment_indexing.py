@@ -42,14 +42,14 @@ def _attachment(
     )
 
 
-def _prepare_and_apply(*, db: Database, thread_id: str, **prepare_kwargs: Any) -> dict[str, int]:
+def _prepare_and_apply(*, db: Database, thread_id: str, **prepare_kwargs: Any) -> None:
     """Run one attachment through the indexer's two phases the way
     ``main.py`` does: ``prepare_attachment_writes`` outside the write
     transaction, then ``apply_attachment_writes`` inside
-    ``db.transaction()``. Returns the apply summary."""
+    ``db.transaction()``."""
     plan = prepare_attachment_writes(db=db, **prepare_kwargs)
     with db.transaction():
-        return apply_attachment_writes(
+        apply_attachment_writes(
             plan=plan,
             claimant_id=prepare_kwargs["claimant_id"],
             thread_id=thread_id,
@@ -79,7 +79,7 @@ def test_successful_cached_extraction_is_reused(tmp_path, monkeypatch):
     embedder = make_mock_embedder()
     embedder.embed.return_value = [0.1] * EMBEDDING_DIM
 
-    summary = _prepare_and_apply(
+    _prepare_and_apply(
         attachment=attachment,
         claimant_id="message@example.com",
         thread_id="thread-1",
@@ -93,9 +93,17 @@ def test_successful_cached_extraction_is_reused(tmp_path, monkeypatch):
         max_ocr_pages=20,
     )
 
-    assert summary["extractions_reused"] == 1
-    assert summary["extractions_run"] == 0
     extractor.assert_not_called()
+    # The chunks come from the cached text, and the row is left as it was.
+    chunk_texts = [
+        row["text"]
+        for row in db._conn.execute(
+            "SELECT text FROM message_chunks WHERE attachment_id = ?", (attachment.content_hash,)
+        )
+    ]
+    assert chunk_texts == ["cached text"]
+    row = db.get_attachment_extraction(attachment.content_hash)
+    assert (row["extractor"], row["extracted_text"]) == ("text@2", "cached text")
     assert db.get_chunk_ids_for_message(
         "message@example.com", attachment_id=attachment.content_hash
     )
@@ -365,7 +373,7 @@ def _run_process_with_cached_status(
     monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
     embedder = make_mock_embedder()
     embedder.embed.return_value = [0.2] * EMBEDDING_DIM
-    summary = _prepare_and_apply(
+    _prepare_and_apply(
         attachment=attachment,
         claimant_id="message@example.com",
         thread_id="thread-1",
@@ -378,7 +386,13 @@ def _run_process_with_cached_status(
         max_bytes=max_bytes,
         max_ocr_pages=20,
     )
-    return summary, extractor
+    # A cache hit leaves the cached row as it was and writes no chunks.
+    row = db.get_attachment_extraction(attachment.content_hash)
+    assert (row["extraction_status"], row["extraction_error"]) == (status, error)
+    assert not db.get_chunk_ids_for_message(
+        "message@example.com", attachment_id=attachment.content_hash
+    )
+    return extractor
 
 
 def test_cached_empty_extraction_is_honored(tmp_path, monkeypatch):
@@ -386,11 +400,7 @@ def test_cached_empty_extraction_is_honored(tmp_path, monkeypatch):
     re-running the extractor would produce the same result.
     """
     db = _seed_thread_for_cache_test(tmp_path)
-    summary, extractor = _run_process_with_cached_status(
-        db, _attachment(), STATUS_EMPTY, monkeypatch
-    )
-    assert summary["extractions_reused"] == 1
-    assert summary["extractions_run"] == 0
+    extractor = _run_process_with_cached_status(db, _attachment(), STATUS_EMPTY, monkeypatch)
     extractor.assert_not_called()
 
 
@@ -399,11 +409,9 @@ def test_cached_too_large_extraction_is_honored_while_still_over_the_cap(tmp_pat
     cap is honored: re-running would only record ``too_large`` again."""
     db = _seed_thread_for_cache_test(tmp_path)
     attachment = _attachment()
-    summary, extractor = _run_process_with_cached_status(
+    extractor = _run_process_with_cached_status(
         db, attachment, STATUS_TOO_LARGE, monkeypatch, max_bytes=attachment.size - 1
     )
-    assert summary["extractions_reused"] == 1
-    assert summary["extractions_run"] == 0
     extractor.assert_not_called()
 
 
@@ -441,9 +449,8 @@ def test_cached_too_large_extraction_is_re_run_once_the_payload_fits(tmp_path, m
             "max_bytes": attachment.size + slack,
             "max_ocr_pages": 20,
         }
-        summary = _prepare_and_apply(**kwargs)
+        _prepare_and_apply(**kwargs)
 
-        assert summary["extractions_run"] == 1, label
         assert extractor.call_count == 1, label
         assert extractor.call_args.kwargs["max_bytes"] == attachment.size + slack
         row = db.get_attachment_extraction(attachment.content_hash)
@@ -453,8 +460,7 @@ def test_cached_too_large_extraction_is_re_run_once_the_payload_fits(tmp_path, m
         ), label
 
         # The rewritten row is a plain cache hit from now on.
-        summary = _prepare_and_apply(**kwargs)
-        assert summary["extractions_reused"] == 1, label
+        _prepare_and_apply(**kwargs)
         assert extractor.call_count == 1, label
 
 
@@ -464,14 +470,13 @@ def test_cached_unsupported_for_unknown_mime_is_honored(tmp_path, monkeypatch):
     ``test_ocr_disabled_unsupported_is_re_run_when_ocr_re_enabled``.
     """
     db = _seed_thread_for_cache_test(tmp_path)
-    summary, extractor = _run_process_with_cached_status(
+    extractor = _run_process_with_cached_status(
         db,
         _attachment(filename="data.foo", content_type="application/x-foo"),
         STATUS_UNSUPPORTED,
         monkeypatch,
         error=NO_EXTRACTOR_ERROR,
     )
-    assert summary["extractions_reused"] == 1
     extractor.assert_not_called()
 
 
@@ -494,7 +499,7 @@ def test_cached_unsupported_is_re_run_for_an_occurrence_with_an_extractor(tmp_pa
         )
     )
     monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
-    summary = _prepare_and_apply(
+    _prepare_and_apply(
         attachment=attachment,
         claimant_id="message@example.com",
         thread_id="thread-1",
@@ -507,7 +512,6 @@ def test_cached_unsupported_is_re_run_for_an_occurrence_with_an_extractor(tmp_pa
         max_bytes=10_000_000,
         max_ocr_pages=20,
     )
-    assert summary["extractions_run"] == 1
     extractor.assert_called_once()
     assert db.get_attachment_extraction(attachment.content_hash)["extraction_status"] == (
         STATUS_SUCCESS
@@ -520,7 +524,7 @@ def test_ocr_disabled_row_stays_cached_while_ocr_is_off(tmp_path, monkeypatch):
     from src.extractors import SCANNED_PDF_OCR_DISABLED_ERROR
 
     db = _seed_thread_for_cache_test(tmp_path)
-    summary, extractor = _run_process_with_cached_status(
+    extractor = _run_process_with_cached_status(
         db,
         _attachment(filename="scan.pdf", content_type="application/pdf"),
         STATUS_UNSUPPORTED,
@@ -528,7 +532,6 @@ def test_ocr_disabled_row_stays_cached_while_ocr_is_off(tmp_path, monkeypatch):
         error=SCANNED_PDF_OCR_DISABLED_ERROR,
         ocr_enabled=False,
     )
-    assert summary["extractions_reused"] == 1
     extractor.assert_not_called()
 
 
@@ -598,7 +601,7 @@ def test_recent_failed_cached_extraction_is_honored(tmp_path, monkeypatch):
     embedder = make_mock_embedder()
     embedder.embed.return_value = [0.2] * EMBEDDING_DIM
 
-    summary = _prepare_and_apply(
+    _prepare_and_apply(
         attachment=attachment,
         claimant_id="message@example.com",
         thread_id="thread-1",
@@ -612,8 +615,6 @@ def test_recent_failed_cached_extraction_is_honored(tmp_path, monkeypatch):
         max_ocr_pages=20,
     )
 
-    assert summary["extractions_reused"] == 1
-    assert summary["extractions_run"] == 0
     extractor.assert_not_called()
 
 
@@ -662,7 +663,7 @@ def test_stale_failed_cached_extraction_is_retried(tmp_path, monkeypatch):
     embedder = make_mock_embedder()
     embedder.embed.return_value = [0.2] * EMBEDDING_DIM
 
-    summary = _prepare_and_apply(
+    _prepare_and_apply(
         attachment=attachment,
         claimant_id="message@example.com",
         thread_id="thread-1",
@@ -676,8 +677,6 @@ def test_stale_failed_cached_extraction_is_retried(tmp_path, monkeypatch):
         max_ocr_pages=20,
     )
 
-    assert summary["extractions_reused"] == 0
-    assert summary["extractions_run"] == 1
     extractor.assert_called_once()
     cached = db.get_attachment_extraction(attachment.content_hash)
     assert cached is not None
@@ -718,7 +717,7 @@ def test_ocr_disabled_unsupported_is_re_run_when_ocr_re_enabled(tmp_path, monkey
     embedder = make_mock_embedder()
     embedder.embed.return_value = [0.2] * EMBEDDING_DIM
 
-    summary = _prepare_and_apply(
+    _prepare_and_apply(
         attachment=attachment,
         claimant_id="message@example.com",
         thread_id="thread-1",
@@ -732,8 +731,6 @@ def test_ocr_disabled_unsupported_is_re_run_when_ocr_re_enabled(tmp_path, monkey
         max_ocr_pages=20,
     )
 
-    assert summary["extractions_reused"] == 0
-    assert summary["extractions_run"] == 1
     extractor.assert_called_once()
 
 
@@ -770,7 +767,7 @@ def test_ocr_disabled_pdf_cache_is_re_run_when_ocr_re_enabled(tmp_path, monkeypa
     embedder = make_mock_embedder()
     embedder.embed.return_value = [0.2] * EMBEDDING_DIM
 
-    summary = _prepare_and_apply(
+    _prepare_and_apply(
         attachment=attachment,
         claimant_id="message@example.com",
         thread_id="thread-1",
@@ -784,8 +781,6 @@ def test_ocr_disabled_pdf_cache_is_re_run_when_ocr_re_enabled(tmp_path, monkeypa
         max_ocr_pages=20,
     )
 
-    assert summary["extractions_reused"] == 0
-    assert summary["extractions_run"] == 1
     extractor.assert_called_once()
     cached = db.get_attachment_extraction(attachment.content_hash)
     assert cached is not None
@@ -847,7 +842,6 @@ class TestPrepareApplyBoundary:
         # Embed still runs for new chunks even on a cache hit (the chunks
         # are derived from the cached text and may be new).
         assert embedder.embed.called
-        assert plan.extraction_reused is True
         assert plan.extraction_to_persist is None
 
     def test_apply_does_no_extraction_or_embedding(self, tmp_path, monkeypatch):
@@ -935,6 +929,12 @@ class TestMultiOccurrenceDeterminism:
         assert embedder.embed.call_count == embed_calls_first_run
 
 
+def _occurrence_count(db: Database, attachment: Attachment) -> int:
+    return db._conn.execute(
+        "SELECT COUNT(*) FROM attachments WHERE attachment_id = ?", (attachment.content_hash,)
+    ).fetchone()[0]
+
+
 class TestNonSuccessPlanPaths:
     def test_unsupported_status_persists_status_only_no_chunks(self, tmp_path, monkeypatch):
         db = _setup_db_for_attachment(tmp_path)
@@ -959,15 +959,15 @@ class TestNonSuccessPlanPaths:
         embedder = make_mock_embedder()
         embedder.embed.return_value = [0.1] * EMBEDDING_DIM
 
-        summary = _prepare_and_apply(
+        _prepare_and_apply(
             db=db,
             embedder=embedder,
             thread_id="thread-x",
             **_kwargs(attachment),
         )
 
-        assert summary["chunks_inserted"] == 0
-        assert summary["occurrences_inserted"] == 1
+        assert not db.get_chunk_ids_for_message("msg@x", attachment_id=attachment.content_hash)
+        assert _occurrence_count(db, attachment) == 1
         # No embedding work should happen for an unsupported attachment.
         embedder.embed.assert_not_called()
         cached = db.get_attachment_extraction(attachment.content_hash)
@@ -991,15 +991,15 @@ class TestNonSuccessPlanPaths:
         )
         embedder = make_mock_embedder()
 
-        summary = _prepare_and_apply(
+        _prepare_and_apply(
             db=db,
             embedder=embedder,
             thread_id="thread-x",
             **_kwargs(attachment, max_bytes=100),
         )
 
-        assert summary["chunks_inserted"] == 0
-        assert summary["occurrences_inserted"] == 1
+        assert not db.get_chunk_ids_for_message("msg@x", attachment_id=attachment.content_hash)
+        assert _occurrence_count(db, attachment) == 1
         embedder.embed.assert_not_called()
         cached = db.get_attachment_extraction(attachment.content_hash)
         assert cached is not None
@@ -1084,7 +1084,7 @@ def test_batch_results_are_shared_but_do_not_block_a_supported_occurrence(tmp_pa
     assert calls == ["blob.bin", "doc.txt"]
     assert blob.status == STATUS_UNSUPPORTED
     assert text.status == STATUS_SUCCESS and text.chunks
-    assert again.status == STATUS_SUCCESS and again.extraction_reused
+    assert again.status == STATUS_SUCCESS
     # Reused but uncommitted: the reusing message still persists the row.
     assert again.extraction_to_persist is text.extraction_to_persist
 
@@ -1235,7 +1235,8 @@ def test_payload_re_arriving_after_its_last_carrier_was_reaped_is_re_extracted(
         max_bytes=10_000_000,
         max_ocr_pages=20,
     )
-    assert _prepare_and_apply(claimant_id="first@x", **kwargs)["extractions_run"] == 1
+    _prepare_and_apply(claimant_id="first@x", **kwargs)
+    assert db.get_attachment_extraction(attachment.content_hash) is not None
 
     db.add_pending_deletion("/m/first", "first@x", "t-rearrive")
     db.reap_thread_messages(
@@ -1245,8 +1246,7 @@ def test_payload_re_arriving_after_its_last_carrier_was_reaped_is_re_extracted(
 
     extract = MagicMock(wraps=attachment_indexing.extract_attachment)
     monkeypatch.setattr(attachment_indexing, "extract_attachment", extract)
-    summary = _prepare_and_apply(claimant_id="keep@x", **kwargs)
+    _prepare_and_apply(claimant_id="keep@x", **kwargs)
 
-    assert summary["extractions_run"] == 1
     extract.assert_called_once()
     assert db.get_attachment_extraction(attachment.content_hash) is not None

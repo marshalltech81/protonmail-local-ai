@@ -24,10 +24,7 @@ def extract(
     on_progress: Callable[[], None] | None = None,  # noqa: ARG001
 ) -> tuple[str, str]:
     """Decode HTML bytes and convert to plain text. Returns (text, "html")."""
-    try:
-        source = payload.decode("utf-8")
-    except UnicodeDecodeError:
-        source = payload.decode("utf-8", errors="replace")
+    source = payload.decode("utf-8", errors="replace")
     # A fresh converter per document: ``HTML2Text`` keeps parser state
     # between calls, so a shared one let an unclosed ``<style>`` blank
     # the next attachment.
