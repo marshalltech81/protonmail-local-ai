@@ -627,6 +627,11 @@ class QuoteCheck(_Output):
 
 class AskMailboxOutput(_Output):
     answer: str = Field(description="The model's answer, with inline labels such as [E1].")
+    coverage_note: str | None = Field(
+        default=None,
+        description="Server-written prompt-budget omission/truncation notice, separate from "
+        "the model's answer. Null when no retrieved evidence was left out or cut to fit.",
+    )
     citations: list[Citation] = Field(
         description="Each cited label that names a supplied passage, in first-cited order."
     )
