@@ -53,7 +53,12 @@ from collections.abc import Callable
 
 import pypdf
 
-from . import note_ocr_capped, note_pdf_page_failed, warn_rate_limited
+from . import (
+    note_ocr_capped,
+    note_pdf_page_failed,
+    note_pdf_pages_unrecovered,
+    warn_rate_limited,
+)
 
 log = logging.getLogger("indexer.extractor.pdf")
 
@@ -99,9 +104,43 @@ def extract(
     walk reads and after each page OCR'd, so the indexer's heartbeat
     keeps up with a long scan (#485). A page that hangs reports nothing.
     """
+    # Pages pypdf could not read, and the ones OCR then recovered: the
+    # difference is counted for the attachments aggregate as
+    # ``pdf_pages_unrecovered`` (review round 4 on #884), on every return
+    # and raise below.
+    failed: set[int] = set()
     digital_pages = _extract_digital_pages(
-        payload, max_pdf_pages=max_pdf_pages, on_progress=on_progress
+        payload, max_pdf_pages=max_pdf_pages, on_progress=on_progress, failed=failed
     )
+    recovered: set[int] = set()
+    try:
+        return _text_from_pages(
+            payload,
+            digital_pages,
+            recovered=recovered,
+            ocr_enabled=ocr_enabled,
+            max_ocr_pages=max_ocr_pages,
+            ocr_timeout_seconds=ocr_timeout_seconds,
+            on_progress=on_progress,
+        )
+    finally:
+        if failed:
+            note_pdf_pages_unrecovered(len(failed - recovered))
+
+
+def _text_from_pages(
+    payload: bytes,
+    digital_pages: list[str],
+    *,
+    recovered: set[int],
+    ocr_enabled: bool,
+    max_ocr_pages: int,
+    ocr_timeout_seconds: float | None,
+    on_progress: Callable[[], None] | None,
+) -> tuple[str, str]:
+    """``extract`` from the digital walk's pages on: the digital text,
+    or the OCR fallback for the pages under the floor. Adds to
+    ``recovered`` each page OCR read text from."""
     digital_text = "\n\n".join(text for text in digital_pages if text)
 
     if not ocr_enabled:
@@ -154,6 +193,7 @@ def extract(
         # operators can fix Poppler/Tesseract and re-run extraction.
         raise
 
+    recovered.update(index for index, text in ocr_text.items() if text)
     if not any(ocr_text.values()):
         return digital_text, "pdf-digital"
     # Each page in order: its digital text, then its OCR text. A scanned
@@ -171,6 +211,7 @@ def _extract_digital_pages(
     *,
     max_pdf_pages: int | None = None,
     on_progress: Callable[[], None] | None = None,
+    failed: set[int] | None = None,
 ) -> list[str]:
     """Pull the embedded text layer out of a PDF: one stripped string
     per page, empty for a page without text or whose extraction failed.
@@ -198,6 +239,8 @@ def _extract_digital_pages(
             log.debug("pypdf page extract failed: %s", type(exc).__name__)
             # Counted for the INFO attachments aggregate (#871).
             note_pdf_page_failed()
+            if failed is not None:
+                failed.add(index)
             text = ""
         pages.append(text.strip())
         if on_progress is not None:

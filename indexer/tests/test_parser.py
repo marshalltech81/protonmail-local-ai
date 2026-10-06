@@ -3635,3 +3635,93 @@ def test_cap_that_loses_nothing_logs_no_cap_line(tmp_path, caplog, shape):
     assert msg is not None
     assert pinned(msg)
     assert "parser work caps" not in caplog.text
+
+
+# Review round 4 on #884: ``body_parts`` counts a capped text part only
+# when it could have contributed to the assembled body, by the same
+# selection ``_assemble_body`` makes (an alternative after the selected
+# one is not a loss). Each shape: (parts before the tail, the tail, the
+# body before the caps were logged, the expected body_parts count).
+def _parts(count: int, start: int = 0) -> bytes:
+    return b"".join(
+        b"--b\r\nContent-Type: text/plain\r\n\r\nS%d\r\n" % i for i in range(start, start + count)
+    )
+
+
+def _alternative(*children: tuple[bytes, bytes]) -> bytes:
+    return (
+        b'--b\r\nContent-Type: multipart/alternative; boundary="a"\r\n\r\n'
+        + b"".join(
+            b"--a\r\nContent-Type: " + ctype + b"\r\n\r\n" + body + b"\r\n"
+            for ctype, body in children
+        )
+        + b"--a--\r\n"
+    )
+
+
+_BODY_CAP_SHAPES = {
+    # The plain alternative is the 200th text part; the HTML one after it
+    # is capped but would never be chosen.
+    "alternative_after_selected": (
+        _parts(199)
+        + _alternative((b"text/plain", b"ALT_PLAIN"), (b"text/html", b"<p>ALT_HTML</p>")),
+        [f"S{i}" for i in range(199)] + ["ALT_PLAIN"],
+        0,
+    ),
+    # Both alternatives are capped: the plain one would have been the
+    # alternative's body, the HTML one would not.
+    "alternative_fully_capped": (
+        _parts(200)
+        + _alternative((b"text/plain", b"ALT_PLAIN"), (b"text/html", b"<p>ALT_HTML</p>")),
+        [f"S{i}" for i in range(200)],
+        1,
+    ),
+    # The HTML alternative is within the cap and chosen only because the
+    # plain one, which would be preferred, is capped.
+    "preferred_alternative_capped": (
+        _parts(199)
+        + _alternative((b"text/html", b"<p>ALT_HTML</p>"), (b"text/plain", b"ALT_PLAIN")),
+        [f"S{i}" for i in range(199)] + ["ALT_HTML"],
+        1,
+    ),
+    # Sequential parts past the cap each contribute.
+    "sequential": (
+        _parts(203),
+        [f"S{i}" for i in range(200)],
+        3,
+    ),
+}
+
+
+def _parse_body_cap_shape(tmp_path, shape):
+    raw = (
+        b"Message-ID: <body@example.test>\r\nFrom: sender@example.test\r\n"
+        b'MIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary="b"\r\n\r\n'
+        + _BODY_CAP_SHAPES[shape][0]
+        + b"--b--\r\n"
+    )
+    folder = tmp_path / "INBOX" / "cur"
+    folder.mkdir(parents=True)
+    path = folder / "body.eml"
+    path.write_bytes(raw)
+    msg = parse_email(path)
+    assert msg is not None
+    return msg, path
+
+
+@pytest.mark.parametrize("shape", sorted(_BODY_CAP_SHAPES))
+def test_body_cap_shape_assembled_body_is_pinned(tmp_path, shape):
+    msg, _ = _parse_body_cap_shape(tmp_path, shape)
+    assert msg.body_text.split("\n\n") == _BODY_CAP_SHAPES[shape][1]
+
+
+@pytest.mark.parametrize("shape", sorted(_BODY_CAP_SHAPES))
+def test_body_parts_counts_only_parts_that_could_contribute(tmp_path, caplog, shape):
+    caplog.set_level("INFO")
+    _, path = _parse_body_cap_shape(tmp_path, shape)
+    lines = [r.getMessage() for r in caplog.records if "parser work caps" in r.getMessage()]
+    count = _BODY_CAP_SHAPES[shape][2]
+    expected = (
+        [f"parser work caps dropped content from {path}: body_parts={count}"] if count else []
+    )
+    assert lines == expected

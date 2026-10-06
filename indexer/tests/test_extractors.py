@@ -3074,6 +3074,95 @@ class TestPdfPageLevelOcr:
         assert "SYNTHETIC_FILENAME_MARKER" not in caplog.text
         assert self.SCANNED not in caplog.text
 
+    @staticmethod
+    def _fail_pypdf_pages(monkeypatch, failing: set[int]) -> None:
+        """Make pypdf raise on the pages at these 0-based indexes: the
+        digital walk reads pages in order, one ``extract_text`` each."""
+        from pypdf import PageObject
+
+        real = PageObject.extract_text
+        calls = {"n": 0}
+
+        def extract_text(self, *args, **kwargs):
+            index = calls["n"]
+            calls["n"] += 1
+            if index in failing:
+                raise ValueError("SYNTHETIC_PYPDF_MARKER")
+            return real(self, *args, **kwargs)
+
+        monkeypatch.setattr(PageObject, "extract_text", extract_text)
+
+    @staticmethod
+    def _unrecovered_line(caplog):
+        """The attachments line for one committed successful PDF plus the
+        extractor counts, and its level."""
+        from src import attachment_indexing, main
+        from src.extractors import STATUS_SUCCESS
+
+        attachment_indexing.attachment_outcomes.record(STATUS_SUCCESS, None, cached=False)
+        main._log_attachment_outcomes(force=True)
+        [record] = [r for r in caplog.records if r.getMessage().startswith("attachments n=")]
+        return record
+
+    @pytest.mark.parametrize(
+        "layout, failing, ocr, cap, ocr_text, extractor, unrecovered",
+        [
+            # OCR off: a mixed PDF returns its digital text before OCR
+            # could read the failed page.
+            ("dd", {1}, False, 20, True, "pdf-digital@4", 1),
+            # OCR on: the failed page is OCR'd and its text recovered.
+            ("dd", {1}, True, 20, True, "pdf-ocr@4", 0),
+            # OCR on but it reads no text on the failed page.
+            ("dd", {1}, True, 20, False, "pdf-digital@4", 1),
+            # The OCR cap leaves the failed page unread.
+            ("dsss", {3}, True, 1, True, "pdf-ocr@4", 1),
+        ],
+    )
+    def test_pdf_pages_unrecovered(
+        self,
+        monkeypatch,
+        tmp_path,
+        caplog,
+        layout,
+        failing,
+        ocr,
+        cap,
+        ocr_text,
+        extractor,
+        unrecovered,
+    ):
+        """Review round 4 on #884: ``pdf_pages_failed`` counts every page
+        pypdf could not read, ``pdf_pages_unrecovered`` those whose text
+        no OCR recovered. Only the latter makes the attachments line a
+        WARNING. Extraction results are unchanged."""
+        from src import attachment_indexing, extractors
+
+        caplog.set_level("INFO")
+        self._fake_ocr(monkeypatch, tmp_path)
+        if not ocr_text:
+            monkeypatch.setattr("pytesseract.image_to_string", lambda image, **_: "  ")
+        self._fail_pypdf_pages(monkeypatch, failing)
+        attachment_indexing.attachment_outcomes.drain()
+        result = self._extract(layout, ocr_enabled=ocr, max_ocr_pages=cap)
+        assert (result.status, result.extractor) == (STATUS_SUCCESS, extractor)
+        assert result.text is not None
+        assert self.DIGITAL.format(n=1) in result.text
+        assert (self.SCANNED in result.text) is (ocr and ocr_text)
+        counts = extractors.drain_extractor_counts()
+        assert counts["pdf_pages_failed"] == len(failing)
+        assert counts["pdf_pages_unrecovered"] == unrecovered
+        # Put the counts back for the aggregate line.
+        for _ in range(counts["pdf_pages_failed"]):
+            extractors.note_pdf_page_failed()
+        extractors.note_pdf_pages_unrecovered(counts["pdf_pages_unrecovered"])
+        for _ in range(counts["ocr_capped_pdfs"]):
+            extractors.note_ocr_capped(0)
+        record = self._unrecovered_line(caplog)
+        degraded = unrecovered or counts["ocr_capped_pdfs"]
+        assert record.levelname == ("WARNING" if degraded else "INFO")
+        assert f"pdf_pages_unrecovered={unrecovered}" in record.getMessage()
+        assert "SYNTHETIC_PYPDF_MARKER" not in caplog.text
+
     def test_page_cap_warnings_are_rate_limited_and_counted(self, monkeypatch, tmp_path, caplog):
         """Review round 2 on #884: one message can carry many capped
         PDFs, and a WARNING each could flood the log. The cap line shares
@@ -3092,6 +3181,7 @@ class TestPdfPageLevelOcr:
         assert [r.levelname for r in lines] == ["WARNING", "WARNING"]
         assert extractors.drain_extractor_counts() == {
             "pdf_pages_failed": 0,
+            "pdf_pages_unrecovered": 0,
             "ocr_capped_pdfs": 5,
             "ocr_pages_skipped": 5 * 25,
             "warnings_suppressed": 3,
@@ -3955,6 +4045,7 @@ class TestMailContentStaysOutOfLogsAndErrors:
         assert pdf._extract_digital_pages(b"%PDF-1.7") == ["", "digital words", ""]
         assert extractors.drain_extractor_counts() == {
             "pdf_pages_failed": 2,
+            "pdf_pages_unrecovered": 0,
             "ocr_capped_pdfs": 0,
             "ocr_pages_skipped": 0,
             "warnings_suppressed": 0,

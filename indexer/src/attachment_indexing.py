@@ -84,7 +84,8 @@ class AttachmentOutcomeCounts:
     Per-attachment lines would flood the log; ``failed`` extractions also
     log their own rate-limited WARNING. ``drain`` also reports the
     extractors' per-attempt counts (``extractors.drain_extractor_counts``:
-    ``pdf_pages_failed``, ``ocr_capped_pdfs``, ``ocr_pages_skipped`` and
+    ``pdf_pages_failed``, ``pdf_pages_unrecovered``, ``ocr_capped_pdfs``,
+    ``ocr_pages_skipped`` and
     ``warnings_suppressed``). Counts
     only: no filename, type or text.
     """
@@ -119,6 +120,7 @@ _SUMMARY_FIELDS = (
     *ATTACHMENT_OUTCOMES,
     "cached",
     "pdf_pages_failed",
+    "pdf_pages_unrecovered",
     "ocr_capped_pdfs",
     "ocr_pages_skipped",
     "warnings_suppressed",
@@ -126,12 +128,14 @@ _SUMMARY_FIELDS = (
 # Counts that mean attachment text is missing from search: the line is
 # then a WARNING (review round 1 on #884). ``pdf_pages_failed`` is left
 # out: a page pypdf cannot read is OCR'd when OCR is on and may be
-# recovered, so it is a diagnostic count (review round 3).
+# recovered, so it is a diagnostic count (review round 3); the pages no
+# OCR recovered are ``pdf_pages_unrecovered`` (review round 4).
 _DEGRADED_FIELDS = (
     STATUS_FAILED,
     STATUS_UNSUPPORTED,
     STATUS_TOO_LARGE,
     "ocr_disabled",
+    "pdf_pages_unrecovered",
     "ocr_capped_pdfs",
     "ocr_pages_skipped",
     "warnings_suppressed",

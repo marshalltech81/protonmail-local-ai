@@ -20,7 +20,7 @@ import re
 import secrets
 from collections import Counter
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -904,6 +904,13 @@ def _assemble_body(nodes: list[_BodyNode]) -> str:
     parent: one backward pass settles each alternative's and related's
     choice, one forward pass keeps the parts every such container above
     them chose."""
+    kept = _kept_nodes(nodes)
+    return "\n\n".join(node.text for i, node in enumerate(nodes) if kept[i] and node.text)
+
+
+def _kept_nodes(nodes: list[_BodyNode]) -> list[bool]:
+    """Which of ``nodes`` the body keeps, by ``_assemble_body``'s rule
+    (it updates each container's choice and flags in place)."""
     for i in range(len(nodes) - 1, -1, -1):
         node = nodes[i]
         if node.alternative:
@@ -924,7 +931,21 @@ def _assemble_body(nodes: list[_BodyNode]) -> str:
         kept[i] = parent < 0 or (
             kept[parent] and (not _selects(nodes[parent]) or nodes[parent].chosen == i)
         )
-    return "\n\n".join(node.text for i, node in enumerate(nodes) if kept[i] and node.text)
+    return kept
+
+
+def _capped_parts_lost(nodes: list[_BodyNode], capped: list[tuple[int, bool]]) -> int:
+    """How many of the ``capped`` text parts (node index, plain or not)
+    could have contributed to the body: those the body would keep had
+    each carried text (review round 4 on #884). An alternative after the
+    one the body selects is not a loss. Works on a copy, so the body
+    already assembled is not affected; linear in the nodes."""
+    hypothetical = [replace(node, children=list(node.children)) for node in nodes]
+    for index, plain in capped:
+        hypothetical[index].has_text = True
+        hypothetical[index].has_plain = plain
+    kept = _kept_nodes(hypothetical)
+    return sum(1 for index, _ in capped if kept[index])
 
 
 def _extract_body_and_attachments(
@@ -938,6 +959,8 @@ def _extract_body_and_attachments(
     attachments: list[Attachment] = []
     nodes: list[_BodyNode] = []
     text_parts = 0
+    # Text parts past MAX_BODY_TEXT_PARTS: (node index, plain or not).
+    capped: list[tuple[int, bool]] = []
 
     # Depth-first in document order, like ``msg.walk()``, but nothing
     # inside an attachment is a candidate for the body: an attached
@@ -1029,7 +1052,8 @@ def _extract_body_and_attachments(
         ):
             continue
         if text_parts >= MAX_BODY_TEXT_PARTS:
-            caps["body_parts"] += 1
+            # Counted below, once the body's selection is known.
+            capped.append((len(nodes) - 1, not is_html))
             continue
         text_parts += 1
         text = _safe_decode(_decoded_payload(part), part.get_content_charset() or "utf-8")
@@ -1037,7 +1061,12 @@ def _extract_body_and_attachments(
         node.has_text = bool(node.text)
         node.has_plain = node.has_text and not is_html
 
-    return _assemble_body(nodes), attachments
+    body = _assemble_body(nodes)
+    if capped:
+        lost = _capped_parts_lost(nodes, capped)
+        if lost:
+            caps["body_parts"] += lost
+    return body, attachments
 
 
 def _safe_decode(payload: bytes, charset: str) -> str:

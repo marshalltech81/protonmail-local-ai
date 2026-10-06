@@ -1311,6 +1311,7 @@ class TestAttachmentOutcomeCounts:
         return dict.fromkeys(attachment_indexing.ATTACHMENT_OUTCOMES, 0) | {
             "cached": 0,
             "pdf_pages_failed": 0,
+            "pdf_pages_unrecovered": 0,
             "ocr_capped_pdfs": 0,
             "ocr_pages_skipped": 0,
             "warnings_suppressed": 0,
@@ -1407,13 +1408,14 @@ class TestAttachmentOutcomeCounts:
             "ocr_disabled": 2,
             "cached": 4,
             "pdf_pages_failed": 5,
+            "pdf_pages_unrecovered": 9,
             "ocr_capped_pdfs": 7,
             "ocr_pages_skipped": 8,
             "warnings_suppressed": 6,
         }
         assert attachment_indexing.format_attachment_outcomes(counts) == (
             "attachments n=6 success=3 failed=1 unsupported=0 too_large=0 "
-            "ocr_disabled=2 empty=0 cached=4 pdf_pages_failed=5 ocr_capped_pdfs=7 "
+            "ocr_disabled=2 empty=0 cached=4 pdf_pages_failed=5 pdf_pages_unrecovered=9 ocr_capped_pdfs=7 "
             "ocr_pages_skipped=8 warnings_suppressed=6"
         )
 
@@ -1430,6 +1432,7 @@ class TestAttachmentOutcomeCounts:
             # A page pypdf cannot read may still be OCR-recovered: a
             # diagnostic count, not lost text (review round 3).
             ("pdf_pages_failed", False),
+            ("pdf_pages_unrecovered", True),
             ("ocr_capped_pdfs", True),
             ("ocr_pages_skipped", True),
             ("warnings_suppressed", True),
@@ -1470,7 +1473,11 @@ class TestAttachmentOutcomeCounts:
         assert plan.extraction_to_persist is not None
         assert plan.extraction_to_persist.error == SCANNED_PDF_OCR_DISABLED_ERROR
         self._commit(plan)
-        assert self._drain() == self._zero() | {"ocr_disabled": 1, "pdf_pages_failed": 2}
+        assert self._drain() == self._zero() | {
+            "ocr_disabled": 1,
+            "pdf_pages_failed": 2,
+            "pdf_pages_unrecovered": 2,
+        }
         for marker in ("SYNTHETIC_PYPDF_MARKER", "SYNTHETIC_FILENAME_MARKER"):
             assert marker not in caplog.text
 

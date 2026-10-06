@@ -3714,7 +3714,7 @@ class TestRequeueOcrDisabledExtractions:
                 "WARNING",
                 "attachments n=2 success=0 failed=0 unsupported=0 too_large=0 "
                 "ocr_disabled=2 empty=0 cached=0 pdf_pages_failed=0 "
-                "ocr_capped_pdfs=0 ocr_pages_skipped=0 warnings_suppressed=0",
+                "pdf_pages_unrecovered=0 ocr_capped_pdfs=0 ocr_pages_skipped=0 warnings_suppressed=0",
             )
         ]
         assert "SYNTHETIC_FILENAME_MARKER" not in caplog.text
@@ -7673,3 +7673,57 @@ class TestAttachmentSummaryCadence:
         attachment_indexing.attachment_outcomes.drain()
         main._log_attachment_outcomes()
         assert caplog.records == []
+
+
+class TestAttachmentSummaryDebounce:
+    """Review round 4 on #884 (security): the steady-state loop flushes
+    the attachments line at the end of every short drain, so mail spaced
+    to arrive one message per drain produced one line per message. At
+    most one line is logged per ``OUTCOMES_LOG_MIN_INTERVAL_SECS``;
+    counts held back carry over to the next line, so none are lost."""
+
+    def test_short_drains_inside_the_interval_give_one_line(self, monkeypatch, caplog):
+        from src import attachment_indexing
+        from src.extractors import STATUS_UNSUPPORTED
+
+        caplog.set_level("INFO")
+        attachment_indexing.attachment_outcomes.drain()
+        clock = {"now": 1000.0}
+        monkeypatch.setattr(main, "_monotonic", lambda: clock["now"])
+
+        def lines():
+            return [
+                r.getMessage()
+                for r in caplog.records
+                if r.getMessage().startswith("attachments n=")
+            ]
+
+        for _ in range(10):
+            attachment_indexing.attachment_outcomes.record(STATUS_UNSUPPORTED, None, cached=False)
+            main._log_attachment_outcomes()
+            clock["now"] += 5.0
+        assert len(lines()) == 1
+        assert " unsupported=1 " in lines()[0]
+        # The next line, once the interval has passed, carries the nine
+        # counts held back.
+        clock["now"] = 1000.0 + main.OUTCOMES_LOG_MIN_INTERVAL_SECS
+        main._log_attachment_outcomes()
+        assert len(lines()) == 2
+        assert " unsupported=9 " in lines()[1]
+        # Nothing left over.
+        assert attachment_indexing.attachment_outcomes.drain()["unsupported"] == 0
+
+    def test_force_logs_inside_the_interval(self, monkeypatch, caplog):
+        """The initial index's final summary is logged whatever the
+        interval, so the scan's counts are not held into steady state."""
+        from src import attachment_indexing
+        from src.extractors import STATUS_SUCCESS
+
+        caplog.set_level("INFO")
+        attachment_indexing.attachment_outcomes.drain()
+        monkeypatch.setattr(main, "_monotonic", lambda: 1000.0)
+        for _ in range(2):
+            attachment_indexing.attachment_outcomes.record(STATUS_SUCCESS, None, cached=False)
+            main._log_attachment_outcomes(force=True)
+        lines = [r for r in caplog.records if r.getMessage().startswith("attachments n=")]
+        assert len(lines) == 2

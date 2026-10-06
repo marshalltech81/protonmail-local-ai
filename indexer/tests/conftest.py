@@ -2,6 +2,7 @@
 Shared fixtures for indexer tests.
 """
 
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -97,6 +98,10 @@ def _reset_extractor_warning_budget(monkeypatch):
 
     monkeypatch.setattr(extractors, "_warning_window", None)
     monkeypatch.setattr(extractors, "_warnings_in_window", 0)
+    # The attachments-line debounce is process-wide too.
+    main = sys.modules.get("src.main")
+    if main is not None:
+        monkeypatch.setattr(main, "_last_outcomes_log", None)
 
 
 @pytest.fixture

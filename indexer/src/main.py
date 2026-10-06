@@ -723,17 +723,35 @@ TIMING_LOG_EVERY = 25
 # arrives (review round 1 on #884).
 SUMMARY_MAX_INTERVAL_SECS = 300.0
 
+# At most one attachments line per this many seconds (review round 4 on
+# #884): a drain ending every message would otherwise log one line per
+# message. Counts held back carry over to the next line.
+OUTCOMES_LOG_MIN_INTERVAL_SECS = 60.0
+_last_outcomes_log: float | None = None
+_monotonic = time.monotonic
 
-def _log_attachment_outcomes() -> None:
-    """Log the attachments committed since the last call by outcome, and
+
+def _log_attachment_outcomes(*, force: bool = False) -> None:
+    """Log the attachments committed since the last line by outcome, and
     reset the counts; nothing when there were none. Logged with each
     timing summary, so failed or skipped extractions are visible without
     a line per attachment (#871). WARNING when any count means text is
-    missing from search, else INFO."""
+    missing from search, else INFO. Within
+    ``OUTCOMES_LOG_MIN_INTERVAL_SECS`` of the last line nothing is logged
+    or reset unless ``force`` (the initial index's final summary)."""
+    global _last_outcomes_log
+    now = _monotonic()
+    if (
+        not force
+        and _last_outcomes_log is not None
+        and now - _last_outcomes_log < OUTCOMES_LOG_MIN_INTERVAL_SECS
+    ):
+        return
     counts = attachment_outcomes.drain()
     line = format_attachment_outcomes(counts)
     if not line:
         return
+    _last_outcomes_log = now
     if attachment_outcomes_degraded(counts):
         log.warning(line)
     else:
@@ -2178,7 +2196,7 @@ def initial_index(
     final_line = format_summary(timing_aggregator.summary())
     if final_line:
         log.info(final_line)
-    _log_attachment_outcomes()
+    _log_attachment_outcomes(force=True)
     log.info("Initial index complete: %d job(s) processed.", processed)
 
 

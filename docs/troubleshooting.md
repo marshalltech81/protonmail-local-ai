@@ -1003,21 +1003,24 @@ only, never filenames or text (`make logs`):
   many bad or long attachments cannot flood the log. The rest are
   counted as `warnings_suppressed` in the attachments line below.
 - `attachments n=<total> success= failed= unsupported= too_large=
-  ocr_disabled= empty= cached= pdf_pages_failed= ocr_capped_pdfs=
-  ocr_pages_skipped= warnings_suppressed=`: the attachments of the
-  messages committed since the previous line, by outcome. It is a
-  WARNING when any of `failed`, `unsupported`, `too_large`,
-  `ocr_disabled`, `ocr_capped_pdfs`, `ocr_pages_skipped` or
+  ocr_disabled= empty= cached= pdf_pages_failed=
+  pdf_pages_unrecovered= ocr_capped_pdfs= ocr_pages_skipped=
+  warnings_suppressed=`: the attachments of the messages committed
+  since the previous line, by outcome. It is a WARNING when any of
+  `failed`, `unsupported`, `too_large`, `ocr_disabled`,
+  `pdf_pages_unrecovered`, `ocr_capped_pdfs`, `ocr_pages_skipped` or
   `warnings_suppressed` is above zero (some attachment text is not
   searchable), and INFO otherwise. `pdf_pages_failed` alone does not
   make it a WARNING (see below).
   - When it is logged: during the initial index, with the timing summary
     once at least 25 messages have been drained since the last one (each
     batch, at the default `INITIAL_INDEX_BATCH_SIZE=50`), and once at
-    the end. Afterwards, with
-    the steady-state timing summary: every 25 messages, when a drain
-    leaves no more ready jobs (the end of a burst), and at least every
-    5 minutes while counts are pending.
+    the end. Afterwards, with the steady-state timing summary: every 25
+    messages, when a drain leaves no more ready jobs (the end of a
+    burst), and at least every 5 minutes while counts are pending. At
+    most one line is logged per 60 seconds (the initial index's final
+    line excepted); counts held back are carried into the next line,
+    so none are lost, and the 5-minute flush still applies.
   - What the outcomes mean: `cached` counts attachments served from the
     extraction cache instead of extracted again. `unsupported` is a type
     no extractor reads, `too_large` is over
@@ -1029,14 +1032,19 @@ only, never filenames or text (`make logs`):
     on, such a page is OCR'd (within `INDEXER_OCR_MAX_PAGES`) and its
     text may be recovered, so the count alone does not mean text is
     missing. A steady rise across ordinary PDFs points at a pypdf
-    regression.
+    regression. `pdf_pages_unrecovered` counts those pages whose text
+    was never recovered: OCR is off, the PDF had enough digital text on
+    its other pages to return before OCR, OCR read no text from the
+    page, or the OCR cap left it unread. These pages are missing from
+    search.
     `ocr_capped_pdfs` counts scanned PDFs whose OCR stopped at
     `INDEXER_OCR_MAX_PAGES`, and `ocr_pages_skipped` the scanned pages
     they left unread.
   - How retries count: the outcomes are counted once per committed
     message, so a message retried after an embedder outage counts once.
-    The extraction counts (`pdf_pages_failed`, `ocr_capped_pdfs`,
-    `ocr_pages_skipped`, `warnings_suppressed`) and the per-attachment
+    The extraction counts (`pdf_pages_failed`,
+    `pdf_pages_unrecovered`, `ocr_capped_pdfs`, `ocr_pages_skipped`,
+    `warnings_suppressed`) and the per-attachment
     WARNINGs count every extraction attempt, retries included.
 
 The parser also caps the work one message can cost. A cap that loses
@@ -1064,7 +1072,7 @@ extractor reads (`.eml`) is not logged.
 | `transport_decode` | A base64 or quoted-printable attached email that does not decode: the attachments inside it are not read |
 | `decoded_bytes` | The same, past 64 MB of decoded attached emails per message |
 | `container_serialize` | A container the serializer refuses (a malformed header), when its payload would be extracted |
-| `body_parts` | Text parts past the 200th, left out of the body |
+| `body_parts` | Text parts past the 200th, left out of the body: only those that could have been part of it, so an alternative rendering after the one the body uses is not counted |
 | `address_header` | Every recipient of a `From`, `To` or `Cc` header over 256,000 characters |
 | `address_element` | One address-list entry over 128,000 characters |
 | `address_length` | One address over 998 characters |

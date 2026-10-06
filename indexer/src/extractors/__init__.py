@@ -88,6 +88,9 @@ ZIP_MAX_UNCOMPRESSED_BYTES = 200 * 1024 * 1024
 # * ``pdf_pages_failed``: PDF pages whose text layer pypdf could not read.
 #   The PDF extractor skips such a page (one DEBUG line each) and counts
 #   it here, so a parser regression is visible without a line per page.
+# * ``pdf_pages_unrecovered``: those of them whose text was never
+#   recovered (OCR off, a digital return before OCR, OCR reading nothing,
+#   or the OCR cap leaving the page unread).
 # * ``ocr_capped_pdfs`` / ``ocr_pages_skipped``: scanned PDFs whose OCR
 #   stopped at ``max_ocr_pages``, and the scanned pages left unread.
 # * ``warnings_suppressed``: per-attachment WARNINGs (failed extraction,
@@ -97,6 +100,7 @@ ZIP_MAX_UNCOMPRESSED_BYTES = 200 * 1024 * 1024
 # A few integers and a window start: the state stays bounded.
 _counts_lock = Lock()
 _pdf_pages_failed = 0
+_pdf_pages_unrecovered = 0
 _ocr_capped_pdfs = 0
 _ocr_pages_skipped = 0
 _warnings_suppressed = 0
@@ -118,6 +122,13 @@ def note_pdf_page_failed() -> None:
         _pdf_pages_failed += 1
 
 
+def note_pdf_pages_unrecovered(pages: int) -> None:
+    """Count PDF pages pypdf could not read whose text OCR never recovered."""
+    global _pdf_pages_unrecovered
+    with _counts_lock:
+        _pdf_pages_unrecovered += pages
+
+
 def note_ocr_capped(pages_skipped: int) -> None:
     """Count one PDF whose OCR stopped at the page cap, and its unread
     scanned pages."""
@@ -129,15 +140,18 @@ def note_ocr_capped(pages_skipped: int) -> None:
 
 def drain_extractor_counts() -> dict[str, int]:
     """Return the counts above since the last call, and reset them."""
-    global _pdf_pages_failed, _ocr_capped_pdfs, _ocr_pages_skipped, _warnings_suppressed
+    global _pdf_pages_failed, _pdf_pages_unrecovered, _ocr_capped_pdfs
+    global _ocr_pages_skipped, _warnings_suppressed
     with _counts_lock:
         counts = {
             "pdf_pages_failed": _pdf_pages_failed,
+            "pdf_pages_unrecovered": _pdf_pages_unrecovered,
             "ocr_capped_pdfs": _ocr_capped_pdfs,
             "ocr_pages_skipped": _ocr_pages_skipped,
             "warnings_suppressed": _warnings_suppressed,
         }
-        _pdf_pages_failed = _ocr_capped_pdfs = _ocr_pages_skipped = _warnings_suppressed = 0
+        _pdf_pages_failed = _pdf_pages_unrecovered = _ocr_capped_pdfs = 0
+        _ocr_pages_skipped = _warnings_suppressed = 0
     return counts
 
 
