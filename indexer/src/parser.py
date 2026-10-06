@@ -27,7 +27,7 @@ from typing import Any
 
 import html2text
 
-from .extractors import resolved_extractor_module
+from .extractors import note_parser_caps_message, resolved_extractor_module, warn_rate_limited
 
 log = logging.getLogger("indexer.parser")
 
@@ -438,8 +438,12 @@ def parse_email(path: Path, maildir_root: Path | None = None) -> Message | None:
     if caps:
         # Fixed names and counts only, with the Maildir path: the
         # message is indexed with this content missing (#872), so
-        # WARNING.
-        log.warning(
+        # WARNING. Rate limited with the extractors' per-item lines, and
+        # every such message counted for the attachments aggregate
+        # (review round 5 on #884).
+        note_parser_caps_message()
+        warn_rate_limited(
+            log,
             "parser work caps dropped content from %s: %s",
             path,
             ",".join(f"{name}={caps[name]}" for name in PARSE_CAPS if caps[name]),

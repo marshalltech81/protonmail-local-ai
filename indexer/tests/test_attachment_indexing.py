@@ -1314,6 +1314,7 @@ class TestAttachmentOutcomeCounts:
             "pdf_pages_unrecovered": 0,
             "ocr_capped_pdfs": 0,
             "ocr_pages_skipped": 0,
+            "parser_caps_messages": 0,
             "warnings_suppressed": 0,
         }
 
@@ -1411,12 +1412,13 @@ class TestAttachmentOutcomeCounts:
             "pdf_pages_unrecovered": 9,
             "ocr_capped_pdfs": 7,
             "ocr_pages_skipped": 8,
+            "parser_caps_messages": 3,
             "warnings_suppressed": 6,
         }
         assert attachment_indexing.format_attachment_outcomes(counts) == (
             "attachments n=6 success=3 failed=1 unsupported=0 too_large=0 "
             "ocr_disabled=2 empty=0 cached=4 pdf_pages_failed=5 pdf_pages_unrecovered=9 ocr_capped_pdfs=7 "
-            "ocr_pages_skipped=8 warnings_suppressed=6"
+            "ocr_pages_skipped=8 parser_caps_messages=3 warnings_suppressed=6"
         )
 
     @pytest.mark.parametrize(
@@ -1435,6 +1437,7 @@ class TestAttachmentOutcomeCounts:
             ("pdf_pages_unrecovered", True),
             ("ocr_capped_pdfs", True),
             ("ocr_pages_skipped", True),
+            ("parser_caps_messages", True),
             ("warnings_suppressed", True),
         ],
     )

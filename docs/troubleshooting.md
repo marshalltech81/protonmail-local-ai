@@ -998,18 +998,19 @@ only, never filenames or text (`make logs`):
   same PDF is served from the extraction cache and reports a plain
   `success`, with no cap line and no `ocr_capped_pdfs` count, although
   the cached text still lacks the unread pages.
-- These per-attachment WARNINGs (failed extractions and OCR caps
-  together) are capped at 20 per 5 minutes, so one message carrying
-  many bad or long attachments cannot flood the log. The rest are
-  counted as `warnings_suppressed` in the attachments line below.
+- These per-item WARNINGs (failed extractions, OCR caps and the
+  parser-cap line described below, together) are capped at 20 per 5
+  minutes, so a stream of crafted mail cannot flood the log. The rest
+  are counted as `warnings_suppressed` in the attachments line below.
 - `attachments n=<total> success= failed= unsupported= too_large=
   ocr_disabled= empty= cached= pdf_pages_failed=
   pdf_pages_unrecovered= ocr_capped_pdfs= ocr_pages_skipped=
-  warnings_suppressed=`: the attachments of the messages committed
-  since the previous line, by outcome. It is a WARNING when any of
-  `failed`, `unsupported`, `too_large`, `ocr_disabled`,
-  `pdf_pages_unrecovered`, `ocr_capped_pdfs`, `ocr_pages_skipped` or
-  `warnings_suppressed` is above zero (some attachment text is not
+  parser_caps_messages= warnings_suppressed=`: the attachments of the
+  messages committed since the previous line, by outcome. It is a
+  WARNING when any of `failed`, `unsupported`, `too_large`,
+  `ocr_disabled`, `pdf_pages_unrecovered`, `ocr_capped_pdfs`,
+  `ocr_pages_skipped`, `parser_caps_messages` or `warnings_suppressed`
+  is above zero (some attachment text is not
   searchable), and INFO otherwise. `pdf_pages_failed` alone does not
   make it a WARNING (see below).
   - When it is logged: during the initial index, with the timing summary
@@ -1045,13 +1046,18 @@ only, never filenames or text (`make logs`):
     The extraction counts (`pdf_pages_failed`,
     `pdf_pages_unrecovered`, `ocr_capped_pdfs`, `ocr_pages_skipped`,
     `warnings_suppressed`) and the per-attachment
-    WARNINGs count every extraction attempt, retries included.
+    WARNINGs count every extraction attempt, retries included, and
+    `parser_caps_messages` every parse of a capped message (see
+    below).
 
 The parser also caps the work one message can cost. A cap that loses
 content logs one WARNING line for that message, with its Maildir path
 and the caps that fired, by name and count:
 `parser work caps dropped content from <path>: body_parts=5,address_header=1`.
-The message is still indexed, without that content.
+The message is still indexed, without that content. These lines share
+the 20-per-5-minutes limit above. Every capped message, logged or not,
+is counted as `parser_caps_messages` in the attachments line, which
+it makes a WARNING.
 
 An attached email (or another container part) counts only when
 something searchable is lost:

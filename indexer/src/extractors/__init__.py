@@ -93,8 +93,11 @@ ZIP_MAX_UNCOMPRESSED_BYTES = 200 * 1024 * 1024
 #   or the OCR cap leaving the page unread).
 # * ``ocr_capped_pdfs`` / ``ocr_pages_skipped``: scanned PDFs whose OCR
 #   stopped at ``max_ocr_pages``, and the scanned pages left unread.
-# * ``warnings_suppressed``: per-attachment WARNINGs (failed extraction,
-#   OCR cap) that the rate limit below withheld.
+# * ``parser_caps_messages``: messages a parser work cap cut (#872),
+#   counted here so the parser's per-message line can be rate limited
+#   without losing a message (review round 5 on #884).
+# * ``warnings_suppressed``: per-item WARNINGs (failed extraction, OCR
+#   cap, parser cap) that the rate limit below withheld.
 #
 # Kept in this always-imported module because ``pdf`` is imported lazily.
 # A few integers and a window start: the state stays bounded.
@@ -103,6 +106,7 @@ _pdf_pages_failed = 0
 _pdf_pages_unrecovered = 0
 _ocr_capped_pdfs = 0
 _ocr_pages_skipped = 0
+_parser_caps_messages = 0
 _warnings_suppressed = 0
 
 # At most this many per-attachment WARNINGs per window, shared by every
@@ -138,20 +142,28 @@ def note_ocr_capped(pages_skipped: int) -> None:
         _ocr_pages_skipped += pages_skipped
 
 
+def note_parser_caps_message() -> None:
+    """Count one message a parser work cap cut."""
+    global _parser_caps_messages
+    with _counts_lock:
+        _parser_caps_messages += 1
+
+
 def drain_extractor_counts() -> dict[str, int]:
     """Return the counts above since the last call, and reset them."""
     global _pdf_pages_failed, _pdf_pages_unrecovered, _ocr_capped_pdfs
-    global _ocr_pages_skipped, _warnings_suppressed
+    global _ocr_pages_skipped, _parser_caps_messages, _warnings_suppressed
     with _counts_lock:
         counts = {
             "pdf_pages_failed": _pdf_pages_failed,
             "pdf_pages_unrecovered": _pdf_pages_unrecovered,
             "ocr_capped_pdfs": _ocr_capped_pdfs,
             "ocr_pages_skipped": _ocr_pages_skipped,
+            "parser_caps_messages": _parser_caps_messages,
             "warnings_suppressed": _warnings_suppressed,
         }
         _pdf_pages_failed = _pdf_pages_unrecovered = _ocr_capped_pdfs = 0
-        _ocr_pages_skipped = _warnings_suppressed = 0
+        _ocr_pages_skipped = _parser_caps_messages = _warnings_suppressed = 0
     return counts
 
 

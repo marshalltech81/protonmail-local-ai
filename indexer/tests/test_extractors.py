@@ -3184,6 +3184,7 @@ class TestPdfPageLevelOcr:
             "pdf_pages_unrecovered": 0,
             "ocr_capped_pdfs": 5,
             "ocr_pages_skipped": 5 * 25,
+            "parser_caps_messages": 0,
             "warnings_suppressed": 3,
         }
 
@@ -4048,6 +4049,7 @@ class TestMailContentStaysOutOfLogsAndErrors:
             "pdf_pages_unrecovered": 0,
             "ocr_capped_pdfs": 0,
             "ocr_pages_skipped": 0,
+            "parser_caps_messages": 0,
             "warnings_suppressed": 0,
         }
         assert extractors.drain_extractor_counts()["pdf_pages_failed"] == 0

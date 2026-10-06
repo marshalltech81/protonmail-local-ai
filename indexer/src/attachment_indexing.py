@@ -123,6 +123,7 @@ _SUMMARY_FIELDS = (
     "pdf_pages_unrecovered",
     "ocr_capped_pdfs",
     "ocr_pages_skipped",
+    "parser_caps_messages",
     "warnings_suppressed",
 )
 # Counts that mean attachment text is missing from search: the line is
@@ -138,6 +139,7 @@ _DEGRADED_FIELDS = (
     "pdf_pages_unrecovered",
     "ocr_capped_pdfs",
     "ocr_pages_skipped",
+    "parser_caps_messages",
     "warnings_suppressed",
 )
 

@@ -3725,3 +3725,42 @@ def test_body_parts_counts_only_parts_that_could_contribute(tmp_path, caplog, sh
         [f"parser work caps dropped content from {path}: body_parts={count}"] if count else []
     )
     assert lines == expected
+
+
+def test_parser_cap_lines_are_rate_limited_and_counted(tmp_path, monkeypatch, caplog):
+    """Review round 5 on #884 (security): every capped message logged its
+    own WARNING, so a stream of crafted messages could flood the log. The
+    line shares the extractor warning budget; every capped message is
+    counted as ``parser_caps_messages`` for the attachments aggregate,
+    and each withheld line as ``warnings_suppressed``. Parse results are
+    unchanged."""
+    from src import extractors
+
+    caplog.set_level("INFO")
+    monkeypatch.setattr(extractors, "_WARNINGS_PER_WINDOW", 2)
+    extractors.drain_extractor_counts()
+    raw, _, _, pinned = _CAP_SHAPES["body_parts"]
+    folder = tmp_path / "INBOX" / "cur"
+    folder.mkdir(parents=True)
+    for i in range(5):
+        path = folder / f"caps{i}.eml"
+        path.write_bytes(raw)
+        msg = parse_email(path)
+        assert msg is not None and pinned(msg)
+    lines = [r for r in caplog.records if "parser work caps" in r.getMessage()]
+    assert [r.levelname for r in lines] == ["WARNING", "WARNING"]
+    counts = extractors.drain_extractor_counts()
+    assert counts["parser_caps_messages"] == 5
+    assert counts["warnings_suppressed"] == 3
+
+
+def test_message_within_every_cap_is_not_counted(tmp_path):
+    from src import extractors
+
+    extractors.drain_extractor_counts()
+    raw = _with_attachment(b"Content-Type: message/rfc822\r\n", _INNER_EMAIL)
+    folder = tmp_path / "INBOX" / "cur"
+    folder.mkdir(parents=True)
+    (folder / "ok.eml").write_bytes(raw)
+    assert parse_email(folder / "ok.eml") is not None
+    assert extractors.drain_extractor_counts()["parser_caps_messages"] == 0
