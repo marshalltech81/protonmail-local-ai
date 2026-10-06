@@ -45,6 +45,7 @@ from tests.answer_eval.cases import (
     message_id_of,
     thread_id_of,
 )
+from tests.answer_eval.cli_judge import CliJudgeError
 from tests.answer_eval.config import ConfigError, LayerConfig, load_layer
 from tests.answer_eval.graders import FAIL, NA, PASS, attribute, budget_omitted_facts, grade_run
 from tests.answer_eval.harness import evaluate
@@ -2066,6 +2067,37 @@ class TestCostGuard:
         assert "judge" in str(raised.value)
         assert raised.value.__cause__ is None and raised.value.__suppress_context__
         assert MARKER not in caplog.text + str(raised.value)
+
+    def test_cli_judge_usage_limit_stops_the_run(self, chunked_db):
+        """Codex review round 1 on #866: a subscription judge's usage-limit
+        refusal was recorded per case and the CLI launched again for every
+        remaining case."""
+        inference = ScriptedClient("14,200 [E1].")
+        judge = ScriptedClient(CliJudgeError("judge_cli_usage_limit", "usage limit reached"))
+        with pytest.raises(ProviderBillingError) as raised:
+            asyncio.run(
+                evaluate(
+                    _cases(3),
+                    _ctx(chunked_db, inference),
+                    judge_client=judge,
+                    judge_config=_judge_config(mode="claude-cli"),
+                )
+            )
+        assert len(inference.calls) == 1 and len(judge.calls) == 1
+        assert str(raised.value) == ProviderBillingError("judge").args[0]
+        assert raised.value.__cause__ is None and raised.value.__suppress_context__
+
+    def test_other_cli_judge_errors_are_still_recorded_per_case(self, chunked_db):
+        judge = ScriptedClient(CliJudgeError("judge_cli_logged_out", "not logged in"))
+        records, _ = asyncio.run(
+            evaluate(
+                _cases(2),
+                _ctx(chunked_db, ScriptedClient("14,200 [E1].")),
+                judge_client=judge,
+                judge_config=_judge_config(mode="claude-cli"),
+            )
+        )
+        assert [r["judge"]["error"] for r in records] == ["judge_cli_logged_out"] * 2
 
     def test_other_provider_errors_are_still_recorded_per_case(self, chunked_db):
         inference = ScriptedClient(_sdk_error("anthropic", 400, "invalid_request_error"))

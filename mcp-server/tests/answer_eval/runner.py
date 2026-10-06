@@ -62,13 +62,14 @@ class NonSyntheticIndexError(RuntimeError):
 
 
 class ProviderBillingError(RuntimeError):
-    """A provider refused a call for billing or credit (#839): every later
-    call would fail the same way, so the run stops. Fixed text only."""
+    """A provider refused a call for billing, credit or a subscription
+    usage limit (#839): every later call would fail the same way, so the
+    run stops. Fixed text only."""
 
     def __init__(self, layer: str) -> None:
         super().__init__(
-            f"the {layer} provider refused a call for billing or credit (out of credit or "
-            "quota); the run stopped and no report was written"
+            f"the {layer} provider refused a call for billing, credit or a usage limit; "
+            "the run stopped and no report was written"
         )
 
 

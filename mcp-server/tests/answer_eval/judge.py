@@ -440,8 +440,9 @@ async def judge_answer(
     rejected, so the judge cannot credit a passage the answer cited for
     something else. ``coverage_note`` is the tool's own omission notice
     and ``omitted_facts`` the facts it may excuse (``build_judge_prompt``).
-    A billing or credit refusal raises ``ProviderBillingError`` to stop
-    the run instead of becoming an outcome (#839).
+    A billing or credit refusal, or a CLI judge's subscription usage
+    limit, raises ``ProviderBillingError`` to stop the run instead of
+    becoming an outcome (#839).
     """
     prompt = build_judge_prompt(
         case, answer, passages, [s.text for s in statements], coverage_note, omitted_facts
@@ -462,6 +463,10 @@ async def judge_answer(
     except InferenceTruncatedError:
         outcome.error = "judge_truncated"
     except (JudgeError, CliJudgeError) as e:
+        if e.category == "judge_cli_usage_limit":
+            # The subscription refused further use: every later judge
+            # call would fail too, so stop as for billing (#839).
+            raise ProviderBillingError("judge") from None
         outcome.error, outcome.detail = e.category, e.detail
     except Exception as e:
         if is_billing_error(e):

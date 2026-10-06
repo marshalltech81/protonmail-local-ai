@@ -231,6 +231,31 @@ class TestSharedHybridResults:
         assert db.searches == ["first", "second"]
         assert "Hit@10:          50.00% (1/2)" in capsys.readouterr().out
 
+    @pytest.mark.parametrize("fails", ["embed", "search"])
+    def test_a_failed_attempt_is_replayed_without_another_call(self, fails):
+        """Codex review round 1 on #866: a failed embed or search was
+        retried by the summary, a second provider call for the query."""
+        q = eval_harness.EvalQuery(id="q1", search_query="first", evidence_groups=[["t1"]])
+        calls: list[str] = []
+
+        class _Failing:
+            def hybrid_search(self, **_kwargs: object) -> list:
+                calls.append("search")
+                raise RuntimeError("search failed")
+
+        def embed(_text: str) -> list[float]:
+            calls.append("embed")
+            if fails == "embed":
+                raise RuntimeError("embed failed")
+            return [0.0]
+
+        hybrid = _hybrid(_Failing(), embed)
+        for _ in range(2):  # the per-query test, then the summary
+            with pytest.raises(RuntimeError, match=f"{fails} failed"):
+                hybrid(q)
+
+        assert calls == (["embed"] if fails == "embed" else ["embed", "search"])
+
     def test_results_are_not_shared_between_runs(self):
         """Each run builds its own ``HybridResults``; nothing persists."""
         q = eval_harness.EvalQuery(id="q1", search_query="first", evidence_groups=[["t1"]])

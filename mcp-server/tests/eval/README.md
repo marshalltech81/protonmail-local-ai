@@ -78,7 +78,9 @@ Without `MCP_EVAL_DB`, every test skips.
 
 Each query with expected evidence costs one embed call and one hybrid
 search per run: the per-query hybrid test and the summary share the
-results in memory (#840). Nothing is cached between runs.
+results in memory (#840). A failed embed or search is shared too: the
+summary raises the same error without calling again. Nothing is cached
+between runs.
 
 ## Comparing two configurations
 
@@ -486,9 +488,11 @@ the line prints twice: once for the argument check, once for the run.
   provider is called. `make eval-answers EVAL_MAX_CALLS=80` or an
   exported variable both work. Unset means no cap.
 - A provider's billing or credit refusal stops the run at once with
-  `answer evaluation: the answering provider refused a call for billing
-  or credit ...` (or `the judge provider ...`) and exit 2, and no report
-  is written, rather than recording every remaining case as an error.
+  `answer evaluation: the answering provider refused a call for
+  billing, credit or a usage limit ...` (or `the judge provider ...`)
+  and exit 2, and no report is written, rather than recording every
+  remaining case as an error. A subscription judge's usage-limit stop
+  (`judge_cli_usage_limit`, below) stops the run the same way.
   It is matched by the SDK's status error, HTTP status and error type,
   never by the provider's message text: Anthropic 402 `billing_error`,
   and OpenAI-compatible 429 `insufficient_quota`. Anthropic has also
@@ -540,8 +544,10 @@ the line prints twice: once for the argument check, once for the run.
   provider switches, reasoning settings such as
   `CLAUDE_CODE_EFFORT_LEVEL` and telemetry exporters (`OTEL_*`) never
   reach a judge call. A
-  logged-out CLI and a usage-limit stop are the judge errors
-  `judge_cli_logged_out` and `judge_cli_usage_limit`; a CLI missing from
+  logged-out CLI is the judge error `judge_cli_logged_out`; a
+  usage-limit stop (`judge_cli_usage_limit`) stops the whole run, as a
+  billing refusal does (see Cost guard), since every later call would
+  hit the same limit; a CLI missing from
   `PATH` or not logged in with a subscription is a configuration error.
   The judge identity records `cli` and `cli_version` (and, for Claude,
   the `served_models` the CLI reports), so a different CLI, version or

@@ -204,24 +204,32 @@ class HybridResults:
     """Each query's top-10 hybrid results, computed once per run (#840).
 
     The per-query hybrid test and ``test_eval_summary`` both need them;
-    sharing them in memory halves the embed calls and searches. Nothing
-    is written anywhere: a new run starts empty.
+    sharing them in memory halves the embed calls and searches. A failed
+    embed or search is kept too and raised again, so the summary does
+    not call the provider a second time for that query. Nothing is
+    written anywhere: a new run starts empty.
     """
 
     def __init__(self, db: Database, embed: Callable[[str], list[float]]) -> None:
         self._db = db
         self._embed = embed
-        self._results: dict[tuple[str, str], list] = {}
+        self._results: dict[tuple[str, str], list | Exception] = {}
 
     def __call__(self, query: EvalQuery) -> list:
         key = (query.id, query.search_query)
         if key not in self._results:
-            self._results[key] = self._db.hybrid_search(
-                query_text=query.search_query,
-                query_embedding=self._embed(query.search_query),
-                limit=10,
-            )
-        return self._results[key]
+            try:
+                self._results[key] = self._db.hybrid_search(
+                    query_text=query.search_query,
+                    query_embedding=self._embed(query.search_query),
+                    limit=10,
+                )
+            except Exception as e:
+                self._results[key] = e
+        result = self._results[key]
+        if isinstance(result, Exception):
+            raise result
+        return result
 
 
 @pytest.fixture(scope="session")
