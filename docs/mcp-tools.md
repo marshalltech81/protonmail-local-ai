@@ -651,8 +651,9 @@ it stays within local-LLM context windows. The bounds differ by tool:
   says which characters it kept. When passages are left out or cut,
   `ask_mailbox` adds a fixed-text note after the email blocks giving
   the counts (never any content). The server also returns that note in
-  the tool's text `content`, separately from the model's answer and its
-  citation checks, stating that the answer may be incomplete. The model
+  the tool's text `content` and structured `coverage_note`, separately
+  from the model's answer and its citation checks, stating that the
+  answer may be incomplete. The model
   is instructed not to repeat prompt-budget caveats in its answer.
 - **`summarize_thread`** works on a single thread and does not use the
   per-chunk path. Its context is the thread's accumulated indexed body
@@ -774,7 +775,8 @@ content as potentially hostile.
 Ask a natural language question about your email.
 Retrieves relevant threads and synthesizes an answer.
 
-The answer prompt asks for only the requested facts, with a citation on
+The answer prompt limits facts to the supplied excerpts and asks for
+only the requested facts, with a citation on
 the opening answer sentence as well as each subsequent statement.
 For a current or final fact, earlier versions are included only when
 the question asks how it changed; unresolved conflicts still cite both
@@ -783,8 +785,8 @@ is asked for one sentence beginning `Not found in the provided emails`,
 then to stop without citations or related claims. These are prompt
 instructions, not guarantees of model behavior; the citation checks
 and one-repair limit remain unchanged. Prompt-budget omissions are
-reported by the server in text `content`, outside the structured
-`answer` and its checked statements.
+reported by the server in text `content` and the additive structured
+`coverage_note` field, outside `answer` and its checked statements.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
@@ -913,6 +915,7 @@ Structured output:
 | Field | Description |
 |---|---|
 | `answer` | The model's answer with its inline labels |
+| `coverage_note` | Server-written notice of prompt-budget omissions/truncation and possible incompleteness; `null` when nothing was left out or cut to fit. This is separate from model prose and citation validation |
 | `citations` | One entry per valid cited label, in first-cited order: `label`, `chunk_id`, `claimant_id`, `message_id`, `thread_id`, `sender`, `sent_at`, `occurred_at`, `source` (`body`, `attachment` or `thread`), `attachment_id`, `attachment_filename`, `char_start`, `char_end` (end of the part shown to the model) |
 | `statements` | The answer cut into statements: `text`, `labels` (the supplied passages it cites) and `status` (`cited`, `unsupported`, `uncertain`, `uncited`, `invalid` for only unknown labels, or `not_checked`) |
 | `quotes` | Each quotation: `text` (cut at 1,000 characters), `statement` (index into `statements`), `status` (`verified`, `misattributed`, `unmatched`, `uncited`, `not_checked`) and `found_in` (labels of the passages it was found in) |
@@ -922,7 +925,8 @@ Structured output:
 
 The prose in `content` is the answer, a `Citations:` list, any
 citation-check lines (fixed text with counts and labels, never the
-model's words), a `Quote check:` count when the answer quotes, and
+model's words), a `Quote check:` count when the answer quotes, any
+server-written `coverage_note`, and
 the `Sources searched:` list. To audit a
 citation, call `get_evidence` with the same question and the
 citation's `thread_id`: the cited `chunk_id` is among the first six

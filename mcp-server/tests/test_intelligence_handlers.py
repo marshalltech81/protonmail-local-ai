@@ -70,6 +70,8 @@ class TestAskMailbox:
         assert len(inference.complete_calls) == 2
         for system, _user in inference.complete_calls:
             prompt = " ".join(system.split())
+            assert "Use only the provided excerpts" in prompt
+            assert "do not add facts from outside them" in prompt
             assert "including the opening answer sentence" in prompt
             assert "earlier versions only when the question asks how it changed" in prompt
             assert "one sentence" in prompt and "then stop" in prompt
@@ -160,10 +162,16 @@ class TestAskMailbox:
         # The server, not model prose checked as factual claims, discloses
         # prompt omissions to the caller even when the model says nothing.
         assert "say that it may be incomplete" not in after_mail
+        assert "The answer may be incomplete." not in after_mail
         assert "Evidence note:" in _text(result)
         assert "were cut short" in _text(result)
         assert "The answer may be incomplete." in _text(result)
         assert "Evidence note:" not in result.structured_content["answer"]
+        note = result.structured_content["coverage_note"]
+        assert note.startswith("Evidence note:")
+        assert "were cut short" in note
+        assert note.endswith("The answer may be incomplete.")
+        assert note in _text(result)
 
     def test_no_disclosure_when_all_evidence_fits(
         self, fake_server, seeded_db, fake_embed, fake_inference
@@ -174,6 +182,7 @@ class TestAskMailbox:
         _system, user = fake_inference.complete_calls[0]
         assert "Evidence note" not in user
         assert "Evidence note" not in _text(result)
+        assert result.structured_content["coverage_note"] is None
 
     def test_db_exception_returns_error(self, fake_server, seeded_db, fake_embed, fake_inference):
         def boom(**_kwargs):

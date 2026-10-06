@@ -1076,7 +1076,8 @@ def _strip_code_fence(text: str) -> str:
 _NOT_FOUND_PREFIX = "Not found in the provided emails"
 
 ASK_SYSTEM = (
-    f"""Answer only what was asked, concisely, using the provided email excerpts.
+    f"""Answer only what was asked, concisely. Use only the provided excerpts;
+do not add facts from outside them.
 Give the current or final fact; include earlier versions only when the
 question asks how it changed. Cite both sides of unresolved conflicts.
 
@@ -2134,7 +2135,7 @@ def _coverage_note(coverage: EvidenceCoverage, *, instruct_model: bool = True) -
         return note + (
             ". If the answer could depend on evidence that is not shown, say that it may be incomplete."
         )
-    return note + ". The answer may be incomplete."
+    return note + "."
 
 
 # Opens the user prompt of the tools that put retrieved threads in one
@@ -2238,6 +2239,8 @@ def _evidence_budget(
     threads: list[ThreadResult],
     task: str,
     reserve_chars: int = 0,
+    *,
+    instruct_model: bool = True,
 ) -> tuple[list[ThreadResult], int]:
     """The threads that fit, and their evidence budget, for a prompt
     built as ``_evidence_prompt`` + ``task`` under ``system``, with room
@@ -2268,7 +2271,7 @@ def _evidence_budget(
         )
         fixed = (
             len(system)
-            + len(_evidence_prompt(kept, [""] * len(kept), worst))
+            + len(_evidence_prompt(kept, [""] * len(kept), worst, instruct_model=instruct_model))
             + len(task)
             + REPAIR_RESERVE_CHARS
             + reserve_chars
@@ -2733,7 +2736,9 @@ def register_intelligence_tools(
             # the model window (#285). Counts of what did not fit are
             # disclosed to the model below and logged; never the text.
             task = f"User's question: {question}"
-            shown, evidence_chars = _evidence_budget(prompt_budget, ASK_SYSTEM, results, task)
+            shown, evidence_chars = _evidence_budget(
+                prompt_budget, ASK_SYSTEM, results, task, instruct_model=False
+            )
             evidence_map: dict[str, EvidenceRef] = {}
             evidence, coverage = _build_evidence(shown, evidence_chars, evidence_map=evidence_map)
             coverage.threads_dropped = len(results) - len(shown)
@@ -2768,6 +2773,7 @@ def register_intelligence_tools(
             lines = [answer, *_citation_lines(citations), *_problem_lines(check)]
             note = _coverage_note(coverage, instruct_model=False)
             if note:
+                note += " The answer may be incomplete."
                 lines.append(note)
             lines.append(_sources_searched(results))
 
@@ -2775,6 +2781,7 @@ def register_intelligence_tools(
                 "\n".join(lines),
                 AskMailboxOutput(
                     answer=answer,
+                    coverage_note=note or None,
                     citations=citations,
                     statements=check.statements,
                     quotes=check.quotes,
