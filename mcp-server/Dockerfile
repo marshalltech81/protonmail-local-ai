@@ -50,6 +50,12 @@ ENV PATH="/app/.venv/bin:$PATH" \
 COPY --from=builder /app/.venv /app/.venv
 COPY --from=builder /app/src/ ./src/
 
+# Source commit the image was built from, logged at startup (#887).
+# Declared late so a new commit does not invalidate the layers above.
+ARG GIT_COMMIT=unknown
+LABEL org.opencontainers.image.revision="${GIT_COMMIT}"
+ENV GIT_COMMIT="${GIT_COMMIT}"
+
 USER mcp
 
 # Probes the FastMCP custom /health route — returns 200 when the

@@ -2081,6 +2081,227 @@ check "stalled syncs count to the exit without a success stamp" \
 check "invalid deadlines are refused at startup" invalid_deadlines_are_refused_at_startup
 check "the deadline defaults agree" deadline_defaults_agree
 
+# --- startup identity line (#887) -------------------------------------------
+#
+# One line names the image's source commit, a random boot ID and a hash of
+# the non-secret settings. The Bridge user, password and fingerprint stand
+# in as secrets: they must neither reach the line nor change the hash.
+
+IDENTITY_RE='^>>> Startup identity: service=mbsync commit=([^ ]+) boot=([0-9a-f]{12}) config=([0-9a-f]{12})$'
+readonly IDENTITY_RE
+
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+identity_setup() {
+    BRIDGE_HOST="host.docker.internal"
+    BRIDGE_IMAP_PORT=1143
+    BRIDGE_CERT_HOST="127.0.0.1"
+    SYNC_INTERVAL=60
+    SYNC_DEADLINE_SECONDS=86400
+    BRIDGE_USER="synthetic-identity-marker@example.com"
+    BRIDGE_CERT_FINGERPRINT="$FP_OLD"
+    BRIDGE_CERT_PIN_ROTATE="false"
+    BRIDGE_PASS_FILE="$WORK/identity-pass"
+    printf 'synthetic-identity-marker-pass\n' >"$BRIDGE_PASS_FILE"
+    GIT_COMMIT="abc1234-dirty"
+    load expected_fingerprint log_startup_identity
+}
+
+# Prints "<commit> <boot> <config>" from one call, after checking the format.
+identity_fields() {
+    local line
+    line="$(log_startup_identity)"
+    if [[ ! "$line" =~ $IDENTITY_RE ]]; then
+        printf 'unexpected line: %s\n' "$line" >&2
+        return 1
+    fi
+    printf '%s %s %s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}"
+}
+
+identity_line_has_the_expected_format() {
+    local first second
+    identity_setup
+    first="$(identity_fields)"
+    second="$(identity_fields)"
+    [[ "${first%% *}" == "abc1234-dirty" ]] || return 1
+    # Each start gets its own boot ID; the settings did not change.
+    [[ "$(cut -d' ' -f2 <<<"$first")" != "$(cut -d' ' -f2 <<<"$second")" ]] || return 1
+    [[ "${first##* }" == "${second##* }" ]] || return 1
+}
+
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+unusable_commit_is_logged_as_unknown() {
+    local value fields
+    identity_setup
+    unset GIT_COMMIT
+    fields="$(identity_fields)"
+    [[ "${fields%% *}" == "unknown" ]] || return 1
+    for value in "" "  " "abc 123" $'abc\nforged line' "$(printf 'x%.0s' {1..65})"; do
+        GIT_COMMIT="$value"
+        fields="$(identity_fields)"
+        [[ "${fields%% *}" == "unknown" ]] || {
+            printf 'accepted %q\n' "$value"
+            return 1
+        }
+    done
+}
+
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+secrets_do_not_change_the_hash_or_reach_the_line() {
+    local before after changed output
+    identity_setup
+    before="$(identity_fields)"
+    BRIDGE_USER="synthetic-identity-marker-other@example.com"
+    printf 'synthetic-identity-marker-other-pass\n' >"$BRIDGE_PASS_FILE"
+    after="$(identity_fields)"
+    [[ "${before##* }" == "${after##* }" ]] || return 1
+    output="$(log_startup_identity 2>&1)"
+    if grep -q 'identity-marker' <<<"$output"; then
+        printf 'a secret marker reached the line\n'
+        return 1
+    fi
+    # A named setting does change it, so the hash is not a constant.
+    SYNC_INTERVAL=120
+    changed="$(identity_fields)"
+    [[ "${changed##* }" != "${before##* }" ]] || return 1
+}
+
+# Codex review round 2 on #893: the expected fingerprint (not secret, it
+# is in .env) and the pin-rotation flag change what mbsync trusts, so
+# they are inputs, the fingerprint in the form the check compares.
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+fingerprint_and_pin_rotation_change_the_hash() {
+    local before same fingerprint rotate
+    identity_setup
+    before="$(identity_fields)"
+    # The same fingerprint in openssl's colon, upper-case form.
+    BRIDGE_CERT_FINGERPRINT="sha256 Fingerprint=$(printf 'AA:%.0s' {1..31})AA"
+    same="$(identity_fields)"
+    [[ "${same##* }" == "${before##* }" ]] || return 1
+    BRIDGE_CERT_FINGERPRINT="$FP_NEW"
+    fingerprint="$(identity_fields)"
+    [[ "${fingerprint##* }" != "${before##* }" ]] || return 1
+    BRIDGE_CERT_FINGERPRINT="$FP_OLD"
+    BRIDGE_CERT_PIN_ROTATE="true"
+    rotate="$(identity_fields)"
+    [[ "${rotate##* }" != "${before##* }" ]] || return 1
+    if grep -q "$FP_OLD" <<<"$(log_startup_identity)"; then
+        printf 'the fingerprint reached the line\n'
+        return 1
+    fi
+}
+
+# Codex review round 4 on #893: the line is logged before validation, so a
+# refused setting still leaves it in the log.
+the_identity_line_precedes_validation() {
+    local identity_line validate_line
+    identity_line="$(grep -n '^log_startup_identity$' "$ENTRYPOINT" | cut -d: -f1)"
+    validate_line="$(grep -n '^require_prerequisites$' "$ENTRYPOINT" | cut -d: -f1)"
+    [[ -n "$identity_line" && -n "$validate_line" ]] || return 1
+    ((identity_line < validate_line)) || return 1
+}
+
+# Values validation would refuse are only hashed, never parsed or printed.
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+malformed_settings_still_give_the_identity_line() {
+    local fields
+    identity_setup
+    BRIDGE_HOST='bad host;synthetic-identity-marker'
+    BRIDGE_IMAP_PORT="oops"
+    SYNC_INTERVAL="-5"
+    BRIDGE_CERT_FINGERPRINT="not a fingerprint"
+    fields="$(identity_fields)" || return 1
+    if grep -q 'identity-marker' <<<"$(log_startup_identity)"; then
+        printf 'a raw value reached the line\n'
+        return 1
+    fi
+    [[ -n "$fields" ]] || return 1
+}
+
+check "the identity line has the expected format" identity_line_has_the_expected_format
+check "an unusable commit is logged as unknown" unusable_commit_is_logged_as_unknown
+check "secrets do not change the hash or reach the identity line" \
+    secrets_do_not_change_the_hash_or_reach_the_line
+check "the fingerprint and pin rotation change the hash" \
+    fingerprint_and_pin_rotation_change_the_hash
+# Codex review round 5 on #893: every variable the entrypoint reads from its
+# environment (each ${NAME:- expansion) is hashed by log_startup_identity
+# (a NAME=%s in its format) or excluded here with a reason. Prints each
+# problem in the given entrypoint, nothing when there is none.
+identity_coverage_problems() {
+    local file="$1" env_read hashed name
+    env_read="$(grep -oE '\$\{[A-Z][A-Z0-9_]*:-' "$file" | sed -E 's/^\$\{//; s/:-$//' | sort -u)"
+    hashed="$(awk '$0 == "log_startup_identity() {" {p = 1} p {print} p && $0 == "}" {exit}' "$file" |
+        grep -oE '[A-Z][A-Z0-9_]*=%s' | sed 's/=%s$//' | sort -u)"
+    if [[ -z "$env_read" || -z "$hashed" ]]; then
+        printf 'no settings found\n'
+        return 0
+    fi
+    while IFS= read -r name; do
+        if grep -qx "$name" <<<"$hashed"; then
+            continue
+        fi
+        case "$name" in
+            BRIDGE_USER) ;; # the Bridge account's user name, a credential
+            GIT_COMMIT) ;;  # not configuration: the line's own commit field
+            *) printf 'neither hashed nor excluded: %s\n' "$name" ;;
+        esac
+    done <<<"$env_read"
+    while IFS= read -r name; do
+        grep -qx "$name" <<<"$env_read" || printf 'hashed but never read: %s\n' "$name"
+    done <<<"$hashed"
+}
+
+every_setting_read_is_hashed_or_excluded() {
+    local problems
+    problems="$(identity_coverage_problems "$ENTRYPOINT")"
+    [[ -z "$problems" ]] || {
+        printf '%s\n' "$problems"
+        return 1
+    }
+}
+
+a_new_setting_left_out_of_the_hash_is_reported() {
+    local copy="$WORK/entrypoint-new-setting.sh"
+    {
+        cat "$ENTRYPOINT"
+        # shellcheck disable=SC2016 # the expansion is the text written
+        printf 'readonly SYNTHETIC_NEW_SETTING="${SYNTHETIC_NEW_SETTING:-1}"\n'
+    } >"$copy"
+    [[ "$(identity_coverage_problems "$copy")" == "neither hashed nor excluded: SYNTHETIC_NEW_SETTING" ]] || return 1
+}
+
+# Codex review round 6 on #893: the line runs before validation, so a host
+# setting could still carry userinfo; it is hashed as a marker, so the hash
+# cannot be used to test guesses at a password.
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+host_credentials_are_not_hashed() {
+    local name first second
+    identity_setup
+    for name in BRIDGE_HOST BRIDGE_CERT_HOST; do
+        printf -v "$name" '%s' 'user:synthetic-host-pass-one@127.0.0.1'
+        first="$(identity_fields)"
+        printf -v "$name" '%s' 'user:synthetic-host-pass-two@127.0.0.1'
+        second="$(identity_fields)"
+        [[ "${first##* }" == "${second##* }" ]] || {
+            printf '%s: the password changed the hash\n' "$name"
+            return 1
+        }
+        if grep -q 'synthetic-host-pass' <<<"$(log_startup_identity)"; then
+            return 1
+        fi
+        printf -v "$name" '%s' '127.0.0.1'
+    done
+}
+
+check "the identity line precedes validation" the_identity_line_precedes_validation
+check "host credentials are not hashed" host_credentials_are_not_hashed
+check "every setting the entrypoint reads is hashed or excluded" \
+    every_setting_read_is_hashed_or_excluded
+check "a new setting left out of the hash is reported" \
+    a_new_setting_left_out_of_the_hash_is_reported
+check "malformed settings still give the identity line" \
+    malformed_settings_still_give_the_identity_line
+
 if ((FAILURES > 0)); then
     printf '%d test(s) failed\n' "$FAILURES" >&2
     exit 1

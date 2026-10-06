@@ -7,11 +7,14 @@ connection to Bridge.
 """
 
 import asyncio
+import hashlib
 import hmac
+import json
 import logging
 import math
 import os
 import re
+import secrets
 import threading
 import time
 import urllib.parse
@@ -37,7 +40,7 @@ from .lib.inference import (
     default_token_budget,
 )
 from .lib.reranker import DEFAULT_RERANK_TIMEOUT_SECS, CohereReranker, RerankConfig
-from .lib.sqlite import Database
+from .lib.sqlite import Database, read_stored_schema_version
 from .tools.brief import register_experimental_tools
 from .tools.intelligence import register_intelligence_tools
 from .tools.retrieval import register_retrieval_tools
@@ -49,6 +52,116 @@ logging.basicConfig(
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
 )
 log = logging.getLogger("mcp-server")
+
+
+# --- Startup identity (#887) -------------------------------------------------
+# One line naming what is running, logged when this module is imported:
+# before any setting below is parsed, so a malformed setting, a missing
+# token or a missing index still leaves it in the log (Codex review rounds
+# 3 and 4 on #893). Every input is a raw environment string or a read that
+# never raises.
+
+# A source commit as the Makefile passes it (``git rev-parse --short
+# HEAD``, plus ``-dirty``): anything else is logged as ``unknown``, so a
+# stray value cannot add text or a line to the log.
+_GIT_COMMIT_PATTERN = re.compile(r"[0-9A-Za-z._-]{1,64}")
+
+# The settings the config hash covers, named one by one. Non-secret
+# values only (the index path, modes, endpoints, models and limits):
+# never an API key, ``MCP_AUTH_TOKEN`` or any other secret, and never the
+# whole environment.
+_IDENTITY_SETTINGS = (
+    "SQLITE_PATH",
+    "INFERENCE_MODE",
+    "INFERENCE_BASE_URL",
+    "INFERENCE_MODEL",
+    "INFERENCE_TIMEOUT_SECS",
+    "INFERENCE_MAX_TOKENS",
+    "INFERENCE_CONTEXT_TOKENS",
+    "INFERENCE_STRUCTURED_OUTPUT",
+    "EMBED_MODE",
+    "EMBED_BASE_URL",
+    "EMBED_MODEL",
+    "EMBED_TIMEOUT_SECS",
+    "RERANK_MODE",
+    "RERANK_BASE_URL",
+    "RERANK_MODEL",
+    "RERANK_CANDIDATES",
+    "RERANK_TIMEOUT_SECS",
+    "MCP_PORT",
+    "MCP_TRANSPORT",
+    "MCP_SESSION_IDLE_TIMEOUT_SECS",
+    "MCP_EXPERIMENTAL_TOOLS",
+)
+
+# Every other variable ``src/`` reads, with why it is not hashed.
+# ``tests/test_startup_identity.py`` checks that each variable read is in
+# one of the two lists (Codex review round 5 on #893).
+_IDENTITY_EXCLUDED = {
+    "INFERENCE_API_KEY": "a secret: the inference provider credential",  # pragma: allowlist secret
+    "EMBED_API_KEY": "a secret: the embedder credential",  # pragma: allowlist secret
+    "RERANK_API_KEY": "a secret: the reranker credential",  # pragma: allowlist secret
+    "MCP_AUTH_TOKEN": "a secret: the /mcp bearer token",
+    "GIT_COMMIT": "not configuration: logged as the line's own commit field",
+}
+
+
+def _git_commit() -> str:
+    """The commit the image was built from (``GIT_COMMIT``, baked in by
+    the Dockerfile), or ``unknown``."""
+    value = os.environ.get("GIT_COMMIT", "").strip()
+    return value if _GIT_COMMIT_PATTERN.fullmatch(value) else "unknown"
+
+
+def _hashable_url(value: str) -> str:
+    """``value`` unless it carries userinfo, so the hash cannot be used to
+    test guesses at a password offline (Codex round 6 on #893). Never
+    raises: a value ``urlsplit`` rejects is a fixed marker too."""
+    try:
+        parts = urllib.parse.urlsplit(value)
+        if parts.username is not None or parts.password is not None:
+            return "<url-with-credentials>"
+    except ValueError:
+        return "<unparseable-url>"
+    return value
+
+
+def _identity_settings() -> dict[str, str | None]:
+    """The raw configured value of each ``_IDENTITY_SETTINGS`` name,
+    ``None`` when unset. Not parsed, so it cannot raise: a malformed
+    value just hashes differently, and an unset setting differs from one
+    set to its default. The one exception is a ``*_BASE_URL`` carrying
+    credentials, hashed as a marker (``_hashable_url``)."""
+    settings = {name: os.environ.get(name) for name in _IDENTITY_SETTINGS}
+    for name, value in settings.items():
+        if name.endswith("_BASE_URL") and value is not None:
+            settings[name] = _hashable_url(value)
+    return settings
+
+
+def _config_hash(settings: dict[str, str | None]) -> str:
+    """First 12 hex digits of a SHA-256 over ``settings`` as sorted JSON."""
+    canonical = json.dumps(settings, sort_keys=True)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:12]
+
+
+def _log_startup_identity() -> None:
+    """Log one line naming what is running (#887): the source commit, a
+    random ID for this start, the schema version stamped in the index
+    (``read_stored_schema_version``) and the first 12 hex digits of a
+    SHA-256 over the raw ``_IDENTITY_SETTINGS`` values. The schema
+    version lives in the indexer; this service has no version of its own
+    to compare."""
+    log.info(
+        "Startup identity: service=mcp-server commit=%s boot=%s schema_stored=%s config=%s",
+        _git_commit(),
+        secrets.token_hex(6),
+        read_stored_schema_version(os.environ.get("SQLITE_PATH", "/data/mail.db")),
+        _config_hash(_identity_settings()),
+    )
+
+
+_log_startup_identity()
 
 # ``import fastmcp`` gives its ``fastmcp`` logger a Rich handler of its own
 # and stops it propagating. Route it through the root handler instead, so

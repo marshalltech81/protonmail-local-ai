@@ -1347,6 +1347,34 @@ def _append_folder_membership_sql(
     params.extend(folders)
 
 
+def read_stored_schema_version(path: str) -> str:
+    """The schema version the indexer stamped, for the startup identity
+    line (#887). Read read-only, without the ``Database`` checks that can
+    stop startup, so the line is logged first (Codex round 3 on #893).
+
+    ``none`` when the file, table or row is missing; ``unreadable`` when
+    it cannot be read. Never creates the file and never raises.
+    """
+    try:
+        # ``stat`` rather than ``exists()``, which reports a file it may
+        # not stat as missing (Codex round 6 on #893).
+        try:
+            Path(path).stat()
+        except FileNotFoundError:
+            return "none"
+        uri = f"file:{quote(str(path))}?mode=ro"
+        with closing(sqlite3.connect(uri, uri=True)) as conn:
+            table = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_version'"
+            ).fetchone()
+            if table is None:
+                return "none"
+            row = conn.execute("SELECT version FROM schema_version").fetchone()
+        return "none" if row is None else str(int(row[0]))
+    except OSError, sqlite3.Error, TypeError, ValueError:
+        return "unreadable"
+
+
 class Database:
     """Read-only handle to the indexer's SQLite output.
 

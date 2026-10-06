@@ -107,6 +107,17 @@ with real values only as needed:
 make build
 ```
 
+`make build` passes the checkout's commit as the `GIT_COMMIT` build
+argument: the short hash, with `-dirty` when a tracked file is modified
+or an untracked file is present that Git does not ignore. It is always
+taken from the checkout, even when `GIT_COMMIT` is set in your shell or
+CI; to label a build explicitly, run
+`make build GIT_COMMIT_OVERRIDE=<value>`.
+Each image records it as the `org.opencontainers.image.revision` label
+and logs it at startup (see `docs/troubleshooting.md`, "Which build and
+settings is a container running?"). A plain `docker compose build`, or
+an image `make up` builds because none exists yet, records `unknown`.
+
 ### 4. Set up the Proton Mail Bridge app
 
 The Bridge app must stay running and signed in. While it is closed,
