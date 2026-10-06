@@ -834,15 +834,39 @@ class TestDeterministicGraders:
         assert decoy.checks["expected_values"] == PASS
         assert decoy.checks["forbidden_values"] == FAIL
 
+    @pytest.mark.parametrize("case_id", ["ask-swim-practice-date", "ask-swim-scope-stated"])
+    def test_later_schedule_as_context_passes_without_a_judge(self, case_id):
+        """Review round 7: naming November as a later change is not the
+        prohibited assertion (``must_not_assert``), and plain containment
+        cannot tell the two apart, so the swim cases leave it to the judge."""
+        case = CASES[case_id]
+        passages = [_passage("E1", "t76.1"), _passage("E2", "t76.2")]
+        answer = (
+            "In September practices were Tuesdays and Thursdays at 6:15pm at the Eastgate "
+            "aquatic center [E1]; from November they moved to Wednesdays at 5:30pm at the "
+            "Northside natatorium [E2]."
+        )
+        det = grade_run(case, _run(answer, passages, ["E1", "E2"]))
+        assert det.passed, det.checks
+
+    def test_citing_a_passage_cut_before_its_fact_fails(self):
+        """Review round 7: a guess cited to a passage the budget cut before
+        the fact is not excused by the coverage note."""
+        case = CASES["ask-kayak-tight-budget"]
+        run = _run(
+            "Four boats at $65 is $260 [E1].",
+            [_passage("E1", "t21", truncated=True)],
+            ["E1"],
+            retrieved=[thread_id_of("t21"), thread_id_of("t22")],
+            coverage_note=self._NOTE,
+        )
+        det = grade_run(case, run)
+        assert det.checks["omission_disclosed"] == PASS
+        assert det.checks["required_evidence_cited"] == FAIL
+
     @pytest.mark.parametrize(
         ("case_id", "ref", "answer"),
         [
-            (
-                "ask-swim-practice-date",
-                "t76.1",
-                "Tuesdays and Thursdays at 6:15pm at the Eastgate aquatic center [E1]; "
-                "from November, Wednesdays at 5:30pm at the Northside natatorium [E2].",
-            ),
             (
                 "ask-garden-plot-trash",
                 "t77.1",

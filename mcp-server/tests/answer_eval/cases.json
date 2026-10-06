@@ -633,7 +633,7 @@
       "must_not_assert": [
         "Practices in the requested period are on Wednesdays at 5:30pm at the Northside natatorium (the November schedule, from a message outside the date filter)."
       ],
-      "deterministic": {"must_include": [["Tuesday", "Tuesdays"], ["Thursday", "Thursdays"], ["6:15", "6:15pm", "6:15 pm"], ["Eastgate"]], "must_not_include": ["Northside", "5:30"]},
+      "deterministic": {"must_include": [["Tuesday", "Tuesdays"], ["Thursday", "Thursdays"], ["6:15", "6:15pm", "6:15 pm"], ["Eastgate"]], "must_not_include": []},
       "criteria": {"factual_correctness": true, "citation_support": true, "completeness": true, "temporal_reasoning": true, "conflict_uncertainty": false, "relevance": true},
       "review": "ai_drafted"
     },
@@ -652,7 +652,7 @@
       "must_not_assert": [
         "Practices in the requested period are on Wednesdays at 5:30pm at the Northside natatorium (the November schedule, from a message outside the date filter)."
       ],
-      "deterministic": {"must_include": [["Tuesday", "Tuesdays"], ["Thursday", "Thursdays"], ["6:15", "6:15pm", "6:15 pm"], ["Eastgate"]], "must_not_include": ["Northside", "5:30"]},
+      "deterministic": {"must_include": [["Tuesday", "Tuesdays"], ["Thursday", "Thursdays"], ["6:15", "6:15pm", "6:15 pm"], ["Eastgate"]], "must_not_include": []},
       "criteria": {"factual_correctness": true, "citation_support": true, "completeness": true, "temporal_reasoning": true, "conflict_uncertainty": false, "relevance": true},
       "review": "ai_drafted"
     },

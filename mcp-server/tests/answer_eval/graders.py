@@ -49,6 +49,8 @@ class GroupStatus:
     supplied: bool
     cited: bool
     whole: bool = False  # supplied with its evidence intact (``_shows_evidence``)
+    cited_intact: bool = False  # cited through a passage that shows its evidence
+    cited_cut: bool = False  # cited through a passage cut before its evidence
 
 
 @dataclass
@@ -165,6 +167,12 @@ def grade_run(case: Case, run: CaseRun) -> DeterministicResult:
                 retrieved=any(thread_id_of(ref) in retrieved for ref in group),
                 supplied=any(_meets(ref, p) for ref in group for p in supplied),
                 cited=any(_meets(ref, p) for ref in group for p in cited),
+                cited_intact=any(
+                    _meets(ref, p) and _shows_evidence(case, p) for ref in group for p in cited
+                ),
+                cited_cut=any(
+                    _meets(ref, p) and not _shows_evidence(case, p) for ref in group for p in cited
+                ),
                 whole=any(
                     _meets(ref, p) and _shows_evidence(case, p) for ref in group for p in supplied
                 ),
@@ -190,7 +198,13 @@ def grade_run(case: Case, run: CaseRun) -> DeterministicResult:
     checks["citations_resolve"] = PASS if resolves else FAIL
     checks["citation_checks"] = FAIL if out.citation_problems else PASS
     if case.answerable:
-        met = all(g.cited or (disclosed and g.retrieved and not g.whole) for g in result.groups)
+        # A group is met by citing a passage that shows its evidence, or
+        # excused by a disclosed omission unless the answer cites a passage
+        # cut before that evidence: a guess, not a disclosure.
+        met = all(
+            g.cited_intact or (disclosed and g.retrieved and not g.whole and not g.cited_cut)
+            for g in result.groups
+        )
         checks["required_evidence_cited"] = PASS if met else FAIL
     else:
         checks["required_evidence_cited"] = NA
