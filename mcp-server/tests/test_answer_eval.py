@@ -235,6 +235,8 @@ class TestCases:
             lambda r: r.update(settings={"prompt_tokens": 10}),
             lambda r: r.update(review="looks fine"),
             lambda r: r["expected_facts"][0].update(excerpt=""),
+            lambda r: r["expected_facts"][0].update(values=[""]),
+            lambda r: r["expected_facts"][0].update(values="four"),
             lambda r: r["deterministic"].update(must_include=[[]]),
         ],
     )
@@ -849,6 +851,34 @@ class TestDeterministicGraders:
         det = grade_run(case, _run(answer, passages, ["E1", "E2"]))
         assert det.passed, det.checks
 
+    def test_guess_stating_an_omitted_fact_fails_beside_an_intact_citation(self):
+        """Review round 9: the $65 passage is supplied and cited, the
+        headcount passage was left out, and the answer still states the
+        headcount-dependent total. A dropped group is excused only when
+        the answer abstains or states none of its facts' values."""
+        case = CASES["ask-kayak-tight-budget"]
+        retrieved = [thread_id_of("t21"), thread_id_of("t22")]
+        passages = [_passage("E1", "t21.1", "Tandem kayaks rent for $65 per boat")]
+        guess = _run(
+            "$65 per boat, so four boats cost $260 [E1].",
+            passages,
+            ["E1"],
+            retrieved=retrieved,
+            coverage_note=self._NOTE,
+        )
+        det = grade_run(case, guess)
+        assert det.checks["required_evidence_cited"] == FAIL
+        assert "synthesis" in attribute(case, guess, det, False, False)
+        honest = _run(
+            "Tandem kayaks rent for $65 per boat [E1]; the group's size is not in the "
+            "emails I received.",
+            passages,
+            ["E1"],
+            retrieved=retrieved,
+            coverage_note=self._NOTE,
+        )
+        assert grade_run(case, honest).checks["required_evidence_cited"] == PASS
+
     def test_uncited_guess_about_omitted_evidence_fails(self):
         """Review round 8: every required passage was left out, and the
         answer states a total with no citation. The note excuses an
@@ -1336,6 +1366,26 @@ def _identity(**overrides):
 
 
 class TestHarnessAndReports:
+    def test_detail_record_keeps_the_judges_omission_inputs(self):
+        """Review round 9: the detail artifact keeps what the judge was
+        allowed to excuse (coverage note, omitted facts) and each
+        passage's truncation, so a verdict can be audited."""
+        case = CASES["ask-kayak-tight-budget"]
+        run = _run(
+            "Not found in the provided emails.",
+            [_passage("E1", "t21", truncated=True)],
+            [],
+            retrieved=[thread_id_of("t21"), thread_id_of("t22")],
+            coverage_note="Evidence note: 1 left out.",
+        )
+        from tests.answer_eval.judge import JudgeOutcome
+        from tests.answer_eval.report import detail_record
+
+        rec = detail_record(case, run, JudgeOutcome(status="not_run"))
+        assert rec["coverage_note"] == "Evidence note: 1 left out."
+        assert rec["omitted_facts"] == ["f1", "f2"]
+        assert rec["passages"]["E1"]["truncated"] is True
+
     def test_privacy_markers_stay_out_of_reports_and_logs(self, chunked_db, caplog):
         case = CASES["ask-roof-total"]
         verdict = json.loads(_verdict(case, [["E1"]]))

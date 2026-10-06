@@ -206,9 +206,25 @@ def grade_run(case: Case, run: CaseRun) -> DeterministicResult:
         # intact citation: an uncited claim about omitted evidence is a
         # guess too (review round 8).
         grounded = is_abstention(answer) or any(g.cited_intact for g in result.groups)
-        for g in result.groups:
+        stated = _fold(answer)
+        for refs, g in zip(case.required_evidence, result.groups, strict=True):
+            # Review round 9: when the group's facts list the values that
+            # assert them, the excuse needs an abstention or an answer
+            # stating none of them; one intact citation elsewhere is not
+            # enough.
+            threads = {thread_id_of(r) for r in refs}
+            values = [
+                v
+                for f in case.expected_facts
+                if any(thread_id_of(s) in threads for s in f.sources)
+                for v in f.values
+            ]
+            if values:
+                avoids = is_abstention(answer) or not any(_mentions(stated, v) for v in values)
+            else:
+                avoids = grounded
             g.met = g.cited_intact or (
-                disclosed and grounded and g.retrieved and not g.whole and not g.cited_cut
+                disclosed and avoids and g.retrieved and not g.whole and not g.cited_cut
             )
         met = all(g.met for g in result.groups)
         checks["required_evidence_cited"] = PASS if met else FAIL

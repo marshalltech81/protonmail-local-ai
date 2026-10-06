@@ -533,8 +533,8 @@
       "expected_handling": "disclose_missing",
       "required_evidence": [["t21"], ["t22"]],
       "expected_facts": [
-        {"id": "f1", "fact": "Tandem kayaks rent for $65 per boat for the day.", "sources": ["t21.1"], "excerpt": "Tandem kayaks rent for $65 per boat"},
-        {"id": "f2", "fact": "The group of eight needs four tandem boats.", "sources": ["t22.1"], "excerpt": "we need four tandem boats"}
+        {"id": "f1", "fact": "Tandem kayaks rent for $65 per boat for the day.", "sources": ["t21.1"], "excerpt": "Tandem kayaks rent for $65 per boat", "values": ["$65"]},
+        {"id": "f2", "fact": "The group of eight needs four tandem boats.", "sources": ["t22.1"], "excerpt": "we need four tandem boats", "values": ["four", "4 boats", "4 tandem", "$260"]}
       ],
       "must_not_assert": ["A group total stated as certain when the headcount was not in the evidence the answer received."],
       "deterministic": {"must_include": [], "must_not_include": []},

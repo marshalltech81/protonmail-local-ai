@@ -80,6 +80,10 @@ class Fact:
     fact: str
     sources: tuple[str, ...]
     excerpt: str
+    # Whole values an answer states only by asserting this fact (or
+    # something derived from it); a disclose_missing grade uses them to
+    # tell a disclosed omission from a guess. Optional.
+    values: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -148,7 +152,9 @@ def _parse_case(row: dict[str, Any]) -> Case:
         _require(isinstance(f.get("fact"), str) and f["fact"].strip(), cid, "fact text")
         _require(_refs(f.get("sources")) and f["sources"], cid, "fact sources")
         _require(isinstance(f.get("excerpt"), str) and f["excerpt"].strip(), cid, "fact excerpt")
-        facts.append(Fact(f["id"], f["fact"], tuple(f["sources"]), f["excerpt"]))
+        values = f.get("values", [])
+        _require(isinstance(values, list) and (not values or _str_list(values)), cid, "values")
+        facts.append(Fact(f["id"], f["fact"], tuple(f["sources"]), f["excerpt"], tuple(values)))
     _require(len({f.id for f in facts}) == len(facts), cid, "duplicate fact ids")
     _require(bool(facts) is answerable, cid, "answerable cases, and only they, need facts")
 

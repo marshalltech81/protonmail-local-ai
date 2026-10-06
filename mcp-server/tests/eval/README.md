@@ -492,7 +492,11 @@ disclosure (#820): when a required group was retrieved but left out of
 the prompt or reached it only cut short of its evidence (the case's fact
 excerpt no longer in the kept text), the server's `coverage_note`
 must be present (`omission_disclosed`), those groups are excused from
-citation and an abstention may stand; a group supplied whole must still
+citation and an abstention may stand. When a dropped group's reference
+facts list `values` (the whole values an answer states only by asserting
+the fact, such as a total derived from it), the excuse also requires an
+abstention or an answer that states none of them; otherwise it requires
+an abstention or at least one intact citation; a group supplied whole must still
 be cited, and a group retrieval never found is never excused (the note
 reports only budget omissions). Each evidence group is also scored as retrieved, supplied to
 the prompt and cited, so a failure is attributed to `retrieval`,
