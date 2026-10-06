@@ -899,6 +899,41 @@ same moment.
   corrupt. Check the indexer's log, then rebuild as in
   [Indexer refuses to start](#indexer-refuses-to-start--wipe-the-sqlite-volume).
 
+## The log shows "token limit hit"
+
+`ask_mailbox`, `summarize_thread` and `extract_from_emails` log one
+WARNING per call that ran into a token limit (#865), for example:
+
+```text
+token limit hit: tool=ask_mailbox limits=evidence_budget outputs_cut=0 threads_dropped=1 passages_omitted=6 passages_truncated=1 prompt_tokens=2950 prompt_budget_tokens=3008 max_tokens=1024
+```
+
+The caller was told too (a truncation notice, a coverage note or an
+error). The line carries counts and settings only. `limits` names
+which limits the call hit:
+
+- `output_max_tokens`: the model stopped at `INFERENCE_MAX_TOKENS`, so
+  the answer or summary was cut off (`outputs_cut` counts the cut
+  replies; for `extract_from_emails`, the threads whose reply was
+  lost). Raise `INFERENCE_MAX_TOKENS`. The reply reserve comes out of
+  `INFERENCE_CONTEXT_TOKENS`, so raise that by the same amount if the
+  model's window allows, or the prompt allowance shrinks.
+- `evidence_budget`: the model window, not the fixed per-thread cap,
+  left out passages (`passages_omitted`), cut them short
+  (`passages_truncated`) or dropped lower-ranked threads
+  (`threads_dropped`; `threads_cut` for `extract_from_emails`). The
+  answer may miss facts. Raise `INFERENCE_CONTEXT_TOKENS` up to the
+  model's real window.
+- `prompt_over_budget`: the request failed before any inference
+  because the instructions, request and headers alone (`prompt_tokens`,
+  estimated) are larger than the prompt allowance
+  (`prompt_budget_tokens`, what `INFERENCE_CONTEXT_TOKENS` leaves after
+  `INFERENCE_MAX_TOKENS`). Shorten the request or schema, or raise
+  `INFERENCE_CONTEXT_TOKENS`.
+
+`prompt_tokens` is the estimated size of the prompt sent (the largest
+one for `extract_from_emails`), counted at three characters per token.
+
 ## Claude Desktop doesn't see the tools
 
 1. Verify the MCP server is running: `docker compose ps`

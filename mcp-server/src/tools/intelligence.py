@@ -2361,15 +2361,50 @@ _ESCAPE_GROWTH = len("&lt;") - len("<")
 _MIN_TAG_CHARS = 14
 
 
-def _too_large(budget: PromptBudget, fixed_chars: int) -> ToolError:
+class PromptTooLargeError(ToolError):
+    """A prompt whose parts other than the mail text already exceed the
+    budget. ``prompt_tokens`` is the estimate the message states, kept
+    so the handler can log it (#865)."""
+
+    def __init__(self, message: str, prompt_tokens: int) -> None:
+        super().__init__(message)
+        self.prompt_tokens = prompt_tokens
+
+
+def _too_large(budget: PromptBudget, fixed_chars: int) -> PromptTooLargeError:
     """The fixed-text error for a prompt whose parts other than the mail
     text (instructions, question, schema, headers) already exceed the
     budget. Counts only."""
-    return ToolError(
+    tokens = -(-fixed_chars // CHARS_PER_TOKEN)
+    return PromptTooLargeError(
         f"Error: the instructions, request and thread headers alone are estimated at "
-        f"{-(-fixed_chars // CHARS_PER_TOKEN)} tokens, more than the {budget.prompt_tokens} "
+        f"{tokens} tokens, more than the {budget.prompt_tokens} "
         "prompt tokens INFERENCE_CONTEXT_TOKENS leaves after INFERENCE_MAX_TOKENS; shorten "
-        "the request or raise INFERENCE_CONTEXT_TOKENS."
+        "the request or raise INFERENCE_CONTEXT_TOKENS.",
+        tokens,
+    )
+
+
+def _warn_token_limits(tool: str, budget: PromptBudget, limits: list[str], **counts: int) -> None:
+    """Log one WARNING for a call that hit a token limit (#865), or
+    nothing when ``limits`` is empty.
+
+    ``limits`` names which: ``prompt_over_budget`` (the request failed
+    before any inference), ``evidence_budget`` (the model window cut the
+    evidence) and ``output_max_tokens`` (a reply stopped at
+    ``INFERENCE_MAX_TOKENS``). ``counts`` are integers under names fixed
+    in the code, and the budget's window figures are config values, so
+    no question, mail or reply text can reach the line.
+    """
+    if not limits:
+        return
+    log.warning(
+        "token limit hit: tool=%s limits=%s %s prompt_budget_tokens=%d max_tokens=%d",
+        tool,
+        ",".join(limits),
+        " ".join(f"{name}={value:d}" for name, value in counts.items()),
+        budget.prompt_tokens,
+        budget.max_output_tokens,
     )
 
 
@@ -2987,6 +3022,28 @@ def register_intelligence_tools(
                 "ask_mailbox", ASK_SYSTEM, user_prompt, evidence_map
             )
 
+            # The window cut the evidence when it dropped threads or set a
+            # budget below the per-thread cap that then trimmed passages;
+            # trimming to the fixed cap alone is not a token limit.
+            window_cut = coverage.threads_dropped or (
+                evidence_chars < PER_THREAD_CHAR_BUDGET * len(shown)
+                and (coverage.omitted or coverage.truncated)
+            )
+            answer_cut = answer.endswith(_TRUNCATED_NOTICE)
+            _warn_token_limits(
+                "ask_mailbox",
+                prompt_budget,
+                [
+                    *(["evidence_budget"] if window_cut else []),
+                    *(["output_max_tokens"] if answer_cut else []),
+                ],
+                outputs_cut=int(answer_cut),
+                threads_dropped=coverage.threads_dropped,
+                passages_omitted=coverage.omitted,
+                passages_truncated=coverage.truncated,
+                prompt_tokens=estimate_tokens(ASK_SYSTEM + user_prompt),
+            )
+
             citations = [_citation(evidence_map[label]) for label in check.used]
             lines = [answer, *_citation_lines(citations), *_problem_lines(check)]
             note = _coverage_note(coverage, instruct_model=False)
@@ -3014,6 +3071,11 @@ def register_intelligence_tools(
             # withheld. Return it to the caller; log only the field name.
             log.warning("ask_mailbox rejected invalid %s", e.field_name)
             raise ToolError(f"Error: {e}") from e
+        except PromptTooLargeError as e:
+            _warn_token_limits(
+                "ask_mailbox", prompt_budget, ["prompt_over_budget"], prompt_tokens=e.prompt_tokens
+            )
+            raise
         except ToolError:
             raise
         except Exception as e:
@@ -3179,6 +3241,14 @@ def register_intelligence_tools(
             summary, check, repair_attempted = await complete_checked(
                 "summarize_thread", SUMMARIZE_SYSTEM, user_prompt, evidence_map
             )
+            summary_cut = summary.endswith(_TRUNCATED_NOTICE)
+            _warn_token_limits(
+                "summarize_thread",
+                prompt_budget,
+                ["output_max_tokens"] if summary_cut else [],
+                outputs_cut=int(summary_cut),
+                prompt_tokens=estimate_tokens(SUMMARIZE_SYSTEM + user_prompt),
+            )
             citations = [_citation(evidence_map[label]) for label in check.used]
             lines = [
                 f"Summary ({style}) — {subject}:\n\n{summary}",
@@ -3199,6 +3269,14 @@ def register_intelligence_tools(
                 ),
             )
 
+        except PromptTooLargeError as e:
+            _warn_token_limits(
+                "summarize_thread",
+                prompt_budget,
+                ["prompt_over_budget"],
+                prompt_tokens=e.prompt_tokens,
+            )
+            raise
         except ToolError:
             raise
         except Exception as e:
@@ -3418,6 +3496,11 @@ def register_intelligence_tools(
             # model window, not the usual per-thread cap, set the budget
             # (#285): a null answer from one is not a genuine absence.
             window_cut = 0
+            # For the token-limit warning (#865): passages the window cut
+            # in those threads, and the largest prompt sent.
+            window_omitted = 0
+            window_truncated = 0
+            largest_prompt_tokens = 0
 
             def render(thread: ThreadResult, body: str) -> str:
                 # The query is the user's task: it says which of the
@@ -3480,7 +3563,12 @@ def register_intelligence_tools(
                     coverage.omitted or coverage.truncated
                 ):
                     window_cut += 1
+                    window_omitted += coverage.omitted
+                    window_truncated += coverage.truncated
                 user_prompt = render(thread, body)
+                largest_prompt_tokens = max(
+                    largest_prompt_tokens, estimate_tokens(EXTRACT_SYSTEM + user_prompt)
+                )
 
                 try:
                     result_str = await llm_complete(EXTRACT_SYSTEM, user_prompt, records_schema)
@@ -3546,6 +3634,19 @@ def register_intelligence_tools(
                 len(fields),
                 sum(f.status == "cited" for f in fields),
                 len(problems),
+            )
+            _warn_token_limits(
+                "extract_from_emails",
+                prompt_budget,
+                [
+                    *(["evidence_budget"] if window_cut else []),
+                    *(["output_max_tokens"] if truncated else []),
+                ],
+                outputs_cut=truncated,
+                threads_cut=window_cut,
+                passages_omitted=window_omitted,
+                passages_truncated=window_truncated,
+                prompt_tokens=largest_prompt_tokens,
             )
             report = "\n".join(
                 [
@@ -3623,6 +3724,14 @@ def register_intelligence_tools(
             # withheld. Return it to the caller; log only the field name.
             log.warning("extract_from_emails rejected invalid %s", e.field_name)
             raise ToolError(f"Error: {e}") from e
+        except PromptTooLargeError as e:
+            _warn_token_limits(
+                "extract_from_emails",
+                prompt_budget,
+                ["prompt_over_budget"],
+                prompt_tokens=e.prompt_tokens,
+            )
+            raise
         except ToolError:
             raise
         except Exception as e:

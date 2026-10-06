@@ -822,6 +822,11 @@ it stays within local-LLM context windows. The bounds differ by tool:
   from the model's answer and its citation checks, stating that the
   answer may be incomplete. The model
   is instructed not to repeat prompt-budget caveats in its answer.
+  When the model window rather than the per-thread budget cut the
+  evidence, or a reply stopped at `INFERENCE_MAX_TOKENS`, the server
+  log also gets one
+  [`token limit hit`](troubleshooting.md#the-log-shows-token-limit-hit)
+  warning for the call.
 - **`summarize_thread`** works on a single thread and does not use the
   per-chunk path. Its context is the thread's accumulated indexed body
   (or the ``snippet`` when the body is empty), up to ``8000``
