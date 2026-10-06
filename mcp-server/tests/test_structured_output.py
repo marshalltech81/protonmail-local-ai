@@ -257,14 +257,12 @@ class TestDateBoundsEcho:
         assert "Date bounds (UTC): to 2024-01-10T08:00:00+00:00" in text
 
     def test_search_emails_unmatched_from_name_still_echoes(self, messages_db):
-        out = _call(
-            _server(messages_db),
-            "search_emails",
-            query="budget",
-            from_name="Nobody Known",
-            date_from="2024-01-10",
-        )
+        server = _server(messages_db)
+        args = {"query": "budget", "from_name": "Nobody Known", "date_from": "2024-01-10"}
+        out = _call(server, "search_emails", **args)
         assert out["date_bounds"]["date_from"] == "2024-01-10T00:00:00+00:00"
+        text = _wire(server, "search_emails", args).content[0].text
+        assert "Date bounds (UTC): from 2024-01-10T00:00:00+00:00" in text
 
     def test_search_attachments_echoes_the_bounds(self, attachments_db):
         server = _server(attachments_db)

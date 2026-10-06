@@ -275,8 +275,12 @@ def register_search_tools(
                 log.error("search_emails: find_contact lookup failed: %s", safe_error)
                 raise ToolError(f"Search error: {safe_error}") from e
             if resolved_from_addr is None:
+                empty = (
+                    f"No results found for: '{query}' (no contact matched from_name={from_name!r})"
+                )
+                bounds_line = describe_date_bounds(bounds)
                 return tool_result(
-                    f"No results found for: '{query}' (no contact matched from_name={from_name!r})",
+                    f"{empty}\n{bounds_line}" if bounds_line else empty,
                     SearchEmailsOutput(
                         mode=mode, resolved_from_addr=None, date_bounds=bounds, results=[]
                     ),
