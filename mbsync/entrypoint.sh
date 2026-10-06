@@ -102,15 +102,21 @@ log_startup_identity() {
     # One line naming what is running (#887): the source commit baked into
     # the image (GIT_COMMIT; anything but a plain token is "unknown"), a
     # random ID for this start, and the first 12 hex digits of a SHA-256
-    # over the non-secret settings named below. BRIDGE_USER, the password
-    # and the certificate fingerprint are not inputs.
-    local commit="${GIT_COMMIT:-unknown}" boot config
+    # over the non-secret settings named below: the endpoint, the sync
+    # timing, the expected certificate fingerprint (not secret; in the
+    # form verify_expected_fingerprint compares) and whether pin rotation
+    # is on. BRIDGE_USER and the password are not inputs.
+    local commit="${GIT_COMMIT:-unknown}" boot config rotate="false"
     if [[ ! "$commit" =~ ^[0-9A-Za-z._-]{1,64}$ ]]; then
         commit="unknown"
     fi
+    if [[ "$BRIDGE_CERT_PIN_ROTATE" == "true" ]]; then
+        rotate="true"
+    fi
     boot="$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')"
-    config="$(printf 'BRIDGE_HOST=%s\nBRIDGE_IMAP_PORT=%s\nBRIDGE_CERT_HOST=%s\nSYNC_INTERVAL=%s\nSYNC_DEADLINE_SECONDS=%s\n' \
-        "$BRIDGE_HOST" "$BRIDGE_IMAP_PORT" "$BRIDGE_CERT_HOST" "$SYNC_INTERVAL" "$SYNC_DEADLINE_SECONDS" | sha256sum)"
+    config="$(printf 'BRIDGE_HOST=%s\nBRIDGE_IMAP_PORT=%s\nBRIDGE_CERT_HOST=%s\nSYNC_INTERVAL=%s\nSYNC_DEADLINE_SECONDS=%s\nBRIDGE_CERT_FINGERPRINT=%s\nBRIDGE_CERT_PIN_ROTATE=%s\n' \
+        "$BRIDGE_HOST" "$BRIDGE_IMAP_PORT" "$BRIDGE_CERT_HOST" "$SYNC_INTERVAL" "$SYNC_DEADLINE_SECONDS" \
+        "$(expected_fingerprint)" "$rotate" | sha256sum)"
     printf '>>> Startup identity: service=mbsync commit=%s boot=%s config=%s\n' \
         "$commit" "$boot" "${config:0:12}"
 }

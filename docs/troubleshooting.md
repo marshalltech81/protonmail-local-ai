@@ -41,7 +41,9 @@ mbsync      >>> Startup identity: service=mbsync commit=1a2b3c4 boot=9e8d7c6b5a4
 Find it with `docker compose logs <service> | grep 'Startup identity'`.
 
 - `commit` is the checkout the image was built from, passed by
-  `make build`; `-dirty` means tracked files were modified. `unknown`
+  `make build`; `-dirty` means a tracked file was modified or an
+  untracked file was present that Git does not ignore (`.env` and
+  `.secrets/` are ignored, so they never count). `unknown`
   means the image was built another way (a plain `docker compose build`,
   or by `make up` when no image existed): run `make build`. The same
   value is on the image:
@@ -58,12 +60,14 @@ Find it with `docker compose logs <service> | grep 'Startup identity'`.
   non-secret settings, named one by one in code: modes, endpoints,
   model names and limits (indexer and mcp-server, `_identity_settings`
   in `src/main.py`; the indexer's include the effective
-  `INDEXER_PARSE_MAX_BYTES` and `EMBED_WARMUP_TIMEOUT_SECS`), or `BRIDGE_HOST`, `BRIDGE_IMAP_PORT`,
-  `BRIDGE_CERT_HOST`, `SYNC_INTERVAL` and `SYNC_DEADLINE_SECONDS`
-  (mbsync). It changes when one of those settings changes and is
-  otherwise stable across restarts. API keys, the MCP bearer token, the
-  Bridge user, password and certificate fingerprint are not inputs, so
-  rotating a secret leaves it unchanged.
+  `INDEXER_PARSE_MAX_BYTES` and `EMBED_WARMUP_TIMEOUT_SECS`), or
+  `BRIDGE_HOST`, `BRIDGE_IMAP_PORT`, `BRIDGE_CERT_HOST`,
+  `SYNC_INTERVAL`, `SYNC_DEADLINE_SECONDS`, `BRIDGE_CERT_FINGERPRINT`
+  (normalized, and not secret) and `BRIDGE_CERT_PIN_ROTATE` (mbsync).
+  It changes when one of those settings changes and is otherwise stable
+  across restarts. API keys, the MCP bearer token, the Bridge user and
+  the Bridge password are not inputs, so rotating a secret leaves it
+  unchanged.
 
 ## Bridge is up but IMAP is unresponsive / mbsync can't connect
 

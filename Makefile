@@ -91,9 +91,10 @@ init-secrets:
 
 # Source commit baked into each image (the org.opencontainers.image.revision
 # label and GIT_COMMIT) and logged at startup (#887): the short HEAD hash,
-# plus -dirty when tracked files differ from it. Empty outside a checkout,
-# which Compose turns into "unknown".
-GIT_COMMIT ?= $(shell git describe --always --dirty --exclude='*')
+# plus -dirty when a tracked file is modified or an untracked file is not
+# git-ignored (.env and .secrets/ are ignored, so they never count). Empty
+# outside a checkout, which Compose turns into "unknown".
+GIT_COMMIT ?= $(shell head=$$(git rev-parse --short HEAD) && status=$$(git status --porcelain --untracked-files=normal) && printf '%s%s' "$$head" "$${status:+-dirty}")
 
 # Build all images from source
 build:

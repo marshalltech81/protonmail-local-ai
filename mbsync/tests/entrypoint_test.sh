@@ -2099,10 +2099,11 @@ identity_setup() {
     SYNC_DEADLINE_SECONDS=86400
     BRIDGE_USER="synthetic-identity-marker@example.com"
     BRIDGE_CERT_FINGERPRINT="$FP_OLD"
+    BRIDGE_CERT_PIN_ROTATE="false"
     BRIDGE_PASS_FILE="$WORK/identity-pass"
     printf 'synthetic-identity-marker-pass\n' >"$BRIDGE_PASS_FILE"
     GIT_COMMIT="abc1234-dirty"
-    load log_startup_identity
+    load expected_fingerprint log_startup_identity
 }
 
 # Prints "<commit> <boot> <config>" from one call, after checking the format.
@@ -2151,7 +2152,6 @@ secrets_do_not_change_the_hash_or_reach_the_line() {
     before="$(identity_fields)"
     BRIDGE_USER="synthetic-identity-marker-other@example.com"
     printf 'synthetic-identity-marker-other-pass\n' >"$BRIDGE_PASS_FILE"
-    BRIDGE_CERT_FINGERPRINT="$FP_NEW"
     after="$(identity_fields)"
     [[ "${before##* }" == "${after##* }" ]] || return 1
     output="$(log_startup_identity 2>&1)"
@@ -2163,6 +2163,31 @@ secrets_do_not_change_the_hash_or_reach_the_line() {
     SYNC_INTERVAL=120
     changed="$(identity_fields)"
     [[ "${changed##* }" != "${before##* }" ]] || return 1
+}
+
+# Codex review round 2 on #893: the expected fingerprint (not secret, it
+# is in .env) and the pin-rotation flag change what mbsync trusts, so
+# they are inputs, the fingerprint in the form the check compares.
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+fingerprint_and_pin_rotation_change_the_hash() {
+    local before same fingerprint rotate
+    identity_setup
+    before="$(identity_fields)"
+    # The same fingerprint in openssl's colon, upper-case form.
+    BRIDGE_CERT_FINGERPRINT="sha256 Fingerprint=$(printf 'AA:%.0s' {1..31})AA"
+    same="$(identity_fields)"
+    [[ "${same##* }" == "${before##* }" ]] || return 1
+    BRIDGE_CERT_FINGERPRINT="$FP_NEW"
+    fingerprint="$(identity_fields)"
+    [[ "${fingerprint##* }" != "${before##* }" ]] || return 1
+    BRIDGE_CERT_FINGERPRINT="$FP_OLD"
+    BRIDGE_CERT_PIN_ROTATE="true"
+    rotate="$(identity_fields)"
+    [[ "${rotate##* }" != "${before##* }" ]] || return 1
+    if grep -q "$FP_OLD" <<<"$(log_startup_identity)"; then
+        printf 'the fingerprint reached the line\n'
+        return 1
+    fi
 }
 
 the_identity_line_follows_validation_and_precedes_any_connection() {
@@ -2178,6 +2203,8 @@ check "the identity line has the expected format" identity_line_has_the_expected
 check "an unusable commit is logged as unknown" unusable_commit_is_logged_as_unknown
 check "secrets do not change the hash or reach the identity line" \
     secrets_do_not_change_the_hash_or_reach_the_line
+check "the fingerprint and pin rotation change the hash" \
+    fingerprint_and_pin_rotation_change_the_hash
 check "the identity line follows validation and precedes any connection" \
     the_identity_line_follows_validation_and_precedes_any_connection
 

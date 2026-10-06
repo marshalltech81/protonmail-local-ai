@@ -107,8 +107,9 @@ with real values only as needed:
 make build
 ```
 
-`make build` passes the checkout's commit (the short hash, with `-dirty`
-when tracked files are modified) as the `GIT_COMMIT` build argument.
+`make build` passes the checkout's commit as the `GIT_COMMIT` build
+argument: the short hash, with `-dirty` when a tracked file is modified
+or an untracked file is present that Git does not ignore.
 Each image records it as the `org.opencontainers.image.revision` label
 and logs it at startup (see `docs/troubleshooting.md`, "Which build and
 settings is a container running?"). A plain `docker compose build`, or

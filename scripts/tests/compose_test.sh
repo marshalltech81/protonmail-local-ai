@@ -648,14 +648,55 @@ every_image_is_built_with_the_source_commit() {
     expect '[.services[] | .build.args.GIT_COMMIT == "abc1234-dirty"] | all' || return 1
 }
 
-make_build_passes_the_source_commit() {
-    local head output
-    head="$(git -C "$ROOT_DIR" rev-parse --short HEAD)"
-    output="$(make --no-print-directory -C "$ROOT_DIR" -n build build-nocache)"
-    [[ "$(grep -cE "^GIT_COMMIT=${head}(-dirty)? docker compose build" <<<"$output")" -eq 2 ]] || {
-        printf 'make build does not pass GIT_COMMIT=%s:\n%s\n' "$head" "$output"
+# Git and make in a scratch directory, isolated from the caller's Git
+# configuration and environment.
+scratch_git() {
+    local dir="$1"
+    shift
+    env -u GIT_DIR -u GIT_WORK_TREE GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+        git -C "$dir" -c user.name=synthetic -c user.email=synthetic@example.invalid \
+        -c commit.gpgsign=false "$@"
+}
+
+scratch_make_commit() {
+    env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMIT GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+        make --no-print-directory -C "$1" -n build build-nocache 2>"$WORK/make.err"
+}
+
+# Fails unless both build targets pass GIT_COMMIT=$2 in directory $1.
+expect_make_commit() {
+    local output
+    output="$(scratch_make_commit "$1")"
+    [[ "$(grep -cxE "GIT_COMMIT=$2 docker compose build( --no-cache)? *" <<<"$output")" -eq 2 ]] || {
+        printf 'expected GIT_COMMIT=%s from both targets:\n%s\n' "$2" "$output"
+        cat "$WORK/make.err"
         return 1
     }
+}
+
+# The Makefile in a scratch repository (Codex review round 2 on #893):
+# the short HEAD hash when clean, -dirty for a modified tracked file or
+# a new untracked one, but not for a git-ignored file such as .env, and
+# empty outside a checkout.
+make_build_passes_the_source_commit() {
+    local repo="$WORK/commit-repo" plain="$WORK/commit-plain" head
+    mkdir -p "$repo" "$plain"
+    cp "$ROOT_DIR/Makefile" "$repo/Makefile"
+    cp "$ROOT_DIR/Makefile" "$plain/Makefile"
+    printf '.env\n' >"$repo/.gitignore"
+    scratch_git "$repo" init -q
+    scratch_git "$repo" add Makefile .gitignore
+    scratch_git "$repo" commit -q -m synthetic
+    head="$(scratch_git "$repo" rev-parse --short HEAD)"
+    expect_make_commit "$repo" "$head" || return 1
+    printf 'SYNTHETIC=1\n' >"$repo/.env"
+    expect_make_commit "$repo" "$head" || return 1
+    printf 'untracked\n' >"$repo/new-file"
+    expect_make_commit "$repo" "$head-dirty" || return 1
+    rm "$repo/new-file"
+    printf '# modified\n' >>"$repo/.gitignore"
+    expect_make_commit "$repo" "$head-dirty" || return 1
+    expect_make_commit "$plain" "" || return 1
 }
 
 the_base_composes_with_the_hardened_overlay() {
