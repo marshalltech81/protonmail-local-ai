@@ -977,12 +977,16 @@ message outside the default scope (filed in Trash), the prompt shows
 them: each passage header carries `in scope` or `context` after the
 sent date, and a scope block between the evidence and the question
 states the filters and the rule. The block holds only the caller's
-own arguments, never a value read from mail: with `from_name` it names
-that name ("the contact matching the name ...") and not the address it
-resolved to, which comes from a sender-controlled header and stays
-inside the untrusted blocks. Each value is cut at 500 characters, has
+own arguments, never a value the server read from mail: with
+`from_name` it names that name and not the address it resolved to.
+Address and name values (`from_addr`, `from_name`, `participant`) can
+still be copies of sender-controlled headers, for example a
+`find_contact` result passed on as `participant`, so the filter lines
+only name those filters and their values follow inside an
+`<untrusted_email>` fence. Each value is cut at 500 characters, has
 delimiter tags escaped and is written as one JSON string on its own
-line; the date bounds are the server's normalized UTC instants. The
+line; the date bounds are the server's normalized UTC instants and the
+folder names are the operator's own, so they stay in the filter lines. The
 block names the `from_name` and the `participant`
 ([#779](https://github.com/marshalltech81/protonmail-local-ai/issues/779)),
 so "what did this person say" no longer leaves the model guessing who
