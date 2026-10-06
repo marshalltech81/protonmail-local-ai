@@ -11,7 +11,9 @@
 - Full-disk encryption on the Mac (FileVault, in System Settings >
   Privacy & Security). The stack stores your decrypted mail, its search
   index and sync state as unencrypted files; FileVault is what protects
-  them on a lost or stolen machine. OrbStack and Docker Desktop keep the
+  them on a lost or stolen Mac that is powered off (or restarted and not
+  yet unlocked at login), not during a logged-in or screen-locked
+  session. OrbStack and Docker Desktop keep the
   Docker volumes inside a virtual-machine disk image, by default on the
   Mac's startup disk, which FileVault covers. Check where yours actually
   is: if the Docker disk image was moved (Docker Desktop allows it) or

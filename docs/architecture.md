@@ -1832,11 +1832,16 @@ Protecting them is the host's job, which makes it a setup requirement:
 - **Backups.** Any backup of these volumes, or of a Maildir archive
   (`docs/troubleshooting.md`), holds the whole mailbox: keep it
   encrypted (for example an encrypted Time Machine destination) and
-  never inside the checkout. A backup of the checkout itself carries the
-  git-ignored operator files (`.secrets/`, `config/authority.toml`,
-  `.env`), so it needs the same protection, or those files left out.
-  Rotating credentials after an exposure covers `.secrets/`, but nothing
-  takes back the addresses in `config/authority.toml` or `.env`.
+  never inside the checkout. A backup of the checkout itself carries
+  every git-ignored file, and any of them can hold private data:
+  credentials (`.secrets/`, `*.pem`, `*.key`), addresses
+  (`config/authority.toml`, `.env`), eval queries grounded in the real
+  mailbox (`mcp-server/tests/eval/queries.json`, `eval-queries.md`),
+  local Maildir or data copies (`maildir/`, `data/`) and logs. So
+  protect a checkout backup like the volumes, or leave out every ignored
+  file (`git status --ignored` lists them). Rotating credentials after an
+  exposure covers `.secrets/`, but nothing takes back the addresses or
+  the mailbox-derived queries.
 - **Deleted mail.** Mail deleted in Proton stays on disk. A reap removes
   the message from the index, but its `.eml`, attachments included,
   stays in the Maildir indefinitely: mbsync never expunges
