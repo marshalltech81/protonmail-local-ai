@@ -887,6 +887,92 @@ startup scan and periodic recovery skip dead rows, so mail that
 dead-lettered on the old version (for example an 8-bit `Date` header
 before #361) stays unindexed until you requeue it.
 
+## A tool call reports degraded retrieval
+
+A `degraded_<lane>` count on a tool's `mcp.timings` line (see
+[Stage timings](mcp-tools.md#stage-timings-in-the-server-log)) means a
+retrieval lane failed and the call carried on without it, so the
+results are worse than usual although `outcome=ok`. A standalone
+`mcp.sqlite` or `mcp.reranker` WARNING names the exception type at the
+same moment.
+
+- `degraded_rerank` on most calls: the rerank provider is failing (the
+  `mcp.reranker` warning gives the status code). Check
+  `RERANK_BASE_URL`, `RERANK_MODEL`, the key in
+  `.secrets/rerank_api_key.txt` and `RERANK_TIMEOUT_SECS`, or set
+  `RERANK_MODE=none` until the provider is back.
+- `degraded_thread_vec` / `degraded_chunk_vec`, or any `_fts` /
+  `attachment_` lane on every call: the index is missing a table or is
+  corrupt. Check the indexer's log, then rebuild as in
+  [Indexer refuses to start](#indexer-refuses-to-start--wipe-the-sqlite-volume).
+
+## The log shows "token limit hit"
+
+`ask_mailbox`, `summarize_thread` and `extract_from_emails` log one
+WARNING per call that ran into a token limit (#865), and the
+experimental `brief_issue` and `check_conclusion` log one when the
+request is over budget (`prompt_over_budget`), for example:
+
+```text
+token limit hit: tool=ask_mailbox limits=evidence_budget outputs_cut=0 threads_dropped=1 passages_omitted=6 passages_truncated=1 prompt_tokens=2950 prompt_budget_tokens=3008 max_tokens=1024
+```
+
+The line carries counts and settings only. Not every limit reaches
+the caller: a cut reply carries a truncation notice, the evidence that
+`ask_mailbox` and `extract_from_emails` leave out is disclosed in their
+coverage or evidence note, and `prompt_over_budget` is an error, but a
+`summarize_thread` context trimmed by the window (`evidence_budget`
+below) is in this log line only. `limits` names which limits the call
+hit:
+
+- `output_max_tokens`: the model stopped at `INFERENCE_MAX_TOKENS`, so
+  the answer or summary was cut off (`outputs_cut` counts every cut
+  reply, whatever stopped it; for `extract_from_emails`, the threads
+  whose reply was lost). A reply cut before any text fails the call
+  with an error, and the line is still logged. When the repair reply
+  was the one cut, `prompt_tokens` is the repair prompt. Raise
+  `INFERENCE_MAX_TOKENS`. The reply reserve comes out of
+  `INFERENCE_CONTEXT_TOKENS`, so raise that by the same amount if the
+  model's window allows, or the prompt allowance shrinks.
+- `context_window`: the model's own context window filled before the
+  reply reached `INFERENCE_MAX_TOKENS` (Anthropic's
+  `model_context_window_exceeded` stop; `context_window_cuts` counts
+  these replies). Raising `INFERENCE_MAX_TOKENS` does not help.
+  `INFERENCE_CONTEXT_TOKENS` is set larger than the model's real
+  window: lower it to that window, or choose a model with a larger
+  one. The caller sees the same truncation notice as for
+  `output_max_tokens`.
+- `evidence_budget`: the model window, not the fixed per-thread cap,
+  left out passages (`passages_omitted`), cut them short
+  (`passages_truncated`) or dropped lower-ranked threads
+  (`threads_dropped`; `threads_cut` for `extract_from_emails`). The
+  passage counts are the window's only: when it dropped a thread but
+  the per-thread cap trimmed the rest, they are 0 and the trim is
+  counted as `evidence_capped_threads` instead. For `summarize_thread`
+  the counts are characters of mail context: `context_chars_kept` out
+  of the `context_chars_wanted` the default window would show. The
+  answer may miss facts. Raise `INFERENCE_CONTEXT_TOKENS` up to the
+  model's real window.
+- `prompt_over_budget`: the request failed before any inference
+  because the instructions, request and headers alone (`prompt_tokens`,
+  estimated) are larger than the prompt allowance
+  (`prompt_budget_tokens`, what `INFERENCE_CONTEXT_TOKENS` leaves after
+  `INFERENCE_MAX_TOKENS`). Shorten the request or schema, or raise
+  `INFERENCE_CONTEXT_TOKENS`.
+
+`prompt_tokens` is the estimated size of the prompt sent (the largest
+one for `extract_from_emails`, including the reply schema structured
+outputs add), counted at three characters per token.
+
+The call's own `mcp.timings` line also carries a
+`token_limit_<limit>` count for each limit it hit, so the warning can
+be matched to its call when several run at once.
+
+Trimming to the fixed per-thread evidence budget (2,000 characters per
+thread) is not a token limit: no setting changes it, so it logs no
+warning. It is counted as `evidence_capped_threads` on the call's
+`mcp.timings` line instead.
+
 ## Claude Desktop doesn't see the tools
 
 1. Verify the MCP server is running: `docker compose ps`
@@ -953,9 +1039,31 @@ problem.
    `sh -c`). With `bearer_token_env_var` instead,
    check that the variable is exported in the shell that starts Codex.
 
-The server logs a request with a wrong token as `Auth error returned:
-invalid_token (status=401)` and never logs the token or the
-`Authorization` header.
+The server logs rejected requests at WARNING as
+`rejected request: reason=<reason>` (#878), and never logs the token,
+the `Authorization` header or the Host and Origin values. So that a
+prober cannot flood the log, only the first rejection per reason in
+each 60-second window gets that line. The rest are counted, and with
+the first rejection after the window ends the server logs
+`rejected requests in the last <N>s: invalid_token=500 bad_origin=3`
+(every rejection in that window, the first ones included; no line when
+each reason was rejected only once). The reasons:
+
+- `missing_token`: no `Authorization` header (`401`). The client is
+  not configured to send the token at all.
+- `invalid_token`: a header with a wrong token or another scheme
+  (`401`). fastmcp's own per-request `Auth error returned` line is
+  filtered out, so this rate-limited line is the record. Follow the
+  steps above.
+- `bad_host`: a Host other than `localhost`, `127.0.0.1`, `[::1]` or
+  `mcp-server` (`421`). Point the client at `http://127.0.0.1:3000/mcp`.
+- `bad_origin`: a browser `Origin` outside the same names over `http`
+  (`403`), usually a web page trying to reach the server.
+
+Repeated `bad_origin` or `invalid_token` lines, or large counts in the
+per-window line, that your own clients do not explain mean something
+on this machine is probing the server: a browser page, or a process
+under another local account.
 
 ## mcp-server exits with "The MCP bearer token is missing or empty"
 

@@ -12,7 +12,10 @@ import logging
 import math
 import os
 import re
+import threading
+import time
 import urllib.parse
+from collections.abc import Callable
 from pathlib import Path
 
 import fastmcp
@@ -23,7 +26,7 @@ from mcp.server.transport_security import TransportSecurityMiddleware, Transport
 from starlette.middleware import Middleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
-from starlette.types import ASGIApp, Receive, Scope, Send
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from .lib.embed import DEFAULT_EMBED_TIMEOUT_SECS, EmbedClient
 from .lib.embed_identity import run_startup_identity_check
@@ -112,6 +115,41 @@ class _DropToolErrorDetail(logging.Filter):
 
 
 logging.getLogger("fastmcp.server.server").addFilter(_DropToolErrorDetail())
+
+
+class _DropRawHostOriginWarning(logging.Filter):
+    """Drop the MCP SDK's Host/Origin rejection warnings (#878).
+
+    ``mcp.server.transport_security`` logs a rejected request's raw Host
+    or Origin header, text any client chose. ``_HostOriginGuard`` logs
+    the rejection itself with a fixed reason instead. Other records from
+    the logger pass unchanged.
+    """
+
+    _PREFIXES = ("Invalid Host header", "Invalid Origin header", "Missing Host header")
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not str(record.msg).startswith(self._PREFIXES)
+
+
+logging.getLogger("mcp.server.transport_security").addFilter(_DropRawHostOriginWarning())
+
+
+class _DropPerRequestAuthError(logging.Filter):
+    """Drop fastmcp's per-request ``Auth error returned`` INFO line.
+
+    fastmcp logs it for every rejected bearer token, so a prober could
+    fill the log with it. ``_RejectionLog`` records the same rejection
+    (``invalid_token``), rate-limited (Codex review round 2 on #883).
+    The 401 response is unchanged, and other records from the logger
+    pass.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not str(record.msg).startswith("Auth error returned")
+
+
+logging.getLogger("fastmcp.server.auth.middleware").addFilter(_DropPerRequestAuthError())
 
 
 _INFERENCE_MODES = frozenset({"anthropic", "openai", "none"})
@@ -462,6 +500,14 @@ class _HostOriginGuard:
     server's own socket address as a Host and any loopback Origin on any
     scheme, which this allowlist does not. It runs ahead of the Streamable
     HTTP session manager, so a rejected request creates no session.
+
+    It also logs every rejected request once at WARNING with a fixed
+    reason (#878): ``bad_host`` or ``bad_origin`` for its own 421 or 403,
+    and ``missing_token`` or ``invalid_token`` for the 401 the bearer
+    check answers further in, told apart by whether an
+    ``Authorization`` header was sent. Only the response status is
+    read; the token and the header values are never logged, and the
+    responses are unchanged.
     """
 
     def __init__(self, app: ASGIApp) -> None:
@@ -469,14 +515,90 @@ class _HostOriginGuard:
         self._validator = TransportSecurityMiddleware(_TRANSPORT_SECURITY)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] == "http":
-            # ``is_post=False``: the transports check a POST's
-            # Content-Type themselves.
-            error = await self._validator.validate_request(Request(scope), is_post=False)
-            if error is not None:
-                await error(scope, receive, send)
-                return
-        await self.app(scope, receive, send)
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        # ``is_post=False``: the transports check a POST's
+        # Content-Type themselves.
+        request = Request(scope)
+        error = await self._validator.validate_request(request, is_post=False)
+        if error is not None:
+            # The validator answers 421 for the Host and 403 for the Origin.
+            _log_rejection("bad_host" if error.status_code == 421 else "bad_origin")
+            await error(scope, receive, send)
+            return
+        has_auth = "authorization" in request.headers
+
+        async def send_and_log(message: Message) -> None:
+            if message["type"] == "http.response.start" and message["status"] == 401:
+                _log_rejection("invalid_token" if has_auth else "missing_token")
+            await send(message)
+
+        await self.app(scope, receive, send_and_log)
+
+
+class _RejectionLog:
+    """Rate-limited logging of rejected requests (#878, Codex review
+    round 1 on #883).
+
+    A prober can send rejected requests as fast as it likes, so not
+    every one gets a line. In each window of ``interval`` seconds the
+    first rejection per reason is logged as ``rejected request:
+    reason=<reason>``; every rejection is counted. When a rejection
+    arrives after the window ended, a window that had more than one
+    rejection for some reason is reported as one ``rejected requests in
+    the last <N>s: <reason>=<count> ...`` line, N being the seconds the
+    window actually covered, and a new window starts. A window with no
+    later rejection is never summarised; its first lines are already
+    logged.
+
+    State is one counter per fixed reason, so it is bounded whatever the
+    traffic. The lock makes ``record`` safe from any thread; it never
+    awaits, so it is safe on the event loop too. Logging happens outside
+    the lock.
+    """
+
+    REASONS = ("missing_token", "invalid_token", "bad_host", "bad_origin")
+
+    def __init__(self, interval: float, clock: Callable[[], float] = time.monotonic) -> None:
+        self._interval = interval
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._window_start: float | None = None
+        self._counts = dict.fromkeys(self.REASONS, 0)
+
+    def record(self, reason: str) -> None:
+        if reason not in self._counts:
+            raise ValueError("unknown rejection reason")
+        summary: tuple[int, dict[str, int]] | None = None
+        with self._lock:
+            now = self._clock()
+            if self._window_start is None or now - self._window_start >= self._interval:
+                if self._window_start is not None and any(n > 1 for n in self._counts.values()):
+                    summary = (int(now - self._window_start), dict(self._counts))
+                self._window_start = now
+                self._counts = dict.fromkeys(self.REASONS, 0)
+            self._counts[reason] += 1
+            first = self._counts[reason] == 1
+        if summary is not None:
+            elapsed, counts = summary
+            log.warning(
+                "rejected requests in the last %ds: %s",
+                elapsed,
+                " ".join(f"{name}={n}" for name, n in counts.items() if n),
+            )
+        if first:
+            log.warning("rejected request: reason=%s", reason)
+
+
+# Seconds per rejection-log window.
+_REJECTION_LOG_INTERVAL_SECS = 60.0
+_REJECTIONS = _RejectionLog(_REJECTION_LOG_INTERVAL_SECS)
+
+
+def _log_rejection(reason: str) -> None:
+    """Record one rejected request; ``reason`` is a fixed literal."""
+    _REJECTIONS.record(reason)
 
 
 _MISSING_AUTH_TOKEN = (

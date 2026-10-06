@@ -18,7 +18,13 @@ from fastmcp.exceptions import ToolError
 from mcp.types import CallToolResult, TextContent
 
 from ..lib.embed import embed_query
-from ..lib.inference import CHARS_PER_TOKEN, InferenceTruncatedError, PromptBudget, estimate_tokens
+from ..lib.inference import (
+    CHARS_PER_TOKEN,
+    InferenceTruncatedError,
+    PromptBudget,
+    TruncationReason,
+    estimate_tokens,
+)
 from ..lib.security import log_tool_call, safe_provider_exception_text
 from ..lib.sqlite import (
     DEFAULT_EXCLUDED_FOLDERS,
@@ -1850,6 +1856,7 @@ class EvidenceCoverage:
     duplicates: int = 0  # passages dropped as repeats of one shown in full
     threads_without_evidence: int = 0  # threads whose every passage was left out
     threads_dropped: int = 0  # lower-ranked threads left out whole to fit the window
+    threads_trimmed: int = 0  # threads with a passage left out or cut short
 
 
 # Shortest normalized body passage treated as a quote of an earlier one
@@ -2172,6 +2179,7 @@ def _build_evidence(
         parts: list[str] = []
         used = 0
         complete = 0  # pieces rendered in full; later ones were cut or left out
+        lost_before = coverage.omitted + coverage.truncated
         for k, ((chunk, text), label, flag) in enumerate(zip(pieces, labels, flags, strict=True)):
             separator = 2 if parts else 0
             tag = _scope_tag(flag) if show_scope else None
@@ -2206,6 +2214,8 @@ def _build_evidence(
                 coverage.duplicates += 1
             else:
                 coverage.omitted += 1
+        if coverage.omitted + coverage.truncated > lost_before:
+            coverage.threads_trimmed += 1
         rendered.append("\n\n".join(parts))
     return rendered, coverage
 
@@ -2361,15 +2371,91 @@ _ESCAPE_GROWTH = len("&lt;") - len("<")
 _MIN_TAG_CHARS = 14
 
 
-def _too_large(budget: PromptBudget, fixed_chars: int) -> ToolError:
+class PromptTooLargeError(ToolError):
+    """A prompt whose parts other than the mail text already exceed the
+    budget. ``prompt_tokens`` is the estimate the message states, kept
+    so the handler can log it (#865)."""
+
+    def __init__(self, message: str, prompt_tokens: int) -> None:
+        super().__init__(message)
+        self.prompt_tokens = prompt_tokens
+
+
+def _too_large(budget: PromptBudget, fixed_chars: int) -> PromptTooLargeError:
     """The fixed-text error for a prompt whose parts other than the mail
     text (instructions, question, schema, headers) already exceed the
     budget. Counts only."""
-    return ToolError(
+    tokens = -(-fixed_chars // CHARS_PER_TOKEN)
+    return PromptTooLargeError(
         f"Error: the instructions, request and thread headers alone are estimated at "
-        f"{-(-fixed_chars // CHARS_PER_TOKEN)} tokens, more than the {budget.prompt_tokens} "
+        f"{tokens} tokens, more than the {budget.prompt_tokens} "
         "prompt tokens INFERENCE_CONTEXT_TOKENS leaves after INFERENCE_MAX_TOKENS; shorten "
-        "the request or raise INFERENCE_CONTEXT_TOKENS."
+        "the request or raise INFERENCE_CONTEXT_TOKENS.",
+        tokens,
+    )
+
+
+@dataclass(frozen=True)
+class _ReplyCut:
+    """A prose reply the model stopped early: why, and the full prompt
+    (system and user text) that produced it. Only the prompt's length
+    is ever logged."""
+
+    reason: TruncationReason
+    prompt: str
+
+
+def _reply_cut_limits(stops: Iterable[TruncationReason]) -> list[str]:
+    """The token limits cut replies hit, given each one's stop reason,
+    as ``_warn_token_limits`` names them: ``output_max_tokens`` for a
+    ``max_tokens`` stop, ``context_window`` for a stop at the model's
+    own window."""
+    reasons = set(stops)
+    return [
+        *(["output_max_tokens"] if "max_tokens" in reasons else []),
+        *(["context_window"] if "context_window" in reasons else []),
+    ]
+
+
+def _count_capped_threads(coverage: EvidenceCoverage, evidence_chars: int, threads: int) -> None:
+    """Count, on the call's timing line, the threads whose evidence the
+    fixed per-thread cap trimmed (``evidence_capped_threads``).
+
+    The cap binds when the evidence budget is the full
+    ``PER_THREAD_CHAR_BUDGET`` per thread; below that the model window
+    set it, and ``_warn_token_limits`` reports the cut instead. Not a
+    WARNING: raising a setting cannot change the cap.
+    """
+    if coverage.threads_trimmed and evidence_chars >= PER_THREAD_CHAR_BUDGET * threads:
+        count("evidence_capped_threads", coverage.threads_trimmed)
+
+
+def _warn_token_limits(tool: str, budget: PromptBudget, limits: list[str], **counts: int) -> None:
+    """Log one WARNING for a call that hit a token limit (#865), or
+    nothing when ``limits`` is empty.
+
+    ``limits`` names which: ``prompt_over_budget`` (the request failed
+    before any inference), ``evidence_budget`` (the model window cut the
+    evidence) and ``output_max_tokens`` (a reply stopped at
+    ``INFERENCE_MAX_TOKENS``). ``counts`` are integers under names fixed
+    in the code, and the budget's window figures are config values, so
+    no question, mail or reply text can reach the line.
+
+    Each limit is also counted as ``token_limit_<limit>`` on the call's
+    own timing line, which the warning cannot be joined to when calls
+    of one tool overlap.
+    """
+    if not limits:
+        return
+    for limit in limits:
+        count(f"token_limit_{limit}", 1)
+    log.warning(
+        "token limit hit: tool=%s limits=%s %s prompt_budget_tokens=%d max_tokens=%d",
+        tool,
+        ",".join(limits),
+        " ".join(f"{name}={value:d}" for name, value in counts.items()),
+        budget.prompt_tokens,
+        budget.max_output_tokens,
     )
 
 
@@ -2669,18 +2755,28 @@ def register_intelligence_tools(
                 return await inference_client.complete(system, user)
             return await inference_client.complete(system, user, json_schema=json_schema)
 
-    async def llm_complete_prose(system: str, user: str) -> str:
+    async def llm_complete_prose(system: str, user: str, cuts: list[_ReplyCut]) -> str:
         """``llm_complete`` for prose answers: a reply cut off at
-        ``max_tokens`` is still worth showing, but never as if complete."""
+        ``max_tokens`` is still worth showing, but never as if complete.
+
+        A cut reply is recorded in ``cuts`` (its stop reason and the
+        prompt that produced it) before the partial is returned or, when
+        there is nothing to show, the error re-raised, so the caller can
+        log the limit either way (#865)."""
         try:
             return await llm_complete(system, user)
         except InferenceTruncatedError as e:
+            cuts.append(_ReplyCut(e.reason, system + user))
             if not e.partial.strip():
                 raise
             return e.partial + _TRUNCATED_NOTICE
 
     async def complete_checked(
-        tool: str, system: str, user_prompt: str, evidence_map: Mapping[str, EvidenceRef]
+        tool: str,
+        system: str,
+        user_prompt: str,
+        evidence_map: Mapping[str, EvidenceRef],
+        cuts: list[_ReplyCut],
     ) -> tuple[str, AnswerCheck, bool]:
         """Generate a prose answer, then check it against the evidence
         actually supplied (``_check_answer``, #284). A failed check gets
@@ -2688,14 +2784,16 @@ def register_intelligence_tools(
         returns is checked again and returned with its problems. An
         answer cut off at max_tokens is not repaired: a second try would
         most likely be cut off too. Returns the answer, its check and
-        whether the repair call was made."""
-        answer = await llm_complete_prose(system, user_prompt)
+        whether the repair call was made; a cut reply, from either call,
+        is recorded in ``cuts``, which the caller owns so it is filled
+        even when the call raises."""
+        answer = await llm_complete_prose(system, user_prompt, cuts)
         check = _check_answer(answer, evidence_map)
         repair_attempted = bool(check.problems) and not answer.endswith(_TRUNCATED_NOTICE)
         if repair_attempted:
             reason = _repair_reason(check.problems)
             answer = await llm_complete_prose(
-                system, user_prompt + _REPAIR_INSTRUCTION.format(reason=reason)
+                system, user_prompt + _REPAIR_INSTRUCTION.format(reason=reason), cuts
             )
             check = _check_answer(answer, evidence_map)
         # Counts only: labels, statements and quotes are provider output.
@@ -2960,6 +3058,7 @@ def register_intelligence_tools(
                 show_scope=show_scope,
             )
             coverage.threads_dropped = len(results) - len(shown)
+            _count_capped_threads(coverage, evidence_chars, len(shown))
 
             # Build context from retrieved threads. Each thread is wrapped
             # in <untrusted_email> tags so the model can't confuse email
@@ -2981,11 +3080,51 @@ def register_intelligence_tools(
                 prompt_budget.prompt_tokens,
             )
 
+            # The window cut the evidence when it dropped threads or set a
+            # budget below the per-thread cap that then trimmed passages;
+            # trimming to the fixed cap alone is not a token limit. The
+            # passage counts are the window's only when it set the budget:
+            # otherwise the cap trimmed them and ``evidence_capped_threads``
+            # counts them, so they are not reported twice.
+            window_budget = evidence_chars < PER_THREAD_CHAR_BUDGET * len(shown)
+            window_cut = coverage.threads_dropped or (
+                window_budget and (coverage.omitted or coverage.truncated)
+            )
+
+            cuts: list[_ReplyCut] = []
+
+            def warn_limits() -> None:
+                _warn_token_limits(
+                    "ask_mailbox",
+                    prompt_budget,
+                    [
+                        *(["evidence_budget"] if window_cut else []),
+                        *_reply_cut_limits(c.reason for c in cuts),
+                    ],
+                    outputs_cut=len(cuts),
+                    context_window_cuts=sum(c.reason == "context_window" for c in cuts),
+                    threads_dropped=coverage.threads_dropped,
+                    passages_omitted=coverage.omitted if window_budget else 0,
+                    passages_truncated=coverage.truncated if window_budget else 0,
+                    # The prompt of the reply that was cut (the repair
+                    # prompt when that was it), else the one sent.
+                    prompt_tokens=estimate_tokens(
+                        cuts[-1].prompt if cuts else ASK_SYSTEM + user_prompt
+                    ),
+                )
+
             # Generate, check the answer's citations, statements and quotes
             # against the evidence supplied, and repair once (#284).
-            answer, check, repair_attempted = await complete_checked(
-                "ask_mailbox", ASK_SYSTEM, user_prompt, evidence_map
-            )
+            try:
+                answer, check, repair_attempted = await complete_checked(
+                    "ask_mailbox", ASK_SYSTEM, user_prompt, evidence_map, cuts
+                )
+            except InferenceTruncatedError:
+                # Cut with nothing to show: the call fails, but the limit
+                # it hit is still logged.
+                warn_limits()
+                raise
+            warn_limits()
 
             citations = [_citation(evidence_map[label]) for label in check.used]
             lines = [answer, *_citation_lines(citations), *_problem_lines(check)]
@@ -3014,6 +3153,11 @@ def register_intelligence_tools(
             # withheld. Return it to the caller; log only the field name.
             log.warning("ask_mailbox rejected invalid %s", e.field_name)
             raise ToolError(f"Error: {e}") from e
+        except PromptTooLargeError as e:
+            _warn_token_limits(
+                "ask_mailbox", prompt_budget, ["prompt_over_budget"], prompt_tokens=e.prompt_tokens
+            )
+            raise
         except ToolError:
             raise
         except Exception as e:
@@ -3169,16 +3313,53 @@ def register_intelligence_tools(
                 ],
             )
             evidence_map: dict[str, EvidenceRef] = {}
-            user_prompt = render(
-                _summarize_context(thread, recent_chunks, context_chars, evidence_map=evidence_map)
+            context = _summarize_context(
+                thread, recent_chunks, context_chars, evidence_map=evidence_map
             )
+            user_prompt = render(context)
+            # Below the tool's own cap the window set the context size.
+            # What the cap alone would show is rendered too (bounded by
+            # that cap) so a cut can be told from a thread that fits;
+            # only the two lengths are logged.
+            wanted_chars = (
+                len(_summarize_context(thread, recent_chunks, evidence_map={}))
+                if context_chars < _SUMMARIZE_CONTEXT_CHARS
+                else len(context)
+            )
+            context_cut = len(context) < wanted_chars
+
+            cuts: list[_ReplyCut] = []
+
+            def warn_limits() -> None:
+                _warn_token_limits(
+                    "summarize_thread",
+                    prompt_budget,
+                    [
+                        *(["evidence_budget"] if context_cut else []),
+                        *_reply_cut_limits(c.reason for c in cuts),
+                    ],
+                    outputs_cut=len(cuts),
+                    context_window_cuts=sum(c.reason == "context_window" for c in cuts),
+                    context_chars_kept=len(context),
+                    context_chars_wanted=wanted_chars,
+                    # The prompt of the reply that was cut (see ask_mailbox).
+                    prompt_tokens=estimate_tokens(
+                        cuts[-1].prompt if cuts else SUMMARIZE_SYSTEM + user_prompt
+                    ),
+                )
 
             # The citation contract of ask_mailbox (#284): every statement
             # and list item in every style is checked the same way, with
             # one bounded repair.
-            summary, check, repair_attempted = await complete_checked(
-                "summarize_thread", SUMMARIZE_SYSTEM, user_prompt, evidence_map
-            )
+            try:
+                summary, check, repair_attempted = await complete_checked(
+                    "summarize_thread", SUMMARIZE_SYSTEM, user_prompt, evidence_map, cuts
+                )
+            except InferenceTruncatedError:
+                # Cut with nothing to show (see ask_mailbox).
+                warn_limits()
+                raise
+            warn_limits()
             citations = [_citation(evidence_map[label]) for label in check.used]
             lines = [
                 f"Summary ({style}) — {subject}:\n\n{summary}",
@@ -3199,6 +3380,14 @@ def register_intelligence_tools(
                 ),
             )
 
+        except PromptTooLargeError as e:
+            _warn_token_limits(
+                "summarize_thread",
+                prompt_budget,
+                ["prompt_over_budget"],
+                prompt_tokens=e.prompt_tokens,
+            )
+            raise
         except ToolError:
             raise
         except Exception as e:
@@ -3412,12 +3601,19 @@ def register_intelligence_tools(
             # Counted apart from a valid ``null`` (or ``[]``) so a failure
             # is never reported as "no data".
             truncated = 0
+            # Each cut reply's stop reason, for the token-limit warning.
+            cut_stops: list[TruncationReason] = []
             unparseable = 0
             nonconforming = 0
             # Threads whose passages were left out or cut short because the
             # model window, not the usual per-thread cap, set the budget
             # (#285): a null answer from one is not a genuine absence.
             window_cut = 0
+            # For the token-limit warning (#865): passages the window cut
+            # in those threads, and the largest prompt sent.
+            window_omitted = 0
+            window_truncated = 0
+            largest_prompt_tokens = 0
 
             def render(thread: ThreadResult, body: str) -> str:
                 # The query is the user's task: it says which of the
@@ -3476,16 +3672,28 @@ def register_intelligence_tools(
                 )
                 next_label = 1 + max((int(label[1:]) for label in known), default=next_label - 1)
                 evidence_map.update(known)
+                _count_capped_threads(coverage, evidence_chars, 1)
                 if evidence_chars < PER_THREAD_CHAR_BUDGET and (
                     coverage.omitted or coverage.truncated
                 ):
                     window_cut += 1
+                    window_omitted += coverage.omitted
+                    window_truncated += coverage.truncated
                 user_prompt = render(thread, body)
+                # The schema the provider adds is input too (the budget
+                # above reserves it), so it counts toward the prompt.
+                prompt_chars = (
+                    len(EXTRACT_SYSTEM) + len(user_prompt) + _schema_reserve_chars(records_schema)
+                )
+                largest_prompt_tokens = max(
+                    largest_prompt_tokens, -(-prompt_chars // CHARS_PER_TOKEN)
+                )
 
                 try:
                     result_str = await llm_complete(EXTRACT_SYSTEM, user_prompt, records_schema)
-                except InferenceTruncatedError:
+                except InferenceTruncatedError as e:
                     truncated += 1
+                    cut_stops.append(e.reason)
                     continue
 
                 try:
@@ -3546,6 +3754,17 @@ def register_intelligence_tools(
                 len(fields),
                 sum(f.status == "cited" for f in fields),
                 len(problems),
+            )
+            _warn_token_limits(
+                "extract_from_emails",
+                prompt_budget,
+                [*(["evidence_budget"] if window_cut else []), *_reply_cut_limits(cut_stops)],
+                outputs_cut=truncated,
+                context_window_cuts=cut_stops.count("context_window"),
+                threads_cut=window_cut,
+                passages_omitted=window_omitted,
+                passages_truncated=window_truncated,
+                prompt_tokens=largest_prompt_tokens,
             )
             report = "\n".join(
                 [
@@ -3623,6 +3842,14 @@ def register_intelligence_tools(
             # withheld. Return it to the caller; log only the field name.
             log.warning("extract_from_emails rejected invalid %s", e.field_name)
             raise ToolError(f"Error: {e}") from e
+        except PromptTooLargeError as e:
+            _warn_token_limits(
+                "extract_from_emails",
+                prompt_budget,
+                ["prompt_over_budget"],
+                prompt_tokens=e.prompt_tokens,
+            )
+            raise
         except ToolError:
             raise
         except Exception as e:

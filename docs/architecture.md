@@ -1945,7 +1945,13 @@ route outside that wrapper and stays open for the container
 healthcheck. The Host/Origin allowlist runs as before and still rejects
 a bad Host (`421`) or Origin (`403`) whatever the token. Startup fails
 when the token is empty, and neither the token nor the `Authorization`
-header is logged. The `MCP_AUTH_TOKEN` environment variable is read only
+header is logged. Rejections are logged with a fixed reason
+(`missing_token`, `invalid_token`, `bad_host`, `bad_origin`; #878),
+rate-limited to the first per reason in each 60-second window plus one
+per-window count line, and
+the MCP SDK's own Host/Origin warning, which quotes the raw header, and
+fastmcp's per-request `Auth error returned` line are filtered out. The
+`MCP_AUTH_TOKEN` environment variable is read only
 when the secret file is absent, for running the server outside a
 container; Compose always mounts the secret, and `validate-env` rejects
 the variable in `.env`.

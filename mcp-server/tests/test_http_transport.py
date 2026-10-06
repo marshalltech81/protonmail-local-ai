@@ -558,3 +558,205 @@ class TestBearerAuth:
             _http_session_calls(_app(), [("ping", {})])
         assert marker not in caplog.text
         assert _TOKEN not in caplog.text
+
+
+_HOST_MARKER = "synthetic-host-marker-3b9e.example"
+
+
+class _Clock:
+    """A settable monotonic clock for the rejection log's window."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+@pytest.fixture(autouse=True)
+def rejection_clock(monkeypatch) -> _Clock:
+    """A fresh rejection log per test, so one test's rejections do not
+    hold back another's first line."""
+    clock = _Clock()
+    monkeypatch.setattr(main_mod, "_REJECTIONS", main_mod._RejectionLog(60.0, clock=clock))
+    return clock
+
+
+def _rejections(caplog) -> list[str]:
+    """The reason of each ``rejected request`` WARNING, in order."""
+    reasons = []
+    for record in caplog.records:
+        message = record.getMessage()
+        if message.startswith("rejected request:"):
+            assert record.levelno == logging.WARNING
+            assert message.startswith("rejected request: reason=")
+            reasons.append(message.removeprefix("rejected request: reason="))
+    return reasons
+
+
+def _rejection_summaries(caplog) -> list[str]:
+    """Each periodic ``rejected requests in the last ...`` WARNING."""
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if r.getMessage().startswith("rejected requests in the last")
+        and r.levelno == logging.WARNING
+    ]
+
+
+class TestRejectionLogging:
+    """#878: every rejected request logs one WARNING with a fixed reason,
+    never the token or a Host/Origin value; the MCP SDK's own warning,
+    which quotes the raw value, is suppressed. The responses are
+    unchanged (the tests above pin them)."""
+
+    def test_missing_token(self, caplog):
+        with caplog.at_level(logging.INFO):
+            assert _mcp_status(_app(), headers=_UNAUTHENTICATED_POST_HEADERS) == 401
+        assert _rejections(caplog) == ["missing_token"]
+
+    @pytest.mark.parametrize(
+        "value",
+        [f"Bearer {_MARKER}", f"Basic {_MARKER}", _MARKER, f"Bearer {_TOKEN}x"],
+    )
+    def test_invalid_token(self, caplog, value):
+        with caplog.at_level(logging.INFO):
+            headers = dict(_POST_HEADERS, authorization=value)
+            assert _mcp_status(_app(), headers=headers) == 401
+        assert _rejections(caplog) == ["invalid_token"]
+        assert _MARKER not in caplog.text
+        assert _TOKEN not in caplog.text
+
+    @pytest.mark.parametrize("host", [_HOST_MARKER, f"{_HOST_MARKER}:3000", None])
+    def test_bad_host(self, caplog, host):
+        with caplog.at_level(logging.DEBUG):
+            assert _mcp_status(_app(), host=host) == 421
+        assert _rejections(caplog) == ["bad_host"]
+        assert _HOST_MARKER not in caplog.text
+        assert not [r for r in caplog.records if r.name == "mcp.server.transport_security"]
+
+    def test_bad_origin(self, caplog):
+        with caplog.at_level(logging.DEBUG):
+            assert _mcp_status(_app(), origin=f"http://{_HOST_MARKER}") == 403
+        assert _rejections(caplog) == ["bad_origin"]
+        assert _HOST_MARKER not in caplog.text
+        assert not [r for r in caplog.records if r.name == "mcp.server.transport_security"]
+
+    def test_bad_host_on_health(self, caplog):
+        app = _app()
+        with caplog.at_level(logging.INFO):
+            status = _with_lifespan(app, lambda: _status(app, "GET", "/health", host=_HOST_MARKER))
+        assert status == 421
+        assert _rejections(caplog) == ["bad_host"]
+        assert _HOST_MARKER not in caplog.text
+
+    def test_accepted_requests_log_no_rejection(self, caplog):
+        app = _app()
+        with caplog.at_level(logging.INFO):
+            assert _mcp_status(app) == 200
+            assert _with_lifespan(app, lambda: _status(app, "GET", "/health")) == 200
+            _http_session_calls(_app(), [("ping", {})])
+        assert _rejections(caplog) == []
+        assert _TOKEN not in caplog.text
+
+    def test_other_sdk_warnings_still_pass(self, caplog):
+        """The filter drops only the Host/Origin records."""
+        with caplog.at_level(logging.INFO):
+            logging.getLogger("mcp.server.transport_security").warning("unrelated warning")
+        assert "unrelated warning" in caplog.text
+
+
+class TestRejectionRateLimit:
+    """Codex review round 1 on #883: a prober must not be able to flood
+    the log. The first rejection per reason in a 60-second window is
+    logged; the rest are counted and reported as one fixed-text line
+    per window, logged with the first rejection after the window ends."""
+
+    def test_repeats_in_a_window_log_once(self, caplog, rejection_clock):
+        app = _app()
+        wrong = dict(_POST_HEADERS, authorization=f"Bearer {_MARKER}")
+        with caplog.at_level(logging.INFO):
+            for _ in range(5):
+                assert _mcp_status(app, headers=wrong) == 401
+                rejection_clock.now += 1
+        assert _rejections(caplog) == ["invalid_token"]
+        assert _rejection_summaries(caplog) == []
+        assert _MARKER not in caplog.text
+
+    def test_each_reason_gets_its_first_line(self, caplog):
+        app = _app()
+        with caplog.at_level(logging.INFO):
+            _mcp_status(app, headers=_UNAUTHENTICATED_POST_HEADERS)
+            _mcp_status(app, headers=dict(_POST_HEADERS, authorization="Bearer x"))
+            _mcp_status(app, host=_HOST_MARKER)
+            _mcp_status(app, origin=f"http://{_HOST_MARKER}")
+        assert _rejections(caplog) == ["missing_token", "invalid_token", "bad_host", "bad_origin"]
+
+    def test_window_counts_are_reported_after_the_window(self, caplog, rejection_clock):
+        app = _app()
+        wrong = dict(_POST_HEADERS, authorization=f"Bearer {_MARKER}")
+        with caplog.at_level(logging.INFO):
+            for _ in range(5):
+                _mcp_status(app, headers=wrong)
+            _mcp_status(app, host=_HOST_MARKER)
+            rejection_clock.now += 75
+            _mcp_status(app, headers=wrong)
+        assert _rejection_summaries(caplog) == [
+            "rejected requests in the last 75s: invalid_token=5 bad_host=1"
+        ]
+        # The new window logs its own first rejection.
+        assert _rejections(caplog) == ["invalid_token", "bad_host", "invalid_token"]
+        assert _MARKER not in caplog.text
+        assert _HOST_MARKER not in caplog.text
+
+    def test_a_window_with_only_first_lines_adds_no_summary(self, caplog, rejection_clock):
+        app = _app()
+        with caplog.at_level(logging.INFO):
+            _mcp_status(app, headers=_UNAUTHENTICATED_POST_HEADERS)
+            rejection_clock.now += 75
+            _mcp_status(app, headers=_UNAUTHENTICATED_POST_HEADERS)
+        assert _rejection_summaries(caplog) == []
+        assert _rejections(caplog) == ["missing_token", "missing_token"]
+
+    def test_counts_are_exact_across_threads(self, caplog, rejection_clock):
+        import threading
+
+        log_ = main_mod._REJECTIONS
+
+        def hammer():
+            for _ in range(200):
+                log_.record("invalid_token")
+
+        with caplog.at_level(logging.INFO):
+            workers = [threading.Thread(target=hammer) for _ in range(8)]
+            for w in workers:
+                w.start()
+            for w in workers:
+                w.join()
+            rejection_clock.now += 61
+            log_.record("invalid_token")
+        assert _rejection_summaries(caplog) == [
+            "rejected requests in the last 61s: invalid_token=1600"
+        ]
+        assert _rejections(caplog) == ["invalid_token", "invalid_token"]
+
+    def test_fastmcp_auth_error_line_is_dropped(self, caplog, rejection_clock):
+        """Codex review round 2 on #883: fastmcp's own per-request
+        ``Auth error returned`` line would flood the log the rate limit
+        protects, so it is filtered; the responses are unchanged."""
+        app = _app()
+        wrong = dict(_POST_HEADERS, authorization="Bearer wrong-token")
+        with caplog.at_level(logging.DEBUG):
+            for _ in range(3):
+                assert _mcp_status(app, headers=wrong) == 401
+        assert "Auth error returned" not in caplog.text
+        assert _rejections(caplog) == ["invalid_token"]
+
+    def test_other_fastmcp_auth_records_still_pass(self, caplog):
+        with caplog.at_level(logging.INFO):
+            logging.getLogger("fastmcp.server.auth.middleware").info("unrelated auth record")
+        assert "unrelated auth record" in caplog.text
+
+    def test_state_is_bounded_to_the_fixed_reasons(self):
+        with pytest.raises(ValueError):
+            main_mod._REJECTIONS.record("attacker-chosen")

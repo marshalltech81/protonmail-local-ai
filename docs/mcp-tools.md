@@ -114,6 +114,29 @@ tool=search_emails outcome=ok total_ms=41.7 stages_ms={'query_embedding': 22.4, 
   `inference_calls` and, on a filtered vector search,
   `thread_vec_expansions` / `chunk_vec_expansions` (re-queries with a
   wider window).
+- A `degraded_<lane>` count means a lane failed and the call fell back,
+  still with `outcome=ok` (#877): `thread_vec` / `chunk_vec` (the
+  vector lane errored; that lane contributed nothing), `thread_fts`
+  (the FTS query errored and a LIKE scan ran instead), `like_fallback`
+  (the LIKE scan errored too), `chunk_fts` / `attachment_fts`,
+  `attachment_filename` / `attachment_text` / `attachment_scan`
+  (`search_attachments`), `attachment_match` (no attachment-first
+  evidence ordering), `evidence_chunks` (no passages; the thread body
+  is used), `recent_chunks` (`summarize_thread` without the latest
+  replies), `rerank` (results in RRF order although `config` says
+  `rerank=cohere`) and `rerank_subjects` (reranked without subjects).
+  See [Troubleshooting](troubleshooting.md#a-tool-call-reports-degraded-retrieval).
+- `evidence_capped_threads` (the intelligence tools) counts the threads
+  whose passages the fixed per-thread evidence budget (2,000 characters
+  per thread) left out or cut. It is a design cap, not a token limit,
+  so no setting raises it and it logs no warning; a cut made by the
+  model window is the `token limit hit` warning instead.
+- `token_limit_output_max_tokens`, `token_limit_context_window`,
+  `token_limit_evidence_budget` and
+  `token_limit_prompt_over_budget` mark a call that hit that token
+  limit; the call also logs a
+  [`token limit hit`](troubleshooting.md#the-log-shows-token-limit-hit)
+  warning with the counts.
 - `config` names the rerank and inference modes.
 
 The line carries names fixed in the code, numbers and mode names only:
@@ -810,6 +833,11 @@ it stays within local-LLM context windows. The bounds differ by tool:
   from the model's answer and its citation checks, stating that the
   answer may be incomplete. The model
   is instructed not to repeat prompt-budget caveats in its answer.
+  When the model window rather than the per-thread budget cut the
+  evidence, or a reply stopped at `INFERENCE_MAX_TOKENS`, the server
+  log also gets one
+  [`token limit hit`](troubleshooting.md#the-log-shows-token-limit-hit)
+  warning for the call.
 - **`summarize_thread`** works on a single thread and does not use the
   per-chunk path. Its context is the thread's accumulated indexed body
   (or the ``snippet`` when the body is empty), up to ``8000``

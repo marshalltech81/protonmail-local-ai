@@ -319,7 +319,7 @@ class TestPromptEvidenceBudget:
         texts, coverage = _build_evidence([r], 200)
         assert "a" * 150 in texts[0]
         assert coverage == EvidenceCoverage(
-            omitted=1, truncated=1, duplicates=0, threads_without_evidence=0
+            omitted=1, truncated=1, duplicates=0, threads_without_evidence=0, threads_trimmed=1
         )
 
     def test_counts_threads_left_without_any_evidence(self):

@@ -1678,6 +1678,7 @@ class Database:
                     out[thread_id] = [r["subject"] for r in rows]
         except sqlite3.Error as e:
             log.warning("Rerank subject lookup failed; skipping: %s", type(e).__name__)
+            timings.count("degraded_rerank_subjects", 1)
             return {}
         return out
 
@@ -1706,12 +1707,16 @@ class Database:
         timings.count("rerank_candidates", len(docs))
         with timings.stage("rerank"):
             scored = reranker.rerank(query, docs, top_n=limit)
+        # Either fallback marks the call's timing line (#877): the line
+        # still says ``rerank=cohere`` while the results are in RRF order.
         if not scored:
+            timings.count("degraded_rerank", 1)
             return candidates[:limit]
         indices = [orig_idx for orig_idx, _ in scored]
         if len(set(indices)) != len(indices) or not all(0 <= i < len(candidates) for i in indices):
             # Fixed text only: the ranking came from the provider.
             log.warning("rerank returned invalid indices; falling back to RRF order")
+            timings.count("degraded_rerank", 1)
             return candidates[:limit]
         reordered: list[ThreadResult] = []
         for orig_idx, score in scored:
@@ -2009,6 +2014,7 @@ class Database:
             rows = self._fetchall(sql, params)
         except sqlite3.OperationalError as e:
             log.warning("Attachment filename search unavailable: %s", type(e).__name__)
+            timings.count("degraded_attachment_filename", 1)
             return []
         return [_row_to_attachment_result(r) for r in rows]
 
@@ -2079,6 +2085,7 @@ class Database:
             rows = self._fetchall(sql, params)
         except sqlite3.OperationalError as e:
             log.warning("Attachment text search unavailable: %s", type(e).__name__)
+            timings.count("degraded_attachment_text", 1)
             return []
         results: list[AttachmentResult] = []
         seen: set[tuple[str, str, str]] = set()
@@ -2121,6 +2128,7 @@ class Database:
             rows = self._fetchall(sql, params)
         except sqlite3.OperationalError as e:
             log.warning("Attachment scan unavailable: %s", type(e).__name__)
+            timings.count("degraded_attachment_scan", 1)
             return []
         return [_row_to_attachment_result(r) for r in rows]
 
@@ -2283,6 +2291,7 @@ class Database:
             # back to a LIKE scan against subject/body/participants so valid
             # searches still return recall rather than empty.
             log.warning("FTS keyword search error, falling back to LIKE: %s", type(e).__name__)
+            timings.count("degraded_thread_fts", 1)
             return self._like_fallback(query, limit, folders, date_from, date_to, has_attachments)
 
     def _chunk_keyword_search(
@@ -2336,6 +2345,7 @@ class Database:
             # corruption or a missing FTS shadow — log at warning so the
             # operator notices precision retrieval has degraded to none.
             log.warning("Chunk keyword search unavailable: %s", type(e).__name__)
+            timings.count("degraded_chunk_fts", 1)
             return []
         results = [self._row_to_result(r) for r in rows]
         return self._best_per_thread(results)[:limit]
@@ -2386,6 +2396,7 @@ class Database:
             # corruption or a missing FTS shadow — log at warning so the
             # operator notices attachment retrieval has degraded to none.
             log.warning("Attachment keyword search unavailable: %s", type(e).__name__)
+            timings.count("degraded_attachment_fts", 1)
             return []
         results = [self._row_to_result(r) for r in rows]
         return self._best_per_thread(results)[:limit]
@@ -2424,6 +2435,7 @@ class Database:
             rows = self._fetchall(sql, [fts_query, *thread_ids])
         except sqlite3.Error as e:
             log.warning("Attachment match lookup failed; skipping bias: %s", type(e).__name__)
+            timings.count("degraded_attachment_match", 1)
             return {}
         matched: dict[str, list[str]] = {}
         for r in rows:
@@ -2539,6 +2551,7 @@ class Database:
             return [self._row_to_result(r) for r in rows]
         except sqlite3.OperationalError as e:
             log.warning("LIKE fallback search error: %s", type(e).__name__)
+            timings.count("degraded_like_fallback", 1)
             return []
 
     def _chunk_vector_search(self, embedding: list[float], limit: int) -> list[ChunkResult] | None:
@@ -2605,6 +2618,7 @@ class Database:
             # raised by sqlite-vec on malformed embedding payloads. Any
             # other exception type is unexpected and should propagate.
             log.warning("Chunk vector search error: %s", type(e).__name__)
+            timings.count("degraded_chunk_vec", 1)
             return None
 
     def get_query_evidence_chunks(
@@ -2725,6 +2739,7 @@ class Database:
             # the whole hybrid_search call; coarse retrieval still
             # works and the LLM falls back to ``body_text``.
             log.warning("Per-thread evidence chunk fetch failed: %s", type(e).__name__)
+            timings.count("degraded_evidence_chunks", 1)
             return {tid: [] for tid in thread_ids}
 
         # First pass: gather ALL chunks per thread (still ordered by
@@ -2832,6 +2847,7 @@ class Database:
             )
         except sqlite3.Error as e:
             log.warning("Recent-chunks lookup failed: %s", type(e).__name__)
+            timings.count("degraded_recent_chunks", 1)
             return []
         chunks = [_row_to_chunk_result(r) for r in rows]
         # Reverse for chronological display: SELECT picked the newest
@@ -2939,6 +2955,7 @@ class Database:
             # for malformed serialised vectors. Other exception types
             # should propagate so corrupt-state bugs aren't masked.
             log.warning("Vector search error: %s", type(e).__name__)
+            timings.count("degraded_thread_vec", 1)
             return None
 
     def _reciprocal_rank_fusion(

@@ -485,6 +485,7 @@ class TestTruncatedOutput:
         with pytest.raises(InferenceTruncatedError) as err:
             asyncio.run(c.complete("sys", "user"))
         assert err.value.partial == '{"invoice": "SYNTH-1", "amount":'
+        assert err.value.reason == "max_tokens"
         assert "SYNTH" not in str(err.value)
 
     def test_openai_length_finish_with_no_content_is_still_truncation(self, monkeypatch):
@@ -515,6 +516,7 @@ class TestTruncatedOutput:
         with pytest.raises(InferenceTruncatedError) as err:
             asyncio.run(c.complete("sys", "user"))
         assert err.value.partial == "The decision was"
+        assert err.value.reason == "max_tokens"
 
     def test_complete_responses_are_returned_unchanged(self, monkeypatch):
         c = self._anthropic()
@@ -576,6 +578,10 @@ class TestFilteredOutput:
         with pytest.raises(InferenceTruncatedError) as err:
             asyncio.run(c.complete("sys", "user"))
         assert err.value.partial == "Partly"
+        # Codex review round 2 on #883: the stop reason is kept, as a fixed
+        # value, while the message (which callers see) is unchanged.
+        assert err.value.reason == "context_window"
+        assert str(err.value) == str(InferenceTruncatedError(""))
 
 
 _MAIL_MARKER = "SYNTHETIC_MAIL"
