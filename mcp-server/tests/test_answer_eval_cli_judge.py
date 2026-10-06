@@ -498,6 +498,30 @@ def test_timeout_does_not_hang_on_unread_output(tmp_path):
     assert time.perf_counter() - start < 10
 
 
+def test_cleanup_wait_is_bounded_even_if_wait_never_returns(tmp_path, monkeypatch):
+    """Review round 9 P1, defensive: whatever the Python version does with
+    unread pipes, the post-kill wait is bounded, so a timeout always ends.
+    ``Process.wait`` is made to hang outright here."""
+    script = tmp_path / "sleepy"
+    script.write_text(f"#!{sys.executable}\nimport time\ntime.sleep(60)\n")
+    script.chmod(0o700)
+
+    async def never(self):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(asyncio.subprocess.Process, "wait", never)
+    monkeypatch.setattr(cli_judge, "KILL_WAIT_SECS", 0.5)
+
+    async def go():
+        inner = cli_judge._run_cli([str(script)], "", str(tmp_path), dict(os.environ))
+        await asyncio.wait_for(asyncio.wait_for(inner, 0.5), 20.0)
+
+    start = time.perf_counter()
+    with pytest.raises(TimeoutError):
+        _run(go())
+    assert time.perf_counter() - start < 10
+
+
 def test_timeout_kills_the_whole_process_tree(tmp_path):
     """Review round 2: an npm-installed launcher spawns the native CLI
     and cannot forward SIGKILL, so the timeout kills the process group."""

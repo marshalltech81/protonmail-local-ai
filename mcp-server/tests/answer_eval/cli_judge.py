@@ -108,6 +108,10 @@ EXECUTABLES = {"claude-cli": "claude", "codex-cli": "codex"}
 PRODUCTS = {"claude-cli": "Claude Code", "codex-cli": "Codex"}
 EXECUTABLE = EXECUTABLES["claude-cli"]
 VERSION_TIMEOUT_SECS = 30.0
+# How long the timeout cleanup waits for a killed CLI to be reaped. A
+# SIGKILLed process exits at once; the bound only guarantees the cleanup
+# itself can never hang (review round 9 P1).
+KILL_WAIT_SECS = 5.0
 
 # The only caller variables a CLI judge call inherits (plus ``LC_*``):
 # what a process needs to find files, its login and the network.
@@ -331,7 +335,8 @@ async def _run_cli(argv: list[str], stdin: str, cwd: str, env: dict[str, str]) -
         if proc.returncode is None:
             with contextlib.suppress(ProcessLookupError):
                 os.killpg(proc.pid, signal.SIGKILL)
-            await proc.wait()
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(proc.wait(), KILL_WAIT_SECS)
     return stdout
 
 
