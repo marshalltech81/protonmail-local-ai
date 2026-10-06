@@ -1877,7 +1877,10 @@ class EvidenceRef:
     ``text`` is the passage text shown, which quotes are checked against.
     ``in_scope`` is its scope label (#755): whether its message meets
     every message-level filter of the request; ``None`` for tools that
-    do not label passages.
+    do not label passages. ``header_scope`` is the scope field its
+    header showed (``"in scope"`` / ``"context"``), ``None`` when the
+    header showed none, so the header can be rebuilt as the model saw
+    it (``_piece_header``).
     """
 
     label: str
@@ -1886,6 +1889,7 @@ class EvidenceRef:
     char_end: int | None
     text: str = ""
     in_scope: bool | None = None
+    header_scope: str | None = None
 
 
 # Upper bound on a labelled passage header (#284). A header whose values
@@ -2178,7 +2182,7 @@ def _build_evidence(
                 # escapes them (a tag cannot span a passage's edges).
                 shown = _escape_delimiter_tags(text)
                 evidence_map[label] = EvidenceRef(
-                    label, thread.thread_id, chunk, char_end, shown, flag
+                    label, thread.thread_id, chunk, char_end, shown, flag, tag
                 )
             used += separator + header_len + len(text)
         if pieces and not parts:
