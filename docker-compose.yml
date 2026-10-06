@@ -303,6 +303,10 @@ services:
       # of reply are fitted into it. Unset takes 48000 in anthropic mode
       # and 32768 in openai mode. Set a small local model's window.
       INFERENCE_CONTEXT_TOKENS: ${INFERENCE_CONTEXT_TOKENS:-}
+      # anthropic mode only: "true" sends the JSON tools' reply schema as
+      # a structured-output format; set "false" for a model or gateway
+      # without structured outputs. Any other value fails startup.
+      INFERENCE_STRUCTURED_OUTPUT: ${INFERENCE_STRUCTURED_OUTPUT:-true}
       MCP_PORT: ${MCP_PORT:-3000}
       # Only "streamable-http" (or empty) is accepted. Still passed through
       # so an old .env with the removed "sse" or "dual" fails startup with

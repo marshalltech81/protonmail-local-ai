@@ -1320,14 +1320,21 @@ class FakeInferenceClient:
         response: str = "mock answer",
         complete_responses: list[str | BaseException] | None = None,
         mode: str = "anthropic",
+        structured_output: bool = False,
     ) -> None:
         self._default_response = response
         self._queued = list(complete_responses) if complete_responses is not None else []
         self.mode = mode
+        # Off by default so a handler test sees today's prompt and parse;
+        # the structured-output tests (#808) turn it on.
+        self.structured_output = structured_output
         self.complete_calls: list[tuple[str, str]] = []
+        # The JSON schema each call carried (None for a call without one).
+        self.json_schemas: list[dict | None] = []
 
-    async def complete(self, system: str, user: str) -> str:
+    async def complete(self, system: str, user: str, json_schema: dict | None = None) -> str:
         self.complete_calls.append((system, user))
+        self.json_schemas.append(json_schema)
         if self._queued:
             queued = self._queued.pop(0)
             if isinstance(queued, BaseException):

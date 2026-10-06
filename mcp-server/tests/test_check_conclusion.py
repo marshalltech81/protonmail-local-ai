@@ -50,6 +50,7 @@ from tests.test_brief_issue import (
     _chunkless_db,
     _labels,
     _outside_blocks,
+    assert_strict,
 )
 
 _CONCLUSION = "The vendor contract renews automatically each year."
@@ -659,3 +660,61 @@ class TestWire:
         assert tools["check_conclusion"].output_schema is not None
         assert not result.is_error
         assert result.structured_content["status"] == "ok"
+
+
+class TestStructuredOutput:
+    """#808: with structured outputs on, check_conclusion sends its
+    constant strict schema on every call; with them off, none."""
+
+    def test_schema_is_strict_and_matches_the_check_model(self):
+        from src.tools.brief import CHECK_JSON_SCHEMA
+        from src.tools.outputs import ConclusionCheck
+
+        assert_strict(CHECK_JSON_SCHEMA, ConclusionCheck)
+        relation = CHECK_JSON_SCHEMA["properties"]["findings"]["items"]["properties"]["relation"]
+        assert set(relation["enum"]) == {"supports", "contradicts", "qualifies", "supersedes"}
+
+    def test_a_good_check_satisfies_the_schema(self, check_db):
+        import jsonschema
+        from src.tools.brief import CHECK_JSON_SCHEMA
+
+        llm = ScriptedInference(_good_check)
+        _run(check_db, llm)
+        jsonschema.validate(json.loads(_good_check(llm.complete_calls[0][1])), CHECK_JSON_SCHEMA)
+
+    def test_schema_is_sent_on_every_call(self, check_db):
+        from src.tools.brief import CHECK_JSON_SCHEMA
+
+        llm = ScriptedInference(lambda _u: _check(), _good_check)
+        llm.structured_output = True
+        out = _run(check_db, llm)
+        assert out.structured_content["status"] == "ok"
+        assert out.structured_content["repair_attempted"] is True
+        assert llm.json_schemas == [CHECK_JSON_SCHEMA, CHECK_JSON_SCHEMA]
+
+    def test_setting_off_sends_no_schema(self, check_db):
+        llm = ScriptedInference(_good_check)
+        _run(check_db, llm)
+        assert llm.json_schemas == [None]
+
+    @pytest.mark.parametrize("structured", [True, False])
+    def test_evidence_budget_reserves_the_schema(self, check_db, monkeypatch, structured):
+        """#809 round 2: Anthropic adds a system prompt for the schema,
+        billed as input, so the budget reserves room for it only when the
+        schema is sent."""
+        from src.tools import brief
+        from src.tools.brief import CHECK_JSON_SCHEMA
+        from src.tools.intelligence import _schema_reserve_chars
+
+        reserves: list[int] = []
+        original = brief._evidence_budget
+
+        def spy(*args, reserve_chars: int = 0, **kwargs):
+            reserves.append(reserve_chars)
+            return original(*args, reserve_chars=reserve_chars, **kwargs)
+
+        monkeypatch.setattr(brief, "_evidence_budget", spy)
+        llm = ScriptedInference(_good_check)
+        llm.structured_output = structured
+        _run(check_db, llm)
+        assert reserves == [_schema_reserve_chars(CHECK_JSON_SCHEMA) if structured else 0]

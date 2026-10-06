@@ -56,6 +56,7 @@ from .intelligence import (
     _escape_delimiter_tags,
     _evidence_budget,
     _evidence_prompt,
+    _schema_reserve_chars,
     _sort_labels,
     _sources_searched,
     _strip_code_fence,
@@ -143,6 +144,48 @@ _BRIEF_REPAIR_INSTRUCTION = (
 )
 
 _TASK = "Return the brief as the JSON object described in the instructions."
+
+
+# --- Structured outputs (#808) ---------------------------------------------
+#
+# In anthropic mode with INFERENCE_STRUCTURED_OUTPUT on, both tools send
+# their reply shape as a strict JSON schema. The shapes are the server's,
+# so the schemas are constants matching the Brief and ConclusionCheck
+# models: every object closed, every field required. Constraints
+# structured outputs do not take (BriefEvent.date's pattern, the findings
+# cap) stay with the models' validation, whose failure gets the repair call.
+
+
+def _closed(**properties: dict) -> dict:
+    return {
+        "type": "object",
+        "properties": properties,
+        "required": list(properties),
+        "additionalProperties": False,
+    }
+
+
+def _entries(**properties: dict) -> dict:
+    """A list of closed entry objects, each with its ``labels``."""
+    labels = {"type": "array", "items": {"type": "string"}}
+    return {"type": "array", "items": _closed(**properties, labels=labels)}
+
+
+_TEXT = {"type": "string"}
+
+BRIEF_JSON_SCHEMA = _closed(
+    chronology=_entries(
+        date={"anyOf": [{"type": "string"}, {"type": "null"}]},
+        date_source={"type": "string", "enum": ["sent", "mentioned", "unknown"]},
+        actor=_TEXT,
+        event=_TEXT,
+    ),
+    positions=_entries(actor=_TEXT, position=_TEXT),
+    decisions=_entries(decision=_TEXT),
+    open_questions=_entries(question=_TEXT),
+    conflicts=_entries(description=_TEXT),
+    insufficient_evidence={"type": "boolean"},
+)
 
 _SECTIONS: tuple[BriefSection, ...] = (
     "chronology",
@@ -495,6 +538,24 @@ _CHECK_REPAIR_INSTRUCTION = (
 
 _CHECK_TASK = "Return the check as the JSON object described in the instructions."
 
+# check_conclusion's strict reply schema (#808). ``relation`` is an enum
+# here; ConclusionFinding keeps it a plain string for unstructured replies.
+CHECK_JSON_SCHEMA = _closed(
+    verdict_summary=_TEXT,
+    findings={
+        "type": "array",
+        "items": _closed(
+            relation={
+                "type": "string",
+                "enum": ["supports", "contradicts", "qualifies", "supersedes"],
+            },
+            explanation=_TEXT,
+            labels={"type": "array", "items": {"type": "string"}},
+        ),
+    },
+    insufficient_evidence={"type": "boolean"},
+)
+
 # Either delimiter tag, in any spelling, inside the caller's conclusion:
 # escaped like _untrusted_email_block does (including the look-alike
 # brackets, #442, and look-alike letters in the name, #533), so the
@@ -664,12 +725,20 @@ def register_experimental_tools(
     secret_values = list(secret_values or ())
     prompt_budget = prompt_budget or PromptBudget()
 
-    async def complete(user_prompt: str, system: str = BRIEF_SYSTEM) -> tuple[str, bool]:
-        """The model's reply and whether it was cut off at max_tokens."""
+    async def complete(
+        user_prompt: str, system: str = BRIEF_SYSTEM, json_schema: dict = BRIEF_JSON_SCHEMA
+    ) -> tuple[str, bool]:
+        """The model's reply and whether it was cut off at max_tokens.
+        ``json_schema`` is sent only with structured outputs on (#808)."""
         count("inference_calls", 1)
         try:
             with stage("inference"):
-                return await inference_client.complete(system, user_prompt), False
+                if not inference_client.structured_output:
+                    return await inference_client.complete(system, user_prompt), False
+                reply = await inference_client.complete(
+                    system, user_prompt, json_schema=json_schema
+                )
+                return reply, False
         except InferenceTruncatedError as e:
             return e.partial, True
 
@@ -794,7 +863,15 @@ def register_experimental_tools(
             # sized so the complete prompt fits the model window (#285).
             task = f"Issue topic: {topic}\n\n{_TASK}"
             evidence_map: dict[str, EvidenceRef] = {}
-            shown, evidence_chars = _evidence_budget(prompt_budget, BRIEF_SYSTEM, evidenced, task)
+            # Room for the system prompt Anthropic adds with the schema (#809).
+            reserve = (
+                _schema_reserve_chars(BRIEF_JSON_SCHEMA)
+                if inference_client.structured_output
+                else 0
+            )
+            shown, evidence_chars = _evidence_budget(
+                prompt_budget, BRIEF_SYSTEM, evidenced, task, reserve_chars=reserve
+            )
             evidence, coverage = _build_evidence(shown, evidence_chars, evidence_map=evidence_map)
             coverage.threads_dropped = len(evidenced) - len(shown)
             user_prompt = _evidence_prompt(shown, evidence, coverage) + task
@@ -1024,7 +1101,15 @@ def register_experimental_tools(
             # block, then the fixed task line.
             task = _conclusion_block(conclusion) + _CHECK_TASK
             evidence_map: dict[str, EvidenceRef] = {}
-            shown, evidence_chars = _evidence_budget(prompt_budget, CHECK_SYSTEM, evidenced, task)
+            # Room for the system prompt Anthropic adds with the schema (#809).
+            reserve = (
+                _schema_reserve_chars(CHECK_JSON_SCHEMA)
+                if inference_client.structured_output
+                else 0
+            )
+            shown, evidence_chars = _evidence_budget(
+                prompt_budget, CHECK_SYSTEM, evidenced, task, reserve_chars=reserve
+            )
             evidence, coverage = _build_evidence(shown, evidence_chars, evidence_map=evidence_map)
             coverage.threads_dropped = len(evidenced) - len(shown)
             user_prompt = _evidence_prompt(shown, evidence, coverage) + task
@@ -1051,14 +1136,16 @@ def register_experimental_tools(
                 quotes, quote_problems = _check_conclusion_quotes(check, used, evidence_map)
                 return used, problems + quote_problems, quotes
 
-            text, truncated = await complete(user_prompt, CHECK_SYSTEM)
+            text, truncated = await complete(user_prompt, CHECK_SYSTEM, CHECK_JSON_SCHEMA)
             check = None if truncated else _parse_check(text)
             used, problems, quotes = check_reply(check)
             repair_attempted = not truncated and (check is None or bool(problems))
             if repair_attempted:
                 reason = _check_repair_reason(check, problems)
                 text2, truncated2 = await complete(
-                    user_prompt + _CHECK_REPAIR_INSTRUCTION.format(reason=reason), CHECK_SYSTEM
+                    user_prompt + _CHECK_REPAIR_INSTRUCTION.format(reason=reason),
+                    CHECK_SYSTEM,
+                    CHECK_JSON_SCHEMA,
                 )
                 check2 = None if truncated2 else _parse_check(text2)
                 if check2 is not None:

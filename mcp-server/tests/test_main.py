@@ -967,6 +967,80 @@ class TestExperimentalToolsFlag:
         assert "Experimental tools not registered" in caplog.text
 
 
+class TestStructuredOutputFlag:
+    """``INFERENCE_STRUCTURED_OUTPUT`` (#808): on unless exactly ``false``
+    (case-insensitive; unset or empty is on), an unrecognized value fails
+    startup, and the value reaches the inference client."""
+
+    def _load(self, monkeypatch, value):
+        import importlib
+
+        import src.main as main_mod
+
+        if value is None:
+            monkeypatch.delenv("INFERENCE_STRUCTURED_OUTPUT", raising=False)
+        else:
+            monkeypatch.setenv("INFERENCE_STRUCTURED_OUTPUT", value)
+        try:
+            return importlib.reload(main_mod).INFERENCE_STRUCTURED_OUTPUT
+        finally:
+            monkeypatch.delenv("INFERENCE_STRUCTURED_OUTPUT", raising=False)
+            importlib.reload(main_mod)
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            (None, True),
+            ("", True),
+            (" ", True),
+            ("true", True),
+            ("TRUE", True),
+            ("false", False),
+            (" False ", False),
+        ],
+    )
+    def test_flag_parses_strictly_with_default_on(self, monkeypatch, value, expected):
+        assert self._load(monkeypatch, value) is expected
+
+    @pytest.mark.parametrize("value", ["0", "no", "off", "flase", "true!"])
+    def test_unrecognized_value_fails_startup(self, monkeypatch, value):
+        with pytest.raises(ValueError, match="INFERENCE_STRUCTURED_OUTPUT"):
+            self._load(monkeypatch, value)
+
+    @pytest.mark.parametrize("enabled", [True, False])
+    def test_setting_reaches_the_inference_client(self, monkeypatch, enabled):
+        import src.main as main_mod
+
+        for name, value in {
+            "EMBED_BASE_URL": "http://host.docker.internal:8001/v1",
+            "EMBED_MODEL": "synthetic",
+            "MCP_AUTH_TOKEN": _PLACEHOLDER_TOKEN,
+            "EMBED_API_KEY": _PLACEHOLDER_KEY,
+            "INFERENCE_MODE": "anthropic",
+            "INFERENCE_BASE_URL": "http://host.docker.internal:8002",
+            "INFERENCE_MODEL": "synthetic",
+            "INFERENCE_API_KEY": _PLACEHOLDER_KEY,
+            "INFERENCE_STRUCTURED_OUTPUT": enabled,
+            "RERANK_MODE": "none",
+        }.items():
+            monkeypatch.setattr(main_mod, name, value)
+        monkeypatch.setattr(main_mod, "Database", TestExperimentalToolsFlag._FakeDatabase)
+        monkeypatch.setattr(main_mod, "run_startup_identity_check", _skip_identity_check)
+        created = []
+        real_create = main_mod.InferenceClient.create
+
+        def spy(**kwargs):
+            client = real_create(**kwargs)
+            created.append(client)
+            return client
+
+        monkeypatch.setattr(main_mod.InferenceClient, "create", spy)
+        monkeypatch.setattr(main_mod, "_run_server", lambda *args: None)
+        main_mod.main()
+        [client] = created
+        assert client.structured_output is enabled
+
+
 class TestHealthEndpoint:
     """The /health route delegates to ``_health_response``, which the
     tests call directly with a stub DB.

@@ -75,6 +75,8 @@ class LayerConfig:
     max_tokens: int
     context_tokens: int
     max_input_chars: int = 0
+    # INFERENCE_STRUCTURED_OUTPUT, read as the server reads it (#808).
+    structured_output: bool = True
     cli_path: str = ""
     cli_version: str = ""
 
@@ -127,6 +129,7 @@ class LayerConfig:
             api_key=self.api_key,
             max_tokens=self.max_tokens,
             timeout_secs=self.timeout_secs,
+            structured_output=self.structured_output,
         )
 
 
@@ -205,11 +208,16 @@ def load_layer(
         max_tokens = int(_number(env, "INFERENCE_MAX_TOKENS", default_max, 1))
         context = int(_number(env, "INFERENCE_CONTEXT_TOKENS", default_context, 1))
         max_input = 0
+        structured = env.get("INFERENCE_STRUCTURED_OUTPUT", "").strip().lower()
+        if structured not in {"", "true", "false"}:
+            raise ConfigError("INFERENCE_STRUCTURED_OUTPUT must be 'true' or 'false'")
+        structured_output = structured != "false"
     else:
         timeout = _number(env, "JUDGE_TIMEOUT_SECS", JUDGE_DEFAULT_TIMEOUT_SECS, 1.0)
         max_tokens = int(_number(env, "JUDGE_MAX_TOKENS", JUDGE_DEFAULT_MAX_TOKENS, 256))
         context = 0
         max_input = int(_number(env, "JUDGE_MAX_INPUT_CHARS", JUDGE_DEFAULT_MAX_INPUT_CHARS, 1000))
+        structured_output = False  # the judge sends no schema
     return LayerConfig(
         layer=layer,
         mode=mode,
@@ -220,6 +228,7 @@ def load_layer(
         max_tokens=max_tokens,
         context_tokens=context,
         max_input_chars=max_input,
+        structured_output=structured_output,
     )
 
 
@@ -247,6 +256,7 @@ def _load_cli_judge(mode: str, env: Mapping[str, str]) -> LayerConfig:
         max_input_chars=int(
             _number(env, "JUDGE_MAX_INPUT_CHARS", JUDGE_DEFAULT_MAX_INPUT_CHARS, 1000)
         ),
+        structured_output=False,  # the judge sends no schema
         cli_path=path,
         cli_version=cli_judge.cli_version(path),
     )

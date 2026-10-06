@@ -113,8 +113,9 @@ class ScriptedInference(FakeInferenceClient):
         super().__init__()
         self._script = list(script)
 
-    async def complete(self, system: str, user: str) -> str:
+    async def complete(self, system: str, user: str, json_schema: dict | None = None) -> str:
         self.complete_calls.append((system, user))
+        self.json_schemas.append(json_schema)
         step = self._script.pop(0)
         if isinstance(step, BaseException):
             raise step
@@ -724,3 +725,85 @@ class TestWire:
         assert tools["brief_issue"].output_schema is not None
         assert not result.is_error
         assert result.structured_content["status"] == "ok"
+
+
+def assert_strict(schema: dict, model: type | None = None) -> None:
+    """Every object in ``schema`` is closed with all its properties
+    required, as Anthropic structured outputs need (#808); with
+    ``model``, its properties are exactly the model's fields, and each
+    nested entry object's those of the entry model it holds."""
+    stack = [(schema, model)]
+    while stack:
+        node, node_model = stack.pop()
+        if node.get("type") == "object":
+            assert node["additionalProperties"] is False
+            assert node["required"] == list(node["properties"])
+            if node_model is not None:
+                assert set(node["properties"]) == set(node_model.model_fields)
+            for name, sub in node["properties"].items():
+                sub_model = None
+                if node_model is not None:
+                    args = getattr(node_model.model_fields[name].annotation, "__args__", ())
+                    sub_model = next((a for a in args if hasattr(a, "model_fields")), None)
+                stack.append((sub, sub_model))
+        elif node.get("type") == "array":
+            stack.append((node["items"], node_model))
+        for branch in node.get("anyOf", []):
+            stack.append((branch, None))
+
+
+class TestStructuredOutput:
+    """#808: with structured outputs on, brief_issue sends its constant
+    strict schema on every call (the repair call too); with them off, it
+    sends none and the request is today's."""
+
+    def test_schema_is_strict_and_matches_the_brief_model(self):
+        from src.tools.brief import BRIEF_JSON_SCHEMA
+        from src.tools.outputs import Brief
+
+        assert_strict(BRIEF_JSON_SCHEMA, Brief)
+
+    def test_a_good_brief_satisfies_the_schema(self, brief_db):
+        import jsonschema
+        from src.tools.brief import BRIEF_JSON_SCHEMA
+
+        llm = ScriptedInference(_good_brief)
+        _run(brief_db, llm)
+        jsonschema.validate(json.loads(_good_brief(llm.complete_calls[0][1])), BRIEF_JSON_SCHEMA)
+
+    def test_schema_is_sent_on_every_call(self, brief_db):
+        from src.tools.brief import BRIEF_JSON_SCHEMA
+
+        llm = ScriptedInference(lambda _u: _brief(insufficient_evidence=False), _good_brief)
+        llm.structured_output = True
+        out = _run(brief_db, llm)
+        assert out.structured_content["status"] == "ok"
+        assert out.structured_content["repair_attempted"] is True
+        assert llm.json_schemas == [BRIEF_JSON_SCHEMA, BRIEF_JSON_SCHEMA]
+
+    def test_setting_off_sends_no_schema(self, brief_db):
+        llm = ScriptedInference(_good_brief)
+        _run(brief_db, llm)
+        assert llm.json_schemas == [None]
+
+    @pytest.mark.parametrize("structured", [True, False])
+    def test_evidence_budget_reserves_the_schema(self, brief_db, monkeypatch, structured):
+        """#809 round 2: Anthropic adds a system prompt for the schema,
+        billed as input, so the budget reserves room for it only when the
+        schema is sent."""
+        from src.tools import brief
+        from src.tools.brief import BRIEF_JSON_SCHEMA
+        from src.tools.intelligence import _schema_reserve_chars
+
+        reserves: list[int] = []
+        original = brief._evidence_budget
+
+        def spy(*args, reserve_chars: int = 0, **kwargs):
+            reserves.append(reserve_chars)
+            return original(*args, reserve_chars=reserve_chars, **kwargs)
+
+        monkeypatch.setattr(brief, "_evidence_budget", spy)
+        llm = ScriptedInference(_good_brief)
+        llm.structured_output = structured
+        _run(brief_db, llm)
+        assert reserves == [_schema_reserve_chars(BRIEF_JSON_SCHEMA) if structured else 0]
