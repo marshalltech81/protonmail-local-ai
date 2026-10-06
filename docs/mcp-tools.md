@@ -377,6 +377,24 @@ passages of its extracted text, each capped at 1600 characters) or
 locates attachments and previews their extracted text; none of the
 three returns the whole document.
 
+Before a no-query coverage scan, disclose the filters and planned maximum
+number of attachment previews; these reach the calling model, which may
+be remote. Use the smallest sufficient `limit`, remain within the requested
+or approved scope and ask before expanding it. There is no exact total.
+`from_addr` selects threads, so previews can come from other participants;
+include that conversation scope in the disclosure.
+
+Check `extraction_status`: any value other than `success` (`failed`,
+`unsupported`, `too_large`, `empty` or null) means no extracted text is
+available, not absence of relevant content. To assess coverage,
+make a separate call without `query`, with the applicable structured
+filters and `extracted_only=false`. A text query cannot reveal unextracted
+files whose filename and MIME type do not match. There is no pagination beyond
+the 50-result cap. Report limited results and unread document text as
+coverage limits rather than claiming an exhaustive attachment audit.
+With `from_addr`, sender filtering happens after a bounded candidate scan,
+so even fewer than 50 results (including zero) can omit matching attachments.
+
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `query` | string | none | Match against filename, MIME type, and extracted text; omit to list by filter alone |
@@ -421,6 +439,24 @@ per role, 10 thread participants, and 10 References are listed (with a
 "+N more" count), and any header value past 500 characters is cut with
 a marker. The page is read from one database snapshot.
 
+To examine all currently indexed messages, follow this tool's `next_offset`
+until null. When a message has `body_omitted_chars > 0`, call
+`get_message` with its claimant ID and follow that tool's `next_offset`
+until null too. Report unread message or body pages, `reaped_messages`
+and `reaped_messages_truncated` as coverage limits: paging cannot recover
+removed messages. Separate page snapshots also mean concurrent indexing
+can change the conversation during the run.
+
+For a potentially exhaustive review, disclose the target thread and planned
+content read before the first call, including transfer to the calling model,
+which may be remote. This is not a metadata probe: even `limit=1` can return
+accumulated thread context when per-message bodies are absent. State that
+the initial read can include the whole conversation's indexed context.
+After disclosure, use `limit=1` only if the count is not already known, to
+learn `total_messages`. Before bulk thread or body paging, disclose how many
+messages will be read. Stay within the requested or approved scope and ask
+before expanding it. A narrower task may need only one page.
+
 Messages of the thread reaped under mirror retention are listed by
 claimant ID and reap time in `reaped_messages`; a fully reaped thread
 fails with `Thread reaped from the index` rather than `Thread not
@@ -434,6 +470,14 @@ found` ([Reaped sources](#reaped-sources)).
 | `limit` | int | `10` | Messages per page; clamped to `[1, 50]` |
 
 ### `get_message`
+For reads within a filtered or exhaustive review, disclose before calling
+that this content read may also return bounded parent-thread context when
+the message has no indexed body, including
+other messages outside the requested sender/date scope. This context
+reaches the calling model, which may be remote. If that exceeds the
+requested or approved scope, ask before the call: a message ID or body
+offset does not prevent the context fallback.
+
 Return one message's own headers — subject, From / To / Cc, send date
 and, when known, delivery date (`occurred_at`) in UTC, folder,
 In-Reply-To, References, attachment flag, [read state](#read-state) — with its thread ID and
@@ -442,6 +486,10 @@ per-message chunk store (overlap between adjacent chunks is removed by
 character offset). The index keeps no raw per-message body, so this is
 the indexed text **after quoted-reply stripping**; it falls back to
 thread context when no body chunks are indexed for the message.
+In that case, `body: null` means no indexed body, and
+`indexed_thread_text` is conversation context, not this message's text.
+Report the gap; do not attribute the context to the message or treat
+the missing body as proof that it contained no relevant evidence.
 Attachment text is not included — use `get_evidence` for that. The
 prose ends its header block with the raw source file's path, size, and
 SHA-256.
@@ -607,6 +655,14 @@ of the address or display name; the display name compares casefolded
 (Unicode caseless). The response names the mode used for
 each filter.
 
+When the exact address is unknown, enumerate name-substring matches in the
+requested sender/recipient role and folder with `query_messages`, following
+the disclosure and paging guidance below. `find_contact` is capped and
+ranks across all roles/folders, so it cannot establish the complete candidate
+set. Prefer the intended person's exact address once resolved. Report
+truncated headers or unresolved identities as limits; ask the user if
+identity remains ambiguous rather than combining unrelated namesakes.
+
 **Response contract.** The response states the filter interpretation,
 `total_matches` (over the whole set), `returned` with the match range,
 and `has_more`; when more remain it includes `next_cursor`. Each
@@ -622,6 +678,36 @@ indexed while a caller pages never shift or duplicate later pages. A
 cursor is bound to the filters it was issued for; a cursor from
 another query, or a malformed one, is rejected with an error rather
 than silently restarting.
+
+To examine every match, follow `next_cursor` until `has_more` is false.
+Each page uses a fresh index snapshot; new matches ahead of the cursor can
+be missed. A changed `total_matches` signals churn, but an unchanged total
+does not prove a stable set. Scope coverage to the indexed results observed
+during the run, not a point-in-time complete mailbox.
+
+Start with narrow filters and `limit=1` to obtain the count. Before bulk
+paging or reading bodies, tell the user the scope and how many messages
+will be read: tool results go to the calling model, which may be remote.
+Prefer the smallest sufficient sample when it answers the question;
+a sample cannot establish an exhaustive content audit.
+
+Subsequent body reads can also return parent-thread context beyond these
+message filters. Include that possible context in the pre-read scope
+disclosure, and ask before a content call would exceed the requested or
+approved scope. Filtering the list does not restrict the context returned
+by `get_message` or `get_thread`.
+
+A count of the exact filter criteria needs only `total_matches`; reading
+every page is necessary when classifying or examining each message.
+Exhausting a keyword query does not establish exhaustive coverage of a
+topic. Consider alternate wording, read candidate messages, and keep the
+counting unit explicit (messages, threads, or distinct bills/items).
+
+For outstanding-item questions, look for completion, corrections and
+reopening across threads and senders. A sent request or delivered advice
+does not prove the action was completed. State the scope and disclose
+unread pages, missing indexed bodies and unavailable attachment text
+instead of claiming full coverage.
 
 ---
 

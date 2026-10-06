@@ -81,6 +81,53 @@ def _registered_tools() -> dict[str, Callable[..., Any]]:
     return cast(dict[str, Callable[..., Any]], server.tools)
 
 
+@pytest.mark.parametrize(
+    ("tool", "guidance"),
+    [
+        ("query_messages", "until ``has_more`` is false"),
+        ("query_messages", "exact address"),
+        ("query_messages", "does not prove exhaustive coverage of a topic"),
+        ("query_messages", "different threads and senders"),
+        ("get_thread", "``body_omitted_chars``"),
+        ("get_thread", "``next_offset`` is null"),
+        ("get_message", "``body: null``"),
+        ("get_message", "``indexed_thread_text`` is conversation context"),
+        ("search_attachments", "``extraction_status``"),
+        ("search_attachments", "no pagination"),
+        ("query_messages", "Before bulk paging"),
+        ("query_messages", "smallest sufficient sample"),
+        ("query_messages", "same total does not prove a stable set"),
+        ("query_messages", "requested sender/recipient role"),
+        ("get_thread", "``reaped_messages_truncated``"),
+        ("get_thread", "all currently indexed messages"),
+        ("search_attachments", "omit ``query``"),
+        ("query_messages", "enumerate name-substring matches"),
+        ("query_messages", "``find_contact`` is capped"),
+        ("search_attachments", "anything other than ``success``"),
+        ("search_attachments", "``too_large``, ``empty`` or null"),
+        ("search_attachments", "fewer than 50 results"),
+        ("get_thread", "For a potentially exhaustive review"),
+        ("get_thread", "before the first call"),
+        ("get_thread", "even ``limit=1`` can return accumulated thread context"),
+        ("get_thread", "use ``limit=1`` only if the count is not already known"),
+        ("get_thread", "Before bulk thread/body paging"),
+        ("get_thread", "requested or approved scope"),
+        ("search_attachments", "Before a no-query coverage scan"),
+        ("search_attachments", "maximum number of attachment previews"),
+        ("get_message", "For reads within a filtered or exhaustive review"),
+        ("get_message", "other messages outside the requested sender/date scope"),
+        ("get_message", "ask before this call"),
+        ("query_messages", "body reads can also return parent-thread context"),
+        ("search_attachments", "previews can come from other participants"),
+    ],
+)
+def test_exhaustive_workflow_guidance_is_in_registered_descriptions(tool, guidance) -> None:
+    # Contract only: scripted traces cannot establish that a live agent
+    # follows these instructions (#803).
+    description = " ".join(inspect.getdoc(_registered_tools()[tool]).split())
+    assert guidance in description
+
+
 def test_every_scenario_has_one_reference_trace() -> None:
     traced = [t["scenario"] for t in TRACES]
     assert sorted(traced) == sorted(SCENARIOS)

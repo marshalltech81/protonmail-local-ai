@@ -237,11 +237,29 @@ def register_retrieval_tools(server, db):
         Get one thread's messages by thread ID, oldest first — each
         message's own headers and body; no attachment content.
 
+        For a potentially exhaustive review, disclose the target thread
+        and planned content read before the first call, including transfer
+        to the calling model, which may be remote. This is not a metadata
+        probe: even ``limit=1`` can return accumulated thread context when
+        per-message bodies are absent; say that the initial read can include
+        the whole conversation's indexed context. After that disclosure,
+        use ``limit=1`` only if the count is not already known, to learn
+        ``total_messages``. Before bulk thread/body paging, disclose how
+        many messages you plan to read. Stay within the requested or approved
+        scope; ask before expanding it. A narrower task may need only one page.
+
         Pages by message: the response states the thread's message
         count and, when more remain, the ``offset`` for the next call.
         Each body is cut at 4,000 characters, with a marker saying how
         much was left out; long header values and lists are shortened the
-        same way. ``get_message`` pages through a full body.
+        same way. When a message's ``body_omitted_chars`` is positive,
+        call ``get_message`` with its claimant ID and follow that tool's
+        ``next_offset`` until null to read the rest of its indexed body.
+        To read all currently indexed messages, also page this tool
+        until its own ``next_offset`` is null. Report unread pages,
+        ``reaped_messages`` and ``reaped_messages_truncated`` as coverage
+        limits: paging cannot recover removed messages. Pages use separate
+        snapshots, so concurrent indexing can change the conversation.
 
         DO NOT use this to read attachment content (PDFs, OCR'd
         images, scans). It returns the message bodies only; the
@@ -407,6 +425,14 @@ def register_retrieval_tools(server, db):
         Get one message's own headers and indexed body, one page of the
         body at a time.
 
+        For reads within a filtered or exhaustive review, disclose before
+        calling that this content read may also return bounded parent-thread
+        context when the message has no indexed body,
+        including other messages outside the requested sender/date scope.
+        This context reaches the calling model, which may be remote. If
+        that exceeds the requested or approved scope, ask before this call;
+        a message ID or body offset does not prevent the context fallback.
+
         Headers come from the message itself: subject, From / To / Cc,
         send date and (when known) delivery date (UTC), folder,
         In-Reply-To, References, and the attachment flag. Headers are
@@ -424,7 +450,11 @@ def register_retrieval_tools(server, db):
         with each ``next_offset`` in turn returns the whole body.
         Attachment text is NOT included here; use get_evidence or
         ask_mailbox for attachment content. When no body chunks are
-        indexed for the message, falls back to parent-thread context.
+        indexed for the message, ``body: null`` means no indexed body;
+        ``indexed_thread_text`` is conversation context, not this
+        message's text. Report this gap rather than attributing the
+        context to this message or treating a missing body as proof
+        that the message contained no relevant evidence.
 
         ``message_id`` is a ``Claimant ID`` (the Message-ID plus
         ``#`` and a short hash, which names exactly one message) or the
@@ -707,11 +737,47 @@ def register_retrieval_tools(server, db):
         enumerated. Messages in Trash are counted only by a separate
         call with ``folder="Trash"``.
 
+        Start with narrow filters and ``limit=1`` to obtain the count.
+        Before bulk paging or reading bodies, tell the user the scope
+        and how many messages you will read: tool results go to the
+        calling model, which may be remote. Prefer the smallest sufficient
+        sample when it answers the question; a sample cannot establish
+        an exhaustive content audit.
+        Subsequent body reads can also return parent-thread context beyond
+        these message filters. Include that possible context in the pre-read
+        scope disclosure; ask before a content call would exceed the
+        requested or approved scope. Filtering this list does not restrict
+        the context returned by ``get_message`` or ``get_thread``.
+
         Paging: the response states ``total_matches``, how many were
         returned, and ``has_more``. When ``has_more`` is true, call
         again with the SAME filters plus ``cursor`` set to the returned
         ``next_cursor``. Never report a partial page as the complete
-        answer — use ``total_matches`` for counts.
+        answer. To examine every match, continue until ``has_more`` is
+        false; a count of these exact criteria needs only ``total_matches``.
+        An exhausted keyword query does not prove exhaustive coverage of
+        a topic: consider alternate wording, read candidate messages,
+        and distinguish messages from threads or distinct bills/items.
+        Each page uses a fresh index snapshot; new matches ahead of the
+        cursor can be missed. A changed ``total_matches`` signals churn,
+        but the same total does not prove a stable set. Scope coverage to
+        the indexed results observed during the run, not a point-in-time
+        complete mailbox.
+
+        When a person's exact address is unknown, enumerate name-substring
+        matches in the requested sender/recipient role and folder with
+        this tool, following the disclosure and paging guidance above.
+        ``find_contact`` is capped and ranks across all roles/folders;
+        it cannot establish the complete candidate set. Prefer the
+        intended person's exact address once resolved. Report truncated
+        headers or unresolved identities as limits; ask the user if
+        identity remains ambiguous rather than combining namesakes.
+        For outstanding-item questions,
+        check for completion, corrections and reopening in different threads and
+        senders before calling an item open or closed. A sent request or
+        delivered advice does not establish that the action was completed.
+        State the scope and any unread pages, missing indexed bodies or
+        unavailable attachment text instead of claiming full coverage.
 
         Args:
             sender: From address. A full address ("jane@example.com")

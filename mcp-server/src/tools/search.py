@@ -762,6 +762,26 @@ def register_search_tools(
         tool LOCATES attachments and previews their extracted text; none
         of the three returns the whole document.
 
+        Before a no-query coverage scan, disclose the filters and planned
+        maximum number of attachment previews; those previews go to the
+        calling model, which may be remote. Use the smallest sufficient
+        ``limit`` and stay within the requested or approved scope; ask
+        before expanding it. The tool does not report an exact total.
+        ``from_addr`` selects threads, so previews can come from other
+        participants; include that conversation scope in the disclosure.
+
+        Check each result's ``extraction_status``: anything other than
+        ``success`` (``failed``, ``unsupported``, ``too_large``, ``empty`` or null)
+        means no extracted text is available, not that the attachment
+        says nothing relevant. To check coverage, omit ``query``
+        in a separate call with applicable structured filters and leave
+        ``extracted_only`` false: a text query cannot reveal unextracted
+        files whose filename and MIME type do not match. There is no pagination
+        beyond the 50-result cap, so report limited results and unread document text
+        as coverage limits; do not claim an exhaustive attachment audit.
+        With ``from_addr``, the sender filter runs after a bounded candidate
+        scan: even fewer than 50 results (including zero) can omit matches.
+
         Args:
             query: Text to match against filename, MIME type, and
                    extracted attachment text. Omit to list by filter
