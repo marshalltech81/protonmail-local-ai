@@ -563,6 +563,25 @@ delivered to `new/` without flags reads as unread. The prose shows it as
 `Status: read, flagged, replied` (or `unread`). The server is
 read-only: nothing here changes the state in Proton.
 
+### Pending deletion
+
+Under mirror retention a message deleted in Proton (mbsync sets the
+Maildir `T` flag) or whose file went missing is tombstoned by the
+indexer and stays indexed until the grace window
+(`INDEXER_DELETION_GRACE_DAYS`) passes and the reaper removes it
+([Reaped sources](#reaped-sources)). Until then `get_message` and
+`query_messages` still list it, and mark it with
+`pending_deletion: true` (`false` for every other message). The prose
+shows `Pending deletion: yes` in `get_message` and `| pending deletion`
+on the `query_messages` row. A tombstone counts only while it is on
+the message's current file, so a message restored upstream reads as
+live once the indexer sees the restore. The flag is read at query
+time and changes no totals or paging: an unfiltered `query_messages` count still includes these
+messages, and `query_messages` has no filter on it. Archive mode
+records no tombstones, so the flag is `false` there, except for
+tombstones left by an earlier mirror-mode run, which archive mode
+neither reaps nor clears. `get_thread` rows do not carry it.
+
 ### `list_threads`
 Browse threads in a folder: every thread with at least one message
 filed in it, newest activity first. A thread's `folder` field is its
@@ -680,7 +699,8 @@ identity remains ambiguous rather than combining unrelated namesakes.
 **Response contract.** The response states the filter interpretation,
 `total_matches` (over the whole set), `returned` with the match range,
 and `has_more`; when more remain it includes `next_cursor`. Each
-message carries its send and delivery dates, folder, read state, attachment flag, subject,
+message carries its send and delivery dates, folder, read state,
+[pending deletion](#pending-deletion), attachment flag, subject,
 From / To / Cc (at most 10 per role, with a count of the rest),
 Message-ID, claimant ID, and Thread ID; the structured output adds In-Reply-To and
 up to 10 References. Header values are sender-controlled, so any past

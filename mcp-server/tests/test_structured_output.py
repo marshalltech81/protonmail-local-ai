@@ -751,3 +751,70 @@ class TestMaildirState:
         assert first["has_more"]
         result = _wire(server, "query_messages", {"seen": True, "cursor": first["next_cursor"]})
         assert result.is_error
+
+
+class TestPendingDeletion:
+    """A message whose file the reconciler tombstoned (``T``-flagged or
+    missing, awaiting the reaper under mirror retention) is still listed,
+    marked ``pending_deletion`` (#794)."""
+
+    @pytest.fixture
+    def server(self, tmp_path):
+        with _open_fixture_db(tmp_path) as (conn, db):
+            for mid, day in (("live", 1), ("doomed", 2), ("restored", 3)):
+                _insert_message(
+                    conn,
+                    message_id=mid,
+                    thread_id="t1",
+                    sent_at=f"2024-01-0{day}T00:00:00+00:00",
+                    from_=["alice@example.com"],
+                )
+            rows = {
+                r[0]: (r[1], r[2])
+                for r in conn.execute("SELECT message_id, claimant_id, filepath FROM messages")
+            }
+            claimant, path = rows["doomed"]
+            # A tombstone on the message's current file marks it.
+            conn.execute(
+                "INSERT INTO pending_deletions VALUES (?, ?, 't1', '2024-02-01T00:00:00+00:00')",
+                (path, claimant),
+            )
+            # One left under a path the message no longer has (the file
+            # moved out of the trash) does not: the reaper clears it.
+            claimant, _ = rows["restored"]
+            conn.execute(
+                "INSERT INTO pending_deletions VALUES (?, ?, 't1', '2024-02-01T00:00:00+00:00')",
+                ("/maildir/INBOX/cur/restored:2,T", claimant),
+            )
+            conn.commit()
+            conn.close()
+            yield _server(db)
+
+    def test_get_message_carries_the_flag(self, server):
+        for mid, expected in (("doomed", True), ("live", False), ("restored", False)):
+            message = _call(server, "get_message", message_id=mid)["message"]
+            assert message["pending_deletion"] is expected
+
+    def test_query_messages_lists_it_with_unchanged_totals_and_paging(self, server):
+        out = _call(server, "query_messages")
+        assert out["total_matches"] == 3
+        assert [(m["message_id"], m["pending_deletion"]) for m in out["messages"]] == [
+            ("restored", False),
+            ("doomed", True),
+            ("live", False),
+        ]
+        first = _call(server, "query_messages", limit=1)
+        second = _call(server, "query_messages", limit=1, cursor=first["next_cursor"])
+        assert (first["total_matches"], second["total_matches"]) == (3, 3)
+        assert [m["message_id"] for m in first["messages"] + second["messages"]] == [
+            "restored",
+            "doomed",
+        ]
+
+    def test_prose_states_it(self, server):
+        text = _wire(server, "get_message", {"message_id": "doomed"}).content[0].text
+        assert "Pending deletion: yes" in text
+        text = _wire(server, "get_message", {"message_id": "live"}).content[0].text
+        assert "Pending deletion" not in text
+        text = _wire(server, "query_messages", {}).content[0].text
+        assert text.count("| pending deletion") == 1

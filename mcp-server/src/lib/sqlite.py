@@ -683,6 +683,9 @@ class MessageRecord:
     seen: bool = False
     flagged: bool = False
     replied: bool = False
+    # The reconciler tombstoned the indexed file (``T``-flagged or
+    # missing): it awaits the reaper under mirror retention.
+    pending_deletion: bool = False
 
     @property
     def effective_at(self) -> str:
@@ -690,10 +693,21 @@ class MessageRecord:
         return self.occurred_at if self.occurred_at is not None else self.sent_at
 
 
+# Whether the reconciler tombstoned the message (#794). A tombstone
+# counts only on the message's current file: one left under an old path
+# is stale, and the reaper clears it unreaped. ``filepath`` is the
+# table's primary key, so this is one lookup.
+_PENDING_DELETION_COLUMN = (
+    "EXISTS (SELECT 1 FROM pending_deletions p WHERE p.filepath = m.filepath "
+    "AND p.claimant_id = m.claimant_id) AS pending_deletion"
+)
+
 _MESSAGE_COLUMNS = (
     "m.message_id, m.claimant_id, m.thread_id, m.subject, m.sent_at, m.occurred_at, "
     "m.folder, "
     "m.has_attachments, m.in_reply_to, m.references_json, m.seen, m.flagged, m.replied, "
+    + _PENDING_DELETION_COLUMN
+    + ", "
     + _SOURCE_COLUMNS
 )
 
@@ -714,6 +728,7 @@ def _row_to_message_record(r) -> MessageRecord:
         seen=bool(r["seen"]),
         flagged=bool(r["flagged"]),
         replied=bool(r["replied"]),
+        pending_deletion=bool(r["pending_deletion"]),
     )
 
 

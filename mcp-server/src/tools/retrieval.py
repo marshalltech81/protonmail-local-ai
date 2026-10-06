@@ -538,6 +538,10 @@ def register_retrieval_tools(server, db):
                 f"Thread ID: {thread.thread_id}",
                 f"Mode: {local_only_note}",
             ]
+            if view.record.pending_deletion:
+                lines.append(
+                    "Pending deletion: yes (deleted in Proton; removed after the grace period)"
+                )
             if f := view.record.source_file:
                 size = "unknown size" if f.size_bytes is None else f"{f.size_bytes:,} bytes"
                 lines.append(f"Source file: {f.locator} ({size}, sha256 {f.sha256 or 'unknown'})")
@@ -893,6 +897,8 @@ def register_retrieval_tools(server, db):
             flags = "".join(f" | {w}" for w in _state_words(m) if w != "read")
             if m.has_attachments:
                 flags += " | attachments"
+            if m.pending_deletion:
+                flags += " | pending deletion"
             delivered = f" | delivered {m.occurred_at}" if m.occurred_at else ""
             lines.append(f"{i}. {m.sent_at}{delivered} | {m.folder}{flags}")
             lines.append(f"   Subject: {clip(m.subject, HEADER_CHAR_LIMIT)}")
