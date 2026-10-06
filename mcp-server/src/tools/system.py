@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from fastmcp.exceptions import ToolError
 from mcp.types import CallToolResult
 
+from ..lib import timings
 from .outputs import MailboxStatusOutput, QueueCounts, tool_result
 
 log = logging.getLogger("mcp.tools.system")
@@ -179,6 +180,7 @@ def _conflict_lines(out: MailboxStatusOutput) -> list[str]:
 
 def register_system_tools(server, db):
     @server.tool(output_schema=MailboxStatusOutput.model_json_schema())
+    @timings.timed_tool("get_mailbox_status")
     async def get_mailbox_status() -> CallToolResult:
         """
         Report whether the local email index is current, and what it holds.
