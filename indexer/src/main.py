@@ -226,7 +226,8 @@ def _resolve_base_url(name: str, raw: str, default_url: str) -> str:
 
 def _validate_embed_config() -> str:
     """Raise at startup when the embedder is misconfigured; return the
-    base URL to build the embedder with (``""`` for the SDK default).
+    base URL to build the embedder with (``default`` resolved to
+    OpenAI's official URL).
 
     Validation runs in ``main()`` rather than at module load so test
     files can ``from src import main`` to import helper functions

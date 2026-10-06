@@ -229,17 +229,16 @@ class OpenAIEmbedder:
     like ``http://host.docker.internal:8001/v1`` and ``api_key`` is any
     operator-supplied placeholder string (e.g. ``unauthenticated``);
     compat servers ignore the auth header. For DeepInfra, ``base_url``
-    is ``https://api.deepinfra.com/v1/openai``. An empty ``base_url``
-    lets the SDK's documented fallback fire (``OPENAI_BASE_URL`` env →
-    ``https://api.openai.com/v1``); startup passes it only when the
-    operator set ``EMBED_BASE_URL=default`` (``main._resolve_base_url``,
-    #750). The class itself is provider-agnostic.
+    is ``https://api.deepinfra.com/v1/openai``. ``base_url`` must be a
+    resolved, non-empty URL: startup turns ``EMBED_BASE_URL=default``
+    into ``https://api.openai.com/v1`` (``main._resolve_base_url``, #750)
+    and it is always passed to the SDK, so ``OPENAI_BASE_URL`` cannot
+    choose the endpoint (#846). The class itself is provider-agnostic.
 
     ``api_key`` must be non-empty — startup validation in
     ``main._validate_embed_config`` enforces that contract before the
     embedder is constructed. ``self.base_url`` is read back from the
-    SDK after construction so it always reflects the wire endpoint,
-    not the (possibly empty) value the operator typed.
+    SDK after construction so it reflects the wire endpoint.
 
     Project-specific behavior preserved over the bare SDK:
 
@@ -282,6 +281,11 @@ class OpenAIEmbedder:
     ):
         if concurrency < 1:
             raise ValueError("embedder concurrency must be >= 1")
+        if not base_url.strip():
+            raise ValueError(
+                "OpenAIEmbedder needs a resolved base URL; startup resolves "
+                "EMBED_BASE_URL (or `default`) before building it."
+            )
         self.model = model
         self.batch_size = batch_size
         self.concurrency = concurrency
@@ -296,12 +300,13 @@ class OpenAIEmbedder:
         # literal that could surface in a misconfigured remote
         # provider's request log.
         #
-        # ``base_url`` may be empty: omit the kwarg so the SDK's
-        # documented fallback chain fires (``OPENAI_BASE_URL`` env →
-        # ``https://api.openai.com/v1`` literal). Startup passes an
-        # empty value only for an explicit ``EMBED_BASE_URL=default``;
-        # an empty ``EMBED_BASE_URL`` fails there (#750), because the
-        # body is sent before a provider checks the key.
+        # ``base_url`` must be non-empty and is always passed: left
+        # out, the SDK would pick the endpoint itself (``OPENAI_BASE_URL``
+        # env, then OpenAI proper), and the body is sent before a
+        # provider checks the key (#750, #846). Startup resolves
+        # ``EMBED_BASE_URL`` (``default`` included) before this runs,
+        # so an empty value is a caller bug. The error never echoes a
+        # value.
         #
         # ``max_retries=0`` because retry policy is owned by the
         # tenacity wrapper below — the SDK's built-in retry would
@@ -324,35 +329,23 @@ class OpenAIEmbedder:
                 raise RuntimeError("Embed provider redirected to a different origin")
 
         http_client = DefaultHttpxClient(event_hooks={"request": [_same_origin_only]})
-        if base_url:
-            self.client = OpenAI(
-                base_url=base_url.rstrip("/"),
-                api_key=api_key,
-                timeout=request_timeout,
-                max_retries=0,
-                http_client=http_client,
-            )
-        else:
-            self.client = OpenAI(
-                api_key=api_key,
-                timeout=request_timeout,
-                max_retries=0,
-                http_client=http_client,
-            )
-        # After the SDK resolves its fallback chain, read the URL back
-        # so logs and error messages name the actual wire endpoint
-        # (e.g. the SDK default) rather than the empty string the
-        # operator typed.
+        self.client = OpenAI(
+            base_url=base_url.rstrip("/"),
+            api_key=api_key,
+            timeout=request_timeout,
+            max_retries=0,
+            http_client=http_client,
+        )
+        # Read the URL back from the SDK so logs and error messages
+        # name the wire endpoint.
         self.base_url = str(self.client.base_url).rstrip("/")
-        # An empty ``base_url`` lets the SDK read ``OPENAI_BASE_URL``,
-        # which bypasses the startup userinfo check on ``EMBED_BASE_URL``
-        # (#339). Re-check the resolved endpoint before it reaches a log
-        # line or an error message; the message never echoes the URL.
+        # The endpoint reaches log lines and error messages, so refuse
+        # one carrying ``user:pass@host`` credentials (#339) for any
+        # caller, not only startup; the message never echoes the URL.
         if "@" in urllib.parse.urlsplit(self.base_url).netloc:
             raise ValueError(
-                "EMBED_BASE_URL (or the SDK's OPENAI_BASE_URL) must not embed "
-                "credentials (user:pass@host). Put the API key in "
-                ".secrets/embed_api_key.txt instead."
+                "EMBED_BASE_URL must not embed credentials (user:pass@host). "
+                "Put the API key in .secrets/embed_api_key.txt instead."
             )
 
     def wait_for_ready(self, timeout: int = 120) -> None:
