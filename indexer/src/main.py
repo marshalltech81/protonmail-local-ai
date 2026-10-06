@@ -75,7 +75,12 @@ from .embedder import (
     scrub_embed_error,
 )
 from .entities import AuthorityRules, AuthorityRulesError, load_authority_rules
-from .extractors import DEFAULT_MAX_BYTES, ExtractionResult, is_stale_extractor
+from .extractors import (
+    DEFAULT_MAX_BYTES,
+    ExtractionResult,
+    is_stale_extractor,
+    warn_rate_limited,
+)
 from .folder_watch import FolderWatchRefresher
 from .maildir import (
     PERMS_REPAIRED_NAME,
@@ -489,8 +494,72 @@ INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS = _int_env(
 )
 
 
+# Recurring steps whose failures are logged where they happen and whose
+# recovery ``_FailureStreak`` logs (#873). A fixed set, so a recovery
+# line carries a known name and counts, never text from the failure.
+HEALTH_FILE_REFRESH = "health file refresh"
+INGESTION_STATE_RECORDING = "ingestion state recording"
+WATCH_REFRESH = "Maildir watch refresh"
+PERIODIC_RECONCILIATION = "periodic reconciliation"
+PERIODIC_RESCAN = "periodic Maildir rescan"
+WAL_CHECKPOINT = "wal checkpoint"
+REAPED_RECORD_PRUNE = "reaped-record prune"
+RECOVERY_COMPONENTS = frozenset(
+    {
+        HEALTH_FILE_REFRESH,
+        INGESTION_STATE_RECORDING,
+        WATCH_REFRESH,
+        PERIODIC_RECONCILIATION,
+        PERIODIC_RESCAN,
+        WAL_CHECKPOINT,
+        REAPED_RECORD_PRUNE,
+    }
+)
+
+
+class _FailureStreak:
+    """One recurring step's run of consecutive failures (#873).
+
+    The step logs each failure itself; this keeps the count and when the
+    run began, and the first success after one or more failures logs one
+    INFO line, so an outage of that step has a visible end. Every step
+    runs on the main thread.
+    """
+
+    def __init__(self, component: str):
+        if component not in RECOVERY_COMPONENTS:
+            raise ValueError("unknown recovery component")
+        self.component = component
+        self.failures = 0
+        self.since = 0.0
+
+    def failed(self) -> None:
+        if not self.failures:
+            self.since = _monotonic()
+        self.failures += 1
+
+    def succeeded(self) -> None:
+        if not self.failures:
+            return
+        log.info(
+            "%s recovered after %d failure(s) over %ds",
+            self.component,
+            self.failures,
+            _monotonic() - self.since,
+        )
+        self.failures = 0
+
+
+_streaks = {name: _FailureStreak(name) for name in RECOVERY_COMPONENTS}
+
+
 def touch_health_file() -> None:
-    INDEXER_HEALTH_FILE.touch(exist_ok=True)
+    try:
+        INDEXER_HEALTH_FILE.touch(exist_ok=True)
+    except OSError:
+        _streaks[HEALTH_FILE_REFRESH].failed()
+        raise
+    _streaks[HEALTH_FILE_REFRESH].succeeded()
     # Liveness for get_mailbox_status rides on every health heartbeat
     # (per message, per embed batch), so a long drain pass never reads
     # as a stopped indexer.
@@ -509,7 +578,8 @@ def _extraction_heartbeat() -> None:
     try:
         touch_health_file()
     except OSError as e:
-        log.warning("health file refresh failed: %s", type(e).__name__)
+        # Once per attachment page while the file cannot be written.
+        warn_rate_limited(log, "health file refresh failed: %s", type(e).__name__)
 
 
 class _IngestionStateRecorder:
@@ -571,8 +641,13 @@ class _IngestionStateRecorder:
                 seen_at=datetime.now(UTC).isoformat(),
             )
         except sqlite3.Error as e:
-            log.error("recording ingestion state failed: %s", e)
+            # Retried on every heartbeat until a write succeeds.
+            _streaks[INGESTION_STATE_RECORDING].failed()
+            warn_rate_limited(
+                log, "recording ingestion state failed: %s", type(e).__name__, level=logging.ERROR
+            )
             return
+        _streaks[INGESTION_STATE_RECORDING].succeeded()
         self._last_write = now
 
 
@@ -1320,7 +1395,8 @@ class _EmbedOutageBreaker:
     the embedder itself is down, the breaker opens: draining stops
     until the backoff elapses, then one batch tests the embedder again.
     The backoff doubles per consecutive outage up to ``cap_seconds``
-    and resets on the first successful embed.
+    and resets on the first successful embed, which logs how long
+    indexing was paused (#873).
 
     Pausing also skips Phase 1, so mail arriving during an outage is
     not keyword-searchable until the embedder returns. That is the
@@ -1332,12 +1408,15 @@ class _EmbedOutageBreaker:
         self.cap_seconds = cap_seconds
         self.consecutive_failures = 0
         self.open_until = 0.0
+        self.outage_started = 0.0
 
     def allow(self, now: float) -> bool:
         return now >= self.open_until
 
     def record_failure(self, now: float) -> float:
         """Open the breaker; returns the pause length in seconds."""
+        if not self.consecutive_failures:
+            self.outage_started = now
         self.consecutive_failures += 1
         delay = min(
             self.base_seconds * (2 ** (self.consecutive_failures - 1)),
@@ -1346,7 +1425,14 @@ class _EmbedOutageBreaker:
         self.open_until = now + delay
         return delay
 
-    def record_success(self) -> None:
+    def record_success(self, now: float | None = None) -> None:
+        if self.consecutive_failures:
+            paused = (time.monotonic() if now is None else now) - self.outage_started
+            log.info(
+                "embedder recovered after %d failure(s), paused %ds; indexing resumed",
+                self.consecutive_failures,
+                paused,
+            )
         self.consecutive_failures = 0
         self.open_until = 0.0
 
@@ -2259,8 +2345,10 @@ def _prune_reaped_records(db: Database) -> None:
     try:
         pruned = db.prune_reaped_messages()
     except Exception as e:
+        _streaks[REAPED_RECORD_PRUNE].failed()
         log.error("reaped-record prune failed: %s", type(e).__name__)
         return
+    _streaks[REAPED_RECORD_PRUNE].succeeded()
     if pruned:
         log.info("pruned %d expired reaped-message record(s)", pruned)
 
@@ -2296,7 +2384,67 @@ def _run_wal_maintenance(db: Database) -> None:
         elif ckpt_pages:
             log.debug("wal_checkpoint truncated %d page(s)", ckpt_pages)
     except Exception as e:
-        log.error("wal checkpoint failed: %s", e)
+        _streaks[WAL_CHECKPOINT].failed()
+        log.error("wal checkpoint failed: %s", type(e).__name__)
+        return
+    _streaks[WAL_CHECKPOINT].succeeded()
+
+
+def _run_watch_refresh(
+    folder_watches: FolderWatchRefresher,
+    db: Database,
+    queue: IndexingQueue,
+    *,
+    skip_trashed: bool,
+) -> None:
+    """``_refresh_folder_watches`` for the main loop: a failure is logged
+    by type and retried on the next signal or sweep, and the first
+    success after failures logs the recovery (#873)."""
+    try:
+        _refresh_folder_watches(folder_watches, db, queue, skip_trashed=skip_trashed)
+    except Exception as e:
+        _streaks[WATCH_REFRESH].failed()
+        log.error("Maildir watch refresh failed: %s", type(e).__name__)
+        return
+    _streaks[WATCH_REFRESH].succeeded()
+
+
+def _run_periodic_reconcile(reconciler: Reconciler | None, db: Database) -> None:
+    """One reconciliation interval: sweep and reap when deletion
+    reconciliation is on, then expire old reaped-message records (in
+    archive mode too, so records from before a switch expire)."""
+    if reconciler is not None:
+        try:
+            reconciler.sweep()
+            reconciler.reap()
+        except Exception as e:
+            _streaks[PERIODIC_RECONCILIATION].failed()
+            log.error("periodic reconciliation failed: %s", type(e).__name__)
+        else:
+            _streaks[PERIODIC_RECONCILIATION].succeeded()
+    _prune_reaped_records(db)
+
+
+def _run_periodic_rescan(
+    db: Database,
+    queue: IndexingQueue,
+    ingestion_state: _IngestionStateRecorder,
+    *,
+    skip_trashed: bool,
+) -> None:
+    """Re-walk the Maildir so a file whose watchdog event was missed is
+    still queued, then acknowledge the sync stamp read before the walk."""
+    try:
+        stamp = ingestion_state.read_stamp()
+        _enqueue_unindexed_messages(
+            db, queue, MAILDIR_PATH, REASON_RESCAN, skip_trashed=skip_trashed
+        )
+        ingestion_state.acknowledge(stamp)
+    except Exception as e:
+        _streaks[PERIODIC_RESCAN].failed()
+        log.error("periodic Maildir rescan failed: %s", type(e).__name__)
+        return
+    _streaks[PERIODIC_RESCAN].succeeded()
 
 
 def _log_reconciler_config(cfg: ReconcilerConfig) -> None:
@@ -2527,23 +2675,11 @@ def main():
             # another.
             if sync_completed.is_set():
                 sync_completed.clear()
-                try:
-                    _refresh_folder_watches(
-                        folder_watches, db, queue, skip_trashed=reconciler is not None
-                    )
-                except Exception as e:
-                    log.error("Maildir watch refresh failed: %s", type(e).__name__)
+                _run_watch_refresh(folder_watches, db, queue, skip_trashed=reconciler is not None)
 
             now = time.monotonic()
             if now - last_reconcile >= reconciler_config.sweep_interval_secs:
-                if reconciler is not None:
-                    try:
-                        reconciler.sweep()
-                        reconciler.reap()
-                    except Exception as e:
-                        log.error("periodic reconciliation failed: %s", e)
-                # In archive mode too, so records from before a switch expire.
-                _prune_reaped_records(db)
+                _run_periodic_reconcile(reconciler, db)
                 last_reconcile = now
 
             # Recovery sweep: re-enqueue messages on chunkless
@@ -2560,26 +2696,12 @@ def main():
                     _recover_zero_vector_threads(db, queue, skip_trashed=reconciler is not None)
                 except Exception as e:
                     log.error("periodic recovery sweep failed: %s", e)
-                try:
-                    stamp = ingestion_state.read_stamp()
-                    _enqueue_unindexed_messages(
-                        db,
-                        queue,
-                        MAILDIR_PATH,
-                        REASON_RESCAN,
-                        skip_trashed=reconciler is not None,
-                    )
-                    ingestion_state.acknowledge(stamp)
-                except Exception as e:
-                    log.error("periodic Maildir rescan failed: %s", e)
+                _run_periodic_rescan(
+                    db, queue, ingestion_state, skip_trashed=reconciler is not None
+                )
                 # Also re-watch here: a lost repair marker, or a failed
                 # re-schedule, leaves no watch until the next try.
-                try:
-                    _refresh_folder_watches(
-                        folder_watches, db, queue, skip_trashed=reconciler is not None
-                    )
-                except Exception as e:
-                    log.error("Maildir watch refresh failed: %s", type(e).__name__)
+                _run_watch_refresh(folder_watches, db, queue, skip_trashed=reconciler is not None)
                 last_recovery_sweep = now
 
             # WAL checkpoint: keep the WAL file size bounded over a

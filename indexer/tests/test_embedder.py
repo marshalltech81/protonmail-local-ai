@@ -1095,3 +1095,73 @@ class TestRedirectPolicy:
         assert emb.embed(_CHUNK_MARKER) == pytest.approx([0.6, 0.8])
         assert len(seen) == 2
         assert _CHUNK_MARKER in seen[1].content.decode()
+
+
+class TestRetryLogging:
+    """#873: each retry of an embed request is logged, so a rate limit
+    that slows indexing leaves a trace even when the retry succeeds."""
+
+    _MARKER = "SYNTHETIC_RETRY_MARKER"
+
+    def _status_error(self, status_code: int) -> APIStatusError:
+        # The provider's body and message echo the submitted text.
+        return APIStatusError(
+            message=f"{status_code} {self._MARKER}",
+            response=httpx2.Response(status_code, request=httpx2.Request("POST", "http://x")),
+            body={"error": self._MARKER},
+        )
+
+    def test_each_retry_logs_attempt_and_scrubbed_error(self, caplog):
+        caplog.set_level(logging.DEBUG)
+        emb = _make_embedder()
+        attempts = {"n": 0}
+
+        def fake_create(**_kwargs):
+            attempts["n"] += 1
+            if attempts["n"] < 3:
+                raise self._status_error(429)
+            return _embed_response([[1.0]])
+
+        _patch_create(emb, fake_create)
+        emb._embed_one_batch.retry.wait = lambda *_a, **_kw: 0  # type: ignore[attr-defined]
+        assert emb.embed_batch([self._MARKER]) == [[1.0]]
+
+        lines = [
+            (r.levelno, r.getMessage())
+            for r in caplog.records
+            if r.getMessage().startswith("embed retry")
+        ]
+        assert lines == [
+            (logging.INFO, "embed retry attempt=2/3 after APIStatusError: status=429"),
+            (logging.WARNING, "embed retry attempt=3/3 after APIStatusError: status=429"),
+        ]
+        assert self._MARKER not in caplog.text
+
+    def test_a_request_that_succeeds_first_time_logs_no_retry(self, caplog):
+        caplog.set_level(logging.DEBUG)
+        emb = _make_embedder()
+        _patch_create(emb, lambda **_kw: _embed_response([[1.0]]))
+        emb.embed_batch(["x"])
+        assert "embed retry" not in caplog.text
+
+    def test_retry_lines_share_the_rate_limit(self, caplog):
+        """A sustained rate limit retries every request; past the shared
+        per-window budget the lines are counted, not logged."""
+        from src import extractors
+
+        caplog.set_level(logging.DEBUG)
+        emb = _make_embedder()
+
+        def fake_create(**_kwargs):
+            raise self._status_error(503)
+
+        _patch_create(emb, fake_create)
+        emb._embed_one_batch.retry.wait = lambda *_a, **_kw: 0  # type: ignore[attr-defined]
+        requests = extractors._WARNINGS_PER_WINDOW  # two retry lines each
+        for _ in range(requests):
+            with pytest.raises(APIStatusError):
+                emb.embed_batch(["x"])
+
+        logged = [r for r in caplog.records if r.getMessage().startswith("embed retry")]
+        assert len(logged) == extractors._WARNINGS_PER_WINDOW
+        assert extractors.drain_extractor_counts()["warnings_suppressed"] == requests

@@ -102,6 +102,10 @@ def _reset_extractor_warning_budget(monkeypatch):
     main = sys.modules.get("src.main")
     if main is not None:
         monkeypatch.setattr(main, "_last_outcomes_log", None)
+        # So are the recurring steps' failure streaks (#873).
+        monkeypatch.setattr(
+            main, "_streaks", {name: main._FailureStreak(name) for name in main.RECOVERY_COMPONENTS}
+        )
 
 
 @pytest.fixture

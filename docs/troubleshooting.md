@@ -887,6 +887,53 @@ startup scan and periodic recovery skip dead rows, so mail that
 dead-lettered on the old version (for example an 8-bit `Date` header
 before #361) stays unindexed until you requeue it.
 
+## Indexer health in the log
+
+The indexer's recurring work logs counts, durations, fixed text and
+exception type names only, never folder names, Message-IDs, addresses
+or mail text (`docker compose logs indexer`).
+
+Embedder retries and outages:
+
+- `embed retry attempt=<n>/3 after <error>`: an embed request failed
+  with a transient error (a 429 or 408, a 5xx, a timeout or a
+  connection error) and is being retried after a 2 to 10 s backoff.
+  INFO, or WARNING before the last attempt. `<error>` is the exception
+  type, plus the HTTP status for a provider error. Occasional lines are
+  normal; a steady stream means the provider is rate limiting or
+  struggling and indexing is slowing down. These lines share the
+  20-per-5-minutes budget of the attachment WARNINGs (see "Attachment
+  text or message content missing from search"); the rest are counted
+  in that section's `warnings_suppressed`.
+- `embedder unavailable (...)` or `embedder rejected credentials or
+  model (...)` (ERROR): a batch failed after its retries and a probe
+  confirmed the embedder itself is down; indexing pauses (see "Tuning
+  indexing retries").
+- `embedder recovered after <n> failure(s), paused <s>s; indexing
+  resumed` (INFO): the first successful embed after an outage. `<n>`
+  is the number of times the pause was extended, `<s>` how long
+  indexing was paused in all.
+
+Each recurring step below logs a failure every time it fails, and one
+`<step> recovered after <n> failure(s) over <s>s` line (INFO) on its
+first success after failing, where `<s>` is the time since its first
+failure. A failure line with no recovery line after it means the step
+is still failing.
+
+| Step | Failure line | When it runs |
+|---|---|---|
+| `health file refresh` | `health file refresh failed: <type>` (WARNING) | Per message, embed request and attachment page |
+| `ingestion state recording` | `recording ingestion state failed: <type>` (ERROR) | At most every 30 s, retried on each heartbeat until it succeeds |
+| `Maildir watch refresh` | `Maildir watch refresh failed: <type>` (ERROR) | After each mbsync sync, and every `INDEXER_RECOVERY_SWEEP_INTERVAL_SECS` |
+| `periodic Maildir rescan` | `periodic Maildir rescan failed: <type>` (ERROR) | Every `INDEXER_RECOVERY_SWEEP_INTERVAL_SECS` (30 min) |
+| `periodic reconciliation` | `periodic reconciliation failed: <type>` (ERROR) | Every `INDEXER_DELETION_SWEEP_INTERVAL_SECS`, with deletion reconciliation on |
+| `reaped-record prune` | `reaped-record prune failed: <type>` (ERROR) | At startup and with each reconciliation interval |
+| `wal checkpoint` | `wal checkpoint failed: <type>` (ERROR) | At startup and every `INDEXER_WAL_CHECKPOINT_INTERVAL_SECS` (10 min) |
+
+The health-file and ingestion-state failures can repeat many times a
+second, so they share the same 20-per-5-minutes budget as the embed
+retries; their recovery line still counts every failure.
+
 ## Reading a tool call's log line
 
 Every MCP tool logs one completion line per call on the `mcp.timings`
@@ -1034,6 +1081,9 @@ only, never filenames or text (`make logs`):
   parser-cap line described below, together) are capped at 20 per 5
   minutes, so a stream of crafted mail cannot flood the log. The rest
   are counted as `warnings_suppressed` in the attachments line below.
+  The budget is shared with the embed retry, health-file and
+  ingestion-state lines (see "Indexer health in the log"), so
+  `warnings_suppressed` can also count those.
 - `attachments n=<total> success= failed= unsupported= too_large=
   ocr_disabled= empty= cached= pdf_pages_failed=
   pdf_pages_unrecovered= ocr_capped_pdfs= ocr_pages_skipped=

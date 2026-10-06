@@ -97,7 +97,9 @@ ZIP_MAX_UNCOMPRESSED_BYTES = 200 * 1024 * 1024
 #   counted here so the parser's per-message line can be rate limited
 #   without losing a message (review round 5 on #884).
 # * ``warnings_suppressed``: per-item WARNINGs (failed extraction, OCR
-#   cap, parser cap) that the rate limit below withheld.
+#   cap, parser cap) that the rate limit below withheld, and the
+#   repeated indexer lines that share it (embed retries, health-file and
+#   ingestion-state failures, #873).
 #
 # Kept in this always-imported module because ``pdf`` is imported lazily.
 # A few integers and a window start: the state stays bounded.
@@ -167,10 +169,12 @@ def drain_extractor_counts() -> dict[str, int]:
     return counts
 
 
-def warn_rate_limited(logger: logging.Logger, msg: str, *args: object) -> None:
-    """Log one per-attachment WARNING unless this window's budget is
-    spent; then count it as suppressed. ``args`` must be counts, module
-    names, type names or fixed text."""
+def warn_rate_limited(
+    logger: logging.Logger, msg: str, *args: object, level: int = logging.WARNING
+) -> None:
+    """Log one repeated line (a WARNING unless ``level`` says otherwise)
+    unless this window's budget is spent; then count it as suppressed.
+    ``args`` must be counts, module names, type names or fixed text."""
     global _warning_window, _warnings_in_window, _warnings_suppressed
     now = time.monotonic()
     with _counts_lock:
@@ -181,7 +185,7 @@ def warn_rate_limited(logger: logging.Logger, msg: str, *args: object) -> None:
             _warnings_suppressed += 1
             return
         _warnings_in_window += 1
-    logger.warning(msg, *args)
+    logger.log(level, msg, *args)
 
 
 def _warn_failed(module_name: str, dispatch_via: str, reason: str) -> None:
