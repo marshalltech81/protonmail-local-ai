@@ -7,6 +7,11 @@ stage that ran, a few counts, and configuration identifiers. A stage
 that did not run is absent, not zero, so a keyword-mode search shows no
 vector lanes.
 
+A retrieval lane that fails and falls back (a vector lane error, the
+FTS-to-LIKE fallback, an attachment lane, a rerank fallback) adds a
+``degraded_<lane>`` count, so a call that returned ``outcome=ok`` with
+lower-quality results says so on its own line (#877).
+
 Content safety: stage names, count names and config keys are literals
 in the code, durations are floats, counts are ints, and config values
 are operator mode names (``rerank``/``inference``). Nothing the caller

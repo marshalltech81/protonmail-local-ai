@@ -114,6 +114,18 @@ tool=search_emails outcome=ok total_ms=41.7 stages_ms={'query_embedding': 22.4, 
   `inference_calls` and, on a filtered vector search,
   `thread_vec_expansions` / `chunk_vec_expansions` (re-queries with a
   wider window).
+- A `degraded_<lane>` count means a lane failed and the call fell back,
+  still with `outcome=ok` (#877): `thread_vec` / `chunk_vec` (the
+  vector lane errored; that lane contributed nothing), `thread_fts`
+  (the FTS query errored and a LIKE scan ran instead), `like_fallback`
+  (the LIKE scan errored too), `chunk_fts` / `attachment_fts`,
+  `attachment_filename` / `attachment_text` / `attachment_scan`
+  (`search_attachments`), `attachment_match` (no attachment-first
+  evidence ordering), `evidence_chunks` (no passages; the thread body
+  is used), `recent_chunks` (`summarize_thread` without the latest
+  replies), `rerank` (results in RRF order although `config` says
+  `rerank=cohere`) and `rerank_subjects` (reranked without subjects).
+  See [Troubleshooting](troubleshooting.md#a-tool-call-reports-degraded-retrieval).
 - `config` names the rerank and inference modes.
 
 The line carries names fixed in the code, numbers and mode names only:

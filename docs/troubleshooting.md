@@ -880,6 +880,25 @@ startup scan and periodic recovery skip dead rows, so mail that
 dead-lettered on the old version (for example an 8-bit `Date` header
 before #361) stays unindexed until you requeue it.
 
+## A tool call reports degraded retrieval
+
+A `degraded_<lane>` count on a tool's `mcp.timings` line (see
+[Stage timings](mcp-tools.md#stage-timings-in-the-server-log)) means a
+retrieval lane failed and the call carried on without it, so the
+results are worse than usual although `outcome=ok`. A standalone
+`mcp.sqlite` or `mcp.reranker` WARNING names the exception type at the
+same moment.
+
+- `degraded_rerank` on most calls: the rerank provider is failing (the
+  `mcp.reranker` warning gives the status code). Check
+  `RERANK_BASE_URL`, `RERANK_MODEL`, the key in
+  `.secrets/rerank_api_key.txt` and `RERANK_TIMEOUT_SECS`, or set
+  `RERANK_MODE=none` until the provider is back.
+- `degraded_thread_vec` / `degraded_chunk_vec`, or any `_fts` /
+  `attachment_` lane on every call: the index is missing a table or is
+  corrupt. Check the indexer's log, then rebuild as in
+  [Indexer refuses to start](#indexer-refuses-to-start--wipe-the-sqlite-volume).
+
 ## Claude Desktop doesn't see the tools
 
 1. Verify the MCP server is running: `docker compose ps`

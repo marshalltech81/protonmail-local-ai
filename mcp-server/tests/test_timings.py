@@ -398,3 +398,173 @@ class TestNoContentInLogs:
         asyncio.run(run_all())
         assert len(_timing_lines(caplog)) == 8
         assert MARKER not in caplog.text
+
+
+def _fail_sql(db: Database, monkeypatch, *fragments: str) -> None:
+    """Make every ``_fetchall`` whose SQL holds one of ``fragments``
+    raise ``OperationalError``, as a missing or corrupt table would."""
+    real = db._fetchall
+
+    def fetchall(sql, params=()):
+        if any(fragment in sql for fragment in fragments):
+            raise sqlite3.OperationalError("no such table")
+        return real(sql, params)
+
+    monkeypatch.setattr(db, "_fetchall", fetchall)
+
+
+def _degraded(line: dict) -> dict:
+    return {k: v for k, v in line["counts"].items() if k.startswith("degraded_")}
+
+
+class TestDegradedRetrieval:
+    """#877: a lane that fails and falls back marks the call's own timing
+    line with ``degraded_<lane>``, so the quality drop can be joined to
+    the tool call it affected. Counts and lane names only."""
+
+    @pytest.mark.parametrize(
+        ("fragments", "mode", "expected"),
+        [
+            (["FROM threads_vec v"], "hybrid", {"degraded_thread_vec": 1}),
+            (["FROM message_chunks_vec v"], "hybrid", {"degraded_chunk_vec": 1}),
+            (["FROM threads_fts"], "keyword", {"degraded_thread_fts": 1}),
+            (
+                ["FROM threads_fts", "ORDER BY date_last DESC LIMIT ?"],
+                "keyword",
+                {"degraded_thread_fts": 1, "degraded_like_fallback": 1},
+            ),
+            (
+                ["JOIN message_chunks c ON message_chunks_fts.rowid"],
+                "keyword",
+                {"degraded_chunk_fts": 1},
+            ),
+            (["FROM attachments_fts"], "keyword", {"degraded_attachment_fts": 1}),
+        ],
+    )
+    def test_search_emails_lane_failure_marks_the_timing_line(
+        self, caplog, monkeypatch, fake_server, fake_embed, chunked_db, fragments, mode, expected
+    ):
+        caplog.set_level(logging.INFO)
+        _fail_sql(chunked_db, monkeypatch, *fragments)
+        register_search_tools(fake_server, chunked_db, fake_embed)
+        asyncio.run(fake_server.tools["search_emails"](query=f"invoice {MARKER}", mode=mode))
+        line = _one_line(caplog)
+        assert line["outcome"] == "ok"
+        assert _degraded(line) == expected
+        assert MARKER not in caplog.text
+
+    def test_attachment_filename_lane_failure_marks_the_timing_line(
+        self, caplog, monkeypatch, fake_server, fake_embed, attachments_db
+    ):
+        caplog.set_level(logging.INFO)
+        _fail_sql(attachments_db, monkeypatch, "bm25(attachments_fts) AS score")
+        register_search_tools(fake_server, attachments_db, fake_embed)
+        asyncio.run(fake_server.tools["search_attachments"](query=f"invoice {MARKER}"))
+        line = _one_line(caplog)
+        assert line["outcome"] == "ok"
+        assert _degraded(line) == {"degraded_attachment_filename": 1}
+        assert MARKER not in caplog.text
+
+    def test_attachment_text_lane_failure_marks_the_timing_line(
+        self, caplog, monkeypatch, fake_server, fake_embed, attachments_db
+    ):
+        caplog.set_level(logging.INFO)
+        _fail_sql(attachments_db, monkeypatch, "WITH hits AS MATERIALIZED")
+        register_search_tools(fake_server, attachments_db, fake_embed)
+        asyncio.run(fake_server.tools["search_attachments"](query=f"invoice {MARKER}"))
+        assert _degraded(_one_line(caplog)) == {"degraded_attachment_text": 1}
+        assert MARKER not in caplog.text
+
+    def test_attachment_scan_failure_marks_the_timing_line(
+        self, caplog, monkeypatch, fake_server, fake_embed, attachments_db
+    ):
+        caplog.set_level(logging.INFO)
+        _fail_sql(attachments_db, monkeypatch, "0.0 AS score FROM attachments a")
+        register_search_tools(fake_server, attachments_db, fake_embed)
+        asyncio.run(fake_server.tools["search_attachments"](content_type="application/pdf"))
+        assert _degraded(_one_line(caplog)) == {"degraded_attachment_scan": 1}
+
+    @pytest.mark.parametrize(
+        ("fragment", "expected"),
+        [
+            ("vec_distance_l2(v.embedding, ?)", {"degraded_evidence_chunks": 1}),
+            ("SELECT a.thread_id, a.attachment_id, bm25", {"degraded_attachment_match": 1}),
+        ],
+    )
+    def test_get_evidence_lane_failure_marks_the_timing_line(
+        self, caplog, monkeypatch, fake_server, fake_embed, chunked_db, fragment, expected
+    ):
+        caplog.set_level(logging.INFO)
+        _fail_sql(chunked_db, monkeypatch, fragment)
+        register_search_tools(fake_server, chunked_db, fake_embed)
+        asyncio.run(fake_server.tools["get_evidence"](query=f"invoice {MARKER}"))
+        assert _degraded(_one_line(caplog)) == expected
+        assert MARKER not in caplog.text
+
+    def test_recent_chunks_failure_marks_the_timing_line(
+        self, caplog, monkeypatch, fake_server, fake_embed, chunked_db
+    ):
+        caplog.set_level(logging.INFO)
+        _fail_sql(chunked_db, monkeypatch, "ORDER BY m.effective_at DESC, c.chunk_index")
+        register_intelligence_tools(fake_server, chunked_db, fake_embed, FakeInferenceClient())
+        asyncio.run(fake_server.tools["summarize_thread"](thread_id="t-alpha"))
+        assert _degraded(_one_line(caplog)) == {"degraded_recent_chunks": 1}
+
+    @pytest.mark.parametrize(
+        "ranking",
+        [
+            [],  # the reranker failed
+            [(0, 1.0), (0, 0.5)],  # a repeated index
+            [(99, 1.0)],  # an out-of-range index
+        ],
+    )
+    def test_rerank_fallback_marks_the_timing_line(
+        self, caplog, fake_server, fake_embed, chunked_db, ranking
+    ):
+        caplog.set_level(logging.INFO)
+
+        class _BadReranker(_Reranker):
+            def rerank(self, query, documents, top_n):
+                return ranking
+
+        register_search_tools(fake_server, chunked_db, fake_embed, reranker=_BadReranker())
+        asyncio.run(fake_server.tools["search_emails"](query=f"invoice {MARKER}"))
+        line = _one_line(caplog)
+        assert line["outcome"] == "ok"
+        assert line["config"] == {"rerank": "cohere"}
+        assert _degraded(line) == {"degraded_rerank": 1}
+        assert MARKER not in caplog.text
+
+    def test_rerank_subject_lookup_failure_marks_the_timing_line(
+        self, caplog, monkeypatch, fake_server, fake_embed, chunked_db
+    ):
+        caplog.set_level(logging.INFO)
+        monkeypatch.setattr("src.lib.sqlite._RERANK_SUBJECT_SQL", "SELECT * FROM no_such_table")
+        register_search_tools(fake_server, chunked_db, fake_embed, reranker=_Reranker())
+        asyncio.run(fake_server.tools["search_emails"](query="invoice"))
+        assert _degraded(_one_line(caplog)) == {"degraded_rerank_subjects": 1}
+
+    def test_healthy_calls_carry_no_degraded_marker(
+        self, caplog, fake_server, fake_embed, chunked_db, attachments_db
+    ):
+        caplog.set_level(logging.INFO)
+        register_search_tools(fake_server, chunked_db, fake_embed, reranker=_Reranker())
+        register_intelligence_tools(fake_server, chunked_db, fake_embed, FakeInferenceClient())
+
+        async def run_chunked():
+            for mode in ("hybrid", "semantic", "keyword"):
+                await fake_server.tools["search_emails"](query="invoice", mode=mode)
+            await fake_server.tools["get_evidence"](query="invoice")
+            await fake_server.tools["summarize_thread"](thread_id="t-alpha")
+
+        asyncio.run(run_chunked())
+        register_search_tools(fake_server, attachments_db, fake_embed)
+
+        async def run_attachments():
+            await fake_server.tools["search_attachments"](query="invoice")
+            await fake_server.tools["search_attachments"](content_type="application/pdf")
+
+        asyncio.run(run_attachments())
+        lines = _timing_lines(caplog)
+        assert len(lines) == 7
+        assert all(_degraded(line) == {} for line in lines)
