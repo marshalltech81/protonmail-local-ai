@@ -15,7 +15,8 @@ has a query vector. Two layers:
    scripted judge. Each run must complete, its captured evidence must
    match the prompt the model received, a case whose evidence was all
    supplied must pass every deterministic check, and the prompt-budget
-   case must show its evidence omitted by prompt assembly.
+   case must show its evidence omitted by prompt assembly and disclosed
+   by the server's coverage note.
 """
 
 import asyncio
@@ -308,7 +309,9 @@ def test_every_case_completes_and_is_judged(records: dict[str, dict]) -> None:
 def test_supplied_evidence_lets_a_correct_answer_pass(case: Case, records: dict[str, dict]) -> None:
     r = records[case.id]
     det = r["deterministic"]
-    if det["prompt_coverage"] in (None, 1.0):
+    if det["prompt_coverage"] in (None, 1.0) or case.expected_handling == "disclose_missing":
+        # #820: an omission the server's coverage note disclosed is what
+        # a disclose_missing case expects.
         assert det["passed"], (case.id, det["checks"])
         assert r["attribution"] == []
     else:
@@ -345,8 +348,17 @@ def test_cases_missing_evidence_are_the_known_ones(records: dict[str, dict]) -> 
     to its budget by design. A change here is a retrieval or prompt
     assembly change: explain it in the PR and update the sets.
     """
+
+    def stages(det: dict) -> list[str]:
+        lost_at = []
+        if det["retrieval_recall"] < 1.0:
+            lost_at.append("retrieval")
+        if det["prompt_coverage"] < det["retrieval_recall"]:
+            lost_at.append("prompt_assembly")
+        return lost_at
+
     lost = {
-        cid: sorted(set(r["attribution"]) & {"retrieval", "prompt_assembly"})
+        cid: stages(r["deterministic"])
         for cid, r in records.items()
         if r["deterministic"]["prompt_coverage"] not in (None, 1.0)
     }
@@ -364,8 +376,7 @@ def test_prompt_budget_case_detects_omitted_evidence(records: dict[str, dict]) -
         det = r["deterministic"]
         assert det["retrieval_recall"] == 1.0, det
         assert det["prompt_coverage"] < 1.0, det
-        assert det["checks"]["required_evidence_cited"] == "fail"
-        assert "prompt_assembly" in r["attribution"]
+        assert det["checks"]["omission_disclosed"] == "pass", det
 
 
 def test_cli_run_writes_report(

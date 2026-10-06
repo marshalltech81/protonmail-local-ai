@@ -45,7 +45,7 @@ from tests.answer_eval.runner import Passage
 
 # Bump on any change to the rubric, the prompt or the verdict schema:
 # runs graded under different versions are not comparable.
-RUBRIC_VERSION = "ask-rubric-3"
+RUBRIC_VERSION = "ask-rubric-4"
 
 CLAIM_VERDICTS = ("supported", "contradicted", "insufficient_evidence")
 DIMENSION_RESULTS = ("pass", "fail", "not_applicable")
@@ -80,8 +80,9 @@ JUDGE_SYSTEM = (
     f"""You grade one answer written by an email assistant. Rubric version \
 {RUBRIC_VERSION}.
 
-You receive, in the user message: the question; how the answer is expected to handle it; \
-verified reference facts; prohibited assertions; which rubric dimensions apply; the \
+You receive, in the user message: the question; how the answer is expected to handle it \
+(with, when the answer is expected to disclose missing evidence, the tool's own coverage \
+note); verified reference facts; prohibited assertions; which rubric dimensions apply; the \
 evidence passages the assistant was given, each with its label (E1, E2, ...); and the \
 assistant's answer, which cites labels in square brackets, followed by the same answer \
 cut into numbered statements (1, 2, ...).
@@ -132,7 +133,11 @@ _HANDLING_TEXT = {
     "disclose_conflict": "The sources conflict and neither supersedes the other: the answer "
     "must report both and say they disagree.",
     "disclose_missing": "Part of the needed evidence may be missing from what the assistant "
-    "received: the answer must say what it could not establish rather than guess.",
+    "received. The tool reports evidence it left out in its own coverage note, below: grade "
+    "the answer and that note together. Together they must say what could not be "
+    "established, and the answer must not guess. A reference fact whose evidence is not "
+    "among the passages the assistant received counts as covered when the note or the "
+    "answer discloses that evidence was left out.",
     "abstain": "The mailbox holds no answer: the answer must say so and assert nothing in "
     "its place.",
 }
@@ -154,18 +159,28 @@ def _label_key(label: str) -> int:
 
 
 def build_judge_prompt(
-    case: Case, answer: str, passages: dict[str, Passage], statements: Sequence[str]
+    case: Case,
+    answer: str,
+    passages: dict[str, Passage],
+    statements: Sequence[str],
+    coverage_note: str | None = None,
 ) -> str:
     """The judge's user message. Trusted case text outside the tags;
     every passage, the answer and each of its numbered statements (the
-    index a claim must return, from 1) inside them."""
+    index a claim must return, from 1) inside them.
+
+    A ``disclose_missing`` case also gets the tool's ``coverage_note``
+    (#820): fixed server text with counts, never model output, so it
+    sits outside the tags and is labelled as the tool's."""
     lines = [
         f"Question: {case.question}",
         "",
         f"Expected handling: {_HANDLING_TEXT[case.expected_handling]}",
-        "",
     ]
-    lines.append("Reference facts (verified):")
+    if case.expected_handling == "disclose_missing":
+        note = _fence(coverage_note) if coverage_note else "none"
+        lines.append(f"Server coverage note (written by the tool, not the assistant): {note}")
+    lines += ["", "Reference facts (verified):"]
     lines += [f"- {f.id}: {f.fact}" for f in case.expected_facts] or ["- none"]
     lines += ["", "Prohibited assertions:"]
     lines += [f"- {i}: {text}" for i, text in enumerate(case.must_not_assert, 1)] or ["- none"]
@@ -397,6 +412,7 @@ async def judge_answer(
     answer_abstained: bool,
     *,
     statements: Sequence[AnswerStatement],
+    coverage_note: str | None = None,
     timeout_secs: float | None = None,
 ) -> JudgeOutcome:
     """One bounded judge call: input size checked first, one request
@@ -407,9 +423,10 @@ async def judge_answer(
     The prompt numbers them, each claim must name the one it assesses,
     and a claim whose labels that statement does not all cite is
     rejected, so the judge cannot credit a passage the answer cited for
-    something else.
+    something else. ``coverage_note`` is the tool's own omission notice
+    (``build_judge_prompt``).
     """
-    prompt = build_judge_prompt(case, answer, passages, [s.text for s in statements])
+    prompt = build_judge_prompt(case, answer, passages, [s.text for s in statements], coverage_note)
     outcome = JudgeOutcome(status="error", prompt_chars=len(JUDGE_SYSTEM) + len(prompt))
     if outcome.prompt_chars > config.max_input_chars:
         outcome.error = "judge_input_too_large"

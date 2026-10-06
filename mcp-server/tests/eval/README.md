@@ -482,13 +482,19 @@ required evidence group cited, `must_include` present as a whole value
 (`4,860` does not match `14,860` or `4,860,000`; an ordinal suffix or
 `.00` may follow a number), `must_not_include` absent anywhere, and
 abstention exactly when the case is unanswerable (citing
-nothing). Each evidence group is also scored as retrieved, supplied to
+nothing). A `disclose_missing` case is graded on the tool's whole
+disclosure (#820): when a required group never reached the prompt, the
+server's `coverage_note` must be present (`omission_disclosed`), the
+unsupplied groups are excused from citation and an abstention may
+stand; a group that was supplied must still be cited. Each evidence group is also scored as retrieved, supplied to
 the prompt and cited, so a failure is attributed to `retrieval`,
 `prompt_assembly`, `synthesis`, `evaluator_infrastructure` or
 `answer_infrastructure` (several may apply; `unknown` otherwise).
 
-The judge (`judge.py`, rubric `ask-rubric-3`) receives the question,
-expected handling, reference facts, prohibited assertions, which
+The judge (`judge.py`, rubric `ask-rubric-4`) receives the question,
+expected handling (for `disclose_missing`, with the tool's
+`coverage_note`, labelled as server text and graded together with the
+answer), reference facts, prohibited assertions, which
 dimensions apply, every passage the answerer received, the answer and
 the answer's structured `statements` numbered from 1; the passages, the
 answer and each statement sit in `<untrusted_evidence>` /

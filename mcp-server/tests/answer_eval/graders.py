@@ -8,6 +8,12 @@ for a thread ref, was in the prompt the model received) and *cited* (the
 answer cites such a passage). A message ref is met only by a passage of
 that message; a passage of the thread's indexed text (no single
 message) meets thread refs only.
+
+A ``disclose_missing`` case is graded on the tool's whole disclosure
+(#820): when a required group never reached the prompt, the server's
+``coverage_note`` is what reports it, so a non-null note is the
+disclosure, the unsupplied groups are excused from citation and an
+abstention may stand. A group that was supplied must still be cited.
 """
 
 import re
@@ -124,6 +130,15 @@ def grade_run(case: Case, run: CaseRun) -> DeterministicResult:
         )
 
     checks = result.checks
+    # Evidence the model never received, reported by the server's note.
+    omission = case.expected_handling == "disclose_missing" and any(
+        not g.supplied for g in result.groups
+    )
+    disclosed = omission and out.coverage_note is not None
+    if omission:
+        checks["omission_disclosed"] = PASS if disclosed else FAIL
+    else:
+        checks["omission_disclosed"] = NA
     checks["answer_complete"] = FAIL if answer.endswith(_TRUNCATED_NOTICE) else PASS
     checks["prompt_matches_capture"] = PASS if run.prompt_consistent else FAIL
     result.citation_problem_kinds = sorted({p.kind for p in out.citation_problems})
@@ -132,7 +147,8 @@ def grade_run(case: Case, run: CaseRun) -> DeterministicResult:
     checks["citations_resolve"] = PASS if resolves else FAIL
     checks["citation_checks"] = FAIL if out.citation_problems else PASS
     if case.answerable:
-        checks["required_evidence_cited"] = PASS if all(g.cited for g in result.groups) else FAIL
+        met = all(g.cited or (disclosed and not g.supplied) for g in result.groups)
+        checks["required_evidence_cited"] = PASS if met else FAIL
     else:
         checks["required_evidence_cited"] = NA
 
@@ -151,7 +167,7 @@ def grade_run(case: Case, run: CaseRun) -> DeterministicResult:
 
     result.abstained = is_abstention(answer)
     if case.answerable:
-        checks["abstention"] = FAIL if result.abstained else PASS
+        checks["abstention"] = FAIL if result.abstained and not disclosed else PASS
     else:
         checks["abstention"] = PASS if result.abstained and not out.citations else FAIL
     return result
