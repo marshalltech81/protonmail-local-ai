@@ -774,7 +774,8 @@ removed Bridge container are kept as history.
     `openWorldHint: false` and its own title-cased `title`, from one
     shared constant; a test fails on a tool added without a deliberate
     classification. Operational logging does not prevent read-only: the
-    logs are the server's telemetry, carry no arguments or mail, and are
+    logs are the server's telemetry, carry no content-bearing arguments
+    or mail (only allowlisted, validated values), and are
     not an effect of the tool. `openWorldHint` stays `false` for the
     tools that call the embed, rerank or inference provider too: the
     domain is the mailbox, and egress is disclosed by the startup
