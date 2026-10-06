@@ -88,7 +88,12 @@ Run these checks in order of depth.
 docker compose logs mbsync --tail 20
 ```
 
-Look for `>>> Syncing...` lines repeating at your `SYNC_INTERVAL`. If startup
+Look for `>>> Syncing...` lines repeating at your `SYNC_INTERVAL`, each
+followed by `>>> Sync ok in <n>s (deadline <n>s)` when the sync succeeds. If
+the permission repair after a sync fails, mbsync logs
+`find/chmod reported <n> error line(s)` with a `docker exec` command that
+lists the entries still unreadable; the errors themselves are not logged,
+because their paths name folders. If startup
 fails, `mbsync` now logs a specific cause such as:
 
 - missing `BRIDGE_USER`
@@ -651,14 +656,16 @@ on from there.
 **Tune the deadline after your first sync.** The default is deliberately
 generous because the first sync of a large mailbox is the longest run
 mbsync makes, and its duration is not known in advance. Once the first
-sync has finished, find how long it took from the log timestamps:
+sync has finished, find how long it took: each successful sync logs
+`>>> Sync ok in <n>s (deadline <n>s)`.
 
 ```bash
-docker compose logs -t mbsync | grep -E 'Running initial sync|Starting sync loop'
+docker compose logs mbsync | grep 'Sync ok'
 ```
 
-(If the first sync was interrupted or failed, it continued in the next
-`>>> Syncing...` runs; add those up.) Later runs only fetch new mail and
+(If the first sync was interrupted or failed, it logged no such line and
+continued in the next `>>> Syncing...` runs; add up their durations from
+the log timestamps, `docker compose logs -t mbsync`.) Later runs only fetch new mail and
 take seconds, so a few times the first sync's duration is a safe deadline;
 a lower one recovers sooner from a stall. Set it in `.env` and recreate
 mbsync:
