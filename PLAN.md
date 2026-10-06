@@ -133,7 +133,12 @@ guessing about semantics, completeness, or identity.
 
 Follow-up: #755 (filters select whole threads, so a passage from a
 message outside the filter can be cited). Decided: label passages
-(Resolved decisions 29); implementation pending.
+(Resolved decisions 29). Implemented (#861): `in_scope` / `context`
+labels in `ask_mailbox` and `get_evidence`, the prompt's scope line
+naming the filters (#779), the context-only citation check and the
+context label on the `get_message` / `get_thread` thread-text
+fallback. Answer-eval measurement against the post-#837 baseline is
+pending.
 
 ### Phase 1.5 — Minimal regression baseline
 
@@ -501,9 +506,10 @@ can be revisited with an explicit owner decision.
 - chunking a very large crafted body still takes tens of seconds
   (#684; Deferred)
 - tool descriptions ask an agent to tell the user before bulk or
-  out-of-scope reads but cannot enforce it; until #755 lands, a
-  filtered read can return passages and parent-thread context from
-  messages outside the filter, unlabelled
+  out-of-scope reads but cannot enforce it; a filtered read can still
+  return passages and parent-thread context from messages outside the
+  filter, labelled `context` (#755), and whether the scope labels
+  improve answers is not yet measured
 
 ## Blockers and Risks
 

@@ -967,18 +967,23 @@ metadata, at query time (`Database.message_scope`, no schema change):
 - **`context`**: any other message of a qualifying thread. A passage
   of a thread's combined text (a thread with no indexed chunks) is in
   scope only when every message of the thread is.
+- When the same passage text appears in several messages of a thread
+  (a quoted reply), one copy is shown; an in-scope copy is kept over a
+  context copy ranked above it.
 
 The labels change nothing about which threads are retrieved or how
 they rank. When a filter is given, or a retrieved thread holds a
 message outside the default scope (filed in Trash), the prompt shows
 them: each passage header carries `in scope` or `context` after the
 sent date, and a scope block between the evidence and the question
-states the filters and the rule. Filter values in that block are the
-caller's text or, for a resolved `from_name`, a sender-controlled
-address, so each is cut at 500 characters, has delimiter tags escaped
-and is written as one JSON string on its own line; the date bounds are
-the server's normalized UTC instants. The block names the resolved
-`from_name` and the `participant`
+states the filters and the rule. The block holds only the caller's
+own arguments, never a value read from mail: with `from_name` it names
+that name ("the contact matching the name ...") and not the address it
+resolved to, which comes from a sender-controlled header and stays
+inside the untrusted blocks. Each value is cut at 500 characters, has
+delimiter tags escaped and is written as one JSON string on its own
+line; the date bounds are the server's normalized UTC instants. The
+block names the `from_name` and the `participant`
 ([#779](https://github.com/marshalltech81/protonmail-local-ai/issues/779)),
 so "what did this person say" no longer leaves the model guessing who
 is meant. The rule: answer from in-scope passages, use context

@@ -284,7 +284,9 @@ _SCOPE_DESCRIPTION = (
     "in_scope: the passage's message meets every message-level filter of the request "
     "(sender, participant, date range on its own delivery date, else sent date, and the "
     "folder it is filed in; without folders, any folder but Trash). context: another "
-    "message of a thread the filters selected, or a thread's combined text. A request "
+    "message of a thread the filters selected. A thread's combined text (a thread with "
+    "no indexed passages) is in_scope only when every message of the thread meets the "
+    "filters, else context. A request "
     "without filters (get_evidence with thread_id) labels every passage in_scope."
 )
 
