@@ -462,7 +462,9 @@ is `127.0.0.1`, not `host.docker.internal`.
   CLI leads its own process group) when `JUDGE_TIMEOUT_SECS` runs out.
   Each CLI inherits only an allowlist of the caller's environment (path,
   home, user, locale, temporary directory, proxy and certificate
-  variables; Claude also keeps `CLAUDE_CONFIG_DIR`), so API keys,
+  variables, including `NODE_EXTRA_CA_CERTS` for a TLS-inspecting proxy;
+  Claude also keeps `CLAUDE_CONFIG_DIR`; path values are made absolute),
+  so API keys,
   provider switches, reasoning settings such as
   `CLAUDE_CODE_EFFORT_LEVEL` and telemetry exporters (`OTEL_*`) never
   reach a judge call. A
@@ -488,9 +490,9 @@ is `127.0.0.1`, not `host.docker.internal`.
   status` must report a claude.ai (subscription) login, not a Console
   (API-billed) one. A machine with an enterprise `managed-mcp.json` is
   refused, since Claude Code exits on `--strict-mcp-config` there, and so
-  is one with an organization-wide managed `CLAUDE.md` or `claudeMd` in
-  `managed-settings.json`, which load into every session whatever the
-  flags. Managed settings delivered by MDM or from Anthropic's servers
+  is one with an organization-wide managed `CLAUDE.md` or any
+  `managed-settings.json` (its `claudeMd`, hooks and other settings
+  apply to every session whatever the flags). Managed settings delivered by MDM or from Anthropic's servers
   cannot be seen locally, so on a managed machine the judge may still
   carry organization instructions.
   `JUDGE_MAX_TOKENS` becomes `CLAUDE_CODE_MAX_OUTPUT_TOKENS`: when a
@@ -506,7 +508,8 @@ is `127.0.0.1`, not `host.docker.internal`.
   `unified_exec`, browser, computer use, apps, plugins, hooks, images,
   sub-agents including `multi_agent_v2`, bundled skills; web search
   disabled). Codex older than 0.160.1, the version these flags were
-  checked against, is refused at startup. `apply_patch` cannot be removed, but
+  checked against, is refused at startup, as is a prerelease of 0.160.1
+  itself (likewise Claude Code below 2.1.211). `apply_patch` cannot be removed, but
   it only writes and `-s read-only` refuses the write. Each call gets a
   private mode-700 `CODEX_HOME` holding only a symbolic link to the
   operator's `auth.json` (the login is linked, never copied), because

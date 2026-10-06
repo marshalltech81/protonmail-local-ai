@@ -209,13 +209,19 @@ class TestConfig:
         with pytest.raises(ConfigError, match="managed CLAUDE.md"):
             load_layer("JUDGE", self.ENV)
         monkeypatch.setattr(cli_judge, "MANAGED_CLAUDE_MD_PATHS", ())
+        # Review round 5: managed hooks (and any other managed setting)
+        # apply whatever the flags say too, so any managed settings file
+        # is refused, not only one carrying claudeMd.
         settings = tmp_path / "managed-settings.json"
         monkeypatch.setattr(cli_judge, "MANAGED_SETTINGS_PATHS", (settings,))
-        settings.write_text(json.dumps({"permissions": {}}))
-        assert load_layer("JUDGE", self.ENV) is not None
-        for text in (json.dumps({"claudeMd": "org rules"}), "not json"):
+        for text in (
+            json.dumps({"claudeMd": "org rules"}),
+            json.dumps({"hooks": {"SessionStart": []}}),
+            json.dumps({"permissions": {}}),
+            "not json",
+        ):
             settings.write_text(text)
-            with pytest.raises(ConfigError, match="managed"):
+            with pytest.raises(ConfigError, match="managed settings"):
                 load_layer("JUDGE", self.ENV)
 
     def test_label_records_the_cli_and_its_version(self):
@@ -313,6 +319,19 @@ class TestClient:
         assert env["PATH"] == os.environ["PATH"] and env["HOME"] == os.environ["HOME"]
         assert env["CLAUDE_CONFIG_DIR"] == str(tmp_path)  # where the login lives
         assert env["LC_ALL"] == "C.UTF-8"
+
+    def test_custom_ca_is_kept_and_resolved(self, fake_claude, monkeypatch, tmp_path):
+        """Review round 5: behind a TLS-inspecting proxy Claude Code needs
+        NODE_EXTRA_CA_CERTS; a relative CA path is made absolute."""
+        exe, _, calls = fake_claude
+        (tmp_path / "ca.pem").write_text("")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("NODE_EXTRA_CA_CERTS", "ca.pem")
+        monkeypatch.setenv("SSL_CERT_FILE", "ca.pem")
+        _run(_client(exe).complete("s", "u"))
+        env = calls()[0]["env"]
+        assert env["NODE_EXTRA_CA_CERTS"] == str((tmp_path / "ca.pem").resolve())
+        assert env["SSL_CERT_FILE"] == str((tmp_path / "ca.pem").resolve())
 
     def test_relative_config_dir_is_resolved(self, fake_claude, monkeypatch, tmp_path):
         """Review round 4: a relative CLAUDE_CONFIG_DIR named a different
@@ -682,6 +701,23 @@ class TestCodexConfig:
         monkeypatch.setattr(cli_judge.shutil, "which", lambda name: str(old))
         with pytest.raises(ConfigError, match="0.160.1 or newer"):
             load_layer("JUDGE", self.ENV)
+
+    @pytest.mark.parametrize(
+        ("version", "ok"),
+        [
+            ("0.160.1", True),
+            ("0.160.2", True),
+            ("0.161.0-alpha.3", True),
+            ("0.160.1-alpha.14", False),
+            ("0.160.1+build.5", True),
+            ("0.160.0", False),
+            ("unknown", False),
+        ],
+    )
+    def test_version_floor_orders_prereleases(self, version, ok):
+        """Review round 5: a prerelease of the floor version precedes the
+        release the flags were checked against."""
+        assert cli_judge.version_at_least(version, (0, 160, 1)) is ok
 
     def test_prerelease_version_is_kept(self, fake_codex):
         """Review round 2: alpha builds collapsed into the stable version."""

@@ -34,9 +34,9 @@ whose ``--setting-sources ""`` still loaded nested ``.claude/rules``
 files, is refused. Before the run, ``claude auth status`` (in
 the same environment) must report the subscription login. An enterprise
 ``managed-mcp.json`` (under which ``--strict-mcp-config`` exits at
-startup) and managed instructions (an organization-wide ``CLAUDE.md``
-or ``claudeMd`` in ``managed-settings.json``, which no flag excludes)
-are refused; managed settings delivered by MDM or from the server
+startup), an organization-wide ``CLAUDE.md`` and any
+``managed-settings.json`` (its ``claudeMd``, hooks and other settings
+apply whatever the flags) are refused; managed settings delivered by MDM or from the server
 cannot be seen from here. ``JUDGE_MAX_TOKENS`` becomes
 ``CLAUDE_CODE_MAX_OUTPUT_TOKENS``; on hitting it the CLI makes its own
 continuation attempts (not ours to turn off) before reporting the cap,
@@ -115,6 +115,7 @@ _ENV_ALLOWLIST = frozenset(
         "__CF_USER_TEXT_ENCODING",
         "SSL_CERT_FILE",
         "SSL_CERT_DIR",
+        "NODE_EXTRA_CA_CERTS",
         "HTTP_PROXY",
         "HTTPS_PROXY",
         "NO_PROXY",
@@ -197,22 +198,36 @@ class CliJudgeError(Exception):
         self.detail = detail
 
 
+# Path-valued variables made absolute: each call runs in a temporary
+# directory, where a relative path would name something else.
+_PATH_VARS = ("CLAUDE_CONFIG_DIR", "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "SSL_CERT_DIR")
+
+
 def _allowed_env(*extra: str) -> dict[str, str]:
-    """The caller's allowlisted variables, plus ``extra`` names."""
-    return {
+    """The caller's allowlisted variables, plus ``extra`` names, with
+    path-valued ones made absolute."""
+    env = {
         k: v
         for k, v in os.environ.items()
         if k in _ENV_ALLOWLIST or k.startswith("LC_") or k in extra
     }
+    for name in _PATH_VARS:
+        if env.get(name, "").strip():
+            env[name] = str(Path(env[name]).resolve())
+    return env
 
 
 def version_at_least(version: str, minimum: tuple[int, ...]) -> bool:
-    """``version``'s numeric part compared with ``minimum``; ``False``
-    when it has none (``unknown``)."""
-    match = re.match(r"\d+(?:\.\d+)*", version)
+    """``version`` compared with ``minimum``, a prerelease of the
+    minimum itself counting as below it; ``False`` when ``version`` has
+    no number (``unknown``)."""
+    match = re.match(r"(\d+(?:\.\d+)*)(-[^+]*)?", version)
     if not match:
         return False
-    return tuple(int(part) for part in match.group(0).split(".")) >= minimum
+    numbers = tuple(int(part) for part in match.group(1).split("."))
+    if numbers != minimum:
+        return numbers > minimum
+    return match.group(2) is None
 
 
 def _not_json(name: str) -> CliJudgeError:
@@ -272,12 +287,9 @@ async def _run_cli(argv: list[str], stdin: str, cwd: str, env: dict[str, str]) -
 
 
 def claude_env(max_tokens: int | None = None) -> dict[str, str]:
-    """The CLI's environment: the allowlist and ``CLAUDE_CONFIG_DIR``
-    (absolute: each call runs in a temporary directory), with
-    auto-updates off."""
+    """The CLI's environment: the allowlist and ``CLAUDE_CONFIG_DIR``,
+    with auto-updates off."""
     env = _allowed_env("CLAUDE_CONFIG_DIR")
-    if env.get("CLAUDE_CONFIG_DIR", "").strip():
-        env["CLAUDE_CONFIG_DIR"] = str(Path(env["CLAUDE_CONFIG_DIR"]).resolve())
     env["DISABLE_AUTOUPDATER"] = "1"
     if max_tokens is not None:
         env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = str(max_tokens)
@@ -309,21 +321,11 @@ def managed_mcp_present() -> bool:
     return any(path.exists() for path in MANAGED_MCP_PATHS)
 
 
-def managed_instructions_present() -> bool:
-    """A managed CLAUDE.md, or managed settings that carry ``claudeMd``
-    (or cannot be read, so cannot be shown not to)."""
-    if any(path.exists() for path in MANAGED_CLAUDE_MD_PATHS):
-        return True
-    for path in MANAGED_SETTINGS_PATHS:
-        if not path.exists():
-            continue
-        try:
-            settings = json.loads(path.read_text(encoding="utf-8"))
-        except OSError, ValueError:
-            return True
-        if not isinstance(settings, dict) or "claudeMd" in settings:
-            return True
-    return False
+def managed_policy_present() -> bool:
+    """A managed CLAUDE.md or any managed settings file: both apply to
+    every session whatever the flags (instructions, ``claudeMd``,
+    hooks that can add context or export the prompt)."""
+    return any(path.exists() for path in (*MANAGED_CLAUDE_MD_PATHS, *MANAGED_SETTINGS_PATHS))
 
 
 class ClaudeCliClient:

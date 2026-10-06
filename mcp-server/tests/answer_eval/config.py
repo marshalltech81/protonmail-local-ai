@@ -294,10 +294,10 @@ def _check_claude_login(mode: str, path: str) -> None:
             f"JUDGE_MODE={mode} cannot run under an enterprise managed-mcp.json: "
             "Claude Code refuses --strict-mcp-config there"
         )
-    if cli_judge.managed_instructions_present():
+    if cli_judge.managed_policy_present():
         raise ConfigError(
-            f"JUDGE_MODE={mode} cannot run with a managed CLAUDE.md or claudeMd in managed "
-            "settings: those instructions reach every session and would alter grading"
+            f"JUDGE_MODE={mode} cannot run with a managed CLAUDE.md or managed settings: "
+            "their instructions and hooks reach every session and would alter grading"
         )
     method = cli_judge.auth_method(path)
     if method is None:
