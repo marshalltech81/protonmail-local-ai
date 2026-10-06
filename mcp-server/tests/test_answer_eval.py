@@ -30,6 +30,7 @@ from src.lib.security import ProviderResponseError
 from src.tools import intelligence
 from src.tools.outputs import AnswerStatement
 
+from tests.agent_metrics import is_held_out
 from tests.answer_eval import __main__ as cli
 from tests.answer_eval.cases import (
     CASES_PATH,
@@ -1732,6 +1733,15 @@ class TestCli:
             (["cases", 0, "judge", "status"], ["MARKER-677"]),
             (["cases", 0, "judge", "groundedness_pass"], "MARKER-677"),
             (["cases", 0, "judge", "correctness_pass"], "MARKER-677"),
+            # #771: an integer too large for a float raised OverflowError.
+            (["aggregates", "dev", "answer_ms_mean"], 10**400),
+            (["aggregates", "by_category", "CATEGORY", "deterministic_pass_rate"], -(10**400)),
+            # #771: an empty judge object hid both sides' judge rates.
+            (["aggregates", "dev", "judge"], {}),
+            (["aggregates", "held_out", "judge"], {"correctness_pass_rate": None}),
+            (["aggregates", "by_category", "CATEGORY", "judge"], {}),
+            # #771: a case ID the case loader refuses (over 64 characters).
+            (["cases", 0, "id"], "ask-" + "a" * 61),
         ],
     )
     def test_compare_rejects_malformed_nested_shapes(
@@ -1759,6 +1769,44 @@ class TestCli:
             out, err = capsys.readouterr()
             assert err == "answer evaluation: malformed answer evaluation report\n"
             assert "MARKER-677" not in out + err
+
+    def test_compare_rejects_duplicate_case_ids(self, chunked_db, tmp_path, capsys):
+        """#771: compare kept the last row per ID, so the order of
+        conflicting duplicates decided whether a regression showed."""
+        good = self._report(chunked_db, tmp_path, "a.json")
+        data = json.loads(good.read_text())
+        dup = json.loads(json.dumps(data["cases"][0]))
+        dup["deterministic"]["passed"] = not dup["deterministic"]["passed"]
+        data["cases"].append(dup)
+        bad = tmp_path / "bad.json"
+        bad.write_text(json.dumps(data))
+        for argv in ([str(good), str(bad)], [str(bad), str(good)]):
+            assert cli.main(["compare", *argv]) == cli.EXIT_CONFIG
+            assert capsys.readouterr().err == (
+                "answer evaluation: malformed answer evaluation report\n"
+            )
+
+    def test_loader_and_report_share_the_case_id_rule(self, chunked_db, tmp_path):
+        """#771: the report check limited case IDs to 64 characters and the
+        loader did not, so a valid --cases file wrote a report compare
+        called malformed. One rule now serves both."""
+        longest, too_long = "ask-" + "a" * 60, "ask-" + "a" * 61
+        data = json.loads(CASES_PATH.read_text())
+        row = next(r for r in data["cases"] if r["id"] == "ask-roof-total")
+        path = tmp_path / "cases.json"
+        for cid, ok in ((longest, True), (too_long, False)):
+            row["id"], row["held_out"] = cid, is_held_out(cid)
+            path.write_text(json.dumps(data))
+            if ok:
+                assert any(c.id == cid for c in load_cases(path))
+            else:
+                with pytest.raises(CaseError, match="malformed id"):
+                    load_cases(path)
+        report = self._report(chunked_db, tmp_path, "a.json")
+        rows = json.loads(report.read_text())
+        rows["cases"][0]["id"] = longest
+        report.write_text(json.dumps(rows))
+        assert cli.main(["compare", str(report), str(report)]) == cli.EXIT_OK
 
     def test_compare_rejects_a_non_utf8_report(self, chunked_db, tmp_path, capsys):
         """Codex round 2 on #761: invalid UTF-8 raised an uncaught

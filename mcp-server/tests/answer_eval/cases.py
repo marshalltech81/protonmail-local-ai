@@ -55,6 +55,7 @@ HANDLINGS = frozenset({"answer", "disclose_conflict", "disclose_missing", "absta
 REVIEW_STATES = frozenset({"ai_drafted", "owner_verified"})
 _ARGUMENTS = frozenset({"question", "from_addr", "date_from", "date_to", "folders", "max_threads"})
 _CASE_ID = re.compile(r"ask-[a-z0-9]+(?:-[a-z0-9]+)*")
+CASE_ID_MAX_LEN = 64
 _FACT_ID = re.compile(r"f[1-9][0-9]*")
 _REF = re.compile(r"t[0-9]{2}(?:\.[1-9][0-9]*)?")
 
@@ -62,6 +63,16 @@ _REF = re.compile(r"t[0-9]{2}(?:\.[1-9][0-9]*)?")
 class CaseError(ValueError):
     """A case file that breaks the schema. Messages name case IDs and
     fields only (both ours), never case text."""
+
+
+def is_case_id(value: object) -> bool:
+    """A well-formed case ID: the one rule for case files and for the
+    reports ``compare`` reads (#771)."""
+    return (
+        isinstance(value, str)
+        and len(value) <= CASE_ID_MAX_LEN
+        and _CASE_ID.fullmatch(value) is not None
+    )
 
 
 def thread_id_of(ref: str) -> str:
@@ -126,7 +137,7 @@ def _refs(value: object) -> bool:
 
 def _parse_case(row: dict[str, Any]) -> Case:
     cid = row.get("id")
-    if not isinstance(cid, str) or not _CASE_ID.fullmatch(cid):
+    if not is_case_id(cid):
         raise CaseError("a case has a missing or malformed id")
     _require(row.get("tool") == "ask_mailbox", cid, "tool must be ask_mailbox")
     _require(row.get("category") in CATEGORIES, cid, "unknown category")
