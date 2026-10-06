@@ -1005,6 +1005,119 @@ thread) is not a token limit: no setting changes it, so it logs no
 warning. It is counted as `evidence_capped_threads` on the call's
 `mcp.timings` line instead.
 
+## Attachment text or message content missing from search
+
+An attachment whose text could not be extracted is still indexed by
+filename and type, but its contents are not searchable. The indexer
+logs these outcomes with counts, extractor names and exception types
+only, never filenames or text (`make logs`):
+
+- `extractor <module> failed (dispatch_via=<mime|extension|...>):
+  <ExceptionType>` (WARNING), per extraction that fails: an encrypted
+  PDF that needs a password, a Tesseract error or timeout, a DOCX or
+  XLSX the parser rejects, or (`zip uncompressed-size cap exceeded`) a
+  DOCX or XLSX that would decompress past its cap. Many of these at
+  once usually means the OCR toolchain or a parser library is
+  broken, not the mail. A failed result is cached for 7 days, then
+  retried when the same bytes arrive again.
+- `pdf OCR capped at <N> of <M> scanned pages` (WARNING): a scanned
+  PDF had more pages without a text layer than `INDEXER_OCR_MAX_PAGES`;
+  the pages past the cap are not read. Every capped PDF is also counted
+  in the attachments line below (`ocr_capped_pdfs`, `ocr_pages_skipped`).
+  Raising the cap applies only to PDFs extracted afterwards, since the
+  result is cached. Known limitation (#891): the cap is logged and
+  counted on the first extraction only. A later message carrying the
+  same PDF is served from the extraction cache and reports a plain
+  `success`, with no cap line and no `ocr_capped_pdfs` count, although
+  the cached text still lacks the unread pages.
+- These per-item WARNINGs (failed extractions, OCR caps and the
+  parser-cap line described below, together) are capped at 20 per 5
+  minutes, so a stream of crafted mail cannot flood the log. The rest
+  are counted as `warnings_suppressed` in the attachments line below.
+- `attachments n=<total> success= failed= unsupported= too_large=
+  ocr_disabled= empty= cached= pdf_pages_failed=
+  pdf_pages_unrecovered= ocr_capped_pdfs= ocr_pages_skipped=
+  parser_caps_messages= warnings_suppressed=`: the attachments of the
+  messages committed since the previous line, by outcome. It is a
+  WARNING when any of `failed`, `unsupported`, `too_large`,
+  `ocr_disabled`, `pdf_pages_unrecovered`, `ocr_capped_pdfs`,
+  `ocr_pages_skipped`, `parser_caps_messages` or `warnings_suppressed`
+  is above zero (some attachment text is not
+  searchable), and INFO otherwise. `pdf_pages_failed` alone does not
+  make it a WARNING (see below).
+  - When it is logged: during the initial index, with the timing summary
+    once at least 25 messages have been drained since the last one (each
+    batch, at the default `INITIAL_INDEX_BATCH_SIZE=50`), and once at
+    the end. Afterwards, with the steady-state timing summary: every 25
+    messages, when a drain leaves no more ready jobs (the end of a
+    burst), and at least every 5 minutes while counts are pending. At
+    most one line is logged per 60 seconds (the initial index's final
+    line excepted); counts held back are carried into the next line,
+    so none are lost, and the 5-minute flush still applies.
+  - What the outcomes mean: `cached` counts attachments served from the
+    extraction cache instead of extracted again. `unsupported` is a type
+    no extractor reads, `too_large` is over
+    `INDEXER_ATTACHMENT_MAX_BYTES`, and `ocr_disabled` is an image or
+    scanned PDF skipped while `INDEXER_OCR_ENABLED=false` (re-extracted
+    once OCR is turned on).
+  - What the extraction counts mean: `pdf_pages_failed` is a diagnostic
+    count of PDF pages whose text layer pypdf could not read. With OCR
+    on, such a page is OCR'd (within `INDEXER_OCR_MAX_PAGES`) and its
+    text may be recovered, so the count alone does not mean text is
+    missing. A steady rise across ordinary PDFs points at a pypdf
+    regression. `pdf_pages_unrecovered` counts those pages whose text
+    was never recovered: OCR is off, the PDF had enough digital text on
+    its other pages to return before OCR, OCR read no text from the
+    page, or the OCR cap left it unread. These pages are missing from
+    search.
+    `ocr_capped_pdfs` counts scanned PDFs whose OCR stopped at
+    `INDEXER_OCR_MAX_PAGES`, and `ocr_pages_skipped` the scanned pages
+    they left unread.
+  - How retries count: the outcomes are counted once per committed
+    message, so a message retried after an embedder outage counts once.
+    The extraction counts (`pdf_pages_failed`,
+    `pdf_pages_unrecovered`, `ocr_capped_pdfs`, `ocr_pages_skipped`,
+    `warnings_suppressed`) and the per-attachment
+    WARNINGs count every extraction attempt, retries included, and
+    `parser_caps_messages` every parse of a capped message (see
+    below).
+
+The parser also caps the work one message can cost. A cap that loses
+content logs one WARNING line for that message, with its Maildir path
+and the caps that fired, by name and count:
+`parser work caps dropped content from <path>: body_parts=5,address_header=1`.
+The message is still indexed, without that content. These lines share
+the 20-per-5-minutes limit above. Every capped message, logged or not,
+is counted as `parser_caps_messages` in the attachments line, which
+it makes a WARNING.
+
+An attached email (or another container part) counts only when
+something searchable is lost:
+
+- The attachments inside a base64 or quoted-printable attached email
+  are not read.
+- The container's own payload is emptied while an extractor would have
+  read it, for example a delivery report named `status.txt`.
+
+An attached email sent without a transfer encoding is still walked, so
+the attachments inside it are kept, and emptying a payload that no
+extractor reads (`.eml`) is not logged.
+
+| Cap | What was dropped |
+|---|---|
+| `attached_depth` | An attached email nested more than 20 levels deep (or 20 transfer-encoded levels) |
+| `attached_fields` | The same, once the message's attached emails exceed the per-message part and header budget |
+| `transport_decode` | A base64 or quoted-printable attached email that does not decode: the attachments inside it are not read |
+| `decoded_bytes` | The same, past 64 MB of decoded attached emails per message |
+| `container_serialize` | A container the serializer refuses (a malformed header), when its payload would be extracted |
+| `body_parts` | Text parts past the 200th, left out of the body: only those that could have been part of it, so an alternative rendering after the one the body uses is not counted |
+| `address_header` | Every recipient of a `From`, `To` or `Cc` header over 256,000 characters |
+| `address_element` | One address-list entry over 128,000 characters |
+| `address_length` | One address over 998 characters |
+
+The caps bound what crafted mail can cost the single indexing worker,
+so they are not configurable. Ordinary mail does not reach them.
+
 ## Claude Desktop doesn't see the tools
 
 1. Verify the MCP server is running: `docker compose ps`

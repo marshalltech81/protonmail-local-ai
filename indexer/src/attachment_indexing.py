@@ -31,13 +31,16 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from threading import Lock
 
 from .chunker import MessageChunk, chunk_message
 from .database import Database
 from .extractors import (
+    OCR_DISABLED_ERROR,
     SCANNED_PDF_OCR_DISABLED_ERROR,
     STATUS_EMPTY,
     STATUS_FAILED,
@@ -45,6 +48,7 @@ from .extractors import (
     STATUS_TOO_LARGE,
     STATUS_UNSUPPORTED,
     ExtractionResult,
+    drain_extractor_counts,
     resolved_extractor_module,
     stale_extractor_module,
 )
@@ -54,6 +58,111 @@ from .extractors import (
 from .parser import Attachment
 
 log = logging.getLogger("indexer.attachments")
+
+# Outcomes the periodic attachments aggregate counts (#871): the
+# extraction statuses, with ``unsupported`` for want of OCR split out as
+# ``ocr_disabled``.
+ATTACHMENT_OUTCOMES: tuple[str, ...] = (
+    STATUS_SUCCESS,
+    STATUS_FAILED,
+    STATUS_UNSUPPORTED,
+    STATUS_TOO_LARGE,
+    "ocr_disabled",
+    STATUS_EMPTY,
+)
+
+
+class AttachmentOutcomeCounts:
+    """Attachment occurrences by outcome since the last ``drain``.
+
+    Every occurrence of a message that commits is counted
+    (``record_committed_outcomes``), whether extracted now or served
+    from the cache or the batch (``cached`` counts the latter too), so
+    the line the indexer logs with each summary shows how much of the
+    mail's attachments is searchable. Counting at commit keeps a message
+    prepared again after an embedder outage from being counted twice.
+    Per-attachment lines would flood the log; ``failed`` extractions also
+    log their own rate-limited WARNING. ``drain`` also reports the
+    extractors' per-attempt counts (``extractors.drain_extractor_counts``:
+    ``pdf_pages_failed``, ``pdf_pages_unrecovered``, ``ocr_capped_pdfs``,
+    ``ocr_pages_skipped`` and
+    ``warnings_suppressed``). Counts
+    only: no filename, type or text.
+    """
+
+    def __init__(self) -> None:
+        self._counts: Counter[str] = Counter()
+        self._lock = Lock()
+
+    def record(self, status: str, error: str | None, *, cached: bool) -> None:
+        outcome = status
+        if status == STATUS_UNSUPPORTED and (error or "").startswith(OCR_DISABLED_ERROR):
+            outcome = "ocr_disabled"
+        with self._lock:
+            self._counts[outcome] += 1
+            if cached:
+                self._counts["cached"] += 1
+
+    def drain(self) -> dict[str, int]:
+        """Return every outcome's count plus ``cached`` and the extractor
+        counts, and reset them."""
+        with self._lock:
+            counts, self._counts = self._counts, Counter()
+        drained = {name: counts[name] for name in (*ATTACHMENT_OUTCOMES, "cached")}
+        drained.update(drain_extractor_counts())
+        return drained
+
+
+attachment_outcomes = AttachmentOutcomeCounts()
+
+# Fields of the summary line after ``n``, in order.
+_SUMMARY_FIELDS = (
+    *ATTACHMENT_OUTCOMES,
+    "cached",
+    "pdf_pages_failed",
+    "pdf_pages_unrecovered",
+    "ocr_capped_pdfs",
+    "ocr_pages_skipped",
+    "parser_caps_messages",
+    "warnings_suppressed",
+)
+# Counts that mean attachment text is missing from search: the line is
+# then a WARNING (review round 1 on #884). ``pdf_pages_failed`` is left
+# out: a page pypdf cannot read is OCR'd when OCR is on and may be
+# recovered, so it is a diagnostic count (review round 3); the pages no
+# OCR recovered are ``pdf_pages_unrecovered`` (review round 4).
+_DEGRADED_FIELDS = (
+    STATUS_FAILED,
+    STATUS_UNSUPPORTED,
+    STATUS_TOO_LARGE,
+    "ocr_disabled",
+    "pdf_pages_unrecovered",
+    "ocr_capped_pdfs",
+    "ocr_pages_skipped",
+    "parser_caps_messages",
+    "warnings_suppressed",
+)
+
+
+def record_committed_outcomes(plans: list[AttachmentWritePlan]) -> None:
+    """Count the outcome of each plan of a message whose writes committed."""
+    for plan in plans:
+        attachment_outcomes.record(plan.status, plan.extraction_error, cached=plan.cached)
+
+
+def attachment_outcomes_degraded(counts: dict[str, int]) -> bool:
+    """Whether ``counts`` include attachments whose text is not searchable."""
+    return any(counts[name] for name in _DEGRADED_FIELDS)
+
+
+def format_attachment_outcomes(counts: dict[str, int]) -> str:
+    """One log line for ``AttachmentOutcomeCounts.drain()``'s result, or
+    an empty string when every count is zero."""
+    if not any(counts[name] for name in _SUMMARY_FIELDS):
+        return ""
+    parts = [f"attachments n={sum(counts[name] for name in ATTACHMENT_OUTCOMES)}"]
+    parts.extend(f"{name}={counts[name]}" for name in _SUMMARY_FIELDS)
+    return " ".join(parts)
 
 
 def attachment_occurrence_id(
@@ -203,6 +312,11 @@ class AttachmentWritePlan:
     # The batched indexer turns it off when another copy of the same bytes
     # in the message fills that slice.
     clears_stale_chunks: bool = True
+    # The extraction error behind ``status`` and whether the result came
+    # from the cache or the batch: the outcome counted once the message
+    # commits (``record_committed_outcomes``).
+    extraction_error: str | None = None
+    cached: bool = False
 
 
 def _resolve_extracted_text(
@@ -217,8 +331,11 @@ def _resolve_extracted_text(
     max_pdf_pages: int | None = None,
     batch_extractions: dict[str, ExtractionResult] | None = None,
     on_progress: Callable[[], None] | None = None,
-) -> tuple[str | None, str, ExtractionResult | None]:
-    """Return ``(text, status, extraction_to_persist)``.
+) -> tuple[str | None, str, ExtractionResult | None, str | None, bool]:
+    """Return ``(text, status, extraction_to_persist, error, cached)``:
+    ``error`` is the extraction error behind ``status`` and ``cached``
+    whether the result was served without extracting, for the outcome
+    counts.
 
     A successful cache hit short-circuits and returns the stored text
     with ``extraction_to_persist=None`` so the apply phase does not
@@ -240,7 +357,7 @@ def _resolve_extracted_text(
         or _unsupported_still_holds(pending.error, attachment, ocr_enabled)
     ):
         text = pending.text if pending.status == STATUS_SUCCESS else None
-        return text, pending.status, pending
+        return text, pending.status, pending, pending.error, True
 
     cached = db.get_attachment_extraction(attachment.content_hash)
     # A row written by an older version of a since-fixed extractor would
@@ -263,7 +380,7 @@ def _resolve_extracted_text(
         # return ``None`` text so the caller skips chunking but the
         # apply phase also skips re-persisting an unchanged row.
         text = cached["extracted_text"] if cached["extraction_status"] == STATUS_SUCCESS else None
-        return text, cached["extraction_status"], None
+        return text, cached["extraction_status"], None, cached["extraction_error"], True
 
     result = extract_attachment(
         content_type=attachment.content_type,
@@ -281,7 +398,7 @@ def _resolve_extracted_text(
     if batch_extractions is not None:
         batch_extractions[attachment.content_hash] = result
     text = result.text if result.status == STATUS_SUCCESS else None
-    return text, result.status, result
+    return text, result.status, result, result.error, False
 
 
 def prepare_attachment_writes(
@@ -331,7 +448,7 @@ def prepare_attachment_writes(
         occurrence_index=occurrence_index,
     )
 
-    text, status, extraction_to_persist = _resolve_extracted_text(
+    text, status, extraction_to_persist, extraction_error, cached = _resolve_extracted_text(
         attachment=attachment,
         db=db,
         ocr_enabled=ocr_enabled,
@@ -347,7 +464,8 @@ def prepare_attachment_writes(
     if status != STATUS_SUCCESS or not text:
         # No usable text for chunking. Still searchable by filename / MIME
         # via the FTS row written in apply. ``unsupported`` and ``too_large``
-        # log at debug because they are common (zip files, huge backups).
+        # log at debug because they are common (zip files, huge backups);
+        # the periodic aggregate counts them at INFO (#871).
         if status in {STATUS_UNSUPPORTED, STATUS_TOO_LARGE}:
             log.debug("attachment status=%s — no chunks", status)
         return AttachmentWritePlan(
@@ -355,6 +473,8 @@ def prepare_attachment_writes(
             occurrence_id=occurrence_id,
             status=status,
             extraction_to_persist=extraction_to_persist,
+            extraction_error=extraction_error,
+            cached=cached,
         )
 
     # Chunk the extracted text. The chunker takes
@@ -376,6 +496,8 @@ def prepare_attachment_writes(
         status=status,
         extraction_to_persist=extraction_to_persist,
         chunks=chunks,
+        extraction_error=extraction_error,
+        cached=cached,
     )
 
 

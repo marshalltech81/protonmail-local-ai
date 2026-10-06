@@ -33,9 +33,11 @@ from __future__ import annotations
 import importlib
 import logging
 import os
+import time
 import zipfile
 from collections.abc import Callable
 from dataclasses import dataclass
+from threading import Lock
 
 import defusedxml
 from PIL import Image
@@ -79,6 +81,116 @@ log = logging.getLogger("indexer.extractor")
 # python-docx / openpyxl get a chance to expand it. 200 MB covers any
 # realistic spreadsheet while keeping memory bounded.
 ZIP_MAX_UNCOMPRESSED_BYTES = 200 * 1024 * 1024
+
+# Counts the indexer reports in its periodic attachments aggregate
+# (#871), per extraction attempt, since the last drain:
+#
+# * ``pdf_pages_failed``: PDF pages whose text layer pypdf could not read.
+#   The PDF extractor skips such a page (one DEBUG line each) and counts
+#   it here, so a parser regression is visible without a line per page.
+# * ``pdf_pages_unrecovered``: those of them whose text was never
+#   recovered (OCR off, a digital return before OCR, OCR reading nothing,
+#   or the OCR cap leaving the page unread).
+# * ``ocr_capped_pdfs`` / ``ocr_pages_skipped``: scanned PDFs whose OCR
+#   stopped at ``max_ocr_pages``, and the scanned pages left unread.
+# * ``parser_caps_messages``: messages a parser work cap cut (#872),
+#   counted here so the parser's per-message line can be rate limited
+#   without losing a message (review round 5 on #884).
+# * ``warnings_suppressed``: per-item WARNINGs (failed extraction, OCR
+#   cap, parser cap) that the rate limit below withheld.
+#
+# Kept in this always-imported module because ``pdf`` is imported lazily.
+# A few integers and a window start: the state stays bounded.
+_counts_lock = Lock()
+_pdf_pages_failed = 0
+_pdf_pages_unrecovered = 0
+_ocr_capped_pdfs = 0
+_ocr_pages_skipped = 0
+_parser_caps_messages = 0
+_warnings_suppressed = 0
+
+# At most this many per-attachment WARNINGs per window, shared by every
+# kind (review rounds 1 and 2 on #884): a sender can attach many distinct
+# malformed or over-long files, and one line each could flood the
+# retained log. The rest are counted.
+_WARNINGS_PER_WINDOW = 20
+_WARNING_WINDOW_SECS = 300.0
+_warning_window: float | None = None
+_warnings_in_window = 0
+
+
+def note_pdf_page_failed() -> None:
+    """Count one PDF page whose text layer could not be read."""
+    global _pdf_pages_failed
+    with _counts_lock:
+        _pdf_pages_failed += 1
+
+
+def note_pdf_pages_unrecovered(pages: int) -> None:
+    """Count PDF pages pypdf could not read whose text OCR never recovered."""
+    global _pdf_pages_unrecovered
+    with _counts_lock:
+        _pdf_pages_unrecovered += pages
+
+
+def note_ocr_capped(pages_skipped: int) -> None:
+    """Count one PDF whose OCR stopped at the page cap, and its unread
+    scanned pages."""
+    global _ocr_capped_pdfs, _ocr_pages_skipped
+    with _counts_lock:
+        _ocr_capped_pdfs += 1
+        _ocr_pages_skipped += pages_skipped
+
+
+def note_parser_caps_message() -> None:
+    """Count one message a parser work cap cut."""
+    global _parser_caps_messages
+    with _counts_lock:
+        _parser_caps_messages += 1
+
+
+def drain_extractor_counts() -> dict[str, int]:
+    """Return the counts above since the last call, and reset them."""
+    global _pdf_pages_failed, _pdf_pages_unrecovered, _ocr_capped_pdfs
+    global _ocr_pages_skipped, _parser_caps_messages, _warnings_suppressed
+    with _counts_lock:
+        counts = {
+            "pdf_pages_failed": _pdf_pages_failed,
+            "pdf_pages_unrecovered": _pdf_pages_unrecovered,
+            "ocr_capped_pdfs": _ocr_capped_pdfs,
+            "ocr_pages_skipped": _ocr_pages_skipped,
+            "parser_caps_messages": _parser_caps_messages,
+            "warnings_suppressed": _warnings_suppressed,
+        }
+        _pdf_pages_failed = _pdf_pages_unrecovered = _ocr_capped_pdfs = 0
+        _ocr_pages_skipped = _parser_caps_messages = _warnings_suppressed = 0
+    return counts
+
+
+def warn_rate_limited(logger: logging.Logger, msg: str, *args: object) -> None:
+    """Log one per-attachment WARNING unless this window's budget is
+    spent; then count it as suppressed. ``args`` must be counts, module
+    names, type names or fixed text."""
+    global _warning_window, _warnings_in_window, _warnings_suppressed
+    now = time.monotonic()
+    with _counts_lock:
+        if _warning_window is None or now - _warning_window >= _WARNING_WINDOW_SECS:
+            _warning_window = now
+            _warnings_in_window = 0
+        if _warnings_in_window >= _WARNINGS_PER_WINDOW:
+            _warnings_suppressed += 1
+            return
+        _warnings_in_window += 1
+    logger.warning(msg, *args)
+
+
+def _warn_failed(module_name: str, dispatch_via: str, reason: str) -> None:
+    """Log a failed extraction at WARNING (it drops the attachment out of
+    search), rate limited. ``reason`` is an exception type name or fixed
+    text."""
+    warn_rate_limited(
+        log, "extractor %s failed (dispatch_via=%s): %s", module_name, dispatch_via, reason
+    )
 
 
 @dataclass(frozen=True)
@@ -350,6 +462,10 @@ def extract(
     if module_name in {"docx", "xlsx"}:
         zip_error = _validate_zip_payload(payload)
         if zip_error is not None:
+            # A ``failed`` row drops the attachment out of search, so it
+            # is visible at WARNING (#871); fixed text, as the error
+            # names only sizes.
+            _warn_failed(module_name, dispatch_via, "zip uncompressed-size cap exceeded")
             return ExtractionResult(
                 status=STATUS_FAILED,
                 extractor=_stamp_extractor(module_name, module_name),
@@ -381,13 +497,9 @@ def extract(
         # the parent message. ``MemoryError`` / ``RecursionError`` are
         # excluded above precisely because they are not per-payload.
         # Parser exceptions quote the document (text, member names), so
-        # only the type is logged and persisted (#257).
-        log.debug(
-            "extractor %s failed (dispatch_via=%s): %s",
-            module_name,
-            dispatch_via,
-            type(exc).__name__,
-        )
+        # only the type is logged and persisted (#257). WARNING, since
+        # the attachment drops out of search (#871), rate limited.
+        _warn_failed(module_name, dispatch_via, type(exc).__name__)
         return ExtractionResult(
             status=STATUS_FAILED,
             extractor=_stamp_extractor(module_name, module_name),

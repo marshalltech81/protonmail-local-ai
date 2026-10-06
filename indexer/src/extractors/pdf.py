@@ -18,9 +18,10 @@ Two paths share one entry point:
 The OCR fallback is gated by ``ocr_enabled`` and bounded by
 ``max_ocr_pages``, counted over the pages selected for OCR, so a
 500-page scanned book attachment does not monopolise CPU. Pages beyond
-the cap are never rendered, and the truncation is silent: nothing is
-logged and nothing is recorded. If the pages within the cap yield
-text, the dispatcher records an ordinary ``success`` that cannot be
+the cap are never rendered; the truncation logs a rate-limited
+WARNING with the counts and is counted in the attachments aggregate
+(#871), but is not recorded. If the pages within the cap yield
+text, the dispatcher caches an ordinary ``success`` that cannot be
 told apart from a complete extraction; if they yield none, the usual
 ``empty`` (or short digital-text ``success``) applies. The result is
 cached by content hash, so raising the cap later does not re-extract a
@@ -51,6 +52,13 @@ import time
 from collections.abc import Callable
 
 import pypdf
+
+from . import (
+    note_ocr_capped,
+    note_pdf_page_failed,
+    note_pdf_pages_unrecovered,
+    warn_rate_limited,
+)
 
 log = logging.getLogger("indexer.extractor.pdf")
 
@@ -96,9 +104,43 @@ def extract(
     walk reads and after each page OCR'd, so the indexer's heartbeat
     keeps up with a long scan (#485). A page that hangs reports nothing.
     """
+    # Pages pypdf could not read, and the ones OCR then recovered: the
+    # difference is counted for the attachments aggregate as
+    # ``pdf_pages_unrecovered`` (review round 4 on #884), on every return
+    # and raise below.
+    failed: set[int] = set()
     digital_pages = _extract_digital_pages(
-        payload, max_pdf_pages=max_pdf_pages, on_progress=on_progress
+        payload, max_pdf_pages=max_pdf_pages, on_progress=on_progress, failed=failed
     )
+    recovered: set[int] = set()
+    try:
+        return _text_from_pages(
+            payload,
+            digital_pages,
+            recovered=recovered,
+            ocr_enabled=ocr_enabled,
+            max_ocr_pages=max_ocr_pages,
+            ocr_timeout_seconds=ocr_timeout_seconds,
+            on_progress=on_progress,
+        )
+    finally:
+        if failed:
+            note_pdf_pages_unrecovered(len(failed - recovered))
+
+
+def _text_from_pages(
+    payload: bytes,
+    digital_pages: list[str],
+    *,
+    recovered: set[int],
+    ocr_enabled: bool,
+    max_ocr_pages: int,
+    ocr_timeout_seconds: float | None,
+    on_progress: Callable[[], None] | None,
+) -> tuple[str, str]:
+    """``extract`` from the digital walk's pages on: the digital text,
+    or the OCR fallback for the pages under the floor. Adds to
+    ``recovered`` each page OCR read text from."""
     digital_text = "\n\n".join(text for text in digital_pages if text)
 
     if not ocr_enabled:
@@ -114,7 +156,14 @@ def extract(
     # The pages to OCR: those whose own text layer is under the floor,
     # first ``max_ocr_pages`` of them.
     ocr_pages = [i for i, text in enumerate(digital_pages) if len(text) < _MIN_DIGITAL_CHARS]
-    if max_ocr_pages > 0:
+    if 0 < max_ocr_pages < len(ocr_pages):
+        # The pages past the cap are never read (#871): counted for the
+        # attachments aggregate, and the line is rate limited, since one
+        # message can carry many capped PDFs (review round 2 on #884).
+        note_ocr_capped(len(ocr_pages) - max_ocr_pages)
+        warn_rate_limited(
+            log, "pdf OCR capped at %d of %d scanned pages", max_ocr_pages, len(ocr_pages)
+        )
         ocr_pages = ocr_pages[:max_ocr_pages]
     if not ocr_pages:
         return digital_text, "pdf-digital"
@@ -135,7 +184,7 @@ def extract(
         log.warning("PDF OCR fallback failed: %s", type(exc).__name__)
         if len(digital_text) >= _MIN_DIGITAL_CHARS:
             # A mixed PDF keeps its digital text, as before page-level
-            # OCR; its unread pages are the same silent loss as the cap.
+            # OCR; its unread pages are lost, as past the cap.
             return digital_text, "pdf-digital"
         # The digital text layer was below the usable threshold, so
         # swallowing the failure would cache the attachment as empty /
@@ -144,6 +193,7 @@ def extract(
         # operators can fix Poppler/Tesseract and re-run extraction.
         raise
 
+    recovered.update(index for index, text in ocr_text.items() if text)
     if not any(ocr_text.values()):
         return digital_text, "pdf-digital"
     # Each page in order: its digital text, then its OCR text. A scanned
@@ -161,6 +211,7 @@ def _extract_digital_pages(
     *,
     max_pdf_pages: int | None = None,
     on_progress: Callable[[], None] | None = None,
+    failed: set[int] | None = None,
 ) -> list[str]:
     """Pull the embedded text layer out of a PDF: one stripped string
     per page, empty for a page without text or whose extraction failed.
@@ -186,6 +237,10 @@ def _extract_digital_pages(
             # Per-page failures (broken cross-ref tables, cipher
             # entries pypdf chokes on) shouldn't abort the whole doc.
             log.debug("pypdf page extract failed: %s", type(exc).__name__)
+            # Counted for the INFO attachments aggregate (#871).
+            note_pdf_page_failed()
+            if failed is not None:
+                failed.add(index)
             text = ""
         pages.append(text.strip())
         if on_progress is not None:

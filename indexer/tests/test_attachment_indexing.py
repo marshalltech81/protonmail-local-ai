@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import MagicMock
 
+import pytest
 from src import attachment_indexing
 from src.attachment_indexing import (
     apply_attachment_writes,
@@ -15,6 +16,7 @@ from src.attachment_indexing import (
 from src.database import EMBEDDING_DIM, Database
 from src.extractors import (
     NO_EXTRACTOR_ERROR,
+    SCANNED_PDF_OCR_DISABLED_ERROR,
     STATUS_EMPTY,
     STATUS_FAILED,
     STATUS_SUCCESS,
@@ -1250,3 +1252,237 @@ def test_payload_re_arriving_after_its_last_carrier_was_reaped_is_re_extracted(
 
     extract.assert_called_once()
     assert db.get_attachment_extraction(attachment.content_hash) is not None
+
+
+# ---------------------------------------------------------------------------
+# Outcome aggregate (#871)
+# ---------------------------------------------------------------------------
+
+
+def _failing_extractor(monkeypatch) -> None:
+    from src import extractors
+
+    def boom(payload, **opts):
+        raise ValueError("SYNTHETIC_EXC_MARKER")
+
+    monkeypatch.setattr(extractors, "_safe_import", lambda module_name: boom)
+
+
+# One attachment per outcome, with the plan status each produced before
+# the aggregate existed (pinned: counting must not change it).
+_OUTCOME_SHAPES: dict[str, tuple[dict[str, Any], dict[str, Any], str]] = {
+    "success": (dict(payload=b"SYNTHETIC_TEXT_MARKER words"), {}, STATUS_SUCCESS),
+    "empty": (dict(payload=b"   \n "), {}, STATUS_EMPTY),
+    "unsupported": (
+        dict(content_type="application/x-unknown", filename="SYNTHETIC_FILENAME_MARKER.bin"),
+        {},
+        STATUS_UNSUPPORTED,
+    ),
+    "too_large": (dict(payload=b"SYNTHETIC_TEXT_MARKER"), {"max_bytes": 4}, STATUS_TOO_LARGE),
+    "ocr_disabled": (
+        dict(content_type="image/png", filename="SYNTHETIC_FILENAME_MARKER.png"),
+        {"ocr_enabled": False},
+        STATUS_UNSUPPORTED,
+    ),
+    "failed": (dict(filename="SYNTHETIC_FILENAME_MARKER.txt"), {}, STATUS_FAILED),
+}
+
+
+class TestAttachmentOutcomeCounts:
+    """#871: the periodic attachments aggregate counts every attachment
+    occurrence by outcome, so a broken OCR toolchain or parser shows up
+    as a rising ``failed`` / ``ocr_disabled`` count rather than not at
+    all. Occurrences are counted when their message commits (review
+    round 1), so a message re-prepared after an embedder outage is not
+    counted twice."""
+
+    @staticmethod
+    def _run(tmp_path, monkeypatch, outcome):
+        attachment_kwargs, overrides, _ = _OUTCOME_SHAPES[outcome]
+        if outcome == "failed":
+            _failing_extractor(monkeypatch)
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        db = _setup_db_for_attachment(tmp_path)
+        attachment = _attachment(**attachment_kwargs)
+        return prepare_attachment_writes(db=db, **_kwargs(attachment, **overrides))
+
+    @staticmethod
+    def _zero() -> dict[str, int]:
+        return dict.fromkeys(attachment_indexing.ATTACHMENT_OUTCOMES, 0) | {
+            "cached": 0,
+            "pdf_pages_failed": 0,
+            "pdf_pages_unrecovered": 0,
+            "ocr_capped_pdfs": 0,
+            "ocr_pages_skipped": 0,
+            "parser_caps_messages": 0,
+            "warnings_suppressed": 0,
+        }
+
+    @staticmethod
+    def _drain() -> dict[str, int]:
+        return attachment_indexing.attachment_outcomes.drain()
+
+    @staticmethod
+    def _commit(*plans) -> None:
+        attachment_indexing.record_committed_outcomes(list(plans))
+
+    def test_outcome_names_are_fixed(self):
+        assert attachment_indexing.ATTACHMENT_OUTCOMES == (
+            "success",
+            "failed",
+            "unsupported",
+            "too_large",
+            "ocr_disabled",
+            "empty",
+        )
+
+    def test_each_outcome_is_counted_once_its_message_commits(self, tmp_path, monkeypatch, caplog):
+        caplog.set_level("DEBUG")
+        for outcome, (_, _, status) in _OUTCOME_SHAPES.items():
+            self._drain()
+            plan = self._run(tmp_path / outcome, monkeypatch, outcome)
+            assert plan.status == status
+            # Preparing alone counts nothing: the message may not commit.
+            assert self._drain() == self._zero()
+            self._commit(plan)
+            assert self._drain() == self._zero() | {outcome: 1}
+        for marker in (
+            "SYNTHETIC_FILENAME_MARKER",
+            "SYNTHETIC_TEXT_MARKER",
+            "SYNTHETIC_EXC_MARKER",
+        ):
+            assert marker not in caplog.text
+
+    def test_a_message_prepared_twice_is_counted_once(self, tmp_path, monkeypatch):
+        """Review round 1: after an embedder outage the message is
+        prepared again; only the attempt that commits is counted."""
+        self._drain()
+        self._run(tmp_path / "first", monkeypatch, "failed")
+        plan = self._run(tmp_path / "retry", monkeypatch, "failed")
+        self._commit(plan)
+        assert self._drain()["failed"] == 1
+
+    def test_drain_resets_the_counts(self, tmp_path, monkeypatch):
+        self._drain()
+        self._commit(self._run(tmp_path, monkeypatch, "success"))
+        assert self._drain()["success"] == 1
+        assert self._drain() == self._zero()
+
+    def test_cache_hits_and_batch_reuse_count_as_cached(self, tmp_path):
+        self._drain()
+        db = _setup_db_for_attachment(tmp_path)
+        attachment = _attachment(b"cached words")
+        batch: dict[str, ExtractionResult] = {}
+        # Extracted, then reused from the batch before it commits.
+        plans = [
+            prepare_attachment_writes(db=db, batch_extractions=batch, **_kwargs(attachment))
+            for _ in range(2)
+        ]
+        _embed_new_chunks(
+            plans[1],
+            db=db,
+            claimant_id="msg@x",
+            embedder=make_mock_embedder([0.1] * EMBEDDING_DIM),
+        )
+        with db.transaction():
+            apply_attachment_writes(plan=plans[1], claimant_id="msg@x", thread_id="thread-x", db=db)
+        # Served from the committed cache.
+        plans.append(prepare_attachment_writes(db=db, **_kwargs(attachment)))
+        self._commit(*plans)
+        assert self._drain() == self._zero() | {"success": 3, "cached": 2}
+
+    def test_cached_ocr_disabled_row_counts_as_ocr_disabled(self, tmp_path):
+        self._drain()
+        db = _setup_db_for_attachment(tmp_path)
+        attachment = _attachment(b"png bytes", content_type="image/png", filename="a.png")
+        for _ in range(2):
+            plan = prepare_attachment_writes(db=db, **_kwargs(attachment, ocr_enabled=False))
+            with db.transaction():
+                apply_attachment_writes(plan=plan, claimant_id="msg@x", thread_id="thread-x", db=db)
+            self._commit(plan)
+        assert self._drain() == self._zero() | {"ocr_disabled": 2, "cached": 1}
+
+    def test_summary_line(self):
+        counts = self._zero() | {
+            "success": 3,
+            "failed": 1,
+            "ocr_disabled": 2,
+            "cached": 4,
+            "pdf_pages_failed": 5,
+            "pdf_pages_unrecovered": 9,
+            "ocr_capped_pdfs": 7,
+            "ocr_pages_skipped": 8,
+            "parser_caps_messages": 3,
+            "warnings_suppressed": 6,
+        }
+        assert attachment_indexing.format_attachment_outcomes(counts) == (
+            "attachments n=6 success=3 failed=1 unsupported=0 too_large=0 "
+            "ocr_disabled=2 empty=0 cached=4 pdf_pages_failed=5 pdf_pages_unrecovered=9 ocr_capped_pdfs=7 "
+            "ocr_pages_skipped=8 parser_caps_messages=3 warnings_suppressed=6"
+        )
+
+    @pytest.mark.parametrize(
+        "field, degraded",
+        [
+            ("success", False),
+            ("empty", False),
+            ("cached", False),
+            ("failed", True),
+            ("unsupported", True),
+            ("too_large", True),
+            ("ocr_disabled", True),
+            # A page pypdf cannot read may still be OCR-recovered: a
+            # diagnostic count, not lost text (review round 3).
+            ("pdf_pages_failed", False),
+            ("pdf_pages_unrecovered", True),
+            ("ocr_capped_pdfs", True),
+            ("ocr_pages_skipped", True),
+            ("parser_caps_messages", True),
+            ("warnings_suppressed", True),
+        ],
+    )
+    def test_degraded_counts(self, field, degraded):
+        """Review round 1: the line is a WARNING when any count means
+        attachment text is missing from search."""
+        counts = self._zero() | {"success": 1, field: 1}
+        assert attachment_indexing.attachment_outcomes_degraded(counts) is degraded
+
+    def test_pdf_pages_pypdf_could_not_read_are_counted(self, tmp_path, monkeypatch, caplog):
+        """A PDF page whose text layer pypdf cannot read is skipped
+        (DEBUG per page); the aggregate counts those pages. The
+        extraction result is unchanged: these pages give no digital text,
+        so with OCR off the PDF is recorded as needing OCR. Pages count
+        per extraction attempt, not per commit."""
+        from src.extractors import pdf
+
+        caplog.set_level("DEBUG")
+
+        class BadPage:
+            def extract_text(self):
+                raise ValueError("SYNTHETIC_PYPDF_MARKER")
+
+        class FakeReader:
+            def __init__(self, stream):
+                self.pages = [BadPage(), BadPage()]
+
+        monkeypatch.setattr(pdf.pypdf, "PdfReader", FakeReader)
+        self._drain()
+        db = _setup_db_for_attachment(tmp_path)
+        attachment = _attachment(
+            b"%PDF-1.7", content_type="application/pdf", filename="SYNTHETIC_FILENAME_MARKER.pdf"
+        )
+        plan = prepare_attachment_writes(db=db, **_kwargs(attachment, ocr_enabled=False))
+        assert plan.status == STATUS_UNSUPPORTED
+        assert plan.extraction_to_persist is not None
+        assert plan.extraction_to_persist.error == SCANNED_PDF_OCR_DISABLED_ERROR
+        self._commit(plan)
+        assert self._drain() == self._zero() | {
+            "ocr_disabled": 1,
+            "pdf_pages_failed": 2,
+            "pdf_pages_unrecovered": 2,
+        }
+        for marker in ("SYNTHETIC_PYPDF_MARKER", "SYNTHETIC_FILENAME_MARKER"):
+            assert marker not in caplog.text
+
+    def test_no_summary_line_without_attachments(self):
+        assert attachment_indexing.format_attachment_outcomes(self._zero()) == ""

@@ -924,7 +924,7 @@ class TestDrainQueueRetryAndDeadLetter:
         # propagates out and the worker marks the queue row failed.
         from src import parser
 
-        def boom(msg):
+        def boom(msg, **_kwargs):
             raise RuntimeError("simulated html2text runaway")
 
         monkeypatch.setattr(parser, "_extract_body_and_attachments", boom)
@@ -3590,7 +3590,7 @@ class TestRequeueOcrDisabledExtractions:
         writer.write(buf)
         return buf.getvalue()
 
-    def _drain(self, db, queue):
+    def _drain(self, db, queue, **kwargs):
         return main._drain_queue_batched(
             db,
             make_mock_embedder(_UNIT_VECTOR),
@@ -3599,9 +3599,10 @@ class TestRequeueOcrDisabledExtractions:
             batch_size=10,
             timing_aggregator=main.TimingAggregator(window=4),
             max_passes=1,
+            **kwargs,
         )
 
-    def _index_with_ocr_off(self, tmp_path, monkeypatch, messages):
+    def _index_with_ocr_off(self, tmp_path, monkeypatch, messages, **drain_kwargs):
         """Index ``messages`` (name -> (payload, MIME type, filename)) with
         OCR off; return the db, queue and paths."""
         maildir = tmp_path / "maildir"
@@ -3615,7 +3616,7 @@ class TestRequeueOcrDisabledExtractions:
             queue.enqueue(str(path), REASON_INITIAL_SCAN)
             paths[name] = str(path)
         monkeypatch.setattr(main, "INDEXER_OCR_ENABLED", False)
-        self._drain(db, queue)
+        self._drain(db, queue, **drain_kwargs)
         return db, queue, paths
 
     @staticmethod
@@ -3675,6 +3676,66 @@ class TestRequeueOcrDisabledExtractions:
         # The next startup finds nothing left to re-run.
         assert main._requeue_stale_extractions(db, queue) == 0
         assert self._queued(db) == {}
+
+    _MESSAGES = {
+        "photo": ("png", "image/png", "SYNTHETIC_FILENAME_MARKER.png"),
+        "scan": ("pdf", "application/pdf", "SYNTHETIC_FILENAME_MARKER.pdf"),
+    }
+
+    def _marker_messages(self):
+        payloads = {"png": self._png(), "pdf": self._scanned_pdf()}
+        return {
+            name: (payloads[kind], ctype, filename)
+            for name, (kind, ctype, filename) in self._MESSAGES.items()
+        }
+
+    @staticmethod
+    def _aggregate_lines(caplog):
+        return [
+            (r.levelname, r.getMessage())
+            for r in caplog.records
+            if r.getMessage().startswith("attachments n=")
+        ]
+
+    def test_initial_index_cadence_logs_the_attachment_aggregate(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """#871: during the initial index (``summary_every``), each timing
+        summary is followed by the attachments line. Attachments skipped
+        while OCR is off are missing from search, so the line is a
+        WARNING (review round 1). Counts only: no filename."""
+        from src import attachment_indexing
+
+        caplog.set_level("INFO")
+        attachment_indexing.attachment_outcomes.drain()
+        self._index_with_ocr_off(tmp_path, monkeypatch, self._marker_messages(), summary_every=1)
+        assert self._aggregate_lines(caplog) == [
+            (
+                "WARNING",
+                "attachments n=2 success=0 failed=0 unsupported=0 too_large=0 "
+                "ocr_disabled=2 empty=0 cached=0 pdf_pages_failed=0 "
+                "pdf_pages_unrecovered=0 ocr_capped_pdfs=0 ocr_pages_skipped=0 parser_caps_messages=0 "
+                "warnings_suppressed=0",
+            )
+        ]
+        assert "SYNTHETIC_FILENAME_MARKER" not in caplog.text
+        # Drained by the line: the next summary starts from zero.
+        assert attachment_indexing.attachment_outcomes.drain()["ocr_disabled"] == 0
+
+    def test_steady_state_drain_leaves_the_summary_to_its_caller(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """Review round 1: without ``summary_every`` (the steady-state
+        loop) the drain itself logs no summary; the loop flushes it
+        (``_steady_state_summary_due``)."""
+        from src import attachment_indexing
+
+        caplog.set_level("INFO")
+        attachment_indexing.attachment_outcomes.drain()
+        self._index_with_ocr_off(tmp_path, monkeypatch, self._marker_messages())
+        assert self._aggregate_lines(caplog) == []
+        main._log_attachment_outcomes()
+        assert [level for level, _ in self._aggregate_lines(caplog)] == ["WARNING"]
 
     def test_occurrence_that_would_not_rerun_is_not_requeued(self, tmp_path, monkeypatch):
         """Bytes cached "OCR disabled" from an image, carried only as
@@ -7562,3 +7623,108 @@ class TestWalMaintenance:
             )
         finally:
             db.close()
+
+
+class TestAttachmentSummaryCadence:
+    """Review round 1 (#871): in steady state the attachments aggregate
+    was flushed only every ``TIMING_LOG_EVERY`` drained messages, so a
+    burst of 8 messages could sit unlogged until unrelated mail arrived.
+    It is now also flushed when a drain empties the queue and after
+    ``SUMMARY_MAX_INTERVAL_SECS``."""
+
+    @pytest.mark.parametrize(
+        "drained, since_log, seconds, due",
+        [
+            (8, 8, 1.0, False),  # a full batch: more may be queued
+            (8, 24, 1.0, False),
+            (8, 25, 1.0, True),  # the message cadence
+            (3, 11, 1.0, True),  # a short batch emptied the queue
+            (0, 8, 1.0, True),  # nothing ready after a burst
+            (0, 0, 1.0, False),  # idle, nothing pending
+            (8, 8, main.SUMMARY_MAX_INTERVAL_SECS, True),  # the interval
+            (0, 0, main.SUMMARY_MAX_INTERVAL_SECS, True),
+        ],
+    )
+    def test_summary_due(self, drained, since_log, seconds, due):
+        assert (
+            main._steady_state_summary_due(
+                drained=drained,
+                drained_since_log=since_log,
+                batch_size=8,
+                seconds_since_summary=seconds,
+            )
+            is due
+        )
+
+    def test_aggregate_without_degraded_counts_is_info(self, caplog):
+        from src import attachment_indexing
+        from src.extractors import STATUS_SUCCESS
+
+        caplog.set_level("INFO")
+        attachment_indexing.attachment_outcomes.drain()
+        attachment_indexing.attachment_outcomes.record(STATUS_SUCCESS, None, cached=True)
+        main._log_attachment_outcomes()
+        [record] = [r for r in caplog.records if r.getMessage().startswith("attachments n=")]
+        assert record.levelname == "INFO"
+
+    def test_nothing_logged_without_attachments(self, caplog):
+        from src import attachment_indexing
+
+        caplog.set_level("INFO")
+        attachment_indexing.attachment_outcomes.drain()
+        main._log_attachment_outcomes()
+        assert caplog.records == []
+
+
+class TestAttachmentSummaryDebounce:
+    """Review round 4 on #884 (security): the steady-state loop flushes
+    the attachments line at the end of every short drain, so mail spaced
+    to arrive one message per drain produced one line per message. At
+    most one line is logged per ``OUTCOMES_LOG_MIN_INTERVAL_SECS``;
+    counts held back carry over to the next line, so none are lost."""
+
+    def test_short_drains_inside_the_interval_give_one_line(self, monkeypatch, caplog):
+        from src import attachment_indexing
+        from src.extractors import STATUS_UNSUPPORTED
+
+        caplog.set_level("INFO")
+        attachment_indexing.attachment_outcomes.drain()
+        clock = {"now": 1000.0}
+        monkeypatch.setattr(main, "_monotonic", lambda: clock["now"])
+
+        def lines():
+            return [
+                r.getMessage()
+                for r in caplog.records
+                if r.getMessage().startswith("attachments n=")
+            ]
+
+        for _ in range(10):
+            attachment_indexing.attachment_outcomes.record(STATUS_UNSUPPORTED, None, cached=False)
+            main._log_attachment_outcomes()
+            clock["now"] += 5.0
+        assert len(lines()) == 1
+        assert " unsupported=1 " in lines()[0]
+        # The next line, once the interval has passed, carries the nine
+        # counts held back.
+        clock["now"] = 1000.0 + main.OUTCOMES_LOG_MIN_INTERVAL_SECS
+        main._log_attachment_outcomes()
+        assert len(lines()) == 2
+        assert " unsupported=9 " in lines()[1]
+        # Nothing left over.
+        assert attachment_indexing.attachment_outcomes.drain()["unsupported"] == 0
+
+    def test_force_logs_inside_the_interval(self, monkeypatch, caplog):
+        """The initial index's final summary is logged whatever the
+        interval, so the scan's counts are not held into steady state."""
+        from src import attachment_indexing
+        from src.extractors import STATUS_SUCCESS
+
+        caplog.set_level("INFO")
+        attachment_indexing.attachment_outcomes.drain()
+        monkeypatch.setattr(main, "_monotonic", lambda: 1000.0)
+        for _ in range(2):
+            attachment_indexing.attachment_outcomes.record(STATUS_SUCCESS, None, cached=False)
+            main._log_attachment_outcomes(force=True)
+        lines = [r for r in caplog.records if r.getMessage().startswith("attachments n=")]
+        assert len(lines) == 2

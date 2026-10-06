@@ -2,6 +2,7 @@
 Shared fixtures for indexer tests.
 """
 
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -87,6 +88,20 @@ def make_thread(
 def count_pending_deletions(db: Database) -> int:
     """Number of tombstones in ``pending_deletions``."""
     return int(db._conn.execute("SELECT COUNT(*) FROM pending_deletions").fetchone()[0])
+
+
+@pytest.fixture(autouse=True)
+def _reset_extractor_warning_budget(monkeypatch):
+    """The failed-extraction WARNING rate limit is process-wide; give each
+    test a fresh window so earlier tests cannot spend its budget."""
+    from src import extractors
+
+    monkeypatch.setattr(extractors, "_warning_window", None)
+    monkeypatch.setattr(extractors, "_warnings_in_window", 0)
+    # The attachments-line debounce is process-wide too.
+    main = sys.modules.get("src.main")
+    if main is not None:
+        monkeypatch.setattr(main, "_last_outcomes_log", None)
 
 
 @pytest.fixture
