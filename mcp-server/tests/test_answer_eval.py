@@ -768,6 +768,23 @@ class TestDeterministicGraders:
         assert det.checks["abstention"] == PASS
         assert det.prompt_coverage == 0.5  # the cut passage still reached the prompt
 
+    def test_cut_passage_that_keeps_the_fact_is_not_an_omission(self):
+        """Review round 3: only the trailing text was cut, so the fact was
+        visible; the note cannot excuse ignoring it."""
+        case = CASES["ask-kayak-tight-budget"]
+        kept = "Tandem kayaks rent for $65 per boat for the"
+        run = _run(
+            "Not found in the provided emails.",
+            [_passage("E1", "t21.1", kept, truncated=True)],
+            [],
+            retrieved=[thread_id_of("t21"), thread_id_of("t22")],
+            coverage_note=self._NOTE,
+        )
+        det = grade_run(case, run)
+        assert det.checks["omission_disclosed"] == PASS  # t22 was left out
+        assert det.checks["required_evidence_cited"] == FAIL  # t21's fact was shown
+        assert budget_omitted_facts(case, run) == ["f2"]
+
     def test_budget_omitted_facts_exclude_retrieval_misses(self):
         """Review round 2: only facts whose evidence was retrieved and then
         left out or cut by the budget may be credited to the note."""

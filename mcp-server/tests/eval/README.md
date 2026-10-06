@@ -486,7 +486,8 @@ required evidence group cited, `must_include` present as a whole value
 abstention exactly when the case is unanswerable (citing
 nothing). A `disclose_missing` case is graded on the tool's whole
 disclosure (#820): when a required group was retrieved but left out of
-the prompt or reached it only cut short, the server's `coverage_note`
+the prompt or reached it only cut short of its evidence (the case's fact
+excerpt no longer in the kept text), the server's `coverage_note`
 must be present (`omission_disclosed`), those groups are excused from
 citation and an abstention may stand; a group supplied whole must still
 be cited, and a group retrieval never found is never excused (the note

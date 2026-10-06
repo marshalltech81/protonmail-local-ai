@@ -11,7 +11,7 @@ message) meets thread refs only.
 
 A ``disclose_missing`` case is graded on the tool's whole disclosure
 (#820): when a required group was retrieved but left out of the prompt,
-or reached it only cut short, the server's ``coverage_note`` is what
+or reached it only cut short of its evidence, the server's ``coverage_note`` is what
 reports it, so a non-null note is the disclosure, those groups are
 excused from citation and an abstention may stand. A group supplied
 whole must still be cited, and the note cannot disclose a group
@@ -48,7 +48,7 @@ class GroupStatus:
     retrieved: bool
     supplied: bool
     cited: bool
-    whole: bool = False  # supplied by a passage not cut to fit the budget
+    whole: bool = False  # supplied with its evidence intact (``_shows_evidence``)
 
 
 @dataclass
@@ -110,21 +110,39 @@ def is_abstention(answer: str) -> bool:
     return stripped.startswith(_NOT_FOUND_PREFIX) or stripped.startswith(_NO_RESULTS)
 
 
+def _shows_evidence(case: Case, passage: Passage) -> bool:
+    """Whether a supplied passage still shows the evidence it carries: a
+    whole passage does; one cut to fit the budget does when it keeps the
+    excerpt of some reference fact sourced from its message. A cut that
+    removed only trailing text is no omission (review round 3)."""
+    if not passage.truncated:
+        return True
+    text = _fold(passage.text)
+    return any(
+        _fold(f.excerpt) in text
+        for f in case.expected_facts
+        if any(_meets(s, passage) for s in f.sources)
+    )
+
+
 def budget_omitted_facts(case: Case, run: CaseRun) -> list[str]:
     """IDs of the reference facts whose evidence the tool retrieved but the
-    prompt budget left out or cut: no source of the fact reached the prompt
-    in a whole passage, and some source's thread was retrieved. These are
-    the only facts a ``coverage_note`` can disclose; a fact retrieval never
-    found is not among them."""
+    prompt budget left out or cut away: some source's thread was retrieved,
+    and no supplied passage of a source shows the fact (whole, or cut but
+    keeping its excerpt). These are the only facts a ``coverage_note`` can
+    disclose; a fact retrieval never found is not among them."""
     if run.output is None:
         return []
     retrieved = {t.thread_id for t in run.output.threads}
-    whole = [p for p in run.passages.values() if not p.truncated]
     return [
         f.id
         for f in case.expected_facts
         if any(thread_id_of(s) in retrieved for s in f.sources)
-        and not any(_meets(s, p) for s in f.sources for p in whole)
+        and not any(
+            _meets(s, p) and (not p.truncated or _fold(f.excerpt) in _fold(p.text))
+            for s in f.sources
+            for p in run.passages.values()
+        )
     ]
 
 
@@ -147,12 +165,14 @@ def grade_run(case: Case, run: CaseRun) -> DeterministicResult:
                 retrieved=any(thread_id_of(ref) in retrieved for ref in group),
                 supplied=any(_meets(ref, p) for ref in group for p in supplied),
                 cited=any(_meets(ref, p) for ref in group for p in cited),
-                whole=any(_meets(ref, p) for ref in group for p in supplied if not p.truncated),
+                whole=any(
+                    _meets(ref, p) and _shows_evidence(case, p) for ref in group for p in supplied
+                ),
             )
         )
 
     checks = result.checks
-    # Retrieved evidence the prompt budget left out or cut, which is all
+    # Retrieved evidence the prompt budget left out or cut away, which is all
     # the server's note can report: a group retrieval missed stays a miss.
     omission = case.expected_handling == "disclose_missing" and any(
         g.retrieved and not g.whole for g in result.groups
