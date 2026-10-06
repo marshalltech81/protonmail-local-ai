@@ -109,7 +109,10 @@ make build
 
 `make build` passes the checkout's commit as the `GIT_COMMIT` build
 argument: the short hash, with `-dirty` when a tracked file is modified
-or an untracked file is present that Git does not ignore.
+or an untracked file is present that Git does not ignore. It is always
+taken from the checkout, even when `GIT_COMMIT` is set in your shell or
+CI; to label a build explicitly, run
+`make build GIT_COMMIT_OVERRIDE=<value>`.
 Each image records it as the `org.opencontainers.image.revision` label
 and logs it at startup (see `docs/troubleshooting.md`, "Which build and
 settings is a container running?"). A plain `docker compose build`, or

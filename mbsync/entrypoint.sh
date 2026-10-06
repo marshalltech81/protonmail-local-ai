@@ -107,17 +107,23 @@ log_startup_identity() {
     # form verify_expected_fingerprint compares) and whether pin rotation
     # is on. BRIDGE_USER and the password are not inputs. It runs before
     # validation: values are hashed as configured, never parsed or printed,
-    # so nothing here can fail on a malformed setting.
+    # so nothing here can fail on a malformed setting. An endpoint value
+    # with an "@" (userinfo, which validation would refuse) is hashed as a
+    # marker, so the hash cannot be used to test guesses at a password.
     local commit="${GIT_COMMIT:-unknown}" boot config rotate="false"
+    local host="$BRIDGE_HOST" port="$BRIDGE_IMAP_PORT" cert_host="$BRIDGE_CERT_HOST"
     if [[ ! "$commit" =~ ^[0-9A-Za-z._-]{1,64}$ ]]; then
         commit="unknown"
     fi
     if [[ "$BRIDGE_CERT_PIN_ROTATE" == "true" ]]; then
         rotate="true"
     fi
+    [[ "$host" != *@* ]] || host="<value-with-credentials>"
+    [[ "$port" != *@* ]] || port="<value-with-credentials>"
+    [[ "$cert_host" != *@* ]] || cert_host="<value-with-credentials>"
     boot="$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')"
     config="$(printf 'BRIDGE_HOST=%s\nBRIDGE_IMAP_PORT=%s\nBRIDGE_CERT_HOST=%s\nSYNC_INTERVAL=%s\nSYNC_DEADLINE_SECONDS=%s\nBRIDGE_CERT_FINGERPRINT=%s\nBRIDGE_CERT_PIN_ROTATE=%s\n' \
-        "$BRIDGE_HOST" "$BRIDGE_IMAP_PORT" "$BRIDGE_CERT_HOST" "$SYNC_INTERVAL" "$SYNC_DEADLINE_SECONDS" \
+        "$host" "$port" "$cert_host" "$SYNC_INTERVAL" "$SYNC_DEADLINE_SECONDS" \
         "$(expected_fingerprint)" "$rotate" | sha256sum)"
     printf '>>> Startup identity: service=mbsync commit=%s boot=%s config=%s\n' \
         "$commit" "$boot" "${config:0:12}"

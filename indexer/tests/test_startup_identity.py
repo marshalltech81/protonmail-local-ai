@@ -113,6 +113,21 @@ class TestReadStoredSchemaVersion:
     def test_a_directory_is_unreadable(self, tmp_path):
         assert main._read_stored_schema_version(tmp_path) == "unreadable"
 
+    def test_a_permission_error_is_unreadable_not_none(self, tmp_path, monkeypatch):
+        """Codex review round 6 on #893: ``Path.exists()`` reports a file
+        it may not stat as missing; only a missing file is ``none``."""
+        path = tmp_path / "mail.db"
+        _stamp(path, SCHEMA_VERSION)
+        real_stat = Path.stat
+
+        def stat(self, *args, **kwargs):
+            if self == path:
+                raise PermissionError(13, "Permission denied")
+            return real_stat(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "stat", stat)
+        assert main._read_stored_schema_version(path) == "unreadable"
+
 
 def test_config_hash_covers_only_the_named_non_secret_settings():
     names = set(main._identity_settings())
@@ -266,6 +281,38 @@ def test_each_raw_value_changes_the_hash(monkeypatch, name, value):
     after = main._identity_settings()
     assert after[name] == value
     assert main._config_hash(before) != main._config_hash(after)
+
+
+class TestUrlCredentialsAreNotHashed:
+    """Codex review round 6 on #893: a hash over a URL carrying userinfo
+    would let anyone with the log test guesses at the password offline,
+    so such a URL is hashed as a fixed marker."""
+
+    _PASSWORD_MARKER = "synthetic-url-pass"  # pragma: allowlist secret
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://user:{pw}@gateway.example/v1",
+            "http://{pw}@gateway.example:8443/v1",
+        ],
+    )
+    def test_userinfo_is_replaced_by_a_marker(self, monkeypatch, caplog, url):
+        monkeypatch.setenv("EMBED_BASE_URL", url.format(pw=self._PASSWORD_MARKER + "-one"))
+        first = _log(caplog)["config"]
+        assert main._identity_settings()["EMBED_BASE_URL"] == "<url-with-credentials>"
+        monkeypatch.setenv("EMBED_BASE_URL", url.format(pw=self._PASSWORD_MARKER + "-two"))
+        second = _log(caplog)["config"]
+        assert first == second
+        assert self._PASSWORD_MARKER not in caplog.text
+
+    def test_a_url_without_userinfo_is_hashed_as_given(self, monkeypatch):
+        monkeypatch.setenv("EMBED_BASE_URL", "http://host.docker.internal:8001/v1")
+        assert main._identity_settings()["EMBED_BASE_URL"] == "http://host.docker.internal:8001/v1"
+
+    def test_an_unparseable_url_is_a_marker_and_does_not_raise(self, monkeypatch):
+        monkeypatch.setenv("EMBED_BASE_URL", "http://[::1/v1")
+        assert main._identity_settings()["EMBED_BASE_URL"] == "<unparseable-url>"
 
 
 def _run_indexer(tmp_path, args: list[str], env: dict[str, str]):

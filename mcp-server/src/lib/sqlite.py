@@ -1353,11 +1353,15 @@ def read_stored_schema_version(path: str) -> str:
     stop startup, so the line is logged first (Codex round 3 on #893).
 
     ``none`` when the file, table or row is missing; ``unreadable`` when
-    SQLite cannot read it. Never creates the file.
+    it cannot be read. Never creates the file and never raises.
     """
-    if not Path(path).exists():
-        return "none"
     try:
+        # ``stat`` rather than ``exists()``, which reports a file it may
+        # not stat as missing (Codex round 6 on #893).
+        try:
+            Path(path).stat()
+        except FileNotFoundError:
+            return "none"
         uri = f"file:{quote(str(path))}?mode=ro"
         with closing(sqlite3.connect(uri, uri=True)) as conn:
             table = conn.execute(
@@ -1367,7 +1371,7 @@ def read_stored_schema_version(path: str) -> str:
                 return "none"
             row = conn.execute("SELECT version FROM schema_version").fetchone()
         return "none" if row is None else str(int(row[0]))
-    except sqlite3.Error, TypeError, ValueError:
+    except OSError, sqlite3.Error, TypeError, ValueError:
         return "unreadable"
 
 

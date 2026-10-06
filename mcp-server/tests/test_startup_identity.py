@@ -267,6 +267,57 @@ class TestReadStoredSchemaVersion:
     def test_a_directory_is_unreadable(self, tmp_path):
         assert read_stored_schema_version(str(tmp_path)) == "unreadable"
 
+    def test_a_permission_error_is_unreadable_not_none(self, tmp_path, monkeypatch):
+        """Codex review round 6 on #893: ``Path.exists()`` reports a file
+        it may not stat as missing; only a missing file is ``none``."""
+        path = Path(
+            self._db(
+                tmp_path,
+                [
+                    "CREATE TABLE schema_version (version INTEGER PRIMARY KEY)",
+                    "INSERT INTO schema_version VALUES (0)",
+                ],
+            )
+        )
+        real_stat = Path.stat
+
+        def stat(self, *args, **kwargs):
+            if self == path:
+                raise PermissionError(13, "Permission denied")
+            return real_stat(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "stat", stat)
+        assert read_stored_schema_version(str(path)) == "unreadable"
+
+
+class TestUrlCredentialsAreNotHashed:
+    """Codex review round 6 on #893: a hash over a URL carrying userinfo
+    would let anyone with the log test guesses at the password offline,
+    so such a URL is hashed as a fixed marker."""
+
+    _PASSWORD_MARKER = "synthetic-url-pass"  # pragma: allowlist secret
+
+    @pytest.mark.parametrize("name", ["INFERENCE_BASE_URL", "EMBED_BASE_URL", "RERANK_BASE_URL"])
+    def test_userinfo_is_replaced_by_a_marker(self, monkeypatch, caplog, name):
+        url = "https://user:{pw}@gateway.example/v1"
+        monkeypatch.setenv(name, url.format(pw=self._PASSWORD_MARKER + "-one"))
+        first = _log(caplog)["config"]
+        assert main_mod._identity_settings()[name] == "<url-with-credentials>"
+        monkeypatch.setenv(name, url.format(pw=self._PASSWORD_MARKER + "-two"))
+        second = _log(caplog)["config"]
+        assert first == second
+        assert self._PASSWORD_MARKER not in caplog.text
+
+    def test_a_url_without_userinfo_is_hashed_as_given(self, monkeypatch):
+        monkeypatch.setenv("EMBED_BASE_URL", "http://host.docker.internal:8001/v1")
+        assert main_mod._identity_settings()["EMBED_BASE_URL"] == (
+            "http://host.docker.internal:8001/v1"
+        )
+
+    def test_an_unparseable_url_is_a_marker_and_does_not_raise(self, monkeypatch):
+        monkeypatch.setenv("INFERENCE_BASE_URL", "http://[::1/v1")
+        assert main_mod._identity_settings()["INFERENCE_BASE_URL"] == "<unparseable-url>"
+
 
 def _run_server(tmp_path, args: list[str], env: dict[str, str]):
     """mcp-server in a child process with only the given settings, so a

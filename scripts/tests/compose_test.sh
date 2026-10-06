@@ -658,17 +658,24 @@ scratch_git() {
         -c commit.gpgsign=false "$@"
 }
 
+# Runs both build targets dry in directory $1, with any NAME=value
+# arguments that follow added to the environment.
 scratch_make_commit() {
-    env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMIT GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
-        make --no-print-directory -C "$1" -n build build-nocache 2>"$WORK/make.err"
+    local dir="$1"
+    shift
+    env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMIT -u GIT_COMMIT_OVERRIDE \
+        GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 "$@" \
+        make --no-print-directory -C "$dir" -n build build-nocache 2>"$WORK/make.err"
 }
 
-# Fails unless both build targets pass GIT_COMMIT=$2 in directory $1.
+# Fails unless both build targets pass GIT_COMMIT=$2 in directory $1;
+# any further NAME=value arguments go into make's environment.
 expect_make_commit() {
-    local output
-    output="$(scratch_make_commit "$1")"
-    [[ "$(grep -cxE "GIT_COMMIT=$2 docker compose build( --no-cache)? *" <<<"$output")" -eq 2 ]] || {
-        printf 'expected GIT_COMMIT=%s from both targets:\n%s\n' "$2" "$output"
+    local dir="$1" expected="$2" output
+    shift 2
+    output="$(scratch_make_commit "$dir" "$@")"
+    [[ "$(grep -cxE "GIT_COMMIT=$expected docker compose build( --no-cache)? *" <<<"$output")" -eq 2 ]] || {
+        printf 'expected GIT_COMMIT=%s from both targets:\n%s\n' "$expected" "$output"
         cat "$WORK/make.err"
         return 1
     }
@@ -689,6 +696,11 @@ make_build_passes_the_source_commit() {
     scratch_git "$repo" commit -q -m synthetic
     head="$(scratch_git "$repo" rev-parse --short HEAD)"
     expect_make_commit "$repo" "$head" || return 1
+    # Codex review round 6 on #893: a GIT_COMMIT left in the shell or CI
+    # does not replace the checkout's commit; GIT_COMMIT_OVERRIDE does.
+    expect_make_commit "$repo" "$head" GIT_COMMIT=stale || return 1
+    expect_make_commit "$repo" synthetic-override GIT_COMMIT=stale \
+        GIT_COMMIT_OVERRIDE=synthetic-override || return 1
     printf 'SYNTHETIC=1\n' >"$repo/.env"
     expect_make_commit "$repo" "$head" || return 1
     printf 'untracked\n' >"$repo/new-file"

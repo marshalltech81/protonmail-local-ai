@@ -46,7 +46,9 @@ Find it with `docker compose logs <service> | grep 'Startup identity'`.
 - `commit` is the checkout the image was built from, passed by
   `make build`; `-dirty` means a tracked file was modified or an
   untracked file was present that Git does not ignore (`.env` and
-  `.secrets/` are ignored, so they never count). `unknown`
+  `.secrets/` are ignored, so they never count). A `GIT_COMMIT` set in
+  the shell is ignored; `make build GIT_COMMIT_OVERRIDE=<value>` labels
+  a build explicitly. `unknown`
   means the image was built another way (a plain `docker compose build`,
   or by `make up` when no image existed): run `make build`. The same
   value is on the image:
@@ -64,8 +66,10 @@ Find it with `docker compose logs <service> | grep 'Startup identity'`.
 - `config` is the first 12 hex digits of a SHA-256 over the service's
   non-secret settings as configured: the raw environment values, not
   parsed, so a malformed value just gives a different hash, and an
-  unset setting hashes differently from one set to its default. The
-  inputs are named one by one in code: every non-secret setting the
+  unset setting hashes differently from one set to its default. A
+  `*_BASE_URL` (or an mbsync host or port) that carries credentials
+  (`user:password@`) is hashed as a fixed marker, so the hash cannot be
+  used to test guesses at the password. The inputs are named one by one in code: every non-secret setting the
   service reads, that is paths (including the indexer's health file),
   modes, endpoints, model names, the MCP transport and limits (indexer
   and mcp-server, `_IDENTITY_SETTINGS` in `src/main.py`, with everything

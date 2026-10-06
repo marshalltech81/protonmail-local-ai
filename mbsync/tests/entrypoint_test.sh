@@ -2270,7 +2270,31 @@ a_new_setting_left_out_of_the_hash_is_reported() {
     [[ "$(identity_coverage_problems "$copy")" == "neither hashed nor excluded: SYNTHETIC_NEW_SETTING" ]] || return 1
 }
 
+# Codex review round 6 on #893: the line runs before validation, so a host
+# setting could still carry userinfo; it is hashed as a marker, so the hash
+# cannot be used to test guesses at a password.
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+host_credentials_are_not_hashed() {
+    local name first second
+    identity_setup
+    for name in BRIDGE_HOST BRIDGE_CERT_HOST; do
+        printf -v "$name" '%s' 'user:synthetic-host-pass-one@127.0.0.1'
+        first="$(identity_fields)"
+        printf -v "$name" '%s' 'user:synthetic-host-pass-two@127.0.0.1'
+        second="$(identity_fields)"
+        [[ "${first##* }" == "${second##* }" ]] || {
+            printf '%s: the password changed the hash\n' "$name"
+            return 1
+        }
+        if grep -q 'synthetic-host-pass' <<<"$(log_startup_identity)"; then
+            return 1
+        fi
+        printf -v "$name" '%s' '127.0.0.1'
+    done
+}
+
 check "the identity line precedes validation" the_identity_line_precedes_validation
+check "host credentials are not hashed" host_credentials_are_not_hashed
 check "every setting the entrypoint reads is hashed or excluded" \
     every_setting_read_is_hashed_or_excluded
 check "a new setting left out of the hash is reported" \

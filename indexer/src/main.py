@@ -185,12 +185,30 @@ def _git_commit() -> str:
     return value if _GIT_COMMIT_PATTERN.fullmatch(value) else "unknown"
 
 
+def _hashable_url(value: str) -> str:
+    """``value`` unless it carries userinfo, so the hash cannot be used to
+    test guesses at a password offline (Codex round 6 on #893). Never
+    raises: a value ``urlsplit`` rejects is a fixed marker too."""
+    try:
+        parts = urllib.parse.urlsplit(value)
+        if parts.username is not None or parts.password is not None:
+            return "<url-with-credentials>"
+    except ValueError:
+        return "<unparseable-url>"
+    return value
+
+
 def _identity_settings() -> dict[str, str | None]:
     """The raw configured value of each ``_IDENTITY_SETTINGS`` name,
-    ``None`` when unset. Never parsed, so it cannot raise: a malformed
+    ``None`` when unset. Not parsed, so it cannot raise: a malformed
     value just hashes differently, and an unset setting differs from one
-    set to its default."""
-    return {name: os.environ.get(name) for name in _IDENTITY_SETTINGS}
+    set to its default. The one exception is a ``*_BASE_URL`` carrying
+    credentials, hashed as a marker (``_hashable_url``)."""
+    settings = {name: os.environ.get(name) for name in _IDENTITY_SETTINGS}
+    for name, value in settings.items():
+        if name.endswith("_BASE_URL") and value is not None:
+            settings[name] = _hashable_url(value)
+    return settings
 
 
 def _config_hash(settings: dict[str, str | None]) -> str:
@@ -207,7 +225,11 @@ def _read_stored_schema_version(path: Path) -> str:
     read (``Database`` reports why when it opens the file).
     """
     try:
-        if not path.exists():
+        # ``stat`` rather than ``exists()``, which reports a file it may
+        # not stat as missing (Codex round 6 on #893).
+        try:
+            path.stat()
+        except FileNotFoundError:
             return "none"
         uri = f"{path.resolve().as_uri()}?mode=ro"
         with closing(sqlite3.connect(uri, uri=True)) as conn:
