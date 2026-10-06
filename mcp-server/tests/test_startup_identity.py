@@ -1,12 +1,22 @@
 """#887: mcp-server logs one INFO line at startup naming the source
 commit, a random boot ID, the schema version the index carries and a
 hash of the non-secret settings, so log lines from before and after a
-rebuild or restart can be told apart."""
+rebuild or restart can be told apart.
+
+The line is built only from inputs that cannot fail (raw environment
+strings and a read-only, never-raising schema read) and is logged when
+``src.main`` is imported, before the module parses any setting, so a
+malformed setting, a missing token or a missing index still leaves it
+in the log (Codex review rounds 3 and 4 on #893)."""
 
 import logging
+import os
 import re
 import sqlite3
+import subprocess
+import sys
 from contextlib import closing
+from pathlib import Path
 
 import pytest
 import src.main as main_mod
@@ -19,16 +29,18 @@ _LINE = re.compile(
 )
 _SECRET_MARKER = "synthetic-secret-marker-887"  # pragma: allowlist secret
 _SECRET_NAMES = ("INFERENCE_API_KEY", "EMBED_API_KEY", "RERANK_API_KEY", "MCP_AUTH_TOKEN")
+_SERVICE_DIR = Path(__file__).resolve().parents[1]
+_CONFIG_PREFIXES = ("INFERENCE_", "EMBED_", "RERANK_", "MCP_", "SQLITE_", "GIT_COMMIT")
 
 
 def _identity_records(caplog) -> list[logging.LogRecord]:
     return [r for r in caplog.records if r.getMessage().startswith("Startup identity:")]
 
 
-def _log(caplog, stored: str = "0") -> re.Match[str]:
+def _log(caplog) -> re.Match[str]:
     caplog.clear()
     caplog.set_level(logging.DEBUG)
-    main_mod._log_startup_identity(stored)
+    main_mod._log_startup_identity()
     [record] = _identity_records(caplog)
     assert record.levelno == logging.INFO
     match = _LINE.fullmatch(record.getMessage())
@@ -36,13 +48,19 @@ def _log(caplog, stored: str = "0") -> re.Match[str]:
     return match
 
 
-def test_line_format(monkeypatch, caplog):
+def test_line_format(tmp_path, monkeypatch, caplog):
     monkeypatch.setenv("GIT_COMMIT", "abc1234-dirty")
-    first = _log(caplog, "0")
+    path = tmp_path / "mail.db"
+    monkeypatch.setenv("SQLITE_PATH", str(path))
+    first = _log(caplog)
     assert first["commit"] == "abc1234-dirty"
-    assert first["stored"] == "0"
-    second = _log(caplog, "none")
-    assert second["stored"] == "none"
+    assert first["stored"] == "none"
+    with closing(sqlite3.connect(path)) as conn:
+        conn.execute("CREATE TABLE schema_version (version INTEGER PRIMARY KEY)")
+        conn.execute("INSERT INTO schema_version VALUES (0)")
+        conn.commit()
+    second = _log(caplog)
+    assert second["stored"] == "0"
     # Each start gets its own boot ID; the settings did not change.
     assert second["boot"] != first["boot"]
     assert second["config"] == first["config"]
@@ -60,6 +78,7 @@ def test_missing_or_unusable_commit_is_logged_as_unknown(monkeypatch, caplog, va
 def test_config_hash_covers_only_the_named_non_secret_settings():
     names = set(main_mod._identity_settings())
     assert names == {
+        "SQLITE_PATH",
         "INFERENCE_MODE",
         "INFERENCE_BASE_URL",
         "INFERENCE_MODEL",
@@ -86,7 +105,6 @@ def test_config_hash_covers_only_the_named_non_secret_settings():
 def test_changing_a_secret_does_not_change_the_hash(monkeypatch, caplog):
     def set_secrets(suffix: str) -> None:
         for name in _SECRET_NAMES:
-            monkeypatch.setattr(main_mod, name, f"{_SECRET_MARKER}-{suffix}")
             monkeypatch.setenv(name, f"{_SECRET_MARKER}-{suffix}")
 
     set_secrets("a")
@@ -95,17 +113,33 @@ def test_changing_a_secret_does_not_change_the_hash(monkeypatch, caplog):
     after = _log(caplog)["config"]
     assert _SECRET_MARKER not in caplog.text
     # A named setting does change it, so the hash is not a constant.
-    monkeypatch.setattr(main_mod, "EMBED_MODEL", "synthetic-other-model")
+    monkeypatch.setenv("EMBED_MODEL", "synthetic-other-model")
     changed = _log(caplog)["config"]
     assert before == after
     assert changed != before
 
 
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("SQLITE_PATH", "/synthetic/mail.db"),
+        # A malformed value is hashed as given, never parsed.
+        ("MCP_PORT", "oops"),
+    ],
+)
+def test_each_raw_value_changes_the_hash(monkeypatch, name, value):
+    monkeypatch.delenv(name, raising=False)
+    before = main_mod._identity_settings()
+    monkeypatch.setenv(name, value)
+    after = main_mod._identity_settings()
+    assert after[name] == value
+    assert main_mod._config_hash(before) != main_mod._config_hash(after)
+
+
 class TestReadStoredSchemaVersion:
-    """The stored version is read read-only, without the ``Database``
-    checks that can stop startup (Codex round 3 on #893): ``none`` when
-    the file, table or row is missing, ``unreadable`` when SQLite cannot
-    read it."""
+    """The stored version is read read-only and never raises: ``none``
+    when the file, table or row is missing, ``unreadable`` when it cannot
+    be read."""
 
     def _db(self, tmp_path, statements: list[str]) -> str:
         path = tmp_path / "mail.db"
@@ -143,55 +177,54 @@ class TestReadStoredSchemaVersion:
         path.write_bytes(b"not a database" * 100)
         assert read_stored_schema_version(str(path)) == "unreadable"
 
-
-class _MainFakeDatabase:
-    def __init__(self, _path):
-        pass
-
-    def get_embedding_dim(self):
-        return 4
+    def test_a_directory_is_unreadable(self, tmp_path):
+        assert read_stored_schema_version(str(tmp_path)) == "unreadable"
 
 
-def _configure_main(monkeypatch) -> None:
-    for name, value in {
-        "EMBED_BASE_URL": "http://host.docker.internal:8001/v1",
-        "EMBED_MODEL": "synthetic",
-        "EMBED_API_KEY": _SECRET_MARKER,
-        "MCP_AUTH_TOKEN": _SECRET_MARKER + "-xxxxxxxxxxxxxxxx",
-        "INFERENCE_MODE": "none",
-        "RERANK_MODE": "none",
-    }.items():
-        monkeypatch.setattr(main_mod, name, value)
-    monkeypatch.setattr(main_mod, "run_startup_identity_check", lambda *a, **kw: None)
+def _run_server(tmp_path, args: list[str], env: dict[str, str]):
+    """mcp-server in a child process with only the given settings, so a
+    malformed one fails it the way it fails the container."""
+    base = {k: v for k, v in os.environ.items() if not k.startswith(_CONFIG_PREFIXES)}
+    base.update(
+        {
+            "GIT_COMMIT": "abc1234",
+            "SQLITE_PATH": str(tmp_path / "mail.db"),
+            "EMBED_BASE_URL": "http://127.0.0.1:9/v1",
+            "EMBED_MODEL": "synthetic-embed",
+            "EMBED_API_KEY": _SECRET_MARKER,
+            "MCP_AUTH_TOKEN": _SECRET_MARKER + "-xxxxxxxxxxxxxxxx",
+            **env,
+        }
+    )
+    return subprocess.run(
+        [sys.executable, *args],
+        cwd=_SERVICE_DIR,
+        env=base,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
 
 
-def test_main_logs_the_identity_line_once(monkeypatch, caplog):
-    _configure_main(monkeypatch)
-    monkeypatch.setattr(main_mod, "Database", _MainFakeDatabase)
-    ran = []
-    monkeypatch.setattr(main_mod, "_run_server", lambda *args: ran.append(args))
-    caplog.set_level(logging.DEBUG)
-    main_mod.main()
-    assert ran
-    [record] = _identity_records(caplog)
-    assert _LINE.fullmatch(record.getMessage())
-    assert _SECRET_MARKER not in caplog.text
-
-
-@pytest.mark.parametrize("stage", ["token", "database"])
-def test_identity_is_logged_before_startup_fails(tmp_path, monkeypatch, caplog, stage):
-    """A missing token or an index that cannot be opened stops startup,
-    and the identity line is already in the log."""
-    _configure_main(monkeypatch)
-    monkeypatch.setattr(main_mod, "SQLITE_PATH", str(tmp_path / "mail.db"))
-    if stage == "token":
-        monkeypatch.setattr(main_mod, "MCP_AUTH_TOKEN", "")
-    caplog.set_level(logging.DEBUG)
-    # The real ``Database`` refuses a missing index file.
-    with pytest.raises((ValueError, FileNotFoundError, RuntimeError)):
-        main_mod.main()
-    [record] = _identity_records(caplog)
-    match = _LINE.fullmatch(record.getMessage())
-    assert match
+@pytest.mark.parametrize(
+    ("args", "env", "cause"),
+    [
+        # Parsed when the module is imported.
+        (["-c", "import src.main"], {"MCP_PORT": "oops"}, "ValueError"),
+        # Refused inside main(): no bearer token.
+        (["-m", "src.main"], {"MCP_AUTH_TOKEN": ""}, "mcp_auth_token"),
+        # Refused inside main(): no index file.
+        (["-m", "src.main"], {}, "SQLite index not found"),
+    ],
+)
+def test_startup_failures_still_log_the_identity_first(tmp_path, args, env, cause):
+    result = _run_server(tmp_path, args, env)
+    assert result.returncode != 0
+    lines = [line for line in result.stderr.splitlines() if "Startup identity:" in line]
+    assert len(lines) == 1, result.stderr
+    match = _LINE.search(lines[0])
+    assert match, lines[0]
     assert match["stored"] == "none"
-    assert _SECRET_MARKER not in caplog.text
+    assert result.stderr.index("Startup identity:") < result.stderr.index("Traceback")
+    assert cause in result.stderr
+    assert _SECRET_MARKER not in result.stderr

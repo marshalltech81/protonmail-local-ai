@@ -105,7 +105,9 @@ log_startup_identity() {
     # over the non-secret settings named below: the endpoint, the sync
     # timing, the expected certificate fingerprint (not secret; in the
     # form verify_expected_fingerprint compares) and whether pin rotation
-    # is on. BRIDGE_USER and the password are not inputs.
+    # is on. BRIDGE_USER and the password are not inputs. It runs before
+    # validation: values are hashed as configured, never parsed or printed,
+    # so nothing here can fail on a malformed setting.
     local commit="${GIT_COMMIT:-unknown}" boot config rotate="false"
     if [[ ! "$commit" =~ ^[0-9A-Za-z._-]{1,64}$ ]]; then
         commit="unknown"
@@ -798,8 +800,9 @@ record_successful_sync() {
 # it directly from the Docker secret at /run/secrets/bridge_pass.
 # =============================================================================
 install_signal_handlers
-require_prerequisites
+# Before validation, so a refused setting still leaves the line (#887).
 log_startup_identity
+require_prerequisites
 check_maildir_layout || exit 1
 
 # BRIDGE_CERT_PIN_ROTATE is an opt-in for accepting one legitimate

@@ -2190,13 +2190,31 @@ fingerprint_and_pin_rotation_change_the_hash() {
     fi
 }
 
-the_identity_line_follows_validation_and_precedes_any_connection() {
-    local validate_line identity_line wait_line
-    validate_line="$(grep -n '^require_prerequisites$' "$ENTRYPOINT" | cut -d: -f1)"
+# Codex review round 4 on #893: the line is logged before validation, so a
+# refused setting still leaves it in the log.
+the_identity_line_precedes_validation() {
+    local identity_line validate_line
     identity_line="$(grep -n '^log_startup_identity$' "$ENTRYPOINT" | cut -d: -f1)"
-    wait_line="$(grep -n '^wait_for_bridge_imap$' "$ENTRYPOINT" | cut -d: -f1)"
-    [[ -n "$validate_line" && -n "$identity_line" && -n "$wait_line" ]] || return 1
-    ((validate_line < identity_line && identity_line < wait_line)) || return 1
+    validate_line="$(grep -n '^require_prerequisites$' "$ENTRYPOINT" | cut -d: -f1)"
+    [[ -n "$identity_line" && -n "$validate_line" ]] || return 1
+    ((identity_line < validate_line)) || return 1
+}
+
+# Values validation would refuse are only hashed, never parsed or printed.
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+malformed_settings_still_give_the_identity_line() {
+    local fields
+    identity_setup
+    BRIDGE_HOST='bad host;synthetic-identity-marker'
+    BRIDGE_IMAP_PORT="oops"
+    SYNC_INTERVAL="-5"
+    BRIDGE_CERT_FINGERPRINT="not a fingerprint"
+    fields="$(identity_fields)" || return 1
+    if grep -q 'identity-marker' <<<"$(log_startup_identity)"; then
+        printf 'a raw value reached the line\n'
+        return 1
+    fi
+    [[ -n "$fields" ]] || return 1
 }
 
 check "the identity line has the expected format" identity_line_has_the_expected_format
@@ -2205,8 +2223,9 @@ check "secrets do not change the hash or reach the identity line" \
     secrets_do_not_change_the_hash_or_reach_the_line
 check "the fingerprint and pin rotation change the hash" \
     fingerprint_and_pin_rotation_change_the_hash
-check "the identity line follows validation and precedes any connection" \
-    the_identity_line_follows_validation_and_precedes_any_connection
+check "the identity line precedes validation" the_identity_line_precedes_validation
+check "malformed settings still give the identity line" \
+    malformed_settings_still_give_the_identity_line
 
 if ((FAILURES > 0)); then
     printf '%d test(s) failed\n' "$FAILURES" >&2

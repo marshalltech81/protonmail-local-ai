@@ -53,6 +53,86 @@ logging.basicConfig(
 )
 log = logging.getLogger("mcp-server")
 
+
+# --- Startup identity (#887) -------------------------------------------------
+# One line naming what is running, logged when this module is imported:
+# before any setting below is parsed, so a malformed setting, a missing
+# token or a missing index still leaves it in the log (Codex review rounds
+# 3 and 4 on #893). Every input is a raw environment string or a read that
+# never raises.
+
+# A source commit as the Makefile passes it (``git rev-parse --short
+# HEAD``, plus ``-dirty``): anything else is logged as ``unknown``, so a
+# stray value cannot add text or a line to the log.
+_GIT_COMMIT_PATTERN = re.compile(r"[0-9A-Za-z._-]{1,64}")
+
+# The settings the config hash covers, named one by one. Non-secret
+# values only (the index path, modes, endpoints, models and limits):
+# never an API key, ``MCP_AUTH_TOKEN`` or any other secret, and never the
+# whole environment.
+_IDENTITY_SETTINGS = (
+    "SQLITE_PATH",
+    "INFERENCE_MODE",
+    "INFERENCE_BASE_URL",
+    "INFERENCE_MODEL",
+    "INFERENCE_TIMEOUT_SECS",
+    "INFERENCE_MAX_TOKENS",
+    "INFERENCE_CONTEXT_TOKENS",
+    "INFERENCE_STRUCTURED_OUTPUT",
+    "EMBED_MODE",
+    "EMBED_BASE_URL",
+    "EMBED_MODEL",
+    "EMBED_TIMEOUT_SECS",
+    "RERANK_MODE",
+    "RERANK_BASE_URL",
+    "RERANK_MODEL",
+    "RERANK_CANDIDATES",
+    "RERANK_TIMEOUT_SECS",
+    "MCP_PORT",
+    "MCP_SESSION_IDLE_TIMEOUT_SECS",
+    "MCP_EXPERIMENTAL_TOOLS",
+)
+
+
+def _git_commit() -> str:
+    """The commit the image was built from (``GIT_COMMIT``, baked in by
+    the Dockerfile), or ``unknown``."""
+    value = os.environ.get("GIT_COMMIT", "").strip()
+    return value if _GIT_COMMIT_PATTERN.fullmatch(value) else "unknown"
+
+
+def _identity_settings() -> dict[str, str | None]:
+    """The raw configured value of each ``_IDENTITY_SETTINGS`` name,
+    ``None`` when unset. Never parsed, so it cannot raise: a malformed
+    value just hashes differently, and an unset setting differs from one
+    set to its default."""
+    return {name: os.environ.get(name) for name in _IDENTITY_SETTINGS}
+
+
+def _config_hash(settings: dict[str, str | None]) -> str:
+    """First 12 hex digits of a SHA-256 over ``settings`` as sorted JSON."""
+    canonical = json.dumps(settings, sort_keys=True)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:12]
+
+
+def _log_startup_identity() -> None:
+    """Log one line naming what is running (#887): the source commit, a
+    random ID for this start, the schema version stamped in the index
+    (``read_stored_schema_version``) and the first 12 hex digits of a
+    SHA-256 over the raw ``_IDENTITY_SETTINGS`` values. The schema
+    version lives in the indexer; this service has no version of its own
+    to compare."""
+    log.info(
+        "Startup identity: service=mcp-server commit=%s boot=%s schema_stored=%s config=%s",
+        _git_commit(),
+        secrets.token_hex(6),
+        read_stored_schema_version(os.environ.get("SQLITE_PATH", "/data/mail.db")),
+        _config_hash(_identity_settings()),
+    )
+
+
+_log_startup_identity()
+
 # ``import fastmcp`` gives its ``fastmcp`` logger a Rich handler of its own
 # and stops it propagating. Route it through the root handler instead, so
 # its records share this service's format and pass the filters below.
@@ -723,70 +803,7 @@ def _run_server(server: FastMCP) -> None:
     uvicorn.Server(config).run()
 
 
-# A source commit as the Makefile passes it (``git rev-parse --short
-# HEAD``, plus ``-dirty``): anything else is logged as ``unknown``, so a
-# stray value cannot add text or a line to the log.
-_GIT_COMMIT_PATTERN = re.compile(r"[0-9A-Za-z._-]{1,64}")
-
-
-def _git_commit() -> str:
-    """The commit the image was built from (``GIT_COMMIT``, baked in by
-    the Dockerfile), or ``unknown``."""
-    value = os.environ.get("GIT_COMMIT", "").strip()
-    return value if _GIT_COMMIT_PATTERN.fullmatch(value) else "unknown"
-
-
-def _identity_settings() -> dict[str, object]:
-    """The settings the startup config hash covers, named one by one.
-
-    Non-secret values only: modes, endpoints, models and limits. Never
-    an API key, ``MCP_AUTH_TOKEN`` or any other secret, and never the
-    whole environment, so a rotated key or token does not change the
-    hash.
-    """
-    return {
-        "INFERENCE_MODE": INFERENCE_MODE,
-        "INFERENCE_BASE_URL": INFERENCE_BASE_URL.strip(),
-        "INFERENCE_MODEL": INFERENCE_MODEL,
-        "INFERENCE_TIMEOUT_SECS": INFERENCE_TIMEOUT_SECS,
-        "INFERENCE_MAX_TOKENS": INFERENCE_MAX_TOKENS,
-        "INFERENCE_CONTEXT_TOKENS": INFERENCE_CONTEXT_TOKENS,
-        "INFERENCE_STRUCTURED_OUTPUT": INFERENCE_STRUCTURED_OUTPUT,
-        "EMBED_MODE": EMBED_MODE,
-        "EMBED_BASE_URL": EMBED_BASE_URL.strip(),
-        "EMBED_MODEL": EMBED_MODEL,
-        "EMBED_TIMEOUT_SECS": EMBED_TIMEOUT_SECS,
-        "RERANK_MODE": RERANK_MODE,
-        "RERANK_BASE_URL": RERANK_BASE_URL.strip(),
-        "RERANK_MODEL": RERANK_MODEL,
-        "RERANK_CANDIDATES": RERANK_CANDIDATES,
-        "RERANK_TIMEOUT_SECS": RERANK_TIMEOUT_SECS,
-        "MCP_PORT": MCP_PORT,
-        "MCP_SESSION_IDLE_TIMEOUT_SECS": MCP_SESSION_IDLE_TIMEOUT_SECS,
-        "MCP_EXPERIMENTAL_TOOLS": MCP_EXPERIMENTAL_TOOLS,
-    }
-
-
-def _log_startup_identity(stored_schema: str) -> None:
-    """Log one line naming what is running (#887): the source commit, a
-    random ID for this start, the schema version the index carries
-    (``read_stored_schema_version``) and the first 12 hex digits of a
-    SHA-256 over ``_identity_settings``. The schema version lives in the
-    indexer; this service has no version of its own to compare."""
-    settings = json.dumps(_identity_settings(), sort_keys=True)
-    log.info(
-        "Startup identity: service=mcp-server commit=%s boot=%s schema_stored=%s config=%s",
-        _git_commit(),
-        secrets.token_hex(6),
-        stored_schema,
-        hashlib.sha256(settings.encode("utf-8")).hexdigest()[:12],
-    )
-
-
 def main():
-    # First, before anything that can stop startup (the token, provider
-    # config, the index open), so a crash loop still says what is running.
-    _log_startup_identity(read_stored_schema_version(SQLITE_PATH))
     # No MCP endpoint is served without its bearer token.
     _require_auth_token(MCP_AUTH_TOKEN)
 

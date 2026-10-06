@@ -30,7 +30,10 @@ as secrets. No other check needs or shows one.
 
 ## Which build and settings is a container running?
 
-Each service logs one `Startup identity` line when it starts:
+Each service logs one `Startup identity` line when it starts, before it
+parses or checks any setting, so the line is there even when startup
+then fails (a malformed setting, a missing token, a refused index or a
+failed migration):
 
 ```text
 indexer     ... Startup identity: service=indexer commit=1a2b3c4 boot=5f0e9d8c7b6a schema_code=0 schema_stored=0 config=0123456789ab
@@ -55,23 +58,22 @@ Find it with `docker compose logs <service> | grep 'Startup identity'`.
   `schema_stored` is the version stamped in the index file, read
   read-only before the service opens it (and, for the indexer, before
   any migration): `none` when there is no index yet, `unreadable` when
-  SQLite cannot read the file. The line is logged before anything that
-  can stop startup, so it is there even when the index is refused (a
-  `schema_stored` above `schema_code` is a downgrade) or a migration
-  fails. A `schema_stored` below `schema_code` on the indexer means
+  SQLite cannot read the file. A `schema_stored` above `schema_code` is
+  a downgrade, which the indexer refuses; one below it means
   migrations run on this start.
 - `config` is the first 12 hex digits of a SHA-256 over the service's
-  non-secret settings, named one by one in code: modes, endpoints,
-  model names and limits (indexer and mcp-server, `_identity_settings`
-  in `src/main.py`; the indexer's include the effective
-  `INDEXER_PARSE_MAX_BYTES` and `EMBED_WARMUP_TIMEOUT_SECS`), or
-  `BRIDGE_HOST`, `BRIDGE_IMAP_PORT`, `BRIDGE_CERT_HOST`,
-  `SYNC_INTERVAL`, `SYNC_DEADLINE_SECONDS`, `BRIDGE_CERT_FINGERPRINT`
-  (normalized, and not secret) and `BRIDGE_CERT_PIN_ROTATE` (mbsync).
-  It changes when one of those settings changes and is otherwise stable
-  across restarts. API keys, the MCP bearer token, the Bridge user and
-  the Bridge password are not inputs, so rotating a secret leaves it
-  unchanged.
+  non-secret settings as configured: the raw environment values, not
+  parsed, so a malformed value just gives a different hash, and an
+  unset setting hashes differently from one set to its default. The
+  inputs are named one by one in code: paths, modes, endpoints, model
+  names and limits (indexer and mcp-server, `_IDENTITY_SETTINGS` in
+  `src/main.py`), or `BRIDGE_HOST`, `BRIDGE_IMAP_PORT`,
+  `BRIDGE_CERT_HOST`, `SYNC_INTERVAL`, `SYNC_DEADLINE_SECONDS`,
+  `BRIDGE_CERT_FINGERPRINT` (normalized, and not secret) and
+  `BRIDGE_CERT_PIN_ROTATE` (mbsync). It changes when one of those
+  settings changes and is otherwise stable across restarts. API keys,
+  the MCP bearer token, the Bridge user and the Bridge password are not
+  inputs, so rotating a secret leaves it unchanged.
 
 ## Bridge is up but IMAP is unresponsive / mbsync can't connect
 

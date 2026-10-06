@@ -1,19 +1,26 @@
 """#887: the indexer logs one INFO line at startup naming the source
 commit, a random boot ID, the code's and the stored schema version and a
 hash of the non-secret settings, so log lines from before and after a
-rebuild or restart can be told apart."""
+rebuild or restart can be told apart.
+
+The line is built only from inputs that cannot fail (raw environment
+strings and a read-only, never-raising schema read) and is logged when
+``src.main`` is imported, before any setting is parsed, so a malformed
+setting, a refused index or a failed migration still leaves it in the
+log (Codex review rounds 3 and 4 on #893)."""
 
 import logging
+import os
 import re
 import sqlite3
+import subprocess
+import sys
 from contextlib import closing
+from pathlib import Path
 
 import pytest
 from src import main
 from src.database import SCHEMA_APPLICATION_ID, SCHEMA_VERSION, Database
-from src.reconciler import ReconcilerConfig
-
-from tests import test_main
 
 _LINE = re.compile(
     r"Startup identity: service=indexer commit=(?P<commit>\S+) "
@@ -21,20 +28,18 @@ _LINE = re.compile(
     r"schema_stored=(?P<stored>\d+|none|unreadable) config=(?P<config>[0-9a-f]{12})"
 )
 _SECRET_MARKER = "synthetic-secret-marker-887"  # pragma: allowlist secret
-_QUEUE_CFG = {"max_attempts": 5, "base_backoff_seconds": 30}
-_RECONCILER_CFG = ReconcilerConfig(
-    enabled=True, grace_days=7, sweep_interval_secs=3600, max_batch_pct=0.05, force=False
-)
+_SERVICE_DIR = Path(__file__).resolve().parents[1]
+_CONFIG_PREFIXES = ("EMBED_", "INDEXER_", "INITIAL_INDEX_", "GIT_COMMIT")
 
 
 def _identity_records(caplog) -> list[logging.LogRecord]:
     return [r for r in caplog.records if r.getMessage().startswith("Startup identity:")]
 
 
-def _log(path, caplog) -> re.Match[str]:
+def _log(caplog) -> re.Match[str]:
     caplog.clear()
     caplog.set_level(logging.DEBUG)
-    main._log_startup_identity(main._read_stored_schema_version(path), _QUEUE_CFG, _RECONCILER_CFG)
+    main._log_startup_identity()
     [record] = _identity_records(caplog)
     assert record.levelno == logging.INFO
     match = _LINE.fullmatch(record.getMessage())
@@ -54,13 +59,14 @@ def _stamp(path, version: int, application_id: int = SCHEMA_APPLICATION_ID) -> N
 def test_line_format_before_and_after_the_index_exists(tmp_path, monkeypatch, caplog):
     monkeypatch.setenv("GIT_COMMIT", "abc1234-dirty")
     path = tmp_path / "mail.db"
-    fresh = _log(path, caplog)
+    monkeypatch.setenv("SQLITE_PATH", str(path))
+    fresh = _log(caplog)
     assert fresh["commit"] == "abc1234-dirty"
     assert fresh["code"] == str(SCHEMA_VERSION)
     # No index yet: nothing is stored.
     assert fresh["stored"] == "none"
     Database(path).close()
-    reopened = _log(path, caplog)
+    reopened = _log(caplog)
     assert reopened["stored"] == str(SCHEMA_VERSION)
     # Each start gets its own boot ID; the settings did not change.
     assert reopened["boot"] != fresh["boot"]
@@ -68,18 +74,17 @@ def test_line_format_before_and_after_the_index_exists(tmp_path, monkeypatch, ca
 
 
 @pytest.mark.parametrize("value", [None, "", "  ", "abc 123", "abc\nforged line", "x" * 65])
-def test_missing_or_unusable_commit_is_logged_as_unknown(tmp_path, monkeypatch, caplog, value):
+def test_missing_or_unusable_commit_is_logged_as_unknown(monkeypatch, caplog, value):
     if value is None:
         monkeypatch.delenv("GIT_COMMIT", raising=False)
     else:
         monkeypatch.setenv("GIT_COMMIT", value)
-    assert _log(tmp_path / "mail.db", caplog)["commit"] == "unknown"
+    assert _log(caplog)["commit"] == "unknown"
 
 
 class TestReadStoredSchemaVersion:
-    """Codex review round 3 on #893: the stored version is read read-only
-    before ``Database`` opens and migrates the file, so the identity line
-    is logged even when that open fails."""
+    """The stored version is read read-only and never raises: the line
+    is logged before ``Database`` opens and migrates the file."""
 
     def test_missing_file_is_none_and_is_not_created(self, tmp_path):
         path = tmp_path / "mail.db"
@@ -104,38 +109,15 @@ class TestReadStoredSchemaVersion:
         path.write_bytes(b"not a database" * 100)
         assert main._read_stored_schema_version(path) == "unreadable"
 
-
-@pytest.mark.parametrize(
-    ("version", "application_id"),
-    [
-        # Newer than the code: a downgrade, refused.
-        (SCHEMA_VERSION + 1, SCHEMA_APPLICATION_ID),
-        # Predates the application-ID stamp: refused with rebuild steps.
-        (SCHEMA_VERSION, 0),
-    ],
-)
-def test_identity_is_logged_before_a_refused_open(
-    tmp_path, monkeypatch, caplog, version, application_id
-):
-    path = tmp_path / "mail.db"
-    _stamp(path, version, application_id)
-    monkeypatch.setattr(main, "SQLITE_PATH", path)
-    monkeypatch.setattr(main, "EMBED_BASE_URL", "http://host.docker.internal:8001/v1")
-    monkeypatch.setattr(main, "EMBED_MODEL", "synthetic-embed")
-    monkeypatch.setattr(main, "EMBED_API_KEY", _SECRET_MARKER)
-    caplog.set_level(logging.DEBUG)
-    with pytest.raises(RuntimeError):
-        main.main()
-    [record] = _identity_records(caplog)
-    match = _LINE.fullmatch(record.getMessage())
-    assert match
-    assert match["stored"] == str(version)
-    assert _SECRET_MARKER not in caplog.text
+    def test_a_directory_is_unreadable(self, tmp_path):
+        assert main._read_stored_schema_version(tmp_path) == "unreadable"
 
 
 def test_config_hash_covers_only_the_named_non_secret_settings():
-    names = set(main._identity_settings(_QUEUE_CFG, _RECONCILER_CFG))
+    names = set(main._identity_settings())
     assert names == {
+        "MAILDIR_PATH",
+        "SQLITE_PATH",
         "EMBED_MODE",
         "EMBED_BASE_URL",
         "EMBED_MODEL",
@@ -169,47 +151,104 @@ def test_config_hash_covers_only_the_named_non_secret_settings():
     assert not [n for n in names if re.search(r"KEY|TOKEN\b|TOKEN$|PASS|SECRET", n)]
 
 
-def test_changing_the_api_key_does_not_change_the_hash(tmp_path, monkeypatch, caplog):
-    path = tmp_path / "mail.db"
-    monkeypatch.setattr(main, "EMBED_API_KEY", _SECRET_MARKER + "-a")
+def test_changing_the_api_key_does_not_change_the_hash(monkeypatch, caplog):
     monkeypatch.setenv("EMBED_API_KEY", _SECRET_MARKER + "-a")
-    before = _log(path, caplog)["config"]
-    monkeypatch.setattr(main, "EMBED_API_KEY", _SECRET_MARKER + "-b")
+    before = _log(caplog)["config"]
     monkeypatch.setenv("EMBED_API_KEY", _SECRET_MARKER + "-b")
-    after = _log(path, caplog)["config"]
+    after = _log(caplog)["config"]
     assert _SECRET_MARKER not in caplog.text
     # A named setting does change it, so the hash is not a constant.
-    monkeypatch.setattr(main, "EMBED_MODEL", "synthetic-other-model")
-    changed = _log(path, caplog)["config"]
+    monkeypatch.setenv("EMBED_MODEL", "synthetic-other-model")
+    changed = _log(caplog)["config"]
     assert before == after
     assert changed != before
 
 
 @pytest.mark.parametrize(
-    ("name", "value", "effective"),
+    ("name", "value"),
     [
         # 0 disables the per-message parse cap.
-        ("INDEXER_PARSE_MAX_BYTES", "0", 0),
-        ("EMBED_WARMUP_TIMEOUT_SECS", "30", 30.0),
+        ("INDEXER_PARSE_MAX_BYTES", "0"),
+        ("EMBED_WARMUP_TIMEOUT_SECS", "30"),
+        ("MAILDIR_PATH", "/synthetic/maildir"),
+        ("SQLITE_PATH", "/synthetic/mail.db"),
+        # A malformed value is hashed as given, never parsed.
+        ("INDEXER_MAX_ATTEMPTS", "oops"),
     ],
 )
-def test_settings_read_outside_main_change_the_hash(monkeypatch, name, value, effective):
-    """Codex review round 1 on #893: the parse cap and the warmup timeout
-    are read by ``parser.py`` and ``embedder.py``; the hash takes the
-    effective value from the same readers."""
+def test_each_raw_value_changes_the_hash(monkeypatch, name, value):
     monkeypatch.delenv(name, raising=False)
-    before = main._identity_settings(_QUEUE_CFG, _RECONCILER_CFG)
+    before = main._identity_settings()
     monkeypatch.setenv(name, value)
-    after = main._identity_settings(_QUEUE_CFG, _RECONCILER_CFG)
-    assert after[name] == effective
-    assert before[name] != after[name]
+    after = main._identity_settings()
+    assert after[name] == value
     assert main._config_hash(before) != main._config_hash(after)
 
 
-def test_main_logs_the_identity_line_once(tmp_path, monkeypatch, caplog):
-    monkeypatch.setattr(main, "EMBED_API_KEY", _SECRET_MARKER)
-    caplog.set_level(logging.DEBUG)
-    test_main.TestMainStartupAndLoop()._run_main(tmp_path, monkeypatch, sweep_due=False)
-    [record] = _identity_records(caplog)
-    assert _LINE.fullmatch(record.getMessage())
-    assert _SECRET_MARKER not in caplog.text
+def _run_indexer(tmp_path, args: list[str], env: dict[str, str]):
+    """The indexer in a child process with only the given settings, so
+    a malformed one fails it the way it fails the container."""
+    base = {k: v for k, v in os.environ.items() if not k.startswith(_CONFIG_PREFIXES)}
+    base.update(
+        {
+            "GIT_COMMIT": "abc1234",
+            "SQLITE_PATH": str(tmp_path / "mail.db"),
+            "MAILDIR_PATH": str(tmp_path / "maildir"),
+            "INDEXER_HEALTH_FILE": str(tmp_path / "health"),
+            "EMBED_BASE_URL": "http://127.0.0.1:9/v1",
+            "EMBED_MODEL": "synthetic-embed",
+            "EMBED_API_KEY": _SECRET_MARKER,
+            **env,
+        }
+    )
+    return subprocess.run(
+        [sys.executable, *args],
+        cwd=_SERVICE_DIR,
+        env=base,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+
+def _assert_identity_logged_before_failure(result) -> re.Match[str]:
+    assert result.returncode != 0
+    lines = [line for line in result.stderr.splitlines() if "Startup identity:" in line]
+    assert len(lines) == 1, result.stderr
+    match = _LINE.search(lines[0])
+    assert match, lines[0]
+    assert result.stderr.index("Startup identity:") < result.stderr.index("Traceback")
+    assert _SECRET_MARKER not in result.stderr
+    return match
+
+
+@pytest.mark.parametrize(
+    ("args", "env", "cause"),
+    [
+        # Parsed when the module is imported.
+        (["-c", "import src.main"], {"EMBED_BATCH_SIZE": "oops"}, "EMBED_BATCH_SIZE"),
+        # Parsed inside main().
+        (["-m", "src.main"], {"INDEXER_MAX_ATTEMPTS": "oops"}, "INDEXER_MAX_ATTEMPTS"),
+    ],
+)
+def test_a_malformed_setting_still_logs_the_identity_first(tmp_path, args, env, cause):
+    result = _run_indexer(tmp_path, args, env)
+    _assert_identity_logged_before_failure(result)
+    assert cause in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("version", "application_id"),
+    [
+        # Newer than the code: a downgrade, refused.
+        (SCHEMA_VERSION + 1, SCHEMA_APPLICATION_ID),
+        # Predates the application-ID stamp: refused with rebuild steps.
+        (SCHEMA_VERSION, 0),
+    ],
+)
+def test_a_refused_index_still_logs_the_identity_first(tmp_path, version, application_id):
+    _stamp(tmp_path / "mail.db", version, application_id)
+    result = _run_indexer(tmp_path, ["-m", "src.main"], {})
+    match = _assert_identity_logged_before_failure(result)
+    assert match["stored"] == str(version)
+    assert "RuntimeError" in result.stderr

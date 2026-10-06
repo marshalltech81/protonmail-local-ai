@@ -74,7 +74,6 @@ from .embedder import (
     OpenAIEmbedder,
     classify_embed_failure,
     scrub_embed_error,
-    warmup_timeout_secs,
 )
 from .entities import AuthorityRules, AuthorityRulesError, load_authority_rules
 from .extractors import DEFAULT_MAX_BYTES, ExtractionResult, is_stale_extractor
@@ -91,7 +90,6 @@ from .parser import (
     Message,
     OversizedMessageError,
     _derive_folder,
-    _parse_max_bytes,
     message_sort_time,
     parse_email,
 )
@@ -119,6 +117,120 @@ logging.basicConfig(
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
 )
 log = logging.getLogger("indexer")
+
+
+# --- Startup identity (#887) -------------------------------------------------
+# One line naming what is running, logged when this module is imported:
+# before any setting below is parsed, so a malformed setting, a refused
+# index or a failed migration still leaves it in the log (Codex review
+# rounds 3 and 4 on #893). Every input is a raw environment string or a
+# read that never raises.
+
+# A source commit as the Makefile passes it (``git rev-parse --short
+# HEAD``, plus ``-dirty``): anything else is logged as ``unknown``, so a
+# stray value cannot add text or a line to the log.
+_GIT_COMMIT_PATTERN = re.compile(r"[0-9A-Za-z._-]{1,64}")
+
+# The settings the config hash covers, named one by one. Non-secret
+# values only (paths, modes, the endpoint, the model and limits): never
+# ``EMBED_API_KEY`` or any other secret, and never the whole environment.
+_IDENTITY_SETTINGS = (
+    "MAILDIR_PATH",
+    "SQLITE_PATH",
+    "EMBED_MODE",
+    "EMBED_BASE_URL",
+    "EMBED_MODEL",
+    "EMBED_BATCH_SIZE",
+    "EMBED_CONCURRENCY",
+    "EMBED_WARMUP_TIMEOUT_SECS",
+    "INDEXER_PARSE_MAX_BYTES",
+    "INDEXER_CHUNK_TARGET_TOKENS",
+    "INDEXER_CHUNK_MAX_TOKENS",
+    "INDEXER_CHUNK_OVERLAP_TOKENS",
+    "INITIAL_INDEX_BATCH_SIZE",
+    "INDEXER_STEADY_STATE_BATCH_SIZE",
+    "INDEXER_WAL_CHECKPOINT_INTERVAL_SECS",
+    "INDEXER_RECOVERY_SWEEP_INTERVAL_SECS",
+    "INDEXER_MESSAGE_TIMEOUT_SECONDS",
+    "INDEXER_ATTACHMENT_EXTRACTION_ENABLED",
+    "INDEXER_OCR_ENABLED",
+    "INDEXER_ATTACHMENT_MAX_BYTES",
+    "INDEXER_OCR_MAX_PAGES",
+    "INDEXER_OCR_TIMEOUT_SECONDS",
+    "INDEXER_PDF_MAX_DIGITAL_PAGES",
+    "INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS",
+    "INDEXER_MAX_ATTEMPTS",
+    "INDEXER_RETRY_BASE_SECONDS",
+    "INDEXER_DELETION_ENABLED",
+    "INDEXER_DELETION_GRACE_DAYS",
+    "INDEXER_DELETION_SWEEP_INTERVAL_SECS",
+    "INDEXER_DELETION_MAX_BATCH_PCT",
+    "INDEXER_DELETION_FORCE",
+)
+
+
+def _git_commit() -> str:
+    """The commit the image was built from (``GIT_COMMIT``, baked in by
+    the Dockerfile), or ``unknown``."""
+    value = os.environ.get("GIT_COMMIT", "").strip()
+    return value if _GIT_COMMIT_PATTERN.fullmatch(value) else "unknown"
+
+
+def _identity_settings() -> dict[str, str | None]:
+    """The raw configured value of each ``_IDENTITY_SETTINGS`` name,
+    ``None`` when unset. Never parsed, so it cannot raise: a malformed
+    value just hashes differently, and an unset setting differs from one
+    set to its default."""
+    return {name: os.environ.get(name) for name in _IDENTITY_SETTINGS}
+
+
+def _config_hash(settings: dict[str, str | None]) -> str:
+    """First 12 hex digits of a SHA-256 over ``settings`` as sorted JSON."""
+    canonical = json.dumps(settings, sort_keys=True)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:12]
+
+
+def _read_stored_schema_version(path: Path) -> str:
+    """The schema version stamped in the index file, read read-only.
+
+    Never creates or migrates the file and never raises. ``none`` when
+    the file, table or row is missing; ``unreadable`` when it cannot be
+    read (``Database`` reports why when it opens the file).
+    """
+    try:
+        if not path.exists():
+            return "none"
+        uri = f"{path.resolve().as_uri()}?mode=ro"
+        with closing(sqlite3.connect(uri, uri=True)) as conn:
+            table = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_version'"
+            ).fetchone()
+            if table is None:
+                return "none"
+            row = conn.execute("SELECT version FROM schema_version").fetchone()
+        return "none" if row is None else str(int(row[0]))
+    except OSError, RuntimeError, sqlite3.Error, TypeError, ValueError:
+        return "unreadable"
+
+
+def _log_startup_identity() -> None:
+    """Log one line naming what is running (#887): the source commit, a
+    random ID for this start, the code's schema version, the one stamped
+    in the index file before any migration, and the first 12 hex digits
+    of a SHA-256 over the raw ``_IDENTITY_SETTINGS`` values."""
+    stored = _read_stored_schema_version(Path(os.environ.get("SQLITE_PATH", "/data/mail.db")))
+    log.info(
+        "Startup identity: service=indexer commit=%s boot=%s schema_code=%d "
+        "schema_stored=%s config=%s",
+        _git_commit(),
+        secrets.token_hex(6),
+        SCHEMA_VERSION,
+        stored,
+        _config_hash(_identity_settings()),
+    )
+
+
+_log_startup_identity()
 
 
 def quiet_document_libraries() -> None:
@@ -2233,112 +2345,6 @@ def _run_wal_maintenance(db: Database) -> None:
         log.error("wal checkpoint failed: %s", e)
 
 
-# A source commit as the Makefile passes it (``git rev-parse --short
-# HEAD``, plus ``-dirty``): anything else is logged as ``unknown``, so a
-# stray value cannot add text or a line to the log.
-_GIT_COMMIT_PATTERN = re.compile(r"[0-9A-Za-z._-]{1,64}")
-
-
-def _git_commit() -> str:
-    """The commit the image was built from (``GIT_COMMIT``, baked in by
-    the Dockerfile), or ``unknown``."""
-    value = os.environ.get("GIT_COMMIT", "").strip()
-    return value if _GIT_COMMIT_PATTERN.fullmatch(value) else "unknown"
-
-
-def _identity_settings(
-    queue_cfg: dict[str, int], reconciler_cfg: ReconcilerConfig
-) -> dict[str, object]:
-    """The settings the startup config hash covers, named one by one.
-
-    Non-secret values only: modes, the endpoint, the model and limits.
-    Never ``EMBED_API_KEY`` or any other secret, and never the whole
-    environment, so a rotated key does not change the hash.
-    """
-    return {
-        "EMBED_MODE": EMBED_MODE,
-        "EMBED_BASE_URL": EMBED_BASE_URL.strip(),
-        "EMBED_MODEL": EMBED_MODEL,
-        "EMBED_BATCH_SIZE": EMBED_BATCH_SIZE,
-        "EMBED_CONCURRENCY": EMBED_CONCURRENCY,
-        # Read elsewhere; taken from the same readers so the value
-        # hashed is the one in effect (Codex round 1 on #893).
-        "EMBED_WARMUP_TIMEOUT_SECS": warmup_timeout_secs(),
-        "INDEXER_PARSE_MAX_BYTES": _parse_max_bytes(),
-        "INDEXER_CHUNK_TARGET_TOKENS": CHUNK_TARGET_TOKENS,
-        "INDEXER_CHUNK_MAX_TOKENS": CHUNK_MAX_TOKENS,
-        "INDEXER_CHUNK_OVERLAP_TOKENS": CHUNK_OVERLAP_TOKENS,
-        "INITIAL_INDEX_BATCH_SIZE": INITIAL_INDEX_BATCH_SIZE,
-        "INDEXER_STEADY_STATE_BATCH_SIZE": STEADY_STATE_BATCH_SIZE,
-        "INDEXER_WAL_CHECKPOINT_INTERVAL_SECS": WAL_CHECKPOINT_INTERVAL_SECS,
-        "INDEXER_RECOVERY_SWEEP_INTERVAL_SECS": RECOVERY_SWEEP_INTERVAL_SECS,
-        "INDEXER_MESSAGE_TIMEOUT_SECONDS": INDEXER_MESSAGE_TIMEOUT_SECONDS,
-        "INDEXER_ATTACHMENT_EXTRACTION_ENABLED": INDEXER_ATTACHMENT_EXTRACTION_ENABLED,
-        "INDEXER_OCR_ENABLED": INDEXER_OCR_ENABLED,
-        "INDEXER_ATTACHMENT_MAX_BYTES": INDEXER_ATTACHMENT_MAX_BYTES,
-        "INDEXER_OCR_MAX_PAGES": INDEXER_OCR_MAX_PAGES,
-        "INDEXER_OCR_TIMEOUT_SECONDS": INDEXER_OCR_TIMEOUT_SECONDS,
-        "INDEXER_PDF_MAX_DIGITAL_PAGES": INDEXER_PDF_MAX_DIGITAL_PAGES,
-        "INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS": INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS,
-        "INDEXER_MAX_ATTEMPTS": queue_cfg["max_attempts"],
-        "INDEXER_RETRY_BASE_SECONDS": queue_cfg["base_backoff_seconds"],
-        "INDEXER_DELETION_ENABLED": reconciler_cfg.enabled,
-        "INDEXER_DELETION_GRACE_DAYS": reconciler_cfg.grace_days,
-        "INDEXER_DELETION_SWEEP_INTERVAL_SECS": reconciler_cfg.sweep_interval_secs,
-        "INDEXER_DELETION_MAX_BATCH_PCT": reconciler_cfg.max_batch_pct,
-        "INDEXER_DELETION_FORCE": reconciler_cfg.force,
-    }
-
-
-def _config_hash(settings: dict[str, object]) -> str:
-    """First 12 hex digits of a SHA-256 over ``settings`` as sorted JSON."""
-    canonical = json.dumps(settings, sort_keys=True)
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:12]
-
-
-def _read_stored_schema_version(path: Path) -> str:
-    """The schema version stamped in the index file, read read-only
-    before ``Database`` opens and migrates it, so the identity line is
-    logged even when that open fails (Codex round 3 on #893).
-
-    Never creates or migrates the file. ``none`` when the file, table or
-    row is missing; ``unreadable`` when SQLite cannot read it (the open
-    that follows reports why).
-    """
-    if not path.exists():
-        return "none"
-    try:
-        with closing(sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)) as conn:
-            table = conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_version'"
-            ).fetchone()
-            if table is None:
-                return "none"
-            row = conn.execute("SELECT version FROM schema_version").fetchone()
-        return "none" if row is None else str(int(row[0]))
-    except sqlite3.Error, TypeError, ValueError:
-        return "unreadable"
-
-
-def _log_startup_identity(
-    stored_schema: str, queue_cfg: dict[str, int], reconciler_cfg: ReconcilerConfig
-) -> None:
-    """Log one line naming what is running (#887): the source commit, a
-    random ID for this start, the code's schema version and the one the
-    index file carries before any migration
-    (``_read_stored_schema_version``), and the first 12 hex digits of a
-    SHA-256 over ``_identity_settings``."""
-    log.info(
-        "Startup identity: service=indexer commit=%s boot=%s schema_code=%d "
-        "schema_stored=%s config=%s",
-        _git_commit(),
-        secrets.token_hex(6),
-        SCHEMA_VERSION,
-        stored_schema,
-        _config_hash(_identity_settings(queue_cfg, reconciler_cfg)),
-    )
-
-
 def _log_reconciler_config(cfg: ReconcilerConfig) -> None:
     if not cfg.enabled:
         log.info(
@@ -2357,13 +2363,6 @@ def _log_reconciler_config(cfg: ReconcilerConfig) -> None:
 
 
 def main():
-    # The identity line comes first, before anything that can stop
-    # startup (embed config, authority rules, the database open and its
-    # migrations), so a crash loop still says what is running (#887).
-    # The two env readers raise only on a malformed value of their own.
-    queue_cfg = load_queue_config_from_env(os.environ)
-    reconciler_config = load_config_from_env(os.environ)
-    _log_startup_identity(_read_stored_schema_version(SQLITE_PATH), queue_cfg, reconciler_config)
     embed_base_url = _validate_embed_config()
     log.info("Starting indexer...")
     log.info("  Maildir: %s", MAILDIR_PATH)
@@ -2406,6 +2405,7 @@ def main():
     threader = Threader(db)
     touch_health_file()
 
+    queue_cfg = load_queue_config_from_env(os.environ)
     queue = IndexingQueue(
         db,
         max_attempts=queue_cfg["max_attempts"],
@@ -2429,6 +2429,7 @@ def main():
             queue_depth["dead"],
         )
 
+    reconciler_config = load_config_from_env(os.environ)
     _log_reconciler_config(reconciler_config)
     reconciler: Reconciler | None = None
     if reconciler_config.enabled:
