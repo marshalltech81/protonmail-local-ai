@@ -3763,9 +3763,15 @@ def library_logger_levels():
     """Start the pypdf and PIL loggers at NOTSET and restore their levels
     afterwards, so a test can show the library logs before the guard
     runs. ``setLevel`` (not attribute assignment) clears the logging
-    module's per-logger level cache."""
+    module's per-logger level cache.
+
+    ``src.main`` is imported first: its import runs the guard, so a
+    first import inside the test would silence the loggers again before
+    the unguarded run (#869)."""
+    import importlib
     import logging
 
+    importlib.import_module("src.main")
     loggers = [logging.getLogger(name) for name in ("pypdf", "PIL")]
     saved = [logger.level for logger in loggers]
     for logger in loggers:
