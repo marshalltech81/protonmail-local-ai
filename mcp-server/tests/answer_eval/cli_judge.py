@@ -202,7 +202,7 @@ class CliJudgeError(Exception):
 
 # Path-valued variables made absolute: each call runs in a temporary
 # directory, where a relative path would name something else.
-_PATH_VARS = ("CLAUDE_CONFIG_DIR", "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "SSL_CERT_DIR")
+_PATH_VARS = ("HOME", "CLAUDE_CONFIG_DIR", "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "SSL_CERT_DIR")
 
 
 def _allowed_env(*extra: str) -> dict[str, str]:

@@ -341,6 +341,17 @@ class TestClient:
         assert env["NODE_EXTRA_CA_CERTS"] == str((tmp_path / "ca.pem").resolve())
         assert env["SSL_CERT_FILE"] == str((tmp_path / "ca.pem").resolve())
 
+    def test_relative_home_is_resolved(self, fake_claude, monkeypatch, tmp_path):
+        """Review round 7: with no CLAUDE_CONFIG_DIR the login is under
+        ~/.claude, and a relative HOME named another directory once the
+        call changed to its temporary working directory."""
+        exe, _, calls = fake_claude
+        (tmp_path / "home").mkdir()
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", "home")
+        _run(_client(exe).complete("s", "u"))
+        assert calls()[0]["env"]["HOME"] == str((tmp_path / "home").resolve())
+
     def test_relative_config_dir_is_resolved(self, fake_claude, monkeypatch, tmp_path):
         """Review round 4: a relative CLAUDE_CONFIG_DIR named a different
         directory from inside the temporary working directory."""
