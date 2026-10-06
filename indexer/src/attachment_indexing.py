@@ -8,15 +8,14 @@ Two-phase shape:
 
 * ``prepare_attachment_writes`` runs everything that must NOT happen
   inside a SQLite write transaction — extractor (OCR / pypdf / openpyxl)
-  CPU work and chunking. It only reads the DB (cache lookups and existing
-  chunk-id diffing). The output is an ``AttachmentWritePlan`` that the
-  caller can hold in memory until it's ready to commit. Embedding is
-  optional here: given an embedder, it embeds the plan's new chunks in
-  one ``embed_batch`` call; given ``embedder=None``, it leaves
-  ``embeddings_by_chunk_id`` empty for the caller to fill. The batched
-  drain pipeline in ``main.py`` passes ``None``, then embeds the new
-  chunks of every message in the batch together (Phase 2b) and fills
-  each plan from that result before applying it.
+  CPU work and chunking. It only reads the DB (extraction cache
+  lookups). The output is an ``AttachmentWritePlan`` that the caller can
+  hold in memory until it's ready to commit. It does not embed: the plan
+  comes back with ``embeddings_by_chunk_id`` empty. The batched drain
+  pipeline in ``main.py`` diffs each plan's chunks against the stored
+  chunk IDs, embeds the new chunks of every message in the batch
+  together (Phase 2b) and fills each plan from that result before
+  applying it.
 
 * ``apply_attachment_writes`` performs only DB writes and is intended
   to be called inside the indexer's outer ``with db.transaction():``
@@ -38,7 +37,6 @@ from datetime import UTC, datetime, timedelta
 
 from .chunker import MessageChunk, chunk_message
 from .database import Database
-from .embedder import EmbeddingBackend
 from .extractors import (
     SCANNED_PDF_OCR_DISABLED_ERROR,
     STATUS_EMPTY,
@@ -291,7 +289,6 @@ def prepare_attachment_writes(
     attachment: Attachment,
     claimant_id: str,
     db: Database,
-    embedder: EmbeddingBackend | None,
     chunk_target_tokens: int,
     chunk_max_tokens: int,
     chunk_overlap_tokens: int,
@@ -308,22 +305,20 @@ def prepare_attachment_writes(
     """Compute everything needed to write one attachment occurrence.
 
     Reads the extraction cache, runs the extractor when needed, then
-    chunks and (optionally) embeds. Pure read + CPU + outbound HTTP —
-    no DB writes. Safe to call before opening the indexer's outer
-    transaction; the apply phase will commit the DB writes inside that
-    transaction.
+    chunks. Pure read + CPU — no DB writes. Safe to call before opening
+    the indexer's outer transaction; the apply phase will commit the DB
+    writes inside that transaction.
 
-    Pass ``embedder=None`` to defer the embed step entirely — the
-    returned plan's ``embeddings_by_chunk_id`` is empty and the caller
-    is responsible for populating it before calling
-    ``apply_attachment_writes``. This is what the cross-message batched
-    indexer does so a single ``embed_batch`` call can cover chunks
-    from many messages in one HTTP round-trip.
+    The returned plan's ``embeddings_by_chunk_id`` is empty: the caller
+    diffs ``chunks`` against the stored chunk IDs and embeds the new
+    ones before calling ``apply_attachment_writes``. The cross-message
+    batched indexer does this so a single ``embed_batch`` call can
+    cover chunks from many messages in one HTTP round-trip.
 
     The function does not raise for benign extraction outcomes
     (``unsupported``, ``empty``, ``too_large``) — those land on the plan
     as a status-only row to persist, with no chunks. Hard failures
-    (``Database`` I/O, embedder I/O) still propagate so the caller
+    (``Database`` I/O) still propagate so the caller
     can decide whether to retry the message.
 
     ``on_progress`` is passed to the extractor, which calls it after
@@ -362,7 +357,7 @@ def prepare_attachment_writes(
             extraction_to_persist=extraction_to_persist,
         )
 
-    # Chunk the extracted text and embed. The chunker takes
+    # Chunk the extracted text. The chunker takes
     # ``message_pk`` = composite of claimant_id + content_hash so chunk
     # IDs are stable across re-runs of the same attachment in the same
     # email and distinct from body chunks (whose pk = claimant_id alone).
@@ -375,28 +370,12 @@ def prepare_attachment_writes(
         max_tokens=chunk_max_tokens,
         overlap_tokens=chunk_overlap_tokens,
     )
-    stored_ids = db.get_chunk_ids_for_message(claimant_id, attachment_id=attachment.content_hash)
-    new_chunks = [c for c in chunks if c.chunk_id not in stored_ids]
-    # Embedding happens HERE — outside any DB transaction the caller owns.
-    # A multi-page PDF with N new chunks issues a single batched embed
-    # call instead of N sequential round-trips. Critical against remote
-    # embedders where per-call latency dominates; harmless against a
-    # host-side server on loopback. ``embedder=None`` defers this step
-    # so the cross-message batched indexer can pack chunks from many
-    # messages into a single embed_batch call upstream.
-    if embedder is not None and new_chunks:
-        vectors = embedder.embed_batch([c.text for c in new_chunks])
-        embeddings_by_chunk_id = {c.chunk_id: v for c, v in zip(new_chunks, vectors)}
-    else:
-        embeddings_by_chunk_id = {}
-
     return AttachmentWritePlan(
         attachment=attachment,
         occurrence_id=occurrence_id,
         status=status,
         extraction_to_persist=extraction_to_persist,
         chunks=chunks,
-        embeddings_by_chunk_id=embeddings_by_chunk_id,
     )
 
 

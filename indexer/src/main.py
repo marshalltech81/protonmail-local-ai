@@ -1063,14 +1063,13 @@ def _phase2a_collect_chunks(
                 # (byte caps, OCR page cap and timeouts), so it is the
                 # unit the stall guard's limit applies to.
                 progress()
-                # ``embedder=None`` defers the embed step — the plan
-                # comes back with empty embeddings_by_chunk_id and
-                # Phase 2c populates it from the batched embed result.
+                # The plan comes back with empty embeddings_by_chunk_id;
+                # the stored-ID diff below picks its new chunks and
+                # Phase 2c fills it from the batched embed result.
                 plan = prepare_attachment_writes(
                     attachment=attachment,
                     claimant_id=msg.claimant_id,
                     db=db,
-                    embedder=None,
                     chunk_target_tokens=CHUNK_TARGET_TOKENS,
                     chunk_max_tokens=CHUNK_MAX_TOKENS,
                     chunk_overlap_tokens=CHUNK_OVERLAP_TOKENS,

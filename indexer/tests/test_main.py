@@ -1496,6 +1496,34 @@ class TestIndexOneFileChunking:
         # The second pass should not have triggered any new embed calls.
         assert embedder.embed.call_count == first_call_count
 
+    def test_attachment_stored_chunk_ids_are_looked_up_once(self, tmp_path, monkeypatch):
+        """#845: preparing an attachment does not diff stored chunk IDs;
+        the batched pipeline does it once per occurrence, then embeds."""
+        db = Database(tmp_path / "db" / "mail.db")
+        threader = Threader(db)
+        dest = tmp_path / "INBOX" / "cur" / "msg.eml"
+        _write_eml_with_text_attachment(dest, "attachment-lookup@x")
+
+        lookups: list[str | None] = []
+        real_lookup = db.get_chunk_ids_for_message
+
+        def counting_lookup(claimant_id, attachment_id=None):
+            lookups.append(attachment_id)
+            return real_lookup(claimant_id, attachment_id=attachment_id)
+
+        monkeypatch.setattr(db, "get_chunk_ids_for_message", counting_lookup)
+        monkeypatch.setattr(main, "MAILDIR_PATH", tmp_path)
+        embedder = make_mock_embedder([0.1] * EMBEDDING_DIM)
+
+        ok, _, _ = _index_one(dest, db, embedder, threader)
+
+        assert ok
+        attachment_lookups = [a for a in lookups if a is not None]
+        assert len(attachment_lookups) == 1
+        assert _chunk_ids(db, "attachment-lookup@x")
+        embedded = [t for call in embedder.embed_batch.call_args_list for t in call.args[0]]
+        assert embedded.count("attachment text that should be chunked") == 1
+
     def test_attachment_embed_failure_does_not_persist_partial_chunks(self, tmp_path):
         """A failing attachment embed must surface as a retryable
         embed-stage failure and leave NO chunk / attachment / extraction
