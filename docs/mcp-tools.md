@@ -574,13 +574,15 @@ indexer and stays indexed until the grace window
 `pending_deletion: true` (`false` for every other message). The prose
 shows `Pending deletion: yes` in `get_message` and `| pending deletion`
 on the `query_messages` row. A tombstone counts only while it is on
-the message's current file, so a message restored upstream reads as
-live once the indexer sees the restore. The flag is read at query
+the message's current file, so under mirror retention a message
+restored upstream reads as live once the indexer sees the restore. The flag is read at query
 time and changes no totals or paging: an unfiltered `query_messages` count still includes these
 messages, and `query_messages` has no filter on it. Archive mode
 records no tombstones, so the flag is `false` there, except for
 tombstones left by an earlier mirror-mode run, which archive mode
-neither reaps nor clears. `get_thread` rows do not carry it.
+neither reaps nor clears: such a tombstone follows the file through
+renames, so the message keeps `pending_deletion: true` even after it is
+restored upstream. `get_thread` rows do not carry it.
 
 ### `list_threads`
 Browse threads in a folder: every thread with at least one message
