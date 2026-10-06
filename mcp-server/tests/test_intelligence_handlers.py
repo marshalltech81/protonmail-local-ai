@@ -56,6 +56,26 @@ def _all_text(result) -> str:
 
 
 class TestAskMailbox:
+    def test_answer_contract_reaches_initial_and_repair_prompts(
+        self, fake_server, seeded_db, fake_embed
+    ):
+        inference = FakeInferenceClient(
+            complete_responses=[
+                "The final amount due is ten dollars.",
+                "The final amount due is ten dollars [E1].",
+            ]
+        )
+        handler = _handlers(fake_server, seeded_db, fake_embed, inference)["ask_mailbox"]
+        asyncio.run(handler(question="What is the final amount due?"))
+        assert len(inference.complete_calls) == 2
+        for system, _user in inference.complete_calls:
+            prompt = " ".join(system.split())
+            assert "including the opening answer sentence" in prompt
+            assert "earlier versions only when the question asks how it changed" in prompt
+            assert "one sentence" in prompt and "then stop" in prompt
+            assert "no citations or related claims" in prompt
+            assert "server reports prompt-budget omissions separately" in prompt
+
     def test_returns_no_results_when_search_is_empty(
         self, fake_server, seeded_db, fake_embed, fake_inference
     ):
@@ -131,21 +151,29 @@ class TestAskMailbox:
         long_thread.body_text = "SYNTHETIC_MARKER_5512 " * 2000
         seeded_db.hybrid_search = lambda **_kw: [long_thread]  # type: ignore[assignment]
         handler = _handlers(fake_server, seeded_db, fake_embed, fake_inference)["ask_mailbox"]
-        asyncio.run(handler(question="what changed?"))
+        result = asyncio.run(handler(question="what changed?"))
         _system, user = fake_inference.complete_calls[0]
         after_mail = user.rpartition("</untrusted_email>")[2]
         assert "were cut short" in after_mail
         assert "SYNTHETIC_MARKER_5512" not in after_mail
         assert after_mail.rstrip().endswith("User's question: what changed?")
+        # The server, not model prose checked as factual claims, discloses
+        # prompt omissions to the caller even when the model says nothing.
+        assert "say that it may be incomplete" not in after_mail
+        assert "Evidence note:" in _text(result)
+        assert "were cut short" in _text(result)
+        assert "The answer may be incomplete." in _text(result)
+        assert "Evidence note:" not in result.structured_content["answer"]
 
     def test_no_disclosure_when_all_evidence_fits(
         self, fake_server, seeded_db, fake_embed, fake_inference
     ):
         seeded_db.hybrid_search = lambda **_kw: [_hostile_thread()]  # type: ignore[assignment]
         handler = _handlers(fake_server, seeded_db, fake_embed, fake_inference)["ask_mailbox"]
-        asyncio.run(handler(question="what changed?"))
+        result = asyncio.run(handler(question="what changed?"))
         _system, user = fake_inference.complete_calls[0]
         assert "Evidence note" not in user
+        assert "Evidence note" not in _text(result)
 
     def test_db_exception_returns_error(self, fake_server, seeded_db, fake_embed, fake_inference):
         def boom(**_kwargs):

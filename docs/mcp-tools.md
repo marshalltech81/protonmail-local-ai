@@ -650,8 +650,10 @@ it stays within local-LLM context windows. The bounds differ by tool:
   a thread, the best-matching chunk is spent first; a chunk cut to fit
   says which characters it kept. When passages are left out or cut,
   `ask_mailbox` adds a fixed-text note after the email blocks giving
-  the counts (never any content) and asks the model to say its answer
-  may be incomplete.
+  the counts (never any content). The server also returns that note in
+  the tool's text `content`, separately from the model's answer and its
+  citation checks, stating that the answer may be incomplete. The model
+  is instructed not to repeat prompt-budget caveats in its answer.
 - **`summarize_thread`** works on a single thread and does not use the
   per-chunk path. Its context is the thread's accumulated indexed body
   (or the ``snippet`` when the body is empty), up to ``8000``
@@ -771,6 +773,18 @@ content as potentially hostile.
 ### `ask_mailbox`
 Ask a natural language question about your email.
 Retrieves relevant threads and synthesizes an answer.
+
+The answer prompt asks for only the requested facts, with a citation on
+the opening answer sentence as well as each subsequent statement.
+For a current or final fact, earlier versions are included only when
+the question asks how it changed; unresolved conflicts still cite both
+sides. When the supplied passages do not answer the question, the model
+is asked for one sentence beginning `Not found in the provided emails`,
+then to stop without citations or related claims. These are prompt
+instructions, not guarantees of model behavior; the citation checks
+and one-repair limit remain unchanged. Prompt-budget omissions are
+reported by the server in text `content`, outside the structured
+`answer` and its checked statements.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
