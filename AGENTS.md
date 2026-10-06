@@ -434,6 +434,11 @@ The services log at INFO; a DEBUG line is not visibility.
   a retry that succeeds), so an outage has a visible end.
 - A healthcheck or status field must not report a component as live
   when a thread or dependency it relies on has stopped.
+- A per-item WARNING that untrusted mail or a remote client can trigger
+  repeatedly (an extraction failure, a cap, a rejected request) goes
+  through a rate limiter from the start, with the suppressed count kept
+  in an aggregate line; an unbounded per-item line lets a crafted
+  stream evict the bounded Docker log history.
 - Tests assert the line appears with the expected counts, and that a
   synthetic mail marker does not.
 
@@ -785,6 +790,11 @@ Notes:
   class cannot return one review round at a time. Where an exact path
   exists (a base64 decode is lossless), use it as ground truth for the
   lossy one
+- a list that must cover every item of some kind (settings in a config
+  hash, registered MCP tools and their annotations) gets a test that
+  derives the items from the code and fails on any it does not cover,
+  with an explicit, reasoned exclusion list; a finding of the form
+  "the list is missing X" is fixed by adding that test, not only X
 - threader changes should verify threading, subject fallback, references, and participant handling
 - database changes should verify schema creation, migration, and upsert/query behavior
 - MCP search changes should verify hybrid/RRF behavior where applicable
