@@ -38,6 +38,8 @@ from .outputs import (
     SearchAttachmentsOutput,
     SearchEmailsOutput,
     clip,
+    date_bounds,
+    describe_date_bounds,
     reaped_source,
     source,
     thread_summary,
@@ -192,7 +194,11 @@ def register_search_tools(
                        A thread qualifies when its span (its messages'
                        delivery dates, else send dates) overlaps the
                        range.
-            date_to: ISO 8601 date upper bound e.g. "2024-12-31"
+            date_to: ISO 8601 date upper bound e.g. "2024-12-31".
+                     For either bound, a date-only value is a UTC day;
+                     for the user's time zone give an offset
+                     ("2024-01-01T00:00:00-05:00"). The response's
+                     ``date_bounds`` echoes the UTC instants applied.
             has_attachments: True to only show threads with attachments
             participant: Filter to threads where this person appears in
                          ANY role — sender, To, or Cc. Use this for
@@ -242,7 +248,7 @@ def register_search_tools(
         limit = clamp_int(limit, default=10, minimum=1, maximum=_MAX_SEARCH_LIMIT)
         # Reject a bad date range before any provider or retrieval work.
         try:
-            validate_date_range(date_from, date_to)
+            bounds = date_bounds(*validate_date_range(date_from, date_to))
             authority_class = normalize_authority_class(authority_class)
         except InvalidFilterError as e:
             log.warning("search_emails rejected invalid %s", e.field_name)
@@ -271,7 +277,9 @@ def register_search_tools(
             if resolved_from_addr is None:
                 return tool_result(
                     f"No results found for: '{query}' (no contact matched from_name={from_name!r})",
-                    SearchEmailsOutput(mode=mode, resolved_from_addr=None, results=[]),
+                    SearchEmailsOutput(
+                        mode=mode, resolved_from_addr=None, date_bounds=bounds, results=[]
+                    ),
                 )
             from_addr = resolved_from_addr
 
@@ -347,12 +355,18 @@ def register_search_tools(
             output = SearchEmailsOutput(
                 mode=mode,
                 resolved_from_addr=resolved_from_addr,
+                date_bounds=bounds,
                 results=[thread_summary(r) for r in results],
             )
+            bounds_line = describe_date_bounds(bounds)
             if not results:
-                return tool_result(f"No results found for: '{query}'", output)
+                empty = f"No results found for: '{query}'"
+                return tool_result(f"{empty}\n{bounds_line}" if bounds_line else empty, output)
 
-            lines = [f"Found {len(results)} thread(s) for: '{query}'\n"]
+            lines = [f"Found {len(results)} thread(s) for: '{query}'"]
+            if bounds_line:
+                lines.append(bounds_line)
+            lines[-1] += "\n"
             for i, r in enumerate(results, 1):
                 participants = ", ".join(clip(p, HEADER_CHAR_LIMIT) for p in r.participants[:3])
                 lines.append(
@@ -793,7 +807,11 @@ def register_search_tools(
             date_from: ISO 8601 date lower bound on the message
                        carrying the attachment: its delivery date
                        (occurred_at), else its send date (sent_at).
-            date_to: ISO 8601 date upper bound, likewise.
+            date_to: ISO 8601 date upper bound, likewise. For
+                     either bound, a date-only value is a UTC day; for
+                     the user's time zone give an offset
+                     ("2024-01-01T00:00:00-05:00"). The response's
+                     ``date_bounds`` echoes the UTC instants applied.
             extracted_only: True to return only attachments whose text
                             extraction succeeded.
             limit: Maximum attachments to return (default 20, clamped
@@ -820,7 +838,7 @@ def register_search_tools(
         limit = clamp_int(limit, default=20, minimum=1, maximum=_MAX_SEARCH_LIMIT)
         # Reject a bad date range before any provider or retrieval work.
         try:
-            validate_date_range(date_from, date_to)
+            bounds = date_bounds(*validate_date_range(date_from, date_to))
         except InvalidFilterError as e:
             log.warning("search_attachments rejected invalid %s", e.field_name)
             raise ToolError(f"Attachment search error: {e}") from e
@@ -852,6 +870,7 @@ def register_search_tools(
             raise ToolError(f"Attachment search error: {safe_error}") from e
 
         output = SearchAttachmentsOutput(
+            date_bounds=bounds,
             results=[
                 AttachmentHit(
                     attachment_id=a.attachment_id,
@@ -873,12 +892,17 @@ def register_search_tools(
                     source_file=source(a.source_file),
                 )
                 for a in results
-            ]
+            ],
         )
+        bounds_line = describe_date_bounds(bounds)
         if not results:
-            return tool_result("No attachments found.", output)
+            empty = "No attachments found."
+            return tool_result(f"{empty}\n{bounds_line}" if bounds_line else empty, output)
 
-        lines = [f"Found {len(results)} attachment(s):", ""]
+        lines = [f"Found {len(results)} attachment(s):"]
+        if bounds_line:
+            lines.append(bounds_line)
+        lines.append("")
         for i, a in enumerate(results, 1):
             size_kb = a.size_bytes / 1024
             fname = clip(a.filename, HEADER_CHAR_LIMIT)

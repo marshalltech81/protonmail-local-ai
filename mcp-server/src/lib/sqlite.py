@@ -3689,13 +3689,18 @@ def _parse_date_range(
     return start, end
 
 
-def validate_date_range(date_from: str | None, date_to: str | None) -> None:
+def validate_date_range(
+    date_from: str | None, date_to: str | None
+) -> tuple[str | None, str | None]:
     """Raise ``InvalidFilterError`` for a date filter pair the search
     methods would reject. Tool handlers call it on entry so a bad range
     fails before any embedding, retrieval or model call; the database
     methods still check for themselves.
+
+    Returns the UTC bounds the search methods apply
+    (``_normalize_date_range``), so a tool can echo them (#802).
     """
-    _parse_date_range(date_from, date_to)
+    return _normalize_date_range(date_from, date_to)
 
 
 def _normalize_date_range(

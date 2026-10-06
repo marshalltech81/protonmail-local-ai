@@ -230,6 +230,41 @@ def listed_message(m: MessageRecord) -> ListedMessage:
 # --- search tools -------------------------------------------------------
 
 
+class DateBounds(_Output):
+    date_from: str | None = Field(
+        description="The inclusive lower bound applied, in UTC (ISO 8601); null when not given."
+    )
+    date_to: str | None = Field(
+        description="The inclusive upper bound applied, in UTC (ISO 8601); null when not given."
+    )
+
+
+def date_bounds(date_from: str | None, date_to: str | None) -> DateBounds | None:
+    """The UTC bounds a date filter resolved to, or ``None`` without one."""
+    if date_from is None and date_to is None:
+        return None
+    return DateBounds(date_from=date_from, date_to=date_to)
+
+
+def describe_date_bounds(bounds: DateBounds | None) -> str | None:
+    """The prose line for ``bounds``, or ``None`` without a date filter."""
+    if bounds is None:
+        return None
+    parts = []
+    if bounds.date_from:
+        parts.append(f"from {bounds.date_from}")
+    if bounds.date_to:
+        parts.append(f"to {bounds.date_to}")
+    return "Date bounds (UTC): " + " ".join(parts)
+
+
+_DATE_BOUNDS_DESCRIPTION = (
+    "The UTC instants the date filters resolved to: a date-only value is the "
+    "whole UTC day, a value with an offset the instant it names. Null without "
+    "a date filter."
+)
+
+
 class SearchEmailsOutput(_Output):
     mode: str = Field(description="The search mode used: hybrid, semantic, or keyword.")
     resolved_from_addr: str | None = Field(
@@ -239,6 +274,7 @@ class SearchEmailsOutput(_Output):
             "are then empty). Null when from_name was not used."
         )
     )
+    date_bounds: DateBounds | None = Field(description=_DATE_BOUNDS_DESCRIPTION)
     results: list[ThreadSummary] = Field(description="Threads, best match first.")
 
 
@@ -339,6 +375,7 @@ class AttachmentHit(_Output):
 
 
 class SearchAttachmentsOutput(_Output):
+    date_bounds: DateBounds | None = Field(description=_DATE_BOUNDS_DESCRIPTION)
     results: list[AttachmentHit]
 
 
@@ -444,6 +481,7 @@ class FilterUse(_Output):
 
 class QueryMessagesOutput(_Output):
     filters: list[FilterUse] = Field(description="How each given filter was applied; empty: none.")
+    date_bounds: DateBounds | None = Field(description=_DATE_BOUNDS_DESCRIPTION)
     total_matches: int = Field(description="Every matching message, not just this page.")
     returned: int
     offset: int = Field(description="Matches returned by earlier pages.")

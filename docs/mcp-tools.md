@@ -271,6 +271,16 @@ drive an unbounded query against the index.
   matches the full day the user named. A timestamp, including an
   explicit midnight, bounds at that instant; naive timestamps are read
   as UTC.
+- A date-only bound is a UTC day, not the user's local day. A question
+  in local time needs an ISO 8601 offset on the bound: "since January 1"
+  in New York is `date_from="2026-01-01T00:00:00-05:00"`. A message sent
+  at 21:30 New York time on 31 December is stored as 02:30 UTC on 1
+  January, so `date_from="2026-01-01"` includes it and the offset bound
+  does not. `search_emails`, `search_attachments` and `query_messages`
+  echo the instants applied as `date_bounds` (`date_from` / `date_to` in
+  UTC, null for a bound not given; the field is null without a date
+  filter) and in a `Date bounds (UTC):` line of the prose. The tools do
+  not parse natural-language dates.
 - A `date_from` later than `date_to` names an empty interval and is
   rejected with an error naming both fields, the same way by every tool
   that takes both bounds. The bounds are compared after UTC
@@ -279,7 +289,11 @@ drive an unbounded query against the index.
 - Date bounds apply to each message's effective time: its delivery
   date (`occurred_at`, the date of its topmost `Received:` header, in
   UTC) when known, else its send date (`sent_at`, its `Date:` header in
-  UTC). A thread matches when its span, from its messages' earliest to
+  UTC). The bound compares against the delivery date whenever there is
+  one, so a message sent just before midnight and delivered after it
+  falls on the later day, even though its `sent_at` is the earlier one;
+  only a message without a delivery date is bounded by its `sent_at`.
+  A thread matches when its span, from its messages' earliest to
   latest effective time, overlaps the range, so a thread with messages
   either side of a short range matches it. The tools that hand passages
   to a model (`get_evidence`, `ask_mailbox`, `extract_from_emails`,
@@ -401,7 +415,7 @@ so even fewer than 50 results (including zero) can omit matching attachments.
 | `content_type` | string | none | Exact MIME-type filter, e.g. `application/pdf`; blank means no filter |
 | `from_addr` | string | none | Restrict to attachments on threads sent by this address or domain |
 | `date_from` | string | none | ISO 8601 date lower bound on the carrying message's effective time (`occurred_at`, else `sent_at`) |
-| `date_to` | string | none | ISO 8601 date upper bound |
+| `date_to` | string | none | ISO 8601 date upper bound. Date-only bounds are UTC days; give an offset for a local-time bound. `date_bounds` echoes the UTC instants applied, as in `search_emails` |
 | `extracted_only` | bool | `false` | Return only attachments whose text extraction succeeded |
 | `limit` | int | `20` | Max attachments to return; clamped to `[1, 50]` |
 
@@ -633,7 +647,7 @@ questions.
 | `text` | string | none | Every word must appear in the message's indexed body (FTS word match with stemming; words may be in different chunks). Attachment text and stripped quoted replies are not searched; at most 16 words |
 | `folder` | string | none | Exact folder name. Without it, messages filed in Trash are left out; pass `"Trash"` to list them ([Trash](#trash-is-left-out-by-default)) |
 | `date_from` | string | none | Inclusive ISO 8601 lower bound on the message's effective time (`occurred_at`, else `sent_at`) |
-| `date_to` | string | none | Inclusive upper bound; a date-only value covers the whole UTC day |
+| `date_to` | string | none | Inclusive upper bound; a date-only value covers the whole UTC day. Give an offset for a local-time bound; `date_bounds` echoes the UTC instants applied ([date bounds](#search_emails)) |
 | `has_attachments` | bool | none | The message's own attachment flag, either way |
 | `seen` | bool | none | `true` for messages read in Proton, `false` for unread ([read state](#read-state)) |
 | `flagged` | bool | none | `true` for flagged (starred) messages, `false` for the rest |
