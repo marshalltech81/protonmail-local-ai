@@ -14,6 +14,7 @@ import logging
 import os
 import stat
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -111,6 +112,8 @@ class TestConfig:
         exe, _, _ = fake_claude
         monkeypatch.setattr(cli_judge.shutil, "which", lambda name: str(exe))
         monkeypatch.setattr(cli_judge, "MANAGED_MCP_PATHS", ())
+        monkeypatch.setattr(cli_judge, "MANAGED_CLAUDE_MD_PATHS", ())
+        monkeypatch.setattr(cli_judge, "MANAGED_SETTINGS_PATHS", ())
 
     def test_needs_no_key_or_base_url(self, tmp_path):
         cfg = load_layer("JUDGE", self.ENV, tmp_path)
@@ -182,6 +185,24 @@ class TestConfig:
         monkeypatch.setattr(cli_judge, "MANAGED_MCP_PATHS", (managed,))
         with pytest.raises(ConfigError, match="managed-mcp.json"):
             load_layer("JUDGE", self.ENV)
+
+    def test_managed_instructions_are_refused(self, tmp_path, monkeypatch):
+        """Review round 2: an organization-wide CLAUDE.md, or claudeMd in
+        managed settings, loads into every session whatever the flags."""
+        managed = tmp_path / "CLAUDE.md"
+        managed.write_text("org rules")
+        monkeypatch.setattr(cli_judge, "MANAGED_CLAUDE_MD_PATHS", (managed,))
+        with pytest.raises(ConfigError, match="managed CLAUDE.md"):
+            load_layer("JUDGE", self.ENV)
+        monkeypatch.setattr(cli_judge, "MANAGED_CLAUDE_MD_PATHS", ())
+        settings = tmp_path / "managed-settings.json"
+        monkeypatch.setattr(cli_judge, "MANAGED_SETTINGS_PATHS", (settings,))
+        settings.write_text(json.dumps({"permissions": {}}))
+        assert load_layer("JUDGE", self.ENV) is not None
+        for text in (json.dumps({"claudeMd": "org rules"}), "not json"):
+            settings.write_text(text)
+            with pytest.raises(ConfigError, match="managed"):
+                load_layer("JUDGE", self.ENV)
 
     def test_label_records_the_cli_and_its_version(self):
         cfg = load_layer("JUDGE", self.ENV)
@@ -322,6 +343,38 @@ class TestClient:
         assert not os.path.exists(call["cwd"])
 
 
+def test_timeout_kills_the_whole_process_tree(tmp_path):
+    """Review round 2: an npm-installed launcher spawns the native CLI
+    and cannot forward SIGKILL, so the timeout kills the process group."""
+    pids = tmp_path / "pids.json"
+    script = tmp_path / "launcher"
+    script.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, subprocess, sys, time\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+        f"open({str(pids)!r}, 'w').write(json.dumps([os.getpid(), child.pid]))\n"
+        "time.sleep(60)\n"
+    )
+    script.chmod(0o700)
+
+    async def go():
+        await asyncio.wait_for(
+            cli_judge._run_cli([str(script)], "", str(tmp_path), dict(os.environ)), 2.0
+        )
+
+    with pytest.raises(TimeoutError):
+        _run(go())
+    for pid in json.loads(pids.read_text()):
+        for _ in range(50):  # the child is reaped by init after the kill
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.05)
+        else:
+            pytest.fail("a CLI process survived the timeout")
+
+
 # ------------------------------------------------------------------ judge
 
 
@@ -398,9 +451,16 @@ here = os.path.dirname(os.path.abspath(__file__))
 if sys.argv[1:] == ["--version"]:
     print("codex-cli 0.123.4")
     sys.exit(0)
-if sys.argv[1:] == ["login", "status"]:
+if sys.argv[1:3] == ["login", "status"]:
+    home = os.environ.get("CODEX_HOME", "")
+    auth = os.path.join(home, "auth.json")
     with open(os.path.join(here, "login_calls.jsonl"), "a") as f:
-        f.write(json.dumps(dict(os.environ)) + "\\n")
+        f.write(json.dumps({{
+            "env": dict(os.environ),
+            "argv": sys.argv[1:],
+            "home_entries": sorted(os.listdir(home)) if home else None,
+            "auth_link": os.readlink(auth) if os.path.islink(auth) else None,
+        }}) + "\\n")
     status = os.path.join(here, "login_status.txt")
     print(open(status).read() if os.path.exists(status) else "Logged in using ChatGPT")
     sys.exit(0)
@@ -496,6 +556,7 @@ class TestCodexConfig:
         exe, _, _, home = fake_codex
         monkeypatch.setattr(cli_judge.shutil, "which", lambda name: str(exe))
         monkeypatch.setenv("CODEX_HOME", str(home))
+        monkeypatch.setattr(cli_judge, "CODEX_MANAGED_CONFIG_PATHS", ())
 
     def test_needs_no_key_or_base_url(self, fake_codex, tmp_path):
         _, _, _, home = fake_codex
@@ -529,8 +590,45 @@ class TestCodexConfig:
         with pytest.raises(ConfigError, match=message) as e:
             load_layer("JUDGE", self.ENV)
         assert "sk-" not in str(e.value)
-        env = json.loads((exe.parent / "login_calls.jsonl").read_text().splitlines()[-1])
-        assert "OPENAI_API_KEY" not in env
+        call = json.loads((exe.parent / "login_calls.jsonl").read_text().splitlines()[-1])
+        assert "OPENAI_API_KEY" not in call["env"]
+
+    def test_login_preflight_uses_the_cases_private_home(self, fake_codex):
+        """Review round 2: the preflight read the real home's credential
+        store (keyring under `auto`) while cases read the linked file;
+        both now use a private home and the file store."""
+        exe, _, _, home = fake_codex
+        assert load_layer("JUDGE", self.ENV) is not None
+        call = json.loads((exe.parent / "login_calls.jsonl").read_text().splitlines()[-1])
+        assert call["env"]["CODEX_HOME"] != str(home)
+        assert call["home_entries"] == ["auth.json"]
+        assert call["auth_link"] == str(home / "auth.json")
+        assert 'cli_auth_credentials_store="file"' in call["argv"]
+
+    def test_relative_codex_home_is_resolved(self, fake_codex, monkeypatch):
+        """Review round 2: a relative CODEX_HOME made a broken link."""
+        _, _, _, home = fake_codex
+        monkeypatch.chdir(home.parent)
+        monkeypatch.setenv("CODEX_HOME", home.name)
+        cfg = load_layer("JUDGE", self.ENV)
+        assert cfg is not None and cfg.cli_auth_file == str(home.resolve() / "auth.json")
+
+    def test_managed_codex_config_is_refused(self, tmp_path, monkeypatch):
+        """Review round 2: managed and system config layers load whatever
+        the session flags say, and can add MCP servers."""
+        managed = tmp_path / "managed_config.toml"
+        managed.write_text("")
+        monkeypatch.setattr(cli_judge, "CODEX_MANAGED_CONFIG_PATHS", (managed,))
+        with pytest.raises(ConfigError, match="managed or system Codex config"):
+            load_layer("JUDGE", self.ENV)
+
+    def test_prerelease_version_is_kept(self, fake_codex):
+        """Review round 2: alpha builds collapsed into the stable version."""
+        exe, _, _, _ = fake_codex
+        script = exe.parent / "codex-pre"
+        script.write_text(f"#!{sys.executable}\nprint('codex-cli 0.162.0-alpha.14')\n")
+        script.chmod(0o700)
+        assert cli_judge.cli_version(str(script)) == "0.162.0-alpha.14"
 
     def test_login_must_be_in_auth_json(self, fake_codex):
         """The per-call home links the login file; a keyring login has none."""
@@ -595,6 +693,7 @@ class TestCodexClient:
         assert 'web_search="disabled"' in overrides
         assert "project_doc_max_bytes=0" in overrides
         assert "check_for_update_on_startup=false" in overrides
+        assert 'cli_auth_credentials_store="file"' in overrides
         # The judge prompt replaces Codex's own base instructions.
         assert call["instructions"] == "JUDGE SYSTEM"
         # The prompt goes on stdin only.

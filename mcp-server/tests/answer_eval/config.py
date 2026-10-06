@@ -286,6 +286,11 @@ def _check_claude_login(mode: str, path: str) -> None:
             f"JUDGE_MODE={mode} cannot run under an enterprise managed-mcp.json: "
             "Claude Code refuses --strict-mcp-config there"
         )
+    if cli_judge.managed_instructions_present():
+        raise ConfigError(
+            f"JUDGE_MODE={mode} cannot run with a managed CLAUDE.md or claudeMd in managed "
+            "settings: those instructions reach every session and would alter grading"
+        )
     method = cli_judge.auth_method(path)
     if method is None:
         raise ConfigError(f"JUDGE_MODE={mode}: the claude CLI is not logged in (run `claude`)")
@@ -299,6 +304,11 @@ def _check_claude_login(mode: str, path: str) -> None:
 def _check_codex_login(mode: str, path: str) -> str:
     """The login file to link into each call's private home, after
     checking it holds a ChatGPT login."""
+    if cli_judge.codex_managed_config_present():
+        raise ConfigError(
+            f"JUDGE_MODE={mode} cannot run with a managed or system Codex config: those "
+            "layers apply whatever the judge's flags say and can add MCP servers"
+        )
     auth_file = cli_judge.codex_auth_file()
     if not os.path.isfile(auth_file):
         raise ConfigError(

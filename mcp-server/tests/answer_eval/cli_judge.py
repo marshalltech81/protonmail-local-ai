@@ -25,9 +25,12 @@ removed from the CLI's environment: a set ``ANTHROPIC_API_KEY`` takes
 the call off the subscription (a bad one hangs the CLI), and a provider
 switch routes it through a cloud account. Auto-updates are off, so one
 run cannot mix CLI versions. Before the run, ``claude auth status`` (in
-the same environment) must report the subscription login, and an
-enterprise ``managed-mcp.json``, under which ``--strict-mcp-config``
-exits at startup, is refused. ``JUDGE_MAX_TOKENS`` becomes
+the same environment) must report the subscription login. An enterprise
+``managed-mcp.json`` (under which ``--strict-mcp-config`` exits at
+startup) and managed instructions (an organization-wide ``CLAUDE.md``
+or ``claudeMd`` in ``managed-settings.json``, which no flag excludes)
+are refused; managed settings delivered by MDM or from the server
+cannot be seen from here. ``JUDGE_MAX_TOKENS`` becomes
 ``CLAUDE_CODE_MAX_OUTPUT_TOKENS``; on hitting it the CLI makes its own
 continuation attempts (not ours to turn off) before reporting the cap,
 which the judge records as ``judge_truncated``.
@@ -48,13 +51,19 @@ which the judge records as ``judge_truncated``.
   removed with it. The login is linked, never copied.
 - ``project_doc_max_bytes=0`` (the working directory's ``AGENTS.md``),
   ``--ignore-rules``, ``--ephemeral``, ``--skip-git-repo-check``, no
-  update check, and ``model_instructions_file`` set to the judge's
-  system prompt in place of Codex's coding-agent instructions.
+  update check, the file credential store (the linked ``auth.json``,
+  never the keyring), and ``model_instructions_file`` set to the
+  judge's system prompt in place of Codex's coding-agent instructions.
 
 ``OPENAI_*`` and ``CODEX_*`` variables are removed so an API key cannot
 take the call off the subscription. Before the run, ``codex login
-status`` must report a ChatGPT login: an API-key login bills API usage,
-and a logged-out CLI still sends the prompt before the 401. Codex has
+status``, in the same kind of private home with the same credential
+store, must report a ChatGPT login: an API-key login bills API usage,
+and a logged-out CLI still sends the prompt before the 401. Managed
+and system config files (``/etc/codex``, macOS managed preferences)
+load above or beside the session flags and can add MCP servers, so
+they are refused; a cloud-managed enterprise layer cannot be seen from
+here. Codex has
 no output-token setting, so ``JUDGE_MAX_TOKENS`` does not apply; the
 judge's timeout bounds the call.
 """
@@ -65,8 +74,10 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import tempfile
+from collections.abc import Iterator
 from pathlib import Path
 
 from src.lib.inference import InferenceTruncatedError
@@ -89,6 +100,24 @@ MANAGED_MCP_PATHS = (
     Path("/Library/Application Support/ClaudeCode/managed-mcp.json"),
     Path("/etc/claude-code/managed-mcp.json"),
 )
+# Organization-wide instructions that load into every Claude session:
+# the managed CLAUDE.md, and ``claudeMd`` in managed settings.
+MANAGED_CLAUDE_MD_PATHS = (
+    Path("/Library/Application Support/ClaudeCode/CLAUDE.md"),
+    Path("/etc/claude-code/CLAUDE.md"),
+)
+MANAGED_SETTINGS_PATHS = (
+    Path("/Library/Application Support/ClaudeCode/managed-settings.json"),
+    Path("/etc/claude-code/managed-settings.json"),
+)
+# Codex config layers that apply whatever the session flags say.
+CODEX_MANAGED_CONFIG_PATHS = (
+    Path("/etc/codex/managed_config.toml"),
+    Path("/etc/codex/config.toml"),
+    Path("/Library/Managed Preferences/com.openai.codex.plist"),
+)
+# Codex reads only the linked auth.json, never the keyring.
+_CODEX_FILE_STORE = 'cli_auth_credentials_store="file"'
 # Codex features turned off for a judge call: the shell and everything
 # that could read the disk, reach the network or load extensions.
 CODEX_DISABLED_FEATURES = (
@@ -116,7 +145,8 @@ _LOGGED_OUT_RE = re.compile(r"not logged in|/login", re.IGNORECASE)
 _CODEX_LOGGED_OUT_RE = re.compile(r"401|unauthorized|not logged in", re.IGNORECASE)
 _USAGE_LIMIT_RE = re.compile(r"usage limit|usage_limit|limit reached|hit your limit", re.IGNORECASE)
 _TOKEN_CAP_RE = re.compile(r"output token maximum", re.IGNORECASE)
-_VERSION_RE = re.compile(r"\d+(?:\.\d+)+")
+# A version number, with any prerelease or build suffix kept.
+_VERSION_RE = re.compile(r"\d+(?:\.\d+)+(?:[-+][0-9A-Za-z.-]+)?")
 
 
 class CliJudgeError(Exception):
@@ -157,7 +187,10 @@ def cli_version(executable: str) -> str:
 
 
 async def _run_cli(argv: list[str], stdin: str, cwd: str, env: dict[str, str]) -> bytes:
-    """Run one CLI call and return its stdout; stderr is discarded."""
+    """Run one CLI call and return its stdout; stderr is discarded. The
+    CLI leads its own process group, so a timeout stops every process
+    it started (an npm launcher, for one, cannot forward SIGKILL to the
+    native binary it runs)."""
     proc = await asyncio.create_subprocess_exec(
         *argv,
         stdin=asyncio.subprocess.PIPE,
@@ -165,6 +198,7 @@ async def _run_cli(argv: list[str], stdin: str, cwd: str, env: dict[str, str]) -
         stderr=asyncio.subprocess.DEVNULL,
         cwd=cwd,
         env=env,
+        start_new_session=True,
     )
     try:
         stdout, _ = await proc.communicate(stdin.encode())
@@ -173,7 +207,7 @@ async def _run_cli(argv: list[str], stdin: str, cwd: str, env: dict[str, str]) -
         # does not keep running (and using the subscription).
         if proc.returncode is None:
             with contextlib.suppress(ProcessLookupError):
-                proc.kill()
+                os.killpg(proc.pid, signal.SIGKILL)
             await proc.wait()
     return stdout
 
@@ -214,6 +248,23 @@ def auth_method(executable: str) -> str | None:
 
 def managed_mcp_present() -> bool:
     return any(path.exists() for path in MANAGED_MCP_PATHS)
+
+
+def managed_instructions_present() -> bool:
+    """A managed CLAUDE.md, or managed settings that carry ``claudeMd``
+    (or cannot be read, so cannot be shown not to)."""
+    if any(path.exists() for path in MANAGED_CLAUDE_MD_PATHS):
+        return True
+    for path in MANAGED_SETTINGS_PATHS:
+        if not path.exists():
+            continue
+        try:
+            settings = json.loads(path.read_text(encoding="utf-8"))
+        except OSError, ValueError:
+            return True
+        if not isinstance(settings, dict) or "claudeMd" in settings:
+            return True
+    return False
 
 
 class ClaudeCliClient:
@@ -294,10 +345,30 @@ class ClaudeCliClient:
 
 
 def codex_auth_file() -> str:
-    """The operator's Codex login file: ``$CODEX_HOME/auth.json``,
+    """The operator's Codex login file, absolute (the link to it lives
+    in another directory): ``$CODEX_HOME/auth.json``,
     ``~/.codex/auth.json`` by default."""
     home = os.environ.get("CODEX_HOME", "").strip() or str(Path.home() / ".codex")
-    return str(Path(home) / "auth.json")
+    return str(Path(home).resolve() / "auth.json")
+
+
+def codex_managed_config_present() -> bool:
+    return any(path.exists() for path in CODEX_MANAGED_CONFIG_PATHS)
+
+
+@contextlib.contextmanager
+def _codex_private_home(auth_file: str, parent: str | None = None) -> Iterator[str]:
+    """A fresh temporary directory (resolved, so ``-C`` names the
+    directory the CLI reports) holding ``home``, a mode-700
+    ``CODEX_HOME`` with only a link to ``auth_file``, and ``work``, an
+    empty mode-700 working directory; removed afterwards."""
+    with tempfile.TemporaryDirectory(prefix="judge-", dir=parent) as tmp:
+        root = os.path.realpath(tmp)
+        for name in ("home", "work"):
+            os.mkdir(os.path.join(root, name))
+            os.chmod(os.path.join(root, name), 0o700)
+        os.symlink(auth_file, os.path.join(root, "home", "auth.json"))
+        yield root
 
 
 def codex_env(home: str | None = None) -> dict[str, str]:
@@ -311,17 +382,20 @@ def codex_env(home: str | None = None) -> dict[str, str]:
 
 def codex_login(executable: str, auth_file: str) -> str | None:
     """``chatgpt`` or ``other`` from ``codex login status`` for the login
-    in ``auth_file``'s directory, or ``None`` when logged out or
-    unreadable. Only classified: the status text is never kept."""
+    in ``auth_file``, read as a judge call reads it (a private home and
+    the file store), or ``None`` when logged out or unreadable. Only
+    classified: the status text is never kept."""
     try:
-        done = subprocess.run(  # nosec B603 - fixed argument list, no shell
-            [executable, "login", "status"],
-            capture_output=True,
-            text=True,
-            timeout=VERSION_TIMEOUT_SECS,
-            check=False,
-            env=codex_env(str(Path(auth_file).parent)),
-        )
+        with _codex_private_home(auth_file) as root:
+            done = subprocess.run(  # nosec B603 - fixed argument list, no shell
+                [executable, "login", "status", "-c", _CODEX_FILE_STORE],
+                capture_output=True,
+                text=True,
+                timeout=VERSION_TIMEOUT_SECS,
+                check=False,
+                cwd=os.path.join(root, "work"),
+                env=codex_env(os.path.join(root, "home")),
+            )
     except OSError, subprocess.TimeoutExpired:
         return None
     out = f"{done.stdout}\n{done.stderr}"
@@ -374,6 +448,7 @@ class CodexCliClient:
             'web_search="disabled"',
             "project_doc_max_bytes=0",
             "check_for_update_on_startup=false",
+            _CODEX_FILE_STORE,
             # A JSON string is a valid TOML basic string.
             f"model_instructions_file={json.dumps(instructions)}",
         ):
@@ -381,14 +456,8 @@ class CodexCliClient:
         return [*argv, "-"]
 
     async def complete(self, system: str, user: str) -> str:
-        with tempfile.TemporaryDirectory(prefix="judge-", dir=self.workdir_parent) as tmp:
-            # Resolved, so ``-C`` names the directory the CLI reports.
-            root = os.path.realpath(tmp)
+        with _codex_private_home(self.auth_file, self.workdir_parent) as root:
             home, workdir = os.path.join(root, "home"), os.path.join(root, "work")
-            for path in (home, workdir):
-                os.mkdir(path)
-                os.chmod(path, 0o700)
-            os.symlink(self.auth_file, os.path.join(home, "auth.json"))
             instructions = os.path.join(home, "judge_system.md")
             Path(instructions).write_text(system, encoding="utf-8")
             stdout = await _run_cli(

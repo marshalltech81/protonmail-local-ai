@@ -458,7 +458,8 @@ is `127.0.0.1`, not `host.docker.internal`.
   limits, which interactive use shares, instead of API credit. Both
   need `JUDGE_MODEL` and the CLI on `PATH`, read no key, take no base
   URL (unset or `default`), send the prompt on stdin, run in a fresh
-  empty directory, and are killed when `JUDGE_TIMEOUT_SECS` runs out. A
+  empty directory, and are killed with every process they started (the
+  CLI leads its own process group) when `JUDGE_TIMEOUT_SECS` runs out. A
   logged-out CLI and a usage-limit stop are the judge errors
   `judge_cli_logged_out` and `judge_cli_usage_limit`; a CLI missing from
   `PATH` or not logged in with a subscription is a configuration error.
@@ -478,8 +479,13 @@ is `127.0.0.1`, not `host.docker.internal`.
   the call off the subscription, and `DISABLE_AUTOUPDATER=1` keeps one
   CLI version for the whole run. Before any case runs, `claude auth
   status` must report a claude.ai (subscription) login, not a Console
-  (API-billed) one, and a machine with an enterprise `managed-mcp.json`
-  is refused, since Claude Code exits on `--strict-mcp-config` there.
+  (API-billed) one. A machine with an enterprise `managed-mcp.json` is
+  refused, since Claude Code exits on `--strict-mcp-config` there, and so
+  is one with an organization-wide managed `CLAUDE.md` or `claudeMd` in
+  `managed-settings.json`, which load into every session whatever the
+  flags. Managed settings delivered by MDM or from Anthropic's servers
+  cannot be seen locally, so on a managed machine the judge may still
+  carry organization instructions.
   `JUDGE_MAX_TOKENS` becomes `CLAUDE_CODE_MAX_OUTPUT_TOKENS`: when a
   reply reaches it, the CLI makes its own continuation attempts (up to
   about four times the cap) before failing, which counts as
@@ -499,11 +505,17 @@ is `127.0.0.1`, not `host.docker.internal`.
   the real home's config, hooks, plugins and skills stay out, and
   Codex's own logs of the call are removed with that directory. The
   working directory's `AGENTS.md` is off (`project_doc_max_bytes=0`), as
-  are rules, session files and the update check, and the judge system
+  are rules, session files and the update check; credentials come only
+  from the linked file (`cli_auth_credentials_store="file"`), and the
+  judge system
   prompt replaces Codex's coding-agent instructions
   (`model_instructions_file`). `OPENAI_*` and `CODEX_*` variables are
-  removed. Before any case runs, `codex login status` must report a
-  ChatGPT login: an API-key login bills API usage, and a logged-out CLI
+  removed. Managed and system Codex config (`/etc/codex/managed_config.toml`,
+  `/etc/codex/config.toml`, macOS managed preferences) is refused, since
+  it applies whatever the flags say and can add MCP servers; a
+  cloud-managed enterprise layer cannot be seen locally. Before any case
+  runs, `codex login status`, run in the same kind of private home with
+  the same file store, must report a ChatGPT login: an API-key login bills API usage, and a logged-out CLI
   still sends the prompt before the server refuses it. A login kept in
   the keyring instead of `auth.json` is refused, since it cannot be
   linked. Codex has no output-token setting, so `JUDGE_MAX_TOKENS` does
