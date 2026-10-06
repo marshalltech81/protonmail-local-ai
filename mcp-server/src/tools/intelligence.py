@@ -972,19 +972,71 @@ def _strict_record_schema(schema: dict, limited: bool = True) -> dict | None:
     return record
 
 
-def _strict_records_schema(schema: dict) -> dict | None:
+def _strict_records_schema(schema: dict) -> tuple[dict, list[str]] | None:
     """The reply schema of one structured extraction call,
-    ``{"records": [<record>, ...]}`` (the top level must be an object), or
-    None when the record cannot be expressed strictly."""
+    ``{"records": [<record>, ...]}`` (the top level must be an object), and
+    the caller's field names; or None when the record cannot be expressed
+    strictly.
+
+    Anthropic caches a structured-output schema for up to 24 hours apart
+    from the prompt, so the schema sent names no caller field: field n
+    (in declaration order) is ``f<n>``, in the record and in its
+    ``_evidence``, and ``names[n - 1]`` is its caller name. The prompt
+    lists the mapping; ``_caller_keys`` maps a reply back."""
     record = _strict_record_schema(schema)
     if record is None:
         return None
-    return {
+    names = [name for name in record["properties"] if name != _EVIDENCE_FIELD]
+    keys = [f"f{n}" for n in range(1, len(names) + 1)]
+    properties = record["properties"]
+    evidence = properties[_EVIDENCE_FIELD]
+    wire_record = {
+        **record,
+        "properties": {
+            **{key: properties[name] for key, name in zip(keys, names, strict=True)},
+            _EVIDENCE_FIELD: {
+                **evidence,
+                "properties": {
+                    key: evidence["properties"][name] for key, name in zip(keys, names, strict=True)
+                },
+                "required": keys,
+            },
+        },
+        "required": [*keys, _EVIDENCE_FIELD],
+    }
+    wrapper = {
         "type": "object",
-        "properties": {"records": {"type": "array", "items": record}},
+        "properties": {"records": {"type": "array", "items": wire_record}},
         "required": ["records"],
         "additionalProperties": False,
     }
+    return wrapper, names
+
+
+def _caller_keys(item: object, names: list[str]) -> object:
+    """One structured reply record with its ``f<n>`` keys, and those of its
+    ``_evidence``, renamed to the caller's names. Anything else is
+    returned as it is, for the checks to judge."""
+    if not isinstance(item, dict):
+        return item
+    mapping = {f"f{n}": name for n, name in enumerate(names, start=1)}
+    renamed = {mapping.get(key, key): value for key, value in item.items()}
+    evidence = renamed.get(_EVIDENCE_FIELD)
+    if isinstance(evidence, dict):
+        renamed[_EVIDENCE_FIELD] = {mapping.get(k, k): v for k, v in evidence.items()}
+    return renamed
+
+
+def _schema_reserve_chars(schema: dict | None) -> int:
+    """Prompt characters to reserve for the system prompt Anthropic adds
+    when a structured-output schema is sent, billed as input. Measured
+    2026-10-05: always fewer tokens than the schema has characters (394
+    tokens for a 456-character schema, 2,075 for 2,589), so one token per
+    character, at ``CHARS_PER_TOKEN`` characters each. Nothing without a
+    schema."""
+    if schema is None:
+        return 0
+    return CHARS_PER_TOKEN * len(json.dumps(schema))
 
 
 def _drop_unrequired_nulls(record: dict, schema: dict) -> dict:
@@ -2176,7 +2228,11 @@ def _evidence_texts(threads: list[ThreadResult]) -> Iterator[str]:
 
 
 def _evidence_budget(
-    budget: PromptBudget, system: str, threads: list[ThreadResult], task: str
+    budget: PromptBudget,
+    system: str,
+    threads: list[ThreadResult],
+    task: str,
+    reserve_chars: int = 0,
 ) -> tuple[list[ThreadResult], int]:
     """The threads that fit, and their evidence budget, for a prompt
     built as ``_evidence_prompt`` + ``task`` under ``system``, with room
@@ -2193,7 +2249,8 @@ def _evidence_budget(
     (at most ``len(threads)`` renders, each of clipped headers only),
     until the rest fit; the caller records how many in
     ``EvidenceCoverage.threads_dropped``. Only when the top thread
-    alone does not fit does the request fail.
+    alone does not fit does the request fail. ``reserve_chars`` is room
+    kept for input the provider adds (``_schema_reserve_chars``).
     """
     kept = list(threads)
     while True:
@@ -2209,6 +2266,7 @@ def _evidence_budget(
             + len(_evidence_prompt(kept, [""] * len(kept), worst))
             + len(task)
             + REPAIR_RESERVE_CHARS
+            + reserve_chars
         )
         if fixed <= budget.prompt_chars or len(kept) == 1:
             break
@@ -3101,9 +3159,12 @@ def register_intelligence_tools(
             # Structured outputs (#808): the reply schema each call sends,
             # or None for a request sent as before (the setting off, openai
             # mode, or a schema the conversion cannot express strictly).
-            records_schema = (
+            structured = (
                 _strict_records_schema(schema) if inference_client.structured_output else None
             )
+            records_schema, field_names = structured if structured else (None, [])
+            # The prompt maps the schema's neutral keys to the caller's names.
+            field_keys = json.dumps({f"f{n}": name for n, name in enumerate(field_names, start=1)})
             # Fixed text: structured outputs were on but not used.
             schema_note = (
                 "Structured-output note: the schema declares a field structured outputs "
@@ -3145,7 +3206,8 @@ def register_intelligence_tools(
                         'Return a JSON object {"records": [...]} holding one record per item '
                         f'of relevant data, each matching the schema with its "{_EVIDENCE_FIELD}" '
                         "object naming the labels each value came from; use null for a field "
-                        "with no value, and an empty records list if no relevant data found."
+                        "with no value, and an empty records list if no relevant data found. "
+                        f"Record keys: {field_keys}"
                         if records_schema is not None
                         else "Return a JSON object matching the schema, with its "
                         f'"{_EVIDENCE_FIELD}" object naming the labels each value came from, '
@@ -3159,7 +3221,9 @@ def register_intelligence_tools(
             budgets = [
                 _text_budget(
                     prompt_budget,
-                    len(EXTRACT_SYSTEM) + len(render(thread, "")),
+                    len(EXTRACT_SYSTEM)
+                    + len(render(thread, ""))
+                    + _schema_reserve_chars(records_schema),
                     PER_THREAD_CHAR_BUDGET,
                     _evidence_texts([thread]),
                 )
@@ -3203,9 +3267,10 @@ def register_intelligence_tools(
                     if not isinstance(wrapped, list):
                         unparseable += 1
                         continue
+                    mapped = [_caller_keys(item, field_names) for item in wrapped]
                     record = [
                         _drop_unrequired_nulls(item, schema) if isinstance(item, dict) else item
-                        for item in wrapped
+                        for item in mapped
                     ]
                 # Accept both a single object and a JSON array of objects.
                 # The prompt asks for an object, but models occasionally

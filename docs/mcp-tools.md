@@ -709,8 +709,19 @@ their reply shapes; `extract_from_emails` builds one from the caller's
 schema (see [its section](#extract_from_emails)). The `brief_issue` and
 `check_conclusion` prompts are unchanged; `extract_from_emails`' prompt
 asks for the `{"records": [...]}` wrapper instead of an object or
-`null` (see its section). The token budgeting and the checks on each
-reply are unchanged.
+`null` (see its section). The checks on each reply are unchanged.
+
+Anthropic adds a system prompt describing the format, billed as input
+tokens, so when a schema is sent the prompt budget keeps room for it:
+one token per character of the schema (measured 2026-10-05 at 394
+tokens for a 456-character schema and 2,075 for a 2,589-character one,
+always below that). Anthropic also processes prompts and replies as
+usual but caches the schema itself for up to 24 hours since its last
+use, apart from them. The constant `brief_issue` and `check_conclusion`
+schemas carry no request data. `extract_from_emails` sends no field
+name of yours: its schema names fields `f1`, `f2`, … in declaration
+order, the prompt lists which is which (`Record keys: {"f1": "vendor"}`),
+and the reply is mapped back to your names before any check.
 
 A model or gateway without structured outputs rejects the request with
 status 400 (check Anthropic's structured-output compatibility list;
@@ -1041,7 +1052,9 @@ answering `null` or `[]`.
 
 **Structured outputs (#808).** With
 [structured outputs](#structured-outputs) on, each call sends a strict
-schema and the model answers `{"records": [<record>, ...]}`; an empty
+schema (with neutral keys `f1`, `f2`, …; see
+[structured outputs](#structured-outputs)) and the model answers
+`{"records": [<record>, ...]}`, mapped back to your field names; an empty
 `records` list is its "no relevant data", in place of `null` / `[]`,
 and a reply of any other shape counts as failed. The record schema is
 built from yours in one pass over the declared fields, without walking

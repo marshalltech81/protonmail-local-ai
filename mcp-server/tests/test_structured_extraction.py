@@ -23,6 +23,7 @@ from src.tools.brief import BRIEF_JSON_SCHEMA, CHECK_JSON_SCHEMA
 from src.tools.intelligence import (
     MAX_STRUCTURED_FIELDS,
     MAX_UNION_PARAMS,
+    _schema_reserve_chars,
     _strict_record_schema,
     _strict_records_schema,
     _union_param_count,
@@ -147,8 +148,9 @@ class TestConversion:
 
     @pytest.mark.parametrize(("schema", "fields"), [c for c in _CATALOGUE if c[1] is not None])
     def test_every_converted_schema_is_strict(self, schema, fields):
-        wrapper = _strict_records_schema(schema)
-        assert wrapper is not None
+        converted = _strict_records_schema(schema)
+        assert converted is not None
+        wrapper, _names = converted
         assert wrapper["required"] == ["records"]
         assert_strict(wrapper)
 
@@ -207,9 +209,9 @@ class TestProviderLimits:
         ],
     )
     def test_at_the_limit_is_structured(self, schema, unions):
-        wrapper = _strict_records_schema(schema)
-        assert wrapper is not None
-        assert _union_param_count(wrapper) == unions <= MAX_UNION_PARAMS
+        converted = _strict_records_schema(schema)
+        assert converted is not None
+        assert _union_param_count(converted[0]) == unions <= MAX_UNION_PARAMS
 
     @pytest.mark.parametrize(
         "schema",
@@ -280,18 +282,19 @@ class TestStructuredExtraction:
     def test_each_call_carries_the_records_schema(self, seeded_db):
         llm = FakeInferenceClient(
             complete_responses=[
-                '{"records": [{"vendor": "Acme", "_evidence": {"vendor": ["E1"]}}]}',
+                '{"records": [{"f1": "Acme", "_evidence": {"f1": ["E1"]}}]}',
                 '{"records": []}',
-                '{"records": [{"vendor": "Beta", "_evidence": {"vendor": null}}, '
-                '{"vendor": "Gamma", "_evidence": {"vendor": null}}]}',
+                '{"records": [{"f1": "Beta", "_evidence": {"f1": []}}, '
+                '{"f1": "Gamma", "_evidence": {"f1": []}}]}',
             ],
             structured_output=True,
         )
         out = _run(seeded_db, llm, _SHORTHAND)
-        assert llm.json_schemas == [_strict_records_schema(_SHORTHAND)] * 3
+        assert llm.json_schemas == [_wire(_SHORTHAND)] * 3
         for _system, user in llm.complete_calls:
             assert _STRUCTURED_ASK in user
             assert _LEGACY_ASK not in user
+            assert 'Record keys: {"f1": "vendor"}' in user
         records = out.structured_content["records"]
         assert [r["vendor"] for r in records] == ["Acme", "Beta", "Gamma"]
         assert out.structured_content["notice"] is None
@@ -324,7 +327,7 @@ class TestStructuredExtraction:
 
     def test_non_object_records_are_a_failure(self, seeded_db):
         llm = FakeInferenceClient(
-            complete_responses=['{"records": [{"vendor": "Acme"}, "Beta"]}', '{"records": []}']
+            complete_responses=['{"records": [{"f1": "Acme"}, "Beta"]}', '{"records": []}']
             + ['{"records": []}'],
             structured_output=True,
         )
@@ -344,8 +347,8 @@ class TestStructuredExtraction:
         }
         llm = FakeInferenceClient(
             complete_responses=[
-                '{"records": [{"vendor": "Acme", "amount": null, "_evidence": {}}]}',
-                '{"records": [{"vendor": null, "amount": 3, "_evidence": {}}]}',
+                '{"records": [{"f1": "Acme", "f2": null, "_evidence": {}}]}',
+                '{"records": [{"f1": null, "f2": 3, "_evidence": {}}]}',
                 '{"records": []}',
             ],
             structured_output=True,
@@ -360,7 +363,7 @@ class TestStructuredExtraction:
     def test_shorthand_nulls_are_kept_as_today(self, seeded_db):
         llm = FakeInferenceClient(
             complete_responses=[
-                '{"records": [{"vendor": "Acme", "note": null, "_evidence": {}}]}',
+                '{"records": [{"f1": "Acme", "f2": null, "_evidence": {}}]}',
                 '{"records": []}',
                 '{"records": []}',
             ],
@@ -444,15 +447,111 @@ class TestRejectedStructuredRequest:
         assert _MARKER not in str(err.value)
         assert _MARKER not in caplog.text
         assert len(calls) == 1
-        assert calls[0]["output_config"]["format"]["schema"] == _strict_records_schema(_SHORTHAND)
+        assert calls[0]["output_config"]["format"]["schema"] == _wire(_SHORTHAND)
+
+
+def _wire(schema: dict) -> dict:
+    converted = _strict_records_schema(schema)
+    assert converted is not None
+    return converted[0]
 
 
 def test_records_wrapper_shape():
-    wrapper = _strict_records_schema(_SHORTHAND)
+    """The schema sent names fields f1, f2, ... in declaration order (also
+    in ``_evidence``); the caller's names are returned beside it."""
+    converted = _strict_records_schema({"vendor": "string", "amount": "number"})
+    assert converted is not None
+    wrapper, names = converted
+    assert names == ["vendor", "amount"]
+    record = _strict_record_schema({"f1": "string", "f2": "number"})
     assert wrapper == {
         "type": "object",
-        "properties": {"records": {"type": "array", "items": _strict_record_schema(_SHORTHAND)}},
+        "properties": {"records": {"type": "array", "items": record}},
         "required": ["records"],
         "additionalProperties": False,
     }
     json.dumps(wrapper)  # serializable as sent
+
+
+class TestGenericKeys:
+    """#809 round 2: Anthropic caches a structured-output schema for up to
+    24 hours apart from the prompt, so the schema sent carries no
+    caller-chosen name; the prompt maps f1, f2, ... to the caller's names
+    and the reply is mapped back before every check."""
+
+    _MARKER_SCHEMA = {"zz_marker_settlement": "number", "zz_marker_party": "string"}
+
+    def test_schema_sent_has_no_caller_names(self):
+        wrapper, names = _strict_records_schema(self._MARKER_SCHEMA) or ({}, [])
+        assert names == list(self._MARKER_SCHEMA)
+        assert "zz_marker" not in json.dumps(wrapper)
+        record = wrapper["properties"]["records"]["items"]
+        assert list(record["properties"]) == ["f1", "f2", "_evidence"]
+        assert list(record["properties"]["_evidence"]["properties"]) == ["f1", "f2"]
+
+    def test_json_schema_form_maps_required_only_names(self):
+        schema = {"properties": {"a": {"type": "string"}}, "required": ["a", "b"]}
+        converted = _strict_records_schema(schema)
+        assert converted is not None
+        assert converted[1] == ["a", "b"]
+
+    def test_reply_is_mapped_back_with_its_evidence(self, seeded_db):
+        llm = FakeInferenceClient(
+            complete_responses=[
+                '{"records": [{"f1": 1200, "f2": "Acme", "_evidence": {"f1": ["E1"], "f2": []}}]}',
+                '{"records": []}',
+                '{"records": []}',
+            ],
+            structured_output=True,
+        )
+        out = _run(seeded_db, llm, self._MARKER_SCHEMA)
+        [record] = out.structured_content["records"]
+        assert record["zz_marker_settlement"] == 1200
+        assert record["zz_marker_party"] == "Acme"
+        assert "f1" not in record and "f2" not in record
+        for schema in llm.json_schemas:
+            assert "zz_marker" not in json.dumps(schema)
+        for _system, user in llm.complete_calls:
+            assert 'Record keys: {"f1": "zz_marker_settlement", "f2": "zz_marker_party"}' in user
+
+
+class TestSchemaTokenReserve:
+    """#809 round 2: with a schema, Anthropic adds a system prompt billed
+    as input (measured 2026-10-05: 394 tokens for a 456-character schema,
+    2,075 for 2,589), always fewer tokens than the schema has characters.
+    The prompt budget reserves one token per schema character."""
+
+    def test_reserve_is_one_token_per_schema_character(self):
+        wire = _wire(_SHORTHAND)
+        assert _schema_reserve_chars(wire) == 3 * len(json.dumps(wire))
+        assert _schema_reserve_chars(None) == 0
+
+    def test_extraction_budget_reserves_the_schema(self, seeded_db, monkeypatch):
+        """The fixed part each thread's evidence budget is sized against
+        grows by at least the reserve when the schema is sent."""
+        from src.tools import intelligence
+
+        def fixed_chars(structured: bool) -> list[int]:
+            seen: list[int] = []
+            original = intelligence._text_budget
+
+            def spy(budget, fixed, cap, texts):
+                seen.append(fixed)
+                return original(budget, fixed, cap, texts)
+
+            monkeypatch.setattr(intelligence, "_text_budget", spy)
+            llm = FakeInferenceClient(
+                complete_responses=['{"records": []}', "null"] * 3, structured_output=structured
+            )
+            _run(seeded_db, llm, _SHORTHAND)
+            monkeypatch.setattr(intelligence, "_text_budget", original)
+            return seen
+
+        on, off = fixed_chars(True), fixed_chars(False)
+        assert on and len(on) == len(off)
+        reserve = _schema_reserve_chars(_wire(_SHORTHAND))
+        assert all(a - b >= reserve for a, b in zip(on, off, strict=True))
+
+    @pytest.mark.parametrize("tool_schema", [BRIEF_JSON_SCHEMA, CHECK_JSON_SCHEMA])
+    def test_fixed_schemas_reserve_is_within_the_default_window(self, tool_schema):
+        assert _schema_reserve_chars(tool_schema) < 48000 * 3 // 4

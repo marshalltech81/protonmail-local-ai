@@ -56,6 +56,7 @@ from .intelligence import (
     _escape_delimiter_tags,
     _evidence_budget,
     _evidence_prompt,
+    _schema_reserve_chars,
     _sort_labels,
     _sources_searched,
     _strip_code_fence,
@@ -862,7 +863,15 @@ def register_experimental_tools(
             # sized so the complete prompt fits the model window (#285).
             task = f"Issue topic: {topic}\n\n{_TASK}"
             evidence_map: dict[str, EvidenceRef] = {}
-            shown, evidence_chars = _evidence_budget(prompt_budget, BRIEF_SYSTEM, evidenced, task)
+            # Room for the system prompt Anthropic adds with the schema (#809).
+            reserve = (
+                _schema_reserve_chars(BRIEF_JSON_SCHEMA)
+                if inference_client.structured_output
+                else 0
+            )
+            shown, evidence_chars = _evidence_budget(
+                prompt_budget, BRIEF_SYSTEM, evidenced, task, reserve_chars=reserve
+            )
             evidence, coverage = _build_evidence(shown, evidence_chars, evidence_map=evidence_map)
             coverage.threads_dropped = len(evidenced) - len(shown)
             user_prompt = _evidence_prompt(shown, evidence, coverage) + task
@@ -1092,7 +1101,15 @@ def register_experimental_tools(
             # block, then the fixed task line.
             task = _conclusion_block(conclusion) + _CHECK_TASK
             evidence_map: dict[str, EvidenceRef] = {}
-            shown, evidence_chars = _evidence_budget(prompt_budget, CHECK_SYSTEM, evidenced, task)
+            # Room for the system prompt Anthropic adds with the schema (#809).
+            reserve = (
+                _schema_reserve_chars(CHECK_JSON_SCHEMA)
+                if inference_client.structured_output
+                else 0
+            )
+            shown, evidence_chars = _evidence_budget(
+                prompt_budget, CHECK_SYSTEM, evidenced, task, reserve_chars=reserve
+            )
             evidence, coverage = _build_evidence(shown, evidence_chars, evidence_map=evidence_map)
             coverage.threads_dropped = len(evidenced) - len(shown)
             user_prompt = _evidence_prompt(shown, evidence, coverage) + task

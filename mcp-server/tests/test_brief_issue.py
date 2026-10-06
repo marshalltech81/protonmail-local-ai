@@ -785,3 +785,25 @@ class TestStructuredOutput:
         llm = ScriptedInference(_good_brief)
         _run(brief_db, llm)
         assert llm.json_schemas == [None]
+
+    @pytest.mark.parametrize("structured", [True, False])
+    def test_evidence_budget_reserves_the_schema(self, brief_db, monkeypatch, structured):
+        """#809 round 2: Anthropic adds a system prompt for the schema,
+        billed as input, so the budget reserves room for it only when the
+        schema is sent."""
+        from src.tools import brief
+        from src.tools.brief import BRIEF_JSON_SCHEMA
+        from src.tools.intelligence import _schema_reserve_chars
+
+        reserves: list[int] = []
+        original = brief._evidence_budget
+
+        def spy(*args, reserve_chars: int = 0, **kwargs):
+            reserves.append(reserve_chars)
+            return original(*args, reserve_chars=reserve_chars, **kwargs)
+
+        monkeypatch.setattr(brief, "_evidence_budget", spy)
+        llm = ScriptedInference(_good_brief)
+        llm.structured_output = structured
+        _run(brief_db, llm)
+        assert reserves == [_schema_reserve_chars(BRIEF_JSON_SCHEMA) if structured else 0]
