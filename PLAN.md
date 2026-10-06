@@ -405,10 +405,11 @@ that degraded says so on its own line. Done: token-limit hits,
 degraded-retrieval markers and rate-limited `/mcp` rejection logging
 (#865, #877, #878; #883), a completion line for every MCP tool (#886;
 #892), and mbsync sync-success and folder-name-safe repair logging
-(#879; #881), and attachment extraction and parser-cap logging with
-rate-limited warnings (#871, #872; #884; follow-ups for caps it does not
-count yet: header truncation #902, extracted-text and PDF digital-page truncation #903, and the unlimited
-PDF OCR-fallback warning, which #889's shared limiter covers).
+(#879; #881), and rate-limited logging of attachment extraction outcomes, the OCR
+page cap and the parser's body and address caps (#871, #872; #884).
+Not yet covered: header truncation (#902), every extractor-internal
+truncation cap, audited as a class (#903), and the unlimited PDF
+OCR-fallback warning (#889).
 Open: embedder recovery and maintenance-loop recoveries (#873),
 queue heartbeat and per-pass maintenance summaries (#874), WAL and
 storage size (#875), a startup identity line with commit, boot ID,
