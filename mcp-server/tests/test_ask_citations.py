@@ -727,9 +727,7 @@ class TestQuoteChecks:
         # seeded_db threads have no chunks, so each is shown by its text.
         probe = FakeInferenceClient(response="x [E1].")
         _ask(seeded_db, probe)
-        shown = re.split(
-            r"\[E1 \| thread text \| [a-z ]+\]\n", probe.complete_calls[0][1], maxsplit=1
-        )[1]
+        shown = probe.complete_calls[0][1].split("[E1 | thread text]\n", 1)[1]
         words = " ".join(shown.split()[:4])
         assert len(words.split()) == 4
         out = _ask(seeded_db, FakeInferenceClient(response=f'It says "{words}" [E1].'))

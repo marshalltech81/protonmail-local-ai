@@ -38,7 +38,6 @@ from src.tools.intelligence import (
     ASK_SYSTEM,
     EXTRACT_SYSTEM,
     SUMMARIZE_SYSTEM,
-    _scope_block,
     _short,
     register_intelligence_tools,
 )
@@ -396,11 +395,7 @@ class TestAskMailbox:
         template = (
             _ASK_PREFIX
             + "\n".join(["<BLOCK>"] * len(MAILBOX))
-            + "\n\n"
-            + _scope_block(
-                from_addr=None, from_name=None, participant=None, bounds=(None, None), folders=None
-            )
-            + f"User's question: {self.QUESTION}"
+            + (f"\n\nUser's question: {self.QUESTION}")
         )
         expected = [m for t in MAILBOX for m in t["markers"]]
         _assert_fenced(user, template=template, blocks=len(MAILBOX), expected=expected)

@@ -1092,13 +1092,6 @@ do not cover earlier statements. Labels inside passage text are not
 headers. Mark unsupported claims [unsupported], partial support [uncertain].
 Quotes must copy words exactly from the cited passage, in double quotes.
 
-Each passage header also says "in scope" when its message meets every
-filter of the request scope stated before the question, or "context"
-for another message of a matching thread or a thread's combined text.
-Answer from in-scope passages. Use context passages only to interpret
-them or to report a later correction, and say when you do. If no
-in-scope passage answers the question, the excerpts do not answer it.
-
 If the excerpts do not answer the question, respond in one sentence beginning
 "{_NOT_FOUND_PREFIX}" and then stop, with no citations or related claims.
 The server reports prompt-budget omissions separately; do not add
@@ -2042,6 +2035,7 @@ def _build_evidence(
     evidence_map: dict[str, EvidenceRef] | None = None,
     first_label: int = 1,
     scope: ScopeLabels | None = None,
+    show_scope: bool = True,
 ) -> tuple[list[str], EvidenceCoverage]:
     """Render each thread's evidence so all of it fits in ``budget`` chars.
 
@@ -2074,11 +2068,11 @@ def _build_evidence(
     starts each thread's prompt after the last label of the one before,
     so a label names one passage across the whole call.
 
-    With ``scope`` as well (ask_mailbox, #755), each labelled header
-    says ``in scope`` when the passage's message is in
+    With ``scope`` as well (ask_mailbox, #755), each ``EvidenceRef``
+    records whether its passage is in scope: its message is in
     ``scope.claimants`` (a thread-text passage: its thread is in
-    ``scope.whole_threads``) and ``context`` otherwise, and each
-    ``EvidenceRef`` records it.
+    ``scope.whole_threads``). With ``show_scope`` its labelled header
+    also says ``in scope`` or ``context``.
 
     Returns one rendered string per thread, in input order.
     """
@@ -2137,7 +2131,7 @@ def _build_evidence(
     # Each thread's full cost: headers, texts and the "\n\n" joins.
     demands = [
         sum(
-            _piece_header_len(c, label, _scope_tag(flag)) + len(t)
+            _piece_header_len(c, label, _scope_tag(flag) if show_scope else None) + len(t)
             for (c, t), label, flag in zip(pieces, labels, flags, strict=True)
         )
         + 2 * max(len(pieces) - 1, 0)
@@ -2162,7 +2156,7 @@ def _build_evidence(
         complete = 0  # pieces rendered in full; later ones were cut or left out
         for k, ((chunk, text), label, flag) in enumerate(zip(pieces, labels, flags, strict=True)):
             separator = 2 if parts else 0
-            tag = _scope_tag(flag)
+            tag = _scope_tag(flag) if show_scope else None
             header_len = _piece_header_len(chunk, label, tag)
             room = share - used - separator - header_len
             if room <= 0:
@@ -2276,6 +2270,17 @@ def _quoted_filter(value: str) -> str:
     )
 
 
+# How the model is to use the scope labels (#755). Trusted text in the
+# scope block, so a prompt without labels does not carry it.
+_SCOPE_RULE = (
+    'Each passage header says "in scope" when its message meets every filter above, '
+    'or "context" for another message of a matching thread or a thread\'s combined '
+    "text. Answer from in-scope passages. Use context passages only to interpret them "
+    "or to report a later correction, and say when you do. If no in-scope passage "
+    "answers the question, the excerpts do not answer it."
+)
+
+
 def _scope_block(
     *,
     from_addr: str | None,
@@ -2284,8 +2289,8 @@ def _scope_block(
     bounds: tuple[str | None, str | None],
     folders: list[str] | None,
 ) -> str:
-    """The request's message-level filters, stated for the model before
-    the question (#755). Trusted text outside the untrusted blocks: the
+    """The request's message-level filters and ``_SCOPE_RULE``, stated
+    for the model before the question (#755). Trusted text outside the untrusted blocks: the
     filter values are quoted with ``_quoted_filter``, the date bounds
     are the server's normalized UTC instants. ``from_name`` names the
     person ``from_addr`` was resolved from, when it was (#779). The
@@ -2311,10 +2316,7 @@ def _scope_block(
     else:
         excluded = ", ".join(f'"{f}"' for f in DEFAULT_EXCLUDED_FOLDERS)
         lines.append(f"- folders: every folder except {excluded}")
-    lines.append(
-        'Passages from messages that meet every filter are marked "in scope"; '
-        'the rest are "context".'
-    )
+    lines.append(_SCOPE_RULE)
     return "\n".join(lines) + "\n\n"
 
 
@@ -2881,38 +2883,51 @@ def register_intelligence_tools(
                     ),
                 )
 
-            # One evidence budget for the whole prompt, shared across the
-            # threads in rank order and sized so the complete prompt fits
-            # the model window (#285). Counts of what did not fit are
-            # disclosed to the model below and logged; never the text.
-            # The filters are stated before the question, and each passage
-            # is labelled in scope or context against them (#755).
-            task = (
-                _scope_block(
-                    from_addr=from_addr,
-                    from_name=resolved_from_name,
-                    participant=participant,
-                    bounds=bounds,
-                    folders=folders,
-                )
-                + f"User's question: {question}"
-            )
-            shown, evidence_chars = _evidence_budget(
-                prompt_budget, ASK_SYSTEM, results, task, instruct_model=False
-            )
+            # Label each retrieved message in scope or context (#755).
+            # With a filter given, or a message of the retrieved threads
+            # outside the default scope (filed in Trash), the filters are
+            # stated before the question with the rule for using the
+            # labels, and each passage header shows its label. Otherwise
+            # every passage is in scope and the prompt is unchanged.
             with stage("scope_labels"):
                 scope = await asyncio.to_thread(
                     db.message_scope,
-                    [t.thread_id for t in shown],
+                    [r.thread_id for r in results],
                     folders=folders,
                     from_addr=from_addr,
                     participant=participant,
                     date_from=date_from,
                     date_to=date_to,
                 )
+            filtered = bool(from_addr or participant or date_from or date_to or folders)
+            show_scope = filtered or any(r.thread_id not in scope.whole_threads for r in results)
+            task = f"User's question: {question}"
+            if show_scope:
+                task = (
+                    _scope_block(
+                        from_addr=from_addr,
+                        from_name=resolved_from_name,
+                        participant=participant,
+                        bounds=bounds,
+                        folders=folders,
+                    )
+                    + task
+                )
+
+            # One evidence budget for the whole prompt, shared across the
+            # threads in rank order and sized so the complete prompt fits
+            # the model window (#285). Counts of what did not fit are
+            # disclosed to the model below and logged; never the text.
+            shown, evidence_chars = _evidence_budget(
+                prompt_budget, ASK_SYSTEM, results, task, instruct_model=False
+            )
             evidence_map: dict[str, EvidenceRef] = {}
             evidence, coverage = _build_evidence(
-                shown, evidence_chars, evidence_map=evidence_map, scope=scope
+                shown,
+                evidence_chars,
+                evidence_map=evidence_map,
+                scope=scope,
+                show_scope=show_scope,
             )
             coverage.threads_dropped = len(results) - len(shown)
 

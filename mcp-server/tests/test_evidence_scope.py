@@ -24,7 +24,12 @@ import pytest
 import sqlite_vec
 import src.lib.sqlite as sqlite_mod
 from src.lib.sqlite import Database
-from src.tools.intelligence import ASK_SYSTEM, _scope_block, register_intelligence_tools
+from src.tools.intelligence import (
+    _SCOPE_RULE,
+    ASK_SYSTEM,
+    _scope_block,
+    register_intelligence_tools,
+)
 from src.tools.outputs import AskMailboxOutput, EvidenceOutput, GetMessageOutput, GetThreadOutput
 from src.tools.retrieval import register_retrieval_tools
 from src.tools.search import register_search_tools
@@ -281,9 +286,31 @@ class TestAskMailboxLabels:
         assert "| in scope |" in headers[_claimant("trash")]
         assert "| context |" in headers[_claimant("sep")]
 
-    def test_the_system_prompt_states_the_scope_rule(self):
-        assert '"in scope"' in ASK_SYSTEM and '"context"' in ASK_SYSTEM
-        assert "Answer from in-scope passages" in ASK_SYSTEM
+    def test_the_scope_rule_is_stated_outside_the_mail(self, scope_db):
+        probe = FakeInferenceClient(response="x [E1].")
+        _ask(scope_db, probe, date_from="2025-09-01")
+        assert _SCOPE_RULE in _outside_blocks(probe.complete_calls[0][1])
+        assert "Answer from in-scope passages" in _SCOPE_RULE
+        assert _SCOPE_RULE not in ASK_SYSTEM
+
+    def test_an_unscoped_prompt_is_unchanged(self, seeded_db):
+        # No filter, and no retrieved message outside the default scope:
+        # every passage is in scope, so no labels, block or rule are shown.
+        probe = FakeInferenceClient(response="x [E1].")
+        out = _ask(seeded_db, probe)
+        user = probe.complete_calls[0][1]
+        assert "Request scope" not in user
+        assert "| in scope" not in user and "| context" not in user
+        assert user.endswith(f"\n\nUser's question: {_QUESTION}")
+        assert {c["scope"] for c in out.structured_content["citations"]} == {"in_scope"}
+
+    def test_a_filter_shows_labels_even_when_all_passages_are_in_scope(self, scope_db):
+        probe = FakeInferenceClient(response="x [E1].")
+        _ask(scope_db, probe, folders=["INBOX", "Trash"])
+        user = probe.complete_calls[0][1]
+        assert "Request scope" in user
+        assert "| context |" not in user
+        assert len(re.findall(r"\| in scope \|", user)) == 5
 
     def test_the_scope_block_states_every_filter_outside_the_mail(self, scope_db):
         probe = FakeInferenceClient(response="x [E1].")
