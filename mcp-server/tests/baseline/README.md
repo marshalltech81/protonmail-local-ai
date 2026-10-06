@@ -108,7 +108,11 @@ harness in `tests/eval/` (`tests/retrieval_metrics.py`).
   correspondence with its attorneys in 2026 (dev, 46-65) and a marina
   co-op's (held out, 66-74). Because they add 2026 sent mail and
   attachments, the `folder-sent` and `has-attachments` enumerations
-  are bounded to before 2026. Adding a thread can lower a recall floor's
+  are bounded to before 2026. Threads 75-77 back the answer
+  evaluation's evidence-scope decoys (#755): in each, a filter selects
+  the thread and another of its messages holds a different answer
+  (another sender's reply, a later month's schedule, a stale list in
+  Trash). Adding a thread can lower a recall floor's
   measured value; re-measure and explain it rather than lowering the
   floor silently.
 - **Unanswerable questions** need terms that appear nowhere in the

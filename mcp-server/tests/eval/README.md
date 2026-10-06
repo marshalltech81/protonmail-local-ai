@@ -393,11 +393,13 @@ Cases must never be built from real mail.
 ### Cases
 
 `tests/answer_eval/cases.json` (schema v1, loaded and validated by
-`cases.py`) holds 34 cases over the baseline corpus: exact facts,
+`cases.py`) holds 37 cases over the baseline corpus: exact facts,
 attachment-only answers, multiple required threads (including
 `ask-tofu-summary`, a summary of the four genuine messages of the
-counting scenario that must not repeat their PINs or link), narrow filters,
-later corrections (and a later message that does not change the fact),
+counting scenario that must not repeat their PINs or link), narrow filters
+(including three evidence-scope decoys for #755, where another message
+of the selected thread holds a different answer: a sender filter, a date
+filter, and a thread with a stale message in Trash), later corrections (and a later message that does not change the fact),
 an unresolved conflict, unanswerable questions, an empty result, a
 prompt-budget omission (the case's own `settings.prompt_tokens`), and
 two synthetic prompt injections: corpus thread t31 tells the answering
