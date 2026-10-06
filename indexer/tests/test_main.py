@@ -877,6 +877,47 @@ class TestDrainQueueRetryAndDeadLetter:
         assert _chunk_ids(db, "fresh@example.com")
         assert queue.stats() == {"queued": 0, "dead": 0}
 
+    def test_permission_deferral_is_told_apart_from_a_permission_retry(self, tmp_path, monkeypatch):
+        """Codex round 2 on #904: a deferral and a retry of the same
+        unreadable file both fail at the parse stage on a
+        ``PermissionError``. The deferral writes the fixed deferral text,
+        so the heartbeat counts only it as ``deferred_permission``; the
+        retry after the 24 h window keeps the errno text and counts as
+        ``retrying``."""
+        from src.queue import PERMISSION_DEFERRED_ERROR
+
+        dest = tmp_path / "INBOX" / "new" / "fresh.eml"
+        _write_eml(dest, "fresh@example.com")
+        db = Database(tmp_path / "mail.db")
+        # A real backoff, so the retry path records one attempt per drain.
+        queue = IndexingQueue(db, max_attempts=3, base_backoff_seconds=60)
+        monkeypatch.setattr(
+            main,
+            "parse_email",
+            lambda path, **kw: (_ for _ in ()).throw(
+                PermissionError(13, f"{SYNTHETIC_MARKER} denied", f"/x/{SYNTHETIC_MARKER}")
+            ),
+        )
+        queue.enqueue(str(dest), "test")
+
+        _drain(queue, db, make_mock_embedder(), Threader(db))
+        row = db._conn.execute("SELECT attempts, last_error FROM indexing_jobs").fetchone()
+        assert row["attempts"] == 0
+        assert row["last_error"] == PERMISSION_DEFERRED_ERROR
+        assert SYNTHETIC_MARKER not in row["last_error"]
+        counts = queue.heartbeat_counts()
+        assert (counts["deferred_permission"], counts["retrying"]) == (1, 0)
+
+        db._conn.execute("UPDATE indexing_jobs SET created_at = '2000-01-01T00:00:00+00:00'")
+        db._conn.commit()
+        _make_due(db)
+        _drain(queue, db, make_mock_embedder(), Threader(db))
+        row = db._conn.execute("SELECT attempts, last_error FROM indexing_jobs").fetchone()
+        assert row["attempts"] == 1
+        assert row["last_error"] == f"PermissionError: [Errno 13] {os.strerror(13)}"
+        counts = queue.heartbeat_counts()
+        assert (counts["deferred_permission"], counts["retrying"]) == (0, 1)
+
     def test_file_unreadable_for_a_day_takes_the_normal_retry_path(self, tmp_path, monkeypatch):
         """A permissions fault that outlasts any sync still ends in a
         visible terminal state rather than deferring forever."""
@@ -5492,6 +5533,34 @@ class TestEmbedFailureHandling:
         assert row["attempts"] == 1
         assert row["last_error_class"] == "retryable"
         assert breaker.allow(main.time.monotonic())
+
+    def test_batch_with_nothing_to_embed_does_not_close_the_breaker(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """Codex round 2 on #904: a due batch of already-indexed,
+        unchanged messages sends no embed request, so it proves nothing
+        about the provider. It must neither log the recovery line nor
+        reset the breaker; only a successful embed request does."""
+        caplog.set_level(logging.INFO)
+        db, threader, queue, paths = self._setup(tmp_path, monkeypatch, {"a": "alpha body"})
+        embedder = make_mock_embedder()
+        embedder.embed.return_value = _UNIT_VECTOR
+        self._drain(db, embedder, threader, queue)
+        assert _chunk_ids(db, "a@example.com")
+
+        breaker = main._EmbedOutageBreaker()
+        breaker.record_failure(0.0)  # an outage whose pause has elapsed
+        queue.enqueue(paths["a"], REASON_INITIAL_SCAN)
+        _make_due(db)
+        calls_before = embedder.embed.call_count
+        caplog.clear()
+
+        processed = self._drain(db, embedder, threader, queue, breaker=breaker)
+
+        assert processed == 1
+        assert embedder.embed.call_count == calls_before
+        assert breaker.consecutive_failures == 1
+        assert "embedder recovered" not in caplog.text
 
     def test_outage_trips_breaker_and_open_breaker_pauses_draining(self, tmp_path, monkeypatch):
         db, threader, queue, paths = self._setup(tmp_path, monkeypatch, {"a": "alpha body"})

@@ -36,9 +36,15 @@ from openai import (
     DefaultHttpxClient,
     OpenAI,
 )
-from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
+from tenacity import (
+    RetryCallState,
+    retry,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 from .chunker import l2_normalize
+from .extractors import warn_rate_limited
 
 log = logging.getLogger("indexer.embedder")
 
@@ -172,6 +178,68 @@ EMBED_FAILURE_INFRASTRUCTURE = "infrastructure"
 EMBED_FAILURE_CONFIGURATION = "configuration"
 EMBED_FAILURE_REJECTED_INPUT = "rejected_input"
 EMBED_FAILURE_UNCERTAIN = "uncertain"
+
+
+# Attempts per embed request, the first included (tenacity's ``stop``).
+_EMBED_ATTEMPTS = 3
+
+
+# Whether the request now running on this thread had an ``embed retry``
+# line logged (not withheld by the rate limit). Each thread runs one
+# request at a time, attempts in sequence, so a thread-local flag is
+# per request; ``_retry_embed_attempt`` resets it on the first attempt.
+_retry_line_logged = threading.local()
+
+
+def _log_embed_retry(retry_state: RetryCallState) -> None:
+    """tenacity ``before_sleep``: log each retry of an embed request
+    (#873), so a rate limit or a flaky provider that slows indexing is
+    visible even when the retry succeeds. INFO, or WARNING when the next
+    attempt is the last. The error is ``scrub_embed_error``'s rendering
+    (type and status only for a provider status error). Rate limited with
+    the indexer's other repeated lines: a sustained rate limit retries
+    every request."""
+    outcome = retry_state.outcome
+    exc = outcome.exception() if outcome is not None else None
+    next_attempt = retry_state.attempt_number + 1
+    logged = warn_rate_limited(
+        log,
+        "embed retry attempt=%d/%d after %s",
+        next_attempt,
+        _EMBED_ATTEMPTS,
+        scrub_embed_error(exc) if exc is not None else "unknown error",
+        level=logging.WARNING if next_attempt >= _EMBED_ATTEMPTS else logging.INFO,
+        attachment=False,
+    )
+    if logged:
+        _retry_line_logged.flag = True
+
+
+def _retry_embed_attempt(retry_state: RetryCallState) -> bool:
+    """tenacity ``retry`` predicate: retry a transient failure. It is the
+    one callback tenacity runs after a successful attempt too, so a
+    success that follows a retry logs its recovery here (#873); otherwise
+    the ``embed retry`` line would be the last word on a request that in
+    fact went through. The recovery is logged whenever a retry line of
+    this request was, so a logged retry always gets its answer even
+    with the shared budget spent (at most one line per logged retry);
+    when every retry line was withheld, there is nothing to answer and
+    the recovery is withheld with them (Codex round 3 on #904)."""
+    outcome = retry_state.outcome
+    if outcome is None:
+        return False
+    if retry_state.attempt_number == 1:
+        _retry_line_logged.flag = False
+    exc = outcome.exception()
+    if exc is not None:
+        return _is_transient_embed_error(exc)
+    if retry_state.attempt_number > 1 and getattr(_retry_line_logged, "flag", False):
+        log.info(
+            "embed request recovered on attempt %d/%d",
+            retry_state.attempt_number,
+            _EMBED_ATTEMPTS,
+        )
+    return False
 
 
 def classify_embed_failure(exc: BaseException) -> str:
@@ -550,9 +618,10 @@ class OpenAIEmbedder:
         ]
 
     @retry(
-        stop=stop_after_attempt(3),
+        stop=stop_after_attempt(_EMBED_ATTEMPTS),
         wait=wait_exponential(multiplier=1, min=2, max=10),
-        retry=retry_if_exception(_is_transient_embed_error),
+        retry=_retry_embed_attempt,
+        before_sleep=_log_embed_retry,
         reraise=True,
     )
     def _embed_one_batch(self, texts: list[str]) -> list[list[float]]:

@@ -58,6 +58,7 @@ import os
 import sqlite3
 import threading
 import time
+from collections import Counter
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
@@ -96,6 +97,21 @@ REASON_INITIAL_SCAN = "initial_scan"
 REASON_RECOVERY = "recovery"
 REASON_RESCAN = "rescan"
 REASON_REEXTRACT = "reextract"
+
+# Stages ``defer`` is called with. The queue heartbeat counts deferrals
+# per stage, and tells permission deferrals and parked trashed files
+# apart from retries (#874).
+STAGE_PARSE = "parse"
+STAGE_EMBED = "embed"
+STAGE_TRASHED = "trashed"
+DEFER_STAGES = (STAGE_PARSE, STAGE_EMBED, STAGE_TRASHED)
+# ``last_error`` of a job deferred because mbsync has not opened the file
+# to the indexer yet (``main._phase1_commit_thread``). Fixed text, and
+# distinct from ``_stage_error``'s rendering of the same
+# ``PermissionError`` (``PermissionError: [Errno 13] ...``), which a job
+# past its deferral window writes on the normal retry path, so the
+# heartbeat tells the two apart (Codex round 2 on #904).
+PERMISSION_DEFERRED_ERROR = "PermissionError: deferred until mbsync opens the file"
 
 # Written by ``begin_attempt`` while a message's step runs and cleared
 # when it returns, so a row still carrying it after a restart was being
@@ -184,6 +200,8 @@ class IndexingQueue:
         self._in_flight: tuple[str, float] | None = None
         # Guards ``_in_flight`` and its refund against the stall guard's thread.
         self._lock = threading.Lock()
+        # ``defer`` calls per stage since the last heartbeat (#874).
+        self._deferrals: Counter[str] = Counter()
 
     # ----- writes --------------------------------------------------------
 
@@ -454,6 +472,12 @@ class IndexingQueue:
             now_iso=_now_iso(),
             next_attempt_iso=next_attempt.isoformat(),
         )
+        self._deferrals[stage] += 1
+
+    def drain_deferrals(self) -> dict[str, int]:
+        """``defer`` calls per stage since the last call, then reset."""
+        counts, self._deferrals = self._deferrals, Counter()
+        return {stage: counts[stage] for stage in DEFER_STAGES}
 
     def requeue_dead(self, error_class: str | None = None) -> int:
         """Return dead-lettered jobs to the queue with a fresh budget.
@@ -498,6 +522,37 @@ class IndexingQueue:
         indexer health file / MCP ``get_mailbox_status`` so operators can
         see when work is backing up or files are giving up."""
         return self.db.queue_stats()
+
+    def heartbeat_counts(self, now: datetime | None = None) -> dict[str, int]:
+        """Counts for the queue heartbeat line (#874), in one query.
+
+        ``pending`` rows have never failed; ``deferred_permission`` rows
+        were last deferred because mbsync has not opened the file yet;
+        ``parked_trashed`` rows are trashed files waiting to be reaped;
+        ``retrying`` is every other queued row (failures, including a
+        permission error past its deferral window, embedder deferrals,
+        a row interrupted mid-step). ``oldest_due_age``
+        is how long, in seconds, the longest-waiting due row has been due
+        (0 when none is due): it grows while draining is stalled.
+        """
+        now = now or datetime.now(UTC)
+        counts, oldest_due = self.db.queue_heartbeat_counts(
+            now_iso=now.isoformat(),
+            permission_stage=STAGE_PARSE,
+            permission_deferred_error=PERMISSION_DEFERRED_ERROR,
+            trashed_stage=STAGE_TRASHED,
+        )
+        age = 0
+        if oldest_due is not None:
+            age = max(0, int((now - datetime.fromisoformat(oldest_due)).total_seconds()))
+        return {
+            "pending": counts.get("pending", 0),
+            "retrying": counts.get("retrying", 0),
+            "deferred_permission": counts.get("deferred_permission", 0),
+            "parked_trashed": counts.get("parked_trashed", 0),
+            "dead": counts.get("dead", 0),
+            "oldest_due_age": age,
+        }
 
 
 def _now_iso() -> str:

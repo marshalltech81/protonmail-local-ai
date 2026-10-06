@@ -942,6 +942,118 @@ startup scan and periodic recovery skip dead rows, so mail that
 dead-lettered on the old version (for example an 8-bit `Date` header
 before #361) stays unindexed until you requeue it.
 
+## Indexer health in the log
+
+The indexer's recurring work logs counts, durations, fixed text and
+exception type names only, never folder names, Message-IDs, addresses
+or mail text (`docker compose logs indexer`).
+
+Embedder retries and outages:
+
+- `embed retry attempt=<n>/3 after <error>`: an embed request failed
+  with a transient error (a 429 or 408, a 5xx, a timeout or a
+  connection error) and is being retried after a 2 to 10 s backoff.
+  INFO, or WARNING before the last attempt. `<error>` is the exception
+  type, plus the HTTP status for a provider error. Occasional lines are
+  normal; a steady stream means the provider is rate limiting or
+  struggling and indexing is slowing down. These lines share the
+  20-per-5-minutes budget of the attachment WARNINGs (see "Attachment
+  text or message content missing from search"); the rest are counted
+  as `suppressed_lines` on the queue heartbeat (below).
+- `embed request recovered on attempt <n>/3` (INFO): the retried
+  request went through. It is logged whenever a retry line of that
+  request was, budget or not, so a retry line with no recovery line
+  after it is a request that failed all three attempts (see the ERROR
+  lines below). When every retry line of a request was withheld, the
+  recovery is withheld with them.
+- `embedder unavailable (...)` or `embedder rejected credentials or
+  model (...)` (ERROR): a batch failed after its retries and a probe
+  confirmed the embedder itself is down; indexing pauses (see "Tuning
+  indexing retries").
+- `embedder recovered after <n> failure(s), paused <s>s; indexing
+  resumed` (INFO): the first successful embed request after an outage.
+  `<n>` is the number of times the pause was extended, `<s>` how long
+  indexing was paused in all. A batch with nothing new to embed sends
+  no request and does not count.
+
+Each recurring step below logs a failure every time it fails, and one
+`<step> recovered after <n> failure(s) over <s>s` line (INFO) on its
+first success after failing, where `<s>` is the time since its first
+failure. A failure line with no recovery line after it means the step
+is still failing.
+
+| Step | Failure line | When it runs |
+|---|---|---|
+| `health file refresh` | `health file refresh failed: <type>` (WARNING) | Per message, embed request and attachment page |
+| `ingestion state recording` | `recording ingestion state failed: <type>` (ERROR) | At most every 30 s, retried on each heartbeat until it succeeds |
+| `Maildir watch refresh` | `Maildir watch refresh failed: <type>` (ERROR) | After each mbsync sync, and every `INDEXER_RECOVERY_SWEEP_INTERVAL_SECS` |
+| `periodic Maildir rescan` | `periodic Maildir rescan failed: <type>` (ERROR) | Every `INDEXER_RECOVERY_SWEEP_INTERVAL_SECS` (30 min) |
+| `periodic reconciliation` | `periodic reconciliation failed: <type>` (ERROR) | Every `INDEXER_DELETION_SWEEP_INTERVAL_SECS`, with deletion reconciliation on |
+| `reaped-record prune` | `reaped-record prune failed: <type>` (ERROR) | At startup and with each reconciliation interval |
+| `wal checkpoint` | `wal checkpoint failed: <type>` (ERROR) | At startup and every `INDEXER_WAL_CHECKPOINT_INTERVAL_SECS` (10 min) |
+
+The health-file and ingestion-state failures can repeat many times a
+second, so they share the same 20-per-5-minutes budget as the embed
+retries; their recovery line still counts every failure.
+
+Queue and maintenance (all INFO unless noted):
+
+- `queue: pending=<n> retrying=<n> deferred_permission=<n>
+  parked_trashed=<n> dead=<n> oldest_due_age=<s>s; deferrals since last
+  heartbeat: parse=<n> embed=<n> trashed=<n>; suppressed_lines=<n>`,
+  every 5 minutes, during the initial index too. `pending` jobs have
+  never failed; `retrying` jobs failed or were deferred by an embedder
+  outage; `deferred_permission` jobs could not be read yet (mbsync
+  opens new files to the indexer only after its sync; deferred for up
+  to 24 h, after which a still-unreadable file takes the normal retry
+  path and counts as `retrying` until it is dead);
+  `parked_trashed` jobs belong to trashed messages waiting for the
+  reaper, which is normal in mirror mode, not a failure. A growing
+  `oldest_due_age` means due jobs are not being drained (an embedder
+  outage pauses draining; see above). The deferral counts are `defer`
+  calls since the previous heartbeat, by stage. `suppressed_lines` is
+  how many embed retry and recovery, health-file and ingestion-state
+  lines the shared rate limit withheld since the previous heartbeat
+  (counted apart from the attachment WARNINGs, so they never make the
+  attachments line a WARNING). `queue heartbeat failed: <type>`
+  (WARNING) if the counts could not be read.
+- `re-queued <n> message(s) whose attachments were extracted by an
+  older extractor version (...); skipped <n> dead-lettered (run make
+  requeue-dead to refresh them).`, at startup after an extractor
+  change. WARNING when any dead-lettered message was skipped: those
+  keep their old attachment text until you run `make requeue-dead`.
+- `maintenance pass=rescan ms=<ms> seen=<n> queued=<n>
+  skipped_dead=<n>`, after each periodic Maildir rescan, even when it
+  queued nothing. `seen` is message files walked, `queued` the ones
+  with no event that the rescan picked up.
+- `maintenance pass=reconcile ms=<ms> tombstoned=<n> cleared=<n>
+  renamed=<n> missing=<n> threads_reaped=<n> threads_rebuilt=<n>
+  blocked_threads=<n> brake=<ok|tripped|forced>`, after each deletion
+  reconciliation pass (mirror mode only). `brake=tripped` means the
+  mass-delete brake held this pass's reaps back (see "Deletion
+  reconciliation"); `forced` means `INDEXER_DELETION_FORCE=true`
+  disables the brake.
+- `maintenance pass=watch_refresh ms=<ms> watches=<n>`, after each
+  periodic Maildir watch refresh; `watches` is the number of
+  directories readable when the watch was last scheduled.
+
+WAL and storage, after each WAL maintenance pass (at startup and every
+`INDEXER_WAL_CHECKPOINT_INTERVAL_SECS`, 10 minutes by default):
+
+- `storage: db=<MB>MB wal=<MB>MB free_disk=<MB>MB` (INFO): the size of
+  `mail.db`, of its `-wal` file, and the free space on the volume
+  holding them, in MiB (rounded down). `storage: size check failed
+  (<type>)` (WARNING) if they could not be read.
+- `wal checkpoint blocked <n> times in a row; WAL=<pages> pages`
+  (WARNING), from the third blocked checkpoint in a row (30 minutes at
+  the default interval) and on every blocked pass after it. Something
+  is holding a read transaction open on the database (a long query in
+  mcp-server, or an `sqlite3` shell left open), so the WAL cannot be
+  truncated and keeps growing; watch `wal=` in the storage line. A
+  single blocked pass is normal and logged at DEBUG only.
+- `wal checkpoint unblocked after <n> blocked pass(es)` (INFO): the
+  first checkpoint that completed after a warned run.
+
 ## Reading a tool call's log line
 
 Every MCP tool logs one completion line per call on the `mcp.timings`
@@ -1089,6 +1201,10 @@ only, never filenames or text (`make logs`):
   parser-cap line described below, together) are capped at 20 per 5
   minutes, so a stream of crafted mail cannot flood the log. The rest
   are counted as `warnings_suppressed` in the attachments line below.
+  The budget is shared with the embed retry, health-file and
+  ingestion-state lines (see "Indexer health in the log"), but those
+  are counted as `suppressed_lines` on the queue heartbeat, never
+  here.
 - `attachments n=<total> success= failed= unsupported= too_large=
   ocr_disabled= empty= cached= pdf_pages_failed=
   pdf_pages_unrecovered= ocr_capped_pdfs= ocr_pages_skipped=

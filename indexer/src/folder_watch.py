@@ -103,6 +103,11 @@ class FolderWatchRefresher:
         # a failed walk is retried on the next refresh (#529).
         self.recovery_pending = False
 
+    @property
+    def watched_dirs(self) -> int:
+        """Directories readable when the watch was last scheduled."""
+        return len(self._watched)
+
     def _schedule(self, readable: dict[str, int]) -> None:
         if self._watch is not None:
             self._observer.unschedule(self._watch)

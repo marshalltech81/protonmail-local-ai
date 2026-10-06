@@ -102,6 +102,14 @@ def _reset_extractor_warning_budget(monkeypatch):
     main = sys.modules.get("src.main")
     if main is not None:
         monkeypatch.setattr(main, "_last_outcomes_log", None)
+        # So are the recurring steps' failure streaks (#873).
+        monkeypatch.setattr(
+            main, "_streaks", {name: main._FailureStreak(name) for name in main.RECOVERY_COMPONENTS}
+        )
+        # And the queue heartbeat's interval (#874).
+        monkeypatch.setattr(main, "_last_queue_heartbeat", None)
+        # And the WAL checkpoint's busy streak (#875).
+        monkeypatch.setattr(main, "_wal_busy_passes", 0)
 
 
 @pytest.fixture

@@ -2330,6 +2330,45 @@ class Database:
             out[row["status"]] = int(row["n"])
         return out
 
+    @_synchronized
+    def queue_heartbeat_counts(
+        self,
+        *,
+        now_iso: str,
+        permission_stage: str,
+        permission_deferred_error: str,
+        trashed_stage: str,
+    ) -> tuple[dict[str, int], str | None]:
+        """Rows per heartbeat bucket and the earliest due time among due
+        queued rows, in one pass over ``indexing_jobs`` (see
+        ``IndexingQueue.heartbeat_counts``)."""
+        rows = self._conn.execute(
+            """
+            SELECT CASE
+                       WHEN status = 'dead' THEN 'dead'
+                       WHEN last_stage = :trashed THEN 'parked_trashed'
+                       WHEN last_stage = :perm_stage AND last_error = :perm_deferred
+                           THEN 'deferred_permission'
+                       WHEN last_error IS NULL THEN 'pending'
+                       ELSE 'retrying'
+                   END AS bucket,
+                   COUNT(*) AS n,
+                   MIN(CASE WHEN status = 'queued' AND next_attempt_at <= :now
+                            THEN next_attempt_at END) AS oldest_due
+            FROM indexing_jobs
+            GROUP BY bucket
+            """,
+            {
+                "trashed": trashed_stage,
+                "perm_stage": permission_stage,
+                "perm_deferred": permission_deferred_error,
+                "now": now_iso,
+            },
+        ).fetchall()
+        counts = {row["bucket"]: int(row["n"]) for row in rows}
+        due = [row["oldest_due"] for row in rows if row["oldest_due"] is not None]
+        return counts, min(due) if due else None
+
     # -------------------------------------------------------------------------
     # Reconciliation support — filepath tracking, tombstones, thread rebuild
     # -------------------------------------------------------------------------
