@@ -2566,6 +2566,10 @@ class TestPdfDigitalExtractor:
             return [Image.new("RGB", (4, 4), color="white")]
 
         monkeypatch.setattr("pdf2image.convert_from_bytes", fake_convert)
+        monkeypatch.setattr(
+            "pdf2image.pdfinfo_from_bytes",
+            lambda payload, **kwargs: captured.setdefault("pdfinfo_timeout", kwargs.get("timeout")),
+        )
         monkeypatch.setattr("pytesseract.image_to_string", lambda image, **_: "ocr text")
         real_temp_dir = _tempfile_mod.TemporaryDirectory
         monkeypatch.setattr(
@@ -2647,6 +2651,64 @@ class TestPdfDigitalExtractor:
         captured = self._capture_render(monkeypatch, tmp_path)
         pdf._extract_ocr(self._blank_pdf(612, 792), pages=[0], ocr_timeout_seconds=45)
         assert 40 < captured["timeout"] <= 45
+        # #781: the page count pdf2image takes first is bounded too.
+        assert captured["pdfinfo_timeout"] == 45
+
+    def test_no_page_count_call_without_a_deadline(self, monkeypatch, tmp_path):
+        from src.extractors import pdf
+
+        captured = self._capture_render(monkeypatch, tmp_path)
+        pdf._extract_ocr(self._blank_pdf(612, 792), pages=[0])
+        assert "pdfinfo_timeout" not in captured
+
+    def test_stalling_page_count_is_bounded_by_the_ocr_timeout(self, tmp_path, monkeypatch):
+        """#781: pdf2image runs Poppler's ``pdfinfo`` for the page count
+        before rendering and does not pass it the timeout. A ``pdfinfo``
+        that stalls on a crafted PDF must stop at the OCR timeout, the
+        way a hung render does. Runs the real pdf2image against a fake
+        Poppler whose ``pdfinfo`` sleeps."""
+        import os
+        import tempfile
+        import time
+
+        import pdf2image
+        from pdf2image.exceptions import PDFPopplerTimeoutError
+        from src.extractors import pdf
+
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        started_marker = tmp_path / "pdfinfo-runs"
+        scripts = {
+            "pdfinfo": f"#!/bin/sh\necho run >> '{started_marker}'\nexec sleep 8\n",
+            "pdftoppm": "#!/bin/sh\necho 'pdftoppm version 24.02.0' >&2\nexit 1\n",
+        }
+        for name, body in scripts.items():
+            (bindir / name).write_text(body)
+            (bindir / name).chmod(0o700)
+        monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
+        monkeypatch.setattr("pytesseract.image_to_string", lambda image, **_: "ocr text")
+        real_temp_dir = tempfile.TemporaryDirectory
+        monkeypatch.setattr(
+            pdf.tempfile,
+            "TemporaryDirectory",
+            lambda **kwargs: real_temp_dir(dir=str(tmp_path)),
+        )
+        timeouts: list[object] = []
+        real_pdfinfo = pdf2image.pdfinfo_from_bytes
+
+        def spy_pdfinfo(payload, **kwargs):
+            timeouts.append(kwargs.get("timeout"))
+            return real_pdfinfo(payload, **kwargs)
+
+        monkeypatch.setattr("pdf2image.pdfinfo_from_bytes", spy_pdfinfo)
+
+        started = time.monotonic()
+        with pytest.raises(PDFPopplerTimeoutError):
+            pdf._extract_ocr(self._blank_pdf(612, 792), pages=[0], ocr_timeout_seconds=1)
+        assert time.monotonic() - started < 5
+        # The page count ran once, under the OCR timeout.
+        assert timeouts == [1]
+        assert started_marker.read_text().splitlines() == ["run"]
 
     def test_unreadable_page_sizes_fail_before_rendering(self, monkeypatch, tmp_path):
         """If the page sizes cannot be read the raster size is unknown, so
@@ -2783,7 +2845,11 @@ class TestPdfPageLevelOcr:
         from PIL import Image
         from src.extractors import pdf
 
-        work: dict = {"renders": [], "timeouts": [], "ocr_calls": 0}
+        work: dict = {"renders": [], "timeouts": [], "pdfinfo_timeouts": [], "ocr_calls": 0}
+
+        def fake_pdfinfo(payload, **kwargs):
+            work["pdfinfo_timeouts"].append(kwargs.get("timeout"))
+            return {"Pages": 99}
 
         def fake_convert(payload, **kwargs):
             first, last = kwargs["first_page"], kwargs["last_page"]
@@ -2798,6 +2864,7 @@ class TestPdfPageLevelOcr:
             return f"{TestPdfPageLevelOcr.SCANNED} {work['ocr_calls']}"
 
         monkeypatch.setattr("pdf2image.convert_from_bytes", fake_convert)
+        monkeypatch.setattr("pdf2image.pdfinfo_from_bytes", fake_pdfinfo)
         monkeypatch.setattr("pytesseract.image_to_string", fake_tesseract)
         real_temp_dir = _tempfile_mod.TemporaryDirectory
         monkeypatch.setattr(
@@ -2959,6 +3026,49 @@ class TestPdfPageLevelOcr:
         assert work["renders"] == [(1, 1), (3, 3), (5, 5)]
         assert work["ocr_calls"] == 3
         assert work["timeouts"] == [45, 44, 43]
+
+    def test_page_count_time_counts_against_the_render_budget(self, monkeypatch, tmp_path):
+        """#781: the page count is Poppler time, so it spends the same
+        budget as the renders; it runs once per document."""
+        from src.extractors import pdf
+
+        work = self._fake_ocr(monkeypatch, tmp_path)
+        clock = {"now": 0.0}
+        real_pdfinfo = __import__("pdf2image").pdfinfo_from_bytes
+
+        def slow_pdfinfo(payload, **kwargs):
+            clock["now"] += 10.0
+            return real_pdfinfo(payload, **kwargs)
+
+        monkeypatch.setattr("pdf2image.pdfinfo_from_bytes", slow_pdfinfo)
+        monkeypatch.setattr(pdf.time, "monotonic", lambda: clock["now"])
+
+        pdf._extract_ocr(self._pdf("sdsds"), pages=[0, 2, 4], ocr_timeout_seconds=45)
+        assert work["pdfinfo_timeouts"] == [45]
+        assert work["timeouts"] == [35, 35, 35]
+
+    @pytest.mark.parametrize(
+        ("layout", "status", "extractor"),
+        [("ds", STATUS_SUCCESS, "pdf-digital@4"), ("ss", STATUS_FAILED, "pdf@4")],
+    )
+    def test_page_count_timeout_degrades_like_a_render_timeout(
+        self, monkeypatch, tmp_path, layout, status, extractor
+    ):
+        """A mixed PDF keeps its digital text; a scanned one is a failed
+        extraction recorded by type, as for any OCR failure."""
+        from pdf2image.exceptions import PDFPopplerTimeoutError
+
+        work = self._fake_ocr(monkeypatch, tmp_path)
+
+        def stalled_pdfinfo(payload, **kwargs):
+            raise PDFPopplerTimeoutError("SYNTHETIC_PDFINFO_MARKER")
+
+        monkeypatch.setattr("pdf2image.pdfinfo_from_bytes", stalled_pdfinfo)
+        result = self._extract(layout, ocr_timeout_seconds=30)
+        assert (result.status, result.extractor) == (status, extractor)
+        if status == STATUS_FAILED:
+            assert result.error == "PDFPopplerTimeoutError"
+        assert work["renders"] == [] and work["ocr_calls"] == 0
 
     def test_dpi_is_sized_from_the_pages_rendered(self, monkeypatch, tmp_path):
         """An oversized digital page that is never rendered must not lower
