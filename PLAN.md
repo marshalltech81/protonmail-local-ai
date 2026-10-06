@@ -361,8 +361,8 @@ input by definition.
 
 Not a phase: the running deployment's resource, throughput, privacy
 and supply-chain work. Milestone *Operations and hardening*: #488,
-#697, #698, #777, #778, #765, #767, #768, #769,
-#780.
+#697, #698, #777, #778, #765, #767, #769. Done: #768 (`make status`
+shows each provider as LOCAL or REMOTE, #830), #780 (#829).
 
 ## Not doing (decided 2026-09-26)
 
