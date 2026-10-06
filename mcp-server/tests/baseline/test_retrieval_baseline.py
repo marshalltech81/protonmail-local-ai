@@ -35,6 +35,7 @@ from collections.abc import Awaitable, Callable
 from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import cast
 
 import pytest
@@ -356,6 +357,52 @@ def test_rank_snapshot(
 # another platform (sqlite-vec's float32 SIMD rounding differs between
 # macOS and Linux CI by a step or two).
 _NEAR_TIE = 1e-6
+# Rows fetched past a lane's cutoff to find the near-tie band beyond it.
+_CUTOFF_WINDOW = 64
+
+
+def _cutoff_exchanges(rows: list, k: int) -> list[tuple[int, int]]:
+    """Pairs ``(i, j)`` of a kept row ``i < k`` and an excluded row
+    ``j >= k`` of different threads whose distances are near-tied, so
+    another platform could admit ``j`` in place of ``i``. The band runs
+    past the first excluded row (review round 4): the chunk lane repeats
+    threads, so the first different thread can sit further out."""
+    edge = rows[k - 1].score
+    kept = [i for i in range(k) if edge - rows[i].score < _NEAR_TIE]
+    beyond = []
+    for j in range(k, len(rows)):
+        if rows[j].score - edge >= _NEAR_TIE:
+            break
+        beyond.append(j)
+    else:
+        if len(rows) > k:
+            raise AssertionError("near-tie band runs past the fetched window")
+    return [
+        (i, j)
+        for i in kept
+        for j in beyond
+        if rows[i].thread_id != rows[j].thread_id and abs(rows[j].score - rows[i].score) < _NEAR_TIE
+    ]
+
+
+def test_cutoff_exchanges_scan_past_same_thread_rows() -> None:
+    """Review round 4: rows k and k+1 share the cutoff row's thread, and a
+    different thread two rows out is still in the near-tie band."""
+    rows = [
+        SimpleNamespace(thread_id=thread, score=score)
+        for thread, score in (
+            ("a", 1.0),
+            ("b", 1.5),
+            ("b", 1.5 + 2e-7),
+            ("b", 1.5 + 4e-7),
+            ("c", 1.5 + 6e-7),
+            ("d", 2.0),
+        )
+    ]
+    assert _cutoff_exchanges(rows, 2) == [(1, 4)]
+    assert _cutoff_exchanges(rows, 1) == []  # the band past "a" holds nothing
+    with pytest.raises(AssertionError, match="past the fetched window"):
+        _cutoff_exchanges(rows[:5], 2)
 
 
 def test_rank_snapshot_survives_near_tied_vector_distances(
@@ -381,16 +428,17 @@ def test_rank_snapshot_survives_near_tied_vector_distances(
 
     def cut_aware(lane: str, search):
         def run_search(embedding, k):
-            rows = search(embedding, k + 1)
+            rows = search(embedding, k + _CUTOFF_WINDOW)
             if rows is None or len(rows) <= k:
                 return rows
-            kept, beyond = rows[:k], rows[k]
             state["cutoffs"] += 1
-            if state["probe"] == ("cut", lane, k):
-                return [*kept[:-1], beyond]
-            if state["probe"] is None and near(kept[-1], beyond):
-                state["ties"].append(("cut", lane, k))
-            return kept
+            probe = state["probe"]
+            if probe is not None and probe[:3] == ("cut", lane, k):
+                i, j = probe[3:]
+                return [*rows[:i], *rows[i + 1 : k], rows[j]]
+            if probe is None:
+                state["ties"] += [("cut", lane, k, i, j) for i, j in _cutoff_exchanges(rows, k)]
+            return rows[:k]
 
         return run_search
 
