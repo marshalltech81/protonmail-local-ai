@@ -1815,6 +1815,10 @@ and exporter were present.
 > (#750). Startup logs one `Privacy:` warning per enabled layer whose
 > endpoint host is not `127.0.0.1`, `::1`, `localhost` or
 > `host.docker.internal`, naming the SDK's default host for `default`.
+> `make status` shows the same classification for the running
+> mcp-server in its Privacy section: each layer's mode and LOCAL or
+> REMOTE with the host name only, plus whether `app-net` is internal
+> (the `docker-compose.hardened.yml` no-egress overlay) (#768).
 
 > **Answer evaluation (development tool).** `make eval-answers` runs
 > outside the containers and sends only the committed synthetic corpus

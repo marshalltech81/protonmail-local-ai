@@ -19,7 +19,7 @@ help:
 	@echo "  down         Stop the full stack"
 	@echo "  restart-indexer  Run validate-env, then restart the indexer (after editing config/authority.toml)"
 	@echo "  logs         Tail logs from all containers"
-	@echo "  status       Show container and index status"
+	@echo "  status       Show container, privacy (LOCAL or REMOTE) and index status"
 	@echo "  requeue-dead Requeue dead-lettered indexing jobs (optional CLASS=retryable|permanent_source_failure|operator_action_required)"
 	@echo "  sync         Sync local uv environments for indexer and mcp-server"
 	@echo "  test         Run indexer, mcp-server, mbsync, Compose, validate-env and make status script tests locally"
@@ -140,17 +140,40 @@ sync-mcp:
 # mcp-server is not running, when the check cannot run (its stderr is
 # shown), or when the helper reports status=error, which carries only an
 # exception type (#732, #733). An index that is not current still passes.
+# The Privacy section reads the running mcp-server's settings and prints
+# each layer's mode and endpoint host name only, never a key or a full
+# URL; `local` must match `_HOST_LOCAL_HOSTS` in both services' main.py
+# (#768).
 status:
 	@echo ""
 	@echo "=== Containers ==="
 	docker compose ps
-	@echo ""
-	@echo "=== Mailbox ==="
 	@running=$$(docker ps --quiet --filter 'name=^mcp-server$$' --filter status=running) || exit 1; \
 	if [ -z "$$running" ]; then \
 		echo "  MCP server is not running; start the stack with make up." >&2; \
 		exit 1; \
 	fi
+	@echo ""
+	@echo "=== Privacy ==="
+	@docker exec mcp-server python -c \
+		"import os, urllib.parse; \
+		 local = {'127.0.0.1', '::1', 'localhost', 'host.docker.internal'}; \
+		 defaults = {'anthropic': 'api.anthropic.com', 'openai': 'api.openai.com', 'cohere': 'api.cohere.com'}; \
+		 env = lambda name, fallback='': os.environ.get(name, fallback).strip(); \
+		 host = lambda mode, url: defaults.get(mode) if url.lower() == 'default' else urllib.parse.urlsplit(url).hostname; \
+		 where = lambda mode, url: 'disabled' if mode == 'none' else ('LOCAL' if (h := host(mode, url)) in local else 'REMOTE') + ' (' + (h or 'unknown host') + ')'; \
+		 layers = [(name, env(name.upper() + '_MODE', fallback).lower()) for name, fallback in (('embed', 'openai'), ('inference', 'none'), ('rerank', 'none'))]; \
+		 [print(f'  {name:<10} {mode:<10} ' + where(mode, env(name.upper() + '_BASE_URL'))) for name, mode in layers]"
+	@net=$$(docker inspect --format '{{range $$name, $$_ := .NetworkSettings.Networks}}{{$$name}}{{end}}' mcp-server) || exit 1; \
+	internal=$$(docker network inspect --format '{{.Internal}}' "$$net") || exit 1; \
+	if [ "$$internal" = true ]; then \
+		echo "  No-egress overlay: active (app-net is internal)"; \
+	else \
+		echo "  No-egress overlay: not active (app-net can reach the internet)"; \
+	fi
+	@echo "  Results returned to a cloud-backed MCP client leave the host regardless."
+	@echo ""
+	@echo "=== Mailbox ==="
 	docker exec mcp-server python -c \
 		"import json, sys; \
 		 from src.tools.system import get_mailbox_status; \
