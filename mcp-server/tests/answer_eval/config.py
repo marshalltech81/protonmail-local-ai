@@ -256,8 +256,12 @@ def _load_cli_judge(mode: str, env: Mapping[str, str]) -> LayerConfig:
         raise ConfigError(
             f"JUDGE_MODE={mode} needs the {name} CLI ({cli_judge.PRODUCTS[mode]}) on PATH"
         )
+    version = cli_judge.cli_version(path)
     auth_file = ""
     if mode == "codex-cli":
+        if not cli_judge.version_at_least(version, cli_judge.CODEX_MIN_VERSION):
+            minimum = ".".join(map(str, cli_judge.CODEX_MIN_VERSION))
+            raise ConfigError(f"JUDGE_MODE={mode} needs the codex CLI {minimum} or newer")
         auth_file = _check_codex_login(mode, path)
     else:
         _check_claude_login(mode, path)
@@ -275,7 +279,7 @@ def _load_cli_judge(mode: str, env: Mapping[str, str]) -> LayerConfig:
         ),
         structured_output=False,  # the judge sends no schema
         cli_path=path,
-        cli_version=cli_judge.cli_version(path),
+        cli_version=version,
         cli_auth_file=auth_file,
     )
 

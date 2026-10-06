@@ -20,11 +20,16 @@ its text is kept or logged.
 - ``--bare`` would do most of this in one flag but accepts only an API
   key, never the subscription login, so it is not used.
 
-``ANTHROPIC_*`` and every ``CLAUDE_CODE_USE_*`` provider switch are
-removed from the CLI's environment: a set ``ANTHROPIC_API_KEY`` takes
-the call off the subscription (a bad one hangs the CLI), and a provider
-switch routes it through a cloud account. Auto-updates are off, so one
-run cannot mix CLI versions. Before the run, ``claude auth status`` (in
+Both CLIs get an allowlisted environment (``_ENV_ALLOWLIST``: the
+path, home, user, locale, temporary directory, proxy and certificate
+variables) and nothing else of the caller's. A strip list kept missing
+variables that change the call: ``ANTHROPIC_API_KEY`` takes it off the
+subscription (a bad one hangs the CLI), a ``CLAUDE_CODE_USE_*`` switch
+routes it through a cloud account, ``CLAUDE_CODE_EFFORT_LEVEL`` or
+``MAX_THINKING_TOKENS`` change the judge's reasoning unrecorded, and
+``OTEL_*`` telemetry can export the whole prompt. Claude keeps
+``CLAUDE_CONFIG_DIR`` (where its login lives) and gets auto-updates
+off, so one run cannot mix CLI versions. Before the run, ``claude auth status`` (in
 the same environment) must report the subscription login. An enterprise
 ``managed-mcp.json`` (under which ``--strict-mcp-config`` exits at
 startup) and managed instructions (an organization-wide ``CLAUDE.md``
@@ -55,8 +60,12 @@ which the judge records as ``judge_truncated``.
   never the keyring), and ``model_instructions_file`` set to the
   judge's system prompt in place of Codex's coding-agent instructions.
 
-``OPENAI_*`` and ``CODEX_*`` variables are removed so an API key cannot
-take the call off the subscription. Before the run, ``codex login
+Bundled skills are off (``skills.bundled.enabled``,
+``skills.include_instructions``; disabling ``skill_search`` alone left
+their catalog in the prompt), and so is ``multi_agent_v2``, which a
+model's catalog entry can turn on whatever ``multi_agent`` says. Codex
+older than 0.160.1, the version these flags were checked against, is
+refused. Before the run, ``codex login
 status``, in the same kind of private home with the same credential
 store, must report a ChatGPT login: an API-key login bills API usage,
 and a logged-out CLI still sends the prompt before the 401. Managed
@@ -88,11 +97,34 @@ PRODUCTS = {"claude-cli": "Claude Code", "codex-cli": "Codex"}
 EXECUTABLE = EXECUTABLES["claude-cli"]
 VERSION_TIMEOUT_SECS = 30.0
 
-# Variables that would move a Claude call off the subscription login:
-# API credentials and endpoints, and every cloud-provider switch.
-_STRIPPED_ENV_PREFIXES = ("ANTHROPIC_", "CLAUDE_CODE_USE_")
-# The same for Codex: API keys, endpoints and Codex's own settings.
-_CODEX_STRIPPED_ENV_PREFIXES = ("OPENAI_", "CODEX_")
+# The only caller variables a CLI judge call inherits (plus ``LC_*``):
+# what a process needs to find files, its login and the network.
+_ENV_ALLOWLIST = frozenset(
+    {
+        "PATH",
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "SHELL",
+        "TMPDIR",
+        "TERM",
+        "TZ",
+        "LANG",
+        "__CF_USER_TEXT_ENCODING",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "NO_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "no_proxy",
+        "all_proxy",
+    }
+)
+# The oldest Codex the judge's flags and features were checked against.
+CODEX_MIN_VERSION = (0, 160, 1)
 # ``claude auth status``'s ``authMethod`` for a Claude subscription.
 SUBSCRIPTION_AUTH_METHOD = "claude.ai"
 # Where an enterprise ``managed-mcp.json`` lives (macOS, Linux).
@@ -134,6 +166,7 @@ CODEX_DISABLED_FEATURES = (
     "hooks",
     "skill_search",
     "multi_agent",
+    "multi_agent_v2",
     "view_image",
     "image_generation",
     "goals",
@@ -157,6 +190,24 @@ class CliJudgeError(Exception):
         super().__init__(detail)
         self.category = category
         self.detail = detail
+
+
+def _allowed_env(*extra: str) -> dict[str, str]:
+    """The caller's allowlisted variables, plus ``extra`` names."""
+    return {
+        k: v
+        for k, v in os.environ.items()
+        if k in _ENV_ALLOWLIST or k.startswith("LC_") or k in extra
+    }
+
+
+def version_at_least(version: str, minimum: tuple[int, ...]) -> bool:
+    """``version``'s numeric part compared with ``minimum``; ``False``
+    when it has none (``unknown``)."""
+    match = re.match(r"\d+(?:\.\d+)*", version)
+    if not match:
+        return False
+    return tuple(int(part) for part in match.group(0).split(".")) >= minimum
 
 
 def _not_json(name: str) -> CliJudgeError:
@@ -216,9 +267,9 @@ async def _run_cli(argv: list[str], stdin: str, cwd: str, env: dict[str, str]) -
 
 
 def claude_env(max_tokens: int | None = None) -> dict[str, str]:
-    """The CLI's environment: the caller's, minus anything that would
-    move the call off the subscription, with auto-updates off."""
-    env = {k: v for k, v in os.environ.items() if not k.startswith(_STRIPPED_ENV_PREFIXES)}
+    """The CLI's environment: the allowlist and ``CLAUDE_CONFIG_DIR``,
+    with auto-updates off."""
+    env = _allowed_env("CLAUDE_CONFIG_DIR")
     env["DISABLE_AUTOUPDATER"] = "1"
     if max_tokens is not None:
         env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = str(max_tokens)
@@ -372,9 +423,9 @@ def _codex_private_home(auth_file: str, parent: str | None = None) -> Iterator[s
 
 
 def codex_env(home: str | None = None) -> dict[str, str]:
-    """The CLI's environment: the caller's, minus API keys, endpoints
-    and Codex settings; ``CODEX_HOME`` set to ``home`` when given."""
-    env = {k: v for k, v in os.environ.items() if not k.startswith(_CODEX_STRIPPED_ENV_PREFIXES)}
+    """The CLI's environment: the allowlist, with ``CODEX_HOME`` set to
+    ``home`` when given."""
+    env = _allowed_env()
     if home is not None:
         env["CODEX_HOME"] = home
     return env
@@ -449,6 +500,8 @@ class CodexCliClient:
             "project_doc_max_bytes=0",
             "check_for_update_on_startup=false",
             _CODEX_FILE_STORE,
+            "skills.bundled.enabled=false",
+            "skills.include_instructions=false",
             # A JSON string is a valid TOML basic string.
             f"model_instructions_file={json.dumps(instructions)}",
         ):

@@ -275,6 +275,31 @@ class TestClient:
         # Review round 1: no CLI update between cases of one run.
         assert env["DISABLE_AUTOUPDATER"] == "1"
 
+    def test_environment_is_an_allowlist(self, fake_claude, monkeypatch, tmp_path):
+        """Review round 3: reasoning controls and content-bearing
+        telemetry slipped through a strip list; only named variables now
+        reach the CLI."""
+        exe, _, calls = fake_claude
+        for name in (
+            "CLAUDE_CODE_EFFORT_LEVEL",
+            "MAX_THINKING_TOKENS",
+            "CLAUDE_CODE_ENABLE_TELEMETRY",
+            "OTEL_LOG_RAW_API_BODIES",
+            "OTEL_EXPORTER_OTLP_ENDPOINT",
+            "SOME_UNKNOWN_SETTING",
+        ):
+            monkeypatch.setenv(name, "1")
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+        monkeypatch.setenv("LC_ALL", "C.UTF-8")
+        _run(_client(exe).complete("s", "u"))
+        env = calls()[0]["env"]
+        for name in ("CLAUDE_CODE_EFFORT_LEVEL", "MAX_THINKING_TOKENS", "SOME_UNKNOWN_SETTING"):
+            assert name not in env
+        assert not any(k.startswith("OTEL_") or "TELEMETRY" in k for k in env)
+        assert env["PATH"] == os.environ["PATH"] and env["HOME"] == os.environ["HOME"]
+        assert env["CLAUDE_CONFIG_DIR"] == str(tmp_path)  # where the login lives
+        assert env["LC_ALL"] == "C.UTF-8"
+
     def test_served_model_is_recorded(self, fake_claude):
         exe, _, _ = fake_claude
         client = _client(exe)
@@ -449,7 +474,7 @@ _FAKE_CODEX = f"""#!{sys.executable}
 import json, os, sys, time
 here = os.path.dirname(os.path.abspath(__file__))
 if sys.argv[1:] == ["--version"]:
-    print("codex-cli 0.123.4")
+    print("codex-cli 0.160.1")
     sys.exit(0)
 if sys.argv[1:3] == ["login", "status"]:
     home = os.environ.get("CODEX_HOME", "")
@@ -563,7 +588,7 @@ class TestCodexConfig:
         cfg = load_layer("JUDGE", self.ENV, tmp_path)
         assert cfg is not None
         assert (cfg.mode, cfg.model, cfg.api_key, cfg.base_url) == ("codex-cli", "gpt-test", "", "")
-        assert cfg.cli_version == "0.123.4"
+        assert cfg.cli_version == "0.160.1"
         client = cfg.client()
         assert isinstance(client, CodexCliClient)
         assert client.auth_file == str(home / "auth.json")
@@ -622,6 +647,18 @@ class TestCodexConfig:
         with pytest.raises(ConfigError, match="managed or system Codex config"):
             load_layer("JUDGE", self.ENV)
 
+    @pytest.mark.parametrize("version", ["codex-cli 0.57.0", "codex-cli 0.160.0", "no version"])
+    def test_old_codex_is_refused(self, fake_codex, monkeypatch, version):
+        """Review round 3: an older CLI rejects the judge's flags, and the
+        failure showed only after the answerer had run every case."""
+        exe, _, _, _ = fake_codex
+        old = exe.parent / "codex-old"
+        old.write_text(exe.read_text().replace('print("codex-cli 0.160.1")', f"print({version!r})"))
+        old.chmod(0o700)
+        monkeypatch.setattr(cli_judge.shutil, "which", lambda name: str(old))
+        with pytest.raises(ConfigError, match="0.160.1 or newer"):
+            load_layer("JUDGE", self.ENV)
+
     def test_prerelease_version_is_kept(self, fake_codex):
         """Review round 2: alpha builds collapsed into the stable version."""
         exe, _, _, _ = fake_codex
@@ -644,7 +681,7 @@ class TestCodexConfig:
         assert (label["mode"], label["cli"], label["cli_version"]) == (
             "codex-cli",
             "codex",
-            "0.123.4",
+            "0.160.1",
         )
         assert label["max_tokens"] is None  # Codex has no output cap to apply
 
@@ -679,6 +716,7 @@ class TestCodexClient:
         # The shell and every tool or extension that could read the disk
         # or reach the network.
         assert {
+            "multi_agent_v2",
             "shell_tool",
             "unified_exec",
             "browser_use",
@@ -694,6 +732,9 @@ class TestCodexClient:
         assert "project_doc_max_bytes=0" in overrides
         assert "check_for_update_on_startup=false" in overrides
         assert 'cli_auth_credentials_store="file"' in overrides
+        # Review round 3: the bundled skill catalog stays out of the prompt.
+        assert "skills.bundled.enabled=false" in overrides
+        assert "skills.include_instructions=false" in overrides
         # The judge prompt replaces Codex's own base instructions.
         assert call["instructions"] == "JUDGE SYSTEM"
         # The prompt goes on stdin only.
@@ -725,6 +766,17 @@ class TestCodexClient:
         env = calls()[0]["env"]
         assert not any(k.startswith("OPENAI_") for k in env)
         assert not any(k.startswith("CODEX_") and k != "CODEX_HOME" for k in env)
+
+    def test_environment_is_an_allowlist(self, fake_codex, monkeypatch):
+        """Review round 3: only named variables reach the CLI."""
+        exe, _, calls, home = fake_codex
+        monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "https://otel.example")
+        monkeypatch.setenv("SOME_UNKNOWN_SETTING", "1")
+        _run(_codex_client(exe, home).complete("s", "u"))
+        env = calls()[0]["env"]
+        assert "SOME_UNKNOWN_SETTING" not in env
+        assert not any(k.startswith("OTEL_") for k in env)
+        assert env["PATH"] == os.environ["PATH"] and env["HOME"] == os.environ["HOME"]
 
     @pytest.mark.parametrize(
         ("message", "category"),

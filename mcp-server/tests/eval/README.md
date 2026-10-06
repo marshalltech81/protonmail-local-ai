@@ -459,7 +459,13 @@ is `127.0.0.1`, not `host.docker.internal`.
   need `JUDGE_MODEL` and the CLI on `PATH`, read no key, take no base
   URL (unset or `default`), send the prompt on stdin, run in a fresh
   empty directory, and are killed with every process they started (the
-  CLI leads its own process group) when `JUDGE_TIMEOUT_SECS` runs out. A
+  CLI leads its own process group) when `JUDGE_TIMEOUT_SECS` runs out.
+  Each CLI inherits only an allowlist of the caller's environment (path,
+  home, user, locale, temporary directory, proxy and certificate
+  variables; Claude also keeps `CLAUDE_CONFIG_DIR`), so API keys,
+  provider switches, reasoning settings such as
+  `CLAUDE_CODE_EFFORT_LEVEL` and telemetry exporters (`OTEL_*`) never
+  reach a judge call. A
   logged-out CLI and a usage-limit stop are the judge errors
   `judge_cli_logged_out` and `judge_cli_usage_limit`; a CLI missing from
   `PATH` or not logged in with a subscription is a configuration error.
@@ -473,11 +479,9 @@ is `127.0.0.1`, not `host.docker.internal`.
   files, hooks or plugins (`--setting-sources ""`), no MCP servers
   (`--strict-mcp-config`), no saved session, and the judge system
   prompt. `--bare` is not used
-  because it accepts only an API key. `ANTHROPIC_*` variables and every
-  `CLAUDE_CODE_USE_*` provider switch are removed from the CLI's
-  environment, since a set `ANTHROPIC_API_KEY` or a switch would take
-  the call off the subscription, and `DISABLE_AUTOUPDATER=1` keeps one
-  CLI version for the whole run. Before any case runs, `claude auth
+  because it accepts only an API key. A set `ANTHROPIC_API_KEY` would
+  take the call off the subscription (the allowlist keeps it out), and
+  `DISABLE_AUTOUPDATER=1` keeps one CLI version for the whole run. Before any case runs, `claude auth
   status` must report a claude.ai (subscription) login, not a Console
   (API-billed) one. A machine with an enterprise `managed-mcp.json` is
   refused, since Claude Code exits on `--strict-mcp-config` there, and so
@@ -497,7 +501,9 @@ is `127.0.0.1`, not `host.docker.internal`.
   The shell and every tool or extension that could read the disk or
   reach the network are turned off (`--disable shell_tool`,
   `unified_exec`, browser, computer use, apps, plugins, hooks, images,
-  sub-agents; web search disabled). `apply_patch` cannot be removed, but
+  sub-agents including `multi_agent_v2`, bundled skills; web search
+  disabled). Codex older than 0.160.1, the version these flags were
+  checked against, is refused at startup. `apply_patch` cannot be removed, but
   it only writes and `-s read-only` refuses the write. Each call gets a
   private mode-700 `CODEX_HOME` holding only a symbolic link to the
   operator's `auth.json` (the login is linked, never copied), because
@@ -509,8 +515,7 @@ is `127.0.0.1`, not `host.docker.internal`.
   from the linked file (`cli_auth_credentials_store="file"`), and the
   judge system
   prompt replaces Codex's coding-agent instructions
-  (`model_instructions_file`). `OPENAI_*` and `CODEX_*` variables are
-  removed. Managed and system Codex config (`/etc/codex/managed_config.toml`,
+  (`model_instructions_file`). Managed and system Codex config (`/etc/codex/managed_config.toml`,
   `/etc/codex/config.toml`, macOS managed preferences) is refused, since
   it applies whatever the flags say and can add MCP servers; a
   cloud-managed enterprise layer cannot be seen locally. Before any case
