@@ -1143,6 +1143,46 @@ class TestRetryLogging:
         _patch_create(emb, lambda **_kw: _embed_response([[1.0]]))
         emb.embed_batch(["x"])
         assert "embed retry" not in caplog.text
+        assert "embed request recovered" not in caplog.text
+
+    def test_a_request_that_succeeds_after_retrying_logs_recovery(self, caplog):
+        """A retried request that then succeeds logs exactly one recovery
+        line, so a retry line is never the last word on that request
+        (Codex round 1 on #904)."""
+        caplog.set_level(logging.DEBUG)
+        emb = _make_embedder()
+        attempts = {"n": 0}
+
+        def fake_create(**_kwargs):
+            attempts["n"] += 1
+            if attempts["n"] < 2:
+                raise self._status_error(503)
+            return _embed_response([[1.0]])
+
+        _patch_create(emb, fake_create)
+        emb._embed_one_batch.retry.wait = lambda *_a, **_kw: 0  # type: ignore[attr-defined]
+        assert emb.embed_batch([self._MARKER]) == [[1.0]]
+
+        lines = [
+            (r.levelno, r.getMessage())
+            for r in caplog.records
+            if r.getMessage().startswith(("embed retry", "embed request recovered"))
+        ]
+        assert lines == [
+            (logging.INFO, "embed retry attempt=2/3 after APIStatusError: status=503"),
+            (logging.INFO, "embed request recovered on attempt 2/3"),
+        ]
+        assert self._MARKER not in caplog.text
+
+    def test_a_request_that_exhausts_its_retries_logs_no_recovery(self, caplog):
+        caplog.set_level(logging.DEBUG)
+        emb = _make_embedder()
+        _patch_create(emb, lambda **_kw: (_ for _ in ()).throw(self._status_error(503)))
+        emb._embed_one_batch.retry.wait = lambda *_a, **_kw: 0  # type: ignore[attr-defined]
+        with pytest.raises(APIStatusError):
+            emb.embed_batch([self._MARKER])
+        assert "embed request recovered" not in caplog.text
+        assert self._MARKER not in caplog.text
 
     def test_retry_lines_share_the_rate_limit(self, caplog):
         """A sustained rate limit retries every request; past the shared

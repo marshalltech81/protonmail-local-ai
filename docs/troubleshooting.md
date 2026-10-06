@@ -960,6 +960,10 @@ Embedder retries and outages:
   20-per-5-minutes budget of the attachment WARNINGs (see "Attachment
   text or message content missing from search"); the rest are counted
   in that section's `warnings_suppressed`.
+- `embed request recovered on attempt <n>/3` (INFO): the retried
+  request went through. A retry line with no recovery line after it
+  is a request that failed all three attempts (see the ERROR lines
+  below). Same budget as the retry line.
 - `embedder unavailable (...)` or `embedder rejected credentials or
   model (...)` (ERROR): a batch failed after its retries and a probe
   confirmed the embedder itself is down; indexing pauses (see "Tuning

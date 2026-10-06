@@ -39,7 +39,6 @@ from openai import (
 from tenacity import (
     RetryCallState,
     retry,
-    retry_if_exception,
     stop_after_attempt,
     wait_exponential,
 )
@@ -204,6 +203,29 @@ def _log_embed_retry(retry_state: RetryCallState) -> None:
         scrub_embed_error(exc) if exc is not None else "unknown error",
         level=logging.WARNING if next_attempt >= _EMBED_ATTEMPTS else logging.INFO,
     )
+
+
+def _retry_embed_attempt(retry_state: RetryCallState) -> bool:
+    """tenacity ``retry`` predicate: retry a transient failure. It is the
+    one callback tenacity runs after a successful attempt too, so a
+    success that follows a retry logs its recovery here (#873); otherwise
+    the ``embed retry`` line would be the last word on a request that in
+    fact went through. Rate limited like the retry line it answers."""
+    outcome = retry_state.outcome
+    if outcome is None:
+        return False
+    exc = outcome.exception()
+    if exc is not None:
+        return _is_transient_embed_error(exc)
+    if retry_state.attempt_number > 1:
+        warn_rate_limited(
+            log,
+            "embed request recovered on attempt %d/%d",
+            retry_state.attempt_number,
+            _EMBED_ATTEMPTS,
+            level=logging.INFO,
+        )
+    return False
 
 
 def classify_embed_failure(exc: BaseException) -> str:
@@ -584,7 +606,7 @@ class OpenAIEmbedder:
     @retry(
         stop=stop_after_attempt(_EMBED_ATTEMPTS),
         wait=wait_exponential(multiplier=1, min=2, max=10),
-        retry=retry_if_exception(_is_transient_embed_error),
+        retry=_retry_embed_attempt,
         before_sleep=_log_embed_retry,
         reraise=True,
     )
