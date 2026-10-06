@@ -349,6 +349,7 @@ def test_answerer_finds_every_value_where_evidence_arrived(records: dict[str, di
 _DECOYS = {
     "ask-walker-rate-sender": "t75.2",
     "ask-swim-practice-date": "t76.2",
+    "ask-swim-scope-stated": "t76.2",
     "ask-garden-plot-trash": "t77.2",
 }
 
