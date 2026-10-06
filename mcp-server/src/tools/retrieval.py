@@ -540,7 +540,8 @@ def register_retrieval_tools(server, db):
             ]
             if view.record.pending_deletion:
                 lines.append(
-                    "Pending deletion: yes (deleted in Proton; removed after the grace period)"
+                    "Pending deletion: yes (deleted in Proton or its file is missing locally; "
+                    "removed after the grace period)"
                 )
             if f := view.record.source_file:
                 size = "unknown size" if f.size_bytes is None else f"{f.size_bytes:,} bytes"
