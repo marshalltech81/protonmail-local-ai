@@ -845,6 +845,13 @@ class TestCodexClient:
         # Review round 3: the bundled skill catalog stays out of the prompt.
         assert "skills.bundled.enabled=false" in overrides
         assert "skills.include_instructions=false" in overrides
+        # Review round 8: no request_user_input tool, and none of Codex's
+        # supplemental prompt blocks (permissions, collaboration mode,
+        # environment context: date and working directory).
+        assert "tools.experimental_request_user_input.enabled=false" in overrides
+        assert "include_permissions_instructions=false" in overrides
+        assert "include_collaboration_mode_instructions=false" in overrides
+        assert "include_environment_context=false" in overrides
         # The judge prompt replaces Codex's own base instructions.
         assert call["instructions"] == "JUDGE SYSTEM"
         # The prompt goes on stdin only.

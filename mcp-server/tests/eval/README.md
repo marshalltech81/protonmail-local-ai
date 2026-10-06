@@ -523,7 +523,8 @@ is `127.0.0.1`, not `host.docker.internal`.
   from the linked file (`cli_auth_credentials_store="file"`), and the
   judge system
   prompt replaces Codex's coding-agent instructions
-  (`model_instructions_file`). Managed and system Codex config (`/etc/codex/managed_config.toml`,
+  (`model_instructions_file`), with its permissions, collaboration-mode
+  and environment-context blocks and the `request_user_input` tool off. Managed and system Codex config (`/etc/codex/managed_config.toml`,
   `/etc/codex/config.toml`, macOS managed preferences) is refused, since
   it applies whatever the flags say and can add MCP servers; a
   cloud-managed enterprise layer cannot be seen locally. Before any case

@@ -56,6 +56,9 @@ which the judge records as ``judge_truncated``.
   load (``--ignore-user-config`` alone still loads the global
   ``AGENTS.md``), and Codex's own logs of the call land there and are
   removed with it. The login is linked, never copied.
+- ``tools.experimental_request_user_input.enabled=false``, and the
+  permissions, collaboration-mode and environment-context prompt blocks
+  off, so the prompt carries only the judge's instructions.
 - ``project_doc_max_bytes=0`` (the working directory's ``AGENTS.md``),
   ``--ignore-rules``, ``--ephemeral``, ``--skip-git-repo-check``, no
   update check, the file credential store (the linked ``auth.json``,
@@ -520,6 +523,12 @@ class CodexCliClient:
             _CODEX_FILE_STORE,
             "skills.bundled.enabled=false",
             "skills.include_instructions=false",
+            "tools.experimental_request_user_input.enabled=false",
+            # Only the judge's instructions: no permissions, collaboration
+            # mode or environment context (date, working directory) blocks.
+            "include_permissions_instructions=false",
+            "include_collaboration_mode_instructions=false",
+            "include_environment_context=false",
             # A JSON string is a valid TOML basic string.
             f"model_instructions_file={json.dumps(instructions)}",
         ):
