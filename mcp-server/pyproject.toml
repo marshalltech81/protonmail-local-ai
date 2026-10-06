@@ -8,7 +8,7 @@ dependencies = [
     "fastmcp==4.0.11",
     # ``fastmcp`` accepts any ``mcp`` 2.x. The tool code imports
     # ``mcp.types`` and ``main.py`` the SDK's Host/Origin validator
-    # directly, so pin the version fastmcp 4.0.10 resolves.
+    # directly, so pin the version fastmcp 4.0.11 resolves.
     "mcp==2.3.0",
     "uvicorn==0.54.0",
     "starlette==1.7.0",

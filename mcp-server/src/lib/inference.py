@@ -2,7 +2,7 @@
 
 ``INFERENCE_MODE`` selects the protocol/SDK:
 
-- ``anthropic`` (default): Anthropic-compatible Messages API via the
+- ``anthropic``: Anthropic-compatible Messages API via the
   official ``anthropic`` SDK. Unlocks prompt caching, typed tool use,
   streaming, and future API surface (extended thinking, batch, token
   counting) without hand-rolling the wire format.
@@ -11,7 +11,8 @@
   ``mlx_lm.server``, DeepInfra, OpenRouter, etc.) target the OpenAI
   SDK as their reference client by design, so pointing the SDK at
   them via ``base_url`` is the supported path.
-- ``none``: layer disabled. ``main.py`` does not instantiate
+- ``none`` (the default, #750): layer disabled, so nothing is sent to
+  an inference provider until one is chosen. ``main.py`` does not instantiate
   ``InferenceClient`` and the intelligence tool group is not
   registered.
 
