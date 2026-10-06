@@ -66,8 +66,9 @@ def judge_default_max_tokens(mode: str) -> int:
     """The ``JUDGE_MAX_TOKENS`` default for a judge mode (#813). Claude
     models think before the verdict and count the thinking against
     ``max_tokens``, so anthropic mode takes the answerer's anthropic
-    default (#805); the other modes keep 2048."""
-    if mode == "anthropic":
+    default (#805), and so does claude-cli, whose cap becomes the CLI's
+    ``CLAUDE_CODE_MAX_OUTPUT_TOKENS`` (#862); the other modes keep 2048."""
+    if mode in ("anthropic", "claude-cli"):
         return ANTHROPIC_DEFAULT_MAX_TOKENS
     return JUDGE_DEFAULT_MAX_TOKENS
 
@@ -281,7 +282,7 @@ def _load_cli_judge(mode: str, env: Mapping[str, str]) -> LayerConfig:
         max_tokens = JUDGE_DEFAULT_MAX_TOKENS
     else:
         _check_claude_login(mode, path)
-        max_tokens = int(_number(env, "JUDGE_MAX_TOKENS", JUDGE_DEFAULT_MAX_TOKENS, 256))
+        max_tokens = int(_number(env, "JUDGE_MAX_TOKENS", judge_default_max_tokens(mode), 256))
     return LayerConfig(
         layer="JUDGE",
         mode=mode,
