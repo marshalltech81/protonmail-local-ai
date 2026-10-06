@@ -407,7 +407,7 @@ degraded-retrieval markers and rate-limited `/mcp` rejection logging
 #892), and mbsync sync-success and folder-name-safe repair logging
 (#879; #881), and attachment extraction and parser-cap logging with
 rate-limited warnings (#871, #872; #884; follow-ups for caps it does not
-count yet: header truncation #902, extracted-text truncation #903).
+count yet: header truncation #902, extracted-text and PDF digital-page truncation #903).
 Open: embedder recovery and maintenance-loop recoveries (#873),
 queue heartbeat and per-pass maintenance summaries (#874), WAL and
 storage size (#875), a startup identity line with commit, boot ID,
@@ -417,8 +417,8 @@ images (#891, #885), and a per-checkout uv cache for parallel runs
 (#896). Open decisions: log-only or exit when the Maildir watcher dies
 (#870), telling a stall from a backlog in status (#876; parked trashed
 files currently show as "retrying"), and correlation IDs (#888).
-Every MCP tool declares safety annotations (#899; Resolved decisions
-31).
+MCP tool safety annotations are decided (Resolved decisions 31) and
+in review (#899).
 
 ## Not doing (decided 2026-09-26)
 
@@ -769,8 +769,8 @@ removed Bridge container are kept as history.
     encoded folders migrates by renaming them (never deleting) and
     rebuilding the index (`docs/setup.md`). The live mailbox had none,
     and the owner accepts a reindex if needed.
-31. **MCP tool safety annotations (2026-10-06, #899):** every tool
-    declares `readOnlyHint: true`, `destructiveHint: false`,
+31. **MCP tool safety annotations (2026-10-06, #899; implementation in
+    review):** every tool is to declare `readOnlyHint: true`, `destructiveHint: false`,
     `openWorldHint: false` and its own title-cased `title`, from one
     shared constant; a test fails on a tool added without a deliberate
     classification. Operational logging does not prevent read-only: the
@@ -781,7 +781,12 @@ removed Bridge container are kept as history.
     privacy warnings and `make status`. Deriving the hint from provider
     locality was considered and not chosen. Covers OpenAI's three
     required hints and Anthropic's `readOnlyHint`, `destructiveHint` and
-    `title`.
+    `title`. Accepted risk: tools that send retrieved mail to a remote
+    inference or rerank provider still advertise `readOnlyHint: true`
+    (nothing in the mailbox or other state changes), so a client that
+    auto-approves read-only tools can send excerpts to that provider
+    without a prompt; the egress is disclosed at startup and by
+    `make status`.
 
 ## Notes for Agents
 
