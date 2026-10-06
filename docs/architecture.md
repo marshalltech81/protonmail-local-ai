@@ -156,7 +156,9 @@ mbsync writes one Maildir per Proton folder (`mbsync/mbsyncrc.template`):
   modified UTF-7 names Bridge lists into UTF-8 (`Folders/Caf&AOk-` is
   `Folders/Café`, `Folders/A&-B` is `Folders/A&B`), and the decoded names
   become directory names as they are. isync 1.4.4, in the image before,
-  kept the modified UTF-7 names undecoded.
+  kept the modified UTF-7 names undecoded, so an existing install must
+  migrate such folders before upgrading (`docs/setup.md`, "Upgrading to
+  the isync 1.5.1 mbsync image").
 - **Sync state:** `SyncState *`. Each folder's UIDVALIDITY and UIDs live
   in `.mbsyncstate` (with `.journal`, `.new` and `.lock` while a sync runs)
   in the folder's own directory, next to isync's `.uidvalidity`, so no two

@@ -789,6 +789,41 @@ restart Claude Desktop.
 `make up`, then add the header to each client as above. Until a client
 sends the token, its requests get `401`.
 
+**Upgrading to the isync 1.5.1 mbsync image (Debian trixie).** isync
+1.5 writes a folder whose name has a non-ASCII character or `&` under
+its decoded UTF-8 name, where isync 1.4.4 kept the modified UTF-7
+spelling (`Folders/.Caf&AOk-` becomes `Folders/.Café`; see
+`docs/architecture.md`, Maildir layout). An existing directory under
+the old spelling is not renamed: the first 1.5.1 sync downloads that
+folder again into the new directory, so its messages are indexed
+twice (conflicting Message-IDs), and the old directory is reported as
+a far-side box that "cannot be opened anymore". Before upgrading, with
+the old image still running, count the affected directories. isync
+1.4.4 always encodes `&`, so a directory name containing `&` is one of
+them. The command prints the count only, no folder names:
+
+```bash
+docker exec mbsync sh -c 'find /maildir -mindepth 1 -type d -name "*&*" | wc -l'
+```
+
+If it prints `0`, upgrade as usual. Otherwise stop the stack
+(`make down`), remove those directories (each folder's mail and sync
+state, together with any subfolders; Proton keeps the mail) and
+upgrade:
+
+```bash
+docker compose run --rm --no-deps --entrypoint sh mbsync \
+  -c 'find /maildir -mindepth 1 -type d -name "*&*" -prune -exec rm -rf {} +'
+make build && make up
+```
+
+The first sync downloads each removed folder under its decoded name. In
+mirror mode the indexer reaps the removed copies after its grace window
+and indexes the new ones; a large folder can trip the mass-delete brake
+(see `docs/troubleshooting.md`, Deletion reconciliation). In archive
+mode (`INDEXER_DELETION_ENABLED=false`) the old copies stay indexed
+beside the new ones until the index is rebuilt.
+
 **Upgrading from a release that served `/sse` (breaking change).** The
 legacy HTTP+SSE transport, its `/sse` and `/messages/` endpoints, and
 the `MCP_TRANSPORT` values `sse` and `dual` were removed. Remove
