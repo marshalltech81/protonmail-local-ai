@@ -48,11 +48,13 @@ from .intelligence import (
     _QUOTE_RE,
     UNTRUSTED_CONTENT_NOTICE,
     EvidenceRef,
+    PromptTooLargeError,
     QuoteCheck,
     _build_evidence,
     _check_quotes,
     _citation,
     _citation_lines,
+    _count_capped_threads,
     _escape_delimiter_tags,
     _evidence_budget,
     _evidence_prompt,
@@ -60,6 +62,7 @@ from .intelligence import (
     _sort_labels,
     _sources_searched,
     _strip_code_fence,
+    _warn_token_limits,
 )
 from .outputs import (
     MAX_CONCLUSION_FINDINGS,
@@ -874,6 +877,7 @@ def register_experimental_tools(
             )
             evidence, coverage = _build_evidence(shown, evidence_chars, evidence_map=evidence_map)
             coverage.threads_dropped = len(evidenced) - len(shown)
+            _count_capped_threads(coverage, evidence_chars, len(shown))
             user_prompt = _evidence_prompt(shown, evidence, coverage) + task
             dates = [
                 ref.chunk.message_date
@@ -974,6 +978,11 @@ def register_experimental_tools(
         except InvalidFilterError as e:
             log.warning("brief_issue rejected invalid %s", e.field_name)
             raise ToolError(f"Error: {e}") from e
+        except PromptTooLargeError as e:
+            _warn_token_limits(
+                "brief_issue", prompt_budget, ["prompt_over_budget"], prompt_tokens=e.prompt_tokens
+            )
+            raise
         except ToolError:
             raise
         except Exception as e:
@@ -1112,6 +1121,7 @@ def register_experimental_tools(
             )
             evidence, coverage = _build_evidence(shown, evidence_chars, evidence_map=evidence_map)
             coverage.threads_dropped = len(evidenced) - len(shown)
+            _count_capped_threads(coverage, evidence_chars, len(shown))
             user_prompt = _evidence_prompt(shown, evidence, coverage) + task
             dates = [
                 ref.chunk.message_date
@@ -1242,6 +1252,14 @@ def register_experimental_tools(
         except InvalidFilterError as e:
             log.warning("check_conclusion rejected invalid %s", e.field_name)
             raise ToolError(f"Error: {e}") from e
+        except PromptTooLargeError as e:
+            _warn_token_limits(
+                "check_conclusion",
+                prompt_budget,
+                ["prompt_over_budget"],
+                prompt_tokens=e.prompt_tokens,
+            )
+            raise
         except ToolError:
             raise
         except Exception as e:

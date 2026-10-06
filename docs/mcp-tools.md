@@ -126,6 +126,11 @@ tool=search_emails outcome=ok total_ms=41.7 stages_ms={'query_embedding': 22.4, 
   replies), `rerank` (results in RRF order although `config` says
   `rerank=cohere`) and `rerank_subjects` (reranked without subjects).
   See [Troubleshooting](troubleshooting.md#a-tool-call-reports-degraded-retrieval).
+- `evidence_capped_threads` (the intelligence tools) counts the threads
+  whose passages the fixed per-thread evidence budget (2,000 characters
+  per thread) left out or cut. It is a design cap, not a token limit,
+  so no setting raises it and it logs no warning; a cut made by the
+  model window is the `token limit hit` warning instead.
 - `config` names the rerank and inference modes.
 
 The line carries names fixed in the code, numbers and mode names only:

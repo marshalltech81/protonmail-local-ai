@@ -902,7 +902,9 @@ same moment.
 ## The log shows "token limit hit"
 
 `ask_mailbox`, `summarize_thread` and `extract_from_emails` log one
-WARNING per call that ran into a token limit (#865), for example:
+WARNING per call that ran into a token limit (#865), and the
+experimental `brief_issue` and `check_conclusion` log one when the
+request is over budget (`prompt_over_budget`), for example:
 
 ```text
 token limit hit: tool=ask_mailbox limits=evidence_budget outputs_cut=0 threads_dropped=1 passages_omitted=6 passages_truncated=1 prompt_tokens=2950 prompt_budget_tokens=3008 max_tokens=1024
@@ -933,6 +935,11 @@ which limits the call hit:
 
 `prompt_tokens` is the estimated size of the prompt sent (the largest
 one for `extract_from_emails`), counted at three characters per token.
+
+Trimming to the fixed per-thread evidence budget (2,000 characters per
+thread) is not a token limit: no setting changes it, so it logs no
+warning. It is counted as `evidence_capped_threads` on the call's
+`mcp.timings` line instead.
 
 ## Claude Desktop doesn't see the tools
 

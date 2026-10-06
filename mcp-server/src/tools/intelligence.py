@@ -1850,6 +1850,7 @@ class EvidenceCoverage:
     duplicates: int = 0  # passages dropped as repeats of one shown in full
     threads_without_evidence: int = 0  # threads whose every passage was left out
     threads_dropped: int = 0  # lower-ranked threads left out whole to fit the window
+    threads_trimmed: int = 0  # threads with a passage left out or cut short
 
 
 # Shortest normalized body passage treated as a quote of an earlier one
@@ -2172,6 +2173,7 @@ def _build_evidence(
         parts: list[str] = []
         used = 0
         complete = 0  # pieces rendered in full; later ones were cut or left out
+        lost_before = coverage.omitted + coverage.truncated
         for k, ((chunk, text), label, flag) in enumerate(zip(pieces, labels, flags, strict=True)):
             separator = 2 if parts else 0
             tag = _scope_tag(flag) if show_scope else None
@@ -2206,6 +2208,8 @@ def _build_evidence(
                 coverage.duplicates += 1
             else:
                 coverage.omitted += 1
+        if coverage.omitted + coverage.truncated > lost_before:
+            coverage.threads_trimmed += 1
         rendered.append("\n\n".join(parts))
     return rendered, coverage
 
@@ -2383,6 +2387,19 @@ def _too_large(budget: PromptBudget, fixed_chars: int) -> PromptTooLargeError:
         "the request or raise INFERENCE_CONTEXT_TOKENS.",
         tokens,
     )
+
+
+def _count_capped_threads(coverage: EvidenceCoverage, evidence_chars: int, threads: int) -> None:
+    """Count, on the call's timing line, the threads whose evidence the
+    fixed per-thread cap trimmed (``evidence_capped_threads``).
+
+    The cap binds when the evidence budget is the full
+    ``PER_THREAD_CHAR_BUDGET`` per thread; below that the model window
+    set it, and ``_warn_token_limits`` reports the cut instead. Not a
+    WARNING: raising a setting cannot change the cap.
+    """
+    if coverage.threads_trimmed and evidence_chars >= PER_THREAD_CHAR_BUDGET * threads:
+        count("evidence_capped_threads", coverage.threads_trimmed)
 
 
 def _warn_token_limits(tool: str, budget: PromptBudget, limits: list[str], **counts: int) -> None:
@@ -2995,6 +3012,7 @@ def register_intelligence_tools(
                 show_scope=show_scope,
             )
             coverage.threads_dropped = len(results) - len(shown)
+            _count_capped_threads(coverage, evidence_chars, len(shown))
 
             # Build context from retrieved threads. Each thread is wrapped
             # in <untrusted_email> tags so the model can't confuse email
@@ -3559,6 +3577,7 @@ def register_intelligence_tools(
                 )
                 next_label = 1 + max((int(label[1:]) for label in known), default=next_label - 1)
                 evidence_map.update(known)
+                _count_capped_threads(coverage, evidence_chars, 1)
                 if evidence_chars < PER_THREAD_CHAR_BUDGET and (
                     coverage.omitted or coverage.truncated
                 ):
