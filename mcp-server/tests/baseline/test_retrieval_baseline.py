@@ -361,7 +361,7 @@ _NEAR_TIE = 1e-6
 _CUTOFF_WINDOW = 64
 
 
-def _cutoff_exchanges(rows: list, k: int) -> list[tuple[int, int]]:
+def _cutoff_exchanges(rows: list, k: int, window: int = _CUTOFF_WINDOW) -> list[tuple[int, int]]:
     """Pairs ``(i, j)`` of a kept row ``i < k`` and an excluded row
     ``j >= k`` of different threads whose distances are near-tied, so
     another platform could admit ``j`` in place of ``i``. The band runs
@@ -375,7 +375,9 @@ def _cutoff_exchanges(rows: list, k: int) -> list[tuple[int, int]]:
             break
         beyond.append(j)
     else:
-        if len(rows) > k:
+        # A full window may hide more of the band; a shorter result means
+        # the lane is exhausted and the band was seen whole (review round 8).
+        if len(rows) >= k + window:
             raise AssertionError("near-tie band runs past the fetched window")
     return [
         (i, j)
@@ -458,7 +460,10 @@ def test_cutoff_exchanges_scan_past_same_thread_rows() -> None:
     assert _cutoff_exchanges(rows, 2) == [(1, 4)]
     assert _cutoff_exchanges(rows, 1) == []  # the band past "a" holds nothing
     with pytest.raises(AssertionError, match="past the fetched window"):
-        _cutoff_exchanges(rows[:5], 2)
+        _cutoff_exchanges(rows[:5], 2, window=3)  # the search filled its window
+    # Review round 8: a lane shorter than its window is exhausted, so a
+    # band reaching its end was fully seen.
+    assert _cutoff_exchanges(rows[:5], 2, window=10) == [(1, 4)]
 
 
 def test_rank_snapshot_survives_near_tied_vector_distances(

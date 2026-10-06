@@ -51,6 +51,7 @@ class GroupStatus:
     whole: bool = False  # supplied with its evidence intact (``_shows_evidence``)
     cited_intact: bool = False  # cited through a passage that shows its evidence
     cited_cut: bool = False  # cited through a passage cut before its evidence
+    met: bool = False  # required_evidence_cited holds for this group
 
 
 @dataclass
@@ -200,11 +201,16 @@ def grade_run(case: Case, run: CaseRun) -> DeterministicResult:
     if case.answerable:
         # A group is met by citing a passage that shows its evidence, or
         # excused by a disclosed omission unless the answer cites a passage
-        # cut before that evidence: a guess, not a disclosure.
-        met = all(
-            g.cited_intact or (disclosed and g.retrieved and not g.whole and not g.cited_cut)
-            for g in result.groups
-        )
+        # cut before that evidence (a guess, not a disclosure). The excuse
+        # also needs an answer that abstains or rests on at least one
+        # intact citation: an uncited claim about omitted evidence is a
+        # guess too (review round 8).
+        grounded = is_abstention(answer) or any(g.cited_intact for g in result.groups)
+        for g in result.groups:
+            g.met = g.cited_intact or (
+                disclosed and grounded and g.retrieved and not g.whole and not g.cited_cut
+            )
+        met = all(g.met for g in result.groups)
         checks["required_evidence_cited"] = PASS if met else FAIL
     else:
         checks["required_evidence_cited"] = NA
@@ -249,8 +255,18 @@ def attribute(
     # Not supplied, or supplied only cut short of its evidence.
     if any(g.retrieved and not g.whole for g in det.groups):
         causes.append("prompt_assembly")
-    synthesis = any(det.checks.get(c) == FAIL for c in SYNTHESIS_CHECKS) or any(
-        g.supplied and not g.cited for g in det.groups
+    # A supplied group left uncited, or cited only through a passage cut
+    # before its evidence (a guess), is the model's doing, as is a group
+    # the budget dropped that stays unmet after the server disclosed the
+    # omission: only the answer's own claims can fail it then (review
+    # round 8). A group retrieval never found is not counted here.
+    guessed = det.checks.get("omission_disclosed") == PASS and any(
+        not g.met and g.retrieved and not g.whole for g in det.groups
+    )
+    synthesis = (
+        any(det.checks.get(c) == FAIL for c in SYNTHESIS_CHECKS)
+        or guessed
+        or any((g.supplied and not g.cited) or g.cited_cut for g in det.groups)
     )
     if synthesis or semantic_failed:
         causes.append("synthesis")

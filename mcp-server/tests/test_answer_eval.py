@@ -849,6 +849,32 @@ class TestDeterministicGraders:
         det = grade_run(case, _run(answer, passages, ["E1", "E2"]))
         assert det.passed, det.checks
 
+    def test_uncited_guess_about_omitted_evidence_fails(self):
+        """Review round 8: every required passage was left out, and the
+        answer states a total with no citation. The note excuses an
+        omission only for an abstention or an answer whose claims rest
+        on at least one intact citation."""
+        case = CASES["ask-kayak-tight-budget"]
+        retrieved = [thread_id_of("t21"), thread_id_of("t22")]
+        run = _run("The total is $260.", [], [], retrieved=retrieved, coverage_note=self._NOTE)
+        det = grade_run(case, run)
+        assert det.checks["required_evidence_cited"] == FAIL
+        assert "synthesis" in attribute(case, run, det, False, False)
+
+    def test_cut_passage_guess_is_attributed_to_synthesis(self):
+        """Review round 8: citing a passage cut before the fact is the
+        model's guess, not only a prompt-assembly loss."""
+        case = CASES["ask-kayak-tight-budget"]
+        run = _run(
+            "Four boats at $65 is $260 [E1].",
+            [_passage("E1", "t21", truncated=True)],
+            ["E1"],
+            retrieved=[thread_id_of("t21"), thread_id_of("t22")],
+            coverage_note=self._NOTE,
+        )
+        det = grade_run(case, run)
+        assert "synthesis" in attribute(case, run, det, False, False)
+
     def test_citing_a_passage_cut_before_its_fact_fails(self):
         """Review round 7: a guess cited to a passage the budget cut before
         the fact is not excused by the coverage note."""
