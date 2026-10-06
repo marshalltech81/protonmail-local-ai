@@ -472,8 +472,9 @@ can be revisited with an explicit owner decision.
   #670). There is no fixed deletion time. The merge is capped per pass,
   so a table it does not finish stays pending and its deleted terms
   stay in the file across further passes until a pass completes it. A
-  failed merge step, a busy checkpoint or an indexer restart also
-  delays removal. Below SQLite, deleted text can outlive both in
+  failed merge step, a busy checkpoint, or a restart that interrupts a
+  merge in progress also delays removal. A restart before the pass does
+  not: the indexer scrubs every table at startup. Below SQLite, deleted text can outlive both in
   filesystem free blocks, snapshots and backups (`docs/architecture.md`).
 - keyword search does not match precomposed letters with two
   diacritics or composed vs decomposed Hangul across forms (#316's

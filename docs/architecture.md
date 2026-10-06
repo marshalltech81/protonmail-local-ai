@@ -1815,9 +1815,12 @@ the project adds no encryption of its own:
 Protecting them is the host's job, which makes it a setup requirement:
 
 - **Full-disk encryption** (FileVault on macOS). OrbStack and Docker
-  Desktop keep Docker volumes inside a virtual-machine disk image on the
-  host's disk, so FileVault covers them. Without it, anyone with the
-  disk can read the mailbox.
+  Desktop keep Docker volumes inside a virtual-machine disk image, by
+  default on the startup disk, which FileVault covers. The protection
+  holds only where the data actually is: a Docker disk image moved to
+  another drive (Docker Desktop allows it), or a checkout (with
+  `.secrets/`) on another drive, needs that drive encrypted too.
+  Without it, anyone with the disk can read the mailbox.
 - **An unlocked, logged-in machine exposes them.** Code running as the
   operator's user, or as root, can read the volumes. This is the same
   trust condition as the MCP bearer token ("processes running as the
