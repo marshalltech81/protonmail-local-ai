@@ -112,8 +112,10 @@ because "we couldn't determine the safety status of the request".
   access, and no tool sends, moves, flags, drafts or deletes mail.
   The server's own diagnostic logging (the [`mcp.timings`
   line](#stage-timings-in-the-server-log), warnings) does not make a
-  tool a writer. It is operational telemetry that carries no arguments
-  or mail, like an access log, not an effect of the tool. Neither
+  tool a writer. It is operational telemetry that carries no
+  content-bearing arguments or mail (only allowlisted, validated values
+  such as modes, limits and ISO dates; see `log_tool_call`), like an
+  access log, not an effect of the tool. Neither
   definition mentions logs.
 - **Not destructive.** `destructiveHint: false`. No tool deletes or
   overwrites anything.
