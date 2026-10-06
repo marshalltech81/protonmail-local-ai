@@ -437,6 +437,11 @@ class GetThreadOutput(_Output):
             "when no message of the thread has an indexed body."
         )
     )
+    indexed_thread_text_scope: Literal["context"] | None = Field(
+        default=None,
+        description="context whenever indexed_thread_text is set: the conversation's "
+        "combined text, not any one message's own text; null otherwise.",
+    )
     reaped_messages: list[ReapedMessage] = Field(
         description="Messages of this thread reaped from the index (mirror retention: "
         "deleted upstream or missing from the Maildir), oldest reap first; empty in the "
@@ -473,6 +478,12 @@ class GetMessageOutput(_Output):
     )
     indexed_thread_text: str | None = Field(
         description="Parent-thread text or snippet; set only when body is null."
+    )
+    indexed_thread_text_scope: Literal["context"] | None = Field(
+        default=None,
+        description="context whenever indexed_thread_text is set: conversation context, "
+        "possibly from other messages outside a requested scope, not this message's "
+        "text; null otherwise.",
     )
 
 

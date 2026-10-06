@@ -25,7 +25,8 @@ import sqlite_vec
 import src.lib.sqlite as sqlite_mod
 from src.lib.sqlite import Database
 from src.tools.intelligence import ASK_SYSTEM, _scope_block, register_intelligence_tools
-from src.tools.outputs import AskMailboxOutput, EvidenceOutput
+from src.tools.outputs import AskMailboxOutput, EvidenceOutput, GetMessageOutput, GetThreadOutput
+from src.tools.retrieval import register_retrieval_tools
 from src.tools.search import register_search_tools
 
 from tests.conftest import (
@@ -462,3 +463,36 @@ class TestGetEvidenceLabels:
             for c in t["chunks"]
         }
         assert asked == audited
+
+
+class TestThreadTextFallbackIsContext:
+    """``get_thread`` and ``get_message`` show the thread's combined text
+    when no message body is indexed; that text is labelled context, not
+    the text of any one message (#755)."""
+
+    def _tools(self, db: Database) -> dict:
+        server = FakeMCPServer()
+        register_retrieval_tools(server, db)
+        return server.tools
+
+    def test_get_message_labels_its_fallback(self, seeded_db):
+        out = asyncio.run(self._tools(seeded_db)["get_message"](message_id="t-alpha"))
+        GetMessageOutput.model_validate(out.structured_content)
+        assert out.structured_content["body"] is None
+        assert out.structured_content["indexed_thread_text"]
+        assert out.structured_content["indexed_thread_text_scope"] == "context"
+        assert "Indexed thread text (context, not this message's text):" in out.content[0].text
+
+    def test_get_thread_labels_its_fallback(self, seeded_db):
+        out = asyncio.run(self._tools(seeded_db)["get_thread"](thread_id="t-alpha"))
+        GetThreadOutput.model_validate(out.structured_content)
+        assert out.structured_content["indexed_thread_text_scope"] == "context"
+        assert "Indexed thread text (context, not any one message's text):" in (out.content[0].text)
+
+    def test_a_message_with_a_body_has_no_fallback_label(self, scope_db):
+        tools = self._tools(scope_db)
+        out = asyncio.run(tools["get_message"](message_id=_claimant("sep")))
+        assert out.structured_content["indexed_thread_text"] is None
+        assert out.structured_content["indexed_thread_text_scope"] is None
+        out = asyncio.run(tools["get_thread"](thread_id="t-swim"))
+        assert out.structured_content["indexed_thread_text_scope"] is None
