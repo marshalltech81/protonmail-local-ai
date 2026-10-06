@@ -28,7 +28,6 @@ a pass.
 
 import asyncio
 import json
-import re
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -36,7 +35,7 @@ from typing import Any
 
 from src.lib.inference import InferenceTruncatedError
 from src.lib.security import safe_provider_exception_text
-from src.tools.intelligence import _strip_code_fence
+from src.tools.intelligence import _escape_delimiter_tags, _strip_code_fence
 from src.tools.outputs import AnswerStatement
 
 from tests.answer_eval.cases import DIMENSIONS, Case
@@ -46,7 +45,7 @@ from tests.answer_eval.runner import Passage
 
 # Bump on any change to the rubric, the prompt or the verdict schema:
 # runs graded under different versions are not comparable.
-RUBRIC_VERSION = "ask-rubric-4"
+RUBRIC_VERSION = "ask-rubric-5"
 
 CLAIM_VERDICTS = ("supported", "contradicted", "insufficient_evidence")
 DIMENSION_RESULTS = ("pass", "fail", "not_applicable")
@@ -145,16 +144,14 @@ _HANDLING_TEXT = {
     "its place.",
 }
 
-# Any spelling of a judge delimiter tag inside untrusted text, opened by
-# "<" or a one-character look-alike, as the server's own email blocks
-# escape theirs (``intelligence._DELIMITER_TAG_RE``).
-_JUDGE_TAG_RE = re.compile(
-    r"[<﹤＜](\s*+(?:/\s*+)?untrusted_(?:evidence|answer|email))", re.IGNORECASE
-)
+# The judge's delimiter tags. Untrusted text is escaped with the
+# server's own hardened escaper, so a tag spelled with zero-width,
+# compatibility or look-alike characters is caught too (#533).
+_JUDGE_TAG_NAMES = ("untrusted_evidence", "untrusted_answer", "untrusted_email")
 
 
 def _fence(content: str) -> str:
-    return _JUDGE_TAG_RE.sub(r"&lt;\1", content)
+    return _escape_delimiter_tags(content, _JUDGE_TAG_NAMES)
 
 
 def _label_key(label: str) -> int:
@@ -208,9 +205,12 @@ def build_judge_prompt(
     for label in sorted(passages, key=_label_key):
         p = passages[label]
         origin = p.message_id or p.thread_id
+        # The header the answerer saw (sender, sent date, attachment name,
+        # #837) is sender-controlled, so it stays inside the fence.
+        header = f"{_fence(p.header)}\n" if p.header else ""
         lines.append(
             f'<untrusted_evidence label="{label}">\n'
-            f"{_fence(f'{p.source} of message {origin}')}\n{_fence(p.text)}\n"
+            f"{_fence(f'{p.source} of message {origin}')}\n{header}{_fence(p.text)}\n"
             "</untrusted_evidence>"
         )
     lines += [

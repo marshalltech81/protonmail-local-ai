@@ -71,6 +71,10 @@ class Passage:
     source: str  # "body", "attachment" or "thread" (the thread's indexed text)
     text: str = field(repr=False)
     truncated: bool = False  # cut to fit the prompt budget
+    # The header ``ask_mailbox`` rendered above the passage
+    # (``intelligence._piece_header``): label, message, sender, sent date
+    # and, for an attachment chunk, its name. Sender-controlled.
+    header: str = field(default="", repr=False)
 
 
 @dataclass
@@ -198,8 +202,11 @@ def capture_evidence_maps(sink: list[dict[str, Any]]) -> Iterator[None]:
 
 def _passage(ref: Any) -> Passage:
     chunk = ref.chunk
+    header = intelligence._piece_header(chunk, ref.char_end or 0, ref.label)
     if chunk is None:
-        return Passage(ref.label, ref.thread_id, None, None, None, "thread", ref.text)
+        return Passage(
+            ref.label, ref.thread_id, None, None, None, "thread", ref.text, header=header
+        )
     source = "attachment" if chunk.attachment_id is not None else "body"
     # ``char_end`` is short of the chunk's end when the passage was cut.
     truncated = ref.char_end is not None and ref.char_end < chunk.char_end
@@ -212,6 +219,7 @@ def _passage(ref: Any) -> Passage:
         source,
         ref.text,
         truncated,
+        header,
     )
 
 
