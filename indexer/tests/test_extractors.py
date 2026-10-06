@@ -330,6 +330,27 @@ class TestHtmlExtractorFallback:
         assert name == "html"
         assert "text" in text
 
+    @pytest.mark.parametrize(
+        ("payload", "expected"),
+        [
+            # Valid multi-byte UTF-8 decodes unchanged.
+            (b"<p>caf\xc3\xa9 na\xc3\xafve</p>", "café naïve\n"),
+            # Each invalid byte, and a truncated sequence, becomes one
+            # U+FFFD while the valid text around it is kept.
+            (
+                b"<html><body><p>caf\xc3\xa9 \xff\xfe text \xe2\x82</p></body></html>",
+                "café �� text �\n",
+            ),
+        ],
+        ids=["valid-utf8", "malformed-utf8"],
+    )
+    def test_decoded_text_is_pinned(self, payload, expected):
+        """#844: the extractor's text for valid and malformed UTF-8 is
+        fixed, so simplifying the decode needs no EXTRACTOR_VERSIONS bump."""
+        from src.extractors.html import extract as html_extract
+
+        assert html_extract(payload) == (expected, "html")
+
     def test_unclosed_style_does_not_blank_the_next_document(self):
         """Regression (#216): a shared converter carried an unclosed
         ``<style>`` into the next attachment, which came out empty."""
