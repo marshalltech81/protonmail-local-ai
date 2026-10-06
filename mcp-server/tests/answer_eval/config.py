@@ -6,8 +6,8 @@ Two layers, each in the repository's ``{LAYER}_MODE`` / ``_BASE_URL`` /
 - ``INFERENCE_*``: the answering model under test, as the server reads
   it (``anthropic`` or ``openai``; the evaluation needs one, and the
   mode defaults to ``none`` as for the server).
-- ``JUDGE_*``: the grader (``anthropic``, ``openai``, ``claude-cli`` or
-  ``none``, the default). It never reads the answerer's variables or key file, so the
+- ``JUDGE_*``: the grader (``anthropic``, ``openai``, ``claude-cli``,
+  ``codex-cli`` or ``none``, the default). It never reads the answerer's variables or key file, so the
   judge cannot silently inherit the answerer's provider or credential,
   and there is no fallback between modes.
 
@@ -19,10 +19,11 @@ _api_key.txt``, which must be mode 600, or, for local development only,
 the ``{LAYER}_API_KEY`` environment variable. Keys are never logged,
 written to a report or taken as a command argument.
 
-``JUDGE_MODE=claude-cli`` (#806) runs the judge through Claude Code on
-the host under the operator's subscription (``cli_judge.py``): it takes
-``JUDGE_MODEL`` and no key, and ``JUDGE_BASE_URL`` may only be unset or
-``default`` (the CLI's login decides the endpoint).
+``JUDGE_MODE=claude-cli`` and ``codex-cli`` (#806) run the judge through
+Claude Code or Codex on the host under the operator's subscription
+(``cli_judge.py``): each takes ``JUDGE_MODEL`` and no key, and
+``JUDGE_BASE_URL`` may only be unset or ``default`` (the CLI's login
+decides the endpoint).
 """
 
 import hashlib
@@ -43,7 +44,7 @@ from tests.answer_eval import cli_judge
 
 ENABLED_MODES = frozenset({"anthropic", "openai"})
 # Judge-only modes that run a vendor CLI on the host.
-CLI_MODES = frozenset({"claude-cli"})
+CLI_MODES = frozenset(cli_judge.EXECUTABLES)
 # The variable each SDK reads for its endpoint when none is passed, and
 # the host it uses when that variable is unset too.
 _SDK_BASE_URL_VARS = {"anthropic": "ANTHROPIC_BASE_URL", "openai": "OPENAI_BASE_URL"}
@@ -79,6 +80,7 @@ class LayerConfig:
     structured_output: bool = True
     cli_path: str = ""
     cli_version: str = ""
+    cli_auth_file: str = ""  # codex-cli: the login file each call links
 
     def endpoint_kind(self) -> str:
         """``host-local``, ``remote`` or ``sdk-default``: the only form of
@@ -113,11 +115,17 @@ class LayerConfig:
             out["retries"] = 0
             out["concurrency"] = 1
         if self.mode in CLI_MODES:
-            out["cli"] = cli_judge.EXECUTABLE
+            out["cli"] = cli_judge.EXECUTABLES[self.mode]
             out["cli_version"] = self.cli_version
+        if self.mode == "codex-cli":
+            out["max_tokens"] = None  # Codex has no output-token setting
         return out
 
-    def client(self) -> InferenceClient | cli_judge.ClaudeCliClient:
+    def client(self) -> InferenceClient | cli_judge.ClaudeCliClient | cli_judge.CodexCliClient:
+        if self.mode == "codex-cli":
+            return cli_judge.CodexCliClient(
+                executable=self.cli_path, model=self.model, auth_file=self.cli_auth_file
+            )
         if self.mode in CLI_MODES:
             return cli_judge.ClaudeCliClient(
                 executable=self.cli_path, model=self.model, max_tokens=self.max_tokens
@@ -233,30 +241,26 @@ def load_layer(
 
 
 def _load_cli_judge(mode: str, env: Mapping[str, str]) -> LayerConfig:
-    """``JUDGE_MODE=claude-cli``: a model, the judge bounds and the CLI
-    on PATH; no key and no base URL."""
+    """``JUDGE_MODE=claude-cli`` or ``codex-cli``: a model, the judge
+    bounds and the CLI on PATH, logged in with a subscription; no key
+    and no base URL."""
     base_url = env.get("JUDGE_BASE_URL", "").strip()
     if base_url and base_url.lower() != "default":
         raise ConfigError(f"JUDGE_BASE_URL does not apply to JUDGE_MODE={mode}: unset it")
     model = env.get("JUDGE_MODEL", "").strip()
     if not model:
         raise ConfigError(f"JUDGE_MODEL must be set when JUDGE_MODE={mode}")
-    path = cli_judge.find_executable()
+    name = cli_judge.EXECUTABLES[mode]
+    path = cli_judge.find_executable(name)
     if path is None:
-        raise ConfigError(f"JUDGE_MODE={mode} needs the claude CLI (Claude Code) on PATH")
-    if cli_judge.managed_mcp_present():
         raise ConfigError(
-            f"JUDGE_MODE={mode} cannot run under an enterprise managed-mcp.json: "
-            "Claude Code refuses --strict-mcp-config there"
+            f"JUDGE_MODE={mode} needs the {name} CLI ({cli_judge.PRODUCTS[mode]}) on PATH"
         )
-    method = cli_judge.auth_method(path)
-    if method is None:
-        raise ConfigError(f"JUDGE_MODE={mode}: the claude CLI is not logged in (run `claude`)")
-    if method != cli_judge.SUBSCRIPTION_AUTH_METHOD:
-        raise ConfigError(
-            f"JUDGE_MODE={mode}: the claude CLI login is not a Claude subscription "
-            "(log in with `claude auth login` and a claude.ai account)"
-        )
+    auth_file = ""
+    if mode == "codex-cli":
+        auth_file = _check_codex_login(mode, path)
+    else:
+        _check_claude_login(mode, path)
     return LayerConfig(
         layer="JUDGE",
         mode=mode,
@@ -272,4 +276,41 @@ def _load_cli_judge(mode: str, env: Mapping[str, str]) -> LayerConfig:
         structured_output=False,  # the judge sends no schema
         cli_path=path,
         cli_version=cli_judge.cli_version(path),
+        cli_auth_file=auth_file,
     )
+
+
+def _check_claude_login(mode: str, path: str) -> None:
+    if cli_judge.managed_mcp_present():
+        raise ConfigError(
+            f"JUDGE_MODE={mode} cannot run under an enterprise managed-mcp.json: "
+            "Claude Code refuses --strict-mcp-config there"
+        )
+    method = cli_judge.auth_method(path)
+    if method is None:
+        raise ConfigError(f"JUDGE_MODE={mode}: the claude CLI is not logged in (run `claude`)")
+    if method != cli_judge.SUBSCRIPTION_AUTH_METHOD:
+        raise ConfigError(
+            f"JUDGE_MODE={mode}: the claude CLI login is not a Claude subscription "
+            "(log in with `claude auth login` and a claude.ai account)"
+        )
+
+
+def _check_codex_login(mode: str, path: str) -> str:
+    """The login file to link into each call's private home, after
+    checking it holds a ChatGPT login."""
+    auth_file = cli_judge.codex_auth_file()
+    if not os.path.isfile(auth_file):
+        raise ConfigError(
+            f"JUDGE_MODE={mode} needs the Codex login in $CODEX_HOME/auth.json "
+            "(a keyring login cannot be linked into the judge's private home)"
+        )
+    login = cli_judge.codex_login(path, auth_file)
+    if login is None:
+        raise ConfigError(f"JUDGE_MODE={mode}: the codex CLI is not logged in (run `codex login`)")
+    if login != "chatgpt":
+        raise ConfigError(
+            f"JUDGE_MODE={mode}: the codex CLI login is not a ChatGPT subscription "
+            "(log in with `codex login` and a ChatGPT account)"
+        )
+    return auth_file
