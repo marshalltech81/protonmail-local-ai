@@ -10,6 +10,8 @@ import unicodedata
 from fastmcp.exceptions import ToolError
 from mcp.types import CallToolResult
 
+# Module import: get_thread and get_message have a local named ``count``.
+from ..lib import timings
 from ..lib.security import log_tool_call
 from ..lib.sqlite import (
     FILTER_TYPE_ERROR,
@@ -230,6 +232,7 @@ def register_retrieval_tools(server, db):
     )
 
     @server.tool(output_schema=GetThreadOutput.model_json_schema())
+    @timings.timed_tool("get_thread")
     async def get_thread(
         thread_id: str,
         include_attachments_metadata: bool = True,
@@ -319,11 +322,15 @@ def register_retrieval_tools(server, db):
                 limit=limit,
                 body_char_limit=_THREAD_BODY_CHAR_LIMIT,
             )
+            # Fixed-text causes: the ID is the caller's and stays out of the log.
             if isinstance(page, ReapedSource):
+                log.warning("get_thread failed: reaped")
                 raise ToolError(reaped_source("Thread", thread_id, page.reaped_at))
             if not page:
+                log.warning("get_thread failed: not found")
                 raise ToolError(f"Thread not found: {thread_id}")
             thread, messages, total = page.thread, page.messages, page.total_messages
+            timings.count("messages", len(messages))
 
             if messages:
                 count = f"{total} (showing {offset + 1}-{offset + len(messages)}, oldest first)"
@@ -432,6 +439,7 @@ def register_retrieval_tools(server, db):
             raise ToolError(f"Error: {type(e).__name__}") from e
 
     @server.tool(output_schema=GetMessageOutput.model_json_schema())
+    @timings.timed_tool("get_message")
     async def get_message(
         message_id: str,
         offset: int = 0,
@@ -502,11 +510,18 @@ def register_retrieval_tools(server, db):
                 # Rejected before any read; past-the-end needs the body.
                 _body_page("", offset)
             view = await asyncio.to_thread(db.get_message_view, message_id)
+            # Fixed-text causes: the ID is the caller's and stays out of the log.
             if isinstance(view, ReapedSource):
+                log.warning("get_message failed: reaped")
                 raise ToolError(reaped_source("Message", message_id, view.reaped_at))
             if not view:
+                log.warning("get_message failed: not found")
                 raise ToolError(f"Message not found: {message_id}")
             if isinstance(view, AmbiguousMessageId):
+                log.warning(
+                    "get_message failed: ambiguous Message-ID (%d claimants listed)",
+                    len(view.claimants),
+                )
                 # Never pick one: either claimant may be the reused ID.
                 listed = "; ".join(
                     f"{c.claimant_id} (sent {c.sent_at}, folder {c.folder})" for c in view.claimants
@@ -626,6 +641,7 @@ def register_retrieval_tools(server, db):
                 indexed_thread_text=thread_text,
                 indexed_thread_text_scope="context" if thread_text is not None else None,
             )
+            timings.count("messages", 1)
             return tool_result("\n".join(lines), output)
 
         except ToolError:
@@ -639,6 +655,7 @@ def register_retrieval_tools(server, db):
             raise ToolError(f"Error: {type(e).__name__}") from e
 
     @server.tool(output_schema=ListThreadsOutput.model_json_schema())
+    @timings.timed_tool("list_threads")
     async def list_threads(
         folder: str = "INBOX",
         filter_type: str = "all",
@@ -711,6 +728,7 @@ def register_retrieval_tools(server, db):
                 offset=offset,
                 threads=[thread_summary(t) for t in threads],
             )
+            timings.count("threads", len(threads))
             scope = "" if filter_type == "all" else f" with {filter_type} messages"
             if not threads:
                 return tool_result(f"No threads{scope} found in {folder}.", output)
@@ -737,6 +755,7 @@ def register_retrieval_tools(server, db):
             raise ToolError(f"Error: {type(e).__name__}") from e
 
     @server.tool(output_schema=QueryMessagesOutput.model_json_schema())
+    @timings.timed_tool("query_messages")
     async def query_messages(
         sender: str | None = None,
         recipient: str | None = None,
@@ -894,6 +913,8 @@ def register_retrieval_tools(server, db):
             log.error("query_messages error: %s", type(e).__name__)
             raise ToolError(f"Error: {type(e).__name__}") from e
 
+        timings.count("total_matches", page.total_matches)
+        timings.count("returned", len(page.messages))
         uses = _filter_uses(args)
         output = QueryMessagesOutput(
             filters=uses,
@@ -958,6 +979,7 @@ def register_retrieval_tools(server, db):
         return tool_result("\n".join(lines), output)
 
     @server.tool(output_schema=FindContactOutput.model_json_schema())
+    @timings.timed_tool("find_contact")
     async def find_contact(
         query: str,
         limit: int = 10,
@@ -997,6 +1019,7 @@ def register_retrieval_tools(server, db):
         limit = clamp_int(limit, default=10, minimum=1, maximum=50)
 
         if not query or not query.strip():
+            log.warning("find_contact rejected an empty query")
             raise ToolError("Provide a name, address, or domain fragment to search for.")
 
         try:
@@ -1004,6 +1027,7 @@ def register_retrieval_tools(server, db):
         except Exception as e:
             log.error("find_contact error: %s", type(e).__name__)
             raise ToolError(f"Error: {type(e).__name__}") from e
+        timings.count("contacts", len(contacts))
 
         # A contact's names are sender-controlled and unbounded in number
         # and length: list at most MAX_LISTED, each cut, with the count.
@@ -1039,6 +1063,7 @@ def register_retrieval_tools(server, db):
         return tool_result("\n".join(lines), output)
 
     @server.tool(output_schema=ListFoldersOutput.model_json_schema())
+    @timings.timed_tool("list_folders")
     async def list_folders() -> CallToolResult:
         """
         List all available email folders and their thread counts.
@@ -1057,6 +1082,7 @@ def register_retrieval_tools(server, db):
         log.info("tool=list_folders")
         try:
             folders = await asyncio.to_thread(db.list_folders)
+            timings.count("folders", len(folders))
             output = ListFoldersOutput(
                 folders=[Folder(name=f["name"], thread_count=f["thread_count"]) for f in folders]
             )

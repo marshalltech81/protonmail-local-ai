@@ -89,10 +89,10 @@ result naming the problem.
 
 ## Stage timings in the server log
 
-`search_emails`, `get_evidence`, `search_attachments`, the three
-intelligence tools and the experimental `brief_issue` and
-`check_conclusion` log one line per call at `INFO` on the `mcp.timings`
-logger, on success and on failure:
+Every tool, the experimental `brief_issue` and `check_conclusion`
+included, logs one line per call at `INFO` on the `mcp.timings` logger,
+on success and on failure (`outcome=error`; see
+[Troubleshooting](troubleshooting.md#reading-a-tool-calls-log-line)):
 
 ```text
 tool=search_emails outcome=ok total_ms=41.7 stages_ms={'query_embedding': 22.4, 'thread_fts': 3.1, 'chunk_fts': 2.0, 'attachment_fts': 0.9, 'thread_vec': 4.6, 'chunk_vec': 6.2, 'fusion': 0.8} counts={'thread_fts': 4, 'chunk_fts': 9, 'attachment_fts': 0, 'thread_vec': 100, 'chunk_vec': 812, 'filtered': 57, 'results': 10} config={'rerank': 'none'}
@@ -113,7 +113,12 @@ tool=search_emails outcome=ok total_ms=41.7 stages_ms={'query_embedding': 22.4, 
   filters), `results`, `evidence_chunks`, `rerank_candidates`,
   `inference_calls` and, on a filtered vector search,
   `thread_vec_expansions` / `chunk_vec_expansions` (re-queries with a
-  wider window).
+  wider window). The retrieval tools record what they returned (#886):
+  `total_matches` and `returned` (`query_messages`), `messages`
+  (`get_thread`, `get_message`), `threads` (`list_threads`),
+  `contacts` (`find_contact`) and `folders` (`list_folders`). They run
+  no timed stages, so their `stages_ms` and `config` are empty, as are
+  `get_mailbox_status`'s `counts`.
 - A `degraded_<lane>` count means a lane failed and the call fell back,
   still with `outcome=ok` (#877): `thread_vec` / `chunk_vec` (the
   vector lane errored; that lane contributed nothing), `thread_fts`
@@ -137,7 +142,8 @@ tool=search_emails outcome=ok total_ms=41.7 stages_ms={'query_embedding': 22.4, 
   limit; the call also logs a
   [`token limit hit`](troubleshooting.md#the-log-shows-token-limit-hit)
   warning with the counts.
-- `config` names the rerank and inference modes.
+- `config` names the rerank and inference modes, for the tools that use
+  them.
 
 The line carries names fixed in the code, numbers and mode names only:
 never the query, other arguments, subjects, addresses, bodies or

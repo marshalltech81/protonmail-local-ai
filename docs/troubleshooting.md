@@ -887,6 +887,38 @@ startup scan and periodic recovery skip dead rows, so mail that
 dead-lettered on the old version (for example an 8-bit `Date` header
 before #361) stays unindexed until you requeue it.
 
+## Reading a tool call's log line
+
+Every MCP tool logs one completion line per call on the `mcp.timings`
+logger, whether it succeeded or failed (#886):
+
+```text
+tool=query_messages outcome=ok total_ms=12.4 stages_ms={} counts={'total_matches': 214, 'returned': 25} config={}
+tool=get_thread outcome=error total_ms=1.9 stages_ms={} counts={} config={}
+```
+
+- `outcome` is `ok` or `error`. For the retrieval tools and
+  `get_mailbox_status`, an `error` line is preceded by a WARNING or
+  ERROR line from the tool's own logger (`mcp.tools.retrieval`,
+  `mcp.tools.system`) naming the cause as fixed text or an exception
+  type, for example
+  `get_thread failed: not found`, `list_threads rejected invalid input
+  (filter_type)` or `query_messages error: OperationalError`.
+- `total_ms` is the whole call; `stages_ms` the timed stages
+  (retrieval lanes, embedding, rerank, inference) that ran.
+- `counts` holds result counts: `returned` and `total_matches` for
+  `query_messages`, `messages`, `threads`, `contacts`, `folders` for the
+  other retrieval tools, and the lane and degradation counts of the
+  search and intelligence tools.
+- `config` names the rerank and inference modes the call used.
+
+The line never carries arguments, Message-IDs, addresses, names or mail
+text. The full list of stages and counts is in
+[Stage timings](mcp-tools.md#stage-timings-in-the-server-log). A call
+with no completion line did not reach the tool, for example a request
+rejected with 401 (see
+[MCP client gets 401 Unauthorized](#mcp-client-gets-401-unauthorized)).
+
 ## A tool call reports degraded retrieval
 
 A `degraded_<lane>` count on a tool's `mcp.timings` line (see

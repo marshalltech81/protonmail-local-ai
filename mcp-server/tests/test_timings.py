@@ -16,18 +16,24 @@ from pathlib import Path
 
 import pytest
 import sqlite_vec
+from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
 from src.lib.sqlite import Database
 from src.lib.timings import count, rerank_mode, stage, timed_tool
 from src.tools.intelligence import register_intelligence_tools
+from src.tools.retrieval import register_retrieval_tools
 from src.tools.search import register_search_tools
+from src.tools.system import register_system_tools
 
 from tests.conftest import (
+    RECENT_REAP_AT,
     FakeEmbedClient,
     FakeInferenceClient,
     _build_schema,
     _insert_chunk,
+    _insert_message,
     _insert_thread,
+    insert_reaped,
 )
 from tests.test_sqlite import _scoped_recall_db, _search, _spy_vector_k
 
@@ -568,3 +574,224 @@ class TestDegradedRetrieval:
         lines = _timing_lines(caplog)
         assert len(lines) == 7
         assert all(_degraded(line) == {} for line in lines)
+
+
+# The seven tools #886 gave a completion line.
+_COMPLETION_TOOLS = (
+    "query_messages",
+    "get_message",
+    "get_thread",
+    "list_threads",
+    "find_contact",
+    "list_folders",
+    "get_mailbox_status",
+)
+
+_MARKER_MESSAGE_ID = f"{MARKER}-mid@example.com"
+_MARKER_THREAD_ID = f"t-{MARKER}"
+_MARKER_FOLDER = f"{MARKER}-folder"
+_MARKER_ADDRESS = f"{MARKER}@example.com"
+
+
+def _open_db(path: Path) -> sqlite3.Connection:
+    conn = sqlite3.connect(str(path))
+    conn.enable_load_extension(True)
+    sqlite_vec.load(conn)
+    conn.enable_load_extension(False)
+    _build_schema(conn)
+    return conn
+
+
+def _insert_marker_message(conn: sqlite3.Connection, variant: str = "") -> None:
+    _insert_message(
+        conn,
+        message_id=_MARKER_MESSAGE_ID,
+        thread_id=_MARKER_THREAD_ID,
+        sent_at="2024-01-10T09:00:00+00:00",
+        subject=f"quarterly {MARKER} report",
+        folder=_MARKER_FOLDER,
+        from_=[f"{MARKER} Person <{_MARKER_ADDRESS}>"],
+        to=["bob@example.com"],
+        body=f"the {MARKER} figures are attached",
+        variant=variant,
+    )
+
+
+@pytest.fixture
+def marker_messages_db(tmp_path: Path):
+    """One message whose Message-ID, thread ID, folder, sender, subject
+    and body all carry ``MARKER``."""
+    db_path = tmp_path / "marker-messages.db"
+    conn = _open_db(db_path)
+    _insert_marker_message(conn)
+    conn.close()
+    return Database(str(db_path))
+
+
+def _register_completion_tools(server, db) -> None:
+    register_retrieval_tools(server, db)
+    register_system_tools(server, db)
+
+
+# Each tool's success call: arguments carrying the marker where the tool
+# takes any, and the counts its line must show.
+_SUCCESS_CALLS: dict[str, tuple[dict, dict]] = {
+    "query_messages": (
+        {"sender": _MARKER_ADDRESS, "text": MARKER, "folder": _MARKER_FOLDER},
+        {"total_matches": 1, "returned": 1},
+    ),
+    "get_message": ({"message_id": _MARKER_MESSAGE_ID}, {"messages": 1}),
+    "get_thread": ({"thread_id": _MARKER_THREAD_ID}, {"messages": 1}),
+    "list_threads": ({"folder": _MARKER_FOLDER}, {"threads": 1}),
+    "find_contact": ({"query": MARKER}, {"contacts": 1}),
+    "list_folders": ({}, {"folders": 1}),
+    "get_mailbox_status": ({}, {}),
+}
+
+# The ``Database`` method each tool reads through, made to fail below.
+_DB_METHODS = {
+    "query_messages": "query_messages",
+    "get_message": "get_message_view",
+    "get_thread": "get_thread_page",
+    "list_threads": "list_threads",
+    "find_contact": "find_contact",
+    "list_folders": "list_folders",
+    "get_mailbox_status": "get_mailbox_status",
+}
+
+# Errors a tool raises to the caller without a database failure: the
+# arguments, and the fixed text the tool logs as the cause.
+_CALLER_ERRORS = [
+    ("query_messages", {"text": MARKER, "date_from": f"{MARKER}-01"}, "date_from"),
+    ("get_message", {"message_id": f"missing-{MARKER}"}, "get_message failed: not found"),
+    ("get_message", {"message_id": _MARKER_MESSAGE_ID, "offset": -1}, "offset"),
+    ("get_message", {"message_id": _MARKER_MESSAGE_ID, "offset": 10**6}, "offset"),
+    ("get_thread", {"thread_id": f"missing-{MARKER}"}, "get_thread failed: not found"),
+    ("list_threads", {"folder": _MARKER_FOLDER, "filter_type": MARKER}, "filter_type"),
+    ("find_contact", {"query": "   "}, "find_contact rejected an empty query"),
+]
+
+
+def _logged_cause(caplog, cause: str) -> bool:
+    return any(r.levelno >= logging.WARNING and cause in r.getMessage() for r in caplog.records)
+
+
+class TestRetrievalAndStatusCompletionLines:
+    """#886: the retrieval tools and ``get_mailbox_status`` log one
+    completion line per call, on success and on error, with counts only.
+    The marker sits in the arguments, the mail and the database error,
+    and must reach no log record."""
+
+    @pytest.mark.parametrize("tool", _COMPLETION_TOOLS)
+    def test_success_logs_one_ok_line_with_counts(
+        self, caplog, fake_server, marker_messages_db, tool
+    ):
+        caplog.set_level(logging.DEBUG)
+        _register_completion_tools(fake_server, marker_messages_db)
+        args, counts = _SUCCESS_CALLS[tool]
+        out = asyncio.run(fake_server.tools[tool](**args))
+        if tool != "get_mailbox_status":
+            assert MARKER in out.content[0].text  # the marker did flow through the call
+        line = _one_line(caplog)
+        assert line["tool"] == tool
+        assert line["outcome"] == "ok"
+        assert line["counts"] == counts
+        assert line["config"] == {}
+        assert MARKER not in caplog.text
+
+    @pytest.mark.parametrize("tool", _COMPLETION_TOOLS)
+    def test_database_error_logs_one_error_line(
+        self, caplog, monkeypatch, fake_server, marker_messages_db, tool
+    ):
+        caplog.set_level(logging.DEBUG)
+
+        def fail(*_args, **_kwargs):
+            raise sqlite3.OperationalError(f"no such table: {MARKER}")
+
+        monkeypatch.setattr(marker_messages_db, _DB_METHODS[tool], fail)
+        _register_completion_tools(fake_server, marker_messages_db)
+        args, _ = _SUCCESS_CALLS[tool]
+        with pytest.raises(ToolError):
+            asyncio.run(fake_server.tools[tool](**args))
+        line = _one_line(caplog)
+        assert line["tool"] == tool
+        assert line["outcome"] == "error"
+        assert line["counts"] == {}
+        assert _logged_cause(caplog, "OperationalError")
+        assert MARKER not in caplog.text
+
+    @pytest.mark.parametrize(("tool", "args", "cause"), _CALLER_ERRORS)
+    def test_caller_error_logs_one_error_line_and_its_cause(
+        self, caplog, fake_server, marker_messages_db, tool, args, cause
+    ):
+        caplog.set_level(logging.DEBUG)
+        _register_completion_tools(fake_server, marker_messages_db)
+        with pytest.raises(ToolError):
+            asyncio.run(fake_server.tools[tool](**args))
+        line = _one_line(caplog)
+        assert line["tool"] == tool
+        assert line["outcome"] == "error"
+        assert _logged_cause(caplog, cause)
+        assert MARKER not in caplog.text
+
+    def test_reaped_and_ambiguous_ids_log_their_cause(self, caplog, fake_server, tmp_path):
+        """The other ``ToolError`` paths of the two ID readers: a reaped
+        thread or message, and a Message-ID two files claim."""
+        caplog.set_level(logging.DEBUG)
+        db_path = tmp_path / "reaped.db"
+        conn = _open_db(db_path)
+        _insert_marker_message(conn)
+        _insert_marker_message(conn, variant="b")
+        insert_reaped(
+            conn,
+            message_id=f"gone-{MARKER}",
+            thread_id=f"t-gone-{MARKER}",
+            reaped_at=RECENT_REAP_AT,
+        )
+        conn.close()
+        _register_completion_tools(fake_server, Database(str(db_path)))
+        tools = fake_server.tools
+        calls = [
+            (tools["get_message"], {"message_id": _MARKER_MESSAGE_ID}, "ambiguous Message-ID"),
+            (tools["get_message"], {"message_id": f"gone-{MARKER}"}, "get_message failed: reaped"),
+            (tools["get_thread"], {"thread_id": f"t-gone-{MARKER}"}, "get_thread failed: reaped"),
+        ]
+        for handler, args, cause in calls:
+            caplog.clear()
+            with pytest.raises(ToolError):
+                asyncio.run(handler(**args))
+            assert _one_line(caplog)["outcome"] == "error"
+            assert _logged_cause(caplog, cause)
+            assert MARKER not in caplog.text
+
+    def test_decorator_leaves_every_tool_schema_unchanged(self, monkeypatch, empty_db):
+        """FastMCP builds each tool's schemas and description from the
+        handler: the listing with ``timed_tool`` must equal the listing
+        with it replaced by a no-op."""
+
+        def listing() -> dict[str, dict]:
+            server = FastMCP("schema-test")
+            _register_completion_tools(server, empty_db)
+
+            async def run():
+                async with Client(server) as client:
+                    return await client.list_tools()
+
+            return {
+                t.name: {
+                    "description": t.description,
+                    "input": t.input_schema,
+                    "output": t.output_schema,
+                }
+                for t in asyncio.run(run())
+            }
+
+        timed = listing()
+        monkeypatch.setattr(
+            "src.lib.timings.timed_tool", lambda *_a, **_k: lambda fn: fn, raising=False
+        )
+        untimed = listing()
+        assert set(timed) == set(_COMPLETION_TOOLS)
+        for tool in _COMPLETION_TOOLS:
+            assert timed[tool] == untimed[tool], tool
+        assert set(timed["query_messages"]["input"]["properties"]) >= {"sender", "cursor"}
