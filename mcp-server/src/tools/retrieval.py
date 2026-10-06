@@ -425,8 +425,9 @@ def register_retrieval_tools(server, db):
         Get one message's own headers and indexed body, one page of the
         body at a time.
 
-        Before calling, disclose that this content read may also return
-        bounded parent-thread context when the message has no indexed body,
+        For reads within a filtered or exhaustive review, disclose before
+        calling that this content read may also return bounded parent-thread
+        context when the message has no indexed body,
         including other messages outside the requested sender/date scope.
         This context reaches the calling model, which may be remote. If
         that exceeds the requested or approved scope, ask before this call;

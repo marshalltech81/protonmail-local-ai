@@ -114,7 +114,7 @@ def _registered_tools() -> dict[str, Callable[..., Any]]:
         ("get_thread", "requested or approved scope"),
         ("search_attachments", "Before a no-query coverage scan"),
         ("search_attachments", "maximum number of attachment previews"),
-        ("get_message", "Before calling"),
+        ("get_message", "For reads within a filtered or exhaustive review"),
         ("get_message", "other messages outside the requested sender/date scope"),
         ("get_message", "ask before this call"),
         ("query_messages", "body reads can also return parent-thread context"),

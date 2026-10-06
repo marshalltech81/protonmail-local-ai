@@ -470,8 +470,9 @@ found` ([Reaped sources](#reaped-sources)).
 | `limit` | int | `10` | Messages per page; clamped to `[1, 50]` |
 
 ### `get_message`
-Before calling, disclose that this content read may also return bounded
-parent-thread context when the message has no indexed body, including
+For reads within a filtered or exhaustive review, disclose before calling
+that this content read may also return bounded parent-thread context when
+the message has no indexed body, including
 other messages outside the requested sender/date scope. This context
 reaches the calling model, which may be remote. If that exceeds the
 requested or approved scope, ask before the call: a message ID or body
