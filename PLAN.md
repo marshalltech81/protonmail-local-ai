@@ -374,9 +374,11 @@ and supply-chain work. Milestone *Operations and hardening*: #488,
 #697, #698, #777, #778, #765, #767, #769. Done: #768 (`make status`
 shows each provider as LOCAL or REMOTE, #830), #780 (#829), dependency
 and base-image digest refresh (#828), and mbsync on Debian trixie
-(#833). Open decisions: the runtime base images, staying on Debian or
-moving to Alpine or distroless (#835), and bounding review rounds for
-test and eval-harness PRs (#838).
+(#833). Open decisions: the runtime base images (#835), and bounding
+review rounds for test and eval-harness PRs (#838). Until the owner
+decides #835, the AGENTS.md constraint "Do not switch runtime images to
+Alpine" stands, and no image moves to Alpine or distroless. #835 records
+the options, distroless included, for that decision only.
 
 ## Not doing (decided 2026-09-26)
 
