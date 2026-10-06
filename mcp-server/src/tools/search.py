@@ -762,6 +762,13 @@ def register_search_tools(
         tool LOCATES attachments and previews their extracted text; none
         of the three returns the whole document.
 
+        Check each result's ``extraction_status``. Failed, skipped or
+        unsupported extraction means unavailable evidence, not that the
+        attachment says nothing relevant. Leave ``extracted_only`` false
+        when checking coverage. There is no pagination beyond the
+        50-result cap, so report limited results and unread document text
+        as coverage limits; do not claim an exhaustive attachment audit.
+
         Args:
             query: Text to match against filename, MIME type, and
                    extracted attachment text. Omit to list by filter

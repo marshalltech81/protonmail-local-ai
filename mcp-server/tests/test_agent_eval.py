@@ -81,6 +81,28 @@ def _registered_tools() -> dict[str, Callable[..., Any]]:
     return cast(dict[str, Callable[..., Any]], server.tools)
 
 
+@pytest.mark.parametrize(
+    ("tool", "guidance"),
+    [
+        ("query_messages", "until ``has_more`` is false"),
+        ("query_messages", "exact address"),
+        ("query_messages", "does not prove exhaustive coverage of a topic"),
+        ("query_messages", "different threads and senders"),
+        ("get_thread", "``body_omitted_chars``"),
+        ("get_thread", "``next_offset`` is null"),
+        ("get_message", "``body: null``"),
+        ("get_message", "``indexed_thread_text`` is conversation context"),
+        ("search_attachments", "``extraction_status``"),
+        ("search_attachments", "no pagination"),
+    ],
+)
+def test_exhaustive_workflow_guidance_is_in_registered_descriptions(tool, guidance) -> None:
+    # Contract only: scripted traces cannot establish that a live agent
+    # follows these instructions (#803).
+    description = " ".join(inspect.getdoc(_registered_tools()[tool]).split())
+    assert guidance in description
+
+
 def test_every_scenario_has_one_reference_trace() -> None:
     traced = [t["scenario"] for t in TRACES]
     assert sorted(traced) == sorted(SCENARIOS)

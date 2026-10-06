@@ -241,7 +241,11 @@ def register_retrieval_tools(server, db):
         count and, when more remain, the ``offset`` for the next call.
         Each body is cut at 4,000 characters, with a marker saying how
         much was left out; long header values and lists are shortened the
-        same way. ``get_message`` pages through a full body.
+        same way. When a message's ``body_omitted_chars`` is positive,
+        call ``get_message`` with its claimant ID and follow that tool's
+        ``next_offset`` until null to read the rest of its indexed body.
+        For the whole conversation, also page this tool until its own
+        ``next_offset`` is null. Report unread pages as a coverage limit.
 
         DO NOT use this to read attachment content (PDFs, OCR'd
         images, scans). It returns the message bodies only; the
@@ -424,7 +428,11 @@ def register_retrieval_tools(server, db):
         with each ``next_offset`` in turn returns the whole body.
         Attachment text is NOT included here; use get_evidence or
         ask_mailbox for attachment content. When no body chunks are
-        indexed for the message, falls back to parent-thread context.
+        indexed for the message, ``body: null`` means no indexed body;
+        ``indexed_thread_text`` is conversation context, not this
+        message's text. Report this gap rather than attributing the
+        context to this message or treating a missing body as proof
+        that the message contained no relevant evidence.
 
         ``message_id`` is a ``Claimant ID`` (the Message-ID plus
         ``#`` and a short hash, which names exactly one message) or the
@@ -711,7 +719,20 @@ def register_retrieval_tools(server, db):
         returned, and ``has_more``. When ``has_more`` is true, call
         again with the SAME filters plus ``cursor`` set to the returned
         ``next_cursor``. Never report a partial page as the complete
-        answer — use ``total_matches`` for counts.
+        answer. To examine every match, continue until ``has_more`` is
+        false; a count of these exact criteria needs only ``total_matches``.
+        An exhausted keyword query does not prove exhaustive coverage of
+        a topic: consider alternate wording, read candidate messages,
+        and distinguish messages from threads or distinct bills/items.
+
+        For a person, resolve the intended contact with ``find_contact``
+        and prefer their exact address: a name or substring can match
+        unrelated people. For outstanding-item questions, check for
+        completion, corrections and reopening in different threads and
+        senders before calling an item open or closed. A sent request or
+        delivered advice does not establish that the action was completed.
+        State the scope and any unread pages, missing indexed bodies or
+        unavailable attachment text instead of claiming full coverage.
 
         Args:
             sender: From address. A full address ("jane@example.com")

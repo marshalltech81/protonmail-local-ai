@@ -377,6 +377,12 @@ passages of its extracted text, each capped at 1600 characters) or
 locates attachments and previews their extracted text; none of the
 three returns the whole document.
 
+Check `extraction_status` and leave `extracted_only=false` when assessing
+coverage: failed, skipped or unsupported extraction means unavailable
+evidence, not absence of relevant content. There is no pagination beyond
+the 50-result cap. Report limited results and unread document text as
+coverage limits rather than claiming an exhaustive attachment audit.
+
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `query` | string | none | Match against filename, MIME type, and extracted text; omit to list by filter alone |
@@ -421,6 +427,11 @@ per role, 10 thread participants, and 10 References are listed (with a
 "+N more" count), and any header value past 500 characters is cut with
 a marker. The page is read from one database snapshot.
 
+To examine the whole conversation, follow this tool's `next_offset`
+until null. When a message has `body_omitted_chars > 0`, call
+`get_message` with its claimant ID and follow that tool's `next_offset`
+until null too. Report unread message or body pages as coverage limits.
+
 Messages of the thread reaped under mirror retention are listed by
 claimant ID and reap time in `reaped_messages`; a fully reaped thread
 fails with `Thread reaped from the index` rather than `Thread not
@@ -442,6 +453,10 @@ per-message chunk store (overlap between adjacent chunks is removed by
 character offset). The index keeps no raw per-message body, so this is
 the indexed text **after quoted-reply stripping**; it falls back to
 thread context when no body chunks are indexed for the message.
+In that case, `body: null` means no indexed body, and
+`indexed_thread_text` is conversation context, not this message's text.
+Report the gap; do not attribute the context to the message or treat
+the missing body as proof that it contained no relevant evidence.
 Attachment text is not included — use `get_evidence` for that. The
 prose ends its header block with the raw source file's path, size, and
 SHA-256.
@@ -607,6 +622,9 @@ of the address or display name; the display name compares casefolded
 (Unicode caseless). The response names the mode used for
 each filter.
 
+Resolve the intended person with `find_contact` and prefer their exact
+address: names and substrings can include unrelated people.
+
 **Response contract.** The response states the filter interpretation,
 `total_matches` (over the whole set), `returned` with the match range,
 and `has_more`; when more remain it includes `next_cursor`. Each
@@ -622,6 +640,19 @@ indexed while a caller pages never shift or duplicate later pages. A
 cursor is bound to the filters it was issued for; a cursor from
 another query, or a malformed one, is rejected with an error rather
 than silently restarting.
+
+To examine every match, follow `next_cursor` until `has_more` is false.
+A count of the exact filter criteria needs only `total_matches`; reading
+every page is necessary when classifying or examining each message.
+Exhausting a keyword query does not establish exhaustive coverage of a
+topic. Consider alternate wording, read candidate messages, and keep the
+counting unit explicit (messages, threads, or distinct bills/items).
+
+For outstanding-item questions, look for completion, corrections and
+reopening across threads and senders. A sent request or delivered advice
+does not prove the action was completed. State the scope and disclose
+unread pages, missing indexed bodies and unavailable attachment text
+instead of claiming full coverage.
 
 ---
 
