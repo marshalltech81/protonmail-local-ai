@@ -246,6 +246,16 @@ class TestConfig:
             with pytest.raises(ConfigError, match="managed settings"):
                 load_layer("JUDGE", self.ENV)
 
+    def test_token_cap_defaults_to_the_anthropic_budget(self):
+        """#862: the cap becomes CLAUDE_CODE_MAX_OUTPUT_TOKENS, the
+        request's max_tokens, which the always-thinking Claude models
+        spend on thinking too, so it defaults to anthropic mode's 16000;
+        an explicit JUDGE_MAX_TOKENS still wins."""
+        cfg = load_layer("JUDGE", self.ENV)
+        assert cfg is not None and cfg.max_tokens == 16000
+        cfg = load_layer("JUDGE", {**self.ENV, "JUDGE_MAX_TOKENS": "4096"})
+        assert cfg is not None and cfg.max_tokens == 4096
+
     def test_label_records_the_cli_and_its_version(self):
         cfg = load_layer("JUDGE", self.ENV)
         assert cfg is not None

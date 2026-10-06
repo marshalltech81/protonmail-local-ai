@@ -529,7 +529,8 @@ cap below, count launches, not model requests.
   the endpoint, or `default` for the SDK default (a remote provider);
   an empty one is refused (#750). It never reads the
   answerer's variables or key. Bounds: `JUDGE_TIMEOUT_SECS` (120),
-  `JUDGE_MAX_TOKENS` (16000 for `JUDGE_MODE=anthropic`, 2048 otherwise),
+  `JUDGE_MAX_TOKENS` (16000 for `JUDGE_MODE=anthropic` and `claude-cli`,
+  2048 otherwise),
   `JUDGE_MAX_INPUT_CHARS` (60,000), one call per case, no retries, one
   case at a time. Current Claude models think before the verdict and the
   thinking counts against `JUDGE_MAX_TOKENS`, so the anthropic default
@@ -587,8 +588,10 @@ cap below, count launches, not model requests.
   apply to every session whatever the flags). Managed settings delivered by MDM or from Anthropic's servers
   cannot be seen locally, so on a managed machine the judge may still
   carry organization instructions.
-  `JUDGE_MAX_TOKENS` becomes `CLAUDE_CODE_MAX_OUTPUT_TOKENS`: when a
-  reply reaches it, the CLI makes its own continuation attempts (up to
+  `JUDGE_MAX_TOKENS` becomes `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, the
+  request's output cap, which the always-thinking Claude models spend on
+  thinking as well as the verdict, so it defaults to 16000 as in
+  anthropic mode (#862). When a reply reaches it, the CLI makes its own continuation attempts (up to
   about four times the cap) before failing, which counts as
   `judge_truncated`. `ANSWER_EVAL_LIVE_CLAUDE=1 uv run pytest
   tests/test_answer_eval_cli_judge.py -k live_canaries` makes one real
