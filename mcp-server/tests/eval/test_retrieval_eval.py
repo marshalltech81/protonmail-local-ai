@@ -50,6 +50,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -199,6 +200,43 @@ def eval_embedder(eval_db: Database):
     return _embed
 
 
+class HybridResults:
+    """Each query's top-10 hybrid results, computed once per run (#840).
+
+    The per-query hybrid test and ``test_eval_summary`` both need them;
+    sharing them in memory halves the embed calls and searches. A failed
+    embed or search is kept too and raised again, so the summary does
+    not call the provider a second time for that query. Nothing is
+    written anywhere: a new run starts empty.
+    """
+
+    def __init__(self, db: Database, embed: Callable[[str], list[float]]) -> None:
+        self._db = db
+        self._embed = embed
+        self._results: dict[tuple[str, str], list | Exception] = {}
+
+    def __call__(self, query: EvalQuery) -> list:
+        key = (query.id, query.search_query)
+        if key not in self._results:
+            try:
+                self._results[key] = self._db.hybrid_search(
+                    query_text=query.search_query,
+                    query_embedding=self._embed(query.search_query),
+                    limit=10,
+                )
+            except Exception as e:
+                self._results[key] = e
+        result = self._results[key]
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+
+@pytest.fixture(scope="session")
+def hybrid_results(eval_db: Database, eval_embedder) -> HybridResults:
+    return HybridResults(eval_db, eval_embedder)
+
+
 def _missing_groups(results: list, groups: list[list[str]]) -> list[list[str]]:
     """Evidence groups with no thread anywhere in ``results``."""
     ranked = [r.thread_id for r in results]
@@ -241,7 +279,7 @@ def test_keyword_search_finds_expected_thread(eval_db: Database, eval_query: Eva
 
 
 def test_hybrid_search_finds_expected_thread(
-    eval_db: Database, eval_embedder, eval_query: EvalQuery
+    hybrid_results: HybridResults, eval_query: EvalQuery
 ) -> None:
     """Hybrid (BM25 + vector via RRF) is the default search mode the LLM
     sees through ``search_emails`` / ``ask_mailbox``. If it loses the
@@ -250,12 +288,7 @@ def test_hybrid_search_finds_expected_thread(
     required evidence group must be in the top 10."""
     if not eval_query.evidence_groups:
         pytest.skip(f"{eval_query.id}: no expected evidence — skip.")
-    embedding = eval_embedder(eval_query.search_query)
-    results = eval_db.hybrid_search(
-        query_text=eval_query.search_query,
-        query_embedding=embedding,
-        limit=10,
-    )
+    results = hybrid_results(eval_query)
     missing = _missing_groups(results, eval_query.evidence_groups)
     assert not missing, (
         f"{eval_query.id}: no thread from groups {missing} "
@@ -263,27 +296,23 @@ def test_hybrid_search_finds_expected_thread(
     )
 
 
-def test_eval_summary(eval_db: Database, eval_embedder, eval_queries: list[EvalQuery]) -> None:
+def test_eval_summary(hybrid_results: HybridResults, eval_queries: list[EvalQuery]) -> None:
     """Aggregate Hit@10, MRR and evidence recall@10 across the loaded
     query set.
 
     Always passes — this is a reporting test, not an assertion, so the
     summary appears in the run output regardless of how the per-query
-    tests above did. To compare two configurations (e.g. before/after a
-    knob change), capture the printed summary block from each run.
+    tests above did. It reuses the results those tests fetched
+    (``HybridResults``), searching only queries they did not run. To
+    compare two configurations (e.g. before/after a knob change),
+    capture the printed summary block from each run.
     """
     # (query id, first-hit rank, groups found in top 10, groups required)
     records: list[tuple[str, int | None, int, int]] = []
     for q in eval_queries:
         if not q.evidence_groups:
             continue
-        embedding = eval_embedder(q.search_query)
-        results = eval_db.hybrid_search(
-            query_text=q.search_query,
-            query_embedding=embedding,
-            limit=10,
-        )
-        ranked = [r.thread_id for r in results]
+        ranked = [r.thread_id for r in hybrid_results(q)]
         found = sum(1 for r in group_ranks(ranked, q.evidence_groups) if r is not None)
         records.append(
             (q.id, first_hit_rank(ranked, q.evidence_groups), found, len(q.evidence_groups))

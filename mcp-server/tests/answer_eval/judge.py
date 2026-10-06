@@ -41,7 +41,7 @@ from src.tools.outputs import AnswerStatement
 from tests.answer_eval.cases import DIMENSIONS, Case
 from tests.answer_eval.cli_judge import CliJudgeError
 from tests.answer_eval.config import LayerConfig
-from tests.answer_eval.runner import Passage
+from tests.answer_eval.runner import Passage, ProviderBillingError, is_billing_error
 
 # Bump on any change to the rubric, the prompt or the verdict schema:
 # runs graded under different versions are not comparable.
@@ -440,6 +440,9 @@ async def judge_answer(
     rejected, so the judge cannot credit a passage the answer cited for
     something else. ``coverage_note`` is the tool's own omission notice
     and ``omitted_facts`` the facts it may excuse (``build_judge_prompt``).
+    A billing or credit refusal, or a CLI judge's subscription usage
+    limit, raises ``ProviderBillingError`` to stop the run instead of
+    becoming an outcome (#839).
     """
     prompt = build_judge_prompt(
         case, answer, passages, [s.text for s in statements], coverage_note, omitted_facts
@@ -460,8 +463,15 @@ async def judge_answer(
     except InferenceTruncatedError:
         outcome.error = "judge_truncated"
     except (JudgeError, CliJudgeError) as e:
+        if e.category == "judge_cli_usage_limit":
+            # The subscription refused further use: every later judge
+            # call would fail too, so stop as for billing (#839).
+            raise ProviderBillingError("judge") from None
         outcome.error, outcome.detail = e.category, e.detail
     except Exception as e:
+        if is_billing_error(e):
+            # Out of credit: every later judge call would fail too (#839).
+            raise ProviderBillingError("judge") from None
         outcome.error = "judge_provider_error"
         outcome.detail = safe_provider_exception_text(e, [config.api_key])
     else:

@@ -42,6 +42,8 @@ from datetime import UTC
 from pathlib import Path
 from typing import Any
 
+import anthropic
+import openai
 from fastmcp.exceptions import ToolError
 from pydantic import ValidationError
 from src.lib.inference import TEMPLATE_RESERVE_TOKENS, InferenceTruncatedError, PromptBudget
@@ -57,6 +59,37 @@ RUN_STATUSES = ("ok", "tool_error", "timeout", "invalid_output", "runner_error",
 
 class NonSyntheticIndexError(RuntimeError):
     """The index is not the synthetic baseline corpus."""
+
+
+class ProviderBillingError(RuntimeError):
+    """A provider refused a call for billing, credit or a subscription
+    usage limit (#839): every later call would fail the same way, so the
+    run stops. Fixed text only."""
+
+    def __init__(self, layer: str) -> None:
+        super().__init__(
+            f"the {layer} provider refused a call for billing, credit or a usage limit; "
+            "the run stopped and no report was written"
+        )
+
+
+def is_billing_error(error: BaseException) -> bool:
+    """True for a provider's billing or credit refusal, matched by SDK
+    status-error type, HTTP status and the error body's ``type`` field;
+    never by the provider's message text.
+
+    - Anthropic: ``APIStatusError`` with status 402 and type
+      ``billing_error``. Anthropic has also answered an exhausted credit
+      balance with 400 ``invalid_request_error``, which only the message
+      tells apart from any other bad request, so that is not matched.
+    - OpenAI-compatible: ``APIStatusError`` with status 429 and type
+      ``insufficient_quota`` (a rate limit is 429 with another type).
+    """
+    if isinstance(error, anthropic.APIStatusError):
+        return error.status_code == 402 and error.type == "billing_error"
+    if isinstance(error, openai.APIStatusError):
+        return error.status_code == 429 and error.type == "insufficient_quota"
+    return False
 
 
 @dataclass(frozen=True)
@@ -97,16 +130,21 @@ class CaseRun:
     prompt_consistent: bool = True
     timings_ms: dict[str, float] = field(default_factory=dict)
     error_detail: str | None = field(default=None, repr=False)  # detail artifact only
+    billing_error: bool = False  # a call hit ``is_billing_error``: stop the run
 
 
 class RecordingInference:
-    """Inference client wrapper that records every request and reply."""
+    """Inference client wrapper that records every request and reply.
+
+    It sees the provider's exception before ``ask_mailbox`` turns it into
+    a ``ToolError``, so it notes a billing refusal there (#839)."""
 
     def __init__(self, inner: Any) -> None:
         self._inner = inner
         self.mode = inner.mode
         self.base_url = getattr(inner, "base_url", "")
         self.calls: list[InferenceCall] = []
+        self.billing_error = False
 
     async def complete(self, system: str, user: str) -> str:
         call = InferenceCall(system=system, user=user)
@@ -118,8 +156,9 @@ class RecordingInference:
         except InferenceTruncatedError as e:
             call.outcome, call.response = "truncated", e.partial
             raise
-        except BaseException:
+        except BaseException as e:
             call.outcome = "error"
+            self.billing_error = self.billing_error or is_billing_error(e)
             raise
         finally:
             call.ms = (time.perf_counter() - start) * 1000
@@ -285,6 +324,7 @@ async def run_case(case: Case, ctx: RunContext) -> CaseRun:
     total_ms = (time.perf_counter() - start) * 1000
 
     run.calls = recorder.calls
+    run.billing_error = recorder.billing_error
     if maps:
         run.passages = {label: _passage(ref) for label, ref in maps[-1].items()}
     if run.calls:

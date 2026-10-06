@@ -233,7 +233,10 @@ baseline: sync-indexer sync-mcp
 # configured providers, so it is never part of `make test` or CI. EVAL_ARGS
 # passes extra flags (e.g. `--case ask-roof-total --detail <path>`);
 # relative --out/--detail paths resolve against the repository root, and
-# the arguments are checked (--preflight) before the index is built.
+# the arguments are checked (--preflight) before the index is built. The
+# preflight prints the planned provider calls and models and refuses a
+# run over EVAL_MAX_CALLS (optional; e.g. `make eval-answers
+# EVAL_MAX_CALLS=80`), so no index is built for a refused run (#839).
 EVAL_OUT ?= $(CURDIR)/.answer-eval
 eval-answers: sync-indexer sync-mcp
 	@dir=$$(mktemp -d) && stamp=$$(date -u +%Y%m%dT%H%M%SZ) && \

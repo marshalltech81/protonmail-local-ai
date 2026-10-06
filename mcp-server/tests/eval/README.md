@@ -76,6 +76,12 @@ floor; with them, a plain `pytest -m eval` selects no tests. `-s` keeps
 pytest from capturing the summary block printed by `test_eval_summary`.
 Without `MCP_EVAL_DB`, every test skips.
 
+Each query with expected evidence costs one embed call and one hybrid
+search per run: the per-query hybrid test and the summary share the
+results in memory (#840). A failed embed or search is shared too: the
+summary raises the same error without calling again. Nothing is cached
+between runs.
+
 ## Comparing two configurations
 
 The summary block ends with a per-query table of first-hit rank and
@@ -459,6 +465,56 @@ embedded) in a temporary directory, runs the cases one at a time, and
 writes a mode-600 JSON report. Run it on the host, so a host-side server
 is `127.0.0.1`, not `host.docker.internal`.
 
+#### Cost guard (#839)
+
+A run calls paid providers. Before the index build and before the first
+call, it prints how many calls it will make and to which models (the
+`INFERENCE_MODEL` and `JUDGE_MODEL` settings), for example:
+
+```text
+Planned provider calls: 38 answer calls to <model> (up to 38 more for citation repairs) and 38 judge calls to <model>; at most 114 provider calls.
+```
+
+That is one answer call per selected case, plus a second (a citation
+repair) for each case whose first answer fails the citation check, and
+one judge call per case unless `JUDGE_MODE=none`. Select fewer cases
+with `--case` (in `EVAL_ARGS`) to cut the count. A case skipped at run
+time because the runtime budget ran out makes no calls. Under `make`,
+the line prints twice: once for the argument check, once for the run.
+
+The API modes make one request per call (the SDKs' own retries are
+off), so their figure is exact. A CLI judge (`claude-cli`, `codex-cli`)
+is counted per launch instead, and the line says "judge CLI launches":
+one launch can make several model requests against the subscription
+(the claude CLI retries a reply cut off at `JUDGE_MAX_TOKENS` on its
+own), and neither CLI has a flag that caps them (Claude Code 2.1.291
+and Codex 0.160.1 were checked). For those modes the figure, and the
+cap below, count launches, not model requests.
+
+- `EVAL_MAX_CALLS` (optional, a whole number of at least 1) caps the
+  run: when the most calls it can make (the "at most" figure, repairs
+  included) exceed it, the run exits 3 before the index is built or any
+  provider is called. With a CLI judge it caps answer calls plus judge
+  CLI launches, as above. `make eval-answers EVAL_MAX_CALLS=80` or an
+  exported variable both work. Unset means no cap.
+- A provider's billing or credit refusal stops the run at once with
+  `answer evaluation: the answering provider refused a call for
+  billing, credit or a usage limit ...` (or `the judge provider ...`)
+  and exit 2, and no report is written, rather than recording every
+  remaining case as an error. A subscription judge's usage-limit stop
+  (`judge_cli_usage_limit`, below) stops the run the same way.
+  It is matched by the SDK's status error, HTTP status and error type,
+  never by the provider's message text: Anthropic 402 `billing_error`,
+  and OpenAI-compatible 429 `insufficient_quota`. Anthropic has also
+  answered an exhausted credit balance with 400
+  `invalid_request_error`, which only the message text tells apart from
+  any other bad request, so that response is still recorded per case
+  as a `tool_error` (or `judge_provider_error`).
+- Use a separate API key for evaluation runs, with its own credit or
+  spending limit where the provider offers one. The live server's
+  `ask_mailbox` and other inference tools share the inference key, so a
+  run that exhausts it would take them down too.
+
 - **Answerer** (`INFERENCE_*`): the server's own variables and defaults
   (`INFERENCE_MAX_TOKENS`, `INFERENCE_CONTEXT_TOKENS`,
   `INFERENCE_TIMEOUT_SECS`, `INFERENCE_STRUCTURED_OUTPUT`), key in
@@ -498,8 +554,10 @@ is `127.0.0.1`, not `host.docker.internal`.
   provider switches, reasoning settings such as
   `CLAUDE_CODE_EFFORT_LEVEL` and telemetry exporters (`OTEL_*`) never
   reach a judge call. A
-  logged-out CLI and a usage-limit stop are the judge errors
-  `judge_cli_logged_out` and `judge_cli_usage_limit`; a CLI missing from
+  logged-out CLI is the judge error `judge_cli_logged_out`; a
+  usage-limit stop (`judge_cli_usage_limit`) stops the whole run, as a
+  billing refusal does (see Cost guard), since every later call would
+  hit the same limit; a CLI missing from
   `PATH` or not logged in with a subscription is a configuration error.
   The judge identity records `cli` and `cli_version` (and, for Claude,
   the `served_models` the CLI reports), so a different CLI, version or
@@ -678,7 +736,8 @@ both refuse a path inside the repository other than `.answer-eval/`.
 Delete old runs with `rm -r .answer-eval`. Never upload either.
 
 Exit codes: `run` 0 complete, 2 incomplete (any error, skip or judge
-error), 3 configuration error; `compare` 0, 1 on a per-case regression
+error, or a billing stop, which writes no report), 3 configuration
+error (including a run over `EVAL_MAX_CALLS`); `compare` 0, 1 on a per-case regression
 with `--fail-on-regression`, 2 when the runs differ in case file, case
 selection, index, rubric or judge (not comparable) unless `--allow-incompatible`,
 3 when a report is unreadable or malformed. A run graded under an

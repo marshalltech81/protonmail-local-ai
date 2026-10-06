@@ -5,6 +5,8 @@ and the whole run under ``max_runtime_secs``, each call capped by what is
 left of it: once it is spent, the
 remaining cases are recorded as ``skipped`` (and unjudged answers as
 ``judge_runtime_budget_exhausted``), which counts against every rate.
+A provider's billing or credit refusal (``runner.is_billing_error``)
+stops the run with ``ProviderBillingError`` instead (#839).
 Log lines carry case IDs and fixed categories only.
 """
 
@@ -19,7 +21,7 @@ from tests.answer_eval.config import LayerConfig
 from tests.answer_eval.graders import attribute, budget_omitted_facts, grade_run
 from tests.answer_eval.judge import JudgeOutcome, judge_answer
 from tests.answer_eval.report import case_record, detail_record
-from tests.answer_eval.runner import CaseRun, RunContext, run_case
+from tests.answer_eval.runner import CaseRun, ProviderBillingError, RunContext, run_case
 
 log = logging.getLogger("answer_eval")
 
@@ -44,6 +46,9 @@ async def evaluate(
             # No call may outlive the run's budget.
             timeout = min(ctx.case_timeout_secs, remaining)
             run = await run_case(case, dataclasses.replace(ctx, case_timeout_secs=timeout))
+            if run.billing_error:
+                # Out of credit: every later call would fail too (#839).
+                raise ProviderBillingError("answering") from None
         det = grade_run(case, run)
 
         remaining = deadline - clock()
