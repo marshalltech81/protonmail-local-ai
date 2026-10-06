@@ -377,13 +377,16 @@ passages of its extracted text, each capped at 1600 characters) or
 locates attachments and previews their extracted text; none of the
 three returns the whole document.
 
-Check `extraction_status`: failed, skipped or unsupported extraction means
-unavailable evidence, not absence of relevant content. To assess coverage,
+Check `extraction_status`: any value other than `success` (`failed`,
+`unsupported`, `too_large`, `empty` or null) means no extracted text is
+available, not absence of relevant content. To assess coverage,
 make a separate call without `query`, with the applicable structured
 filters and `extracted_only=false`. A text query cannot reveal unextracted
 files whose filename and MIME type do not match. There is no pagination beyond
 the 50-result cap. Report limited results and unread document text as
 coverage limits rather than claiming an exhaustive attachment audit.
+With `from_addr`, sender filtering happens after a bounded candidate scan,
+so even fewer than 50 results (including zero) can omit matching attachments.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
@@ -627,11 +630,13 @@ of the address or display name; the display name compares casefolded
 (Unicode caseless). The response names the mode used for
 each filter.
 
-`find_contact` supplies candidates across all roles and folders; its top
-hit need not match the requested sender or recipient. Check plausible
-exact addresses against the requested role and folder with `query_messages`
-before selecting the intended person's address. Ask the user if identity
-remains ambiguous rather than combining unrelated namesakes.
+When the exact address is unknown, enumerate name-substring matches in the
+requested sender/recipient role and folder with `query_messages`, following
+the disclosure and paging guidance below. `find_contact` is capped and
+ranks across all roles/folders, so it cannot establish the complete candidate
+set. Prefer the intended person's exact address once resolved. Report
+truncated headers or unresolved identities as limits; ask the user if
+identity remains ambiguous rather than combining unrelated namesakes.
 
 **Response contract.** The response states the filter interpretation,
 `total_matches` (over the whole set), `returned` with the match range,
@@ -660,6 +665,7 @@ paging or reading bodies, tell the user the scope and how many messages
 will be read: tool results go to the calling model, which may be remote.
 Prefer the smallest sufficient sample when it answers the question;
 a sample cannot establish an exhaustive content audit.
+
 A count of the exact filter criteria needs only `total_matches`; reading
 every page is necessary when classifying or examining each message.
 Exhausting a keyword query does not establish exhaustive coverage of a

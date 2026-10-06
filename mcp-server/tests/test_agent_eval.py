@@ -101,6 +101,11 @@ def _registered_tools() -> dict[str, Callable[..., Any]]:
         ("get_thread", "``reaped_messages_truncated``"),
         ("get_thread", "all currently indexed messages"),
         ("search_attachments", "omit ``query``"),
+        ("query_messages", "enumerate name-substring matches"),
+        ("query_messages", "``find_contact`` is capped"),
+        ("search_attachments", "anything other than ``success``"),
+        ("search_attachments", "``too_large``, ``empty`` or null"),
+        ("search_attachments", "fewer than 50 results"),
     ],
 )
 def test_exhaustive_workflow_guidance_is_in_registered_descriptions(tool, guidance) -> None:

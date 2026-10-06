@@ -740,12 +740,15 @@ def register_retrieval_tools(server, db):
         the indexed results observed during the run, not a point-in-time
         complete mailbox.
 
-        For a person, ``find_contact`` supplies candidates across all
-        roles and folders; do not blindly select its top hit. Check
-        plausible exact addresses against the requested sender/recipient
-        role and folder with this tool, then prefer the intended person's
-        exact address. Ask the user if identity remains ambiguous rather
-        than combining unrelated namesakes. For outstanding-item questions,
+        When a person's exact address is unknown, enumerate name-substring
+        matches in the requested sender/recipient role and folder with
+        this tool, following the disclosure and paging guidance above.
+        ``find_contact`` is capped and ranks across all roles/folders;
+        it cannot establish the complete candidate set. Prefer the
+        intended person's exact address once resolved. Report truncated
+        headers or unresolved identities as limits; ask the user if
+        identity remains ambiguous rather than combining namesakes.
+        For outstanding-item questions,
         check for completion, corrections and reopening in different threads and
         senders before calling an item open or closed. A sent request or
         delivered advice does not establish that the action was completed.
