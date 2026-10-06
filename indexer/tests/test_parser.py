@@ -532,15 +532,17 @@ class TestParseEmail:
 
 
 def _legacy_dir(name: str) -> Path:
-    """The directory isync 1.4.4 writes a folder to under
-    ``SubFolders Legacy`` (``maildir_join_path``): the first component as
-    it is, then ``/.`` before each later one."""
+    """The directory isync writes a folder to under ``SubFolders Legacy``
+    (``maildir_join_path``, unchanged from 1.4.4 to 1.5.1): the first
+    component as it is, then ``/.`` before each later one."""
     first, *rest = name.split("/")
     return Path(first, *(f".{component}" for component in rest))
 
 
-# Folder names as Bridge lists them (isync 1.4.4 passes modified UTF-7
-# through undecoded), covering every shape the layout treats differently:
+# Folder names as isync stores them, covering every shape the layout
+# treats differently. isync 1.5.1 (#833) decodes Bridge's modified UTF-7
+# to UTF-8 (Folders/Café, Folders/A&B); the encoded spelling isync 1.4.4
+# kept (Folders/Caf&AOk-) remains on an install not yet migrated. Also:
 # top level, nested, Maildir's own directory names as children, dots, a
 # leading dot, "!", spaces, INBOX below the top level and deep nesting.
 LEGACY_FOLDER_NAMES = [
@@ -560,6 +562,8 @@ LEGACY_FOLDER_NAMES = [
     "Folders/x!y",
     "Folders/with space",
     "Folders/Caf&AOk-",
+    "Folders/Café",
+    "Folders/A&B",
     "Folders/INBOX",
     "Folders/Deep/Er/Est",
 ]

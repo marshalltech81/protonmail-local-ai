@@ -58,7 +58,8 @@ The stack runs three containers beside the Proton Mail Bridge app:
   mode since the Bridge container was removed, #716), IMAP on the
   host's loopback over implicit TLS, reached through
   `host.docker.internal`. Tested on macOS; Linux is not supported.
-- **mbsync** — pull-only into Maildir, `chmod go+r` after each sync;
+- **mbsync** — on Debian trixie with isync 1.5.1 (#833); pull-only
+  into Maildir, `chmod go+r` after each sync;
   no trust on first use: the certificate must match the
   operator-supplied `BRIDGE_CERT_FINGERPRINT` on every start, then a
   persistent pin.
@@ -253,12 +254,21 @@ answers real knowledge questions, and identify why failures occur.
    citation accuracy, pagination, unnecessary calls. **Partly done**
    (#452, #494, #560; answer evaluation #658). The `ask_mailbox`
    answer contract (#811, #817) raised the synthetic answer eval from
-   17/34 to 28–29/34 deterministic passes with no regressions; the
+   17/34 to 28–29/34 deterministic passes with no regressions. The
    exhaustive-workflow tool guidance (#800, #816) awaits a live
-   before/after run (#803). Remaining: #283 (pass thresholds,
-   live-client trace replay, latency and cost), #604, #655, #656,
-   #657, #770, #771, #818, #820; real-mail failures to explain: #774,
-   #776. Evals use the synthetic corpus only; questions from real
+   before/after run (#803).
+
+   The answer eval now has 38 cases: evidence-scope decoys for #755,
+   and `disclose_missing` grading on the server's coverage note (#820,
+   #822). Its judge can run on the Claude or Codex subscription CLIs
+   (#806, #810). One run varies by about ±1–2 cases, so comparisons use
+   three runs per side, per case. The #755 baseline is 29, 27 and 28 of
+   38.
+
+   Remaining: #283 (pass thresholds, live-client trace replay, latency
+   and cost), #655, #656, #657, #770, #771, #813, #814, #818, #826,
+   #834, #837 (the judge cannot see passage headers), #839 (eval cost
+   guard). Real-mail failures to explain: #774, #776. Evals use the synthetic corpus only; questions from real
    mail would send mail to the model provider and wait on an owner
    decision (held 2026-10-02, #785). Answer quality
    stays a manual grade.
@@ -362,7 +372,13 @@ input by definition.
 Not a phase: the running deployment's resource, throughput, privacy
 and supply-chain work. Milestone *Operations and hardening*: #488,
 #697, #698, #777, #778, #765, #767, #769. Done: #768 (`make status`
-shows each provider as LOCAL or REMOTE, #830), #780 (#829).
+shows each provider as LOCAL or REMOTE, #830), #780 (#829), dependency
+and base-image digest refresh (#828), and mbsync on Debian trixie
+(#833). Open decisions: the runtime base images (#835), and bounding
+review rounds for test and eval-harness PRs (#838). Until the owner
+decides #835, the AGENTS.md constraint "Do not switch runtime images to
+Alpine" stands, and no image moves to Alpine or distroless. #835 records
+the options, distroless included, for that decision only.
 
 ## Not doing (decided 2026-09-26)
 
@@ -690,6 +706,21 @@ removed Bridge container are kept as history.
     Restricting evidence was rejected (it drops the corrections an
     answer depends on), as was keeping it unlabelled (out-of-scope
     citations stay invisible). Synthetic decoy eval cases come first.
+    Step 1 is done (#822): decoy cases for a sender filter, a date
+    filter and a mixed Trash/INBOX thread, plus a three-run baseline.
+    Step 2 also puts the active filters in the prompt as a scope line
+    (folding in #779) and keeps the hidden-scope case next to its
+    scope-stated companion. #837 lands first, so the judge sees the
+    passage headers, and the baseline is re-run (owner, 2026-10-06).
+
+30. **mbsync on Debian trixie (2026-10-06, #833):** isync 1.5.1,
+    OpenSSL 3.5. The #570 log redaction was re-derived from isync
+    1.5.1's message formats. The template uses `TLSType IMAPS`, with the
+    same meaning as before. isync 1.5 decodes Bridge's modified UTF-7
+    folder names to UTF-8 directory names. An existing install with
+    encoded folders migrates by renaming them (never deleting) and
+    rebuilding the index (`docs/setup.md`). The live mailbox had none,
+    and the owner accepts a reindex if needed.
 
 ## Notes for Agents
 
