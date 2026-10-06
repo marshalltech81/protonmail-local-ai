@@ -25,7 +25,7 @@ get_message's included (#489).
 from datetime import date, datetime
 from typing import Any, Literal
 
-from mcp.types import CallToolResult, TextContent
+from mcp.types import CallToolResult, TextContent, ToolAnnotations
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ..lib.sqlite import (
@@ -45,6 +45,19 @@ MAX_LISTED = 10
 # reply header) before it is cut with a marker. IDs are never cut: a
 # shortened ID would not chain to the next call.
 HEADER_CHAR_LIMIT = 500
+
+# Safety annotations every tool declares (#899): the server reads a
+# read-only SQLite index and changes nothing, and its interaction domain
+# is the mailbox, including for the tools that call the operator-chosen
+# embed, rerank or inference provider. A tool that cannot honour all
+# three needs owner approval and its own classification.
+READ_ONLY_TOOL = ToolAnnotations(read_only_hint=True, destructive_hint=False, open_world_hint=False)
+
+
+def read_only(title: str) -> ToolAnnotations:
+    """``READ_ONLY_TOOL`` plus the tool's human-readable ``title``, which
+    Anthropic's directory policy requires next to the hints."""
+    return READ_ONLY_TOOL.model_copy(update={"title": title})
 
 
 class _Output(BaseModel):

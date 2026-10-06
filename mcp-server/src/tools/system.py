@@ -12,7 +12,7 @@ from fastmcp.exceptions import ToolError
 from mcp.types import CallToolResult
 
 from ..lib import timings
-from .outputs import MailboxStatusOutput, QueueCounts, tool_result
+from .outputs import MailboxStatusOutput, QueueCounts, read_only, tool_result
 
 log = logging.getLogger("mcp.tools.system")
 
@@ -179,7 +179,10 @@ def _conflict_lines(out: MailboxStatusOutput) -> list[str]:
 
 
 def register_system_tools(server, db):
-    @server.tool(output_schema=MailboxStatusOutput.model_json_schema())
+    @server.tool(
+        output_schema=MailboxStatusOutput.model_json_schema(),
+        annotations=read_only("Get Mailbox Status"),
+    )
     @timings.timed_tool("get_mailbox_status")
     async def get_mailbox_status() -> CallToolResult:
         """

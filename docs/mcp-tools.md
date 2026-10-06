@@ -87,6 +87,93 @@ Arguments are checked against each tool's input schema before the tool
 runs: a wrong type or an argument the tool does not declare is an error
 result naming the problem.
 
+## Safety annotations
+
+Every tool, the experimental `brief_issue` and `check_conclusion`
+included, declares the same three MCP safety hints plus its own
+human-readable `title` (#899):
+
+```json
+{"title": "Search Emails", "readOnlyHint": true, "destructiveHint": false, "openWorldHint": false}
+```
+
+Each tool is read-only, non-destructive and closed-world. Without these
+hints the MCP defaults apply (`readOnlyHint: false`,
+`destructiveHint: true`, `openWorldHint: true`), and some clients block
+the call. ChatGPT did on 2026-10-06, refusing a `query_messages` call
+because "we couldn't determine the safety status of the request".
+
+- **Read-only.** The MCP specification defines `readOnlyHint` as "If
+  true, the tool does not modify its environment." OpenAI's
+  [Apps SDK reference](https://developers.openai.com/apps-sdk/reference)
+  describes it as a tool that "only retrieves or computes information
+  and doesn't create, update, delete, or send data outside the
+  conversation." The server opens SQLite `?mode=ro` and has no IMAP
+  access, and no tool sends, moves, flags, drafts or deletes mail.
+  The server's own diagnostic logging (the [`mcp.timings`
+  line](#stage-timings-in-the-server-log), warnings) does not make a
+  tool a writer. It is operational telemetry that carries no
+  content-bearing arguments or mail (only allowlisted, validated values
+  such as modes, limits and ISO dates; see `log_tool_call`), like an
+  access log, not an effect of the tool. Neither
+  definition mentions logs.
+- **Not destructive.** `destructiveHint: false`. No tool deletes or
+  overwrites anything.
+- **Closed world.** The specification says: "If true, this tool may
+  interact with an 'open world' of external entities. If false, the
+  tool's domain of interaction is closed." OpenAI describes an
+  open-world tool as one that "accesses the public internet or
+  open-ended external entities". The owner chose `openWorldHint: false`
+  for every tool (2026-10-06), including the tools that send query
+  text or mail excerpts to the operator-configured embed, rerank or
+  inference provider: `search_emails`, `get_evidence`, `ask_mailbox`,
+  `summarize_thread`, `extract_from_emails`, `brief_issue` and
+  `check_conclusion`. (`search_attachments` and the retrieval and
+  status tools call no provider; their results go only to the calling
+  client and its model.) Their domain of interaction is the mailbox. The provider is a fixed
+  backend the operator chose, not an open-ended set of entities.
+  Deriving the hint from whether a provider is local or remote was
+  considered and not chosen. Data egress to a remote provider is
+  disclosed elsewhere: by the startup `Privacy:` warnings and by the
+  Privacy section of `make status` (see
+  [Architecture](architecture.md#privacy-model)).
+
+The tools that send retrieved mail to a remote inference or rerank
+provider still advertise `readOnlyHint: true`. This is an owner
+decision, accepted as a stated risk on 2026-10-06: nothing in the
+mailbox or other state changes, and the provider is the operator's own
+chosen backend. As a result, a client that auto-approves read-only
+tools may send mail excerpts to that provider without prompting. That
+egress is disclosed by the startup `Privacy:` warnings and by
+`make status`.
+
+These cover both clients' requirements. OpenAI lists `readOnlyHint`,
+`destructiveHint` and `openWorldHint` as required, and all three are
+set explicitly. Anthropic's
+[connector documentation](https://claude.com/docs/connectors/building/mcp.md)
+says "All MCP tools must declare both of these annotations:
+`readOnlyHint` … `destructiveHint`". Its
+[Software Directory Policy](https://support.claude.com/en/articles/13145358-anthropic-software-directory-policy)
+says "MCP servers must provide all applicable annotations for their
+tools, in particular readOnlyHint, destructiveHint, and title". FastMCP
+also uses the annotation `title` as the tool's display `title`.
+
+Annotations are hints, not an authorization control. The specification
+says they "are not guaranteed to provide a faithful description of tool
+behavior" and that "Clients should never make tool use decisions based
+on ToolAnnotations received from untrusted servers". OpenAI says
+"servers must still enforce their own authorization logic". Access
+control remains the `/mcp` bearer token and the Host/Origin guard, and
+read-only behavior remains the `?mode=ro` connection and the absence of
+any Bridge access.
+
+Every tool takes its annotations from the shared `read_only(title)`
+helper in `mcp-server/src/tools/outputs.py`.
+`mcp-server/tests/test_tool_annotations.py` lists every tool through a
+real client and fails on a tool it does not know. A tool that would
+change mail or state, or reach arbitrary external entities, needs the
+owner's approval and its own classification.
+
 ## Stage timings in the server log
 
 Every tool, the experimental `brief_issue` and `check_conclusion`

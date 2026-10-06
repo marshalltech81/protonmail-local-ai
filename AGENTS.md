@@ -733,6 +733,13 @@ Notes:
   accounts and browser pages, not code running as the operator
 - keep the server read-only: do not add mail-changing tools (send, move,
   flag, draft) without explicit owner approval
+- every tool passes `annotations=read_only("<Title>")` from
+  `src/tools/outputs.py` (#899): `readOnlyHint=true`,
+  `destructiveHint=false`, `openWorldHint=false` and its own title. A
+  tool that would change mail or state, or reach arbitrary external
+  entities, needs explicit owner approval and its own classification.
+  `tests/test_tool_annotations.py` enumerates every tool through a real
+  client, so add a new tool there deliberately
 - do not give it any access to Bridge
 - keep Streamable HTTP at `/mcp` as the only transport; do not reintroduce
   the legacy SSE transport or a dual mode without explicit owner approval.
