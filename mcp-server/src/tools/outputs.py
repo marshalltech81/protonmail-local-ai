@@ -30,6 +30,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ..lib.sqlite import (
     MAX_LISTED_CLAIMANTS,
+    MAX_LISTED_MATCHED_ADDRESSES,
     REAPED_RECORD_RETENTION_DAYS,
     MessageRecord,
     SourceFile,
@@ -513,8 +514,25 @@ class FilterUse(_Output):
     match: Literal["exact_address", "substring", "all_words", "equals", "inclusive_bound"]
 
 
+class AddressFilterMatch(_Output):
+    filter: Literal["sender", "recipient", "participant"]
+    distinct_addresses: int = Field(
+        description="Distinct addresses this filter matched across every match, not just "
+        "this page; 1 for an exact address that matched. Above 1, a name or fragment "
+        "matched several addresses, possibly different people."
+    )
+    addresses: list[str] = Field(
+        description=f"The matched addresses, most matching messages first, at most "
+        f"{MAX_LISTED_MATCHED_ADDRESSES}; see distinct_addresses."
+    )
+
+
 class QueryMessagesOutput(_Output):
     filters: list[FilterUse] = Field(description="How each given filter was applied; empty: none.")
+    address_matches: list[AddressFilterMatch] = Field(
+        description="Per sender / recipient / participant filter given, the addresses it "
+        "matched; empty without one."
+    )
     date_bounds: DateBounds | None = Field(description=_DATE_BOUNDS_DESCRIPTION)
     total_matches: int = Field(description="Every matching message, not just this page.")
     returned: int

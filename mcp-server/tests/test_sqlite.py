@@ -4470,6 +4470,95 @@ class TestQueryMessages:
         assert [(p.name, p.address) for p in m2.cc] == [(None, "carol@other.org")]
 
 
+class TestQueryMessagesAddressMatches:
+    """#801: each sender / recipient / participant filter reports how many
+    distinct canonical addresses it matched over the whole result set, so
+    a name shared by two people is visible. Results and totals are
+    unchanged."""
+
+    def test_name_filter_counts_both_namesakes(self, namesakes_db):
+        page = namesakes_db.query_messages(sender="Avery Cole")
+        assert _ids(page) == ["n3", "n2", "n1"]
+        assert page.total_matches == 3
+        match = page.address_matches["sender"]
+        assert match.distinct == 2
+        # Most matching messages first, then address.
+        assert match.addresses == ["avery@one.example", "a.cole@two.example"]
+
+    def test_exact_address_filter_counts_one(self, namesakes_db):
+        page = namesakes_db.query_messages(sender="Avery Cole <AVERY@one.example>")
+        assert _ids(page) == ["n3", "n1"]
+        match = page.address_matches["sender"]
+        assert match.distinct == 1
+        assert match.addresses == ["avery@one.example"]
+
+    def test_exact_address_without_matches_counts_zero(self, namesakes_db):
+        page = namesakes_db.query_messages(sender="nobody@example.com")
+        assert page.total_matches == 0
+        match = page.address_matches["sender"]
+        assert match.distinct == 0
+        assert match.addresses == []
+
+    def test_count_covers_only_the_result_set(self, namesakes_db):
+        # The other filters narrow the set to n1, so only its sender counts.
+        page = namesakes_db.query_messages(sender="avery", date_to="2024-01-01")
+        assert _ids(page) == ["n1"]
+        assert page.address_matches["sender"].distinct == 1
+
+    def test_count_uses_the_filter_roles(self, namesakes_db):
+        # As a recipient the name matches only n4's To address.
+        recipient = namesakes_db.query_messages(recipient="avery cole")
+        assert _ids(recipient) == ["n4"]
+        assert recipient.address_matches["recipient"].addresses == ["avery@one.example"]
+        participant = namesakes_db.query_messages(participant="Avery Cole")
+        assert participant.total_matches == 4
+        assert participant.address_matches["participant"].distinct == 2
+
+    def test_each_address_filter_is_counted_separately(self, namesakes_db):
+        page = namesakes_db.query_messages(sender="@one.example", recipient="avery")
+        assert _ids(page) == ["n4"]
+        assert page.address_matches["sender"].addresses == ["blake@one.example"]
+        assert page.address_matches["recipient"].addresses == ["avery@one.example"]
+
+    def test_only_address_filters_are_reported(self, namesakes_db):
+        assert namesakes_db.query_messages(subject="Note").address_matches == {}
+
+    def test_every_page_reports_the_whole_set_and_paging_is_unchanged(self, namesakes_db):
+        seen: list[str] = []
+        cursor = None
+        while True:
+            page = namesakes_db.query_messages(sender="Avery Cole", limit=1, cursor=cursor)
+            assert page.total_matches == 3
+            assert page.address_matches["sender"].distinct == 2
+            seen += _ids(page)
+            if not page.has_more:
+                break
+            cursor = page.next_cursor
+        assert seen == ["n3", "n2", "n1"]
+
+    def test_listed_addresses_are_capped(self, tmp_path):
+        from src.lib.sqlite import MAX_LISTED_MATCHED_ADDRESSES
+
+        from tests.conftest import _insert_message
+
+        conn, path = _open_built_db_conn(tmp_path, "many-senders.db")
+        senders = MAX_LISTED_MATCHED_ADDRESSES + 2
+        for n in range(senders):
+            _insert_message(
+                conn,
+                message_id=f"s{n}",
+                thread_id=f"ts{n}",
+                sent_at="2024-01-01T09:00:00+00:00",
+                from_=[f"Sam Lee <sam{n:02d}@many.example>"],
+            )
+        conn.close()
+        match = Database(str(path)).query_messages(sender="Sam Lee").address_matches["sender"]
+        assert match.distinct == senders
+        assert match.addresses == [
+            f"sam{n:02d}@many.example" for n in range(MAX_LISTED_MATCHED_ADDRESSES)
+        ]
+
+
 class TestQueryMessagesUnicodeText:
     """Composed and decomposed spellings of a word are the same word to
     FTS (unicode61 folds diacritics); the ``text`` terms must agree, or
