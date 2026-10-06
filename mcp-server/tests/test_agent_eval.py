@@ -94,6 +94,13 @@ def _registered_tools() -> dict[str, Callable[..., Any]]:
         ("get_message", "``indexed_thread_text`` is conversation context"),
         ("search_attachments", "``extraction_status``"),
         ("search_attachments", "no pagination"),
+        ("query_messages", "Before bulk paging"),
+        ("query_messages", "smallest sufficient sample"),
+        ("query_messages", "same total does not prove a stable set"),
+        ("query_messages", "requested sender/recipient role"),
+        ("get_thread", "``reaped_messages_truncated``"),
+        ("get_thread", "all currently indexed messages"),
+        ("search_attachments", "omit ``query``"),
     ],
 )
 def test_exhaustive_workflow_guidance_is_in_registered_descriptions(tool, guidance) -> None:

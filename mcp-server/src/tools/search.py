@@ -764,9 +764,11 @@ def register_search_tools(
 
         Check each result's ``extraction_status``. Failed, skipped or
         unsupported extraction means unavailable evidence, not that the
-        attachment says nothing relevant. Leave ``extracted_only`` false
-        when checking coverage. There is no pagination beyond the
-        50-result cap, so report limited results and unread document text
+        attachment says nothing relevant. To check coverage, omit ``query``
+        in a separate call with applicable structured filters and leave
+        ``extracted_only`` false: a text query cannot reveal unextracted
+        files whose filename and MIME type do not match. There is no pagination
+        beyond the 50-result cap, so report limited results and unread document text
         as coverage limits; do not claim an exhaustive attachment audit.
 
         Args:

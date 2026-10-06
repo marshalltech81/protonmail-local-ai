@@ -377,9 +377,11 @@ passages of its extracted text, each capped at 1600 characters) or
 locates attachments and previews their extracted text; none of the
 three returns the whole document.
 
-Check `extraction_status` and leave `extracted_only=false` when assessing
-coverage: failed, skipped or unsupported extraction means unavailable
-evidence, not absence of relevant content. There is no pagination beyond
+Check `extraction_status`: failed, skipped or unsupported extraction means
+unavailable evidence, not absence of relevant content. To assess coverage,
+make a separate call without `query`, with the applicable structured
+filters and `extracted_only=false`. A text query cannot reveal unextracted
+files whose filename and MIME type do not match. There is no pagination beyond
 the 50-result cap. Report limited results and unread document text as
 coverage limits rather than claiming an exhaustive attachment audit.
 
@@ -427,10 +429,13 @@ per role, 10 thread participants, and 10 References are listed (with a
 "+N more" count), and any header value past 500 characters is cut with
 a marker. The page is read from one database snapshot.
 
-To examine the whole conversation, follow this tool's `next_offset`
+To examine all currently indexed messages, follow this tool's `next_offset`
 until null. When a message has `body_omitted_chars > 0`, call
 `get_message` with its claimant ID and follow that tool's `next_offset`
-until null too. Report unread message or body pages as coverage limits.
+until null too. Report unread message or body pages, `reaped_messages`
+and `reaped_messages_truncated` as coverage limits: paging cannot recover
+removed messages. Separate page snapshots also mean concurrent indexing
+can change the conversation during the run.
 
 Messages of the thread reaped under mirror retention are listed by
 claimant ID and reap time in `reaped_messages`; a fully reaped thread
@@ -622,8 +627,11 @@ of the address or display name; the display name compares casefolded
 (Unicode caseless). The response names the mode used for
 each filter.
 
-Resolve the intended person with `find_contact` and prefer their exact
-address: names and substrings can include unrelated people.
+`find_contact` supplies candidates across all roles and folders; its top
+hit need not match the requested sender or recipient. Check plausible
+exact addresses against the requested role and folder with `query_messages`
+before selecting the intended person's address. Ask the user if identity
+remains ambiguous rather than combining unrelated namesakes.
 
 **Response contract.** The response states the filter interpretation,
 `total_matches` (over the whole set), `returned` with the match range,
@@ -642,6 +650,16 @@ another query, or a malformed one, is rejected with an error rather
 than silently restarting.
 
 To examine every match, follow `next_cursor` until `has_more` is false.
+Each page uses a fresh index snapshot; new matches ahead of the cursor can
+be missed. A changed `total_matches` signals churn, but an unchanged total
+does not prove a stable set. Scope coverage to the indexed results observed
+during the run, not a point-in-time complete mailbox.
+
+Start with narrow filters and `limit=1` to obtain the count. Before bulk
+paging or reading bodies, tell the user the scope and how many messages
+will be read: tool results go to the calling model, which may be remote.
+Prefer the smallest sufficient sample when it answers the question;
+a sample cannot establish an exhaustive content audit.
 A count of the exact filter criteria needs only `total_matches`; reading
 every page is necessary when classifying or examining each message.
 Exhausting a keyword query does not establish exhaustive coverage of a

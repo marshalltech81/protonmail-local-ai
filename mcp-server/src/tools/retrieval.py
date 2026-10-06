@@ -244,8 +244,11 @@ def register_retrieval_tools(server, db):
         same way. When a message's ``body_omitted_chars`` is positive,
         call ``get_message`` with its claimant ID and follow that tool's
         ``next_offset`` until null to read the rest of its indexed body.
-        For the whole conversation, also page this tool until its own
-        ``next_offset`` is null. Report unread pages as a coverage limit.
+        To read all currently indexed messages, also page this tool
+        until its own ``next_offset`` is null. Report unread pages,
+        ``reaped_messages`` and ``reaped_messages_truncated`` as coverage
+        limits: paging cannot recover removed messages. Pages use separate
+        snapshots, so concurrent indexing can change the conversation.
 
         DO NOT use this to read attachment content (PDFs, OCR'd
         images, scans). It returns the message bodies only; the
@@ -715,6 +718,13 @@ def register_retrieval_tools(server, db):
         enumerated. Messages in Trash are counted only by a separate
         call with ``folder="Trash"``.
 
+        Start with narrow filters and ``limit=1`` to obtain the count.
+        Before bulk paging or reading bodies, tell the user the scope
+        and how many messages you will read: tool results go to the
+        calling model, which may be remote. Prefer the smallest sufficient
+        sample when it answers the question; a sample cannot establish
+        an exhaustive content audit.
+
         Paging: the response states ``total_matches``, how many were
         returned, and ``has_more``. When ``has_more`` is true, call
         again with the SAME filters plus ``cursor`` set to the returned
@@ -724,11 +734,19 @@ def register_retrieval_tools(server, db):
         An exhausted keyword query does not prove exhaustive coverage of
         a topic: consider alternate wording, read candidate messages,
         and distinguish messages from threads or distinct bills/items.
+        Each page uses a fresh index snapshot; new matches ahead of the
+        cursor can be missed. A changed ``total_matches`` signals churn,
+        but the same total does not prove a stable set. Scope coverage to
+        the indexed results observed during the run, not a point-in-time
+        complete mailbox.
 
-        For a person, resolve the intended contact with ``find_contact``
-        and prefer their exact address: a name or substring can match
-        unrelated people. For outstanding-item questions, check for
-        completion, corrections and reopening in different threads and
+        For a person, ``find_contact`` supplies candidates across all
+        roles and folders; do not blindly select its top hit. Check
+        plausible exact addresses against the requested sender/recipient
+        role and folder with this tool, then prefer the intended person's
+        exact address. Ask the user if identity remains ambiguous rather
+        than combining unrelated namesakes. For outstanding-item questions,
+        check for completion, corrections and reopening in different threads and
         senders before calling an item open or closed. A sent request or
         delivered advice does not establish that the action was completed.
         State the scope and any unread pages, missing indexed bodies or
