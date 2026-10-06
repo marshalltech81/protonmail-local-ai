@@ -612,7 +612,7 @@ def main():
     # provider.
     # Every enabled layer must name its endpoint before any SDK client
     # is built: an empty ``*_BASE_URL`` fails here, ``default`` resolves
-    # to ``""`` (the SDK's own endpoint). Checked for all layers first
+    # to the provider's official URL. Checked for all layers first
     # so no client exists, and no request is possible, when any of them
     # is ambiguous (#750). Disabled layers need no URL.
     embed_base_url = _resolve_base_url("EMBED_BASE_URL", EMBED_BASE_URL, EMBED_MODE)
@@ -778,10 +778,9 @@ def main():
     log.info(f"  SQLite:   {SQLITE_PATH}")
     log.info(f"  Embed mode:     {EMBED_MODE}")
     # Surface the resolved wire endpoint, not the raw env var.
-    # ``EMBED_BASE_URL=default`` means "use the SDK default" (OpenAI
-    # proper) — printing the raw value would hide that the request is
-    # going to api.openai.com. ``EmbedClient.base_url``
-    # reads the URL back from the SDK after fallback resolution,
+    # ``EMBED_BASE_URL=default`` means OpenAI proper — printing the raw
+    # value would hide that the request is going to api.openai.com.
+    # ``EmbedClient.base_url`` reads the URL back from the SDK,
     # matching the inference / rerank log lines below.
     log.info(f"  Embed:          {embed_client.base_url} (model={EMBED_MODEL})")
     log.info(f"  Inference mode: {INFERENCE_MODE}")

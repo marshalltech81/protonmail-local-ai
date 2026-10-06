@@ -139,36 +139,53 @@ class TestOpenAIEmbedder:
         emb = _make_embedder(base_url="http://x:8001/v1/")
         assert emb.base_url == "http://x:8001/v1"
 
-    def test_empty_base_url_falls_back_to_sdk_default(self):
-        # An empty ``base_url`` is what startup passes for an explicit
-        # ``EMBED_BASE_URL=default`` (#750): "use the SDK default"
-        # (OpenAI proper). Symmetric with the mcp-server
-        # ``EmbedClient`` and ``_OpenAIBackend`` behavior.
-        emb = _make_embedder(base_url="")
-        # After construction the SDK has resolved its fallback chain
-        # (``OPENAI_BASE_URL`` env → ``https://api.openai.com/v1``).
-        # We read the URL back from the SDK so the stored value
-        # reflects the wire endpoint rather than the empty string.
-        # The trailing ``/`` anchors the hostname boundary so the
-        # check can't be satisfied by ``https://api.openai.com.<x>/``
-        # (CodeQL ``py/incomplete-url-substring-sanitization``).
-        assert emb.base_url.startswith("https://api.openai.com/")
+    @pytest.mark.parametrize("value", ["", "   "])
+    def test_empty_base_url_is_rejected(self, value):
+        """#846: startup resolves ``EMBED_BASE_URL`` (``default`` included)
+        before building the embedder, so an empty URL here is a caller
+        bug. It must fail closed rather than let the SDK pick an endpoint
+        (``OPENAI_BASE_URL``, then OpenAI proper). Fixed text, no key."""
+        marker = "SYNTHETIC_EMBED_KEY"  # pragma: allowlist secret
+        with pytest.raises(ValueError) as exc:
+            _make_embedder(base_url=value, api_key=marker)
+        assert str(exc.value) == (
+            "OpenAIEmbedder needs a resolved base URL; startup resolves "
+            "EMBED_BASE_URL (or `default`) before building it."
+        )
+        assert marker not in str(exc.value)
 
-    def test_inherited_endpoint_with_userinfo_is_rejected(self, monkeypatch, caplog):
-        """#339: ``EMBED_BASE_URL=default`` lets the SDK read
-        ``OPENAI_BASE_URL``, which skipped the startup userinfo check, and
-        the resolved URL reaches the startup log and error messages. The
-        embedder rejects it once resolved, without echoing the URL."""
+    def test_base_url_is_passed_explicitly_to_the_sdk(self, monkeypatch):
+        from openai import OpenAI as real_openai
+
+        calls: list[dict] = []
+
+        def recording_openai(**kwargs):
+            calls.append(kwargs)
+            return real_openai(**kwargs)
+
+        monkeypatch.setattr("src.embedder.OpenAI", recording_openai)
+        _make_embedder(base_url="https://api.openai.com/v1/")
+        [kwargs] = calls
+        assert kwargs["base_url"] == "https://api.openai.com/v1"
+
+    def test_ambient_openai_base_url_cannot_redirect(self, monkeypatch, caplog):
+        """#339/#846: a stray ``OPENAI_BASE_URL``, even one carrying a
+        credential, must neither change the endpoint nor reach a log."""
         marker = "SYNTHETIC_URL_CREDENTIAL"
         monkeypatch.setenv("OPENAI_BASE_URL", f"https://user:{marker}@provider.invalid/v1")
-        with caplog.at_level("DEBUG"), pytest.raises(ValueError, match="credentials") as exc:
-            _make_embedder(base_url="")
-        assert marker not in str(exc.value)
+        with caplog.at_level("DEBUG"):
+            emb = _make_embedder(base_url="https://api.openai.com/v1")
+        assert emb.base_url == "https://api.openai.com/v1"
         assert marker not in caplog.text
 
-    def test_empty_base_url_without_inherited_endpoint_starts(self, monkeypatch):
-        monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
-        assert _make_embedder(base_url="").base_url.startswith("https://api.openai.com/")
+    def test_endpoint_with_userinfo_is_rejected(self, caplog):
+        """The resolved URL reaches the startup log and error messages, so
+        a ``user:pass@host`` endpoint is refused without echoing it."""
+        marker = "SYNTHETIC_URL_CREDENTIAL"
+        with caplog.at_level("DEBUG"), pytest.raises(ValueError, match="credentials") as exc:
+            _make_embedder(base_url=f"https://user:{marker}@provider.invalid/v1")
+        assert marker not in str(exc.value)
+        assert marker not in caplog.text
 
     def test_embed_returns_vector_on_success(self):
         emb = _make_embedder()

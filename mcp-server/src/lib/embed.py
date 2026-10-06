@@ -46,6 +46,11 @@ class EmbedClient:
     ) -> None:
         from openai import AsyncOpenAI, DefaultAsyncHttpxClient
 
+        if not base_url.strip():
+            raise ValueError(
+                "EmbedClient needs a resolved base URL; startup resolves "
+                "EMBED_BASE_URL (or `default`) before building it."
+            )
         self.model = model
         # ``api_key`` is required (non-empty) — startup validation in
         # ``main.py`` rejects an empty value before reaching here.
@@ -57,15 +62,13 @@ class EmbedClient:
         # operator wrote — no silent rewrite that could surface in a
         # misconfigured remote provider's request log.
         #
-        # ``base_url`` may be empty: an empty value omits the kwarg so
-        # the SDK's documented fallback chain fires
-        # (``OPENAI_BASE_URL`` env → ``https://api.openai.com/v1``
-        # literal). Passing the empty string through would defeat the
-        # fallback because the SDK only treats ``None`` as "missing."
-        # ``main.py`` passes an empty value only for an explicit
-        # ``EMBED_BASE_URL=default``; an empty ``EMBED_BASE_URL`` fails
-        # startup (#750), because the body is sent before a provider
-        # checks the key.
+        # ``base_url`` must be non-empty and is always passed: left
+        # out, the SDK would pick the endpoint itself (``OPENAI_BASE_URL``
+        # env, then OpenAI proper), and the body is sent before a
+        # provider checks the key (#750, #846). ``main.py`` resolves
+        # ``EMBED_BASE_URL`` (``default`` included) before this runs, so
+        # an empty value is a caller bug. The error never echoes a
+        # value.
         #
         # ``max_retries=0`` disables SDK-internal retries so one
         # ``embed()`` call makes one request and ``timeout_secs`` is
@@ -88,26 +91,16 @@ class EmbedClient:
             lambda: self.client.base_url, "Embed provider", log
         )
         http_client = DefaultAsyncHttpxClient(event_hooks={"request": [same_origin_only]})
-        if base_url:
-            self.client = AsyncOpenAI(
-                base_url=base_url.rstrip("/"),
-                api_key=api_key,
-                timeout=timeout_secs,
-                max_retries=0,
-                http_client=http_client,
-            )
-        else:
-            self.client = AsyncOpenAI(
-                api_key=api_key,
-                timeout=timeout_secs,
-                max_retries=0,
-                http_client=http_client,
-            )
-        # After the SDK resolves its fallback chain, read the URL back
-        # so ``self.base_url`` always reflects the wire endpoint.
-        # ``embed_query`` surfaces this in the dim-mismatch error so
-        # operators see the actual URL (e.g. the SDK default), not the
-        # empty string they typed.
+        self.client = AsyncOpenAI(
+            base_url=base_url.rstrip("/"),
+            api_key=api_key,
+            timeout=timeout_secs,
+            max_retries=0,
+            http_client=http_client,
+        )
+        # Read the URL back from the SDK so ``self.base_url`` reflects
+        # the wire endpoint; ``embed_query`` surfaces it in the
+        # dim-mismatch error.
         self.base_url = str(self.client.base_url).rstrip("/")
 
     async def aclose(self) -> None:

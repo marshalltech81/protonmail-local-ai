@@ -9,6 +9,7 @@ hitting Cohere's hosted API.
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
 from src.lib.reranker import (
     DEFAULT_RERANK_TIMEOUT_SECS,
     CohereReranker,
@@ -19,7 +20,7 @@ from src.lib.reranker import (
 def _make_reranker(candidates: int = 50) -> CohereReranker:
     return CohereReranker(
         RerankConfig(
-            base_url="",
+            base_url="https://api.cohere.com",
             model="rerank-v4.0-pro",
             api_key="ck-test",  # pragma: allowlist secret
             candidates=candidates,
@@ -110,28 +111,39 @@ class TestRerank:
         r.client.rerank = fake_rerank  # type: ignore[assignment]
         assert r.rerank("q", ["a", "b"], top_n=5) == []
 
-    def test_empty_base_url_omits_kwarg_so_sdk_default_applies(self):
-        # An empty ``base_url`` is what ``main.py`` passes for an
-        # explicit ``RERANK_BASE_URL=default`` (#750): "use the SDK
-        # default" (``https://api.cohere.com``). Symmetric with how ``EmbedClient``, ``OpenAIEmbedder``, and
-        # ``_OpenAIBackend`` treat empty base URLs.
-        #
-        # The base_url kwarg must be GENUINELY ABSENT from the SDK
-        # constructor call — passing an empty string would defeat the
-        # SDK's fallback chain because the SDK only treats ``None``
-        # as "missing."
+    @pytest.mark.parametrize("value", ["", "   "])
+    def test_empty_base_url_is_rejected_before_the_sdk_client(self, value):
+        # #846: ``main.py`` resolves ``RERANK_BASE_URL`` (``default`` to
+        # ``https://api.cohere.com``) before building the reranker, so an
+        # empty URL here is a caller bug. Fail closed rather than let the
+        # SDK pick an endpoint (``CO_API_URL``, then Cohere). Fixed text,
+        # no key.
+        marker = "SYNTHETIC_RERANK_KEY"  # pragma: allowlist secret
+        with patch("cohere.ClientV2") as mock_client, pytest.raises(ValueError) as exc:
+            CohereReranker(
+                RerankConfig(base_url=value, model="rerank-v4.0-pro", api_key=marker, candidates=20)
+            )
+        mock_client.assert_not_called()
+        assert str(exc.value) == (
+            "CohereReranker needs a resolved base URL; startup resolves "
+            "RERANK_BASE_URL (or `default`) before building it."
+        )
+        assert marker not in str(exc.value)
+
+    def test_base_url_is_passed_explicitly_to_the_sdk(self, monkeypatch):
+        # An explicit ``base_url`` wins over ``CO_API_URL`` in the SDK, so
+        # the ambient variable cannot redirect mail.
+        monkeypatch.setenv("CO_API_URL", "https://ambient.invalid")
         with patch("cohere.ClientV2") as mock_client:
             CohereReranker(
                 RerankConfig(
-                    base_url="",
+                    base_url="https://api.cohere.com/",
                     model="rerank-v4.0-pro",
                     api_key="ck-test",  # pragma: allowlist secret
                     candidates=20,
-                    timeout_secs=42.5,
                 )
             )
-            mock_client.assert_called_once()
-            assert "base_url" not in mock_client.call_args.kwargs
+        assert mock_client.call_args.kwargs["base_url"] == "https://api.cohere.com"
 
     def test_timeout_is_passed_to_sdk_client(self):
         # A stalled Cohere request must not be allowed to pin the
@@ -142,7 +154,7 @@ class TestRerank:
         with patch("cohere.ClientV2") as mock_client:
             CohereReranker(
                 RerankConfig(
-                    base_url="",
+                    base_url="https://api.cohere.com",
                     model="rerank-v4.0-pro",
                     api_key="ck-test",  # pragma: allowlist secret
                     candidates=20,

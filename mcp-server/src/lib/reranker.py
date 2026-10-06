@@ -87,10 +87,11 @@ class CohereReranker:
 
     Same shape as the other three SDK-using clients (``EmbedClient``,
     ``OpenAIEmbedder``, ``_OpenAIBackend``): ``api_key`` and ``model``
-    are required upstream; an empty ``base_url`` means "use the SDK
-    default" (``https://api.cohere.com``), which ``main.py`` passes only
-    for an explicit ``RERANK_BASE_URL=default`` (#750). Set a URL for
-    proxies, gateways, or EU region overrides.
+    are required upstream; ``base_url`` must be a resolved, non-empty
+    URL. ``main.py`` turns ``RERANK_BASE_URL=default`` into
+    ``https://api.cohere.com`` (#750) and it is always passed to the
+    SDK, so ``CO_API_URL`` cannot choose the endpoint (#846). Set a URL
+    for proxies, gateways, or EU region overrides.
     """
 
     # ``RERANK_MODE`` value, reported on the per-call timing line.
@@ -99,10 +100,17 @@ class CohereReranker:
     def __init__(self, config: RerankConfig):
         import cohere
 
+        # Left out, the SDK would pick the endpoint itself (``CO_API_URL``,
+        # then Cohere), and the documents are sent before the provider
+        # checks the key, so an empty URL fails closed (#846). The error
+        # never echoes a value.
+        if not config.base_url.strip():
+            raise ValueError(
+                "CohereReranker needs a resolved base URL; startup resolves "
+                "RERANK_BASE_URL (or `default`) before building it."
+            )
         self.config = config
         self.candidates = config.candidates
-        # Pass ``base_url`` only when explicitly set — passing an empty
-        # string would override the SDK default with a malformed URL.
         # ``timeout`` is always passed: the SDK default (300s) is longer
         # than we want a hybrid_search worker thread to wait on a
         # stalled Cohere call.
@@ -118,28 +126,18 @@ class CohereReranker:
         # the inference and embed clients, which also pin
         # ``max_retries=0``; rerank is an optional stage with a
         # fallback, so a retry is the wrong trade.
-        if config.base_url:
-            self.client = cohere.ClientV2(
-                api_key=config.api_key,
-                base_url=config.base_url.rstrip("/"),
-                timeout=config.timeout_secs,
-                max_retries=0,
-            )
-        else:
-            self.client = cohere.ClientV2(
-                api_key=config.api_key,
-                timeout=config.timeout_secs,
-                max_retries=0,
-            )
+        self.client = cohere.ClientV2(
+            api_key=config.api_key,
+            base_url=config.base_url.rstrip("/"),
+            timeout=config.timeout_secs,
+            max_retries=0,
+        )
         # Note: ``EmbedClient`` / ``_OpenAIBackend`` / ``OpenAIEmbedder``
-        # read back ``self.client.base_url`` after construction so the
-        # field reflects the SDK's resolved URL. The Cohere SDK only
-        # exposes the resolved URL via ``_client_wrapper.get_base_url()``
+        # read back ``self.client.base_url`` after construction. The
+        # Cohere SDK only exposes it via ``_client_wrapper.get_base_url()``
         # (private API across SDK versions), so this client doesn't
-        # mirror that field. ``main.py`` resolves the endpoint the way
-        # the SDK does (configured URL, then ``CO_API_URL``, then
-        # ``https://api.cohere.com``) for its log line and privacy
-        # warning, without reaching into SDK internals.
+        # mirror that field; ``main.py`` logs the resolved
+        # ``RERANK_BASE_URL`` it passed in.
 
     def rerank(
         self,

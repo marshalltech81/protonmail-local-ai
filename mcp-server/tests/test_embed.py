@@ -53,19 +53,45 @@ class TestConstructor:
         # The SDK's stored credential is what we passed in.
         assert c.client.api_key == "placeholder"  # pragma: allowlist secret
 
-    def test_empty_base_url_falls_back_to_sdk_default(self):
-        # An empty ``base_url`` is what ``main.py`` passes for an
-        # explicit ``EMBED_BASE_URL=default`` (#750): "use the SDK
-        # default" (OpenAI proper). Symmetric with the indexer's
-        # ``OpenAIEmbedder``, the inference ``_OpenAIBackend``, and
-        # the existing ``_AnthropicBackend`` empty-URL path.
-        c = EmbedClient(base_url="", model="m", api_key="sk-real")  # pragma: allowlist secret
-        # After construction the SDK has resolved its fallback chain
-        # (``OPENAI_BASE_URL`` env → ``https://api.openai.com/v1``).
-        # The trailing ``/`` anchors the hostname boundary so the
-        # check can't be satisfied by ``https://api.openai.com.<x>/``
-        # (CodeQL ``py/incomplete-url-substring-sanitization``).
-        assert c.base_url.startswith("https://api.openai.com/")
+    @pytest.mark.parametrize("value", ["", "   "])
+    def test_empty_base_url_is_rejected(self, value):
+        # #846: ``main.py`` resolves ``EMBED_BASE_URL`` (``default``
+        # included) before building the client, so an empty URL here is
+        # a caller bug. Fail closed rather than let the SDK pick an
+        # endpoint (``OPENAI_BASE_URL``, then OpenAI proper). Fixed text,
+        # no key.
+        marker = "SYNTHETIC_EMBED_KEY"  # pragma: allowlist secret
+        with pytest.raises(ValueError) as exc:
+            EmbedClient(base_url=value, model="m", api_key=marker)
+        assert str(exc.value) == (
+            "EmbedClient needs a resolved base URL; startup resolves "
+            "EMBED_BASE_URL (or `default`) before building it."
+        )
+        assert marker not in str(exc.value)
+
+    def test_base_url_is_passed_explicitly_to_the_sdk(self, monkeypatch):
+        import openai
+
+        real_async_openai = openai.AsyncOpenAI
+        calls: list[dict] = []
+
+        def recording_async_openai(**kwargs):
+            calls.append(kwargs)
+            return real_async_openai(**kwargs)
+
+        monkeypatch.setattr(openai, "AsyncOpenAI", recording_async_openai)
+        EmbedClient(
+            base_url="https://api.openai.com/v1/",
+            model="m",
+            api_key="placeholder",  # pragma: allowlist secret
+        )
+        [kwargs] = calls
+        assert kwargs["base_url"] == "https://api.openai.com/v1"
+
+    def test_ambient_openai_base_url_cannot_redirect(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_BASE_URL", "https://ambient.invalid/v1")
+        c = EmbedClient(base_url="https://api.openai.com/v1", model="m", api_key="placeholder")
+        assert c.base_url == "https://api.openai.com/v1"
 
 
 class TestEmbed:

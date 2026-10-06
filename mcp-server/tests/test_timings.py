@@ -144,7 +144,7 @@ class TestHelpers:
 
         cohere = CohereReranker(
             RerankConfig(
-                base_url="",
+                base_url="https://api.cohere.com",
                 model="rerank-v4.0-pro",
                 api_key="ck-test",  # pragma: allowlist secret
                 candidates=10,
