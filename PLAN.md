@@ -405,15 +405,18 @@ that degraded says so on its own line. Done: token-limit hits,
 degraded-retrieval markers and rate-limited `/mcp` rejection logging
 (#865, #877, #878; #883), a completion line for every MCP tool (#886;
 #892), and mbsync sync-success and folder-name-safe repair logging
-(#879; #881). Open: attachment extraction and parser-cap logging
-(#871, #872), embedder recovery and maintenance-loop recoveries (#873),
+(#879; #881), and attachment extraction and parser-cap logging with
+rate-limited warnings (#871, #872; #884). Open: embedder recovery and maintenance-loop recoveries (#873),
 queue heartbeat and per-pass maintenance summaries (#874), WAL and
-storage size (#875), startup identity line (#887), a shared
+storage size (#875), a startup identity line with commit, boot ID,
+schema and a raw-value config hash (#887), a shared
 rate-limited logger (#889), the OCR cap on cache hits and multipage
 images (#891, #885), and a per-checkout uv cache for parallel runs
 (#896). Open decisions: log-only or exit when the Maildir watcher dies
 (#870), telling a stall from a backlog in status (#876; parked trashed
 files currently show as "retrying"), and correlation IDs (#888).
+Every MCP tool declares safety annotations (#899; Resolved decisions
+31).
 
 ## Not doing (decided 2026-09-26)
 
@@ -764,6 +767,19 @@ removed Bridge container are kept as history.
     encoded folders migrates by renaming them (never deleting) and
     rebuilding the index (`docs/setup.md`). The live mailbox had none,
     and the owner accepts a reindex if needed.
+31. **MCP tool safety annotations (2026-10-06, #899):** every tool
+    declares `readOnlyHint: true`, `destructiveHint: false`,
+    `openWorldHint: false` and its own title-cased `title`, from one
+    shared constant; a test fails on a tool added without a deliberate
+    classification. Operational logging does not prevent read-only: the
+    logs are the server's telemetry, carry no arguments or mail, and are
+    not an effect of the tool. `openWorldHint` stays `false` for the
+    tools that call the embed, rerank or inference provider too: the
+    domain is the mailbox, and egress is disclosed by the startup
+    privacy warnings and `make status`. Deriving the hint from provider
+    locality was considered and not chosen. Covers OpenAI's three
+    required hints and Anthropic's `readOnlyHint`, `destructiveHint` and
+    `title`.
 
 ## Notes for Agents
 
