@@ -325,6 +325,17 @@ class TestConfig:
         assert cfg is not None
         assert (cfg.max_tokens, cfg.context_tokens) == (max_tokens, context)
 
+    @pytest.mark.parametrize(("mode", "max_tokens"), [("anthropic", 16000), ("openai", 2048)])
+    def test_judge_token_default_follows_the_mode(self, mode, max_tokens):
+        """#813: Claude judges think before the verdict, and thinking
+        counts against max_tokens, so anthropic mode defaults to 16000;
+        an explicit JUDGE_MAX_TOKENS still wins."""
+        env = {**self.ENV, "JUDGE_MODE": mode, "JUDGE_API_KEY": "k"}
+        cfg = load_layer("JUDGE", env)
+        assert cfg is not None and cfg.max_tokens == max_tokens
+        cfg = load_layer("JUDGE", {**env, "JUDGE_MAX_TOKENS": "4096"})
+        assert cfg is not None and cfg.max_tokens == 4096
+
     @pytest.mark.parametrize("value", ["default", " Default "])
     def test_default_selects_the_sdk_default(self, value):
         cfg = load_layer("JUDGE", {**self.ENV, "JUDGE_BASE_URL": value, "JUDGE_API_KEY": "k"})

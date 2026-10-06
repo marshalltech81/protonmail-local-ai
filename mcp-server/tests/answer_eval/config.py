@@ -35,6 +35,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from src.lib.inference import (
+    ANTHROPIC_DEFAULT_MAX_TOKENS,
     DEFAULT_COMPLETE_TIMEOUT_SECS,
     InferenceClient,
     default_token_budget,
@@ -59,6 +60,16 @@ JUDGE_DEFAULT_MAX_TOKENS = 2048
 # reference facts, supplied evidence and answer do not fit is reported
 # as an incomplete assessment, never graded on part of its evidence.
 JUDGE_DEFAULT_MAX_INPUT_CHARS = 60_000
+
+
+def judge_default_max_tokens(mode: str) -> int:
+    """The ``JUDGE_MAX_TOKENS`` default for a judge mode (#813). Claude
+    models think before the verdict and count the thinking against
+    ``max_tokens``, so anthropic mode takes the answerer's anthropic
+    default (#805); the other modes keep 2048."""
+    if mode == "anthropic":
+        return ANTHROPIC_DEFAULT_MAX_TOKENS
+    return JUDGE_DEFAULT_MAX_TOKENS
 
 
 class ConfigError(ValueError):
@@ -222,7 +233,7 @@ def load_layer(
         structured_output = structured != "false"
     else:
         timeout = _number(env, "JUDGE_TIMEOUT_SECS", JUDGE_DEFAULT_TIMEOUT_SECS, 1.0)
-        max_tokens = int(_number(env, "JUDGE_MAX_TOKENS", JUDGE_DEFAULT_MAX_TOKENS, 256))
+        max_tokens = int(_number(env, "JUDGE_MAX_TOKENS", judge_default_max_tokens(mode), 256))
         context = 0
         max_input = int(_number(env, "JUDGE_MAX_INPUT_CHARS", JUDGE_DEFAULT_MAX_INPUT_CHARS, 1000))
         structured_output = False  # the judge sends no schema

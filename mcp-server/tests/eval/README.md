@@ -456,8 +456,13 @@ is `127.0.0.1`, not `host.docker.internal`.
   the endpoint, or `default` for the SDK default (a remote provider);
   an empty one is refused (#750). It never reads the
   answerer's variables or key. Bounds: `JUDGE_TIMEOUT_SECS` (120),
-  `JUDGE_MAX_TOKENS` (2048), `JUDGE_MAX_INPUT_CHARS` (60,000), one call
-  per case, no retries, one case at a time.
+  `JUDGE_MAX_TOKENS` (16000 for `JUDGE_MODE=anthropic`, 2048 otherwise),
+  `JUDGE_MAX_INPUT_CHARS` (60,000), one call per case, no retries, one
+  case at a time. Current Claude models think before the verdict and the
+  thinking counts against `JUDGE_MAX_TOKENS`, so the anthropic default
+  matches the answerer's (#805, #813); 2048 cut verdicts short. A
+  Claude Fable 5.1 judgement at the 16000 ceiling took 14–24 s, well
+  inside the 120 s timeout.
 - **Subscription judges** (`JUDGE_MODE=claude-cli` or `codex-cli`, #806):
   each judge call runs a vendor CLI once, so it uses the subscription's
   limits, which interactive use shares, instead of API credit. They run
