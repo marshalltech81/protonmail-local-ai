@@ -63,7 +63,12 @@ make baseline UPDATE=1   # rewrite snapshot.json after an intended ranking chang
      never show. `golden.json`'s `evidence_queries` are the
      `get_evidence` queries it embeds at build time.
    - **Rank snapshot, for unchanged behaviour.** The top-10 order of
-     every search question must match `snapshot.json`.
+     every search question must match `snapshot.json`, and must not
+     change when any two adjacent vector distances closer than 1e-6
+     are swapped: sqlite-vec's float32 rounding differs between macOS
+     and Linux, so an order that rests on such a tie passes locally and
+     fails in CI. If a corpus edit trips this, reword the new text
+     until the snapshot no longer depends on the tie.
    - **Answer-evaluation cases** (`test_answer_eval_cases.py`). The
      build also embeds every question in
      `tests/answer_eval/cases.json`. Each case's fact excerpts must be

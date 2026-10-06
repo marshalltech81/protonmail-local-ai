@@ -79,7 +79,7 @@ other word for it).
 Threads 75-77 back the evidence-scope decoy cases (#755): a filter
 selects the whole thread, and another message of it holds a different
 answer. In t75 the neighbour Nadia gives the dog walker's half-hour
-rate and Theo's later reply gives another (a sender filter on Nadia);
+rate and Callum's later reply gives another (a sender filter on Nadia);
 in t76 the swim coach's September schedule is followed by a November
 one (a September date filter); in t77 the garden coordinator's plot and
 season price are followed by a stale list, filed in Trash, that names
@@ -948,7 +948,7 @@ THREADS: dict[int, list[Msg]] = {
             ME,
             "Storage unit agreement ready for your signature",
             "Hi Sam,\n\nOakmere Storage sent you a storage unit agreement to "
-            "review and sign.\n\nReview and sign: "
+            "read over and sign.\n\nReview and sign: "
             "https://signlattice.example/envelope/7Q2LX\n\n"
             f"{_SIGNING_BOILERPLATE}\n\nSignLattice",
         ),
@@ -1777,7 +1777,7 @@ THREADS.update(
 # --- Evidence-scope decoys (#755) -----------------------------------------
 
 NADIA = "Nadia Brooks <nadia@elmhollow.example>"
-THEO = "Theo Lindqvist <theo@elmhollow.example>"
+CALLUM = "Callum Ferris <callum@elmhollow.example>"
 COACH = "Ines Duarte <coach@marlinswim.example>"
 SWIM_FAMILIES = "Marlin Swim Families <families@marlinswim.example>"
 ROSA = "Rosa Delgado <rosa@greenacregarden.example>"
@@ -1785,7 +1785,7 @@ FELIX = "Felix Moreau <felix@greenacregarden.example>"
 
 THREADS.update(
     {
-        # Sender decoy: the in-scope rate is Nadia's; Theo's reply differs.
+        # Sender decoy: the in-scope rate is Nadia's; Callum's reply differs.
         75: [
             Msg(
                 "INBOX",
@@ -1796,16 +1796,16 @@ THREADS.update(
                 "Hi Sam,\n\nYou asked about a dog walker. We use Milo Grant for "
                 "Pepper. He asks $22 per half-hour walk on weekdays and sends a "
                 "photo after each one.\n\nNadia",
-                cc=THEO,
+                cc=CALLUM,
             ),
             Msg(
                 "INBOX",
                 "Thu, 11 Sep 2025 07:45:00 +0000",
-                THEO,
+                CALLUM,
                 ME,
                 "Re: Dog walker for Pepper",
                 "Sam,\n\nWe had Milo for our terrier last spring. He asked us $30 "
-                "per half-hour walk.\n\nTheo",
+                "per half-hour walk.\n\nCallum",
                 cc=NADIA,
             ),
         ],

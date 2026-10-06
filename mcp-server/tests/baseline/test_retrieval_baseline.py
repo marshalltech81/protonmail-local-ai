@@ -350,3 +350,65 @@ def test_rank_snapshot(
         "ranking changed; if intended, rerun with --update-baseline and "
         f"review the snapshot diff:\n{json.dumps(changed, indent=2)}"
     )
+
+
+# Vector distances closer than this can come back in either order on
+# another platform (sqlite-vec's float32 SIMD rounding differs between
+# macOS and Linux CI by a step or two).
+_NEAR_TIE = 1e-6
+
+
+def test_rank_snapshot_survives_near_tied_vector_distances(
+    baseline_db: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#755: a corpus edit left one golden question's snapshot on a knife
+    edge, where two chunk distances one float32 step apart came back
+    swapped on Linux and moved a thread past its neighbour. Swap every
+    adjacent near-tied pair of different threads in the vector lanes, one
+    at a time, and require the snapshot order to stay the same, so such
+    an edit fails here on any platform rather than only in CI."""
+    vectors = json.loads(
+        (Path(os.environ["BASELINE_DIR"]) / "query_vectors.json").read_text(encoding="utf-8")
+    )
+    fuse = baseline_db._reciprocal_rank_fusion
+    state: dict = {}
+
+    def swapping_fusion(bm25, vec, chunks):
+        lanes = {"vec": list(vec), "chunk": list(chunks)}
+        if "swap" in state:
+            name, i = state["swap"]
+            lanes[name][i - 1], lanes[name][i] = lanes[name][i], lanes[name][i - 1]
+        else:
+            state["ties"] = [
+                (name, i)
+                for name, lane in lanes.items()
+                for i in range(1, len(lane))
+                if abs(lane[i].score - lane[i - 1].score) < _NEAR_TIE
+                and lane[i].thread_id != lane[i - 1].thread_id
+            ]
+        return fuse(bm25, lanes["vec"], lanes["chunk"])
+
+    monkeypatch.setattr(baseline_db, "_reciprocal_rank_fusion", swapping_fusion)
+    swaps, flips = 0, []
+    for q in GOLDEN["search"]:
+
+        def run(q=q) -> list[str]:
+            hits = baseline_db.hybrid_search(
+                q["query"],
+                vectors[q["query"]],
+                limit=SNAPSHOT_DEPTH,
+                with_evidence="evidence" in q,
+                **q.get("filters", {}),
+            )
+            return _refs(_order_ties(hits))
+
+        state.clear()
+        expected = run()
+        for tie in state["ties"]:
+            state["swap"] = tie
+            swaps += 1
+            if run() != expected:
+                flips.append((q["id"], *tie))
+    # The hashed embedder leaves near-ties in many lanes; check some were tried.
+    assert swaps > 0
+    assert flips == [], f"snapshot order depends on a near-tied distance: {flips}"

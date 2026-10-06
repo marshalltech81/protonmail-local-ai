@@ -612,7 +612,7 @@
         {"id": "f1", "fact": "Milo Grant asks $22 per half-hour walk on weekdays.", "sources": ["t75.1"], "excerpt": "He asks $22 per half-hour walk on weekdays"}
       ],
       "must_not_assert": [
-        "The dog walker asks $30 per half-hour walk (Theo's rate, from a message the sender filter does not select)."
+        "The dog walker asks $30 per half-hour walk (Callum's rate, from a message the sender filter does not select)."
       ],
       "deterministic": {"must_include": [["$22"]], "must_not_include": ["$30"]},
       "criteria": {"factual_correctness": true, "citation_support": true, "completeness": true, "temporal_reasoning": false, "conflict_uncertainty": false, "relevance": true},
