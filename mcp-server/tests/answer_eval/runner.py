@@ -202,7 +202,9 @@ def capture_evidence_maps(sink: list[dict[str, Any]]) -> Iterator[None]:
 
 def _passage(ref: Any) -> Passage:
     chunk = ref.chunk
-    header = intelligence._piece_header(chunk, ref.char_end or 0, ref.label)
+    # The scope label the header showed, if any (#755).
+    scope = getattr(ref, "header_scope", None)
+    header = intelligence._piece_header(chunk, ref.char_end or 0, ref.label, scope)
     if chunk is None:
         return Passage(
             ref.label, ref.thread_id, None, None, None, "thread", ref.text, header=header

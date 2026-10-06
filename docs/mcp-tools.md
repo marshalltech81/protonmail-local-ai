@@ -104,7 +104,10 @@ tool=search_emails outcome=ok total_ms=41.7 stages_ms={'query_embedding': 22.4, 
   `thread_fts` / `chunk_fts` / `attachment_fts`, the vector lanes
   `thread_vec` / `chunk_vec` (each covering every widening step of a
   filtered search), `fusion` (RRF plus post-fusion filters),
-  `evidence_fetch`, `rerank`, `attachment_search` and `inference`
+  `evidence_fetch`, `scope_labels` (the per-message
+  [evidence scope](#evidence-scope-in-scope-or-context) lookup of
+  `ask_mailbox` and `get_evidence`), `rerank`, `attachment_search` and
+  `inference`
   (summed over every completion the call made).
 - `counts` holds candidates per lane, `filtered` (after fusion and
   filters), `results`, `evidence_chunks`, `rerank_candidates`,
@@ -133,7 +136,9 @@ before.
   leave out a thread only when **every** message of it is in Trash.
   This is the per-message membership the `folders` filter uses: a
   thread with one message in Trash and a reply in INBOX stays, and its
-  Trash message's passages can still appear as evidence. Passing
+  Trash message's passages can still appear as evidence, labelled
+  `context` in `ask_mailbox` and `get_evidence`
+  ([Evidence scope](#evidence-scope-in-scope-or-context)). Passing
   `folders` replaces the default, so `folders=["Trash"]` searches
   Trash and `folders=["INBOX", "Trash"]` both. `search_emails`,
   `ask_mailbox` and `extract_from_emails` resolve `from_name` over the
@@ -323,7 +328,13 @@ same values and format as that message's headers), and the passage's
 character offsets. With `date_from` / `date_to`, threads are selected
 by span as in `search_emails`, and their passages can come from
 messages outside the range; check each chunk's `occurred_at` and
-`sent_at`. Attachment-derived
+`sent_at`. Each chunk's `scope` says whether its own message meets
+every sender, participant, date and folder filter (`in_scope`) or not
+(`context`), exactly as `ask_mailbox` labels it
+([Evidence scope](#evidence-scope-in-scope-or-context)); the prose
+ends each chunk line with `in scope` or `context`. The `thread_id`
+path takes no filters, so every chunk there is `in_scope`.
+Attachment-derived
 chunks (extracted PDF / OCR / document text) are included — unlike
 `get_thread`, which is body-only.
 
@@ -442,7 +453,9 @@ folder, In-Reply-To, attachment flag, [read state](#read-state);
 recipient lists past 10 are summarized as a count) and its indexed body after quoted-reply
 stripping. Attachment text is not included. When no message body is
 indexed yet, the accumulated thread text (a retrieval artifact that
-also carries quoted replies) is shown instead.
+also carries quoted replies) is shown instead, headed as context and
+not any one message's text, with `indexed_thread_text_scope:
+"context"` in the structured output.
 
 Responses are bounded: messages are paged (the response states the
 thread's message count and the `offset` for the next page), and each
@@ -501,7 +514,10 @@ character offset). The index keeps no raw per-message body, so this is
 the indexed text **after quoted-reply stripping**; it falls back to
 thread context when no body chunks are indexed for the message.
 In that case, `body: null` means no indexed body, and
-`indexed_thread_text` is conversation context, not this message's text.
+`indexed_thread_text` is conversation context, not this message's text:
+the prose heads it `Indexed thread text (context, not this message's
+text)` and the structured output sets `indexed_thread_text_scope:
+"context"`, the label `ask_mailbox` gives such passages.
 Report the gap; do not attribute the context to the message or treat
 the missing body as proof that it contained no relevant evidence.
 Attachment text is not included — use `get_evidence` for that. The
@@ -951,12 +967,89 @@ is treated as absent, and a padded one is stripped, here and in
 inflated caller-supplied value cannot expand into an oversized prompt
 that blows past the model's context window.
 
+#### Evidence scope: in scope or context
+
+Filters select whole threads: a thread qualifies when any of its
+messages meets the sender, participant, date or folder condition, and
+its passages can come from any of its messages, so the evidence can
+hold another sender's reply, a message outside the date range or a
+copy filed in Trash. Whole threads are kept on purpose, since replies
+and later corrections are often what a correct answer needs (owner
+decision, [#755](https://github.com/marshalltech81/protonmail-local-ai/issues/755)).
+Each passage is instead labelled from its own message's indexed
+metadata, at query time (`Database.message_scope`, no schema change):
+
+- **`in scope`**: the message meets every message-level filter of the
+  request, with `query_messages`' per-message predicates: `from_addr`
+  (or the address `from_name` resolved to) in its From line;
+  `participant` in its From, To or Cc; its effective time
+  (`occurred_at`, else `sent_at`) within `date_from` / `date_to`; and
+  the folder it is filed in within `folders`, or, without `folders`,
+  any folder but Trash.
+- **`context`**: any other message of a qualifying thread. A passage
+  of a thread's combined text (a thread with no indexed chunks) is in
+  scope only when every message of the thread is.
+- When the same passage text appears in several messages of a thread
+  (a quoted reply), one copy is shown; an in-scope copy is kept over a
+  context copy ranked above it.
+
+The labels change nothing about which threads are retrieved or how
+they rank. When a filter is given, or a retrieved thread holds a
+message outside the default scope (filed in Trash), the prompt shows
+them: each passage header carries `in scope` or `context` after the
+sent date, and a scope block between the evidence and the question
+states the filters and the rule. The block holds only the caller's
+own arguments, never a value the server read from mail: with
+`from_name` it names that name and not the address it resolved to.
+Address and name values (`from_addr`, `from_name`, `participant`) can
+still be copies of sender-controlled headers, for example a
+`find_contact` result passed on as `participant`, so the filter lines
+only name those filters and their values follow inside an
+`<untrusted_email>` fence. Each value is cut at 500 characters, has
+delimiter tags escaped and is written as one JSON string on its own
+line; the date bounds are the server's normalized UTC instants and the
+folder names are the operator's own, so they stay in the filter lines. The
+block names the `from_name` and the `participant`
+([#779](https://github.com/marshalltech81/protonmail-local-ai/issues/779)),
+so "what did this person say" no longer leaves the model guessing who
+is meant. The rule: answer from in-scope passages, use context
+passages only to interpret them or to report a later correction, and
+say so; if no in-scope passage answers the question, the excerpts do
+not answer it. With no filter and every retrieved message in the
+default scope, every passage is in scope and the prompt is unchanged.
+Each citation's `scope` is `in_scope` or `context` either way, and
+`get_evidence` returns the same label per chunk. `extract_from_emails`,
+`brief_issue` and `check_conclusion` do not label their passages.
+
+How the ambiguous cases are labelled:
+
+- **Long recipient lists.** `participant` counts every From, To and Cc
+  entry the index records, which is every address the message lists
+  (the indexer caps entity writes per message, not participant rows).
+  A message where the person is one of forty Cc recipients is in
+  scope, as it is for `query_messages(participant=...)`; the label
+  says the message meets the filter, not that it is about the person.
+  A bare name or domain matches by substring, as the thread filter
+  does.
+- **Folder moves.** The label uses the folder a message is filed in
+  now, as indexed: a message moved from INBOX to Archive is in scope
+  for `folders=["Archive"]` and context for `folders=["INBOX"]`. Two
+  copies of one Message-ID in different folders are separate claimants
+  and are labelled separately.
+- **Mixed Trash and INBOX threads.** Without `folders`, a Trash
+  message's passages are context, so a stale copy in Trash cannot be
+  the answer to an unfiltered question. Naming `"Trash"` in `folders`
+  makes them in scope.
+
 **Citations (#284).** Each passage in the prompt starts with a header
 line holding a server-assigned evidence label and the passage's own
 message: `[E3 | message <claimant ID> | from <sender> | sent
 <date> | chunk N chars X-Y]` (attachment passages also name the file
 and MIME type; a thread shown by its indexed text, because it had no
-matching chunks, gets `[E4 | thread text]`). The sender is the
+matching chunks, gets `[E4 | thread text]`; when the prompt shows
+[scope labels](#evidence-scope-in-scope-or-context), `in scope |` or
+`context |` follows the sent date and `thread text` is followed by
+`| in scope` or `| context`). The sender is the
 message's first `From` entry and the date its own sent date, not the
 thread's latest, so passages from different messages with the same
 chunk index stay distinct. Labels are numbered by thread rank, then
@@ -983,6 +1076,12 @@ answer against the passages it supplied:
   passage has, however many digits it has (`[E10000]`), is an
   `unknown_labels` problem, and an answer that cites nothing (and does
   not open with that phrase) is a `no_citations` problem.
+- **Scope.** An answer whose every valid label is a `context` passage
+  (and that does not open with the not-found phrase) is a
+  `context_only_citations` problem naming those labels: it rests on no
+  message that meets the request's filters. Without a filter this
+  happens only when every cited passage is from a Trash message or
+  combined thread text of a thread holding one.
 - **Statements.** The answer is cut into statements at line breaks and
   at sentence ends followed by whitespace (a label written after the
   full stop, as in `Moved. [E2]`, belongs to the sentence before it; a
@@ -1041,10 +1140,10 @@ Structured output:
 |---|---|
 | `answer` | The model's answer with its inline labels |
 | `coverage_note` | Server-written notice of prompt-budget omissions/truncation and possible incompleteness; `null` when nothing was left out or cut to fit. This is separate from model prose and citation validation |
-| `citations` | One entry per valid cited label, in first-cited order: `label`, `chunk_id`, `claimant_id`, `message_id`, `thread_id`, `sender`, `sent_at`, `occurred_at`, `source` (`body`, `attachment` or `thread`), `attachment_id`, `attachment_filename`, `char_start`, `char_end` (end of the part shown to the model) |
+| `citations` | One entry per valid cited label, in first-cited order: `label`, `chunk_id`, `claimant_id`, `message_id`, `thread_id`, `sender`, `sent_at`, `occurred_at`, `source` (`body`, `attachment` or `thread`), `attachment_id`, `attachment_filename`, `char_start`, `char_end` (end of the part shown to the model), `scope` (`in_scope` or `context`, [Evidence scope](#evidence-scope-in-scope-or-context)) |
 | `statements` | The answer cut into statements: `text`, `labels` (the supplied passages it cites) and `status` (`cited`, `unsupported`, `uncertain`, `uncited`, `invalid` for only unknown labels, or `not_checked`) |
 | `quotes` | Each quotation: `text` (cut at 1,000 characters), `statement` (index into `statements`), `status` (`verified`, `misattributed`, `unmatched`, `uncited`, `not_checked`) and `found_in` (labels of the passages it was found in) |
-| `citation_problems` | `[]` when the check passed, else entries `{kind, labels, statements, quotes}`, `kind` one of `unknown_labels`, `no_citations`, `uncited_statements`, `unmatched_quotes`, `misattributed_quotes`; `statements` and `quotes` are indexes into those lists, and `labels` holds the unknown labels or, for `misattributed_quotes`, the passages the quotes were found in |
+| `citation_problems` | `[]` when the check passed, else entries `{kind, labels, statements, quotes}`, `kind` one of `unknown_labels`, `no_citations`, `uncited_statements`, `unmatched_quotes`, `misattributed_quotes`, `context_only_citations`; `statements` and `quotes` are indexes into those lists, and `labels` holds the unknown labels or, for `misattributed_quotes`, the passages the quotes were found in, or, for `context_only_citations`, the cited labels |
 | `repair_attempted` | Whether the one repair call was made |
 | `threads` | The threads searched, best match first (the `search_emails` thread shape) |
 

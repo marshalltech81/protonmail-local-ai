@@ -25,7 +25,7 @@ from src.lib.inference import (
     default_token_budget,
     estimate_tokens,
 )
-from src.lib.sqlite import ChunkResult, ThreadResult
+from src.lib.sqlite import ChunkResult, ScopeLabels, ThreadResult
 from src.tools.brief import (
     _BRIEF_REPAIR_INSTRUCTION,
     _CHECK_REPAIR_INSTRUCTION,
@@ -116,9 +116,16 @@ def _long_threads(n: int = 5, chunks: int = 3, size: int = 1500) -> list[ThreadR
 class _StubDb:
     """Just the reads the intelligence tools make, returning fixed data."""
 
-    def __init__(self, threads: list[ThreadResult], recent: list[ChunkResult] | None = None):
+    def __init__(
+        self,
+        threads: list[ThreadResult],
+        recent: list[ChunkResult] | None = None,
+        *,
+        in_scope: bool = True,
+    ):
         self._threads = threads
         self._recent = recent or []
+        self._in_scope = in_scope
 
     def hybrid_search(self, **_kwargs):
         return list(self._threads)
@@ -128,6 +135,16 @@ class _StubDb:
 
     def get_recent_chunks_for_thread(self, _thread_id, _limit):
         return list(self._recent)
+
+    def message_scope(self, thread_ids, **_filters):
+        # Every message in scope (no labels shown), or every message out
+        # of it (#755): each header then carries a scope field.
+        if not self._in_scope:
+            return ScopeLabels(claimants=set(), whole_threads=set())
+        return ScopeLabels(
+            claimants={c.claimant_id for t in self._threads for c in t.evidence_chunks},
+            whole_threads=set(thread_ids),
+        )
 
 
 def _tools(db, inference, budget: PromptBudget | None = None, *, experimental=False):
@@ -233,6 +250,19 @@ class TestAskMailboxBudget:
         llm = FakeInferenceClient(response="no labels here")  # forces the repair call
         asyncio.run(_tools(_StubDb(_long_threads()), llm, _SMALL)["ask_mailbox"](question="q?"))
         assert len(llm.complete_calls) == 2
+        for call in llm.complete_calls:
+            assert _prompt_chars(call) <= _SMALL.prompt_chars
+            assert estimate_tokens(call[0] + call[1]) <= _SMALL.prompt_tokens
+
+    def test_scope_labels_and_block_stay_within_the_budget(self):
+        """With every passage context (#755) the headers carry a scope
+        field and the prompt a scope block; it still fits."""
+        llm = FakeInferenceClient(response="no labels here")  # forces the repair call
+        db = _StubDb(_long_threads(), in_scope=False)
+        asyncio.run(_tools(db, llm, _SMALL)["ask_mailbox"](question="q?"))
+        assert len(llm.complete_calls) == 2
+        assert "| context | chunk" in llm.complete_calls[0][1]
+        assert "Request scope" in llm.complete_calls[0][1]
         for call in llm.complete_calls:
             assert _prompt_chars(call) <= _SMALL.prompt_chars
             assert estimate_tokens(call[0] + call[1]) <= _SMALL.prompt_tokens

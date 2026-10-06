@@ -537,6 +537,20 @@ class TestRunner:
             if p.source != "thread":
                 assert " | from " in p.header and " | sent " in p.header
 
+    def test_captured_headers_keep_their_scope_labels(self, chunked_db):
+        """#755: with a filter, each header shows its scope label, and the
+        captured header is still the one the model saw."""
+        case = dataclasses.replace(
+            CASES["ask-roof-total"],
+            arguments={"question": "invoice march", "date_from": "2024-01-01"},
+        )
+        inference = ScriptedClient("Invoice 12345 is due March 31 [E1].")
+        run = asyncio.run(run_case(case, _ctx(chunked_db, inference)))
+        assert run.passages
+        for p in run.passages.values():
+            assert p.header in run.calls[0].user
+            assert "| in scope" in p.header or "| context" in p.header
+
     def test_attachment_passage_header_names_the_attachment(self):
         """#837: an attachment chunk's header carries its file name."""
         chunk = ChunkResult(

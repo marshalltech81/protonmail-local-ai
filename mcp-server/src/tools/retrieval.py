@@ -380,14 +380,25 @@ def register_retrieval_tools(server, db):
             # No message body indexed yet (e.g. chunking still pending):
             # fall back to the accumulated thread text, a retrieval
             # artifact that also carries quoted replies.
+            # It is labelled context (#755): no one message's own text.
             thread_text = None
             if not page.has_bodies:
                 if thread.body_text:
                     thread_text = thread.body_text
-                    lines += ["", "Indexed thread text:", "", thread.body_text]
+                    lines += [
+                        "",
+                        "Indexed thread text (context, not any one message's text):",
+                        "",
+                        thread.body_text,
+                    ]
                 elif thread.snippet:
                     thread_text = thread.snippet
-                    lines += ["", "Indexed snippet:", "", thread.snippet]
+                    lines += [
+                        "",
+                        "Indexed snippet (context, not any one message's text):",
+                        "",
+                        thread.snippet,
+                    ]
 
             if include_attachments_metadata and thread.has_attachments:
                 lines.append("")
@@ -404,6 +415,7 @@ def register_retrieval_tools(server, db):
                 messages=[_thread_message(m, page.bodies.get(m.claimant_id)) for m in messages],
                 next_offset=next_offset if next_offset < total else None,
                 indexed_thread_text=thread_text,
+                indexed_thread_text_scope="context" if thread_text is not None else None,
                 reaped_messages=[
                     ReapedMessage(claimant_id=r.claimant_id, reaped_at=r.reaped_at)
                     for r in page.reaped
@@ -454,7 +466,8 @@ def register_retrieval_tools(server, db):
         ask_mailbox for attachment content. When no body chunks are
         indexed for the message, ``body: null`` means no indexed body;
         ``indexed_thread_text`` is conversation context, not this
-        message's text. Report this gap rather than attributing the
+        message's text (``indexed_thread_text_scope`` says context, as
+        ask_mailbox labels such passages). Report this gap rather than attributing the
         context to this message or treating a missing body as proof
         that the message contained no relevant evidence.
 
@@ -582,12 +595,23 @@ def register_retrieval_tools(server, db):
                     "Showing indexed thread context instead; use get_thread "
                     "for the full thread.",
                 ]
+                # Labelled context (#755): not this message's own text.
                 if thread.body_text:
                     thread_text = thread.body_text
-                    lines += ["", "Indexed thread text:", "", thread.body_text]
+                    lines += [
+                        "",
+                        "Indexed thread text (context, not this message's text):",
+                        "",
+                        thread.body_text,
+                    ]
                 elif thread.snippet:
                     thread_text = thread.snippet
-                    lines += ["", "Indexed snippet:", "", thread.snippet]
+                    lines += [
+                        "",
+                        "Indexed snippet (context, not this message's text):",
+                        "",
+                        thread.snippet,
+                    ]
 
             output = GetMessageOutput(
                 message=listed_message(view.record),
@@ -599,6 +623,7 @@ def register_retrieval_tools(server, db):
                 body_total_chars=len(body_text),
                 next_offset=next_offset,
                 indexed_thread_text=thread_text,
+                indexed_thread_text_scope="context" if thread_text is not None else None,
             )
             return tool_result("\n".join(lines), output)
 
