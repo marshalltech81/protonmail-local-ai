@@ -1810,6 +1810,7 @@ the project adds no encryption of its own:
 | Every message as an `.eml` file, attachments included | `maildir-volume` | Unencrypted |
 | The index: thread and message text, chunks, extracted attachment text, participants, vectors | `sqlite-volume` (`mail.db` and its WAL) | Unencrypted |
 | Sync state, folder names and the Bridge certificate pin | `mbsync-state` and the Maildir | Unencrypted |
+| Credentials: the Bridge IMAP password, the MCP bearer token, provider API keys | `.secrets/*.txt` in the checkout | Unencrypted (mode 600) |
 
 Protecting them is the host's job, which makes it a setup requirement:
 
@@ -1820,17 +1821,23 @@ Protecting them is the host's job, which makes it a setup requirement:
 - **An unlocked, logged-in machine exposes them.** Code running as the
   operator's user, or as root, can read the volumes. This is the same
   trust condition as the MCP bearer token ("processes running as the
-  operator are trusted", see Endpoint authentication), so full-disk
-  encryption protects a powered-off or locked machine, not a running
-  session.
+  operator are trusted", see Endpoint authentication). Full-disk
+  encryption protects a powered-off machine, or one restarted and not
+  yet unlocked at login. A screen lock does not re-lock FileVault, so a
+  logged-in session that is only screen-locked is not protected by it.
 - **Backups.** Any backup of these volumes, or of a Maildir archive
   (`docs/troubleshooting.md`), holds the whole mailbox: keep it
   encrypted (for example an encrypted Time Machine destination) and
-  never inside the checkout.
-- **Deleted mail.** A reap removes a message from the index, but its
-  text can persist below SQLite in free blocks, snapshots and backups
-  (see "Cascade on message removal" and "Deletion Reconciliation"
-  above).
+  never inside the checkout. A backup of the checkout itself carries
+  `.secrets/`, so it needs the same protection, or `.secrets/` left out
+  and the credentials rotated if it was exposed.
+- **Deleted mail.** Mail deleted in Proton stays on disk. A reap removes
+  the message from the index, but its `.eml`, attachments included,
+  stays in the Maildir indefinitely: mbsync never expunges
+  (`Expunge None`) and the indexer's Maildir mount is read-only, so
+  removing those files is undecided (#728). Below that, deleted text can
+  also persist in free blocks, snapshots and backups (see "Cascade on
+  message removal" and "Deletion Reconciliation" above).
 
 Application-level encryption of the index (for example SQLCipher) is
 out of scope: sqlite-vec would need to work with it, and the indexer

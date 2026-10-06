@@ -225,10 +225,13 @@ network can reach it.
 
 **At rest, these copies are unencrypted.** Bridge decrypts your mail, and
 the Maildir, the search index and mbsync's sync state are then ordinary
-files in Docker volumes; Proton's protections do not cover them. Turn on
-full-disk encryption (FileVault), encrypt any backup of them, and keep
-them out of the checkout. While you are logged in and the disk is
-unlocked, code running as your user can read them. See
+files in Docker volumes; Proton's protections do not cover them. The
+credentials in `.secrets/` are plaintext files too. Mail you delete in
+Proton stays in the Maildir (#728). Turn on full-disk encryption
+(FileVault), and encrypt any backup of the volumes or the checkout.
+FileVault protects a powered-off machine, not a logged-in session,
+even a screen-locked one: while you are logged in, code running as your
+user can read them. See
 [at rest](docs/architecture.md#at-rest-on-the-hosts-disk).
 
 ### 2. Project-internal model layers — controlled by `INFERENCE_MODE` and `RERANK_MODE`
