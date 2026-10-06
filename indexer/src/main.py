@@ -70,7 +70,7 @@ from .embedder import (
     scrub_embed_error,
 )
 from .entities import AuthorityRules, AuthorityRulesError, load_authority_rules
-from .extractors import ExtractionResult, is_stale_extractor
+from .extractors import DEFAULT_MAX_BYTES, ExtractionResult, is_stale_extractor
 from .folder_watch import FolderWatchRefresher
 from .maildir import (
     PERMS_REPAIRED_NAME,
@@ -449,7 +449,7 @@ def _bool_env(name: str, default: bool) -> bool:
 # ``INDEXER_PARSE_MAX_BYTES`` (50 MB) carries at most ~36 MB of
 # base64-encoded attachment, so a much larger default would admit
 # little more.
-_DEFAULT_ATTACHMENT_MAX_BYTES = 32 * 1024 * 1024
+_DEFAULT_ATTACHMENT_MAX_BYTES = DEFAULT_MAX_BYTES
 INDEXER_ATTACHMENT_EXTRACTION_ENABLED = _bool_env("INDEXER_ATTACHMENT_EXTRACTION_ENABLED", True)
 INDEXER_OCR_ENABLED = _bool_env("INDEXER_OCR_ENABLED", True)
 INDEXER_ATTACHMENT_MAX_BYTES = _int_env(

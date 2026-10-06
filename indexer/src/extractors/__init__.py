@@ -260,6 +260,10 @@ _EXT_DISPATCH: dict[str, str] = {
 # can be upgraded later if the operator flips the switch).
 _IMAGE_MIME_PREFIX = "image/"
 
+# Default payload cap, shared with the indexer's
+# ``INDEXER_ATTACHMENT_MAX_BYTES`` default (``src/main.py``).
+DEFAULT_MAX_BYTES = 32 * 1024 * 1024
+
 
 def extract(
     *,
@@ -267,7 +271,7 @@ def extract(
     filename: str,
     payload: bytes,
     ocr_enabled: bool = True,
-    max_bytes: int = 10_000_000,
+    max_bytes: int = DEFAULT_MAX_BYTES,
     max_ocr_pages: int = 20,
     max_extracted_chars: int | None = None,
     ocr_timeout_seconds: float | None = None,
