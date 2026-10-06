@@ -126,6 +126,8 @@ _ENV_ALLOWLIST = frozenset(
         "SSL_CERT_FILE",
         "SSL_CERT_DIR",
         "NODE_EXTRA_CA_CERTS",
+        # Codex reads its own CA variable before SSL_CERT_FILE.
+        "CODEX_CA_CERTIFICATE",
         "HTTP_PROXY",
         "HTTPS_PROXY",
         "NO_PROXY",
@@ -158,10 +160,13 @@ MANAGED_SETTINGS_PATHS = (
     Path("/Library/Application Support/ClaudeCode/managed-settings.json"),
     Path("/etc/claude-code/managed-settings.json"),
 )
-# Codex config layers that apply whatever the session flags say.
+# Codex config layers that apply whatever the session flags say,
+# including the requirements layer (developer instructions, hooks, MCP
+# servers and forced features).
 CODEX_MANAGED_CONFIG_PATHS = (
     Path("/etc/codex/managed_config.toml"),
     Path("/etc/codex/config.toml"),
+    Path("/etc/codex/requirements.toml"),
     Path("/Library/Managed Preferences/com.openai.codex.plist"),
 )
 # Codex reads only the linked auth.json, never the keyring.
@@ -212,7 +217,14 @@ class CliJudgeError(Exception):
 
 # Path-valued variables made absolute: each call runs in a temporary
 # directory, where a relative path would name something else.
-_PATH_VARS = ("HOME", "CLAUDE_CONFIG_DIR", "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE")
+_PATH_VARS = (
+    "HOME",
+    "TMPDIR",
+    "CLAUDE_CONFIG_DIR",
+    "NODE_EXTRA_CA_CERTS",
+    "SSL_CERT_FILE",
+    "CODEX_CA_CERTIFICATE",
+)
 # Directory lists (OpenSSL's SSL_CERT_DIR is separated like PATH): each
 # entry is made absolute on its own and empty entries are dropped.
 _PATH_LIST_VARS = ("SSL_CERT_DIR",)

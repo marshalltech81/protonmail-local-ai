@@ -464,7 +464,8 @@ is `127.0.0.1`, not `host.docker.internal`.
   CLI leads its own process group) when `JUDGE_TIMEOUT_SECS` runs out.
   Each CLI inherits only an allowlist of the caller's environment (path,
   home, user, locale, temporary directory, proxy and certificate
-  variables, including `NODE_EXTRA_CA_CERTS` for a TLS-inspecting proxy;
+  variables, including `NODE_EXTRA_CA_CERTS` (and Codex's
+  `CODEX_CA_CERTIFICATE`) for a TLS-inspecting proxy;
   Claude also keeps `CLAUDE_CONFIG_DIR`; path values are made absolute),
   so API keys,
   provider switches, reasoning settings such as
@@ -528,8 +529,10 @@ is `127.0.0.1`, not `host.docker.internal`.
   prompt replaces Codex's coding-agent instructions
   (`model_instructions_file`), with its permissions, collaboration-mode
   and environment-context blocks and the `request_user_input` tool off. Managed and system Codex config (`/etc/codex/managed_config.toml`,
-  `/etc/codex/config.toml`, macOS managed preferences) is refused, since
-  it applies whatever the flags say and can add MCP servers; a
+  `/etc/codex/config.toml`, the requirements layer
+  `/etc/codex/requirements.toml`, macOS managed preferences) is refused,
+  since it applies whatever the flags say and can add instructions,
+  hooks or MCP servers; a
   cloud-managed enterprise layer cannot be seen locally. Before any case
   runs, `codex login status`, run in the same kind of private home with
   the same file store, must report a ChatGPT login: an API-key login bills API usage, and a logged-out CLI

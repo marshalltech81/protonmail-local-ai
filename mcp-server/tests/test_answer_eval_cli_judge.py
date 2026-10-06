@@ -540,6 +540,14 @@ def test_judge_answer_maps_cli_errors_to_their_category(fake_claude):
     assert outcome.detail == "claude CLI is not logged in: run `claude` and /login"
 
 
+def test_codex_requirements_layer_is_refused():
+    """Review round 12: /etc/codex/requirements.toml can add developer
+    instructions, hooks, MCP servers and features whatever the session
+    flags say, so its presence refuses the judge like managed config.
+    (Module level: the Codex test class blanks these paths.)"""
+    assert Path("/etc/codex/requirements.toml") in cli_judge.CODEX_MANAGED_CONFIG_PATHS
+
+
 # ------------------------------------------------------------------ live
 
 
@@ -761,6 +769,19 @@ class TestCodexConfig:
         monkeypatch.setenv("CODEX_HOME", home.name)
         cfg = load_layer("JUDGE", self.ENV)
         assert cfg is not None and cfg.cli_auth_file == str(home.resolve() / "auth.json")
+
+    def test_tmpdir_and_codex_ca_are_kept_and_made_absolute(self, monkeypatch, tmp_path):
+        """Review round 12: a relative TMPDIR, and Codex's own
+        CODEX_CA_CERTIFICATE (which Codex reads before SSL_CERT_FILE), named
+        other paths once a call changed into its temporary directory."""
+        (tmp_path / "scratch").mkdir()
+        (tmp_path / "ca.pem").write_text("")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("TMPDIR", "scratch")
+        monkeypatch.setenv("CODEX_CA_CERTIFICATE", "ca.pem")
+        env = cli_judge._allowed_env()
+        assert env["TMPDIR"] == str((tmp_path / "scratch").resolve())
+        assert env["CODEX_CA_CERTIFICATE"] == str((tmp_path / "ca.pem").resolve())
 
     def test_managed_codex_config_is_refused(self, tmp_path, monkeypatch):
         """Review round 2: managed and system config layers load whatever
