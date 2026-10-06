@@ -9,6 +9,7 @@ strings and a read-only, never-raising schema read) and is logged when
 malformed setting, a missing token or a missing index still leaves it
 in the log (Codex review rounds 3 and 4 on #893)."""
 
+import ast
 import logging
 import os
 import re
@@ -96,10 +97,96 @@ def test_config_hash_covers_only_the_named_non_secret_settings():
         "RERANK_CANDIDATES",
         "RERANK_TIMEOUT_SECS",
         "MCP_PORT",
+        "MCP_TRANSPORT",
         "MCP_SESSION_IDLE_TIMEOUT_SECS",
         "MCP_EXPERIMENTAL_TOOLS",
     }
     assert not names & set(_SECRET_NAMES)
+
+
+# --- Completeness (Codex review round 5 on #893) -----------------------------
+# Every environment variable ``src/`` reads is either a hash input or an
+# explicit exclusion with a reason, so a new setting cannot be left out of
+# the hash by accident.
+
+_ENV_NAME = re.compile(r"[A-Z][A-Z0-9_]{2,}")
+# The service's own env helpers, which take the variable name as a literal
+# argument (``_read_secret``'s env fallback, any ``*_env`` helper).
+_ENV_HELPERS = {"getenv", "_read_secret"}
+
+
+def _env_names_read_by_src() -> set[str]:
+    """Names in literal reads: ``os.environ.get("X")`` / ``os.getenv`` /
+    ``os.environ["X"]`` and the helpers above (any ``*_env`` too)."""
+    names: set[str] = set()
+    for path in (_SERVICE_DIR / "src").rglob("*.py"):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            candidates: list[ast.expr] = []
+            if isinstance(node, ast.Call):
+                func = node.func
+                fn = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+                receiver = ""
+                if isinstance(func, ast.Attribute):
+                    value = func.value
+                    receiver = (
+                        value.attr if isinstance(value, ast.Attribute) else getattr(value, "id", "")
+                    )
+                if (
+                    (fn == "get" and receiver in {"environ", "env"})
+                    or fn in _ENV_HELPERS
+                    or fn.endswith("_env")
+                ):
+                    candidates = list(node.args)
+            elif isinstance(node, ast.Subscript):
+                value = node.value
+                receiver = (
+                    value.attr if isinstance(value, ast.Attribute) else getattr(value, "id", "")
+                )
+                if receiver in {"environ", "env"}:
+                    candidates = [node.slice]
+            names.update(
+                c.value
+                for c in candidates
+                if isinstance(c, ast.Constant)
+                and isinstance(c.value, str)
+                and _ENV_NAME.fullmatch(c.value)
+            )
+    return names
+
+
+def test_the_scan_finds_reads_in_every_module():
+    # One read per module or helper, so a scan that silently stopped
+    # matching would fail here first.
+    assert {
+        "EMBED_MODEL",  # os.environ.get in main.py
+        "MCP_SESSION_IDLE_TIMEOUT_SECS",  # _float_env
+        "RERANK_CANDIDATES",  # _int_env
+        "MCP_EXPERIMENTAL_TOOLS",  # _flag_env
+        "MCP_AUTH_TOKEN",  # _read_secret's env fallback
+        "MCP_TRANSPORT",
+    } <= _env_names_read_by_src()
+
+
+def test_every_setting_read_is_hashed_or_excluded():
+    read = _env_names_read_by_src()
+    missing = read - set(main_mod._IDENTITY_SETTINGS) - set(main_mod._IDENTITY_EXCLUDED)
+    assert not missing, f"add to _IDENTITY_SETTINGS or _IDENTITY_EXCLUDED: {sorted(missing)}"
+
+
+def test_the_lists_name_only_settings_that_are_read_and_do_not_overlap():
+    listed = set(main_mod._IDENTITY_SETTINGS) | set(main_mod._IDENTITY_EXCLUDED)
+    assert not listed - _env_names_read_by_src()
+    assert not set(main_mod._IDENTITY_SETTINGS) & set(main_mod._IDENTITY_EXCLUDED)
+    assert len(set(main_mod._IDENTITY_SETTINGS)) == len(main_mod._IDENTITY_SETTINGS)
+
+
+def test_each_exclusion_has_a_one_line_reason():
+    for name, reason in main_mod._IDENTITY_EXCLUDED.items():
+        assert reason.strip() and "\n" not in reason, name
+
+
+def test_every_secret_is_excluded():
+    assert set(_SECRET_NAMES) <= set(main_mod._IDENTITY_EXCLUDED)
 
 
 def test_changing_a_secret_does_not_change_the_hash(monkeypatch, caplog):

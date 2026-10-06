@@ -2223,7 +2223,58 @@ check "secrets do not change the hash or reach the identity line" \
     secrets_do_not_change_the_hash_or_reach_the_line
 check "the fingerprint and pin rotation change the hash" \
     fingerprint_and_pin_rotation_change_the_hash
+# Codex review round 5 on #893: every variable the entrypoint reads from its
+# environment (each ${NAME:- expansion) is hashed by log_startup_identity
+# (a NAME=%s in its format) or excluded here with a reason. Prints each
+# problem in the given entrypoint, nothing when there is none.
+identity_coverage_problems() {
+    local file="$1" env_read hashed name
+    env_read="$(grep -oE '\$\{[A-Z][A-Z0-9_]*:-' "$file" | sed -E 's/^\$\{//; s/:-$//' | sort -u)"
+    hashed="$(awk '$0 == "log_startup_identity() {" {p = 1} p {print} p && $0 == "}" {exit}' "$file" |
+        grep -oE '[A-Z][A-Z0-9_]*=%s' | sed 's/=%s$//' | sort -u)"
+    if [[ -z "$env_read" || -z "$hashed" ]]; then
+        printf 'no settings found\n'
+        return 0
+    fi
+    while IFS= read -r name; do
+        if grep -qx "$name" <<<"$hashed"; then
+            continue
+        fi
+        case "$name" in
+            BRIDGE_USER) ;; # the Bridge account's user name, a credential
+            GIT_COMMIT) ;;  # not configuration: the line's own commit field
+            *) printf 'neither hashed nor excluded: %s\n' "$name" ;;
+        esac
+    done <<<"$env_read"
+    while IFS= read -r name; do
+        grep -qx "$name" <<<"$env_read" || printf 'hashed but never read: %s\n' "$name"
+    done <<<"$hashed"
+}
+
+every_setting_read_is_hashed_or_excluded() {
+    local problems
+    problems="$(identity_coverage_problems "$ENTRYPOINT")"
+    [[ -z "$problems" ]] || {
+        printf '%s\n' "$problems"
+        return 1
+    }
+}
+
+a_new_setting_left_out_of_the_hash_is_reported() {
+    local copy="$WORK/entrypoint-new-setting.sh"
+    {
+        cat "$ENTRYPOINT"
+        # shellcheck disable=SC2016 # the expansion is the text written
+        printf 'readonly SYNTHETIC_NEW_SETTING="${SYNTHETIC_NEW_SETTING:-1}"\n'
+    } >"$copy"
+    [[ "$(identity_coverage_problems "$copy")" == "neither hashed nor excluded: SYNTHETIC_NEW_SETTING" ]] || return 1
+}
+
 check "the identity line precedes validation" the_identity_line_precedes_validation
+check "every setting the entrypoint reads is hashed or excluded" \
+    every_setting_read_is_hashed_or_excluded
+check "a new setting left out of the hash is reported" \
+    a_new_setting_left_out_of_the_hash_is_reported
 check "malformed settings still give the identity line" \
     malformed_settings_still_give_the_identity_line
 

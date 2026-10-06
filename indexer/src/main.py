@@ -137,6 +137,7 @@ _GIT_COMMIT_PATTERN = re.compile(r"[0-9A-Za-z._-]{1,64}")
 _IDENTITY_SETTINGS = (
     "MAILDIR_PATH",
     "SQLITE_PATH",
+    "INDEXER_HEALTH_FILE",
     "EMBED_MODE",
     "EMBED_BASE_URL",
     "EMBED_MODEL",
@@ -167,6 +168,14 @@ _IDENTITY_SETTINGS = (
     "INDEXER_DELETION_MAX_BATCH_PCT",
     "INDEXER_DELETION_FORCE",
 )
+
+# Every other variable ``src/`` reads, with why it is not hashed.
+# ``tests/test_startup_identity.py`` checks that each variable read is in
+# one of the two lists (Codex review round 5 on #893).
+_IDENTITY_EXCLUDED = {
+    "EMBED_API_KEY": "a secret: the embedder credential",  # pragma: allowlist secret
+    "GIT_COMMIT": "not configuration: logged as the line's own commit field",
+}
 
 
 def _git_commit() -> str:

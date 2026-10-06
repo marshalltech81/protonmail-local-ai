@@ -65,9 +65,13 @@ Find it with `docker compose logs <service> | grep 'Startup identity'`.
   non-secret settings as configured: the raw environment values, not
   parsed, so a malformed value just gives a different hash, and an
   unset setting hashes differently from one set to its default. The
-  inputs are named one by one in code: paths, modes, endpoints, model
-  names and limits (indexer and mcp-server, `_IDENTITY_SETTINGS` in
-  `src/main.py`), or `BRIDGE_HOST`, `BRIDGE_IMAP_PORT`,
+  inputs are named one by one in code: every non-secret setting the
+  service reads, that is paths (including the indexer's health file),
+  modes, endpoints, model names, the MCP transport and limits (indexer
+  and mcp-server, `_IDENTITY_SETTINGS` in `src/main.py`, with everything
+  else the service reads listed with its reason in
+  `_IDENTITY_EXCLUDED`; a test fails when a new setting is in neither),
+  or `BRIDGE_HOST`, `BRIDGE_IMAP_PORT`,
   `BRIDGE_CERT_HOST`, `SYNC_INTERVAL`, `SYNC_DEADLINE_SECONDS`,
   `BRIDGE_CERT_FINGERPRINT` (normalized, and not secret) and
   `BRIDGE_CERT_PIN_ROTATE` (mbsync). It changes when one of those

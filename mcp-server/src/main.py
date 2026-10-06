@@ -89,9 +89,21 @@ _IDENTITY_SETTINGS = (
     "RERANK_CANDIDATES",
     "RERANK_TIMEOUT_SECS",
     "MCP_PORT",
+    "MCP_TRANSPORT",
     "MCP_SESSION_IDLE_TIMEOUT_SECS",
     "MCP_EXPERIMENTAL_TOOLS",
 )
+
+# Every other variable ``src/`` reads, with why it is not hashed.
+# ``tests/test_startup_identity.py`` checks that each variable read is in
+# one of the two lists (Codex review round 5 on #893).
+_IDENTITY_EXCLUDED = {
+    "INFERENCE_API_KEY": "a secret: the inference provider credential",  # pragma: allowlist secret
+    "EMBED_API_KEY": "a secret: the embedder credential",  # pragma: allowlist secret
+    "RERANK_API_KEY": "a secret: the reranker credential",  # pragma: allowlist secret
+    "MCP_AUTH_TOKEN": "a secret: the /mcp bearer token",
+    "GIT_COMMIT": "not configuration: logged as the line's own commit field",
+}
 
 
 def _git_commit() -> str:
