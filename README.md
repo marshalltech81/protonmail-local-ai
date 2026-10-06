@@ -226,7 +226,8 @@ network can reach it.
 **At rest, these copies are unencrypted.** Bridge decrypts your mail, and
 the Maildir, the search index and mbsync's sync state are then ordinary
 files in Docker volumes; Proton's protections do not cover them. The
-credentials in `.secrets/` are plaintext files too. Mail you delete in
+credentials in `.secrets/`, and the addresses in `config/authority.toml`
+and `.env`, are plaintext files too. Mail you delete in
 Proton stays in the Maildir (#728). Turn on full-disk encryption
 (FileVault), and encrypt any backup of the volumes or the checkout.
 FileVault protects a powered-off machine, not a logged-in session,

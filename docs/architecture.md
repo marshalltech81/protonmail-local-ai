@@ -1811,6 +1811,7 @@ the project adds no encryption of its own:
 | The index: thread and message text, chunks, extracted attachment text, participants, vectors | `sqlite-volume` (`mail.db` and its WAL) | Unencrypted |
 | Sync state, folder names and the Bridge certificate pin | `mbsync-state` and the Maildir | Unencrypted |
 | Credentials: the Bridge IMAP password, the MCP bearer token, provider API keys | `.secrets/*.txt` in the checkout | Unencrypted (mode 600) |
+| Operator configuration naming real people: source-authority rules (addresses, domains), the Bridge username | `config/authority.toml`, `.env` in the checkout | Unencrypted |
 
 Protecting them is the host's job, which makes it a setup requirement:
 
@@ -1831,9 +1832,11 @@ Protecting them is the host's job, which makes it a setup requirement:
 - **Backups.** Any backup of these volumes, or of a Maildir archive
   (`docs/troubleshooting.md`), holds the whole mailbox: keep it
   encrypted (for example an encrypted Time Machine destination) and
-  never inside the checkout. A backup of the checkout itself carries
-  `.secrets/`, so it needs the same protection, or `.secrets/` left out
-  and the credentials rotated if it was exposed.
+  never inside the checkout. A backup of the checkout itself carries the
+  git-ignored operator files (`.secrets/`, `config/authority.toml`,
+  `.env`), so it needs the same protection, or those files left out.
+  Rotating credentials after an exposure covers `.secrets/`, but nothing
+  takes back the addresses in `config/authority.toml` or `.env`.
 - **Deleted mail.** Mail deleted in Proton stays on disk. A reap removes
   the message from the index, but its `.eml`, attachments included,
   stays in the Maildir indefinitely: mbsync never expunges
