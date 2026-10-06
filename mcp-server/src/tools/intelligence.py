@@ -52,6 +52,7 @@ from .outputs import (
     SummarizeThreadOutput,
     SummaryStyle,
     clip,
+    read_only,
     thread_summary,
     tool_result,
 )
@@ -2814,7 +2815,10 @@ def register_intelligence_tools(
     # Config identifiers for the per-call timing line.
     timing_config = {"rerank": rerank_mode(reranker), "inference": inference_client.mode}
 
-    @server.tool(output_schema=AskMailboxOutput.model_json_schema())
+    @server.tool(
+        output_schema=AskMailboxOutput.model_json_schema(),
+        annotations=read_only("Ask the mailbox"),
+    )
     @timed_tool("ask_mailbox", **timing_config)
     async def ask_mailbox(
         question: str,
@@ -3165,7 +3169,10 @@ def register_intelligence_tools(
             log.error("ask_mailbox error: %s", safe_error)
             raise ToolError(f"Error: {safe_error}") from e
 
-    @server.tool(output_schema=SummarizeThreadOutput.model_json_schema())
+    @server.tool(
+        output_schema=SummarizeThreadOutput.model_json_schema(),
+        annotations=read_only("Summarize thread"),
+    )
     @timed_tool("summarize_thread", **timing_config)
     async def summarize_thread(
         thread_id: str,
@@ -3395,7 +3402,10 @@ def register_intelligence_tools(
             log.error("summarize_thread error: %s", safe_error)
             raise ToolError(f"Error: {safe_error}") from e
 
-    @server.tool(output_schema=ExtractFromEmailsOutput.model_json_schema())
+    @server.tool(
+        output_schema=ExtractFromEmailsOutput.model_json_schema(),
+        annotations=read_only("Extract from emails"),
+    )
     @timed_tool("extract_from_emails", **timing_config)
     async def extract_from_emails(
         query: str,
