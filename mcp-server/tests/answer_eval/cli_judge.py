@@ -233,6 +233,16 @@ def _allowed_env(*extra: str) -> dict[str, str]:
         if env.get(name, "").strip():
             entries = (e for e in env[name].split(os.pathsep) if e.strip())
             env[name] = os.pathsep.join(str(Path(e).resolve()) for e in entries)
+    if "PATH" in env:
+        # The CLI's launcher may find its interpreter or helpers through
+        # PATH: a relative entry, or an empty one (the current directory),
+        # is made absolute against this directory; absolute entries stay
+        # exactly as given.
+        cwd = os.getcwd()
+        env["PATH"] = os.pathsep.join(
+            e if os.path.isabs(e) else os.path.join(cwd, e) if e else cwd
+            for e in env["PATH"].split(os.pathsep)
+        )
     return env
 
 
@@ -391,6 +401,9 @@ class ClaudeCliClient:
             system,
             "--strict-mcp-config",
             "--no-session-persistence",
+            # No skill or command catalog: an instruction channel outside
+            # the system prompt that untrusted evidence could name.
+            "--disable-slash-commands",
         ]
 
     async def complete(self, system: str, user: str) -> str:

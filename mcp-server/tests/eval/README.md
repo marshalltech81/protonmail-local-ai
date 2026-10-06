@@ -481,8 +481,11 @@ is `127.0.0.1`, not `host.docker.internal`.
 - **`claude-cli`** runs `claude -p` (Claude Code, logged in with a Claude
   subscription) with no tools (`--tools ""`), no settings, `CLAUDE.md`
   files, hooks or plugins (`--setting-sources ""`), no MCP servers
-  (`--strict-mcp-config`), no saved session, and the judge system
-  prompt. `--bare` is not used
+  (`--strict-mcp-config`), no skills or commands
+  (`--disable-slash-commands`), no saved session, and the judge system
+  prompt. Relative or empty `PATH` entries are made absolute before the
+  calls change directory, so the CLI's launcher still finds its
+  interpreter. `--bare` is not used
   because it accepts only an API key. A set `ANTHROPIC_API_KEY` would
   take the call off the subscription (the allowlist keeps it out), and
   `DISABLE_AUTOUPDATER=1` keeps one CLI version for the whole run.
