@@ -401,6 +401,9 @@ class Database:
         cur = self._conn.cursor()
         cur.execute("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY)")
         row = cur.execute("SELECT version FROM schema_version").fetchone()
+        # The version the file carried when it was opened, before any
+        # migration; ``None`` for a new index. Logged at startup (#887).
+        self.stored_schema_version: int | None = None if row is None else row["version"]
         if row is None:
             self._apply_initial_schema(cur)
             log.info(f"Database initialized at {self.path} (schema v{SCHEMA_VERSION})")

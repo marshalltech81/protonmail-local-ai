@@ -24,8 +24,12 @@ grace window; ``INDEXER_DELETION_ENABLED=false`` (archive mode) turns it
 off. See ``src/reconciler.py``.
 """
 
+import hashlib
+import json
 import logging
 import os
+import re
+import secrets
 import sqlite3
 import threading
 import time
@@ -53,7 +57,7 @@ from .chunker import (
     mean_vector,
     truncate_to_tokens,
 )
-from .database import EMBEDDING_DIM, Database
+from .database import EMBEDDING_DIM, SCHEMA_VERSION, Database
 from .embed_identity import (
     CalibrationRequestError,
     EmbedderDimensionError,
@@ -2226,6 +2230,79 @@ def _run_wal_maintenance(db: Database) -> None:
         log.error("wal checkpoint failed: %s", e)
 
 
+# A source commit as the Makefile passes it (``git rev-parse --short
+# HEAD``, plus ``-dirty``): anything else is logged as ``unknown``, so a
+# stray value cannot add text or a line to the log.
+_GIT_COMMIT_PATTERN = re.compile(r"[0-9A-Za-z._-]{1,64}")
+
+
+def _git_commit() -> str:
+    """The commit the image was built from (``GIT_COMMIT``, baked in by
+    the Dockerfile), or ``unknown``."""
+    value = os.environ.get("GIT_COMMIT", "").strip()
+    return value if _GIT_COMMIT_PATTERN.fullmatch(value) else "unknown"
+
+
+def _identity_settings(
+    queue_cfg: dict[str, int], reconciler_cfg: ReconcilerConfig
+) -> dict[str, object]:
+    """The settings the startup config hash covers, named one by one.
+
+    Non-secret values only: modes, the endpoint, the model and limits.
+    Never ``EMBED_API_KEY`` or any other secret, and never the whole
+    environment, so a rotated key does not change the hash.
+    """
+    return {
+        "EMBED_MODE": EMBED_MODE,
+        "EMBED_BASE_URL": EMBED_BASE_URL.strip(),
+        "EMBED_MODEL": EMBED_MODEL,
+        "EMBED_BATCH_SIZE": EMBED_BATCH_SIZE,
+        "EMBED_CONCURRENCY": EMBED_CONCURRENCY,
+        "INDEXER_CHUNK_TARGET_TOKENS": CHUNK_TARGET_TOKENS,
+        "INDEXER_CHUNK_MAX_TOKENS": CHUNK_MAX_TOKENS,
+        "INDEXER_CHUNK_OVERLAP_TOKENS": CHUNK_OVERLAP_TOKENS,
+        "INITIAL_INDEX_BATCH_SIZE": INITIAL_INDEX_BATCH_SIZE,
+        "INDEXER_STEADY_STATE_BATCH_SIZE": STEADY_STATE_BATCH_SIZE,
+        "INDEXER_WAL_CHECKPOINT_INTERVAL_SECS": WAL_CHECKPOINT_INTERVAL_SECS,
+        "INDEXER_RECOVERY_SWEEP_INTERVAL_SECS": RECOVERY_SWEEP_INTERVAL_SECS,
+        "INDEXER_MESSAGE_TIMEOUT_SECONDS": INDEXER_MESSAGE_TIMEOUT_SECONDS,
+        "INDEXER_ATTACHMENT_EXTRACTION_ENABLED": INDEXER_ATTACHMENT_EXTRACTION_ENABLED,
+        "INDEXER_OCR_ENABLED": INDEXER_OCR_ENABLED,
+        "INDEXER_ATTACHMENT_MAX_BYTES": INDEXER_ATTACHMENT_MAX_BYTES,
+        "INDEXER_OCR_MAX_PAGES": INDEXER_OCR_MAX_PAGES,
+        "INDEXER_OCR_TIMEOUT_SECONDS": INDEXER_OCR_TIMEOUT_SECONDS,
+        "INDEXER_PDF_MAX_DIGITAL_PAGES": INDEXER_PDF_MAX_DIGITAL_PAGES,
+        "INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS": INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS,
+        "INDEXER_MAX_ATTEMPTS": queue_cfg["max_attempts"],
+        "INDEXER_RETRY_BASE_SECONDS": queue_cfg["base_backoff_seconds"],
+        "INDEXER_DELETION_ENABLED": reconciler_cfg.enabled,
+        "INDEXER_DELETION_GRACE_DAYS": reconciler_cfg.grace_days,
+        "INDEXER_DELETION_SWEEP_INTERVAL_SECS": reconciler_cfg.sweep_interval_secs,
+        "INDEXER_DELETION_MAX_BATCH_PCT": reconciler_cfg.max_batch_pct,
+        "INDEXER_DELETION_FORCE": reconciler_cfg.force,
+    }
+
+
+def _log_startup_identity(
+    db: Database, queue_cfg: dict[str, int], reconciler_cfg: ReconcilerConfig
+) -> None:
+    """Log one line naming what is running (#887): the source commit, a
+    random ID for this start, the code's schema version and the one the
+    index carried when it was opened (``none`` for a new index), and the
+    first 12 hex digits of a SHA-256 over ``_identity_settings``."""
+    settings = json.dumps(_identity_settings(queue_cfg, reconciler_cfg), sort_keys=True)
+    stored = db.stored_schema_version
+    log.info(
+        "Startup identity: service=indexer commit=%s boot=%s schema_code=%d "
+        "schema_stored=%s config=%s",
+        _git_commit(),
+        secrets.token_hex(6),
+        SCHEMA_VERSION,
+        "none" if stored is None else stored,
+        hashlib.sha256(settings.encode("utf-8")).hexdigest()[:12],
+    )
+
+
 def _log_reconciler_config(cfg: ReconcilerConfig) -> None:
     if not cfg.enabled:
         log.info(
@@ -2312,6 +2389,7 @@ def main():
 
     reconciler_config = load_config_from_env(os.environ)
     _log_reconciler_config(reconciler_config)
+    _log_startup_identity(db, queue_cfg, reconciler_config)
     reconciler: Reconciler | None = None
     if reconciler_config.enabled:
         reconciler = Reconciler(db, embedder, reconciler_config, maildir_root=MAILDIR_PATH)
