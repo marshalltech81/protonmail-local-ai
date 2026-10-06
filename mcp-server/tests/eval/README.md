@@ -429,6 +429,9 @@ until the owner verifies them.
 ```bash
 export INFERENCE_MODE=openai INFERENCE_BASE_URL=http://127.0.0.1:1234/v1 INFERENCE_MODEL=<model>
 export JUDGE_MODE=anthropic JUDGE_BASE_URL=default JUDGE_MODEL=<model>  # optional; default JUDGE_MODE=none
+# or, billed to a subscription through a CLI on the host:
+# export JUDGE_MODE=claude-cli JUDGE_MODEL=<model>   # Claude Code, Claude subscription
+# export JUDGE_MODE=codex-cli JUDGE_MODEL=<model>    # Codex CLI, ChatGPT subscription
 make eval-answers                                   # report under .answer-eval/ (git-ignored)
 make eval-answers EVAL_ARGS="--case ask-recital-date --detail /tmp/detail.json"
 make eval-answers-compare BASELINE=<run-a.json> CANDIDATE=<run-b.json>
@@ -445,7 +448,7 @@ is `127.0.0.1`, not `host.docker.internal`.
   `.secrets/inference_api_key.txt`.
   `INFERENCE_MODE` defaults to `none`, as for the server, so the run
   needs it set.
-- **Judge** (`JUDGE_MODE` = `anthropic|openai|none`, `JUDGE_BASE_URL`,
+- **Judge** (`JUDGE_MODE` = `anthropic|openai|claude-cli|codex-cli|none`, `JUDGE_BASE_URL`,
   `JUDGE_MODEL`, key in `.secrets/judge_api_key.txt`, mode 600, or
   `JUDGE_API_KEY` for local development only). Same contract as the
   server's layers: an enabled judge needs a model and a non-empty key (a
@@ -455,6 +458,103 @@ is `127.0.0.1`, not `host.docker.internal`.
   answerer's variables or key. Bounds: `JUDGE_TIMEOUT_SECS` (120),
   `JUDGE_MAX_TOKENS` (2048), `JUDGE_MAX_INPUT_CHARS` (60,000), one call
   per case, no retries, one case at a time.
+- **Subscription judges** (`JUDGE_MODE=claude-cli` or `codex-cli`, #806):
+  each judge call runs a vendor CLI once, so it uses the subscription's
+  limits, which interactive use shares, instead of API credit. They run
+  on macOS or Linux only (the timeout kills the CLI's process group).
+  Both
+  need `JUDGE_MODEL` and the CLI on `PATH`, read no key, take no base
+  URL (unset or `default`), send the prompt on stdin, run in a fresh
+  empty directory, and are killed with every process they started (the
+  CLI leads its own process group) when `JUDGE_TIMEOUT_SECS` runs out.
+  Each CLI inherits only an allowlist of the caller's environment (path,
+  home, user, locale, temporary directory, proxy and certificate
+  variables, including `NODE_EXTRA_CA_CERTS` (and Codex's
+  `CODEX_CA_CERTIFICATE`) for a TLS-inspecting proxy;
+  Claude also keeps `CLAUDE_CONFIG_DIR`; path values are made absolute),
+  so API keys,
+  provider switches, reasoning settings such as
+  `CLAUDE_CODE_EFFORT_LEVEL` and telemetry exporters (`OTEL_*`) never
+  reach a judge call. A
+  logged-out CLI and a usage-limit stop are the judge errors
+  `judge_cli_logged_out` and `judge_cli_usage_limit`; a CLI missing from
+  `PATH` or not logged in with a subscription is a configuration error.
+  The judge identity records `cli` and `cli_version` (and, for Claude,
+  the `served_models` the CLI reports), so a different CLI, version or
+  model is a different judge to `compare`. Running the same stored
+  answers through an API judge and both CLIs shows where judges
+  disagree (#655).
+- **`claude-cli`** runs `claude -p` (Claude Code, logged in with a Claude
+  subscription) with no tools (`--tools ""`), no settings, `CLAUDE.md`
+  files, hooks or plugins (`--setting-sources ""`), no MCP servers
+  (`--strict-mcp-config`), no skills or commands
+  (`--disable-slash-commands`), no saved session, and the judge system
+  prompt. Relative or empty `PATH` entries are made absolute before the
+  calls change directory, so the CLI's launcher still finds its
+  interpreter. `--bare` is not used
+  because it accepts only an API key. A set `ANTHROPIC_API_KEY` would
+  take the call off the subscription (the allowlist keeps it out), and
+  `DISABLE_AUTOUPDATER=1` keeps one CLI version for the whole run.
+  Claude Code before 2.1.211 is refused, since its `--setting-sources ""`
+  still loaded nested `.claude/rules` files, and a relative
+  `CLAUDE_CONFIG_DIR` is made absolute before the calls change directory. Before any case runs, `claude auth
+  status` must report a claude.ai (subscription) login, not a Console
+  (API-billed) one. A machine with an enterprise `managed-mcp.json` is
+  refused, since Claude Code exits on `--strict-mcp-config` there, and so
+  is one with an organization-wide managed `CLAUDE.md` or any
+  `managed-settings.json` or `*.json` fragment in a
+  `managed-settings.d` directory (its `claudeMd`, hooks and other settings
+  apply to every session whatever the flags). Managed settings delivered by MDM or from Anthropic's servers
+  cannot be seen locally, so on a managed machine the judge may still
+  carry organization instructions.
+  `JUDGE_MAX_TOKENS` becomes `CLAUDE_CODE_MAX_OUTPUT_TOKENS`: when a
+  reply reaches it, the CLI makes its own continuation attempts (up to
+  about four times the cap) before failing, which counts as
+  `judge_truncated`. `ANSWER_EVAL_LIVE_CLAUDE=1 uv run pytest
+  tests/test_answer_eval_cli_judge.py -k live_canaries` makes one real
+  call to check that planted `CLAUDE.md`/`AGENTS.md` files and an
+  `ANTHROPIC_API_KEY` never reach it.
+- **`codex-cli`** runs `codex exec` (Codex CLI, logged in with ChatGPT).
+  The shell and every tool or extension that could read the disk or
+  reach the network are turned off (`--disable shell_tool`,
+  `unified_exec`, browser, computer use, apps, plugins, hooks, images,
+  sub-agents including `multi_agent_v2`, bundled skills; web search
+  disabled). Codex older than 0.160.1, the version these flags were
+  checked against, is refused at startup, as is a prerelease of 0.160.1
+  itself (likewise Claude Code below 2.1.211). `apply_patch` cannot be removed, but
+  it only writes and `-s read-only` refuses the write. Each call gets a
+  private mode-700 `CODEX_HOME` holding only a symbolic link to the
+  operator's `auth.json` (the login is linked, never copied), because
+  `--ignore-user-config` still loads the global `~/.codex/AGENTS.md`;
+  the real home's config, hooks, plugins and skills stay out, and
+  Codex's own logs of the call are removed with that directory. The
+  working directory's `AGENTS.md` is off (`project_doc_max_bytes=0`), as
+  are rules, session files and the update check; credentials come only
+  from the linked file (`cli_auth_credentials_store="file"`), and the
+  judge system
+  prompt replaces Codex's coding-agent instructions
+  (`model_instructions_file`), with its permissions, collaboration-mode
+  and environment-context blocks and the `request_user_input` tool off. Managed and system Codex config (`/etc/codex/managed_config.toml`,
+  `/etc/codex/config.toml`, the requirements layer
+  `/etc/codex/requirements.toml`, macOS managed preferences) is refused,
+  since it applies whatever the flags say and can add instructions,
+  hooks or MCP servers; a
+  cloud-managed enterprise layer cannot be seen locally. Before any case
+  runs, `codex login status`, run in the same kind of private home with
+  the same file store, must report a ChatGPT login: an API-key login bills API usage, and a logged-out CLI
+  still sends the prompt before the server refuses it. A login kept in
+  the keyring instead of `auth.json` is refused, since it cannot be
+  linked. Codex has no output-token setting, so `JUDGE_MAX_TOKENS` is not
+  read (the identity records `max_tokens: null`) and the timeout
+  bounds the call. `ANSWER_EVAL_LIVE_CODEX=1 uv run pytest
+  tests/test_answer_eval_cli_judge.py -k live_codex` makes one real call
+  to check that planted `AGENTS.md` files, the global `AGENTS.md` and an
+  `OPENAI_API_KEY` never reach it and that it cannot read a file.
+  **Known limitation (#827):** Codex also registers tools that a model's
+  catalog entry advertises, and no setting turns those off. In Codex
+  0.160.1, `gpt-6-astra`, `gpt-6-sol` and `gpt-6-luna` advertise `clock`
+  and `send_user_message_async`, so with those models the judge is not
+  tool-free. Pick a model that advertises none, such as `gpt-5.5`.
 - Either layer with the base URL `default` is refused while the SDK's own
   endpoint variable (`OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL`) is set, so
   the report's `sdk-default` label is never a custom endpoint.

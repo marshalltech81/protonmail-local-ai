@@ -40,6 +40,7 @@ from src.tools.intelligence import _strip_code_fence
 from src.tools.outputs import AnswerStatement
 
 from tests.answer_eval.cases import DIMENSIONS, Case
+from tests.answer_eval.cli_judge import CliJudgeError
 from tests.answer_eval.config import LayerConfig
 from tests.answer_eval.runner import Passage
 
@@ -62,6 +63,8 @@ JUDGE_ERRORS = (
     "judge_unknown_evidence_id",
     "judge_incomplete_assessment",
     "judge_runtime_budget_exhausted",
+    "judge_cli_logged_out",
+    "judge_cli_usage_limit",
 )
 
 RUBRIC = {
@@ -456,7 +459,7 @@ async def judge_answer(
         outcome.error = "judge_timeout"
     except InferenceTruncatedError:
         outcome.error = "judge_truncated"
-    except JudgeError as e:
+    except (JudgeError, CliJudgeError) as e:
         outcome.error, outcome.detail = e.category, e.detail
     except Exception as e:
         outcome.error = "judge_provider_error"
