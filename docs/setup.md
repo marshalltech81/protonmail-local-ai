@@ -806,23 +806,67 @@ them. The command prints the count only, no folder names:
 docker exec mbsync sh -c 'find /maildir -mindepth 1 -type d -name "*&*" | wc -l'
 ```
 
-If it prints `0`, upgrade as usual. Otherwise stop the stack
-(`make down`), remove those directories (each folder's mail and sync
-state, together with any subfolders; Proton keeps the mail) and
-upgrade:
+If it prints `0`, upgrade as usual. Otherwise, do not delete anything
+yet. With `Expunge None`, a folder you renamed or deleted in Proton
+stays in the Maildir, and its directory may be the only remaining copy
+of that mail. Stop the stack (`make down`) and work through the steps
+below. They use the project's Maildir volume
+(`protonmail-local-ai_maildir-volume` by default; `docker volume ls`
+shows yours).
 
-```bash
-docker compose run --rm --no-deps --entrypoint sh mbsync \
-  -c 'find /maildir -mindepth 1 -type d -name "*&*" -prune -exec rm -rf {} +'
-make build && make up
-```
+1. Back up the affected directories into a separate Docker volume (it
+   stays in Docker's storage, like the original):
 
-The first sync downloads each removed folder under its decoded name. In
-mirror mode the indexer reaps the removed copies after its grace window
-and indexes the new ones; a large folder can trip the mass-delete brake
-(see `docs/troubleshooting.md`, Deletion reconciliation). In archive
-mode (`INDEXER_DELETION_ENABLED=false`) the old copies stay indexed
-beside the new ones until the index is rebuilt.
+   ```bash
+   docker run --rm -v protonmail-local-ai_maildir-volume:/maildir:ro \
+     -v mbsync-utf7-backup:/backup debian:trixie-slim sh -c \
+     'cd /maildir && find . -mindepth 1 -type d -name "*&*" -prune -print0 |
+      tar --null -cf /backup/encoded-folders.tar -T -'
+   ```
+
+2. List each affected directory with its decoded name. This prints your
+   folder names to your terminal only:
+
+   ```bash
+   docker run --rm -v protonmail-local-ai_maildir-volume:/maildir:ro \
+     python:3.14-slim-trixie python -c '
+   import base64, os, re
+   def dec(s):
+       return re.sub(r"&([A-Za-z0-9+,]*)-", lambda m: base64.b64decode(
+           m[1].replace(",", "/") + "=" * (-len(m[1]) % 4)).decode("utf-16-be")
+           if m[1] else "&", s)
+   for root, dirs, _ in os.walk("/maildir"):
+       for d in sorted(dirs):
+           if "&" in d:
+               p = os.path.join(root, d)
+               print(p, "->", dec(p))
+               dirs.remove(d)'
+   ```
+
+3. For each one, check whether a folder of the decoded name still exists
+   in Proton:
+   - **Still in Proton:** remove its directory. Quote the path, as the
+     names contain `&`. The first 1.5.1 sync downloads the folder again
+     under its decoded name.
+
+     ```bash
+     docker run --rm -v protonmail-local-ai_maildir-volume:/maildir \
+       debian:trixie-slim rm -rf -- '/maildir/Folders/.Caf&AOk-'
+     ```
+
+   - **No longer in Proton:** keep it. It is the only copy, and 1.5.1
+     does not download it again, so nothing duplicates. It is reported as
+     a far-side box that "cannot be opened anymore", as before.
+
+4. Upgrade: `make build && make up`.
+
+In mirror mode the indexer reaps the removed copies after its grace
+window and indexes the new ones. A large folder can trip the
+mass-delete brake (see `docs/troubleshooting.md`, Deletion
+reconciliation). In archive mode (`INDEXER_DELETION_ENABLED=false`) the
+old copies stay indexed beside the new ones until the index is rebuilt.
+Remove the backup volume (`docker volume rm mbsync-utf7-backup`) once
+the new folders are complete.
 
 **Upgrading from a release that served `/sse` (breaking change).** The
 legacy HTTP+SSE transport, its `/sse` and `/messages/` endpoints, and
