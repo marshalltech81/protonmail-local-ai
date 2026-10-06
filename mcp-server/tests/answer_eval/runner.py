@@ -70,6 +70,7 @@ class Passage:
     chunk_id: str | None
     source: str  # "body", "attachment" or "thread" (the thread's indexed text)
     text: str = field(repr=False)
+    truncated: bool = False  # cut to fit the prompt budget
 
 
 @dataclass
@@ -200,6 +201,8 @@ def _passage(ref: Any) -> Passage:
     if chunk is None:
         return Passage(ref.label, ref.thread_id, None, None, None, "thread", ref.text)
     source = "attachment" if chunk.attachment_id is not None else "body"
+    # ``char_end`` is short of the chunk's end when the passage was cut.
+    truncated = ref.char_end is not None and ref.char_end < chunk.char_end
     return Passage(
         ref.label,
         ref.thread_id,
@@ -208,6 +211,7 @@ def _passage(ref: Any) -> Passage:
         chunk.chunk_id,
         source,
         ref.text,
+        truncated,
     )
 
 

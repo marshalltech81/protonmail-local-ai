@@ -19,7 +19,7 @@ from statistics import fmean
 from typing import Any
 
 from tests.answer_eval.cases import DIMENSIONS, Case
-from tests.answer_eval.graders import DeterministicResult
+from tests.answer_eval.graders import DeterministicResult, budget_omitted_facts
 from tests.answer_eval.judge import CLAIM_VERDICTS, JudgeOutcome
 from tests.answer_eval.runner import CaseRun
 
@@ -89,6 +89,9 @@ def detail_record(case: Case, run: CaseRun, judge: JudgeOutcome) -> dict[str, An
         "question": case.question,
         "answer": run.output.answer if run.output else None,
         "tool_error": run.error_detail,
+        # What the judge was allowed to excuse (review round 9).
+        "coverage_note": run.output.coverage_note if run.output else None,
+        "omitted_facts": budget_omitted_facts(case, run),
         "retrieved_threads": [t.thread_id for t in run.output.threads] if run.output else [],
         "passages": {
             label: {
@@ -98,6 +101,7 @@ def detail_record(case: Case, run: CaseRun, judge: JudgeOutcome) -> dict[str, An
                 "chunk_id": p.chunk_id,
                 "source": p.source,
                 "text": p.text,
+                "truncated": p.truncated,
             }
             for label, p in run.passages.items()
         },

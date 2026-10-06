@@ -8,6 +8,14 @@ for a thread ref, was in the prompt the model received) and *cited* (the
 answer cites such a passage). A message ref is met only by a passage of
 that message; a passage of the thread's indexed text (no single
 message) meets thread refs only.
+
+A ``disclose_missing`` case is graded on the tool's whole disclosure
+(#820): when a required group was retrieved but left out of the prompt,
+or reached it only cut short of its evidence, the server's ``coverage_note`` is what
+reports it, so a non-null note is the disclosure, those groups are
+excused from citation and an abstention may stand. A group supplied
+whole must still be cited, and the note cannot disclose a group
+retrieval never found.
 """
 
 import re
@@ -40,6 +48,10 @@ class GroupStatus:
     retrieved: bool
     supplied: bool
     cited: bool
+    whole: bool = False  # supplied with its evidence intact (``_shows_evidence``)
+    cited_intact: bool = False  # cited through a passage that shows its evidence
+    cited_cut: bool = False  # cited through a passage cut before its evidence
+    met: bool = False  # required_evidence_cited holds for this group
 
 
 @dataclass
@@ -101,6 +113,42 @@ def is_abstention(answer: str) -> bool:
     return stripped.startswith(_NOT_FOUND_PREFIX) or stripped.startswith(_NO_RESULTS)
 
 
+def _shows_evidence(case: Case, passage: Passage) -> bool:
+    """Whether a supplied passage still shows the evidence it carries: a
+    whole passage does; one cut to fit the budget does when it keeps the
+    excerpt of some reference fact sourced from its message. A cut that
+    removed only trailing text is no omission (review round 3)."""
+    if not passage.truncated:
+        return True
+    text = _fold(passage.text)
+    return any(
+        _fold(f.excerpt) in text
+        for f in case.expected_facts
+        if any(_meets(s, passage) for s in f.sources)
+    )
+
+
+def budget_omitted_facts(case: Case, run: CaseRun) -> list[str]:
+    """IDs of the reference facts whose evidence the tool retrieved but the
+    prompt budget left out or cut away: some source's thread was retrieved,
+    and no supplied passage of a source shows the fact (whole, or cut but
+    keeping its excerpt). These are the only facts a ``coverage_note`` can
+    disclose; a fact retrieval never found is not among them."""
+    if run.output is None:
+        return []
+    retrieved = {t.thread_id for t in run.output.threads}
+    return [
+        f.id
+        for f in case.expected_facts
+        if any(thread_id_of(s) in retrieved for s in f.sources)
+        and not any(
+            _meets(s, p) and (not p.truncated or _fold(f.excerpt) in _fold(p.text))
+            for s in f.sources
+            for p in run.passages.values()
+        )
+    ]
+
+
 def grade_run(case: Case, run: CaseRun) -> DeterministicResult:
     """Grade one completed run; a run that did not complete gets no checks
     (its status already counts it as an error)."""
@@ -120,10 +168,29 @@ def grade_run(case: Case, run: CaseRun) -> DeterministicResult:
                 retrieved=any(thread_id_of(ref) in retrieved for ref in group),
                 supplied=any(_meets(ref, p) for ref in group for p in supplied),
                 cited=any(_meets(ref, p) for ref in group for p in cited),
+                cited_intact=any(
+                    _meets(ref, p) and _shows_evidence(case, p) for ref in group for p in cited
+                ),
+                cited_cut=any(
+                    _meets(ref, p) and not _shows_evidence(case, p) for ref in group for p in cited
+                ),
+                whole=any(
+                    _meets(ref, p) and _shows_evidence(case, p) for ref in group for p in supplied
+                ),
             )
         )
 
     checks = result.checks
+    # Retrieved evidence the prompt budget left out or cut away, which is all
+    # the server's note can report: a group retrieval missed stays a miss.
+    omission = case.expected_handling == "disclose_missing" and any(
+        g.retrieved and not g.whole for g in result.groups
+    )
+    disclosed = omission and out.coverage_note is not None
+    if omission:
+        checks["omission_disclosed"] = PASS if disclosed else FAIL
+    else:
+        checks["omission_disclosed"] = NA
     checks["answer_complete"] = FAIL if answer.endswith(_TRUNCATED_NOTICE) else PASS
     checks["prompt_matches_capture"] = PASS if run.prompt_consistent else FAIL
     result.citation_problem_kinds = sorted({p.kind for p in out.citation_problems})
@@ -132,7 +199,35 @@ def grade_run(case: Case, run: CaseRun) -> DeterministicResult:
     checks["citations_resolve"] = PASS if resolves else FAIL
     checks["citation_checks"] = FAIL if out.citation_problems else PASS
     if case.answerable:
-        checks["required_evidence_cited"] = PASS if all(g.cited for g in result.groups) else FAIL
+        # A group is met by citing a passage that shows its evidence, or
+        # excused by a disclosed omission unless the answer cites a passage
+        # cut before that evidence (a guess, not a disclosure). The excuse
+        # also needs an answer that abstains or rests on at least one
+        # intact citation: an uncited claim about omitted evidence is a
+        # guess too (review round 8).
+        grounded = is_abstention(answer) or any(g.cited_intact for g in result.groups)
+        stated = _fold(answer)
+        for refs, g in zip(case.required_evidence, result.groups, strict=True):
+            # Review round 9: when the group's facts list the values that
+            # assert them, the excuse needs an abstention or an answer
+            # stating none of them; one intact citation elsewhere is not
+            # enough.
+            threads = {thread_id_of(r) for r in refs}
+            values = [
+                v
+                for f in case.expected_facts
+                if any(thread_id_of(s) in threads for s in f.sources)
+                for v in f.values
+            ]
+            if values:
+                avoids = is_abstention(answer) or not any(_mentions(stated, v) for v in values)
+            else:
+                avoids = grounded
+            g.met = g.cited_intact or (
+                disclosed and avoids and g.retrieved and not g.whole and not g.cited_cut
+            )
+        met = all(g.met for g in result.groups)
+        checks["required_evidence_cited"] = PASS if met else FAIL
     else:
         checks["required_evidence_cited"] = NA
 
@@ -151,7 +246,9 @@ def grade_run(case: Case, run: CaseRun) -> DeterministicResult:
 
     result.abstained = is_abstention(answer)
     if case.answerable:
-        checks["abstention"] = FAIL if result.abstained else PASS
+        # Abstaining is the disclosure only when no group was lost to retrieval.
+        excused = disclosed and all(g.retrieved for g in result.groups)
+        checks["abstention"] = FAIL if result.abstained and not excused else PASS
     else:
         checks["abstention"] = PASS if result.abstained and not out.citations else FAIL
     return result
@@ -171,10 +268,21 @@ def attribute(
         return causes
     if any(not g.retrieved for g in det.groups):
         causes.append("retrieval")
-    if any(g.retrieved and not g.supplied for g in det.groups):
+    # Not supplied, or supplied only cut short of its evidence.
+    if any(g.retrieved and not g.whole for g in det.groups):
         causes.append("prompt_assembly")
-    synthesis = any(det.checks.get(c) == FAIL for c in SYNTHESIS_CHECKS) or any(
-        g.supplied and not g.cited for g in det.groups
+    # A supplied group left uncited, or cited only through a passage cut
+    # before its evidence (a guess), is the model's doing, as is a group
+    # the budget dropped that stays unmet after the server disclosed the
+    # omission: only the answer's own claims can fail it then (review
+    # round 8). A group retrieval never found is not counted here.
+    guessed = det.checks.get("omission_disclosed") == PASS and any(
+        not g.met and g.retrieved and not g.whole for g in det.groups
+    )
+    synthesis = (
+        any(det.checks.get(c) == FAIL for c in SYNTHESIS_CHECKS)
+        or guessed
+        or any((g.supplied and not g.cited) or g.cited_cut for g in det.groups)
     )
     if synthesis or semantic_failed:
         causes.append("synthesis")

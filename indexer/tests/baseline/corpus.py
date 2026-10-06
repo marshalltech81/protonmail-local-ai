@@ -76,6 +76,19 @@ every golden search query's words, the reserved words above and every
 ``unanswerable`` question's ``absent_terms`` (so "wiring", never the
 other word for it).
 
+Threads 75-77 back the evidence-scope decoy cases (#755): a filter
+selects the whole thread, and another message of it holds a different
+answer. In t75 the neighbour Nadia gives the dog walker's half-hour
+rate and Callum's later reply gives another (a sender filter on Nadia);
+in t76 the swim coach's September schedule is followed by a November
+one (a September date filter); in t77 the garden coordinator's plot and
+season price are followed by a stale list, filed in Trash, that names
+another plot and price (no filter: Trash is left out by default). Their
+words avoid every golden search query's words, the reserved words above
+and every ``unanswerable`` question's ``absent_terms``; they have no
+Sent messages, attachments or May 2024 dates, so the enumeration
+baselines are undisturbed.
+
 Thread IDs are the root Message-IDs: ``t<NN>.1@baseline.example``.
 """
 
@@ -935,7 +948,7 @@ THREADS: dict[int, list[Msg]] = {
             ME,
             "Storage unit agreement ready for your signature",
             "Hi Sam,\n\nOakmere Storage sent you a storage unit agreement to "
-            "review and sign.\n\nReview and sign: "
+            "read over and sign.\n\nReview and sign: "
             "https://signlattice.example/envelope/7Q2LX\n\n"
             f"{_SIGNING_BOILERPLATE}\n\nSignLattice",
         ),
@@ -1755,6 +1768,90 @@ THREADS.update(
                 JORDAN,
                 "Re: Liveaboards and berth assignments",
                 _INLINE_ABOVE_SIGNATURE,
+            ),
+        ],
+    }
+)
+
+
+# --- Evidence-scope decoys (#755) -----------------------------------------
+
+NADIA = "Nadia Brooks <nadia@elmhollow.example>"
+CALLUM = "Callum Ferris <callum@elmhollow.example>"
+COACH = "Ines Duarte <coach@marlinswim.example>"
+SWIM_FAMILIES = "Marlin Swim Families <families@marlinswim.example>"
+ROSA = "Rosa Delgado <rosa@greenacregarden.example>"
+FELIX = "Felix Moreau <felix@greenacregarden.example>"
+
+THREADS.update(
+    {
+        # Sender decoy: the in-scope rate is Nadia's; Callum's reply differs.
+        75: [
+            Msg(
+                "INBOX",
+                "Wed, 10 Sep 2025 18:20:00 +0000",
+                NADIA,
+                ME,
+                "Dog walker for Pepper",
+                "Hi Sam,\n\nYou asked about a dog walker. We use Milo Grant for "
+                "Pepper. He asks $22 per half-hour walk on weekdays and sends a "
+                "photo after each one.\n\nNadia",
+                cc=CALLUM,
+            ),
+            Msg(
+                "INBOX",
+                "Thu, 11 Sep 2025 07:45:00 +0000",
+                CALLUM,
+                ME,
+                "Re: Dog walker for Pepper",
+                "Sam,\n\nWe had Milo for our terrier last spring. He asked us $30 "
+                "per half-hour walk.\n\nCallum",
+                cc=NADIA,
+            ),
+        ],
+        # Date decoy: September's schedule, then November's in the same thread.
+        76: [
+            Msg(
+                "INBOX",
+                "Mon, 08 Sep 2025 21:00:00 +0000",
+                COACH,
+                SWIM_FAMILIES,
+                "Swim practice schedule",
+                "Hello families,\n\nFall swim practices run Tuesdays and Thursdays "
+                "at 6:15pm at the Eastgate aquatic center through October.\n\n"
+                "Coach Ines",
+            ),
+            Msg(
+                "INBOX",
+                "Mon, 03 Nov 2025 21:00:00 +0000",
+                COACH,
+                SWIM_FAMILIES,
+                "Re: Swim practice schedule",
+                "Hello families,\n\nFrom November on, swim practices move to "
+                "Wednesdays at 5:30pm at the Northside natatorium.\n\nCoach Ines",
+            ),
+        ],
+        # Trash decoy: the coordinator's INBOX message, then a stale list in Trash.
+        77: [
+            Msg(
+                "INBOX",
+                "Tue, 04 Mar 2025 15:00:00 +0000",
+                ROSA,
+                ME,
+                "Your community garden plot",
+                "Hi Sam,\n\nWelcome to Greenacre Community Garden. Your plot is B-14, "
+                "next to the east gate, and the season price is $45, payable at the "
+                "April 5 orientation.\n\nRosa Delgado\nGarden coordinator",
+            ),
+            Msg(
+                "Trash",
+                "Wed, 05 Mar 2025 09:10:00 +0000",
+                FELIX,
+                ME,
+                "Re: Your community garden plot",
+                "Sam, Rosa,\n\nMy list from last season still shows Sam on plot C-3 "
+                "at $70 for the season.\n\nFelix",
+                cc=ROSA,
             ),
         ],
     }

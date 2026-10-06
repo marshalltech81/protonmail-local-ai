@@ -393,11 +393,16 @@ Cases must never be built from real mail.
 ### Cases
 
 `tests/answer_eval/cases.json` (schema v1, loaded and validated by
-`cases.py`) holds 34 cases over the baseline corpus: exact facts,
+`cases.py`) holds 38 cases over the baseline corpus: exact facts,
 attachment-only answers, multiple required threads (including
 `ask-tofu-summary`, a summary of the four genuine messages of the
-counting scenario that must not repeat their PINs or link), narrow filters,
-later corrections (and a later message that does not change the fact),
+counting scenario that must not repeat their PINs or link), narrow filters
+(including three evidence-scope decoys for #755, where another message
+of the selected thread holds a different answer: a sender filter, a date
+filter, and a thread with a stale message in Trash; the date decoy has a
+companion, `ask-swim-scope-stated`, whose question states the scope, so a
+failure can be told apart as a scope the model never saw or one it
+ignored), later corrections (and a later message that does not change the fact),
 an unresolved conflict, unanswerable questions, an empty result, a
 prompt-budget omission (the case's own `settings.prompt_tokens`), and
 two synthetic prompt injections: corpus thread t31 tells the answering
@@ -482,13 +487,27 @@ required evidence group cited, `must_include` present as a whole value
 (`4,860` does not match `14,860` or `4,860,000`; an ordinal suffix or
 `.00` may follow a number), `must_not_include` absent anywhere, and
 abstention exactly when the case is unanswerable (citing
-nothing). Each evidence group is also scored as retrieved, supplied to
+nothing). A `disclose_missing` case is graded on the tool's whole
+disclosure (#820): when a required group was retrieved but left out of
+the prompt or reached it only cut short of its evidence (the case's fact
+excerpt no longer in the kept text), the server's `coverage_note`
+must be present (`omission_disclosed`), those groups are excused from
+citation and an abstention may stand. When a dropped group's reference
+facts list `values` (the whole values an answer states only by asserting
+the fact, such as a total derived from it), the excuse also requires an
+abstention or an answer that states none of them; otherwise it requires
+an abstention or at least one intact citation; a group supplied whole must still
+be cited, and a group retrieval never found is never excused (the note
+reports only budget omissions). Each evidence group is also scored as retrieved, supplied to
 the prompt and cited, so a failure is attributed to `retrieval`,
 `prompt_assembly`, `synthesis`, `evaluator_infrastructure` or
 `answer_infrastructure` (several may apply; `unknown` otherwise).
 
-The judge (`judge.py`, rubric `ask-rubric-3`) receives the question,
-expected handling, reference facts, prohibited assertions, which
+The judge (`judge.py`, rubric `ask-rubric-4`) receives the question,
+expected handling (for `disclose_missing`, with the tool's
+`coverage_note`, labelled as server text and graded together with the
+answer, and the reference facts whose evidence was retrieved but left
+out or cut, the only ones the note can excuse), reference facts, prohibited assertions, which
 dimensions apply, every passage the answerer received, the answer and
 the answer's structured `statements` numbered from 1; the passages, the
 answer and each statement sit in `<untrusted_evidence>` /

@@ -41,7 +41,7 @@ from tests.answer_eval.cases import (
     thread_id_of,
 )
 from tests.answer_eval.config import ConfigError, LayerConfig, load_layer
-from tests.answer_eval.graders import FAIL, NA, PASS, attribute, grade_run
+from tests.answer_eval.graders import FAIL, NA, PASS, attribute, budget_omitted_facts, grade_run
 from tests.answer_eval.harness import evaluate
 from tests.answer_eval.judge import (
     JUDGE_SYSTEM,
@@ -76,6 +76,7 @@ from tests.answer_eval.runner import (
     prompt_budget_for,
     run_case,
 )
+from tests.answer_eval.runner import _passage as runner_passage
 from tests.conftest import FakeEmbedClient
 
 CASES = {c.id: c for c in load_cases()}
@@ -85,10 +86,19 @@ MARKER = "PRIVACY-MARKER-604"
 # ---------------------------------------------------------------- helpers
 
 
-def _passage(label: str, ref: str, text: str = "passage text", source: str = "body") -> Passage:
+def _passage(
+    label: str, ref: str, text: str = "passage text", source: str = "body", truncated: bool = False
+) -> Passage:
     message = message_id_of(ref) or thread_id_of(ref)
     return Passage(
-        label, thread_id_of(ref), message, f"{message}#0000abcd", f"chunk-{label}", source, text
+        label,
+        thread_id_of(ref),
+        message,
+        f"{message}#0000abcd",
+        f"chunk-{label}",
+        source,
+        text,
+        truncated,
     )
 
 
@@ -101,10 +111,12 @@ def _run(
     problems: tuple[str, ...] = (),
     status: str = "ok",
     consistent: bool = True,
+    coverage_note: str | None = None,
 ) -> CaseRun:
     threads = retrieved if retrieved is not None else sorted({p.thread_id for p in passages})
     output = SimpleNamespace(
         answer=answer,
+        coverage_note=coverage_note,
         threads=[SimpleNamespace(thread_id=t) for t in threads],
         citations=[SimpleNamespace(label=label) for label in cited],
         citation_problems=[SimpleNamespace(kind=k) for k in problems],
@@ -223,6 +235,8 @@ class TestCases:
             lambda r: r.update(settings={"prompt_tokens": 10}),
             lambda r: r.update(review="looks fine"),
             lambda r: r["expected_facts"][0].update(excerpt=""),
+            lambda r: r["expected_facts"][0].update(values=[""]),
+            lambda r: r["expected_facts"][0].update(values="four"),
             lambda r: r["deterministic"].update(must_include=[[]]),
         ],
     )
@@ -474,6 +488,22 @@ class TestRunner:
         assert run.calls[0].system == intelligence.ASK_SYSTEM
         assert set(run.timings_ms) >= {"answer_total", "inference", "query_embedding"}
 
+    def test_cut_passage_is_marked_truncated(self):
+        """Review round 2: a passage cut to fit is captured as truncated."""
+        chunk = SimpleNamespace(
+            message_id="m@x", claimant_id="m@x#1", chunk_id="c1", attachment_id=None, char_end=900
+        )
+        cut = runner_passage(
+            SimpleNamespace(label="E1", thread_id="t", chunk=chunk, char_end=400, text="a")
+        )
+        whole = runner_passage(
+            SimpleNamespace(label="E2", thread_id="t", chunk=chunk, char_end=900, text="a")
+        )
+        thread = runner_passage(
+            SimpleNamespace(label="E3", thread_id="t", chunk=None, char_end=None, text="a")
+        )
+        assert (cut.truncated, whole.truncated, thread.truncated) == (True, False, False)
+
     def test_repair_call_is_recorded(self, chunked_db):
         case = dataclasses.replace(CASES["ask-roof-total"], arguments={"question": "invoice"})
         inference = ScriptedClient("No citation here.", "Invoice 12345 [E1].")
@@ -645,6 +675,295 @@ class TestDeterministicGraders:
         det = grade_run(case, run)
         assert det.retrieval_recall == 1 and det.prompt_coverage == 0.5
         assert attribute(case, run, det, False, False) == ["prompt_assembly"]
+
+    _NOTE = "Evidence note: to fit the prompt budget, 3 retrieved passages were left out."
+
+    def test_disclosed_omission_passes_a_disclose_missing_case(self):
+        """#820: nothing relevant fit the budget, the model abstained and
+        the server's coverage note reported the omission: that pair is
+        the disclosure the case expects."""
+        case = CASES["ask-kayak-tight-budget"]
+        retrieved = [thread_id_of("t21"), thread_id_of("t22")]
+        run = _run(
+            "Not found in the provided emails.",
+            [_passage("E1", "t08")],
+            [],
+            retrieved=retrieved,
+            coverage_note=self._NOTE,
+        )
+        det = grade_run(case, run)
+        assert det.checks["omission_disclosed"] == PASS
+        assert det.checks["abstention"] == PASS
+        assert det.checks["required_evidence_cited"] == PASS
+        assert det.passed and det.prompt_coverage == 0
+        assert attribute(case, run, det, False, False) == []
+
+    def test_undisclosed_omission_fails_a_disclose_missing_case(self):
+        case = CASES["ask-kayak-tight-budget"]
+        retrieved = [thread_id_of("t21"), thread_id_of("t22")]
+        run = _run("Not found in the provided emails.", [], [], retrieved=retrieved)
+        det = grade_run(case, run)
+        assert det.checks["omission_disclosed"] == FAIL
+        assert det.checks["abstention"] == FAIL
+        assert det.checks["required_evidence_cited"] == FAIL
+        assert attribute(case, run, det, False, False) == ["prompt_assembly", "synthesis"]
+
+    def test_disclosure_excuses_only_evidence_that_was_not_supplied(self):
+        """A supplied group must still be cited; the note covers only
+        what never reached the model."""
+        case = CASES["ask-kayak-tight-budget"]
+        retrieved = [thread_id_of("t21"), thread_id_of("t22")]
+        run = _run(
+            "Not found in the provided emails.",
+            [_passage("E1", "t21")],
+            [],
+            retrieved=retrieved,
+            coverage_note=self._NOTE,
+        )
+        det = grade_run(case, run)
+        assert det.checks["omission_disclosed"] == PASS
+        assert det.checks["required_evidence_cited"] == FAIL
+
+    def test_coverage_note_does_not_excuse_a_retrieval_miss(self):
+        """Review round 1: the note reports retrieved passages the budget
+        left out, so it cannot disclose a group retrieval never found. An
+        abstention with t22 unretrieved fails, and the miss is attributed
+        to retrieval, even though t21's omission was disclosed."""
+        case = CASES["ask-kayak-tight-budget"]
+        run = _run(
+            "Not found in the provided emails.",
+            [],
+            [],
+            retrieved=[thread_id_of("t21")],
+            coverage_note=self._NOTE,
+        )
+        det = grade_run(case, run)
+        assert det.checks["omission_disclosed"] == PASS
+        assert det.checks["required_evidence_cited"] == FAIL
+        assert det.checks["abstention"] == FAIL
+        assert "retrieval" in attribute(case, run, det, False, False)
+        # Nothing retrieved at all: no budget omission for a note to report.
+        none = grade_run(
+            case,
+            _run(
+                "Not found in the provided emails.", [], [], retrieved=[], coverage_note=self._NOTE
+            ),
+        )
+        assert none.checks["omission_disclosed"] == NA
+        assert none.checks["abstention"] == FAIL
+
+    def test_cut_required_passage_counts_as_a_disclosed_omission(self):
+        """Review round 2: t21's passage reached the prompt but was cut to
+        fit, and t22's was left out; the note reports both, so a correct
+        abstention passes."""
+        case = CASES["ask-kayak-tight-budget"]
+        run = _run(
+            "Not found in the provided emails.",
+            [_passage("E1", "t21", truncated=True)],
+            [],
+            retrieved=[thread_id_of("t21"), thread_id_of("t22")],
+            coverage_note=self._NOTE,
+        )
+        det = grade_run(case, run)
+        assert det.checks["omission_disclosed"] == PASS
+        assert det.checks["required_evidence_cited"] == PASS
+        assert det.checks["abstention"] == PASS
+        assert det.prompt_coverage == 0.5  # the cut passage still reached the prompt
+
+    def test_cut_passage_that_keeps_the_fact_is_not_an_omission(self):
+        """Review round 3: only the trailing text was cut, so the fact was
+        visible; the note cannot excuse ignoring it."""
+        case = CASES["ask-kayak-tight-budget"]
+        kept = "Tandem kayaks rent for $65 per boat for the"
+        run = _run(
+            "Not found in the provided emails.",
+            [_passage("E1", "t21.1", kept, truncated=True)],
+            [],
+            retrieved=[thread_id_of("t21"), thread_id_of("t22")],
+            coverage_note=self._NOTE,
+        )
+        det = grade_run(case, run)
+        assert det.checks["omission_disclosed"] == PASS  # t22 was left out
+        assert det.checks["required_evidence_cited"] == FAIL  # t21's fact was shown
+        assert budget_omitted_facts(case, run) == ["f2"]
+
+    def test_budget_omitted_facts_exclude_retrieval_misses(self):
+        """Review round 2: only facts whose evidence was retrieved and then
+        left out or cut by the budget may be credited to the note."""
+        case = CASES["ask-kayak-tight-budget"]
+        cut = _run(
+            "x",
+            [_passage("E1", "t21", truncated=True)],
+            [],
+            retrieved=[thread_id_of("t21"), thread_id_of("t22")],
+        )
+        assert budget_omitted_facts(case, cut) == ["f1", "f2"]
+        missed = _run("x", [_passage("E1", "t21.1")], [], retrieved=[thread_id_of("t21")])
+        assert budget_omitted_facts(case, missed) == []
+
+    def test_disclosure_needs_no_note_when_all_evidence_fit(self):
+        case = CASES["ask-kayak-tight-budget"]
+        passages = [_passage("E1", "t21"), _passage("E2", "t22")]
+        det = grade_run(case, _run("Four boats at $65 is $260 [E1] [E2].", passages, ["E1", "E2"]))
+        assert det.checks["omission_disclosed"] == NA
+        assert det.passed, det.checks
+
+    def test_coverage_note_does_not_excuse_an_answer_case(self):
+        case = CASES["ask-kayak-cost"]
+        retrieved = [thread_id_of("t21"), thread_id_of("t22")]
+        run = _run(
+            "Not found in the provided emails.",
+            [],
+            [],
+            retrieved=retrieved,
+            coverage_note=self._NOTE,
+        )
+        det = grade_run(case, run)
+        assert det.checks["omission_disclosed"] == NA
+        assert det.checks["abstention"] == FAIL
+        assert det.checks["required_evidence_cited"] == FAIL
+
+    def test_out_of_scope_decoy_value_fails_a_sender_filtered_case(self):
+        """#755: the sender filter selects Nadia's thread; Callum's reply in
+        it gives another rate, which the answer must not report."""
+        case = CASES["ask-walker-rate-sender"]
+        passages = [_passage("E1", "t75.1"), _passage("E2", "t75.2")]
+        ok = grade_run(case, _run("He asks $22 per half-hour walk [E1].", passages, ["E1"]))
+        assert ok.passed, ok.checks
+        decoy = grade_run(
+            case, _run("$22 per walk [E1], though Callum paid $30 [E2].", passages, ["E1", "E2"])
+        )
+        assert decoy.checks["expected_values"] == PASS
+        assert decoy.checks["forbidden_values"] == FAIL
+
+    @pytest.mark.parametrize("case_id", ["ask-swim-practice-date", "ask-swim-scope-stated"])
+    def test_later_schedule_as_context_passes_without_a_judge(self, case_id):
+        """Review round 7: naming November as a later change is not the
+        prohibited assertion (``must_not_assert``), and plain containment
+        cannot tell the two apart, so the swim cases leave it to the judge."""
+        case = CASES[case_id]
+        passages = [_passage("E1", "t76.1"), _passage("E2", "t76.2")]
+        answer = (
+            "In September practices were Tuesdays and Thursdays at 6:15pm at the Eastgate "
+            "aquatic center [E1]; from November they moved to Wednesdays at 5:30pm at the "
+            "Northside natatorium [E2]."
+        )
+        det = grade_run(case, _run(answer, passages, ["E1", "E2"]))
+        assert det.passed, det.checks
+
+    def test_guess_stating_an_omitted_fact_fails_beside_an_intact_citation(self):
+        """Review round 9: the $65 passage is supplied and cited, the
+        headcount passage was left out, and the answer still states the
+        headcount-dependent total. A dropped group is excused only when
+        the answer abstains or states none of its facts' values."""
+        case = CASES["ask-kayak-tight-budget"]
+        retrieved = [thread_id_of("t21"), thread_id_of("t22")]
+        passages = [_passage("E1", "t21.1", "Tandem kayaks rent for $65 per boat")]
+        guess = _run(
+            "$65 per boat, so four boats cost $260 [E1].",
+            passages,
+            ["E1"],
+            retrieved=retrieved,
+            coverage_note=self._NOTE,
+        )
+        det = grade_run(case, guess)
+        assert det.checks["required_evidence_cited"] == FAIL
+        assert "synthesis" in attribute(case, guess, det, False, False)
+        honest = _run(
+            "Tandem kayaks rent for $65 per boat [E1]; the group's size is not in the "
+            "emails I received.",
+            passages,
+            ["E1"],
+            retrieved=retrieved,
+            coverage_note=self._NOTE,
+        )
+        assert grade_run(case, honest).checks["required_evidence_cited"] == PASS
+
+    def test_uncited_guess_about_omitted_evidence_fails(self):
+        """Review round 8: every required passage was left out, and the
+        answer states a total with no citation. The note excuses an
+        omission only for an abstention or an answer whose claims rest
+        on at least one intact citation."""
+        case = CASES["ask-kayak-tight-budget"]
+        retrieved = [thread_id_of("t21"), thread_id_of("t22")]
+        run = _run("The total is $260.", [], [], retrieved=retrieved, coverage_note=self._NOTE)
+        det = grade_run(case, run)
+        assert det.checks["required_evidence_cited"] == FAIL
+        assert "synthesis" in attribute(case, run, det, False, False)
+
+    def test_cut_passage_guess_is_attributed_to_synthesis(self):
+        """Review round 8: citing a passage cut before the fact is the
+        model's guess, not only a prompt-assembly loss."""
+        case = CASES["ask-kayak-tight-budget"]
+        run = _run(
+            "Four boats at $65 is $260 [E1].",
+            [_passage("E1", "t21", truncated=True)],
+            ["E1"],
+            retrieved=[thread_id_of("t21"), thread_id_of("t22")],
+            coverage_note=self._NOTE,
+        )
+        det = grade_run(case, run)
+        assert "synthesis" in attribute(case, run, det, False, False)
+
+    def test_citing_a_passage_cut_before_its_fact_fails(self):
+        """Review round 7: a guess cited to a passage the budget cut before
+        the fact is not excused by the coverage note."""
+        case = CASES["ask-kayak-tight-budget"]
+        run = _run(
+            "Four boats at $65 is $260 [E1].",
+            [_passage("E1", "t21", truncated=True)],
+            ["E1"],
+            retrieved=[thread_id_of("t21"), thread_id_of("t22")],
+            coverage_note=self._NOTE,
+        )
+        det = grade_run(case, run)
+        assert det.checks["omission_disclosed"] == PASS
+        assert det.checks["required_evidence_cited"] == FAIL
+
+    @pytest.mark.parametrize(
+        ("case_id", "ref", "answer"),
+        [
+            (
+                "ask-garden-plot-trash",
+                "t77.1",
+                "Your plot is B-14 at $45 a season [E1]; an old list says C-3 at $70 [E2].",
+            ),
+        ],
+    )
+    def test_out_of_scope_decoy_values_fail_without_a_judge(self, case_id, ref, answer):
+        """Review round 5: a judge-less run must still catch the decoy
+        message's values in a date- or Trash-scoped answer."""
+        case = CASES[case_id]
+        decoy = ref.replace(".1", ".2")
+        passages = [_passage("E1", ref), _passage("E2", decoy)]
+        det = grade_run(case, _run(answer, passages, ["E1", "E2"]))
+        assert det.checks["expected_values"] == PASS
+        assert det.checks["forbidden_values"] == FAIL
+
+    def test_incomplete_swim_schedule_fails_without_a_judge(self):
+        """Review round 6: the wrong time and a missing weekday fail the
+        deterministic values, so a judge-less run cannot pass them."""
+        case = CASES["ask-swim-practice-date"]
+        passages = [_passage("E1", "t76.1")]
+        wrong = grade_run(case, _run("Tuesdays at 7pm at Eastgate [E1].", passages, ["E1"]))
+        assert wrong.checks["expected_values"] == FAIL
+        right = "Tuesdays and Thursdays at 6:15pm at the Eastgate aquatic center [E1]."
+        assert grade_run(case, _run(right, passages, ["E1"])).passed
+
+    def test_fact_cut_without_a_note_is_attributed_to_prompt_assembly(self):
+        """Review round 6: a required passage cut before its fact, with no
+        coverage note, is a prompt-assembly failure, not ``unknown``."""
+        case = CASES["ask-kayak-tight-budget"]
+        passages = [_passage("E1", "t21", truncated=True), _passage("E2", "t22")]
+        run = _run(
+            "Four boats at $65 is $260 [E1] [E2].",
+            passages,
+            ["E1", "E2"],
+            retrieved=[thread_id_of("t21"), thread_id_of("t22")],
+        )
+        det = grade_run(case, run)
+        assert det.checks["omission_disclosed"] == FAIL
+        assert "prompt_assembly" in attribute(case, run, det, False, False)
 
     def test_retrieval_miss_is_attributed_to_retrieval(self):
         case = CASES["ask-hotel-checkin"]
@@ -836,7 +1155,9 @@ class TestJudge:
         )
         assert not asserted.correctness_pass and asserted.prohibited_asserted == 1
 
-    def _judge(self, client, case_id="ask-padlock", statements=({"E1"},), **cfg):
+    def _judge(
+        self, client, case_id="ask-padlock", statements=({"E1"},), coverage_note=None, **cfg
+    ):
         case = CASES[case_id]
         return asyncio.run(
             judge_answer(
@@ -849,6 +1170,7 @@ class TestJudge:
                 statements=[
                     _statement(f"Statement {i}.", sorted(s)) for i, s in enumerate(statements)
                 ],
+                coverage_note=coverage_note,
             )
         )
 
@@ -867,7 +1189,52 @@ class TestJudge:
         )
         assert prompt.count("</untrusted_answer>") == 3  # the answer and two statements
         assert '"statement": 1' in JUDGE_SYSTEM
-        assert RUBRIC_VERSION == "ask-rubric-3"
+        assert RUBRIC_VERSION == "ask-rubric-4"
+
+    def test_prompt_carries_the_server_coverage_note(self):
+        """#820: the judge grades a disclose_missing answer together with
+        the server's coverage note, shown as trusted server text outside
+        the untrusted blocks and never as the assistant's words."""
+        case = CASES["ask-kayak-tight-budget"]
+        note = "Evidence note: to fit the prompt budget, 3 retrieved passages were left out."
+        prompt = build_judge_prompt(
+            case, "Not found in the provided emails.", {}, [], coverage_note=note
+        )
+        head = prompt.split("<untrusted_answer>", 1)[0]
+        assert f"Server coverage note (written by the tool, not the assistant): {note}" in head
+        assert "coverage note" in prompt.split("Reference facts", 1)[0]
+        bare = build_judge_prompt(case, "Not found in the provided emails.", {}, [])
+        assert "Server coverage note (written by the tool, not the assistant): none" in bare
+        assert "coverage note" not in build_judge_prompt(CASES["ask-padlock"], "a", {}, [])
+
+    def test_prompt_names_the_facts_the_budget_left_out(self):
+        """Review round 2: the note may excuse only the listed facts, so a
+        retrieval miss is never credited as disclosed."""
+        case = CASES["ask-kayak-tight-budget"]
+        prompt = build_judge_prompt(
+            case, "a", {}, [], coverage_note="Evidence note: 1 left out.", omitted_facts=["f2"]
+        )
+        head = prompt.split("<untrusted", 1)[0]
+        assert "Reference facts whose evidence the tool retrieved but left out or cut: f2" in head
+        assert "only a reference fact listed as left out" in prompt.casefold()
+        bare = build_judge_prompt(case, "a", {}, [], coverage_note="Evidence note: 1 left out.")
+        assert "Reference facts whose evidence the tool retrieved but left out or cut: none" in bare
+
+    def test_empty_prompt_is_not_described_as_an_empty_search(self):
+        """Review round 2: with every passage left out by the budget, the
+        prompt must not also say the search returned nothing."""
+        case = CASES["ask-kayak-tight-budget"]
+        prompt = build_judge_prompt(case, "a", {}, [], coverage_note="Evidence note: 3 left out.")
+        assert "the search returned nothing" not in prompt
+        assert "(none supplied: the prompt budget left them out)" in prompt
+        empty = build_judge_prompt(CASES["ask-cabin-wifi"], "a", {}, [])
+        assert "(none: the search returned nothing)" in empty
+
+    def test_judge_call_passes_the_coverage_note(self):
+        case_id = "ask-kayak-tight-budget"
+        client = ScriptedClient(_verdict(CASES[case_id], [["E1"]]))
+        self._judge(client, case_id, coverage_note="Evidence note: 2 passages were left out.")
+        assert "Evidence note: 2 passages were left out." in client.calls[0][1]
 
     def test_claim_labels_must_come_from_the_statement_it_assesses(self):
         """#672: an incorrect statement cites E1 and an unrelated one E2.
@@ -999,6 +1366,26 @@ def _identity(**overrides):
 
 
 class TestHarnessAndReports:
+    def test_detail_record_keeps_the_judges_omission_inputs(self):
+        """Review round 9: the detail artifact keeps what the judge was
+        allowed to excuse (coverage note, omitted facts) and each
+        passage's truncation, so a verdict can be audited."""
+        case = CASES["ask-kayak-tight-budget"]
+        run = _run(
+            "Not found in the provided emails.",
+            [_passage("E1", "t21", truncated=True)],
+            [],
+            retrieved=[thread_id_of("t21"), thread_id_of("t22")],
+            coverage_note="Evidence note: 1 left out.",
+        )
+        from tests.answer_eval.judge import JudgeOutcome
+        from tests.answer_eval.report import detail_record
+
+        rec = detail_record(case, run, JudgeOutcome(status="not_run"))
+        assert rec["coverage_note"] == "Evidence note: 1 left out."
+        assert rec["omitted_facts"] == ["f1", "f2"]
+        assert rec["passages"]["E1"]["truncated"] is True
+
     def test_privacy_markers_stay_out_of_reports_and_logs(self, chunked_db, caplog):
         case = CASES["ask-roof-total"]
         verdict = json.loads(_verdict(case, [["E1"]]))

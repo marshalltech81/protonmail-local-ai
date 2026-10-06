@@ -35,6 +35,7 @@ from collections.abc import Awaitable, Callable
 from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import cast
 
 import pytest
@@ -350,3 +351,196 @@ def test_rank_snapshot(
         "ranking changed; if intended, rerun with --update-baseline and "
         f"review the snapshot diff:\n{json.dumps(changed, indent=2)}"
     )
+
+
+# Vector distances closer than this can come back in either order on
+# another platform (sqlite-vec's float32 SIMD rounding differs between
+# macOS and Linux CI by a step or two).
+_NEAR_TIE = 1e-6
+# Rows fetched past a lane's cutoff to find the near-tie band beyond it.
+_CUTOFF_WINDOW = 64
+
+
+def _cutoff_exchanges(rows: list, k: int, window: int = _CUTOFF_WINDOW) -> list[tuple[int, int]]:
+    """Pairs ``(i, j)`` of a kept row ``i < k`` and an excluded row
+    ``j >= k`` of different threads whose distances are near-tied, so
+    another platform could admit ``j`` in place of ``i``. The band runs
+    past the first excluded row (review round 4): the chunk lane repeats
+    threads, so the first different thread can sit further out."""
+    edge = rows[k - 1].score
+    kept = [i for i in range(k) if edge - rows[i].score < _NEAR_TIE]
+    beyond = []
+    for j in range(k, len(rows)):
+        if rows[j].score - edge >= _NEAR_TIE:
+            break
+        beyond.append(j)
+    else:
+        # A full window may hide more of the band; a shorter result means
+        # the lane is exhausted and the band was seen whole (review round 8).
+        if len(rows) >= k + window:
+            raise AssertionError("near-tie band runs past the fetched window")
+    return [
+        (i, j)
+        for i in kept
+        for j in beyond
+        if rows[i].thread_id != rows[j].thread_id and abs(rows[j].score - rows[i].score) < _NEAR_TIE
+    ]
+
+
+def test_cutoff_exchange_admits_the_row_at_the_displaced_rank() -> None:
+    """Review round 5: an excluded row that rounds ahead of kept row ``i``
+    takes rank ``i``; the rows after it move down and the last kept row
+    drops out, so the admitted thread gets the RRF credit of rank ``i``."""
+    rows = list("abcdef")
+    assert _exchanged(rows, 4, 1, 5) == ["a", "f", "b", "c"]
+    assert _exchanged(rows, 4, 3, 4) == ["a", "b", "c", "e"]
+
+
+def _exchanged(rows: list, k: int, i: int, j: int) -> list:
+    """The first ``k`` rows as another platform could return them when
+    excluded row ``j`` rounds ahead of kept row ``i``: ``j`` at rank ``i``,
+    the kept rows from ``i`` on one rank lower, the last one cut."""
+    return [*rows[:i], rows[j], *rows[i : k - 1]]
+
+
+def _band_moves(lane: list) -> list[tuple[int, int]]:
+    """Single moves ``(src, dst)`` another platform could produce inside a
+    vector lane: within each run of rows whose adjacent distances are
+    near-tied, any row may land at any other position in the run, and
+    every move of a row past a row of another thread is probed (review
+    round 6: with ``A, A, B`` tied, ``B`` can rank above both ``A`` rows,
+    and RRF credits only a thread's first row)."""
+    moves: list[tuple[int, int]] = []
+    start = 0
+    for end in range(1, len(lane) + 1):
+        if end < len(lane) and lane[end].score - lane[end - 1].score < _NEAR_TIE:
+            continue
+        for src in range(start, end):
+            for dst in range(start, end):
+                lo, hi = sorted((src, dst))
+                passed = [lane[k] for k in range(lo, hi + 1) if k != src]
+                if src != dst and any(r.thread_id != lane[src].thread_id for r in passed):
+                    moves.append((src, dst))
+        start = end
+    return moves
+
+
+def _moved(lane: list, src: int, dst: int) -> list:
+    rows = [*lane[:src], *lane[src + 1 :]]
+    rows.insert(dst, lane[src])
+    return rows
+
+
+def test_band_moves_cover_a_thread_passing_repeated_rows() -> None:
+    lane = [
+        SimpleNamespace(thread_id=t, score=s)
+        for t, s in (("A", 1.0), ("A", 1.0 + 2e-7), ("B", 1.0 + 4e-7), ("C", 2.0))
+    ]
+    moves = _band_moves(lane)
+    assert (2, 0) in moves  # B above both A rows
+    assert [r.thread_id for r in _moved(lane, 2, 0)] == ["B", "A", "A", "C"]
+    assert (0, 1) not in moves  # A past A changes nothing
+    assert all(3 not in m for m in moves)  # C is outside the band
+
+
+def test_cutoff_exchanges_scan_past_same_thread_rows() -> None:
+    """Review round 4: rows k and k+1 share the cutoff row's thread, and a
+    different thread two rows out is still in the near-tie band."""
+    rows = [
+        SimpleNamespace(thread_id=thread, score=score)
+        for thread, score in (
+            ("a", 1.0),
+            ("b", 1.5),
+            ("b", 1.5 + 2e-7),
+            ("b", 1.5 + 4e-7),
+            ("c", 1.5 + 6e-7),
+            ("d", 2.0),
+        )
+    ]
+    assert _cutoff_exchanges(rows, 2) == [(1, 4)]
+    assert _cutoff_exchanges(rows, 1) == []  # the band past "a" holds nothing
+    with pytest.raises(AssertionError, match="past the fetched window"):
+        _cutoff_exchanges(rows[:5], 2, window=3)  # the search filled its window
+    # Review round 8: a lane shorter than its window is exhausted, so a
+    # band reaching its end was fully seen.
+    assert _cutoff_exchanges(rows[:5], 2, window=10) == [(1, 4)]
+
+
+def test_rank_snapshot_survives_near_tied_vector_distances(
+    baseline_db: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#755: a corpus edit left one golden question's snapshot on a knife
+    edge, where two chunk distances one float32 step apart came back
+    swapped on Linux and moved a thread past its neighbour. Two kinds of
+    near-tie are tried, one at a time, and the snapshot order must hold:
+    an adjacent pair of different threads inside a vector lane is
+    swapped, and, since another platform can also admit a different row
+    at a lane's ``k`` cutoff (review round 2), each search fetches one
+    extra row and a near-tied pair across the cutoff is exchanged. Such
+    an edit then fails here on any platform rather than only in CI."""
+    vectors = json.loads(
+        (Path(os.environ["BASELINE_DIR"]) / "query_vectors.json").read_text(encoding="utf-8")
+    )
+    fuse = baseline_db._reciprocal_rank_fusion
+    state: dict = {"cutoffs": 0}
+
+    def cut_aware(lane: str, search):
+        def run_search(embedding, k):
+            rows = search(embedding, k + _CUTOFF_WINDOW)
+            if rows is None or len(rows) <= k:
+                return rows
+            state["cutoffs"] += 1
+            probe = state["probe"]
+            if probe is not None and probe[:3] == ("cut", lane, k):
+                i, j = probe[3:]
+                return _exchanged(rows, k, i, j)
+            if probe is None:
+                state["ties"] += [("cut", lane, k, i, j) for i, j in _cutoff_exchanges(rows, k)]
+            return rows[:k]
+
+        return run_search
+
+    def swapping_fusion(bm25, vec, chunks):
+        lanes = {"vec": list(vec), "chunk": list(chunks)}
+        probe = state["probe"]
+        if probe is not None and probe[0] == "move":
+            _, name, src, dst = probe
+            lanes[name] = _moved(lanes[name], src, dst)
+        elif probe is None:
+            state["ties"] += [
+                ("move", name, src, dst)
+                for name, lane in lanes.items()
+                for src, dst in _band_moves(lane)
+            ]
+        return fuse(bm25, lanes["vec"], lanes["chunk"])
+
+    monkeypatch.setattr(baseline_db, "_vector_search", cut_aware("vec", baseline_db._vector_search))
+    monkeypatch.setattr(
+        baseline_db, "_chunk_vector_search", cut_aware("chunk", baseline_db._chunk_vector_search)
+    )
+    monkeypatch.setattr(baseline_db, "_reciprocal_rank_fusion", swapping_fusion)
+    probes, flips = 0, []
+    for q in GOLDEN["search"]:
+
+        def run(q=q) -> list[str]:
+            hits = baseline_db.hybrid_search(
+                q["query"],
+                vectors[q["query"]],
+                limit=SNAPSHOT_DEPTH,
+                with_evidence="evidence" in q,
+                **q.get("filters", {}),
+            )
+            return _refs(_order_ties(hits))
+
+        state.update(probe=None, ties=[])
+        expected = run()
+        for tie in list(state["ties"]):
+            state["probe"] = tie
+            probes += 1
+            if run() != expected:
+                flips.append((q["id"], *tie))
+    # The hashed embedder leaves near-ties in many lanes; check some were
+    # tried, and that every full lane was compared across its cutoff.
+    assert probes > 0
+    assert state["cutoffs"] > 0
+    assert flips == [], f"snapshot order depends on a near-tied distance: {flips}"

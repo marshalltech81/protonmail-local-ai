@@ -533,8 +533,8 @@
       "expected_handling": "disclose_missing",
       "required_evidence": [["t21"], ["t22"]],
       "expected_facts": [
-        {"id": "f1", "fact": "Tandem kayaks rent for $65 per boat for the day.", "sources": ["t21.1"], "excerpt": "Tandem kayaks rent for $65 per boat"},
-        {"id": "f2", "fact": "The group of eight needs four tandem boats.", "sources": ["t22.1"], "excerpt": "we need four tandem boats"}
+        {"id": "f1", "fact": "Tandem kayaks rent for $65 per boat for the day.", "sources": ["t21.1"], "excerpt": "Tandem kayaks rent for $65 per boat", "values": ["$65"]},
+        {"id": "f2", "fact": "The group of eight needs four tandem boats.", "sources": ["t22.1"], "excerpt": "we need four tandem boats", "values": ["four", "4 boats", "4 tandem", "$260"]}
       ],
       "must_not_assert": ["A group total stated as certain when the headcount was not in the evidence the answer received."],
       "deterministic": {"must_include": [], "must_not_include": []},
@@ -596,6 +596,84 @@
         "The tofu cooking class, either SignLattice signing notice or the security newsletter is a one-time PIN or email verification email."
       ],
       "deterministic": {"must_include": [["Northwind"], ["Larkspur"], ["Quillfeather"], ["Harrow"]], "must_not_include": ["583914", "270615", "914772", "640358", "quillfeather.example/confirm", "K4T9ZR2W"]},
+      "criteria": {"factual_correctness": true, "citation_support": true, "completeness": true, "temporal_reasoning": false, "conflict_uncertainty": false, "relevance": true},
+      "review": "ai_drafted"
+    },
+    {
+      "id": "ask-walker-rate-sender",
+      "category": "narrow_filter",
+      "tool": "ask_mailbox",
+      "arguments": {"question": "What does the dog walker ask per half-hour walk?", "from_addr": "nadia@elmhollow.example"},
+      "held_out": false,
+      "answerable": true,
+      "expected_handling": "answer",
+      "required_evidence": [["t75.1"]],
+      "expected_facts": [
+        {"id": "f1", "fact": "Milo Grant asks $22 per half-hour walk on weekdays.", "sources": ["t75.1"], "excerpt": "He asks $22 per half-hour walk on weekdays"}
+      ],
+      "must_not_assert": [
+        "The dog walker asks $30 per half-hour walk (Callum's rate, from a message the sender filter does not select)."
+      ],
+      "deterministic": {"must_include": [["$22"]], "must_not_include": ["$30"]},
+      "criteria": {"factual_correctness": true, "citation_support": true, "completeness": true, "temporal_reasoning": false, "conflict_uncertainty": false, "relevance": true},
+      "review": "ai_drafted"
+    },
+    {
+      "id": "ask-swim-practice-date",
+      "category": "narrow_filter",
+      "tool": "ask_mailbox",
+      "arguments": {"question": "When and where are swim practices?", "date_from": "2025-09-01", "date_to": "2025-09-30"},
+      "held_out": false,
+      "answerable": true,
+      "expected_handling": "answer",
+      "required_evidence": [["t76.1"]],
+      "expected_facts": [
+        {"id": "f1", "fact": "Fall swim practices are Tuesdays and Thursdays at 6:15pm at the Eastgate aquatic center.", "sources": ["t76.1"], "excerpt": "Fall swim practices run Tuesdays and Thursdays at 6:15pm at the Eastgate aquatic center"}
+      ],
+      "must_not_assert": [
+        "Practices in the requested period are on Wednesdays at 5:30pm at the Northside natatorium (the November schedule, from a message outside the date filter)."
+      ],
+      "deterministic": {"must_include": [["Tuesday", "Tuesdays"], ["Thursday", "Thursdays"], ["6:15", "6:15pm", "6:15 pm"], ["Eastgate"]], "must_not_include": []},
+      "criteria": {"factual_correctness": true, "citation_support": true, "completeness": true, "temporal_reasoning": true, "conflict_uncertainty": false, "relevance": true},
+      "review": "ai_drafted"
+    },
+    {
+      "id": "ask-swim-scope-stated",
+      "category": "narrow_filter",
+      "tool": "ask_mailbox",
+      "arguments": {"question": "When and where were swim practices in September?", "date_from": "2025-09-01", "date_to": "2025-09-30"},
+      "held_out": false,
+      "answerable": true,
+      "expected_handling": "answer",
+      "required_evidence": [["t76.1"]],
+      "expected_facts": [
+        {"id": "f1", "fact": "Fall swim practices are Tuesdays and Thursdays at 6:15pm at the Eastgate aquatic center.", "sources": ["t76.1"], "excerpt": "Fall swim practices run Tuesdays and Thursdays at 6:15pm at the Eastgate aquatic center"}
+      ],
+      "must_not_assert": [
+        "Practices in the requested period are on Wednesdays at 5:30pm at the Northside natatorium (the November schedule, from a message outside the date filter)."
+      ],
+      "deterministic": {"must_include": [["Tuesday", "Tuesdays"], ["Thursday", "Thursdays"], ["6:15", "6:15pm", "6:15 pm"], ["Eastgate"]], "must_not_include": []},
+      "criteria": {"factual_correctness": true, "citation_support": true, "completeness": true, "temporal_reasoning": true, "conflict_uncertainty": false, "relevance": true},
+      "review": "ai_drafted"
+    },
+    {
+      "id": "ask-garden-plot-trash",
+      "category": "narrow_filter",
+      "tool": "ask_mailbox",
+      "arguments": {"question": "Which community garden plot do I have, and what is the season price?"},
+      "held_out": false,
+      "answerable": true,
+      "expected_handling": "answer",
+      "required_evidence": [["t77.1"]],
+      "expected_facts": [
+        {"id": "f1", "fact": "Sam's plot is B-14, next to the east gate.", "sources": ["t77.1"], "excerpt": "Your plot is B-14, next to the east gate"},
+        {"id": "f2", "fact": "The season price is $45, payable at the April 5 orientation.", "sources": ["t77.1"], "excerpt": "the season price is $45, payable at the April 5 orientation"}
+      ],
+      "must_not_assert": [
+        "Sam's plot is C-3 (from a stale list in a message filed in Trash).",
+        "The season price is $70 (from a stale list in a message filed in Trash)."
+      ],
+      "deterministic": {"must_include": [["B-14"], ["$45"]], "must_not_include": ["C-3", "$70"]},
       "criteria": {"factual_correctness": true, "citation_support": true, "completeness": true, "temporal_reasoning": false, "conflict_uncertainty": false, "relevance": true},
       "review": "ai_drafted"
     }

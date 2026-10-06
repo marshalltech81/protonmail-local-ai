@@ -15,7 +15,8 @@ has a query vector. Two layers:
    scripted judge. Each run must complete, its captured evidence must
    match the prompt the model received, a case whose evidence was all
    supplied must pass every deterministic check, and the prompt-budget
-   case must show its evidence omitted by prompt assembly.
+   case must show its evidence omitted by prompt assembly and disclosed
+   by the server's coverage note.
 """
 
 import asyncio
@@ -269,6 +270,10 @@ def _judge_config() -> LayerConfig:
 _ORACLE_MISSES: dict[str, list[list[str]]] = {}
 
 
+# Details (passages supplied) per case, kept by ``_evaluate_all``.
+_DETAILS: dict[str, dict] = {}
+
+
 def _evaluate_all(baseline_dir: Path, baseline_db: Database) -> list[dict]:
     vectors = json.loads((baseline_dir / "query_vectors.json").read_text(encoding="utf-8"))
     records = []
@@ -284,10 +289,11 @@ def _evaluate_all(baseline_dir: Path, baseline_db: Database) -> list[dict]:
             expected_embed_dim=baseline_db.get_embedding_dim(),
         )
         judge.case = case
-        rows, _ = asyncio.run(
+        rows, details = asyncio.run(
             evaluate([case], ctx, judge_client=judge, judge_config=_judge_config())
         )
         records += rows
+        _DETAILS[case.id] = details[0]
     return records
 
 
@@ -308,7 +314,9 @@ def test_every_case_completes_and_is_judged(records: dict[str, dict]) -> None:
 def test_supplied_evidence_lets_a_correct_answer_pass(case: Case, records: dict[str, dict]) -> None:
     r = records[case.id]
     det = r["deterministic"]
-    if det["prompt_coverage"] in (None, 1.0):
+    if det["prompt_coverage"] in (None, 1.0) or case.expected_handling == "disclose_missing":
+        # #820: an omission the server's coverage note disclosed is what
+        # a disclose_missing case expects.
         assert det["passed"], (case.id, det["checks"])
         assert r["attribution"] == []
     else:
@@ -337,6 +345,23 @@ def test_answerer_finds_every_value_where_evidence_arrived(records: dict[str, di
         assert stated == [], cid
 
 
+# Each #755 decoy case's out-of-scope sibling message (review round 6).
+_DECOYS = {
+    "ask-walker-rate-sender": "t75.2",
+    "ask-swim-practice-date": "t76.2",
+    "ask-swim-scope-stated": "t76.2",
+    "ask-garden-plot-trash": "t77.2",
+}
+
+
+@pytest.mark.parametrize("case_id", sorted(_DECOYS))
+def test_decoy_reaches_the_answering_model(case_id: str, records: dict[str, dict]) -> None:
+    """Review round 6: a decoy case tests nothing unless the out-of-scope
+    sibling's passage is in the prompt the model received."""
+    supplied = {p["message_id"] for p in _DETAILS[case_id]["passages"].values()}
+    assert message_id_of(_DECOYS[case_id]) in supplied, (case_id, sorted(supplied))
+
+
 def test_cases_missing_evidence_are_the_known_ones(records: dict[str, dict]) -> None:
     """Which cases lose evidence before the model sees it.
 
@@ -345,8 +370,17 @@ def test_cases_missing_evidence_are_the_known_ones(records: dict[str, dict]) -> 
     to its budget by design. A change here is a retrieval or prompt
     assembly change: explain it in the PR and update the sets.
     """
+
+    def stages(det: dict) -> list[str]:
+        lost_at = []
+        if det["retrieval_recall"] < 1.0:
+            lost_at.append("retrieval")
+        if det["prompt_coverage"] < det["retrieval_recall"]:
+            lost_at.append("prompt_assembly")
+        return lost_at
+
     lost = {
-        cid: sorted(set(r["attribution"]) & {"retrieval", "prompt_assembly"})
+        cid: stages(r["deterministic"])
         for cid, r in records.items()
         if r["deterministic"]["prompt_coverage"] not in (None, 1.0)
     }
@@ -364,8 +398,7 @@ def test_prompt_budget_case_detects_omitted_evidence(records: dict[str, dict]) -
         det = r["deterministic"]
         assert det["retrieval_recall"] == 1.0, det
         assert det["prompt_coverage"] < 1.0, det
-        assert det["checks"]["required_evidence_cited"] == "fail"
-        assert "prompt_assembly" in r["attribution"]
+        assert det["checks"]["omission_disclosed"] == "pass", det
 
 
 def test_cli_run_writes_report(
