@@ -497,7 +497,8 @@ is `127.0.0.1`, not `host.docker.internal`.
   (API-billed) one. A machine with an enterprise `managed-mcp.json` is
   refused, since Claude Code exits on `--strict-mcp-config` there, and so
   is one with an organization-wide managed `CLAUDE.md` or any
-  `managed-settings.json` (its `claudeMd`, hooks and other settings
+  `managed-settings.json` or `*.json` fragment in a
+  `managed-settings.d` directory (its `claudeMd`, hooks and other settings
   apply to every session whatever the flags). Managed settings delivered by MDM or from Anthropic's servers
   cannot be seen locally, so on a managed machine the judge may still
   carry organization instructions.

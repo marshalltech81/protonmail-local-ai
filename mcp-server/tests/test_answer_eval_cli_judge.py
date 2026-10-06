@@ -114,6 +114,20 @@ class TestConfig:
         monkeypatch.setattr(cli_judge, "MANAGED_MCP_PATHS", ())
         monkeypatch.setattr(cli_judge, "MANAGED_CLAUDE_MD_PATHS", ())
         monkeypatch.setattr(cli_judge, "MANAGED_SETTINGS_PATHS", ())
+        monkeypatch.setattr(cli_judge, "MANAGED_SETTINGS_DIRS", ())
+
+    def test_managed_settings_drop_ins_are_refused(self, monkeypatch, tmp_path):
+        """Review round 13: Claude Code merges every *.json in a
+        managed-settings.d directory, which can add hooks or instructions
+        whatever the flags say; any such fragment refuses the judge."""
+        drop_ins = tmp_path / "managed-settings.d"
+        drop_ins.mkdir()
+        monkeypatch.setattr(cli_judge, "MANAGED_SETTINGS_DIRS", (drop_ins,))
+        (drop_ins / "README.txt").write_text("not a policy")
+        assert load_layer("JUDGE", self.ENV) is not None  # no *.json yet
+        (drop_ins / "10-team.json").write_text("{}")
+        with pytest.raises(ConfigError, match="managed CLAUDE.md"):
+            load_layer("JUDGE", self.ENV)
 
     def test_needs_no_key_or_base_url(self, tmp_path):
         cfg = load_layer("JUDGE", self.ENV, tmp_path)
@@ -538,6 +552,15 @@ def test_judge_answer_maps_cli_errors_to_their_category(fake_claude):
     assert outcome.status == "error"
     assert outcome.error == "judge_cli_logged_out" and outcome.error in JUDGE_ERRORS
     assert outcome.detail == "claude CLI is not logged in: run `claude` and /login"
+
+
+def test_managed_settings_drop_in_dirs_are_listed():
+    """Review round 13: both platforms' drop-in directories are checked.
+    (Module level: the Claude test class blanks these paths.)"""
+    assert set(cli_judge.MANAGED_SETTINGS_DIRS) == {
+        Path("/Library/Application Support/ClaudeCode/managed-settings.d"),
+        Path("/etc/claude-code/managed-settings.d"),
+    }
 
 
 def test_codex_requirements_layer_is_refused():

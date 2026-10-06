@@ -160,6 +160,11 @@ MANAGED_SETTINGS_PATHS = (
     Path("/Library/Application Support/ClaudeCode/managed-settings.json"),
     Path("/etc/claude-code/managed-settings.json"),
 )
+# Drop-in policy fragments: Claude Code merges every *.json in these.
+MANAGED_SETTINGS_DIRS = (
+    Path("/Library/Application Support/ClaudeCode/managed-settings.d"),
+    Path("/etc/claude-code/managed-settings.d"),
+)
 # Codex config layers that apply whatever the session flags say,
 # including the requirements layer (developer instructions, hooks, MCP
 # servers and forced features).
@@ -369,10 +374,13 @@ def managed_mcp_present() -> bool:
 
 
 def managed_policy_present() -> bool:
-    """A managed CLAUDE.md or any managed settings file: both apply to
-    every session whatever the flags (instructions, ``claudeMd``,
-    hooks that can add context or export the prompt)."""
-    return any(path.exists() for path in (*MANAGED_CLAUDE_MD_PATHS, *MANAGED_SETTINGS_PATHS))
+    """A managed CLAUDE.md, any managed settings file, or a ``*.json``
+    fragment in a managed-settings.d directory: all apply to every
+    session whatever the flags (instructions, ``claudeMd``, hooks that
+    can add context or export the prompt)."""
+    if any(path.exists() for path in (*MANAGED_CLAUDE_MD_PATHS, *MANAGED_SETTINGS_PATHS)):
+        return True
+    return any(path.is_dir() and any(path.glob("*.json")) for path in MANAGED_SETTINGS_DIRS)
 
 
 class ClaudeCliClient:
