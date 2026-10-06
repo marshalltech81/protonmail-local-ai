@@ -834,6 +834,32 @@ class TestDeterministicGraders:
         assert decoy.checks["expected_values"] == PASS
         assert decoy.checks["forbidden_values"] == FAIL
 
+    @pytest.mark.parametrize(
+        ("case_id", "ref", "answer"),
+        [
+            (
+                "ask-swim-practice-date",
+                "t76.1",
+                "Tuesdays and Thursdays at the Eastgate aquatic center [E1]; from "
+                "November, Wednesdays at 5:30pm at the Northside natatorium [E2].",
+            ),
+            (
+                "ask-garden-plot-trash",
+                "t77.1",
+                "Your plot is B-14 at $45 a season [E1]; an old list says C-3 at $70 [E2].",
+            ),
+        ],
+    )
+    def test_out_of_scope_decoy_values_fail_without_a_judge(self, case_id, ref, answer):
+        """Review round 5: a judge-less run must still catch the decoy
+        message's values in a date- or Trash-scoped answer."""
+        case = CASES[case_id]
+        decoy = ref.replace(".1", ".2")
+        passages = [_passage("E1", ref), _passage("E2", decoy)]
+        det = grade_run(case, _run(answer, passages, ["E1", "E2"]))
+        assert det.checks["expected_values"] == PASS
+        assert det.checks["forbidden_values"] == FAIL
+
     def test_retrieval_miss_is_attributed_to_retrieval(self):
         case = CASES["ask-hotel-checkin"]
         run = _run("Not found in the provided emails.", [_passage("E1", "t24.1")], [])

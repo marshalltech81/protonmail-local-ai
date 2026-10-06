@@ -385,6 +385,22 @@ def _cutoff_exchanges(rows: list, k: int) -> list[tuple[int, int]]:
     ]
 
 
+def test_cutoff_exchange_admits_the_row_at_the_displaced_rank() -> None:
+    """Review round 5: an excluded row that rounds ahead of kept row ``i``
+    takes rank ``i``; the rows after it move down and the last kept row
+    drops out, so the admitted thread gets the RRF credit of rank ``i``."""
+    rows = list("abcdef")
+    assert _exchanged(rows, 4, 1, 5) == ["a", "f", "b", "c"]
+    assert _exchanged(rows, 4, 3, 4) == ["a", "b", "c", "e"]
+
+
+def _exchanged(rows: list, k: int, i: int, j: int) -> list:
+    """The first ``k`` rows as another platform could return them when
+    excluded row ``j`` rounds ahead of kept row ``i``: ``j`` at rank ``i``,
+    the kept rows from ``i`` on one rank lower, the last one cut."""
+    return [*rows[:i], rows[j], *rows[i : k - 1]]
+
+
 def test_cutoff_exchanges_scan_past_same_thread_rows() -> None:
     """Review round 4: rows k and k+1 share the cutoff row's thread, and a
     different thread two rows out is still in the near-tie band."""
@@ -435,7 +451,7 @@ def test_rank_snapshot_survives_near_tied_vector_distances(
             probe = state["probe"]
             if probe is not None and probe[:3] == ("cut", lane, k):
                 i, j = probe[3:]
-                return [*rows[:i], *rows[i + 1 : k], rows[j]]
+                return _exchanged(rows, k, i, j)
             if probe is None:
                 state["ties"] += [("cut", lane, k, i, j) for i, j in _cutoff_exchanges(rows, k)]
             return rows[:k]
