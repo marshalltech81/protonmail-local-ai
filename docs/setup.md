@@ -167,7 +167,7 @@ handshake is the first thing on the connection, so there is no
 plaintext phase for anything on the path to strip or inject into. It
 keeps certificate verification and the persistent fingerprint pin. The
 app's certificate names only `127.0.0.1`, and the isync shipped in the
-image (1.4.4) checks a self-signed CA certificate like Bridge's against
+image (1.5.1) checks a self-signed CA certificate like Bridge's against
 the configured host name, so connecting to `host.docker.internal`
 directly fails with `certificate owner does not match hostname`.
 `docker-compose.yml` therefore sets `BRIDGE_CERT_HOST=127.0.0.1`: the
@@ -788,6 +788,156 @@ restart Claude Desktop.
 `make init-secrets` (it creates only the missing token file), then
 `make up`, then add the header to each client as above. Until a client
 sends the token, its requests get `401`.
+
+**Upgrading to the isync 1.5.1 mbsync image (Debian trixie).** isync
+1.5 writes a folder whose name has a non-ASCII character or `&` under
+its decoded UTF-8 name, where isync 1.4.4 kept the modified UTF-7
+spelling (`Folders/.Caf&AOk-` becomes `Folders/.Café`; see
+`docs/architecture.md`, Maildir layout). An existing directory under
+the old spelling is not renamed: the first 1.5.1 sync downloads that
+folder again into the new directory, so its messages are indexed
+twice (conflicting Message-IDs), and the old directory is reported as
+a far-side box that "cannot be opened anymore". Before upgrading, with
+the old image still running, count the affected directories. isync
+1.4.4 always encodes `&`, so a directory name containing `&` is one of
+them. The command prints the count only, no folder names:
+
+```bash
+docker exec mbsync sh -c 'find /maildir -mindepth 1 -type d -name "*&*" | wc -l'
+```
+
+If it prints `0`, upgrade as usual. Otherwise migrate before
+upgrading. The migration renames those directories to the names 1.5.1
+expects and never deletes anything. That matters: with `Expunge None`,
+a folder or subfolder you renamed or deleted in Proton survives only in
+the Maildir. Stop the stack (`make down`) and work through the steps
+below from the checkout, in one shell. They read your stack's Maildir
+volume name from the resolved Compose config, with the same project name
+(`-p` or `COMPOSE_PROJECT_NAME`) the stack runs under, and name the
+backup volume after it:
+
+```bash
+maildir=$(docker compose config --format json \
+  | python3 -c 'import json, sys; print(json.load(sys.stdin)["volumes"]["maildir-volume"]["name"])')
+backup="${maildir}-utf7-backup"
+```
+
+1. Back up the affected directories into a separate Docker volume (it
+   stays in Docker's storage, like the original). The archive holds
+   complete messages, so the volume root is mode 700 and the archive
+   mode 600:
+
+   ```bash
+   docker run --rm -v "$maildir":/maildir:ro \
+     -v "$backup":/backup debian:trixie-slim sh -c \
+     'umask 077 && chmod 700 /backup && cd /maildir &&
+      find . -mindepth 1 -type d -name "*&*" -prune -print0 |
+      tar --null -cf /backup/encoded-folders.tar -T - &&
+      chmod 600 /backup/encoded-folders.tar'
+   ```
+
+2. Save this script as `utf7-migrate.py`. It renames every directory
+   whose name holds modified UTF-7 to its decoded name, deepest first, so
+   subfolders, sync state and messages all move with their folder. Within
+   a folder it moves every source to a temporary name before giving any
+   its final name, since one folder's target can be another's current
+   name (`A&-` becomes `A&` while `A&--` becomes `A&-`).
+   Without `--apply` it only prints the plan, with your folder names, to
+   your terminal. It renames nothing if any target already exists, or if
+   a name is not modified UTF-7 (for example, when run after upgrading).
+   Apply it once only: a second run could decode a name twice (`A&--B`
+   becomes `A&-B`, then `A&B`), so `--apply` records a marker in the
+   backup volume and the script refuses to run again.
+
+   ```python
+   import base64, binascii, os, re, sys
+
+   MARKER = "/backup/utf7-migration-applied"
+
+
+   def dec(s):
+       return re.sub(
+           r"&([A-Za-z0-9+,]*)-",
+           lambda m: (
+               base64.b64decode(m[1].replace(",", "/") + "=" * (-len(m[1]) % 4), validate=True).decode(
+                   "utf-16-be"
+               )
+               if m[1]
+               else "&"
+           ),
+           s,
+       )
+
+
+   if os.path.exists(MARKER):
+       sys.exit(
+           "stopped: the migration was already applied; running it again "
+           "could decode a name twice. Nothing was renamed"
+       )
+   # Each parent's renames, deepest parent first, planned on the tree as it is.
+   batches = {}
+   for parent, dirs, _ in os.walk("/maildir"):
+       for d in dirs:
+           if "&" in d:
+               try:
+                   new = dec(d)
+               except binascii.Error, UnicodeDecodeError:
+                   sys.exit(
+                       "stopped: a directory name is not modified UTF-7; "
+                       "run this only before upgrading; nothing was renamed"
+                   )
+               if new != d:
+                   batches.setdefault(parent, []).append((d, new))
+   order = sorted(batches, key=lambda p: p.count(os.sep), reverse=True)
+   clash = 0
+   for parent in order:
+       sources = {src for src, _ in batches[parent]}
+       for src, dst in batches[parent]:
+           print(os.path.join(parent, src), "->", os.path.join(parent, dst))
+           # A target that is another source here is moved out of the way first.
+           if os.path.exists(os.path.join(parent, dst)) and dst not in sources:
+               clash += 1
+   if clash:
+       sys.exit(f"stopped: {clash} target(s) already exist; nothing was renamed")
+   if sys.argv[1:] == ["--apply"]:
+       open(MARKER, "x").close()
+       for parent in order:
+           staged = []
+           for i, (src, dst) in enumerate(batches[parent]):
+               tmp = os.path.join(parent, f".utf7-migrating-{i}")
+               os.rename(os.path.join(parent, src), tmp)
+               staged.append((tmp, os.path.join(parent, dst)))
+           for tmp, dst in staged:
+               os.rename(tmp, dst)
+       print(f"renamed {sum(len(b) for b in batches.values())} directories")
+   ```
+
+3. Review the plan, then apply it:
+
+   ```bash
+   docker run --rm -v "$PWD/utf7-migrate.py:/m.py:ro" -v "$backup":/backup \
+     -v "$maildir":/maildir:ro python:3.14-slim-trixie python /m.py
+   docker run --rm -v "$PWD/utf7-migrate.py:/m.py:ro" -v "$backup":/backup \
+     -v "$maildir":/maildir python:3.14-slim-trixie python /m.py --apply
+   ```
+
+4. Build the new images with the updated checkout: `make build`. This is
+   required: `make up` does not rebuild, and starting the old 1.4.4
+   image on the renamed folders would recreate the encoded directories
+   and download their mail again.
+
+5. Rebuild the index from the Maildir, since every renamed directory
+   changes its messages' file paths. Follow `docs/troubleshooting.md`,
+   "Indexer refuses to start — wipe the sqlite-volume", which removes
+   only the index and runs `make up`.
+
+The first 1.5.1 sync then finds each folder under its decoded name with
+its sync state. A folder gone from Proton stays, reported as a far-side
+box that "cannot be opened anymore", as before. Keep the backup volume
+until the first sync and the rebuilt index look complete, then remove
+it (`docker volume rm "$backup"`). That also removes the
+script's "already applied" marker, so do not run the script again
+afterwards.
 
 **Upgrading from a release that served `/sse` (breaking change).** The
 legacy HTTP+SSE transport, its `/sse` and `/messages/` endpoints, and

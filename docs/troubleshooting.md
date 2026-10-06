@@ -232,9 +232,10 @@ The run still counts as a failure, as before, when mbsync reports any other
 error in the same run, exits with any status other than 1, or cannot open
 `INBOX` (which cannot be renamed or deleted, so Bridge refusing it means
 Bridge is refusing folders, not that one went away). The match is the exact
-line isync 1.4.4 prints, `Error: channel protonmail: far side box <name>
-cannot be opened.`; a different isync version that words it differently
-falls back to counting the run as a failure.
+line isync 1.5.1 prints, `Error: channel protonmail: far side box <name>
+cannot be opened anymore.`, or the one isync 1.4.4 printed, without
+`anymore`; a different isync version that words it differently falls back
+to counting the run as a failure.
 
 To see which local folders are affected, run one sync by hand:
 
@@ -250,11 +251,12 @@ stops the warning, but its messages then count as deleted for the indexer
 ## Folder names in mbsync's log
 
 Folder names are mailbox content, so the entrypoint keeps them out of
-`docker logs mbsync` (#570). Every isync 1.4.4 message that names a folder
-is logged with the name replaced and the rest of the message kept:
+`docker logs mbsync` (#570). Every isync 1.5.1 message that names a folder
+(and every 1.4.4 one) is logged with the name replaced and the rest of the
+message kept:
 
 - a folder name becomes `<folder>`, for example
-  `Error: channel protonmail, far side box <folder>: UIDVALIDITY genuinely changed (at UID 42).`
+  `Error: channel protonmail, far side box <folder> (at UID 42): UIDVALIDITY genuinely changed.`
   (`INBOX` is shown as it is);
 - a path in the Maildir or its sync state, which contains the folder name,
   becomes `<path>`, for example
@@ -265,7 +267,7 @@ is logged with the name replaced and the rest of the message kept:
 - text Bridge itself returns, which may name a folder too, is withheld
   after the fixed part, for example
   `Error from IMAP server: (server text withheld)` or
-  `IMAP command 'UID FETCH 1:5 (UID FLAGS)' returned an error: NO (server text withheld)`.
+  `IMAP command 'UID FETCH 1:5 (UID FLAGS)' returned an error: (server text withheld)`.
 
 Redaction does not change how a sync is counted: these errors still fail
 it, and only the far-side `cannot be opened` line
@@ -370,15 +372,15 @@ appear in this order:
 | Log line in `docker logs mbsync` | What is stale | Fix |
 | --- | --- | --- |
 | `the Bridge certificate does not match BRIDGE_CERT_FINGERPRINT`, or `Bridge cert fingerprint does not match pinned value` | The expected fingerprint and the certificate pin. Checked before mbsync logs in. | Verify the new certificate, update `BRIDGE_CERT_FINGERPRINT`, then rotate the pin: [Bridge cert pin mismatch](#mbsync-refuses-to-sync--bridge-cert-pin-mismatch) and [the Bridge app](#mbsync-cannot-reach-or-verify-the-bridge-app). |
-| `IMAP command 'LOGIN <user> <pass>' returned an error: NO (server text withheld)` (or `AUTHENTICATE PLAIN <authdata>`, or `BAD`) | The credentials: Bridge refused `BRIDGE_USER` or `.secrets/bridge_pass.txt`. | Copy the new username and password from Bridge: [re-authenticate](#bridge-credentials-expired--need-to-re-authenticate), or step 2 of [Switching to another Bridge installation](setup.md#switching-to-another-bridge-installation). |
-| `Error: channel protonmail, far side box <folder>: UIDVALIDITY genuinely changed (at UID 42).` or `... Unable to recover from UIDVALIDITY change.` | The sync state: this Bridge numbers the folder's messages differently. | Below. |
+| `IMAP command 'LOGIN <user> <pass>' returned an error: (server text withheld)` (or `AUTHENTICATE PLAIN <authdata>`) | The credentials: Bridge refused `BRIDGE_USER` or `.secrets/bridge_pass.txt`. | Copy the new username and password from Bridge: [re-authenticate](#bridge-credentials-expired--need-to-re-authenticate), or step 2 of [Switching to another Bridge installation](setup.md#switching-to-another-bridge-installation). |
+| `Error: channel protonmail, far side box <folder> (at UID 42): UIDVALIDITY genuinely changed.` or `... Unable to recover from UIDVALIDITY change.` | The sync state: this Bridge numbers the folder's messages differently. | Below. |
 
 ### Spurious or genuine
 
 mbsync records each folder's IMAP UIDVALIDITY and the UID of every
 message it pulled, in the folder's `.mbsyncstate` (see
 [Folder names in mbsync's log](#folder-names-in-mbsyncs-log)). When
-Bridge reports a different UIDVALIDITY, isync 1.4.4 tells the two cases
+Bridge reports a different UIDVALIDITY, isync 1.5.1 tells the two cases
 apart itself, by comparing the Message-ID of each message it pulled with
 the message Bridge now serves at that UID:
 
@@ -387,16 +389,19 @@ the message Bridge now serves at that UID:
   `Notice: channel protonmail, far side box <folder>: Recovered from change of UIDVALIDITY.`
   and syncs as usual. Nothing to do.
 - **Genuine**: a UID now holds another message. isync logs
-  `UIDVALIDITY genuinely changed (at UID <n>)`.
+  `(at UID <n>): UIDVALIDITY genuinely changed`.
 - **Unknown**: no UID contradicts the old state, but too few messages
   could be confirmed (fewer than 20, and fewer than 80% of those it
   pulled before; typical of Drafts). isync logs
   `Unable to recover from UIDVALIDITY change`. Treat it as genuine.
 
-`UIDVALIDITY of both far side <folder> and near side <folder> changed`,
-or a `near side box` line, means the local Maildir's own UIDVALIDITY
+A `near side box` line means the local Maildir's own UIDVALIDITY
 changed, which happens when something other than mbsync rewrites the
-Maildir (a restore from a backup, for example). Treat it as genuine too.
+Maildir (a restore from a backup, for example). isync checks that side
+the same way; when both sides changed and either change is genuine, it
+logs `Unable to recover from both-sided UIDVALIDITY change, as it is
+genuine on at least one side`. Treat a near-side or both-sided error as
+genuine too.
 
 In each error case isync skips that folder and changes nothing in it
 (mbsync is pull-only and never expunges); the other folders keep

@@ -15,12 +15,15 @@
 
 # IMAP Account — connection to the Proton Mail Bridge app's IMAP server.
 # PassCmd avoids credentials appearing in docker inspect or process list.
-# SSLType IMAPS: implicit TLS (RFC 8314, Bridge's "SSL" mode, #638). The
+# TLSType IMAPS: implicit TLS (RFC 8314, Bridge's "SSL" mode, #638). The
 # TLS handshake is the first thing on the connection, so there is no
 # plaintext phase to strip or inject into, and isync never falls back to
 # STARTTLS or plaintext. Bridge serves it on the IMAP port once the
-# Bridge app's IMAP connection mode is set to SSL.
-# Leave SSLVersions unset so isync/OpenSSL can negotiate the strongest
+# Bridge app's IMAP connection mode is set to SSL. It must be set: with a
+# Tunnel, isync otherwise defaults to no TLS. (isync 1.5 renamed
+# SSLType to TLSType; the old name still works but prints a notice on
+# stderr every run, which the entrypoint would count as an error.)
+# Leave TLSVersions unset so isync/OpenSSL can negotiate the strongest
 # supported protocol instead of pinning the connection to TLS 1.2.
 # CertificateFile: extracted automatically at container startup by entrypoint.sh.
 IMAPAccount protonmail
@@ -28,7 +31,7 @@ Host ${MBSYNC_IMAP_HOST}
 ${MBSYNC_IMAP_CONNECT}
 User ${BRIDGE_USER}
 PassCmd "cat /run/secrets/bridge_pass"
-SSLType IMAPS
+TLSType IMAPS
 CertificateFile /tmp/mbsync/bridge-cert.pem
 
 # Remote store — maps IMAPAccount to a named store for use in Channel.

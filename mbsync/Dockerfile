@@ -1,7 +1,7 @@
 # =============================================================================
 # mbsync — real-time incremental email sync from ProtonBridge to Maildir
 # =============================================================================
-FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587
+FROM debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f
 
 # socat relays the IMAP connection to the Bridge app on the host through
 # mbsync's Tunnel (BRIDGE_CERT_HOST, see entrypoint.sh).

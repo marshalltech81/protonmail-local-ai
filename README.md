@@ -169,6 +169,14 @@ Claude Desktop. Codex connects directly, with
 [Connect an MCP client](docs/setup.md#7-connect-an-mcp-client) for the
 details and caveats.
 
+**Upgrading to the isync 1.5.1 mbsync image:** folders whose names
+have a non-ASCII character or `&` move to a new directory name, and
+would be downloaded and indexed a second time. Check and migrate them
+first, by renaming, never deleting: a folder already gone from Proton
+exists only in the Maildir. See
+[the upgrade note](docs/setup.md) ("Upgrading to the isync 1.5.1 mbsync
+image").
+
 **Upgrading from a release that served `/sse`:** the legacy SSE
 transport was removed. Change client URLs from `/sse` to `/mcp`, and
 remove `MCP_TRANSPORT=sse` or `MCP_TRANSPORT=dual` from `.env` and from

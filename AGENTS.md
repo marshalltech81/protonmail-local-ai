@@ -244,8 +244,9 @@ Important facts:
   credentials and updates are managed in the app. `docker-compose.yml`
   sets mbsync's `BRIDGE_HOST=host.docker.internal` and
   `BRIDGE_CERT_HOST=127.0.0.1`. The app's certificate names only
-  `127.0.0.1` and isync 1.4.4 checks Bridge's self-signed CA certificate
-  against `Host`, so the entrypoint keeps `Host 127.0.0.1` and connects
+  `127.0.0.1` and isync (1.5.1 in the image) checks Bridge's self-signed
+  CA certificate against `Host`, so the entrypoint keeps `Host 127.0.0.1`
+  and connects
   through an isync `Tunnel` (`socat`); implicit TLS and verification run
   end to end. Because the app's loopback port can be held by another
   local account while the app is down, mbsync never trusts on first use:

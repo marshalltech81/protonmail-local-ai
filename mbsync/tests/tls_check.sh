@@ -161,7 +161,7 @@ IMAPAccount check
 ${connection}
 User synthetic@example.com
 PassCmd "echo synthetic"
-SSLType IMAPS
+TLSType IMAPS
 CertificateFile /work/${certfile}
 
 IMAPStore check-remote
@@ -217,7 +217,10 @@ else
 fi
 docker rm -f "$STUB" >/dev/null
 
-# 1. Bridge down at start, then up.
+# 1. Bridge down at start, then up. The rendered template must load
+# without a deprecation notice: isync writes it to stderr on every run,
+# where it would count as another error and turn the tolerated far-side
+# failure (#276) into a failed sync.
 start_mbsync "$FP_A"
 if wait_for_log "$MBSYNC" "Waiting for ProtonBridge IMAP" && sleep 4 \
     && [[ "$(docker inspect -f '{{.State.Running}}' "$MBSYNC")" == "true" ]]; then
@@ -226,7 +229,8 @@ if wait_for_log "$MBSYNC" "Waiting for ProtonBridge IMAP" && sleep 4 \
         && wait_for_log "$MBSYNC" "Starting sync loop" \
         && [[ -s "$WORK/maildir/.mbsync-last-sync.json" ]] \
         && wait_for_log "$STUB" "stub: login over TLS" \
-        && ! log_has "$MBSYNC" "Initial sync returned a non-zero status"; then
+        && ! log_has "$MBSYNC" "Initial sync returned a non-zero status" \
+        && ! log_has "$MBSYNC" "notice: .* is deprecated"; then
         pass "waits for an unavailable Bridge, then pins and syncs over implicit TLS"
     else
         fail "waits for an unavailable Bridge, then pins and syncs over implicit TLS"
