@@ -726,18 +726,16 @@ def _pack_spans(
     # True while ``current`` holds only the overlap seed of the last close.
     seed_only = False
 
-    def close() -> list[_Span]:
+    def close() -> None:
         """Close ``current``, seed the next group with its overlap tail."""
         nonlocal current, current_tokens, current_rendered, seed_only
         if not current:
-            return []
+            return
         groups.append(current)
-        overlap = _overlap_tail(current, overlap_tokens)
-        current = list(overlap)
+        current = list(_overlap_tail(current, overlap_tokens))
         seed_only = bool(current)
         current_tokens = sum(estimate_tokens(s.text) for s in current)
         current_rendered = current_tokens + sum(gap_tokens[s.start] for s in current[1:])
-        return overlap
 
     prev_end: int | None = None
     for span in spans:
