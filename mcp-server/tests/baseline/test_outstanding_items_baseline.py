@@ -329,8 +329,11 @@ def test_the_new_year_boundary_is_utc_unless_the_bound_has_an_offset(tools: dict
     (row,) = [m for m in page["messages"] if m["message_id"] == _mid("t65.1")]
     assert row["sent_at"] == "2026-01-01T02:30:00+00:00"
     assert row["occurred_at"] is None
-    assert "t65.1" in _listed(_query_all(tools, sender=AVERY, date_from="2026-01-01"))
+    utc_day = _query_all(tools, sender=AVERY, date_from="2026-01-01")
+    assert utc_day[0]["date_bounds"]["date_from"] == "2026-01-01T00:00:00+00:00"
+    assert "t65.1" in _listed(utc_day)
     new_york = _query_all(tools, sender=AVERY, date_from="2026-01-01T00:00:00-05:00")
+    assert new_york[0]["date_bounds"]["date_from"] == "2026-01-01T05:00:00+00:00"
     assert "t65.1" not in _listed(new_york)
 
 

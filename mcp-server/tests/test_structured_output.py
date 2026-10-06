@@ -202,6 +202,80 @@ class TestQueryMessages:
         ]
 
 
+class TestDateBoundsEcho:
+    """Each date-filtered tool echoes the UTC instants its bounds resolved
+    to (#802): a date-only bound is a UTC day, an offset bound is the
+    instant it names. m1 was sent at 09:00 UTC on 2024-01-10, which is
+    04:00 in New York, so it is inside the UTC day but before 05:00
+    New York time."""
+
+    def test_query_messages_date_only_bound_is_the_utc_day(self, messages_db):
+        page = _call(_server(messages_db), "query_messages", date_from="2024-01-10")
+        assert page["date_bounds"] == {
+            "date_from": "2024-01-10T00:00:00+00:00",
+            "date_to": None,
+        }
+        assert "m1" in [m["message_id"] for m in page["messages"]]
+
+    def test_query_messages_offset_bound_is_converted_to_utc(self, messages_db):
+        server = _server(messages_db)
+        args = {"date_from": "2024-01-10T05:00:00-05:00", "date_to": "2024-01-31"}
+        page = _call(server, "query_messages", **args)
+        assert page["date_bounds"] == {
+            "date_from": "2024-01-10T10:00:00+00:00",
+            "date_to": "2024-01-31T23:59:59.999999+00:00",
+        }
+        assert "m1" not in [m["message_id"] for m in page["messages"]]
+        text = _wire(server, "query_messages", args).content[0].text
+        assert (
+            "Date bounds (UTC): from 2024-01-10T10:00:00+00:00 "
+            "to 2024-01-31T23:59:59.999999+00:00" in text
+        )
+
+    def test_no_date_filter_echoes_null(self, messages_db):
+        server = _server(messages_db)
+        assert _call(server, "query_messages", sender="Jane")["date_bounds"] is None
+        found = _call(server, "search_emails", query="budget", mode="keyword")
+        assert found["date_bounds"] is None
+        assert _call(server, "search_attachments", query="zzzz")["date_bounds"] is None
+
+    def test_search_emails_echoes_the_bounds(self, messages_db):
+        server = _server(messages_db)
+        same_day = _call(
+            server, "search_emails", query="budget", mode="keyword", date_to="2024-01-10"
+        )
+        assert same_day["date_bounds"] == {
+            "date_from": None,
+            "date_to": "2024-01-10T23:59:59.999999+00:00",
+        }
+        assert [r["thread_id"] for r in same_day["results"]] == ["t1"]
+        args = {"query": "budget", "mode": "keyword", "date_to": "2024-01-10T03:00:00-05:00"}
+        before = _call(server, "search_emails", **args)
+        assert before["date_bounds"]["date_to"] == "2024-01-10T08:00:00+00:00"
+        assert before["results"] == []
+        text = _wire(server, "search_emails", args).content[0].text
+        assert "Date bounds (UTC): to 2024-01-10T08:00:00+00:00" in text
+
+    def test_search_emails_unmatched_from_name_still_echoes(self, messages_db):
+        server = _server(messages_db)
+        args = {"query": "budget", "from_name": "Nobody Known", "date_from": "2024-01-10"}
+        out = _call(server, "search_emails", **args)
+        assert out["date_bounds"]["date_from"] == "2024-01-10T00:00:00+00:00"
+        text = _wire(server, "search_emails", args).content[0].text
+        assert "Date bounds (UTC): from 2024-01-10T00:00:00+00:00" in text
+
+    def test_search_attachments_echoes_the_bounds(self, attachments_db):
+        server = _server(attachments_db)
+        args = {"query": "zzzz-no-match", "date_from": "2024-01-10T00:00:00+05:30"}
+        out = _call(server, "search_attachments", **args)
+        assert out["date_bounds"] == {
+            "date_from": "2024-01-09T18:30:00+00:00",
+            "date_to": None,
+        }
+        text = _wire(server, "search_attachments", args).content[0].text
+        assert "Date bounds (UTC): from 2024-01-09T18:30:00+00:00" in text
+
+
 @pytest.mark.parametrize(
     ("name", "args", "key"),
     [

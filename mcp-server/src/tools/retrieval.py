@@ -40,6 +40,8 @@ from .outputs import (
     ReapedMessage,
     ThreadMessage,
     clip,
+    date_bounds,
+    describe_date_bounds,
     listed_message,
     message_headers,
     reaped_source,
@@ -798,7 +800,10 @@ def register_retrieval_tools(server, db):
                        message's time: its delivery date (occurred_at),
                        else its send date (sent_at).
             date_to: ISO 8601 upper bound, inclusive; a date-only value
-                     covers the whole day (UTC).
+                     covers the whole day (UTC). For either bound in
+                     the user's time zone, give an offset
+                     ("2026-01-01T00:00:00-05:00"). The response's
+                     ``date_bounds`` echoes the UTC instants applied.
             has_attachments: True for messages with attachments, False
                              for messages without.
             authority_class: Messages whose sender the operator's rules
@@ -836,7 +841,7 @@ def register_retrieval_tools(server, db):
         limit = clamp_int(limit, default=25, minimum=1, maximum=_MAX_QUERY_LIMIT)
         # Reject a bad date range before any retrieval work.
         try:
-            validate_date_range(date_from, date_to)
+            bounds = date_bounds(*validate_date_range(date_from, date_to))
         except InvalidFilterError as e:
             log.warning("query_messages rejected invalid %s", e.field_name)
             raise ToolError(f"Error: {e}") from e
@@ -858,6 +863,7 @@ def register_retrieval_tools(server, db):
         uses = _filter_uses(args)
         output = QueryMessagesOutput(
             filters=uses,
+            date_bounds=bounds,
             total_matches=page.total_matches,
             returned=len(page.messages),
             offset=page.offset,
@@ -865,7 +871,10 @@ def register_retrieval_tools(server, db):
             next_cursor=page.next_cursor,
             messages=[listed_message(m) for m in page.messages],
         )
-        lines = [f"Query: {_describe_filters(uses)}", f"total_matches: {page.total_matches}"]
+        lines = [f"Query: {_describe_filters(uses)}"]
+        if bounds_line := describe_date_bounds(bounds):
+            lines.append(bounds_line)
+        lines.append(f"total_matches: {page.total_matches}")
         if not page.messages:
             lines.append("returned: 0")
             lines.append("has_more: false")
