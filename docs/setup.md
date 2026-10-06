@@ -8,6 +8,13 @@
   Proton plan)
 - Claude Desktop installed
 - Git configured with SSH key for GitHub
+- Full-disk encryption on the Mac (FileVault, in System Settings >
+  Privacy & Security). The stack stores your decrypted mail, its search
+  index and sync state as unencrypted files; FileVault is what protects
+  them on a lost or stolen machine. OrbStack and Docker Desktop keep the
+  Docker volumes inside a virtual-machine disk image on the Mac's own
+  disk, so FileVault covers them too. See `docs/architecture.md`, "At
+  rest (on the host's disk)".
 
 ### Platform support
 

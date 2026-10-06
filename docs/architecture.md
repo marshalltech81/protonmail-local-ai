@@ -1785,8 +1785,10 @@ columns are populated lazily on the next reindex of the file.
 
 ## Privacy Model
 
-Three layers, each with its own boundary. The README has the operator-facing
-walkthrough; the table below is the per-operation reference.
+Three layers, each with its own boundary, plus the host's disk, where
+everything is stored unencrypted (see At rest). The README has the
+operator-facing walkthrough; the tables below are the per-operation
+reference.
 
 ### Storage and processing layer (always local)
 
@@ -1796,6 +1798,43 @@ walkthrough; the table below is the per-operation reference.
 | Vector index | ✅ (SQLite) | Never |
 | Keyword search | ✅ (SQLite FTS5) | Never |
 | Send/Move/Flag | Disabled by default | Never |
+
+### At rest (on the host's disk)
+
+Bridge decrypts mail locally, and this project then keeps it as plain
+files. Proton's server-side protections do not cover these copies, and
+the project adds no encryption of its own:
+
+| Data | Where | Stored |
+|---|---|---|
+| Every message as an `.eml` file, attachments included | `maildir-volume` | Unencrypted |
+| The index: thread and message text, chunks, extracted attachment text, participants, vectors | `sqlite-volume` (`mail.db` and its WAL) | Unencrypted |
+| Sync state, folder names and the Bridge certificate pin | `mbsync-state` and the Maildir | Unencrypted |
+
+Protecting them is the host's job, which makes it a setup requirement:
+
+- **Full-disk encryption** (FileVault on macOS). OrbStack and Docker
+  Desktop keep Docker volumes inside a virtual-machine disk image on the
+  host's disk, so FileVault covers them. Without it, anyone with the
+  disk can read the mailbox.
+- **An unlocked, logged-in machine exposes them.** Code running as the
+  operator's user, or as root, can read the volumes. This is the same
+  trust condition as the MCP bearer token ("processes running as the
+  operator are trusted", see Endpoint authentication), so full-disk
+  encryption protects a powered-off or locked machine, not a running
+  session.
+- **Backups.** Any backup of these volumes, or of a Maildir archive
+  (`docs/troubleshooting.md`), holds the whole mailbox: keep it
+  encrypted (for example an encrypted Time Machine destination) and
+  never inside the checkout.
+- **Deleted mail.** A reap removes a message from the index, but its
+  text can persist below SQLite in free blocks, snapshots and backups
+  (see "Cascade on message removal" and "Deletion Reconciliation"
+  above).
+
+Application-level encryption of the index (for example SQLCipher) is
+out of scope: sqlite-vec would need to work with it, and the indexer
+would need its key without a person present.
 
 The MCP server switches off FastMCP's OpenTelemetry instrumentation at
 startup (`telemetry_mode = "off"`, overriding any `FASTMCP_TELEMETRY_MODE`),
