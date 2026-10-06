@@ -124,15 +124,26 @@ because "we couldn't determine the safety status of the request".
   open-ended external entities". The owner chose `openWorldHint: false`
   for every tool (2026-10-06), including the tools that send query
   text or mail excerpts to the operator-configured embed, rerank or
-  inference provider (`search_emails`, `get_evidence`,
-  `search_attachments` and the intelligence and experimental tools).
-  Their domain of interaction is the mailbox. The provider is a fixed
+  inference provider: `search_emails`, `get_evidence`, `ask_mailbox`,
+  `summarize_thread`, `extract_from_emails`, `brief_issue` and
+  `check_conclusion`. (`search_attachments` and the retrieval and
+  status tools call no provider; their results go only to the calling
+  client and its model.) Their domain of interaction is the mailbox. The provider is a fixed
   backend the operator chose, not an open-ended set of entities.
   Deriving the hint from whether a provider is local or remote was
   considered and not chosen. Data egress to a remote provider is
   disclosed elsewhere: by the startup `Privacy:` warnings and by the
   Privacy section of `make status` (see
   [Architecture](architecture.md#privacy-model)).
+
+The tools that send retrieved mail to a remote inference or rerank
+provider still advertise `readOnlyHint: true`. This is an owner
+decision, accepted as a stated risk on 2026-10-06: nothing in the
+mailbox or other state changes, and the provider is the operator's own
+chosen backend. As a result, a client that auto-approves read-only
+tools may send mail excerpts to that provider without prompting. That
+egress is disclosed by the startup `Privacy:` warnings and by
+`make status`.
 
 These cover both clients' requirements. OpenAI lists `readOnlyHint`,
 `destructiveHint` and `openWorldHint` as required, and all three are
