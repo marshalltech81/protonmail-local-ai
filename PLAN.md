@@ -651,6 +651,22 @@ removed Bridge container are kept as history.
     the Maildir and index volumes in bulk for testing or analysis without
     the owner's consent for that run; analysis goes through the MCP
     tools in memory (AGENTS.md, "Do not export mail in bulk").
+27. **Default inference model (2026-10-05, #764, #805):** the default
+    `INFERENCE_MODEL` is `claude-sonnet-5-5`. The owner made the change
+    without the Sonnet 4.6 comparison the issue proposed. Unset token
+    settings take 16000 / 48000 (reply / window) in anthropic mode,
+    where thinking counts against the reply limit, and keep 1024 /
+    32768 otherwise, so a 32k local model still fits.
+28. **Structured outputs for the JSON tools (2026-10-05, #808, #809):**
+    in anthropic mode `extract_from_emails`, `brief_issue` and
+    `check_conclusion` send their reply schema as an Anthropic
+    structured-output format, behind `INFERENCE_STRUCTURED_OUTPUT`
+    (default on). A provider rejection is an error naming the setting,
+    with no retry without the format. Anthropic caches a schema for up
+    to 24 hours, so the extraction schema carries neutral keys
+    (`f1`, `f2`, …) and never a caller's field name. Schemas over
+    Anthropic's measured limits (more than 8 fields, or a type list
+    mixing an array) are sent as plain JSON. openai mode is #807.
 
 ## Notes for Agents
 
