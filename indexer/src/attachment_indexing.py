@@ -31,13 +31,16 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from threading import Lock
 
 from .chunker import MessageChunk, chunk_message
 from .database import Database
 from .extractors import (
+    OCR_DISABLED_ERROR,
     SCANNED_PDF_OCR_DISABLED_ERROR,
     STATUS_EMPTY,
     STATUS_FAILED,
@@ -54,6 +57,64 @@ from .extractors import (
 from .parser import Attachment
 
 log = logging.getLogger("indexer.attachments")
+
+# Outcomes the periodic INFO aggregate counts (#871): the extraction
+# statuses, with ``unsupported`` for want of OCR split out as
+# ``ocr_disabled``.
+ATTACHMENT_OUTCOMES: tuple[str, ...] = (
+    STATUS_SUCCESS,
+    STATUS_FAILED,
+    STATUS_UNSUPPORTED,
+    STATUS_TOO_LARGE,
+    "ocr_disabled",
+    STATUS_EMPTY,
+)
+
+
+class AttachmentOutcomeCounts:
+    """Attachment occurrences by outcome since the last ``drain``.
+
+    Every occurrence ``prepare_attachment_writes`` resolves is counted,
+    whether extracted now or served from the cache or the batch
+    (``cached`` counts the latter too), so the INFO line the indexer
+    logs with each timing summary shows how much of the mail's
+    attachments is searchable. Per-attachment lines would flood the
+    log; ``failed`` extractions also log their own WARNING. Counts
+    only: no filename, type or text.
+    """
+
+    def __init__(self) -> None:
+        self._counts: Counter[str] = Counter()
+        self._lock = Lock()
+
+    def record(self, status: str, error: str | None, *, cached: bool) -> None:
+        outcome = status
+        if status == STATUS_UNSUPPORTED and (error or "").startswith(OCR_DISABLED_ERROR):
+            outcome = "ocr_disabled"
+        with self._lock:
+            self._counts[outcome] += 1
+            if cached:
+                self._counts["cached"] += 1
+
+    def drain(self) -> dict[str, int]:
+        """Return every outcome's count plus ``cached``, and reset them."""
+        with self._lock:
+            counts, self._counts = self._counts, Counter()
+        return {name: counts[name] for name in (*ATTACHMENT_OUTCOMES, "cached")}
+
+
+attachment_outcomes = AttachmentOutcomeCounts()
+
+
+def format_attachment_outcomes(counts: dict[str, int]) -> str:
+    """One log line for ``AttachmentOutcomeCounts.drain()``'s result, or
+    an empty string when no attachment was seen."""
+    total = sum(counts[name] for name in ATTACHMENT_OUTCOMES)
+    if not total:
+        return ""
+    parts = [f"attachments n={total}"]
+    parts.extend(f"{name}={counts[name]}" for name in (*ATTACHMENT_OUTCOMES, "cached"))
+    return " ".join(parts)
 
 
 def attachment_occurrence_id(
@@ -240,6 +301,7 @@ def _resolve_extracted_text(
         or _unsupported_still_holds(pending.error, attachment, ocr_enabled)
     ):
         text = pending.text if pending.status == STATUS_SUCCESS else None
+        attachment_outcomes.record(pending.status, pending.error, cached=True)
         return text, pending.status, pending
 
     cached = db.get_attachment_extraction(attachment.content_hash)
@@ -263,6 +325,9 @@ def _resolve_extracted_text(
         # return ``None`` text so the caller skips chunking but the
         # apply phase also skips re-persisting an unchanged row.
         text = cached["extracted_text"] if cached["extraction_status"] == STATUS_SUCCESS else None
+        attachment_outcomes.record(
+            cached["extraction_status"], cached["extraction_error"], cached=True
+        )
         return text, cached["extraction_status"], None
 
     result = extract_attachment(
@@ -280,6 +345,7 @@ def _resolve_extracted_text(
     )
     if batch_extractions is not None:
         batch_extractions[attachment.content_hash] = result
+    attachment_outcomes.record(result.status, result.error, cached=False)
     text = result.text if result.status == STATUS_SUCCESS else None
     return text, result.status, result
 
@@ -347,7 +413,8 @@ def prepare_attachment_writes(
     if status != STATUS_SUCCESS or not text:
         # No usable text for chunking. Still searchable by filename / MIME
         # via the FTS row written in apply. ``unsupported`` and ``too_large``
-        # log at debug because they are common (zip files, huge backups).
+        # log at debug because they are common (zip files, huge backups);
+        # the periodic aggregate counts them at INFO (#871).
         if status in {STATUS_UNSUPPORTED, STATUS_TOO_LARGE}:
             log.debug("attachment status=%s — no chunks", status)
         return AttachmentWritePlan(

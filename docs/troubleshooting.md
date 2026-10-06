@@ -973,6 +973,34 @@ thread) is not a token limit: no setting changes it, so it logs no
 warning. It is counted as `evidence_capped_threads` on the call's
 `mcp.timings` line instead.
 
+## Attachment text missing from search
+
+An attachment whose text could not be extracted is still indexed by
+filename and type, but its contents are not searchable. The indexer
+logs these outcomes with counts, extractor names and exception types
+only, never filenames or text (`make logs`):
+
+- `extractor <module> failed (dispatch_via=<mime|extension|...>):
+  <ExceptionType>` (WARNING), once per extraction that fails: an
+  encrypted PDF that needs a password, a Tesseract error or timeout, a
+  DOCX or XLSX the parser rejects, or (`zip uncompressed-size cap
+  exceeded`) a DOCX or XLSX that would decompress past its cap. Many of
+  these at once usually means the OCR toolchain or a parser library is
+  broken, not the mail. A failed result is cached for 7 days, then
+  retried when the same bytes arrive again.
+- `pdf OCR capped at <N> of <M> scanned pages` (WARNING): a scanned
+  PDF had more pages without a text layer than `INDEXER_OCR_MAX_PAGES`;
+  the pages past the cap are not read. Raising the cap applies only to
+  PDFs extracted afterwards, since the result is cached.
+- `attachments n=<total> success= failed= unsupported= too_large=
+  ocr_disabled= empty= cached=` (INFO), with each timing summary (about
+  every 25 messages): the attachments seen since the previous line, by
+  outcome. `cached` counts those served from the extraction cache
+  instead of extracted again. `unsupported` is a type no extractor
+  reads, `too_large` is over `INDEXER_ATTACHMENT_MAX_BYTES`, and
+  `ocr_disabled` is an image or scanned PDF skipped while
+  `INDEXER_OCR_ENABLED=false` (re-extracted once OCR is turned on).
+
 ## Claude Desktop doesn't see the tools
 
 1. Verify the MCP server is running: `docker compose ps`

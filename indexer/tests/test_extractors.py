@@ -195,6 +195,93 @@ class TestSafetyGates:
         assert result.extractor == "text@2"
 
 
+class TestFailedOutcomesAreLogged:
+    """#871: a ``failed`` extraction drops the attachment out of search,
+    so it logs a WARNING naming the extractor module and the exception
+    type; never the filename, the member names or the exception text."""
+
+    def test_extractor_exception_logs_a_warning(self, monkeypatch, caplog):
+        caplog.set_level("INFO")
+
+        def fake_safe_import(module_name):
+            def boom(payload, **opts):
+                raise ValueError("SYNTHETIC_EXC_MARKER")
+
+            return boom
+
+        monkeypatch.setattr("src.extractors._safe_import", fake_safe_import)
+        monkeypatch.setattr("src.extractors._IMPORT_CACHE", {})
+
+        result = extract(
+            content_type="text/plain",
+            filename="SYNTHETIC_FILENAME_MARKER.txt",
+            payload=b"SYNTHETIC_TEXT_MARKER",
+        )
+
+        assert result == ExtractionResult(
+            status=STATUS_FAILED, extractor="text@2", text=None, error="ValueError"
+        )
+        [record] = [r for r in caplog.records if r.name == "indexer.extractor"]
+        assert record.levelname == "WARNING"
+        assert record.getMessage() == "extractor text failed (dispatch_via=mime): ValueError"
+        for marker in (
+            "SYNTHETIC_EXC_MARKER",
+            "SYNTHETIC_FILENAME_MARKER",
+            "SYNTHETIC_TEXT_MARKER",
+        ):
+            assert marker not in caplog.text
+
+    def test_zip_budget_failure_logs_a_warning(self, monkeypatch, caplog):
+        import io
+        import zipfile
+
+        caplog.set_level("INFO")
+        monkeypatch.setattr("src.extractors.ZIP_MAX_UNCOMPRESSED_BYTES", 4)
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr("SYNTHETIC_MEMBER_MARKER", b"<root>" * 50)
+
+        result = extract(
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            filename="SYNTHETIC_FILENAME_MARKER.xlsx",
+            payload=buf.getvalue(),
+        )
+
+        assert result == ExtractionResult(
+            status=STATUS_FAILED,
+            extractor="xlsx@4",
+            text=None,
+            error="zip member declares 300 uncompressed bytes (cap 4)",
+        )
+        [record] = [r for r in caplog.records if r.name == "indexer.extractor"]
+        assert record.levelname == "WARNING"
+        assert record.getMessage() == (
+            "extractor xlsx failed (dispatch_via=mime): zip uncompressed-size cap exceeded"
+        )
+        for marker in ("SYNTHETIC_MEMBER_MARKER", "SYNTHETIC_FILENAME_MARKER"):
+            assert marker not in caplog.text
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"content_type": "text/plain", "filename": "a.txt", "payload": b"words"},
+            {"content_type": "text/plain", "filename": "a.txt", "payload": b"   "},
+            {"content_type": "application/x-unknown", "filename": "a.bin", "payload": b"x"},
+            {"content_type": "text/plain", "filename": "a.txt", "payload": b"xx", "max_bytes": 1},
+            {
+                "content_type": "image/png",
+                "filename": "a.png",
+                "payload": b"x",
+                "ocr_enabled": False,
+            },
+        ],
+    )
+    def test_other_outcomes_log_no_failure_warning(self, caplog, kwargs):
+        caplog.set_level("INFO")
+        assert extract(**kwargs).status != STATUS_FAILED
+        assert "failed" not in caplog.text
+
+
 class TestEmptyExtraction:
     def test_extractor_returning_empty_text_reports_empty(self):
         # ``text`` extractor on whitespace-only payload yields a
@@ -2915,6 +3002,36 @@ class TestPdfPageLevelOcr:
         self._extract("d" + "s" * 30, max_ocr_pages=5)
         assert work["renders"] == [(2, 6)]
         assert work["ocr_calls"] == 5
+
+    def test_page_cap_logs_a_warning_with_the_counts(self, monkeypatch, tmp_path, caplog):
+        """#871: pages past the cap are never read, so the cap says so at
+        WARNING with counts only. The result is the same as before."""
+        caplog.set_level("INFO")
+        self._fake_ocr(monkeypatch, tmp_path)
+        result = extract(
+            content_type="application/pdf",
+            filename="SYNTHETIC_FILENAME_MARKER.pdf",
+            payload=self._pdf("d" + "s" * 30),
+            max_ocr_pages=5,
+        )
+        assert result.status == STATUS_SUCCESS
+        assert result.extractor == "pdf-ocr@4"
+        assert result.text is not None
+        assert [f"{self.SCANNED} {n}" in result.text for n in range(1, 7)] == [True] * 5 + [False]
+        [record] = [r for r in caplog.records if "OCR capped" in r.getMessage()]
+        assert record.levelname == "WARNING"
+        assert record.getMessage() == "pdf OCR capped at 5 of 30 scanned pages"
+        assert "SYNTHETIC_FILENAME_MARKER" not in caplog.text
+        assert self.SCANNED not in caplog.text
+
+    @pytest.mark.parametrize("layout, cap", [("sss", 3), ("sss", 20), ("s" * 30, 0), ("dd", 1)])
+    def test_no_cap_warning_when_every_scanned_page_is_read(
+        self, monkeypatch, tmp_path, caplog, layout, cap
+    ):
+        caplog.set_level("INFO")
+        self._fake_ocr(monkeypatch, tmp_path)
+        self._extract(layout, max_ocr_pages=cap)
+        assert "OCR capped" not in caplog.text
 
     def test_page_cap_counts_pages_across_runs(self, monkeypatch, tmp_path):
         work = self._fake_ocr(monkeypatch, tmp_path)

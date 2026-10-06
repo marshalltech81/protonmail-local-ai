@@ -1250,3 +1250,128 @@ def test_payload_re_arriving_after_its_last_carrier_was_reaped_is_re_extracted(
 
     extract.assert_called_once()
     assert db.get_attachment_extraction(attachment.content_hash) is not None
+
+
+# ---------------------------------------------------------------------------
+# Outcome aggregate (#871)
+# ---------------------------------------------------------------------------
+
+
+def _failing_extractor(monkeypatch) -> None:
+    from src import extractors
+
+    def boom(payload, **opts):
+        raise ValueError("SYNTHETIC_EXC_MARKER")
+
+    monkeypatch.setattr(extractors, "_safe_import", lambda module_name: boom)
+
+
+# One attachment per outcome, with the plan status each produced before
+# the aggregate existed (pinned: counting must not change it).
+_OUTCOME_SHAPES: dict[str, tuple[dict[str, Any], dict[str, Any], str]] = {
+    "success": (dict(payload=b"SYNTHETIC_TEXT_MARKER words"), {}, STATUS_SUCCESS),
+    "empty": (dict(payload=b"   \n "), {}, STATUS_EMPTY),
+    "unsupported": (
+        dict(content_type="application/x-unknown", filename="SYNTHETIC_FILENAME_MARKER.bin"),
+        {},
+        STATUS_UNSUPPORTED,
+    ),
+    "too_large": (dict(payload=b"SYNTHETIC_TEXT_MARKER"), {"max_bytes": 4}, STATUS_TOO_LARGE),
+    "ocr_disabled": (
+        dict(content_type="image/png", filename="SYNTHETIC_FILENAME_MARKER.png"),
+        {"ocr_enabled": False},
+        STATUS_UNSUPPORTED,
+    ),
+    "failed": (dict(filename="SYNTHETIC_FILENAME_MARKER.txt"), {}, STATUS_FAILED),
+}
+
+
+class TestAttachmentOutcomeCounts:
+    """#871: the periodic INFO aggregate counts every attachment occurrence
+    by outcome, so a broken OCR toolchain or parser shows up as a rising
+    ``failed`` / ``ocr_disabled`` count rather than not at all."""
+
+    @staticmethod
+    def _run(tmp_path, monkeypatch, outcome):
+        attachment_kwargs, overrides, _ = _OUTCOME_SHAPES[outcome]
+        if outcome == "failed":
+            _failing_extractor(monkeypatch)
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        db = _setup_db_for_attachment(tmp_path)
+        attachment = _attachment(**attachment_kwargs)
+        return prepare_attachment_writes(db=db, **_kwargs(attachment, **overrides))
+
+    @staticmethod
+    def _zero() -> dict[str, int]:
+        return dict.fromkeys(attachment_indexing.ATTACHMENT_OUTCOMES, 0) | {"cached": 0}
+
+    @staticmethod
+    def _drain() -> dict[str, int]:
+        return attachment_indexing.attachment_outcomes.drain()
+
+    def test_outcome_names_are_fixed(self):
+        assert attachment_indexing.ATTACHMENT_OUTCOMES == (
+            "success",
+            "failed",
+            "unsupported",
+            "too_large",
+            "ocr_disabled",
+            "empty",
+        )
+
+    def test_each_outcome_is_counted_once(self, tmp_path, monkeypatch, caplog):
+        caplog.set_level("DEBUG")
+        for outcome, (_, _, status) in _OUTCOME_SHAPES.items():
+            self._drain()
+            plan = self._run(tmp_path / outcome, monkeypatch, outcome)
+            assert plan.status == status
+            assert self._drain() == self._zero() | {outcome: 1}
+        for marker in (
+            "SYNTHETIC_FILENAME_MARKER",
+            "SYNTHETIC_TEXT_MARKER",
+            "SYNTHETIC_EXC_MARKER",
+        ):
+            assert marker not in caplog.text
+
+    def test_drain_resets_the_counts(self, tmp_path, monkeypatch):
+        self._drain()
+        self._run(tmp_path, monkeypatch, "success")
+        assert self._drain()["success"] == 1
+        assert self._drain() == self._zero()
+
+    def test_cache_hits_and_batch_reuse_count_as_cached(self, tmp_path):
+        self._drain()
+        db = _setup_db_for_attachment(tmp_path)
+        attachment = _attachment(b"cached words")
+        batch: dict[str, ExtractionResult] = {}
+        # Extracted, then reused from the batch before it commits.
+        for _ in range(2):
+            plan = prepare_attachment_writes(db=db, batch_extractions=batch, **_kwargs(attachment))
+        _embed_new_chunks(
+            plan, db=db, claimant_id="msg@x", embedder=make_mock_embedder([0.1] * EMBEDDING_DIM)
+        )
+        with db.transaction():
+            apply_attachment_writes(plan=plan, claimant_id="msg@x", thread_id="thread-x", db=db)
+        # Served from the committed cache.
+        prepare_attachment_writes(db=db, **_kwargs(attachment))
+        assert self._drain() == self._zero() | {"success": 3, "cached": 2}
+
+    def test_cached_ocr_disabled_row_counts_as_ocr_disabled(self, tmp_path):
+        self._drain()
+        db = _setup_db_for_attachment(tmp_path)
+        attachment = _attachment(b"png bytes", content_type="image/png", filename="a.png")
+        for _ in range(2):
+            plan = prepare_attachment_writes(db=db, **_kwargs(attachment, ocr_enabled=False))
+            with db.transaction():
+                apply_attachment_writes(plan=plan, claimant_id="msg@x", thread_id="thread-x", db=db)
+        assert self._drain() == self._zero() | {"ocr_disabled": 2, "cached": 1}
+
+    def test_summary_line(self):
+        counts = self._zero() | {"success": 3, "failed": 1, "ocr_disabled": 2, "cached": 4}
+        assert attachment_indexing.format_attachment_outcomes(counts) == (
+            "attachments n=6 success=3 failed=1 unsupported=0 too_large=0 "
+            "ocr_disabled=2 empty=0 cached=4"
+        )
+
+    def test_no_summary_line_without_attachments(self):
+        assert attachment_indexing.format_attachment_outcomes(self._zero()) == ""

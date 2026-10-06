@@ -18,9 +18,9 @@ Two paths share one entry point:
 The OCR fallback is gated by ``ocr_enabled`` and bounded by
 ``max_ocr_pages``, counted over the pages selected for OCR, so a
 500-page scanned book attachment does not monopolise CPU. Pages beyond
-the cap are never rendered, and the truncation is silent: nothing is
-logged and nothing is recorded. If the pages within the cap yield
-text, the dispatcher records an ordinary ``success`` that cannot be
+the cap are never rendered; the truncation logs a WARNING with the
+counts (#871) but is not recorded. If the pages within the cap yield
+text, the dispatcher caches an ordinary ``success`` that cannot be
 told apart from a complete extraction; if they yield none, the usual
 ``empty`` (or short digital-text ``success``) applies. The result is
 cached by content hash, so raising the cap later does not re-extract a
@@ -114,7 +114,9 @@ def extract(
     # The pages to OCR: those whose own text layer is under the floor,
     # first ``max_ocr_pages`` of them.
     ocr_pages = [i for i, text in enumerate(digital_pages) if len(text) < _MIN_DIGITAL_CHARS]
-    if max_ocr_pages > 0:
+    if 0 < max_ocr_pages < len(ocr_pages):
+        # The pages past the cap are never read (#871).
+        log.warning("pdf OCR capped at %d of %d scanned pages", max_ocr_pages, len(ocr_pages))
         ocr_pages = ocr_pages[:max_ocr_pages]
     if not ocr_pages:
         return digital_text, "pdf-digital"
@@ -135,7 +137,7 @@ def extract(
         log.warning("PDF OCR fallback failed: %s", type(exc).__name__)
         if len(digital_text) >= _MIN_DIGITAL_CHARS:
             # A mixed PDF keeps its digital text, as before page-level
-            # OCR; its unread pages are the same silent loss as the cap.
+            # OCR; its unread pages are lost, as past the cap.
             return digital_text, "pdf-digital"
         # The digital text layer was below the usable threshold, so
         # swallowing the failure would cache the attachment as empty /

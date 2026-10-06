@@ -42,6 +42,8 @@ from watchdog.observers import Observer
 from .attachment_indexing import (
     AttachmentWritePlan,
     apply_attachment_writes,
+    attachment_outcomes,
+    format_attachment_outcomes,
     prepare_attachment_writes,
     reruns_once_ocr_is_on,
     too_large_fits,
@@ -712,6 +714,16 @@ class MaildirHandler(FileSystemEventHandler):
 # heartbeat, which is refreshed per message, around each embed call and
 # after each attachment page read.
 TIMING_LOG_EVERY = 25
+
+
+def _log_attachment_outcomes() -> None:
+    """Log the attachments seen since the last call by outcome, and reset
+    the counts; nothing when there were none. Logged with each timing
+    summary, so failed or skipped extractions are visible at INFO without
+    a line per attachment (#871)."""
+    line = format_attachment_outcomes(attachment_outcomes.drain())
+    if line:
+        log.info(line)
 
 
 def _iter_maildir_messages(root: Path):
@@ -1727,6 +1739,7 @@ def _drain_queue_batched(
             line = format_summary(timing_aggregator.summary())
             if line:
                 log.info(line)
+            _log_attachment_outcomes()
 
     return processed
 
@@ -2124,6 +2137,7 @@ def initial_index(
     final_line = format_summary(timing_aggregator.summary())
     if final_line:
         log.info(final_line)
+    _log_attachment_outcomes()
     log.info("Initial index complete: %d job(s) processed.", processed)
 
 
@@ -2433,6 +2447,7 @@ def main():
                             depth["queued"],
                             depth["dead"],
                         )
+                    _log_attachment_outcomes()
                     drained_since_log = 0
             except Exception as e:
                 log.error("queue drain failed: %s", _stage_error(e))

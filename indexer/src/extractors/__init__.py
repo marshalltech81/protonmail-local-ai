@@ -350,6 +350,14 @@ def extract(
     if module_name in {"docx", "xlsx"}:
         zip_error = _validate_zip_payload(payload)
         if zip_error is not None:
+            # A ``failed`` row drops the attachment out of search, so it
+            # is visible at WARNING (#871); fixed text, as the error
+            # names only sizes.
+            log.warning(
+                "extractor %s failed (dispatch_via=%s): zip uncompressed-size cap exceeded",
+                module_name,
+                dispatch_via,
+            )
             return ExtractionResult(
                 status=STATUS_FAILED,
                 extractor=_stamp_extractor(module_name, module_name),
@@ -381,8 +389,9 @@ def extract(
         # the parent message. ``MemoryError`` / ``RecursionError`` are
         # excluded above precisely because they are not per-payload.
         # Parser exceptions quote the document (text, member names), so
-        # only the type is logged and persisted (#257).
-        log.debug(
+        # only the type is logged and persisted (#257). WARNING, since
+        # the attachment drops out of search (#871).
+        log.warning(
             "extractor %s failed (dispatch_via=%s): %s",
             module_name,
             dispatch_via,

@@ -3676,6 +3676,36 @@ class TestRequeueOcrDisabledExtractions:
         assert main._requeue_stale_extractions(db, queue) == 0
         assert self._queued(db) == {}
 
+    def test_drain_logs_the_attachment_outcome_aggregate(self, tmp_path, monkeypatch, caplog):
+        """#871: with the timing summary, every ``TIMING_LOG_EVERY``
+        messages, an INFO line counts the attachments by outcome, so
+        attachments skipped while OCR is off are visible at INFO. Counts
+        only: no filename reaches the log."""
+        from src import attachment_indexing
+
+        caplog.set_level("INFO")
+        attachment_indexing.attachment_outcomes.drain()
+        monkeypatch.setattr(main, "TIMING_LOG_EVERY", 1)
+        self._index_with_ocr_off(
+            tmp_path,
+            monkeypatch,
+            {
+                "photo": (self._png(), "image/png", "SYNTHETIC_FILENAME_MARKER.png"),
+                "scan": (self._scanned_pdf(), "application/pdf", "SYNTHETIC_FILENAME_MARKER.pdf"),
+            },
+        )
+        lines = [r for r in caplog.records if r.getMessage().startswith("attachments n=")]
+        assert [(r.levelname, r.getMessage()) for r in lines] == [
+            (
+                "INFO",
+                "attachments n=2 success=0 failed=0 unsupported=0 too_large=0 "
+                "ocr_disabled=2 empty=0 cached=0",
+            )
+        ]
+        assert "SYNTHETIC_FILENAME_MARKER" not in caplog.text
+        # Drained by the line: the next summary starts from zero.
+        assert attachment_indexing.attachment_outcomes.drain()["ocr_disabled"] == 0
+
     def test_occurrence_that_would_not_rerun_is_not_requeued(self, tmp_path, monkeypatch):
         """Bytes cached "OCR disabled" from an image, carried only as
         ``.bin`` by a live message: reprocessing that message would serve
