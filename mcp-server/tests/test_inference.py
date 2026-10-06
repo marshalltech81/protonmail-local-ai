@@ -6,6 +6,7 @@ behavior is deterministic without hitting a live provider.
 """
 
 import asyncio
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -15,6 +16,7 @@ from src.lib.inference import (
     _AnthropicBackend,
     _OpenAIBackend,
 )
+from src.lib.security import ProviderResponseError
 
 
 def _openai_response(text: str) -> SimpleNamespace:
@@ -783,3 +785,131 @@ class TestAnthropicContentValidation:
 
     def test_text_is_returned(self):
         assert asyncio.run(self._backend("answer").complete("sys", "user")) == "answer"
+
+
+class TestStructuredOutput:
+    """#808: in anthropic mode a call that carries a JSON schema sends it
+    as ``output_config.format`` unless INFERENCE_STRUCTURED_OUTPUT is off;
+    openai mode never sends it (#807). A provider 400 on such a call is a
+    fixed-text error naming the setting, with no retry."""
+
+    _SCHEMA = {
+        "type": "object",
+        "properties": {"answer": {"type": "string"}},
+        "required": ["answer"],
+        "additionalProperties": False,
+    }
+
+    def _client(self, mode="anthropic", **kwargs):
+        return InferenceClient.create(
+            mode=mode,
+            base_url="http://h.invalid" if mode == "anthropic" else "http://h.invalid/v1",
+            model="synthetic-model",
+            api_key="sk-test",  # pragma: allowlist secret
+            **kwargs,
+        )
+
+    def _capture(self, client):
+        calls: list[dict] = []
+
+        async def fake_create(**kwargs):
+            calls.append(kwargs)
+            if client.mode == "anthropic":
+                return _anthropic_response('{"answer": "x"}')
+            return _openai_response('{"answer": "x"}')
+
+        if client.mode == "anthropic":
+            client._backend.client.messages.create = fake_create  # type: ignore[assignment]
+        else:
+            client._backend.client.chat.completions.create = fake_create  # type: ignore[assignment]
+        return calls
+
+    def test_anthropic_sends_the_schema_by_default(self):
+        client = self._client()
+        calls = self._capture(client)
+        asyncio.run(client.complete("sys", "user", json_schema=self._SCHEMA))
+        assert calls[0]["output_config"] == {
+            "format": {"type": "json_schema", "schema": self._SCHEMA}
+        }
+
+    def test_anthropic_call_without_a_schema_is_unchanged(self):
+        client = self._client()
+        calls = self._capture(client)
+        asyncio.run(client.complete("sys", "user"))
+        assert set(calls[0]) == {"model", "max_tokens", "system", "messages"}
+
+    def test_setting_off_sends_no_schema(self):
+        client = self._client(structured_output=False)
+        calls = self._capture(client)
+        asyncio.run(client.complete("sys", "user", json_schema=self._SCHEMA))
+        assert set(calls[0]) == {"model", "max_tokens", "system", "messages"}
+
+    def test_openai_mode_ignores_the_schema(self):
+        client = self._client(mode="openai")
+        calls = self._capture(client)
+        asyncio.run(client.complete("sys", "user", json_schema=self._SCHEMA))
+        assert set(calls[0]) == {"model", "messages", "max_tokens", "stream"}
+
+    @pytest.mark.parametrize(
+        ("mode", "kwargs", "expected"),
+        [
+            ("anthropic", {}, True),
+            ("anthropic", {"structured_output": True}, True),
+            ("anthropic", {"structured_output": False}, False),
+            ("openai", {}, False),
+            ("openai", {"structured_output": True}, False),
+        ],
+    )
+    def test_structured_output_flag(self, mode, kwargs, expected):
+        assert self._client(mode=mode, **kwargs).structured_output is expected
+
+    def _rejecting(self, client):
+        import anthropic
+        import httpx2
+
+        request = httpx2.Request("POST", "http://h.invalid/v1/messages")
+        response = httpx2.Response(400, request=request, json={"error": _MAIL_MARKER})
+        error = anthropic.BadRequestError(
+            f"rejected {_MAIL_MARKER}", response=response, body={"error": _MAIL_MARKER}
+        )
+        calls: list[dict] = []
+
+        async def fake_create(**kwargs):
+            calls.append(kwargs)
+            raise error
+
+        client._backend.client.messages.create = fake_create  # type: ignore[assignment]
+        return calls, error
+
+    def test_rejected_structured_request_names_the_setting(self, caplog):
+        caplog.set_level(logging.DEBUG)
+        client = self._client()
+        calls, _ = self._rejecting(client)
+        with pytest.raises(ProviderResponseError) as err:
+            asyncio.run(client.complete("sys", "user", json_schema=self._SCHEMA))
+        assert "INFERENCE_STRUCTURED_OUTPUT=false" in str(err.value)
+        assert _MAIL_MARKER not in str(err.value)
+        assert _MAIL_MARKER not in caplog.text
+        assert "BadRequestError: status=400" in caplog.text
+        # No silent retry without the format.
+        assert len(calls) == 1
+        # The SDK error, which can quote the request, is not chained.
+        assert err.value.__cause__ is None
+        assert err.value.__suppress_context__
+
+    def test_rejected_plain_request_is_not_rewritten(self):
+        import anthropic
+
+        client = self._client()
+        _, error = self._rejecting(client)
+        with pytest.raises(anthropic.BadRequestError) as err:
+            asyncio.run(client.complete("sys", "user"))
+        assert err.value is error
+
+    def test_rejection_with_the_setting_off_is_not_rewritten(self):
+        import anthropic
+
+        client = self._client(structured_output=False)
+        _, error = self._rejecting(client)
+        with pytest.raises(anthropic.BadRequestError):
+            asyncio.run(client.complete("sys", "user", json_schema=self._SCHEMA))

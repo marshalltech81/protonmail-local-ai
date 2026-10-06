@@ -232,12 +232,15 @@ def _int_env(name: str, default: int, minimum: int = 1) -> int:
     return value
 
 
-def _flag_env(name: str) -> bool:
-    """Read an on/off flag: unset, empty or ``false`` is off, ``true`` is
-    on (case-insensitive). Anything else raises ``ValueError`` so a typo
-    fails startup instead of silently leaving the flag off or on."""
+def _flag_env(name: str, default: bool = False) -> bool:
+    """Read an on/off flag: ``true`` is on and ``false`` off
+    (case-insensitive), unset or empty is ``default``. Anything else raises
+    ``ValueError`` so a typo fails startup instead of silently leaving the
+    flag off or on."""
     raw = os.environ.get(name, "").strip().lower()
-    if raw in {"", "false"}:
+    if raw == "":
+        return default
+    if raw == "false":
         return False
     if raw == "true":
         return True
@@ -352,6 +355,10 @@ INFERENCE_MAX_TOKENS = _int_env("INFERENCE_MAX_TOKENS", _DEFAULT_MAX_TOKENS, min
 # small local model's window; ``PromptBudget`` rejects a window with too
 # little room left for a prompt at startup.
 INFERENCE_CONTEXT_TOKENS = _int_env("INFERENCE_CONTEXT_TOKENS", _DEFAULT_CONTEXT_TOKENS, minimum=1)
+# In anthropic mode the JSON tools (extract_from_emails, brief_issue,
+# check_conclusion) send their reply schema as a structured-output format
+# (#808). Set false for a model or gateway without structured outputs.
+INFERENCE_STRUCTURED_OUTPUT = _flag_env("INFERENCE_STRUCTURED_OUTPUT", default=True)
 
 EMBED_MODE = _normalize_mode("EMBED_MODE", os.environ.get("EMBED_MODE", "openai"), _EMBED_MODES)
 EMBED_BASE_URL = _reject_url_userinfo("EMBED_BASE_URL", os.environ.get("EMBED_BASE_URL", ""))
@@ -648,6 +655,7 @@ def main():
             api_key=INFERENCE_API_KEY,
             max_tokens=INFERENCE_MAX_TOKENS,
             timeout_secs=INFERENCE_TIMEOUT_SECS,
+            structured_output=INFERENCE_STRUCTURED_OUTPUT,
         )
         _reject_url_userinfo("INFERENCE_BASE_URL", inference_client.base_url)
 

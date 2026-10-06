@@ -826,6 +826,233 @@ def _record_conforms(record: dict, schema: dict) -> bool:
     )
 
 
+# --- Structured outputs (#808) ---------------------------------------------
+#
+# In anthropic mode with INFERENCE_STRUCTURED_OUTPUT on, each per-thread
+# extraction call sends a strict JSON schema built from the caller's schema
+# and the reply is {"records": [<record>, ...]}. Structured outputs need
+# every object closed (additionalProperties false); every declared field is
+# required and nullable instead of optional.
+
+_SCALAR_TYPES = ("string", "number", "integer", "boolean")
+_NULLABLE_STRING = {"anyOf": [{"type": "string"}, {"type": "null"}]}
+# An array field's items: any JSON scalar. Nested caller item schemas are
+# not converted (one pass, no recursion).
+_ANY_SCALAR = {"anyOf": [*({"type": t} for t in _SCALAR_TYPES), {"type": "null"}]}
+# Keys that make a property without a ``type`` a structured shape rather
+# than a free value, which the conversion does not express.
+_STRUCTURE_KEYS = ("properties", "items", "anyOf", "oneOf", "allOf", "$ref")
+
+
+def _strict_field(declared: object) -> dict | None:
+    """The strict, nullable schema of one field declared with ``declared``
+    (a type name or a list of them), or None when it cannot be expressed:
+    an object, a non-string declaration, or a list naming something that
+    is not a JSON type. A single unknown name ("dollar amount") cannot be
+    checked, so any value passes today; it becomes a nullable string."""
+    names = declared if isinstance(declared, list) else [declared]
+    if not names or not all(isinstance(n, str) for n in names):
+        return None
+    if any(n not in _JSON_TYPE_CHECKS for n in names):
+        return _NULLABLE_STRING if len(names) == 1 else None
+    if "object" in names:
+        return None
+    if "array" in names and len(set(names) - {"array", "null"}) > 0:
+        return None  # an array mixed with another type: too large a grammar
+    branches = [
+        {"type": "array", "items": _ANY_SCALAR} if n == "array" else {"type": n}
+        for n in dict.fromkeys(names)
+        if n != "null"
+    ]
+    return {"anyOf": [*branches, {"type": "null"}]}
+
+
+def _strict_property(sub: object) -> dict | None:
+    """``_strict_field`` for one JSON Schema property. One level only: an
+    array's ``items`` is looked at, never walked."""
+    if not isinstance(sub, dict):
+        return None
+    if "type" not in sub:
+        if any(key in sub for key in _STRUCTURE_KEYS):
+            return None
+        return _NULLABLE_STRING  # only described (description, enum, ...)
+    items = sub.get("items")
+    if items is not None and not (isinstance(items, dict) and items.get("type") in _SCALAR_TYPES):
+        return None
+    return _strict_field(sub["type"])
+
+
+# Anthropic refuses a structured-output schema with more than 16
+# union-typed parameters (anyOf, or a list of types) with a 400; measured
+# 2026-10-05: 16 accepted, 18 refused.
+MAX_UNION_PARAMS = 16
+# It also refuses a schema whose compiled grammar is too large, a limit it
+# does not publish and that depends on the schema's shape (2026-10-05: 15
+# scalar fields accepted, 16 refused; 10 scalar and 3 array fields
+# refused). Every mix of up to 8 fields was accepted on Sonnet 5.5,
+# Sonnet 4.6 and Opus 5.5, except type lists mixing an array with another
+# type, which the conversion refuses; more fields are sent as before #808.
+MAX_STRUCTURED_FIELDS = 8
+
+
+def _union_param_count(schema: object) -> int:
+    """How many union-typed parameters ``schema`` has: nodes with an
+    ``anyOf`` or a list ``type``. One iterative pass over a schema the
+    server built, so a deep one cannot recurse."""
+    count = 0
+    stack = [schema]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dict):
+            if "anyOf" in node or isinstance(node.get("type"), list):
+                count += 1
+            stack.extend(node.values())
+        elif isinstance(node, list):
+            stack.extend(node)
+    return count
+
+
+def _strict_record_schema(schema: dict, limited: bool = True) -> dict | None:
+    """The strict schema of one record for the caller's ``schema``, or None
+    when it cannot be expressed strictly (the call is then sent without a
+    format, as before #808).
+
+    One bounded pass over the declared fields, in declaration order:
+    shorthand keys, or JSON Schema ``properties`` then any ``required``
+    names they lack (a required-only field becomes a nullable string). No
+    nested caller schema is walked. The record also carries the closed
+    ``_evidence`` object, one list of labels per field (empty for none;
+    not nullable, so it adds no union). With ``limited`` (the default),
+    a record over the provider's limits is None too: more than
+    ``MAX_STRUCTURED_FIELDS`` fields, or more than ``MAX_UNION_PARAMS``
+    union-typed parameters (each nullable field has one, an array field
+    two). The field count stops the pass as soon as it is exceeded."""
+    fields: dict[str, dict] = {}
+    if _is_json_schema(schema):
+        properties = schema.get("properties")
+        properties = properties if isinstance(properties, dict) else {}
+        for name, sub in properties.items():
+            converted = _strict_property(sub)
+            if converted is None:
+                return None
+            fields[name] = converted
+            if limited and len(fields) > MAX_STRUCTURED_FIELDS:
+                return None
+        required = schema.get("required")
+        for name in required if isinstance(required, list) else []:
+            if isinstance(name, str) and name not in fields:
+                fields[name] = _NULLABLE_STRING
+                if limited and len(fields) > MAX_STRUCTURED_FIELDS:
+                    return None
+    else:
+        for name, declared in schema.items():
+            converted = _strict_field(declared)
+            if converted is None:
+                return None
+            fields[name] = converted
+            if limited and len(fields) > MAX_STRUCTURED_FIELDS:
+                return None
+    if not fields:
+        return None  # a free-form object: nothing to hold the reply to
+    labels = {"type": "array", "items": {"type": "string"}}
+    evidence = {
+        "type": "object",
+        "properties": dict.fromkeys(fields, labels),
+        "required": list(fields),
+        "additionalProperties": False,
+    }
+    record = {
+        "type": "object",
+        "properties": {**fields, _EVIDENCE_FIELD: evidence},
+        "required": [*fields, _EVIDENCE_FIELD],
+        "additionalProperties": False,
+    }
+    if limited and _union_param_count(record) > MAX_UNION_PARAMS:
+        return None
+    return record
+
+
+def _strict_records_schema(schema: dict) -> tuple[dict, list[str]] | None:
+    """The reply schema of one structured extraction call,
+    ``{"records": [<record>, ...]}`` (the top level must be an object), and
+    the caller's field names; or None when the record cannot be expressed
+    strictly.
+
+    Anthropic caches a structured-output schema for up to 24 hours apart
+    from the prompt, so the schema sent names no caller field: field n
+    (in declaration order) is ``f<n>``, in the record and in its
+    ``_evidence``, and ``names[n - 1]`` is its caller name. The prompt
+    lists the mapping; ``_caller_keys`` maps a reply back."""
+    record = _strict_record_schema(schema)
+    if record is None:
+        return None
+    names = [name for name in record["properties"] if name != _EVIDENCE_FIELD]
+    keys = [f"f{n}" for n in range(1, len(names) + 1)]
+    properties = record["properties"]
+    evidence = properties[_EVIDENCE_FIELD]
+    wire_record = {
+        **record,
+        "properties": {
+            **{key: properties[name] for key, name in zip(keys, names, strict=True)},
+            _EVIDENCE_FIELD: {
+                **evidence,
+                "properties": {
+                    key: evidence["properties"][name] for key, name in zip(keys, names, strict=True)
+                },
+                "required": keys,
+            },
+        },
+        "required": [*keys, _EVIDENCE_FIELD],
+    }
+    wrapper = {
+        "type": "object",
+        "properties": {"records": {"type": "array", "items": wire_record}},
+        "required": ["records"],
+        "additionalProperties": False,
+    }
+    return wrapper, names
+
+
+def _caller_keys(item: object, names: list[str]) -> object:
+    """One structured reply record with its ``f<n>`` keys, and those of its
+    ``_evidence``, renamed to the caller's names. Anything else is
+    returned as it is, for the checks to judge."""
+    if not isinstance(item, dict):
+        return item
+    mapping = {f"f{n}": name for n, name in enumerate(names, start=1)}
+    renamed = {mapping.get(key, key): value for key, value in item.items()}
+    evidence = renamed.get(_EVIDENCE_FIELD)
+    if isinstance(evidence, dict):
+        renamed[_EVIDENCE_FIELD] = {mapping.get(k, k): v for k, v in evidence.items()}
+    return renamed
+
+
+def _schema_reserve_chars(schema: dict | None) -> int:
+    """Prompt characters to reserve for the system prompt Anthropic adds
+    when a structured-output schema is sent, billed as input. Measured
+    2026-10-05: always fewer tokens than the schema has characters (394
+    tokens for a 456-character schema, 2,075 for 2,589), so one token per
+    character, at ``CHARS_PER_TOKEN`` characters each. Nothing without a
+    schema."""
+    if schema is None:
+        return 0
+    return CHARS_PER_TOKEN * len(json.dumps(schema))
+
+
+def _drop_unrequired_nulls(record: dict, schema: dict) -> dict:
+    """A structured record with each null its caller's JSON Schema did not
+    require removed. The strict schema makes every field required and
+    nullable, so a null there stands for the omitted field, which
+    ``_record_conforms`` accepts, while a typed null would fail it. A null
+    in a required field is kept and still fails. Shorthand records are
+    unchanged: the shorthand check already passes a null."""
+    if not _is_json_schema(schema):
+        return record
+    required = schema.get("required")
+    kept = {n for n in required if isinstance(n, str)} if isinstance(required, list) else set()
+    return {k: v for k, v in record.items() if v is not None or k in kept}
+
+
 # Appended to a prose answer the model stopped writing at max_tokens.
 _TRUNCATED_NOTICE = (
     "\n\n[Answer cut off at the INFERENCE_MAX_TOKENS limit; raise it for a complete answer.]"
@@ -2001,7 +2228,11 @@ def _evidence_texts(threads: list[ThreadResult]) -> Iterator[str]:
 
 
 def _evidence_budget(
-    budget: PromptBudget, system: str, threads: list[ThreadResult], task: str
+    budget: PromptBudget,
+    system: str,
+    threads: list[ThreadResult],
+    task: str,
+    reserve_chars: int = 0,
 ) -> tuple[list[ThreadResult], int]:
     """The threads that fit, and their evidence budget, for a prompt
     built as ``_evidence_prompt`` + ``task`` under ``system``, with room
@@ -2018,7 +2249,8 @@ def _evidence_budget(
     (at most ``len(threads)`` renders, each of clipped headers only),
     until the rest fit; the caller records how many in
     ``EvidenceCoverage.threads_dropped``. Only when the top thread
-    alone does not fit does the request fail.
+    alone does not fit does the request fail. ``reserve_chars`` is room
+    kept for input the provider adds (``_schema_reserve_chars``).
     """
     kept = list(threads)
     while True:
@@ -2034,6 +2266,7 @@ def _evidence_budget(
             + len(_evidence_prompt(kept, [""] * len(kept), worst))
             + len(task)
             + REPAIR_RESERVE_CHARS
+            + reserve_chars
         )
         if fixed <= budget.prompt_chars or len(kept) == 1:
             break
@@ -2245,10 +2478,12 @@ def register_intelligence_tools(
     secret_values = list(secret_values or ())
     prompt_budget = prompt_budget or PromptBudget()
 
-    async def llm_complete(system: str, user: str) -> str:
+    async def llm_complete(system: str, user: str, json_schema: dict | None = None) -> str:
         count("inference_calls", 1)
         with stage("inference"):
-            return await inference_client.complete(system, user)
+            if json_schema is None:
+                return await inference_client.complete(system, user)
+            return await inference_client.complete(system, user, json_schema=json_schema)
 
     async def llm_complete_prose(system: str, user: str) -> str:
         """``llm_complete`` for prose answers: a reply cut off at
@@ -2921,6 +3156,24 @@ def register_intelligence_tools(
                 return output(["No matching emails found."])
 
             schema_str = json.dumps(schema, indent=2)
+            # Structured outputs (#808): the reply schema each call sends,
+            # or None for a request sent as before (the setting off, openai
+            # mode, or a schema the conversion cannot express strictly).
+            structured = (
+                _strict_records_schema(schema) if inference_client.structured_output else None
+            )
+            records_schema, field_names = structured if structured else (None, [])
+            # The prompt maps the schema's neutral keys to the caller's names.
+            field_keys = json.dumps({f"f{n}": name for n, name in enumerate(field_names, start=1)})
+            # Fixed text: structured outputs were on but not used.
+            schema_note = (
+                "Structured-output note: the schema declares a field structured outputs "
+                "cannot express (an object, a nested shape or a type list mixing an array), "
+                "or more than 8 fields, so the replies were requested "
+                "and read as plain JSON, without INFERENCE_STRUCTURED_OUTPUT's schema guarantee."
+                if inference_client.structured_output and records_schema is None
+                else ""
+            )
             # Threads whose answer says nothing about their data: cut off
             # at max_tokens, or not a JSON object / array of objects.
             # Counted apart from a valid ``null`` (or ``[]``) so a failure
@@ -2949,9 +3202,17 @@ def register_intelligence_tools(
                         f"Body:\n{body}"
                     )
                     + "\n\n"
-                    "Return a JSON object matching the schema, with its "
-                    f'"{_EVIDENCE_FIELD}" object naming the labels each value came from, '
-                    "or null if no relevant data found."
+                    + (
+                        'Return a JSON object {"records": [...]} holding one record per item '
+                        f'of relevant data, each matching the schema with its "{_EVIDENCE_FIELD}" '
+                        "object naming the labels each value came from; use null for a field "
+                        "with no value, and an empty records list if no relevant data found. "
+                        f"Record keys: {field_keys}"
+                        if records_schema is not None
+                        else "Return a JSON object matching the schema, with its "
+                        f'"{_EVIDENCE_FIELD}" object naming the labels each value came from, '
+                        "or null if no relevant data found."
+                    )
                 )
 
             # Each thread's evidence budget, sized so its complete prompt
@@ -2960,7 +3221,9 @@ def register_intelligence_tools(
             budgets = [
                 _text_budget(
                     prompt_budget,
-                    len(EXTRACT_SYSTEM) + len(render(thread, "")),
+                    len(EXTRACT_SYSTEM)
+                    + len(render(thread, ""))
+                    + _schema_reserve_chars(records_schema),
                     PER_THREAD_CHAR_BUDGET,
                     _evidence_texts([thread]),
                 )
@@ -2987,7 +3250,7 @@ def register_intelligence_tools(
                 user_prompt = render(thread, body)
 
                 try:
-                    result_str = await llm_complete(EXTRACT_SYSTEM, user_prompt)
+                    result_str = await llm_complete(EXTRACT_SYSTEM, user_prompt, records_schema)
                 except InferenceTruncatedError:
                     truncated += 1
                     continue
@@ -2997,6 +3260,18 @@ def register_intelligence_tools(
                 except json.JSONDecodeError:
                     unparseable += 1
                     continue
+                if records_schema is not None:
+                    # The reply is {"records": [...]}; an empty list is the
+                    # model's "no relevant data". Any other shape is no answer.
+                    wrapped = record.get("records") if isinstance(record, dict) else None
+                    if not isinstance(wrapped, list):
+                        unparseable += 1
+                        continue
+                    mapped = [_caller_keys(item, field_names) for item in wrapped]
+                    record = [
+                        _drop_unrequired_nulls(item, schema) if isinstance(item, dict) else item
+                        for item in mapped
+                    ]
                 # Accept both a single object and a JSON array of objects.
                 # The prompt asks for an object, but models occasionally
                 # return an array when the schema implies multiple items
@@ -3060,6 +3335,8 @@ def register_intelligence_tools(
                 if window_cut
                 else ""
             )
+            # The structured-output note goes wherever the evidence note does.
+            window_note = " ".join(note for note in (window_note, schema_note) if note)
             if failed:
                 reasons = []
                 if truncated:
