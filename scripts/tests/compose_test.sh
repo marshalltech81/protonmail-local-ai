@@ -40,6 +40,7 @@ render() {
     env -i PATH="$PATH" HOME="${HOME:-/tmp}" BRIDGE_USER="synthetic@example.com" \
         ${BRIDGE_IMAP_PORT:+BRIDGE_IMAP_PORT="$BRIDGE_IMAP_PORT"} \
         ${BRIDGE_CERT_FINGERPRINT:+BRIDGE_CERT_FINGERPRINT="$BRIDGE_CERT_FINGERPRINT"} \
+        ${GIT_COMMIT:+GIT_COMMIT="$GIT_COMMIT"} \
         docker compose --project-directory "$ROOT_DIR" --env-file /dev/null "${args[@]}" \
         config --format json >"$WORK/config.json" 2>"$WORK/compose.err" || {
         cat "$WORK/compose.err"
@@ -638,6 +639,25 @@ mbsync_keeps_its_hardening_and_no_port_is_exposed() {
     expect '.services.mbsync | has("extra_hosts") | not' || return 1
 }
 
+# Each image is built with the source commit it logs at startup (#887):
+# `make build` passes it, a plain `docker compose build` gets "unknown".
+every_image_is_built_with_the_source_commit() {
+    render "$BASE"
+    expect '[.services[] | .build.args.GIT_COMMIT == "unknown"] | all' || return 1
+    GIT_COMMIT="abc1234-dirty" render "$BASE"
+    expect '[.services[] | .build.args.GIT_COMMIT == "abc1234-dirty"] | all' || return 1
+}
+
+make_build_passes_the_source_commit() {
+    local head output
+    head="$(git -C "$ROOT_DIR" rev-parse --short HEAD)"
+    output="$(make --no-print-directory -C "$ROOT_DIR" -n build build-nocache)"
+    [[ "$(grep -cE "^GIT_COMMIT=${head}(-dirty)? docker compose build" <<<"$output")" -eq 2 ]] || {
+        printf 'make build does not pass GIT_COMMIT=%s:\n%s\n' "$head" "$output"
+        return 1
+    }
+}
+
 the_base_composes_with_the_hardened_overlay() {
     render "$BASE" "$HARDENED"
     expect '.services | keys == ["indexer", "mbsync", "mcp-server"]' || return 1
@@ -694,6 +714,8 @@ check "merged hardening rejects new users, secrets, hooks and devices" \
     merged_hardening_rejects_new_grants
 check "merged hardening rejects a service a top-level include brings in" \
     merged_hardening_rejects_an_included_service
+check "every image is built with the source commit" every_image_is_built_with_the_source_commit
+check "make build passes the source commit" make_build_passes_the_source_commit
 
 if ((FAILURES > 0)); then
     printf '%d test(s) failed\n' "$FAILURES" >&2

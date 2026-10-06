@@ -89,9 +89,15 @@ init-secrets:
 		echo "  .secrets/mcp_auth_token.txt already exists, skipping"; \
 	fi
 
+# Source commit baked into each image (the org.opencontainers.image.revision
+# label and GIT_COMMIT) and logged at startup (#887): the short HEAD hash,
+# plus -dirty when tracked files differ from it. Empty outside a checkout,
+# which Compose turns into "unknown".
+GIT_COMMIT ?= $(shell git describe --always --dirty --exclude='*')
+
 # Build all images from source
 build:
-	docker compose build
+	GIT_COMMIT=$(GIT_COMMIT) docker compose build
 
 # Build all images from source with the BuildKit cache disabled.
 # Use after a base-image tag refresh, when chasing a "stale layer"
@@ -103,7 +109,7 @@ build:
 #
 #   make build-nocache SERVICES="indexer mcp-server"
 build-nocache:
-	docker compose build --no-cache $(SERVICES)
+	GIT_COMMIT=$(GIT_COMMIT) docker compose build --no-cache $(SERVICES)
 
 validate-env:
 	./scripts/validate-env.sh

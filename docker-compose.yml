@@ -33,6 +33,10 @@ services:
   mbsync:
     build:
       context: ./mbsync
+      # Source commit for the image label and the startup identity line
+      # (#887). `make build` sets it; a plain build gets "unknown".
+      args:
+        GIT_COMMIT: ${GIT_COMMIT:-unknown}
     secrets:
       - bridge_pass
     container_name: mbsync
@@ -100,6 +104,8 @@ services:
   indexer:
     build:
       context: ./indexer
+      args:
+        GIT_COMMIT: ${GIT_COMMIT:-unknown}
     container_name: indexer
     restart: unless-stopped
     init: true
@@ -251,6 +257,8 @@ services:
   mcp-server:
     build:
       context: ./mcp-server
+      args:
+        GIT_COMMIT: ${GIT_COMMIT:-unknown}
     container_name: mcp-server
     restart: unless-stopped
     init: true
