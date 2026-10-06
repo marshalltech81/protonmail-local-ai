@@ -143,7 +143,8 @@ groundedness 94 to 103, deterministic passes 92 to 96; the
 narrow-filter cases rise from 13 to 20 of 21 on correctness. In the
 decoy cases the answer now gives the in-scope value and names the
 decoy as context; the deterministic `must_not_include` check still
-fails them, since it sees only the value's presence (#770).
+fails them, since it sees only the value's presence (#894). Remaining:
+labels in `extract_from_emails` and the experimental tools (#895).
 
 ### Phase 1.5 — Minimal regression baseline
 
@@ -277,9 +278,14 @@ answers real knowledge questions, and identify why failures occur.
    32, 30 and 30 of 38 deterministic passes before #755's labels and 32
    of 38 in each run after them.
 
+   `make eval-answers` prints its planned answer and judge calls
+   before it runs, caps them with `EVAL_MAX_CALLS` and stops at the
+   first billing or usage-limit error (#839, #866).
+
    Remaining: #283 (pass thresholds, live-client trace replay, latency
-   and cost), #655, #656, #657, #818, #826, #834, #839 (eval cost
-   guard). Real-mail failures to explain: #774, #776. Evals use the synthetic corpus only; questions from real
+   and cost), #655, #656, #657, #818, #826, #834, #894 (decoy cases
+   fail `must_not_include` on a correct answer), #897 (one judge error
+   marks a run incomplete). Real-mail failures to explain: #774, #776. Evals use the synthetic corpus only; questions from real
    mail would send mail to the model provider and wait on an owner
    decision (held 2026-10-02, #785). Answer quality
    stays a manual grade.
@@ -310,10 +316,10 @@ answers real knowledge questions, and identify why failures occur.
    repair, in every citing tool. **Partly done** (#457, #495, #559,
    #565). Remaining: semantic support (a model judge), #284; long
    correction, conflict and multi-thread answers still uncited after
-   the repair (#819).
+   the repair (#819); the truncation notice gives the wrong setting for
+   a context-window stop (#890).
 
-Also in this milestone: #779, #764 (default
-inference model).
+Also in this milestone: #764 (default inference model).
 
 ### Phase 4 — Deterministic knowledge scaffolding
 
@@ -391,6 +397,23 @@ review rounds for test and eval-harness PRs (#838). Until the owner
 decides #835, the AGENTS.md constraint "Do not switch runtime images to
 Alpine" stands, and no image moves to Alpine or distroless. #835 records
 the options, distroless included, for that decision only.
+
+**Observability.** AGENTS.md now requires degraded behaviour to be
+visible in the logs (#880): every fallback, cap, skip, retry or partial
+result logs at INFO or above, recoveries are logged, and a tool call
+that degraded says so on its own line. Done: token-limit hits,
+degraded-retrieval markers and rate-limited `/mcp` rejection logging
+(#865, #877, #878; #883), a completion line for every MCP tool (#886;
+#892), and mbsync sync-success and folder-name-safe repair logging
+(#879; #881). Open: attachment extraction and parser-cap logging
+(#871, #872), embedder recovery and maintenance-loop recoveries (#873),
+queue heartbeat and per-pass maintenance summaries (#874), WAL and
+storage size (#875), startup identity line (#887), a shared
+rate-limited logger (#889), the OCR cap on cache hits and multipage
+images (#891, #885), and a per-checkout uv cache for parallel runs
+(#896). Open decisions: log-only or exit when the Maildir watcher dies
+(#870), telling a stall from a backlog in status (#876; parked trashed
+files currently show as "retrying"), and correlation IDs (#888).
 
 ## Not doing (decided 2026-09-26)
 
@@ -489,6 +512,8 @@ can be revisited with an explicit owner decision.
   the server (#661)
 - audio/video and calendar attachments are not extracted (#695);
   PDF / DOCX / XLSX / HTML / TXT / images are
+- pdf2image runs a second, untimed `pdfinfo` inside each render; the
+  timed page count before it covers the realistic stall (#868)
 - `list_threads(filter_type=...)` rejects unsupported values cleanly;
   read/flagged/replied state is indexed (#649) but draft/forwarded is not
 - deletion reconciliation (mirror) is not yet validated under
