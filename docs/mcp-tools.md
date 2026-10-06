@@ -815,9 +815,12 @@ and the reply is mapped back to your names before any check.
 A model or gateway without structured outputs rejects the request with
 status 400 (check Anthropic's structured-output compatibility list;
 `claude-sonnet-4-6` and the current Sonnet and Opus models have them). The tool call then fails with a
-fixed-text error naming `INFERENCE_STRUCTURED_OUTPUT=false`; the
-request is not retried without the format, and only the error type and
-status are logged. Set `INFERENCE_STRUCTURED_OUTPUT=false` for such a
+fixed-text error that lists the common causes of a 400 in order (account
+credit or billing, an invalid or retired `INFERENCE_MODEL`, a prompt too
+large for the model's window, then a model or gateway without structured
+outputs) and names `INFERENCE_STRUCTURED_OUTPUT=false` for the last one
+only. The request is not retried without the format, and only the
+error type and status are logged. Set `INFERENCE_STRUCTURED_OUTPUT=false` for such a
 model to get the plain-JSON requests. Any value other than `true` or
 `false` (in any case; unset or empty is `true`) fails startup.
 `INFERENCE_MODE=openai` ignores the setting and never sends a format
