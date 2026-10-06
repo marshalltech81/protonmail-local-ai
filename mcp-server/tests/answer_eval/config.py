@@ -6,8 +6,8 @@ Two layers, each in the repository's ``{LAYER}_MODE`` / ``_BASE_URL`` /
 - ``INFERENCE_*``: the answering model under test, as the server reads
   it (``anthropic`` or ``openai``; the evaluation needs one, and the
   mode defaults to ``none`` as for the server).
-- ``JUDGE_*``: the grader (``anthropic``, ``openai`` or ``none``, the
-  default). It never reads the answerer's variables or key file, so the
+- ``JUDGE_*``: the grader (``anthropic``, ``openai``, ``claude-cli`` or
+  ``none``, the default). It never reads the answerer's variables or key file, so the
   judge cannot silently inherit the answerer's provider or credential,
   and there is no fallback between modes.
 
@@ -18,6 +18,11 @@ OpenAI proper) and an empty one is refused, as for the server's layers
 _api_key.txt``, which must be mode 600, or, for local development only,
 the ``{LAYER}_API_KEY`` environment variable. Keys are never logged,
 written to a report or taken as a command argument.
+
+``JUDGE_MODE=claude-cli`` (#806) runs the judge through Claude Code on
+the host under the operator's subscription (``cli_judge.py``): it takes
+``JUDGE_MODEL`` and no key, and ``JUDGE_BASE_URL`` may only be unset or
+``default`` (the CLI's login decides the endpoint).
 """
 
 import hashlib
@@ -34,7 +39,11 @@ from src.lib.inference import (
     default_token_budget,
 )
 
+from tests.answer_eval import cli_judge
+
 ENABLED_MODES = frozenset({"anthropic", "openai"})
+# Judge-only modes that run a vendor CLI on the host.
+CLI_MODES = frozenset({"claude-cli"})
 # The variable each SDK reads for its endpoint when none is passed, and
 # the host it uses when that variable is unset too.
 _SDK_BASE_URL_VARS = {"anthropic": "ANTHROPIC_BASE_URL", "openai": "OPENAI_BASE_URL"}
@@ -66,10 +75,14 @@ class LayerConfig:
     max_tokens: int
     context_tokens: int
     max_input_chars: int = 0
+    cli_path: str = ""
+    cli_version: str = ""
 
     def endpoint_kind(self) -> str:
         """``host-local``, ``remote`` or ``sdk-default``: the only form of
         the endpoint a report records (never the URL)."""
+        if self.mode in CLI_MODES:
+            return "remote"
         if not self.base_url:
             return "sdk-default"
         host = urllib.parse.urlsplit(self.base_url).hostname
@@ -97,9 +110,16 @@ class LayerConfig:
             out["max_input_chars"] = self.max_input_chars
             out["retries"] = 0
             out["concurrency"] = 1
+        if self.mode in CLI_MODES:
+            out["cli"] = cli_judge.EXECUTABLE
+            out["cli_version"] = self.cli_version
         return out
 
-    def client(self) -> InferenceClient:
+    def client(self) -> InferenceClient | cli_judge.ClaudeCliClient:
+        if self.mode in CLI_MODES:
+            return cli_judge.ClaudeCliClient(
+                executable=self.cli_path, model=self.model, max_tokens=self.max_tokens
+            )
         return InferenceClient.create(
             mode=self.mode,
             base_url=self.base_url,
@@ -146,8 +166,13 @@ def load_layer(
         if layer == "INFERENCE":
             raise ConfigError("the answer evaluation needs INFERENCE_MODE=anthropic or openai")
         return None
+    if layer == "JUDGE" and mode in CLI_MODES:
+        return _load_cli_judge(mode, env)
     if mode not in ENABLED_MODES:
-        raise ConfigError(f"{layer}_MODE must be one of: anthropic, none, openai")
+        modes = (
+            "anthropic, claude-cli, none, openai" if layer == "JUDGE" else "anthropic, none, openai"
+        )
+        raise ConfigError(f"{layer}_MODE must be one of: {modes}")
     base_url = env.get(f"{layer}_BASE_URL", "").strip()
     if not base_url:
         raise ConfigError(
@@ -195,4 +220,33 @@ def load_layer(
         max_tokens=max_tokens,
         context_tokens=context,
         max_input_chars=max_input,
+    )
+
+
+def _load_cli_judge(mode: str, env: Mapping[str, str]) -> LayerConfig:
+    """``JUDGE_MODE=claude-cli``: a model, the judge bounds and the CLI
+    on PATH; no key and no base URL."""
+    base_url = env.get("JUDGE_BASE_URL", "").strip()
+    if base_url and base_url.lower() != "default":
+        raise ConfigError(f"JUDGE_BASE_URL does not apply to JUDGE_MODE={mode}: unset it")
+    model = env.get("JUDGE_MODEL", "").strip()
+    if not model:
+        raise ConfigError(f"JUDGE_MODEL must be set when JUDGE_MODE={mode}")
+    path = cli_judge.find_executable()
+    if path is None:
+        raise ConfigError(f"JUDGE_MODE={mode} needs the claude CLI (Claude Code) on PATH")
+    return LayerConfig(
+        layer="JUDGE",
+        mode=mode,
+        base_url="",
+        model=model,
+        api_key="",
+        timeout_secs=_number(env, "JUDGE_TIMEOUT_SECS", JUDGE_DEFAULT_TIMEOUT_SECS, 1.0),
+        max_tokens=int(_number(env, "JUDGE_MAX_TOKENS", JUDGE_DEFAULT_MAX_TOKENS, 256)),
+        context_tokens=0,
+        max_input_chars=int(
+            _number(env, "JUDGE_MAX_INPUT_CHARS", JUDGE_DEFAULT_MAX_INPUT_CHARS, 1000)
+        ),
+        cli_path=path,
+        cli_version=cli_judge.cli_version(path),
     )

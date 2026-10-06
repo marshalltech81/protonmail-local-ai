@@ -424,6 +424,8 @@ until the owner verifies them.
 ```bash
 export INFERENCE_MODE=openai INFERENCE_BASE_URL=http://127.0.0.1:1234/v1 INFERENCE_MODEL=<model>
 export JUDGE_MODE=anthropic JUDGE_BASE_URL=default JUDGE_MODEL=<model>  # optional; default JUDGE_MODE=none
+# or, billed to a Claude subscription through Claude Code on the host:
+# export JUDGE_MODE=claude-cli JUDGE_MODEL=<model>
 make eval-answers                                   # report under .answer-eval/ (git-ignored)
 make eval-answers EVAL_ARGS="--case ask-recital-date --detail /tmp/detail.json"
 make eval-answers-compare BASELINE=<run-a.json> CANDIDATE=<run-b.json>
@@ -439,7 +441,7 @@ is `127.0.0.1`, not `host.docker.internal`.
   `INFERENCE_TIMEOUT_SECS`), key in `.secrets/inference_api_key.txt`.
   `INFERENCE_MODE` defaults to `none`, as for the server, so the run
   needs it set.
-- **Judge** (`JUDGE_MODE` = `anthropic|openai|none`, `JUDGE_BASE_URL`,
+- **Judge** (`JUDGE_MODE` = `anthropic|openai|claude-cli|none`, `JUDGE_BASE_URL`,
   `JUDGE_MODEL`, key in `.secrets/judge_api_key.txt`, mode 600, or
   `JUDGE_API_KEY` for local development only). Same contract as the
   server's layers: an enabled judge needs a model and a non-empty key (a
@@ -449,6 +451,30 @@ is `127.0.0.1`, not `host.docker.internal`.
   answerer's variables or key. Bounds: `JUDGE_TIMEOUT_SECS` (120),
   `JUDGE_MAX_TOKENS` (2048), `JUDGE_MAX_INPUT_CHARS` (60,000), one call
   per case, no retries, one case at a time.
+- **Subscription judge** (`JUDGE_MODE=claude-cli`, #806): each judge call
+  runs `claude -p` (Claude Code, logged in with a Claude subscription)
+  once, so it uses the subscription's limits, which interactive use
+  shares, instead of API credit. It needs `JUDGE_MODEL` and the CLI on
+  `PATH`, reads no key, and takes no base URL (unset or `default`). Each
+  call runs in a fresh empty directory with no tools (`--tools ""`), no
+  settings, `CLAUDE.md` files, hooks or plugins (`--setting-sources ""`),
+  no MCP servers (`--strict-mcp-config`), no saved session, and the
+  judge system prompt, with the prompt on stdin. `--bare` is not used
+  because it accepts only an API key. `ANTHROPIC_*` variables are removed
+  from the CLI's environment, since a set `ANTHROPIC_API_KEY` would take
+  the call off the subscription. `JUDGE_MAX_TOKENS` becomes
+  `CLAUDE_CODE_MAX_OUTPUT_TOKENS`: when a reply reaches it, the CLI makes
+  its own continuation attempts (up to about four times the cap) before
+  failing, which counts as `judge_truncated`. A logged-out CLI and a
+  usage-limit stop are the judge errors `judge_cli_logged_out` and
+  `judge_cli_usage_limit`; a CLI missing from `PATH` is a configuration
+  error. The judge identity records `cli`, `cli_version` and the
+  `served_models` the CLI reports, so a different CLI version or model
+  is a different judge to `compare`. `ANSWER_EVAL_LIVE_CLAUDE=1 uv run
+  pytest tests/test_answer_eval_cli_judge.py -k live` makes one real call
+  to check that planted `CLAUDE.md`/`AGENTS.md` files and an
+  `ANTHROPIC_API_KEY` never reach it. Codex CLI is not supported yet:
+  its shell tool cannot be turned off.
 - Either layer with the base URL `default` is refused while the SDK's own
   endpoint variable (`OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL`) is set, so
   the report's `sdk-default` label is never a custom endpoint.

@@ -33,7 +33,8 @@ from src.lib.inference import PromptBudget
 from src.lib.sqlite import Database
 
 from tests.answer_eval.cases import CASES_PATH, CASES_SCHEMA_VERSION, CaseError, load_cases
-from tests.answer_eval.config import ConfigError, load_layer
+from tests.answer_eval.cli_judge import ClaudeCliClient
+from tests.answer_eval.config import ConfigError, LayerConfig, load_layer
 from tests.answer_eval.harness import evaluate
 from tests.answer_eval.judge import RUBRIC_VERSION
 from tests.answer_eval.report import (
@@ -127,11 +128,12 @@ def _run(args: argparse.Namespace) -> int:
         case_timeout_secs=args.case_timeout_secs,
     )
     started = datetime.now(UTC).isoformat(timespec="seconds")
+    judge_client = judge.client() if judge else None
     records, details = asyncio.run(
         evaluate(
             cases,
             ctx,
-            judge_client=judge.client() if judge else None,
+            judge_client=judge_client,
             judge_config=judge,
             max_runtime_secs=args.max_runtime_secs,
         )
@@ -143,7 +145,7 @@ def _run(args: argparse.Namespace) -> int:
         "rubric_version": RUBRIC_VERSION,
         **index,
         "answerer": answerer.label(),
-        "judge": judge.label() if judge else None,
+        "judge": _judge_label(judge, judge_client),
         "retrieval": {"embedder": "hashed-baseline (precomputed)", "reranker": "none"},
         "settings": {
             "case_timeout_secs": args.case_timeout_secs,
@@ -169,6 +171,17 @@ def _run(args: argparse.Namespace) -> int:
     print(render_summary(report))
     print(f"Report: {out}" + (f"\nDetail: {detail}" if detail else ""))
     return EXIT_INCOMPLETE if is_incomplete(report) else EXIT_OK
+
+
+def _judge_label(judge: LayerConfig | None, client: Any) -> dict[str, Any] | None:
+    """The judge's identity; a CLI judge adds the models it reports
+    having served, so a changed model is a different judge."""
+    if judge is None:
+        return None
+    label = judge.label()
+    if isinstance(client, ClaudeCliClient):
+        label["served_models"] = sorted(client.served_models)
+    return label
 
 
 # Case IDs and categories as cases.json writes them: the only report
