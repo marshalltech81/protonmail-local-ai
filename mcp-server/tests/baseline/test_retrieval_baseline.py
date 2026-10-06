@@ -401,6 +401,46 @@ def _exchanged(rows: list, k: int, i: int, j: int) -> list:
     return [*rows[:i], rows[j], *rows[i : k - 1]]
 
 
+def _band_moves(lane: list) -> list[tuple[int, int]]:
+    """Single moves ``(src, dst)`` another platform could produce inside a
+    vector lane: within each run of rows whose adjacent distances are
+    near-tied, any row may land at any other position in the run, and
+    every move of a row past a row of another thread is probed (review
+    round 6: with ``A, A, B`` tied, ``B`` can rank above both ``A`` rows,
+    and RRF credits only a thread's first row)."""
+    moves: list[tuple[int, int]] = []
+    start = 0
+    for end in range(1, len(lane) + 1):
+        if end < len(lane) and lane[end].score - lane[end - 1].score < _NEAR_TIE:
+            continue
+        for src in range(start, end):
+            for dst in range(start, end):
+                lo, hi = sorted((src, dst))
+                passed = [lane[k] for k in range(lo, hi + 1) if k != src]
+                if src != dst and any(r.thread_id != lane[src].thread_id for r in passed):
+                    moves.append((src, dst))
+        start = end
+    return moves
+
+
+def _moved(lane: list, src: int, dst: int) -> list:
+    rows = [*lane[:src], *lane[src + 1 :]]
+    rows.insert(dst, lane[src])
+    return rows
+
+
+def test_band_moves_cover_a_thread_passing_repeated_rows() -> None:
+    lane = [
+        SimpleNamespace(thread_id=t, score=s)
+        for t, s in (("A", 1.0), ("A", 1.0 + 2e-7), ("B", 1.0 + 4e-7), ("C", 2.0))
+    ]
+    moves = _band_moves(lane)
+    assert (2, 0) in moves  # B above both A rows
+    assert [r.thread_id for r in _moved(lane, 2, 0)] == ["B", "A", "A", "C"]
+    assert (0, 1) not in moves  # A past A changes nothing
+    assert all(3 not in m for m in moves)  # C is outside the band
+
+
 def test_cutoff_exchanges_scan_past_same_thread_rows() -> None:
     """Review round 4: rows k and k+1 share the cutoff row's thread, and a
     different thread two rows out is still in the near-tie band."""
@@ -439,9 +479,6 @@ def test_rank_snapshot_survives_near_tied_vector_distances(
     fuse = baseline_db._reciprocal_rank_fusion
     state: dict = {"cutoffs": 0}
 
-    def near(a, b) -> bool:
-        return abs(a.score - b.score) < _NEAR_TIE and a.thread_id != b.thread_id
-
     def cut_aware(lane: str, search):
         def run_search(embedding, k):
             rows = search(embedding, k + _CUTOFF_WINDOW)
@@ -461,15 +498,14 @@ def test_rank_snapshot_survives_near_tied_vector_distances(
     def swapping_fusion(bm25, vec, chunks):
         lanes = {"vec": list(vec), "chunk": list(chunks)}
         probe = state["probe"]
-        if probe is not None and probe[0] == "swap":
-            _, name, i = probe
-            lanes[name][i - 1], lanes[name][i] = lanes[name][i], lanes[name][i - 1]
+        if probe is not None and probe[0] == "move":
+            _, name, src, dst = probe
+            lanes[name] = _moved(lanes[name], src, dst)
         elif probe is None:
             state["ties"] += [
-                ("swap", name, i)
+                ("move", name, src, dst)
                 for name, lane in lanes.items()
-                for i in range(1, len(lane))
-                if near(lane[i - 1], lane[i])
+                for src, dst in _band_moves(lane)
             ]
         return fuse(bm25, lanes["vec"], lanes["chunk"])
 

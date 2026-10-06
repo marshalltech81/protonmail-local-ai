@@ -840,8 +840,8 @@ class TestDeterministicGraders:
             (
                 "ask-swim-practice-date",
                 "t76.1",
-                "Tuesdays and Thursdays at the Eastgate aquatic center [E1]; from "
-                "November, Wednesdays at 5:30pm at the Northside natatorium [E2].",
+                "Tuesdays and Thursdays at 6:15pm at the Eastgate aquatic center [E1]; "
+                "from November, Wednesdays at 5:30pm at the Northside natatorium [E2].",
             ),
             (
                 "ask-garden-plot-trash",
@@ -859,6 +859,31 @@ class TestDeterministicGraders:
         det = grade_run(case, _run(answer, passages, ["E1", "E2"]))
         assert det.checks["expected_values"] == PASS
         assert det.checks["forbidden_values"] == FAIL
+
+    def test_incomplete_swim_schedule_fails_without_a_judge(self):
+        """Review round 6: the wrong time and a missing weekday fail the
+        deterministic values, so a judge-less run cannot pass them."""
+        case = CASES["ask-swim-practice-date"]
+        passages = [_passage("E1", "t76.1")]
+        wrong = grade_run(case, _run("Tuesdays at 7pm at Eastgate [E1].", passages, ["E1"]))
+        assert wrong.checks["expected_values"] == FAIL
+        right = "Tuesdays and Thursdays at 6:15pm at the Eastgate aquatic center [E1]."
+        assert grade_run(case, _run(right, passages, ["E1"])).passed
+
+    def test_fact_cut_without_a_note_is_attributed_to_prompt_assembly(self):
+        """Review round 6: a required passage cut before its fact, with no
+        coverage note, is a prompt-assembly failure, not ``unknown``."""
+        case = CASES["ask-kayak-tight-budget"]
+        passages = [_passage("E1", "t21", truncated=True), _passage("E2", "t22")]
+        run = _run(
+            "Four boats at $65 is $260 [E1] [E2].",
+            passages,
+            ["E1", "E2"],
+            retrieved=[thread_id_of("t21"), thread_id_of("t22")],
+        )
+        det = grade_run(case, run)
+        assert det.checks["omission_disclosed"] == FAIL
+        assert "prompt_assembly" in attribute(case, run, det, False, False)
 
     def test_retrieval_miss_is_attributed_to_retrieval(self):
         case = CASES["ask-hotel-checkin"]

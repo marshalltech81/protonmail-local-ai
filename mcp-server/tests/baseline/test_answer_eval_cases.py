@@ -270,6 +270,10 @@ def _judge_config() -> LayerConfig:
 _ORACLE_MISSES: dict[str, list[list[str]]] = {}
 
 
+# Details (passages supplied) per case, kept by ``_evaluate_all``.
+_DETAILS: dict[str, dict] = {}
+
+
 def _evaluate_all(baseline_dir: Path, baseline_db: Database) -> list[dict]:
     vectors = json.loads((baseline_dir / "query_vectors.json").read_text(encoding="utf-8"))
     records = []
@@ -285,10 +289,11 @@ def _evaluate_all(baseline_dir: Path, baseline_db: Database) -> list[dict]:
             expected_embed_dim=baseline_db.get_embedding_dim(),
         )
         judge.case = case
-        rows, _ = asyncio.run(
+        rows, details = asyncio.run(
             evaluate([case], ctx, judge_client=judge, judge_config=_judge_config())
         )
         records += rows
+        _DETAILS[case.id] = details[0]
     return records
 
 
@@ -338,6 +343,22 @@ def test_answerer_finds_every_value_where_evidence_arrived(records: dict[str, di
             g for g in _ORACLE_MISSES[cid] if any(_mentions(e, v) for e in excerpts for v in g)
         ]
         assert stated == [], cid
+
+
+# Each #755 decoy case's out-of-scope sibling message (review round 6).
+_DECOYS = {
+    "ask-walker-rate-sender": "t75.2",
+    "ask-swim-practice-date": "t76.2",
+    "ask-garden-plot-trash": "t77.2",
+}
+
+
+@pytest.mark.parametrize("case_id", sorted(_DECOYS))
+def test_decoy_reaches_the_answering_model(case_id: str, records: dict[str, dict]) -> None:
+    """Review round 6: a decoy case tests nothing unless the out-of-scope
+    sibling's passage is in the prompt the model received."""
+    supplied = {p["message_id"] for p in _DETAILS[case_id]["passages"].values()}
+    assert message_id_of(_DECOYS[case_id]) in supplied, (case_id, sorted(supplied))
 
 
 def test_cases_missing_evidence_are_the_known_ones(records: dict[str, dict]) -> None:

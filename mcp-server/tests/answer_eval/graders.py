@@ -232,7 +232,8 @@ def attribute(
         return causes
     if any(not g.retrieved for g in det.groups):
         causes.append("retrieval")
-    if any(g.retrieved and not g.supplied for g in det.groups):
+    # Not supplied, or supplied only cut short of its evidence.
+    if any(g.retrieved and not g.whole for g in det.groups):
         causes.append("prompt_assembly")
     synthesis = any(det.checks.get(c) == FAIL for c in SYNTHESIS_CHECKS) or any(
         g.supplied and not g.cited for g in det.groups
