@@ -131,7 +131,8 @@ guessing about semantics, completeness, or identity.
 8. Doc-drift sweep — done.
 
 Follow-up: #755 (filters select whole threads, so a passage from a
-message outside the filter can be cited; owner decision).
+message outside the filter can be cited). Decided: label passages
+(Resolved decisions 29); implementation pending.
 
 ### Phase 1.5 — Minimal regression baseline
 
@@ -250,9 +251,13 @@ answers real knowledge questions, and identify why failures occur.
 1. **Agent-level evals** on the synthetic mailbox — tool selection,
    arguments, retrieval and evidence recall (apart from hit rate),
    citation accuracy, pagination, unnecessary calls. **Partly done**
-   (#452, #494, #560; answer evaluation #658). Remaining: #283 (pass
-   thresholds, live-client trace replay, latency and cost), #604,
-   #655, #656, #657, #770, #771; real-mail failures to explain: #774,
+   (#452, #494, #560; answer evaluation #658). The `ask_mailbox`
+   answer contract (#811, #817) raised the synthetic answer eval from
+   17/34 to 28–29/34 deterministic passes with no regressions; the
+   exhaustive-workflow tool guidance (#800, #816) awaits a live
+   before/after run (#803). Remaining: #283 (pass thresholds,
+   live-client trace replay, latency and cost), #604, #655, #656,
+   #657, #770, #771, #818, #820; real-mail failures to explain: #774,
    #776. Evals use the synthetic corpus only; questions from real
    mail would send mail to the model provider and wait on an owner
    decision (held 2026-10-02, #785). Answer quality
@@ -282,7 +287,9 @@ answers real knowledge questions, and identify why failures occur.
 8. **A validated citation contract for today's answers** — stable
    evidence IDs, claim→citation checks, quote verification, one
    repair, in every citing tool. **Partly done** (#457, #495, #559,
-   #565). Remaining: semantic support (a model judge), #284.
+   #565). Remaining: semantic support (a model judge), #284; long
+   correction, conflict and multi-thread answers still uncited after
+   the repair (#819).
 
 Also in this milestone: #779, #764 (default
 inference model).
@@ -472,6 +479,10 @@ can be revisited with an explicit owner decision.
   and nothing reports it (`docs/architecture.md`)
 - chunking a very large crafted body still takes tens of seconds
   (#684; Deferred)
+- tool descriptions ask an agent to tell the user before bulk or
+  out-of-scope reads but cannot enforce it; until #755 lands, a
+  filtered read can return passages and parent-thread context from
+  messages outside the filter, unlabelled
 
 ## Blockers and Risks
 
@@ -667,6 +678,18 @@ removed Bridge container are kept as history.
     (`f1`, `f2`, …) and never a caller's field name. Schemas over
     Anthropic's measured limits (more than 8 fields, or a type list
     mixing an array) are sent as plain JSON. openai mode is #807.
+29. **Evidence scope under filters (2026-10-05, #755):** retrieval keeps
+    selecting whole threads and supplying their context, and each
+    evidence passage is labelled `in_scope` (its own message satisfies
+    every message-level filter) or `context`. The `ask_mailbox` prompt
+    answers from in-scope passages and uses context only to interpret
+    them; the citation check flags a filtered answer that cites no
+    in-scope passage; the body-less parent-thread fallback of
+    `get_message` / `get_thread` is labelled context. Labels come from
+    indexed message metadata at query time, with no schema change.
+    Restricting evidence was rejected (it drops the corrections an
+    answer depends on), as was keeping it unlabelled (out-of-scope
+    citations stay invisible). Synthetic decoy eval cases come first.
 
 ## Notes for Agents
 
