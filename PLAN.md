@@ -419,8 +419,8 @@ images (#891, #885), and a per-checkout uv cache for parallel runs
 (#896). Open decisions: log-only or exit when the Maildir watcher dies
 (#870), telling a stall from a backlog in status (#876; parked trashed
 files currently show as "retrying"), and correlation IDs (#888).
-MCP tool safety annotations are decided (Resolved decisions 31) and
-in review (#899).
+Every MCP tool declares safety annotations (#899; #900; Resolved
+decisions 31).
 
 ## Not doing (decided 2026-09-26)
 
@@ -771,8 +771,8 @@ removed Bridge container are kept as history.
     encoded folders migrates by renaming them (never deleting) and
     rebuilding the index (`docs/setup.md`). The live mailbox had none,
     and the owner accepts a reindex if needed.
-31. **MCP tool safety annotations (2026-10-06, #899; implementation in
-    review):** every tool is to declare `readOnlyHint: true`, `destructiveHint: false`,
+31. **MCP tool safety annotations (2026-10-06, #899, #900):** every
+    tool declares `readOnlyHint: true`, `destructiveHint: false`,
     `openWorldHint: false` and its own title-cased `title`, from one
     shared constant; a test fails on a tool added without a deliberate
     classification. Operational logging does not prevent read-only: the
