@@ -108,12 +108,17 @@ TEMPLATE_RESERVE_TOKENS = 64
 MIN_PROMPT_TOKENS = 1024
 
 # Fixed text for a provider 400 on a call that carried a structured-output
-# schema (#808). The model or gateway may not support structured outputs;
-# there is no retry without the format, so the operator decides.
+# schema (#808). The provider's message is never parsed (it can echo the
+# prompt), so the text lists the common causes in order and names the
+# setting only for the last one (#812). There is no retry without the
+# format, so the operator decides.
 STRUCTURED_OUTPUT_REJECTED = (
     "Inference provider rejected a structured-output request with status 400 "
-    "(mode=anthropic). If the model or gateway does not support structured "
-    "outputs, set INFERENCE_STRUCTURED_OUTPUT=false."
+    "(mode=anthropic). Common causes, in order: account credit or billing; "
+    "an invalid or retired INFERENCE_MODEL; a prompt too large for the "
+    "model's window (check INFERENCE_CONTEXT_TOKENS); or a model or gateway "
+    "without structured outputs, in which case set "
+    "INFERENCE_STRUCTURED_OUTPUT=false."
 )
 
 

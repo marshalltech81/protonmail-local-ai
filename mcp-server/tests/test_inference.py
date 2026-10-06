@@ -897,6 +897,21 @@ class TestStructuredOutput:
         assert err.value.__cause__ is None
         assert err.value.__suppress_context__
 
+    def test_rejected_structured_request_lists_the_common_400_causes(self):
+        # A 400 is more often billing, a bad model ID or an oversized
+        # prompt than a model without structured outputs; the setting is
+        # named last, for that cause only (#812).
+        client = self._client()
+        self._rejecting(client)
+        with pytest.raises(ProviderResponseError) as err:
+            asyncio.run(client.complete("sys", "user", json_schema=self._SCHEMA))
+        text = str(err.value)
+        causes = ["credit", "INFERENCE_MODEL", "INFERENCE_CONTEXT_TOKENS"]
+        positions = [text.find(cause) for cause in causes]
+        assert -1 not in positions, text
+        assert positions == sorted(positions)
+        assert positions[-1] < text.find("INFERENCE_STRUCTURED_OUTPUT=false")
+
     def test_rejected_plain_request_is_not_rewritten(self):
         import anthropic
 
