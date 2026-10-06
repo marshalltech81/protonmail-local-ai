@@ -629,13 +629,16 @@ the prompt and cited, so a failure is attributed to `retrieval`,
 `prompt_assembly`, `synthesis`, `evaluator_infrastructure` or
 `answer_infrastructure` (several may apply; `unknown` otherwise).
 
-The judge (`judge.py`, rubric `ask-rubric-4`) receives the question,
+The judge (`judge.py`, rubric `ask-rubric-5`) receives the question,
 expected handling (for `disclose_missing`, with the tool's
 `coverage_note`, labelled as server text and graded together with the
 answer, and the reference facts whose evidence was retrieved but left
 out or cut, the only ones the note can excuse), reference facts, prohibited assertions, which
-dimensions apply, every passage the answerer received, the answer and
-the answer's structured `statements` numbered from 1; the passages, the
+dimensions apply, every passage the answerer received under the header
+`ask_mailbox` gave it (sender, sent date and, for an attachment chunk,
+the file name, #837), the answer and
+the answer's structured `statements` numbered from 1; the passages with
+their headers, the
 answer and each statement sit in `<untrusted_evidence>` /
 `<untrusted_answer>` blocks they cannot close, under a system prompt
 that tells the judge to ignore instructions inside them. It returns a
@@ -678,7 +681,10 @@ Exit codes: `run` 0 complete, 2 incomplete (any error, skip or judge
 error), 3 configuration error; `compare` 0, 1 on a per-case regression
 with `--fail-on-regression`, 2 when the runs differ in case file, case
 selection, index, rubric or judge (not comparable) unless `--allow-incompatible`,
-3 when a report is unreadable or malformed. Scores
+3 when a report is unreadable or malformed. A run graded under an
+earlier rubric (for example `ask-rubric-4`, whose judge saw no passage
+headers) is not comparable with a later one: re-run the baseline under
+the current rubric rather than comparing across versions. Scores
 are advisory: no quality threshold is calibrated yet, so a low score
 never fails a run. CI runs only the scripted path (`make baseline` and
 `tests/test_answer_eval.py`), with no provider or credential.

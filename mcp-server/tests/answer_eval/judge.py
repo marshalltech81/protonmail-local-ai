@@ -46,7 +46,7 @@ from tests.answer_eval.runner import Passage
 
 # Bump on any change to the rubric, the prompt or the verdict schema:
 # runs graded under different versions are not comparable.
-RUBRIC_VERSION = "ask-rubric-4"
+RUBRIC_VERSION = "ask-rubric-5"
 
 CLAIM_VERDICTS = ("supported", "contradicted", "insufficient_evidence")
 DIMENSION_RESULTS = ("pass", "fail", "not_applicable")
@@ -208,9 +208,12 @@ def build_judge_prompt(
     for label in sorted(passages, key=_label_key):
         p = passages[label]
         origin = p.message_id or p.thread_id
+        # The header the answerer saw (sender, sent date, attachment name,
+        # #837) is sender-controlled, so it stays inside the fence.
+        header = f"{_fence(p.header)}\n" if p.header else ""
         lines.append(
             f'<untrusted_evidence label="{label}">\n'
-            f"{_fence(f'{p.source} of message {origin}')}\n{_fence(p.text)}\n"
+            f"{_fence(f'{p.source} of message {origin}')}\n{header}{_fence(p.text)}\n"
             "</untrusted_evidence>"
         )
     lines += [
