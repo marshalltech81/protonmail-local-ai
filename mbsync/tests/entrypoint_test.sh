@@ -282,6 +282,7 @@ fifo_pin_is_refused_without_reading() {
 # shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
 sync_setup() {
     MAILDIR_PATH="$WORK/maildir-$1"
+    RUNTIME_DIR="$WORK/runtime-$1"
     CONFIG_FILE="$WORK/mbsyncrc"
     FIND_CALLS="$WORK/find-calls-$1"
     SYNC_ACTIVITY_FILE="$WORK/activity-$1"
@@ -291,7 +292,7 @@ sync_setup() {
     SYNC_DEADLINE_SECONDS=86400
     SYNC_KILL_GRACE_SECONDS=30
     PERMS_REPAIRED_FILE="$MAILDIR_PATH/.mbsync-perms-repaired"
-    mkdir -p "$MAILDIR_PATH"
+    mkdir -p "$MAILDIR_PATH" "$RUNTIME_DIR"
     : >"$FIND_CALLS"
     load run_child relax_new_maildir_perms signal_perms_repaired mark_sync_activity \
         filter_mbsync_output report_mbsync_errors report_mbsync_notices \
@@ -360,6 +361,71 @@ repair_still_runs_after_a_failed_mbsync() {
     run_sync || rc=$?
     ((rc == 3)) || return 1
     [[ "$(wc -l <"$FIND_CALLS")" -eq 2 ]] || return 1
+}
+
+# --- sync log lines (#879) ----------------------------------------------------
+#
+# A successful sync logs its duration against the deadline, so the
+# deadline can be tuned from the log. The permission repair's find and
+# chmod name the paths they fail on, and these paths hold folder names:
+# their diagnostics are kept in a temporary file and only counted, and
+# the file is removed on every path. A synthetic marker stands in for a
+# folder name and must never reach the log.
+
+readonly REPAIR_MARKER="MarkerZq9-879"
+
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+successful_sync_is_logged_with_its_duration() {
+    local rc=0 log="$WORK/sync-ok-log"
+    sync_setup sync-ok
+    mbsync() { command sleep 1; }
+    find() { :; }
+    run_sync >"$log" 2>&1 || rc=$?
+    cat "$log"
+    ((rc == 0)) || return 1
+    grep -qE '^>>> Sync ok in [1-9][0-9]*s \(deadline 86400s\)$' "$log" || return 1
+    # The repair's error file is removed on success too.
+    [[ -z "$(command find "$RUNTIME_DIR" -type f)" ]] || return 1
+    # A failed sync logs no success line.
+    mbsync() { mbsync_fails; }
+    rc=0
+    run_sync >"$log" 2>&1 || rc=$?
+    ((rc == 3)) || return 1
+    ! grep -q 'Sync ok' "$log" || return 1
+}
+
+# $1: the find that fails, d (directories) or f (files).
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+repair_errors_are_counted_without_naming_folders() {
+    local kind="$1" rc=0 log="$WORK/repair-err-log-$1"
+    sync_setup "repair-err-$kind"
+    mbsync() { mbsync_ok; }
+    find() {
+        if [[ "$3" == "$kind" ]]; then
+            printf "find: '%s/Folders/.%s/cur': Permission denied\n" "$MAILDIR_PATH" "$REPAIR_MARKER" >&2
+            printf "chmod: changing permissions of '%s/Folders/.%s/cur/1:2,S': Operation not permitted\n" \
+                "$MAILDIR_PATH" "$REPAIR_MARKER" >&2
+            return 1
+        fi
+    }
+    relax_new_maildir_perms >"$log" 2>&1 || rc=$?
+    cat "$log"
+    ((rc == 1)) || return 1
+    grep -q 'reported 2 error line(s)' "$log" || return 1
+    grep -q "To see them: docker exec mbsync find ${MAILDIR_PATH}" "$log" || return 1
+    if grep -q "$REPAIR_MARKER" "$log"; then
+        echo "a folder name reached the log"
+        return 1
+    fi
+    [[ -z "$(command find "$RUNTIME_DIR" -type f)" ]] || return 1
+    # Through run_sync too: the sync fails and still names no folder.
+    rc=0
+    run_sync >"$log" 2>&1 || rc=$?
+    ((rc == 1)) || return 1
+    grep -q 'could not make new Maildir entries readable' "$log" || return 1
+    ! grep -q "$REPAIR_MARKER" "$log" || return 1
+    ! grep -q 'Sync ok' "$log" || return 1
+    [[ -z "$(command find "$RUNTIME_DIR" -type f)" ]] || return 1
 }
 
 # --- permission-repair marker (#524) -------------------------------------------
@@ -1791,6 +1857,7 @@ missing_expected_fingerprint_is_refused_at_startup() {
 # shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
 stop_setup() {
     MAILDIR_PATH="$WORK/maildir-stop-$1"
+    RUNTIME_DIR="$WORK/runtime-stop-$1"
     CONFIG_FILE="$WORK/mbsyncrc"
     CHILD_LOG="$WORK/child-$1"
     SYNC_ACTIVITY_FILE="$WORK/activity-stop-$1"
@@ -1799,7 +1866,7 @@ stop_setup() {
     MBSYNC_ERROR_COUNTS_WAIT_TENTHS=50
     SYNC_DEADLINE_SECONDS=86400
     SYNC_KILL_GRACE_SECONDS=30
-    mkdir -p "$MAILDIR_PATH" "$WORK/bin-stop-$1"
+    mkdir -p "$MAILDIR_PATH" "$RUNTIME_DIR" "$WORK/bin-stop-$1"
     : >"$CHILD_LOG"
     # A long-running child that records its start and any TERM it gets.
     # Background commands ignore INT, so TERM is what must reach it.
@@ -1940,6 +2007,11 @@ check "sync succeeds when mbsync and the repair succeed" \
 check "a failed directory repair fails the sync" failed_directory_repair_fails_the_sync
 check "a failed file repair fails the sync" failed_file_repair_fails_the_sync
 check "the repair still runs after a failed mbsync" repair_still_runs_after_a_failed_mbsync
+check "a successful sync is logged with its duration" successful_sync_is_logged_with_its_duration
+check "directory repair errors are counted without naming folders" \
+    repair_errors_are_counted_without_naming_folders d
+check "file repair errors are counted without naming folders" \
+    repair_errors_are_counted_without_naming_folders f
 check "unopenable far boxes alone are a warned success" \
     unopenable_far_box_only_is_a_warned_success
 check "an unopenable far box with another error still fails" \

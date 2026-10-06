@@ -407,8 +407,21 @@ relax_new_maildir_perms() {
     #
     # Runs inside ``run_sync``, an ``if`` condition where errexit is off,
     # so each step's failure is returned explicitly.
-    find "$MAILDIR_PATH" -type d \! -perm -005 -exec chmod go+rx {} + || return 1
-    find "$MAILDIR_PATH" -type f \! -perm -044 -exec chmod go+r {} + || return 1
+    #
+    # find and chmod name the paths they fail on, and these paths hold
+    # folder names, so their diagnostics are kept in a file and only
+    # counted, as in check_maildir_layout (#879).
+    local find_err lines
+
+    find_err="$(mktemp "${RUNTIME_DIR}/perms-find.XXXXXX")" || return 1
+    if ! find "$MAILDIR_PATH" -type d \! -perm -005 -exec chmod go+rx {} + 2>"$find_err" \
+        || ! find "$MAILDIR_PATH" -type f \! -perm -044 -exec chmod go+r {} + 2>>"$find_err"; then
+        lines="$(wc -l <"$find_err" | tr -d '[:space:]')"
+        rm -f "$find_err"
+        echo ">>> find/chmod reported ${lines} error line(s), not logged because they name folders. To see them: docker exec mbsync find ${MAILDIR_PATH} -type d ! -perm -005 -o -type f ! -perm -044" >&2
+        return 1
+    fi
+    rm -f "$find_err"
 }
 
 signal_perms_repaired() {
@@ -685,14 +698,16 @@ run_sync() {
     # mbsync runs under timeout(1) with the per-run deadline (#282). A run
     # stopped there fails like any other, so the loop's failure limit
     # applies and no success stamp is written.
-    local rc=0 counts="" withheld=0 other=0
+    local rc=0 counts="" withheld=0 other=0 started duration
     rm -f "$MBSYNC_ERROR_COUNTS_FILE" "$MBSYNC_NOTICES_DONE_FILE"
     mark_sync_activity
     # Both streams go through the filters as they are written; run_child
     # waits on (and signals) timeout, which passes a stop on to mbsync.
+    started="$SECONDS"
     run_child timeout --kill-after="${SYNC_KILL_GRACE_SECONDS}s" "${SYNC_DEADLINE_SECONDS}s" \
         mbsync -c "$CONFIG_FILE" -a \
         > >(report_mbsync_notices) 2> >(report_mbsync_errors) || rc=$?
+    duration=$((SECONDS - started))
     mark_sync_activity
     # 124: stopped by TERM at the deadline; 137: KILLed, after ignoring
     # TERM for the grace (or by the kernel, which timeout cannot tell).
@@ -728,6 +743,11 @@ run_sync() {
         echo ">>> WARNING: could not signal the indexer to re-watch Maildir folders; it does so at the next successful sync or its recovery sweep." >&2
     fi
     mark_sync_activity
+    # The duration is mbsync's run, the part SYNC_DEADLINE_SECONDS bounds,
+    # so the deadline can be tuned from this line (#879).
+    if ((rc == 0)); then
+        printf '>>> Sync ok in %ds (deadline %ds)\n' "$duration" "$SYNC_DEADLINE_SECONDS"
+    fi
     return "$rc"
 }
 
