@@ -42,6 +42,7 @@ from .outputs import (
     clip,
     date_bounds,
     describe_date_bounds,
+    read_only,
     reaped_source,
     source,
     thread_summary,
@@ -118,7 +119,10 @@ def register_search_tools(
     # Config identifier for the per-call timing line.
     timing_config = {"rerank": rerank_mode(reranker)}
 
-    @server.tool(output_schema=SearchEmailsOutput.model_json_schema())
+    @server.tool(
+        output_schema=SearchEmailsOutput.model_json_schema(),
+        annotations=read_only("Search Emails"),
+    )
     @timed_tool("search_emails", **timing_config)
     async def search_emails(
         query: str,
@@ -416,7 +420,10 @@ def register_search_tools(
             log.error("search_emails error: %s", safe_error)
             raise ToolError(f"Search error: {safe_error}") from e
 
-    @server.tool(output_schema=EvidenceOutput.model_json_schema())
+    @server.tool(
+        output_schema=EvidenceOutput.model_json_schema(),
+        annotations=read_only("Get Evidence Passages"),
+    )
     @timed_tool("get_evidence", **timing_config)
     async def get_evidence(
         query: str,
@@ -779,7 +786,10 @@ def register_search_tools(
 
         return tool_result("\n".join(lines).rstrip(), output)
 
-    @server.tool(output_schema=SearchAttachmentsOutput.model_json_schema())
+    @server.tool(
+        output_schema=SearchAttachmentsOutput.model_json_schema(),
+        annotations=read_only("Search Attachments"),
+    )
     @timed_tool("search_attachments")
     async def search_attachments(
         query: str | None = None,

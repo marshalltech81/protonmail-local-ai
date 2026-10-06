@@ -98,6 +98,37 @@ require_prerequisites() {
     validate_bridge_endpoint || exit 1
 }
 
+log_startup_identity() {
+    # One line naming what is running (#887): the source commit baked into
+    # the image (GIT_COMMIT; anything but a plain token is "unknown"), a
+    # random ID for this start, and the first 12 hex digits of a SHA-256
+    # over the non-secret settings named below: the endpoint, the sync
+    # timing, the expected certificate fingerprint (not secret; in the
+    # form verify_expected_fingerprint compares) and whether pin rotation
+    # is on. BRIDGE_USER and the password are not inputs. It runs before
+    # validation: values are hashed as configured, never parsed or printed,
+    # so nothing here can fail on a malformed setting. An endpoint value
+    # with an "@" (userinfo, which validation would refuse) is hashed as a
+    # marker, so the hash cannot be used to test guesses at a password.
+    local commit="${GIT_COMMIT:-unknown}" boot config rotate="false"
+    local host="$BRIDGE_HOST" port="$BRIDGE_IMAP_PORT" cert_host="$BRIDGE_CERT_HOST"
+    if [[ ! "$commit" =~ ^[0-9A-Za-z._-]{1,64}$ ]]; then
+        commit="unknown"
+    fi
+    if [[ "$BRIDGE_CERT_PIN_ROTATE" == "true" ]]; then
+        rotate="true"
+    fi
+    [[ "$host" != *@* ]] || host="<value-with-credentials>"
+    [[ "$port" != *@* ]] || port="<value-with-credentials>"
+    [[ "$cert_host" != *@* ]] || cert_host="<value-with-credentials>"
+    boot="$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')"
+    config="$(printf 'BRIDGE_HOST=%s\nBRIDGE_IMAP_PORT=%s\nBRIDGE_CERT_HOST=%s\nSYNC_INTERVAL=%s\nSYNC_DEADLINE_SECONDS=%s\nBRIDGE_CERT_FINGERPRINT=%s\nBRIDGE_CERT_PIN_ROTATE=%s\n' \
+        "$host" "$port" "$cert_host" "$SYNC_INTERVAL" "$SYNC_DEADLINE_SECONDS" \
+        "$(expected_fingerprint)" "$rotate" | sha256sum)"
+    printf '>>> Startup identity: service=mbsync commit=%s boot=%s config=%s\n' \
+        "$commit" "$boot" "${config:0:12}"
+}
+
 validate_bridge_endpoint() {
     # These values are written into mbsyncrc and, with a tunnel, into the
     # shell command isync runs for it, so only a plain host name or IPv4
@@ -775,6 +806,8 @@ record_successful_sync() {
 # it directly from the Docker secret at /run/secrets/bridge_pass.
 # =============================================================================
 install_signal_handlers
+# Before validation, so a refused setting still leaves the line (#887).
+log_startup_identity
 require_prerequisites
 check_maildir_layout || exit 1
 

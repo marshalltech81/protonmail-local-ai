@@ -40,6 +40,7 @@ render() {
     env -i PATH="$PATH" HOME="${HOME:-/tmp}" BRIDGE_USER="synthetic@example.com" \
         ${BRIDGE_IMAP_PORT:+BRIDGE_IMAP_PORT="$BRIDGE_IMAP_PORT"} \
         ${BRIDGE_CERT_FINGERPRINT:+BRIDGE_CERT_FINGERPRINT="$BRIDGE_CERT_FINGERPRINT"} \
+        ${GIT_COMMIT:+GIT_COMMIT="$GIT_COMMIT"} \
         docker compose --project-directory "$ROOT_DIR" --env-file /dev/null "${args[@]}" \
         config --format json >"$WORK/config.json" 2>"$WORK/compose.err" || {
         cat "$WORK/compose.err"
@@ -638,6 +639,78 @@ mbsync_keeps_its_hardening_and_no_port_is_exposed() {
     expect '.services.mbsync | has("extra_hosts") | not' || return 1
 }
 
+# Each image is built with the source commit it logs at startup (#887):
+# `make build` passes it, a plain `docker compose build` gets "unknown".
+every_image_is_built_with_the_source_commit() {
+    render "$BASE"
+    expect '[.services[] | .build.args.GIT_COMMIT == "unknown"] | all' || return 1
+    GIT_COMMIT="abc1234-dirty" render "$BASE"
+    expect '[.services[] | .build.args.GIT_COMMIT == "abc1234-dirty"] | all' || return 1
+}
+
+# Git and make in a scratch directory, isolated from the caller's Git
+# configuration and environment.
+scratch_git() {
+    local dir="$1"
+    shift
+    env -u GIT_DIR -u GIT_WORK_TREE GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+        git -C "$dir" -c user.name=synthetic -c user.email=synthetic@example.invalid \
+        -c commit.gpgsign=false "$@"
+}
+
+# Runs both build targets dry in directory $1, with any NAME=value
+# arguments that follow added to the environment.
+scratch_make_commit() {
+    local dir="$1"
+    shift
+    env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMIT -u GIT_COMMIT_OVERRIDE \
+        GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 "$@" \
+        make --no-print-directory -C "$dir" -n build build-nocache 2>"$WORK/make.err"
+}
+
+# Fails unless both build targets pass GIT_COMMIT=$2 in directory $1;
+# any further NAME=value arguments go into make's environment.
+expect_make_commit() {
+    local dir="$1" expected="$2" output
+    shift 2
+    output="$(scratch_make_commit "$dir" "$@")"
+    [[ "$(grep -cxE "GIT_COMMIT=$expected docker compose build( --no-cache)? *" <<<"$output")" -eq 2 ]] || {
+        printf 'expected GIT_COMMIT=%s from both targets:\n%s\n' "$expected" "$output"
+        cat "$WORK/make.err"
+        return 1
+    }
+}
+
+# The Makefile in a scratch repository (Codex review round 2 on #893):
+# the short HEAD hash when clean, -dirty for a modified tracked file or
+# a new untracked one, but not for a git-ignored file such as .env, and
+# empty outside a checkout.
+make_build_passes_the_source_commit() {
+    local repo="$WORK/commit-repo" plain="$WORK/commit-plain" head
+    mkdir -p "$repo" "$plain"
+    cp "$ROOT_DIR/Makefile" "$repo/Makefile"
+    cp "$ROOT_DIR/Makefile" "$plain/Makefile"
+    printf '.env\n' >"$repo/.gitignore"
+    scratch_git "$repo" init -q
+    scratch_git "$repo" add Makefile .gitignore
+    scratch_git "$repo" commit -q -m synthetic
+    head="$(scratch_git "$repo" rev-parse --short HEAD)"
+    expect_make_commit "$repo" "$head" || return 1
+    # Codex review round 6 on #893: a GIT_COMMIT left in the shell or CI
+    # does not replace the checkout's commit; GIT_COMMIT_OVERRIDE does.
+    expect_make_commit "$repo" "$head" GIT_COMMIT=stale || return 1
+    expect_make_commit "$repo" synthetic-override GIT_COMMIT=stale \
+        GIT_COMMIT_OVERRIDE=synthetic-override || return 1
+    printf 'SYNTHETIC=1\n' >"$repo/.env"
+    expect_make_commit "$repo" "$head" || return 1
+    printf 'untracked\n' >"$repo/new-file"
+    expect_make_commit "$repo" "$head-dirty" || return 1
+    rm "$repo/new-file"
+    printf '# modified\n' >>"$repo/.gitignore"
+    expect_make_commit "$repo" "$head-dirty" || return 1
+    expect_make_commit "$plain" "" || return 1
+}
+
 the_base_composes_with_the_hardened_overlay() {
     render "$BASE" "$HARDENED"
     expect '.services | keys == ["indexer", "mbsync", "mcp-server"]' || return 1
@@ -694,6 +767,8 @@ check "merged hardening rejects new users, secrets, hooks and devices" \
     merged_hardening_rejects_new_grants
 check "merged hardening rejects a service a top-level include brings in" \
     merged_hardening_rejects_an_included_service
+check "every image is built with the source commit" every_image_is_built_with_the_source_commit
+check "make build passes the source commit" make_build_passes_the_source_commit
 
 if ((FAILURES > 0)); then
     printf '%d test(s) failed\n' "$FAILURES" >&2

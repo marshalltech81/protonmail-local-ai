@@ -55,6 +55,12 @@ RUN mkdir -p /maildir /state \
   && chmod 755 /maildir \
   && chmod 700 /state
 
+# Source commit the image was built from, logged at startup (#887).
+# Declared late so a new commit does not invalidate the layers above.
+ARG GIT_COMMIT=unknown
+LABEL org.opencontainers.image.revision="${GIT_COMMIT}"
+ENV GIT_COMMIT="${GIT_COMMIT}"
+
 # Drop to non-root user
 USER mbsync
 

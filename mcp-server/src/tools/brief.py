@@ -78,6 +78,7 @@ from .outputs import (
     ConclusionQuoteCheck,
     FindingSource,
     clip,
+    read_only,
     thread_summary,
     tool_result,
 )
@@ -748,7 +749,10 @@ def register_experimental_tools(
     # Config identifiers for the per-call timing line.
     timing_config = {"rerank": rerank_mode(reranker), "inference": inference_client.mode}
 
-    @server.tool(output_schema=BriefIssueOutput.model_json_schema())
+    @server.tool(
+        output_schema=BriefIssueOutput.model_json_schema(),
+        annotations=read_only("Brief an Issue (Experimental)"),
+    )
     @timed_tool("brief_issue", **timing_config)
     async def brief_issue(
         topic: str,
@@ -990,7 +994,10 @@ def register_experimental_tools(
             log.error("brief_issue error: %s", safe_error)
             raise ToolError(f"Error: {safe_error}") from e
 
-    @server.tool(output_schema=CheckConclusionOutput.model_json_schema())
+    @server.tool(
+        output_schema=CheckConclusionOutput.model_json_schema(),
+        annotations=read_only("Check a Conclusion (Experimental)"),
+    )
     @timed_tool("check_conclusion", **timing_config)
     async def check_conclusion(
         conclusion: str,

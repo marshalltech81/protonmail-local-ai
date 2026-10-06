@@ -47,6 +47,7 @@ from .outputs import (
     describe_date_bounds,
     listed_message,
     message_headers,
+    read_only,
     reaped_source,
     thread_summary,
     tool_result,
@@ -231,7 +232,10 @@ def register_retrieval_tools(server, db):
         "This response is based on the local SQLite index only."
     )
 
-    @server.tool(output_schema=GetThreadOutput.model_json_schema())
+    @server.tool(
+        output_schema=GetThreadOutput.model_json_schema(),
+        annotations=read_only("Get Thread"),
+    )
     @timings.timed_tool("get_thread")
     async def get_thread(
         thread_id: str,
@@ -438,7 +442,10 @@ def register_retrieval_tools(server, db):
             log.error("get_thread error: %s", type(e).__name__)
             raise ToolError(f"Error: {type(e).__name__}") from e
 
-    @server.tool(output_schema=GetMessageOutput.model_json_schema())
+    @server.tool(
+        output_schema=GetMessageOutput.model_json_schema(),
+        annotations=read_only("Get Message"),
+    )
     @timings.timed_tool("get_message")
     async def get_message(
         message_id: str,
@@ -654,7 +661,10 @@ def register_retrieval_tools(server, db):
             log.error("get_message error: %s", type(e).__name__)
             raise ToolError(f"Error: {type(e).__name__}") from e
 
-    @server.tool(output_schema=ListThreadsOutput.model_json_schema())
+    @server.tool(
+        output_schema=ListThreadsOutput.model_json_schema(),
+        annotations=read_only("List Threads"),
+    )
     @timings.timed_tool("list_threads")
     async def list_threads(
         folder: str = "INBOX",
@@ -754,7 +764,10 @@ def register_retrieval_tools(server, db):
             log.error("list_threads error: %s", type(e).__name__)
             raise ToolError(f"Error: {type(e).__name__}") from e
 
-    @server.tool(output_schema=QueryMessagesOutput.model_json_schema())
+    @server.tool(
+        output_schema=QueryMessagesOutput.model_json_schema(),
+        annotations=read_only("Query Messages"),
+    )
     @timings.timed_tool("query_messages")
     async def query_messages(
         sender: str | None = None,
@@ -978,7 +991,10 @@ def register_retrieval_tools(server, db):
 
         return tool_result("\n".join(lines), output)
 
-    @server.tool(output_schema=FindContactOutput.model_json_schema())
+    @server.tool(
+        output_schema=FindContactOutput.model_json_schema(),
+        annotations=read_only("Find Contact"),
+    )
     @timings.timed_tool("find_contact")
     async def find_contact(
         query: str,
@@ -1062,7 +1078,10 @@ def register_retrieval_tools(server, db):
             )
         return tool_result("\n".join(lines), output)
 
-    @server.tool(output_schema=ListFoldersOutput.model_json_schema())
+    @server.tool(
+        output_schema=ListFoldersOutput.model_json_schema(),
+        annotations=read_only("List Folders"),
+    )
     @timings.timed_tool("list_folders")
     async def list_folders() -> CallToolResult:
         """

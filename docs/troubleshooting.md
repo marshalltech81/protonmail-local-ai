@@ -28,6 +28,61 @@ as secrets. No other check needs or shows one.
 | `get_mailbox_status` says `... waiting to be indexed` | Index current: indexing behind | Normal after a large sync; if it does not fall, see [Tuning indexing retries](#tuning-indexing-retries) |
 | `get_mailbox_status` is current but a message is missing | Index: a dead-lettered message (`current` ignores the `dead` count), or none: the mail reached Proton after the last sync | If the `dead` count is non-zero, fix its cause and run `make requeue-dead` (see [Tuning indexing retries](#tuning-indexing-retries)); otherwise wait one `SYNC_INTERVAL` |
 
+## Which build and settings is a container running?
+
+Each service logs one `Startup identity` line when it starts, before it
+parses or checks any setting, so the line is there even when startup
+then fails (a malformed setting, a missing token, a refused index or a
+failed migration):
+
+```text
+indexer     ... Startup identity: service=indexer commit=1a2b3c4 boot=5f0e9d8c7b6a schema_code=0 schema_stored=0 config=0123456789ab
+mcp-server  ... Startup identity: service=mcp-server commit=1a2b3c4 boot=0a1b2c3d4e5f schema_stored=0 config=ba9876543210
+mbsync      >>> Startup identity: service=mbsync commit=1a2b3c4 boot=9e8d7c6b5a4f config=c0ffee123456
+```
+
+Find it with `docker compose logs <service> | grep 'Startup identity'`.
+
+- `commit` is the checkout the image was built from, passed by
+  `make build`; `-dirty` means a tracked file was modified or an
+  untracked file was present that Git does not ignore (`.env` and
+  `.secrets/` are ignored, so they never count). A `GIT_COMMIT` set in
+  the shell is ignored; `make build GIT_COMMIT_OVERRIDE=<value>` labels
+  a build explicitly. `unknown`
+  means the image was built another way (a plain `docker compose build`,
+  or by `make up` when no image existed): run `make build`. The same
+  value is on the image:
+  `docker image inspect <image> --format '{{index .Config.Labels "org.opencontainers.image.revision"}}'`.
+- `boot` is random for every process start. Lines between one `boot`
+  and the next come from the same run, so a restart shows up as a new
+  value.
+- `schema_code` (indexer only) is the schema version the code expects.
+  `schema_stored` is the version stamped in the index file, read
+  read-only before the service opens it (and, for the indexer, before
+  any migration): `none` when there is no index yet, `unreadable` when
+  SQLite cannot read the file. A `schema_stored` above `schema_code` is
+  a downgrade, which the indexer refuses; one below it means
+  migrations run on this start.
+- `config` is the first 12 hex digits of a SHA-256 over the service's
+  non-secret settings as configured: the raw environment values, not
+  parsed, so a malformed value just gives a different hash, and an
+  unset setting hashes differently from one set to its default. A
+  `*_BASE_URL` (or an mbsync host or port) that carries credentials
+  (`user:password@`) is hashed as a fixed marker, so the hash cannot be
+  used to test guesses at the password. The inputs are named one by one in code: every non-secret setting the
+  service reads, that is paths (including the indexer's health file),
+  modes, endpoints, model names, the MCP transport and limits (indexer
+  and mcp-server, `_IDENTITY_SETTINGS` in `src/main.py`, with everything
+  else the service reads listed with its reason in
+  `_IDENTITY_EXCLUDED`; a test fails when a new setting is in neither),
+  or `BRIDGE_HOST`, `BRIDGE_IMAP_PORT`,
+  `BRIDGE_CERT_HOST`, `SYNC_INTERVAL`, `SYNC_DEADLINE_SECONDS`,
+  `BRIDGE_CERT_FINGERPRINT` (normalized, and not secret) and
+  `BRIDGE_CERT_PIN_ROTATE` (mbsync). It changes when one of those
+  settings changes and is otherwise stable across restarts. API keys,
+  the MCP bearer token, the Bridge user and the Bridge password are not
+  inputs, so rotating a secret leaves it unchanged.
+
 ## Bridge is up but IMAP is unresponsive / mbsync can't connect
 
 Bridge may still be in the middle of its initial sync — pulling every
