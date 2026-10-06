@@ -231,19 +231,22 @@ baseline: sync-indexer sync-mcp
 # the INFERENCE_* answerer and the optional JUDGE_* judge, and writes a
 # mode-600 report under EVAL_OUT (git-ignored by default). It calls the
 # configured providers, so it is never part of `make test` or CI. EVAL_ARGS
-# passes extra flags (e.g. `--case ask-roof-total --detail <path>`).
+# passes extra flags (e.g. `--case ask-roof-total --detail <path>`);
+# relative --out/--detail paths resolve against the repository root, and
+# the arguments are checked (--preflight) before the index is built.
 EVAL_OUT ?= $(CURDIR)/.answer-eval
 eval-answers: sync-indexer sync-mcp
 	@dir=$$(mktemp -d) && stamp=$$(date -u +%Y%m%dT%H%M%SZ) && \
+	( cd mcp-server && uv run python -m tests.answer_eval run --preflight --index-dir "$$dir/out" --out "$(EVAL_OUT)/run-$$stamp.json" --path-base "$(CURDIR)" $(EVAL_ARGS) ) && \
 	( cd indexer && uv run python -m tests.baseline.build "$$dir/out" ../mcp-server/tests/baseline/golden.json ../mcp-server/tests/answer_eval/cases.json >/dev/null ) && \
-	( cd mcp-server && uv run python -m tests.answer_eval run --index-dir "$$dir/out" --out "$(EVAL_OUT)/run-$$stamp.json" --source-commit "$$(git rev-parse HEAD)" $(EVAL_ARGS) ); \
+	( cd mcp-server && uv run python -m tests.answer_eval run --index-dir "$$dir/out" --out "$(EVAL_OUT)/run-$$stamp.json" --path-base "$(CURDIR)" --source-commit "$$(git rev-parse HEAD)" $(EVAL_ARGS) ); \
 	status=$$?; rm -rf "$$dir"; exit $$status
 
 # Compare two answer-evaluation reports: per-case and per-category changes.
 eval-answers-compare: sync-mcp
 	@if [ -z "$(BASELINE)" ] || [ -z "$(CANDIDATE)" ]; then \
 		echo "usage: make eval-answers-compare BASELINE=<run.json> CANDIDATE=<run.json>"; exit 2; fi
-	cd mcp-server && uv run python -m tests.answer_eval compare "$(abspath $(BASELINE))" "$(abspath $(CANDIDATE))" $(EVAL_ARGS)
+	cd mcp-server && uv run python -m tests.answer_eval compare "$(abspath $(BASELINE))" "$(abspath $(CANDIDATE))" --path-base "$(CURDIR)" $(EVAL_ARGS)
 
 typecheck: typecheck-indexer typecheck-mcp
 

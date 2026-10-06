@@ -433,9 +433,26 @@ export JUDGE_MODE=anthropic JUDGE_BASE_URL=default JUDGE_MODEL=<model>  # option
 # export JUDGE_MODE=claude-cli JUDGE_MODEL=<model>   # Claude Code, Claude subscription
 # export JUDGE_MODE=codex-cli JUDGE_MODEL=<model>    # Codex CLI, ChatGPT subscription
 make eval-answers                                   # report under .answer-eval/ (git-ignored)
-make eval-answers EVAL_ARGS="--case ask-recital-date --detail /tmp/detail.json"
+make eval-answers EVAL_ARGS="--case ask-recital-date --detail .answer-eval/detail.json"
 make eval-answers-compare BASELINE=<run-a.json> CANDIDATE=<run-b.json>
 ```
+
+The targets read settings only from the environment, not from `.env`.
+To keep eval settings between runs, put the `export`-free assignments
+(`INFERENCE_MODE=...`, `JUDGE_MODEL=...`, `JUDGE_MAX_TOKENS=...`) in
+`.env.eval` at the repository root, which is git-ignored, and load it
+into the shell before `make`:
+
+```bash
+set -a; . ./.env.eval; set +a
+make eval-answers
+```
+
+Keep keys out of it: they stay in `.secrets/inference_api_key.txt` and
+`.secrets/judge_api_key.txt` (mode 600). Relative `--out` and `--detail`
+paths in `EVAL_ARGS` resolve against the repository root (make passes
+`--path-base`), and the target checks the arguments before it builds
+the index, so a refused path or unknown `--case` fails in seconds.
 
 The target builds the baseline index (with every case question
 embedded) in a temporary directory, runs the cases one at a time, and

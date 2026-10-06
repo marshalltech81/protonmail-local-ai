@@ -1621,6 +1621,54 @@ class TestCli:
         assert not out.exists()
         assert ".answer-eval" in capsys.readouterr().err
 
+    def test_relative_report_paths_resolve_against_the_path_base(
+        self, chunked_db, tmp_path, monkeypatch, capsys
+    ):
+        """#814: make runs the CLI from mcp-server/, so a relative
+        ``.answer-eval/x.json`` landed in mcp-server/ and was refused.
+        ``--path-base`` (the repository root, from make) resolves it."""
+        monkeypatch.chdir(cli.REPO_ROOT / "mcp-server")
+        rel = [
+            "--out",
+            ".answer-eval/run-814.json",
+            "--detail",
+            ".answer-eval/detail-814.json",
+        ]
+        base = ["run", "--preflight", "--index-dir", str(tmp_path / "none"), *rel]
+        assert cli.main(base) == cli.EXIT_CONFIG
+        capsys.readouterr()
+        assert cli.main([*base, "--path-base", str(cli.REPO_ROOT)]) == cli.EXIT_OK
+        assert not (cli.REPO_ROOT / ".answer-eval" / "run-814.json").exists()
+        # A relative path outside the repository resolves too.
+        out = tmp_path / "r.json"
+        assert cli.main([*base[:4], "--out", "r.json", "--path-base", str(tmp_path)]) == 0
+        assert not out.exists()
+        # compare's --out follows the same rule.
+        a = self._report(chunked_db, tmp_path, "a.json")
+        argv = ["compare", str(a), str(a), "--out", "c.json", "--path-base", str(tmp_path)]
+        assert cli.main(argv) == cli.EXIT_OK
+        assert (tmp_path / "c.json").exists()
+
+    def test_preflight_checks_paths_before_the_index_exists(self, tmp_path, monkeypatch, capsys):
+        """#814: make checks the arguments before building the index, so a
+        bad report path fails in seconds; nothing is opened or written."""
+
+        def no_provider(*_a, **_k):
+            raise AssertionError("a provider was configured")
+
+        monkeypatch.setattr(cli, "load_layer", no_provider)
+        missing = str(tmp_path / "not-built-yet")
+        out = tmp_path / "r.json"
+        argv = ["run", "--preflight", "--index-dir", missing, "--out", str(out)]
+        assert cli.main(argv) == cli.EXIT_OK
+        assert not out.exists() and not (tmp_path / "not-built-yet").exists()
+        inside = str(cli.REPO_ROOT / "mcp-server" / "run.json")
+        argv = ["run", "--preflight", "--index-dir", missing, "--out", inside]
+        assert cli.main(argv) == cli.EXIT_CONFIG
+        assert ".answer-eval" in capsys.readouterr().err
+        argv = ["run", "--preflight", "--index-dir", missing, "--out", str(out), "--case", "nope"]
+        assert cli.main(argv) == cli.EXIT_CONFIG
+
     def test_run_refuses_a_non_synthetic_index(self, messages_db, tmp_path, capsys):
         index = tmp_path / "index"
         index.mkdir()
