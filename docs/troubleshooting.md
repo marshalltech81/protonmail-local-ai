@@ -934,6 +934,41 @@ The health-file and ingestion-state failures can repeat many times a
 second, so they share the same 20-per-5-minutes budget as the embed
 retries; their recovery line still counts every failure.
 
+Queue and maintenance (all INFO unless noted):
+
+- `queue: pending=<n> retrying=<n> deferred_permission=<n>
+  parked_trashed=<n> dead=<n> oldest_due_age=<s>s; deferrals since last
+  heartbeat: parse=<n> embed=<n> trashed=<n>`, every 5 minutes, during
+  the initial index too. `pending` jobs have never failed; `retrying`
+  jobs failed or were deferred by an embedder outage;
+  `deferred_permission` jobs could not be read yet (mbsync opens new
+  files to the indexer only after its sync; deferred for up to 24 h);
+  `parked_trashed` jobs belong to trashed messages waiting for the
+  reaper, which is normal in mirror mode, not a failure. A growing
+  `oldest_due_age` means due jobs are not being drained (an embedder
+  outage pauses draining; see above). The deferral counts are `defer`
+  calls since the previous heartbeat, by stage. `queue heartbeat
+  failed: <type>` (WARNING) if the counts could not be read.
+- `re-queued <n> message(s) whose attachments were extracted by an
+  older extractor version (...); skipped <n> dead-lettered (run make
+  requeue-dead to refresh them).`, at startup after an extractor
+  change. WARNING when any dead-lettered message was skipped: those
+  keep their old attachment text until you run `make requeue-dead`.
+- `maintenance pass=rescan ms=<ms> seen=<n> queued=<n>
+  skipped_dead=<n>`, after each periodic Maildir rescan, even when it
+  queued nothing. `seen` is message files walked, `queued` the ones
+  with no event that the rescan picked up.
+- `maintenance pass=reconcile ms=<ms> tombstoned=<n> cleared=<n>
+  renamed=<n> missing=<n> threads_reaped=<n> threads_rebuilt=<n>
+  blocked_threads=<n> brake=<ok|tripped|forced>`, after each deletion
+  reconciliation pass (mirror mode only). `brake=tripped` means the
+  mass-delete brake held this pass's reaps back (see "Deletion
+  reconciliation"); `forced` means `INDEXER_DELETION_FORCE=true`
+  disables the brake.
+- `maintenance pass=watch_refresh ms=<ms> watches=<n>`, after each
+  periodic Maildir watch refresh; `watches` is the number of
+  directories readable when the watch was last scheduled.
+
 ## Reading a tool call's log line
 
 Every MCP tool logs one completion line per call on the `mcp.timings`

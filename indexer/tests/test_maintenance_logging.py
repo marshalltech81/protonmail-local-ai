@@ -9,12 +9,27 @@ a provider error stays out of the log.
 """
 
 import logging
+import re
 import sqlite3
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
 from src import main
 from src.database import Database
+from src.folder_watch import FolderWatchRefresher
+from src.queue import (
+    ERROR_CLASS_RETRYABLE,
+    REASON_INITIAL_SCAN,
+    STAGE_EMBED,
+    STAGE_PARSE,
+    STAGE_TRASHED,
+    IndexingQueue,
+)
+from src.threader import Threader
+from src.timings import TimingAggregator
+
+from tests.conftest import make_mock_embedder
 
 MARKER = "SYNTHETIC_OBS_MARKER"
 
@@ -281,3 +296,325 @@ class TestPruneRecovery:
         assert _recoveries(caplog) == ["reaped-record prune recovered after 1 failure(s) over 5s"]
         assert MARKER not in caplog.text
         db.close()
+
+
+# --- #874: queue heartbeat -----------------------------------------------
+
+
+def _seed_queue(tmp_path) -> tuple[Database, IndexingQueue, datetime]:
+    """One row in each heartbeat bucket, paths carrying the marker:
+    two never tried (one due two minutes ago), one retrying, one
+    deferred for permissions, one parked trashed file, one dead."""
+    db = Database(tmp_path / "mail.db")
+    queue = IndexingQueue(db, max_attempts=3, base_backoff_seconds=0)
+    now = datetime.now(UTC)
+    path = f"/maildir/{MARKER}/cur/%s"
+    queue.enqueue(path % "old", REASON_INITIAL_SCAN, due_at=now - timedelta(seconds=120))
+    queue.enqueue(path % "new", REASON_INITIAL_SCAN)
+    queue.enqueue(path % "retry", REASON_INITIAL_SCAN)
+    queue.mark_failed(path % "retry", stage="db_write", error="OperationalError")
+    queue.enqueue(path % "perm", REASON_INITIAL_SCAN)
+    queue.defer(
+        path % "perm",
+        stage=STAGE_PARSE,
+        error="PermissionError: [Errno 13] Permission denied",
+        error_class=ERROR_CLASS_RETRYABLE,
+        delay_seconds=60,
+    )
+    queue.enqueue(path % "trash", REASON_INITIAL_SCAN)
+    queue.defer(
+        path % "trash",
+        stage=STAGE_TRASHED,
+        error="file is T-flagged; parked until reaped or restored",
+        error_class=ERROR_CLASS_RETRYABLE,
+        delay_seconds=3600,
+    )
+    queue.enqueue(path % "dead", REASON_INITIAL_SCAN)
+    queue.mark_dead_terminal(path % "dead", stage="parse", error="too large")
+    return db, queue, now
+
+
+class TestQueueHeartbeatCounts:
+    def test_one_row_per_bucket(self, tmp_path):
+        db, queue, now = _seed_queue(tmp_path)
+        counts = queue.heartbeat_counts(now=now + timedelta(seconds=5))
+        assert counts == {
+            "pending": 2,
+            "retrying": 1,
+            "deferred_permission": 1,
+            "parked_trashed": 1,
+            "dead": 1,
+            "oldest_due_age": 125,
+        }
+        db.close()
+
+    def test_empty_queue(self, tmp_path):
+        db = Database(tmp_path / "mail.db")
+        counts = IndexingQueue(db).heartbeat_counts()
+        assert counts == {
+            "pending": 0,
+            "retrying": 0,
+            "deferred_permission": 0,
+            "parked_trashed": 0,
+            "dead": 0,
+            "oldest_due_age": 0,
+        }
+        db.close()
+
+    def test_defer_counts_by_stage_and_resets(self, tmp_path):
+        db, queue, _now = _seed_queue(tmp_path)
+        queue.defer(
+            f"/maildir/{MARKER}/cur/new",
+            stage=STAGE_EMBED,
+            error="APIConnectionError",
+            error_class=ERROR_CLASS_RETRYABLE,
+            delay_seconds=30,
+        )
+        assert queue.drain_deferrals() == {"parse": 1, "embed": 1, "trashed": 1}
+        assert queue.drain_deferrals() == {"parse": 0, "embed": 0, "trashed": 0}
+        db.close()
+
+
+class TestQueueHeartbeatLine:
+    def test_logs_counts_at_the_interval(self, tmp_path, caplog, clock):
+        caplog.set_level(logging.INFO)
+        db, queue, _now = _seed_queue(tmp_path)
+        # The queue's own retry and dead-letter lines carry file paths.
+        caplog.clear()
+
+        main._maybe_log_queue_heartbeat(queue)
+        clock["t"] += main.QUEUE_HEARTBEAT_INTERVAL_SECS - 1
+        main._maybe_log_queue_heartbeat(queue)
+        lines = _messages(caplog, "queue: ")
+        assert len(lines) == 1
+        assert lines[0].levelno == logging.INFO
+        assert re.fullmatch(
+            r"queue: pending=2 retrying=1 deferred_permission=1 parked_trashed=1 dead=1 "
+            r"oldest_due_age=1\d\ds; deferrals since last heartbeat: parse=1 embed=0 trashed=1",
+            lines[0].getMessage(),
+        )
+
+        clock["t"] += 1
+        main._maybe_log_queue_heartbeat(queue)
+        lines = _messages(caplog, "queue: ")
+        assert len(lines) == 2
+        assert lines[1].getMessage().endswith("parse=0 embed=0 trashed=0")
+        assert MARKER not in caplog.text
+        db.close()
+
+    def test_a_failed_count_query_logs_its_type(self, tmp_path, monkeypatch, caplog):
+        db = Database(tmp_path / "mail.db")
+        queue = IndexingQueue(db)
+
+        def boom(**_kw):
+            raise sqlite3.OperationalError(MARKER)
+
+        monkeypatch.setattr(queue, "heartbeat_counts", boom)
+        main._maybe_log_queue_heartbeat(queue)
+        assert "queue heartbeat failed: OperationalError" in caplog.text
+        assert MARKER not in caplog.text
+        db.close()
+
+    def test_the_initial_drain_logs_the_heartbeat(self, tmp_path, caplog):
+        """The initial index can run for hours inside one drain call."""
+        caplog.set_level(logging.INFO)
+        db = Database(tmp_path / "mail.db")
+        queue = IndexingQueue(db)
+        main._drain_queue_batched(
+            db,
+            make_mock_embedder(),
+            Threader(db),
+            queue,
+            batch_size=10,
+            timing_aggregator=TimingAggregator(window=10),
+        )
+        assert len(_messages(caplog, "queue: pending=0 ")) == 1
+        db.close()
+
+
+# --- #874: re-extract sweep ---------------------------------------------
+
+
+class TestReextractSweepDeadSkips:
+    def _stale(self, db, monkeypatch, paths):
+        monkeypatch.setattr(main, "INDEXER_ATTACHMENT_EXTRACTION_ENABLED", True)
+        monkeypatch.setattr(main, "INDEXER_OCR_ENABLED", False)
+        monkeypatch.setattr(main, "is_stale_extractor", lambda *_a, **_kw: True)
+        monkeypatch.setattr(db, "get_extractor_names", lambda: ["pdf@1"])
+        monkeypatch.setattr(db, "find_filepaths_with_extractors", lambda _names: paths)
+        monkeypatch.setattr(db, "find_no_extractor_attachments", lambda: [])
+        monkeypatch.setattr(db, "find_too_large_attachments", lambda: [])
+
+    def test_dead_lettered_files_are_counted(self, tmp_path, monkeypatch, caplog):
+        caplog.set_level(logging.INFO)
+        db = Database(tmp_path / "mail.db")
+        queue = IndexingQueue(db)
+        paths = [f"/maildir/{MARKER}/cur/{n}" for n in ("a", "b", "c")]
+        for p in paths[1:]:
+            queue.enqueue(p, REASON_INITIAL_SCAN)
+            queue.mark_dead_terminal(p, stage="parse", error="x")
+        self._stale(db, monkeypatch, paths)
+        caplog.clear()
+
+        assert main._requeue_stale_extractions(db, queue) == 1
+        lines = _messages(caplog, "re-queued ")
+        assert len(lines) == 1
+        assert lines[0].levelno == logging.WARNING
+        assert (
+            lines[0]
+            .getMessage()
+            .endswith("; skipped 2 dead-lettered (run make requeue-dead to refresh them).")
+        )
+        assert MARKER not in caplog.text
+        db.close()
+
+    def test_only_dead_lettered_files_still_log(self, tmp_path, monkeypatch, caplog):
+        caplog.set_level(logging.INFO)
+        db = Database(tmp_path / "mail.db")
+        queue = IndexingQueue(db)
+        path = f"/maildir/{MARKER}/cur/a"
+        queue.enqueue(path, REASON_INITIAL_SCAN)
+        queue.mark_dead_terminal(path, stage="parse", error="x")
+        self._stale(db, monkeypatch, [path])
+
+        assert main._requeue_stale_extractions(db, queue) == 0
+        lines = _messages(caplog, "re-queued 0 message(s)")
+        assert len(lines) == 1
+        assert "skipped 1 dead-lettered" in lines[0].getMessage()
+        db.close()
+
+    def test_no_dead_skips_keeps_info(self, tmp_path, monkeypatch, caplog):
+        caplog.set_level(logging.INFO)
+        db = Database(tmp_path / "mail.db")
+        queue = IndexingQueue(db)
+        self._stale(db, monkeypatch, ["/maildir/x/cur/a"])
+
+        assert main._requeue_stale_extractions(db, queue) == 1
+        (line,) = _messages(caplog, "re-queued ")
+        assert line.levelno == logging.INFO
+        assert line.getMessage().endswith(
+            "; skipped 0 dead-lettered (run make requeue-dead to refresh them)."
+        )
+        db.close()
+
+
+# --- #874: maintenance pass summaries ------------------------------------
+
+_MS = r"ms=\d+"
+
+
+class TestRescanSummary:
+    def test_each_pass_logs_seen_and_queued(self, tmp_path, monkeypatch, caplog):
+        caplog.set_level(logging.INFO)
+        maildir = tmp_path / "maildir"
+        cur = maildir / MARKER / "cur"
+        cur.mkdir(parents=True)
+        for name in ("a", "b", "c"):
+            (cur / name).write_bytes(b"Subject: x\r\n\r\nbody\r\n")
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        db = Database(tmp_path / "mail.db")
+        queue = IndexingQueue(db)
+        queue.enqueue(str(cur / "c"), REASON_INITIAL_SCAN)
+        queue.mark_dead_terminal(str(cur / "c"), stage="parse", error="x")
+        state = main._IngestionStateRecorder(db, maildir)
+        caplog.clear()
+
+        main._run_periodic_rescan(db, queue, state, skip_trashed=False)
+        # A pass that finds nothing new still logs.
+        main._run_periodic_rescan(db, queue, state, skip_trashed=False)
+
+        lines = [r.getMessage() for r in _messages(caplog, "maintenance pass=rescan")]
+        assert len(lines) == 2
+        assert re.fullmatch(
+            rf"maintenance pass=rescan {_MS} seen=3 queued=2 skipped_dead=1", lines[0]
+        )
+        assert re.fullmatch(
+            rf"maintenance pass=rescan {_MS} seen=3 queued=0 skipped_dead=1", lines[1]
+        )
+        assert MARKER not in caplog.text
+        db.close()
+
+    def test_a_failed_pass_logs_no_summary(self, monkeypatch, caplog, tmp_path):
+        caplog.set_level(logging.INFO)
+
+        def walk(*_a, **_kw):
+            raise OSError(5, "io", MARKER)
+
+        monkeypatch.setattr(main, "_iter_maildir_messages", walk)
+        db = Database(tmp_path / "mail.db")
+        state = main._IngestionStateRecorder(db, tmp_path)
+        main._run_periodic_rescan(db, IndexingQueue(db), state, skip_trashed=False)
+        assert not _messages(caplog, "maintenance pass=rescan")
+        assert MARKER not in caplog.text
+        db.close()
+
+
+class TestReconcileSummary:
+    def test_logs_sweep_and_reap_counts(self, tmp_path, caplog):
+        caplog.set_level(logging.INFO)
+        db = Database(tmp_path / "mail.db")
+        main._run_periodic_reconcile(_FakeReconciler([None]), db)  # type: ignore[arg-type]
+        (line,) = _messages(caplog, "maintenance pass=reconcile")
+        assert line.levelno == logging.INFO
+        assert re.fullmatch(
+            rf"maintenance pass=reconcile {_MS} tombstoned=2 cleared=1 renamed=3 missing=0 "
+            r"threads_reaped=1 threads_rebuilt=0 blocked_threads=0 brake=ok",
+            line.getMessage(),
+        )
+        db.close()
+
+    @pytest.mark.parametrize(
+        ("reap", "force", "brake"),
+        [
+            ({"threads_reaped": 0, "threads_rebuilt": 0, "aborted": False}, False, "ok"),
+            (
+                {
+                    "threads_reaped": 0,
+                    "threads_rebuilt": 0,
+                    "aborted": True,
+                    "tombstones_pending": 9,
+                },
+                False,
+                "tripped",
+            ),
+            ({"threads_reaped": 0, "threads_rebuilt": 0, "aborted": False}, True, "forced"),
+        ],
+    )
+    def test_brake_state(self, tmp_path, caplog, reap, force, brake):
+        caplog.set_level(logging.INFO)
+        db = Database(tmp_path / "mail.db")
+        reconciler = _FakeReconciler([None])
+        reconciler.config.force = force
+        reconciler.reap = lambda: reap  # type: ignore[method-assign]
+        main._run_periodic_reconcile(reconciler, db)  # type: ignore[arg-type]
+        (line,) = _messages(caplog, "maintenance pass=reconcile")
+        assert line.getMessage().endswith(f"blocked_threads=0 brake={brake}")
+        db.close()
+
+    def test_archive_mode_logs_no_reconcile_summary(self, tmp_path, caplog):
+        caplog.set_level(logging.INFO)
+        db = Database(tmp_path / "mail.db")
+        main._run_periodic_reconcile(None, db)
+        assert not _messages(caplog, "maintenance pass=reconcile")
+        db.close()
+
+
+class TestWatchRefreshSummary:
+    def test_periodic_refresh_logs_the_watch_count(self, monkeypatch, caplog):
+        caplog.set_level(logging.INFO)
+        monkeypatch.setattr(main, "_refresh_folder_watches", lambda *_a, **_kw: False)
+        watches = SimpleNamespace(watched_dirs=7)
+        main._run_watch_refresh(watches, None, None, skip_trashed=False, summary=True)  # type: ignore[arg-type]
+        main._run_watch_refresh(watches, None, None, skip_trashed=False)  # type: ignore[arg-type]
+        lines = [r.getMessage() for r in _messages(caplog, "maintenance pass=watch_refresh")]
+        assert len(lines) == 1
+        assert re.fullmatch(rf"maintenance pass=watch_refresh {_MS} watches=7", lines[0])
+
+    def test_watched_dirs_counts_the_scheduled_directories(self, tmp_path):
+        (tmp_path / "INBOX" / "cur").mkdir(parents=True)
+        (tmp_path / "INBOX" / "new").mkdir()
+        observer = SimpleNamespace(schedule=lambda *_a, **_kw: object(), unschedule=lambda _w: None)
+        refresher = FolderWatchRefresher(tmp_path, observer, None)  # type: ignore[arg-type]
+        assert refresher.watched_dirs == 0
+        refresher.start()
+        assert refresher.watched_dirs == 3

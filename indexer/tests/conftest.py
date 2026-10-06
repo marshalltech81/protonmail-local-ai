@@ -106,6 +106,8 @@ def _reset_extractor_warning_budget(monkeypatch):
         monkeypatch.setattr(
             main, "_streaks", {name: main._FailureStreak(name) for name in main.RECOVERY_COMPONENTS}
         )
+        # And the queue heartbeat's interval (#874).
+        monkeypatch.setattr(main, "_last_queue_heartbeat", None)
 
 
 @pytest.fixture

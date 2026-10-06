@@ -107,6 +107,9 @@ from .queue import (
     REASON_RECOVERY,
     REASON_REEXTRACT,
     REASON_RESCAN,
+    STAGE_EMBED,
+    STAGE_PARSE,
+    STAGE_TRASHED,
     IndexingQueue,
 )
 from .queue import load_config_from_env as load_queue_config_from_env
@@ -833,6 +836,45 @@ def _log_attachment_outcomes(*, force: bool = False) -> None:
         log.info(line)
 
 
+# The queue heartbeat (#874): counts only, so a stalled or growing queue
+# is visible even while nothing drains.
+QUEUE_HEARTBEAT_INTERVAL_SECS = 300.0
+_last_queue_heartbeat: float | None = None
+
+
+def _maybe_log_queue_heartbeat(queue: IndexingQueue) -> None:
+    """Log the queue's state at most once per
+    ``QUEUE_HEARTBEAT_INTERVAL_SECS``. Called each main-loop tick and
+    each drain pass, so the hours-long initial drain logs it too."""
+    global _last_queue_heartbeat
+    now = _monotonic()
+    if (
+        _last_queue_heartbeat is not None
+        and now - _last_queue_heartbeat < QUEUE_HEARTBEAT_INTERVAL_SECS
+    ):
+        return
+    _last_queue_heartbeat = now
+    try:
+        c = queue.heartbeat_counts()
+    except sqlite3.Error as e:
+        log.warning("queue heartbeat failed: %s", type(e).__name__)
+        return
+    d = queue.drain_deferrals()
+    log.info(
+        "queue: pending=%d retrying=%d deferred_permission=%d parked_trashed=%d dead=%d "
+        "oldest_due_age=%ds; deferrals since last heartbeat: parse=%d embed=%d trashed=%d",
+        c["pending"],
+        c["retrying"],
+        c["deferred_permission"],
+        c["parked_trashed"],
+        c["dead"],
+        c["oldest_due_age"],
+        d[STAGE_PARSE],
+        d[STAGE_EMBED],
+        d[STAGE_TRASHED],
+    )
+
+
 def _steady_state_summary_due(
     *, drained: int, drained_since_log: int, batch_size: int, seconds_since_summary: float
 ) -> bool:
@@ -994,7 +1036,7 @@ def _phase1_commit_thread(
         if _enqueued_within(row, PERMISSION_DEFER_WINDOW_SECS):
             queue.defer(
                 filepath,
-                stage="parse",
+                stage=STAGE_PARSE,
                 error=_stage_error(e),
                 error_class=ERROR_CLASS_RETRYABLE,
                 delay_seconds=PERMISSION_DEFER_SECS,
@@ -1495,7 +1537,7 @@ def _pause_embedding(
     for entry in entries:
         queue.defer(
             entry.row["filepath"],
-            stage="embed",
+            stage=STAGE_EMBED,
             error=err_repr,
             error_class=error_class,
             delay_seconds=delay,
@@ -1714,6 +1756,7 @@ def _drain_queue_batched(
         if breaker is not None and not breaker.allow(time.monotonic()):
             break
         passes += 1
+        _maybe_log_queue_heartbeat(queue)
         # ---- Gather batch + Phase 1 ----
         # Snapshot up to batch_size distinct queued rows in one query
         # so the gather loop cannot re-claim the same row repeatedly
@@ -1738,7 +1781,7 @@ def _drain_queue_batched(
                 else:
                     queue.defer(
                         row["filepath"],
-                        stage="trashed",
+                        stage=STAGE_TRASHED,
                         error="file is T-flagged; parked until reaped or restored",
                         error_class=ERROR_CLASS_RETRYABLE,
                         delay_seconds=TRASHED_DEFER_SECS,
@@ -2050,18 +2093,26 @@ def _requeue_stale_extractions(db: Database, queue: IndexingQueue) -> int:
             if reruns_once_ocr_is_on(row["extraction_error"], row["content_type"], row["filename"])
         )
     re_enqueued = 0
+    skipped_dead = 0
     for filepath in sorted(filepaths):
-        if queue.has_pending_row(filepath) or queue.is_dead(filepath):
+        if queue.has_pending_row(filepath):
+            continue
+        if queue.is_dead(filepath):
+            skipped_dead += 1
             continue
         queue.enqueue(filepath, REASON_REEXTRACT)
         re_enqueued += 1
-    if re_enqueued:
-        log.info(
+    if re_enqueued or skipped_dead:
+        # A dead-lettered message keeps its stale attachment text (#874).
+        log.log(
+            logging.WARNING if skipped_dead else logging.INFO,
             "re-queued %d message(s) whose attachments were extracted by an older "
             "extractor version (%s), skipped while OCR was off, had no extractor, "
-            "or now fit under INDEXER_ATTACHMENT_MAX_BYTES.",
+            "or now fit under INDEXER_ATTACHMENT_MAX_BYTES; skipped %d dead-lettered "
+            "(run make requeue-dead to refresh them).",
             re_enqueued,
             ", ".join(sorted(stale)) or "none",
+            skipped_dead,
         )
     return re_enqueued
 
@@ -2074,6 +2125,7 @@ def _enqueue_unindexed_messages(
     *,
     skip_trashed: bool = False,
     oldest_first: bool = False,
+    summary_pass: str | None = None,
 ) -> int:
     """Walk the Maildir and enqueue every message not yet indexed.
 
@@ -2108,13 +2160,20 @@ def _enqueue_unindexed_messages(
     left (due at their enqueue time) interleave by date with the new
     ones. Otherwise walk order is kept and no headers are read.
 
+    ``summary_pass`` names a maintenance pass: one INFO line with the
+    walk's duration and counts is then logged even when it queued
+    nothing (#874).
+
     Returns the number of files enqueued.
     """
+    started = _monotonic()
+    seen = 0
     skipped_dead = 0
     candidates: list[Path] = []
     already_queued: list[Path] = []
     walk_started = datetime.now(UTC)
     for filepath in _iter_maildir_messages(root):
+        seen += 1
         path_str = str(filepath)
         if db.is_indexed(path_str):
             continue
@@ -2145,6 +2204,15 @@ def _enqueue_unindexed_messages(
         log.info(
             "Maildir walk (%s): enqueued %d message(s), skipped %d dead-lettered.",
             reason,
+            enqueued,
+            skipped_dead,
+        )
+    if summary_pass is not None:
+        log.info(
+            "maintenance pass=%s ms=%d seen=%d queued=%d skipped_dead=%d",
+            summary_pass,
+            (_monotonic() - started) * 1000,
+            seen,
             enqueued,
             skipped_dead,
         )
@@ -2396,10 +2464,13 @@ def _run_watch_refresh(
     queue: IndexingQueue,
     *,
     skip_trashed: bool,
+    summary: bool = False,
 ) -> None:
     """``_refresh_folder_watches`` for the main loop: a failure is logged
     by type and retried on the next signal or sweep, and the first
-    success after failures logs the recovery (#873)."""
+    success after failures logs the recovery (#873). ``summary`` (the
+    periodic pass) logs its duration and watch count (#874)."""
+    started = _monotonic()
     try:
         _refresh_folder_watches(folder_watches, db, queue, skip_trashed=skip_trashed)
     except Exception as e:
@@ -2407,6 +2478,12 @@ def _run_watch_refresh(
         log.error("Maildir watch refresh failed: %s", type(e).__name__)
         return
     _streaks[WATCH_REFRESH].succeeded()
+    if summary:
+        log.info(
+            "maintenance pass=watch_refresh ms=%d watches=%d",
+            (_monotonic() - started) * 1000,
+            folder_watches.watched_dirs,
+        )
 
 
 def _run_periodic_reconcile(reconciler: Reconciler | None, db: Database) -> None:
@@ -2414,14 +2491,37 @@ def _run_periodic_reconcile(reconciler: Reconciler | None, db: Database) -> None
     reconciliation is on, then expire old reaped-message records (in
     archive mode too, so records from before a switch expire)."""
     if reconciler is not None:
+        started = _monotonic()
         try:
-            reconciler.sweep()
-            reconciler.reap()
+            swept = reconciler.sweep()
+            reaped = reconciler.reap()
         except Exception as e:
             _streaks[PERIODIC_RECONCILIATION].failed()
             log.error("periodic reconciliation failed: %s", type(e).__name__)
         else:
             _streaks[PERIODIC_RECONCILIATION].succeeded()
+            # One line per pass, no-op passes included (#874). The brake
+            # is "tripped" when it held back this pass's reaps, "forced"
+            # when INDEXER_DELETION_FORCE disables it.
+            if reaped.get("aborted"):
+                brake = "tripped"
+            elif reconciler.config.force:
+                brake = "forced"
+            else:
+                brake = "ok"
+            log.info(
+                "maintenance pass=reconcile ms=%d tombstoned=%d cleared=%d renamed=%d "
+                "missing=%d threads_reaped=%d threads_rebuilt=%d blocked_threads=%d brake=%s",
+                (_monotonic() - started) * 1000,
+                swept.get("tombstoned", 0),
+                swept.get("cleared", 0),
+                swept.get("renamed", 0),
+                swept.get("missing", 0),
+                reaped.get("threads_reaped", 0),
+                reaped.get("threads_rebuilt", 0),
+                reaped.get("blocked_threads", 0),
+                brake,
+            )
     _prune_reaped_records(db)
 
 
@@ -2437,7 +2537,7 @@ def _run_periodic_rescan(
     try:
         stamp = ingestion_state.read_stamp()
         _enqueue_unindexed_messages(
-            db, queue, MAILDIR_PATH, REASON_RESCAN, skip_trashed=skip_trashed
+            db, queue, MAILDIR_PATH, REASON_RESCAN, skip_trashed=skip_trashed, summary_pass="rescan"
         )
         ingestion_state.acknowledge(stamp)
     except Exception as e:
@@ -2620,6 +2720,7 @@ def main():
     try:
         while True:
             touch_health_file()
+            _maybe_log_queue_heartbeat(queue)
             # Drain any queued indexing jobs before yielding to the
             # reconciler so newly-arrived mail is visible in search
             # quickly. Steady state goes through the same batched path
@@ -2701,7 +2802,13 @@ def main():
                 )
                 # Also re-watch here: a lost repair marker, or a failed
                 # re-schedule, leaves no watch until the next try.
-                _run_watch_refresh(folder_watches, db, queue, skip_trashed=reconciler is not None)
+                _run_watch_refresh(
+                    folder_watches,
+                    db,
+                    queue,
+                    skip_trashed=reconciler is not None,
+                    summary=True,
+                )
                 last_recovery_sweep = now
 
             # WAL checkpoint: keep the WAL file size bounded over a
