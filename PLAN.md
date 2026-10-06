@@ -110,7 +110,7 @@ Follow-ups on corpus completeness and correctness:
   count split threads on the rebuilt index first), #756 (subject
   fallback chains recurring same-subject mail)
 - attachment coverage: #691 (optional decoders; fontTools waits on
-  py-pdf/pypdf#4156), #694, #695, #490 (OCR language)
+  py-pdf/pypdf#4156), #694, #695
 - bounded work: #781
 - index-side Unicode normalization left from #316: #782
 
@@ -371,7 +371,8 @@ input by definition.
 
 Not a phase: the running deployment's resource, throughput, privacy
 and supply-chain work. Milestone *Operations and hardening*: #488,
-#697, #698, #777, #778, #765, #767, #769. Done: #768 (`make status`
+#697, #698, #777, #778, #767, #769. Done: #765 (at-rest protection
+documented as a setup requirement, #851), #768 (`make status`
 shows each provider as LOCAL or REMOTE, #830), #780 (#829), dependency
 and base-image digest refresh (#828), and mbsync on Debian trixie
 (#833). Open decisions: the runtime base images (#835), and bounding
