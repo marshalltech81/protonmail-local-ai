@@ -89,6 +89,16 @@ class TestSafetyGates:
         assert result.text is None
         assert "200" in (result.error or "")
 
+    def test_default_max_bytes_matches_indexer_attachment_default(self):
+        # A caller that omits max_bytes gets the same cap as the indexer's
+        # INDEXER_ATTACHMENT_MAX_BYTES default (#780).
+        import inspect
+
+        from src import main
+
+        default = inspect.signature(extract).parameters["max_bytes"].default
+        assert default == main._DEFAULT_ATTACHMENT_MAX_BYTES == 32 * 1024 * 1024
+
     def test_image_dispatch_blocked_when_ocr_disabled(self):
         result = extract(
             content_type="image/png",
