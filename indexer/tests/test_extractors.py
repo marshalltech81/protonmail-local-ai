@@ -927,10 +927,11 @@ class TestXlsxSharedStringBudget:
         text, _ = xlsx.extract(payload)
 
         assert "tail" not in text
-        # Three full blank values, a fourth sliced to the budget's last
-        # characters, and a fifth with no room left: 100,000 characters
-        # scanned in all.
-        assert rows[0] == 5
+        # Three full blank values and a fourth sliced to the budget's last
+        # characters, where the walk stops because that value was cut
+        # (review round 1 on #917; a fifth row was parsed before): 100,000
+        # characters scanned in all.
+        assert rows[0] == 4
 
     @pytest.mark.parametrize(
         ("room", "expected"),
@@ -1785,10 +1786,14 @@ class TestXlsxRawNodeBudget:
 
         from src.extractors import xlsx
 
-        left, cut = xlsx._scan_worksheet(io.BytesIO(b"<worksheet><sheetData><row></sheetData>"), 50)
+        caps: set[str] = set()
+        left, cut = xlsx._scan_worksheet(
+            io.BytesIO(b"<worksheet><sheetData><row></sheetData>"), 50, caps
+        )
 
         assert cut is None
         assert left == 50 - 3
+        assert caps == set()
 
     def test_entity_declarations_are_refused(self):
         payload = _rewrite_sheet_xml(
@@ -3185,6 +3190,7 @@ class TestPdfPageLevelOcr:
             "ocr_capped_pdfs": 5,
             "ocr_pages_skipped": 5 * 25,
             "ocr_capped_images": 0,
+            "extractor_caps": 0,
             "parser_caps_messages": 0,
             "warnings_suppressed": 3,
         }
@@ -4252,6 +4258,7 @@ class TestMailContentStaysOutOfLogsAndErrors:
             "ocr_capped_pdfs": 0,
             "ocr_pages_skipped": 0,
             "ocr_capped_images": 0,
+            "extractor_caps": 0,
             "parser_caps_messages": 0,
             "warnings_suppressed": 0,
         }
@@ -4682,3 +4689,453 @@ class TestHeicImages:
         assert stale_extractor_module("image@2") == "image"
         assert stale_extractor_module("image-ocr@2") == "image"
         assert stale_extractor_module("image-ocr@3") is None
+
+
+# #903: every truncation or skip cap inside an extractor is reported the
+# same way: a fixed cap name in a rate-limited WARNING, and one
+# ``extractor_caps`` count in the attachments aggregate per cap per
+# extraction attempt.
+
+_CAP_MARKER = "SYNTHETIC_CAP_MARKER"
+
+
+def _cap_extracted_chars(monkeypatch):
+    payload = (_CAP_MARKER + " ") * 20
+    result = extract(
+        content_type="text/plain",
+        filename=f"{_CAP_MARKER}.txt",
+        payload=payload.encode(),
+        max_extracted_chars=16,
+    )
+    assert result.status == STATUS_SUCCESS
+    assert result.text == payload[:16]
+
+
+def _cap_pdf_digital_pages(monkeypatch):
+    from src.extractors import pdf
+
+    read: list[int] = []
+
+    class Page:
+        def __init__(self, index):
+            self.index = index
+
+        def extract_text(self):
+            read.append(self.index)
+            return f"{_CAP_MARKER} digital text of page {self.index} " * 2
+
+    class FakeReader:
+        def __init__(self, stream):
+            self.pages = [Page(i) for i in range(5)]
+
+    monkeypatch.setattr(pdf.pypdf, "PdfReader", FakeReader)
+    text, name = pdf.extract(b"%PDF-1.7", ocr_enabled=False, max_pdf_pages=2)
+    assert name == "pdf-digital"
+    assert text == "\n\n".join(
+        (f"{_CAP_MARKER} digital text of page {i} " * 2).strip() for i in range(2)
+    )
+    # The walk stops at the cap: the pages past it are never read.
+    assert read == [0, 1]
+
+
+def _blank_square_pdf(side: float) -> bytes:
+    import io as _io
+
+    from pypdf import PdfWriter
+
+    writer = PdfWriter()
+    writer.add_blank_page(width=side, height=side)
+    buf = _io.BytesIO()
+    writer.write(buf)
+    return buf.getvalue()
+
+
+def _fake_ocr_render(monkeypatch, *, pdfinfo_error: Exception | None = None) -> list[int]:
+    """Stub Poppler and Tesseract for ``pdf._extract_ocr``; returns the
+    DPI of each render."""
+    from PIL import Image
+
+    renders: list[int] = []
+
+    def pdfinfo(payload, **kwargs):
+        if pdfinfo_error is not None:
+            raise pdfinfo_error
+        return {}
+
+    def convert(payload, **kwargs):
+        renders.append(kwargs["dpi"])
+        pages = kwargs["last_page"] - kwargs["first_page"] + 1
+        return [Image.new("RGB", (4, 4), color="white")] * pages
+
+    monkeypatch.setattr("pdf2image.pdfinfo_from_bytes", pdfinfo)
+    monkeypatch.setattr("pdf2image.convert_from_bytes", convert)
+    monkeypatch.setattr("pytesseract.image_to_string", lambda image, **_: "ocr text")
+    return renders
+
+
+def _cap_pdf_ocr_dpi(monkeypatch):
+    from src.extractors import pdf
+
+    renders = _fake_ocr_render(monkeypatch)
+    texts = pdf._extract_ocr(_blank_square_pdf(14_400), pages=[0], ocr_timeout_seconds=60)
+    assert texts == {0: "ocr text"}
+    # A 200-inch square page fits the pixel budget only at 15 dpi, and
+    # was rendered once at it.
+    assert renders == [15]
+
+
+def _cap_xlsx_sheet_nodes(monkeypatch):
+    from src.extractors import xlsx
+
+    # Both worksheets cross the node budget: the first is cut, the second
+    # emptied. One extraction, so one report.
+    payload = _titled_xlsx(
+        [("one", [[f"{_CAP_MARKER} first"]] * 50), ("two", [[f"{_CAP_MARKER} second"]])]
+    )
+    monkeypatch.setattr(xlsx, "_MAX_SHEET_NODES", 300)
+    scans = _count_calls(monkeypatch, xlsx, "_scan_worksheet")
+    text, _ = xlsx.extract(payload)
+    lines = text.split("\n")
+    assert lines[0] == "[Sheet: one]"
+    assert 1 < len(lines) < 51
+    assert set(lines[1:]) == {f"{_CAP_MARKER} first"}
+    assert scans[0] == 2
+
+
+def _cap_xlsx_row_nodes(monkeypatch):
+    from src.extractors import xlsx
+
+    monkeypatch.setattr(xlsx, "_MAX_ROW_NODES", 1_000)
+    wide = '<row r="3">' + '<c r="A3"><v>1</v></c>' * 400 + "</row>"
+    payload = _rewrite_sheet_xml(
+        _xlsx_bytes([[f"{_CAP_MARKER} first"], ["second"]]),
+        _rows_before_sheet_end(wide + '<row r="4"><c r="A4"><v>4</v></c></row>'),
+    )
+    rows = _count_parsed_rows(monkeypatch)
+    text, _ = xlsx.extract(payload)
+    assert text == f"[Sheet: Sheet]\n{_CAP_MARKER} first\nsecond"
+    # Only the two rows before the cut reach openpyxl.
+    assert rows[0] <= 3
+
+
+def _cap_xlsx_tag_bytes(monkeypatch):
+    from src.extractors import xlsx
+
+    monkeypatch.setattr(xlsx, "_SCAN_CHUNK", 256)
+    monkeypatch.setattr(xlsx, "_MAX_TAG_BYTES", 1_024)
+    attributes = "".join(f' a{i}="1"' for i in range(1_000))
+    payload = _rewrite_sheet_xml(
+        _xlsx_bytes([[f"{_CAP_MARKER} first"]]),
+        _rows_before_sheet_end(f'<row r="2"><c r="A2"{attributes}/></row>'),
+    )
+    rows = _count_parsed_rows(monkeypatch)
+    text, _ = xlsx.extract(payload)
+    assert text == f"[Sheet: Sheet]\n{_CAP_MARKER} first"
+    assert rows[0] <= 2
+
+
+def _cap_xlsx_expanded_cells(monkeypatch):
+    from src.extractors import xlsx
+
+    # Each one-cell row costs ``1 + _ROW_COST``: two fit, the third does not.
+    monkeypatch.setattr(xlsx, "_MAX_EXPANDED_CELLS", 2 * (1 + xlsx._ROW_COST))
+    rows = _count_parsed_rows(monkeypatch)
+    text, _ = xlsx.extract(_xlsx_bytes([[f"{_CAP_MARKER} {r}"] for r in range(10)]))
+    assert text == f"[Sheet: Sheet]\n{_CAP_MARKER} 0\n{_CAP_MARKER} 1"
+    assert rows[0] <= 4
+
+
+def _cap_xlsx_text_chars(monkeypatch):
+    from src.extractors import xlsx
+
+    header = "[Sheet: Sheet]"
+    monkeypatch.setattr(xlsx, "_MAX_TEXT_CHARS", len(header) + 2 + 6)
+    rows = _count_parsed_rows(monkeypatch)
+    text, _ = xlsx.extract(_xlsx_bytes([[f"{_CAP_MARKER} value"]] + [["next"]] * 20))
+    assert text == f"{header}\n{_CAP_MARKER[:5]}"
+    assert rows[0] == 1
+
+
+# Each reported cap, and an extraction that crosses it with its output
+# pinned (what the code returned before #903) and the work it did.
+_CAP_TRIGGERS = {
+    "extracted_chars": _cap_extracted_chars,
+    "pdf_digital_pages": _cap_pdf_digital_pages,
+    "pdf_ocr_dpi": _cap_pdf_ocr_dpi,
+    "xlsx_sheet_nodes": _cap_xlsx_sheet_nodes,
+    "xlsx_row_nodes": _cap_xlsx_row_nodes,
+    "xlsx_tag_bytes": _cap_xlsx_tag_bytes,
+    "xlsx_expanded_cells": _cap_xlsx_expanded_cells,
+    "xlsx_text_chars": _cap_xlsx_text_chars,
+}
+
+# Every cap constant in the extractor modules (``module:NAME``) and every
+# configured cap the dispatcher takes (``module:parameter``), with the
+# cap name it is reported under ...
+_REPORTED_CAPS = {
+    "src.extractors:max_extracted_chars": "extracted_chars",
+    "src.extractors:max_pdf_pages": "pdf_digital_pages",
+    "src.extractors.pdf:_MAX_OCR_PAGE_PIXELS": "pdf_ocr_dpi",
+    "src.extractors.xlsx:_MAX_SHEET_NODES": "xlsx_sheet_nodes",
+    "src.extractors.xlsx:_MAX_ROW_NODES": "xlsx_row_nodes",
+    "src.extractors.xlsx:_MAX_TAG_BYTES": "xlsx_tag_bytes",
+    "src.extractors.xlsx:_MAX_EXPANDED_CELLS": "xlsx_expanded_cells",
+    "src.extractors.xlsx:_MAX_TEXT_CHARS": "xlsx_text_chars",
+}
+# ... or the reason it is not reported as an extractor cap.
+_WORKBOOK_FAILS = "fails the workbook (XlsxEagerPartBudgetError): a failed row, counted as failed="
+_UNREPORTED_CAPS = {
+    "src.extractors:max_bytes": (
+        "skips the whole attachment as too_large, counted as too_large= in the aggregate"
+    ),
+    "src.extractors:DEFAULT_MAX_BYTES": "the default of max_bytes",
+    "src.extractors:ZIP_MAX_UNCOMPRESSED_BYTES": (
+        "fails the document: a failed row with its rate-limited WARNING, counted as failed="
+    ),
+    "src.extractors:GLOBAL_MAX_IMAGE_PIXELS": (
+        "an image over it raises: a failed row with its rate-limited WARNING, counted as failed="
+    ),
+    "src.extractors:max_ocr_pages": (
+        "PDF: reported by #884 as ocr_capped_pdfs= / ocr_pages_skipped=; "
+        "multipage TIFF: reported by #885 (#916) as ocr_capped_images="
+    ),
+    "src.extractors:ocr_timeout_seconds": (
+        "a timeout raises: a failed row with its rate-limited WARNING, counted as failed="
+    ),
+    "src.extractors.xlsx:_MAX_EAGER_PART_BYTES": _WORKBOOK_FAILS,
+    "src.extractors.xlsx:_MAX_EAGER_BYTES": _WORKBOOK_FAILS,
+    "src.extractors.xlsx:_MAX_EAGER_READS": _WORKBOOK_FAILS,
+}
+
+_EXTRACTOR_MODULES = (
+    "src.extractors",
+    "src.extractors.docx",
+    "src.extractors.html",
+    "src.extractors.image",
+    "src.extractors.pdf",
+    "src.extractors.text",
+    "src.extractors.xlsx",
+)
+
+
+def _extractor_caps_in_code() -> set[str]:
+    """Every module-level ``*MAX*`` constant the extractor modules define,
+    and every ``max_*`` / ``*_seconds`` parameter of the dispatcher."""
+    import importlib
+    import inspect
+    import pkgutil
+    import re
+
+    from src import extractors
+
+    # A new extractor module must be added to the list above.
+    submodules = {f"src.extractors.{m.name}" for m in pkgutil.iter_modules(extractors.__path__)}
+    assert submodules | {"src.extractors"} == set(_EXTRACTOR_MODULES)
+
+    found: set[str] = set()
+    for name in _EXTRACTOR_MODULES:
+        source = inspect.getsource(importlib.import_module(name))
+        for constant in re.findall(r"^([A-Z_][A-Z0-9_]*MAX[A-Z0-9_]*)\s*[:=]", source, re.M):
+            found.add(f"{name}:{constant}")
+    for parameter in inspect.signature(extractors.extract).parameters:
+        if parameter.startswith("max_") or parameter.endswith("_seconds"):
+            found.add(f"src.extractors:{parameter}")
+    return found
+
+
+class TestExtractorCapsAreReported:
+    """#903: a cap that cuts what an extractor returns logs a rate-limited
+    WARNING naming the cap and counts once in ``extractor_caps`` per cap
+    per extraction attempt. The extraction's output is unchanged."""
+
+    @pytest.fixture(autouse=True)
+    def _fresh_counts(self):
+        from src import extractors
+
+        extractors.drain_extractor_counts()
+
+    def test_every_cap_is_reported_or_excluded_with_a_reason(self):
+        found = _extractor_caps_in_code()
+        assert not set(_REPORTED_CAPS) & set(_UNREPORTED_CAPS)
+        assert found == set(_REPORTED_CAPS) | set(_UNREPORTED_CAPS)
+        assert all(reason.strip() for reason in _UNREPORTED_CAPS.values())
+        # Each reported cap has a case that crosses it below.
+        assert set(_REPORTED_CAPS.values()) == set(_CAP_TRIGGERS)
+
+    def test_the_discovery_finds_cap_constants(self):
+        """Guards the completeness test: a broken pattern would find
+        nothing and pass vacuously."""
+        found = _extractor_caps_in_code()
+        assert "src.extractors.xlsx:_MAX_TEXT_CHARS" in found
+        assert "src.extractors:GLOBAL_MAX_IMAGE_PIXELS" in found
+        assert "src.extractors:max_extracted_chars" in found
+        assert len(found) == len(_REPORTED_CAPS) + len(_UNREPORTED_CAPS)
+
+    @pytest.mark.parametrize("cap", sorted(_CAP_TRIGGERS))
+    def test_cap_logs_a_warning_and_is_counted(self, cap, monkeypatch, caplog):
+        from src import extractors
+
+        caplog.set_level("DEBUG")
+        _CAP_TRIGGERS[cap](monkeypatch)
+
+        lines = [
+            r
+            for r in caplog.records
+            if r.name.startswith("indexer.extractor") and "extractor cap" in r.getMessage()
+        ]
+        assert [r.levelname for r in lines] == ["WARNING"]
+        assert f"extractor cap {cap}:" in lines[0].getMessage()
+        counts = extractors.drain_extractor_counts()
+        assert counts["extractor_caps"] == 1
+        assert counts["warnings_suppressed"] == 0
+        assert _CAP_MARKER not in caplog.text
+
+    def test_cap_lines_share_the_warning_rate_limit(self, monkeypatch, caplog):
+        """A sender can attach many capped files: past the window's budget
+        the line is withheld, and still counted."""
+        from src import extractors
+
+        caplog.set_level("DEBUG")
+        monkeypatch.setattr(extractors, "_WARNINGS_PER_WINDOW", 2)
+        for _ in range(5):
+            _cap_extracted_chars(monkeypatch)
+
+        lines = [r for r in caplog.records if "extractor cap" in r.getMessage()]
+        assert len(lines) == 2
+        counts = extractors.drain_extractor_counts()
+        assert counts["extractor_caps"] == 5
+        assert counts["warnings_suppressed"] == 3
+
+    @pytest.mark.parametrize(
+        "run",
+        [
+            lambda: extract(
+                content_type="text/plain",
+                filename="a.txt",
+                payload=b"short text",
+                max_extracted_chars=64,
+            ),
+            lambda: extract(
+                content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                filename="a.xlsx",
+                payload=_xlsx_bytes([["a", "b"], ["c", "d"]]),
+            ),
+        ],
+        ids=["text", "xlsx"],
+    )
+    def test_an_extraction_under_every_cap_reports_none(self, run, caplog):
+        from src import extractors
+
+        caplog.set_level("DEBUG")
+        assert run().status == STATUS_SUCCESS
+        assert "extractor cap" not in caplog.text
+        assert extractors.drain_extractor_counts()["extractor_caps"] == 0
+
+    def test_pdf_with_exactly_the_page_cap_reports_none(self, monkeypatch, caplog):
+        from src import extractors
+        from src.extractors import pdf
+
+        class Page:
+            def extract_text(self):
+                return "digital text long enough to pass the floor easily"
+
+        class FakeReader:
+            def __init__(self, stream):
+                self.pages = [Page(), Page()]
+
+        caplog.set_level("DEBUG")
+        monkeypatch.setattr(pdf.pypdf, "PdfReader", FakeReader)
+        pdf.extract(b"%PDF-1.7", ocr_enabled=False, max_pdf_pages=2)
+        assert "extractor cap" not in caplog.text
+        assert extractors.drain_extractor_counts()["extractor_caps"] == 0
+
+    def test_ordinary_page_renders_at_full_dpi_and_reports_none(self, monkeypatch, caplog):
+        from src import extractors
+        from src.extractors import pdf
+
+        caplog.set_level("DEBUG")
+        renders = _fake_ocr_render(monkeypatch)
+        pdf._extract_ocr(_blank_square_pdf(612), pages=[0])
+        assert renders == [pdf._OCR_DPI]
+        assert "extractor cap" not in caplog.text
+        assert extractors.drain_extractor_counts()["extractor_caps"] == 0
+
+    def test_lowered_dpi_is_not_reported_when_no_render_ran(self, monkeypatch, caplog):
+        """Review round 3: the DPI cap was counted when the DPI was chosen,
+        so a Poppler failure before any render still reported a
+        reduced-resolution OCR. It is reported once a render at it ran."""
+        from src import extractors
+        from src.extractors import pdf
+
+        caplog.set_level("DEBUG")
+        renders = _fake_ocr_render(monkeypatch, pdfinfo_error=TimeoutError("pdfinfo"))
+        with pytest.raises(TimeoutError):
+            pdf._extract_ocr(_blank_square_pdf(14_400), pages=[0], ocr_timeout_seconds=60)
+        assert renders == []
+        assert "extractor cap" not in caplog.text
+        assert extractors.drain_extractor_counts()["extractor_caps"] == 0
+
+    def test_lowered_dpi_is_reported_once_across_render_runs(self, monkeypatch, caplog):
+        """Two runs of non-consecutive pages are two renders of one OCR
+        pass: one report."""
+        import io as _io
+
+        from pypdf import PdfWriter
+        from src import extractors
+        from src.extractors import pdf
+
+        writer = PdfWriter()
+        for _ in range(3):
+            writer.add_blank_page(width=14_400, height=14_400)
+        buf = _io.BytesIO()
+        writer.write(buf)
+        caplog.set_level("DEBUG")
+        renders = _fake_ocr_render(monkeypatch)
+        pdf._extract_ocr(buf.getvalue(), pages=[0, 2])
+        assert renders == [15, 15]
+        assert caplog.text.count("extractor cap pdf_ocr_dpi") == 1
+        assert extractors.drain_extractor_counts()["extractor_caps"] == 1
+
+    @pytest.mark.parametrize(
+        ("sheets", "reported"),
+        [
+            # The last value spends the budget exactly: nothing is cut.
+            ([("Sheet", [["abcdef"]])], False),
+            # So does an empty sheet after it, whose header was never due.
+            ([("Sheet", [["abcdef"]]), ("two", [])], False),
+            # A row after the exactly spent budget is cut.
+            ([("Sheet", [["abcdef"], ["next"]])], True),
+            # As is a later sheet with a value.
+            ([("Sheet", [["abcdef"]]), ("two", [["next"]])], True),
+        ],
+        ids=["last-value", "empty-sheet-after", "row-after", "sheet-after"],
+    )
+    def test_text_budget_spent_exactly_reports_only_a_real_cut(
+        self, sheets, reported, monkeypatch, caplog
+    ):
+        """Review round 1: a budget spent exactly by the workbook's last
+        value reported ``xlsx_text_chars`` although nothing was cut. The
+        text returned is the same either way."""
+        from src import extractors
+        from src.extractors import xlsx
+
+        caplog.set_level("DEBUG")
+        # The header ``[Sheet: Sheet]`` and the blank line before it, then
+        # ``abcdef`` and its newline.
+        monkeypatch.setattr(xlsx, "_MAX_TEXT_CHARS", len("[Sheet: Sheet]") + 2 + 7)
+        text, _ = xlsx.extract(_titled_xlsx(sheets))
+        assert text == "[Sheet: Sheet]\nabcdef"
+        assert ("extractor cap xlsx_text_chars" in caplog.text) is reported
+        assert extractors.drain_extractor_counts()["extractor_caps"] == int(reported)
+
+    def test_spent_text_budget_stops_at_the_first_unread_value(self, monkeypatch):
+        """After an exactly spent budget the walk reads on only to find a
+        value it cannot keep, then stops: the rows after it are not
+        parsed."""
+        from src.extractors import xlsx
+
+        monkeypatch.setattr(xlsx, "_MAX_TEXT_CHARS", len("[Sheet: Sheet]") + 2 + 7)
+        rows = _count_parsed_rows(monkeypatch)
+        text, _ = xlsx.extract(_xlsx_bytes([["abcdef"], ["next"]] + [["more"]] * 50))
+        assert text == "[Sheet: Sheet]\nabcdef"
+        assert rows[0] == 2

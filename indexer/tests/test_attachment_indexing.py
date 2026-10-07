@@ -1315,6 +1315,7 @@ class TestAttachmentOutcomeCounts:
             "ocr_capped_pdfs": 0,
             "ocr_pages_skipped": 0,
             "ocr_capped_images": 0,
+            "extractor_caps": 0,
             "parser_caps_messages": 0,
             "warnings_suppressed": 0,
         }
@@ -1414,13 +1415,15 @@ class TestAttachmentOutcomeCounts:
             "ocr_capped_pdfs": 7,
             "ocr_pages_skipped": 8,
             "ocr_capped_images": 2,
+            "extractor_caps": 4,
             "parser_caps_messages": 3,
             "warnings_suppressed": 6,
         }
         assert attachment_indexing.format_attachment_outcomes(counts) == (
             "attachments n=6 success=3 failed=1 unsupported=0 too_large=0 "
             "ocr_disabled=2 empty=0 cached=4 pdf_pages_failed=5 pdf_pages_unrecovered=9 ocr_capped_pdfs=7 "
-            "ocr_pages_skipped=8 ocr_capped_images=2 parser_caps_messages=3 warnings_suppressed=6"
+            "ocr_pages_skipped=8 ocr_capped_images=2 extractor_caps=4 parser_caps_messages=3 "
+            "warnings_suppressed=6"
         )
 
     _DEGRADED_CASES = [
@@ -1438,6 +1441,8 @@ class TestAttachmentOutcomeCounts:
         ("ocr_capped_pdfs", True),
         ("ocr_pages_skipped", True),
         ("ocr_capped_images", True),
+        # An extractor cap cut the attachment's text (#903).
+        ("extractor_caps", True),
         ("parser_caps_messages", True),
         ("warnings_suppressed", True),
     ]

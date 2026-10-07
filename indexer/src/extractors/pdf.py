@@ -57,6 +57,7 @@ from . import (
     note_ocr_capped,
     note_pdf_page_failed,
     note_pdf_pages_unrecovered,
+    warn_extractor_cap,
     warn_rate_limited,
 )
 
@@ -223,9 +224,10 @@ def _extract_digital_pages(
     pages: list[str] = []
     for index, page in enumerate(reader.pages):
         if max_pdf_pages is not None and index >= max_pdf_pages:
-            log.info(
-                "pdf-digital truncated at %d pages (max_pdf_pages cap)",
-                max_pdf_pages,
+            # The pages past the cap are never read: WARNING, rate
+            # limited, counted for the attachments aggregate (#903).
+            warn_extractor_cap(
+                log, "pdf_digital_pages", "pdf-digital stopped at %d pages", max_pdf_pages
             )
             break
         try:
@@ -354,6 +356,14 @@ def _extract_ocr(
             images = convert_from_bytes(payload, **convert_kwargs)  # type: ignore[arg-type]
             if render_budget is not None:
                 render_budget -= time.monotonic() - started
+            if dpi < _OCR_DPI and run is runs[0]:
+                # A lower DPI lowers OCR accuracy for every page (#903).
+                # Reported once a render at it has run, not when it is
+                # chosen, so a Poppler failure before any render is only
+                # the failure (review round 3 on #917).
+                warn_extractor_cap(
+                    log, "pdf_ocr_dpi", "pdf OCR rendered at %d dpi, not %d", dpi, _OCR_DPI
+                )
             for index, image in zip(run, images, strict=False):
                 text = pytesseract.image_to_string(image, **tesseract_kwargs)
                 texts[index] = (text or "").strip()
