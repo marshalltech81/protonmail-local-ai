@@ -1342,23 +1342,25 @@ safety hints (#919; background and sources in
    showing this exact message, the block happened in ChatGPT.
 2. Optionally confirm the server serves the hints. From the repository
    root, list the tools through a client; every tool should print
-   `True False False`. The snippet reads the token from its file,
-   takes the port from `MCP_PORT` in your shell, else from `.env`, else
-   `3000` (the order Compose uses), so the token goes to the port the
-   server is published on, and uses the
-   stdio adapter's URL and HTTP client: IPv4 loopback, ignoring
-   `HTTP_PROXY`, `ALL_PROXY` and the system proxy, so the token never
-   goes to a proxy:
+   `True False False`. The snippet reads the token from its file and
+   asks Compose for the port it publishes `mcp-server` on (Compose
+   applies your shell and `.env` the same way `make up` does), so the
+   token goes to that port and nowhere else; with no port it stops
+   before sending anything. It uses the stdio adapter's URL and HTTP
+   client: IPv4 loopback, ignoring `HTTP_PROXY`, `ALL_PROXY` and the
+   system proxy, so the token never goes to a proxy:
 
    ```bash
-   cd mcp-server && MCP_PORT="${MCP_PORT:-$(sed -n 's/^MCP_PORT=//p' ../.env | tail -n 1)}" uv run python - <<'EOF'
+   port=$(docker compose config --format json \
+     | python3 -c 'import json, sys; print(json.load(sys.stdin)["services"]["mcp-server"]["ports"][0]["published"])')
+   cd mcp-server && MCP_PORT="$port" uv run python - <<'EOF'
    import asyncio, os, pathlib
    from fastmcp import Client
    from fastmcp.client.transports import StreamableHttpTransport
    from src.stdio_adapter import _loopback_http_client, server_url
    token = pathlib.Path("../.secrets/mcp_auth_token.txt").read_text().strip()
    transport = StreamableHttpTransport(
-       server_url(os.environ.get("MCP_PORT") or "3000"), auth=token,
+       server_url(os.environ["MCP_PORT"]), auth=token,
        httpx_client_factory=_loopback_http_client,
    )
    async def main():
