@@ -814,7 +814,10 @@ class TestPptExtractor:
                 NON_OLE2_PPT_ERROR,
             )
 
-    def test_stale_ooxml_row_refreshed_from_a_ppt_occurrence_runs_ppt(self, tmp_path, monkeypatch):
+    @pytest.mark.parametrize("override", ["docx", "xlsx", "pptx"])
+    def test_stale_ooxml_row_refreshed_from_a_ppt_occurrence_runs_ppt(
+        self, tmp_path, monkeypatch, override
+    ):
         """An OLE2 payload bound for an OOXML extractor goes to the legacy
         extractor its occurrence's label selects, now ``.ppt`` too."""
         from src.extractors import ppt
@@ -824,12 +827,41 @@ class TestPptExtractor:
             content_type=_PPT_MIME,
             filename="deck.ppt",
             payload=_OLE2_MAGIC + bytes(64),
-            module_override="docx",
+            module_override=override,
         )
         assert (result.status, result.extractor, result.text) == (
             STATUS_SUCCESS,
             "ppt@1",
             "slide words",
+        )
+
+    @pytest.mark.parametrize(
+        ("content_type", "filename"),
+        [
+            (
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                "a.bin",
+            ),
+            ("application/octet-stream", "deck.pptx"),
+        ],
+    )
+    def test_ole2_labelled_pptx_stays_unsupported(self, monkeypatch, content_type, filename):
+        """``.ppt`` bytes labelled ``.pptx`` select the PPTX extractor,
+        which cannot read OLE2: recorded ``unsupported`` without running
+        either reader (#936, #957)."""
+        from src.extractors import LEGACY_OLE2_ERROR, STATUS_UNSUPPORTED, ppt
+
+        def must_not_run(*_args, **_kwargs):
+            raise AssertionError("the .ppt reader ran on a .pptx occurrence")
+
+        monkeypatch.setattr(ppt, "run_tool", must_not_run)
+        result = extract(
+            content_type=content_type, filename=filename, payload=_OLE2_MAGIC + bytes(64)
+        )
+        assert (result.status, result.extractor, result.error) == (
+            STATUS_UNSUPPORTED,
+            None,
+            LEGACY_OLE2_ERROR,
         )
 
     @pytest.mark.parametrize("error", [MemoryError, RecursionError])
