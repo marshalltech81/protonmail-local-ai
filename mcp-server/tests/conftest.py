@@ -151,7 +151,8 @@ def _build_schema(conn: sqlite3.Connection) -> None:
             content_type              TEXT NOT NULL,
             size_bytes                INTEGER NOT NULL,
             seen_at                   TEXT NOT NULL,
-            fts_rowid                 INTEGER
+            fts_rowid                 INTEGER,
+            extractor_module          TEXT NOT NULL DEFAULT ''
         );
 
         CREATE VIRTUAL TABLE attachments_fts USING fts5(
@@ -162,16 +163,19 @@ def _build_schema(conn: sqlite3.Connection) -> None:
             tokenize='porter unicode61'
         );
 
-        -- Per-content-hash extracted-text cache. ``search_attachments``
-        -- LEFT JOINs this for extraction status + a text snippet, so
-        -- the table must exist on every fixture DB even when empty.
+        -- Extracted-text cache keyed by content hash and extractor
+        -- module (#928). ``search_attachments`` LEFT JOINs this for
+        -- extraction status + a text snippet, so the table must exist on
+        -- every fixture DB even when empty.
         CREATE TABLE attachment_extractions (
-            attachment_id     TEXT PRIMARY KEY,
+            attachment_id     TEXT NOT NULL,
+            extractor_module  TEXT NOT NULL,
             extraction_status TEXT NOT NULL,
             extractor         TEXT,
             extracted_text    TEXT,
             extraction_error  TEXT,
-            extracted_at      TEXT NOT NULL
+            extracted_at      TEXT NOT NULL,
+            PRIMARY KEY (attachment_id, extractor_module)
         );
         CREATE TABLE indexing_jobs (
             filepath        TEXT PRIMARY KEY,
@@ -338,6 +342,7 @@ def _insert_attachment(
     size_bytes: int = 1234,
     occurrence_id: str | None = None,
     variant: str = "",
+    extractor_module: str = "pdf",
 ) -> None:
     claimant = claimant_of(message_id, variant)
     occurrence_id = occurrence_id or f"{claimant}:{attachment_id}:{filename}"
@@ -351,8 +356,8 @@ def _insert_attachment(
         """
         INSERT INTO attachments
             (attachment_occurrence_id, claimant_id, attachment_id, thread_id, filename,
-             content_type, size_bytes, seen_at, fts_rowid)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+             content_type, size_bytes, seen_at, fts_rowid, extractor_module)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             occurrence_id,
@@ -364,6 +369,7 @@ def _insert_attachment(
             size_bytes,
             "2024-01-01T00:00:00+00:00",
             fts_rowid,
+            extractor_module,
         ),
     )
     conn.commit()
@@ -375,10 +381,12 @@ def _insert_extraction(
     attachment_id: str,
     status: str = "success",
     extracted_text: str | None = None,
-    extractor: str = "pdf",
+    extractor: str | None = "pdf",
     error: str | None = None,
+    extractor_module: str = "pdf",
 ) -> None:
-    """Insert one ``attachment_extractions`` row (per content hash).
+    """Insert one ``attachment_extractions`` row (per content hash and
+    extractor module; an occurrence uses the row its module names).
 
     Mirrors the indexer's extracted-text cache: ``status`` is
     ``success`` / ``failed`` / ``pending``, ``extracted_text`` carries
@@ -387,12 +395,13 @@ def _insert_extraction(
     conn.execute(
         """
         INSERT INTO attachment_extractions
-            (attachment_id, extraction_status, extractor,
+            (attachment_id, extractor_module, extraction_status, extractor,
              extracted_text, extraction_error, extracted_at)
-        VALUES (?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
         (
             attachment_id,
+            extractor_module,
             status,
             extractor,
             extracted_text,

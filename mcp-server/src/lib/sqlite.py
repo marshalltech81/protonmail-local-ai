@@ -585,9 +585,10 @@ class AttachmentResult:
     and each is its own row in the ``attachments`` table.
 
     ``extraction_status`` and ``text_snippet`` come from
-    ``attachment_extractions`` (keyed by content hash). ``extraction_status``
-    is ``None`` and ``text_snippet`` empty when the index has no extraction
-    row for the attachment yet — distinct from a failed extraction, which
+    ``attachment_extractions``: the row keyed by the content hash and the
+    extractor module the occurrence's ``extractor_module`` names (#928).
+    ``extraction_status`` is ``None`` and ``text_snippet`` empty when the
+    index has no extraction row for the occurrence yet — distinct from a failed extraction, which
     has a non-NULL status.
     """
 
@@ -2034,6 +2035,7 @@ class Database:
             "JOIN attachments a ON attachments_fts.rowid = a.fts_rowid "
             "JOIN threads t ON a.thread_id = t.thread_id "
             "LEFT JOIN attachment_extractions e ON e.attachment_id = a.attachment_id "
+            "AND e.extractor_module = a.extractor_module "
             "LEFT JOIN messages m ON m.claimant_id = a.claimant_id "
             "WHERE " + " AND ".join(where) + " "  # nosec B608
             "ORDER BY score LIMIT ?"
@@ -2092,6 +2094,7 @@ class Database:
             "          AND (? IS NULL OR a2.content_type = ?) ) "
             "    JOIN threads t ON a.thread_id = t.thread_id "
             "    LEFT JOIN attachment_extractions e ON e.attachment_id = a.attachment_id "
+            "AND e.extractor_module = a.extractor_module "
             "    WHERE " + " AND ".join(where) + " "  # nosec B608
             "    GROUP BY a.attachment_occurrence_id ) "
             "SELECT a.attachment_id, COALESCE(m.message_id, a.claimant_id) AS message_id, "
@@ -2106,6 +2109,7 @@ class Database:
             "JOIN attachments a ON a.attachment_occurrence_id = best.attachment_occurrence_id "
             "JOIN threads t ON a.thread_id = t.thread_id "
             "LEFT JOIN attachment_extractions e ON e.attachment_id = a.attachment_id "
+            "AND e.extractor_module = a.extractor_module "
             "LEFT JOIN messages m ON m.claimant_id = a.claimant_id "
             "ORDER BY score LIMIT ?"
         )
@@ -2148,6 +2152,7 @@ class Database:
             "FROM attachments a "
             "JOIN threads t ON a.thread_id = t.thread_id "
             "LEFT JOIN attachment_extractions e ON e.attachment_id = a.attachment_id "
+            "AND e.extractor_module = a.extractor_module "
             "LEFT JOIN messages m ON m.claimant_id = a.claimant_id "
             "WHERE " + " AND ".join(where) + " "  # nosec B608
             "ORDER BY m.effective_at DESC LIMIT ?"

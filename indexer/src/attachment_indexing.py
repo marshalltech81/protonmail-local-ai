@@ -43,7 +43,6 @@ from .extractors import (
     BINARY_AS_TEXT_ERROR,
     LEGACY_OLE2_ERROR,
     OCR_DISABLED_ERROR,
-    SCANNED_PDF_OCR_DISABLED_ERROR,
     STATUS_EMPTY,
     STATUS_FAILED,
     STATUS_SUCCESS,
@@ -51,8 +50,8 @@ from .extractors import (
     STATUS_UNSUPPORTED,
     ExtractionResult,
     drain_extractor_counts,
+    is_stale_extractor,
     resolved_extractor_module,
-    stale_extractor_module,
 )
 from .extractors import (
     extract as extract_attachment,
@@ -208,41 +207,52 @@ def attachment_occurrence_id(
 _FAILED_CACHE_MAX_AGE = timedelta(days=7)
 
 
-def _unsupported_still_holds(error: str | None, attachment: Attachment, ocr_enabled: bool) -> bool:
-    """Whether an ``unsupported`` result also applies to ``attachment``.
+# The ``extractor_module`` of an occurrence whose MIME type and filename
+# select no extractor (#928).
+NO_EXTRACTOR_MODULE = ""
 
-    Results are shared by content hash, but dispatch reads each
-    occurrence's MIME type and filename, so the same bytes can arrive as
-    ``.bin`` first and ``.txt`` later (#210). An "OCR disabled" result
-    holds until OCR is turned on for an occurrence that needs OCR: an
-    image, or a PDF when the PDF extractor wrote the result (it found no
-    digital text layer). An OLE2 result also holds for an occurrence
-    that selects the DOCX, XLSX or text extractor, and a "binary payload
-    labelled as text" result for one that selects the text extractor,
-    which the dispatcher would reject the same way (#694, #932); an
-    occurrence labelled ``.doc`` / ``.xls`` selects the legacy extractor
-    instead and re-runs it (#935). Any other result holds only while this
+
+def extraction_cache_module(content_type: str, filename: str) -> str:
+    """The extractor module an occurrence's MIME type and filename select,
+    or ``NO_EXTRACTOR_MODULE``. With the content hash, the key of the
+    ``attachment_extractions`` row the occurrence uses (#928): dispatch
+    from a label and the bytes is deterministic, so every occurrence with
+    the same key would extract the same result."""
+    return resolved_extractor_module(content_type, filename) or NO_EXTRACTOR_MODULE
+
+
+def _unsupported_still_holds(error: str | None, module: str, ocr_enabled: bool) -> bool:
+    """Whether an ``unsupported`` result cached under ``module`` still
+    holds for the occurrences that select that module (#928).
+
+    An "OCR disabled" result holds until OCR is turned on. An OLE2 result
+    under an OOXML label, a "binary payload labelled as text" result and
+    the "no extractor" result are decided by the label and the bytes
+    alone (#694, #932), so they hold for good. Any other result (an
+    extractor not importable in this image) holds only while the
     occurrence selects no extractor.
     """
-    module = resolved_extractor_module(attachment.content_type, attachment.filename)
     error = error or ""
-    needs_ocr = module == "image" or (module == "pdf" and error == SCANNED_PDF_OCR_DISABLED_ERROR)
-    if "OCR disabled" in error and needs_ocr:
+    if "OCR disabled" in error:
         return not ocr_enabled
-    if error == LEGACY_OLE2_ERROR and module in {"docx", "xlsx", "text"}:
+    if error in {LEGACY_OLE2_ERROR, BINARY_AS_TEXT_ERROR}:
         return True
-    if error == BINARY_AS_TEXT_ERROR and module == "text":
-        return True
-    return module is None
+    return module == NO_EXTRACTOR_MODULE
 
 
-def reruns_once_ocr_is_on(error: str | None, content_type: str, filename: str) -> bool:
+def reprocess_reruns_extraction(
+    error: str | None, extractor_module: str, content_type: str, filename: str
+) -> bool:
     """Whether reprocessing an occurrence (by its MIME type and filename)
-    of bytes cached as an ``unsupported`` result with ``error`` re-runs
-    extraction once OCR is on. The startup sweep re-queues by this, so
-    it shares ``_unsupported_still_holds`` with the cache check."""
-    occurrence = Attachment(filename=filename, content_type=content_type, size=0)
-    return not _unsupported_still_holds(error, occurrence, ocr_enabled=True)
+    that uses an ``unsupported`` row with ``error`` cached under
+    ``extractor_module`` would extract again once OCR is on: its label
+    now selects another module (a release started routing it, or a
+    migrated v0 row was keyed by its stamp), or the row no longer holds.
+    The startup sweep re-queues by this, so it shares
+    ``_unsupported_still_holds`` with the cache check."""
+    if extraction_cache_module(content_type, filename) != extractor_module:
+        return True
+    return not _unsupported_still_holds(error, extractor_module, ocr_enabled=True)
 
 
 def too_large_fits(size: int, max_bytes: int) -> bool:
@@ -253,7 +263,7 @@ def too_large_fits(size: int, max_bytes: int) -> bool:
 
 
 def _cache_hit_short_circuits(
-    cached: dict, attachment: Attachment, ocr_enabled: bool, max_bytes: int
+    cached: dict, attachment: Attachment, module: str, ocr_enabled: bool, max_bytes: int
 ) -> bool:
     """Return True when ``cached`` should short-circuit re-extraction.
 
@@ -268,8 +278,7 @@ def _cache_hit_short_circuits(
       to fit, the row is stale and the payload is extracted (#693);
       ``too_large_fits`` is the same predicate for the startup sweep.
     * ``STATUS_UNSUPPORTED`` — while ``_unsupported_still_holds`` for
-      this occurrence: re-run once OCR is re-enabled, or when this
-      occurrence's metadata selects an extractor.
+      the row's module: re-run once OCR is re-enabled.
     * ``STATUS_FAILED`` — re-run if the cached row is older than
       ``_FAILED_CACHE_MAX_AGE`` (defense against a chronic failure
       burning OCR cycles on every reappearance), otherwise honor the
@@ -283,7 +292,7 @@ def _cache_hit_short_circuits(
     if status == STATUS_TOO_LARGE:
         return not too_large_fits(len(attachment.payload), max_bytes)
     if status == STATUS_UNSUPPORTED:
-        return _unsupported_still_holds(cached["extraction_error"], attachment, ocr_enabled)
+        return _unsupported_still_holds(cached["extraction_error"], module, ocr_enabled)
     if status == STATUS_FAILED:
         cached_at = cached["extracted_at"]
         if not cached_at:
@@ -344,7 +353,7 @@ def _resolve_extracted_text(
     max_extracted_chars: int | None,
     ocr_timeout_seconds: float | None = None,
     max_pdf_pages: int | None = None,
-    batch_extractions: dict[str, ExtractionResult] | None = None,
+    batch_extractions: dict[tuple[str, str], ExtractionResult] | None = None,
     on_progress: Callable[[], None] | None = None,
 ) -> tuple[str | None, str, ExtractionResult | None, str | None, bool]:
     """Return ``(text, status, extraction_to_persist, error, cached)``:
@@ -359,36 +368,31 @@ def _resolve_extracted_text(
     re-runs the extractor and asks the apply phase to persist the
     fresh result.
 
+    Results are keyed by content hash and the extractor module this
+    occurrence selects (``extraction_cache_module``, #928), so an
+    occurrence is served only what an extraction under its own label
+    would produce.
+
     ``batch_extractions`` holds the results extracted earlier in the
-    same batch, by content hash: those are not committed yet, so the
-    cache cannot serve them (#237). A reused one is still returned for
+    same batch, by that key: those are not committed yet, so the cache
+    cannot serve them (#237). A reused one is still returned for
     persisting, since the message that extracted it may fail to commit.
     """
-    pending = (
-        batch_extractions.get(attachment.content_hash) if batch_extractions is not None else None
-    )
-    if pending is not None and (
-        pending.status != STATUS_UNSUPPORTED
-        or _unsupported_still_holds(pending.error, attachment, ocr_enabled)
-    ):
+    module = extraction_cache_module(attachment.content_type, attachment.filename)
+    key = (attachment.content_hash, module)
+    pending = batch_extractions.get(key) if batch_extractions is not None else None
+    if pending is not None:
         text = pending.text if pending.status == STATUS_SUCCESS else None
         return text, pending.status, pending, pending.error, True
 
-    cached = db.get_attachment_extraction(attachment.content_hash)
+    cached = db.get_attachment_extraction(attachment.content_hash, module)
     # A row written by an older version of a since-fixed extractor would
-    # otherwise be served forever. Re-run the module that wrote it, from
-    # whichever occurrence of the bytes arrives: the row is shared by
-    # content hash, so an occurrence whose own metadata resolves to
-    # another extractor must still refresh it with the same one.
-    refresh_module = (
-        stale_extractor_module(cached["extractor"], ocr_enabled=ocr_enabled)
-        if cached is not None
-        else None
-    )
+    # otherwise be served forever: it is re-extracted, and only by an
+    # occurrence that selects its module.
     if (
         cached is not None
-        and refresh_module is None
-        and _cache_hit_short_circuits(cached, attachment, ocr_enabled, max_bytes)
+        and not is_stale_extractor(cached["extractor"], ocr_enabled=ocr_enabled)
+        and _cache_hit_short_circuits(cached, attachment, module, ocr_enabled, max_bytes)
     ):
         # Successful hits return the stored text; non-success hits
         # (empty / unsupported / too_large / failed-within-window)
@@ -407,11 +411,10 @@ def _resolve_extracted_text(
         max_extracted_chars=max_extracted_chars,
         ocr_timeout_seconds=ocr_timeout_seconds,
         max_pdf_pages=max_pdf_pages,
-        module_override=refresh_module,
         on_progress=on_progress,
     )
     if batch_extractions is not None:
-        batch_extractions[attachment.content_hash] = result
+        batch_extractions[key] = result
     text = result.text if result.status == STATUS_SUCCESS else None
     return text, result.status, result, result.error, False
 
@@ -431,7 +434,7 @@ def prepare_attachment_writes(
     max_extracted_chars: int | None = None,
     ocr_timeout_seconds: float | None = None,
     max_pdf_pages: int | None = None,
-    batch_extractions: dict[str, ExtractionResult] | None = None,
+    batch_extractions: dict[tuple[str, str], ExtractionResult] | None = None,
     on_progress: Callable[[], None] | None = None,
 ) -> AttachmentWritePlan:
     """Compute everything needed to write one attachment occurrence.
@@ -535,13 +538,16 @@ def apply_attachment_writes(
     * ``attachments`` row records this specific occurrence (a forwarded
       PDF gets one row per email it appeared in) so filename / MIME
       filters work uniformly.
-    * ``attachment_extractions`` is keyed by content hash, so a single
-      ``store_attachment_extraction`` covers any future occurrences of
-      the same payload — and is skipped entirely on a cache hit.
+    * ``attachment_extractions`` is keyed by content hash and extractor
+      module, so a single ``store_attachment_extraction`` covers any
+      future occurrences of the same payload that select the same
+      extractor — and is skipped entirely on a cache hit. The
+      occurrence row records the module, naming the row it uses.
     * ``message_chunks`` carries per-occurrence chunks of the extracted
       text so any chunk hit lifts the parent thread of the email that
       carried it.
     """
+    module = extraction_cache_module(plan.attachment.content_type, plan.attachment.filename)
     db.upsert_attachment(
         claimant_id=claimant_id,
         thread_id=thread_id,
@@ -550,12 +556,14 @@ def apply_attachment_writes(
         content_type=plan.attachment.content_type,
         size_bytes=plan.attachment.size,
         occurrence_id=plan.occurrence_id,
+        extractor_module=module,
     )
 
     if plan.extraction_to_persist is not None:
         result = plan.extraction_to_persist
         db.store_attachment_extraction(
             attachment_id=plan.attachment.content_hash,
+            extractor_module=module,
             extraction_status=result.status,
             extractor=result.extractor,
             extracted_text=result.text,

@@ -91,7 +91,11 @@ def _dedupe_by_canonical(addrs: list[str]) -> list[str]:
 # folded into ``_apply_initial_schema`` with no migration and no bump
 # (owner, 2026-10-01). The first deployment was 2026-10-03, so every
 # schema change now needs the bump and a migration.
-SCHEMA_VERSION = 0
+#
+# v1 (#928): ``attachment_extractions`` is keyed by (content hash,
+# extractor module) and each ``attachments`` occurrence names the module
+# whose row it uses (``migrations/0001_extraction_cache_per_module.sql``).
+SCHEMA_VERSION = 1
 SCHEMA_APPLICATION_ID = 0x504D4149  # "PMAI"
 
 # How long a ``reaped_messages`` record outlives the reap. The record
@@ -100,13 +104,17 @@ SCHEMA_APPLICATION_ID = 0x504D4149  # "PMAI"
 # of "not found"; after this window the lookup reads as not found.
 REAPED_RECORD_RETENTION_DAYS = 30
 
-# Drop a payload's cached extraction once no ``attachments`` row
-# references it (#562). Both lookups use an index (the extraction
-# primary key and ``idx_attachments_attachment_id``), so a removal costs
-# one indexed statement per payload it carried, whatever the table sizes.
+# Drop each cached extraction of a payload that no ``attachments`` row
+# uses any more (#562): a row is used by the occurrences of its content
+# hash whose ``extractor_module`` names it (#928). Both lookups use an
+# index (the extraction primary key and ``idx_attachments_attachment_id``),
+# so a removal costs one indexed statement per payload it carried,
+# whatever the table sizes.
 _PURGE_ORPHAN_EXTRACTION_SQL = (
     "DELETE FROM attachment_extractions WHERE attachment_id = ? "
-    "AND NOT EXISTS (SELECT 1 FROM attachments WHERE attachment_id = ?)"
+    "AND NOT EXISTS (SELECT 1 FROM attachments a "
+    "WHERE a.attachment_id = attachment_extractions.attachment_id "
+    "AND a.extractor_module = attachment_extractions.extractor_module)"
 )
 
 # The schema uses FTS5 ``contentless_delete=1``, which SQLite added in 3.43.
@@ -463,11 +471,12 @@ class Database:
           ``attachment_id`` is non-null for chunks derived from a
           specific attachment; null for body chunks.
         * **Attachment indexing** — ``attachments`` (one per occurrence,
-          captures filename/MIME), ``attachments_fts`` (filename + MIME
-          search), and ``attachment_extractions`` (per content-hash
-          cache so OCR / PDF parse cost runs at most once per unique
-          payload regardless of forwarding count; a row is deleted with
-          the last occurrence that references it).
+          captures filename/MIME and the extractor module whose cached
+          row it uses), ``attachments_fts`` (filename + MIME search), and
+          ``attachment_extractions`` (a cache keyed by content hash and
+          extractor module, so OCR / PDF parse cost runs at most once per
+          unique payload and extractor regardless of forwarding count; a
+          row is deleted with the last occurrence that uses it).
 
         Plus the cross-cutting tables: ``message_thread_map`` (message
         → thread index), ``indexed_files`` (file identity for rename
@@ -602,6 +611,11 @@ class Database:
                 size_bytes                INTEGER NOT NULL,
                 seen_at                   TEXT NOT NULL,
                 fts_rowid                 INTEGER,
+                -- The extractor module this occurrence's MIME type and
+                -- filename choose ('' for none): with ``attachment_id``,
+                -- the key of the ``attachment_extractions`` row it uses
+                -- (#928).
+                extractor_module          TEXT NOT NULL DEFAULT '',
                 FOREIGN KEY (claimant_id) REFERENCES message_thread_map(claimant_id)
                     ON DELETE CASCADE,
                 FOREIGN KEY (thread_id) REFERENCES threads(thread_id)
@@ -615,13 +629,19 @@ class Database:
             -- ``attachments_fts`` on ``fts_rowid``.
             CREATE INDEX idx_attachments_fts_rowid ON attachments(fts_rowid);
 
+            -- One row per payload and extractor module (#928): the same
+            -- bytes under labels that pick different extractors get
+            -- separate results. ``extractor_module`` is '' for an
+            -- occurrence that selects no extractor.
             CREATE TABLE attachment_extractions (
-                attachment_id      TEXT PRIMARY KEY,
+                attachment_id      TEXT NOT NULL,
+                extractor_module   TEXT NOT NULL,
                 extraction_status  TEXT NOT NULL,
                 extractor          TEXT,
                 extracted_text     TEXT,
                 extraction_error   TEXT,
-                extracted_at       TEXT NOT NULL
+                extracted_at       TEXT NOT NULL,
+                PRIMARY KEY (attachment_id, extractor_module)
             );
 
             CREATE VIRTUAL TABLE attachments_fts USING fts5(
@@ -1369,6 +1389,7 @@ class Database:
         content_type: str,
         size_bytes: int,
         occurrence_id: str,
+        extractor_module: str,
     ) -> bool:
         """Record one attachment occurrence on a message.
 
@@ -1376,7 +1397,12 @@ class Database:
         existed. Idempotent — re-indexing the same message produces the
         same occurrence id for a specific attachment slot, and this call
         no-ops on the second call rather than churning ``seen_at`` or the
-        FTS row.
+        FTS row. The one exception is ``extractor_module``, the module
+        whose ``attachment_extractions`` row the occurrence uses (#928):
+        when it changed (a release routes the label to another
+        extractor, or a migrated row's module came from its stamp), it is
+        updated and a cached row of the payload no occurrence uses any
+        more is purged.
 
         ``occurrence_id`` must be derived via
         ``attachment_indexing.attachment_occurrence_id`` so the formula
@@ -1386,18 +1412,25 @@ class Database:
         The filename + MIME type are mirrored into the ``attachments_fts``
         contentless table for direct keyword search ("find the .pdf
         named contract"). The deterministic ``attachment_id`` (sha256
-        of payload bytes) is what links the occurrence to its single
-        cached extraction in ``attachment_extractions``.
+        of payload bytes) and ``extractor_module`` are what link the
+        occurrence to its cached extraction in ``attachment_extractions``.
         """
         cur = self._conn.cursor()
         started = False
         try:
             started = self._begin_if_needed(cur)
             existing = cur.execute(
-                "SELECT 1 FROM attachments WHERE attachment_occurrence_id = ?",
+                "SELECT extractor_module FROM attachments WHERE attachment_occurrence_id = ?",
                 (occurrence_id,),
             ).fetchone()
             if existing is not None:
+                if existing["extractor_module"] != extractor_module:
+                    cur.execute(
+                        "UPDATE attachments SET extractor_module = ? "
+                        "WHERE attachment_occurrence_id = ?",
+                        (extractor_module, occurrence_id),
+                    )
+                    cur.execute(_PURGE_ORPHAN_EXTRACTION_SQL, (attachment_id,))
                 self._commit_if_started(started)
                 return False
 
@@ -1411,8 +1444,8 @@ class Database:
                 """
                 INSERT INTO attachments
                     (attachment_occurrence_id, claimant_id, attachment_id, thread_id, filename,
-                     content_type, size_bytes, seen_at, fts_rowid)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     content_type, size_bytes, seen_at, fts_rowid, extractor_module)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     occurrence_id,
@@ -1424,6 +1457,7 @@ class Database:
                     size_bytes,
                     now_iso,
                     fts_rowid,
+                    extractor_module,
                 ),
             )
             self._commit_if_started(started)
@@ -1442,9 +1476,9 @@ class Database:
 
     @_synchronized
     def find_filepaths_with_extractors(self, extractors: list[str]) -> list[str]:
-        """Maildir filepaths of messages carrying an attachment whose
-        cached extraction was written by one of ``extractors``, whatever
-        that occurrence's own filename or MIME type."""
+        """Maildir filepaths of messages carrying an attachment occurrence
+        whose cached extraction (the row its ``extractor_module`` names)
+        was written by one of ``extractors``."""
         if not extractors:
             return []
         placeholders = ",".join(["?"] * len(extractors))
@@ -1453,6 +1487,7 @@ class Database:
             SELECT DISTINCT m.filepath
             FROM attachment_extractions e
             JOIN attachments a ON a.attachment_id = e.attachment_id
+                AND a.extractor_module = e.extractor_module
             JOIN message_thread_map m ON m.claimant_id = a.claimant_id
             WHERE e.extractor IN ({placeholders})
             ORDER BY m.filepath
@@ -1465,12 +1500,14 @@ class Database:
     def find_ocr_disabled_attachments(self) -> list[sqlite3.Row]:
         """Every attachment occurrence whose cached extraction is an "OCR
         disabled" result, with its message's Maildir filepath, filename,
-        MIME type and the cached error."""
+        MIME type, the cached error and the row's extractor module."""
         return self._conn.execute(
             """
-            SELECT m.filepath, a.filename, a.content_type, e.extraction_error
+            SELECT m.filepath, a.filename, a.content_type, e.extraction_error,
+                   e.extractor_module
             FROM attachment_extractions e
             JOIN attachments a ON a.attachment_id = e.attachment_id
+                AND a.extractor_module = e.extractor_module
             JOIN message_thread_map m ON m.claimant_id = a.claimant_id
             WHERE e.extraction_status = 'unsupported'
               AND e.extraction_error IN (?, ?)
@@ -1488,9 +1525,11 @@ class Database:
         ``find_ocr_disabled_attachments``."""
         return self._conn.execute(
             """
-            SELECT m.filepath, a.filename, a.content_type, e.extraction_error
+            SELECT m.filepath, a.filename, a.content_type, e.extraction_error,
+                   e.extractor_module
             FROM attachment_extractions e
             JOIN attachments a ON a.attachment_id = e.attachment_id
+                AND a.extractor_module = e.extractor_module
             JOIN message_thread_map m ON m.claimant_id = a.claimant_id
             WHERE e.extraction_status = 'unsupported'
               AND e.extraction_error IN (?, ?)
@@ -1503,13 +1542,14 @@ class Database:
     def find_too_large_attachments(self) -> list[sqlite3.Row]:
         """Every attachment occurrence whose cached extraction is
         ``too_large``, with its message's Maildir filepath and the
-        payload's size in bytes. Occurrences share the row by content
-        hash, so all of them carry the same size."""
+        payload's size in bytes. The row is keyed by content hash, so
+        every occurrence using it carries the same size."""
         return self._conn.execute(
             """
             SELECT m.filepath, a.size_bytes
             FROM attachment_extractions e
             JOIN attachments a ON a.attachment_id = e.attachment_id
+                AND a.extractor_module = e.extractor_module
             JOIN message_thread_map m ON m.claimant_id = a.claimant_id
             WHERE e.extraction_status = 'too_large'
             ORDER BY m.filepath
@@ -1517,20 +1557,23 @@ class Database:
         ).fetchall()
 
     @_synchronized
-    def get_attachment_extraction(self, attachment_id: str) -> sqlite3.Row | None:
-        """Return the cached extraction row for an attachment, or None.
+    def get_attachment_extraction(
+        self, attachment_id: str, extractor_module: str
+    ) -> sqlite3.Row | None:
+        """Return the cached extraction row for a payload under one
+        extractor module ('' for none), or None.
 
         Used by the indexer write path to skip extraction work whenever
-        the same payload has already been processed. Even a failed prior
-        extraction is returned — the caller can decide whether to retry
-        based on ``extraction_status`` and how recent ``extracted_at``
-        is.
+        the same payload has already been processed by the extractor this
+        occurrence selects. Even a failed prior extraction is returned —
+        the caller can decide whether to retry based on
+        ``extraction_status`` and how recent ``extracted_at`` is.
         """
         return self._conn.execute(
-            "SELECT attachment_id, extraction_status, extractor, "
+            "SELECT attachment_id, extractor_module, extraction_status, extractor, "
             "extracted_text, extraction_error, extracted_at "
-            "FROM attachment_extractions WHERE attachment_id = ?",
-            (attachment_id,),
+            "FROM attachment_extractions WHERE attachment_id = ? AND extractor_module = ?",
+            (attachment_id, extractor_module),
         ).fetchone()
 
     @_synchronized
@@ -1538,12 +1581,15 @@ class Database:
         self,
         *,
         attachment_id: str,
+        extractor_module: str,
         extraction_status: str,
         extractor: str | None,
         extracted_text: str | None,
         extraction_error: str | None,
     ) -> None:
-        """Persist (or replace) the extraction record for ``attachment_id``.
+        """Persist (or replace) the extraction record for ``attachment_id``
+        under ``extractor_module`` ('' when the occurrence selects no
+        extractor).
 
         ``extraction_status`` is one of:
 
@@ -1554,7 +1600,7 @@ class Database:
         * ``"too_large"`` — payload exceeds the configured byte cap
         * ``"failed"`` — extractor raised; ``extraction_error`` populated
 
-        The same (attachment_id) is OR-REPLACE'd so a follow-up pass
+        The same (attachment_id, extractor_module) is OR-REPLACE'd so a follow-up pass
         (e.g. after enabling OCR or bumping ``INDEXER_OCR_MAX_PAGES``)
         can upgrade a prior ``unsupported`` / ``empty`` status without
         churning the schema.
@@ -1566,12 +1612,13 @@ class Database:
             cur.execute(
                 """
                 INSERT OR REPLACE INTO attachment_extractions
-                    (attachment_id, extraction_status, extractor,
+                    (attachment_id, extractor_module, extraction_status, extractor,
                      extracted_text, extraction_error, extracted_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     attachment_id,
+                    extractor_module,
                     extraction_status,
                     extractor,
                     extracted_text,
@@ -1586,10 +1633,10 @@ class Database:
 
     def _delete_attachments_for_message(self, cur: sqlite3.Cursor, claimant_id: str) -> None:
         """Drop all ``attachments`` occurrences and their FTS rows for
-        ``claimant_id``, then the cached ``attachment_extractions`` row of
-        each payload no remaining occurrence references (#562).
+        ``claimant_id``, then each cached ``attachment_extractions`` row
+        of their payloads that no remaining occurrence uses (#562, #928).
 
-        A payload another message still carries keeps its row. Purging
+        A row another message's occurrence still uses is kept. Purging
         an orphan gives up the extraction cache for a later re-arrival of
         the same bytes, which is extracted again; the extracted text must
         not outlive every message that carried it. Runs on the caller's
@@ -1605,7 +1652,7 @@ class Database:
                 self._mark_fts_scrub("attachments_fts")
         cur.execute("DELETE FROM attachments WHERE claimant_id = ?", (claimant_id,))
         for attachment_id in sorted({row["attachment_id"] for row in rows}):
-            cur.execute(_PURGE_ORPHAN_EXTRACTION_SQL, (attachment_id, attachment_id))
+            cur.execute(_PURGE_ORPHAN_EXTRACTION_SQL, (attachment_id,))
 
     @_synchronized
     def replace_thread_vector(self, thread_id: str, embedding: list[float]) -> None:

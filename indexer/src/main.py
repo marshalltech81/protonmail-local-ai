@@ -53,7 +53,7 @@ from .attachment_indexing import (
     format_attachment_outcomes,
     prepare_attachment_writes,
     record_committed_outcomes,
-    reruns_once_ocr_is_on,
+    reprocess_reruns_extraction,
     too_large_fits,
 )
 from .chunker import (
@@ -1324,7 +1324,7 @@ def _phase2a_collect_chunks(
     all_texts: list[str],
     *,
     progress: Callable[[], None] = lambda: None,
-    batch_extractions: dict[str, ExtractionResult] | None = None,
+    batch_extractions: dict[tuple[str, str], ExtractionResult] | None = None,
 ) -> tuple[bool, str | None]:
     """Phase 2a: chunk the body and attachments WITHOUT embedding.
 
@@ -1332,7 +1332,7 @@ def _phase2a_collect_chunks(
     records the offsets on ``state`` so Phase 2c can read its vectors
     back. ``batch_extractions`` carries the batch's uncommitted
     extraction results, so identical bytes are extracted once per batch
-    (#237). Returns ``(True, None)`` on success or ``(False, error)`` on
+    and extractor module (#237, #928). Returns ``(True, None)`` on success or ``(False, error)`` on
     a chunk/extract failure (rare — usually only attachment OCR errors)
     so the caller can mark the queue row failed without aborting the
     rest of the batch.
@@ -1977,7 +1977,7 @@ def _drain_queue_batched(
         # entry — not just before/after the bulk embed.
         all_texts: list[str] = []
         survivors: list[_BatchedMsg] = []
-        batch_extractions: dict[str, ExtractionResult] = {}
+        batch_extractions: dict[tuple[str, str], ExtractionResult] = {}
         for entry in batch:
             if not queue.begin_attempt(entry.row["filepath"]):
                 continue
@@ -2213,25 +2213,22 @@ def _requeue_stale_extractions(db: Database, queue: IndexingQueue) -> int:
     disabled" (an image, or a PDF without a digital text layer, skipped
     while OCR was off) whose reprocess would run OCR on it (#300).
 
-    Reprocessing re-runs that extractor (a stale row is refreshed from
-    any occurrence of its bytes) and replaces the attachment's chunks,
-    and the row is rewritten with the current version, so each message
-    is re-queued once. Every message carrying the bytes is included, not
-    only those whose filename or MIME type resolves to the extractor:
-    they all indexed the shared stale text. An "OCR disabled" row has no
-    extractor to refresh it from another occurrence, so only messages
-    whose own occurrence re-runs extraction are re-queued; the re-run
-    replaces the row, which keeps that once-only too. The same holds for
-    a "no extractor" row whose occurrence's MIME type or filename now
-    selects one, as when a release starts routing an extension such as
-    ``.heic`` (#691); that does not depend on OCR. An OLE2 row (an OLE2
-    payload no extractor read, #694) is handled the same way: an
-    occurrence labelled ``.doc`` / ``.xls`` now selects the legacy
-    extractor (#935). A ``too_large`` row
-    whose payload fits under the current ``INDEXER_ATTACHMENT_MAX_BYTES``
-    (the operator raised the cap) is re-extracted from any occurrence, so
-    every message carrying the bytes is re-queued; the re-run rewrites
-    the row, and bytes still over the cap are never re-queued (#693).
+    Rows are keyed by content hash and extractor module, and each
+    occurrence names the row it uses (#928), so only the messages whose
+    occurrences use a row are re-queued for it. Reprocessing re-extracts
+    a stale row and replaces the attachment's chunks, and the row is
+    rewritten with the current version, so each message is re-queued
+    once. An "OCR disabled" row is re-queued once OCR is on, and a "no
+    extractor" or OLE2 row (an OLE2 payload no extractor read, #694)
+    when the occurrence's MIME type or filename now selects another
+    module, as when a release starts routing an extension such as
+    ``.heic`` (#691) or labels ``.doc`` / ``.xls`` (#935); the re-run
+    writes the occurrence's own row, which keeps that once-only too. A
+    ``too_large`` row whose payload fits under the current
+    ``INDEXER_ATTACHMENT_MAX_BYTES`` (the operator raised the cap) is
+    re-extracted, so every message using it is re-queued; the re-run
+    rewrites the row, and bytes still over the cap are never re-queued
+    (#693).
     Like the zero-vector recovery sweep, files already queued or
     dead-lettered are left alone. Skipped entirely when attachment
     extraction is disabled, since the drain would not re-stamp the rows.
@@ -2245,12 +2242,15 @@ def _requeue_stale_extractions(db: Database, queue: IndexingQueue) -> int:
         if is_stale_extractor(name, ocr_enabled=INDEXER_OCR_ENABLED)
     ]
     filepaths = set(db.find_filepaths_with_extractors(stale))
-    # For a "no extractor" row the predicate is only "this occurrence now
-    # selects an extractor"; the OCR setting plays no part in it.
+    # For a "no extractor" or OLE2 row the predicate is only "this
+    # occurrence now selects another module"; the OCR setting plays no
+    # part in it.
     filepaths.update(
         row["filepath"]
         for row in db.find_no_extractor_attachments()
-        if reruns_once_ocr_is_on(row["extraction_error"], row["content_type"], row["filename"])
+        if reprocess_reruns_extraction(
+            row["extraction_error"], row["extractor_module"], row["content_type"], row["filename"]
+        )
     )
     filepaths.update(
         row["filepath"]
@@ -2261,7 +2261,12 @@ def _requeue_stale_extractions(db: Database, queue: IndexingQueue) -> int:
         filepaths.update(
             row["filepath"]
             for row in db.find_ocr_disabled_attachments()
-            if reruns_once_ocr_is_on(row["extraction_error"], row["content_type"], row["filename"])
+            if reprocess_reruns_extraction(
+                row["extraction_error"],
+                row["extractor_module"],
+                row["content_type"],
+                row["filename"],
+            )
         )
     re_enqueued = 0
     skipped_dead = 0

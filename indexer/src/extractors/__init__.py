@@ -351,10 +351,10 @@ def is_stale_extractor(name: str | None, *, ocr_enabled: bool = True) -> bool:
 
 def stale_extractor_module(name: str | None, *, ocr_enabled: bool = True) -> str | None:
     """The module that recorded ``name`` when that was an older version
-    of it, else ``None``. A stale row is refreshed by re-running this
-    module from any occurrence of the same bytes: the cache is shared by
-    content hash, so the same file attached as ``.bin`` must re-run the
-    DOCX extractor rather than its own (none) and overwrite the row.
+    of it, else ``None``. The cache is keyed by content hash and the
+    extractor module the occurrence selects (#928), so a stale row is
+    refreshed by a fresh extraction of an occurrence that selects its
+    module.
 
     A row an OCR extractor wrote (``image-ocr``, ``pdf-ocr``) is not
     stale while OCR is off: the refresh could only record "OCR disabled"
@@ -395,8 +395,8 @@ NO_EXTRACTOR_ERROR = "no extractor for this content type or filename extension"
 # that is an OLE2 compound file, which neither OOXML extractor can read
 # (#694), when the occurrence's label selects no legacy extractor
 # (#935): a password-protected OOXML package, or a legacy file labelled
-# as OOXML. The row is re-run for an occurrence whose label selects the
-# ``doc`` or ``xls`` extractor (``attachment_indexing``).
+# as OOXML. An occurrence labelled ``.doc`` / ``.xls`` selects the legacy
+# extractor and has its own cache row (#928).
 LEGACY_OLE2_ERROR = "OLE2 compound file (legacy .doc / .xls or encrypted Office file)"
 
 # The fixed 8-byte signature every OLE2 compound file starts with.
@@ -500,7 +500,6 @@ def extract(
     max_extracted_chars: int | None = None,
     ocr_timeout_seconds: float | None = None,
     max_pdf_pages: int | None = None,
-    module_override: str | None = None,
     on_progress: Callable[[], None] | None = None,
 ) -> ExtractionResult:
     """Run text extraction for one attachment payload.
@@ -517,10 +516,6 @@ def extract(
     text and bloat the ``attachment_extractions`` table well past the
     payload's on-disk size. ``None`` means no cap.
 
-    ``module_override`` runs that extractor module instead of the one the
-    metadata resolves to; used to refresh a stale cache row (see
-    ``stale_extractor_module``).
-
     ``on_progress`` (when supplied) is called after each page an
     extractor reads (the PDF and image extractors), so the indexer can
     refresh its heartbeat through a long OCR (#485).
@@ -533,21 +528,7 @@ def extract(
             error=f"payload {len(payload)} bytes exceeds cap {max_bytes}",
         )
 
-    module_name: str | None
-    if module_override is not None:
-        module_name, dispatch_via = module_override, "cache-refresh"
-    else:
-        module_name, dispatch_via = _resolve_extractor(content_type, filename)
-
-    # A stale ``text`` row refreshed from an occurrence whose own label
-    # selects another extractor: when the text guard below would reject
-    # the bytes, run that extractor instead, as a fresh extraction of this
-    # occurrence would (#932, review round 1). Otherwise the occurrence
-    # would cache the guard's ``unsupported`` and never run it.
-    if module_override == "text" and payload.startswith(_BINARY_SIGNATURES):
-        labelled, via = _resolve_extractor(content_type, filename)
-        if labelled is not None:
-            module_name, dispatch_via = labelled, via
+    module_name, dispatch_via = _resolve_extractor(content_type, filename)
 
     # Image types are gated by ``ocr_enabled`` because the only sensible
     # extractor is Tesseract. Disabling OCR globally should cleanly
@@ -571,7 +552,7 @@ def extract(
     # The container decides between a legacy and an OOXML extractor
     # (#694, #935): a constant-size prefix check; the aggregate counts an
     # unsupported result, so no per-item line.
-    module_name = _route_container(module_name, payload, content_type, filename)
+    module_name = _route_container(module_name, payload)
     if module_name is None:
         return ExtractionResult(
             status=STATUS_UNSUPPORTED,
@@ -581,8 +562,8 @@ def extract(
         )
 
     # A binary payload labelled as text (#932): the same constant-size
-    # prefix check, also decided by the bytes alone (including a
-    # ``module_override`` refresh) and counted by the aggregate.
+    # prefix check, also decided by the bytes alone and counted by the
+    # aggregate.
     if module_name == "text" and payload.startswith(_BINARY_SIGNATURES):
         return ExtractionResult(
             status=STATUS_UNSUPPORTED,
@@ -693,31 +674,24 @@ def extract(
 _LEGACY_TO_OOXML = {"doc": "docx", "xls": "xlsx"}
 
 
-def _route_container(
-    module_name: str, payload: bytes, content_type: str, filename: str
-) -> str | None:
+def _route_container(module_name: str, payload: bytes) -> str | None:
     """The extractor for ``payload`` once its container is known, or
     ``None`` when it is an OLE2 file no extractor reads.
 
     * A legacy label (``doc``, ``xls``) keeps its legacy extractor for an
       OLE2 payload; any other payload goes to the OOXML extractor, a
       best effort for an OOXML file mislabelled as a legacy type.
-    * An OLE2 payload bound for an OOXML extractor goes to the legacy
-      extractor this occurrence's own label selects. This covers a
-      ``module_override`` refresh of a stale DOCX / XLSX row from a
-      ``.doc`` / ``.xls`` occurrence. With no legacy label (an encrypted
-      OOXML file is OLE2 too, or the label says ``.docx``), it is
-      ``None``: neither OOXML extractor can read OLE2, and an attempt
-      would only record ``failed`` and re-run every
-      ``_FAILED_CACHE_MAX_AGE`` (#694).
+    * An OLE2 payload under an OOXML label (an encrypted OOXML file is
+      OLE2 too, or a legacy file labelled ``.docx``) is ``None``: neither
+      OOXML extractor can read OLE2, and an attempt would only record
+      ``failed`` and re-run every ``_FAILED_CACHE_MAX_AGE`` (#694).
     * Anything else is unchanged.
     """
     ole2 = payload.startswith(_OLE2_SIGNATURE)
     if module_name in _LEGACY_TO_OOXML:
         return module_name if ole2 else _LEGACY_TO_OOXML[module_name]
     if ole2 and module_name in _LEGACY_TO_OOXML.values():
-        labelled = _resolve_extractor(content_type, filename)[0]
-        return labelled if labelled in _LEGACY_TO_OOXML else None
+        return None
     return module_name
 
 

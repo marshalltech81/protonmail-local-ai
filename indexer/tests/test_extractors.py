@@ -771,23 +771,6 @@ class TestDocxExtractor:
         assert extractors.stale_extractor_module("text") is None
         assert extractors.stale_extractor_module(None) is None
 
-    def test_module_override_ignores_the_occurrence_metadata(self):
-        # Used to refresh a stale cache row from any occurrence of its bytes.
-        import docx
-        from src.extractors import STATUS_SUCCESS, extract
-
-        document = docx.Document()
-        document.add_paragraph("override text")
-        result = extract(
-            content_type="application/octet-stream",
-            filename="blob.bin",
-            payload=self._save(document),
-            module_override="docx",
-        )
-        assert result.status == STATUS_SUCCESS
-        assert result.extractor == "docx@5"
-        assert "override text" in (result.text or "")
-
 
 def _xlsx_bytes(rows: list[list[object]]) -> bytes:
     """A synthetic one-sheet workbook. openpyxl writes string cells as
@@ -4808,59 +4791,24 @@ class TestLegacyOfficeLabels:
             assert result.status == STATUS_FAILED
         assert calls == ["docx", "docx"]
 
-    def test_ole2_payload_refreshing_a_stale_row_reaches_the_legacy_extractor(self, monkeypatch):
-        """The startup sweep refreshes a stale ``docx`` / ``xlsx`` row with
-        ``module_override``; a legacy-labelled OLE2 occurrence then runs the
-        legacy extractor its own label selects (#935)."""
-        from src import extractors
-
-        calls: list[str] = []
-
-        def stub(module_name):
-            def run(payload, **_opts):
-                calls.append(module_name)
-                return "legacy words", module_name
-
-            return run
-
-        monkeypatch.setattr(extractors, "_safe_import", stub)
-        for filename, override in (("a.xls", "xlsx"), ("a.doc", "docx")):
-            result = extract(
-                content_type="application/octet-stream",
-                filename=filename,
-                payload=_OLE2_MAGIC + bytes(64),
-                module_override=override,
-            )
-            assert result.status == STATUS_SUCCESS
-        assert calls == ["xls", "doc"]
-
     def test_ole2_payload_without_a_legacy_label_stays_unsupported(self, monkeypatch):
         """An OLE2 payload bound for either OOXML extractor with no legacy
         label is ``unsupported`` (#694): under an OOXML label (for example
         a password-protected OOXML package, which is also OLE2; the MIME
-        type wins over a ``.doc`` name), and when a ``.bin`` occurrence
-        refreshes a stale row. #935 keeps this."""
+        type wins over a ``.doc`` name). #935 keeps this."""
         from src.extractors import LEGACY_OLE2_ERROR
 
         calls = _count_extractor_calls(monkeypatch)
         payload = _OLE2_MAGIC + bytes(64)
-        for content_type, filename, override in (
+        for content_type, filename in (
             (
                 "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                 "a.doc",
-                None,
             ),
-            ("application/octet-stream", "a.docx", None),
-            ("application/octet-stream", "a.xlsx", None),
-            ("application/octet-stream", "a.bin", "docx"),
-            ("application/octet-stream", "a.bin", "xlsx"),
+            ("application/octet-stream", "a.docx"),
+            ("application/octet-stream", "a.xlsx"),
         ):
-            result = extract(
-                content_type=content_type,
-                filename=filename,
-                payload=payload,
-                module_override=override,
-            )
+            result = extract(content_type=content_type, filename=filename, payload=payload)
             assert (result.status, result.error) == (STATUS_UNSUPPORTED, LEGACY_OLE2_ERROR), (
                 content_type,
                 filename,
@@ -4980,41 +4928,6 @@ class TestBinaryPayloadLabelledAsText:
         )
         assert result.status == STATUS_SUCCESS
         assert calls == ["text"]
-
-    def test_refreshing_a_stale_text_row_records_unsupported(self, monkeypatch):
-        """The startup sweep refreshes a stale ``text`` row with
-        ``module_override`` from any occurrence; the bytes decide there too."""
-        from src.extractors import BINARY_AS_TEXT_ERROR
-
-        calls = _count_extractor_calls(monkeypatch)
-        result = extract(
-            content_type="application/octet-stream",
-            filename="a.bin",
-            payload=b"%PDF-1.7" + bytes(64),
-            module_override="text",
-        )
-        assert (result.status, result.error) == (STATUS_UNSUPPORTED, BINARY_AS_TEXT_ERROR)
-        assert calls == []
-
-    @pytest.mark.parametrize(
-        ("content_type", "filename", "module"),
-        [("application/pdf", "a.pdf", "pdf"), ("image/png", "a.bin", "image")],
-    )
-    def test_refresh_from_an_occurrence_with_its_own_extractor_runs_that_extractor(
-        self, content_type, filename, module, monkeypatch
-    ):
-        """Review round 1: a stale ``text`` row refreshed from an occurrence
-        whose label selects another extractor runs that extractor, as a
-        fresh extraction of the occurrence would, rather than recording the
-        text guard's ``unsupported`` for it."""
-        calls = _count_extractor_calls(monkeypatch)
-        extract(
-            content_type=content_type,
-            filename=filename,
-            payload=_BINARY_SIGNATURES["pdf" if module == "pdf" else "png"] + bytes(64),
-            module_override="text",
-        )
-        assert calls == [module]
 
     def test_signature_check_is_bounded_on_a_large_payload(self, monkeypatch):
         """The guard is a fixed-prefix check: a payload at the default size

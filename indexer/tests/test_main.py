@@ -3407,9 +3407,14 @@ class TestRequeueStaleExtractions:
         assert row["extractor"] == "docx@5"
         assert main._requeue_stale_extractions(db, queue) == 0
 
-    def test_alias_messages_are_requeued_and_rebuilt(self, tmp_path, monkeypatch):
-        """A message carrying the same bytes as ``.bin`` shares the stale
-        cache row and indexed its old text, so it is rebuilt too."""
+    def test_alias_messages_using_the_stale_row_are_requeued_and_rebuilt(
+        self, tmp_path, monkeypatch
+    ):
+        """A message carrying the same bytes as ``.bin`` that uses the stale
+        DOCX row (as a v0 database migrated to v1 leaves it, #928) indexed
+        its old text, so it is re-queued too. Its reprocess extracts under
+        its own label, which selects no extractor, so its old text goes and
+        it moves to its own row; neither is re-queued again."""
         maildir = tmp_path / "maildir"
         monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
         docx_path = maildir / "INBOX" / "cur" / "contract.eml"
@@ -3438,18 +3443,29 @@ class TestRequeueStaleExtractions:
                 ),
             )
             self._drain(db, queue)
+        # The v0 shape: one row per payload, used by both occurrences.
+        with db.transaction():
+            db._conn.execute("DELETE FROM attachment_extractions WHERE extractor_module = ''")
+            db._conn.execute("UPDATE attachments SET extractor_module = 'docx'")
 
         assert main._requeue_stale_extractions(db, queue) == 2
         self._drain(db, queue)
 
-        for mid in ("contract@example.com", "blob@example.com"):
+        def attachment_text(mid: str) -> str:
             rows = db._conn.execute(
                 "SELECT text FROM message_chunks WHERE "
                 "claimant_id IN (SELECT claimant_id FROM message_thread_map WHERE message_id = ?) "
                 "AND attachment_id IS NOT NULL",
                 (mid,),
             ).fetchall()
-            assert "HEADER_MARK" in " ".join(r["text"] for r in rows), mid
+            return " ".join(r["text"] for r in rows)
+
+        assert "HEADER_MARK" in attachment_text("contract@example.com")
+        assert attachment_text("blob@example.com") == ""
+        modules = db._conn.execute(
+            "SELECT filename, extractor_module FROM attachments ORDER BY filename"
+        ).fetchall()
+        assert [tuple(r) for r in modules] == [("blob.bin", ""), ("contract.docx", "docx")]
         assert main._requeue_stale_extractions(db, queue) == 0
 
     def test_nothing_is_requeued_when_extraction_is_disabled(self, tmp_path, monkeypatch):
@@ -3780,9 +3796,9 @@ class TestRequeueOcrDisabledExtractions:
 
     def test_occurrence_that_would_not_rerun_is_not_requeued(self, tmp_path, monkeypatch):
         """Bytes cached "OCR disabled" from an image, carried only as
-        ``.bin`` by a live message: reprocessing that message would serve
-        the row again (no extractor for ``.bin``), so re-queueing it would
-        repeat on every startup."""
+        ``.bin`` by a live message: that occurrence has its own "no
+        extractor" row (#928), which OCR does not change, so it is not
+        re-queued; re-queueing it would repeat on every startup."""
         db, queue, paths = self._index_with_ocr_off(
             tmp_path,
             monkeypatch,
@@ -3791,7 +3807,7 @@ class TestRequeueOcrDisabledExtractions:
                 "blob": (self._png(), "application/octet-stream", "blob.bin"),
             },
         )
-        assert len(db.find_ocr_disabled_attachments()) == 2
+        assert [r["filename"] for r in db.find_ocr_disabled_attachments()] == ["photo.png"]
         queue.enqueue(paths["photo"], REASON_INITIAL_SCAN)
         for _ in range(queue.max_attempts):
             queue.mark_failed(paths["photo"], stage="embed", error="x")
@@ -6955,8 +6971,9 @@ class TestBatchSharesExtraction:
 
     def test_no_text_copy_does_not_clear_a_filled_copy(self, tmp_path, monkeypatch):
         """Review round 2: re-indexing a message whose ``.bin`` copy still
-        reads the cached ``unsupported`` row while its ``.txt`` copy of the
-        same bytes extracts. The ``.bin`` plan cleared the shared chunk
+        reads its cached ``unsupported`` row while its ``.txt`` copy of the
+        same bytes re-extracts (its own row is made a stale ``unsupported``
+        one here; rows are per module since #928). The ``.bin`` plan cleared the shared chunk
         slice, and the ``.txt`` plan, having embedded nothing because its
         chunks were already stored, then failed to restore it."""
         from src.extractors import STATUS_UNSUPPORTED
@@ -6969,6 +6986,7 @@ class TestBatchSharesExtraction:
         ).fetchone()["attachment_id"]
         db.store_attachment_extraction(
             attachment_id=content_hash,
+            extractor_module="text",
             extraction_status=STATUS_UNSUPPORTED,
             extractor=None,
             extracted_text=None,
