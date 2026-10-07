@@ -1324,8 +1324,7 @@ only, never filenames or text (`make logs`):
     so none are lost, and the 5-minute flush still applies.
   - What the outcomes mean: `cached` counts attachments served from the
     extraction cache instead of extracted again. `unsupported` is a type
-    no extractor reads, including PowerPoint slideshows and templates
-    (`.ppsx`, `.potx`), and password-protected Office files and other
+    no extractor reads, and password-protected Office files and other
     OLE2 files not labelled `.doc` / `.xls` / `.ppt`, recorded with
     "OLE2 compound file" rather than as `failed`, so they are not
     retried (#694); a `.ppt`-labelled file that is not OLE2 is recorded

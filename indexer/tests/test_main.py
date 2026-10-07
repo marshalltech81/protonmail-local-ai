@@ -4078,7 +4078,7 @@ class TestPptxStartsDispatching:
         rows = db._conn.execute(
             "SELECT extraction_status, extractor FROM attachment_extractions"
         ).fetchall()
-        assert [tuple(r) for r in rows] == [("success", "pptx@1")] * 2
+        assert [tuple(r) for r in rows] == [("success", "pptx@2")] * 2
         chunks = [
             r["text"]
             for r in db._conn.execute(
@@ -4128,7 +4128,7 @@ class TestPptxStartsDispatching:
         rows = db._conn.execute(
             "SELECT extraction_status, extractor, extraction_error FROM attachment_extractions"
         ).fetchall()
-        assert [tuple(r) for r in rows] == [("failed", "pptx@1", "InvalidXmlError")]
+        assert [tuple(r) for r in rows] == [("failed", "pptx@2", "InvalidXmlError")]
         errors = [r[0] for r in db._conn.execute("SELECT last_error FROM indexing_jobs")]
         assert all(marker not in (e or "") for e in errors)
         assert marker not in caplog.text

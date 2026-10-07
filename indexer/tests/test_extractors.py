@@ -5768,7 +5768,7 @@ class TestPptxExtractor:
         )
         assert result == ExtractionResult(
             status=STATUS_SUCCESS,
-            extractor="pptx@1",
+            extractor="pptx@2",
             text="ATTACHMENTFACT only in the deck",
             error=None,
         )
@@ -5928,7 +5928,7 @@ class TestPptxExtractor:
 
     def test_deck_without_text_is_empty(self):
         result = extract(content_type=_PPTX_MIME, filename="a.pptx", payload=_deck(_boxes()))
-        assert (result.status, result.extractor, result.text) == (STATUS_EMPTY, "pptx@1", None)
+        assert (result.status, result.extractor, result.text) == (STATUS_EMPTY, "pptx@2", None)
 
     def test_repeated_slide_entries_read_the_slide_once(self, monkeypatch):
         """A slide list naming one slide many times costs a slide-list
@@ -6023,7 +6023,7 @@ class TestPptxExtractor:
         result = extract(content_type=_PPTX_MIME, filename="a.pptx", payload=payload)
         assert time.perf_counter() - started < 5.0
         assert (result.status, result.error) == (STATUS_FAILED, "PptxRelationshipChainError")
-        assert result.extractor == "pptx@1"
+        assert result.extractor == "pptx@2"
         assert _PPTX_MARKER not in caplog.text
 
     def test_malformed_slide_fails_by_type_without_its_text(self, caplog):
@@ -6084,7 +6084,7 @@ class TestPptxExtractor:
 
         payload = _rewrite_deck(_deck(_boxes(_PPTX_MARKER)), {"ppt/slides/slide1.xml": pad})
         monkeypatch.setattr(pptx, "_MAX_EXPANSION_BYTES", 250_000)
-        opened = _count_calls(monkeypatch, pptx._pptx, "Presentation")
+        opened = _count_calls(monkeypatch, pptx.Package, "open")
         caplog.set_level("DEBUG")
         result = extract(content_type=_PPTX_MIME, filename="a.pptx", payload=payload)
         assert (result.status, result.error) == (STATUS_FAILED, "PptxPackageBudgetError")
@@ -6114,7 +6114,7 @@ class TestPptxExtractor:
 
         payload = _rewrite_deck(_deck(_boxes(_PPTX_MARKER)), {}, extra)
         monkeypatch.setattr(pptx, budget, setting)
-        opened = _count_calls(monkeypatch, pptx._pptx, "Presentation")
+        opened = _count_calls(monkeypatch, pptx.Package, "open")
         caplog.set_level("DEBUG")
         result = extract(content_type=_PPTX_MIME, filename="a.pptx", payload=payload)
         assert (result.status, result.error) == (STATUS_FAILED, "PptxPackageBudgetError")
@@ -6138,7 +6138,7 @@ class TestPptxExtractor:
     def test_payload_that_is_not_a_zip_is_left_to_python_pptx(self, monkeypatch):
         from src.extractors import pptx
 
-        opened = _count_calls(monkeypatch, pptx._pptx, "Presentation")
+        opened = _count_calls(monkeypatch, pptx.Package, "open")
         result = extract(
             content_type=_PPTX_MIME,
             filename="a.pptx",
@@ -6154,7 +6154,7 @@ class TestPptxExtractor:
         from src.extractors import pptx
 
         payload = _deck(TestPptxExtractor._full_slide, _boxes("b"))
-        opened = _count_calls(monkeypatch, pptx._pptx, "Presentation")
+        opened = _count_calls(monkeypatch, pptx.Package, "open")
         assert pptx.extract(payload)[0].startswith("Quarterly review")
         assert opened[0] == 1
 
@@ -6187,60 +6187,241 @@ class TestPptxExtractor:
             assert (result.status, result.error) == (STATUS_UNSUPPORTED, LEGACY_OLE2_ERROR)
         assert calls == []
 
-    def test_pptx_starts_at_version_one(self):
-        from src.extractors import EXTRACTOR_VERSIONS, stale_extractor_module
 
-        assert EXTRACTOR_VERSIONS["pptx"] == 1
-        assert stale_extractor_module("pptx@1") is None
+_PPTM_MIME = "application/vnd.ms-powerpoint.presentation.macroEnabled.12"
+_PRESENTATION_MAIN = (
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"
+)
+_SLIDESHOW_MAIN = "application/vnd.openxmlformats-officedocument.presentationml.slideshow.main+xml"
+_TEMPLATE_MAIN = "application/vnd.openxmlformats-officedocument.presentationml.template.main+xml"
+_MACRO_MAIN = "application/vnd.ms-powerpoint.presentation.macroEnabled.main+xml"
+_VBA_MARKER = "SYNTHETIC_MACRO_MARKER"
+
+# (MIME type, extension, main-part content type) of each PresentationML
+# variant read since #947.
+_PPTX_VARIANTS = {
+    "ppsx": (_PPSX_MIME, ".ppsx", _SLIDESHOW_MAIN),
+    "potx": (_POTX_MIME, ".potx", _TEMPLATE_MAIN),
+    "pptm": (_PPTM_MIME, ".pptm", _MACRO_MAIN),
+}
+
+# Each variant labelled by its MIME type alone and by its extension alone.
+_PPTX_VARIANT_LABELS = [
+    pytest.param(mime, "a.bin", main, id=f"{name}-mime")
+    for name, (mime, _, main) in _PPTX_VARIANTS.items()
+] + [
+    pytest.param("application/octet-stream", f"a{ext}", main, id=f"{name}-ext")
+    for name, (_, ext, main) in _PPTX_VARIANTS.items()
+]
 
 
-def _retyped_deck(main_type: str) -> bytes:
+def _retyped_deck(main_type: str, payload: bytes | None = None) -> bytes:
     """A deck whose main part declares another PresentationML type, as
-    PowerPoint saves a slideshow (``.ppsx``) or a template (``.potx``)."""
+    PowerPoint saves a slideshow (``.ppsx``), a template (``.potx``) or a
+    macro-enabled deck (``.pptm``). python-pptx saves only the
+    presentation type, so the fixture (test code only) edits the saved
+    package's ``[Content_Types].xml``."""
 
     def retype(xml: bytes) -> bytes:
-        assert b"presentation.main+xml" in xml
-        return xml.replace(b"presentation.main+xml", main_type.encode())
+        assert _PRESENTATION_MAIN.encode() in xml
+        return xml.replace(_PRESENTATION_MAIN.encode(), main_type.encode())
 
-    return _rewrite_deck(_deck(_boxes("SLIDESHOWFACT")), {"[Content_Types].xml": retype})
+    if payload is None:
+        payload = _deck(_boxes("SLIDESHOWFACT"))
+    return _rewrite_deck(payload, {"[Content_Types].xml": retype})
 
 
-class TestPowerPointSlideshowsAndTemplates:
-    """#936: python-pptx refuses a package whose main part is the
-    slideshow or template type, so ``.ppsx`` / ``.potx`` stay unsupported
-    rather than being routed to fail on every file, as ``.dotx`` (#694)."""
+def _macro_deck(text: str) -> bytes:
+    """A ``.pptm``: a deck with a ``vbaProject.bin`` part related from the
+    presentation, as PowerPoint saves macros, holding a synthetic marker
+    instead of a VBA project."""
+    import io
 
-    @pytest.mark.parametrize("main_type", ["slideshow.main+xml", "template.main+xml"])
-    def test_python_pptx_does_not_open_them(self, main_type):
+    from pptx import Presentation
+    from pptx.opc.package import Part
+    from pptx.opc.packuri import PackURI
+
+    presentation = Presentation()
+    _boxes(text)(presentation.slides.add_slide(presentation.slide_layouts[6]))
+    part = presentation.part
+    vba = Part(
+        PackURI("/ppt/vbaProject.bin"),
+        "application/vnd.ms-office.vbaProject",
+        part.package,
+        _VBA_MARKER.encode(),
+    )
+    part.relate_to(vba, "http://schemas.microsoft.com/office/2006/relationships/vbaProject")
+    buf = io.BytesIO()
+    presentation.save(buf)
+    return _retyped_deck(_MACRO_MAIN, buf.getvalue())
+
+
+class TestPowerPointVariants:
+    """#947: slideshows (``.ppsx``), templates (``.potx``) and macro-enabled
+    decks (``.pptm``) are read by the PPTX extractor. python-pptx's own
+    part factory loads each one's main part as a ``PresentationPart``;
+    the extractor opens the package with ``Package.open`` and accepts
+    those main-part types. The payload bytes are not changed, and a
+    macro part is never read."""
+
+    def test_python_pptx_route_for_variants_still_holds(self):
+        """Fails loudly if a python-pptx upgrade changes the route: the
+        stock ``pptx.Presentation`` still refuses a slideshow and a
+        template, and python-pptx's ``PartFactory`` still maps each
+        variant's main-part type to ``PresentationPart``, which
+        ``Package.open`` then loads."""
         import io
 
         from pptx import Presentation
+        from pptx.opc.constants import CONTENT_TYPE as CT
+        from pptx.opc.package import PartFactory
+        from pptx.package import Package
+        from pptx.parts.presentation import PresentationPart
+        from src.extractors import pptx
 
-        with pytest.raises(ValueError, match="not a PowerPoint file"):
-            Presentation(io.BytesIO(_retyped_deck(main_type)))
+        assert {_SLIDESHOW_MAIN, _TEMPLATE_MAIN, _MACRO_MAIN} == {
+            CT.PML_SLIDESHOW_MAIN,
+            CT.PML_TEMPLATE_MAIN,
+            CT.PML_PRES_MACRO_MAIN,
+        }
+        assert pptx._PRESENTATION_MAIN_TYPES == {
+            CT.PML_PRESENTATION_MAIN,
+            CT.PML_SLIDESHOW_MAIN,
+            CT.PML_TEMPLATE_MAIN,
+            CT.PML_PRES_MACRO_MAIN,
+        }
+        for main_type in (_SLIDESHOW_MAIN, _TEMPLATE_MAIN):
+            with pytest.raises(ValueError, match="not a PowerPoint file"):
+                Presentation(io.BytesIO(_retyped_deck(main_type)))
+        for main_type in (_SLIDESHOW_MAIN, _TEMPLATE_MAIN, _MACRO_MAIN):
+            assert PartFactory.part_type_for[main_type] is PresentationPart
+            part = Package.open(io.BytesIO(_retyped_deck(main_type))).main_document_part
+            assert isinstance(part, PresentationPart)
+            assert part.content_type == main_type
 
-    @pytest.mark.parametrize(
-        ("content_type", "filename"),
-        [
-            (_PPSX_MIME, "a.bin"),
-            ("application/octet-stream", "a.ppsx"),
-            (_POTX_MIME, "a.bin"),
-            ("application/octet-stream", "a.potx"),
-        ],
-    )
-    def test_they_are_unsupported_by_mime_and_by_extension(
-        self, content_type, filename, monkeypatch
+    @pytest.mark.parametrize(("content_type", "filename", "main_type"), _PPTX_VARIANT_LABELS)
+    def test_each_variant_is_extracted_by_mime_and_by_extension(
+        self, content_type, filename, main_type, monkeypatch, caplog
     ):
-        from src.extractors import NO_EXTRACTOR_ERROR
+        calls = _count_extractor_calls(monkeypatch)
+        payload = _retyped_deck(main_type, _deck(_boxes("VARIANTFACT renewal due 2031-04-01")))
+        caplog.set_level("DEBUG")
+        result = extract(content_type=content_type, filename=filename, payload=payload)
+        assert (result.status, result.extractor) == (STATUS_SUCCESS, "pptx@2")
+        assert result.text == "VARIANTFACT renewal due 2031-04-01"
+        assert calls == ["pptx"]
+        assert "VARIANTFACT" not in caplog.text
+
+    @pytest.mark.parametrize("label", [(_PPTM_MIME, "a.bin"), ("", "a.pptm")])
+    def test_macro_part_is_never_read(self, label, monkeypatch, caplog):
+        """A ``.pptm`` yields its slide text. python-pptx loads the macro
+        part as an opaque ``Part`` when it opens the package; nothing reads
+        its bytes, so no macro text reaches the index or the logs."""
+        import io
+        import zipfile
+
+        from pptx.opc.package import Part
+
+        payload = _macro_deck("MACRODECKFACT")
+        archive = zipfile.ZipFile(io.BytesIO(payload))
+        assert archive.read("ppt/vbaProject.bin") == _VBA_MARKER.encode()
+        assert _MACRO_MAIN.encode() in archive.read("[Content_Types].xml")
+
+        read: list[str] = []
+        real_blob = Part.blob
+
+        def recording_blob(part):
+            read.append(str(part.partname))
+            return real_blob.fget(part)
+
+        monkeypatch.setattr(Part, "blob", property(recording_blob))
+        caplog.set_level("DEBUG")
+        content_type, filename = label
+        result = extract(content_type=content_type, filename=filename, payload=payload)
+        assert (result.status, result.extractor) == (STATUS_SUCCESS, "pptx@2")
+        assert result.text == "MACRODECKFACT"
+        assert "/ppt/vbaProject.bin" not in read
+        assert _VBA_MARKER not in caplog.text
+
+    @pytest.mark.parametrize(("content_type", "filename", "main_type"), _PPTX_VARIANT_LABELS)
+    def test_ole2_payload_under_each_label_is_unsupported(
+        self, content_type, filename, main_type, monkeypatch
+    ):
+        from src.extractors import LEGACY_OLE2_ERROR
 
         calls = _count_extractor_calls(monkeypatch)
         result = extract(
-            content_type=content_type,
-            filename=filename,
-            payload=_retyped_deck("slideshow.main+xml"),
+            content_type=content_type, filename=filename, payload=_OLE2_MAGIC + bytes(64)
         )
-        assert (result.status, result.error) == (STATUS_UNSUPPORTED, NO_EXTRACTOR_ERROR)
+        assert (result.status, result.error) == (STATUS_UNSUPPORTED, LEGACY_OLE2_ERROR)
         assert calls == []
+
+    @pytest.mark.parametrize(("content_type", "filename", "main_type"), _PPTX_VARIANT_LABELS)
+    def test_variants_go_through_the_pre_open_budgets(
+        self, content_type, filename, main_type, monkeypatch, caplog
+    ):
+        from src.extractors import pptx
+
+        payload = _retyped_deck(main_type, _deck(_boxes(_PPTX_MARKER)))
+        monkeypatch.setattr(pptx, "_MAX_MEMBERS", 5)
+        opened = _count_calls(monkeypatch, pptx.Package, "open")
+        caplog.set_level("DEBUG")
+        result = extract(content_type=content_type, filename=filename, payload=payload)
+        assert (result.status, result.error) == (STATUS_FAILED, "PptxPackageBudgetError")
+        assert opened[0] == 0
+        assert _PPTX_MARKER not in caplog.text
+
+    def test_variants_go_through_the_walk_budgets(self, monkeypatch, caplog):
+        from src.extractors import pptx
+
+        payload = _retyped_deck(_SLIDESHOW_MAIN, _deck(_boxes("one"), _boxes(_PPTX_MARKER)))
+        monkeypatch.setattr(pptx, "_MAX_SLIDES", 1)
+        caplog.set_level("DEBUG")
+        result = extract(content_type=_PPSX_MIME, filename="a.ppsx", payload=payload)
+        assert (result.status, result.text) == (STATUS_SUCCESS, "one")
+        assert "extractor cap pptx_slides" in caplog.text
+        assert _PPTX_MARKER not in caplog.text
+
+    @pytest.mark.parametrize(("content_type", "filename", "main_type"), _PPTX_VARIANT_LABELS)
+    def test_package_whose_main_part_is_not_a_presentation_fails_by_type(
+        self, content_type, filename, main_type, caplog
+    ):
+        """A Word document under a PowerPoint label: python-pptx loads its
+        main part as a generic part, which the extractor refuses with
+        fixed text; nothing of the document is logged or recorded."""
+        caplog.set_level("DEBUG")
+        result = extract(
+            content_type=content_type,
+            filename=filename.replace("a.", f"{_PPTX_MARKER}."),
+            payload=_docx_bytes(_PPTX_MARKER),
+        )
+        assert (result.status, result.error) == (STATUS_FAILED, "ValueError")
+        assert "ValueError" in caplog.text
+        assert _PPTX_MARKER not in caplog.text
+
+    def test_variant_labelled_pptx_is_extracted(self):
+        """The outcome that changed for a ``.pptx`` label, and why the
+        PPTX version is bumped: a slideshow or template sent as ``.pptx``
+        failed under ``pptx@1`` (``pptx.Presentation`` refused it)."""
+        for main_type in (_SLIDESHOW_MAIN, _TEMPLATE_MAIN):
+            result = extract(
+                content_type=_PPTX_MIME, filename="a.pptx", payload=_retyped_deck(main_type)
+            )
+            assert (result.status, result.text) == (STATUS_SUCCESS, "SLIDESHOWFACT")
+
+    def test_mime_dispatch_keys_are_lowercase(self):
+        """The label is lowercased before the lookup, so a key with an
+        upper-case letter (``macroEnabled``) would never match."""
+        from src.extractors import _MIME_DISPATCH
+
+        assert [key for key in _MIME_DISPATCH if key != key.lower()] == []
+
+    def test_pptx_version_2_marks_version_1_rows_stale(self):
+        from src.extractors import EXTRACTOR_VERSIONS, stale_extractor_module
+
+        assert EXTRACTOR_VERSIONS["pptx"] == 2
+        assert stale_extractor_module("pptx@1") == "pptx"
+        assert stale_extractor_module("pptx@2") is None
 
 
 # #903: every truncation or skip cap inside an extractor is reported the

@@ -328,13 +328,17 @@ class ExtractionResult:
 # pptx 1: the first ``.pptx`` extractor (#936). Rows cached ``unsupported``
 # for a ``.pptx`` before it carry no extractor, so no version marks them
 # stale; the "no extractor" sweep re-queues them instead.
+# pptx 2: reads slideshows (``.ppsx``) and templates (``.potx``), which
+# ``pptx.Presentation`` refused, so one labelled ``.pptx`` failed (#947).
+# ``.pptm`` / ``.ppsx`` / ``.potx`` occurrences cached "no extractor" are
+# re-queued by that sweep.
 EXTRACTOR_VERSIONS: dict[str, int] = {
     "doc": 1,
     "docx": 5,
     "image": 3,
     "pdf": 5,
     "ppt": 1,
-    "pptx": 1,
+    "pptx": 2,
     "text": 3,
     "xls": 1,
     "xlsx": 6,
@@ -482,9 +486,14 @@ _MIME_DISPATCH: dict[str, str] = {
     # Legacy PowerPoint: OLE2 only; anything else is ``unsupported``
     # (``NON_OLE2_PPT_ERROR``, #957).
     "application/vnd.ms-powerpoint": "ppt",
-    # Presentations only: python-pptx refuses a package whose main part is
-    # the slideshow (``.ppsx``) or template (``.potx``) type (#936).
     "application/vnd.openxmlformats-officedocument.presentationml.presentation": "pptx",
+    # Macro-enabled decks (``.pptm``, text only; macros are never read),
+    # slideshows (``.ppsx``) and templates (``.potx``): the PPTX extractor
+    # loads their main parts (#947).
+    # Keys are lowercase: the label is lowercased before the lookup.
+    "application/vnd.ms-powerpoint.presentation.macroenabled.12": "pptx",
+    "application/vnd.openxmlformats-officedocument.presentationml.slideshow": "pptx",
+    "application/vnd.openxmlformats-officedocument.presentationml.template": "pptx",
     "text/html": "html",
     "application/xhtml+xml": "html",
     "text/plain": "text",
@@ -504,6 +513,9 @@ _EXT_DISPATCH: dict[str, str] = {
     ".xls": "xls",
     ".ppt": "ppt",
     ".pptx": "pptx",
+    ".pptm": "pptx",
+    ".ppsx": "pptx",
+    ".potx": "pptx",
     ".html": "html",
     ".htm": "html",
     ".xhtml": "html",

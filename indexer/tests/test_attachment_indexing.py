@@ -1980,6 +1980,46 @@ def test_cached_no_extractor_row_for_a_dotx_is_re_extracted(tmp_path):
         assert persisted.text is not None and "SYNTHETIC_DOTX_FACT" in persisted.text
 
 
+@pytest.mark.parametrize("variant", ["ppsx", "potx", "pptm"])
+def test_cached_no_extractor_row_for_a_powerpoint_variant_is_re_extracted(tmp_path, variant):
+    """#947: a slideshow, template or macro-enabled deck cached
+    ``unsupported`` (no extractor) before it was routed is re-queued by the
+    startup sweep and re-extracted through the real dispatcher; its chunks
+    carry a fact that appears only in the attachment."""
+    from src.attachment_indexing import reprocess_reruns_extraction
+
+    from tests.test_extractors import _PPTX_VARIANTS, _boxes, _deck, _macro_deck, _retyped_deck
+
+    mime, ext, main_type = _PPTX_VARIANTS[variant]
+    fact = "SYNTHETIC_DECK_ONLY_FACT"
+    if variant == "pptm":
+        payload = _macro_deck(fact)
+    else:
+        payload = _retyped_deck(main_type, _deck(_boxes(fact)))
+    for content_type, filename in ((mime, "a.bin"), ("application/octet-stream", f"a{ext}")):
+        assert reprocess_reruns_extraction(NO_EXTRACTOR_ERROR, "", content_type, filename)
+        db = _setup_db_for_attachment(tmp_path / filename)
+        attachment = _attachment(payload, filename=filename, content_type=content_type)
+        db.store_attachment_extraction(
+            attachment_id=attachment.content_hash,
+            extractor_module="",
+            extraction_status=STATUS_UNSUPPORTED,
+            extractor=None,
+            extracted_text=None,
+            extraction_error=NO_EXTRACTOR_ERROR,
+        )
+        plan = prepare_attachment_writes(db=db, **_kwargs(attachment))
+        assert (plan.status, plan.cached) == (STATUS_SUCCESS, False)
+        persisted = plan.extraction_to_persist
+        assert persisted is not None
+        assert (persisted.status, persisted.extractor, persisted.text) == (
+            STATUS_SUCCESS,
+            "pptx@2",
+            fact,
+        )
+        assert [chunk.text for chunk in plan.chunks if fact in chunk.text]
+
+
 def _encrypted_pdf_case(monkeypatch) -> tuple[bytes, str, str]:
     from src.extractors import ENCRYPTED_PDF_ERROR
 
