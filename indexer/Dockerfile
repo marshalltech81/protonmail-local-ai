@@ -72,7 +72,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     tesseract-ocr \
     poppler-utils \
     catdoc \
- && rm -rf /var/lib/apt/lists/*
+ && rm -rf /var/lib/apt/lists/* \
+ # The service runs from the uv-built virtualenv, which has no pip, so
+ # the base image's pip (and the packages it vendors) is removed (#1007).
+ && python -m pip uninstall --yes --no-cache-dir pip
 
 # UID 1002 — distinct from mbsync (UID 1001) so a parser/extractor
 # exploit triggered by a malicious .eml or attachment doesn't end up
