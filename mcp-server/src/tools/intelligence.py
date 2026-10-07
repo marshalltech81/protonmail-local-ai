@@ -3435,12 +3435,34 @@ def register_intelligence_tools(
             # What the cap alone would show is rendered too (bounded by
             # that cap) so a cut can be told from a thread that fits;
             # only the two lengths are logged.
+            wanted_map: dict[str, EvidenceRef] = {}
             wanted_chars = (
-                len(_summarize_context(thread, recent_chunks, evidence_map={}))
+                len(_summarize_context(thread, recent_chunks, evidence_map=wanted_map))
                 if context_chars < _SUMMARIZE_CONTEXT_CHARS
                 else len(context)
             )
             context_cut = len(context) < wanted_chars
+            # The caller is told what the window cut (#949), counted in
+            # passages against what the cap alone would show: a label
+            # missing is left out, a shorter text is cut short.
+            window_note = ""
+            if context_cut:
+                window_note = _coverage_note(
+                    EvidenceCoverage(
+                        omitted=len(wanted_map) - len(evidence_map),
+                        truncated=sum(
+                            len(ref.text) < len(wanted_map[label].text)
+                            for label, ref in evidence_map.items()
+                        ),
+                        threads_without_evidence=0 if evidence_map else 1,
+                    ),
+                    instruct_model=False,
+                )
+            if window_note:
+                window_note += (
+                    f" {len(evidence_map)} of {len(wanted_map)} passages are shown."
+                    " The summary may be incomplete."
+                )
 
             cuts: list[_ReplyCut] = []
 
@@ -3479,11 +3501,13 @@ def register_intelligence_tools(
                 f"Summary ({style}) — {subject}:\n\n{summary}",
                 *_citation_lines(citations),
                 *_problem_lines(check),
+                *([window_note] if window_note else []),
             ]
             return tool_result(
                 "\n".join(lines),
                 SummarizeThreadOutput(
                     summary=summary,
+                    coverage_note=window_note or None,
                     style=used_style,
                     thread=thread_summary(thread),
                     citations=citations,

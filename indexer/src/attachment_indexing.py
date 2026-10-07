@@ -40,6 +40,7 @@ from threading import Lock
 from .chunker import MessageChunk, chunk_message
 from .database import Database
 from .extractors import (
+    BINARY_AS_TEXT_ERROR,
     LEGACY_OLE2_ERROR,
     OCR_DISABLED_ERROR,
     PERMANENT_FAILURE_ERRORS,
@@ -217,21 +218,24 @@ def _unsupported_still_holds(error: str | None, attachment: Attachment, ocr_enab
     holds until OCR is turned on for an occurrence that needs OCR: an
     image, or a PDF when the PDF extractor wrote the result (it found no
     digital text layer). An OLE2 result also holds for an occurrence
-    that selects the DOCX or XLSX extractor, which the dispatcher would
-    reject the same way (#694); an occurrence labelled ``.doc`` / ``.xls``
-    selects the legacy extractor instead and re-runs it (#935). An
-    encrypted PDF, a PDF over a pypdf limit or a workbook over the
-    eager-part budget holds for every occurrence: the extractor read the
-    bytes as its format before declining, so they decide the outcome,
-    not the label (#931). Any other result holds only while this
-    occurrence selects no extractor.
+    that selects the DOCX, XLSX or text extractor, and a "binary payload
+    labelled as text" result for one that selects the text extractor,
+    which the dispatcher would reject the same way (#694, #932); an
+    occurrence labelled ``.doc`` / ``.xls`` selects the legacy extractor
+    instead and re-runs it (#935). An encrypted PDF, a PDF over a pypdf
+    limit or a workbook over the eager-part budget holds for every
+    occurrence: the extractor read the bytes as its format before
+    declining, so they decide the outcome, not the label (#931). Any
+    other result holds only while this occurrence selects no extractor.
     """
     module = resolved_extractor_module(attachment.content_type, attachment.filename)
     error = error or ""
     needs_ocr = module == "image" or (module == "pdf" and error == SCANNED_PDF_OCR_DISABLED_ERROR)
     if "OCR disabled" in error and needs_ocr:
         return not ocr_enabled
-    if error == LEGACY_OLE2_ERROR and module in {"docx", "xlsx"}:
+    if error == LEGACY_OLE2_ERROR and module in {"docx", "xlsx", "text"}:
+        return True
+    if error == BINARY_AS_TEXT_ERROR and module == "text":
         return True
     if error in PERMANENT_FAILURE_ERRORS:
         return True

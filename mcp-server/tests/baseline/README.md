@@ -48,8 +48,11 @@ make baseline UPDATE=1   # rewrite snapshot.json after an intended ranking chang
      message, 4,000 tokens per thread), the message's chunks,
      `get_message` (all pages), `get_thread` (all pages, bodies cut at
      4,000 characters) and, for attachments, `get_evidence` and
-     `search_attachments`. A passage no tool returns is a strict xfail
-     naming its issue (#795 today), so a fix flips it. Boundary checks:
+     `search_attachments`. The file's `corpus_evidence` holds passages
+     of corpus shapes outside any scenario, checked the same way (#907:
+     t89's sentence past the build's extracted-characters cap). A
+     passage no tool returns is a strict xfail naming its issue (#795,
+     or #907 for that sentence), so a fix flips it. Boundary checks:
      a Blair Reed participant lookup of more than 100 messages with
      required evidence on page 2, a 56-message thread with the decisive
      message past the first `get_thread` page and past the thread text,
@@ -127,6 +130,15 @@ harness in `tests/eval/` (`tests/retrieval_metrics.py`).
   (`unsupported`, found by filename), a whitespace-only attachment
   (`empty`), an attached email carrying its own attachment, and an
   RFC 2231 non-ASCII filename (`test_attachment_formats_baseline.py`).
+  Threads 88-89 pin two capped attachments (#907): one over the size
+  cap (`too_large`, found by filename, never evidence) and one cut at
+  the extracted-characters cap, whose last sentence is a known loss in
+  `tests/eval/outstanding_items.json` `corpus_evidence`
+  (`test_capped_attachments_baseline.py`). The build lowers both caps,
+  `INDEXER_ATTACHMENT_MAX_BYTES` to 64 KiB and
+  `INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS` to 20,000 (production: 32 MB
+  and 2,000,000), so these results are not production behaviour; the
+  build fails if the lowered caps cut any other attachment.
   Adding a thread can lower a recall floor's
   measured value; re-measure and explain it rather than lowering the
   floor silently.

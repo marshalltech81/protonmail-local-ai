@@ -16,10 +16,21 @@ Usage, from ``indexer/``:
 (``mcp-server/tests/answer_eval/cases.json``); each case's
 ``arguments.question`` gets a query vector too, so the evaluation can
 run ``ask_mailbox`` against this index.
+
+The build lowers two attachment caps so the capped-attachment shapes
+(t88, t89, #907) fit in small fixtures: ``INDEXER_ATTACHMENT_MAX_BYTES``
+to ``CAPPED_ATTACHMENT_MAX_BYTES`` (64 KiB; production default 32 MB)
+and ``INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS`` to
+``CAPPED_ATTACHMENT_MAX_CHARS`` (20,000; production default 2,000,000).
+The baseline's capped results are therefore not production behaviour.
+``check_capped_attachments`` fails the build if any other attachment is
+cut by them.
 """
 
 import json
+import sqlite3
 import sys
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
@@ -28,7 +39,13 @@ from src.database import Database
 from src.queue import IndexingQueue
 from src.threader import Threader
 
-from tests.baseline.corpus import write_maildir
+from tests.baseline.corpus import (
+    CAPPED_ATTACHMENT_MAX_BYTES,
+    CAPPED_ATTACHMENT_MAX_CHARS,
+    CHAR_CAPPED_FILENAME,
+    TOO_LARGE_FILENAME,
+    write_maildir,
+)
 from tests.baseline.hash_embedder import HashEmbedder, embed_text
 
 
@@ -40,6 +57,34 @@ def _sorted_walk(root: Path):
     # platform, so threading — and therefore the baseline — is identical.
     files = (p for p in root.rglob("*") if p.is_file() and p.parent.name in ("cur", "new"))
     return iter(sorted(files, key=lambda p: p.name))
+
+
+def check_capped_attachments(db_path: Path) -> None:
+    """Raise ``RuntimeError`` unless the lowered caps cut exactly the two
+    capped shapes: t88's attachment ``too_large`` and t89's extracted
+    text at the character cap. Every other baseline attachment is a few
+    KB, so a corpus edit that pushes one past a cap is caught here."""
+    with closing(sqlite3.connect(db_path)) as conn:
+        too_large = sorted(
+            name
+            for (name,) in conn.execute(
+                "SELECT a.filename FROM attachments a JOIN attachment_extractions e"
+                " USING (attachment_id) WHERE e.extraction_status = 'too_large'"
+            )
+        )
+        truncated = sorted(
+            name
+            for (name,) in conn.execute(
+                "SELECT a.filename FROM attachments a JOIN attachment_extractions e"
+                " USING (attachment_id) WHERE length(e.extracted_text) >= ?",
+                (CAPPED_ATTACHMENT_MAX_CHARS,),
+            )
+        )
+    if too_large != [TOO_LARGE_FILENAME] or truncated != [CHAR_CAPPED_FILENAME]:
+        raise RuntimeError(
+            "the build's lowered attachment caps cut unexpected attachments:"
+            f" too_large={too_large} truncated={truncated}"
+        )
 
 
 def build(out_dir: Path, golden_path: Path, cases_path: Path | None = None) -> dict[str, int]:
@@ -67,6 +112,10 @@ def build(out_dir: Path, golden_path: Path, cases_path: Path | None = None) -> d
             patch.object(main, "MAILDIR_PATH", maildir),
             patch.object(main, "_iter_maildir_messages", _sorted_walk),
             patch.object(main, "INDEXER_HEALTH_FILE", out_dir / "indexer-health"),
+            patch.object(main, "INDEXER_ATTACHMENT_MAX_BYTES", CAPPED_ATTACHMENT_MAX_BYTES),
+            patch.object(
+                main, "INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS", CAPPED_ATTACHMENT_MAX_CHARS
+            ),
         ):
             main.initial_index(db, HashEmbedder(), Threader(db), IndexingQueue(db))
         stats = IndexingQueue(db).stats()
@@ -75,6 +124,7 @@ def build(out_dir: Path, golden_path: Path, cases_path: Path | None = None) -> d
     unfinished = {k: v for k, v in stats.items() if v}
     if unfinished:
         raise RuntimeError(f"baseline corpus did not index cleanly: {unfinished}")
+    check_capped_attachments(out_dir / "mail.db")
 
     golden = json.loads(golden_path.read_text(encoding="utf-8"))
     # ``evidence_queries`` are get_evidence lookups the outstanding-items

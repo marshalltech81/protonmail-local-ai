@@ -117,6 +117,22 @@ reserved words above and every ``unanswerable`` question's
 Quillon, greenhouse, Corrigan, gangway, Pellow, orchard, Mélèzes) out
 of every body.
 
+Threads 88-89 back two capped attachments (#907), dated February 2026
+like t78-t87. The build (``build.py``) lowers the attachment size cap to
+``CAPPED_ATTACHMENT_MAX_BYTES`` (64 KiB) and the extracted-characters
+cap to ``CAPPED_ATTACHMENT_MAX_CHARS`` (20,000), not the production
+defaults, so the fixtures stay small; both are generated from a
+repeated clause (``_padded``), like t41's long body. t88's text
+attachment is over the size cap (``too_large``, no text, found by its
+filename); t89's is cut at the character cap, so its last sentence (the
+Kittiwake boathouse) is a known loss in
+``mcp-server/tests/eval/outstanding_items.json`` ``corpus_evidence``.
+Every other attachment stays far under both caps; the build fails if
+another is cut. Their words avoid every golden search query's words,
+the reserved words above and every ``unanswerable`` question's
+``absent_terms``; keep Kittiwake, boathouse and sportive out of every
+other thread.
+
 Thread IDs are the root Message-IDs: ``t<NN>.1@baseline.example``.
 """
 
@@ -2232,6 +2248,78 @@ THREADS.update(
                         "fête-des-Mélèzes.txt",
                         "text/plain",
                         "Lanterns go up over the Pellow orchard at dusk.\n",
+                    ),
+                ),
+            ),
+        ],
+    }
+)
+
+
+# Threads 88-89 (#907) sit past the build's lowered attachment caps
+# (``CAPPED_ATTACHMENT_MAX_BYTES`` and ``CAPPED_ATTACHMENT_MAX_CHARS``,
+# applied by ``build.py``): t88's text attachment is over the size cap,
+# and t89's decisive sentence is past the extracted-characters cap.
+CAPPED_ATTACHMENT_MAX_BYTES = 64 * 1024
+CAPPED_ATTACHMENT_MAX_CHARS = 20_000
+TOO_LARGE_FILENAME = "harbour-ledger.txt"
+CHAR_CAPPED_FILENAME = "wheelers-route-notes.txt"
+
+THREADS.update(
+    {
+        # A text attachment over the size cap: listed, never extracted (#907).
+        88: [
+            Msg(
+                "INBOX",
+                "Thu, 19 Feb 2026 15:40:00 +0000",
+                "Fennick Rowe <fennick@tidewaterarchive.example>",
+                ME,
+                "Transcribed harbour ledger",
+                "Hi Sam,\n\nThe harbour ledger transcription comes attached. It runs "
+                "long.\n\nFennick",
+                attachments=(
+                    Attachment(
+                        TOO_LARGE_FILENAME,
+                        "text/plain",
+                        _padded(
+                            "Skerrow Point harbour ledger, winter season.",
+                            "Night {n}. Lamp lit at dusk, fog bell rung twice, one "
+                            "schooner sighted off the shoals.",
+                            CAPPED_ATTACHMENT_MAX_BYTES + 6_000,
+                            "End of the winter season ledger.",
+                        )
+                        + "\n",
+                    ),
+                ),
+            ),
+        ],
+        # A text attachment whose decisive sentence is past the
+        # extracted-characters cap: indexed up to the cap only (#907).
+        # The intro's length puts the cut between words of the extracted
+        # text (CRLF line endings), since the answer evaluation refuses
+        # an index whose chunks hold a partial word.
+        89: [
+            Msg(
+                "INBOX",
+                "Fri, 20 Feb 2026 17:25:00 +0000",
+                "Oren Tallis <oren@corncrakewheelers.example>",
+                ME,
+                "Wheelers route notes",
+                "Hi Sam,\n\nOur group's route notes come attached; the meeting point "
+                "sits in there.\n\nOren",
+                attachments=(
+                    Attachment(
+                        CHAR_CAPPED_FILENAME,
+                        "text/plain",
+                        _padded(
+                            "Corncrake Wheelers ride route notes.",
+                            "Leg {n}. Follow the towpath past the willow cottage, keep "
+                            "left at the stone viaduct and regroup by the signal box.",
+                            CAPPED_ATTACHMENT_MAX_CHARS + 2_000,
+                            "Our autumn sportive starts at the Kittiwake boathouse on "
+                            "Sunday April 19.",
+                        )
+                        + "\n",
                     ),
                 ),
             ),

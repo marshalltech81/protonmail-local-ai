@@ -34,7 +34,7 @@ class TestDispatchByMime:
             payload=b"Hello there",
         )
         assert result.status == STATUS_SUCCESS
-        assert result.extractor == "text@2"
+        assert result.extractor == "text@3"
         assert result.text == "Hello there"
 
     def test_text_csv_uses_text_extractor(self):
@@ -67,7 +67,7 @@ class TestDispatchByMime:
             payload=b"text content",
         )
         assert result.status == STATUS_SUCCESS
-        assert result.extractor == "text@2"
+        assert result.extractor == "text@3"
 
     def test_no_dispatch_match_returns_unsupported(self):
         result = extract(
@@ -194,7 +194,7 @@ class TestSafetyGates:
         assert result.status == STATUS_FAILED
         # Only the exception type is persisted (#257).
         assert result.error == "RuntimeError"
-        assert result.extractor == "text@2"
+        assert result.extractor == "text@3"
 
 
 class TestFailedOutcomesAreLogged:
@@ -271,7 +271,7 @@ class TestFailedOutcomesAreLogged:
         )
 
         assert result == ExtractionResult(
-            status=STATUS_FAILED, extractor="text@2", text=None, error="ValueError"
+            status=STATUS_FAILED, extractor="text@3", text=None, error="ValueError"
         )
         [record] = [r for r in caplog.records if r.name == "indexer.extractor"]
         assert record.levelname == "WARNING"
@@ -442,7 +442,7 @@ class TestTextExtractorUnicode:
         # bytes, which decodes as one replacement character.
         assert result.text is not None and self.WORDS in result.text
         assert "\x00" not in result.text
-        assert result.extractor == "text@2"
+        assert result.extractor == "text@3"
 
 
 class TestStaleOcrRowsWhileOcrIsOff:
@@ -5038,15 +5038,17 @@ class TestLegacyOfficeLabels:
             )
         assert calls == []
 
-    def test_ole2_payload_for_another_extractor_keeps_todays_path(self, monkeypatch):
-        """Only the OOXML extractors are guarded: the text extractor still
-        reads whatever an OLE2 payload labelled ``.txt`` holds."""
+    def test_ole2_payload_labelled_as_text_is_a_binary_payload(self, monkeypatch):
+        """#932: an OLE2 payload labelled ``.txt`` is not decoded either; the
+        text guard records it with its own fixed reason."""
+        from src.extractors import BINARY_AS_TEXT_ERROR
+
         calls = _count_extractor_calls(monkeypatch)
         result = extract(
             content_type="text/plain", filename="a.txt", payload=_OLE2_MAGIC + b"words"
         )
-        assert result.status == STATUS_SUCCESS
-        assert calls == ["text"]
+        assert (result.status, result.error) == (STATUS_UNSUPPORTED, BINARY_AS_TEXT_ERROR)
+        assert calls == []
 
     def test_docx_and_xlsx_rows_from_before_the_ole2_check_are_stale(self):
         """The recorded outcome changed for OLE2 payloads (``failed`` became
@@ -5057,6 +5059,165 @@ class TestLegacyOfficeLabels:
         assert EXTRACTOR_VERSIONS["xlsx"] >= 5
         assert stale_extractor_module("docx@3") == "docx"
         assert stale_extractor_module("xlsx@4") == "xlsx"
+
+
+# Fixed binary signatures the text guard rejects (#932).
+_BINARY_SIGNATURES = {
+    "pdf": b"%PDF-",
+    "zip": b"PK\x03\x04",
+    "zip-empty": b"PK\x05\x06",
+    "ole2": _OLE2_MAGIC,
+    "png": b"\x89PNG\r\n\x1a\n",
+    "jpeg": b"\xff\xd8\xff",
+    "gif87a": b"GIF87a",
+    "gif89a": b"GIF89a",
+}
+
+# Occurrences that select the text extractor: a ``text/plain`` label, and a
+# ``.txt`` name with no Content-Type.
+_TEXT_LABELS = (
+    ("text/plain", "SYNTHETIC_FILENAME_MARKER.pdf"),
+    ("", "SYNTHETIC_FILENAME_MARKER.txt"),
+)
+
+# Genuine text in each encoding the text extractor decodes today.
+_GENUINE_TEXT = "SYNTHETIC invoice 1234, résumé café"
+_GENUINE_TEXT_PAYLOADS = {
+    "utf-8": _GENUINE_TEXT.encode("utf-8"),
+    "utf-8-bom": _GENUINE_TEXT.encode("utf-8-sig"),
+    "utf-16-bom": _GENUINE_TEXT.encode("utf-16"),
+    "utf-16-le-bomless": _GENUINE_TEXT.encode("utf-16-le"),
+    "utf-16-be-bomless": _GENUINE_TEXT.encode("utf-16-be"),
+    "cp1252": _GENUINE_TEXT.encode("cp1252"),
+}
+
+
+class TestBinaryPayloadLabelledAsText:
+    """#932: a binary payload labelled as text was decoded with replacement
+    characters and cached ``success``. A payload bound for the text
+    extractor that starts with a fixed binary signature is recorded
+    ``unsupported`` instead, decided by the bytes alone."""
+
+    @pytest.mark.parametrize("encoding", sorted(_GENUINE_TEXT_PAYLOADS))
+    @pytest.mark.parametrize(("content_type", "filename"), _TEXT_LABELS)
+    def test_genuine_text_keeps_todays_path(self, encoding, content_type, filename, monkeypatch):
+        calls = _count_extractor_calls(monkeypatch)
+        result = extract(
+            content_type=content_type,
+            filename=filename,
+            payload=_GENUINE_TEXT_PAYLOADS[encoding],
+        )
+        assert result.status == STATUS_SUCCESS
+        assert result.text == _GENUINE_TEXT
+        assert result.extractor is not None and result.extractor.startswith("text@")
+        assert calls == ["text"]
+
+    @pytest.mark.parametrize("signature", sorted(_BINARY_SIGNATURES))
+    @pytest.mark.parametrize(("content_type", "filename"), _TEXT_LABELS)
+    def test_binary_signature_is_unsupported_without_decoding(
+        self, signature, content_type, filename, monkeypatch, caplog
+    ):
+        from src.extractors import BINARY_AS_TEXT_ERROR
+
+        caplog.set_level("DEBUG")
+        calls = _count_extractor_calls(monkeypatch)
+        payload = _BINARY_SIGNATURES[signature] + b"SYNTHETIC_PAYLOAD_MARKER" + bytes(64)
+        result = extract(content_type=content_type, filename=filename, payload=payload)
+        assert result == ExtractionResult(
+            status=STATUS_UNSUPPORTED, extractor=None, text=None, error=BINARY_AS_TEXT_ERROR
+        )
+        assert calls == []
+        assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+        for marker in ("SYNTHETIC_PAYLOAD_MARKER", "SYNTHETIC_FILENAME_MARKER"):
+            assert marker not in caplog.text
+            assert marker not in BINARY_AS_TEXT_ERROR
+
+    @pytest.mark.parametrize("signature", sorted(_BINARY_SIGNATURES))
+    def test_partial_signature_keeps_todays_path(self, signature, monkeypatch):
+        """Only the whole fixed prefix matches: a payload shorter than the
+        signature, or one that diverges at its last byte, is decoded."""
+        calls = _count_extractor_calls(monkeypatch)
+        magic = _BINARY_SIGNATURES[signature]
+        for payload in (magic[:-1], magic[:-1] + b"\x00text"):
+            result = extract(content_type="text/plain", filename="a.txt", payload=payload)
+            assert result.status in {STATUS_SUCCESS, STATUS_EMPTY}, (signature, payload)
+        assert calls == ["text", "text"]
+
+    def test_signature_after_the_first_byte_is_not_matched(self, monkeypatch):
+        calls = _count_extractor_calls(monkeypatch)
+        result = extract(
+            content_type="text/plain", filename="a.txt", payload=b"see %PDF-1.7 in the text"
+        )
+        assert result.status == STATUS_SUCCESS
+        assert calls == ["text"]
+
+    def test_refreshing_a_stale_text_row_records_unsupported(self, monkeypatch):
+        """The startup sweep refreshes a stale ``text`` row with
+        ``module_override`` from any occurrence; the bytes decide there too."""
+        from src.extractors import BINARY_AS_TEXT_ERROR
+
+        calls = _count_extractor_calls(monkeypatch)
+        result = extract(
+            content_type="application/octet-stream",
+            filename="a.bin",
+            payload=b"%PDF-1.7" + bytes(64),
+            module_override="text",
+        )
+        assert (result.status, result.error) == (STATUS_UNSUPPORTED, BINARY_AS_TEXT_ERROR)
+        assert calls == []
+
+    @pytest.mark.parametrize(
+        ("content_type", "filename", "module"),
+        [("application/pdf", "a.pdf", "pdf"), ("image/png", "a.bin", "image")],
+    )
+    def test_refresh_from_an_occurrence_with_its_own_extractor_runs_that_extractor(
+        self, content_type, filename, module, monkeypatch
+    ):
+        """Review round 1: a stale ``text`` row refreshed from an occurrence
+        whose label selects another extractor runs that extractor, as a
+        fresh extraction of the occurrence would, rather than recording the
+        text guard's ``unsupported`` for it."""
+        calls = _count_extractor_calls(monkeypatch)
+        extract(
+            content_type=content_type,
+            filename=filename,
+            payload=_BINARY_SIGNATURES["pdf" if module == "pdf" else "png"] + bytes(64),
+            module_override="text",
+        )
+        assert calls == [module]
+
+    def test_signature_check_is_bounded_on_a_large_payload(self, monkeypatch):
+        """The guard is a fixed-prefix check: a payload at the default size
+        cap is rejected without reading past its signature, and genuine
+        text of the same size still reaches the extractor once."""
+        import time
+
+        from src.extractors import BINARY_AS_TEXT_ERROR, DEFAULT_MAX_BYTES
+
+        calls = _count_extractor_calls(monkeypatch)
+        tail = b"A" * (DEFAULT_MAX_BYTES - 16)
+        start = time.perf_counter()
+        for magic in _BINARY_SIGNATURES.values():
+            result = extract(content_type="text/plain", filename="a.txt", payload=magic + tail)
+            assert (result.status, result.error) == (STATUS_UNSUPPORTED, BINARY_AS_TEXT_ERROR)
+        assert time.perf_counter() - start < 2.0
+        assert calls == []
+
+    def test_other_extractors_still_read_their_formats(self, monkeypatch):
+        """The guard covers only the text extractor: a PNG labelled as an
+        image still reaches the image extractor."""
+        calls = _count_extractor_calls(monkeypatch)
+        extract(content_type="image/png", filename="a.png", payload=b"\x89PNG\r\n\x1a\n")
+        assert calls == ["image"]
+
+    def test_text_rows_from_before_the_guard_are_stale(self):
+        """``success`` rows the previous text version wrote for binary
+        payloads re-run once."""
+        from src.extractors import EXTRACTOR_VERSIONS, stale_extractor_module
+
+        assert EXTRACTOR_VERSIONS["text"] == 3
+        assert stale_extractor_module("text@2") == "text"
+        assert stale_extractor_module("text@3") is None
 
 
 _DOTX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.template"
