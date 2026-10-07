@@ -841,10 +841,13 @@ def register_experimental_tools(
         The window cut the evidence when it dropped threads or set a
         budget below the per-thread cap that then trimmed passages; the
         passage counts are the window's only when it set the budget.
-        Each cut reply names its stop. ``reserve`` is the schema the
-        provider adds as input (``_schema_reserve_chars``, 0 when none is
-        sent), counted in the prompt as extract_from_emails does. Counts
-        and config values only."""
+        Each cut reply names its stop. ``user_prompt`` is the last one
+        sent: the repair prompt when the repair call was made, whether or
+        not its reply was cut (a cut first reply gets no repair, so a cut
+        reply's prompt is always the last one). ``reserve`` is the schema
+        the provider adds as input (``_schema_reserve_chars``, 0 when none
+        is sent), counted in the prompt as extract_from_emails does.
+        Counts and config values only."""
         window_budget = evidence_chars < PER_THREAD_CHAR_BUDGET * shown
         window_cut = coverage.threads_dropped or (
             window_budget and (coverage.omitted or coverage.truncated)
@@ -861,12 +864,8 @@ def register_experimental_tools(
             threads_dropped=coverage.threads_dropped,
             passages_omitted=coverage.omitted if window_budget else 0,
             passages_truncated=coverage.truncated if window_budget else 0,
-            # The prompt of the reply that was cut (the repair prompt
-            # when that was it), else the one sent, plus the schema.
-            prompt_tokens=-(
-                -(len(cuts[-1].prompt if cuts else system + user_prompt) + reserve)
-                // CHARS_PER_TOKEN
-            ),
+            # The last prompt sent, plus the schema.
+            prompt_tokens=-(-(len(system + user_prompt) + reserve) // CHARS_PER_TOKEN),
         )
 
     # Config identifiers for the per-call timing line.
@@ -1049,15 +1048,15 @@ def register_experimental_tools(
                 return cited, problems + quote_problems, quotes
 
             cuts: list[_ReplyCut] = []
+            sent = user_prompt  # the last prompt sent, for the limit warning
             text, truncated = await complete(user_prompt, cuts)
             brief = None if truncated else _parse_brief(text)
             cited, problems, quotes = check_brief(brief)
             repair_attempted = not truncated and (brief is None or bool(problems))
             if repair_attempted:
                 reason = _repair_reason(brief, problems)
-                text2, truncated2 = await complete(
-                    user_prompt + _BRIEF_REPAIR_INSTRUCTION.format(reason=reason), cuts
-                )
+                sent = user_prompt + _BRIEF_REPAIR_INSTRUCTION.format(reason=reason)
+                text2, truncated2 = await complete(sent, cuts)
                 brief2 = None if truncated2 else _parse_brief(text2)
                 if brief2 is not None:
                     brief = brief2
@@ -1067,7 +1066,7 @@ def register_experimental_tools(
             warn_limits(
                 "brief_issue",
                 BRIEF_SYSTEM,
-                user_prompt,
+                sent,
                 coverage,
                 evidence_chars,
                 len(shown),
@@ -1323,18 +1322,15 @@ def register_experimental_tools(
                 return used, problems + quote_problems, quotes
 
             cuts: list[_ReplyCut] = []
+            sent = user_prompt  # the last prompt sent, for the limit warning
             text, truncated = await complete(user_prompt, cuts, CHECK_SYSTEM, CHECK_JSON_SCHEMA)
             check = None if truncated else _parse_check(text)
             used, problems, quotes = check_reply(check)
             repair_attempted = not truncated and (check is None or bool(problems))
             if repair_attempted:
                 reason = _check_repair_reason(check, problems)
-                text2, truncated2 = await complete(
-                    user_prompt + _CHECK_REPAIR_INSTRUCTION.format(reason=reason),
-                    cuts,
-                    CHECK_SYSTEM,
-                    CHECK_JSON_SCHEMA,
-                )
+                sent = user_prompt + _CHECK_REPAIR_INSTRUCTION.format(reason=reason)
+                text2, truncated2 = await complete(sent, cuts, CHECK_SYSTEM, CHECK_JSON_SCHEMA)
                 check2 = None if truncated2 else _parse_check(text2)
                 if check2 is not None:
                     check = check2
@@ -1344,7 +1340,7 @@ def register_experimental_tools(
             warn_limits(
                 "check_conclusion",
                 CHECK_SYSTEM,
-                user_prompt,
+                sent,
                 coverage,
                 evidence_chars,
                 len(shown),

@@ -1131,7 +1131,9 @@ the model is told, in the prompt, so this log line is where it shows.
   reply, whatever stopped it; for `extract_from_emails`, the threads
   whose reply was lost). A reply cut before any text fails the call
   with an error, and the line is still logged. When the repair reply
-  was the one cut, `prompt_tokens` is the repair prompt. Raise
+  was the one cut, `prompt_tokens` is the repair prompt (for
+  `brief_issue` and `check_conclusion`, whenever a repair call was
+  made, cut or not). Raise
   `INFERENCE_MAX_TOKENS`. The reply reserve comes out of
   `INFERENCE_CONTEXT_TOKENS`, so raise that by the same amount if the
   model's window allows, or the prompt allowance shrinks.

@@ -1420,6 +1420,22 @@ class TestExperimentalTokenLimits:
         assert _one_limit_line(caplog)["counts"]["prompt_tokens"] == expected
 
     @pytest.mark.parametrize(("tool", "args"), _EXPERIMENTAL)
+    def test_uncut_repair_counts_the_repair_prompt(self, caplog, tool, args):
+        """Review round 2 on #960: when the evidence was cut and the
+        repair reply was not, the repair prompt (the longer one) was still
+        sent, so it is the one counted."""
+        caplog.set_level(logging.INFO)
+        llm = FakeInferenceClient(response=f"{_MARKER} not json")  # forces the repair call
+        asyncio.run(_tools(_StubDb(_long_threads()), llm, _SMALL, experimental=True)[tool](**args))
+        assert len(llm.complete_calls) == 2
+        repair_system, repair_user = llm.complete_calls[1]
+        assert repair_user != llm.complete_calls[0][1]
+        line = _one_limit_line(caplog)
+        assert line["limits"] == ["evidence_budget"]
+        assert line["counts"]["prompt_tokens"] == estimate_tokens(repair_system + repair_user)
+        assert _MARKER not in caplog.text
+
+    @pytest.mark.parametrize(("tool", "args"), _EXPERIMENTAL)
     def test_cut_repair_reply_counts_the_repair_prompt(self, caplog, tool, args):
         caplog.set_level(logging.INFO)
         llm = FakeInferenceClient(
