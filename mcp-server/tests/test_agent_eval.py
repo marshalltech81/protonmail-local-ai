@@ -14,9 +14,11 @@ pins the scorers against the scenario set; their failure cases are in
 ``tests/test_agent_metrics.py``, and ``test_failure_traces_are_caught``
 mutates reference traces into the failures the correction, conflict and
 abstention scenarios exist to catch, and ``test_counting_failures_are_caught``
-into the mistakes the counting scenario regresses (#283), and
+into the mistakes the counting scenario regresses (#283),
 ``test_outstanding_failures_are_caught`` into the failures the
-outstanding-items scenario exists to catch (#798). ``HELD_OUT_IDS`` pins the held-out
+outstanding-items scenario exists to catch (#798), and
+``test_citing_after_a_listing_only_is_caught`` cites after a listing
+in place of every read (#804). ``HELD_OUT_IDS`` pins the held-out
 split. The contract tests below keep the
 scenarios and traces in step with the real tool signatures and output
 fields.
@@ -241,6 +243,20 @@ def _cite(trace: dict, *threads: int, count: int) -> None:
     trace["answer"]["count"] = count
 
 
+def _drop_reads_except(trace: dict, ref: str) -> None:
+    trace["calls"] = [
+        c
+        for c in trace["calls"]
+        if c["tool"] != "get_message" or c["arguments"]["message_id"].startswith(f"{ref}{_D}")
+    ]
+
+
+def _null_bodies(trace: dict) -> None:
+    for call in trace["calls"]:
+        if call["tool"] == "get_message":
+            call["result"]["body"] = None
+
+
 # The mistakes the counting scenario regresses against (#283), each made
 # on the reference trace: counting keyword matches, a message counted
 # twice, a long body read only to its first page, a wrong or missing
@@ -269,6 +285,12 @@ _COUNTING_FAILURES: list[tuple[str, Callable[[dict], None], str]] = [
         ),
         "forbidden_text_absent",
     ),
+    # The three short genuine messages counted from the "PIN" listing
+    # alone, their bodies never read; only the long notice is paged (#804).
+    ("cites-after-listing-only", lambda t: _drop_reads_except(t, "t41.1"), "answer_messages_exact"),
+    # Every get_message result answers ``body: null`` (no indexed body):
+    # the pages came back empty, so nothing was read (#804, review round 1).
+    ("reads-return-no-body", _null_bodies, "answer_messages_exact"),
 ]
 
 
@@ -281,6 +303,49 @@ def test_counting_failures_are_caught(change: Callable[[dict], None], failure: s
     trace = copy.deepcopy(TRACE_BY_SCENARIO["tofu-count"])
     change(trace)
     score = score_trace(SCENARIOS["tofu-count"], trace)
+    assert failure in score.failures, score
+
+
+def _list_instead_of_reading(trace: dict) -> None:
+    """Replace every content read (``get_message``, ``get_thread``) with one
+    ``query_messages`` listing of the same messages, keeping the citations."""
+    rows: dict[str, dict] = {}
+    kept = []
+    for call in trace["calls"]:
+        result = call["result"]
+        if call["tool"] == "get_message":
+            rows[result["message"]["message_id"]] = result["message"]
+        elif call["tool"] == "get_thread":
+            for row in result["messages"]:
+                rows[row["message_id"]] = {
+                    "message_id": row["message_id"],
+                    "claimant_id": row["claimant_id"],
+                    "thread_id": result["thread"]["thread_id"],
+                }
+        else:
+            kept.append(call)
+    listing = {"has_more": False, "next_cursor": None, "messages": list(rows.values())}
+    kept.append({"tool": "query_messages", "arguments": {"text": "listed"}, "result": listing})
+    trace["calls"] = kept
+
+
+@pytest.mark.parametrize(
+    ("scenario_id", "failure"),
+    [
+        ("tofu-count", "answer_messages_exact"),
+        ("recital-new-date", "message_citation_recall"),
+        ("final-offer-salary", "message_citation_recall"),
+        ("block-party-date", "message_citation_recall"),
+    ],
+)
+def test_citing_after_a_listing_only_is_caught(scenario_id: str, failure: str) -> None:
+    """A listing names a message but returns no content, so citing the
+    right messages after only listing them fails (#804), as it does for
+    outstanding items (#799). The citations stay valid: the IDs were returned."""
+    trace = copy.deepcopy(TRACE_BY_SCENARIO[scenario_id])
+    _list_instead_of_reading(trace)
+    score = score_trace(SCENARIOS[scenario_id], trace)
+    assert score.citation_validity == 1.0
     assert failure in score.failures, score
 
 
