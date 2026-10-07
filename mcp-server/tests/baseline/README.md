@@ -122,6 +122,11 @@ harness in `tests/eval/` (`tests/retrieval_metrics.py`).
   two filenames in two threads (one `attachment_id`, one extraction
   row, a cache hit), and a PDF under a `.txt` filename that is
   extracted by MIME type (`test_attachment_shapes_baseline.py`).
+  Threads 82-87 pin six more (#909): a DOCX and an XLSX (its fact on
+  the second sheet), a JSON attachment no extractor reads
+  (`unsupported`, found by filename), a whitespace-only attachment
+  (`empty`), an attached email carrying its own attachment, and an
+  RFC 2231 non-ASCII filename (`test_attachment_formats_baseline.py`).
   Adding a thread can lower a recall floor's
   measured value; re-measure and explain it rather than lowering the
   floor silently.

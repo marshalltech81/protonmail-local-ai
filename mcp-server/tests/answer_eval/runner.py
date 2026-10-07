@@ -434,8 +434,10 @@ def corpus_manifest(path: Path = CORPUS_PATH) -> dict[str, CorpusMessage]:
                     text.append(part.get_content())
                 elif not part.is_multipart():
                     # A binary attachment's own bytes: the corpus's PDFs
-                    # (``_minimal_pdf``) carry their text uncompressed,
-                    # so the words an extractor finds are among these.
+                    # (``_minimal_pdf``) and its DOCX and XLSX files (stored,
+                    # not deflated, by ``_ooxml``) carry their text
+                    # uncompressed, so the words an extractor finds are
+                    # among these.
                     payload = part.get_payload(decode=True)
                     text.append(payload.decode("utf-8", "replace"))
             manifest[message_id] = CorpusMessage(

@@ -102,11 +102,28 @@ golden search query's words, the reserved words above and every
 facts (Brambleford, granary, Ashgrove, meadow, telescope, calico,
 muslin, sashing) out of every body.
 
+Threads 82-87 back six more attachment shapes (#909), dated February
+2026 like t78-t81: a DOCX (t82) and an XLSX whose fact is on its second
+sheet (t83), both hand-built by ``_ooxml`` as stored (uncompressed) ZIPs
+so the bytes are identical on every platform and the extracted words
+are in the raw payload; a JSON attachment no extractor handles (t84,
+``unsupported``); a whitespace-only text attachment (t85, ``empty``);
+an attached email (``message/rfc822``) carrying its own attachment
+(t86), whose inner body is neither attachment text nor the outer body;
+and a text attachment with an RFC 2231 encoded non-ASCII filename
+(t87). Their words avoid every golden search query's words, the
+reserved words above and every ``unanswerable`` question's
+``absent_terms``; keep the attachment-only facts (Ravensholm, abbey,
+Quillon, greenhouse, Corrigan, gangway, Pellow, orchard, Mélèzes) out
+of every body.
+
 Thread IDs are the root Message-IDs: ``t<NN>.1@baseline.example``.
 """
 
 import email.policy
 import email.utils
+import io
+import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
@@ -122,9 +139,11 @@ class Attachment:
     # "text/plain" or "text/html"; any other type is attached as bytes
     # (the UTF-8 of ``text``), which is how t64's damaged PDF fails
     # extraction and how t78's and t81's ``_minimal_pdf`` output is
-    # attached whole.
+    # attached whole. ``bytes`` is attached as given (t82's and t83's
+    # ``_ooxml`` output); a ``message/rfc822`` attachment's bytes are an
+    # email, attached as one (t86).
     mime: str
-    text: str
+    text: str | bytes
 
 
 @dataclass(frozen=True)
@@ -1990,6 +2009,234 @@ THREADS.update(
 )
 
 
+_RELS_TYPE = "application/vnd.openxmlformats-package.relationships+xml"
+_OFFICE_DOCUMENT = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+
+
+def _ooxml(main: str, parts: dict[str, tuple[str, str]], rels: dict[str, str]) -> bytes:
+    """An Office Open XML package: ``parts`` maps a part name to its
+    content type and XML, ``main`` is the part the package's root
+    relationship points at, and ``rels`` maps a ``.rels`` part to its XML.
+
+    Hand-written so the corpus needs no Office library. The ZIP is
+    stored, not deflated, with a fixed timestamp, so its bytes are the
+    same on every platform and zlib version, and the text the DOCX and
+    XLSX extractors find is in the payload as written.
+    """
+    overrides = "".join(
+        f'<Override PartName="/{name}" ContentType="{ctype}"/>'
+        for name, (ctype, _) in parts.items()
+    )
+    files = {
+        "[Content_Types].xml": (
+            '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+            f'<Default Extension="rels" ContentType="{_RELS_TYPE}"/>{overrides}</Types>'
+        ),
+        "_rels/.rels": _relationships({"rId1": ("officeDocument", main)}),
+        **rels,
+        **{name: xml for name, (_, xml) in parts.items()},
+    }
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_STORED) as zf:
+        for name, xml in files.items():
+            info = zipfile.ZipInfo(name, date_time=(2026, 2, 1, 0, 0, 0))
+            zf.writestr(info, '<?xml version="1.0" encoding="UTF-8"?>' + xml)
+    return out.getvalue()
+
+
+def _relationships(targets: dict[str, tuple[str, str]]) -> str:
+    """A ``.rels`` part: relationship ID -> (type name, target)."""
+    entries = "".join(
+        f'<Relationship Id="{rid}" Type="{_OFFICE_DOCUMENT}/{kind}" Target="{target}"/>'
+        for rid, (kind, target) in targets.items()
+    )
+    return (
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        f"{entries}</Relationships>"
+    )
+
+
+def _docx(paragraphs: tuple[str, ...]) -> bytes:
+    """A one-part DOCX of plain paragraphs (no markup characters in them)."""
+    body = "".join(f"<w:p><w:r><w:t>{p}</w:t></w:r></w:p>" for p in paragraphs)
+    document = (
+        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        f"<w:body>{body}</w:body></w:document>"
+    )
+    ctype = "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"
+    return _ooxml("word/document.xml", {"word/document.xml": (ctype, document)}, {})
+
+
+def _xlsx(sheets: dict[str, tuple[tuple[str, ...], ...]]) -> bytes:
+    """An XLSX of inline-string cells in columns A and B, one worksheet
+    per ``sheets`` entry (title -> rows)."""
+    spreadsheetml = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+    worksheet_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"
+    parts: dict[str, tuple[str, str]] = {}
+    entries, targets = "", {}
+    for number, (title, rows) in enumerate(sheets.items(), start=1):
+        cells = "".join(
+            f'<row r="{r}">'
+            + "".join(
+                f'<c r="{col}{r}" t="inlineStr"><is><t>{value}</t></is></c>'
+                for col, value in zip("AB", row, strict=False)
+            )
+            + "</row>"
+            for r, row in enumerate(rows, start=1)
+        )
+        parts[f"xl/worksheets/sheet{number}.xml"] = (
+            worksheet_type,
+            f'<worksheet xmlns="{spreadsheetml}"><sheetData>{cells}</sheetData></worksheet>',
+        )
+        entries += f'<sheet name="{title}" sheetId="{number}" r:id="rId{number}"/>'
+        targets[f"rId{number}"] = ("worksheet", f"worksheets/sheet{number}.xml")
+    workbook = (
+        f'<workbook xmlns="{spreadsheetml}" xmlns:r="{_OFFICE_DOCUMENT}">'
+        f"<sheets>{entries}</sheets></workbook>"
+    )
+    parts = {
+        "xl/workbook.xml": (
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml",
+            workbook,
+        ),
+        **parts,
+    }
+    return _ooxml("xl/workbook.xml", parts, {"xl/_rels/workbook.xml.rels": _relationships(targets)})
+
+
+def _forwarded_email() -> bytes:
+    """The email t86 attaches: its own body and its own attachment."""
+    em = EmailMessage(policy=email.policy.SMTP)
+    em["Date"] = "Fri, 13 Feb 2026 07:00:00 +0000"
+    em["From"] = "Saltmarsh Ferries <bookings@saltmarshferries.example>"
+    em["To"] = "Hollis Vane <hollis@vanefamily.example>"
+    em["Subject"] = "Ferry crossing"
+    em.set_content(
+        "Hello Hollis,\n\nPlease wait by the gangway ten minutes early.\n\nSaltmarsh Ferries\n"
+    )
+    em.add_attachment(
+        "Vehicle deck slot seven on the Corrigan ferry, Friday March 6.\n",
+        filename="crossing.txt",
+    )
+    em.set_boundary("baseline-t86-inner")
+    return em.as_bytes()
+
+
+THREADS.update(
+    {
+        # A DOCX whose fact is only in the attachment (#909).
+        82: [
+            Msg(
+                "INBOX",
+                "Fri, 13 Feb 2026 10:00:00 +0000",
+                "Gwen Ashby <gwen@thistlewoodchoir.example>",
+                ME,
+                "Choir rehearsal notes",
+                "Hi Sam,\n\nThe notes from Tuesday are attached.\n\nGwen",
+                attachments=(
+                    Attachment(
+                        "rehearsal-notes.docx",
+                        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        _docx(
+                            (
+                                "Thistlewood Choir",
+                                "Bring the blue folder of hymns.",
+                                "Our winter concert happens at the Ravensholm abbey on Sunday March 22.",
+                            )
+                        ),
+                    ),
+                ),
+            ),
+        ],
+        # An XLSX whose fact is on its second sheet (#909).
+        83: [
+            Msg(
+                "INBOX",
+                "Sat, 14 Feb 2026 11:30:00 +0000",
+                "Tobias Fell <tobias@harrowallotments.example>",
+                ME,
+                "Seed swap spreadsheet",
+                "Hi Sam,\n\nThe seed swap spreadsheet comes attached.\n\nTobias",
+                attachments=(
+                    Attachment(
+                        "seed-swap.xlsx",
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        _xlsx(
+                            {
+                                "Seeds": (("Variety", "Sachets"), ("Marigold", "Twelve")),
+                                "Pickup": (("Collect your sachets from the Quillon greenhouse",),),
+                            }
+                        ),
+                    ),
+                ),
+            ),
+        ],
+        # A type no extractor handles, found by its filename (#909).
+        84: [
+            Msg(
+                "INBOX",
+                "Sun, 15 Feb 2026 09:45:00 +0000",
+                "Ingrid Holm <ingrid@fenwickkites.example>",
+                ME,
+                "Kite flyers export",
+                "Sam,\n\nHere comes the export you asked for.\n\nIngrid",
+                attachments=(
+                    Attachment(
+                        "kite-roster.json",
+                        "application/json",
+                        '{"kites": ["delta", "box"], "launch": "Saturday"}\n',
+                    ),
+                ),
+            ),
+        ],
+        # An attachment with no text in it (#909).
+        85: [
+            Msg(
+                "INBOX",
+                "Mon, 16 Feb 2026 16:20:00 +0000",
+                "Marta Quince <marta@copperbecklibrary.example>",
+                ME,
+                "Spring rota",
+                "Hi Sam,\n\nA blank rota for the spring shifts comes attached; fill it in when you can.\n\nMarta",
+                attachments=(Attachment("spring-rota.txt", "text/plain", " \n\n \n"),),
+            ),
+        ],
+        # An attached email carrying its own attachment (#909).
+        86: [
+            Msg(
+                "INBOX",
+                "Tue, 17 Feb 2026 12:10:00 +0000",
+                "Hollis Vane <hollis@vanefamily.example>",
+                ME,
+                "Fwd: Ferry crossing",
+                "Sam,\n\nForwarding this one for you.\n\nHollis",
+                attachments=(
+                    Attachment("ferry-crossing.eml", "message/rfc822", _forwarded_email()),
+                ),
+            ),
+        ],
+        # A non-ASCII filename, RFC 2231 encoded (#909).
+        87: [
+            Msg(
+                "INBOX",
+                "Wed, 18 Feb 2026 19:05:00 +0000",
+                "Aurelie Brun <aurelie@brunfamily.example>",
+                ME,
+                "Festival programme",
+                "Coucou Sam,\n\nThe programme for the festival comes attached.\n\nAurelie",
+                attachments=(
+                    Attachment(
+                        "fête-des-Mélèzes.txt",
+                        "text/plain",
+                        "Lanterns go up over the Pellow orchard at dusk.\n",
+                    ),
+                ),
+            ),
+        ],
+    }
+)
+
+
 def build_message(n: int, index: int, msg: Msg) -> bytes:
     """Serialise message ``index`` (0-based) of thread ``n``.
 
@@ -2012,12 +2259,14 @@ def build_message(n: int, index: int, msg: Msg) -> bytes:
     em.set_content(msg.body)
     for att in msg.attachments:
         maintype, subtype = att.mime.split("/")
+        payload = att.text if isinstance(att.text, bytes) else att.text.encode()
         if maintype == "text":
             em.add_attachment(att.text, subtype=subtype, filename=att.filename)
+        elif maintype == "message":
+            inner = email.message_from_bytes(payload, policy=email.policy.SMTP)
+            em.add_attachment(inner, filename=att.filename)
         else:
-            em.add_attachment(
-                att.text.encode(), maintype=maintype, subtype=subtype, filename=att.filename
-            )
+            em.add_attachment(payload, maintype=maintype, subtype=subtype, filename=att.filename)
     if msg.attachments:
         em.set_boundary(f"baseline-t{n:02d}-{index + 1}")
     return em.as_bytes()
