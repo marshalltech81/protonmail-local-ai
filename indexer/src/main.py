@@ -924,13 +924,27 @@ class MaildirHandler(FileSystemEventHandler):
                 except Exception as e:
                     log.error("reconciler on_moved failed: %s", type(e).__name__)
             else:
-                # Default deployment has no reconciler; still move the
+                # Archive mode has no reconciler; still move the
                 # indexed_files / message_thread_map filepath forward so
-                # future lookups find the current on-disk name.
+                # future lookups find the current on-disk name. A rename
+                # that drops the T flag restores the message, so clear a
+                # tombstone an earlier mirror-mode run left on it (same
+                # rule as ``Reconciler.handle_moved``) rather than carry
+                # it to the live name, where it would report the message
+                # as pending deletion for ever (#860). Archive mode never
+                # reaps, so a leftover tombstone otherwise outlives the
+                # restore.
+                restored = not is_trashed(dest_path_obj)
+                leftover_tombstone = restored and self.db.has_pending_deletion(src_path)
                 try:
-                    self.db.update_filepath(src_path, dest_path, folder=folder_change)
+                    self.db.update_filepath(
+                        src_path, dest_path, folder=folder_change, clear_tombstone=restored
+                    )
                 except Exception as e:
                     log.error("update_filepath failed on rename: %s", type(e).__name__)
+                    return
+                if leftover_tombstone:
+                    log.info("archive retention: cleared %d leftover tombstone on restore", 1)
             return
 
         # Case 2: new delivery — enqueue for the worker. A flag rename

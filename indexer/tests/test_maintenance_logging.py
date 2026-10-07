@@ -797,7 +797,11 @@ class TestOnMovedFailureLogsTypeOnly:
             calls.append(a)
             raise ValueError(MARKER)
 
-        db = SimpleNamespace(is_indexed=lambda _p: True, update_filepath=update_filepath)
+        db = SimpleNamespace(
+            is_indexed=lambda _p: True,
+            has_pending_deletion=lambda _p: False,
+            update_filepath=update_filepath,
+        )
         handler = main.MaildirHandler(db, None)  # type: ignore[arg-type]
 
         handler.on_moved(self._moved(tmp_path))

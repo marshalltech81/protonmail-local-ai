@@ -1990,7 +1990,13 @@ the next sweep would start a fresh grace window). If mbsync later
 clears the `T` flag because the message was restored upstream, the
 file is live mail again and is re-indexed normally. With
 reconciliation disabled (archive mode), the index is append-only and
-`T`-flagged files are indexed like any other.
+`T`-flagged files are indexed like any other. Archive mode writes no
+tombstones and reaps nothing, but it inherits any `pending_deletions`
+row an earlier mirror-mode run left: the watchdog handler carries such
+a tombstone along with flag renames, and clears it (one INFO line per
+restore) when a rename drops the `T` flag, so a message restored
+upstream stops reading as pending deletion (`docs/mcp-tools.md`,
+*Pending deletion*; #860).
 
 Two stage outcomes short-circuit the retry path entirely:
 
