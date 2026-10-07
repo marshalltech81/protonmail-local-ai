@@ -866,9 +866,12 @@ time and changes no totals or paging: an unfiltered `query_messages` count still
 messages, and `query_messages` has no filter on it. Archive mode
 records no tombstones, so the flag is `false` there, except for
 tombstones left by an earlier mirror-mode run, which archive mode
-neither reaps nor clears: such a tombstone follows the file through
-renames, so the message keeps `pending_deletion: true` even after it is
-restored upstream. `get_thread` rows do not carry it.
+never reaps: such a message keeps `pending_deletion: true` until it is
+restored upstream (the `T` flag cleared), when the indexer clears the
+tombstone as it records the rename (live, or at the next startup's
+rename sweep) and the message reads as live. A
+leftover tombstone on a message that stays trashed is kept. `get_thread`
+rows do not carry it.
 
 ### `list_threads`
 Browse threads in a folder: every thread with at least one message

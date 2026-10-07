@@ -308,7 +308,7 @@ class TestSweepPaths:
 
         result = sweep_paths(db)
 
-        assert result == {"renamed": count, "unreachable": 0}
+        assert result == {"renamed": count, "unreachable": 0, "tombstones_cleared": 0}
         assert len(listed) == len(set(listed)) == 1
 
     def test_does_not_tombstone_missing_files(self, db, threader, maildir):
@@ -351,6 +351,64 @@ class TestSweepPaths:
         second = sweep_paths(db)
         assert first["renamed"] == 1
         assert second["renamed"] == 0
+
+    def _index_tombstoned(self, db, threader, maildir, subject: str) -> Path:
+        """One indexed ``T``-flagged file carrying a tombstone, as a
+        mirror-mode run leaves it; archive mode writes none itself."""
+        path = maildir / "1700000000.M1.host:2,ST"
+        _write_eml(path, "sp-restore@example.com", subject=subject)
+        thread_id = _index(path, db, threader)
+        entry = db.find_message_entry_by_filepath(str(path))
+        assert entry is not None
+        assert db.add_pending_deletion(str(path), entry["claimant_id"], thread_id)
+        return path
+
+    def test_clears_leftover_tombstone_on_restore_seen_at_startup(
+        self, db, threader, maildir, caplog
+    ):
+        """Review round 1 on #860: a restore (``T`` flag cleared) that
+        mbsync applied while the indexer was down reaches the index only
+        through this sweep, which runs in archive mode too, where no
+        reconciler would clear the tombstone later. The sweep applies the
+        same restore rule as ``handle_moved``: the tombstone is dropped
+        with the rename, counted on the sweep's own line, and nothing is
+        reaped or tombstoned."""
+        marker = "SYNTHETIC_MARKER_860"
+        path = self._index_tombstoned(db, threader, maildir, marker)
+        live = maildir / "1700000000.M1.host:2,S"
+        path.rename(live)
+
+        with caplog.at_level(logging.INFO):
+            result = sweep_paths(db)
+
+        assert result == {"renamed": 1, "unreachable": 0, "tombstones_cleared": 1}
+        assert count_pending_deletions(db) == 0
+        assert db.find_message_entry_by_filepath(str(live)) is not None
+        assert db._conn.execute("SELECT count(*) FROM message_thread_map").fetchone()[0] == 1
+        assert [
+            (r.levelno, r.getMessage())
+            for r in caplog.records
+            if r.getMessage().startswith("startup rename sweep")
+        ] == [(logging.INFO, "startup rename sweep: renamed=1 unreachable=0 tombstones_cleared=1")]
+        assert marker not in caplog.text
+
+    def test_keeps_leftover_tombstone_while_file_stays_trashed(self, db, threader, maildir, caplog):
+        """A flag rename that keeps ``T`` is no restore: the tombstone
+        follows the file to its new name and the sweep counts none
+        cleared."""
+        marker = "SYNTHETIC_MARKER_860"
+        path = self._index_tombstoned(db, threader, maildir, marker)
+        starred = maildir / "1700000000.M1.host:2,FST"
+        path.rename(starred)
+
+        with caplog.at_level(logging.INFO):
+            result = sweep_paths(db)
+
+        assert result == {"renamed": 1, "unreachable": 0, "tombstones_cleared": 0}
+        assert db.has_pending_deletion(str(starred))
+        assert not db.has_pending_deletion(str(path))
+        assert count_pending_deletions(db) == 1
+        assert marker not in caplog.text
 
 
 # ---------------------------------------------------------------------------

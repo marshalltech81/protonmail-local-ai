@@ -7034,6 +7034,143 @@ class TestMessageRecordsEndToEnd:
         assert row["filepath"] == str(dest)
         assert row["folder"] == folder_before
 
+    # The ``EXISTS`` predicate mcp-server's ``get_message`` / ``query_messages``
+    # evaluate for ``pending_deletion`` (``mcp-server/src/lib/sqlite.py``).
+    _PENDING_DELETION_SQL = (
+        "SELECT EXISTS (SELECT 1 FROM pending_deletions p WHERE p.filepath = m.filepath "
+        "AND p.claimant_id = m.claimant_id) FROM messages m"
+    )
+
+    def _index_with_leftover_tombstone(self, tmp_path, monkeypatch, subject: str):
+        """Archive-mode index of one ``T``-flagged file carrying a tombstone
+        a mirror-mode run left behind (archive mode writes none itself)."""
+        maildir = tmp_path / "maildir"
+        src = maildir / "INBOX" / "cur" / "1700000000.M1.host:2,ST"
+        _write_eml(src, "restore@example.com", subject=subject)
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        db = Database(tmp_path / "mail.db")
+        queue = _make_queue(db)
+        main.initial_index(db, make_mock_embedder(_UNIT_VECTOR), Threader(db), queue)
+        entry = db.find_message_entry_by_filepath(str(src))
+        assert entry is not None
+        assert db.add_pending_deletion(str(src), entry["claimant_id"], entry["thread_id"])
+        assert db._conn.execute(self._PENDING_DELETION_SQL).fetchone()[0] == 1
+        return db, queue, src
+
+    def test_archive_mode_restore_clears_leftover_tombstone(self, tmp_path, monkeypatch, caplog):
+        """After a switch from mirror to archive retention, a tombstone the
+        mirror-mode run left stays in ``pending_deletions``. Archive mode
+        runs no reconciler, so the handler's ``update_filepath`` fall-through
+        must clear it on a rename that drops the ``T`` flag, the way the
+        reconciler's ``handle_moved`` does under mirror retention (#860);
+        otherwise the restored message reports ``pending_deletion`` for
+        ever. Archive mode still reaps nothing, and the recovery is logged
+        without the file name or subject."""
+        marker = "SYNTHETIC_MARKER_860"
+        db, queue, src = self._index_with_leftover_tombstone(tmp_path, monkeypatch, marker)
+        dest = src.with_name("1700000000.M1.host:2,S")
+        src.rename(dest)
+
+        with caplog.at_level(logging.INFO):
+            main.MaildirHandler(db, queue).on_moved(_FakeEvent(str(src), str(dest)))
+
+        assert db._conn.execute("SELECT count(*) FROM pending_deletions").fetchone()[0] == 0
+        assert db._conn.execute(self._PENDING_DELETION_SQL).fetchone()[0] == 0
+        # Nothing reaped: the message, its locator and its chunks survive
+        # under the restored name.
+        assert db.is_indexed(str(dest))
+        row = db._conn.execute("SELECT filepath FROM messages").fetchone()
+        assert row["filepath"] == str(dest)
+        assert db._conn.execute("SELECT count(*) FROM message_thread_map").fetchone()[0] == 1
+        assert db._conn.execute("SELECT count(*) FROM message_chunks").fetchone()[0] == 1
+        assert db._conn.execute("SELECT count(*) FROM reaped_messages").fetchone()[0] == 0
+        assert [
+            (r.levelno, r.getMessage()) for r in caplog.records if "tombstone" in r.getMessage()
+        ] == [(logging.INFO, "archive retention: cleared 1 leftover tombstone on restore")]
+        assert marker not in caplog.text
+
+    def test_archive_mode_mass_restore_logs_are_rate_limited(self, tmp_path, monkeypatch, caplog):
+        """Review round 1 on #860: an operator restoring a whole folder of
+        messages that still carry mirror-mode tombstones fires one rename
+        event each. The recovery line shares the indexer's per-window
+        line budget, so a mass restore logs at most the budget and the
+        rest are counted for the queue heartbeat's ``suppressed_lines``
+        instead of evicting the retained log."""
+        from src import extractors
+
+        maildir = tmp_path / "maildir"
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        db = Database(tmp_path / "mail.db")
+        queue = _make_queue(db)
+        count = extractors._WARNINGS_PER_WINDOW + 5
+        paths = []
+        for i in range(count):
+            src = maildir / "INBOX" / "cur" / f"17000000{i:02d}.M{i}.host:2,ST"
+            _write_eml(src, f"mass{i}@example.com")
+            paths.append(src)
+        main.initial_index(db, make_mock_embedder(_UNIT_VECTOR), Threader(db), queue)
+        for src in paths:
+            entry = db.find_message_entry_by_filepath(str(src))
+            assert entry is not None
+            assert db.add_pending_deletion(str(src), entry["claimant_id"], entry["thread_id"])
+        handler = main.MaildirHandler(db, queue)
+
+        with caplog.at_level(logging.INFO):
+            for src in paths:
+                dest = src.with_name(src.name[:-1])
+                src.rename(dest)
+                handler.on_moved(_FakeEvent(str(src), str(dest)))
+
+        assert db._conn.execute("SELECT count(*) FROM pending_deletions").fetchone()[0] == 0
+        assert db._conn.execute("SELECT count(*) FROM message_thread_map").fetchone()[0] == count
+        logged = [r for r in caplog.records if "leftover tombstone" in r.getMessage()]
+        assert len(logged) == extractors._WARNINGS_PER_WINDOW
+        assert extractors.drain_suppressed_lines() == 5
+
+    def test_archive_mode_rename_keeping_t_flag_moves_tombstone(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """A flag rename that keeps ``T`` is no restore: the leftover
+        tombstone follows the file as before, nothing is reaped and no
+        recovery is logged."""
+        marker = "SYNTHETIC_MARKER_860"
+        db, queue, src = self._index_with_leftover_tombstone(tmp_path, monkeypatch, marker)
+        dest = src.with_name("1700000000.M1.host:2,FST")
+        src.rename(dest)
+
+        with caplog.at_level(logging.INFO):
+            main.MaildirHandler(db, queue).on_moved(_FakeEvent(str(src), str(dest)))
+
+        assert db.has_pending_deletion(str(dest))
+        assert not db.has_pending_deletion(str(src))
+        assert db._conn.execute(self._PENDING_DELETION_SQL).fetchone()[0] == 1
+        assert db.is_indexed(str(dest))
+        assert db._conn.execute("SELECT count(*) FROM reaped_messages").fetchone()[0] == 0
+        assert not [r for r in caplog.records if "tombstone" in r.getMessage()]
+        assert marker not in caplog.text
+
+    def test_archive_mode_restore_without_tombstone_logs_nothing(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """Dropping ``T`` from a file that carries no tombstone (the common
+        archive-mode case) logs no recovery."""
+        maildir = tmp_path / "maildir"
+        src = maildir / "INBOX" / "cur" / "1700000000.M1.host:2,ST"
+        _write_eml(src, "plain@example.com")
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        db = Database(tmp_path / "mail.db")
+        queue = _make_queue(db)
+        main.initial_index(db, make_mock_embedder(_UNIT_VECTOR), Threader(db), queue)
+        dest = src.with_name("1700000000.M1.host:2,S")
+        src.rename(dest)
+
+        with caplog.at_level(logging.INFO):
+            main.MaildirHandler(db, queue).on_moved(_FakeEvent(str(src), str(dest)))
+
+        assert db.is_indexed(str(dest))
+        assert db._conn.execute("SELECT count(*) FROM pending_deletions").fetchone()[0] == 0
+        assert not [r for r in caplog.records if "tombstone" in r.getMessage()]
+
     def test_indexing_records_message_with_source_hash_and_reap_clears_it(
         self, tmp_path, monkeypatch
     ):

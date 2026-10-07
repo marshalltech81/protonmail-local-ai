@@ -530,9 +530,14 @@ def sweep_paths(db: Database) -> dict:
     has renamed it in place (e.g. a flag-only rename such as ``S`` →
     ``SR``, or a ``new`` → ``cur`` promotion). Intended to be safe to
     run on every indexer startup — unlike ``Reconciler.sweep()`` it does
-    NOT tombstone missing files and does NOT touch ``pending_deletions``,
-    so it is safe under archive mode too, while still healing path drift that accumulated while the indexer
-    was offline.
+    NOT tombstone missing files, so it is safe under archive mode too,
+    while still healing path drift that accumulated while the indexer
+    was offline. A tombstone follows its file through the rename, except
+    that a rename which dropped the ``T`` flag restores the message, so
+    the tombstone is cleared with it (the rule ``Reconciler.handle_moved``
+    applies live): in archive mode no reconciler would clear it later, and
+    a tombstone a mirror-mode run left would otherwise report the restored
+    message as pending deletion for ever (#860).
 
     Returns a summary dict so the caller can log how much drift there
     was (useful when diagnosing "new mail shows up in search late" on
@@ -540,6 +545,7 @@ def sweep_paths(db: Database) -> dict:
     """
     renamed = 0
     unreachable = 0
+    tombstones_cleared = 0
 
     listings: dict[Path, dict[str, Path]] = {}
     for row in db.iter_message_map():
@@ -555,16 +561,24 @@ def sweep_paths(db: Database) -> dict:
             continue
 
         if str(current) != row["filepath"]:
-            db.update_filepath(row["filepath"], str(current))
+            restored = not is_trashed(current)
+            if restored and db.has_pending_deletion(row["filepath"]):
+                tombstones_cleared += 1
+            db.update_filepath(row["filepath"], str(current), clear_tombstone=restored)
             renamed += 1
 
     if renamed or unreachable:
         log.info(
-            "startup rename sweep: renamed=%d unreachable=%d",
+            "startup rename sweep: renamed=%d unreachable=%d tombstones_cleared=%d",
             renamed,
             unreachable,
+            tombstones_cleared,
         )
-    return {"renamed": renamed, "unreachable": unreachable}
+    return {
+        "renamed": renamed,
+        "unreachable": unreachable,
+        "tombstones_cleared": tombstones_cleared,
+    }
 
 
 def load_config_from_env(env: Mapping[str, str]) -> ReconcilerConfig:
