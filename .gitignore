@@ -20,6 +20,9 @@ __pycache__/
 *.egg-info/
 .venv/
 venv/
+# Per-checkout uv cache set by the Makefile (UV_CACHE_DIR); also keeps it
+# out of Semgrep scans through .semgrepignore
+.uv-cache/
 dist/
 .pytest_cache/
 .ruff_cache/
