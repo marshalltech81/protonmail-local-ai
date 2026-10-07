@@ -11,8 +11,11 @@ cannot skip in CI.
 
 from __future__ import annotations
 
+import ast
+import json
 import logging
 import os
+import re
 import resource
 import shutil
 import struct
@@ -56,10 +59,15 @@ linux_only = pytest.mark.skipif(
 )
 
 
+# Generous limits for the runner's own tests: a stand-in tool is a
+# Python script, which starts well under them.
+_LIMITS = {"max_address_space_bytes": 1024 * 1024 * 1024, "max_cpu_seconds": 60}
+
+
 def _fake_tool(tmp_path: Path, body: str) -> str:
     """An executable Python script standing in for a tool."""
     path = tmp_path / "fake_tool"
-    path.write_text(f"#!{sys.executable}\nimport os, signal, sys, time\n{body}\n")
+    path.write_text(f"#!{sys.executable}\nimport json, os, resource, signal, sys, time\n{body}\n")
     path.chmod(0o700)
     return str(path)
 
@@ -82,7 +90,12 @@ class TestRunTool:
             "print(oct(os.stat(path).st_mode & 0o777), path, open(path, 'rb').read().decode())",
         )
         output = run_tool(
-            [tool], b"payload bytes", timeout_seconds=30, max_output_bytes=4096, suffix=".doc"
+            [tool],
+            b"payload bytes",
+            timeout_seconds=30,
+            max_output_bytes=4096,
+            **_LIMITS,
+            suffix=".doc",
         )
         mode, path, content = output.data.decode().split(" ", 2)
         assert mode == "0o600"
@@ -96,7 +109,9 @@ class TestRunTool:
         record = tmp_path / "seen"
         tool = _fake_tool(tmp_path, f"open({str(record)!r}, 'w').write(sys.argv[-1])\nsys.exit(2)")
         with pytest.raises(ToolExitError):
-            run_tool([tool], b"x", timeout_seconds=30, max_output_bytes=10, suffix=".doc")
+            run_tool(
+                [tool], b"x", timeout_seconds=30, max_output_bytes=10, **_LIMITS, suffix=".doc"
+            )
         assert not Path(record.read_text()).exists()
 
     def test_output_is_read_up_to_the_cap_and_the_tool_killed(self, tmp_path):
@@ -107,7 +122,9 @@ class TestRunTool:
             "for _ in range(1024):\n    sys.stdout.buffer.write(b'a' * 65536)\n    sys.stdout.flush()",
         )
         started = time.monotonic()
-        output = run_tool([tool], b"x", timeout_seconds=30, max_output_bytes=100_000, suffix=".x")
+        output = run_tool(
+            [tool], b"x", timeout_seconds=30, max_output_bytes=100_000, **_LIMITS, suffix=".x"
+        )
         assert output.truncated is True
         assert output.data == b"a" * 100_000
         assert time.monotonic() - started < 20
@@ -116,7 +133,7 @@ class TestRunTool:
         tool = _fake_tool(tmp_path, "time.sleep(60)")
         started = time.monotonic()
         with pytest.raises(ToolTimeoutError):
-            run_tool([tool], b"x", timeout_seconds=0.5, max_output_bytes=10, suffix=".x")
+            run_tool([tool], b"x", timeout_seconds=0.5, max_output_bytes=10, **_LIMITS, suffix=".x")
         assert time.monotonic() - started < 10
 
     def test_timeout_applies_while_the_tool_writes(self, tmp_path):
@@ -127,18 +144,25 @@ class TestRunTool:
             "while True:\n    sys.stdout.write('a')\n    sys.stdout.flush()\n    time.sleep(0.05)",
         )
         with pytest.raises(ToolTimeoutError):
-            run_tool([tool], b"x", timeout_seconds=0.5, max_output_bytes=1_000_000, suffix=".x")
+            run_tool(
+                [tool],
+                b"x",
+                timeout_seconds=0.5,
+                max_output_bytes=1_000_000,
+                **_LIMITS,
+                suffix=".x",
+            )
 
     def test_timeout_applies_after_the_tool_closes_stdout(self, tmp_path):
         tool = _fake_tool(tmp_path, "os.close(1)\ntime.sleep(60)")
         with pytest.raises(ToolTimeoutError):
-            run_tool([tool], b"x", timeout_seconds=0.5, max_output_bytes=10, suffix=".x")
+            run_tool([tool], b"x", timeout_seconds=0.5, max_output_bytes=10, **_LIMITS, suffix=".x")
 
     def test_a_death_by_signal_is_a_fixed_error(self, tmp_path):
         # SIGKILL: macOS writes no crash report for it.
         tool = _fake_tool(tmp_path, "os.kill(os.getpid(), signal.SIGKILL)")
         with pytest.raises(ToolCrashError) as excinfo:
-            run_tool([tool], b"x", timeout_seconds=30, max_output_bytes=10, suffix=".x")
+            run_tool([tool], b"x", timeout_seconds=30, max_output_bytes=10, **_LIMITS, suffix=".x")
         assert str(excinfo.value) == "extraction tool killed by a signal"
 
     @pytest.mark.parametrize("returncode", [-11, -24, -6])
@@ -150,13 +174,13 @@ class TestRunTool:
         monkeypatch.setattr(subprocess.Popen, "wait", lambda self, timeout=None: returncode)
         tool = _fake_tool(tmp_path, "pass")
         with pytest.raises(ToolCrashError):
-            run_tool([tool], b"x", timeout_seconds=30, max_output_bytes=10, suffix=".x")
+            run_tool([tool], b"x", timeout_seconds=30, max_output_bytes=10, **_LIMITS, suffix=".x")
 
     @linux_only
     def test_a_real_segfault_is_a_fixed_error(self, tmp_path):
         tool = _fake_tool(tmp_path, "os.kill(os.getpid(), signal.SIGSEGV)")
         with pytest.raises(ToolCrashError):
-            run_tool([tool], b"x", timeout_seconds=30, max_output_bytes=10, suffix=".x")
+            run_tool([tool], b"x", timeout_seconds=30, max_output_bytes=10, **_LIMITS, suffix=".x")
 
     def test_non_zero_exit_withholds_stderr_and_stdout(self, tmp_path, caplog):
         caplog.set_level("DEBUG")
@@ -165,15 +189,136 @@ class TestRunTool:
             f"sys.stderr.write({MARKER!r})\nsys.stdout.write({MARKER!r})\nsys.exit(1)",
         )
         with pytest.raises(ToolExitError) as excinfo:
-            run_tool([tool], b"x", timeout_seconds=30, max_output_bytes=1000, suffix=".x")
+            run_tool(
+                [tool], b"x", timeout_seconds=30, max_output_bytes=1000, **_LIMITS, suffix=".x"
+            )
         assert MARKER not in str(excinfo.value)
         assert MARKER not in caplog.text
+
+    def test_tool_runs_under_the_limits_it_is_given(self, tmp_path):
+        """The launcher sets both limits and then ``execve``s the tool,
+        which reports its own: the limits are inherited, not applied to
+        the launcher alone."""
+        tool = _fake_tool(
+            tmp_path,
+            "print(json.dumps({'argv': sys.argv[1:-1], "
+            "'cpu': resource.getrlimit(resource.RLIMIT_CPU), "
+            "'as': resource.getrlimit(resource.RLIMIT_AS)}))",
+        )
+        output = run_tool(
+            [tool, "-a", "b"],
+            b"x",
+            timeout_seconds=30,
+            max_output_bytes=4096,
+            max_address_space_bytes=768 * 1024 * 1024,
+            max_cpu_seconds=7,
+            suffix=".x",
+        )
+        seen = json.loads(output.data)
+        assert seen["argv"] == ["-a", "b"]
+        assert seen["cpu"] == [7, 8]
+        if sys.platform == "linux":
+            assert seen["as"] == [768 * 1024 * 1024] * 2
+
+    @linux_only
+    def test_a_real_cpu_limit_hit_is_a_crash_error(self, tmp_path):
+        """SIGXCPU from the CPU limit, real only on Linux: on macOS it
+        would write a crash report (the stubbed status test covers it)."""
+        tool = _fake_tool(tmp_path, "while True:\n    pass")
+        started = time.monotonic()
+        with pytest.raises(ToolCrashError):
+            run_tool(
+                [tool],
+                b"x",
+                timeout_seconds=30,
+                max_output_bytes=10,
+                max_address_space_bytes=1024 * 1024 * 1024,
+                max_cpu_seconds=1,
+                suffix=".x",
+            )
+        assert time.monotonic() - started < 15
+
+    @linux_only
+    def test_a_real_address_space_hit_is_an_exit_error(self, tmp_path):
+        tool = _fake_tool(tmp_path, "bytearray(512 * 1024 * 1024)")
+        with pytest.raises(ToolExitError):
+            run_tool(
+                [tool],
+                b"x",
+                timeout_seconds=30,
+                max_output_bytes=10,
+                max_address_space_bytes=256 * 1024 * 1024,
+                max_cpu_seconds=30,
+                suffix=".x",
+            )
 
     def test_tool_gets_no_inherited_environment(self, tmp_path, monkeypatch):
         monkeypatch.setenv("SYNTHETIC_SECRET_ENV", MARKER)
         tool = _fake_tool(tmp_path, "print(sorted(os.environ))")
-        output = run_tool([tool], b"x", timeout_seconds=30, max_output_bytes=4096, suffix=".x")
+        output = run_tool(
+            [tool], b"x", timeout_seconds=30, max_output_bytes=4096, **_LIMITS, suffix=".x"
+        )
         assert b"SYNTHETIC_SECRET_ENV" not in output.data
+
+
+def _run_tool_calls() -> dict[str, list[ast.Call]]:
+    """Every call to ``run_tool`` in the indexer's source, by file."""
+    src = Path(extractors.__file__).parents[1]
+    calls: dict[str, list[ast.Call]] = {}
+    for path in sorted(src.rglob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text())):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+            if name == "run_tool":
+                calls.setdefault(str(path.relative_to(src)), []).append(node)
+    return calls
+
+
+# External programs the indexer starts without ``run_tool``, so without
+# its address-space and CPU limits, and why. Each has a timeout only.
+_TOOLS_OUTSIDE_RUN_TOOL = {
+    # pytesseract runs Tesseract with ``INDEXER_OCR_TIMEOUT_SECONDS``.
+    "extractors/image.py": "Tesseract through pytesseract (#1021)",
+    # pdf2image runs pdfinfo and pdftoppm, and pytesseract Tesseract,
+    # under the OCR timeout.
+    "extractors/pdf.py": "pdfinfo, pdftoppm and Tesseract through pdf2image and pytesseract (#1021)",
+}
+
+
+class TestEveryToolRunsUnderLimits:
+    """#995: every external tool gets address-space and CPU limits
+    through the one path, ``run_tool``, whose callers must each pass
+    both; a program started any other way is listed above with its
+    reason."""
+
+    def test_every_run_tool_caller_passes_both_limits(self):
+        calls = _run_tool_calls()
+        # Guards the scan: it finds the three extractors (and nothing
+        # passes limits through ``**kwargs``, which it could not check).
+        assert set(calls) == {"extractors/doc.py", "extractors/xls.py", "extractors/ppt.py"}
+        for path, nodes in calls.items():
+            for node in nodes:
+                keywords = {k.arg for k in node.keywords}
+                assert None not in keywords, path
+                assert {"max_address_space_bytes", "max_cpu_seconds"} <= keywords, path
+
+    def test_no_other_module_starts_a_program(self):
+        src = Path(extractors.__file__).parents[1]
+        starters = re.compile(
+            r"^\s*(import (subprocess|pytesseract|pdf2image)|"
+            r"from (subprocess|pytesseract|pdf2image)( import|\.))|os\.(exec|spawn|posix_spawn|system|popen)",
+            re.M,
+        )
+        found = {
+            str(path.relative_to(src))
+            for path in src.rglob("*.py")
+            if starters.search(path.read_text())
+        }
+        allowed = {"extractors/_runner.py", "extractors/_launcher.py"}
+        assert found - allowed == set(_TOOLS_OUTSIDE_RUN_TOOL)
+        assert all(reason.strip() for reason in _TOOLS_OUTSIDE_RUN_TOOL.values())
 
 
 # ---------------------------------------------------------------------------
@@ -236,7 +381,10 @@ class TestDocExtractor:
         ("body", "error"),
         [
             ("time.sleep(60)", "ToolTimeoutError"),
-            (f"sys.stderr.write({MARKER!r})\nsys.exit(1)", "ToolExitError"),
+            (
+                f"sys.stderr.write({MARKER!r})\nsys.stdout.write({MARKER!r})\nsys.exit(1)",
+                "ToolExitError",
+            ),
             ("os.kill(os.getpid(), signal.SIGKILL)", "ToolCrashError"),
         ],
     )
@@ -256,6 +404,77 @@ class TestDocExtractor:
         warnings = [r for r in caplog.records if r.levelname == "WARNING"]
         assert len(warnings) == 1
         assert error in warnings[0].getMessage()
+        assert MARKER not in caplog.text
+
+    def test_catdoc_runs_under_both_limits(self, tmp_path, monkeypatch):
+        """#995: a stand-in catdoc reports its own limits, so the launch
+        path is proved to set them, not only to pass them."""
+        from src.extractors import doc
+
+        tool = _fake_tool(
+            tmp_path,
+            "print(json.dumps({'cpu': resource.getrlimit(resource.RLIMIT_CPU), "
+            "'as': resource.getrlimit(resource.RLIMIT_AS), 'env': sorted(os.environ)}))",
+        )
+        monkeypatch.setattr(doc.shutil, "which", lambda _name: tool)
+        monkeypatch.setenv("SYNTHETIC_SECRET_ENV", MARKER)
+        text, _ = doc.extract(_OLE2_MAGIC)
+        seen = json.loads(text)
+        assert seen["cpu"] == [doc.CHILD_MAX_CPU_SECONDS, doc.CHILD_MAX_CPU_SECONDS + 1]
+        if sys.platform == "linux":
+            assert seen["as"] == [doc.CHILD_MAX_ADDRESS_SPACE_BYTES] * 2
+        assert "SYNTHETIC_SECRET_ENV" not in seen["env"]
+        # The timeout is past the CPU limit, so a CPU-bound run meets
+        # the limit first.
+        assert doc.TOOL_TIMEOUT_SECONDS > doc.CHILD_MAX_CPU_SECONDS + 1
+
+    @pytest.mark.parametrize("returncode", [-11, -24, -9])
+    def test_signal_statuses_are_crash_rows(self, tmp_path, monkeypatch, caplog, returncode):
+        """SIGSEGV, SIGXCPU (the CPU limit) and SIGKILL (its hard limit),
+        by the status the parent sees: stubbed, so nothing crashes for
+        real on macOS."""
+        import subprocess
+
+        from src.extractors import doc
+
+        caplog.set_level("DEBUG")
+        tool = _fake_tool(tmp_path, f"sys.stdout.write({MARKER!r})")
+        monkeypatch.setattr(doc.shutil, "which", lambda _name: tool)
+        monkeypatch.setattr(subprocess.Popen, "wait", lambda self, timeout=None: returncode)
+        result = extract(content_type="application/msword", filename="a.doc", payload=_OLE2_MAGIC)
+        assert (result.status, result.error, result.text) == (STATUS_FAILED, "ToolCrashError", None)
+        assert MARKER not in caplog.text
+
+    @requires_catdoc
+    @linux_only
+    def test_real_catdoc_over_its_address_space_is_a_fixed_failed_row(self, monkeypatch, caplog):
+        """Under 2 MiB catdoc cannot even map libc (measured in the
+        image) and exits with an error: the limit reaches the real
+        binary, and the hit is a fixed failed row."""
+        from src.extractors import doc
+
+        caplog.set_level("DEBUG")
+        monkeypatch.setattr(doc, "CHILD_MAX_ADDRESS_SPACE_BYTES", 2 * 1024 * 1024)
+        result = extract(
+            content_type="application/msword",
+            filename="memo.doc",
+            payload=DOC_FIXTURE.read_bytes(),
+        )
+        assert (result.status, result.error, result.text) == (STATUS_FAILED, "ToolExitError", None)
+        assert "COBALT" not in caplog.text
+
+    @linux_only
+    def test_real_cpu_limit_hit_is_a_fixed_failed_row(self, tmp_path, monkeypatch, caplog):
+        from src.extractors import doc
+
+        caplog.set_level("DEBUG")
+        tool = _fake_tool(tmp_path, f"sys.stderr.write({MARKER!r})\nwhile True:\n    pass")
+        monkeypatch.setattr(doc.shutil, "which", lambda _name: tool)
+        monkeypatch.setattr(doc, "CHILD_MAX_CPU_SECONDS", 1)
+        started = time.monotonic()
+        result = extract(content_type="application/msword", filename="a.doc", payload=_OLE2_MAGIC)
+        assert (result.status, result.error) == (STATUS_FAILED, "ToolCrashError")
+        assert time.monotonic() - started < 15
         assert MARKER not in caplog.text
 
     def test_catdoc_gets_a_fixed_charset_and_no_wrapping(self, tmp_path, monkeypatch):
@@ -413,22 +632,20 @@ class TestXlsExtractor:
     def test_child_runs_isolated_with_the_limits(self, monkeypatch):
         from src.extractors import xls
 
-        seen: list[list[str]] = []
+        seen: list[tuple[list[str], int, int]] = []
 
         def fake_run_tool(argv, payload, **kwargs):
-            seen.append(argv)
+            seen.append((argv, kwargs["max_address_space_bytes"], kwargs["max_cpu_seconds"]))
             return ToolOutput(b"\n", truncated=False)
 
         monkeypatch.setattr(xls, "run_tool", fake_run_tool)
         xls.extract(_OLE2_MAGIC)
         assert seen == [
-            [
-                sys.executable,
-                "-I",
-                str(Path(xls.__file__).with_name("xls_child.py")),
-                str(xls.CHILD_MAX_ADDRESS_SPACE_BYTES),
-                str(xls.CHILD_MAX_CPU_SECONDS),
-            ]
+            (
+                [sys.executable, "-I", str(Path(xls.__file__).with_name("xls_child.py"))],
+                xls.CHILD_MAX_ADDRESS_SPACE_BYTES,
+                xls.CHILD_MAX_CPU_SECONDS,
+            )
         ]
 
 
