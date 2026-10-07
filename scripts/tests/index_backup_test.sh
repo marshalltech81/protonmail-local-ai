@@ -60,6 +60,8 @@ inspect)
     fi
     if [[ "$3" == *Mounts* ]]; then
         printf 'fake_sqlite-volume\n'
+    elif [[ "$3" == *StartedAt* ]]; then
+        printf '%s\n' "$FAKE_STARTED_AT"
     else
         printf 'sha256:fakeindexerimage\n'
     fi
@@ -77,6 +79,11 @@ run)
     ;;
 stop | start) ;;
 logs)
+    # docker logs --since CURSOR indexer: a cursor other than the new
+    # process's start time also returns the previous process's lines.
+    if [[ "$3" != "$FAKE_STARTED_AT" ]]; then
+        printf '%s\n' "${FAKE_OLD_LOGS:-}" >&2
+    fi
     printf '%s\n' "$FAKE_LOGS" >&2
     ;;
 *)
@@ -127,6 +134,7 @@ run_backup() {
 run_restore() {
     printf '%s\n' "$2" | PATH="$WORK/bin:$PATH" FAKE_DOCKER_LOG="$WORK/docker.log" \
         FAKE_DATA="$WORK/data" FAKE_STUB="$WORK/stub" FAKE_LOGS="${FAKE_LOGS:-}" \
+        FAKE_OLD_LOGS="${FAKE_OLD_LOGS:-}" FAKE_STARTED_AT=2026-10-07T12:00:01.5Z \
         RESTORE_WAIT_SECONDS="${RESTORE_WAIT_SECONDS:-5}" BACKUP="$1" \
         bash "$REPO/scripts/restore-index.sh" >"$WORK/out" 2>&1 && STATUS=0 || STATUS=$?
 }
@@ -321,10 +329,13 @@ restore_replaces_the_index() {
     make_db "$WORK/backup.db"
     python3 -c 'import sqlite3, sys; c = sqlite3.connect(sys.argv[1]); c.execute("DELETE FROM t WHERE a < 100"); c.commit()' "$WORK/backup.db"
     make_db "$WORK/data/mail.db"
+    # The live index's mode, which lets mcp-server (another UID) read it.
+    chmod 644 "$WORK/data/mail.db"
     printf 'stale wal\n' >"$WORK/data/mail.db-wal"
     printf 'stale shm\n' >"$WORK/data/mail.db-shm"
     FAKE_LOGS="$READY_LOGS" run_restore "$WORK/backup.db" yes
     [[ "$STATUS" -eq 0 ]]
+    [[ "$(mode_of "$WORK/data/mail.db")" == 0o644 ]]
     # Checked before opening the index: SQLite discards an invalid WAL.
     [[ ! -e "$WORK/data/mail.db-wal" && ! -e "$WORK/data/mail.db-shm" && ! -e "$WORK/data/.restore-index.db" ]]
     [[ "$(query "$WORK/data/mail.db" 'SELECT count(*) FROM t')" == 100 ]]
@@ -464,6 +475,34 @@ restore_wait_is_bounded() {
     grep -F 'Startup identity' "$WORK/out" >/dev/null
 }
 
+restore_ignores_the_previous_indexer_lines() {
+    reset
+    make_db "$WORK/backup.db"
+    make_db "$WORK/data/mail.db"
+    # The stopped indexer verified the old index; the new one has not
+    # reported yet, so the restore must time out, not start mcp-server.
+    FAKE_OLD_LOGS="$READY_LOGS" FAKE_LOGS='indexer | Startup identity: service=indexer' \
+        RESTORE_WAIT_SECONDS=0 run_restore "$WORK/backup.db" yes
+    [[ "$STATUS" -ne 0 ]]
+    grep -F 'did not report its embedder identity' "$WORK/out" >/dev/null
+    grep -Fx 'logs --since 2026-10-07T12:00:01.5Z indexer' "$WORK/docker.log" >/dev/null
+    if grep -E '^start .*mcp-server' "$WORK/docker.log" >/dev/null; then
+        return 1
+    fi
+}
+
+restore_checks_the_wait_before_anything() {
+    reset
+    make_db "$WORK/backup.db"
+    make_db "$WORK/data/mail.db"
+    RESTORE_WAIT_SECONDS=900s run_restore "$WORK/backup.db" yes
+    [[ "$STATUS" -ne 0 ]]
+    grep -F 'RESTORE_WAIT_SECONDS must be a whole number' "$WORK/out" >/dev/null
+    if grep -E '^(stop|run|start)' "$WORK/docker.log" >/dev/null; then
+        return 1
+    fi
+}
+
 stub_matches_the_indexer() {
     local name
     for name in SCHEMA_VERSION SCHEMA_APPLICATION_ID; do
@@ -514,6 +553,8 @@ check "restore keeps committed WAL rows when the swap fails" restore_keeps_commi
 check "restore removes a partial staged file" restore_removes_a_partial_staged_file
 check "restore reports an index the indexer refuses" restore_reports_a_refused_index
 check "restore waits a bounded time" restore_wait_is_bounded
+check "restore ignores the previous indexer's log lines" restore_ignores_the_previous_indexer_lines
+check "restore checks RESTORE_WAIT_SECONDS before anything" restore_checks_the_wait_before_anything
 check "the restore stub matches indexer/src/database.py" stub_matches_the_indexer
 
 if ((FAILURES > 0)); then

@@ -51,11 +51,17 @@ try:
     # Fold the current index WAL into its main file first, so that file
     # alone holds every committed transaction if the swap below fails or
     # is interrupted after the sidecars are gone.
+    # The installed file keeps the current index mode (0644 when there is
+    # none): mcp-server runs as another UID and reads it through the
+    # "other" bits, so the staged 0600 must not become the index mode.
+    mode = 0o644
     if db.exists():
+        mode = db.stat().st_mode & 0o777
         with closing(sqlite3.connect(db)) as live:
             busy = live.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0]
         if busy:
             sys.exit("refused: the current index is still in use")
+    os.chmod(staged, mode)
     for suffix in ("-wal", "-shm", "-journal"):
         Path(f"{db}{suffix}").unlink(missing_ok=True)
     os.replace(staged, db)
@@ -81,6 +87,9 @@ if [[ "$BACKUP" == \~/* ]]; then
     BACKUP="$HOME${BACKUP#\~}"
 fi
 [[ -f "$BACKUP" ]] || die "$BACKUP is not a file"
+# Checked before anything stops or changes.
+wait_secs="${RESTORE_WAIT_SECONDS:-900}"
+[[ "$wait_secs" =~ ^[0-9]+$ ]] || die "RESTORE_WAIT_SECONDS must be a whole number of seconds"
 
 # The indexer container's own image and index volume, whatever project
 # name or overlays created it. The container must exist (make up first).
@@ -113,7 +122,6 @@ on_exit() {
 }
 trap on_exit EXIT
 
-since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 docker run --rm -i --network none --read-only --tmpfs /tmp --cap-drop ALL \
     --security-opt no-new-privileges:true --user 1002:1002 \
     --env SQLITE_PATH=/data/mail.db --volume "$volume:/data" \
@@ -121,11 +129,12 @@ docker run --rm -i --network none --read-only --tmpfs /tmp --cap-drop ALL \
     die "the index was not replaced (the reason is above); the previous index is unchanged"
 restored=1
 docker start indexer
+# Read logs from the new process's start (nanosecond precision), so a
+# line the stopped indexer wrote cannot count as this start's.
+since=$(docker inspect --format '{{.State.StartedAt}}' indexer)
 
 # Wait (bounded) for the indexer to verify or refuse the embedder
 # identity, printing its schema and embedder startup lines.
-wait_secs="${RESTORE_WAIT_SECONDS:-900}"
-[[ "$wait_secs" =~ ^[0-9]+$ ]] || die "RESTORE_WAIT_SECONDS must be a whole number of seconds"
 deadline=$((SECONDS + wait_secs))
 pattern='Startup identity|Migrating database|Database ready|Embedder identity|embedder is not the one|Schema version mismatch'
 while :; do

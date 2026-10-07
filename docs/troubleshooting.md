@@ -826,11 +826,13 @@ It asks for `yes`, then:
    and its schema version is not above the code's;
 3. checkpoints the current index's WAL into `mail.db`, so that file
    alone holds every committed change if the swap fails, then removes
-   the `-wal` and `-shm` files and renames the copy over `mail.db` (an
-   old WAL left beside the restored file would be replayed into it); a
-   staged copy is removed on any failure, a full volume included;
-4. starts `indexer` and waits up to `RESTORE_WAIT_SECONDS` (900) for
-   its startup lines, printing the `Startup identity` line
+   the `-wal` and `-shm` files and renames the copy over `mail.db` with
+   the current file's mode, so mcp-server (another user) can still read
+   it (an old WAL left beside the restored file would be replayed into
+   it); a staged copy is removed on any failure, a full volume included;
+4. starts `indexer` and waits up to `RESTORE_WAIT_SECONDS` (900, checked
+   before anything is stopped) for the startup lines of that new
+   process, printing the `Startup identity` line
    (`schema_stored`), any `Migrating database` and `Database ready`
    lines and the `Embedder identity verified` line;
 5. starts `mcp-server` only after that line, so it never serves an
