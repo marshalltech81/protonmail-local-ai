@@ -2117,7 +2117,13 @@ columns are populated lazily on the next reindex of the file.
 `.github/workflows/security.yml` runs Trivy over the repository: the
 uv lockfiles, `pyproject.toml` files and `indexer/java/pom.xml` for
 vulnerable dependencies, and the Dockerfiles for misconfiguration. It
-fails on HIGH or CRITICAL findings.
+fails on HIGH or CRITICAL findings. The misconfiguration scan runs
+offline (`--offline-scan`): Trivy's Maven analyzer would otherwise
+resolve `pom.xml` from Maven Central, which rate-limits the shared CI
+runners (#1047); the dependency scan still resolves it. `make trivy`
+runs the same scans locally with the same flags (#1017), skipping the
+per-checkout `.uv-cache` as the workflow does;
+`scripts/tests/trivy_flags_test.sh` fails when the two differ.
 
 ### Image scan
 

@@ -807,6 +807,16 @@ Notes:
   `# nosemgrep: <rule-id>` comment on the reported line with the reason
   beside it. A rule change gets matching cases in its fixture
   (`.semgrep/compose.test.yml`, `.semgrep/shell.sh`).
+- for dependency (`pyproject.toml`, `uv.lock`, `pom.xml`) or Dockerfile
+  changes, run `make trivy`: the Trivy jobs from
+  `.github/workflows/security.yml` locally (the dependency scans of
+  `indexer/` and `mcp-server/` and the offline misconfiguration scan of
+  the repository, with the workflow's flags; needs `trivy` on `PATH`,
+  and warns when its version is not the pinned one). The flag values
+  live in the Makefile and the workflow; `make test-trivy-flags` (part
+  of `make test`, no Trivy needed) fails when they differ, so a change
+  to one is made in both. The image scans in
+  `.github/workflows/docker.yml` have no local target.
 - for Dockerfile, build, or container-runtime changes, run the smallest relevant `docker compose build ...` subset when practical
 - prefer real `.eml` fixtures for parser tests
 - a fixture generated with an office application (Word, PowerPoint,

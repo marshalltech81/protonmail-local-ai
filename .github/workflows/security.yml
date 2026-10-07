@@ -137,6 +137,12 @@ jobs:
           version: v0.75.0
           cache: true
 
+      # Trivy's language analyzers run whatever the scanners, and the
+      # Maven one resolves indexer/java/pom.xml from Maven Central, which
+      # rate-limits the shared runner IPs (429; #1047). This scan reads
+      # only the Dockerfiles, so it runs offline (--offline-scan, which
+      # the action has no input for); the dependency scan above still
+      # resolves pom.xml.
       - name: Scan repository configuration
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
@@ -147,7 +153,9 @@ jobs:
           format: table
           exit-code: "1"
           severity: CRITICAL,HIGH
-          skip-dirs: .git,.ruff_cache,.pytest_cache,.venv,indexer/.venv,mcp-server/.venv
+          skip-dirs: .git,.ruff_cache,.pytest_cache,.venv,indexer/.venv,mcp-server/.venv,.uv-cache
+        env:
+          TRIVY_OFFLINE_SCAN: "true"
 
   semgrep:
     name: Semgrep Compose and shell scan

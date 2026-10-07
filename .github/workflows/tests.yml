@@ -80,6 +80,9 @@ jobs:
       - name: Run image pin tests
         run: bash scripts/tests/image_pin_test.sh
 
+      - name: Run the Trivy flag checks
+        run: bash scripts/tests/trivy_flags_test.sh
+
   indexer-pytest:
     name: indexer pytest
     runs-on: ubuntu-latest
