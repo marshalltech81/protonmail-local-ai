@@ -325,7 +325,7 @@ Also in this milestone: #764 (default inference model).
 
 ### Phase 4 — Deterministic knowledge scaffolding
 
-**Status: mostly done.** Milestone *Phase 4*. Items 1 and 2 were built
+**Status: mostly done; item 5 open.** Milestone *Phase 4*. Items 1 and 2 were built
 before go-live, so their tables are in the v0 schema; any later
 Phase 4 schema change needs a numbered migration.
 
@@ -342,7 +342,11 @@ Phase 4 schema change needs a numbered migration.
    `Received:`, confirmed as Proton's on live mail) and the effective
    time `COALESCE(occurred_at, sent_at)` for every filter, span and
    ordering (`docs/architecture.md`, "Message time"). **Done** (#593,
-   #597, #599). Bitemporal claims wait for Phase 5.
+   #597, #599). Amended 2026-10-07 (Resolved decisions 35): the
+   effective time stays the default basis; `date_basis` lets a caller
+   choose `sent`, `occurred` or `internal` (#1085, #1092), and a
+   missing `Date:` stays unknown instead of being dated at indexing
+   (#1080). Bitemporal claims wait for Phase 5.
 4. **Deletion/retention semantics.** Mirror is the default, archive
    (`INDEXER_DELETION_ENABLED=false`) the opt-in, Trash indexed but
    hidden from default search. A reaped source reads as removed for 30
@@ -351,6 +355,26 @@ Phase 4 schema change needs a numbered migration.
    Remaining: user-controlled retention (#784), local
    deletion of deleted mail's files (#728), and validating reaping on
    live mail (#783).
+5. **Deterministic query language** (2026-10-07, Resolved decisions
+   35; design note `docs/design/2026-10-07-deterministic-query-predicates.md`).
+   `query_messages` is already an exact enumerator with good address
+   semantics; what it lacks is composition, an explicit clock and a
+   way to say "could not tell". One predicate compiler replaces the
+   three drifted filter implementations (#1084), then: `replied`,
+   size and `date_basis` (#1085); per-message evaluability and an
+   `indeterminate` count beside `total_matches` (#1086, before any
+   negation); the bounded `all` / `any` / `negate` form with a leaf
+   cap and three-valued evaluation (#1087, delivers #992 option 2);
+   explicit address-mode and `body_words` leaves (#1088); grouped
+   aggregation as its own tool over the same engine (#823); leaves
+   that wait on the evidence model: `header_exists` /
+   `header_contains` (#1089), Bcc (#1090), `attachment_text_words`
+   (#1091), `date_basis=internal` (#1092); and a capability report in
+   `get_mailbox_status` derived from the registered leaves (#1093).
+   Omitted by decision: IMAP UID, KEYWORD (labels are outside the
+   corpus by the sync patterns, a separate corpus decision), DRAFT
+   and DELETED (#955 becomes a leaf if wanted). #824, #955 and #1056
+   become leaves on the compiler. **Not started.**
 
 ### Phase 5 — Knowledge reasoning
 
@@ -427,6 +451,44 @@ files currently show as "retrying"), and correlation IDs (#888).
 Every MCP tool declares safety annotations (#899; #900; Resolved
 decisions 31).
 
+### Evidence model
+
+Not a phase: cross-cutting work to capture source semantics losslessly
+at the Maildir boundary, so deterministic queries are grounded in
+preserved evidence rather than reconstructed from it (owner and Claude
+correspondence, 2026-10-07; Resolved decisions 35; design note
+`docs/design/2026-10-07-deterministic-query-predicates.md`). Milestone
+*Evidence model*. Principle: capture source semantics losslessly at
+ingestion, preserve immutable evidence locally, derive search
+structures from that evidence. The product boundary stays Bridge →
+mbsync → Maildir → indexer; mbsync is not replaced (Deferred).
+
+1. **Parser seam** — `parse_email_bytes(raw, source_metadata)` with
+   Maildir as the adapter; no behaviour change (#1077).
+2. **Reparse class** — an in-place full reparse through the job queue
+   for changes that keep chunk IDs, the executable form of #786's
+   "reparse" (#1078, decision). The three changes below share one
+   `SCHEMA_VERSION` bump and one backfill.
+3. **All headers** — a `message_headers` table keeping duplicates and
+   order under one aggregate budget (fields, bytes, largest value in
+   one guard); values never reach logs (#1079). Narrows #825 to
+   normalization; prerequisite for #463 options 2 and 3.
+4. **Unknown dates stay unknown** — nullable `sent_at` with a status;
+   `effective_at` remains the ordering fallback, documented as not
+   evidence (#1080).
+5. **Arrival time** — experiment: `CopyArrivalDate yes` in the mbsync
+   template, a layout test proving the mtime equals Bridge's
+   INTERNALDATE, `internal_at` with an `unavailable` status for files
+   that predate the option (#1081). Recovering it for existing mail
+   would be a cold re-pull, an explicit operation, not part of this.
+6. **Content-hash identity** — messages without a usable Message-ID
+   indexed under a hash-only claimant ID instead of dead-lettered
+   (#1082, decision; AGENTS.md data-model constraint).
+7. **Occurrence model** — one `messages` row is one occurrence while
+   Proton folders are exclusive and the virtual folders are excluded;
+   the `,U=` in a Maildir file name is isync's near-side UID, never
+   read; `.mbsyncstate` is never parsed (#1083, decision).
+
 ## Not doing (decided 2026-09-26)
 
 Recorded so items are auditable rather than silently dropped. Each
@@ -485,6 +547,17 @@ can be revisited with an explicit owner decision.
 - newest-first initial indexing as an option. Trigger: #752 lands
 - reporting child folders skipped under isync's reserved names
   (needs an extra IMAP listing). Trigger: a real report
+- replacing mbsync with a read-only IMAP acquisition layer (decided
+  2026-10-07, Resolved decisions 35): Maildir already carries folder,
+  flags and (with `CopyArrivalDate`) the arrival time, and the
+  evidence-model work needs none of Bridge's UIDs; a Python IMAP
+  client against Bridge's Gluon server would re-open the TLS and
+  fingerprint path, add a fourth container and a new untrusted-input
+  surface, and reverse the Maildir product boundary. Bridge `UID
+  SEARCH` is a differential test target for simple predicates, run by
+  hand and read-only, never an oracle for BODY/TEXT semantics.
+  Trigger: an IDLE-latency requirement, or a sync defect isync cannot
+  handle
 
 ## Operational baseline
 
@@ -828,6 +901,19 @@ removed Bridge container are kept as history.
     a PR's "Not done" gets its own issue before the PR is called ready;
     a gap in code, tests or docs that a PR adds counts as introduced by
     it under the #751 exception.
+35. **Deterministic query language and the evidence model
+    (2026-10-07):** keep Maildir as the product boundary and isync as
+    the sync layer; do not replace mbsync (Deferred). Preserve source
+    semantics the indexer already receives but discards (all headers,
+    unknown dates, arrival time, content-hash identity; "Evidence
+    model" above). Build the deterministic layer as one predicate
+    compiler with a bounded Boolean form, explicit `date_basis`
+    (`effective` stays the default) and three-valued results with an
+    `indeterminate` count, established before negation (Phase 4
+    item 5). Define `BODY`/`TEXT` equivalents by what the index holds
+    (`body_words`, `attachment_text_words`), never by Gluon's
+    behaviour. Omit IMAP UID, KEYWORD, DRAFT and DELETED. Design note:
+    `docs/design/2026-10-07-deterministic-query-predicates.md`.
 
 ## Notes for Agents
 
