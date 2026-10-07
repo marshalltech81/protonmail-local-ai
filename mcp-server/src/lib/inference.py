@@ -167,15 +167,17 @@ TruncationReason = Literal["max_tokens", "context_window"]
 # The fixed message for each stop, naming the setting that fixes it
 # (#890). A context-window stop is not about the output reserve: a
 # larger INFERENCE_MAX_TOKENS leaves even less of the window for the
-# prompt, so that message never names it.
+# prompt, so that message never names it. It says "or below" because
+# the window can already match the model's and still fill when the
+# text tokenizes more densely than CHARS_PER_TOKEN assumes.
 _TRUNCATION_MESSAGES: dict[TruncationReason, str] = {
     "max_tokens": (
         "Inference output hit the max_tokens limit before finishing (raise INFERENCE_MAX_TOKENS)"
     ),
     "context_window": (
         "Inference output hit the model's context window before finishing "
-        "(set INFERENCE_CONTEXT_TOKENS to the model's real window, or use a model "
-        "with a larger one)"
+        "(lower INFERENCE_CONTEXT_TOKENS to the model's real window or below, or use "
+        "a model with a larger one)"
     ),
 }
 

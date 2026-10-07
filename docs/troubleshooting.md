@@ -1137,9 +1137,11 @@ hit:
   reply reached `INFERENCE_MAX_TOKENS` (Anthropic's
   `model_context_window_exceeded` stop; `context_window_cuts` counts
   these replies). Raising `INFERENCE_MAX_TOKENS` does not help.
-  `INFERENCE_CONTEXT_TOKENS` is set larger than the model's real
-  window: lower it to that window, or choose a model with a larger
-  one. The caller's truncation notice (or, for a reply cut before any
+  Either `INFERENCE_CONTEXT_TOKENS` is set larger than the model's
+  real window, or the prompt tokenizes more densely than the
+  three-characters-per-token estimate (CJK scripts, long digit or
+  base64 runs). Lower it to the model's real window, or below it for
+  dense mail, or choose a model with a larger one. The caller's truncation notice (or, for a reply cut before any
   text, the error) says the same: it names `INFERENCE_CONTEXT_TOKENS`,
   not `INFERENCE_MAX_TOKENS` (#890).
 - `evidence_budget`: the model window, not the fixed per-thread cap,

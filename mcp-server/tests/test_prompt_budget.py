@@ -1171,9 +1171,9 @@ class TestTruncationText:
             "answer.]"
         ),
         "context_window": (
-            "\n\n[Answer cut off at the model's context window; set INFERENCE_CONTEXT_TOKENS "
-            "to the model's real window, or use a model with a larger one, for a complete "
-            "answer.]"
+            "\n\n[Answer cut off at the model's context window; lower INFERENCE_CONTEXT_TOKENS "
+            "to the model's real window or below, or use a model with a larger one, for a "
+            "complete answer.]"
         ),
     }
     _ERRORS = {
@@ -1183,11 +1183,22 @@ class TestTruncationText:
         ),
         "context_window": (
             "Inference output hit the model's context window before finishing "
-            "(set INFERENCE_CONTEXT_TOKENS to the model's real window, or use a model "
-            "with a larger one)"
+            "(lower INFERENCE_CONTEXT_TOKENS to the model's real window or below, or use "
+            "a model with a larger one)"
         ),
     }
     _WRONG = {"max_tokens": "INFERENCE_CONTEXT_TOKENS", "context_window": "INFERENCE_MAX_TOKENS"}
+
+    def test_context_window_text_advises_lowering_the_window(self):
+        """Review round 1 on #914: the window can already match the
+        model's and still fill, because the three-characters-per-token
+        estimate undercounts dense text (CJK, digit or base64 runs). The
+        fix that always applies is a lower INFERENCE_CONTEXT_TOKENS."""
+        for text in (
+            _TRUNCATED_NOTICES["context_window"],
+            str(InferenceTruncatedError(partial="", reason="context_window")),
+        ):
+            assert "lower INFERENCE_CONTEXT_TOKENS to the model's real window or below" in text
 
     @pytest.mark.parametrize("reason", ["max_tokens", "context_window"])
     def test_notice_text_is_fixed_per_reason(self, reason):

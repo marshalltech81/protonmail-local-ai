@@ -1313,7 +1313,8 @@ An answer the model stopped writing early is returned with a closing
 `[Answer cut off …]` notice rather than as if complete;
 `summarize_thread` does the same. The notice names the setting to
 change: `INFERENCE_MAX_TOKENS` when the reply reached it,
-`INFERENCE_CONTEXT_TOKENS` (or a model with a larger window) when the
+`INFERENCE_CONTEXT_TOKENS` (lower it to the model's real window or
+below, or use a model with a larger window) when the
 model's own context window filled first (Anthropic's
 `model_context_window_exceeded` stop). A reply cut before any text is
 an error with the same distinction.

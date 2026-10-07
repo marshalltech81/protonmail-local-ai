@@ -1065,14 +1065,16 @@ def _drop_unrequired_nulls(record: dict, schema: dict) -> dict:
 
 # Appended to a prose answer the model stopped writing early, chosen by
 # the stop reason so the notice names the setting that fixes it (#890):
-# a context-window stop is not helped by a larger output reserve.
+# a context-window stop is not helped by a larger output reserve, and
+# a lower window also covers text denser than CHARS_PER_TOKEN assumes.
 _TRUNCATED_NOTICES: dict[TruncationReason, str] = {
     "max_tokens": (
         "\n\n[Answer cut off at the INFERENCE_MAX_TOKENS limit; raise it for a complete answer.]"
     ),
     "context_window": (
-        "\n\n[Answer cut off at the model's context window; set INFERENCE_CONTEXT_TOKENS "
-        "to the model's real window, or use a model with a larger one, for a complete answer.]"
+        "\n\n[Answer cut off at the model's context window; lower INFERENCE_CONTEXT_TOKENS "
+        "to the model's real window or below, or use a model with a larger one, for a "
+        "complete answer.]"
     ),
 }
 _TRUNCATED_NOTICE_SUFFIXES = tuple(_TRUNCATED_NOTICES.values())
