@@ -341,6 +341,23 @@ contents of a returned thread, follow up with `get_thread` or
 | `limit` | int | `10` | Max threads to return |
 | `authority_class` | string | none | Keep threads with a message whose From sender carries this source-authority class: `counsel`, `management`, `vendor`, `government`, `personal`, `other`, or `unclassified`. Assigned by the operator's rules file (`docs/setup.md`); a filter only, never a ranking weight. Spam-folder messages never count, so a thread matches only through its non-Spam messages. Blank is ignored; any other value is an error |
 
+**Resolving `from_name`
+([#864](https://github.com/marshalltech81/protonmail-local-ai/issues/864)).**
+`search_emails`, `get_evidence`, `ask_mailbox` and `extract_from_emails`
+resolve `from_name` the same way: one `find_contact` lookup over
+From-line senders in the call's folder scope, and the matching sender
+with the most threads becomes the `from_addr` filter. Each reports the
+lookup in its structured output: `resolved_from_addr`, the address
+filtered by, and `from_name_matches`, the number of distinct sender
+addresses the name matched. The lookup ranks at most 10 contacts, so
+the count stops at 10 (10 means ten or more). Above 1, several senders
+share the name, possibly different people, and only the first was
+filtered by; pass `from_addr` to choose another (`find_contact` lists
+them, counting every role). No match reports `null` and `0`; a call
+without `from_name`, or with an explicit `from_addr`, reports `null`
+for both. The address is in the structured output only: the prose
+does not show it and nothing about it is logged.
+
 **When to use which mode:**
 - `hybrid` — best for most queries (default)
 - `keyword` — exact names, invoice numbers, email addresses
@@ -750,7 +767,8 @@ person ("do I have Jane Smith's email?", "show me everyone at
 example.com"). For "emails from Jane Smith", call
 `search_emails(from_name=...)` directly instead: it resolves the name
 internally to the most-active matching sender and reports the address
-it used in `resolved_from_addr`. Resolve a name here first only when
+it used in `resolved_from_addr` and how many senders matched in
+`from_name_matches` ([Resolving `from_name`](#search_emails)). Resolve a name here first only when
 you need a different matching contact than that one (then pass it as
 `from_addr`), or for a tool that filters by address alone, such as
 `get_evidence` or `search_attachments`.
@@ -1283,6 +1301,7 @@ Structured output:
 | `quotes` | Each quotation: `text` (cut at 1,000 characters), `statement` (index into `statements`), `status` (`verified`, `misattributed`, `unmatched`, `uncited`, `not_checked`) and `found_in` (labels of the passages it was found in) |
 | `citation_problems` | `[]` when the check passed, else entries `{kind, labels, statements, quotes}`, `kind` one of `unknown_labels`, `no_citations`, `uncited_statements`, `unmatched_quotes`, `misattributed_quotes`, `context_only_citations`; `statements` and `quotes` are indexes into those lists, and `labels` holds the unknown labels or, for `misattributed_quotes`, the passages the quotes were found in, or, for `context_only_citations`, the cited labels |
 | `repair_attempted` | Whether the one repair call was made |
+| `resolved_from_addr`, `from_name_matches` | The `from_name` lookup: the address filtered by and how many senders matched, up to 10 ([Resolving `from_name`](#search_emails)); `null` without `from_name` |
 | `threads` | The threads searched, best match first (the `search_emails` thread shape) |
 
 The prose in `content` is the answer, a `Citations:` list, any
@@ -1511,6 +1530,7 @@ Structured output:
 | `fields` | One entry per field with a value: `record` (index into `records`), `field`, `labels`, `status` (`cited`, `uncited`, `invalid`), `value_check` (`verified`, `misattributed`, `unmatched`, `uncited`, `not_checked`) and `found_in` |
 | `citation_problems` | `[]` when every field cites a supplied passage, else entries `{record, kind, labels, fields}`, `kind` one of `unknown_labels`, `uncited_fields`, `misattributed_values` |
 | `notice` | The incomplete-extraction or evidence note in `content`, or `null` |
+| `resolved_from_addr`, `from_name_matches` | The `from_name` lookup: the address filtered by and how many senders matched, up to 10 ([Resolving `from_name`](#search_emails)); `null` without `from_name` |
 | `threads` | The threads searched, best match first |
 
 In `content`, the records stay the first item (pure JSON) and any

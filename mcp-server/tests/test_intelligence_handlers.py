@@ -30,6 +30,7 @@ from mcp.types import CallToolResult
 from src.lib.inference import InferenceTruncatedError
 from src.lib.security import ProviderResponseError
 from src.tools.intelligence import register_intelligence_tools
+from src.tools.outputs import MAX_FROM_NAME_MATCHES
 
 from tests.conftest import FakeEmbedClient, FakeInferenceClient
 
@@ -1109,7 +1110,7 @@ class TestPersonFilters:
         out = _person_call(
             fake_server, person_db, FakeInferenceClient(response="null"), tool, from_name="Dana"
         )
-        assert lookups == [("Dana", 1, True, None)]
+        assert lookups == [("Dana", MAX_FROM_NAME_MATCHES, True, None)]
         # Sender-only, as in search_emails: the thread she only received is out.
         assert _searched(out) == {"t-dana-sent"}
 

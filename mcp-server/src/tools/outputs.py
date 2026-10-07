@@ -41,6 +41,9 @@ from ..lib.sqlite import Participant as ParticipantRecord
 # Entries listed per bounded list (thread participants, senders, one
 # message's recipients per role, References) before the rest are counted.
 MAX_LISTED = 10
+# Senders counted per ``from_name`` lookup (#864): ``from_name_matches``
+# saturates here, so one lookup never ranks more contacts than this.
+MAX_FROM_NAME_MATCHES = 10
 # Characters of one sender-controlled value (subject, name, address,
 # reply header) before it is cut with a marker. IDs are never cut: a
 # shortened ID would not chain to the next call.
@@ -288,15 +291,24 @@ _DATE_BOUNDS_DESCRIPTION = (
 )
 
 
+_RESOLVED_FROM_ADDR_DESCRIPTION = (
+    "When from_name was given without from_addr: the sender address it resolved to and "
+    "filtered by (the matching sender with the most threads in scope), or null if no "
+    "contact matched (results are then empty). Null when from_name was not used."
+)
+_FROM_NAME_MATCHES_DESCRIPTION = (
+    "When from_name was given without from_addr: the distinct sender addresses it matched "
+    f"in scope, counted up to {MAX_FROM_NAME_MATCHES} ({MAX_FROM_NAME_MATCHES} means that "
+    "many or more). Above 1, possibly different people who share the name; only "
+    "resolved_from_addr was filtered by, so pass from_addr to choose another. 0 when no "
+    "contact matched; null when from_name was not used."
+)
+
+
 class SearchEmailsOutput(_Output):
     mode: str = Field(description="The search mode used: hybrid, semantic, or keyword.")
-    resolved_from_addr: str | None = Field(
-        description=(
-            "When from_name was given without from_addr: the sender address it "
-            "resolved to and filtered by, or null if no contact matched (results "
-            "are then empty). Null when from_name was not used."
-        )
-    )
+    resolved_from_addr: str | None = Field(description=_RESOLVED_FROM_ADDR_DESCRIPTION)
+    from_name_matches: int | None = Field(description=_FROM_NAME_MATCHES_DESCRIPTION)
     date_bounds: DateBounds | None = Field(description=_DATE_BOUNDS_DESCRIPTION)
     results: list[ThreadSummary] = Field(description="Threads, best match first.")
 
@@ -374,6 +386,8 @@ class EvidenceThread(_Output):
 
 class EvidenceOutput(_Output):
     chunk_count: int
+    resolved_from_addr: str | None = Field(description=_RESOLVED_FROM_ADDR_DESCRIPTION)
+    from_name_matches: int | None = Field(description=_FROM_NAME_MATCHES_DESCRIPTION)
     threads: list[EvidenceThread] = Field(
         description="Threads in rank order, chunks ranked within."
     )
@@ -765,6 +779,8 @@ class AskMailboxOutput(_Output):
     repair_attempted: bool = Field(
         description="True when the first answer failed the check and the model was asked once more."
     )
+    resolved_from_addr: str | None = Field(description=_RESOLVED_FROM_ADDR_DESCRIPTION)
+    from_name_matches: int | None = Field(description=_FROM_NAME_MATCHES_DESCRIPTION)
     threads: list[ThreadSummary] = Field(description="The threads searched, best match first.")
 
 
@@ -864,6 +880,8 @@ class ExtractFromEmailsOutput(_Output):
         description="The incomplete-extraction and evidence note in content, if any: "
         "counts of threads that could not be extracted or whose passages were cut."
     )
+    resolved_from_addr: str | None = Field(description=_RESOLVED_FROM_ADDR_DESCRIPTION)
+    from_name_matches: int | None = Field(description=_FROM_NAME_MATCHES_DESCRIPTION)
     threads: list[ThreadSummary] = Field(description="The threads searched, best match first.")
 
 

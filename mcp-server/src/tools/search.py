@@ -24,6 +24,7 @@ from ..lib.timings import count, rerank_mode, stage, timed_tool
 from ..lib.validation import clamp_int
 from .intelligence import (
     _MAX_ASK_THREADS,
+    FromNameResolution,
     blank_to_none,
     clamp_ask_threads,
     resolve_from_name,
@@ -279,16 +280,20 @@ def register_search_tools(
         # lookup. When the lookup yields nothing, short-circuit with an
         # honest empty result rather than silently dropping the
         # filter and returning unrelated threads.
+        # Reported in the structured output only (#864), never logged.
         resolved_from_addr = None
+        from_name_matches = None
         if from_name and not from_addr:
             try:
-                resolved_from_addr = await resolve_from_name(db, from_name, folders)
+                resolution = await resolve_from_name(db, from_name, folders)
             except Exception as e:
                 # Local-DB work, but a conversion error can quote stored
                 # mail: the same classification as provider failures (#257).
                 safe_error = safe_provider_exception_text(e, secrets)
                 log.error("search_emails: find_contact lookup failed: %s", safe_error)
                 raise ToolError(f"Search error: {safe_error}") from e
+            resolved_from_addr = resolution.address
+            from_name_matches = resolution.senders
             if resolved_from_addr is None:
                 empty = (
                     f"No results found for: '{query}' (no contact matched from_name={from_name!r})"
@@ -297,7 +302,11 @@ def register_search_tools(
                 return tool_result(
                     f"{empty}\n{bounds_line}" if bounds_line else empty,
                     SearchEmailsOutput(
-                        mode=mode, resolved_from_addr=None, date_bounds=bounds, results=[]
+                        mode=mode,
+                        resolved_from_addr=None,
+                        from_name_matches=0,
+                        date_bounds=bounds,
+                        results=[],
                     ),
                 )
             from_addr = resolved_from_addr
@@ -374,6 +383,7 @@ def register_search_tools(
             output = SearchEmailsOutput(
                 mode=mode,
                 resolved_from_addr=resolved_from_addr,
+                from_name_matches=from_name_matches,
                 date_bounds=bounds,
                 results=[thread_summary(r) for r in results],
             )
@@ -591,6 +601,9 @@ def register_search_tools(
         # thread_score | None, chunks). ``lane_ranks`` is None for the
         # thread-scoped path because that path bypasses RRF fusion.
         groups: list[tuple[str, str, dict[str, int] | None, float | None, list]] = []
+        # The ``from_name`` lookup, reported in the structured output only
+        # (#864), never logged.
+        resolution: FromNameResolution | None = None
         # Scope labels of the mailbox-wide path (#755); the thread path
         # has no filters, so every passage there is in scope.
         scope: ScopeLabels | None = None
@@ -629,12 +642,18 @@ def register_search_tools(
                 # wins, and no match is an empty result, never a search
                 # without the filter.
                 if from_name and not from_addr:
-                    from_addr = await resolve_from_name(db, from_name, folders)
+                    resolution = await resolve_from_name(db, from_name, folders)
+                    from_addr = resolution.address
                     if from_addr is None:
                         return tool_result(
                             f"No evidence found for: '{query}' "
                             f"(no contact matched from_name={from_name!r})",
-                            EvidenceOutput(chunk_count=0, threads=[]),
+                            EvidenceOutput(
+                                chunk_count=0,
+                                resolved_from_addr=None,
+                                from_name_matches=0,
+                                threads=[],
+                            ),
                         )
                 embedding = await embed_query(embed_client, query, expected_embed_dim)
                 # ask_mailbox's retrieval, with the same per-thread chunk
@@ -704,6 +723,8 @@ def register_search_tools(
         total_chunks = sum(len(chunks) for _, _, _, _, chunks in groups)
         output = EvidenceOutput(
             chunk_count=total_chunks,
+            resolved_from_addr=resolution.address if resolution else None,
+            from_name_matches=resolution.senders if resolution else None,
             threads=[
                 EvidenceThread(
                     thread_id=tid,

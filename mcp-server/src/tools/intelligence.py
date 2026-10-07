@@ -39,6 +39,7 @@ from ..lib.timings import count, rerank_mode, stage, timed_tool
 from ..lib.validation import clamp_int
 from .outputs import (
     HEADER_CHAR_LIMIT,
+    MAX_FROM_NAME_MATCHES,
     MAX_LISTED,
     AnswerStatement,
     AskMailboxOutput,
@@ -462,24 +463,42 @@ def blank_to_none(value: str | None) -> str | None:
     return (value.strip() or None) if value is not None else None
 
 
-async def resolve_from_name(db, from_name: str, folders: list[str] | None) -> str | None:
-    """The sender address ``from_name`` names, or ``None`` if no contact
-    matches: ``find_contact``'s top match counted over From-line senders
-    only, within the caller's folder scope (``folders``, else the default
-    Trash exclusion).
+@dataclass(frozen=True)
+class FromNameResolution:
+    """What a ``from_name`` lookup found (#864): ``address`` is the sender
+    filtered by (``None`` when no contact matched) and ``senders`` how
+    many distinct sender addresses the name matched, at most
+    ``MAX_FROM_NAME_MATCHES``. Both are reported in the tool's structured
+    output only; the address is mail content and is never logged."""
+
+    address: str | None
+    senders: int
+
+
+async def resolve_from_name(db, from_name: str, folders: list[str] | None) -> FromNameResolution:
+    """The sender address ``from_name`` names, with the number of senders
+    it matched: ``find_contact``'s top match counted over From-line
+    senders only, within the caller's folder scope (``folders``, else
+    the default Trash exclusion).
 
     The resolved address becomes a sender-only ``from_addr`` filter, so
     the lookup counts senders only: over all participants a frequent
     recipient could outrank the sender and leave the filter matching
     nothing. Scoping it like the search keeps it from picking a sender
     whose threads the search would then filter out. ``search_emails``,
-    ``ask_mailbox`` and ``extract_from_emails`` share it.
+    ``get_evidence``, ``ask_mailbox`` and ``extract_from_emails`` share
+    it.
+
+    One lookup asks for ``MAX_FROM_NAME_MATCHES`` contacts, so the count
+    saturates there: a name shared by more senders reports the cap.
     """
     with stage("contact_lookup"):
         contacts = await asyncio.to_thread(
-            db.find_contact, from_name, 1, senders_only=True, folders=folders
+            db.find_contact, from_name, MAX_FROM_NAME_MATCHES, senders_only=True, folders=folders
         )
-    return contacts[0]["email"] if contacts else None
+    return FromNameResolution(
+        address=contacts[0]["email"] if contacts else None, senders=len(contacts)
+    )
 
 
 # Tail size for ``summarize_thread``'s recent-chunks fetch. The stored
@@ -2961,13 +2980,16 @@ def register_intelligence_tools(
             raise ToolError(f"Error: {e}") from e
         # The name ``from_addr`` was resolved from, for the scope block.
         resolved_from_name = from_name if from_name and not from_addr else None
+        # Reported in the structured output only (#864), never logged.
+        resolution = None
 
         try:
             # ``from_name`` resolves to a sender address as in
             # search_emails; an explicit ``from_addr`` wins. No match is
             # an honest empty answer, never a search without the filter.
             if from_name and not from_addr:
-                from_addr = await resolve_from_name(db, from_name, folders)
+                resolution = await resolve_from_name(db, from_name, folders)
+                from_addr = resolution.address
                 if from_addr is None:
                     no_contact = (
                         "No relevant emails found to answer your question "
@@ -2980,9 +3002,13 @@ def register_intelligence_tools(
                             citations=[],
                             citation_problems=[],
                             repair_attempted=False,
+                            resolved_from_addr=None,
+                            from_name_matches=0,
                             threads=[],
                         ),
                     )
+            resolved_from_addr = resolution.address if resolution else None
+            from_name_matches = resolution.senders if resolution else None
             # Retrieve relevant threads via hybrid search, with the
             # precise passages that drove ranking attached to each thread
             # rather than the truncated accumulated thread body.
@@ -3011,6 +3037,8 @@ def register_intelligence_tools(
                         citations=[],
                         citation_problems=[],
                         repair_attempted=False,
+                        resolved_from_addr=resolved_from_addr,
+                        from_name_matches=from_name_matches,
                         threads=[],
                     ),
                 )
@@ -3148,6 +3176,8 @@ def register_intelligence_tools(
                     quotes=check.quotes,
                     citation_problems=check.problems,
                     repair_attempted=repair_attempted,
+                    resolved_from_addr=resolved_from_addr,
+                    from_name_matches=from_name_matches,
                     threads=[thread_summary(r) for r in results],
                 ),
             )
@@ -3526,8 +3556,11 @@ def register_intelligence_tools(
             # search_emails. No match is an honest empty result, never a
             # search without the filter.
             from_addr = None
+            # Reported in the structured output only (#864), never logged.
+            resolution = None
             if from_name:
-                from_addr = await resolve_from_name(db, from_name, folders)
+                resolution = await resolve_from_name(db, from_name, folders)
+                from_addr = resolution.address
                 if from_addr is None:
                     return tool_result(
                         f"No matching emails found (no contact matched from_name={from_name!r}).",
@@ -3537,6 +3570,8 @@ def register_intelligence_tools(
                             fields=[],
                             citation_problems=[],
                             notice=None,
+                            resolved_from_addr=None,
+                            from_name_matches=0,
                             threads=[],
                         ),
                     )
@@ -3572,6 +3607,8 @@ def register_intelligence_tools(
                         fields=fields,
                         citation_problems=problems,
                         notice=notice,
+                        resolved_from_addr=resolution.address if resolution else None,
+                        from_name_matches=resolution.senders if resolution else None,
                         threads=[thread_summary(r) for r in results],
                     ).model_dump(mode="json", by_alias=True),
                 )
