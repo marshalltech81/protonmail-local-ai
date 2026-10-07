@@ -3,9 +3,12 @@ Tool safety annotations (#899).
 
 Every tool declares ``readOnlyHint=True``, ``destructiveHint=False`` and
 ``openWorldHint=False`` explicitly, plus its own human-readable
-``title``: OpenAI blocks calls to tools whose hints are left at the MCP
-defaults, and Anthropic's directory policy requires ``readOnlyHint``,
-``destructiveHint`` and ``title``. These tests build a real FastMCP
+``title``: OpenAI requires all three hints and blocks calls to tools
+left at the MCP defaults, and Anthropic's directory policy requires
+``readOnlyHint``, ``destructiveHint`` and ``title``. The hints are
+necessary, not sufficient: ChatGPT can still refuse a call to an
+annotated tool with a client-side safety check this server cannot
+control (#919, docs/troubleshooting.md). These tests build a real FastMCP
 server with every tool group registered, experimental and intelligence
 included, and read the annotations through the in-memory client, so
 they check what a client receives on the wire.

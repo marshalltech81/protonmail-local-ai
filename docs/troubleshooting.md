@@ -1310,6 +1310,54 @@ extractor reads (`.eml`) is not logged.
 The caps bound what crafted mail can cost the single indexing worker,
 so they are not configurable. Ordinary mail does not reach them.
 
+## ChatGPT says a tool call was blocked by OpenAI
+
+ChatGPT reports "This tool call was blocked by OpenAI because we
+couldn't determine the safety status of the request". This is a check
+on OpenAI's side, made before the request is sent: the server never
+receives the call, and nothing in `.env`, the bearer token or the
+server changes the outcome. The check is intermittent, and it also
+blocks tools that declare the read-only safety hints (#919; background
+and sources in [Safety annotations](mcp-tools.md#safety-annotations)).
+
+1. Confirm the call never arrived. Look for the tool's completion line
+   around the time of the refusal:
+
+   ```bash
+   docker compose logs mcp-server --since 10m | grep 'tool=<tool name>'
+   ```
+
+   A call that reached the server logs a `tool=<name> outcome=...`
+   line on `mcp.timings` (see
+   [Reading a tool call's log line](#reading-a-tool-calls-log-line)),
+   and every tool except `list_folders` and `get_mailbox_status` also
+   logs a `tool=<name> {...} withheld=[...]` line when the call
+   starts. No
+   line for the blocked call means the block happened in ChatGPT. A
+   line with `outcome=error` is a server failure instead; follow the
+   cause on the WARNING or ERROR line before it.
+2. Optionally confirm the server serves the hints. From the repository
+   root, list the tools through a client; every tool should print
+   `True False False`:
+
+   ```bash
+   cd mcp-server && uv run python - <<'EOF'
+   import asyncio, pathlib
+   from fastmcp import Client
+   token = pathlib.Path("../.secrets/mcp_auth_token.txt").read_text().strip()
+   async def main():
+       async with Client("http://127.0.0.1:3000/mcp", auth=token) as c:
+           for t in await c.list_tools():
+               a = t.annotations
+               print(t.name, a.readOnlyHint, a.destructiveHint, a.openWorldHint)
+   asyncio.run(main())
+   EOF
+   ```
+
+3. Retry the identical call; it often succeeds on a later attempt.
+4. The ChatGPT workspace "Configure approvals" setting is reported to
+   reduce the blocks. There is no server-side fix.
+
 ## Claude Desktop doesn't see the tools
 
 1. Verify the MCP server is running: `docker compose ps`

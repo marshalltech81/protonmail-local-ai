@@ -99,9 +99,38 @@ human-readable `title` (#899):
 
 Each tool is read-only, non-destructive and closed-world. Without these
 hints the MCP defaults apply (`readOnlyHint: false`,
-`destructiveHint: true`, `openWorldHint: true`), and some clients block
-the call. ChatGPT did on 2026-10-06, refusing a `query_messages` call
-because "we couldn't determine the safety status of the request".
+`destructiveHint: true`, `openWorldHint: true`), which advertise a
+destructive, open-world tool, and OpenAI and Anthropic both require the
+hints (see below). ChatGPT refused a `query_messages` call on
+2026-10-06 because "we couldn't determine the safety status of the
+request", which led to #899.
+
+The hints are necessary but not sufficient. With all three set and
+served, ChatGPT refused a call with the same message again on
+2026-10-07 (#919), and the request never reached the server: there is
+no `mcp.timings` line for it. Others report the same message for tools
+that declare the hints
+([OpenAI community](https://community.openai.com/t/chatgpt-app-mcp-tool-calls-blocked-by-openai-safety-checks-before-reaching-mcp-server/1386059)),
+and report that it is intermittent, so an identical retry can succeed
+([1](https://community.openai.com/t/intermittent-chatgpt-mcp-tool-calls-blocked-by-openai-safety-checks-before-reaching-server-same-call-later-succeeds-testing-results/1386088),
+[2](https://github.com/totec448-spec/chat-on-steroids/issues/555)).
+OpenAI's [MCP guide](https://developers.openai.com/api/docs/guides/tools-connectors-mcp)
+says it has "built-in safeguards to help detect and block these
+threats", and its
+[Apps SDK reference](https://developers.openai.com/apps-sdk/reference)
+says the hints "only influence how ChatGPT or Codex frames the tool
+call to the user". The refusal is a nondeterministic check on OpenAI's
+side that this server cannot control; see
+[Troubleshooting](troubleshooting.md#chatgpt-says-a-tool-call-was-blocked-by-openai)
+for how to confirm it and what to do.
+
+Tool descriptions are not prefixed with "Read-only." (decided in #899,
+kept in #919). Tools that declare the read-only hint are blocked the
+same way elsewhere, and rewording tool descriptions is reported not to
+stop the block
+([3](https://github.com/miuuyy/codex-chatgpt-web/issues/745)), so the
+prefix would not fix it and would only lengthen every description
+(#818 is trimming them).
 
 - **Read-only.** The MCP specification defines `readOnlyHint` as "If
   true, the tool does not modify its environment." OpenAI's
