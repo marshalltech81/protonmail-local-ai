@@ -142,6 +142,17 @@ def _strip_yaml_comment(line: str) -> str:
     return line
 
 
+# A mapping key (plain or quoted, optionally a list item) and its colon.
+_YAML_KEY = re.compile(r"""^\s*(?:-\s+)?(?:"[^"]*"|'[^']*'|[^\s'"#][^:]*?)\s*:(?:\s|$)""")
+
+
+def _yaml_value(line: str) -> str:
+    """``line`` without its mapping key: Compose interpolates values,
+    single-quoted ones included, but never keys."""
+    m = _YAML_KEY.match(line)
+    return line[m.end() :] if m else line
+
+
 def _indent(line: str) -> int:
     return len(line) - len(line.lstrip())
 
@@ -165,7 +176,7 @@ def _compose_refs(files: list[Path]) -> set[str]:
                 env_indent = _indent(line)
             elif env_indent is not None and (m := _VALUE_LESS.match(line)):
                 names.add(m.group(1) or m.group(2))
-            names.update(_COMPOSE_REF.findall(line))
+            names.update(_COMPOSE_REF.findall(_yaml_value(line)))
     return names
 
 
@@ -198,7 +209,7 @@ def _compose_own_uses(files: list[Path]) -> set[str]:
             if m := _COMPOSE_PASS_THROUGH.match(line):
                 names.update(_COMPOSE_REF.findall(m.group(2) or ""))
                 continue
-            names.update(_COMPOSE_REF.findall(line))
+            names.update(_COMPOSE_REF.findall(_yaml_value(line)))
     return names
 
 
@@ -597,3 +608,23 @@ def test_literal_dollars_in_a_script_are_not_reads(tmp_path):
 def test_only_the_name_argument_is_collected(tmp_path, line, expected):
     (tmp_path / "m.py").write_text(f"import os\n{line}\n", encoding="utf-8")
     assert _python_env_reads([tmp_path]) == expected
+
+
+# --- Review round 4: mapping keys are not interpolated -----------------------
+
+
+def test_a_compose_mapping_key_is_not_a_read_but_a_single_quoted_value_is(tmp_path):
+    # ``docker compose config`` (v5) interpolates a single-quoted value
+    # (YAML quoting is gone before interpolation) but not a mapping key.
+    compose = tmp_path / "docker-compose.yml"
+    compose.write_text(
+        "services:\n"
+        "  a:\n"
+        "    command: 'echo $SINGLE_QUOTED_920'\n"
+        "    labels:\n"
+        "      $KEY_920: x\n"
+        '      "${QUOTED_KEY_920}": y\n',
+        encoding="utf-8",
+    )
+    assert _compose_refs([compose]) == {"SINGLE_QUOTED_920"}
+    assert _compose_own_uses([compose]) == {"SINGLE_QUOTED_920"}
