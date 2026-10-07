@@ -37,6 +37,7 @@ from ..lib.security import log_tool_call, safe_provider_exception_text
 from ..lib.sqlite import (
     PROMPT_EVIDENCE_CHUNKS_PER_THREAD,
     InvalidFilterError,
+    ScopeLabels,
     ThreadResult,
     validate_date_range,
 )
@@ -46,6 +47,7 @@ from .intelligence import (
     _LABEL_RE,
     _MAX_ASK_THREADS,
     _QUOTE_RE,
+    _SCOPE_LABELS,
     UNTRUSTED_CONTENT_NOTICE,
     EvidenceRef,
     PromptTooLargeError,
@@ -59,6 +61,7 @@ from .intelligence import (
     _evidence_budget,
     _evidence_prompt,
     _schema_reserve_chars,
+    _scope_block,
     _sort_labels,
     _sources_searched,
     _strip_code_fence,
@@ -148,6 +151,19 @@ _BRIEF_REPAIR_INSTRUCTION = (
 )
 
 _TASK = "Return the brief as the JSON object described in the instructions."
+
+# How each tool is to use the scope labels (#755, #895): stated in the
+# scope block, which only a scoped request's prompt carries.
+_BRIEF_SCOPE_RULE = _SCOPE_LABELS + (
+    "Build the brief from in-scope passages. Use context passages only to interpret "
+    "them or to report a later correction, and say in the entry when you do. If no "
+    "in-scope passage concerns the topic, the evidence is insufficient."
+)
+_CHECK_SCOPE_RULE = _SCOPE_LABELS + (
+    "Base the findings on in-scope passages. Use context passages only to interpret "
+    "them or to report a later change, and say in the finding when you do. If no "
+    "in-scope passage bears on the conclusion, the evidence is insufficient."
+)
 
 
 # --- Structured outputs (#808) ---------------------------------------------
@@ -712,6 +728,43 @@ def _finding_lines(findings: list[CheckedFinding]) -> list[str]:
     return lines
 
 
+def _scope_labels(
+    db,
+    evidenced: list[ThreadResult],
+    *,
+    folders: list[str] | None,
+    from_addr: str | None,
+    date_from: str | None,
+    date_to: str | None,
+    bounds: tuple[str | None, str | None],
+    rule: str,
+) -> tuple[ScopeLabels, str]:
+    """Label the evidenced threads' messages in scope or context, as
+    ask_mailbox does (#755, #895), and the scope block to put before the
+    task: the filters and ``rule`` when a filter was given or a thread
+    holds a message outside the default scope (filed in Trash), else ""
+    so the prompt is unchanged."""
+    scope = db.message_scope(
+        [r.thread_id for r in evidenced],
+        folders=folders,
+        from_addr=from_addr,
+        date_from=date_from,
+        date_to=date_to,
+    )
+    filtered = bool(from_addr or date_from or date_to or folders)
+    if not (filtered or any(r.thread_id not in scope.whole_threads for r in evidenced)):
+        return scope, ""
+    block = _scope_block(
+        from_addr=from_addr,
+        from_name=None,
+        participant=None,
+        bounds=bounds,
+        folders=folders,
+        rule=rule,
+    )
+    return scope, block
+
+
 def register_experimental_tools(
     server,
     db,
@@ -820,7 +873,7 @@ def register_experimental_tools(
         )
         max_threads = clamp_int(max_threads, default=5, minimum=1, maximum=_MAX_ASK_THREADS)
         try:
-            validate_date_range(date_from, date_to)
+            bounds = validate_date_range(date_from, date_to)
         except InvalidFilterError as e:
             log.warning("brief_issue rejected invalid %s", e.field_name)
             raise ToolError(f"Error: {e}") from e
@@ -867,8 +920,21 @@ def register_experimental_tools(
                 )
 
             # The same labelled evidence and shared budget as ask_mailbox,
-            # sized so the complete prompt fits the model window (#285).
-            task = f"Issue topic: {topic}\n\n{_TASK}"
+            # sized so the complete prompt fits the model window (#285),
+            # with its scope labels and block (#895).
+            with stage("scope_labels"):
+                scope, scope_text = await asyncio.to_thread(
+                    _scope_labels,
+                    db,
+                    evidenced,
+                    folders=folders,
+                    from_addr=from_addr,
+                    date_from=date_from,
+                    date_to=date_to,
+                    bounds=bounds,
+                    rule=_BRIEF_SCOPE_RULE,
+                )
+            task = f"{scope_text}Issue topic: {topic}\n\n{_TASK}"
             evidence_map: dict[str, EvidenceRef] = {}
             # Room for the system prompt Anthropic adds with the schema (#809).
             reserve = (
@@ -879,7 +945,13 @@ def register_experimental_tools(
             shown, evidence_chars = _evidence_budget(
                 prompt_budget, BRIEF_SYSTEM, evidenced, task, reserve_chars=reserve
             )
-            evidence, coverage = _build_evidence(shown, evidence_chars, evidence_map=evidence_map)
+            evidence, coverage = _build_evidence(
+                shown,
+                evidence_chars,
+                evidence_map=evidence_map,
+                scope=scope,
+                show_scope=bool(scope_text),
+            )
             coverage.threads_dropped = len(evidenced) - len(shown)
             _count_capped_threads(coverage, evidence_chars, len(shown))
             user_prompt = _evidence_prompt(shown, evidence, coverage) + task
@@ -1069,7 +1141,7 @@ def register_experimental_tools(
         if len(conclusion) > _MAX_CONCLUSION_CHARS:
             raise ToolError(f"Error: conclusion is longer than {_MAX_CONCLUSION_CHARS} characters")
         try:
-            validate_date_range(date_from, date_to)
+            bounds = validate_date_range(date_from, date_to)
         except InvalidFilterError as e:
             log.warning("check_conclusion rejected invalid %s", e.field_name)
             raise ToolError(f"Error: {e}") from e
@@ -1113,9 +1185,22 @@ def register_experimental_tools(
 
             # ask_mailbox's labelled evidence and shared budget, sized
             # so the complete prompt fits the model window (#285). The
-            # conclusion follows the mail blocks in its own escaped
-            # block, then the fixed task line.
-            task = _conclusion_block(conclusion) + _CHECK_TASK
+            # conclusion follows the mail blocks (after the scope block,
+            # when shown, #895) in its own escaped block, then the fixed
+            # task line.
+            with stage("scope_labels"):
+                scope, scope_text = await asyncio.to_thread(
+                    _scope_labels,
+                    db,
+                    evidenced,
+                    folders=folders,
+                    from_addr=from_addr,
+                    date_from=date_from,
+                    date_to=date_to,
+                    bounds=bounds,
+                    rule=_CHECK_SCOPE_RULE,
+                )
+            task = scope_text + _conclusion_block(conclusion) + _CHECK_TASK
             evidence_map: dict[str, EvidenceRef] = {}
             # Room for the system prompt Anthropic adds with the schema (#809).
             reserve = (
@@ -1126,7 +1211,13 @@ def register_experimental_tools(
             shown, evidence_chars = _evidence_budget(
                 prompt_budget, CHECK_SYSTEM, evidenced, task, reserve_chars=reserve
             )
-            evidence, coverage = _build_evidence(shown, evidence_chars, evidence_map=evidence_map)
+            evidence, coverage = _build_evidence(
+                shown,
+                evidence_chars,
+                evidence_map=evidence_map,
+                scope=scope,
+                show_scope=bool(scope_text),
+            )
             coverage.threads_dropped = len(evidenced) - len(shown)
             _count_capped_threads(coverage, evidence_chars, len(shown))
             user_prompt = _evidence_prompt(shown, evidence, coverage) + task

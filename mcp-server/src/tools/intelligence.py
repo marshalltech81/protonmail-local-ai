@@ -1095,10 +1095,29 @@ def _drop_unrequired_nulls(record: dict, schema: dict) -> dict:
     return {k: v for k, v in record.items() if v is not None or k in kept}
 
 
-# Appended to a prose answer the model stopped writing at max_tokens.
-_TRUNCATED_NOTICE = (
-    "\n\n[Answer cut off at the INFERENCE_MAX_TOKENS limit; raise it for a complete answer.]"
-)
+# Appended to a prose answer the model stopped writing early, chosen by
+# the stop reason so the notice names the setting that fixes it (#890):
+# a context-window stop is not helped by a larger output reserve, and
+# a lower window also covers text denser than CHARS_PER_TOKEN assumes.
+_TRUNCATED_NOTICES: dict[TruncationReason, str] = {
+    "max_tokens": (
+        "\n\n[Answer cut off at the INFERENCE_MAX_TOKENS limit; raise it for a complete answer.]"
+    ),
+    "context_window": (
+        "\n\n[Answer cut off at the model's context window; lower INFERENCE_CONTEXT_TOKENS "
+        "to the model's real window or below, or use a model with a larger one, for a "
+        "complete answer.]"
+    ),
+}
+_TRUNCATED_NOTICE_SUFFIXES = tuple(_TRUNCATED_NOTICES.values())
+
+
+def _without_truncated_notice(answer: str) -> str:
+    """``answer`` less its truncation notice, if it carries one."""
+    for notice in _TRUNCATED_NOTICE_SUFFIXES:
+        if answer.endswith(notice):
+            return answer.removesuffix(notice)
+    return answer
 
 
 def _strip_code_fence(text: str) -> str:
@@ -1524,7 +1543,7 @@ def _check_answer(answer: str, evidence_map: Mapping[str, EvidenceRef]) -> Answe
     Labels and quotes are checked, not meaning: a valid label or a
     verified quote does not prove the passage supports the claim.
     """
-    body = answer.removesuffix(_TRUNCATED_NOTICE)
+    body = _without_truncated_notice(answer)
     not_found = body.lstrip().startswith(_NOT_FOUND_PREFIX)
 
     quote_matches = list(_QUOTE_RE.finditer(body))
@@ -1754,6 +1773,9 @@ def _check_records(
        misattributed one is. At most ``_MAX_CHECKED_QUOTES`` values of
        at most ``_MAX_QUOTE_CHARS`` characters are searched per thread,
        each in each passage at most once; the rest are not_checked.
+    3. Scope (#895): a field whose valid labels all name ``context``
+       passages (``in_scope is False``) is reported as
+       ``context_only_fields``. Unlabelled passages never trip this.
 
     Records are numbered from ``first_index`` (their place in the tool's
     output). Labels and words are checked, not meaning.
@@ -1772,6 +1794,8 @@ def _check_records(
         uncited: list[str] = []
         misattributed: list[str] = []
         misattributed_in: dict[str, None] = {}
+        context_only: list[str] = []
+        context_labels: dict[str, None] = {}
         for name, value in record.items():
             # Provenance is the server's to write; a value the model put
             # under its name is replaced, so it is not checked.
@@ -1786,6 +1810,9 @@ def _check_records(
             )
             if status == "uncited":
                 uncited.append(name)
+            if valid and all(known[label].in_scope is False for label in valid):
+                context_only.append(name)
+                context_labels.update(dict.fromkeys(valid))
             value_check: Literal[
                 "verified", "misattributed", "unmatched", "uncited", "not_checked"
             ] = "not_checked"
@@ -1835,6 +1862,15 @@ def _check_records(
                     fields=misattributed,
                 )
             )
+        if context_only:
+            problems.append(
+                ExtractCitationProblem(
+                    record=index,
+                    kind="context_only_fields",
+                    labels=list(context_labels),
+                    fields=context_only,
+                )
+            )
     return ExtractionCheck(list(used), fields, problems)
 
 
@@ -1864,6 +1900,12 @@ def _extraction_lines(
         lines.append(
             f"Citation check: {n} field value(s) in {records} record(s) appear only in a "
             "passage their field does not cite."
+        )
+    records, n = total("context_only_fields")
+    if records:
+        lines.append(
+            f"Citation check: {n} field value(s) in {records} record(s) cite only context "
+            "passages, none from a message that meets the request's filters."
         )
     searched = [f for f in fields if f.value_check in ("verified", "misattributed", "unmatched")]
     if searched:
@@ -2112,7 +2154,7 @@ def _build_evidence(
     starts each thread's prompt after the last label of the one before,
     so a label names one passage across the whole call.
 
-    With ``scope`` as well (ask_mailbox, #755), each ``EvidenceRef``
+    With ``scope`` as well (#755, #895), each ``EvidenceRef``
     records whether its passage is in scope: its message is in
     ``scope.claimants`` (a thread-text passage: its thread is in
     ``scope.whole_threads``). With ``show_scope`` its labelled header
@@ -2334,13 +2376,23 @@ def _quoted_filter(value: str) -> str:
 
 
 # How the model is to use the scope labels (#755). Trusted text in the
-# scope block, so a prompt without labels does not carry it.
-_SCOPE_RULE = (
+# scope block, so a prompt without labels does not carry it. The first
+# sentence defines the labels; the rest is each tool's own task (#895).
+_SCOPE_LABELS = (
     'Each passage header says "in scope" when its message meets every filter above, '
     'or "context" for another message of a matching thread or a thread\'s combined '
-    "text. Answer from in-scope passages. Use context passages only to interpret them "
+    "text. "
+)
+_SCOPE_RULE = _SCOPE_LABELS + (
+    "Answer from in-scope passages. Use context passages only to interpret them "
     "or to report a later correction, and say when you do. If no in-scope passage "
     "answers the question, the excerpts do not answer it."
+)
+# extract_from_emails' rule (#895): the JSON reply has no room to "say
+# when you do", so data only context states is left out instead.
+_EXTRACT_SCOPE_RULE = _SCOPE_LABELS + (
+    "Extract values from in-scope passages. Use context passages only to interpret "
+    "them; data that only context passages state is outside the request, so leave it out."
 )
 
 
@@ -2351,9 +2403,11 @@ def _scope_block(
     participant: str | None,
     bounds: tuple[str | None, str | None],
     folders: list[str] | None,
+    rule: str = _SCOPE_RULE,
 ) -> str:
-    """The request's message-level filters and ``_SCOPE_RULE``, stated
-    for the model before the question (#755). The filter lines are
+    """The request's message-level filters and ``rule`` (ask_mailbox's
+    ``_SCOPE_RULE`` by default; each other tool passes its own, #895),
+    stated for the model before the question (#755). The filter lines are
     trusted text; the date bounds are the server's normalized UTC
     instants and folder names are the operator's own. Address and name
     values (``from_addr``, ``from_name``, ``participant``) can be copies
@@ -2386,7 +2440,7 @@ def _scope_block(
     else:
         excluded = ", ".join(f'"{f}"' for f in DEFAULT_EXCLUDED_FOLDERS)
         lines.append(f"- folders: every folder except {excluded}")
-    lines.append(_SCOPE_RULE)
+    lines.append(rule)
     if fenced:
         lines.append("Filter values (as the caller gave them; possibly copied from mail):")
         lines.append(_untrusted_email_block("\n".join(fenced)))
@@ -2802,7 +2856,7 @@ def register_intelligence_tools(
             cuts.append(_ReplyCut(e.reason, system + user))
             if not e.partial.strip():
                 raise
-            return e.partial + _TRUNCATED_NOTICE
+            return e.partial + _TRUNCATED_NOTICES[e.reason]
 
     async def complete_checked(
         tool: str,
@@ -2822,7 +2876,7 @@ def register_intelligence_tools(
         even when the call raises."""
         answer = await llm_complete_prose(system, user_prompt, cuts)
         check = _check_answer(answer, evidence_map)
-        repair_attempted = bool(check.problems) and not answer.endswith(_TRUNCATED_NOTICE)
+        repair_attempted = bool(check.problems) and not answer.endswith(_TRUNCATED_NOTICE_SUFFIXES)
         if repair_attempted:
             reason = _repair_reason(check.problems)
             answer = await llm_complete_prose(
@@ -3559,7 +3613,7 @@ def register_intelligence_tools(
             )
         # Reject a bad date range before any provider or retrieval work.
         try:
-            validate_date_range(date_from, date_to)
+            bounds = validate_date_range(date_from, date_to)
         except InvalidFilterError as e:
             log.warning("extract_from_emails rejected invalid %s", e.field_name)
             raise ToolError(f"Error: {e}") from e
@@ -3675,10 +3729,39 @@ def register_intelligence_tools(
             window_truncated = 0
             largest_prompt_tokens = 0
 
+            # Label each retrieved message in scope or context, as
+            # ask_mailbox does (#755, #895). A thread's prompt states the
+            # filters and the rule, and its headers show the labels, when
+            # a filter was given or the thread holds a message outside the
+            # default scope (filed in Trash); otherwise it is unchanged.
+            with stage("scope_labels"):
+                scope = await asyncio.to_thread(
+                    db.message_scope,
+                    [r.thread_id for r in results],
+                    folders=folders,
+                    from_addr=from_addr,
+                    participant=participant,
+                    date_from=date_from,
+                    date_to=date_to,
+                )
+            filtered = bool(from_addr or participant or date_from or date_to or folders)
+            scope_text = _scope_block(
+                from_addr=from_addr,
+                from_name=from_name,
+                participant=participant,
+                bounds=bounds,
+                folders=folders,
+                rule=_EXTRACT_SCOPE_RULE,
+            )
+
+            def shows_scope(thread: ThreadResult) -> bool:
+                return filtered or thread.thread_id not in scope.whole_threads
+
             def render(thread: ThreadResult, body: str) -> str:
                 # The query is the user's task: it says which of the
                 # records in the passage are wanted (#315). It stays
-                # outside the untrusted block with the schema.
+                # outside the untrusted block with the schema, and the
+                # scope block (when shown) follows the block.
                 return (
                     f"Request: {query}\n\n"
                     f"Extract data relevant to the request, matching this schema:\n"
@@ -3691,6 +3774,7 @@ def register_intelligence_tools(
                         f"Body:\n{body}"
                     )
                     + "\n\n"
+                    + (scope_text if shows_scope(thread) else "")
                     + (
                         'Return a JSON object {"records": [...]} holding one record per item '
                         f'of relevant data, each matching the schema with its "{_EVIDENCE_FIELD}" '
@@ -3728,7 +3812,12 @@ def register_intelligence_tools(
                 # records are checked against its own passages only.
                 known: dict[str, EvidenceRef] = {}
                 [body], coverage = _build_evidence(
-                    [thread], evidence_chars, evidence_map=known, first_label=next_label
+                    [thread],
+                    evidence_chars,
+                    evidence_map=known,
+                    first_label=next_label,
+                    scope=scope,
+                    show_scope=shows_scope(thread),
                 )
                 next_label = 1 + max((int(label[1:]) for label in known), default=next_label - 1)
                 evidence_map.update(known)

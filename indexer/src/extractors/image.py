@@ -10,7 +10,9 @@ landscape EXIF metadata even when shot portrait, and unrotated input
 hurts OCR accuracy materially). A multipage TIFF (a scanned invoice or
 fax) is OCR'd page by page, up to ``max_ocr_pages``, like a scanned PDF;
 other formats' extra frames are animation, not pages, and only the
-first is read. Anything else — language hints, preprocessing — is left
+first is read. When OCR stops at the cap, one probe seek finds whether
+a frame was left unread; if so, a rate-limited WARNING says so and the
+image is counted for the attachments aggregate (#885). Anything else — language hints, preprocessing — is left
 as a future tuning concern.
 
 Decompression-bomb defense: ``INDEXER_ATTACHMENT_MAX_BYTES`` caps the
@@ -37,12 +39,17 @@ security updates do not cover (owner accepted, 2026-10-04).
 from __future__ import annotations
 
 import io
+import logging
 import warnings
 from collections.abc import Callable
 
 import pillow_heif
 import pytesseract
 from PIL import Image, ImageOps
+
+from . import note_ocr_capped_image, warn_rate_limited
+
+log = logging.getLogger("indexer.extractor.image")
 
 # HEIF opener only (pillow-heif 1.x has no AVIF plugin); skip decoding a
 # photo's thumbnails, depth maps and auxiliary images, which OCR never
@@ -94,7 +101,10 @@ def extract(
             if on_progress is not None:
                 on_progress()
             page += 1
-            if image.format != "TIFF" or (max_ocr_pages > 0 and page >= max_ocr_pages):
+            if image.format != "TIFF":
+                break
+            if max_ocr_pages > 0 and page >= max_ocr_pages:
+                _note_if_capped(image, page)
                 break
             # Seek page by page rather than read ``n_frames``: that walks
             # every image directory in the file before any cap applies.
@@ -103,3 +113,35 @@ def extract(
             except EOFError:
                 break
     return "\n\n".join(texts), "image-ocr"
+
+
+def _note_if_capped(image: Image.Image, pages_read: int) -> None:
+    """Log and count a TIFF whose OCR stopped at the cap with a frame
+    left unread (#885).
+
+    One seek past the cap is the bound: counting every frame would walk
+    the whole frame chain, which the loop above avoids. ``EOFError``
+    means the cap read every frame. Any other error (a corrupt frame
+    directory) cannot change the result, which is the frames already
+    read, so it is logged by type and the image counted as capped.
+    ``MemoryError`` and ``RecursionError`` propagate: the dispatcher
+    treats them as host pressure."""
+    try:
+        image.seek(pages_read)
+    except EOFError:
+        return
+    except MemoryError, RecursionError:
+        raise
+    except Exception as e:
+        note_ocr_capped_image()
+        warn_rate_limited(
+            log,
+            "image OCR capped at %d frames; the next frame could not be read (%s)",
+            pages_read,
+            type(e).__name__,
+        )
+        return
+    note_ocr_capped_image()
+    warn_rate_limited(
+        log, "image OCR capped at %d of at least %d frames", pages_read, pages_read + 1
+    )

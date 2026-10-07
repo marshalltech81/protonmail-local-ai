@@ -85,8 +85,8 @@ class AttachmentOutcomeCounts:
     log their own rate-limited WARNING. ``drain`` also reports the
     extractors' per-attempt counts (``extractors.drain_extractor_counts``:
     ``pdf_pages_failed``, ``pdf_pages_unrecovered``, ``ocr_capped_pdfs``,
-    ``ocr_pages_skipped`` and
-    ``warnings_suppressed``). Counts
+    ``ocr_pages_skipped``, ``ocr_capped_images``, ``parser_caps_messages``
+    and ``warnings_suppressed``). Counts
     only: no filename, type or text.
     """
 
@@ -123,6 +123,7 @@ _SUMMARY_FIELDS = (
     "pdf_pages_unrecovered",
     "ocr_capped_pdfs",
     "ocr_pages_skipped",
+    "ocr_capped_images",
     "parser_caps_messages",
     "warnings_suppressed",
 )
@@ -139,6 +140,7 @@ _DEGRADED_FIELDS = (
     "pdf_pages_unrecovered",
     "ocr_capped_pdfs",
     "ocr_pages_skipped",
+    "ocr_capped_images",
     "parser_caps_messages",
     "warnings_suppressed",
 )

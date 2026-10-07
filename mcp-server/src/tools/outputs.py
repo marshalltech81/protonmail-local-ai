@@ -852,19 +852,23 @@ class ExtractedField(_Output):
 
 class ExtractCitationProblem(_Output):
     record: int = Field(description="0-based index of the record in records.")
-    kind: Literal["unknown_labels", "uncited_fields", "misattributed_values"] = Field(
+    kind: Literal[
+        "unknown_labels", "uncited_fields", "misattributed_values", "context_only_fields"
+    ] = Field(
         description="unknown_labels: the record cites labels no passage supplied for its "
         "thread has. uncited_fields: fields with a value whose _evidence entry cites no "
         "label. misattributed_values: string values found only in a passage their field "
-        "does not cite."
+        "does not cite. context_only_fields: fields whose cited passages are all context, "
+        "none in scope (the citation's scope)."
     )
     labels: list[str] = Field(
         description="The unknown labels; for misattributed_values, the labels of the passages "
-        "the values were found in. Empty otherwise."
+        "the values were found in; for context_only_fields, the context labels those fields "
+        "cite. Empty otherwise."
     )
     fields: list[str] = Field(
-        description="The fields concerned (uncited_fields, misattributed_values); empty for "
-        "unknown_labels."
+        description="The fields concerned (uncited_fields, misattributed_values, "
+        "context_only_fields); empty for unknown_labels."
     )
 
 

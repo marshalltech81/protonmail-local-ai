@@ -1186,8 +1186,25 @@ say so; if no in-scope passage answers the question, the excerpts do
 not answer it. With no filter and every retrieved message in the
 default scope, every passage is in scope and the prompt is unchanged.
 Each citation's `scope` is `in_scope` or `context` either way, and
-`get_evidence` returns the same label per chunk. `extract_from_emails`,
-`brief_issue` and `check_conclusion` do not label their passages.
+`get_evidence` returns the same label per chunk.
+
+`extract_from_emails`, `brief_issue` and `check_conclusion` label their
+passages the same way
+([#895](https://github.com/marshalltech81/protonmail-local-ai/issues/895)),
+with the same scope block (fenced the same way) and the same condition
+for showing it; `extract_from_emails` decides per thread, since each
+thread is its own prompt. The block sits after the mail block and
+before the reply format in `extract_from_emails`, before the topic in
+`brief_issue` and before the conclusion block in `check_conclusion`.
+Each tool's rule says how its task uses the labels:
+`extract_from_emails` takes values from in-scope passages and leaves
+out data that only context passages state; `brief_issue` and
+`check_conclusion` build the brief or findings from in-scope passages,
+use context only to interpret them or report a later correction or
+change, and say so in the entry or finding. With no scope applying,
+their prompts are unchanged as well. Citations carry `scope`, and an
+extracted field whose cited passages are all context gets a
+`context_only_fields` problem (see `extract_from_emails`).
 
 How the ambiguous cases are labelled:
 
@@ -1340,9 +1357,15 @@ flag its first half as uncited. A passage whose text imitates a header (`[E7 | f
 for a label comes from the server's own map, not from text the model
 read; a label that exists only in mail text is reported as unknown.
 
-An answer the model stopped writing at `INFERENCE_MAX_TOKENS` is
-returned with a closing `[Answer cut off …]` notice rather than as if
-complete; `summarize_thread` does the same.
+An answer the model stopped writing early is returned with a closing
+`[Answer cut off …]` notice rather than as if complete;
+`summarize_thread` does the same. The notice names the setting to
+change: `INFERENCE_MAX_TOKENS` when the reply reached it,
+`INFERENCE_CONTEXT_TOKENS` (lower it to the model's real window or
+below, or use a model with a larger window) when the
+model's own context window filled first (Anthropic's
+`model_context_window_exceeded` stop). A reply cut before any text is
+an error with the same distinction.
 
 ### `summarize_thread`
 Summarize a thread in different styles.
@@ -1528,6 +1551,12 @@ here):
   of at most 1,000 characters are searched per thread, each in each of
   the thread's passages at most once; the rest are `not_checked`, as
   are values that are not strings.
+- **Scope.** When the thread's passages are labelled
+  ([Evidence scope](#evidence-scope-in-scope-or-context)), a field
+  whose valid labels all name `context` passages gets a
+  `context_only_fields` problem listing those fields and labels: its
+  value rests on no message that meets the request's filters. The
+  content line says so in fixed text with counts.
 
 There is no repair call: each thread still drives exactly one model
 call, and a record with problems is kept and reported. Only counts are
@@ -1540,7 +1569,7 @@ Structured output:
 | `records` | The records, as in the first content item, each with `_source_thread`, `_date` and `_evidence` |
 | `citations` | One entry per valid label any record cites, in first-cited order, with the `ask_mailbox` citation fields |
 | `fields` | One entry per field with a value: `record` (index into `records`), `field`, `labels`, `status` (`cited`, `uncited`, `invalid`), `value_check` (`verified`, `misattributed`, `unmatched`, `uncited`, `not_checked`) and `found_in` |
-| `citation_problems` | `[]` when every field cites a supplied passage, else entries `{record, kind, labels, fields}`, `kind` one of `unknown_labels`, `uncited_fields`, `misattributed_values` |
+| `citation_problems` | `[]` when every field cites a supplied passage, else entries `{record, kind, labels, fields}`, `kind` one of `unknown_labels`, `uncited_fields`, `misattributed_values`, `context_only_fields` |
 | `notice` | The incomplete-extraction or evidence note in `content`, or `null` |
 | `resolved_from_addr`, `from_name_matches` | The `from_name` lookup: the address filtered by and how many senders matched, up to 10 ([Resolving `from_name`](#search_emails)); `null` without `from_name` |
 | `threads` | The threads searched, best match first |

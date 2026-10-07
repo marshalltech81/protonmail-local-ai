@@ -886,12 +886,13 @@ outside it, and a thread whose span straddles a short range with no
 message inside it still qualifies. Each passage carries its own
 message's `sent_at` and `occurred_at` (on `get_evidence` chunks and
 on citations), so a model can see which passages fall outside the
-range. `ask_mailbox` and `get_evidence` also label each passage
+range. `ask_mailbox`, `get_evidence`, `extract_from_emails`,
+`brief_issue` and `check_conclusion` also label each passage
 `in scope` or `context` by whether its own message's effective time
-(and sender, participant and folder) meets every filter (#755,
-`docs/mcp-tools.md`, "Evidence scope"); `ask_mailbox` states the
-filters in its prompt and asks the model to answer from in-scope
-passages. The attachment-name bias that leads a thread's evidence with
+(and sender, participant and folder) meets every filter (#755, #895,
+`docs/mcp-tools.md`, "Evidence scope"); the prompt-building tools
+state the filters in their prompt and ask the model to work from
+in-scope passages. The attachment-name bias that leads a thread's evidence with
 the file the query names is not date-scoped either: it orders
 passages within a qualifying thread. Ranking lanes are not date-scoped
 per passage: a passage outside the range can still lift its thread's
@@ -1078,7 +1079,8 @@ extraction is recorded as `failed`. A multipage TIFF (a scanned
 invoice or fax) is OCR'd page by page; other image formats' extra
 frames are animation and only the first is read.
 `INDEXER_OCR_MAX_PAGES` (default 20) caps the pages OCR'd per
-document of either kind.
+document of either kind; a document the cap cuts short logs a WARNING
+and is counted in the attachments line (`docs/troubleshooting.md`).
 
 OCR assumes English. The indexer image installs only Tesseract's
 English language data (`eng`, plus `osd`), and the extractors pass no
