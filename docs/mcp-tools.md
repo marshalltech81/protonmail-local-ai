@@ -1160,17 +1160,24 @@ is treated as absent, and a padded one is stripped, here and in
 
 **Late resolutions in long threads
 ([#974](https://github.com/marshalltech81/protonmail-local-ai/issues/974)).**
-A thread's passages are chosen by similarity to the question (at most
-six, then cut to the per-thread prompt budget), not by position, with
-two exceptions: chunks of attachments whose filename or MIME type the
-question matches come first, and a thread with no indexed chunks shows
-its indexed text instead. So in a long thread they can stop before a
-late resolution: the message that settles the matter is often worded
+Each thread gives at most six passages (`PROMPT_EVIDENCE_CHUNKS_PER_THREAD`),
+then cut to the per-thread prompt budget, ordered by similarity to the
+question, not by position. When the question matches one of the
+thread's attachments by filename or MIME type, that attachment's
+chunks come first, then the thread's other attachment chunks, then
+body chunks, each group by similarity, so attachments can fill every
+slot before a body message. A thread with no indexed chunks shows its
+indexed text instead. So in a long thread the passages can stop before
+a late resolution: the message that settles the matter is often worded
 nothing like the question. The `ask_mailbox` and `get_evidence`
 descriptions tell the calling model so: for status or closure, re-ask
 about the resolution without the attachment's filename (which would
 pull the same attachment passages back in), or read the thread's later
-messages with `get_thread` or `get_message`.
+messages with `get_thread` or `get_message`. `get_evidence` orders
+passages the same way, with six per thread mailbox-wide and `limit`
+with `thread_id`, but has no indexed-text fallback: its description
+says a chunkless thread is listed with an empty `chunks` list (with
+`max_threads`) or left out, to be read with `get_thread`.
 
 `max_threads` is clamped to `[1, 10]` at the tool boundary so an
 inflated caller-supplied value cannot expand into an oversized prompt
@@ -1516,7 +1523,8 @@ has no folder filter and always leaves out Trash, so it cannot
 reconcile a run scoped with `folders` or one that includes Trash;
 reconcile those by hand.
 The tool description says only that the top `limit` threads are
-searched and points here; the steps are not sent to clients:
+searched, points here, and asks the model to tell the user how much
+mail a population run will read; the steps are not sent to clients:
 
 1. Before the first call, say the date windows, the most attachment
    previews and the most threads the run will read:
@@ -1529,7 +1537,10 @@ searched and points here; the steps are not sent to clients:
    20, would look like a window under the cap). There is no
    pagination, so split the period into `date_from` / `date_to`
    windows narrow enough that each returns fewer than 50 results,
-   and narrow any window that returns 50.
+   and narrow any window that returns 50. If one message carries 50
+   or more matching attachments, every window holding it stays at the
+   cap: report the population as truncated rather than narrowing
+   further.
 3. Run `extract_from_emails` per window, with `participant` set to
    the vendor's address (the tool has no `from_addr`) and a schema
    that declares its own `invoice_date` and `invoice_number`. The

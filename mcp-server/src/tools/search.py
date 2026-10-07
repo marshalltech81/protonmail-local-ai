@@ -473,13 +473,18 @@ def register_search_tools(
         retrieved, in the same order. A smaller limit keeps the first
         limit chunks of it.
 
-        A thread's passages are chosen by similarity to the question
-        (attachments whose filename or MIME type the question matches
-        come first, and a thread with no passages shows its indexed
-        text), so they can stop before a late resolution in a long
-        thread. For status or closure, re-ask about the resolution
-        without the attachment's filename, or read the thread's later
-        messages with get_thread or get_message.
+        Each thread's passages are ordered by similarity to the query;
+        when the query matches one of its attachments' filename or MIME
+        type, that attachment comes first, then its other attachments,
+        then the body, each by similarity, and attachments can then
+        fill every slot (six per thread mailbox-wide, limit with
+        thread_id) before a body message. A thread with no passages is
+        listed with an empty chunks list (with max_threads) or left
+        out; read it with get_thread. So passages can stop before a
+        late resolution in a long thread: for status or closure,
+        re-ask about the resolution without the attachment's filename,
+        or read the thread's later messages with get_thread or
+        get_message.
 
         Args:
             query: The question or topic to gather evidence for.
