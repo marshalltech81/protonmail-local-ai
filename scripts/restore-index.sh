@@ -102,7 +102,8 @@ fi
 # The structural checks below cannot tell a crafted index from a real
 # one, so the path to the backup must be one no other account can
 # change: the file and every directory above it owned by you (or root),
-# with no group or other write bit unless the directory is sticky.
+# with no group or other write bit unless the directory is sticky, and
+# every symbolic link among the directory components yours (or root's).
 # Otherwise another account could swap the file before it is opened.
 # ACL entries count too: they are checked before the mode bits.
 # acl_grants PATH succeeds when PATH carries an entry that gives access:
@@ -123,21 +124,64 @@ if [[ -n "$(find "$BACKUP" -maxdepth 0 \( -perm -g=w -o -perm -o=w -o \( ! -user
     acl_grants "$BACKUP"; then
     die "another account can replace $BACKUP; it must be yours and writable only by you"
 fi
-ancestor=$(cd -- "$(dirname -- "$BACKUP")" && pwd -P)
+# replaceable_dir DIR succeeds when another account can rename or remove
+# entries in DIR: a group or other write bit without the sticky bit, an
+# owner other than you or root, or an ACL entry that grants access.
+replaceable_dir() {
+    [[ -n "$(find "$1" -maxdepth 0 \( \( \( -perm -g=w -o -perm -o=w \) ! -perm -1000 \) -o \( ! -user 0 ! -user "$me" \) \) -print)" ]] ||
+        acl_grants "$1"
+}
+# The open below takes the path as given, so each directory component
+# is checked as written, before the resolved directories: a symbolic
+# link among them can be repointed by its owner (in a sticky directory
+# too) or replaced by any account that can write the directory holding
+# it, whether or not that directory is on the resolved path.
+# Split with parameter expansion, not dirname or read: both are
+# line-oriented and would drop the components after a newline.
+dir="${BACKUP%/*}"
+[[ "$BACKUP" == */* ]] || dir=.
+prefix=""
+[[ "$BACKUP" != /* ]] || prefix=/
+rest="$dir"
+while [[ -n "$rest" ]]; do
+    part="${rest%%/*}"
+    if [[ "$rest" == */* ]]; then
+        rest="${rest#*/}"
+    else
+        rest=""
+    fi
+    [[ -n "$part" ]] || continue
+    prefix="$prefix$part"
+    if [[ -L "$prefix" && -n "$(find "$prefix" -maxdepth 0 ! -user 0 ! -user "$me" -print)" ]]; then
+        die "another account can replace $BACKUP through $prefix, a symbolic link it owns; pass a path whose links are yours"
+    fi
+    # The x keeps a newline that ends the directory's own name, which
+    # the substitution would otherwise strip with pwd's.
+    real=$(cd -- "$prefix" && pwd -P && printf x) || die "cannot enter $prefix"
+    real="${real%$'\n'x}"
+    if replaceable_dir "$real"; then
+        die "another account can replace $BACKUP through $prefix; keep backups in a directory only you can write, as make backup-index creates"
+    fi
+    prefix="$prefix/"
+done
+ancestor=$(cd -- "$dir" && pwd -P && printf x) || die "cannot enter $dir"
+ancestor="${ancestor%$'\n'x}"
 while :; do
-    if [[ -n "$(find "$ancestor" -maxdepth 0 \( \( \( -perm -g=w -o -perm -o=w \) ! -perm -1000 \) -o \( ! -user 0 ! -user "$me" \) \) -print)" ]] ||
-        acl_grants "$ancestor"; then
+    if replaceable_dir "$ancestor"; then
         die "another account can replace $BACKUP through $ancestor; keep backups in a directory only you can write, as make backup-index creates"
     fi
     [[ "$ancestor" != / ]] || break
-    ancestor=$(dirname -- "$ancestor")
+    ancestor="${ancestor%/*}"
+    [[ -n "$ancestor" ]] || ancestor=/
 done
 # Open the backup once, now, and stream that descriptor later: the file
 # checked here is the one restored, whatever is put at its path while the
 # prompt waits or the services stop.
 exec 3<"$BACKUP"
 [[ -f /dev/fd/3 ]] || die "$BACKUP is not a regular file"
-# Checked before anything stops or changes.
+# Bounds the wait for the indexer's startup lines and, after a failed
+# restore container, for that container to exit. Checked before anything
+# stops or changes.
 wait_secs="${RESTORE_WAIT_SECONDS:-900}"
 [[ "$wait_secs" =~ ^[0-9]{1,6}$ ]] || die "RESTORE_WAIT_SECONDS must be a whole number of seconds"
 # Base 10: arithmetic would read a leading zero as octal (08 fails).
@@ -176,8 +220,13 @@ trap on_exit EXIT
 
 docker stop mcp-server indexer
 
+# The container is named so the script can tell whether it is gone: a
+# failing docker run does not prove its process stopped (the client can
+# detach from a container that keeps running), and --rm removes it only
+# once it exits.
+container="restore-index-$$"
 rc=0
-docker run --rm -i --network none --read-only --tmpfs /tmp --cap-drop ALL \
+docker run --rm -i --name "$container" --network none --read-only --tmpfs /tmp --cap-drop ALL \
     --security-opt no-new-privileges:true --user 1002:1002 \
     --env SQLITE_PATH=/data/mail.db --volume "$volume:/data" \
     "$image" python -c "$RESTORE_PY" <&3 || rc=$?
@@ -185,9 +234,22 @@ if ((rc == 3)); then
     die "the index was not replaced (the reason is above); the previous index is unchanged"
 elif ((rc != 0)); then
     # Killed or failed at a point the script cannot know (exit 3 is the
-    # only "unchanged" answer), so the swap may have happened: start only
-    # the indexer, which migrates or refuses whichever index is there.
+    # only "unchanged" answer), so the swap may have happened. Wait
+    # (bounded) until the container is gone, so the indexer cannot open
+    # the index while that process still checkpoints or renames it, then
+    # start only the indexer, which migrates or refuses whichever index
+    # is there. If it is still running after the bound, start nothing.
     restored=1
+    deadline=$((SECONDS + wait_secs))
+    while :; do
+        running=$(docker ps -q --filter "name=^${container}$") ||
+            die "cannot tell whether the restore container $container is still running, so nothing was started; wait for it (docker wait $container), then run make up and check docker compose logs indexer"
+        [[ -n "$running" ]] || break
+        if ((SECONDS >= deadline)); then
+            die "the restore container $container is still running after ${wait_secs}s, so nothing was started; wait for it (docker wait $container), then run make up and check docker compose logs indexer"
+        fi
+        sleep 1
+    done
     docker start indexer
     die "the restore container failed (exit $rc), so the index may or may not have been replaced; the indexer was started, check docker compose logs indexer"
 fi

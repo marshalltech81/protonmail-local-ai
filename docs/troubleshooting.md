@@ -891,10 +891,16 @@ helper needs nothing from the checkout, so the copy taken before the
 checkout works with the older release (its own `make restore-index`
 target is the same script where the release has one).
 
-If the one-off restore container is killed or Docker fails part way,
-the script cannot tell whether the copy was swapped in: it starts only
-the indexer and leaves `mcp-server` stopped. Check the indexer log, then
-run `make up`.
+If the one-off restore container (`restore-index-<pid>`) is killed or
+Docker fails part way, the script cannot tell whether the copy was
+swapped in. A failed `docker run` does not prove the container's
+process stopped (the client can detach from a container that keeps
+running), so the script first waits up to `RESTORE_WAIT_SECONDS` for
+the container to be gone, then starts only the indexer and leaves
+`mcp-server` stopped. Check the indexer log, then run `make up`. If the
+container is still running after the wait, nothing is started: wait
+for it (`docker wait restore-index-<pid>`, the name is in the
+message), then run `make up` and check the indexer log.
 
 The backup file and every directory above it must be yours (or
 root's) and writable only by you, with no ACL entry that gives another
@@ -902,8 +908,11 @@ account access (on macOS, deny-only entries such as the one on home
 directories are fine), unless the directory is sticky like `/tmp`, and
 the file must not be a symbolic link: another account
 could otherwise swap in a crafted index, which the integrity and schema
-checks cannot tell apart. Directories made by `make backup-index`
-already qualify.
+checks cannot tell apart. The directories are checked both as written
+in `BACKUP` and after resolving symbolic links, and a symbolic link
+among the directory components must be yours (or root's, like `/tmp`
+on macOS): its owner could otherwise repoint it between the checks and
+the open. Directories made by `make backup-index` already qualify.
 
 ## Embedder identity mismatch
 

@@ -60,7 +60,14 @@ set -Eeuo pipefail
 printf '%s\n' "$*" >>"$FAKE_DOCKER_LOG"
 case "$1" in
 ps)
-    if [[ "$FAKE_RUNNING" == 1 ]]; then
+    # docker ps -q --filter name=^restore-index-PID$: the one-off restore
+    # container is still running for the first FAKE_RUN_LINGER polls.
+    if [[ "$*" == *"--filter name=^restore-index-"* ]]; then
+        [[ "$*" == "ps -q --filter name=^$(cat "$FAKE_RUN_NAME_FILE")\$" ]]
+        if (($(grep -c '^ps -q --filter name=^restore-index-' "$FAKE_DOCKER_LOG") <= ${FAKE_RUN_LINGER:-0})); then
+            printf 'fedcba987654\n'
+        fi
+    elif [[ "$FAKE_RUNNING" == 1 ]]; then
         printf '0123456789ab\n'
     fi
     ;;
@@ -102,6 +109,9 @@ run)
     # docker run FLAGS... sha256:fakeindexerimage python -c CODE
     [[ "$*" == *" --network none "* && "$*" == *" --read-only "* && "$*" == *" --cap-drop ALL "* ]]
     [[ "$*" == *" --volume fake_sqlite-volume:/data "* && "$*" == *" sha256:fakeindexerimage python -c "* ]]
+    # The container is named, so the script can tell whether it is gone.
+    [[ "$*" =~ \ --name\ (restore-index-[0-9]+)\  ]]
+    printf '%s\n' "${BASH_REMATCH[1]}" >"$FAKE_RUN_NAME_FILE"
     # FAKE_RUN_EXIT: the container is killed (or docker fails) at a point
     # the script cannot know.
     if [[ -n "${FAKE_RUN_EXIT:-}" ]]; then
@@ -200,6 +210,7 @@ run_backup() {
 run_restore() {
     printf '%s\n' "$2" | PATH="$WORK/bin:$PATH" FAKE_DOCKER_LOG="$WORK/docker.log" \
         FAKE_DATA="$WORK/data" FAKE_STUB="$WORK/stub" FAKE_LOGS="${FAKE_LOGS:-}" \
+        FAKE_RUN_NAME_FILE="$WORK/run-name" \
         FAKE_OLD_LOGS="${FAKE_OLD_LOGS:-}" FAKE_STARTED_AT=2026-10-07T12:00:01.5Z \
         RESTORE_WAIT_SECONDS="${RESTORE_WAIT_SECONDS:-5}" BACKUP="$1" \
         bash "$REPO/scripts/restore-index.sh" >"$WORK/out" 2>&1 && STATUS=0 || STATUS=$?
@@ -752,6 +763,100 @@ restore_refuses_a_replaceable_backup_path() {
     rm -rf "${WORK:?}/shared"
 }
 
+restore_refuses_a_symlinked_directory_another_account_can_replace() {
+    reset
+    rm -rf "${WORK:?}/open" "${WORK:?}/real"
+    make_db "$WORK/data/mail.db"
+    mkdir -m 700 "$WORK/real"
+    make_db "$WORK/real/backup.db"
+    # The link is yours, but it sits in a directory another account can
+    # write (group-writable, no sticky bit) that is not on the resolved
+    # path, so that account can replace the link before the open.
+    mkdir -m 700 "$WORK/open"
+    chmod 775 "$WORK/open"
+    ln -s "$WORK/real" "$WORK/open/link"
+    run_restore "$WORK/open/link/backup.db" yes
+    [[ "$STATUS" -ne 0 ]]
+    grep -F "another account can replace $WORK/open/link/backup.db through $WORK/open;" "$WORK/out" >/dev/null
+    if grep -E '^(stop|run|start)' "$WORK/docker.log" >/dev/null; then
+        return 1
+    fi
+    # A directory above the link that another account can write is
+    # refused too, even when the link's own directory is private.
+    reset
+    make_db "$WORK/data/mail.db"
+    chmod 700 "$WORK/open"
+    mkdir -m 700 "$WORK/open/private"
+    mv "$WORK/open/link" "$WORK/open/private/link"
+    chmod 775 "$WORK/open"
+    run_restore "$WORK/open/private/link/backup.db" yes
+    [[ "$STATUS" -ne 0 ]]
+    grep -F "another account can replace $WORK/open/private/link/backup.db through $WORK/open" "$WORK/out" >/dev/null
+    if grep -E '^(stop|run|start)' "$WORK/docker.log" >/dev/null; then
+        return 1
+    fi
+    # Your link in a sticky directory (like /tmp) is fine.
+    reset
+    make_db "$WORK/data/mail.db"
+    chmod 1775 "$WORK/open"
+    FAKE_LOGS="$READY_LOGS" run_restore "$WORK/open/private/link/backup.db" yes
+    [[ "$STATUS" -eq 0 ]]
+    # A newline in a component above the link must not end the walk
+    # early (a line-oriented split would check only the first line).
+    reset
+    make_db "$WORK/data/mail.db"
+    chmod 700 "$WORK/open"
+    mkdir -m 700 "$WORK/a"$'\n'"b"
+    mv "$WORK/open" "$WORK/a"$'\n'"b/open"
+    chmod 775 "$WORK/a"$'\n'"b/open"
+    run_restore "$WORK/a"$'\n'"b/open/private/link/backup.db" yes
+    [[ "$STATUS" -ne 0 ]]
+    grep -F 'another account can replace' "$WORK/out" >/dev/null
+    grep -F 'b/open; keep backups in a directory only you can write' "$WORK/out" >/dev/null
+    if grep -E '^(stop|run|start)' "$WORK/docker.log" >/dev/null; then
+        return 1
+    fi
+    rm -rf "${WORK:?}/a"$'\n'"b"
+}
+
+restore_refuses_a_symlinked_directory_owned_by_another_account() {
+    reset
+    rm -rf "${WORK:?}/holder" "${WORK:?}/real"
+    make_db "$WORK/data/mail.db"
+    mkdir -m 700 "$WORK/real"
+    make_db "$WORK/real/backup.db"
+    # Refused for the link's owner alone, whatever its directory allows.
+    mkdir -m 700 "$WORK/holder"
+    ln -s "$WORK/real" "$WORK/holder/link"
+    # Only root can give the link to another account; CI runners allow
+    # sudo without a password, a developer machine usually does not.
+    if ! sudo -n chown -h nobody "$WORK/holder/link" 2>/dev/null; then
+        printf 'skipped: cannot create a symbolic link owned by another account without sudo\n'
+        return 0
+    fi
+    run_restore "$WORK/holder/link/backup.db" yes
+    [[ "$STATUS" -ne 0 ]]
+    grep -F "another account can replace $WORK/holder/link/backup.db through $WORK/holder/link, a symbolic link it owns" "$WORK/out" >/dev/null
+    if grep -E '^(stop|run|start)' "$WORK/docker.log" >/dev/null; then
+        return 1
+    fi
+}
+
+restore_accepts_a_root_owned_symlinked_directory() {
+    reset
+    make_db "$WORK/data/mail.db"
+    # On macOS /tmp is a root-owned symbolic link to /private/tmp, and
+    # /private/tmp is sticky; on Linux it is a plain sticky directory.
+    local dir
+    dir=$(mktemp -d /tmp/index-backup-test.XXXXXX)
+    chmod 700 "$dir"
+    make_db "$dir/backup.db"
+    FAKE_LOGS="$READY_LOGS" run_restore "$dir/backup.db" yes
+    rm -rf "$dir"
+    [[ "$STATUS" -eq 0 ]]
+    grep -Fx 'start mcp-server' "$WORK/docker.log" >/dev/null
+}
+
 restore_refuses_a_symlinked_backup() {
     reset
     make_db "$WORK/data/mail.db"
@@ -838,6 +943,45 @@ restore_treats_a_killed_container_as_unknown() {
     fi
 }
 
+# restore_polls: how often the script asked docker ps whether the one-off
+# restore container was still running.
+restore_polls() {
+    grep -c '^ps -q --filter name=^restore-index-[0-9]*\$$' "$WORK/docker.log" || true
+}
+
+restore_waits_for_a_lingering_container() {
+    reset
+    make_db "$WORK/backup.db"
+    make_db "$WORK/data/mail.db"
+    # docker run reports a failure while the container keeps running for
+    # two polls; the indexer starts only once it is gone.
+    FAKE_RUN_EXIT=137 FAKE_RUN_LINGER=2 run_restore "$WORK/backup.db" yes
+    [[ "$STATUS" -ne 0 ]]
+    grep -F 'may or may not have been replaced' "$WORK/out" >/dev/null
+    [[ "$(restore_polls)" == 3 ]]
+    local order
+    order=$(grep -E '^(ps|start)' "$WORK/docker.log" | cut -d' ' -f1-2 | tr '\n' ',')
+    [[ "$order" == "ps -q,ps -q,ps -q,start indexer," ]]
+    if grep -E '^start .*mcp-server' "$WORK/docker.log" >/dev/null; then
+        return 1
+    fi
+}
+
+restore_starts_nothing_while_the_container_runs() {
+    reset
+    make_db "$WORK/backup.db"
+    make_db "$WORK/data/mail.db"
+    FAKE_RUN_EXIT=137 FAKE_RUN_LINGER=99 RESTORE_WAIT_SECONDS=0 run_restore "$WORK/backup.db" yes
+    [[ "$STATUS" -ne 0 ]]
+    grep -F "restore container $(cat "$WORK/run-name") is still running after 0s" "$WORK/out" >/dev/null
+    grep -F 'nothing was started' "$WORK/out" >/dev/null
+    grep -F 'mcp-server was left stopped' "$WORK/out" >/dev/null
+    [[ "$(restore_polls)" -ge 1 ]]
+    if grep -E '^start ' "$WORK/docker.log" >/dev/null; then
+        return 1
+    fi
+}
+
 stub_matches_the_indexer() {
     local name
     for name in SCHEMA_VERSION SCHEMA_APPLICATION_ID; do
@@ -901,9 +1045,14 @@ check "restore reports a failed log read" restore_reports_a_failed_log_read
 check "restore restarts the services when stop fails" restore_restarts_the_services_when_stop_fails
 check "restore refuses a backup path another account can replace" restore_refuses_a_replaceable_backup_path
 check "restore refuses a symlinked backup" restore_refuses_a_symlinked_backup
+check "restore refuses a symlinked directory another account can replace" restore_refuses_a_symlinked_directory_another_account_can_replace
+check "restore refuses a symlinked directory owned by another account" restore_refuses_a_symlinked_directory_owned_by_another_account
+check "restore accepts a root-owned symlinked directory" restore_accepts_a_root_owned_symlinked_directory
 check "backup refuses a copy restore would reject" backup_refuses_a_copy_restore_would_reject
 check "restore refuses ACL-writable paths" restore_refuses_acl_writable_paths
 check "restore treats a killed container as an unknown swap state" restore_treats_a_killed_container_as_unknown
+check "restore waits for a lingering restore container before starting the indexer" restore_waits_for_a_lingering_container
+check "restore starts nothing while the restore container still runs" restore_starts_nothing_while_the_container_runs
 check "the restore stub matches indexer/src/database.py" stub_matches_the_indexer
 
 if ((FAILURES > 0)); then
