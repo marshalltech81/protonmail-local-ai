@@ -3832,6 +3832,75 @@ class TestEncryptedPdf:
         assert opened == [{"args": ()}]
 
 
+class TestCffFontPdf:
+    """#691: pypdf reads the built-in encoding of an embedded CFF
+    (``/FontFile3`` ``/Type1C``) font only with fontTools, which is held
+    back until py-pdf/pypdf#4156 bounds its cost. Without it the codes
+    fall through to StandardEncoding and the text comes out garbled, as
+    a ``success`` row no retrieval test can tell from real text. The
+    fixture pins that gap: its page's only text is set in such a font,
+    whose encoding places each letter at its ROT13 code (recipe in
+    ``fixtures/extractors/README.md``)."""
+
+    # The sentence the fixture carries; ``cff-src/generate-cff-pdf.py``
+    # holds the same string.
+    SENTENCE = "Synthetic CFF marker: the quick brown fox jumps over the lazy dog."
+
+    @staticmethod
+    def _fixture() -> bytes:
+        from pathlib import Path
+
+        return (Path(__file__).parent / "fixtures" / "extractors" / "cff-font.pdf").read_bytes()
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "CFF built-in encodings need fontTools, held back under #691; a flip means "
+            "fontTools landed and EXTRACTOR_VERSIONS['pdf'] needs a bump so cached rows re-extract"
+        ),
+    )
+    def test_cff_font_text_extracts_as_written(self, monkeypatch):
+        """Today the extractor returns the ROT13 of the sentence as
+        ``success`` / ``pdf-digital@5``; with fontTools it returns the
+        sentence itself."""
+        from src.extractors import pdf
+
+        monkeypatch.setattr(pdf, "_extract_ocr", lambda *a, **kw: pytest.fail("OCR must not run"))
+
+        result = extract(
+            content_type="application/pdf", filename="cff.pdf", payload=self._fixture()
+        )
+
+        assert result.status == STATUS_SUCCESS
+        assert result.extractor == "pdf-digital@5"
+        assert result.text == self.SENTENCE
+
+    def test_fixture_resolves_text_through_the_cff_encoding_alone(self):
+        """The gap stays pinned only while nothing but the font program
+        maps the codes: no ``/Encoding``, no ``/ToUnicode``, a Type1C
+        ``/FontFile3``. The file carries no document information
+        dictionary or XMP, so no author or producer name is committed."""
+        import io
+
+        import pypdf
+
+        payload = self._fixture()
+        reader = pypdf.PdfReader(io.BytesIO(payload))
+
+        assert len(payload) < 100_000
+        assert len(reader.pages) == 1
+        fonts = reader.pages[0]["/Resources"]["/Font"]
+        assert list(fonts.keys()) == ["/F1"]
+        font = fonts["/F1"].get_object()
+        assert font["/Subtype"] == "/Type1"
+        assert "/Encoding" not in font
+        assert "/ToUnicode" not in font
+        font_file = font["/FontDescriptor"]["/FontFile3"].get_object()
+        assert font_file["/Subtype"] == "/Type1C"
+        assert reader.metadata is None
+        assert reader.xmp_metadata is None
+
+
 class TestImageExtractor:
     def test_invokes_pytesseract_with_oriented_image(self, monkeypatch):
         import io
