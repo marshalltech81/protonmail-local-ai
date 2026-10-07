@@ -1098,7 +1098,10 @@ each message whose occurrence of it now selects a module.
   (`java.base`, `java.desktop`, `java.xml`, `java.logging`,
   `jdk.unsupported`); both live under `/opt/ppt` in the image. The
   build's `ppt-builder` stage fetches the jars pinned in
-  `indexer/java/pom.xml` with Maven (strict checksums), compiles the
+  `indexer/java/pom.xml` with Maven (strict checksums on download, into
+  a BuildKit cache mount with its own id that a later rebuild reuses
+  and that trusts every build the operator runs on that builder,
+  #1070), compiles the
   reader and writes the runtime; the JDK and Maven stay in that stage,
   and the runtime image grows by about 67 MB (411 to 478 MB). Java runs
   under 512 MiB of address space and 30 s of CPU, and the parent kills
@@ -2150,7 +2153,18 @@ per-checkout `.uv-cache` as the workflow does;
 
 `.github/workflows/docker.yml` also scans the three built images
 (indexer, mcp-server, mbsync) with Trivy after `docker compose build`,
-on each change to a build input and weekly (#977). This covers what
+on each change to a build input and weekly (#977). Before that build,
+a pull-request run restores the indexer's `ppt-builder` stage from the
+GitHub Actions cache (BuildKit's `gha` backend, #1070), so Maven
+Central is contacted only when `indexer/java/pom.xml` or a layer
+before it changed. Every run on `main` (a push, the weekly schedule, a
+manual dispatch) restores nothing: it builds the stage from the
+current Debian packages (a restored apt layer is never rerun, and
+Trivy cannot see the `jlink` runtime) and writes the cache
+pull-request runs restore, so a restored stage is never older than the
+last build on `main`. The runner's BuildKit is new on every run, so
+the Dockerfile's cache mount of the Maven repository helps local
+rebuilds only. This covers what
 the lockfiles do not: Debian packages installed with apt (catdoc,
 Tesseract, Poppler and the base image's own packages), the Python
 packages actually installed, and the `.ppt` reader's jars in
