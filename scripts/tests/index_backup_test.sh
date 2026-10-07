@@ -693,6 +693,22 @@ restore_refuses_a_symlinked_directory_another_account_can_replace() {
     chmod 1775 "$WORK/open"
     FAKE_LOGS="$READY_LOGS" run_restore "$WORK/open/private/link/backup.db" yes
     [[ "$STATUS" -eq 0 ]]
+    # A newline in a component above the link must not end the walk
+    # early (a line-oriented split would check only the first line).
+    reset
+    make_db "$WORK/data/mail.db"
+    chmod 700 "$WORK/open"
+    mkdir -m 700 "$WORK/a"$'\n'"b"
+    mv "$WORK/open" "$WORK/a"$'\n'"b/open"
+    chmod 775 "$WORK/a"$'\n'"b/open"
+    run_restore "$WORK/a"$'\n'"b/open/private/link/backup.db" yes
+    [[ "$STATUS" -ne 0 ]]
+    grep -F 'another account can replace' "$WORK/out" >/dev/null
+    grep -F 'b/open; keep backups in a directory only you can write' "$WORK/out" >/dev/null
+    if grep -E '^(stop|run|start)' "$WORK/docker.log" >/dev/null; then
+        return 1
+    fi
+    rm -rf "${WORK:?}/a"$'\n'"b"
 }
 
 restore_refuses_a_symlinked_directory_owned_by_another_account() {

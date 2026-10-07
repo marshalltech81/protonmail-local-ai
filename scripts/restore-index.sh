@@ -134,28 +134,43 @@ replaceable_dir() {
 # link among them can be repointed by its owner (in a sticky directory
 # too) or replaced by any account that can write the directory holding
 # it, whether or not that directory is on the resolved path.
+# Split with parameter expansion, not dirname or read: both are
+# line-oriented and would drop the components after a newline.
+dir="${BACKUP%/*}"
+[[ "$BACKUP" == */* ]] || dir=.
 prefix=""
 [[ "$BACKUP" != /* ]] || prefix=/
-IFS=/ read -r -a parts <<<"$(dirname -- "$BACKUP")"
-for part in "${parts[@]}"; do
+rest="$dir"
+while [[ -n "$rest" ]]; do
+    part="${rest%%/*}"
+    if [[ "$rest" == */* ]]; then
+        rest="${rest#*/}"
+    else
+        rest=""
+    fi
     [[ -n "$part" ]] || continue
     prefix="$prefix$part"
     if [[ -L "$prefix" && -n "$(find "$prefix" -maxdepth 0 ! -user 0 ! -user "$me" -print)" ]]; then
         die "another account can replace $BACKUP through $prefix, a symbolic link it owns; pass a path whose links are yours"
     fi
-    real=$(cd -- "$prefix" && pwd -P)
+    # The x keeps a newline that ends the directory's own name, which
+    # the substitution would otherwise strip with pwd's.
+    real=$(cd -- "$prefix" && pwd -P && printf x) || die "cannot enter $prefix"
+    real="${real%$'\n'x}"
     if replaceable_dir "$real"; then
         die "another account can replace $BACKUP through $prefix; keep backups in a directory only you can write, as make backup-index creates"
     fi
     prefix="$prefix/"
 done
-ancestor=$(cd -- "$(dirname -- "$BACKUP")" && pwd -P)
+ancestor=$(cd -- "$dir" && pwd -P && printf x) || die "cannot enter $dir"
+ancestor="${ancestor%$'\n'x}"
 while :; do
     if replaceable_dir "$ancestor"; then
         die "another account can replace $BACKUP through $ancestor; keep backups in a directory only you can write, as make backup-index creates"
     fi
     [[ "$ancestor" != / ]] || break
-    ancestor=$(dirname -- "$ancestor")
+    ancestor="${ancestor%/*}"
+    [[ -n "$ancestor" ]] || ancestor=/
 done
 # Open the backup once, now, and stream that descriptor later: the file
 # checked here is the one restored, whatever is put at its path while the
