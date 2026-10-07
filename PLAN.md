@@ -65,8 +65,8 @@ The stack runs three containers beside the Proton Mail Bridge app:
   persistent pin.
 - **indexer** — parses Maildir, threads, embeds through any
   OpenAI-compatible `/v1/embeddings` provider, writes SQLite (schema
-  v0, with numbered migrations for any change since the first
-  deployment; 4096-dim L2-normalized vectors; per-message records
+  v1 since the per-extractor extraction cache, #928; numbered
+  migrations for any change since the first deployment; 4096-dim L2-normalized vectors; per-message records
   keyed by claimant ID).
   Initial scan and steady state drain one durable `indexing_jobs`
   queue through a two-phase batched path.
@@ -110,11 +110,8 @@ Follow-ups on corpus completeness and correctness:
   count split threads on the rebuilt index first), #756 (subject
   fallback chains recurring same-subject mail)
 - attachment coverage: #691 (optional decoders; fontTools waits on
-  py-pdf/pypdf#4156), #695, #923 (formats with no extractor), #946
-  (DOCX parse memory), #947 (PPTX charts, SmartArt and variants), #967
-  (python-docx loader cost); per-extractor extraction cache, schema v1
-  (#928, in progress); legacy `.ppt` through Apache POI (#957, in
-  progress)
+  py-pdf/pypdf#4156), #695, #923 (formats with no extractor), #947
+  (PPTX charts, SmartArt and variants)
 - bounded work: #781
 - index-side Unicode normalization left from #316: #782
 
