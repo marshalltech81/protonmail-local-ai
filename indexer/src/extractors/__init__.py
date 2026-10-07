@@ -304,6 +304,9 @@ class ExtractionResult:
 # ``failed`` rows the previous versions wrote for one are refreshed (#694).
 # docx 5: reads Word templates (``.dotx``), which ``docx.Document``
 # refused, so a template labelled ``.docx`` failed (#937).
+# docx 5 still: a long part-relationship chain is now ``failed``
+# (``DocxRelationshipChainError``) instead of escaping as
+# ``RecursionError`` (#945); that escape cached no row, so none is stale.
 # text 3: a payload starting with a fixed binary signature is recorded
 # ``unsupported`` instead of decoded as replacement characters, so the
 # ``success`` rows the previous version wrote for one are refreshed (#932).

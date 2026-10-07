@@ -1126,6 +1126,17 @@ earlier release is re-queued by the startup sweep below, and the
 DOCX version bump (`docx@5`) refreshes a template labelled `.docx`
 that the previous version recorded as `failed`.
 
+python-docx follows a package's part relationships recursively while it
+opens it, so a crafted `.docx` chaining a few thousand related parts
+(well under 1 MB) raised `RecursionError`, which the dispatcher
+re-raises as host pressure. The DOCX extractor catches it around the
+package open only and records the attachment `failed` with
+`DocxRelationshipChainError` (#945); a `RecursionError` anywhere else
+still escapes as host pressure. No row was cached for such a payload
+before, so the DOCX version is not bumped; a message that was
+dead-lettered by the old behaviour is picked up again by
+`make requeue-dead`.
+
 PowerPoint (#936): `application/vnd.openxmlformats-officedocument.presentationml.presentation`
 and `.pptx` route to the PPTX extractor (`python-pptx`), which reads,
 slide by slide, the text of every shape (text boxes, placeholders, auto
