@@ -2224,7 +2224,10 @@ def _requeue_stale_extractions(db: Database, queue: IndexingQueue) -> int:
     replaces the row, which keeps that once-only too. The same holds for
     a "no extractor" row whose occurrence's MIME type or filename now
     selects one, as when a release starts routing an extension such as
-    ``.heic`` (#691); that does not depend on OCR. A ``too_large`` row
+    ``.heic`` (#691); that does not depend on OCR. An OLE2 row (an OLE2
+    payload no extractor read, #694) is handled the same way: an
+    occurrence labelled ``.doc`` / ``.xls`` now selects the legacy
+    extractor (#935). A ``too_large`` row
     whose payload fits under the current ``INDEXER_ATTACHMENT_MAX_BYTES``
     (the operator raised the cap) is re-extracted from any occurrence, so
     every message carrying the bytes is re-queued; the re-run rewrites

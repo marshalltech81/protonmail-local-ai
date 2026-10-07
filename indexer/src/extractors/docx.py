@@ -17,10 +17,11 @@ flat list per top-level row so their text is copied once; lxml rejects
 XML nested deeper than 256 elements, which keeps the recursion shallow.
 
 Legacy ``.doc`` (binary Word, an OLE2 compound file, not OOXML) cannot
-be parsed by ``python-docx``. The dispatcher records any OLE2 payload
-``unsupported`` before this module runs, whatever its label (#694), so
-a ``.doc``-labelled payload reaches it only when it is not OLE2 (an
-OOXML file mislabelled as ``.doc``). Word templates (``.dotx``) are not routed here:
+be parsed by ``python-docx``. The dispatcher never hands this module an
+OLE2 payload: one labelled ``.doc`` goes to the ``doc`` extractor
+(#935), and any other is recorded ``unsupported`` (#694). A
+``.doc``-labelled payload reaches it only when it is not OLE2 (an OOXML
+file mislabelled as ``.doc``). Word templates (``.dotx``) are not routed here:
 ``docx.Document`` refuses a package whose main part is the template
 type.
 """

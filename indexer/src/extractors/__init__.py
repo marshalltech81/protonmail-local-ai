@@ -100,8 +100,10 @@ ZIP_MAX_UNCOMPRESSED_BYTES = 200 * 1024 * 1024
 # * ``extractor_caps``: caps inside an extractor that cut what it
 #   returned (#903), one per cap per extraction attempt: the dispatcher's
 #   ``max_extracted_chars``, the PDF digital-page cap, the OCR DPI
-#   lowered to fit the page-pixel budget, and the XLSX node, cell and
-#   text budgets. Each also logs a rate-limited WARNING naming the cap.
+#   lowered to fit the page-pixel budget, the XLSX node, cell and
+#   text budgets, the catdoc output byte cap, and the XLS sheet, cell
+#   and text budgets (#935). Each also logs a rate-limited WARNING
+#   naming the cap.
 # * ``parser_caps_messages``: messages a parser work cap cut (#872),
 #   counted here so the parser's per-message line can be rate limited
 #   without losing a message (review round 5 on #884).
@@ -314,7 +316,17 @@ class ExtractionResult:
 # docx 4, xlsx 5: an OLE2 payload (a real ``.doc`` / ``.xls``, or an
 # encrypted OOXML file) is recorded ``unsupported`` instead of ``failed``, so the
 # ``failed`` rows the previous versions wrote for one are refreshed (#694).
-EXTRACTOR_VERSIONS: dict[str, int] = {"docx": 4, "image": 3, "pdf": 4, "text": 2, "xlsx": 5}
+# doc 1, xls 1: legacy binary ``.doc`` (catdoc) and ``.xls`` (xlrd in a
+# child process), recorded ``unsupported`` before (#935).
+EXTRACTOR_VERSIONS: dict[str, int] = {
+    "doc": 1,
+    "docx": 4,
+    "image": 3,
+    "pdf": 4,
+    "text": 2,
+    "xls": 1,
+    "xlsx": 5,
+}
 
 
 def _stamp_extractor(module_name: str, extractor_name: str) -> str:
@@ -387,9 +399,10 @@ NO_EXTRACTOR_ERROR = "no extractor for this content type or filename extension"
 
 # ``unsupported`` error for a payload bound for the DOCX or XLSX extractor
 # that is an OLE2 compound file, which neither OOXML extractor can read
-# (#694): a legacy binary ``.doc`` / ``.xls``, or a password-protected
-# OOXML package. Decided by the bytes alone, whatever the label, because
-# the result is cached by content hash for every occurrence.
+# (#694), when the occurrence's label selects no legacy extractor
+# (#935): a password-protected OOXML package, or a legacy file labelled
+# as OOXML. The row is re-run for an occurrence whose label selects the
+# ``doc`` or ``xls`` extractor (``attachment_indexing``).
 LEGACY_OLE2_ERROR = "OLE2 compound file (legacy .doc / .xls or encrypted Office file)"
 
 # The fixed 8-byte signature every OLE2 compound file starts with.
@@ -402,14 +415,14 @@ _OLE2_SIGNATURE = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
 _MIME_DISPATCH: dict[str, str] = {
     "application/pdf": "pdf",
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
-    # Legacy ``.doc`` / ``.xls`` labels: a best effort for OOXML files
-    # mislabelled as a legacy type. A real legacy binary (OLE2) is recorded
-    # ``unsupported`` before the extractor runs (``LEGACY_OLE2_ERROR``).
-    # Word templates (``.dotx``) are not routed: python-docx refuses a
-    # package whose main part is the template type (#694).
-    "application/msword": "docx",
+    # Legacy ``.doc`` / ``.xls`` labels select the legacy extractors for
+    # an OLE2 payload, and the OOXML ones otherwise, a best effort for
+    # OOXML files mislabelled as a legacy type (``_route_container``,
+    # #935). Word templates (``.dotx``) are not routed: python-docx
+    # refuses a package whose main part is the template type (#694).
+    "application/msword": "doc",
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
-    "application/vnd.ms-excel": "xlsx",
+    "application/vnd.ms-excel": "xls",
     "text/html": "html",
     "application/xhtml+xml": "html",
     "text/plain": "text",
@@ -423,9 +436,9 @@ _MIME_DISPATCH: dict[str, str] = {
 _EXT_DISPATCH: dict[str, str] = {
     ".pdf": "pdf",
     ".docx": "docx",
-    ".doc": "docx",
+    ".doc": "doc",
     ".xlsx": "xlsx",
-    ".xls": "xlsx",
+    ".xls": "xls",
     ".html": "html",
     ".htm": "html",
     ".xhtml": "html",
@@ -527,14 +540,11 @@ def extract(
             error=NO_EXTRACTOR_ERROR,
         )
 
-    # An OLE2 payload (a real legacy ``.doc`` / ``.xls``) would only fail
-    # inside the OOXML parser and be re-run every ``_FAILED_CACHE_MAX_AGE``;
-    # record it as unsupported instead (#694). The bytes alone decide, not
-    # the label, so every occurrence of the same bytes, including a
-    # ``module_override`` refresh, records the same outcome (review round
-    # 1). A constant-size prefix check; the aggregate counts the result,
-    # so no per-item line.
-    if module_name in {"docx", "xlsx"} and payload.startswith(_OLE2_SIGNATURE):
+    # The container decides between a legacy and an OOXML extractor
+    # (#694, #935): a constant-size prefix check; the aggregate counts an
+    # unsupported result, so no per-item line.
+    module_name = _route_container(module_name, payload, content_type, filename)
+    if module_name is None:
         return ExtractionResult(
             status=STATUS_UNSUPPORTED,
             extractor=None,
@@ -637,6 +647,39 @@ def extract(
         text=cleaned,
         error=None,
     )
+
+
+# The legacy (OLE2) extractor for a legacy label, and the OOXML one the
+# same label selects for a payload that is not OLE2.
+_LEGACY_TO_OOXML = {"doc": "docx", "xls": "xlsx"}
+
+
+def _route_container(
+    module_name: str, payload: bytes, content_type: str, filename: str
+) -> str | None:
+    """The extractor for ``payload`` once its container is known, or
+    ``None`` when it is an OLE2 file no extractor reads.
+
+    * A legacy label (``doc``, ``xls``) keeps its legacy extractor for an
+      OLE2 payload; any other payload goes to the OOXML extractor, a
+      best effort for an OOXML file mislabelled as a legacy type.
+    * An OLE2 payload bound for an OOXML extractor goes to the legacy
+      extractor this occurrence's own label selects. This covers a
+      ``module_override`` refresh of a stale DOCX / XLSX row from a
+      ``.doc`` / ``.xls`` occurrence. With no legacy label (an encrypted
+      OOXML file is OLE2 too, or the label says ``.docx``), it is
+      ``None``: neither OOXML extractor can read OLE2, and an attempt
+      would only record ``failed`` and re-run every
+      ``_FAILED_CACHE_MAX_AGE`` (#694).
+    * Anything else is unchanged.
+    """
+    ole2 = payload.startswith(_OLE2_SIGNATURE)
+    if module_name in _LEGACY_TO_OOXML:
+        return module_name if ole2 else _LEGACY_TO_OOXML[module_name]
+    if ole2 and module_name in _LEGACY_TO_OOXML.values():
+        labelled = _resolve_extractor(content_type, filename)[0]
+        return labelled if labelled in _LEGACY_TO_OOXML else None
+    return module_name
 
 
 def resolved_extractor_module(content_type: str, filename: str) -> str | None:
