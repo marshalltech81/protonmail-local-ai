@@ -922,7 +922,7 @@ class MaildirHandler(FileSystemEventHandler):
                 try:
                     self.reconciler.handle_moved(src_path, dest_path, folder=folder_change)
                 except Exception as e:
-                    log.error("reconciler on_moved failed: %s", e)
+                    log.error("reconciler on_moved failed: %s", type(e).__name__)
             else:
                 # Default deployment has no reconciler; still move the
                 # indexed_files / message_thread_map filepath forward so
@@ -930,7 +930,7 @@ class MaildirHandler(FileSystemEventHandler):
                 try:
                     self.db.update_filepath(src_path, dest_path, folder=folder_change)
                 except Exception as e:
-                    log.error("update_filepath failed on rename: %s", e)
+                    log.error("update_filepath failed on rename: %s", type(e).__name__)
             return
 
         # Case 2: new delivery — enqueue for the worker. A flag rename
@@ -2896,7 +2896,7 @@ def main():
     try:
         sweep_paths(db)
     except Exception as e:
-        log.error("startup rename sweep failed: %s", e)
+        log.error("startup rename sweep failed: %s", type(e).__name__)
 
     # Index existing emails
     breaker = _EmbedOutageBreaker()
@@ -2919,7 +2919,7 @@ def main():
             reconciler.sweep()
             reconciler.reap()
         except Exception as e:
-            log.error("startup reconciliation failed: %s", e)
+            log.error("startup reconciliation failed: %s", type(e).__name__)
     _prune_reaped_records(db)
     # Scrubs what the startup reap above deleted (#670).
     _run_wal_maintenance(db)
@@ -3009,7 +3009,7 @@ def main():
                 try:
                     _recover_zero_vector_threads(db, queue, skip_trashed=reconciler is not None)
                 except Exception as e:
-                    log.error("periodic recovery sweep failed: %s", e)
+                    log.error("periodic recovery sweep failed: %s", type(e).__name__)
                 _run_periodic_rescan(
                     db, queue, ingestion_state, skip_trashed=reconciler is not None
                 )
