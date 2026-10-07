@@ -6,15 +6,18 @@ Fetch thread and message context from the local SQLite index.
 import asyncio
 import logging
 import unicodedata
+from typing import Annotated
 
 from fastmcp.exceptions import ToolError
 from mcp.types import CallToolResult
+from pydantic import Field
 
 # Module import: get_thread and get_message have a local named ``count``.
 from ..lib import timings
 from ..lib.predicates import (
     DATE_BASES,
     DEFAULT_DATE_BASIS,
+    MAX_SIZE_BYTES,
     normalize_date_basis,
     validate_date_range,
 )
@@ -66,6 +69,13 @@ log = logging.getLogger("mcp.tools.retrieval")
 # Ceiling on query_messages page size: enumeration pages by cursor, so a
 # large page only bloats one response.
 _MAX_QUERY_LIMIT = 100
+
+# A ``size_min`` / ``size_max`` argument (#1085): validated by the tool's
+# argument model before the handler runs, strictly (no ``true`` or
+# ``"100"`` coerced to an int) and within SQLite's INTEGER range, so the
+# published schema states the contract and an oversized value cannot
+# reach the bind (``OverflowError``).
+SizeBound = Annotated[int, Field(strict=True, ge=0, le=MAX_SIZE_BYTES)] | None
 
 # Seconds per window of the rate-limited ``fields`` rejection warning:
 # a client can repeat a rejected projection as fast as it likes.
@@ -863,8 +873,8 @@ def register_retrieval_tools(server, db):
         seen: bool | None = None,
         flagged: bool | None = None,
         replied: bool | None = None,
-        size_min: int | None = None,
-        size_max: int | None = None,
+        size_min: SizeBound = None,
+        size_max: SizeBound = None,
         date_basis: str = "effective",
         limit: int = 25,
         cursor: str | None = None,
@@ -973,9 +983,10 @@ def register_retrieval_tools(server, db):
             seen: True for messages read in Proton, False for unread.
             flagged: True for flagged (starred) messages, False for the rest.
             replied: True for messages answered in Proton, False for the rest.
-            size_min: Inclusive lower bound in bytes on the message's
-                      local file size (not the server's RFC822.SIZE);
-                      messages without a stored size are left out.
+            size_min: Inclusive lower bound in bytes (an integer from 0
+                      to 2^63-1) on the message's local file size (not
+                      the server's RFC822.SIZE); messages without a
+                      stored size are left out.
             size_max: Inclusive upper bound in bytes, likewise.
             limit: Messages per page (default 25, clamped to [1, 100]).
             cursor: ``next_cursor`` from the previous page of the same query.

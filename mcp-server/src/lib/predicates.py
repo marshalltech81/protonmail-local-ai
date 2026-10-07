@@ -459,14 +459,22 @@ def normalize_date_basis(value: str | None) -> str:
     )
 
 
+# The largest value a size bound can take: SQLite's INTEGER is 64-bit
+# signed, and ``sqlite3`` refuses to bind a larger Python int
+# (``OverflowError``). The tool's schema states the same range.
+MAX_SIZE_BYTES = 2**63 - 1
+
+
 def normalize_size_bound(name: str, value: Any) -> int | None:
     """A ``size_min`` / ``size_max`` filter to apply: ``None`` when not
-    given, otherwise the value, which must be a non-negative integer
-    (fixed-text ``InvalidFilterError`` otherwise)."""
+    given, otherwise the value, which must be an integer from 0 to
+    ``MAX_SIZE_BYTES`` (fixed-text ``InvalidFilterError`` otherwise).
+    The tool's argument model enforces the same (strict, before
+    coercion); this check is the ``Database`` API's own."""
     if value is None:
         return None
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise InvalidFilterError(name, f"{name} must be a non-negative integer")
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= MAX_SIZE_BYTES:
+        raise InvalidFilterError(name, f"{name} must be an integer from 0 to {MAX_SIZE_BYTES}")
     return value
 
 

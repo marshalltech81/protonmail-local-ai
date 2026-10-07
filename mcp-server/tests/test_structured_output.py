@@ -475,6 +475,51 @@ class TestDateBoundsEcho:
         assert "Date bounds (UTC): from 2024-01-09T18:30:00+00:00" in text
 
 
+class TestSizeBoundsOnTheWire:
+    """``size_min`` / ``size_max`` are checked by the tool's argument
+    model before the handler runs (#1085, Codex round 1): strictly, so a
+    string or a bool is not coerced to an int, and within SQLite's
+    INTEGER range, so an oversized value never reaches the bind."""
+
+    def test_schema_states_the_range(self, messages_db):
+        props = _tools(_server(messages_db))["query_messages"].input_schema["properties"]
+        for name in ("size_min", "size_max"):
+            integer = next(s for s in props[name]["anyOf"] if s.get("type") == "integer")
+            assert (integer["minimum"], integer["maximum"]) == (0, 2**63 - 1)
+
+    @pytest.mark.parametrize(
+        ("value", "reason"),
+        [
+            ("100", "Input should be a valid integer"),
+            (True, "Input should be a valid integer"),
+            (1.5, "Input should be a valid integer"),
+            (-1, "greater than or equal to 0"),
+            (2**63, "less than or equal to 9223372036854775807"),
+        ],
+    )
+    @pytest.mark.parametrize("name", ["size_min", "size_max"])
+    def test_wrong_type_or_range_is_a_schema_error(self, messages_db, name, value, reason):
+        result = _wire(_server(messages_db), "query_messages", {name: value})
+        assert result.is_error
+        assert reason in result.content[0].text
+        assert "OverflowError" not in result.content[0].text
+
+    def test_in_range_integers_filter(self, messages_db):
+        server = _server(messages_db)
+        page = _call(server, "query_messages", size_min=100, size_max=2**63 - 1)
+        assert page["total_matches"] == 5  # every fixture row is 100 bytes
+        assert _call(server, "query_messages", size_max=99)["total_matches"] == 0
+
+    def test_replied_coerces_like_the_other_flag_filters(self, messages_db):
+        # The bool filters share the argument model's lax bool parsing
+        # (seen, flagged, has_attachments before it); replied is no stricter.
+        server = _server(messages_db)
+        for name in ("replied", "seen"):
+            assert _call(server, "query_messages", **{name: "false"})["filters"] == [
+                {"filter": name, "value": False, "match": "equals"}
+            ]
+
+
 @pytest.mark.parametrize(
     ("name", "args", "key"),
     [

@@ -809,6 +809,10 @@ class TestClockSizeAndRepliedLeaves:
             ({"size_max": -1}, "size_max"),
             ({"size_min": True}, "size_min"),
             ({"size_max": "12"}, "size_max"),
+            # Beyond SQLite's INTEGER: sqlite3 would raise OverflowError at
+            # the bind (Codex round 1 on #1125).
+            ({"size_min": 2**63}, "size_min"),
+            ({"size_max": 2**63}, "size_max"),
             ({"size_min": 400, "size_max": 300}, "size_min/size_max"),
         ],
     )
@@ -816,6 +820,8 @@ class TestClockSizeAndRepliedLeaves:
         with pytest.raises(InvalidFilterError) as info:
             clocks_db.query_messages(**filters)
         assert info.value.field_name == field
+        if field in ("size_min", "size_max"):
+            assert str(info.value) == f"{field} must be an integer from 0 to 9223372036854775807"
 
     def test_internal_basis_is_a_fixed_text_error_naming_1092(self, clocks_db):
         with pytest.raises(InvalidFilterError) as info:
