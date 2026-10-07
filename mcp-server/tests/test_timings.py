@@ -668,7 +668,7 @@ _CALLER_ERRORS = [
     ("get_message", {"message_id": _MARKER_MESSAGE_ID, "offset": 10**6}, "offset"),
     ("get_thread", {"thread_id": f"missing-{MARKER}"}, "get_thread failed: not found"),
     ("list_threads", {"folder": _MARKER_FOLDER, "filter_type": MARKER}, "filter_type"),
-    ("find_contact", {"query": "   "}, "find_contact rejected an empty query"),
+    ("find_contact", {"query": "   "}, "rejected invalid argument: find_contact.query"),
 ]
 
 

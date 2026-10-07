@@ -25,6 +25,7 @@ from ..lib.inference import (
     TruncationReason,
     estimate_tokens,
 )
+from ..lib.rate_limited_log import ArgumentRejections
 from ..lib.security import log_tool_call, safe_provider_exception_text
 from ..lib.sqlite import (
     DEFAULT_EXCLUDED_FOLDERS,
@@ -2844,6 +2845,8 @@ def register_intelligence_tools(
     """
     secret_values = list(secret_values or ())
     prompt_budget = prompt_budget or PromptBudget()
+    # A client can repeat a rejected argument as fast as it likes (#1039).
+    rejections = ArgumentRejections(log, ("ask_mailbox", "extract_from_emails"))
 
     async def llm_complete(system: str, user: str, json_schema: dict | None = None) -> str:
         count("inference_calls", 1)
@@ -3055,7 +3058,7 @@ def register_intelligence_tools(
         try:
             bounds = validate_date_range(date_from, date_to)
         except InvalidFilterError as e:
-            log.warning("ask_mailbox rejected invalid %s", e.field_name)
+            rejections.reject("ask_mailbox", e.field_name)
             raise ToolError(f"Error: {e}") from e
         # The name ``from_addr`` was resolved from, for the scope block.
         resolved_from_name = from_name if from_name and not from_addr else None
@@ -3263,7 +3266,7 @@ def register_intelligence_tools(
         except InvalidFilterError as e:
             # The message quotes the rejected value, which log_tool_call
             # withheld. Return it to the caller; log only the field name.
-            log.warning("ask_mailbox rejected invalid %s", e.field_name)
+            rejections.reject("ask_mailbox", e.field_name)
             raise ToolError(f"Error: {e}") from e
         except PromptTooLargeError as e:
             _warn_token_limits(
@@ -3648,7 +3651,7 @@ def register_intelligence_tools(
         try:
             bounds = validate_date_range(date_from, date_to)
         except InvalidFilterError as e:
-            log.warning("extract_from_emails rejected invalid %s", e.field_name)
+            rejections.reject("extract_from_emails", e.field_name)
             raise ToolError(f"Error: {e}") from e
 
         try:
@@ -4025,7 +4028,7 @@ def register_intelligence_tools(
         except InvalidFilterError as e:
             # The message quotes the rejected value, which log_tool_call
             # withheld. Return it to the caller; log only the field name.
-            log.warning("extract_from_emails rejected invalid %s", e.field_name)
+            rejections.reject("extract_from_emails", e.field_name)
             raise ToolError(f"Error: {e}") from e
         except PromptTooLargeError as e:
             _warn_token_limits(

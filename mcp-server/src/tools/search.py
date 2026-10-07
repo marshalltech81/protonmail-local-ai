@@ -11,7 +11,7 @@ from fastmcp.exceptions import ToolError
 from mcp.types import CallToolResult
 
 from ..lib.embed import embed_query
-from ..lib.rate_limited_log import RateLimitedLog
+from ..lib.rate_limited_log import ArgumentRejections, RateLimitedLog
 from ..lib.security import log_tool_call, safe_provider_exception_text
 from ..lib.sqlite import (
     PROMPT_EVIDENCE_CHUNKS_PER_THREAD,
@@ -221,6 +221,8 @@ def register_search_tools(
         first_msg="get_evidence rejected invalid %s",
         summary_msg="get_evidence rejected invalid controls in the last %ds: %s",
     )
+    # The same for every other rejected argument, keyed by tool and field (#1039).
+    rejections = ArgumentRejections(log, ("search_emails", "get_evidence", "search_attachments"))
 
     @server.tool(
         output_schema=SearchEmailsOutput.model_json_schema(),
@@ -369,7 +371,7 @@ def register_search_tools(
             bounds = date_bounds(*validate_date_range(date_from, date_to))
             authority_class = normalize_authority_class(authority_class)
         except InvalidFilterError as e:
-            log.warning("search_emails rejected invalid %s", e.field_name)
+            rejections.reject("search_emails", e.field_name)
             raise ToolError(f"Search error: {e}") from e
         # A blank person filter is absent and padding is stripped, as in
         # get_evidence and ask_mailbox (#702, #705).
@@ -516,7 +518,7 @@ def register_search_tools(
         except InvalidFilterError as e:
             # The message quotes the rejected value, which log_tool_call
             # withheld. Return it to the caller; log only the field name.
-            log.warning("search_emails rejected invalid %s", e.field_name)
+            rejections.reject("search_emails", e.field_name)
             raise ToolError(f"Search error: {e}") from e
         except VectorLanesUnavailableError as e:
             # Fixed text naming the fix; it quotes nothing.
@@ -737,7 +739,7 @@ def register_search_tools(
             try:
                 validate_date_range(date_from, date_to)
             except InvalidFilterError as e:
-                log.warning("get_evidence rejected invalid %s", e.field_name)
+                rejections.reject("get_evidence", e.field_name)
                 raise ToolError(f"Evidence error: {e}") from e
 
         # groups: list of (subject, thread_id, lane_ranks | None,
@@ -926,7 +928,7 @@ def register_search_tools(
         except InvalidFilterError as e:
             # The message quotes the rejected value, which log_tool_call
             # withheld. Return it to the caller; log only the field name.
-            log.warning("get_evidence rejected invalid %s", e.field_name)
+            rejections.reject("get_evidence", e.field_name)
             raise ToolError(f"Evidence error: {e}") from e
         except Exception as e:
             # Mirror search_emails: classify before logging or returning,
@@ -1219,7 +1221,7 @@ def register_search_tools(
         try:
             bounds = date_bounds(*validate_date_range(date_from, date_to))
         except InvalidFilterError as e:
-            log.warning("search_attachments rejected invalid %s", e.field_name)
+            rejections.reject("search_attachments", e.field_name)
             raise ToolError(f"Attachment search error: {e}") from e
         try:
             with stage("attachment_search"):
@@ -1237,7 +1239,7 @@ def register_search_tools(
         except InvalidFilterError as e:
             # The message quotes the rejected value, which log_tool_call
             # withheld. Return it to the caller; log only the field name.
-            log.warning("search_attachments rejected invalid %s", e.field_name)
+            rejections.reject("search_attachments", e.field_name)
             raise ToolError(f"Attachment search error: {e}") from e
         except Exception as e:
             # search_attachments is local-DB work (FTS + joins), but an

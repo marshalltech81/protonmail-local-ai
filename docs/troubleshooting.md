@@ -1083,8 +1083,13 @@ tool=get_thread outcome=error total_ms=1.9 stages_ms={} counts={} config={}
   ERROR line from the tool's own logger (`mcp.tools.retrieval`,
   `mcp.tools.system`) naming the cause as fixed text or an exception
   type, for example
-  `get_thread failed: not found`, `list_threads rejected invalid input
-  (filter_type)` or `query_messages error: OperationalError`.
+  `get_thread failed: not found`, `rejected invalid argument:
+  list_threads.filter_type` or `query_messages error: OperationalError`.
+  A rejected argument (every tool, keyed by tool and field, #1039) is
+  logged once per key per minute; later repeats in that minute are
+  counted into one `rejected invalid arguments in the last <N>s:
+  <tool>.<field>=<count> ...` line, logged when the next rejection
+  arrives after the minute ends.
 - `total_ms` is the whole call; `stages_ms` the timed stages
   (retrieval lanes, embedding, rerank, inference) that ran.
 - `counts` holds result counts: `returned` and `total_matches` for

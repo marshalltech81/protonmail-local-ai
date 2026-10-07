@@ -74,3 +74,47 @@ class RateLimitedLog:
             )
         if first:
             self._logger.warning(self._first_msg, key)
+
+
+class ArgumentRejections(RateLimitedLog):
+    """Rate-limited ``rejected invalid argument: <tool>.<field>``
+    WARNINGs for the tools' argument checks (#1039).
+
+    Both parts of the key are fixed literals: ``tool`` is named at the
+    call site, and a field outside ``FIELDS`` (the names the
+    ``InvalidFilterError`` raisers and the tools' own checks use) is
+    counted as ``other`` rather than raising, so a new field can never
+    change what the caller receives.
+    """
+
+    FIELDS = (
+        "date_from",
+        "date_to",
+        "date_from/date_to",
+        "cursor",
+        "text",
+        "authority_class",
+        "offset",
+        "filter_type",
+        "query",
+        "other",
+    )
+
+    def __init__(
+        self,
+        logger: logging.Logger,
+        tools: tuple[str, ...],
+        interval: float = 60.0,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        super().__init__(
+            logger,
+            tuple(f"{tool}.{field}" for tool in tools for field in self.FIELDS),
+            interval,
+            first_msg="rejected invalid argument: %s",
+            summary_msg="rejected invalid arguments in the last %ds: %s",
+            clock=clock,
+        )
+
+    def reject(self, tool: str, field: str) -> None:
+        self.record(f"{tool}.{field if field in self.FIELDS else 'other'}")
