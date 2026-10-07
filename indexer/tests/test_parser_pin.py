@@ -22,7 +22,9 @@ so a change shows as that message's line.
 
 A deliberate parser change regenerates the snapshot with
 ``PARSER_PIN_UPDATE=1 uv run pytest tests/test_parser_pin.py`` and the
-PR explains the diff, as for ``make baseline UPDATE=1``.
+PR explains the diff, as for ``make baseline UPDATE=1``. So does adding
+a corpus message or a shape, since the catalogue grows with them: the
+regenerated file then differs only by the added records (#1124).
 """
 
 import hashlib
@@ -195,6 +197,9 @@ def test_parse_email_output_is_pinned(tmp_path):
         _PIN.parent.mkdir(parents=True, exist_ok=True)
         _PIN.write_text("{\n" + ",\n".join(lines) + "\n}\n", encoding="utf-8")
     pinned = json.loads(_PIN.read_text(encoding="utf-8"))
-    assert sorted(records) == sorted(pinned), "the catalogue changed; regenerate the pin"
+    assert sorted(records) == sorted(pinned), (
+        "the catalogue changed (a fixture, shape or corpus message was added or removed); "
+        "regenerate the pin with PARSER_PIN_UPDATE=1"
+    )
     for key in sorted(records):
         assert records[key] == pinned[key], key

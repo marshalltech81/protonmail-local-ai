@@ -2205,9 +2205,15 @@ manual dispatch) restores nothing: it builds the stage from the
 current Debian packages (a restored apt layer is never rerun, and
 Trivy cannot see the `jlink` runtime) and writes the cache
 pull-request runs restore, so a restored stage is never older than the
-last build on `main`. The runner's BuildKit is new on every run, so
-the Dockerfile's cache mount of the Maven repository helps local
-rebuilds only. This covers what
+last build on `main`. The `indexer pytest` job of
+`.github/workflows/tests.yml`, which exports the `ppt-runtime` stage
+for the indexer's `.ppt` tests, restores and writes the same cache
+under the same rule (#1105), so it too reaches Maven Central only on
+a run on `main` or after a change to the stage's inputs; that export
+is one build, which fetches the restored layers it copies, so it
+needs no loaded image. The runner's BuildKit is new on every
+run, so the Dockerfile's cache mount of the Maven repository helps
+local rebuilds only. This covers what
 the lockfiles do not: Debian packages installed with apt (catdoc,
 Tesseract, Poppler and the base image's own packages), the Python
 packages actually installed, and the `.ppt` reader's jars in

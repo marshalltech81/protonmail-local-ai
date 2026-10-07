@@ -120,8 +120,51 @@ jobs:
       # the same Dockerfile stage the image copies. Its tests skip only
       # off CI: test_ppt_runtime_is_installed_in_ci fails here if the
       # export is missing.
-      - name: Export the .ppt reader runtime
-        run: docker build --target ppt-runtime --output "type=local,dest=${RUNNER_TEMP}/ppt" indexer
+      #
+      # The stage's ppt-builder layers are restored from the GitHub
+      # Actions cache (BuildKit's gha backend, scope indexer-ppt: the
+      # cache docker.yml writes and reads, #1105), so Maven Central is
+      # contacted only when indexer/java/pom.xml or a layer before it
+      # changed; a fresh runner otherwise fetched the .ppt reader's jars
+      # on every run and failed with Maven Central's 429s and 502s
+      # (#1070). The build runs on a docker-container builder because
+      # the runner's default builder cannot import or export a cache.
+      # Exporting the stage to a directory is one build, so the build
+      # that restores the layers is the one that reads them for the
+      # COPY; the lazy restored layers that made docker.yml load the
+      # stage as an image only trip a later build on the same builder,
+      # which this job has none of.
+      #
+      # As in docker.yml, only a pull-request run restores the stage.
+      # A run on main (a push, a manual dispatch) builds it cold, so
+      # the cache keeps picking up Debian's OpenJDK and Maven updates
+      # (a restored apt layer is never rerun), and writes the cache
+      # pull-request runs restore; a pull request's own export lands in
+      # its ref's cache, which runs on main never see. A failed export
+      # (the cache API throttles) is ignored, with a warning in the
+      # build log: the next run is cold instead of this one failing
+      # before the tests run.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          # BuildKit pinned by digest, like the images; the action's
+          # default is the moving buildx-stable-1 tag. Dependabot does
+          # not track a driver option: bump the tag and digest by hand,
+          # together with docker.yml's.
+          driver-opts: image=moby/buildkit:v0.33.1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
+
+      - name: Export the .ppt reader runtime (from the cache on pull-request runs)
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: indexer
+          target: ppt-runtime
+          outputs: type=local,dest=${{ runner.temp }}/ppt
+          # The export is a directory the tests read, not an image to
+          # attest: the action's default provenance attestation would
+          # write a provenance.json beside opt/ in it.
+          provenance: false
+          cache-from: ${{ github.event_name == 'pull_request' && 'type=gha,scope=indexer-ppt' || '' }}
+          cache-to: type=gha,mode=max,scope=indexer-ppt,ignore-error=true
 
       - name: Run pytest with coverage
         working-directory: indexer

@@ -180,7 +180,10 @@ harness in `tests/eval/` (`tests/retrieval_metrics.py`).
   `tests/test_agent_eval.py` until the scenario is updated.
 - **After changing the corpus or golden set**, run `make baseline
   UPDATE=1` and commit the regenerated `snapshot.json` together with
-  the change.
+  the change. A corpus change also regenerates the parser pin
+  (`PARSER_PIN_UPDATE=1 uv run pytest tests/test_parser_pin.py` in
+  `indexer/`), which catalogues every corpus message; its diff must
+  be only the added or removed records.
 - **Unexpected snapshot diff.** If a refactor PR produces a snapshot
   diff, treat it as a behaviour change and explain it in the PR. Do
   not regenerate the snapshot just to make the test pass.
