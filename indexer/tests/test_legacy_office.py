@@ -1,0 +1,582 @@
+"""Legacy binary Office attachments (#935): the shared subprocess runner,
+``.doc`` through catdoc and ``.xls`` through xlrd in a child process.
+
+Fixtures are synthetic and tool-generated (``fixtures/extractors/README.md``).
+Tests that need the real catdoc binary skip locally when it is missing
+(it has no Homebrew formula); CI installs it, and
+``test_catdoc_is_installed_in_ci`` fails there if it is not, so they
+cannot skip in CI.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import resource
+import shutil
+import struct
+import sys
+import time
+from pathlib import Path
+
+import pytest
+from src import extractors
+from src.extractors import (
+    STATUS_FAILED,
+    STATUS_SUCCESS,
+    extract,
+)
+from src.extractors._runner import (
+    ToolCrashError,
+    ToolExitError,
+    ToolOutput,
+    ToolTimeoutError,
+    run_tool,
+)
+
+FIXTURES = Path(__file__).parent / "fixtures" / "extractors"
+DOC_FIXTURE = FIXTURES / "legacy.doc"
+XLS_FIXTURE = FIXTURES / "legacy.xls"
+
+MARKER = "SYNTHETIC_PAYLOAD_MARKER"
+_OLE2_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+
+_IN_CI = bool(os.environ.get("CI"))
+requires_catdoc = pytest.mark.skipif(
+    shutil.which("catdoc") is None and not _IN_CI,
+    reason="catdoc is not installed (no Homebrew formula); these tests run in CI and the image",
+)
+linux_only = pytest.mark.skipif(
+    sys.platform != "linux",
+    reason=(
+        "real resource limits and crashing signals are asserted on Linux only (the image and "
+        "CI): macOS does not enforce RLIMIT_AS and writes a crash report for each crash"
+    ),
+)
+
+
+def _fake_tool(tmp_path: Path, body: str) -> str:
+    """An executable Python script standing in for a tool."""
+    path = tmp_path / "fake_tool"
+    path.write_text(f"#!{sys.executable}\nimport os, signal, sys, time\n{body}\n")
+    path.chmod(0o700)
+    return str(path)
+
+
+def _peak_rss_bytes() -> int:
+    peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return peak if sys.platform == "darwin" else peak * 1024
+
+
+# ---------------------------------------------------------------------------
+# The shared runner
+# ---------------------------------------------------------------------------
+
+
+class TestRunTool:
+    def test_returns_stdout_and_passes_a_private_temp_file(self, tmp_path):
+        tool = _fake_tool(
+            tmp_path,
+            "path = sys.argv[-1]\n"
+            "print(oct(os.stat(path).st_mode & 0o777), path, open(path, 'rb').read().decode())",
+        )
+        output = run_tool(
+            [tool], b"payload bytes", timeout_seconds=30, max_output_bytes=4096, suffix=".doc"
+        )
+        mode, path, content = output.data.decode().split(" ", 2)
+        assert mode == "0o600"
+        assert path.endswith(".doc")
+        assert content.strip() == "payload bytes"
+        assert output.truncated is False
+        # Deleted after the run.
+        assert not Path(path).exists()
+
+    def test_temp_file_is_deleted_when_the_tool_fails(self, tmp_path):
+        record = tmp_path / "seen"
+        tool = _fake_tool(tmp_path, f"open({str(record)!r}, 'w').write(sys.argv[-1])\nsys.exit(2)")
+        with pytest.raises(ToolExitError):
+            run_tool([tool], b"x", timeout_seconds=30, max_output_bytes=10, suffix=".doc")
+        assert not Path(record.read_text()).exists()
+
+    def test_output_is_read_up_to_the_cap_and_the_tool_killed(self, tmp_path):
+        """Never read whole and cut: the parent stops at the cap, and the
+        tool, which would write 64 MB, is killed."""
+        tool = _fake_tool(
+            tmp_path,
+            "for _ in range(1024):\n    sys.stdout.buffer.write(b'a' * 65536)\n    sys.stdout.flush()",
+        )
+        started = time.monotonic()
+        output = run_tool([tool], b"x", timeout_seconds=30, max_output_bytes=100_000, suffix=".x")
+        assert output.truncated is True
+        assert output.data == b"a" * 100_000
+        assert time.monotonic() - started < 20
+
+    def test_timeout_kills_the_tool(self, tmp_path):
+        tool = _fake_tool(tmp_path, "time.sleep(60)")
+        started = time.monotonic()
+        with pytest.raises(ToolTimeoutError):
+            run_tool([tool], b"x", timeout_seconds=0.5, max_output_bytes=10, suffix=".x")
+        assert time.monotonic() - started < 10
+
+    def test_timeout_applies_while_the_tool_writes(self, tmp_path):
+        """A tool that keeps writing a little, under the cap, still meets
+        the deadline."""
+        tool = _fake_tool(
+            tmp_path,
+            "while True:\n    sys.stdout.write('a')\n    sys.stdout.flush()\n    time.sleep(0.05)",
+        )
+        with pytest.raises(ToolTimeoutError):
+            run_tool([tool], b"x", timeout_seconds=0.5, max_output_bytes=1_000_000, suffix=".x")
+
+    def test_timeout_applies_after_the_tool_closes_stdout(self, tmp_path):
+        tool = _fake_tool(tmp_path, "os.close(1)\ntime.sleep(60)")
+        with pytest.raises(ToolTimeoutError):
+            run_tool([tool], b"x", timeout_seconds=0.5, max_output_bytes=10, suffix=".x")
+
+    def test_a_death_by_signal_is_a_fixed_error(self, tmp_path):
+        # SIGKILL: macOS writes no crash report for it.
+        tool = _fake_tool(tmp_path, "os.kill(os.getpid(), signal.SIGKILL)")
+        with pytest.raises(ToolCrashError) as excinfo:
+            run_tool([tool], b"x", timeout_seconds=30, max_output_bytes=10, suffix=".x")
+        assert str(excinfo.value) == "extraction tool killed by a signal"
+
+    @pytest.mark.parametrize("returncode", [-11, -24, -6])
+    def test_any_signal_maps_to_the_crash_error(self, monkeypatch, tmp_path, returncode):
+        """SIGSEGV, SIGXCPU and SIGABRT, by the status the parent sees:
+        stubbed, so no tool crashes for real."""
+        import subprocess
+
+        monkeypatch.setattr(subprocess.Popen, "wait", lambda self, timeout=None: returncode)
+        tool = _fake_tool(tmp_path, "pass")
+        with pytest.raises(ToolCrashError):
+            run_tool([tool], b"x", timeout_seconds=30, max_output_bytes=10, suffix=".x")
+
+    @linux_only
+    def test_a_real_segfault_is_a_fixed_error(self, tmp_path):
+        tool = _fake_tool(tmp_path, "os.kill(os.getpid(), signal.SIGSEGV)")
+        with pytest.raises(ToolCrashError):
+            run_tool([tool], b"x", timeout_seconds=30, max_output_bytes=10, suffix=".x")
+
+    def test_non_zero_exit_withholds_stderr_and_stdout(self, tmp_path, caplog):
+        caplog.set_level("DEBUG")
+        tool = _fake_tool(
+            tmp_path,
+            f"sys.stderr.write({MARKER!r})\nsys.stdout.write({MARKER!r})\nsys.exit(1)",
+        )
+        with pytest.raises(ToolExitError) as excinfo:
+            run_tool([tool], b"x", timeout_seconds=30, max_output_bytes=1000, suffix=".x")
+        assert MARKER not in str(excinfo.value)
+        assert MARKER not in caplog.text
+
+    def test_tool_gets_no_inherited_environment(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SYNTHETIC_SECRET_ENV", MARKER)
+        tool = _fake_tool(tmp_path, "print(sorted(os.environ))")
+        output = run_tool([tool], b"x", timeout_seconds=30, max_output_bytes=4096, suffix=".x")
+        assert b"SYNTHETIC_SECRET_ENV" not in output.data
+
+
+# ---------------------------------------------------------------------------
+# .doc through catdoc
+# ---------------------------------------------------------------------------
+
+
+def test_catdoc_is_installed_in_ci():
+    """The catdoc tests skip only off CI: CI installs the package, so a
+    missing binary there is a failure, not a skip."""
+    if not _IN_CI:
+        pytest.skip("only checked in CI")
+    assert shutil.which("catdoc") is not None
+
+
+class TestDocExtractor:
+    @requires_catdoc
+    def test_real_doc_extracts_its_text(self):
+        result = extract(
+            content_type="application/msword",
+            filename="memo.doc",
+            payload=DOC_FIXTURE.read_bytes(),
+        )
+        assert result.status == STATUS_SUCCESS
+        assert result.extractor == "doc@1"
+        assert result.text is not None
+        assert "The COBALT-LANTERN ledger code is 4471." in result.text
+        assert "Café crème at the Zürich office, naïve résumé." in result.text
+
+    @requires_catdoc
+    def test_real_doc_by_extension(self):
+        result = extract(
+            content_type="application/octet-stream",
+            filename="memo.DOC",
+            payload=DOC_FIXTURE.read_bytes(),
+        )
+        assert result.status == STATUS_SUCCESS
+        assert "COBALT-LANTERN" in (result.text or "")
+
+    @requires_catdoc
+    def test_catdoc_failure_on_garbage_ole2_is_a_fixed_failed(self, caplog):
+        caplog.set_level("DEBUG")
+        payload = _OLE2_MAGIC + MARKER.encode() + bytes(2048)
+        result = extract(content_type="application/msword", filename="a.doc", payload=payload)
+        assert result.status in (STATUS_FAILED, "empty")
+        if result.status == STATUS_FAILED:
+            assert result.error in {"ToolExitError", "ToolCrashError"}
+        assert MARKER not in caplog.text
+
+    def test_missing_binary_is_failed(self, monkeypatch):
+        from src.extractors import doc
+
+        monkeypatch.setattr(doc.shutil, "which", lambda _name: None)
+        result = extract(
+            content_type="application/msword", filename="a.doc", payload=_OLE2_MAGIC + bytes(64)
+        )
+        assert (result.status, result.error) == (STATUS_FAILED, "ToolNotFoundError")
+
+    @pytest.mark.parametrize(
+        ("body", "error"),
+        [
+            ("time.sleep(60)", "ToolTimeoutError"),
+            (f"sys.stderr.write({MARKER!r})\nsys.exit(1)", "ToolExitError"),
+            ("os.kill(os.getpid(), signal.SIGKILL)", "ToolCrashError"),
+        ],
+    )
+    def test_tool_failures_are_fixed_failed_rows(self, tmp_path, monkeypatch, caplog, body, error):
+        from src.extractors import doc
+
+        caplog.set_level("DEBUG")
+        tool = _fake_tool(tmp_path, body)
+        monkeypatch.setattr(doc.shutil, "which", lambda _name: tool)
+        monkeypatch.setattr(doc, "TOOL_TIMEOUT_SECONDS", 0.5)
+        result = extract(
+            content_type="application/msword",
+            filename=f"{MARKER}.doc",
+            payload=_OLE2_MAGIC + MARKER.encode(),
+        )
+        assert (result.status, result.error) == (STATUS_FAILED, error)
+        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+        assert len(warnings) == 1
+        assert error in warnings[0].getMessage()
+        assert MARKER not in caplog.text
+
+    def test_catdoc_gets_a_fixed_charset_and_no_wrapping(self, tmp_path, monkeypatch):
+        from src.extractors import doc
+
+        tool = _fake_tool(tmp_path, "print(' '.join(sys.argv[1:-1]))")
+        monkeypatch.setattr(doc.shutil, "which", lambda _name: tool)
+        text, name = doc.extract(_OLE2_MAGIC)
+        assert (text.strip(), name) == ("-d utf-8 -w", "doc")
+
+    @pytest.mark.parametrize("error", [MemoryError, RecursionError])
+    def test_host_pressure_in_the_parent_propagates(self, monkeypatch, error):
+        from src.extractors import doc
+
+        def raise_(*_args, **_kwargs):
+            raise error
+
+        monkeypatch.setattr(doc, "run_tool", raise_)
+        monkeypatch.setattr(doc.shutil, "which", lambda _name: "/bin/true")
+        with pytest.raises(error):
+            extract(content_type="application/msword", filename="a.doc", payload=_OLE2_MAGIC)
+
+
+# ---------------------------------------------------------------------------
+# .xls through xlrd in a child process
+# ---------------------------------------------------------------------------
+
+
+def _sst_bomb() -> bytes:
+    """The generated workbook with its shared-string table turned into
+    the loop measured for #935: the declared count is 2^31 - 1 and the
+    first string ("Item", 7 bytes) becomes an empty string whose
+    phonetic size is -7, so xlrd re-reads it forever. Same length, so
+    the OLE2 container is unchanged."""
+    data = bytearray(XLS_FIXTURE.read_bytes())
+    first = data.find(b"\x04\x00\x00Item")
+    assert first > 0 and data.count(b"\x04\x00\x00Item") == 1
+    data[first - 4 : first] = struct.pack("<i", 2**31 - 1)
+    data[first : first + 7] = b"\x00\x00\x04" + struct.pack("<i", -7)
+    return bytes(data)
+
+
+def _self_referencing_directory() -> bytes:
+    """The generated workbook with the root storage's first child made
+    its own left sibling: a cycle in the OLE2 directory tree, which
+    xlrd's ``_build_family_tree`` follows with no cycle check."""
+    data = bytearray(XLS_FIXTURE.read_bytes())
+    sector_size = 1 << struct.unpack_from("<H", data, 0x1E)[0]
+    directory = 512 + struct.unpack_from("<i", data, 0x30)[0] * sector_size
+    child = struct.unpack_from("<i", data, directory + 0x4C)[0]
+    assert child > 0
+    struct.pack_into("<i", data, directory + child * 128 + 0x44, child)
+    return bytes(data)
+
+
+def _xls(payload: bytes, **kwargs):
+    return extract(
+        content_type="application/vnd.ms-excel", filename="book.xls", payload=payload, **kwargs
+    )
+
+
+class TestXlsExtractor:
+    def test_real_xls_extracts_both_sheets(self):
+        result = _xls(XLS_FIXTURE.read_bytes())
+        assert result.status == STATUS_SUCCESS
+        assert result.extractor == "xls@1"
+        assert result.text == (
+            "[Sheet: Summary]\nItem\tNote\nCOBALT-LANTERN\tCafé crème, Zürich"
+            "\n\n[Sheet: Détails]\nSecond-sheet code\tOBSIDIAN-HERON 8812"
+        )
+
+    def test_real_xls_by_extension(self):
+        result = extract(
+            content_type="application/octet-stream",
+            filename="book.XLS",
+            payload=XLS_FIXTURE.read_bytes(),
+        )
+        assert "OBSIDIAN-HERON 8812" in (result.text or "")
+
+    @linux_only
+    def test_sst_loop_meets_the_address_space_limit(self, monkeypatch):
+        """The shared-string loop runs until the child's address space
+        runs out (MemoryError, exit 3): a bounded failed row. The parent's
+        own memory does not grow with it."""
+        from src.extractors import xls
+
+        monkeypatch.setattr(xls, "CHILD_MAX_ADDRESS_SPACE_BYTES", 256 * 1024 * 1024)
+        before = _peak_rss_bytes()
+        started = time.monotonic()
+        result = _xls(_sst_bomb())
+        assert (result.status, result.error) == (STATUS_FAILED, "ToolExitError")
+        assert time.monotonic() - started < 30
+        assert _peak_rss_bytes() - before < 64 * 1024 * 1024
+
+    @linux_only
+    def test_cpu_limit_kills_the_child(self, monkeypatch):
+        """SIGXCPU, real only on Linux: on macOS it would write a crash
+        report (the mapping is covered by the stubbed status test)."""
+        from src.extractors import xls
+
+        monkeypatch.setattr(xls, "CHILD_MAX_CPU_SECONDS", 1)
+        started = time.monotonic()
+        result = _xls(_sst_bomb())
+        assert (result.status, result.error) == (STATUS_FAILED, "ToolCrashError")
+        assert time.monotonic() - started < 15
+
+    def test_wall_clock_timeout_kills_the_child(self, monkeypatch):
+        from src.extractors import xls
+
+        monkeypatch.setattr(xls, "XLS_TIMEOUT_SECONDS", 0.5)
+        started = time.monotonic()
+        result = _xls(_sst_bomb())
+        assert (result.status, result.error) == (STATUS_FAILED, "ToolTimeoutError")
+        assert time.monotonic() - started < 10
+
+    def test_directory_cycle_is_a_failed_row_not_recursion(self):
+        from src.extractors import xls_child
+
+        payload = _self_referencing_directory()
+        # The shape is the one claimed: in-process, xlrd recurses until
+        # RecursionError ...
+        with pytest.raises(RecursionError):
+            xls_child.extract_text(payload)
+        # ... which the dispatcher would treat as host pressure. In the
+        # child it is a fixed failed row.
+        result = _xls(payload)
+        assert (result.status, result.error) == (STATUS_FAILED, "ToolExitError")
+
+    def test_garbage_ole2_is_failed_without_quoting_it(self, caplog):
+        caplog.set_level("DEBUG")
+        result = _xls(_OLE2_MAGIC + MARKER.encode() + bytes(1024))
+        assert (result.status, result.error) == (STATUS_FAILED, "ToolExitError")
+        assert MARKER not in caplog.text
+
+    @pytest.mark.parametrize(
+        "data",
+        [b"no newline", b"unknown_cap\ntext", b"x" * 10],
+    )
+    def test_malformed_child_output_is_failed(self, monkeypatch, data):
+        from src.extractors import xls
+
+        monkeypatch.setattr(xls, "run_tool", lambda *_a, **_k: ToolOutput(data, truncated=False))
+        result = _xls(_OLE2_MAGIC)
+        assert (result.status, result.error) == (STATUS_FAILED, "XlsOutputError")
+
+    def test_truncated_child_output_is_failed(self, monkeypatch):
+        from src.extractors import xls
+
+        monkeypatch.setattr(
+            xls, "run_tool", lambda *_a, **_k: ToolOutput(b"\ntext", truncated=True)
+        )
+        result = _xls(_OLE2_MAGIC)
+        assert (result.status, result.error) == (STATUS_FAILED, "XlsOutputError")
+
+    def test_child_runs_isolated_with_the_limits(self, monkeypatch):
+        from src.extractors import xls
+
+        seen: list[list[str]] = []
+
+        def fake_run_tool(argv, payload, **kwargs):
+            seen.append(argv)
+            return ToolOutput(b"\n", truncated=False)
+
+        monkeypatch.setattr(xls, "run_tool", fake_run_tool)
+        xls.extract(_OLE2_MAGIC)
+        assert seen == [
+            [
+                sys.executable,
+                "-I",
+                str(Path(xls.__file__).with_name("xls_child.py")),
+                str(xls.CHILD_MAX_ADDRESS_SPACE_BYTES),
+                str(xls.CHILD_MAX_CPU_SECONDS),
+            ]
+        ]
+
+
+class TestXlsChildWalk:
+    """The child's budgets, run in-process so the work done is counted."""
+
+    @staticmethod
+    def _count(monkeypatch) -> dict[str, int]:
+        import xlrd
+
+        counts = {"sheets": 0, "rows": 0, "unloaded": 0}
+        load, row_values, unload = (
+            xlrd.book.Book.sheet_by_index,
+            xlrd.sheet.Sheet.row_values,
+            xlrd.book.Book.unload_sheet,
+        )
+
+        def counting_load(self, index):
+            counts["sheets"] += 1
+            return load(self, index)
+
+        def counting_rows(self, rowx, *args):
+            counts["rows"] += 1
+            return row_values(self, rowx, *args)
+
+        def counting_unload(self, index):
+            counts["unloaded"] += 1
+            return unload(self, index)
+
+        monkeypatch.setattr(xlrd.book.Book, "sheet_by_index", counting_load)
+        monkeypatch.setattr(xlrd.sheet.Sheet, "row_values", counting_rows)
+        monkeypatch.setattr(xlrd.book.Book, "unload_sheet", counting_unload)
+        return counts
+
+    def test_every_sheet_is_unloaded(self, monkeypatch):
+        from src.extractors import xls_child
+
+        counts = self._count(monkeypatch)
+        text, caps = xls_child.extract_text(XLS_FIXTURE.read_bytes())
+        assert caps == []
+        assert "OBSIDIAN-HERON" in text
+        assert counts == {"sheets": 2, "rows": 3, "unloaded": 2}
+
+    def test_sheet_budget_stops_before_loading(self, monkeypatch):
+        from src.extractors import xls_child
+
+        monkeypatch.setattr(xls_child, "_MAX_SHEETS", 1)
+        counts = self._count(monkeypatch)
+        text, caps = xls_child.extract_text(XLS_FIXTURE.read_bytes())
+        assert caps == ["xls_sheets"]
+        assert text == "[Sheet: Summary]\nItem\tNote\nCOBALT-LANTERN\tCafé crème, Zürich"
+        assert counts["sheets"] == 1
+
+    def test_cell_budget_stops_the_walk_and_the_next_load(self, monkeypatch):
+        from src.extractors import xls_child
+
+        # Two two-cell rows fit; the second sheet's row does not.
+        monkeypatch.setattr(xls_child, "_MAX_EXPANDED_CELLS", 2 * (2 + xls_child._ROW_COST))
+        counts = self._count(monkeypatch)
+        text, caps = xls_child.extract_text(XLS_FIXTURE.read_bytes())
+        assert caps == ["xls_expanded_cells"]
+        assert "OBSIDIAN" not in text
+        assert counts == {"sheets": 2, "rows": 3, "unloaded": 2}
+
+    def test_cell_budget_spent_on_one_sheet_loads_no_more(self, monkeypatch):
+        from src.extractors import xls_child
+
+        monkeypatch.setattr(xls_child, "_MAX_EXPANDED_CELLS", 1)
+        counts = self._count(monkeypatch)
+        text, caps = xls_child.extract_text(XLS_FIXTURE.read_bytes())
+        assert (text, caps) == ("", ["xls_expanded_cells"])
+        assert counts == {"sheets": 1, "rows": 1, "unloaded": 1}
+
+    def test_text_budget_cuts_a_value(self, monkeypatch):
+        from src.extractors import xls_child
+
+        header = "[Sheet: Summary]"
+        monkeypatch.setattr(xls_child, "_MAX_TEXT_CHARS", len("Summary") + 11 + 3)
+        counts = self._count(monkeypatch)
+        text, caps = xls_child.extract_text(XLS_FIXTURE.read_bytes())
+        assert (text, caps) == (f"{header}\nIt", ["xls_text_chars"])
+        assert counts["rows"] == 1
+
+    def test_cell_values_are_written_as_the_xlsx_extractor_writes_them(self):
+        import xlrd
+        from src.extractors import xls_child
+
+        assert xls_child._cell_text(xlrd.XL_CELL_NUMBER, 4471.0, 0) == "4471"
+        assert xls_child._cell_text(xlrd.XL_CELL_NUMBER, 2.5, 0) == "2.5"
+        assert xls_child._cell_text(xlrd.XL_CELL_NUMBER, 1e20, 0) == "1e+20"
+        assert xls_child._cell_text(xlrd.XL_CELL_BOOLEAN, 1, 0) == "TRUE"
+        assert xls_child._cell_text(xlrd.XL_CELL_BOOLEAN, 0, 0) == "FALSE"
+        assert xls_child._cell_text(xlrd.XL_CELL_DATE, 45000.0, 0) == "2023-03-15 00:00:00"
+        # A date xlrd cannot convert keeps its number.
+        assert xls_child._cell_text(xlrd.XL_CELL_DATE, 1e10, 0) == "10000000000"
+        for ctype in (xlrd.XL_CELL_EMPTY, xlrd.XL_CELL_BLANK, xlrd.XL_CELL_ERROR):
+            assert xls_child._cell_text(ctype, 7, 0) is None
+
+    def test_separators_inside_a_value_become_spaces(self, monkeypatch):
+        import xlrd
+        from src.extractors import xls_child
+
+        class Sheet:
+            name = "S"
+            nrows = 1
+
+            def row_types(self, _rowx):
+                return [xlrd.XL_CELL_TEXT, xlrd.XL_CELL_EMPTY, xlrd.XL_CELL_TEXT, xlrd.XL_CELL_TEXT]
+
+            def row_values(self, _rowx):
+                return ["a\tb", "", "  ", "c\nd"]
+
+        class Book:
+            nsheets = 1
+            datemode = 0
+
+            def sheet_by_index(self, _index):
+                return Sheet()
+
+            def unload_sheet(self, _index):
+                pass
+
+        assert xls_child._walk(Book()) == ("[Sheet: S]\na b\t\t\tc d", [])
+
+    def test_output_encoding(self):
+        from src.extractors import xls_child
+
+        assert xls_child.encode_output("Zürich", ["xls_sheets"]) == "xls_sheets\nZürich".encode()
+        assert xls_child.encode_output("", []) == b"\n"
+
+
+class TestXlsCapsReachTheLog:
+    """The child reports a cap by name; the parent logs it through
+    ``warn_extractor_cap``, once, without workbook text."""
+
+    def test_child_cap_is_logged_and_counted(self, monkeypatch, caplog):
+        from src.extractors import xls
+
+        caplog.set_level("DEBUG")
+        extractors.drain_extractor_counts()
+        monkeypatch.setattr(
+            xls,
+            "run_tool",
+            lambda *_a, **_k: ToolOutput(f"xls_sheets\n{MARKER}".encode(), truncated=False),
+        )
+        result = _xls(_OLE2_MAGIC)
+        assert result.status == STATUS_SUCCESS
+        lines = [r for r in caplog.records if "extractor cap" in r.getMessage()]
+        assert [r.levelno for r in lines] == [logging.WARNING]
+        assert "extractor cap xls_sheets:" in lines[0].getMessage()
+        assert extractors.drain_extractor_counts()["extractor_caps"] == 1
+        assert MARKER not in caplog.text
