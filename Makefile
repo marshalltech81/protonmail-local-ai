@@ -1,4 +1,4 @@
-.PHONY: build build-nocache up down logs status requeue-dead clean sync sync-indexer sync-mcp test test-indexer test-mcp test-mbsync test-mbsync-tls test-mbsync-layout test-compose test-validate-env test-make-status restart-indexer baseline eval-answers eval-answers-compare typecheck typecheck-indexer typecheck-mcp init-secrets validate-env help
+.PHONY: build build-nocache up down logs status requeue-dead clean sync sync-indexer sync-mcp test test-indexer test-mcp test-mbsync test-mbsync-tls test-mbsync-layout test-compose test-validate-env test-make-status restart-indexer backup-index restore-index test-index-backup baseline eval-answers eval-answers-compare typecheck typecheck-indexer typecheck-mcp init-secrets validate-env help
 
 # Per-checkout uv cache (#896): a cache shared between checkouts or
 # worktrees running make targets at the same time fails with missing-file
@@ -24,9 +24,11 @@ help:
 	@echo "  restart-indexer  Run validate-env, then restart the indexer (after editing config/authority.toml)"
 	@echo "  logs         Tail logs from all containers"
 	@echo "  status       Show container, privacy (LOCAL or REMOTE) and index status"
+	@echo "  backup-index Copy the live index to BACKUP_DIR=<dir outside the checkout> (mode 700/600), checked with integrity_check"
+	@echo "  restore-index Replace the index with BACKUP=<file from backup-index> (asks first; stops indexer and mcp-server, restarts mcp-server once the indexer verifies the index)"
 	@echo "  requeue-dead Requeue dead-lettered indexing jobs (optional CLASS=retryable|permanent_source_failure|operator_action_required)"
 	@echo "  sync         Sync local uv environments for indexer and mcp-server"
-	@echo "  test         Run indexer, mcp-server, mbsync, Compose, validate-env and make status script tests locally"
+	@echo "  test         Run indexer, mcp-server, mbsync, Compose, validate-env, make status and index backup script tests locally"
 	@echo "  typecheck    Run mypy over the indexer and mcp-server Python services"
 	@echo "  test-indexer Run indexer unit tests only"
 	@echo "  test-mcp     Run mcp-server unit tests only"
@@ -35,6 +37,7 @@ help:
 	@echo "  test-mbsync-layout  Run the mbsync Maildir layout and UIDVALIDITY checks with synthetic stores (needs Docker)"
 	@echo "  test-compose Run Compose rendering and merged-hardening tests"
 	@echo "  test-validate-env  Run validate-env.sh and mcp-auth-headers.sh tests against synthetic fixtures"
+	@echo "  test-index-backup  Run backup-index and restore-index tests against a fake docker (no daemon)"
 	@echo "  test-make-status  Run make status tests against a fake docker (no daemon)"
 	@echo "  baseline     Run the retrieval regression baseline (UPDATE=1 rewrites the rank snapshot)"
 	@echo "  eval-answers Opt-in ask_mailbox answer-quality run on the synthetic corpus (calls INFERENCE_* and JUDGE_* providers)"
@@ -201,8 +204,23 @@ status:
 requeue-dead:
 	docker exec indexer python -m src.requeue_dead $(if $(CLASS),--class $(CLASS),)
 
+# Copy the live index while the stack runs (#1005), for example before
+# deploying a schema change. The copy holds the whole mailbox, so it goes
+# only to BACKUP_DIR, which must be outside the checkout; see
+# scripts/backup-index.sh and docs/troubleshooting.md ("Back up and
+# restore the index").
+backup-index:
+	BACKUP_DIR="$(BACKUP_DIR)" ./scripts/backup-index.sh
+
+# Replace the index with a backup-index copy (#1005): asks for "yes",
+# stops indexer and mcp-server, checks the copy and swaps it in, starts
+# the indexer and prints its schema and embedder identity lines, then
+# starts mcp-server once the indexer has verified the index.
+restore-index:
+	BACKUP="$(BACKUP)" ./scripts/restore-index.sh
+
 # Run unit tests locally using uv
-test: test-indexer test-mcp test-mbsync test-compose test-validate-env test-make-status
+test: test-indexer test-mcp test-mbsync test-compose test-validate-env test-make-status test-index-backup
 
 test-indexer: sync-indexer
 	cd indexer && uv run pytest -q
@@ -228,6 +246,9 @@ test-validate-env:
 
 test-make-status:
 	bash scripts/tests/make_status_test.sh
+
+test-index-backup:
+	bash scripts/tests/index_backup_test.sh
 
 # Retrieval regression baseline. Step 1 indexes the synthetic mailbox with
 # the real indexer and a hashed embedder; step 2 checks the golden
