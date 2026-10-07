@@ -798,9 +798,11 @@ SQLite's online backup API from a read-only connection, which reads one
 consistent snapshot while the indexer writes, into a temporary file next
 to the index in the index volume (so the volume needs free space for one
 more copy of `mail.db` while it runs). It runs `PRAGMA integrity_check`
-on that copy, streams it to `BACKUP_DIR/mail-<UTC timestamp>.db`, checks
-the SHA-256 of the host file against the container's, and removes the
-temporary file. A temporary copy left by a run that was killed before
+on that copy, streams it to `BACKUP_DIR/mail-<UTC timestamp>-<run>.db`
+(where `<run>` is the process ID and four random bytes, so two backups
+started in the same second never share a name, in the volume or on the
+host), checks the SHA-256 of the host file against the container's, and
+removes the temporary file. A temporary copy left by a run that was killed before
 its cleanup (`.backup-index-*.db` in the volume) is removed by the next
 backup once it is more than 6 hours old, and the run says how many it
 removed. The target prints the integrity result, the path, the
@@ -817,7 +819,7 @@ the running containers changes.
 To go back to a copy:
 
 ```bash
-make restore-index BACKUP="$HOME/protonmail-local-ai-backup/mail-20261007T120000Z.db"
+make restore-index BACKUP="$HOME/protonmail-local-ai-backup/mail-20261007T120000Z-48213-9f3ac1d2.db"
 ```
 
 It asks for `yes`, then:

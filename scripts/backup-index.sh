@@ -20,7 +20,7 @@ set -Eeuo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 
-# Runs inside the indexer container: python -c CODE MODE STAMP.
+# Runs inside the indexer container: python -c CODE MODE TAG.
 # make: back up, check and describe the copy; stream: write it to
 # stdout; remove: delete it. Paths derive from SQLITE_PATH.
 BACKUP_PY='
@@ -28,9 +28,9 @@ import hashlib, os, sqlite3, sys, time
 from contextlib import closing
 from pathlib import Path
 
-mode, stamp = sys.argv[1], sys.argv[2]
+mode, tag = sys.argv[1], sys.argv[2]
 db = Path(os.environ["SQLITE_PATH"])
-copy = db.with_name(f".backup-index-{stamp}.db")
+copy = db.with_name(f".backup-index-{tag}.db")
 if mode == "make":
     # Reclaim copies an interrupted run left behind (killed before its
     # cleanup ran). Only those untouched for 6 hours, so a backup still
@@ -151,13 +151,19 @@ here=$(pwd -P)
 [[ "$here" != "$REPO" && "$here" != "$REPO"/* ]] || die "BACKUP_DIR is inside the checkout ($REPO)"
 require_private . "$dir"
 
+# The UTC second, then a token unique to this run (the pid and four
+# random bytes): two runs that start in the same second would otherwise
+# share the in-volume copy's name and remove each other's copy (#1051).
+# The host file carries the same name, so it cannot collide either.
 stamp=$(date -u +%Y%m%dT%H%M%SZ)
-dest="mail-$stamp.db"
+tag="$stamp-$$-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
+[[ "$tag" =~ ^[0-9]{8}T[0-9]{6}Z-[0-9]+-[0-9a-f]{8}$ ]] || die "could not build the backup name (date or od gave an unexpected value)"
+dest="mail-$tag.db"
 [[ ! -e "$dest" ]] || die "$dir/$dest already exists"
 
 cleanup() {
-    docker exec indexer python -c "$BACKUP_PY" remove "$stamp" ||
-        printf 'backup-index: could not remove the temporary copy .backup-index-%s.db from the index volume\n' "$stamp" >&2
+    docker exec indexer python -c "$BACKUP_PY" remove "$tag" ||
+        printf 'backup-index: could not remove the temporary copy .backup-index-%s.db from the index volume\n' "$tag" >&2
     if [[ "${complete:-0}" != 1 ]]; then
         rm -f "$dest"
     fi
@@ -165,7 +171,7 @@ cleanup() {
 trap cleanup EXIT
 
 printf 'Copying the index inside the indexer container...\n'
-report=$(docker exec indexer python -c "$BACKUP_PY" make "$stamp") || die "the indexer could not copy the index (its error is above)"
+report=$(docker exec indexer python -c "$BACKUP_PY" make "$tag") || die "the indexer could not copy the index (its error is above)"
 integrity=""
 read -r size digest version ours integrity <<<"$report"
 [[ -n "$integrity" ]] || die "the indexer did not report on the copy"
@@ -178,7 +184,7 @@ printf 'integrity_check: %s\n' "$integrity"
 (
     umask 077
     set -o noclobber
-    docker exec indexer python -c "$BACKUP_PY" stream "$stamp" >"$dest"
+    docker exec indexer python -c "$BACKUP_PY" stream "$tag" >"$dest"
 )
 host_digest=$(shasum -a 256 "$dest")
 host_digest="${host_digest%% *}"
