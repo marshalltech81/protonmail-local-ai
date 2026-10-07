@@ -292,7 +292,7 @@ services:
       # - none (default): intelligence tools are not registered, and
       #   nothing is sent to an inference provider.
       INFERENCE_MODE: ${INFERENCE_MODE:-none}
-      INFERENCE_BASE_URL: ${INFERENCE_BASE_URL}
+      INFERENCE_BASE_URL: ${INFERENCE_BASE_URL:-}
       INFERENCE_MODEL: ${INFERENCE_MODEL:-claude-sonnet-5-5}
       # Per-operation HTTP timeout for inference completions (seconds):
       # each connect, read or write must make progress within it; it
