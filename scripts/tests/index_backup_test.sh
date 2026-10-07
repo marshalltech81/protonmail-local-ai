@@ -604,6 +604,44 @@ restore_restarts_the_services_when_stop_fails() {
     fi
 }
 
+restore_refuses_a_replaceable_backup_path() {
+    reset
+    make_db "$WORK/data/mail.db"
+    # A directory another account can write (group-writable, no sticky
+    # bit) on the way to the backup lets it swap the file.
+    mkdir -m 700 "$WORK/shared"
+    chmod 775 "$WORK/shared"
+    mkdir -m 700 "$WORK/shared/backups"
+    make_db "$WORK/shared/backups/backup.db"
+    run_restore "$WORK/shared/backups/backup.db" yes
+    [[ "$STATUS" -ne 0 ]]
+    grep -F 'another account can replace' "$WORK/out" >/dev/null
+    if grep -E '^(stop|run|start)' "$WORK/docker.log" >/dev/null; then
+        return 1
+    fi
+    # A sticky directory (like /tmp) is fine.
+    reset
+    make_db "$WORK/data/mail.db"
+    chmod 1775 "$WORK/shared"
+    FAKE_LOGS="$READY_LOGS" run_restore "$WORK/shared/backups/backup.db" yes
+    [[ "$STATUS" -eq 0 ]]
+    rm -rf "${WORK:?}/shared"
+}
+
+restore_refuses_a_symlinked_backup() {
+    reset
+    make_db "$WORK/data/mail.db"
+    make_db "$WORK/backup.db"
+    ln -s "$WORK/backup.db" "$WORK/link.db"
+    run_restore "$WORK/link.db" yes
+    rm -f "$WORK/link.db"
+    [[ "$STATUS" -ne 0 ]]
+    grep -F 'is a symbolic link' "$WORK/out" >/dev/null
+    if grep -E '^(stop|run|start)' "$WORK/docker.log" >/dev/null; then
+        return 1
+    fi
+}
+
 stub_matches_the_indexer() {
     local name
     for name in SCHEMA_VERSION SCHEMA_APPLICATION_ID; do
@@ -662,6 +700,8 @@ check "restore reads RESTORE_WAIT_SECONDS as decimal" restore_reads_the_wait_as_
 check "restore streams the file it opened before the prompt" restore_streams_the_file_it_checked
 check "restore reports a failed log read" restore_reports_a_failed_log_read
 check "restore restarts the services when stop fails" restore_restarts_the_services_when_stop_fails
+check "restore refuses a backup path another account can replace" restore_refuses_a_replaceable_backup_path
+check "restore refuses a symlinked backup" restore_refuses_a_symlinked_backup
 check "the restore stub matches indexer/src/database.py" stub_matches_the_indexer
 
 if ((FAILURES > 0)); then

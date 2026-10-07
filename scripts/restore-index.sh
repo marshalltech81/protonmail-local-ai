@@ -86,7 +86,26 @@ die() {
 if [[ "$BACKUP" == \~/* ]]; then
     BACKUP="$HOME${BACKUP#\~}"
 fi
+[[ ! -L "$BACKUP" ]] || die "$BACKUP is a symbolic link; pass the file itself"
 [[ -f "$BACKUP" ]] || die "$BACKUP is not a file"
+
+# The structural checks below cannot tell a crafted index from a real
+# one, so the path to the backup must be one no other account can
+# change: the file and every directory above it owned by you (or root),
+# with no group or other write bit unless the directory is sticky.
+# Otherwise another account could swap the file before it is opened.
+me=$(id -u)
+if [[ -n "$(find "$BACKUP" -maxdepth 0 \( -perm -g=w -o -perm -o=w -o \( ! -user 0 ! -user "$me" \) \) -print)" ]]; then
+    die "another account can replace $BACKUP; it must be yours and writable only by you"
+fi
+ancestor=$(cd -- "$(dirname -- "$BACKUP")" && pwd -P)
+while :; do
+    if [[ -n "$(find "$ancestor" -maxdepth 0 \( \( \( -perm -g=w -o -perm -o=w \) ! -perm -1000 \) -o \( ! -user 0 ! -user "$me" \) \) -print)" ]]; then
+        die "another account can replace $BACKUP through $ancestor; keep backups in a directory only you can write, as make backup-index creates"
+    fi
+    [[ "$ancestor" != / ]] || break
+    ancestor=$(dirname -- "$ancestor")
+done
 # Open the backup once, now, and stream that descriptor later: the file
 # checked here is the one restored, whatever is put at its path while the
 # prompt waits or the services stop.

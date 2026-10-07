@@ -773,9 +773,9 @@ way (killed, disk full) the index stays at the last version that
 finished, and the next `make up` retries the rest; nothing needs to be
 deleted. If a retry keeps failing with the same error, rebuild the
 index as in the section above. If a migration finished but the
-result is wrong, restore the copy taken before the upgrade
-([Back up and restore the index](#back-up-and-restore-the-index)) and
-run the release that wrote it. v1 (#928) keys the attachment
+result is wrong, recreate the containers from the release before it
+and then restore the copy taken before the upgrade, in that order
+([Back up and restore the index](#back-up-and-restore-the-index)). v1 (#928) keys the attachment
 extraction cache by extractor module; after it, an attachment whose
 label selects a different extractor from the one that first read its
 bytes is re-extracted once, the next time its message is reprocessed.
@@ -852,11 +852,32 @@ run `make up` so the containers exist, then restore.
 The current index is replaced, so take a `make backup-index` first if
 you may want it back. Mail that arrived after the copy was taken is
 indexed again when the indexer starts, since it queues every Maildir
-message the index does not hold. A copy at an older schema version is
-migrated again on that start, so restore it with the release that
-wrote it if the newer migration is the problem. The indexer refuses a
-copy made with a different embedder; see
+message the index does not hold. The indexer refuses a copy made with
+a different embedder; see
 [Embedder identity mismatch](#embedder-identity-mismatch).
+
+The restore runs, and then starts, the image of the existing indexer
+container, and that indexer migrates an older copy again on its first
+start. To undo a migration that finished but is wrong, recreate the
+containers from the release before it first, then restore:
+
+```bash
+git checkout <the release before the migration>
+make build
+docker compose up --no-start   # add the same -f overlays you run with
+make restore-index BACKUP="$HOME/protonmail-local-ai-backup/mail-<before the upgrade>.db"
+```
+
+`up --no-start` replaces the containers with ones built from that
+release without starting them, so nothing opens the migrated index;
+`restore-index` then installs the copy and starts them.
+
+The backup file and every directory above it must be yours (or
+root's) and writable only by you, unless the directory is sticky like
+`/tmp`, and the file must not be a symbolic link: another account
+could otherwise swap in a crafted index, which the integrity and schema
+checks cannot tell apart. Directories made by `make backup-index`
+already qualify.
 
 ## Embedder identity mismatch
 

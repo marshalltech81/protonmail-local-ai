@@ -1436,7 +1436,8 @@ stops startup (`docs/troubleshooting.md`).
 Before deploying a release that adds a migration, take a snapshot with
 `make backup-index BACKUP_DIR=<directory outside the checkout>`: a
 migration that commits but turns out wrong is then undone with
-`make restore-index BACKUP=<file>` instead of a full rebuild from
+`make restore-index BACKUP=<file>`, after recreating the containers
+from the release before the migration, instead of a full rebuild from
 Maildir (`docs/troubleshooting.md`, "Back up and restore the index").
 
 | Version | Migration | Change |
