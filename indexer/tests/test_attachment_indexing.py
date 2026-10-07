@@ -1980,20 +1980,28 @@ def test_cached_no_extractor_row_for_a_dotx_is_re_extracted(tmp_path):
         assert persisted.text is not None and "SYNTHETIC_DOTX_FACT" in persisted.text
 
 
-@pytest.mark.parametrize("variant", ["ppsx", "potx", "pptm"])
+@pytest.mark.parametrize("variant", ["ppsx", "potx", "pptm", "ppsm", "potm"])
 def test_cached_no_extractor_row_for_a_powerpoint_variant_is_re_extracted(tmp_path, variant):
-    """#947: a slideshow, template or macro-enabled deck cached
-    ``unsupported`` (no extractor) before it was routed is re-queued by the
-    startup sweep and re-extracted through the real dispatcher; its chunks
-    carry a fact that appears only in the attachment."""
+    """#947, #1042: a slideshow, template or macro-enabled deck, slideshow
+    or template cached ``unsupported`` (no extractor) before it was routed
+    is re-queued by the startup sweep and re-extracted through the real
+    dispatcher; its chunks carry a fact that appears only in the
+    attachment."""
     from src.attachment_indexing import reprocess_reruns_extraction
 
-    from tests.test_extractors import _PPTX_VARIANTS, _boxes, _deck, _macro_deck, _retyped_deck
+    from tests.test_extractors import (
+        _MACRO_VARIANTS,
+        _PPTX_VARIANTS,
+        _boxes,
+        _deck,
+        _macro_deck,
+        _retyped_deck,
+    )
 
     mime, ext, main_type = _PPTX_VARIANTS[variant]
     fact = "SYNTHETIC_DECK_ONLY_FACT"
-    if variant == "pptm":
-        payload = _macro_deck(fact)
+    if variant in _MACRO_VARIANTS:
+        payload = _macro_deck(fact, main_type)
     else:
         payload = _retyped_deck(main_type, _deck(_boxes(fact)))
     for content_type, filename in ((mime, "a.bin"), ("application/octet-stream", f"a{ext}")):

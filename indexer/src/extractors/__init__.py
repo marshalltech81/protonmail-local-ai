@@ -338,6 +338,11 @@ class ExtractionResult:
 # re-runs every cached document once through the walk after the open,
 # which has no budget yet (#1031), and records an over-budget package
 # that was read in full before the budgets ``unsupported``.
+# pptx 3 still: reads macro-enabled slideshows (``.ppsm``) and templates
+# (``.potm``), whose main parts python-pptx loaded as generic parts, so
+# one labelled ``.pptx`` failed by type (#1042); the bump above refreshes
+# those rows, and ``.ppsm`` / ``.potm`` occurrences cached "no extractor"
+# carry no version and are re-queued by that sweep.
 EXTRACTOR_VERSIONS: dict[str, int] = {
     "doc": 1,
     "docx": 6,
@@ -504,11 +509,14 @@ _MIME_DISPATCH: dict[str, str] = {
     "application/vnd.openxmlformats-officedocument.presentationml.presentation": "pptx",
     # Macro-enabled decks (``.pptm``, text only; macros are never read),
     # slideshows (``.ppsx``) and templates (``.potx``): the PPTX extractor
-    # loads their main parts (#947).
+    # loads their main parts (#947), as it does the macro-enabled
+    # slideshows (``.ppsm``) and templates (``.potm``) it registers (#1042).
     # Keys are lowercase: the label is lowercased before the lookup.
     "application/vnd.ms-powerpoint.presentation.macroenabled.12": "pptx",
     "application/vnd.openxmlformats-officedocument.presentationml.slideshow": "pptx",
     "application/vnd.openxmlformats-officedocument.presentationml.template": "pptx",
+    "application/vnd.ms-powerpoint.slideshow.macroenabled.12": "pptx",
+    "application/vnd.ms-powerpoint.template.macroenabled.12": "pptx",
     "text/html": "html",
     "application/xhtml+xml": "html",
     "text/plain": "text",
@@ -531,6 +539,8 @@ _EXT_DISPATCH: dict[str, str] = {
     ".pptm": "pptx",
     ".ppsx": "pptx",
     ".potx": "pptx",
+    ".ppsm": "pptx",
+    ".potm": "pptx",
     ".html": "html",
     ".htm": "html",
     ".xhtml": "html",

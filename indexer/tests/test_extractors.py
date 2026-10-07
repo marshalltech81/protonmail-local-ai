@@ -6253,21 +6253,30 @@ class TestPptxExtractor:
 
 
 _PPTM_MIME = "application/vnd.ms-powerpoint.presentation.macroEnabled.12"
+_PPSM_MIME = "application/vnd.ms-powerpoint.slideshow.macroEnabled.12"
+_POTM_MIME = "application/vnd.ms-powerpoint.template.macroEnabled.12"
 _PRESENTATION_MAIN = (
     "application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"
 )
 _SLIDESHOW_MAIN = "application/vnd.openxmlformats-officedocument.presentationml.slideshow.main+xml"
 _TEMPLATE_MAIN = "application/vnd.openxmlformats-officedocument.presentationml.template.main+xml"
 _MACRO_MAIN = "application/vnd.ms-powerpoint.presentation.macroEnabled.main+xml"
+_SLIDESHOW_MACRO_MAIN = "application/vnd.ms-powerpoint.slideshow.macroEnabled.main+xml"
+_TEMPLATE_MACRO_MAIN = "application/vnd.ms-powerpoint.template.macroEnabled.main+xml"
 _VBA_MARKER = "SYNTHETIC_MACRO_MARKER"
 
 # (MIME type, extension, main-part content type) of each PresentationML
-# variant read since #947.
+# variant read since #947 (``.ppsm`` / ``.potm`` since #1042).
 _PPTX_VARIANTS = {
     "ppsx": (_PPSX_MIME, ".ppsx", _SLIDESHOW_MAIN),
     "potx": (_POTX_MIME, ".potx", _TEMPLATE_MAIN),
     "pptm": (_PPTM_MIME, ".pptm", _MACRO_MAIN),
+    "ppsm": (_PPSM_MIME, ".ppsm", _SLIDESHOW_MACRO_MAIN),
+    "potm": (_POTM_MIME, ".potm", _TEMPLATE_MACRO_MAIN),
 }
+# The variants whose main part is macro-enabled: saved with a
+# ``vbaProject.bin`` part.
+_MACRO_VARIANTS = {"pptm", "ppsm", "potm"}
 
 # Each variant labelled by its MIME type alone and by its extension alone.
 _PPTX_VARIANT_LABELS = [
@@ -6295,10 +6304,11 @@ def _retyped_deck(main_type: str, payload: bytes | None = None) -> bytes:
     return _rewrite_deck(payload, {"[Content_Types].xml": retype})
 
 
-def _macro_deck(text: str) -> bytes:
-    """A ``.pptm``: a deck with a ``vbaProject.bin`` part related from the
-    presentation, as PowerPoint saves macros, holding a synthetic marker
-    instead of a VBA project."""
+def _macro_deck(text: str, main_type: str = _MACRO_MAIN) -> bytes:
+    """A ``.pptm`` (or, by ``main_type``, a ``.ppsm`` / ``.potm``): a deck
+    with a ``vbaProject.bin`` part related from the presentation, as
+    PowerPoint saves macros, holding a synthetic marker instead of a VBA
+    project."""
     import io
 
     from pptx import Presentation
@@ -6317,7 +6327,7 @@ def _macro_deck(text: str) -> bytes:
     part.relate_to(vba, "http://schemas.microsoft.com/office/2006/relationships/vbaProject")
     buf = io.BytesIO()
     presentation.save(buf)
-    return _retyped_deck(_MACRO_MAIN, buf.getvalue())
+    return _retyped_deck(main_type, buf.getvalue())
 
 
 class TestPowerPointVariants:
@@ -6325,17 +6335,24 @@ class TestPowerPointVariants:
     decks (``.pptm``) are read by the PPTX extractor. python-pptx's own
     part factory loads each one's main part as a ``PresentationPart``;
     the extractor opens the package with ``Package.open`` and accepts
-    those main-part types. The payload bytes are not changed, and a
-    macro part is never read."""
+    those main-part types. #1042: macro-enabled slideshows (``.ppsm``)
+    and templates (``.potm``) too; python-pptx has no mapping for their
+    main parts, so the extractor registers them at import. The payload
+    bytes are not changed, and a macro part is never read."""
 
     def test_python_pptx_route_for_variants_still_holds(self):
         """Fails loudly if a python-pptx upgrade changes the route: the
         stock ``pptx.Presentation`` still refuses a slideshow and a
-        template, and python-pptx's ``PartFactory`` still maps each
-        variant's main-part type to ``PresentationPart``, which
-        ``Package.open`` then loads."""
+        template, plain or macro-enabled; python-pptx's own map
+        (``pptx/__init__.py``) still covers the three #947 types and still
+        lacks the two macro-enabled ones (so the registration
+        ``extractors.pptx`` makes at import is still needed, and the test
+        says so when an upgrade makes it redundant); and ``PartFactory``
+        maps all five to ``PresentationPart``, which ``Package.open`` then
+        loads."""
         import io
 
+        import pptx as python_pptx
         from pptx import Presentation
         from pptx.opc.constants import CONTENT_TYPE as CT
         from pptx.opc.package import PartFactory
@@ -6348,16 +6365,32 @@ class TestPowerPointVariants:
             CT.PML_TEMPLATE_MAIN,
             CT.PML_PRES_MACRO_MAIN,
         }
+        assert not hasattr(CT, "PML_SLIDESHOW_MACRO_MAIN")
+        assert not hasattr(CT, "PML_TEMPLATE_MACRO_MAIN")
+        assert pptx.PML_SLIDESHOW_MACRO_MAIN == _SLIDESHOW_MACRO_MAIN
+        assert pptx.PML_TEMPLATE_MACRO_MAIN == _TEMPLATE_MACRO_MAIN
         assert pptx._PRESENTATION_MAIN_TYPES == {
             CT.PML_PRESENTATION_MAIN,
             CT.PML_SLIDESHOW_MAIN,
             CT.PML_TEMPLATE_MAIN,
             CT.PML_PRES_MACRO_MAIN,
+            _SLIDESHOW_MACRO_MAIN,
+            _TEMPLATE_MACRO_MAIN,
         }
-        for main_type in (_SLIDESHOW_MAIN, _TEMPLATE_MAIN):
+        native = python_pptx.content_type_to_part_class_map
+        for main_type in (_SLIDESHOW_MAIN, _TEMPLATE_MAIN, _MACRO_MAIN):
+            assert native[main_type] is PresentationPart
+        for main_type in (_SLIDESHOW_MACRO_MAIN, _TEMPLATE_MACRO_MAIN):
+            assert main_type not in native
+        for main_type in (
+            _SLIDESHOW_MAIN,
+            _TEMPLATE_MAIN,
+            _SLIDESHOW_MACRO_MAIN,
+            _TEMPLATE_MACRO_MAIN,
+        ):
             with pytest.raises(ValueError, match="not a PowerPoint file"):
                 Presentation(io.BytesIO(_retyped_deck(main_type)))
-        for main_type in (_SLIDESHOW_MAIN, _TEMPLATE_MAIN, _MACRO_MAIN):
+        for _, _, main_type in _PPTX_VARIANTS.values():
             assert PartFactory.part_type_for[main_type] is PresentationPart
             part = Package.open(io.BytesIO(_retyped_deck(main_type))).main_document_part
             assert isinstance(part, PresentationPart)
@@ -6376,20 +6409,33 @@ class TestPowerPointVariants:
         assert calls == ["pptx"]
         assert "VARIANTFACT" not in caplog.text
 
-    @pytest.mark.parametrize("label", [(_PPTM_MIME, "a.bin"), ("", "a.pptm")])
-    def test_macro_part_is_never_read(self, label, monkeypatch, caplog):
-        """A ``.pptm`` yields its slide text. python-pptx loads the macro
-        part as an opaque ``Part`` when it opens the package; nothing reads
-        its bytes, so no macro text reaches the index or the logs."""
+    @pytest.mark.parametrize(
+        ("label", "main_type"),
+        [
+            pytest.param((mime, "a.bin"), main, id=f"{name}-mime")
+            for name, (mime, _, main) in _PPTX_VARIANTS.items()
+            if name in _MACRO_VARIANTS
+        ]
+        + [
+            pytest.param(("", f"a{ext}"), main, id=f"{name}-ext")
+            for name, (_, ext, main) in _PPTX_VARIANTS.items()
+            if name in _MACRO_VARIANTS
+        ],
+    )
+    def test_macro_part_is_never_read(self, label, main_type, monkeypatch, caplog):
+        """A ``.pptm``, ``.ppsm`` or ``.potm`` yields its slide text.
+        python-pptx loads the macro part as an opaque ``Part`` when it
+        opens the package; nothing reads its bytes, so no macro text
+        reaches the index or the logs."""
         import io
         import zipfile
 
         from pptx.opc.package import Part
 
-        payload = _macro_deck("MACRODECKFACT")
+        payload = _macro_deck("MACRODECKFACT", main_type)
         archive = zipfile.ZipFile(io.BytesIO(payload))
         assert archive.read("ppt/vbaProject.bin") == _VBA_MARKER.encode()
-        assert _MACRO_MAIN.encode() in archive.read("[Content_Types].xml")
+        assert main_type.encode() in archive.read("[Content_Types].xml")
 
         read: list[str] = []
         real_blob = Part.blob
@@ -6465,9 +6511,17 @@ class TestPowerPointVariants:
 
     def test_variant_labelled_pptx_is_extracted(self):
         """The outcome that changed for a ``.pptx`` label, and why the
-        PPTX version is bumped: a slideshow or template sent as ``.pptx``
-        failed under ``pptx@1`` (``pptx.Presentation`` refused it)."""
-        for main_type in (_SLIDESHOW_MAIN, _TEMPLATE_MAIN):
+        PPTX version was bumped: a slideshow or template sent as ``.pptx``
+        failed under ``pptx@1`` (``pptx.Presentation`` refused it). A
+        macro-enabled slideshow or template sent as ``.pptx`` failed under
+        ``pptx@2`` (its main part loaded as a generic part, #1042); the
+        #1032 bump to ``pptx@3`` refreshes those rows."""
+        for main_type in (
+            _SLIDESHOW_MAIN,
+            _TEMPLATE_MAIN,
+            _SLIDESHOW_MACRO_MAIN,
+            _TEMPLATE_MACRO_MAIN,
+        ):
             result = extract(
                 content_type=_PPTX_MIME, filename="a.pptx", payload=_retyped_deck(main_type)
             )
