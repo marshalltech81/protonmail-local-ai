@@ -1480,6 +1480,12 @@ def test_evidence_descriptions_warn_passages_can_stop_before_a_resolution(tool, 
     assert "late resolution in a long thread" in doc
     assert "re-ask about the resolution" in doc
     assert "get_thread or get_message" in doc
+    # Review round 6: name the two exceptions to similarity order, and
+    # keep a matched filename out of the re-ask so it does not pull the
+    # same attachment passages back in.
+    assert "attachments whose filename or MIME type the question matches come first" in doc
+    assert "a thread with no passages shows its indexed text" in doc
+    assert "without the attachment's filename" in doc
 
 
 def test_extract_description_points_to_the_population_recipe(empty_db):

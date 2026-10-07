@@ -474,9 +474,12 @@ def register_search_tools(
         limit chunks of it.
 
         A thread's passages are chosen by similarity to the question
-        and can stop before a late resolution in a long thread. For
-        status or closure, re-ask about the resolution, or read the
-        thread's later messages with get_thread or get_message.
+        (attachments whose filename or MIME type the question matches
+        come first, and a thread with no passages shows its indexed
+        text), so they can stop before a late resolution in a long
+        thread. For status or closure, re-ask about the resolution
+        without the attachment's filename, or read the thread's later
+        messages with get_thread or get_message.
 
         Args:
             query: The question or topic to gather evidence for.

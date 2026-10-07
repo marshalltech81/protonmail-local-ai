@@ -2948,9 +2948,12 @@ def register_intelligence_tools(
         ``ask_mailbox`` will surface it.
 
         A thread's passages are chosen by similarity to the question
-        and can stop before a late resolution in a long thread. For
-        status or closure, re-ask about the resolution, or read the
-        thread's later messages with get_thread or get_message.
+        (attachments whose filename or MIME type the question matches
+        come first, and a thread with no passages shows its indexed
+        text), so they can stop before a late resolution in a long
+        thread. For status or closure, re-ask about the resolution
+        without the attachment's filename, or read the thread's later
+        messages with get_thread or get_message.
 
         Use this whenever the question needs:
           - attachment content (PDFs, scans, OCR'd images, statements,

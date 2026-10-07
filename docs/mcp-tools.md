@@ -1161,12 +1161,16 @@ is treated as absent, and a padded one is stripped, here and in
 **Late resolutions in long threads
 ([#974](https://github.com/marshalltech81/protonmail-local-ai/issues/974)).**
 A thread's passages are chosen by similarity to the question (at most
-six, then cut to the per-thread prompt budget), not by position, so in
-a long thread they can stop before a late resolution: the message that
-settles the matter is often worded nothing like the question. The
-`ask_mailbox` and `get_evidence` descriptions tell the calling model
-so: for status or closure, re-ask about the resolution, or read the
-thread's later messages with `get_thread` or `get_message`.
+six, then cut to the per-thread prompt budget), not by position, with
+two exceptions: chunks of attachments whose filename or MIME type the
+question matches come first, and a thread with no indexed chunks shows
+its indexed text instead. So in a long thread they can stop before a
+late resolution: the message that settles the matter is often worded
+nothing like the question. The `ask_mailbox` and `get_evidence`
+descriptions tell the calling model so: for status or closure, re-ask
+about the resolution without the attachment's filename (which would
+pull the same attachment passages back in), or read the thread's later
+messages with `get_thread` or `get_message`.
 
 `max_threads` is clamped to `[1, 10]` at the tool boundary so an
 inflated caller-supplied value cannot expand into an oversized prompt
@@ -1507,6 +1511,10 @@ match, and nothing names the threads left out. For every occurrence
 backed by an attachment (every invoice line for one material code from
 one vendor, say; a body-only population such as RSVPs has nothing to
 enumerate and uses `extract_from_emails` alone), follow this recipe.
+It covers an unscoped, non-Trash population only: `search_attachments`
+has no folder filter and always leaves out Trash, so it cannot
+reconcile a run scoped with `folders` or one that includes Trash;
+reconcile those by hand.
 The tool description says only that the top `limit` threads are
 searched and points here; the steps are not sent to clients:
 
@@ -1531,6 +1539,11 @@ searched and points here; the steps are not sent to clients:
    window, so a January invoice in a thread with a June reply is listed
    for January but can be extracted (and take one of the `limit`
    slots) in June. Set `limit` to at least the window's thread count.
+   `participant` and `from_addr` select whole threads, so attachments
+   carried by other people's messages in the vendor's threads are
+   enumerated and extracted too: check each occurrence's sender (the
+   citation's `sender`, or `get_message` on its `claimant_id`) before
+   counting it.
 4. Reconcile across all windows, not per window. A record links to
    its source through its `_evidence` labels: look each label up by
    `label` in that call's top-level `citations` list, whose entries
@@ -1551,8 +1564,8 @@ Limits the recipe does not remove:
   extraction did not succeed and whose filename and MIME type do not
   match; its `from_addr` filter runs after a bounded candidate scan,
   so even a window under 50 can miss matches.
-- Each thread's passages are chosen by similarity to `query` and cut
-  to a budget, so an invoice page whose line is not near the query
+- Each thread's passages are chosen by similarity to `query` (with
+  the exceptions under `ask_mailbox`) and cut to a budget, so an invoice page whose line is not near the query
   can be missing from a searched thread
   ([#974](https://github.com/marshalltech81/protonmail-local-ai/issues/974),
   [#858](https://github.com/marshalltech81/protonmail-local-ai/issues/858)).
