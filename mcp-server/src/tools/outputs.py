@@ -396,8 +396,9 @@ class EvidenceThread(_Output):
     context_passages_left_out: int | None = Field(
         default=None,
         exclude_if=lambda v: v is None,
-        description="Only with scope=in_scope: this thread's context passages left out. "
-        "A thread with no chunks and a non-zero count had no in-scope passage.",
+        description="Only with scope=in_scope: this thread's context passages (of the "
+        "chosen source) left out. A thread with no chunks and a non-zero count has no "
+        "in-scope passage.",
     )
 
 

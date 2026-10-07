@@ -216,7 +216,8 @@ tool=search_emails outcome=ok total_ms=41.7 stages_ms={'query_embedding': 22.4, 
   `thread_fts` / `chunk_fts` / `attachment_fts`, the vector lanes
   `thread_vec` / `chunk_vec` (each covering every widening step of a
   filtered search), `fusion` (RRF plus post-fusion filters),
-  `evidence_fetch`, `evidence_source` (`get_evidence` with `source`),
+  `evidence_fetch`, `evidence_precision` (`get_evidence` with `source`
+  or `scope=in_scope` on the mailbox-wide path),
   `scope_labels` (the per-message
   [evidence scope](#evidence-scope-in-scope-or-context) lookup of
   `ask_mailbox` and `get_evidence`), `rerank`, `attachment_search` and
@@ -254,7 +255,12 @@ tool=search_emails outcome=ok total_ms=41.7 stages_ms={'query_embedding': 22.4, 
   `evidence_context_dropped` counts the `context` passages left out and
   `evidence_threads_scope_emptied` the threads left with none; with
   `source` on the mailbox-wide path, `evidence_threads_source_emptied`
-  counts the ranked threads with no passage of that source.
+  counts the ranked threads with no passage of that source. With
+  `max_chunks_per_thread`, `evidence_chunks_capped` counts the passages
+  the cap removed; with `max_chars_per_chunk`,
+  `evidence_chunks_truncated` counts the passages it cut. A rejected
+  control logs `get_evidence rejected invalid <field>` once per field
+  per minute, and later repeats as one count line.
 - `evidence_capped_threads` (the intelligence tools) counts the threads
   whose passages the fixed per-thread evidence budget (2,000 characters
   per thread) left out or cut. It is a design cap, not a token limit,
@@ -531,7 +537,7 @@ chunks (extracted PDF / OCR / document text) are included — unlike
 | `include_scores` | bool | `false` | Annotate each thread with the retrieval lanes that matched (`thread_fts` / `chunk_fts` / `attachment_fts` / `thread_vec` / `chunk_vec` / `rerank`; `keyword_slot` marks a thread moved up as the best thread keyword hit) and each chunk with its vector distance |
 | `source` | string | `any` | `body` or `attachment` keeps only that source's passages, chosen before the per-thread cap ([Precision controls](#precision-controls)) |
 | `scope` | string | `any` | `in_scope` leaves out `context` passages and reports how many |
-| `max_chunks_per_thread` | int | `6` | Passages per thread, `1` to `6` |
+| `max_chunks_per_thread` | int | `6`, or `limit` with `thread_id` | Passages per thread, `1` to `6` |
 | `max_chars_per_chunk` | int | `1600` | Characters per passage, `1` to `1600`; a longer passage is cut and flagged `text_truncated` |
 
 The mailbox-wide path runs the same hybrid retrieval as `ask_mailbox`
@@ -577,21 +583,25 @@ Left out, the output is the same as without them, so an audit of an
 `ask_mailbox` answer leaves them unset. Each applies to the chunks
 the existing retrieval returns:
 
-- `source` re-selects each ranked thread's passages from that source
+- `source` filters each ranked thread's full ranked passage list
   before the six-per-thread cap, so a thread whose top passages are
   attachments still returns its body passages with `source=body`. On
   the mailbox-wide path a ranked thread with no passage of that source
-  is left out, and `threads_without_source_passages` (and a line in the
-  prose) counts them. On the `thread_id` path, no passage of that
-  source returns `No evidence found ... (source=...)`.
-- `scope=in_scope` drops `context` passages after labelling, before
-  the per-thread cap and the `limit` budget. Each thread reports
-  `context_passages_left_out`, and the response its total. A thread
+  (a thread with no indexed passages included) is left out, and
+  `threads_without_source_passages` (and a line in the prose) counts
+  them. On the `thread_id` path, no passage of that source returns
+  `No evidence found ... (source=...)`.
+- `scope=in_scope` drops `context` passages after labelling, from the
+  same full list, before the per-thread cap and the `limit` budget, so
+  an in-scope passage ranked below six context passages is still
+  found. Each thread reports `context_passages_left_out` (its `context`
+  passages, of the chosen source), and the response its total. A thread
   left with no passage stays listed with an empty `chunks` list and the
   line `No in-scope passages: N context passage(s) left out`. The
   `thread_id` path takes no filters, so nothing there is `context`.
 - `max_chunks_per_thread` keeps each thread's first passages in rank
-  order; `limit` still caps the total.
+  order; `limit` still caps the total. On the `thread_id` path the
+  per-thread cap is `limit` when it is left out, as before.
 - `max_chars_per_chunk` cuts each passage's `text`, as the 1,600
   default does.
 

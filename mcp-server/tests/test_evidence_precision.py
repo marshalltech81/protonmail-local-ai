@@ -30,6 +30,7 @@ from tests.conftest import (
     _insert_attachment,
     _insert_chunk,
     _insert_message,
+    _insert_thread,
     source_sha256,
 )
 from tests.test_evidence_scope import _finish_threads
@@ -436,14 +437,162 @@ class TestValidation:
         assert _MARKER not in caplog.text
 
 
-class TestHelperDefault:
-    def test_the_shared_helper_keeps_every_source_by_default(self, precision_db):
-        embedding = [1.0, 0.0, 0.0, 0.0]
-        default = precision_db.get_evidence_chunks_for_threads(["t-trip"], embedding, 6)
-        assert [c.chunk_id for c in default["t-trip"]] == _TRIP_ORDER
-        body = precision_db.get_evidence_chunks_for_threads(["t-trip"], embedding, 6, source="body")
-        assert [c.chunk_id for c in body["t-trip"]] == [c for c in _TRIP_ORDER if c in _BODY]
-        attachment = precision_db.get_query_evidence_chunks(
-            _QUERY, ["t-trip"], embedding, 1, source="attachment"
+def _new_db(tmp_path: Path, name: str) -> tuple[sqlite3.Connection, Path]:
+    path = tmp_path / name
+    conn = sqlite3.connect(str(path))
+    conn.enable_load_extension(True)
+    sqlite_vec.load(conn)
+    conn.enable_load_extension(False)
+    _build_schema(conn)
+    return conn, path
+
+
+class TestReviewRoundOne:
+    """Codex review round 1 on PR #1038."""
+
+    def test_scope_considers_passages_ranked_below_the_six_passage_cap(self, tmp_path):
+        # Seven context passages rank above the only in-scope one.
+        conn, path = _new_db(tmp_path, "crowd.db")
+        _insert_message(
+            conn,
+            message_id="lead@crowd.example",
+            thread_id="t-crowd",
+            subject="field trip",
+            sent_at="2025-09-10T09:00:00+00:00",
+            from_=[_COACH],
+            to=[_PARENT],
         )
-        assert [c.chunk_id for c in attachment["t-trip"]] == ["lead-att-permit"]
+        _insert_message(
+            conn,
+            message_id="reply@crowd.example",
+            thread_id="t-crowd",
+            subject="field trip",
+            sent_at="2025-09-11T09:00:00+00:00",
+            from_=[_VOLUNTEER],
+            to=[_PARENT],
+        )
+        for i in range(7):
+            _chunk(
+                conn,
+                f"reply-{i}",
+                "reply@crowd.example",
+                "t-crowd",
+                f"Reply part {i}. {_MARKER}",
+                1.0 - i / 100,
+                chunk_index=i,
+                char_start=i * 40,
+            )
+        _chunk(conn, "lead-body", "lead@crowd.example", "t-crowd", "Bus at 8am.", 0.1)
+        _finish_threads(conn)
+        conn.close()
+        db = Database(str(path))
+
+        out = _evidence(db, from_addr="coach@trip.example", scope="in_scope")
+        assert _ids(out, "t-crowd") == ["lead-body"]
+        assert _thread(out, "t-crowd")["context_passages_left_out"] == 7
+        out = _evidence(db, from_addr="coach@trip.example", scope="in_scope", source="body")
+        assert _ids(out, "t-crowd") == ["lead-body"]
+
+    def test_the_timing_line_counts_what_the_caps_removed(self, precision_db, caplog):
+        with caplog.at_level(logging.INFO):
+            _evidence(precision_db, from_addr="coach@trip.example", max_chunks_per_thread=2)
+            _evidence(precision_db, from_addr="coach@trip.example", max_chars_per_chunk=22)
+            _evidence(precision_db, from_addr="coach@trip.example")
+        capped, truncated, default = (
+            r.getMessage() for r in caplog.records if r.name == "mcp.timings"
+        )
+        # t-trip: five passages cut to two; t-note's one passage stays.
+        assert "'evidence_chunks_capped': 3" in capped
+        # Four passages exceed 22 characters.
+        assert "'evidence_chunks_truncated': 4" in truncated
+        assert "evidence_chunks_capped" not in default
+        assert "evidence_chunks_truncated" not in default
+        assert _MARKER not in caplog.text
+
+    def test_the_thread_path_keeps_limit_as_its_default_per_thread_cap(self, tmp_path):
+        conn, path = _new_db(tmp_path, "pages.db")
+        _insert_message(
+            conn,
+            message_id="scan@cap.example",
+            thread_id="t-cap",
+            subject="scans",
+            sent_at="2025-09-10T09:00:00+00:00",
+            from_=[_COACH],
+            to=[_PARENT],
+            has_attachments=True,
+        )
+        for i in range(8):
+            _chunk(
+                conn,
+                f"att-{i}",
+                "scan@cap.example",
+                "t-cap",
+                f"Scanned page {i}.",
+                1.0 - i / 100,
+                attachment_id=f"scan-{i}",
+            )
+        _chunk(conn, "cap-body", "scan@cap.example", "t-cap", "Pages attached.", 0.1)
+        conn.close()
+        db = Database(str(path))
+
+        def count(**kwargs) -> int:
+            return len(_ids(_evidence(db, thread_id="t-cap", **kwargs), "t-cap"))
+
+        assert count() == 9
+        assert count(source="attachment") == 8
+        assert count(limit=3, source="attachment") == 3
+        assert count(max_chunks_per_thread=6) == 6
+
+    def test_repeated_invalid_controls_log_one_warning_per_field(self, precision_db, caplog):
+        tools = _tools(precision_db)
+        with caplog.at_level(logging.INFO):
+            for _ in range(3):
+                for kwargs in ({"source": _MARKER}, {"max_chunks_per_thread": 9}):
+                    with pytest.raises(ToolError):
+                        asyncio.run(tools["get_evidence"](query=_QUERY, **kwargs))
+        warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert warnings == [
+            "get_evidence rejected invalid source",
+            "get_evidence rejected invalid max_chunks_per_thread",
+        ]
+        assert _MARKER not in caplog.text
+
+    def test_a_chunkless_thread_counts_as_having_no_passage_of_the_source(self, tmp_path):
+        conn, path = _new_db(tmp_path, "chunkless.db")
+        _insert_message(
+            conn,
+            message_id="lead@trip.example",
+            thread_id="t-trip",
+            subject="field trip plans",
+            sent_at="2025-09-10T09:00:00+00:00",
+            from_=[_COACH],
+            to=[_PARENT],
+        )
+        _chunk(conn, "lead-b0", "lead@trip.example", "t-trip", "The bus leaves at 8am.", 1.0)
+        _insert_thread(
+            conn,
+            thread_id="t-empty",
+            subject="field trip plans",
+            participants=["coach@trip.example", _PARENT],
+            senders=["coach@trip.example"],
+            message_ids=["empty@trip.example"],
+            body_text="field trip plans",
+        )
+        _finish_threads(conn)
+        conn.close()
+        db = Database(str(path))
+
+        default = _evidence(db, from_addr="coach@trip.example", max_threads=3)
+        assert _ids(default, "t-empty") == []
+        out = _evidence(db, from_addr="coach@trip.example", max_threads=3, source="body")
+        assert [t["thread_id"] for t in out.structured_content["threads"]] == ["t-trip"]
+        assert out.structured_content["threads_without_source_passages"] == 1
+
+    def test_an_unmatched_from_name_still_reports_the_controls(self, precision_db):
+        out = _evidence(precision_db, from_name="Nobody Here", source="body", scope="in_scope")
+        assert out.structured_content["threads"] == []
+        assert out.structured_content["threads_without_source_passages"] == 0
+        assert out.structured_content["context_passages_left_out"] == 0
+        out = _evidence(precision_db, from_name="Nobody Here")
+        assert "threads_without_source_passages" not in out.structured_content
+        assert "context_passages_left_out" not in out.structured_content

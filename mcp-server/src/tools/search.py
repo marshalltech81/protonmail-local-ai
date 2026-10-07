@@ -5,11 +5,13 @@ Semantic, keyword, and hybrid search over the SQLite index.
 
 import asyncio
 import logging
+import sys
 
 from fastmcp.exceptions import ToolError
 from mcp.types import CallToolResult
 
 from ..lib.embed import embed_query
+from ..lib.rate_limited_log import RateLimitedLog
 from ..lib.security import log_tool_call, safe_provider_exception_text
 from ..lib.sqlite import (
     PROMPT_EVIDENCE_CHUNKS_PER_THREAD,
@@ -88,6 +90,19 @@ _EVIDENCE_CHUNK_CHARS = 1600
 # exactly these values.
 _EVIDENCE_SOURCES = ("any", "body", "attachment")
 _EVIDENCE_SCOPES = ("any", "in_scope")
+_PRECISION_CONTROLS = ("source", "scope", "max_chunks_per_thread", "max_chars_per_chunk")
+# Seconds per window of the rate-limited rejection warning.
+_PRECISION_REJECTION_LOG_SECS = 60.0
+# ``per_thread_limit`` that keeps every ranked chunk of a thread. The
+# evidence query already reads and ranks all of a thread's chunks before
+# its cap, so ``source`` and ``scope`` filter that full list and the
+# cap applies after them.
+_ALL_THREAD_CHUNKS = sys.maxsize
+
+
+def _of_source(chunks: list, source: str) -> list:
+    """``chunks`` of ``source`` (``body`` or ``attachment``), in order."""
+    return [c for c in chunks if (c.attachment_id is None) == (source == "body")]
 
 
 def _check_precision_controls(
@@ -150,6 +165,16 @@ def register_search_tools(
     secrets = list(secret_values or ())
     # Config identifier for the per-call timing line.
     timing_config = {"rerank": rerank_mode(reranker)}
+    # A client can repeat a rejected precision control as fast as it
+    # likes: the first rejection per field and window is logged, the
+    # rest are counted into one summary line.
+    precision_rejections = RateLimitedLog(
+        log,
+        _PRECISION_CONTROLS,
+        _PRECISION_REJECTION_LOG_SECS,
+        first_msg="get_evidence rejected invalid %s",
+        summary_msg="get_evidence rejected invalid controls in the last %ds: %s",
+    )
 
     @server.tool(
         output_schema=SearchEmailsOutput.model_json_schema(),
@@ -556,7 +581,7 @@ def register_search_tools(
                             retrieval quality.
             source: "body" or "attachment" passages only (default "any").
             scope: "in_scope" drops context passages (default "any").
-            max_chunks_per_thread: 1 to 6 (default 6).
+            max_chunks_per_thread: 1 to 6 (default 6; limit with thread_id).
             max_chars_per_chunk: 1 to 1600 (default 1600).
 
         Returns:
@@ -592,7 +617,7 @@ def register_search_tools(
         try:
             _check_precision_controls(source, scope, max_chunks_per_thread, max_chars_per_chunk)
         except InvalidFilterError as e:
-            log.warning("get_evidence rejected invalid %s", e.field_name)
+            precision_rejections.record(e.field_name)
             raise ToolError(f"Evidence error: {e}") from e
         source_filter = None if source == "any" else source
         in_scope_only = scope == "in_scope"
@@ -668,6 +693,8 @@ def register_search_tools(
         # With ``source``: ranked threads left out for having no passage
         # of that source (mailbox-wide path).
         source_emptied = 0
+        # With ``max_chunks_per_thread``: passages the cap removed.
+        capped_out = 0
         try:
             if thread_id:
                 thread = await asyncio.to_thread(db.get_thread_or_reaped, thread_id)
@@ -684,8 +711,7 @@ def register_search_tools(
                         query,
                         [thread_id],
                         embedding,
-                        min(limit, max_chunks_per_thread or limit),
-                        source_filter,
+                        _ALL_THREAD_CHUNKS if source_filter else limit,
                     )
                 chunks = grouped.get(thread_id, [])
                 if not chunks:
@@ -697,6 +723,11 @@ def register_search_tools(
                         raise ToolError(reaped_source("Thread", thread_id, current.reaped_at))
                     if not current:
                         raise ToolError(f"Thread not found: {thread_id}")
+                if source_filter:
+                    chunks = _of_source(chunks, source_filter)[:limit]
+                if max_chunks_per_thread:
+                    capped_out = max(0, len(chunks) - max_chunks_per_thread)
+                    chunks = chunks[:max_chunks_per_thread]
                 count("evidence_chunks", len(chunks))
                 if in_scope_only:
                     # No filters on this path: nothing is context.
@@ -722,6 +753,8 @@ def register_search_tools(
                                 resolved_from_addr=None,
                                 from_name_matches=0,
                                 threads=[],
+                                context_passages_left_out=0 if in_scope_only else None,
+                                threads_without_source_passages=0 if source_filter else None,
                             ),
                         )
                 embedding = await embed_query(embed_client, query, expected_embed_dim)
@@ -743,20 +776,19 @@ def register_search_tools(
                     participant=participant,
                 )
                 count("results", len(results))
-                # ``source`` re-selects each ranked thread's passages from
-                # that source before the per-thread cap. The threads and
-                # their order stay ask_mailbox's: the reranker saw the
-                # unfiltered evidence.
-                by_source: dict[str, list] | None = None
-                if source_filter and results:
-                    with stage("evidence_source"):
-                        by_source = await asyncio.to_thread(
+                # ``source`` and ``scope`` filter each ranked thread's full
+                # ranked passage list, so the six-passage cap applies after
+                # them. The threads and their order stay ask_mailbox's:
+                # the reranker saw the unfiltered evidence.
+                every_chunk: dict[str, list] | None = None
+                if (source_filter or in_scope_only) and results:
+                    with stage("evidence_precision"):
+                        every_chunk = await asyncio.to_thread(
                             db.get_query_evidence_chunks,
                             query,
                             [r.thread_id for r in results],
                             embedding,
-                            PROMPT_EVIDENCE_CHUNKS_PER_THREAD,
-                            source_filter,
+                            _ALL_THREAD_CHUNKS,
                         )
                 # Each passage labelled as ask_mailbox labels it, before
                 # ``scope=in_scope`` filters on the label.
@@ -777,17 +809,23 @@ def register_search_tools(
                 taken = 0
                 for r in results:
                     ranked = r.evidence_chunks
-                    if by_source is not None:
-                        ranked = by_source.get(r.thread_id, [])
-                        if r.evidence_chunks and not ranked:
-                            source_emptied += 1
-                            continue
                     dropped = 0
-                    if in_scope_only:
-                        kept = [c for c in ranked if _chunk_scope(c, labels) == "in_scope"]
-                        dropped = len(ranked) - len(kept)
-                        ranked = kept
-                    chunks = ranked[:per_thread][: limit - taken]
+                    if every_chunk is not None:
+                        ranked = every_chunk.get(r.thread_id, [])
+                        if source_filter:
+                            ranked = _of_source(ranked, source_filter)
+                            if not ranked:
+                                # No passage of that source, a thread
+                                # with no indexed passages included.
+                                source_emptied += 1
+                                continue
+                        if in_scope_only:
+                            kept = [c for c in ranked if _chunk_scope(c, labels) == "in_scope"]
+                            dropped = len(ranked) - len(kept)
+                            ranked = kept
+                        ranked = ranked[:PROMPT_EVIDENCE_CHUNKS_PER_THREAD]
+                    capped = ranked[:per_thread]
+                    chunks = capped[: limit - taken]
                     # With ``max_threads``, a thread that has no indexed
                     # chunks stays, empty: ask_mailbox shows the model its
                     # indexed thread text instead, so the audit must still
@@ -806,6 +844,7 @@ def register_search_tools(
                     groups.append((subject, r.thread_id, r.lane_ranks, r.score, chunks))
                     if in_scope_only:
                         context_dropped[r.thread_id] = dropped
+                    capped_out += len(ranked) - len(capped)
                     taken += len(chunks)
         except ToolError:
             raise
@@ -837,6 +876,13 @@ def register_search_tools(
                     f"scope=in_scope left out {total_dropped} context passage(s); "
                     f"{scope_emptied} thread(s) had no in-scope passage."
                 )
+        if max_chunks_per_thread:
+            count("evidence_chunks_capped", capped_out)
+        if max_chars_per_chunk:
+            count(
+                "evidence_chunks_truncated",
+                sum(len(c.text) > chunk_chars for *_, chunks in groups for c in chunks),
+            )
         searched_by_source = source_filter is not None and not thread_id
         if searched_by_source:
             count("evidence_threads_source_emptied", source_emptied)

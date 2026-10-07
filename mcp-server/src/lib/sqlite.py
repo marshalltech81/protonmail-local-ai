@@ -2667,7 +2667,6 @@ class Database:
         thread_ids: list[str],
         embedding: list[float],
         per_thread_limit: int,
-        source: Literal["body", "attachment"] | None = None,
     ) -> dict[str, list[ChunkResult]]:
         """Per-thread evidence for ``query_text``, as ``ask_mailbox`` sees it.
 
@@ -2677,7 +2676,7 @@ class Database:
         thread's slice. ``hybrid_search(with_evidence=True)`` and the
         thread-scoped ``get_evidence`` path both call this, so an audit
         of one thread returns the passages ``ask_mailbox`` was given for
-        it (#461). ``source`` is passed through (``get_evidence``, #988).
+        it (#461).
         """
         matched_attachments = self._matched_attachments(query_text, thread_ids)
         return self.get_evidence_chunks_for_threads(
@@ -2685,7 +2684,6 @@ class Database:
             embedding,
             per_thread_limit=per_thread_limit,
             matched_attachments=matched_attachments,
-            source=source,
         )
 
     def get_evidence_chunks_for_threads(
@@ -2694,7 +2692,6 @@ class Database:
         embedding: list[float],
         per_thread_limit: int = 3,
         matched_attachments: dict[str, list[str]] | None = None,
-        source: Literal["body", "attachment"] | None = None,
     ) -> dict[str, list[ChunkResult]]:
         """Return up to ``per_thread_limit`` best-matching chunks per thread.
 
@@ -2728,11 +2725,6 @@ class Database:
         even when a body chunk, or another attachment's chunk, has
         higher dense similarity. Remembering only the thread let the cap
         keep unrelated attachments and drop the one that matched.
-
-        ``source`` (``get_evidence``'s ``source`` control, #988) keeps
-        only body or only attachment chunks before the reorder and the
-        cap, so the cap is filled from that source. ``None``, what every
-        other caller passes, keeps both.
         """
         if not thread_ids:
             return {}
@@ -2796,11 +2788,8 @@ class Database:
         # ``per_thread_limit`` happens after the reorder.
         all_chunks: dict[str, list[ChunkResult]] = {tid: [] for tid in thread_ids}
         for r in rows:
-            if not _has_valid_distance(r):
-                continue
-            if source is not None and (r["attachment_id"] is None) != (source == "body"):
-                continue
-            all_chunks[r["thread_id"]].append(_row_to_chunk_result(r))
+            if _has_valid_distance(r):
+                all_chunks[r["thread_id"]].append(_row_to_chunk_result(r))
 
         matched_by_thread = matched_attachments or {}
         grouped: dict[str, list[ChunkResult]] = {}
