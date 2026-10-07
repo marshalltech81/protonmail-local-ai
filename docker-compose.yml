@@ -348,8 +348,8 @@ services:
       # RERANK_CANDIDATES governs how many RRF results are fed to the
       # cross-encoder before truncation to the caller's ``limit``.
       RERANK_MODE: ${RERANK_MODE:-none}
-      RERANK_BASE_URL: ${RERANK_BASE_URL}
-      RERANK_MODEL: ${RERANK_MODEL}
+      RERANK_BASE_URL: ${RERANK_BASE_URL:-}
+      RERANK_MODEL: ${RERANK_MODEL:-}
       RERANK_CANDIDATES: ${RERANK_CANDIDATES:-20}
       # Per-operation HTTP timeout for the Cohere rerank API (seconds):
       # each connect, read or write must make progress within it; it
