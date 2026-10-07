@@ -1525,9 +1525,8 @@ file:
    and narrow any window that returns 50.
 3. Run `extract_from_emails` per window, with `participant` set to
    the vendor's address (the tool has no `from_addr`) and a schema
-   that declares its own `invoice_date` and `invoice_number`, or read
-   each attachment's passages with `get_evidence(query,
-   thread_id=...)`. The windows do not select the same set:
+   that declares its own `invoice_date` and `invoice_number`. The
+   windows do not select the same set:
    `search_attachments` dates the message carrying the attachment,
    while `extract_from_emails` takes any thread whose span overlaps the
    window, so a January invoice in a thread with a June reply is listed
@@ -1559,6 +1558,8 @@ Limits the recipe does not remove:
   ([#974](https://github.com/marshalltech81/protonmail-local-ai/issues/974),
   [#858](https://github.com/marshalltech81/protonmail-local-ai/issues/858)).
 - `_date` is the thread's last message date, not the invoice date.
+- A citation that covers an attachment does not prove that every
+  requested line inside it was extracted.
 - Records are model output. The server checks their shape, their
   citation labels and whether string values appear in the cited
   passages (`value_check`, below), not whether a value is right.
