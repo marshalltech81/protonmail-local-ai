@@ -14,6 +14,7 @@ import quopri
 import re
 import textwrap
 import time
+from collections import Counter
 from datetime import UTC, datetime
 from email.message import EmailMessage
 from pathlib import Path
@@ -4289,3 +4290,95 @@ def test_many_part_message_walk_is_bounded(tmp_path, monkeypatch, caplog):
         )
     ]
     assert "SYNTHETIC_TEXT_MARKER" not in caplog.text
+
+
+class _CountingParts(list):
+    """A part list that counts the children taken from it, forwards or
+    backwards, so a test can assert how many a walk queued."""
+
+    taken = 0
+
+    def __iter__(self):
+        for child in super().__iter__():
+            _CountingParts.taken += 1
+            yield child
+
+    def __reversed__(self):
+        for child in super().__reversed__():
+            _CountingParts.taken += 1
+            yield child
+
+
+def test_attached_container_children_are_queued_lazily(monkeypatch, caplog):
+    """Review round 1 on #1020 (Codex): a container marked as an
+    attachment went through the serialization preflight
+    (``_nesting_exceeds``), which queued every child of a part at once,
+    so 200,000 children were all queued before any cap applied. Both
+    that preflight and the walk now take children as they visit them:
+    assert the children taken, not only the result and the time."""
+    from src import parser
+
+    caplog.set_level("INFO")
+    raw = (
+        _CAP_HEAD
+        + b'Content-Type: multipart/mixed; boundary="b"\r\n\r\n'
+        + b"--b\r\nContent-Type: text/plain\r\n\r\nPARENT_BODY\r\n"
+        + b'--b\r\nContent-Type: multipart/mixed; boundary="c"\r\n'
+        + _CAP_FILENAME
+        + b"\r\n"
+        + b"--c\r\n\r\n" * 200_000
+        + b"--c--\r\n--b--\r\n"
+    )
+    tree = email.message_from_bytes(raw)
+    bundle = tree.get_payload()[1]
+    bundle.set_payload(_CountingParts(bundle.get_payload()))
+    _CountingParts.taken = 0
+    caps: Counter[str] = Counter()
+    start = time.perf_counter()
+    body, attachments = parser._extract_body_and_attachments(tree, caps=caps)
+    elapsed = time.perf_counter() - start
+    assert body == "PARENT_BODY"
+    assert [a.filename for a in attachments] == ["SYNTHETIC_FILENAME_MARKER.eml"]
+    assert attachments[0].payload == b""
+    # The preflight stops once the field budget is spent, and the walk
+    # at the part cap: neither takes much past its cap.
+    assert _CountingParts.taken <= parser.MAX_ATTACHED_MESSAGE_FIELDS + parser.MAX_WALKED_PARTS
+    assert caps == Counter({"mime_parts": 1})
+    assert elapsed < 5
+
+
+def test_walk_cap_keeps_the_first_parts_in_document_order(tmp_path, caplog):
+    """Review round 1 on #1020 (Codex): the cap was charged for every
+    child as its parent was popped, so a root with thousands of
+    container children spent the budget at once and the text inside
+    the first child, the third part in document order, was dropped
+    while later containers were still visited. The cap now keeps the
+    first MAX_WALKED_PARTS parts in document order."""
+    from src import parser
+
+    caplog.set_level("INFO")
+    raw = (
+        _CAP_HEAD
+        + b'Content-Type: multipart/mixed; boundary="b"\r\n\r\n'
+        + b"".join(
+            b'--b\r\nContent-Type: multipart/mixed; boundary="c"\r\n\r\n'
+            b"--c\r\nContent-Type: text/plain\r\n\r\nT%d\r\n--c--\r\n" % i
+            for i in range(parser.MAX_WALKED_PARTS)
+        )
+        + b"--b--\r\n"
+    )
+    folder = tmp_path / "INBOX" / "cur"
+    folder.mkdir(parents=True)
+    path = folder / "order.eml"
+    path.write_bytes(raw)
+    msg = parse_email(path)
+    assert msg is not None
+    assert msg.body_text.split("\n\n") == [f"T{i}" for i in range(200)]
+    # The root and 4,999 (container, text) pairs, then one more container:
+    # the text parts walked past the 200th count as body_parts.
+    walked_texts = (parser.MAX_WALKED_PARTS - 1) // 2
+    lines = [r.getMessage() for r in caplog.records if "parser work caps" in r.getMessage()]
+    assert lines == [
+        f"parser work caps dropped content from {path}: "
+        f"body_parts={walked_texts - 200},mime_parts=1"
+    ]
