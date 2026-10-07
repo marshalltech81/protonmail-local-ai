@@ -408,7 +408,7 @@ def corpus_manifest(path: Path = CORPUS_PATH) -> dict[str, CorpusMessage]:
     both services own a top-level ``tests`` package), which serializes
     byte-identically; the indexer's claimant ID is the Message-ID plus a
     prefix of that SHA-256. The tokens cover every part's headers and
-    every decoded text part, our own trusted bytes. ``sent_at`` is the
+    every decoded text part and binary attachment, our own trusted bytes. ``sent_at`` is the
     ``Date:`` header as the indexer normalizes it (``parser._parse_date``:
     UTC, ISO format); the corpus writes no ``Received:`` header, so the
     indexer stores no ``occurred_at``.
@@ -432,6 +432,12 @@ def corpus_manifest(path: Path = CORPUS_PATH) -> dict[str, CorpusMessage]:
                 text += [str(v) for v in part.values()]
                 if part.get_content_maintype() == "text":
                     text.append(part.get_content())
+                elif not part.is_multipart():
+                    # A binary attachment's own bytes: the corpus's PDFs
+                    # (``_minimal_pdf``) carry their text uncompressed,
+                    # so the words an extractor finds are among these.
+                    payload = part.get_payload(decode=True)
+                    text.append(payload.decode("utf-8", "replace"))
             manifest[message_id] = CorpusMessage(
                 hashlib.sha256(raw).hexdigest(),
                 f"t{n:02d}.1{BASELINE_DOMAIN}",
