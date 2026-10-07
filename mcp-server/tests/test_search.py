@@ -1495,6 +1495,10 @@ def test_extract_description_points_to_the_population_recipe(empty_db):
     # messages, so occurrences key on claimant_id too.
     assert "limit=50, narrowing any window that returns 50" in doc
     assert "by claimant_id and attachment_id" in doc
+    # Review round 4: the recipe is for attachment-backed populations
+    # only, and each window's extraction limit covers its threads.
+    assert "For every attachment-backed occurrence" in doc
+    assert "limit at least its thread count" in doc
     assert "listed attachment with no record" in doc
     assert "docs/mcp-tools.md" not in doc
     # Review round 2: disclosure precedes the first enumeration call

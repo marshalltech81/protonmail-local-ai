@@ -1504,7 +1504,9 @@ inflated values fan out into that many model calls.
 ([#976](https://github.com/marshalltech81/protonmail-local-ai/issues/976)).**
 The threads searched are the top `limit` hits for `query`, not every
 match, and nothing names the threads left out. For every occurrence
-(every invoice line for one material code from one vendor, say), the
+backed by an attachment (every invoice line for one material code from
+one vendor, say; a body-only population such as RSVPs has nothing to
+enumerate and uses `extract_from_emails` alone), the
 tool description gives the calling model a short form of this recipe,
 including the disclosure before reading; clients cannot read this
 file:
@@ -1541,9 +1543,9 @@ file:
    `claimant_id` names the message. Count a record once, against the
    enumerated occurrence its citations name; drop duplicates, set
    aside for review a record that cites no enumerated occurrence, and
-   report each enumerated occurrence with no record. The same bytes
-   attached twice to one message stay one occurrence, as
-   `search_attachments` reports them.
+   report each enumerated occurrence with no record. Copies of the
+   same bytes attached twice to one message share both IDs, so they
+   cannot be reconciled one by one.
 
 Limits the recipe does not remove:
 
