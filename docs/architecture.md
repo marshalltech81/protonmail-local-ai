@@ -2148,12 +2148,16 @@ per-checkout `.uv-cache` as the workflow does;
 `.github/workflows/docker.yml` also scans the three built images
 (indexer, mcp-server, mbsync) with Trivy after `docker compose build`,
 on each change to a build input and weekly (#977). Before that build,
-the job restores the indexer's `ppt-builder` stage from the GitHub
-Actions cache (BuildKit's `gha` backend, #1070) and saves it back, so
-Maven Central is contacted only when `indexer/java/pom.xml` or a layer
-before it changed; the runner's BuildKit is new on every run, so the
-Dockerfile's cache mount of the Maven repository helps local rebuilds
-only. This covers what
+a pull-request or push run restores the indexer's `ppt-builder` stage
+from the GitHub Actions cache (BuildKit's `gha` backend, #1070) and
+saves it back, so Maven Central is contacted only when
+`indexer/java/pom.xml` or a layer before it changed. The weekly and
+manual runs restore nothing: they build the stage from the current
+Debian packages (a restored apt layer is never rerun, and Trivy cannot
+see the `jlink` runtime) and write the cache the other runs restore,
+so a restored stage is at most a week behind Debian. The runner's
+BuildKit is new on every run, so the Dockerfile's cache mount of the
+Maven repository helps local rebuilds only. This covers what
 the lockfiles do not: Debian packages installed with apt (catdoc,
 Tesseract, Poppler and the base image's own packages), the Python
 packages actually installed, and the `.ppt` reader's jars in
