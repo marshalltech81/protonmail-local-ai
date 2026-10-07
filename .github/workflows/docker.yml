@@ -109,7 +109,9 @@ jobs:
         with:
           # BuildKit pinned by digest, like the images; the action's
           # default is the moving buildx-stable-1 tag. Dependabot does
-          # not track a driver option: bump the tag and digest by hand.
+          # not track a driver option: bump the tag and digest by hand,
+          # together with tests.yml's (scripts/tests/image_pin_test.sh
+          # fails while they differ, #1122).
           driver-opts: image=moby/buildkit:v0.33.1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
 
       - name: Build the .ppt reader stage (from the cache on pull-request runs)
