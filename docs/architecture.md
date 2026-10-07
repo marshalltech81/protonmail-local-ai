@@ -759,6 +759,14 @@ decoding, so a header folded inside a quoted name or a `filename` /
 `name` parameter leaves no line break in the stored value, while a line
 break the sender percent-encodes in the filename is kept (#688). An index built before this keeps the
 old values until the affected messages are re-indexed.
+RFC 2231 decoding leaves RFC 2047 encoded-words (`=?utf-8?q?...?=`) in
+a filename untouched, and some clients send a long non-ASCII name as
+several of them; the parser then decodes those the same way as Subject
+(#924). A value whose encoded-words do not decode is kept as sent, with
+one rate-limited WARNING naming the exception type, and a value that
+decodes to nothing is kept as sent too, so the part stays an
+attachment. Filenames stored before this are corrected only when their
+message is re-indexed.
 
 **Read state.** `seen`, `flagged` and `replied` are the `S`, `F` and
 `R` flags in `filepath`'s `:2,<flags>` suffix (`maildir.message_state`,

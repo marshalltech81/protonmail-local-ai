@@ -1344,6 +1344,30 @@ extractor reads (`.eml`) is not logged.
 The caps bound what crafted mail can cost the single indexing worker,
 so they are not configurable. Ordinary mail does not reach them.
 
+## Attachment filename shows `=?utf-8?...?=` text
+
+Some clients send a long non-ASCII attachment name as RFC 2047
+encoded-words (`=?utf-8?B?...?= =?utf-8?B?...?=`), which the standard
+library does not decode in a filename parameter. The indexer decodes
+them the same way as Subject (#924), so `search_attachments`,
+`get_message` and filename search show the sender's name. If the
+encoded-words do not decode (a malformed charset label), the indexer
+keeps the filename as sent and logs, without the filename:
+`attachment filename encoded-words could not be decoded
+(<ExceptionType>); kept 1 filename as sent` (WARNING, under the same
+20-per-5-minutes limit as the lines above).
+
+The fix applies when a message is parsed. Filenames stored by an
+earlier image keep the encoded text until their message is re-indexed;
+a flag change or folder move does not re-parse a message, so to correct
+them all rebuild the index as in
+[Indexer refuses to start](#indexer-refuses-to-start--wipe-the-sqlite-volume).
+The rebuild re-embeds every message, so it is optional. Extraction
+dispatches by content type first, so for most such attachments only the
+displayed name and filename search change; one sent as
+`application/octet-stream` is also dispatched by its decoded extension
+once re-indexed.
+
 ## ChatGPT says a tool call was blocked by OpenAI
 
 ChatGPT reports "This tool call was blocked by OpenAI because we
