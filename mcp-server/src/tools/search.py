@@ -591,9 +591,10 @@ def register_search_tools(
         listed with an empty chunks list (with max_threads) or left
         out; read it with get_thread. So passages can stop before a
         late resolution in a long thread: for status or closure,
-        re-ask about the resolution without the attachment's filename,
-        or read the thread's later messages with get_thread or
-        get_message.
+        re-ask about the resolution without the attachment's filename
+        or file-type words (for example "PDF"), since either keeps
+        that attachment first, or read the thread's later messages
+        with get_thread or get_message.
 
         Args:
             query: The question or topic to gather evidence for.

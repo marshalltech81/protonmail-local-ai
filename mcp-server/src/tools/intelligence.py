@@ -2960,8 +2960,9 @@ def register_intelligence_tools(
         body message. A thread with no passages shows its indexed text.
         So passages can stop before a late resolution in a long thread:
         for status or closure, re-ask about the resolution without the
-        attachment's filename, or read the thread's later messages with
-        get_thread or get_message.
+        attachment's filename or file-type words (for example "PDF"),
+        since either keeps that attachment first, or read the thread's
+        later messages with get_thread or get_message.
 
         Use this whenever the question needs attachment content (PDFs,
         scans, OCR'd images, statements, quotes, reports, signed forms),

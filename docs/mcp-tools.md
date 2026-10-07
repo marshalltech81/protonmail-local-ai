@@ -1297,7 +1297,8 @@ indexed text instead. So in a long thread the passages can stop before
 a late resolution: the message that settles the matter is often worded
 nothing like the question. The `ask_mailbox` and `get_evidence`
 descriptions tell the calling model so: for status or closure, re-ask
-about the resolution without the attachment's filename (which would
+about the resolution without the attachment's filename or file-type
+words such as "PDF" (the match covers MIME types too, so either would
 pull the same attachment passages back in), or read the thread's later
 messages with `get_thread` or `get_message`. `get_evidence` orders
 passages the same way, with six per thread mailbox-wide and `limit`
@@ -1664,10 +1665,13 @@ mail a population run will read; the steps are not sent to clients:
    pagination, so split the period into `date_from` / `date_to`
    windows narrow enough that each returns fewer than 50 results.
    Before narrowing a window that returns 50, tell the user the added
-   windows and previews, as in step 1. If one message carries 50
-   or more matching attachments, every window holding it stays at the
-   cap: report the population as truncated rather than narrowing
-   further.
+   windows and previews, as in step 1. Every hit is dated by its
+   carrying message, so 50 or more matching attachments with one
+   effective time (one message carrying them all, or several messages
+   with the same timestamp) cannot be separated by any window: when a
+   window at the smallest interval the bounds can express still
+   returns 50, report the population as truncated rather than
+   narrowing further.
 3. Run `extract_from_emails` per window, with `participant` set to
    the vendor's address (the tool has no `from_addr`) and a schema
    that declares its own `invoice_date` and `invoice_number`. The
@@ -1680,9 +1684,15 @@ mail a population run will read; the steps are not sent to clients:
    `participant` and `from_addr` select whole threads, so attachments
    carried by other people's messages in the vendor's threads are
    enumerated and extracted too: check a record's sender from its
-   citation's `sender` before counting it. An occurrence with no
-   record has no sender in these results; report it as unverified
-   rather than reading each message with `get_message`.
+   citation's `sender` before counting it. That `sender`, like the
+   `from_addr` and `participant` filters, is the claimed From address:
+   the index does not authenticate senders and Spam stays searchable
+   (`docs/architecture.md`, "Known limitation"), so a forged From
+   matches too. Counting a record as the vendor's mail needs
+   provenance these results do not give (the vendor's own records, or
+   checking the message by hand). An occurrence with no record has no
+   sender in these results; report it as unverified rather than
+   reading each message with `get_message`.
 4. Reconcile across all windows, not per window. A record links to
    its source through its `_evidence` labels: look each label up by
    `label` in that call's top-level `citations` list, whose entries

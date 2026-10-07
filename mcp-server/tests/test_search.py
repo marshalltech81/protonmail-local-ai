@@ -1477,8 +1477,15 @@ def test_evidence_descriptions_warn_passages_can_stop_before_a_resolution(tool, 
     doc = _wire_descriptions(empty_db)[tool]
     asked = {"ask_mailbox": "question", "get_evidence": "query"}[tool]
     assert "late resolution in a long thread" in doc
-    assert "re-ask about the resolution without the attachment's filename" in doc
-    assert "get_thread or get_message" in doc
+    # Review round 11: ``_matched_attachments`` matches query words
+    # against MIME types as well as filenames, so a re-ask that keeps a
+    # file-type word ("PDF") keeps the same attachment first.
+    assert (
+        "re-ask about the resolution without the attachment's filename or "
+        'file-type words (for example "PDF"), since either keeps that '
+        "attachment first, or read the thread's later messages with "
+        "get_thread or get_message" in doc
+    )
     # Review round 8 (owner): the full order of
     # ``get_evidence_chunks_for_threads``. With an attachment the query
     # names, that attachment leads, then the thread's other attachments,
