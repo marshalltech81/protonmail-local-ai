@@ -89,7 +89,9 @@ fi
 [[ -f "$BACKUP" ]] || die "$BACKUP is not a file"
 # Checked before anything stops or changes.
 wait_secs="${RESTORE_WAIT_SECONDS:-900}"
-[[ "$wait_secs" =~ ^[0-9]+$ ]] || die "RESTORE_WAIT_SECONDS must be a whole number of seconds"
+[[ "$wait_secs" =~ ^[0-9]{1,6}$ ]] || die "RESTORE_WAIT_SECONDS must be a whole number of seconds"
+# Base 10: arithmetic would read a leading zero as octal (08 fails).
+wait_secs=$((10#$wait_secs))
 
 # The indexer container's own image and index volume, whatever project
 # name or overlays created it. The container must exist (make up first).

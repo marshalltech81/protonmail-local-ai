@@ -51,6 +51,12 @@ ps)
 exec)
     # docker exec indexer python -c CODE ARGS...
     [[ "$2" == indexer && "$3" == python && "$4" == -c ]]
+    # FAKE_SWAP_DIR: during the copy, another account moves the checked
+    # directory away and puts an open one at its path.
+    if [[ -n "${FAKE_SWAP_DIR:-}" && "$6" == make ]]; then
+        mv "$FAKE_SWAP_DIR" "$FAKE_SWAP_DIR.moved"
+        mkdir -m 777 "$FAKE_SWAP_DIR"
+    fi
     SQLITE_PATH="$FAKE_DATA/mail.db" exec python3 -c "$5" "${@:6}"
     ;;
 inspect)
@@ -299,6 +305,19 @@ backup_refuses_a_directory_shared_through_an_acl() {
     [[ -z "$(backups)" ]]
 }
 
+backup_writes_into_the_checked_directory() {
+    reset
+    rm -rf "$WORK/backups.moved"
+    make_db "$WORK/data/mail.db"
+    FAKE_SWAP_DIR="$WORK/backups" run_backup "$WORK/backups"
+    [[ "$STATUS" -eq 0 ]]
+    # The copy is in the directory that was checked, now moved away;
+    # nothing reached the open directory put at its path.
+    [[ -n "$(find "$WORK/backups.moved" -name 'mail-*.db')" ]]
+    [[ -z "$(find "$WORK/backups" -type f)" ]]
+    rm -rf "$WORK/backups.moved"
+}
+
 backup_needs_a_running_indexer() {
     reset
     make_db "$WORK/data/mail.db"
@@ -503,6 +522,21 @@ restore_checks_the_wait_before_anything() {
     fi
 }
 
+restore_reads_the_wait_as_decimal() {
+    reset
+    make_db "$WORK/backup.db"
+    make_db "$WORK/data/mail.db"
+    # 08 is not valid octal; it must be read as eight seconds.
+    FAKE_LOGS="$READY_LOGS" RESTORE_WAIT_SECONDS=08 run_restore "$WORK/backup.db" yes
+    [[ "$STATUS" -eq 0 ]]
+    grep -Fx 'start mcp-server' "$WORK/docker.log" >/dev/null
+    # Bash reports the octal error and leaves the deadline unset, which
+    # only the timeout path would trip over.
+    if grep -F 'value too great for base' "$WORK/out" >/dev/null; then
+        return 1
+    fi
+}
+
 stub_matches_the_indexer() {
     local name
     for name in SCHEMA_VERSION SCHEMA_APPLICATION_ID; do
@@ -541,6 +575,7 @@ check "backup refuses a path inside the checkout" backup_refuses_a_path_inside_t
 check "backup requires BACKUP_DIR" backup_requires_backup_dir
 check "backup refuses a directory other users can open" backup_refuses_a_shared_directory
 check "backup refuses a directory shared through an ACL" backup_refuses_a_directory_shared_through_an_acl
+check "backup writes into the directory it checked" backup_writes_into_the_checked_directory
 check "backup needs a running indexer" backup_needs_a_running_indexer
 check "backup writes nothing when integrity_check fails" backup_writes_nothing_when_the_check_fails
 check "restore replaces the index and drops the old WAL" restore_replaces_the_index
@@ -555,6 +590,7 @@ check "restore reports an index the indexer refuses" restore_reports_a_refused_i
 check "restore waits a bounded time" restore_wait_is_bounded
 check "restore ignores the previous indexer's log lines" restore_ignores_the_previous_indexer_lines
 check "restore checks RESTORE_WAIT_SECONDS before anything" restore_checks_the_wait_before_anything
+check "restore reads RESTORE_WAIT_SECONDS as decimal" restore_reads_the_wait_as_decimal
 check "the restore stub matches indexer/src/database.py" stub_matches_the_indexer
 
 if ((FAILURES > 0)); then

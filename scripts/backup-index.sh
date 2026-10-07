@@ -116,23 +116,31 @@ has_acl() {
     fi
 }
 
-# Refuses $1 when group or other mode bits, or an ACL, give access to it.
+# require_private PATH [NAME]: refuses PATH (reported as NAME) when group
+# or other mode bits, or an ACL, give access to it.
 require_private() {
     if [[ -n "$(find "$1" -maxdepth 0 \( -perm -g=r -o -perm -g=w -o -perm -g=x -o -perm -o=r -o -perm -o=w -o -perm -o=x \) -print)" ]] ||
         has_acl "$1"; then
-        die "$1 is accessible to other users (mode bits or an ACL); run chmod 700 (and chmod -N on macOS) on it or choose a new directory"
+        die "${2:-$1} is accessible to other users (mode bits or an ACL); run chmod 700 (and chmod -N on macOS) on it or choose a new directory"
     fi
 }
 
 if [[ ! -d "$dir" ]]; then
     (umask 077 && mkdir -p "$dir")
 fi
-# Also after creating it: a new directory can inherit ACL entries.
-require_private "$dir"
+# Work inside the directory itself from here on: every path below is
+# relative to it, so renaming or replacing $dir (or an ancestor) while
+# the copy runs cannot redirect the file somewhere unchecked. The check
+# runs on the directory entered, and also after creating it, since a new
+# directory can inherit ACL entries.
+cd -- "$dir"
+here=$(pwd -P)
+[[ "$here" != "$REPO" && "$here" != "$REPO"/* ]] || die "BACKUP_DIR is inside the checkout ($REPO)"
+require_private . "$dir"
 
 stamp=$(date -u +%Y%m%dT%H%M%SZ)
-dest="$dir/mail-$stamp.db"
-[[ ! -e "$dest" ]] || die "$dest already exists"
+dest="mail-$stamp.db"
+[[ ! -e "$dest" ]] || die "$dir/$dest already exists"
 
 cleanup() {
     docker exec indexer python -c "$BACKUP_PY" remove "$stamp" ||
@@ -160,8 +168,8 @@ host_digest=$(shasum -a 256 "$dest")
 host_digest="${host_digest%% *}"
 [[ "$host_digest" == "$digest" ]] || die "the file written to the host does not match the copy in the container"
 chmod 600 "$dest"
-require_private "$dest"
+require_private "$dest" "$dir/$dest"
 complete=1
 
-printf 'Index backup: %s\n' "$dest"
+printf 'Index backup: %s\n' "$dir/$dest"
 printf 'Size: %s bytes, schema version %s, SHA-256 %s\n' "$size" "$version" "$digest"
