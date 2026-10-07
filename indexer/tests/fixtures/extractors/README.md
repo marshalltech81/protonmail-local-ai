@@ -2,6 +2,14 @@
 
 Every fixture here is synthetic. None comes from real mail.
 
+`tests/test_fixture_authors.py` (#980) reads the author metadata of
+every Office file under the indexer and mcp-server test trees (OLE2
+Author and Last Saved By, OOXML `docProps/core.xml` creator and
+lastModifiedBy, ODF creator fields) and fails unless each is empty or
+a synthetic name on its allowlist. Fix a failure by regenerating the
+file with its recipe below or scrubbing it the way
+`legacy-src/scrub-ppt-author.py` does.
+
 ## Legacy binary Office files (#935)
 
 `legacy.doc`, `legacy.xls`, `legacy.ppt` and `legacy-lo.ppt` are real
