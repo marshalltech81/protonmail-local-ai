@@ -931,8 +931,9 @@ removed Bridge container are kept as history.
   an issue waiting on an owner choice between stated options;
   `security` flags privacy, secrets, exposure, TLS, supply-chain and
   bounded-work issues whatever their type. Each label's description
-  on GitHub repeats its rule. Dependabot's own labels
-  (`dependencies` and the ecosystem names) stay on its PRs only.
+  on GitHub repeats its rule. Dependabot PRs carry `dependencies` as
+  their type plus the area the update lands in
+  (`.github/dependabot.yml`); the old ecosystem labels are retired.
 - The Current Objective supersedes any older scope statement that
   froze the MCP API surface; Phases 0–5 are the priority order.
 - Edit this file only when a decision, roadmap status or known
