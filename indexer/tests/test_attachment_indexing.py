@@ -1965,10 +1965,10 @@ def _xlsx_budget_case(monkeypatch) -> tuple[bytes, str, str]:
 
 class TestPermanentFailureCacheRows:
     """#931: an encrypted PDF, a PDF over a pypdf limit and a workbook over
-    the eager-part budget fail the same way for the same bytes, so they
-    are cached ``unsupported`` and served to every later occurrence of
-    those bytes, whatever its label, instead of a ``failed`` row the
-    extractor re-runs every 7 days."""
+    the eager-part budget fail the same way in the same extractor, so they
+    are cached ``unsupported`` and served to later occurrences that select
+    that extractor or none, instead of a ``failed`` row the extractor
+    re-runs every 7 days."""
 
     _CASES = {
         "encrypted-pdf": (_encrypted_pdf_case, "application/pdf", "locked.pdf"),
@@ -2008,13 +2008,17 @@ class TestPermanentFailureCacheRows:
             error,
         )
 
-        # Same label, no extractor, and another extractor's label: the
-        # bytes decide the outcome, so the row stands in for all of them.
-        for later_type, later_name in (
+        # The same extractor (by label, or a legacy ``.xls`` label that
+        # routes these non-OLE2 bytes to XLSX) would decline them again, and
+        # an occurrence that selects no extractor has nothing to run.
+        later_occurrences = [
             (content_type, filename),
+            ("application/octet-stream", f"other{filename[filename.rindex('.') :]}"),
             ("application/octet-stream", "a.bin"),
-            ("text/plain", "a.txt"),
-        ):
+        ]
+        if case == "xlsx-eager-budget":
+            later_occurrences.append(("application/vnd.ms-excel", "a.xls"))
+        for later_type, later_name in later_occurrences:
             later = _attachment(payload, filename=later_name, content_type=later_type)
             again = prepare_attachment_writes(db=db, **_kwargs(later))
             assert (again.status, again.cached, again.chunks) == (STATUS_UNSUPPORTED, True, [])
@@ -2026,6 +2030,48 @@ class TestPermanentFailureCacheRows:
             "SYNTHETIC_USER_PASSWORD",
         ):
             assert marker not in caplog.text
+
+    @pytest.mark.parametrize(
+        ("case", "other_type", "other_name"),
+        [
+            ("encrypted-pdf", "text/plain", "a.txt"),
+            ("pdf-limit", "application/octet-stream", "a.docx"),
+            (
+                "xlsx-eager-budget",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                "a.docx",
+            ),
+            ("xlsx-eager-budget", "text/plain", "a.txt"),
+        ],
+    )
+    def test_row_is_re_run_for_an_occurrence_with_another_extractor(
+        self, tmp_path, monkeypatch, case, other_type, other_name
+    ):
+        """Review round 3: the exception only shows the bytes fail in the
+        extractor that raised it. An occurrence whose label selects another
+        extractor (a ZIP first labelled ``.xlsx``, then ``.docx``) re-runs
+        extraction, so corrected metadata can recover text."""
+        build, content_type, filename = self._CASES[case]
+        payload, error, extractor_name = build(monkeypatch)
+        db = _seed_thread_for_cache_test(tmp_path)
+        attachment = _attachment(payload, filename=other_name, content_type=other_type)
+        db.store_attachment_extraction(
+            attachment_id=attachment.content_hash,
+            extraction_status=STATUS_UNSUPPORTED,
+            extractor=extractor_name,
+            extracted_text=None,
+            extraction_error=error,
+        )
+        extractor = MagicMock(
+            return_value=ExtractionResult(
+                status=STATUS_SUCCESS, extractor="other@1", text="words", error=None
+            )
+        )
+        monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
+
+        prepare_attachment_writes(db=db, **_kwargs(attachment, claimant_id="message@example.com"))
+
+        extractor.assert_called_once()
 
     @pytest.mark.parametrize(
         ("case", "old_extractor", "old_error"),

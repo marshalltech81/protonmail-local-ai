@@ -256,7 +256,7 @@ class ExtractionResult:
     * ``"unsupported"`` — no extractor registered for this MIME type
       *or* the format's optional dependency is missing in this image,
       or the extractor declined in a way the same bytes always repeat
-      (``PERMANENT_FAILURE_ERRORS``, #931).
+      (``PERMANENT_FAILURE_MODULES``, #931).
     * ``"too_large"`` — payload exceeded ``max_bytes``.
     * ``"failed"`` — extractor raised; ``error`` records the exception
       type only, since its message can quote the document. Indexer
@@ -406,17 +406,21 @@ LEGACY_OLE2_ERROR = "OLE2 compound file (legacy .doc / .xls or encrypted Office 
 _OLE2_SIGNATURE = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
 
 # ``unsupported`` errors for an extractor exception the same bytes always
-# repeat (#931), so a ``failed`` row would only re-run it every
-# ``_FAILED_CACHE_MAX_AGE``. Each is raised only after the extractor has
-# read the bytes as its format, so the result holds for every occurrence
-# of them, whatever its label. Fixed text: the exceptions' own messages
-# can quote the document.
+# repeat in that extractor (#931), so a ``failed`` row would only re-run
+# it every ``_FAILED_CACHE_MAX_AGE``. Fixed text: the exceptions' own
+# messages can quote the document.
 ENCRYPTED_PDF_ERROR = "encrypted PDF (open password required)"
 PDF_LIMIT_ERROR = "PDF structure exceeds pypdf limits"
 XLSX_EAGER_BUDGET_ERROR = "workbook exceeds the eager-part budget"
-PERMANENT_FAILURE_ERRORS = frozenset(
-    {ENCRYPTED_PDF_ERROR, PDF_LIMIT_ERROR, XLSX_EAGER_BUDGET_ERROR}
-)
+# The extractor labels each error holds for: the one that raised it, and
+# a legacy ``.xls`` label, which routes these non-OLE2 (ZIP) bytes to the
+# XLSX extractor. Another extractor may still read the bytes (review
+# round 3).
+PERMANENT_FAILURE_MODULES: dict[str, frozenset[str]] = {
+    ENCRYPTED_PDF_ERROR: frozenset({"pdf"}),
+    PDF_LIMIT_ERROR: frozenset({"pdf"}),
+    XLSX_EAGER_BUDGET_ERROR: frozenset({"xlsx", "xls"}),
+}
 
 # ``unsupported`` error for a payload bound for the text extractor that
 # starts with one of ``_BINARY_SIGNATURES`` (#932): decoding it would only
