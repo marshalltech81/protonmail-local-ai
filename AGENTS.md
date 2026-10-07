@@ -578,6 +578,14 @@ Examples:
   Items that only explain a choice (no docs changed because none apply,
   a check not run because nothing it covers changed) need none. The
   issue holds fixed text, options and links, never mailbox content.
+- A pre-existing problem found while working (a review finding the PR
+  did not introduce, a bug seen while reading code, a flaky or wrong
+  test) that is not fixed in that PR gets its own GitHub issue at the
+  time, unless an open issue already tracks it (owner, 2026-10-07). A
+  review thread is resolved as pre-existing, out of scope or deferred
+  only with that issue's link in the reply, and the PR's "Not done"
+  lists it. Nothing found stays only in a thread, a PR body or a
+  commit message.
 - Merge (squash) only on the owner's explicit go-ahead.
 
 ## Common Commands
