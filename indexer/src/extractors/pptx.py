@@ -56,7 +56,6 @@ from __future__ import annotations
 
 import io
 import logging
-import zipfile
 from collections.abc import Callable, Iterator
 
 import pptx as _pptx
@@ -70,7 +69,7 @@ from pptx.shapes.group import GroupShape
 from pptx.slide import NotesSlide, Slide
 from pptx.table import Table
 
-from . import warn_extractor_cap
+from . import over_package_budget, warn_extractor_cap
 
 log = logging.getLogger("indexer.extractor.pptx")
 
@@ -146,21 +145,13 @@ class PptxPackageBudgetError(Exception):
 
 
 def _check_package(payload: bytes) -> None:
-    """Raise when the package is over a pre-open budget. Reads only the
-    central directory, as the dispatcher's ZIP guard does; zipfile stops a
-    member at its declared size when python-pptx reads it. A payload that
-    is not a ZIP is left to python-pptx to reject."""
-    try:
-        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
-            members = archive.infolist()
-    except zipfile.BadZipFile:
-        return
-    expansion = sum(max(info.file_size - info.compress_size, 0) for info in members)
-    rels_bytes = sum(info.file_size for info in members if info.filename.endswith(".rels"))
-    if (
-        len(members) > _MAX_MEMBERS
-        or expansion > _MAX_EXPANSION_BYTES
-        or rels_bytes > _MAX_RELS_BYTES
+    """Raise when the package is over a pre-open budget, read from the
+    ZIP central directory (``over_package_budget``)."""
+    if over_package_budget(
+        payload,
+        max_members=_MAX_MEMBERS,
+        max_expansion_bytes=_MAX_EXPANSION_BYTES,
+        max_rels_bytes=_MAX_RELS_BYTES,
     ):
         raise PptxPackageBudgetError()
 

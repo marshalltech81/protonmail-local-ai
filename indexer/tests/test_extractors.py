@@ -5386,6 +5386,259 @@ class TestDocxRelationshipChain:
             extract(content_type=_DOCX_MIME, filename="a.docx", payload=_docx_bytes(_CHAIN_MARKER))
 
 
+_DOCX_BUDGET_MARKER = "SYNTHETIC_DOCX_BUDGET_MARKER"
+
+
+def _media_docx_bytes(images: int) -> bytes:
+    """A synthetic ``.docx`` with real-shaped package members: a body
+    fact, a table, a header, an external hyperlink and ``images`` distinct
+    PNG pictures (stored compressed, so they barely expand)."""
+    import io
+
+    import docx
+    from docx.opc.constants import RELATIONSHIP_TYPE as RT
+    from docx.shared import Inches
+
+    document = docx.Document()
+    document.add_paragraph("SYNTHETIC_MEDIA_FACT renewal due 2031-04-01")
+    table = document.add_table(rows=1, cols=2)
+    table.cell(0, 0).text = "SYNTHETIC_MEDIA_CELL"
+    table.cell(0, 1).text = "Grüße, café, 東京"
+    document.sections[0].header.paragraphs[0].text = "SYNTHETIC_MEDIA_HEADER"
+    document.part.relate_to("https://example.invalid/ref", RT.HYPERLINK, is_external=True)
+    for i in range(images):
+        document.add_picture(io.BytesIO(_png((8 + i, 8), "red")), width=Inches(1))
+    buf = io.BytesIO()
+    document.save(buf)
+    return buf.getvalue()
+
+
+_MEDIA_DOCX_TEXT = (
+    "SYNTHETIC_MEDIA_FACT renewal due 2031-04-01\n\n"
+    "SYNTHETIC_MEDIA_CELL Grüße, café, 東京\n\n"
+    "SYNTHETIC_MEDIA_HEADER"
+)
+
+
+class TestDocxPackageBudget:
+    """#967, #946: python-docx builds a part for every related member,
+    checking each relationship against a list of the parts it has visited,
+    and parses every XML part whole, before any extractor work runs. The
+    package is checked from the ZIP central directory first."""
+
+    @pytest.mark.parametrize(
+        ("content_type", "filename", "to_payload"),
+        [
+            (_DOCX_MIME, "a.docx", lambda payload: payload),
+            (_DOTX_MIME, "a.dotx", _dotx_bytes),
+        ],
+        ids=["docx", "dotx"],
+    )
+    def test_ordinary_documents_with_media_extract_as_before(
+        self, content_type, filename, to_payload, monkeypatch
+    ):
+        """Pinned before the package budgets: a document and a template
+        with pictures, a table, a header and a hyperlink open once and
+        read the same text."""
+        from src.extractors import docx as docx_extractor
+
+        payload = to_payload(_media_docx_bytes(40))
+        opened = _count_calls(monkeypatch, docx_extractor.Package, "open")
+        result = extract(content_type=content_type, filename=filename, payload=payload)
+        assert (result.status, result.text) == (STATUS_SUCCESS, _MEDIA_DOCX_TEXT)
+        assert opened[0] == 1
+
+    @staticmethod
+    def _over(budget: str) -> list[tuple[str, bytes, int]]:
+        """Members that put a small synthetic document just over the
+        default ``budget``, as (name, data, compression)."""
+        import zipfile
+
+        from src.extractors import docx as docx_extractor
+
+        if budget == "_MAX_MEMBERS":
+            # Tiny stored members add nothing to the expansion sum.
+            count = docx_extractor._MAX_MEMBERS
+            return [(f"c/p{i}.xml", b"", zipfile.ZIP_STORED) for i in range(count)]
+        if budget == "_MAX_RELS_BYTES":
+            # One wide relationship part; its expansion stays far under
+            # the expansion budget.
+            size = docx_extractor._MAX_RELS_BYTES + 1
+            return [("c/_rels/p.xml.rels", b" " * size, zipfile.ZIP_DEFLATED)]
+        # Highly compressible padding: a small payload, a large parse.
+        size = docx_extractor._MAX_EXPANSION_BYTES + 1
+        return [("c/pad.xml", b" " * size, zipfile.ZIP_DEFLATED)]
+
+    @pytest.mark.parametrize("budget", ["_MAX_MEMBERS", "_MAX_RELS_BYTES", "_MAX_EXPANSION_BYTES"])
+    @pytest.mark.parametrize(
+        ("content_type", "filename", "to_payload"),
+        [
+            (_DOCX_MIME, f"{_DOCX_BUDGET_MARKER}.docx", lambda payload: payload),
+            (_DOTX_MIME, f"{_DOCX_BUDGET_MARKER}.dotx", _dotx_bytes),
+        ],
+        ids=["docx", "dotx"],
+    )
+    def test_package_over_a_default_budget_fails_before_python_docx_opens(
+        self, budget, content_type, filename, to_payload, monkeypatch, caplog
+    ):
+        """Each budget at its default: the package fails by type with fixed
+        text, python-docx never opens it (no member is read, no part is
+        parsed), no cap WARNING is logged, and the marker stays out of the
+        log."""
+        import time
+        import zipfile
+
+        from src import extractors
+        from src.extractors import EXTRACTOR_VERSIONS
+        from src.extractors import docx as docx_extractor
+
+        base = to_payload(_docx_bytes(_DOCX_BUDGET_MARKER))
+        payload = _with_members(base, self._over(budget))
+        assert len(payload) < 2_000_000
+        opened = _count_calls(monkeypatch, docx_extractor.Package, "open")
+        reads = _count_calls(monkeypatch, zipfile.ZipFile, "read")
+        extractors.drain_extractor_counts()
+
+        caplog.set_level("DEBUG")
+        started = time.perf_counter()
+        result = extract(content_type=content_type, filename=filename, payload=payload)
+        assert time.perf_counter() - started < 5.0
+        assert (result.status, result.error) == (STATUS_FAILED, "DocxPackageBudgetError")
+        assert result.extractor == f"docx@{EXTRACTOR_VERSIONS['docx']}"
+        assert result.text is None
+        assert opened[0] == 0
+        assert reads[0] == 0
+        assert "DocxPackageBudgetError" in caplog.text
+        assert "extractor cap" not in caplog.text
+        assert extractors.drain_extractor_counts()["extractor_caps"] == 0
+        assert _DOCX_BUDGET_MARKER not in caplog.text
+        assert _DOCX_BUDGET_MARKER not in str(docx_extractor.DocxPackageBudgetError())
+
+    def test_package_budgets_spent_exactly_open_the_document(self, monkeypatch):
+        import io
+        import zipfile
+
+        from src.extractors import docx as docx_extractor
+
+        payload = _media_docx_bytes(3)
+        infos = zipfile.ZipFile(io.BytesIO(payload)).infolist()
+        monkeypatch.setattr(docx_extractor, "_MAX_MEMBERS", len(infos))
+        monkeypatch.setattr(
+            docx_extractor,
+            "_MAX_RELS_BYTES",
+            sum(i.file_size for i in infos if i.filename.endswith(".rels")),
+        )
+        monkeypatch.setattr(
+            docx_extractor,
+            "_MAX_EXPANSION_BYTES",
+            sum(max(i.file_size - i.compress_size, 0) for i in infos),
+        )
+        assert docx_extractor.extract(payload) == (_MEDIA_DOCX_TEXT, "docx")
+
+    @pytest.mark.parametrize("budget", ["_MAX_MEMBERS", "_MAX_RELS_BYTES", "_MAX_EXPANSION_BYTES"])
+    def test_one_unit_over_a_budget_fails(self, budget, monkeypatch):
+        import io
+        import zipfile
+
+        from src.extractors import docx as docx_extractor
+
+        payload = _media_docx_bytes(3)
+        infos = zipfile.ZipFile(io.BytesIO(payload)).infolist()
+        spent = {
+            "_MAX_MEMBERS": len(infos),
+            "_MAX_RELS_BYTES": sum(i.file_size for i in infos if i.filename.endswith(".rels")),
+            "_MAX_EXPANSION_BYTES": sum(max(i.file_size - i.compress_size, 0) for i in infos),
+        }
+        monkeypatch.setattr(docx_extractor, budget, spent[budget] - 1)
+        with pytest.raises(docx_extractor.DocxPackageBudgetError):
+            docx_extractor.extract(payload)
+
+    def test_payload_that_is_not_a_zip_is_left_to_python_docx(self, monkeypatch):
+        from src.extractors import docx as docx_extractor
+
+        opened = _count_calls(monkeypatch, docx_extractor.Package, "open")
+        with pytest.raises(Exception) as excinfo:
+            docx_extractor.extract(b"not a zip " + _DOCX_BUDGET_MARKER.encode())
+        assert not isinstance(excinfo.value, docx_extractor.DocxPackageBudgetError)
+        assert opened[0] == 1
+
+    def test_related_parts_under_the_member_budget_open_quickly(self):
+        """The member budget bounds python-docx's quadratic part walk
+        (#967): every member just under it is a related part, and the
+        document still opens and reads in a generous time."""
+        import time
+
+        from src.extractors import docx as docx_extractor
+
+        parts = docx_extractor._MAX_MEMBERS - 20
+        payload = _related_parts_docx(parts)
+        started = time.perf_counter()
+        assert docx_extractor.extract(payload) == (_DOCX_BUDGET_MARKER, "docx")
+        assert time.perf_counter() - started < 5.0
+
+    def test_package_budgets_do_not_make_cached_rows_stale(self):
+        """Review round 1: the budgets come with no ``docx`` version bump.
+        A bump would re-run every cached document through the walk after
+        the open, which has no budget yet (#1031), to turn the few
+        over-budget ``success`` rows, whose text is still right, into
+        ``failed`` ones."""
+        from src.extractors import EXTRACTOR_VERSIONS, stale_extractor_module
+
+        assert EXTRACTOR_VERSIONS["docx"] == 5
+        assert stale_extractor_module("docx@5") is None
+
+    def test_long_chain_still_fails_as_a_chain_under_the_budgets(self):
+        """#968's behaviour holds: a chain under the package budgets still
+        fails as a relationship chain, not as a package budget."""
+        from src.extractors import docx as docx_extractor
+
+        with pytest.raises(docx_extractor.DocxRelationshipChainError):
+            docx_extractor.extract(_chained_docx(2000))
+
+
+def _with_members(payload: bytes, members: list[tuple[str, bytes, int]]) -> bytes:
+    """``payload`` with ``members`` appended, as (name, data, compression)."""
+    import io
+    import zipfile
+
+    source = zipfile.ZipFile(io.BytesIO(payload))
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as archive:
+        for info in source.infolist():
+            archive.writestr(info, source.read(info.filename))
+        for name, data, compression in members:
+            archive.writestr(name, data, compress_type=compression)
+    return out.getvalue()
+
+
+def _related_parts_docx(parts: int) -> bytes:
+    """A synthetic ``.docx`` whose main part relates to ``parts`` empty
+    members, the shape that makes python-docx's part walk quadratic."""
+    import io
+    import zipfile
+
+    rels = "".join(
+        f'<Relationship Id="rX{i}" Type="http://example.invalid/part" Target="/c/p{i}.bin"/>'
+        for i in range(parts)
+    ).encode()
+    source = zipfile.ZipFile(io.BytesIO(_docx_bytes(_DOCX_BUDGET_MARKER)))
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as archive:
+        for info in source.infolist():
+            data = source.read(info.filename)
+            if info.filename == "word/_rels/document.xml.rels":
+                data = data.replace(b"</Relationships>", rels + b"</Relationships>")
+            elif info.filename == "[Content_Types].xml":
+                data = data.replace(
+                    b"</Types>",
+                    b'<Default Extension="bin" ContentType="application/octet-stream"/></Types>',
+                )
+            archive.writestr(info, data)
+        for i in range(parts):
+            archive.writestr(f"c/p{i}.bin", b"", compress_type=zipfile.ZIP_STORED)
+    return out.getvalue()
+
+
 # #936: PowerPoint ``.pptx``. Every deck is built here with python-pptx
 # itself; crafted shapes python-pptx cannot write are made by editing the
 # saved XML.
@@ -6369,6 +6622,10 @@ _DECK_FAILS = (
     "fails the deck (PptxPackageBudgetError): a failed row with its rate-limited "
     "WARNING, counted as failed="
 )
+_DOCUMENT_FAILS = (
+    "fails the document (DocxPackageBudgetError): a failed row with its rate-limited "
+    "WARNING, counted as failed="
+)
 _UNREPORTED_CAPS = {
     "src.extractors:max_bytes": (
         "skips the whole attachment as too_large, counted as too_large= in the aggregate"
@@ -6390,6 +6647,9 @@ _UNREPORTED_CAPS = {
     "src.extractors.xlsx:_MAX_EAGER_PART_BYTES": _WORKBOOK_FAILS,
     "src.extractors.xlsx:_MAX_EAGER_BYTES": _WORKBOOK_FAILS,
     "src.extractors.xlsx:_MAX_EAGER_READS": _WORKBOOK_FAILS,
+    "src.extractors.docx:_MAX_EXPANSION_BYTES": _DOCUMENT_FAILS,
+    "src.extractors.docx:_MAX_MEMBERS": _DOCUMENT_FAILS,
+    "src.extractors.docx:_MAX_RELS_BYTES": _DOCUMENT_FAILS,
     "src.extractors.pptx:_MAX_EXPANSION_BYTES": _DECK_FAILS,
     "src.extractors.pptx:_MAX_MEMBERS": _DECK_FAILS,
     "src.extractors.pptx:_MAX_RELS_BYTES": _DECK_FAILS,
