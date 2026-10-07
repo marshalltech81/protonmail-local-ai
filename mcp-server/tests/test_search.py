@@ -734,11 +734,13 @@ class TestGetEvidencePersonFilters:
         assert "cannot be combined with thread_id" in message
         assert "from_name" in message
 
-    def test_thread_id_description_names_every_rejected_filter(
-        self, fake_server, fake_embed, seeded_db
-    ):
-        tool = self._tool(fake_server, fake_embed, seeded_db)
-        doc = " ".join((tool.__doc__ or "").split())
+    def test_thread_id_description_names_every_rejected_filter(self, seeded_db):
+        # Read from the ``thread_id`` description a client receives in
+        # ``tools/list``, not from ``__doc__`` (#1011).
+        from tests.test_tool_annotations import _server, _wire_tools
+
+        params = _wire_tools(_server(seeded_db))["get_evidence"]["inputSchema"]["properties"]
+        doc = " ".join(params["thread_id"]["description"].split())
         sentence = doc.split("Cannot be combined with", 1)[1].split(".", 1)[0]
         for name in ("folders", "from_addr", "from_name", "participant", "max_threads"):
             assert name in sentence
@@ -1439,19 +1441,16 @@ class TestFolderFilterMatchesListThreads:
     "tool",
     ["get_evidence", "ask_mailbox", "extract_from_emails", "brief_issue", "check_conclusion"],
 )
-def test_evidence_tool_descriptions_state_the_date_contract(tool, fake_server, seeded_db):
+def test_evidence_tool_descriptions_state_the_date_contract(tool, seeded_db):
     """Under a date range the evidence tools select threads by span and
     may show passages from outside the range (docs/architecture.md,
-    Message time), so each tool's description must say so and point the
-    model at each passage's own ``occurred_at`` and ``sent_at``."""
-    from src.tools.brief import register_experimental_tools
-    from src.tools.intelligence import register_intelligence_tools
+    Message time), so each tool's ``date_from`` description must say so
+    and point the model at each passage's own ``occurred_at`` and
+    ``sent_at``. Read from the parameter description a client receives
+    in ``tools/list``, not from ``__doc__`` (#1011)."""
+    from tests.test_tool_annotations import _server, _wire_tools
 
-    from tests.conftest import FakeEmbedClient, FakeInferenceClient
-
-    register_search_tools(fake_server, seeded_db, FakeEmbedClient())
-    register_intelligence_tools(fake_server, seeded_db, FakeEmbedClient(), FakeInferenceClient())
-    register_experimental_tools(fake_server, seeded_db, FakeEmbedClient(), FakeInferenceClient())
-    doc = " ".join((fake_server.tools[tool].__doc__ or "").split())
+    params = _wire_tools(_server(seeded_db))[tool]["inputSchema"]["properties"]
+    doc = " ".join(params["date_from"]["description"].split())
     assert "span (its messages' occurred_at, else sent_at) overlaps the range" in doc
     assert "occurred_at and sent_at" in doc

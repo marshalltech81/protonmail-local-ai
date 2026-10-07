@@ -130,6 +130,15 @@ kept in #919): the block also hits tools that already declare the
 read-only hint, so the prefix is not adopted as a fix (#818 is
 trimming descriptions).
 
+A tool's description is its handler docstring before `Args:`, but
+FastMCP parses the docstring as Google style and sends only its first
+text section: a line of words ending in a colon with an indented block
+under it starts an admonition, and everything from that line on is
+dropped from what the client receives (#1011; `ask_mailbox` lost its
+routing and person guidance this way). Keep such blocks out of tool
+docstrings; `mcp-server/tests/test_tool_annotations.py` checks every
+tool's description on the wire against its docstring.
+
 - **Read-only.** The MCP specification defines `readOnlyHint` as "If
   true, the tool does not modify its environment." OpenAI's
   [Apps SDK reference](https://developers.openai.com/apps-sdk/reference)

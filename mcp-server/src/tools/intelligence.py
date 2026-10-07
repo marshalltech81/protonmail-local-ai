@@ -2952,14 +2952,12 @@ def register_intelligence_tools(
         that PDF's text is already in the local index, and
         ``ask_mailbox`` will surface it.
 
-        Use this whenever the question needs:
-          - attachment content (PDFs, scans, OCR'd images, statements,
-            quotes, reports, signed forms)
-          - synthesis across MORE THAN ONE thread ("what's the
-            status of X?", "what's open at Y?", "summarize my recent
-            vendor activity")
-          - comparison between an email body and its attachment
-            ("does the carrier email match the quote PDF?")
+        Use this whenever the question needs attachment content (PDFs,
+        scans, OCR'd images, statements, quotes, reports, signed forms),
+        synthesis across MORE THAN ONE thread ("what's the status of
+        X?", "what's open at Y?", "summarize my recent vendor
+        activity"), or a comparison between an email body and its
+        attachment ("does the carrier email match the quote PDF?").
 
         Use search_emails (not this) when the user wants a *list* of
         threads matching a query rather than a synthesized answer or
