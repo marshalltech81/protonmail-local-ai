@@ -888,9 +888,9 @@ def register_retrieval_tools(server, db):
         a topic: consider alternate wording, read candidate messages,
         and distinguish messages from threads or distinct bills/items.
         For every message about a topic, run one exact lane per subject
-        term, body word set and participant, page each to the end and
-        union by thread_id, reporting which lane found each thread
-        (multi-lane recipe: docs/mcp-tools.md).
+        term, body word set and participant, page each to the end, union
+        the rows by claimant_id with the lane that found each, and group
+        by thread_id to read (multi-lane recipe: docs/mcp-tools.md).
         Each page uses a fresh index snapshot; new matches ahead of the
         cursor can be missed. A changed ``total_matches`` signals churn,
         but the same total does not prove a stable set. Scope coverage to

@@ -1550,8 +1550,10 @@ def test_query_messages_description_points_to_the_multi_lane_recipe(empty_db):
     doc = _wire_descriptions(empty_db)["query_messages"]
     assert (
         "For every message about a topic, run one exact lane per subject term, "
-        "body word set and participant, page each to the end and union by "
-        "thread_id, reporting which lane found each thread (multi-lane recipe: "
-        "docs/mcp-tools.md)."
+        "body word set and participant, page each to the end, union the rows by "
+        "claimant_id with the lane that found each, and group by thread_id to "
+        "read (multi-lane recipe: docs/mcp-tools.md)."
     ) in doc
+    # Review round 1 on #1100: the union keeps message identities.
+    assert "union by thread_id" not in doc
     assert doc.count("multi-lane recipe") == 1

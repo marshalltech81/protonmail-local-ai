@@ -1089,16 +1089,23 @@ exact lanes with this tool and union them (#992, option 1):
 3. Page each lane to `has_more=false`, with `fields` kept to what the
    union needs (`["subject", "sent_at", "from"]`; `thread_id` is always
    included).
-4. Union by `thread_id`, keeping for each thread the lane or lanes that
-   found it. A thread found only by a body-word lane is weaker
+4. Union the rows by `claimant_id`, keeping for each message the lane
+   or lanes that found it: several matching messages can share a
+   thread, and a union keyed by thread would drop them before the
+   count. Then group the rows by `thread_id` for the reads, carrying
+   the lanes up: a thread found only by a body-word lane is weaker
    evidence than one a subject or participant lane also found, and the
    report should let the user see that.
-5. Read the candidate threads (`get_thread`) before counting them, and
-   report the ones discarded as noise with the lane that found them.
+5. Read the candidate threads (`get_thread`) before counting them. A
+   thread read brings in its messages that no lane matched; count
+   from the unioned rows, not from the threads read, and report the
+   threads discarded as noise with the lane that found them.
 
-What the union can claim: every indexed message outside Trash that
-matched one of the lanes as they were run, in the snapshot each page
-observed. What it cannot claim: coverage of the topic. A message about
+What the union can claim: every indexed message within the shared
+`folder` and date scope of the lanes (outside Trash only when `folder`
+is omitted) that matched one of the lanes as they were run, in the
+snapshot each page observed. What it cannot claim: coverage of the
+topic. A message about
 the concept that uses none of the lane terms and comes from none of
 the lane participants is not found, and nothing in the result shows
 that it is missing; paging a lane to the end proves the lane, not the
