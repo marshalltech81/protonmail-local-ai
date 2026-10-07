@@ -55,7 +55,7 @@ exec)
     # directory away and puts an open one at its path.
     if [[ -n "${FAKE_SWAP_DIR:-}" && "$6" == make ]]; then
         mv "$FAKE_SWAP_DIR" "$FAKE_SWAP_DIR.moved"
-        mkdir -m 777 "$FAKE_SWAP_DIR"
+        mkdir -m 755 "$FAKE_SWAP_DIR"
     fi
     SQLITE_PATH="$FAKE_DATA/mail.db" exec python3 -c "$5" "${@:6}"
     ;;
