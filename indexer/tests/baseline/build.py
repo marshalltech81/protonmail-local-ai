@@ -27,8 +27,8 @@ The baseline's capped results are therefore not production behaviour.
 cut by them.
 
 The OCR shapes (t90, t91, #908) run Tesseract and Poppler, so the build
-needs ``tesseract`` and ``pdftoppm`` on ``PATH`` (macOS: ``brew install
-tesseract poppler``) and fails naming the missing one, rather than
+needs ``tesseract``, ``pdftoppm`` and ``pdfinfo`` on ``PATH`` (macOS:
+``brew install tesseract poppler``) and fails naming the missing one, rather than
 recording the shapes as failed or OCR-disabled. It forces OCR on
 (``INDEXER_OCR_ENABLED``) and lowers ``INDEXER_OCR_MAX_PAGES`` to
 ``CAPPED_OCR_MAX_PAGES`` (2; production default 20), so t91's
@@ -58,10 +58,11 @@ from tests.baseline.corpus import (
 )
 from tests.baseline.hash_embedder import HashEmbedder, embed_text
 
-# The binaries the OCR shapes run: pytesseract starts ``tesseract`` and
-# pdf2image starts Poppler's ``pdftoppm`` (and ``pdfinfo``, from the
-# same package).
-OCR_BINARIES = ("tesseract", "pdftoppm")
+# The binaries the OCR shapes run: pytesseract starts ``tesseract``, and
+# pdf2image starts Poppler's ``pdfinfo`` (the page count, before every
+# render) and ``pdftoppm`` (the render). A partial Poppler install can
+# have one without the other (review round 1), so both are checked.
+OCR_BINARIES = ("tesseract", "pdftoppm", "pdfinfo")
 
 
 def require_ocr_binaries() -> None:

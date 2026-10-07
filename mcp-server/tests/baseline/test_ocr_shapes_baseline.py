@@ -100,11 +100,16 @@ def test_image_ocr_text_is_found_in_the_attachment(tools: dict) -> None:
 
 def test_image_ocr_text_is_not_in_the_body_tools(tools: dict) -> None:
     """The attachment_only contract: a text lookup for the OCR'd words
-    lists nothing, and get_message shows no attachment text."""
+    lists nothing, and get_message and get_thread show no attachment
+    text."""
     assert _call(tools, "query_messages", text="gannet", limit=100)["messages"] == []
     message = _call(tools, "get_message", message_id=_mid("t90.1"))
     assert message["next_offset"] is None
     assert "gannet" not in message["body"].casefold()
+    thread = _call(tools, "get_thread", thread_id=_mid("t90.1"))
+    assert thread["messages"] and all(
+        "gannet" not in m["body"].casefold() for m in thread["messages"]
+    )
 
 
 def test_capped_scanned_pdf_is_found_by_the_pages_within_the_cap(tools: dict) -> None:

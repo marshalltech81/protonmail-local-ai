@@ -4,6 +4,7 @@ The golden questions themselves run in ``mcp-server/tests/baseline``;
 these keep the indexer-side inputs deterministic and the build clean.
 """
 
+import ast
 import io
 import json
 import logging
@@ -16,6 +17,7 @@ from pathlib import Path
 
 import pypdf
 import pytest
+from PIL import Image
 from src.database import EMBEDDING_DIM, Database
 from src.extractors import EXTRACTOR_VERSIONS, _resolve_extractor
 
@@ -37,6 +39,7 @@ from tests.baseline.corpus import (
     thread_id,
     write_maildir,
 )
+from tests.baseline.fixtures import generate
 from tests.baseline.hash_embedder import HashEmbedder, embed_text
 
 _GOLDEN = Path(__file__).parents[3] / "mcp-server" / "tests" / "baseline" / "golden.json"
@@ -48,7 +51,7 @@ _GOLDEN = Path(__file__).parents[3] / "mcp-server" / "tests" / "baseline" / "gol
 _IN_CI = bool(os.environ.get("CI"))
 requires_ocr = pytest.mark.skipif(
     any(shutil.which(binary) is None for binary in OCR_BINARIES) and not _IN_CI,
-    reason="tesseract or pdftoppm is not installed (brew install tesseract poppler)",
+    reason="tesseract, pdftoppm or pdfinfo is not installed (brew install tesseract poppler)",
 )
 
 
@@ -93,6 +96,43 @@ def test_ocr_fixtures_carry_no_metadata():
     assert reader.metadata is None
     assert [page.extract_text() for page in reader.pages] == [""] * len(OCR_PDF_PAGES)
     assert len(OCR_PDF_PAGES) == CAPPED_OCR_MAX_PAGES + 1
+
+
+def test_generator_reads_the_corpus_text_from_its_source():
+    """Review round 1 on #908: the generator must run before the images
+    exist, so it reads the corpus's constants from the source instead of
+    importing the corpus, which reads the images at import."""
+    tree = ast.parse(Path(generate.__file__).read_text(encoding="utf-8"))
+    imported = {node.module or "" for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)}
+    imported |= {
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    }
+    assert not any("corpus" in name for name in imported), imported
+    assert (
+        generate.OCR_IMAGE_FILENAME,
+        generate.OCR_IMAGE_TEXT,
+        generate.OCR_CAPPED_PDF_FILENAME,
+        generate.OCR_PDF_PAGES,
+    ) == (OCR_IMAGE_FILENAME, OCR_IMAGE_TEXT, OCR_CAPPED_PDF_FILENAME, OCR_PDF_PAGES)
+    with pytest.raises(LookupError, match="NOT_A_CORPUS_CONSTANT"):
+        generate._corpus_constant("NOT_A_CORPUS_CONSTANT")
+
+
+def test_generator_writes_both_images(tmp_path):
+    """The recipe writes a grey PNG of the fixture size and a PDF with
+    one image page per line, no text layer and no Info dictionary."""
+    png, pdf = generate.write(tmp_path)
+    assert (png.name, pdf.name) == (OCR_IMAGE_FILENAME, OCR_CAPPED_PDF_FILENAME)
+    with Image.open(png) as image:
+        assert (image.format, image.mode, image.size) == ("PNG", "L", generate._SIZE)
+    raw = pdf.read_bytes()
+    assert b"/Info" not in raw
+    reader = pypdf.PdfReader(io.BytesIO(raw))
+    assert reader.metadata is None
+    assert [page.extract_text() for page in reader.pages] == [""] * len(OCR_PDF_PAGES)
 
 
 def _read_tree(root: Path) -> dict[str, bytes]:

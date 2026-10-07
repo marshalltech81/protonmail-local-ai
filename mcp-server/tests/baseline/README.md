@@ -12,8 +12,8 @@ The build runs OCR on two of the corpus's attachments (threads 90-91,
 #908), so it needs Tesseract and Poppler on `PATH`: `brew install
 tesseract poppler` on macOS (CI installs `tesseract-ocr poppler-utils`).
 Without them the build stops with a message naming the missing binary
-(`tesseract` or `pdftoppm`) rather than recording the shapes as failed
-extractions.
+(`tesseract`, `pdftoppm` or `pdfinfo`) rather than recording the shapes
+as failed extractions.
 
 ## How it works
 

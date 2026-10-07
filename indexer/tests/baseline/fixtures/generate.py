@@ -23,21 +23,35 @@ Usage, from ``indexer/``:
     uv run python -m tests.baseline.fixtures.generate
 """
 
+import ast
 import zlib
 from pathlib import Path
+from typing import Any
 
 from PIL import Image, ImageDraw, ImageFont
-
-from tests.baseline.corpus import (
-    OCR_CAPPED_PDF_FILENAME,
-    OCR_IMAGE_FILENAME,
-    OCR_IMAGE_TEXT,
-    OCR_PDF_PAGES,
-)
 
 _SIZE = (1000, 160)
 _DPI = 200
 _HERE = Path(__file__).parent
+_CORPUS = _HERE.parent / "corpus.py"
+
+
+def _corpus_constant(name: str) -> Any:
+    """The literal ``corpus.py`` assigns to ``name``, read from its source:
+    the corpus reads the committed images at import, so importing it
+    could not run before they exist (review round 1 on #908)."""
+    for node in ast.parse(_CORPUS.read_text(encoding="utf-8")).body:
+        if isinstance(node, ast.Assign) and [
+            t.id for t in node.targets if isinstance(t, ast.Name)
+        ] == [name]:
+            return ast.literal_eval(node.value)
+    raise LookupError(f"{name} is not assigned a literal in {_CORPUS.name}")
+
+
+OCR_IMAGE_FILENAME: str = _corpus_constant("OCR_IMAGE_FILENAME")
+OCR_IMAGE_TEXT: str = _corpus_constant("OCR_IMAGE_TEXT")
+OCR_CAPPED_PDF_FILENAME: str = _corpus_constant("OCR_CAPPED_PDF_FILENAME")
+OCR_PDF_PAGES: tuple[str, ...] = _corpus_constant("OCR_PDF_PAGES")
 
 
 def _render(text: str) -> Image.Image:
@@ -90,8 +104,13 @@ def _image_pdf(pages: list[Image.Image]) -> bytes:
     return out
 
 
-if __name__ == "__main__":
-    image, pdf = _HERE / OCR_IMAGE_FILENAME, _HERE / OCR_CAPPED_PDF_FILENAME
+def write(out_dir: Path) -> tuple[Path, Path]:
+    """Write both images under ``out_dir``; return their paths."""
+    image, pdf = out_dir / OCR_IMAGE_FILENAME, out_dir / OCR_CAPPED_PDF_FILENAME
     _render(OCR_IMAGE_TEXT).save(image, "PNG")
     pdf.write_bytes(_image_pdf([_render(line) for line in OCR_PDF_PAGES]))
-    print(f"wrote {image} and {pdf}")
+    return image, pdf
+
+
+if __name__ == "__main__":
+    print("wrote {} and {}".format(*write(_HERE)))
