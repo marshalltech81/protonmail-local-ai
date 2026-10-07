@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import MagicMock
@@ -86,7 +87,7 @@ def test_successful_cached_extraction_is_reused(tmp_path, monkeypatch):
     db.store_attachment_extraction(
         attachment_id=attachment.content_hash,
         extraction_status=STATUS_SUCCESS,
-        extractor="text@2",
+        extractor="text@3",
         extracted_text="cached text",
         extraction_error=None,
     )
@@ -120,7 +121,7 @@ def test_successful_cached_extraction_is_reused(tmp_path, monkeypatch):
     ]
     assert chunk_texts == ["cached text"]
     row = db.get_attachment_extraction(attachment.content_hash)
-    assert (row["extractor"], row["extracted_text"]) == ("text@2", "cached text")
+    assert (row["extractor"], row["extracted_text"]) == ("text@3", "cached text")
     assert db.get_chunk_ids_for_message(
         "message@example.com", attachment_id=attachment.content_hash
     )
@@ -381,7 +382,7 @@ def _run_process_with_cached_status(
     db.store_attachment_extraction(
         attachment_id=attachment.content_hash,
         extraction_status=status,
-        extractor="text@2",
+        extractor="text@3",
         extracted_text=None,
         extraction_error=error,
     )
@@ -448,7 +449,7 @@ def test_cached_too_large_extraction_is_re_run_once_the_payload_fits(tmp_path, m
         )
         extractor = MagicMock(
             return_value=ExtractionResult(
-                status=STATUS_SUCCESS, extractor="text@2", text="now extracted", error=None
+                status=STATUS_SUCCESS, extractor="text@3", text="now extracted", error=None
             )
         )
         monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
@@ -607,7 +608,7 @@ def test_recent_failed_cached_extraction_is_honored(tmp_path, monkeypatch):
     db.store_attachment_extraction(
         attachment_id=attachment.content_hash,
         extraction_status=STATUS_FAILED,
-        extractor="text@2",
+        extractor="text@3",
         extracted_text=None,
         extraction_error="recent failure",
     )
@@ -843,7 +844,7 @@ class TestPrepareApplyBoundary:
         db.store_attachment_extraction(
             attachment_id=attachment.content_hash,
             extraction_status=STATUS_SUCCESS,
-            extractor="text@2",
+            extractor="text@3",
             extracted_text="cached body",
             extraction_error=None,
         )
@@ -1575,17 +1576,32 @@ class TestLegacyOle2CacheRows:
             )
             extractor.assert_not_called()
 
+    def test_row_holds_for_a_text_labelled_occurrence(self, tmp_path, monkeypatch):
+        """#932: the same bytes labelled ``.txt`` would be rejected by the
+        text guard, so the row stands in for them too."""
+        from src.extractors import LEGACY_OLE2_ERROR
+
+        for content_type, filename in (("text/plain", "a.bin"), ("", "a.txt")):
+            db = _seed_thread_for_cache_test(tmp_path / filename)
+            attachment = _attachment(
+                _OLE2_MAGIC + bytes(64), filename=filename, content_type=content_type
+            )
+            extractor = _run_process_with_cached_status(
+                db, attachment, STATUS_UNSUPPORTED, monkeypatch, error=LEGACY_OLE2_ERROR
+            )
+            extractor.assert_not_called()
+
     def test_row_is_re_run_for_an_occurrence_with_another_extractor(self, tmp_path, monkeypatch):
-        """The same bytes labelled ``.txt`` take the text path, so the row
+        """The same bytes labelled ``.pdf`` take the PDF path, so the row
         does not stand in for them."""
         db = _seed_thread_for_cache_test(tmp_path)
         attachment = _attachment(
-            _OLE2_MAGIC + bytes(64), filename="a.txt", content_type="text/plain"
+            _OLE2_MAGIC + bytes(64), filename="a.pdf", content_type="application/pdf"
         )
         self._store(db, attachment)
         extractor = MagicMock(
             return_value=ExtractionResult(
-                status=STATUS_SUCCESS, extractor="text@2", text="words", error=None
+                status=STATUS_FAILED, extractor="pdf@4", text=None, error="PdfReadError"
             )
         )
         monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
@@ -1644,6 +1660,135 @@ class TestLegacyOle2CacheRows:
             STATUS_UNSUPPORTED,
             None,
             LEGACY_OLE2_ERROR,
+        )
+        again = prepare_attachment_writes(db=db, **_kwargs(attachment))
+        assert (again.status, again.cached) == (STATUS_UNSUPPORTED, True)
+        assert "SYNTHETIC_TEXT_MARKER" not in caplog.text
+
+
+# Fixed binary signatures the text guard rejects (#932).
+_BINARY_SIGNATURES = (
+    b"%PDF-",
+    b"PK\x03\x04",
+    _OLE2_MAGIC,
+    b"\x89PNG\r\n\x1a\n",
+    b"\xff\xd8\xff",
+    b"GIF87a",
+    b"GIF89a",
+)
+
+# Occurrences that select the text extractor: a ``text/plain`` label, and a
+# ``.txt`` name with no Content-Type.
+_TEXT_LABELS = (
+    ("text/plain", "SYNTHETIC_FILENAME_MARKER.pdf"),
+    ("", "SYNTHETIC_FILENAME_MARKER.txt"),
+)
+
+
+class TestBinaryPayloadLabelledAsText:
+    """#932: a binary payload labelled as text is cached ``unsupported``
+    through the real dispatcher, produces no chunk, is counted in the
+    aggregate, and the row is served to later text occurrences."""
+
+    @pytest.mark.parametrize("magic", _BINARY_SIGNATURES)
+    @pytest.mark.parametrize(("content_type", "filename"), _TEXT_LABELS)
+    def test_binary_payload_is_unsupported_with_no_chunk(
+        self, magic, content_type, filename, tmp_path, caplog
+    ):
+        from src.extractors import BINARY_AS_TEXT_ERROR
+
+        caplog.set_level("DEBUG")
+        attachment_indexing.attachment_outcomes.drain()
+        db = _setup_db_for_attachment(tmp_path)
+        attachment = _attachment(
+            magic + b"SYNTHETIC_TEXT_MARKER" + bytes(64),
+            filename=filename,
+            content_type=content_type,
+        )
+        plan = prepare_attachment_writes(db=db, **_kwargs(attachment))
+        assert plan.status == STATUS_UNSUPPORTED
+        assert plan.chunks == []
+        with db.transaction():
+            apply_attachment_writes(plan=plan, claimant_id="msg@x", thread_id="thread-x", db=db)
+        attachment_indexing.record_committed_outcomes([plan])
+        row = db.get_attachment_extraction(attachment.content_hash)
+        assert (row["extraction_status"], row["extractor"], row["extraction_error"]) == (
+            STATUS_UNSUPPORTED,
+            None,
+            BINARY_AS_TEXT_ERROR,
+        )
+        assert not db.get_chunk_ids_for_message("msg@x", attachment_id=attachment.content_hash)
+        counts = attachment_indexing.attachment_outcomes.drain()
+        assert counts["unsupported"] == 1
+        assert counts["success"] == 0
+        assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+        for marker in ("SYNTHETIC_TEXT_MARKER", "SYNTHETIC_FILENAME_MARKER"):
+            assert marker not in caplog.text
+
+    @pytest.mark.parametrize(("content_type", "filename"), _TEXT_LABELS + (("text/csv", "a.csv"),))
+    def test_row_holds_for_later_text_occurrences(
+        self, content_type, filename, tmp_path, monkeypatch
+    ):
+        from src.extractors import BINARY_AS_TEXT_ERROR
+
+        db = _seed_thread_for_cache_test(tmp_path)
+        attachment = _attachment(
+            b"%PDF-1.7" + bytes(64), filename=filename, content_type=content_type
+        )
+        extractor = _run_process_with_cached_status(
+            db, attachment, STATUS_UNSUPPORTED, monkeypatch, error=BINARY_AS_TEXT_ERROR
+        )
+        extractor.assert_not_called()
+
+    def test_row_is_re_run_for_an_occurrence_with_another_extractor(self, tmp_path, monkeypatch):
+        """The same bytes labelled ``.pdf`` reach the PDF extractor."""
+        from src.extractors import BINARY_AS_TEXT_ERROR
+
+        db = _seed_thread_for_cache_test(tmp_path)
+        attachment = _attachment(
+            b"%PDF-1.7" + bytes(64), filename="a.pdf", content_type="application/pdf"
+        )
+        db.store_attachment_extraction(
+            attachment_id=attachment.content_hash,
+            extraction_status=STATUS_UNSUPPORTED,
+            extractor=None,
+            extracted_text=None,
+            extraction_error=BINARY_AS_TEXT_ERROR,
+        )
+        extractor = MagicMock(
+            return_value=ExtractionResult(
+                status=STATUS_SUCCESS, extractor="pdf-digital@4", text="words", error=None
+            )
+        )
+        monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
+        prepare_attachment_writes(db=db, **_kwargs(attachment, claimant_id="message@example.com"))
+        extractor.assert_called_once()
+
+    def test_stale_text_success_row_is_refreshed_to_unsupported_once(self, tmp_path, caplog):
+        """A ``success`` row the previous text version wrote for a binary
+        payload is stale after the bump: it is refreshed once, through the
+        real dispatcher, to ``unsupported``, and then served from the cache."""
+        from src.extractors import BINARY_AS_TEXT_ERROR
+
+        caplog.set_level("DEBUG")
+        db = _setup_db_for_attachment(tmp_path)
+        attachment = _attachment(b"%PDF-1.7" + b"SYNTHETIC_TEXT_MARKER" + bytes(64))
+        db.store_attachment_extraction(
+            attachment_id=attachment.content_hash,
+            extraction_status=STATUS_SUCCESS,
+            extractor="text@2",
+            extracted_text="%PDF-1.7 \ufffd\ufffd",
+            extraction_error=None,
+        )
+        plan = prepare_attachment_writes(db=db, **_kwargs(attachment))
+        assert (plan.status, plan.cached, plan.chunks) == (STATUS_UNSUPPORTED, False, [])
+        with db.transaction():
+            apply_attachment_writes(plan=plan, claimant_id="msg@x", thread_id="thread-x", db=db)
+        row = db.get_attachment_extraction(attachment.content_hash)
+        assert (row["extraction_status"], row["extractor"], row["extraction_error"]) == (
+            STATUS_UNSUPPORTED,
+            None,
+            BINARY_AS_TEXT_ERROR,
         )
         again = prepare_attachment_writes(db=db, **_kwargs(attachment))
         assert (again.status, again.cached) == (STATUS_UNSUPPORTED, True)
