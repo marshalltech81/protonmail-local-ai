@@ -3913,6 +3913,85 @@ class TestRequeueNewlyDispatchedExtensions:
         assert self._queued(db) == {}
 
 
+class TestRequeueLegacyOle2Rows:
+    """#935: #694 cached a genuine ``.doc`` / ``.xls`` as ``unsupported``
+    with the OLE2 error and no extractor, so no version bump marks it
+    stale. Once ``.doc`` / ``.xls`` select the legacy extractors, the
+    startup sweep re-queues messages whose occurrence selects one, once;
+    an occurrence labelled ``.docx`` still selects no reader and is left."""
+
+    _write_eml = staticmethod(TestRequeueOcrDisabledExtractions._write_eml)
+    _drain = TestRequeueOcrDisabledExtractions._drain
+    _queued = staticmethod(TestRequeueOcrDisabledExtractions._queued)
+
+    def _index_as_694_did(self, tmp_path, monkeypatch, messages):
+        from src import extractors
+
+        maildir = tmp_path / "maildir"
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        db = Database(tmp_path / "mail.db")
+        queue = _make_queue(db)
+        paths = {}
+        for name, (payload, ctype, filename) in messages.items():
+            path = maildir / "INBOX" / "cur" / f"{name}.eml"
+            self._write_eml(path, f"{name}@example.com", payload, ctype, filename)
+            queue.enqueue(str(path), REASON_INITIAL_SCAN)
+            paths[name] = str(path)
+        # #694's dispatch: legacy labels went to the OOXML extractors.
+        legacy = {"application/msword": "doc", "application/vnd.ms-excel": "xls"}
+        for mime in legacy:
+            monkeypatch.setitem(extractors._MIME_DISPATCH, mime, legacy[mime] + "x")
+        monkeypatch.setitem(extractors._EXT_DISPATCH, ".doc", "docx")
+        monkeypatch.setitem(extractors._EXT_DISPATCH, ".xls", "xlsx")
+        self._drain(db, queue)
+        # The upgrade.
+        for mime, module in legacy.items():
+            monkeypatch.setitem(extractors._MIME_DISPATCH, mime, module)
+        monkeypatch.setitem(extractors._EXT_DISPATCH, ".doc", "doc")
+        monkeypatch.setitem(extractors._EXT_DISPATCH, ".xls", "xls")
+        return db, queue, paths
+
+    def test_legacy_labelled_occurrences_are_requeued_once(self, tmp_path, monkeypatch):
+        from src import attachment_indexing
+        from src.extractors import LEGACY_OLE2_ERROR, STATUS_SUCCESS, ExtractionResult
+
+        ole2 = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+        db, queue, paths = self._index_as_694_did(
+            tmp_path,
+            monkeypatch,
+            {
+                "memo": (ole2 + b"synthetic doc", "application/msword", "memo.doc"),
+                "book": (ole2 + b"synthetic xls", "application/octet-stream", "book.xls"),
+                "sealed": (ole2 + b"synthetic docx", "application/octet-stream", "sealed.docx"),
+            },
+        )
+        rows = db._conn.execute(
+            "SELECT extraction_status, extractor, extraction_error FROM attachment_extractions"
+        ).fetchall()
+        assert [tuple(r) for r in rows] == [("unsupported", None, LEGACY_OLE2_ERROR)] * 3
+        assert self._queued(db) == {}
+
+        assert main._requeue_stale_extractions(db, queue) == 2
+        assert self._queued(db) == {
+            paths["memo"]: REASON_REEXTRACT,
+            paths["book"]: REASON_REEXTRACT,
+        }
+
+        extractor = MagicMock(
+            return_value=ExtractionResult(
+                status=STATUS_SUCCESS, extractor="doc@1", text="legacy words", error=None
+            )
+        )
+        monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
+        self._drain(db, queue)
+        assert extractor.call_count == 2
+
+        # The rows are rewritten, so the next startup finds nothing; the
+        # ``.docx`` occurrence still selects no reader and is never queued.
+        assert main._requeue_stale_extractions(db, queue) == 0
+        assert self._queued(db) == {}
+
+
 class TestRequeueTooLargeThatNowFits:
     """#693: attachments cached ``too_large`` under a smaller
     ``INDEXER_ATTACHMENT_MAX_BYTES`` must be read once the operator raises
