@@ -89,6 +89,19 @@ and every ``unanswerable`` question's ``absent_terms``; they have no
 Sent messages, attachments or May 2024 dates, so the enumeration
 baselines are undisturbed.
 
+Threads 78-81 back three attachment shapes (#906), dated February
+2026 so the pre-2026 enumerations are undisturbed. t78 carries a real
+digital PDF (``_minimal_pdf``) whose pickup place, the Brambleford
+granary, is in the attachment only; t79 and t80 carry one byte-identical
+quilt pattern under two filenames, so both occurrences share one
+attachment ID and the second extraction is a cache hit; t81 carries a
+PDF under a ``.txt`` filename, declared ``application/pdf``, so the
+extractor is chosen by MIME type, not extension. Their words avoid every
+golden search query's words, the reserved words above and every
+``unanswerable`` question's ``absent_terms``; keep the attachment-only
+facts (Brambleford, granary, Ashgrove, meadow, telescope, calico,
+muslin, sashing) out of every body.
+
 Thread IDs are the root Message-IDs: ``t<NN>.1@baseline.example``.
 """
 
@@ -108,7 +121,8 @@ class Attachment:
     filename: str
     # "text/plain" or "text/html"; any other type is attached as bytes
     # (the UTF-8 of ``text``), which is how t64's damaged PDF fails
-    # extraction.
+    # extraction and how t78's and t81's ``_minimal_pdf`` output is
+    # attached whole.
     mime: str
     text: str
 
@@ -1852,6 +1866,124 @@ THREADS.update(
                 "Sam, Rosa,\n\nMy list from last season still shows Sam on plot C-3 "
                 "at $70 for the season.\n\nFelix",
                 cc=ROSA,
+            ),
+        ],
+    }
+)
+
+
+def _minimal_pdf(lines: tuple[str, ...]) -> str:
+    """A one-page digital PDF showing ``lines`` in Helvetica, as ASCII.
+
+    Hand-written so the corpus needs no PDF library: an uncompressed
+    content stream, the standard Type1 font and a cross-reference table
+    with the real byte offsets, so pypdf reads it without repair. The
+    result is ASCII, so ``build_message`` attaches its UTF-8 bytes
+    unchanged.
+    """
+    escaped = (line.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)") for line in lines)
+    content = "BT /F1 12 Tf 14 TL 72 720 Td " + " T* ".join(f"({line}) Tj" for line in escaped)
+    content += " ET"
+    objects = (
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+        "/Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        f"<< /Length {len(content)} >>\nstream\n{content}\nendstream",
+    )
+    out = "%PDF-1.4\n"
+    offsets = []
+    for number, body in enumerate(objects, start=1):
+        offsets.append(len(out))
+        out += f"{number} 0 obj\n{body}\nendobj\n"
+    xref = len(out)
+    out += f"xref\n0 {len(objects) + 1}\n0000000000 65535 f \n"
+    out += "".join(f"{offset:010d} 00000 n \n" for offset in offsets)
+    out += f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n"
+    return out
+
+
+# One payload under two filenames (t79, t80): byte-identical, so both
+# occurrences share one attachment_id and one extraction row.
+_QUILT_PATTERN = (
+    "Pinwheel quilt pattern\n"
+    "Cut forty calico squares and twelve muslin squares.\n"
+    "Sew indigo sashing around each pinwheel.\n"
+)
+
+THREADS.update(
+    {
+        # A real digital PDF whose fact is only in the attachment (#906).
+        78: [
+            Msg(
+                "INBOX",
+                "Mon, 09 Feb 2026 14:00:00 +0000",
+                "Mossbank Honey Farm <orders@mossbankhoney.example>",
+                ME,
+                "Your honey order",
+                "Hi Sam,\n\nYour order details are attached.\n\nMossbank Honey Farm",
+                attachments=(
+                    Attachment(
+                        "honey-order.pdf",
+                        "application/pdf",
+                        _minimal_pdf(
+                            (
+                                "Mossbank Honey Farm",
+                                "Six jars of wildflower honey, sealed with beeswax.",
+                                "Collect them from the Brambleford granary on Saturday March 14.",
+                            )
+                        ),
+                    ),
+                ),
+            ),
+        ],
+        # One payload under two filenames, in two threads (#906).
+        79: [
+            Msg(
+                "INBOX",
+                "Tue, 10 Feb 2026 18:30:00 +0000",
+                "Odile Marsh <odile@fernquilters.example>",
+                ME,
+                "Guild pattern for March",
+                "Hi Sam,\n\nThe pinwheel quilting pattern for Thursday is attached.\n\nOdile",
+                attachments=(Attachment("pinwheel-pattern.txt", "text/plain", _QUILT_PATTERN),),
+            ),
+        ],
+        80: [
+            Msg(
+                "INBOX",
+                "Wed, 11 Feb 2026 08:15:00 +0000",
+                "Priya Lund <priya@fernquilters.example>",
+                ME,
+                "Handout from the guild",
+                "Sam,\n\nOdile wanted everyone in the sewing circle to have this sheet.\n\nPriya",
+                attachments=(Attachment("guild-handout.txt", "text/plain", _QUILT_PATTERN),),
+            ),
+        ],
+        # A .txt filename on a part declared and encoded as application/pdf:
+        # dispatch goes by the MIME type (#906).
+        81: [
+            Msg(
+                "INBOX",
+                "Thu, 12 Feb 2026 20:45:00 +0000",
+                "Corvid Observatory <desk@corvidobservatory.example>",
+                ME,
+                "Your stargazing ticket",
+                "Hello Sam,\n\nYour ticket is attached.\n\nCorvid Observatory",
+                attachments=(
+                    Attachment(
+                        "stargazing-ticket.txt",
+                        "application/pdf",
+                        _minimal_pdf(
+                            (
+                                "Corvid Observatory",
+                                "Admits two to the telescope dome for the meteor watch.",
+                                "Meet the guide at the Ashgrove meadow gate at nine.",
+                            )
+                        ),
+                    ),
+                ),
             ),
         ],
     }

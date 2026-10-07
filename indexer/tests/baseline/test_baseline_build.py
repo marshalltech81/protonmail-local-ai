@@ -5,14 +5,17 @@ these keep the indexer-side inputs deterministic and the build clean.
 """
 
 import json
+import logging
 import math
+import re
 from pathlib import Path
 
 import pytest
 from src.database import EMBEDDING_DIM, Database
+from src.extractors import EXTRACTOR_VERSIONS, _resolve_extractor
 
 from tests.baseline.build import build
-from tests.baseline.corpus import THREADS, write_maildir
+from tests.baseline.corpus import THREADS, thread_id, write_maildir
 from tests.baseline.hash_embedder import HashEmbedder, embed_text
 
 _GOLDEN = Path(__file__).parents[3] / "mcp-server" / "tests" / "baseline" / "golden.json"
@@ -93,6 +96,49 @@ class TestBuild:
             golden["evidence_queries"]
         ) | {question}
         assert vectors[question] == embed_text(question)
+
+    def test_attachment_shapes_extract_as_documented(self, tmp_path, caplog):
+        """#906: t78's real PDF and t81's PDF under a ``.txt`` name are
+        extracted by the digital PDF extractor (t81 dispatched by MIME);
+        t79 and t80 share one payload, so one extraction row serves both
+        and the second occurrence is the build's only cache hit."""
+        out = tmp_path / "out"
+        with caplog.at_level(logging.INFO, logger="indexer"):
+            build(out, _GOLDEN)
+
+        cached = [
+            int(m.group(1))
+            for r in caplog.records
+            if (m := re.search(r"^attachments n=\d+ .*\bcached=(\d+)\b", r.getMessage()))
+        ]
+        assert cached and sum(cached) == 1
+
+        db = Database(out / "mail.db")
+        try:
+            rows = db._conn.execute(
+                "SELECT a.thread_id, a.filename, a.content_type, a.attachment_id,"
+                " e.extraction_status, e.extractor"
+                " FROM attachments a JOIN attachment_extractions e USING (attachment_id)"
+                " WHERE a.thread_id IN (?, ?, ?, ?) ORDER BY a.thread_id",
+                tuple(thread_id(n) for n in (78, 79, 80, 81)),
+            ).fetchall()
+            pattern_id = rows[1][3]
+            extraction_rows = db._conn.execute(
+                "SELECT COUNT(*) FROM attachment_extractions WHERE attachment_id = ?",
+                (pattern_id,),
+            ).fetchone()[0]
+        finally:
+            db.close()
+        pdf, pattern, handout, ticket = rows
+        assert pdf[1:3] == ("honey-order.pdf", "application/pdf")
+        assert pdf[4:] == ("success", f"pdf-digital@{EXTRACTOR_VERSIONS['pdf']}")
+        assert [pattern[1], handout[1]] == ["pinwheel-pattern.txt", "guild-handout.txt"]
+        assert pattern[3] == handout[3] and pattern[4] == "success"
+        assert extraction_rows == 1
+        assert ticket[1:3] == ("stargazing-ticket.txt", "application/pdf")
+        assert _resolve_extractor(ticket[2], ticket[1]) == ("pdf", "mime")
+        assert ticket[4:] == ("success", f"pdf-digital@{EXTRACTOR_VERSIONS['pdf']}")
+        assert len({pdf[3], pattern[3], ticket[3]}) == 3
 
     def test_refuses_non_empty_output_dir(self, tmp_path):
         (tmp_path / "leftover").write_text("x")

@@ -43,7 +43,10 @@
     {"id": "alt-cabin-address", "query": "cabin street address Hemlock Ridge", "required_evidence": [["t27", "t28"]], "max_rank": 1},
     {"id": "attach-only-rent", "query": "new monthly rent", "required_evidence": [["t23"]], "max_rank": 3, "evidence": "$2,140"},
     {"id": "correction-recital", "query": "piano recital moved new date", "required_evidence": [["t24"]], "max_rank": 1, "evidence": "Sunday August 11"},
-    {"id": "conflict-block-party", "query": "Juniper Lane block party", "required_evidence": [["t29"], ["t30"]], "max_rank": 1}
+    {"id": "conflict-block-party", "query": "Juniper Lane block party", "required_evidence": [["t29"], ["t30"]], "max_rank": 1},
+    {"id": "attach-pdf-only", "query": "Brambleford granary", "required_evidence": [["t78"]], "max_rank": 1, "evidence": "Brambleford granary", "_comment": "#906: a real digital PDF; the fact is in the attachment only."},
+    {"id": "attach-shared-payload", "query": "pinwheel calico muslin sashing", "required_evidence": [["t79"], ["t80"]], "max_rank": 1, "_comment": "#906: one payload under two filenames in two threads."},
+    {"id": "attach-mime-dispatch", "query": "Ashgrove meadow telescope", "required_evidence": [["t81"]], "max_rank": 1, "evidence": "Ashgrove meadow", "_comment": "#906: a PDF under a .txt filename, dispatched by MIME type."}
   ],
   "enumerate": [
     {"id": "sender", "args": {"sender": "adjuster@keystoneins.example"}, "expect": ["t10.1", "t10.3"]},
