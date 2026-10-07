@@ -108,10 +108,13 @@ Follow-ups on corpus completeness and correctness:
 
 - threading: #752 (replies indexed before their root stay split;
   count split threads on the rebuilt index first), #756 (subject
-  fallback chains recurring same-subject mail)
+  fallback chains recurring same-subject mail; counts posted
+  2026-10-07: 694 of 5,979 multi-message threads have a subject-joined
+  message, 3 span more than 180 days; owner picks an option)
 - attachment coverage: #691 (optional decoders; fontTools waits on
   py-pdf/pypdf#4156), #695, #923 (formats with no extractor), #947
-  (PPTX charts, SmartArt and variants)
+  (PPTX charts and SmartArt; the `.pptm`, `.ppsx`, `.potx`, `.ppsm`
+  and `.potm` variants are routed since #1043 and #1068)
 - bounded work: #781
 - index-side Unicode normalization left from #316: #782
 
@@ -526,7 +529,9 @@ can be revisited with an explicit owner decision.
   DOCX / XLSX / PPTX / legacy DOC and XLS (#935) / legacy PPT (Apache
   POI in a Java process, #957) / HTML / TXT / images are
 - pdf2image runs a second, untimed `pdfinfo` inside each render; the
-  timed page count before it covers the realistic stall (#868)
+  timed page count before it covers the realistic stall (#868; no
+  pdf2image release changes this, checked 2026-10-07, so the choice
+  between accepting it and a direct `pdftoppm` call is the owner's)
 - `list_threads(filter_type=...)` rejects unsupported values cleanly;
   read/flagged/replied state is indexed (#649) but draft/forwarded is not
 - deletion reconciliation (mirror) is not yet validated under

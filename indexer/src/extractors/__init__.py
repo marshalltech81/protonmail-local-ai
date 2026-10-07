@@ -346,6 +346,8 @@ class ExtractionResult:
 # ``stale_extractor_module``); rolling back to such a build treats the
 # ``docx@5`` rows written since as stale and re-runs them through the
 # unbudgeted walk at its next start, which is that build's behaviour.
+# Version 6 is therefore taken: the next ``docx`` bump goes to 7, or
+# the ``docx@6`` rows such a build wrote would never be re-extracted.
 # pptx 3 still: reads macro-enabled slideshows (``.ppsm``) and templates
 # (``.potm``), whose main parts python-pptx loaded as generic parts, so
 # one labelled ``.pptx`` failed by type (#1042); the bump above refreshes

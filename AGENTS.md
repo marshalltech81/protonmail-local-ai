@@ -231,7 +231,17 @@ Do not make any of the following changes unless the repository owner explicitly 
   reach mail indexed before it; with the bump, stale rows re-extract and
   the startup sweep re-queues the messages carrying them once.
   Dead-lettered messages are skipped and keep their stale chunks until
-  an operator runs `make requeue-dead`.
+  an operator runs `make requeue-dead`. A bump also re-runs that
+  module on every cached payload the startup sweep considers (the
+  sweep does nothing while `INDEXER_ATTACHMENT_EXTRACTION_ENABLED` is
+  off, and keeps `image-ocr` / `pdf-ocr` rows while OCR is off), so
+  before bumping a module whose post-open walk is not yet budgeted,
+  read the issue or PR that last chose not to bump it (#1036 declined a `docx` bump
+  while #1031 is open; #1068 bumped it anyway and #1075 reverted it).
+  A reverted bump leaves its number taken: a build in between may have
+  stamped rows with it, and a row is never treated as stale by a
+  lower-or-equal version, so the next `docx` bump goes to 7, not 6
+  (`test_docx_rows_stamped_by_the_reverted_bump_are_kept` pins this).
 
 ## Bridge-Specific Guardrails
 
@@ -661,6 +671,7 @@ When changing Docker Compose service definitions or runtime behavior:
 - add resource controls such as memory limits, `pids_limit`, and log rotation when practical
 - keep container-to-container network access as narrow as the architecture allows
 - prefer degraded modes over broadening privileges, relaxing confinement, or exposing more of the host
+- give every optional setting's Compose interpolation a default (`${NAME:-}` or the documented value), so a `.env` written before the setting existed does not print an "is not set" warning on every command (#1058, #1074). Required settings stay as bare `${NAME}`; Compose only warns and substitutes an empty string for those, so the requirement is enforced by `scripts/validate-env.sh` (which `make up` runs first) and by each service's own startup check, never by Compose
 
 ## Bash Conventions
 
