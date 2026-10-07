@@ -7089,6 +7089,44 @@ class TestMessageRecordsEndToEnd:
         ] == [(logging.INFO, "archive retention: cleared 1 leftover tombstone on restore")]
         assert marker not in caplog.text
 
+    def test_archive_mode_mass_restore_logs_are_rate_limited(self, tmp_path, monkeypatch, caplog):
+        """Review round 1 on #860: an operator restoring a whole folder of
+        messages that still carry mirror-mode tombstones fires one rename
+        event each. The recovery line shares the indexer's per-window
+        line budget, so a mass restore logs at most the budget and the
+        rest are counted for the queue heartbeat's ``suppressed_lines``
+        instead of evicting the retained log."""
+        from src import extractors
+
+        maildir = tmp_path / "maildir"
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        db = Database(tmp_path / "mail.db")
+        queue = _make_queue(db)
+        count = extractors._WARNINGS_PER_WINDOW + 5
+        paths = []
+        for i in range(count):
+            src = maildir / "INBOX" / "cur" / f"17000000{i:02d}.M{i}.host:2,ST"
+            _write_eml(src, f"mass{i}@example.com")
+            paths.append(src)
+        main.initial_index(db, make_mock_embedder(_UNIT_VECTOR), Threader(db), queue)
+        for src in paths:
+            entry = db.find_message_entry_by_filepath(str(src))
+            assert entry is not None
+            assert db.add_pending_deletion(str(src), entry["claimant_id"], entry["thread_id"])
+        handler = main.MaildirHandler(db, queue)
+
+        with caplog.at_level(logging.INFO):
+            for src in paths:
+                dest = src.with_name(src.name[:-1])
+                src.rename(dest)
+                handler.on_moved(_FakeEvent(str(src), str(dest)))
+
+        assert db._conn.execute("SELECT count(*) FROM pending_deletions").fetchone()[0] == 0
+        assert db._conn.execute("SELECT count(*) FROM message_thread_map").fetchone()[0] == count
+        logged = [r for r in caplog.records if "leftover tombstone" in r.getMessage()]
+        assert len(logged) == extractors._WARNINGS_PER_WINDOW
+        assert extractors.drain_suppressed_lines() == 5
+
     def test_archive_mode_rename_keeping_t_flag_moves_tombstone(
         self, tmp_path, monkeypatch, caplog
     ):

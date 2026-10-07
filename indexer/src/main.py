@@ -933,10 +933,12 @@ class MaildirHandler(FileSystemEventHandler):
                 # it to the live name, where it would report the message
                 # as pending deletion for ever (#860). Archive mode never
                 # reaps, so a leftover tombstone otherwise outlives the
-                # restore.
+                # restore. The lookup stays inside the error boundary:
+                # watchdog does not catch handler exceptions, and one
+                # escaping here would end the observer thread.
                 restored = not is_trashed(dest_path_obj)
-                leftover_tombstone = restored and self.db.has_pending_deletion(src_path)
                 try:
+                    leftover_tombstone = restored and self.db.has_pending_deletion(src_path)
                     self.db.update_filepath(
                         src_path, dest_path, folder=folder_change, clear_tombstone=restored
                     )
@@ -944,7 +946,17 @@ class MaildirHandler(FileSystemEventHandler):
                     log.error("update_filepath failed on rename: %s", type(e).__name__)
                     return
                 if leftover_tombstone:
-                    log.info("archive retention: cleared %d leftover tombstone on restore", 1)
+                    # One line per restore, within the indexer's shared
+                    # per-window budget: a folder restored at once fires
+                    # one event per message, and the rest are counted on
+                    # the queue heartbeat's ``suppressed_lines``.
+                    warn_rate_limited(
+                        log,
+                        "archive retention: cleared %d leftover tombstone on restore",
+                        1,
+                        level=logging.INFO,
+                        attachment=False,
+                    )
             return
 
         # Case 2: new delivery — enqueue for the worker. A flag rename

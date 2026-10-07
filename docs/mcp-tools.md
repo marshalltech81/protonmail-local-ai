@@ -859,7 +859,8 @@ records no tombstones, so the flag is `false` there, except for
 tombstones left by an earlier mirror-mode run, which archive mode
 never reaps: such a message keeps `pending_deletion: true` until it is
 restored upstream (the `T` flag cleared), when the indexer clears the
-tombstone as it records the rename and the message reads as live. A
+tombstone as it records the rename (live, or at the next startup's
+rename sweep) and the message reads as live. A
 leftover tombstone on a message that stays trashed is kept. `get_thread`
 rows do not carry it.
 

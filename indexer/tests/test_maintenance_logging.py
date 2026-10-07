@@ -811,3 +811,29 @@ class TestOnMovedFailureLogsTypeOnly:
             (logging.ERROR, "update_filepath failed on rename: ValueError")
         ]
         assert MARKER not in caplog.text
+
+    def test_tombstone_lookup_failure(self, tmp_path, monkeypatch, caplog):
+        """Review round 1 on #860: the leftover-tombstone lookup that
+        precedes ``update_filepath`` on an archive-mode restore runs
+        inside the same error boundary. watchdog does not catch handler
+        exceptions, so one escaping here would end the observer thread."""
+        monkeypatch.setattr(main, "MAILDIR_PATH", tmp_path)
+        calls = []
+
+        def has_pending_deletion(_p):
+            raise sqlite3.OperationalError(MARKER)
+
+        db = SimpleNamespace(
+            is_indexed=lambda _p: True,
+            has_pending_deletion=has_pending_deletion,
+            update_filepath=lambda *a, **_kw: calls.append(a),
+        )
+        handler = main.MaildirHandler(db, None)  # type: ignore[arg-type]
+
+        handler.on_moved(self._moved(tmp_path))
+
+        assert calls == []
+        assert [(r.levelno, r.getMessage()) for r in _messages(caplog, "update_filepath")] == [
+            (logging.ERROR, "update_filepath failed on rename: OperationalError")
+        ]
+        assert MARKER not in caplog.text
