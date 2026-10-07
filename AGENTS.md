@@ -556,7 +556,10 @@ Examples:
   the owner accept it explicitly as a stated risk, recorded in the PR
   description and a linked issue. A P2/P3 finding the PR did not
   introduce keeps the cap. Record which applied in the "Review round N"
-  section.
+  section. A gap or bug in code, tests or docs that the PR adds counts
+  as introduced by it even when nothing is broken today (owner,
+  2026-10-07); only a problem that already existed on `main` may be
+  deferred under the cap.
 - File P3 findings as issues rather than fixing them ahead of
   go-live or P1/P2 work. Exception (owner, 2026-10-02): a small P3
   with an agreed fix and no new mechanism may be fixed before go-live.
@@ -779,6 +782,11 @@ Notes:
   (`.semgrep/compose.test.yml`, `.semgrep/shell.sh`).
 - for Dockerfile, build, or container-runtime changes, run the smallest relevant `docker compose build ...` subset when practical
 - prefer real `.eml` fixtures for parser tests
+- tests that need a process to die from a signal use `SIGKILL`; map
+  other signals (`SIGSEGV`, `SIGABRT`, `SIGXCPU`) with a stubbed exit
+  status, and run a real crash signal only on Linux in CI. A real
+  `SIGSEGV` on macOS files a crash report and shows the developer a
+  "Python quit unexpectedly" dialog on every run (2026-10-07)
 - integration tests should mock IMAP rather than hitting a live Bridge instance
 - add or update tests when behavior changes
 

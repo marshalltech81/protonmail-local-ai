@@ -1613,11 +1613,12 @@ class TestLegacyOle2CacheRows:
             extractor.assert_not_called()
 
     def test_row_holds_for_an_ooxml_labelled_occurrence(self, tmp_path, monkeypatch):
-        """Review round 1: the same bytes labelled ``.docx`` / ``.xlsx``
-        would be rejected the same way, so the row stands in for them."""
+        """Review round 1: the same bytes labelled ``.docx`` / ``.xlsx`` (or
+        ``.pptx``, #936) would be rejected the same way, so the row stands
+        in for them."""
         from src.extractors import LEGACY_OLE2_ERROR
 
-        for filename in ("a.docx", "a.xlsx"):
+        for filename in ("a.docx", "a.xlsx", "a.pptx"):
             db = _seed_thread_for_cache_test(tmp_path / filename)
             attachment = _attachment(
                 _OLE2_MAGIC + bytes(64), filename=filename, content_type="application/octet-stream"

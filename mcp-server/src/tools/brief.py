@@ -32,7 +32,12 @@ from mcp.types import CallToolResult
 from pydantic import BaseModel, ValidationError
 
 from ..lib.embed import embed_query
-from ..lib.inference import InferenceTruncatedError, PromptBudget
+from ..lib.inference import (
+    CHARS_PER_TOKEN,
+    InferenceTruncatedError,
+    PromptBudget,
+    TruncationReason,
+)
 from ..lib.security import log_tool_call, safe_provider_exception_text
 from ..lib.sqlite import (
     PROMPT_EVIDENCE_CHUNKS_PER_THREAD,
@@ -44,11 +49,14 @@ from ..lib.sqlite import (
 from ..lib.timings import count, rerank_mode, stage, timed_tool
 from ..lib.validation import clamp_int
 from .intelligence import (
+    _EXTRACT_CUT_TEXTS,
     _LABEL_RE,
     _MAX_ASK_THREADS,
     _QUOTE_RE,
     _SCOPE_LABELS,
+    PER_THREAD_CHAR_BUDGET,
     UNTRUSTED_CONTENT_NOTICE,
+    EvidenceCoverage,
     EvidenceRef,
     PromptTooLargeError,
     QuoteCheck,
@@ -60,6 +68,8 @@ from .intelligence import (
     _escape_delimiter_tags,
     _evidence_budget,
     _evidence_prompt,
+    _reply_cut_limits,
+    _ReplyCut,
     _schema_reserve_chars,
     _scope_block,
     _sort_labels,
@@ -765,6 +775,19 @@ def _scope_labels(
     return scope, block
 
 
+def _raw_reply_line(reason: TruncationReason | None, kind: str, raw_text: str) -> str:
+    """The prose before a reply that did not parse as a ``kind``: for a
+    cut reply, extract_from_emails' fixed text for its stop, which names
+    the setting to change (#950, #951); else that it was not valid
+    JSON."""
+    why = (
+        _EXTRACT_CUT_TEXTS[reason]
+        if reason
+        else f"not valid JSON in the {kind} format, even after one repair"
+    )
+    return f"\nThe model's reply was {why}; its raw text follows.\n\n{raw_text}"
+
+
 def register_experimental_tools(
     server,
     db,
@@ -783,21 +806,67 @@ def register_experimental_tools(
     prompt_budget = prompt_budget or PromptBudget()
 
     async def complete(
-        user_prompt: str, system: str = BRIEF_SYSTEM, json_schema: dict = BRIEF_JSON_SCHEMA
-    ) -> tuple[str, bool]:
-        """The model's reply and whether it was cut off at max_tokens.
-        ``json_schema`` is sent only with structured outputs on (#808)."""
+        user_prompt: str,
+        cuts: list[_ReplyCut],
+        system: str = BRIEF_SYSTEM,
+        json_schema: dict = BRIEF_JSON_SCHEMA,
+    ) -> tuple[str, TruncationReason | None]:
+        """The model's reply and, when it was cut off, why (the cut is
+        also added to ``cuts`` for the limit warning). ``json_schema`` is
+        sent only with structured outputs on (#808)."""
         count("inference_calls", 1)
         try:
             with stage("inference"):
                 if not inference_client.structured_output:
-                    return await inference_client.complete(system, user_prompt), False
+                    return await inference_client.complete(system, user_prompt), None
                 reply = await inference_client.complete(
                     system, user_prompt, json_schema=json_schema
                 )
-                return reply, False
+                return reply, None
         except InferenceTruncatedError as e:
-            return e.partial, True
+            cuts.append(_ReplyCut(e.reason, system + user_prompt))
+            return e.partial, e.reason
+
+    def warn_limits(
+        tool: str,
+        system: str,
+        user_prompt: str,
+        coverage: EvidenceCoverage,
+        evidence_chars: int,
+        shown: int,
+        cuts: list[_ReplyCut],
+        reserve: int,
+    ) -> None:
+        """Log the token limits the call hit, as ask_mailbox does (#951).
+        The window cut the evidence when it dropped threads or set a
+        budget below the per-thread cap that then trimmed passages; the
+        passage counts are the window's only when it set the budget.
+        Each cut reply names its stop. ``user_prompt`` is the last one
+        sent: the repair prompt when the repair call was made, whether or
+        not its reply was cut (a cut first reply gets no repair, so a cut
+        reply's prompt is always the last one). ``reserve`` is the schema
+        the provider adds as input (``_schema_reserve_chars``, 0 when none
+        is sent), counted in the prompt as extract_from_emails does.
+        Counts and config values only."""
+        window_budget = evidence_chars < PER_THREAD_CHAR_BUDGET * shown
+        window_cut = coverage.threads_dropped or (
+            window_budget and (coverage.omitted or coverage.truncated)
+        )
+        _warn_token_limits(
+            tool,
+            prompt_budget,
+            [
+                *(["evidence_budget"] if window_cut else []),
+                *_reply_cut_limits(c.reason for c in cuts),
+            ],
+            outputs_cut=len(cuts),
+            context_window_cuts=sum(c.reason == "context_window" for c in cuts),
+            threads_dropped=coverage.threads_dropped,
+            passages_omitted=coverage.omitted if window_budget else 0,
+            passages_truncated=coverage.truncated if window_budget else 0,
+            # The last prompt sent, plus the schema.
+            prompt_tokens=-(-(len(system + user_prompt) + reserve) // CHARS_PER_TOKEN),
+        )
 
     # Config identifiers for the per-call timing line.
     timing_config = {"rerank": rerank_mode(reranker), "inference": inference_client.mode}
@@ -964,7 +1033,7 @@ def register_experimental_tools(
 
             # Generate and check. A reply that is not a brief, or whose
             # entries fail the label check, gets one repair call with a
-            # fixed instruction; a reply cut off at max_tokens does not
+            # fixed instruction; a reply cut off early does not
             # (a second try would most likely be cut off too). The
             # repaired brief is used when it parses, else the first one
             # when that parsed; with neither, the raw reply is returned.
@@ -978,25 +1047,37 @@ def register_experimental_tools(
                 quotes, quote_problems = _check_brief_quotes(brief, evidence_map)
                 return cited, problems + quote_problems, quotes
 
-            text, truncated = await complete(user_prompt)
+            cuts: list[_ReplyCut] = []
+            sent = user_prompt  # the last prompt sent, for the limit warning
+            text, truncated = await complete(user_prompt, cuts)
             brief = None if truncated else _parse_brief(text)
             cited, problems, quotes = check_brief(brief)
             repair_attempted = not truncated and (brief is None or bool(problems))
             if repair_attempted:
                 reason = _repair_reason(brief, problems)
-                text2, truncated2 = await complete(
-                    user_prompt + _BRIEF_REPAIR_INSTRUCTION.format(reason=reason)
-                )
+                sent = user_prompt + _BRIEF_REPAIR_INSTRUCTION.format(reason=reason)
+                text2, truncated2 = await complete(sent, cuts)
                 brief2 = None if truncated2 else _parse_brief(text2)
                 if brief2 is not None:
                     brief = brief2
                     cited, problems, quotes = check_brief(brief)
                 elif brief is None:
                     text, truncated = text2, truncated2
+            warn_limits(
+                "brief_issue",
+                BRIEF_SYSTEM,
+                sent,
+                coverage,
+                evidence_chars,
+                len(shown),
+                cuts,
+                reserve,
+            )
 
             status: Literal["ok", "invalid_json", "truncated"] = (
                 "ok" if brief is not None else "truncated" if truncated else "invalid_json"
             )
+            truncation_reason = truncated if status == "truncated" else None
             # Counts only: labels, quotes and replies are provider output.
             log.debug(
                 "brief_issue: %d threads, %d passages, status %s, %d cited, %d problems, "
@@ -1022,12 +1103,7 @@ def register_experimental_tools(
                 lines += _brief_lines(brief)
             else:
                 raw_text = clip(text, _MAX_BRIEF_RESPONSE_CHARS)
-                why = (
-                    "was cut off at the INFERENCE_MAX_TOKENS limit"
-                    if truncated
-                    else "was not valid JSON in the brief format, even after one repair"
-                )
-                lines.append(f"\nThe model's reply {why}; its raw text follows.\n\n{raw_text}")
+                lines.append(_raw_reply_line(truncation_reason, "brief", raw_text))
             lines += _citation_lines(citations)
             for p in problems:
                 detail = f": {', '.join(p.labels)}" if p.labels else ""
@@ -1040,6 +1116,7 @@ def register_experimental_tools(
                 BriefIssueOutput(
                     experimental=True,
                     status=status,
+                    truncation_reason=truncation_reason,
                     brief=brief,
                     raw_text=raw_text,
                     as_of=as_of,
@@ -1230,7 +1307,7 @@ def register_experimental_tools(
 
             # Generate and check as brief_issue does: one repair call with
             # a fixed instruction for a reply that is not a check or has
-            # problems, none for a reply cut off at max_tokens.
+            # problems, none for a reply cut off early.
             def check_reply(
                 check: ConclusionCheck | None,
             ) -> tuple[
@@ -1244,27 +1321,37 @@ def register_experimental_tools(
                 quotes, quote_problems = _check_conclusion_quotes(check, used, evidence_map)
                 return used, problems + quote_problems, quotes
 
-            text, truncated = await complete(user_prompt, CHECK_SYSTEM, CHECK_JSON_SCHEMA)
+            cuts: list[_ReplyCut] = []
+            sent = user_prompt  # the last prompt sent, for the limit warning
+            text, truncated = await complete(user_prompt, cuts, CHECK_SYSTEM, CHECK_JSON_SCHEMA)
             check = None if truncated else _parse_check(text)
             used, problems, quotes = check_reply(check)
             repair_attempted = not truncated and (check is None or bool(problems))
             if repair_attempted:
                 reason = _check_repair_reason(check, problems)
-                text2, truncated2 = await complete(
-                    user_prompt + _CHECK_REPAIR_INSTRUCTION.format(reason=reason),
-                    CHECK_SYSTEM,
-                    CHECK_JSON_SCHEMA,
-                )
+                sent = user_prompt + _CHECK_REPAIR_INSTRUCTION.format(reason=reason)
+                text2, truncated2 = await complete(sent, cuts, CHECK_SYSTEM, CHECK_JSON_SCHEMA)
                 check2 = None if truncated2 else _parse_check(text2)
                 if check2 is not None:
                     check = check2
                     used, problems, quotes = check_reply(check)
                 elif check is None:
                     text, truncated = text2, truncated2
+            warn_limits(
+                "check_conclusion",
+                CHECK_SYSTEM,
+                sent,
+                coverage,
+                evidence_chars,
+                len(shown),
+                cuts,
+                reserve,
+            )
 
             status: Literal["ok", "invalid_json", "truncated"] = (
                 "ok" if check is not None else "truncated" if truncated else "invalid_json"
             )
+            truncation_reason = truncated if status == "truncated" else None
             # Counts only: labels and replies are provider output.
             log.debug(
                 "check_conclusion: %d threads, %d passages, status %s, %d findings, "
@@ -1312,12 +1399,7 @@ def register_experimental_tools(
                 lines += _finding_lines(findings)
             else:
                 raw_text = clip(text, _MAX_BRIEF_RESPONSE_CHARS)
-                why = (
-                    "was cut off at the INFERENCE_MAX_TOKENS limit"
-                    if truncated
-                    else "was not valid JSON in the check format, even after one repair"
-                )
-                lines.append(f"\nThe model's reply {why}; its raw text follows.\n\n{raw_text}")
+                lines.append(_raw_reply_line(truncation_reason, "check", raw_text))
             for p in problems:
                 detail = f": {', '.join(p.labels)}" if p.labels else ""
                 if p.item is not None:
@@ -1335,6 +1417,7 @@ def register_experimental_tools(
                 CheckConclusionOutput(
                     experimental=True,
                     status=status,
+                    truncation_reason=truncation_reason,
                     verdict_summary=verdict,
                     findings=findings,
                     insufficient_evidence=check.insufficient_evidence if check else None,
