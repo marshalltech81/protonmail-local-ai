@@ -91,7 +91,7 @@ die() {
     exit 1
 }
 
-[[ -n "${BACKUP:-}" ]] || die "set BACKUP to a file written by make backup-index, for example make restore-index BACKUP=~/protonmail-local-ai-backup/mail-20261007T120000Z.db"
+[[ -n "${BACKUP:-}" ]] || die "set BACKUP to a file written by make backup-index, for example make restore-index BACKUP=~/protonmail-local-ai-backup/mail-20261007T120000Z-48213-9f3ac1d2.db"
 # zsh passes make BACKUP=~/file with the ~ unexpanded.
 if [[ "$BACKUP" == \~/* ]]; then
     BACKUP="$HOME${BACKUP#\~}"

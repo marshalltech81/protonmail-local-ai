@@ -548,6 +548,21 @@ restore_needs_a_yes() {
     fi
 }
 
+restore_requires_backup() {
+    reset
+    run_restore "" yes
+    [[ "$STATUS" -ne 0 ]]
+    grep -F 'set BACKUP' "$WORK/out" >/dev/null
+    # The example file name in that message has the shape backup-index
+    # writes (mail-<tag>.db, the tag checked there against the same
+    # pattern), so the message cannot show a name the target no longer
+    # produces (#1061).
+    local example
+    example=$(grep -oE 'BACKUP=[^ ]+' "$WORK/out")
+    [[ "$example" =~ /mail-[0-9]{8}T[0-9]{6}Z-[0-9]+-[0-9a-f]{8}\.db$ ]]
+    [[ ! -s "$WORK/docker.log" ]]
+}
+
 restore_needs_an_existing_backup_and_container() {
     reset
     run_restore "$WORK/missing.db" yes
@@ -1029,6 +1044,7 @@ check "backup needs a running indexer" backup_needs_a_running_indexer
 check "backup writes nothing when integrity_check fails" backup_writes_nothing_when_the_check_fails
 check "restore replaces the index and drops the old WAL" restore_replaces_the_index
 check "restore needs a yes" restore_needs_a_yes
+check "restore requires BACKUP" restore_requires_backup
 check "restore needs a backup file and an indexer container" restore_needs_an_existing_backup_and_container
 check "restore refuses a corrupt backup" restore_refuses_a_corrupt_backup
 check "restore refuses a newer schema" restore_refuses_a_newer_schema
