@@ -1192,6 +1192,31 @@ before, so the DOCX version is not bumped; a message that was
 dead-lettered by the old behaviour is picked up again by
 `make requeue-dead`.
 
+Before python-docx opens a `.docx` or `.dotx`, the package is checked
+from the ZIP central directory (#967, #946), as for `.pptx` below and
+with the same shared check. python-docx parses every XML part it
+relates whole with lxml, and builds a part for every related member
+while checking each relationship against a list of the parts it has
+already visited, so opening costs the number of related members times
+the number of relationships. Plainly timed, 20,000 related members took
+2.6 s and 5,000 members with 4 MiB of the smallest relationships 2.7 s;
+32 MiB of element-dense XML peaked at 784 MiB while it opened. So a
+document fails as `DocxPackageBudgetError`, before python-docx reads any
+member, when its members expand by more than 32 MiB past their
+compressed sizes, number more than 5,000, or hold more than 4 MiB of
+relationship (`.rels`) parts. A synthetic 500-page formatted document
+with 2,000 pictures and 10,000 hyperlinks has about 2,000 members,
+16 MiB of expansion and 2.1 MiB of relationships. Pictures are stored
+compressed and barely expand, but members stored uncompressed are not
+counted against the expansion budget, so at the default
+`INDEXER_ATTACHMENT_MAX_BYTES` python-docx can still parse up to about
+64 MiB of XML (#1033). The DOCX version is not bumped: a
+bump would re-run every cached document through the walk after the
+open, which has no budget yet (#1031), so a document read in full
+before keeps its cached text. `DocxRelationshipChainError` (#945) still
+applies to a chain under these budgets. The walk after the open has no
+budget of its own yet (#1031).
+
 PowerPoint (#936): `application/vnd.openxmlformats-officedocument.presentationml.presentation`
 and `.pptx` route to the PPTX extractor (`python-pptx`), which reads,
 slide by slide, the text of every shape (text boxes, placeholders, auto

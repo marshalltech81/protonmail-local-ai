@@ -1,0 +1,701 @@
+{
+  "max_threads": {
+    "structured": {
+      "chunk_count": 6,
+      "from_name_matches": null,
+      "resolved_from_addr": null,
+      "threads": [
+        {
+          "chunks": [
+            {
+              "attachment_filename": null,
+              "attachment_id": null,
+              "attachment_mime": null,
+              "char_end": 25,
+              "char_start": 0,
+              "chunk_id": "note-body",
+              "chunk_index": 0,
+              "claimant_id": "note@trip.example#731166873719b592",
+              "kind": "body",
+              "message_id": "note@trip.example",
+              "occurred_at": null,
+              "scope": "in_scope",
+              "sent_at": "2025-09-25T09:00:00+00:00",
+              "source": "body",
+              "source_file": {
+                "indexed_at": "2024-01-01T00:00:00Z",
+                "locator": "/maildir/INBOX/cur/note@trip.example",
+                "sha256": "sha256(note@trip.example)",
+                "size_bytes": 100,
+                "source_type": "maildir_message"
+              },
+              "text": "Reminder: trip forms due.",
+              "text_truncated": false,
+              "vector_distance": null
+            }
+          ],
+          "lane_ranks": null,
+          "retrieval_score": null,
+          "subject": "trip reminder",
+          "thread_id": "t-note"
+        },
+        {
+          "chunks": [
+            {
+              "attachment_filename": null,
+              "attachment_id": null,
+              "attachment_mime": null,
+              "char_end": 22,
+              "char_start": 0,
+              "chunk_id": "lead-b0",
+              "chunk_index": 0,
+              "claimant_id": "lead@trip.example#e87c13b1f3c3eeea",
+              "kind": "body",
+              "message_id": "lead@trip.example",
+              "occurred_at": null,
+              "scope": "in_scope",
+              "sent_at": "2025-09-10T09:00:00+00:00",
+              "source": "body",
+              "source_file": {
+                "indexed_at": "2024-01-01T00:00:00Z",
+                "locator": "/maildir/INBOX/cur/lead@trip.example",
+                "sha256": "sha256(lead@trip.example)",
+                "size_bytes": 100,
+                "source_type": "maildir_message"
+              },
+              "text": "The bus leaves at 8am.",
+              "text_truncated": false,
+              "vector_distance": null
+            },
+            {
+              "attachment_filename": null,
+              "attachment_id": null,
+              "attachment_mime": null,
+              "char_end": 56,
+              "char_start": 0,
+              "chunk_id": "help-body",
+              "chunk_index": 0,
+              "claimant_id": "help@trip.example#ee20323962923272",
+              "kind": "body",
+              "message_id": "help@trip.example",
+              "occurred_at": null,
+              "scope": "context",
+              "sent_at": "2025-09-20T09:00:00+00:00",
+              "source": "body",
+              "source_file": {
+                "indexed_at": "2024-01-01T00:00:00Z",
+                "locator": "/maildir/INBOX/cur/help@trip.example",
+                "sha256": "sha256(help@trip.example)",
+                "size_bytes": 100,
+                "source_type": "maildir_message"
+              },
+              "text": "I can drive two children. SYNTHETIC_PRECISION_MARKER_988",
+              "text_truncated": false,
+              "vector_distance": null
+            },
+            {
+              "attachment_filename": null,
+              "attachment_id": null,
+              "attachment_mime": null,
+              "char_end": 44,
+              "char_start": 23,
+              "chunk_id": "lead-b1",
+              "chunk_index": 1,
+              "claimant_id": "lead@trip.example#e87c13b1f3c3eeea",
+              "kind": "body",
+              "message_id": "lead@trip.example",
+              "occurred_at": null,
+              "scope": "in_scope",
+              "sent_at": "2025-09-10T09:00:00+00:00",
+              "source": "body",
+              "source_file": {
+                "indexed_at": "2024-01-01T00:00:00Z",
+                "locator": "/maildir/INBOX/cur/lead@trip.example",
+                "sha256": "sha256(lead@trip.example)",
+                "size_bytes": 100,
+                "source_type": "maildir_message"
+              },
+              "text": "Bring a packed lunch.",
+              "text_truncated": false,
+              "vector_distance": null
+            },
+            {
+              "attachment_filename": "permit.pdf",
+              "attachment_id": "att-permit",
+              "attachment_mime": "application/pdf",
+              "char_end": 264,
+              "char_start": 0,
+              "chunk_id": "lead-att-permit",
+              "chunk_index": 0,
+              "claimant_id": "lead@trip.example#e87c13b1f3c3eeea",
+              "kind": "attachment",
+              "message_id": "lead@trip.example",
+              "occurred_at": null,
+              "scope": "in_scope",
+              "sent_at": "2025-09-10T09:00:00+00:00",
+              "source": "attachment",
+              "source_file": {
+                "indexed_at": "2024-01-01T00:00:00Z",
+                "locator": "/maildir/INBOX/cur/lead@trip.example",
+                "sha256": "sha256(lead@trip.example)",
+                "size_bytes": 100,
+                "source_type": "maildir_message"
+              },
+              "text": "Permission form: sign and return by Friday. Permission form: sign and return by Friday. Permission form: sign and return by Friday. Permission form: sign and return by Friday. Permission form: sign and return by Friday. Permission form: sign and return by Friday. ",
+              "text_truncated": false,
+              "vector_distance": null
+            },
+            {
+              "attachment_filename": "packing.pdf",
+              "attachment_id": "att-packing",
+              "attachment_mime": "application/pdf",
+              "char_end": 32,
+              "char_start": 0,
+              "chunk_id": "lead-att-packing",
+              "chunk_index": 0,
+              "claimant_id": "lead@trip.example#e87c13b1f3c3eeea",
+              "kind": "attachment",
+              "message_id": "lead@trip.example",
+              "occurred_at": null,
+              "scope": "in_scope",
+              "sent_at": "2025-09-10T09:00:00+00:00",
+              "source": "attachment",
+              "source_file": {
+                "indexed_at": "2024-01-01T00:00:00Z",
+                "locator": "/maildir/INBOX/cur/lead@trip.example",
+                "sha256": "sha256(lead@trip.example)",
+                "size_bytes": 100,
+                "source_type": "maildir_message"
+              },
+              "text": "Packing list: hat, water bottle.",
+              "text_truncated": false,
+              "vector_distance": null
+            }
+          ],
+          "lane_ranks": null,
+          "retrieval_score": null,
+          "subject": "field trip",
+          "thread_id": "t-trip"
+        }
+      ]
+    },
+    "text": "Evidence for: 'field trip plans'\n6 chunk(s) from 2 thread(s).\n\n[1] trip reminder\n    Thread ID: t-note\n    --- chunk 0 | msg note@trip.example#731166873719b592 | 2025-09-25 | in scope\n        Source: message body\n        Chars 0-25\n        Reminder: trip forms due.\n\n[2] field trip\n    Thread ID: t-trip\n    --- chunk 0 | msg lead@trip.example#e87c13b1f3c3eeea | 2025-09-10 | in scope\n        Source: message body\n        Chars 0-22\n        The bus leaves at 8am.\n    --- chunk 0 | msg help@trip.example#ee20323962923272 | 2025-09-20 | context\n        Source: message body\n        Chars 0-56\n        I can drive two children. SYNTHETIC_PRECISION_MARKER_988\n    --- chunk 1 | msg lead@trip.example#e87c13b1f3c3eeea | 2025-09-10 | in scope\n        Source: message body\n        Chars 23-44\n        Bring a packed lunch.\n    --- chunk 0 | msg lead@trip.example#e87c13b1f3c3eeea | 2025-09-10 | in scope\n        Source: attachment \"permit.pdf\" (application/pdf)\n        Chars 0-264\n        Permission form: sign and return by Friday. Permission form: sign and return by Friday. Permission form: sign and return by Friday. Permission form: sign and return by Friday. Permission form: sign and return by Friday. Permission form: sign and return by Friday. \n    --- chunk 0 | msg lead@trip.example#e87c13b1f3c3eeea | 2025-09-10 | in scope\n        Source: attachment \"packing.pdf\" (application/pdf)\n        Chars 0-32\n        Packing list: hat, water bottle."
+  },
+  "sender_filtered": {
+    "structured": {
+      "chunk_count": 6,
+      "from_name_matches": null,
+      "resolved_from_addr": null,
+      "threads": [
+        {
+          "chunks": [
+            {
+              "attachment_filename": null,
+              "attachment_id": null,
+              "attachment_mime": null,
+              "char_end": 25,
+              "char_start": 0,
+              "chunk_id": "note-body",
+              "chunk_index": 0,
+              "claimant_id": "note@trip.example#731166873719b592",
+              "kind": "body",
+              "message_id": "note@trip.example",
+              "occurred_at": null,
+              "scope": "in_scope",
+              "sent_at": "2025-09-25T09:00:00+00:00",
+              "source": "body",
+              "source_file": {
+                "indexed_at": "2024-01-01T00:00:00Z",
+                "locator": "/maildir/INBOX/cur/note@trip.example",
+                "sha256": "sha256(note@trip.example)",
+                "size_bytes": 100,
+                "source_type": "maildir_message"
+              },
+              "text": "Reminder: trip forms due.",
+              "text_truncated": false,
+              "vector_distance": null
+            }
+          ],
+          "lane_ranks": null,
+          "retrieval_score": null,
+          "subject": "trip reminder",
+          "thread_id": "t-note"
+        },
+        {
+          "chunks": [
+            {
+              "attachment_filename": null,
+              "attachment_id": null,
+              "attachment_mime": null,
+              "char_end": 22,
+              "char_start": 0,
+              "chunk_id": "lead-b0",
+              "chunk_index": 0,
+              "claimant_id": "lead@trip.example#e87c13b1f3c3eeea",
+              "kind": "body",
+              "message_id": "lead@trip.example",
+              "occurred_at": null,
+              "scope": "in_scope",
+              "sent_at": "2025-09-10T09:00:00+00:00",
+              "source": "body",
+              "source_file": {
+                "indexed_at": "2024-01-01T00:00:00Z",
+                "locator": "/maildir/INBOX/cur/lead@trip.example",
+                "sha256": "sha256(lead@trip.example)",
+                "size_bytes": 100,
+                "source_type": "maildir_message"
+              },
+              "text": "The bus leaves at 8am.",
+              "text_truncated": false,
+              "vector_distance": null
+            },
+            {
+              "attachment_filename": null,
+              "attachment_id": null,
+              "attachment_mime": null,
+              "char_end": 56,
+              "char_start": 0,
+              "chunk_id": "help-body",
+              "chunk_index": 0,
+              "claimant_id": "help@trip.example#ee20323962923272",
+              "kind": "body",
+              "message_id": "help@trip.example",
+              "occurred_at": null,
+              "scope": "context",
+              "sent_at": "2025-09-20T09:00:00+00:00",
+              "source": "body",
+              "source_file": {
+                "indexed_at": "2024-01-01T00:00:00Z",
+                "locator": "/maildir/INBOX/cur/help@trip.example",
+                "sha256": "sha256(help@trip.example)",
+                "size_bytes": 100,
+                "source_type": "maildir_message"
+              },
+              "text": "I can drive two children. SYNTHETIC_PRECISION_MARKER_988",
+              "text_truncated": false,
+              "vector_distance": null
+            },
+            {
+              "attachment_filename": null,
+              "attachment_id": null,
+              "attachment_mime": null,
+              "char_end": 44,
+              "char_start": 23,
+              "chunk_id": "lead-b1",
+              "chunk_index": 1,
+              "claimant_id": "lead@trip.example#e87c13b1f3c3eeea",
+              "kind": "body",
+              "message_id": "lead@trip.example",
+              "occurred_at": null,
+              "scope": "in_scope",
+              "sent_at": "2025-09-10T09:00:00+00:00",
+              "source": "body",
+              "source_file": {
+                "indexed_at": "2024-01-01T00:00:00Z",
+                "locator": "/maildir/INBOX/cur/lead@trip.example",
+                "sha256": "sha256(lead@trip.example)",
+                "size_bytes": 100,
+                "source_type": "maildir_message"
+              },
+              "text": "Bring a packed lunch.",
+              "text_truncated": false,
+              "vector_distance": null
+            },
+            {
+              "attachment_filename": "permit.pdf",
+              "attachment_id": "att-permit",
+              "attachment_mime": "application/pdf",
+              "char_end": 264,
+              "char_start": 0,
+              "chunk_id": "lead-att-permit",
+              "chunk_index": 0,
+              "claimant_id": "lead@trip.example#e87c13b1f3c3eeea",
+              "kind": "attachment",
+              "message_id": "lead@trip.example",
+              "occurred_at": null,
+              "scope": "in_scope",
+              "sent_at": "2025-09-10T09:00:00+00:00",
+              "source": "attachment",
+              "source_file": {
+                "indexed_at": "2024-01-01T00:00:00Z",
+                "locator": "/maildir/INBOX/cur/lead@trip.example",
+                "sha256": "sha256(lead@trip.example)",
+                "size_bytes": 100,
+                "source_type": "maildir_message"
+              },
+              "text": "Permission form: sign and return by Friday. Permission form: sign and return by Friday. Permission form: sign and return by Friday. Permission form: sign and return by Friday. Permission form: sign and return by Friday. Permission form: sign and return by Friday. ",
+              "text_truncated": false,
+              "vector_distance": null
+            },
+            {
+              "attachment_filename": "packing.pdf",
+              "attachment_id": "att-packing",
+              "attachment_mime": "application/pdf",
+              "char_end": 32,
+              "char_start": 0,
+              "chunk_id": "lead-att-packing",
+              "chunk_index": 0,
+              "claimant_id": "lead@trip.example#e87c13b1f3c3eeea",
+              "kind": "attachment",
+              "message_id": "lead@trip.example",
+              "occurred_at": null,
+              "scope": "in_scope",
+              "sent_at": "2025-09-10T09:00:00+00:00",
+              "source": "attachment",
+              "source_file": {
+                "indexed_at": "2024-01-01T00:00:00Z",
+                "locator": "/maildir/INBOX/cur/lead@trip.example",
+                "sha256": "sha256(lead@trip.example)",
+                "size_bytes": 100,
+                "source_type": "maildir_message"
+              },
+              "text": "Packing list: hat, water bottle.",
+              "text_truncated": false,
+              "vector_distance": null
+            }
+          ],
+          "lane_ranks": null,
+          "retrieval_score": null,
+          "subject": "field trip",
+          "thread_id": "t-trip"
+        }
+      ]
+    },
+    "text": "Evidence for: 'field trip plans'\n6 chunk(s) from 2 thread(s).\n\n[1] trip reminder\n    Thread ID: t-note\n    --- chunk 0 | msg note@trip.example#731166873719b592 | 2025-09-25 | in scope\n        Source: message body\n        Chars 0-25\n        Reminder: trip forms due.\n\n[2] field trip\n    Thread ID: t-trip\n    --- chunk 0 | msg lead@trip.example#e87c13b1f3c3eeea | 2025-09-10 | in scope\n        Source: message body\n        Chars 0-22\n        The bus leaves at 8am.\n    --- chunk 0 | msg help@trip.example#ee20323962923272 | 2025-09-20 | context\n        Source: message body\n        Chars 0-56\n        I can drive two children. SYNTHETIC_PRECISION_MARKER_988\n    --- chunk 1 | msg lead@trip.example#e87c13b1f3c3eeea | 2025-09-10 | in scope\n        Source: message body\n        Chars 23-44\n        Bring a packed lunch.\n    --- chunk 0 | msg lead@trip.example#e87c13b1f3c3eeea | 2025-09-10 | in scope\n        Source: attachment \"permit.pdf\" (application/pdf)\n        Chars 0-264\n        Permission form: sign and return by Friday. Permission form: sign and return by Friday. Permission form: sign and return by Friday. Permission form: sign and return by Friday. Permission form: sign and return by Friday. Permission form: sign and return by Friday. \n    --- chunk 0 | msg lead@trip.example#e87c13b1f3c3eeea | 2025-09-10 | in scope\n        Source: attachment \"packing.pdf\" (application/pdf)\n        Chars 0-32\n        Packing list: hat, water bottle."
+  },
+  "thread": {
+    "structured": {
+      "chunk_count": 5,
+      "from_name_matches": null,
+      "resolved_from_addr": null,
+      "threads": [
+        {
+          "chunks": [
+            {
+              "attachment_filename": null,
+              "attachment_id": null,
+              "attachment_mime": null,
+              "char_end": 22,
+              "char_start": 0,
+              "chunk_id": "lead-b0",
+              "chunk_index": 0,
+              "claimant_id": "lead@trip.example#e87c13b1f3c3eeea",
+              "kind": "body",
+              "message_id": "lead@trip.example",
+              "occurred_at": null,
+              "scope": "in_scope",
+              "sent_at": "2025-09-10T09:00:00+00:00",
+              "source": "body",
+              "source_file": {
+                "indexed_at": "2024-01-01T00:00:00Z",
+                "locator": "/maildir/INBOX/cur/lead@trip.example",
+                "sha256": "sha256(lead@trip.example)",
+                "size_bytes": 100,
+                "source_type": "maildir_message"
+              },
+              "text": "The bus leaves at 8am.",
+              "text_truncated": false,
+              "vector_distance": null
+            },
+            {
+              "attachment_filename": null,
+              "attachment_id": null,
+              "attachment_mime": null,
+              "char_end": 56,
+              "char_start": 0,
+              "chunk_id": "help-body",
+              "chunk_index": 0,
+              "claimant_id": "help@trip.example#ee20323962923272",
+              "kind": "body",
+              "message_id": "help@trip.example",
+              "occurred_at": null,
+              "scope": "in_scope",
+              "sent_at": "2025-09-20T09:00:00+00:00",
+              "source": "body",
+              "source_file": {
+                "indexed_at": "2024-01-01T00:00:00Z",
+                "locator": "/maildir/INBOX/cur/help@trip.example",
+                "sha256": "sha256(help@trip.example)",
+                "size_bytes": 100,
+                "source_type": "maildir_message"
+              },
+              "text": "I can drive two children. SYNTHETIC_PRECISION_MARKER_988",
+              "text_truncated": false,
+              "vector_distance": null
+            },
+            {
+              "attachment_filename": null,
+              "attachment_id": null,
+              "attachment_mime": null,
+              "char_end": 44,
+              "char_start": 23,
+              "chunk_id": "lead-b1",
+              "chunk_index": 1,
+              "claimant_id": "lead@trip.example#e87c13b1f3c3eeea",
+              "kind": "body",
+              "message_id": "lead@trip.example",
+              "occurred_at": null,
+              "scope": "in_scope",
+              "sent_at": "2025-09-10T09:00:00+00:00",
+              "source": "body",
+              "source_file": {
+                "indexed_at": "2024-01-01T00:00:00Z",
+                "locator": "/maildir/INBOX/cur/lead@trip.example",
+                "sha256": "sha256(lead@trip.example)",
+                "size_bytes": 100,
+                "source_type": "maildir_message"
+              },
+              "text": "Bring a packed lunch.",
+              "text_truncated": false,
+              "vector_distance": null
+            },
+            {
+              "attachment_filename": "permit.pdf",
+              "attachment_id": "att-permit",
+              "attachment_mime": "application/pdf",
+              "char_end": 264,
+              "char_start": 0,
+              "chunk_id": "lead-att-permit",
+              "chunk_index": 0,
+              "claimant_id": "lead@trip.example#e87c13b1f3c3eeea",
+              "kind": "attachment",
+              "message_id": "lead@trip.example",
+              "occurred_at": null,
+              "scope": "in_scope",
+              "sent_at": "2025-09-10T09:00:00+00:00",
+              "source": "attachment",
+              "source_file": {
+                "indexed_at": "2024-01-01T00:00:00Z",
+                "locator": "/maildir/INBOX/cur/lead@trip.example",
+                "sha256": "sha256(lead@trip.example)",
+                "size_bytes": 100,
+                "source_type": "maildir_message"
+              },
+              "text": "Permission form: sign and return by Friday. Permission form: sign and return by Friday. Permission form: sign and return by Friday. Permission form: sign and return by Friday. Permission form: sign and return by Friday. Permission form: sign and return by Friday. ",
+              "text_truncated": false,
+              "vector_distance": null
+            },
+            {
+              "attachment_filename": "packing.pdf",
+              "attachment_id": "att-packing",
+              "attachment_mime": "application/pdf",
+              "char_end": 32,
+              "char_start": 0,
+              "chunk_id": "lead-att-packing",
+              "chunk_index": 0,
+              "claimant_id": "lead@trip.example#e87c13b1f3c3eeea",
+              "kind": "attachment",
+              "message_id": "lead@trip.example",
+              "occurred_at": null,
+              "scope": "in_scope",
+              "sent_at": "2025-09-10T09:00:00+00:00",
+              "source": "attachment",
+              "source_file": {
+                "indexed_at": "2024-01-01T00:00:00Z",
+                "locator": "/maildir/INBOX/cur/lead@trip.example",
+                "sha256": "sha256(lead@trip.example)",
+                "size_bytes": 100,
+                "source_type": "maildir_message"
+              },
+              "text": "Packing list: hat, water bottle.",
+              "text_truncated": false,
+              "vector_distance": null
+            }
+          ],
+          "lane_ranks": null,
+          "retrieval_score": null,
+          "subject": "field trip",
+          "thread_id": "t-trip"
+        }
+      ]
+    },
+    "text": "Evidence for: 'field trip plans'\n5 chunk(s) from 1 thread(s).\n\n[1] field trip\n    Thread ID: t-trip\n    --- chunk 0 | msg lead@trip.example#e87c13b1f3c3eeea | 2025-09-10 | in scope\n        Source: message body\n        Chars 0-22\n        The bus leaves at 8am.\n    --- chunk 0 | msg help@trip.example#ee20323962923272 | 2025-09-20 | in scope\n        Source: message body\n        Chars 0-56\n        I can drive two children. SYNTHETIC_PRECISION_MARKER_988\n    --- chunk 1 | msg lead@trip.example#e87c13b1f3c3eeea | 2025-09-10 | in scope\n        Source: message body\n        Chars 23-44\n        Bring a packed lunch.\n    --- chunk 0 | msg lead@trip.example#e87c13b1f3c3eeea | 2025-09-10 | in scope\n        Source: attachment \"permit.pdf\" (application/pdf)\n        Chars 0-264\n        Permission form: sign and return by Friday. Permission form: sign and return by Friday. Permission form: sign and return by Friday. Permission form: sign and return by Friday. Permission form: sign and return by Friday. Permission form: sign and return by Friday. \n    --- chunk 0 | msg lead@trip.example#e87c13b1f3c3eeea | 2025-09-10 | in scope\n        Source: attachment \"packing.pdf\" (application/pdf)\n        Chars 0-32\n        Packing list: hat, water bottle."
+  },
+  "unfiltered_scores": {
+    "structured": {
+      "chunk_count": 6,
+      "from_name_matches": null,
+      "resolved_from_addr": null,
+      "threads": [
+        {
+          "chunks": [
+            {
+              "attachment_filename": null,
+              "attachment_id": null,
+              "attachment_mime": null,
+              "char_end": 25,
+              "char_start": 0,
+              "chunk_id": "note-body",
+              "chunk_index": 0,
+              "claimant_id": "note@trip.example#731166873719b592",
+              "kind": "body",
+              "message_id": "note@trip.example",
+              "occurred_at": null,
+              "scope": "in_scope",
+              "sent_at": "2025-09-25T09:00:00+00:00",
+              "source": "body",
+              "source_file": {
+                "indexed_at": "2024-01-01T00:00:00Z",
+                "locator": "/maildir/INBOX/cur/note@trip.example",
+                "sha256": "sha256(note@trip.example)",
+                "size_bytes": 100,
+                "source_type": "maildir_message"
+              },
+              "text": "Reminder: trip forms due.",
+              "text_truncated": false,
+              "vector_distance": 0.5656853914260864
+            }
+          ],
+          "lane_ranks": {
+            "chunk_fts": 0,
+            "chunk_vec": 5
+          },
+          "retrieval_score": 0.031544957774465976,
+          "subject": "trip reminder",
+          "thread_id": "t-note"
+        },
+        {
+          "chunks": [
+            {
+              "attachment_filename": null,
+              "attachment_id": null,
+              "attachment_mime": null,
+              "char_end": 22,
+              "char_start": 0,
+              "chunk_id": "lead-b0",
+              "chunk_index": 0,
+              "claimant_id": "lead@trip.example#e87c13b1f3c3eeea",
+              "kind": "body",
+              "message_id": "lead@trip.example",
+              "occurred_at": null,
+              "scope": "in_scope",
+              "sent_at": "2025-09-10T09:00:00+00:00",
+              "source": "body",
+              "source_file": {
+                "indexed_at": "2024-01-01T00:00:00Z",
+                "locator": "/maildir/INBOX/cur/lead@trip.example",
+                "sha256": "sha256(lead@trip.example)",
+                "size_bytes": 100,
+                "source_type": "maildir_message"
+              },
+              "text": "The bus leaves at 8am.",
+              "text_truncated": false,
+              "vector_distance": 0.0
+            },
+            {
+              "attachment_filename": null,
+              "attachment_id": null,
+              "attachment_mime": null,
+              "char_end": 56,
+              "char_start": 0,
+              "chunk_id": "help-body",
+              "chunk_index": 0,
+              "claimant_id": "help@trip.example#ee20323962923272",
+              "kind": "body",
+              "message_id": "help@trip.example",
+              "occurred_at": null,
+              "scope": "in_scope",
+              "sent_at": "2025-09-20T09:00:00+00:00",
+              "source": "body",
+              "source_file": {
+                "indexed_at": "2024-01-01T00:00:00Z",
+                "locator": "/maildir/INBOX/cur/help@trip.example",
+                "sha256": "sha256(help@trip.example)",
+                "size_bytes": 100,
+                "source_type": "maildir_message"
+              },
+              "text": "I can drive two children. SYNTHETIC_PRECISION_MARKER_988",
+              "text_truncated": false,
+              "vector_distance": 0.070710688829422
+            },
+            {
+              "attachment_filename": null,
+              "attachment_id": null,
+              "attachment_mime": null,
+              "char_end": 44,
+              "char_start": 23,
+              "chunk_id": "lead-b1",
+              "chunk_index": 1,
+              "claimant_id": "lead@trip.example#e87c13b1f3c3eeea",
+              "kind": "body",
+              "message_id": "lead@trip.example",
+              "occurred_at": null,
+              "scope": "in_scope",
+              "sent_at": "2025-09-10T09:00:00+00:00",
+              "source": "body",
+              "source_file": {
+                "indexed_at": "2024-01-01T00:00:00Z",
+                "locator": "/maildir/INBOX/cur/lead@trip.example",
+                "sha256": "sha256(lead@trip.example)",
+                "size_bytes": 100,
+                "source_type": "maildir_message"
+              },
+              "text": "Bring a packed lunch.",
+              "text_truncated": false,
+              "vector_distance": 0.141421377658844
+            },
+            {
+              "attachment_filename": "permit.pdf",
+              "attachment_id": "att-permit",
+              "attachment_mime": "application/pdf",
+              "char_end": 264,
+              "char_start": 0,
+              "chunk_id": "lead-att-permit",
+              "chunk_index": 0,
+              "claimant_id": "lead@trip.example#e87c13b1f3c3eeea",
+              "kind": "attachment",
+              "message_id": "lead@trip.example",
+              "occurred_at": null,
+              "scope": "in_scope",
+              "sent_at": "2025-09-10T09:00:00+00:00",
+              "source": "attachment",
+              "source_file": {
+                "indexed_at": "2024-01-01T00:00:00Z",
+                "locator": "/maildir/INBOX/cur/lead@trip.example",
+                "sha256": "sha256(lead@trip.example)",
+                "size_bytes": 100,
+                "source_type": "maildir_message"
+              },
+              "text": "Permission form: sign and return by Friday. Permission form: sign and return by Friday. Permission form: sign and return by Friday. Permission form: sign and return by Friday. Permission form: sign and return by Friday. Permission form: sign and return by Friday. ",
+              "text_truncated": false,
+              "vector_distance": 0.2828426957130432
+            },
+            {
+              "attachment_filename": "packing.pdf",
+              "attachment_id": "att-packing",
+              "attachment_mime": "application/pdf",
+              "char_end": 32,
+              "char_start": 0,
+              "chunk_id": "lead-att-packing",
+              "chunk_index": 0,
+              "claimant_id": "lead@trip.example#e87c13b1f3c3eeea",
+              "kind": "attachment",
+              "message_id": "lead@trip.example",
+              "occurred_at": null,
+              "scope": "in_scope",
+              "sent_at": "2025-09-10T09:00:00+00:00",
+              "source": "attachment",
+              "source_file": {
+                "indexed_at": "2024-01-01T00:00:00Z",
+                "locator": "/maildir/INBOX/cur/lead@trip.example",
+                "sha256": "sha256(lead@trip.example)",
+                "size_bytes": 100,
+                "source_type": "maildir_message"
+              },
+              "text": "Packing list: hat, water bottle.",
+              "text_truncated": false,
+              "vector_distance": 0.4242640733718872
+            }
+          ],
+          "lane_ranks": {
+            "chunk_vec": 0
+          },
+          "retrieval_score": 0.01639344262295082,
+          "subject": "field trip",
+          "thread_id": "t-trip"
+        }
+      ]
+    },
+    "text": "Evidence for: 'field trip plans'\n6 chunk(s) from 2 thread(s).\n\n[1] trip reminder\n    Thread ID: t-note\n    Lanes: chunk_fts#0, chunk_vec#5 | retrieval score 0.0315\n    --- chunk 0 | msg note@trip.example#731166873719b592 | 2025-09-25 | in scope\n        Source: message body\n        Chars 0-25 | vector distance 0.5657\n        Reminder: trip forms due.\n\n[2] field trip\n    Thread ID: t-trip\n    Lanes: chunk_vec#0 | retrieval score 0.0164\n    --- chunk 0 | msg lead@trip.example#e87c13b1f3c3eeea | 2025-09-10 | in scope\n        Source: message body\n        Chars 0-22 | vector distance 0.0000\n        The bus leaves at 8am.\n    --- chunk 0 | msg help@trip.example#ee20323962923272 | 2025-09-20 | in scope\n        Source: message body\n        Chars 0-56 | vector distance 0.0707\n        I can drive two children. SYNTHETIC_PRECISION_MARKER_988\n    --- chunk 1 | msg lead@trip.example#e87c13b1f3c3eeea | 2025-09-10 | in scope\n        Source: message body\n        Chars 23-44 | vector distance 0.1414\n        Bring a packed lunch.\n    --- chunk 0 | msg lead@trip.example#e87c13b1f3c3eeea | 2025-09-10 | in scope\n        Source: attachment \"permit.pdf\" (application/pdf)\n        Chars 0-264 | vector distance 0.2828\n        Permission form: sign and return by Friday. Permission form: sign and return by Friday. Permission form: sign and return by Friday. Permission form: sign and return by Friday. Permission form: sign and return by Friday. Permission form: sign and return by Friday. \n    --- chunk 0 | msg lead@trip.example#e87c13b1f3c3eeea | 2025-09-10 | in scope\n        Source: attachment \"packing.pdf\" (application/pdf)\n        Chars 0-32 | vector distance 0.4243\n        Packing list: hat, water bottle."
+  }
+}

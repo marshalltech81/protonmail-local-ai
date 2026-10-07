@@ -309,6 +309,11 @@ class ExtractionResult:
 # docx 5 still: a long part-relationship chain is now ``failed``
 # (``DocxRelationshipChainError``) instead of escaping as
 # ``RecursionError`` (#945); that escape cached no row, so none is stale.
+# docx 5 still: a package over a pre-open budget is now ``failed``
+# (``DocxPackageBudgetError``, #967, #946). Not bumped: a bump would re-run
+# every cached document through the walk after the open, which has no
+# budget yet (#1031), only to turn the few over-budget ``success`` rows,
+# whose text is still right, into ``failed`` ones.
 # text 3: a payload starting with a fixed binary signature is recorded
 # ``unsupported`` instead of decoded as replacement characters, so the
 # ``success`` rows the previous version wrote for one are refreshed (#932).
@@ -888,6 +893,31 @@ def _validate_zip_payload(payload: bytes) -> str | None:
         # informative failure (e.g. python-docx's ``BadZipFile``).
         return None
     return None
+
+
+def over_package_budget(
+    payload: bytes, *, max_members: int, max_expansion_bytes: int, max_rels_bytes: int
+) -> bool:
+    """True when an OOXML package is over one of its extractor's pre-open
+    budgets (#936, #967): more than ``max_members`` members, members
+    expanding by more than ``max_expansion_bytes`` past their compressed
+    size, or more than ``max_rels_bytes`` declared in relationship
+    (``.rels``) members. Reads only the central directory, as
+    ``_validate_zip_payload`` does; zipfile stops a member at its declared
+    size when the library reads it. A payload that is not a ZIP is left
+    to the library to reject."""
+    import io
+
+    try:
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+            members = archive.infolist()
+    except zipfile.BadZipFile:
+        return False
+    expansion = sum(max(info.file_size - info.compress_size, 0) for info in members)
+    rels_bytes = sum(info.file_size for info in members if info.filename.endswith(".rels"))
+    return (
+        len(members) > max_members or expansion > max_expansion_bytes or rels_bytes > max_rels_bytes
+    )
 
 
 _IMPORT_CACHE: dict[str, Callable[..., tuple[str, str]] | None] = {}

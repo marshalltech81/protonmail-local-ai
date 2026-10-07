@@ -202,6 +202,175 @@ class TestQueryMessages:
         ]
 
 
+class TestQueryMessagesFields:
+    """#990: ``fields`` projects each row (structured and prose) onto the
+    named fields plus ``claimant_id`` and ``thread_id``; without it the
+    output is exactly what it was before the parameter existed."""
+
+    ALL_FIELDS = [
+        "message_id",
+        "claimant_id",
+        "subject",
+        "sent_at",
+        "occurred_at",
+        "folder",
+        "has_attachments",
+        "seen",
+        "flagged",
+        "replied",
+        "in_reply_to",
+        "references",
+        "references_count",
+        "from",
+        "from_count",
+        "to",
+        "to_count",
+        "cc",
+        "cc_count",
+        "source_file",
+        "thread_id",
+        "pending_deletion",
+    ]
+
+    def test_without_fields_the_output_is_unchanged(self, messages_db):
+        # Pinned on main before the parameter existed.
+        server = _server(messages_db)
+        result = _wire(server, "query_messages", {"subject": "Re: Budget"})
+        assert result.content[0].text == (
+            "Query: subject='Re: Budget' (case-insensitive substring)\n"
+            "total_matches: 1\n"
+            "returned: 1 (matches 1-1)\n"
+            "has_more: false\n"
+            "\n"
+            "1. 2024-01-11T10:00:00+00:00 | INBOX | unread | attachments\n"
+            "   Subject: Re: Budget review\n"
+            "   From: bob@example.com\n"
+            "   To: Jane Doe <jane@example.com>\n"
+            "   Cc: carol@other.org\n"
+            "   Message-ID: m2 | Claimant ID: m2#29c1b289e7522195\n"
+            "   Thread ID: t1\n"
+        )
+        page = _call(server, "query_messages", sender="jane@example.com", limit=2)
+        assert [list(m) for m in page["messages"]] == [self.ALL_FIELDS] * 2
+
+    def test_every_field_named_equals_no_projection(self, messages_db):
+        server = _server(messages_db)
+        args = {"sender": "jane@example.com", "limit": 2}
+        plain = _wire(server, "query_messages", args)
+        full = _wire(server, "query_messages", {**args, "fields": self.ALL_FIELDS})
+        assert full.content[0].text == plain.content[0].text
+        assert full.structured_content == plain.structured_content
+
+    def test_rows_hold_exactly_the_named_fields_and_the_ids(self, messages_db):
+        server = _server(messages_db)
+        page = _call(server, "query_messages", fields=["subject", "sent_at"])
+        assert page["total_matches"] == 5 and page["returned"] == 5
+        for row in page["messages"]:
+            assert set(row) == {"claimant_id", "thread_id", "subject", "sent_at"}
+        # The envelope is untouched.
+        full = _call(server, "query_messages")
+        assert {k: v for k, v in page.items() if k != "messages"} == {
+            k: v for k, v in full.items() if k != "messages"
+        }
+        assert [r["claimant_id"] for r in page["messages"]] == [
+            r["claimant_id"] for r in full["messages"]
+        ]
+
+    def test_empty_list_keeps_only_the_ids(self, messages_db):
+        page = _call(_server(messages_db), "query_messages", fields=[], limit=1)
+        assert list(page["messages"][0]) == ["claimant_id", "thread_id"]
+
+    def test_prose_shows_only_the_named_fields(self, messages_db):
+        text = (
+            _wire(
+                _server(messages_db),
+                "query_messages",
+                {"subject": "Re: Budget", "fields": ["subject", "sent_at"]},
+            )
+            .content[0]
+            .text
+        )
+        assert text.endswith(
+            "1. 2024-01-11T10:00:00+00:00\n"
+            "   Subject: Re: Budget review\n"
+            "   Claimant ID: m2#29c1b289e7522195\n"
+            "   Thread ID: t1\n"
+        )
+        for absent in ("INBOX", "unread", "attachments", "From:", "To:", "Cc:", "Message-ID"):
+            assert absent not in text
+
+    def test_prose_with_only_the_ids(self, messages_db):
+        text = (
+            _wire(_server(messages_db), "query_messages", {"subject": "Re: Budget", "fields": []})
+            .content[0]
+            .text
+        )
+        assert text.endswith("1.\n   Claimant ID: m2#29c1b289e7522195\n   Thread ID: t1\n")
+
+    def test_cursor_round_trip_with_a_projection(self, messages_db):
+        server = _server(messages_db)
+        args = {"sender": "jane@example.com", "limit": 2, "fields": ["from"]}
+        first = _call(server, "query_messages", **args)
+        assert first["has_more"] is True
+        rest = _call(server, "query_messages", **args, cursor=first["next_cursor"])
+        assert rest["has_more"] is False
+        full = _call(server, "query_messages", sender="jane@example.com")
+        assert [r["claimant_id"] for r in first["messages"] + rest["messages"]] == [
+            r["claimant_id"] for r in full["messages"]
+        ]
+        for row in first["messages"] + rest["messages"]:
+            assert set(row) == {"claimant_id", "thread_id", "from"}
+        # A cursor from an unprojected page continues a projected one.
+        plain = _call(server, "query_messages", sender="jane@example.com", limit=2)
+        assert _call(server, "query_messages", **args, cursor=plain["next_cursor"]) == rest
+
+    def test_overlong_fields_list_is_rejected_with_fixed_text(self, messages_db, caplog):
+        # Review round 1: more names than a row has fields is rejected
+        # before any check per name; the log line stays bounded.
+        with caplog.at_level("DEBUG"):
+            result = _wire(_server(messages_db), "query_messages", {"fields": ["subject"] * 10_000})
+        assert result.is_error
+        text = result.content[0].text
+        assert "fields lists at most 22 names" in text
+        assert len(text) < 200
+        assert "'subject'" not in caplog.text
+        assert "query_messages rejected invalid fields" in caplog.text
+        # Up to one entry per field, repeats included, is accepted.
+        page = _call(_server(messages_db), "query_messages", fields=["subject"] * 22, limit=1)
+        assert set(page["messages"][0]) == {"claimant_id", "thread_id", "subject"}
+
+    def test_unknown_field_is_rejected_by_name_and_not_logged(self, messages_db, caplog):
+        marker = "privatemarkerf990"
+        with caplog.at_level("DEBUG"):
+            result = _wire(_server(messages_db), "query_messages", {"fields": ["subject", marker]})
+        assert result.is_error
+        text = result.content[0].text
+        assert f"unknown field '{marker}'" in text
+        assert "fields" in text
+        assert marker not in caplog.text
+        assert "query_messages rejected invalid fields" in caplog.text
+
+    def test_repeated_rejections_are_rate_limited(self, messages_db, caplog):
+        # Review round 2: a client repeating a rejected projection gets
+        # one WARNING per reason per window, not one per request.
+        server = _server(messages_db)
+        marker = "privatemarkerg990"
+        with caplog.at_level("DEBUG"):
+            for _ in range(5):
+                assert _wire(server, "query_messages", {"fields": [marker]}).is_error
+                assert _wire(server, "query_messages", {"fields": ["subject"] * 23}).is_error
+        lines = [
+            r.getMessage()
+            for r in caplog.records
+            if r.levelname == "WARNING" and "rejected invalid fields" in r.getMessage()
+        ]
+        assert lines == [
+            "query_messages rejected invalid fields: reason=unknown_name",
+            "query_messages rejected invalid fields: reason=too_many",
+        ]
+        assert marker not in caplog.text
+
+
 class TestQueryMessagesAddressMatches:
     """#801: the structured output lists, per address filter, how many
     distinct addresses it matched over the whole set."""

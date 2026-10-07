@@ -254,6 +254,48 @@ class TestLogToolCall:
         assert "'flagged': True" in text
         assert "Confidential-marker" not in text
 
+    def test_fields_are_logged_only_when_every_name_is_a_row_field(self, caplog):
+        # #990: query_messages' projection names row fields; one name
+        # outside the fixed set withholds the whole list.
+        import logging
+
+        logger = logging.getLogger("test-tool-log-fields")
+        with caplog.at_level(logging.INFO, logger="test-tool-log-fields"):
+            log_tool_call(logger, "query_messages", {"fields": ["subject", "from"]})
+            log_tool_call(logger, "query_messages", {"fields": ["subject", "Confidential-marker"]})
+            log_tool_call(logger, "query_messages", {"fields": "subject"})
+        text = caplog.text
+        assert "'fields': ['subject', 'from']" in text
+        assert "Confidential-marker" not in text
+        assert text.count("withheld=['fields']") == 2
+
+    def test_long_repeated_fields_list_is_withheld(self, caplog):
+        # Review round 1: a list of valid names longer than the row has
+        # fields (repeats add nothing) is withheld by name, so the line
+        # stays bounded.
+        import logging
+
+        logger = logging.getLogger("test-tool-log-fields-long")
+        with caplog.at_level(logging.INFO, logger="test-tool-log-fields-long"):
+            log_tool_call(logger, "query_messages", {"fields": ["subject"] * 10_000})
+            log_tool_call(
+                logger, "query_messages", {"fields": ["subject"] * 50 + ["Confidential-marker"]}
+            )
+        text = caplog.text
+        assert text.count("withheld=['fields']") == 2
+        assert "subject" not in text
+        assert "Confidential-marker" not in text
+        assert len(text) < 1000
+
+    def test_fields_allowlist_is_every_query_messages_row_field(self):
+        """The logging allowlist is the row model's own field names, so a
+        new row field cannot be accepted by the tool but withheld here."""
+        from src.lib.security import QUERY_MESSAGE_FIELDS
+        from src.tools.outputs import ListedMessage
+
+        schema = ListedMessage.model_json_schema(by_alias=True)
+        assert list(QUERY_MESSAGE_FIELDS) == list(schema["properties"])
+
     def test_valid_metadata_values_are_logged(self, caplog):
         import logging
 
@@ -284,3 +326,44 @@ class TestLogToolCall:
             "withheld=[]",
         ):
             assert fragment in text
+
+    def test_get_evidence_precision_controls_log_only_accepted_values(self, caplog):
+        """``source`` and ``scope`` log only the enum values get_evidence
+        accepts, and the caps only integers in its ranges (#988)."""
+        import logging
+
+        logger = logging.getLogger("test-tool-log-precision")
+        with caplog.at_level(logging.INFO, logger="test-tool-log-precision"):
+            log_tool_call(
+                logger,
+                "get_evidence",
+                {
+                    "source": "attachment",
+                    "scope": "in_scope",
+                    "max_chunks_per_thread": 1,
+                    "max_chars_per_chunk": 1,
+                },
+            )
+            log_tool_call(
+                logger,
+                "get_evidence",
+                {
+                    "source": "Confidential-marker",
+                    "scope": "context",
+                    "max_chunks_per_thread": 7,
+                    "max_chars_per_chunk": True,
+                },
+            )
+        first, second = (r.getMessage() for r in caplog.records)
+        for fragment in (
+            "'source': 'attachment'",
+            "'scope': 'in_scope'",
+            "'max_chunks_per_thread': 1",
+            "'max_chars_per_chunk': 1",
+            "withheld=[]",
+        ):
+            assert fragment in first
+        assert second.endswith(
+            "{} withheld=['max_chars_per_chunk', 'max_chunks_per_thread', 'scope', 'source']"
+        )
+        assert "Confidential-marker" not in caplog.text
