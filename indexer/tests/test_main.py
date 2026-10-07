@@ -3448,6 +3448,9 @@ class TestRequeueStaleExtractions:
         from src.extractors import EXTRACTOR_VERSIONS
 
         assert EXTRACTOR_VERSIONS["docx"] == 5
+        # Version 6 is taken by the reverted bump: the next bump must go
+        # to 7, or rows stamped ``docx@6`` would keep their old text.
+        assert EXTRACTOR_VERSIONS["docx"] != 6
         maildir = tmp_path / "maildir"
         monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
         path = maildir / "INBOX" / "cur" / "contract.eml"
