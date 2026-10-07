@@ -3788,7 +3788,7 @@ def test_parser_cap_lines_are_rate_limited_and_counted(tmp_path, monkeypatch, ca
     from src import extractors
 
     caplog.set_level("INFO")
-    monkeypatch.setattr(extractors, "_WARNINGS_PER_WINDOW", 2)
+    monkeypatch.setattr(extractors._LINE_BUDGET, "limit", 2)
     extractors.drain_extractor_counts()
     raw, _, _, pinned = _CAP_SHAPES["body_parts"]
     folder = tmp_path / "INBOX" / "cur"

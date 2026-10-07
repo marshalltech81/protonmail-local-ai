@@ -33,7 +33,6 @@ from __future__ import annotations
 import importlib
 import logging
 import os
-import time
 import zipfile
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -41,6 +40,8 @@ from threading import Lock
 
 import defusedxml
 from PIL import Image
+
+from ..rate_limited_log import LineBudget
 
 # ``defuse_stdlib`` swaps the standard-library XML parsers (``xml.etree``,
 # ``xml.sax``, ``xml.dom.*``, ``xml.parsers.expat``, ``xmlrpc.client``)
@@ -106,13 +107,14 @@ ZIP_MAX_UNCOMPRESSED_BYTES = 200 * 1024 * 1024
 #   counted here so the parser's per-message line can be rate limited
 #   without losing a message (review round 5 on #884).
 # * ``warnings_suppressed``: per-item WARNINGs (failed extraction, OCR
-#   cap, extractor cap, parser cap) that the rate limit below withheld.
-# * ``_suppressed_lines``: the repeated indexer lines that share the
-#   rate limit (embed retries and recoveries, health-file and
+#   cap, OCR fallback failure, extractor cap, parser cap) that the rate
+#   limit below withheld (the budget's ``attachment`` bucket).
+# * the budget's ``line`` bucket: the repeated indexer lines that share
+#   the rate limit (embed retries and recoveries, health-file and
 #   ingestion-state failures, #873), withheld. Counted apart from the
-#   attachment WARNINGs, and reported on the queue heartbeat, because a
-#   suppressed embed line says nothing about attachment text (Codex
-#   round 2 on #904).
+#   attachment WARNINGs, and reported on the queue heartbeat as
+#   ``suppressed_lines``, because a suppressed embed line says nothing
+#   about attachment text (Codex round 2 on #904).
 #
 # Kept in this always-imported module because ``pdf`` is imported lazily.
 # A few integers and a window start: the state stays bounded.
@@ -124,8 +126,6 @@ _ocr_pages_skipped = 0
 _ocr_capped_images = 0
 _extractor_caps = 0
 _parser_caps_messages = 0
-_warnings_suppressed = 0
-_suppressed_lines = 0
 
 # At most this many per-attachment WARNINGs per window, shared by every
 # kind (review rounds 1 and 2 on #884): a sender can attach many distinct
@@ -133,8 +133,13 @@ _suppressed_lines = 0
 # retained log. The rest are counted.
 _WARNINGS_PER_WINDOW = 20
 _WARNING_WINDOW_SECS = 300.0
-_warning_window: float | None = None
-_warnings_in_window = 0
+_ATTACHMENT_LINES = "attachment"
+_OTHER_LINES = "line"
+_LINE_BUDGET = LineBudget(
+    limit=_WARNINGS_PER_WINDOW,
+    window_secs=_WARNING_WINDOW_SECS,
+    buckets=(_ATTACHMENT_LINES, _OTHER_LINES),
+)
 
 
 def note_pdf_page_failed() -> None:
@@ -188,7 +193,6 @@ def drain_extractor_counts() -> dict[str, int]:
     """Return the counts above since the last call, and reset them."""
     global _pdf_pages_failed, _pdf_pages_unrecovered, _ocr_capped_pdfs
     global _ocr_pages_skipped, _ocr_capped_images, _extractor_caps, _parser_caps_messages
-    global _warnings_suppressed
     with _counts_lock:
         counts = {
             "pdf_pages_failed": _pdf_pages_failed,
@@ -198,23 +202,18 @@ def drain_extractor_counts() -> dict[str, int]:
             "ocr_capped_images": _ocr_capped_images,
             "extractor_caps": _extractor_caps,
             "parser_caps_messages": _parser_caps_messages,
-            "warnings_suppressed": _warnings_suppressed,
+            "warnings_suppressed": _LINE_BUDGET.drain(_ATTACHMENT_LINES),
         }
         _pdf_pages_failed = _pdf_pages_unrecovered = _ocr_capped_pdfs = 0
         _ocr_pages_skipped = _ocr_capped_images = _extractor_caps = 0
         _parser_caps_messages = 0
-        _warnings_suppressed = 0
     return counts
 
 
 def drain_suppressed_lines() -> int:
     """Return the non-attachment lines withheld since the last call, and
     reset the count (reported on the queue heartbeat)."""
-    global _suppressed_lines
-    with _counts_lock:
-        n = _suppressed_lines
-        _suppressed_lines = 0
-    return n
+    return _LINE_BUDGET.drain(_OTHER_LINES)
 
 
 def warn_rate_limited(
@@ -230,21 +229,8 @@ def warn_rate_limited(
     in the heartbeat's ``suppressed_lines`` for any other indexer line
     (``attachment=False``). ``args`` must be counts, module names, type
     names or fixed text. Returns whether the line was logged."""
-    global _warning_window, _warnings_in_window, _warnings_suppressed, _suppressed_lines
-    now = time.monotonic()
-    with _counts_lock:
-        if _warning_window is None or now - _warning_window >= _WARNING_WINDOW_SECS:
-            _warning_window = now
-            _warnings_in_window = 0
-        if _warnings_in_window >= _WARNINGS_PER_WINDOW:
-            if attachment:
-                _warnings_suppressed += 1
-            else:
-                _suppressed_lines += 1
-            return False
-        _warnings_in_window += 1
-    logger.log(level, msg, *args)
-    return True
+    bucket = _ATTACHMENT_LINES if attachment else _OTHER_LINES
+    return _LINE_BUDGET.log(logger, bucket, msg, *args, level=level)
 
 
 def _warn_failed(module_name: str, dispatch_via: str, reason: str) -> None:

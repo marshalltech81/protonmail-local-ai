@@ -1190,6 +1190,10 @@ only, never filenames or text (`make logs`):
   once usually means the OCR toolchain or a parser library is
   broken, not the mail. A failed result is cached for 7 days, then
   retried when the same bytes arrive again.
+- `PDF OCR fallback failed: <ExceptionType>` (WARNING): OCR of a PDF's
+  pages without a text layer raised (a Tesseract error or timeout). A
+  PDF with enough digital text keeps it and loses the scanned pages;
+  otherwise the extraction fails as above.
 - `pdf OCR capped at <N> of <M> scanned pages` (WARNING): a scanned
   PDF had more pages without a text layer than `INDEXER_OCR_MAX_PAGES`;
   the pages past the cap are not read. Every capped PDF is also counted
@@ -1237,8 +1241,9 @@ only, never filenames or text (`make logs`):
   zip, image-pixel and XLSX whole-part caps, the OCR timeout); the OCR
   page caps have their own lines above. Like the OCR cap, a cap is reported
   on the first extraction only: the cached text is served afterwards.
-- These per-item WARNINGs (failed extractions, OCR and extractor caps,
-  and the parser-cap line described below, together) are capped at 20
+- These per-item WARNINGs (failed extractions, OCR fallback failures,
+  OCR and extractor caps, and the parser-cap line described below,
+  together) are capped at 20
   per 5 minutes, so a stream of crafted mail cannot flood the log. The rest
   are counted as `warnings_suppressed` in the attachments line below.
   The budget is shared with the embed retry, health-file and
