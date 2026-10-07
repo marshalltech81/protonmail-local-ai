@@ -8,7 +8,9 @@ lastModifiedBy and ``docProps/app.xml`` Company and Manager for OOXML,
 and the ``office:meta`` creator fields for ODF. The repository is
 public, so this module walks every Office file under the indexer and
 mcp-server test trees and requires each of those fields to be empty or
-a name on ``_SYNTHETIC_AUTHORS``.
+a name on ``_SYNTHETIC_AUTHORS``. OOXML properties are also read from
+any part ``_rels/.rels`` names for them, in Transitional or Strict
+namespaces.
 
 Fixtures built at test time live in ``tmp_path`` and are never
 committed, so the walk does not see them. Names kept in binary records
@@ -23,6 +25,7 @@ reads the mcp-server's test tree by path. Failure messages name the
 file and the field, never the value, so a real name is not copied into
 the CI log."""
 
+import posixpath
 import shutil
 import struct
 import zipfile
@@ -61,14 +64,29 @@ _OOXML = frozenset(
 _ODF_ZIP = frozenset({".odt", ".ods", ".odp"})
 _ODF_FLAT = frozenset({".fodt", ".fods", ".fodp"})
 
-_CODEPAGES = {1200: "utf-16-le", 10000: "mac_roman", 65001: "utf-8"}
+# Code page 1200 is UTF-16LE, but olefile 0.47 strips every NUL byte from
+# the string before returning it, so what is left is read as Latin-1: an
+# ASCII name round-trips, and anything else stays non-empty and off the
+# allowlist.
+_CODEPAGES = {1200: "latin-1", 10000: "mac_roman", 65001: "utf-8"}
 _DC = "{http://purl.org/dc/elements/1.1/}"
 _CP = "{http://schemas.openxmlformats.org/package/2006/metadata/core-properties}"
-_EP = "{http://schemas.openxmlformats.org/officeDocument/2006/extended-properties}"
+# Transitional and Strict OOXML name the extended-properties namespace differently.
+_EP = (
+    "{http://schemas.openxmlformats.org/officeDocument/2006/extended-properties}",
+    "{http://purl.oclc.org/ooxml/officeDocument/extendedProperties}",
+)
 _META = "{urn:oasis:names:tc:opendocument:xmlns:meta:1.0}"
-_OOXML_FIELDS = {"creator": f"{_DC}creator", "lastModifiedBy": f"{_CP}lastModifiedBy"}
-_OOXML_APP_FIELDS = {"Company": f"{_EP}Company", "Manager": f"{_EP}Manager"}
-_ODF_FIELDS = {"initial-creator": f"{_META}initial-creator", "creator": f"{_DC}creator"}
+_REL = "{http://schemas.openxmlformats.org/package/2006/relationships}Relationship"
+_OOXML_FIELDS = {"creator": (f"{_DC}creator",), "lastModifiedBy": (f"{_CP}lastModifiedBy",)}
+_OOXML_APP_FIELDS = {
+    "Company": tuple(f"{ns}Company" for ns in _EP),
+    "Manager": tuple(f"{ns}Manager" for ns in _EP),
+}
+_ODF_FIELDS = {"initial-creator": (f"{_META}initial-creator",), "creator": (f"{_DC}creator",)}
+# Relationship types name the properties parts by their last path segment.
+_CORE_RELS = frozenset({"core-properties"})
+_APP_RELS = frozenset({"extended-properties", "extendedProperties"})
 
 
 def _office_files(roots: tuple[Path, ...]) -> list[Path]:
@@ -99,13 +117,35 @@ def _ole2_fields(path: Path) -> dict[str, str]:
     }
 
 
-def _xml_fields(xml: bytes, fields: dict[str, str]) -> dict[str, str]:
+def _xml_fields(xml: bytes, fields: dict[str, tuple[str, ...]]) -> dict[str, str]:
     root = ElementTree.fromstring(xml)
     found: dict[str, str] = {}
-    for name, tag in fields.items():
+    for name, tags in fields.items():
         # A field may repeat; join them so every value is checked.
-        found[name] = "\n".join(el.text or "" for el in root.iter(tag))
+        found[name] = "\n".join(el.text or "" for tag in tags for el in root.iter(tag))
     return found
+
+
+def _ooxml_fields(path: Path) -> dict[str, str]:
+    """Core and extended properties, from the conventional ``docProps/``
+    parts and from any part the package relationships name for them."""
+    with zipfile.ZipFile(path) as archive:
+        names = set(archive.namelist())
+        parts = {"docProps/core.xml": _OOXML_FIELDS, "docProps/app.xml": _OOXML_APP_FIELDS}
+        if "_rels/.rels" in names:
+            for rel in ElementTree.fromstring(archive.read("_rels/.rels")).iter(_REL):
+                kind = rel.get("Type", "").rsplit("/", 1)[-1]
+                target = posixpath.normpath(rel.get("Target", "").lstrip("/"))
+                if kind in _CORE_RELS:
+                    parts[target] = _OOXML_FIELDS
+                elif kind in _APP_RELS:
+                    parts[target] = _OOXML_APP_FIELDS
+        found: dict[str, list[str]] = {}
+        for part, spec in parts.items():
+            if part in names:
+                for name, value in _xml_fields(archive.read(part), spec).items():
+                    found.setdefault(name, []).append(value)
+    return {name: "\n".join(values) for name, values in found.items()}
 
 
 def _zip_member(path: Path, member: str) -> bytes | None:
@@ -121,14 +161,7 @@ def _author_fields(path: Path) -> dict[str, str]:
     if suffix in _OLE2:
         return _ole2_fields(path)
     if suffix in _OOXML:
-        fields: dict[str, str] = {}
-        core = _zip_member(path, "docProps/core.xml")
-        if core is not None:
-            fields |= _xml_fields(core, _OOXML_FIELDS)
-        app = _zip_member(path, "docProps/app.xml")
-        if app is not None:
-            fields |= _xml_fields(app, _OOXML_APP_FIELDS)
-        return fields
+        return _ooxml_fields(path)
     if suffix in _ODF_ZIP:
         meta = _zip_member(path, "meta.xml")
         return _xml_fields(meta, _ODF_FIELDS) if meta is not None else {}
@@ -242,6 +275,18 @@ def test_decode_reads_the_utf8_code_page_olefile_reports_as_signed():
     assert _decode(None, None) == ""
 
 
+def test_decode_reads_a_unicode_property_set_as_olefile_returns_it():
+    # Under code page 1200 the strings are UTF-16LE, and olefile 0.47
+    # strips every NUL byte before returning them, so an ASCII name
+    # arrives as plain ASCII bytes and must still match the allowlist.
+    returned = "Synthetic Author".encode("utf-16-le").replace(b"\x00", b"")
+    assert _decode(returned, 1200) == "Synthetic Author"
+    # A non-Latin name cannot round-trip, but it stays non-empty and off
+    # the allowlist, so the check fails closed.
+    mangled = _decode("Фиктивный".encode("utf-16-le").replace(b"\x00", b""), 1200)
+    assert mangled.strip() and mangled not in _SYNTHETIC_AUTHORS
+
+
 def test_ole2_fields_read_company_and_manager_as_empty_on_the_committed_fixtures():
     for name in ("legacy.doc", "legacy.xls", "legacy.ppt", "legacy-lo.ppt"):
         fields = _author_fields(_FIXTURES / name)
@@ -258,12 +303,62 @@ def _ooxml(path: Path, core: bytes | None, app: bytes | None = None) -> Path:
     return path
 
 
-def _app(company: str, manager: str) -> bytes:
+_TRANSITIONAL_APP = "http://schemas.openxmlformats.org/officeDocument/2006/extended-properties"
+_STRICT_APP = "http://purl.oclc.org/ooxml/officeDocument/extendedProperties"
+
+
+def _app(company: str, manager: str, namespace: str = _TRANSITIONAL_APP) -> bytes:
     return (
-        '<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/'
-        'extended-properties"><Application>Synthetic</Application>'
+        f'<Properties xmlns="{namespace}"><Application>Synthetic</Application>'
         f"<Company>{company}</Company><Manager>{manager}</Manager></Properties>"
     ).encode()
+
+
+def test_check_reads_strict_ooxml_extended_properties(tmp_path: Path):
+    core = _core("Synthetic Author", "")
+    bad = _ooxml(tmp_path / "strict.docx", core, _app("", "Fictional Boss", _STRICT_APP))
+    good = _ooxml(tmp_path / "good.docx", core, _app("Synthetic Author", "", _STRICT_APP))
+
+    assert _violations(bad) == ["Manager"]
+    assert _author_fields(good)["Company"] == "Synthetic Author"
+    assert _violations(good) == []
+
+
+def _rels(*relationships: tuple[str, str]) -> bytes:
+    body = "".join(
+        f'<Relationship Id="rId{i}" Type="{kind}" Target="{target}"/>'
+        for i, (kind, target) in enumerate(relationships)
+    )
+    return (
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        f"{body}</Relationships>"
+    ).encode()
+
+
+@pytest.mark.parametrize(
+    "app_type",
+    [
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties",
+        "http://purl.oclc.org/ooxml/officeDocument/relationships/extendedProperties",
+    ],
+)
+def test_check_finds_property_parts_through_the_package_relationships(
+    tmp_path: Path, app_type: str
+):
+    core_type = (
+        "http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties"
+    )
+    package = tmp_path / "moved.pptx"
+    with zipfile.ZipFile(package, "w") as archive:
+        archive.writestr("[Content_Types].xml", b"<Types/>")
+        archive.writestr(
+            "_rels/.rels",
+            _rels((core_type, "/metadata/core.xml"), (app_type, "metadata/application.xml")),
+        )
+        archive.writestr("metadata/core.xml", _core("Fictional Writer", ""))
+        archive.writestr("metadata/application.xml", _app("Fictional Holdings", ""))
+
+    assert _violations(package) == ["creator", "Company"]
 
 
 def test_check_rejects_an_ooxml_company_or_manager_off_the_allowlist(tmp_path: Path):
