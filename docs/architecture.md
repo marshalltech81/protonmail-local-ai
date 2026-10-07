@@ -2137,7 +2137,11 @@ vulnerable dependencies, and the Dockerfiles for misconfiguration. It
 fails on HIGH or CRITICAL findings. The misconfiguration scan runs
 offline (`--offline-scan`): Trivy's Maven analyzer would otherwise
 resolve `pom.xml` from Maven Central, which rate-limits the shared CI
-runners (#1047); the dependency scan still resolves it. `make trivy`
+runners (#1047). The dependency scan still resolves it, from a cached
+`~/.m2/repository` keyed on `indexer/java/pom.xml` that the job fills
+with `mvn dependency:resolve` (strict checksums, JDK 21 like the image
+build) before the scan; Trivy reads POMs from that directory before
+asking Maven Central, so a warm cache makes no request (#1069). `make trivy`
 runs the same scans locally with the same flags (#1017), skipping the
 per-checkout `.uv-cache` as the workflow does;
 `scripts/tests/trivy_flags_test.sh` fails when the two differ.

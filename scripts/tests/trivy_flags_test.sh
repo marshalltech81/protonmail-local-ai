@@ -3,9 +3,12 @@ set -Eeuo pipefail
 
 # Checks the Trivy steps in .github/workflows/security.yml: each option
 # (pinned version, severity, exit code, skip-dirs, offline mode) has one
-# value across the Trivy steps, and the misconfiguration scan runs
-# offline so it never resolves indexer/java/pom.xml from Maven Central
-# (#1047). Then runs `make trivy` against a fake `trivy` that records
+# value across the Trivy steps, the misconfiguration scan runs offline
+# so it never resolves indexer/java/pom.xml from Maven Central (#1047),
+# and the dependency scan job caches ~/.m2/repository keyed on that
+# pom.xml and resolves it with Maven before the scan, so Trivy's Maven
+# analyzer finds the POMs locally (#1069). Then runs `make trivy`
+# against a fake `trivy` that records
 # each call and answers `--version` with $FAKE_TRIVY_VERSION, and checks
 # the target runs the workflow's three scans with the workflow's flags
 # (#1017), then the image gates of .github/workflows/docker.yml with
@@ -75,6 +78,30 @@ ok=false; [[ "$(grep -c '^ *skip-dirs:' "$WORKFLOW")" -eq 1 ]] && ok=true
 check "skip-dirs is set on the misconfiguration scan only" "$ok"
 ok=false; [[ ",$SKIP_DIRS," == *,.uv-cache,* ]] && ok=true
 check "the misconfiguration scan skips .uv-cache" "$ok"
+
+# The dependency scan job: from `trivy-deps:` to the next job. Its Maven
+# repository cache (actions/cache on ~/.m2/repository, keyed on
+# indexer/java/pom.xml) and the Maven resolve that warms it both come
+# before its first scan, so the scan reads the POMs from the local
+# repository instead of Maven Central (#1069).
+DEPS_JOB="$(awk '/^  trivy-deps:$/ {found = 1; next} found && /^  [a-z-]+:$/ {exit} found' "$WORKFLOW")"
+# deps_line REGEX: the number of the first line of the job matching
+# REGEX, or nothing when no line does (a missing line is a finding for
+# the checks below, not an error, hence the || true).
+deps_line() {
+    grep -n -E "$1" <<<"$DEPS_JOB" | head -n 1 | cut -d: -f1 || true
+}
+cache_line="$(deps_line '^ *path: ~/.m2/repository$')"
+key_line="$(deps_line "^ *key: .*hashFiles\\('indexer/java/pom.xml'\\)")"
+mvn_line="$(deps_line '^ *mvn .*--strict-checksums')"
+scan_line="$(deps_line '^ *scan-ref: indexer$')"
+ok=false; [[ -n "$cache_line" && -n "$key_line" ]] && ok=true
+check "the dependency scan caches ~/.m2/repository keyed on indexer/java/pom.xml" "$ok"
+ok=false; [[ -n "$mvn_line" ]] && grep -q -E '^ *(--file|-f) indexer/java/pom.xml dependency:resolve$' <<<"$DEPS_JOB" && ok=true
+check "the dependency scan resolves indexer/java/pom.xml with Maven, strict checksums" "$ok"
+ok=false; [[ -n "$cache_line" && -n "$mvn_line" && -n "$scan_line" ]] \
+    && ((cache_line < mvn_line && mvn_line < scan_line)) && ok=true
+check "the cache and the Maven resolve come before the indexer scan" "$ok"
 
 # --- docker.yml ---------------------------------------------------------
 

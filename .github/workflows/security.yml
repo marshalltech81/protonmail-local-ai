@@ -76,6 +76,35 @@ jobs:
           version: v0.75.0
           cache: true
 
+      # The indexer scan walks indexer/java/pom.xml's dependency tree, and
+      # Trivy's Maven analyzer reads each POM from the local repository
+      # before asking Maven Central, which rate-limits the shared runner
+      # IPs (429; #1069). Trivy has no flag for that repository: it takes
+      # `localRepository` from ~/.m2/settings.xml and otherwise uses
+      # ~/.m2/repository, the same default Maven writes to. So the job
+      # caches that directory, keyed on the POM, and fills it with Maven
+      # before the scan: on a warm cache neither Maven nor Trivy fetches
+      # anything. The JDK matches the one indexer/Dockerfile builds with
+      # (openjdk-21); Maven is preinstalled on the runner. The resolve
+      # verifies checksums like the image build does.
+      - name: Cache the Maven repository
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.m2/repository
+          key: m2-${{ runner.os }}-${{ hashFiles('indexer/java/pom.xml') }}
+          restore-keys: |
+            m2-${{ runner.os }}-
+
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Resolve the .ppt reader's POMs into the Maven repository
+        run: >-
+          mvn --batch-mode --no-transfer-progress --strict-checksums
+          --file indexer/java/pom.xml dependency:resolve
+
       # Both scans run even when the other fails, so the job reports every
       # service's findings instead of stopping at the first failing scan
       # (#1016). A failing scan still fails the job. !cancelled() rather
