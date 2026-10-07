@@ -1927,3 +1927,105 @@ def test_cached_no_extractor_row_for_a_dotx_is_re_extracted(tmp_path):
         assert persisted is not None
         assert (persisted.status, persisted.extractor) == (STATUS_SUCCESS, "docx@5")
         assert persisted.text is not None and "SYNTHETIC_DOTX_FACT" in persisted.text
+
+
+def _stub_ppt_reader(monkeypatch, tmp_path, text: bytes) -> list[bytes]:
+    """Install a stand-in for the ``.ppt`` Java reader that returns
+    ``text``; returns the payloads it was handed."""
+    from src.extractors import ppt
+    from src.extractors._runner import ToolOutput
+
+    seen: list[bytes] = []
+
+    def run_tool(_argv, payload, **_kwargs):
+        seen.append(payload)
+        return ToolOutput(text, truncated=False)
+
+    home = tmp_path / "ppt-home"
+    (home / "jre" / "bin").mkdir(parents=True)
+    (home / "jre" / "bin" / "java").touch()
+    monkeypatch.setattr(ppt, "PPT_HOME", home)
+    monkeypatch.setattr(ppt, "run_tool", run_tool)
+    return seen
+
+
+_OLE2 = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+_PPT_MIME = "application/vnd.ms-powerpoint"
+
+
+def test_cached_no_extractor_row_for_a_ppt_is_re_extracted(tmp_path, monkeypatch):
+    """#957: a ``.ppt`` cached ``unsupported`` (no extractor) before
+    ``.ppt`` was routed is re-extracted through the real dispatcher, once,
+    and the startup sweep's predicate re-queues it."""
+    from src.attachment_indexing import reruns_once_ocr_is_on
+
+    payload = _OLE2 + b"synthetic deck bytes"
+    for content_type, filename in ((_PPT_MIME, "a.bin"), ("application/octet-stream", "a.ppt")):
+        assert reruns_once_ocr_is_on(NO_EXTRACTOR_ERROR, content_type, filename)
+        seen = _stub_ppt_reader(monkeypatch, tmp_path / filename, b"SYNTHETIC_PPT_FACT")
+        db = _setup_db_for_attachment(tmp_path / filename)
+        attachment = _attachment(payload, filename=filename, content_type=content_type)
+        db.store_attachment_extraction(
+            attachment_id=attachment.content_hash,
+            extraction_status=STATUS_UNSUPPORTED,
+            extractor=None,
+            extracted_text=None,
+            extraction_error=NO_EXTRACTOR_ERROR,
+        )
+        plan = prepare_attachment_writes(db=db, **_kwargs(attachment))
+        assert (plan.status, plan.cached) == (STATUS_SUCCESS, False)
+        assert seen == [payload]
+        persisted = plan.extraction_to_persist
+        assert persisted is not None
+        assert (persisted.status, persisted.extractor, persisted.text) == (
+            STATUS_SUCCESS,
+            "ppt@1",
+            "SYNTHETIC_PPT_FACT",
+        )
+        _embed_new_chunks(
+            plan, db=db, claimant_id="msg@x", embedder=make_mock_embedder([0.1] * EMBEDDING_DIM)
+        )
+        with db.transaction():
+            apply_attachment_writes(plan=plan, claimant_id="msg@x", thread_id="thread-x", db=db)
+        again = prepare_attachment_writes(db=db, **_kwargs(attachment))
+        assert (again.status, again.cached) == (STATUS_SUCCESS, True)
+        assert seen == [payload]
+
+
+def test_non_ole2_ppt_row_holds_for_ppt_occurrences_only(tmp_path, monkeypatch, caplog):
+    """#957: bytes labelled ``.ppt`` that are not OLE2 are cached
+    ``unsupported`` with their own error. A later ``.ppt`` occurrence is
+    served that row without running anything; an occurrence whose label
+    selects another extractor runs it."""
+    from src.extractors import NON_OLE2_PPT_ERROR
+
+    caplog.set_level("DEBUG")
+    db = _setup_db_for_attachment(tmp_path)
+    payload = b"SYNTHETIC_NOT_A_DECK plain words"
+    first = _attachment(payload, filename="a.ppt", content_type=_PPT_MIME)
+    plan = prepare_attachment_writes(db=db, **_kwargs(first))
+    assert (plan.status, plan.cached) == (STATUS_UNSUPPORTED, False)
+    with db.transaction():
+        apply_attachment_writes(plan=plan, claimant_id="msg@x", thread_id="thread-x", db=db)
+    row = db.get_attachment_extraction(first.content_hash)
+    assert (row["extraction_status"], row["extraction_error"]) == (
+        STATUS_UNSUPPORTED,
+        NON_OLE2_PPT_ERROR,
+    )
+
+    extractor = MagicMock(
+        return_value=ExtractionResult(
+            status=STATUS_SUCCESS, extractor="text@3", text="plain words", error=None
+        )
+    )
+    monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
+    for filename, content_type in (("b.ppt", _PPT_MIME), ("deck.PPT", "application/octet-stream")):
+        later = _attachment(payload, filename=filename, content_type=content_type)
+        again = prepare_attachment_writes(db=db, **_kwargs(later))
+        assert (again.status, again.cached) == (STATUS_UNSUPPORTED, True)
+    extractor.assert_not_called()
+
+    as_text = _attachment(payload, filename="notes.txt", content_type="text/plain")
+    prepare_attachment_writes(db=db, **_kwargs(as_text))
+    extractor.assert_called_once()
+    assert "SYNTHETIC_NOT_A_DECK" not in caplog.text

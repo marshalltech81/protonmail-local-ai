@@ -118,6 +118,11 @@ and logs it at startup (see `docs/troubleshooting.md`, "Which build and
 settings is a container running?"). A plain `docker compose build`, or
 an image `make up` builds because none exists yet, records `unknown`.
 
+Besides the Debian and Python packages, the indexer build fetches the
+Java libraries of its legacy `.ppt` reader (Apache POI, pinned in
+`indexer/java/pom.xml`) from Maven Central (`repo.maven.apache.org`),
+so the build host needs to reach it. Nothing is downloaded at runtime.
+
 ### 4. Set up the Proton Mail Bridge app
 
 The Bridge app must stay running and signed in. While it is closed,

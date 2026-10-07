@@ -1015,7 +1015,7 @@ as message bodies. Two extra tables sit alongside `message_chunks`:
 | Table | Keyed by | Purpose |
 |---|---|---|
 | `attachments` | attachment_occurrence_id | Per-occurrence row capturing filename + MIME + size as it appeared on a specific email. The occurrence id includes the message, payload hash, filename, and attachment slot so duplicate same-payload files in one email are still represented. |
-| `attachment_extractions` | attachment_id (= sha256 of payload) | Per-content-hash cache of extracted text + status. The expensive work (Tesseract OCR, pypdf parse, DOCX walk) runs at most once per unique payload, including within one indexing batch, where results not yet committed are shared by content hash. Non-success rows are also honored: `empty` short-circuits unconditionally; `too_large` short-circuits while the payload still exceeds `INDEXER_ATTACHMENT_MAX_BYTES`, and is re-extracted once the operator raises the cap far enough for it to fit (#693); `unsupported` short-circuits while it also holds for the occurrence at hand (an "OCR disabled" row, for an occurrence that needs OCR — an image, or a PDF whose row the PDF extractor wrote because it found no digital text layer — until OCR is turned on; an "OLE2 compound file" row also for an occurrence that selects the DOCX, XLSX, PPTX or text extractor (#694, #932, #936), and re-run for one labelled `.doc` / `.xls`, which selects a legacy extractor (#935); a "binary payload labelled as text" row also for an occurrence that selects the text extractor (#932); any other until the occurrence's MIME type or filename selects an extractor, since the same bytes can arrive as `.bin` first and `.txt` later); `failed` short-circuits within a 7-day retry window so a chronic failure stops re-running on every reappearance, but a real fix landed via dependency upgrade can pick the payload up later. The `extractor` column carries a version (`docx@5`); a row written by an older version of a fixed extractor (`extractors.EXTRACTOR_VERSIONS`) is refreshed by re-running that extractor from whichever occurrence of the bytes arrives (whatever its own filename or MIME type), and the indexer re-queues every message carrying those bytes once at startup so their chunks are rebuilt, except dead-lettered messages, which keep their stale chunks until `make requeue-dead` rescues them. Rows from a newer version (after a rollback) are kept. A row is deleted with the last `attachments` row that references it (see *Cascade on message removal*). A stale row an OCR extractor wrote (`image-ocr`, `pdf-ocr`) is kept and served while `INDEXER_OCR_ENABLED=false`, since a refresh could only replace its text with "OCR disabled"; it is refreshed once OCR is on. Likewise, once OCR is on, the startup sweep re-queues each message whose occurrence of bytes cached "OCR disabled" would now be OCR'd; an occurrence that selects no extractor (`.bin`) is not re-queued, since its reprocess would serve the same row. The sweep also re-queues, whatever the OCR setting, each message whose occurrence of bytes cached as "no extractor" now selects one, as when a release starts routing an extension such as `.heic` (#691) or `.dotx` (#937), and each message whose occurrence of bytes cached "OLE2 compound file" is labelled `.doc` / `.xls` (#935). Likewise, after `INDEXER_ATTACHMENT_MAX_BYTES` is raised, it re-queues every message carrying bytes cached `too_large` whose size (`attachments.size_bytes`) now fits; the re-run rewrites the row, so each is re-queued once, and bytes still over the cap are never re-queued (#693). |
+| `attachment_extractions` | attachment_id (= sha256 of payload) | Per-content-hash cache of extracted text + status. The expensive work (Tesseract OCR, pypdf parse, DOCX walk) runs at most once per unique payload, including within one indexing batch, where results not yet committed are shared by content hash. Non-success rows are also honored: `empty` short-circuits unconditionally; `too_large` short-circuits while the payload still exceeds `INDEXER_ATTACHMENT_MAX_BYTES`, and is re-extracted once the operator raises the cap far enough for it to fit (#693); `unsupported` short-circuits while it also holds for the occurrence at hand (an "OCR disabled" row, for an occurrence that needs OCR — an image, or a PDF whose row the PDF extractor wrote because it found no digital text layer — until OCR is turned on; an "OLE2 compound file" row also for an occurrence that selects the DOCX, XLSX, PPTX or text extractor (#694, #932, #936), and re-run for one labelled `.doc` / `.xls` / `.ppt`, which selects a legacy extractor (#935, #957); a "binary payload labelled as text" row also for an occurrence that selects the text extractor (#932); a "not an OLE2 compound file" row also for an occurrence that selects the `.ppt` extractor (#957); any other until the occurrence's MIME type or filename selects an extractor, since the same bytes can arrive as `.bin` first and `.txt` later); `failed` short-circuits within a 7-day retry window so a chronic failure stops re-running on every reappearance, but a real fix landed via dependency upgrade can pick the payload up later. The `extractor` column carries a version (`docx@5`); a row written by an older version of a fixed extractor (`extractors.EXTRACTOR_VERSIONS`) is refreshed by re-running that extractor from whichever occurrence of the bytes arrives (whatever its own filename or MIME type), and the indexer re-queues every message carrying those bytes once at startup so their chunks are rebuilt, except dead-lettered messages, which keep their stale chunks until `make requeue-dead` rescues them. Rows from a newer version (after a rollback) are kept. A row is deleted with the last `attachments` row that references it (see *Cascade on message removal*). A stale row an OCR extractor wrote (`image-ocr`, `pdf-ocr`) is kept and served while `INDEXER_OCR_ENABLED=false`, since a refresh could only replace its text with "OCR disabled"; it is refreshed once OCR is on. Likewise, once OCR is on, the startup sweep re-queues each message whose occurrence of bytes cached "OCR disabled" would now be OCR'd; an occurrence that selects no extractor (`.bin`) is not re-queued, since its reprocess would serve the same row. The sweep also re-queues, whatever the OCR setting, each message whose occurrence of bytes cached as "no extractor" now selects one, as when a release starts routing an extension such as `.heic` (#691), `.dotx` (#937), `.pptx` (#936) or `.ppt` (#957), and each message whose occurrence of bytes cached "OLE2 compound file" is labelled `.doc` / `.xls` / `.ppt` (#935, #957). Likewise, after `INDEXER_ATTACHMENT_MAX_BYTES` is raised, it re-queues every message carrying bytes cached `too_large` whose size (`attachments.size_bytes`) now fits; the re-run rewrites the row, so each is re-queued once, and bytes still over the cap are never re-queued (#693). |
 
 Per-occurrence chunks land in `message_chunks` with the
 `attachment_id` column populated and `kind` set to `attachment`. They embed exactly like body chunks
@@ -1041,22 +1041,27 @@ lazy-imported so a missing optional dependency (e.g. `python-docx`
 not in this image) downgrades to `unsupported` rather than crashing
 the indexer at startup.
 
-Legacy Office types (#694, #935): `application/msword` / `.doc` and
-`application/vnd.ms-excel` / `.xls` select the `doc` and `xls`
-extractors. The container decides which one runs: a genuine legacy
+Legacy Office types (#694, #935, #957): `application/msword` / `.doc`,
+`application/vnd.ms-excel` / `.xls` and `application/vnd.ms-powerpoint`
+/ `.ppt` select the `doc`, `xls` and `ppt` extractors. The container
+decides which one runs: a genuine legacy
 binary is an OLE2 compound file (it starts with `D0 CF 11 E0 A1 B1 1A
 E1`) and goes to the legacy extractor; any other payload goes to the
 DOCX or XLSX extractor, as a best effort for OOXML files mislabelled as
-a legacy type. An OLE2 payload whose label selects an OOXML extractor
-or none (for example a password-protected OOXML package, also OLE2,
+a legacy type. `.ppt` has no OOXML fallback: a `.ppt`-labelled payload
+that is not OLE2 is recorded `unsupported` ("not an OLE2 compound file
+(labelled legacy .ppt)") without running anything, and that row is
+served for later `.ppt` occurrences. An OLE2 payload whose label
+selects an OOXML extractor or none (for example a password-protected OOXML package, also OLE2,
 labelled `.docx` or `.pptx`) is recorded `unsupported` ("OLE2
 compound file") without running anything, since no OOXML parser (DOCX,
 XLSX, PPTX) can read it; a `failed` row would be retried every 7 days.
 That row is served for later occurrences that select the DOCX, XLSX,
-PPTX or text extractor or none, and re-run for one labelled `.doc` / `.xls`; the startup sweep re-queues
-the messages carrying such an occurrence once. A stale DOCX / XLSX
-row refreshed from a `.doc` / `.xls` occurrence runs the legacy
-extractor its label selects.
+PPTX or text extractor or none, and re-run for one labelled `.doc` /
+`.xls` / `.ppt`; the startup sweep re-queues the messages carrying such
+an occurrence once. A stale DOCX / XLSX / PPTX row refreshed from a
+`.doc` / `.xls` / `.ppt` occurrence runs the legacy extractor its label
+selects.
 
 - **`.doc`** text comes from `catdoc` (Debian's `catdoc` package in the
   indexer image), run with `-d utf-8 -w` (UTF-8 output whatever the
@@ -1078,24 +1083,49 @@ extractor its label selects.
   costs a Python start-up and an xlrd import per workbook, about 0.1 s
   in the image; a 20 MB workbook of 1,000,000 cells takes about 1.2 s
   and 145 MB.
+- **`.ppt`** is read by Apache POI 5.5.1's HSLF reader
+  (`SlideShowExtractor`: slide text, placeholders and text boxes alike,
+  and speaker notes; masters and comments are left out) in a Java
+  process (owner decision 2026-10-07, #957). `indexer/java/PptText.java`
+  runs on a Java runtime trimmed with `jlink` to five modules
+  (`java.base`, `java.desktop`, `java.xml`, `java.logging`,
+  `jdk.unsupported`); both live under `/opt/ppt` in the image. The
+  build's `ppt-builder` stage fetches the jars pinned in
+  `indexer/java/pom.xml` with Maven (strict checksums), compiles the
+  reader and writes the runtime; the JDK and Maven stay in that stage,
+  and the runtime image grows by about 67 MB (411 to 478 MB). Java is
+  started through `extractors/ppt_launcher.py` (`python -I`), which lowers its own
+  address space (512 MiB) and CPU time (30 s), caps glibc at two malloc
+  arenas, and `execve`s Java; the parent kills it after 45 s. The JVM
+  runs with a 128 MiB heap, bounded code cache, class space and
+  metaspace, the serial collector, C1 only and no class-data sharing,
+  the set it needs to start under that limit. Its own messages are
+  turned off or sent to stderr, which is discarded, so nothing but the
+  deck's text reaches stdout, and it writes no perf-data file, crash
+  report or core. Each deck costs one JVM start-up: 0.15 to 0.35 s and
+  60 to 70 MB on the fixture decks. catppt, the first candidate, read
+  no slide text from decks current PowerPoint or LibreOffice save
+  (#958).
 
 Both run through one subprocess runner (`extractors/_runner.py`): the
 payload goes to a mode-600 file under `/tmp` (tmpfs), deleted after the
 run; the tool gets an argument list with no shell, no stdin and an
 environment of `LC_ALL=C.UTF-8` only; its stderr is discarded, since it
 can quote the document; and its stdout is read incrementally up to a
-byte cap (8 MiB for catdoc, whose text past the cap is not indexed and
-is reported as `doc_output_bytes`). A timeout (60 s for catdoc), a
+byte cap (8 MiB for catdoc and for the `.ppt` reader, whose text past
+the cap is not indexed and is reported as `doc_output_bytes` /
+`ppt_output_bytes`). A timeout (60 s for catdoc, 45 s for the `.ppt`
+reader), a
 death by signal, a non-zero exit, or an xls child's malformed or
 oversized output records `failed` with a fixed error type
 (`ToolTimeoutError`, `ToolCrashError`, `ToolExitError`,
 `XlsOutputError`); nothing the tool printed reaches a log or
 `last_error`. catdoc has no Homebrew formula, so its tests skip on a
 Mac without it; CI installs it and fails if it is missing, and the
-image carries it.
-
-Legacy PowerPoint `.ppt` is not extracted yet (#957); `catppt` reads
-only placeholder text (#958).
+image carries it. The `.ppt` runtime is built for Linux, so the tests
+that run the real reader skip on a Mac unless `INDEXER_TEST_PPT_HOME`
+points at an exported `/opt/ppt`; CI exports it from the Dockerfile's
+`ppt-runtime` stage and fails if it is missing.
 
 Binary payloads labelled as text: the text extractor decodes whatever
 it is given, so a PDF, ZIP (or OOXML), OLE2, PNG, JPEG or GIF file sent
@@ -1146,7 +1176,7 @@ not read or OCR'd, and chart and SmartArt text is not extracted.
 Slideshows (`.ppsx`) and templates (`.potx`) are not routed:
 `pptx.Presentation` refuses a package whose main part is either type,
 so they are `unsupported`. Legacy binary
-`.ppt` is not read by this extractor. A `.pptx` cached as "no
+`.ppt` is read by the `ppt` extractor (Apache POI), not this one. A `.pptx` cached as "no
 extractor" before #936 is re-queued once by the startup sweep above and
 read.
 

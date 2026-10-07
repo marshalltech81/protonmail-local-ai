@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 # Regenerate the legacy binary Office fixtures (../legacy.doc,
-# ../legacy.xls) from the synthetic sources beside this script with
+# ../legacy.xls, ../legacy-lo.ppt) from the synthetic sources beside this script with
 # LibreOffice in headless mode. See ../README.md for the version used.
 #
 # Usage: generate.sh [path to soffice]
@@ -20,7 +20,10 @@ profile="-env:UserInstallation=file://${work_dir}/profile"
   --convert-to 'doc:MS Word 97' --outdir "${work_dir}" "${src_dir}/legacy-doc.txt"
 "${soffice}" "${profile}" --headless \
   --convert-to 'xls:MS Excel 97' --outdir "${work_dir}" "${src_dir}/legacy-xls.fods"
+"${soffice}" "${profile}" --headless \
+  --convert-to 'ppt:MS PowerPoint 97' --outdir "${work_dir}" "${src_dir}/legacy-ppt.fodp"
 
 cp "${work_dir}/legacy-doc.doc" "${out_dir}/legacy.doc"
 cp "${work_dir}/legacy-xls.xls" "${out_dir}/legacy.xls"
-printf 'wrote %s and %s\n' "${out_dir}/legacy.doc" "${out_dir}/legacy.xls"
+cp "${work_dir}/legacy-ppt.ppt" "${out_dir}/legacy-lo.ppt"
+printf 'wrote %s, %s and %s\n' "${out_dir}/legacy.doc" "${out_dir}/legacy.xls" "${out_dir}/legacy-lo.ppt"

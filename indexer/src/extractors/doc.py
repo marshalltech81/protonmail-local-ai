@@ -25,7 +25,7 @@ from ._runner import ToolNotFoundError, run_tool
 
 log = logging.getLogger("indexer.extractor.doc")
 
-# Wall-clock seconds a catdoc / catppt run may take. catdoc reads a
+# Wall-clock seconds a catdoc run may take. catdoc reads a
 # document in a single pass; the generated fixtures take a few
 # milliseconds, so this is reached only by a tool that hangs.
 TOOL_TIMEOUT_SECONDS = 60.0

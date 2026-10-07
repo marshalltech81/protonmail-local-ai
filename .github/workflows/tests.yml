@@ -104,8 +104,17 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends catdoc
 
+      # The legacy .ppt extractor's Java runtime and jars (#957), built by
+      # the same Dockerfile stage the image copies. Its tests skip only
+      # off CI: test_ppt_runtime_is_installed_in_ci fails here if the
+      # export is missing.
+      - name: Export the .ppt reader runtime
+        run: docker build --target ppt-runtime --output "type=local,dest=${RUNNER_TEMP}/ppt" indexer
+
       - name: Run pytest with coverage
         working-directory: indexer
+        env:
+          INDEXER_TEST_PPT_HOME: ${{ runner.temp }}/ppt/opt/ppt
         run: uv run pytest -q --cov-report=xml:coverage.xml --cov-report=term
 
       - name: Upload indexer coverage report
