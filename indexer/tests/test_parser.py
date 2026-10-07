@@ -6,6 +6,7 @@ encoded headers, address parsing, date fallback, and folder derivation.
 """
 
 import base64
+import dataclasses
 import email.errors
 import email.utils
 import hashlib
@@ -25,11 +26,13 @@ from src.parser import (
     PARSE_CAPS,
     SUBJECT_MAX_CHARS,
     OversizedMessageError,
+    SourceMetadata,
     _clean_id,
     _decode_header,
     _derive_folder,
     _parse_addrs,
     parse_email,
+    parse_email_bytes,
 )
 
 # ---------------------------------------------------------------------------
@@ -665,6 +668,96 @@ class TestFileIdentity:
         assert msg_seen is not None and msg_seen_replied is not None
         assert msg_seen.content_hash == msg_seen_replied.content_hash
         assert msg_seen.size == msg_seen_replied.size
+
+
+# ---------------------------------------------------------------------------
+# parse_email_bytes — the pure half, and the Maildir adapter (#1077)
+# ---------------------------------------------------------------------------
+
+_SPLIT_RAW = (
+    b"From: alice@example.com\nTo: bob@example.com\nSubject: Split\n"
+    b"Message-ID: <split@example.com>\nDate: Mon, 01 Jan 2024 12:00:00 +0000\n\nBody.\n"
+)
+
+
+class TestParseEmailBytes:
+    def test_bytes_and_file_give_the_same_message(self, tmp_path):
+        """The split is output-identical: the bytes with the file's
+        ``SourceMetadata`` parse to the ``Message`` the file does."""
+        path = tmp_path / "INBOX" / "cur" / "m:2,S"
+        path.parent.mkdir(parents=True)
+        path.write_bytes(_SPLIT_RAW)
+        from_file = parse_email(path, maildir_root=tmp_path)
+        assert from_file is not None
+        source = SourceMetadata(
+            folder="INBOX",
+            flags=frozenset("S"),
+            size=len(_SPLIT_RAW),
+            mtime_ns=from_file.mtime_ns,
+            path=str(path),
+        )
+        path.unlink()  # nothing is left to read
+        assert parse_email_bytes(_SPLIT_RAW, source) == from_file
+
+    def test_reads_nothing_from_disk(self, tmp_path, monkeypatch):
+        """``parse_email_bytes`` opens no file: the path is only a label."""
+
+        def _no_open(*_args, **_kwargs):
+            raise AssertionError("parse_email_bytes opened a file")
+
+        monkeypatch.setattr("builtins.open", _no_open)
+        monkeypatch.setattr(Path, "open", _no_open)
+        source = SourceMetadata(
+            folder="Folders/Clients",
+            flags=frozenset(),
+            size=len(_SPLIT_RAW),
+            mtime_ns=None,
+            path=str(tmp_path / "Folders" / ".Clients" / "cur" / "missing"),
+        )
+        msg = parse_email_bytes(_SPLIT_RAW, source)
+        assert msg is not None
+        assert msg.folder == "Folders/Clients"
+        assert msg.filepath == source.path
+        assert msg.mtime_ns is None
+        assert (msg.size, msg.content_hash) == (
+            len(_SPLIT_RAW),
+            hashlib.sha256(_SPLIT_RAW).hexdigest(),
+        )
+        assert parse_email_bytes(b"Subject: no id\n\nBody.\n", source) is None
+
+    def test_source_metadata_is_frozen(self):
+        source = SourceMetadata(folder="INBOX", flags=frozenset(), size=1, mtime_ns=None, path="p")
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            source.folder = "Sent"  # type: ignore[misc]
+
+    def test_adapter_builds_source_metadata_from_the_file(self, tmp_path, monkeypatch):
+        """``parse_email`` reads the file and hands its bytes with the
+        folder, flags, size, mtime and path to ``parse_email_bytes``."""
+        from src import parser
+
+        path = tmp_path / "Folders" / ".Clients" / "cur" / "m:2,FS"
+        path.parent.mkdir(parents=True)
+        path.write_bytes(_SPLIT_RAW)
+        seen: list[tuple[bytes, SourceMetadata]] = []
+
+        def _capture(raw: bytes, source: SourceMetadata):
+            seen.append((raw, source))
+            return None
+
+        monkeypatch.setattr(parser, "parse_email_bytes", _capture)
+        assert parse_email(path, maildir_root=tmp_path) is None
+        assert seen == [
+            (
+                _SPLIT_RAW,
+                SourceMetadata(
+                    folder="Folders/Clients",
+                    flags=frozenset("FS"),
+                    size=len(_SPLIT_RAW),
+                    mtime_ns=path.stat().st_mtime_ns,
+                    path=str(path),
+                ),
+            )
+        ]
 
 
 class TestClaimantId:

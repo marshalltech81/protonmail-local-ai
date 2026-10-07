@@ -694,6 +694,17 @@ body chunks for the same message.
 Threads are the retrieval unit; `messages` is the authoritative
 per-message record.
 
+**Parser seam.** `indexer/src/parser.py` parses in two halves (#1077).
+`parse_email_bytes(raw, source)` turns a message's RFC 822 bytes into a
+`Message` and reads nothing from disk; `parse_email(path)`, the Maildir
+adapter, reads the file under the size cap and builds the
+`SourceMetadata` it hands over: the folder, the Maildir flags, the
+file's size and mtime, and its path, which only names the message in
+log lines and the `filepath` record. Everything below the parser
+(threading, chunking, extraction, the database writer) sees the
+`Message`, so another source (an mbox import, say) would plug in at
+`parse_email_bytes` with its own adapter.
+
 **Claimant IDs.** A Message-ID is set by the sender, so two different
 files can claim the same one, by accident or to overwrite another
 message's evidence. Every per-message row is therefore keyed by a

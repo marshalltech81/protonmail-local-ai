@@ -28,6 +28,7 @@ from typing import Any
 import html2text
 
 from .extractors import note_parser_caps_message, resolved_extractor_module, warn_rate_limited
+from .maildir import parse_flags
 
 log = logging.getLogger("indexer.parser")
 
@@ -308,8 +309,35 @@ class Message:
         return claimant_id(self.message_id, self.content_hash)
 
 
+@dataclass(frozen=True)
+class SourceMetadata:
+    """What the source adapter knows about a message beyond its bytes
+    (#1077). The Maildir adapter, ``parse_email``, fills it from the
+    file; ``parse_email_bytes`` copies ``folder``, ``path`` and
+    ``mtime_ns`` onto the ``Message`` and names ``path`` in its log
+    lines, and derives nothing from any field.
+    """
+
+    # The folder the message is filed in (``_derive_folder``).
+    folder: str
+    # The Maildir flag letters in the file name (``maildir.parse_flags``);
+    # empty for a ``new/`` delivery.
+    flags: frozenset[str]
+    # The size in bytes of the file as read.
+    size: int
+    # The file's modification time, or ``None`` when ``stat`` failed.
+    mtime_ns: int | None
+    # The file's path, for log lines and the ``Message.filepath`` record.
+    path: str
+
+
 def parse_email(path: Path, maildir_root: Path | None = None) -> Message | None:
     """Parse a single .eml file from Maildir into a Message object.
+
+    The Maildir adapter (#1077): reads the file under the size cap,
+    builds the ``SourceMetadata`` the file gives (folder, flags, size,
+    mtime, path) and hands both to ``parse_email_bytes``, which does
+    the parsing and reads nothing from disk.
 
     ``maildir_root`` — when provided, the folder is derived as the relative
     path from the root to the directory that contains ``cur/``/``new/``.
@@ -327,16 +355,8 @@ def parse_email(path: Path, maildir_root: Path | None = None) -> Message | None:
     so the worker's queue routes them to the retry/backoff path rather
     than collapsing them into ``None`` — which the worker treats as a
     permanent "no Message-ID" outcome and dead-letters without retry.
-
-    Content-pathology errors (a malformed MIME structure ``email`` cannot
-    decompose, an html2text blowup, anything raised by the body /
-    attachment walker that is not already caught locally) also propagate.
-    The previous bare ``except Exception`` collapsed those into the same
-    ``None`` channel as missing-Message-ID, which silently un-indexed
-    every affected file with no dead-letter visibility. Letting the
-    exception escape routes the row through the queue's retry +
-    dead-letter cascade so operators see persistent parser bugs instead
-    of a quietly shrinking index.
+    Content-pathology errors propagate from ``parse_email_bytes``; see
+    there.
 
     Files larger than ``INDEXER_PARSE_MAX_BYTES`` (default 50 MB) raise
     ``OversizedMessageError`` either at the fstat pre-check or while
@@ -399,6 +419,43 @@ def parse_email(path: Path, maildir_root: Path | None = None) -> Message | None:
                 raise OversizedMessageError(path, actual, cap)
         else:
             raw = f.read()
+    source = SourceMetadata(
+        folder=_derive_folder(path, maildir_root),
+        flags=frozenset(parse_flags(path)),
+        size=len(raw),
+        # ``mtime_ns`` reuses the ``stat`` captured above for the size
+        # cap check. A ``stat`` failure is treated as "identity unknown"
+        # rather than a parse failure: the file was just read
+        # successfully, so the row still belongs in the index. Future
+        # passes can backfill.
+        mtime_ns=stat.st_mtime_ns if stat is not None else None,
+        path=str(path),
+    )
+    return parse_email_bytes(raw, source)
+
+
+def parse_email_bytes(raw: bytes, source: SourceMetadata) -> Message | None:
+    """Parse an RFC 822 message from its bytes into a Message object.
+
+    The pure half of ``parse_email`` (#1077): no filesystem access, so
+    a parser test needs no file and another source adapter can plug in
+    here. ``source`` is what the adapter knows beyond the bytes; its
+    ``path`` names the message in log lines (never any of its content).
+
+    Returns ``None`` for a message without a usable Message-ID (none, or
+    one over ``MESSAGE_ID_MAX_CHARS``), which the worker dead-letters.
+
+    Content-pathology errors (a malformed MIME structure ``email`` cannot
+    decompose, an html2text blowup, anything raised by the body /
+    attachment walker that is not already caught locally) propagate.
+    The previous bare ``except Exception`` collapsed those into the same
+    ``None`` channel as missing-Message-ID, which silently un-indexed
+    every affected file with no dead-letter visibility. Letting the
+    exception escape routes the row through the queue's retry +
+    dead-letter cascade so operators see persistent parser bugs instead
+    of a quietly shrinking index.
+    """
+    path = source.path
     msg = email.message_from_bytes(raw)
 
     message_id = _clean_id(msg.get("Message-ID", ""))
@@ -465,20 +522,13 @@ def parse_email(path: Path, maildir_root: Path | None = None) -> Message | None:
             ",".join(f"{name}={caps[name]}" for name in PARSE_CAPS if caps[name]),
         )
 
-    folder = _derive_folder(path, maildir_root)
-
     # Capture file identity. ``size`` is the length of the
     # bytes we actually hashed; ``content_hash`` is computed over the
     # raw file — not the decoded body — so flag-only renames keep the
     # same hash while any real content mutation shows up as a mismatch.
-    # ``mtime_ns`` reuses the ``stat`` captured above for the size cap
-    # check. A ``stat`` failure is treated as "identity unknown"
-    # rather than a parse failure: the file was just read
-    # successfully, so the row still belongs in the index. Future
-    # passes can backfill.
+    # ``mtime_ns`` is the adapter's (see ``parse_email``).
     size = len(raw)
     content_hash = hashlib.sha256(raw).hexdigest()
-    mtime_ns = stat.st_mtime_ns if stat is not None else None
 
     return Message(
         message_id=message_id,
@@ -493,12 +543,12 @@ def parse_email(path: Path, maildir_root: Path | None = None) -> Message | None:
         date_is_fallback=parsed_date is None,
         occurred_at=occurred_at,
         body_text=body_text,
-        folder=folder,
-        filepath=str(path),
+        folder=source.folder,
+        filepath=path,
         attachments=attachments,
         has_attachments=len(attachments) > 0,
         size=size,
-        mtime_ns=mtime_ns,
+        mtime_ns=source.mtime_ns,
         content_hash=content_hash,
     )
 
