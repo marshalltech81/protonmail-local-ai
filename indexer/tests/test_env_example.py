@@ -5,9 +5,11 @@ variables from the code and checks both directions:
 - every name the indexer or mcp-server reads, or a Compose file
   interpolates, is a key in ``.env.example`` (commented or not), unless
   ``_NOT_DOCUMENTED`` names it with a reason;
-- every ``.env.example`` key is read somewhere (services, Compose, the
-  Makefile or a script), unless ``_NOT_READ`` names it with a reason, so
-  a removed setting does not leave a dead key behind.
+- every ``.env.example`` key has a reader (a Python service, a value
+  Compose itself uses, or an expansion in the mbsync scripts, the
+  Makefile or an operator script; a Compose pass-through, a comment or a
+  message alone does not count), unless ``_NOT_READ`` names it with a
+  reason, so a removed setting does not leave a dead key behind.
 
 It lives in the indexer suite because CI has no repo-root pytest job; it
 reads the mcp-server's sources by path."""
@@ -45,8 +47,9 @@ _NOT_DOCUMENTED = {
     "GIT_COMMIT": "a build arg the Makefile passes, not configuration",
 }
 
-# Keys in ``.env.example`` that no service, Compose file, Makefile or
-# script reads. Empty today; a name added here needs a reason.
+# Keys in ``.env.example`` with no reader (``_runtime_readers``). Empty
+# today; a name added here needs a reason, and a test fails once it is
+# read again or leaves ``.env.example``.
 _NOT_READ: dict[str, str] = {}
 
 
@@ -121,25 +124,74 @@ def _example_keys(path: Path) -> set[str]:
     return set(_EXAMPLE_KEY.findall(path.read_text(encoding="utf-8")))
 
 
+# A Compose ``environment:`` entry that only forwards the variable of the
+# same name into a container (``NAME: ${NAME:-default}``). It is not a
+# read on its own: the container still has to consume it.
+_COMPOSE_PASS_THROUGH = re.compile(
+    r"""^\s*(?:-\s*)?([A-Za-z_][A-Za-z0-9_]*)\s*[:=]\s*["']?\$\{\1(?:[:?+-][^}]*)?\}["']?\s*$"""
+)
+
+
+def _compose_own_uses(files: list[Path]) -> set[str]:
+    """Compose references other than pass-throughs: ports, build args and
+    any other value Compose itself consumes."""
+    names: set[str] = set()
+    for path in files:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if line.lstrip().startswith("#") or _COMPOSE_PASS_THROUGH.match(line):
+                continue
+            names.update(_COMPOSE_REF.findall(line))
+    return names
+
+
 def _script_files(repo: Path) -> list[Path]:
-    """Operator-run code outside the services: the Makefile and the shell
+    """Code outside the Python services that reads settings: the mbsync
+    container's scripts and template, the Makefile and the operator
     scripts (tests excluded, since they set variables rather than read
     them)."""
     return [
         repo / "Makefile",
         *sorted((repo / "scripts").glob("*.sh")),
         *sorted((repo / "mbsync").glob("*.sh")),
+        repo / "mbsync" / "mbsyncrc.template",
     ]
 
 
-def _mentioned_in(files: list[Path], names: set[str]) -> set[str]:
-    text = "\n".join(p.read_text(encoding="utf-8") for p in files)
-    return {n for n in names if re.search(rf"\b{re.escape(n)}\b", text)}
+# A shell or Make expansion: ``$NAME``, ``${NAME...}`` or ``$(NAME)``.
+_EXPANSION = re.compile(r"\$[{(]?([A-Za-z_][A-Za-z0-9_]*)")
+
+
+def _script_expansions(files: list[Path]) -> set[str]:
+    """Names expanded on non-comment lines. A comment or a message that
+    only mentions a name is not a read."""
+    names: set[str] = set()
+    for path in files:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if line.lstrip().startswith("#"):
+                continue
+            names.update(_EXPANSION.findall(line))
+    return names
+
+
+def _python_reads(repo: Path) -> set[str]:
+    return _python_env_reads([repo / "indexer" / "src", repo / "mcp-server" / "src"])
 
 
 def _read_names(repo: Path) -> set[str]:
-    return _python_env_reads([repo / "indexer" / "src", repo / "mcp-server" / "src"]) | (
-        _compose_refs(_compose_files(repo))
+    """Forward direction: what an operator can set. Containers get no
+    ``env_file``, so a ``.env`` value reaches one only through a Compose
+    interpolation; the Python services are also scanned for reads Compose
+    does not forward."""
+    return _python_reads(repo) | _compose_refs(_compose_files(repo))
+
+
+def _runtime_readers(repo: Path) -> set[str]:
+    """Reverse direction: names something actually consumes. A Compose
+    pass-through alone does not count."""
+    return (
+        _python_reads(repo)
+        | _compose_own_uses(_compose_files(repo))
+        | _script_expansions(_script_files(repo))
     )
 
 
@@ -148,8 +200,14 @@ def _undocumented(repo: Path) -> set[str]:
 
 
 def _dead_keys(repo: Path) -> set[str]:
-    unread = _example_keys(repo / ".env.example") - _read_names(repo) - set(_NOT_READ)
-    return unread - _mentioned_in(_script_files(repo), unread)
+    return _example_keys(repo / ".env.example") - _runtime_readers(repo) - set(_NOT_READ)
+
+
+def _stale_not_read(repo: Path, not_read: dict[str, str]) -> set[str]:
+    """``_NOT_READ`` names that have left ``.env.example`` or gained a
+    reader, so the exclusion no longer hides anything."""
+    keys = _example_keys(repo / ".env.example")
+    return {n for n in not_read if n not in keys or n in _runtime_readers(repo)}
 
 
 # --- The checks --------------------------------------------------------------
@@ -171,7 +229,7 @@ def test_exclusions_are_still_needed_and_reasoned():
     # A stale exclusion would hide a future regression for that name.
     assert set(_NOT_DOCUMENTED) <= read
     assert not set(_NOT_DOCUMENTED) & keys
-    assert not set(_NOT_READ) - keys
+    assert not _stale_not_read(_REPO, _NOT_READ)
     for name, reason in {**_NOT_DOCUMENTED, **_NOT_READ}.items():
         assert reason.strip() and "\n" not in reason, name
 
@@ -194,6 +252,11 @@ def test_the_scan_finds_reads_from_every_source():
         "INFERENCE_API_KEY",  # mcp-server _read_secret
     } <= python
     assert {"BRIDGE_USER", "GIT_COMMIT", "MCP_PORT"} <= _compose_refs(_compose_files(_REPO))
+    assert "MCP_PORT" in _compose_own_uses(_compose_files(_REPO))  # the published port
+    assert "BRIDGE_USER" not in _compose_own_uses(_compose_files(_REPO))  # a pass-through
+    assert {"BRIDGE_CERT_PIN_ROTATE", "SYNC_DEADLINE_SECONDS"} <= _script_expansions(
+        _script_files(_REPO)
+    )
     assert len(_example_keys(_REPO / ".env.example")) > 40
 
 
@@ -246,6 +309,7 @@ def repo_copy(tmp_path):
         (tmp_path / sub).mkdir()
         for path in (_REPO / sub).glob("*.sh"):
             shutil.copy(path, tmp_path / sub / path.name)
+    shutil.copy(_REPO / "mbsync" / "mbsyncrc.template", tmp_path / "mbsync")
     assert not _undocumented(tmp_path)
     assert not _dead_keys(tmp_path)
     return tmp_path
@@ -295,3 +359,56 @@ def test_a_key_read_only_by_a_script_is_not_dead(repo_copy):
         script.read_text(encoding="utf-8") + '\n: "${SCRIPT_ONLY_920:-}"\n', encoding="utf-8"
     )
     assert not _dead_keys(repo_copy)
+
+
+# --- Review round 1: a mention, a pass-through or a stale exclusion ----------
+
+
+def _add_key(repo: Path, name: str) -> None:
+    example = repo / ".env.example"
+    example.write_text(example.read_text(encoding="utf-8") + f"\n{name}=1\n", encoding="utf-8")
+
+
+def _append(path: Path, text: str) -> None:
+    path.write_text(path.read_text(encoding="utf-8") + text, encoding="utf-8")
+
+
+def test_a_comment_or_message_mention_in_a_script_is_not_a_read(repo_copy):
+    _add_key(repo_copy, "MENTIONED_ONLY_920")
+    _append(
+        repo_copy / "scripts" / "validate-env.sh",
+        '\n# MENTIONED_ONLY_920 was removed\necho "remove MENTIONED_ONLY_920 from .env"\n',
+    )
+    _append(repo_copy / "Makefile", "\n# MENTIONED_ONLY_920\n")
+    assert _dead_keys(repo_copy) == {"MENTIONED_ONLY_920"}
+
+
+def test_a_makefile_expansion_is_a_read(repo_copy):
+    _add_key(repo_copy, "MAKE_ONLY_920")
+    _append(repo_copy / "Makefile", "\nx:\n\t@echo $(MAKE_ONLY_920)\n")
+    assert not _dead_keys(repo_copy)
+
+
+def test_a_compose_pass_through_without_a_runtime_reader_is_dead(repo_copy):
+    _add_key(repo_copy, "PASS_THROUGH_920")
+    _append(repo_copy / "docker-compose.yml", "      PASS_THROUGH_920: ${PASS_THROUGH_920:-1}\n")
+    assert _dead_keys(repo_copy) == {"PASS_THROUGH_920"}
+
+
+def test_a_pass_through_read_by_an_mbsync_script_is_not_dead(repo_copy):
+    _add_key(repo_copy, "PASS_THROUGH_920")
+    _append(repo_copy / "docker-compose.yml", "      PASS_THROUGH_920: ${PASS_THROUGH_920:-1}\n")
+    _append(repo_copy / "mbsync" / "entrypoint.sh", '\n: "${PASS_THROUGH_920}"\n')
+    assert not _dead_keys(repo_copy)
+
+
+def test_a_setting_compose_itself_uses_is_not_dead(repo_copy):
+    _add_key(repo_copy, "COMPOSE_USE_920")
+    _append(repo_copy / "docker-compose.yml", '      - "127.0.0.1:${COMPOSE_USE_920:-1}:3000"\n')
+    assert not _dead_keys(repo_copy)
+
+
+def test_a_not_read_exclusion_for_a_key_that_is_read_is_stale(repo_copy):
+    assert _stale_not_read(repo_copy, {"RERANK_CANDIDATES": "x"}) == {"RERANK_CANDIDATES"}
+    _add_key(repo_copy, "UNREAD_920")
+    assert not _stale_not_read(repo_copy, {"UNREAD_920": "x"})
