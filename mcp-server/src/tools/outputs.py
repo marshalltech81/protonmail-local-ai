@@ -799,6 +799,12 @@ SummaryStyle = Literal["brief", "detailed", "action-items", "timeline"]
 
 class SummarizeThreadOutput(_Output):
     summary: str = Field(description="The model's summary, with inline labels such as [E1].")
+    coverage_note: str | None = Field(
+        default=None,
+        description="Server-written notice that the model window left out or cut short "
+        "passages the tool would otherwise show, separate from the model's summary. Null "
+        "when the window trimmed nothing.",
+    )
     style: SummaryStyle = Field(
         description="The style used; an unknown style is summarized as brief."
     )

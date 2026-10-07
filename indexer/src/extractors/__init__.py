@@ -307,6 +307,9 @@ class ExtractionResult:
 # docx 5 still: a long part-relationship chain is now ``failed``
 # (``DocxRelationshipChainError``) instead of escaping as
 # ``RecursionError`` (#945); that escape cached no row, so none is stale.
+# text 3: a payload starting with a fixed binary signature is recorded
+# ``unsupported`` instead of decoded as replacement characters, so the
+# ``success`` rows the previous version wrote for one are refreshed (#932).
 # doc 1, xls 1: legacy binary ``.doc`` (catdoc) and ``.xls`` (xlrd in a
 # child process), recorded ``unsupported`` before (#935).
 EXTRACTOR_VERSIONS: dict[str, int] = {
@@ -314,7 +317,7 @@ EXTRACTOR_VERSIONS: dict[str, int] = {
     "docx": 5,
     "image": 3,
     "pdf": 4,
-    "text": 2,
+    "text": 3,
     "xls": 1,
     "xlsx": 5,
 }
@@ -398,6 +401,27 @@ LEGACY_OLE2_ERROR = "OLE2 compound file (legacy .doc / .xls or encrypted Office 
 
 # The fixed 8-byte signature every OLE2 compound file starts with.
 _OLE2_SIGNATURE = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+
+# ``unsupported`` error for a payload bound for the text extractor that
+# starts with one of ``_BINARY_SIGNATURES`` (#932): decoding it would only
+# index replacement characters. Decided by the bytes alone, like the OLE2
+# check.
+BINARY_AS_TEXT_ERROR = "binary payload labelled as text"
+
+# Fixed prefixes of binary formats senders mislabel as text: PDF, ZIP
+# (including OOXML; an empty archive starts with its end-of-central-
+# directory record), OLE2, PNG, JPEG and GIF. A prefix list only; no
+# sniffing beyond it.
+_BINARY_SIGNATURES = (
+    b"%PDF-",
+    b"PK\x03\x04",
+    b"PK\x05\x06",
+    _OLE2_SIGNATURE,
+    b"\x89PNG\r\n\x1a\n",
+    b"\xff\xd8\xff",
+    b"GIF87a",
+    b"GIF89a",
+)
 
 
 # Maps normalized MIME -> per-format extractor module name (under
@@ -515,6 +539,16 @@ def extract(
     else:
         module_name, dispatch_via = _resolve_extractor(content_type, filename)
 
+    # A stale ``text`` row refreshed from an occurrence whose own label
+    # selects another extractor: when the text guard below would reject
+    # the bytes, run that extractor instead, as a fresh extraction of this
+    # occurrence would (#932, review round 1). Otherwise the occurrence
+    # would cache the guard's ``unsupported`` and never run it.
+    if module_override == "text" and payload.startswith(_BINARY_SIGNATURES):
+        labelled, via = _resolve_extractor(content_type, filename)
+        if labelled is not None:
+            module_name, dispatch_via = labelled, via
+
     # Image types are gated by ``ocr_enabled`` because the only sensible
     # extractor is Tesseract. Disabling OCR globally should cleanly
     # downgrade them to ``unsupported`` rather than failing per-call.
@@ -544,6 +578,17 @@ def extract(
             extractor=None,
             text=None,
             error=LEGACY_OLE2_ERROR,
+        )
+
+    # A binary payload labelled as text (#932): the same constant-size
+    # prefix check, also decided by the bytes alone (including a
+    # ``module_override`` refresh) and counted by the aggregate.
+    if module_name == "text" and payload.startswith(_BINARY_SIGNATURES):
+        return ExtractionResult(
+            status=STATUS_UNSUPPORTED,
+            extractor=None,
+            text=None,
+            error=BINARY_AS_TEXT_ERROR,
         )
 
     extractor_fn = _safe_import(module_name)

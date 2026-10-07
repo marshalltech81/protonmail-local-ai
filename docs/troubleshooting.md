@@ -1116,13 +1116,12 @@ request is over budget (`prompt_over_budget`), for example:
 token limit hit: tool=ask_mailbox limits=evidence_budget outputs_cut=0 threads_dropped=1 passages_omitted=6 passages_truncated=1 prompt_tokens=2950 prompt_budget_tokens=3008 max_tokens=1024
 ```
 
-The line carries counts and settings only. Not every limit reaches
+The line carries counts and settings only. Each limit also reaches
 the caller: a cut reply carries a truncation notice, the evidence that
-`ask_mailbox` and `extract_from_emails` leave out is disclosed in their
-coverage or evidence note, and `prompt_over_budget` is an error, but a
-`summarize_thread` context trimmed by the window (`evidence_budget`
-below) is in this log line only. `limits` names which limits the call
-hit:
+`ask_mailbox`, `summarize_thread` and `extract_from_emails` leave out
+for the window is disclosed in their coverage or evidence note (#949),
+and `prompt_over_budget` is an error. `limits` names which limits the
+call hit:
 
 - `output_max_tokens`: the model stopped at `INFERENCE_MAX_TOKENS`, so
   the answer or summary was cut off (`outputs_cut` counts every cut
@@ -1293,7 +1292,9 @@ only, never filenames or text (`make logs`):
     `.xls` files are extracted with catdoc and xlrd (#935); a crashed,
     timed-out or over-limit run is `failed` with a fixed error type such
     as `ToolTimeoutError` or `ToolExitError` (see `docs/architecture.md`,
-    "Extractor dispatch"). `too_large` is over
+    "Extractor dispatch"). Binary files (PDF, ZIP, OLE2, PNG, JPEG,
+    GIF) sent as text are recorded with "binary payload labelled as
+    text" (#932). `too_large` is over
     `INDEXER_ATTACHMENT_MAX_BYTES`, and `ocr_disabled` is an image or
     scanned PDF skipped while `INDEXER_OCR_ENABLED=false` (re-extracted
     once OCR is turned on).
@@ -1372,8 +1373,13 @@ Some clients send a long non-ASCII attachment name as RFC 2047
 encoded-words (`=?utf-8?B?...?= =?utf-8?B?...?=`), which the standard
 library does not decode in a filename parameter. The indexer decodes
 them the same way as Subject (#924), so `search_attachments`,
-`get_message` and filename search show the sender's name. If the
-encoded-words do not decode (a malformed charset label), the indexer
+`get_message` and filename search show the sender's name. A charset
+label the codec rejects (unknown, `idna`, a NUL in the label) is
+decoded as UTF-8 with replacement characters, as in Subject (#942),
+and logged without the text: `header encoded-word charset could not be
+decoded (<ExceptionType>); decoded 1 word as UTF-8` (WARNING, rate
+limited, suppressed lines counted in the heartbeat). If
+the encoded-words still do not decode to valid text, the indexer
 keeps the filename as sent and logs, without the filename:
 `attachment filename encoded-words could not be decoded
 (<ExceptionType>); kept 1 filename as sent` (WARNING, under the same
