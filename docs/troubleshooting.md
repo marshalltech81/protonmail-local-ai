@@ -1340,6 +1340,46 @@ extractor reads (`.eml`) is not logged.
 The caps bound what crafted mail can cost the single indexing worker,
 so they are not configurable. Ordinary mail does not reach them.
 
+## ChatGPT says a tool call was blocked by OpenAI
+
+ChatGPT reports "This tool call was blocked by OpenAI because we
+couldn't determine the safety status of the request". This is a check
+on OpenAI's side, made before ChatGPT sends the call, and nothing in
+`.env`, the bearer token or the server changes the outcome. The check
+is intermittent, and it also blocks tools that declare the read-only
+safety hints (#919; background and sources in
+[Safety annotations](mcp-tools.md#safety-annotations)).
+
+1. Rule out a server-side failure. Look at the server log around the
+   time of the refusal:
+
+   ```bash
+   docker compose logs mcp-server --since 10m | grep -E 'tool=<tool name>|rejected request'
+   ```
+
+   A tool that ran logs a `tool=<name> outcome=...` line on
+   `mcp.timings` (see
+   [Reading a tool call's log line](#reading-a-tool-calls-log-line)),
+   and every tool except `list_folders` and `get_mailbox_status` also
+   logs a `tool=<name> {...} withheld=[...]` line when it starts. A
+   missing line shows only that the tool did not run, not by itself
+   that the request never arrived: a request refused for its token,
+   Host or Origin is logged as `rejected request: reason=<reason>`
+   instead (see
+   [MCP client gets 401 Unauthorized](#mcp-client-gets-401-unauthorized)),
+   and a line with `outcome=error` is a server failure whose cause is
+   on the WARNING or ERROR line before it. With neither, and ChatGPT
+   showing this exact message, the block happened in ChatGPT.
+2. Retry the identical call; it often succeeds on a later attempt.
+   There is no server-side fix.
+3. Approval settings are not a recommended fix. Setting the connector's
+   approvals in ChatGPT to allow all actions without asking is reported
+   to reduce the blocks, but it removes ChatGPT's per-call approval:
+   every tool call then runs without a prompt, including calls that
+   return mail to ChatGPT and the intelligence tools that send mail
+   excerpts to the configured inference provider. Keep approvals on
+   and retry instead.
+
 ## Claude Desktop doesn't see the tools
 
 1. Verify the MCP server is running: `docker compose ps`
