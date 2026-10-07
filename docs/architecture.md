@@ -1213,13 +1213,25 @@ counted against the expansion budget, so at the default
 64 MiB of XML (#1033). An over-budget document is recorded
 `unsupported` ("document exceeds a pre-open package budget"), not
 `failed`, since the same bytes trip the budget on every run (#1032; see
-*Permanent extractor failures* below). The budgets shipped with no DOCX
-version bump, so a document read in full before them kept its cached
-text; #1032 bumps it (`docx@6`) to refresh the `failed` rows version 5
-wrote for an over-budget package, which also re-runs every cached
+*Permanent extractor failures* below). The DOCX version is not bumped,
+neither by the budgets (#1036) nor by the mapping (#1032; PR #1068's
+bump to `docx@6` was reverted): a bump would re-run every cached
 document once through the walk after the open, which has no budget of
-its own yet (#1031), and records an over-budget document read in full
-before the budgets `unsupported`. `DocxRelationshipChainError` (#945)
+its own yet (#1031), and re-record an over-budget document that was
+read in full before the budgets as `unsupported`. So a document read in
+full before keeps its cached text. A package-budget row recorded
+`failed` before the mapping is not re-queued by the startup sweep, so
+it stays `failed` until the same bytes are processed again (a new
+occurrence, or the message reprocessed for another reason) more than
+7 days after it was recorded; that re-run reads the central directory
+once, never opens the document, and records the row `unsupported`
+under the mapping. A deliberate `docx` bump, once #1031 lands,
+converts whatever rows remain at the next start. A row stamped
+`docx@6` by a build between #1068 and its revert (#1075) is kept, since
+a newer row is never downgraded; rolling back to such a build treats
+the `docx@5` rows written since as stale and re-runs them through the
+unbudgeted walk at its next start, which is that build's behaviour.
+`DocxRelationshipChainError` (#945)
 still applies to a chain under these budgets.
 
 PowerPoint (#936): `application/vnd.openxmlformats-officedocument.presentationml.presentation`
@@ -1285,10 +1297,15 @@ raised the error (#928), so it is served only to occurrences that run
 that module on the bytes; an occurrence whose label runs another
 extractor has its own row and extracts. It is stamped with the
 extractor version (`pdf@5`), so a later version bump, for example one
-that raises a budget, refreshes it; the bumps that came with each
-mapping (`pdf@5`, `xlsx@6`, `pptx@3`, `docx@6`) refreshed the `failed`
-rows the previous versions wrote, since the startup sweep re-runs only
-stale rows, never aged `failed` ones. Each logs a rate-limited WARNING
+that raises a budget, refreshes it; the bumps that came with the
+`pdf`, `xlsx` and `pptx` mappings (`pdf@5`, `xlsx@6`, `pptx@3`)
+refreshed the `failed` rows the previous versions wrote, since the
+startup sweep re-runs only stale rows, never aged `failed` ones. `docx`
+was deliberately not bumped (its walk is unbudgeted, #1031; see the
+DOCX budget paragraph above), so a `.docx` / `.dotx` package-budget row
+recorded `failed` before the mapping stays `failed` until the same
+bytes are processed again more than 7 days on, or until a `docx` bump
+follows #1031. Each logs a rate-limited WARNING
 (`extractor <module> declined ...; recorded unsupported, not retried`).
 A pypdf limit hit inside one page's text extraction (a `/ToUnicode`
 map over its size limit, for example) is not one of these: like any

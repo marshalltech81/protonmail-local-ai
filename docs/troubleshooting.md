@@ -1376,7 +1376,16 @@ only, never filenames or text (`make logs`):
   XML would decompress past 32 MiB, or with more than 20,000 members
   or 8 MiB of relationship parts; a `.docx` or `.dotx` past 32 MiB,
   5,000 members or 4 MiB of relationship parts). The file stays
-  searchable by filename and type only.
+  searchable by filename and type only. A `.docx` or `.dotx` over a
+  budget that was recorded `failed` (`DocxPackageBudgetError`) before
+  #1032 is not re-queued at startup, because the `docx` extractor
+  version was deliberately not bumped while its walk after the open is
+  unbudgeted (#1031). It stays `failed` until the same bytes are
+  processed again (a new occurrence, or the message reprocessed for
+  another reason) more than 7 days after it was recorded; that re-run
+  reads the central directory once, never opens the document, and
+  records it `unsupported`. A `docx` bump after #1031 converts the
+  rest at the next start.
 - `PDF OCR fallback failed: <ExceptionType>` (WARNING): OCR of a PDF's
   pages without a text layer raised (a Tesseract error or timeout). A
   PDF with enough digital text keeps it and loses the scanned pages;

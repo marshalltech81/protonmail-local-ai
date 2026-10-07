@@ -3404,8 +3404,64 @@ class TestRequeueStaleExtractions:
 
         assert "HEADER_MARK" in self._attachment_chunk_text(db)
         row = db._conn.execute("SELECT extractor FROM attachment_extractions").fetchone()
-        assert row["extractor"] == "docx@6"
+        assert row["extractor"] == "docx@5"
         assert main._requeue_stale_extractions(db, queue) == 0
+
+    @pytest.mark.parametrize(
+        ("status", "error"),
+        [("success", None), ("failed", "DocxPackageBudgetError")],
+    )
+    def test_docx_rows_from_before_the_budget_mapping_are_not_requeued(
+        self, tmp_path, monkeypatch, status, error
+    ):
+        """#1036 shipped the DOCX package budgets with no ``docx`` bump and
+        the #1032 permanent-failure mapping keeps it (the walk after the
+        open is unbudgeted, #1031): a ``docx@5`` row, whether a document
+        read in full or an over-budget one recorded ``failed`` before the
+        mapping, is not re-queued by the startup sweep."""
+        maildir = tmp_path / "maildir"
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        path = maildir / "INBOX" / "cur" / "contract.eml"
+        self._write_docx_eml(path, "contract@example.com")
+        db = Database(tmp_path / "mail.db")
+        queue = _make_queue(db)
+        queue.enqueue(str(path), REASON_INITIAL_SCAN)
+        self._drain(db, queue)
+        with db.transaction():
+            db._conn.execute(
+                "UPDATE attachment_extractions SET extractor = 'docx@5', "
+                "extraction_status = ?, extraction_error = ?",
+                (status, error),
+            )
+
+        assert main._requeue_stale_extractions(db, queue) == 0
+        row = db._conn.execute(
+            "SELECT extractor, extraction_status FROM attachment_extractions"
+        ).fetchone()
+        assert (row["extractor"], row["extraction_status"]) == ("docx@5", status)
+
+    def test_docx_rows_stamped_by_the_reverted_bump_are_kept(self, tmp_path, monkeypatch):
+        """PR #1068 shipped ``docx`` 6 and PR #1075 reverted it to 5: a
+        ``docx@6`` row a build between the two wrote is newer than the
+        current version, so the sweep keeps it rather than re-running it
+        (pins the rollback note beside ``EXTRACTOR_VERSIONS``)."""
+        from src.extractors import EXTRACTOR_VERSIONS
+
+        assert EXTRACTOR_VERSIONS["docx"] == 5
+        maildir = tmp_path / "maildir"
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        path = maildir / "INBOX" / "cur" / "contract.eml"
+        self._write_docx_eml(path, "contract@example.com")
+        db = Database(tmp_path / "mail.db")
+        queue = _make_queue(db)
+        queue.enqueue(str(path), REASON_INITIAL_SCAN)
+        self._drain(db, queue)
+        with db.transaction():
+            db._conn.execute("UPDATE attachment_extractions SET extractor = 'docx@6'")
+
+        assert main._requeue_stale_extractions(db, queue) == 0
+        row = db._conn.execute("SELECT extractor FROM attachment_extractions").fetchone()
+        assert row["extractor"] == "docx@6"
 
     def test_alias_messages_using_the_stale_row_are_requeued_and_rebuilt(
         self, tmp_path, monkeypatch
@@ -3566,7 +3622,7 @@ class TestRequeueStaleExtractions:
                 attachment_indexing,
                 "extract_attachment",
                 lambda **_kw: ExtractionResult(
-                    status=STATUS_EMPTY, extractor="docx@6", text=None, error=None
+                    status=STATUS_EMPTY, extractor="docx@5", text=None, error=None
                 ),
             )
             main._drain_queue_batched(
