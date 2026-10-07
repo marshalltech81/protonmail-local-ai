@@ -49,6 +49,9 @@ log = logging.getLogger("indexer.parser")
 # * ``container_serialize``: a container the generator refuses;
 # * ``body_parts``: text parts past ``MAX_BODY_TEXT_PARTS`` are left out
 #   of the body;
+# * ``mime_parts``: parts past the ``MAX_WALKED_PARTS`` the body-and-
+#   attachment walk queues are left out (their text and attachments);
+#   counted once per message (#996);
 # * ``address_header``: an address header over
 #   ``_MAX_ADDRESS_HEADER_CHARS`` loses all its recipients;
 # * ``address_element`` / ``address_length``: one address-list element
@@ -66,6 +69,7 @@ PARSE_CAPS: tuple[str, ...] = (
     "decoded_bytes",
     "container_serialize",
     "body_parts",
+    "mime_parts",
     "address_header",
     "address_element",
     "address_length",
@@ -910,6 +914,15 @@ def _decode_transport_form(
 # a handful; parts past the cap are left out of the body.
 MAX_BODY_TEXT_PARTS = 200
 
+# MIME parts one message's body-and-attachment walk queues and visits,
+# the root and the parts inside attachments included (#996). Every part
+# costs a stack entry and a fixed classification (and a body node when
+# it is outside attachments) on top of the stdlib parse, so a crafted
+# message of 700,000 empty parts (4.9 MB) spent about 2.3 s here (plain
+# timing); at this cap the walk takes about 30 ms. Real mail has tens of
+# parts; a container's children past the cap are never queued.
+MAX_WALKED_PARTS = 10_000
+
 
 @dataclass
 class _BodyNode:
@@ -1023,6 +1036,10 @@ def _extract_body_and_attachments(
     # its content, so none of it is body text.
     budget = _SerializationBudget()
     stack: list[tuple[email.message.Message, bool, int, int, bool]] = [(msg, False, 0, -1, False)]
+    # Parts ever queued, the root included: at most MAX_WALKED_PARTS, so
+    # neither the stack nor the walk grows with a crafted part count.
+    queued = 1
+    cut = False
     while stack:
         part, in_attachment, decode_depth, parent, no_body = stack.pop()
         ct = part.get_content_type()
@@ -1072,6 +1089,11 @@ def _extract_body_and_attachments(
             else:
                 children, depth = part.get_payload(), decode_depth
             if isinstance(children, list):
+                room = MAX_WALKED_PARTS - queued
+                if len(children) > room:
+                    cut = True
+                    children = children[:room]
+                queued += len(children)
                 index = -1 if node is None else len(nodes) - 1
                 encoding = str(part.get("Content-Transfer-Encoding", "")).strip().lower()
                 skip = no_body or (
@@ -1108,6 +1130,8 @@ def _extract_body_and_attachments(
         node.has_text = bool(node.text)
         node.has_plain = node.has_text and not is_html
 
+    if cut:
+        caps["mime_parts"] += 1
     body = _assemble_body(nodes)
     if capped:
         lost = _capped_parts_lost(nodes, capped)

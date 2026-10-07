@@ -3754,6 +3754,21 @@ _CAP_SHAPES = {
         "body_parts=5",
         lambda msg: msg.body_text.split("\n\n") == [f"S{i}" for i in range(200)],
     ),
+    # #996: the walk stops at MAX_WALKED_PARTS (the root counts as one),
+    # so the attachment after the cap is never recorded.
+    "mime_parts": (
+        _CAP_HEAD
+        + b'Content-Type: multipart/mixed; boundary="b"\r\n\r\n'
+        + b"--b\r\nContent-Type: text/plain\r\n\r\nS0\r\n"
+        + b"--b\r\nContent-Type: application/x-empty\r\n\r\n\r\n" * 9_998
+        + b"--b\r\nContent-Type: text/plain\r\n"
+        + _TXT_FILENAME
+        + b"\r\nSYNTHETIC_TEXT_MARKER\r\n"
+        + b"--b--\r\n",
+        False,
+        "mime_parts=1",
+        lambda msg: msg.body_text == "S0" and msg.attachments == [],
+    ),
     "address_header": (
         _addresses(b"bob@example.test, " + b"SYNTHETIC_HEADER_MARKER@example.test, " * 7_000),
         False,
@@ -4123,3 +4138,154 @@ def test_every_parse_cap_is_counted_at_a_site_and_pinned_by_a_shape():
     }
     assert len(set(PARSE_CAPS)) == len(PARSE_CAPS)
     assert counted == set(PARSE_CAPS) == shaped
+
+
+# #996: ordinary multipart shapes, pinned on main before the walk was
+# capped: the cap must not change their body or attachments.
+_PDF = b'Content-Type: application/pdf\r\nContent-Disposition: attachment; filename="a.pdf"\r\n'
+_PNG = (
+    b"Content-Type: image/png\r\nContent-ID: <img1>\r\n"
+    b'Content-Disposition: inline; filename="i.png"\r\n'
+)
+_ORDINARY_SHAPES = {
+    "alternative": (
+        b'Content-Type: multipart/alternative; boundary="a"\r\n\r\n'
+        b"--a\r\nContent-Type: text/plain\r\n\r\nPLAIN\r\n"
+        b"--a\r\nContent-Type: text/html\r\n\r\n<p>HTML</p>\r\n--a--\r\n",
+        "PLAIN",
+        [],
+    ),
+    "related": (
+        b'Content-Type: multipart/related; boundary="r"\r\n\r\n'
+        b"--r\r\nContent-Type: text/html\r\n\r\n<p>ROOT</p>\r\n"
+        b"--r\r\n" + _PNG + b"\r\nPNGDATA\r\n--r--\r\n",
+        "ROOT",
+        [("i.png", "image/png", 7)],
+    ),
+    "mixed_with_attachments": (
+        b'Content-Type: multipart/mixed; boundary="m"\r\n\r\n'
+        b"--m\r\nContent-Type: text/plain\r\n\r\nFIRST\r\n"
+        b"--m\r\n" + _PDF + b"\r\nPDFDATA\r\n"
+        b"--m\r\nContent-Type: text/plain\r\n\r\nSECOND\r\n--m--\r\n",
+        "FIRST\n\nSECOND",
+        [("a.pdf", "application/pdf", 7)],
+    ),
+    # Alternative holding a related, an attachment, and an attached
+    # email with its own attachment (recorded, its text not the body).
+    "nested_containers": (
+        b'Content-Type: multipart/mixed; boundary="m"\r\n\r\n'
+        b'--m\r\nContent-Type: multipart/alternative; boundary="a"\r\n\r\n'
+        b"--a\r\nContent-Type: text/plain\r\n\r\nALT_PLAIN\r\n"
+        b'--a\r\nContent-Type: multipart/related; boundary="r"\r\n\r\n'
+        b"--r\r\nContent-Type: text/html\r\n\r\n<p>ALT_HTML</p>\r\n"
+        b"--r\r\n" + _PNG + b"\r\nPNGDATA\r\n--r--\r\n"
+        b"--a--\r\n"
+        b"--m\r\n" + _PDF + b"\r\nPDFDATA\r\n"
+        b"--m\r\nContent-Type: message/rfc822\r\n"
+        b'Content-Disposition: attachment; filename="f.eml"\r\n\r\n'
+        b'From: a@example.test\r\nContent-Type: multipart/mixed; boundary="i"\r\n\r\n'
+        b"--i\r\nContent-Type: text/plain\r\n\r\nINNER\r\n"
+        b"--i\r\n" + _PDF + b"\r\nINNERPDF\r\n--i--\r\n"
+        b"--m--\r\n",
+        "ALT_PLAIN",
+        [
+            ("i.png", "image/png", 7),
+            ("a.pdf", "application/pdf", 7),
+            ("f.eml", "message/rfc822", -1),  # its serialization's size
+            ("a.pdf", "application/pdf", 8),
+        ],
+    ),
+}
+
+
+@pytest.mark.parametrize("shape", sorted(_ORDINARY_SHAPES))
+def test_ordinary_multipart_shape_parse_result_is_pinned(tmp_path, caplog, shape):
+    caplog.set_level("INFO")
+    raw, body, attachments = _ORDINARY_SHAPES[shape]
+    folder = tmp_path / "INBOX" / "cur"
+    folder.mkdir(parents=True)
+    path = folder / "ordinary.eml"
+    path.write_bytes(_CAP_HEAD + raw)
+    msg = parse_email(path)
+    assert msg is not None
+    assert msg.body_text == body
+    got = [(a.filename, a.content_type, a.size) for a in msg.attachments]
+    assert [g if s >= 0 else (*g[:2], -1) for g, (_, _, s) in zip(got, attachments)] == attachments
+    assert len(got) == len(attachments)
+    assert "parser work caps" not in caplog.text
+
+
+def test_message_at_the_walk_cap_is_not_cut(tmp_path, caplog):
+    """#996: exactly MAX_WALKED_PARTS parts (the root included) are all
+    walked: the attachment that is the last of them is kept."""
+    from src.parser import MAX_WALKED_PARTS
+
+    caplog.set_level("INFO")
+    raw = (
+        _CAP_HEAD
+        + b'Content-Type: multipart/mixed; boundary="b"\r\n\r\n'
+        + b"--b\r\nContent-Type: application/x-empty\r\n\r\n\r\n" * (MAX_WALKED_PARTS - 2)
+        + b"--b\r\n"
+        + _PDF
+        + b"\r\nPDFDATA\r\n--b--\r\n"
+    )
+    folder = tmp_path / "INBOX" / "cur"
+    folder.mkdir(parents=True)
+    (folder / "edge.eml").write_bytes(raw)
+    msg = parse_email(folder / "edge.eml")
+    assert msg is not None
+    assert [a.filename for a in msg.attachments] == ["a.pdf"]
+    assert "parser work caps" not in caplog.text
+
+
+def test_many_part_message_walk_is_bounded(tmp_path, monkeypatch, caplog):
+    """#996 (Codex security review on PR #444): every MIME part became a
+    body node before any cap applied, so a crafted message of 700,000
+    empty parts (4.9 MB) took seconds of the single ingestion worker
+    on top of the stdlib parse. The walk now stops at MAX_WALKED_PARTS:
+    assert the parts visited, not only the time, and the WARNING."""
+    from src import parser
+
+    caplog.set_level("INFO")
+    visited = 0
+    real = parser._part_filename
+
+    def counting(part):
+        nonlocal visited
+        visited += 1
+        return real(part)
+
+    monkeypatch.setattr(parser, "_part_filename", counting)
+    raw = (
+        _CAP_HEAD
+        + b'Content-Type: multipart/mixed; boundary="b"\r\n\r\n'
+        + b"--b\r\nContent-Type: text/plain\r\n\r\nSYNTHETIC_TEXT_MARKER\r\n"
+        + b"--b\r\n\r\n" * 200_000
+        + b"--b--\r\n"
+    )
+    folder = tmp_path / "INBOX" / "cur"
+    folder.mkdir(parents=True)
+    path = folder / "many.eml"
+    path.write_bytes(raw)
+    msg_tree = email.message_from_bytes(raw)
+    start = time.perf_counter()
+    body, attachments = parser._extract_body_and_attachments(msg_tree)
+    elapsed = time.perf_counter() - start
+    assert visited == parser.MAX_WALKED_PARTS
+    assert body == "SYNTHETIC_TEXT_MARKER" and attachments == []
+    assert elapsed < 5
+    caplog.clear()
+    visited = 0
+    msg = parse_email(path)
+    assert msg is not None and visited == parser.MAX_WALKED_PARTS
+    # The empty parts are text/plain by default: those walked past the
+    # 200-text-part cap (all but the root and the first 200) count too.
+    lines = [r for r in caplog.records if "parser work caps" in r.getMessage()]
+    assert [(r.levelname, r.getMessage()) for r in lines] == [
+        (
+            "WARNING",
+            f"parser work caps dropped content from {path}: "
+            f"body_parts={parser.MAX_WALKED_PARTS - 201},mime_parts=1",
+        )
+    ]
+    assert "SYNTHETIC_TEXT_MARKER" not in caplog.text
