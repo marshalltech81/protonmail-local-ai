@@ -81,9 +81,14 @@ jobs:
       # export a cache), importing and exporting the cache under its own
       # scope, so the compose build that follows, on the same builder,
       # finds the stage built and Maven does not run unless
-      # indexer/java/pom.xml or a layer before it changed. Only the layer
-      # cache survives a run: the BuildKit cache mount that keeps the
-      # Maven repository across local rebuilds lives in the builder,
+      # indexer/java/pom.xml or a layer before it changed. The step
+      # loads the stage as an image rather than building cache-only:
+      # restored layers are lazy references into the cache backend that
+      # only the restoring build can fetch, and a later build on the
+      # builder silently rebuilds a stage it cannot fetch (seen in CI,
+      # reproduced locally); loading forces every layer down. Only the
+      # layer cache survives a run: the BuildKit cache mount that keeps
+      # the Maven repository across local rebuilds lives in the builder,
       # which every run creates anew.
       #
       # A scheduled or manual run restores nothing and builds the stage
@@ -107,8 +112,8 @@ jobs:
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: indexer
-          target: ppt-runtime
-          outputs: type=cacheonly
+          target: ppt-builder
+          load: true
           cache-from: ${{ (github.event_name == 'pull_request' || github.event_name == 'push') && 'type=gha,scope=indexer-ppt' || '' }}
           cache-to: type=gha,mode=max,scope=indexer-ppt,ignore-error=true
 
