@@ -211,10 +211,10 @@ class Attachment:
     object goes out of scope and the bytes are GC'd. Callers that only
     need metadata can ignore ``payload``.
 
-    ``content_hash`` is the SHA-256 of ``payload`` and acts as the
-    deduplication key in ``attachment_extractions`` — a forwarded PDF
-    is OCR'd / parsed once per content, regardless of how many emails
-    carry it.
+    ``content_hash`` is the SHA-256 of ``payload`` and, with the
+    extractor module the label selects, the deduplication key in
+    ``attachment_extractions`` — a forwarded PDF is OCR'd / parsed once
+    per content, regardless of how many emails carry it.
     """
 
     filename: str

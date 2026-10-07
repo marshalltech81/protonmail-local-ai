@@ -36,8 +36,8 @@ then fails (a malformed setting, a missing token, a refused index or a
 failed migration):
 
 ```text
-indexer     ... Startup identity: service=indexer commit=1a2b3c4 boot=5f0e9d8c7b6a schema_code=0 schema_stored=0 config=0123456789ab
-mcp-server  ... Startup identity: service=mcp-server commit=1a2b3c4 boot=0a1b2c3d4e5f schema_stored=0 config=ba9876543210
+indexer     ... Startup identity: service=indexer commit=1a2b3c4 boot=5f0e9d8c7b6a schema_code=1 schema_stored=1 config=0123456789ab
+mcp-server  ... Startup identity: service=mcp-server commit=1a2b3c4 boot=0a1b2c3d4e5f schema_stored=1 config=ba9876543210
 mbsync      >>> Startup identity: service=mbsync commit=1a2b3c4 boot=9e8d7c6b5a4f config=c0ffee123456
 ```
 
@@ -762,6 +762,20 @@ make up
 Maildir and Bridge state are untouched. The indexer re-parses and
 re-embeds every message, so the rebuild takes as long as an initial
 index and calls the embedding provider for the whole mailbox.
+
+## Indexer stops during a schema migration
+
+An index from an older release is migrated at startup: the log shows
+`Migrating database at ...: vN -> vM`, then `Applying migration ...`
+and `Database ready at ... (schema vM, applied migrations: [...])`.
+Each migration runs in one transaction, so if the indexer stops part
+way (killed, disk full) the index stays at the last version that
+finished, and the next `make up` retries the rest; nothing needs to be
+deleted. If a retry keeps failing with the same error, rebuild the
+index as in the section above. v1 (#928) keys the attachment
+extraction cache by extractor module; after it, an attachment whose
+label selects a different extractor from the one that first read its
+bytes is re-extracted once, the next time its message is reprocessed.
 
 ## Embedder identity mismatch
 

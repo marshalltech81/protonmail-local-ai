@@ -1014,8 +1014,8 @@ as message bodies. Two extra tables sit alongside `message_chunks`:
 
 | Table | Keyed by | Purpose |
 |---|---|---|
-| `attachments` | attachment_occurrence_id | Per-occurrence row capturing filename + MIME + size as it appeared on a specific email. The occurrence id includes the message, payload hash, filename, and attachment slot so duplicate same-payload files in one email are still represented. |
-| `attachment_extractions` | attachment_id (= sha256 of payload) | Per-content-hash cache of extracted text + status. The expensive work (Tesseract OCR, pypdf parse, DOCX walk) runs at most once per unique payload, including within one indexing batch, where results not yet committed are shared by content hash. Non-success rows are also honored: `empty` short-circuits unconditionally; `too_large` short-circuits while the payload still exceeds `INDEXER_ATTACHMENT_MAX_BYTES`, and is re-extracted once the operator raises the cap far enough for it to fit (#693); `unsupported` short-circuits while it also holds for the occurrence at hand (an "OCR disabled" row, for an occurrence that needs OCR — an image, or a PDF whose row the PDF extractor wrote because it found no digital text layer — until OCR is turned on; an "OLE2 compound file" row also for an occurrence that selects the DOCX, XLSX, PPTX or text extractor (#694, #932, #936), and re-run for one labelled `.doc` / `.xls` / `.ppt`, which selects a legacy extractor (#935, #957); a "binary payload labelled as text" row also for an occurrence that selects the text extractor (#932); a "not an OLE2 compound file" row also for an occurrence that selects the `.ppt` extractor (#957); an encrypted-PDF or pypdf-limit row also for an occurrence that selects the PDF extractor, and an eager-part-budget row for one that selects the XLSX extractor or is labelled `.xls` (#931); any other until the occurrence's MIME type or filename selects an extractor, since the same bytes can arrive as `.bin` first and `.txt` later); `failed` short-circuits within a 7-day retry window so a chronic failure stops re-running on every reappearance, but a real fix landed via dependency upgrade can pick the payload up later. The `extractor` column carries a version (`docx@5`); a row written by an older version of a fixed extractor (`extractors.EXTRACTOR_VERSIONS`) is refreshed by re-running that extractor from whichever occurrence of the bytes arrives (whatever its own filename or MIME type), and the indexer re-queues every message carrying those bytes once at startup so their chunks are rebuilt, except dead-lettered messages, which keep their stale chunks until `make requeue-dead` rescues them. Rows from a newer version (after a rollback) are kept. A row is deleted with the last `attachments` row that references it (see *Cascade on message removal*). A stale row an OCR extractor wrote (`image-ocr`, `pdf-ocr`) is kept and served while `INDEXER_OCR_ENABLED=false`, since a refresh could only replace its text with "OCR disabled"; it is refreshed once OCR is on. Likewise, once OCR is on, the startup sweep re-queues each message whose occurrence of bytes cached "OCR disabled" would now be OCR'd; an occurrence that selects no extractor (`.bin`) is not re-queued, since its reprocess would serve the same row. The sweep also re-queues, whatever the OCR setting, each message whose occurrence of bytes cached as "no extractor" now selects one, as when a release starts routing an extension such as `.heic` (#691), `.dotx` (#937), `.pptx` (#936) or `.ppt` (#957), and each message whose occurrence of bytes cached "OLE2 compound file" is labelled `.doc` / `.xls` / `.ppt` (#935, #957). Likewise, after `INDEXER_ATTACHMENT_MAX_BYTES` is raised, it re-queues every message carrying bytes cached `too_large` whose size (`attachments.size_bytes`) now fits; the re-run rewrites the row, so each is re-queued once, and bytes still over the cap are never re-queued (#693). |
+| `attachments` | attachment_occurrence_id | Per-occurrence row capturing filename + MIME + size as it appeared on a specific email. The occurrence id includes the message, payload hash, filename, and attachment slot so duplicate same-payload files in one email are still represented. `extractor_module` names the extraction row the occurrence uses (see below; '' when its label selects no extractor). When one message carries the same bytes under labels that run different extractors, the texts share the message's chunk slice for the payload, and every text's chunks are kept. A text hit in `search_attachments` is attributed to an occurrence whose row is a success; with two such occurrences in one message, to the first by occurrence id. |
+| `attachment_extractions` | (attachment_id, extractor_module) | Cache of extracted text + status, keyed by the payload's sha256 and the extractor module the occurrence's MIME type and filename run on those bytes, after the container check (OOXML bytes labelled `.doc` run `docx` and share the `.docx` row; '' when the label selects no extractor) (#928). Dispatch from a label and the bytes is deterministic, so every occurrence with the same key would extract the same result, and an occurrence is served only what an extraction under its own label gives, whatever labels of the same bytes arrived before it: an OLE2 `.doc` first seen as `.txt`, or a PowerPoint file first sent as `.doc` (#986), no longer decides the later occurrences' result. The same bytes under two labels that run different extractors store two rows; the cost is one extraction per module the bytes arrive under and a second copy of the text, which is negligible next to the mail itself. The expensive work (Tesseract OCR, pypdf parse, DOCX walk) runs at most once per payload and module, including within one indexing batch, where results not yet committed are shared by the same key. Non-success rows are also honored: `empty` short-circuits unconditionally; `too_large` short-circuits while the payload still exceeds `INDEXER_ATTACHMENT_MAX_BYTES`, and is re-extracted once the operator raises the cap far enough for it to fit (#693); `unsupported` short-circuits while it holds: an "OCR disabled" row until OCR is turned on; an "OLE2 compound file" row (an OLE2 payload under an OOXML label, #694, #936), a "binary payload labelled as text" row (#932), a "not an OLE2 compound file" row under the `ppt` module (#957) and a "no extractor" row for good, since the label and the bytes decide them; an encrypted-PDF or pypdf-limit row under `pdf` and an eager-part-budget row under `xlsx` for good too, since that module would decline the same bytes again (#931); any other (an extractor not importable in the image) only under the '' module; `failed` short-circuits within a 7-day retry window so a chronic failure stops re-running on every reappearance, but a real fix landed via dependency upgrade can pick the payload up later. The `extractor` column carries a version (`docx@5`); a row written by an older version of a fixed extractor (`extractors.EXTRACTOR_VERSIONS`) is re-extracted by the next occurrence that uses it, and the indexer re-queues every message with an occurrence using it once at startup so their chunks are rebuilt, except dead-lettered messages, which keep their stale chunks until `make requeue-dead` rescues them. Rows from a newer version (after a rollback) are kept. A row is deleted with the last `attachments` row that uses it (see *Cascade on message removal*). A stale row an OCR extractor wrote (`image-ocr`, `pdf-ocr`) is kept and served while `INDEXER_OCR_ENABLED=false`, since a refresh could only replace its text with "OCR disabled"; it is refreshed once OCR is on. Likewise, once OCR is on, the startup sweep re-queues each message with an occurrence using an "OCR disabled" row. The sweep also re-queues, whatever the OCR setting, each message whose occurrence uses a "no extractor" or "OLE2 compound file" row but whose label now selects another module, as when a release starts routing an extension such as `.heic` (#691), `.dotx` (#937), `.pptx` (#936) or `.ppt` (#957); the reprocess writes the occurrence's own row and points the occurrence at it, so each is re-queued once. Likewise, after `INDEXER_ATTACHMENT_MAX_BYTES` is raised, it re-queues every message with an occurrence using a `too_large` row whose size (`attachments.size_bytes`) now fits; the re-run rewrites the row, so each is re-queued once, and bytes still over the cap are never re-queued (#693). Schema v1 introduced the key; see *Schema versions*. |
 
 Per-occurrence chunks land in `message_chunks` with the
 `attachment_id` column populated and `kind` set to `attachment`. They embed exactly like body chunks
@@ -1056,12 +1056,12 @@ selects an OOXML extractor or none (for example a password-protected OOXML packa
 labelled `.docx` or `.pptx`) is recorded `unsupported` ("OLE2
 compound file") without running anything, since no OOXML parser (DOCX,
 XLSX, PPTX) can read it; a `failed` row would be retried every 7 days.
-That row is served for later occurrences that select the DOCX, XLSX,
-PPTX or text extractor or none, and re-run for one labelled `.doc` /
-`.xls` / `.ppt`; the startup sweep re-queues the messages carrying such
-an occurrence once. A stale DOCX / XLSX / PPTX row refreshed from a
-`.doc` / `.xls` / `.ppt` occurrence runs the legacy extractor its label
-selects.
+That row is the OOXML module's: an occurrence labelled `.doc` /
+`.xls` / `.ppt` selects the legacy extractor and has its own row
+(#928). A
+row v0 wrote for such a payload carried no extractor and was
+migrated under the '' module, so the startup sweep re-queues once
+each message whose occurrence of it now selects a module.
 
 - **`.doc`** text comes from `catdoc` (Debian's `catdoc` package in the
   indexer image), run with `-d utf-8 -w` (UTF-8 output whatever the
@@ -1137,11 +1137,10 @@ signatures (`%PDF-`, `PK\x03\x04`, `PK\x05\x06` (an empty ZIP),
 `89 50 4E 47 0D 0A 1A 0A`, `FF D8 FF`, `GIF87a` / `GIF89a`), the
 dispatcher records it `unsupported` ("binary payload labelled as text")
 without decoding it (#932). Only those fixed prefixes are checked; the
-bytes decide, and the row is served for later occurrences that select
-the text extractor or none. An occurrence labelled with the real type
-(`.pdf`, an image) still runs that type's extractor, including when it
-refreshes a stale `text` row. A binary file labelled only as text is
-therefore not extracted (#969).
+bytes decide, and the row is the text module's. An occurrence
+labelled with the real type (`.pdf`, an image) runs that type's
+extractor and has its own row (#928). A binary file labelled only as
+text is therefore not extracted (#969).
 
 Word templates: the template MIME type
 (`application/vnd.openxmlformats-officedocument.wordprocessingml.template`)
@@ -1197,12 +1196,10 @@ structural limits while it is opened or its pages are listed
 structure exceeds pypdf limits"),
 and a workbook over the XLSX eager-part budget below ("workbook exceeds
 the eager-part budget"). Each is matched by exact exception class;
-anything else stays `failed`. The row is served to later occurrences
-that select the same extractor (for the budget, also one labelled
-`.xls`, which routes these ZIP bytes to XLSX) or none; an occurrence
-whose label selects another extractor re-runs extraction, since the
-exception only shows the bytes fail in the one that raised it. It is
-stamped with the
+anything else stays `failed`. The row is keyed by the module that
+raised the error (#928), so it is served only to occurrences that run
+that module on the bytes; an occurrence whose label runs another
+extractor has its own row and extracts. It is stamped with the
 extractor version (`pdf@5`), so a later version bump, for example one
 that raises a budget, refreshes it. Each logs a rate-limited WARNING
 (`extractor <module> declined ...; recorded unsupported, not retried`).
@@ -1320,11 +1317,13 @@ fails as `PptxRelationshipChainError` rather than as host pressure.
 When a message is reaped, `_delete_attachments_for_message` drops its
 `attachments` rows and FTS shadows; the `_delete_chunks_for_message`
 cascade also drops the message's attachment chunks (they share the
-`claimant_id` key). In the same transaction it deletes the cached
-`attachment_extractions` row of each payload no remaining `attachments`
-row references, so a payload's extracted text does not outlive every
-message that carried it (#562). A payload another message still carries
-keeps its row. The cost is the cache for a re-arrival: the same bytes
+`claimant_id` key). In the same transaction it deletes each cached
+`attachment_extractions` row of the message's payloads that no remaining
+`attachments` row uses (same payload and `extractor_module`), so a
+payload's extracted text does not outlive every message that carried it
+(#562, #928). A row another message's occurrence still uses is kept.
+When a reprocess points an occurrence at another module's row, the row
+it left is purged the same way if nothing else uses it. The cost is the cache for a re-arrival: the same bytes
 arriving after their last carrier was reaped are extracted again. The
 check is one indexed statement per payload the message carried
 (`idx_attachments_attachment_id` and the extraction primary key), so
@@ -1442,8 +1441,24 @@ run once against `mail.db`:
 ```sql
 DELETE FROM attachment_extractions WHERE NOT EXISTS (
   SELECT 1 FROM attachments a
-  WHERE a.attachment_id = attachment_extractions.attachment_id);
+  WHERE a.attachment_id = attachment_extractions.attachment_id
+    AND a.extractor_module = attachment_extractions.extractor_module);
 ```
+
+## Schema versions
+
+The indexer stamps the schema version in `schema_version` (and
+`PRAGMA application_id`). A fresh install creates the current schema
+directly; an existing index runs the forward migrations in
+`indexer/src/migrations/` at startup, each in its own transaction, so a
+failure leaves the last applied version stamped and the next start
+retries it. A version above the code's, or a missing migration file,
+stops startup (`docs/troubleshooting.md`).
+
+| Version | Migration | Change |
+|---|---|---|
+| 0 | (initial schema) | First deployed schema (2026-10-03). |
+| 1 | `0001_extraction_cache_per_module.sql` | `attachment_extractions` keyed by (content hash, extractor module); `attachments.extractor_module` (#928). Each v0 row keeps its result and stamp and is keyed by its stamp's module (`docx@5` -> `docx`, `pdf-ocr@4` -> `pdf`), or '' when it has no stamp (`unsupported`, `too_large`); each occurrence is pointed at its payload's row, as before. No `EXTRACTOR_VERSIONS` bump comes with it, so nothing is re-extracted for the re-keying alone. An occurrence whose label selects another module than its row's moves to its own row the next time its message is reprocessed. |
 
 ## Deletion Reconciliation (mirror by default)
 

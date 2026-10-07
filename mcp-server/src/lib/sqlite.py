@@ -585,9 +585,10 @@ class AttachmentResult:
     and each is its own row in the ``attachments`` table.
 
     ``extraction_status`` and ``text_snippet`` come from
-    ``attachment_extractions`` (keyed by content hash). ``extraction_status``
-    is ``None`` and ``text_snippet`` empty when the index has no extraction
-    row for the attachment yet — distinct from a failed extraction, which
+    ``attachment_extractions``: the row keyed by the content hash and the
+    extractor module the occurrence's ``extractor_module`` names (#928).
+    ``extraction_status`` is ``None`` and ``text_snippet`` empty when the
+    index has no extraction row for the occurrence yet — distinct from a failed extraction, which
     has a non-NULL status.
     """
 
@@ -2034,6 +2035,7 @@ class Database:
             "JOIN attachments a ON attachments_fts.rowid = a.fts_rowid "
             "JOIN threads t ON a.thread_id = t.thread_id "
             "LEFT JOIN attachment_extractions e ON e.attachment_id = a.attachment_id "
+            "AND e.extractor_module = a.extractor_module "
             "LEFT JOIN messages m ON m.claimant_id = a.claimant_id "
             "WHERE " + " AND ".join(where) + " "  # nosec B608
             "ORDER BY score LIMIT ?"
@@ -2064,8 +2066,12 @@ class Database:
         deterministic (see ``_chunk_vector_search`` for the full
         rationale). The anchor is chosen among the occurrences that pass
         ``content_type``, the one filter that can differ between them
-        (thread and extraction are shared by the pair): choosing first
+        (the thread is shared by the pair): choosing first
         dropped the match when only another occurrence passed (#309).
+        Only occurrences whose extraction row (by their extractor module)
+        is a success can have produced text, so the anchor is chosen
+        among those (#928): the same bytes as ``.bin`` beside a ``.pdf``
+        no longer take the PDF's hit with an ``unsupported`` status.
 
         Many chunks can match one attachment, so each attachment is ranked
         by its best chunk *before* the LIMIT: limiting chunk rows first
@@ -2087,11 +2093,15 @@ class Database:
             "    FROM hits h JOIN message_chunks c ON c.fts_rowid = h.fts_rowid "
             "    JOIN attachments a ON a.attachment_occurrence_id = ( "
             "        SELECT MIN(a2.attachment_occurrence_id) FROM attachments a2 "
+            "        JOIN attachment_extractions e2 ON e2.attachment_id = a2.attachment_id "
+            "          AND e2.extractor_module = a2.extractor_module "
+            "          AND e2.extraction_status = 'success' "
             "        WHERE a2.attachment_id = c.attachment_id "
             "          AND a2.claimant_id = c.claimant_id "
             "          AND (? IS NULL OR a2.content_type = ?) ) "
             "    JOIN threads t ON a.thread_id = t.thread_id "
             "    LEFT JOIN attachment_extractions e ON e.attachment_id = a.attachment_id "
+            "AND e.extractor_module = a.extractor_module "
             "    WHERE " + " AND ".join(where) + " "  # nosec B608
             "    GROUP BY a.attachment_occurrence_id ) "
             "SELECT a.attachment_id, COALESCE(m.message_id, a.claimant_id) AS message_id, "
@@ -2106,6 +2116,7 @@ class Database:
             "JOIN attachments a ON a.attachment_occurrence_id = best.attachment_occurrence_id "
             "JOIN threads t ON a.thread_id = t.thread_id "
             "LEFT JOIN attachment_extractions e ON e.attachment_id = a.attachment_id "
+            "AND e.extractor_module = a.extractor_module "
             "LEFT JOIN messages m ON m.claimant_id = a.claimant_id "
             "ORDER BY score LIMIT ?"
         )
@@ -2148,6 +2159,7 @@ class Database:
             "FROM attachments a "
             "JOIN threads t ON a.thread_id = t.thread_id "
             "LEFT JOIN attachment_extractions e ON e.attachment_id = a.attachment_id "
+            "AND e.extractor_module = a.extractor_module "
             "LEFT JOIN messages m ON m.claimant_id = a.claimant_id "
             "WHERE " + " AND ".join(where) + " "  # nosec B608
             "ORDER BY m.effective_at DESC LIMIT ?"
