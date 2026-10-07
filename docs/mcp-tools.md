@@ -216,7 +216,9 @@ tool=search_emails outcome=ok total_ms=41.7 stages_ms={'query_embedding': 22.4, 
   `thread_fts` / `chunk_fts` / `attachment_fts`, the vector lanes
   `thread_vec` / `chunk_vec` (each covering every widening step of a
   filtered search), `fusion` (RRF plus post-fusion filters),
-  `evidence_fetch`, `scope_labels` (the per-message
+  `evidence_fetch`, `evidence_precision` (`get_evidence` with `source`
+  or `scope=in_scope` on the mailbox-wide path),
+  `scope_labels` (the per-message
   [evidence scope](#evidence-scope-in-scope-or-context) lookup of
   `ask_mailbox` and `get_evidence`), `rerank`, `attachment_search` and
   `inference`
@@ -248,6 +250,17 @@ tool=search_emails outcome=ok total_ms=41.7 stages_ms={'query_embedding': 22.4, 
   `from_name_matches_capped` is 1 when more than 10 matched
   ([Resolving `from_name`](#search_emails)). Numbers only: the
   addresses are never logged.
+- `evidence_filtered` is 1 when a `get_evidence` call used a
+  [precision control](#precision-controls). With `scope=in_scope`,
+  `evidence_context_dropped` counts the `context` passages left out and
+  `evidence_threads_scope_emptied` the threads left with none; with
+  `source` on the mailbox-wide path, `evidence_threads_source_emptied`
+  counts the ranked threads with no passage of that source. With
+  `max_chunks_per_thread`, `evidence_chunks_capped` counts the passages
+  the cap removed; with `max_chars_per_chunk`,
+  `evidence_chunks_truncated` counts the passages it cut. A rejected
+  control logs `get_evidence rejected invalid <field>` once per field
+  per minute, and later repeats as one count line.
 - `evidence_capped_threads` (the intelligence tools) counts the threads
   whose passages the fixed per-thread evidence budget (2,000 characters
   per thread) left out or cut. It is a design cap, not a token limit,
@@ -522,6 +535,10 @@ chunks (extracted PDF / OCR / document text) are included — unlike
 | `max_threads` | int | none | Rank threads exactly as `ask_mailbox` does with this `max_threads` and return their evidence; clamped to `[1, 10]` like `ask_mailbox`'s. Omit it to rank by `limit` instead |
 | `limit` | int | `12`, or `max_threads` × 6 | Max evidence chunks to return (with `max_threads`, a smaller value keeps the first `limit` chunks of the audit set in rank order); clamped to `[1, 60]`, the most `ask_mailbox` can put in one prompt (10 threads × 6 chunks), so the cap never cuts below an answer's evidence set |
 | `include_scores` | bool | `false` | Annotate each thread with the retrieval lanes that matched (`thread_fts` / `chunk_fts` / `attachment_fts` / `thread_vec` / `chunk_vec` / `rerank`; `keyword_slot` marks a thread moved up as the best thread keyword hit) and each chunk with its vector distance |
+| `source` | string | `any` | `body` or `attachment` keeps only that source's passages, chosen before the per-thread cap ([Precision controls](#precision-controls)) |
+| `scope` | string | `any` | `in_scope` leaves out `context` passages and reports how many |
+| `max_chunks_per_thread` | int | `6`, or `limit` with `thread_id` | Passages per thread, `1` to `6` |
+| `max_chars_per_chunk` | int | `1600` | Characters per passage, `1` to `1600`; a longer passage is cut and flagged `text_truncated` |
 
 The mailbox-wide path runs the same hybrid retrieval as `ask_mailbox`
 (the same code), with the same cap of six chunks per thread, and
@@ -555,6 +572,42 @@ bypasses RRF fusion, so `include_scores` shows per-chunk vector
 distance but no lane provenance. A `thread_id` whose thread was reaped
 fails with `Thread reaped from the index` rather than `Thread not
 found` ([Reaped sources](#reaped-sources)).
+
+#### Precision controls
+
+`source`, `scope`, `max_chunks_per_thread` and `max_chars_per_chunk`
+narrow the passages returned without changing which threads are
+ranked or in what order
+([#988](https://github.com/marshalltech81/protonmail-local-ai/issues/988)).
+Left out, the output is the same as without them, so an audit of an
+`ask_mailbox` answer leaves them unset. Each applies to the chunks
+the existing retrieval returns:
+
+- `source` filters each ranked thread's full ranked passage list
+  before the six-per-thread cap, so a thread whose top passages are
+  attachments still returns its body passages with `source=body`. On
+  the mailbox-wide path a ranked thread with no passage of that source
+  (a thread with no indexed passages included) is left out, and
+  `threads_without_source_passages` (and a line in the prose) counts
+  them. On the `thread_id` path, no passage of that source returns
+  `No evidence found ... (source=...)`.
+- `scope=in_scope` drops `context` passages after labelling, from the
+  same full list, before the per-thread cap and the `limit` budget, so
+  an in-scope passage ranked below six context passages is still
+  found. Each thread reports `context_passages_left_out` (its `context`
+  passages, of the chosen source), and the response its total. A thread
+  left with no passage stays listed with an empty `chunks` list and the
+  line `No in-scope passages: N context passage(s) left out`. The
+  `thread_id` path takes no filters, so nothing there is `context`.
+- `max_chunks_per_thread` keeps each thread's first passages in rank
+  order; `limit` still caps the total. On the `thread_id` path the
+  per-thread cap is `limit` when it is left out, as before.
+- `max_chars_per_chunk` cuts each passage's `text`, as the 1,600
+  default does.
+
+A value out of range is rejected with fixed text naming the field and
+its range. A call that used any control adds `evidence_filtered` to its
+[timing line](#stage-timings-in-the-server-log).
 
 ### `search_attachments`
 Locate indexed attachments by filename, MIME type, and extracted
