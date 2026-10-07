@@ -539,6 +539,46 @@ Examples:
 - `chore(pre-commit): add detect-secrets baseline`
 - `style: apply pre-commit autofixes across repo`
 
+## Issue Conventions
+
+Every open issue carries, on GitHub (owner, 2026-10-07):
+
+- exactly one **type** label: `bug` (behaves wrongly or unsafely),
+  `enhancement` (new or changed behaviour, including measurement that
+  leads to it), `documentation`, `test` (a test, fixture or eval-harness
+  gap; nothing shipped changes) or `chore` (tooling, CI, build,
+  housekeeping, or an investigation with no product change)
+- exactly one **priority** label, `P0`–`P3`, as the review rules above
+  use them
+- one or more **area** labels, `area/mbsync`, `area/indexer`,
+  `area/parser`, `area/extractors`, `area/database`, `area/mcp-server`,
+  `area/mcp-tools`, `area/eval`, `area/docker`, `area/ci`,
+  `area/tooling`, `area/docs`, matching the commit scopes below
+- one **milestone**: a PLAN.md phase, *Corpus and contract follow-ups*
+  (Phase 0 and 1 follow-ups), *Operations and hardening* or *Evidence
+  model*
+- flags where they apply: `decision` (waits on an owner choice between
+  stated options) and `security` (privacy, secrets, exposure, TLS,
+  supply chain or bounded-work robustness, whatever the type)
+
+Each label's description on GitHub repeats its rule. Dependabot PRs
+carry `dependencies` as their type plus the area the update lands in
+(`.github/dependabot.yml`).
+
+A dependency between issues is a GitHub "blocked by" relation, set
+when the issue is filed or when the dependency is found, with the
+reason in the body's Relationships section; a `Refs` line is context,
+not a dependency.
+
+Titles are `<component>: <what is wrong | what will be true>`, or
+`Decision: <the choice, naming the component>`. The component is the
+noun a reader would grep for (a service, module, tool name, format or
+surface), more specific than the area label. A bug states the observed
+behaviour in the present tense; an enhancement states the outcome.
+`Decision:` is the only status word allowed; no type, priority, phase
+or issue number goes in a title. Sentence case, no trailing period,
+under about 80 characters.
+
 ## Pull Requests and Review
 
 - When a PR first lands, one test-first commit per issue, with a
