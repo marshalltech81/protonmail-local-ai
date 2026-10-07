@@ -356,6 +356,14 @@ def _extract_ocr(
             images = convert_from_bytes(payload, **convert_kwargs)  # type: ignore[arg-type]
             if render_budget is not None:
                 render_budget -= time.monotonic() - started
+            if dpi < _OCR_DPI and run is runs[0]:
+                # A lower DPI lowers OCR accuracy for every page (#903).
+                # Reported once a render at it has run, not when it is
+                # chosen, so a Poppler failure before any render is only
+                # the failure (review round 3 on #917).
+                warn_extractor_cap(
+                    log, "pdf_ocr_dpi", "pdf OCR rendered at %d dpi, not %d", dpi, _OCR_DPI
+                )
             for index, image in zip(run, images, strict=False):
                 text = pytesseract.image_to_string(image, **tesseract_kwargs)
                 texts[index] = (text or "").strip()
@@ -396,10 +404,5 @@ def _ocr_dpi(payload: bytes, pages: list[int]) -> int:
     # highest; at most ``_OCR_DPI`` cheap checks.
     for dpi in range(_OCR_DPI, 0, -1):
         if fits(dpi):
-            if dpi < _OCR_DPI:
-                # A lower DPI lowers OCR accuracy for every page (#903).
-                warn_extractor_cap(
-                    log, "pdf_ocr_dpi", "pdf OCR rendered at %d dpi, not %d", dpi, _OCR_DPI
-                )
             return dpi
     raise ValueError("PDF page too large to render for OCR")

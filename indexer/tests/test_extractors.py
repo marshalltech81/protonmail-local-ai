@@ -4738,18 +4738,50 @@ def _cap_pdf_digital_pages(monkeypatch):
     assert read == [0, 1]
 
 
-def _cap_pdf_ocr_dpi(monkeypatch):
+def _blank_square_pdf(side: float) -> bytes:
     import io as _io
 
     from pypdf import PdfWriter
-    from src.extractors import pdf
 
     writer = PdfWriter()
-    writer.add_blank_page(width=14_400, height=14_400)
+    writer.add_blank_page(width=side, height=side)
     buf = _io.BytesIO()
     writer.write(buf)
-    # A 200-inch square page fits the pixel budget only at 15 dpi.
-    assert pdf._ocr_dpi(buf.getvalue(), [0]) == 15
+    return buf.getvalue()
+
+
+def _fake_ocr_render(monkeypatch, *, pdfinfo_error: Exception | None = None) -> list[int]:
+    """Stub Poppler and Tesseract for ``pdf._extract_ocr``; returns the
+    DPI of each render."""
+    from PIL import Image
+
+    renders: list[int] = []
+
+    def pdfinfo(payload, **kwargs):
+        if pdfinfo_error is not None:
+            raise pdfinfo_error
+        return {}
+
+    def convert(payload, **kwargs):
+        renders.append(kwargs["dpi"])
+        pages = kwargs["last_page"] - kwargs["first_page"] + 1
+        return [Image.new("RGB", (4, 4), color="white")] * pages
+
+    monkeypatch.setattr("pdf2image.pdfinfo_from_bytes", pdfinfo)
+    monkeypatch.setattr("pdf2image.convert_from_bytes", convert)
+    monkeypatch.setattr("pytesseract.image_to_string", lambda image, **_: "ocr text")
+    return renders
+
+
+def _cap_pdf_ocr_dpi(monkeypatch):
+    from src.extractors import pdf
+
+    renders = _fake_ocr_render(monkeypatch)
+    texts = pdf._extract_ocr(_blank_square_pdf(14_400), pages=[0], ocr_timeout_seconds=60)
+    assert texts == {0: "ocr text"}
+    # A 200-inch square page fits the pixel budget only at 15 dpi, and
+    # was rendered once at it.
+    assert renders == [15]
 
 
 def _cap_xlsx_sheet_nodes(monkeypatch):
@@ -5017,7 +5049,35 @@ class TestExtractorCapsAreReported:
         assert "extractor cap" not in caplog.text
         assert extractors.drain_extractor_counts()["extractor_caps"] == 0
 
-    def test_ordinary_page_renders_at_full_dpi_and_reports_none(self, caplog):
+    def test_ordinary_page_renders_at_full_dpi_and_reports_none(self, monkeypatch, caplog):
+        from src import extractors
+        from src.extractors import pdf
+
+        caplog.set_level("DEBUG")
+        renders = _fake_ocr_render(monkeypatch)
+        pdf._extract_ocr(_blank_square_pdf(612), pages=[0])
+        assert renders == [pdf._OCR_DPI]
+        assert "extractor cap" not in caplog.text
+        assert extractors.drain_extractor_counts()["extractor_caps"] == 0
+
+    def test_lowered_dpi_is_not_reported_when_no_render_ran(self, monkeypatch, caplog):
+        """Review round 3: the DPI cap was counted when the DPI was chosen,
+        so a Poppler failure before any render still reported a
+        reduced-resolution OCR. It is reported once a render at it ran."""
+        from src import extractors
+        from src.extractors import pdf
+
+        caplog.set_level("DEBUG")
+        renders = _fake_ocr_render(monkeypatch, pdfinfo_error=TimeoutError("pdfinfo"))
+        with pytest.raises(TimeoutError):
+            pdf._extract_ocr(_blank_square_pdf(14_400), pages=[0], ocr_timeout_seconds=60)
+        assert renders == []
+        assert "extractor cap" not in caplog.text
+        assert extractors.drain_extractor_counts()["extractor_caps"] == 0
+
+    def test_lowered_dpi_is_reported_once_across_render_runs(self, monkeypatch, caplog):
+        """Two runs of non-consecutive pages are two renders of one OCR
+        pass: one report."""
         import io as _io
 
         from pypdf import PdfWriter
@@ -5025,13 +5085,16 @@ class TestExtractorCapsAreReported:
         from src.extractors import pdf
 
         writer = PdfWriter()
-        writer.add_blank_page(width=612, height=792)
+        for _ in range(3):
+            writer.add_blank_page(width=14_400, height=14_400)
         buf = _io.BytesIO()
         writer.write(buf)
         caplog.set_level("DEBUG")
-        assert pdf._ocr_dpi(buf.getvalue(), [0]) == pdf._OCR_DPI
-        assert "extractor cap" not in caplog.text
-        assert extractors.drain_extractor_counts()["extractor_caps"] == 0
+        renders = _fake_ocr_render(monkeypatch)
+        pdf._extract_ocr(buf.getvalue(), pages=[0, 2])
+        assert renders == [15, 15]
+        assert caplog.text.count("extractor cap pdf_ocr_dpi") == 1
+        assert extractors.drain_extractor_counts()["extractor_caps"] == 1
 
     @pytest.mark.parametrize(
         ("sheets", "reported"),
