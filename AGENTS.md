@@ -487,6 +487,13 @@ is exactly what this forbids.
   happened. Measure the worst case with a plain timing before sizing
   a bound; figures taken under a profiler (`cProfile`, `tracemalloc`)
   overstate it several times over.
+- A third-party parser whose cost cannot be bounded in-process (it
+  allocates or loops on input before our code runs) runs through the
+  bounded subprocess runner (`indexer/src/extractors/_runner.py`, a
+  child process with its own memory and CPU limits, a timeout and an
+  output cap), as xlrd does. Measure a candidate library on crafted
+  input with plain timing and RSS before choosing it: two `.xls`
+  readers failed that test (#935).
 - A review finding that calls for new parsing of untrusted input, or
   any new mechanism rather than a guard (a check, a cap, a fallback),
   is a design decision: stop and ask, with "document the limitation"
@@ -782,6 +789,10 @@ Notes:
   (`.semgrep/compose.test.yml`, `.semgrep/shell.sh`).
 - for Dockerfile, build, or container-runtime changes, run the smallest relevant `docker compose build ...` subset when practical
 - prefer real `.eml` fixtures for parser tests
+- a fixture generated with an office application (Word, PowerPoint,
+  LibreOffice) records the creating user in its metadata (OLE2
+  SummaryInformation, `docProps/core.xml`); set a synthetic author and
+  check the file before committing it (#980)
 - tests that need a process to die from a signal use `SIGKILL`; map
   other signals (`SIGSEGV`, `SIGABRT`, `SIGXCPU`) with a stubbed exit
   status, and run a real crash signal only on Linux in CI. A real
