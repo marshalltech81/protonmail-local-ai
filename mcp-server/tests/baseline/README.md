@@ -117,7 +117,12 @@ harness in `tests/eval/` (`tests/retrieval_metrics.py`).
   evaluation's evidence-scope decoys (#755): in each, a filter selects
   the thread and another of its messages holds a different answer
   (another sender's reply, a later month's schedule, a stale list in
-  Trash). Adding a thread can lower a recall floor's
+  Trash). Threads 78-81 pin three attachment shapes (#906): a real
+  digital PDF whose fact is only in the attachment, one payload under
+  two filenames in two threads (one `attachment_id`, one extraction
+  row, a cache hit), and a PDF under a `.txt` filename that is
+  extracted by MIME type (`test_attachment_shapes_baseline.py`).
+  Adding a thread can lower a recall floor's
   measured value; re-measure and explain it rather than lowering the
   floor silently.
 - **Unanswerable questions** need terms that appear nowhere in the

@@ -1209,9 +1209,37 @@ only, never filenames or text (`make logs`):
   is corrupt; the frames already read are still indexed. Each is
   counted as `ocr_capped_images` in the attachments line below. The
   same caching and #891 limitation as the PDF cap line apply.
-- These per-item WARNINGs (failed extractions, OCR caps and the
-  parser-cap line described below, together) are capped at 20 per 5
-  minutes, so a stream of crafted mail cannot flood the log. The rest
+- `extractor cap <name>: <fixed text and counts>` (WARNING): a cap
+  inside an extractor cut the text it returned (#903). Logged once per
+  cap per extraction, and counted as `extractor_caps` in the
+  attachments line below. The caps, by name:
+  - `extracted_chars`: the extracted text was longer than
+    `INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS`; the rest is not stored.
+  - `pdf_digital_pages`: the PDF has more pages than
+    `INDEXER_PDF_MAX_DIGITAL_PAGES`; the pages past it are not read.
+  - `pdf_ocr_dpi`: a scanned page is too large to render at 200 dpi
+    within the 10-megapixel page budget, so the PDF's OCR ran at the
+    lower DPI the line names, which reads small print less reliably.
+  - `xlsx_sheet_nodes`, `xlsx_row_nodes`, `xlsx_tag_bytes`: a
+    worksheet's XML crossed a node budget (5,000,000 across the
+    workbook, 131,072 in one row) or a 1 MB start tag; that worksheet is
+    cut before the row that crossed it. Later worksheets are still read
+    within the budget left: after a row or tag cut that is the
+    workbook's remaining budget, and after a workbook-wide cut only what
+    was left before the cut row, so a later worksheet larger than that
+    is cut or read as empty as well.
+  - `xlsx_expanded_cells`, `xlsx_text_chars`: the walk over a
+    workbook's cells stopped at its cell budget (5,000,000, counting a
+    row as 64 cells) or its 10,000,000-character text budget.
+
+  The other caps either skip or fail the whole attachment and show as
+  `too_large` or `failed` instead (`INDEXER_ATTACHMENT_MAX_BYTES`, the
+  zip, image-pixel and XLSX whole-part caps, the OCR timeout); the OCR
+  page caps have their own lines above. Like the OCR cap, a cap is reported
+  on the first extraction only: the cached text is served afterwards.
+- These per-item WARNINGs (failed extractions, OCR and extractor caps,
+  and the parser-cap line described below, together) are capped at 20
+  per 5 minutes, so a stream of crafted mail cannot flood the log. The rest
   are counted as `warnings_suppressed` in the attachments line below.
   The budget is shared with the embed retry, health-file and
   ingestion-state lines (see "Indexer health in the log"), but those
@@ -1220,12 +1248,12 @@ only, never filenames or text (`make logs`):
 - `attachments n=<total> success= failed= unsupported= too_large=
   ocr_disabled= empty= cached= pdf_pages_failed=
   pdf_pages_unrecovered= ocr_capped_pdfs= ocr_pages_skipped=
-  ocr_capped_images= parser_caps_messages= warnings_suppressed=`: the attachments of the
-  messages committed since the previous line, by outcome. It is a
+  ocr_capped_images= extractor_caps= parser_caps_messages=
+  warnings_suppressed=`: the attachments of the messages committed since the previous line, by outcome. It is a
   WARNING when any of `failed`, `unsupported`, `too_large`,
   `ocr_disabled`, `pdf_pages_unrecovered`, `ocr_capped_pdfs`,
-  `ocr_pages_skipped`, `ocr_capped_images`, `parser_caps_messages` or
-  `warnings_suppressed` is above zero (some attachment text is not
+  `ocr_pages_skipped`, `ocr_capped_images`, `extractor_caps`,
+  `parser_caps_messages` or `warnings_suppressed` is above zero (some attachment text is not
   searchable), and INFO otherwise. `pdf_pages_failed` alone does not
   make it a WARNING (see below).
   - When it is logged: during the initial index, with the timing summary
@@ -1262,12 +1290,14 @@ only, never filenames or text (`make logs`):
     they left unread. `ocr_capped_images` counts multipage TIFFs whose
     OCR stopped at the cap with a frame left unread; their unread
     frames are not counted.
+    `extractor_caps` counts the extractor caps above, one per cap per
+    extraction.
   - How retries count: the outcomes are counted once per committed
     message, so a message retried after an embedder outage counts once.
     The extraction counts (`pdf_pages_failed`,
     `pdf_pages_unrecovered`, `ocr_capped_pdfs`, `ocr_pages_skipped`,
-    `ocr_capped_images`, `warnings_suppressed`) and the per-attachment
-    WARNINGs count every extraction attempt, retries included, and
+    `ocr_capped_images`, `extractor_caps`, `warnings_suppressed`) and the
+    per-attachment WARNINGs count every extraction attempt, retries included, and
     `parser_caps_messages` every parse of a capped message (see
     below).
 
@@ -1313,6 +1343,46 @@ extractor reads (`.eml`) is not logged.
 
 The caps bound what crafted mail can cost the single indexing worker,
 so they are not configurable. Ordinary mail does not reach them.
+
+## ChatGPT says a tool call was blocked by OpenAI
+
+ChatGPT reports "This tool call was blocked by OpenAI because we
+couldn't determine the safety status of the request". This is a check
+on OpenAI's side, made before ChatGPT sends the call, and nothing in
+`.env`, the bearer token or the server changes the outcome. The check
+is intermittent, and it also blocks tools that declare the read-only
+safety hints (#919; background and sources in
+[Safety annotations](mcp-tools.md#safety-annotations)).
+
+1. Rule out a server-side failure. Look at the server log around the
+   time of the refusal:
+
+   ```bash
+   docker compose logs mcp-server --since 10m | grep -E 'tool=<tool name>|rejected request'
+   ```
+
+   A tool that ran logs a `tool=<name> outcome=...` line on
+   `mcp.timings` (see
+   [Reading a tool call's log line](#reading-a-tool-calls-log-line)),
+   and every tool except `list_folders` and `get_mailbox_status` also
+   logs a `tool=<name> {...} withheld=[...]` line when it starts. A
+   missing line shows only that the tool did not run, not by itself
+   that the request never arrived: a request refused for its token,
+   Host or Origin is logged as `rejected request: reason=<reason>`
+   instead (see
+   [MCP client gets 401 Unauthorized](#mcp-client-gets-401-unauthorized)),
+   and a line with `outcome=error` is a server failure whose cause is
+   on the WARNING or ERROR line before it. With neither, and ChatGPT
+   showing this exact message, the block happened in ChatGPT.
+2. Retry the identical call; it often succeeds on a later attempt.
+   There is no server-side fix.
+3. Approval settings are not a recommended fix. Setting the connector's
+   approvals in ChatGPT to allow all actions without asking is reported
+   to reduce the blocks, but it removes ChatGPT's per-call approval:
+   every tool call then runs without a prompt, including calls that
+   return mail to ChatGPT and the intelligence tools that send mail
+   excerpts to the configured inference provider. Keep approvals on
+   and retry instead.
 
 ## Claude Desktop doesn't see the tools
 
