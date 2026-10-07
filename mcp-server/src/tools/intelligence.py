@@ -1063,10 +1063,27 @@ def _drop_unrequired_nulls(record: dict, schema: dict) -> dict:
     return {k: v for k, v in record.items() if v is not None or k in kept}
 
 
-# Appended to a prose answer the model stopped writing at max_tokens.
-_TRUNCATED_NOTICE = (
-    "\n\n[Answer cut off at the INFERENCE_MAX_TOKENS limit; raise it for a complete answer.]"
-)
+# Appended to a prose answer the model stopped writing early, chosen by
+# the stop reason so the notice names the setting that fixes it (#890):
+# a context-window stop is not helped by a larger output reserve.
+_TRUNCATED_NOTICES: dict[TruncationReason, str] = {
+    "max_tokens": (
+        "\n\n[Answer cut off at the INFERENCE_MAX_TOKENS limit; raise it for a complete answer.]"
+    ),
+    "context_window": (
+        "\n\n[Answer cut off at the model's context window; set INFERENCE_CONTEXT_TOKENS "
+        "to the model's real window, or use a model with a larger one, for a complete answer.]"
+    ),
+}
+_TRUNCATED_NOTICE_SUFFIXES = tuple(_TRUNCATED_NOTICES.values())
+
+
+def _without_truncated_notice(answer: str) -> str:
+    """``answer`` less its truncation notice, if it carries one."""
+    for notice in _TRUNCATED_NOTICE_SUFFIXES:
+        if answer.endswith(notice):
+            return answer.removesuffix(notice)
+    return answer
 
 
 def _strip_code_fence(text: str) -> str:
@@ -1492,7 +1509,7 @@ def _check_answer(answer: str, evidence_map: Mapping[str, EvidenceRef]) -> Answe
     Labels and quotes are checked, not meaning: a valid label or a
     verified quote does not prove the passage supports the claim.
     """
-    body = answer.removesuffix(_TRUNCATED_NOTICE)
+    body = _without_truncated_notice(answer)
     not_found = body.lstrip().startswith(_NOT_FOUND_PREFIX)
 
     quote_matches = list(_QUOTE_RE.finditer(body))
@@ -2770,7 +2787,7 @@ def register_intelligence_tools(
             cuts.append(_ReplyCut(e.reason, system + user))
             if not e.partial.strip():
                 raise
-            return e.partial + _TRUNCATED_NOTICE
+            return e.partial + _TRUNCATED_NOTICES[e.reason]
 
     async def complete_checked(
         tool: str,
@@ -2790,7 +2807,7 @@ def register_intelligence_tools(
         even when the call raises."""
         answer = await llm_complete_prose(system, user_prompt, cuts)
         check = _check_answer(answer, evidence_map)
-        repair_attempted = bool(check.problems) and not answer.endswith(_TRUNCATED_NOTICE)
+        repair_attempted = bool(check.problems) and not answer.endswith(_TRUNCATED_NOTICE_SUFFIXES)
         if repair_attempted:
             reason = _repair_reason(check.problems)
             answer = await llm_complete_prose(

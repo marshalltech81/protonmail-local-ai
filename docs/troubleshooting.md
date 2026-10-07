@@ -1139,8 +1139,9 @@ hit:
   these replies). Raising `INFERENCE_MAX_TOKENS` does not help.
   `INFERENCE_CONTEXT_TOKENS` is set larger than the model's real
   window: lower it to that window, or choose a model with a larger
-  one. The caller sees the same truncation notice as for
-  `output_max_tokens`.
+  one. The caller's truncation notice (or, for a reply cut before any
+  text, the error) says the same: it names `INFERENCE_CONTEXT_TOKENS`,
+  not `INFERENCE_MAX_TOKENS` (#890).
 - `evidence_budget`: the model window, not the fixed per-thread cap,
   left out passages (`passages_omitted`), cut them short
   (`passages_truncated`) or dropped lower-ranked threads

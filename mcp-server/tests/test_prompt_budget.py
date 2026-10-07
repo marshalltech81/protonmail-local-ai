@@ -37,6 +37,7 @@ from src.tools.brief import (
 from src.tools.intelligence import (
     _REPAIR_INSTRUCTION,
     _REPAIR_REASONS,
+    _TRUNCATED_NOTICES,
     PER_THREAD_CHAR_BUDGET,
     REPAIR_RESERVE_CHARS,
     _build_evidence,
@@ -1108,8 +1109,9 @@ class TestReviewRound2:
         tool = _tools(_StubDb(_short_threads()), llm)["ask_mailbox"]
         if partial:
             out = asyncio.run(tool(question="q?"))
-            # The caller-facing notice is unchanged.
-            assert "INFERENCE_MAX_TOKENS" in out.structured_content["answer"]
+            # The caller-facing notice names the setting for this stop (#890).
+            assert "INFERENCE_CONTEXT_TOKENS" in out.structured_content["answer"]
+            assert "INFERENCE_MAX_TOKENS" not in out.structured_content["answer"]
         else:
             with pytest.raises(ToolError):
                 asyncio.run(tool(question="q?"))
@@ -1152,4 +1154,90 @@ class TestReviewRound2:
         counts = _one_line(caplog)["counts"]
         assert counts["token_limit_output_max_tokens"] == 1
         assert counts["token_limit_context_window"] == 1
+        assert _MARKER not in caplog.text
+
+
+class TestTruncationText:
+    """#890: the text the caller sees for a cut reply names the setting
+    that fixes that stop. A ``max_tokens`` stop points to
+    ``INFERENCE_MAX_TOKENS``; a stop at the model's own context window
+    points to ``INFERENCE_CONTEXT_TOKENS`` (or another model), never to
+    the output reserve, which a larger value would only make worse. Both
+    texts are fixed: nothing from the reply or the mail is in them."""
+
+    _NOTICES = {
+        "max_tokens": (
+            "\n\n[Answer cut off at the INFERENCE_MAX_TOKENS limit; raise it for a complete "
+            "answer.]"
+        ),
+        "context_window": (
+            "\n\n[Answer cut off at the model's context window; set INFERENCE_CONTEXT_TOKENS "
+            "to the model's real window, or use a model with a larger one, for a complete "
+            "answer.]"
+        ),
+    }
+    _ERRORS = {
+        "max_tokens": (
+            "Inference output hit the max_tokens limit before finishing "
+            "(raise INFERENCE_MAX_TOKENS)"
+        ),
+        "context_window": (
+            "Inference output hit the model's context window before finishing "
+            "(set INFERENCE_CONTEXT_TOKENS to the model's real window, or use a model "
+            "with a larger one)"
+        ),
+    }
+    _WRONG = {"max_tokens": "INFERENCE_CONTEXT_TOKENS", "context_window": "INFERENCE_MAX_TOKENS"}
+
+    @pytest.mark.parametrize("reason", ["max_tokens", "context_window"])
+    def test_notice_text_is_fixed_per_reason(self, reason):
+        assert _TRUNCATED_NOTICES[reason] == self._NOTICES[reason]
+        assert self._WRONG[reason] not in _TRUNCATED_NOTICES[reason]
+
+    @pytest.mark.parametrize("reason", ["max_tokens", "context_window"])
+    def test_error_text_is_fixed_per_reason(self, reason):
+        err = InferenceTruncatedError(partial=f"{_MARKER} partial", reason=reason)
+        assert str(err) == self._ERRORS[reason]
+        assert self._WRONG[reason] not in str(err)
+        assert _MARKER not in str(err)
+
+    @pytest.mark.parametrize("reason", ["max_tokens", "context_window"])
+    def test_ask_mailbox_partial_answer_carries_the_reason_notice(self, caplog, reason):
+        caplog.set_level(logging.INFO)
+        llm = FakeInferenceClient(
+            complete_responses=[InferenceTruncatedError(partial="p [E1]", reason=reason)]
+        )
+        out = asyncio.run(_tools(_StubDb(_short_threads()), llm)["ask_mailbox"](question="q?"))
+        answer = out.structured_content["answer"]
+        assert answer == "p [E1]" + self._NOTICES[reason]
+        assert self._WRONG[reason] not in answer
+        # The notice is not a citation problem: the check strips it (#284).
+        assert out.structured_content["citation_problems"] == []
+        assert _one_limit_line(caplog)["counts"]["outputs_cut"] == 1
+
+    @pytest.mark.parametrize("reason", ["max_tokens", "context_window"])
+    def test_summarize_thread_partial_summary_carries_the_reason_notice(self, reason):
+        llm = FakeInferenceClient(
+            complete_responses=[InferenceTruncatedError(partial="s [E1]", reason=reason)]
+        )
+        out = asyncio.run(
+            _tools(_StubDb([_summary_thread()]), llm)["summarize_thread"](thread_id="t1")
+        )
+        text = out.content[0].text
+        assert "s [E1]" + self._NOTICES[reason] + "\n\nCitations:" in text
+        assert self._WRONG[reason] not in text
+
+    @pytest.mark.parametrize("reason", ["max_tokens", "context_window"])
+    def test_empty_reply_error_names_the_reason_setting(self, caplog, reason):
+        caplog.set_level(logging.INFO)
+        llm = FakeInferenceClient(
+            complete_responses=[InferenceTruncatedError(partial="", reason=reason)]
+        )
+        with pytest.raises(ToolError) as err:
+            asyncio.run(
+                _tools(_StubDb(_short_threads()), llm)["ask_mailbox"](question=f"{_MARKER}?")
+            )
+        assert str(err.value) == f"Error: {self._ERRORS[reason]}"
+        assert self._WRONG[reason] not in str(err.value)
+        assert _MARKER not in str(err.value)
         assert _MARKER not in caplog.text

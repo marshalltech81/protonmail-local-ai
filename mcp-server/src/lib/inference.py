@@ -164,8 +164,24 @@ def estimate_tokens(text: str) -> int:
 TruncationReason = Literal["max_tokens", "context_window"]
 
 
+# The fixed message for each stop, naming the setting that fixes it
+# (#890). A context-window stop is not about the output reserve: a
+# larger INFERENCE_MAX_TOKENS leaves even less of the window for the
+# prompt, so that message never names it.
+_TRUNCATION_MESSAGES: dict[TruncationReason, str] = {
+    "max_tokens": (
+        "Inference output hit the max_tokens limit before finishing (raise INFERENCE_MAX_TOKENS)"
+    ),
+    "context_window": (
+        "Inference output hit the model's context window before finishing "
+        "(set INFERENCE_CONTEXT_TOKENS to the model's real window, or use a model "
+        "with a larger one)"
+    ),
+}
+
+
 class InferenceTruncatedError(ProviderResponseError):
-    """The model stopped at ``max_tokens`` before finishing its answer.
+    """The model stopped before finishing its answer.
 
     ``partial`` holds whatever text it produced. Callers decide what a
     cut-off answer is worth: prose can be shown with a notice, while a
@@ -175,15 +191,12 @@ class InferenceTruncatedError(ProviderResponseError):
     ``reason`` is a fixed value naming the stop: ``max_tokens`` (the
     reply reached ``INFERENCE_MAX_TOKENS``) or ``context_window``
     (Anthropic's ``model_context_window_exceeded``: the model's own
-    window filled first). The message is the same for both, so what the
-    caller sees does not change; the reason is for the server log.
+    window filled first). The message is fixed text chosen by the
+    reason, so the caller is told which setting to change.
     """
 
     def __init__(self, partial: str, reason: TruncationReason = "max_tokens") -> None:
-        super().__init__(
-            "Inference output hit the max_tokens limit before finishing "
-            "(raise INFERENCE_MAX_TOKENS)"
-        )
+        super().__init__(_TRUNCATION_MESSAGES[reason])
         self.partial = partial
         self.reason: TruncationReason = reason
 

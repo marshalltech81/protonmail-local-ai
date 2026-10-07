@@ -21,7 +21,7 @@ retrieval never found.
 import re
 from dataclasses import dataclass, field
 
-from src.tools.intelligence import _NOT_FOUND_PREFIX, _TRUNCATED_NOTICE
+from src.tools.intelligence import _NOT_FOUND_PREFIX, _TRUNCATED_NOTICE_SUFFIXES
 
 from tests.answer_eval.cases import Case, message_id_of, thread_id_of
 from tests.answer_eval.runner import CaseRun, Passage
@@ -191,7 +191,7 @@ def grade_run(case: Case, run: CaseRun) -> DeterministicResult:
         checks["omission_disclosed"] = PASS if disclosed else FAIL
     else:
         checks["omission_disclosed"] = NA
-    checks["answer_complete"] = FAIL if answer.endswith(_TRUNCATED_NOTICE) else PASS
+    checks["answer_complete"] = FAIL if answer.endswith(_TRUNCATED_NOTICE_SUFFIXES) else PASS
     checks["prompt_matches_capture"] = PASS if run.prompt_consistent else FAIL
     result.citation_problem_kinds = sorted({p.kind for p in out.citation_problems})
     unknown = "unknown_labels" in result.citation_problem_kinds

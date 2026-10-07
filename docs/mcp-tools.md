@@ -1309,9 +1309,14 @@ flag its first half as uncited. A passage whose text imitates a header (`[E7 | f
 for a label comes from the server's own map, not from text the model
 read; a label that exists only in mail text is reported as unknown.
 
-An answer the model stopped writing at `INFERENCE_MAX_TOKENS` is
-returned with a closing `[Answer cut off …]` notice rather than as if
-complete; `summarize_thread` does the same.
+An answer the model stopped writing early is returned with a closing
+`[Answer cut off …]` notice rather than as if complete;
+`summarize_thread` does the same. The notice names the setting to
+change: `INFERENCE_MAX_TOKENS` when the reply reached it,
+`INFERENCE_CONTEXT_TOKENS` (or a model with a larger window) when the
+model's own context window filled first (Anthropic's
+`model_context_window_exceeded` stop). A reply cut before any text is
+an error with the same distinction.
 
 ### `summarize_thread`
 Summarize a thread in different styles.
