@@ -1541,9 +1541,10 @@ searched and points here; the steps are not sent to clients:
    slots) in June. Set `limit` to at least the window's thread count.
    `participant` and `from_addr` select whole threads, so attachments
    carried by other people's messages in the vendor's threads are
-   enumerated and extracted too: check each occurrence's sender (the
-   citation's `sender`, or `get_message` on its `claimant_id`) before
-   counting it.
+   enumerated and extracted too: check a record's sender from its
+   citation's `sender` before counting it. An occurrence with no
+   record has no sender in these results; report it as unverified
+   rather than reading each message with `get_message`.
 4. Reconcile across all windows, not per window. A record links to
    its source through its `_evidence` labels: look each label up by
    `label` in that call's top-level `citations` list, whose entries
