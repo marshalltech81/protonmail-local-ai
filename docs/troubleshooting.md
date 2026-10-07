@@ -1343,14 +1343,15 @@ safety hints (#919; background and sources in
 2. Optionally confirm the server serves the hints. From the repository
    root, list the tools through a client; every tool should print
    `True False False`. The snippet reads the token from its file,
-   takes the port from `MCP_PORT` in `.env` (default `3000`) so the
-   token goes to the port the server is published on, and uses the
+   takes the port from `MCP_PORT` in your shell, else from `.env`, else
+   `3000` (the order Compose uses), so the token goes to the port the
+   server is published on, and uses the
    stdio adapter's URL and HTTP client: IPv4 loopback, ignoring
    `HTTP_PROXY`, `ALL_PROXY` and the system proxy, so the token never
    goes to a proxy:
 
    ```bash
-   cd mcp-server && MCP_PORT="$(sed -n 's/^MCP_PORT=//p' ../.env | tail -n 1)" uv run python - <<'EOF'
+   cd mcp-server && MCP_PORT="${MCP_PORT:-$(sed -n 's/^MCP_PORT=//p' ../.env | tail -n 1)}" uv run python - <<'EOF'
    import asyncio, os, pathlib
    from fastmcp import Client
    from fastmcp.client.transports import StreamableHttpTransport
@@ -1364,7 +1365,7 @@ safety hints (#919; background and sources in
        async with Client(transport) as c:
            for t in await c.list_tools():
                a = t.annotations
-               print(t.name, a.readOnlyHint, a.destructiveHint, a.openWorldHint)
+               print(t.name, a.read_only_hint, a.destructive_hint, a.open_world_hint)
    asyncio.run(main())
    EOF
    ```
