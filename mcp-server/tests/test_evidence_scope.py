@@ -25,14 +25,33 @@ import pytest
 import sqlite_vec
 import src.lib.sqlite as sqlite_mod
 from src.lib.sqlite import ChunkResult, Database, ScopeLabels, ThreadResult
+from src.tools.brief import (
+    _BRIEF_SCOPE_RULE,
+    _CHECK_SCOPE_RULE,
+    _CHECK_TASK,
+    _TASK,
+    BRIEF_SYSTEM,
+    CHECK_SYSTEM,
+    register_experimental_tools,
+)
 from src.tools.intelligence import (
+    _EXTRACT_SCOPE_RULE,
     _SCOPE_RULE,
     ASK_SYSTEM,
+    EXTRACT_SYSTEM,
     _build_evidence,
     _scope_block,
     register_intelligence_tools,
 )
-from src.tools.outputs import AskMailboxOutput, EvidenceOutput, GetMessageOutput, GetThreadOutput
+from src.tools.outputs import (
+    AskMailboxOutput,
+    BriefIssueOutput,
+    CheckConclusionOutput,
+    EvidenceOutput,
+    ExtractFromEmailsOutput,
+    GetMessageOutput,
+    GetThreadOutput,
+)
 from src.tools.retrieval import register_retrieval_tools
 from src.tools.search import register_search_tools
 
@@ -80,6 +99,17 @@ def _finish_threads(conn: sqlite3.Connection) -> None:
 
 @pytest.fixture
 def scope_db(tmp_path: Path) -> Database:
+    return _swim_db(tmp_path)
+
+
+@pytest.fixture
+def inbox_scope_db(tmp_path: Path) -> Database:
+    """``scope_db`` without the Trash message: every message is in the
+    default scope, so an unfiltered request labels nothing (#895)."""
+    return _swim_db(tmp_path, skip=("trash",))
+
+
+def _swim_db(tmp_path: Path, skip: tuple[str, ...] = ()) -> Database:
     """One swim-team thread whose messages differ in sender, date,
     recipients and folder:
 
@@ -89,6 +119,10 @@ def scope_db(tmp_path: Path) -> Database:
     - ``nov``: the coach, sent 3 November, INBOX, the later schedule.
     - ``club``: Dana, 15 September, INBOX, sent to a long list.
     - ``trash``: the coach, 12 September, filed in Trash, a stale list.
+
+    ``nov`` carries the synthetic marker, so a test can check that the
+    out-of-scope decoy's text never reaches a log line. ``skip`` leaves
+    the named messages out.
     """
     path = tmp_path / "scope.db"
     conn = sqlite3.connect(str(path))
@@ -126,7 +160,7 @@ def scope_db(tmp_path: Path) -> Database:
             [_COACH],
             [_PARENT],
             [],
-            "From November, practices are Wednesdays at 5:30pm at Northside.",
+            f"From November, practices are Wednesdays at 5:30pm at Northside. {_MARKER}",
         ),
         (
             "club",
@@ -150,6 +184,8 @@ def scope_db(tmp_path: Path) -> Database:
         ),
     ]
     for name, sent, occurred, folder, from_, to, cc, body in rows:
+        if name in skip:
+            continue
         _insert_message(
             conn,
             message_id=f"{name}@swim.example",
@@ -615,3 +651,221 @@ class TestThreadTextFallbackIsContext:
         assert out.structured_content["indexed_thread_text_scope"] is None
         out = asyncio.run(tools["get_thread"](thread_id="t-swim"))
         assert out.structured_content["indexed_thread_text_scope"] is None
+
+
+# --- extract_from_emails, brief_issue and check_conclusion (#895) ---------
+
+_SEPTEMBER = {"date_from": "2025-09-01", "date_to": "2025-09-30"}
+_SCHEMA = {"day": "string"}
+
+
+def _extract(db, inference, **kwargs):
+    tools = _tools(db, inference)
+    return asyncio.run(tools["extract_from_emails"](query=_QUESTION, schema=_SCHEMA, **kwargs))
+
+
+def _experimental(db: Database, inference: FakeInferenceClient) -> dict:
+    server = FakeMCPServer()
+    register_experimental_tools(server, db, FakeEmbedClient(), inference)
+    return server.tools
+
+
+def _brief(db, inference, **kwargs):
+    return asyncio.run(_experimental(db, inference)["brief_issue"](topic=_QUESTION, **kwargs))
+
+
+def _check(db, inference, **kwargs):
+    return asyncio.run(
+        _experimental(db, inference)["check_conclusion"](conclusion=_QUESTION, **kwargs)
+    )
+
+
+def _assert_labelled(user_prompt: str, shown: tuple[str, ...]) -> None:
+    """The decoys (November, outside the dates; Trash, outside the
+    default folders) are context; the September messages in scope.
+    ``shown`` names the messages whose passages the prompt holds."""
+    headers = _headers(user_prompt)
+    assert set(headers) == {_claimant(n) for n in shown}
+    for name in shown:
+        tag = "| context |" if name in ("nov", "trash") else "| in scope |"
+        assert tag in headers[_claimant(name)]
+
+
+def _assert_unlabelled(user_prompt: str) -> None:
+    assert "Request scope" not in user_prompt
+    assert "| in scope" not in user_prompt and "| context" not in user_prompt
+
+
+class TestExtractLabels:
+    def test_each_header_carries_its_messages_scope(self, scope_db):
+        probe = FakeInferenceClient(response="null")
+        _extract(scope_db, probe, **_SEPTEMBER)
+        _assert_labelled(probe.complete_calls[0][1], ("sep", "late", "nov"))
+
+    def test_the_scope_block_and_rule_sit_outside_the_mail_before_the_reply_format(self, scope_db):
+        probe = FakeInferenceClient(response="null")
+        _extract(scope_db, probe, **_SEPTEMBER)
+        outside = _outside_blocks(probe.complete_calls[0][1])
+        assert _EXTRACT_SCOPE_RULE in outside
+        assert _EXTRACT_SCOPE_RULE not in EXTRACT_SYSTEM
+        assert "2025-09-01T00:00:00+00:00" in outside
+        assert outside.index("Request scope") < outside.index("Return a JSON object")
+        assert _MARKER not in outside
+
+    def test_the_default_scope_labels_a_thread_with_a_trash_message(self, tmp_path):
+        # Two messages, so both are among the passages shown.
+        db = _swim_db(tmp_path, skip=("sep", "late", "club"))
+        probe = FakeInferenceClient(response="null")
+        _extract(db, probe)
+        user = probe.complete_calls[0][1]
+        assert 'folders: every folder except "Trash"' in _outside_blocks(user)
+        headers = _headers(user)
+        assert "| context |" in headers[_claimant("trash")]
+        assert "| in scope |" in headers[_claimant("nov")]
+
+    def test_an_unscoped_prompt_is_unchanged(self, inbox_scope_db):
+        probe = FakeInferenceClient(response="null")
+        out = _extract(inbox_scope_db, probe)
+        user = probe.complete_calls[0][1]
+        _assert_unlabelled(user)
+        # The reply format follows the mail block directly, as before.
+        assert "</untrusted_email>\n\nReturn a JSON object matching the schema" in user
+        assert out.structured_content["citation_problems"] == []
+
+    def test_a_field_cited_only_from_context_is_flagged(self, scope_db, caplog):
+        probe = FakeInferenceClient(response="null")
+        _extract(scope_db, probe, **_SEPTEMBER)
+        nov = _label_of(probe.complete_calls[0][1], "nov")
+        record = {"day": f"Wednesdays {_MARKER}", "_evidence": {"day": [nov]}}
+        with caplog.at_level(logging.DEBUG):
+            out = _extract(scope_db, FakeInferenceClient(response=json.dumps(record)), **_SEPTEMBER)
+        ExtractFromEmailsOutput.model_validate(out.structured_content)
+        assert out.structured_content["citation_problems"] == [
+            {"record": 0, "kind": "context_only_fields", "labels": [nov], "fields": ["day"]}
+        ]
+        scopes = {c["label"]: c["scope"] for c in out.structured_content["citations"]}
+        assert scopes == {nov: "context"}
+        lines = "\n".join(c.text for c in out.content).splitlines()
+        assert (
+            "Citation check: 1 field value(s) in 1 record(s) cite only context passages, none "
+            "from a message that meets the request's filters."
+        ) in lines
+        assert _MARKER not in caplog.text
+
+    def test_a_field_with_an_in_scope_citation_passes(self, scope_db):
+        probe = FakeInferenceClient(response="null")
+        _extract(scope_db, probe, **_SEPTEMBER)
+        user = probe.complete_calls[0][1]
+        sep, nov = _label_of(user, "sep"), _label_of(user, "nov")
+        record = {"day": "Tuesdays", "_evidence": {"day": [sep, nov]}}
+        out = _extract(scope_db, FakeInferenceClient(response=json.dumps(record)), **_SEPTEMBER)
+        assert out.structured_content["citation_problems"] == []
+
+
+def _brief_reply(label: str) -> str:
+    return json.dumps(
+        {
+            "chronology": [
+                {
+                    "date": None,
+                    "date_source": "unknown",
+                    "actor": "Coach",
+                    "event": f"Practices move to Wednesdays {_MARKER}",
+                    "labels": [label],
+                }
+            ],
+            "positions": [],
+            "decisions": [],
+            "open_questions": [],
+            "conflicts": [],
+            "insufficient_evidence": False,
+        }
+    )
+
+
+class TestBriefLabels:
+    def test_each_header_carries_its_messages_scope(self, scope_db):
+        probe = FakeInferenceClient(response="x")
+        _brief(scope_db, probe, **_SEPTEMBER)
+        _assert_labelled(probe.complete_calls[0][1], ("sep", "late", "nov", "club", "trash"))
+
+    def test_the_scope_block_and_rule_precede_the_task_outside_the_mail(self, scope_db):
+        probe = FakeInferenceClient(response="x")
+        _brief(scope_db, probe, from_addr="coach@swim.example", **_SEPTEMBER)
+        user = probe.complete_calls[0][1]
+        outside = _outside_blocks(user)
+        assert _BRIEF_SCOPE_RULE in outside
+        assert _BRIEF_SCOPE_RULE not in BRIEF_SYSTEM
+        assert "sender (From): the address in the filter values below" in outside
+        assert "coach@swim.example" not in outside
+        assert 'sender address: "coach@swim.example"' in user
+        assert outside.index("Request scope") < outside.index("Issue topic:")
+        assert user.endswith(_TASK)
+        assert _MARKER not in outside
+
+    def test_an_unscoped_prompt_is_unchanged(self, inbox_scope_db):
+        probe = FakeInferenceClient(response="x")
+        _brief(inbox_scope_db, probe)
+        user = probe.complete_calls[0][1]
+        _assert_unlabelled(user)
+        assert user.endswith(f"\n\nIssue topic: {_QUESTION}\n\n{_TASK}")
+
+    def test_citations_carry_the_label_and_no_mail_reaches_the_log(self, scope_db, caplog):
+        probe = FakeInferenceClient(response="x")
+        _brief(scope_db, probe, **_SEPTEMBER)
+        nov = _label_of(probe.complete_calls[0][1], "nov")
+        with caplog.at_level(logging.DEBUG):
+            out = _brief(scope_db, FakeInferenceClient(response=_brief_reply(nov)), **_SEPTEMBER)
+        BriefIssueOutput.model_validate(out.structured_content)
+        assert [c["scope"] for c in out.structured_content["citations"]] == ["context"]
+        assert _MARKER not in caplog.text
+
+
+class TestCheckConclusionLabels:
+    def test_each_header_carries_its_messages_scope(self, scope_db):
+        probe = FakeInferenceClient(response="x")
+        _check(scope_db, probe, **_SEPTEMBER)
+        _assert_labelled(probe.complete_calls[0][1], ("sep", "late", "nov", "club", "trash"))
+
+    def test_the_scope_block_precedes_the_conclusion_outside_the_mail(self, scope_db):
+        probe = FakeInferenceClient(response="x")
+        _check(scope_db, probe, folders=["INBOX"], **_SEPTEMBER)
+        user = probe.complete_calls[0][1]
+        outside = _outside_blocks(user)
+        assert _CHECK_SCOPE_RULE in outside
+        assert _CHECK_SCOPE_RULE not in CHECK_SYSTEM
+        assert 'folders: "INBOX"' in outside
+        assert outside.index("Request scope") < outside.index("<conclusion>")
+        assert user.endswith(_CHECK_TASK)
+        assert _MARKER not in outside
+
+    def test_an_unscoped_prompt_is_unchanged(self, inbox_scope_db):
+        probe = FakeInferenceClient(response="x")
+        _check(inbox_scope_db, probe)
+        user = probe.complete_calls[0][1]
+        _assert_unlabelled(user)
+        # The conclusion block follows the mail and its note directly.
+        assert user.split("Conclusion to check")[0].endswith("</untrusted_email>\n\n")
+
+    def test_no_mail_reaches_the_log(self, scope_db, caplog):
+        probe = FakeInferenceClient(response="x")
+        _check(scope_db, probe, **_SEPTEMBER)
+        nov = _label_of(probe.complete_calls[0][1], "nov")
+        reply = json.dumps(
+            {
+                "verdict_summary": f"Contradicted {_MARKER}",
+                "findings": [
+                    {
+                        "relation": "contradicts",
+                        "explanation": f"Wednesdays {_MARKER}",
+                        "labels": [nov],
+                    }
+                ],
+                "insufficient_evidence": False,
+            }
+        )
+        with caplog.at_level(logging.DEBUG):
+            out = _check(scope_db, FakeInferenceClient(response=reply), **_SEPTEMBER)
+        CheckConclusionOutput.model_validate(out.structured_content)
+        assert out.structured_content["findings"]
+        assert _MARKER not in caplog.text
