@@ -383,7 +383,30 @@ backup_reclaims_stale_temporary_copies() {
     [[ "$STATUS" -eq 0 ]]
     [[ ! -e "$WORK/data/.backup-index-20260101T000000Z.db" ]]
     [[ -e "$WORK/data/.backup-index-29990101T000000Z.db" ]]
-    grep -F 'Removed 1 stale temporary copy' "$WORK/out" >/dev/null
+    grep -F 'Removed 1 stale backup copy(s) and 0 stale restore staging file(s) from the index volume' "$WORK/out" >/dev/null
+}
+
+backup_reclaims_a_stale_restore_staging_file() {
+    reset
+    make_db "$WORK/data/mail.db"
+    # Left by a restore container killed before its cleanup ran (#1054).
+    printf 'stale\n' >"$WORK/data/.restore-index.db"
+    touch -t 202601010000 "$WORK/data/.restore-index.db"
+    run_backup "$WORK/backups"
+    [[ "$STATUS" -eq 0 ]]
+    [[ ! -e "$WORK/data/.restore-index.db" ]]
+    grep -F 'Removed 0 stale backup copy(s) and 1 stale restore staging file(s) from the index volume' "$WORK/out" >/dev/null
+    no_temp_copy_left
+    # A recent one is a restore still writing and must stay.
+    reset
+    make_db "$WORK/data/mail.db"
+    printf 'running\n' >"$WORK/data/.restore-index.db"
+    run_backup "$WORK/backups"
+    [[ "$STATUS" -eq 0 ]]
+    [[ -e "$WORK/data/.restore-index.db" ]]
+    if grep -F 'Removed' "$WORK/out" >/dev/null; then
+        return 1
+    fi
 }
 
 backup_runs_in_the_same_second_do_not_collide() {
@@ -818,6 +841,7 @@ check "backup refuses a directory other users can open" backup_refuses_a_shared_
 check "backup refuses a directory shared through an ACL" backup_refuses_a_directory_shared_through_an_acl
 check "backup writes into the directory it checked" backup_writes_into_the_checked_directory
 check "backup reclaims stale temporary copies" backup_reclaims_stale_temporary_copies
+check "backup reclaims a stale restore staging file" backup_reclaims_a_stale_restore_staging_file
 check "backup runs starting in the same second do not collide" backup_runs_in_the_same_second_do_not_collide
 check "backup needs a running indexer" backup_needs_a_running_indexer
 check "backup writes nothing when integrity_check fails" backup_writes_nothing_when_the_check_fails

@@ -32,15 +32,22 @@ mode, tag = sys.argv[1], sys.argv[2]
 db = Path(os.environ["SQLITE_PATH"])
 copy = db.with_name(f".backup-index-{tag}.db")
 if mode == "make":
-    # Reclaim copies an interrupted run left behind (killed before its
-    # cleanup ran). Only those untouched for 6 hours, so a backup still
-    # running in another shell keeps its copy.
+    # Reclaim what an interrupted run left behind (killed before its
+    # cleanup ran): copies of earlier backups, and the file a restore
+    # stages before swapping it in (#1054; restore-index names it). Only
+    # those untouched for 6 hours, so a backup still running in another
+    # shell, or a restore still writing, keeps its file.
     cutoff = time.time() - 6 * 3600
-    stale = [p for p in db.parent.glob(".backup-index-*") if p.stat().st_mtime < cutoff]
-    for path in stale:
+    copies = [p for p in db.parent.glob(".backup-index-*") if p.stat().st_mtime < cutoff]
+    staged = db.with_name(".restore-index.db")
+    stagings = [staged] if staged.exists() and staged.stat().st_mtime < cutoff else []
+    for path in copies + stagings:
         path.unlink(missing_ok=True)
-    if stale:
-        print(f"Removed {len(stale)} stale temporary copy(s) from the index volume", file=sys.stderr)
+    if copies or stagings:
+        print(
+            f"Removed {len(copies)} stale backup copy(s) and {len(stagings)} stale restore staging file(s) from the index volume",
+            file=sys.stderr,
+        )
     os.umask(0o077)
     copy.unlink(missing_ok=True)
     with (
