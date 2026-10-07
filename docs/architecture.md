@@ -2201,8 +2201,23 @@ fixed version; findings with no fix yet are not gated (owner decision
 unfixed findings included, is uploaded as the `trivy-image-reports`
 artifact.
 
+The same job writes a software bill of materials per image (#767):
+Trivy's CycloneDX JSON output for each built image, listing the
+packages the scan above saw (Debian packages, Python packages, the
+`.ppt` reader's jars) with no vulnerability data, which the reports
+carry. The three files (`sbom-indexer.cdx.json`,
+`sbom-mcp-server.cdx.json`, `sbom-mbsync.cdx.json`) are uploaded as
+the `image-sboms` artifact of the run, kept for 14 days: open the run
+under the repository's Actions tab (the Docker workflow) and download
+the artifact from its summary page, or run `gh run download <run-id>
+-n image-sboms`. An SBOM lists packages, never mail data, and Trivy
+reads the built image from the Docker daemon, not the checkout. There
+is no local target for it; `trivy image --format cyclonedx --output
+<file> <image>` with the pinned Trivy produces the same file.
+
 Not covered: the Java runtime that `jlink` builds into `/opt/ppt/jre`
-has no package records, so Trivy does not scan it (#1008).
+has no package records, so Trivy neither scans it nor lists it in the
+SBOM (#1008).
 
 `make trivy` runs the same three gates after its filesystem scans, and
 `make trivy-images` runs them alone (#1065), with the workflow's
