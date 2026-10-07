@@ -578,10 +578,14 @@ class TestFilteredOutput:
         with pytest.raises(InferenceTruncatedError) as err:
             asyncio.run(c.complete("sys", "user"))
         assert err.value.partial == "Partly"
-        # Codex review round 2 on #883: the stop reason is kept, as a fixed
-        # value, while the message (which callers see) is unchanged.
+        # Codex review round 2 on #883: the stop reason is kept as a fixed
+        # value. #890: the message names INFERENCE_CONTEXT_TOKENS, not the
+        # output reserve, which a context-window stop is not about.
         assert err.value.reason == "context_window"
-        assert str(err.value) == str(InferenceTruncatedError(""))
+        assert str(err.value) == str(InferenceTruncatedError("", reason="context_window"))
+        assert "INFERENCE_CONTEXT_TOKENS" in str(err.value)
+        assert "INFERENCE_MAX_TOKENS" not in str(err.value)
+        assert "Partly" not in str(err.value)
 
 
 _MAIL_MARKER = "SYNTHETIC_MAIL"
