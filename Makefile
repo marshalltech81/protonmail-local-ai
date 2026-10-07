@@ -264,9 +264,12 @@ test-trivy-flags:
 # offline misconfiguration scan of the repository (#1047), with the
 # workflow's severity, exit code and skip-dirs; test-trivy-flags fails
 # when the two drift. Every scan runs even when an earlier one fails,
-# as in CI. TRIVY names the binary, and the target warns when its
-# version is not the one the workflow pins. The image scans of
-# docker.yml are not covered.
+# as in CI. The dependency scans pass --offline-scan=false explicitly:
+# Trivy reads any option from a TRIVY_* variable, so an exported
+# TRIVY_OFFLINE_SCAN would otherwise make them skip the dependencies
+# not cached locally and still pass. TRIVY names the binary, and the
+# target warns when its version is not the one the workflow pins. The
+# image scans of docker.yml are not covered.
 TRIVY ?= trivy
 TRIVY_VERSION := v0.75.0
 TRIVY_SEVERITY := CRITICAL,HIGH
@@ -281,8 +284,8 @@ trivy:
 		echo "warning: trivy $$installed is installed but CI pins $(TRIVY_VERSION); findings may differ" >&2; \
 	fi
 	@status=0; \
-	"$(TRIVY)" fs --scanners vuln --severity $(TRIVY_SEVERITY) --exit-code 1 indexer || status=1; \
-	"$(TRIVY)" fs --scanners vuln --severity $(TRIVY_SEVERITY) --exit-code 1 mcp-server || status=1; \
+	"$(TRIVY)" fs --scanners vuln --severity $(TRIVY_SEVERITY) --exit-code 1 --offline-scan=false indexer || status=1; \
+	"$(TRIVY)" fs --scanners vuln --severity $(TRIVY_SEVERITY) --exit-code 1 --offline-scan=false mcp-server || status=1; \
 	"$(TRIVY)" fs --scanners misconfig --severity $(TRIVY_SEVERITY) --exit-code 1 --offline-scan --skip-dirs $(TRIVY_MISCONFIG_SKIP_DIRS) . || status=1; \
 	exit $$status
 

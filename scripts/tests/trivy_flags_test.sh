@@ -98,29 +98,62 @@ run_make() {
         >"$WORK/out" 2>"$WORK/err" || MAKE_STATUS=$?
 }
 
-# The pinned version and clean scans: the three scans of the workflow,
-# with its flags, and no warning.
+# The scans the workflow runs, in order, one line per trivy-action step:
+# "<scanners> <scan-ref> <skip-dirs or -> <offline true|false>". The
+# expected `make trivy` calls derive from this list, so a step added,
+# removed or retargeted in the workflow fails the test until the
+# target follows.
+EXPECTED=()
+while IFS= read -r line; do
+    EXPECTED+=("$line")
+done < <(awk '
+    /^ *- name:/ { if (ref != "") print scanners, ref, skip, offline
+                   ref = ""; scanners = ""; skip = "-"; offline = "false" }
+    /^ *scan-ref:/ { ref = $2 }
+    /^ *scanners:/ { scanners = $2 }
+    /^ *skip-dirs:/ { skip = $2 }
+    /^ *TRIVY_OFFLINE_SCAN:/ { gsub(/"/, "", $2); offline = $2 }
+    END { if (ref != "") print scanners, ref, skip, offline }
+' "$WORKFLOW")
+if [[ "${#EXPECTED[@]}" -lt 2 ]]; then
+    printf 'FAIL: found %d Trivy steps in security.yml\n' "${#EXPECTED[@]}" >&2
+    exit 1
+fi
+printf 'security.yml: %d Trivy scans: %s\n' "${#EXPECTED[@]}" "$(printf '[%s] ' "${EXPECTED[@]}")"
+
+# The pinned version and clean scans: the workflow's scans, in its
+# order, with its flags, and no warning. Each dependency scan passes
+# --offline-scan=false explicitly so an exported TRIVY_OFFLINE_SCAN
+# cannot make it skip dependencies silently.
 run_make "$VERSION" 0
 ok=false; [[ "$MAKE_STATUS" -eq 0 ]] && ok=true
 check "make trivy succeeds when every scan is clean" "$ok"
-ok=false; [[ "$(wc -l <"$WORK/calls")" -eq 3 ]] && ok=true
-check "make trivy runs three scans" "$ok"
-ok=false; [[ "$(sed -n 1p "$WORK/calls")" == "fs --scanners vuln "*" indexer" ]] && ok=true
-check "the first scan is the vuln scan of indexer" "$ok"
-ok=false; [[ "$(sed -n 2p "$WORK/calls")" == "fs --scanners vuln "*" mcp-server" ]] && ok=true
-check "the second scan is the vuln scan of mcp-server" "$ok"
-ok=false; [[ "$(sed -n 3p "$WORK/calls")" == "fs --scanners misconfig "*" ." ]] && ok=true
-check "the third scan is the misconfig scan of the repository" "$ok"
-ok=false; [[ "$(grep -c -- "--severity $SEVERITY " "$WORK/calls")" -eq 3 ]] && ok=true
-check "every scan uses the workflow's severity" "$ok"
-ok=false; [[ "$(grep -c -- "--exit-code $EXIT_CODE " "$WORK/calls")" -eq 3 ]] && ok=true
-check "every scan uses the workflow's exit code" "$ok"
-ok=false; [[ "$(sed -n 3p "$WORK/calls")" == *" --skip-dirs $SKIP_DIRS "* ]] && ok=true
-check "the misconfig scan uses the workflow's skip-dirs" "$ok"
-ok=false; [[ "$(sed -n 3p "$WORK/calls")" == *" --offline-scan "* ]] && ok=true
-check "the misconfig scan runs offline" "$ok"
-ok=false; [[ "$(grep -c -- "--skip-dirs\|--offline-scan" "$WORK/calls")" -eq 1 ]] && ok=true
-check "the vuln scans use neither skip-dirs nor offline mode" "$ok"
+ok=false; [[ "$(wc -l <"$WORK/calls")" -eq "${#EXPECTED[@]}" ]] && ok=true
+check "make trivy runs one scan per Trivy step of the workflow" "$ok"
+for i in "${!EXPECTED[@]}"; do
+    read -r scanners ref skip offline <<<"${EXPECTED[$i]}"
+    call="$(sed -n "$((i + 1))p" "$WORK/calls")"
+    ok=false; [[ "$call" == "fs --scanners $scanners "*" $ref" ]] && ok=true
+    check "scan $((i + 1)) is the $scanners scan of $ref" "$ok"
+    ok=false; [[ "$call" == *" --severity $SEVERITY "* ]] && ok=true
+    check "scan $((i + 1)) uses the workflow's severity" "$ok"
+    ok=false; [[ "$call" == *" --exit-code $EXIT_CODE "* ]] && ok=true
+    check "scan $((i + 1)) uses the workflow's exit code" "$ok"
+    if [[ "$skip" == - ]]; then
+        ok=false; [[ "$call" != *"--skip-dirs"* ]] && ok=true
+        check "scan $((i + 1)) skips no directory" "$ok"
+    else
+        ok=false; [[ "$call" == *" --skip-dirs $skip "* ]] && ok=true
+        check "scan $((i + 1)) uses the workflow's skip-dirs" "$ok"
+    fi
+    if [[ "$offline" == true ]]; then
+        ok=false; [[ "$call" == *" --offline-scan "* ]] && ok=true
+        check "scan $((i + 1)) runs offline" "$ok"
+    else
+        ok=false; [[ "$call" == *" --offline-scan=false "* ]] && ok=true
+        check "scan $((i + 1)) runs online whatever the environment says" "$ok"
+    fi
+done
 ok=false; [[ ! -s "$WORK/err" ]] && ok=true
 check "no warning for the pinned version" "$ok"
 
@@ -128,7 +161,7 @@ check "no warning for the pinned version" "$ok"
 run_make "$VERSION" 1
 ok=false; [[ "$MAKE_STATUS" -ne 0 ]] && ok=true
 check "make trivy fails when a scan finds something" "$ok"
-ok=false; [[ "$(wc -l <"$WORK/calls")" -eq 3 ]] && ok=true
+ok=false; [[ "$(wc -l <"$WORK/calls")" -eq "${#EXPECTED[@]}" ]] && ok=true
 check "every scan still runs after a failing one" "$ok"
 
 # Another version: a warning naming both versions, scans still run.
@@ -137,7 +170,7 @@ ok=false; [[ "$MAKE_STATUS" -eq 0 ]] && ok=true
 check "make trivy still succeeds with another version" "$ok"
 ok=false; grep -q "0.0.1.*$VERSION" "$WORK/err" && ok=true
 check "another version is warned about, naming the pinned one" "$ok"
-ok=false; [[ "$(wc -l <"$WORK/calls")" -eq 3 ]] && ok=true
+ok=false; [[ "$(wc -l <"$WORK/calls")" -eq "${#EXPECTED[@]}" ]] && ok=true
 check "the scans run with another version" "$ok"
 
 # No trivy: the install hint, no scan.
