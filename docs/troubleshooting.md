@@ -1314,44 +1314,50 @@ so they are not configurable. Ordinary mail does not reach them.
 
 ChatGPT reports "This tool call was blocked by OpenAI because we
 couldn't determine the safety status of the request". This is a check
-on OpenAI's side, made before the request is sent: the server never
-receives the call, and nothing in `.env`, the bearer token or the
-server changes the outcome. The check is intermittent, and it also
-blocks tools that declare the read-only safety hints (#919; background
-and sources in [Safety annotations](mcp-tools.md#safety-annotations)).
+on OpenAI's side, made before ChatGPT sends the call, and nothing in
+`.env`, the bearer token or the server changes the outcome. The check
+is intermittent, and it also blocks tools that declare the read-only
+safety hints (#919; background and sources in
+[Safety annotations](mcp-tools.md#safety-annotations)).
 
-1. Confirm the call never arrived. Look for the tool's completion line
-   around the time of the refusal:
+1. Rule out a server-side failure. Look at the server log around the
+   time of the refusal:
 
    ```bash
-   docker compose logs mcp-server --since 10m | grep 'tool=<tool name>'
+   docker compose logs mcp-server --since 10m | grep -E 'tool=<tool name>|rejected request'
    ```
 
-   A call that reached the server logs a `tool=<name> outcome=...`
-   line on `mcp.timings` (see
+   A tool that ran logs a `tool=<name> outcome=...` line on
+   `mcp.timings` (see
    [Reading a tool call's log line](#reading-a-tool-calls-log-line)),
    and every tool except `list_folders` and `get_mailbox_status` also
-   logs a `tool=<name> {...} withheld=[...]` line when the call
-   starts. No
-   line for the blocked call means the block happened in ChatGPT. A
-   line with `outcome=error` is a server failure instead; follow the
-   cause on the WARNING or ERROR line before it.
+   logs a `tool=<name> {...} withheld=[...]` line when it starts. A
+   missing line shows only that the tool did not run, not by itself
+   that the request never arrived: a request refused for its token,
+   Host or Origin is logged as `rejected request: reason=<reason>`
+   instead (see
+   [MCP client gets 401 Unauthorized](#mcp-client-gets-401-unauthorized)),
+   and a line with `outcome=error` is a server failure whose cause is
+   on the WARNING or ERROR line before it. With neither, and ChatGPT
+   showing this exact message, the block happened in ChatGPT.
 2. Optionally confirm the server serves the hints. From the repository
    root, list the tools through a client; every tool should print
-   `True False False`. The client reads the token from its file and
-   uses the stdio adapter's HTTP client, which ignores `HTTP_PROXY`,
-   `ALL_PROXY` and the system proxy, so the token goes straight to
-   loopback and never to a proxy:
+   `True False False`. The snippet reads the token from its file,
+   takes the port from `MCP_PORT` in `.env` (default `3000`) so the
+   token goes to the port the server is published on, and uses the
+   stdio adapter's URL and HTTP client: IPv4 loopback, ignoring
+   `HTTP_PROXY`, `ALL_PROXY` and the system proxy, so the token never
+   goes to a proxy:
 
    ```bash
-   cd mcp-server && uv run python - <<'EOF'
-   import asyncio, pathlib
+   cd mcp-server && MCP_PORT="$(sed -n 's/^MCP_PORT=//p' ../.env | tail -n 1)" uv run python - <<'EOF'
+   import asyncio, os, pathlib
    from fastmcp import Client
    from fastmcp.client.transports import StreamableHttpTransport
-   from src.stdio_adapter import _loopback_http_client
+   from src.stdio_adapter import _loopback_http_client, server_url
    token = pathlib.Path("../.secrets/mcp_auth_token.txt").read_text().strip()
    transport = StreamableHttpTransport(
-       "http://127.0.0.1:3000/mcp", auth=token,
+       server_url(os.environ.get("MCP_PORT") or "3000"), auth=token,
        httpx_client_factory=_loopback_http_client,
    )
    async def main():
@@ -1364,8 +1370,14 @@ and sources in [Safety annotations](mcp-tools.md#safety-annotations)).
    ```
 
 3. Retry the identical call; it often succeeds on a later attempt.
-4. The ChatGPT workspace "Configure approvals" setting is reported to
-   reduce the blocks. There is no server-side fix.
+   There is no server-side fix.
+4. Approval settings are not a recommended fix. Setting the connector's
+   approvals in ChatGPT to allow all actions without asking is reported
+   to reduce the blocks, but it removes ChatGPT's per-call approval:
+   every tool call then runs without a prompt, including calls that
+   return mail to ChatGPT and the intelligence tools that send mail
+   excerpts to the configured inference provider. Keep approvals on
+   and retry instead.
 
 ## Claude Desktop doesn't see the tools
 

@@ -107,8 +107,8 @@ request", which led to #899.
 
 The hints are necessary but not sufficient. With all three set and
 served, ChatGPT refused a call with the same message again on
-2026-10-07 (#919), and the request never reached the server: there is
-no `mcp.timings` line for it. Others report the same message for tools
+2026-10-07 (#919), and the server logged nothing for that call: the
+tool never ran. Others report the same message for tools
 that declare the hints
 ([OpenAI community](https://community.openai.com/t/chatgpt-app-mcp-tool-calls-blocked-by-openai-safety-checks-before-reaching-mcp-server/1386059)),
 and report that it is intermittent, so an identical retry can succeed
