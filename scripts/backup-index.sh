@@ -38,9 +38,17 @@ if mode == "make":
     # those untouched for 6 hours, so a backup still running in another
     # shell, or a restore still writing, keeps its file.
     cutoff = time.time() - 6 * 3600
-    copies = [p for p in db.parent.glob(".backup-index-*") if p.stat().st_mtime < cutoff]
-    staged = db.with_name(".restore-index.db")
-    stagings = [staged] if staged.exists() and staged.stat().st_mtime < cutoff else []
+
+    def stale(path):
+        try:
+            return path.stat().st_mtime < cutoff
+        except FileNotFoundError:
+            # Absent, or removed by another backup sweep between the
+            # listing and this check.
+            return False
+
+    copies = [p for p in db.parent.glob(".backup-index-*") if stale(p)]
+    stagings = [p for p in (db.with_name(".restore-index.db"),) if stale(p)]
     for path in copies + stagings:
         path.unlink(missing_ok=True)
     if copies or stagings:
