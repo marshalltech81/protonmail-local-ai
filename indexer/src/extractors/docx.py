@@ -33,6 +33,14 @@ for it. The payload bytes are not changed. This route depends on
 python-docx 1.2.0's ``Package`` / ``PartFactory`` API;
 ``test_python_docx_route_for_templates_still_holds`` fails if an
 upgrade breaks it.
+
+python-docx follows a package's part relationships recursively while it
+opens it, so a long chain of related parts raises ``RecursionError``
+there (#945). Only the open is guarded: the error becomes
+``DocxRelationshipChainError``, recorded ``failed`` by type, since a
+chain of crafted parts is a property of the file, not host pressure. A
+``RecursionError`` anywhere else still reaches the dispatcher, which
+re-raises it.
 """
 
 from __future__ import annotations
@@ -60,6 +68,14 @@ PartFactory.part_type_for[WML_TEMPLATE_MAIN] = DocumentPart
 _WORD_MAIN_TYPES = frozenset({CT.WML_DOCUMENT_MAIN, WML_TEMPLATE_MAIN})
 
 
+class DocxRelationshipChainError(Exception):
+    """The package relates its parts in a chain too long for python-docx
+    to follow: it follows relationships recursively. Fixed text."""
+
+    def __init__(self) -> None:
+        super().__init__("package relationship chain too deep to open")
+
+
 def _open_document(payload: bytes) -> DocxDocument:
     """Load a ``.docx`` or ``.dotx`` payload as a python-docx document.
 
@@ -67,7 +83,11 @@ def _open_document(payload: bytes) -> DocxDocument:
     Any other main part (a workbook, a presentation) raises ``ValueError``
     with fixed text, as ``docx.Document`` would.
     """
-    part = Package.open(io.BytesIO(payload)).main_document_part
+    try:
+        package = Package.open(io.BytesIO(payload))
+    except RecursionError:
+        raise DocxRelationshipChainError() from None
+    part = package.main_document_part
     if part.content_type not in _WORD_MAIN_TYPES or not isinstance(part, DocumentPart):
         raise ValueError("main part is not a Word document or template")
     return part.document
