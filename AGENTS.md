@@ -221,8 +221,9 @@ Do not make any of the following changes unless the repository owner explicitly 
   membership still resolves by Message-ID.
 - Do not store raw attachment payload bytes in SQLite. The current schema
   keeps bytes only in the `.eml` on disk. ``attachment_extractions`` caches
-  the extracted *text* per content hash so OCR / parse cost runs at most
-  once per unique payload, not the bytes themselves.
+  the extracted *text* per content hash and extractor module (#928) so
+  OCR / parse cost runs at most once per unique payload and extractor,
+  not the bytes themselves.
 - When a change makes an attachment extractor return different text for
   the same bytes, bump that module's entry in
   `indexer/src/extractors/__init__.py` `EXTRACTOR_VERSIONS`. The

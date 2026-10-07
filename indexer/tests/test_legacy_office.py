@@ -814,12 +814,10 @@ class TestPptExtractor:
                 NON_OLE2_PPT_ERROR,
             )
 
-    @pytest.mark.parametrize("override", ["docx", "xlsx", "pptx"])
-    def test_stale_ooxml_row_refreshed_from_a_ppt_occurrence_runs_ppt(
-        self, tmp_path, monkeypatch, override
-    ):
-        """An OLE2 payload bound for an OOXML extractor goes to the legacy
-        extractor its occurrence's label selects, now ``.ppt`` too."""
+    def test_a_ppt_occurrence_runs_ppt_and_never_an_ooxml_refresh(self, tmp_path, monkeypatch):
+        """A ``.ppt`` occurrence runs the ``ppt`` extractor. Since #928 an
+        OOXML row is never refreshed from it (rows are per module), so
+        the dispatcher has no OOXML-to-legacy re-route to take."""
         from src.extractors import ppt
 
         monkeypatch.setattr(ppt, "PPT_HOME", _fake_ppt_home(tmp_path, "print('slide words')"))
@@ -827,7 +825,6 @@ class TestPptExtractor:
             content_type=_PPT_MIME,
             filename="deck.ppt",
             payload=_OLE2_MAGIC + bytes(64),
-            module_override=override,
         )
         assert (result.status, result.extractor, result.text) == (
             STATUS_SUCCESS,

@@ -30,6 +30,12 @@ from src.parser import Attachment
 from tests.conftest import make_message, make_mock_embedder, make_thread
 
 
+def _module(attachment: Attachment) -> str:
+    """The extractor module ``attachment``'s label selects: with its content
+    hash, the key of the cache row it uses (#928)."""
+    return attachment_indexing.extraction_cache_module(attachment)
+
+
 def _attachment(
     payload: bytes = b"hello from an attachment",
     *,
@@ -86,6 +92,7 @@ def test_successful_cached_extraction_is_reused(tmp_path, monkeypatch):
     attachment = _attachment()
     db.store_attachment_extraction(
         attachment_id=attachment.content_hash,
+        extractor_module=_module(attachment),
         extraction_status=STATUS_SUCCESS,
         extractor="text@3",
         extracted_text="cached text",
@@ -120,7 +127,7 @@ def test_successful_cached_extraction_is_reused(tmp_path, monkeypatch):
         )
     ]
     assert chunk_texts == ["cached text"]
-    row = db.get_attachment_extraction(attachment.content_hash)
+    row = db.get_attachment_extraction(attachment.content_hash, _module(attachment))
     assert (row["extractor"], row["extracted_text"]) == ("text@3", "cached text")
     assert db.get_chunk_ids_for_message(
         "message@example.com", attachment_id=attachment.content_hash
@@ -140,6 +147,7 @@ def _process_with_cached_extractor(
     attachment = _attachment(b"docx bytes", filename=filename, content_type=content_type)
     db.store_attachment_extraction(
         attachment_id=attachment.content_hash,
+        extractor_module=_module(attachment),
         extraction_status=status,
         extractor=extractor_name,
         extracted_text=text,
@@ -166,7 +174,7 @@ def _process_with_cached_extractor(
         max_bytes=10_000_000,
         max_ocr_pages=20,
     )
-    return extractor, db.get_attachment_extraction(attachment.content_hash)
+    return extractor, db.get_attachment_extraction(attachment.content_hash, _module(attachment))
 
 
 def test_cache_row_from_an_older_extractor_version_is_re_extracted(tmp_path, monkeypatch):
@@ -207,7 +215,7 @@ def test_cache_row_from_the_unversioned_xlsx_extractor_is_re_extracted(tmp_path,
         content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
     extractor.assert_called_once()
-    assert extractor.call_args.kwargs["module_override"] == "xlsx"
+    assert extractor.call_args.kwargs["filename"] == "book.xlsx"
 
 
 def test_pre_bump_pdf_row_is_re_extracted_by_the_pdf_extractor(tmp_path, monkeypatch):
@@ -225,7 +233,7 @@ def test_pre_bump_pdf_row_is_re_extracted_by_the_pdf_extractor(tmp_path, monkeyp
         content_type="application/pdf",
     )
     extractor.assert_called_once()
-    assert extractor.call_args.kwargs["module_override"] == "pdf"
+    assert extractor.call_args.kwargs["filename"] == "statement.pdf"
     assert row["extracted_text"] == "fresh text"
 
 
@@ -236,6 +244,7 @@ def test_stale_ocr_row_is_served_while_ocr_is_off(tmp_path, monkeypatch):
     attachment = _attachment(b"png bytes", filename="scan.png", content_type="image/png")
     db.store_attachment_extraction(
         attachment_id=attachment.content_hash,
+        extractor_module=_module(attachment),
         extraction_status=STATUS_SUCCESS,
         extractor="image-ocr",
         extracted_text="old ocr text",
@@ -249,7 +258,10 @@ def test_stale_ocr_row_is_served_while_ocr_is_off(tmp_path, monkeypatch):
     )
     extractor.assert_not_called()
     assert plan.status == STATUS_SUCCESS and plan.chunks
-    assert db.get_attachment_extraction(attachment.content_hash)["extractor"] == "image-ocr"
+    assert (
+        db.get_attachment_extraction(attachment.content_hash, _module(attachment))["extractor"]
+        == "image-ocr"
+    )
 
 
 def test_cache_row_from_the_current_extractor_version_is_reused(tmp_path, monkeypatch):
@@ -271,28 +283,36 @@ def test_cache_row_from_a_newer_extractor_version_is_reused(tmp_path, monkeypatc
     assert row["extractor"] == "docx@5"
 
 
-def test_stale_row_is_refreshed_by_an_occurrence_of_another_type(tmp_path, monkeypatch):
-    """The same bytes attached as ``.bin`` resolve to no extractor. They
-    share the DOCX cache row, so they re-run the extractor that produced
-    it: re-running by their own metadata would overwrite the row with
-    ``unsupported``, and skipping would leave their chunks stale."""
+def test_stale_row_is_left_to_the_occurrences_that_select_its_module(tmp_path, monkeypatch):
+    """#928: the same bytes attached as ``.bin`` select no extractor, so
+    they neither use nor refresh the stale DOCX row (before, they re-ran
+    the DOCX extractor for it). They get their own row, and the DOCX row
+    is left for a ``.docx`` occurrence to refresh."""
     db = _seed_thread_for_cache_test(tmp_path)
-    extractor, row = _process_with_cached_extractor(
-        db,
-        "docx",
-        STATUS_SUCCESS,
-        "old text",
-        monkeypatch,
-        filename="blob.bin",
-        content_type="application/octet-stream",
+    blob = _attachment(b"docx bytes", filename="blob.bin", content_type="application/octet-stream")
+    db.store_attachment_extraction(
+        attachment_id=blob.content_hash,
+        extractor_module="docx",
+        extraction_status=STATUS_SUCCESS,
+        extractor="docx",
+        extracted_text="old text",
+        extraction_error=None,
+    )
+    extractor = MagicMock(wraps=attachment_indexing.extract_attachment)
+    monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
+    _prepare_and_apply(
+        db=db,
+        thread_id="thread-1",
+        **_kwargs(blob, claimant_id="message@example.com"),
     )
     extractor.assert_called_once()
-    assert extractor.call_args.kwargs["module_override"] == "docx"
-    assert row["extractor"] == "docx@5"
-    assert row["extracted_text"] == "fresh text"
-    assert db.get_chunk_ids_for_message(
-        "message@example.com", attachment_id=hashlib.sha256(b"docx bytes").hexdigest()
+    own = db.get_attachment_extraction(blob.content_hash, "")
+    assert (own["extraction_status"], own["extraction_error"]) == (
+        STATUS_UNSUPPORTED,
+        NO_EXTRACTOR_ERROR,
     )
+    docx_row = db.get_attachment_extraction(blob.content_hash, "docx")
+    assert (docx_row["extractor"], docx_row["extracted_text"]) == ("docx", "old text")
 
 
 def test_reused_terminal_row_clears_the_stale_chunks(tmp_path, monkeypatch):
@@ -306,6 +326,7 @@ def test_reused_terminal_row_clears_the_stale_chunks(tmp_path, monkeypatch):
 
     db.store_attachment_extraction(
         attachment_id=attachment_id,
+        extractor_module="docx",
         extraction_status=STATUS_EMPTY,
         extractor="docx@5",
         extracted_text=None,
@@ -381,6 +402,7 @@ def _run_process_with_cached_status(
 ):
     db.store_attachment_extraction(
         attachment_id=attachment.content_hash,
+        extractor_module=_module(attachment),
         extraction_status=status,
         extractor="text@3",
         extracted_text=None,
@@ -404,7 +426,7 @@ def _run_process_with_cached_status(
         max_ocr_pages=20,
     )
     # A cache hit leaves the cached row as it was and writes no chunks.
-    row = db.get_attachment_extraction(attachment.content_hash)
+    row = db.get_attachment_extraction(attachment.content_hash, _module(attachment))
     assert (row["extraction_status"], row["extraction_error"]) == (status, error)
     assert not db.get_chunk_ids_for_message(
         "message@example.com", attachment_id=attachment.content_hash
@@ -442,6 +464,7 @@ def test_cached_too_large_extraction_is_re_run_once_the_payload_fits(tmp_path, m
         attachment = _attachment()
         db.store_attachment_extraction(
             attachment_id=attachment.content_hash,
+            extractor_module=_module(attachment),
             extraction_status=STATUS_TOO_LARGE,
             extractor=None,
             extracted_text=None,
@@ -470,7 +493,7 @@ def test_cached_too_large_extraction_is_re_run_once_the_payload_fits(tmp_path, m
 
         assert extractor.call_count == 1, label
         assert extractor.call_args.kwargs["max_bytes"] == attachment.size + slack
-        row = db.get_attachment_extraction(attachment.content_hash)
+        row = db.get_attachment_extraction(attachment.content_hash, _module(attachment))
         assert row["extraction_status"] == STATUS_SUCCESS, label
         assert db.get_chunk_ids_for_message(
             "message@example.com", attachment_id=attachment.content_hash
@@ -505,6 +528,7 @@ def test_cached_unsupported_is_re_run_for_an_occurrence_with_an_extractor(tmp_pa
     attachment = _attachment(filename="document.txt", content_type="text/plain")
     db.store_attachment_extraction(
         attachment_id=attachment.content_hash,
+        extractor_module=_module(attachment),
         extraction_status=STATUS_UNSUPPORTED,
         extractor=None,
         extracted_text=None,
@@ -530,9 +554,9 @@ def test_cached_unsupported_is_re_run_for_an_occurrence_with_an_extractor(tmp_pa
         max_ocr_pages=20,
     )
     extractor.assert_called_once()
-    assert db.get_attachment_extraction(attachment.content_hash)["extraction_status"] == (
-        STATUS_SUCCESS
-    )
+    assert db.get_attachment_extraction(attachment.content_hash, _module(attachment))[
+        "extraction_status"
+    ] == (STATUS_SUCCESS)
 
 
 def test_ocr_disabled_row_stays_cached_while_ocr_is_off(tmp_path, monkeypatch):
@@ -555,13 +579,15 @@ def test_ocr_disabled_row_stays_cached_while_ocr_is_off(tmp_path, monkeypatch):
 def test_image_ocr_disabled_row_does_not_block_a_pdf_occurrence(tmp_path, monkeypatch):
     """Review round 2: the PDF extractor reads a digital text layer without
     OCR, so an "OCR disabled" row written for the bytes as an image must
-    not keep a PDF occurrence of them unextracted while OCR is off."""
+    not keep a PDF occurrence of them unextracted while OCR is off. Since
+    #928 the row is the image module's, which a PDF occurrence never reads."""
     from src.extractors import OCR_DISABLED_ERROR
 
     db = _seed_thread_for_cache_test(tmp_path)
     attachment = _attachment(filename="report.pdf", content_type="application/pdf")
     db.store_attachment_extraction(
         attachment_id=attachment.content_hash,
+        extractor_module="image",
         extraction_status=STATUS_UNSUPPORTED,
         extractor=None,
         extracted_text=None,
@@ -607,6 +633,7 @@ def test_recent_failed_cached_extraction_is_honored(tmp_path, monkeypatch):
     attachment = _attachment()
     db.store_attachment_extraction(
         attachment_id=attachment.content_hash,
+        extractor_module=_module(attachment),
         extraction_status=STATUS_FAILED,
         extractor="text@3",
         extracted_text=None,
@@ -655,10 +682,11 @@ def test_stale_failed_cached_extraction_is_retried(tmp_path, monkeypatch):
     stale_iso = (datetime.now(UTC) - timedelta(days=30)).isoformat()
     db._conn.execute(
         "INSERT INTO attachment_extractions "
-        "(attachment_id, extraction_status, extractor, extracted_text, "
-        "extraction_error, extracted_at) VALUES (?, ?, ?, ?, ?, ?)",
+        "(attachment_id, extractor_module, extraction_status, extractor, extracted_text, "
+        "extraction_error, extracted_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
         (
             attachment.content_hash,
+            "text",
             STATUS_FAILED,
             "text",
             None,
@@ -695,7 +723,7 @@ def test_stale_failed_cached_extraction_is_retried(tmp_path, monkeypatch):
     )
 
     extractor.assert_called_once()
-    cached = db.get_attachment_extraction(attachment.content_hash)
+    cached = db.get_attachment_extraction(attachment.content_hash, _module(attachment))
     assert cached is not None
     assert cached["extraction_status"] == STATUS_SUCCESS
     assert cached["extracted_text"] == "fresh extracted text"
@@ -716,6 +744,7 @@ def test_ocr_disabled_unsupported_is_re_run_when_ocr_re_enabled(tmp_path, monkey
     attachment = _attachment()
     db.store_attachment_extraction(
         attachment_id=attachment.content_hash,
+        extractor_module=_module(attachment),
         extraction_status="unsupported",
         extractor=None,
         extracted_text=None,
@@ -766,6 +795,7 @@ def test_ocr_disabled_pdf_cache_is_re_run_when_ocr_re_enabled(tmp_path, monkeypa
     attachment = _attachment(filename="scan.pdf", content_type="application/pdf")
     db.store_attachment_extraction(
         attachment_id=attachment.content_hash,
+        extractor_module=_module(attachment),
         extraction_status="unsupported",
         extractor=None,
         extracted_text=None,
@@ -799,7 +829,7 @@ def test_ocr_disabled_pdf_cache_is_re_run_when_ocr_re_enabled(tmp_path, monkeypa
     )
 
     extractor.assert_called_once()
-    cached = db.get_attachment_extraction(attachment.content_hash)
+    cached = db.get_attachment_extraction(attachment.content_hash, _module(attachment))
     assert cached is not None
     assert cached["extraction_status"] == STATUS_SUCCESS
     assert cached["extractor"] == "pdf-ocr"
@@ -843,6 +873,7 @@ class TestPrepareApplyBoundary:
         attachment = _attachment()
         db.store_attachment_extraction(
             attachment_id=attachment.content_hash,
+            extractor_module=_module(attachment),
             extraction_status=STATUS_SUCCESS,
             extractor="text@3",
             extracted_text="cached body",
@@ -975,7 +1006,7 @@ class TestNonSuccessPlanPaths:
         assert _occurrence_count(db, attachment) == 1
         # No embedding work should happen for an unsupported attachment.
         embedder.embed.assert_not_called()
-        cached = db.get_attachment_extraction(attachment.content_hash)
+        cached = db.get_attachment_extraction(attachment.content_hash, _module(attachment))
         assert cached is not None
         assert cached["extraction_status"] == STATUS_UNSUPPORTED
 
@@ -1006,7 +1037,7 @@ class TestNonSuccessPlanPaths:
         assert not db.get_chunk_ids_for_message("msg@x", attachment_id=attachment.content_hash)
         assert _occurrence_count(db, attachment) == 1
         embedder.embed.assert_not_called()
-        cached = db.get_attachment_extraction(attachment.content_hash)
+        cached = db.get_attachment_extraction(attachment.content_hash, _module(attachment))
         assert cached is not None
         assert cached["extraction_status"] == STATUS_TOO_LARGE
 
@@ -1029,7 +1060,7 @@ class TestExtractedTextCap:
             **_kwargs(attachment, max_extracted_chars=128),
         )
 
-        cached = db.get_attachment_extraction(attachment.content_hash)
+        cached = db.get_attachment_extraction(attachment.content_hash, _module(attachment))
         assert cached is not None
         assert cached["extraction_status"] == STATUS_SUCCESS
         assert len(cached["extracted_text"]) <= 128
@@ -1049,7 +1080,7 @@ class TestExtractedTextCap:
             **_kwargs(attachment, max_extracted_chars=None),
         )
 
-        cached = db.get_attachment_extraction(attachment.content_hash)
+        cached = db.get_attachment_extraction(attachment.content_hash, _module(attachment))
         assert cached is not None
         # Stored text is the stripped extraction; allow for trailing
         # whitespace stripped by the dispatcher but assert it covers the
@@ -1057,10 +1088,10 @@ class TestExtractedTextCap:
         assert len(cached["extracted_text"]) >= len(long_payload) - 5
 
 
-def test_batch_results_are_shared_but_do_not_block_a_supported_occurrence(tmp_path, monkeypatch):
+def test_batch_results_are_shared_per_extractor_module(tmp_path, monkeypatch):
     """#237 + #210 within one batch: a pending result is reused by later
-    occurrences of the same bytes, except an ``unsupported`` one when
-    the occurrence's metadata now selects an extractor."""
+    occurrences of the same bytes that select the same extractor module
+    (#928), and an occurrence that selects another extracts its own."""
     from src.extractors import extract
 
     db = _setup_db_for_attachment(tmp_path)
@@ -1071,7 +1102,7 @@ def test_batch_results_are_shared_but_do_not_block_a_supported_occurrence(tmp_pa
         return extract(**kwargs)
 
     monkeypatch.setattr(attachment_indexing, "extract_attachment", counting_extract)
-    batch: dict[str, ExtractionResult] = {}
+    batch: dict[tuple[str, str], ExtractionResult] = {}
     payload = b"plain words in a file"
 
     def prepare(filename, content_type):
@@ -1088,19 +1119,20 @@ def test_batch_results_are_shared_but_do_not_block_a_supported_occurrence(tmp_pa
     assert calls == ["blob.bin", "doc.txt"]
     assert blob.status == STATUS_UNSUPPORTED
     assert text.status == STATUS_SUCCESS and text.chunks
-    assert again.status == STATUS_SUCCESS
+    assert (again.status, again.cached) == (STATUS_UNSUPPORTED, True)
     # Reused but uncommitted: the reusing message still persists the row.
-    assert again.extraction_to_persist is text.extraction_to_persist
+    assert again.extraction_to_persist is blob.extraction_to_persist
 
 
 def test_ocr_disabled_row_does_not_block_a_non_ocr_occurrence(tmp_path, monkeypatch):
     """Review round 1: bytes cached "OCR disabled" from an image must not
     block the same bytes attached as text while OCR is off — the text
-    extractor does not need OCR."""
+    extractor does not need OCR. Since #928 the row is the image module's."""
     db = _seed_thread_for_cache_test(tmp_path)
     attachment = _attachment(filename="document.txt", content_type="text/plain")
     db.store_attachment_extraction(
         attachment_id=attachment.content_hash,
+        extractor_module="image",
         extraction_status=STATUS_UNSUPPORTED,
         extractor=None,
         extracted_text=None,
@@ -1139,7 +1171,7 @@ def test_batch_ocr_disabled_result_does_not_block_a_non_ocr_occurrence(tmp_path,
         return extract(**kwargs)
 
     monkeypatch.setattr(attachment_indexing, "extract_attachment", counting_extract)
-    batch: dict[str, ExtractionResult] = {}
+    batch: dict[tuple[str, str], ExtractionResult] = {}
     payload = b"plain words in a file"
     for filename, content_type in (("scan.png", "image/png"), ("doc.txt", "text/plain")):
         plan = prepare_attachment_writes(
@@ -1174,7 +1206,7 @@ def test_unsupported_attachment_log_omits_filename_and_mime(tmp_path, caplog):
         )
 
     assert plan.status == STATUS_UNSUPPORTED
-    cached = db.get_attachment_extraction(attachment.content_hash)
+    cached = db.get_attachment_extraction(attachment.content_hash, _module(attachment))
     assert cached is not None
     for marker in ("SYNTHETIC_FILENAME_MARKER", "SYNTHETIC_MIME_MARKER"):
         assert marker not in caplog.text
@@ -1204,7 +1236,7 @@ def test_failed_extraction_persists_no_filename_or_parser_text(tmp_path, monkeyp
         )
 
     assert plan.status == STATUS_FAILED
-    cached = db.get_attachment_extraction(attachment.content_hash)
+    cached = db.get_attachment_extraction(attachment.content_hash, _module(attachment))
     assert cached is not None
     assert cached["extraction_error"] == "ValueError"
     for marker in ("SYNTHETIC_FILENAME_MARKER", "SYNTHETIC_EXC_MARKER"):
@@ -1239,20 +1271,20 @@ def test_payload_re_arriving_after_its_last_carrier_was_reaped_is_re_extracted(
         max_ocr_pages=20,
     )
     _prepare_and_apply(claimant_id="first@x", **kwargs)
-    assert db.get_attachment_extraction(attachment.content_hash) is not None
+    assert db.get_attachment_extraction(attachment.content_hash, _module(attachment)) is not None
 
     db.add_pending_deletion("/m/first", "first@x", "t-rearrive")
     db.reap_thread_messages(
         make_thread(messages=[keep], thread_id="t-rearrive"), [0.0] * EMBEDDING_DIM, ["first@x"]
     )
-    assert db.get_attachment_extraction(attachment.content_hash) is None
+    assert db.get_attachment_extraction(attachment.content_hash, _module(attachment)) is None
 
     extract = MagicMock(wraps=attachment_indexing.extract_attachment)
     monkeypatch.setattr(attachment_indexing, "extract_attachment", extract)
     _prepare_and_apply(claimant_id="keep@x", **kwargs)
 
     extract.assert_called_once()
-    assert db.get_attachment_extraction(attachment.content_hash) is not None
+    assert db.get_attachment_extraction(attachment.content_hash, _module(attachment)) is not None
 
 
 # ---------------------------------------------------------------------------
@@ -1375,7 +1407,7 @@ class TestAttachmentOutcomeCounts:
         self._drain()
         db = _setup_db_for_attachment(tmp_path)
         attachment = _attachment(b"cached words")
-        batch: dict[str, ExtractionResult] = {}
+        batch: dict[tuple[str, str], ExtractionResult] = {}
         # Extracted, then reused from the batch before it commits.
         plans = [
             prepare_attachment_writes(db=db, batch_extractions=batch, **_kwargs(attachment))
@@ -1527,8 +1559,8 @@ _OLE2_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
 
 
 def _stub_legacy_extractors(monkeypatch) -> list[str]:
-    """Replace the ``doc`` / ``xls`` extractors with stubs that record
-    each call, so the real dispatcher runs without catdoc."""
+    """Replace the ``doc`` / ``xls`` / ``ppt`` extractors with stubs that
+    record each call, so the real dispatcher runs without catdoc or Java."""
     from src import extractors
 
     calls: list[str] = []
@@ -1540,24 +1572,27 @@ def _stub_legacy_extractors(monkeypatch) -> list[str]:
 
         return run
 
-    for module in ("doc", "xls"):
+    for module in ("doc", "xls", "ppt"):
         monkeypatch.setitem(extractors._IMPORT_CACHE, module, stub(module))
     return calls
 
 
 class TestLegacyOle2CacheRows:
-    """#694: an OLE2 payload no extractor reads is cached ``unsupported``.
-    The row is shared by content hash, so it must hold for every
-    occurrence the same check would reject, and only for those. #935: an
-    occurrence labelled ``.doc`` / ``.xls`` now selects a legacy
-    extractor, so it re-runs the row."""
+    """#694: an OLE2 payload no extractor reads is cached ``unsupported``,
+    and the row holds for the occurrences that select its module. #935:
+    an occurrence labelled ``.doc`` / ``.xls`` selects a legacy extractor.
+    #928: rows are keyed by module, so the v0 OLE2 rows (which had no
+    extractor stamp and were migrated under '') stand in for no labelled
+    occurrence."""
 
     @staticmethod
-    def _store(db: Database, attachment: Attachment) -> None:
+    def _store_v0_row(db: Database, attachment: Attachment) -> None:
+        """The OLE2 row v0 wrote, as the v1 migration keys it."""
         from src.extractors import LEGACY_OLE2_ERROR
 
         db.store_attachment_extraction(
             attachment_id=attachment.content_hash,
+            extractor_module=attachment_indexing.NO_EXTRACTOR_MODULE,
             extraction_status=STATUS_UNSUPPORTED,
             extractor=None,
             extracted_text=None,
@@ -1593,20 +1628,29 @@ class TestLegacyOle2CacheRows:
             )
             extractor.assert_not_called()
 
-    def test_row_holds_for_a_text_labelled_occurrence(self, tmp_path, monkeypatch):
-        """#932: the same bytes labelled ``.txt`` would be rejected by the
-        text guard, so the row stands in for them too."""
-        from src.extractors import LEGACY_OLE2_ERROR
+    def test_v0_row_does_not_stand_in_for_a_text_labelled_occurrence(self, tmp_path):
+        """#928: the same bytes labelled ``.txt`` get the text guard's own
+        result (#932) through the real dispatcher, under their own module,
+        and the startup sweep re-queues them for it once."""
+        from src.extractors import BINARY_AS_TEXT_ERROR, LEGACY_OLE2_ERROR
 
         for content_type, filename in (("text/plain", "a.bin"), ("", "a.txt")):
             db = _seed_thread_for_cache_test(tmp_path / filename)
             attachment = _attachment(
                 _OLE2_MAGIC + bytes(64), filename=filename, content_type=content_type
             )
-            extractor = _run_process_with_cached_status(
-                db, attachment, STATUS_UNSUPPORTED, monkeypatch, error=LEGACY_OLE2_ERROR
+            self._store_v0_row(db, attachment)
+            assert attachment_indexing.reprocess_reruns_extraction(
+                LEGACY_OLE2_ERROR, "", content_type, filename
             )
-            extractor.assert_not_called()
+            plan = prepare_attachment_writes(
+                db=db, **_kwargs(attachment, claimant_id="message@example.com")
+            )
+            assert (plan.status, plan.extraction_error, plan.cached) == (
+                STATUS_UNSUPPORTED,
+                BINARY_AS_TEXT_ERROR,
+                False,
+            )
 
     def test_row_is_re_run_for_a_legacy_labelled_occurrence(self, tmp_path, monkeypatch):
         """#935: the rows #694 recorded for a real ``.doc`` / ``.xls`` are
@@ -1621,7 +1665,7 @@ class TestLegacyOle2CacheRows:
             attachment = _attachment(
                 _OLE2_MAGIC + bytes(64), filename=filename, content_type=content_type
             )
-            self._store(db, attachment)
+            self._store_v0_row(db, attachment)
             extractor = MagicMock(
                 return_value=ExtractionResult(
                     status=STATUS_SUCCESS, extractor="doc@1", text="words", error=None
@@ -1641,7 +1685,7 @@ class TestLegacyOle2CacheRows:
         attachment = _attachment(
             _OLE2_MAGIC + bytes(64), filename="a.pdf", content_type="application/pdf"
         )
-        self._store(db, attachment)
+        self._store_v0_row(db, attachment)
         extractor = MagicMock(
             return_value=ExtractionResult(
                 status=STATUS_FAILED, extractor="pdf@4", text=None, error="PdfReadError"
@@ -1655,8 +1699,8 @@ class TestLegacyOle2CacheRows:
         """#694 review round 1: a ``.docx`` occurrence of a genuine
         ``.doc``'s bytes processed first, through the real dispatcher,
         caches ``unsupported``, not ``failed``. #935: the later ``.doc``
-        occurrence extracts the bytes and replaces the row, which then
-        serves both."""
+        occurrence extracts the bytes. #928: each keeps its own row, and
+        each is then served its own from the cache."""
         from src.extractors import LEGACY_OLE2_ERROR
 
         calls = _stub_legacy_extractors(monkeypatch)
@@ -1666,7 +1710,7 @@ class TestLegacyOle2CacheRows:
         plan = prepare_attachment_writes(db=db, **_kwargs(first))
         with db.transaction():
             apply_attachment_writes(plan=plan, claimant_id="msg@x", thread_id="thread-x", db=db)
-        row = db.get_attachment_extraction(first.content_hash)
+        row = db.get_attachment_extraction(first.content_hash, _module(first))
         assert (row["extraction_status"], row["extraction_error"]) == (
             STATUS_UNSUPPORTED,
             LEGACY_OLE2_ERROR,
@@ -1680,9 +1724,9 @@ class TestLegacyOle2CacheRows:
         )
         with db.transaction():
             apply_attachment_writes(plan=again, claimant_id="msg@x", thread_id="thread-x", db=db)
-        for occurrence in (first, later):
+        for occurrence, status in ((first, STATUS_UNSUPPORTED), (later, STATUS_SUCCESS)):
             served = prepare_attachment_writes(db=db, **_kwargs(occurrence))
-            assert (served.status, served.cached) == (STATUS_SUCCESS, True)
+            assert (served.status, served.cached) == (status, True)
         assert calls == ["doc"]
 
     def test_stale_failed_row_is_refreshed_through_the_legacy_extractor(
@@ -1702,6 +1746,7 @@ class TestLegacyOle2CacheRows:
         )
         db.store_attachment_extraction(
             attachment_id=attachment.content_hash,
+            extractor_module=_module(attachment),
             extraction_status=STATUS_FAILED,
             extractor="docx@3",
             extracted_text=None,
@@ -1715,7 +1760,7 @@ class TestLegacyOle2CacheRows:
         )
         with db.transaction():
             apply_attachment_writes(plan=plan, claimant_id="msg@x", thread_id="thread-x", db=db)
-        row = db.get_attachment_extraction(attachment.content_hash)
+        row = db.get_attachment_extraction(attachment.content_hash, _module(attachment))
         assert (row["extraction_status"], row["extractor"], row["extraction_error"]) == (
             STATUS_SUCCESS,
             "doc@1",
@@ -1726,27 +1771,26 @@ class TestLegacyOle2CacheRows:
         assert calls == ["doc"]
         assert "SYNTHETIC_TEXT_MARKER" not in caplog.text
 
-    def test_stale_failed_row_from_an_unlabelled_occurrence_stays_unsupported(
-        self, tmp_path, monkeypatch
-    ):
-        """The same refresh from a ``.bin`` occurrence has no legacy label,
-        so it records ``unsupported`` (#694); a later ``.doc`` occurrence
-        then re-runs it."""
-        from src.extractors import LEGACY_OLE2_ERROR
-
+    def test_stale_docx_row_is_not_refreshed_by_other_labels(self, tmp_path, monkeypatch):
+        """#928: a stale ``failed`` DOCX row (migrated under ``docx``) is
+        neither used nor refreshed by a ``.bin`` or ``.doc`` occurrence of
+        the bytes (before, a ``.bin`` refresh rewrote it ``unsupported``):
+        each extracts under its own label, and the DOCX row is left for a
+        ``.docx`` occurrence."""
         calls = _stub_legacy_extractors(monkeypatch)
         db = _setup_db_for_attachment(tmp_path)
         payload = _OLE2_MAGIC + bytes(64)
         unlabelled = _attachment(payload, filename="a.bin", content_type="application/octet-stream")
         db.store_attachment_extraction(
             attachment_id=unlabelled.content_hash,
+            extractor_module="docx",
             extraction_status=STATUS_FAILED,
             extractor="docx@3",
             extracted_text=None,
             extraction_error="BadZipFile",
         )
         plan = prepare_attachment_writes(db=db, **_kwargs(unlabelled))
-        assert (plan.status, plan.extraction_error) == (STATUS_UNSUPPORTED, LEGACY_OLE2_ERROR)
+        assert (plan.status, plan.extraction_error) == (STATUS_UNSUPPORTED, NO_EXTRACTOR_ERROR)
         with db.transaction():
             apply_attachment_writes(plan=plan, claimant_id="msg@x", thread_id="thread-x", db=db)
         assert calls == []
@@ -1754,6 +1798,9 @@ class TestLegacyOle2CacheRows:
         again = prepare_attachment_writes(db=db, **_kwargs(labelled))
         assert (again.status, again.cached) == (STATUS_SUCCESS, False)
         assert calls == ["doc"]
+        assert db.get_attachment_extraction(unlabelled.content_hash, "docx")["extractor"] == (
+            "docx@3"
+        )
 
 
 # Fixed binary signatures the text guard rejects (#932).
@@ -1802,7 +1849,7 @@ class TestBinaryPayloadLabelledAsText:
         with db.transaction():
             apply_attachment_writes(plan=plan, claimant_id="msg@x", thread_id="thread-x", db=db)
         attachment_indexing.record_committed_outcomes([plan])
-        row = db.get_attachment_extraction(attachment.content_hash)
+        row = db.get_attachment_extraction(attachment.content_hash, _module(attachment))
         assert (row["extraction_status"], row["extractor"], row["extraction_error"]) == (
             STATUS_UNSUPPORTED,
             None,
@@ -1832,7 +1879,8 @@ class TestBinaryPayloadLabelledAsText:
         extractor.assert_not_called()
 
     def test_row_is_re_run_for_an_occurrence_with_another_extractor(self, tmp_path, monkeypatch):
-        """The same bytes labelled ``.pdf`` reach the PDF extractor."""
+        """The same bytes labelled ``.pdf`` reach the PDF extractor: the row is
+        the text module's (#928)."""
         from src.extractors import BINARY_AS_TEXT_ERROR
 
         db = _seed_thread_for_cache_test(tmp_path)
@@ -1841,6 +1889,7 @@ class TestBinaryPayloadLabelledAsText:
         )
         db.store_attachment_extraction(
             attachment_id=attachment.content_hash,
+            extractor_module="text",
             extraction_status=STATUS_UNSUPPORTED,
             extractor=None,
             extracted_text=None,
@@ -1866,6 +1915,7 @@ class TestBinaryPayloadLabelledAsText:
         attachment = _attachment(b"%PDF-1.7" + b"SYNTHETIC_TEXT_MARKER" + bytes(64))
         db.store_attachment_extraction(
             attachment_id=attachment.content_hash,
+            extractor_module=_module(attachment),
             extraction_status=STATUS_SUCCESS,
             extractor="text@2",
             extracted_text="%PDF-1.7 \ufffd\ufffd",
@@ -1875,7 +1925,7 @@ class TestBinaryPayloadLabelledAsText:
         assert (plan.status, plan.cached, plan.chunks) == (STATUS_UNSUPPORTED, False, [])
         with db.transaction():
             apply_attachment_writes(plan=plan, claimant_id="msg@x", thread_id="thread-x", db=db)
-        row = db.get_attachment_extraction(attachment.content_hash)
+        row = db.get_attachment_extraction(attachment.content_hash, _module(attachment))
         assert (row["extraction_status"], row["extractor"], row["extraction_error"]) == (
             STATUS_UNSUPPORTED,
             None,
@@ -1894,7 +1944,7 @@ def test_cached_no_extractor_row_for_a_dotx_is_re_extracted(tmp_path):
     import zipfile
 
     import docx
-    from src.attachment_indexing import reruns_once_ocr_is_on
+    from src.attachment_indexing import reprocess_reruns_extraction
 
     document = docx.Document()
     document.add_paragraph("SYNTHETIC_DOTX_FACT")
@@ -1911,11 +1961,12 @@ def test_cached_no_extractor_row_for_a_dotx_is_re_extracted(tmp_path):
 
     dotx_mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.template"
     for content_type, filename in ((dotx_mime, "a.bin"), ("application/octet-stream", "a.dotx")):
-        assert reruns_once_ocr_is_on(NO_EXTRACTOR_ERROR, content_type, filename)
+        assert reprocess_reruns_extraction(NO_EXTRACTOR_ERROR, "", content_type, filename)
         db = _setup_db_for_attachment(tmp_path / filename)
         attachment = _attachment(out.getvalue(), filename=filename, content_type=content_type)
         db.store_attachment_extraction(
             attachment_id=attachment.content_hash,
+            extractor_module="",
             extraction_status=STATUS_UNSUPPORTED,
             extractor=None,
             extracted_text=None,
@@ -1927,6 +1978,219 @@ def test_cached_no_extractor_row_for_a_dotx_is_re_extracted(tmp_path):
         assert persisted is not None
         assert (persisted.status, persisted.extractor) == (STATUS_SUCCESS, "docx@5")
         assert persisted.text is not None and "SYNTHETIC_DOTX_FACT" in persisted.text
+
+
+# ---------------------------------------------------------------------------
+# Per-module cache keying (#928)
+# ---------------------------------------------------------------------------
+
+
+def _catalogue_docx() -> bytes:
+    import io
+
+    import docx
+
+    document = docx.Document()
+    document.add_paragraph("SYNTHETIC_ZIP_FACT")
+    buf = io.BytesIO()
+    document.save(buf)
+    return buf.getvalue()
+
+
+# (bytes shape, labels as (content_type, filename)). Each label selects a
+# different extractor module for the same bytes, or none.
+_CATALOGUE: dict[str, tuple[Any, tuple[tuple[str, str], ...]]] = {
+    "ole2": (
+        lambda: _OLE2_MAGIC + b"SYNTHETIC_OLE2_BODY" + bytes(64),
+        (
+            ("application/msword", "a.doc"),
+            ("application/octet-stream", "a.docx"),
+            ("application/octet-stream", "a.pptx"),
+            ("application/vnd.ms-powerpoint", "a.ppt"),
+            ("text/plain", "a.txt"),
+            ("application/octet-stream", "a.bin"),
+        ),
+    ),
+    "zip": (
+        _catalogue_docx,
+        (
+            ("application/octet-stream", "a.docx"),
+            ("application/octet-stream", "a.xlsx"),
+            ("application/octet-stream", "a.pptx"),
+            ("application/vnd.ms-excel", "a.xls"),
+        ),
+    ),
+    "binary-as-text": (
+        lambda: b"\x89PNG\r\n\x1a\n" + bytes(64),
+        (
+            ("text/plain", "a.txt"),
+            ("image/png", "a.png"),
+            ("application/octet-stream", "a.bin"),
+        ),
+    ),
+    "non-ole2-ppt": (
+        lambda: b"SYNTHETIC_NOT_A_DECK plain words",
+        (
+            ("application/vnd.ms-powerpoint", "a.ppt"),
+            ("text/plain", "a.txt"),
+            ("application/octet-stream", "a.bin"),
+        ),
+    ),
+    "pdf-as-text": (
+        lambda: b"%PDF-1.7\nSYNTHETIC_PDF_BODY" + bytes(64),
+        (
+            ("text/plain", "a.txt"),
+            ("application/pdf", "a.pdf"),
+        ),
+    ),
+}
+
+_CATALOGUE_PAIRS = [
+    (shape, first, second)
+    for shape, (_, labels) in _CATALOGUE.items()
+    for first in labels
+    for second in labels
+    if first != second
+]
+
+
+def _catalogue_outcome(plan: Any) -> tuple[str, str | None, tuple[str, ...]]:
+    return plan.status, plan.extraction_error, tuple(c.text for c in plan.chunks)
+
+
+class TestPerModuleCacheCatalogue:
+    """#928: the cache is keyed by (content hash, extractor module), so an
+    occurrence is served the result a fresh extraction under its own
+    label would give, whatever labels of the same bytes were indexed
+    before it, committed or earlier in the same batch."""
+
+    @staticmethod
+    def _plan(db: Database, payload: bytes, label: tuple[str, str], **extra: Any) -> Any:
+        content_type, filename = label
+        attachment = _attachment(payload, filename=filename, content_type=content_type)
+        return prepare_attachment_writes(db=db, **_kwargs(attachment, ocr_enabled=False, **extra))
+
+    @staticmethod
+    def _commit(db: Database, plan: Any) -> None:
+        _embed_new_chunks(
+            plan, db=db, claimant_id="msg@x", embedder=make_mock_embedder([0.1] * EMBEDDING_DIM)
+        )
+        with db.transaction():
+            apply_attachment_writes(plan=plan, claimant_id="msg@x", thread_id="thread-x", db=db)
+
+    @pytest.mark.parametrize(
+        ("shape", "first", "second"),
+        _CATALOGUE_PAIRS,
+        ids=[f"{shape}:{first[1]}->{second[1]}" for shape, first, second in _CATALOGUE_PAIRS],
+    )
+    def test_an_occurrence_gets_its_own_labels_result(
+        self, shape, first, second, tmp_path, monkeypatch
+    ):
+        _stub_legacy_extractors(monkeypatch)
+        payload = _CATALOGUE[shape][0]()
+        fresh = _catalogue_outcome(
+            self._plan(_setup_db_for_attachment(tmp_path / "fresh"), payload, second)
+        )
+
+        committed = _setup_db_for_attachment(tmp_path / "committed")
+        earlier = self._plan(committed, payload, first)
+        self._commit(committed, earlier)
+        later = self._plan(committed, payload, second)
+        assert _catalogue_outcome(later) == fresh
+        self._commit(committed, later)
+        # The first label is still served its own result, from the cache.
+        again = self._plan(committed, payload, first)
+        assert again.cached
+        assert _catalogue_outcome(again) == _catalogue_outcome(earlier)
+
+        batched = _setup_db_for_attachment(tmp_path / "batched")
+        batch: dict[Any, ExtractionResult] = {}
+        self._plan(batched, payload, first, batch_extractions=batch)
+        assert (
+            _catalogue_outcome(self._plan(batched, payload, second, batch_extractions=batch))
+            == fresh
+        )
+
+    @pytest.mark.parametrize("first_label", ["docx", "doc"])
+    def test_labels_that_run_the_same_extractor_share_its_row(
+        self, first_label, tmp_path, monkeypatch
+    ):
+        """#928 review round 1: OOXML bytes labelled ``.doc`` run the DOCX
+        extractor, so they share the ``.docx`` row (extracted once) rather
+        than storing a second copy under ``doc``. OLE2 bytes under ``.doc``
+        run the legacy extractor and keep their own row."""
+        calls = _stub_legacy_extractors(monkeypatch)
+        payload = _catalogue_docx()
+        labels = {
+            "docx": ("application/octet-stream", "a.docx"),
+            "doc": ("application/msword", "a.doc"),
+        }
+        db = _setup_db_for_attachment(tmp_path)
+        self._commit(db, self._plan(db, payload, labels[first_label]))
+        other = "doc" if first_label == "docx" else "docx"
+        again = self._plan(db, payload, labels[other])
+        assert (again.status, again.cached) == (STATUS_SUCCESS, True)
+        assert [
+            r[0] for r in db._conn.execute("SELECT extractor_module FROM attachment_extractions")
+        ] == ["docx"]
+        assert calls == []
+
+    @pytest.mark.parametrize("first_label", ["doc", "ppt"])
+    def test_a_ppt_sent_as_doc_does_not_decide_a_ppt_occurrence(
+        self, first_label, tmp_path, monkeypatch
+    ):
+        """#986: a PowerPoint file (OLE2) sent as ``.doc`` caches an empty
+        row from the Word extractor. A later ``.ppt`` occurrence of the
+        same bytes runs its own extractor instead of being served that
+        row, and the reverse order holds too. Both extractors are stubbed
+        (no catdoc or Java)."""
+        from src import extractors
+
+        calls: list[str] = []
+
+        def stub(module_name, text):
+            def run(payload, **_opts):
+                calls.append(module_name)
+                return text, module_name
+
+            return run
+
+        monkeypatch.setitem(extractors._IMPORT_CACHE, "doc", stub("doc", ""))
+        monkeypatch.setitem(extractors._IMPORT_CACHE, "ppt", stub("ppt", "slide words"))
+        payload = _OLE2_MAGIC + b"SYNTHETIC_PPT_BODY" + bytes(64)
+        labels = {
+            "doc": ("application/msword", "deck.doc"),
+            "ppt": ("application/vnd.ms-powerpoint", "deck.ppt"),
+        }
+        second_label = "ppt" if first_label == "doc" else "doc"
+        db = _setup_db_for_attachment(tmp_path)
+        self._commit(db, self._plan(db, payload, labels[first_label]))
+        later = self._plan(db, payload, labels[second_label])
+
+        assert calls == [first_label, second_label]
+        assert later.cached is False
+        expected = (
+            (STATUS_SUCCESS, ("slide words",))
+            if second_label == "ppt"
+            else (
+                STATUS_EMPTY,
+                (),
+            )
+        )
+        assert (later.status, tuple(c.text for c in later.chunks)) == expected
+
+    def test_the_catalogue_has_labels_with_different_results(self, tmp_path, monkeypatch):
+        """Guards the catalogue: every shape has two labels whose fresh
+        results differ, so the pairs above test something."""
+        _stub_legacy_extractors(monkeypatch)
+        for shape, (make, labels) in _CATALOGUE.items():
+            outcomes = {
+                _catalogue_outcome(
+                    self._plan(_setup_db_for_attachment(tmp_path / shape / label[1]), make(), label)
+                )
+                for label in labels
+            }
+            assert len(outcomes) > 1, shape
 
 
 def _stub_ppt_reader(monkeypatch, tmp_path, text: bytes) -> list[bytes]:
@@ -1957,16 +2221,18 @@ def test_cached_no_extractor_row_for_a_ppt_is_re_extracted(tmp_path, monkeypatch
     """#957: a ``.ppt`` cached ``unsupported`` (no extractor) before
     ``.ppt`` was routed is re-extracted through the real dispatcher, once,
     and the startup sweep's predicate re-queues it."""
-    from src.attachment_indexing import reruns_once_ocr_is_on
+    from src.attachment_indexing import reprocess_reruns_extraction
 
     payload = _OLE2 + b"synthetic deck bytes"
     for content_type, filename in ((_PPT_MIME, "a.bin"), ("application/octet-stream", "a.ppt")):
-        assert reruns_once_ocr_is_on(NO_EXTRACTOR_ERROR, content_type, filename)
+        # The row an earlier release wrote is the '' module's (#928).
+        assert reprocess_reruns_extraction(NO_EXTRACTOR_ERROR, "", content_type, filename)
         seen = _stub_ppt_reader(monkeypatch, tmp_path / filename, b"SYNTHETIC_PPT_FACT")
         db = _setup_db_for_attachment(tmp_path / filename)
         attachment = _attachment(payload, filename=filename, content_type=content_type)
         db.store_attachment_extraction(
             attachment_id=attachment.content_hash,
+            extractor_module="",
             extraction_status=STATUS_UNSUPPORTED,
             extractor=None,
             extracted_text=None,
@@ -2007,7 +2273,7 @@ def test_non_ole2_ppt_row_holds_for_ppt_occurrences_only(tmp_path, monkeypatch, 
     assert (plan.status, plan.cached) == (STATUS_UNSUPPORTED, False)
     with db.transaction():
         apply_attachment_writes(plan=plan, claimant_id="msg@x", thread_id="thread-x", db=db)
-    row = db.get_attachment_extraction(first.content_hash)
+    row = db.get_attachment_extraction(first.content_hash, "ppt")
     assert (row["extraction_status"], row["extraction_error"]) == (
         STATUS_UNSUPPORTED,
         NON_OLE2_PPT_ERROR,

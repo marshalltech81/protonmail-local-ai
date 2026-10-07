@@ -11,6 +11,7 @@ import json
 import sqlite3
 import threading
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 from src.attachment_indexing import attachment_occurrence_id
@@ -113,11 +114,27 @@ class TestSchema:
         second = Database(db_path)  # second open must not raise
         second.close()
 
-    def test_fresh_install_is_stamped_version_zero(self, db):
-        """The initial schema is version 0; the first migration will be
-        ``0001``."""
-        assert SCHEMA_VERSION == 0
-        assert db._conn.execute("SELECT version FROM schema_version").fetchone()[0] == 0
+    def test_fresh_install_is_stamped_version_one(self, db):
+        """A fresh install creates the current schema directly and stamps
+        v1 (#928), skipping the migration files."""
+        assert SCHEMA_VERSION == 1
+        assert db._conn.execute("SELECT version FROM schema_version").fetchone()[0] == 1
+
+    def test_fresh_install_keys_the_extraction_cache_by_module(self, db):
+        """#928: (content hash, extractor module) is the extraction
+        primary key, and each occurrence names its module."""
+        pk = [
+            r["name"]
+            for r in sorted(
+                db._conn.execute("PRAGMA table_info(attachment_extractions)").fetchall(),
+                key=lambda r: r["pk"],
+            )
+            if r["pk"]
+        ]
+        assert pk == ["attachment_id", "extractor_module"]
+        cols = {r["name"]: r for r in db._conn.execute("PRAGMA table_info(attachments)").fetchall()}
+        assert cols["extractor_module"]["notnull"] == 1
+        assert cols["extractor_module"]["dflt_value"] == "''"
 
     def test_database_from_the_old_numbering_fails_with_rebuild_instructions(self, tmp_path):
         """Before the renumber the baseline was v21 and the latest v22.
@@ -174,6 +191,218 @@ class TestSchema:
             conn.close()
         with pytest.raises(RuntimeError, match="Downgrade migrations are not supported"):
             Database(db_path)
+
+
+_V0_SCHEMA = Path(__file__).parent / "fixtures" / "schema" / "v0.sql"
+
+# v0 extraction rows (attachment_id, status, extractor, text, error) and
+# the module the v1 migration keys each by: the stamp's module, or ''
+# with no stamp.
+_V0_EXTRACTIONS = [
+    (("h-docx", "success", "docx@5", "SYNTHETIC_DOCX_TEXT", None), "docx"),
+    (("h-pdf-ocr", "success", "pdf-ocr@4", "SYNTHETIC_OCR_TEXT", None), "pdf"),
+    (("h-html", "success", "html", "SYNTHETIC_HTML_TEXT", None), "html"),
+    (("h-image", "empty", "image-ocr@3", None, None), "image"),
+    (("h-text", "failed", "text@2", None, "ValueError"), "text"),
+    (
+        (
+            "h-none",
+            "unsupported",
+            None,
+            None,
+            "no extractor for this content type or filename extension",
+        ),
+        "",
+    ),
+    (("h-large", "too_large", None, None, "payload 9 bytes exceeds cap 1"), ""),
+]
+# v0 occurrences (occurrence id, content hash, filename, MIME type) and
+# the module the migration links each to: its payload's row, or '' when
+# the payload has no row.
+_V0_OCCURRENCES = [
+    (("occ-docx", "h-docx", "a.docx", "application/octet-stream"), "docx"),
+    # Same bytes under a label that selects no extractor: in v0 it used
+    # the payload's one row, and still does after the migration.
+    (("occ-docx-bin", "h-docx", "a.bin", "application/octet-stream"), "docx"),
+    (("occ-none", "h-none", "a.bin", "application/octet-stream"), ""),
+    (("occ-norow", "h-norow", "a.txt", "text/plain"), ""),
+]
+
+
+def _build_v0_database(path) -> None:
+    """A v0 database built from the real v0 schema, with extraction and
+    occurrence rows, as a deployed v0 indexer left it."""
+    import sqlite_vec
+
+    conn = sqlite3.connect(path)
+    try:
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        conn.execute("CREATE TABLE schema_version (version INTEGER PRIMARY KEY)")
+        conn.executescript("BEGIN;\n" + _V0_SCHEMA.read_text() + "\nCOMMIT;")
+        conn.execute("INSERT INTO schema_version VALUES (0)")
+        conn.execute(f"PRAGMA application_id = {SCHEMA_APPLICATION_ID}")
+        conn.execute(
+            "INSERT INTO threads (thread_id, subject, participants, folder, date_first, "
+            "date_last, message_ids) VALUES ('t', 's', '[]', 'INBOX', 'd', 'd', '[]')"
+        )
+        conn.execute("INSERT INTO message_thread_map VALUES ('c', 'm@x', 't', '/m/c')")
+        for (occurrence, content_hash, filename, content_type), _ in _V0_OCCURRENCES:
+            conn.execute(
+                "INSERT INTO attachments (attachment_occurrence_id, claimant_id, attachment_id, "
+                "thread_id, filename, content_type, size_bytes, seen_at, fts_rowid) "
+                "VALUES (?, 'c', ?, 't', ?, ?, 1, 'd', NULL)",
+                (occurrence, content_hash, filename, content_type),
+            )
+        for row, _ in _V0_EXTRACTIONS:
+            conn.execute(
+                "INSERT INTO attachment_extractions (attachment_id, extraction_status, "
+                "extractor, extracted_text, extraction_error, extracted_at) "
+                "VALUES (?, ?, ?, ?, ?, '2026-10-01T00:00:00+00:00')",
+                row,
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _schema_shape(conn) -> dict:
+    """Every table's columns (name, type, not null, default, pk position)
+    and every index's columns, for comparing two databases' schemas."""
+    shape: dict = {}
+    for (name,) in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name"
+    ).fetchall():
+        shape[name] = sorted(
+            tuple(r)[1:] for r in conn.execute(f'PRAGMA table_info("{name}")').fetchall()
+        )
+    for name, table in conn.execute(
+        "SELECT name, tbl_name FROM sqlite_master WHERE type = 'index' ORDER BY name"
+    ).fetchall():
+        shape[f"index:{table}:{name}"] = [
+            tuple(r) for r in conn.execute(f'PRAGMA index_info("{name}")').fetchall()
+        ]
+    return shape
+
+
+class TestMigrationV1:
+    """#928: v0 -> v1 keys ``attachment_extractions`` by (content hash,
+    extractor module) and links each occurrence to its row."""
+
+    def test_v0_database_migrates_to_the_fresh_v1_shape(self, tmp_path, caplog):
+        caplog.set_level("INFO")
+        _build_v0_database(tmp_path / "v0.db")
+        migrated = Database(tmp_path / "v0.db")
+        fresh = Database(tmp_path / "fresh.db")
+        try:
+            assert migrated._conn.execute("SELECT version FROM schema_version").fetchone()[0] == 1
+            assert _schema_shape(migrated._conn) == _schema_shape(fresh._conn)
+        finally:
+            migrated.close()
+            fresh.close()
+        assert "applied migrations: [1]" in caplog.text
+        assert "SYNTHETIC" not in caplog.text
+
+    def test_v0_rows_are_carried_over_under_their_stamps_module(self, tmp_path):
+        _build_v0_database(tmp_path / "v0.db")
+        db = Database(tmp_path / "v0.db")
+        try:
+            rows = db._conn.execute(
+                "SELECT attachment_id, extractor_module, extraction_status, extractor, "
+                "extracted_text, extraction_error, extracted_at FROM attachment_extractions "
+                "ORDER BY attachment_id"
+            ).fetchall()
+            assert [tuple(r) for r in rows] == sorted(
+                (row[0], module, *row[1:], "2026-10-01T00:00:00+00:00")
+                for row, module in _V0_EXTRACTIONS
+            )
+            links = db._conn.execute(
+                "SELECT attachment_occurrence_id, extractor_module FROM attachments"
+            ).fetchall()
+            assert dict(tuple(r) for r in links) == {
+                occurrence[0]: module for occurrence, module in _V0_OCCURRENCES
+            }
+            # The served lookup finds each row under its new key.
+            row = db.get_attachment_extraction("h-docx", "docx")
+            assert row["extracted_text"] == "SYNTHETIC_DOCX_TEXT"
+            assert db.get_attachment_extraction("h-docx", "") is None
+        finally:
+            db.close()
+
+    def test_migrated_rows_keep_their_stamps_so_no_version_is_stale(self, tmp_path):
+        """No ``EXTRACTOR_VERSIONS`` bump comes with the re-keying: rows
+        keep their stamps, so the current ones stay current."""
+        from src.extractors import is_stale_extractor
+
+        _build_v0_database(tmp_path / "v0.db")
+        db = Database(tmp_path / "v0.db")
+        try:
+            assert sorted(
+                name for name in db.get_extractor_names() if is_stale_extractor(name)
+            ) == ["text@2"]
+        finally:
+            db.close()
+
+    def test_a_failure_part_way_leaves_v0_and_a_retry_succeeds(self, tmp_path):
+        """The migration runs in one transaction: a failure after its
+        first statements (here a table in the way of the rebuild) rolls
+        all of it back, so v0 stays stamped with its rows intact, and the
+        next start applies it."""
+        path = tmp_path / "v0.db"
+        _build_v0_database(path)
+        conn = sqlite3.connect(path)
+        conn.execute("CREATE TABLE attachment_extractions_v1 (x)")
+        conn.commit()
+        conn.close()
+
+        with pytest.raises(sqlite3.OperationalError, match="already exists"):
+            Database(path)
+
+        conn = sqlite3.connect(path)
+        try:
+            assert conn.execute("SELECT version FROM schema_version").fetchone()[0] == 0
+            columns = [r[1] for r in conn.execute("PRAGMA table_info(attachments)").fetchall()]
+            assert "extractor_module" not in columns
+            assert conn.execute("SELECT COUNT(*) FROM attachment_extractions").fetchone()[0] == (
+                len(_V0_EXTRACTIONS)
+            )
+            conn.execute("DROP TABLE attachment_extractions_v1")
+            conn.commit()
+        finally:
+            conn.close()
+
+        db = Database(path)
+        try:
+            assert db._conn.execute("SELECT version FROM schema_version").fetchone()[0] == 1
+            assert db.get_attachment_extraction("h-docx", "docx") is not None
+        finally:
+            db.close()
+
+    def test_a_missing_migration_file_fails_closed_at_v0(self, tmp_path, monkeypatch):
+        """Gap detection: code two versions ahead with no ``0002`` file
+        refuses to start and applies nothing."""
+        from src import database
+
+        path = tmp_path / "v0.db"
+        _build_v0_database(path)
+        monkeypatch.setattr(database, "SCHEMA_VERSION", 2)
+        with pytest.raises(RuntimeError, match="migration sequence broken"):
+            Database(path)
+        conn = sqlite3.connect(path)
+        try:
+            assert conn.execute("SELECT version FROM schema_version").fetchone()[0] == 0
+        finally:
+            conn.close()
+
+    def test_a_v1_database_under_v0_code_fails_closed(self, tmp_path, monkeypatch):
+        """Downgrade detection: a migrated database refuses older code."""
+        from src import database
+
+        Database(tmp_path / "v1.db").close()
+        monkeypatch.setattr(database, "SCHEMA_VERSION", 0)
+        with pytest.raises(RuntimeError, match="Downgrade migrations are not supported"):
+            Database(tmp_path / "v1.db")
 
 
 class TestIngestionState:
@@ -2143,6 +2372,7 @@ class TestUpsertAttachment:
             filename="invoice.pdf",
             content_type="application/pdf",
             size_bytes=1234,
+            extractor_module="pdf",
             occurrence_id=attachment_occurrence_id(
                 claimant_id="att1@x",
                 content_hash="hash-a" * 8,
@@ -2176,6 +2406,7 @@ class TestUpsertAttachment:
                 "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
             ),
             size_bytes=5678,
+            extractor_module="pdf",
             occurrence_id=attachment_occurrence_id(
                 claimant_id="att2@x",
                 content_hash="hash-b" * 8,
@@ -2205,6 +2436,7 @@ class TestUpsertAttachment:
             filename="invoice-a.pdf",
             content_type="application/pdf",
             size_bytes=10,
+            extractor_module="pdf",
             occurrence_id="occ-a",
         )
         assert db.upsert_attachment(
@@ -2214,6 +2446,7 @@ class TestUpsertAttachment:
             filename="invoice-b.pdf",
             content_type="application/pdf",
             size_bytes=10,
+            extractor_module="pdf",
             occurrence_id="occ-b",
         )
 
@@ -2234,6 +2467,7 @@ class TestUpsertAttachment:
             filename="march-statement.pdf",
             content_type="application/pdf",
             size_bytes=10,
+            extractor_module="pdf",
             occurrence_id=attachment_occurrence_id(
                 claimant_id="att3@x",
                 content_hash="hash-c" * 8,
@@ -2249,18 +2483,19 @@ class TestUpsertAttachment:
 
 class TestAttachmentExtractionCache:
     def test_get_returns_none_when_not_stored(self, db):
-        assert db.get_attachment_extraction("nonexistent" * 4) is None
+        assert db.get_attachment_extraction("nonexistent" * 4, "pdf") is None
 
     def test_store_then_get_roundtrips(self, db):
         attachment_id = "hash-d" * 8
         db.store_attachment_extraction(
             attachment_id=attachment_id,
+            extractor_module="pdf",
             extraction_status="success",
             extractor="pdf-digital",
             extracted_text="hello world",
             extraction_error=None,
         )
-        row = db.get_attachment_extraction(attachment_id)
+        row = db.get_attachment_extraction(attachment_id, "pdf")
         assert row is not None
         assert row["extraction_status"] == "success"
         assert row["extractor"] == "pdf-digital"
@@ -2270,6 +2505,7 @@ class TestAttachmentExtractionCache:
         attachment_id = "hash-e" * 8
         db.store_attachment_extraction(
             attachment_id=attachment_id,
+            extractor_module="pdf",
             extraction_status="empty",
             extractor="pdf-digital",
             extracted_text=None,
@@ -2278,12 +2514,13 @@ class TestAttachmentExtractionCache:
         # Operator enabled OCR → re-extract upgraded the row.
         db.store_attachment_extraction(
             attachment_id=attachment_id,
+            extractor_module="pdf",
             extraction_status="success",
             extractor="pdf-ocr",
             extracted_text="now we have text",
             extraction_error=None,
         )
-        row = db.get_attachment_extraction(attachment_id)
+        row = db.get_attachment_extraction(attachment_id, "pdf")
         assert row["extraction_status"] == "success"
         assert row["extracted_text"] == "now we have text"
 
@@ -2449,6 +2686,7 @@ class TestAttachmentCascadeOnMessageRemoval:
             filename="doomed.pdf",
             content_type="application/pdf",
             size_bytes=1,
+            extractor_module="pdf",
             occurrence_id=attachment_occurrence_id(
                 claimant_id="cas1@x",
                 content_hash="cascade-hash" * 4,
@@ -2485,6 +2723,7 @@ class TestAttachmentCascadeOnMessageRemoval:
                 filename=f"{mid}.pdf",
                 content_type="application/pdf",
                 size_bytes=1,
+                extractor_module="pdf",
                 occurrence_id=attachment_occurrence_id(
                     claimant_id=mid,
                     content_hash=attachment_id,
@@ -2515,6 +2754,7 @@ def _attach(db, claimant_id: str, thread_id: str, attachment_id: str) -> None:
         filename="shared.pdf",
         content_type="application/pdf",
         size_bytes=1,
+        extractor_module="pdf",
         occurrence_id=attachment_occurrence_id(
             claimant_id=claimant_id,
             content_hash=attachment_id,
@@ -2527,6 +2767,7 @@ def _attach(db, claimant_id: str, thread_id: str, attachment_id: str) -> None:
 def _cache_extraction(db, attachment_id: str) -> None:
     db.store_attachment_extraction(
         attachment_id=attachment_id,
+        extractor_module="pdf",
         extraction_status="success",
         extractor="pdf-digital",
         extracted_text=f"cached {_EXTRACTION_MARKER} content",
@@ -2574,7 +2815,7 @@ class TestExtractionPurgeOnRemoval:
 
         _reap_message(db, thread, "pu1@x")
 
-        assert db.get_attachment_extraction(attachment_id) is None
+        assert db.get_attachment_extraction(attachment_id, "pdf") is None
         assert not _marker_in_any_table(db)
 
     def test_reaping_one_of_two_carriers_keeps_the_extraction(self, db, threader):
@@ -2586,7 +2827,7 @@ class TestExtractionPurgeOnRemoval:
 
         _reap_message(db, thread, "pu2a@x")
 
-        cached = db.get_attachment_extraction(attachment_id)
+        cached = db.get_attachment_extraction(attachment_id, "pdf")
         assert cached is not None
         assert _EXTRACTION_MARKER in cached["extracted_text"]
 
@@ -2598,11 +2839,11 @@ class TestExtractionPurgeOnRemoval:
         _cache_extraction(db, attachment_id)
 
         _reap_message(db, thread, "pu3a@x")
-        assert db.get_attachment_extraction(attachment_id) is not None
+        assert db.get_attachment_extraction(attachment_id, "pdf") is not None
         thread.messages = [m for m in thread.messages if m.message_id != "pu3a@x"]
         _reap_message(db, thread, "pu3b@x")
 
-        assert db.get_attachment_extraction(attachment_id) is None
+        assert db.get_attachment_extraction(attachment_id, "pdf") is None
         assert not _marker_in_any_table(db)
 
     def test_reaping_both_carriers_in_one_reap_purges_the_extraction(self, db, threader):
@@ -2620,7 +2861,7 @@ class TestExtractionPurgeOnRemoval:
 
         db.reap_thread_messages(survivors, FAKE_EMBEDDING, ["pu4a@x", "pu4b@x"])
 
-        assert db.get_attachment_extraction(attachment_id) is None
+        assert db.get_attachment_extraction(attachment_id, "pdf") is None
 
     def test_deleting_the_whole_thread_purges_its_extractions(self, db, threader):
         thread = self._seed(db, threader, ["pu5a@x", "pu5b@x"])
@@ -2635,8 +2876,8 @@ class TestExtractionPurgeOnRemoval:
         _tombstone_thread(db, thread.thread_id)
         assert db.delete_thread_completely(thread.thread_id)
 
-        assert db.get_attachment_extraction(shared) is None
-        assert db.get_attachment_extraction(own) is None
+        assert db.get_attachment_extraction(shared, "pdf") is None
+        assert db.get_attachment_extraction(own, "pdf") is None
         assert not _marker_in_any_table(db)
 
     def test_deleting_a_thread_keeps_a_payload_another_thread_carries(self, db, threader):
@@ -2654,7 +2895,7 @@ class TestExtractionPurgeOnRemoval:
         _tombstone_thread(db, doomed.thread_id)
         assert db.delete_thread_completely(doomed.thread_id)
 
-        assert db.get_attachment_extraction(attachment_id) is not None
+        assert db.get_attachment_extraction(attachment_id, "pdf") is not None
 
     def test_a_failed_reap_rolls_back_the_purge(self, db, threader, monkeypatch):
         thread = self._seed(db, threader, ["pu7@x", "pu7-keep@x"])
@@ -2670,7 +2911,7 @@ class TestExtractionPurgeOnRemoval:
         with pytest.raises(RuntimeError):
             _reap_message(db, thread, "pu7@x")
 
-        assert db.get_attachment_extraction(attachment_id) is not None
+        assert db.get_attachment_extraction(attachment_id, "pdf") is not None
         assert (
             db._conn.execute(
                 "SELECT COUNT(*) FROM attachments WHERE claimant_id = ?", ("pu7@x",)
@@ -2692,7 +2933,7 @@ class TestExtractionPurgeOnRemoval:
         with pytest.raises(RuntimeError):
             db.delete_thread_completely(thread.thread_id)
 
-        assert db.get_attachment_extraction(attachment_id) is not None
+        assert db.get_attachment_extraction(attachment_id, "pdf") is not None
 
     def test_the_orphan_check_is_one_indexed_statement_per_payload(self, db, threader):
         """The purge looks up only the payloads the removed rows carried,
@@ -2715,13 +2956,15 @@ class TestExtractionPurgeOnRemoval:
         plan = " | ".join(
             r["detail"]
             for r in db._conn.execute(
-                "EXPLAIN QUERY PLAN " + _PURGE_ORPHAN_EXTRACTION_SQL, ("a", "a")
+                "EXPLAIN QUERY PLAN " + _PURGE_ORPHAN_EXTRACTION_SQL, ("a",)
             ).fetchall()
         )
-        assert "SEARCH attachments USING COVERING INDEX idx_attachments_attachment_id" in plan
+        # Since #928 the check also matches the row's module, so the
+        # occurrence lookup reads the table row; it is still indexed.
+        assert "SEARCH a USING INDEX idx_attachments_attachment_id" in plan
         assert (
-            "SEARCH attachment_extractions USING INDEX sqlite_autoindex_attachment_extractions_1"
-            in plan
+            "SEARCH attachment_extractions USING COVERING INDEX "
+            "sqlite_autoindex_attachment_extractions_1" in plan
         )
         assert "SCAN" not in plan
 
@@ -2751,6 +2994,7 @@ class TestSecureDelete:
         _attach(db, "sd@x", thread.thread_id, attachment_id)
         db.store_attachment_extraction(
             attachment_id=attachment_id,
+            extractor_module="pdf",
             extraction_status="success",
             extractor="pdf-digital",
             extracted_text=" ".join([self._MARKER] * 2000),
@@ -2763,7 +3007,7 @@ class TestSecureDelete:
 
         assert _reap_message(db, thread, "sd@x") == ["/m/sd@x"]
 
-        assert db.get_attachment_extraction(attachment_id) is None
+        assert db.get_attachment_extraction(attachment_id, "pdf") is None
         assert db.wal_checkpoint_truncate()[0] == 0
         return db.path.read_bytes()
 
@@ -2827,6 +3071,7 @@ class TestFtsScrub:
             filename=f"{self._FILE}.pdf",
             content_type="application/pdf",
             size_bytes=1,
+            extractor_module="pdf",
             occurrence_id=attachment_occurrence_id(
                 claimant_id="fts@x",
                 content_hash=attachment_id,
