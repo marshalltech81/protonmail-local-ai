@@ -53,7 +53,12 @@ log = logging.getLogger("indexer.parser")
 #   ``_MAX_ADDRESS_HEADER_CHARS`` loses all its recipients;
 # * ``address_element`` / ``address_length``: one address-list element
 #   over ``_MAX_ADDRESS_ELEMENT_CHARS``, or an address over
-#   ``_MAX_ADDRESS_CHARS``, is dropped.
+#   ``_MAX_ADDRESS_CHARS``, is dropped;
+# * ``subject_length``: a decoded subject over ``SUBJECT_MAX_CHARS`` is
+#   cut to the cap (#902);
+# * ``in_reply_to_length`` / ``references_length``: an In-Reply-To, or
+#   a References entry, over ``MESSAGE_ID_MAX_CHARS`` is dropped, so
+#   threading sees the rest (#902).
 PARSE_CAPS: tuple[str, ...] = (
     "attached_depth",
     "attached_fields",
@@ -64,6 +69,9 @@ PARSE_CAPS: tuple[str, ...] = (
     "address_header",
     "address_element",
     "address_length",
+    "subject_length",
+    "in_reply_to_length",
+    "references_length",
 )
 
 
@@ -403,19 +411,23 @@ def parse_email(path: Path, maildir_root: Path | None = None) -> Message | None:
         )
         return None
 
-    in_reply_to = _clean_id(msg.get("In-Reply-To", ""))
-    if len(in_reply_to) > MESSAGE_ID_MAX_CHARS:
-        in_reply_to = ""
-    references = [
-        ref
-        for ref in (_clean_id(r) for r in msg.get("References", "").split() if r.strip())
-        if len(ref) <= MESSAGE_ID_MAX_CHARS
-    ]
-
     # Work caps that drop content, counted by ``PARSE_CAPS`` name and
     # logged once below.
     caps: Counter[str] = Counter()
-    subject = _decode_header(msg.get("Subject", NO_SUBJECT))[:SUBJECT_MAX_CHARS]
+    in_reply_to = _clean_id(msg.get("In-Reply-To", ""))
+    if len(in_reply_to) > MESSAGE_ID_MAX_CHARS:
+        caps["in_reply_to_length"] += 1
+        in_reply_to = ""
+    references: list[str] = []
+    for ref in (_clean_id(r) for r in msg.get("References", "").split() if r.strip()):
+        if len(ref) <= MESSAGE_ID_MAX_CHARS:
+            references.append(ref)
+        else:
+            caps["references_length"] += 1
+    subject = _decode_header(msg.get("Subject", NO_SUBJECT))
+    if len(subject) > SUBJECT_MAX_CHARS:
+        caps["subject_length"] += 1
+        subject = subject[:SUBJECT_MAX_CHARS]
     # Parse From structurally, like To / Cc: decoding the whole header
     # first turns an encoded name with a comma ("=?utf-8?q?Doe=2C_Jane?=")
     # into an unquoted "Doe, Jane <...>" that no longer parses as one
