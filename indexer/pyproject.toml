@@ -44,6 +44,10 @@ dev = [
     # SDK); the runtime gets it transitively via openai.
     "httpx2==2.13.1",
     "mypy==2.4.0",
+    # Reads OLE2 SummaryInformation (Author, Last Saved By) in
+    # tests/test_fixture_authors.py (#980); no runtime dependency reads
+    # OLE2 property sets.
+    "olefile==0.47",
     "pytest==9.1.1",
     "pytest-cov==7.1.0",
 ]

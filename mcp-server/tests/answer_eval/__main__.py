@@ -10,8 +10,9 @@
   provider call, including a run larger than ``EVAL_MAX_CALLS``.
 - ``compare``: 0 compared, 1 a per-case regression with
   ``--fail-on-regression``, 2 the runs are not comparable (different
-  cases, index or judge/rubric) without ``--allow-incompatible``, 3 a
-  report is unreadable or malformed.
+  cases, index, judge/rubric or timeouts) without
+  ``--allow-incompatible``, 3 a report is unreadable or malformed, or
+  ``--out`` is one of the input reports.
 
 Quality is advisory until thresholds are calibrated: ``run`` never
 fails on a low score.
@@ -48,6 +49,7 @@ from tests.answer_eval.harness import evaluate
 from tests.answer_eval.judge import RUBRIC_VERSION
 from tests.answer_eval.report import (
     REPORT_SCHEMA_VERSION,
+    TIMEOUT_SETTINGS,
     build_report,
     compare_reports,
     is_incomplete,
@@ -296,6 +298,14 @@ def _report_shape_ok(data: dict[str, Any]) -> bool:
         for k in _COUNT_KEYS
     ):
         return False
+    # The timeouts compare checks (#997): missing or malformed on both
+    # sides would compare equal and hide a changed run condition.
+    settings = data["identity"].get("settings")
+    if not isinstance(settings, dict) or not all(
+        k in settings and settings[k] is not None and _is_rate(settings[k]) and settings[k] > 0
+        for k in TIMEOUT_SETTINGS
+    ):
+        return False
     if not isinstance(aggregates, dict) or not isinstance(aggregates.get("by_category"), dict):
         return False
     for split in ("dev", "held_out"):
@@ -355,7 +365,19 @@ def _load_report(path: Path) -> dict[str, Any]:
     return data
 
 
+def _check_compare_output(args: argparse.Namespace) -> Path:
+    """``--out`` resolved, refused when it is either input report (#997):
+    real paths with symlinks followed, and the same file under another
+    name (a hard link, or another case on a case-insensitive disk)."""
+    out = _check_output_path(args.out, args.path_base)
+    for report in (args.baseline, args.candidate):
+        if out == report.resolve() or (out.exists() and os.path.samefile(out, report)):
+            raise ConfigError("--out must not be the baseline or candidate report")
+    return out
+
+
 def _compare(args: argparse.Namespace) -> int:
+    out = _check_compare_output(args) if args.out else None
     base, cand = _load_report(args.baseline), _load_report(args.candidate)
     # _load_report checks the labels and the shape of what compare reads;
     # anything it does not model surfaces here. Fixed text only: the
@@ -366,8 +388,8 @@ def _compare(args: argparse.Namespace) -> int:
     except AttributeError, KeyError, TypeError:
         raise ConfigError("malformed answer evaluation report") from None
     print(rendered)
-    if args.out:
-        write_private_json(_check_output_path(args.out, args.path_base), cmp)
+    if out:
+        write_private_json(out, cmp)
     if cmp["incompatible"] and not args.allow_incompatible:
         return EXIT_INCOMPLETE
     if cmp["regressions"] and args.fail_on_regression:

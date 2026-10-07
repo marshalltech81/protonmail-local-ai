@@ -1508,3 +1508,64 @@ class TestExperimentalTokenLimits:
         assert _limit_lines(caplog) == []
         assert not [k for k in _one_line(caplog)["counts"] if k.startswith("token_limit_")]
         assert _MARKER not in caplog.text
+
+
+class TestRepairPromptCounted:
+    """#984: ``ask_mailbox`` and ``summarize_thread`` count the last
+    prompt sent, as ``brief_issue`` and ``check_conclusion`` do after
+    #960: the repair prompt whenever the repair call was made, cut or
+    not. A cut repair reply keeps counting the repair prompt
+    (``TestReviewRound2``)."""
+
+    def test_ask_mailbox_uncut_repair_counts_the_repair_prompt(self, caplog):
+        caplog.set_level(logging.INFO)
+        llm = FakeInferenceClient(response=f"{_MARKER} uncited")  # forces the repair call
+        asyncio.run(
+            _tools(_StubDb(_long_threads()), llm, _SMALL)["ask_mailbox"](question=f"{_MARKER}?")
+        )
+        assert len(llm.complete_calls) == 2
+        system, user = llm.complete_calls[0]
+        repair_system, repair_user = llm.complete_calls[1]
+        assert len(repair_user) > len(user)
+        line = _one_limit_line(caplog)
+        assert line["limits"] == ["evidence_budget"]
+        assert line["counts"]["outputs_cut"] == 0
+        assert line["counts"]["prompt_tokens"] == estimate_tokens(repair_system + repair_user)
+        assert line["counts"]["prompt_tokens"] > estimate_tokens(system + user)
+        assert _MARKER not in caplog.text
+
+    def test_summarize_thread_uncut_repair_counts_the_repair_prompt(self, caplog):
+        caplog.set_level(logging.INFO)
+        thread, recent = _long_summary_thread()
+        small = PromptBudget(context_tokens=3072, max_output_tokens=1024)
+        llm = FakeInferenceClient(response=f"{_MARKER} uncited")  # forces the repair call
+        asyncio.run(
+            _tools(_StubDb([thread], recent), llm, small)["summarize_thread"](thread_id="t1")
+        )
+        assert len(llm.complete_calls) == 2
+        system, user = llm.complete_calls[0]
+        repair_system, repair_user = llm.complete_calls[1]
+        assert len(repair_user) > len(user)
+        line = _one_limit_line(caplog)
+        assert line["tool"] == "summarize_thread"
+        assert line["limits"] == ["evidence_budget"]
+        assert line["counts"]["outputs_cut"] == 0
+        assert line["counts"]["prompt_tokens"] == estimate_tokens(repair_system + repair_user)
+        assert line["counts"]["prompt_tokens"] > estimate_tokens(system + user)
+        assert _MARKER not in caplog.text
+
+    @pytest.mark.parametrize("tool", ["ask_mailbox", "summarize_thread"])
+    def test_no_repair_counts_the_first_prompt(self, caplog, tool):
+        caplog.set_level(logging.INFO)
+        if tool == "ask_mailbox":
+            llm = FakeInferenceClient(response="ok [E1]")
+            asyncio.run(_tools(_StubDb(_long_threads()), llm, _SMALL)[tool](question="q?"))
+        else:
+            thread, recent = _long_summary_thread()
+            small = PromptBudget(context_tokens=3072, max_output_tokens=1024)
+            llm = FakeInferenceClient(response="summary [E1]")
+            asyncio.run(_tools(_StubDb([thread], recent), llm, small)[tool](thread_id="t1"))
+        assert len(llm.complete_calls) == 1
+        system, user = llm.complete_calls[0]
+        assert _one_limit_line(caplog)["counts"]["prompt_tokens"] == estimate_tokens(system + user)
+        assert _MARKER not in caplog.text

@@ -537,6 +537,11 @@ cap below, count launches, not model requests.
   matches the answerer's (#805, #813); 2048 cut verdicts short. A
   Claude Fable 5.1 judgement at the 16000 ceiling took 14–24 s, well
   inside the 120 s timeout.
+- Token and character settings (`INFERENCE_MAX_TOKENS`,
+  `INFERENCE_CONTEXT_TOKENS`, `JUDGE_MAX_TOKENS`,
+  `JUDGE_MAX_INPUT_CHARS`) take plain whole numbers (`16000`): `1024.9`,
+  `1e4`, `nan` or `inf` is a configuration error naming the setting,
+  and the timeouts must be finite (#997).
 - **Subscription judges** (`JUDGE_MODE=claude-cli` or `codex-cli`, #806):
   each judge call runs a vendor CLI once, so it uses the subscription's
   limits, which interactive use shares, instead of API credit. They run
@@ -645,7 +650,9 @@ cap below, count launches, not model requests.
   under `--max-runtime-secs` (3600): every answer and judge call is
   capped by what is left of it, and cases past it are `skipped`. Both
   must be finite numbers greater than 0 (a configuration error
-  otherwise).
+  otherwise). A timed-out or skipped case counts as failing, so
+  `compare` lists a changed timeout under "Changed between runs" and
+  treats the runs as not comparable (#997).
 
 Retrieval uses the baseline's hashed embedder (query vectors precomputed
 at build time) and no reranker, so a run measures prompt assembly,
@@ -742,8 +749,12 @@ Exit codes: `run` 0 complete, 2 incomplete (any error, skip or judge
 error, or a billing stop, which writes no report), 3 configuration
 error (including a run over `EVAL_MAX_CALLS`); `compare` 0, 1 on a per-case regression
 with `--fail-on-regression`, 2 when the runs differ in case file, case
-selection, index, rubric or judge (not comparable) unless `--allow-incompatible`,
-3 when a report is unreadable or malformed. A run graded under an
+selection, index, rubric, judge, case timeout or run budget (not
+comparable) unless `--allow-incompatible`,
+3 when a report is unreadable or malformed, or when `compare --out`
+names the baseline or candidate report (the same file through a
+symlink, hard link or another letter case included), which it would
+otherwise overwrite. A run graded under an
 earlier rubric (for example `ask-rubric-4`, whose judge saw no passage
 headers) is not comparable with a later one: re-run the baseline under
 the current rubric rather than comparing across versions. Scores
