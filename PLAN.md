@@ -328,7 +328,7 @@ Also in this milestone: #764 (default inference model).
 
 ### Phase 4 — Deterministic knowledge scaffolding
 
-**Status: mostly done.** Milestone *Phase 4*. Items 1 and 2 were built
+**Status: mostly done; item 5 open.** Milestone *Phase 4*. Items 1 and 2 were built
 before go-live, so their tables are in the v0 schema; any later
 Phase 4 schema change needs a numbered migration.
 
@@ -345,7 +345,11 @@ Phase 4 schema change needs a numbered migration.
    `Received:`, confirmed as Proton's on live mail) and the effective
    time `COALESCE(occurred_at, sent_at)` for every filter, span and
    ordering (`docs/architecture.md`, "Message time"). **Done** (#593,
-   #597, #599). Bitemporal claims wait for Phase 5.
+   #597, #599). Amended 2026-10-07 (Resolved decisions 35): the
+   effective time stays the default basis; `date_basis` lets a caller
+   choose `sent`, `occurred` or `internal` (#1085, #1092), and a
+   missing `Date:` stays unknown instead of being dated at indexing
+   (#1080). Bitemporal claims wait for Phase 5.
 4. **Deletion/retention semantics.** Mirror is the default, archive
    (`INDEXER_DELETION_ENABLED=false`) the opt-in, Trash indexed but
    hidden from default search. A reaped source reads as removed for 30
@@ -354,6 +358,30 @@ Phase 4 schema change needs a numbered migration.
    Remaining: user-controlled retention (#784), local
    deletion of deleted mail's files (#728), and validating reaping on
    live mail (#783).
+5. **Deterministic query language** (2026-10-07, Resolved decisions
+   35).
+   `query_messages` is already an exact enumerator with good address
+   semantics; what it lacks is composition, an explicit clock and a
+   way to say "could not tell". One leaf compiler serves the three
+   filter implementations (#1084), then: `replied`, size and
+   `date_basis` (#1085), which ships the `indeterminate` count for
+   its own NULL clocks and sizes, read from the row with no new
+   storage, so no basis ever drops unknown rows silently; per-message
+   content evaluability generalizing that count (#1086, before any
+   negation); the bounded `all` / `any` / `negate` form with a leaf
+   cap that also counts `any` groups (empty groups rejected) and
+   three-valued evaluation; the form is fixed at two levels, so there
+   is no nesting to bound (#1087, delivers #992 option 2);
+   explicit address-mode and `body_words` leaves (#1088); grouped
+   aggregation as its own tool over the same engine (#823); leaves
+   that wait on the evidence model: `header_exists` /
+   `header_contains` (#1089), Bcc (#1090), `attachment_text_words`
+   (#1091), `date_basis=internal` (#1092); and a capability report in
+   `get_mailbox_status` derived from the registered leaves (#1093).
+   Omitted by decision: IMAP UID, KEYWORD (labels are outside the
+   corpus by the sync patterns, a separate corpus decision), DRAFT
+   and DELETED (#955 becomes a leaf if wanted). #824, #955 and #1056
+   become leaves on the compiler. **Not started.**
 
 ### Phase 5 — Knowledge reasoning
 
@@ -430,6 +458,60 @@ files currently show as "retrying"), and correlation IDs (#888).
 Every MCP tool declares safety annotations (#899; #900; Resolved
 decisions 31).
 
+### Evidence model
+
+Not a phase: cross-cutting work to capture source semantics losslessly
+at the Maildir boundary, so deterministic queries are grounded in
+preserved evidence rather than reconstructed from it (owner and Claude
+correspondence, 2026-10-07; Resolved decisions 35). Milestone
+*Evidence model*. Principle: capture source semantics losslessly at
+ingestion, preserve immutable evidence locally, derive search
+structures from that evidence. The product boundary stays Bridge →
+mbsync → Maildir → indexer; mbsync is not replaced (Deferred).
+
+1. **Parser seam** — `parse_email_bytes(raw, source_metadata)` with
+   Maildir as the adapter; no behaviour change (#1077).
+2. **Reparse class** — an in-place full reparse through the job queue
+   for changes that keep chunk IDs, the executable form of #786's
+   "reparse" (#1078, decision). Each schema change below is its own
+   PR with its own migration and `SCHEMA_VERSION` bump (AGENTS.md:
+   schema-adjacent fixes get their own PR); a new column reads as
+   unknown, and the capability report (#1093) says "supported after
+   backfill", until a reparse fills it. Changes that land close
+   together may share one reparse run, never one migration.
+3. **All headers** — a `message_headers` table keeping duplicates and
+   order under one aggregate budget (fields, bytes, largest value in
+   one guard); values never reach logs (#1079). Keyed by claimant ID,
+   and added to the AGENTS.md per-message-row list by the same PR. The
+   same migration stores whether the budget was hit, so a header
+   predicate on a capped message is indeterminate, not false. Narrows #825 to
+   normalization; prerequisite for #463 options 2 and 3.
+4. **Unknown dates stay unknown** — nullable `sent_at` with a status;
+   `effective_at` remains the ordering fallback, documented as not
+   evidence (#1080).
+5. **Arrival time** — experiment: `CopyArrivalDate yes` in the mbsync
+   template, a layout test proving the mtime equals Bridge's
+   INTERNALDATE, `internal_at` with an `unavailable` status for files
+   that predate the option (#1081). Recovering it for existing mail
+   would be a cold re-pull, an explicit operation, not part of this.
+6. **Content-hash identity** — whether messages without a usable
+   Message-ID are indexed instead of dead-lettered (#1082, decision,
+   open). Adopting it changes the AGENTS.md claimant-ID and
+   thread-membership constraints, so the decision must define the
+   synthetic message and thread identity (such a message never becomes
+   a thread other messages resolve to by ID, and two of them never
+   merge by an empty ID) and update AGENTS.md in the same PR. Until
+   then the claimant-ID invariant stands unchanged.
+7. **Occurrence model** — one `messages` row is one occurrence while
+   Proton folders are exclusive and the virtual folders are excluded;
+   the `,U=` in a Maildir file name is isync's near-side UID, never
+   read; `.mbsyncstate` is never parsed (#1083, decision). Two
+   byte-identical files claiming one Message-ID share a claimant ID
+   and today collapse into one row that tracks a single path, so
+   removing that copy can reap mail whose other copy survives (#1102,
+   P1); "one row per occurrence" does not hold for them until #1102 is
+   fixed.
+
 ## Not doing (decided 2026-09-26)
 
 Recorded so items are auditable rather than silently dropped. Each
@@ -488,6 +570,17 @@ can be revisited with an explicit owner decision.
 - newest-first initial indexing as an option. Trigger: #752 lands
 - reporting child folders skipped under isync's reserved names
   (needs an extra IMAP listing). Trigger: a real report
+- replacing mbsync with a read-only IMAP acquisition layer (decided
+  2026-10-07, Resolved decisions 35): Maildir already carries folder,
+  flags and (with `CopyArrivalDate`) the arrival time, and the
+  evidence-model work needs none of Bridge's UIDs; a Python IMAP
+  client against Bridge's Gluon server would re-open the TLS and
+  fingerprint path, add a fourth container and a new untrusted-input
+  surface, and reverse the Maildir product boundary. Bridge `UID
+  SEARCH` is a differential test target for simple predicates, run by
+  hand and read-only, never an oracle for BODY/TEXT semantics.
+  Trigger: an IDLE-latency requirement, or a sync defect isync cannot
+  handle
 
 ## Operational baseline
 
@@ -607,6 +700,10 @@ removed Bridge container are kept as history.
    (#444) while no live index existed.
 8. **#297 undated mail (2026-09-30):** keep the first persisted date
    on reprocess. Its date chain was superseded by 14 (`occurred_at`).
+   **Superseded by 35 once #1080 lands:** a missing or unparseable
+   `Date:` is stored as unknown (`sent_at` NULL with a status), and
+   the first indexing time survives only as `first_indexed_at`, a
+   non-evidentiary fallback for `effective_at` ordering and display.
 9. **#276 retained near-side mbsync state (2026-09-30):** warn about a
    far-side box that cannot be opened and keep syncing the rest, never
    `Remove Near`, which deletes local mail. Done (#521); #275/#281 per
@@ -833,12 +930,27 @@ removed Bridge container are kept as history.
     a PR's "Not done" gets its own issue before the PR is called ready;
     a gap in code, tests or docs that a PR adds counts as introduced by
     it under the #751 exception.
+35. **Deterministic query language and the evidence model
+    (2026-10-07):** keep Maildir as the product boundary and isync as
+    the sync layer; do not replace mbsync (Deferred). Preserve source
+    semantics the indexer already receives but discards (all headers,
+    unknown dates, arrival time; content-hash identity is a separate
+    open decision, #1082; "Evidence model" above). Build the deterministic layer as one predicate
+    compiler with a bounded Boolean form, explicit `date_basis`
+    (`effective` stays the default) and three-valued results with an
+    `indeterminate` count, established before negation (Phase 4
+    item 5). Define `BODY`/`TEXT` equivalents by what the index holds
+    (`body_words`, `attachment_text_words`), never by Gluon's
+    behaviour. Omit IMAP UID, KEYWORD, DRAFT and DELETED. The
+    assessment behind this is in the issues' bodies (#1077–#1093), not
+    in the repository.
 
 ## Notes for Agents
 
 - Read `AGENTS.md` before making changes.
-- Find current work in GitHub issues (milestones, `P0`–`P3`,
-  `decision`); this file is direction, not a queue.
+- Find current work in GitHub issues; this file is direction, not a
+  queue. Labels, milestones, blocked-by relations and title shape
+  follow AGENTS.md "Issue Conventions".
 - The Current Objective supersedes any older scope statement that
   froze the MCP API surface; Phases 0–5 are the priority order.
 - Edit this file only when a decision, roadmap status or known
