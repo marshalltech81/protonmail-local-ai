@@ -36,7 +36,7 @@ from src.tools.intelligence import (
     _record_conforms,
 )
 
-from tests.answer_eval.adapters import NO_RECORDS
+from tests.answer_eval.adapters import NO_RECORDS  # EXTRACTION_INCOMPLETE is no abstention
 from tests.answer_eval.cases import Case, message_id_of, thread_id_of
 from tests.answer_eval.runner import CaseRun, Passage
 
@@ -49,6 +49,7 @@ _NO_RESULTS = "No relevant emails found"
 # Checks whose failure points at what the model did with its evidence.
 SYNTHESIS_CHECKS = (
     "answer_complete",
+    "extraction_complete",
     "citations_resolve",
     "citation_checks",
     "expected_values",
@@ -225,7 +226,12 @@ def grade_run(case: Case, run: CaseRun) -> DeterministicResult:
     checks["prompt_matches_capture"] = PASS if run.prompt_consistent else FAIL
     if out.records is None:
         checks["records_conform"] = NA
+        checks["extraction_complete"] = NA
     else:
+        # The prose tools' ``answer_complete`` for an extraction: a reply
+        # cut off, malformed or nonconforming for some thread leaves data
+        # missing, whatever the records say (Codex round 2 on #656's PR).
+        checks["extraction_complete"] = FAIL if out.incomplete else PASS
         schema = case.arguments["schema"]
         conform = all(_record_shape_ok(r, schema) for r in out.records)
         checks["records_conform"] = PASS if conform else FAIL

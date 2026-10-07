@@ -727,13 +727,20 @@ Every tool is graded through one view of its output (`adapters.py`,
 with the one thread summarized as the threads and its window note as
 the coverage note; `extract_from_emails`'s records, each rendered as one
 statement `field: value [E1]; ...` with the labels its server-checked
-`_evidence` cites (no records at all is graded as an abstention), with
-the tool's `notice` as the coverage note and no repair call. An
-extraction also gets `records_conform`: every record carries the
-server's `_source_thread`, `_date` and `_evidence` and its declared
-fields have the schema's JSON types (shape only, the tool's own check);
-a failure is attributed to `answer_infrastructure`, since the tool, not
-the model, owns that contract.
+`_evidence` cites, with the tool's `notice` as the coverage note and no
+repair call. No records at all is graded as an abstention, unless the
+notice says the extraction was incomplete (`Incomplete: ...`: a reply
+cut off, malformed or nonconforming for some thread), which is never an
+abstention. An extraction also gets `extraction_complete` (fails on
+that notice, with or without records; the prose tools' `answer_complete`)
+and `records_conform`: every record carries the server's
+`_source_thread`, `_date` and `_evidence` and its declared fields have
+the schema's JSON types (shape only, the tool's own check); a
+`records_conform` failure is attributed to `answer_infrastructure`,
+since the tool, not the model, owns that contract. A summary passage the
+window cut short is captured as truncated, the thread's indexed text
+(E1, which has no chunk offsets) included, by comparing the shown map
+with the one the tool's caps alone would show.
 
 Deterministic checks (`graders.py`), never overridden by the judge:
 answer not cut off, capture consistent, cited labels resolve to

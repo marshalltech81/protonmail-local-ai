@@ -13,16 +13,18 @@ import logging
 from types import SimpleNamespace
 
 import pytest
-from src.lib.inference import PromptBudget
+from src.lib.inference import InferenceTruncatedError, PromptBudget
 from src.tools.outputs import AnswerStatement, ExtractFromEmailsOutput, SummarizeThreadOutput
 
 from tests.answer_eval import __main__ as cli
 from tests.answer_eval.adapters import (
+    EXTRACTION_INCOMPLETE,
     NO_RECORDS,
     OUTPUT_MODELS,
     planned_calls,
     select_passages,
     view_of,
+    window_cut_labels,
 )
 from tests.answer_eval.cases import CASES_PATH, TOOLS, CaseError, load_cases
 from tests.answer_eval.graders import FAIL, NA, PASS, attribute, grade_run, is_abstention
@@ -275,6 +277,46 @@ class TestCapture:
     def test_output_models_cover_every_tool(self):
         assert set(OUTPUT_MODELS) == set(TOOLS)
 
+    def test_window_cut_summary_passages_are_marked_truncated(self):
+        """Codex round 2: when the window cut the summary context, the
+        handler also builds the map its caps alone would show; a passage
+        shorter in the shown map than there (E1's thread text included,
+        which has no chunk offsets) was cut by the window."""
+        shown = {
+            "E1": SimpleNamespace(text="start of the thread"),
+            "E7": SimpleNamespace(text="newest reply, whole"),
+        }
+        wanted = {
+            "E1": SimpleNamespace(text="start of the thread and the rest of it"),
+            "E4": SimpleNamespace(text="left out entirely"),
+            "E7": SimpleNamespace(text="newest reply, whole"),
+        }
+        assert window_cut_labels("summarize_thread", [shown, wanted]) == {"E1"}
+        assert window_cut_labels("summarize_thread", [shown]) == set()  # nothing cut
+        assert window_cut_labels("ask_mailbox", [shown, wanted]) == set()
+        assert window_cut_labels("extract_from_emails", [shown, wanted]) == set()
+
+    def test_extract_all_threads_failed_is_not_an_abstention(self, chunked_db):
+        """Codex round 2: a reply cut off for every searched thread gives
+        ``records=[]`` with the handler's ``Incomplete:`` notice, which must
+        not grade as a genuine empty result."""
+        case = dataclasses.replace(
+            CASES[EXTRACT], arguments={"query": "invoice", "schema": {"invoice": "string"}}
+        )
+        inference = ScriptedClient(InferenceTruncatedError("{"))
+        run = asyncio.run(run_case(case, _ctx(chunked_db, inference)))
+        assert run.status == "ok" and run.output is not None
+        assert run.output.records == []
+        assert (run.output.notice or "").startswith("Incomplete:")
+        view = run.view
+        assert view.incomplete is True
+        assert view.answer == EXTRACTION_INCOMPLETE
+        assert not is_abstention(view.answer)
+        det = grade_run(case, run)
+        assert det.abstained is False
+        assert det.checks["extraction_complete"] == FAIL
+        assert "synthesis" in attribute(case, run, det, False, False)
+
 
 # ------------------------------------------------------------------ views
 
@@ -308,7 +350,40 @@ class TestViews:
         )
         view = view_of("extract_from_emails", output)
         assert view.answer == NO_RECORDS and view.statements == []
-        assert is_abstention(view.answer)
+        assert is_abstention(view.answer) and view.incomplete is False
+
+    @pytest.mark.parametrize(
+        "notice",
+        [
+            "Incomplete: 2 of 2 threads could not be extracted (2 returned output that was "
+            "not a JSON object, array of objects, or null), so any matching data in them is "
+            "missing.",
+            "Incomplete: 1 of 2 threads could not be extracted (1 cut off), so any matching "
+            "data in them is missing. Evidence note: in 1 of 2 threads, matched passages were "
+            "left out.",
+        ],
+    )
+    def test_incomplete_extraction_is_not_an_abstention(self, notice):
+        """Codex round 2: the handler's ``Incomplete:`` notice means some
+        thread's reply was cut, malformed or nonconforming; with no records
+        that is a failure, never a genuine empty result."""
+        output = SimpleNamespace(
+            records=[], citations=[], citation_problems=[], notice=notice, threads=[]
+        )
+        view = view_of("extract_from_emails", output)
+        assert view.incomplete is True
+        assert view.answer == EXTRACTION_INCOMPLETE
+        assert not is_abstention(view.answer)
+        assert view.coverage_note == notice
+        # A window-only note is not an incomplete extraction.
+        window = SimpleNamespace(
+            records=[],
+            citations=[],
+            citation_problems=[],
+            notice="Evidence note: in 1 of 2 threads, matched passages were left out.",
+            threads=[],
+        )
+        assert view_of("extract_from_emails", window).incomplete is False
 
     def test_uncited_record_field_is_an_uncited_statement(self):
         record = {"bid": "$38,400", "_source_thread": "s", "_date": "d", "_evidence": {}}
@@ -422,7 +497,51 @@ class TestGrading:
         assert det.checks["abstention"] == FAIL
         assert det.checks["expected_values"] == FAIL
         assert det.checks["records_conform"] == PASS  # nothing to check
+        assert det.checks["extraction_complete"] == PASS
         assert det.checks["required_evidence_cited"] == FAIL
+
+    def test_failed_extraction_is_not_a_correct_abstention(self):
+        """Codex round 2: an unanswerable extraction case passes only on a
+        genuine empty result; every thread failing is a failure."""
+        case = dataclasses.replace(
+            CASES[EXTRACT],
+            answerable=False,
+            expected_handling="abstain",
+            required_evidence=(),
+            expected_facts=(),
+            must_include=(),
+            criteria={**CASES[EXTRACT].criteria, "conflict_uncertainty": True},
+        )
+        genuine = _extract_run([], [_passage("E1", "t05.1")], [])
+        det = grade_run(case, genuine)
+        assert det.checks["abstention"] == PASS
+        assert det.checks["extraction_complete"] == PASS
+        assert det.passed, det.checks
+        failed = _extract_run(
+            [],
+            [_passage("E1", "t05.1")],
+            [],
+            notice="Incomplete: 2 of 2 threads could not be extracted (2 cut off at "
+            "INFERENCE_MAX_TOKENS), so any matching data in them is missing.",
+        )
+        det = grade_run(case, failed)
+        assert det.abstained is False
+        assert det.checks["abstention"] == FAIL
+        assert det.checks["extraction_complete"] == FAIL
+        assert "synthesis" in attribute(case, failed, det, False, False)
+        # Records plus a partial failure: the records are graded, and the
+        # failure is still reported.
+        partial = _extract_run(
+            [_pool_record()],
+            [_passage("E1", "t05.1")],
+            ["E1"],
+            notice="Incomplete: 1 of 2 threads could not be extracted (1 cut off at "
+            "INFERENCE_MAX_TOKENS), so any matching data in them is missing.",
+        )
+        det = grade_run(CASES[EXTRACT], partial)
+        assert det.checks["expected_values"] == PASS
+        assert det.checks["extraction_complete"] == FAIL
+        assert det.checks["answer_complete"] == PASS
 
 
 # ------------------------------------------------------------------ judge

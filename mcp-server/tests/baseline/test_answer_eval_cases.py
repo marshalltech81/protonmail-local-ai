@@ -453,6 +453,12 @@ def test_cases_missing_evidence_are_the_known_ones(records: dict[str, dict]) -> 
 def test_prompt_budget_case_detects_omitted_evidence(records: dict[str, dict]) -> None:
     budget = [c for c in CASES if c.category == "prompt_budget"]
     assert {c.tool for c in budget} == {"ask_mailbox", "summarize_thread"}
+    # Codex round 2 on #656's PR: the summary's thread text (E1) the
+    # window cut short is captured as truncated; the newest message
+    # shown whole is not.
+    passages = _DETAILS["summarize-hall-open-points"]["passages"]
+    assert passages["E1"]["truncated"] is True, passages["E1"]
+    assert all(not p["truncated"] for label, p in passages.items() if label != "E1"), passages
     for case in budget:
         r = records[case.id]
         det = r["deterministic"]

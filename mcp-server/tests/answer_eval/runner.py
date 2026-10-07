@@ -40,7 +40,7 @@ import re
 import time
 from collections.abc import Callable, Iterator
 from contextlib import closing, contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC
 from pathlib import Path
 from typing import Any
@@ -54,7 +54,13 @@ from src.lib.security import ProviderResponseError
 from src.tools import intelligence
 from src.tools.outputs import AskMailboxOutput, ExtractFromEmailsOutput, SummarizeThreadOutput
 
-from tests.answer_eval.adapters import OUTPUT_MODELS, AnswerView, select_passages, view_of
+from tests.answer_eval.adapters import (
+    OUTPUT_MODELS,
+    AnswerView,
+    select_passages,
+    view_of,
+    window_cut_labels,
+)
 from tests.answer_eval.cases import BASELINE_DOMAIN, Case
 
 ToolOutput = AskMailboxOutput | SummarizeThreadOutput | ExtractFromEmailsOutput
@@ -365,6 +371,10 @@ async def run_case(case: Case, ctx: RunContext) -> CaseRun:
     run.billing_error = recorder.billing_error
     shown = select_passages(case.tool, maps)
     run.passages = {label: _passage(ref) for label, ref in shown.items()}
+    # A summary passage the window cut short, E1's thread text included,
+    # which has no chunk offsets for ``_passage`` to compare.
+    for label in window_cut_labels(case.tool, maps):
+        run.passages[label] = replace(run.passages[label], truncated=True)
     if run.calls:
         # Every captured label's header is in a prompt the model received
         # (the first, for a prose tool; its own thread's, for extraction).

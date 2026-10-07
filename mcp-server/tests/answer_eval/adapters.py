@@ -16,10 +16,15 @@ of a tool's output that the graders, the judge and the reports read.
   ``field: value [E1]; ...`` with the labels its ``_evidence`` cites, so
   the citation checks, ``must_include`` and the judge's per-statement
   claims apply to records as they do to prose. The answer is those
-  statements, one per line, or ``NO_RECORDS`` (graded as an abstention)
-  when the tool extracted none; the tool's ``notice`` is the coverage
-  note; there is no repair call. Field names are the case's own; values
-  are provider output and reach only the detail artifact, as answers do.
+  statements, one per line, or, when the tool extracted none,
+  ``NO_RECORDS`` (graded as an abstention) unless the tool's ``notice``
+  says the extraction was incomplete (a reply cut off, malformed or
+  nonconforming for some thread): then it is ``EXTRACTION_INCOMPLETE``,
+  which is no abstention, and ``incomplete`` is set for the
+  ``extraction_complete`` check (Codex round 2 on #656's PR). The
+  ``notice`` is the coverage note; there is no repair call. Field names
+  are the case's own; values are provider output and reach only the
+  detail artifact, as answers do.
 
 The experimental tools (``brief_issue``, ``check_conclusion``) have no
 adapter yet (#656, #291).
@@ -51,6 +56,15 @@ OUTPUT_MODELS: dict[str, type] = {
 # The extract view's answer when the tool returned no records: fixed
 # text, graded as an abstention (``graders.is_abstention``).
 NO_RECORDS = "No records extracted"
+# ... unless the tool's notice reports an incomplete extraction: fixed
+# text that is no abstention.
+EXTRACTION_INCOMPLETE = "Extraction incomplete: no records"
+# How ``extract_from_emails`` opens its notice when a thread's reply was
+# cut off, not JSON, or a record failed the schema check (the fixed text
+# ``f"Incomplete: {failed} of {len(results)} threads could not be
+# extracted ..."`` in ``src/tools/intelligence.py``). A window-only
+# evidence note does not start with it.
+_INCOMPLETE_PREFIX = "Incomplete:"
 
 # ``extract_from_emails``'s default ``limit`` (one model call per thread).
 _EXTRACT_DEFAULT_LIMIT = 20
@@ -68,6 +82,9 @@ class AnswerView:
     coverage_note: str | None = field(default=None, repr=False)
     repair_attempted: bool | None = None  # None for a tool without a repair call
     records: list[dict[str, Any]] | None = field(default=None, repr=False)  # extract only
+    # extract only: some searched thread's reply was cut off, malformed
+    # or nonconforming, so data may be missing whatever the records say.
+    incomplete: bool = False
 
 
 def _record_statement(record: Mapping[str, Any]) -> AnswerStatement:
@@ -118,17 +135,46 @@ def view_of(tool: str, output: Any) -> AnswerView:
     if tool == "extract_from_emails":
         records = list(output.records)
         statements = [_record_statement(r) for r in records if isinstance(r, Mapping)]
+        notice = output.notice
+        incomplete = isinstance(notice, str) and notice.startswith(_INCOMPLETE_PREFIX)
+        if statements:
+            answer = "\n".join(s.text for s in statements)
+        else:
+            answer = EXTRACTION_INCOMPLETE if incomplete else NO_RECORDS
         return AnswerView(
-            "\n".join(s.text for s in statements) if statements else NO_RECORDS,
+            answer,
             output.threads,
             output.citations,
             output.citation_problems,
             statements,
-            output.notice,
+            notice,
             None,
             records,
+            incomplete,
         )
     raise KeyError(tool)
+
+
+def window_cut_labels(tool: str, maps: Sequence[Mapping[str, Any]]) -> set[str]:
+    """Labels of the shown passages the model window cut short, beyond what
+    the capture's chunk offsets record.
+
+    ``summarize_thread`` builds a second map, what its caps alone would
+    show, only when the window cut the context (#949); a passage whose
+    text is shorter in the shown map than there was cut by the window.
+    This covers ``E1``, the thread's indexed text, which has no chunk
+    offsets for ``runner._passage`` to compare (Codex round 2 on #656's
+    PR). The other tools build no such map (``ask_mailbox``'s thread-text
+    fallback is #1128).
+    """
+    if tool != "summarize_thread" or len(maps) < 2:
+        return set()
+    shown, wanted = maps[0], maps[1]
+    return {
+        label
+        for label, ref in shown.items()
+        if label in wanted and len(ref.text) < len(wanted[label].text)
+    }
 
 
 def select_passages(tool: str, maps: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
