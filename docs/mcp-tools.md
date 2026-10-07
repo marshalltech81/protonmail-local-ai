@@ -112,8 +112,7 @@ tool never ran. Others report the same message for tools
 that declare the hints
 ([OpenAI community](https://community.openai.com/t/chatgpt-app-mcp-tool-calls-blocked-by-openai-safety-checks-before-reaching-mcp-server/1386059)),
 and report that it is intermittent, so an identical retry can succeed
-([1](https://community.openai.com/t/intermittent-chatgpt-mcp-tool-calls-blocked-by-openai-safety-checks-before-reaching-server-same-call-later-succeeds-testing-results/1386088),
-[2](https://github.com/totec448-spec/chat-on-steroids/issues/555)).
+([report](https://github.com/totec448-spec/chat-on-steroids/issues/555)).
 OpenAI's [MCP guide](https://developers.openai.com/api/docs/guides/tools-connectors-mcp)
 says it has "built-in safeguards to help detect and block these
 threats", and its
@@ -128,7 +127,7 @@ Tool descriptions are not prefixed with "Read-only." (decided in #899,
 kept in #919). Tools that declare the read-only hint are blocked the
 same way elsewhere, and rewording tool descriptions is reported not to
 stop the block
-([3](https://github.com/miuuyy/codex-chatgpt-web/issues/745)), so the
+([report](https://github.com/miuuyy/codex-chatgpt-web/issues/745)), so the
 prefix would not fix it and would only lengthen every description
 (#818 is trimming them).
 
