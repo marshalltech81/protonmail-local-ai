@@ -26,6 +26,11 @@ from tests.answer_eval.runner import CaseRun
 REPORT_SCHEMA_VERSION = 1
 # Identity fields that must match for two runs' grades to be comparable.
 _COMPARABLE = ("cases_sha256", "index_sha256", "rubric_version")
+# Run settings (``identity.settings``) that bound how long cases may
+# take. A case that times out or is skipped counts as failing, so a
+# changed timeout can alter every rate: each one is both reported as
+# changed and makes the runs incompatible (#997).
+_TIMEOUT_SETTINGS = ("case_timeout_secs", "max_runtime_secs")
 
 
 def case_record(
@@ -347,6 +352,10 @@ def compare_reports(base: dict[str, Any], cand: dict[str, Any]) -> dict[str, Any
     if {r["id"] for r in base["cases"]} != {r["id"] for r in cand["cases"]}:
         incompatible.append("case_selection")
     changed = [k for k in ("answerer", "retrieval", "source_commit") if bi.get(k) != ci.get(k)]
+    bs, cs = bi.get("settings") or {}, ci.get("settings") or {}
+    timeouts = [k for k in _TIMEOUT_SETTINGS if bs.get(k) != cs.get(k)]
+    changed += timeouts
+    incompatible += timeouts
     b_cases = {r["id"]: r for r in base["cases"]}
     c_cases = {r["id"]: r for r in cand["cases"]}
     regressions, improvements = [], []

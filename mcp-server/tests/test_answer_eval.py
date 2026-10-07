@@ -479,6 +479,64 @@ class TestConfig:
         with pytest.raises(ConfigError, match="INFERENCE_STRUCTURED_OUTPUT"):
             load_layer("INFERENCE", {**self._ANSWERER, "INFERENCE_STRUCTURED_OUTPUT": "yes"})
 
+    _INTEGER_SETTINGS = [
+        ("INFERENCE", "INFERENCE_MAX_TOKENS"),
+        ("INFERENCE", "INFERENCE_CONTEXT_TOKENS"),
+        ("JUDGE", "JUDGE_MAX_TOKENS"),
+        ("JUDGE", "JUDGE_MAX_INPUT_CHARS"),
+    ]
+
+    def _layer_env(self, layer: str) -> dict[str, str]:
+        if layer == "INFERENCE":
+            return dict(self._ANSWERER)
+        return {**self.ENV, "JUDGE_API_KEY": "k"}  # pragma: allowlist secret
+
+    @pytest.mark.parametrize(("layer", "name"), _INTEGER_SETTINGS)
+    @pytest.mark.parametrize("value", ["1024.9", "4096.0", "nan", "inf", "-inf", "1e4", "4_096"])
+    def test_token_and_character_settings_need_integer_syntax(self, layer, name, value):
+        """#997 item 5: ``1024.9`` was truncated to 1024, and ``nan`` or
+        ``inf`` passed the minimum check and then raised an uncaught
+        ValueError or OverflowError from ``int``. The error names the
+        setting, never its value."""
+        with pytest.raises(ConfigError) as e:
+            load_layer(layer, {**self._layer_env(layer), name: value})
+        assert str(e.value) == f"{name} must be a whole number"
+        assert value not in str(e.value)
+
+    @pytest.mark.parametrize(("layer", "name"), _INTEGER_SETTINGS)
+    def test_token_and_character_settings_accept_integers(self, layer, name):
+        """The plain digits ``.env.eval`` uses keep working, padded too."""
+        cfg = load_layer(layer, {**self._layer_env(layer), name: " 16000 "})
+        assert cfg is not None
+        field = {
+            "INFERENCE_MAX_TOKENS": "max_tokens",
+            "INFERENCE_CONTEXT_TOKENS": "context_tokens",
+            "JUDGE_MAX_TOKENS": "max_tokens",
+            "JUDGE_MAX_INPUT_CHARS": "max_input_chars",
+        }[name]
+        value = getattr(cfg, field)
+        assert value == 16000 and type(value) is int
+
+    @pytest.mark.parametrize(("layer", "name"), _INTEGER_SETTINGS)
+    def test_integer_settings_keep_their_minimum(self, layer, name):
+        with pytest.raises(ConfigError, match=f"{name} must be at least"):
+            load_layer(layer, {**self._layer_env(layer), name: "0"})
+
+    @pytest.mark.parametrize(
+        ("layer", "name"),
+        [("INFERENCE", "INFERENCE_TIMEOUT_SECS"), ("JUDGE", "JUDGE_TIMEOUT_SECS")],
+    )
+    @pytest.mark.parametrize("value", ["nan", "inf", "-inf"])
+    def test_timeouts_must_be_finite(self, layer, name, value):
+        """#997 item 5, same class: ``nan`` passed ``value < minimum`` (a
+        comparison with nan is false) and reached the client as a
+        timeout. Fractional timeouts stay valid."""
+        with pytest.raises(ConfigError) as e:
+            load_layer(layer, {**self._layer_env(layer), name: value})
+        assert str(e.value) == f"{name} must be a finite number"
+        cfg = load_layer(layer, {**self._layer_env(layer), name: "90.5"})
+        assert cfg is not None and cfg.timeout_secs == 90.5
+
 
 # ----------------------------------------------------------------- runner
 
@@ -1593,6 +1651,26 @@ class TestHarnessAndReports:
         assert compare_reports(base, other)["incompatible"] == ["rubric_version"]
         assert "not comparable" in render_comparison(compare_reports(base, other))
 
+    @pytest.mark.parametrize("setting", ["case_timeout_secs", "max_runtime_secs"])
+    def test_compare_reports_timeout_changes(self, chunked_db, setting):
+        """#997 item 6: a shorter case timeout or run budget turns cases
+        into timeouts or skips, which count as failures, so a timeout
+        change can alter every rate. It is named as changed and makes the
+        runs incompatible, so its failures are not read as regressions."""
+        good = _records(chunked_db, ["14,200 [E1]."], [None], judge=False)[0][0]
+        settings = {"case_timeout_secs": 900.0, "max_runtime_secs": 3600.0}
+        base = build_report(_identity(settings=dict(settings)), [good], False)
+        same = build_report(_identity(settings=dict(settings)), [good], False)
+        cmp = compare_reports(base, same)
+        assert cmp["incompatible"] == [] and cmp["changed"] == []
+        cand = build_report(_identity(settings={**settings, setting: 1.0}), [good], False)
+        cmp = compare_reports(base, cand)
+        assert cmp["changed"] == [setting]
+        assert cmp["incompatible"] == [setting]
+        rendered = render_comparison(cmp)
+        assert f"Changed between runs: ['{setting}']" in rendered
+        assert "not comparable" in rendered
+
     def test_runtime_budget_caps_each_call(self, chunked_db):
         """Review round 1: a case starting just before the deadline got the
         full case timeout (900 s)."""
@@ -1926,6 +2004,52 @@ class TestCli:
             out, err = capsys.readouterr()
             assert err == "answer evaluation: unreadable input (UnicodeDecodeError)\n"
             assert "MARKER-677" not in out + err
+
+    @pytest.mark.parametrize("which", ["baseline", "candidate"])
+    @pytest.mark.parametrize(
+        "how", ["same", "relative", "symlink", "symlinked-dir", "hardlink", "case"]
+    )
+    def test_compare_refuses_out_overwriting_an_input(
+        self, chunked_db, tmp_path, capsys, monkeypatch, which, how
+    ):
+        """#997 item 4: ``compare --out`` resolving to either input report
+        replaced that run report with the comparison."""
+        reports = tmp_path / "reports"
+        reports.mkdir()
+        a = self._report(chunked_db, reports, "a.json")
+        b = self._report(chunked_db, reports, "b.json")
+        target = a if which == "baseline" else b
+        if how == "same":
+            out = str(target)
+        elif how == "relative":
+            # --out resolves against --path-base, the inputs against cwd.
+            monkeypatch.chdir(reports)
+            a, b = Path("a.json"), Path("b.json")
+            out = f"../reports/{target.name}"
+        elif how == "symlink":
+            link = tmp_path / "link.json"
+            link.symlink_to(target)
+            out = str(link)
+        elif how == "symlinked-dir":
+            (tmp_path / "dir-link").symlink_to(reports)
+            out = str(tmp_path / "dir-link" / target.name)
+        elif how == "hardlink":
+            link = tmp_path / "hard.json"
+            os.link(target, link)
+            out = str(link)
+        else:
+            # A case-insensitive file system (macOS's default) names one
+            # file two ways; skip where the names are distinct files.
+            upper = reports / target.name.upper()
+            if not upper.exists():
+                pytest.skip("case-sensitive file system")
+            out = str(upper)
+        before = {p: p.read_bytes() for p in reports.iterdir()}
+        argv = ["compare", str(a), str(b), "--out", out, "--path-base", str(reports)]
+        assert cli.main(argv) == cli.EXIT_CONFIG
+        err = capsys.readouterr().err
+        assert err == "answer evaluation: --out must not be the baseline or candidate report\n"
+        assert {p: p.read_bytes() for p in reports.iterdir()} == before
 
     def test_run_rejects_detail_overwriting_the_report(self, tmp_path, capsys):
         """Review round 1: --detail equal to --out overwrote the report."""

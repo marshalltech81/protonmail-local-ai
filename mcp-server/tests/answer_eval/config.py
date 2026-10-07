@@ -27,7 +27,9 @@ decides the endpoint).
 """
 
 import hashlib
+import math
 import os
+import re
 import stat
 import urllib.parse
 from collections.abc import Mapping
@@ -172,8 +174,26 @@ def _number(env: Mapping[str, str], name: str, default: float, minimum: float) -
         value = float(raw)
     except ValueError:
         raise ConfigError(f"{name} must be a number") from None
+    # A comparison with nan is false, so nan would pass the minimum.
+    if not math.isfinite(value):
+        raise ConfigError(f"{name} must be a finite number")
     if value < minimum:
         raise ConfigError(f"{name} must be at least {minimum:g}")
+    return value
+
+
+def _integer(env: Mapping[str, str], name: str, default: int, minimum: int) -> int:
+    """A token or character count: plain digits only, so ``1024.9`` is
+    not truncated and ``nan``/``inf`` never reach ``int`` (#997). The
+    errors name the setting, never its value."""
+    raw = env.get(name, "").strip()
+    if not raw:
+        return default
+    if not re.fullmatch(r"[0-9]+", raw):
+        raise ConfigError(f"{name} must be a whole number")
+    value = int(raw)
+    if value < minimum:
+        raise ConfigError(f"{name} must be at least {minimum}")
     return value
 
 
@@ -225,8 +245,8 @@ def load_layer(
     if layer == "INFERENCE":
         timeout = _number(env, "INFERENCE_TIMEOUT_SECS", DEFAULT_COMPLETE_TIMEOUT_SECS, 1.0)
         default_max, default_context = default_token_budget(mode)
-        max_tokens = int(_number(env, "INFERENCE_MAX_TOKENS", default_max, 1))
-        context = int(_number(env, "INFERENCE_CONTEXT_TOKENS", default_context, 1))
+        max_tokens = _integer(env, "INFERENCE_MAX_TOKENS", default_max, 1)
+        context = _integer(env, "INFERENCE_CONTEXT_TOKENS", default_context, 1)
         max_input = 0
         structured = env.get("INFERENCE_STRUCTURED_OUTPUT", "").strip().lower()
         if structured not in {"", "true", "false"}:
@@ -234,9 +254,9 @@ def load_layer(
         structured_output = structured != "false"
     else:
         timeout = _number(env, "JUDGE_TIMEOUT_SECS", JUDGE_DEFAULT_TIMEOUT_SECS, 1.0)
-        max_tokens = int(_number(env, "JUDGE_MAX_TOKENS", judge_default_max_tokens(mode), 256))
+        max_tokens = _integer(env, "JUDGE_MAX_TOKENS", judge_default_max_tokens(mode), 256)
         context = 0
-        max_input = int(_number(env, "JUDGE_MAX_INPUT_CHARS", JUDGE_DEFAULT_MAX_INPUT_CHARS, 1000))
+        max_input = _integer(env, "JUDGE_MAX_INPUT_CHARS", JUDGE_DEFAULT_MAX_INPUT_CHARS, 1000)
         structured_output = False  # the judge sends no schema
     return LayerConfig(
         layer=layer,
@@ -282,7 +302,7 @@ def _load_cli_judge(mode: str, env: Mapping[str, str]) -> LayerConfig:
         max_tokens = JUDGE_DEFAULT_MAX_TOKENS
     else:
         _check_claude_login(mode, path)
-        max_tokens = int(_number(env, "JUDGE_MAX_TOKENS", judge_default_max_tokens(mode), 256))
+        max_tokens = _integer(env, "JUDGE_MAX_TOKENS", judge_default_max_tokens(mode), 256)
     return LayerConfig(
         layer="JUDGE",
         mode=mode,
@@ -292,9 +312,7 @@ def _load_cli_judge(mode: str, env: Mapping[str, str]) -> LayerConfig:
         timeout_secs=_number(env, "JUDGE_TIMEOUT_SECS", JUDGE_DEFAULT_TIMEOUT_SECS, 1.0),
         max_tokens=max_tokens,
         context_tokens=0,
-        max_input_chars=int(
-            _number(env, "JUDGE_MAX_INPUT_CHARS", JUDGE_DEFAULT_MAX_INPUT_CHARS, 1000)
-        ),
+        max_input_chars=_integer(env, "JUDGE_MAX_INPUT_CHARS", JUDGE_DEFAULT_MAX_INPUT_CHARS, 1000),
         structured_output=False,  # the judge sends no schema
         cli_path=path,
         cli_version=version,
