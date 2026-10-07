@@ -1490,6 +1490,13 @@ def test_extract_description_points_to_the_population_recipe(empty_db):
     doc = _wire_descriptions(empty_db)["extract_from_emails"]
     assert "Only the top ``limit`` threads are searched" in doc
     assert "search_attachments in date windows under its 50 cap" in doc
-    assert "say how many threads will reach the model" in doc
     assert "listed attachment with no record" in doc
     assert "docs/mcp-tools.md" not in doc
+    # Review round 2: disclosure precedes the first enumeration call
+    # (search_attachments already returns text previews), and
+    # reconciliation runs both ways.
+    disclose = doc.index("first say the windows, the most previews and threads")
+    assert disclose < doc.index("search_attachments in date windows")
+    assert "_evidence labels to citations" in doc
+    assert "drop duplicates" in doc
+    assert "set aside records citing no listed attachment" in doc

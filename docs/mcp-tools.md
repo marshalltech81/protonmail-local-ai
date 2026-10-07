@@ -1509,13 +1509,16 @@ tool description gives the calling model a short form of this recipe,
 including the disclosure before reading; clients cannot read this
 file:
 
-1. Enumerate the attachments with `search_attachments`, a lexical
+1. Before the first call, say the date windows, the most attachment
+   previews and the most threads the run will read:
+   `search_attachments` already returns extracted-text previews to
+   the calling model, and each extracted thread is one model call
+   whose passages reach the inference provider.
+2. Enumerate the attachments with `search_attachments`, a lexical
    match on the material code or its description, plus `from_addr`
    and `content_type` where they help. There is no pagination, so
    split the period into `date_from` / `date_to` windows narrow
    enough that each returns fewer than 50 results, the cap.
-2. Before extracting, say how many threads will be read: each is one
-   model call, and its passages reach the inference provider.
 3. Run `extract_from_emails` per window, with `participant` set to
    the vendor's address (the tool has no `from_addr`) and a schema
    that declares its own `invoice_date` and `invoice_number`, or read
