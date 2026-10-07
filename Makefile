@@ -1,4 +1,4 @@
-.PHONY: build build-nocache up down logs status requeue-dead clean sync sync-indexer sync-mcp test test-indexer test-mcp test-mbsync test-mbsync-tls test-mbsync-layout test-compose test-validate-env test-make-status test-trivy-flags trivy restart-indexer backup-index restore-index test-index-backup baseline eval-answers eval-answers-compare typecheck typecheck-indexer typecheck-mcp init-secrets validate-env help
+.PHONY: build build-nocache up down logs status requeue-dead clean sync sync-indexer sync-mcp test test-indexer test-mcp test-mbsync test-mbsync-tls test-mbsync-layout test-compose test-validate-env test-make-status test-image-pins test-trivy-flags trivy restart-indexer backup-index restore-index test-index-backup baseline eval-answers eval-answers-compare typecheck typecheck-indexer typecheck-mcp init-secrets validate-env help
 
 # Per-checkout uv cache (#896): a cache shared between checkouts or
 # worktrees running make targets at the same time fails with missing-file
@@ -28,7 +28,7 @@ help:
 	@echo "  restore-index Replace the index with BACKUP=<file from backup-index> (asks first; stops indexer and mcp-server, restarts mcp-server once the indexer verifies the index)"
 	@echo "  requeue-dead Requeue dead-lettered indexing jobs (optional CLASS=retryable|permanent_source_failure|operator_action_required)"
 	@echo "  sync         Sync local uv environments for indexer and mcp-server"
-	@echo "  test         Run indexer, mcp-server, mbsync, Compose, validate-env, make status, index backup and Trivy flag script tests locally"
+	@echo "  test         Run indexer, mcp-server, mbsync, Compose, validate-env, make status, index backup, image pin and Trivy flag script tests locally"
 	@echo "  typecheck    Run mypy over the indexer and mcp-server Python services"
 	@echo "  test-indexer Run indexer unit tests only"
 	@echo "  test-mcp     Run mcp-server unit tests only"
@@ -39,6 +39,7 @@ help:
 	@echo "  test-validate-env  Run validate-env.sh and mcp-auth-headers.sh tests against synthetic fixtures"
 	@echo "  test-index-backup  Run backup-index and restore-index tests against a fake docker (no daemon)"
 	@echo "  test-make-status  Run make status tests against a fake docker (no daemon)"
+	@echo "  test-image-pins  Check tls_check.sh pins the python image the indexer and mcp-server Dockerfiles build from"
 	@echo "  test-trivy-flags  Check that make trivy and the Trivy jobs in .github/workflows/security.yml agree (no Trivy install)"
 	@echo "  trivy        Run the CI Trivy scans locally: dependency scans of indexer/ and mcp-server/, offline misconfig scan of the repository (needs trivy)"
 	@echo "  baseline     Run the retrieval regression baseline (UPDATE=1 rewrites the rank snapshot)"
@@ -222,7 +223,7 @@ restore-index:
 	BACKUP="$(BACKUP)" ./scripts/restore-index.sh
 
 # Run unit tests locally using uv
-test: test-indexer test-mcp test-mbsync test-compose test-validate-env test-make-status test-index-backup test-trivy-flags
+test: test-indexer test-mcp test-mbsync test-compose test-validate-env test-make-status test-index-backup test-image-pins test-trivy-flags
 
 test-indexer: sync-indexer
 	cd indexer && uv run pytest -q
@@ -251,6 +252,9 @@ test-make-status:
 
 test-index-backup:
 	bash scripts/tests/index_backup_test.sh
+
+test-image-pins:
+	bash scripts/tests/image_pin_test.sh
 
 test-trivy-flags:
 	bash scripts/tests/trivy_flags_test.sh

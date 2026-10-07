@@ -32,7 +32,9 @@ set -Eeuo pipefail
 
 MBSYNC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly MBSYNC_DIR
-# The digest the indexer and mcp-server images are built from.
+# The image the indexer and mcp-server Dockerfiles build from. Dependabot
+# bumps only the Dockerfiles; scripts/tests/image_pin_test.sh fails when
+# this pin differs from them (#1023), so bump it with them.
 readonly PYTHON_IMAGE="python:3.14-slim-trixie@sha256:f85c5697265c178cc6887276c55fe16cf3d14ca35c3df6a5eab3b360534a55d2"
 readonly RUN_ID="mbsync-tls-check-$$"
 readonly NETWORK="$RUN_ID"
