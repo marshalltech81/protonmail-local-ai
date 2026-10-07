@@ -8,6 +8,7 @@ import json
 import logging
 import math
 import re
+import sys
 from pathlib import Path
 
 import pytest
@@ -15,7 +16,7 @@ from src.database import EMBEDDING_DIM, Database
 from src.extractors import EXTRACTOR_VERSIONS, _resolve_extractor
 
 from tests.baseline.build import build
-from tests.baseline.corpus import THREADS, thread_id, write_maildir
+from tests.baseline.corpus import THREADS, _docx, _xlsx, thread_id, write_maildir
 from tests.baseline.hash_embedder import HashEmbedder, embed_text
 
 _GOLDEN = Path(__file__).parents[3] / "mcp-server" / "tests" / "baseline" / "golden.json"
@@ -200,6 +201,20 @@ class TestBuild:
         assert text["kite-roster.json"] is None and text["spring-rota.txt"] is None
         assert "Corrigan" in text["crossing.txt"]
         assert text["ferry-crossing.eml"] is None
+
+    def test_ooxml_attachments_are_platform_independent(self, monkeypatch):
+        """#909 review round 1: ``zipfile.ZipInfo`` records the creating
+        system from ``sys.platform`` (0 on Windows, 3 elsewhere), and the
+        claimant IDs and ``index_sha256`` hash the message bytes, so the
+        DOCX and XLSX threads must serialize identically on Windows."""
+
+        # The corpus builds its payloads at import, so build them anew.
+        def payloads() -> list[bytes]:
+            return [_docx(("Ravensholm abbey",)), _xlsx({"Pickup": (("Quillon",),)})]
+
+        here = payloads()
+        monkeypatch.setattr(sys, "platform", "win32")
+        assert payloads() == here
 
     def test_refuses_non_empty_output_dir(self, tmp_path):
         (tmp_path / "leftover").write_text("x")

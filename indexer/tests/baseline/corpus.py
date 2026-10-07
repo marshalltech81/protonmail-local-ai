@@ -2019,7 +2019,7 @@ def _ooxml(main: str, parts: dict[str, tuple[str, str]], rels: dict[str, str]) -
     relationship points at, and ``rels`` maps a ``.rels`` part to its XML.
 
     Hand-written so the corpus needs no Office library. The ZIP is
-    stored, not deflated, with a fixed timestamp, so its bytes are the
+    stored, not deflated, with a fixed timestamp and creating system, so its bytes are the
     same on every platform and zlib version, and the text the DOCX and
     XLSX extractors find is in the payload as written.
     """
@@ -2040,6 +2040,9 @@ def _ooxml(main: str, parts: dict[str, tuple[str, str]], rels: dict[str, str]) -
     with zipfile.ZipFile(out, "w", zipfile.ZIP_STORED) as zf:
         for name, xml in files.items():
             info = zipfile.ZipInfo(name, date_time=(2026, 2, 1, 0, 0, 0))
+            # ``ZipInfo`` takes the creating system from the platform
+            # (0 on Windows); fix it to Unix (3) so every platform agrees.
+            info.create_system = 3
             zf.writestr(info, '<?xml version="1.0" encoding="UTF-8"?>' + xml)
     return out.getvalue()
 
