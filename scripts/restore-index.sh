@@ -100,7 +100,8 @@ fi
 # The structural checks below cannot tell a crafted index from a real
 # one, so the path to the backup must be one no other account can
 # change: the file and every directory above it owned by you (or root),
-# with no group or other write bit unless the directory is sticky.
+# with no group or other write bit unless the directory is sticky, and
+# every symbolic link among the directory components yours (or root's).
 # Otherwise another account could swap the file before it is opened.
 # ACL entries count too: they are checked before the mode bits.
 # acl_grants PATH succeeds when PATH carries an entry that gives access:
@@ -121,10 +122,36 @@ if [[ -n "$(find "$BACKUP" -maxdepth 0 \( -perm -g=w -o -perm -o=w -o \( ! -user
     acl_grants "$BACKUP"; then
     die "another account can replace $BACKUP; it must be yours and writable only by you"
 fi
+# replaceable_dir DIR succeeds when another account can rename or remove
+# entries in DIR: a group or other write bit without the sticky bit, an
+# owner other than you or root, or an ACL entry that grants access.
+replaceable_dir() {
+    [[ -n "$(find "$1" -maxdepth 0 \( \( \( -perm -g=w -o -perm -o=w \) ! -perm -1000 \) -o \( ! -user 0 ! -user "$me" \) \) -print)" ]] ||
+        acl_grants "$1"
+}
+# The open below takes the path as given, so each directory component
+# is checked as written, before the resolved directories: a symbolic
+# link among them can be repointed by its owner (in a sticky directory
+# too) or replaced by any account that can write the directory holding
+# it, whether or not that directory is on the resolved path.
+prefix=""
+[[ "$BACKUP" != /* ]] || prefix=/
+IFS=/ read -r -a parts <<<"$(dirname -- "$BACKUP")"
+for part in "${parts[@]}"; do
+    [[ -n "$part" ]] || continue
+    prefix="$prefix$part"
+    if [[ -L "$prefix" && -n "$(find "$prefix" -maxdepth 0 ! -user 0 ! -user "$me" -print)" ]]; then
+        die "another account can replace $BACKUP through $prefix, a symbolic link it owns; pass a path whose links are yours"
+    fi
+    real=$(cd -- "$prefix" && pwd -P)
+    if replaceable_dir "$real"; then
+        die "another account can replace $BACKUP through $prefix; keep backups in a directory only you can write, as make backup-index creates"
+    fi
+    prefix="$prefix/"
+done
 ancestor=$(cd -- "$(dirname -- "$BACKUP")" && pwd -P)
 while :; do
-    if [[ -n "$(find "$ancestor" -maxdepth 0 \( \( \( -perm -g=w -o -perm -o=w \) ! -perm -1000 \) -o \( ! -user 0 ! -user "$me" \) \) -print)" ]] ||
-        acl_grants "$ancestor"; then
+    if replaceable_dir "$ancestor"; then
         die "another account can replace $BACKUP through $ancestor; keep backups in a directory only you can write, as make backup-index creates"
     fi
     [[ "$ancestor" != / ]] || break

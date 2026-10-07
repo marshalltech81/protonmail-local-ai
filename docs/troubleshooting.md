@@ -901,8 +901,11 @@ account access (on macOS, deny-only entries such as the one on home
 directories are fine), unless the directory is sticky like `/tmp`, and
 the file must not be a symbolic link: another account
 could otherwise swap in a crafted index, which the integrity and schema
-checks cannot tell apart. Directories made by `make backup-index`
-already qualify.
+checks cannot tell apart. The directories are checked both as written
+in `BACKUP` and after resolving symbolic links, and a symbolic link
+among the directory components must be yours (or root's, like `/tmp`
+on macOS): its owner could otherwise repoint it between the checks and
+the open. Directories made by `make backup-index` already qualify.
 
 ## Embedder identity mismatch
 

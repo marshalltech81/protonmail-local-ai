@@ -655,6 +655,84 @@ restore_refuses_a_replaceable_backup_path() {
     rm -rf "${WORK:?}/shared"
 }
 
+restore_refuses_a_symlinked_directory_another_account_can_replace() {
+    reset
+    rm -rf "${WORK:?}/open" "${WORK:?}/real"
+    make_db "$WORK/data/mail.db"
+    mkdir -m 700 "$WORK/real"
+    make_db "$WORK/real/backup.db"
+    # The link is yours, but it sits in a directory another account can
+    # write (group-writable, no sticky bit) that is not on the resolved
+    # path, so that account can replace the link before the open.
+    mkdir -m 700 "$WORK/open"
+    chmod 775 "$WORK/open"
+    ln -s "$WORK/real" "$WORK/open/link"
+    run_restore "$WORK/open/link/backup.db" yes
+    [[ "$STATUS" -ne 0 ]]
+    grep -F "another account can replace $WORK/open/link/backup.db through $WORK/open;" "$WORK/out" >/dev/null
+    if grep -E '^(stop|run|start)' "$WORK/docker.log" >/dev/null; then
+        return 1
+    fi
+    # A directory above the link that another account can write is
+    # refused too, even when the link's own directory is private.
+    reset
+    make_db "$WORK/data/mail.db"
+    chmod 700 "$WORK/open"
+    mkdir -m 700 "$WORK/open/private"
+    mv "$WORK/open/link" "$WORK/open/private/link"
+    chmod 775 "$WORK/open"
+    run_restore "$WORK/open/private/link/backup.db" yes
+    [[ "$STATUS" -ne 0 ]]
+    grep -F "another account can replace $WORK/open/private/link/backup.db through $WORK/open" "$WORK/out" >/dev/null
+    if grep -E '^(stop|run|start)' "$WORK/docker.log" >/dev/null; then
+        return 1
+    fi
+    # Your link in a sticky directory (like /tmp) is fine.
+    reset
+    make_db "$WORK/data/mail.db"
+    chmod 1775 "$WORK/open"
+    FAKE_LOGS="$READY_LOGS" run_restore "$WORK/open/private/link/backup.db" yes
+    [[ "$STATUS" -eq 0 ]]
+}
+
+restore_refuses_a_symlinked_directory_owned_by_another_account() {
+    reset
+    rm -rf "${WORK:?}/holder" "${WORK:?}/real"
+    make_db "$WORK/data/mail.db"
+    mkdir -m 700 "$WORK/real"
+    make_db "$WORK/real/backup.db"
+    # Refused for the link's owner alone, whatever its directory allows.
+    mkdir -m 700 "$WORK/holder"
+    ln -s "$WORK/real" "$WORK/holder/link"
+    # Only root can give the link to another account; CI runners allow
+    # sudo without a password, a developer machine usually does not.
+    if ! sudo -n chown -h nobody "$WORK/holder/link" 2>/dev/null; then
+        printf 'skipped: cannot create a symbolic link owned by another account without sudo\n'
+        return 0
+    fi
+    run_restore "$WORK/holder/link/backup.db" yes
+    [[ "$STATUS" -ne 0 ]]
+    grep -F "another account can replace $WORK/holder/link/backup.db through $WORK/holder/link, a symbolic link it owns" "$WORK/out" >/dev/null
+    if grep -E '^(stop|run|start)' "$WORK/docker.log" >/dev/null; then
+        return 1
+    fi
+}
+
+restore_accepts_a_root_owned_symlinked_directory() {
+    reset
+    make_db "$WORK/data/mail.db"
+    # On macOS /tmp is a root-owned symbolic link to /private/tmp, and
+    # /private/tmp is sticky; on Linux it is a plain sticky directory.
+    local dir
+    dir=$(mktemp -d /tmp/index-backup-test.XXXXXX)
+    chmod 700 "$dir"
+    make_db "$dir/backup.db"
+    FAKE_LOGS="$READY_LOGS" run_restore "$dir/backup.db" yes
+    rm -rf "$dir"
+    [[ "$STATUS" -eq 0 ]]
+    grep -Fx 'start mcp-server' "$WORK/docker.log" >/dev/null
+}
+
 restore_refuses_a_symlinked_backup() {
     reset
     make_db "$WORK/data/mail.db"
@@ -840,6 +918,9 @@ check "restore reports a failed log read" restore_reports_a_failed_log_read
 check "restore restarts the services when stop fails" restore_restarts_the_services_when_stop_fails
 check "restore refuses a backup path another account can replace" restore_refuses_a_replaceable_backup_path
 check "restore refuses a symlinked backup" restore_refuses_a_symlinked_backup
+check "restore refuses a symlinked directory another account can replace" restore_refuses_a_symlinked_directory_another_account_can_replace
+check "restore refuses a symlinked directory owned by another account" restore_refuses_a_symlinked_directory_owned_by_another_account
+check "restore accepts a root-owned symlinked directory" restore_accepts_a_root_owned_symlinked_directory
 check "backup refuses a copy restore would reject" backup_refuses_a_copy_restore_would_reject
 check "restore refuses ACL-writable paths" restore_refuses_acl_writable_paths
 check "restore treats a killed container as an unknown swap state" restore_treats_a_killed_container_as_unknown
