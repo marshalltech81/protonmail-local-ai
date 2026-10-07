@@ -117,6 +117,8 @@ build:
 # Use after a base-image tag refresh, when chasing a "stale layer"
 # bug, or when you want to confirm a Dockerfile change actually
 # rebuilds the layer you think it does. Slower than ``make build``.
+# The indexer's Maven repository lives in a BuildKit cache mount, which
+# --no-cache also starts empty, so the jars are downloaded again (#1070).
 #
 # Pass SERVICES=indexer (or any compose service name list) to scope
 # the rebuild:

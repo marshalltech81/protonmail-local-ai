@@ -40,7 +40,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /build
 COPY java/pom.xml ./
-RUN mvn --batch-mode --no-transfer-progress --strict-checksums \
+# Maven's local repository is a BuildKit cache mount (#1070): a rebuild
+# that reruns this step (a pom.xml bump, a base-image refresh)
+# downloads only what the mount lacks, so a Maven Central outage or
+# rate limit stops it only on a cold mount. A --no-cache build starts
+# from an empty mount and refills it. Every download is still
+# checksum-verified; a jar already in the mount passed that check when
+# it arrived. `docker builder prune` empties the mount.
+RUN --mount=type=cache,target=/root/.m2,sharing=locked \
+    mvn --batch-mode --no-transfer-progress --strict-checksums \
     dependency:copy-dependencies -DoutputDirectory=/opt/ppt/lib
 COPY java/PptText.java ./
 RUN javac --release 21 -d classes -cp '/opt/ppt/lib/*' PptText.java \

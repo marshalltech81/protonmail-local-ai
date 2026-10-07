@@ -1098,7 +1098,8 @@ each message whose occurrence of it now selects a module.
   (`java.base`, `java.desktop`, `java.xml`, `java.logging`,
   `jdk.unsupported`); both live under `/opt/ppt` in the image. The
   build's `ppt-builder` stage fetches the jars pinned in
-  `indexer/java/pom.xml` with Maven (strict checksums), compiles the
+  `indexer/java/pom.xml` with Maven (strict checksums, into a BuildKit
+  cache mount a later rebuild reuses, #1070), compiles the
   reader and writes the runtime; the JDK and Maven stay in that stage,
   and the runtime image grows by about 67 MB (411 to 478 MB). Java runs
   under 512 MiB of address space and 30 s of CPU, and the parent kills
@@ -2146,7 +2147,13 @@ per-checkout `.uv-cache` as the workflow does;
 
 `.github/workflows/docker.yml` also scans the three built images
 (indexer, mcp-server, mbsync) with Trivy after `docker compose build`,
-on each change to a build input and weekly (#977). This covers what
+on each change to a build input and weekly (#977). Before that build,
+the job restores the indexer's `ppt-builder` stage from the GitHub
+Actions cache (BuildKit's `gha` backend, #1070) and saves it back, so
+Maven Central is contacted only when `indexer/java/pom.xml` or a layer
+before it changed; the runner's BuildKit is new on every run, so the
+Dockerfile's cache mount of the Maven repository helps local rebuilds
+only. This covers what
 the lockfiles do not: Debian packages installed with apt (catdoc,
 Tesseract, Poppler and the base image's own packages), the Python
 packages actually installed, and the `.ppt` reader's jars in

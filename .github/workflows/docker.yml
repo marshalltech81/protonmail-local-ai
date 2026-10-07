@@ -73,6 +73,35 @@ jobs:
           make init-secrets
           printf 'placeholder-bridge-pass' > .secrets/bridge_pass.txt
 
+      # The indexer's ppt-builder stage fetches the .ppt reader's jars
+      # from Maven Central, whose outages and rate limits have failed
+      # this job (#1070). The stage's layers are kept in the GitHub
+      # Actions cache: the step below builds that stage alone on a
+      # docker-container builder (the runner's default builder cannot
+      # export a cache), importing and exporting the cache under its own
+      # scope, so the compose build that follows, on the same builder,
+      # finds the stage built and Maven does not run unless
+      # indexer/java/pom.xml or a layer before it changed. Only the layer
+      # cache survives a run: the BuildKit cache mount that keeps the
+      # Maven repository across local rebuilds lives in the builder,
+      # which every run creates anew.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          # BuildKit pinned by digest, like the images; the action's
+          # default is the moving buildx-stable-1 tag. Dependabot does
+          # not track a driver option: bump the tag and digest by hand.
+          driver-opts: image=moby/buildkit:v0.33.1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
+
+      - name: Restore the .ppt reader build stage from the cache
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: indexer
+          target: ppt-runtime
+          outputs: type=cacheonly
+          cache-from: type=gha,scope=indexer-ppt
+          cache-to: type=gha,mode=max,scope=indexer-ppt
+
       # A fixed project name gives the images fixed names to scan.
       - name: Build local images
         id: build
