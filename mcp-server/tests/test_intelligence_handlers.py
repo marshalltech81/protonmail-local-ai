@@ -1110,7 +1110,7 @@ class TestPersonFilters:
         out = _person_call(
             fake_server, person_db, FakeInferenceClient(response="null"), tool, from_name="Dana"
         )
-        assert lookups == [("Dana", MAX_FROM_NAME_MATCHES, True, None)]
+        assert lookups == [("Dana", MAX_FROM_NAME_MATCHES + 1, True, None)]
         # Sender-only, as in search_emails: the thread she only received is out.
         assert _searched(out) == {"t-dana-sent"}
 

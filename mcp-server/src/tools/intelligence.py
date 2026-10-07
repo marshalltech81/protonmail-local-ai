@@ -466,13 +466,15 @@ def blank_to_none(value: str | None) -> str | None:
 @dataclass(frozen=True)
 class FromNameResolution:
     """What a ``from_name`` lookup found (#864): ``address`` is the sender
-    filtered by (``None`` when no contact matched) and ``senders`` how
-    many distinct sender addresses the name matched, at most
-    ``MAX_FROM_NAME_MATCHES``. Both are reported in the tool's structured
+    filtered by (``None`` when no contact matched), ``senders`` how many
+    distinct sender addresses the name matched, at most
+    ``MAX_FROM_NAME_MATCHES``, and ``capped`` whether more matched than
+    that. The address and count are reported in the tool's structured
     output only; the address is mail content and is never logged."""
 
     address: str | None
     senders: int
+    capped: bool
 
 
 async def resolve_from_name(db, from_name: str, folders: list[str] | None) -> FromNameResolution:
@@ -489,15 +491,26 @@ async def resolve_from_name(db, from_name: str, folders: list[str] | None) -> Fr
     ``get_evidence``, ``ask_mailbox`` and ``extract_from_emails`` share
     it.
 
-    One lookup asks for ``MAX_FROM_NAME_MATCHES`` contacts, so the count
-    saturates there: a name shared by more senders reports the cap.
+    One lookup asks for one contact more than ``MAX_FROM_NAME_MATCHES``,
+    so the count saturates at the cap and a name shared by more senders
+    is told apart from exactly the cap. The count, and a capped flag
+    when it saturated, go on the call's timing line (numbers only).
     """
     with stage("contact_lookup"):
         contacts = await asyncio.to_thread(
-            db.find_contact, from_name, MAX_FROM_NAME_MATCHES, senders_only=True, folders=folders
+            db.find_contact,
+            from_name,
+            MAX_FROM_NAME_MATCHES + 1,
+            senders_only=True,
+            folders=folders,
         )
+    senders = min(len(contacts), MAX_FROM_NAME_MATCHES)
+    capped = len(contacts) > MAX_FROM_NAME_MATCHES
+    count("from_name_matches", senders)
+    if capped:
+        count("from_name_matches_capped", 1)
     return FromNameResolution(
-        address=contacts[0]["email"] if contacts else None, senders=len(contacts)
+        address=contacts[0]["email"] if contacts else None, senders=senders, capped=capped
     )
 
 

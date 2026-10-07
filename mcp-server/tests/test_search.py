@@ -698,7 +698,7 @@ class TestGetEvidencePersonFilters:
         captured = self._spy(seeded_db, "hybrid_search")
         tool = self._tool(fake_server, fake_embed, seeded_db)
         asyncio.run(tool(query="invoice", from_name="alice", folders=["INBOX"]))
-        assert lookups == [("alice", MAX_FROM_NAME_MATCHES, True, ["INBOX"])]
+        assert lookups == [("alice", MAX_FROM_NAME_MATCHES + 1, True, ["INBOX"])]
         assert captured.get("from_addr") == "alice@example.com"
 
     def test_explicit_from_addr_wins_over_from_name(self, fake_server, fake_embed, seeded_db):

@@ -34,6 +34,7 @@ from tests.conftest import (
     _insert_chunk,
     _insert_thread,
 )
+from tests.test_timings import _one_line
 from tests.test_tool_annotations import _server, _wire_tools
 
 # The address of the busier "Jordan" carries a marker the log must not
@@ -166,11 +167,45 @@ class TestReport:
         out = _call(_db(tmp_path, many), tool, from_name="Jordan")
         assert _report(out) == ("jordan00@inbox.example", MAX_FROM_NAME_MATCHES)
 
+    @pytest.mark.parametrize(
+        ("senders", "capped"),
+        [(2, False), (MAX_FROM_NAME_MATCHES, False), (MAX_FROM_NAME_MATCHES + 1, True)],
+    )
+    def test_timing_line_counts_matches_and_saturation(
+        self, tmp_path, tool, caplog, senders, capped
+    ):
+        """Review round 1: the count and whether it saturated reach the
+        call's timing line as numbers; the addresses never do."""
+        many = [
+            (f"t-{n:02d}", f"Jordan {n:02d} <jordan{n:02d}@{_ADDRESS_MARKER}.example>", "INBOX")
+            for n in range(senders)
+        ]
+        with caplog.at_level(logging.INFO):
+            _call(_db(tmp_path, many), tool, from_name="Jordan")
+        line = _one_line(caplog)
+        counts = line["counts"]
+        assert line["tool"] == tool
+        assert counts["from_name_matches"] == min(senders, MAX_FROM_NAME_MATCHES)
+        assert counts.get("from_name_matches_capped", 0) == (1 if capped else 0)
+        assert _ADDRESS_MARKER not in caplog.text
+
 
 @pytest.mark.parametrize("tool", ["search_emails", "get_evidence", "ask_mailbox"])
 def test_an_explicit_from_addr_leaves_from_name_unused(tmp_path, tool):
     out = _call(_two_jordans(tmp_path), tool, from_name="Jordan", from_addr="vale@inbox.example")
     assert _report(out) == (None, None)
+
+
+@pytest.mark.parametrize("tool", FROM_NAME_TOOLS)
+def test_output_schema_suggests_only_arguments_the_tool_takes(empty_db, tool):
+    """Review round 1: extract_from_emails takes no from_addr, so its
+    schema must not tell the client to pass one."""
+    wire = _wire_tools(_server(empty_db))[tool]
+    description = wire["outputSchema"]["properties"]["from_name_matches"]["description"]
+    takes_from_addr = "from_addr" in wire["inputSchema"]["properties"]
+    assert ("pass from_addr" in description) is takes_from_addr
+    if not takes_from_addr:
+        assert "participant" in description
 
 
 class TestResolveFromName:
@@ -185,9 +220,11 @@ class TestResolveFromName:
 
         db.find_contact = spy  # type: ignore[method-assign]
         resolution = asyncio.run(resolve_from_name(db, "Jordan", ["INBOX"]))
-        assert resolution == FromNameResolution(address=_REED_ADDR, senders=2)
-        assert lookups == [("Jordan", MAX_FROM_NAME_MATCHES, True, ["INBOX"])]
+        assert resolution == FromNameResolution(address=_REED_ADDR, senders=2, capped=False)
+        # One more than the cap, so saturation is told apart from exactly
+        # the cap.
+        assert lookups == [("Jordan", MAX_FROM_NAME_MATCHES + 1, True, ["INBOX"])]
 
     def test_no_match(self, tmp_path):
         resolution = asyncio.run(resolve_from_name(_two_jordans(tmp_path), "nobody", None))
-        assert resolution == FromNameResolution(address=None, senders=0)
+        assert resolution == FromNameResolution(address=None, senders=0, capped=False)

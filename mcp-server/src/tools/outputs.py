@@ -296,12 +296,22 @@ _RESOLVED_FROM_ADDR_DESCRIPTION = (
     "filtered by (the matching sender with the most threads in scope), or null if no "
     "contact matched (results are then empty). Null when from_name was not used."
 )
-_FROM_NAME_MATCHES_DESCRIPTION = (
+_FROM_NAME_MATCHES_PREFIX = (
     "When from_name was given without from_addr: the distinct sender addresses it matched "
     f"in scope, counted up to {MAX_FROM_NAME_MATCHES} ({MAX_FROM_NAME_MATCHES} means that "
     "many or more). Above 1, possibly different people who share the name; only "
-    "resolved_from_addr was filtered by, so pass from_addr to choose another. 0 when no "
-    "contact matched; null when from_name was not used."
+    "resolved_from_addr was filtered by, "
+)
+_FROM_NAME_MATCHES_SUFFIX = " 0 when no contact matched; null when from_name was not used."
+_FROM_NAME_MATCHES_DESCRIPTION = (
+    _FROM_NAME_MATCHES_PREFIX + "so pass from_addr to choose another." + _FROM_NAME_MATCHES_SUFFIX
+)
+# extract_from_emails takes no from_addr (#864 review round 1).
+_EXTRACT_FROM_NAME_MATCHES_DESCRIPTION = (
+    _FROM_NAME_MATCHES_PREFIX
+    + "and this tool takes no from_addr: name the sender more fully, or pass another "
+    "address as participant (which matches any role, not only the sender)."
+    + _FROM_NAME_MATCHES_SUFFIX
 )
 
 
@@ -881,7 +891,7 @@ class ExtractFromEmailsOutput(_Output):
         "counts of threads that could not be extracted or whose passages were cut."
     )
     resolved_from_addr: str | None = Field(description=_RESOLVED_FROM_ADDR_DESCRIPTION)
-    from_name_matches: int | None = Field(description=_FROM_NAME_MATCHES_DESCRIPTION)
+    from_name_matches: int | None = Field(description=_EXTRACT_FROM_NAME_MATCHES_DESCRIPTION)
     threads: list[ThreadSummary] = Field(description="The threads searched, best match first.")
 
 

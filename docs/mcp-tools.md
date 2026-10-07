@@ -218,6 +218,11 @@ tool=search_emails outcome=ok total_ms=41.7 stages_ms={'query_embedding': 22.4, 
   replies), `rerank` (results in RRF order although `config` says
   `rerank=cohere`) and `rerank_subjects` (reranked without subjects).
   See [Troubleshooting](troubleshooting.md#a-tool-call-reports-degraded-retrieval).
+- `from_name_matches` (the tools that resolve `from_name`) is the
+  number of senders the name matched, up to 10, and
+  `from_name_matches_capped` is 1 when more than 10 matched
+  ([Resolving `from_name`](#search_emails)). Numbers only: the
+  addresses are never logged.
 - `evidence_capped_threads` (the intelligence tools) counts the threads
   whose passages the fixed per-thread evidence budget (2,000 characters
   per thread) left out or cut. It is a design cap, not a token limit,
@@ -350,13 +355,20 @@ with the most threads becomes the `from_addr` filter. Each reports the
 lookup in its structured output: `resolved_from_addr`, the address
 filtered by, and `from_name_matches`, the number of distinct sender
 addresses the name matched. The lookup ranks at most 10 contacts, so
-the count stops at 10 (10 means ten or more). Above 1, several senders
-share the name, possibly different people, and only the first was
-filtered by; pass `from_addr` to choose another (`find_contact` lists
-them, counting every role). No match reports `null` and `0`; a call
-without `from_name`, or with an explicit `from_addr`, reports `null`
-for both. The address is in the structured output only: the prose
-does not show it and nothing about it is logged.
+the count stops at 10 (10 means ten or more; the timing line's
+`from_name_matches_capped` says when more matched). Above 1, several
+senders share the name, possibly different people, and only the first
+was filtered by; pass another sender's address as `from_addr` to
+choose it (`extract_from_emails` takes no `from_addr`: name the sender
+more fully, or pass the address as `participant`, which matches any
+role). Only the top address is reported. `find_contact` can help find
+the others, but it ranks every role across every folder, Trash
+included, and lists at most `limit` contacts, so recipients or
+out-of-scope contacts can crowd out the senders counted here. No match
+reports `null` and `0`; a call without `from_name`, or with an
+explicit `from_addr`, reports `null` for both. The address is in the
+structured output only: the prose does not show it and nothing about
+it is logged.
 
 **When to use which mode:**
 - `hybrid` — best for most queries (default)
