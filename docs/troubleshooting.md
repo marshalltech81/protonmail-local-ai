@@ -1212,7 +1212,9 @@ only, never filenames or text (`make logs`):
   deck whose parts are chained too deep to open,
   `PptxPackageBudgetError` one whose XML would decompress past
   32 MiB, or with more than 20,000 members or 8 MiB of relationship
-  parts), or (`zip uncompressed-size cap exceeded`) a DOCX, XLSX or
+  parts; `DocxRelationshipChainError` and `DocxPackageBudgetError` are
+  the same for a `.docx` or `.dotx`, whose limits are 32 MiB, 5,000
+  members and 4 MiB of relationship parts), or (`zip uncompressed-size cap exceeded`) a DOCX, XLSX or
   PPTX that would decompress past its cap. For a legacy `.doc`,
   `.xls` or `.ppt` (#935, #957) the type names the tool's fate:
   `ToolTimeoutError`, `ToolCrashError` (killed by a signal, including
