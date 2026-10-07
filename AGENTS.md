@@ -231,7 +231,11 @@ Do not make any of the following changes unless the repository owner explicitly 
   reach mail indexed before it; with the bump, stale rows re-extract and
   the startup sweep re-queues the messages carrying them once.
   Dead-lettered messages are skipped and keep their stale chunks until
-  an operator runs `make requeue-dead`.
+  an operator runs `make requeue-dead`. A bump also re-runs that
+  module on every cached payload at the next start, so before bumping
+  a module whose post-open walk is not yet budgeted, read the issue or
+  PR that last chose not to bump it (#1036 declined a `docx` bump
+  while #1031 is open; #1068 bumped it anyway and #1075 reverted it).
 
 ## Bridge-Specific Guardrails
 
@@ -661,6 +665,7 @@ When changing Docker Compose service definitions or runtime behavior:
 - add resource controls such as memory limits, `pids_limit`, and log rotation when practical
 - keep container-to-container network access as narrow as the architecture allows
 - prefer degraded modes over broadening privileges, relaxing confinement, or exposing more of the host
+- give every optional setting's Compose interpolation a default (`${NAME:-}` or the documented value), so a `.env` written before the setting existed does not print an "is not set" warning on every command (#1058, #1074); required settings stay without a default so `validate-env.sh` and Compose both fail closed
 
 ## Bash Conventions
 
