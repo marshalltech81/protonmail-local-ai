@@ -1197,6 +1197,20 @@ class TestOutstandingReads:
         assert score.conclusion_citation_support == 2 / 3
         assert {"required_evidence_coverage", "conclusion_citation_support"} <= set(score.failures)
 
+    def test_a_conclusion_is_supported_by_a_read_of_its_own_claimant(self) -> None:
+        # Two files claim a.2 (#217): the listed one is cited, another one
+        # read. The source counts as covered (its Message-ID was read), but
+        # the conclusion cites a file nothing returned the content of.
+        read = [m for m in _LISTED if m != "a.2"]
+        trace = _outstanding_trace(read=read)
+        other = _thread_read(["a.2@x.example"])
+        other["result"]["messages"][0]["claimant_id"] = "a.2@x.example#0000ffff"
+        trace["calls"].append(other)
+        score = score_trace(_outstanding(), trace)
+        assert score.required_evidence_coverage == 1.0
+        assert score.conclusion_citation_support == 2 / 3
+        assert "conclusion_citation_support" in score.failures
+
     def test_a_cut_get_thread_body_is_not_a_read(self) -> None:
         read = [m for m in _LISTED if m != "a.2"]
         trace = _outstanding_trace(read=read)

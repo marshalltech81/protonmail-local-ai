@@ -509,6 +509,7 @@ def _score_outstanding(
     all_cited: list[str],
     calls: Sequence[dict],
     message_of: dict[str, str],
+    claimants_of: dict[str, set[str]],
     full_read_recall: float | None,
 ) -> dict[str, Any]:
     """The outstanding-items scores of ``answer`` (see ``score_trace``).
@@ -564,23 +565,30 @@ def _score_outstanding(
     # A source counts as read only when a result returned its content: an
     # attachment passage for an attachment source, the whole body for any
     # other (``_content_reads``). A listing that only names it reads nothing.
-    bodies, attachment_passages = (set(r.values()) for r in _content_reads(calls))
+    bodies, attachment_passages = _content_reads(calls)
     attachment_sources = set(truth.attachment_sources)
-    read = {
-        m
-        for a in truth.actions
-        for m in a.required_sources
-        if m in (attachment_passages if m in attachment_sources else bodies)
-    }
+
+    def reads_of(message: str) -> dict[str, str]:
+        return attachment_passages if message in attachment_sources else bodies
+
+    read = {m for a in truth.actions for m in a.required_sources if m in set(reads_of(m).values())}
 
     # Every conclusion must cite a required source of its action that the
-    # trace read; a superseded source is not one.
+    # trace read; a superseded source is not one. The read must be of the
+    # file the citation names (#217): a cited claimant or passage needs its
+    # own claimant read, a bare Message-ID any file claiming it.
+    def source_read(cited_id: str, required: set[str]) -> bool:
+        message = message_of.get(cited_id)
+        if message is None or message not in required:
+            return False
+        return bool(claimants_of.get(cited_id, set()) & set(reads_of(message)))
+
     conclusions = items + excluded
     supported = sum(
         1
         for entry in conclusions
         if (a := by_id.get(entry.get("action", ""))) is not None
-        and messages(entry.get("cited", [])) & set(a.required_sources) & read
+        and any(source_read(c, set(a.required_sources)) for c in entry.get("cited", []))
     )
     # The canonical citation set (top-level and per-conclusion, see
     # ``score_trace``), so a forbidden source cited anywhere counts.
@@ -750,7 +758,7 @@ def score_trace(scenario: Scenario, trace: dict) -> AgentScore:
     outstanding: dict[str, Any] = {}
     if scenario.outstanding is not None:
         outstanding = _score_outstanding(
-            scenario.outstanding, answer, cited, calls, message_of, full_read_recall
+            scenario.outstanding, answer, cited, calls, message_of, claimants_of, full_read_recall
         )
 
     signatures = [json.dumps([c["tool"], c["arguments"]], sort_keys=True) for c in calls]
