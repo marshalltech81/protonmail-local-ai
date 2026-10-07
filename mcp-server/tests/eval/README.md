@@ -450,8 +450,9 @@ held-out cases.
 **Other tools (#656).** A case's `tool` is `ask_mailbox`,
 `summarize_thread` or `extract_from_emails`, and its id starts with the
 tool's short name (`ask-`, `summarize-`, `extract-`). A
-`summarize_thread` case names a baseline thread ID directly and a
-`style`; nothing is embedded for it. An `extract_from_emails` case gives
+`summarize_thread` case names a baseline thread ID directly and one of
+the tool's four styles (the handler would summarize any other as
+`brief`); nothing is embedded for it. An `extract_from_emails` case gives
 the `query`, the `schema` and a small `limit`, since each searched
 thread is one paid model call. The same fields apply to every tool:
 `required_evidence`, `expected_facts` with corpus excerpts,

@@ -142,6 +142,10 @@ class TestCaseSchema:
             (SUMMARIZE, lambda r: r["arguments"].update(thread_id="the pool thread")),
             (SUMMARIZE, lambda r: r["arguments"].pop("thread_id")),
             (SUMMARIZE, lambda r: r["arguments"].update(style=3)),
+            # Codex round 1: the handler summarizes an unknown style as
+            # brief, so a typo would grade a task the case does not state.
+            (SUMMARIZE, lambda r: r["arguments"].update(style="action_item")),
+            (SUMMARIZE, lambda r: r["arguments"].update(style="Brief")),
             (EXTRACT, lambda r: r["arguments"].pop("schema")),
             (EXTRACT, lambda r: r["arguments"].update(schema="vendor")),
             (EXTRACT, lambda r: r["arguments"].update(schema={})),

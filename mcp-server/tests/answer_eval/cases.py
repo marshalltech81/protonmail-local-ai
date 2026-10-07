@@ -25,10 +25,11 @@ import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, TypeGuard
+from typing import Any, TypeGuard, get_args
 
 from src.lib.inference import MIN_PROMPT_TOKENS
 from src.tools.intelligence import _declared_fields
+from src.tools.outputs import SummaryStyle
 
 from tests.agent_metrics import is_held_out
 
@@ -82,6 +83,9 @@ _ARGUMENTS = {
 _CASE_ID = re.compile(r"(?:ask|summarize|extract)-[a-z0-9]+(?:-[a-z0-9]+)*")
 # A baseline thread's ID: its root message (``thread_id_of``).
 _THREAD_ID = re.compile(r"t[0-9]{2}\.1" + re.escape(BASELINE_DOMAIN))
+# The handler summarizes any other style as ``brief`` (Codex round 1 on
+# #656's PR): a typo would grade a task the case does not state.
+_SUMMARY_STYLES = frozenset(get_args(SummaryStyle))
 CASE_ID_MAX_LEN = 64
 _FACT_ID = re.compile(r"f[1-9][0-9]*")
 _REF = re.compile(r"t[0-9]{2}(?:\.[1-9][0-9]*)?")
@@ -203,7 +207,11 @@ def _parse_case(row: dict[str, Any]) -> Case:
         _require(
             isinstance(thread_id, str) and bool(_THREAD_ID.fullmatch(thread_id)), cid, "thread_id"
         )
-        _require(isinstance(args.get("style", "brief"), str), cid, "style must be a string")
+        _require(
+            args.get("style", "brief") in _SUMMARY_STYLES,
+            cid,
+            f"style must be one of {sorted(_SUMMARY_STYLES)}",
+        )
     else:
         _require(isinstance(args.get("query"), str) and args["query"].strip(), cid, "query")
         _require(isinstance(args.get("schema"), dict) and bool(args["schema"]), cid, "schema")
