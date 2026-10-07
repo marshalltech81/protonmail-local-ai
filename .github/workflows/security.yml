@@ -153,7 +153,7 @@ jobs:
           format: table
           exit-code: "1"
           severity: CRITICAL,HIGH
-          skip-dirs: .git,.ruff_cache,.pytest_cache,.venv,indexer/.venv,mcp-server/.venv
+          skip-dirs: .git,.ruff_cache,.pytest_cache,.venv,indexer/.venv,mcp-server/.venv,.uv-cache
         env:
           TRIVY_OFFLINE_SCAN: "true"
 
