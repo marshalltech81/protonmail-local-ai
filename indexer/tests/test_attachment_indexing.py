@@ -1314,6 +1314,7 @@ class TestAttachmentOutcomeCounts:
             "pdf_pages_unrecovered": 0,
             "ocr_capped_pdfs": 0,
             "ocr_pages_skipped": 0,
+            "ocr_capped_images": 0,
             "parser_caps_messages": 0,
             "warnings_suppressed": 0,
         }
@@ -1412,35 +1413,43 @@ class TestAttachmentOutcomeCounts:
             "pdf_pages_unrecovered": 9,
             "ocr_capped_pdfs": 7,
             "ocr_pages_skipped": 8,
+            "ocr_capped_images": 2,
             "parser_caps_messages": 3,
             "warnings_suppressed": 6,
         }
         assert attachment_indexing.format_attachment_outcomes(counts) == (
             "attachments n=6 success=3 failed=1 unsupported=0 too_large=0 "
             "ocr_disabled=2 empty=0 cached=4 pdf_pages_failed=5 pdf_pages_unrecovered=9 ocr_capped_pdfs=7 "
-            "ocr_pages_skipped=8 parser_caps_messages=3 warnings_suppressed=6"
+            "ocr_pages_skipped=8 ocr_capped_images=2 parser_caps_messages=3 warnings_suppressed=6"
         )
 
-    @pytest.mark.parametrize(
-        "field, degraded",
-        [
-            ("success", False),
-            ("empty", False),
-            ("cached", False),
-            ("failed", True),
-            ("unsupported", True),
-            ("too_large", True),
-            ("ocr_disabled", True),
-            # A page pypdf cannot read may still be OCR-recovered: a
-            # diagnostic count, not lost text (review round 3).
-            ("pdf_pages_failed", False),
-            ("pdf_pages_unrecovered", True),
-            ("ocr_capped_pdfs", True),
-            ("ocr_pages_skipped", True),
-            ("parser_caps_messages", True),
-            ("warnings_suppressed", True),
-        ],
-    )
+    _DEGRADED_CASES = [
+        ("success", False),
+        ("empty", False),
+        ("cached", False),
+        ("failed", True),
+        ("unsupported", True),
+        ("too_large", True),
+        ("ocr_disabled", True),
+        # A page pypdf cannot read may still be OCR-recovered: a
+        # diagnostic count, not lost text (review round 3).
+        ("pdf_pages_failed", False),
+        ("pdf_pages_unrecovered", True),
+        ("ocr_capped_pdfs", True),
+        ("ocr_pages_skipped", True),
+        ("ocr_capped_images", True),
+        ("parser_caps_messages", True),
+        ("warnings_suppressed", True),
+    ]
+
+    def test_degraded_cases_cover_every_summary_field(self):
+        """Every field of the attachments line is classified in
+        ``_DEGRADED_CASES``, so a new count cannot be added without
+        deciding whether it makes the line a WARNING (#885)."""
+        fields = [field for field, _ in self._DEGRADED_CASES]
+        assert sorted(fields) == sorted(attachment_indexing._SUMMARY_FIELDS)
+
+    @pytest.mark.parametrize("field, degraded", _DEGRADED_CASES)
     def test_degraded_counts(self, field, degraded):
         """Review round 1: the line is a WARNING when any count means
         attachment text is missing from search."""

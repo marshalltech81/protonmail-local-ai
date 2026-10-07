@@ -1078,7 +1078,8 @@ extraction is recorded as `failed`. A multipage TIFF (a scanned
 invoice or fax) is OCR'd page by page; other image formats' extra
 frames are animation and only the first is read.
 `INDEXER_OCR_MAX_PAGES` (default 20) caps the pages OCR'd per
-document of either kind.
+document of either kind; a document the cap cuts short logs a WARNING
+and is counted in the attachments line (`docs/troubleshooting.md`).
 
 OCR assumes English. The indexer image installs only Tesseract's
 English language data (`eng`, plus `osd`), and the extractors pass no
