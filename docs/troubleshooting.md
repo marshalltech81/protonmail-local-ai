@@ -1144,8 +1144,11 @@ hit:
   base64 runs). Lower it to the model's real window, or below it for
   dense mail, or choose a model with a larger one. The caller's truncation notice (or, for a reply cut before any
   text, the error) says the same: it names `INFERENCE_CONTEXT_TOKENS`,
-  not `INFERENCE_MAX_TOKENS` (#890); `brief_issue` and
-  `check_conclusion` return `truncation_reason: "context_window"`.
+  not `INFERENCE_MAX_TOKENS` (#890). So does `extract_from_emails`'s
+  `Incomplete:` line, which counts the threads cut at the context
+  window apart from those cut at `INFERENCE_MAX_TOKENS` (#950), and
+  `brief_issue` and `check_conclusion` return
+  `truncation_reason: "context_window"` (#951).
 - `evidence_budget`: the model window, not the fixed per-thread cap,
   left out passages (`passages_omitted`), cut them short
   (`passages_truncated`) or dropped lower-ranked threads
