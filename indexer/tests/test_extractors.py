@@ -5201,6 +5201,107 @@ class TestWordTemplates:
         assert stale_extractor_module("docx@5") is None
 
 
+_DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+_CHAIN_MARKER = "SYNTHETIC_CHAIN_MARKER"
+
+
+def _chained_docx(links: int) -> bytes:
+    """A synthetic ``.docx`` whose main part relates to ``/c/p0.xml``, each
+    ``/c/pN.xml`` relating to the next, ``links`` relationships long."""
+    import io
+    import zipfile
+
+    rels = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rIdChain" Type="http://example.invalid/chain" Target="/c/p{0}.xml"/>'
+        "</Relationships>"
+    )
+    source = zipfile.ZipFile(io.BytesIO(_docx_bytes(_CHAIN_MARKER)))
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as archive:
+        for info in source.infolist():
+            data = source.read(info.filename)
+            if info.filename == "word/_rels/document.xml.rels":
+                data = data.replace(
+                    b"</Relationships>",
+                    b'<Relationship Id="rIdChain" Type="http://example.invalid/chain"'
+                    b' Target="/c/p0.xml"/></Relationships>',
+                )
+            archive.writestr(info, data)
+        for i in range(links + 1):
+            archive.writestr(f"c/p{i}.xml", b"<x/>")
+        for i in range(links):
+            archive.writestr(f"c/_rels/p{i}.xml.rels", rels.format(i + 1))
+    return out.getvalue()
+
+
+class TestDocxRelationshipChain:
+    """#945: python-docx walks a package's part relationships recursively
+    while it opens it, so a long chain of related parts raised
+    ``RecursionError``, which the dispatcher re-raises as host pressure.
+    It is a property of the file: a ``failed`` row with a fixed type."""
+
+    def test_long_relationship_chain_fails_by_type_not_recursion(self, monkeypatch, caplog):
+        import time
+
+        from docx.opc.pkgreader import PackageReader
+        from src.extractors import EXTRACTOR_VERSIONS
+        from src.extractors import docx as docx_extractor
+
+        links = 2000
+        payload = _chained_docx(links)
+        assert len(payload) < 1_000_000
+
+        # Work done: each part the loader visits reads its relationships
+        # once, and the document walk never starts.
+        rels_read: list[int] = []
+        srels_for = PackageReader._srels_for
+
+        def counting_srels_for(phys_reader, source_uri):
+            rels_read.append(1)
+            return srels_for(phys_reader, source_uri)
+
+        monkeypatch.setattr(PackageReader, "_srels_for", staticmethod(counting_srels_for))
+        walked: list[int] = []
+        block_lines = docx_extractor._block_lines
+
+        def counting_block_lines(blocks):
+            walked.append(1)
+            return block_lines(blocks)
+
+        monkeypatch.setattr(docx_extractor, "_block_lines", counting_block_lines)
+
+        caplog.set_level("DEBUG")
+        started = time.perf_counter()
+        result = extract(content_type=_DOCX_MIME, filename="a.docx", payload=payload)
+        assert time.perf_counter() - started < 5.0
+        assert (result.status, result.error) == (STATUS_FAILED, "DocxRelationshipChainError")
+        assert result.extractor == f"docx@{EXTRACTOR_VERSIONS['docx']}"
+        assert result.text is None
+        assert 0 < len(rels_read) < links
+        assert walked == []
+        assert _CHAIN_MARKER not in caplog.text
+
+    def test_short_relationship_chain_still_extracts(self):
+        """The same shape under the recursion limit opens and is read."""
+        result = extract(content_type=_DOCX_MIME, filename="a.docx", payload=_chained_docx(20))
+        assert result.status == STATUS_SUCCESS
+        assert result.text == _CHAIN_MARKER
+
+    def test_recursion_error_after_the_open_still_escapes(self, monkeypatch):
+        """Only the package open is guarded: a ``RecursionError`` raised
+        while the opened document is walked stays host pressure."""
+        from src.extractors import docx as docx_extractor
+
+        def boom(blocks):
+            raise RecursionError
+
+        monkeypatch.setattr(docx_extractor, "_block_lines", boom)
+        with pytest.raises(RecursionError):
+            extract(content_type=_DOCX_MIME, filename="a.docx", payload=_docx_bytes(_CHAIN_MARKER))
+
+
 # #903: every truncation or skip cap inside an extractor is reported the
 # same way: a fixed cap name in a rate-limited WARNING, and one
 # ``extractor_caps`` count in the attachments aggregate per cap per
