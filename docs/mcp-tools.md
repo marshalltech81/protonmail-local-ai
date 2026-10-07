@@ -1078,7 +1078,10 @@ exact lanes with this tool and union them (#992, option 1):
    term, one `text` lane per body word set (the words a body must
    contain, at most 16), and one `participant` (or `sender`) lane per
    person or domain known to be involved. Give every lane the same
-   `folder` and date bounds so the union has one scope.
+   `folder`, date bounds and every other predicate the question
+   carries (`recipient`, `has_attachments`, `seen`, `flagged`,
+   `authority_class`), so the union has one scope; a lane that drops
+   one of them includes messages outside it.
 2. Run each lane with `limit=1` to get its `total_matches`, and tell
    the user the lane counts before paging. A single body-word lane can
    return hundreds of unrelated bulk messages (newsletters and
@@ -1101,10 +1104,11 @@ exact lanes with this tool and union them (#992, option 1):
    from the unioned rows, not from the threads read, and report the
    threads discarded as noise with the lane that found them.
 
-What the union can claim: every indexed message within the shared
-`folder` and date scope of the lanes (outside Trash only when `folder`
-is omitted) that matched one of the lanes as they were run, in the
-snapshot each page observed. What it cannot claim: coverage of the
+What the union can claim: every indexed message within the lanes'
+shared scope (the `folder`, date bounds and other predicates every
+lane carried; outside Trash only when `folder` is omitted) that
+matched one of the lanes as they were run, in the snapshot each page
+observed. State that scope with the claim. What it cannot claim: coverage of the
 topic. A message about
 the concept that uses none of the lane terms and comes from none of
 the lane participants is not found, and nothing in the result shows
