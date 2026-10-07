@@ -3663,12 +3663,12 @@ class TestPermanentFailuresAreUnsupported:
             # An allowlisted type from another extractor is not matched.
             ("xlsx", "pypdf.errors.FileNotDecryptedError"),
             ("pdf", "src.extractors.xlsx.XlsxEagerPartBudgetError"),
-            # The legacy extractors' subprocess errors (#935): a timeout or
+            # The legacy extractors' subprocess errors (#935, #957): a timeout or
             # a crash can be transient, so they stay ``failed`` for any
             # module.
             *(
                 (module, f"src.extractors._runner.{name}")
-                for module in ("doc", "xls", "pdf", "xlsx")
+                for module in ("doc", "xls", "ppt", "pdf", "xlsx")
                 for name in (
                     "ToolNotFoundError",
                     "ToolTimeoutError",
@@ -3692,7 +3692,7 @@ class TestPermanentFailuresAreUnsupported:
         # The XLSX path runs the zip pre-check first; give it a zip. A
         # legacy label keeps its legacy extractor only for an OLE2 payload.
         payload = b"x"
-        if module_name in {"doc", "xls"}:
+        if module_name in {"doc", "xls", "ppt"}:
             payload = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + bytes(64)
         if module_name == "xlsx":
             import io
@@ -6378,6 +6378,35 @@ def _cap_xls_text_chars(monkeypatch):
     assert text == "[Sheet: Summary]\nIt"
 
 
+def _cap_ppt_output_bytes(monkeypatch):
+    """The runner returned a cut output: the bytes before the cut are
+    kept. That the runner stops reading at the cap and kills the reader
+    is asserted in ``test_legacy_office``."""
+    import tempfile
+    from pathlib import Path
+
+    from src.extractors import ppt
+    from src.extractors._runner import ToolOutput
+
+    calls = []
+
+    def run_tool(_argv, _payload, *, max_output_bytes, **_kwargs):
+        calls.append(max_output_bytes)
+        data = (_CAP_MARKER + "b" * max_output_bytes)[:max_output_bytes]
+        return ToolOutput(data.encode(), truncated=True)
+
+    home = Path(tempfile.mkdtemp())
+    (home / "jre" / "bin").mkdir(parents=True)
+    (home / "jre" / "bin" / "java").touch()
+    monkeypatch.setattr(ppt, "PPT_HOME", home)
+    monkeypatch.setattr(ppt, "run_tool", run_tool)
+    monkeypatch.setattr(ppt, "_MAX_OUTPUT_BYTES", 1000)
+    text, _ = ppt.extract(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1")
+    assert calls == [1000]
+    assert len(text) == 1000
+    assert text.startswith(_CAP_MARKER)
+
+
 # Each reported cap, and an extraction that crosses it with its output
 # pinned (what the code returned before #903) and the work it did.
 _CAP_TRIGGERS = {
@@ -6394,6 +6423,7 @@ _CAP_TRIGGERS = {
     "pptx_table_cells": _cap_pptx_table_cells,
     "pptx_text_chars": _cap_pptx_text_chars,
     "doc_output_bytes": _cap_doc_output_bytes,
+    "ppt_output_bytes": _cap_ppt_output_bytes,
     "xls_sheets": _cap_xls_sheets,
     "xls_expanded_cells": _cap_xls_expanded_cells,
     "xls_text_chars": _cap_xls_text_chars,
@@ -6416,6 +6446,7 @@ _REPORTED_CAPS = {
     "src.extractors.pptx:_MAX_TABLE_CELLS": "pptx_table_cells",
     "src.extractors.pptx:_MAX_TEXT_CHARS": "pptx_text_chars",
     "src.extractors.doc:_MAX_OUTPUT_BYTES": "doc_output_bytes",
+    "src.extractors.ppt:_MAX_OUTPUT_BYTES": "ppt_output_bytes",
     "src.extractors.xls_child:_MAX_SHEETS": "xls_sheets",
     "src.extractors.xls_child:_MAX_EXPANDED_CELLS": "xls_expanded_cells",
     "src.extractors.xls_child:_MAX_TEXT_CHARS": "xls_text_chars",
@@ -6465,6 +6496,14 @@ _UNREPORTED_CAPS = {
         "the child is killed (ToolCrashError): a failed row with its rate-limited WARNING, "
         "counted as failed="
     ),
+    "src.extractors.ppt:CHILD_MAX_ADDRESS_SPACE_BYTES": (
+        "the JVM fails (ToolExitError): a failed row with its rate-limited WARNING, "
+        "counted as failed="
+    ),
+    "src.extractors.ppt:CHILD_MAX_CPU_SECONDS": (
+        "the JVM is killed (ToolCrashError): a failed row with its rate-limited WARNING, "
+        "counted as failed="
+    ),
 }
 
 _EXTRACTOR_MODULES = (
@@ -6475,6 +6514,8 @@ _EXTRACTOR_MODULES = (
     "src.extractors.html",
     "src.extractors.image",
     "src.extractors.pdf",
+    "src.extractors.ppt",
+    "src.extractors.ppt_launcher",
     "src.extractors.pptx",
     "src.extractors.text",
     "src.extractors.xls",

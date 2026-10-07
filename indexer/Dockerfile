@@ -24,7 +24,38 @@ RUN uv sync --locked --no-dev --no-install-project
 COPY src/ ./src/
 
 # -----------------------------------------------------------------------------
-# Stage 2: Runtime — no build toolchain
+# Stage 2: Legacy .ppt reader (#957) — Apache POI on a trimmed Java runtime
+# The JDK and Maven stay in this stage. Maven fetches the jars pinned in
+# java/pom.xml and fails on a checksum mismatch (--strict-checksums);
+# javac compiles the one-class reader against them; jlink writes a Java
+# runtime with only the modules POI needs. The result is /opt/ppt:
+# jre/ and lib/ (the jars).
+# -----------------------------------------------------------------------------
+FROM python:3.14-slim-trixie@sha256:c3e521df8b2b498a7a682e7e18676771cb80c6b75b8699af886b2d554ce40151 AS ppt-builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    openjdk-21-jdk-headless \
+    maven \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY java/pom.xml ./
+RUN mvn --batch-mode --no-transfer-progress --strict-checksums \
+    dependency:copy-dependencies -DoutputDirectory=/opt/ppt/lib
+COPY java/PptText.java ./
+RUN javac --release 21 -d classes -cp '/opt/ppt/lib/*' PptText.java \
+ && jar --create --file /opt/ppt/lib/ppt-text.jar -C classes . \
+ && jlink --add-modules java.base,java.desktop,java.xml,java.logging,jdk.unsupported \
+    --strip-java-debug-attributes --no-header-files --no-man-pages --compress=zip-6 \
+    --output /opt/ppt/jre
+
+# Only /opt/ppt, so CI can export it for the indexer tests
+# (.github/workflows/tests.yml) and the runtime copies the same files.
+FROM scratch AS ppt-runtime
+COPY --from=ppt-builder /opt/ppt /opt/ppt
+
+# -----------------------------------------------------------------------------
+# Stage 3: Runtime — no build toolchain
 # Runs as non-root user 'indexer' (UID 1002)
 # -----------------------------------------------------------------------------
 FROM python:3.14-slim-trixie@sha256:c3e521df8b2b498a7a682e7e18676771cb80c6b75b8699af886b2d554ce40151
@@ -36,9 +67,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # shells out to when rendering each PDF page to a PIL image. English
     # is the only Tesseract language pack installed, and the extractors
     # pass no language, so adding a tesseract-ocr-* pack here would not
-    # select it by itself (issue #490). catdoc supplies catdoc and catppt,
-    # which src/extractors/{doc,ppt}.py run on legacy binary .doc / .ppt
-    # attachments (#935).
+    # select it by itself (issue #490). catdoc supplies catdoc, which
+    # src/extractors/doc.py runs on legacy binary .doc attachments (#935).
     tesseract-ocr \
     poppler-utils \
     catdoc \
@@ -67,6 +97,9 @@ ENV PATH="/app/.venv/bin:$PATH" \
 # Copy the uv-managed virtualenv from the builder; runtime keeps no toolchain.
 COPY --from=builder /app/.venv /app/.venv
 COPY --from=builder /app/src/ ./src/
+# The legacy .ppt reader: a trimmed Java runtime and the POI jars, owned
+# by root and read-only to the indexer (src/extractors/ppt.py).
+COPY --from=ppt-runtime /opt/ppt /opt/ppt
 COPY --chmod=755 --chown=indexer:indexer healthcheck.sh /healthcheck.sh
 
 # Pre-create volume mount points with correct ownership BEFORE VOLUME declaration.

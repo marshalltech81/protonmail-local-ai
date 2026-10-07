@@ -4118,6 +4118,113 @@ class TestPptxStartsDispatching:
         assert marker not in caplog.text
 
 
+class TestLegacyPptThroughThePipeline:
+    """#957: ``.ppt`` attachments cached ``unsupported`` ("no extractor")
+    before ``.ppt`` was routed are re-queued once by the startup sweep and
+    extracted; a reader failure reaches neither the log nor any persisted
+    error with deck text."""
+
+    _write_eml = staticmethod(TestRequeueOcrDisabledExtractions._write_eml)
+    _drain = TestRequeueOcrDisabledExtractions._drain
+    _queued = staticmethod(TestRequeueOcrDisabledExtractions._queued)
+    _OLE2 = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+
+    def _enqueue(self, tmp_path, monkeypatch, messages):
+        maildir = tmp_path / "maildir"
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        db = Database(tmp_path / "mail.db")
+        queue = _make_queue(db)
+        paths = {}
+        for name, (payload, ctype, filename) in messages.items():
+            path = maildir / "INBOX" / "cur" / f"{name}.eml"
+            self._write_eml(path, f"{name}@example.com", payload, ctype, filename)
+            queue.enqueue(str(path), REASON_INITIAL_SCAN)
+            paths[name] = str(path)
+        return db, queue, paths
+
+    def test_no_extractor_ppt_rows_are_requeued_once_and_extracted(self, tmp_path, monkeypatch):
+        from src import attachment_indexing, extractors
+        from src.extractors import NO_EXTRACTOR_ERROR, STATUS_SUCCESS, ExtractionResult
+
+        db, queue, paths = self._enqueue(
+            tmp_path,
+            monkeypatch,
+            {
+                "by_mime": (self._OLE2 + b"deck one", "application/vnd.ms-powerpoint", "a.bin"),
+                "by_name": (self._OLE2 + b"deck two", "application/octet-stream", "b.ppt"),
+                "opaque": (self._OLE2 + b"deck three", "application/octet-stream", "c.bin"),
+            },
+        )
+        # The dispatch before #957: ``.ppt`` selected no extractor.
+        monkeypatch.delitem(extractors._MIME_DISPATCH, "application/vnd.ms-powerpoint")
+        monkeypatch.delitem(extractors._EXT_DISPATCH, ".ppt")
+        self._drain(db, queue)
+        rows = db._conn.execute(
+            "SELECT extraction_status, extractor, extraction_error FROM attachment_extractions"
+        ).fetchall()
+        assert [tuple(r) for r in rows] == [("unsupported", None, NO_EXTRACTOR_ERROR)] * 3
+        # The upgrade.
+        monkeypatch.undo()
+        monkeypatch.setattr(main, "MAILDIR_PATH", tmp_path / "maildir")
+
+        assert main._requeue_stale_extractions(db, queue) == 2
+        assert self._queued(db) == {
+            paths["by_mime"]: REASON_REEXTRACT,
+            paths["by_name"]: REASON_REEXTRACT,
+        }
+        extractor = MagicMock(
+            return_value=ExtractionResult(
+                status=STATUS_SUCCESS, extractor="ppt@1", text="slide words", error=None
+            )
+        )
+        monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
+        self._drain(db, queue)
+        assert extractor.call_count == 2
+        # The rows are rewritten, so the next startup finds nothing; the
+        # ``.bin`` occurrence still selects no extractor and is never queued.
+        assert main._requeue_stale_extractions(db, queue) == 0
+        assert self._queued(db) == {}
+
+    def test_reader_failure_keeps_deck_text_out_of_logs_and_errors(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        from src.extractors import ppt
+
+        caplog.set_level("DEBUG")
+        marker = "SYNTHETIC_DECK_MARKER"
+        home = tmp_path / "ppt"
+        java = home / "jre" / "bin" / "java"
+        java.parent.mkdir(parents=True)
+        java.write_text(
+            f"#!{sys.executable}\nimport sys\n"
+            f"sys.stderr.write({marker!r})\nsys.stdout.write({marker!r})\nsys.exit(1)\n"
+        )
+        java.chmod(0o700)
+        monkeypatch.setattr(ppt, "PPT_HOME", home)
+        db, queue, paths = self._enqueue(
+            tmp_path,
+            monkeypatch,
+            {
+                "deck": (
+                    self._OLE2 + marker.encode(),
+                    "application/vnd.ms-powerpoint",
+                    f"{marker}.ppt",
+                )
+            },
+        )
+        self._drain(db, queue)
+        row = db._conn.execute(
+            "SELECT extraction_status, extractor, extraction_error FROM attachment_extractions"
+        ).fetchone()
+        assert tuple(row) == ("failed", "ppt@1", "ToolExitError")
+        # The message is indexed (its job row is gone) and no job row
+        # holds the marker.
+        assert db._conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 1
+        jobs = db._conn.execute("SELECT last_error FROM indexing_jobs").fetchall()
+        assert all(marker not in (r["last_error"] or "") for r in jobs)
+        assert marker not in caplog.text
+
+
 class TestRequeueTooLargeThatNowFits:
     """#693: attachments cached ``too_large`` under a smaller
     ``INDEXER_ATTACHMENT_MAX_BYTES`` must be read once the operator raises

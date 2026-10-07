@@ -1107,28 +1107,33 @@ same moment.
 
 ## The log shows "token limit hit"
 
-`ask_mailbox`, `summarize_thread` and `extract_from_emails` log one
-WARNING per call that ran into a token limit (#865), and the
-experimental `brief_issue` and `check_conclusion` log one when the
-request is over budget (`prompt_over_budget`), for example:
+`ask_mailbox`, `summarize_thread`, `extract_from_emails` and the
+experimental `brief_issue` and `check_conclusion` log one WARNING per
+call that ran into a token limit (#865, #951), for example:
 
 ```text
 token limit hit: tool=ask_mailbox limits=evidence_budget outputs_cut=0 threads_dropped=1 passages_omitted=6 passages_truncated=1 prompt_tokens=2950 prompt_budget_tokens=3008 max_tokens=1024
 ```
 
 The line carries counts and settings only. Each limit also reaches
-the caller: a cut reply carries a truncation notice, the evidence that
-`ask_mailbox`, `summarize_thread` and `extract_from_emails` leave out
-for the window is disclosed in their coverage or evidence note (#949),
-and `prompt_over_budget` is an error. `limits` names which limits the
-call hit:
+the caller: a cut reply carries a truncation notice (for `brief_issue`
+and `check_conclusion`, `status: "truncated"` with
+`truncation_reason`), the evidence that `ask_mailbox`,
+`summarize_thread` and `extract_from_emails` leave out for the window
+is disclosed in their coverage or evidence note (#949), and
+`prompt_over_budget` is an error. The exception is evidence that
+`brief_issue` and `check_conclusion` leave out for the window: only
+the model is told, in the prompt, so this log line is where it shows.
+`limits` names which limits the call hit:
 
 - `output_max_tokens`: the model stopped at `INFERENCE_MAX_TOKENS`, so
   the answer or summary was cut off (`outputs_cut` counts every cut
   reply, whatever stopped it; for `extract_from_emails`, the threads
   whose reply was lost). A reply cut before any text fails the call
   with an error, and the line is still logged. When the repair reply
-  was the one cut, `prompt_tokens` is the repair prompt. Raise
+  was the one cut, `prompt_tokens` is the repair prompt (for
+  `brief_issue` and `check_conclusion`, whenever a repair call was
+  made, cut or not). Raise
   `INFERENCE_MAX_TOKENS`. The reply reserve comes out of
   `INFERENCE_CONTEXT_TOKENS`, so raise that by the same amount if the
   model's window allows, or the prompt allowance shrinks.
@@ -1144,7 +1149,9 @@ call hit:
   text, the error) says the same: it names `INFERENCE_CONTEXT_TOKENS`,
   not `INFERENCE_MAX_TOKENS` (#890). So does `extract_from_emails`'s
   `Incomplete:` line, which counts the threads cut at the context
-  window apart from those cut at `INFERENCE_MAX_TOKENS` (#950).
+  window apart from those cut at `INFERENCE_MAX_TOKENS` (#950), and
+  `brief_issue` and `check_conclusion` return
+  `truncation_reason: "context_window"` (#951).
 - `evidence_budget`: the model window, not the fixed per-thread cap,
   left out passages (`passages_omitted`), cut them short
   (`passages_truncated`) or dropped lower-ranked threads
@@ -1164,8 +1171,9 @@ call hit:
   `INFERENCE_CONTEXT_TOKENS`.
 
 `prompt_tokens` is the estimated size of the prompt sent (the largest
-one for `extract_from_emails`, including the reply schema structured
-outputs add), counted at three characters per token.
+one for `extract_from_emails`; for it, `brief_issue` and
+`check_conclusion`, including the reply schema structured outputs
+add), counted at three characters per token.
 
 The call's own `mcp.timings` line also carries a
 `token_limit_<limit>` count for each limit it hit, so the warning can
@@ -1191,12 +1199,15 @@ only, never filenames or text (`make logs`):
   `PptxPackageBudgetError` one whose XML would decompress past
   32 MiB, or with more than 20,000 members or 8 MiB of relationship
   parts), or (`zip uncompressed-size cap exceeded`) a DOCX, XLSX or
-  PPTX that would decompress past its cap. For a legacy `.doc`
-  or `.xls` (#935) the type names the tool's fate: `ToolTimeoutError`,
-  `ToolCrashError` (killed by a signal, including the `.xls` child's
-  CPU limit), `ToolExitError` (an error, including the `.xls` child's
-  memory limit), `ToolNotFoundError` (catdoc missing from the image) or
-  `XlsOutputError`. Many of these at
+  PPTX that would decompress past its cap. For a legacy `.doc`,
+  `.xls` or `.ppt` (#935, #957) the type names the tool's fate:
+  `ToolTimeoutError`, `ToolCrashError` (killed by a signal, including
+  the `.xls` child's and the `.ppt` reader's CPU limit), `ToolExitError`
+  (an error, including the `.xls` child's memory limit, and any deck the
+  `.ppt` reader rejects or that needs more than its 128 MiB heap, such
+  as a password-protected one), `ToolNotFoundError` (catdoc or the
+  `.ppt` Java runtime missing from the image) or `XlsOutputError`.
+  Many of these at
   once usually means the OCR toolchain or a parser library is
   broken, not the mail. A failed result is cached for 7 days, then
   retried when the same bytes arrive again.
@@ -1250,6 +1261,8 @@ only, never filenames or text (`make logs`):
     budget above (#935).
   - `doc_output_bytes`: catdoc wrote more than 8 MiB for a legacy
     `.doc`; the rest is not read (#935).
+  - `ppt_output_bytes`: the `.ppt` reader wrote more than 8 MiB for a
+    legacy `.ppt`; the rest is not read (#957).
   - `pptx_slides`, `pptx_shapes`, `pptx_table_cells`,
     `pptx_text_chars`: the walk over a PowerPoint deck stopped at its
     slide budget (5,000 slide-list entries), shape budget (100,000,
@@ -1260,8 +1273,8 @@ only, never filenames or text (`make logs`):
   The other caps either skip or fail the whole attachment and show as
   `too_large` or `failed` instead (`INDEXER_ATTACHMENT_MAX_BYTES`, the
   zip, image-pixel and XLSX whole-part caps, the OCR timeout, the
-  legacy-Office tool timeouts and the `.xls` child's memory and CPU
-  limits); the OCR
+  legacy-Office tool timeouts and the `.xls` child's and the `.ppt`
+  reader's memory and CPU limits); the OCR
   page caps have their own lines above. Like the OCR cap, a cap is reported
   on the first extraction only: the cached text is served afterwards.
 - These per-item WARNINGs (failed extractions, OCR fallback failures,
@@ -1295,12 +1308,15 @@ only, never filenames or text (`make logs`):
     so none are lost, and the 5-minute flush still applies.
   - What the outcomes mean: `cached` counts attachments served from the
     extraction cache instead of extracted again. `unsupported` is a type
-    no extractor reads, including legacy PowerPoint `.ppt` (#957),
-    PowerPoint slideshows and templates (`.ppsx`, `.potx`), and
-    password-protected Office files and other OLE2 files not labelled
-    `.doc` / `.xls`, recorded with "OLE2 compound file" rather than as
-    `failed`, so they are not retried (#694). Genuine legacy `.doc` and
-    `.xls` files are extracted with catdoc and xlrd (#935); a crashed,
+    no extractor reads, including PowerPoint slideshows and templates
+    (`.ppsx`, `.potx`), and password-protected Office files and other
+    OLE2 files not labelled `.doc` / `.xls` / `.ppt`, recorded with
+    "OLE2 compound file" rather than as `failed`, so they are not
+    retried (#694); a `.ppt`-labelled file that is not OLE2 is recorded
+    with "not an OLE2 compound file (labelled legacy .ppt)" (#957).
+    Genuine legacy `.doc`, `.xls` and `.ppt` files are extracted with
+    catdoc, xlrd and Apache POI (#935, #957); each `.ppt` starts a Java
+    process, about 0.2 to 0.4 s of CPU; a crashed,
     timed-out or over-limit run is `failed` with a fixed error type such
     as `ToolTimeoutError` or `ToolExitError` (see `docs/architecture.md`,
     "Extractor dispatch"). Binary files (PDF, ZIP, OLE2, PNG, JPEG,

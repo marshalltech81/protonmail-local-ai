@@ -1,7 +1,8 @@
 name: Security Scan
 
 # The path filters list only files a scanner here reads: Trivy's vuln
-# scan reads the uv lockfiles and pyproject.toml, its misconfig scan
+# scan reads the uv lockfiles, pyproject.toml and the Maven manifest of
+# the indexer's .ppt reader (indexer/java/pom.xml), its misconfig scan
 # reads the Dockerfiles (it has no checks for Compose files, shell
 # scripts or workflow YAML), Bandit reads indexer/src and
 # mcp-server/src, and Semgrep reads the Compose files (base and
@@ -14,6 +15,7 @@ on:
     paths:
       - "**/pyproject.toml"
       - "**/uv.lock"
+      - "**/pom.xml"
       - "**/Dockerfile"
       - "indexer/src/**"
       - "mcp-server/src/**"
@@ -31,6 +33,7 @@ on:
     paths:
       - "**/pyproject.toml"
       - "**/uv.lock"
+      - "**/pom.xml"
       - "**/Dockerfile"
       - "indexer/src/**"
       - "mcp-server/src/**"
