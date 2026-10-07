@@ -106,12 +106,33 @@ def _compose_files(repo: Path) -> list[Path]:
     return sorted({p for pattern in patterns for p in repo.glob(pattern)})
 
 
+# Value-less ``environment:`` entries (``- NAME`` or ``NAME:``), which
+# Compose fills from the invoking shell or ``.env`` without a ``$``.
+_VALUE_LESS = re.compile(r"^\s*(?:-\s*([A-Za-z_][A-Za-z0-9_]*)|([A-Za-z_][A-Za-z0-9_]*)\s*:)\s*$")
+
+
+def _indent(line: str) -> int:
+    return len(line) - len(line.lstrip())
+
+
 def _compose_refs(files: list[Path]) -> set[str]:
     names: set[str] = set()
     for path in files:
+        env_indent: int | None = None  # set while inside an ``environment:`` block
         for line in path.read_text(encoding="utf-8").splitlines():
-            if line.lstrip().startswith("#"):
+            if not line.strip() or line.lstrip().startswith("#"):
                 continue
+            if env_indent is not None and _indent(line) <= env_indent:
+                env_indent = None
+            key = line.strip().split(":", 1)[0]
+            if key == "environment":
+                value = line.split(":", 1)[1].strip()
+                assert not value.startswith(("[", "{")), (
+                    f"{path.name}: use a block environment: list or map, not flow-style"
+                )
+                env_indent = _indent(line)
+            elif env_indent is not None and (m := _VALUE_LESS.match(line)):
+                names.add(m.group(1) or m.group(2))
             names.update(_COMPOSE_REF.findall(line))
     return names
 
@@ -128,33 +149,33 @@ def _example_keys(path: Path) -> set[str]:
 # same name into a container (``NAME: ${NAME:-default}``). It is not a
 # read on its own: the container still has to consume it.
 _COMPOSE_PASS_THROUGH = re.compile(
-    r"""^\s*(?:-\s*)?([A-Za-z_][A-Za-z0-9_]*)\s*[:=]\s*["']?\$\{\1(?:[:?+-][^}]*)?\}["']?\s*$"""
+    r"""^\s*(?:-\s*)?([A-Za-z_][A-Za-z0-9_]*)\s*[:=]\s*["']?\$\{\1(?:[:?+-](.*))?\}["']?\s*$"""
 )
 
 
 def _compose_own_uses(files: list[Path]) -> set[str]:
-    """Compose references other than pass-throughs: ports, build args and
-    any other value Compose itself consumes."""
+    """Compose references other than pass-throughs: ports, build args, a
+    pass-through's nested default (``${A:-$B}`` reads ``B``) and any other
+    value Compose itself consumes."""
     names: set[str] = set()
     for path in files:
         for line in path.read_text(encoding="utf-8").splitlines():
-            if line.lstrip().startswith("#") or _COMPOSE_PASS_THROUGH.match(line):
+            if line.lstrip().startswith("#"):
+                continue
+            if m := _COMPOSE_PASS_THROUGH.match(line):
+                names.update(_COMPOSE_REF.findall(m.group(2) or ""))
                 continue
             names.update(_COMPOSE_REF.findall(line))
     return names
 
 
 def _script_files(repo: Path) -> list[Path]:
-    """Code outside the Python services that reads settings: the mbsync
-    container's scripts and template, the Makefile and the operator
-    scripts (tests excluded, since they set variables rather than read
-    them)."""
-    return [
-        repo / "Makefile",
-        *sorted((repo / "scripts").glob("*.sh")),
-        *sorted((repo / "mbsync").glob("*.sh")),
-        repo / "mbsync" / "mbsyncrc.template",
-    ]
+    """Code outside the Python services that reads settings: every shell
+    script one directory down (the services' entrypoints and healthchecks
+    and the operator scripts; tests, which set variables rather than read
+    them, sit deeper), the mbsync template and the Makefile."""
+    scripts = [p for p in repo.glob("*/*.sh") if not p.parent.name.startswith(".")]
+    return [repo / "Makefile", *sorted(scripts), repo / "mbsync" / "mbsyncrc.template"]
 
 
 # A shell or Make expansion: ``$NAME``, ``${NAME...}`` or ``$(NAME)``.
@@ -305,11 +326,10 @@ def repo_copy(tmp_path):
         shutil.copy(path, tmp_path / path.name)
     for sub in ("indexer/src", "mcp-server/src"):
         shutil.copytree(_REPO / sub, tmp_path / sub, ignore=shutil.ignore_patterns("data"))
-    for sub in ("scripts", "mbsync"):
-        (tmp_path / sub).mkdir()
-        for path in (_REPO / sub).glob("*.sh"):
-            shutil.copy(path, tmp_path / sub / path.name)
-    shutil.copy(_REPO / "mbsync" / "mbsyncrc.template", tmp_path / "mbsync")
+    for path in _script_files(_REPO):
+        target = tmp_path / path.relative_to(_REPO)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(path, target)
     assert not _undocumented(tmp_path)
     assert not _dead_keys(tmp_path)
     return tmp_path
@@ -412,3 +432,59 @@ def test_a_not_read_exclusion_for_a_key_that_is_read_is_stale(repo_copy):
     assert _stale_not_read(repo_copy, {"RERANK_CANDIDATES": "x"}) == {"RERANK_CANDIDATES"}
     _add_key(repo_copy, "UNREAD_920")
     assert not _stale_not_read(repo_copy, {"UNREAD_920": "x"})
+
+
+# --- Review round 2: value-less entries, other scripts, nested defaults ------
+
+
+def test_value_less_compose_environment_entries_are_reads(tmp_path):
+    compose = tmp_path / "docker-compose.yml"
+    compose.write_text(
+        "services:\n"
+        "  a:\n"
+        "    cap_drop:\n"
+        "      - ALL\n"
+        "    environment:\n"
+        "      - LIST_FORM_920\n"
+        "      - SET_920=1\n"
+        "  b:\n"
+        "    environment:\n"
+        "      MAP_FORM_920:\n"
+        "      SET_920: x\n"
+        "    cap_add:\n"
+        "      - NET_RAW\n",
+        encoding="utf-8",
+    )
+    assert _compose_refs([compose]) == {"LIST_FORM_920", "MAP_FORM_920"}
+
+
+def test_a_flow_style_compose_environment_is_rejected(tmp_path):
+    compose = tmp_path / "docker-compose.yml"
+    compose.write_text("services:\n  a:\n    environment: [FLOW_920]\n", encoding="utf-8")
+    with pytest.raises(AssertionError, match="flow-style"):
+        _compose_refs([compose])
+
+
+def test_every_service_script_is_scanned():
+    scanned = set(_script_files(_REPO))
+    assert _REPO / "indexer" / "healthcheck.sh" in scanned
+    assert _REPO / "mbsync" / "entrypoint.sh" in scanned
+    assert not [p for p in scanned if ".semgrep" in p.parts or "tests" in p.parts]
+
+
+def test_a_key_read_only_by_the_indexer_healthcheck_is_not_dead(repo_copy):
+    _add_key(repo_copy, "PROBE_ONLY_920")
+    _append(repo_copy / "docker-compose.yml", "      PROBE_ONLY_920: ${PROBE_ONLY_920:-1}\n")
+    _append(repo_copy / "indexer" / "healthcheck.sh", '\n: "${PROBE_ONLY_920}"\n')
+    assert not _dead_keys(repo_copy)
+
+
+def test_a_nested_compose_default_is_a_compose_read(tmp_path):
+    compose = tmp_path / "docker-compose.yml"
+    compose.write_text(
+        "      PRIMARY_920: ${PRIMARY_920:-$FALLBACK_920}\n"
+        "      OTHER_920: ${OTHER_920:-${NESTED_920}}\n"
+        "      PLAIN_920: ${PLAIN_920:-1}\n",
+        encoding="utf-8",
+    )
+    assert _compose_own_uses([compose]) == {"FALLBACK_920", "NESTED_920"}
