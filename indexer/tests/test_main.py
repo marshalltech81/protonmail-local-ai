@@ -5313,6 +5313,7 @@ class TestMainStartupAndLoop:
         db = Database(tmp_path / "mail.db")
         self._db = db
         monkeypatch.setattr(main, "_ingestion_state", None)
+        monkeypatch.setattr(main, "_observer", None)
         monkeypatch.setattr(main, "MAILDIR_PATH", tmp_path / "maildir")
         monkeypatch.setattr(main, "_validate_embed_config", lambda: None)
         monkeypatch.setattr(main, "Database", lambda path: db)
@@ -5704,9 +5705,18 @@ class TestMainStartupAndLoop:
 
         def observer():
             # Shares the harness's event list, so the heartbeat and the
-            # thread's death are recorded in order.
-            observers.append(_FakeObserver(self._events, alive_for=1))
+            # thread's death are recorded in order. Alive through
+            # startup's heartbeats; dead from the loop's second pass.
+            observers.append(_FakeObserver(self._events, alive_for=3))
             return observers[-1]
+
+        # The real heartbeat, so the loop's own call carries the check.
+        real_touch = main.touch_health_file
+        monkeypatch.setattr(main, "INDEXER_HEALTH_FILE", tmp_path / "health")
+
+        def health():
+            real_touch()
+            self._events.append("health")
 
         with pytest.raises(SystemExit) as info:
             self._run_main(
@@ -5714,13 +5724,13 @@ class TestMainStartupAndLoop:
                 monkeypatch,
                 sweep_due=False,
                 observer=observer,
-                health=lambda: self._events.append("health"),
+                health=health,
                 sleep=sleep,
             )
         assert info.value.code == 1
-        # Detected on the loop pass after the thread died, before that
-        # pass refreshes the health file: the healthcheck goes red even
-        # if the exit were delayed.
+        # Detected by the heartbeat on the pass after the thread died,
+        # before it refreshes the health file: the healthcheck goes red
+        # even if the exit were delayed.
         events = self._events
         dead = events.index("observer_dead")
         assert "health" in events[:dead]
@@ -5736,6 +5746,19 @@ class TestMainStartupAndLoop:
         events = self._run_main(tmp_path, monkeypatch, sweep_due=False)
 
         assert "observer_dead" not in events
+
+    def test_main_publishes_the_observer_to_the_heartbeat(self, tmp_path, monkeypatch):
+        """Review round 1: the check lives in ``touch_health_file`` so the
+        initial drain is covered too; ``main`` must hand it the observer."""
+        observers: list[_FakeObserver] = []
+
+        def observer():
+            observers.append(_FakeObserver(self._events))
+            return observers[-1]
+
+        self._run_main(tmp_path, monkeypatch, sweep_due=False, observer=observer)
+
+        assert main._observer is observers[0]
 
     def test_main_loop_rewatches_folders_after_a_sync(self, tmp_path, monkeypatch):
         monkeypatch.setenv("INDEXER_DELETION_ENABLED", "true")
@@ -5794,6 +5817,76 @@ class TestMainStartupAndLoop:
         events = self._run_main(tmp_path, monkeypatch, sweep_due=True)
         assert "initial_index:skip_trashed=True" in events
         assert f"walk:{main.REASON_RESCAN}:skip_trashed=True" in events
+
+
+class TestWatcherDeathHeartbeat:
+    """Review round 1 of #870: the watcher can die during the initial
+    drain, hours before the main loop starts, while ``initial_index``
+    keeps the health file fresh after every message. The check rides on
+    every heartbeat, so the guarantee holds from ``observer.start()``
+    on, and the health file is never refreshed over a dead watcher."""
+
+    def test_heartbeat_exits_when_the_watcher_thread_stopped(self, tmp_path, monkeypatch, caplog):
+        caplog.set_level(logging.INFO)
+        health = tmp_path / "health"
+        monkeypatch.setattr(main, "INDEXER_HEALTH_FILE", health)
+        monkeypatch.setattr(main, "_observer", _FakeObserver([], alive_for=0))
+
+        with pytest.raises(SystemExit) as info:
+            main.touch_health_file()
+
+        assert info.value.code == 1
+        assert not health.exists()
+        (line,) = [r for r in caplog.records if "Maildir watcher thread stopped" in r.getMessage()]
+        assert line.levelno == logging.ERROR
+        assert (
+            "Maildir watcher thread stopped; new mail is found only by the periodic rescan"
+            in line.getMessage()
+        )
+
+    @pytest.mark.parametrize("observer", [None, "alive"])
+    def test_heartbeat_touches_while_the_watcher_is_alive_or_not_started(
+        self, tmp_path, monkeypatch, caplog, observer
+    ):
+        caplog.set_level(logging.INFO)
+        health = tmp_path / "health"
+        monkeypatch.setattr(main, "INDEXER_HEALTH_FILE", health)
+        monkeypatch.setattr(main, "_observer", _FakeObserver([]) if observer else None)
+
+        main.touch_health_file()
+
+        assert health.exists()
+        assert not caplog.records
+
+    def test_initial_index_exits_when_the_watcher_dies_mid_drain(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        caplog.set_level(logging.INFO)
+        maildir = tmp_path / "maildir"
+        inbox = maildir / "INBOX" / "cur"
+        inbox.mkdir(parents=True)
+        message_count = 5
+        for i in range(message_count):
+            _write_eml(inbox / f"m{i}.eml", f"m{i}@example.com")
+        db = Database(tmp_path / "mail.db")
+        embedder = make_mock_embedder()
+        embedder.embed.return_value = [0.0] * EMBEDDING_DIM
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        monkeypatch.setattr(main, "INDEXER_HEALTH_FILE", tmp_path / "health")
+        monkeypatch.setattr(main, "INITIAL_INDEX_BATCH_SIZE", 1)
+        events: list[str] = []
+        # Alive for the first message's heartbeats, dead from then on.
+        monkeypatch.setattr(main, "_observer", _FakeObserver(events, alive_for=4))
+
+        with pytest.raises(SystemExit) as info:
+            main.initial_index(db, embedder, Threader(db), _make_queue(db))
+
+        assert info.value.code == 1
+        assert "observer_dead" in events
+        indexed = sum(db.is_indexed(str(inbox / f"m{i}.eml")) for i in range(message_count))
+        assert indexed < message_count
+        (line,) = [r for r in caplog.records if "Maildir watcher thread stopped" in r.getMessage()]
+        assert line.levelno == logging.ERROR
 
 
 class TestReapedMessagesStayDeleted:

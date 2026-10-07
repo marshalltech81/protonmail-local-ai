@@ -1994,8 +1994,10 @@ eventually rather than omitted until the next container restart.
 watchdog's dispatcher thread catches only its own empty-queue
 timeout, so an exception escaping a handler (`enqueue` or
 `is_indexed` on a locked database, a full disk) ends it, and from
-then on only the rescan finds new mail. Each pass of the main loop
-checks `observer.is_alive()` before it refreshes the heartbeat; a
+then on only the rescan finds new mail. Every heartbeat
+(`touch_health_file`: per message, embed request and attachment page,
+during the initial index as well as each pass of the main loop)
+checks `observer.is_alive()` before it refreshes the health file; a
 dead thread logs an ERROR and exits the process with status 1, the
 stall guard's remedy, so Compose restarts the indexer with a fresh
 watcher and the startup walk covers the gap (#870). The handlers are

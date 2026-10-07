@@ -1156,9 +1156,11 @@ Maildir watcher and walks (#870):
   locked database or a full disk; Python prints the thread's traceback
   just before this line). The indexer exits with status 1 and Compose
   restarts it with a fresh watcher; the startup walk queues any mail
-  delivered in between. The healthcheck is not refreshed once the
-  thread is found dead. A restart loop with this line means the cause
-  persists: read the traceback above it.
+  delivered in between. The check runs on every heartbeat (per
+  message, embed request and attachment page), during the initial
+  index as well as the steady-state loop, and the heartbeat is not
+  written once the thread is found dead. A restart loop with this
+  line means the cause persists: read the traceback above it.
 - `Maildir walk: skipped <n> director(ies) it could not read; their
   mail is not indexed until they are readable` (WARNING), after a
   startup or periodic Maildir walk, and `Maildir watch: <n>

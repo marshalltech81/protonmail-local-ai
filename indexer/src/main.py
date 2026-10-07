@@ -44,6 +44,7 @@ from pathlib import Path
 
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
+from watchdog.observers.api import BaseObserver
 
 from .attachment_indexing import (
     AttachmentWritePlan,
@@ -709,7 +710,32 @@ class _FailureStreak:
 _streaks = {name: _FailureStreak(name) for name in RECOVERY_COMPONENTS}
 
 
+# The Maildir watcher, set by ``main`` once it is started;
+# ``touch_health_file`` checks it on every heartbeat. watchdog's
+# dispatcher catches only ``queue.Empty``, so an exception escaping a
+# handler (``enqueue`` or ``is_indexed`` on a locked database, a full
+# disk) ends the observer thread, and from then on only the periodic
+# rescan finds new mail. The initial drain can run for hours before the
+# main loop starts, refreshing the health file after every message, so
+# the check rides on the heartbeat rather than the loop: the
+# healthcheck never reports a watcherless indexer as live, and the exit
+# is the stall guard's remedy, Compose restarts the container with a
+# fresh watcher and the startup walk covers the gap (#870).
+_observer: BaseObserver | None = None
+
+
+def _exit_if_watcher_dead() -> None:
+    if _observer is None or _observer.is_alive():
+        return
+    log.error(
+        "Maildir watcher thread stopped; new mail is found only by the "
+        "periodic rescan; exiting so the container restarts"
+    )
+    raise SystemExit(1)
+
+
 def touch_health_file() -> None:
+    _exit_if_watcher_dead()
     try:
         INDEXER_HEALTH_FILE.touch(exist_ok=True)
     except OSError:
@@ -2956,6 +2982,9 @@ def main():
     )
     folder_watches.start()
     observer.start()
+    # From here every heartbeat checks the thread (#870).
+    global _observer
+    _observer = observer
     log.info("Watching Maildir for new emails...")
 
     # Always-on startup rename sweep. mbsync renames files in place for
@@ -3008,21 +3037,7 @@ def main():
     last_summary = time.monotonic()
     try:
         while True:
-            # watchdog's dispatcher catches only ``queue.Empty``, so an
-            # exception escaping a handler (``enqueue`` or ``is_indexed``
-            # on a locked database, a full disk) ends the observer
-            # thread, and from then on only the periodic rescan finds
-            # new mail. Checked before the heartbeat so the healthcheck
-            # never reports a watcherless indexer as live; the exit is
-            # the stall guard's remedy, Compose restarts the container
-            # with a fresh watcher and the startup walk covers the gap
-            # (#870).
-            if not observer.is_alive():
-                log.error(
-                    "Maildir watcher thread stopped; new mail is found only by the "
-                    "periodic rescan; exiting so the container restarts"
-                )
-                raise SystemExit(1)
+            # Also checks the watcher thread (``_exit_if_watcher_dead``).
             touch_health_file()
             _maybe_log_queue_heartbeat(queue)
             # Drain any queued indexing jobs before yielding to the
