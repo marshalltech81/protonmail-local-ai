@@ -42,7 +42,9 @@ work, along three dimensions:
 When a budget runs out the text collected so far is returned, as the
 dispatcher's own ``max_extracted_chars`` truncation would: a hostile
 workbook is truncated, and a long legitimate one still yields its
-first rows rather than nothing.
+first rows rather than nothing. Each budget that cut a workbook logs a
+rate-limited WARNING naming it, once per extraction, and is counted in
+the attachments aggregate's ``extractor_caps`` (#903).
 
 Parts openpyxl loads whole rather than streams (the shared-string
 table, ``[Content_Types].xml``, the workbook, styles and the rest; see
@@ -57,6 +59,7 @@ as opposed to its nodes, are bounded by the dispatcher's zip cap.
 from __future__ import annotations
 
 import io
+import logging
 import shutil
 import zipfile
 from collections.abc import Callable
@@ -85,6 +88,10 @@ from openpyxl.xml.constants import (
     XLTX,
 )
 from openpyxl.xml.functions import fromstring
+
+from . import warn_extractor_cap
+
+log = logging.getLogger("indexer.extractor.xlsx")
 
 # XML nodes (elements plus their attributes) in the worksheet parts
 # openpyxl will parse, across the workbook, and in any one row (#432).
@@ -355,6 +362,8 @@ def _bound_worksheets(payload: bytes) -> io.BytesIO:
     # Per cut worksheet: how many of its leading bytes to keep, and what
     # follows them.
     cuts: dict[str, tuple[int, bytes]] = {}
+    # The budgets that cut a worksheet, reported once each below.
+    caps: set[str] = set()
     try:
         reader.read_manifest()
         reader.read_workbook()
@@ -372,14 +381,16 @@ def _bound_worksheets(payload: bytes) -> io.BytesIO:
                     _copy_prefix(member, cut_member, keep)
                     cut_member.write(tail)
                     cut_member.seek(0)
-                    left, cut = _scan_worksheet(cut_member, left)
+                    left, cut = _scan_worksheet(cut_member, left, caps)
                 else:
-                    left, cut = _scan_worksheet(member, left)
+                    left, cut = _scan_worksheet(member, left, caps)
             if cut is not None:
                 # A cut of the cut worksheet falls inside its kept bytes.
                 cuts[target] = cut
     finally:
         reader.archive.close()
+    for cap in sorted(caps):
+        warn_extractor_cap(log, cap, "xlsx worksheet XML cut before openpyxl parses it")
     if not cuts:
         return io.BytesIO(payload)
     # Rewrite the archive with the cut worksheets. A name stored twice
@@ -438,6 +449,7 @@ class _WorksheetScan:
         self.unit_nodes = 0
         self.left_before_unit = left
         self.cut_at: int | None = None
+        self.cap: str | None = None  # the budget the cut was for
 
     def _start(self, name: str, attributes: dict[str, str]) -> None:
         self.depth += 1
@@ -453,6 +465,7 @@ class _WorksheetScan:
         self.unit_nodes += cost
         self.left -= cost
         if self.left < 0 or self.unit_nodes > _MAX_ROW_NODES:
+            self.cap = "xlsx_row_nodes" if self.unit_nodes > _MAX_ROW_NODES else "xlsx_sheet_nodes"
             self.cut()
             raise _Cut
 
@@ -491,8 +504,11 @@ def _copy_prefix(source: IO[bytes], target: IO[bytes], size: int) -> None:
         size -= len(chunk)
 
 
-def _scan_worksheet(source: IO[bytes], left: int) -> tuple[int, tuple[int, bytes] | None]:
-    """Charge one worksheet's nodes against ``left``.
+def _scan_worksheet(
+    source: IO[bytes], left: int, caps: set[str]
+) -> tuple[int, tuple[int, bytes] | None]:
+    """Charge one worksheet's nodes against ``left``; adds the budget a
+    cut was for to ``caps``.
 
     Returns the budget left and, when the worksheet crosses a budget,
     its cut: the bytes to keep and the end tags of the elements still
@@ -509,6 +525,7 @@ def _scan_worksheet(source: IO[bytes], left: int) -> tuple[int, tuple[int, bytes
             scan.parser.Parse(chunk, False)
             fed += len(chunk)
             if fed - scan.last_event > _MAX_TAG_BYTES:
+                scan.cap = "xlsx_tag_bytes"
                 scan.cut()
                 break
         else:
@@ -521,6 +538,8 @@ def _scan_worksheet(source: IO[bytes], left: int) -> tuple[int, tuple[int, bytes
         pass
     if scan.cut_at is None:
         return scan.left, None
+    if scan.cap is not None:
+        caps.add(scan.cap)
     encoding = (scan.encoding or "utf-8").lower()
     ascii_compatible = (
         encoding in _ASCII_COMPATIBLE
@@ -591,4 +610,9 @@ def _serialize(workbook: openpyxl.Workbook) -> str:
             parts.append("\n".join(sheet_lines))
         if chars_left <= 0 or expanded_cells > _MAX_EXPANDED_CELLS:
             break
+    # A budget that ended the walk cut the text (#903).
+    if expanded_cells > _MAX_EXPANDED_CELLS:
+        warn_extractor_cap(log, "xlsx_expanded_cells", "xlsx walk stopped at the cell budget")
+    elif chars_left <= 0:
+        warn_extractor_cap(log, "xlsx_text_chars", "xlsx walk stopped at the text budget")
     return "\n\n".join(parts)

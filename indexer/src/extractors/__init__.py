@@ -93,11 +93,16 @@ ZIP_MAX_UNCOMPRESSED_BYTES = 200 * 1024 * 1024
 #   or the OCR cap leaving the page unread).
 # * ``ocr_capped_pdfs`` / ``ocr_pages_skipped``: scanned PDFs whose OCR
 #   stopped at ``max_ocr_pages``, and the scanned pages left unread.
+# * ``extractor_caps``: caps inside an extractor that cut what it
+#   returned (#903), one per cap per extraction attempt: the dispatcher's
+#   ``max_extracted_chars``, the PDF digital-page cap, the OCR DPI
+#   lowered to fit the page-pixel budget, and the XLSX node, cell and
+#   text budgets. Each also logs a rate-limited WARNING naming the cap.
 # * ``parser_caps_messages``: messages a parser work cap cut (#872),
 #   counted here so the parser's per-message line can be rate limited
 #   without losing a message (review round 5 on #884).
 # * ``warnings_suppressed``: per-item WARNINGs (failed extraction, OCR
-#   cap, parser cap) that the rate limit below withheld.
+#   cap, extractor cap, parser cap) that the rate limit below withheld.
 # * ``_suppressed_lines``: the repeated indexer lines that share the
 #   rate limit (embed retries and recoveries, health-file and
 #   ingestion-state failures, #873), withheld. Counted apart from the
@@ -112,6 +117,7 @@ _pdf_pages_failed = 0
 _pdf_pages_unrecovered = 0
 _ocr_capped_pdfs = 0
 _ocr_pages_skipped = 0
+_extractor_caps = 0
 _parser_caps_messages = 0
 _warnings_suppressed = 0
 _suppressed_lines = 0
@@ -149,6 +155,16 @@ def note_ocr_capped(pages_skipped: int) -> None:
         _ocr_pages_skipped += pages_skipped
 
 
+def warn_extractor_cap(logger: logging.Logger, cap: str, msg: str, *args: object) -> None:
+    """Count one extraction attempt that ``cap`` (a fixed name) cut, and
+    log ``msg`` after the cap name at WARNING, rate limited. ``args`` must
+    be counts or fixed text, as for ``warn_rate_limited``."""
+    global _extractor_caps
+    with _counts_lock:
+        _extractor_caps += 1
+    warn_rate_limited(logger, "extractor cap %s: " + msg, cap, *args)
+
+
 def note_parser_caps_message() -> None:
     """Count one message a parser work cap cut."""
     global _parser_caps_messages
@@ -159,18 +175,20 @@ def note_parser_caps_message() -> None:
 def drain_extractor_counts() -> dict[str, int]:
     """Return the counts above since the last call, and reset them."""
     global _pdf_pages_failed, _pdf_pages_unrecovered, _ocr_capped_pdfs
-    global _ocr_pages_skipped, _parser_caps_messages, _warnings_suppressed
+    global _ocr_pages_skipped, _extractor_caps, _parser_caps_messages, _warnings_suppressed
     with _counts_lock:
         counts = {
             "pdf_pages_failed": _pdf_pages_failed,
             "pdf_pages_unrecovered": _pdf_pages_unrecovered,
             "ocr_capped_pdfs": _ocr_capped_pdfs,
             "ocr_pages_skipped": _ocr_pages_skipped,
+            "extractor_caps": _extractor_caps,
             "parser_caps_messages": _parser_caps_messages,
             "warnings_suppressed": _warnings_suppressed,
         }
         _pdf_pages_failed = _pdf_pages_unrecovered = _ocr_capped_pdfs = 0
-        _ocr_pages_skipped = _parser_caps_messages = _warnings_suppressed = 0
+        _ocr_pages_skipped = _extractor_caps = _parser_caps_messages = 0
+        _warnings_suppressed = 0
     return counts
 
 
@@ -555,8 +573,11 @@ def extract(
             error=None,
         )
     if max_extracted_chars is not None and len(cleaned) > max_extracted_chars:
-        log.info(
-            "extractor %s output truncated from %d to %d chars",
+        # Text past the cap is not indexed: WARNING, rate limited (#903).
+        warn_extractor_cap(
+            log,
+            "extracted_chars",
+            "%s output truncated from %d to %d chars",
             extractor_name,
             len(cleaned),
             max_extracted_chars,

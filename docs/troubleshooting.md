@@ -1200,8 +1200,32 @@ only, never filenames or text (`make logs`):
   same PDF is served from the extraction cache and reports a plain
   `success`, with no cap line and no `ocr_capped_pdfs` count, although
   the cached text still lacks the unread pages.
-- These per-item WARNINGs (failed extractions, OCR caps and the
-  parser-cap line described below, together) are capped at 20 per 5
+- `extractor cap <name>: <fixed text and counts>` (WARNING): a cap
+  inside an extractor cut the text it returned (#903). Logged once per
+  cap per extraction, and counted as `extractor_caps` in the
+  attachments line below. The caps, by name:
+  - `extracted_chars`: the extracted text was longer than
+    `INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS`; the rest is not stored.
+  - `pdf_digital_pages`: the PDF has more pages than
+    `INDEXER_PDF_MAX_DIGITAL_PAGES`; the pages past it are not read.
+  - `pdf_ocr_dpi`: a scanned page is too large to render at 200 dpi
+    within the 10-megapixel page budget, so the PDF's OCR ran at the
+    lower DPI the line names, which reads small print less reliably.
+  - `xlsx_sheet_nodes`, `xlsx_row_nodes`, `xlsx_tag_bytes`: a
+    workbook's worksheet XML crossed a node budget (5,000,000 across the
+    workbook, 131,072 in one row) or a 1 MB start tag; the worksheet
+    is cut before that row and any later worksheet is read as empty.
+  - `xlsx_expanded_cells`, `xlsx_text_chars`: the walk over a
+    workbook's cells stopped at its cell budget (5,000,000, counting a
+    row as 64 cells) or its 10,000,000-character text budget.
+
+  The other caps either skip or fail the whole attachment and show as
+  `too_large` or `failed` instead (`INDEXER_ATTACHMENT_MAX_BYTES`, the
+  zip, image-pixel and XLSX whole-part caps, the OCR timeout); the OCR
+  page cap has its own line above. Like the OCR cap, a cap is reported
+  on the first extraction only: the cached text is served afterwards.
+- These per-item WARNINGs (failed extractions, OCR and extractor caps,
+  and the parser-cap line described below, together) are capped at 20 per 5
   minutes, so a stream of crafted mail cannot flood the log. The rest
   are counted as `warnings_suppressed` in the attachments line below.
   The budget is shared with the embed retry, health-file and
@@ -1211,12 +1235,12 @@ only, never filenames or text (`make logs`):
 - `attachments n=<total> success= failed= unsupported= too_large=
   ocr_disabled= empty= cached= pdf_pages_failed=
   pdf_pages_unrecovered= ocr_capped_pdfs= ocr_pages_skipped=
-  parser_caps_messages= warnings_suppressed=`: the attachments of the
+  extractor_caps= parser_caps_messages= warnings_suppressed=`: the attachments of the
   messages committed since the previous line, by outcome. It is a
   WARNING when any of `failed`, `unsupported`, `too_large`,
   `ocr_disabled`, `pdf_pages_unrecovered`, `ocr_capped_pdfs`,
-  `ocr_pages_skipped`, `parser_caps_messages` or `warnings_suppressed`
-  is above zero (some attachment text is not
+  `ocr_pages_skipped`, `extractor_caps`, `parser_caps_messages` or
+  `warnings_suppressed` is above zero (some attachment text is not
   searchable), and INFO otherwise. `pdf_pages_failed` alone does not
   make it a WARNING (see below).
   - When it is logged: during the initial index, with the timing summary
@@ -1246,12 +1270,13 @@ only, never filenames or text (`make logs`):
     search.
     `ocr_capped_pdfs` counts scanned PDFs whose OCR stopped at
     `INDEXER_OCR_MAX_PAGES`, and `ocr_pages_skipped` the scanned pages
-    they left unread.
+    they left unread. `extractor_caps` counts the extractor caps above,
+    one per cap per extraction.
   - How retries count: the outcomes are counted once per committed
     message, so a message retried after an embedder outage counts once.
     The extraction counts (`pdf_pages_failed`,
     `pdf_pages_unrecovered`, `ocr_capped_pdfs`, `ocr_pages_skipped`,
-    `warnings_suppressed`) and the per-attachment
+    `extractor_caps`, `warnings_suppressed`) and the per-attachment
     WARNINGs count every extraction attempt, retries included, and
     `parser_caps_messages` every parse of a capped message (see
     below).

@@ -57,6 +57,7 @@ from . import (
     note_ocr_capped,
     note_pdf_page_failed,
     note_pdf_pages_unrecovered,
+    warn_extractor_cap,
     warn_rate_limited,
 )
 
@@ -223,9 +224,10 @@ def _extract_digital_pages(
     pages: list[str] = []
     for index, page in enumerate(reader.pages):
         if max_pdf_pages is not None and index >= max_pdf_pages:
-            log.info(
-                "pdf-digital truncated at %d pages (max_pdf_pages cap)",
-                max_pdf_pages,
+            # The pages past the cap are never read: WARNING, rate
+            # limited, counted for the attachments aggregate (#903).
+            warn_extractor_cap(
+                log, "pdf_digital_pages", "pdf-digital stopped at %d pages", max_pdf_pages
             )
             break
         try:
@@ -394,5 +396,10 @@ def _ocr_dpi(payload: bytes, pages: list[int]) -> int:
     # highest; at most ``_OCR_DPI`` cheap checks.
     for dpi in range(_OCR_DPI, 0, -1):
         if fits(dpi):
+            if dpi < _OCR_DPI:
+                # A lower DPI lowers OCR accuracy for every page (#903).
+                warn_extractor_cap(
+                    log, "pdf_ocr_dpi", "pdf OCR rendered at %d dpi, not %d", dpi, _OCR_DPI
+                )
             return dpi
     raise ValueError("PDF page too large to render for OCR")
