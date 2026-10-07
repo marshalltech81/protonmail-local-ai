@@ -1107,28 +1107,33 @@ same moment.
 
 ## The log shows "token limit hit"
 
-`ask_mailbox`, `summarize_thread` and `extract_from_emails` log one
-WARNING per call that ran into a token limit (#865), and the
-experimental `brief_issue` and `check_conclusion` log one when the
-request is over budget (`prompt_over_budget`), for example:
+`ask_mailbox`, `summarize_thread`, `extract_from_emails` and the
+experimental `brief_issue` and `check_conclusion` log one WARNING per
+call that ran into a token limit (#865, #951), for example:
 
 ```text
 token limit hit: tool=ask_mailbox limits=evidence_budget outputs_cut=0 threads_dropped=1 passages_omitted=6 passages_truncated=1 prompt_tokens=2950 prompt_budget_tokens=3008 max_tokens=1024
 ```
 
 The line carries counts and settings only. Each limit also reaches
-the caller: a cut reply carries a truncation notice, the evidence that
-`ask_mailbox`, `summarize_thread` and `extract_from_emails` leave out
-for the window is disclosed in their coverage or evidence note (#949),
-and `prompt_over_budget` is an error. `limits` names which limits the
-call hit:
+the caller: a cut reply carries a truncation notice (for `brief_issue`
+and `check_conclusion`, `status: "truncated"` with
+`truncation_reason`), the evidence that `ask_mailbox`,
+`summarize_thread` and `extract_from_emails` leave out for the window
+is disclosed in their coverage or evidence note (#949), and
+`prompt_over_budget` is an error. The exception is evidence that
+`brief_issue` and `check_conclusion` leave out for the window: only
+the model is told, in the prompt, so this log line is where it shows.
+`limits` names which limits the call hit:
 
 - `output_max_tokens`: the model stopped at `INFERENCE_MAX_TOKENS`, so
   the answer or summary was cut off (`outputs_cut` counts every cut
   reply, whatever stopped it; for `extract_from_emails`, the threads
   whose reply was lost). A reply cut before any text fails the call
   with an error, and the line is still logged. When the repair reply
-  was the one cut, `prompt_tokens` is the repair prompt. Raise
+  was the one cut, `prompt_tokens` is the repair prompt (for
+  `brief_issue` and `check_conclusion`, whenever a repair call was
+  made, cut or not). Raise
   `INFERENCE_MAX_TOKENS`. The reply reserve comes out of
   `INFERENCE_CONTEXT_TOKENS`, so raise that by the same amount if the
   model's window allows, or the prompt allowance shrinks.
@@ -1144,7 +1149,9 @@ call hit:
   text, the error) says the same: it names `INFERENCE_CONTEXT_TOKENS`,
   not `INFERENCE_MAX_TOKENS` (#890). So does `extract_from_emails`'s
   `Incomplete:` line, which counts the threads cut at the context
-  window apart from those cut at `INFERENCE_MAX_TOKENS` (#950).
+  window apart from those cut at `INFERENCE_MAX_TOKENS` (#950), and
+  `brief_issue` and `check_conclusion` return
+  `truncation_reason: "context_window"` (#951).
 - `evidence_budget`: the model window, not the fixed per-thread cap,
   left out passages (`passages_omitted`), cut them short
   (`passages_truncated`) or dropped lower-ranked threads
@@ -1164,8 +1171,9 @@ call hit:
   `INFERENCE_CONTEXT_TOKENS`.
 
 `prompt_tokens` is the estimated size of the prompt sent (the largest
-one for `extract_from_emails`, including the reply schema structured
-outputs add), counted at three characters per token.
+one for `extract_from_emails`; for it, `brief_issue` and
+`check_conclusion`, including the reply schema structured outputs
+add), counted at three characters per token.
 
 The call's own `mcp.timings` line also carries a
 `token_limit_<limit>` count for each limit it hit, so the warning can

@@ -1345,3 +1345,166 @@ class TestSummarizeTrimNotice:
         assert "Evidence note" not in out.content[0].text
         assert _limit_lines(caplog) == []
         assert _MARKER not in caplog.text
+
+
+_EXPERIMENTAL = [
+    ("brief_issue", {"topic": f"{_MARKER} budget"}),
+    ("check_conclusion", {"conclusion": f"{_MARKER} The budget is 700 units."}),
+]
+
+
+class TestExperimentalTokenLimits:
+    """#951: ``brief_issue`` and ``check_conclusion`` report a token
+    limit as ``ask_mailbox`` does: one WARNING naming the limits and
+    counts, ``token_limit_<limit>`` on the call's own timing line, and
+    for a cut reply the fixed stop reason in ``truncation_reason`` and a
+    fixed text naming the setting for that stop. Neither the request,
+    the mail nor the reply (each carries ``_MARKER``) reaches the log."""
+
+    _WRONG = TestTruncationText._WRONG
+    _LIMITS = {"max_tokens": "output_max_tokens", "context_window": "context_window"}
+
+    @pytest.mark.parametrize(("tool", "args"), _EXPERIMENTAL)
+    @pytest.mark.parametrize("reason", ["max_tokens", "context_window"])
+    def test_cut_reply(self, caplog, tool, args, reason):
+        caplog.set_level(logging.INFO)
+        partial = f'{{"{_MARKER}": ['
+        llm = FakeInferenceClient(
+            complete_responses=[InferenceTruncatedError(partial=partial, reason=reason)]
+        )
+        out = asyncio.run(_tools(_StubDb(_short_threads()), llm, experimental=True)[tool](**args))
+        assert len(llm.complete_calls) == 1  # a cut reply gets no repair
+        data = out.structured_content
+        assert data["status"] == "truncated"
+        assert data["truncation_reason"] == reason
+        assert data["raw_text"] == partial
+        text = out.content[0].text
+        # The same per-stop wording as extract_from_emails (#950).
+        cut = TestTruncationText._EXTRACT_CUTS[reason]
+        assert f"\nThe model's reply was {cut}; its raw text follows.\n\n{partial}" in text
+        assert self._WRONG[reason] not in text
+        line = _one_limit_line(caplog)
+        assert line["tool"] == tool
+        assert line["limits"] == [self._LIMITS[reason]]
+        counts = line["counts"]
+        assert counts["outputs_cut"] == 1
+        assert counts["context_window_cuts"] == (reason == "context_window")
+        assert counts["threads_dropped"] == counts["passages_omitted"] == 0
+        assert counts["passages_truncated"] == 0
+        system, user = llm.complete_calls[0]
+        assert counts["prompt_tokens"] == estimate_tokens(system + user)
+        assert counts["max_tokens"] == DEFAULT_MAX_TOKENS
+        timing = _one_line(caplog)["counts"]
+        assert timing[f"token_limit_{self._LIMITS[reason]}"] == 1
+        assert _MARKER not in caplog.text
+
+    @pytest.mark.parametrize(("tool", "args"), _EXPERIMENTAL)
+    @pytest.mark.parametrize("structured", [True, False])
+    def test_prompt_tokens_count_the_schema_sent(self, caplog, tool, args, structured):
+        """Review round 1 on #960: with structured outputs on, the
+        provider also bills the schema's system prompt as input, so the
+        logged prompt counts the same reserve the evidence budget kept
+        for it, as extract_from_emails does."""
+        from src.tools.brief import BRIEF_JSON_SCHEMA, CHECK_JSON_SCHEMA
+
+        caplog.set_level(logging.INFO)
+        llm = FakeInferenceClient(
+            complete_responses=[InferenceTruncatedError(partial="{")],
+            structured_output=structured,
+        )
+        asyncio.run(_tools(_StubDb(_short_threads()), llm, experimental=True)[tool](**args))
+        schema = BRIEF_JSON_SCHEMA if tool == "brief_issue" else CHECK_JSON_SCHEMA
+        reserve = _schema_reserve_chars(schema) if structured else 0
+        system, user = llm.complete_calls[0]
+        expected = -(-(len(system) + len(user) + reserve) // CHARS_PER_TOKEN)
+        assert _one_limit_line(caplog)["counts"]["prompt_tokens"] == expected
+
+    @pytest.mark.parametrize(("tool", "args"), _EXPERIMENTAL)
+    def test_uncut_repair_counts_the_repair_prompt(self, caplog, tool, args):
+        """Review round 2 on #960: when the evidence was cut and the
+        repair reply was not, the repair prompt (the longer one) was still
+        sent, so it is the one counted."""
+        caplog.set_level(logging.INFO)
+        llm = FakeInferenceClient(response=f"{_MARKER} not json")  # forces the repair call
+        asyncio.run(_tools(_StubDb(_long_threads()), llm, _SMALL, experimental=True)[tool](**args))
+        assert len(llm.complete_calls) == 2
+        repair_system, repair_user = llm.complete_calls[1]
+        assert repair_user != llm.complete_calls[0][1]
+        line = _one_limit_line(caplog)
+        assert line["limits"] == ["evidence_budget"]
+        assert line["counts"]["prompt_tokens"] == estimate_tokens(repair_system + repair_user)
+        assert _MARKER not in caplog.text
+
+    @pytest.mark.parametrize(("tool", "args"), _EXPERIMENTAL)
+    def test_cut_repair_reply_counts_the_repair_prompt(self, caplog, tool, args):
+        caplog.set_level(logging.INFO)
+        llm = FakeInferenceClient(
+            complete_responses=[
+                f"{_MARKER} not json",  # forces the repair call
+                InferenceTruncatedError(partial=f"{_MARKER} {{", reason="context_window"),
+            ]
+        )
+        out = asyncio.run(_tools(_StubDb(_short_threads()), llm, experimental=True)[tool](**args))
+        assert len(llm.complete_calls) == 2
+        assert out.structured_content["status"] == "truncated"
+        assert out.structured_content["truncation_reason"] == "context_window"
+        line = _one_limit_line(caplog)
+        assert line["limits"] == ["context_window"]
+        repair_system, repair_user = llm.complete_calls[1]
+        assert line["counts"]["prompt_tokens"] == estimate_tokens(repair_system + repair_user)
+        assert _MARKER not in caplog.text
+
+    @pytest.mark.parametrize(("tool", "args"), _EXPERIMENTAL)
+    def test_evidence_cut_to_the_window(self, caplog, tool, args):
+        caplog.set_level(logging.INFO)
+        llm = FakeInferenceClient(response=f"{_MARKER} not json")
+        out = asyncio.run(
+            _tools(_StubDb(_long_threads()), llm, _SMALL, experimental=True)[tool](**args)
+        )
+        data = out.structured_content
+        assert data["status"] == "invalid_json"
+        assert data["truncation_reason"] is None
+        line = _one_limit_line(caplog)
+        assert line["tool"] == tool
+        assert line["limits"] == ["evidence_budget"]
+        counts = line["counts"]
+        assert counts["outputs_cut"] == 0
+        assert counts["passages_omitted"] + counts["passages_truncated"] > 0
+        assert 0 < counts["prompt_tokens"] <= _SMALL.prompt_tokens
+        assert counts["prompt_budget_tokens"] == _SMALL.prompt_tokens
+        assert counts["max_tokens"] == _SMALL.max_output_tokens
+        assert _one_line(caplog)["counts"]["token_limit_evidence_budget"] == 1
+        assert _MARKER not in caplog.text
+
+    @pytest.mark.parametrize(("tool", "args"), _EXPERIMENTAL)
+    def test_threads_dropped_to_fit(self, caplog, tool, args):
+        caplog.set_level(logging.INFO)
+        threads = _long_threads(n=5, chunks=1, size=300)
+        for t in threads:
+            t.subject = f"{_MARKER} " + "h" * 600
+            t.participants = [f"{_MARKER} " + "h" * 600] * 3
+        llm = FakeInferenceClient(response="not json")
+        asyncio.run(_tools(_StubDb(threads), llm, _SMALL, experimental=True)[tool](**args))
+        line = _one_limit_line(caplog)
+        assert line["limits"] == ["evidence_budget"]
+        assert line["counts"]["threads_dropped"] > 0
+        assert _MARKER not in caplog.text
+
+    @pytest.mark.parametrize(("tool", "args"), _EXPERIMENTAL)
+    def test_window_cut_and_reply_cut_share_one_line(self, caplog, tool, args):
+        caplog.set_level(logging.INFO)
+        llm = FakeInferenceClient(complete_responses=[InferenceTruncatedError(partial="{")])
+        asyncio.run(_tools(_StubDb(_long_threads()), llm, _SMALL, experimental=True)[tool](**args))
+        line = _one_limit_line(caplog)
+        assert line["limits"] == ["evidence_budget", "output_max_tokens"]
+        assert line["counts"]["outputs_cut"] == 1
+
+    @pytest.mark.parametrize(("tool", "args"), _EXPERIMENTAL)
+    def test_calls_within_every_limit_log_no_warning(self, caplog, tool, args):
+        caplog.set_level(logging.INFO)
+        llm = FakeInferenceClient(response=f"{_MARKER} not json")
+        out = asyncio.run(_tools(_StubDb(_short_threads()), llm, experimental=True)[tool](**args))
+        assert out.structured_content["truncation_reason"] is None
+        assert _limit_lines(caplog) == []
+        assert not [k for k in _one_line(caplog)["counts"] if k.startswith("token_limit_")]
+        assert _MARKER not in caplog.text
