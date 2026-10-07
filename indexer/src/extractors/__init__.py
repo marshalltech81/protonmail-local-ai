@@ -345,7 +345,7 @@ class ExtractionResult:
 # carry no version and are re-queued by that sweep.
 EXTRACTOR_VERSIONS: dict[str, int] = {
     "doc": 1,
-    "docx": 6,
+    "docx": 5,
     "image": 3,
     "pdf": 5,
     "ppt": 1,

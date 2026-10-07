@@ -749,14 +749,14 @@ class TestDocxExtractor:
             filename="v.docx",
             payload=self._save(document),
         )
-        assert result.extractor == "docx@6"
+        assert result.extractor == "docx@5"
 
     def test_docx_version_2_rows_are_stale(self):
         # docx@2 missed first-page and even-page headers/footers (#299).
         from src import extractors
 
         assert extractors.stale_extractor_module("docx@2") == "docx"
-        assert extractors.stale_extractor_module("docx@6") is None
+        assert extractors.stale_extractor_module("docx@5") is None
 
     def test_versions_are_keyed_by_dispatch_module(self, monkeypatch):
         """The image module records ``image-ocr`` and the PDF module
@@ -3653,18 +3653,19 @@ class TestPermanentFailuresAreUnsupported:
         assert PPTX_PACKAGE_BUDGET_ERROR == "presentation exceeds a pre-open package budget"
         assert DOCX_PACKAGE_BUDGET_ERROR == "document exceeds a pre-open package budget"
 
-    def test_pptx_and_docx_versions_bumped_so_failed_budget_rows_refresh(self):
-        """#1032: the ``failed`` rows the previous versions wrote for a
-        package over a budget are stale, so the startup sweep re-runs
-        them once and they are recorded ``unsupported``."""
+    def test_pptx_version_bumped_so_failed_budget_rows_refresh(self):
+        """#1032: the ``failed`` rows ``pptx@2`` wrote for a deck over a
+        budget are stale, so the startup sweep re-runs them once and they
+        are recorded ``unsupported``. The PPTX walk is budgeted (#936), so
+        the re-run is bounded. ``docx`` is deliberately not bumped: see
+        ``TestDocxPackageBudget.test_package_budgets_do_not_make_cached_rows_stale``."""
         from src.extractors import EXTRACTOR_VERSIONS, stale_extractor_module
 
         assert EXTRACTOR_VERSIONS["pptx"] == 3
-        assert EXTRACTOR_VERSIONS["docx"] == 6
+        assert EXTRACTOR_VERSIONS["docx"] == 5
         assert stale_extractor_module("pptx@2") == "pptx"
-        assert stale_extractor_module("docx@5") == "docx"
         assert stale_extractor_module("pptx@3") is None
-        assert stale_extractor_module("docx@6") is None
+        assert stale_extractor_module("docx@5") is None
 
     def test_a_page_level_pypdf_limit_keeps_the_other_pages(self, monkeypatch):
         """Review round 1: a limit hit inside one page's text extraction
@@ -5346,7 +5347,7 @@ class TestWordTemplates:
 
         assert EXTRACTOR_VERSIONS["docx"] >= 5
         assert stale_extractor_module("docx@4") == "docx"
-        assert stale_extractor_module("docx@6") is None
+        assert stale_extractor_module("docx@5") is None
 
 
 _DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -5640,16 +5641,19 @@ class TestDocxPackageBudget:
         assert docx_extractor.extract(payload) == (_DOCX_BUDGET_MARKER, "docx")
         assert time.perf_counter() - started < 5.0
 
-    def test_package_budgets_make_version_5_rows_stale(self):
-        """#1036 shipped the budgets with no ``docx`` bump; #1032 bumps it
-        so the ``failed`` rows version 5 wrote for an over-budget package
-        are refreshed once to ``unsupported`` (the sweep re-runs only
-        stale rows, never aged ``failed`` ones)."""
+    def test_package_budgets_do_not_make_cached_rows_stale(self):
+        """#1036 (review round 1) shipped the budgets with no ``docx``
+        bump, and the #1032 permanent-failure mapping keeps it: a bump
+        would re-run every cached document through the walk after the
+        open, which has no budget yet (#1031), and re-record an
+        over-budget document read in full before the budgets as
+        ``unsupported``. The few ``failed`` package-budget rows version 5
+        wrote stay ``failed`` (retried weekly) until #1031 lands and a
+        deliberate bump follows."""
         from src.extractors import EXTRACTOR_VERSIONS, stale_extractor_module
 
-        assert EXTRACTOR_VERSIONS["docx"] == 6
-        assert stale_extractor_module("docx@5") == "docx"
-        assert stale_extractor_module("docx@6") is None
+        assert EXTRACTOR_VERSIONS["docx"] == 5
+        assert stale_extractor_module("docx@5") is None
 
     def test_long_chain_still_fails_as_a_chain_under_the_budgets(self):
         """#968's behaviour holds: a chain under the package budgets still
