@@ -26,13 +26,14 @@ The baseline's capped results are therefore not production behaviour.
 ``check_capped_attachments`` fails the build if any other attachment is
 cut by them.
 
-The OCR shapes (t90, t91, #908) run Tesseract and Poppler, so the build
-needs ``tesseract``, ``pdftoppm`` and ``pdfinfo`` on ``PATH`` (macOS:
-``brew install tesseract poppler``) and fails naming the missing one, rather than
-recording the shapes as failed or OCR-disabled. It forces OCR on
-(``INDEXER_OCR_ENABLED``) and lowers ``INDEXER_OCR_MAX_PAGES`` to
-``CAPPED_OCR_MAX_PAGES`` (2; production default 20), so t91's
-three-page scan has a page past the cap.
+The OCR shapes (t90-t92, #908, #1113) run Tesseract and Poppler, so the
+build needs ``tesseract``, ``pdftoppm`` and ``pdfinfo`` on ``PATH``
+(macOS: ``brew install tesseract poppler``) and fails naming the missing
+one, rather than recording the shapes as failed or OCR-disabled. It
+forces OCR on (``INDEXER_OCR_ENABLED``) and lowers
+``INDEXER_OCR_MAX_PAGES`` to ``CAPPED_OCR_MAX_PAGES`` (2; production
+default 20), so t91's three-page scan has a page past the cap and t92's
+three-frame TIFF a frame past it.
 """
 
 import json
@@ -70,11 +71,11 @@ OCR_BINARIES = ("tesseract", "pdftoppm", "pdfinfo")
 def require_ocr_binaries() -> None:
     """Raise ``RuntimeError`` naming the first OCR binary missing from
     ``PATH``, so a build without it fails up front instead of recording
-    t90 and t91 as failed extractions."""
+    t90-t92 as failed extractions."""
     for binary in OCR_BINARIES:
         if shutil.which(binary) is None:
             raise RuntimeError(
-                f"the baseline's OCR shapes (t90, t91) need {binary} on PATH; install"
+                f"the baseline's OCR shapes (t90-t92) need {binary} on PATH; install"
                 " Tesseract and Poppler (macOS: brew install tesseract poppler;"
                 " Debian/Ubuntu: apt-get install tesseract-ocr poppler-utils)"
             )
@@ -149,7 +150,8 @@ def build(out_dir: Path, golden_path: Path, cases_path: Path | None = None) -> d
                 main, "INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS", CAPPED_ATTACHMENT_MAX_CHARS
             ),
             # OCR on whatever the environment says, and t91's scan one
-            # page past the cap (#908).
+            # page past the cap (#908) and t92's TIFF one frame past it
+            # (#1113).
             patch.object(main, "INDEXER_OCR_ENABLED", True),
             patch.object(main, "INDEXER_OCR_MAX_PAGES", CAPPED_OCR_MAX_PAGES),
         ):

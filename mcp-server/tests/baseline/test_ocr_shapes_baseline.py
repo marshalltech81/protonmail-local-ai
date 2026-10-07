@@ -1,7 +1,7 @@
-"""OCR shapes against the built baseline (#908).
+"""OCR shapes against the built baseline (#908, #1113).
 
-Two attachments the indexer reads with Tesseract, pinned on the
-synthetic corpus (``indexer/tests/baseline/corpus.py``, threads 90-91;
+Three attachments the indexer reads with Tesseract, pinned on the
+synthetic corpus (``indexer/tests/baseline/corpus.py``, threads 90-92;
 the images are the committed fixtures under
 ``indexer/tests/baseline/fixtures/``):
 
@@ -13,7 +13,12 @@ the images are the committed fixtures under
   production default): the pages within the cap are found, and the
   last page's words are a known loss recorded in
   ``tests/eval/outstanding_items.json`` ``corpus_evidence`` (layers
-  measured by ``test_outstanding_items_baseline.py``).
+  measured by ``test_outstanding_items_baseline.py``);
+- t92: a multipage TIFF (one image frame per page) with one frame more
+  than the same cap, read frame by frame by the image OCR extractor
+  (#885 logs the frame left unread): the frames within the cap are
+  found, and the last frame's words are a known loss recorded the same
+  way.
 
 Three Tesseract versions are in play (Homebrew, Ubuntu's apt, the
 image), so the OCR'd words are matched case-insensitively with
@@ -44,11 +49,14 @@ from tests.conftest import FakeMCPServer
 pytestmark = pytest.mark.baseline
 
 _DOMAIN = "@baseline.example"
-# The fixtures' text, as the corpus states it (``OCR_IMAGE_TEXT`` and
-# ``OCR_PDF_PAGES`` in indexer/tests/baseline/corpus.py).
+# The fixtures' text, as the corpus states it (``OCR_IMAGE_TEXT``,
+# ``OCR_PDF_PAGES`` and ``OCR_TIFF_FRAMES`` in
+# indexer/tests/baseline/corpus.py).
 CHALKBOARD_TEXT = "GANNET QUAY POTTERY"
 READ_PAGES = ("PLOVER CREEK REGATTA", "CORMORANT CUP RESULTS")
 LOST_PAGE = "CURLEW PAVILION SUPPER"
+READ_FRAMES = ("SANDERLING WHARF CENSUS", "TURNSTONE INLET MUSTER")
+LOST_FRAME = "WHIMBREL JETTY PENNANT"
 
 
 def _mid(ref: str) -> str:
@@ -131,3 +139,31 @@ def test_capped_scanned_pdf_page_past_the_cap_is_in_no_tool(tools: dict) -> None
     assert chunks and not any("curlew" in _norm(c) for c in chunks)
     assert _norm(LOST_PAGE).split()[0] == "curlew"
     assert _call(tools, "query_messages", text="curlew", limit=100)["messages"] == []
+
+
+def test_capped_tiff_is_found_by_the_frames_within_the_cap(tools: dict) -> None:
+    """#1113: the image OCR extractor reads the TIFF frame by frame up to
+    the cap; the words of those frames reach the attachment index and
+    the evidence chunks."""
+    (hit,) = _call(tools, "search_attachments", query="sanderling wharf")["results"]
+    assert hit["message_id"] == _mid("t92.1")
+    assert (hit["filename"], hit["content_type"]) == ("headland-fax.tiff", "image/tiff")
+    assert hit["extraction_status"] == "success"
+    chunks = _attachment_chunks(tools, "sanderling wharf census", "t92.1")
+    assert chunks
+    for frame in READ_FRAMES:
+        assert any(_norm(frame) in _norm(c) for c in chunks), frame
+
+
+def test_capped_tiff_frame_past_the_cap_is_in_no_tool(tools: dict) -> None:
+    """The last frame is the recorded known loss (#885 logs it on the
+    indexer side): its words reach neither the attachment index nor the
+    evidence chunks nor any body tool."""
+    assert _call(tools, "search_attachments", query="whimbrel")["results"] == []
+    chunks = _attachment_chunks(tools, "whimbrel jetty", "t92.1")
+    assert chunks and not any("whimbrel" in _norm(c) for c in chunks)
+    assert _norm(LOST_FRAME).split()[0] == "whimbrel"
+    assert _call(tools, "query_messages", text="whimbrel", limit=100)["messages"] == []
+    message = _call(tools, "get_message", message_id=_mid("t92.1"))
+    assert "sanderling" not in message["body"].casefold()
+    assert "whimbrel" not in message["body"].casefold()
