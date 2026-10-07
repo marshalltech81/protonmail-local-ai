@@ -29,9 +29,12 @@ COPY src/ ./src/
 # -----------------------------------------------------------------------------
 FROM python:3.14-slim-trixie@sha256:c3e521df8b2b498a7a682e7e18676771cb80c6b75b8699af886b2d554ce40151
 
+# The service runs from the uv-built virtualenv, which has no pip, so the
+# base image's pip (and the packages it vendors) is removed (#1007).
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
- && rm -rf /var/lib/apt/lists/*
+ && rm -rf /var/lib/apt/lists/* \
+ && python -m pip uninstall --yes --no-cache-dir pip
 
 RUN groupadd --gid 1003 mcp && \
     useradd --uid 1003 \
