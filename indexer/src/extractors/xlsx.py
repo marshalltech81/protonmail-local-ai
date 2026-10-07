@@ -51,7 +51,8 @@ table, ``[Content_Types].xml``, the workbook, styles and the rest; see
 ``_MAX_EAGER_BYTES``) are a fourth dimension, bounded before any of
 them is read (#428): ``_check_eager_parts`` finds each the way openpyxl
 does and charges its declared size, and a workbook over a cap fails
-with ``XlsxEagerPartBudgetError``. No text is kept then: a part loaded
+with ``XlsxEagerPartBudgetError``, which the dispatcher records as
+``unsupported`` (#931). No text is kept then: a part loaded
 whole cannot be cut the way a worksheet is. The bytes of a worksheet,
 as opposed to its nodes, are bounded by the dispatcher's zip cap.
 """
@@ -198,7 +199,8 @@ def extract(
 class XlsxEagerPartBudgetError(Exception):
     """A part openpyxl loads whole is over its cap, or the parts it loads
     whole are over the workbook's budget (#428). Fixed text: the
-    dispatcher records the type name as a ``failed`` extraction."""
+    dispatcher records it as ``unsupported`` with its own fixed text,
+    since the same bytes always trip the same budget (#931)."""
 
     def __init__(self) -> None:
         super().__init__("xlsx part openpyxl loads whole is over budget")

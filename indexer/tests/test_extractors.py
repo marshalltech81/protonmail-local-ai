@@ -302,7 +302,7 @@ class TestFailedOutcomesAreLogged:
 
         assert result == ExtractionResult(
             status=STATUS_FAILED,
-            extractor="xlsx@5",
+            extractor="xlsx@6",
             text=None,
             error="zip member declares 300 uncompressed bytes (cap 4)",
         )
@@ -962,10 +962,10 @@ class TestXlsxSharedStringBudget:
             filename="book.xlsx",
             payload=_xlsx_bytes([["versioned"]]),
         )
-        assert result.extractor == "xlsx@5"
+        assert result.extractor == "xlsx@6"
         assert extractors.stale_extractor_module("xlsx") == "xlsx"
-        assert extractors.stale_extractor_module("xlsx@3") == "xlsx"
-        assert extractors.stale_extractor_module("xlsx@5") is None
+        assert extractors.stale_extractor_module("xlsx@5") == "xlsx"
+        assert extractors.stale_extractor_module("xlsx@6") is None
 
 
 def _titled_xlsx(sheets: list[tuple[str, list[list[object]]]]) -> bytes:
@@ -2026,13 +2026,16 @@ class TestXlsxEagerPartBudget:
         )
 
     def _assert_rejected(self, payload: bytes, monkeypatch) -> _MemberReads:
+        from src.extractors import XLSX_EAGER_BUDGET_ERROR as xlsx_budget_error
         from src.extractors import xlsx
 
         loads, readers = self._openpyxl_calls(monkeypatch)
         reads = _MemberReads(monkeypatch)
         result = extract(content_type=self._XLSX, filename="book.xlsx", payload=payload)
-        assert result.status == STATUS_FAILED
-        assert result.error == "XlsxEagerPartBudgetError"
+        # #931: the budget is fixed, so the same bytes always trip it.
+        assert result.status == STATUS_UNSUPPORTED
+        assert result.error == xlsx_budget_error == "workbook exceeds the eager-part budget"
+        assert result.extractor == "xlsx@6"
         assert result.text is None
         # Rejected before openpyxl, or the pre-pass, opened the workbook,
         # and with no more read than the budget allows.
@@ -2533,7 +2536,7 @@ class TestPdfDigitalExtractor:
         )
 
         assert result.status == STATUS_FAILED
-        assert result.extractor == "pdf@4"
+        assert result.extractor == "pdf@5"
         assert result.text is None
         assert result.error == "RuntimeError"
 
@@ -3014,7 +3017,7 @@ class TestPdfPageLevelOcr:
         work = self._fake_ocr(monkeypatch, tmp_path)
         result = self._extract("ds")
         assert result.status == STATUS_SUCCESS
-        assert result.extractor == "pdf-ocr@4"
+        assert result.extractor == "pdf-ocr@5"
         assert result.text is not None
         assert self.DIGITAL.format(n=1) in result.text
         assert self.SCANNED in result.text
@@ -3056,7 +3059,7 @@ class TestPdfPageLevelOcr:
             max_ocr_pages=5,
         )
         assert result.status == STATUS_SUCCESS
-        assert result.extractor == "pdf-ocr@4"
+        assert result.extractor == "pdf-ocr@5"
         assert result.text is not None
         assert [f"{self.SCANNED} {n}" in result.text for n in range(1, 7)] == [True] * 5 + [False]
         [record] = [r for r in caplog.records if "OCR capped" in r.getMessage()]
@@ -3100,13 +3103,13 @@ class TestPdfPageLevelOcr:
         [
             # OCR off: a mixed PDF returns its digital text before OCR
             # could read the failed page.
-            ("dd", {1}, False, 20, True, "pdf-digital@4", 1),
+            ("dd", {1}, False, 20, True, "pdf-digital@5", 1),
             # OCR on: the failed page is OCR'd and its text recovered.
-            ("dd", {1}, True, 20, True, "pdf-ocr@4", 0),
+            ("dd", {1}, True, 20, True, "pdf-ocr@5", 0),
             # OCR on but it reads no text on the failed page.
-            ("dd", {1}, True, 20, False, "pdf-digital@4", 1),
+            ("dd", {1}, True, 20, False, "pdf-digital@5", 1),
             # The OCR cap leaves the failed page unread.
-            ("dsss", {3}, True, 1, True, "pdf-ocr@4", 1),
+            ("dsss", {3}, True, 1, True, "pdf-ocr@5", 1),
         ],
     )
     def test_pdf_pages_unrecovered(
@@ -3167,7 +3170,7 @@ class TestPdfPageLevelOcr:
         monkeypatch.setattr(extractors._LINE_BUDGET, "limit", 2)
         extractors.drain_extractor_counts()
         results = [self._extract("d" + "s" * 30, max_ocr_pages=5) for _ in range(5)]
-        assert {(r.status, r.extractor) for r in results} == {(STATUS_SUCCESS, "pdf-ocr@4")}
+        assert {(r.status, r.extractor) for r in results} == {(STATUS_SUCCESS, "pdf-ocr@5")}
         lines = [r for r in caplog.records if "OCR capped" in r.getMessage()]
         assert [r.levelname for r in lines] == ["WARNING", "WARNING"]
         assert extractors.drain_extractor_counts() == {
@@ -3203,13 +3206,13 @@ class TestPdfPageLevelOcr:
     def test_digital_pdf_renders_nothing(self, monkeypatch, tmp_path):
         work = self._fake_ocr(monkeypatch, tmp_path)
         result = self._extract("dd")
-        assert result.extractor == "pdf-digital@4"
+        assert result.extractor == "pdf-digital@5"
         assert work["renders"] == [] and work["ocr_calls"] == 0
 
     def test_scanned_pdf_still_ocrs_every_page_within_the_cap(self, monkeypatch, tmp_path):
         work = self._fake_ocr(monkeypatch, tmp_path)
         result = self._extract("sss")
-        assert result.extractor == "pdf-ocr@4"
+        assert result.extractor == "pdf-ocr@5"
         assert work["renders"] == [(1, 3)]
         assert work["ocr_calls"] == 3
 
@@ -3217,7 +3220,7 @@ class TestPdfPageLevelOcr:
         work = self._fake_ocr(monkeypatch, tmp_path)
         result = self._extract("ds", ocr_enabled=False)
         assert result.status == STATUS_SUCCESS
-        assert result.extractor == "pdf-digital@4"
+        assert result.extractor == "pdf-digital@5"
         assert work["renders"] == [] and work["ocr_calls"] == 0
 
     def test_ocr_failure_on_a_mixed_pdf_keeps_the_digital_text(self, monkeypatch, tmp_path, caplog):
@@ -3227,7 +3230,7 @@ class TestPdfPageLevelOcr:
         self._fake_ocr(monkeypatch, tmp_path, fail=True)
         result = self._extract("ds")
         assert result.status == STATUS_SUCCESS
-        assert result.extractor == "pdf-digital@4"
+        assert result.extractor == "pdf-digital@5"
         assert result.text == self.DIGITAL.format(n=1)
         assert "RuntimeError" in caplog.text
         assert "SYNTHETIC_OCR_MARKER" not in caplog.text
@@ -3363,7 +3366,7 @@ class TestPdfPageLevelOcr:
 
     @pytest.mark.parametrize(
         ("layout", "status", "extractor"),
-        [("ds", STATUS_SUCCESS, "pdf-digital@4"), ("ss", STATUS_FAILED, "pdf@4")],
+        [("ds", STATUS_SUCCESS, "pdf-digital@5"), ("ss", STATUS_FAILED, "pdf@5")],
     )
     def test_slow_page_count_degrades_like_a_timeout(
         self, monkeypatch, tmp_path, layout, status, extractor
@@ -3390,7 +3393,7 @@ class TestPdfPageLevelOcr:
 
     @pytest.mark.parametrize(
         ("layout", "status", "extractor"),
-        [("ds", STATUS_SUCCESS, "pdf-digital@4"), ("ss", STATUS_FAILED, "pdf@4")],
+        [("ds", STATUS_SUCCESS, "pdf-digital@5"), ("ss", STATUS_FAILED, "pdf@5")],
     )
     def test_page_count_timeout_degrades_like_a_render_timeout(
         self, monkeypatch, tmp_path, layout, status, extractor
@@ -3462,9 +3465,10 @@ class TestPdfPageLevelOcr:
 class TestPdfExtractorVersion:
     """#292 changed what the PDF extractor returns for the same bytes,
     #691 makes AES-encrypted PDFs that need no open password extract
-    instead of failing, and #707 stops caching a success with pages
-    dropped by host pressure, so rows written before any of them must
-    re-extract."""
+    instead of failing, #707 stops caching a success with pages
+    dropped by host pressure, and #931 records a PDF that needs an open
+    password or exceeds pypdf's limits ``unsupported``, so rows written
+    before any of them must re-extract."""
 
     @pytest.mark.parametrize(
         "name",
@@ -3478,15 +3482,18 @@ class TestPdfExtractorVersion:
             "pdf-digital@3",
             "pdf-ocr@3",
             "pdf@3",
+            "pdf-digital@4",
+            "pdf-ocr@4",
+            "pdf@4",
         ],
     )
     def test_pre_bump_pdf_rows_are_stale(self, name):
         from src.extractors import EXTRACTOR_VERSIONS, stale_extractor_module
 
-        assert EXTRACTOR_VERSIONS["pdf"] == 4
+        assert EXTRACTOR_VERSIONS["pdf"] == 5
         assert stale_extractor_module(name) == "pdf"
 
-    @pytest.mark.parametrize("name", ["pdf-digital@4", "pdf-ocr@4", "pdf@4"])
+    @pytest.mark.parametrize("name", ["pdf-digital@5", "pdf-ocr@5", "pdf@5"])
     def test_current_pdf_rows_are_not_stale(self, name):
         from src.extractors import stale_extractor_module
 
@@ -3527,6 +3534,167 @@ def _encrypted_pdf(text: str, *, user_password: str, algorithm: str) -> bytes:
     return buf.getvalue()
 
 
+def _deep_page_tree_pdf(marker: str = "SYNTHETIC_DEEP_TREE_MARKER") -> bytes:
+    """A one-page PDF whose page sits under more nested ``/Pages`` nodes
+    than pypdf's ``page_tree_maximum_depth`` allows, so reading its pages
+    raises ``LimitReachedError`` (#931). ``marker`` is the title, so a
+    test can check it never reaches a log."""
+    import io
+
+    from pypdf import PdfWriter
+    from pypdf.generic import ArrayObject, DictionaryObject, NameObject, NumberObject
+
+    writer = PdfWriter()
+    writer.add_blank_page(width=100, height=100)
+    writer.add_metadata({"/Title": marker})
+    pages = writer.root_object["/Pages"]
+    kid = pages["/Kids"][0]
+    # pypdf 6's limit is 100 levels.
+    for _ in range(150):
+        node = DictionaryObject(
+            {
+                NameObject("/Type"): NameObject("/Pages"),
+                NameObject("/Kids"): ArrayObject([kid]),
+                NameObject("/Count"): NumberObject(1),
+            }
+        )
+        kid = writer._add_object(node)
+    pages[NameObject("/Kids")] = ArrayObject([kid])
+    buf = io.BytesIO()
+    writer.write(buf)
+    return buf.getvalue()
+
+
+class TestPermanentFailuresAreUnsupported:
+    """#931: an extractor exception the same bytes always repeat is
+    recorded ``unsupported`` with a fixed text per type, stamped with the
+    extractor so a later version bump still refreshes it. Matched by
+    exact class: anything else, a subclass included, stays ``failed``."""
+
+    def test_pdf_over_a_pypdf_limit_is_unsupported(self, monkeypatch, caplog):
+        import io
+
+        import pypdf
+        from src.extractors import PDF_LIMIT_ERROR, pdf
+
+        caplog.set_level("DEBUG")
+        monkeypatch.setattr(pdf, "_extract_ocr", lambda *a, **kw: pytest.fail("OCR must not run"))
+        payload = _deep_page_tree_pdf()
+        with pytest.raises(pypdf.errors.LimitReachedError):
+            list(pypdf.PdfReader(io.BytesIO(payload)).pages)
+
+        result = extract(
+            content_type="application/pdf",
+            filename="SYNTHETIC_FILENAME_MARKER.pdf",
+            payload=payload,
+        )
+
+        assert result == ExtractionResult(
+            status=STATUS_UNSUPPORTED, extractor="pdf@5", text=None, error=PDF_LIMIT_ERROR
+        )
+        assert PDF_LIMIT_ERROR == "PDF structure exceeds pypdf limits"
+        [record] = [r for r in caplog.records if r.name == "indexer.extractor"]
+        assert record.levelname == "WARNING"
+        assert record.getMessage() == (
+            "extractor pdf declined (dispatch_via=mime): PDF structure exceeds pypdf "
+            "limits; recorded unsupported, not retried"
+        )
+        for marker in ("SYNTHETIC_DEEP_TREE_MARKER", "SYNTHETIC_FILENAME_MARKER"):
+            assert marker not in caplog.text
+
+    def test_a_page_level_pypdf_limit_keeps_the_other_pages(self, monkeypatch):
+        """Review round 1: a limit hit inside one page's text extraction
+        (``/ToUnicode`` size, for example) is a per-page failure, as
+        before: the page is counted in ``pdf_pages_failed`` (and OCR'd when
+        OCR is on) and the other pages' text is kept, rather than the
+        whole document being recorded ``unsupported``."""
+        from pypdf.errors import LimitReachedError
+        from src import extractors
+        from src.extractors import pdf
+
+        good_text = "digital words " * 20
+
+        class LimitPage:
+            def extract_text(self):
+                raise LimitReachedError("SYNTHETIC_PYPDF_MARKER")
+
+        class GoodPage:
+            def extract_text(self):
+                return good_text
+
+        class FakeReader:
+            def __init__(self, stream):
+                self.pages = [LimitPage(), GoodPage()]
+
+        monkeypatch.setattr(pdf.pypdf, "PdfReader", FakeReader)
+        extractors.drain_extractor_counts()
+
+        result = extract(
+            content_type="application/pdf", filename="a.pdf", payload=b"%PDF-1.7", ocr_enabled=False
+        )
+
+        assert (result.status, result.extractor) == (STATUS_SUCCESS, "pdf-digital@5")
+        assert result.text == good_text.strip()
+        assert extractors.drain_extractor_counts()["pdf_pages_failed"] == 1
+
+    @pytest.mark.parametrize(
+        ("module_name", "exc_path"),
+        [
+            ("pdf", "pypdf.errors.PdfReadError"),
+            # A subclass of an allowlisted type is not matched.
+            ("pdf", "pypdf.errors.WrongPasswordError"),
+            # An allowlisted type from another extractor is not matched.
+            ("xlsx", "pypdf.errors.FileNotDecryptedError"),
+            ("pdf", "src.extractors.xlsx.XlsxEagerPartBudgetError"),
+            # The legacy extractors' subprocess errors (#935, #957): a timeout or
+            # a crash can be transient, so they stay ``failed`` for any
+            # module.
+            *(
+                (module, f"src.extractors._runner.{name}")
+                for module in ("doc", "xls", "ppt", "pdf", "xlsx")
+                for name in (
+                    "ToolNotFoundError",
+                    "ToolTimeoutError",
+                    "ToolCrashError",
+                    "ToolExitError",
+                )
+            ),
+        ],
+    )
+    def test_other_exceptions_stay_failed(self, monkeypatch, module_name, exc_path):
+        import importlib
+
+        module_path, _, name = exc_path.rpartition(".")
+        exc_type = getattr(importlib.import_module(module_path), name)
+
+        def boom(payload, **opts):
+            raise exc_type()
+
+        monkeypatch.setattr("src.extractors._safe_import", lambda module: boom)
+        filename = f"a.{module_name}"
+        # The XLSX path runs the zip pre-check first; give it a zip. A
+        # legacy label keeps its legacy extractor only for an OLE2 payload.
+        payload = b"x"
+        if module_name in {"doc", "xls", "ppt"}:
+            payload = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + bytes(64)
+        if module_name == "xlsx":
+            import io
+            import zipfile
+
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, "w") as archive:
+                archive.writestr("a", b"a")
+            payload = buf.getvalue()
+
+        result = extract(
+            content_type="application/octet-stream", filename=filename, payload=payload
+        )
+
+        assert result.status == STATUS_FAILED
+        assert result.error == name
+        assert (result.extractor or "").startswith(f"{module_name}@")
+
+
 class TestEncryptedPdf:
     """#691: pypdf needs ``cryptography`` for AES. An owner-password-only
     PDF opens with the empty user password and extracts like any other;
@@ -3546,12 +3714,15 @@ class TestEncryptedPdf:
         result = extract(content_type="application/pdf", filename="statement.pdf", payload=payload)
 
         assert result.status == STATUS_SUCCESS
-        assert result.extractor == "pdf-digital@4"
+        assert result.extractor == "pdf-digital@5"
         assert result.text == self.MARKER
 
     @pytest.mark.parametrize("algorithm", ["AES-128", "AES-256"])
-    def test_pdf_needing_an_open_password_fails_by_type(self, algorithm, monkeypatch, caplog):
-        from src.extractors import pdf
+    def test_pdf_needing_an_open_password_is_unsupported(self, algorithm, monkeypatch, caplog):
+        """#931: no password is ever tried, so the same bytes always fail
+        the same way: recorded ``unsupported`` with fixed text, not a
+        ``failed`` row re-run every 7 days."""
+        from src.extractors import ENCRYPTED_PDF_ERROR, pdf
 
         caplog.set_level("DEBUG")
         monkeypatch.setattr(pdf, "_extract_ocr", lambda *a, **kw: pytest.fail("OCR must not run"))
@@ -3563,9 +3734,9 @@ class TestEncryptedPdf:
 
         result = extract(content_type="application/pdf", filename="locked.pdf", payload=payload)
 
-        assert result.status == STATUS_FAILED
-        assert result.extractor == "pdf@4"
-        assert result.error == "FileNotDecryptedError"
+        assert result.status == STATUS_UNSUPPORTED
+        assert result.extractor == "pdf@5"
+        assert result.error == ENCRYPTED_PDF_ERROR == "encrypted PDF (open password required)"
         assert result.text is None
         for marker in ("SYNTHETIC_USER_PW_MARKER", "SYNTHETIC_USER_PASSWORD", "synthetic-owner"):
             assert marker not in caplog.text
@@ -3592,7 +3763,7 @@ class TestEncryptedPdf:
 
         result = extract(content_type="application/pdf", filename="locked.pdf", payload=payload)
 
-        assert result.status == STATUS_FAILED
+        assert result.status == STATUS_UNSUPPORTED
         assert opened == [{"args": ()}]
 
 
@@ -4834,10 +5005,9 @@ class TestLegacyOfficeLabels:
         from src.extractors import EXTRACTOR_VERSIONS, stale_extractor_module
 
         assert EXTRACTOR_VERSIONS["docx"] >= 4
-        assert EXTRACTOR_VERSIONS["xlsx"] == 5
+        assert EXTRACTOR_VERSIONS["xlsx"] >= 5
         assert stale_extractor_module("docx@3") == "docx"
         assert stale_extractor_module("xlsx@4") == "xlsx"
-        assert stale_extractor_module("xlsx@5") is None
 
 
 # Fixed binary signatures the text guard rejects (#932).
@@ -6191,7 +6361,10 @@ _REPORTED_CAPS = {
     "src.extractors.xls_child:_MAX_TEXT_CHARS": "xls_text_chars",
 }
 # ... or the reason it is not reported as an extractor cap.
-_WORKBOOK_FAILS = "fails the workbook (XlsxEagerPartBudgetError): a failed row, counted as failed="
+_WORKBOOK_FAILS = (
+    "fails the workbook (XlsxEagerPartBudgetError): an unsupported row (#931), "
+    "counted as unsupported="
+)
 _DECK_FAILS = (
     "fails the deck (PptxPackageBudgetError): a failed row with its rate-limited "
     "WARNING, counted as failed="
@@ -6232,6 +6405,14 @@ _UNREPORTED_CAPS = {
         "the child is killed (ToolCrashError): a failed row with its rate-limited WARNING, "
         "counted as failed="
     ),
+    "src.extractors.doc:CHILD_MAX_ADDRESS_SPACE_BYTES": (
+        "catdoc fails (ToolExitError): a failed row with its rate-limited WARNING, "
+        "counted as failed="
+    ),
+    "src.extractors.doc:CHILD_MAX_CPU_SECONDS": (
+        "catdoc is killed (ToolCrashError): a failed row with its rate-limited WARNING, "
+        "counted as failed="
+    ),
     "src.extractors.ppt:CHILD_MAX_ADDRESS_SPACE_BYTES": (
         "the JVM fails (ToolExitError): a failed row with its rate-limited WARNING, "
         "counted as failed="
@@ -6244,6 +6425,7 @@ _UNREPORTED_CAPS = {
 
 _EXTRACTOR_MODULES = (
     "src.extractors",
+    "src.extractors._launcher",
     "src.extractors._runner",
     "src.extractors.doc",
     "src.extractors.docx",
@@ -6251,7 +6433,6 @@ _EXTRACTOR_MODULES = (
     "src.extractors.image",
     "src.extractors.pdf",
     "src.extractors.ppt",
-    "src.extractors.ppt_launcher",
     "src.extractors.pptx",
     "src.extractors.text",
     "src.extractors.xls",

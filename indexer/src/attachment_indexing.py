@@ -44,6 +44,7 @@ from .extractors import (
     LEGACY_OLE2_ERROR,
     NON_OLE2_PPT_ERROR,
     OCR_DISABLED_ERROR,
+    PERMANENT_FAILURE_ERRORS,
     STATUS_EMPTY,
     STATUS_FAILED,
     STATUS_SUCCESS,
@@ -236,7 +237,10 @@ def _unsupported_still_holds(error: str | None, module: str, ocr_enabled: bool) 
     under an OOXML label, a "binary payload labelled as text" result, a
     "not an OLE2 compound file" result under the ``ppt`` label and the
     "no extractor" result are decided by the label and the bytes alone
-    (#694, #932, #957), so they hold for good. Any other result (an
+    (#694, #932, #957), so they hold for good. So do an encrypted PDF, a
+    PDF over a pypdf limit and a workbook over the eager-part budget: the
+    module that raised them would decline the same bytes again, and the
+    row is that module's own (#931). Any other result (an
     extractor not importable in this image) holds only while the
     occurrence selects no extractor.
     """
@@ -244,6 +248,8 @@ def _unsupported_still_holds(error: str | None, module: str, ocr_enabled: bool) 
     if "OCR disabled" in error:
         return not ocr_enabled
     if error in {LEGACY_OLE2_ERROR, BINARY_AS_TEXT_ERROR, NON_OLE2_PPT_ERROR}:
+        return True
+    if error in PERMANENT_FAILURE_ERRORS:
         return True
     return module == NO_EXTRACTOR_MODULE
 

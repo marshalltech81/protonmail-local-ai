@@ -6,9 +6,9 @@
 # -----------------------------------------------------------------------------
 # Stage 1: Builder — installs Python dependencies that require compilation
 # -----------------------------------------------------------------------------
-FROM python:3.14-slim-trixie@sha256:c3e521df8b2b498a7a682e7e18676771cb80c6b75b8699af886b2d554ce40151 AS builder
+FROM python:3.14-slim-trixie@sha256:f85c5697265c178cc6887276c55fe16cf3d14ca35c3df6a5eab3b360534a55d2 AS builder
 
-COPY --from=ghcr.io/astral-sh/uv:0.11.6@sha256:b1e699368d24c57cda93c338a57a8c5a119009ba809305cc8e86986d4a006754 /uv /uvx /bin/
+COPY --from=ghcr.io/astral-sh/uv:0.12.23@sha256:61d393e44e249f2e4b526b6c7ddcecce245946826e608e11c93ad4f5bba55b21 /uv /uvx /bin/
 
 ENV UV_PYTHON_DOWNLOADS=0 \
     UV_LINK_MODE=copy \
@@ -31,7 +31,7 @@ COPY src/ ./src/
 # runtime with only the modules POI needs. The result is /opt/ppt:
 # jre/ and lib/ (the jars).
 # -----------------------------------------------------------------------------
-FROM python:3.14-slim-trixie@sha256:c3e521df8b2b498a7a682e7e18676771cb80c6b75b8699af886b2d554ce40151 AS ppt-builder
+FROM python:3.14-slim-trixie@sha256:f85c5697265c178cc6887276c55fe16cf3d14ca35c3df6a5eab3b360534a55d2 AS ppt-builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     openjdk-21-jdk-headless \
@@ -58,7 +58,7 @@ COPY --from=ppt-builder /opt/ppt /opt/ppt
 # Stage 3: Runtime — no build toolchain
 # Runs as non-root user 'indexer' (UID 1002)
 # -----------------------------------------------------------------------------
-FROM python:3.14-slim-trixie@sha256:c3e521df8b2b498a7a682e7e18676771cb80c6b75b8699af886b2d554ce40151
+FROM python:3.14-slim-trixie@sha256:f85c5697265c178cc6887276c55fe16cf3d14ca35c3df6a5eab3b360534a55d2
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     # Attachment text extraction. Tesseract supplies the OCR
@@ -72,7 +72,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     tesseract-ocr \
     poppler-utils \
     catdoc \
- && rm -rf /var/lib/apt/lists/*
+ && rm -rf /var/lib/apt/lists/* \
+ # The service runs from the uv-built virtualenv, which has no pip, so
+ # the base image's pip (and the packages it vendors) is removed (#1007).
+ && python -m pip uninstall --yes --no-cache-dir pip
 
 # UID 1002 — distinct from mbsync (UID 1001) so a parser/extractor
 # exploit triggered by a malicious .eml or attachment doesn't end up

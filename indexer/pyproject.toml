@@ -12,7 +12,7 @@ dependencies = [
     # (LM Studio / vLLM / mlx_lm.server / TEI / DeepInfra / OpenRouter)
     # target the SDK as their reference client by design, so pointing
     # the SDK at them via ``base_url`` is the supported path.
-    "openai==3.24.0",
+    "openai==3.26.0",
     # Real BPE tokenizer for chunk-size estimation. Counting chunk tokens
     # with a char-count heuristic undercounts CJK / URL / Base64 / code
     # text by 4-6×, producing chunks that blow past the embed model's
@@ -44,6 +44,10 @@ dev = [
     # SDK); the runtime gets it transitively via openai.
     "httpx2==2.13.1",
     "mypy==2.4.0",
+    # Reads OLE2 SummaryInformation (Author, Last Saved By) in
+    # tests/test_fixture_authors.py (#980); no runtime dependency reads
+    # OLE2 property sets.
+    "olefile==0.47",
     "pytest==9.1.1",
     "pytest-cov==7.1.0",
 ]

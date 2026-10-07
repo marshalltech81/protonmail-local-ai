@@ -1144,10 +1144,7 @@ the model is told, in the prompt, so this log line is where it shows.
   the answer or summary was cut off (`outputs_cut` counts every cut
   reply, whatever stopped it; for `extract_from_emails`, the threads
   whose reply was lost). A reply cut before any text fails the call
-  with an error, and the line is still logged. When the repair reply
-  was the one cut, `prompt_tokens` is the repair prompt (for
-  `brief_issue` and `check_conclusion`, whenever a repair call was
-  made, cut or not). Raise
+  with an error, and the line is still logged. Raise
   `INFERENCE_MAX_TOKENS`. The reply reserve comes out of
   `INFERENCE_CONTEXT_TOKENS`, so raise that by the same amount if the
   model's window allows, or the prompt allowance shrinks.
@@ -1187,7 +1184,10 @@ the model is told, in the prompt, so this log line is where it shows.
 `prompt_tokens` is the estimated size of the prompt sent (the largest
 one for `extract_from_emails`; for it, `brief_issue` and
 `check_conclusion`, including the reply schema structured outputs
-add), counted at three characters per token.
+add), counted at three characters per token. For `ask_mailbox`,
+`summarize_thread`, `brief_issue` and `check_conclusion` it is the
+last prompt sent: the repair prompt whenever a repair call was made,
+whether or not its reply was cut (#984).
 
 The call's own `mcp.timings` line also carries a
 `token_limit_<limit>` count for each limit it hit, so the warning can
@@ -1216,8 +1216,8 @@ only, never filenames or text (`make logs`):
   PPTX that would decompress past its cap. For a legacy `.doc`,
   `.xls` or `.ppt` (#935, #957) the type names the tool's fate:
   `ToolTimeoutError`, `ToolCrashError` (killed by a signal, including
-  the `.xls` child's and the `.ppt` reader's CPU limit), `ToolExitError`
-  (an error, including the `.xls` child's memory limit, and any deck the
+  each tool's CPU limit), `ToolExitError` (an error, including each
+  tool's memory limit, and any deck the
   `.ppt` reader rejects or that needs more than its 128 MiB heap, such
   as a password-protected one), `ToolNotFoundError` (catdoc or the
   `.ppt` Java runtime missing from the image) or `XlsOutputError`.
@@ -1335,7 +1335,9 @@ only, never filenames or text (`make logs`):
     as `ToolTimeoutError` or `ToolExitError` (see `docs/architecture.md`,
     "Extractor dispatch"). Binary files (PDF, ZIP, OLE2, PNG, JPEG,
     GIF) sent as text are recorded with "binary payload labelled as
-    text" (#932). `too_large` is over
+    text" (#932). It also counts PDFs that need an open password or
+    exceed pypdf's limits, and workbooks over the XLSX eager-part budget,
+    which fail the same way every time (#931). `too_large` is over
     `INDEXER_ATTACHMENT_MAX_BYTES`, and `ocr_disabled` is an image or
     scanned PDF skipped while `INDEXER_OCR_ENABLED=false` (re-extracted
     once OCR is turned on).
