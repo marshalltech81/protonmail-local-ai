@@ -155,7 +155,7 @@ def _process_with_cached_extractor(
     )
     extractor = MagicMock(
         return_value=ExtractionResult(
-            status=STATUS_SUCCESS, extractor="docx@5", text="fresh text", error=None
+            status=STATUS_SUCCESS, extractor="docx@6", text="fresh text", error=None
         )
     )
     monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
@@ -185,7 +185,7 @@ def test_cache_row_from_an_older_extractor_version_is_re_extracted(tmp_path, mon
         db = _seed_thread_for_cache_test(tmp_path / status)
         extractor, row = _process_with_cached_extractor(db, "docx", status, text, monkeypatch)
         extractor.assert_called_once()
-        assert row["extractor"] == "docx@5"
+        assert row["extractor"] == "docx@6"
         assert row["extracted_text"] == "fresh text"
 
 
@@ -196,7 +196,7 @@ def test_cache_row_from_docx_version_2_is_re_extracted(tmp_path, monkeypatch):
         db = _seed_thread_for_cache_test(tmp_path / status)
         extractor, row = _process_with_cached_extractor(db, "docx@2", status, text, monkeypatch)
         extractor.assert_called_once()
-        assert row["extractor"] == "docx@5"
+        assert row["extractor"] == "docx@6"
         assert row["extracted_text"] == "fresh text"
 
 
@@ -267,7 +267,7 @@ def test_stale_ocr_row_is_served_while_ocr_is_off(tmp_path, monkeypatch):
 def test_cache_row_from_the_current_extractor_version_is_reused(tmp_path, monkeypatch):
     db = _seed_thread_for_cache_test(tmp_path)
     extractor, _ = _process_with_cached_extractor(
-        db, "docx@5", STATUS_SUCCESS, "cached text", monkeypatch
+        db, "docx@6", STATUS_SUCCESS, "cached text", monkeypatch
     )
     extractor.assert_not_called()
 
@@ -277,10 +277,10 @@ def test_cache_row_from_a_newer_extractor_version_is_reused(tmp_path, monkeypatc
     # downgraded by the older walker.
     db = _seed_thread_for_cache_test(tmp_path)
     extractor, row = _process_with_cached_extractor(
-        db, "docx@5", STATUS_SUCCESS, "newer text", monkeypatch
+        db, "docx@6", STATUS_SUCCESS, "newer text", monkeypatch
     )
     extractor.assert_not_called()
-    assert row["extractor"] == "docx@5"
+    assert row["extractor"] == "docx@6"
 
 
 def test_stale_row_is_left_to_the_occurrences_that_select_its_module(tmp_path, monkeypatch):
@@ -321,14 +321,14 @@ def test_reused_terminal_row_clears_the_stale_chunks(tmp_path, monkeypatch):
     it, so it must still drop the chunks its own stale extraction left."""
     db = _seed_thread_for_cache_test(tmp_path)
     attachment_id = hashlib.sha256(b"docx bytes").hexdigest()
-    _process_with_cached_extractor(db, "docx@5", STATUS_SUCCESS, "old text", monkeypatch)
+    _process_with_cached_extractor(db, "docx@6", STATUS_SUCCESS, "old text", monkeypatch)
     assert db.get_chunk_ids_for_message("message@example.com", attachment_id=attachment_id)
 
     db.store_attachment_extraction(
         attachment_id=attachment_id,
         extractor_module="docx",
         extraction_status=STATUS_EMPTY,
-        extractor="docx@5",
+        extractor="docx@6",
         extracted_text=None,
         extraction_error=None,
     )
@@ -357,14 +357,14 @@ def test_re_extraction_without_text_clears_the_stale_chunks(tmp_path, monkeypatc
     later sweep would repair it."""
     db = _seed_thread_for_cache_test(tmp_path)
     attachment_id = hashlib.sha256(b"docx bytes").hexdigest()
-    _process_with_cached_extractor(db, "docx@5", STATUS_SUCCESS, "old text", monkeypatch)
+    _process_with_cached_extractor(db, "docx@6", STATUS_SUCCESS, "old text", monkeypatch)
     assert db.get_chunk_ids_for_message("message@example.com", attachment_id=attachment_id)
 
     with db.transaction():
         db._conn.execute("UPDATE attachment_extractions SET extractor = 'docx'")
     extractor = MagicMock(
         return_value=ExtractionResult(
-            status=STATUS_EMPTY, extractor="docx@5", text=None, error=None
+            status=STATUS_EMPTY, extractor="docx@6", text=None, error=None
         )
     )
     monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
@@ -1976,24 +1976,32 @@ def test_cached_no_extractor_row_for_a_dotx_is_re_extracted(tmp_path):
         assert (plan.status, plan.cached) == (STATUS_SUCCESS, False)
         persisted = plan.extraction_to_persist
         assert persisted is not None
-        assert (persisted.status, persisted.extractor) == (STATUS_SUCCESS, "docx@5")
+        assert (persisted.status, persisted.extractor) == (STATUS_SUCCESS, "docx@6")
         assert persisted.text is not None and "SYNTHETIC_DOTX_FACT" in persisted.text
 
 
-@pytest.mark.parametrize("variant", ["ppsx", "potx", "pptm"])
+@pytest.mark.parametrize("variant", ["ppsx", "potx", "pptm", "ppsm", "potm"])
 def test_cached_no_extractor_row_for_a_powerpoint_variant_is_re_extracted(tmp_path, variant):
-    """#947: a slideshow, template or macro-enabled deck cached
-    ``unsupported`` (no extractor) before it was routed is re-queued by the
-    startup sweep and re-extracted through the real dispatcher; its chunks
-    carry a fact that appears only in the attachment."""
+    """#947, #1042: a slideshow, template or macro-enabled deck, slideshow
+    or template cached ``unsupported`` (no extractor) before it was routed
+    is re-queued by the startup sweep and re-extracted through the real
+    dispatcher; its chunks carry a fact that appears only in the
+    attachment."""
     from src.attachment_indexing import reprocess_reruns_extraction
 
-    from tests.test_extractors import _PPTX_VARIANTS, _boxes, _deck, _macro_deck, _retyped_deck
+    from tests.test_extractors import (
+        _MACRO_VARIANTS,
+        _PPTX_VARIANTS,
+        _boxes,
+        _deck,
+        _macro_deck,
+        _retyped_deck,
+    )
 
     mime, ext, main_type = _PPTX_VARIANTS[variant]
     fact = "SYNTHETIC_DECK_ONLY_FACT"
-    if variant == "pptm":
-        payload = _macro_deck(fact)
+    if variant in _MACRO_VARIANTS:
+        payload = _macro_deck(fact, main_type)
     else:
         payload = _retyped_deck(main_type, _deck(_boxes(fact)))
     for content_type, filename in ((mime, "a.bin"), ("application/octet-stream", f"a{ext}")):
@@ -2014,7 +2022,7 @@ def test_cached_no_extractor_row_for_a_powerpoint_variant_is_re_extracted(tmp_pa
         assert persisted is not None
         assert (persisted.status, persisted.extractor, persisted.text) == (
             STATUS_SUCCESS,
-            "pptx@2",
+            "pptx@3",
             fact,
         )
         assert [chunk.text for chunk in plan.chunks if fact in chunk.text]
@@ -2055,12 +2063,34 @@ def _xlsx_budget_case(monkeypatch) -> tuple[bytes, str, str]:
     return _zip_parts(parts), XLSX_EAGER_BUDGET_ERROR, "xlsx@6"
 
 
+def _pptx_budget_case(monkeypatch) -> tuple[bytes, str, str]:
+    """A deck over a lowered PPTX pre-open member budget (#1032)."""
+    from src.extractors import PPTX_PACKAGE_BUDGET_ERROR, pptx
+
+    from tests.test_extractors import _boxes, _deck
+
+    monkeypatch.setattr(pptx, "_MAX_MEMBERS", 1)
+    return _deck(_boxes("SYNTHETIC_TEXT_MARKER")), PPTX_PACKAGE_BUDGET_ERROR, "pptx@3"
+
+
+def _docx_budget_case(monkeypatch) -> tuple[bytes, str, str]:
+    """A document over a lowered DOCX pre-open member budget (#1032)."""
+    from src.extractors import DOCX_PACKAGE_BUDGET_ERROR, docx
+
+    from tests.test_extractors import _docx_bytes
+
+    monkeypatch.setattr(docx, "_MAX_MEMBERS", 1)
+    return _docx_bytes("SYNTHETIC_TEXT_MARKER"), DOCX_PACKAGE_BUDGET_ERROR, "docx@6"
+
+
 class TestPermanentFailureCacheRows:
     """#931: an encrypted PDF, a PDF over a pypdf limit and a workbook over
     the eager-part budget fail the same way in the same extractor, so they
     are cached ``unsupported`` under that extractor's module (#928) and
     served to every later occurrence that runs it, instead of a ``failed``
-    row the extractor re-runs every 7 days."""
+    row the extractor re-runs every 7 days. #1032 adds a deck and a
+    document over their pre-open package budgets, decided from the ZIP
+    central directory alone."""
 
     _CASES = {
         "encrypted-pdf": (_encrypted_pdf_case, "application/pdf", "locked.pdf", "pdf"),
@@ -2071,7 +2101,27 @@ class TestPermanentFailureCacheRows:
             "book.xlsx",
             "xlsx",
         ),
+        "pptx-package-budget": (
+            _pptx_budget_case,
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            "deck.pptx",
+            "pptx",
+        ),
+        "docx-package-budget": (
+            _docx_budget_case,
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "doc.docx",
+            "docx",
+        ),
     }
+
+    def test_every_permanent_error_has_a_case(self, monkeypatch):
+        """The cases cover ``PERMANENT_FAILURE_ERRORS`` exactly, so adding
+        an error to the mapping without a cache test here fails."""
+        from src.extractors import PERMANENT_FAILURE_ERRORS
+
+        covered = {build(monkeypatch)[1] for build, *_ in self._CASES.values()}
+        assert covered == set(PERMANENT_FAILURE_ERRORS)
 
     @staticmethod
     def _commit(db: Database, plan: Any) -> None:
@@ -2200,6 +2250,8 @@ class TestPermanentFailureCacheRows:
             ("encrypted-pdf", "pdf@4", "FileNotDecryptedError"),
             ("pdf-limit", "pdf@4", "LimitReachedError"),
             ("xlsx-eager-budget", "xlsx@5", "XlsxEagerPartBudgetError"),
+            ("pptx-package-budget", "pptx@2", "PptxPackageBudgetError"),
+            ("docx-package-budget", "docx@5", "DocxPackageBudgetError"),
         ],
     )
     def test_stale_failed_row_is_refreshed_to_unsupported_once(

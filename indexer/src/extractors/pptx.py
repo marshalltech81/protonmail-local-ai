@@ -10,15 +10,22 @@ line, separated by blank lines so the chunker has paragraph boundaries
 to pack on, as in the DOCX extractor.
 
 Slideshows (``.ppsx``), templates (``.potx``) and macro-enabled decks
-(``.pptm``) are read the same way (#947). ``pptx.Presentation`` refuses
-the slideshow and template main-part types ("not a PowerPoint file"),
-although python-pptx's own ``PartFactory`` already maps all three
-(``pptx/__init__.py``) to ``PresentationPart``. So the package is opened
-with ``Package.open`` and its main part used directly when it is one of
-the four presentation types. The payload bytes are not changed and
-nothing is registered. A macro-enabled deck's ``vbaProject.bin`` is
-loaded by python-pptx as an opaque part and never read: only slide and
-notes text is. This route depends on python-pptx 1.0.2's ``Package`` /
+(``.pptm``) are read the same way (#947), as are macro-enabled
+slideshows (``.ppsm``) and templates (``.potm``) (#1042).
+``pptx.Presentation`` accepts only the presentation and macro-enabled
+presentation main-part types ("not a PowerPoint file" for the rest),
+although python-pptx's own ``PartFactory`` already maps the slideshow
+and template types too (``pptx/__init__.py``) to ``PresentationPart``.
+So the package is opened with ``Package.open`` and its main part used
+directly when it is one of the six presentation types. python-pptx has
+no constant or mapping for the macro-enabled slideshow and template
+main parts, so ``Package.open`` would load either as a generic part;
+they are registered once, at import, in ``PartFactory.part_type_for``
+(the extension point ``pptx/__init__.py`` itself uses), as the DOCX
+extractor does for Word templates (#937). The payload bytes are not
+changed. A macro-enabled file's ``vbaProject.bin`` is loaded by
+python-pptx as an opaque part and never read: only slide and notes
+text is. This route depends on python-pptx 1.0.2's ``Package`` /
 ``PartFactory`` API; ``test_python_pptx_route_for_variants_still_holds``
 fails if an upgrade breaks it. Legacy binary ``.ppt`` is an OLE2
 compound file, which the dispatcher records ``unsupported`` before this
@@ -34,7 +41,9 @@ The work is bounded per extraction, counted as the walk goes:
   relationship. Plainly timed, 166 MB of slide XML parses in about a
   second but peaks at 2.5 GB, and 200,000 tiny related members take
   about 4 s. So before python-pptx opens it, a deck fails as
-  ``PptxPackageBudgetError`` when its members expand by more than
+  ``PptxPackageBudgetError``, which the dispatcher records ``unsupported``
+  since the same bytes always repeat it (#1032), when its members expand
+  by more than
   ``_MAX_EXPANSION_BYTES`` past their compressed size, number more than
   ``_MAX_MEMBERS``, or hold more than ``_MAX_RELS_BYTES`` of
   relationship parts, all read from the ZIP central directory. python-pptx
@@ -69,6 +78,7 @@ from collections.abc import Callable, Iterator
 
 from pptx.enum.shapes import PP_PLACEHOLDER
 from pptx.opc.constants import CONTENT_TYPE as CT
+from pptx.opc.package import PartFactory
 from pptx.oxml.ns import qn
 from pptx.oxml.text import CT_RegularTextRun, CT_TextBody, CT_TextField, CT_TextLineBreak
 from pptx.package import Package
@@ -136,10 +146,25 @@ _MAX_MEMBERS = 20_000
 # 80,000, several times a large deck's.
 _MAX_RELS_BYTES = 8 * 1024 * 1024
 
+# python-pptx 1.0.2 has no constants for the macro-enabled slideshow and
+# template main parts (#1042), and its part factory does not map them.
+PML_SLIDESHOW_MACRO_MAIN = "application/vnd.ms-powerpoint.slideshow.macroEnabled.main+xml"
+PML_TEMPLATE_MACRO_MAIN = "application/vnd.ms-powerpoint.template.macroEnabled.main+xml"
+PartFactory.part_type_for[PML_SLIDESHOW_MACRO_MAIN] = PresentationPart
+PartFactory.part_type_for[PML_TEMPLATE_MACRO_MAIN] = PresentationPart
+
 # Main-part content types this module reads: a presentation, a
-# macro-enabled presentation, a slideshow and a template (#947).
+# macro-enabled presentation, a slideshow and a template (#947), and a
+# macro-enabled slideshow and template (#1042).
 _PRESENTATION_MAIN_TYPES = frozenset(
-    {CT.PML_PRESENTATION_MAIN, CT.PML_PRES_MACRO_MAIN, CT.PML_SLIDESHOW_MAIN, CT.PML_TEMPLATE_MAIN}
+    {
+        CT.PML_PRESENTATION_MAIN,
+        CT.PML_PRES_MACRO_MAIN,
+        CT.PML_SLIDESHOW_MAIN,
+        CT.PML_TEMPLATE_MAIN,
+        PML_SLIDESHOW_MACRO_MAIN,
+        PML_TEMPLATE_MACRO_MAIN,
+    }
 )
 
 _PARAGRAPH = qn("a:p")
@@ -175,11 +200,13 @@ def _check_package(payload: bytes) -> None:
 
 
 def _open_presentation(payload: bytes) -> Presentation:
-    """Load a ``.pptx``, ``.pptm``, ``.ppsx`` or ``.potx`` payload.
+    """Load a ``.pptx``, ``.pptm``, ``.ppsx``, ``.potx``, ``.ppsm`` or
+    ``.potm`` payload.
 
     The same check ``pptx.Presentation`` makes, widened to the slideshow
-    and template types. Any other main part (a document, a workbook)
-    raises ``ValueError`` with fixed text, as ``pptx.Presentation`` would.
+    and template types, plain and macro-enabled. Any other main part (a
+    document, a workbook) raises ``ValueError`` with fixed text, as
+    ``pptx.Presentation`` would.
     """
     part = Package.open(io.BytesIO(payload)).main_document_part
     if part.content_type not in _PRESENTATION_MAIN_TYPES or not isinstance(part, PresentationPart):
@@ -231,8 +258,8 @@ def extract(
     max_pdf_pages: int | None = None,  # noqa: ARG001
     on_progress: Callable[[], None] | None = None,  # noqa: ARG001
 ) -> tuple[str, str]:
-    """Extract text from a PPTX, PPTM, PPSX or POTX payload. Returns
-    (text, "pptx")."""
+    """Extract text from a PPTX, PPTM, PPSX, POTX, PPSM or POTM payload.
+    Returns (text, "pptx")."""
     _check_package(payload)
     try:
         presentation = _open_presentation(payload)

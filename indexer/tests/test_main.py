@@ -3404,7 +3404,7 @@ class TestRequeueStaleExtractions:
 
         assert "HEADER_MARK" in self._attachment_chunk_text(db)
         row = db._conn.execute("SELECT extractor FROM attachment_extractions").fetchone()
-        assert row["extractor"] == "docx@5"
+        assert row["extractor"] == "docx@6"
         assert main._requeue_stale_extractions(db, queue) == 0
 
     def test_alias_messages_using_the_stale_row_are_requeued_and_rebuilt(
@@ -3566,7 +3566,7 @@ class TestRequeueStaleExtractions:
                 attachment_indexing,
                 "extract_attachment",
                 lambda **_kw: ExtractionResult(
-                    status=STATUS_EMPTY, extractor="docx@5", text=None, error=None
+                    status=STATUS_EMPTY, extractor="docx@6", text=None, error=None
                 ),
             )
             main._drain_queue_batched(
@@ -4078,7 +4078,7 @@ class TestPptxStartsDispatching:
         rows = db._conn.execute(
             "SELECT extraction_status, extractor FROM attachment_extractions"
         ).fetchall()
-        assert [tuple(r) for r in rows] == [("success", "pptx@2")] * 2
+        assert [tuple(r) for r in rows] == [("success", "pptx@3")] * 2
         chunks = [
             r["text"]
             for r in db._conn.execute(
@@ -4128,7 +4128,7 @@ class TestPptxStartsDispatching:
         rows = db._conn.execute(
             "SELECT extraction_status, extractor, extraction_error FROM attachment_extractions"
         ).fetchall()
-        assert [tuple(r) for r in rows] == [("failed", "pptx@2", "InvalidXmlError")]
+        assert [tuple(r) for r in rows] == [("failed", "pptx@3", "InvalidXmlError")]
         errors = [r[0] for r in db._conn.execute("SELECT last_error FROM indexing_jobs")]
         assert all(marker not in (e or "") for e in errors)
         assert marker not in caplog.text
