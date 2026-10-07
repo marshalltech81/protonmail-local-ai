@@ -55,11 +55,15 @@ if mode == "make":
             version = str(conn.execute("SELECT version FROM schema_version").fetchone()[0])
         except (sqlite3.Error, TypeError):
             version = "none"
+        # The same identity restore-index requires, so a copy it would
+        # refuse is never reported as a good backup.
+        from src.database import SCHEMA_APPLICATION_ID
+        ours = "yes" if conn.execute("PRAGMA application_id").fetchone()[0] == SCHEMA_APPLICATION_ID else "no"
     digest = hashlib.sha256()
     with copy.open("rb") as handle:
         while block := handle.read(1 << 20):
             digest.update(block)
-    print(copy.stat().st_size, digest.hexdigest(), version, result)
+    print(copy.stat().st_size, digest.hexdigest(), version, ours, result)
 elif mode == "stream":
     with copy.open("rb") as handle:
         while block := handle.read(1 << 20):
@@ -163,10 +167,13 @@ trap cleanup EXIT
 printf 'Copying the index inside the indexer container...\n'
 report=$(docker exec indexer python -c "$BACKUP_PY" make "$stamp") || die "the indexer could not copy the index (its error is above)"
 integrity=""
-read -r size digest version integrity <<<"$report"
+read -r size digest version ours integrity <<<"$report"
 [[ -n "$integrity" ]] || die "the indexer did not report on the copy"
 printf 'integrity_check: %s\n' "$integrity"
 [[ "$integrity" == ok ]] || die "the copy failed PRAGMA integrity_check; nothing was written to $dir"
+# Refuse what restore-index would refuse.
+[[ "$ours" == yes ]] || die "the copy is not a protonmail-local-ai index (application ID); nothing was written to $dir"
+[[ "$version" =~ ^[0-9]+$ ]] || die "the copy has no schema version (the indexer may still be creating the index); nothing was written to $dir"
 
 (
     umask 077

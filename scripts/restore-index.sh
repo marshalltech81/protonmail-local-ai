@@ -28,6 +28,14 @@ from pathlib import Path
 
 from src.database import SCHEMA_APPLICATION_ID, SCHEMA_VERSION
 
+
+def refuse(message):
+    # Exit 3 means "refused, the index is unchanged"; the shell treats any
+    # other failure (a killed container, a docker error) as unknown.
+    print(message, file=sys.stderr)
+    sys.exit(3)
+
+
 db = Path(os.environ["SQLITE_PATH"])
 staged = db.with_name(".restore-index.db")
 os.umask(0o077)
@@ -41,13 +49,13 @@ try:
         result = "; ".join(row[0] for row in conn.execute("PRAGMA integrity_check(20)"))
         print(f"integrity_check: {result}")
         if result != "ok":
-            sys.exit("refused: the backup failed PRAGMA integrity_check")
+            refuse("refused: the backup failed PRAGMA integrity_check")
         if conn.execute("PRAGMA application_id").fetchone()[0] != SCHEMA_APPLICATION_ID:
-            sys.exit("refused: the file is not a protonmail-local-ai index")
+            refuse("refused: the file is not a protonmail-local-ai index")
         version = conn.execute("SELECT version FROM schema_version").fetchone()[0]
     print(f"backup schema version: {version} (code: {SCHEMA_VERSION})")
     if version > SCHEMA_VERSION:
-        sys.exit("refused: the backup schema is newer than this code; run the release that wrote it")
+        refuse("refused: the backup schema is newer than this code; run the release that wrote it")
     # Fold the current index WAL into its main file first, so that file
     # alone holds every committed transaction if the swap below fails or
     # is interrupted after the sidecars are gone.
@@ -60,7 +68,7 @@ try:
         with closing(sqlite3.connect(db)) as live:
             busy = live.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0]
         if busy:
-            sys.exit("refused: the current index is still in use")
+            refuse("refused: the current index is still in use")
     os.chmod(staged, mode)
     for suffix in ("-wal", "-shm", "-journal"):
         Path(f"{db}{suffix}").unlink(missing_ok=True)
@@ -69,9 +77,9 @@ except BaseException as exc:
     # Any failure, a full volume included, leaves no staged copy behind.
     staged.unlink(missing_ok=True)
     if isinstance(exc, sqlite3.Error):
-        sys.exit(f"refused: SQLite error ({type(exc).__name__})")
+        refuse(f"refused: SQLite error ({type(exc).__name__})")
     if isinstance(exc, OSError):
-        sys.exit(f"refused: {type(exc).__name__} (errno {exc.errno}) in the index volume")
+        refuse(f"refused: {type(exc).__name__} (errno {exc.errno}) in the index volume")
     raise
 print(f"restored {db}")
 '
@@ -94,13 +102,29 @@ fi
 # change: the file and every directory above it owned by you (or root),
 # with no group or other write bit unless the directory is sticky.
 # Otherwise another account could swap the file before it is opened.
+# ACL entries count too: they are checked before the mode bits.
+# acl_grants PATH succeeds when PATH carries an entry that gives access:
+# on macOS an "allow" entry (deny-only entries, like the one on home
+# directories, only restrict), elsewhere any ACL (ls shows a +).
+acl_grants() {
+    local listing
+    if [[ "$(uname)" == Darwin ]]; then
+        listing=$(ls -lde -- "$1")
+        grep -qE '^ *[0-9]+: .* allow ' <<<"$listing"
+    else
+        listing=$(ls -ld -- "$1")
+        [[ "${listing:10:1}" == + ]]
+    fi
+}
 me=$(id -u)
-if [[ -n "$(find "$BACKUP" -maxdepth 0 \( -perm -g=w -o -perm -o=w -o \( ! -user 0 ! -user "$me" \) \) -print)" ]]; then
+if [[ -n "$(find "$BACKUP" -maxdepth 0 \( -perm -g=w -o -perm -o=w -o \( ! -user 0 ! -user "$me" \) \) -print)" ]] ||
+    acl_grants "$BACKUP"; then
     die "another account can replace $BACKUP; it must be yours and writable only by you"
 fi
 ancestor=$(cd -- "$(dirname -- "$BACKUP")" && pwd -P)
 while :; do
-    if [[ -n "$(find "$ancestor" -maxdepth 0 \( \( \( -perm -g=w -o -perm -o=w \) ! -perm -1000 \) -o \( ! -user 0 ! -user "$me" \) \) -print)" ]]; then
+    if [[ -n "$(find "$ancestor" -maxdepth 0 \( \( \( -perm -g=w -o -perm -o=w \) ! -perm -1000 \) -o \( ! -user 0 ! -user "$me" \) \) -print)" ]] ||
+        acl_grants "$ancestor"; then
         die "another account can replace $BACKUP through $ancestor; keep backups in a directory only you can write, as make backup-index creates"
     fi
     [[ "$ancestor" != / ]] || break
@@ -150,11 +174,21 @@ trap on_exit EXIT
 
 docker stop mcp-server indexer
 
+rc=0
 docker run --rm -i --network none --read-only --tmpfs /tmp --cap-drop ALL \
     --security-opt no-new-privileges:true --user 1002:1002 \
     --env SQLITE_PATH=/data/mail.db --volume "$volume:/data" \
-    "$image" python -c "$RESTORE_PY" <&3 ||
+    "$image" python -c "$RESTORE_PY" <&3 || rc=$?
+if ((rc == 3)); then
     die "the index was not replaced (the reason is above); the previous index is unchanged"
+elif ((rc != 0)); then
+    # Killed or failed at a point the script cannot know (exit 3 is the
+    # only "unchanged" answer), so the swap may have happened: start only
+    # the indexer, which migrates or refuses whichever index is there.
+    restored=1
+    docker start indexer
+    die "the restore container failed (exit $rc), so the index may or may not have been replaced; the indexer was started, check docker compose logs indexer"
+fi
 restored=1
 docker start indexer
 # Read logs from the new process's start (nanosecond precision), so a

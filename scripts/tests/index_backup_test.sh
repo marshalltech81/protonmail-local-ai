@@ -57,7 +57,7 @@ exec)
         mv "$FAKE_SWAP_DIR" "$FAKE_SWAP_DIR.moved"
         mkdir -m 755 "$FAKE_SWAP_DIR"
     fi
-    SQLITE_PATH="$FAKE_DATA/mail.db" exec python3 -c "$5" "${@:6}"
+    SQLITE_PATH="$FAKE_DATA/mail.db" PYTHONPATH="$FAKE_STUB" exec python3 -c "$5" "${@:6}"
     ;;
 inspect)
     if [[ -n "${FAKE_NO_CONTAINER:-}" ]]; then
@@ -76,6 +76,11 @@ run)
     # docker run FLAGS... sha256:fakeindexerimage python -c CODE
     [[ "$*" == *" --network none "* && "$*" == *" --read-only "* && "$*" == *" --cap-drop ALL "* ]]
     [[ "$*" == *" --volume fake_sqlite-volume:/data "* && "$*" == *" sha256:fakeindexerimage python -c "* ]]
+    # FAKE_RUN_EXIT: the container is killed (or docker fails) at a point
+    # the script cannot know.
+    if [[ -n "${FAKE_RUN_EXIT:-}" ]]; then
+        exit "$FAKE_RUN_EXIT"
+    fi
     cd "$FAKE_STUB"
     # FAKE_FSIZE caps file size (512-byte blocks), as a full volume would.
     if [[ -n "${FAKE_FSIZE:-}" ]]; then
@@ -150,7 +155,7 @@ reset() {
 
 run_backup() {
     PATH="$WORK/bin:$PATH" FAKE_DOCKER_LOG="$WORK/docker.log" FAKE_DATA="$WORK/data" \
-        FAKE_RUNNING="${FAKE_RUNNING:-1}" BACKUP_DIR="$1" \
+        FAKE_RUNNING="${FAKE_RUNNING:-1}" FAKE_STUB="$WORK/stub" BACKUP_DIR="$1" \
         bash "$REPO/scripts/backup-index.sh" >"$WORK/out" 2>&1 && STATUS=0 || STATUS=$?
 }
 
@@ -295,7 +300,18 @@ grant_acl() {
     if [[ "$(uname)" == Darwin ]]; then
         chmod +a "everyone allow list,search,read,file_inherit,directory_inherit" "$1"
     else
-        setfacl -m u:nobody:rx "$1"
+        # -d: a default entry, which new directories inherit.
+        setfacl -m u:nobody:rx "$1" && setfacl -d -m u:nobody:rx "$1"
+    fi
+}
+
+# grant_write_acl PATH: gives another account write access to a file or
+# directory through an ACL entry.
+grant_write_acl() {
+    if [[ "$(uname)" == Darwin ]]; then
+        chmod +a "everyone allow write" "$1"
+    else
+        setfacl -m u:nobody:rw "$1"
     fi
 }
 
@@ -642,6 +658,78 @@ restore_refuses_a_symlinked_backup() {
     fi
 }
 
+backup_refuses_a_copy_restore_would_reject() {
+    reset
+    make_db "$WORK/data/mail.db" 1 7
+    run_backup "$WORK/backups"
+    [[ "$STATUS" -ne 0 ]]
+    grep -F 'not a protonmail-local-ai index' "$WORK/out" >/dev/null
+    [[ -z "$(backups)" ]]
+    no_temp_copy_left
+    # No schema_version row yet (the indexer is still creating it).
+    reset
+    make_db "$WORK/data/mail.db"
+    python3 -c 'import sqlite3, sys; c = sqlite3.connect(sys.argv[1]); c.execute("DELETE FROM schema_version"); c.commit()' "$WORK/data/mail.db"
+    run_backup "$WORK/backups"
+    [[ "$STATUS" -ne 0 ]]
+    grep -F 'no schema version' "$WORK/out" >/dev/null
+    [[ -z "$(backups)" ]]
+    no_temp_copy_left
+}
+
+restore_refuses_acl_writable_paths() {
+    reset
+    make_db "$WORK/data/mail.db"
+    mkdir -m 700 "$WORK/acl"
+    make_db "$WORK/acl/backup.db"
+    if ! grant_write_acl "$WORK/acl/backup.db"; then
+        printf 'skipped: this file system takes no ACL\n'
+        return 0
+    fi
+    run_restore "$WORK/acl/backup.db" yes
+    [[ "$STATUS" -ne 0 ]]
+    grep -F 'another account can replace' "$WORK/out" >/dev/null
+    if grep -E '^(stop|run|start)' "$WORK/docker.log" >/dev/null; then
+        return 1
+    fi
+    # An ACL on a directory above it that grants access.
+    reset
+    rm -rf "${WORK:?}/acl"
+    make_db "$WORK/data/mail.db"
+    mkdir -m 700 "$WORK/acl"
+    make_db "$WORK/acl/backup.db"
+    grant_write_acl "$WORK/acl"
+    run_restore "$WORK/acl/backup.db" yes
+    [[ "$STATUS" -ne 0 ]]
+    grep -F 'another account can replace' "$WORK/out" >/dev/null
+    rm -rf "${WORK:?}/acl"
+    # A deny-only entry (as on macOS home directories) is fine.
+    if [[ "$(uname)" == Darwin ]]; then
+        reset
+        make_db "$WORK/data/mail.db"
+        mkdir -m 700 "$WORK/acl"
+        make_db "$WORK/acl/backup.db"
+        chmod +a "group:everyone deny delete" "$WORK/acl"
+        FAKE_LOGS="$READY_LOGS" run_restore "$WORK/acl/backup.db" yes
+        chmod -N "$WORK/acl"
+        [[ "$STATUS" -eq 0 ]]
+        rm -rf "${WORK:?}/acl"
+    fi
+}
+
+restore_treats_a_killed_container_as_unknown() {
+    reset
+    make_db "$WORK/backup.db"
+    make_db "$WORK/data/mail.db"
+    FAKE_RUN_EXIT=137 run_restore "$WORK/backup.db" yes
+    [[ "$STATUS" -ne 0 ]]
+    grep -F 'may or may not have been replaced' "$WORK/out" >/dev/null
+    grep -Fx 'start indexer' "$WORK/docker.log" >/dev/null
+    if grep -E '^start .*mcp-server' "$WORK/docker.log" >/dev/null; then
+        return 1
+    fi
+}
+
 stub_matches_the_indexer() {
     local name
     for name in SCHEMA_VERSION SCHEMA_APPLICATION_ID; do
@@ -702,6 +790,9 @@ check "restore reports a failed log read" restore_reports_a_failed_log_read
 check "restore restarts the services when stop fails" restore_restarts_the_services_when_stop_fails
 check "restore refuses a backup path another account can replace" restore_refuses_a_replaceable_backup_path
 check "restore refuses a symlinked backup" restore_refuses_a_symlinked_backup
+check "backup refuses a copy restore would reject" backup_refuses_a_copy_restore_would_reject
+check "restore refuses ACL-writable paths" restore_refuses_acl_writable_paths
+check "restore treats a killed container as an unknown swap state" restore_treats_a_killed_container_as_unknown
 check "the restore stub matches indexer/src/database.py" stub_matches_the_indexer
 
 if ((FAILURES > 0)); then

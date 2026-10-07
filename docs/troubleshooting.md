@@ -805,7 +805,9 @@ its cleanup (`.backup-index-*.db` in the volume) is removed by the next
 backup once it is more than 6 hours old, and the run says how many it
 removed. The target prints the integrity result, the path, the
 size and the schema version, and writes nothing to `BACKUP_DIR` when
-the check fails. `BACKUP_DIR` is required; it is created with mode 700,
+the check fails or when the copy lacks what `restore-index` requires
+(this project's application ID and a schema version, which an index the
+indexer is still creating may not have yet). `BACKUP_DIR` is required; it is created with mode 700,
 and the directory (new or existing) and the file are refused when mode
 bits or an ACL give other users access (on macOS, `chmod -N <dir>`
 removes ACL entries); a path inside the checkout is refused, and the
@@ -862,19 +864,36 @@ start. To undo a migration that finished but is wrong, recreate the
 containers from the release before it first, then restore:
 
 ```bash
+# The release before schema v1 has no restore helper: keep this one.
+cp scripts/restore-index.sh "$HOME/restore-index.sh"
 git checkout <the release before the migration>
 make build
-docker compose up --no-start   # add the same -f overlays you run with
-make restore-index BACKUP="$HOME/protonmail-local-ai-backup/mail-<before the upgrade>.db"
+# Only these two (--no-deps), so mbsync keeps running; add the same
+# -f overlays you run with.
+docker compose up --no-start --no-deps indexer mcp-server
+BACKUP="$HOME/protonmail-local-ai-backup/mail-<before the upgrade>.db" \
+  bash "$HOME/restore-index.sh"
+rm "$HOME/restore-index.sh"
 ```
 
-`up --no-start` replaces the containers with ones built from that
-release without starting them, so nothing opens the migrated index;
-`restore-index` then installs the copy and starts them.
+`up --no-start --no-deps` replaces the indexer and mcp-server
+containers with ones built from that release without starting them, so
+nothing opens the migrated index, and leaves mbsync running;
+`restore-index.sh` then installs the copy and starts the two. The
+helper needs nothing from the checkout, so the copy taken before the
+checkout works with the older release (its own `make restore-index`
+target is the same script where the release has one).
+
+If the one-off restore container is killed or Docker fails part way,
+the script cannot tell whether the copy was swapped in: it starts only
+the indexer and leaves `mcp-server` stopped. Check the indexer log, then
+run `make up`.
 
 The backup file and every directory above it must be yours (or
-root's) and writable only by you, unless the directory is sticky like
-`/tmp`, and the file must not be a symbolic link: another account
+root's) and writable only by you, with no ACL entry that gives another
+account access (on macOS, deny-only entries such as the one on home
+directories are fine), unless the directory is sticky like `/tmp`, and
+the file must not be a symbolic link: another account
 could otherwise swap in a crafted index, which the integrity and schema
 checks cannot tell apart. Directories made by `make backup-index`
 already qualify.
