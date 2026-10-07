@@ -1069,6 +1069,46 @@ Exhausting a keyword query does not establish exhaustive coverage of a
 topic. Consider alternate wording, read candidate messages, and keep the
 counting unit explicit (messages, threads, or distinct bills/items).
 
+**Multi-lane enumeration.** A broad question ("every message about a
+committee's finances and audits") has no single filter set: a call
+takes one AND of filters, and the ranked tools are capped. Run several
+exact lanes with this tool and union them (#992, option 1):
+
+1. Choose the lanes from the question: one `subject` lane per subject
+   term, one `text` lane per body word set (the words a body must
+   contain, at most 16), and one `participant` (or `sender`) lane per
+   person or domain known to be involved. Give every lane the same
+   `folder` and date bounds so the union has one scope.
+2. Run each lane with `limit=1` to get its `total_matches`, and tell
+   the user the lane counts before paging. A single body-word lane can
+   return hundreds of unrelated bulk messages (newsletters and
+   marketing that happen to use the word): narrow such a lane with
+   `sender`, `date_from` / `date_to` or a second `text` word rather than
+   paging through it, and report which lane was narrowed and how,
+   since the narrowing is a gap in the union.
+3. Page each lane to `has_more=false`, with `fields` kept to what the
+   union needs (`["subject", "sent_at", "from"]`; `thread_id` is always
+   included).
+4. Union by `thread_id`, keeping for each thread the lane or lanes that
+   found it. A thread found only by a body-word lane is weaker
+   evidence than one a subject or participant lane also found, and the
+   report should let the user see that.
+5. Read the candidate threads (`get_thread`) before counting them, and
+   report the ones discarded as noise with the lane that found them.
+
+What the union can claim: every indexed message outside Trash that
+matched one of the lanes as they were run, in the snapshot each page
+observed. What it cannot claim: coverage of the topic. A message about
+the concept that uses none of the lane terms and comes from none of
+the lane participants is not found, and nothing in the result shows
+that it is missing; paging a lane to the end proves the lane, not the
+concept (the paragraph above, and the completeness claims under
+evaluation in #776). Report the lanes, their counts, the union size,
+the narrowing and the discards, not "all messages about X". The
+bounded Boolean filter form (#1087: `all` of leaves and `any` groups
+with `negate`, one call and one cursor) will replace this multi-call
+shape; the lanes and the claim stay the same.
+
 For outstanding-item questions, look for completion, corrections and
 reopening across threads and senders. A sent request or delivered advice
 does not prove the action was completed. State the scope and disclose

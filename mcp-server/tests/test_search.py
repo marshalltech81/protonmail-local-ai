@@ -1539,3 +1539,19 @@ def test_extract_description_points_to_the_population_recipe(empty_db):
     assert "claimant_id" not in doc
     # Review round 8 (owner): the pre-read disclosure is back on the wire.
     assert "Before a population run, tell the user how much mail will be read." in doc
+
+
+def test_query_messages_description_points_to_the_multi_lane_recipe(empty_db):
+    """#992 option 1: a broad question needs several exact lanes, and the
+    description says so in one sentence pointing to the recipe in
+    docs/mcp-tools.md, where the steps live (as #976's population recipe
+    does); the wire carries the lanes, the union key and the pointer,
+    not the steps."""
+    doc = _wire_descriptions(empty_db)["query_messages"]
+    assert (
+        "For every message about a topic, run one exact lane per subject term, "
+        "body word set and participant, page each to the end and union by "
+        "thread_id, reporting which lane found each thread (multi-lane recipe: "
+        "docs/mcp-tools.md)."
+    ) in doc
+    assert doc.count("multi-lane recipe") == 1
