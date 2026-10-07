@@ -30,7 +30,7 @@ _COMPARABLE = ("cases_sha256", "index_sha256", "rubric_version")
 # take. A case that times out or is skipped counts as failing, so a
 # changed timeout can alter every rate: each one is both reported as
 # changed and makes the runs incompatible (#997).
-_TIMEOUT_SETTINGS = ("case_timeout_secs", "max_runtime_secs")
+TIMEOUT_SETTINGS = ("case_timeout_secs", "max_runtime_secs")
 
 
 def case_record(
@@ -353,7 +353,7 @@ def compare_reports(base: dict[str, Any], cand: dict[str, Any]) -> dict[str, Any
         incompatible.append("case_selection")
     changed = [k for k in ("answerer", "retrieval", "source_commit") if bi.get(k) != ci.get(k)]
     bs, cs = bi.get("settings") or {}, ci.get("settings") or {}
-    timeouts = [k for k in _TIMEOUT_SETTINGS if bs.get(k) != cs.get(k)]
+    timeouts = [k for k in TIMEOUT_SETTINGS if bs.get(k) != cs.get(k)]
     changed += timeouts
     incompatible += timeouts
     b_cases = {r["id"]: r for r in base["cases"]}

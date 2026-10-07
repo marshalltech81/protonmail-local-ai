@@ -49,6 +49,7 @@ from tests.answer_eval.harness import evaluate
 from tests.answer_eval.judge import RUBRIC_VERSION
 from tests.answer_eval.report import (
     REPORT_SCHEMA_VERSION,
+    TIMEOUT_SETTINGS,
     build_report,
     compare_reports,
     is_incomplete,
@@ -295,6 +296,14 @@ def _report_shape_ok(data: dict[str, Any]) -> bool:
     if not all(
         isinstance(counts.get(k), int) and not isinstance(counts[k], bool) and counts[k] >= 0
         for k in _COUNT_KEYS
+    ):
+        return False
+    # The timeouts compare checks (#997): missing or malformed on both
+    # sides would compare equal and hide a changed run condition.
+    settings = data["identity"].get("settings")
+    if not isinstance(settings, dict) or not all(
+        k in settings and settings[k] is not None and _is_rate(settings[k]) and settings[k] > 0
+        for k in TIMEOUT_SETTINGS
     ):
         return False
     if not isinstance(aggregates, dict) or not isinstance(aggregates.get("by_category"), dict):

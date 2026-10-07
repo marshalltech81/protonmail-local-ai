@@ -504,6 +504,14 @@ class TestConfig:
         assert value not in str(e.value)
 
     @pytest.mark.parametrize(("layer", "name"), _INTEGER_SETTINGS)
+    def test_integer_settings_past_the_digit_limit_are_config_errors(self, layer, name):
+        """#997 Codex round 1: digits only, but past Python's 4300-digit
+        int() limit, raised an uncaught ValueError."""
+        with pytest.raises(ConfigError) as e:
+            load_layer(layer, {**self._layer_env(layer), name: "9" * 5000})
+        assert str(e.value) == f"{name} must be a whole number"
+
+    @pytest.mark.parametrize(("layer", "name"), _INTEGER_SETTINGS)
     def test_token_and_character_settings_accept_integers(self, layer, name):
         """The plain digits ``.env.eval`` uses keep working, padded too."""
         cfg = load_layer(layer, {**self._layer_env(layer), name: " 16000 "})
@@ -1537,6 +1545,7 @@ def _identity(**overrides):
         "answerer": {"mode": "openai", "model": "a"},
         "judge": {"mode": "openai", "model": "j"},
         "retrieval": {"reranker": "none"},
+        "settings": {"case_timeout_secs": 900.0, "max_runtime_secs": 3600.0},
     }
     base.update(overrides)
     return base
@@ -1927,6 +1936,18 @@ class TestCli:
             (["aggregates", "by_category", "CATEGORY", "judge"], {}),
             # #771: a case ID the case loader refuses (over 64 characters).
             (["cases", 0, "id"], "ask-" + "a" * 61),
+            # #997 Codex round 1: compare reads the timeouts, so a missing
+            # or malformed one would compare equal on both sides.
+            (["identity", "settings"], None),
+            (["identity", "settings"], ["MARKER-677"]),
+            (["identity", "settings", "case_timeout_secs"], None),
+            (["identity", "settings", "case_timeout_secs"], "MARKER-677"),
+            (["identity", "settings", "case_timeout_secs"], True),
+            (["identity", "settings", "case_timeout_secs"], 0),
+            (["identity", "settings", "max_runtime_secs"], -5.0),
+            (["identity", "settings", "max_runtime_secs"], float("nan")),
+            (["identity", "settings", "max_runtime_secs"], float("inf")),
+            (["identity", "settings", "max_runtime_secs"], 10**400),
         ],
     )
     def test_compare_rejects_malformed_nested_shapes(

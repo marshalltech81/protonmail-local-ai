@@ -189,9 +189,13 @@ def _integer(env: Mapping[str, str], name: str, default: int, minimum: int) -> i
     raw = env.get(name, "").strip()
     if not raw:
         return default
-    if not re.fullmatch(r"[0-9]+", raw):
+    # int() also refuses digit strings past Python's conversion limit.
+    try:
+        value = int(raw) if re.fullmatch(r"[0-9]+", raw) else None
+    except ValueError:
+        value = None
+    if value is None:
         raise ConfigError(f"{name} must be a whole number")
-    value = int(raw)
     if value < minimum:
         raise ConfigError(f"{name} must be at least {minimum}")
     return value
