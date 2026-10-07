@@ -46,8 +46,11 @@ COPY java/pom.xml ./
 # rate limit stops it only on a cold mount. A --no-cache build starts
 # from an empty mount and refills it. Every download is still
 # checksum-verified; a jar already in the mount passed that check when
-# it arrived. `docker builder prune` empties the mount.
-RUN --mount=type=cache,target=/root/.m2,sharing=locked \
+# it arrived. The mount has its own id, so no other project's build on
+# the same builder fills it or reads it; any build the operator runs
+# there can still write to it, as to every cache mount, so the mount is
+# trusted as far as the builder is. `docker builder prune` empties it.
+RUN --mount=type=cache,id=protonmail-local-ai-maven,target=/root/.m2,sharing=locked \
     mvn --batch-mode --no-transfer-progress --strict-checksums \
     dependency:copy-dependencies -DoutputDirectory=/opt/ppt/lib
 COPY java/PptText.java ./
