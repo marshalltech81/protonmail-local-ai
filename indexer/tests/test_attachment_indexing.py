@@ -1555,22 +1555,59 @@ class TestLegacyOle2CacheRows:
             )
             extractor.assert_not_called()
 
+    def test_row_holds_for_an_ooxml_labelled_occurrence(self, tmp_path, monkeypatch):
+        """Review round 1: the same bytes labelled ``.docx`` / ``.xlsx``
+        would be rejected the same way, so the row stands in for them."""
+        from src.extractors import LEGACY_OLE2_ERROR
+
+        for filename in ("a.docx", "a.xlsx"):
+            db = _seed_thread_for_cache_test(tmp_path / filename)
+            attachment = _attachment(
+                _OLE2_MAGIC + bytes(64), filename=filename, content_type="application/octet-stream"
+            )
+            extractor = _run_process_with_cached_status(
+                db, attachment, STATUS_UNSUPPORTED, monkeypatch, error=LEGACY_OLE2_ERROR
+            )
+            extractor.assert_not_called()
+
     def test_row_is_re_run_for_an_occurrence_with_another_extractor(self, tmp_path, monkeypatch):
-        """The same bytes labelled ``.docx`` take the DOCX path today, so the
-        legacy row does not stand in for them."""
+        """The same bytes labelled ``.txt`` take the text path, so the row
+        does not stand in for them."""
         db = _seed_thread_for_cache_test(tmp_path)
         attachment = _attachment(
-            _OLE2_MAGIC + bytes(64), filename="a.docx", content_type="application/octet-stream"
+            _OLE2_MAGIC + bytes(64), filename="a.txt", content_type="text/plain"
         )
         self._store(db, attachment)
         extractor = MagicMock(
             return_value=ExtractionResult(
-                status=STATUS_FAILED, extractor="docx@4", text=None, error="BadZipFile"
+                status=STATUS_SUCCESS, extractor="text@2", text="words", error=None
             )
         )
         monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
         prepare_attachment_writes(db=db, **_kwargs(attachment, claimant_id="message@example.com"))
         extractor.assert_called_once()
+
+    def test_outcome_does_not_depend_on_which_occurrence_arrives_first(self, tmp_path):
+        """Review round 1: a ``.docx`` occurrence of a genuine ``.doc``'s
+        bytes processed first, through the real dispatcher, must not cache
+        a ``failed`` row that the ``.doc`` occurrence then serves for seven
+        days."""
+        from src.extractors import LEGACY_OLE2_ERROR
+
+        db = _setup_db_for_attachment(tmp_path)
+        payload = _OLE2_MAGIC + bytes(64)
+        first = _attachment(payload, filename="a.docx", content_type="application/octet-stream")
+        plan = prepare_attachment_writes(db=db, **_kwargs(first))
+        with db.transaction():
+            apply_attachment_writes(plan=plan, claimant_id="msg@x", thread_id="thread-x", db=db)
+        row = db.get_attachment_extraction(first.content_hash)
+        assert (row["extraction_status"], row["extraction_error"]) == (
+            STATUS_UNSUPPORTED,
+            LEGACY_OLE2_ERROR,
+        )
+        later = _attachment(payload, filename="a.doc", content_type="application/msword")
+        again = prepare_attachment_writes(db=db, **_kwargs(later))
+        assert (again.status, again.cached) == (STATUS_UNSUPPORTED, True)
 
     def test_stale_failed_row_is_refreshed_to_unsupported_once(self, tmp_path, caplog):
         """A ``failed`` row the previous DOCX version wrote for a real

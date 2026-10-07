@@ -292,8 +292,8 @@ class ExtractionResult:
 # pdf 4: lets ``MemoryError`` / ``RecursionError`` on a page escape as
 # host pressure; before, the page was skipped and the PDF could be
 # cached as a success with that page's text missing (#707).
-# docx 4, xlsx 5: a legacy-labelled OLE2 payload (a real ``.doc`` /
-# ``.xls``) is recorded ``unsupported`` instead of ``failed``, so the
+# docx 4, xlsx 5: an OLE2 payload (a real ``.doc`` / ``.xls``, or an
+# encrypted OOXML file) is recorded ``unsupported`` instead of ``failed``, so the
 # ``failed`` rows the previous versions wrote for one are refreshed (#694).
 EXTRACTOR_VERSIONS: dict[str, int] = {"docx": 4, "image": 3, "pdf": 4, "text": 2, "xlsx": 5}
 
@@ -366,11 +366,12 @@ SCANNED_PDF_OCR_DISABLED_ERROR = f"{OCR_DISABLED_ERROR}; scanned PDF"
 # persisted text names neither (#257).
 NO_EXTRACTOR_ERROR = "no extractor for this content type or filename extension"
 
-# ``unsupported`` error for a payload labelled as a legacy binary Office
-# type (``.doc`` / ``.xls``) that is an OLE2 compound file, which neither
-# OOXML extractor can read (#694). Only OOXML files mislabelled as a
-# legacy type (ZIP payloads) go on to the extractor.
-LEGACY_OLE2_ERROR = "legacy binary Office file (OLE2); no extractor for .doc or .xls"
+# ``unsupported`` error for a payload bound for the DOCX or XLSX extractor
+# that is an OLE2 compound file, which neither OOXML extractor can read
+# (#694): a legacy binary ``.doc`` / ``.xls``, or a password-protected
+# OOXML package. Decided by the bytes alone, whatever the label, because
+# the result is cached by content hash for every occurrence.
+LEGACY_OLE2_ERROR = "OLE2 compound file (legacy .doc / .xls or encrypted Office file)"
 
 # The fixed 8-byte signature every OLE2 compound file starts with.
 _OLE2_SIGNATURE = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
@@ -384,7 +385,7 @@ _MIME_DISPATCH: dict[str, str] = {
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
     # Legacy ``.doc`` / ``.xls`` labels: a best effort for OOXML files
     # mislabelled as a legacy type. A real legacy binary (OLE2) is recorded
-    # ``unsupported`` before the extractor runs (``_LEGACY_OFFICE_LABELS``).
+    # ``unsupported`` before the extractor runs (``LEGACY_OLE2_ERROR``).
     # Word templates (``.dotx``) are not routed: python-docx refuses a
     # package whose main part is the template type (#694).
     "application/msword": "docx",
@@ -427,12 +428,6 @@ _EXT_DISPATCH: dict[str, str] = {
     ".heif": "image",
     ".hif": "image",
 }
-
-# The ``_MIME_DISPATCH`` / ``_EXT_DISPATCH`` keys that name a legacy binary
-# Office type (#694).
-_LEGACY_OFFICE_LABELS = frozenset(
-    {"application/msword", "application/vnd.ms-excel", ".doc", ".xls"}
-)
 
 # Image MIME types are routed to the image extractor unless OCR is
 # disabled (in which case we report ``unsupported`` so the cached row
@@ -513,17 +508,14 @@ def extract(
             error=NO_EXTRACTOR_ERROR,
         )
 
-    # A legacy-labelled payload that is a real legacy binary (OLE2) would
-    # only fail inside the OOXML parser and be re-run every
-    # ``_FAILED_CACHE_MAX_AGE``; record it as unsupported instead (#694).
-    # The label check uses the occurrence's metadata, so it also applies
-    # when ``module_override`` refreshes a stale row. A constant-size
-    # prefix check; the aggregate counts the result, so no per-item line.
-    if (
-        module_name in {"docx", "xlsx"}
-        and payload.startswith(_OLE2_SIGNATURE)
-        and legacy_office_labelled(content_type, filename)
-    ):
+    # An OLE2 payload (a real legacy ``.doc`` / ``.xls``) would only fail
+    # inside the OOXML parser and be re-run every ``_FAILED_CACHE_MAX_AGE``;
+    # record it as unsupported instead (#694). The bytes alone decide, not
+    # the label, so every occurrence of the same bytes, including a
+    # ``module_override`` refresh, records the same outcome (review round
+    # 1). A constant-size prefix check; the aggregate counts the result,
+    # so no per-item line.
+    if module_name in {"docx", "xlsx"} and payload.startswith(_OLE2_SIGNATURE):
         return ExtractionResult(
             status=STATUS_UNSUPPORTED,
             extractor=None,
@@ -645,35 +637,15 @@ def _resolve_extractor(content_type: str, filename: str) -> tuple[str | None, st
        (gating happens upstream so the resolver itself can stay pure).
     3. Filename extension fallback against ``_EXT_DISPATCH``.
     """
-    label, dispatch_via = _dispatch_label(content_type, filename)
-    if dispatch_via == "mime":
-        return _MIME_DISPATCH[label], dispatch_via
-    if dispatch_via == "mime-image":
-        return "image", dispatch_via
-    if dispatch_via == "extension":
-        return _EXT_DISPATCH[label], dispatch_via
-    return None, dispatch_via
-
-
-def _dispatch_label(content_type: str, filename: str) -> tuple[str, str]:
-    """Return the normalized MIME type or extension that selects the
-    extractor, in ``_resolve_extractor``'s order, and ``dispatch_via``."""
     normalized_mime = (content_type or "").lower().split(";", 1)[0].strip()
     if normalized_mime in _MIME_DISPATCH:
-        return normalized_mime, "mime"
+        return _MIME_DISPATCH[normalized_mime], "mime"
     if normalized_mime.startswith(_IMAGE_MIME_PREFIX):
-        return normalized_mime, "mime-image"
+        return "image", "mime-image"
     ext = os.path.splitext(filename or "")[1].lower()
     if ext in _EXT_DISPATCH:
-        return ext, "extension"
-    return "", "none"
-
-
-def legacy_office_labelled(content_type: str, filename: str) -> bool:
-    """Whether the MIME type or extension that selects the extractor names
-    a legacy binary Office type (``.doc`` / ``.xls``), so an OLE2 payload
-    under this label is recorded ``unsupported`` (#694)."""
-    return _dispatch_label(content_type, filename)[0] in _LEGACY_OFFICE_LABELS
+        return _EXT_DISPATCH[ext], "extension"
+    return None, "none"
 
 
 def _validate_zip_payload(payload: bytes) -> str | None:

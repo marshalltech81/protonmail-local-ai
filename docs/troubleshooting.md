@@ -1240,8 +1240,8 @@ only, never filenames or text (`make logs`):
   - What the outcomes mean: `cached` counts attachments served from the
     extraction cache instead of extracted again. `unsupported` is a type
     no extractor reads, including Word templates (`.dotx`) and genuine
-    legacy binary `.doc` / `.xls` files (OLE2), which are recorded with
-    "legacy binary Office file (OLE2)" rather than as `failed`, so they
+    legacy binary `.doc` / `.xls` and password-protected Office files (OLE2), recorded with
+    "OLE2 compound file" rather than as `failed`, so they
     are not retried (#694; see `docs/architecture.md`, "Extractor
     dispatch"). `too_large` is over
     `INDEXER_ATTACHMENT_MAX_BYTES`, and `ocr_disabled` is an image or

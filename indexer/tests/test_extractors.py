@@ -4817,20 +4817,49 @@ class TestLegacyOfficeLabels:
         assert (result.status, result.error) == (STATUS_UNSUPPORTED, LEGACY_OLE2_ERROR)
         assert calls == []
 
-    def test_ole2_payload_with_an_ooxml_label_keeps_todays_path(self, monkeypatch):
-        """Only legacy labels are checked: an OLE2 file labelled ``.docx``
-        or ``.xlsx`` (for example a password-protected OOXML package) still
-        reaches the extractor and fails there, as before."""
+    def test_ole2_outcome_does_not_depend_on_the_label(self, monkeypatch):
+        """Review round 1: the cache is shared by content hash, so the
+        outcome for the same bytes must not depend on which occurrence
+        arrives first. An OLE2 payload bound for either OOXML extractor is
+        ``unsupported`` under an OOXML label too (for example a
+        password-protected OOXML package, which is also OLE2), and when a
+        ``.bin`` occurrence refreshes a stale row."""
+        from src.extractors import LEGACY_OLE2_ERROR
+
         calls = _count_extractor_calls(monkeypatch)
         payload = _OLE2_MAGIC + bytes(64)
-        for content_type, filename in (
-            ("application/vnd.openxmlformats-officedocument.wordprocessingml.document", "a.doc"),
-            ("application/octet-stream", "a.docx"),
-            ("application/octet-stream", "a.xlsx"),
+        for content_type, filename, override in (
+            (
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                "a.doc",
+                None,
+            ),
+            ("application/octet-stream", "a.docx", None),
+            ("application/octet-stream", "a.xlsx", None),
+            ("application/octet-stream", "a.bin", "docx"),
+            ("application/octet-stream", "a.bin", "xlsx"),
         ):
-            result = extract(content_type=content_type, filename=filename, payload=payload)
-            assert result.status == STATUS_FAILED, (content_type, filename)
-        assert calls == ["docx", "docx", "xlsx"]
+            result = extract(
+                content_type=content_type,
+                filename=filename,
+                payload=payload,
+                module_override=override,
+            )
+            assert (result.status, result.error) == (STATUS_UNSUPPORTED, LEGACY_OLE2_ERROR), (
+                content_type,
+                filename,
+            )
+        assert calls == []
+
+    def test_ole2_payload_for_another_extractor_keeps_todays_path(self, monkeypatch):
+        """Only the OOXML extractors are guarded: the text extractor still
+        reads whatever an OLE2 payload labelled ``.txt`` holds."""
+        calls = _count_extractor_calls(monkeypatch)
+        result = extract(
+            content_type="text/plain", filename="a.txt", payload=_OLE2_MAGIC + b"words"
+        )
+        assert result.status == STATUS_SUCCESS
+        assert calls == ["text"]
 
     def test_docx_and_xlsx_rows_from_before_the_ole2_check_are_stale(self):
         """The recorded outcome changed for OLE2 payloads (``failed`` became
