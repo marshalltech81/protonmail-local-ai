@@ -356,7 +356,7 @@ Phase 4 schema change needs a numbered migration.
    deletion of deleted mail's files (#728), and validating reaping on
    live mail (#783).
 5. **Deterministic query language** (2026-10-07, Resolved decisions
-   35; design note `docs/design/2026-10-07-deterministic-query-predicates.md`).
+   35).
    `query_messages` is already an exact enumerator with good address
    semantics; what it lacks is composition, an explicit clock and a
    way to say "could not tell". One predicate compiler replaces the
@@ -456,8 +456,7 @@ decisions 31).
 Not a phase: cross-cutting work to capture source semantics losslessly
 at the Maildir boundary, so deterministic queries are grounded in
 preserved evidence rather than reconstructed from it (owner and Claude
-correspondence, 2026-10-07; Resolved decisions 35; design note
-`docs/design/2026-10-07-deterministic-query-predicates.md`). Milestone
+correspondence, 2026-10-07; Resolved decisions 35). Milestone
 *Evidence model*. Principle: capture source semantics losslessly at
 ingestion, preserve immutable evidence locally, derive search
 structures from that evidence. The product boundary stays Bridge →
@@ -912,8 +911,9 @@ removed Bridge container are kept as history.
     `indeterminate` count, established before negation (Phase 4
     item 5). Define `BODY`/`TEXT` equivalents by what the index holds
     (`body_words`, `attachment_text_words`), never by Gluon's
-    behaviour. Omit IMAP UID, KEYWORD, DRAFT and DELETED. Design note:
-    `docs/design/2026-10-07-deterministic-query-predicates.md`.
+    behaviour. Omit IMAP UID, KEYWORD, DRAFT and DELETED. The
+    assessment behind this is in the issues' bodies (#1077–#1093), not
+    in the repository.
 
 ## Notes for Agents
 
