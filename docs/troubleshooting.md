@@ -1185,9 +1185,13 @@ only, never filenames or text (`make logs`):
 
 - `extractor <module> failed (dispatch_via=<mime|extension|...>):
   <ExceptionType>` (WARNING), per extraction that fails: an encrypted
-  PDF that needs a password, a Tesseract error or timeout, a DOCX or
-  XLSX the parser rejects, or (`zip uncompressed-size cap exceeded`) a
-  DOCX or XLSX that would decompress past its cap. For a legacy `.doc`
+  PDF that needs a password, a Tesseract error or timeout, a DOCX,
+  XLSX or PPTX the parser rejects (`PptxRelationshipChainError` is a
+  deck whose parts are chained too deep to open,
+  `PptxPackageBudgetError` one whose XML would decompress past
+  32 MiB, or with more than 20,000 members or 8 MiB of relationship
+  parts), or (`zip uncompressed-size cap exceeded`) a DOCX, XLSX or
+  PPTX that would decompress past its cap. For a legacy `.doc`
   or `.xls` (#935) the type names the tool's fate: `ToolTimeoutError`,
   `ToolCrashError` (killed by a signal, including the `.xls` child's
   CPU limit), `ToolExitError` (an error, including the `.xls` child's
@@ -1246,6 +1250,12 @@ only, never filenames or text (`make logs`):
     budget above (#935).
   - `doc_output_bytes`: catdoc wrote more than 8 MiB for a legacy
     `.doc`; the rest is not read (#935).
+  - `pptx_slides`, `pptx_shapes`, `pptx_table_cells`,
+    `pptx_text_chars`: the walk over a PowerPoint deck stopped at its
+    slide budget (5,000 slide-list entries), shape budget (100,000,
+    counting groups and the shapes in them), table budget (200,000 rows
+    and cells) or 10,000,000-character text budget; the slides after it
+    are not read.
 
   The other caps either skip or fail the whole attachment and show as
   `too_large` or `failed` instead (`INDEXER_ATTACHMENT_MAX_BYTES`, the
@@ -1285,7 +1295,8 @@ only, never filenames or text (`make logs`):
     so none are lost, and the 5-minute flush still applies.
   - What the outcomes mean: `cached` counts attachments served from the
     extraction cache instead of extracted again. `unsupported` is a type
-    no extractor reads, including legacy PowerPoint `.ppt` (#957), and
+    no extractor reads, including legacy PowerPoint `.ppt` (#957),
+    PowerPoint slideshows and templates (`.ppsx`, `.potx`), and
     password-protected Office files and other OLE2 files not labelled
     `.doc` / `.xls`, recorded with "OLE2 compound file" rather than as
     `failed`, so they are not retried (#694). Genuine legacy `.doc` and
