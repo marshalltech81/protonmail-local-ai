@@ -5489,9 +5489,53 @@ class TestPptxExtractor:
         opened = _count_calls(monkeypatch, pptx._pptx, "Presentation")
         caplog.set_level("DEBUG")
         result = extract(content_type=_PPTX_MIME, filename="a.pptx", payload=payload)
-        assert (result.status, result.error) == (STATUS_FAILED, "PptxExpansionBudgetError")
+        assert (result.status, result.error) == (STATUS_FAILED, "PptxPackageBudgetError")
         assert opened[0] == 0
         assert _PPTX_MARKER not in caplog.text
+
+    @pytest.mark.parametrize(
+        ("budget", "setting", "extra"),
+        [
+            # Many tiny stored members: they add nothing to the expansion
+            # sum, but python-pptx builds a part for each one related.
+            ("_MAX_MEMBERS", 50, [(f"c/p{i}.xml", b"") for i in range(60)]),
+            # A wide relationship list, even to parts that do not exist:
+            # python-pptx walks every relationship while it opens.
+            ("_MAX_RELS_BYTES", 4096, [("c/_rels/p.xml.rels", b" " * 5000)]),
+        ],
+        ids=["members", "rels-bytes"],
+    )
+    def test_package_count_budgets_fail_before_python_pptx_opens(
+        self, budget, setting, extra, monkeypatch, caplog
+    ):
+        """Review round 2: python-pptx materializes every related part and
+        relationship before any walk budget applies. Members and the bytes
+        of ``.rels`` members (the only relationship parts python-pptx
+        reads, found by name) are counted from the central directory."""
+        from src.extractors import pptx
+
+        payload = _rewrite_deck(_deck(_boxes(_PPTX_MARKER)), {}, extra)
+        monkeypatch.setattr(pptx, budget, setting)
+        opened = _count_calls(monkeypatch, pptx._pptx, "Presentation")
+        caplog.set_level("DEBUG")
+        result = extract(content_type=_PPTX_MIME, filename="a.pptx", payload=payload)
+        assert (result.status, result.error) == (STATUS_FAILED, "PptxPackageBudgetError")
+        assert opened[0] == 0
+        assert _PPTX_MARKER not in caplog.text
+
+    def test_package_budgets_spent_exactly_open_the_deck(self, monkeypatch):
+        import io
+        import zipfile
+
+        from src.extractors import pptx
+
+        payload = _deck(_boxes("exact"))
+        infos = zipfile.ZipFile(io.BytesIO(payload)).infolist()
+        monkeypatch.setattr(pptx, "_MAX_MEMBERS", len(infos))
+        monkeypatch.setattr(
+            pptx, "_MAX_RELS_BYTES", sum(i.file_size for i in infos if i.filename.endswith(".rels"))
+        )
+        assert pptx.extract(payload) == ("exact", "pptx")
 
     def test_payload_that_is_not_a_zip_is_left_to_python_pptx(self, monkeypatch):
         from src.extractors import pptx
@@ -5503,7 +5547,7 @@ class TestPptxExtractor:
             payload=b"not a zip " + _PPTX_MARKER.encode(),
         )
         assert result.status == STATUS_FAILED
-        assert result.error != "PptxExpansionBudgetError"
+        assert result.error != "PptxPackageBudgetError"
         assert opened[0] == 1
 
     def test_ordinary_deck_is_under_the_expansion_budget(self, monkeypatch):
@@ -5946,6 +5990,10 @@ _REPORTED_CAPS = {
 }
 # ... or the reason it is not reported as an extractor cap.
 _WORKBOOK_FAILS = "fails the workbook (XlsxEagerPartBudgetError): a failed row, counted as failed="
+_DECK_FAILS = (
+    "fails the deck (PptxPackageBudgetError): a failed row with its rate-limited "
+    "WARNING, counted as failed="
+)
 _UNREPORTED_CAPS = {
     "src.extractors:max_bytes": (
         "skips the whole attachment as too_large, counted as too_large= in the aggregate"
@@ -5967,10 +6015,9 @@ _UNREPORTED_CAPS = {
     "src.extractors.xlsx:_MAX_EAGER_PART_BYTES": _WORKBOOK_FAILS,
     "src.extractors.xlsx:_MAX_EAGER_BYTES": _WORKBOOK_FAILS,
     "src.extractors.xlsx:_MAX_EAGER_READS": _WORKBOOK_FAILS,
-    "src.extractors.pptx:_MAX_EXPANSION_BYTES": (
-        "fails the deck (PptxExpansionBudgetError): a failed row with its rate-limited "
-        "WARNING, counted as failed="
-    ),
+    "src.extractors.pptx:_MAX_EXPANSION_BYTES": _DECK_FAILS,
+    "src.extractors.pptx:_MAX_MEMBERS": _DECK_FAILS,
+    "src.extractors.pptx:_MAX_RELS_BYTES": _DECK_FAILS,
     "src.extractors.xls:_MAX_OUTPUT_BYTES": (
         "child output past it cannot come from a working child: XlsOutputError, a failed row "
         "with its rate-limited WARNING, counted as failed="

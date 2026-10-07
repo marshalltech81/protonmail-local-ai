@@ -1189,8 +1189,9 @@ only, never filenames or text (`make logs`):
   PDF that needs a password, a Tesseract error or timeout, a DOCX,
   XLSX or PPTX the parser rejects (`PptxRelationshipChainError` is a
   deck whose parts are chained too deep to open,
-  `PptxExpansionBudgetError` one whose XML would decompress past
-  32 MiB), or (`zip uncompressed-size cap exceeded`) a DOCX, XLSX or
+  `PptxPackageBudgetError` one whose XML would decompress past
+  32 MiB, or with more than 20,000 members or 8 MiB of relationship
+  parts), or (`zip uncompressed-size cap exceeded`) a DOCX, XLSX or
   PPTX that would decompress past its cap. For a legacy `.doc`
   or `.xls` (#935) the type names the tool's fate: `ToolTimeoutError`,
   `ToolCrashError` (killed by a signal, including the `.xls` child's

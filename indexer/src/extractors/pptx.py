@@ -21,11 +21,16 @@ The work is bounded per extraction, counted as the walk goes:
   more than ``ZIP_MAX_UNCOMPRESSED_BYTES`` before python-pptx opens it.
   Opening parses every XML part the package relates whole with lxml,
   which refuses elements nested more than 256 deep and text nodes over
-  10 MB. Plainly timed, 166 MB of slide XML parses in about a second but
-  peaks at 2.5 GB, so a deck whose members expand by more than
-  ``_MAX_EXPANSION_BYTES`` past their compressed size fails as
-  ``PptxExpansionBudgetError`` before python-pptx opens it. python-pptx follows the
-  package's relationships recursively, so a long chain of related parts
+  10 MB, and builds a part for every related member and walks every
+  relationship. Plainly timed, 166 MB of slide XML parses in about a
+  second but peaks at 2.5 GB, and 200,000 tiny related members take
+  about 4 s. So before python-pptx opens it, a deck fails as
+  ``PptxPackageBudgetError`` when its members expand by more than
+  ``_MAX_EXPANSION_BYTES`` past their compressed size, number more than
+  ``_MAX_MEMBERS``, or hold more than ``_MAX_RELS_BYTES`` of
+  relationship parts, all read from the ZIP central directory. python-pptx
+  follows the package's relationships recursively, so a long chain of
+  related parts
   raises ``RecursionError`` while it opens, which is turned into
   ``PptxRelationshipChainError`` here: a chain of crafted parts is a
   property of the file, not host pressure.
@@ -106,6 +111,20 @@ _ELEMENT_COST = 8
 # expand; a long text-heavy deck's XML expands by a few MB.
 _MAX_EXPANSION_BYTES = 32 * 1024 * 1024
 
+# Members in the package (review round 2). python-pptx builds a part for
+# every member a relationship names, about 18 microseconds each plainly
+# timed, and tiny stored members add nothing to the expansion above. A
+# 1,000-slide deck with notes and media has a few thousand members.
+_MAX_MEMBERS = 20_000
+
+# Declared bytes of relationship parts (review round 2). python-pptx reads
+# a part's relationships only from the member named for it under
+# ``_rels/`` ending ``.rels``, so the name finds every one, and it walks
+# each relationship, even to a part that does not exist: 300,000 took
+# about 2 s. A relationship is about 100 bytes, so this allows about
+# 80,000, several times a large deck's.
+_MAX_RELS_BYTES = 8 * 1024 * 1024
+
 _PARAGRAPH = qn("a:p")
 _TEXT_ELEMENTS = (CT_RegularTextRun, CT_TextField, CT_TextLineBreak)
 
@@ -118,28 +137,32 @@ class PptxRelationshipChainError(Exception):
         super().__init__("package relationship chain too deep to open")
 
 
-class PptxExpansionBudgetError(Exception):
-    """The deck's members expand past ``_MAX_EXPANSION_BYTES``. Fixed
-    text."""
+class PptxPackageBudgetError(Exception):
+    """The deck's package is over a budget checked before python-pptx
+    opens it: expansion, member count or relationship bytes. Fixed text."""
 
     def __init__(self) -> None:
-        super().__init__("package expands past the PPTX expansion budget")
+        super().__init__("package over a PPTX pre-open budget")
 
 
-def _check_expansion(payload: bytes) -> None:
-    """Raise when the members' declared sizes expand past the budget.
-    Reads only the central directory, as the dispatcher's ZIP guard does;
-    zipfile stops a member at its declared size when python-pptx reads
-    it. A payload that is not a ZIP is left to python-pptx to reject."""
+def _check_package(payload: bytes) -> None:
+    """Raise when the package is over a pre-open budget. Reads only the
+    central directory, as the dispatcher's ZIP guard does; zipfile stops a
+    member at its declared size when python-pptx reads it. A payload that
+    is not a ZIP is left to python-pptx to reject."""
     try:
         with zipfile.ZipFile(io.BytesIO(payload)) as archive:
-            expansion = sum(
-                max(info.file_size - info.compress_size, 0) for info in archive.infolist()
-            )
+            members = archive.infolist()
     except zipfile.BadZipFile:
         return
-    if expansion > _MAX_EXPANSION_BYTES:
-        raise PptxExpansionBudgetError()
+    expansion = sum(max(info.file_size - info.compress_size, 0) for info in members)
+    rels_bytes = sum(info.file_size for info in members if info.filename.endswith(".rels"))
+    if (
+        len(members) > _MAX_MEMBERS
+        or expansion > _MAX_EXPANSION_BYTES
+        or rels_bytes > _MAX_RELS_BYTES
+    ):
+        raise PptxPackageBudgetError()
 
 
 class _Budget:
@@ -187,7 +210,7 @@ def extract(
     on_progress: Callable[[], None] | None = None,  # noqa: ARG001
 ) -> tuple[str, str]:
     """Extract text from a PPTX payload. Returns (text, "pptx")."""
-    _check_expansion(payload)
+    _check_package(payload)
     try:
         presentation = _pptx.Presentation(io.BytesIO(payload))
     except RecursionError:
