@@ -932,7 +932,9 @@ and thread IDs always). The envelope (`filters`, `address_matches`,
 page's messages before projection, so a projected and an unprojected
 page continue each other. An unknown name is an error that names it,
 and a list of more than 22 names (one per field; repeats add nothing)
-is an error; the log records only that `fields` was rejected. Omitting `fields`
+is an error; the log records only that `fields` was rejected and why,
+in a warning rate-limited to one per reason per minute with a count of
+the repeats. Omitting `fields`
 returns every field, as before. Because rows can be projected, the
 output schema requires only `claimant_id` and `thread_id` in a row.
 

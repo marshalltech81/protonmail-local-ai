@@ -12,6 +12,7 @@ from mcp.types import CallToolResult
 
 # Module import: get_thread and get_message have a local named ``count``.
 from ..lib import timings
+from ..lib.rate_limited_log import RateLimitedLog
 from ..lib.security import QUERY_MESSAGE_FIELDS, log_tool_call
 from ..lib.sqlite import (
     FILTER_TYPE_ERROR,
@@ -60,6 +61,10 @@ log = logging.getLogger("mcp.tools.retrieval")
 # Ceiling on query_messages page size: enumeration pages by cursor, so a
 # large page only bloats one response.
 _MAX_QUERY_LIMIT = 100
+
+# Seconds per window of the rate-limited ``fields`` rejection warning:
+# a client can repeat a rejected projection as fast as it likes.
+_FIELDS_REJECTION_LOG_INTERVAL_SECS = 60.0
 
 # Recipients rendered per role before the rest are summarized as a count.
 _MAX_LISTED_PARTICIPANTS = 10
@@ -274,6 +279,13 @@ def _describe_filters(uses: list[FilterUse]) -> str:
 
 
 def register_retrieval_tools(server, db):
+    fields_rejections = RateLimitedLog(
+        log,
+        ("too_many", "unknown_name"),
+        _FIELDS_REJECTION_LOG_INTERVAL_SECS,
+        first_msg="query_messages rejected invalid fields: reason=%s",
+        summary_msg="query_messages rejected invalid fields in the last %ds: %s",
+    )
     local_only_note = (
         "mcp-server has no live Bridge access. "
         "This response is based on the local SQLite index only."
@@ -963,13 +975,13 @@ def register_retrieval_tools(server, db):
             if len(fields) > len(QUERY_MESSAGE_FIELDS):
                 # Repeats add nothing: refuse the list before checking
                 # each name, with fixed text.
-                log.warning("query_messages rejected invalid fields")
+                fields_rejections.record("too_many")
                 raise ToolError(f"Error: fields lists at most {len(QUERY_MESSAGE_FIELDS)} names")
             unknown = [f for f in fields if f not in QUERY_MESSAGE_FIELDS]
             if unknown:
                 # The name goes back to the caller only; the log names
-                # the parameter, as for the other rejected inputs.
-                log.warning("query_messages rejected invalid fields")
+                # the parameter and reason, rate-limited.
+                fields_rejections.record("unknown_name")
                 raise ToolError(
                     f"Error: unknown field {clip(unknown[0], 100)!r} in fields; "
                     f"valid: {', '.join(QUERY_MESSAGE_FIELDS)}"

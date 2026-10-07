@@ -350,6 +350,26 @@ class TestQueryMessagesFields:
         assert marker not in caplog.text
         assert "query_messages rejected invalid fields" in caplog.text
 
+    def test_repeated_rejections_are_rate_limited(self, messages_db, caplog):
+        # Review round 2: a client repeating a rejected projection gets
+        # one WARNING per reason per window, not one per request.
+        server = _server(messages_db)
+        marker = "privatemarkerg990"
+        with caplog.at_level("DEBUG"):
+            for _ in range(5):
+                assert _wire(server, "query_messages", {"fields": [marker]}).is_error
+                assert _wire(server, "query_messages", {"fields": ["subject"] * 23}).is_error
+        lines = [
+            r.getMessage()
+            for r in caplog.records
+            if r.levelname == "WARNING" and "rejected invalid fields" in r.getMessage()
+        ]
+        assert lines == [
+            "query_messages rejected invalid fields: reason=unknown_name",
+            "query_messages rejected invalid fields: reason=too_many",
+        ]
+        assert marker not in caplog.text
+
 
 class TestQueryMessagesAddressMatches:
     """#801: the structured output lists, per address filter, how many
