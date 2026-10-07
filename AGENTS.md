@@ -563,8 +563,7 @@ Every open issue carries, on GitHub (owner, 2026-10-07):
 
 Each label's description on GitHub repeats its rule. Dependabot PRs
 are labelled `dependencies` as their type plus the area the update
-lands in; `.github/dependabot.yml` sets these labels once #1096 merges,
-and until then it still applies the retired ecosystem labels.
+lands in, as `.github/dependabot.yml` sets them.
 
 A dependency between issues is a GitHub "blocked by" relation, set
 when the issue is filed or when the dependency is found, with the
