@@ -28,6 +28,8 @@ SCHEMA_APPLICATION_ID = 0x504D4149
 EOF
 # FAKE_FAIL_REPLACE makes os.replace fail, as an I/O error at the swap
 # would.
+# FAKE_VANISH_STALE: another run's sweep removes the stale files this
+# run found, between its listing them and its reading their mtime.
 cat >"$WORK/stub/sitecustomize.py" <<'EOF'
 import os
 
@@ -36,6 +38,20 @@ if os.environ.get("FAKE_FAIL_REPLACE"):
         raise OSError(5, "synthetic replace failure")
 
     os.replace = _fail
+
+if os.environ.get("FAKE_VANISH_STALE"):
+    _stat = os.stat
+
+    def _vanish(path, *args, **kwargs):
+        name = "" if isinstance(path, int) else os.path.basename(str(path))
+        if name in (".restore-index.db", ".backup-index-20260101T000000Z.db"):
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
+        return _stat(path, *args, **kwargs)
+
+    os.stat = _vanish
 EOF
 
 cat >"$WORK/bin/docker" <<'EOF'
@@ -57,7 +73,17 @@ exec)
         mv "$FAKE_SWAP_DIR" "$FAKE_SWAP_DIR.moved"
         mkdir -m 755 "$FAKE_SWAP_DIR"
     fi
-    SQLITE_PATH="$FAKE_DATA/mail.db" PYTHONPATH="$FAKE_STUB" exec python3 -c "$5" "${@:6}"
+    SQLITE_PATH="$FAKE_DATA/mail.db" PYTHONPATH="$FAKE_STUB" python3 -c "$5" "${@:6}"
+    # FAKE_SECOND_BACKUP: a second backup, into this directory, starts
+    # in the same second and runs to completion between this run's copy
+    # and its export (its output goes to <directory>.out).
+    if [[ -n "${FAKE_SECOND_BACKUP:-}" && "$6" == make ]]; then
+        # Bash 5 applies the assignments before a command one by one, so
+        # the trigger is cleared from a copy of the directory.
+        second="$FAKE_SECOND_BACKUP"
+        FAKE_SECOND_BACKUP= BACKUP_DIR="$second" \
+            bash "$FAKE_REPO/scripts/backup-index.sh" >"$second.out" 2>&1
+    fi
     ;;
 inspect)
     if [[ -n "${FAKE_NO_CONTAINER:-}" ]]; then
@@ -122,6 +148,18 @@ esac
 EOF
 chmod +x "$WORK/bin/docker"
 
+# FAKE_STAMP: two runs that start in the same second read the same
+# clock; unset, the real date answers.
+cat >"$WORK/bin/date" <<'EOF'
+#!/bin/bash
+if [[ -n "${FAKE_STAMP:-}" ]]; then
+    printf '%s\n' "$FAKE_STAMP"
+    exit 0
+fi
+exec /bin/date "$@"
+EOF
+chmod +x "$WORK/bin/date"
+
 # make_db PATH [VERSION] [APPLICATION_ID] [corrupt]: a synthetic WAL-mode
 # index carrying the marker, with uncheckpointed rows left in the WAL.
 make_db() {
@@ -155,7 +193,7 @@ reset() {
 
 run_backup() {
     PATH="$WORK/bin:$PATH" FAKE_DOCKER_LOG="$WORK/docker.log" FAKE_DATA="$WORK/data" \
-        FAKE_RUNNING="${FAKE_RUNNING:-1}" FAKE_STUB="$WORK/stub" BACKUP_DIR="$1" \
+        FAKE_RUNNING="${FAKE_RUNNING:-1}" FAKE_STUB="$WORK/stub" FAKE_REPO="$REPO" BACKUP_DIR="$1" \
         bash "$REPO/scripts/backup-index.sh" >"$WORK/out" 2>&1 && STATUS=0 || STATUS=$?
 }
 
@@ -196,7 +234,9 @@ backup_writes_a_checked_private_copy() {
     [[ "$STATUS" -eq 0 ]]
     local copy
     copy=$(backups)
-    [[ "$copy" =~ /backups/index/mail-[0-9]{8}T[0-9]{6}Z\.db$ ]]
+    # UTC second, then a per-run token (pid and 4 random bytes), so two
+    # runs that start in the same second never share a name (#1051).
+    [[ "$copy" =~ /backups/index/mail-[0-9]{8}T[0-9]{6}Z-[0-9]+-[0-9a-f]{8}\.db$ ]]
     [[ "$(mode_of "$WORK/backups/index")" == 0o700 ]]
     [[ "$(mode_of "$copy")" == 0o600 ]]
     grep -F "Index backup: $copy" "$WORK/out" >/dev/null
@@ -362,7 +402,75 @@ backup_reclaims_stale_temporary_copies() {
     [[ "$STATUS" -eq 0 ]]
     [[ ! -e "$WORK/data/.backup-index-20260101T000000Z.db" ]]
     [[ -e "$WORK/data/.backup-index-29990101T000000Z.db" ]]
-    grep -F 'Removed 1 stale temporary copy' "$WORK/out" >/dev/null
+    grep -F 'Removed 1 stale backup copy(s) and 0 stale restore staging file(s) from the index volume' "$WORK/out" >/dev/null
+}
+
+backup_reclaims_a_stale_restore_staging_file() {
+    reset
+    make_db "$WORK/data/mail.db"
+    # Left by a restore container killed before its cleanup ran (#1054).
+    printf 'stale\n' >"$WORK/data/.restore-index.db"
+    touch -t 202601010000 "$WORK/data/.restore-index.db"
+    run_backup "$WORK/backups"
+    [[ "$STATUS" -eq 0 ]]
+    [[ ! -e "$WORK/data/.restore-index.db" ]]
+    grep -F 'Removed 0 stale backup copy(s) and 1 stale restore staging file(s) from the index volume' "$WORK/out" >/dev/null
+    no_temp_copy_left
+    # A recent one is a restore still writing and must stay.
+    reset
+    make_db "$WORK/data/mail.db"
+    printf 'running\n' >"$WORK/data/.restore-index.db"
+    run_backup "$WORK/backups"
+    [[ "$STATUS" -eq 0 ]]
+    [[ -e "$WORK/data/.restore-index.db" ]]
+    if grep -F 'Removed' "$WORK/out" >/dev/null; then
+        return 1
+    fi
+}
+
+backup_tolerates_stale_files_another_run_removes() {
+    reset
+    make_db "$WORK/data/mail.db"
+    printf 'stale\n' >"$WORK/data/.backup-index-20260101T000000Z.db"
+    touch -t 202601010000 "$WORK/data/.backup-index-20260101T000000Z.db"
+    printf 'stale\n' >"$WORK/data/.restore-index.db"
+    touch -t 202601010000 "$WORK/data/.restore-index.db"
+    FAKE_VANISH_STALE=1 run_backup "$WORK/backups"
+    [[ "$STATUS" -eq 0 ]]
+    [[ ! -e "$WORK/data/.backup-index-20260101T000000Z.db" && ! -e "$WORK/data/.restore-index.db" ]]
+    # The other run removed them, so this run reports nothing.
+    if grep -F 'Removed' "$WORK/out" >/dev/null; then
+        return 1
+    fi
+    [[ -n "$(backups)" ]]
+    no_temp_copy_left
+}
+
+backup_runs_in_the_same_second_do_not_collide() {
+    reset
+    rm -rf "$WORK/backups2" "$WORK/backups2.out"
+    make_db "$WORK/data/mail.db"
+    # Both runs read the same clock; the second runs to completion while
+    # the first is between its copy and its export (#1051).
+    FAKE_STAMP=20260101T000000Z FAKE_SECOND_BACKUP="$WORK/backups2" run_backup "$WORK/backups"
+    [[ "$STATUS" -eq 0 ]]
+    grep -F 'Index backup: ' "$WORK/backups2.out" >/dev/null
+    local first second
+    first=$(find "$WORK/backups" -name 'mail-20260101T000000Z-*.db')
+    second=$(find "$WORK/backups2" -name 'mail-20260101T000000Z-*.db')
+    [[ -n "$first" && -n "$second" && "${first##*/}" != "${second##*/}" ]]
+    [[ "$(query "$first" 'SELECT count(*) FROM t')" == 200 ]]
+    [[ "$(query "$second" 'SELECT count(*) FROM t')" == 200 ]]
+    # The in-volume temporary names differed too (the tag after "make"
+    # in the exec calls), and the second run's sweep kept the first
+    # run's copy, which was in use rather than stale.
+    [[ "$(grep -E '^ make 20260101T000000Z-' "$WORK/docker.log" | awk '{print $NF}' | sort -u | wc -l | tr -d ' ')" == 2 ]]
+    if grep -F 'Removed' "$WORK/out" "$WORK/backups2.out" >/dev/null; then
+        return 1
+    fi
+    no_temp_copy_left
+    marker_not_printed
+    rm -rf "$WORK/backups2" "$WORK/backups2.out"
 }
 
 backup_needs_a_running_indexer() {
@@ -770,6 +878,9 @@ check "backup refuses a directory other users can open" backup_refuses_a_shared_
 check "backup refuses a directory shared through an ACL" backup_refuses_a_directory_shared_through_an_acl
 check "backup writes into the directory it checked" backup_writes_into_the_checked_directory
 check "backup reclaims stale temporary copies" backup_reclaims_stale_temporary_copies
+check "backup reclaims a stale restore staging file" backup_reclaims_a_stale_restore_staging_file
+check "backup tolerates stale files another run removes first" backup_tolerates_stale_files_another_run_removes
+check "backup runs starting in the same second do not collide" backup_runs_in_the_same_second_do_not_collide
 check "backup needs a running indexer" backup_needs_a_running_indexer
 check "backup writes nothing when integrity_check fails" backup_writes_nothing_when_the_check_fails
 check "restore replaces the index and drops the old WAL" restore_replaces_the_index

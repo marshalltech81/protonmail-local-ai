@@ -37,6 +37,8 @@ def refuse(message):
 
 
 db = Path(os.environ["SQLITE_PATH"])
+# backup-index removes a stale one of these (left by a killed container)
+# by this name; keep the two in step.
 staged = db.with_name(".restore-index.db")
 os.umask(0o077)
 try:

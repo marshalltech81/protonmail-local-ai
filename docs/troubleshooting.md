@@ -798,11 +798,15 @@ SQLite's online backup API from a read-only connection, which reads one
 consistent snapshot while the indexer writes, into a temporary file next
 to the index in the index volume (so the volume needs free space for one
 more copy of `mail.db` while it runs). It runs `PRAGMA integrity_check`
-on that copy, streams it to `BACKUP_DIR/mail-<UTC timestamp>.db`, checks
-the SHA-256 of the host file against the container's, and removes the
-temporary file. A temporary copy left by a run that was killed before
-its cleanup (`.backup-index-*.db` in the volume) is removed by the next
-backup once it is more than 6 hours old, and the run says how many it
+on that copy, streams it to `BACKUP_DIR/mail-<UTC timestamp>-<run>.db`
+(where `<run>` is the process ID and four random bytes, so two backups
+started in the same second never share a name, in the volume or on the
+host), checks the SHA-256 of the host file against the container's, and
+removes the temporary file. A temporary copy left by a run that was killed before
+its cleanup (`.backup-index-*.db` in the volume), and the staging file a
+killed restore leaves (`.restore-index.db`, see below), are removed by
+the next backup once they are more than 6 hours old (a run or a restore
+still writing keeps its file), and the run says how many of each it
 removed. The target prints the integrity result, the path, the
 size and the schema version, and writes nothing to `BACKUP_DIR` when
 the check fails or when the copy lacks what `restore-index` requires
@@ -817,7 +821,7 @@ the running containers changes.
 To go back to a copy:
 
 ```bash
-make restore-index BACKUP="$HOME/protonmail-local-ai-backup/mail-20261007T120000Z.db"
+make restore-index BACKUP="$HOME/protonmail-local-ai-backup/mail-20261007T120000Z-48213-9f3ac1d2.db"
 ```
 
 It asks for `yes`, then:
@@ -834,7 +838,10 @@ It asks for `yes`, then:
    the `-wal` and `-shm` files and renames the copy over `mail.db` with
    the current file's mode, so mcp-server (another user) can still read
    it (an old WAL left beside the restored file would be replayed into
-   it); a staged copy is removed on any failure, a full volume included;
+   it); a staged copy (`.restore-index.db` in the volume) is removed on
+   any failure the container handles, a full volume included, and one
+   left by a killed container is removed by the next `make backup-index`
+   once it is 6 hours old;
 4. starts `indexer` and waits up to `RESTORE_WAIT_SECONDS` (900, checked
    before anything is stopped) for the startup lines of that new
    process, printing the `Startup identity` line
