@@ -74,6 +74,15 @@ jobs:
       - name: Run make status tests
         run: bash scripts/tests/make_status_test.sh
 
+      - name: Run backup-index and restore-index tests
+        run: bash scripts/tests/index_backup_test.sh
+
+      - name: Run image pin tests
+        run: bash scripts/tests/image_pin_test.sh
+
+      - name: Run the Trivy flag checks
+        run: bash scripts/tests/trivy_flags_test.sh
+
   indexer-pytest:
     name: indexer pytest
     runs-on: ubuntu-latest
@@ -88,7 +97,7 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
-          version: "0.11.6"
+          version: "0.12.23"
           enable-cache: true
           cache-dependency-glob: "indexer/uv.lock"
 
@@ -139,7 +148,7 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
-          version: "0.11.6"
+          version: "0.12.23"
           enable-cache: true
           cache-dependency-glob: "mcp-server/uv.lock"
 
@@ -176,7 +185,7 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
-          version: "0.11.6"
+          version: "0.12.23"
           enable-cache: true
           cache-dependency-glob: |
             indexer/uv.lock

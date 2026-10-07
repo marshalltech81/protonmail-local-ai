@@ -309,6 +309,10 @@ class ExtractionResult:
 # docx 5 still: a long part-relationship chain is now ``failed``
 # (``DocxRelationshipChainError``) instead of escaping as
 # ``RecursionError`` (#945); that escape cached no row, so none is stale.
+# docx 5 still: a package over a pre-open budget is now ``failed``
+# (``DocxPackageBudgetError``, #967, #946), with no bump: the walk after
+# the open has no budget yet (#1031), so the few over-budget ``success``
+# rows, whose text is still right, were left alone.
 # text 3: a payload starting with a fixed binary signature is recorded
 # ``unsupported`` instead of decoded as replacement characters, so the
 # ``success`` rows the previous version wrote for one are refreshed (#932).
@@ -323,13 +327,37 @@ class ExtractionResult:
 # pptx 1: the first ``.pptx`` extractor (#936). Rows cached ``unsupported``
 # for a ``.pptx`` before it carry no extractor, so no version marks them
 # stale; the "no extractor" sweep re-queues them instead.
+# pptx 2: reads slideshows (``.ppsx``) and templates (``.potx``), which
+# ``pptx.Presentation`` refused, so one labelled ``.pptx`` failed (#947).
+# ``.pptm`` / ``.ppsx`` / ``.potx`` occurrences cached "no extractor" are
+# re-queued by that sweep.
+# pptx 3: a deck over a pre-open budget is recorded ``unsupported``
+# instead of ``failed`` (#1032), so the ``failed`` rows version 2 wrote
+# for one are refreshed once; the startup sweep re-runs stale rows only,
+# never aged ``failed`` ones. The PPTX walk is budgeted (#936), so the
+# re-run is bounded.
+# docx 5 still: the same mapping for a document over a pre-open budget
+# (#1032) came with no bump, for the reason above (#1031): the few
+# ``failed`` rows version 5 wrote for one stay ``failed`` until the same
+# bytes are processed again more than 7 days on, or until a deliberate
+# bump follows #1031. PR #1068 briefly shipped ``docx`` 6 for this
+# mapping; PR #1075 reverted it. A row a build between the two stamped
+# ``docx@6`` is kept (a newer row is never downgraded, see
+# ``stale_extractor_module``); rolling back to such a build treats the
+# ``docx@5`` rows written since as stale and re-runs them through the
+# unbudgeted walk at its next start, which is that build's behaviour.
+# pptx 3 still: reads macro-enabled slideshows (``.ppsm``) and templates
+# (``.potm``), whose main parts python-pptx loaded as generic parts, so
+# one labelled ``.pptx`` failed by type (#1042); the bump above refreshes
+# those rows, and ``.ppsm`` / ``.potm`` occurrences cached "no extractor"
+# carry no version and are re-queued by that sweep.
 EXTRACTOR_VERSIONS: dict[str, int] = {
     "doc": 1,
     "docx": 5,
     "image": 3,
     "pdf": 5,
     "ppt": 1,
-    "pptx": 1,
+    "pptx": 3,
     "text": 3,
     "xls": 1,
     "xlsx": 6,
@@ -425,12 +453,21 @@ _OLE2_SIGNATURE = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
 # ``unsupported`` errors for an extractor exception the same bytes always
 # repeat in that extractor (#931), so a ``failed`` row would only re-run
 # it every ``_FAILED_CACHE_MAX_AGE``. Fixed text: the exceptions' own
-# messages can quote the document.
+# messages can quote the document. The PPTX and DOCX pre-open package
+# budgets are decided from the ZIP central directory alone (#1032).
 ENCRYPTED_PDF_ERROR = "encrypted PDF (open password required)"
 PDF_LIMIT_ERROR = "PDF structure exceeds pypdf limits"
 XLSX_EAGER_BUDGET_ERROR = "workbook exceeds the eager-part budget"
+PPTX_PACKAGE_BUDGET_ERROR = "presentation exceeds a pre-open package budget"
+DOCX_PACKAGE_BUDGET_ERROR = "document exceeds a pre-open package budget"
 PERMANENT_FAILURE_ERRORS = frozenset(
-    {ENCRYPTED_PDF_ERROR, PDF_LIMIT_ERROR, XLSX_EAGER_BUDGET_ERROR}
+    {
+        ENCRYPTED_PDF_ERROR,
+        PDF_LIMIT_ERROR,
+        XLSX_EAGER_BUDGET_ERROR,
+        PPTX_PACKAGE_BUDGET_ERROR,
+        DOCX_PACKAGE_BUDGET_ERROR,
+    }
 )
 # Extractors that read an OOXML package (a ZIP): each gets the OLE2 check
 # and the ZIP guard before its library opens the payload.
@@ -477,9 +514,17 @@ _MIME_DISPATCH: dict[str, str] = {
     # Legacy PowerPoint: OLE2 only; anything else is ``unsupported``
     # (``NON_OLE2_PPT_ERROR``, #957).
     "application/vnd.ms-powerpoint": "ppt",
-    # Presentations only: python-pptx refuses a package whose main part is
-    # the slideshow (``.ppsx``) or template (``.potx``) type (#936).
     "application/vnd.openxmlformats-officedocument.presentationml.presentation": "pptx",
+    # Macro-enabled decks (``.pptm``, text only; macros are never read),
+    # slideshows (``.ppsx``) and templates (``.potx``): the PPTX extractor
+    # loads their main parts (#947), as it does the macro-enabled
+    # slideshows (``.ppsm``) and templates (``.potm``) it registers (#1042).
+    # Keys are lowercase: the label is lowercased before the lookup.
+    "application/vnd.ms-powerpoint.presentation.macroenabled.12": "pptx",
+    "application/vnd.openxmlformats-officedocument.presentationml.slideshow": "pptx",
+    "application/vnd.openxmlformats-officedocument.presentationml.template": "pptx",
+    "application/vnd.ms-powerpoint.slideshow.macroenabled.12": "pptx",
+    "application/vnd.ms-powerpoint.template.macroenabled.12": "pptx",
     "text/html": "html",
     "application/xhtml+xml": "html",
     "text/plain": "text",
@@ -499,6 +544,11 @@ _EXT_DISPATCH: dict[str, str] = {
     ".xls": "xls",
     ".ppt": "ppt",
     ".pptx": "pptx",
+    ".pptm": "pptx",
+    ".ppsx": "pptx",
+    ".potx": "pptx",
+    ".ppsm": "pptx",
+    ".potm": "pptx",
     ".html": "html",
     ".htm": "html",
     ".xhtml": "html",
@@ -760,6 +810,16 @@ def _permanent_failure_error(module_name: str, exc: Exception) -> str | None:
 
         if type(exc) is XlsxEagerPartBudgetError:
             return XLSX_EAGER_BUDGET_ERROR
+    elif module_name == "pptx":
+        from .pptx import PptxPackageBudgetError
+
+        if type(exc) is PptxPackageBudgetError:
+            return PPTX_PACKAGE_BUDGET_ERROR
+    elif module_name == "docx":
+        from .docx import DocxPackageBudgetError
+
+        if type(exc) is DocxPackageBudgetError:
+            return DOCX_PACKAGE_BUDGET_ERROR
     return None
 
 
@@ -888,6 +948,31 @@ def _validate_zip_payload(payload: bytes) -> str | None:
         # informative failure (e.g. python-docx's ``BadZipFile``).
         return None
     return None
+
+
+def over_package_budget(
+    payload: bytes, *, max_members: int, max_expansion_bytes: int, max_rels_bytes: int
+) -> bool:
+    """True when an OOXML package is over one of its extractor's pre-open
+    budgets (#936, #967): more than ``max_members`` members, members
+    expanding by more than ``max_expansion_bytes`` past their compressed
+    size, or more than ``max_rels_bytes`` declared in relationship
+    (``.rels``) members. Reads only the central directory, as
+    ``_validate_zip_payload`` does; zipfile stops a member at its declared
+    size when the library reads it. A payload that is not a ZIP is left
+    to the library to reject."""
+    import io
+
+    try:
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+            members = archive.infolist()
+    except zipfile.BadZipFile:
+        return False
+    expansion = sum(max(info.file_size - info.compress_size, 0) for info in members)
+    rels_bytes = sum(info.file_size for info in members if info.filename.endswith(".rels"))
+    return (
+        len(members) > max_members or expansion > max_expansion_bytes or rels_bytes > max_rels_bytes
+    )
 
 
 _IMPORT_CACHE: dict[str, Callable[..., tuple[str, str]] | None] = {}

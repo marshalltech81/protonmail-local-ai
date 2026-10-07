@@ -337,6 +337,13 @@ _SCOPE_DESCRIPTION = (
 )
 
 
+class EvidenceCarrier(_Output):
+    claimant_id: str = Field(description="A later message carrying the same attachment.")
+    sent_at: str | None
+    occurred_at: str | None
+    scope: EvidenceScope = Field(description="That message's scope label.")
+
+
 class EvidenceChunk(_Output):
     chunk_id: str = Field(
         description="Stable ID of the passage; ask_mailbox citations name it (chunk_id)."
@@ -379,6 +386,19 @@ class EvidenceChunk(_Output):
         "carrying the attachment); null when none is recorded."
     )
     scope: EvidenceScope = Field(description=_SCOPE_DESCRIPTION)
+    carried_by: list[EvidenceCarrier] | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description="Only with dedupe_attachments, on attachment passages: the other "
+        "messages of this thread carrying the same attachment (content hash) whose copy "
+        "of this passage was collapsed into this one, earliest first, at most "
+        f"{MAX_LISTED}; see carried_by_count. This passage is on the earliest carrier.",
+    )
+    carried_by_count: int | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description="Only with carried_by: every message counted there, listed or not.",
+    )
 
 
 class EvidenceThread(_Output):
@@ -393,6 +413,13 @@ class EvidenceThread(_Output):
     )
     retrieval_score: float | None = Field(description="Only with include_scores.")
     chunks: list[EvidenceChunk]
+    context_passages_left_out: int | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description="Only with scope=in_scope: this thread's context passages (of the "
+        "chosen source) left out. A thread with no chunks and a non-zero count has no "
+        "in-scope passage.",
+    )
 
 
 class EvidenceOutput(_Output):
@@ -401,6 +428,23 @@ class EvidenceOutput(_Output):
     from_name_matches: int | None = Field(description=_FROM_NAME_MATCHES_DESCRIPTION)
     threads: list[EvidenceThread] = Field(
         description="Threads in rank order, chunks ranked within."
+    )
+    context_passages_left_out: int | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description="Only with scope=in_scope: context passages left out in all.",
+    )
+    threads_without_source_passages: int | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description="Only with source=body or attachment on the mailbox-wide path: "
+        "ranked threads left out because none of their passages has that source.",
+    )
+    attachment_copies_collapsed: int | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description="Only with dedupe_attachments: repeated attachment passages folded "
+        "into the returned ones (the carried_by entries in all).",
     )
 
 
@@ -579,7 +623,26 @@ class QueryMessagesOutput(_Output):
     next_cursor: str | None = Field(
         description="Pass with the same filters for the next page; null when has_more is false."
     )
-    messages: list[ListedMessage] = Field(description="Newest send date first.")
+    messages: list[ListedMessage] = Field(
+        description="Newest send date first. With fields, each row holds only those "
+        "fields plus claimant_id and thread_id."
+    )
+
+
+def query_messages_output_schema() -> dict[str, Any]:
+    """``QueryMessagesOutput``'s schema with only ``claimant_id`` and
+    ``thread_id`` required in a row, since ``fields`` (#990) leaves the
+    others out."""
+    schema = QueryMessagesOutput.model_json_schema()
+    schema["$defs"]["ListedMessage"]["required"] = ["claimant_id", "thread_id"]
+    return schema
+
+
+def project_rows(content: dict[str, Any], fields: frozenset[str]) -> dict[str, Any]:
+    """``content`` (a dumped ``QueryMessagesOutput``) with each row cut to
+    ``fields``, in the row's own field order."""
+    rows = [{k: v for k, v in row.items() if k in fields} for row in content["messages"]]
+    return {**content, "messages": rows}
 
 
 class Contact(_Output):

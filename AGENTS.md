@@ -490,10 +490,12 @@ is exactly what this forbids.
   overstate it several times over.
 - A third-party parser whose cost cannot be bounded in-process (it
   allocates or loops on input before our code runs) runs in a child
-  process launched through `indexer/src/extractors/_runner.py`. The
-  runner enforces only a wall-clock timeout and an output cap; the
-  child wrapper itself must set `RLIMIT_AS` and `RLIMIT_CPU` before it
-  loads the parser, as `xls_child.py` does for xlrd. Measure a
+  process launched through `indexer/src/extractors/_runner.py`
+  `run_tool`. It enforces a wall-clock timeout and an output cap, and
+  starts the tool through `_launcher.py`, which sets `RLIMIT_AS` and
+  `RLIMIT_CPU` to the limits the caller passes before the parser loads;
+  every caller passes both, sized by a plain measurement of the tool
+  in the image (#995). Measure a
   candidate library on crafted input with plain timing and RSS before
   choosing it: two `.xls` readers failed that test (#935).
 - A review finding that calls for new parsing of untrusted input, or
@@ -569,6 +571,14 @@ Examples:
   as introduced by it even when nothing is broken today (owner,
   2026-10-07); only a problem that already existed on `main` may be
   deferred under the cap.
+- Re-scope trigger (owner, 2026-10-07): from the fourth review round
+  on, whenever a round finds problems in the code or text the PR
+  added, stop fixing and ask the owner before the next push: cut scope (drop or simplify
+  the part that keeps drawing findings), accept the open findings as
+  stated risks, or keep fixing. Explain each finding in plain terms,
+  and say whether the choice can change what the tools return.
+  Choosing to fix one round does not accept later rounds' findings.
+  An agent working the PR stops and reports instead of pushing.
 - File P3 findings as issues rather than fixing them ahead of
   go-live or P1/P2 work. Exception (owner, 2026-10-02): a small P3
   with an agreed fix and no new mechanism may be fixed before go-live.
@@ -797,6 +807,16 @@ Notes:
   `# nosemgrep: <rule-id>` comment on the reported line with the reason
   beside it. A rule change gets matching cases in its fixture
   (`.semgrep/compose.test.yml`, `.semgrep/shell.sh`).
+- for dependency (`pyproject.toml`, `uv.lock`, `pom.xml`) or Dockerfile
+  changes, run `make trivy`: the Trivy jobs from
+  `.github/workflows/security.yml` locally (the dependency scans of
+  `indexer/` and `mcp-server/` and the offline misconfiguration scan of
+  the repository, with the workflow's flags; needs `trivy` on `PATH`,
+  and warns when its version is not the pinned one). The flag values
+  live in the Makefile and the workflow; `make test-trivy-flags` (part
+  of `make test`, no Trivy needed) fails when they differ, so a change
+  to one is made in both. The image scans in
+  `.github/workflows/docker.yml` have no local target.
 - for Dockerfile, build, or container-runtime changes, run the smallest relevant `docker compose build ...` subset when practical
 - prefer real `.eml` fixtures for parser tests
 - a fixture generated with an office application (Word, PowerPoint,
@@ -844,6 +864,7 @@ Notes:
 - MCP search changes should verify hybrid/RRF behavior where applicable
 - mbsync entrypoint changes should update `mbsync/tests/entrypoint_test.sh`, which loads the real functions with external commands mocked; changes to mbsync's TLS or connection settings should also pass `make test-mbsync-tls` (the shipped image against a synthetic implicit-TLS server)
 - changes to `mbsync/mbsyncrc.template` should pass `make test-mbsync-layout` (the shipped image's isync against synthetic Maildir stores: folder layout, and spurious and genuine UIDVALIDITY changes with the documented recovery)
+- a base-image digest bump in `indexer/Dockerfile` or `mcp-server/Dockerfile` (Dependabot's or by hand) moves `PYTHON_IMAGE` in `mbsync/tests/tls_check.sh` with it; `scripts/tests/image_pin_test.sh` (`make test-image-pins`, also in CI) fails while the three differ, since Dependabot does not update the script
 - Compose changes that touch service selection, dependencies, hardening or ports should keep `scripts/tests/compose_test.sh` passing; it also checks the required hardening on the merged config of every overlay combination the Makefile uses, and that every base service starts with no profile active, so a new overlay, combination or profile-activating target is added to its list
 - indexing, chunking, embedding-storage, or retrieval changes should pass `make baseline`; if ranking changes on purpose, regenerate the snapshot with `make baseline UPDATE=1` and explain the snapshot diff in the PR
 - `ask_mailbox` prompt or answer-path changes can be compared with the opt-in `make eval-answers` / `make eval-answers-compare` (synthetic corpus only, calls the configured `INFERENCE_*` and `JUDGE_*` providers, never in CI; see `mcp-server/tests/eval/README.md`)

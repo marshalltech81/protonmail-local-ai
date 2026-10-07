@@ -657,7 +657,10 @@ as a file, is body text. Neither is an inline `message/*` part sent
 in a transfer encoding (base64 or quoted-printable, which RFC 2046
 forbids for it): the parser exposes it as its encoded transport text,
 so it adds nothing to the body. At most 200 text parts per message
-(`MAX_BODY_TEXT_PARTS`) are decoded; later ones are left out.
+(`MAX_BODY_TEXT_PARTS`) are decoded; later ones are left out. The
+walk over a message's parts stops after 10,000 parts
+(`MAX_WALKED_PARTS`, the parts inside attachments included); later
+parts add no body text and no attachments.
 
 A query like "what did my landlord say about the heating?" returns the
 full landlord thread (via the coarse lanes) and surfaces the specific
@@ -1015,7 +1018,7 @@ as message bodies. Two extra tables sit alongside `message_chunks`:
 | Table | Keyed by | Purpose |
 |---|---|---|
 | `attachments` | attachment_occurrence_id | Per-occurrence row capturing filename + MIME + size as it appeared on a specific email. The occurrence id includes the message, payload hash, filename, and attachment slot so duplicate same-payload files in one email are still represented. `extractor_module` names the extraction row the occurrence uses (see below; '' when its label selects no extractor). When one message carries the same bytes under labels that run different extractors, the texts share the message's chunk slice for the payload, and every text's chunks are kept. A text hit in `search_attachments` is attributed to an occurrence whose row is a success; with two such occurrences in one message, to the first by occurrence id. |
-| `attachment_extractions` | (attachment_id, extractor_module) | Cache of extracted text + status, keyed by the payload's sha256 and the extractor module the occurrence's MIME type and filename run on those bytes, after the container check (OOXML bytes labelled `.doc` run `docx` and share the `.docx` row; '' when the label selects no extractor) (#928). Dispatch from a label and the bytes is deterministic, so every occurrence with the same key would extract the same result, and an occurrence is served only what an extraction under its own label gives, whatever labels of the same bytes arrived before it: an OLE2 `.doc` first seen as `.txt`, or a PowerPoint file first sent as `.doc` (#986), no longer decides the later occurrences' result. The same bytes under two labels that run different extractors store two rows; the cost is one extraction per module the bytes arrive under and a second copy of the text, which is negligible next to the mail itself. The expensive work (Tesseract OCR, pypdf parse, DOCX walk) runs at most once per payload and module, including within one indexing batch, where results not yet committed are shared by the same key. Non-success rows are also honored: `empty` short-circuits unconditionally; `too_large` short-circuits while the payload still exceeds `INDEXER_ATTACHMENT_MAX_BYTES`, and is re-extracted once the operator raises the cap far enough for it to fit (#693); `unsupported` short-circuits while it holds: an "OCR disabled" row until OCR is turned on; an "OLE2 compound file" row (an OLE2 payload under an OOXML label, #694, #936), a "binary payload labelled as text" row (#932), a "not an OLE2 compound file" row under the `ppt` module (#957) and a "no extractor" row for good, since the label and the bytes decide them; an encrypted-PDF or pypdf-limit row under `pdf` and an eager-part-budget row under `xlsx` for good too, since that module would decline the same bytes again (#931); any other (an extractor not importable in the image) only under the '' module; `failed` short-circuits within a 7-day retry window so a chronic failure stops re-running on every reappearance, but a real fix landed via dependency upgrade can pick the payload up later. The `extractor` column carries a version (`docx@5`); a row written by an older version of a fixed extractor (`extractors.EXTRACTOR_VERSIONS`) is re-extracted by the next occurrence that uses it, and the indexer re-queues every message with an occurrence using it once at startup so their chunks are rebuilt, except dead-lettered messages, which keep their stale chunks until `make requeue-dead` rescues them. Rows from a newer version (after a rollback) are kept. A row is deleted with the last `attachments` row that uses it (see *Cascade on message removal*). A stale row an OCR extractor wrote (`image-ocr`, `pdf-ocr`) is kept and served while `INDEXER_OCR_ENABLED=false`, since a refresh could only replace its text with "OCR disabled"; it is refreshed once OCR is on. Likewise, once OCR is on, the startup sweep re-queues each message with an occurrence using an "OCR disabled" row. The sweep also re-queues, whatever the OCR setting, each message whose occurrence uses a "no extractor" or "OLE2 compound file" row but whose label now selects another module, as when a release starts routing an extension such as `.heic` (#691), `.dotx` (#937), `.pptx` (#936) or `.ppt` (#957); the reprocess writes the occurrence's own row and points the occurrence at it, so each is re-queued once. Likewise, after `INDEXER_ATTACHMENT_MAX_BYTES` is raised, it re-queues every message with an occurrence using a `too_large` row whose size (`attachments.size_bytes`) now fits; the re-run rewrites the row, so each is re-queued once, and bytes still over the cap are never re-queued (#693). Schema v1 introduced the key; see *Schema versions*. |
+| `attachment_extractions` | (attachment_id, extractor_module) | Cache of extracted text + status, keyed by the payload's sha256 and the extractor module the occurrence's MIME type and filename run on those bytes, after the container check (OOXML bytes labelled `.doc` run `docx` and share the `.docx` row; '' when the label selects no extractor) (#928). Dispatch from a label and the bytes is deterministic, so every occurrence with the same key would extract the same result, and an occurrence is served only what an extraction under its own label gives, whatever labels of the same bytes arrived before it: an OLE2 `.doc` first seen as `.txt`, or a PowerPoint file first sent as `.doc` (#986), no longer decides the later occurrences' result. The same bytes under two labels that run different extractors store two rows; the cost is one extraction per module the bytes arrive under and a second copy of the text, which is negligible next to the mail itself. The expensive work (Tesseract OCR, pypdf parse, DOCX walk) runs at most once per payload and module, including within one indexing batch, where results not yet committed are shared by the same key. Non-success rows are also honored: `empty` short-circuits unconditionally; `too_large` short-circuits while the payload still exceeds `INDEXER_ATTACHMENT_MAX_BYTES`, and is re-extracted once the operator raises the cap far enough for it to fit (#693); `unsupported` short-circuits while it holds: an "OCR disabled" row until OCR is turned on; an "OLE2 compound file" row (an OLE2 payload under an OOXML label, #694, #936), a "binary payload labelled as text" row (#932), a "not an OLE2 compound file" row under the `ppt` module (#957) and a "no extractor" row for good, since the label and the bytes decide them; an encrypted-PDF or pypdf-limit row under `pdf`, an eager-part-budget row under `xlsx` and a pre-open package-budget row under `pptx` or `docx` for good too, since that module would decline the same bytes again (#931, #1032); any other (an extractor not importable in the image) only under the '' module; `failed` short-circuits within a 7-day retry window so a chronic failure stops re-running on every reappearance, but a real fix landed via dependency upgrade can pick the payload up later. The `extractor` column carries a version (`docx@5`); a row written by an older version of a fixed extractor (`extractors.EXTRACTOR_VERSIONS`) is re-extracted by the next occurrence that uses it, and the indexer re-queues every message with an occurrence using it once at startup so their chunks are rebuilt, except dead-lettered messages, which keep their stale chunks until `make requeue-dead` rescues them. Rows from a newer version (after a rollback) are kept. A row is deleted with the last `attachments` row that uses it (see *Cascade on message removal*). A stale row an OCR extractor wrote (`image-ocr`, `pdf-ocr`) is kept and served while `INDEXER_OCR_ENABLED=false`, since a refresh could only replace its text with "OCR disabled"; it is refreshed once OCR is on. Likewise, once OCR is on, the startup sweep re-queues each message with an occurrence using an "OCR disabled" row. The sweep also re-queues, whatever the OCR setting, each message whose occurrence uses a "no extractor" or "OLE2 compound file" row but whose label now selects another module, as when a release starts routing an extension such as `.heic` (#691), `.dotx` (#937), `.pptx` (#936), `.ppt` (#957), `.pptm` / `.ppsx` / `.potx` (#947) or `.ppsm` / `.potm` (#1042); the reprocess writes the occurrence's own row and points the occurrence at it, so each is re-queued once. Likewise, after `INDEXER_ATTACHMENT_MAX_BYTES` is raised, it re-queues every message with an occurrence using a `too_large` row whose size (`attachments.size_bytes`) now fits; the re-run rewrites the row, so each is re-queued once, and bytes still over the cap are never re-queued (#693). Schema v1 introduced the key; see *Schema versions*. |
 
 Per-occurrence chunks land in `message_chunks` with the
 `attachment_id` column populated and `kind` set to `attachment`. They embed exactly like body chunks
@@ -1065,15 +1068,19 @@ each message whose occurrence of it now selects a module.
 
 - **`.doc`** text comes from `catdoc` (Debian's `catdoc` package in the
   indexer image), run with `-d utf-8 -w` (UTF-8 output whatever the
-  locale, no line wrapping).
+  locale, no line wrapping), under 64 MiB of address space and 10 s of
+  CPU, killed after 60 s (#995). catdoc streams the document: measured
+  in the image, the fixture and LibreOffice-written documents of 8.8 and
+  21.9 MB take 0.002 to 0.11 s of CPU and complete under 4 to 5 MiB of
+  address space.
 - **`.xls`** is read by `xlrd` 2.0.2 in a child Python process
   (`extractors/xls_child.py`, started as `python -I`). xlrd's work on
   opening a workbook is not bounded by the payload size: its
   shared-string loop trusts a declared count and a signed skip length
   (6 KB of workbook can loop until memory runs out), and its OLE2
   directory walk recurses with no cycle check (`RecursionError`). So
-  the child lowers its own address space (512 MiB) and CPU time (30 s)
-  before importing xlrd, and the parent kills it after 45 s. Inside
+  the child runs under 512 MiB of address space and 30 s of CPU, set
+  before it starts, and the parent kills it after 45 s. Inside
   those limits it applies the XLSX extractor's budgets, counted while
   reading: at most 1,024 sheets, loaded one at a time and unloaded after
   each; 5,000,000 cells visited (padding included, plus 64 per row),
@@ -1093,10 +1100,9 @@ each message whose occurrence of it now selects a module.
   build's `ppt-builder` stage fetches the jars pinned in
   `indexer/java/pom.xml` with Maven (strict checksums), compiles the
   reader and writes the runtime; the JDK and Maven stay in that stage,
-  and the runtime image grows by about 67 MB (411 to 478 MB). Java is
-  started through `extractors/ppt_launcher.py` (`python -I`), which lowers its own
-  address space (512 MiB) and CPU time (30 s), caps glibc at two malloc
-  arenas, and `execve`s Java; the parent kills it after 45 s. The JVM
+  and the runtime image grows by about 67 MB (411 to 478 MB). Java runs
+  under 512 MiB of address space and 30 s of CPU, and the parent kills
+  it after 45 s. The JVM
   runs with a 128 MiB heap, bounded code cache, class space and
   metaspace, the serial collector, C1 only and no class-data sharing,
   the set it needs to start under that limit. Its own messages are
@@ -1107,16 +1113,22 @@ each message whose occurrence of it now selects a module.
   no slide text from decks current PowerPoint or LibreOffice save
   (#958).
 
-Both run through one subprocess runner (`extractors/_runner.py`): the
-payload goes to a mode-600 file under `/tmp` (tmpfs), deleted after the
-run; the tool gets an argument list with no shell, no stdin and an
+All three run through one subprocess runner (`extractors/_runner.py`).
+It starts every tool through `extractors/_launcher.py` (`python -I`),
+which lowers its own address space (`RLIMIT_AS`) and CPU time
+(`RLIMIT_CPU`) to the limits the extractor passes, caps glibc at two
+malloc arenas (the JVM needs it to start under its limit), and
+`execve`s the tool, so the limits hold before the tool reads a byte;
+`run_tool` has no default limits, and a test checks that each caller
+passes both (#995). The payload goes to a mode-600 file under `/tmp`
+(tmpfs), deleted after the run; the tool gets an argument list with no shell, no stdin and an
 environment of `LC_ALL=C.UTF-8` only; its stderr is discarded, since it
 can quote the document; and its stdout is read incrementally up to a
 byte cap (8 MiB for catdoc and for the `.ppt` reader, whose text past
 the cap is not indexed and is reported as `doc_output_bytes` /
-`ppt_output_bytes`). A timeout (60 s for catdoc, 45 s for the `.ppt`
-reader), a
-death by signal, a non-zero exit, or an xls child's malformed or
+`ppt_output_bytes`). A timeout, a death by signal (a crash, or the CPU
+limit), a non-zero exit (a tool that fails an allocation under the
+address-space limit exits with an error), or an xls child's malformed or
 oversized output records `failed` with a fixed error type
 (`ToolTimeoutError`, `ToolCrashError`, `ToolExitError`,
 `XlsOutputError`); nothing the tool printed reaches a log or
@@ -1126,6 +1138,20 @@ image carries it. The `.ppt` runtime is built for Linux, so the tests
 that run the real reader skip on a Mac unless `INDEXER_TEST_PPT_HOME`
 points at an exported `/opt/ppt`; CI exports it from the Dockerfile's
 `ppt-runtime` stage and fails if it is missing.
+
+The limits on every external program the indexer runs:
+
+| Program | Address space | CPU time | Wall clock |
+|---|---|---|---|
+| catdoc (`.doc`) | 64 MiB | 10 s | 60 s |
+| xlrd child (`.xls`) | 512 MiB | 30 s | 45 s |
+| Java with Apache POI (`.ppt`) | 512 MiB | 30 s | 45 s |
+| Tesseract (images, scanned PDFs) | none | none | `INDEXER_OCR_TIMEOUT_SECONDS` per page |
+| Poppler `pdfinfo` / `pdftoppm` (scanned PDFs) | none | none | the OCR render deadline (see `INDEXER_OCR_TIMEOUT_SECONDS`) |
+
+Tesseract and Poppler are started by pytesseract and pdf2image, not
+through the runner, so they have no memory or CPU limit of their own
+and are bounded only by the container's (#1021).
 
 Binary payloads labelled as text: the text extractor decodes whatever
 it is given, so a PDF, ZIP (or OOXML), OLE2, PNG, JPEG or GIF file sent
@@ -1166,18 +1192,84 @@ before, so the DOCX version is not bumped; a message that was
 dead-lettered by the old behaviour is picked up again by
 `make requeue-dead`.
 
+Before python-docx opens a `.docx` or `.dotx`, the package is checked
+from the ZIP central directory (#967, #946), as for `.pptx` below and
+with the same shared check. python-docx parses every XML part it
+relates whole with lxml, and builds a part for every related member
+while checking each relationship against a list of the parts it has
+already visited, so opening costs the number of related members times
+the number of relationships. Plainly timed, 20,000 related members took
+2.6 s and 5,000 members with 4 MiB of the smallest relationships 2.7 s;
+32 MiB of element-dense XML peaked at 784 MiB while it opened. So a
+document fails as `DocxPackageBudgetError`, before python-docx reads any
+member, when its members expand by more than 32 MiB past their
+compressed sizes, number more than 5,000, or hold more than 4 MiB of
+relationship (`.rels`) parts. A synthetic 500-page formatted document
+with 2,000 pictures and 10,000 hyperlinks has about 2,000 members,
+16 MiB of expansion and 2.1 MiB of relationships. Pictures are stored
+compressed and barely expand, but members stored uncompressed are not
+counted against the expansion budget, so at the default
+`INDEXER_ATTACHMENT_MAX_BYTES` python-docx can still parse up to about
+64 MiB of XML (#1033). An over-budget document is recorded
+`unsupported` ("document exceeds a pre-open package budget"), not
+`failed`, since the same bytes trip the budget on every run (#1032; see
+*Permanent extractor failures* below). The DOCX version is not bumped,
+neither by the budgets (#1036) nor by the mapping (#1032; PR #1068's
+bump to `docx@6` was reverted): a bump would re-run every cached
+document once through the walk after the open, which has no budget of
+its own yet (#1031), and re-record an over-budget document that was
+read in full before the budgets as `unsupported`. So a document read in
+full before keeps its cached text. A package-budget row recorded
+`failed` before the mapping is not re-queued by the startup sweep, so
+it stays `failed` until the same bytes are processed again (a new
+occurrence, or the message reprocessed for another reason) more than
+7 days after it was recorded; that re-run reads the central directory
+once, never opens the document, and records the row `unsupported`
+under the mapping. A deliberate `docx` bump, once #1031 lands,
+converts whatever rows remain at the next start. A row stamped
+`docx@6` by a build between #1068 and its revert (#1075) is kept, since
+a newer row is never downgraded; rolling back to such a build treats
+the `docx@5` rows written since as stale and re-runs them through the
+unbudgeted walk at its next start, which is that build's behaviour.
+`DocxRelationshipChainError` (#945)
+still applies to a chain under these budgets.
+
 PowerPoint (#936): `application/vnd.openxmlformats-officedocument.presentationml.presentation`
 and `.pptx` route to the PPTX extractor (`python-pptx`), which reads,
 slide by slide, the text of every shape (text boxes, placeholders, auto
 shapes), each table as one line per row, the shapes inside group
 shapes at any depth, and then the slide's speaker notes. Pictures are
-not read or OCR'd, and chart and SmartArt text is not extracted.
-Slideshows (`.ppsx`) and templates (`.potx`) are not routed:
-`pptx.Presentation` refuses a package whose main part is either type,
-so they are `unsupported`. Legacy binary
-`.ppt` is read by the `ppt` extractor (Apache POI), not this one. A `.pptx` cached as "no
-extractor" before #936 is re-queued once by the startup sweep above and
-read.
+not read or OCR'd, and chart and SmartArt text is not extracted (#947).
+Macro-enabled decks (`application/vnd.ms-powerpoint.presentation.macroEnabled.12`,
+`.pptm`), slideshows
+(`application/vnd.openxmlformats-officedocument.presentationml.slideshow`,
+`.ppsx`) and templates
+(`application/vnd.openxmlformats-officedocument.presentationml.template`,
+`.potx`) route to the same extractor (#947), as do macro-enabled
+slideshows (`application/vnd.ms-powerpoint.slideshow.macroEnabled.12`,
+`.ppsm`) and templates
+(`application/vnd.ms-powerpoint.template.macroEnabled.12`, `.potm`)
+(#1042), with the same ZIP guard, OLE2 check, pre-open package budgets,
+walk and caps as `.pptx`. `pptx.Presentation` refuses every main-part
+type but the presentation and macro-enabled presentation, although
+python-pptx's own part factory already loads the slideshow and template
+types as a presentation part; so the extractor opens the package with
+python-pptx's `Package` and reads the main part when it is one of the
+six presentation types. python-pptx has no mapping for the macro-enabled
+slideshow and template main parts, so the extractor registers those two
+in its `PartFactory` at import, as the DOCX extractor does for `.dotx`;
+without it the main part loads as a generic part and the extractor
+refuses it. The payload bytes are not changed. Only slide and notes
+text is read from a `.pptm`, `.ppsm` or `.potm`: the macro part
+(`vbaProject.bin`) is loaded by python-pptx as an opaque part and never
+read or run. The PPTX version bump (`pptx@2`) refreshed a slideshow or
+template labelled `.pptx` that the previous version recorded as
+`failed`; the #1032 bump (`pptx@3`) does the same for a macro-enabled
+slideshow or template labelled `.pptx`. Legacy binary
+`.ppt` is read by the `ppt` extractor (Apache POI), not this one. A
+`.pptx`, `.pptm`, `.ppsx`, `.potx`, `.ppsm` or `.potm` cached as "no
+extractor" before #936, #947 or #1042 is re-queued once by the startup
+sweep above and read.
 
 Encrypted PDFs: `pypdf` opens an encrypted PDF with the empty user
 password, so an owner-password-only PDF (print or copy restrictions,
@@ -1194,14 +1286,26 @@ password (pypdf `FileNotDecryptedError`), a PDF over one of pypdf's
 structural limits while it is opened or its pages are listed
 (`LimitReachedError`, such as page-tree depth or entry count; "PDF
 structure exceeds pypdf limits"),
-and a workbook over the XLSX eager-part budget below ("workbook exceeds
-the eager-part budget"). Each is matched by exact exception class;
+a workbook over the XLSX eager-part budget below ("workbook exceeds
+the eager-part budget"), and a deck or document over the PPTX or DOCX
+pre-open package budgets ("presentation exceeds a pre-open package
+budget", "document exceeds a pre-open package budget"; #1032), which
+are decided from the ZIP central directory alone before the package is
+opened. Each is matched by exact exception class;
 anything else stays `failed`. The row is keyed by the module that
 raised the error (#928), so it is served only to occurrences that run
 that module on the bytes; an occurrence whose label runs another
 extractor has its own row and extracts. It is stamped with the
 extractor version (`pdf@5`), so a later version bump, for example one
-that raises a budget, refreshes it. Each logs a rate-limited WARNING
+that raises a budget, refreshes it; the bumps that came with the
+`pdf`, `xlsx` and `pptx` mappings (`pdf@5`, `xlsx@6`, `pptx@3`)
+refreshed the `failed` rows the previous versions wrote, since the
+startup sweep re-runs only stale rows, never aged `failed` ones. `docx`
+was deliberately not bumped (its walk is unbudgeted, #1031; see the
+DOCX budget paragraph above), so a `.docx` / `.dotx` package-budget row
+recorded `failed` before the mapping stays `failed` until the same
+bytes are processed again more than 7 days on, or until a `docx` bump
+follows #1031. Each logs a rate-limited WARNING
 (`extractor <module> declined ...; recorded unsupported, not retried`).
 A pypdf limit hit inside one page's text extraction (a `/ToUnicode`
 map over its size limit, for example) is not one of these: like any
@@ -1300,7 +1404,9 @@ so a deck whose members expand by more than 32 MiB past their
 compressed sizes fails as `PptxPackageBudgetError` before it is
 opened, as does one with more than 20,000 members or more than 8 MiB of
 relationship (`.rels`) parts, since python-pptx builds a part for every
-related member and walks every relationship as it opens. It then counts its walk against four budgets
+related member and walks every relationship as it opens; the dispatcher
+records it `unsupported` ("presentation exceeds a pre-open package
+budget", #1032), not `failed`. It then counts its walk against four budgets
 per presentation: 5,000 slide-list entries (an entry naming a slide
 already read is skipped, not read again), 100,000 shapes (each group
 and every shape in it, and each notes-page shape), 200,000 table rows
@@ -1454,6 +1560,13 @@ directly; an existing index runs the forward migrations in
 failure leaves the last applied version stamped and the next start
 retries it. A version above the code's, or a missing migration file,
 stops startup (`docs/troubleshooting.md`).
+
+Before deploying a release that adds a migration, take a snapshot with
+`make backup-index BACKUP_DIR=<directory outside the checkout>`: a
+migration that commits but turns out wrong is then undone with
+`make restore-index BACKUP=<file>`, after recreating the containers
+from the release before the migration, instead of a full rebuild from
+Maildir (`docs/troubleshooting.md`, "Back up and restore the index").
 
 | Version | Migration | Change |
 |---|---|---|
@@ -1918,7 +2031,16 @@ the next sweep would start a fresh grace window). If mbsync later
 clears the `T` flag because the message was restored upstream, the
 file is live mail again and is re-indexed normally. With
 reconciliation disabled (archive mode), the index is append-only and
-`T`-flagged files are indexed like any other.
+`T`-flagged files are indexed like any other. Archive mode writes no
+tombstones and reaps nothing, but it inherits any `pending_deletions`
+row an earlier mirror-mode run left: the watchdog handler and the
+startup rename sweep carry such a tombstone along with flag renames,
+and clear it when a rename drops the `T` flag, so a message restored
+upstream stops reading as pending deletion (`docs/mcp-tools.md`,
+*Pending deletion*; #860). The handler logs one INFO line per restore
+within the indexer's shared per-window line budget (the rest are
+counted on the queue heartbeat's `suppressed_lines`); the sweep reports
+`tombstones_cleared=N` on its own line.
 
 Two stage outcomes short-circuit the retry path entirely:
 
@@ -2007,6 +2129,36 @@ Rows for which `stat` / hash capture failed at parse time carry NULL
 identity values, which a future content-hash lookup must skip; the
 columns are populated lazily on the next reindex of the file.
 
+## Vulnerability Scans
+
+`.github/workflows/security.yml` runs Trivy over the repository: the
+uv lockfiles, `pyproject.toml` files and `indexer/java/pom.xml` for
+vulnerable dependencies, and the Dockerfiles for misconfiguration. It
+fails on HIGH or CRITICAL findings. The misconfiguration scan runs
+offline (`--offline-scan`): Trivy's Maven analyzer would otherwise
+resolve `pom.xml` from Maven Central, which rate-limits the shared CI
+runners (#1047); the dependency scan still resolves it. `make trivy`
+runs the same scans locally with the same flags (#1017), skipping the
+per-checkout `.uv-cache` as the workflow does;
+`scripts/tests/trivy_flags_test.sh` fails when the two differ.
+
+### Image scan
+
+`.github/workflows/docker.yml` also scans the three built images
+(indexer, mcp-server, mbsync) with Trivy after `docker compose build`,
+on each change to a build input and weekly (#977). This covers what
+the lockfiles do not: Debian packages installed with apt (catdoc,
+Tesseract, Poppler and the base image's own packages), the Python
+packages actually installed, and the `.ppt` reader's jars in
+`/opt/ppt/lib`. The job fails on HIGH or CRITICAL findings that have a
+fixed version; findings with no fix yet are not gated (owner decision
+2026-10-07), but the full report for each image, every severity and
+unfixed findings included, is uploaded as the `trivy-image-reports`
+artifact.
+
+Not covered: the Java runtime that `jlink` builds into `/opt/ppt/jre`
+has no package records, so Trivy does not scan it (#1008).
+
 ## Privacy Model
 
 Three layers, each with its own boundary, plus the host's disk, where
@@ -2053,7 +2205,8 @@ Protecting them is the host's job, which makes it a setup requirement:
   encryption protects a powered-off machine, or one restarted and not
   yet unlocked at login. A screen lock does not re-lock FileVault, so a
   logged-in session that is only screen-locked is not protected by it.
-- **Backups.** Any backup of these volumes, or of a Maildir archive
+- **Backups.** Any backup of these volumes, of the index
+  (`make backup-index`), or of a Maildir archive
   (`docs/troubleshooting.md`), holds the whole mailbox: keep it
   encrypted (for example an encrypted Time Machine destination) and
   never inside the checkout. A backup of the checkout itself carries

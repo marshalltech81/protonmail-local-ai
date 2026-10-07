@@ -23,14 +23,16 @@ the first sixteen hex digits of the raw file's SHA-256, for example
 `<id@x.example>` stored as `id@x.example#3f9a2c1b7d40e865`. It stays the same
 across flag renames and folder moves, since those do not change the
 file's bytes. Every message row, evidence chunk, and attachment hit
-carries both `message_id` (the header value) and `claimant_id`.
+carries both `message_id` (the header value) and `claimant_id`
+(a `query_messages` `fields` projection can leave out `message_id`).
 `get_message` accepts either; a bare Message-ID that several messages
 claim returns an error listing their claimant IDs instead of choosing
 one. Both claimants sit in the thread their Message-ID resolves to.
 
 Every message row (`get_thread`, `get_message`, `query_messages`),
 evidence chunk (`get_evidence`), and attachment hit
-(`search_attachments`) carries `source_file`: the raw message file the
+(`search_attachments`) carries `source_file` (unless a `query_messages`
+`fields` projection leaves it out): the raw message file the
 result came from, so an answer can be checked against the original
 bytes. It holds `source_type` (`maildir_message`), `locator` (the
 file's path in the Maildir volume as the indexer sees it, `/maildir/...`,
@@ -128,6 +130,15 @@ kept in #919): the block also hits tools that already declare the
 read-only hint, so the prefix is not adopted as a fix (#818 is
 trimming descriptions).
 
+A tool's description is its handler docstring before `Args:`, but
+FastMCP parses the docstring as Google style and sends only its first
+text section: a line of words ending in a colon with an indented block
+under it starts an admonition, and everything from that line on is
+dropped from what the client receives (#1011; `ask_mailbox` lost its
+routing and person guidance this way). Keep such blocks out of tool
+docstrings; `mcp-server/tests/test_tool_annotations.py` checks every
+tool's description on the wire against its docstring.
+
 - **Read-only.** The MCP specification defines `readOnlyHint` as "If
   true, the tool does not modify its environment." OpenAI's
   [Apps SDK reference](https://developers.openai.com/apps-sdk/reference)
@@ -216,7 +227,9 @@ tool=search_emails outcome=ok total_ms=41.7 stages_ms={'query_embedding': 22.4, 
   `thread_fts` / `chunk_fts` / `attachment_fts`, the vector lanes
   `thread_vec` / `chunk_vec` (each covering every widening step of a
   filtered search), `fusion` (RRF plus post-fusion filters),
-  `evidence_fetch`, `scope_labels` (the per-message
+  `evidence_fetch`, `evidence_precision` (`get_evidence` with `source`,
+  `scope=in_scope` or `dedupe_attachments` on the mailbox-wide path),
+  `scope_labels` (the per-message
   [evidence scope](#evidence-scope-in-scope-or-context) lookup of
   `ask_mailbox` and `get_evidence`), `rerank`, `attachment_search` and
   `inference`
@@ -248,6 +261,21 @@ tool=search_emails outcome=ok total_ms=41.7 stages_ms={'query_embedding': 22.4, 
   `from_name_matches_capped` is 1 when more than 10 matched
   ([Resolving `from_name`](#search_emails)). Numbers only: the
   addresses are never logged.
+- `evidence_filtered` is 1 when a `get_evidence` call used a
+  [precision control](#precision-controls) or `dedupe_attachments`. With `scope=in_scope`,
+  `evidence_context_dropped` counts the `context` passages left out and
+  `evidence_threads_scope_emptied` the threads left with none; with
+  `source` on the mailbox-wide path, `evidence_threads_source_emptied`
+  counts the ranked threads with no passage of that source. With
+  `max_chunks_per_thread`, `evidence_chunks_capped` counts the passages
+  the cap removed; with `max_chars_per_chunk`,
+  `evidence_chunks_truncated` counts the passages it cut. With
+  `dedupe_attachments`, `evidence_attachment_copies_collapsed` counts
+  the [repeated attachment passages](#collapsing-repeated-attachments)
+  collapsed and `evidence_carriers_unlisted` the carriers past the ten
+  each `carried_by` lists. A rejected
+  control logs `get_evidence rejected invalid <field>` once per field
+  per minute, and later repeats as one count line.
 - `evidence_capped_threads` (the intelligence tools) counts the threads
   whose passages the fixed per-thread evidence budget (2,000 characters
   per thread) left out or cut. It is a design cap, not a token limit,
@@ -522,6 +550,11 @@ chunks (extracted PDF / OCR / document text) are included — unlike
 | `max_threads` | int | none | Rank threads exactly as `ask_mailbox` does with this `max_threads` and return their evidence; clamped to `[1, 10]` like `ask_mailbox`'s. Omit it to rank by `limit` instead |
 | `limit` | int | `12`, or `max_threads` × 6 | Max evidence chunks to return (with `max_threads`, a smaller value keeps the first `limit` chunks of the audit set in rank order); clamped to `[1, 60]`, the most `ask_mailbox` can put in one prompt (10 threads × 6 chunks), so the cap never cuts below an answer's evidence set |
 | `include_scores` | bool | `false` | Annotate each thread with the retrieval lanes that matched (`thread_fts` / `chunk_fts` / `attachment_fts` / `thread_vec` / `chunk_vec` / `rerank`; `keyword_slot` marks a thread moved up as the best thread keyword hit) and each chunk with its vector distance |
+| `source` | string | `any` | `body` or `attachment` keeps only that source's passages, chosen before the per-thread cap ([Precision controls](#precision-controls)) |
+| `scope` | string | `any` | `in_scope` leaves out `context` passages and reports how many |
+| `max_chunks_per_thread` | int | `6`, or `limit` with `thread_id` | Passages per thread, `1` to `6` |
+| `max_chars_per_chunk` | int | `1600` | Characters per passage, `1` to `1600`; a longer passage is cut and flagged `text_truncated` |
+| `dedupe_attachments` | bool | `false` | Return an attachment carried by several messages of a thread once per passage, on the earliest carrier, with the others in `carried_by` ([Collapsing repeated attachments](#collapsing-repeated-attachments)) |
 
 The mailbox-wide path runs the same hybrid retrieval as `ask_mailbox`
 (the same code), with the same cap of six chunks per thread, and
@@ -555,6 +588,73 @@ bypasses RRF fusion, so `include_scores` shows per-chunk vector
 distance but no lane provenance. A `thread_id` whose thread was reaped
 fails with `Thread reaped from the index` rather than `Thread not
 found` ([Reaped sources](#reaped-sources)).
+
+#### Precision controls
+
+`source`, `scope`, `max_chunks_per_thread` and `max_chars_per_chunk`
+narrow the passages returned without changing which threads are
+ranked or in what order
+([#988](https://github.com/marshalltech81/protonmail-local-ai/issues/988)).
+Left out, the output is the same as without them, so an audit of an
+`ask_mailbox` answer leaves them unset. Each applies to the chunks
+the existing retrieval returns:
+
+- `source` filters each ranked thread's full ranked passage list
+  before the six-per-thread cap, so a thread whose top passages are
+  attachments still returns its body passages with `source=body`. On
+  the mailbox-wide path a ranked thread with no passage of that source
+  (a thread with no indexed passages included) is left out, and
+  `threads_without_source_passages` (and a line in the prose) counts
+  them. On the `thread_id` path, no passage of that source returns
+  `No evidence found ... (source=...)`.
+- `scope=in_scope` drops `context` passages after labelling, from the
+  same full list, before the per-thread cap and the `limit` budget, so
+  an in-scope passage ranked below six context passages is still
+  found. Each thread reports `context_passages_left_out` (its `context`
+  passages, of the chosen source), and the response its total. A thread
+  left with no passage stays listed with an empty `chunks` list and the
+  line `No in-scope passages: N context passage(s) left out`. The
+  `thread_id` path takes no filters, so nothing there is `context`.
+- `max_chunks_per_thread` keeps each thread's first passages in rank
+  order; `limit` still caps the total. On the `thread_id` path the
+  per-thread cap is `limit` when it is left out, as before.
+- `max_chars_per_chunk` cuts each passage's `text`, as the 1,600
+  default does.
+
+A value out of range is rejected with fixed text naming the field and
+its range. A call that used any control adds `evidence_filtered` to its
+[timing line](#stage-timings-in-the-server-log).
+
+#### Collapsing repeated attachments
+
+A document attached to several messages of one thread (sent, re-sent,
+forwarded) is indexed once per message, so by default each copy of a
+passage is returned
+([#989](https://github.com/marshalltech81/protonmail-local-ai/issues/989)).
+With `dedupe_attachments=true`, attachment passages with the same
+`attachment_id` (the content hash), `chunk_index` and text in one
+thread are returned once, on the earliest carrying message (by delivery date, else
+send date), at the rank of the best-ranked copy. That chunk's
+`carried_by` lists the other carrying messages, earliest first, each
+with its `claimant_id`, `sent_at`, `occurred_at` and `scope`, at most
+10 of them; `carried_by_count` counts them all. The prose adds an
+`Also carried by:` line naming the same ten and `and N more`. A
+different document under the same filename has a different content
+hash and stays separate, and body passages are untouched. Copies of
+one payload whose text differs (chunked by another extractor module,
+or a message still on an older extractor version) also stay separate. Every attachment chunk carries `carried_by`
+and `carried_by_count` (empty and 0 when no other message has the
+passage); body chunks and calls without the flag have neither.
+
+The collapse runs on each thread's full ranked passage list, after
+`source` and `scope` and before the per-thread cap and the `limit`
+budget, so the freed places go to other passages. Copies are collapsed
+only within a thread: the same document in two threads is returned in
+each. `attachment_copies_collapsed` (and a line in the prose) counts
+the copies folded into the returned passages. Like the precision
+controls, the flag adds `evidence_filtered` to the timing line, with
+`evidence_attachment_copies_collapsed`. `ask_mailbox` does not
+collapse attachments, so leave the flag unset for an audit.
 
 ### `search_attachments`
 Locate indexed attachments by filename, MIME type, and extracted
@@ -766,9 +866,12 @@ time and changes no totals or paging: an unfiltered `query_messages` count still
 messages, and `query_messages` has no filter on it. Archive mode
 records no tombstones, so the flag is `false` there, except for
 tombstones left by an earlier mirror-mode run, which archive mode
-neither reaps nor clears: such a tombstone follows the file through
-renames, so the message keeps `pending_deletion: true` even after it is
-restored upstream. `get_thread` rows do not carry it.
+never reaps: such a message keeps `pending_deletion: true` until it is
+restored upstream (the `T` flag cleared), when the indexer clears the
+tombstone as it records the rename (live, or at the next startup's
+rename sweep) and the message reads as live. A
+leftover tombstone on a message that stays trashed is kept. `get_thread`
+rows do not carry it.
 
 ### `list_threads`
 Browse threads in a folder: every thread with at least one message
@@ -862,6 +965,7 @@ questions.
 | `authority_class` | string | none | The source-authority class of the message's From sender (any author, for a multi-author From): `counsel`, `management`, `vendor`, `government`, `personal`, `other`, or `unclassified`; a message in Spam never matches; blank is ignored, any other value is an error |
 | `limit` | int | `25` | Messages per page; clamped to `[1, 100]` |
 | `cursor` | string | none | `next_cursor` from the previous page of the same query |
+| `fields` | list of strings | none (every field) | Row fields to return; see Field projection below |
 
 All given filters must match; blank filters are ignored. With none,
 every indexed message outside Trash is enumerated, so a count from an
@@ -912,6 +1016,28 @@ Message-ID, claimant ID, and Thread ID; the structured output adds In-Reply-To a
 up to 10 References. Header values are sender-controlled, so any past
 500 characters is cut with a marker. The count, the page, and its participants are read in one
 snapshot.
+
+**Field projection.** A corpus-building pass that pages through
+hundreds of rows rarely needs every field. `fields` lists the row
+fields to return, by their structured-output names (`message_id`,
+`subject`, `sent_at`, `occurred_at`, `folder`, `has_attachments`,
+`seen`, `flagged`, `replied`, `in_reply_to`, `references`,
+`references_count`, `from`, `from_count`, `to`, `to_count`, `cc`,
+`cc_count`, `source_file`, `pending_deletion`); `claimant_id` and
+`thread_id` are always included, so rows stay addressable. A usual
+minimal set is `["subject", "sent_at", "from", "has_attachments"]`.
+The text form shows only the projected fields it lists (the claimant
+and thread IDs always). The envelope (`filters`, `address_matches`,
+`date_bounds`, `total_matches`, `returned`, `offset`, `has_more`,
+`next_cursor`) is unchanged, and so is the cursor: it is built from the
+page's messages before projection, so a projected and an unprojected
+page continue each other. An unknown name is an error that names it,
+and a list of more than 22 names (one per field; repeats add nothing)
+is an error; the log records only that `fields` was rejected and why,
+in a warning rate-limited to one per reason per minute with a count of
+the repeats. Omitting `fields`
+returns every field, as before. Because rows can be projected, the
+output schema requires only `claimant_id` and `thread_id` in a row.
 
 **Paging.** Keyset pagination on `(effective_at, claimant_id)`: messages
 indexed while a caller pages never shift or duplicate later pages. A

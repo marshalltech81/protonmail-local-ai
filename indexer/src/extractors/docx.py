@@ -35,6 +35,19 @@ python-docx 1.2.0's ``Package`` / ``PartFactory`` API;
 ``test_python_docx_route_for_templates_still_holds`` fails if an
 upgrade breaks it.
 
+Before python-docx opens it, the package is checked from the ZIP central
+directory (#967, #946), as the PPTX extractor does. python-docx parses
+every XML part it relates whole with lxml, and builds a part for every
+related member, checking each relationship against a list of the parts
+it has already visited, so opening costs the number of related members
+times the number of relationships. A package fails as
+``DocxPackageBudgetError``, which the dispatcher records ``unsupported``
+since the same bytes always repeat it (#1032), when its members expand
+by more than
+``_MAX_EXPANSION_BYTES`` past their compressed size, number more than
+``_MAX_MEMBERS``, or hold more than ``_MAX_RELS_BYTES`` of relationship
+parts. The constants below say what was measured.
+
 python-docx follows a package's part relationships recursively while it
 opens it, so a long chain of related parts raises ``RecursionError``
 there (#945). Only the open is guarded: the error becomes
@@ -59,6 +72,8 @@ from docx.section import _Footer, _Header
 from docx.table import Table, _Cell
 from docx.text.paragraph import Paragraph
 
+from . import over_package_budget
+
 # python-docx 1.2.0 has no constant for the Word template main part.
 WML_TEMPLATE_MAIN = (
     "application/vnd.openxmlformats-officedocument.wordprocessingml.template.main+xml"
@@ -67,6 +82,42 @@ PartFactory.part_type_for[WML_TEMPLATE_MAIN] = DocumentPart
 
 # Main-part content types this module reads: a document and a template.
 _WORD_MAIN_TYPES = frozenset({CT.WML_DOCUMENT_MAIN, WML_TEMPLATE_MAIN})
+
+
+# Bytes the package's members may expand by past their compressed size
+# (#946). Plainly timed, opening parses XML at about 7 bytes of memory per
+# byte of text-heavy XML and about 23 per byte of element-dense XML (32 MiB
+# peaked at 241 MiB and 784 MiB), so with the payload's own stored members
+# (``INDEXER_ATTACHMENT_MAX_BYTES``) at most about 64 MiB of XML is parsed
+# at the defaults, not the 200 MB the ZIP guard allows. Pictures are
+# stored already compressed and barely expand; a synthetic 500-page
+# formatted document with 2,000 pictures expanded by 16 MiB. The same
+# figure as the PPTX extractor's.
+_MAX_EXPANSION_BYTES = 32 * 1024 * 1024
+
+# Members in the package (#967). python-docx checks each part it reaches
+# against a list of the parts already visited: plainly timed, 5,000
+# related members open in 0.2 s, 10,000 in 0.8 s and 20,000 in 2.6 s.
+# A document has one member per picture, header, footer and embedded
+# object; the 2,000-picture document above has about 2,000.
+_MAX_MEMBERS = 5_000
+
+# Declared bytes of relationship parts (#967). Each relationship to a part
+# already visited is checked against the whole visited list, so the open
+# costs members times relationships: plainly timed, 5,000 members and
+# 4 MiB of the smallest relationships (about 44 bytes each, 84,000 of
+# them) took 2.7 s. A picture's relationship is about 130 bytes and an
+# external hyperlink's (which skips the check) about 200; the
+# 2,000-picture document above, with 10,000 hyperlinks, held 2.1 MiB.
+_MAX_RELS_BYTES = 4 * 1024 * 1024
+
+
+class DocxPackageBudgetError(Exception):
+    """The package is over a budget checked before python-docx opens it:
+    expansion, member count or relationship bytes. Fixed text."""
+
+    def __init__(self) -> None:
+        super().__init__("package over a DOCX pre-open budget")
 
 
 class DocxRelationshipChainError(Exception):
@@ -82,8 +133,17 @@ def _open_document(payload: bytes) -> DocxDocument:
 
     The same check ``docx.Document`` makes, widened to the template type.
     Any other main part (a workbook, a presentation) raises ``ValueError``
-    with fixed text, as ``docx.Document`` would.
+    with fixed text, as ``docx.Document`` would. A package over a
+    pre-open budget raises ``DocxPackageBudgetError`` before python-docx
+    reads any member.
     """
+    if over_package_budget(
+        payload,
+        max_members=_MAX_MEMBERS,
+        max_expansion_bytes=_MAX_EXPANSION_BYTES,
+        max_rels_bytes=_MAX_RELS_BYTES,
+    ):
+        raise DocxPackageBudgetError()
     try:
         package = Package.open(io.BytesIO(payload))
     except RecursionError:

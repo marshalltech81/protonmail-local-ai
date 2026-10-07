@@ -1,4 +1,4 @@
-.PHONY: build build-nocache up down logs status requeue-dead clean sync sync-indexer sync-mcp test test-indexer test-mcp test-mbsync test-mbsync-tls test-mbsync-layout test-compose test-validate-env test-make-status restart-indexer baseline eval-answers eval-answers-compare typecheck typecheck-indexer typecheck-mcp init-secrets validate-env help
+.PHONY: build build-nocache up down logs status requeue-dead clean sync sync-indexer sync-mcp test test-indexer test-mcp test-mbsync test-mbsync-tls test-mbsync-layout test-compose test-validate-env test-make-status test-image-pins test-trivy-flags trivy restart-indexer backup-index restore-index test-index-backup baseline eval-answers eval-answers-compare typecheck typecheck-indexer typecheck-mcp init-secrets validate-env help
 
 # Per-checkout uv cache (#896): a cache shared between checkouts or
 # worktrees running make targets at the same time fails with missing-file
@@ -24,9 +24,11 @@ help:
 	@echo "  restart-indexer  Run validate-env, then restart the indexer (after editing config/authority.toml)"
 	@echo "  logs         Tail logs from all containers"
 	@echo "  status       Show container, privacy (LOCAL or REMOTE) and index status"
+	@echo "  backup-index Copy the live index to BACKUP_DIR=<dir outside the checkout> (mode 700/600), checked with integrity_check"
+	@echo "  restore-index Replace the index with BACKUP=<file from backup-index> (asks first; stops indexer and mcp-server, restarts mcp-server once the indexer verifies the index)"
 	@echo "  requeue-dead Requeue dead-lettered indexing jobs (optional CLASS=retryable|permanent_source_failure|operator_action_required)"
 	@echo "  sync         Sync local uv environments for indexer and mcp-server"
-	@echo "  test         Run indexer, mcp-server, mbsync, Compose, validate-env and make status script tests locally"
+	@echo "  test         Run indexer, mcp-server, mbsync, Compose, validate-env, make status, index backup, image pin and Trivy flag script tests locally"
 	@echo "  typecheck    Run mypy over the indexer and mcp-server Python services"
 	@echo "  test-indexer Run indexer unit tests only"
 	@echo "  test-mcp     Run mcp-server unit tests only"
@@ -35,7 +37,11 @@ help:
 	@echo "  test-mbsync-layout  Run the mbsync Maildir layout and UIDVALIDITY checks with synthetic stores (needs Docker)"
 	@echo "  test-compose Run Compose rendering and merged-hardening tests"
 	@echo "  test-validate-env  Run validate-env.sh and mcp-auth-headers.sh tests against synthetic fixtures"
+	@echo "  test-index-backup  Run backup-index and restore-index tests against a fake docker (no daemon)"
 	@echo "  test-make-status  Run make status tests against a fake docker (no daemon)"
+	@echo "  test-image-pins  Check tls_check.sh pins the python image the indexer and mcp-server Dockerfiles build from"
+	@echo "  test-trivy-flags  Check that make trivy and the Trivy jobs in .github/workflows/security.yml agree (no Trivy install)"
+	@echo "  trivy        Run the CI Trivy scans locally: dependency scans of indexer/ and mcp-server/, offline misconfig scan of the repository (needs trivy)"
 	@echo "  baseline     Run the retrieval regression baseline (UPDATE=1 rewrites the rank snapshot)"
 	@echo "  eval-answers Opt-in ask_mailbox answer-quality run on the synthetic corpus (calls INFERENCE_* and JUDGE_* providers)"
 	@echo "  eval-answers-compare  Compare two answer-evaluation reports (BASELINE=... CANDIDATE=...)"
@@ -201,8 +207,23 @@ status:
 requeue-dead:
 	docker exec indexer python -m src.requeue_dead $(if $(CLASS),--class $(CLASS),)
 
+# Copy the live index while the stack runs (#1005), for example before
+# deploying a schema change. The copy holds the whole mailbox, so it goes
+# only to BACKUP_DIR, which must be outside the checkout; see
+# scripts/backup-index.sh and docs/troubleshooting.md ("Back up and
+# restore the index").
+backup-index:
+	BACKUP_DIR="$(BACKUP_DIR)" ./scripts/backup-index.sh
+
+# Replace the index with a backup-index copy (#1005): asks for "yes",
+# stops indexer and mcp-server, checks the copy and swaps it in, starts
+# the indexer and prints its schema and embedder identity lines, then
+# starts mcp-server once the indexer has verified the index.
+restore-index:
+	BACKUP="$(BACKUP)" ./scripts/restore-index.sh
+
 # Run unit tests locally using uv
-test: test-indexer test-mcp test-mbsync test-compose test-validate-env test-make-status
+test: test-indexer test-mcp test-mbsync test-compose test-validate-env test-make-status test-index-backup test-image-pins test-trivy-flags
 
 test-indexer: sync-indexer
 	cd indexer && uv run pytest -q
@@ -228,6 +249,45 @@ test-validate-env:
 
 test-make-status:
 	bash scripts/tests/make_status_test.sh
+
+test-index-backup:
+	bash scripts/tests/index_backup_test.sh
+
+test-image-pins:
+	bash scripts/tests/image_pin_test.sh
+
+test-trivy-flags:
+	bash scripts/tests/trivy_flags_test.sh
+
+# The Trivy scans of .github/workflows/security.yml, locally (#1017):
+# the dependency (vuln) scans of indexer/ and mcp-server/ and the
+# offline misconfiguration scan of the repository (#1047), with the
+# workflow's severity, exit code and skip-dirs; test-trivy-flags fails
+# when the two drift. Every scan runs even when an earlier one fails,
+# as in CI. The dependency scans pass --offline-scan=false explicitly:
+# Trivy reads any option from a TRIVY_* variable, so an exported
+# TRIVY_OFFLINE_SCAN would otherwise make them skip the dependencies
+# not cached locally and still pass. TRIVY names the binary, and the
+# target warns when its version is not the one the workflow pins. The
+# image scans of docker.yml are not covered.
+TRIVY ?= trivy
+TRIVY_VERSION := v0.75.0
+TRIVY_SEVERITY := CRITICAL,HIGH
+TRIVY_MISCONFIG_SKIP_DIRS := .git,.ruff_cache,.pytest_cache,.venv,indexer/.venv,mcp-server/.venv,.uv-cache
+
+trivy:
+	@command -v "$(TRIVY)" >/dev/null 2>&1 || { \
+		echo "trivy not found: install Trivy $(TRIVY_VERSION) (brew install trivy, or https://trivy.dev/docs/getting-started/installation/), or set TRIVY=<path>" >&2; \
+		exit 1; }
+	@installed=$$("$(TRIVY)" --version | sed -n 's/^Version: *//p' | head -n 1); \
+	if [ "v$$installed" != "$(TRIVY_VERSION)" ]; then \
+		echo "warning: trivy $$installed is installed but CI pins $(TRIVY_VERSION); findings may differ" >&2; \
+	fi
+	@status=0; \
+	"$(TRIVY)" fs --scanners vuln --severity $(TRIVY_SEVERITY) --exit-code 1 --offline-scan=false indexer || status=1; \
+	"$(TRIVY)" fs --scanners vuln --severity $(TRIVY_SEVERITY) --exit-code 1 --offline-scan=false mcp-server || status=1; \
+	"$(TRIVY)" fs --scanners misconfig --severity $(TRIVY_SEVERITY) --exit-code 1 --offline-scan --skip-dirs $(TRIVY_MISCONFIG_SKIP_DIRS) . || status=1; \
+	exit $$status
 
 # Retrieval regression baseline. Step 1 indexes the synthetic mailbox with
 # the real indexer and a hashed embedder; step 2 checks the golden

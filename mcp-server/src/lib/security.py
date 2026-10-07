@@ -98,6 +98,10 @@ def _is_int(v: Any) -> bool:
     return isinstance(v, int) and not isinstance(v, bool)
 
 
+def _int_in(low: int, high: int) -> Callable[[Any], bool]:
+    return lambda v: _is_int(v) and low <= v <= high
+
+
 def _is_bool(v: Any) -> bool:
     return isinstance(v, bool)
 
@@ -110,6 +114,45 @@ def _is_iso_date(v: Any) -> bool:
     except ValueError:
         return False
     return True
+
+
+def _names_from(allowed: tuple[str, ...]) -> Callable[[Any], bool]:
+    # At most one entry per allowed name, so a logged list is bounded.
+    return lambda v: (
+        isinstance(v, list)
+        and len(v) <= len(allowed)
+        and all(isinstance(n, str) and n in allowed for n in v)
+    )
+
+
+# The row fields ``query_messages`` can project onto with ``fields``
+# (#990): ``tools/outputs.ListedMessage``'s serialized field names, in
+# its order (pinned by ``tests/test_security.py``). Kept here because
+# this module cannot import ``tools.outputs`` without a cycle.
+QUERY_MESSAGE_FIELDS = (
+    "message_id",
+    "claimant_id",
+    "subject",
+    "sent_at",
+    "occurred_at",
+    "folder",
+    "has_attachments",
+    "seen",
+    "flagged",
+    "replied",
+    "in_reply_to",
+    "references",
+    "references_count",
+    "from",
+    "from_count",
+    "to",
+    "to_count",
+    "cc",
+    "cc_count",
+    "source_file",
+    "thread_id",
+    "pending_deletion",
+)
 
 
 # Tool parameters whose values can be logged — but only when the value
@@ -137,10 +180,20 @@ _LOGGABLE_TOOL_PARAMS: dict[str, Callable[[Any], bool]] = {
     "include_attachments_metadata": _is_bool,
     "date_from": _is_iso_date,
     "date_to": _is_iso_date,
+    # ``get_evidence``'s precision controls (#988), with the ranges it
+    # accepts (``tools/search``).
+    "source": _one_of("any", "body", "attachment"),
+    "scope": _one_of("any", "in_scope"),
+    "max_chunks_per_thread": _int_in(1, 6),
+    "max_chars_per_chunk": _int_in(1, 1600),
+    # ``get_evidence``'s attachment collapse (#989).
+    "dedupe_attachments": _is_bool,
     # ``lib/sqlite.AUTHORITY_CLASSES``.
     "authority_class": _one_of(
         "counsel", "management", "vendor", "government", "personal", "other", "unclassified"
     ),
+    # ``query_messages``' projection: logged only when every name is a row field.
+    "fields": _names_from(QUERY_MESSAGE_FIELDS),
 }
 
 

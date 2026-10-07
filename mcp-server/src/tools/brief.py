@@ -38,6 +38,7 @@ from ..lib.inference import (
     PromptBudget,
     TruncationReason,
 )
+from ..lib.rate_limited_log import ArgumentRejections
 from ..lib.security import log_tool_call, safe_provider_exception_text
 from ..lib.sqlite import (
     PROMPT_EVIDENCE_CHUNKS_PER_THREAD,
@@ -804,6 +805,8 @@ def register_experimental_tools(
     the arguments are those of ``register_intelligence_tools``."""
     secret_values = list(secret_values or ())
     prompt_budget = prompt_budget or PromptBudget()
+    # A client can repeat a rejected argument as fast as it likes (#1039).
+    rejections = ArgumentRejections(log, ("brief_issue", "check_conclusion"))
 
     async def complete(
         user_prompt: str,
@@ -944,7 +947,7 @@ def register_experimental_tools(
         try:
             bounds = validate_date_range(date_from, date_to)
         except InvalidFilterError as e:
-            log.warning("brief_issue rejected invalid %s", e.field_name)
+            rejections.reject("brief_issue", e.field_name)
             raise ToolError(f"Error: {e}") from e
 
         try:
@@ -1129,7 +1132,7 @@ def register_experimental_tools(
             )
 
         except InvalidFilterError as e:
-            log.warning("brief_issue rejected invalid %s", e.field_name)
+            rejections.reject("brief_issue", e.field_name)
             raise ToolError(f"Error: {e}") from e
         except PromptTooLargeError as e:
             _warn_token_limits(
@@ -1220,7 +1223,7 @@ def register_experimental_tools(
         try:
             bounds = validate_date_range(date_from, date_to)
         except InvalidFilterError as e:
-            log.warning("check_conclusion rejected invalid %s", e.field_name)
+            rejections.reject("check_conclusion", e.field_name)
             raise ToolError(f"Error: {e}") from e
 
         try:
@@ -1431,7 +1434,7 @@ def register_experimental_tools(
             )
 
         except InvalidFilterError as e:
-            log.warning("check_conclusion rejected invalid %s", e.field_name)
+            rejections.reject("check_conclusion", e.field_name)
             raise ToolError(f"Error: {e}") from e
         except PromptTooLargeError as e:
             _warn_token_limits(

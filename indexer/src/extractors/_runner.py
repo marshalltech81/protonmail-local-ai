@@ -6,6 +6,13 @@ runs Apache POI in a Java process (#957). Every
 tool is attacker-reachable parsing code, so the run is bounded and its
 output is treated as data:
 
+* The tool is started through ``_launcher.py`` (``python -I``), which
+  lowers its own address-space (``RLIMIT_AS``) and CPU-time
+  (``RLIMIT_CPU``) limits to the values the caller passes and then
+  ``execve``s the tool, so every tool runs under both limits from its
+  first instruction (#995). The caller sizes them from a plain
+  measurement of the tool; there are no defaults.
+
 * The payload is written to a mode-600 temporary file under ``/tmp``
   (a tmpfs in Compose), passed as the last argument and deleted
   afterwards. Not stdin: catdoc's catppt 0.95, the first ``.ppt``
@@ -17,9 +24,10 @@ output is treated as data:
   up to ``max_output_bytes``; past it the tool is killed and the bytes
   read so far are returned with ``truncated=True``. Output is never read
   whole and cut afterwards.
-* A timeout, a death by signal (a crash, or a resource limit the tool
-  set on itself) and a non-zero exit raise fixed-text exceptions, which
-  the dispatcher records by type name as a ``failed`` row.
+* A timeout, a death by signal (a crash, or the CPU limit) and a
+  non-zero exit (a tool that fails an allocation under the
+  address-space limit exits with an error) raise fixed-text exceptions,
+  which the dispatcher records by type name as a ``failed`` row.
 """
 
 from __future__ import annotations
@@ -27,9 +35,11 @@ from __future__ import annotations
 import os
 import selectors
 import subprocess  # nosec B404 — argument lists only, no shell
+import sys
 import tempfile
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 # Bytes read from a tool's stdout per call.
 _READ_CHUNK = 64 * 1024
@@ -40,6 +50,9 @@ _TMP_DIR = "/tmp"  # nosec B108 — tmpfs in Compose; the file is mode 600
 # The environment a tool runs with: nothing inherited from the indexer
 # (its secrets path, provider settings), and a UTF-8 locale.
 _TOOL_ENV = {"LC_ALL": "C.UTF-8"}
+
+# Sets the limits, then ``execve``s the tool.
+_LAUNCHER = Path(__file__).with_name("_launcher.py")
 
 
 class ToolNotFoundError(Exception):
@@ -84,9 +97,14 @@ def run_tool(
     *,
     timeout_seconds: float,
     max_output_bytes: int,
+    max_address_space_bytes: int,
+    max_cpu_seconds: int,
     suffix: str,
 ) -> ToolOutput:
-    """Run ``argv`` plus the path of a temporary file holding ``payload``.
+    """Run ``argv`` plus the path of a temporary file holding ``payload``,
+    under ``max_address_space_bytes`` of address space and
+    ``max_cpu_seconds`` of CPU time. ``argv[0]`` is an absolute path:
+    the launcher ``execve``s it with no ``PATH`` search.
 
     Raises ``ToolTimeoutError``, ``ToolCrashError`` or ``ToolExitError``;
     a run the output cap cut is returned, not raised, since the bytes
@@ -96,7 +114,16 @@ def run_tool(
     try:
         with os.fdopen(fd, "wb") as handle:
             handle.write(payload)
-        return _run(argv + [path], timeout_seconds, max_output_bytes)
+        launched = [
+            sys.executable,
+            "-I",
+            str(_LAUNCHER),
+            str(max_address_space_bytes),
+            str(max_cpu_seconds),
+            *argv,
+            path,
+        ]
+        return _run(launched, timeout_seconds, max_output_bytes)
     finally:
         os.unlink(path)
 

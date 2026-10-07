@@ -5,11 +5,13 @@ Semantic, keyword, and hybrid search over the SQLite index.
 
 import asyncio
 import logging
+import sys
 
 from fastmcp.exceptions import ToolError
 from mcp.types import CallToolResult
 
 from ..lib.embed import embed_query
+from ..lib.rate_limited_log import ArgumentRejections, RateLimitedLog
 from ..lib.security import log_tool_call, safe_provider_exception_text
 from ..lib.sqlite import (
     PROMPT_EVIDENCE_CHUNKS_PER_THREAD,
@@ -34,6 +36,7 @@ from .outputs import (
     HEADER_CHAR_LIMIT,
     MAX_LISTED,
     AttachmentHit,
+    EvidenceCarrier,
     EvidenceChunk,
     EvidenceOutput,
     EvidenceScope,
@@ -45,9 +48,11 @@ from .outputs import (
     describe_date_bounds,
     read_only,
     reaped_source,
-    source,
     thread_summary,
     tool_result,
+)
+from .outputs import (
+    source as source_ref,
 )
 
 log = logging.getLogger("mcp.tools.search")
@@ -79,6 +84,93 @@ _VALID_SEARCH_MODES = frozenset({"hybrid", "semantic", "keyword"})
 # already paragraph-bounded by the indexer; this is a defensive ceiling so
 # one pathologically long attachment chunk can't bloat the tool response.
 _EVIDENCE_CHUNK_CHARS = 1600
+
+# ``get_evidence``'s precision controls (#988). The per-thread and
+# per-chunk caps can only lower ``PROMPT_EVIDENCE_CHUNKS_PER_THREAD`` and
+# ``_EVIDENCE_CHUNK_CHARS``; ``lib/security._LOGGABLE_TOOL_PARAMS`` logs
+# exactly these values.
+_EVIDENCE_SOURCES = ("any", "body", "attachment")
+_EVIDENCE_SCOPES = ("any", "in_scope")
+_PRECISION_CONTROLS = ("source", "scope", "max_chunks_per_thread", "max_chars_per_chunk")
+# Seconds per window of the rate-limited rejection warning.
+_PRECISION_REJECTION_LOG_SECS = 60.0
+# ``per_thread_limit`` that keeps every ranked chunk of a thread. The
+# evidence query already reads and ranks all of a thread's chunks before
+# its cap, so ``source`` and ``scope`` filter that full list and the
+# cap applies after them.
+_ALL_THREAD_CHUNKS = sys.maxsize
+
+
+def _of_source(chunks: list, source: str) -> list:
+    """``chunks`` of ``source`` (``body`` or ``attachment``), in order."""
+    return [c for c in chunks if (c.attachment_id is None) == (source == "body")]
+
+
+def _carrier_date(chunk) -> tuple[bool, str]:
+    """Sort key of a passage's message: its delivery date, else its send
+    date (as the date filters read it), an unknown date last."""
+    date = chunk.message_occurred_at or chunk.message_date
+    return (date is None, date or "")
+
+
+def _collapse_attachment_copies(chunks: list) -> tuple[list, dict[str, list]]:
+    """``chunks`` with each attachment passage (same content hash, chunk
+    index and text) kept once, on its earliest carrying message, at the
+    rank of its best-ranked copy (#989); and, per kept ``chunk_id``, the
+    other copies, earliest first. Body passages pass through unchanged.
+
+    The text is part of the key: copies of one payload can be chunked
+    differently (another extractor module, or a message left on an older
+    extractor version), and those are different passages."""
+    copies: dict[tuple[str, int, str], list] = {}
+    for c in chunks:
+        if c.attachment_id is not None:
+            copies.setdefault((c.attachment_id, c.chunk_index, c.text), []).append(c)
+    kept: list = []
+    carried: dict[str, list] = {}
+    for c in chunks:
+        if c.attachment_id is None:
+            kept.append(c)
+            continue
+        group = copies[(c.attachment_id, c.chunk_index, c.text)]
+        if c is not group[0]:
+            continue
+        # A stable sort: copies of one date keep their rank order.
+        earliest, *others = sorted(group, key=_carrier_date)
+        kept.append(earliest)
+        carried[earliest.chunk_id] = others
+    return kept, carried
+
+
+def _msg_date(chunk) -> str:
+    """A passage's message date for the prose: its send day, plus its
+    delivery day when known."""
+    msg_date = (chunk.message_date or "")[:10] or "unknown date"
+    if chunk.message_occurred_at:
+        msg_date += f" (delivered {chunk.message_occurred_at[:10]})"
+    return msg_date
+
+
+def _check_precision_controls(
+    source: str,
+    scope: str,
+    max_chunks_per_thread: int | None,
+    max_chars_per_chunk: int | None,
+) -> None:
+    """Reject an out-of-range precision control with fixed text (#988):
+    the message names the field and its range, never the value."""
+    if source not in _EVIDENCE_SOURCES:
+        raise InvalidFilterError("source", "source must be any, body or attachment.")
+    if scope not in _EVIDENCE_SCOPES:
+        raise InvalidFilterError("scope", "scope must be any or in_scope.")
+    for name, value, ceiling in (
+        ("max_chunks_per_thread", max_chunks_per_thread, PROMPT_EVIDENCE_CHUNKS_PER_THREAD),
+        ("max_chars_per_chunk", max_chars_per_chunk, _EVIDENCE_CHUNK_CHARS),
+    ):
+        if value is not None and (
+            isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= ceiling
+        ):
+            raise InvalidFilterError(name, f"{name} must be an integer from 1 to {ceiling}.")
 
 
 def _chunk_scope(chunk, scope: ScopeLabels | None) -> EvidenceScope:
@@ -119,6 +211,18 @@ def register_search_tools(
     secrets = list(secret_values or ())
     # Config identifier for the per-call timing line.
     timing_config = {"rerank": rerank_mode(reranker)}
+    # A client can repeat a rejected precision control as fast as it
+    # likes: the first rejection per field and window is logged, the
+    # rest are counted into one summary line.
+    precision_rejections = RateLimitedLog(
+        log,
+        _PRECISION_CONTROLS,
+        _PRECISION_REJECTION_LOG_SECS,
+        first_msg="get_evidence rejected invalid %s",
+        summary_msg="get_evidence rejected invalid controls in the last %ds: %s",
+    )
+    # The same for every other rejected argument, keyed by tool and field (#1039).
+    rejections = ArgumentRejections(log, ("search_emails", "get_evidence", "search_attachments"))
 
     @server.tool(
         output_schema=SearchEmailsOutput.model_json_schema(),
@@ -267,7 +371,7 @@ def register_search_tools(
             bounds = date_bounds(*validate_date_range(date_from, date_to))
             authority_class = normalize_authority_class(authority_class)
         except InvalidFilterError as e:
-            log.warning("search_emails rejected invalid %s", e.field_name)
+            rejections.reject("search_emails", e.field_name)
             raise ToolError(f"Search error: {e}") from e
         # A blank person filter is absent and padding is stripped, as in
         # get_evidence and ask_mailbox (#702, #705).
@@ -414,7 +518,7 @@ def register_search_tools(
         except InvalidFilterError as e:
             # The message quotes the rejected value, which log_tool_call
             # withheld. Return it to the caller; log only the field name.
-            log.warning("search_emails rejected invalid %s", e.field_name)
+            rejections.reject("search_emails", e.field_name)
             raise ToolError(f"Search error: {e}") from e
         except VectorLanesUnavailableError as e:
             # Fixed text naming the fix; it quotes nothing.
@@ -448,6 +552,11 @@ def register_search_tools(
         include_scores: bool = False,
         participant: str | None = None,
         from_name: str | None = None,
+        source: str = "any",
+        scope: str = "any",
+        max_chunks_per_thread: int | None = None,
+        max_chars_per_chunk: int | None = None,
+        dedupe_attachments: bool = False,
     ) -> CallToolResult:
         """
         Return the exact indexed passages (evidence chunks) that back a
@@ -532,6 +641,15 @@ def register_search_tools(
                             chunk_vec / rerank) and each chunk with its
                             vector distance — useful for debugging
                             retrieval quality.
+            source: "body" or "attachment" passages only (default "any").
+            scope: "in_scope" drops context passages (default "any").
+            max_chunks_per_thread: 1 to 6 (default 6; limit with thread_id).
+            max_chars_per_chunk: 1 to 1600 (default 1600).
+            dedupe_attachments: When true, an attachment carried by
+                                several messages of a thread (sent,
+                                re-sent, forwarded) returns each passage
+                                once, on the earliest carrier, with the
+                                others in carried_by (default false).
 
         Returns:
             Ranked evidence chunks grouped by thread, with full
@@ -553,12 +671,39 @@ def register_search_tools(
                 "max_threads": max_threads,
                 "limit": limit,
                 "include_scores": include_scores,
+                "source": source,
+                "scope": scope,
+                "max_chunks_per_thread": max_chunks_per_thread,
+                "max_chars_per_chunk": max_chars_per_chunk,
+                "dedupe_attachments": dedupe_attachments,
             },
         )
         from_name = blank_to_none(from_name)
         participant = blank_to_none(participant)
         if not query or not query.strip():
             raise ToolError("Provide a query to gather evidence for.")
+        try:
+            _check_precision_controls(source, scope, max_chunks_per_thread, max_chars_per_chunk)
+        except InvalidFilterError as e:
+            precision_rejections.record(e.field_name)
+            raise ToolError(f"Evidence error: {e}") from e
+        source_filter = None if source == "any" else source
+        in_scope_only = scope == "in_scope"
+        per_thread = max_chunks_per_thread or PROMPT_EVIDENCE_CHUNKS_PER_THREAD
+        chunk_chars = max_chars_per_chunk or _EVIDENCE_CHUNK_CHARS
+        # The timing line marks a call that a precision control narrowed.
+        if (
+            source_filter
+            or in_scope_only
+            or max_chunks_per_thread
+            or max_chars_per_chunk
+            or dedupe_attachments
+        ):
+            count("evidence_filtered", 1)
+        # With ``source`` or ``dedupe_attachments`` the thread path reads
+        # every ranked passage, filters or collapses them, then applies
+        # ``limit``.
+        full_thread_list = bool(source_filter or dedupe_attachments)
         if thread_id:
             # These filters select threads; thread_id already names one.
             # Applying them would only keep or drop that whole thread (a
@@ -607,7 +752,7 @@ def register_search_tools(
             try:
                 validate_date_range(date_from, date_to)
             except InvalidFilterError as e:
-                log.warning("get_evidence rejected invalid %s", e.field_name)
+                rejections.reject("get_evidence", e.field_name)
                 raise ToolError(f"Evidence error: {e}") from e
 
         # groups: list of (subject, thread_id, lane_ranks | None,
@@ -619,7 +764,18 @@ def register_search_tools(
         resolution: FromNameResolution | None = None
         # Scope labels of the mailbox-wide path (#755); the thread path
         # has no filters, so every passage there is in scope.
-        scope: ScopeLabels | None = None
+        labels: ScopeLabels | None = None
+        # With ``scope=in_scope``: context passages left out, per listed
+        # thread (#988).
+        context_dropped: dict[str, int] = {}
+        # With ``source``: ranked threads left out for having no passage
+        # of that source (mailbox-wide path).
+        source_emptied = 0
+        # With ``max_chunks_per_thread``: passages the cap removed.
+        capped_out = 0
+        # With ``dedupe_attachments``: per kept attachment passage, the
+        # copies on later messages of its thread (#989).
+        carried: dict[str, list] = {}
         try:
             if thread_id:
                 thread = await asyncio.to_thread(db.get_thread_or_reaped, thread_id)
@@ -632,7 +788,11 @@ def register_search_tools(
                 # whose filename or MIME type the query matches lead.
                 with stage("evidence_fetch"):
                     grouped = await asyncio.to_thread(
-                        db.get_query_evidence_chunks, query, [thread_id], embedding, limit
+                        db.get_query_evidence_chunks,
+                        query,
+                        [thread_id],
+                        embedding,
+                        _ALL_THREAD_CHUNKS if full_thread_list else limit,
                     )
                 chunks = grouped.get(thread_id, [])
                 if not chunks:
@@ -644,7 +804,20 @@ def register_search_tools(
                         raise ToolError(reaped_source("Thread", thread_id, current.reaped_at))
                     if not current:
                         raise ToolError(f"Thread not found: {thread_id}")
+                if source_filter:
+                    chunks = _of_source(chunks, source_filter)
+                if dedupe_attachments:
+                    chunks, copies = _collapse_attachment_copies(chunks)
+                    carried.update(copies)
+                if full_thread_list:
+                    chunks = chunks[:limit]
+                if max_chunks_per_thread:
+                    capped_out = max(0, len(chunks) - max_chunks_per_thread)
+                    chunks = chunks[:max_chunks_per_thread]
                 count("evidence_chunks", len(chunks))
+                if in_scope_only:
+                    # No filters on this path: nothing is context.
+                    context_dropped[thread_id] = 0
                 if chunks:
                     groups.append(
                         (clip(thread.subject, HEADER_CHAR_LIMIT), thread_id, None, None, chunks)
@@ -666,6 +839,9 @@ def register_search_tools(
                                 resolved_from_addr=None,
                                 from_name_matches=0,
                                 threads=[],
+                                context_passages_left_out=0 if in_scope_only else None,
+                                threads_without_source_passages=0 if source_filter else None,
+                                attachment_copies_collapsed=0 if dedupe_attachments else None,
                             ),
                         )
                 embedding = await embed_query(embed_client, query, expected_embed_dim)
@@ -687,44 +863,85 @@ def register_search_tools(
                     participant=participant,
                 )
                 count("results", len(results))
-                # Flatten thread-ranked evidence into a flat chunk budget:
-                # ``limit`` counts chunks, threads are already ranked, and
-                # chunks within a thread are ranked by similarity. Once the
-                # budget is spent the slice yields [] and the thread drops.
-                taken = 0
-                for r in results:
-                    chunks = r.evidence_chunks[: limit - taken]
-                    # With ``max_threads``, a thread that has no indexed
-                    # chunks stays, empty: ask_mailbox shows the model its
-                    # indexed thread text instead, so the audit must still
-                    # list the thread in its place. Once ``limit`` is
-                    # spent, later threads drop whether or not they have
-                    # chunks, so a smaller ``limit`` is a rank-order prefix.
-                    keep_chunkless = (
-                        max_threads is not None and not r.evidence_chunks and taken < limit
-                    )
-                    if not chunks and not keep_chunkless:
-                        continue
-                    subject = clip(r.subject, HEADER_CHAR_LIMIT)
-                    groups.append((subject, r.thread_id, r.lane_ranks, r.score, chunks))
-                    taken += len(chunks)
-                # Each passage labelled as ask_mailbox labels it.
+                # ``source`` and ``scope`` filter each ranked thread's full
+                # ranked passage list, so the six-passage cap applies after
+                # them. The threads and their order stay ask_mailbox's:
+                # the reranker saw the unfiltered evidence.
+                every_chunk: dict[str, list] | None = None
+                if (source_filter or in_scope_only or dedupe_attachments) and results:
+                    with stage("evidence_precision"):
+                        every_chunk = await asyncio.to_thread(
+                            db.get_query_evidence_chunks,
+                            query,
+                            [r.thread_id for r in results],
+                            embedding,
+                            _ALL_THREAD_CHUNKS,
+                        )
+                # Each passage labelled as ask_mailbox labels it, before
+                # ``scope=in_scope`` filters on the label.
                 with stage("scope_labels"):
-                    scope = await asyncio.to_thread(
+                    labels = await asyncio.to_thread(
                         db.message_scope,
-                        [tid for _, tid, _, _, _ in groups],
+                        [r.thread_id for r in results],
                         folders=folders,
                         from_addr=from_addr,
                         participant=participant,
                         date_from=date_from,
                         date_to=date_to,
                     )
+                # Flatten thread-ranked evidence into a flat chunk budget:
+                # ``limit`` counts chunks, threads are already ranked, and
+                # chunks within a thread are ranked by similarity. Once the
+                # budget is spent the slice yields [] and the thread drops.
+                taken = 0
+                for r in results:
+                    ranked = r.evidence_chunks
+                    dropped = 0
+                    if every_chunk is not None:
+                        ranked = every_chunk.get(r.thread_id, [])
+                        if source_filter:
+                            ranked = _of_source(ranked, source_filter)
+                            if not ranked:
+                                # No passage of that source, a thread
+                                # with no indexed passages included.
+                                source_emptied += 1
+                                continue
+                        if in_scope_only:
+                            kept = [c for c in ranked if _chunk_scope(c, labels) == "in_scope"]
+                            dropped = len(ranked) - len(kept)
+                            ranked = kept
+                        if dedupe_attachments:
+                            ranked, copies = _collapse_attachment_copies(ranked)
+                            carried.update(copies)
+                        ranked = ranked[:PROMPT_EVIDENCE_CHUNKS_PER_THREAD]
+                    capped = ranked[:per_thread]
+                    chunks = capped[: limit - taken]
+                    # With ``max_threads``, a thread that has no indexed
+                    # chunks stays, empty: ask_mailbox shows the model its
+                    # indexed thread text instead, so the audit must still
+                    # list the thread in its place. A thread ``scope``
+                    # emptied stays too, with its count (#988). Once
+                    # ``limit`` is spent, later threads drop whether or not
+                    # they have chunks, so a smaller ``limit`` is a
+                    # rank-order prefix.
+                    keep_chunkless = (
+                        max_threads is not None and not r.evidence_chunks and taken < limit
+                    )
+                    keep_emptied = dropped > 0 and not ranked and taken < limit
+                    if not chunks and not keep_chunkless and not keep_emptied:
+                        continue
+                    subject = clip(r.subject, HEADER_CHAR_LIMIT)
+                    groups.append((subject, r.thread_id, r.lane_ranks, r.score, chunks))
+                    if in_scope_only:
+                        context_dropped[r.thread_id] = dropped
+                    capped_out += len(ranked) - len(capped)
+                    taken += len(chunks)
         except ToolError:
             raise
         except InvalidFilterError as e:
             # The message quotes the rejected value, which log_tool_call
             # withheld. Return it to the caller; log only the field name.
-            log.warning("get_evidence rejected invalid %s", e.field_name)
+            rejections.reject("get_evidence", e.field_name)
             raise ToolError(f"Evidence error: {e}") from e
         except Exception as e:
             # Mirror search_emails: classify before logging or returning,
@@ -734,10 +951,63 @@ def register_search_tools(
             raise ToolError(f"Evidence error: {safe_error}") from e
 
         total_chunks = sum(len(chunks) for _, _, _, _, chunks in groups)
+        # What the precision controls left out (#988), on the timing line
+        # (counts only) and in the response.
+        total_dropped = sum(context_dropped.values())
+        scope_emptied = sum(
+            1 for _, tid, _, _, chunks in groups if not chunks and context_dropped.get(tid)
+        )
+        notes: list[str] = []
+        if in_scope_only:
+            count("evidence_context_dropped", total_dropped)
+            count("evidence_threads_scope_emptied", scope_emptied)
+            if total_dropped:
+                notes.append(
+                    f"scope=in_scope left out {total_dropped} context passage(s); "
+                    f"{scope_emptied} thread(s) had no in-scope passage."
+                )
+        if max_chunks_per_thread:
+            count("evidence_chunks_capped", capped_out)
+        if max_chars_per_chunk:
+            count(
+                "evidence_chunks_truncated",
+                sum(len(c.text) > chunk_chars for *_, chunks in groups for c in chunks),
+            )
+        collapsed = 0
+        if dedupe_attachments:
+            collapsed = sum(
+                len(carried.get(c.chunk_id, ())) for *_, chunks in groups for c in chunks
+            )
+            count("evidence_attachment_copies_collapsed", collapsed)
+            # ``carried_by`` lists ``MAX_LISTED`` carriers per passage; the
+            # rest are counted in ``carried_by_count`` and here.
+            count(
+                "evidence_carriers_unlisted",
+                sum(
+                    max(0, len(carried.get(c.chunk_id, ())) - MAX_LISTED)
+                    for *_, chunks in groups
+                    for c in chunks
+                ),
+            )
+            if collapsed:
+                notes.append(
+                    f"dedupe_attachments collapsed {collapsed} repeated attachment passage(s)."
+                )
+        searched_by_source = source_filter is not None and not thread_id
+        if searched_by_source:
+            count("evidence_threads_source_emptied", source_emptied)
+            if source_emptied:
+                notes.append(
+                    f"source={source}: {source_emptied} ranked thread(s) had no "
+                    f"{source} passages and are not listed."
+                )
         output = EvidenceOutput(
             chunk_count=total_chunks,
             resolved_from_addr=resolution.address if resolution else None,
             from_name_matches=resolution.senders if resolution else None,
+            context_passages_left_out=total_dropped if in_scope_only else None,
+            threads_without_source_passages=source_emptied if searched_by_source else None,
+            attachment_copies_collapsed=collapsed if dedupe_attachments else None,
             threads=[
                 EvidenceThread(
                     thread_id=tid,
@@ -759,24 +1029,53 @@ def register_search_tools(
                             occurred_at=c.message_occurred_at,
                             char_start=c.char_start,
                             char_end=c.char_end,
-                            text=c.text[:_EVIDENCE_CHUNK_CHARS],
-                            text_truncated=len(c.text) > _EVIDENCE_CHUNK_CHARS,
+                            text=c.text[:chunk_chars],
+                            text_truncated=len(c.text) > chunk_chars,
                             vector_distance=c.score if include_scores else None,
-                            source_file=source(c.source_file),
-                            scope=_chunk_scope(c, scope),
+                            source_file=source_ref(c.source_file),
+                            scope=_chunk_scope(c, labels),
+                            carried_by=(
+                                [
+                                    EvidenceCarrier(
+                                        claimant_id=o.claimant_id,
+                                        sent_at=o.message_date,
+                                        occurred_at=o.message_occurred_at,
+                                        scope=_chunk_scope(o, labels),
+                                    )
+                                    for o in carried.get(c.chunk_id, [])[:MAX_LISTED]
+                                ]
+                                if dedupe_attachments and c.attachment_id is not None
+                                else None
+                            ),
+                            carried_by_count=(
+                                len(carried.get(c.chunk_id, ()))
+                                if dedupe_attachments and c.attachment_id is not None
+                                else None
+                            ),
                         )
                         for c in chunks
                     ],
+                    context_passages_left_out=context_dropped.get(tid),
                 )
                 for subject, tid, lane_ranks, score, chunks in groups
             ],
         )
         if not groups:
-            return tool_result(f"No evidence found for: '{query}'", output)
+            filters = ", ".join(
+                f"{name}={value}"
+                for name, value, given in (
+                    ("source", source, source_filter is not None),
+                    ("scope", scope, in_scope_only),
+                )
+                if given
+            )
+            missing = f"No evidence found for: '{query}'" + (f" ({filters})" if filters else "")
+            return tool_result("\n".join([missing, *notes]), output)
 
         lines = [
             f"Evidence for: '{query}'",
             f"{total_chunks} chunk(s) from {len(groups)} thread(s).",
+            *notes,
             "",
         ]
         for i, (subject, tid, lane_ranks, score, chunks) in enumerate(groups, 1):
@@ -786,16 +1085,22 @@ def register_search_tools(
                 lanes = ", ".join(f"{name}#{rank}" for name, rank in sorted(lane_ranks.items()))
                 score_str = f" | retrieval score {score:.4f}" if score is not None else ""
                 lines.append(f"    Lanes: {lanes}{score_str}")
-            if not chunks:
+            left_out = context_dropped.get(tid)
+            if not chunks and left_out:
+                lines.append(
+                    f"    No in-scope passages: {left_out} context passage(s) left out "
+                    "(scope=in_scope)."
+                )
+            elif not chunks:
                 lines.append(
                     "    No indexed passages: ask_mailbox shows this thread's indexed "
                     "text instead; read it with get_thread."
                 )
+            elif left_out:
+                lines.append(f"    {left_out} context passage(s) left out (scope=in_scope).")
             for chunk in chunks:
-                msg_date = (chunk.message_date or "")[:10] or "unknown date"
-                if chunk.message_occurred_at:
-                    msg_date += f" (delivered {chunk.message_occurred_at[:10]})"
-                in_scope = _chunk_scope(chunk, scope) == "in_scope"
+                msg_date = _msg_date(chunk)
+                in_scope = _chunk_scope(chunk, labels) == "in_scope"
                 lines.append(
                     f"    --- chunk {chunk.chunk_index} | msg {chunk.claimant_id} | {msg_date}"
                     f" | {'in scope' if in_scope else 'context'}"
@@ -804,6 +1109,16 @@ def register_search_tools(
                     fname = clip(chunk.attachment_filename or "attachment", HEADER_CHAR_LIMIT)
                     mime = clip(chunk.attachment_mime or "unknown", HEADER_CHAR_LIMIT)
                     lines.append(f'        Source: attachment "{fname}" ({mime})')
+                    others = carried.get(chunk.chunk_id, [])
+                    if others:
+                        unlisted = len(others) - MAX_LISTED
+                        lines.append(
+                            "        Also carried by: "
+                            + ", ".join(
+                                f"msg {o.claimant_id} ({_msg_date(o)})" for o in others[:MAX_LISTED]
+                            )
+                            + (f", and {unlisted} more" if unlisted > 0 else "")
+                        )
                 elif chunk.kind != "body":
                     lines.append(f"        Source: message body ({chunk.kind})")
                 else:
@@ -813,8 +1128,8 @@ def register_search_tools(
                     offsets += f" | vector distance {chunk.score:.4f}"
                 lines.append(offsets)
                 text = chunk.text
-                if len(text) > _EVIDENCE_CHUNK_CHARS:
-                    text = text[:_EVIDENCE_CHUNK_CHARS] + " ... [truncated]"
+                if len(text) > chunk_chars:
+                    text = text[:chunk_chars] + " ... [truncated]"
                 lines.append(f"        {text}")
             lines.append("")
 
@@ -919,7 +1234,7 @@ def register_search_tools(
         try:
             bounds = date_bounds(*validate_date_range(date_from, date_to))
         except InvalidFilterError as e:
-            log.warning("search_attachments rejected invalid %s", e.field_name)
+            rejections.reject("search_attachments", e.field_name)
             raise ToolError(f"Attachment search error: {e}") from e
         try:
             with stage("attachment_search"):
@@ -937,7 +1252,7 @@ def register_search_tools(
         except InvalidFilterError as e:
             # The message quotes the rejected value, which log_tool_call
             # withheld. Return it to the caller; log only the field name.
-            log.warning("search_attachments rejected invalid %s", e.field_name)
+            rejections.reject("search_attachments", e.field_name)
             raise ToolError(f"Attachment search error: {e}") from e
         except Exception as e:
             # search_attachments is local-DB work (FTS + joins), but an
@@ -968,7 +1283,7 @@ def register_search_tools(
                     sender_count=len(a.senders),
                     extraction_status=a.extraction_status,
                     text_snippet=a.text_snippet,
-                    source_file=source(a.source_file),
+                    source_file=source_ref(a.source_file),
                 )
                 for a in results
             ],

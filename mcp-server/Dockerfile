@@ -7,9 +7,9 @@
 # -----------------------------------------------------------------------------
 # Stage 1: Builder — installs Python dependencies that require compilation
 # -----------------------------------------------------------------------------
-FROM python:3.14-slim-trixie@sha256:c3e521df8b2b498a7a682e7e18676771cb80c6b75b8699af886b2d554ce40151 AS builder
+FROM python:3.14-slim-trixie@sha256:f85c5697265c178cc6887276c55fe16cf3d14ca35c3df6a5eab3b360534a55d2 AS builder
 
-COPY --from=ghcr.io/astral-sh/uv:0.11.6@sha256:b1e699368d24c57cda93c338a57a8c5a119009ba809305cc8e86986d4a006754 /uv /uvx /bin/
+COPY --from=ghcr.io/astral-sh/uv:0.12.23@sha256:61d393e44e249f2e4b526b6c7ddcecce245946826e608e11c93ad4f5bba55b21 /uv /uvx /bin/
 
 ENV UV_PYTHON_DOWNLOADS=0 \
     UV_LINK_MODE=copy
@@ -27,11 +27,14 @@ COPY src/ ./src/
 # Stage 2: Runtime — no build toolchain
 # Runs as non-root user 'mcp' (UID 1003)
 # -----------------------------------------------------------------------------
-FROM python:3.14-slim-trixie@sha256:c3e521df8b2b498a7a682e7e18676771cb80c6b75b8699af886b2d554ce40151
+FROM python:3.14-slim-trixie@sha256:f85c5697265c178cc6887276c55fe16cf3d14ca35c3df6a5eab3b360534a55d2
 
+# The service runs from the uv-built virtualenv, which has no pip, so the
+# base image's pip (and the packages it vendors) is removed (#1007).
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
- && rm -rf /var/lib/apt/lists/*
+ && rm -rf /var/lib/apt/lists/* \
+ && python -m pip uninstall --yes --no-cache-dir pip
 
 RUN groupadd --gid 1003 mcp && \
     useradd --uid 1003 \

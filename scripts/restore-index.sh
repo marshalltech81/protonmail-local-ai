@@ -1,0 +1,287 @@
+#!/bin/bash
+set -Eeuo pipefail
+
+# Replace the index with a copy made by `make backup-index` (#1005). Run
+# through `make restore-index BACKUP=<file>`.
+#
+# Asks for confirmation, then stops the indexer and mcp-server (the only
+# services that open the index) and streams the copy over stdin into a
+# one-off container of the indexer's image with its index volume, the
+# indexer's user, a read-only root, no capabilities and no network (no
+# host mount, so a stopped stack's overlays and project name do not
+# matter). That container writes it next to the index,
+# refuses it unless PRAGMA integrity_check is ok, the application ID is
+# this project's and its schema version is not above the code's, then
+# checkpoints the old index's WAL into it, removes its -wal and -shm
+# files and renames the copy over the index. Removing the WAL first
+# matters: an old WAL left beside the restored file would be replayed
+# into it. The indexer is started and its startup lines (schema version,
+# embedder identity) are printed; mcp-server starts once the indexer has
+# verified the restored index. A refused file leaves the index unchanged
+# and both services are started again.
+
+# Runs inside a one-off indexer container: python -c CODE, copy on stdin.
+RESTORE_PY='
+import os, sqlite3, sys
+from contextlib import closing
+from pathlib import Path
+
+from src.database import SCHEMA_APPLICATION_ID, SCHEMA_VERSION
+
+
+def refuse(message):
+    # Exit 3 means "refused, the index is unchanged"; the shell treats any
+    # other failure (a killed container, a docker error) as unknown.
+    print(message, file=sys.stderr)
+    sys.exit(3)
+
+
+db = Path(os.environ["SQLITE_PATH"])
+# backup-index removes a stale one of these (left by a killed container)
+# by this name; keep the two in step.
+staged = db.with_name(".restore-index.db")
+os.umask(0o077)
+try:
+    with staged.open("wb") as handle:
+        while block := sys.stdin.buffer.read(1 << 20):
+            handle.write(block)
+        handle.flush()
+        os.fsync(handle.fileno())
+    with closing(sqlite3.connect(f"{staged.as_uri()}?mode=ro", uri=True)) as conn:
+        result = "; ".join(row[0] for row in conn.execute("PRAGMA integrity_check(20)"))
+        print(f"integrity_check: {result}")
+        if result != "ok":
+            refuse("refused: the backup failed PRAGMA integrity_check")
+        if conn.execute("PRAGMA application_id").fetchone()[0] != SCHEMA_APPLICATION_ID:
+            refuse("refused: the file is not a protonmail-local-ai index")
+        version = conn.execute("SELECT version FROM schema_version").fetchone()[0]
+    print(f"backup schema version: {version} (code: {SCHEMA_VERSION})")
+    if version > SCHEMA_VERSION:
+        refuse("refused: the backup schema is newer than this code; run the release that wrote it")
+    # Fold the current index WAL into its main file first, so that file
+    # alone holds every committed transaction if the swap below fails or
+    # is interrupted after the sidecars are gone.
+    # The installed file keeps the current index mode (0644 when there is
+    # none): mcp-server runs as another UID and reads it through the
+    # "other" bits, so the staged 0600 must not become the index mode.
+    mode = 0o644
+    if db.exists():
+        mode = db.stat().st_mode & 0o777
+        with closing(sqlite3.connect(db)) as live:
+            busy = live.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0]
+        if busy:
+            refuse("refused: the current index is still in use")
+    os.chmod(staged, mode)
+    for suffix in ("-wal", "-shm", "-journal"):
+        Path(f"{db}{suffix}").unlink(missing_ok=True)
+    os.replace(staged, db)
+except BaseException as exc:
+    # Any failure, a full volume included, leaves no staged copy behind.
+    staged.unlink(missing_ok=True)
+    if isinstance(exc, sqlite3.Error):
+        refuse(f"refused: SQLite error ({type(exc).__name__})")
+    if isinstance(exc, OSError):
+        refuse(f"refused: {type(exc).__name__} (errno {exc.errno}) in the index volume")
+    raise
+print(f"restored {db}")
+'
+
+die() {
+    printf 'restore-index: %s\n' "$1" >&2
+    exit 1
+}
+
+[[ -n "${BACKUP:-}" ]] || die "set BACKUP to a file written by make backup-index, for example make restore-index BACKUP=~/protonmail-local-ai-backup/mail-20261007T120000Z-48213-9f3ac1d2.db"
+# zsh passes make BACKUP=~/file with the ~ unexpanded.
+if [[ "$BACKUP" == \~/* ]]; then
+    BACKUP="$HOME${BACKUP#\~}"
+fi
+[[ ! -L "$BACKUP" ]] || die "$BACKUP is a symbolic link; pass the file itself"
+[[ -f "$BACKUP" ]] || die "$BACKUP is not a file"
+
+# The structural checks below cannot tell a crafted index from a real
+# one, so the path to the backup must be one no other account can
+# change: the file and every directory above it owned by you (or root),
+# with no group or other write bit unless the directory is sticky, and
+# every symbolic link among the directory components yours (or root's).
+# Otherwise another account could swap the file before it is opened.
+# ACL entries count too: they are checked before the mode bits.
+# acl_grants PATH succeeds when PATH carries an entry that gives access:
+# on macOS an "allow" entry (deny-only entries, like the one on home
+# directories, only restrict), elsewhere any ACL (ls shows a +).
+acl_grants() {
+    local listing
+    if [[ "$(uname)" == Darwin ]]; then
+        listing=$(ls -lde -- "$1")
+        grep -qE '^ *[0-9]+: .* allow ' <<<"$listing"
+    else
+        listing=$(ls -ld -- "$1")
+        [[ "${listing:10:1}" == + ]]
+    fi
+}
+me=$(id -u)
+if [[ -n "$(find "$BACKUP" -maxdepth 0 \( -perm -g=w -o -perm -o=w -o \( ! -user 0 ! -user "$me" \) \) -print)" ]] ||
+    acl_grants "$BACKUP"; then
+    die "another account can replace $BACKUP; it must be yours and writable only by you"
+fi
+# replaceable_dir DIR succeeds when another account can rename or remove
+# entries in DIR: a group or other write bit without the sticky bit, an
+# owner other than you or root, or an ACL entry that grants access.
+replaceable_dir() {
+    [[ -n "$(find "$1" -maxdepth 0 \( \( \( -perm -g=w -o -perm -o=w \) ! -perm -1000 \) -o \( ! -user 0 ! -user "$me" \) \) -print)" ]] ||
+        acl_grants "$1"
+}
+# The open below takes the path as given, so each directory component
+# is checked as written, before the resolved directories: a symbolic
+# link among them can be repointed by its owner (in a sticky directory
+# too) or replaced by any account that can write the directory holding
+# it, whether or not that directory is on the resolved path.
+# Split with parameter expansion, not dirname or read: both are
+# line-oriented and would drop the components after a newline.
+dir="${BACKUP%/*}"
+[[ "$BACKUP" == */* ]] || dir=.
+prefix=""
+[[ "$BACKUP" != /* ]] || prefix=/
+rest="$dir"
+while [[ -n "$rest" ]]; do
+    part="${rest%%/*}"
+    if [[ "$rest" == */* ]]; then
+        rest="${rest#*/}"
+    else
+        rest=""
+    fi
+    [[ -n "$part" ]] || continue
+    prefix="$prefix$part"
+    if [[ -L "$prefix" && -n "$(find "$prefix" -maxdepth 0 ! -user 0 ! -user "$me" -print)" ]]; then
+        die "another account can replace $BACKUP through $prefix, a symbolic link it owns; pass a path whose links are yours"
+    fi
+    # The x keeps a newline that ends the directory's own name, which
+    # the substitution would otherwise strip with pwd's.
+    real=$(cd -- "$prefix" && pwd -P && printf x) || die "cannot enter $prefix"
+    real="${real%$'\n'x}"
+    if replaceable_dir "$real"; then
+        die "another account can replace $BACKUP through $prefix; keep backups in a directory only you can write, as make backup-index creates"
+    fi
+    prefix="$prefix/"
+done
+ancestor=$(cd -- "$dir" && pwd -P && printf x) || die "cannot enter $dir"
+ancestor="${ancestor%$'\n'x}"
+while :; do
+    if replaceable_dir "$ancestor"; then
+        die "another account can replace $BACKUP through $ancestor; keep backups in a directory only you can write, as make backup-index creates"
+    fi
+    [[ "$ancestor" != / ]] || break
+    ancestor="${ancestor%/*}"
+    [[ -n "$ancestor" ]] || ancestor=/
+done
+# Open the backup once, now, and stream that descriptor later: the file
+# checked here is the one restored, whatever is put at its path while the
+# prompt waits or the services stop.
+exec 3<"$BACKUP"
+[[ -f /dev/fd/3 ]] || die "$BACKUP is not a regular file"
+# Bounds the wait for the indexer's startup lines and, after a failed
+# restore container, for that container to exit. Checked before anything
+# stops or changes.
+wait_secs="${RESTORE_WAIT_SECONDS:-900}"
+[[ "$wait_secs" =~ ^[0-9]{1,6}$ ]] || die "RESTORE_WAIT_SECONDS must be a whole number of seconds"
+# Base 10: arithmetic would read a leading zero as octal (08 fails).
+wait_secs=$((10#$wait_secs))
+
+# The indexer container's own image and index volume, whatever project
+# name or overlays created it. The container must exist (make up first).
+image=$(docker inspect --format '{{.Image}}' indexer) || die "no indexer container; start the stack with make up first"
+volume=$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Name}}{{end}}{{end}}' indexer)
+[[ -n "$image" && -n "$volume" ]] || die "cannot find the indexer's image or index volume"
+
+printf 'This stops the indexer and mcp-server and replaces the search index with\n'
+printf '  %s\n' "$BACKUP"
+printf 'The current index is deleted; take a copy first with make backup-index if you may want it.\n'
+printf 'Mail that arrived after the backup is indexed again from Maildir when the indexer starts.\n'
+read -r -p "Restore? (yes/no): " confirm || confirm=""
+[[ "$confirm" == yes ]] || die "not restored"
+
+# The trap below is armed before the stop, so an interrupted or failed
+# stop still starts the services again.
+# Until the copy is in place, any exit starts both services again on the
+# unchanged index. After it, mcp-server starts only once the indexer has
+# migrated and verified the restored index: docker start does not apply
+# Compose's depends_on, and mcp-server must not serve a schema the
+# indexer is still migrating.
+restored=0
+on_exit() {
+    if [[ "$restored" == 0 ]]; then
+        docker start indexer mcp-server ||
+            printf 'restore-index: could not start indexer and mcp-server; run make up\n' >&2
+    elif [[ "$restored" == 1 ]]; then
+        printf 'restore-index: mcp-server was left stopped; once the indexer is healthy, run make up\n' >&2
+    fi
+}
+trap on_exit EXIT
+
+docker stop mcp-server indexer
+
+# The container is named so the script can tell whether it is gone: a
+# failing docker run does not prove its process stopped (the client can
+# detach from a container that keeps running), and --rm removes it only
+# once it exits.
+container="restore-index-$$"
+rc=0
+docker run --rm -i --name "$container" --network none --read-only --tmpfs /tmp --cap-drop ALL \
+    --security-opt no-new-privileges:true --user 1002:1002 \
+    --env SQLITE_PATH=/data/mail.db --volume "$volume:/data" \
+    "$image" python -c "$RESTORE_PY" <&3 || rc=$?
+if ((rc == 3)); then
+    die "the index was not replaced (the reason is above); the previous index is unchanged"
+elif ((rc != 0)); then
+    # Killed or failed at a point the script cannot know (exit 3 is the
+    # only "unchanged" answer), so the swap may have happened. Wait
+    # (bounded) until the container is gone, so the indexer cannot open
+    # the index while that process still checkpoints or renames it, then
+    # start only the indexer, which migrates or refuses whichever index
+    # is there. If it is still running after the bound, start nothing.
+    restored=1
+    deadline=$((SECONDS + wait_secs))
+    while :; do
+        running=$(docker ps -q --filter "name=^${container}$") ||
+            die "cannot tell whether the restore container $container is still running, so nothing was started; wait for it (docker wait $container), then run make up and check docker compose logs indexer"
+        [[ -n "$running" ]] || break
+        if ((SECONDS >= deadline)); then
+            die "the restore container $container is still running after ${wait_secs}s, so nothing was started; wait for it (docker wait $container), then run make up and check docker compose logs indexer"
+        fi
+        sleep 1
+    done
+    docker start indexer
+    die "the restore container failed (exit $rc), so the index may or may not have been replaced; the indexer was started, check docker compose logs indexer"
+fi
+restored=1
+docker start indexer
+# Read logs from the new process's start (nanosecond precision), so a
+# line the stopped indexer wrote cannot count as this start's.
+since=$(docker inspect --format '{{.State.StartedAt}}' indexer)
+
+# Wait (bounded) for the indexer to verify or refuse the embedder
+# identity, printing its schema and embedder startup lines.
+deadline=$((SECONDS + wait_secs))
+pattern='Startup identity|Migrating database|Database ready|Embedder identity|embedder is not the one|Schema version mismatch'
+while :; do
+    if ! logs=$(docker logs --since "$since" indexer 2>&1); then
+        printf '%s\n' "$logs" >&2
+        die "could not read the indexer log (the error is above); check docker compose logs indexer"
+    fi
+    if grep -qE 'Embedder identity (verified|recorded)|Recorded embedder identity|embedder is not the one|Schema version mismatch' <<<"$logs"; then
+        break
+    fi
+    if ((SECONDS >= deadline)); then
+        printf '%s\n' "$logs" | grep -E "$pattern" || true
+        die "the indexer did not report its embedder identity within ${wait_secs}s; check docker compose logs indexer"
+    fi
+    sleep 5
+done
+lines=$(grep -E "$pattern" <<<"$logs")
+printf '%s\n' "$lines"
+if grep -qE 'embedder is not the one|Schema version mismatch' <<<"$lines"; then
+    die "the indexer refused the restored index; see docs/troubleshooting.md"
+fi
+docker start mcp-server
+restored=2
+printf 'Index restored from %s\n' "$BACKUP"

@@ -533,7 +533,7 @@ class TestGetMessagePaging:
             message = _error(handler(message_id="a", offset=offset))
         assert message.startswith("Error: offset")
         rejected = [r.getMessage() for r in caplog.records if "rejected" in r.getMessage()]
-        assert rejected == ["get_message rejected invalid offset"]
+        assert rejected == ["rejected invalid argument: get_message.offset"]
 
     def test_offset_past_a_missing_body_is_rejected(self, fake_server, seeded_db):
         handler = _handlers(fake_server, seeded_db)["get_message"]

@@ -15,6 +15,7 @@ they check what a client receives on the wire.
 """
 
 import asyncio
+import inspect
 
 import pytest
 from fastmcp import Client, FastMCP
@@ -25,7 +26,7 @@ from src.tools.retrieval import register_retrieval_tools
 from src.tools.search import register_search_tools
 from src.tools.system import register_system_tools
 
-from tests.conftest import FakeEmbedClient, FakeInferenceClient
+from tests.conftest import FakeEmbedClient, FakeInferenceClient, FakeMCPServer
 
 # Every tool the server can register, with its title. A new tool fails
 # ``test_every_registered_tool_is_classified`` until it is classified
@@ -74,8 +75,38 @@ def _wire_tools(server: FastMCP) -> dict[str, dict]:
     return {t["name"]: t for t in result["tools"]}
 
 
+def _handlers(db) -> dict[str, object]:
+    """The plain handler of every tool ``_server`` registers, captured by
+    the ``FakeMCPServer`` stub so its docstring can be read directly."""
+    fake = FakeMCPServer()
+    embed = FakeEmbedClient()
+    inference = FakeInferenceClient()
+    register_search_tools(fake, db, embed)
+    register_retrieval_tools(fake, db)
+    register_intelligence_tools(fake, db, embed, inference)
+    register_experimental_tools(fake, db, embed, inference)
+    register_system_tools(fake, db)
+    return fake.tools
+
+
 def test_every_registered_tool_is_classified(empty_db):
     assert set(_wire_tools(_server(empty_db))) == set(EXPECTED_TITLES)
+
+
+@pytest.mark.parametrize("name", sorted(EXPECTED_TITLES))
+def test_wire_description_is_the_docstring_before_args(empty_db, name):
+    """FastMCP builds the description from the docstring through griffe's
+    Google parser and sends only the first text section (#1011): a line
+    of words ending in a colon with an indented block under it starts an
+    admonition section, and everything from it on is dropped from what
+    the client receives. So every tool's wire description must carry its
+    whole docstring before ``Args:``, whitespace normalised."""
+    handlers = _handlers(empty_db)
+    assert set(handlers) == set(EXPECTED_TITLES)
+    doc = inspect.getdoc(handlers[name]) or ""
+    expected = " ".join(doc.split("\nArgs:", 1)[0].split())
+    wire = _wire_tools(_server(empty_db))[name]["description"]
+    assert " ".join(wire.split()) == expected
 
 
 @pytest.mark.parametrize("name", sorted(EXPECTED_TITLES))

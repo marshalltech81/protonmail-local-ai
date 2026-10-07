@@ -772,10 +772,147 @@ Each migration runs in one transaction, so if the indexer stops part
 way (killed, disk full) the index stays at the last version that
 finished, and the next `make up` retries the rest; nothing needs to be
 deleted. If a retry keeps failing with the same error, rebuild the
-index as in the section above. v1 (#928) keys the attachment
+index as in the section above. If a migration finished but the
+result is wrong, recreate the containers from the release before it
+and then restore the copy taken before the upgrade, in that order
+([Back up and restore the index](#back-up-and-restore-the-index)). v1 (#928) keys the attachment
 extraction cache by extractor module; after it, an attachment whose
 label selects a different extractor from the one that first read its
 bytes is re-extracted once, the next time its message is reprocessed.
+
+## Back up and restore the index
+
+Take a copy of the index before deploying a release that changes the
+schema (a new `indexer/src/migrations/` file), so a migration that
+commits but turns out wrong can be undone without a full rebuild from
+Maildir (#1005). The copy holds the whole mailbox: choose a directory
+outside the checkout, on an encrypted disk, and delete copies you no
+longer need (docs/architecture.md, "Backups").
+
+```bash
+make backup-index BACKUP_DIR="$HOME/protonmail-local-ai-backup"
+```
+
+The stack keeps running. The indexer container copies the index with
+SQLite's online backup API from a read-only connection, which reads one
+consistent snapshot while the indexer writes, into a temporary file next
+to the index in the index volume (so the volume needs free space for one
+more copy of `mail.db` while it runs). It runs `PRAGMA integrity_check`
+on that copy, streams it to `BACKUP_DIR/mail-<UTC timestamp>-<run>.db`
+(where `<run>` is the process ID and four random bytes, so two backups
+started in the same second never share a name, in the volume or on the
+host), checks the SHA-256 of the host file against the container's, and
+removes the temporary file. A temporary copy left by a run that was killed before
+its cleanup (`.backup-index-*.db` in the volume), and the staging file a
+killed restore leaves (`.restore-index.db`, see below), are removed by
+the next backup once they are more than 6 hours old (a run or a restore
+still writing keeps its file), and the run says how many of each it
+removed. The target prints the integrity result, the path, the
+size and the schema version, and writes nothing to `BACKUP_DIR` when
+the check fails or when the copy lacks what `restore-index` requires
+(this project's application ID and a schema version, which an index the
+indexer is still creating may not have yet). `BACKUP_DIR` is required; it is created with mode 700,
+and the directory (new or existing) and the file are refused when mode
+bits or an ACL give other users access (on macOS, `chmod -N <dir>`
+removes ACL entries); a path inside the checkout is refused, and the
+file is mode 600. No mount or setting of
+the running containers changes.
+
+To go back to a copy:
+
+```bash
+make restore-index BACKUP="$HOME/protonmail-local-ai-backup/mail-20261007T120000Z-48213-9f3ac1d2.db"
+```
+
+It asks for `yes`, then:
+
+1. stops `mcp-server` and `indexer` (the stack must have been started
+   with `make up`, so the containers exist; mbsync keeps running);
+2. streams the file into a one-off container of the indexer's image with
+   the index volume, the indexer's user, a read-only root, no
+   capabilities and no network, which refuses the file unless
+   `PRAGMA integrity_check` is `ok`, the file is this project's index
+   and its schema version is not above the code's;
+3. checkpoints the current index's WAL into `mail.db`, so that file
+   alone holds every committed change if the swap fails, then removes
+   the `-wal` and `-shm` files and renames the copy over `mail.db` with
+   the current file's mode, so mcp-server (another user) can still read
+   it (an old WAL left beside the restored file would be replayed into
+   it); a staged copy (`.restore-index.db` in the volume) is removed on
+   any failure the container handles, a full volume included, and one
+   left by a killed container is removed by the next `make backup-index`
+   once it is 6 hours old;
+4. starts `indexer` and waits up to `RESTORE_WAIT_SECONDS` (900, checked
+   before anything is stopped) for the startup lines of that new
+   process, printing the `Startup identity` line
+   (`schema_stored`), any `Migrating database` and `Database ready`
+   lines and the `Embedder identity verified` line;
+5. starts `mcp-server` only after that line, so it never serves an
+   index the indexer is still migrating. If the indexer refuses the
+   restored index or does not report in time, `mcp-server` is left
+   stopped: fix the cause and run `make up`. When step 2 or 3 refuses
+   the file, the index is unchanged and both services start again.
+
+If the current index cannot be opened at all, step 3 refuses; remove
+the index volume as in
+[Indexer refuses to start](#indexer-refuses-to-start--wipe-the-sqlite-volume),
+run `make up` so the containers exist, then restore.
+
+The current index is replaced, so take a `make backup-index` first if
+you may want it back. Mail that arrived after the copy was taken is
+indexed again when the indexer starts, since it queues every Maildir
+message the index does not hold. The indexer refuses a copy made with
+a different embedder; see
+[Embedder identity mismatch](#embedder-identity-mismatch).
+
+The restore runs, and then starts, the image of the existing indexer
+container, and that indexer migrates an older copy again on its first
+start. To undo a migration that finished but is wrong, recreate the
+containers from the release before it first, then restore:
+
+```bash
+# The release before schema v1 has no restore helper: keep this one.
+cp scripts/restore-index.sh "$HOME/restore-index.sh"
+git checkout <the release before the migration>
+make build
+# Only these two (--no-deps), so mbsync keeps running; add the same
+# -f overlays you run with.
+docker compose up --no-start --no-deps indexer mcp-server
+BACKUP="$HOME/protonmail-local-ai-backup/mail-<before the upgrade>.db" \
+  bash "$HOME/restore-index.sh"
+rm "$HOME/restore-index.sh"
+```
+
+`up --no-start --no-deps` replaces the indexer and mcp-server
+containers with ones built from that release without starting them, so
+nothing opens the migrated index, and leaves mbsync running;
+`restore-index.sh` then installs the copy and starts the two. The
+helper needs nothing from the checkout, so the copy taken before the
+checkout works with the older release (its own `make restore-index`
+target is the same script where the release has one).
+
+If the one-off restore container (`restore-index-<pid>`) is killed or
+Docker fails part way, the script cannot tell whether the copy was
+swapped in. A failed `docker run` does not prove the container's
+process stopped (the client can detach from a container that keeps
+running), so the script first waits up to `RESTORE_WAIT_SECONDS` for
+the container to be gone, then starts only the indexer and leaves
+`mcp-server` stopped. Check the indexer log, then run `make up`. If the
+container is still running after the wait, nothing is started: wait
+for it (`docker wait restore-index-<pid>`, the name is in the
+message), then run `make up` and check the indexer log.
+
+The backup file and every directory above it must be yours (or
+root's) and writable only by you, with no ACL entry that gives another
+account access (on macOS, deny-only entries such as the one on home
+directories are fine), unless the directory is sticky like `/tmp`, and
+the file must not be a symbolic link: another account
+could otherwise swap in a crafted index, which the integrity and schema
+checks cannot tell apart. The directories are checked both as written
+in `BACKUP` and after resolving symbolic links, and a symbolic link
+among the directory components must be yours (or root's, like `/tmp`
+on macOS): its owner could otherwise repoint it between the checks and
+the open. Directories made by `make backup-index` already qualify.
 
 ## Embedder identity mismatch
 
@@ -1083,8 +1220,13 @@ tool=get_thread outcome=error total_ms=1.9 stages_ms={} counts={} config={}
   ERROR line from the tool's own logger (`mcp.tools.retrieval`,
   `mcp.tools.system`) naming the cause as fixed text or an exception
   type, for example
-  `get_thread failed: not found`, `list_threads rejected invalid input
-  (filter_type)` or `query_messages error: OperationalError`.
+  `get_thread failed: not found`, `rejected invalid argument:
+  list_threads.filter_type` or `query_messages error: OperationalError`.
+  A rejected argument (every tool, keyed by tool and field, #1039) is
+  logged once per key per minute; later repeats in that minute are
+  counted into one `rejected invalid arguments in the last <N>s:
+  <tool>.<field>=<count> ...` line, logged when the next rejection
+  arrives after the minute ends.
 - `total_ms` is the whole call; `stages_ms` the timed stages
   (retrieval lanes, embedding, rerank, inference) that ran.
 - `counts` holds result counts: `returned` and `total_matches` for
@@ -1144,10 +1286,7 @@ the model is told, in the prompt, so this log line is where it shows.
   the answer or summary was cut off (`outputs_cut` counts every cut
   reply, whatever stopped it; for `extract_from_emails`, the threads
   whose reply was lost). A reply cut before any text fails the call
-  with an error, and the line is still logged. When the repair reply
-  was the one cut, `prompt_tokens` is the repair prompt (for
-  `brief_issue` and `check_conclusion`, whenever a repair call was
-  made, cut or not). Raise
+  with an error, and the line is still logged. Raise
   `INFERENCE_MAX_TOKENS`. The reply reserve comes out of
   `INFERENCE_CONTEXT_TOKENS`, so raise that by the same amount if the
   model's window allows, or the prompt allowance shrinks.
@@ -1187,7 +1326,10 @@ the model is told, in the prompt, so this log line is where it shows.
 `prompt_tokens` is the estimated size of the prompt sent (the largest
 one for `extract_from_emails`; for it, `brief_issue` and
 `check_conclusion`, including the reply schema structured outputs
-add), counted at three characters per token.
+add), counted at three characters per token. For `ask_mailbox`,
+`summarize_thread`, `brief_issue` and `check_conclusion` it is the
+last prompt sent: the repair prompt whenever a repair call was made,
+whether or not its reply was cut (#984).
 
 The call's own `mcp.timings` line also carries a
 `token_limit_<limit>` count for each limit it hit, so the warning can
@@ -1209,15 +1351,14 @@ only, never filenames or text (`make logs`):
   <ExceptionType>` (WARNING), per extraction that fails: an encrypted
   PDF that needs a password, a Tesseract error or timeout, a DOCX,
   XLSX or PPTX the parser rejects (`PptxRelationshipChainError` is a
-  deck whose parts are chained too deep to open,
-  `PptxPackageBudgetError` one whose XML would decompress past
-  32 MiB, or with more than 20,000 members or 8 MiB of relationship
-  parts), or (`zip uncompressed-size cap exceeded`) a DOCX, XLSX or
+  deck whose parts are chained too deep to open, and
+  `DocxRelationshipChainError` the same for a `.docx` or `.dotx`), or
+  (`zip uncompressed-size cap exceeded`) a DOCX, XLSX or
   PPTX that would decompress past its cap. For a legacy `.doc`,
   `.xls` or `.ppt` (#935, #957) the type names the tool's fate:
   `ToolTimeoutError`, `ToolCrashError` (killed by a signal, including
-  the `.xls` child's and the `.ppt` reader's CPU limit), `ToolExitError`
-  (an error, including the `.xls` child's memory limit, and any deck the
+  each tool's CPU limit), `ToolExitError` (an error, including each
+  tool's memory limit, and any deck the
   `.ppt` reader rejects or that needs more than its 128 MiB heap, such
   as a password-protected one), `ToolNotFoundError` (catdoc or the
   `.ppt` Java runtime missing from the image) or `XlsOutputError`.
@@ -1225,6 +1366,26 @@ only, never filenames or text (`make logs`):
   once usually means the OCR toolchain or a parser library is
   broken, not the mail. A failed result is cached for 7 days, then
   retried when the same bytes arrive again.
+- `extractor <module> declined (dispatch_via=<mime|extension|...>):
+  <fixed text>; recorded unsupported, not retried` (WARNING): the
+  extractor refused the file in a way the same bytes always repeat, so
+  the result is cached `unsupported` for good instead of `failed`
+  (#931): a PDF that needs an open password or exceeds pypdf's limits,
+  a workbook over the XLSX eager-part budget, or a deck or document
+  over the PPTX / DOCX pre-open package budgets (#1032: a deck whose
+  XML would decompress past 32 MiB, or with more than 20,000 members
+  or 8 MiB of relationship parts; a `.docx` or `.dotx` past 32 MiB,
+  5,000 members or 4 MiB of relationship parts). The file stays
+  searchable by filename and type only. A `.docx` or `.dotx` over a
+  budget that was recorded `failed` (`DocxPackageBudgetError`) before
+  #1032 is not re-queued at startup, because the `docx` extractor
+  version was deliberately not bumped while its walk after the open is
+  unbudgeted (#1031). It stays `failed` until the same bytes are
+  processed again (a new occurrence, or the message reprocessed for
+  another reason) more than 7 days after it was recorded; that re-run
+  reads the central directory once, never opens the document, and
+  records it `unsupported`. A `docx` bump after #1031 converts the
+  rest at the next start.
 - `PDF OCR fallback failed: <ExceptionType>` (WARNING): OCR of a PDF's
   pages without a text layer raised (a Tesseract error or timeout). A
   PDF with enough digital text keeps it and loses the scanned pages;
@@ -1322,8 +1483,7 @@ only, never filenames or text (`make logs`):
     so none are lost, and the 5-minute flush still applies.
   - What the outcomes mean: `cached` counts attachments served from the
     extraction cache instead of extracted again. `unsupported` is a type
-    no extractor reads, including PowerPoint slideshows and templates
-    (`.ppsx`, `.potx`), and password-protected Office files and other
+    no extractor reads, and password-protected Office files and other
     OLE2 files not labelled `.doc` / `.xls` / `.ppt`, recorded with
     "OLE2 compound file" rather than as `failed`, so they are not
     retried (#694); a `.ppt`-labelled file that is not OLE2 is recorded
@@ -1336,8 +1496,9 @@ only, never filenames or text (`make logs`):
     "Extractor dispatch"). Binary files (PDF, ZIP, OLE2, PNG, JPEG,
     GIF) sent as text are recorded with "binary payload labelled as
     text" (#932). It also counts PDFs that need an open password or
-    exceed pypdf's limits, and workbooks over the XLSX eager-part budget,
-    which fail the same way every time (#931). `too_large` is over
+    exceed pypdf's limits, workbooks over the XLSX eager-part budget, and
+    decks and documents over the PPTX / DOCX pre-open package budgets,
+    which fail the same way every time (#931, #1032). `too_large` is over
     `INDEXER_ATTACHMENT_MAX_BYTES`, and `ocr_disabled` is an image or
     scanned PDF skipped while `INDEXER_OCR_ENABLED=false` (re-extracted
     once OCR is turned on).
@@ -1403,6 +1564,7 @@ extractor reads (`.eml`) is not logged.
 | `decoded_bytes` | The same, past 64 MB of decoded attached emails per message |
 | `container_serialize` | A container the serializer refuses (a malformed header), when its payload would be extracted |
 | `body_parts` | Text parts past the 200th, left out of the body: only those that could have been part of it, so an alternative rendering after the one the body uses is not counted |
+| `mime_parts` | Every MIME part past the 10,000th (the message itself and the parts inside attachments count): their text and attachments are not read. Counted once per message |
 | `address_header` | Every recipient of a `From`, `To` or `Cc` header over 256,000 characters |
 | `address_element` | One address-list entry over 128,000 characters |
 | `address_length` | One address over 998 characters |
