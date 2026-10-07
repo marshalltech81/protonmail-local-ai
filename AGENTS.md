@@ -865,11 +865,16 @@ Notes:
   `.github/workflows/security.yml` locally (the dependency scans of
   `indexer/` and `mcp-server/` and the offline misconfiguration scan of
   the repository, with the workflow's flags; needs `trivy` on `PATH`,
-  and warns when its version is not the pinned one). The flag values
-  live in the Makefile and the workflow; `make test-trivy-flags` (part
-  of `make test`, no Trivy needed) fails when they differ, so a change
-  to one is made in both. The image scans in
-  `.github/workflows/docker.yml` have no local target.
+  and warns when its version is not the pinned one), then the image
+  gates of `.github/workflows/docker.yml` (the vuln scans of the built
+  indexer, mcp-server and mbsync images, fixable HIGH/CRITICAL only;
+  `make trivy-images` runs these alone). The image gates need the
+  images `make build` last produced, named as `docker compose build`
+  names them, and fail naming the image when one is not built; rebuild
+  first, since they scan the image, not the checkout. The flag values
+  live in the Makefile and the workflows; `make test-trivy-flags` (part
+  of `make test`, no Trivy or Docker needed) fails when they differ, so
+  a change to one is made in both.
 - for Dockerfile, build, or container-runtime changes, run the smallest relevant `docker compose build ...` subset when practical
 - prefer real `.eml` fixtures for parser tests
 - a fixture generated with an office application (Word, PowerPoint,
