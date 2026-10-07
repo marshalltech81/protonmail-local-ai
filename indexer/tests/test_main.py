@@ -3440,6 +3440,29 @@ class TestRequeueStaleExtractions:
         ).fetchone()
         assert (row["extractor"], row["extraction_status"]) == ("docx@5", status)
 
+    def test_docx_rows_stamped_by_the_reverted_bump_are_kept(self, tmp_path, monkeypatch):
+        """PR #1068 shipped ``docx`` 6 and PR #1075 reverted it to 5: a
+        ``docx@6`` row a build between the two wrote is newer than the
+        current version, so the sweep keeps it rather than re-running it
+        (pins the rollback note beside ``EXTRACTOR_VERSIONS``)."""
+        from src.extractors import EXTRACTOR_VERSIONS
+
+        assert EXTRACTOR_VERSIONS["docx"] == 5
+        maildir = tmp_path / "maildir"
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        path = maildir / "INBOX" / "cur" / "contract.eml"
+        self._write_docx_eml(path, "contract@example.com")
+        db = Database(tmp_path / "mail.db")
+        queue = _make_queue(db)
+        queue.enqueue(str(path), REASON_INITIAL_SCAN)
+        self._drain(db, queue)
+        with db.transaction():
+            db._conn.execute("UPDATE attachment_extractions SET extractor = 'docx@6'")
+
+        assert main._requeue_stale_extractions(db, queue) == 0
+        row = db._conn.execute("SELECT extractor FROM attachment_extractions").fetchone()
+        assert row["extractor"] == "docx@6"
+
     def test_alias_messages_using_the_stale_row_are_requeued_and_rebuilt(
         self, tmp_path, monkeypatch
     ):

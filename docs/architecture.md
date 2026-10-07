@@ -1226,7 +1226,11 @@ occurrence, or the message reprocessed for another reason) more than
 7 days after it was recorded; that re-run reads the central directory
 once, never opens the document, and records the row `unsupported`
 under the mapping. A deliberate `docx` bump, once #1031 lands,
-converts whatever rows remain at the next start.
+converts whatever rows remain at the next start. A row stamped
+`docx@6` by a build between #1068 and its revert (#1075) is kept, since
+a newer row is never downgraded; rolling back to such a build treats
+the `docx@5` rows written since as stale and re-runs them through the
+unbudgeted walk at its next start, which is that build's behaviour.
 `DocxRelationshipChainError` (#945)
 still applies to a chain under these budgets.
 

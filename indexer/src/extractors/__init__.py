@@ -331,13 +331,21 @@ class ExtractionResult:
 # ``pptx.Presentation`` refused, so one labelled ``.pptx`` failed (#947).
 # ``.pptm`` / ``.ppsx`` / ``.potx`` occurrences cached "no extractor" are
 # re-queued by that sweep.
-# docx 6, pptx 3: a package over a pre-open budget is recorded
-# ``unsupported`` instead of ``failed`` (#1032), so the ``failed`` rows the
-# previous versions wrote for one are refreshed once; the startup sweep
-# re-runs stale rows only, never aged ``failed`` ones. The docx bump also
-# re-runs every cached document once through the walk after the open,
-# which has no budget yet (#1031), and records an over-budget package
-# that was read in full before the budgets ``unsupported``.
+# pptx 3: a deck over a pre-open budget is recorded ``unsupported``
+# instead of ``failed`` (#1032), so the ``failed`` rows version 2 wrote
+# for one are refreshed once; the startup sweep re-runs stale rows only,
+# never aged ``failed`` ones. The PPTX walk is budgeted (#936), so the
+# re-run is bounded.
+# docx 5 still: the same mapping for a document over a pre-open budget
+# (#1032) came with no bump, for the reason above (#1031): the few
+# ``failed`` rows version 5 wrote for one stay ``failed`` until the same
+# bytes are processed again more than 7 days on, or until a deliberate
+# bump follows #1031. PR #1068 briefly shipped ``docx`` 6 for this
+# mapping; PR #1075 reverted it. A row a build between the two stamped
+# ``docx@6`` is kept (a newer row is never downgraded, see
+# ``stale_extractor_module``); rolling back to such a build treats the
+# ``docx@5`` rows written since as stale and re-runs them through the
+# unbudgeted walk at its next start, which is that build's behaviour.
 # pptx 3 still: reads macro-enabled slideshows (``.ppsm``) and templates
 # (``.potm``), whose main parts python-pptx loaded as generic parts, so
 # one labelled ``.pptx`` failed by type (#1042); the bump above refreshes
