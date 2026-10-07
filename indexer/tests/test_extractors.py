@@ -5442,6 +5442,71 @@ class TestPptxExtractor:
         assert _PPTX_MARKER not in caplog.text
         assert _PPTX_MARKER not in (result.error or "")
 
+    def test_layout_placeholders_and_notes_placeholder_are_read(self):
+        """Review round 1: text typed into a layout's title and content
+        placeholders (``SlidePlaceholder``) and the notes placeholder
+        (``NotesSlidePlaceholder``), both ``Shape`` subclasses."""
+        import io
+
+        from pptx import Presentation
+        from pptx.shapes.autoshape import Shape
+        from pptx.shapes.placeholder import NotesSlidePlaceholder, SlidePlaceholder
+        from src.extractors.pptx import extract as pptx_extract
+
+        assert issubclass(SlidePlaceholder, Shape)
+        assert issubclass(NotesSlidePlaceholder, Shape)
+        presentation = Presentation()
+        slide = presentation.slides.add_slide(presentation.slide_layouts[1])
+        slide.shapes.title.text = "TITLEFACT"
+        slide.placeholders[1].text_frame.text = "BODYFACT"
+        slide.notes_slide.notes_text_frame.text = "NOTESFACT"
+        buf = io.BytesIO()
+        presentation.save(buf)
+
+        assert pptx_extract(buf.getvalue()) == ("TITLEFACT\n\nBODYFACT\n\nNOTESFACT", "pptx")
+
+    def test_expansion_budget_fails_before_python_pptx_opens(self, monkeypatch, caplog):
+        """Review round 1: python-pptx parses every XML part whole when it
+        opens, about 15 bytes of memory per byte of XML. A deck whose
+        members expand by more than ``_MAX_EXPANSION_BYTES`` past their
+        compressed size fails before python-pptx sees it."""
+        from src.extractors import pptx
+
+        def pad(xml: bytes) -> bytes:
+            return xml.replace(b"</p:spTree>", b"<!--" + b" " * 300_000 + b"--></p:spTree>")
+
+        payload = _rewrite_deck(_deck(_boxes(_PPTX_MARKER)), {"ppt/slides/slide1.xml": pad})
+        monkeypatch.setattr(pptx, "_MAX_EXPANSION_BYTES", 250_000)
+        opened = _count_calls(monkeypatch, pptx._pptx, "Presentation")
+        caplog.set_level("DEBUG")
+        result = extract(content_type=_PPTX_MIME, filename="a.pptx", payload=payload)
+        assert (result.status, result.error) == (STATUS_FAILED, "PptxExpansionBudgetError")
+        assert opened[0] == 0
+        assert _PPTX_MARKER not in caplog.text
+
+    def test_payload_that_is_not_a_zip_is_left_to_python_pptx(self, monkeypatch):
+        from src.extractors import pptx
+
+        opened = _count_calls(monkeypatch, pptx._pptx, "Presentation")
+        result = extract(
+            content_type=_PPTX_MIME,
+            filename="a.pptx",
+            payload=b"not a zip " + _PPTX_MARKER.encode(),
+        )
+        assert result.status == STATUS_FAILED
+        assert result.error != "PptxExpansionBudgetError"
+        assert opened[0] == 1
+
+    def test_ordinary_deck_is_under_the_expansion_budget(self, monkeypatch):
+        """Stored media (already compressed) costs nothing; the default
+        budget is far above an ordinary deck's XML."""
+        from src.extractors import pptx
+
+        payload = _deck(TestPptxExtractor._full_slide, _boxes("b"))
+        opened = _count_calls(monkeypatch, pptx._pptx, "Presentation")
+        assert pptx.extract(payload)[0].startswith("Quarterly review")
+        assert opened[0] == 1
+
     def test_zip_guard_runs_before_python_pptx(self, monkeypatch, caplog):
         calls = _count_extractor_calls(monkeypatch)
         monkeypatch.setattr("src.extractors.ZIP_MAX_UNCOMPRESSED_BYTES", 64)
@@ -5819,6 +5884,10 @@ _UNREPORTED_CAPS = {
     "src.extractors.xlsx:_MAX_EAGER_PART_BYTES": _WORKBOOK_FAILS,
     "src.extractors.xlsx:_MAX_EAGER_BYTES": _WORKBOOK_FAILS,
     "src.extractors.xlsx:_MAX_EAGER_READS": _WORKBOOK_FAILS,
+    "src.extractors.pptx:_MAX_EXPANSION_BYTES": (
+        "fails the deck (PptxExpansionBudgetError): a failed row with its rate-limited "
+        "WARNING, counted as failed="
+    ),
 }
 
 _EXTRACTOR_MODULES = (

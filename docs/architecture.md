@@ -1171,7 +1171,11 @@ across the workbook. A workbook over one of these fails as
 are not loaded at all.
 
 The PPTX extractor (#936) is bounded by the zip guard before
-python-pptx opens the deck, then counts its walk against four budgets
+python-pptx opens the deck, and by a 32 MiB expansion budget: python-pptx
+parses every XML part whole (about 15 bytes of memory per byte of XML),
+so a deck whose members expand by more than 32 MiB past their
+compressed sizes fails as `PptxExpansionBudgetError` before it is
+opened. It then counts its walk against four budgets
 per presentation: 5,000 slide-list entries (an entry naming a slide
 already read is skipped, not read again), 100,000 shapes (each group
 and every shape in it, and each notes-page shape), 200,000 table rows
