@@ -1184,8 +1184,10 @@ with 2,000 pictures and 10,000 hyperlinks has about 2,000 members,
 compressed and barely expand, but members stored uncompressed are not
 counted against the expansion budget, so at the default
 `INDEXER_ATTACHMENT_MAX_BYTES` python-docx can still parse up to about
-64 MiB of XML (#1033). A document read in full before is refreshed by
-the `docx@6` version bump. `DocxRelationshipChainError` (#945) still
+64 MiB of XML (#1033). The DOCX version is not bumped: a
+bump would re-run every cached document through the walk after the
+open, which has no budget yet (#1031), so a document read in full
+before keeps its cached text. `DocxRelationshipChainError` (#945) still
 applies to a chain under these budgets. The walk after the open has no
 budget of its own yet (#1031).
 

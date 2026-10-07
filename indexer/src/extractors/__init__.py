@@ -309,10 +309,11 @@ class ExtractionResult:
 # docx 5 still: a long part-relationship chain is now ``failed``
 # (``DocxRelationshipChainError``) instead of escaping as
 # ``RecursionError`` (#945); that escape cached no row, so none is stale.
-# docx 6: a package over a pre-open budget (members, expansion,
-# relationship bytes) is ``failed`` (``DocxPackageBudgetError``) before
-# python-docx opens it (#967, #946); before, such a document was read, so
-# its ``success`` rows are refreshed.
+# docx 5 still: a package over a pre-open budget is now ``failed``
+# (``DocxPackageBudgetError``, #967, #946). Not bumped: a bump would re-run
+# every cached document through the walk after the open, which has no
+# budget yet (#1031), only to turn the few over-budget ``success`` rows,
+# whose text is still right, into ``failed`` ones.
 # text 3: a payload starting with a fixed binary signature is recorded
 # ``unsupported`` instead of decoded as replacement characters, so the
 # ``success`` rows the previous version wrote for one are refreshed (#932).
@@ -329,7 +330,7 @@ class ExtractionResult:
 # stale; the "no extractor" sweep re-queues them instead.
 EXTRACTOR_VERSIONS: dict[str, int] = {
     "doc": 1,
-    "docx": 6,
+    "docx": 5,
     "image": 3,
     "pdf": 5,
     "ppt": 1,

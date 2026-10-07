@@ -747,14 +747,14 @@ class TestDocxExtractor:
             filename="v.docx",
             payload=self._save(document),
         )
-        assert result.extractor == "docx@6"
+        assert result.extractor == "docx@5"
 
     def test_docx_version_2_rows_are_stale(self):
         # docx@2 missed first-page and even-page headers/footers (#299).
         from src import extractors
 
         assert extractors.stale_extractor_module("docx@2") == "docx"
-        assert extractors.stale_extractor_module("docx@6") is None
+        assert extractors.stale_extractor_module("docx@5") is None
 
     def test_versions_are_keyed_by_dispatch_module(self, monkeypatch):
         """The image module records ``image-ocr`` and the PDF module
@@ -5280,8 +5280,9 @@ class TestWordTemplates:
         the docx rows the previous version wrote re-extract."""
         from src.extractors import EXTRACTOR_VERSIONS, stale_extractor_module
 
-        assert EXTRACTOR_VERSIONS["docx"] >= 5
+        assert EXTRACTOR_VERSIONS["docx"] == 5
         assert stale_extractor_module("docx@4") == "docx"
+        assert stale_extractor_module("docx@5") is None
 
 
 _DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -5575,14 +5576,16 @@ class TestDocxPackageBudget:
         assert docx_extractor.extract(payload) == (_DOCX_BUDGET_MARKER, "docx")
         assert time.perf_counter() - started < 5.0
 
-    def test_rows_from_before_the_package_budgets_are_stale(self):
-        """A document over a budget was read before; it now fails, so the
-        docx rows the previous version wrote re-extract once."""
+    def test_package_budgets_do_not_make_cached_rows_stale(self):
+        """Review round 1: the budgets come with no ``docx`` version bump.
+        A bump would re-run every cached document through the walk after
+        the open, which has no budget yet (#1031), to turn the few
+        over-budget ``success`` rows, whose text is still right, into
+        ``failed`` ones."""
         from src.extractors import EXTRACTOR_VERSIONS, stale_extractor_module
 
-        assert EXTRACTOR_VERSIONS["docx"] == 6
-        assert stale_extractor_module("docx@5") == "docx"
-        assert stale_extractor_module("docx@6") is None
+        assert EXTRACTOR_VERSIONS["docx"] == 5
+        assert stale_extractor_module("docx@5") is None
 
     def test_long_chain_still_fails_as_a_chain_under_the_budgets(self):
         """#968's behaviour holds: a chain under the package budgets still
