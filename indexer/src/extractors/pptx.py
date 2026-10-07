@@ -34,7 +34,9 @@ The work is bounded per extraction, counted as the walk goes:
   relationship. Plainly timed, 166 MB of slide XML parses in about a
   second but peaks at 2.5 GB, and 200,000 tiny related members take
   about 4 s. So before python-pptx opens it, a deck fails as
-  ``PptxPackageBudgetError`` when its members expand by more than
+  ``PptxPackageBudgetError``, which the dispatcher records ``unsupported``
+  since the same bytes always repeat it (#1032), when its members expand
+  by more than
   ``_MAX_EXPANSION_BYTES`` past their compressed size, number more than
   ``_MAX_MEMBERS``, or hold more than ``_MAX_RELS_BYTES`` of
   relationship parts, all read from the ZIP central directory. python-pptx

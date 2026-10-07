@@ -41,7 +41,9 @@ every XML part it relates whole with lxml, and builds a part for every
 related member, checking each relationship against a list of the parts
 it has already visited, so opening costs the number of related members
 times the number of relationships. A package fails as
-``DocxPackageBudgetError`` when its members expand by more than
+``DocxPackageBudgetError``, which the dispatcher records ``unsupported``
+since the same bytes always repeat it (#1032), when its members expand
+by more than
 ``_MAX_EXPANSION_BYTES`` past their compressed size, number more than
 ``_MAX_MEMBERS``, or hold more than ``_MAX_RELS_BYTES`` of relationship
 parts. The constants below say what was measured.

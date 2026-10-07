@@ -17,6 +17,8 @@ from collections.abc import Callable
 
 import pytest
 from src.extractors import (
+    DOCX_PACKAGE_BUDGET_ERROR,
+    PPTX_PACKAGE_BUDGET_ERROR,
     STATUS_EMPTY,
     STATUS_FAILED,
     STATUS_SUCCESS,
@@ -747,14 +749,14 @@ class TestDocxExtractor:
             filename="v.docx",
             payload=self._save(document),
         )
-        assert result.extractor == "docx@5"
+        assert result.extractor == "docx@6"
 
     def test_docx_version_2_rows_are_stale(self):
         # docx@2 missed first-page and even-page headers/footers (#299).
         from src import extractors
 
         assert extractors.stale_extractor_module("docx@2") == "docx"
-        assert extractors.stale_extractor_module("docx@5") is None
+        assert extractors.stale_extractor_module("docx@6") is None
 
     def test_versions_are_keyed_by_dispatch_module(self, monkeypatch):
         """The image module records ``image-ocr`` and the PDF module
@@ -3602,6 +3604,68 @@ class TestPermanentFailuresAreUnsupported:
         for marker in ("SYNTHETIC_DEEP_TREE_MARKER", "SYNTHETIC_FILENAME_MARKER"):
             assert marker not in caplog.text
 
+    @pytest.mark.parametrize("module", ["pptx", "docx"])
+    def test_package_over_a_pre_open_budget_is_unsupported(self, module, monkeypatch, caplog):
+        """#1032: the PPTX and DOCX pre-open package budgets are decided
+        from the ZIP central directory alone, so the same bytes trip them
+        on every run; a ``failed`` row would only re-run the check every
+        7 days. Recorded ``unsupported`` with fixed text, before the
+        package is opened, with the same WARNING as the other permanent
+        failures; the marker stays out of the log and the fixed text."""
+        from src import extractors
+
+        if module == "pptx":
+            from src.extractors import pptx as extractor_module
+
+            payload = _deck(_boxes("SYNTHETIC_BUDGET_MARKER"))
+            content_type, error = _PPTX_MIME, PPTX_PACKAGE_BUDGET_ERROR
+        else:
+            from src.extractors import docx as extractor_module
+
+            payload = _docx_bytes("SYNTHETIC_BUDGET_MARKER")
+            content_type, error = _DOCX_MIME, DOCX_PACKAGE_BUDGET_ERROR
+        monkeypatch.setattr(extractor_module, "_MAX_MEMBERS", 1)
+        opened = _count_calls(monkeypatch, extractor_module.Package, "open")
+        caplog.set_level("DEBUG")
+
+        result = extract(
+            content_type=content_type,
+            filename=f"SYNTHETIC_FILENAME_MARKER.{module}",
+            payload=payload,
+        )
+
+        version = extractors.EXTRACTOR_VERSIONS[module]
+        assert result == ExtractionResult(
+            status=STATUS_UNSUPPORTED, extractor=f"{module}@{version}", text=None, error=error
+        )
+        assert opened[0] == 0
+        [record] = [r for r in caplog.records if r.name == "indexer.extractor"]
+        assert record.levelname == "WARNING"
+        assert record.getMessage() == (
+            f"extractor {module} declined (dispatch_via=mime): {error}; "
+            "recorded unsupported, not retried"
+        )
+        for marker in ("SYNTHETIC_BUDGET_MARKER", "SYNTHETIC_FILENAME_MARKER"):
+            assert marker not in caplog.text
+            assert marker not in error
+
+    def test_package_budget_fixed_texts(self):
+        assert PPTX_PACKAGE_BUDGET_ERROR == "presentation exceeds a pre-open package budget"
+        assert DOCX_PACKAGE_BUDGET_ERROR == "document exceeds a pre-open package budget"
+
+    def test_pptx_and_docx_versions_bumped_so_failed_budget_rows_refresh(self):
+        """#1032: the ``failed`` rows the previous versions wrote for a
+        package over a budget are stale, so the startup sweep re-runs
+        them once and they are recorded ``unsupported``."""
+        from src.extractors import EXTRACTOR_VERSIONS, stale_extractor_module
+
+        assert EXTRACTOR_VERSIONS["pptx"] == 3
+        assert EXTRACTOR_VERSIONS["docx"] == 6
+        assert stale_extractor_module("pptx@2") == "pptx"
+        assert stale_extractor_module("docx@5") == "docx"
+        assert stale_extractor_module("pptx@3") is None
+        assert stale_extractor_module("docx@6") is None
+
     def test_a_page_level_pypdf_limit_keeps_the_other_pages(self, monkeypatch):
         """Review round 1: a limit hit inside one page's text extraction
         (``/ToUnicode`` size, for example) is a per-page failure, as
@@ -5280,9 +5344,9 @@ class TestWordTemplates:
         the docx rows the previous version wrote re-extract."""
         from src.extractors import EXTRACTOR_VERSIONS, stale_extractor_module
 
-        assert EXTRACTOR_VERSIONS["docx"] == 5
+        assert EXTRACTOR_VERSIONS["docx"] >= 5
         assert stale_extractor_module("docx@4") == "docx"
-        assert stale_extractor_module("docx@5") is None
+        assert stale_extractor_module("docx@6") is None
 
 
 _DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -5481,10 +5545,10 @@ class TestDocxPackageBudget:
     def test_package_over_a_default_budget_fails_before_python_docx_opens(
         self, budget, content_type, filename, to_payload, monkeypatch, caplog
     ):
-        """Each budget at its default: the package fails by type with fixed
-        text, python-docx never opens it (no member is read, no part is
-        parsed), no cap WARNING is logged, and the marker stays out of the
-        log."""
+        """Each budget at its default: the package is recorded
+        ``unsupported`` with fixed text (#1032), python-docx never opens it
+        (no member is read, no part is parsed), no cap WARNING is logged,
+        and the marker stays out of the log."""
         import time
         import zipfile
 
@@ -5503,12 +5567,12 @@ class TestDocxPackageBudget:
         started = time.perf_counter()
         result = extract(content_type=content_type, filename=filename, payload=payload)
         assert time.perf_counter() - started < 5.0
-        assert (result.status, result.error) == (STATUS_FAILED, "DocxPackageBudgetError")
+        assert (result.status, result.error) == (STATUS_UNSUPPORTED, DOCX_PACKAGE_BUDGET_ERROR)
         assert result.extractor == f"docx@{EXTRACTOR_VERSIONS['docx']}"
         assert result.text is None
         assert opened[0] == 0
         assert reads[0] == 0
-        assert "DocxPackageBudgetError" in caplog.text
+        assert "extractor docx declined" in caplog.text
         assert "extractor cap" not in caplog.text
         assert extractors.drain_extractor_counts()["extractor_caps"] == 0
         assert _DOCX_BUDGET_MARKER not in caplog.text
@@ -5576,16 +5640,16 @@ class TestDocxPackageBudget:
         assert docx_extractor.extract(payload) == (_DOCX_BUDGET_MARKER, "docx")
         assert time.perf_counter() - started < 5.0
 
-    def test_package_budgets_do_not_make_cached_rows_stale(self):
-        """Review round 1: the budgets come with no ``docx`` version bump.
-        A bump would re-run every cached document through the walk after
-        the open, which has no budget yet (#1031), to turn the few
-        over-budget ``success`` rows, whose text is still right, into
-        ``failed`` ones."""
+    def test_package_budgets_make_version_5_rows_stale(self):
+        """#1036 shipped the budgets with no ``docx`` bump; #1032 bumps it
+        so the ``failed`` rows version 5 wrote for an over-budget package
+        are refreshed once to ``unsupported`` (the sweep re-runs only
+        stale rows, never aged ``failed`` ones)."""
         from src.extractors import EXTRACTOR_VERSIONS, stale_extractor_module
 
-        assert EXTRACTOR_VERSIONS["docx"] == 5
-        assert stale_extractor_module("docx@5") is None
+        assert EXTRACTOR_VERSIONS["docx"] == 6
+        assert stale_extractor_module("docx@5") == "docx"
+        assert stale_extractor_module("docx@6") is None
 
     def test_long_chain_still_fails_as_a_chain_under_the_budgets(self):
         """#968's behaviour holds: a chain under the package budgets still
@@ -5768,7 +5832,7 @@ class TestPptxExtractor:
         )
         assert result == ExtractionResult(
             status=STATUS_SUCCESS,
-            extractor="pptx@2",
+            extractor="pptx@3",
             text="ATTACHMENTFACT only in the deck",
             error=None,
         )
@@ -5928,7 +5992,7 @@ class TestPptxExtractor:
 
     def test_deck_without_text_is_empty(self):
         result = extract(content_type=_PPTX_MIME, filename="a.pptx", payload=_deck(_boxes()))
-        assert (result.status, result.extractor, result.text) == (STATUS_EMPTY, "pptx@2", None)
+        assert (result.status, result.extractor, result.text) == (STATUS_EMPTY, "pptx@3", None)
 
     def test_repeated_slide_entries_read_the_slide_once(self, monkeypatch):
         """A slide list naming one slide many times costs a slide-list
@@ -6023,7 +6087,7 @@ class TestPptxExtractor:
         result = extract(content_type=_PPTX_MIME, filename="a.pptx", payload=payload)
         assert time.perf_counter() - started < 5.0
         assert (result.status, result.error) == (STATUS_FAILED, "PptxRelationshipChainError")
-        assert result.extractor == "pptx@2"
+        assert result.extractor == "pptx@3"
         assert _PPTX_MARKER not in caplog.text
 
     def test_malformed_slide_fails_by_type_without_its_text(self, caplog):
@@ -6087,7 +6151,7 @@ class TestPptxExtractor:
         opened = _count_calls(monkeypatch, pptx.Package, "open")
         caplog.set_level("DEBUG")
         result = extract(content_type=_PPTX_MIME, filename="a.pptx", payload=payload)
-        assert (result.status, result.error) == (STATUS_FAILED, "PptxPackageBudgetError")
+        assert (result.status, result.error) == (STATUS_UNSUPPORTED, PPTX_PACKAGE_BUDGET_ERROR)
         assert opened[0] == 0
         assert _PPTX_MARKER not in caplog.text
 
@@ -6117,7 +6181,7 @@ class TestPptxExtractor:
         opened = _count_calls(monkeypatch, pptx.Package, "open")
         caplog.set_level("DEBUG")
         result = extract(content_type=_PPTX_MIME, filename="a.pptx", payload=payload)
-        assert (result.status, result.error) == (STATUS_FAILED, "PptxPackageBudgetError")
+        assert (result.status, result.error) == (STATUS_UNSUPPORTED, PPTX_PACKAGE_BUDGET_ERROR)
         assert opened[0] == 0
         assert _PPTX_MARKER not in caplog.text
 
@@ -6145,7 +6209,7 @@ class TestPptxExtractor:
             payload=b"not a zip " + _PPTX_MARKER.encode(),
         )
         assert result.status == STATUS_FAILED
-        assert result.error != "PptxPackageBudgetError"
+        assert result.error != PPTX_PACKAGE_BUDGET_ERROR
         assert opened[0] == 1
 
     def test_ordinary_deck_is_under_the_expansion_budget(self, monkeypatch):
@@ -6307,7 +6371,7 @@ class TestPowerPointVariants:
         payload = _retyped_deck(main_type, _deck(_boxes("VARIANTFACT renewal due 2031-04-01")))
         caplog.set_level("DEBUG")
         result = extract(content_type=content_type, filename=filename, payload=payload)
-        assert (result.status, result.extractor) == (STATUS_SUCCESS, "pptx@2")
+        assert (result.status, result.extractor) == (STATUS_SUCCESS, "pptx@3")
         assert result.text == "VARIANTFACT renewal due 2031-04-01"
         assert calls == ["pptx"]
         assert "VARIANTFACT" not in caplog.text
@@ -6338,7 +6402,7 @@ class TestPowerPointVariants:
         caplog.set_level("DEBUG")
         content_type, filename = label
         result = extract(content_type=content_type, filename=filename, payload=payload)
-        assert (result.status, result.extractor) == (STATUS_SUCCESS, "pptx@2")
+        assert (result.status, result.extractor) == (STATUS_SUCCESS, "pptx@3")
         assert result.text == "MACRODECKFACT"
         assert "/ppt/vbaProject.bin" not in read
         assert _VBA_MARKER not in caplog.text
@@ -6367,7 +6431,7 @@ class TestPowerPointVariants:
         opened = _count_calls(monkeypatch, pptx.Package, "open")
         caplog.set_level("DEBUG")
         result = extract(content_type=content_type, filename=filename, payload=payload)
-        assert (result.status, result.error) == (STATUS_FAILED, "PptxPackageBudgetError")
+        assert (result.status, result.error) == (STATUS_UNSUPPORTED, PPTX_PACKAGE_BUDGET_ERROR)
         assert opened[0] == 0
         assert _PPTX_MARKER not in caplog.text
 
@@ -6416,12 +6480,15 @@ class TestPowerPointVariants:
 
         assert [key for key in _MIME_DISPATCH if key != key.lower()] == []
 
-    def test_pptx_version_2_marks_version_1_rows_stale(self):
+    def test_pptx_versions_1_and_2_rows_are_stale(self):
+        """``pptx@1`` refused slideshows and templates (#947); ``pptx@2``
+        recorded an over-budget package ``failed`` (#1032)."""
         from src.extractors import EXTRACTOR_VERSIONS, stale_extractor_module
 
-        assert EXTRACTOR_VERSIONS["pptx"] == 2
+        assert EXTRACTOR_VERSIONS["pptx"] == 3
         assert stale_extractor_module("pptx@1") == "pptx"
-        assert stale_extractor_module("pptx@2") is None
+        assert stale_extractor_module("pptx@2") == "pptx"
+        assert stale_extractor_module("pptx@3") is None
 
 
 # #903: every truncation or skip cap inside an extractor is reported the
@@ -6800,12 +6867,11 @@ _WORKBOOK_FAILS = (
     "counted as unsupported="
 )
 _DECK_FAILS = (
-    "fails the deck (PptxPackageBudgetError): a failed row with its rate-limited "
-    "WARNING, counted as failed="
+    "fails the deck (PptxPackageBudgetError): an unsupported row (#1032), counted as unsupported="
 )
 _DOCUMENT_FAILS = (
-    "fails the document (DocxPackageBudgetError): a failed row with its rate-limited "
-    "WARNING, counted as failed="
+    "fails the document (DocxPackageBudgetError): an unsupported row (#1032), "
+    "counted as unsupported="
 )
 _UNREPORTED_CAPS = {
     "src.extractors:max_bytes": (

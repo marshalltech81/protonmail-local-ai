@@ -1335,12 +1335,9 @@ only, never filenames or text (`make logs`):
   <ExceptionType>` (WARNING), per extraction that fails: an encrypted
   PDF that needs a password, a Tesseract error or timeout, a DOCX,
   XLSX or PPTX the parser rejects (`PptxRelationshipChainError` is a
-  deck whose parts are chained too deep to open,
-  `PptxPackageBudgetError` one whose XML would decompress past
-  32 MiB, or with more than 20,000 members or 8 MiB of relationship
-  parts; `DocxRelationshipChainError` and `DocxPackageBudgetError` are
-  the same for a `.docx` or `.dotx`, whose limits are 32 MiB, 5,000
-  members and 4 MiB of relationship parts), or (`zip uncompressed-size cap exceeded`) a DOCX, XLSX or
+  deck whose parts are chained too deep to open, and
+  `DocxRelationshipChainError` the same for a `.docx` or `.dotx`), or
+  (`zip uncompressed-size cap exceeded`) a DOCX, XLSX or
   PPTX that would decompress past its cap. For a legacy `.doc`,
   `.xls` or `.ppt` (#935, #957) the type names the tool's fate:
   `ToolTimeoutError`, `ToolCrashError` (killed by a signal, including
@@ -1353,6 +1350,17 @@ only, never filenames or text (`make logs`):
   once usually means the OCR toolchain or a parser library is
   broken, not the mail. A failed result is cached for 7 days, then
   retried when the same bytes arrive again.
+- `extractor <module> declined (dispatch_via=<mime|extension|...>):
+  <fixed text>; recorded unsupported, not retried` (WARNING): the
+  extractor refused the file in a way the same bytes always repeat, so
+  the result is cached `unsupported` for good instead of `failed`
+  (#931): a PDF that needs an open password or exceeds pypdf's limits,
+  a workbook over the XLSX eager-part budget, or a deck or document
+  over the PPTX / DOCX pre-open package budgets (#1032: a deck whose
+  XML would decompress past 32 MiB, or with more than 20,000 members
+  or 8 MiB of relationship parts; a `.docx` or `.dotx` past 32 MiB,
+  5,000 members or 4 MiB of relationship parts). The file stays
+  searchable by filename and type only.
 - `PDF OCR fallback failed: <ExceptionType>` (WARNING): OCR of a PDF's
   pages without a text layer raised (a Tesseract error or timeout). A
   PDF with enough digital text keeps it and loses the scanned pages;
@@ -1463,8 +1471,9 @@ only, never filenames or text (`make logs`):
     "Extractor dispatch"). Binary files (PDF, ZIP, OLE2, PNG, JPEG,
     GIF) sent as text are recorded with "binary payload labelled as
     text" (#932). It also counts PDFs that need an open password or
-    exceed pypdf's limits, and workbooks over the XLSX eager-part budget,
-    which fail the same way every time (#931). `too_large` is over
+    exceed pypdf's limits, workbooks over the XLSX eager-part budget, and
+    decks and documents over the PPTX / DOCX pre-open package budgets,
+    which fail the same way every time (#931, #1032). `too_large` is over
     `INDEXER_ATTACHMENT_MAX_BYTES`, and `ocr_disabled` is an image or
     scanned PDF skipped while `INDEXER_OCR_ENABLED=false` (re-extracted
     once OCR is turned on).

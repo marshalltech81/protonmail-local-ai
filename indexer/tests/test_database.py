@@ -199,7 +199,7 @@ _V0_SCHEMA = Path(__file__).parent / "fixtures" / "schema" / "v0.sql"
 # the module the v1 migration keys each by: the stamp's module, or ''
 # with no stamp.
 _V0_EXTRACTIONS = [
-    (("h-docx", "success", "docx@5", "SYNTHETIC_DOCX_TEXT", None), "docx"),
+    (("h-docx", "success", "docx@6", "SYNTHETIC_DOCX_TEXT", None), "docx"),
     (("h-pdf-ocr", "success", "pdf-ocr@4", "SYNTHETIC_OCR_TEXT", None), "pdf"),
     (("h-html", "success", "html", "SYNTHETIC_HTML_TEXT", None), "html"),
     (("h-image", "empty", "image-ocr@3", None, None), "image"),
