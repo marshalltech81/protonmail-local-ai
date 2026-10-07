@@ -752,3 +752,58 @@ class TestStorageLine:
         assert "storage: size check failed (PermissionError)" in caplog.text
         assert MARKER not in caplog.text
         db.close()
+
+
+# --- #934: watcher rename failures log the type only --------------------
+
+
+class TestOnMovedFailureLogsTypeOnly:
+    """A failed rename update in the watcher logs the exception type,
+    never its text."""
+
+    def _moved(self, tmp_path):
+        src = tmp_path / "INBOX" / "cur" / "1700000000.M1.host:2,S"
+        return SimpleNamespace(
+            src_path=str(src),
+            dest_path=str(src.with_name("1700000000.M1.host:2,RS")),
+            is_directory=False,
+        )
+
+    def test_reconciler_handle_moved_failure(self, tmp_path, monkeypatch, caplog):
+        monkeypatch.setattr(main, "MAILDIR_PATH", tmp_path)
+        calls = []
+
+        def handle_moved(*a, **_kw):
+            calls.append(a)
+            raise sqlite3.OperationalError(MARKER)
+
+        db = SimpleNamespace(is_indexed=lambda _p: True)
+        reconciler = SimpleNamespace(handle_moved=handle_moved)
+        handler = main.MaildirHandler(db, None, reconciler=reconciler)  # type: ignore[arg-type]
+
+        handler.on_moved(self._moved(tmp_path))
+
+        assert len(calls) == 1
+        assert [(r.levelno, r.getMessage()) for r in _messages(caplog, "reconciler on_moved")] == [
+            (logging.ERROR, "reconciler on_moved failed: OperationalError")
+        ]
+        assert MARKER not in caplog.text
+
+    def test_update_filepath_failure(self, tmp_path, monkeypatch, caplog):
+        monkeypatch.setattr(main, "MAILDIR_PATH", tmp_path)
+        calls = []
+
+        def update_filepath(*a, **_kw):
+            calls.append(a)
+            raise ValueError(MARKER)
+
+        db = SimpleNamespace(is_indexed=lambda _p: True, update_filepath=update_filepath)
+        handler = main.MaildirHandler(db, None)  # type: ignore[arg-type]
+
+        handler.on_moved(self._moved(tmp_path))
+
+        assert len(calls) == 1
+        assert [(r.levelno, r.getMessage()) for r in _messages(caplog, "update_filepath")] == [
+            (logging.ERROR, "update_filepath failed on rename: ValueError")
+        ]
+        assert MARKER not in caplog.text
