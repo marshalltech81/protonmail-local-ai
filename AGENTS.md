@@ -665,7 +665,7 @@ When changing Docker Compose service definitions or runtime behavior:
 - add resource controls such as memory limits, `pids_limit`, and log rotation when practical
 - keep container-to-container network access as narrow as the architecture allows
 - prefer degraded modes over broadening privileges, relaxing confinement, or exposing more of the host
-- give every optional setting's Compose interpolation a default (`${NAME:-}` or the documented value), so a `.env` written before the setting existed does not print an "is not set" warning on every command (#1058, #1074); required settings stay without a default so `validate-env.sh` and Compose both fail closed
+- give every optional setting's Compose interpolation a default (`${NAME:-}` or the documented value), so a `.env` written before the setting existed does not print an "is not set" warning on every command (#1058, #1074). Required settings stay as bare `${NAME}`; Compose only warns and substitutes an empty string for those, so the requirement is enforced by `scripts/validate-env.sh` (which `make up` runs first) and by each service's own startup check, never by Compose
 
 ## Bash Conventions
 
