@@ -21,6 +21,8 @@ from pathlib import Path
 import pytest
 from src.parser import (
     MESSAGE_ID_MAX_CHARS,
+    PARSE_CAPS,
+    SUBJECT_MAX_CHARS,
     OversizedMessageError,
     _clean_id,
     _decode_header,
@@ -3345,6 +3347,13 @@ _INNER_EMAIL = (
     b"From: a@example.test\r\nSubject: SYNTHETIC_HEADER_MARKER\r\n\r\nSYNTHETIC_TEXT_MARKER\r\n"
 )
 _LONG_LOCAL = b"SYNTHETIC_HEADER_MARKER" + b"x" * 1000
+_LONG_SUBJECT = b"SYNTHETIC_HEADER_MARKER" + b"s" * 3000
+_LONG_ID = _id_of(999, marker="SYNTHETIC_HEADER_MARKER")
+
+
+def _headers(extra: bytes) -> bytes:
+    """A plain-text message with ``extra`` (CRLF-terminated) header lines."""
+    return _CAP_HEAD + extra + b"Content-Type: text/plain\r\n\r\nPARENT_BODY\r\n"
 
 
 def _only_attachment_is_empty(msg) -> bool:
@@ -3494,6 +3503,30 @@ _CAP_SHAPES = {
         "address_length=2",
         lambda msg: msg.to_addrs == ["bob@example.test"],
     ),
+    # #902: the header caps. The subject is cut to ``SUBJECT_MAX_CHARS``;
+    # an In-Reply-To or References entry over ``MESSAGE_ID_MAX_CHARS`` is
+    # dropped and threading sees the rest.
+    "subject_length": (
+        _headers(b"Subject: " + _LONG_SUBJECT + b"\r\n"),
+        False,
+        "subject_length=1",
+        lambda msg: msg.subject == _LONG_SUBJECT.decode()[:SUBJECT_MAX_CHARS],
+    ),
+    "in_reply_to_length": (
+        _headers(f"In-Reply-To: <{_LONG_ID}>\r\n".encode()),
+        False,
+        "in_reply_to_length=1",
+        lambda msg: msg.in_reply_to is None and msg.body_text == "PARENT_BODY",
+    ),
+    "references_length": (
+        _headers(
+            f"References: <a@example.test> <{_LONG_ID}>\r\n"
+            f" <b@example.test> <{_id_of(5000, marker='SYNTHETIC_HEADER_MARKER')}>\r\n".encode()
+        ),
+        False,
+        "references_length=2",
+        lambda msg: msg.references == ["a@example.test", "b@example.test"],
+    ),
 }
 
 
@@ -3544,6 +3577,10 @@ def test_several_caps_share_one_line_in_a_fixed_order(tmp_path, caplog):
         + b"To: bob@example.test, "
         + _LONG_LOCAL
         + b"@example.test\r\n"
+        + b"Subject: "
+        + _LONG_SUBJECT
+        + b"\r\n"
+        + f"In-Reply-To: <{_LONG_ID}>\r\nReferences: <a@example.test> <{_LONG_ID}>\r\n".encode()
         + b'Content-Type: multipart/mixed; boundary="b"\r\n\r\n'
         + b"".join(b"--b\r\nContent-Type: text/plain\r\n\r\nS%d\r\n" % i for i in range(202))
         + b"--b\r\nContent-Type: message/rfc822\r\nContent-Transfer-Encoding: base64\r\n"
@@ -3557,7 +3594,8 @@ def test_several_caps_share_one_line_in_a_fixed_order(tmp_path, caplog):
     assert parse_email(path) is not None
     assert [r.getMessage() for r in caplog.records if "parser work caps" in r.getMessage()] == [
         f"parser work caps dropped content from {path}: "
-        "transport_decode=1,body_parts=2,address_length=1"
+        "transport_decode=1,body_parts=2,address_length=1,"
+        "subject_length=1,in_reply_to_length=1,references_length=1"
     ]
 
 
@@ -3589,8 +3627,21 @@ def _nested_rfc822_with_note(levels: int) -> bytes:
 # walk still descends into the container and keeps the attachments inside
 # it. Likewise a decoded container the generator refuses is still walked.
 # Each shape's parse result is pinned (unchanged from before the caps
-# were logged) and no cap line is logged.
+# were logged) and no cap line is logged. #902: a header value at its
+# cap is kept whole, so it is not counted either.
 _NO_LOSS_SHAPES = {
+    "subject_at_the_cap": (
+        _headers(b"Subject: " + _LONG_SUBJECT[:SUBJECT_MAX_CHARS] + b"\r\n"),
+        lambda msg: msg.subject == _LONG_SUBJECT[:SUBJECT_MAX_CHARS].decode(),
+    ),
+    "in_reply_to_at_the_cap": (
+        _headers(f"In-Reply-To: <{_id_of(998)}>\r\n".encode()),
+        lambda msg: msg.in_reply_to == _id_of(998),
+    ),
+    "references_at_the_cap": (
+        _headers(f"References: <a@example.test> <{_id_of(998)}>\r\n".encode()),
+        lambda msg: msg.references == ["a@example.test", _id_of(998)],
+    ),
     "identity_depth_keeps_inner_attachment": (
         _with_attachment(b"Content-Type: message/rfc822\r\n", _nested_rfc822_with_note(21)),
         lambda msg: (
@@ -3764,3 +3815,42 @@ def test_message_within_every_cap_is_not_counted(tmp_path):
     (folder / "ok.eml").write_bytes(raw)
     assert parse_email(folder / "ok.eml") is not None
     assert extractors.drain_extractor_counts()["parser_caps_messages"] == 0
+
+
+@pytest.mark.parametrize("shape", ["subject_length", "in_reply_to_length", "references_length"])
+def test_header_caps_count_the_message_for_the_aggregate(tmp_path, monkeypatch, shape):
+    """#902: a message whose subject was cut or whose reply headers
+    were dropped counts as ``parser_caps_messages`` like any other."""
+    from src import extractors
+
+    extractors.drain_extractor_counts()
+    _parse_cap_shape(tmp_path, monkeypatch, shape)
+    assert extractors.drain_extractor_counts()["parser_caps_messages"] == 1
+
+
+def test_every_parse_cap_is_counted_at_a_site_and_pinned_by_a_shape():
+    """#902 (#905): the cap line renders ``PARSE_CAPS`` names only, so a
+    cap counted under a name the tuple lacks is left off the line with
+    no test failing. The counted names are derived from the parser's
+    source (every ``caps[...] +=`` site names a literal or calls
+    ``_nesting_cap``, whose two names are read the same way) and must
+    equal ``PARSE_CAPS``, and every name must have a pinned shape in
+    ``_CAP_SHAPES``."""
+    import inspect
+
+    from src import parser
+
+    sites = re.findall(r"\bcaps\[([^\]]+)\] \+=", inspect.getsource(parser))
+    assert sites
+    counted: set[str] = set()
+    for site in sites:
+        if site == "_nesting_cap(budget)":
+            counted |= set(re.findall(r'"(\w+)"', inspect.getsource(parser._nesting_cap)))
+        else:
+            assert re.fullmatch(r'"\w+"', site), site
+            counted.add(site.strip('"'))
+    shaped = {
+        name for _, _, line, _ in _CAP_SHAPES.values() for name in re.findall(r"(\w+)=\d+", line)
+    }
+    assert len(set(PARSE_CAPS)) == len(PARSE_CAPS)
+    assert counted == set(PARSE_CAPS) == shaped

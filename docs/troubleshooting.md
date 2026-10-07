@@ -1262,6 +1262,13 @@ the 20-per-5-minutes limit above. Every capped message, logged or not,
 is counted as `parser_caps_messages` in the attachments line, which
 it makes a WARNING.
 
+The header caps count the same way (#902): `subject_length` when a
+decoded subject over 2,000 characters was cut to that length,
+`in_reply_to_length` when an `In-Reply-To` over 998 characters was
+dropped, and `references_length` for each `References` entry over 998
+characters dropped (the rest are kept, so threading uses them). A
+value exactly at its cap is kept whole and not counted.
+
 An attached email (or another container part) counts only when
 something searchable is lost:
 

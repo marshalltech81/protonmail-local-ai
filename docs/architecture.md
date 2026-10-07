@@ -725,7 +725,10 @@ itself never reaches the log or `last_error`. A new thread's ID is its
 root message's Message-ID, so this also bounds thread IDs. A longer
 `In-Reply-To` or `References` entry is dropped from the message (it
 could never match an indexed Message-ID), so threading uses the rest
-and the stored reply fields stay bounded. This assumes no indexed
+and the stored reply fields stay bounded; each drop is counted as a
+parser cap (`in_reply_to_length` / `references_length`, like the
+subject cut as `subject_length`; see `docs/troubleshooting.md`,
+#902). This assumes no indexed
 message has a longer ID: an index built before the limit (none is
 deployed) is rebuilt from Maildir, as for any pre-deployment change,
 since a reply's dropped reference to an older over-long ID could no
