@@ -2754,6 +2754,7 @@ class TestMessageIdClaimantProvenance:
             _build_schema,
             _insert_attachment,
             _insert_chunk,
+            _insert_extraction,
             _insert_message,
         )
 
@@ -2795,6 +2796,11 @@ class TestMessageIdClaimantProvenance:
                 embedding=vec,
                 attachment_id="same-bytes",
             )
+        # Chunks come from a successful extraction, which text hits are
+        # attributed through (#928).
+        _insert_extraction(
+            conn, attachment_id="same-bytes", extracted_text="quarterly ledger figures"
+        )
         conn.close()
         return Database(str(db_path))
 
@@ -4281,6 +4287,78 @@ class TestSearchAttachments:
             ("copy.bin", "unsupported", ""),
             ("copy.pdf", "success", "pdf words"),
         ]
+
+    def test_text_hit_is_attributed_to_an_occurrence_that_extracted(self, tmp_path):
+        """#928 review round 1: the same bytes as ``.bin`` (no extractor,
+        ``unsupported``) and ``.pdf`` (``success``) in one message share the
+        chunk slice. A text hit is the PDF occurrence's, with its status
+        and snippet; a filter matching only the ``.bin`` drops it."""
+        from tests.conftest import (
+            _insert_attachment,
+            _insert_chunk,
+            _insert_extraction,
+            _insert_thread,
+        )
+
+        conn, path = _open_built_db_conn(tmp_path, "attribution.db")
+        _insert_thread(
+            conn,
+            thread_id="t-att",
+            subject="copies",
+            participants=["alice@example.com"],
+            senders=["alice@example.com"],
+            date_first="2024-03-10T09:00:00+00:00",
+            date_last="2024-03-10T09:00:00+00:00",
+            has_attachments=True,
+        )
+        # ``occ-a`` sorts first, so the old anchor picked the ``.bin``.
+        for occ, name, mime, module in (
+            ("occ-a", "copy.bin", "application/octet-stream", ""),
+            ("occ-b", "copy.pdf", "application/pdf", "pdf"),
+        ):
+            _insert_attachment(
+                conn,
+                message_id="t-att",
+                thread_id="t-att",
+                attachment_id="hash-att",
+                filename=name,
+                content_type=mime,
+                occurrence_id=occ,
+                extractor_module=module,
+            )
+        _insert_extraction(
+            conn,
+            attachment_id="hash-att",
+            status="unsupported",
+            extractor=None,
+            extractor_module="",
+        )
+        _insert_extraction(
+            conn,
+            attachment_id="hash-att",
+            extracted_text="attributionmarker payable 100",
+            extractor_module="pdf",
+        )
+        _insert_chunk(
+            conn,
+            chunk_id="att-c1",
+            message_id="t-att",
+            thread_id="t-att",
+            text="attributionmarker payable 100",
+            embedding=[0.0, 0.0, 0.0, 1.0],
+            attachment_id="hash-att",
+        )
+        conn.close()
+        db = Database(str(path))
+        (hit,) = db.search_attachments(query="attributionmarker")
+        assert (hit.filename, hit.extraction_status) == ("copy.pdf", "success")
+        assert "attributionmarker" in hit.text_snippet
+        assert (
+            db.search_attachments(
+                query="attributionmarker", content_type="application/octet-stream"
+            )
+            == []
+        )
 
     def test_lanes_degrade_when_attachments_table_missing(self, tmp_path):
         # Every lane JOINs/scans ``attachments``; dropping it exercises the

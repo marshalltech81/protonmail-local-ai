@@ -7171,6 +7171,64 @@ class TestBatchSharesExtraction:
         assert db._conn.execute("SELECT COUNT(*) FROM attachments").fetchone()[0] == 5
         assert db._conn.execute("SELECT COUNT(*) FROM attachment_extractions").fetchone()[0] == 1
 
+    @pytest.mark.parametrize("order", [("a.txt", "a.html"), ("a.html", "a.txt")])
+    def test_one_payload_under_two_extractors_keeps_both_texts(self, tmp_path, monkeypatch, order):
+        """#928 review round 1: the same bytes under labels that run
+        different extractors (text and HTML) give two texts, which share
+        the message's chunk slice for the payload. Both stay searchable,
+        whatever the attachment order, and a re-index embeds nothing new."""
+        from email.message import EmailMessage
+
+        from src import attachment_indexing
+
+        payload = b"<p>SYNTHETIC_MULTI_MARKER <b>bold</b> words</p>"
+        maildir = tmp_path / "maildir"
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        path = maildir / "INBOX" / "cur" / "m.eml"
+        msg = EmailMessage()
+        msg["From"] = "alice@example.com"
+        msg["To"] = "bob@example.com"
+        msg["Subject"] = "Two labels"
+        msg["Message-ID"] = "<m@example.com>"
+        msg["Date"] = "Mon, 01 Jan 2024 12:00:00 +0000"
+        msg.set_content("Body.")
+        for filename in order:
+            subtype = "html" if filename.endswith(".html") else "plain"
+            msg.add_attachment(payload, maintype="text", subtype=subtype, filename=filename)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(bytes(msg))
+        db = Database(tmp_path / "mail.db")
+        queue = _make_queue(db)
+        embedder = make_mock_embedder(_UNIT_VECTOR)
+
+        def drain():
+            queue.enqueue(str(path), REASON_INITIAL_SCAN)
+            main._drain_queue_batched(
+                db,
+                embedder,
+                Threader(db),
+                queue,
+                batch_size=10,
+                timing_aggregator=main.TimingAggregator(window=4),
+                max_passes=1,
+            )
+
+        drain()
+        texts = [text for _, text in self._attachment_chunks(db)]
+        assert len(texts) == 2
+        assert any("<b>" in t for t in texts)
+        assert any("SYNTHETIC_MULTI_MARKER" in t and "<b>" not in t for t in texts)
+        modules = {
+            r[0] for r in db._conn.execute("SELECT extractor_module FROM attachment_extractions")
+        }
+        assert modules == {"text", "html"}
+        embedded_before = embedder.embed_batch.call_count
+
+        monkeypatch.setattr(attachment_indexing, "extract_attachment", MagicMock())
+        drain()
+        assert [text for _, text in self._attachment_chunks(db)] == texts
+        assert embedder.embed_batch.call_count == embedded_before
+
     def test_copies_in_one_message_extract_and_embed_once(self, tmp_path, monkeypatch):
         db, calls, embedded = self._drain(
             tmp_path, monkeypatch, {"m@example.com": ["scan0.txt", "scan1.txt"]}

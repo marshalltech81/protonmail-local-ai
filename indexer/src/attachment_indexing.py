@@ -51,8 +51,10 @@ from .extractors import (
     STATUS_UNSUPPORTED,
     ExtractionResult,
     drain_extractor_counts,
+    extraction_module,
     is_stale_extractor,
-    resolved_extractor_module,
+    label_extraction_modules,
+    ole2_extraction_module,
 )
 from .extractors import (
     extract as extract_attachment,
@@ -213,13 +215,17 @@ _FAILED_CACHE_MAX_AGE = timedelta(days=7)
 NO_EXTRACTOR_MODULE = ""
 
 
-def extraction_cache_module(content_type: str, filename: str) -> str:
-    """The extractor module an occurrence's MIME type and filename select,
-    or ``NO_EXTRACTOR_MODULE``. With the content hash, the key of the
+def extraction_cache_module(attachment: Attachment) -> str:
+    """The extractor module an occurrence's MIME type and filename run on
+    its bytes (``extractors.extraction_module``), or
+    ``NO_EXTRACTOR_MODULE``. With the content hash, the key of the
     ``attachment_extractions`` row the occurrence uses (#928): dispatch
     from a label and the bytes is deterministic, so every occurrence with
     the same key would extract the same result."""
-    return resolved_extractor_module(content_type, filename) or NO_EXTRACTOR_MODULE
+    return (
+        extraction_module(attachment.content_type, attachment.filename, attachment.payload)
+        or NO_EXTRACTOR_MODULE
+    )
 
 
 def _unsupported_still_holds(error: str | None, module: str, ocr_enabled: bool) -> bool:
@@ -248,11 +254,16 @@ def reprocess_reruns_extraction(
     """Whether reprocessing an occurrence (by its MIME type and filename)
     that uses an ``unsupported`` row with ``error`` cached under
     ``extractor_module`` would extract again once OCR is on: its label
-    now selects another module (a release started routing it, or a
-    migrated v0 row was keyed by its stamp), or the row no longer holds.
-    The startup sweep re-queues by this, so it shares
+    now runs another module on the bytes (a release started routing it,
+    or a migrated v0 row was keyed by its stamp), or the row no longer
+    holds. The startup sweep re-queues by this, so it shares
     ``_unsupported_still_holds`` with the cache check."""
-    if extraction_cache_module(content_type, filename) != extractor_module:
+    if error == LEGACY_OLE2_ERROR:
+        # The row says the bytes are OLE2, so the label's module is exact.
+        modules = {ole2_extraction_module(content_type, filename) or NO_EXTRACTOR_MODULE}
+    else:
+        modules = set(label_extraction_modules(content_type, filename)) or {NO_EXTRACTOR_MODULE}
+    if extractor_module not in modules:
         return True
     return not _unsupported_still_holds(error, extractor_module, ocr_enabled=True)
 
@@ -380,7 +391,7 @@ def _resolve_extracted_text(
     cannot serve them (#237). A reused one is still returned for
     persisting, since the message that extracted it may fail to commit.
     """
-    module = extraction_cache_module(attachment.content_type, attachment.filename)
+    module = extraction_cache_module(attachment)
     key = (attachment.content_hash, module)
     pending = batch_extractions.get(key) if batch_extractions is not None else None
     if pending is not None:
@@ -549,7 +560,7 @@ def apply_attachment_writes(
       text so any chunk hit lifts the parent thread of the email that
       carried it.
     """
-    module = extraction_cache_module(plan.attachment.content_type, plan.attachment.filename)
+    module = extraction_cache_module(plan.attachment)
     db.upsert_attachment(
         claimant_id=claimant_id,
         thread_id=thread_id,

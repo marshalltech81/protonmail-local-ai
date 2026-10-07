@@ -612,7 +612,7 @@ class Database:
                 seen_at                   TEXT NOT NULL,
                 fts_rowid                 INTEGER,
                 -- The extractor module this occurrence's MIME type and
-                -- filename choose ('' for none): with ``attachment_id``,
+                -- filename run on its bytes ('' for none): with ``attachment_id``,
                 -- the key of the ``attachment_extractions`` row it uses
                 -- (#928).
                 extractor_module          TEXT NOT NULL DEFAULT '',

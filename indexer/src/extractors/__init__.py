@@ -732,6 +732,39 @@ def _route_container(module_name: str, payload: bytes) -> str | None:
     return module_name
 
 
+def extraction_module(content_type: str, filename: str, payload: bytes) -> str | None:
+    """The extractor module whose result an extraction of ``payload``
+    under this label is, or ``None`` when the label selects none: the
+    module the label selects after the container check (``.doc`` with
+    OOXML bytes runs ``docx``). An OLE2 payload under an OOXML label,
+    which no extractor reads, stays under that label's module. A prefix
+    check only. With the content hash, the extraction cache key (#928):
+    labels that run the same extractor on the same bytes share its row."""
+    selected = _resolve_extractor(content_type, filename)[0]
+    if selected is None:
+        return None
+    return _route_container(selected, payload) or selected
+
+
+def ole2_extraction_module(content_type: str, filename: str) -> str | None:
+    """``extraction_module`` for OLE2 bytes under this label, for a caller
+    that knows the bytes are OLE2 (an "OLE2 compound file" row) but does
+    not hold them."""
+    return extraction_module(content_type, filename, _OLE2_SIGNATURE)
+
+
+def label_extraction_modules(content_type: str, filename: str) -> frozenset[str]:
+    """Every module ``extraction_module`` can return for this label,
+    whatever the bytes: a legacy label also runs its OOXML extractor on
+    bytes that are not OLE2. Empty when the label selects none."""
+    selected = _resolve_extractor(content_type, filename)[0]
+    if selected is None:
+        return frozenset()
+    if selected in _LEGACY_TO_OOXML:
+        return frozenset({selected, _LEGACY_TO_OOXML[selected]})
+    return frozenset({selected})
+
+
 def resolved_extractor_module(content_type: str, filename: str) -> str | None:
     """The extractor module this metadata selects, or ``None``. Dispatch
     reads the MIME type and filename, not the bytes, so the same bytes

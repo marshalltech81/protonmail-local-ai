@@ -1393,6 +1393,11 @@ def _phase2a_collect_chunks(
         # IDs (the chunk key is message + content hash): embed each once.
         queued_attach_offsets: dict[str, int] = {}
         attach_stored_ids: list[set[str]] = []
+        # The first plan with text for each payload in this message. The
+        # same bytes under labels that run different extractors give
+        # different texts (#928), but share one chunk slice: the first
+        # plan writes every text's chunks, so none replaces another.
+        slice_holder: dict[str, int] = {}
         if INDEXER_ATTACHMENT_EXTRACTION_ENABLED and msg.attachments:
             cap = (
                 INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS
@@ -1431,6 +1436,23 @@ def _phase2a_collect_chunks(
                 stored_attach_ids = db.get_chunk_ids_for_message(
                     msg.claimant_id, attachment_id=attachment.content_hash
                 )
+                holder = slice_holder.get(attachment.content_hash)
+                if plan.chunks and holder is not None:
+                    target = attach_plans[holder]
+                    known = {c.chunk_id for c in target.chunks}
+                    extra = [c for c in plan.chunks if c.chunk_id not in known]
+                    target.chunks.extend(extra)
+                    for c in extra:
+                        if c.chunk_id in stored_attach_ids:
+                            continue
+                        if c.chunk_id not in queued_attach_offsets:
+                            queued_attach_offsets[c.chunk_id] = len(all_texts)
+                            all_texts.append(c.text)
+                        attach_new_chunks[holder].append(c)
+                        attach_offsets[holder].append(queued_attach_offsets[c.chunk_id])
+                    plan.chunks = []
+                elif plan.chunks:
+                    slice_holder[attachment.content_hash] = len(attach_plans)
                 plan_new = [c for c in plan.chunks if c.chunk_id not in stored_attach_ids]
                 plan_offsets: list[int] = []
                 for c in plan_new:

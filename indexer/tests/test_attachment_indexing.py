@@ -33,7 +33,7 @@ from tests.conftest import make_message, make_mock_embedder, make_thread
 def _module(attachment: Attachment) -> str:
     """The extractor module ``attachment``'s label selects: with its content
     hash, the key of the cache row it uses (#928)."""
-    return attachment_indexing.extraction_cache_module(attachment.content_type, attachment.filename)
+    return attachment_indexing.extraction_cache_module(attachment)
 
 
 def _attachment(
@@ -326,7 +326,7 @@ def test_reused_terminal_row_clears_the_stale_chunks(tmp_path, monkeypatch):
 
     db.store_attachment_extraction(
         attachment_id=attachment_id,
-        extractor_module="doc",
+        extractor_module="docx",
         extraction_status=STATUS_EMPTY,
         extractor="docx@5",
         extracted_text=None,
@@ -2110,6 +2110,30 @@ class TestPerModuleCacheCatalogue:
             _catalogue_outcome(self._plan(batched, payload, second, batch_extractions=batch))
             == fresh
         )
+
+    @pytest.mark.parametrize("first_label", ["docx", "doc"])
+    def test_labels_that_run_the_same_extractor_share_its_row(
+        self, first_label, tmp_path, monkeypatch
+    ):
+        """#928 review round 1: OOXML bytes labelled ``.doc`` run the DOCX
+        extractor, so they share the ``.docx`` row (extracted once) rather
+        than storing a second copy under ``doc``. OLE2 bytes under ``.doc``
+        run the legacy extractor and keep their own row."""
+        calls = _stub_legacy_extractors(monkeypatch)
+        payload = _catalogue_docx()
+        labels = {
+            "docx": ("application/octet-stream", "a.docx"),
+            "doc": ("application/msword", "a.doc"),
+        }
+        db = _setup_db_for_attachment(tmp_path)
+        self._commit(db, self._plan(db, payload, labels[first_label]))
+        other = "doc" if first_label == "docx" else "docx"
+        again = self._plan(db, payload, labels[other])
+        assert (again.status, again.cached) == (STATUS_SUCCESS, True)
+        assert [
+            r[0] for r in db._conn.execute("SELECT extractor_module FROM attachment_extractions")
+        ] == ["docx"]
+        assert calls == []
 
     @pytest.mark.parametrize("first_label", ["doc", "ppt"])
     def test_a_ppt_sent_as_doc_does_not_decide_a_ppt_occurrence(

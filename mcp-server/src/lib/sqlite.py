@@ -2066,8 +2066,12 @@ class Database:
         deterministic (see ``_chunk_vector_search`` for the full
         rationale). The anchor is chosen among the occurrences that pass
         ``content_type``, the one filter that can differ between them
-        (thread and extraction are shared by the pair): choosing first
+        (the thread is shared by the pair): choosing first
         dropped the match when only another occurrence passed (#309).
+        Only occurrences whose extraction row (by their extractor module)
+        is a success can have produced text, so the anchor is chosen
+        among those (#928): the same bytes as ``.bin`` beside a ``.pdf``
+        no longer take the PDF's hit with an ``unsupported`` status.
 
         Many chunks can match one attachment, so each attachment is ranked
         by its best chunk *before* the LIMIT: limiting chunk rows first
@@ -2089,6 +2093,9 @@ class Database:
             "    FROM hits h JOIN message_chunks c ON c.fts_rowid = h.fts_rowid "
             "    JOIN attachments a ON a.attachment_occurrence_id = ( "
             "        SELECT MIN(a2.attachment_occurrence_id) FROM attachments a2 "
+            "        JOIN attachment_extractions e2 ON e2.attachment_id = a2.attachment_id "
+            "          AND e2.extractor_module = a2.extractor_module "
+            "          AND e2.extraction_status = 'success' "
             "        WHERE a2.attachment_id = c.attachment_id "
             "          AND a2.claimant_id = c.claimant_id "
             "          AND (? IS NULL OR a2.content_type = ?) ) "
