@@ -1107,17 +1107,18 @@ same moment.
 
 ## The log shows "token limit hit"
 
-`ask_mailbox`, `summarize_thread` and `extract_from_emails` log one
-WARNING per call that ran into a token limit (#865), and the
-experimental `brief_issue` and `check_conclusion` log one when the
-request is over budget (`prompt_over_budget`), for example:
+`ask_mailbox`, `summarize_thread`, `extract_from_emails` and the
+experimental `brief_issue` and `check_conclusion` log one WARNING per
+call that ran into a token limit (#865, #951), for example:
 
 ```text
 token limit hit: tool=ask_mailbox limits=evidence_budget outputs_cut=0 threads_dropped=1 passages_omitted=6 passages_truncated=1 prompt_tokens=2950 prompt_budget_tokens=3008 max_tokens=1024
 ```
 
 The line carries counts and settings only. Not every limit reaches
-the caller: a cut reply carries a truncation notice, the evidence that
+the caller: a cut reply carries a truncation notice (for `brief_issue`
+and `check_conclusion`, `status: "truncated"` with
+`truncation_reason`), the evidence that
 `ask_mailbox` and `extract_from_emails` leave out is disclosed in their
 coverage or evidence note, and `prompt_over_budget` is an error, but a
 `summarize_thread` context trimmed by the window (`evidence_budget`
@@ -1143,7 +1144,8 @@ hit:
   base64 runs). Lower it to the model's real window, or below it for
   dense mail, or choose a model with a larger one. The caller's truncation notice (or, for a reply cut before any
   text, the error) says the same: it names `INFERENCE_CONTEXT_TOKENS`,
-  not `INFERENCE_MAX_TOKENS` (#890).
+  not `INFERENCE_MAX_TOKENS` (#890); `brief_issue` and
+  `check_conclusion` return `truncation_reason: "context_window"`.
 - `evidence_budget`: the model window, not the fixed per-thread cap,
   left out passages (`passages_omitted`), cut them short
   (`passages_truncated`) or dropped lower-ranked threads

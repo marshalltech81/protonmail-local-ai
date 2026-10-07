@@ -28,6 +28,7 @@ from typing import Any, Literal
 from mcp.types import CallToolResult, TextContent, ToolAnnotations
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from ..lib.inference import TruncationReason
 from ..lib.sqlite import (
     MAX_LISTED_CLAIMANTS,
     MAX_LISTED_MATCHED_ADDRESSES,
@@ -1031,6 +1032,15 @@ class BriefQuoteCheck(ReplyQuoteCheck):
     item: int = Field(description="0-based index of that entry within its section.")
 
 
+# Shared by the experimental tools' outputs (#951).
+_TRUNCATION_REASON_DESCRIPTION = (
+    "Why a truncated reply stopped; null unless status is truncated. max_tokens: it "
+    "reached INFERENCE_MAX_TOKENS (raise it). context_window: the model's own context "
+    "window filled first (lower INFERENCE_CONTEXT_TOKENS to the model's real window or "
+    "below, or use a model with a larger one)."
+)
+
+
 class BriefIssueOutput(_Output):
     experimental: Literal[True] = Field(
         description="Always true: brief_issue is experimental and this format may change."
@@ -1038,7 +1048,12 @@ class BriefIssueOutput(_Output):
     status: Literal["ok", "invalid_json", "truncated"] = Field(
         description="ok: brief holds the parsed brief. invalid_json: the reply was not "
         "the brief JSON even after one repair; raw_text holds it. truncated: the reply "
-        "was cut off at INFERENCE_MAX_TOKENS; raw_text holds the part produced."
+        "was cut off before finishing (truncation_reason says where); raw_text holds the "
+        "part produced."
+    )
+    truncation_reason: TruncationReason | None = Field(
+        default=None,
+        description=_TRUNCATION_REASON_DESCRIPTION,
     )
     brief: Brief | None = Field(description="The parsed brief; null unless status is ok.")
     raw_text: str | None = Field(
@@ -1154,8 +1169,12 @@ class CheckConclusionOutput(_Output):
     )
     status: Literal["ok", "invalid_json", "truncated"] = Field(
         description="ok: the reply parsed as a check. invalid_json: it did not, even after "
-        "one repair; raw_text holds it. truncated: the reply was cut off at "
-        "INFERENCE_MAX_TOKENS; raw_text holds the part produced."
+        "one repair; raw_text holds it. truncated: the reply was cut off before finishing "
+        "(truncation_reason says where); raw_text holds the part produced."
+    )
+    truncation_reason: TruncationReason | None = Field(
+        default=None,
+        description=_TRUNCATION_REASON_DESCRIPTION,
     )
     verdict_summary: str | None = Field(
         description="The model's short overall verdict, cut for length; null unless ok."

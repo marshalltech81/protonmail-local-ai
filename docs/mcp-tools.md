@@ -1684,12 +1684,19 @@ is not a brief, or that has any problem, gets exactly one repair call: the same 
 plus a fixed instruction after the task (the rejected reply is not
 replayed). The repaired brief is used when it parses; otherwise the
 first one when it parsed; otherwise the raw reply is returned with
-`status: "invalid_json"`. A reply cut off at `INFERENCE_MAX_TOKENS` is
-not repaired and comes back with `status: "truncated"`; a brief needs
-more output than an `ask_mailbox` answer, so raise
-`INFERENCE_MAX_TOKENS` (for example to 4096; anthropic mode defaults to
-16000) when that happens. Only
-counts are logged.
+`status: "invalid_json"`. A reply cut off before it finished is not
+repaired and comes back with `status: "truncated"`, the stop in
+`truncation_reason`, and a fixed line before the raw reply naming the
+setting to change, as for `ask_mailbox`'s truncation notice:
+`max_tokens` when the reply reached `INFERENCE_MAX_TOKENS` (a brief
+needs more output than an `ask_mailbox` answer, so raise it, for
+example to 4096; anthropic mode defaults to 16000), `context_window`
+when the model's own window filled first (lower
+`INFERENCE_CONTEXT_TOKENS` to the model's real window or below, or use
+a model with a larger one). Only counts are logged; a call that hit a
+token limit (a cut reply, or evidence cut to fit the window) logs one
+[`token limit hit`](troubleshooting.md#the-log-shows-token-limit-hit)
+WARNING, as `ask_mailbox` does.
 
 Structured output:
 
@@ -1697,6 +1704,7 @@ Structured output:
 |---|---|
 | `experimental` | Always `true` |
 | `status` | `ok`, `invalid_json` or `truncated` |
+| `truncation_reason` | When `truncated`: `max_tokens` (raise `INFERENCE_MAX_TOKENS`) or `context_window` (lower `INFERENCE_CONTEXT_TOKENS` to the model's real window or below, or use a model with a larger one); else `null` |
 | `brief` | When `ok`: `chronology` (`date`, `date_source`: `sent` / `mentioned` / `unknown`, `actor`, `event`, `labels`; sorted oldest first, undated last), `positions` (`actor`, `position`, `labels`), `decisions` (`decision`, `labels`), `open_questions` (`question`, `labels`), `conflicts` (`description`, `labels`), `insufficient_evidence`; else `null` |
 | `raw_text` | The unparsed reply when `status` is not `ok`, else `null` |
 | `as_of` | Latest sent date (`YYYY-MM-DD`) among the passages supplied; the brief describes the evidence up to then |
@@ -1767,8 +1775,10 @@ flag: `insufficient_evidence: true` with findings is
 failure gets exactly one repair call with fixed text, as does a quote
 problem (below); a reply that is
 still not a check comes back raw with `status: "invalid_json"`, and a
-reply cut off at `INFERENCE_MAX_TOKENS` comes back with `status:
-"truncated"` and no repair. Only counts are logged.
+reply cut off before it finished comes back with `status:
+"truncated"`, its stop in `truncation_reason` and no repair, as for
+`brief_issue`. Only counts are logged, and a token limit is logged as
+for `brief_issue`.
 
 The server attaches a `sources` entry to each finding for every valid
 label it cites: the `ask_mailbox` citation fields (claimant, sender,
@@ -1796,6 +1806,7 @@ Structured output:
 |---|---|
 | `experimental` | Always `true` |
 | `status` | `ok`, `invalid_json` or `truncated` |
+| `truncation_reason` | As in `brief_issue` |
 | `verdict_summary` | The model's short overall verdict (cut at 1000 characters); `null` unless `ok` |
 | `findings` | `{relation, explanation, labels, sources}`; `[]` unless `ok` |
 | `insufficient_evidence` | The model's abstention flag; `null` unless `ok` |
