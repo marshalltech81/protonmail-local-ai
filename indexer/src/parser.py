@@ -567,8 +567,9 @@ def _decode_filename_words(filename: str | None) -> str | None:
     encoded-words (often several, a long name folded by the sending
     client) came back undecoded. ``_decode_header`` does the encoded-word
     grammar through ``email.header.decode_header``, in one linear pass.
-    The undecoded value is kept when decoding raises (a NUL in the
-    charset label raises ``ValueError``), yields text that is not valid
+    A charset label the codec rejects (unknown, ``idna``, a NUL in it)
+    takes ``_decode_header``'s UTF-8 fallback, as in Subject (#942).
+    The undecoded value is kept when decoding raises, yields text that is not valid
     Unicode (a ``unicode_escape`` word can decode to a lone surrogate),
     or leaves nothing:
     a filename never becomes empty, so it stays an attachment. The
@@ -1155,20 +1156,31 @@ def _decode_header_parts(parts: list[tuple[bytes | str, str | None]]) -> str:
         if isinstance(part, bytes):
             # ``charset`` is whatever the sender claimed in the MIME header;
             # obscure or invalid labels ("x-mac-romanian", typos, historical
-            # aliases) raise LookupError, and a codec that rejects
-            # ``errors="replace"`` (``idna``) raises UnicodeError. Handle
-            # both locally with a utf-8 fallback and ``errors="replace"``
+            # aliases) raise LookupError, a codec that rejects
+            # ``errors="replace"`` (``idna``) raises UnicodeError, and a
+            # NUL in the label makes the codec lookup raise a plain
+            # ValueError (#942); ``ValueError`` covers UnicodeError too.
+            # Handle them locally with a utf-8 fallback and ``errors="replace"``
             # so a single bad header does not affect the rest of the
             # message. Anything we DON'T catch
             # here propagates out of ``parse_email``: the function does
             # not have a blanket ``except Exception`` precisely so
             # unanticipated parser failures route through the durable
             # queue's retry + dead-letter cascade instead of being
-            # dead-lettered as unindexable without any retry.
+            # dead-lettered as unindexable without any retry. The fallback
+            # changes the indexed text, so it logs one rate-limited WARNING
+            # per word naming the exception type only (the label and text
+            # are mail content).
             encoding = charset or "utf-8"
             try:
                 decoded.append(part.decode(encoding, errors="replace"))
-            except LookupError, UnicodeError:
+            except (LookupError, ValueError) as exc:
+                warn_rate_limited(
+                    log,
+                    "header encoded-word charset could not be decoded (%s); decoded 1 word as UTF-8",
+                    type(exc).__name__,
+                    attachment=False,
+                )
                 decoded.append(part.decode("utf-8", errors="replace"))
         else:
             decoded.append(part)

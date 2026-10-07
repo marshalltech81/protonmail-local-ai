@@ -762,7 +762,12 @@ old values until the affected messages are re-indexed.
 RFC 2231 decoding leaves RFC 2047 encoded-words (`=?utf-8?q?...?=`) in
 a filename untouched, and some clients send a long non-ASCII name as
 several of them; the parser then decodes those the same way as Subject
-(#924). A value whose encoded-words do not decode is kept as sent, with
+(#924). In Subject, the From fallback and filenames, an encoded-word
+whose charset label the codec rejects (unknown, `idna`, a NUL in the
+label) is decoded as UTF-8 with replacement characters rather than
+failing the message, with one rate-limited WARNING per word naming the
+exception type (#942). A value whose encoded-words still do not
+decode is kept as sent, with
 one rate-limited WARNING naming the exception type, and a value that
 decodes to nothing is kept as sent too, so the part stays an
 attachment. Filenames stored before this are corrected only when their
