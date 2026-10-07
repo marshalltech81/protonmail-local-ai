@@ -1219,10 +1219,15 @@ bump to `docx@6` was reverted): a bump would re-run every cached
 document once through the walk after the open, which has no budget of
 its own yet (#1031), and re-record an over-budget document that was
 read in full before the budgets as `unsupported`. So a document read in
-full before keeps its cached text, and a package-budget row recorded
-`failed` before the mapping stays `failed` (retried weekly, one
-central-directory read, never opened) until #1031 lands and a
-deliberate `docx` bump follows. `DocxRelationshipChainError` (#945)
+full before keeps its cached text. A package-budget row recorded
+`failed` before the mapping is not re-queued by the startup sweep, so
+it stays `failed` until the same bytes are processed again (a new
+occurrence, or the message reprocessed for another reason) more than
+7 days after it was recorded; that re-run reads the central directory
+once, never opens the document, and records the row `unsupported`
+under the mapping. A deliberate `docx` bump, once #1031 lands,
+converts whatever rows remain at the next start.
+`DocxRelationshipChainError` (#945)
 still applies to a chain under these budgets.
 
 PowerPoint (#936): `application/vnd.openxmlformats-officedocument.presentationml.presentation`
@@ -1294,8 +1299,9 @@ refreshed the `failed` rows the previous versions wrote, since the
 startup sweep re-runs only stale rows, never aged `failed` ones. `docx`
 was deliberately not bumped (its walk is unbudgeted, #1031; see the
 DOCX budget paragraph above), so a `.docx` / `.dotx` package-budget row
-recorded `failed` before the mapping stays `failed` and is retried
-weekly until #1031 lands and a `docx` bump follows. Each logs a rate-limited WARNING
+recorded `failed` before the mapping stays `failed` until the same
+bytes are processed again more than 7 days on, or until a `docx` bump
+follows #1031. Each logs a rate-limited WARNING
 (`extractor <module> declined ...; recorded unsupported, not retried`).
 A pypdf limit hit inside one page's text extraction (a `/ToUnicode`
 map over its size limit, for example) is not one of these: like any

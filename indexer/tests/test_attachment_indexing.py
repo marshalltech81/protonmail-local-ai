@@ -274,13 +274,17 @@ def test_cache_row_from_the_current_extractor_version_is_reused(tmp_path, monkey
 
 def test_cache_row_from_a_newer_extractor_version_is_reused(tmp_path, monkeypatch):
     # After a rollback, rows the newer release wrote must not be
-    # downgraded by the older walker.
+    # downgraded by the older walker. ``docx@6`` is one above the
+    # current version (5), so this is not the current-version case above.
+    from src.extractors import EXTRACTOR_VERSIONS
+
+    assert EXTRACTOR_VERSIONS["docx"] == 5
     db = _seed_thread_for_cache_test(tmp_path)
     extractor, row = _process_with_cached_extractor(
-        db, "docx@5", STATUS_SUCCESS, "newer text", monkeypatch
+        db, "docx@6", STATUS_SUCCESS, "newer text", monkeypatch
     )
     extractor.assert_not_called()
-    assert row["extractor"] == "docx@5"
+    assert row["extractor"] == "docx@6"
 
 
 def test_stale_row_is_left_to_the_occurrences_that_select_its_module(tmp_path, monkeypatch):

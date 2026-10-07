@@ -5648,8 +5648,9 @@ class TestDocxPackageBudget:
         open, which has no budget yet (#1031), and re-record an
         over-budget document read in full before the budgets as
         ``unsupported``. The few ``failed`` package-budget rows version 5
-        wrote stay ``failed`` (retried weekly) until #1031 lands and a
-        deliberate bump follows."""
+        wrote stay ``failed`` until the same bytes are processed again
+        (a new occurrence, or a reprocess for another reason) more than
+        7 days on, or until #1031 lands and a deliberate bump follows."""
         from src.extractors import EXTRACTOR_VERSIONS, stale_extractor_module
 
         assert EXTRACTOR_VERSIONS["docx"] == 5
