@@ -1292,7 +1292,9 @@ only, never filenames or text (`make logs`):
     `.xls` files are extracted with catdoc and xlrd (#935); a crashed,
     timed-out or over-limit run is `failed` with a fixed error type such
     as `ToolTimeoutError` or `ToolExitError` (see `docs/architecture.md`,
-    "Extractor dispatch"). `too_large` is over
+    "Extractor dispatch"). Binary files (PDF, ZIP, OLE2, PNG, JPEG,
+    GIF) sent as text are recorded with "binary payload labelled as
+    text" (#932). `too_large` is over
     `INDEXER_ATTACHMENT_MAX_BYTES`, and `ocr_disabled` is an image or
     scanned PDF skipped while `INDEXER_OCR_ENABLED=false` (re-extracted
     once OCR is turned on).
