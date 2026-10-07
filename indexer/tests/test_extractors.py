@@ -3189,6 +3189,7 @@ class TestPdfPageLevelOcr:
             "pdf_pages_unrecovered": 0,
             "ocr_capped_pdfs": 5,
             "ocr_pages_skipped": 5 * 25,
+            "ocr_capped_images": 0,
             "extractor_caps": 0,
             "parser_caps_messages": 0,
             "warnings_suppressed": 3,
@@ -3873,6 +3874,207 @@ class TestMultipageTiff:
         assert seen == ["PAGE_0", "PAGE_1"]
 
 
+class TestMultipageTiffOcrCap:
+    """#885: OCR of a multipage TIFF stopped at ``max_ocr_pages`` without
+    a word, so the later frames silently dropped out of search. A single
+    probe seek past the cap finds whether a frame was left unread; the
+    capped image is logged (rate limited, counts only) and counted for
+    the attachments aggregate. The extraction result is unchanged."""
+
+    COLORS = TestMultipageTiff.COLORS
+
+    @pytest.fixture(autouse=True)
+    def _fresh_counts(self):
+        from src import extractors
+
+        extractors.drain_extractor_counts()
+
+    def _frames(self, count: int) -> bytes:
+        import io
+
+        from PIL import Image
+
+        frames = [Image.new("RGB", (32, 32), c) for c in self.COLORS[:count]]
+        buf = io.BytesIO()
+        frames[0].save(buf, format="TIFF", save_all=True, append_images=frames[1:])
+        return buf.getvalue()
+
+    def _corrupt_third_frame(self) -> bytes:
+        """Three frames, the second frame's next-IFD offset pointing past
+        the end of the file: seeking to the third frame raises a
+        non-``EOFError`` (Pillow: ``TypeError``)."""
+        import struct
+
+        data = bytearray(self._frames(3))
+        assert data[:2] == b"II"
+        offset = struct.unpack_from("<I", data, 4)[0]
+        ifds = []
+        while offset:
+            ifds.append(offset)
+            entries = struct.unpack_from("<H", data, offset)[0]
+            offset = struct.unpack_from("<I", data, offset + 2 + 12 * entries)[0]
+        entries = struct.unpack_from("<H", data, ifds[1])[0]
+        struct.pack_into("<I", data, ifds[1] + 2 + 12 * entries, len(data) + 1000)
+        return bytes(data)
+
+    def _ocr(self, monkeypatch) -> list[str]:
+        from src.extractors import image as image_module
+
+        seen: list[str] = []
+
+        def fake_ocr(img, **_kwargs):
+            marker = f"PAGE_{self.COLORS.index(img.convert('RGB').getpixel((0, 0)))}"
+            seen.append(marker)
+            return marker
+
+        monkeypatch.setattr(image_module.pytesseract, "image_to_string", fake_ocr)
+        return seen
+
+    @staticmethod
+    def _count_seeks(monkeypatch) -> list[int]:
+        from PIL import TiffImagePlugin
+
+        seeks: list[int] = []
+        real_seek = TiffImagePlugin.TiffImageFile.seek
+
+        def seek(self, frame):
+            seeks.append(frame)
+            return real_seek(self, frame)
+
+        monkeypatch.setattr(TiffImagePlugin.TiffImageFile, "seek", seek)
+        return seeks
+
+    @staticmethod
+    def _cap_lines(caplog) -> list:
+        return [r for r in caplog.records if "image OCR capped" in r.getMessage()]
+
+    def _extract(self, payload: bytes, max_ocr_pages: int) -> ExtractionResult:
+        return extract(
+            content_type="image/tiff",
+            filename="SYNTHETIC_FILENAME_MARKER.tiff",
+            payload=payload,
+            max_ocr_pages=max_ocr_pages,
+        )
+
+    def test_a_frame_past_the_cap_is_logged_and_counted(self, monkeypatch, caplog):
+        from src import extractors
+
+        caplog.set_level("INFO")
+        seen = self._ocr(monkeypatch)
+        seeks = self._count_seeks(monkeypatch)
+        result = self._extract(self._frames(3), max_ocr_pages=2)
+        assert (result.status, result.extractor) == (STATUS_SUCCESS, "image-ocr@3")
+        assert result.text is not None
+        assert result.text.split() == ["PAGE_0", "PAGE_1"]
+        assert seen == ["PAGE_0", "PAGE_1"]
+        # One seek to the second frame, one probe past the cap; the probed
+        # frame is never OCR'd and the frame chain is not walked further.
+        assert seeks == [1, 2]
+        [line] = self._cap_lines(caplog)
+        assert line.levelname == "WARNING"
+        assert line.getMessage() == "image OCR capped at 2 of at least 3 frames"
+        counts = extractors.drain_extractor_counts()
+        assert counts["ocr_capped_images"] == 1
+        assert counts["ocr_capped_pdfs"] == 0
+        assert counts["ocr_pages_skipped"] == 0
+        assert "SYNTHETIC_FILENAME_MARKER" not in caplog.text
+        assert "PAGE_" not in caplog.text
+
+    @pytest.mark.parametrize(
+        "frames, cap, expected_seeks",
+        [
+            (2, 2, [1, 2]),  # the probe finds no further frame
+            (3, 3, [1, 2, 3]),
+            (3, 0, [1, 2, 3]),  # no cap: no probe, the loop ends at EOF
+            (3, 20, [1, 2, 3]),
+            (1, 1, [1]),
+        ],
+    )
+    def test_no_cap_line_when_every_frame_is_read(
+        self, monkeypatch, caplog, frames, cap, expected_seeks
+    ):
+        from src import extractors
+
+        caplog.set_level("INFO")
+        seen = self._ocr(monkeypatch)
+        seeks = self._count_seeks(monkeypatch)
+        result = self._extract(self._frames(frames), max_ocr_pages=cap)
+        assert result.status == STATUS_SUCCESS
+        assert seen == [f"PAGE_{i}" for i in range(frames)]
+        assert seeks == expected_seeks
+        assert self._cap_lines(caplog) == []
+        assert extractors.drain_extractor_counts()["ocr_capped_images"] == 0
+
+    @pytest.mark.filterwarnings("ignore:Corrupt EXIF data:UserWarning")
+    def test_an_unreadable_probe_frame_leaves_the_result_unchanged(self, monkeypatch, caplog):
+        """The probe seek can raise on a corrupt file; the frames already
+        read are the result, as without the probe."""
+        from src import extractors
+
+        caplog.set_level("INFO")
+        self._ocr(monkeypatch)
+        intact = self._extract(self._frames(3), max_ocr_pages=2)
+        extractors.drain_extractor_counts()
+        caplog.clear()
+        seen = self._ocr(monkeypatch)
+        seeks = self._count_seeks(monkeypatch)
+        result = self._extract(self._corrupt_third_frame(), max_ocr_pages=2)
+        assert result == intact
+        assert seen == ["PAGE_0", "PAGE_1"]
+        assert seeks == [1, 2]
+        [line] = self._cap_lines(caplog)
+        assert line.levelname == "WARNING"
+        assert line.getMessage() == (
+            "image OCR capped at 2 frames; the next frame could not be read (TypeError)"
+        )
+        assert extractors.drain_extractor_counts()["ocr_capped_images"] == 1
+        assert "SYNTHETIC_FILENAME_MARKER" not in caplog.text
+
+    @pytest.mark.parametrize("exc", [MemoryError, RecursionError])
+    def test_host_pressure_in_the_probe_is_not_swallowed(self, monkeypatch, exc):
+        """The dispatcher re-raises these as host pressure; the probe
+        must not turn them into a capped success."""
+        from PIL import TiffImagePlugin
+
+        self._ocr(monkeypatch)
+        real_seek = TiffImagePlugin.TiffImageFile.seek
+
+        def seek(self, frame):
+            if frame == 2:
+                raise exc
+            return real_seek(self, frame)
+
+        monkeypatch.setattr(TiffImagePlugin.TiffImageFile, "seek", seek)
+        with pytest.raises(exc):
+            self._extract(self._frames(3), max_ocr_pages=2)
+
+    def test_cap_lines_are_rate_limited_and_every_image_counted(self, monkeypatch, caplog):
+        from src import extractors
+
+        caplog.set_level("INFO")
+        self._ocr(monkeypatch)
+        monkeypatch.setattr(extractors, "_WARNINGS_PER_WINDOW", 2)
+        results = [self._extract(self._frames(3), max_ocr_pages=1) for _ in range(5)]
+        assert {(r.status, r.text) for r in results} == {(STATUS_SUCCESS, "PAGE_0")}
+        assert [r.levelname for r in self._cap_lines(caplog)] == ["WARNING", "WARNING"]
+        counts = extractors.drain_extractor_counts()
+        assert counts["ocr_capped_images"] == 5
+        assert counts["warnings_suppressed"] == 3
+
+    def test_a_capped_image_makes_the_attachments_line_a_warning(self, monkeypatch, caplog):
+        from src import attachment_indexing, main
+
+        caplog.set_level("INFO")
+        self._ocr(monkeypatch)
+        attachment_indexing.attachment_outcomes.drain()
+        self._extract(self._frames(3), max_ocr_pages=2)
+        attachment_indexing.attachment_outcomes.record(STATUS_SUCCESS, None, cached=False)
+        main._log_attachment_outcomes(force=True)
+        [line] = [r for r in caplog.records if r.getMessage().startswith("attachments n=")]
+        assert line.levelname == "WARNING"
+        assert "ocr_capped_images=1" in line.getMessage()
+
+
 class TestGlobalImagePixelCap:
     """Process-wide PIL cap installed by ``indexer.extractors`` at import.
 
@@ -4055,6 +4257,7 @@ class TestMailContentStaysOutOfLogsAndErrors:
             "pdf_pages_unrecovered": 0,
             "ocr_capped_pdfs": 0,
             "ocr_pages_skipped": 0,
+            "ocr_capped_images": 0,
             "extractor_caps": 0,
             "parser_caps_messages": 0,
             "warnings_suppressed": 0,
@@ -4662,7 +4865,7 @@ _UNREPORTED_CAPS = {
     ),
     "src.extractors:max_ocr_pages": (
         "PDF: reported by #884 as ocr_capped_pdfs= / ocr_pages_skipped=; "
-        "multipage TIFF: reported by #885"
+        "multipage TIFF: reported by #885 (#916) as ocr_capped_images="
     ),
     "src.extractors:ocr_timeout_seconds": (
         "a timeout raises: a failed row with its rate-limited WARNING, counted as failed="

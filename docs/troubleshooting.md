@@ -1200,6 +1200,15 @@ only, never filenames or text (`make logs`):
   same PDF is served from the extraction cache and reports a plain
   `success`, with no cap line and no `ocr_capped_pdfs` count, although
   the cached text still lacks the unread pages.
+- `image OCR capped at <N> of at least <N+1> frames` (WARNING): a
+  multipage TIFF had more frames than `INDEXER_OCR_MAX_PAGES`; the
+  frames past the cap are not read. The indexer looks one frame past
+  the cap rather than count every frame, so the total is reported as
+  "at least". `image OCR capped at <N> frames; the next frame could not
+  be read (<ExceptionType>)` is the same cap when that frame directory
+  is corrupt; the frames already read are still indexed. Each is
+  counted as `ocr_capped_images` in the attachments line below. The
+  same caching and #891 limitation as the PDF cap line apply.
 - `extractor cap <name>: <fixed text and counts>` (WARNING): a cap
   inside an extractor cut the text it returned (#903). Logged once per
   cap per extraction, and counted as `extractor_caps` in the
@@ -1222,11 +1231,11 @@ only, never filenames or text (`make logs`):
   The other caps either skip or fail the whole attachment and show as
   `too_large` or `failed` instead (`INDEXER_ATTACHMENT_MAX_BYTES`, the
   zip, image-pixel and XLSX whole-part caps, the OCR timeout); the OCR
-  page cap has its own line above. Like the OCR cap, a cap is reported
+  page caps have their own lines above. Like the OCR cap, a cap is reported
   on the first extraction only: the cached text is served afterwards.
 - These per-item WARNINGs (failed extractions, OCR and extractor caps,
-  and the parser-cap line described below, together) are capped at 20 per 5
-  minutes, so a stream of crafted mail cannot flood the log. The rest
+  and the parser-cap line described below, together) are capped at 20
+  per 5 minutes, so a stream of crafted mail cannot flood the log. The rest
   are counted as `warnings_suppressed` in the attachments line below.
   The budget is shared with the embed retry, health-file and
   ingestion-state lines (see "Indexer health in the log"), but those
@@ -1235,12 +1244,12 @@ only, never filenames or text (`make logs`):
 - `attachments n=<total> success= failed= unsupported= too_large=
   ocr_disabled= empty= cached= pdf_pages_failed=
   pdf_pages_unrecovered= ocr_capped_pdfs= ocr_pages_skipped=
-  extractor_caps= parser_caps_messages= warnings_suppressed=`: the attachments of the
-  messages committed since the previous line, by outcome. It is a
+  ocr_capped_images= extractor_caps= parser_caps_messages=
+  warnings_suppressed=`: the attachments of the messages committed since the previous line, by outcome. It is a
   WARNING when any of `failed`, `unsupported`, `too_large`,
   `ocr_disabled`, `pdf_pages_unrecovered`, `ocr_capped_pdfs`,
-  `ocr_pages_skipped`, `extractor_caps`, `parser_caps_messages` or
-  `warnings_suppressed` is above zero (some attachment text is not
+  `ocr_pages_skipped`, `ocr_capped_images`, `extractor_caps`,
+  `parser_caps_messages` or `warnings_suppressed` is above zero (some attachment text is not
   searchable), and INFO otherwise. `pdf_pages_failed` alone does not
   make it a WARNING (see below).
   - When it is logged: during the initial index, with the timing summary
@@ -1270,14 +1279,17 @@ only, never filenames or text (`make logs`):
     search.
     `ocr_capped_pdfs` counts scanned PDFs whose OCR stopped at
     `INDEXER_OCR_MAX_PAGES`, and `ocr_pages_skipped` the scanned pages
-    they left unread. `extractor_caps` counts the extractor caps above,
-    one per cap per extraction.
+    they left unread. `ocr_capped_images` counts multipage TIFFs whose
+    OCR stopped at the cap with a frame left unread; their unread
+    frames are not counted.
+    `extractor_caps` counts the extractor caps above, one per cap per
+    extraction.
   - How retries count: the outcomes are counted once per committed
     message, so a message retried after an embedder outage counts once.
     The extraction counts (`pdf_pages_failed`,
     `pdf_pages_unrecovered`, `ocr_capped_pdfs`, `ocr_pages_skipped`,
-    `extractor_caps`, `warnings_suppressed`) and the per-attachment
-    WARNINGs count every extraction attempt, retries included, and
+    `ocr_capped_images`, `extractor_caps`, `warnings_suppressed`) and the
+    per-attachment WARNINGs count every extraction attempt, retries included, and
     `parser_caps_messages` every parse of a capped message (see
     below).
 

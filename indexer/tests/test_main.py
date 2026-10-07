@@ -3755,9 +3755,8 @@ class TestRequeueOcrDisabledExtractions:
                 "WARNING",
                 "attachments n=2 success=0 failed=0 unsupported=0 too_large=0 "
                 "ocr_disabled=2 empty=0 cached=0 pdf_pages_failed=0 "
-                "pdf_pages_unrecovered=0 ocr_capped_pdfs=0 ocr_pages_skipped=0 extractor_caps=0 "
-                "parser_caps_messages=0 "
-                "warnings_suppressed=0",
+                "pdf_pages_unrecovered=0 ocr_capped_pdfs=0 ocr_pages_skipped=0 ocr_capped_images=0 "
+                "extractor_caps=0 parser_caps_messages=0 warnings_suppressed=0",
             )
         ]
         assert "SYNTHETIC_FILENAME_MARKER" not in caplog.text
