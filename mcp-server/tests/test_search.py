@@ -1454,3 +1454,88 @@ def test_evidence_tool_descriptions_state_the_date_contract(tool, seeded_db):
     doc = " ".join(params["date_from"]["description"].split())
     assert "span (its messages' occurred_at, else sent_at) overlaps the range" in doc
     assert "occurred_at and sent_at" in doc
+
+
+def _wire_descriptions(db) -> dict[str, str]:
+    """Each tool's description as a client receives it. FastMCP sends
+    only the docstring's first text section, so guidance placed after
+    an indented block never reaches the calling model; these checks
+    read the wire, not ``__doc__``."""
+    from tests.test_tool_annotations import _server, _wire_tools
+
+    return {
+        name: " ".join(tool["description"].split())
+        for name, tool in _wire_tools(_server(db)).items()
+    }
+
+
+@pytest.mark.parametrize("tool", ["ask_mailbox", "get_evidence"])
+def test_evidence_descriptions_warn_passages_can_stop_before_a_resolution(tool, empty_db):
+    """#974 option 1: per-thread passages are picked by similarity to
+    the question, so a late message that settles the matter can be left
+    out; the description says so and how to follow up."""
+    doc = _wire_descriptions(empty_db)[tool]
+    asked = {"ask_mailbox": "question", "get_evidence": "query"}[tool]
+    assert "late resolution in a long thread" in doc
+    # Review round 11: ``_matched_attachments`` matches query words
+    # against MIME types as well as filenames, so a re-ask that keeps a
+    # file-type word ("PDF") keeps the same attachment first.
+    assert (
+        "re-ask about the resolution without the attachment's filename or "
+        'file-type words (for example "PDF"), since either keeps that '
+        "attachment first, or read the thread's later messages with "
+        "get_thread or get_message" in doc
+    )
+    # Review round 8 (owner): the full order of
+    # ``get_evidence_chunks_for_threads``. With an attachment the query
+    # names, that attachment leads, then the thread's other attachments,
+    # then the body, each by similarity; otherwise similarity alone.
+    assert (
+        f"when the {asked} matches one of its attachments' filename or MIME type, "
+        "that attachment comes first, then its other attachments, then the body, "
+        "each by similarity" in doc
+    )
+    assert "attachments can then fill every slot" in doc
+
+
+def test_ask_mailbox_description_states_its_slot_count_and_fallback(empty_db):
+    """ask_mailbox takes ``PROMPT_EVIDENCE_CHUNKS_PER_THREAD`` passages
+    per thread and shows a chunkless thread's indexed text."""
+    from src.lib.sqlite import PROMPT_EVIDENCE_CHUNKS_PER_THREAD
+
+    assert PROMPT_EVIDENCE_CHUNKS_PER_THREAD == 6
+    doc = _wire_descriptions(empty_db)["ask_mailbox"]
+    assert "Each thread gives at most six passages" in doc
+    assert "A thread with no passages shows its indexed text" in doc
+
+
+def test_get_evidence_description_states_its_slots_and_chunkless_threads(empty_db):
+    """Review round 8: get_evidence does not show a chunkless thread's
+    indexed text (that is ask_mailbox's fallback): it lists the thread
+    with an empty chunks list under max_threads and leaves it out
+    otherwise. Its per-thread cap is six mailbox-wide and ``limit``
+    with thread_id."""
+    doc = _wire_descriptions(empty_db)["get_evidence"]
+    assert "six per thread mailbox-wide, limit with thread_id" in doc
+    assert (
+        "A thread with no passages is listed with an empty chunks list "
+        "(with max_threads) or left out; read it with get_thread." in doc
+    )
+    assert "indexed text" not in doc
+
+
+def test_extract_description_points_to_the_population_recipe(empty_db):
+    """#976 option 1: extraction covers the top ``limit`` threads only,
+    and the description says so in one sentence pointing to the recipe
+    in docs/mcp-tools.md. Review rounds 1-5 grew the recipe on the wire;
+    after round 6 the owner moved it to the docs only, so the
+    description must not carry its steps."""
+    doc = _wire_descriptions(empty_db)["extract_from_emails"]
+    assert (
+        "Only the top ``limit`` threads are searched, not every match "
+        "(population recipe: docs/mcp-tools.md)."
+    ) in doc
+    assert "search_attachments" not in doc
+    assert "claimant_id" not in doc
+    # Review round 8 (owner): the pre-read disclosure is back on the wire.
+    assert "Before a population run, tell the user how much mail will be read." in doc

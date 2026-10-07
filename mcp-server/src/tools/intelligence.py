@@ -2952,6 +2952,18 @@ def register_intelligence_tools(
         that PDF's text is already in the local index, and
         ``ask_mailbox`` will surface it.
 
+        Each thread gives at most six passages, ordered by similarity
+        to the question; when the question matches one of its
+        attachments' filename or MIME type, that attachment comes
+        first, then its other attachments, then the body, each by
+        similarity, and attachments can then fill every slot before a
+        body message. A thread with no passages shows its indexed text.
+        So passages can stop before a late resolution in a long thread:
+        for status or closure, re-ask about the resolution without the
+        attachment's filename or file-type words (for example "PDF"),
+        since either keeps that attachment first, or read the thread's
+        later messages with get_thread or get_message.
+
         Use this whenever the question needs attachment content (PDFs,
         scans, OCR'd images, statements, quotes, reports, signed forms),
         synthesis across MORE THAN ONE thread ("what's the status of
@@ -3560,7 +3572,9 @@ def register_intelligence_tools(
         context, so fields that live only in an attached invoice or
         statement can be extracted. For prose answers across threads
         use ask_mailbox; for one specific thread use summarize_thread
-        or get_thread.
+        or get_thread. Only the top ``limit`` threads are searched, not
+        every match (population recipe: docs/mcp-tools.md). Before a
+        population run, tell the user how much mail will be read.
 
         To extract from one PERSON's mail, call find_contact with the
         name first and pass the address of the person meant as
