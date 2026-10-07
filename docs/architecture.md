@@ -765,7 +765,8 @@ several of them; the parser then decodes those the same way as Subject
 (#924). In Subject, the From fallback and filenames, an encoded-word
 whose charset label the codec rejects (unknown, `idna`, a NUL in the
 label) is decoded as UTF-8 with replacement characters rather than
-failing the message (#942). A value whose encoded-words still do not
+failing the message, with one rate-limited WARNING per word naming the
+exception type (#942). A value whose encoded-words still do not
 decode is kept as sent, with
 one rate-limited WARNING naming the exception type, and a value that
 decodes to nothing is kept as sent too, so the part stays an

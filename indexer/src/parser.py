@@ -1167,11 +1167,20 @@ def _decode_header_parts(parts: list[tuple[bytes | str, str | None]]) -> str:
             # not have a blanket ``except Exception`` precisely so
             # unanticipated parser failures route through the durable
             # queue's retry + dead-letter cascade instead of being
-            # dead-lettered as unindexable without any retry.
+            # dead-lettered as unindexable without any retry. The fallback
+            # changes the indexed text, so it logs one rate-limited WARNING
+            # per word naming the exception type only (the label and text
+            # are mail content).
             encoding = charset or "utf-8"
             try:
                 decoded.append(part.decode(encoding, errors="replace"))
-            except LookupError, ValueError:
+            except (LookupError, ValueError) as exc:
+                warn_rate_limited(
+                    log,
+                    "header encoded-word charset could not be decoded (%s); decoded 1 word as UTF-8",
+                    type(exc).__name__,
+                    attachment=False,
+                )
                 decoded.append(part.decode("utf-8", errors="replace"))
         else:
             decoded.append(part)

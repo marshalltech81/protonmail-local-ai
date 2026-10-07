@@ -1357,7 +1357,10 @@ library does not decode in a filename parameter. The indexer decodes
 them the same way as Subject (#924), so `search_attachments`,
 `get_message` and filename search show the sender's name. A charset
 label the codec rejects (unknown, `idna`, a NUL in the label) is
-decoded as UTF-8 with replacement characters, as in Subject (#942). If
+decoded as UTF-8 with replacement characters, as in Subject (#942),
+and logged without the text: `header encoded-word charset could not be
+decoded (<ExceptionType>); decoded 1 word as UTF-8` (WARNING, rate
+limited, suppressed lines counted in the heartbeat). If
 the encoded-words still do not decode to valid text, the indexer
 keeps the filename as sent and logs, without the filename:
 `attachment filename encoded-words could not be decoded
