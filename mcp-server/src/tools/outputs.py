@@ -579,7 +579,26 @@ class QueryMessagesOutput(_Output):
     next_cursor: str | None = Field(
         description="Pass with the same filters for the next page; null when has_more is false."
     )
-    messages: list[ListedMessage] = Field(description="Newest send date first.")
+    messages: list[ListedMessage] = Field(
+        description="Newest send date first. With fields, each row holds only those "
+        "fields plus claimant_id and thread_id."
+    )
+
+
+def query_messages_output_schema() -> dict[str, Any]:
+    """``QueryMessagesOutput``'s schema with only ``claimant_id`` and
+    ``thread_id`` required in a row, since ``fields`` (#990) leaves the
+    others out."""
+    schema = QueryMessagesOutput.model_json_schema()
+    schema["$defs"]["ListedMessage"]["required"] = ["claimant_id", "thread_id"]
+    return schema
+
+
+def project_rows(content: dict[str, Any], fields: frozenset[str]) -> dict[str, Any]:
+    """``content`` (a dumped ``QueryMessagesOutput``) with each row cut to
+    ``fields``, in the row's own field order."""
+    rows = [{k: v for k, v in row.items() if k in fields} for row in content["messages"]]
+    return {**content, "messages": rows}
 
 
 class Contact(_Output):

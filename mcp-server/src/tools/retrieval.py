@@ -12,7 +12,7 @@ from mcp.types import CallToolResult
 
 # Module import: get_thread and get_message have a local named ``count``.
 from ..lib import timings
-from ..lib.security import log_tool_call
+from ..lib.security import QUERY_MESSAGE_FIELDS, log_tool_call
 from ..lib.sqlite import (
     FILTER_TYPE_ERROR,
     LIST_THREAD_FILTERS,
@@ -47,6 +47,8 @@ from .outputs import (
     describe_date_bounds,
     listed_message,
     message_headers,
+    project_rows,
+    query_messages_output_schema,
     read_only,
     reaped_source,
     thread_summary,
@@ -182,6 +184,51 @@ def _thread_message(m: MessageRecord, body: MessageBody | None) -> ThreadMessage
         body=body.text if body else None,
         body_omitted_chars=body.omitted_chars if body else 0,
     )
+
+
+def _listed_lines(i: int, m: MessageRecord, fields: frozenset[str] | None) -> list[str]:
+    """Row ``i`` of a query_messages page in prose. With a ``fields``
+    projection (#990) only the projected fields appear; the claimant and
+    thread IDs always do."""
+
+    def shown(name: str) -> bool:
+        return fields is None or name in fields
+
+    head = []
+    if shown("sent_at"):
+        head.append(m.sent_at)
+    if m.occurred_at and shown("occurred_at"):
+        head.append(f"delivered {m.occurred_at}")
+    if shown("folder"):
+        head.append(m.folder)
+    for name, word, on in (
+        ("seen", "unread", not m.seen),
+        ("flagged", "flagged", m.flagged),
+        ("replied", "replied", m.replied),
+        ("has_attachments", "attachments", m.has_attachments),
+        ("pending_deletion", "pending deletion", m.pending_deletion),
+    ):
+        if on and shown(name):
+            head.append(word)
+    lines = [f"{i}. " + " | ".join(head) if head else f"{i}."]
+    if shown("subject"):
+        lines.append(f"   Subject: {clip(m.subject, HEADER_CHAR_LIMIT)}")
+    for name, label, people in (("from", "From", m.from_), ("to", "To", m.to), ("cc", "Cc", m.cc)):
+        if people and shown(name):
+            lines.append(f"   {label}: {_format_participants(people)}")
+    ids = [f"Claimant ID: {m.claimant_id}"]
+    if shown("message_id"):
+        ids.insert(0, f"Message-ID: {m.message_id}")
+    lines.append("   " + " | ".join(ids))
+    lines.append(f"   Thread ID: {m.thread_id}")
+    return lines
+
+
+def _projected(result: CallToolResult, fields: frozenset[str] | None) -> CallToolResult:
+    """``result`` with its structured rows cut to ``fields``, if given."""
+    if fields is not None and result.structured_content is not None:
+        result.structured_content = project_rows(result.structured_content, fields)
+    return result
 
 
 def _filter_uses(args: dict) -> list[FilterUse]:
@@ -765,7 +812,7 @@ def register_retrieval_tools(server, db):
             raise ToolError(f"Error: {type(e).__name__}") from e
 
     @server.tool(
-        output_schema=QueryMessagesOutput.model_json_schema(),
+        output_schema=query_messages_output_schema(),
         annotations=read_only("Query Messages"),
     )
     @timings.timed_tool("query_messages")
@@ -784,6 +831,7 @@ def register_retrieval_tools(server, db):
         flagged: bool | None = None,
         limit: int = 25,
         cursor: str | None = None,
+        fields: list[str] | None = None,
     ) -> CallToolResult:
         """
         Enumerate EVERY message matching exact criteria, with an exact
@@ -827,7 +875,8 @@ def register_retrieval_tools(server, db):
         cursor can be missed. A changed ``total_matches`` signals churn,
         but the same total does not prove a stable set. Scope coverage to
         the indexed results observed during the run, not a point-in-time
-        complete mailbox.
+        complete mailbox. For large pages, ``fields`` keeps only the named
+        row fields, e.g. ``["subject", "sent_at", "from", "has_attachments"]``.
 
         When a person's exact address is unknown, enumerate name-substring
         matches in the requested sender/recipient role and folder with
@@ -882,6 +931,8 @@ def register_retrieval_tools(server, db):
             flagged: True for flagged (starred) messages, False for the rest.
             limit: Messages per page (default 25, clamped to [1, 100]).
             cursor: ``next_cursor`` from the previous page of the same query.
+            fields: Row fields to return; claimant_id and thread_id are
+                    always kept. Omit for every field.
 
         Returns:
             The filter interpretation, total_matches, the page's
@@ -903,8 +954,22 @@ def register_retrieval_tools(server, db):
             "seen": seen,
             "flagged": flagged,
         }
-        log_tool_call(log, "query_messages", {**args, "limit": limit, "cursor": cursor})
+        log_tool_call(
+            log, "query_messages", {**args, "limit": limit, "cursor": cursor, "fields": fields}
+        )
         limit = clamp_int(limit, default=25, minimum=1, maximum=_MAX_QUERY_LIMIT)
+        projection = None
+        if fields is not None:
+            unknown = [f for f in fields if f not in QUERY_MESSAGE_FIELDS]
+            if unknown:
+                # The name goes back to the caller only; the log names
+                # the parameter, as for the other rejected inputs.
+                log.warning("query_messages rejected invalid fields")
+                raise ToolError(
+                    f"Error: unknown field {clip(unknown[0], 100)!r} in fields; "
+                    f"valid: {', '.join(QUERY_MESSAGE_FIELDS)}"
+                )
+            projection = frozenset(fields) | {"claimant_id", "thread_id"}
         # Reject a bad date range before any retrieval work.
         try:
             bounds = date_bounds(*validate_date_range(date_from, date_to))
@@ -963,7 +1028,7 @@ def register_retrieval_tools(server, db):
             lines.append("returned: 0")
             lines.append("has_more: false")
             lines.append("No messages match." if page.offset == 0 else "No further messages.")
-            return tool_result("\n".join(lines), output)
+            return _projected(tool_result("\n".join(lines), output), projection)
 
         first, last = page.offset + 1, page.offset + len(page.messages)
         lines.append(f"returned: {len(page.messages)} (matches {first}-{last})")
@@ -974,22 +1039,10 @@ def register_retrieval_tools(server, db):
         lines.append("")
 
         for i, m in enumerate(page.messages, first):
-            flags = "".join(f" | {w}" for w in _state_words(m) if w != "read")
-            if m.has_attachments:
-                flags += " | attachments"
-            if m.pending_deletion:
-                flags += " | pending deletion"
-            delivered = f" | delivered {m.occurred_at}" if m.occurred_at else ""
-            lines.append(f"{i}. {m.sent_at}{delivered} | {m.folder}{flags}")
-            lines.append(f"   Subject: {clip(m.subject, HEADER_CHAR_LIMIT)}")
-            for label, people in (("From", m.from_), ("To", m.to), ("Cc", m.cc)):
-                if people:
-                    lines.append(f"   {label}: {_format_participants(people)}")
-            lines.append(f"   Message-ID: {m.message_id} | Claimant ID: {m.claimant_id}")
-            lines.append(f"   Thread ID: {m.thread_id}")
+            lines.extend(_listed_lines(i, m, projection))
             lines.append("")
 
-        return tool_result("\n".join(lines), output)
+        return _projected(tool_result("\n".join(lines), output), projection)
 
     @server.tool(
         output_schema=FindContactOutput.model_json_schema(),
