@@ -1455,3 +1455,36 @@ def test_evidence_tool_descriptions_state_the_date_contract(tool, fake_server, s
     doc = " ".join((fake_server.tools[tool].__doc__ or "").split())
     assert "span (its messages' occurred_at, else sent_at) overlaps the range" in doc
     assert "occurred_at and sent_at" in doc
+
+
+def _wire_descriptions(db) -> dict[str, str]:
+    """Each tool's description as a client receives it. FastMCP sends
+    only the docstring's first text section, so guidance placed after
+    an indented block never reaches the calling model; these checks
+    read the wire, not ``__doc__``."""
+    from tests.test_tool_annotations import _server, _wire_tools
+
+    return {
+        name: " ".join(tool["description"].split())
+        for name, tool in _wire_tools(_server(db)).items()
+    }
+
+
+@pytest.mark.parametrize("tool", ["ask_mailbox", "get_evidence"])
+def test_evidence_descriptions_warn_passages_can_stop_before_a_resolution(tool, empty_db):
+    """#974 option 1: per-thread passages are picked by similarity to
+    the question, so a late message that settles the matter can be left
+    out; the description says so and how to follow up."""
+    doc = _wire_descriptions(empty_db)[tool]
+    assert "chosen by similarity to the question" in doc
+    assert "late resolution in a long thread" in doc
+    assert "re-ask about the resolution" in doc
+    assert "get_thread or get_message" in doc
+
+
+def test_extract_description_points_to_the_population_recipe(empty_db):
+    """#976 option 1: extraction covers the top ``limit`` threads only;
+    the description points to the search_attachments recipe."""
+    doc = _wire_descriptions(empty_db)["extract_from_emails"]
+    assert "search_attachments" in doc
+    assert "docs/mcp-tools.md" in doc

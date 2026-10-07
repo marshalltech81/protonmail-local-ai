@@ -2947,6 +2947,11 @@ def register_intelligence_tools(
         that PDF's text is already in the local index, and
         ``ask_mailbox`` will surface it.
 
+        A thread's passages are chosen by similarity to the question
+        and can stop before a late resolution in a long thread. For
+        status or closure, re-ask about the resolution, or read the
+        thread's later messages with get_thread or get_message.
+
         Use this whenever the question needs:
           - attachment content (PDFs, scans, OCR'd images, statements,
             quotes, reports, signed forms)
@@ -3560,7 +3565,9 @@ def register_intelligence_tools(
         context, so fields that live only in an attached invoice or
         statement can be extracted. For prose answers across threads
         use ask_mailbox; for one specific thread use summarize_thread
-        or get_thread.
+        or get_thread. Only the top ``limit`` threads are searched: for
+        every occurrence, list them with search_attachments first and
+        reconcile (recipe in docs/mcp-tools.md).
 
         To extract from one PERSON's mail, call find_contact with the
         name first and pass the address of the person meant as

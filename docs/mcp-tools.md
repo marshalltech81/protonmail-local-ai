@@ -1158,6 +1158,16 @@ rather than searching without the filter. A blank `participant` or
 is treated as absent, and a padded one is stripped, here and in
 `search_emails`, `extract_from_emails` and `get_evidence`.
 
+**Late resolutions in long threads
+([#974](https://github.com/marshalltech81/protonmail-local-ai/issues/974)).**
+A thread's passages are chosen by similarity to the question (at most
+six, then cut to the per-thread prompt budget), not by position, so in
+a long thread they can stop before a late resolution: the message that
+settles the matter is often worded nothing like the question. The
+`ask_mailbox` and `get_evidence` descriptions tell the calling model
+so: for status or closure, re-ask about the resolution, or read the
+thread's later messages with `get_thread` or `get_message`.
+
 `max_threads` is clamped to `[1, 10]` at the tool boundary so an
 inflated caller-supplied value cannot expand into an oversized prompt
 that blows past the model's context window.
@@ -1489,6 +1499,44 @@ JSON Schema `properties` or `required`, is rejected before any model
 call. `limit` is clamped to `[1, 50]`
 at the tool boundary. Each retrieved thread drives one LLM call, so
 inflated values fan out into that many model calls.
+
+**Building a population
+([#976](https://github.com/marshalltech81/protonmail-local-ai/issues/976)).**
+The threads searched are the top `limit` hits for `query`, not every
+match, and nothing names the threads left out. For every occurrence
+(every invoice line for one material code from one vendor, say), the
+tool description points the calling model here:
+
+1. Enumerate the attachments with `search_attachments`, a lexical
+   match on the material code or its description, plus `from_addr`
+   and `content_type` where they help. There is no pagination, so
+   split the period into `date_from` / `date_to` windows narrow
+   enough that each returns fewer than 50 results, the cap.
+2. Run `extract_from_emails` per window, with `participant` set to
+   the vendor's address (the tool has no `from_addr`) and a schema
+   that declares its own `invoice_date` and `invoice_number`, or read
+   each attachment's passages with `get_evidence(query,
+   thread_id=...)`.
+3. Reconcile: match the records' `citations` (`thread_id`,
+   `attachment_id`) and the `threads` searched against the
+   enumerated list, and report each attachment with no record.
+
+Limits the recipe does not remove:
+
+- `search_attachments` leaves out Trash and attachments whose text
+  extraction did not succeed and whose filename and MIME type do not
+  match; its `from_addr` filter runs after a bounded candidate scan,
+  so even a window under 50 can miss matches.
+- Each thread's passages are chosen by similarity to `query` and cut
+  to a budget, so an invoice page whose line is not near the query
+  can be missing from a searched thread
+  ([#974](https://github.com/marshalltech81/protonmail-local-ai/issues/974),
+  [#858](https://github.com/marshalltech81/protonmail-local-ai/issues/858)).
+- `_date` is the thread's last message date, not the invoice date.
+- Records are model output, checked by shape and citation labels
+  only (below).
+- Each searched thread is one model call, and its passages reach the
+  inference provider: say how many threads a run will read first.
 
 **Schema forms and what is checked.** Each returned record is checked
 against the schema's declared fields and basic JSON types; this is a
