@@ -571,6 +571,14 @@ Examples:
   as introduced by it even when nothing is broken today (owner,
   2026-10-07); only a problem that already existed on `main` may be
   deferred under the cap.
+- Re-scope trigger (owner, 2026-10-07): from the fourth review round
+  on, whenever a round finds problems in the code or text the PR
+  added, stop fixing and ask the owner before the next push: cut scope (drop or simplify
+  the part that keeps drawing findings), accept the open findings as
+  stated risks, or keep fixing. Explain each finding in plain terms,
+  and say whether the choice can change what the tools return.
+  Choosing to fix one round does not accept later rounds' findings.
+  An agent working the PR stops and reports instead of pushing.
 - File P3 findings as issues rather than fixing them ahead of
   go-live or P1/P2 work. Exception (owner, 2026-10-02): a small P3
   with an agreed fix and no new mechanism may be fixed before go-live.
