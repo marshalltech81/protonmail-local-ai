@@ -392,7 +392,8 @@ class TestSenderFilter:
     def test_from_addr_ignores_recipients_when_senders_populated(self):
         from datetime import UTC, datetime
 
-        from src.lib.sqlite import ThreadResult, _matches_sender
+        from src.lib.predicates import _matches_sender
+        from src.lib.sqlite import ThreadResult
 
         modern = ThreadResult(
             thread_id="modern",
@@ -419,7 +420,8 @@ class TestSenderFilter:
         reliably matches every display variant of the same correspondent."""
         from datetime import UTC, datetime
 
-        from src.lib.sqlite import ThreadResult, _matches_sender
+        from src.lib.predicates import _matches_sender
+        from src.lib.sqlite import ThreadResult
 
         result = ThreadResult(
             thread_id="t",
@@ -441,7 +443,8 @@ class TestSenderFilter:
         full-address queries rejects near-misses."""
         from datetime import UTC, datetime
 
-        from src.lib.sqlite import ThreadResult, _matches_sender
+        from src.lib.predicates import _matches_sender
+        from src.lib.sqlite import ThreadResult
 
         result = ThreadResult(
             thread_id="t",
@@ -464,7 +467,8 @@ class TestSenderFilter:
         work against the lowercased display string."""
         from datetime import UTC, datetime
 
-        from src.lib.sqlite import ThreadResult, _matches_sender
+        from src.lib.predicates import _matches_sender
+        from src.lib.sqlite import ThreadResult
 
         result = ThreadResult(
             thread_id="t",
@@ -1544,21 +1548,21 @@ class TestDateFilterFormCatalogue:
 
     @pytest.mark.parametrize("value", DATE_ONLY)
     def test_date_only_form_names_the_whole_day(self, value):
-        from src.lib.sqlite import _parse_filter_date
+        from src.lib.predicates import _parse_filter_date
 
         assert _parse_filter_date(value, end_of_day=False).isoformat() == self._START
         assert _parse_filter_date(value, end_of_day=True).isoformat() == self._END_OF_DAY
 
     @pytest.mark.parametrize(("value", "instant"), sorted(DATETIME.items()))
     def test_datetime_form_names_one_instant(self, value, instant):
-        from src.lib.sqlite import _parse_filter_date
+        from src.lib.predicates import _parse_filter_date
 
         assert _parse_filter_date(value, end_of_day=False).isoformat() == instant
         assert _parse_filter_date(value, end_of_day=True).isoformat() == instant
 
     @pytest.mark.parametrize("value", REJECTED)
     def test_unaccepted_form_is_rejected(self, value):
-        from src.lib.sqlite import InvalidFilterError, _parse_filter_date
+        from src.lib.predicates import InvalidFilterError, _parse_filter_date
 
         with pytest.raises(InvalidFilterError):
             _parse_filter_date(value, end_of_day=True, _field_name="date_to")
@@ -3716,7 +3720,8 @@ class TestAddrMatchHelpers:
     def test_matches_participant_vs_matches_sender(self):
         from datetime import UTC, datetime
 
-        from src.lib.sqlite import ThreadResult, _matches_participant, _matches_sender
+        from src.lib.predicates import _matches_participant, _matches_sender
+        from src.lib.sqlite import ThreadResult
 
         r = ThreadResult(
             thread_id="t",
@@ -5530,7 +5535,7 @@ class TestDefaultTrashExclusion:
         post-filtered by folder."""
         ks = _spy_vector_k(seeded_db, monkeypatch)
         calls: list = []
-        monkeypatch.setattr(seeded_db, "_threads_in_folders", lambda *a: calls.append(a) or set())
+        monkeypatch.setattr(seeded_db, "_threads_with_message", lambda *a: calls.append(a) or set())
         seeded_db.hybrid_search("invoice", _TRASH_QUERY, limit=5)
         seeded_db.semantic_search(_TRASH_QUERY, limit=5)
         assert ks["thread"] == [10, 10] and len(ks["chunk"]) == 2

@@ -14,8 +14,9 @@ from contextlib import closing
 import pytest
 import sqlite_vec
 from fastmcp.exceptions import ToolError
+from src.lib.predicates import AUTHORITY_CLASSES
 from src.lib.security import log_tool_call
-from src.lib.sqlite import AUTHORITY_CLASSES, Database, InvalidFilterError
+from src.lib.sqlite import Database, InvalidFilterError
 
 from tests.conftest import _build_schema, _insert_thread, claimant_of, set_authority
 from tests.test_sqlite import _TARGET, _scoped_recall_db, _search
