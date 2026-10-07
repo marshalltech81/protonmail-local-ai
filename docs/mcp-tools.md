@@ -218,8 +218,8 @@ tool=search_emails outcome=ok total_ms=41.7 stages_ms={'query_embedding': 22.4, 
   `thread_fts` / `chunk_fts` / `attachment_fts`, the vector lanes
   `thread_vec` / `chunk_vec` (each covering every widening step of a
   filtered search), `fusion` (RRF plus post-fusion filters),
-  `evidence_fetch`, `evidence_precision` (`get_evidence` with `source`
-  or `scope=in_scope` on the mailbox-wide path),
+  `evidence_fetch`, `evidence_precision` (`get_evidence` with `source`,
+  `scope=in_scope` or `dedupe_attachments` on the mailbox-wide path),
   `scope_labels` (the per-message
   [evidence scope](#evidence-scope-in-scope-or-context) lookup of
   `ask_mailbox` and `get_evidence`), `rerank`, `attachment_search` and
@@ -253,14 +253,17 @@ tool=search_emails outcome=ok total_ms=41.7 stages_ms={'query_embedding': 22.4, 
   ([Resolving `from_name`](#search_emails)). Numbers only: the
   addresses are never logged.
 - `evidence_filtered` is 1 when a `get_evidence` call used a
-  [precision control](#precision-controls). With `scope=in_scope`,
+  [precision control](#precision-controls) or `dedupe_attachments`. With `scope=in_scope`,
   `evidence_context_dropped` counts the `context` passages left out and
   `evidence_threads_scope_emptied` the threads left with none; with
   `source` on the mailbox-wide path, `evidence_threads_source_emptied`
   counts the ranked threads with no passage of that source. With
   `max_chunks_per_thread`, `evidence_chunks_capped` counts the passages
   the cap removed; with `max_chars_per_chunk`,
-  `evidence_chunks_truncated` counts the passages it cut. A rejected
+  `evidence_chunks_truncated` counts the passages it cut. With
+  `dedupe_attachments`, `evidence_attachment_copies_collapsed` counts
+  the [repeated attachment passages](#collapsing-repeated-attachments)
+  collapsed. A rejected
   control logs `get_evidence rejected invalid <field>` once per field
   per minute, and later repeats as one count line.
 - `evidence_capped_threads` (the intelligence tools) counts the threads
@@ -541,6 +544,7 @@ chunks (extracted PDF / OCR / document text) are included — unlike
 | `scope` | string | `any` | `in_scope` leaves out `context` passages and reports how many |
 | `max_chunks_per_thread` | int | `6`, or `limit` with `thread_id` | Passages per thread, `1` to `6` |
 | `max_chars_per_chunk` | int | `1600` | Characters per passage, `1` to `1600`; a longer passage is cut and flagged `text_truncated` |
+| `dedupe_attachments` | bool | `false` | Return an attachment carried by several messages of a thread once per passage, on the earliest carrier, with the others in `carried_by` ([Collapsing repeated attachments](#collapsing-repeated-attachments)) |
 
 The mailbox-wide path runs the same hybrid retrieval as `ask_mailbox`
 (the same code), with the same cap of six chunks per thread, and
@@ -610,6 +614,34 @@ the existing retrieval returns:
 A value out of range is rejected with fixed text naming the field and
 its range. A call that used any control adds `evidence_filtered` to its
 [timing line](#stage-timings-in-the-server-log).
+
+#### Collapsing repeated attachments
+
+A document attached to several messages of one thread (sent, re-sent,
+forwarded) is indexed once per message, so by default each copy of a
+passage is returned
+([#989](https://github.com/marshalltech81/protonmail-local-ai/issues/989)).
+With `dedupe_attachments=true`, attachment passages with the same
+`attachment_id` (the content hash) and `chunk_index` in one thread are
+returned once, on the earliest carrying message (by delivery date, else
+send date), at the rank of the best-ranked copy. That chunk's
+`carried_by` lists the other carrying messages, earliest first, each
+with its `claimant_id`, `sent_at`, `occurred_at` and `scope`; the prose
+adds an `Also carried by:` line. A different document under the same
+filename has a different content hash and stays separate, and body
+passages are untouched. Every attachment chunk carries `carried_by`
+(empty when no other message has the passage); body chunks and calls
+without the flag have none.
+
+The collapse runs on each thread's full ranked passage list, after
+`source` and `scope` and before the per-thread cap and the `limit`
+budget, so the freed places go to other passages. Copies are collapsed
+only within a thread: the same document in two threads is returned in
+each. `attachment_copies_collapsed` (and a line in the prose) counts
+the copies folded into the returned passages. Like the precision
+controls, the flag adds `evidence_filtered` to the timing line, with
+`evidence_attachment_copies_collapsed`. `ask_mailbox` does not
+collapse attachments, so leave the flag unset for an audit.
 
 ### `search_attachments`
 Locate indexed attachments by filename, MIME type, and extracted

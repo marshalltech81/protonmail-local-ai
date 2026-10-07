@@ -186,6 +186,8 @@ _LOGGABLE_TOOL_PARAMS: dict[str, Callable[[Any], bool]] = {
     "scope": _one_of("any", "in_scope"),
     "max_chunks_per_thread": _int_in(1, 6),
     "max_chars_per_chunk": _int_in(1, 1600),
+    # ``get_evidence``'s attachment collapse (#989).
+    "dedupe_attachments": _is_bool,
     # ``lib/sqlite.AUTHORITY_CLASSES``.
     "authority_class": _one_of(
         "counsel", "management", "vendor", "government", "personal", "other", "unclassified"

@@ -36,6 +36,7 @@ from .outputs import (
     HEADER_CHAR_LIMIT,
     MAX_LISTED,
     AttachmentHit,
+    EvidenceCarrier,
     EvidenceChunk,
     EvidenceOutput,
     EvidenceScope,
@@ -103,6 +104,47 @@ _ALL_THREAD_CHUNKS = sys.maxsize
 def _of_source(chunks: list, source: str) -> list:
     """``chunks`` of ``source`` (``body`` or ``attachment``), in order."""
     return [c for c in chunks if (c.attachment_id is None) == (source == "body")]
+
+
+def _carrier_date(chunk) -> tuple[bool, str]:
+    """Sort key of a passage's message: its delivery date, else its send
+    date (as the date filters read it), an unknown date last."""
+    date = chunk.message_occurred_at or chunk.message_date
+    return (date is None, date or "")
+
+
+def _collapse_attachment_copies(chunks: list) -> tuple[list, dict[str, list]]:
+    """``chunks`` with each attachment passage (same content hash and
+    chunk index) kept once, on its earliest carrying message, at the rank
+    of its best-ranked copy (#989); and, per kept ``chunk_id``, the other
+    copies, earliest first. Body passages pass through unchanged."""
+    copies: dict[tuple[str, int], list] = {}
+    for c in chunks:
+        if c.attachment_id is not None:
+            copies.setdefault((c.attachment_id, c.chunk_index), []).append(c)
+    kept: list = []
+    carried: dict[str, list] = {}
+    for c in chunks:
+        if c.attachment_id is None:
+            kept.append(c)
+            continue
+        group = copies[(c.attachment_id, c.chunk_index)]
+        if c is not group[0]:
+            continue
+        # A stable sort: copies of one date keep their rank order.
+        earliest, *others = sorted(group, key=_carrier_date)
+        kept.append(earliest)
+        carried[earliest.chunk_id] = others
+    return kept, carried
+
+
+def _msg_date(chunk) -> str:
+    """A passage's message date for the prose: its send day, plus its
+    delivery day when known."""
+    msg_date = (chunk.message_date or "")[:10] or "unknown date"
+    if chunk.message_occurred_at:
+        msg_date += f" (delivered {chunk.message_occurred_at[:10]})"
+    return msg_date
 
 
 def _check_precision_controls(
@@ -508,6 +550,7 @@ def register_search_tools(
         scope: str = "any",
         max_chunks_per_thread: int | None = None,
         max_chars_per_chunk: int | None = None,
+        dedupe_attachments: bool = False,
     ) -> CallToolResult:
         """
         Return the exact indexed passages (evidence chunks) that back a
@@ -583,6 +626,11 @@ def register_search_tools(
             scope: "in_scope" drops context passages (default "any").
             max_chunks_per_thread: 1 to 6 (default 6; limit with thread_id).
             max_chars_per_chunk: 1 to 1600 (default 1600).
+            dedupe_attachments: When true, an attachment carried by
+                                several messages of a thread (sent,
+                                re-sent, forwarded) returns each passage
+                                once, on the earliest carrier, with the
+                                others in carried_by (default false).
 
         Returns:
             Ranked evidence chunks grouped by thread, with full
@@ -608,6 +656,7 @@ def register_search_tools(
                 "scope": scope,
                 "max_chunks_per_thread": max_chunks_per_thread,
                 "max_chars_per_chunk": max_chars_per_chunk,
+                "dedupe_attachments": dedupe_attachments,
             },
         )
         from_name = blank_to_none(from_name)
@@ -624,8 +673,18 @@ def register_search_tools(
         per_thread = max_chunks_per_thread or PROMPT_EVIDENCE_CHUNKS_PER_THREAD
         chunk_chars = max_chars_per_chunk or _EVIDENCE_CHUNK_CHARS
         # The timing line marks a call that a precision control narrowed.
-        if source_filter or in_scope_only or max_chunks_per_thread or max_chars_per_chunk:
+        if (
+            source_filter
+            or in_scope_only
+            or max_chunks_per_thread
+            or max_chars_per_chunk
+            or dedupe_attachments
+        ):
             count("evidence_filtered", 1)
+        # With ``source`` or ``dedupe_attachments`` the thread path reads
+        # every ranked passage, filters or collapses them, then applies
+        # ``limit``.
+        full_thread_list = bool(source_filter or dedupe_attachments)
         if thread_id:
             # These filters select threads; thread_id already names one.
             # Applying them would only keep or drop that whole thread (a
@@ -695,6 +754,9 @@ def register_search_tools(
         source_emptied = 0
         # With ``max_chunks_per_thread``: passages the cap removed.
         capped_out = 0
+        # With ``dedupe_attachments``: per kept attachment passage, the
+        # copies on later messages of its thread (#989).
+        carried: dict[str, list] = {}
         try:
             if thread_id:
                 thread = await asyncio.to_thread(db.get_thread_or_reaped, thread_id)
@@ -711,7 +773,7 @@ def register_search_tools(
                         query,
                         [thread_id],
                         embedding,
-                        _ALL_THREAD_CHUNKS if source_filter else limit,
+                        _ALL_THREAD_CHUNKS if full_thread_list else limit,
                     )
                 chunks = grouped.get(thread_id, [])
                 if not chunks:
@@ -724,7 +786,12 @@ def register_search_tools(
                     if not current:
                         raise ToolError(f"Thread not found: {thread_id}")
                 if source_filter:
-                    chunks = _of_source(chunks, source_filter)[:limit]
+                    chunks = _of_source(chunks, source_filter)
+                if dedupe_attachments:
+                    chunks, copies = _collapse_attachment_copies(chunks)
+                    carried.update(copies)
+                if full_thread_list:
+                    chunks = chunks[:limit]
                 if max_chunks_per_thread:
                     capped_out = max(0, len(chunks) - max_chunks_per_thread)
                     chunks = chunks[:max_chunks_per_thread]
@@ -755,6 +822,7 @@ def register_search_tools(
                                 threads=[],
                                 context_passages_left_out=0 if in_scope_only else None,
                                 threads_without_source_passages=0 if source_filter else None,
+                                attachment_copies_collapsed=0 if dedupe_attachments else None,
                             ),
                         )
                 embedding = await embed_query(embed_client, query, expected_embed_dim)
@@ -781,7 +849,7 @@ def register_search_tools(
                 # them. The threads and their order stay ask_mailbox's:
                 # the reranker saw the unfiltered evidence.
                 every_chunk: dict[str, list] | None = None
-                if (source_filter or in_scope_only) and results:
+                if (source_filter or in_scope_only or dedupe_attachments) and results:
                     with stage("evidence_precision"):
                         every_chunk = await asyncio.to_thread(
                             db.get_query_evidence_chunks,
@@ -823,6 +891,9 @@ def register_search_tools(
                             kept = [c for c in ranked if _chunk_scope(c, labels) == "in_scope"]
                             dropped = len(ranked) - len(kept)
                             ranked = kept
+                        if dedupe_attachments:
+                            ranked, copies = _collapse_attachment_copies(ranked)
+                            carried.update(copies)
                         ranked = ranked[:PROMPT_EVIDENCE_CHUNKS_PER_THREAD]
                     capped = ranked[:per_thread]
                     chunks = capped[: limit - taken]
@@ -883,6 +954,16 @@ def register_search_tools(
                 "evidence_chunks_truncated",
                 sum(len(c.text) > chunk_chars for *_, chunks in groups for c in chunks),
             )
+        collapsed = 0
+        if dedupe_attachments:
+            collapsed = sum(
+                len(carried.get(c.chunk_id, ())) for *_, chunks in groups for c in chunks
+            )
+            count("evidence_attachment_copies_collapsed", collapsed)
+            if collapsed:
+                notes.append(
+                    f"dedupe_attachments collapsed {collapsed} repeated attachment passage(s)."
+                )
         searched_by_source = source_filter is not None and not thread_id
         if searched_by_source:
             count("evidence_threads_source_emptied", source_emptied)
@@ -897,6 +978,7 @@ def register_search_tools(
             from_name_matches=resolution.senders if resolution else None,
             context_passages_left_out=total_dropped if in_scope_only else None,
             threads_without_source_passages=source_emptied if searched_by_source else None,
+            attachment_copies_collapsed=collapsed if dedupe_attachments else None,
             threads=[
                 EvidenceThread(
                     thread_id=tid,
@@ -923,6 +1005,19 @@ def register_search_tools(
                             vector_distance=c.score if include_scores else None,
                             source_file=source_ref(c.source_file),
                             scope=_chunk_scope(c, labels),
+                            carried_by=(
+                                [
+                                    EvidenceCarrier(
+                                        claimant_id=o.claimant_id,
+                                        sent_at=o.message_date,
+                                        occurred_at=o.message_occurred_at,
+                                        scope=_chunk_scope(o, labels),
+                                    )
+                                    for o in carried.get(c.chunk_id, ())
+                                ]
+                                if dedupe_attachments and c.attachment_id is not None
+                                else None
+                            ),
                         )
                         for c in chunks
                     ],
@@ -970,9 +1065,7 @@ def register_search_tools(
             elif left_out:
                 lines.append(f"    {left_out} context passage(s) left out (scope=in_scope).")
             for chunk in chunks:
-                msg_date = (chunk.message_date or "")[:10] or "unknown date"
-                if chunk.message_occurred_at:
-                    msg_date += f" (delivered {chunk.message_occurred_at[:10]})"
+                msg_date = _msg_date(chunk)
                 in_scope = _chunk_scope(chunk, labels) == "in_scope"
                 lines.append(
                     f"    --- chunk {chunk.chunk_index} | msg {chunk.claimant_id} | {msg_date}"
@@ -982,6 +1075,14 @@ def register_search_tools(
                     fname = clip(chunk.attachment_filename or "attachment", HEADER_CHAR_LIMIT)
                     mime = clip(chunk.attachment_mime or "unknown", HEADER_CHAR_LIMIT)
                     lines.append(f'        Source: attachment "{fname}" ({mime})')
+                    if carried.get(chunk.chunk_id):
+                        lines.append(
+                            "        Also carried by: "
+                            + ", ".join(
+                                f"msg {o.claimant_id} ({_msg_date(o)})"
+                                for o in carried[chunk.chunk_id]
+                            )
+                        )
                 elif chunk.kind != "body":
                     lines.append(f"        Source: message body ({chunk.kind})")
                 else:
