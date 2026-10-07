@@ -65,8 +65,8 @@ The stack runs three containers beside the Proton Mail Bridge app:
   persistent pin.
 - **indexer** — parses Maildir, threads, embeds through any
   OpenAI-compatible `/v1/embeddings` provider, writes SQLite (schema
-  v0, with numbered migrations for any change since the first
-  deployment; 4096-dim L2-normalized vectors; per-message records
+  v1 since the per-extractor extraction cache, #928; numbered
+  migrations for any change since the first deployment; 4096-dim L2-normalized vectors; per-message records
   keyed by claimant ID).
   Initial scan and steady state drain one durable `indexing_jobs`
   queue through a two-phase batched path.
@@ -110,11 +110,8 @@ Follow-ups on corpus completeness and correctness:
   count split threads on the rebuilt index first), #756 (subject
   fallback chains recurring same-subject mail)
 - attachment coverage: #691 (optional decoders; fontTools waits on
-  py-pdf/pypdf#4156), #695, #923 (formats with no extractor), #946
-  (DOCX parse memory), #947 (PPTX charts, SmartArt and variants), #967
-  (python-docx loader cost); per-extractor extraction cache, schema v1
-  (#928, in progress); legacy `.ppt` through Apache POI (#957, in
-  progress)
+  py-pdf/pypdf#4156), #695, #923 (formats with no extractor), #947
+  (PPTX charts, SmartArt and variants)
 - bounded work: #781
 - index-side Unicode normalization left from #316: #782
 
@@ -418,10 +415,13 @@ identity line (#887; #893), header truncation (#902; #913), every
 extractor truncation cap with a completeness test (#903; #917), the
 multipage TIFF OCR cap (#885; #916), one shared rate-limited logger per
 service (#889; #933), reconciler errors logged by type only (#934;
-#940) and a per-checkout uv cache (#896; #912). Open: the OCR cap on
-cache hits (#891), stale extractor-version counts in status (#979),
-Trivy scans of the built images (#977) and a merge gate on a Codex
-review of the head commit (#978). Open decisions: log-only or exit when the Maildir watcher dies
+#940), a per-checkout uv cache (#896; #912) and Trivy scans of the
+built images, gated on fixable HIGH/CRITICAL findings (#977; #1015,
+after #1006/#1007 refreshed the base digests and removed pip from the
+runtime images). Open: the OCR cap on cache hits (#891), stale
+extractor-version counts in status (#979, decision), the unscanned
+jlink runtime (#1008) and a merge gate on a Codex review of the head
+commit (#978). Open decisions: log-only or exit when the Maildir watcher dies
 (#870), telling a stall from a backlog in status (#876; parked trashed
 files currently show as "retrying"), and correlation IDs (#888).
 Every MCP tool declares safety annotations (#899; #900; Resolved
@@ -804,23 +804,26 @@ removed Bridge container are kept as history.
     process with its own memory and CPU limits, because python-calamine
     allocates every sheet's full grid at open (1.6–2.7 GB from a 6.6 KB
     file) and xlrd's shared-string loop is unbounded in-process; `.ppt`
-    through Apache POI on a trimmed Java runtime (#957, in progress),
+    through Apache POI on a trimmed Java runtime (#957; #982),
     because `catppt` reads no slide text from current PowerPoint decks
     and office-oxide was judged too young for code beside the mail
     database. Every external parser runs through one runner (temp file,
     no shell, timeout, output cap, and address-space and CPU limits set
     by its launcher before the parser loads, #995; the OCR path's
     Tesseract and Poppler have a timeout only, #1021). Accepted risk: catdoc's
-    unfixed Debian CVEs; CI does not yet scan image packages (#977).
+    unfixed Debian CVEs (none at HIGH/CRITICAL); CI now scans the built
+    images (#977; #1015).
 33. **Per-extractor extraction cache (2026-10-07, #928):** the
     attachment extraction cache is keyed by content hash and extractor
     module, so one label's result is never served to an occurrence that
     selects another extractor. It is the first change since the first
     deployment that takes a `SCHEMA_VERSION` bump (to 1) and a numbered
     migration (`0001`). Chosen over per-row special cases after #931's
-    review showed each workaround creating new cross-label cases. In
-    progress; #931 (permanent failures recorded `unsupported`, with the
-    pdf/xlsx version bump kept) is rebuilt on it.
+    review showed each workaround creating new cross-label cases. Landed
+    in #994 (also closing #986); #931 (permanent failures recorded
+    `unsupported`, with the pdf/xlsx version bump kept) was rebuilt on
+    it in #971. Snapshot the index before deploying a schema change
+    (#1005).
 34. **Review and PR rules (2026-10-07, #944, #981):** every real gap in
     a PR's "Not done" gets its own issue before the PR is called ready;
     a gap in code, tests or docs that a PR adds counts as introduced by
