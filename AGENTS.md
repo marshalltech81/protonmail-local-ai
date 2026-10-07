@@ -571,9 +571,9 @@ Examples:
   as introduced by it even when nothing is broken today (owner,
   2026-10-07); only a problem that already existed on `main` may be
   deferred under the cap.
-- Re-scope trigger (owner, 2026-10-07): when a fourth review round
-  again finds problems in the code or text the PR added, stop fixing
-  and ask the owner before the next push: cut scope (drop or simplify
+- Re-scope trigger (owner, 2026-10-07): from the fourth review round
+  on, whenever a round finds problems in the code or text the PR
+  added, stop fixing and ask the owner before the next push: cut scope (drop or simplify
   the part that keeps drawing findings), accept the open findings as
   stated risks, or keep fixing. Explain each finding in plain terms,
   and say whether the choice can change what the tools return.
