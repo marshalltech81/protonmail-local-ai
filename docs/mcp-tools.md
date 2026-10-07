@@ -1099,26 +1099,36 @@ exact lanes with this tool and union them (#992, option 1):
    the lanes up: a thread found only by a body-word lane is weaker
    evidence than one a subject or participant lane also found, and the
    report should let the user see that.
-5. Read the candidate threads (`get_thread`) before counting them. A
-   thread read brings in its messages that no lane matched; count
-   from the unioned rows, not from the threads read, and report the
-   threads discarded as noise with the lane that found them.
+5. Classify each unioned row before counting: read its thread
+   (`get_thread`) for context, decide per message, and drop the rows
+   that are noise. A thread read brings in messages that no lane
+   matched, and a kept thread can still hold matched rows that are
+   not about the topic, so count from the rows kept, not from the
+   threads read, and report the rows dropped with the lane that found
+   each.
 
-What the union can claim: every indexed message within the lanes'
-shared scope (the `folder`, date bounds and other predicates every
-lane carried; outside Trash only when `folder` is omitted) that
-matched one of the lanes as they were run, in the snapshot each page
-observed. State that scope with the claim. What it cannot claim: coverage of the
-topic. A message about
-the concept that uses none of the lane terms and comes from none of
-the lane participants is not found, and nothing in the result shows
+What the union can claim: the rows the lanes returned during the
+run, within the lanes' shared scope (the `folder`, date bounds and
+other predicates every lane carried; outside Trash only when `folder`
+is omitted), with the churn caveat above: a message indexed during
+the run that sorts ahead of a lane's cursor is missed, so the rows
+returned are not every match in any one snapshot. State that scope
+with the claim. What it cannot claim: coverage of the topic. A message
+about the concept that uses none of the lane terms and comes from none
+of the lane participants is not found, and nothing in the result shows
 that it is missing; paging a lane to the end proves the lane, not the
 concept (the paragraph above, and the completeness claims under
-evaluation in #776). Report the lanes, their counts, the union size,
-the narrowing and the discards, not "all messages about X". The
-bounded Boolean filter form (#1087: `all` of leaves and `any` groups
-with `negate`, one call and one cursor) will replace this multi-call
-shape; the lanes and the claim stay the same.
+evaluation in #776). Attachment text is outside the recipe: `text`
+searches body chunks only, and `get_thread` returns no attachment
+text, so a message whose only mention of the topic is in an
+attachment is not found and a candidate cannot be classified by its
+attachments here; say so in the report, and treat `search_attachments`
+and `get_evidence` as ranked and capped, not as a lane. Report the
+lanes, their counts, the union size, the narrowing and the rows
+dropped, not "all messages about X". The bounded Boolean filter form
+(#1087: `all` of leaves and `any` groups with `negate`, one call and
+one cursor) will replace this multi-call shape; the lanes and the
+claim stay the same.
 
 For outstanding-item questions, look for completion, corrections and
 reopening across threads and senders. A sent request or delivered advice
