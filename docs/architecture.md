@@ -2005,6 +2005,22 @@ whose event was missed — restart, event coalescing, a delivery
 while the observer was not running — is therefore indexed
 eventually rather than omitted until the next container restart.
 
+watchdog's dispatcher thread catches only its own empty-queue
+timeout, so an exception escaping a handler (`enqueue` or
+`is_indexed` on a locked database, a full disk) ends it, and from
+then on only the rescan finds new mail. Every heartbeat
+(`touch_health_file`: per message, embed request and attachment page,
+during the initial index as well as each pass of the main loop)
+checks `observer.is_alive()` before it refreshes the health file; a
+dead thread logs an ERROR and exits the process with status 1, the
+stall guard's remedy, so Compose restarts the indexer with a fresh
+watcher and the startup walk covers the gap (#870). The handlers are
+not wrapped in a catch-all: the failure must stay visible. The
+Maildir walk and the watch's directory walk each log a WARNING with
+the number of directories they could not read, since mail in them is
+neither indexed nor watched until they are readable; the count never
+carries folder names.
+
 mbsync creates each folder directory 0700 and makes it readable to
 the indexer's UID only in its post-sync permission repair, which runs
 after every sync attempt, failed ones included, and before the

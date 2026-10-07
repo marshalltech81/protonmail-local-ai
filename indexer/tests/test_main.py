@@ -645,6 +645,74 @@ class TestInitialIndexNestedFolders:
         assert row["folder"] == "Clients/ABC"
 
 
+class TestMaildirWalkUnreadableDirectories:
+    """A folder the indexer cannot read is skipped by the Maildir walk
+    (mbsync opens a new folder to other users only after its sync), so
+    its mail stays unindexed until a later walk finds it readable. The
+    walk says how many such directories it skipped, never which (#870)."""
+
+    @pytest.fixture
+    def unreadable(self):
+        locked: list[Path] = []
+
+        def lock(path: Path) -> Path:
+            path.chmod(0o000)
+            locked.append(path)
+            return path
+
+        yield lock
+        for path in locked:
+            if path.exists():
+                path.chmod(0o755)
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root can list a mode-000 directory")
+    def test_logs_the_count_without_folder_names(self, tmp_path, unreadable, caplog):
+        caplog.set_level(logging.INFO)
+        maildir = tmp_path / "maildir"
+        for name in ("INBOX", SYNTHETIC_MARKER, f"{SYNTHETIC_MARKER}-2"):
+            (maildir / name / "cur").mkdir(parents=True)
+            (maildir / name / "cur" / "m.eml:2,S").write_text("x")
+        unreadable(maildir / SYNTHETIC_MARKER)
+        unreadable(maildir / f"{SYNTHETIC_MARKER}-2")
+
+        found = list(main._iter_maildir_messages(maildir))
+
+        assert found == [maildir / "INBOX" / "cur" / "m.eml:2,S"]
+        (line,) = [r for r in caplog.records if "could not read" in r.getMessage()]
+        assert line.levelno == logging.WARNING
+        assert "2 director" in line.getMessage()
+        assert SYNTHETIC_MARKER not in caplog.text
+
+    def test_a_readable_tree_logs_nothing(self, tmp_path, caplog):
+        caplog.set_level(logging.INFO)
+        maildir = tmp_path / "maildir"
+        (maildir / "INBOX" / "cur").mkdir(parents=True)
+        (maildir / "INBOX" / "cur" / "m.eml:2,S").write_text("x")
+
+        found = list(main._iter_maildir_messages(maildir))
+
+        assert found == [maildir / "INBOX" / "cur" / "m.eml:2,S"]
+        assert not caplog.records
+
+    def test_a_directory_that_vanishes_is_not_counted(self, tmp_path, monkeypatch, caplog):
+        caplog.set_level(logging.INFO)
+        maildir = tmp_path / "maildir"
+        (maildir / "INBOX" / "cur").mkdir(parents=True)
+        (maildir / "Gone" / "cur").mkdir(parents=True)
+        real_scandir = os.scandir
+
+        def flaky_scandir(path):
+            if Path(path).name == "Gone":
+                raise FileNotFoundError(2, "gone")
+            return real_scandir(path)
+
+        monkeypatch.setattr(main.os, "scandir", flaky_scandir)
+
+        list(main._iter_maildir_messages(maildir))
+
+        assert not caplog.records
+
+
 class TestInitialIndexHeartbeat:
     def test_health_file_refreshed_at_least_once_per_processed_message(self, tmp_path, monkeypatch):
         """``initial_index`` must refresh the heartbeat often enough
@@ -5189,14 +5257,26 @@ class TestLateFolderWatches:
 
 
 class _FakeObserver:
-    def __init__(self, events: list[str]):
+    def __init__(self, events: list[str], *, alive_for: int | None = None):
         self._events = events
+        # ``is_alive`` answers True this many times, then False for ever
+        # (a dispatcher thread that died); ``None`` stays alive.
+        self._alive_for = alive_for
 
     def schedule(self, *args, **kwargs):
         pass
 
     def start(self):
         self._events.append("observer_start")
+
+    def is_alive(self):
+        if self._alive_for is None:
+            return True
+        if self._alive_for > 0:
+            self._alive_for -= 1
+            return True
+        self._events.append("observer_dead")
+        return False
 
     def stop(self):
         pass
@@ -5224,12 +5304,16 @@ class TestMainStartupAndLoop:
         embed_vector=None,
         sweep_paths=None,
         recover=None,
+        observer=None,
+        health=None,
+        sleep=None,
     ):
         events: list[str] = []
         self._events = events
         db = Database(tmp_path / "mail.db")
         self._db = db
         monkeypatch.setattr(main, "_ingestion_state", None)
+        monkeypatch.setattr(main, "_observer", None)
         monkeypatch.setattr(main, "MAILDIR_PATH", tmp_path / "maildir")
         monkeypatch.setattr(main, "_validate_embed_config", lambda: None)
         monkeypatch.setattr(main, "Database", lambda path: db)
@@ -5237,11 +5321,11 @@ class TestMainStartupAndLoop:
         embedder.base_url = embed_url
         self._embedder = embedder
         monkeypatch.setattr(main, "OpenAIEmbedder", lambda **kw: embedder)
-        monkeypatch.setattr(main, "touch_health_file", lambda: None)
+        monkeypatch.setattr(main, "touch_health_file", health or (lambda: None))
         monkeypatch.setattr(
             main, "sweep_paths", sweep_paths or (lambda db: events.append("sweep_paths"))
         )
-        monkeypatch.setattr(main, "Observer", lambda: _FakeObserver(events))
+        monkeypatch.setattr(main, "Observer", observer or (lambda: _FakeObserver(events)))
         monkeypatch.setattr(
             main,
             "initial_index",
@@ -5303,7 +5387,7 @@ class TestMainStartupAndLoop:
         def _stop(_seconds):
             raise KeyboardInterrupt
 
-        monkeypatch.setattr(main.time, "sleep", _stop)
+        monkeypatch.setattr(main.time, "sleep", sleep or _stop)
         main.main()
         return events
 
@@ -5573,6 +5657,109 @@ class TestMainStartupAndLoop:
         assert "queue drain failed: ValueError" in caplog.text
         assert SYNTHETIC_MARKER not in caplog.text
 
+    # --- dead watcher thread (#870) ----------------------------------------
+    # watchdog's dispatcher catches only ``queue.Empty``, so a handler
+    # exception ends the observer thread; the main loop must notice and
+    # exit so Compose restarts the container, instead of refreshing the
+    # health file over a watcher that is gone.
+
+    # The thread's traceback is the failure under test, not a stray one.
+    @pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
+    def test_a_handler_exception_ends_the_observer_thread(self, tmp_path):
+        """Pins the watchdog 6.0.0 behaviour the loop check relies on:
+        an exception from ``on_created`` (here, the queue's enqueue
+        failing) is not caught by the dispatcher and ends its thread."""
+        from watchdog.observers import Observer
+
+        class _FailingQueue:
+            def enqueue(self, *a, **kw):
+                raise sqlite3.OperationalError("database is locked")
+
+        cur = tmp_path / "INBOX" / "cur"
+        cur.mkdir(parents=True)
+        handler = main.MaildirHandler(MagicMock(), _FailingQueue())  # type: ignore[arg-type]
+        observer = Observer()
+        observer.schedule(handler, str(tmp_path), recursive=True)
+        observer.start()
+        try:
+            (cur / "1.eml:2,S").write_text("x")
+            observer.join(timeout=10)
+            assert not observer.is_alive()
+        finally:
+            observer.stop()
+            observer.join(timeout=10)
+
+    def test_main_loop_exits_when_the_watcher_thread_stopped(self, tmp_path, monkeypatch, caplog):
+        caplog.set_level(logging.INFO)
+        sleeps = 0
+
+        def sleep(_seconds):
+            # The loop must exit on its own; the safety net only keeps a
+            # regression from hanging the test.
+            nonlocal sleeps
+            sleeps += 1
+            if sleeps > 3:
+                raise KeyboardInterrupt
+
+        observers: list[_FakeObserver] = []
+
+        def observer():
+            # Shares the harness's event list, so the heartbeat and the
+            # thread's death are recorded in order. Alive through
+            # startup's heartbeats; dead from the loop's second pass.
+            observers.append(_FakeObserver(self._events, alive_for=3))
+            return observers[-1]
+
+        # The real heartbeat, so the loop's own call carries the check.
+        real_touch = main.touch_health_file
+        monkeypatch.setattr(main, "INDEXER_HEALTH_FILE", tmp_path / "health")
+
+        def health():
+            real_touch()
+            self._events.append("health")
+
+        with pytest.raises(SystemExit) as info:
+            self._run_main(
+                tmp_path,
+                monkeypatch,
+                sweep_due=False,
+                observer=observer,
+                health=health,
+                sleep=sleep,
+            )
+        assert info.value.code == 1
+        # Detected by the heartbeat on the pass after the thread died,
+        # before it refreshes the health file: the healthcheck goes red
+        # even if the exit were delayed.
+        events = self._events
+        dead = events.index("observer_dead")
+        assert "health" in events[:dead]
+        assert "health" not in events[dead:]
+        (line,) = [r for r in caplog.records if "Maildir watcher thread stopped" in r.getMessage()]
+        assert line.levelno == logging.ERROR
+        assert (
+            "Maildir watcher thread stopped; new mail is found only by the periodic rescan"
+            in line.getMessage()
+        )
+
+    def test_main_loop_keeps_running_while_the_watcher_is_alive(self, tmp_path, monkeypatch):
+        events = self._run_main(tmp_path, monkeypatch, sweep_due=False)
+
+        assert "observer_dead" not in events
+
+    def test_main_publishes_the_observer_to_the_heartbeat(self, tmp_path, monkeypatch):
+        """Review round 1: the check lives in ``touch_health_file`` so the
+        initial drain is covered too; ``main`` must hand it the observer."""
+        observers: list[_FakeObserver] = []
+
+        def observer():
+            observers.append(_FakeObserver(self._events))
+            return observers[-1]
+
+        self._run_main(tmp_path, monkeypatch, sweep_due=False, observer=observer)
+
+        assert main._observer is observers[0]
+
     def test_main_loop_rewatches_folders_after_a_sync(self, tmp_path, monkeypatch):
         monkeypatch.setenv("INDEXER_DELETION_ENABLED", "true")
         assert "refresh:True" in self._run_main(tmp_path, monkeypatch, sweep_due=False, synced=True)
@@ -5630,6 +5817,76 @@ class TestMainStartupAndLoop:
         events = self._run_main(tmp_path, monkeypatch, sweep_due=True)
         assert "initial_index:skip_trashed=True" in events
         assert f"walk:{main.REASON_RESCAN}:skip_trashed=True" in events
+
+
+class TestWatcherDeathHeartbeat:
+    """Review round 1 of #870: the watcher can die during the initial
+    drain, hours before the main loop starts, while ``initial_index``
+    keeps the health file fresh after every message. The check rides on
+    every heartbeat, so the guarantee holds from ``observer.start()``
+    on, and the health file is never refreshed over a dead watcher."""
+
+    def test_heartbeat_exits_when_the_watcher_thread_stopped(self, tmp_path, monkeypatch, caplog):
+        caplog.set_level(logging.INFO)
+        health = tmp_path / "health"
+        monkeypatch.setattr(main, "INDEXER_HEALTH_FILE", health)
+        monkeypatch.setattr(main, "_observer", _FakeObserver([], alive_for=0))
+
+        with pytest.raises(SystemExit) as info:
+            main.touch_health_file()
+
+        assert info.value.code == 1
+        assert not health.exists()
+        (line,) = [r for r in caplog.records if "Maildir watcher thread stopped" in r.getMessage()]
+        assert line.levelno == logging.ERROR
+        assert (
+            "Maildir watcher thread stopped; new mail is found only by the periodic rescan"
+            in line.getMessage()
+        )
+
+    @pytest.mark.parametrize("observer", [None, "alive"])
+    def test_heartbeat_touches_while_the_watcher_is_alive_or_not_started(
+        self, tmp_path, monkeypatch, caplog, observer
+    ):
+        caplog.set_level(logging.INFO)
+        health = tmp_path / "health"
+        monkeypatch.setattr(main, "INDEXER_HEALTH_FILE", health)
+        monkeypatch.setattr(main, "_observer", _FakeObserver([]) if observer else None)
+
+        main.touch_health_file()
+
+        assert health.exists()
+        assert not caplog.records
+
+    def test_initial_index_exits_when_the_watcher_dies_mid_drain(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        caplog.set_level(logging.INFO)
+        maildir = tmp_path / "maildir"
+        inbox = maildir / "INBOX" / "cur"
+        inbox.mkdir(parents=True)
+        message_count = 5
+        for i in range(message_count):
+            _write_eml(inbox / f"m{i}.eml", f"m{i}@example.com")
+        db = Database(tmp_path / "mail.db")
+        embedder = make_mock_embedder()
+        embedder.embed.return_value = [0.0] * EMBEDDING_DIM
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        monkeypatch.setattr(main, "INDEXER_HEALTH_FILE", tmp_path / "health")
+        monkeypatch.setattr(main, "INITIAL_INDEX_BATCH_SIZE", 1)
+        events: list[str] = []
+        # Alive for the first message's heartbeats, dead from then on.
+        monkeypatch.setattr(main, "_observer", _FakeObserver(events, alive_for=4))
+
+        with pytest.raises(SystemExit) as info:
+            main.initial_index(db, embedder, Threader(db), _make_queue(db))
+
+        assert info.value.code == 1
+        assert "observer_dead" in events
+        indexed = sum(db.is_indexed(str(inbox / f"m{i}.eml")) for i in range(message_count))
+        assert indexed < message_count
+        (line,) = [r for r in caplog.records if "Maildir watcher thread stopped" in r.getMessage()]
+        assert line.levelno == logging.ERROR
 
 
 class TestReapedMessagesStayDeleted:

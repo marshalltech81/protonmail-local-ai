@@ -1147,6 +1147,33 @@ The health-file and ingestion-state failures can repeat many times a
 second, so they share the same 20-per-5-minutes budget as the embed
 retries; their recovery line still counts every failure.
 
+Maildir watcher and walks (#870):
+
+- `Maildir watcher thread stopped; new mail is found only by the
+  periodic rescan; exiting so the container restarts` (ERROR): the
+  watchdog thread that turns mbsync's file events into indexing jobs
+  died (an exception escaped one of its callbacks, for example a
+  locked database or a full disk; Python prints the thread's traceback
+  just before this line). The indexer exits with status 1 and Compose
+  restarts it with a fresh watcher; the startup walk queues any mail
+  delivered in between. The check runs on every heartbeat (per
+  message, embed request and attachment page), during the initial
+  index as well as the steady-state loop, and the heartbeat is not
+  written once the thread is found dead. A restart loop with this
+  line means the cause persists: read the traceback above it.
+- `Maildir walk: skipped <n> director(ies) it could not read; their
+  mail is not indexed until they are readable` (WARNING), after a
+  startup or periodic Maildir walk, and `Maildir watch: <n>
+  director(ies) could not be read and are not watched until they are
+  readable` (WARNING), after a watch schedule or refresh. A folder the
+  indexer's UID cannot enter is neither walked nor watched, so its
+  mail is missing from the index until a later walk or refresh finds
+  it readable. mbsync creates each new folder 0700 and opens it after
+  its sync, so a line during a sync is transient; one that repeats
+  after the sync means the permission repair did not reach the folder
+  (see "Index is empty after startup"). The count is of directories,
+  never their names.
+
 Queue and maintenance (all INFO unless noted):
 
 - `queue: pending=<n> retrying=<n> deferred_permission=<n>

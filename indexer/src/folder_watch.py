@@ -45,22 +45,37 @@ def readable_dirs(root: Path) -> dict[str, int]:
     folder named ``cur``, ``new`` or ``tmp`` is the directory ``.cur``,
     ``.new`` or ``.tmp`` (mbsync's ``SubFolders Legacy``, #281), so it is
     walked like any other folder.
+
+    The directories the walk could not read (and so cannot be watched)
+    are counted and logged as one WARNING per walk, never named (#870);
+    a directory that vanished mid-walk is gone, not unreadable.
     """
     found: dict[str, int] = {}
+    unreadable = 0
     pending = [root]
     while pending:
         directory = pending.pop()
         try:
             with os.scandir(directory) as entries:
                 children = [entry for entry in entries if entry.is_dir(follow_symlinks=False)]
+        except FileNotFoundError:
+            continue
         except OSError:
+            unreadable += 1
             continue
         for entry in children:
             if not os.access(entry.path, os.R_OK | os.X_OK):
+                unreadable += 1
                 continue
             found[entry.path] = entry.inode()
             if entry.name not in MESSAGE_DIRS:
                 pending.append(Path(entry.path))
+    if unreadable:
+        log.warning(
+            "Maildir watch: %d director(ies) could not be read and are not watched "
+            "until they are readable",
+            unreadable,
+        )
     return found
 
 
