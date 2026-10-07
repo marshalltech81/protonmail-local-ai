@@ -1169,8 +1169,9 @@ the model is told, in the prompt, so this log line is where it shows.
   `INFERENCE_CONTEXT_TOKENS`.
 
 `prompt_tokens` is the estimated size of the prompt sent (the largest
-one for `extract_from_emails`, including the reply schema structured
-outputs add), counted at three characters per token.
+one for `extract_from_emails`; for it, `brief_issue` and
+`check_conclusion`, including the reply schema structured outputs
+add), counted at three characters per token.
 
 The call's own `mcp.timings` line also carries a
 `token_limit_<limit>` count for each limit it hit, so the warning can

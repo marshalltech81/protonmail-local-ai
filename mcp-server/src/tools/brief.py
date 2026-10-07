@@ -33,10 +33,10 @@ from pydantic import BaseModel, ValidationError
 
 from ..lib.embed import embed_query
 from ..lib.inference import (
+    CHARS_PER_TOKEN,
     InferenceTruncatedError,
     PromptBudget,
     TruncationReason,
-    estimate_tokens,
 )
 from ..lib.security import log_tool_call, safe_provider_exception_text
 from ..lib.sqlite import (
@@ -835,12 +835,16 @@ def register_experimental_tools(
         evidence_chars: int,
         shown: int,
         cuts: list[_ReplyCut],
+        reserve: int,
     ) -> None:
         """Log the token limits the call hit, as ask_mailbox does (#951).
         The window cut the evidence when it dropped threads or set a
         budget below the per-thread cap that then trimmed passages; the
         passage counts are the window's only when it set the budget.
-        Each cut reply names its stop. Counts and config values only."""
+        Each cut reply names its stop. ``reserve`` is the schema the
+        provider adds as input (``_schema_reserve_chars``, 0 when none is
+        sent), counted in the prompt as extract_from_emails does. Counts
+        and config values only."""
         window_budget = evidence_chars < PER_THREAD_CHAR_BUDGET * shown
         window_cut = coverage.threads_dropped or (
             window_budget and (coverage.omitted or coverage.truncated)
@@ -858,8 +862,11 @@ def register_experimental_tools(
             passages_omitted=coverage.omitted if window_budget else 0,
             passages_truncated=coverage.truncated if window_budget else 0,
             # The prompt of the reply that was cut (the repair prompt
-            # when that was it), else the one sent.
-            prompt_tokens=estimate_tokens(cuts[-1].prompt if cuts else system + user_prompt),
+            # when that was it), else the one sent, plus the schema.
+            prompt_tokens=-(
+                -(len(cuts[-1].prompt if cuts else system + user_prompt) + reserve)
+                // CHARS_PER_TOKEN
+            ),
         )
 
     # Config identifiers for the per-call timing line.
@@ -1058,7 +1065,14 @@ def register_experimental_tools(
                 elif brief is None:
                     text, truncated = text2, truncated2
             warn_limits(
-                "brief_issue", BRIEF_SYSTEM, user_prompt, coverage, evidence_chars, len(shown), cuts
+                "brief_issue",
+                BRIEF_SYSTEM,
+                user_prompt,
+                coverage,
+                evidence_chars,
+                len(shown),
+                cuts,
+                reserve,
             )
 
             status: Literal["ok", "invalid_json", "truncated"] = (
@@ -1335,6 +1349,7 @@ def register_experimental_tools(
                 evidence_chars,
                 len(shown),
                 cuts,
+                reserve,
             )
 
             status: Literal["ok", "invalid_json", "truncated"] = (

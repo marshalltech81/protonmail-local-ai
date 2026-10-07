@@ -1399,6 +1399,27 @@ class TestExperimentalTokenLimits:
         assert _MARKER not in caplog.text
 
     @pytest.mark.parametrize(("tool", "args"), _EXPERIMENTAL)
+    @pytest.mark.parametrize("structured", [True, False])
+    def test_prompt_tokens_count_the_schema_sent(self, caplog, tool, args, structured):
+        """Review round 1 on #960: with structured outputs on, the
+        provider also bills the schema's system prompt as input, so the
+        logged prompt counts the same reserve the evidence budget kept
+        for it, as extract_from_emails does."""
+        from src.tools.brief import BRIEF_JSON_SCHEMA, CHECK_JSON_SCHEMA
+
+        caplog.set_level(logging.INFO)
+        llm = FakeInferenceClient(
+            complete_responses=[InferenceTruncatedError(partial="{")],
+            structured_output=structured,
+        )
+        asyncio.run(_tools(_StubDb(_short_threads()), llm, experimental=True)[tool](**args))
+        schema = BRIEF_JSON_SCHEMA if tool == "brief_issue" else CHECK_JSON_SCHEMA
+        reserve = _schema_reserve_chars(schema) if structured else 0
+        system, user = llm.complete_calls[0]
+        expected = -(-(len(system) + len(user) + reserve) // CHARS_PER_TOKEN)
+        assert _one_limit_line(caplog)["counts"]["prompt_tokens"] == expected
+
+    @pytest.mark.parametrize(("tool", "args"), _EXPERIMENTAL)
     def test_cut_repair_reply_counts_the_repair_prompt(self, caplog, tool, args):
         caplog.set_level(logging.INFO)
         llm = FakeInferenceClient(
