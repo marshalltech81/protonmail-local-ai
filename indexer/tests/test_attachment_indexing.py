@@ -2005,6 +2005,8 @@ _CATALOGUE: dict[str, tuple[Any, tuple[tuple[str, str], ...]]] = {
         (
             ("application/msword", "a.doc"),
             ("application/octet-stream", "a.docx"),
+            ("application/octet-stream", "a.pptx"),
+            ("application/vnd.ms-powerpoint", "a.ppt"),
             ("text/plain", "a.txt"),
             ("application/octet-stream", "a.bin"),
         ),
@@ -2100,6 +2102,52 @@ class TestPerModuleCacheCatalogue:
             _catalogue_outcome(self._plan(batched, payload, second, batch_extractions=batch))
             == fresh
         )
+
+    @pytest.mark.parametrize("first_label", ["doc", "ppt"])
+    def test_a_ppt_sent_as_doc_does_not_decide_a_ppt_occurrence(
+        self, first_label, tmp_path, monkeypatch
+    ):
+        """#986: a PowerPoint file (OLE2) sent as ``.doc`` caches an empty
+        row from the Word extractor. A later ``.ppt`` occurrence of the
+        same bytes runs its own extractor instead of being served that
+        row, and the reverse order holds too. The ``ppt`` route is
+        stubbed here, so this holds whether or not a release routes
+        ``.ppt``."""
+        from src import extractors
+
+        calls: list[str] = []
+
+        def stub(module_name, text):
+            def run(payload, **_opts):
+                calls.append(module_name)
+                return text, module_name
+
+            return run
+
+        monkeypatch.setitem(extractors._IMPORT_CACHE, "doc", stub("doc", ""))
+        monkeypatch.setitem(extractors._IMPORT_CACHE, "ppt", stub("ppt", "slide words"))
+        monkeypatch.setitem(extractors._MIME_DISPATCH, "application/vnd.ms-powerpoint", "ppt")
+        payload = _OLE2_MAGIC + b"SYNTHETIC_PPT_BODY" + bytes(64)
+        labels = {
+            "doc": ("application/msword", "deck.doc"),
+            "ppt": ("application/vnd.ms-powerpoint", "deck.ppt"),
+        }
+        second_label = "ppt" if first_label == "doc" else "doc"
+        db = _setup_db_for_attachment(tmp_path)
+        self._commit(db, self._plan(db, payload, labels[first_label]))
+        later = self._plan(db, payload, labels[second_label])
+
+        assert calls == [first_label, second_label]
+        assert later.cached is False
+        expected = (
+            (STATUS_SUCCESS, ("slide words",))
+            if second_label == "ppt"
+            else (
+                STATUS_EMPTY,
+                (),
+            )
+        )
+        assert (later.status, tuple(c.text for c in later.chunks)) == expected
 
     def test_the_catalogue_has_labels_with_different_results(self, tmp_path, monkeypatch):
         """Guards the catalogue: every shape has two labels whose fresh
