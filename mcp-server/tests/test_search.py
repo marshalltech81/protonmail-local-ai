@@ -1483,29 +1483,15 @@ def test_evidence_descriptions_warn_passages_can_stop_before_a_resolution(tool, 
 
 
 def test_extract_description_points_to_the_population_recipe(empty_db):
-    """#976 option 1: extraction covers the top ``limit`` threads only;
-    the description carries the search_attachments recipe itself.
-    Review round 1: a client cannot read docs/mcp-tools.md, so the
-    steps and the pre-read disclosure must be on the wire."""
+    """#976 option 1: extraction covers the top ``limit`` threads only,
+    and the description says so in one sentence pointing to the recipe
+    in docs/mcp-tools.md. Review rounds 1-5 grew the recipe on the wire;
+    after round 6 the owner moved it to the docs only, so the
+    description must not carry its steps."""
     doc = _wire_descriptions(empty_db)["extract_from_emails"]
-    assert "Only the top ``limit`` threads are searched" in doc
-    assert "search_attachments in date windows under its 50 cap" in doc
-    # Review round 3: the default limit (20) would look like a window
-    # under the cap, and attachment_id is a payload hash shared across
-    # messages, so occurrences key on claimant_id too.
-    assert "limit=50, narrowing any window that returns 50" in doc
-    assert "by claimant_id and attachment_id" in doc
-    # Review round 4: the recipe is for attachment-backed populations
-    # only, and each window's extraction limit covers its threads.
-    assert "For every attachment-backed occurrence" in doc
-    assert "limit at least its thread count" in doc
-    assert "listed attachment with no record" in doc
-    assert "docs/mcp-tools.md" not in doc
-    # Review round 2: disclosure precedes the first enumeration call
-    # (search_attachments already returns text previews), and
-    # reconciliation runs both ways.
-    disclose = doc.index("first say the windows, the most previews and threads")
-    assert disclose < doc.index("search_attachments in date windows")
-    assert "_evidence labels to citations" in doc
-    assert "drop duplicates" in doc
-    assert "set aside records citing no listed attachment" in doc
+    assert (
+        "Only the top ``limit`` threads are searched, not every match "
+        "(population recipe: docs/mcp-tools.md)."
+    ) in doc
+    assert "search_attachments" not in doc
+    assert "claimant_id" not in doc

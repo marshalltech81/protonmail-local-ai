@@ -3565,15 +3565,8 @@ def register_intelligence_tools(
         context, so fields that live only in an attached invoice or
         statement can be extracted. For prose answers across threads
         use ask_mailbox; for one specific thread use summarize_thread
-        or get_thread. Only the top ``limit`` threads are searched. For
-        every attachment-backed occurrence, first say the windows, the
-        most previews and threads you will read; list them with
-        search_attachments in date windows under its 50 cap (limit=50,
-        narrowing any window that returns 50); extract per window with
-        limit at least its thread count; match records' _evidence
-        labels to citations by claimant_id and attachment_id, drop
-        duplicates, set aside records citing no listed attachment, and
-        report each listed attachment with no record.
+        or get_thread. Only the top ``limit`` threads are searched, not
+        every match (population recipe: docs/mcp-tools.md).
 
         To extract from one PERSON's mail, call find_contact with the
         name first and pass the address of the person meant as

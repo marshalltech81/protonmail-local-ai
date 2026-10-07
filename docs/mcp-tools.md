@@ -1506,10 +1506,9 @@ The threads searched are the top `limit` hits for `query`, not every
 match, and nothing names the threads left out. For every occurrence
 backed by an attachment (every invoice line for one material code from
 one vendor, say; a body-only population such as RSVPs has nothing to
-enumerate and uses `extract_from_emails` alone), the
-tool description gives the calling model a short form of this recipe,
-including the disclosure before reading; clients cannot read this
-file:
+enumerate and uses `extract_from_emails` alone), follow this recipe.
+The tool description says only that the top `limit` threads are
+searched and points here; the steps are not sent to clients:
 
 1. Before the first call, say the date windows, the most attachment
    previews and the most threads the run will read:
