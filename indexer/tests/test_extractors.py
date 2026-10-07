@@ -3861,8 +3861,28 @@ class TestCffFontPdf:
     )
     def test_cff_font_text_extracts_as_written(self, monkeypatch):
         """Today the extractor returns the ROT13 of the sentence as
-        ``success`` / ``pdf-digital@5``; with fontTools it returns the
-        sentence itself."""
+        ``success``; with fontTools it returns the sentence itself. Only
+        the text is under the xfail: the module version is pinned in
+        ``test_extracts_as_success_from_the_digital_path`` so that the
+        bump fontTools brings cannot keep this test failing (review
+        round 1 on #1114)."""
+        from src.extractors import pdf
+
+        monkeypatch.setattr(pdf, "_extract_ocr", lambda *a, **kw: pytest.fail("OCR must not run"))
+
+        result = extract(
+            content_type="application/pdf", filename="cff.pdf", payload=self._fixture()
+        )
+
+        assert result.status == STATUS_SUCCESS
+        assert result.text == self.SENTENCE
+
+    def test_extracts_as_success_from_the_digital_path(self, monkeypatch):
+        """Whatever the text, the fixture is a ``success`` row from the
+        digital path at the current module version: the garble is
+        invisible to a status check, which is why the xfail above
+        exists. Passes before and after fontTools; the version moves
+        with the bump."""
         from src.extractors import pdf
 
         monkeypatch.setattr(pdf, "_extract_ocr", lambda *a, **kw: pytest.fail("OCR must not run"))
@@ -3873,7 +3893,7 @@ class TestCffFontPdf:
 
         assert result.status == STATUS_SUCCESS
         assert result.extractor == "pdf-digital@5"
-        assert result.text == self.SENTENCE
+        assert result.text is not None and len(result.text) == len(self.SENTENCE)
 
     def test_fixture_resolves_text_through_the_cff_encoding_alone(self):
         """The gap stays pinned only while nothing but the font program
