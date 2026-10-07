@@ -1536,8 +1536,9 @@ mail a population run will read; the steps are not sent to clients:
    and `content_type` where they help, and `limit=50` (the default,
    20, would look like a window under the cap). There is no
    pagination, so split the period into `date_from` / `date_to`
-   windows narrow enough that each returns fewer than 50 results,
-   and narrow any window that returns 50. If one message carries 50
+   windows narrow enough that each returns fewer than 50 results.
+   Before narrowing a window that returns 50, tell the user the added
+   windows and previews, as in step 1. If one message carries 50
    or more matching attachments, every window holding it stays at the
    cap: report the population as truncated rather than narrowing
    further.
