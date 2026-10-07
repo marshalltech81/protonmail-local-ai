@@ -8,7 +8,8 @@ name: Security Scan
 # mcp-server/src, and Semgrep reads the Compose files (base and
 # overlays) and shell scripts with the repo's own rules in .semgrep/.
 # shellcheck in lint.yml still lints the scripts for correctness, and
-# docker.yml validates the Compose syntax.
+# docker.yml validates the Compose syntax and scans the built images
+# with Trivy (#977).
 on:
   push:
     branches: [main]

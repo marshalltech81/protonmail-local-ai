@@ -1,9 +1,11 @@
 name: Docker
 
-# Runs only when a build input changes: the three build contexts, the
+# Runs when a build input changes: the three build contexts, the
 # Compose files, .env.example (copied to .env), the Makefile (make
-# init-secrets) and this file. The main ruleset requires no status
-# checks, so a skipped run blocks no merge.
+# init-secrets) and this file, and weekly, like security.yml, so the
+# image scan below sees advisories published since the last build. The
+# main ruleset requires no status checks, so a skipped run blocks no
+# merge.
 on:
   push:
     branches: [main]
@@ -25,6 +27,8 @@ on:
       - ".env.example"
       - "Makefile"
       - ".github/workflows/docker.yml"
+  schedule:
+    - cron: "0 8 * * 0"
   workflow_dispatch:
 
 permissions:
@@ -58,7 +62,7 @@ jobs:
   build-images:
     name: docker compose build
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     needs: compose-config
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -69,5 +73,107 @@ jobs:
           make init-secrets
           printf 'placeholder-bridge-pass' > .secrets/bridge_pass.txt
 
+      # A fixed project name gives the images fixed names to scan.
       - name: Build local images
+        id: build
+        env:
+          COMPOSE_PROJECT_NAME: protonmail-local-ai
         run: docker compose build mbsync indexer mcp-server
+
+      # Scan the built images (#977), not only the lockfiles security.yml
+      # reads: OS packages installed with apt and the .ppt reader's jars
+      # are seen only here. Trivy finds no package records for the
+      # jlink-built Java runtime in /opt/ppt/jre, so it is not scanned
+      # (#1008). Trivy is pinned like security.yml's steps.
+      - name: Install Trivy
+        uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
+        with:
+          version: v0.69.3
+          cache: true
+
+      # The full reports list every severity, unfixed findings included,
+      # and never fail the job; they are uploaded below.
+      - name: Report indexer image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          skip-setup-trivy: true
+          scan-type: image
+          image-ref: protonmail-local-ai-indexer
+          scanners: vuln
+          format: table
+          output: trivy-image-indexer.txt
+          exit-code: "0"
+
+      - name: Report mcp-server image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          skip-setup-trivy: true
+          scan-type: image
+          image-ref: protonmail-local-ai-mcp-server
+          scanners: vuln
+          format: table
+          output: trivy-image-mcp-server.txt
+          exit-code: "0"
+
+      - name: Report mbsync image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          skip-setup-trivy: true
+          scan-type: image
+          image-ref: protonmail-local-ai-mbsync
+          scanners: vuln
+          format: table
+          output: trivy-image-mbsync.txt
+          exit-code: "0"
+
+      - name: Upload image scan reports
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: trivy-image-reports
+          path: trivy-image-*.txt
+          if-no-files-found: error
+
+      # The gate: HIGH and CRITICAL, as in security.yml. It skips findings
+      # Debian or upstream has not fixed yet (owner decision 2026-10-07,
+      # #977), since nothing in this repository can act on them; they
+      # stay in the uploaded reports. Each image's gate runs even when
+      # another's failed, so one run reports all three.
+      - name: Gate indexer image
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          skip-setup-trivy: true
+          scan-type: image
+          image-ref: protonmail-local-ai-indexer
+          scanners: vuln
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          severity: CRITICAL,HIGH
+
+      - name: Gate mcp-server image
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          skip-setup-trivy: true
+          scan-type: image
+          image-ref: protonmail-local-ai-mcp-server
+          scanners: vuln
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          severity: CRITICAL,HIGH
+
+      - name: Gate mbsync image
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          skip-setup-trivy: true
+          scan-type: image
+          image-ref: protonmail-local-ai-mbsync
+          scanners: vuln
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          severity: CRITICAL,HIGH
