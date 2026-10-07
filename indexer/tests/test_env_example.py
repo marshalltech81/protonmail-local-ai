@@ -53,6 +53,22 @@ _NOT_DOCUMENTED = {
 _NOT_READ: dict[str, str] = {}
 
 
+def _name_argument(fn: str, call: ast.Call) -> list[ast.expr]:
+    """The argument that names the variable, and no other: the first for
+    ``get`` / ``getenv``, ``_read_secret``'s ``env_fallback`` (second),
+    otherwise a ``name=`` keyword or the first string literal positional
+    (``queue._int_env`` takes the env mapping first). A default value is
+    never collected."""
+    if fn in {"get", "getenv"}:
+        return call.args[:1]
+    if fn == "_read_secret":
+        keyword = [k.value for k in call.keywords if k.arg == "env_fallback"]
+        return keyword or call.args[1:2]
+    keyword = [k.value for k in call.keywords if k.arg == "name"]
+    literals = [a for a in call.args if isinstance(a, ast.Constant) and isinstance(a.value, str)]
+    return keyword or literals[:1]
+
+
 def _python_env_reads(src_dirs: list[Path]) -> set[str]:
     """Names in literal reads under ``src_dirs``: ``os.environ.get("X")``,
     ``os.environ["X"]``, ``os.getenv("X")``, ``env.get("X")`` and the
@@ -78,7 +94,7 @@ def _python_env_reads(src_dirs: list[Path]) -> set[str]:
                         or fn in _ENV_HELPERS
                         or fn.endswith("_env")
                     ):
-                        candidates = list(node.args)
+                        candidates = _name_argument(fn, node)
                 elif isinstance(node, ast.Subscript):
                     value = node.value
                     receiver = (
@@ -111,6 +127,21 @@ def _compose_files(repo: Path) -> list[Path]:
 _VALUE_LESS = re.compile(r"^\s*(?:-\s*([A-Za-z_][A-Za-z0-9_]*)|([A-Za-z_][A-Za-z0-9_]*)\s*:)\s*$")
 
 
+def _strip_yaml_comment(line: str) -> str:
+    """``line`` without a YAML comment: a ``#`` at the start or after
+    whitespace, outside quotes."""
+    quote = ""
+    for i, ch in enumerate(line):
+        if quote:
+            if ch == quote:
+                quote = ""
+        elif ch in "\"'":
+            quote = ch
+        elif ch == "#" and (i == 0 or line[i - 1].isspace()):
+            return line[:i]
+    return line
+
+
 def _indent(line: str) -> int:
     return len(line) - len(line.lstrip())
 
@@ -119,8 +150,9 @@ def _compose_refs(files: list[Path]) -> set[str]:
     names: set[str] = set()
     for path in files:
         env_indent: int | None = None  # set while inside an ``environment:`` block
-        for line in path.read_text(encoding="utf-8").splitlines():
-            if not line.strip() or line.lstrip().startswith("#"):
+        for raw in path.read_text(encoding="utf-8").splitlines():
+            line = _strip_yaml_comment(raw)
+            if not line.strip():
                 continue
             if env_indent is not None and _indent(line) <= env_indent:
                 env_indent = None
@@ -159,8 +191,9 @@ def _compose_own_uses(files: list[Path]) -> set[str]:
     value Compose itself consumes."""
     names: set[str] = set()
     for path in files:
-        for line in path.read_text(encoding="utf-8").splitlines():
-            if line.lstrip().startswith("#"):
+        for raw in path.read_text(encoding="utf-8").splitlines():
+            line = _strip_yaml_comment(raw)
+            if not line.strip():
                 continue
             if m := _COMPOSE_PASS_THROUGH.match(line):
                 names.update(_COMPOSE_REF.findall(m.group(2) or ""))
@@ -182,15 +215,43 @@ def _script_files(repo: Path) -> list[Path]:
 _EXPANSION = re.compile(r"\$[{(]?([A-Za-z_][A-Za-z0-9_]*)")
 
 
+def _shell_expansions(line: str) -> list[str]:
+    """Names Bash would expand on ``line``: not inside single quotes, not
+    after a backslash, not in a comment."""
+    names: list[str] = []
+    in_double = False
+    i = 0
+    while i < len(line):
+        ch = line[i]
+        if ch == "\\":
+            i += 2
+            continue
+        if ch == "'" and not in_double:
+            end = line.find("'", i + 1)
+            i = len(line) if end < 0 else end + 1
+            continue
+        if ch == '"':
+            in_double = not in_double
+        elif ch == "#" and not in_double and (i == 0 or line[i - 1].isspace()):
+            break
+        elif ch == "$" and (m := _EXPANSION.match(line, i)):
+            names.append(m.group(1))
+        i += 1
+    return names
+
+
 def _script_expansions(files: list[Path]) -> set[str]:
-    """Names expanded on non-comment lines. A comment or a message that
-    only mentions a name is not a read."""
+    """Names expanded by the scripts. A comment, or a message that only
+    mentions a name, is not a read. Shell scripts follow Bash quoting; the
+    Makefile and the template are expanded before any shell sees them, so
+    only their comment lines are skipped."""
     names: set[str] = set()
     for path in files:
         for line in path.read_text(encoding="utf-8").splitlines():
-            if line.lstrip().startswith("#"):
-                continue
-            names.update(_EXPANSION.findall(line))
+            if path.suffix == ".sh":
+                names.update(_shell_expansions(line))
+            elif not line.lstrip().startswith("#"):
+                names.update(_EXPANSION.findall(line))
     return names
 
 
@@ -488,3 +549,51 @@ def test_a_nested_compose_default_is_a_compose_read(tmp_path):
         encoding="utf-8",
     )
     assert _compose_own_uses([compose]) == {"FALLBACK_920", "NESTED_920"}
+
+
+# --- Review round 3: inline comments, literal dollars, argument position ----
+
+
+def test_inline_yaml_comments_do_not_hide_compose_entries(tmp_path):
+    compose = tmp_path / "docker-compose.yml"
+    compose.write_text(
+        "services:\n"
+        "  a:\n"
+        "    environment:\n"
+        "      - LIST_920 # forwarded from the shell\n"
+        "      PASS_920: ${PASS_920:-1} # a pass-through\n"
+        '      HASH_920: "${HASH_920:-a#b}"\n'
+        '    ports: ["127.0.0.1:${PORT_920:-1}:1"] # published\n',
+        encoding="utf-8",
+    )
+    assert _compose_refs([compose]) == {"LIST_920", "PASS_920", "HASH_920", "PORT_920"}
+    assert _compose_own_uses([compose]) == {"PORT_920"}
+
+
+def test_literal_dollars_in_a_script_are_not_reads(tmp_path):
+    script = tmp_path / "s.sh"
+    script.write_text(
+        "echo 'set $SINGLE_QUOTED_920'\n"
+        "echo \\$ESCAPED_920\n"
+        'echo "it\'s ${DOUBLE_QUOTED_920}"\n'
+        'echo "don\'t" $AFTER_QUOTES_920\n'
+        "x=${BARE_920:-1} # $COMMENTED_920\n",
+        encoding="utf-8",
+    )
+    assert _script_expansions([script]) == {"DOUBLE_QUOTED_920", "AFTER_QUOTES_920", "BARE_920"}
+
+
+@pytest.mark.parametrize(
+    "line, expected",
+    [
+        ("os.getenv('REAL_920', 'LOCAL_DEFAULT_920')", {"REAL_920"}),
+        ("os.environ.get('REAL_920', 'LOCAL_DEFAULT_920')", {"REAL_920"}),
+        ("_int_env(env, 'REAL_920', 1)", {"REAL_920"}),
+        ("_read_secret('A_SECRET_FILE_920', 'REAL_920')", {"REAL_920"}),
+        ("_read_secret('A_SECRET_FILE_920', env_fallback='REAL_920')", {"REAL_920"}),
+        ("_flag_env(name='REAL_920', default=True)", {"REAL_920"}),
+    ],
+)
+def test_only_the_name_argument_is_collected(tmp_path, line, expected):
+    (tmp_path / "m.py").write_text(f"import os\n{line}\n", encoding="utf-8")
+    assert _python_env_reads([tmp_path]) == expected
