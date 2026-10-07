@@ -124,10 +124,9 @@ side that this server cannot control; see
 for how to confirm it and what to do.
 
 Tool descriptions are not prefixed with "Read-only." (decided in #899,
-kept in #919). The block also hits tools that already declare the
-read-only hint, and no report shows that a description prefix stops
-it; whether one would help is untested. Adding it would lengthen every
-description on an unproven fix while #818 is trimming them.
+kept in #919): the block also hits tools that already declare the
+read-only hint, so the prefix is not adopted as a fix (#818 is
+trimming descriptions).
 
 - **Read-only.** The MCP specification defines `readOnlyHint` as "If
   true, the tool does not modify its environment." OpenAI's

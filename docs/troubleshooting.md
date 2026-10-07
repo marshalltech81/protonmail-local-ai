@@ -1340,41 +1340,9 @@ safety hints (#919; background and sources in
    and a line with `outcome=error` is a server failure whose cause is
    on the WARNING or ERROR line before it. With neither, and ChatGPT
    showing this exact message, the block happened in ChatGPT.
-2. Optionally confirm the server serves the hints. From the repository
-   root, list the tools through a client; every tool should print
-   `True False False`. The snippet reads the token from its file and
-   asks Compose for the port it publishes `mcp-server` on (Compose
-   applies your shell and `.env` the same way `make up` does), so the
-   token goes to that port and nowhere else; with no port it stops
-   before sending anything. It uses the stdio adapter's URL and HTTP
-   client: IPv4 loopback, ignoring `HTTP_PROXY`, `ALL_PROXY` and the
-   system proxy, so the token never goes to a proxy:
-
-   ```bash
-   port=$(docker compose config --format json \
-     | python3 -c 'import json, sys; print(json.load(sys.stdin)["services"]["mcp-server"]["ports"][0]["published"])')
-   cd mcp-server && MCP_PORT="$port" uv run python - <<'EOF'
-   import asyncio, os, pathlib
-   from fastmcp import Client
-   from fastmcp.client.transports import StreamableHttpTransport
-   from src.stdio_adapter import _loopback_http_client, server_url
-   token = pathlib.Path("../.secrets/mcp_auth_token.txt").read_text().strip()
-   transport = StreamableHttpTransport(
-       server_url(os.environ["MCP_PORT"]), auth=token,
-       httpx_client_factory=_loopback_http_client,
-   )
-   async def main():
-       async with Client(transport) as c:
-           for t in await c.list_tools():
-               a = t.annotations
-               print(t.name, a.read_only_hint, a.destructive_hint, a.open_world_hint)
-   asyncio.run(main())
-   EOF
-   ```
-
-3. Retry the identical call; it often succeeds on a later attempt.
+2. Retry the identical call; it often succeeds on a later attempt.
    There is no server-side fix.
-4. Approval settings are not a recommended fix. Setting the connector's
+3. Approval settings are not a recommended fix. Setting the connector's
    approvals in ChatGPT to allow all actions without asking is reported
    to reduce the blocks, but it removes ChatGPT's per-call approval:
    every tool call then runs without a prompt, including calls that
