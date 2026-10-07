@@ -807,8 +807,10 @@ removed Bridge container are kept as history.
     through Apache POI on a trimmed Java runtime (#957, in progress),
     because `catppt` reads no slide text from current PowerPoint decks
     and office-oxide was judged too young for code beside the mail
-    database. Every external parser runs through one bounded runner
-    (temp file, no shell, timeout, output cap). Accepted risk: catdoc's
+    database. Every external parser runs through one runner (temp file,
+    no shell, timeout, output cap); a child that needs memory and CPU
+    limits sets them itself before loading the parser (xlrd's child
+    does). Accepted risk: catdoc's
     unfixed Debian CVEs; CI does not yet scan image packages (#977).
 33. **Per-extractor extraction cache (2026-10-07, #928):** the
     attachment extraction cache is keyed by content hash and extractor

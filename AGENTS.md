@@ -488,12 +488,13 @@ is exactly what this forbids.
   a bound; figures taken under a profiler (`cProfile`, `tracemalloc`)
   overstate it several times over.
 - A third-party parser whose cost cannot be bounded in-process (it
-  allocates or loops on input before our code runs) runs through the
-  bounded subprocess runner (`indexer/src/extractors/_runner.py`, a
-  child process with its own memory and CPU limits, a timeout and an
-  output cap), as xlrd does. Measure a candidate library on crafted
-  input with plain timing and RSS before choosing it: two `.xls`
-  readers failed that test (#935).
+  allocates or loops on input before our code runs) runs in a child
+  process launched through `indexer/src/extractors/_runner.py`. The
+  runner enforces only a wall-clock timeout and an output cap; the
+  child wrapper itself must set `RLIMIT_AS` and `RLIMIT_CPU` before it
+  loads the parser, as `xls_child.py` does for xlrd. Measure a
+  candidate library on crafted input with plain timing and RSS before
+  choosing it: two `.xls` readers failed that test (#935).
 - A review finding that calls for new parsing of untrusted input, or
   any new mechanism rather than a guard (a check, a cap, a fallback),
   is a design decision: stop and ask, with "document the limitation"
