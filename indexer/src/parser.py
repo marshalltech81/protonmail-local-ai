@@ -19,7 +19,7 @@ import quopri
 import re
 import secrets
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -49,6 +49,9 @@ log = logging.getLogger("indexer.parser")
 # * ``container_serialize``: a container the generator refuses;
 # * ``body_parts``: text parts past ``MAX_BODY_TEXT_PARTS`` are left out
 #   of the body;
+# * ``mime_parts``: parts past the first ``MAX_WALKED_PARTS`` in
+#   document order are left out of the walk (their text and
+#   attachments); counted once per message (#996);
 # * ``address_header``: an address header over
 #   ``_MAX_ADDRESS_HEADER_CHARS`` loses all its recipients;
 # * ``address_element`` / ``address_length``: one address-list element
@@ -66,6 +69,7 @@ PARSE_CAPS: tuple[str, ...] = (
     "decoded_bytes",
     "container_serialize",
     "body_parts",
+    "mime_parts",
     "address_header",
     "address_element",
     "address_length",
@@ -690,9 +694,16 @@ def _nesting_exceeds(root: email.message.Message, limit: int, budget: _Serializa
     and per ``_HEADER_BYTES_PER_UNIT`` bytes of header text). Iterative,
     stops at the first part past either limit, and leaves an exhausted
     budget exhausted for every later container."""
-    stack = [(root, 1)]
+    # Children are taken lazily, last first as before, so a part with a
+    # crafted number of children is not queued whole (review round 1 on
+    # #1020); each one taken is visited and charged to the budget.
+    stack: list[tuple[Iterator[email.message.Message], int]] = [(iter((root,)), 1)]
     while stack:
-        part, depth = stack.pop()
+        siblings, depth = stack[-1]
+        part = next(siblings, None)
+        if part is None:
+            stack.pop()
+            continue
         headers = part.items()
         header_bytes = sum(len(name) + len(str(value)) for name, value in headers)
         budget.remaining -= 1 + len(headers) + header_bytes // _HEADER_BYTES_PER_UNIT
@@ -700,7 +711,9 @@ def _nesting_exceeds(root: email.message.Message, limit: int, budget: _Serializa
             return True
         children = part.get_payload() if part.is_multipart() else None
         if isinstance(children, list):
-            stack.extend((c, depth + 1) for c in children if isinstance(c, email.message.Message))
+            stack.append(
+                ((c for c in reversed(children) if isinstance(c, email.message.Message)), depth + 1)
+            )
     return False
 
 
@@ -910,6 +923,15 @@ def _decode_transport_form(
 # a handful; parts past the cap are left out of the body.
 MAX_BODY_TEXT_PARTS = 200
 
+# MIME parts one message's body-and-attachment walk visits, the root and
+# the parts inside attachments included (#996). Every part costs a stack
+# entry and a fixed classification (and a body node when it is outside
+# attachments) on top of the stdlib parse, so a crafted message of
+# 700,000 empty parts (4.9 MB) spent about 2.3 s here (plain timing); at
+# this cap the walk takes about 30 ms. Real mail has tens of parts; the
+# walk keeps the first parts in document order and stops at the cap.
+MAX_WALKED_PARTS = 10_000
+
 
 @dataclass
 class _BodyNode:
@@ -1022,9 +1044,24 @@ def _extract_body_and_attachments(
     # parser exposes such an email as its encoded transport text, not
     # its content, so none of it is body text.
     budget = _SerializationBudget()
-    stack: list[tuple[email.message.Message, bool, int, int, bool]] = [(msg, False, 0, -1, False)]
-    while stack:
-        part, in_attachment, decode_depth, parent, no_body = stack.pop()
+    # One frame per open container: its children, taken one at a time as
+    # they are visited (review round 1 on #1020), so the walk keeps the
+    # first MAX_WALKED_PARTS parts in document order and never queues a
+    # container's children all at once.
+    frames: list[tuple[Iterator[email.message.Message], bool, int, int, bool]] = [
+        (iter((msg,)), False, 0, -1, False)
+    ]
+    walked = 0
+    while frames:
+        siblings, in_attachment, decode_depth, parent, no_body = frames[-1]
+        part = next(siblings, None)
+        if part is None:
+            frames.pop()
+            continue
+        if walked >= MAX_WALKED_PARTS:
+            caps["mime_parts"] += 1
+            break
+        walked += 1
         ct = part.get_content_type()
         filename = _part_filename(part)
         is_attachment = _is_attachment(part, filename)
@@ -1078,10 +1115,14 @@ def _extract_body_and_attachments(
                     part.get_content_maintype() == "message"
                     and encoding not in ("", "7bit", "8bit", "binary")
                 )
-                stack.extend(
-                    (c, inside, depth, index, skip)
-                    for c in reversed(children)
-                    if isinstance(c, email.message.Message)
+                frames.append(
+                    (
+                        (c for c in children if isinstance(c, email.message.Message)),
+                        inside,
+                        depth,
+                        index,
+                        skip,
+                    )
                 )
             continue
         if node is None:

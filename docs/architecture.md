@@ -657,7 +657,10 @@ as a file, is body text. Neither is an inline `message/*` part sent
 in a transfer encoding (base64 or quoted-printable, which RFC 2046
 forbids for it): the parser exposes it as its encoded transport text,
 so it adds nothing to the body. At most 200 text parts per message
-(`MAX_BODY_TEXT_PARTS`) are decoded; later ones are left out.
+(`MAX_BODY_TEXT_PARTS`) are decoded; later ones are left out. The
+walk over a message's parts stops after 10,000 parts
+(`MAX_WALKED_PARTS`, the parts inside attachments included); later
+parts add no body text and no attachments.
 
 A query like "what did my landlord say about the heating?" returns the
 full landlord thread (via the coarse lanes) and surfaces the specific

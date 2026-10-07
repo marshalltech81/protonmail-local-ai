@@ -1403,6 +1403,7 @@ extractor reads (`.eml`) is not logged.
 | `decoded_bytes` | The same, past 64 MB of decoded attached emails per message |
 | `container_serialize` | A container the serializer refuses (a malformed header), when its payload would be extracted |
 | `body_parts` | Text parts past the 200th, left out of the body: only those that could have been part of it, so an alternative rendering after the one the body uses is not counted |
+| `mime_parts` | Every MIME part past the 10,000th (the message itself and the parts inside attachments count): their text and attachments are not read. Counted once per message |
 | `address_header` | Every recipient of a `From`, `To` or `Cc` header over 256,000 characters |
 | `address_element` | One address-list entry over 128,000 characters |
 | `address_length` | One address over 998 characters |
