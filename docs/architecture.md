@@ -816,6 +816,19 @@ message's `message_thread_map` row. `messages` references
 both `ON DELETE CASCADE`, so every existing removal path — reaper,
 whole-thread delete, rebuild — cleans them up without separate code.
 
+Every message-level filter the tools accept (`sender`, `recipient`,
+`participant`, `subject`, `text`, `folder`, the effective-time bounds,
+the attachment and read flags, `authority_class`) is a leaf of one
+predicate module, `mcp-server/src/lib/predicates.py` (#1084): each
+leaf has a name, a value shape, one SQL compiler over a `messages` row
+and an evaluability rule, and adapters build the leaf list for
+`query_messages` (conjoined on one message, with the keyset cursor
+bound to a digest of the list), for the evidence-scope labels (the
+same, as a label per message) and for `search_emails`' thread filters
+(each leaf decided on its own against the thread, as before). A new
+predicate is written once there; `docs/mcp-tools.md`, "Filter
+predicates", lists the leaves.
+
 ## Message time
 
 The index records two times per message, `sent_at` and `occurred_at`,

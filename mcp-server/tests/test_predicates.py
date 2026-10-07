@@ -1,0 +1,654 @@
+"""The predicate layer behind ``query_messages``, ``message_scope`` and
+``search_emails``' post-fusion filters (#1084).
+
+``TestPinnedFilterSemantics`` was written and run against ``main``
+before the predicate module existed, so every filter's result at each
+of the three call sites is pinned before the rewrite.
+"""
+
+import json
+import logging
+import re
+import sqlite3
+from contextlib import closing
+from pathlib import Path
+
+import pytest
+from src.lib.predicates import (
+    LEAVES,
+    Evaluability,
+    Leaf,
+    compile_leaves,
+    leaf_digest,
+    message_scope_leaves,
+    query_messages_leaves,
+    search_emails_leaves,
+)
+from src.lib.security import _LOGGABLE_TOOL_PARAMS, log_tool_call
+from src.lib.sqlite import Database, InvalidFilterError
+
+from tests.conftest import _insert_message, claimant_of, set_authority
+from tests.test_evidence_scope import _finish_threads
+from tests.test_sqlite import _open_built_db_conn
+
+# A synthetic value no fixture row contains: the tests assert it never
+# reaches the log through any adapter.
+_MARKER = "Zq-private-marker-7731"
+
+
+@pytest.fixture
+def mixed_db(tmp_path) -> Database:
+    """Three threads whose messages differ in every filtered field.
+
+    ``t-mix`` holds ``ma`` (alice, January, INBOX, read) and ``mb``
+    (bob, March, Archive, flagged, with an attachment), so one message
+    satisfies a sender filter and another a date filter. ``t-solo`` is
+    ``mc`` (carol, sent in February but delivered on the 20th), ``t-trash``
+    is ``md`` (alice, in Trash) and ``t-spam`` is ``me`` (alice, in Spam).
+    alice carries the ``counsel`` class.
+    """
+    conn, path = _open_built_db_conn(tmp_path, "predicates.db")
+    _insert_message(
+        conn,
+        message_id="ma",
+        thread_id="t-mix",
+        sent_at="2024-01-10T09:00:00+00:00",
+        subject="Budget Plan",
+        from_=["Alice Example <alice@one.example>"],
+        to=["Bob <bob@two.example>"],
+        body="the budget plan is approved",
+        seen=True,
+    )
+    _insert_message(
+        conn,
+        message_id="mb",
+        thread_id="t-mix",
+        sent_at="2024-03-10T09:00:00+00:00",
+        subject="Re: Budget Plan",
+        folder="Archive",
+        from_=["bob@two.example"],
+        to=["alice@one.example"],
+        cc=["Carol <carol@three.example>"],
+        has_attachments=True,
+        body="attached totals",
+        attachment_text="spreadsheet totals",
+        flagged=True,
+    )
+    _insert_message(
+        conn,
+        message_id="mc",
+        thread_id="t-solo",
+        sent_at="2024-02-10T09:00:00+00:00",
+        occurred_at="2024-02-20T09:00:00+00:00",
+        subject="Straße notice",
+        from_=["carol@three.example"],
+        to=["alice@one.example"],
+        body="notice about the street",
+    )
+    _insert_message(
+        conn,
+        message_id="md",
+        thread_id="t-trash",
+        sent_at="2024-04-01T09:00:00+00:00",
+        subject="old",
+        folder="Trash",
+        from_=["alice@one.example"],
+        to=["bob@two.example"],
+        body="old news",
+    )
+    _insert_message(
+        conn,
+        message_id="me",
+        thread_id="t-spam",
+        sent_at="2024-05-01T09:00:00+00:00",
+        subject="offer",
+        folder="Spam",
+        from_=["alice@one.example"],
+        to=["bob@two.example"],
+        body="offer",
+    )
+    _finish_threads(conn)
+    conn.execute("UPDATE threads SET has_attachments = 1 WHERE thread_id = 't-mix'")
+    conn.commit()
+    conn.close()
+    set_authority(path, "alice@one.example", "counsel", "address:alice@one.example")
+    return Database(str(path))
+
+
+def _ids(page) -> list[str]:
+    return [m.message_id for m in page.messages]
+
+
+def _scope(db: Database, **filters) -> set[str]:
+    labels = db.message_scope(["t-mix", "t-solo", "t-trash"], **filters)
+    return {c.split("#", 1)[0] for c in labels.claimants}
+
+
+def _threads(db: Database) -> list:
+    return [db.get_thread(t) for t in ("t-mix", "t-solo", "t-trash")]
+
+
+def _filtered(db: Database, **filters) -> list[str]:
+    return [r.thread_id for r in db._apply_filters(_threads(db), **filters)]
+
+
+class TestPinnedFilterSemantics:
+    """What each call site returns for each filter today (pinned on
+    ``main`` before #1084)."""
+
+    @pytest.mark.parametrize(
+        ("filters", "expected"),
+        [
+            ({}, ["me", "mb", "mc", "ma"]),
+            ({"sender": "alice@one.example"}, ["me", "ma"]),
+            ({"sender": "ALICE@ONE.EXAMPLE"}, ["me", "ma"]),
+            ({"sender": " alice@one.example "}, ["me", "ma"]),
+            ({"sender": "Alice"}, ["me", "ma"]),
+            ({"sender": "@one.example"}, ["me", "ma"]),
+            ({"sender": "  "}, ["me", "mb", "mc", "ma"]),
+            ({"recipient": "alice@one.example"}, ["mb", "mc"]),
+            ({"recipient": "carol@three.example"}, ["mb"]),
+            ({"participant": "carol@three.example"}, ["mb", "mc"]),
+            ({"participant": "CAROL"}, ["mb", "mc"]),
+            ({"subject": "budget plan"}, ["mb", "ma"]),
+            ({"subject": "STRASSE"}, ["mc"]),
+            ({"text": "approved budget"}, ["ma"]),
+            ({"text": "totals"}, ["mb"]),
+            ({"text": "spreadsheet"}, []),
+            ({"folder": "Trash"}, ["md"]),
+            ({"folder": "Archive"}, ["mb"]),
+            ({"date_from": "2024-02-15"}, ["me", "mb", "mc"]),
+            ({"date_to": "2024-02-15"}, ["ma"]),
+            ({"date_from": "2024-02-20T09:00:00+00:00"}, ["me", "mb", "mc"]),
+            ({"has_attachments": True}, ["mb"]),
+            ({"has_attachments": False}, ["me", "mc", "ma"]),
+            ({"seen": True}, ["ma"]),
+            ({"seen": False}, ["me", "mb", "mc"]),
+            ({"flagged": True}, ["mb"]),
+            ({"authority_class": "counsel"}, ["ma"]),
+            ({"authority_class": "counsel", "folder": "Trash"}, ["md"]),
+            ({"authority_class": "unclassified"}, ["mb", "mc"]),
+            ({"authority_class": " "}, ["me", "mb", "mc", "ma"]),
+            ({"sender": "alice@one.example", "date_from": "2024-03-01"}, ["me"]),
+            (
+                {"sender": "alice@one.example", "date_from": "2024-03-01", "date_to": "2024-03-31"},
+                [],
+            ),
+        ],
+    )
+    def test_query_messages(self, mixed_db, filters, expected):
+        page = mixed_db.query_messages(**filters)
+        assert _ids(page) == expected
+        assert page.total_matches == len(expected)
+
+    def test_query_messages_reports_matched_addresses(self, mixed_db):
+        page = mixed_db.query_messages(sender="alice", recipient="bob@two.example")
+        assert page.address_matches["sender"].addresses == ["alice@one.example"]
+        assert page.address_matches["sender"].distinct == 1
+        assert page.address_matches["recipient"].addresses == ["bob@two.example"]
+        assert set(page.address_matches) == {"sender", "recipient"}
+
+    @pytest.mark.parametrize(
+        ("filters", "field"),
+        [
+            ({"text": "..."}, "text"),
+            ({"text": " ".join(f"w{i}" for i in range(17))}, "text"),
+            ({"authority_class": "boss"}, "authority_class"),
+            ({"date_from": "not-a-date"}, "date_from"),
+            ({"date_from": "2024-02-02", "date_to": "2024-02-01"}, "date_from/date_to"),
+        ],
+    )
+    def test_query_messages_rejections(self, mixed_db, filters, field):
+        with pytest.raises(InvalidFilterError) as info:
+            mixed_db.query_messages(**filters)
+        assert info.value.field_name == field
+
+    def test_cursor_walks_and_is_bound_to_its_filters(self, mixed_db):
+        first = mixed_db.query_messages(sender="alice@one.example", limit=1)
+        assert _ids(first) == ["me"] and first.has_more
+        second = mixed_db.query_messages(
+            sender="alice@one.example", limit=1, cursor=first.next_cursor
+        )
+        assert _ids(second) == ["ma"] and second.offset == 1 and not second.has_more
+        # Padding is stripped before the digest; case is not, so another
+        # spelling of the same address is a foreign cursor.
+        assert _ids(
+            mixed_db.query_messages(sender=" alice@one.example ", cursor=first.next_cursor)
+        ) == ["ma"]
+        with pytest.raises(InvalidFilterError, match="issued for different filters"):
+            mixed_db.query_messages(sender="ALICE@one.example", cursor=first.next_cursor)
+        with pytest.raises(InvalidFilterError, match="issued for different filters"):
+            mixed_db.query_messages(sender="bob@two.example", cursor=first.next_cursor)
+        with pytest.raises(InvalidFilterError, match="issued for different filters"):
+            mixed_db.query_messages(cursor=first.next_cursor)
+        for cursor in ("not-a-cursor", "e30", "eyJ2IjogOX0"):
+            with pytest.raises(InvalidFilterError, match="invalid cursor"):
+                mixed_db.query_messages(cursor=cursor)
+
+    @pytest.mark.parametrize(
+        ("filters", "expected"),
+        [
+            ({}, {"ma", "mb", "mc"}),
+            ({"from_addr": "alice@one.example"}, {"ma"}),
+            ({"from_addr": "Alice"}, {"ma"}),
+            ({"from_addr": "@two.example"}, {"mb"}),
+            ({"participant": "alice@one.example"}, {"ma", "mb", "mc"}),
+            ({"participant": "Carol"}, {"mb", "mc"}),
+            ({"folders": ["Trash"]}, {"md"}),
+            ({"folders": ["INBOX", "Archive"]}, {"ma", "mb", "mc"}),
+            ({"date_from": "2024-02-15"}, {"mb", "mc"}),
+            ({"date_to": "2024-02-15"}, {"ma"}),
+            ({"from_addr": "alice@one.example", "date_from": "2024-03-01"}, set()),
+        ],
+    )
+    def test_message_scope(self, mixed_db, filters, expected):
+        assert _scope(mixed_db, **filters) == expected
+
+    def test_message_scope_whole_threads(self, mixed_db):
+        labels = mixed_db.message_scope(["t-mix", "t-solo", "t-trash"], participant="alice")
+        assert labels.whole_threads == {"t-mix", "t-solo"}
+        labels = mixed_db.message_scope(["t-mix"], from_addr="alice@one.example")
+        assert labels.whole_threads == set()
+
+    def test_message_scope_rejections(self, mixed_db):
+        with pytest.raises(InvalidFilterError):
+            mixed_db.message_scope(["t-mix"], date_from="bad")
+
+    @pytest.mark.parametrize(
+        ("filters", "expected"),
+        [
+            ({}, ["t-mix", "t-solo", "t-trash"]),
+            ({"from_addr": "alice@one.example"}, ["t-mix", "t-trash"]),
+            ({"from_addr": "ALICE@ONE.EXAMPLE"}, ["t-mix", "t-trash"]),
+            ({"from_addr": "Alice"}, ["t-mix", "t-trash"]),
+            ({"from_addr": "@one.example"}, ["t-mix", "t-trash"]),
+            ({"from_addr": "bob@two.example"}, ["t-mix"]),
+            ({"from_addr": "carol"}, ["t-solo"]),
+            ({"participant": "carol@three.example"}, ["t-mix", "t-solo"]),
+            ({"participant": "Bob"}, ["t-mix", "t-trash"]),
+            ({"date_from": "2024-03-01"}, ["t-mix", "t-trash"]),
+            ({"date_to": "2024-02-15"}, ["t-mix"]),
+            ({"has_attachments": True}, ["t-mix"]),
+            ({"has_attachments": False}, ["t-solo", "t-trash"]),
+            ({"folders": ["Archive"]}, ["t-mix"]),
+            ({"folders": ["INBOX"]}, ["t-mix", "t-solo"]),
+            ({"authority_class": "counsel"}, ["t-mix", "t-trash"]),
+            ({"authority_class": "unclassified"}, ["t-mix", "t-solo"]),
+            # The thread-level quantifier: alice's message is from
+            # January and bob's from March, yet the thread matches both
+            # filters; ``query_messages`` finds no such message.
+            (
+                {
+                    "from_addr": "alice@one.example",
+                    "date_from": "2024-03-01",
+                    "date_to": "2024-03-31",
+                },
+                ["t-mix"],
+            ),
+        ],
+    )
+    def test_apply_filters(self, mixed_db, filters, expected):
+        assert _filtered(mixed_db, **filters) == expected
+
+    def test_apply_filters_rejections(self, mixed_db):
+        with pytest.raises(InvalidFilterError, match="date_to"):
+            mixed_db._apply_filters(_threads(mixed_db), date_to="bad")
+        with pytest.raises(InvalidFilterError, match="date_from must not be after"):
+            mixed_db._apply_filters(
+                _threads(mixed_db), date_from="2024-02-02", date_to="2024-02-01"
+            )
+        # The class is validated by the search methods before the filter
+        # runs; the filter itself only finds no such sender.
+        assert mixed_db._apply_filters(_threads(mixed_db), authority_class="boss") == []
+
+    def test_apply_filters_evaluates_senders_on_the_thread_row(self, mixed_db):
+        """``search_emails`` matches ``from_addr`` against the thread's
+        recorded senders, not the per-message rows: a message whose From
+        is not the thread's primary author on any message does not count."""
+        thread = mixed_db.get_thread("t-mix")
+        thread.senders = ["only@four.example"]
+        assert mixed_db._apply_filters([thread], from_addr="alice@one.example") == []
+        assert mixed_db._apply_filters([thread], from_addr="only@four.example") == [thread]
+
+    def test_no_filter_value_reaches_the_log(self, mixed_db, caplog):
+        with caplog.at_level(logging.DEBUG):
+            mixed_db.query_messages(
+                sender=_MARKER,
+                recipient=_MARKER,
+                participant=_MARKER,
+                subject=_MARKER,
+                text=_MARKER,
+            )
+            mixed_db.message_scope(["t-mix"], from_addr=_MARKER, participant=_MARKER)
+            mixed_db._apply_filters(_threads(mixed_db), from_addr=_MARKER, participant=_MARKER)
+            with pytest.raises(InvalidFilterError):
+                mixed_db.query_messages(folder=_MARKER, date_from=_MARKER)
+        assert _MARKER not in caplog.text
+
+
+def test_fixture_thread_row_records_each_messages_primary_author(mixed_db):
+    with sqlite3.connect(mixed_db.path) as conn:
+        senders = json.loads(
+            conn.execute("SELECT senders FROM threads WHERE thread_id = 't-mix'").fetchone()[0]
+        )
+    assert senders == ["Alice Example <alice@one.example>", "bob@two.example"]
+    assert claimant_of("ma").startswith("ma#")
+
+
+_DOCS = Path(__file__).resolve().parents[2] / "docs" / "mcp-tools.md"
+
+# One sample value per declared parameter shape. A leaf declaring a new
+# shape must add its sample here, so its compiler gets exercised.
+_SAMPLES: dict[str, object] = {
+    "address": "jane@example.test",
+    "text": "budget",
+    "words": ("budget", "plan"),
+    "folders": ("INBOX", "Archive"),
+    "instant": "2024-01-01T00:00:00+00:00",
+    "bool": True,
+    "class": "counsel",
+}
+
+# Leaves deliberately left out of docs/mcp-tools.md, each with its
+# reason. Empty: every leaf is in the "Filter predicates" table.
+_UNDOCUMENTED: dict[str, str] = {}
+
+
+def _filter_predicates_section() -> str:
+    return _DOCS.read_text().split("## Filter predicates", 1)[1].split("\n## ", 1)[0]
+
+
+def _every_adapter_leaf_name() -> set[str]:
+    """The leaf names the three adapters can build, with every parameter
+    given."""
+    names = {
+        leaf.name
+        for leaf in query_messages_leaves(
+            sender="a@example.test",
+            recipient="b@example.test",
+            participant="c@example.test",
+            subject="s",
+            text="word",
+            folder="INBOX",
+            date_from="2024-01-01",
+            date_to="2024-12-31",
+            has_attachments=True,
+            authority_class="counsel",
+            seen=True,
+            flagged=False,
+        )
+    }
+    names |= {leaf.name for leaf in query_messages_leaves(**dict.fromkeys(_QUERY_PARAMS))}
+    names |= {
+        leaf.name
+        for leaf in message_scope_leaves(
+            from_addr="a@example.test",
+            participant="c@example.test",
+            folders=["INBOX"],
+            date_from="2024-01-01",
+            date_to="2024-12-31",
+        )
+    }
+    names |= {
+        leaf.name
+        for leaf in search_emails_leaves(
+            folders=["INBOX"],
+            from_addr="a@example.test",
+            date_from="2024-01-01",
+            date_to="2024-12-31",
+            has_attachments=False,
+            participant="c@example.test",
+            authority_class="counsel",
+        )
+    }
+    return names
+
+
+_QUERY_PARAMS = (
+    "sender",
+    "recipient",
+    "participant",
+    "subject",
+    "text",
+    "folder",
+    "date_from",
+    "date_to",
+    "has_attachments",
+    "authority_class",
+    "seen",
+    "flagged",
+)
+
+
+class TestLeafRegistry:
+    """Every registered leaf has a compiler, an evaluability rule and a
+    docs entry, and some adapter builds it (the capability report of
+    #1093 reads the same registry)."""
+
+    def test_registry_is_keyed_by_leaf_name(self):
+        assert all(name == kind.name for name, kind in LEAVES.items())
+        assert len(LEAVES) == 13
+
+    @pytest.mark.parametrize("name", sorted(LEAVES))
+    def test_leaf_compiles_with_a_rule_and_a_docs_entry(self, name, mixed_db):
+        kind = LEAVES[name]
+        assert kind.param in _SAMPLES, f"{name}: no sample for parameter shape {kind.param!r}"
+        params: list = []
+        sql = kind.compile(_SAMPLES[kind.param], params)
+        assert sql.startswith("m.") or sql.startswith("instr(mcp_casefold(m.")
+        assert sql.count("?") == len(params)
+        # The fragment runs as written against the schema.
+        with closing(mixed_db._connect()) as conn:
+            conn.execute(f"SELECT COUNT(*) FROM messages m WHERE {sql}", params).fetchone()
+        assert isinstance(kind.evaluability, Evaluability)
+        if name in _UNDOCUMENTED:
+            assert _UNDOCUMENTED[name]
+        else:
+            assert f"| `{name}` |" in _filter_predicates_section(), f"{name}: not documented"
+
+    def test_every_leaf_is_built_by_an_adapter(self):
+        assert _every_adapter_leaf_name() == set(LEAVES)
+
+    def test_docs_table_names_no_unregistered_leaf(self):
+        documented = set(re.findall(r"^\| `([a-z_]+)` \|", _filter_predicates_section(), re.M))
+        assert documented == set(LEAVES) - set(_UNDOCUMENTED)
+
+    def test_thread_tests_cover_the_search_emails_leaves_decided_in_memory(self):
+        in_memory = {name for name, kind in LEAVES.items() if kind.thread_test is not None}
+        assert in_memory == {
+            "sender",
+            "participant",
+            "effective_from",
+            "effective_to",
+            "has_attachments",
+        }
+
+
+class TestCompilerAndDigest:
+    def test_no_leaves_compile_to_true(self):
+        assert compile_leaves([]) == ("1", [])
+
+    def test_leaves_conjoin_in_order(self):
+        sql, params = compile_leaves(
+            [Leaf("folder", ("INBOX",)), Leaf("seen", False), Leaf("effective_from", "2024-01-01")]
+        )
+        assert sql == "m.folder IN (?) AND m.seen = ? AND m.effective_at >= ?"
+        assert params == ["INBOX", 0, "2024-01-01"]
+
+    def test_query_messages_sql_is_the_old_where_clause(self):
+        sql, params = compile_leaves(
+            query_messages_leaves(
+                sender="jane@example.test",
+                recipient=None,
+                participant=None,
+                subject="Plan",
+                text="budget plan",
+                folder=None,
+                date_from="2024-01-01",
+                date_to=None,
+                has_attachments=True,
+                authority_class="counsel",
+                seen=None,
+                flagged=True,
+            )
+        )
+        assert sql == " AND ".join(
+            [
+                "m.claimant_id IN (SELECT claimant_id FROM message_participants "
+                "WHERE address = ? AND role IN (?))",
+                "instr(mcp_casefold(m.subject), ?) > 0",
+                "m.claimant_id IN (SELECT c.claimant_id FROM message_chunks_fts f "
+                "JOIN message_chunks c ON c.fts_rowid = f.rowid "
+                "WHERE message_chunks_fts MATCH ? AND c.attachment_id IS NULL)",
+                "m.claimant_id IN (SELECT c.claimant_id FROM message_chunks_fts f "
+                "JOIN message_chunks c ON c.fts_rowid = f.rowid "
+                "WHERE message_chunks_fts MATCH ? AND c.attachment_id IS NULL)",
+                "m.folder NOT IN (?)",
+                "m.effective_at >= ?",
+                "m.has_attachments = ?",
+                "m.flagged = ?",
+                "m.claimant_id IN (SELECT p.claimant_id FROM entities e "
+                "JOIN message_participants p ON p.address = e.canonical_key AND p.role = 'from' "
+                "JOIN messages am ON am.claimant_id = p.claimant_id "
+                "WHERE e.kind = 'person' AND e.authority_class = ? AND am.folder NOT IN (?))",
+            ]
+        )
+        assert params == [
+            "jane@example.test",
+            "from",
+            "plan",
+            '"budget"',
+            '"plan"',
+            "Trash",
+            "2024-01-01T00:00:00+00:00",
+            1,
+            1,
+            "counsel",
+            "Spam",
+        ]
+
+    def test_digest_binds_the_leaf_list_in_order(self):
+        a = [Leaf("sender", "jane@example.test"), Leaf("not_in_folders", ("Trash",))]
+        assert leaf_digest(a) == leaf_digest(list(a))
+        assert len(leaf_digest(a)) == 16
+        assert leaf_digest(a) != leaf_digest(list(reversed(a)))
+        assert leaf_digest(a) != leaf_digest([Leaf("sender", "Jane@example.test"), a[1]])
+        assert leaf_digest(a) != leaf_digest([Leaf("participant", "jane@example.test"), a[1]])
+
+    def test_adapters_ignore_blank_filters_and_keep_the_default_scope(self):
+        assert query_messages_leaves(**dict.fromkeys(_QUERY_PARAMS)) == [
+            Leaf("not_in_folders", ("Trash",))
+        ]
+        blank = {
+            name: "  "
+            for name in _QUERY_PARAMS
+            if name not in ("has_attachments", "seen", "flagged", "date_from", "date_to")
+        }
+        assert query_messages_leaves(**{**dict.fromkeys(_QUERY_PARAMS), **blank}) == [
+            Leaf("not_in_folders", ("Trash",))
+        ]
+        assert message_scope_leaves(
+            from_addr=None, participant=None, folders=None, date_from=None, date_to=None
+        ) == [Leaf("not_in_folders", ("Trash",))]
+        assert (
+            search_emails_leaves(
+                folders=None,
+                from_addr=None,
+                date_from=None,
+                date_to=None,
+                has_attachments=None,
+                participant=None,
+                authority_class=None,
+            )
+            == []
+        )
+
+    def test_search_emails_leaves_keep_the_old_filter_order(self):
+        leaves = search_emails_leaves(
+            folders=["INBOX"],
+            from_addr="a@example.test",
+            date_from="2024-01-01",
+            date_to="2024-12-31",
+            has_attachments=True,
+            participant="c@example.test",
+            authority_class="counsel",
+        )
+        assert [leaf.name for leaf in leaves] == [
+            "sender",
+            "participant",
+            "effective_from",
+            "effective_to",
+            "has_attachments",
+            "folder",
+            "authority_class",
+        ]
+
+    def test_apply_filters_falls_back_to_sql_for_a_leaf_without_a_thread_test(
+        self, mixed_db, monkeypatch
+    ):
+        """A leaf ``search_emails`` does not take today still has the
+        wrapper's meaning: some message of the thread satisfies it."""
+        monkeypatch.setattr("src.lib.sqlite.search_emails_leaves", lambda **_: [Leaf("seen", True)])
+        assert _filtered(mixed_db) == ["t-mix"]
+
+
+class TestLogAllowlist:
+    """No leaf value reaches the log: the ``log_tool_call`` allowlist is
+    the one from before the module, and a marker passed through every
+    tool parameter that becomes a leaf is withheld."""
+
+    def test_allowlist_is_unchanged(self):
+        assert set(_LOGGABLE_TOOL_PARAMS) == {
+            "mode",
+            "style",
+            "filter_type",
+            "limit",
+            "max_threads",
+            "offset",
+            "has_attachments",
+            "seen",
+            "flagged",
+            "include_scores",
+            "extracted_only",
+            "include_attachments_metadata",
+            "date_from",
+            "date_to",
+            "source",
+            "scope",
+            "max_chunks_per_thread",
+            "max_chars_per_chunk",
+            "dedupe_attachments",
+            "authority_class",
+            "fields",
+        }
+
+    def test_marker_through_each_tools_filters_is_withheld(self, caplog):
+        logger = logging.getLogger("test-1084-tool-log")
+        calls = {
+            "query_messages": {**dict.fromkeys(_QUERY_PARAMS, _MARKER), "cursor": _MARKER},
+            "search_emails": {
+                "query": _MARKER,
+                "folders": [_MARKER],
+                "from_addr": _MARKER,
+                "participant": _MARKER,
+                "date_from": _MARKER,
+                "date_to": _MARKER,
+                "has_attachments": _MARKER,
+                "authority_class": _MARKER,
+            },
+            "ask_mailbox": {
+                "folders": [_MARKER],
+                "from_addr": _MARKER,
+                "participant": _MARKER,
+                "date_from": _MARKER,
+                "date_to": _MARKER,
+            },
+        }
+        with caplog.at_level(logging.DEBUG, logger="test-1084-tool-log"):
+            for tool, params in calls.items():
+                log_tool_call(logger, tool, params)
+        assert len(caplog.records) == 3
+        assert _MARKER not in caplog.text
+        for params in calls.values():
+            for name in params:
+                assert f"'{name}'" in caplog.text

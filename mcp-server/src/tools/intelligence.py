@@ -25,6 +25,7 @@ from ..lib.inference import (
     TruncationReason,
     estimate_tokens,
 )
+from ..lib.predicates import validate_date_range
 from ..lib.rate_limited_log import ArgumentRejections
 from ..lib.security import log_tool_call, safe_provider_exception_text
 from ..lib.sqlite import (
@@ -34,7 +35,6 @@ from ..lib.sqlite import (
     InvalidFilterError,
     ScopeLabels,
     ThreadResult,
-    validate_date_range,
 )
 from ..lib.timings import count, rerank_mode, stage, timed_tool
 from ..lib.validation import clamp_int

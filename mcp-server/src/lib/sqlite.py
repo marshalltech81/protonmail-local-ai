@@ -5,7 +5,6 @@ Supports BM25 keyword search, vector similarity search, and hybrid fusion.
 """
 
 import base64
-import hashlib
 import json
 import logging
 import math
@@ -15,7 +14,7 @@ import struct
 import unicodedata
 from contextlib import closing
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime, time, timedelta
+from datetime import UTC, datetime, timedelta
 from email.utils import parseaddr
 from itertools import groupby
 from pathlib import Path
@@ -25,75 +24,27 @@ from urllib.parse import quote
 import sqlite_vec
 
 from . import timings
+from .predicates import (
+    ADDRESS_ROLES,
+    DEFAULT_EXCLUDED_FOLDERS,
+    LEAVES,
+    InvalidFilterError,
+    Leaf,
+    _addr_matches,
+    _normalize_date_range,
+    _substring_participant_rows,
+    address_match_mode,
+    canonical_addr,
+    compile_leaves,
+    leaf_digest,
+    message_scope_leaves,
+    normalize_authority_class,
+    query_messages_leaves,
+    search_emails_leaves,
+)
 from .reranker import RerankerBackend
 
 log = logging.getLogger("mcp.sqlite")
-
-
-class InvalidFilterError(ValueError):
-    """A filter or query argument the caller supplied was rejected (a
-    date, a cursor, the ``query_messages`` text), or the two date bounds
-    name an empty interval.
-
-    The message may quote the rejected value so the caller learns why,
-    which means it must never be logged: tool handlers catch this and log
-    only which field failed.
-    """
-
-    def __init__(self, field_name: str, message: str) -> None:
-        super().__init__(message)
-        self.field_name = field_name
-
-
-# Source-authority classes the indexer assigns from the operator rules
-# file (``indexer/src/entities.py`` ``AUTHORITY_CLASSES``) plus
-# ``unclassified`` for senders no rule matched.
-AUTHORITY_CLASSES = (
-    "counsel",
-    "management",
-    "vendor",
-    "government",
-    "personal",
-    "other",
-    "unclassified",
-)
-
-
-def normalize_authority_class(value: str | None) -> str | None:
-    """The ``authority_class`` filter to apply: ``None`` for a missing or
-    blank value (ignored, like every blank string filter), otherwise the
-    stripped value, which must be one of ``AUTHORITY_CLASSES``."""
-    if value is None or not value.strip():
-        return None
-    value = value.strip()
-    if value not in AUTHORITY_CLASSES:
-        raise InvalidFilterError(
-            "authority_class",
-            f"authority_class must be one of {', '.join(AUTHORITY_CLASSES)}",
-        )
-    return value
-
-
-# Folders whose messages never count toward an ``authority_class``
-# filter (#463). Authority comes from the claimed From address, which is
-# sender-controlled, and Proton files most spoofed or DMARC-failing mail
-# in Spam. Matched exactly against ``messages.folder``, like the folder
-# filters.
-AUTHORITY_EXCLUDED_FOLDERS = ("Spam",)
-
-# Claimants (per-message keys) whose From sender's person entity carries
-# the bound class, outside ``AUTHORITY_EXCLUDED_FOLDERS``. Bind the class
-# followed by the excluded folders.
-# Driven from ``idx_entities_authority`` into the participant address
-# index.
-_SENDER_CLASS_MESSAGES = (
-    # The f-string adds ``?`` placeholders only; the folders are bound.
-    "SELECT p.claimant_id FROM entities e "  # nosec B608
-    "JOIN message_participants p ON p.address = e.canonical_key AND p.role = 'from' "
-    "JOIN messages am ON am.claimant_id = p.claimant_id "
-    "WHERE e.kind = 'person' AND e.authority_class = ? "
-    f"AND am.folder NOT IN ({','.join('?' * len(AUTHORITY_EXCLUDED_FOLDERS))})"
-)
 
 
 class VectorLanesUnavailableError(RuntimeError):
@@ -108,30 +59,6 @@ class VectorLanesUnavailableError(RuntimeError):
         )
 
 
-def canonical_addr(value: str) -> str:
-    """Extract the bare lowercased email from a display string.
-
-    Mirrors ``indexer.threader.canonical_addr`` (the two services are separate
-    ``uv`` projects, so the helper is duplicated intentionally until a shared
-    package exists). Returns ``""`` when no ``@``-bearing address is
-    recoverable, so a callee can distinguish "no email found" from a
-    successful normalization.
-    """
-    if not value:
-        return ""
-    try:
-        _, addr = parseaddr(value)
-    except Exception:
-        # parseaddr recurses on nested comments. Stored senders and
-        # participants are indexed mail, so one hostile entry must count
-        # as "no address", not abort a search whose filter is valid.
-        return ""
-    addr = addr.strip().lower()
-    if "@" not in addr:
-        return ""
-    return addr
-
-
 # When any filter (folder, sender, date range, attachment flag) is active,
 # the filtered result set is a subset of the raw ranked candidates. Pulling
 # only ``limit * 2`` raw candidates means a filter can wipe out the page —
@@ -139,16 +66,6 @@ def canonical_addr(value: str) -> str:
 # are present to preserve recall.
 _UNFILTERED_OVERSAMPLE = 2
 _FILTERED_OVERSAMPLE = 4
-
-# Folders whose mail stays synced and indexed but is left out of
-# mailbox-wide retrieval unless the caller names them (#441). Under
-# mirror retention a deleted message lives on as its Trash copy until
-# it is purged from Trash. Matched exactly, as ``folders`` filters are.
-# Thread searches leave out a thread only when every message of it is
-# in one of these folders (the per-message membership the ``folders``
-# filter uses); message and attachment lookups leave out the messages
-# filed there. Lookups of one named thread or message are unaffected.
-DEFAULT_EXCLUDED_FOLDERS = ("Trash",)
 
 # Oversample factor for the chunk and attachment FTS lanes, where one
 # thread can legitimately own many matching rows (a long thread, a
@@ -261,52 +178,6 @@ def _changed_reply_subjects(thread_subject: str, subjects: list[str]) -> list[st
 # the SQLite build, so lookups over an unbounded ID list batch under it
 # (same bound as the indexer's).
 _IN_CLAUSE_BATCH_SIZE = 500
-
-
-def _addr_matches(haystack: list[str], query_lower: str) -> bool:
-    """True if ``query_lower`` matches an address string in ``haystack``.
-
-    Match mode depends on the shape of the query:
-
-    * A full address (``bob@example.com``) is compared by canonical
-      equality so that case variation in the stored display string
-      (``Bob@Example.com``, ``Bob Smith <bob@example.com>``) still matches.
-    * A bare name (``bob``) or domain fragment (``@example.com``,
-      ``example.com``) keeps substring behavior against the display
-      string, both sides casefolded (Unicode caseless: ``STRASSE``
-      matches ``Straße``), since those shapes cannot canonicalize.
-    """
-    canonical_query = canonical_addr(query_lower)
-    # A canonicalizable full address requires a non-empty local part.
-    # ``canonical_addr`` still returns the input for a bare domain like
-    # ``@example.com`` because the ``@`` check passes, but equality against
-    # ``bob@example.com`` would then miss. Route the domain-only shape through
-    # the substring fallback so ``"@example.com"`` still behaves like a
-    # domain filter.
-    if canonical_query and not canonical_query.startswith("@"):
-        return any(canonical_addr(s) == canonical_query for s in haystack)
-    query_folded = query_lower.casefold()
-    return any(query_folded in s.casefold() for s in haystack)
-
-
-def _matches_sender(result, from_addr_lower: str) -> bool:
-    """True if ``from_addr_lower`` matches one of the thread's senders.
-
-    Senders is the list of ``From`` addresses recorded on the thread.
-    See ``_addr_matches`` for the full-address vs. substring match rules.
-    """
-    return _addr_matches(result.senders, from_addr_lower)
-
-
-def _matches_participant(result, participant_lower: str) -> bool:
-    """True if ``participant_lower`` matches anyone on the thread.
-
-    Participants is the broader From + To + Cc set, so this surfaces
-    threads a person was on in *any* role — distinct from
-    ``_matches_sender``, which is From-line only. See ``_addr_matches``
-    for the full-address vs. substring match rules.
-    """
-    return _addr_matches(result.participants, participant_lower)
 
 
 def _is_fts_query_token_char(ch: str) -> bool:
@@ -1019,10 +890,6 @@ class MessagePage:
     address_matches: dict[str, AddressMatches] = field(default_factory=dict)
 
 
-# Each ``text`` term is its own FTS subquery; bound the count so one call
-# cannot fan out into hundreds of them.
-_MAX_TEXT_TERMS = 16
-
 _INVALID_CURSOR = "invalid cursor; restart the query without a cursor"
 
 
@@ -1032,71 +899,6 @@ def _sql_casefold(value):
     expands ``ß`` so ``STRASSE`` matches ``Straße``. Compare against a
     needle folded the same way."""
     return value.casefold() if isinstance(value, str) else value
-
-
-def _text_terms(text: str) -> list[str]:
-    """Split ``text`` into distinct words exactly as the chunk index does.
-
-    ``message_chunks_fts`` tokenizes with ``porter unicode61``. Hand-rolled
-    splitting kept drifting from unicode61 — combining marks, underscores
-    (separators to FTS), private-use characters (word characters to FTS)
-    — and every drift silently changed an exhaustive count. So the words
-    come from unicode61 itself: a throwaway in-memory FTS5 table and its
-    ``fts5vocab`` instance view, in text order. Porter is left out so each
-    word stays unstemmed; the index's tokenizer stems it once at MATCH
-    time. unicode61's case and diacritic folding is idempotent, so a word
-    quoted as a phrase re-tokenizes to itself. The text is not normalized
-    (indexed chunks are stored as written).
-    """
-    with closing(sqlite3.connect(":memory:")) as conn:
-        conn.execute("CREATE VIRTUAL TABLE t USING fts5(x, tokenize='unicode61')")
-        conn.execute("CREATE VIRTUAL TABLE v USING fts5vocab(t, 'instance')")
-        conn.execute("INSERT INTO t(x) VALUES (?)", (text,))
-        rows = conn.execute("SELECT term FROM v ORDER BY offset").fetchall()
-    return list(dict.fromkeys(row[0] for row in rows))
-
-
-def address_match_mode(value: str) -> str:
-    """How a sender / recipient / participant predicate matches.
-
-    ``"exact"`` when ``value`` holds a full address (``jane@example.com``,
-    ``Jane <jane@example.com>``): canonical equality, an indexed lookup.
-    ``"substring"`` otherwise (a domain like ``@example.com`` or a name
-    fragment): case-insensitive substring of the address or display name.
-    """
-    # Nested-comment input that makes parseaddr recurse canonicalizes to
-    # "", so it can only be a substring.
-    canonical = canonical_addr(value)
-    return "exact" if canonical and not canonical.startswith("@") else "substring"
-
-
-def _participant_clause(value: str, roles: tuple[str, ...], params: list) -> str:
-    """SQL restricting ``messages m`` to those where ``value`` appears in
-    one of ``roles``; appends the bound values to ``params``."""
-    role_sql = ",".join(["?"] * len(roles))
-    if address_match_mode(value) == "exact":
-        params.extend([canonical_addr(value), *roles])
-        return (
-            "m.claimant_id IN (SELECT claimant_id FROM message_participants "  # nosec B608
-            f"WHERE address = ? AND role IN ({role_sql}))"
-        )
-    return (
-        "m.claimant_id IN (SELECT claimant_id FROM message_participants "  # nosec B608
-        f"WHERE {_substring_participant_rows(value, roles, params)})"
-    )
-
-
-def _substring_participant_rows(value: str, roles: tuple[str, ...], params: list) -> str:
-    """SQL selecting the ``message_participants`` rows in ``roles`` whose
-    address or display name contains ``value``; appends the bound values
-    to ``params``."""
-    role_sql = ",".join(["?"] * len(roles))
-    # Addresses are stored lowercased; names fold with ``mcp_casefold``.
-    params.extend([*roles, value.strip().lower(), value.strip().casefold()])
-    return (
-        f"role IN ({role_sql}) "  # nosec B608
-        "AND (instr(address, ?) > 0 OR instr(mcp_casefold(name), ?) > 0)"
-    )
 
 
 def _address_matches(
@@ -3113,77 +2915,58 @@ class Database:
         participant: str | None = None,
         authority_class: str | None = None,
     ) -> list[ThreadResult]:
-        date_from_dt, date_to_dt = _parse_date_range(date_from, date_to)
+        """The threads of ``results`` passing every filter, in order.
 
+        The filters are the leaves of ``predicates.search_emails_leaves``,
+        each decided against the thread on its own: by the leaf's thread
+        test where it has one (the sender and participant filters on
+        the thread's recorded senders and participants, the date bounds
+        on its effective-time span, the attachment flag on its own),
+        otherwise by the existence of a message of the thread satisfying
+        the leaf's SQL (folders, authority class). So one message can
+        satisfy the sender filter and another the date filter. A pure
+        filter: survivors keep their fused order and score.
+        ``_has_post_fusion_filter`` counts these filters so the caller
+        oversampled raw candidates and a deep match still survives.
+        """
         filtered = results
-        if from_addr:
-            fa = from_addr.lower()
-            # Filter by sender (the From-only subset, not all participants).
-            filtered = [r for r in filtered if _matches_sender(r, fa)]
-        if participant:
-            # Filter by anyone on the thread — From, To, or Cc. Distinct
-            # from ``from_addr``, which is sender-only. Runs post-fusion
-            # like the sender filter; ``_has_post_fusion_filter`` counts
-            # it so the caller oversampled raw candidates and a deep
-            # match still survives the filter.
-            pa = participant.lower()
-            filtered = [r for r in filtered if _matches_participant(r, pa)]
-        # Compare as datetimes rather than as strings: a user-supplied
-        # date-only ``date_to="2024-12-31"`` was previously compared against
-        # stored ISO timestamps like ``"2024-12-31T10:00:00+00:00"`` and
-        # excluded the entire last day because the stored string sorts
-        # lexicographically greater than the bare date. ``_parse_filter_date``
-        # promotes date-only values to start/end of day in UTC.
-        if date_from_dt is not None:
-            filtered = [r for r in filtered if r.date_last >= date_from_dt]
-        if date_to_dt is not None:
-            filtered = [r for r in filtered if r.date_first <= date_to_dt]
-        if has_attachments is not None:
-            filtered = [r for r in filtered if r.has_attachments == has_attachments]
-        if folders and filtered:
-            # Last, so the lookup covers only the survivors of the
-            # in-memory filters.
-            members = self._threads_in_folders([r.thread_id for r in filtered], folders)
-            filtered = [r for r in filtered if r.thread_id in members]
-        if authority_class and filtered:
-            # A pure filter: survivors keep their fused order and score.
-            sent = self._threads_sent_by_class([r.thread_id for r in filtered], authority_class)
-            filtered = [r for r in filtered if r.thread_id in sent]
+        for leaf in search_emails_leaves(
+            folders=folders,
+            from_addr=from_addr,
+            date_from=date_from,
+            date_to=date_to,
+            has_attachments=has_attachments,
+            participant=participant,
+            authority_class=authority_class,
+        ):
+            if not filtered:
+                break
+            thread_test = LEAVES[leaf.name].thread_test
+            if thread_test is not None:
+                test = thread_test(leaf.value)
+                filtered = [r for r in filtered if test(r)]
+            else:
+                # A lookup covering only the survivors so far.
+                matching = self._threads_with_message([r.thread_id for r in filtered], leaf)
+                filtered = [r for r in filtered if r.thread_id in matching]
         return filtered
 
-    def _threads_sent_by_class(self, thread_ids: list[str], authority_class: str) -> set[str]:
-        """The subset of ``thread_ids`` with a message whose From sender
-        the indexer classified as ``authority_class``. Batched like
-        ``_threads_in_folders``."""
+    def _threads_with_message(self, thread_ids: list[str], leaf: Leaf) -> set[str]:
+        """The subset of ``thread_ids`` with a message satisfying ``leaf``:
+        for ``folder``, the same per-message membership ``list_threads``
+        uses (#415); for ``authority_class``, a message whose From sender
+        the indexer classified so. One connection; the id list is batched
+        under ``_IN_CLAUSE_BATCH_SIZE``."""
+        predicate, params = compile_leaves([leaf])
         found: set[str] = set()
         with closing(self._connect()) as conn:
             for start in range(0, len(thread_ids), _IN_CLAUSE_BATCH_SIZE):
                 batch = thread_ids[start : start + _IN_CLAUSE_BATCH_SIZE]
                 id_marks = ",".join("?" * len(batch))
                 rows = conn.execute(
-                    "SELECT DISTINCT thread_id FROM messages "  # nosec B608
-                    f"WHERE thread_id IN ({id_marks}) "
-                    f"AND claimant_id IN ({_SENDER_CLASS_MESSAGES})",
-                    [*batch, authority_class, *AUTHORITY_EXCLUDED_FOLDERS],
-                ).fetchall()
-                found.update(r["thread_id"] for r in rows)
-        return found
-
-    def _threads_in_folders(self, thread_ids: list[str], folders: list[str]) -> set[str]:
-        """The subset of ``thread_ids`` with a message filed in one of
-        ``folders``: the same per-message membership ``list_threads``
-        uses (#415). One connection; the id list is batched under
-        ``_IN_CLAUSE_BATCH_SIZE``."""
-        found: set[str] = set()
-        folder_marks = ",".join("?" * len(folders))
-        with closing(self._connect()) as conn:
-            for start in range(0, len(thread_ids), _IN_CLAUSE_BATCH_SIZE):
-                batch = thread_ids[start : start + _IN_CLAUSE_BATCH_SIZE]
-                id_marks = ",".join("?" * len(batch))
-                rows = conn.execute(
-                    "SELECT DISTINCT thread_id FROM messages "  # nosec B608
-                    f"WHERE thread_id IN ({id_marks}) AND folder IN ({folder_marks})",
-                    [*batch, *folders],
+                    "SELECT DISTINCT m.thread_id FROM messages m "  # nosec B608
+                    f"WHERE m.thread_id IN ({id_marks}) AND {predicate}",
+                    [*batch, *params],
                 ).fetchall()
                 found.update(r["thread_id"] for r in rows)
         return found
@@ -3203,7 +2986,8 @@ class Database:
 
         The filters select whole threads (``_apply_filters``); this asks
         the same question of each message on its own, from its indexed
-        metadata, with ``query_messages``'s per-message predicates:
+        metadata, with the same leaves as ``query_messages``
+        (``predicates.message_scope_leaves``):
 
         - ``from_addr``: the message's From role; ``participant``: its
           From, To or Cc, every recipient counted however long the list
@@ -3218,26 +3002,15 @@ class Database:
         Labels only: nothing here selects or ranks. One connection; the
         thread list is batched under ``_IN_CLAUSE_BATCH_SIZE``.
         """
-        params: list = []
-        clauses: list[str] = []
-        if from_addr:
-            clauses.append(_participant_clause(from_addr, ("from",), params))
-        if participant:
-            clauses.append(_participant_clause(participant, ("from", "to", "cc"), params))
-        if folders:
-            clauses.append(f"m.folder IN ({','.join('?' * len(folders))})")
-            params.extend(folders)
-        else:
-            clauses.append(f"m.folder NOT IN ({','.join('?' * len(DEFAULT_EXCLUDED_FOLDERS))})")
-            params.extend(DEFAULT_EXCLUDED_FOLDERS)
-        date_from_iso, date_to_iso = _normalize_date_range(date_from, date_to)
-        if date_from_iso is not None:
-            clauses.append("m.effective_at >= ?")
-            params.append(date_from_iso)
-        if date_to_iso is not None:
-            clauses.append("m.effective_at <= ?")
-            params.append(date_to_iso)
-        predicate = " AND ".join(clauses)
+        predicate, params = compile_leaves(
+            message_scope_leaves(
+                from_addr=from_addr,
+                participant=participant,
+                folders=folders,
+                date_from=date_from,
+                date_to=date_to,
+            )
+        )
 
         claimants: set[str] = set()
         seen_threads: set[str] = set()
@@ -3741,92 +3514,40 @@ class Database:
         words or more than ``_MAX_TEXT_TERMS``, or a malformed / foreign
         cursor.
         """
-        sender, recipient, participant, subject, text, folder = (
-            v.strip() if v and v.strip() else None
-            for v in (sender, recipient, participant, subject, text, folder)
+        leaves = query_messages_leaves(
+            sender=sender,
+            recipient=recipient,
+            participant=participant,
+            subject=subject,
+            text=text,
+            folder=folder,
+            date_from=date_from,
+            date_to=date_to,
+            has_attachments=has_attachments,
+            authority_class=authority_class,
+            seen=seen,
+            flagged=flagged,
         )
-        date_from_iso, date_to_iso = _normalize_date_range(date_from, date_to)
-        authority_class = normalize_authority_class(authority_class)
-
-        where: list[str] = []
-        params: list = []
         address_filters = [
-            (name, value, roles)
-            for name, value, roles in (
-                ("sender", sender, ("from",)),
-                ("recipient", recipient, ("to", "cc")),
-                ("participant", participant, ("from", "to", "cc")),
-            )
-            if value
+            (leaf.name, leaf.value, ADDRESS_ROLES[leaf.name])
+            for leaf in leaves
+            if leaf.name in ADDRESS_ROLES
         ]
-        for _, value, roles in address_filters:
-            where.append(_participant_clause(value, roles, params))
-        if subject:
-            where.append("instr(mcp_casefold(m.subject), ?) > 0")
-            params.append(subject.casefold())
-        if text:
-            terms = _text_terms(text)
-            if not terms:
-                raise InvalidFilterError("text", "text must contain at least one word")
-            if len(terms) > _MAX_TEXT_TERMS:
-                raise InvalidFilterError("text", f"text supports at most {_MAX_TEXT_TERMS} words")
-            # One subquery per word, so the words may fall in different
-            # chunks of the same message. Each is a quoted FTS phrase;
-            # unicode61 never keeps a quote inside a token, but doubling
-            # any (FTS5 string escaping) keeps FTS syntax out regardless.
-            for term in terms:
-                where.append(
-                    "m.claimant_id IN (SELECT c.claimant_id FROM message_chunks_fts f "
-                    "JOIN message_chunks c ON c.fts_rowid = f.rowid "
-                    "WHERE message_chunks_fts MATCH ? AND c.attachment_id IS NULL)"
-                )
-                params.append('"' + term.replace('"', '""') + '"')
-        if folder:
-            where.append("m.folder = ?")
-            params.append(folder)
-        else:
-            # Without a folder, messages filed in an excluded folder are
-            # left out (#441); ``folder="Trash"`` lists them.
-            marks = ",".join("?" * len(DEFAULT_EXCLUDED_FOLDERS))
-            where.append(f"m.folder NOT IN ({marks})")
-            params.extend(DEFAULT_EXCLUDED_FOLDERS)
-        if date_from_iso is not None:
-            where.append("m.effective_at >= ?")
-            params.append(date_from_iso)
-        if date_to_iso is not None:
-            where.append("m.effective_at <= ?")
-            params.append(date_to_iso)
-        if has_attachments is not None:
-            where.append("m.has_attachments = ?")
-            params.append(1 if has_attachments else 0)
-        for column, state in (("seen", seen), ("flagged", flagged)):
-            if state is not None:
-                where.append(f"m.{column} = ?")
-                params.append(1 if state else 0)
-        if authority_class:
-            where.append(f"m.claimant_id IN ({_SENDER_CLASS_MESSAGES})")
-            params.extend([authority_class, *AUTHORITY_EXCLUDED_FOLDERS])
+        where_sql, params = compile_leaves(leaves)
 
         # A cursor is only meaningful for the predicates it was issued
         # under; bind it to a digest of them.
-        digest = hashlib.sha256(
-            json.dumps(
-                [sender, recipient, participant, subject, text, folder]
-                + [date_from_iso, date_to_iso, has_attachments, authority_class, seen, flagged]
-            ).encode()
-        ).hexdigest()[:16]
-        page_where = list(where)
+        digest = leaf_digest(leaves)
+        page_where_sql = where_sql
         page_params = list(params)
         offset = 0
         if cursor:
             last_at, last_id, offset = _decode_cursor(cursor, digest)
             # Row-value form: SQLite seeks idx_messages_effective to the
             # cursor; the equivalent OR expansion sorted every earlier row.
-            page_where.append("(m.effective_at, m.claimant_id) < (?, ?)")
+            page_where_sql += " AND (m.effective_at, m.claimant_id) < (?, ?)"
             page_params += [last_at, last_id]
 
-        where_sql = " AND ".join(where) or "1"
-        page_where_sql = " AND ".join(page_where) or "1"
         with closing(self._connect()) as conn:
             # One read transaction: the count, the page, and its
             # participants come from the same snapshot even while the
@@ -3894,102 +3615,3 @@ def _has_valid_distance(row: sqlite3.Row) -> bool:
     """
     score = row["score"]
     return score is not None and math.isfinite(score)
-
-
-def _parse_date_range(
-    date_from: str | None, date_to: str | None
-) -> tuple[datetime | None, datetime | None]:
-    """Parse the ``date_from`` / ``date_to`` filters into tz-aware UTC
-    bounds, ``None`` for a bound that was not supplied.
-
-    Every tool that takes both bounds parses them here, so they all
-    reject the same input. Raises ``InvalidFilterError`` (a
-    ``ValueError``) on an unparseable value, and on ``date_from`` after
-    ``date_to`` (#312): that interval is empty, but the thread overlap
-    predicates (``date_last >= from AND date_first <= to``) would still
-    accept a thread spanning it. The comparison runs on the parsed UTC
-    instants, after date-only promotion, so a single date names its whole
-    day and two offsets for one instant compare equal.
-    """
-    start = (
-        _parse_filter_date(date_from, end_of_day=False, _field_name="date_from")
-        if date_from
-        else None
-    )
-    end = _parse_filter_date(date_to, end_of_day=True, _field_name="date_to") if date_to else None
-    if start is not None and end is not None and start > end:
-        raise InvalidFilterError("date_from/date_to", "date_from must not be after date_to")
-    return start, end
-
-
-def validate_date_range(
-    date_from: str | None, date_to: str | None
-) -> tuple[str | None, str | None]:
-    """Raise ``InvalidFilterError`` for a date filter pair the search
-    methods would reject. Tool handlers call it on entry so a bad range
-    fails before any embedding, retrieval or model call; the database
-    methods still check for themselves.
-
-    Returns the UTC bounds the search methods apply
-    (``_normalize_date_range``), so a tool can echo them (#802).
-    """
-    return _normalize_date_range(date_from, date_to)
-
-
-def _normalize_date_range(
-    date_from: str | None, date_to: str | None
-) -> tuple[str | None, str | None]:
-    """``_parse_date_range`` as ISO 8601 strings for SQL pushdown, where
-    they are compared lexicographically against stored ``+00:00``
-    timestamps (``date_first`` / ``date_last`` / ``effective_at``).
-    """
-    start, end = _parse_date_range(date_from, date_to)
-    return (
-        start.isoformat() if start is not None else None,
-        end.isoformat() if end is not None else None,
-    )
-
-
-def _parse_filter_date(
-    value: str, *, end_of_day: bool, _field_name: str = "date filter"
-) -> datetime:
-    """Parse a user-supplied date filter into a tz-aware UTC ``datetime``.
-
-    Accepts:
-    - date-only values, meaning any form ``date.fromisoformat`` accepts
-      (``"2024-12-31"``, ``"20241231"``, ``"2025-W01-2"``, ...), with or
-      without a trailing ``Z``: promoted to ``00:00:00`` when used as a
-      lower bound, ``23:59:59.999999`` when used as an upper bound, both
-      in UTC — so the filter includes the full day the user named (#330).
-    - any ISO 8601 datetime ``datetime.fromisoformat`` accepts, including
-      a trailing ``Z``: the instant it names, for either bound.
-
-    Naive datetimes are assumed to be UTC. Offset-aware values are
-    converted to UTC before being returned, so callers that feed the
-    result's ``isoformat()`` into SQL string comparisons against stored
-    UTC timestamps compare the same instant rather than two offset-shifted
-    strings that happen to sort differently.
-    """
-    # Date-only is whatever the date parser accepts, not a string shape:
-    # a length check missed the basic and week-date forms (#330). The
-    # ``Z`` is dropped because the date parser rejects it and it only
-    # restates the UTC the day is already read in.
-    try:
-        day = date.fromisoformat(value.removesuffix("Z"))
-    except ValueError:
-        day = None
-    if day is not None:
-        return datetime.combine(day, time.max if end_of_day else time.min, tzinfo=UTC)
-
-    try:
-        dt = datetime.fromisoformat(value)
-    except ValueError as exc:
-        raise InvalidFilterError(_field_name, f"{_field_name}: invalid datetime {value!r}") from exc
-    if dt.tzinfo is None:
-        return dt.replace(tzinfo=UTC)
-    try:
-        return dt.astimezone(UTC)
-    except OverflowError as exc:
-        # A parseable value at datetime's limit with an outward offset
-        # ("0001-01-01T00:00:00+14:00") has no UTC instant.
-        raise InvalidFilterError(_field_name, f"{_field_name}: invalid datetime {value!r}") from exc
