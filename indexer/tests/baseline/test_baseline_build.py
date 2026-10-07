@@ -4,22 +4,35 @@ The golden questions themselves run in ``mcp-server/tests/baseline``;
 these keep the indexer-side inputs deterministic and the build clean.
 """
 
+import ast
+import inspect
+import io
 import json
 import logging
 import math
+import os
 import re
+import shutil
 import sys
 from pathlib import Path
 
+import pypdf
 import pytest
+from PIL import Image
 from src.database import EMBEDDING_DIM, Database
 from src.extractors import EXTRACTOR_VERSIONS, _resolve_extractor
 
-from tests.baseline.build import build, check_capped_attachments
+from tests.baseline.build import OCR_BINARIES, build, check_capped_attachments
 from tests.baseline.corpus import (
+    _FIXTURES,
     CAPPED_ATTACHMENT_MAX_BYTES,
     CAPPED_ATTACHMENT_MAX_CHARS,
+    CAPPED_OCR_MAX_PAGES,
     CHAR_CAPPED_FILENAME,
+    OCR_CAPPED_PDF_FILENAME,
+    OCR_IMAGE_FILENAME,
+    OCR_IMAGE_TEXT,
+    OCR_PDF_PAGES,
     THREADS,
     TOO_LARGE_FILENAME,
     _docx,
@@ -27,9 +40,120 @@ from tests.baseline.corpus import (
     thread_id,
     write_maildir,
 )
+from tests.baseline.fixtures import generate
 from tests.baseline.hash_embedder import HashEmbedder, embed_text
 
 _GOLDEN = Path(__file__).parents[3] / "mcp-server" / "tests" / "baseline" / "golden.json"
+
+# The build runs OCR on t90 and t91 (#908), so off CI the tests that
+# build skip without Tesseract and Poppler, as the catdoc tests do
+# (``test_legacy_office.py``); CI installs both, and
+# ``test_ocr_binaries_are_installed_in_ci`` fails there if one is missing.
+_IN_CI = bool(os.environ.get("CI"))
+requires_ocr = pytest.mark.skipif(
+    any(shutil.which(binary) is None for binary in OCR_BINARIES) and not _IN_CI,
+    reason="tesseract, pdftoppm or pdfinfo is not installed (brew install tesseract poppler)",
+)
+
+
+def _norm(text: str) -> str:
+    """Case-folded with whitespace normalised: how OCR'd words are matched."""
+    return " ".join(text.split()).casefold()
+
+
+def _aggregate(caplog, field: str) -> int:
+    """The sum of ``field`` over the build's ``attachments n=...`` lines."""
+    values = [
+        int(m.group(1))
+        for r in caplog.records
+        if (m := re.search(rf"^attachments n=\d+ .*\b{field}=(\d+)\b", r.getMessage()))
+    ]
+    assert values
+    return sum(values)
+
+
+def test_ocr_binaries_are_installed_in_ci():
+    """The building tests skip only off CI: CI installs Tesseract and
+    Poppler, so a missing binary there is a failure, not a skip."""
+    if not _IN_CI:
+        pytest.skip("only checked in CI")
+    assert all(shutil.which(binary) is not None for binary in OCR_BINARIES)
+
+
+def test_ocr_binaries_cover_the_executables_the_ocr_path_starts():
+    """Review round 2 on #908 (AGENTS.md: a list that must cover every
+    item is checked against the code, not against itself): the preflight
+    list equals the commands the OCR libraries start. pytesseract names
+    its command in ``tesseract_cmd``; pdf2image names each Poppler
+    command in a ``_get_command_path("...")`` call. Excluded, with the
+    reason checked: ``pdftocairo``, which pdf2image runs only with
+    ``use_pdftocairo=True``, and the PDF extractor never passes it."""
+    import pdf2image.pdf2image as pdf2image_module
+    import pytesseract
+    from src.extractors import pdf as pdf_extractor
+
+    started = {pytesseract.pytesseract.tesseract_cmd}
+    started |= set(re.findall(r'_get_command_path\("(\w+)"', inspect.getsource(pdf2image_module)))
+    excluded = {"pdftocairo"}
+    assert excluded < started
+    assert "pdftocairo" not in inspect.getsource(pdf_extractor)
+    assert started - excluded == set(OCR_BINARIES)
+
+
+def test_ocr_fixtures_carry_no_metadata():
+    """#908: the committed images name no author or tool: the PNG has
+    only its header, data and end chunks, and the PDF has no Info
+    dictionary, no text layer and ``OCR_PDF_PAGES`` pages."""
+    png = (_FIXTURES / OCR_IMAGE_FILENAME).read_bytes()
+    chunks, offset = [], 8
+    while offset < len(png):
+        length = int.from_bytes(png[offset : offset + 4], "big")
+        chunks.append(png[offset + 4 : offset + 8])
+        offset += 12 + length
+    assert chunks == [b"IHDR", b"IDAT", b"IEND"]
+    raw = (_FIXTURES / OCR_CAPPED_PDF_FILENAME).read_bytes()
+    assert b"/Info" not in raw
+    reader = pypdf.PdfReader(io.BytesIO(raw))
+    assert reader.metadata is None
+    assert [page.extract_text() for page in reader.pages] == [""] * len(OCR_PDF_PAGES)
+    assert len(OCR_PDF_PAGES) == CAPPED_OCR_MAX_PAGES + 1
+
+
+def test_generator_reads_the_corpus_text_from_its_source():
+    """Review round 1 on #908: the generator must run before the images
+    exist, so it reads the corpus's constants from the source instead of
+    importing the corpus, which reads the images at import."""
+    tree = ast.parse(Path(generate.__file__).read_text(encoding="utf-8"))
+    imported = {node.module or "" for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)}
+    imported |= {
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    }
+    assert not any("corpus" in name for name in imported), imported
+    assert (
+        generate.OCR_IMAGE_FILENAME,
+        generate.OCR_IMAGE_TEXT,
+        generate.OCR_CAPPED_PDF_FILENAME,
+        generate.OCR_PDF_PAGES,
+    ) == (OCR_IMAGE_FILENAME, OCR_IMAGE_TEXT, OCR_CAPPED_PDF_FILENAME, OCR_PDF_PAGES)
+    with pytest.raises(LookupError, match="NOT_A_CORPUS_CONSTANT"):
+        generate._corpus_constant("NOT_A_CORPUS_CONSTANT")
+
+
+def test_generator_writes_both_images(tmp_path):
+    """The recipe writes a grey PNG of the fixture size and a PDF with
+    one image page per line, no text layer and no Info dictionary."""
+    png, pdf = generate.write(tmp_path)
+    assert (png.name, pdf.name) == (OCR_IMAGE_FILENAME, OCR_CAPPED_PDF_FILENAME)
+    with Image.open(png) as image:
+        assert (image.format, image.mode, image.size) == ("PNG", "L", generate._SIZE)
+    raw = pdf.read_bytes()
+    assert b"/Info" not in raw
+    reader = pypdf.PdfReader(io.BytesIO(raw))
+    assert reader.metadata is None
+    assert [page.extract_text() for page in reader.pages] == [""] * len(OCR_PDF_PAGES)
 
 
 def _read_tree(root: Path) -> dict[str, bytes]:
@@ -73,6 +197,7 @@ class TestHashEmbedder:
 
 
 class TestBuild:
+    @requires_ocr
     def test_indexes_whole_corpus(self, tmp_path):
         out = tmp_path / "out"
         assert build(out, _GOLDEN) == {"queued": 0, "dead": 0}
@@ -96,6 +221,7 @@ class TestBuild:
             golden["evidence_queries"]
         )
 
+    @requires_ocr
     def test_embeds_answer_eval_case_questions(self, tmp_path):
         cases = tmp_path / "cases.json"
         question = "Synthetic question about the roof?"
@@ -110,6 +236,7 @@ class TestBuild:
         ) | {question}
         assert vectors[question] == embed_text(question)
 
+    @requires_ocr
     def test_attachment_shapes_extract_as_documented(self, tmp_path, caplog):
         """#906: t78's real PDF and t81's PDF under a ``.txt`` name are
         extracted by the digital PDF extractor (t81 dispatched by MIME);
@@ -153,6 +280,7 @@ class TestBuild:
         assert ticket[4:] == ("success", f"pdf-digital@{EXTRACTOR_VERSIONS['pdf']}")
         assert len({pdf[3], pattern[3], ticket[3]}) == 3
 
+    @requires_ocr
     def test_format_shapes_extract_as_documented(self, tmp_path, caplog):
         """#909: t82's DOCX and t83's XLSX extract (the XLSX's second
         sheet included), t84's JSON is ``unsupported``, t85's blank text
@@ -212,6 +340,7 @@ class TestBuild:
         assert "Corrigan" in text["crossing.txt"]
         assert text["ferry-crossing.eml"] is None
 
+    @requires_ocr
     def test_capped_shapes_hit_the_build_caps(self, tmp_path, caplog):
         """#907: under the build's lowered caps, t88's attachment is
         ``too_large`` (no extractor, no text) and t89's is ``success``
@@ -266,6 +395,7 @@ class TestBuild:
         (source,) = [a.text for m in THREADS[89] for a in m.attachments]
         assert isinstance(source, str) and source.index("Kittiwake") > CAPPED_ATTACHMENT_MAX_CHARS
 
+    @requires_ocr
     def test_build_refuses_an_unexpected_capped_attachment(self, tmp_path):
         """#907: the lowered caps must cut only t88 and t89; a corpus edit
         that pushes another attachment past either cap fails the build."""
@@ -299,6 +429,72 @@ class TestBuild:
         here = payloads()
         monkeypatch.setattr(sys, "platform", "win32")
         assert payloads() == here
+
+    @pytest.mark.parametrize("binary", OCR_BINARIES)
+    def test_build_fails_naming_a_missing_ocr_binary(self, tmp_path, monkeypatch, binary):
+        """#908: without Tesseract or Poppler the build stops up front
+        with fixed text naming the binary, instead of indexing t90 and
+        t91 as failed extractions."""
+        monkeypatch.setattr(
+            shutil, "which", lambda name, *a, **k: None if name == binary else f"/usr/bin/{name}"
+        )
+        out = tmp_path / "out"
+        with pytest.raises(RuntimeError, match=rf"need {binary} on PATH"):
+            build(out, _GOLDEN)
+        assert not out.exists()
+
+    @requires_ocr
+    def test_ocr_shapes_extract_as_documented(self, tmp_path, caplog):
+        """#908: t90's PNG is read by the image OCR extractor, and t91's
+        scanned PDF by the PDF extractor's OCR fallback up to the build's
+        lowered page cap: its first pages are extracted and the last is
+        not, with one ``pdf OCR capped`` WARNING and the aggregate
+        counts. OCR'd words are matched case-insensitively with
+        whitespace normalised, since Tesseract versions differ."""
+        out = tmp_path / "out"
+        with caplog.at_level(logging.INFO, logger="indexer"):
+            build(out, _GOLDEN)
+
+        capped = [r for r in caplog.records if "OCR capped" in r.getMessage()]
+        assert [(r.levelno, r.getMessage()) for r in capped] == [
+            (
+                logging.WARNING,
+                f"pdf OCR capped at {CAPPED_OCR_MAX_PAGES} of {len(OCR_PDF_PAGES)} scanned pages",
+            )
+        ]
+        assert _aggregate(caplog, "ocr_capped_pdfs") == 1
+        assert _aggregate(caplog, "ocr_pages_skipped") == len(OCR_PDF_PAGES) - CAPPED_OCR_MAX_PAGES
+        for line in (OCR_IMAGE_TEXT, *OCR_PDF_PAGES):
+            assert _norm(line).split()[0] not in caplog.text.casefold()
+
+        db = Database(out / "mail.db")
+        try:
+            rows = db._conn.execute(
+                "SELECT a.filename, a.content_type, e.extraction_status, e.extractor,"
+                " e.extracted_text"
+                " FROM attachments a JOIN attachment_extractions e USING (attachment_id)"
+                " WHERE a.thread_id IN (?, ?) ORDER BY a.thread_id",
+                (thread_id(90), thread_id(91)),
+            ).fetchall()
+        finally:
+            db.close()
+        image, scan = rows
+        assert image[:4] == (
+            OCR_IMAGE_FILENAME,
+            "image/png",
+            "success",
+            f"image-ocr@{EXTRACTOR_VERSIONS['image']}",
+        )
+        assert _norm(OCR_IMAGE_TEXT) in _norm(image[4])
+        assert scan[:4] == (
+            OCR_CAPPED_PDF_FILENAME,
+            "application/pdf",
+            "success",
+            f"pdf-ocr@{EXTRACTOR_VERSIONS['pdf']}",
+        )
+        read, (lost,) = OCR_PDF_PAGES[:CAPPED_OCR_MAX_PAGES], OCR_PDF_PAGES[CAPPED_OCR_MAX_PAGES:]
+        assert all(_norm(page) in _norm(scan[4]) for page in read)
+        assert _norm(lost).split()[0] not in _norm(scan[4])
 
     def test_refuses_non_empty_output_dir(self, tmp_path):
         (tmp_path / "leftover").write_text("x")

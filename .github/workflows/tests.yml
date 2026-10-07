@@ -107,11 +107,14 @@ jobs:
 
       # catdoc runs the legacy .doc extractor, as in indexer/Dockerfile
       # (#935). Its tests skip only off CI: test_catdoc_is_installed_in_ci
-      # fails here if the binary is missing.
-      - name: Install catdoc
+      # fails here if the binary is missing. Tesseract and Poppler run
+      # the OCR shapes of the retrieval baseline (#908), which
+      # tests/baseline/test_baseline_build.py builds; those tests skip
+      # only off CI too (test_ocr_binaries_are_installed_in_ci).
+      - name: Install catdoc, Tesseract and Poppler
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends catdoc
+          sudo apt-get install -y --no-install-recommends catdoc tesseract-ocr poppler-utils
 
       # The legacy .ppt extractor's Java runtime and jars (#957), built by
       # the same Dockerfile stage the image copies. Its tests skip only
@@ -195,6 +198,14 @@ jobs:
         run: |
           (cd indexer && uv sync --locked --dev)
           (cd mcp-server && uv sync --locked --dev)
+
+      # The build OCRs the corpus's image and scanned-PDF attachments
+      # (#908) with Tesseract and Poppler, as in indexer/Dockerfile, and
+      # fails naming the missing binary.
+      - name: Install Tesseract and Poppler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends tesseract-ocr poppler-utils
 
       - name: Build baseline index
         working-directory: indexer
