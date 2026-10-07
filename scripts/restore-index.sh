@@ -12,11 +12,13 @@ set -Eeuo pipefail
 # matter). That container writes it next to the index,
 # refuses it unless PRAGMA integrity_check is ok, the application ID is
 # this project's and its schema version is not above the code's, then
-# removes the old index's -wal and -shm files and renames the copy over
-# the index. Removing the WAL first matters: an old WAL left beside the
-# restored file would be replayed into it. The two services are started
-# again in every case, and their startup lines (schema version, embedder
-# identity) are printed.
+# checkpoints the old index's WAL into it, removes its -wal and -shm
+# files and renames the copy over the index. Removing the WAL first
+# matters: an old WAL left beside the restored file would be replayed
+# into it. The indexer is started and its startup lines (schema version,
+# embedder identity) are printed; mcp-server starts once the indexer has
+# verified the restored index. A refused file leaves the index unchanged
+# and both services are started again.
 
 # Runs inside a one-off indexer container: python -c CODE, copy on stdin.
 RESTORE_PY='
@@ -46,15 +48,25 @@ try:
     print(f"backup schema version: {version} (code: {SCHEMA_VERSION})")
     if version > SCHEMA_VERSION:
         sys.exit("refused: the backup schema is newer than this code; run the release that wrote it")
-except sqlite3.Error as exc:
+    # Fold the current index WAL into its main file first, so that file
+    # alone holds every committed transaction if the swap below fails or
+    # is interrupted after the sidecars are gone.
+    if db.exists():
+        with closing(sqlite3.connect(db)) as live:
+            busy = live.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0]
+        if busy:
+            sys.exit("refused: the current index is still in use")
+    for suffix in ("-wal", "-shm", "-journal"):
+        Path(f"{db}{suffix}").unlink(missing_ok=True)
+    os.replace(staged, db)
+except BaseException as exc:
+    # Any failure, a full volume included, leaves no staged copy behind.
     staged.unlink(missing_ok=True)
-    sys.exit(f"refused: SQLite cannot read the backup ({type(exc).__name__})")
-except SystemExit:
-    staged.unlink(missing_ok=True)
+    if isinstance(exc, sqlite3.Error):
+        sys.exit(f"refused: SQLite error ({type(exc).__name__})")
+    if isinstance(exc, OSError):
+        sys.exit(f"refused: {type(exc).__name__} (errno {exc.errno}) in the index volume")
     raise
-for suffix in ("-wal", "-shm", "-journal"):
-    Path(f"{db}{suffix}").unlink(missing_ok=True)
-os.replace(staged, db)
 print(f"restored {db}")
 '
 
@@ -85,15 +97,21 @@ read -r -p "Restore? (yes/no): " confirm || confirm=""
 
 docker stop mcp-server indexer
 
-started=0
-start_services() {
-    if [[ "$started" == 0 ]]; then
-        started=1
+# Until the copy is in place, any exit starts both services again on the
+# unchanged index. After it, mcp-server starts only once the indexer has
+# migrated and verified the restored index: docker start does not apply
+# Compose's depends_on, and mcp-server must not serve a schema the
+# indexer is still migrating.
+restored=0
+on_exit() {
+    if [[ "$restored" == 0 ]]; then
         docker start indexer mcp-server ||
             printf 'restore-index: could not start indexer and mcp-server; run make up\n' >&2
+    elif [[ "$restored" == 1 ]]; then
+        printf 'restore-index: mcp-server was left stopped; once the indexer is healthy, run make up\n' >&2
     fi
 }
-trap start_services EXIT
+trap on_exit EXIT
 
 since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 docker run --rm -i --network none --read-only --tmpfs /tmp --cap-drop ALL \
@@ -101,7 +119,8 @@ docker run --rm -i --network none --read-only --tmpfs /tmp --cap-drop ALL \
     --env SQLITE_PATH=/data/mail.db --volume "$volume:/data" \
     "$image" python -c "$RESTORE_PY" <"$BACKUP" ||
     die "the index was not replaced (the reason is above); the previous index is unchanged"
-start_services
+restored=1
+docker start indexer
 
 # Wait (bounded) for the indexer to verify or refuse the embedder
 # identity, printing its schema and embedder startup lines.
@@ -125,4 +144,6 @@ printf '%s\n' "$lines"
 if grep -qE 'embedder is not the one|Schema version mismatch' <<<"$lines"; then
     die "the indexer refused the restored index; see docs/troubleshooting.md"
 fi
+docker start mcp-server
+restored=2
 printf 'Index restored from %s\n' "$BACKUP"

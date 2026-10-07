@@ -25,7 +25,7 @@ help:
 	@echo "  logs         Tail logs from all containers"
 	@echo "  status       Show container, privacy (LOCAL or REMOTE) and index status"
 	@echo "  backup-index Copy the live index to BACKUP_DIR=<dir outside the checkout> (mode 700/600), checked with integrity_check"
-	@echo "  restore-index Replace the index with BACKUP=<file from backup-index> (asks first; stops and restarts indexer and mcp-server)"
+	@echo "  restore-index Replace the index with BACKUP=<file from backup-index> (asks first; stops indexer and mcp-server, restarts mcp-server once the indexer verifies the index)"
 	@echo "  requeue-dead Requeue dead-lettered indexing jobs (optional CLASS=retryable|permanent_source_failure|operator_action_required)"
 	@echo "  sync         Sync local uv environments for indexer and mcp-server"
 	@echo "  test         Run indexer, mcp-server, mbsync, Compose, validate-env, make status and index backup script tests locally"
@@ -213,8 +213,9 @@ backup-index:
 	BACKUP_DIR="$(BACKUP_DIR)" ./scripts/backup-index.sh
 
 # Replace the index with a backup-index copy (#1005): asks for "yes",
-# stops indexer and mcp-server, checks the copy, swaps it in and starts
-# them again, printing the schema and embedder identity lines.
+# stops indexer and mcp-server, checks the copy and swaps it in, starts
+# the indexer and prints its schema and embedder identity lines, then
+# starts mcp-server once the indexer has verified the index.
 restore-index:
 	BACKUP="$(BACKUP)" ./scripts/restore-index.sh
 

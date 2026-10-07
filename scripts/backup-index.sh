@@ -100,13 +100,35 @@ fi
 running=$(docker ps --quiet --filter 'name=^indexer$' --filter status=running)
 [[ -n "$running" ]] || die "the indexer is not running; start the stack with make up"
 
-if [[ -d "$dir" ]]; then
-    if [[ -n "$(find "$dir" -maxdepth 0 \( -perm -g=r -o -perm -g=w -o -perm -g=x -o -perm -o=r -o -perm -o=w -o -perm -o=x \) -print)" ]]; then
-        die "$dir is accessible to other users; run chmod 700 on it or choose a new directory"
+# Succeeds when $1 carries an ACL. ACL entries are checked before the
+# mode bits and can grant other accounts access to a mode-700 directory,
+# or be inherited by what is created in it. macOS lists them with ls -e
+# (the mode's + is hidden behind @ when extended attributes exist);
+# elsewhere ls marks them with a + after the mode.
+has_acl() {
+    local listing
+    if [[ "$(uname)" == Darwin ]]; then
+        listing=$(ls -lde -- "$1")
+        grep -qE '^ *[0-9]+: ' <<<"$listing"
+    else
+        listing=$(ls -ld -- "$1")
+        [[ "${listing:10:1}" == + ]]
     fi
-else
+}
+
+# Refuses $1 when group or other mode bits, or an ACL, give access to it.
+require_private() {
+    if [[ -n "$(find "$1" -maxdepth 0 \( -perm -g=r -o -perm -g=w -o -perm -g=x -o -perm -o=r -o -perm -o=w -o -perm -o=x \) -print)" ]] ||
+        has_acl "$1"; then
+        die "$1 is accessible to other users (mode bits or an ACL); run chmod 700 (and chmod -N on macOS) on it or choose a new directory"
+    fi
+}
+
+if [[ ! -d "$dir" ]]; then
     (umask 077 && mkdir -p "$dir")
 fi
+# Also after creating it: a new directory can inherit ACL entries.
+require_private "$dir"
 
 stamp=$(date -u +%Y%m%dT%H%M%SZ)
 dest="$dir/mail-$stamp.db"
@@ -138,6 +160,7 @@ host_digest=$(shasum -a 256 "$dest")
 host_digest="${host_digest%% *}"
 [[ "$host_digest" == "$digest" ]] || die "the file written to the host does not match the copy in the container"
 chmod 600 "$dest"
+require_private "$dest"
 complete=1
 
 printf 'Index backup: %s\n' "$dest"

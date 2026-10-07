@@ -26,6 +26,17 @@ cat >"$WORK/stub/src/database.py" <<'EOF'
 SCHEMA_VERSION = 1
 SCHEMA_APPLICATION_ID = 0x504D4149
 EOF
+# FAKE_FAIL_REPLACE makes os.replace fail, as an I/O error at the swap
+# would.
+cat >"$WORK/stub/sitecustomize.py" <<'EOF'
+import os
+
+if os.environ.get("FAKE_FAIL_REPLACE"):
+    def _fail(*args, **kwargs):
+        raise OSError(5, "synthetic replace failure")
+
+    os.replace = _fail
+EOF
 
 cat >"$WORK/bin/docker" <<'EOF'
 #!/bin/bash
@@ -58,6 +69,10 @@ run)
     [[ "$*" == *" --network none "* && "$*" == *" --read-only "* && "$*" == *" --cap-drop ALL "* ]]
     [[ "$*" == *" --volume fake_sqlite-volume:/data "* && "$*" == *" sha256:fakeindexerimage python -c "* ]]
     cd "$FAKE_STUB"
+    # FAKE_FSIZE caps file size (512-byte blocks), as a full volume would.
+    if [[ -n "${FAKE_FSIZE:-}" ]]; then
+        ulimit -f "$FAKE_FSIZE"
+    fi
     SQLITE_PATH="$FAKE_DATA/mail.db" PYTHONPATH="$FAKE_STUB" exec python3 -c "${*: -1}"
     ;;
 stop | start) ;;
@@ -243,6 +258,39 @@ backup_refuses_a_shared_directory() {
     [[ -z "$(backups)" ]]
 }
 
+# grant_acl DIR: gives another account read access through an ACL entry;
+# fails when the platform cannot set one.
+grant_acl() {
+    if [[ "$(uname)" == Darwin ]]; then
+        chmod +a "everyone allow list,search,read,file_inherit,directory_inherit" "$1"
+    else
+        setfacl -m u:nobody:rx "$1"
+    fi
+}
+
+backup_refuses_a_directory_shared_through_an_acl() {
+    reset
+    make_db "$WORK/data/mail.db"
+    mkdir -m 700 "$WORK/backups"
+    if ! grant_acl "$WORK/backups"; then
+        printf 'skipped: this file system takes no ACL\n'
+        return 0
+    fi
+    run_backup "$WORK/backups"
+    [[ "$STATUS" -ne 0 ]]
+    grep -F 'accessible to other users' "$WORK/out" >/dev/null
+    [[ -z "$(backups)" ]]
+    # A new directory inheriting the entry from its parent is refused too.
+    reset
+    make_db "$WORK/data/mail.db"
+    mkdir -m 700 "$WORK/backups"
+    grant_acl "$WORK/backups"
+    run_backup "$WORK/backups/new"
+    [[ "$STATUS" -ne 0 ]]
+    grep -F 'accessible to other users' "$WORK/out" >/dev/null
+    [[ -z "$(backups)" ]]
+}
+
 backup_needs_a_running_indexer() {
     reset
     make_db "$WORK/data/mail.db"
@@ -281,7 +329,10 @@ restore_replaces_the_index() {
     [[ ! -e "$WORK/data/mail.db-wal" && ! -e "$WORK/data/mail.db-shm" && ! -e "$WORK/data/.restore-index.db" ]]
     [[ "$(query "$WORK/data/mail.db" 'SELECT count(*) FROM t')" == 100 ]]
     grep -Fx 'stop mcp-server indexer' "$WORK/docker.log" >/dev/null
-    grep -Fx 'start indexer mcp-server' "$WORK/docker.log" >/dev/null
+    # mcp-server starts only after the indexer has verified the index.
+    local order
+    order=$(grep -E '^(start|logs)' "$WORK/docker.log" | cut -d' ' -f1-2 | uniq | tr '\n' ',')
+    [[ "$order" == "start indexer,logs --since,start mcp-server," ]]
     grep -F 'backup schema version: 1 (code: 1)' "$WORK/out" >/dev/null
     grep -F 'Embedder identity verified' "$WORK/out" >/dev/null
     grep -F 'schema_stored=1' "$WORK/out" >/dev/null
@@ -333,6 +384,49 @@ refused_restore() {
     marker_not_printed
 }
 
+# wal_only_rows DB: commits 50 rows that stay in the WAL (no checkpoint).
+wal_only_rows() {
+    python3 - "$1" <<'PY'
+import os, sqlite3, sys
+conn = sqlite3.connect(sys.argv[1])
+conn.execute("PRAGMA wal_autocheckpoint=0")
+with conn:
+    conn.executemany("INSERT INTO t VALUES (?, 'wal')", [(1000 + i,) for i in range(50)])
+os._exit(0)
+PY
+    [[ -s "$1-wal" ]]
+}
+
+restore_keeps_committed_wal_rows_when_the_swap_fails() {
+    reset
+    make_db "$WORK/backup.db"
+    make_db "$WORK/data/mail.db"
+    wal_only_rows "$WORK/data/mail.db"
+    FAKE_FAIL_REPLACE=1 run_restore "$WORK/backup.db" yes
+    [[ "$STATUS" -ne 0 ]]
+    grep -F 'previous index is unchanged' "$WORK/out" >/dev/null
+    [[ ! -e "$WORK/data/.restore-index.db" ]]
+    # The old database file alone, without any sidecar, holds every
+    # committed row.
+    cp "$WORK/data/mail.db" "$WORK/solo.db"
+    [[ "$(query "$WORK/solo.db" 'SELECT count(*) FROM t')" == 250 ]]
+    grep -Fx 'start indexer mcp-server' "$WORK/docker.log" >/dev/null
+}
+
+restore_removes_a_partial_staged_file() {
+    reset
+    make_db "$WORK/backup.db"
+    make_db "$WORK/data/mail.db"
+    [[ "$(wc -c <"$WORK/backup.db")" -gt 4096 ]]
+    # Writes past 4 KiB fail, as on a full volume.
+    FAKE_FSIZE=8 run_restore "$WORK/backup.db" yes
+    [[ "$STATUS" -ne 0 ]]
+    grep -F 'previous index is unchanged' "$WORK/out" >/dev/null
+    [[ ! -e "$WORK/data/.restore-index.db" ]]
+    [[ "$(query "$WORK/data/mail.db" 'SELECT count(*) FROM t')" == 200 ]]
+    grep -Fx 'start indexer mcp-server' "$WORK/docker.log" >/dev/null
+}
+
 restore_refuses_a_corrupt_backup() {
     refused_restore 'failed PRAGMA integrity_check' 1 "$((0x504D4149))" corrupt
 }
@@ -353,6 +447,10 @@ restore_reports_a_refused_index() {
         run_restore "$WORK/backup.db" yes
     [[ "$STATUS" -ne 0 ]]
     grep -F 'indexer refused the restored index' "$WORK/out" >/dev/null
+    grep -F 'mcp-server was left stopped' "$WORK/out" >/dev/null
+    if grep -E '^start .*mcp-server' "$WORK/docker.log" >/dev/null; then
+        return 1
+    fi
 }
 
 restore_wait_is_bounded() {
@@ -403,6 +501,7 @@ check "backup expands a ~ that zsh passed through unexpanded" backup_expands_an_
 check "backup refuses a path inside the checkout" backup_refuses_a_path_inside_the_checkout
 check "backup requires BACKUP_DIR" backup_requires_backup_dir
 check "backup refuses a directory other users can open" backup_refuses_a_shared_directory
+check "backup refuses a directory shared through an ACL" backup_refuses_a_directory_shared_through_an_acl
 check "backup needs a running indexer" backup_needs_a_running_indexer
 check "backup writes nothing when integrity_check fails" backup_writes_nothing_when_the_check_fails
 check "restore replaces the index and drops the old WAL" restore_replaces_the_index
@@ -411,6 +510,8 @@ check "restore needs a backup file and an indexer container" restore_needs_an_ex
 check "restore refuses a corrupt backup" restore_refuses_a_corrupt_backup
 check "restore refuses a newer schema" restore_refuses_a_newer_schema
 check "restore refuses a file that is not an index" restore_refuses_a_foreign_file
+check "restore keeps committed WAL rows when the swap fails" restore_keeps_committed_wal_rows_when_the_swap_fails
+check "restore removes a partial staged file" restore_removes_a_partial_staged_file
 check "restore reports an index the indexer refuses" restore_reports_a_refused_index
 check "restore waits a bounded time" restore_wait_is_bounded
 check "the restore stub matches indexer/src/database.py" stub_matches_the_indexer

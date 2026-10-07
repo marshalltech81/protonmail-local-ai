@@ -803,8 +803,10 @@ the SHA-256 of the host file against the container's, and removes the
 temporary file. The target prints the integrity result, the path, the
 size and the schema version, and writes nothing to `BACKUP_DIR` when
 the check fails. `BACKUP_DIR` is required; it is created with mode 700,
-an existing one must not be open to other users, a path inside the
-checkout is refused, and the file is mode 600. No mount or setting of
+and the directory (new or existing) and the file are refused when mode
+bits or an ACL give other users access (on macOS, `chmod -N <dir>`
+removes ACL entries); a path inside the checkout is refused, and the
+file is mode 600. No mount or setting of
 the running containers changes.
 
 To go back to a copy:
@@ -822,15 +824,25 @@ It asks for `yes`, then:
    capabilities and no network, which refuses the file unless
    `PRAGMA integrity_check` is `ok`, the file is this project's index
    and its schema version is not above the code's;
-3. removes the old index's `-wal` and `-shm` files and renames the copy
-   over `mail.db` (an old WAL left beside the restored file would be
-   replayed into it);
-4. starts `indexer` and `mcp-server` again (also when step 2 refused
-   the file, leaving the index unchanged) and waits up to
-   `RESTORE_WAIT_SECONDS` (900) for the indexer's startup lines,
-   printing the `Startup identity` line (`schema_stored`), any
-   `Migrating database` and `Database ready` lines and the
-   `Embedder identity verified` line.
+3. checkpoints the current index's WAL into `mail.db`, so that file
+   alone holds every committed change if the swap fails, then removes
+   the `-wal` and `-shm` files and renames the copy over `mail.db` (an
+   old WAL left beside the restored file would be replayed into it); a
+   staged copy is removed on any failure, a full volume included;
+4. starts `indexer` and waits up to `RESTORE_WAIT_SECONDS` (900) for
+   its startup lines, printing the `Startup identity` line
+   (`schema_stored`), any `Migrating database` and `Database ready`
+   lines and the `Embedder identity verified` line;
+5. starts `mcp-server` only after that line, so it never serves an
+   index the indexer is still migrating. If the indexer refuses the
+   restored index or does not report in time, `mcp-server` is left
+   stopped: fix the cause and run `make up`. When step 2 or 3 refuses
+   the file, the index is unchanged and both services start again.
+
+If the current index cannot be opened at all, step 3 refuses; remove
+the index volume as in
+[Indexer refuses to start](#indexer-refuses-to-start--wipe-the-sqlite-volume),
+run `make up` so the containers exist, then restore.
 
 The current index is replaced, so take a `make backup-index` first if
 you may want it back. Mail that arrived after the copy was taken is
