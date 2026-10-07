@@ -1329,6 +1329,9 @@ the_layout_check_runs_before_any_sync() {
 # repair walk is running. A first sync that takes hours is healthy with no
 # success stamp; whether mail is current is get_mailbox_status's job. /proc
 # is a temporary directory and stat reports the heartbeat's synthetic age.
+# The clock is frozen at NOW: check_health reads `date +%s` and then stat,
+# and with the real clock a second boundary between the two reads would
+# make the age one second short of ACTIVITY_AGE (#1119).
 
 # shellcheck disable=SC2034,SC2329 # used by the healthcheck functions loaded with eval
 health_setup() {
@@ -1349,7 +1352,9 @@ health_setup() {
     # Processes that are always there: init and the entrypoint.
     add_process 1 docker-init
     add_process 7 entrypoint.sh
-    stat() { printf '%s\n' "$(($(date +%s) - ACTIVITY_AGE))"; }
+    NOW="$(command date +%s)"
+    date() { printf '%s\n' "$NOW"; }
+    stat() { printf '%s\n' "$((NOW - ACTIVITY_AGE))"; }
     load_from "$HEALTHCHECK" sync_in_progress check_health
 }
 
