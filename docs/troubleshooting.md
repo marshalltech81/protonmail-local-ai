@@ -800,7 +800,10 @@ to the index in the index volume (so the volume needs free space for one
 more copy of `mail.db` while it runs). It runs `PRAGMA integrity_check`
 on that copy, streams it to `BACKUP_DIR/mail-<UTC timestamp>.db`, checks
 the SHA-256 of the host file against the container's, and removes the
-temporary file. The target prints the integrity result, the path, the
+temporary file. A temporary copy left by a run that was killed before
+its cleanup (`.backup-index-*.db` in the volume) is removed by the next
+backup once it is more than 6 hours old, and the run says how many it
+removed. The target prints the integrity result, the path, the
 size and the schema version, and writes nothing to `BACKUP_DIR` when
 the check fails. `BACKUP_DIR` is required; it is created with mode 700,
 and the directory (new or existing) and the file are refused when mode

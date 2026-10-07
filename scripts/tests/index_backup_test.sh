@@ -83,8 +83,25 @@ run)
     fi
     SQLITE_PATH="$FAKE_DATA/mail.db" PYTHONPATH="$FAKE_STUB" exec python3 -c "${*: -1}"
     ;;
-stop | start) ;;
+stop)
+    # FAKE_SWAP_BACKUP: while the services stop, another account puts a
+    # different, valid index file at the backup path.
+    if [[ -n "${FAKE_SWAP_BACKUP:-}" ]]; then
+        mv "$FAKE_SWAP_BACKUP" "$FAKE_SWAP_BACKUP.moved"
+        cp "$FAKE_SWAP_BACKUP.other" "$FAKE_SWAP_BACKUP"
+    fi
+    # FAKE_STOP_FAIL: the daemon acted but the command reports an error.
+    if [[ -n "${FAKE_STOP_FAIL:-}" ]]; then
+        printf 'Error response from daemon: synthetic stop failure\n' >&2
+        exit 1
+    fi
+    ;;
+start) ;;
 logs)
+    if [[ -n "${FAKE_LOGS_FAIL:-}" ]]; then
+        printf 'Error response from daemon: synthetic-logs-failure-1005\n' >&2
+        exit 1
+    fi
     # docker logs --since CURSOR indexer: a cursor other than the new
     # process's start time also returns the previous process's lines.
     if [[ "$3" != "$FAKE_STARTED_AT" ]]; then
@@ -318,6 +335,20 @@ backup_writes_into_the_checked_directory() {
     rm -rf "$WORK/backups.moved"
 }
 
+backup_reclaims_stale_temporary_copies() {
+    reset
+    make_db "$WORK/data/mail.db"
+    printf 'stale\n' >"$WORK/data/.backup-index-20260101T000000Z.db"
+    touch -t 202601010000 "$WORK/data/.backup-index-20260101T000000Z.db"
+    # A copy another run is still writing is recent and must stay.
+    printf 'running\n' >"$WORK/data/.backup-index-29990101T000000Z.db"
+    run_backup "$WORK/backups"
+    [[ "$STATUS" -eq 0 ]]
+    [[ ! -e "$WORK/data/.backup-index-20260101T000000Z.db" ]]
+    [[ -e "$WORK/data/.backup-index-29990101T000000Z.db" ]]
+    grep -F 'Removed 1 stale temporary copy' "$WORK/out" >/dev/null
+}
+
 backup_needs_a_running_indexer() {
     reset
     make_db "$WORK/data/mail.db"
@@ -537,6 +568,42 @@ restore_reads_the_wait_as_decimal() {
     fi
 }
 
+restore_streams_the_file_it_checked() {
+    reset
+    make_db "$WORK/backup.db"
+    make_db "$WORK/backup.db.other"
+    python3 -c 'import sqlite3, sys; c = sqlite3.connect(sys.argv[1]); c.execute("DELETE FROM t WHERE a >= 7"); c.commit()' "$WORK/backup.db.other"
+    make_db "$WORK/data/mail.db"
+    FAKE_SWAP_BACKUP="$WORK/backup.db" FAKE_LOGS="$READY_LOGS" run_restore "$WORK/backup.db" yes
+    [[ "$STATUS" -eq 0 ]]
+    # The file opened before the prompt (200 rows), not the one put at
+    # its path afterwards (7 rows).
+    [[ "$(query "$WORK/data/mail.db" 'SELECT count(*) FROM t')" == 200 ]]
+    rm -f "$WORK/backup.db.moved" "$WORK/backup.db.other"
+}
+
+restore_reports_a_failed_log_read() {
+    reset
+    make_db "$WORK/backup.db"
+    make_db "$WORK/data/mail.db"
+    FAKE_LOGS_FAIL=1 run_restore "$WORK/backup.db" yes
+    [[ "$STATUS" -ne 0 ]]
+    grep -F 'synthetic-logs-failure-1005' "$WORK/out" >/dev/null
+    grep -F 'could not read the indexer log' "$WORK/out" >/dev/null
+}
+
+restore_restarts_the_services_when_stop_fails() {
+    reset
+    make_db "$WORK/backup.db"
+    make_db "$WORK/data/mail.db"
+    FAKE_STOP_FAIL=1 run_restore "$WORK/backup.db" yes
+    [[ "$STATUS" -ne 0 ]]
+    grep -Fx 'start indexer mcp-server' "$WORK/docker.log" >/dev/null
+    if grep -E '^run ' "$WORK/docker.log" >/dev/null; then
+        return 1
+    fi
+}
+
 stub_matches_the_indexer() {
     local name
     for name in SCHEMA_VERSION SCHEMA_APPLICATION_ID; do
@@ -576,6 +643,7 @@ check "backup requires BACKUP_DIR" backup_requires_backup_dir
 check "backup refuses a directory other users can open" backup_refuses_a_shared_directory
 check "backup refuses a directory shared through an ACL" backup_refuses_a_directory_shared_through_an_acl
 check "backup writes into the directory it checked" backup_writes_into_the_checked_directory
+check "backup reclaims stale temporary copies" backup_reclaims_stale_temporary_copies
 check "backup needs a running indexer" backup_needs_a_running_indexer
 check "backup writes nothing when integrity_check fails" backup_writes_nothing_when_the_check_fails
 check "restore replaces the index and drops the old WAL" restore_replaces_the_index
@@ -591,6 +659,9 @@ check "restore waits a bounded time" restore_wait_is_bounded
 check "restore ignores the previous indexer's log lines" restore_ignores_the_previous_indexer_lines
 check "restore checks RESTORE_WAIT_SECONDS before anything" restore_checks_the_wait_before_anything
 check "restore reads RESTORE_WAIT_SECONDS as decimal" restore_reads_the_wait_as_decimal
+check "restore streams the file it opened before the prompt" restore_streams_the_file_it_checked
+check "restore reports a failed log read" restore_reports_a_failed_log_read
+check "restore restarts the services when stop fails" restore_restarts_the_services_when_stop_fails
 check "the restore stub matches indexer/src/database.py" stub_matches_the_indexer
 
 if ((FAILURES > 0)); then

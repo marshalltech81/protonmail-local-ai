@@ -87,6 +87,11 @@ if [[ "$BACKUP" == \~/* ]]; then
     BACKUP="$HOME${BACKUP#\~}"
 fi
 [[ -f "$BACKUP" ]] || die "$BACKUP is not a file"
+# Open the backup once, now, and stream that descriptor later: the file
+# checked here is the one restored, whatever is put at its path while the
+# prompt waits or the services stop.
+exec 3<"$BACKUP"
+[[ -f /dev/fd/3 ]] || die "$BACKUP is not a regular file"
 # Checked before anything stops or changes.
 wait_secs="${RESTORE_WAIT_SECONDS:-900}"
 [[ "$wait_secs" =~ ^[0-9]{1,6}$ ]] || die "RESTORE_WAIT_SECONDS must be a whole number of seconds"
@@ -106,8 +111,8 @@ printf 'Mail that arrived after the backup is indexed again from Maildir when th
 read -r -p "Restore? (yes/no): " confirm || confirm=""
 [[ "$confirm" == yes ]] || die "not restored"
 
-docker stop mcp-server indexer
-
+# The trap below is armed before the stop, so an interrupted or failed
+# stop still starts the services again.
 # Until the copy is in place, any exit starts both services again on the
 # unchanged index. After it, mcp-server starts only once the indexer has
 # migrated and verified the restored index: docker start does not apply
@@ -124,10 +129,12 @@ on_exit() {
 }
 trap on_exit EXIT
 
+docker stop mcp-server indexer
+
 docker run --rm -i --network none --read-only --tmpfs /tmp --cap-drop ALL \
     --security-opt no-new-privileges:true --user 1002:1002 \
     --env SQLITE_PATH=/data/mail.db --volume "$volume:/data" \
-    "$image" python -c "$RESTORE_PY" <"$BACKUP" ||
+    "$image" python -c "$RESTORE_PY" <&3 ||
     die "the index was not replaced (the reason is above); the previous index is unchanged"
 restored=1
 docker start indexer
@@ -140,7 +147,10 @@ since=$(docker inspect --format '{{.State.StartedAt}}' indexer)
 deadline=$((SECONDS + wait_secs))
 pattern='Startup identity|Migrating database|Database ready|Embedder identity|embedder is not the one|Schema version mismatch'
 while :; do
-    logs=$(docker logs --since "$since" indexer 2>&1)
+    if ! logs=$(docker logs --since "$since" indexer 2>&1); then
+        printf '%s\n' "$logs" >&2
+        die "could not read the indexer log (the error is above); check docker compose logs indexer"
+    fi
     if grep -qE 'Embedder identity (verified|recorded)|Recorded embedder identity|embedder is not the one|Schema version mismatch' <<<"$logs"; then
         break
     fi

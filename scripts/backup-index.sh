@@ -24,7 +24,7 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 # make: back up, check and describe the copy; stream: write it to
 # stdout; remove: delete it. Paths derive from SQLITE_PATH.
 BACKUP_PY='
-import hashlib, os, sqlite3, sys
+import hashlib, os, sqlite3, sys, time
 from contextlib import closing
 from pathlib import Path
 
@@ -32,6 +32,15 @@ mode, stamp = sys.argv[1], sys.argv[2]
 db = Path(os.environ["SQLITE_PATH"])
 copy = db.with_name(f".backup-index-{stamp}.db")
 if mode == "make":
+    # Reclaim copies an interrupted run left behind (killed before its
+    # cleanup ran). Only those untouched for 6 hours, so a backup still
+    # running in another shell keeps its copy.
+    cutoff = time.time() - 6 * 3600
+    stale = [p for p in db.parent.glob(".backup-index-*") if p.stat().st_mtime < cutoff]
+    for path in stale:
+        path.unlink(missing_ok=True)
+    if stale:
+        print(f"Removed {len(stale)} stale temporary copy(s) from the index volume", file=sys.stderr)
     os.umask(0o077)
     copy.unlink(missing_ok=True)
     with (
