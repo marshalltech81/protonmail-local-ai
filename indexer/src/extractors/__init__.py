@@ -406,11 +406,13 @@ _OLE2_SIGNATURE = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
 BINARY_AS_TEXT_ERROR = "binary payload labelled as text"
 
 # Fixed prefixes of binary formats senders mislabel as text: PDF, ZIP
-# (including OOXML), OLE2, PNG, JPEG and GIF. A prefix list only; no
+# (including OOXML; an empty archive starts with its end-of-central-
+# directory record), OLE2, PNG, JPEG and GIF. A prefix list only; no
 # sniffing beyond it.
 _BINARY_SIGNATURES = (
     b"%PDF-",
     b"PK\x03\x04",
+    b"PK\x05\x06",
     _OLE2_SIGNATURE,
     b"\x89PNG\r\n\x1a\n",
     b"\xff\xd8\xff",
@@ -533,6 +535,16 @@ def extract(
         module_name, dispatch_via = module_override, "cache-refresh"
     else:
         module_name, dispatch_via = _resolve_extractor(content_type, filename)
+
+    # A stale ``text`` row refreshed from an occurrence whose own label
+    # selects another extractor: when the text guard below would reject
+    # the bytes, run that extractor instead, as a fresh extraction of this
+    # occurrence would (#932, review round 1). Otherwise the occurrence
+    # would cache the guard's ``unsupported`` and never run it.
+    if module_override == "text" and payload.startswith(_BINARY_SIGNATURES):
+        labelled, via = _resolve_extractor(content_type, filename)
+        if labelled is not None:
+            module_name, dispatch_via = labelled, via
 
     # Image types are gated by ``ocr_enabled`` because the only sensible
     # extractor is Tesseract. Disabling OCR globally should cleanly

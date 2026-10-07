@@ -1759,6 +1759,7 @@ class TestLegacyOle2CacheRows:
 _BINARY_SIGNATURES = (
     b"%PDF-",
     b"PK\x03\x04",
+    b"PK\x05\x06",
     _OLE2_MAGIC,
     b"\x89PNG\r\n\x1a\n",
     b"\xff\xd8\xff",

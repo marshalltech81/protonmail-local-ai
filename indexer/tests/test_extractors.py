@@ -4895,6 +4895,7 @@ class TestLegacyOfficeLabels:
 _BINARY_SIGNATURES = {
     "pdf": b"%PDF-",
     "zip": b"PK\x03\x04",
+    "zip-empty": b"PK\x05\x06",
     "ole2": _OLE2_MAGIC,
     "png": b"\x89PNG\r\n\x1a\n",
     "jpeg": b"\xff\xd8\xff",
@@ -4993,6 +4994,43 @@ class TestBinaryPayloadLabelledAsText:
             module_override="text",
         )
         assert (result.status, result.error) == (STATUS_UNSUPPORTED, BINARY_AS_TEXT_ERROR)
+        assert calls == []
+
+    @pytest.mark.parametrize(
+        ("content_type", "filename", "module"),
+        [("application/pdf", "a.pdf", "pdf"), ("image/png", "a.bin", "image")],
+    )
+    def test_refresh_from_an_occurrence_with_its_own_extractor_runs_that_extractor(
+        self, content_type, filename, module, monkeypatch
+    ):
+        """Review round 1: a stale ``text`` row refreshed from an occurrence
+        whose label selects another extractor runs that extractor, as a
+        fresh extraction of the occurrence would, rather than recording the
+        text guard's ``unsupported`` for it."""
+        calls = _count_extractor_calls(monkeypatch)
+        extract(
+            content_type=content_type,
+            filename=filename,
+            payload=_BINARY_SIGNATURES["pdf" if module == "pdf" else "png"] + bytes(64),
+            module_override="text",
+        )
+        assert calls == [module]
+
+    def test_signature_check_is_bounded_on_a_large_payload(self, monkeypatch):
+        """The guard is a fixed-prefix check: a payload at the default size
+        cap is rejected without reading past its signature, and genuine
+        text of the same size still reaches the extractor once."""
+        import time
+
+        from src.extractors import BINARY_AS_TEXT_ERROR, DEFAULT_MAX_BYTES
+
+        calls = _count_extractor_calls(monkeypatch)
+        tail = b"A" * (DEFAULT_MAX_BYTES - 16)
+        start = time.perf_counter()
+        for magic in _BINARY_SIGNATURES.values():
+            result = extract(content_type="text/plain", filename="a.txt", payload=magic + tail)
+            assert (result.status, result.error) == (STATUS_UNSUPPORTED, BINARY_AS_TEXT_ERROR)
+        assert time.perf_counter() - start < 2.0
         assert calls == []
 
     def test_other_extractors_still_read_their_formats(self, monkeypatch):

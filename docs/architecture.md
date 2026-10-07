@@ -1097,14 +1097,16 @@ it is given, so a PDF, ZIP (or OOXML), OLE2, PNG, JPEG or GIF file sent
 as `text/plain`, or named `.txt` / `.csv` / `.md` with no usable
 Content-Type, was indexed as replacement characters. When a payload
 bound for the text extractor starts with one of those formats' fixed
-signatures (`%PDF-`, `PK\x03\x04`, `D0 CF 11 E0 A1 B1 1A E1`,
+signatures (`%PDF-`, `PK\x03\x04`, `PK\x05\x06` (an empty ZIP),
+`D0 CF 11 E0 A1 B1 1A E1`,
 `89 50 4E 47 0D 0A 1A 0A`, `FF D8 FF`, `GIF87a` / `GIF89a`), the
 dispatcher records it `unsupported` ("binary payload labelled as text")
 without decoding it (#932). Only those fixed prefixes are checked; the
 bytes decide, and the row is served for later occurrences that select
 the text extractor or none. An occurrence labelled with the real type
-(`.pdf`, an image) still runs that type's extractor. A binary file
-labelled only as text is therefore not extracted.
+(`.pdf`, an image) still runs that type's extractor, including when it
+refreshes a stale `text` row. A binary file labelled only as text is
+therefore not extracted (#969).
 
 Word templates: the template MIME type
 (`application/vnd.openxmlformats-officedocument.wordprocessingml.template`)
