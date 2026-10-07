@@ -746,14 +746,14 @@ class TestDocxExtractor:
             filename="v.docx",
             payload=self._save(document),
         )
-        assert result.extractor == "docx@4"
+        assert result.extractor == "docx@5"
 
     def test_docx_version_2_rows_are_stale(self):
         # docx@2 missed first-page and even-page headers/footers (#299).
         from src import extractors
 
         assert extractors.stale_extractor_module("docx@2") == "docx"
-        assert extractors.stale_extractor_module("docx@4") is None
+        assert extractors.stale_extractor_module("docx@5") is None
 
     def test_versions_are_keyed_by_dispatch_module(self, monkeypatch):
         """The image module records ``image-ocr`` and the PDF module
@@ -785,7 +785,7 @@ class TestDocxExtractor:
             module_override="docx",
         )
         assert result.status == STATUS_SUCCESS
-        assert result.extractor == "docx@4"
+        assert result.extractor == "docx@5"
         assert "override text" in (result.text or "")
 
 
@@ -4873,24 +4873,42 @@ class TestLegacyOfficeLabels:
         ``unsupported``), so rows the previous versions wrote re-extract."""
         from src.extractors import EXTRACTOR_VERSIONS, stale_extractor_module
 
-        assert EXTRACTOR_VERSIONS["docx"] == 4
+        assert EXTRACTOR_VERSIONS["docx"] >= 4
         assert EXTRACTOR_VERSIONS["xlsx"] == 5
         assert stale_extractor_module("docx@3") == "docx"
         assert stale_extractor_module("xlsx@4") == "xlsx"
-        assert stale_extractor_module("docx@4") is None
         assert stale_extractor_module("xlsx@5") is None
 
 
 _DOTX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.template"
+_DOTX_MAIN_CT = "application/vnd.openxmlformats-officedocument.wordprocessingml.template.main+xml"
 
 
-def _dotx_bytes(text: str) -> bytes:
-    """A synthetic Word template: a ``.docx`` whose main part declares the
-    template content type, as Word saves a ``.dotx``."""
+def _rich_docx_bytes() -> bytes:
+    """A synthetic ``.docx`` with a body fact, a table cell and non-ASCII text."""
+    import io
+
+    import docx
+
+    document = docx.Document()
+    document.add_paragraph("SYNTHETIC_DOTX_FACT renewal due 2031-04-01")
+    table = document.add_table(rows=1, cols=2)
+    table.cell(0, 0).text = "SYNTHETIC_DOTX_CELL"
+    table.cell(0, 1).text = "Grüße, café, 東京"
+    buf = io.BytesIO()
+    document.save(buf)
+    return buf.getvalue()
+
+
+def _dotx_bytes(docx_payload: bytes) -> bytes:
+    """A synthetic Word template: the ``.docx`` with its main part declared
+    as the template content type, as Word saves a ``.dotx``. python-docx
+    has no API to save a template, so the fixture (test code only) edits
+    the generated package's ``[Content_Types].xml``."""
     import io
     import zipfile
 
-    source = zipfile.ZipFile(io.BytesIO(_docx_bytes(text)))
+    source = zipfile.ZipFile(io.BytesIO(docx_payload))
     out = io.BytesIO()
     with zipfile.ZipFile(out, "w") as archive:
         for info in source.infolist():
@@ -4903,30 +4921,114 @@ def _dotx_bytes(text: str) -> bytes:
 
 
 class TestWordTemplates:
-    """#694: python-docx refuses a ``.dotx`` (its main part's content type
-    is not the document type), so ``.dotx`` stays unsupported rather than
-    being mapped to the DOCX extractor to fail on every template."""
+    """#937: a Word template (``.dotx``) is read by the DOCX extractor. Its
+    main part is loaded as a python-docx ``DocumentPart`` through
+    ``PartFactory.part_type_for``; the payload bytes are not changed."""
 
-    def test_python_docx_does_not_open_a_dotx(self):
+    def test_python_docx_route_for_templates_still_holds(self):
+        """Fails loudly if a python-docx upgrade changes the route: the
+        stock ``docx.Document`` still refuses a template, and the
+        registration ``extractors.docx`` makes at import loads the
+        template's main part as a ``DocumentPart``."""
         import io
 
         import docx
+        from docx.opc.part import PartFactory
+        from docx.package import Package
+        from docx.parts.document import DocumentPart
+        from src.extractors import docx as docx_extractor
 
+        payload = _dotx_bytes(_rich_docx_bytes())
         with pytest.raises(ValueError, match="not a Word file"):
-            docx.Document(io.BytesIO(_dotx_bytes("SYNTHETIC_DOC_TEXT")))
+            docx.Document(io.BytesIO(payload))
+        assert docx_extractor.WML_TEMPLATE_MAIN == _DOTX_MAIN_CT
+        assert PartFactory.part_type_for[_DOTX_MAIN_CT] is DocumentPart
+        part = Package.open(io.BytesIO(payload)).main_document_part
+        assert isinstance(part, DocumentPart)
+        assert part.content_type == _DOTX_MAIN_CT
 
-    def test_dotx_is_unsupported_by_mime_and_by_extension(self, monkeypatch):
-        from src.extractors import NO_EXTRACTOR_ERROR
+    def test_dotx_is_extracted_by_mime_and_by_extension(self, monkeypatch, caplog):
+        from src.extractors import EXTRACTOR_VERSIONS
+
+        caplog.set_level("DEBUG")
+        calls = _count_extractor_calls(monkeypatch)
+        payload = _dotx_bytes(_rich_docx_bytes())
+        for content_type, filename in (
+            (_DOTX_MIME, "a.bin"),
+            ("application/octet-stream", "SYNTHETIC_FILENAME_MARKER.dotx"),
+        ):
+            result = extract(content_type=content_type, filename=filename, payload=payload)
+            assert result.status == STATUS_SUCCESS
+            assert result.extractor == f"docx@{EXTRACTOR_VERSIONS['docx']}"
+            assert result.text is not None
+            assert "SYNTHETIC_DOTX_FACT renewal due 2031-04-01" in result.text
+            assert "SYNTHETIC_DOTX_CELL Grüße, café, 東京" in result.text
+        assert calls == ["docx", "docx"]
+        for marker in ("SYNTHETIC_DOTX_FACT", "SYNTHETIC_DOTX_CELL", "SYNTHETIC_FILENAME_MARKER"):
+            assert marker not in caplog.text
+
+    def test_dotx_yields_the_same_text_as_the_docx_it_came_from(self):
+        docx_payload = _rich_docx_bytes()
+        as_docx = extract(
+            content_type="application/octet-stream", filename="a.docx", payload=docx_payload
+        )
+        as_dotx = extract(
+            content_type=_DOTX_MIME, filename="a.dotx", payload=_dotx_bytes(docx_payload)
+        )
+        assert as_docx.status == as_dotx.status == STATUS_SUCCESS
+        assert as_docx.text == as_dotx.text
+
+    def test_dotx_goes_through_the_zip_guard(self, monkeypatch):
+        calls = _count_extractor_calls(monkeypatch)
+        monkeypatch.setattr("src.extractors.ZIP_MAX_UNCOMPRESSED_BYTES", 4)
+        result = extract(
+            content_type=_DOTX_MIME, filename="a.dotx", payload=_dotx_bytes(_rich_docx_bytes())
+        )
+        assert result.status == STATUS_FAILED
+        assert result.error is not None and "uncompressed" in result.error
+        assert calls == []
+
+    def test_ole2_payload_labelled_dotx_keeps_the_ole2_guard(self, monkeypatch):
+        """#694's guard runs before the extractor for a ``.dotx`` label too."""
+        from src.extractors import LEGACY_OLE2_ERROR
 
         calls = _count_extractor_calls(monkeypatch)
-        payload = _dotx_bytes("SYNTHETIC_DOC_TEXT")
         for content_type, filename in (
             (_DOTX_MIME, "a.bin"),
             ("application/octet-stream", "a.dotx"),
         ):
-            result = extract(content_type=content_type, filename=filename, payload=payload)
-            assert (result.status, result.error) == (STATUS_UNSUPPORTED, NO_EXTRACTOR_ERROR)
+            result = extract(
+                content_type=content_type, filename=filename, payload=_OLE2_MAGIC + bytes(64)
+            )
+            assert (result.status, result.error) == (STATUS_UNSUPPORTED, LEGACY_OLE2_ERROR)
         assert calls == []
+
+    def test_non_word_package_still_fails(self, caplog):
+        """Only the document and template main parts are read: another OOXML
+        package (a workbook) labelled ``.dotx`` fails with a fixed error."""
+        import io
+
+        import openpyxl
+
+        caplog.set_level("DEBUG")
+        workbook = openpyxl.Workbook()
+        sheet = workbook.active
+        assert sheet is not None
+        sheet["A1"] = "SYNTHETIC_SHEET_MARKER"
+        buf = io.BytesIO()
+        workbook.save(buf)
+        result = extract(content_type=_DOTX_MIME, filename="a.dotx", payload=buf.getvalue())
+        assert (result.status, result.error) == (STATUS_FAILED, "ValueError")
+        assert "SYNTHETIC_SHEET_MARKER" not in caplog.text
+
+    def test_docx_rows_from_before_dotx_support_are_stale(self):
+        """A template labelled ``.docx`` failed before; it now extracts, so
+        the docx rows the previous version wrote re-extract."""
+        from src.extractors import EXTRACTOR_VERSIONS, stale_extractor_module
+
+        assert EXTRACTOR_VERSIONS["docx"] == 5
+        assert stale_extractor_module("docx@4") == "docx"
+        assert stale_extractor_module("docx@5") is None
 
 
 # #903: every truncation or skip cap inside an extractor is reported the

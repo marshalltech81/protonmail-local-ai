@@ -1267,7 +1267,7 @@ only, never filenames or text (`make logs`):
     so none are lost, and the 5-minute flush still applies.
   - What the outcomes mean: `cached` counts attachments served from the
     extraction cache instead of extracted again. `unsupported` is a type
-    no extractor reads, including Word templates (`.dotx`) and genuine
+    no extractor reads, including genuine
     legacy binary `.doc` / `.xls` and password-protected Office files (OLE2), recorded with
     "OLE2 compound file" rather than as `failed`, so they
     are not retried (#694; see `docs/architecture.md`, "Extractor

@@ -314,7 +314,9 @@ class ExtractionResult:
 # docx 4, xlsx 5: an OLE2 payload (a real ``.doc`` / ``.xls``, or an
 # encrypted OOXML file) is recorded ``unsupported`` instead of ``failed``, so the
 # ``failed`` rows the previous versions wrote for one are refreshed (#694).
-EXTRACTOR_VERSIONS: dict[str, int] = {"docx": 4, "image": 3, "pdf": 4, "text": 2, "xlsx": 5}
+# docx 5: reads Word templates (``.dotx``), which ``docx.Document``
+# refused, so a template labelled ``.docx`` failed (#937).
+EXTRACTOR_VERSIONS: dict[str, int] = {"docx": 5, "image": 3, "pdf": 4, "text": 2, "xlsx": 5}
 
 
 def _stamp_extractor(module_name: str, extractor_name: str) -> str:
@@ -402,11 +404,12 @@ _OLE2_SIGNATURE = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
 _MIME_DISPATCH: dict[str, str] = {
     "application/pdf": "pdf",
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
+    # Word templates (``.dotx``): the DOCX extractor loads the template
+    # main part (#937).
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.template": "docx",
     # Legacy ``.doc`` / ``.xls`` labels: a best effort for OOXML files
     # mislabelled as a legacy type. A real legacy binary (OLE2) is recorded
     # ``unsupported`` before the extractor runs (``LEGACY_OLE2_ERROR``).
-    # Word templates (``.dotx``) are not routed: python-docx refuses a
-    # package whose main part is the template type (#694).
     "application/msword": "docx",
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
     "application/vnd.ms-excel": "xlsx",
@@ -423,6 +426,7 @@ _MIME_DISPATCH: dict[str, str] = {
 _EXT_DISPATCH: dict[str, str] = {
     ".pdf": "pdf",
     ".docx": "docx",
+    ".dotx": "docx",
     ".doc": "docx",
     ".xlsx": "xlsx",
     ".xls": "xlsx",
