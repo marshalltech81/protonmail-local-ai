@@ -6276,6 +6276,27 @@ class TestStageErrorsKeepMailOutOfLastError:
 
         assert main._stage_error(exc) == f"OversizedMessageError: {exc}"
 
+    def test_nul_charset_label_subject_is_indexed_not_dead_lettered(self, tmp_path, caplog):
+        """#942: a NUL in a Subject encoded-word's charset label raised
+        ``ValueError`` out of ``parse_email`` and dead-lettered the
+        message. It now takes the UTF-8 fallback and is indexed; the
+        marker in the Subject reaches neither the log nor ``last_error``."""
+        dest = tmp_path / "INBOX" / "cur" / "msg.eml"
+        _write_eml(dest, "nul-charset@example.com", subject=f"=?utf-8\x00?q?{SYNTHETIC_MARKER}?=")
+        db = Database(tmp_path / "mail.db")
+        caplog.set_level(logging.DEBUG)
+
+        ok, stage, err = _index_one(dest, db, make_mock_embedder(_UNIT_VECTOR), Threader(db))
+
+        assert (ok, stage, err) == (True, "db_write", None)
+        assert db._conn.execute("SELECT COUNT(*) FROM indexing_jobs").fetchone()[0] == 0
+        row = db._conn.execute("SELECT display_subject FROM threads").fetchone()
+        # Q-encoding reads ``_`` as a space.
+        decoded = SYNTHETIC_MARKER.replace("_", " ")
+        assert row["display_subject"] == decoded
+        assert SYNTHETIC_MARKER not in caplog.text
+        assert decoded not in caplog.text
+
     def test_sqlite_error_is_type_only(self):
         """FTS5 query errors quote the bound query string ("no such
         column: <term>"), so sqlite text is not kept."""

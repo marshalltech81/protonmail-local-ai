@@ -1,5 +1,5 @@
 {
-  "_comment": "Golden questions for the synthetic baseline mailbox (indexer/tests/baseline/corpus.py). Thread refs 'tNN' mean 'tNN.1@baseline.example'; message refs 'tNN.M' mean 'tNN.M@baseline.example'. required_evidence is a list of groups: every group is required, and any one thread in a group satisfies it. max_rank (1-based) bounds the first hit from any group; groups missing from the top 10 lower evidence recall instead. The recall floors are the hashed embedder's measured values rounded down: wiring checks, not semantic quality. vector_only questions must be answerable only by the vector lanes. unanswerable questions have no answer in the corpus: none of their absent_terms occurs in any message's subject, body or attachment (case-insensitive), and an abstaining agent must have asked for one of them. evidence_queries are get_evidence queries the outstanding-items reachability checks (#798) make; the build embeds them and they rank nothing in the snapshot.",
+  "_comment": "Golden questions for the synthetic baseline mailbox (indexer/tests/baseline/corpus.py). Thread refs 'tNN' mean 'tNN.1@baseline.example'; message refs 'tNN.M' mean 'tNN.M@baseline.example'. required_evidence is a list of groups: every group is required, and any one thread in a group satisfies it. max_rank (1-based) bounds the first hit from any group; groups missing from the top 10 lower evidence recall instead. The recall floors are the hashed embedder's measured values rounded down: wiring checks, not semantic quality. vector_only questions must be answerable only by the vector lanes. unanswerable questions have no answer in the corpus: none of their absent_terms occurs in any message's subject, body or attachment (case-insensitive), and an abstaining agent must have asked for one of them. evidence_queries are get_evidence queries the outstanding-items reachability checks (#798, #907) make; the build embeds them and they rank nothing in the snapshot.",
   "floors": {
     "mrr": 0.9,
     "evidence_recall_at_10": 1.0,
@@ -52,7 +52,9 @@
     {"id": "attach-unsupported", "query": "kite flyers export", "required_evidence": [["t84"]], "max_rank": 1, "_comment": "#909: a JSON attachment no extractor reads; it has no text, so the thread is found by its subject and body."},
     {"id": "attach-empty", "query": "blank spring rota", "required_evidence": [["t85"]], "max_rank": 1, "_comment": "#909: a whitespace-only attachment (status empty); found by its subject and body."},
     {"id": "attach-forwarded-inner", "query": "Corrigan vehicle deck", "required_evidence": [["t86"]], "max_rank": 1, "evidence": "Corrigan ferry", "_comment": "#909: the attachment of an attached email."},
-    {"id": "attach-nonascii-name", "query": "Pellow orchard lanterns", "required_evidence": [["t87"]], "max_rank": 1, "evidence": "Pellow orchard", "_comment": "#909: a text attachment with an RFC 2231 non-ASCII filename."}
+    {"id": "attach-nonascii-name", "query": "Pellow orchard lanterns", "required_evidence": [["t87"]], "max_rank": 1, "evidence": "Pellow orchard", "_comment": "#909: a text attachment with an RFC 2231 non-ASCII filename."},
+    {"id": "attach-too-large", "query": "harbour ledger transcription", "required_evidence": [["t88"]], "max_rank": 1, "_comment": "#907: a text attachment over the build's lowered size cap (status too_large, no text), so the thread is found by its subject and body."},
+    {"id": "attach-char-capped", "query": "Corncrake Wheelers towpath viaduct", "required_evidence": [["t89"]], "max_rank": 1, "evidence": "Corncrake Wheelers", "_comment": "#907: a text attachment cut at the build's lowered extracted-characters cap; the query matches text before the cut."}
   ],
   "enumerate": [
     {"id": "sender", "args": {"sender": "adjuster@keystoneins.example"}, "expect": ["t10.1", "t10.3"]},
@@ -63,7 +65,7 @@
     {"id": "date-range", "args": {"date_from": "2024-05-01", "date_to": "2024-05-31"}, "expect": ["t08.1", "t09.1", "t13.1", "t13.2", "t17.1", "t17.2", "t17.3"]},
     {"id": "text-stemmed", "args": {"text": "resurfacing"}, "expect": ["t04.1", "t05.1"]}
   ],
-  "evidence_queries": ["stipulated dismissal filing", "berth-lease template comments", "engagement amendment scope"],
+  "evidence_queries": ["stipulated dismissal filing", "berth-lease template comments", "engagement amendment scope", "Kittiwake boathouse sportive"],
   "unanswerable": [
     {"id": "cabin-wifi", "absent_terms": ["wifi", "wi-fi", "wireless", "internet"]},
     {"id": "electrician-quote", "absent_terms": ["electric", "breaker"]}

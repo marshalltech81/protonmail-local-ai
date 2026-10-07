@@ -15,8 +15,18 @@ import pytest
 from src.database import EMBEDDING_DIM, Database
 from src.extractors import EXTRACTOR_VERSIONS, _resolve_extractor
 
-from tests.baseline.build import build
-from tests.baseline.corpus import THREADS, _docx, _xlsx, thread_id, write_maildir
+from tests.baseline.build import build, check_capped_attachments
+from tests.baseline.corpus import (
+    CAPPED_ATTACHMENT_MAX_BYTES,
+    CAPPED_ATTACHMENT_MAX_CHARS,
+    CHAR_CAPPED_FILENAME,
+    THREADS,
+    TOO_LARGE_FILENAME,
+    _docx,
+    _xlsx,
+    thread_id,
+    write_maildir,
+)
 from tests.baseline.hash_embedder import HashEmbedder, embed_text
 
 _GOLDEN = Path(__file__).parents[3] / "mcp-server" / "tests" / "baseline" / "golden.json"
@@ -201,6 +211,80 @@ class TestBuild:
         assert text["kite-roster.json"] is None and text["spring-rota.txt"] is None
         assert "Corrigan" in text["crossing.txt"]
         assert text["ferry-crossing.eml"] is None
+
+    def test_capped_shapes_hit_the_build_caps(self, tmp_path, caplog):
+        """#907: under the build's lowered caps, t88's attachment is
+        ``too_large`` (no extractor, no text) and t89's is ``success``
+        cut at the extracted-characters cap, its last sentence lost,
+        with one ``extracted_chars`` WARNING and the aggregate counts."""
+        out = tmp_path / "out"
+        with caplog.at_level(logging.INFO, logger="indexer"):
+            build(out, _GOLDEN)
+
+        cap_warnings = [
+            r for r in caplog.records if r.getMessage().startswith("extractor cap extracted_chars:")
+        ]
+        assert [r.levelno for r in cap_warnings] == [logging.WARNING]
+        assert cap_warnings[0].getMessage().endswith(f" to {CAPPED_ATTACHMENT_MAX_CHARS} chars")
+        assert "Kittiwake" not in caplog.text and "Corncrake" not in caplog.text
+
+        def summed(field: str) -> int:
+            values = [
+                int(m.group(1))
+                for r in caplog.records
+                if (m := re.search(rf"^attachments n=\d+ .*\b{field}=(\d+)\b", r.getMessage()))
+            ]
+            assert values
+            return sum(values)
+
+        assert summed("too_large") == 1
+        assert summed("extractor_caps") == 1
+
+        db = Database(out / "mail.db")
+        try:
+            rows = db._conn.execute(
+                "SELECT a.thread_id, a.filename, a.size_bytes, e.extraction_status,"
+                " e.extractor, e.extracted_text"
+                " FROM attachments a JOIN attachment_extractions e USING (attachment_id)"
+                " WHERE a.thread_id IN (?, ?) ORDER BY a.thread_id",
+                (thread_id(88), thread_id(89)),
+            ).fetchall()
+        finally:
+            db.close()
+        too_large, capped = rows
+        assert too_large[1] == TOO_LARGE_FILENAME
+        assert too_large[2] > CAPPED_ATTACHMENT_MAX_BYTES
+        assert too_large[3:] == ("too_large", None, None)
+        assert capped[1] == CHAR_CAPPED_FILENAME
+        assert capped[3:5] == ("success", f"text@{EXTRACTOR_VERSIONS['text']}")
+        assert len(capped[5]) == CAPPED_ATTACHMENT_MAX_CHARS
+        assert capped[5].startswith("Corncrake Wheelers ride route notes.")
+        # The cut ends between words: the answer evaluation's index check
+        # (``index_identity``) refuses chunk text holding a partial word.
+        assert not capped[5][-1].isalnum()
+        assert "Kittiwake" not in capped[5]
+        (source,) = [a.text for m in THREADS[89] for a in m.attachments]
+        assert isinstance(source, str) and source.index("Kittiwake") > CAPPED_ATTACHMENT_MAX_CHARS
+
+    def test_build_refuses_an_unexpected_capped_attachment(self, tmp_path):
+        """#907: the lowered caps must cut only t88 and t89; a corpus edit
+        that pushes another attachment past either cap fails the build."""
+        out = tmp_path / "out"
+        build(out, _GOLDEN)
+        check_capped_attachments(out / "mail.db")
+
+        db = Database(out / "mail.db")
+        try:
+            with db._conn as conn:
+                conn.execute(
+                    "UPDATE attachment_extractions SET extraction_status = 'too_large',"
+                    " extracted_text = NULL WHERE attachment_id = (SELECT attachment_id"
+                    " FROM attachments WHERE filename = 'roof-estimate.txt')"
+                )
+        finally:
+            db.close()
+        with pytest.raises(RuntimeError, match="roof-estimate.txt"):
+            check_capped_attachments(out / "mail.db")
 
     def test_ooxml_attachments_are_platform_independent(self, monkeypatch):
         """#909 review round 1: ``zipfile.ZipInfo`` records the creating
