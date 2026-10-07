@@ -918,8 +918,21 @@ removed Bridge container are kept as history.
 ## Notes for Agents
 
 - Read `AGENTS.md` before making changes.
-- Find current work in GitHub issues (milestones, `P0`–`P3`,
-  `decision`); this file is direction, not a queue.
+- Find current work in GitHub issues; this file is direction, not a
+  queue. Every open issue carries (2026-10-07): exactly one **type**
+  (`bug`, `enhancement`, `documentation`, `test`, `chore`), exactly
+  one **priority** (`P0`–`P3`), one or more **areas** (`area/mbsync`,
+  `area/indexer`, `area/parser`, `area/extractors`, `area/database`,
+  `area/mcp-server`, `area/mcp-tools`, `area/eval`, `area/docker`,
+  `area/ci`, `area/tooling`, `area/docs`, matching the commit scopes
+  in AGENTS.md) and one **milestone** (a phase above, *Corpus and
+  contract follow-ups* for Phase 0/1 follow-ups, *Operations and
+  hardening*, or *Evidence model*). `decision` is a status flag for
+  an issue waiting on an owner choice between stated options;
+  `security` flags privacy, secrets, exposure, TLS, supply-chain and
+  bounded-work issues whatever their type. Each label's description
+  on GitHub repeats its rule. Dependabot's own labels
+  (`dependencies` and the ecosystem names) stay on its PRs only.
 - The Current Objective supersedes any older scope statement that
   froze the MCP API surface; Phases 0–5 are the priority order.
 - Edit this file only when a decision, roadmap status or known
