@@ -1065,15 +1065,19 @@ each message whose occurrence of it now selects a module.
 
 - **`.doc`** text comes from `catdoc` (Debian's `catdoc` package in the
   indexer image), run with `-d utf-8 -w` (UTF-8 output whatever the
-  locale, no line wrapping).
+  locale, no line wrapping), under 64 MiB of address space and 10 s of
+  CPU, killed after 60 s (#995). catdoc streams the document: measured
+  in the image, the fixture and LibreOffice-written documents of 8.8 and
+  21.9 MB take 0.002 to 0.11 s of CPU and complete under 4 to 5 MiB of
+  address space.
 - **`.xls`** is read by `xlrd` 2.0.2 in a child Python process
   (`extractors/xls_child.py`, started as `python -I`). xlrd's work on
   opening a workbook is not bounded by the payload size: its
   shared-string loop trusts a declared count and a signed skip length
   (6 KB of workbook can loop until memory runs out), and its OLE2
   directory walk recurses with no cycle check (`RecursionError`). So
-  the child lowers its own address space (512 MiB) and CPU time (30 s)
-  before importing xlrd, and the parent kills it after 45 s. Inside
+  the child runs under 512 MiB of address space and 30 s of CPU, set
+  before it starts, and the parent kills it after 45 s. Inside
   those limits it applies the XLSX extractor's budgets, counted while
   reading: at most 1,024 sheets, loaded one at a time and unloaded after
   each; 5,000,000 cells visited (padding included, plus 64 per row),
@@ -1093,10 +1097,9 @@ each message whose occurrence of it now selects a module.
   build's `ppt-builder` stage fetches the jars pinned in
   `indexer/java/pom.xml` with Maven (strict checksums), compiles the
   reader and writes the runtime; the JDK and Maven stay in that stage,
-  and the runtime image grows by about 67 MB (411 to 478 MB). Java is
-  started through `extractors/ppt_launcher.py` (`python -I`), which lowers its own
-  address space (512 MiB) and CPU time (30 s), caps glibc at two malloc
-  arenas, and `execve`s Java; the parent kills it after 45 s. The JVM
+  and the runtime image grows by about 67 MB (411 to 478 MB). Java runs
+  under 512 MiB of address space and 30 s of CPU, and the parent kills
+  it after 45 s. The JVM
   runs with a 128 MiB heap, bounded code cache, class space and
   metaspace, the serial collector, C1 only and no class-data sharing,
   the set it needs to start under that limit. Its own messages are
@@ -1107,16 +1110,22 @@ each message whose occurrence of it now selects a module.
   no slide text from decks current PowerPoint or LibreOffice save
   (#958).
 
-Both run through one subprocess runner (`extractors/_runner.py`): the
-payload goes to a mode-600 file under `/tmp` (tmpfs), deleted after the
-run; the tool gets an argument list with no shell, no stdin and an
+All three run through one subprocess runner (`extractors/_runner.py`).
+It starts every tool through `extractors/_launcher.py` (`python -I`),
+which lowers its own address space (`RLIMIT_AS`) and CPU time
+(`RLIMIT_CPU`) to the limits the extractor passes, caps glibc at two
+malloc arenas (the JVM needs it to start under its limit), and
+`execve`s the tool, so the limits hold before the tool reads a byte;
+`run_tool` has no default limits, and a test checks that each caller
+passes both (#995). The payload goes to a mode-600 file under `/tmp`
+(tmpfs), deleted after the run; the tool gets an argument list with no shell, no stdin and an
 environment of `LC_ALL=C.UTF-8` only; its stderr is discarded, since it
 can quote the document; and its stdout is read incrementally up to a
 byte cap (8 MiB for catdoc and for the `.ppt` reader, whose text past
 the cap is not indexed and is reported as `doc_output_bytes` /
-`ppt_output_bytes`). A timeout (60 s for catdoc, 45 s for the `.ppt`
-reader), a
-death by signal, a non-zero exit, or an xls child's malformed or
+`ppt_output_bytes`). A timeout, a death by signal (a crash, or the CPU
+limit), a non-zero exit (a tool that fails an allocation under the
+address-space limit exits with an error), or an xls child's malformed or
 oversized output records `failed` with a fixed error type
 (`ToolTimeoutError`, `ToolCrashError`, `ToolExitError`,
 `XlsOutputError`); nothing the tool printed reaches a log or
@@ -1126,6 +1135,20 @@ image carries it. The `.ppt` runtime is built for Linux, so the tests
 that run the real reader skip on a Mac unless `INDEXER_TEST_PPT_HOME`
 points at an exported `/opt/ppt`; CI exports it from the Dockerfile's
 `ppt-runtime` stage and fails if it is missing.
+
+The limits on every external program the indexer runs:
+
+| Program | Address space | CPU time | Wall clock |
+|---|---|---|---|
+| catdoc (`.doc`) | 64 MiB | 10 s | 60 s |
+| xlrd child (`.xls`) | 512 MiB | 30 s | 45 s |
+| Java with Apache POI (`.ppt`) | 512 MiB | 30 s | 45 s |
+| Tesseract (images, scanned PDFs) | none | none | `INDEXER_OCR_TIMEOUT_SECONDS` per page |
+| Poppler `pdfinfo` / `pdftoppm` (scanned PDFs) | none | none | the OCR render deadline (see `INDEXER_OCR_TIMEOUT_SECONDS`) |
+
+Tesseract and Poppler are started by pytesseract and pdf2image, not
+through the runner, so they have no memory or CPU limit of their own
+and are bounded only by the container's (#1021).
 
 Binary payloads labelled as text: the text extractor decodes whatever
 it is given, so a PDF, ZIP (or OOXML), OLE2, PNG, JPEG or GIF file sent

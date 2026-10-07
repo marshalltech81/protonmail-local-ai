@@ -808,9 +808,9 @@ removed Bridge container are kept as history.
     because `catppt` reads no slide text from current PowerPoint decks
     and office-oxide was judged too young for code beside the mail
     database. Every external parser runs through one runner (temp file,
-    no shell, timeout, output cap); a child that needs memory and CPU
-    limits sets them itself before loading the parser (xlrd's child
-    does). Accepted risk: catdoc's
+    no shell, timeout, output cap, and address-space and CPU limits set
+    by its launcher before the parser loads, #995; the OCR path's
+    Tesseract and Poppler have a timeout only, #1021). Accepted risk: catdoc's
     unfixed Debian CVEs; CI does not yet scan image packages (#977).
 33. **Per-extractor extraction cache (2026-10-07, #928):** the
     attachment extraction cache is keyed by content hash and extractor

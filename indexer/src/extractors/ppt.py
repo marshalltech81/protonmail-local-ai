@@ -12,9 +12,9 @@ on a trimmed Java runtime, both installed under ``PPT_HOME`` by
 reads no slide text from decks current PowerPoint or LibreOffice save
 (#958).
 
-The JVM is started through ``ppt_launcher.py`` (``sys.executable -I``),
-which caps its own address space and CPU time and then ``execv``s
-Java, and run by ``_runner.run_tool``: no shell, a minimal environment,
+The JVM is run by ``_runner.run_tool``, whose launcher (``_launcher.py``,
+``sys.executable -I``) caps its own address space and CPU time and caps
+glibc's malloc arenas, then ``execv``s Java: no shell, a minimal environment,
 a wall-clock timeout, stdout read up to ``_MAX_OUTPUT_BYTES`` and stderr
 discarded (POI's errors and Log4j's "no provider" line can quote the
 deck or are noise). Output past the byte cap is not indexed: the text
@@ -31,7 +31,6 @@ indexer image, 0.15 to 0.35 s wall time, 0.2 to 0.4 s of CPU and
 from __future__ import annotations
 
 import logging
-import sys
 from collections.abc import Callable
 from pathlib import Path
 
@@ -64,7 +63,7 @@ _MAX_OUTPUT_BYTES = 8 * 1024 * 1024
 # JVM options. The heap, code cache, class space and metaspace sizes,
 # the serial collector, C1-only compilation and no class-data sharing
 # keep the JVM inside ``CHILD_MAX_ADDRESS_SPACE_BYTES`` (with the malloc
-# arena cap ``ppt_launcher`` sets); the heap bounds what POI may hold for
+# arena cap ``_launcher`` sets); the heap bounds what POI may hold for
 # one deck (past it the JVM fails the deck). The JVM's own messages
 # (unified logging, warnings) would go to stdout and be indexed as the
 # deck's text, so logging is off and the rest goes to stderr. No
@@ -89,8 +88,6 @@ _JVM_OPTIONS = (
     "-Dstdout.encoding=UTF-8",
 )
 
-_LAUNCHER = Path(__file__).with_name("ppt_launcher.py")
-
 
 def extract(
     payload: bytes,
@@ -107,11 +104,6 @@ def extract(
         raise ToolNotFoundError
     output = run_tool(
         [
-            sys.executable,
-            "-I",
-            str(_LAUNCHER),
-            str(CHILD_MAX_ADDRESS_SPACE_BYTES),
-            str(CHILD_MAX_CPU_SECONDS),
             str(java),
             *_JVM_OPTIONS,
             "-cp",
@@ -121,6 +113,8 @@ def extract(
         payload,
         timeout_seconds=PPT_TIMEOUT_SECONDS,
         max_output_bytes=_MAX_OUTPUT_BYTES,
+        max_address_space_bytes=CHILD_MAX_ADDRESS_SPACE_BYTES,
+        max_cpu_seconds=CHILD_MAX_CPU_SECONDS,
         suffix=".ppt",
     )
     if output.truncated:
