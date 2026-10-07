@@ -93,7 +93,7 @@
       "golden_search": "conflict-block-party",
       "required_citations": [["t29.1"], ["t30.2"]],
       "expected_tools": ["search_emails", "get_evidence", "ask_mailbox"],
-      "max_calls": 2,
+      "max_calls": 3,
       "held_out": true
     },
     {
@@ -121,7 +121,7 @@
       "full_read_messages": ["t41.1"],
       "forbidden_answer_text": ["583914", "270615", "914772", "640358", "quillfeather.example/confirm", "K4T9ZR2W"],
       "expected_tools": ["get_mailbox_status", "query_messages", "search_emails", "get_evidence"],
-      "max_calls": 6
+      "max_calls": 9
     },
     {
       "id": "counsel-outstanding",

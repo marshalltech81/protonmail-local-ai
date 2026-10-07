@@ -17,7 +17,10 @@ synthetic mailbox) and a trace of the calls an agent made, score
   answer cites (a cited message or passage covers its thread);
 - **message citation recall**: the fraction of required citation groups
   (message IDs) the answer cites, a cited passage or claimant ID
-  counting as its message. A correction scenario requires the
+  counting as its message, and only when a result returned that
+  message's content (``_content_reads``: its whole body, or an
+  attachment passage; a listing or a body passage reads nothing, #804).
+  A correction scenario requires the
   correcting message, which thread-level citation recall cannot tell
   from the message it corrects; a conflicting-sources scenario requires
   each side of the disagreement;
@@ -33,8 +36,9 @@ synthetic mailbox) and a trace of the calls an agent made, score
 - **unnecessary calls**: calls over the scenario's budget, and calls
   identical (tool and arguments) to an earlier one;
 - **counting** (scenarios listing ``expected_answer_messages``): whether
-  the answer cites exactly those messages (a decoy cited or a message
-  left out fails; two IDs of one message count once), and whether its
+  the answer cites exactly those messages (a decoy cited, a message
+  left out or a cited message whose content no result returned fails;
+  two IDs of one message count once), and whether its
   ``count`` is a JSON integer equal to their number;
 - **full reads**: the fraction of ``full_read_messages`` whose body the
   ``get_message`` results cover from offset 0 through each
@@ -642,9 +646,15 @@ def score_trace(scenario: Scenario, trace: dict) -> AgentScore:
         covered = set(cited) | {thread_of[c] for c in cited if c in thread_of}
         citation_recall = _groups_covered(covered, scenario.required_evidence)
 
+    # A cited message counts for the message-level scorers only when a
+    # result returned its content (``_content_reads``, as for outstanding
+    # items): a listing or a body passage that named it reads nothing.
+    bodies, attachment_passages = _content_reads(calls)
+    read = bodies | attachment_passages
+
     message_citation_recall: float | None = None
     if scenario.required_citations:
-        cited_messages = {message_of[c] for c in cited if c in message_of}
+        cited_messages = {message_of[c] for c in cited if message_of.get(c) in read}
         message_citation_recall = _groups_covered(cited_messages, scenario.required_citations)
 
     # Abstaining means answering nothing, so an abstention citing a source
@@ -680,15 +690,16 @@ def score_trace(scenario: Scenario, trace: dict) -> AgentScore:
 
     # A counting answer must cite exactly the expected messages: a decoy
     # cited or a message left out fails. A cited ID counts as the message
-    # a result returned it with, so two IDs of one message are one message.
-    # An ID no result returned as a message fails, even when it equals a
+    # a result returned it with, so two IDs of one message are one message,
+    # and only when that message's content was read (``read`` above). An ID
+    # no result returned as a message fails, even when it equals a
     # returned thread ID: a root's Message-ID is also its thread's ID.
     answer_messages_exact: bool | None = None
     answer_count_correct: bool | None = None
     if scenario.expected_answer_messages:
         expected_answers = set(scenario.expected_answer_messages)
         answer_messages_exact = (
-            all(c in message_of for c in cited)
+            all(message_of.get(c) in read for c in cited)
             and {message_of[c] for c in cited} == expected_answers
         )
         count = answer.get("count")

@@ -135,6 +135,14 @@
             {"chunk_id": "c-t24-a", "message_id": "t24.1@baseline.example", "claimant_id": "t24.1@baseline.example#00000241", "source": "body"},
             {"chunk_id": "c-t24-b", "message_id": "t24.2@baseline.example", "claimant_id": "t24.2@baseline.example#00000242", "source": "body"}
           ]}]}
+        },
+        {
+          "tool": "get_thread",
+          "arguments": {"thread_id": "t24.1@baseline.example"},
+          "result": {"thread": {"thread_id": "t24.1@baseline.example"}, "total_messages": 2, "offset": 0, "next_offset": null, "messages": [
+            {"message_id": "t24.1@baseline.example", "claimant_id": "t24.1@baseline.example#00000241", "body": "", "body_omitted_chars": 0},
+            {"message_id": "t24.2@baseline.example", "claimant_id": "t24.2@baseline.example#00000242", "body": "", "body_omitted_chars": 0}
+          ]}
         }
       ],
       "answer": {"text": "The recital moved from the first announced date; the later message gives the new one.", "cited": ["t24.2@baseline.example#00000242"]}
@@ -150,10 +158,10 @@
         {
           "tool": "get_thread",
           "arguments": {"thread_id": "t17.1@baseline.example"},
-          "result": {"thread": {"thread_id": "t17.1@baseline.example", "message_count": 3}, "total_messages": 3, "next_offset": null, "messages": [
-            {"message_id": "t17.1@baseline.example", "claimant_id": "t17.1@baseline.example#00000171"},
-            {"message_id": "t17.2@baseline.example", "claimant_id": "t17.2@baseline.example#00000172"},
-            {"message_id": "t17.3@baseline.example", "claimant_id": "t17.3@baseline.example#00000173"}
+          "result": {"thread": {"thread_id": "t17.1@baseline.example", "message_count": 3}, "total_messages": 3, "offset": 0, "next_offset": null, "messages": [
+            {"message_id": "t17.1@baseline.example", "claimant_id": "t17.1@baseline.example#00000171", "body": "", "body_omitted_chars": 0},
+            {"message_id": "t17.2@baseline.example", "claimant_id": "t17.2@baseline.example#00000172", "body": "", "body_omitted_chars": 0},
+            {"message_id": "t17.3@baseline.example", "claimant_id": "t17.3@baseline.example#00000173", "body": "", "body_omitted_chars": 0}
           ]}
         }
       ],
@@ -174,6 +182,16 @@
               {"chunk_id": "c-t30-b", "message_id": "t30.2@baseline.example", "claimant_id": "t30.2@baseline.example#00000302", "source": "body"}
             ]}
           ]}
+        },
+        {
+          "tool": "get_message",
+          "arguments": {"message_id": "t29.1@baseline.example#00000291"},
+          "result": {"message": {"message_id": "t29.1@baseline.example", "claimant_id": "t29.1@baseline.example#00000291", "thread_id": "t29.1@baseline.example"}, "body_offset": 0, "body_total_chars": 135, "next_offset": null}
+        },
+        {
+          "tool": "get_message",
+          "arguments": {"message_id": "t30.2@baseline.example#00000302"},
+          "result": {"message": {"message_id": "t30.2@baseline.example", "claimant_id": "t30.2@baseline.example#00000302", "thread_id": "t30.1@baseline.example"}, "body_offset": 0, "body_total_chars": 101, "next_offset": null}
         }
       ],
       "answer": {"text": "The two messages give different dates; neither corrects the other.", "cited": ["t29.1@baseline.example#00000291", "t30.2@baseline.example#00000302"]}
@@ -240,6 +258,21 @@
           "result": {"total_matches": 1, "returned": 1, "offset": 0, "has_more": false, "next_cursor": null, "messages": [
             {"message_id": "t42.1@baseline.example", "claimant_id": "t42.1@baseline.example#00000421", "thread_id": "t42.1@baseline.example"}
           ]}
+        },
+        {
+          "tool": "get_message",
+          "arguments": {"message_id": "t38.1@baseline.example#00000381"},
+          "result": {"message": {"message_id": "t38.1@baseline.example", "claimant_id": "t38.1@baseline.example#00000381", "thread_id": "t38.1@baseline.example"}, "body_offset": 0, "body_total_chars": 197, "next_offset": null}
+        },
+        {
+          "tool": "get_message",
+          "arguments": {"message_id": "t39.1@baseline.example#00000391"},
+          "result": {"message": {"message_id": "t39.1@baseline.example", "claimant_id": "t39.1@baseline.example#00000391", "thread_id": "t39.1@baseline.example"}, "body_offset": 0, "body_total_chars": 213, "next_offset": null}
+        },
+        {
+          "tool": "get_message",
+          "arguments": {"message_id": "t40.1@baseline.example#00000401"},
+          "result": {"message": {"message_id": "t40.1@baseline.example", "claimant_id": "t40.1@baseline.example#00000401", "thread_id": "t40.1@baseline.example"}, "body_offset": 0, "body_total_chars": 273, "next_offset": null}
         },
         {
           "tool": "get_message",
