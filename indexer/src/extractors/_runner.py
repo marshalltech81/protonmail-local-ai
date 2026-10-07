@@ -1,13 +1,15 @@
 """Run an external extraction tool on one attachment payload (#935).
 
-Shared by the ``doc`` and ``ppt`` extractors (catdoc, catppt) and by the
-``xls`` extractor, which runs xlrd in a child Python process. Every
+Shared by the ``doc`` extractor (catdoc), the ``xls`` extractor, which
+runs xlrd in a child Python process, and the ``ppt`` extractor, which
+runs Apache POI in a Java process (#957). Every
 tool is attacker-reachable parsing code, so the run is bounded and its
 output is treated as data:
 
 * The payload is written to a mode-600 temporary file under ``/tmp``
   (a tmpfs in Compose), passed as the last argument and deleted
-  afterwards. Not stdin: catppt 0.95 segfaults when it reads stdin.
+  afterwards. Not stdin: catdoc's catppt 0.95, the first ``.ppt``
+  candidate, segfaulted when it read stdin.
 * The tool runs with an argument list and no shell, a minimal
   environment, no stdin, and its stderr discarded: stderr can quote the
   document, and nothing a tool prints may reach a log or ``last_error``.

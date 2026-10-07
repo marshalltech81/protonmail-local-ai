@@ -42,6 +42,7 @@ from .database import Database
 from .extractors import (
     BINARY_AS_TEXT_ERROR,
     LEGACY_OLE2_ERROR,
+    NON_OLE2_PPT_ERROR,
     OCR_DISABLED_ERROR,
     SCANNED_PDF_OCR_DISABLED_ERROR,
     STATUS_EMPTY,
@@ -220,9 +221,12 @@ def _unsupported_still_holds(error: str | None, attachment: Attachment, ocr_enab
     that selects the DOCX, XLSX or text extractor, and a "binary payload
     labelled as text" result for one that selects the text extractor,
     which the dispatcher would reject the same way (#694, #932); an
-    occurrence labelled ``.doc`` / ``.xls`` selects the legacy extractor
-    instead and re-runs it (#935). Any other result holds only while this
-    occurrence selects no extractor.
+    occurrence labelled ``.doc`` / ``.xls`` / ``.ppt`` selects the legacy
+    extractor instead and re-runs it (#935, #957). A "not an OLE2
+    compound file" result holds for an occurrence that selects the
+    ``ppt`` extractor, which would reject the bytes the same way (#957).
+    Any other result holds only while this occurrence selects no
+    extractor.
     """
     module = resolved_extractor_module(attachment.content_type, attachment.filename)
     error = error or ""
@@ -232,6 +236,8 @@ def _unsupported_still_holds(error: str | None, attachment: Attachment, ocr_enab
     if error == LEGACY_OLE2_ERROR and module in {"docx", "xlsx", "text"}:
         return True
     if error == BINARY_AS_TEXT_ERROR and module == "text":
+        return True
+    if error == NON_OLE2_PPT_ERROR and module == "ppt":
         return True
     return module is None
 

@@ -32,6 +32,18 @@ updates:
       day: monday
     labels: [dependencies, python]
 
+  # indexer Java libraries for the legacy .ppt reader (#957). POI's two
+  # artifacts share a version, so they move together.
+  - package-ecosystem: maven
+    directory: /indexer/java
+    schedule:
+      interval: weekly
+      day: monday
+    labels: [dependencies, java]
+    groups:
+      apache-poi:
+        patterns: ["org.apache.poi:*"]
+
   # Docker base images
   - package-ecosystem: docker
     directory: /mbsync

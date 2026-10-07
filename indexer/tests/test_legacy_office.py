@@ -1,5 +1,6 @@
 """Legacy binary Office attachments (#935): the shared subprocess runner,
-``.doc`` through catdoc and ``.xls`` through xlrd in a child process.
+``.doc`` through catdoc, ``.xls`` through xlrd in a child process, and
+``.ppt`` through Apache POI in a Java process (#957).
 
 Fixtures are synthetic and tool-generated (``fixtures/extractors/README.md``).
 Tests that need the real catdoc binary skip locally when it is missing
@@ -580,3 +581,265 @@ class TestXlsCapsReachTheLog:
         assert "extractor cap xls_sheets:" in lines[0].getMessage()
         assert extractors.drain_extractor_counts()["extractor_caps"] == 1
         assert MARKER not in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# .ppt through Apache POI in a Java process (#957)
+# ---------------------------------------------------------------------------
+
+PPT_FIXTURE = FIXTURES / "legacy.ppt"
+PPT_LO_FIXTURE = FIXTURES / "legacy-lo.ppt"
+_PPT_MIME = "application/vnd.ms-powerpoint"
+
+# The image's runtime, or the one CI exports from indexer/Dockerfile.
+_PPT_HOME = Path(os.environ.get("INDEXER_TEST_PPT_HOME", "/opt/ppt"))
+_HAS_PPT_RUNTIME = (_PPT_HOME / "jre" / "bin" / "java").is_file()
+requires_ppt_runtime = pytest.mark.skipif(
+    not _HAS_PPT_RUNTIME and not _IN_CI,
+    reason=(
+        "the .ppt Java runtime is built by indexer/Dockerfile for Linux; set "
+        "INDEXER_TEST_PPT_HOME to an exported /opt/ppt (CI does) to run these"
+    ),
+)
+
+
+@pytest.fixture
+def real_ppt_home(monkeypatch):
+    from src.extractors import ppt
+
+    monkeypatch.setattr(ppt, "PPT_HOME", _PPT_HOME)
+
+
+def _fake_ppt_home(tmp_path: Path, body: str) -> Path:
+    """A ``PPT_HOME`` whose ``java`` is a Python script running ``body``."""
+    home = tmp_path / "ppt"
+    java = home / "jre" / "bin" / "java"
+    java.parent.mkdir(parents=True)
+    java.write_text(f"#!{sys.executable}\nimport json, os, resource, signal, sys, time\n{body}\n")
+    java.chmod(0o700)
+    return home
+
+
+def _ppt(payload: bytes, **kwargs):
+    return extract(content_type=_PPT_MIME, filename="deck.ppt", payload=payload, **kwargs)
+
+
+def test_ppt_runtime_is_installed_in_ci():
+    """The real-JVM tests skip only off CI: CI exports the runtime from
+    indexer/Dockerfile, so a missing runtime there is a failure."""
+    if not _IN_CI:
+        pytest.skip("only checked in CI")
+    assert _HAS_PPT_RUNTIME, f"no Java runtime under {_PPT_HOME}"
+
+
+@requires_ppt_runtime
+@pytest.mark.usefixtures("real_ppt_home")
+class TestPptRealReader:
+    def test_powerpoint_deck_yields_placeholders_text_box_and_non_ascii(self):
+        """The deck PowerPoint 16 saved keeps all slide text in drawing
+        records, which catppt never read (#958)."""
+        result = _ppt(PPT_FIXTURE.read_bytes())
+        assert (result.status, result.extractor) == (STATUS_SUCCESS, "ppt@1")
+        text = result.text or ""
+        assert "Synthetic legacy slide deck" in text
+        assert "The AMBER-KESTREL project code is 5129." in text
+        assert "The text box holds TEAL-MARMOT 3307." in text
+        assert "Café crème at the Zürich office, naïve résumé." in text
+        # Nothing the JVM or Log4j prints reaches the text.
+        assert "warning" not in text.lower()
+        assert "log4j" not in text.lower()
+
+    def test_powerpoint_deck_by_extension(self):
+        result = extract(
+            content_type="application/octet-stream",
+            filename="DECK.PPT",
+            payload=PPT_FIXTURE.read_bytes(),
+        )
+        assert result.status == STATUS_SUCCESS
+        assert "AMBER-KESTREL" in (result.text or "")
+
+    def test_libreoffice_deck_yields_its_text(self):
+        result = _ppt(PPT_LO_FIXTURE.read_bytes())
+        assert result.status == STATUS_SUCCESS
+        text = result.text or ""
+        assert "Synthetic legacy slide deck" in text
+        assert "The AMBER-KESTREL project code is 5129." in text
+        assert "Café crème at the Zürich office, naïve résumé." in text
+
+    def test_garbage_ole2_is_a_fixed_failed_row(self, caplog):
+        caplog.set_level("DEBUG")
+        result = _ppt(_OLE2_MAGIC + MARKER.encode() + bytes(2048))
+        assert (result.status, result.error) == (STATUS_FAILED, "ToolExitError")
+        assert MARKER not in caplog.text
+
+
+class TestPptExtractor:
+    def test_java_runs_through_the_launcher_with_limits_and_options(self, tmp_path, monkeypatch):
+        """The launcher lowers its limits and caps glibc's malloc arenas,
+        then ``execve``s Java with the fixed options, the jars and the
+        payload file; nothing else is inherited."""
+        import json
+
+        from src.extractors import ppt
+
+        home = _fake_ppt_home(
+            tmp_path,
+            "print(json.dumps({'argv': sys.argv, 'env': dict(os.environ), "
+            "'cpu': resource.getrlimit(resource.RLIMIT_CPU), "
+            "'as': resource.getrlimit(resource.RLIMIT_AS)}))",
+        )
+        monkeypatch.setattr(ppt, "PPT_HOME", home)
+        monkeypatch.setenv("SYNTHETIC_SECRET_ENV", MARKER)
+        text, name = ppt.extract(_OLE2_MAGIC)
+        seen = json.loads(text)
+        assert name == "ppt"
+        assert seen["argv"][1:-1] == [*ppt._JVM_OPTIONS, "-cp", f"{home}/lib/*", "PptText"]
+        assert seen["argv"][-1].endswith(".ppt")
+        assert seen["cpu"] == [ppt.CHILD_MAX_CPU_SECONDS, ppt.CHILD_MAX_CPU_SECONDS + 1]
+        if sys.platform == "linux":
+            assert seen["as"] == [ppt.CHILD_MAX_ADDRESS_SPACE_BYTES] * 2
+        assert seen["env"]["MALLOC_ARENA_MAX"] == "2"
+        assert seen["env"]["LC_ALL"] == "C.UTF-8"
+        assert "SYNTHETIC_SECRET_ENV" not in seen["env"]
+
+    def test_jvm_output_goes_to_stderr_and_writes_no_files(self):
+        """JVM messages on stdout would be indexed as the deck's text, and
+        a crash report or core file would copy it to disk."""
+        from src.extractors import ppt
+
+        for option in (
+            "-Xlog:disable",
+            "-XX:+DisplayVMOutputToStderr",
+            "-XX:+ErrorFileToStderr",
+            "-XX:-CreateCoredumpOnCrash",
+            "-XX:-UsePerfData",
+            "-Xmx128m",
+        ):
+            assert option in ppt._JVM_OPTIONS
+
+    def test_missing_runtime_is_failed(self, tmp_path, monkeypatch):
+        from src.extractors import ppt
+
+        monkeypatch.setattr(ppt, "PPT_HOME", tmp_path / "absent")
+        result = _ppt(_OLE2_MAGIC + bytes(64))
+        assert (result.status, result.error) == (STATUS_FAILED, "ToolNotFoundError")
+
+    @pytest.mark.parametrize(
+        ("body", "error"),
+        [
+            ("time.sleep(60)", "ToolTimeoutError"),
+            (
+                f"sys.stderr.write({MARKER!r})\nsys.stdout.write({MARKER!r})\nsys.exit(1)",
+                "ToolExitError",
+            ),
+            ("os.kill(os.getpid(), signal.SIGKILL)", "ToolCrashError"),
+        ],
+    )
+    def test_tool_failures_are_fixed_failed_rows(self, tmp_path, monkeypatch, caplog, body, error):
+        from src.extractors import ppt
+
+        caplog.set_level("DEBUG")
+        monkeypatch.setattr(ppt, "PPT_HOME", _fake_ppt_home(tmp_path, body))
+        monkeypatch.setattr(ppt, "PPT_TIMEOUT_SECONDS", 0.5)
+        started = time.monotonic()
+        result = extract(
+            content_type=_PPT_MIME,
+            filename=f"{MARKER}.ppt",
+            payload=_OLE2_MAGIC + MARKER.encode(),
+        )
+        assert (result.status, result.error, result.text) == (STATUS_FAILED, error, None)
+        assert time.monotonic() - started < 20
+        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+        assert len(warnings) == 1
+        assert error in warnings[0].getMessage()
+        assert MARKER not in caplog.text
+
+    @pytest.mark.parametrize("returncode", [-11, -24, -6])
+    def test_signal_statuses_are_crash_rows(self, tmp_path, monkeypatch, returncode):
+        """SIGSEGV, SIGXCPU (the CPU limit) and SIGABRT, by the status the
+        parent sees: stubbed, so nothing crashes for real on macOS."""
+        import subprocess
+
+        from src.extractors import ppt
+
+        monkeypatch.setattr(ppt, "PPT_HOME", _fake_ppt_home(tmp_path, "pass"))
+        monkeypatch.setattr(subprocess.Popen, "wait", lambda self, timeout=None: returncode)
+        result = _ppt(_OLE2_MAGIC)
+        assert (result.status, result.error) == (STATUS_FAILED, "ToolCrashError")
+
+    def test_output_is_cut_at_the_byte_cap_and_java_killed(self, tmp_path, monkeypatch, caplog):
+        """Read up to the cap, never whole: a reader writing 16 MiB is
+        killed before it finishes, and the cut is reported once."""
+        from src.extractors import ppt
+
+        caplog.set_level("DEBUG")
+        extractors.drain_extractor_counts()
+        finished = tmp_path / "finished"
+        home = _fake_ppt_home(
+            tmp_path,
+            f"sys.stdout.write({MARKER!r})\n"
+            "for _ in range(256):\n    sys.stdout.write('b' * 65536)\n"
+            "sys.stdout.flush()\n"
+            f"open({str(finished)!r}, 'w').close()",
+        )
+        monkeypatch.setattr(ppt, "PPT_HOME", home)
+        monkeypatch.setattr(ppt, "_MAX_OUTPUT_BYTES", 100_000)
+        started = time.monotonic()
+        text, _ = ppt.extract(_OLE2_MAGIC)
+        assert len(text) == 100_000
+        assert text.startswith(MARKER)
+        assert not finished.exists()
+        assert time.monotonic() - started < 20
+        lines = [r for r in caplog.records if "extractor cap" in r.getMessage()]
+        assert [r.levelno for r in lines] == [logging.WARNING]
+        assert "extractor cap ppt_output_bytes:" in lines[0].getMessage()
+        assert extractors.drain_extractor_counts()["extractor_caps"] == 1
+        assert MARKER not in caplog.text
+
+    @pytest.mark.parametrize(
+        "payload", [b"PK\x03\x04" + bytes(64), MARKER.encode(), b""], ids=["zip", "text", "empty"]
+    )
+    def test_non_ole2_ppt_is_unsupported_without_running_java(self, monkeypatch, payload):
+        from src.extractors import NON_OLE2_PPT_ERROR, STATUS_UNSUPPORTED, ppt
+
+        def must_not_run(*_args, **_kwargs):
+            raise AssertionError("the reader ran on a non-OLE2 payload")
+
+        monkeypatch.setattr(ppt, "run_tool", must_not_run)
+        for content_type, filename in ((_PPT_MIME, "a.bin"), ("application/octet-stream", "a.ppt")):
+            result = extract(content_type=content_type, filename=filename, payload=payload)
+            assert (result.status, result.extractor, result.error) == (
+                STATUS_UNSUPPORTED,
+                None,
+                NON_OLE2_PPT_ERROR,
+            )
+
+    def test_stale_ooxml_row_refreshed_from_a_ppt_occurrence_runs_ppt(self, tmp_path, monkeypatch):
+        """An OLE2 payload bound for an OOXML extractor goes to the legacy
+        extractor its occurrence's label selects, now ``.ppt`` too."""
+        from src.extractors import ppt
+
+        monkeypatch.setattr(ppt, "PPT_HOME", _fake_ppt_home(tmp_path, "print('slide words')"))
+        result = extract(
+            content_type=_PPT_MIME,
+            filename="deck.ppt",
+            payload=_OLE2_MAGIC + bytes(64),
+            module_override="docx",
+        )
+        assert (result.status, result.extractor, result.text) == (
+            STATUS_SUCCESS,
+            "ppt@1",
+            "slide words",
+        )
+
+    @pytest.mark.parametrize("error", [MemoryError, RecursionError])
+    def test_host_pressure_in_the_parent_propagates(self, tmp_path, monkeypatch, error):
+        from src.extractors import ppt
+
+        def raise_(*_args, **_kwargs):
+            raise error
+
+        monkeypatch.setattr(ppt, "PPT_HOME", _fake_ppt_home(tmp_path, "pass"))
+        monkeypatch.setattr(ppt, "run_tool", raise_)
+        with pytest.raises(error):
+            _ppt(_OLE2_MAGIC)

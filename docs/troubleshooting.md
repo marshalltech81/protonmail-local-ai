@@ -1187,12 +1187,15 @@ only, never filenames or text (`make logs`):
   <ExceptionType>` (WARNING), per extraction that fails: an encrypted
   PDF that needs a password, a Tesseract error or timeout, a DOCX or
   XLSX the parser rejects, or (`zip uncompressed-size cap exceeded`) a
-  DOCX or XLSX that would decompress past its cap. For a legacy `.doc`
-  or `.xls` (#935) the type names the tool's fate: `ToolTimeoutError`,
-  `ToolCrashError` (killed by a signal, including the `.xls` child's
-  CPU limit), `ToolExitError` (an error, including the `.xls` child's
-  memory limit), `ToolNotFoundError` (catdoc missing from the image) or
-  `XlsOutputError`. Many of these at
+  DOCX or XLSX that would decompress past its cap. For a legacy `.doc`,
+  `.xls` or `.ppt` (#935, #957) the type names the tool's fate:
+  `ToolTimeoutError`, `ToolCrashError` (killed by a signal, including
+  the `.xls` child's and the `.ppt` reader's CPU limit), `ToolExitError`
+  (an error, including the `.xls` child's memory limit, and any deck the
+  `.ppt` reader rejects or that needs more than its 128 MiB heap, such
+  as a password-protected one), `ToolNotFoundError` (catdoc or the
+  `.ppt` Java runtime missing from the image) or `XlsOutputError`.
+  Many of these at
   once usually means the OCR toolchain or a parser library is
   broken, not the mail. A failed result is cached for 7 days, then
   retried when the same bytes arrive again.
@@ -1246,12 +1249,14 @@ only, never filenames or text (`make logs`):
     budget above (#935).
   - `doc_output_bytes`: catdoc wrote more than 8 MiB for a legacy
     `.doc`; the rest is not read (#935).
+  - `ppt_output_bytes`: the `.ppt` reader wrote more than 8 MiB for a
+    legacy `.ppt`; the rest is not read (#957).
 
   The other caps either skip or fail the whole attachment and show as
   `too_large` or `failed` instead (`INDEXER_ATTACHMENT_MAX_BYTES`, the
   zip, image-pixel and XLSX whole-part caps, the OCR timeout, the
-  legacy-Office tool timeouts and the `.xls` child's memory and CPU
-  limits); the OCR
+  legacy-Office tool timeouts and the `.xls` child's and the `.ppt`
+  reader's memory and CPU limits); the OCR
   page caps have their own lines above. Like the OCR cap, a cap is reported
   on the first extraction only: the cached text is served afterwards.
 - These per-item WARNINGs (failed extractions, OCR fallback failures,
@@ -1285,11 +1290,14 @@ only, never filenames or text (`make logs`):
     so none are lost, and the 5-minute flush still applies.
   - What the outcomes mean: `cached` counts attachments served from the
     extraction cache instead of extracted again. `unsupported` is a type
-    no extractor reads, including legacy PowerPoint `.ppt` (#957), and
-    password-protected Office files and other OLE2 files not labelled
-    `.doc` / `.xls`, recorded with "OLE2 compound file" rather than as
-    `failed`, so they are not retried (#694). Genuine legacy `.doc` and
-    `.xls` files are extracted with catdoc and xlrd (#935); a crashed,
+    no extractor reads, and password-protected Office files and other
+    OLE2 files not labelled `.doc` / `.xls` / `.ppt`, recorded with
+    "OLE2 compound file" rather than as `failed`, so they are not
+    retried (#694); a `.ppt`-labelled file that is not OLE2 is recorded
+    with "not an OLE2 compound file (labelled legacy .ppt)" (#957).
+    Genuine legacy `.doc`, `.xls` and `.ppt` files are extracted with
+    catdoc, xlrd and Apache POI (#935, #957); each `.ppt` starts a Java
+    process, about 0.2 to 0.4 s of CPU; a crashed,
     timed-out or over-limit run is `failed` with a fixed error type such
     as `ToolTimeoutError` or `ToolExitError` (see `docs/architecture.md`,
     "Extractor dispatch"). Binary files (PDF, ZIP, OLE2, PNG, JPEG,
