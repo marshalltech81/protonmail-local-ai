@@ -1018,7 +1018,9 @@ model, set `INFERENCE_CONTEXT_TOKENS` to its window (for example 8192
 or 4096): the evidence budget shrinks to what fits, and the coverage
 note reports what was left out or cut. `summarize_thread` keeps at
 least a 2:1 share for its body and recent-message sections and gives
-room one does not need to the other. `extract_from_emails` adds a
+room one does not need to the other, and returns a coverage note when
+the window left out or cut short passages its own cap would show.
+`extract_from_emails` adds a
 counts-only evidence note when the window cut passages from any
 thread, so a `null` answer from such a thread is not read as a genuine
 absence. Thread subjects and participants are sender-controlled and can
@@ -1434,14 +1436,24 @@ of fewer than three words ("Call Bob") is a fragment and is not
 checked. A summary of a short thread may quote words found in both the
 thread text and a recent passage; it is verified when it cites either.
 
-Structured output: `summary`, `style` (the style used; an unknown
-style is summarized as `brief`), `thread` (the `search_emails` thread
-shape), and `citations`, `statements`, `quotes`,
+**Context trimmed by the window (#949).** When
+`INFERENCE_CONTEXT_TOKENS` is too small for the context the tool's own
+character caps would show, the context is cut to fit and the result
+says so in `coverage_note`, written by the server and outside the
+summary: the `ask_mailbox` evidence note with counts only (passages
+left out and cut short, compared with what the caps would show), then
+`<n> of <m> passages are shown. The summary may be incomplete.` The
+note is `null` when the window trimmed nothing. Trimming by the caps
+themselves is not reported.
+
+Structured output: `summary`, `coverage_note` (above), `style` (the
+style used; an unknown style is summarized as `brief`), `thread` (the
+`search_emails` thread shape), and `citations`, `statements`, `quotes`,
 `citation_problems` and `repair_attempted` as in
 [`ask_mailbox`](#ask_mailbox). The prose in `content` is the summary
 under its `Summary (<style>) — <subject>:` heading, then the
-`Citations:` list and any citation-check lines (fixed text, counts and
-labels). An `E1` citation has source `thread` and no chunk; read it
+`Citations:` list, any citation-check lines (fixed text, counts and
+labels) and the coverage note, if any. An `E1` citation has source `thread` and no chunk; read it
 with `get_thread`. A recent passage's `chunk_id` is a body chunk of
 the thread.
 

@@ -3,7 +3,8 @@
 Is the decisive evidence of each planted matter reachable through the
 real read tools, and where is it lost when it is not? The ground truth
 (``tests/eval/outstanding_items.json``) lists, per scenario, each
-decisive passage and which layers hold it:
+decisive passage and which layers hold it (``corpus_evidence`` lists
+passages of corpus shapes outside any scenario the same way, #907):
 
 - ``raw``: a text part of the ``.eml`` the build wrote;
 - ``thread_text``: ``threads.body_text``, the thread FTS input (each
@@ -50,14 +51,18 @@ pytestmark = pytest.mark.baseline
 
 _HERE = Path(__file__).parent
 _EVAL = _HERE.parent / "eval"
-TRUTH = json.loads((_EVAL / "outstanding_items.json").read_text(encoding="utf-8"))["scenarios"]
+_TRUTH_FILE = json.loads((_EVAL / "outstanding_items.json").read_text(encoding="utf-8"))
+TRUTH = _TRUTH_FILE["scenarios"]
 SCENARIOS = {
     s.id: s
     for s in load_scenarios(_EVAL / "agent_scenarios.json", _HERE / "golden.json")
     if s.outstanding is not None
 }
 _DOMAIN = "@baseline.example"
-EVIDENCE = [e for truth in TRUTH.values() for e in truth["evidence"]]
+# Plus the corpus shapes outside any scenario (#907: a sentence past the
+# build's lowered extracted-characters cap).
+CORPUS_EVIDENCE = _TRUTH_FILE["corpus_evidence"]
+EVIDENCE = [e for truth in TRUTH.values() for e in truth["evidence"]] + CORPUS_EVIDENCE
 TOOL_LAYERS = ("get_message", "get_thread", "get_evidence", "search_attachments")
 
 AVERY = "avery.cole@colereedlaw.example"
@@ -251,6 +256,7 @@ def test_truth_refs_are_indexed_messages(baseline_db: Database) -> None:
         refs += truth["forbidden_sources"] + truth["completeness_blockers"]
         refs += truth["full_read_messages"] + [e["ref"] for e in truth["evidence"]]
         assert set(refs) <= indexed, (sid, sorted(set(refs) - indexed))
+    assert {e["ref"] for e in CORPUS_EVIDENCE} <= indexed
     # The loader read the same file.
     assert set(SCENARIOS) == set(TRUTH)
 

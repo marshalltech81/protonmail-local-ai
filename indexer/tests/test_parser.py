@@ -2223,6 +2223,131 @@ class TestDecodeHeader:
         assert msg.subject == "Café"
         assert msg.body_text == "Café body."
 
+    # #942: every way a sender's encoded-word charset label can fail the
+    # codec (unknown label, a codec that refuses ``errors="replace"``, a
+    # NUL in the label) takes the same UTF-8 fallback, in Subject and in
+    # the From fallback (a From with no parseable address), and logs one
+    # rate-limited WARNING per word naming the exception type only.
+    UNDECODABLE_CHARSET_LABELS = {
+        "unknown-label": ("x-unknown-942", "LookupError"),
+        "codec-rejects-replace": ("idna", "UnicodeError"),
+        "nul-in-label": ("utf-8\x00", "ValueError"),
+        "nul-only-label": ("\x00", "ValueError"),
+    }
+
+    @staticmethod
+    def _charset_fallback_warnings(caplog) -> list[tuple[int, str]]:
+        return [
+            (r.levelno, r.getMessage())
+            for r in caplog.records
+            if "encoded-word charset" in r.getMessage()
+        ]
+
+    @staticmethod
+    def _charset_fallback_line(exc_name: str) -> tuple[int, str]:
+        return (
+            logging.WARNING,
+            f"header encoded-word charset could not be decoded ({exc_name}); "
+            "decoded 1 word as UTF-8",
+        )
+
+    @staticmethod
+    def _write_header_message(tmp_path: Path, subject: bytes, from_: bytes) -> Path:
+        folder = tmp_path / "INBOX" / "cur"
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / "charset.eml"
+        path.write_bytes(
+            b"From: " + from_ + b"\r\n"
+            b"Subject: " + subject + b"\r\n"
+            b"Message-ID: <charset-942@example.test>\r\n"
+            b"Date: Mon, 01 Jan 2024 12:00:00 +0000\r\n"
+            b"Content-Type: text/plain; charset=utf-8\r\n"
+            b"\r\n"
+            b"Body.\r\n"
+        )
+        return path
+
+    @pytest.mark.parametrize("shape", sorted(UNDECODABLE_CHARSET_LABELS))
+    def test_undecodable_charset_label_subject_falls_back_to_utf8(self, tmp_path, caplog, shape):
+        marker = "SUBJMARKER942"
+        label, exc_name = self.UNDECODABLE_CHARSET_LABELS[shape]
+        label = label.encode()
+        word = b"=?" + label + b"?q?" + marker.encode() + b"_caf=C3=A9?="
+        with caplog.at_level(logging.DEBUG):
+            msg = parse_email(
+                self._write_header_message(tmp_path, b"Re: " + word, b"a@example.test")
+            )
+        assert msg is not None
+        assert msg.subject == f"Re: {marker} café"
+        assert msg.from_addr == "a@example.test"
+        assert msg.body_text == "Body."
+        assert self._charset_fallback_warnings(caplog) == [self._charset_fallback_line(exc_name)]
+        assert marker not in caplog.text
+
+    @pytest.mark.parametrize("shape", sorted(UNDECODABLE_CHARSET_LABELS))
+    def test_undecodable_charset_label_from_fallback_falls_back_to_utf8(
+        self, tmp_path, caplog, shape
+    ):
+        """``From: <word> <>`` has no address, so the whole header goes
+        through ``_decode_header``, the same path as Subject."""
+        marker = "FROMMARKER942"
+        label, exc_name = self.UNDECODABLE_CHARSET_LABELS[shape]
+        label = label.encode()
+        word = b"=?" + label + b"?q?" + marker.encode() + b"_caf=C3=A9?="
+        with caplog.at_level(logging.DEBUG):
+            msg = parse_email(self._write_header_message(tmp_path, b"Hello", word + b" <>"))
+        assert msg is not None
+        assert msg.from_addrs == []
+        assert msg.from_addr == f"{marker} café <>"
+        assert msg.subject == "Hello"
+        assert self._charset_fallback_warnings(caplog) == [self._charset_fallback_line(exc_name)]
+        assert marker not in caplog.text
+
+    def test_nul_charset_label_filename_logs_the_charset_fallback(self, tmp_path, caplog):
+        """A filename encoded-word with a NUL label decodes through the
+        same fallback, so it logs the header line, not the filename
+        kept-as-sent line, and never the filename."""
+        marker = "FNAMEMARKER942"
+        headers = (
+            b"Content-Type: application/pdf\r\n"
+            b'Content-Disposition: attachment; filename="=?utf-8\x00?q?'
+            + marker.encode()
+            + b'.pdf?="'
+        )
+        with caplog.at_level(logging.DEBUG):
+            msg = parse_email(_write_filename_message(tmp_path, headers))
+        assert msg is not None
+        assert [a.filename for a in msg.attachments] == [f"{marker}.pdf"]
+        assert self._charset_fallback_warnings(caplog) == [
+            self._charset_fallback_line("ValueError")
+        ]
+        assert "kept 1 filename as sent" not in caplog.text
+        assert marker not in caplog.text
+
+    def test_nul_charset_label_subject_decodes_one_call_per_word(self, tmp_path, monkeypatch):
+        """#942: the fallback adds no rescan; a Subject of many NUL-label
+        words costs one ``decode_header`` call per word."""
+        import email.header
+
+        calls = 0
+        real = email.header.decode_header
+
+        def counting(value):
+            nonlocal calls
+            calls += 1
+            return real(value)
+
+        monkeypatch.setattr(email.header, "decode_header", counting)
+        words = 20_000
+        subject = b" ".join([b"=?utf-8\x00?q?caf=C3=A9?="] * words)
+        start = time.perf_counter()
+        msg = parse_email(self._write_header_message(tmp_path, subject, b"a@example.test"))
+        elapsed = time.perf_counter() - start
+        assert msg is not None
+        assert msg.subject == ("café" * words)[:SUBJECT_MAX_CHARS]
+        assert calls == words
+        assert elapsed < 10
+
     def test_mixed_plain_and_encoded_text(self):
         assert _decode_header("Re: =?utf-8?q?H=C3=A9llo?= world") == "Re: Héllo world"
 
@@ -3155,7 +3280,8 @@ _FILENAME_SHAPES = {
     "encoded-word-nul-in-charset": (
         b"Content-Type: application/pdf\r\n"
         b'Content-Disposition: attachment; filename="=?utf-8\x00?q?caf=C3=A9.pdf?="',
-        "=?utf-8\x00?q?caf=C3=A9.pdf?=",
+        # #942: decoded like Subject, with the unknown-label UTF-8 fallback.
+        "café.pdf",
     ),
     "encoded-word-lone-surrogate": (
         b"Content-Type: application/pdf\r\n"
@@ -3263,7 +3389,6 @@ def test_undecodable_filename_is_not_logged(tmp_path, caplog):
 @pytest.mark.parametrize(
     ("charset", "text", "exc_name"),
     [
-        ("utf-8\x00", "{}.pdf", "ValueError"),
         ("unicode_escape", "{}=5Cud83d.pdf", "UnicodeEncodeError"),
     ],
 )

@@ -36,9 +36,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # shells out to when rendering each PDF page to a PIL image. English
     # is the only Tesseract language pack installed, and the extractors
     # pass no language, so adding a tesseract-ocr-* pack here would not
-    # select it by itself (issue #490).
+    # select it by itself (issue #490). catdoc supplies catdoc and catppt,
+    # which src/extractors/{doc,ppt}.py run on legacy binary .doc / .ppt
+    # attachments (#935).
     tesseract-ocr \
     poppler-utils \
+    catdoc \
  && rm -rf /var/lib/apt/lists/*
 
 # UID 1002 — distinct from mbsync (UID 1001) so a parser/extractor

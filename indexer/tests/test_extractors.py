@@ -34,7 +34,7 @@ class TestDispatchByMime:
             payload=b"Hello there",
         )
         assert result.status == STATUS_SUCCESS
-        assert result.extractor == "text@2"
+        assert result.extractor == "text@3"
         assert result.text == "Hello there"
 
     def test_text_csv_uses_text_extractor(self):
@@ -67,7 +67,7 @@ class TestDispatchByMime:
             payload=b"text content",
         )
         assert result.status == STATUS_SUCCESS
-        assert result.extractor == "text@2"
+        assert result.extractor == "text@3"
 
     def test_no_dispatch_match_returns_unsupported(self):
         result = extract(
@@ -194,7 +194,7 @@ class TestSafetyGates:
         assert result.status == STATUS_FAILED
         # Only the exception type is persisted (#257).
         assert result.error == "RuntimeError"
-        assert result.extractor == "text@2"
+        assert result.extractor == "text@3"
 
 
 class TestFailedOutcomesAreLogged:
@@ -271,7 +271,7 @@ class TestFailedOutcomesAreLogged:
         )
 
         assert result == ExtractionResult(
-            status=STATUS_FAILED, extractor="text@2", text=None, error="ValueError"
+            status=STATUS_FAILED, extractor="text@3", text=None, error="ValueError"
         )
         [record] = [r for r in caplog.records if r.name == "indexer.extractor"]
         assert record.levelname == "WARNING"
@@ -442,7 +442,7 @@ class TestTextExtractorUnicode:
         # bytes, which decodes as one replacement character.
         assert result.text is not None and self.WORDS in result.text
         assert "\x00" not in result.text
-        assert result.extractor == "text@2"
+        assert result.extractor == "text@3"
 
 
 class TestStaleOcrRowsWhileOcrIsOff:
@@ -4297,7 +4297,6 @@ def library_logger_levels():
     first import inside the test would silence the loggers again before
     the unguarded run (#869)."""
     import importlib
-    import logging
 
     importlib.import_module("src.main")
     loggers = [logging.getLogger(name) for name in ("pypdf", "PIL")]
@@ -4383,7 +4382,6 @@ class TestDocumentLibraryOutputIsSilenced:
 
     def test_logging_setup_raises_library_logger_levels(self):
         import importlib
-        import logging
 
         # The module-level setup runs when ``src.main`` is imported.
         importlib.import_module("src.main")
@@ -4707,7 +4705,8 @@ def _docx_bytes(text: str) -> bytes:
 
 _OLE2_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
 
-# Legacy binary Office labels: each routes to an OOXML extractor (#694).
+# Legacy binary Office labels, and the OOXML extractor each falls back to
+# for a payload that is not OLE2 (#694, #935).
 _LEGACY_LABELS = (
     ("application/msword", "a.bin", "docx"),
     ("application/octet-stream", "a.doc", "docx"),
@@ -4739,10 +4738,11 @@ def _count_extractor_calls(monkeypatch) -> list[str]:
 
 
 class TestLegacyOfficeLabels:
-    """#694: ``application/msword`` / ``.doc`` and ``application/vnd.ms-excel``
-    / ``.xls`` route to the OOXML extractors as a best effort for OOXML files
-    mislabelled as a legacy type. A genuine legacy binary is an OLE2
-    compound file, which no OOXML parser can read."""
+    """#694, #935: ``application/msword`` / ``.doc`` and
+    ``application/vnd.ms-excel`` / ``.xls`` route a genuine legacy binary
+    (an OLE2 compound file) to the ``doc`` / ``xls`` extractor, and any
+    other payload to the OOXML extractor, as a best effort for OOXML files
+    mislabelled as a legacy type."""
 
     def test_zip_payload_with_a_legacy_label_still_reaches_the_ooxml_extractor(self, monkeypatch):
         calls = _count_extractor_calls(monkeypatch)
@@ -4777,27 +4777,27 @@ class TestLegacyOfficeLabels:
         assert len(warnings) == len(_LEGACY_LABELS)
         assert "SYNTHETIC_PAYLOAD_MARKER" not in caplog.text
 
-    def test_ole2_payload_with_a_legacy_label_is_unsupported_without_an_extractor(
-        self, monkeypatch, caplog
-    ):
-        """A genuine ``.doc`` / ``.xls`` is recorded ``unsupported`` with a
-        fixed reason, not ``failed``, so it is not re-run every
-        ``_FAILED_CACHE_MAX_AGE``. The extractor is never called and no
-        per-item WARNING is logged: the attachments aggregate counts it."""
-        from src.extractors import LEGACY_OLE2_ERROR
+    def test_ole2_payload_with_a_legacy_label_reaches_the_legacy_extractor(self, monkeypatch):
+        """#935: a genuine ``.doc`` / ``.xls`` goes to the legacy extractor
+        (#694 recorded it ``unsupported``)."""
+        from src import extractors
 
-        caplog.set_level("DEBUG")
-        calls = _count_extractor_calls(monkeypatch)
-        payload = _OLE2_MAGIC + b"SYNTHETIC_PAYLOAD_MARKER" + bytes(512)
+        calls: list[str] = []
+
+        def stub(module_name):
+            def run(payload, **_opts):
+                calls.append(module_name)
+                return "legacy words", module_name
+
+            return run
+
+        monkeypatch.setattr(extractors, "_safe_import", stub)
+        payload = _OLE2_MAGIC + bytes(512)
         for content_type, filename, _ in _LEGACY_LABELS:
             result = extract(content_type=content_type, filename=filename, payload=payload)
-            assert result == ExtractionResult(
-                status=STATUS_UNSUPPORTED, extractor=None, text=None, error=LEGACY_OLE2_ERROR
-            ), (content_type, filename)
-        assert calls == []
-        assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
-        assert "SYNTHETIC_PAYLOAD_MARKER" not in caplog.text
-        assert "SYNTHETIC_PAYLOAD_MARKER" not in LEGACY_OLE2_ERROR
+            assert result.status == STATUS_SUCCESS, (content_type, filename)
+            assert result.extractor == f"{calls[-1]}@1"
+        assert calls == ["doc", "doc", "xls", "xls"]
 
     def test_ole2_check_reads_only_the_signature(self, monkeypatch):
         """A payload shorter than the signature, or one that only starts
@@ -4808,29 +4808,38 @@ class TestLegacyOfficeLabels:
             assert result.status == STATUS_FAILED
         assert calls == ["docx", "docx"]
 
-    def test_ole2_payload_refreshing_a_stale_row_is_unsupported(self, monkeypatch):
+    def test_ole2_payload_refreshing_a_stale_row_reaches_the_legacy_extractor(self, monkeypatch):
         """The startup sweep refreshes a stale ``docx`` / ``xlsx`` row with
-        ``module_override``; a legacy-labelled OLE2 occurrence then records
-        ``unsupported`` rather than failing again."""
-        from src.extractors import LEGACY_OLE2_ERROR
+        ``module_override``; a legacy-labelled OLE2 occurrence then runs the
+        legacy extractor its own label selects (#935)."""
+        from src import extractors
 
-        calls = _count_extractor_calls(monkeypatch)
-        result = extract(
-            content_type="application/octet-stream",
-            filename="a.xls",
-            payload=_OLE2_MAGIC + bytes(64),
-            module_override="xlsx",
-        )
-        assert (result.status, result.error) == (STATUS_UNSUPPORTED, LEGACY_OLE2_ERROR)
-        assert calls == []
+        calls: list[str] = []
 
-    def test_ole2_outcome_does_not_depend_on_the_label(self, monkeypatch):
-        """Review round 1: the cache is shared by content hash, so the
-        outcome for the same bytes must not depend on which occurrence
-        arrives first. An OLE2 payload bound for either OOXML extractor is
-        ``unsupported`` under an OOXML label too (for example a
-        password-protected OOXML package, which is also OLE2), and when a
-        ``.bin`` occurrence refreshes a stale row."""
+        def stub(module_name):
+            def run(payload, **_opts):
+                calls.append(module_name)
+                return "legacy words", module_name
+
+            return run
+
+        monkeypatch.setattr(extractors, "_safe_import", stub)
+        for filename, override in (("a.xls", "xlsx"), ("a.doc", "docx")):
+            result = extract(
+                content_type="application/octet-stream",
+                filename=filename,
+                payload=_OLE2_MAGIC + bytes(64),
+                module_override=override,
+            )
+            assert result.status == STATUS_SUCCESS
+        assert calls == ["xls", "doc"]
+
+    def test_ole2_payload_without_a_legacy_label_stays_unsupported(self, monkeypatch):
+        """An OLE2 payload bound for either OOXML extractor with no legacy
+        label is ``unsupported`` (#694): under an OOXML label (for example
+        a password-protected OOXML package, which is also OLE2; the MIME
+        type wins over a ``.doc`` name), and when a ``.bin`` occurrence
+        refreshes a stale row. #935 keeps this."""
         from src.extractors import LEGACY_OLE2_ERROR
 
         calls = _count_extractor_calls(monkeypatch)
@@ -4858,15 +4867,17 @@ class TestLegacyOfficeLabels:
             )
         assert calls == []
 
-    def test_ole2_payload_for_another_extractor_keeps_todays_path(self, monkeypatch):
-        """Only the OOXML extractors are guarded: the text extractor still
-        reads whatever an OLE2 payload labelled ``.txt`` holds."""
+    def test_ole2_payload_labelled_as_text_is_a_binary_payload(self, monkeypatch):
+        """#932: an OLE2 payload labelled ``.txt`` is not decoded either; the
+        text guard records it with its own fixed reason."""
+        from src.extractors import BINARY_AS_TEXT_ERROR
+
         calls = _count_extractor_calls(monkeypatch)
         result = extract(
             content_type="text/plain", filename="a.txt", payload=_OLE2_MAGIC + b"words"
         )
-        assert result.status == STATUS_SUCCESS
-        assert calls == ["text"]
+        assert (result.status, result.error) == (STATUS_UNSUPPORTED, BINARY_AS_TEXT_ERROR)
+        assert calls == []
 
     def test_docx_and_xlsx_rows_from_before_the_ole2_check_are_stale(self):
         """The recorded outcome changed for OLE2 payloads (``failed`` became
@@ -4878,6 +4889,165 @@ class TestLegacyOfficeLabels:
         assert stale_extractor_module("docx@3") == "docx"
         assert stale_extractor_module("xlsx@4") == "xlsx"
         assert stale_extractor_module("xlsx@5") is None
+
+
+# Fixed binary signatures the text guard rejects (#932).
+_BINARY_SIGNATURES = {
+    "pdf": b"%PDF-",
+    "zip": b"PK\x03\x04",
+    "zip-empty": b"PK\x05\x06",
+    "ole2": _OLE2_MAGIC,
+    "png": b"\x89PNG\r\n\x1a\n",
+    "jpeg": b"\xff\xd8\xff",
+    "gif87a": b"GIF87a",
+    "gif89a": b"GIF89a",
+}
+
+# Occurrences that select the text extractor: a ``text/plain`` label, and a
+# ``.txt`` name with no Content-Type.
+_TEXT_LABELS = (
+    ("text/plain", "SYNTHETIC_FILENAME_MARKER.pdf"),
+    ("", "SYNTHETIC_FILENAME_MARKER.txt"),
+)
+
+# Genuine text in each encoding the text extractor decodes today.
+_GENUINE_TEXT = "SYNTHETIC invoice 1234, résumé café"
+_GENUINE_TEXT_PAYLOADS = {
+    "utf-8": _GENUINE_TEXT.encode("utf-8"),
+    "utf-8-bom": _GENUINE_TEXT.encode("utf-8-sig"),
+    "utf-16-bom": _GENUINE_TEXT.encode("utf-16"),
+    "utf-16-le-bomless": _GENUINE_TEXT.encode("utf-16-le"),
+    "utf-16-be-bomless": _GENUINE_TEXT.encode("utf-16-be"),
+    "cp1252": _GENUINE_TEXT.encode("cp1252"),
+}
+
+
+class TestBinaryPayloadLabelledAsText:
+    """#932: a binary payload labelled as text was decoded with replacement
+    characters and cached ``success``. A payload bound for the text
+    extractor that starts with a fixed binary signature is recorded
+    ``unsupported`` instead, decided by the bytes alone."""
+
+    @pytest.mark.parametrize("encoding", sorted(_GENUINE_TEXT_PAYLOADS))
+    @pytest.mark.parametrize(("content_type", "filename"), _TEXT_LABELS)
+    def test_genuine_text_keeps_todays_path(self, encoding, content_type, filename, monkeypatch):
+        calls = _count_extractor_calls(monkeypatch)
+        result = extract(
+            content_type=content_type,
+            filename=filename,
+            payload=_GENUINE_TEXT_PAYLOADS[encoding],
+        )
+        assert result.status == STATUS_SUCCESS
+        assert result.text == _GENUINE_TEXT
+        assert result.extractor is not None and result.extractor.startswith("text@")
+        assert calls == ["text"]
+
+    @pytest.mark.parametrize("signature", sorted(_BINARY_SIGNATURES))
+    @pytest.mark.parametrize(("content_type", "filename"), _TEXT_LABELS)
+    def test_binary_signature_is_unsupported_without_decoding(
+        self, signature, content_type, filename, monkeypatch, caplog
+    ):
+        from src.extractors import BINARY_AS_TEXT_ERROR
+
+        caplog.set_level("DEBUG")
+        calls = _count_extractor_calls(monkeypatch)
+        payload = _BINARY_SIGNATURES[signature] + b"SYNTHETIC_PAYLOAD_MARKER" + bytes(64)
+        result = extract(content_type=content_type, filename=filename, payload=payload)
+        assert result == ExtractionResult(
+            status=STATUS_UNSUPPORTED, extractor=None, text=None, error=BINARY_AS_TEXT_ERROR
+        )
+        assert calls == []
+        assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+        for marker in ("SYNTHETIC_PAYLOAD_MARKER", "SYNTHETIC_FILENAME_MARKER"):
+            assert marker not in caplog.text
+            assert marker not in BINARY_AS_TEXT_ERROR
+
+    @pytest.mark.parametrize("signature", sorted(_BINARY_SIGNATURES))
+    def test_partial_signature_keeps_todays_path(self, signature, monkeypatch):
+        """Only the whole fixed prefix matches: a payload shorter than the
+        signature, or one that diverges at its last byte, is decoded."""
+        calls = _count_extractor_calls(monkeypatch)
+        magic = _BINARY_SIGNATURES[signature]
+        for payload in (magic[:-1], magic[:-1] + b"\x00text"):
+            result = extract(content_type="text/plain", filename="a.txt", payload=payload)
+            assert result.status in {STATUS_SUCCESS, STATUS_EMPTY}, (signature, payload)
+        assert calls == ["text", "text"]
+
+    def test_signature_after_the_first_byte_is_not_matched(self, monkeypatch):
+        calls = _count_extractor_calls(monkeypatch)
+        result = extract(
+            content_type="text/plain", filename="a.txt", payload=b"see %PDF-1.7 in the text"
+        )
+        assert result.status == STATUS_SUCCESS
+        assert calls == ["text"]
+
+    def test_refreshing_a_stale_text_row_records_unsupported(self, monkeypatch):
+        """The startup sweep refreshes a stale ``text`` row with
+        ``module_override`` from any occurrence; the bytes decide there too."""
+        from src.extractors import BINARY_AS_TEXT_ERROR
+
+        calls = _count_extractor_calls(monkeypatch)
+        result = extract(
+            content_type="application/octet-stream",
+            filename="a.bin",
+            payload=b"%PDF-1.7" + bytes(64),
+            module_override="text",
+        )
+        assert (result.status, result.error) == (STATUS_UNSUPPORTED, BINARY_AS_TEXT_ERROR)
+        assert calls == []
+
+    @pytest.mark.parametrize(
+        ("content_type", "filename", "module"),
+        [("application/pdf", "a.pdf", "pdf"), ("image/png", "a.bin", "image")],
+    )
+    def test_refresh_from_an_occurrence_with_its_own_extractor_runs_that_extractor(
+        self, content_type, filename, module, monkeypatch
+    ):
+        """Review round 1: a stale ``text`` row refreshed from an occurrence
+        whose label selects another extractor runs that extractor, as a
+        fresh extraction of the occurrence would, rather than recording the
+        text guard's ``unsupported`` for it."""
+        calls = _count_extractor_calls(monkeypatch)
+        extract(
+            content_type=content_type,
+            filename=filename,
+            payload=_BINARY_SIGNATURES["pdf" if module == "pdf" else "png"] + bytes(64),
+            module_override="text",
+        )
+        assert calls == [module]
+
+    def test_signature_check_is_bounded_on_a_large_payload(self, monkeypatch):
+        """The guard is a fixed-prefix check: a payload at the default size
+        cap is rejected without reading past its signature, and genuine
+        text of the same size still reaches the extractor once."""
+        import time
+
+        from src.extractors import BINARY_AS_TEXT_ERROR, DEFAULT_MAX_BYTES
+
+        calls = _count_extractor_calls(monkeypatch)
+        tail = b"A" * (DEFAULT_MAX_BYTES - 16)
+        start = time.perf_counter()
+        for magic in _BINARY_SIGNATURES.values():
+            result = extract(content_type="text/plain", filename="a.txt", payload=magic + tail)
+            assert (result.status, result.error) == (STATUS_UNSUPPORTED, BINARY_AS_TEXT_ERROR)
+        assert time.perf_counter() - start < 2.0
+        assert calls == []
+
+    def test_other_extractors_still_read_their_formats(self, monkeypatch):
+        """The guard covers only the text extractor: a PNG labelled as an
+        image still reaches the image extractor."""
+        calls = _count_extractor_calls(monkeypatch)
+        extract(content_type="image/png", filename="a.png", payload=b"\x89PNG\r\n\x1a\n")
+        assert calls == ["image"]
+
+    def test_text_rows_from_before_the_guard_are_stale(self):
+        """``success`` rows the previous text version wrote for binary
+        payloads re-run once."""
+        from src.extractors import EXTRACTOR_VERSIONS, stale_extractor_module
+
+        assert EXTRACTOR_VERSIONS["text"] == 3
+        assert stale_extractor_module("text@2") == "text"
+        assert stale_extractor_module("text@3") is None
 
 
 _DOTX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.template"
@@ -5196,6 +5366,72 @@ def _cap_xlsx_text_chars(monkeypatch):
     assert rows[0] == 1
 
 
+def _cap_doc_output_bytes(monkeypatch):
+    """A tool writing past the byte cap: the bytes before it are kept,
+    and no more are read."""
+    import sys
+    import tempfile
+
+    from src.extractors import doc
+
+    tool = tempfile.NamedTemporaryFile("w", suffix=".py", delete=False)
+    tool.write(
+        f"#!{sys.executable}\nimport sys\n"
+        f"sys.stdout.write({_CAP_MARKER!r})\n"
+        "for _ in range(256):\n    sys.stdout.write('b' * 65536)\n"
+    )
+    tool.close()
+    import os
+
+    os.chmod(tool.name, 0o700)
+    monkeypatch.setattr(doc.shutil, "which", lambda _name: tool.name)
+    monkeypatch.setattr(doc, "_MAX_OUTPUT_BYTES", 1000)
+    try:
+        text, _ = doc.extract(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1")
+    finally:
+        os.unlink(tool.name)
+    assert len(text) == 1000
+    assert text.startswith(_CAP_MARKER)
+
+
+def _run_xls_child_in_process(monkeypatch, **budgets):
+    """Run the xls child's walk in this process (its budgets patched) and
+    hand its output to the real parent."""
+    from pathlib import Path
+
+    from src.extractors import xls, xls_child
+    from src.extractors._runner import ToolOutput
+
+    for name, value in budgets.items():
+        monkeypatch.setattr(xls_child, name, value)
+
+    def run_tool(_argv, payload, **_kwargs):
+        text, caps = xls_child.extract_text(payload)
+        return ToolOutput(xls_child.encode_output(text, caps), truncated=False)
+
+    monkeypatch.setattr(xls, "run_tool", run_tool)
+    fixture = Path(__file__).parent / "fixtures" / "extractors" / "legacy.xls"
+    text, _ = xls.extract(fixture.read_bytes())
+    return text
+
+
+def _cap_xls_sheets(monkeypatch):
+    text = _run_xls_child_in_process(monkeypatch, _MAX_SHEETS=1)
+    assert text.startswith("[Sheet: Summary]")
+    assert "OBSIDIAN" not in text
+
+
+def _cap_xls_expanded_cells(monkeypatch):
+    text = _run_xls_child_in_process(monkeypatch, _MAX_EXPANDED_CELLS=2 * (2 + 64))
+    assert "COBALT-LANTERN" in text
+    assert "OBSIDIAN" not in text
+
+
+def _cap_xls_text_chars(monkeypatch):
+    text = _run_xls_child_in_process(monkeypatch, _MAX_TEXT_CHARS=len("Summary") + 11 + 3)
+    assert text == "[Sheet: Summary]\nIt"
+
+
 # Each reported cap, and an extraction that crosses it with its output
 # pinned (what the code returned before #903) and the work it did.
 _CAP_TRIGGERS = {
@@ -5207,6 +5443,10 @@ _CAP_TRIGGERS = {
     "xlsx_tag_bytes": _cap_xlsx_tag_bytes,
     "xlsx_expanded_cells": _cap_xlsx_expanded_cells,
     "xlsx_text_chars": _cap_xlsx_text_chars,
+    "doc_output_bytes": _cap_doc_output_bytes,
+    "xls_sheets": _cap_xls_sheets,
+    "xls_expanded_cells": _cap_xls_expanded_cells,
+    "xls_text_chars": _cap_xls_text_chars,
 }
 
 # Every cap constant in the extractor modules (``module:NAME``) and every
@@ -5221,6 +5461,10 @@ _REPORTED_CAPS = {
     "src.extractors.xlsx:_MAX_TAG_BYTES": "xlsx_tag_bytes",
     "src.extractors.xlsx:_MAX_EXPANDED_CELLS": "xlsx_expanded_cells",
     "src.extractors.xlsx:_MAX_TEXT_CHARS": "xlsx_text_chars",
+    "src.extractors.doc:_MAX_OUTPUT_BYTES": "doc_output_bytes",
+    "src.extractors.xls_child:_MAX_SHEETS": "xls_sheets",
+    "src.extractors.xls_child:_MAX_EXPANDED_CELLS": "xls_expanded_cells",
+    "src.extractors.xls_child:_MAX_TEXT_CHARS": "xls_text_chars",
 }
 # ... or the reason it is not reported as an extractor cap.
 _WORKBOOK_FAILS = "fails the workbook (XlsxEagerPartBudgetError): a failed row, counted as failed="
@@ -5245,15 +5489,31 @@ _UNREPORTED_CAPS = {
     "src.extractors.xlsx:_MAX_EAGER_PART_BYTES": _WORKBOOK_FAILS,
     "src.extractors.xlsx:_MAX_EAGER_BYTES": _WORKBOOK_FAILS,
     "src.extractors.xlsx:_MAX_EAGER_READS": _WORKBOOK_FAILS,
+    "src.extractors.xls:_MAX_OUTPUT_BYTES": (
+        "child output past it cannot come from a working child: XlsOutputError, a failed row "
+        "with its rate-limited WARNING, counted as failed="
+    ),
+    "src.extractors.xls:CHILD_MAX_ADDRESS_SPACE_BYTES": (
+        "the child fails (ToolExitError): a failed row with its rate-limited WARNING, "
+        "counted as failed="
+    ),
+    "src.extractors.xls:CHILD_MAX_CPU_SECONDS": (
+        "the child is killed (ToolCrashError): a failed row with its rate-limited WARNING, "
+        "counted as failed="
+    ),
 }
 
 _EXTRACTOR_MODULES = (
     "src.extractors",
+    "src.extractors._runner",
+    "src.extractors.doc",
     "src.extractors.docx",
     "src.extractors.html",
     "src.extractors.image",
     "src.extractors.pdf",
     "src.extractors.text",
+    "src.extractors.xls",
+    "src.extractors.xls_child",
     "src.extractors.xlsx",
 )
 

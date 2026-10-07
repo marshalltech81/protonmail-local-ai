@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import MagicMock
@@ -86,7 +87,7 @@ def test_successful_cached_extraction_is_reused(tmp_path, monkeypatch):
     db.store_attachment_extraction(
         attachment_id=attachment.content_hash,
         extraction_status=STATUS_SUCCESS,
-        extractor="text@2",
+        extractor="text@3",
         extracted_text="cached text",
         extraction_error=None,
     )
@@ -120,7 +121,7 @@ def test_successful_cached_extraction_is_reused(tmp_path, monkeypatch):
     ]
     assert chunk_texts == ["cached text"]
     row = db.get_attachment_extraction(attachment.content_hash)
-    assert (row["extractor"], row["extracted_text"]) == ("text@2", "cached text")
+    assert (row["extractor"], row["extracted_text"]) == ("text@3", "cached text")
     assert db.get_chunk_ids_for_message(
         "message@example.com", attachment_id=attachment.content_hash
     )
@@ -381,7 +382,7 @@ def _run_process_with_cached_status(
     db.store_attachment_extraction(
         attachment_id=attachment.content_hash,
         extraction_status=status,
-        extractor="text@2",
+        extractor="text@3",
         extracted_text=None,
         extraction_error=error,
     )
@@ -448,7 +449,7 @@ def test_cached_too_large_extraction_is_re_run_once_the_payload_fits(tmp_path, m
         )
         extractor = MagicMock(
             return_value=ExtractionResult(
-                status=STATUS_SUCCESS, extractor="text@2", text="now extracted", error=None
+                status=STATUS_SUCCESS, extractor="text@3", text="now extracted", error=None
             )
         )
         monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
@@ -607,7 +608,7 @@ def test_recent_failed_cached_extraction_is_honored(tmp_path, monkeypatch):
     db.store_attachment_extraction(
         attachment_id=attachment.content_hash,
         extraction_status=STATUS_FAILED,
-        extractor="text@2",
+        extractor="text@3",
         extracted_text=None,
         extraction_error="recent failure",
     )
@@ -843,7 +844,7 @@ class TestPrepareApplyBoundary:
         db.store_attachment_extraction(
             attachment_id=attachment.content_hash,
             extraction_status=STATUS_SUCCESS,
-            extractor="text@2",
+            extractor="text@3",
             extracted_text="cached body",
             extraction_error=None,
         )
@@ -1502,15 +1503,16 @@ class TestAttachmentOutcomeCounts:
         assert attachment_indexing.format_attachment_outcomes(self._zero()) == ""
 
     def test_legacy_ole2_attachment_counts_as_unsupported(self, tmp_path, caplog):
-        """#694: a genuine ``.doc`` is counted in the aggregate's
-        ``unsupported``, with no per-item WARNING and no payload text."""
+        """#694: an OLE2 payload no extractor reads (here labelled
+        ``.docx``) is counted in the aggregate's ``unsupported``, with no
+        per-item WARNING and no payload text."""
         caplog.set_level("DEBUG")
         self._drain()
         db = _setup_db_for_attachment(tmp_path)
         attachment = _attachment(
             _OLE2_MAGIC + b"SYNTHETIC_TEXT_MARKER" + bytes(64),
-            filename="SYNTHETIC_FILENAME_MARKER.doc",
-            content_type="application/msword",
+            filename="SYNTHETIC_FILENAME_MARKER.docx",
+            content_type="application/octet-stream",
         )
         plan = prepare_attachment_writes(db=db, **_kwargs(attachment))
         assert plan.status == STATUS_UNSUPPORTED
@@ -1524,10 +1526,31 @@ class TestAttachmentOutcomeCounts:
 _OLE2_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
 
 
+def _stub_legacy_extractors(monkeypatch) -> list[str]:
+    """Replace the ``doc`` / ``xls`` extractors with stubs that record
+    each call, so the real dispatcher runs without catdoc."""
+    from src import extractors
+
+    calls: list[str] = []
+
+    def stub(module_name):
+        def run(payload, **_opts):
+            calls.append(module_name)
+            return "legacy words", module_name
+
+        return run
+
+    for module in ("doc", "xls"):
+        monkeypatch.setitem(extractors._IMPORT_CACHE, module, stub(module))
+    return calls
+
+
 class TestLegacyOle2CacheRows:
-    """#694: a legacy-labelled OLE2 payload is cached ``unsupported``. The
-    row is shared by content hash, so it must hold for every occurrence
-    the same check would reject, and only for those."""
+    """#694: an OLE2 payload no extractor reads is cached ``unsupported``.
+    The row is shared by content hash, so it must hold for every
+    occurrence the same check would reject, and only for those. #935: an
+    occurrence labelled ``.doc`` / ``.xls`` now selects a legacy
+    extractor, so it re-runs the row."""
 
     @staticmethod
     def _store(db: Database, attachment: Attachment) -> None:
@@ -1541,16 +1564,10 @@ class TestLegacyOle2CacheRows:
             extraction_error=LEGACY_OLE2_ERROR,
         )
 
-    def test_row_holds_for_legacy_labelled_and_unrouted_occurrences(self, tmp_path, monkeypatch):
+    def test_row_holds_for_an_unrouted_occurrence(self, tmp_path, monkeypatch):
         from src.extractors import LEGACY_OLE2_ERROR
 
-        for content_type, filename in (
-            ("application/msword", "a.bin"),
-            ("application/octet-stream", "a.doc"),
-            ("application/vnd.ms-excel", "a.bin"),
-            ("application/octet-stream", "a.xls"),
-            ("application/octet-stream", "a.bin"),
-        ):
+        for content_type, filename in (("application/octet-stream", "a.bin"),):
             db = _seed_thread_for_cache_test(tmp_path / filename / content_type.replace("/", "_"))
             attachment = _attachment(
                 _OLE2_MAGIC + bytes(64), filename=filename, content_type=content_type
@@ -1575,30 +1592,73 @@ class TestLegacyOle2CacheRows:
             )
             extractor.assert_not_called()
 
+    def test_row_holds_for_a_text_labelled_occurrence(self, tmp_path, monkeypatch):
+        """#932: the same bytes labelled ``.txt`` would be rejected by the
+        text guard, so the row stands in for them too."""
+        from src.extractors import LEGACY_OLE2_ERROR
+
+        for content_type, filename in (("text/plain", "a.bin"), ("", "a.txt")):
+            db = _seed_thread_for_cache_test(tmp_path / filename)
+            attachment = _attachment(
+                _OLE2_MAGIC + bytes(64), filename=filename, content_type=content_type
+            )
+            extractor = _run_process_with_cached_status(
+                db, attachment, STATUS_UNSUPPORTED, monkeypatch, error=LEGACY_OLE2_ERROR
+            )
+            extractor.assert_not_called()
+
+    def test_row_is_re_run_for_a_legacy_labelled_occurrence(self, tmp_path, monkeypatch):
+        """#935: the rows #694 recorded for a real ``.doc`` / ``.xls`` are
+        re-extracted once the legacy extractor is selected."""
+        for content_type, filename in (
+            ("application/msword", "a.bin"),
+            ("application/octet-stream", "a.doc"),
+            ("application/vnd.ms-excel", "a.bin"),
+            ("application/octet-stream", "a.xls"),
+        ):
+            db = _seed_thread_for_cache_test(tmp_path / filename / content_type.replace("/", "_"))
+            attachment = _attachment(
+                _OLE2_MAGIC + bytes(64), filename=filename, content_type=content_type
+            )
+            self._store(db, attachment)
+            extractor = MagicMock(
+                return_value=ExtractionResult(
+                    status=STATUS_SUCCESS, extractor="doc@1", text="words", error=None
+                )
+            )
+            monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
+            plan = prepare_attachment_writes(
+                db=db, **_kwargs(attachment, claimant_id="message@example.com")
+            )
+            extractor.assert_called_once()
+            assert (plan.status, plan.cached) == (STATUS_SUCCESS, False)
+
     def test_row_is_re_run_for_an_occurrence_with_another_extractor(self, tmp_path, monkeypatch):
-        """The same bytes labelled ``.txt`` take the text path, so the row
+        """The same bytes labelled ``.pdf`` take the PDF path, so the row
         does not stand in for them."""
         db = _seed_thread_for_cache_test(tmp_path)
         attachment = _attachment(
-            _OLE2_MAGIC + bytes(64), filename="a.txt", content_type="text/plain"
+            _OLE2_MAGIC + bytes(64), filename="a.pdf", content_type="application/pdf"
         )
         self._store(db, attachment)
         extractor = MagicMock(
             return_value=ExtractionResult(
-                status=STATUS_SUCCESS, extractor="text@2", text="words", error=None
+                status=STATUS_FAILED, extractor="pdf@4", text=None, error="PdfReadError"
             )
         )
         monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
         prepare_attachment_writes(db=db, **_kwargs(attachment, claimant_id="message@example.com"))
         extractor.assert_called_once()
 
-    def test_outcome_does_not_depend_on_which_occurrence_arrives_first(self, tmp_path):
-        """Review round 1: a ``.docx`` occurrence of a genuine ``.doc``'s
-        bytes processed first, through the real dispatcher, must not cache
-        a ``failed`` row that the ``.doc`` occurrence then serves for seven
-        days."""
+    def test_a_doc_occurrence_after_a_docx_one_extracts_the_bytes(self, tmp_path, monkeypatch):
+        """#694 review round 1: a ``.docx`` occurrence of a genuine
+        ``.doc``'s bytes processed first, through the real dispatcher,
+        caches ``unsupported``, not ``failed``. #935: the later ``.doc``
+        occurrence extracts the bytes and replaces the row, which then
+        serves both."""
         from src.extractors import LEGACY_OLE2_ERROR
 
+        calls = _stub_legacy_extractors(monkeypatch)
         db = _setup_db_for_attachment(tmp_path)
         payload = _OLE2_MAGIC + bytes(64)
         first = _attachment(payload, filename="a.docx", content_type="application/octet-stream")
@@ -1612,15 +1672,27 @@ class TestLegacyOle2CacheRows:
         )
         later = _attachment(payload, filename="a.doc", content_type="application/msword")
         again = prepare_attachment_writes(db=db, **_kwargs(later))
-        assert (again.status, again.cached) == (STATUS_UNSUPPORTED, True)
+        assert (again.status, again.cached) == (STATUS_SUCCESS, False)
+        assert calls == ["doc"]
+        _embed_new_chunks(
+            again, db=db, claimant_id="msg@x", embedder=make_mock_embedder([0.1] * EMBEDDING_DIM)
+        )
+        with db.transaction():
+            apply_attachment_writes(plan=again, claimant_id="msg@x", thread_id="thread-x", db=db)
+        for occurrence in (first, later):
+            served = prepare_attachment_writes(db=db, **_kwargs(occurrence))
+            assert (served.status, served.cached) == (STATUS_SUCCESS, True)
+        assert calls == ["doc"]
 
-    def test_stale_failed_row_is_refreshed_to_unsupported_once(self, tmp_path, caplog):
-        """A ``failed`` row the previous DOCX version wrote for a real
-        ``.doc`` is stale after the bump: it is refreshed once, through the
-        real dispatcher, to ``unsupported``, and then served from the cache."""
-        from src.extractors import LEGACY_OLE2_ERROR
-
+    def test_stale_failed_row_is_refreshed_through_the_legacy_extractor(
+        self, tmp_path, caplog, monkeypatch
+    ):
+        """A ``failed`` row DOCX version 3 wrote for a real ``.doc`` is
+        stale: it is refreshed once, through the real dispatcher, by the
+        ``doc`` extractor the occurrence's label selects (#935), and then
+        served from the cache."""
         caplog.set_level("DEBUG")
+        calls = _stub_legacy_extractors(monkeypatch)
         db = _setup_db_for_attachment(tmp_path)
         attachment = _attachment(
             _OLE2_MAGIC + b"SYNTHETIC_TEXT_MARKER" + bytes(64),
@@ -1635,15 +1707,178 @@ class TestLegacyOle2CacheRows:
             extraction_error="BadZipFile",
         )
         plan = prepare_attachment_writes(db=db, **_kwargs(attachment))
-        assert plan.status == STATUS_UNSUPPORTED
+        assert plan.status == STATUS_SUCCESS
         assert plan.cached is False
+        _embed_new_chunks(
+            plan, db=db, claimant_id="msg@x", embedder=make_mock_embedder([0.1] * EMBEDDING_DIM)
+        )
+        with db.transaction():
+            apply_attachment_writes(plan=plan, claimant_id="msg@x", thread_id="thread-x", db=db)
+        row = db.get_attachment_extraction(attachment.content_hash)
+        assert (row["extraction_status"], row["extractor"], row["extraction_error"]) == (
+            STATUS_SUCCESS,
+            "doc@1",
+            None,
+        )
+        again = prepare_attachment_writes(db=db, **_kwargs(attachment))
+        assert (again.status, again.cached) == (STATUS_SUCCESS, True)
+        assert calls == ["doc"]
+        assert "SYNTHETIC_TEXT_MARKER" not in caplog.text
+
+    def test_stale_failed_row_from_an_unlabelled_occurrence_stays_unsupported(
+        self, tmp_path, monkeypatch
+    ):
+        """The same refresh from a ``.bin`` occurrence has no legacy label,
+        so it records ``unsupported`` (#694); a later ``.doc`` occurrence
+        then re-runs it."""
+        from src.extractors import LEGACY_OLE2_ERROR
+
+        calls = _stub_legacy_extractors(monkeypatch)
+        db = _setup_db_for_attachment(tmp_path)
+        payload = _OLE2_MAGIC + bytes(64)
+        unlabelled = _attachment(payload, filename="a.bin", content_type="application/octet-stream")
+        db.store_attachment_extraction(
+            attachment_id=unlabelled.content_hash,
+            extraction_status=STATUS_FAILED,
+            extractor="docx@3",
+            extracted_text=None,
+            extraction_error="BadZipFile",
+        )
+        plan = prepare_attachment_writes(db=db, **_kwargs(unlabelled))
+        assert (plan.status, plan.extraction_error) == (STATUS_UNSUPPORTED, LEGACY_OLE2_ERROR)
+        with db.transaction():
+            apply_attachment_writes(plan=plan, claimant_id="msg@x", thread_id="thread-x", db=db)
+        assert calls == []
+        labelled = _attachment(payload, filename="a.doc", content_type="application/msword")
+        again = prepare_attachment_writes(db=db, **_kwargs(labelled))
+        assert (again.status, again.cached) == (STATUS_SUCCESS, False)
+        assert calls == ["doc"]
+
+
+# Fixed binary signatures the text guard rejects (#932).
+_BINARY_SIGNATURES = (
+    b"%PDF-",
+    b"PK\x03\x04",
+    b"PK\x05\x06",
+    _OLE2_MAGIC,
+    b"\x89PNG\r\n\x1a\n",
+    b"\xff\xd8\xff",
+    b"GIF87a",
+    b"GIF89a",
+)
+
+# Occurrences that select the text extractor: a ``text/plain`` label, and a
+# ``.txt`` name with no Content-Type.
+_TEXT_LABELS = (
+    ("text/plain", "SYNTHETIC_FILENAME_MARKER.pdf"),
+    ("", "SYNTHETIC_FILENAME_MARKER.txt"),
+)
+
+
+class TestBinaryPayloadLabelledAsText:
+    """#932: a binary payload labelled as text is cached ``unsupported``
+    through the real dispatcher, produces no chunk, is counted in the
+    aggregate, and the row is served to later text occurrences."""
+
+    @pytest.mark.parametrize("magic", _BINARY_SIGNATURES)
+    @pytest.mark.parametrize(("content_type", "filename"), _TEXT_LABELS)
+    def test_binary_payload_is_unsupported_with_no_chunk(
+        self, magic, content_type, filename, tmp_path, caplog
+    ):
+        from src.extractors import BINARY_AS_TEXT_ERROR
+
+        caplog.set_level("DEBUG")
+        attachment_indexing.attachment_outcomes.drain()
+        db = _setup_db_for_attachment(tmp_path)
+        attachment = _attachment(
+            magic + b"SYNTHETIC_TEXT_MARKER" + bytes(64),
+            filename=filename,
+            content_type=content_type,
+        )
+        plan = prepare_attachment_writes(db=db, **_kwargs(attachment))
+        assert plan.status == STATUS_UNSUPPORTED
+        assert plan.chunks == []
+        with db.transaction():
+            apply_attachment_writes(plan=plan, claimant_id="msg@x", thread_id="thread-x", db=db)
+        attachment_indexing.record_committed_outcomes([plan])
+        row = db.get_attachment_extraction(attachment.content_hash)
+        assert (row["extraction_status"], row["extractor"], row["extraction_error"]) == (
+            STATUS_UNSUPPORTED,
+            None,
+            BINARY_AS_TEXT_ERROR,
+        )
+        assert not db.get_chunk_ids_for_message("msg@x", attachment_id=attachment.content_hash)
+        counts = attachment_indexing.attachment_outcomes.drain()
+        assert counts["unsupported"] == 1
+        assert counts["success"] == 0
+        assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+        for marker in ("SYNTHETIC_TEXT_MARKER", "SYNTHETIC_FILENAME_MARKER"):
+            assert marker not in caplog.text
+
+    @pytest.mark.parametrize(("content_type", "filename"), _TEXT_LABELS + (("text/csv", "a.csv"),))
+    def test_row_holds_for_later_text_occurrences(
+        self, content_type, filename, tmp_path, monkeypatch
+    ):
+        from src.extractors import BINARY_AS_TEXT_ERROR
+
+        db = _seed_thread_for_cache_test(tmp_path)
+        attachment = _attachment(
+            b"%PDF-1.7" + bytes(64), filename=filename, content_type=content_type
+        )
+        extractor = _run_process_with_cached_status(
+            db, attachment, STATUS_UNSUPPORTED, monkeypatch, error=BINARY_AS_TEXT_ERROR
+        )
+        extractor.assert_not_called()
+
+    def test_row_is_re_run_for_an_occurrence_with_another_extractor(self, tmp_path, monkeypatch):
+        """The same bytes labelled ``.pdf`` reach the PDF extractor."""
+        from src.extractors import BINARY_AS_TEXT_ERROR
+
+        db = _seed_thread_for_cache_test(tmp_path)
+        attachment = _attachment(
+            b"%PDF-1.7" + bytes(64), filename="a.pdf", content_type="application/pdf"
+        )
+        db.store_attachment_extraction(
+            attachment_id=attachment.content_hash,
+            extraction_status=STATUS_UNSUPPORTED,
+            extractor=None,
+            extracted_text=None,
+            extraction_error=BINARY_AS_TEXT_ERROR,
+        )
+        extractor = MagicMock(
+            return_value=ExtractionResult(
+                status=STATUS_SUCCESS, extractor="pdf-digital@4", text="words", error=None
+            )
+        )
+        monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
+        prepare_attachment_writes(db=db, **_kwargs(attachment, claimant_id="message@example.com"))
+        extractor.assert_called_once()
+
+    def test_stale_text_success_row_is_refreshed_to_unsupported_once(self, tmp_path, caplog):
+        """A ``success`` row the previous text version wrote for a binary
+        payload is stale after the bump: it is refreshed once, through the
+        real dispatcher, to ``unsupported``, and then served from the cache."""
+        from src.extractors import BINARY_AS_TEXT_ERROR
+
+        caplog.set_level("DEBUG")
+        db = _setup_db_for_attachment(tmp_path)
+        attachment = _attachment(b"%PDF-1.7" + b"SYNTHETIC_TEXT_MARKER" + bytes(64))
+        db.store_attachment_extraction(
+            attachment_id=attachment.content_hash,
+            extraction_status=STATUS_SUCCESS,
+            extractor="text@2",
+            extracted_text="%PDF-1.7 \ufffd\ufffd",
+            extraction_error=None,
+        )
+        plan = prepare_attachment_writes(db=db, **_kwargs(attachment))
+        assert (plan.status, plan.cached, plan.chunks) == (STATUS_UNSUPPORTED, False, [])
         with db.transaction():
             apply_attachment_writes(plan=plan, claimant_id="msg@x", thread_id="thread-x", db=db)
         row = db.get_attachment_extraction(attachment.content_hash)
         assert (row["extraction_status"], row["extractor"], row["extraction_error"]) == (
             STATUS_UNSUPPORTED,
             None,
-            LEGACY_OLE2_ERROR,
+            BINARY_AS_TEXT_ERROR,
         )
         again = prepare_attachment_writes(db=db, **_kwargs(attachment))
         assert (again.status, again.cached) == (STATUS_UNSUPPORTED, True)

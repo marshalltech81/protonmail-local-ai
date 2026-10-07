@@ -1302,6 +1302,48 @@ class TestTruncationText:
         assert line["counts"]["outputs_cut"] == len(stops)
         assert line["counts"]["context_window_cuts"] == stops.count("context_window")
         assert _MARKER not in notice
+
+
+class TestSummarizeTrimNotice:
+    """#949: a summarize_thread context trimmed by the model window is
+    disclosed to the caller, as ask_mailbox's coverage note is."""
+
+    # The default cap shows E1 (the thread text, cut to the body cap),
+    # E4 (cut to the tail cap) and E5. The 3072-token window shows E1,
+    # cut shorter, and E5 cut short: E4 is left out, E1 and E5 are cut.
+    _NOTE = (
+        "Evidence note: to fit the prompt budget, 1 retrieved passages were left out "
+        "and 2 were cut short. 2 of 3 passages are shown. The summary may be incomplete."
+    )
+
+    def _run(self, caplog, budget: PromptBudget | None):
+        caplog.set_level(logging.INFO)
+        thread, recent = _long_summary_thread()
+        llm = FakeInferenceClient(response="summary [E1]")
+        out = asyncio.run(
+            _tools(_StubDb([thread], recent), llm, budget)["summarize_thread"](thread_id="t1")
+        )
+        return out, llm.complete_calls[0][1]
+
+    def test_window_trim_returns_the_notice_with_counts(self, caplog):
+        out, prompt = self._run(caplog, PromptBudget(context_tokens=3072, max_output_tokens=1024))
+        # The passages the window shows, read from the prompt itself.
+        assert "[E1 | thread text]" in prompt
+        assert "[E4 " not in prompt
+        assert "[E5 " in prompt
+        assert out.structured_content["coverage_note"] == self._NOTE
+        assert out.content[0].text.endswith("\n" + self._NOTE)
+        # The notice is outside the summary, so not a citation problem.
+        assert out.structured_content["citation_problems"] == []
+        assert _one_limit_line(caplog)["limits"] == ["evidence_budget"]
+        assert _MARKER not in caplog.text
+
+    def test_default_window_returns_no_notice(self, caplog):
+        out, prompt = self._run(caplog, None)
+        assert "[E4 " in prompt
+        assert out.structured_content["coverage_note"] is None
+        assert "Evidence note" not in out.content[0].text
+        assert _limit_lines(caplog) == []
         assert _MARKER not in caplog.text
 
 

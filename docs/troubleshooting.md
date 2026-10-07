@@ -1115,15 +1115,16 @@ call that ran into a token limit (#865, #951), for example:
 token limit hit: tool=ask_mailbox limits=evidence_budget outputs_cut=0 threads_dropped=1 passages_omitted=6 passages_truncated=1 prompt_tokens=2950 prompt_budget_tokens=3008 max_tokens=1024
 ```
 
-The line carries counts and settings only. Not every limit reaches
+The line carries counts and settings only. Each limit also reaches
 the caller: a cut reply carries a truncation notice (for `brief_issue`
 and `check_conclusion`, `status: "truncated"` with
-`truncation_reason`), the evidence that
-`ask_mailbox` and `extract_from_emails` leave out is disclosed in their
-coverage or evidence note, and `prompt_over_budget` is an error, but a
-`summarize_thread` context trimmed by the window (`evidence_budget`
-below) is in this log line only. `limits` names which limits the call
-hit:
+`truncation_reason`), the evidence that `ask_mailbox`,
+`summarize_thread` and `extract_from_emails` leave out for the window
+is disclosed in their coverage or evidence note (#949), and
+`prompt_over_budget` is an error. The exception is evidence that
+`brief_issue` and `check_conclusion` leave out for the window: only
+the model is told, in the prompt, so this log line is where it shows.
+`limits` names which limits the call hit:
 
 - `output_max_tokens`: the model stopped at `INFERENCE_MAX_TOKENS`, so
   the answer or summary was cut off (`outputs_cut` counts every cut
@@ -1191,7 +1192,12 @@ only, never filenames or text (`make logs`):
   <ExceptionType>` (WARNING), per extraction that fails: an encrypted
   PDF that needs a password, a Tesseract error or timeout, a DOCX or
   XLSX the parser rejects, or (`zip uncompressed-size cap exceeded`) a
-  DOCX or XLSX that would decompress past its cap. Many of these at
+  DOCX or XLSX that would decompress past its cap. For a legacy `.doc`
+  or `.xls` (#935) the type names the tool's fate: `ToolTimeoutError`,
+  `ToolCrashError` (killed by a signal, including the `.xls` child's
+  CPU limit), `ToolExitError` (an error, including the `.xls` child's
+  memory limit), `ToolNotFoundError` (catdoc missing from the image) or
+  `XlsOutputError`. Many of these at
   once usually means the OCR toolchain or a parser library is
   broken, not the mail. A failed result is cached for 7 days, then
   retried when the same bytes arrive again.
@@ -1240,10 +1246,17 @@ only, never filenames or text (`make logs`):
   - `xlsx_expanded_cells`, `xlsx_text_chars`: the walk over a
     workbook's cells stopped at its cell budget (5,000,000, counting a
     row as 64 cells) or its 10,000,000-character text budget.
+  - `xls_sheets`, `xls_expanded_cells`, `xls_text_chars`: the same walk
+    over a legacy `.xls` stopped at 1,024 sheets or at the cell or text
+    budget above (#935).
+  - `doc_output_bytes`: catdoc wrote more than 8 MiB for a legacy
+    `.doc`; the rest is not read (#935).
 
   The other caps either skip or fail the whole attachment and show as
   `too_large` or `failed` instead (`INDEXER_ATTACHMENT_MAX_BYTES`, the
-  zip, image-pixel and XLSX whole-part caps, the OCR timeout); the OCR
+  zip, image-pixel and XLSX whole-part caps, the OCR timeout, the
+  legacy-Office tool timeouts and the `.xls` child's memory and CPU
+  limits); the OCR
   page caps have their own lines above. Like the OCR cap, a cap is reported
   on the first extraction only: the cached text is served afterwards.
 - These per-item WARNINGs (failed extractions, OCR fallback failures,
@@ -1277,11 +1290,16 @@ only, never filenames or text (`make logs`):
     so none are lost, and the 5-minute flush still applies.
   - What the outcomes mean: `cached` counts attachments served from the
     extraction cache instead of extracted again. `unsupported` is a type
-    no extractor reads, including genuine
-    legacy binary `.doc` / `.xls` and password-protected Office files (OLE2), recorded with
-    "OLE2 compound file" rather than as `failed`, so they
-    are not retried (#694; see `docs/architecture.md`, "Extractor
-    dispatch"). `too_large` is over
+    no extractor reads, including legacy PowerPoint `.ppt` (#957), and
+    password-protected Office files and other OLE2 files not labelled
+    `.doc` / `.xls`, recorded with "OLE2 compound file" rather than as
+    `failed`, so they are not retried (#694). Genuine legacy `.doc` and
+    `.xls` files are extracted with catdoc and xlrd (#935); a crashed,
+    timed-out or over-limit run is `failed` with a fixed error type such
+    as `ToolTimeoutError` or `ToolExitError` (see `docs/architecture.md`,
+    "Extractor dispatch"). Binary files (PDF, ZIP, OLE2, PNG, JPEG,
+    GIF) sent as text are recorded with "binary payload labelled as
+    text" (#932). `too_large` is over
     `INDEXER_ATTACHMENT_MAX_BYTES`, and `ocr_disabled` is an image or
     scanned PDF skipped while `INDEXER_OCR_ENABLED=false` (re-extracted
     once OCR is turned on).
@@ -1360,8 +1378,13 @@ Some clients send a long non-ASCII attachment name as RFC 2047
 encoded-words (`=?utf-8?B?...?= =?utf-8?B?...?=`), which the standard
 library does not decode in a filename parameter. The indexer decodes
 them the same way as Subject (#924), so `search_attachments`,
-`get_message` and filename search show the sender's name. If the
-encoded-words do not decode (a malformed charset label), the indexer
+`get_message` and filename search show the sender's name. A charset
+label the codec rejects (unknown, `idna`, a NUL in the label) is
+decoded as UTF-8 with replacement characters, as in Subject (#942),
+and logged without the text: `header encoded-word charset could not be
+decoded (<ExceptionType>); decoded 1 word as UTF-8` (WARNING, rate
+limited, suppressed lines counted in the heartbeat). If
+the encoded-words still do not decode to valid text, the indexer
 keeps the filename as sent and logs, without the filename:
 `attachment filename encoded-words could not be decoded
 (<ExceptionType>); kept 1 filename as sent` (WARNING, under the same
