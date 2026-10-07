@@ -76,11 +76,12 @@ jobs:
           version: v0.75.0
           cache: true
 
-      # Both scans run even when the other fails (if: always()), so the
-      # job reports every service's findings instead of stopping at
-      # the first failing scan (#1016). A failing scan still fails the job.
+      # Both scans run even when the other fails, so the job reports every
+      # service's findings instead of stopping at the first failing scan
+      # (#1016). A failing scan still fails the job. !cancelled() rather
+      # than always(), so a superseded run still cancels.
       - name: Scan indexer dependencies
-        if: always()
+        if: ${{ !cancelled() }}
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           skip-setup-trivy: true
@@ -92,7 +93,7 @@ jobs:
           severity: CRITICAL,HIGH
 
       - name: Scan mcp-server dependencies
-        if: always()
+        if: ${{ !cancelled() }}
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           skip-setup-trivy: true
