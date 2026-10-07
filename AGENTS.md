@@ -565,10 +565,12 @@ Each label's description on GitHub repeats its rule. Dependabot PRs
 are labelled `dependencies` as their type plus the area the update
 lands in, as `.github/dependabot.yml` sets them.
 
-A dependency between issues is a GitHub "blocked by" relation, set
-when the issue is filed or when the dependency is found, with the
-reason in the body's Relationships section; a `Refs` line is context,
-not a dependency.
+Relations between issues are GitHub relations, not only prose, set
+when the issue is filed or when the relation is found, with the
+reason in the body's Relationships section: a dependency is a
+"blocked by" relation, and a part or follow-up of a larger issue
+(a "Parent:" or "Follow-up to" line, open or closed parent) is a
+sub-issue of it. A `Refs` line is context, not a relation.
 
 Titles are `<component>: <what is wrong | what will be true>`, or
 `Decision: <the choice, naming the component>`. The component is the
