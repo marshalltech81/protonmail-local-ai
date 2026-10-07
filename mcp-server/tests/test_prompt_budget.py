@@ -1252,3 +1252,54 @@ class TestTruncationText:
         assert self._WRONG[reason] not in str(err.value)
         assert _MARKER not in str(err.value)
         assert _MARKER not in caplog.text
+
+    # #950: extract_from_emails's failure line names the setting per stop
+    # reason, counting each reason apart when one call has both.
+    _EXTRACT_CUTS = {
+        "max_tokens": "cut off at the INFERENCE_MAX_TOKENS limit",
+        "context_window": (
+            "cut off at the model's context window: lower INFERENCE_CONTEXT_TOKENS "
+            "to the model's real window or below, or use a model with a larger one"
+        ),
+    }
+
+    @pytest.mark.parametrize(
+        ("stops", "expected"),
+        [
+            (["max_tokens"], "1 {max_tokens}"),
+            (["context_window"], "1 {context_window}"),
+            (
+                ["context_window", "max_tokens", "context_window"],
+                "1 {max_tokens}; 2 {context_window}",
+            ),
+        ],
+        ids=["max_tokens", "context_window", "mixed"],
+    )
+    def test_extract_failure_line_names_the_reason_setting(self, caplog, stops, expected):
+        caplog.set_level(logging.INFO)
+        threads = [_thread(f"t{i}", [_chunk(f"c{i}", f"{_MARKER} invoice {i}")]) for i in range(3)]
+        llm = FakeInferenceClient(
+            complete_responses=[
+                *(InferenceTruncatedError(partial=f"{_MARKER} {{", reason=s) for s in stops),
+                *(["null"] * (3 - len(stops))),
+            ]
+        )
+        out = asyncio.run(
+            _tools(_StubDb(threads), llm)["extract_from_emails"](
+                query=_MARKER, schema={"amount": "number"}
+            )
+        )
+        reasons = expected.format(**self._EXTRACT_CUTS)
+        notice = (
+            f"Incomplete: {len(stops)} of 3 threads could not be extracted ({reasons}), "
+            "so any matching data in them is missing."
+        )
+        assert out.structured_content["notice"] == notice
+        assert out.content[0].text == f"No records extracted. {notice}"
+        if "max_tokens" not in stops:
+            assert "INFERENCE_MAX_TOKENS" not in notice
+        line = _one_limit_line(caplog)
+        assert line["counts"]["outputs_cut"] == len(stops)
+        assert line["counts"]["context_window_cuts"] == stops.count("context_window")
+        assert _MARKER not in notice
+        assert _MARKER not in caplog.text

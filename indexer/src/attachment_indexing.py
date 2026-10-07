@@ -219,8 +219,10 @@ def _unsupported_still_holds(error: str | None, attachment: Attachment, ocr_enab
     digital text layer). An OLE2 result also holds for an occurrence
     that selects the DOCX, XLSX or text extractor, and a "binary payload
     labelled as text" result for one that selects the text extractor,
-    which the dispatcher would reject the same way (#694, #932). Any
-    other result holds only while this occurrence selects no extractor.
+    which the dispatcher would reject the same way (#694, #932); an
+    occurrence labelled ``.doc`` / ``.xls`` selects the legacy extractor
+    instead and re-runs it (#935). Any other result holds only while this
+    occurrence selects no extractor.
     """
     module = resolved_extractor_module(attachment.content_type, attachment.filename)
     error = error or ""

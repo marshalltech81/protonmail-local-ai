@@ -1111,6 +1111,16 @@ _TRUNCATED_NOTICES: dict[TruncationReason, str] = {
 }
 _TRUNCATED_NOTICE_SUFFIXES = tuple(_TRUNCATED_NOTICES.values())
 
+# extract_from_emails's failure line, per stop reason, after the count of
+# threads cut that way (#950). Same advice as the notices above.
+_EXTRACT_CUT_TEXTS: dict[TruncationReason, str] = {
+    "max_tokens": "cut off at the INFERENCE_MAX_TOKENS limit",
+    "context_window": (
+        "cut off at the model's context window: lower INFERENCE_CONTEXT_TOKENS "
+        "to the model's real window or below, or use a model with a larger one"
+    ),
+}
+
 
 def _without_truncated_notice(answer: str) -> str:
     """``answer`` less its truncation notice, if it carries one."""
@@ -3940,8 +3950,11 @@ def register_intelligence_tools(
             window_note = " ".join(note for note in (window_note, schema_note) if note)
             if failed:
                 reasons = []
-                if truncated:
-                    reasons.append(f"{truncated} cut off at the INFERENCE_MAX_TOKENS limit")
+                # Fixed text per stop reason, naming the setting that fixes
+                # it (#950, as #890 did for the prose notice).
+                for stop, text in _EXTRACT_CUT_TEXTS.items():
+                    if stop_cuts := cut_stops.count(stop):
+                        reasons.append(f"{stop_cuts} {text}")
                 if unparseable:
                     reasons.append(
                         f"{unparseable} returned output that was not a JSON object, "
