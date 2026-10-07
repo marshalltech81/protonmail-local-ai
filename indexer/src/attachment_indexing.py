@@ -217,8 +217,9 @@ def _unsupported_still_holds(error: str | None, attachment: Attachment, ocr_enab
     image, or a PDF when the PDF extractor wrote the result (it found no
     digital text layer). An OLE2 result also holds for an occurrence
     that selects the DOCX or XLSX extractor, which the dispatcher would
-    reject the same way (#694). Any other result holds only while this
-    occurrence selects no extractor.
+    reject the same way (#694); an occurrence labelled ``.doc`` / ``.xls``
+    selects the legacy extractor instead and re-runs it (#935). Any other
+    result holds only while this occurrence selects no extractor.
     """
     module = resolved_extractor_module(attachment.content_type, attachment.filename)
     error = error or ""

@@ -4297,7 +4297,6 @@ def library_logger_levels():
     first import inside the test would silence the loggers again before
     the unguarded run (#869)."""
     import importlib
-    import logging
 
     importlib.import_module("src.main")
     loggers = [logging.getLogger(name) for name in ("pypdf", "PIL")]
@@ -4383,7 +4382,6 @@ class TestDocumentLibraryOutputIsSilenced:
 
     def test_logging_setup_raises_library_logger_levels(self):
         import importlib
-        import logging
 
         # The module-level setup runs when ``src.main`` is imported.
         importlib.import_module("src.main")
@@ -4707,7 +4705,8 @@ def _docx_bytes(text: str) -> bytes:
 
 _OLE2_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
 
-# Legacy binary Office labels: each routes to an OOXML extractor (#694).
+# Legacy binary Office labels, and the OOXML extractor each falls back to
+# for a payload that is not OLE2 (#694, #935).
 _LEGACY_LABELS = (
     ("application/msword", "a.bin", "docx"),
     ("application/octet-stream", "a.doc", "docx"),
@@ -4739,10 +4738,11 @@ def _count_extractor_calls(monkeypatch) -> list[str]:
 
 
 class TestLegacyOfficeLabels:
-    """#694: ``application/msword`` / ``.doc`` and ``application/vnd.ms-excel``
-    / ``.xls`` route to the OOXML extractors as a best effort for OOXML files
-    mislabelled as a legacy type. A genuine legacy binary is an OLE2
-    compound file, which no OOXML parser can read."""
+    """#694, #935: ``application/msword`` / ``.doc`` and
+    ``application/vnd.ms-excel`` / ``.xls`` route a genuine legacy binary
+    (an OLE2 compound file) to the ``doc`` / ``xls`` extractor, and any
+    other payload to the OOXML extractor, as a best effort for OOXML files
+    mislabelled as a legacy type."""
 
     def test_zip_payload_with_a_legacy_label_still_reaches_the_ooxml_extractor(self, monkeypatch):
         calls = _count_extractor_calls(monkeypatch)
@@ -4777,27 +4777,27 @@ class TestLegacyOfficeLabels:
         assert len(warnings) == len(_LEGACY_LABELS)
         assert "SYNTHETIC_PAYLOAD_MARKER" not in caplog.text
 
-    def test_ole2_payload_with_a_legacy_label_is_unsupported_without_an_extractor(
-        self, monkeypatch, caplog
-    ):
-        """A genuine ``.doc`` / ``.xls`` is recorded ``unsupported`` with a
-        fixed reason, not ``failed``, so it is not re-run every
-        ``_FAILED_CACHE_MAX_AGE``. The extractor is never called and no
-        per-item WARNING is logged: the attachments aggregate counts it."""
-        from src.extractors import LEGACY_OLE2_ERROR
+    def test_ole2_payload_with_a_legacy_label_reaches_the_legacy_extractor(self, monkeypatch):
+        """#935: a genuine ``.doc`` / ``.xls`` goes to the legacy extractor
+        (#694 recorded it ``unsupported``)."""
+        from src import extractors
 
-        caplog.set_level("DEBUG")
-        calls = _count_extractor_calls(monkeypatch)
-        payload = _OLE2_MAGIC + b"SYNTHETIC_PAYLOAD_MARKER" + bytes(512)
+        calls: list[str] = []
+
+        def stub(module_name):
+            def run(payload, **_opts):
+                calls.append(module_name)
+                return "legacy words", module_name
+
+            return run
+
+        monkeypatch.setattr(extractors, "_safe_import", stub)
+        payload = _OLE2_MAGIC + bytes(512)
         for content_type, filename, _ in _LEGACY_LABELS:
             result = extract(content_type=content_type, filename=filename, payload=payload)
-            assert result == ExtractionResult(
-                status=STATUS_UNSUPPORTED, extractor=None, text=None, error=LEGACY_OLE2_ERROR
-            ), (content_type, filename)
-        assert calls == []
-        assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
-        assert "SYNTHETIC_PAYLOAD_MARKER" not in caplog.text
-        assert "SYNTHETIC_PAYLOAD_MARKER" not in LEGACY_OLE2_ERROR
+            assert result.status == STATUS_SUCCESS, (content_type, filename)
+            assert result.extractor == f"{calls[-1]}@1"
+        assert calls == ["doc", "doc", "xls", "xls"]
 
     def test_ole2_check_reads_only_the_signature(self, monkeypatch):
         """A payload shorter than the signature, or one that only starts
@@ -4808,29 +4808,38 @@ class TestLegacyOfficeLabels:
             assert result.status == STATUS_FAILED
         assert calls == ["docx", "docx"]
 
-    def test_ole2_payload_refreshing_a_stale_row_is_unsupported(self, monkeypatch):
+    def test_ole2_payload_refreshing_a_stale_row_reaches_the_legacy_extractor(self, monkeypatch):
         """The startup sweep refreshes a stale ``docx`` / ``xlsx`` row with
-        ``module_override``; a legacy-labelled OLE2 occurrence then records
-        ``unsupported`` rather than failing again."""
-        from src.extractors import LEGACY_OLE2_ERROR
+        ``module_override``; a legacy-labelled OLE2 occurrence then runs the
+        legacy extractor its own label selects (#935)."""
+        from src import extractors
 
-        calls = _count_extractor_calls(monkeypatch)
-        result = extract(
-            content_type="application/octet-stream",
-            filename="a.xls",
-            payload=_OLE2_MAGIC + bytes(64),
-            module_override="xlsx",
-        )
-        assert (result.status, result.error) == (STATUS_UNSUPPORTED, LEGACY_OLE2_ERROR)
-        assert calls == []
+        calls: list[str] = []
 
-    def test_ole2_outcome_does_not_depend_on_the_label(self, monkeypatch):
-        """Review round 1: the cache is shared by content hash, so the
-        outcome for the same bytes must not depend on which occurrence
-        arrives first. An OLE2 payload bound for either OOXML extractor is
-        ``unsupported`` under an OOXML label too (for example a
-        password-protected OOXML package, which is also OLE2), and when a
-        ``.bin`` occurrence refreshes a stale row."""
+        def stub(module_name):
+            def run(payload, **_opts):
+                calls.append(module_name)
+                return "legacy words", module_name
+
+            return run
+
+        monkeypatch.setattr(extractors, "_safe_import", stub)
+        for filename, override in (("a.xls", "xlsx"), ("a.doc", "docx")):
+            result = extract(
+                content_type="application/octet-stream",
+                filename=filename,
+                payload=_OLE2_MAGIC + bytes(64),
+                module_override=override,
+            )
+            assert result.status == STATUS_SUCCESS
+        assert calls == ["xls", "doc"]
+
+    def test_ole2_payload_without_a_legacy_label_stays_unsupported(self, monkeypatch):
+        """An OLE2 payload bound for either OOXML extractor with no legacy
+        label is ``unsupported`` (#694): under an OOXML label (for example
+        a password-protected OOXML package, which is also OLE2; the MIME
+        type wins over a ``.doc`` name), and when a ``.bin`` occurrence
+        refreshes a stale row. #935 keeps this."""
         from src.extractors import LEGACY_OLE2_ERROR
 
         calls = _count_extractor_calls(monkeypatch)
@@ -5196,6 +5205,72 @@ def _cap_xlsx_text_chars(monkeypatch):
     assert rows[0] == 1
 
 
+def _cap_doc_output_bytes(monkeypatch):
+    """A tool writing past the byte cap: the bytes before it are kept,
+    and no more are read."""
+    import sys
+    import tempfile
+
+    from src.extractors import doc
+
+    tool = tempfile.NamedTemporaryFile("w", suffix=".py", delete=False)
+    tool.write(
+        f"#!{sys.executable}\nimport sys\n"
+        f"sys.stdout.write({_CAP_MARKER!r})\n"
+        "for _ in range(256):\n    sys.stdout.write('b' * 65536)\n"
+    )
+    tool.close()
+    import os
+
+    os.chmod(tool.name, 0o700)
+    monkeypatch.setattr(doc.shutil, "which", lambda _name: tool.name)
+    monkeypatch.setattr(doc, "_MAX_OUTPUT_BYTES", 1000)
+    try:
+        text, _ = doc.extract(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1")
+    finally:
+        os.unlink(tool.name)
+    assert len(text) == 1000
+    assert text.startswith(_CAP_MARKER)
+
+
+def _run_xls_child_in_process(monkeypatch, **budgets):
+    """Run the xls child's walk in this process (its budgets patched) and
+    hand its output to the real parent."""
+    from pathlib import Path
+
+    from src.extractors import xls, xls_child
+    from src.extractors._runner import ToolOutput
+
+    for name, value in budgets.items():
+        monkeypatch.setattr(xls_child, name, value)
+
+    def run_tool(_argv, payload, **_kwargs):
+        text, caps = xls_child.extract_text(payload)
+        return ToolOutput(xls_child.encode_output(text, caps), truncated=False)
+
+    monkeypatch.setattr(xls, "run_tool", run_tool)
+    fixture = Path(__file__).parent / "fixtures" / "extractors" / "legacy.xls"
+    text, _ = xls.extract(fixture.read_bytes())
+    return text
+
+
+def _cap_xls_sheets(monkeypatch):
+    text = _run_xls_child_in_process(monkeypatch, _MAX_SHEETS=1)
+    assert text.startswith("[Sheet: Summary]")
+    assert "OBSIDIAN" not in text
+
+
+def _cap_xls_expanded_cells(monkeypatch):
+    text = _run_xls_child_in_process(monkeypatch, _MAX_EXPANDED_CELLS=2 * (2 + 64))
+    assert "COBALT-LANTERN" in text
+    assert "OBSIDIAN" not in text
+
+
+def _cap_xls_text_chars(monkeypatch):
+    text = _run_xls_child_in_process(monkeypatch, _MAX_TEXT_CHARS=len("Summary") + 11 + 3)
+    assert text == "[Sheet: Summary]\nIt"
+
+
 # Each reported cap, and an extraction that crosses it with its output
 # pinned (what the code returned before #903) and the work it did.
 _CAP_TRIGGERS = {
@@ -5207,6 +5282,10 @@ _CAP_TRIGGERS = {
     "xlsx_tag_bytes": _cap_xlsx_tag_bytes,
     "xlsx_expanded_cells": _cap_xlsx_expanded_cells,
     "xlsx_text_chars": _cap_xlsx_text_chars,
+    "doc_output_bytes": _cap_doc_output_bytes,
+    "xls_sheets": _cap_xls_sheets,
+    "xls_expanded_cells": _cap_xls_expanded_cells,
+    "xls_text_chars": _cap_xls_text_chars,
 }
 
 # Every cap constant in the extractor modules (``module:NAME``) and every
@@ -5221,6 +5300,10 @@ _REPORTED_CAPS = {
     "src.extractors.xlsx:_MAX_TAG_BYTES": "xlsx_tag_bytes",
     "src.extractors.xlsx:_MAX_EXPANDED_CELLS": "xlsx_expanded_cells",
     "src.extractors.xlsx:_MAX_TEXT_CHARS": "xlsx_text_chars",
+    "src.extractors.doc:_MAX_OUTPUT_BYTES": "doc_output_bytes",
+    "src.extractors.xls_child:_MAX_SHEETS": "xls_sheets",
+    "src.extractors.xls_child:_MAX_EXPANDED_CELLS": "xls_expanded_cells",
+    "src.extractors.xls_child:_MAX_TEXT_CHARS": "xls_text_chars",
 }
 # ... or the reason it is not reported as an extractor cap.
 _WORKBOOK_FAILS = "fails the workbook (XlsxEagerPartBudgetError): a failed row, counted as failed="
@@ -5245,15 +5328,31 @@ _UNREPORTED_CAPS = {
     "src.extractors.xlsx:_MAX_EAGER_PART_BYTES": _WORKBOOK_FAILS,
     "src.extractors.xlsx:_MAX_EAGER_BYTES": _WORKBOOK_FAILS,
     "src.extractors.xlsx:_MAX_EAGER_READS": _WORKBOOK_FAILS,
+    "src.extractors.xls:_MAX_OUTPUT_BYTES": (
+        "child output past it cannot come from a working child: XlsOutputError, a failed row "
+        "with its rate-limited WARNING, counted as failed="
+    ),
+    "src.extractors.xls:CHILD_MAX_ADDRESS_SPACE_BYTES": (
+        "the child fails (ToolExitError): a failed row with its rate-limited WARNING, "
+        "counted as failed="
+    ),
+    "src.extractors.xls:CHILD_MAX_CPU_SECONDS": (
+        "the child is killed (ToolCrashError): a failed row with its rate-limited WARNING, "
+        "counted as failed="
+    ),
 }
 
 _EXTRACTOR_MODULES = (
     "src.extractors",
+    "src.extractors._runner",
+    "src.extractors.doc",
     "src.extractors.docx",
     "src.extractors.html",
     "src.extractors.image",
     "src.extractors.pdf",
     "src.extractors.text",
+    "src.extractors.xls",
+    "src.extractors.xls_child",
     "src.extractors.xlsx",
 )
 

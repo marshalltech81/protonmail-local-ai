@@ -1188,7 +1188,12 @@ only, never filenames or text (`make logs`):
   <ExceptionType>` (WARNING), per extraction that fails: an encrypted
   PDF that needs a password, a Tesseract error or timeout, a DOCX or
   XLSX the parser rejects, or (`zip uncompressed-size cap exceeded`) a
-  DOCX or XLSX that would decompress past its cap. Many of these at
+  DOCX or XLSX that would decompress past its cap. For a legacy `.doc`
+  or `.xls` (#935) the type names the tool's fate: `ToolTimeoutError`,
+  `ToolCrashError` (killed by a signal, including the `.xls` child's
+  CPU limit), `ToolExitError` (an error, including the `.xls` child's
+  memory limit), `ToolNotFoundError` (catdoc missing from the image) or
+  `XlsOutputError`. Many of these at
   once usually means the OCR toolchain or a parser library is
   broken, not the mail. A failed result is cached for 7 days, then
   retried when the same bytes arrive again.
@@ -1237,10 +1242,17 @@ only, never filenames or text (`make logs`):
   - `xlsx_expanded_cells`, `xlsx_text_chars`: the walk over a
     workbook's cells stopped at its cell budget (5,000,000, counting a
     row as 64 cells) or its 10,000,000-character text budget.
+  - `xls_sheets`, `xls_expanded_cells`, `xls_text_chars`: the same walk
+    over a legacy `.xls` stopped at 1,024 sheets or at the cell or text
+    budget above (#935).
+  - `doc_output_bytes`: catdoc wrote more than 8 MiB for a legacy
+    `.doc`; the rest is not read (#935).
 
   The other caps either skip or fail the whole attachment and show as
   `too_large` or `failed` instead (`INDEXER_ATTACHMENT_MAX_BYTES`, the
-  zip, image-pixel and XLSX whole-part caps, the OCR timeout); the OCR
+  zip, image-pixel and XLSX whole-part caps, the OCR timeout, the
+  legacy-Office tool timeouts and the `.xls` child's memory and CPU
+  limits); the OCR
   page caps have their own lines above. Like the OCR cap, a cap is reported
   on the first extraction only: the cached text is served afterwards.
 - These per-item WARNINGs (failed extractions, OCR fallback failures,
@@ -1274,11 +1286,14 @@ only, never filenames or text (`make logs`):
     so none are lost, and the 5-minute flush still applies.
   - What the outcomes mean: `cached` counts attachments served from the
     extraction cache instead of extracted again. `unsupported` is a type
-    no extractor reads, including genuine
-    legacy binary `.doc` / `.xls` and password-protected Office files (OLE2), recorded with
-    "OLE2 compound file" rather than as `failed`, so they
-    are not retried (#694; see `docs/architecture.md`, "Extractor
-    dispatch"). `too_large` is over
+    no extractor reads, including legacy PowerPoint `.ppt` (#957), and
+    password-protected Office files and other OLE2 files not labelled
+    `.doc` / `.xls`, recorded with "OLE2 compound file" rather than as
+    `failed`, so they are not retried (#694). Genuine legacy `.doc` and
+    `.xls` files are extracted with catdoc and xlrd (#935); a crashed,
+    timed-out or over-limit run is `failed` with a fixed error type such
+    as `ToolTimeoutError` or `ToolExitError` (see `docs/architecture.md`,
+    "Extractor dispatch"). `too_large` is over
     `INDEXER_ATTACHMENT_MAX_BYTES`, and `ocr_disabled` is an image or
     scanned PDF skipped while `INDEXER_OCR_ENABLED=false` (re-extracted
     once OCR is turned on).
