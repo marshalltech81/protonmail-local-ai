@@ -409,6 +409,7 @@ class TestDateBoundsEcho:
         assert page["date_bounds"] == {
             "date_from": "2024-01-10T00:00:00+00:00",
             "date_to": None,
+            "basis": "effective",
         }
         assert "m1" in [m["message_id"] for m in page["messages"]]
 
@@ -419,6 +420,7 @@ class TestDateBoundsEcho:
         assert page["date_bounds"] == {
             "date_from": "2024-01-10T10:00:00+00:00",
             "date_to": "2024-01-31T23:59:59.999999+00:00",
+            "basis": "effective",
         }
         assert "m1" not in [m["message_id"] for m in page["messages"]]
         text = _wire(server, "query_messages", args).content[0].text
@@ -442,6 +444,7 @@ class TestDateBoundsEcho:
         assert same_day["date_bounds"] == {
             "date_from": None,
             "date_to": "2024-01-10T23:59:59.999999+00:00",
+            "basis": "effective",
         }
         assert [r["thread_id"] for r in same_day["results"]] == ["t1"]
         args = {"query": "budget", "mode": "keyword", "date_to": "2024-01-10T03:00:00-05:00"}
@@ -466,6 +469,7 @@ class TestDateBoundsEcho:
         assert out["date_bounds"] == {
             "date_from": "2024-01-09T18:30:00+00:00",
             "date_to": None,
+            "basis": "effective",
         }
         text = _wire(server, "search_attachments", args).content[0].text
         assert "Date bounds (UTC): from 2024-01-09T18:30:00+00:00" in text

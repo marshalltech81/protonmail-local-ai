@@ -12,9 +12,11 @@ import re
 import sqlite3
 from contextlib import closing
 from pathlib import Path
+from typing import get_args
 
 import pytest
 from src.lib.predicates import (
+    DATE_BASES,
     LEAVES,
     Evaluability,
     Leaf,
@@ -25,7 +27,8 @@ from src.lib.predicates import (
     search_emails_leaves,
 )
 from src.lib.security import _LOGGABLE_TOOL_PARAMS, log_tool_call
-from src.lib.sqlite import Database, InvalidFilterError
+from src.lib.sqlite import Database, InvalidFilterError, MessageRecord, _record_clock
+from src.tools.outputs import DateBasisName
 
 from tests.conftest import _insert_message, claimant_of, set_authority
 from tests.test_evidence_scope import _finish_threads
@@ -347,6 +350,8 @@ _SAMPLES: dict[str, object] = {
     "instant": "2024-01-01T00:00:00+00:00",
     "bool": True,
     "class": "counsel",
+    "bytes": 1024,
+    "basis": "occurred",
 }
 
 # Leaves deliberately left out of docs/mcp-tools.md, each with its
@@ -379,6 +384,21 @@ def _every_adapter_leaf_name() -> set[str]:
         )
     }
     names |= {leaf.name for leaf in query_messages_leaves(**dict.fromkeys(_QUERY_PARAMS))}
+    for basis in DATE_BASES:
+        names |= {
+            leaf.name
+            for leaf in query_messages_leaves(
+                **{
+                    **dict.fromkeys(_QUERY_PARAMS),
+                    "date_from": "2024-01-01",
+                    "date_to": "2024-12-31",
+                    "replied": True,
+                    "size_min": 1,
+                    "size_max": 2,
+                    "date_basis": basis,
+                }
+            )
+        }
     names |= {
         leaf.name
         for leaf in message_scope_leaves(
@@ -417,6 +437,10 @@ _QUERY_PARAMS = (
     "authority_class",
     "seen",
     "flagged",
+    "replied",
+    "size_min",
+    "size_max",
+    "date_basis",
 )
 
 
@@ -427,7 +451,7 @@ class TestLeafRegistry:
 
     def test_registry_is_keyed_by_leaf_name(self):
         assert all(name == kind.name for name, kind in LEAVES.items())
-        assert len(LEAVES) == 13
+        assert len(LEAVES) == 21
 
     @pytest.mark.parametrize("name", sorted(LEAVES))
     def test_leaf_compiles_with_a_rule_and_a_docs_entry(self, name, mixed_db):
@@ -542,7 +566,17 @@ class TestCompilerAndDigest:
         blank = {
             name: "  "
             for name in _QUERY_PARAMS
-            if name not in ("has_attachments", "seen", "flagged", "date_from", "date_to")
+            if name
+            not in (
+                "has_attachments",
+                "seen",
+                "flagged",
+                "replied",
+                "size_min",
+                "size_max",
+                "date_from",
+                "date_to",
+            )
         }
         assert query_messages_leaves(**{**dict.fromkeys(_QUERY_PARAMS), **blank}) == [
             Leaf("not_in_folders", ("Trash",))
@@ -597,7 +631,9 @@ class TestLogAllowlist:
     the one from before the module, and a marker passed through every
     tool parameter that becomes a leaf is withheld."""
 
-    def test_allowlist_is_unchanged(self):
+    def test_allowlist_is_pinned(self):
+        # #1085 added replied (bool), size_min / size_max (ints) and
+        # date_basis (an enum); each passes only its own check.
         assert set(_LOGGABLE_TOOL_PARAMS) == {
             "mode",
             "style",
@@ -620,7 +656,31 @@ class TestLogAllowlist:
             "dedupe_attachments",
             "authority_class",
             "fields",
+            "replied",
+            "size_min",
+            "size_max",
+            "date_basis",
         }
+
+    def test_valid_1085_values_are_logged_and_invalid_ones_withheld(self, caplog):
+        logger = logging.getLogger("test-1085-tool-log")
+        with caplog.at_level(logging.INFO, logger="test-1085-tool-log"):
+            log_tool_call(
+                logger,
+                "query_messages",
+                {"replied": True, "size_min": 1000, "size_max": 2000, "date_basis": "sent"},
+            )
+            log_tool_call(
+                logger,
+                "query_messages",
+                {"replied": 1, "size_min": True, "size_max": "2000", "date_basis": _MARKER},
+            )
+        first, second = caplog.messages
+        assert "'replied': True" in first and "'size_min': 1000" in first
+        assert "'size_max': 2000" in first and "'date_basis': 'sent'" in first
+        assert first.endswith("withheld=[]")
+        assert second.endswith("withheld=['date_basis', 'replied', 'size_max', 'size_min']")
+        assert _MARKER not in caplog.text
 
     def test_marker_through_each_tools_filters_is_withheld(self, caplog):
         logger = logging.getLogger("test-1084-tool-log")
@@ -652,3 +712,234 @@ class TestLogAllowlist:
         for params in calls.values():
             for name in params:
                 assert f"'{name}'" in caplog.text
+
+
+@pytest.fixture
+def clocks_db(tmp_path) -> Database:
+    """Four messages of one thread whose clocks, sizes and replied flags
+    differ (#1085). ``c2`` is sent on February 10 and delivered on the
+    20th, either side of a February 15 bound. ``c3`` is sent after
+    ``c4`` but delivered before ``c4``'s send time, so the sent and
+    effective orders differ; ``c4`` has no delivery time and ``c3`` no
+    stored size. Only ``c1`` is replied to.
+
+    Effective order: c4, c3, c2, c1. Sent order: c3, c4, c2, c1.
+    Occurred order (c4 has none): c3, c2, c1.
+    """
+    conn, path = _open_built_db_conn(tmp_path, "clocks.db")
+    rows = [
+        ("c1", "2024-01-10T09:00:00+00:00", "2024-01-12T09:00:00+00:00", 100, True),
+        ("c2", "2024-02-10T09:00:00+00:00", "2024-02-20T09:00:00+00:00", 5000, False),
+        ("c3", "2024-03-20T09:00:00+00:00", "2024-03-05T09:00:00+00:00", None, False),
+        ("c4", "2024-03-10T09:00:00+00:00", None, 300, False),
+    ]
+    for message_id, sent_at, occurred_at, size_bytes, replied in rows:
+        _insert_message(
+            conn,
+            message_id=message_id,
+            thread_id="t-clocks",
+            sent_at=sent_at,
+            occurred_at=occurred_at,
+            from_=["alice@one.example"],
+            to=["bob@two.example"],
+            size_bytes=size_bytes,
+            replied=replied,
+        )
+    _finish_threads(conn)
+    conn.commit()
+    conn.close()
+    return Database(str(path))
+
+
+class TestClockSizeAndRepliedLeaves:
+    """``replied``, ``size_min`` / ``size_max`` and ``date_basis`` on
+    ``query_messages`` (#1085). A NULL size or a NULL clock under the
+    chosen basis is neither a match nor a miss: the row is left out
+    (its ``indeterminate`` count arrives with #1086)."""
+
+    @pytest.mark.parametrize(
+        ("filters", "expected"),
+        [
+            ({}, ["c4", "c3", "c2", "c1"]),
+            ({"date_basis": "effective"}, ["c4", "c3", "c2", "c1"]),
+            ({"date_basis": " effective "}, ["c4", "c3", "c2", "c1"]),
+            ({"date_basis": ""}, ["c4", "c3", "c2", "c1"]),
+            ({"date_basis": "sent"}, ["c3", "c4", "c2", "c1"]),
+            ({"date_basis": "occurred"}, ["c3", "c2", "c1"]),
+            # c2: sent before the bound, delivered after it.
+            ({"date_from": "2024-02-15"}, ["c4", "c3", "c2"]),
+            ({"date_from": "2024-02-15", "date_basis": "sent"}, ["c3", "c4"]),
+            ({"date_from": "2024-02-15", "date_basis": "occurred"}, ["c3", "c2"]),
+            ({"date_to": "2024-02-15"}, ["c1"]),
+            ({"date_to": "2024-02-15", "date_basis": "sent"}, ["c2", "c1"]),
+            ({"date_to": "2024-02-15", "date_basis": "occurred"}, ["c1"]),
+            (
+                {
+                    "date_from": "2024-02-10T09:00:00+00:00",
+                    "date_to": "2024-02-10T09:00:00+00:00",
+                    "date_basis": "sent",
+                },
+                ["c2"],
+            ),
+            ({"replied": True}, ["c1"]),
+            ({"replied": False}, ["c4", "c3", "c2"]),
+            # Inclusive bounds; c3 has no stored size and never matches a bound.
+            ({"size_min": 100}, ["c4", "c2", "c1"]),
+            ({"size_min": 0}, ["c4", "c2", "c1"]),
+            ({"size_min": 101}, ["c4", "c2"]),
+            ({"size_max": 300}, ["c4", "c1"]),
+            ({"size_max": 99}, []),
+            ({"size_min": 300, "size_max": 300}, ["c4"]),
+            ({"size_min": 100, "size_max": 5000}, ["c4", "c2", "c1"]),
+            ({"size_min": 200, "replied": True}, []),
+            ({"size_max": 400, "date_basis": "occurred"}, ["c1"]),
+        ],
+    )
+    def test_query_messages(self, clocks_db, filters, expected):
+        page = clocks_db.query_messages(**filters)
+        assert _ids(page) == expected
+        assert page.total_matches == len(expected)
+
+    @pytest.mark.parametrize(
+        ("filters", "field"),
+        [
+            ({"date_basis": "internal"}, "date_basis"),
+            ({"date_basis": "bogus"}, "date_basis"),
+            ({"size_min": -1}, "size_min"),
+            ({"size_max": -1}, "size_max"),
+            ({"size_min": True}, "size_min"),
+            ({"size_max": "12"}, "size_max"),
+            ({"size_min": 400, "size_max": 300}, "size_min/size_max"),
+        ],
+    )
+    def test_rejections(self, clocks_db, filters, field):
+        with pytest.raises(InvalidFilterError) as info:
+            clocks_db.query_messages(**filters)
+        assert info.value.field_name == field
+
+    def test_internal_basis_is_a_fixed_text_error_naming_1092(self, clocks_db):
+        with pytest.raises(InvalidFilterError) as info:
+            clocks_db.query_messages(date_basis="internal")
+        assert str(info.value) == (
+            "date_basis 'internal' is unavailable until #1092 (the index stores no "
+            "server arrival time); use effective, sent or occurred"
+        )
+
+    def test_cursor_walks_the_basis_order_and_is_bound_to_the_basis(self, clocks_db):
+        first = clocks_db.query_messages(date_basis="sent", limit=1)
+        assert _ids(first) == ["c3"] and first.has_more
+        second = clocks_db.query_messages(date_basis="sent", limit=1, cursor=first.next_cursor)
+        assert _ids(second) == ["c4"] and second.offset == 1
+        third = clocks_db.query_messages(date_basis="sent", limit=2, cursor=second.next_cursor)
+        assert _ids(third) == ["c2", "c1"] and not third.has_more
+        # The same leaf list under another basis is another keyset: the
+        # cursor is foreign there, never read against the other clock.
+        for other in ({}, {"date_basis": "effective"}, {"date_basis": "occurred"}):
+            with pytest.raises(InvalidFilterError, match="issued for different filters"):
+                clocks_db.query_messages(**other, cursor=first.next_cursor)
+        with pytest.raises(InvalidFilterError, match="issued for different filters"):
+            clocks_db.query_messages(date_basis="sent", replied=False, cursor=first.next_cursor)
+        default = clocks_db.query_messages(limit=1)
+        assert _ids(default) == ["c4"]
+        with pytest.raises(InvalidFilterError, match="issued for different filters"):
+            clocks_db.query_messages(date_basis="sent", cursor=default.next_cursor)
+        assert _ids(clocks_db.query_messages(limit=1, cursor=default.next_cursor)) == ["c3"]
+
+    def test_cursor_under_occurred_skips_undated_rows(self, clocks_db):
+        first = clocks_db.query_messages(date_basis="occurred", limit=1)
+        assert _ids(first) == ["c3"]
+        rest = clocks_db.query_messages(date_basis="occurred", cursor=first.next_cursor)
+        assert _ids(rest) == ["c2", "c1"] and not rest.has_more
+
+    def test_cursor_binds_size_and_replied(self, clocks_db):
+        first = clocks_db.query_messages(size_min=100, limit=1)
+        assert _ids(first) == ["c4"]
+        assert _ids(clocks_db.query_messages(size_min=100, cursor=first.next_cursor)) == [
+            "c2",
+            "c1",
+        ]
+        for other in ({"size_min": 101}, {"size_max": 100}, {"size_min": 100, "replied": False}):
+            with pytest.raises(InvalidFilterError, match="issued for different filters"):
+                clocks_db.query_messages(**other, cursor=first.next_cursor)
+
+    def test_leaves_compile_and_declare_their_evaluability(self):
+        sql, params = compile_leaves(
+            [
+                Leaf("dated", "occurred"),
+                Leaf("sent_from", "2024-01-01T00:00:00+00:00"),
+                Leaf("occurred_to", "2024-12-31T23:59:59.999999+00:00"),
+                Leaf("replied", True),
+                Leaf("size_min", 1),
+                Leaf("size_max", 2),
+            ]
+        )
+        assert sql == (
+            "m.occurred_at IS NOT NULL AND m.sent_at >= ? AND m.occurred_at <= ? "
+            "AND m.replied = ? AND m.size_bytes >= ? AND m.size_bytes <= ?"
+        )
+        assert params == ["2024-01-01T00:00:00+00:00", "2024-12-31T23:59:59.999999+00:00", 1, 1, 2]
+        unknown_when_null = {"size_min", "size_max", "occurred_from", "occurred_to"}
+        for name, kind in LEAVES.items():
+            expected = (
+                Evaluability.UNKNOWN_WHEN_NULL
+                if name in unknown_when_null
+                else Evaluability.DECIDED
+            )
+            assert kind.evaluability is expected, name
+
+    def test_adapter_builds_the_basis_leaves(self):
+        base = dict.fromkeys(_QUERY_PARAMS)
+        assert query_messages_leaves(
+            **{**base, "date_from": "2024-01-01", "date_basis": "sent"}
+        ) == [
+            Leaf("not_in_folders", ("Trash",)),
+            Leaf("sent_from", "2024-01-01T00:00:00+00:00"),
+        ]
+        assert query_messages_leaves(
+            **{**base, "date_to": "2024-01-01", "date_basis": "occurred"}
+        ) == [
+            Leaf("not_in_folders", ("Trash",)),
+            Leaf("dated", "occurred"),
+            Leaf("occurred_to", "2024-01-01T23:59:59.999999+00:00"),
+        ]
+        assert query_messages_leaves(
+            **{**base, "replied": False, "size_min": 10, "size_max": 20}
+        ) == [
+            Leaf("not_in_folders", ("Trash",)),
+            Leaf("replied", False),
+            Leaf("size_min", 10),
+            Leaf("size_max", 20),
+        ]
+
+    def test_digest_binds_the_basis(self):
+        leaves = [Leaf("not_in_folders", ("Trash",))]
+        assert leaf_digest(leaves) == leaf_digest(leaves, "effective")
+        assert len({leaf_digest(leaves, basis) for basis in DATE_BASES}) == len(DATE_BASES)
+
+    def test_output_basis_names_are_the_registered_bases(self):
+        assert set(get_args(DateBasisName)) == set(DATE_BASES)
+
+    def test_cursor_position_needs_the_basis_clock(self):
+        record = MessageRecord(
+            message_id="c",
+            claimant_id="c#0",
+            thread_id="t",
+            subject="s",
+            sent_at="2024-01-10T09:00:00+00:00",
+            folder="INBOX",
+            has_attachments=False,
+        )
+        assert _record_clock(record, DATE_BASES["sent"]) == "2024-01-10T09:00:00+00:00"
+        assert _record_clock(record, DATE_BASES["effective"]) == "2024-01-10T09:00:00+00:00"
+        # Unreachable through query_messages (the ``dated`` leaf keeps
+        # such rows off the page); refused rather than encoded as null.
+        with pytest.raises(ValueError, match="without a occurred time"):
+            _record_clock(record, DATE_BASES["occurred"])
+
+    def test_no_filter_value_reaches_the_log(self, clocks_db, caplog):
+        with caplog.at_level(logging.DEBUG):
+            with pytest.raises(InvalidFilterError):
+                clocks_db.query_messages(date_basis=_MARKER)
+            with pytest.raises(InvalidFilterError):
+                clocks_db.query_messages(size_min=_MARKER)
+        assert _MARKER not in caplog.text

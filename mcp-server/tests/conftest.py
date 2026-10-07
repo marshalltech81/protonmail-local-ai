@@ -480,11 +480,13 @@ def _insert_message_record(
     seen: bool = False,
     flagged: bool = False,
     replied: bool = False,
+    size_bytes: int | None = 100,
 ) -> None:
     """Insert one ``messages`` row and its ``message_participants``.
 
     ``participants`` is ``(role, display string)`` pairs; addresses are
     canonicalized and names split out the way the indexer writes them.
+    ``size_bytes`` is the stored file size, ``None`` for a row without one.
     """
     cur.execute(
         """
@@ -492,7 +494,7 @@ def _insert_message_record(
             (claimant_id, message_id, thread_id, filepath, folder, subject, sent_at,
              occurred_at, in_reply_to, references_json, has_attachments, size_bytes,
              content_hash, indexed_at, seen, flagged, replied)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 100, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             claimant_of(message_id, variant),
@@ -506,6 +508,7 @@ def _insert_message_record(
             in_reply_to,
             json.dumps(references or []),
             1 if has_attachments else 0,
+            size_bytes,
             source_sha256(message_id, variant),
             "2024-01-01T00:00:00+00:00",
             int(seen),
@@ -576,6 +579,7 @@ def _insert_message(
     seen: bool = False,
     flagged: bool = False,
     replied: bool = False,
+    size_bytes: int | None = 100,
 ) -> None:
     """Insert one message with full per-message control.
 
@@ -639,6 +643,7 @@ def _insert_message(
         seen=seen,
         flagged=flagged,
         replied=replied,
+        size_bytes=size_bytes,
     )
     conn.commit()
     if body is not None:

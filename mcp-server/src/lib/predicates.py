@@ -360,13 +360,19 @@ def _substring_participant_rows(value: str, roles: tuple[str, ...], params: list
 class Evaluability(Enum):
     """How a leaf decides a message.
 
-    A placeholder until #1086 lands three-valued evaluation: every leaf
-    today reads a field the index stores for every message, so it is
-    true or false of each message, never unknown. Declared per leaf so
-    the registry test requires it from the start.
+    ``DECIDED``: the leaf reads a field the index stores for every
+    message, so it is true or false of each message, never unknown.
+    ``UNKNOWN_WHEN_NULL``: the field can be NULL (``size_bytes`` for a
+    message whose file size was not recorded, ``occurred_at`` for one
+    without a parseable topmost ``Received:`` header). Such a message is
+    neither matched nor missed: the comparison yields NULL, so it is
+    left out of the matches and of ``total_matches``; #1086 reports it
+    in the ``indeterminate`` count. Declared per leaf so the registry
+    test requires it; three-valued evaluation itself lands with #1086.
     """
 
     DECIDED = "decided"
+    UNKNOWN_WHEN_NULL = "unknown_when_null"
 
 
 @dataclass(frozen=True)
@@ -395,6 +401,73 @@ class LeafKind:
     compile: Callable[[Any, list], str]
     evaluability: Evaluability
     thread_test: Callable[[Any], Callable[[Any], bool]] | None = None
+
+
+@dataclass(frozen=True)
+class DateBasis:
+    """One clock of ``messages`` that ``query_messages``' date bounds,
+    order and cursor run on (#1085; ``docs/architecture.md`` "Message
+    time"). ``from_leaf`` / ``to_leaf`` name its bound leaves.
+    ``nullable`` says the clock can be NULL; the adapter then adds the
+    ``dated`` leaf so every row of the page has a place in the ordering.
+    """
+
+    name: str
+    column: str
+    from_leaf: str
+    to_leaf: str
+    nullable: bool
+
+
+DEFAULT_DATE_BASIS = "effective"
+
+DATE_BASES: dict[str, DateBasis] = {
+    basis.name: basis
+    for basis in (
+        DateBasis("effective", "effective_at", "effective_from", "effective_to", False),
+        DateBasis("sent", "sent_at", "sent_from", "sent_to", False),
+        DateBasis("occurred", "occurred_at", "occurred_from", "occurred_to", True),
+    )
+}
+
+# A legal basis the index cannot serve yet, with the fixed text it
+# answers: the server arrival time (IMAP INTERNALDATE) is stored by
+# #1081 and served by #1092.
+UNAVAILABLE_DATE_BASES: dict[str, str] = {
+    "internal": (
+        "date_basis 'internal' is unavailable until #1092 (the index stores no "
+        "server arrival time); use effective, sent or occurred"
+    ),
+}
+
+
+def normalize_date_basis(value: str | None) -> str:
+    """The ``date_basis`` to apply: ``DEFAULT_DATE_BASIS`` for a missing
+    or blank value, otherwise the stripped name of a ``DATE_BASES``
+    entry. Raises ``InvalidFilterError`` (fixed text) for an unavailable
+    or unknown basis."""
+    if value is None or not value.strip():
+        return DEFAULT_DATE_BASIS
+    value = value.strip()
+    if value in DATE_BASES:
+        return value
+    if value in UNAVAILABLE_DATE_BASES:
+        raise InvalidFilterError("date_basis", UNAVAILABLE_DATE_BASES[value])
+    raise InvalidFilterError(
+        "date_basis",
+        "date_basis must be one of " + ", ".join([*DATE_BASES, *UNAVAILABLE_DATE_BASES]),
+    )
+
+
+def normalize_size_bound(name: str, value: Any) -> int | None:
+    """A ``size_min`` / ``size_max`` filter to apply: ``None`` when not
+    given, otherwise the value, which must be a non-negative integer
+    (fixed-text ``InvalidFilterError`` otherwise)."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise InvalidFilterError(name, f"{name} must be a non-negative integer")
+    return value
 
 
 # Roles each address leaf searches in ``message_participants``.
@@ -446,14 +519,20 @@ def _compile_not_in_folders(folders: tuple[str, ...], params: list) -> str:
     return f"m.folder NOT IN ({','.join('?' * len(folders))})"
 
 
-def _compile_effective_from(instant: str, params: list) -> str:
-    params.append(instant)
-    return "m.effective_at >= ?"
+def _compile_bound(column: str, op: str) -> Callable[[Any, list], str]:
+    """The compiler for an inclusive bound (``op`` is ``>=`` or ``<=``)
+    on a clock or size column of ``messages``. A NULL column compares
+    as unknown, so the row is left out (``Evaluability``)."""
+
+    def compile(value: Any, params: list) -> str:
+        params.append(value)
+        return f"m.{column} {op} ?"
+
+    return compile
 
 
-def _compile_effective_to(instant: str, params: list) -> str:
-    params.append(instant)
-    return "m.effective_at <= ?"
+def _compile_dated(basis: str, params: list) -> str:
+    return f"m.{DATE_BASES[basis].column} IS NOT NULL"
 
 
 def _compile_flag(column: str) -> Callable[[bool, list], str]:
@@ -517,17 +596,36 @@ LEAVES: dict[str, LeafKind] = {
         LeafKind(
             "effective_from",
             "instant",
-            _compile_effective_from,
+            _compile_bound("effective_at", ">="),
             Evaluability.DECIDED,
             _effective_from_test,
         ),
         LeafKind(
             "effective_to",
             "instant",
-            _compile_effective_to,
+            _compile_bound("effective_at", "<="),
             Evaluability.DECIDED,
             _effective_to_test,
         ),
+        # The other clocks of ``query_messages``' ``date_basis`` (#1085).
+        # ``sent_at`` is stored for every message; ``occurred_at`` is
+        # NULL without a delivery time, so the ``dated`` leaf keeps such
+        # rows out of a page ordered by it.
+        LeafKind("sent_from", "instant", _compile_bound("sent_at", ">="), Evaluability.DECIDED),
+        LeafKind("sent_to", "instant", _compile_bound("sent_at", "<="), Evaluability.DECIDED),
+        LeafKind(
+            "occurred_from",
+            "instant",
+            _compile_bound("occurred_at", ">="),
+            Evaluability.UNKNOWN_WHEN_NULL,
+        ),
+        LeafKind(
+            "occurred_to",
+            "instant",
+            _compile_bound("occurred_at", "<="),
+            Evaluability.UNKNOWN_WHEN_NULL,
+        ),
+        LeafKind("dated", "basis", _compile_dated, Evaluability.DECIDED),
         LeafKind(
             "has_attachments",
             "bool",
@@ -537,6 +635,20 @@ LEAVES: dict[str, LeafKind] = {
         ),
         LeafKind("seen", "bool", _compile_flag("seen"), Evaluability.DECIDED),
         LeafKind("flagged", "bool", _compile_flag("flagged"), Evaluability.DECIDED),
+        LeafKind("replied", "bool", _compile_flag("replied"), Evaluability.DECIDED),
+        # The local Maildir file's size, NULL when not recorded.
+        LeafKind(
+            "size_min",
+            "bytes",
+            _compile_bound("size_bytes", ">="),
+            Evaluability.UNKNOWN_WHEN_NULL,
+        ),
+        LeafKind(
+            "size_max",
+            "bytes",
+            _compile_bound("size_bytes", "<="),
+            Evaluability.UNKNOWN_WHEN_NULL,
+        ),
         LeafKind("authority_class", "class", _compile_authority_class, Evaluability.DECIDED),
     )
 }
@@ -550,13 +662,16 @@ def compile_leaves(leaves: Sequence[Leaf]) -> tuple[str, list]:
     return sql or "1", params
 
 
-def leaf_digest(leaves: Sequence[Leaf]) -> str:
-    """A short digest of the leaf list, in order, binding a keyset cursor
-    to the predicates it was issued under (``Database.query_messages``).
-    A cursor whose digest differs is rejected as foreign, never read
-    against other predicates."""
+def leaf_digest(leaves: Sequence[Leaf], date_basis: str = DEFAULT_DATE_BASIS) -> str:
+    """A short digest of the leaf list, in order, and of the
+    ``date_basis`` the page is ordered by, binding a keyset cursor to
+    the predicates and the ordering it was issued under
+    (``Database.query_messages``). The same leaves under another basis
+    are another keyset (#1085). A cursor whose digest differs is
+    rejected as foreign, never read against other predicates or
+    another clock."""
     canonical = [[leaf.name, leaf.value] for leaf in leaves]
-    return hashlib.sha256(json.dumps(canonical).encode()).hexdigest()[:16]
+    return hashlib.sha256(json.dumps([date_basis, canonical]).encode()).hexdigest()[:16]
 
 
 # ---------------------------------------------------------------------------
@@ -577,12 +692,18 @@ def _folder_leaf(folders: tuple[str, ...]) -> Leaf:
     return Leaf("not_in_folders", DEFAULT_EXCLUDED_FOLDERS)
 
 
-def _bound_leaves(date_from_iso: str | None, date_to_iso: str | None) -> list[Leaf]:
-    leaves = []
+def _bound_leaves(
+    date_from_iso: str | None, date_to_iso: str | None, date_basis: str = DEFAULT_DATE_BASIS
+) -> list[Leaf]:
+    """The inclusive bounds on the clock ``date_basis`` names, preceded
+    under a nullable clock by the ``dated`` leaf that keeps rows without
+    that clock out of the ordering."""
+    basis = DATE_BASES[date_basis]
+    leaves = [Leaf("dated", basis.name)] if basis.nullable else []
     if date_from_iso is not None:
-        leaves.append(Leaf("effective_from", date_from_iso))
+        leaves.append(Leaf(basis.from_leaf, date_from_iso))
     if date_to_iso is not None:
-        leaves.append(Leaf("effective_to", date_to_iso))
+        leaves.append(Leaf(basis.to_leaf, date_to_iso))
     return leaves
 
 
@@ -600,18 +721,31 @@ def query_messages_leaves(
     authority_class: str | None,
     seen: bool | None,
     flagged: bool | None,
+    replied: bool | None = None,
+    size_min: int | None = None,
+    size_max: int | None = None,
+    date_basis: str | None = None,
 ) -> list[Leaf]:
     """``query_messages``' flat parameters as leaves, blank ones ignored.
+    The date bounds are leaves on the clock ``date_basis`` names
+    (``DATE_BASES``, default ``effective``; #1085).
 
     Raises ``InvalidFilterError`` for an invalid date range, an unknown
-    authority class, or a ``text`` with no words or more than
-    ``_MAX_TEXT_TERMS``.
+    authority class, a ``text`` with no words or more than
+    ``_MAX_TEXT_TERMS``, an unavailable or unknown ``date_basis``, a
+    size bound that is not a non-negative integer, or ``size_min``
+    above ``size_max``.
     """
     sender, recipient, participant, subject, text, folder = (
         _given(v) for v in (sender, recipient, participant, subject, text, folder)
     )
     date_from_iso, date_to_iso = _normalize_date_range(date_from, date_to)
+    date_basis = normalize_date_basis(date_basis)
     authority_class = normalize_authority_class(authority_class)
+    size_min = normalize_size_bound("size_min", size_min)
+    size_max = normalize_size_bound("size_max", size_max)
+    if size_min is not None and size_max is not None and size_min > size_max:
+        raise InvalidFilterError("size_min/size_max", "size_min must not be greater than size_max")
     leaves = [
         Leaf(name, value)
         for name, value in (
@@ -631,10 +765,17 @@ def query_messages_leaves(
             raise InvalidFilterError("text", f"text supports at most {_MAX_TEXT_TERMS} words")
         leaves.append(Leaf("text", tuple(terms)))
     leaves.append(_folder_leaf((folder,) if folder else ()))
-    leaves += _bound_leaves(date_from_iso, date_to_iso)
-    for name, state in (("has_attachments", has_attachments), ("seen", seen), ("flagged", flagged)):
-        if state is not None:
-            leaves.append(Leaf(name, state))
+    leaves += _bound_leaves(date_from_iso, date_to_iso, date_basis)
+    for name, value in (
+        ("has_attachments", has_attachments),
+        ("seen", seen),
+        ("flagged", flagged),
+        ("replied", replied),
+        ("size_min", size_min),
+        ("size_max", size_max),
+    ):
+        if value is not None:
+            leaves.append(Leaf(name, value))
     if authority_class:
         leaves.append(Leaf("authority_class", authority_class))
     return leaves

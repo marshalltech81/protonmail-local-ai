@@ -23,7 +23,7 @@ get_message's included (#489).
 """
 
 from datetime import date, datetime
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from mcp.types import CallToolResult, TextContent, ToolAnnotations
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -257,6 +257,11 @@ def listed_message(m: MessageRecord) -> ListedMessage:
 # --- search tools -------------------------------------------------------
 
 
+# The clocks ``query_messages``' ``date_basis`` can choose
+# (``lib/predicates.DATE_BASES``; pinned equal by ``tests/test_predicates``).
+DateBasisName = Literal["effective", "sent", "occurred"]
+
+
 class DateBounds(_Output):
     date_from: str | None = Field(
         description="The inclusive lower bound applied, in UTC (ISO 8601); null when not given."
@@ -264,18 +269,29 @@ class DateBounds(_Output):
     date_to: str | None = Field(
         description="The inclusive upper bound applied, in UTC (ISO 8601); null when not given."
     )
+    basis: DateBasisName = Field(
+        default="effective",
+        description="The message clock the bounds apply to: effective (occurred_at, else "
+        "sent_at), or the sent or occurred clock query_messages' date_basis chose, which "
+        "also orders its page. The search tools always use effective.",
+    )
 
 
-def date_bounds(date_from: str | None, date_to: str | None) -> DateBounds | None:
-    """The UTC bounds a date filter resolved to, or ``None`` without one."""
-    if date_from is None and date_to is None:
+def date_bounds(
+    date_from: str | None, date_to: str | None, basis: str = "effective"
+) -> DateBounds | None:
+    """The UTC bounds a date filter resolved to, on ``basis`` (a
+    ``lib/predicates.DATE_BASES`` name); ``None`` without a date filter
+    under the default basis (a non-default basis is echoed even without
+    bounds, since it orders the page)."""
+    if date_from is None and date_to is None and basis == "effective":
         return None
-    return DateBounds(date_from=date_from, date_to=date_to)
+    return DateBounds(date_from=date_from, date_to=date_to, basis=cast(DateBasisName, basis))
 
 
 def describe_date_bounds(bounds: DateBounds | None) -> str | None:
     """The prose line for ``bounds``, or ``None`` without a date filter."""
-    if bounds is None:
+    if bounds is None or (bounds.date_from is None and bounds.date_to is None):
         return None
     parts = []
     if bounds.date_from:
@@ -288,7 +304,7 @@ def describe_date_bounds(bounds: DateBounds | None) -> str | None:
 _DATE_BOUNDS_DESCRIPTION = (
     "The UTC instants the date filters resolved to: a date-only value is the "
     "whole UTC day, a value with an offset the instant it names. Null without "
-    "a date filter."
+    "a date filter (query_messages: under the default date_basis)."
 )
 
 
@@ -590,7 +606,7 @@ class ListThreadsOutput(_Output):
 
 class FilterUse(_Output):
     filter: str
-    value: str | bool = Field(
+    value: str | bool | int = Field(
         description="The value as applied (a canonical address for exact_address)."
     )
     match: Literal["exact_address", "substring", "all_words", "equals", "inclusive_bound"]

@@ -817,8 +817,9 @@ both `ON DELETE CASCADE`, so every existing removal path — reaper,
 whole-thread delete, rebuild — cleans them up without separate code.
 
 Every message-level filter the tools accept (`sender`, `recipient`,
-`participant`, `subject`, `text`, `folder`, the effective-time bounds,
-the attachment and read flags, `authority_class`) is a leaf of one
+`participant`, `subject`, `text`, `folder`, the bounds on the effective,
+send or delivery time, the attachment, read, flagged and replied flags,
+the size bounds, `authority_class`) is a leaf of one
 predicate module, `mcp-server/src/lib/predicates.py` (#1084): each
 leaf has a name, a value shape, one SQL compiler over a `messages` row
 and an evaluability rule, and adapters build the leaf list for
@@ -833,8 +834,10 @@ predicates", lists the leaves.
 
 The index records two times per message, `sent_at` and `occurred_at`,
 and derives one effective time from them. Every date the MCP tools
-filter on or sort by is the effective time; outputs return both stored
-fields.
+filter on or sort by is the effective time, except that
+`query_messages` can bound, order and page on `sent_at` or
+`occurred_at` alone through `date_basis` (#1085; `docs/mcp-tools.md`);
+outputs return both stored fields.
 
 **`sent_at`** is the message's `Date:` header as parsed by
 `parsedate_to_datetime` (`indexer/src/parser.py` `_parse_date`),

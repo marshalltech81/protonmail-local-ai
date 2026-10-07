@@ -12,7 +12,12 @@ from mcp.types import CallToolResult
 
 # Module import: get_thread and get_message have a local named ``count``.
 from ..lib import timings
-from ..lib.predicates import validate_date_range
+from ..lib.predicates import (
+    DATE_BASES,
+    DEFAULT_DATE_BASIS,
+    normalize_date_basis,
+    validate_date_range,
+)
 from ..lib.rate_limited_log import ArgumentRejections, RateLimitedLog
 from ..lib.security import QUERY_MESSAGE_FIELDS, log_tool_call
 from ..lib.sqlite import (
@@ -254,11 +259,23 @@ def _filter_uses(args: dict) -> list[FilterUse]:
             uses.append(FilterUse(filter=key, value=value.strip(), match="substring"))
         elif key == "text":
             uses.append(FilterUse(filter=key, value=value.strip(), match="all_words"))
-        elif key in ("date_from", "date_to"):
+        elif key in ("date_from", "date_to", "size_min", "size_max"):
             uses.append(FilterUse(filter=key, value=value, match="inclusive_bound"))
         else:
             uses.append(FilterUse(filter=key, value=value, match="equals"))
     return uses
+
+
+def _describe_date_basis(basis: str) -> str | None:
+    """The prose line naming a non-default ``date_basis`` (#1085), or
+    ``None`` under the default."""
+    if basis == DEFAULT_DATE_BASIS:
+        return None
+    column = DATE_BASES[basis].column
+    line = f"date_basis: {basis} (bounds, order and cursor use {column}"
+    if DATE_BASES[basis].nullable:
+        line += "; messages without a delivery time are left out"
+    return line + ")"
 
 
 def _describe_filters(uses: list[FilterUse]) -> str:
@@ -845,6 +862,10 @@ def register_retrieval_tools(server, db):
         authority_class: str | None = None,
         seen: bool | None = None,
         flagged: bool | None = None,
+        replied: bool | None = None,
+        size_min: int | None = None,
+        size_max: int | None = None,
+        date_basis: str = "effective",
         limit: int = 25,
         cursor: str | None = None,
         fields: list[str] | None = None,
@@ -935,6 +956,12 @@ def register_retrieval_tools(server, db):
                      the user's time zone, give an offset
                      ("2026-01-01T00:00:00-05:00"). The response's
                      ``date_bounds`` echoes the UTC instants applied.
+            date_basis: Which message clock the date bounds, the order
+                        and the cursor use: "effective" (default:
+                        delivery date, else send date), "sent" (the
+                        Date header) or "occurred" (delivery date;
+                        messages without one are left out). "internal"
+                        (server arrival time) is not available yet.
             has_attachments: True for messages with attachments, False
                              for messages without.
             authority_class: Messages whose sender the operator's rules
@@ -945,6 +972,11 @@ def register_retrieval_tools(server, db):
                              never match.
             seen: True for messages read in Proton, False for unread.
             flagged: True for flagged (starred) messages, False for the rest.
+            replied: True for messages answered in Proton, False for the rest.
+            size_min: Inclusive lower bound in bytes on the message's
+                      local file size (not the server's RFC822.SIZE);
+                      messages without a stored size are left out.
+            size_max: Inclusive upper bound in bytes, likewise.
             limit: Messages per page (default 25, clamped to [1, 100]).
             cursor: ``next_cursor`` from the previous page of the same query.
             fields: Row fields to return; claimant_id and thread_id are
@@ -969,9 +1001,20 @@ def register_retrieval_tools(server, db):
             "authority_class": authority_class,
             "seen": seen,
             "flagged": flagged,
+            "replied": replied,
+            "size_min": size_min,
+            "size_max": size_max,
         }
         log_tool_call(
-            log, "query_messages", {**args, "limit": limit, "cursor": cursor, "fields": fields}
+            log,
+            "query_messages",
+            {
+                **args,
+                "date_basis": date_basis,
+                "limit": limit,
+                "cursor": cursor,
+                "fields": fields,
+            },
         )
         limit = clamp_int(limit, default=25, minimum=1, maximum=_MAX_QUERY_LIMIT)
         projection = None
@@ -991,15 +1034,19 @@ def register_retrieval_tools(server, db):
                     f"valid: {', '.join(QUERY_MESSAGE_FIELDS)}"
                 )
             projection = frozenset(fields) | {"claimant_id", "thread_id"}
-        # Reject a bad date range before any retrieval work.
+        # Reject a bad date range or an unavailable basis before any
+        # retrieval work.
         try:
-            bounds = date_bounds(*validate_date_range(date_from, date_to))
+            basis = normalize_date_basis(date_basis)
+            bounds = date_bounds(*validate_date_range(date_from, date_to), basis)
         except InvalidFilterError as e:
             rejections.reject("query_messages", e.field_name)
             raise ToolError(f"Error: {e}") from e
 
         try:
-            page = await asyncio.to_thread(db.query_messages, **args, limit=limit, cursor=cursor)
+            page = await asyncio.to_thread(
+                db.query_messages, **args, date_basis=basis, limit=limit, cursor=cursor
+            )
         except InvalidFilterError as e:
             # Validation messages quote the offending input (an invalid
             # date echoes its text), which log_tool_call deliberately
@@ -1036,6 +1083,8 @@ def register_retrieval_tools(server, db):
         lines = [f"Query: {_describe_filters(uses)}"]
         if bounds_line := describe_date_bounds(bounds):
             lines.append(bounds_line)
+        if basis_line := _describe_date_basis(basis):
+            lines.append(basis_line)
         lines.append(f"total_matches: {page.total_matches}")
         # Counts only: the addresses themselves are in the structured
         # output (#801).
