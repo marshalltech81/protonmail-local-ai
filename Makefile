@@ -39,7 +39,7 @@ help:
 	@echo "  test-validate-env  Run validate-env.sh and mcp-auth-headers.sh tests against synthetic fixtures"
 	@echo "  test-index-backup  Run backup-index and restore-index tests against a fake docker (no daemon)"
 	@echo "  test-make-status  Run make status tests against a fake docker (no daemon)"
-	@echo "  test-image-pins  Check tls_check.sh pins the python image the indexer and mcp-server Dockerfiles build from"
+	@echo "  test-image-pins  Check tls_check.sh pins the python image the indexer and mcp-server Dockerfiles build from, and docker.yml and tests.yml the same BuildKit image"
 	@echo "  test-trivy-flags  Check that make trivy and the Trivy jobs in .github/workflows/security.yml and docker.yml agree (no Trivy install)"
 	@echo "  trivy        Run the CI Trivy scans locally: dependency scans of indexer/ and mcp-server/, offline misconfig scan of the repository, then the image gates (needs trivy and the built images)"
 	@echo "  trivy-images Run the CI Trivy image gates of .github/workflows/docker.yml on the built indexer, mcp-server and mbsync images (needs trivy, make build)"
