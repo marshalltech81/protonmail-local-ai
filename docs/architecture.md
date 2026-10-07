@@ -2162,10 +2162,10 @@ has no package records, so Trivy does not scan it (#1008).
 `make trivy` runs the same three gates after its filesystem scans, and
 `make trivy-images` runs them alone (#1065), with the workflow's
 scanners, severity, exit code and `--ignore-unfixed`. They scan the
-images `make build` last produced, named as `docker compose build`
-names them (the project name from `docker compose config`, then
-`-indexer`, `-mcp-server`, `-mbsync`), and fail with a message naming
-the image when one is not built; rebuild before scanning a change,
+images `make build` last produced, as `docker compose config --images`
+lists them (the project name, then `-indexer`, `-mcp-server`,
+`-mbsync`), and fail with a message naming the image when one is not
+built; rebuild before scanning a change,
 since the gates read the image, not the checkout. The full reports
 have no local equivalent: run `trivy image <name>` by hand for every
 severity. `scripts/tests/trivy_flags_test.sh` derives the gates from

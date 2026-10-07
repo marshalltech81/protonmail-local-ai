@@ -273,9 +273,9 @@ test-trivy-flags:
 # would otherwise make them skip the dependencies not cached locally
 # and still pass. TRIVY names the binary, and the targets warn when its
 # version is not the one the workflows pin. trivy-images runs the image
-# gates alone; they need the images `make build` produced, named
-# <project>-<service> as docker compose builds them (docker.yml fixes
-# the project name to protonmail-local-ai; locally it is the directory
+# gates alone; they need the images `make build` produced, taken from
+# `docker compose config --images` (the three services, named after
+# the project: protonmail-local-ai in docker.yml, locally the directory
 # name or COMPOSE_PROJECT_NAME), and fail, naming the image, when one
 # is not built. The gates scan whatever `make build` last produced,
 # not the checkout.
@@ -283,7 +283,6 @@ TRIVY ?= trivy
 TRIVY_VERSION := v0.75.0
 TRIVY_SEVERITY := CRITICAL,HIGH
 TRIVY_MISCONFIG_SKIP_DIRS := .git,.ruff_cache,.pytest_cache,.venv,indexer/.venv,mcp-server/.venv,.uv-cache
-TRIVY_IMAGE_SERVICES := indexer mcp-server mbsync
 
 # The lines trivy and trivy-images start with: the binary is present,
 # and its version is the pinned one or a warning says so.
@@ -298,20 +297,20 @@ define trivy-preflight
 endef
 
 # The image gates, as one shell fragment for a recipe that set
-# `status=0` before it and exits with `$$status` after it: resolve the
-# project name as docker compose does, refuse (status 1, no scan) when
-# an image is not built, else scan each image and keep going on a
+# `status=0` before it and exits with `$$status` after it: take the
+# image names from docker compose, refuse (status 1, no scan) when an
+# image is not built, else scan each image and keep going on a
 # finding.
 define trivy-image-scans
-	project=$$(docker compose config | sed -n 's/^name: //p'); \
-	if [ -z "$$project" ]; then echo "cannot read the Compose project name from docker compose config" >&2; exit 1; fi; \
+	images=$$(docker compose config --images); \
+	if [ -z "$$images" ]; then echo "docker compose config --images listed no image" >&2; exit 1; fi; \
 	built=1; \
-	for service in $(TRIVY_IMAGE_SERVICES); do \
-		docker image inspect "$$project-$$service" >/dev/null 2>&1 || { echo "image $$project-$$service is not built: run make build first" >&2; built=0; }; \
+	for image in $$images; do \
+		docker image inspect "$$image" >/dev/null 2>&1 || { echo "image $$image is not built: run make build first" >&2; built=0; }; \
 	done; \
 	if [ "$$built" -eq 1 ]; then \
-		for service in $(TRIVY_IMAGE_SERVICES); do \
-			"$(TRIVY)" image --scanners vuln --severity $(TRIVY_SEVERITY) --exit-code 1 --ignore-unfixed --offline-scan=false "$$project-$$service" || status=1; \
+		for image in $$images; do \
+			"$(TRIVY)" image --scanners vuln --severity $(TRIVY_SEVERITY) --exit-code 1 --ignore-unfixed --offline-scan=false "$$image" || status=1; \
 		done; \
 	else status=1; fi
 endef

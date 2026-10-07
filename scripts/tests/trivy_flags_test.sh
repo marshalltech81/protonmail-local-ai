@@ -136,19 +136,25 @@ exit "$FAKE_TRIVY_EXIT"
 EOF
 chmod 755 "$WORK/bin/trivy"
 
-# A fake docker, first on PATH for make: `compose config` names the
-# project `fakeproj`, so a hard-coded image name fails the test, and
-# `image inspect` fails for the images listed in $FAKE_DOCKER_MISSING.
+# A fake docker, first on PATH for make: `compose config --images`
+# lists the gated services' images under the project `fakeproj`, in
+# the reverse of docker.yml's order, so a hard-coded image name or a
+# name built from a parsed project name fails the test; `image
+# inspect` fails for the images listed in $FAKE_DOCKER_MISSING.
 cat >"$WORK/bin/docker" <<'EOF'
 #!/bin/bash
 set -Eeuo pipefail
-case "$1 $2" in
-    "compose config") printf 'name: fakeproj\nservices: {}\n' ;;
-    "image inspect") [[ " ${FAKE_DOCKER_MISSING:-} " == *" $3 "* ]] && exit 1; exit 0 ;;
+case "$1 $2 ${3:-}" in
+    "compose config --images") printf '%s\n' "$FAKE_DOCKER_IMAGES" ;;
+    "image inspect "*) [[ " ${FAKE_DOCKER_MISSING:-} " == *" $3 "* ]] && exit 1; exit 0 ;;
     *) printf 'fake docker: unexpected call: %s\n' "$*" >&2; exit 2 ;;
 esac
 EOF
 chmod 755 "$WORK/bin/docker"
+FAKE_DOCKER_IMAGES=""
+for ((i = ${#GATE_SERVICES[@]} - 1; i >= 0; i--)); do
+    FAKE_DOCKER_IMAGES+="${FAKE_DOCKER_IMAGES:+$'\n'}fakeproj-${GATE_SERVICES[$i]}"
+done
 FAKE_DOCKER_MISSING=""
 
 # run_make VERSION EXIT [TARGET]: runs `make TARGET` (trivy by default)
@@ -158,39 +164,44 @@ FAKE_DOCKER_MISSING=""
 run_make() {
     : >"$WORK/calls"
     MAKE_STATUS=0
-    PATH="$WORK/bin:$PATH" FAKE_DOCKER_MISSING="$FAKE_DOCKER_MISSING" \
+    PATH="$WORK/bin:$PATH" FAKE_DOCKER_IMAGES="$FAKE_DOCKER_IMAGES" FAKE_DOCKER_MISSING="$FAKE_DOCKER_MISSING" \
         FAKE_TRIVY_LOG="$WORK/calls" FAKE_TRIVY_VERSION="${1#v}" FAKE_TRIVY_EXIT="$2" \
         make -s -C "$ROOT" "${3:-trivy}" TRIVY="$WORK/bin/trivy" \
         >"$WORK/out" 2>"$WORK/err" || MAKE_STATUS=$?
 }
 
 # check_image_calls FIRST: the fake trivy's calls from line FIRST on are
-# docker.yml's image gates, in order, each on the image docker compose
-# names for its service, with the gate's flags, online whatever the
-# environment says (as the fs scans).
+# docker.yml's image gates, one per gate in the order docker compose
+# lists the images (not the workflow's), each on the image docker
+# compose names for its service, with the gate's flags, online whatever
+# the environment says (as the fs scans).
 check_image_calls() {
-    local i gate scanners ref code unfixed severity call n
+    local i gate scanners ref code unfixed severity service call
     for i in "${!GATES[@]}"; do
         gate="${GATES[$i]}"
         read -r scanners ref code unfixed severity <<<"$gate"
-        n=$(($1 + i))
-        call="$(sed -n "${n}p" "$WORK/calls")"
-        ok=false; [[ "$call" == "image --scanners $scanners "*" fakeproj-${GATE_SERVICES[$i]}" ]] && ok=true
-        check "scan $n is the $scanners image scan of ${GATE_SERVICES[$i]}, named by docker compose" "$ok"
+        service="${GATE_SERVICES[$i]}"
+        call="$(tail -n "+$1" "$WORK/calls" | grep -- " fakeproj-$service\$" || true)"
+        ok=false; [[ "$(grep -c . <<<"$call")" -eq 1 ]] && ok=true
+        check "the image of $service, named by docker compose, is scanned once" "$ok"
+        ok=false; [[ "$call" == "image --scanners $scanners "* ]] && ok=true
+        check "the $service image scan is the gate's $scanners scan" "$ok"
         ok=false; [[ "$call" == *" --severity $severity "* ]] && ok=true
-        check "scan $n uses the gate's severity" "$ok"
+        check "the $service image scan uses the gate's severity" "$ok"
         ok=false; [[ "$call" == *" --exit-code $code "* ]] && ok=true
-        check "scan $n uses the gate's exit code" "$ok"
+        check "the $service image scan uses the gate's exit code" "$ok"
         if [[ "$unfixed" == true ]]; then
             ok=false; [[ "$call" == *" --ignore-unfixed "* ]] && ok=true
-            check "scan $n ignores unfixed findings as the gate does" "$ok"
+            check "the $service image scan ignores unfixed findings as the gate does" "$ok"
         else
             ok=false; [[ "$call" != *"--ignore-unfixed"* ]] && ok=true
-            check "scan $n gates unfixed findings as the gate does" "$ok"
+            check "the $service image scan gates unfixed findings as the gate does" "$ok"
         fi
         ok=false; [[ "$call" == *" --offline-scan=false "* ]] && ok=true
-        check "scan $n runs online whatever the environment says" "$ok"
+        check "the $service image scan runs online whatever the environment says" "$ok"
     done
+    ok=false; [[ "$(tail -n "+$1" "$WORK/calls" | grep -vc '^image ')" -eq 0 ]] && ok=true
+    check "no fs scan runs after the image gates" "$ok"
 }
 
 # The scans the workflow runs, in order, one line per trivy-action step:
