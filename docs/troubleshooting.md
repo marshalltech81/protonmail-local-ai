@@ -1116,13 +1116,12 @@ request is over budget (`prompt_over_budget`), for example:
 token limit hit: tool=ask_mailbox limits=evidence_budget outputs_cut=0 threads_dropped=1 passages_omitted=6 passages_truncated=1 prompt_tokens=2950 prompt_budget_tokens=3008 max_tokens=1024
 ```
 
-The line carries counts and settings only. Not every limit reaches
+The line carries counts and settings only. Each limit also reaches
 the caller: a cut reply carries a truncation notice, the evidence that
-`ask_mailbox` and `extract_from_emails` leave out is disclosed in their
-coverage or evidence note, and `prompt_over_budget` is an error, but a
-`summarize_thread` context trimmed by the window (`evidence_budget`
-below) is in this log line only. `limits` names which limits the call
-hit:
+`ask_mailbox`, `summarize_thread` and `extract_from_emails` leave out
+for the window is disclosed in their coverage or evidence note (#949),
+and `prompt_over_budget` is an error. `limits` names which limits the
+call hit:
 
 - `output_max_tokens`: the model stopped at `INFERENCE_MAX_TOKENS`, so
   the answer or summary was cut off (`outputs_cut` counts every cut
