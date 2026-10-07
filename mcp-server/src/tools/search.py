@@ -45,9 +45,11 @@ from .outputs import (
     describe_date_bounds,
     read_only,
     reaped_source,
-    source,
     thread_summary,
     tool_result,
+)
+from .outputs import (
+    source as source_ref,
 )
 
 log = logging.getLogger("mcp.tools.search")
@@ -79,6 +81,35 @@ _VALID_SEARCH_MODES = frozenset({"hybrid", "semantic", "keyword"})
 # already paragraph-bounded by the indexer; this is a defensive ceiling so
 # one pathologically long attachment chunk can't bloat the tool response.
 _EVIDENCE_CHUNK_CHARS = 1600
+
+# ``get_evidence``'s precision controls (#988). The per-thread and
+# per-chunk caps can only lower ``PROMPT_EVIDENCE_CHUNKS_PER_THREAD`` and
+# ``_EVIDENCE_CHUNK_CHARS``; ``lib/security._LOGGABLE_TOOL_PARAMS`` logs
+# exactly these values.
+_EVIDENCE_SOURCES = ("any", "body", "attachment")
+_EVIDENCE_SCOPES = ("any", "in_scope")
+
+
+def _check_precision_controls(
+    source: str,
+    scope: str,
+    max_chunks_per_thread: int | None,
+    max_chars_per_chunk: int | None,
+) -> None:
+    """Reject an out-of-range precision control with fixed text (#988):
+    the message names the field and its range, never the value."""
+    if source not in _EVIDENCE_SOURCES:
+        raise InvalidFilterError("source", "source must be any, body or attachment.")
+    if scope not in _EVIDENCE_SCOPES:
+        raise InvalidFilterError("scope", "scope must be any or in_scope.")
+    for name, value, ceiling in (
+        ("max_chunks_per_thread", max_chunks_per_thread, PROMPT_EVIDENCE_CHUNKS_PER_THREAD),
+        ("max_chars_per_chunk", max_chars_per_chunk, _EVIDENCE_CHUNK_CHARS),
+    ):
+        if value is not None and (
+            isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= ceiling
+        ):
+            raise InvalidFilterError(name, f"{name} must be an integer from 1 to {ceiling}.")
 
 
 def _chunk_scope(chunk, scope: ScopeLabels | None) -> EvidenceScope:
@@ -448,6 +479,10 @@ def register_search_tools(
         include_scores: bool = False,
         participant: str | None = None,
         from_name: str | None = None,
+        source: str = "any",
+        scope: str = "any",
+        max_chunks_per_thread: int | None = None,
+        max_chars_per_chunk: int | None = None,
     ) -> CallToolResult:
         """
         Return the exact indexed passages (evidence chunks) that back a
@@ -519,6 +554,10 @@ def register_search_tools(
                             chunk_vec / rerank) and each chunk with its
                             vector distance — useful for debugging
                             retrieval quality.
+            source: "body" or "attachment" passages only (default "any").
+            scope: "in_scope" drops context passages (default "any").
+            max_chunks_per_thread: 1 to 6 (default 6).
+            max_chars_per_chunk: 1 to 1600 (default 1600).
 
         Returns:
             Ranked evidence chunks grouped by thread, with full
@@ -540,12 +579,28 @@ def register_search_tools(
                 "max_threads": max_threads,
                 "limit": limit,
                 "include_scores": include_scores,
+                "source": source,
+                "scope": scope,
+                "max_chunks_per_thread": max_chunks_per_thread,
+                "max_chars_per_chunk": max_chars_per_chunk,
             },
         )
         from_name = blank_to_none(from_name)
         participant = blank_to_none(participant)
         if not query or not query.strip():
             raise ToolError("Provide a query to gather evidence for.")
+        try:
+            _check_precision_controls(source, scope, max_chunks_per_thread, max_chars_per_chunk)
+        except InvalidFilterError as e:
+            log.warning("get_evidence rejected invalid %s", e.field_name)
+            raise ToolError(f"Evidence error: {e}") from e
+        source_filter = None if source == "any" else source
+        in_scope_only = scope == "in_scope"
+        per_thread = max_chunks_per_thread or PROMPT_EVIDENCE_CHUNKS_PER_THREAD
+        chunk_chars = max_chars_per_chunk or _EVIDENCE_CHUNK_CHARS
+        # The timing line marks a call that a precision control narrowed.
+        if source_filter or in_scope_only or max_chunks_per_thread or max_chars_per_chunk:
+            count("evidence_filtered", 1)
         if thread_id:
             # These filters select threads; thread_id already names one.
             # Applying them would only keep or drop that whole thread (a
@@ -606,7 +661,13 @@ def register_search_tools(
         resolution: FromNameResolution | None = None
         # Scope labels of the mailbox-wide path (#755); the thread path
         # has no filters, so every passage there is in scope.
-        scope: ScopeLabels | None = None
+        labels: ScopeLabels | None = None
+        # With ``scope=in_scope``: context passages left out, per listed
+        # thread (#988).
+        context_dropped: dict[str, int] = {}
+        # With ``source``: ranked threads left out for having no passage
+        # of that source (mailbox-wide path).
+        source_emptied = 0
         try:
             if thread_id:
                 thread = await asyncio.to_thread(db.get_thread_or_reaped, thread_id)
@@ -619,7 +680,12 @@ def register_search_tools(
                 # whose filename or MIME type the query matches lead.
                 with stage("evidence_fetch"):
                     grouped = await asyncio.to_thread(
-                        db.get_query_evidence_chunks, query, [thread_id], embedding, limit
+                        db.get_query_evidence_chunks,
+                        query,
+                        [thread_id],
+                        embedding,
+                        min(limit, max_chunks_per_thread or limit),
+                        source_filter,
                     )
                 chunks = grouped.get(thread_id, [])
                 if not chunks:
@@ -632,6 +698,9 @@ def register_search_tools(
                     if not current:
                         raise ToolError(f"Thread not found: {thread_id}")
                 count("evidence_chunks", len(chunks))
+                if in_scope_only:
+                    # No filters on this path: nothing is context.
+                    context_dropped[thread_id] = 0
                 if chunks:
                     groups.append(
                         (clip(thread.subject, HEADER_CHAR_LIMIT), thread_id, None, None, chunks)
@@ -674,38 +743,70 @@ def register_search_tools(
                     participant=participant,
                 )
                 count("results", len(results))
-                # Flatten thread-ranked evidence into a flat chunk budget:
-                # ``limit`` counts chunks, threads are already ranked, and
-                # chunks within a thread are ranked by similarity. Once the
-                # budget is spent the slice yields [] and the thread drops.
-                taken = 0
-                for r in results:
-                    chunks = r.evidence_chunks[: limit - taken]
-                    # With ``max_threads``, a thread that has no indexed
-                    # chunks stays, empty: ask_mailbox shows the model its
-                    # indexed thread text instead, so the audit must still
-                    # list the thread in its place. Once ``limit`` is
-                    # spent, later threads drop whether or not they have
-                    # chunks, so a smaller ``limit`` is a rank-order prefix.
-                    keep_chunkless = (
-                        max_threads is not None and not r.evidence_chunks and taken < limit
-                    )
-                    if not chunks and not keep_chunkless:
-                        continue
-                    subject = clip(r.subject, HEADER_CHAR_LIMIT)
-                    groups.append((subject, r.thread_id, r.lane_ranks, r.score, chunks))
-                    taken += len(chunks)
-                # Each passage labelled as ask_mailbox labels it.
+                # ``source`` re-selects each ranked thread's passages from
+                # that source before the per-thread cap. The threads and
+                # their order stay ask_mailbox's: the reranker saw the
+                # unfiltered evidence.
+                by_source: dict[str, list] | None = None
+                if source_filter and results:
+                    with stage("evidence_source"):
+                        by_source = await asyncio.to_thread(
+                            db.get_query_evidence_chunks,
+                            query,
+                            [r.thread_id for r in results],
+                            embedding,
+                            PROMPT_EVIDENCE_CHUNKS_PER_THREAD,
+                            source_filter,
+                        )
+                # Each passage labelled as ask_mailbox labels it, before
+                # ``scope=in_scope`` filters on the label.
                 with stage("scope_labels"):
-                    scope = await asyncio.to_thread(
+                    labels = await asyncio.to_thread(
                         db.message_scope,
-                        [tid for _, tid, _, _, _ in groups],
+                        [r.thread_id for r in results],
                         folders=folders,
                         from_addr=from_addr,
                         participant=participant,
                         date_from=date_from,
                         date_to=date_to,
                     )
+                # Flatten thread-ranked evidence into a flat chunk budget:
+                # ``limit`` counts chunks, threads are already ranked, and
+                # chunks within a thread are ranked by similarity. Once the
+                # budget is spent the slice yields [] and the thread drops.
+                taken = 0
+                for r in results:
+                    ranked = r.evidence_chunks
+                    if by_source is not None:
+                        ranked = by_source.get(r.thread_id, [])
+                        if r.evidence_chunks and not ranked:
+                            source_emptied += 1
+                            continue
+                    dropped = 0
+                    if in_scope_only:
+                        kept = [c for c in ranked if _chunk_scope(c, labels) == "in_scope"]
+                        dropped = len(ranked) - len(kept)
+                        ranked = kept
+                    chunks = ranked[:per_thread][: limit - taken]
+                    # With ``max_threads``, a thread that has no indexed
+                    # chunks stays, empty: ask_mailbox shows the model its
+                    # indexed thread text instead, so the audit must still
+                    # list the thread in its place. A thread ``scope``
+                    # emptied stays too, with its count (#988). Once
+                    # ``limit`` is spent, later threads drop whether or not
+                    # they have chunks, so a smaller ``limit`` is a
+                    # rank-order prefix.
+                    keep_chunkless = (
+                        max_threads is not None and not r.evidence_chunks and taken < limit
+                    )
+                    keep_emptied = dropped > 0 and not ranked and taken < limit
+                    if not chunks and not keep_chunkless and not keep_emptied:
+                        continue
+                    subject = clip(r.subject, HEADER_CHAR_LIMIT)
+                    groups.append((subject, r.thread_id, r.lane_ranks, r.score, chunks))
+                    if in_scope_only:
+                        context_dropped[r.thread_id] = dropped
+                    taken += len(chunks)
         except ToolError:
             raise
         except InvalidFilterError as e:
@@ -721,10 +822,35 @@ def register_search_tools(
             raise ToolError(f"Evidence error: {safe_error}") from e
 
         total_chunks = sum(len(chunks) for _, _, _, _, chunks in groups)
+        # What the precision controls left out (#988), on the timing line
+        # (counts only) and in the response.
+        total_dropped = sum(context_dropped.values())
+        scope_emptied = sum(
+            1 for _, tid, _, _, chunks in groups if not chunks and context_dropped.get(tid)
+        )
+        notes: list[str] = []
+        if in_scope_only:
+            count("evidence_context_dropped", total_dropped)
+            count("evidence_threads_scope_emptied", scope_emptied)
+            if total_dropped:
+                notes.append(
+                    f"scope=in_scope left out {total_dropped} context passage(s); "
+                    f"{scope_emptied} thread(s) had no in-scope passage."
+                )
+        searched_by_source = source_filter is not None and not thread_id
+        if searched_by_source:
+            count("evidence_threads_source_emptied", source_emptied)
+            if source_emptied:
+                notes.append(
+                    f"source={source}: {source_emptied} ranked thread(s) had no "
+                    f"{source} passages and are not listed."
+                )
         output = EvidenceOutput(
             chunk_count=total_chunks,
             resolved_from_addr=resolution.address if resolution else None,
             from_name_matches=resolution.senders if resolution else None,
+            context_passages_left_out=total_dropped if in_scope_only else None,
+            threads_without_source_passages=source_emptied if searched_by_source else None,
             threads=[
                 EvidenceThread(
                     thread_id=tid,
@@ -746,24 +872,35 @@ def register_search_tools(
                             occurred_at=c.message_occurred_at,
                             char_start=c.char_start,
                             char_end=c.char_end,
-                            text=c.text[:_EVIDENCE_CHUNK_CHARS],
-                            text_truncated=len(c.text) > _EVIDENCE_CHUNK_CHARS,
+                            text=c.text[:chunk_chars],
+                            text_truncated=len(c.text) > chunk_chars,
                             vector_distance=c.score if include_scores else None,
-                            source_file=source(c.source_file),
-                            scope=_chunk_scope(c, scope),
+                            source_file=source_ref(c.source_file),
+                            scope=_chunk_scope(c, labels),
                         )
                         for c in chunks
                     ],
+                    context_passages_left_out=context_dropped.get(tid),
                 )
                 for subject, tid, lane_ranks, score, chunks in groups
             ],
         )
         if not groups:
-            return tool_result(f"No evidence found for: '{query}'", output)
+            filters = ", ".join(
+                f"{name}={value}"
+                for name, value, given in (
+                    ("source", source, source_filter is not None),
+                    ("scope", scope, in_scope_only),
+                )
+                if given
+            )
+            missing = f"No evidence found for: '{query}'" + (f" ({filters})" if filters else "")
+            return tool_result("\n".join([missing, *notes]), output)
 
         lines = [
             f"Evidence for: '{query}'",
             f"{total_chunks} chunk(s) from {len(groups)} thread(s).",
+            *notes,
             "",
         ]
         for i, (subject, tid, lane_ranks, score, chunks) in enumerate(groups, 1):
@@ -773,16 +910,24 @@ def register_search_tools(
                 lanes = ", ".join(f"{name}#{rank}" for name, rank in sorted(lane_ranks.items()))
                 score_str = f" | retrieval score {score:.4f}" if score is not None else ""
                 lines.append(f"    Lanes: {lanes}{score_str}")
-            if not chunks:
+            left_out = context_dropped.get(tid)
+            if not chunks and left_out:
+                lines.append(
+                    f"    No in-scope passages: {left_out} context passage(s) left out "
+                    "(scope=in_scope)."
+                )
+            elif not chunks:
                 lines.append(
                     "    No indexed passages: ask_mailbox shows this thread's indexed "
                     "text instead; read it with get_thread."
                 )
+            elif left_out:
+                lines.append(f"    {left_out} context passage(s) left out (scope=in_scope).")
             for chunk in chunks:
                 msg_date = (chunk.message_date or "")[:10] or "unknown date"
                 if chunk.message_occurred_at:
                     msg_date += f" (delivered {chunk.message_occurred_at[:10]})"
-                in_scope = _chunk_scope(chunk, scope) == "in_scope"
+                in_scope = _chunk_scope(chunk, labels) == "in_scope"
                 lines.append(
                     f"    --- chunk {chunk.chunk_index} | msg {chunk.claimant_id} | {msg_date}"
                     f" | {'in scope' if in_scope else 'context'}"
@@ -800,8 +945,8 @@ def register_search_tools(
                     offsets += f" | vector distance {chunk.score:.4f}"
                 lines.append(offsets)
                 text = chunk.text
-                if len(text) > _EVIDENCE_CHUNK_CHARS:
-                    text = text[:_EVIDENCE_CHUNK_CHARS] + " ... [truncated]"
+                if len(text) > chunk_chars:
+                    text = text[:chunk_chars] + " ... [truncated]"
                 lines.append(f"        {text}")
             lines.append("")
 
@@ -955,7 +1100,7 @@ def register_search_tools(
                     sender_count=len(a.senders),
                     extraction_status=a.extraction_status,
                     text_snippet=a.text_snippet,
-                    source_file=source(a.source_file),
+                    source_file=source_ref(a.source_file),
                 )
                 for a in results
             ],

@@ -284,3 +284,44 @@ class TestLogToolCall:
             "withheld=[]",
         ):
             assert fragment in text
+
+    def test_get_evidence_precision_controls_log_only_accepted_values(self, caplog):
+        """``source`` and ``scope`` log only the enum values get_evidence
+        accepts, and the caps only integers in its ranges (#988)."""
+        import logging
+
+        logger = logging.getLogger("test-tool-log-precision")
+        with caplog.at_level(logging.INFO, logger="test-tool-log-precision"):
+            log_tool_call(
+                logger,
+                "get_evidence",
+                {
+                    "source": "attachment",
+                    "scope": "in_scope",
+                    "max_chunks_per_thread": 1,
+                    "max_chars_per_chunk": 1,
+                },
+            )
+            log_tool_call(
+                logger,
+                "get_evidence",
+                {
+                    "source": "Confidential-marker",
+                    "scope": "context",
+                    "max_chunks_per_thread": 7,
+                    "max_chars_per_chunk": True,
+                },
+            )
+        first, second = (r.getMessage() for r in caplog.records)
+        for fragment in (
+            "'source': 'attachment'",
+            "'scope': 'in_scope'",
+            "'max_chunks_per_thread': 1",
+            "'max_chars_per_chunk': 1",
+            "withheld=[]",
+        ):
+            assert fragment in first
+        assert second.endswith(
+            "{} withheld=['max_chars_per_chunk', 'max_chunks_per_thread', 'scope', 'source']"
+        )
+        assert "Confidential-marker" not in caplog.text

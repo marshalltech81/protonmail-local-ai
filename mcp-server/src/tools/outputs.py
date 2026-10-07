@@ -393,6 +393,12 @@ class EvidenceThread(_Output):
     )
     retrieval_score: float | None = Field(description="Only with include_scores.")
     chunks: list[EvidenceChunk]
+    context_passages_left_out: int | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description="Only with scope=in_scope: this thread's context passages left out. "
+        "A thread with no chunks and a non-zero count had no in-scope passage.",
+    )
 
 
 class EvidenceOutput(_Output):
@@ -401,6 +407,17 @@ class EvidenceOutput(_Output):
     from_name_matches: int | None = Field(description=_FROM_NAME_MATCHES_DESCRIPTION)
     threads: list[EvidenceThread] = Field(
         description="Threads in rank order, chunks ranked within."
+    )
+    context_passages_left_out: int | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description="Only with scope=in_scope: context passages left out in all.",
+    )
+    threads_without_source_passages: int | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description="Only with source=body or attachment on the mailbox-wide path: "
+        "ranked threads left out because none of their passages has that source.",
     )
 
 

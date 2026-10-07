@@ -98,6 +98,10 @@ def _is_int(v: Any) -> bool:
     return isinstance(v, int) and not isinstance(v, bool)
 
 
+def _int_in(low: int, high: int) -> Callable[[Any], bool]:
+    return lambda v: _is_int(v) and low <= v <= high
+
+
 def _is_bool(v: Any) -> bool:
     return isinstance(v, bool)
 
@@ -137,6 +141,12 @@ _LOGGABLE_TOOL_PARAMS: dict[str, Callable[[Any], bool]] = {
     "include_attachments_metadata": _is_bool,
     "date_from": _is_iso_date,
     "date_to": _is_iso_date,
+    # ``get_evidence``'s precision controls (#988), with the ranges it
+    # accepts (``tools/search``).
+    "source": _one_of("any", "body", "attachment"),
+    "scope": _one_of("any", "in_scope"),
+    "max_chunks_per_thread": _int_in(1, 6),
+    "max_chars_per_chunk": _int_in(1, 1600),
     # ``lib/sqlite.AUTHORITY_CLASSES``.
     "authority_class": _one_of(
         "counsel", "management", "vendor", "government", "personal", "other", "unclassified"
