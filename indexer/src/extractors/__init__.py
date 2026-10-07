@@ -312,7 +312,9 @@ class ExtractionResult:
 # ``success`` rows the previous version wrote for one are refreshed (#932).
 # doc 1, xls 1: legacy binary ``.doc`` (catdoc) and ``.xls`` (xlrd in a
 # child process), recorded ``unsupported`` before (#935).
-# pptx 1: the first PowerPoint extractor (#936). Rows cached ``unsupported``
+# ppt 1: legacy binary ``.ppt`` (Apache POI in a Java process), recorded
+# ``unsupported`` before (#957).
+# pptx 1: the first ``.pptx`` extractor (#936). Rows cached ``unsupported``
 # for a ``.pptx`` before it carry no extractor, so no version marks them
 # stale; the "no extractor" sweep re-queues them instead.
 EXTRACTOR_VERSIONS: dict[str, int] = {
@@ -320,6 +322,7 @@ EXTRACTOR_VERSIONS: dict[str, int] = {
     "docx": 5,
     "image": 3,
     "pdf": 4,
+    "ppt": 1,
     "pptx": 1,
     "text": 3,
     "xls": 1,
@@ -403,6 +406,13 @@ NO_EXTRACTOR_ERROR = "no extractor for this content type or filename extension"
 # extractor and has its own cache row (#928).
 LEGACY_OLE2_ERROR = "OLE2 compound file (legacy .doc / .xls or encrypted Office file)"
 
+# ``unsupported`` error for a payload labelled ``.ppt`` /
+# ``application/vnd.ms-powerpoint`` that is not an OLE2 compound file
+# (#957): the ``ppt`` extractor reads only OLE2. Kept apart from "no
+# extractor" so the row holds for later ``.ppt`` occurrences instead of
+# re-running on each (``attachment_indexing``).
+NON_OLE2_PPT_ERROR = "not an OLE2 compound file (labelled legacy .ppt)"
+
 # The fixed 8-byte signature every OLE2 compound file starts with.
 _OLE2_SIGNATURE = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
 
@@ -448,6 +458,9 @@ _MIME_DISPATCH: dict[str, str] = {
     "application/msword": "doc",
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
     "application/vnd.ms-excel": "xls",
+    # Legacy PowerPoint: OLE2 only; anything else is ``unsupported``
+    # (``NON_OLE2_PPT_ERROR``, #957).
+    "application/vnd.ms-powerpoint": "ppt",
     # Presentations only: python-pptx refuses a package whose main part is
     # the slideshow (``.ppsx``) or template (``.potx``) type (#936).
     "application/vnd.openxmlformats-officedocument.presentationml.presentation": "pptx",
@@ -468,6 +481,7 @@ _EXT_DISPATCH: dict[str, str] = {
     ".doc": "doc",
     ".xlsx": "xlsx",
     ".xls": "xls",
+    ".ppt": "ppt",
     ".pptx": "pptx",
     ".html": "html",
     ".htm": "html",
@@ -559,6 +573,16 @@ def extract(
             extractor=None,
             text=None,
             error=NO_EXTRACTOR_ERROR,
+        )
+
+    # A ``.ppt`` that is not OLE2 (#957): the same constant-size prefix
+    # check; the aggregate counts the unsupported result.
+    if module_name == "ppt" and not payload.startswith(_OLE2_SIGNATURE):
+        return ExtractionResult(
+            status=STATUS_UNSUPPORTED,
+            extractor=None,
+            text=None,
+            error=NON_OLE2_PPT_ERROR,
         )
 
     # The container decides between a legacy and an OOXML extractor

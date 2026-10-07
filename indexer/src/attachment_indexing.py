@@ -42,6 +42,7 @@ from .database import Database
 from .extractors import (
     BINARY_AS_TEXT_ERROR,
     LEGACY_OLE2_ERROR,
+    NON_OLE2_PPT_ERROR,
     OCR_DISABLED_ERROR,
     STATUS_EMPTY,
     STATUS_FAILED,
@@ -226,16 +227,17 @@ def _unsupported_still_holds(error: str | None, module: str, ocr_enabled: bool) 
     holds for the occurrences that select that module (#928).
 
     An "OCR disabled" result holds until OCR is turned on. An OLE2 result
-    under an OOXML label, a "binary payload labelled as text" result and
-    the "no extractor" result are decided by the label and the bytes
-    alone (#694, #932), so they hold for good. Any other result (an
+    under an OOXML label, a "binary payload labelled as text" result, a
+    "not an OLE2 compound file" result under the ``ppt`` label and the
+    "no extractor" result are decided by the label and the bytes alone
+    (#694, #932, #957), so they hold for good. Any other result (an
     extractor not importable in this image) holds only while the
     occurrence selects no extractor.
     """
     error = error or ""
     if "OCR disabled" in error:
         return not ocr_enabled
-    if error in {LEGACY_OLE2_ERROR, BINARY_AS_TEXT_ERROR}:
+    if error in {LEGACY_OLE2_ERROR, BINARY_AS_TEXT_ERROR, NON_OLE2_PPT_ERROR}:
         return True
     return module == NO_EXTRACTOR_MODULE
 
