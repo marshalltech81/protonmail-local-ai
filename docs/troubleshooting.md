@@ -884,10 +884,16 @@ helper needs nothing from the checkout, so the copy taken before the
 checkout works with the older release (its own `make restore-index`
 target is the same script where the release has one).
 
-If the one-off restore container is killed or Docker fails part way,
-the script cannot tell whether the copy was swapped in: it starts only
-the indexer and leaves `mcp-server` stopped. Check the indexer log, then
-run `make up`.
+If the one-off restore container (`restore-index-<pid>`) is killed or
+Docker fails part way, the script cannot tell whether the copy was
+swapped in. A failed `docker run` does not prove the container's
+process stopped (the client can detach from a container that keeps
+running), so the script first waits up to `RESTORE_WAIT_SECONDS` for
+the container to be gone, then starts only the indexer and leaves
+`mcp-server` stopped. Check the indexer log, then run `make up`. If the
+container is still running after the wait, nothing is started: wait
+for it (`docker wait restore-index-<pid>`, the name is in the
+message), then run `make up` and check the indexer log.
 
 The backup file and every directory above it must be yours (or
 root's) and writable only by you, with no ACL entry that gives another

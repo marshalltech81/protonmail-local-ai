@@ -135,7 +135,9 @@ done
 # prompt waits or the services stop.
 exec 3<"$BACKUP"
 [[ -f /dev/fd/3 ]] || die "$BACKUP is not a regular file"
-# Checked before anything stops or changes.
+# Bounds the wait for the indexer's startup lines and, after a failed
+# restore container, for that container to exit. Checked before anything
+# stops or changes.
 wait_secs="${RESTORE_WAIT_SECONDS:-900}"
 [[ "$wait_secs" =~ ^[0-9]{1,6}$ ]] || die "RESTORE_WAIT_SECONDS must be a whole number of seconds"
 # Base 10: arithmetic would read a leading zero as octal (08 fails).
@@ -174,8 +176,13 @@ trap on_exit EXIT
 
 docker stop mcp-server indexer
 
+# The container is named so the script can tell whether it is gone: a
+# failing docker run does not prove its process stopped (the client can
+# detach from a container that keeps running), and --rm removes it only
+# once it exits.
+container="restore-index-$$"
 rc=0
-docker run --rm -i --network none --read-only --tmpfs /tmp --cap-drop ALL \
+docker run --rm -i --name "$container" --network none --read-only --tmpfs /tmp --cap-drop ALL \
     --security-opt no-new-privileges:true --user 1002:1002 \
     --env SQLITE_PATH=/data/mail.db --volume "$volume:/data" \
     "$image" python -c "$RESTORE_PY" <&3 || rc=$?
@@ -183,9 +190,22 @@ if ((rc == 3)); then
     die "the index was not replaced (the reason is above); the previous index is unchanged"
 elif ((rc != 0)); then
     # Killed or failed at a point the script cannot know (exit 3 is the
-    # only "unchanged" answer), so the swap may have happened: start only
-    # the indexer, which migrates or refuses whichever index is there.
+    # only "unchanged" answer), so the swap may have happened. Wait
+    # (bounded) until the container is gone, so the indexer cannot open
+    # the index while that process still checkpoints or renames it, then
+    # start only the indexer, which migrates or refuses whichever index
+    # is there. If it is still running after the bound, start nothing.
     restored=1
+    deadline=$((SECONDS + wait_secs))
+    while :; do
+        running=$(docker ps -q --filter "name=^${container}$") ||
+            die "cannot tell whether the restore container $container is still running, so nothing was started; wait for it (docker wait $container), then run make up and check docker compose logs indexer"
+        [[ -n "$running" ]] || break
+        if ((SECONDS >= deadline)); then
+            die "the restore container $container is still running after ${wait_secs}s, so nothing was started; wait for it (docker wait $container), then run make up and check docker compose logs indexer"
+        fi
+        sleep 1
+    done
     docker start indexer
     die "the restore container failed (exit $rc), so the index may or may not have been replaced; the indexer was started, check docker compose logs indexer"
 fi

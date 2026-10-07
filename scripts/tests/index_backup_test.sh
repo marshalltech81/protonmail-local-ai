@@ -44,7 +44,14 @@ set -Eeuo pipefail
 printf '%s\n' "$*" >>"$FAKE_DOCKER_LOG"
 case "$1" in
 ps)
-    if [[ "$FAKE_RUNNING" == 1 ]]; then
+    # docker ps -q --filter name=^restore-index-PID$: the one-off restore
+    # container is still running for the first FAKE_RUN_LINGER polls.
+    if [[ "$*" == *"--filter name=^restore-index-"* ]]; then
+        [[ "$*" == "ps -q --filter name=^$(cat "$FAKE_RUN_NAME_FILE")\$" ]]
+        if (($(grep -c '^ps -q --filter name=^restore-index-' "$FAKE_DOCKER_LOG") <= ${FAKE_RUN_LINGER:-0})); then
+            printf 'fedcba987654\n'
+        fi
+    elif [[ "$FAKE_RUNNING" == 1 ]]; then
         printf '0123456789ab\n'
     fi
     ;;
@@ -76,6 +83,9 @@ run)
     # docker run FLAGS... sha256:fakeindexerimage python -c CODE
     [[ "$*" == *" --network none "* && "$*" == *" --read-only "* && "$*" == *" --cap-drop ALL "* ]]
     [[ "$*" == *" --volume fake_sqlite-volume:/data "* && "$*" == *" sha256:fakeindexerimage python -c "* ]]
+    # The container is named, so the script can tell whether it is gone.
+    [[ "$*" =~ \ --name\ (restore-index-[0-9]+)\  ]]
+    printf '%s\n' "${BASH_REMATCH[1]}" >"$FAKE_RUN_NAME_FILE"
     # FAKE_RUN_EXIT: the container is killed (or docker fails) at a point
     # the script cannot know.
     if [[ -n "${FAKE_RUN_EXIT:-}" ]]; then
@@ -162,6 +172,7 @@ run_backup() {
 run_restore() {
     printf '%s\n' "$2" | PATH="$WORK/bin:$PATH" FAKE_DOCKER_LOG="$WORK/docker.log" \
         FAKE_DATA="$WORK/data" FAKE_STUB="$WORK/stub" FAKE_LOGS="${FAKE_LOGS:-}" \
+        FAKE_RUN_NAME_FILE="$WORK/run-name" \
         FAKE_OLD_LOGS="${FAKE_OLD_LOGS:-}" FAKE_STARTED_AT=2026-10-07T12:00:01.5Z \
         RESTORE_WAIT_SECONDS="${RESTORE_WAIT_SECONDS:-5}" BACKUP="$1" \
         bash "$REPO/scripts/restore-index.sh" >"$WORK/out" 2>&1 && STATUS=0 || STATUS=$?
@@ -730,6 +741,45 @@ restore_treats_a_killed_container_as_unknown() {
     fi
 }
 
+# restore_polls: how often the script asked docker ps whether the one-off
+# restore container was still running.
+restore_polls() {
+    grep -c '^ps -q --filter name=^restore-index-[0-9]*\$$' "$WORK/docker.log" || true
+}
+
+restore_waits_for_a_lingering_container() {
+    reset
+    make_db "$WORK/backup.db"
+    make_db "$WORK/data/mail.db"
+    # docker run reports a failure while the container keeps running for
+    # two polls; the indexer starts only once it is gone.
+    FAKE_RUN_EXIT=137 FAKE_RUN_LINGER=2 run_restore "$WORK/backup.db" yes
+    [[ "$STATUS" -ne 0 ]]
+    grep -F 'may or may not have been replaced' "$WORK/out" >/dev/null
+    [[ "$(restore_polls)" == 3 ]]
+    local order
+    order=$(grep -E '^(ps|start)' "$WORK/docker.log" | cut -d' ' -f1-2 | tr '\n' ',')
+    [[ "$order" == "ps -q,ps -q,ps -q,start indexer," ]]
+    if grep -E '^start .*mcp-server' "$WORK/docker.log" >/dev/null; then
+        return 1
+    fi
+}
+
+restore_starts_nothing_while_the_container_runs() {
+    reset
+    make_db "$WORK/backup.db"
+    make_db "$WORK/data/mail.db"
+    FAKE_RUN_EXIT=137 FAKE_RUN_LINGER=99 RESTORE_WAIT_SECONDS=0 run_restore "$WORK/backup.db" yes
+    [[ "$STATUS" -ne 0 ]]
+    grep -F "restore container $(cat "$WORK/run-name") is still running after 0s" "$WORK/out" >/dev/null
+    grep -F 'nothing was started' "$WORK/out" >/dev/null
+    grep -F 'mcp-server was left stopped' "$WORK/out" >/dev/null
+    [[ "$(restore_polls)" -ge 1 ]]
+    if grep -E '^start ' "$WORK/docker.log" >/dev/null; then
+        return 1
+    fi
+}
+
 stub_matches_the_indexer() {
     local name
     for name in SCHEMA_VERSION SCHEMA_APPLICATION_ID; do
@@ -793,6 +843,8 @@ check "restore refuses a symlinked backup" restore_refuses_a_symlinked_backup
 check "backup refuses a copy restore would reject" backup_refuses_a_copy_restore_would_reject
 check "restore refuses ACL-writable paths" restore_refuses_acl_writable_paths
 check "restore treats a killed container as an unknown swap state" restore_treats_a_killed_container_as_unknown
+check "restore waits for a lingering restore container before starting the indexer" restore_waits_for_a_lingering_container
+check "restore starts nothing while the restore container still runs" restore_starts_nothing_while_the_container_runs
 check "the restore stub matches indexer/src/database.py" stub_matches_the_indexer
 
 if ((FAILURES > 0)); then
