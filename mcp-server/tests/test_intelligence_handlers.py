@@ -887,6 +887,22 @@ def _wire_call(db, inference, name: str, args: dict, embed=None) -> CallToolResu
     return asyncio.run(run())
 
 
+def _wire_description(db, name: str) -> str:
+    """The description of tool ``name`` as a client receives it in
+    ``tools/list``, whitespace normalised. FastMCP sends only the first
+    text section of the docstring (#1011), so a check on the handler's
+    ``__doc__`` can pass for guidance the client never sees."""
+    server = FastMCP("intelligence-wire-test")
+    register_intelligence_tools(server, db, FakeEmbedClient(), FakeInferenceClient())
+
+    async def run() -> str:
+        async with Client(server) as client:
+            tools = {t.name: t for t in await client.list_tools()}
+            return tools[name].description or ""
+
+    return " ".join(asyncio.run(run()).split())
+
+
 _TOOL_ARGS = {
     "ask_mailbox": {"question": "What was the budget?"},
     "summarize_thread": {"thread_id": "t-alpha"},
@@ -1226,12 +1242,13 @@ class TestPersonFilters:
         assert lookups == ["Dana"]
 
     @pytest.mark.parametrize("tool", _PERSON_TOOLS)
-    def test_person_guidance_covers_the_folder_scope(self, fake_server, person_db, tool):
+    def test_person_guidance_covers_the_folder_scope(self, person_db, tool):
         # Review round 2 (#702): find_contact ranks contacts over every
         # folder, so with ``folders`` set its top address may have no
-        # thread in scope; the description says what to do then.
-        handlers = _handlers(fake_server, person_db, FakeEmbedClient(), FakeInferenceClient())
-        doc = " ".join((handlers[tool].__doc__ or "").split())
+        # thread in scope; the description says what to do then. Read
+        # on the wire, not from ``__doc__`` (#1011).
+        doc = _wire_description(person_db, tool)
+        assert "call find_contact with the name first" in doc
         assert "find_contact ranks contacts across all folders" in doc
         assert "pass the name itself as participant" in doc
 
