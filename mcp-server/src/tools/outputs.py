@@ -337,6 +337,13 @@ _SCOPE_DESCRIPTION = (
 )
 
 
+class EvidenceCarrier(_Output):
+    claimant_id: str = Field(description="A later message carrying the same attachment.")
+    sent_at: str | None
+    occurred_at: str | None
+    scope: EvidenceScope = Field(description="That message's scope label.")
+
+
 class EvidenceChunk(_Output):
     chunk_id: str = Field(
         description="Stable ID of the passage; ask_mailbox citations name it (chunk_id)."
@@ -379,6 +386,19 @@ class EvidenceChunk(_Output):
         "carrying the attachment); null when none is recorded."
     )
     scope: EvidenceScope = Field(description=_SCOPE_DESCRIPTION)
+    carried_by: list[EvidenceCarrier] | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description="Only with dedupe_attachments, on attachment passages: the other "
+        "messages of this thread carrying the same attachment (content hash) whose copy "
+        "of this passage was collapsed into this one, earliest first, at most "
+        f"{MAX_LISTED}; see carried_by_count. This passage is on the earliest carrier.",
+    )
+    carried_by_count: int | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description="Only with carried_by: every message counted there, listed or not.",
+    )
 
 
 class EvidenceThread(_Output):
@@ -419,6 +439,12 @@ class EvidenceOutput(_Output):
         exclude_if=lambda v: v is None,
         description="Only with source=body or attachment on the mailbox-wide path: "
         "ranked threads left out because none of their passages has that source.",
+    )
+    attachment_copies_collapsed: int | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description="Only with dedupe_attachments: repeated attachment passages folded "
+        "into the returned ones (the carried_by entries in all).",
     )
 
 
