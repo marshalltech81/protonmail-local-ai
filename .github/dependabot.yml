@@ -1,5 +1,10 @@
 version: 2
 
+# Labels follow the repository scheme (PLAN.md, Notes for Agents):
+# `dependencies` is the type, the second label is the area the update
+# lands in. The ecosystem labels (python, docker, java, pre-commit,
+# github-actions) were retired on 2026-10-07.
+
 updates:
   # Repo-level tooling
   - package-ecosystem: pre-commit
@@ -7,14 +12,14 @@ updates:
     schedule:
       interval: weekly
       day: monday
-    labels: [dependencies, pre-commit]
+    labels: [dependencies, area/ci]
 
   - package-ecosystem: docker-compose
     directory: /
     schedule:
       interval: weekly
       day: monday
-    labels: [dependencies, docker]
+    labels: [dependencies, area/docker]
 
   # indexer Python dependencies
   - package-ecosystem: uv
@@ -22,7 +27,7 @@ updates:
     schedule:
       interval: weekly
       day: monday
-    labels: [dependencies, python]
+    labels: [dependencies, area/indexer]
 
   # mcp-server Python dependencies
   - package-ecosystem: uv
@@ -30,7 +35,7 @@ updates:
     schedule:
       interval: weekly
       day: monday
-    labels: [dependencies, python]
+    labels: [dependencies, area/mcp-server]
 
   # indexer Java libraries for the legacy .ppt reader (#957). POI's two
   # artifacts share a version, so they move together.
@@ -39,7 +44,7 @@ updates:
     schedule:
       interval: weekly
       day: monday
-    labels: [dependencies, java]
+    labels: [dependencies, area/extractors]
     groups:
       apache-poi:
         patterns: ["org.apache.poi:*"]
@@ -50,21 +55,21 @@ updates:
     schedule:
       interval: weekly
       day: monday
-    labels: [dependencies, docker]
+    labels: [dependencies, area/docker]
 
   - package-ecosystem: docker
     directory: /indexer
     schedule:
       interval: weekly
       day: monday
-    labels: [dependencies, docker]
+    labels: [dependencies, area/docker]
 
   - package-ecosystem: docker
     directory: /mcp-server
     schedule:
       interval: weekly
       day: monday
-    labels: [dependencies, docker]
+    labels: [dependencies, area/docker]
 
   # GitHub Actions
   - package-ecosystem: github-actions
@@ -72,4 +77,4 @@ updates:
     schedule:
       interval: weekly
       day: monday
-    labels: [dependencies, github-actions]
+    labels: [dependencies, area/ci]
