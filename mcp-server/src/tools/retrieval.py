@@ -12,7 +12,7 @@ from mcp.types import CallToolResult
 
 # Module import: get_thread and get_message have a local named ``count``.
 from ..lib import timings
-from ..lib.rate_limited_log import RateLimitedLog
+from ..lib.rate_limited_log import ArgumentRejections, RateLimitedLog
 from ..lib.security import QUERY_MESSAGE_FIELDS, log_tool_call
 from ..lib.sqlite import (
     FILTER_TYPE_ERROR,
@@ -285,6 +285,10 @@ def register_retrieval_tools(server, db):
         _FIELDS_REJECTION_LOG_INTERVAL_SECS,
         first_msg="query_messages rejected invalid fields: reason=%s",
         summary_msg="query_messages rejected invalid fields in the last %ds: %s",
+    )
+    # The same for every other rejected argument, keyed by tool and field (#1039).
+    rejections = ArgumentRejections(
+        log, ("get_message", "list_threads", "query_messages", "find_contact")
     )
     local_only_note = (
         "mcp-server has no live Bridge access. "
@@ -714,7 +718,7 @@ def register_retrieval_tools(server, db):
             raise
         except InvalidFilterError as e:
             # The message quotes the offset; log only the field.
-            log.warning("get_message rejected invalid %s", e.field_name)
+            rejections.reject("get_message", e.field_name)
             raise ToolError(f"Error: {e}") from e
         except Exception as e:
             log.error("get_message error: %s", type(e).__name__)
@@ -779,7 +783,7 @@ def register_retrieval_tools(server, db):
         # Validated here so its fixed message is the only text returned;
         # every other failure below is reported by type (#257).
         if filter_type not in LIST_THREAD_FILTERS:
-            log.warning("list_threads rejected invalid input (filter_type)")
+            rejections.reject("list_threads", "filter_type")
             raise ToolError(f"Error: {FILTER_TYPE_ERROR}")
 
         try:
@@ -991,7 +995,7 @@ def register_retrieval_tools(server, db):
         try:
             bounds = date_bounds(*validate_date_range(date_from, date_to))
         except InvalidFilterError as e:
-            log.warning("query_messages rejected invalid %s", e.field_name)
+            rejections.reject("query_messages", e.field_name)
             raise ToolError(f"Error: {e}") from e
 
         try:
@@ -1002,7 +1006,7 @@ def register_retrieval_tools(server, db):
             # withheld. Return it to the caller; log only the field. Any
             # other ValueError (converting stored rows) can quote mail and
             # falls through to the type-only branch (#257).
-            log.warning("query_messages rejected invalid input (%s)", e.field_name)
+            rejections.reject("query_messages", e.field_name)
             raise ToolError(f"Error: {e}") from e
         except Exception as e:
             log.error("query_messages error: %s", type(e).__name__)
@@ -1105,7 +1109,7 @@ def register_retrieval_tools(server, db):
         limit = clamp_int(limit, default=10, minimum=1, maximum=50)
 
         if not query or not query.strip():
-            log.warning("find_contact rejected an empty query")
+            rejections.reject("find_contact", "query")
             raise ToolError("Provide a name, address, or domain fragment to search for.")
 
         try:

@@ -1194,7 +1194,7 @@ class TestInvertedDateRange:
         with caplog.at_level(logging.DEBUG):
             text = _error(handler(**kwargs))
         assert "date_from must not be after date_to" in text
-        assert f"{tool} rejected invalid date_from/date_to" in caplog.text
+        assert f"rejected invalid argument: {tool}.date_from/date_to" in caplog.text
 
 
 class TestDateRangeRejectedBeforeWork:
