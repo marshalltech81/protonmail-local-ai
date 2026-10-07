@@ -1490,6 +1490,11 @@ def test_extract_description_points_to_the_population_recipe(empty_db):
     doc = _wire_descriptions(empty_db)["extract_from_emails"]
     assert "Only the top ``limit`` threads are searched" in doc
     assert "search_attachments in date windows under its 50 cap" in doc
+    # Review round 3: the default limit (20) would look like a window
+    # under the cap, and attachment_id is a payload hash shared across
+    # messages, so occurrences key on claimant_id too.
+    assert "limit=50, narrowing any window that returns 50" in doc
+    assert "by claimant_id and attachment_id" in doc
     assert "listed attachment with no record" in doc
     assert "docs/mcp-tools.md" not in doc
     # Review round 2: disclosure precedes the first enumeration call

@@ -1516,9 +1516,11 @@ file:
    whose passages reach the inference provider.
 2. Enumerate the attachments with `search_attachments`, a lexical
    match on the material code or its description, plus `from_addr`
-   and `content_type` where they help. There is no pagination, so
-   split the period into `date_from` / `date_to` windows narrow
-   enough that each returns fewer than 50 results, the cap.
+   and `content_type` where they help, and `limit=50` (the default,
+   20, would look like a window under the cap). There is no
+   pagination, so split the period into `date_from` / `date_to`
+   windows narrow enough that each returns fewer than 50 results,
+   and narrow any window that returns 50.
 3. Run `extract_from_emails` per window, with `participant` set to
    the vendor's address (the tool has no `from_addr`) and a schema
    that declares its own `invoice_date` and `invoice_number`, or read
@@ -1532,11 +1534,16 @@ file:
 4. Reconcile across all windows, not per window. A record links to
    its source through its `_evidence` labels: look each label up by
    `label` in that call's top-level `citations` list, whose entries
-   carry `thread_id`, `attachment_id`, `sent_at` and `occurred_at`.
-   Count a record once, against the enumerated attachment its
-   citations name; drop duplicates, set aside for review a record
-   that cites no enumerated attachment, and report each enumerated
-   attachment with no record.
+   carry `thread_id`, `claimant_id`, `attachment_id`, `sent_at` and
+   `occurred_at`. Key each occurrence by `claimant_id` and
+   `attachment_id` together: `attachment_id` is the payload's content
+   hash, shared by every message carrying the same bytes, and
+   `claimant_id` names the message. Count a record once, against the
+   enumerated occurrence its citations name; drop duplicates, set
+   aside for review a record that cites no enumerated occurrence, and
+   report each enumerated occurrence with no record. The same bytes
+   attached twice to one message stay one occurrence, as
+   `search_attachments` reports them.
 
 Limits the recipe does not remove:
 
@@ -1550,8 +1557,9 @@ Limits the recipe does not remove:
   ([#974](https://github.com/marshalltech81/protonmail-local-ai/issues/974),
   [#858](https://github.com/marshalltech81/protonmail-local-ai/issues/858)).
 - `_date` is the thread's last message date, not the invoice date.
-- Records are model output, checked by shape and citation labels
-  only (below).
+- Records are model output. The server checks their shape, their
+  citation labels and whether string values appear in the cited
+  passages (`value_check`, below), not whether a value is right.
 
 **Schema forms and what is checked.** Each returned record is checked
 against the schema's declared fields and basic JSON types; this is a

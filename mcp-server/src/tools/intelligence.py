@@ -3568,10 +3568,11 @@ def register_intelligence_tools(
         or get_thread. Only the top ``limit`` threads are searched. For
         every occurrence, first say the windows, the most previews and
         threads you will read; list them with search_attachments in
-        date windows under its 50 cap; extract per window; match
-        records' _evidence labels to citations, drop duplicates, set
-        aside records citing no listed attachment, and report each
-        listed attachment with no record.
+        date windows under its 50 cap (limit=50, narrowing any window
+        that returns 50); extract per window; match records' _evidence
+        labels to citations by claimant_id and attachment_id, drop
+        duplicates, set aside records citing no listed attachment, and
+        report each listed attachment with no record.
 
         To extract from one PERSON's mail, call find_contact with the
         name first and pass the address of the person meant as
