@@ -359,12 +359,16 @@ Phase 4 schema change needs a numbered migration.
    35).
    `query_messages` is already an exact enumerator with good address
    semantics; what it lacks is composition, an explicit clock and a
-   way to say "could not tell". One predicate compiler replaces the
-   three drifted filter implementations (#1084), then: `replied`,
-   size and `date_basis` (#1085); per-message evaluability and an
-   `indeterminate` count beside `total_matches` (#1086, before any
+   way to say "could not tell". One leaf compiler serves the three
+   filter implementations (#1084), then: `replied`, size and
+   `date_basis` (#1085), which ships the `indeterminate` count for
+   its own NULL clocks and sizes, read from the row with no new
+   storage, so no basis ever drops unknown rows silently; per-message
+   content evaluability generalizing that count (#1086, before any
    negation); the bounded `all` / `any` / `negate` form with a leaf
-   cap and three-valued evaluation (#1087, delivers #992 option 2);
+   cap that also counts `any` groups (empty groups rejected) and
+   three-valued evaluation; the form is fixed at two levels, so there
+   is no nesting to bound (#1087, delivers #992 option 2);
    explicit address-mode and `body_words` leaves (#1088); grouped
    aggregation as its own tool over the same engine (#823); leaves
    that wait on the evidence model: `header_exists` /
@@ -466,11 +470,18 @@ mbsync → Maildir → indexer; mbsync is not replaced (Deferred).
    Maildir as the adapter; no behaviour change (#1077).
 2. **Reparse class** — an in-place full reparse through the job queue
    for changes that keep chunk IDs, the executable form of #786's
-   "reparse" (#1078, decision). The three changes below share one
-   `SCHEMA_VERSION` bump and one backfill.
+   "reparse" (#1078, decision). Each schema change below is its own
+   PR with its own migration and `SCHEMA_VERSION` bump (AGENTS.md:
+   schema-adjacent fixes get their own PR); a new column reads as
+   unknown, and the capability report (#1093) says "supported after
+   backfill", until a reparse fills it. Changes that land close
+   together may share one reparse run, never one migration.
 3. **All headers** — a `message_headers` table keeping duplicates and
    order under one aggregate budget (fields, bytes, largest value in
-   one guard); values never reach logs (#1079). Narrows #825 to
+   one guard); values never reach logs (#1079). Keyed by claimant ID,
+   and added to the AGENTS.md per-message-row list by the same PR. The
+   same migration stores whether the budget was hit, so a header
+   predicate on a capped message is indeterminate, not false. Narrows #825 to
    normalization; prerequisite for #463 options 2 and 3.
 4. **Unknown dates stay unknown** — nullable `sent_at` with a status;
    `effective_at` remains the ordering fallback, documented as not
@@ -480,13 +491,21 @@ mbsync → Maildir → indexer; mbsync is not replaced (Deferred).
    INTERNALDATE, `internal_at` with an `unavailable` status for files
    that predate the option (#1081). Recovering it for existing mail
    would be a cold re-pull, an explicit operation, not part of this.
-6. **Content-hash identity** — messages without a usable Message-ID
-   indexed under a hash-only claimant ID instead of dead-lettered
-   (#1082, decision; AGENTS.md data-model constraint).
+6. **Content-hash identity** — whether messages without a usable
+   Message-ID are indexed instead of dead-lettered (#1082, decision,
+   open). Adopting it changes the AGENTS.md claimant-ID and
+   thread-membership constraints, so the decision must define the
+   synthetic message and thread identity (such a message never becomes
+   a thread other messages resolve to by ID, and two of them never
+   merge by an empty ID) and update AGENTS.md in the same PR. Until
+   then the claimant-ID invariant stands unchanged.
 7. **Occurrence model** — one `messages` row is one occurrence while
    Proton folders are exclusive and the virtual folders are excluded;
    the `,U=` in a Maildir file name is isync's near-side UID, never
-   read; `.mbsyncstate` is never parsed (#1083, decision).
+   read; `.mbsyncstate` is never parsed (#1083, decision). Two
+   byte-identical files claiming one Message-ID share a claimant ID
+   and are deliberately one row, so "one row per occurrence" holds
+   for distinct content only.
 
 ## Not doing (decided 2026-09-26)
 
@@ -674,6 +693,10 @@ removed Bridge container are kept as history.
    (#444) while no live index existed.
 8. **#297 undated mail (2026-09-30):** keep the first persisted date
    on reprocess. Its date chain was superseded by 14 (`occurred_at`).
+   **Superseded by 35 once #1080 lands:** a missing or unparseable
+   `Date:` is stored as unknown (`sent_at` NULL with a status), and
+   the first indexing time survives only as `first_indexed_at`, a
+   non-evidentiary fallback for `effective_at` ordering and display.
 9. **#276 retained near-side mbsync state (2026-09-30):** warn about a
    far-side box that cannot be opened and keep syncing the rest, never
    `Remove Near`, which deletes local mail. Done (#521); #275/#281 per
@@ -904,8 +927,8 @@ removed Bridge container are kept as history.
     (2026-10-07):** keep Maildir as the product boundary and isync as
     the sync layer; do not replace mbsync (Deferred). Preserve source
     semantics the indexer already receives but discards (all headers,
-    unknown dates, arrival time, content-hash identity; "Evidence
-    model" above). Build the deterministic layer as one predicate
+    unknown dates, arrival time; content-hash identity is a separate
+    open decision, #1082; "Evidence model" above). Build the deterministic layer as one predicate
     compiler with a bounded Boolean form, explicit `date_basis`
     (`effective` stays the default) and three-valued results with an
     `indeterminate` count, established before negation (Phase 4
