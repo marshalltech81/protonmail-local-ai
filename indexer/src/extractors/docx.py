@@ -21,9 +21,19 @@ be parsed by ``python-docx``. The dispatcher never hands this module an
 OLE2 payload: one labelled ``.doc`` goes to the ``doc`` extractor
 (#935), and any other is recorded ``unsupported`` (#694). A
 ``.doc``-labelled payload reaches it only when it is not OLE2 (an OOXML
-file mislabelled as ``.doc``). Word templates (``.dotx``) are not routed here:
-``docx.Document`` refuses a package whose main part is the template
-type.
+file mislabelled as ``.doc``).
+
+Word templates (``.dotx``) are read the same way (#937). A template is
+a ``.docx`` whose main part declares the template content type, and
+``docx.Document`` refuses it ("not a Word file"). So the package is
+opened with ``Package.open`` and the main part used directly. The
+template content type is registered once, at import, in python-docx's
+``PartFactory.part_type_for`` (the extension point ``docx/__init__.py``
+uses for the document type), so the factory builds a ``DocumentPart``
+for it. The payload bytes are not changed. This route depends on
+python-docx 1.2.0's ``Package`` / ``PartFactory`` API;
+``test_python_docx_route_for_templates_still_holds`` fails if an
+upgrade breaks it.
 """
 
 from __future__ import annotations
@@ -31,12 +41,37 @@ from __future__ import annotations
 import io
 from collections.abc import Callable, Iterable
 
-import docx as _docx
 from docx.document import Document as DocxDocument
+from docx.opc.constants import CONTENT_TYPE as CT
+from docx.opc.part import PartFactory
 from docx.oxml.table import CT_Row
+from docx.package import Package
+from docx.parts.document import DocumentPart
 from docx.section import _Footer, _Header
 from docx.table import Table, _Cell
 from docx.text.paragraph import Paragraph
+
+# python-docx 1.2.0 has no constant for the Word template main part.
+WML_TEMPLATE_MAIN = (
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.template.main+xml"
+)
+PartFactory.part_type_for[WML_TEMPLATE_MAIN] = DocumentPart
+
+# Main-part content types this module reads: a document and a template.
+_WORD_MAIN_TYPES = frozenset({CT.WML_DOCUMENT_MAIN, WML_TEMPLATE_MAIN})
+
+
+def _open_document(payload: bytes) -> DocxDocument:
+    """Load a ``.docx`` or ``.dotx`` payload as a python-docx document.
+
+    The same check ``docx.Document`` makes, widened to the template type.
+    Any other main part (a workbook, a presentation) raises ``ValueError``
+    with fixed text, as ``docx.Document`` would.
+    """
+    part = Package.open(io.BytesIO(payload)).main_document_part
+    if part.content_type not in _WORD_MAIN_TYPES or not isinstance(part, DocumentPart):
+        raise ValueError("main part is not a Word document or template")
+    return part.document
 
 
 def extract(
@@ -48,8 +83,8 @@ def extract(
     max_pdf_pages: int | None = None,  # noqa: ARG001
     on_progress: Callable[[], None] | None = None,  # noqa: ARG001
 ) -> tuple[str, str]:
-    """Extract text from a DOCX payload. Returns (text, "docx")."""
-    document = _docx.Document(io.BytesIO(payload))
+    """Extract text from a DOCX or DOTX payload. Returns (text, "docx")."""
+    document = _open_document(payload)
 
     parts: list[str] = []
     # Body paragraphs keep the document's natural paragraph structure —

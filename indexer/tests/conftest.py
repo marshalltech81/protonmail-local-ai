@@ -95,9 +95,17 @@ def _reset_extractor_warning_budget(monkeypatch):
     """The failed-extraction WARNING rate limit is process-wide; give each
     test a fresh window so earlier tests cannot spend its budget."""
     from src import extractors
+    from src.rate_limited_log import LineBudget
 
-    monkeypatch.setattr(extractors, "_warning_window", None)
-    monkeypatch.setattr(extractors, "_warnings_in_window", 0)
+    monkeypatch.setattr(
+        extractors,
+        "_LINE_BUDGET",
+        LineBudget(
+            limit=extractors._WARNINGS_PER_WINDOW,
+            window_secs=extractors._WARNING_WINDOW_SECS,
+            buckets=(extractors._ATTACHMENT_LINES, extractors._OTHER_LINES),
+        ),
+    )
     # The attachments-line debounce is process-wide too.
     main = sys.modules.get("src.main")
     if main is not None:

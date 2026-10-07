@@ -1195,6 +1195,10 @@ only, never filenames or text (`make logs`):
   once usually means the OCR toolchain or a parser library is
   broken, not the mail. A failed result is cached for 7 days, then
   retried when the same bytes arrive again.
+- `PDF OCR fallback failed: <ExceptionType>` (WARNING): OCR of a PDF's
+  pages without a text layer raised (a Tesseract error or timeout). A
+  PDF with enough digital text keeps it and loses the scanned pages;
+  otherwise the extraction fails as above.
 - `pdf OCR capped at <N> of <M> scanned pages` (WARNING): a scanned
   PDF had more pages without a text layer than `INDEXER_OCR_MAX_PAGES`;
   the pages past the cap are not read. Every capped PDF is also counted
@@ -1249,8 +1253,9 @@ only, never filenames or text (`make logs`):
   limits); the OCR
   page caps have their own lines above. Like the OCR cap, a cap is reported
   on the first extraction only: the cached text is served afterwards.
-- These per-item WARNINGs (failed extractions, OCR and extractor caps,
-  and the parser-cap line described below, together) are capped at 20
+- These per-item WARNINGs (failed extractions, OCR fallback failures,
+  OCR and extractor caps, and the parser-cap line described below,
+  together) are capped at 20
   per 5 minutes, so a stream of crafted mail cannot flood the log. The rest
   are counted as `warnings_suppressed` in the attachments line below.
   The budget is shared with the embed retry, health-file and
@@ -1279,14 +1284,14 @@ only, never filenames or text (`make logs`):
     so none are lost, and the 5-minute flush still applies.
   - What the outcomes mean: `cached` counts attachments served from the
     extraction cache instead of extracted again. `unsupported` is a type
-    no extractor reads, including Word templates (`.dotx`), legacy
-    PowerPoint `.ppt` (#957), and password-protected Office files and
-    other OLE2 files not labelled `.doc` / `.xls`, recorded with "OLE2
-    compound file" rather than as `failed`, so they are not retried
-    (#694). Genuine legacy `.doc` and `.xls` files are extracted with
-    catdoc and xlrd (#935); a crashed, timed-out or over-limit run is
-    `failed` with a fixed error type such as `ToolTimeoutError` or
-    `ToolExitError` (see `docs/architecture.md`, "Extractor dispatch"). `too_large` is over
+    no extractor reads, including legacy PowerPoint `.ppt` (#957), and
+    password-protected Office files and other OLE2 files not labelled
+    `.doc` / `.xls`, recorded with "OLE2 compound file" rather than as
+    `failed`, so they are not retried (#694). Genuine legacy `.doc` and
+    `.xls` files are extracted with catdoc and xlrd (#935); a crashed,
+    timed-out or over-limit run is `failed` with a fixed error type such
+    as `ToolTimeoutError` or `ToolExitError` (see `docs/architecture.md`,
+    "Extractor dispatch"). `too_large` is over
     `INDEXER_ATTACHMENT_MAX_BYTES`, and `ocr_disabled` is an image or
     scanned PDF skipped while `INDEXER_OCR_ENABLED=false` (re-extracted
     once OCR is turned on).
@@ -1358,6 +1363,30 @@ extractor reads (`.eml`) is not logged.
 
 The caps bound what crafted mail can cost the single indexing worker,
 so they are not configurable. Ordinary mail does not reach them.
+
+## Attachment filename shows `=?utf-8?...?=` text
+
+Some clients send a long non-ASCII attachment name as RFC 2047
+encoded-words (`=?utf-8?B?...?= =?utf-8?B?...?=`), which the standard
+library does not decode in a filename parameter. The indexer decodes
+them the same way as Subject (#924), so `search_attachments`,
+`get_message` and filename search show the sender's name. If the
+encoded-words do not decode (a malformed charset label), the indexer
+keeps the filename as sent and logs, without the filename:
+`attachment filename encoded-words could not be decoded
+(<ExceptionType>); kept 1 filename as sent` (WARNING, under the same
+20-per-5-minutes limit as the lines above).
+
+The fix applies when a message is parsed. Filenames stored by an
+earlier image keep the encoded text until their message is re-indexed;
+a flag change or folder move does not re-parse a message, so to correct
+them all rebuild the index as in
+[Indexer refuses to start](#indexer-refuses-to-start--wipe-the-sqlite-volume).
+The rebuild re-embeds every message, so it is optional. Extraction
+dispatches by content type first, so for most such attachments only the
+displayed name and filename search change; one sent as
+`application/octet-stream` is also dispatched by its decoded extension
+once re-indexed.
 
 ## ChatGPT says a tool call was blocked by OpenAI
 

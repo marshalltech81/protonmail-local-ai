@@ -3025,11 +3025,11 @@ _FILENAME_SHAPES = {
         "doc.pdf",
     ),
     # The standard library leaves an encoded-word in a quoted parameter
-    # undecoded; pinned as is.
+    # undecoded; it is decoded as Subject is (#924).
     "encoded-word": (
         b"Content-Type: application/pdf\r\n"
         b'Content-Disposition: attachment; filename="=?utf-8?q?r=C3=A9sum=C3=A9.pdf?="',
-        "=?utf-8?q?r=C3=A9sum=C3=A9.pdf?=",
+        "résumé.pdf",
     ),
     # #688: a header folded inside the filename parameter. Unfolding
     # (RFC 5322 2.2.3) removes the line break and keeps the whitespace
@@ -3076,7 +3076,7 @@ _FILENAME_SHAPES = {
     "fold-between-encoded-words": (
         b"Content-Type: application/pdf\r\n"
         b'Content-Disposition: attachment; filename="=?utf-8?q?rep?=\r\n =?utf-8?q?ort.pdf?="',
-        "=?utf-8?q?rep?= =?utf-8?q?ort.pdf?=",
+        "report.pdf",
     ),
     # #688 review round 1: only syntactic folds are removed. A line break
     # an RFC 2231 value percent-encodes is filename content and survives.
@@ -3108,6 +3108,63 @@ _FILENAME_SHAPES = {
     "no-filename": (
         b"Content-Type: application/pdf\r\nContent-Disposition: attachment",
         "unnamed",
+    ),
+    "empty-filename": (
+        b'Content-Type: application/pdf\r\nContent-Disposition: attachment; filename=""',
+        "unnamed",
+    ),
+    # #924: encoded-words the standard library leaves in a parameter.
+    "encoded-word-two-adjacent": (
+        b"Content-Type: application/pdf\r\n"
+        b'Content-Disposition: attachment; filename="=?utf-8?q?caf=C3=A9_?= =?utf-8?q?men=C3=BC.pdf?="',
+        "café menü.pdf",
+    ),
+    "encoded-word-b-folded-unquoted-name": (
+        b"Content-Type: image/png;\r\n name==?utf-8?B?Y2Fmw6kg?=\r\n =?utf-8?B?bWVuw7wucG5n?=",
+        "café menü.png",
+    ),
+    "encoded-word-not-adjacent": (
+        b"Content-Type: application/pdf\r\n"
+        b'Content-Disposition: attachment; filename="Q3 =?utf-8?q?caf=C3=A9?= notes.pdf"',
+        "Q3 café notes.pdf",
+    ),
+    "encoded-word-content-type-name": (
+        b'Content-Type: application/pdf; name="=?utf-8?q?r=C3=A9sum=C3=A9.pdf?="',
+        "résumé.pdf",
+    ),
+    "encoded-word-in-rfc2231": (
+        b"Content-Type: application/pdf\r\n"
+        b"Content-Disposition: attachment; filename*=utf-8''%3D%3Futf-8%3Fq%3Fcaf%3DC3%3DA9.pdf%3F%3D",
+        "café.pdf",
+    ),
+    "encoded-word-after-8bit": (
+        b"Content-Type: application/pdf\r\n"
+        b'Content-Disposition: attachment; filename="r\xc3\xa9 =?utf-8?q?caf=C3=A9.pdf?="',
+        "r\ufffd\ufffd café.pdf",
+    ),
+    "encoded-word-unknown-charset": (
+        b"Content-Type: application/pdf\r\n"
+        b'Content-Disposition: attachment; filename="=?x-unknown-924?q?caf=C3=A9.pdf?="',
+        "café.pdf",
+    ),
+    "encoded-word-malformed": (
+        b"Content-Type: application/pdf\r\n"
+        b'Content-Disposition: attachment; filename="=?utf-8?q?caf=C3=A9.pdf"',
+        "=?utf-8?q?caf=C3=A9.pdf",
+    ),
+    "encoded-word-nul-in-charset": (
+        b"Content-Type: application/pdf\r\n"
+        b'Content-Disposition: attachment; filename="=?utf-8\x00?q?caf=C3=A9.pdf?="',
+        "=?utf-8\x00?q?caf=C3=A9.pdf?=",
+    ),
+    "encoded-word-lone-surrogate": (
+        b"Content-Type: application/pdf\r\n"
+        b'Content-Disposition: attachment; filename="=?unicode_escape?q?a=5Cud83d.pdf?="',
+        "=?unicode_escape?q?a=5Cud83d.pdf?=",
+    ),
+    "encoded-word-decodes-empty": (
+        b'Content-Type: application/pdf\r\nContent-Disposition: attachment; filename="=?utf-8?q?_?="',
+        "=?utf-8?q?_?=",
     ),
 }
 
@@ -3167,6 +3224,16 @@ def test_attachment_filename_matches_stdlib_or_its_unknown_charset_fallback(shap
             unknown = unknown.replace(label + b"''", b"x-unknown-362''")
         assert unknown != headers
         stdlib = email.message_from_bytes(unknown + b"\r\n\r\nAAAA\r\n").get_filename()
+    # #924: encoded-words the standard library leaves in the value are
+    # decoded the same way as Subject; where that raises, is not valid
+    # Unicode or leaves nothing, the standard library's value is kept.
+    if stdlib and "=?" in stdlib:
+        try:
+            subject = _decode_header(email.message_from_string(f"Subject: {stdlib}\n\n")["Subject"])
+            subject.encode("utf-8")
+        except ValueError, LookupError, email.errors.HeaderParseError:
+            subject = ""
+        stdlib = subject or stdlib
     assert _part_filename(part) == stdlib
     if shape.startswith("fold-"):
         assert stdlib is not None
@@ -3191,6 +3258,83 @@ def test_undecodable_filename_is_not_logged(tmp_path, caplog):
     assert len(warnings) == 1
     assert "UnicodeError" in warnings[0].getMessage()
     assert marker not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("charset", "text", "exc_name"),
+    [
+        ("utf-8\x00", "{}.pdf", "ValueError"),
+        ("unicode_escape", "{}=5Cud83d.pdf", "UnicodeEncodeError"),
+    ],
+)
+def test_undecodable_filename_encoded_word_is_kept_and_not_logged(
+    tmp_path, caplog, charset, text, exc_name
+):
+    """#924: an encoded-word filename that does not decode keeps the
+    standard library's value and logs one fixed WARNING naming the
+    exception type, never the filename."""
+    marker = "FNAMEMARKER924"
+    raw = f"=?{charset}?q?{text.format(marker)}?="
+    headers = (
+        b"Content-Type: application/pdf\r\n"
+        b'Content-Disposition: attachment; filename="' + raw.encode() + b'"'
+    )
+    with caplog.at_level(logging.DEBUG):
+        msg = parse_email(_write_filename_message(tmp_path, headers))
+    assert msg is not None
+    assert [a.filename for a in msg.attachments] == [raw]
+    warnings = [r for r in caplog.records if "filename" in r.getMessage()]
+    assert [r.levelno for r in warnings] == [logging.WARNING]
+    assert warnings[0].getMessage() == (
+        f"attachment filename encoded-words could not be decoded ({exc_name}); "
+        "kept 1 filename as sent"
+    )
+    assert marker not in caplog.text
+
+
+def test_filename_encoded_word_decoding_is_one_call_per_word(tmp_path, monkeypatch):
+    """#924: a crafted filename of many encoded-words is decoded in one
+    linear pass: one ``decode_header`` call per word, never a rescan of
+    the rest of the value, and none for a flood of ``=?`` prefixes that
+    are not encoded-words."""
+    import email.header
+
+    calls = 0
+    real = email.header.decode_header
+
+    def counting(value):
+        nonlocal calls
+        calls += 1
+        return real(value)
+
+    monkeypatch.setattr(email.header, "decode_header", counting)
+    words = 20_000
+    crafted = " ".join(["=?utf-8?q?caf=C3=A9?="] * words)
+    headers = (
+        b"Content-Type: application/pdf\r\n"
+        b'Content-Disposition: attachment; filename="' + crafted.encode() + b'"'
+    )
+    start = time.perf_counter()
+    msg = parse_email(_write_filename_message(tmp_path / "words", headers))
+    elapsed = time.perf_counter() - start
+    assert msg is not None
+    assert [a.filename for a in msg.attachments] == ["café" * words]
+    assert calls == words
+    assert elapsed < 10
+
+    calls = 0
+    flood = "=?" * 200_000 + ".pdf"
+    headers = (
+        b"Content-Type: application/pdf\r\n"
+        b'Content-Disposition: attachment; filename="' + flood.encode() + b'"'
+    )
+    start = time.perf_counter()
+    msg = parse_email(_write_filename_message(tmp_path / "flood", headers))
+    elapsed = time.perf_counter() - start
+    assert msg is not None
+    assert [a.filename for a in msg.attachments] == [flood]
+    assert calls == 0
+    assert elapsed < 10
 
 
 class TestMessageSortTime:
@@ -3788,7 +3932,7 @@ def test_parser_cap_lines_are_rate_limited_and_counted(tmp_path, monkeypatch, ca
     from src import extractors
 
     caplog.set_level("INFO")
-    monkeypatch.setattr(extractors, "_WARNINGS_PER_WINDOW", 2)
+    monkeypatch.setattr(extractors._LINE_BUDGET, "limit", 2)
     extractors.drain_extractor_counts()
     raw, _, _, pinned = _CAP_SHAPES["body_parts"]
     folder = tmp_path / "INBOX" / "cur"

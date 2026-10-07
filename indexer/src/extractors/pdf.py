@@ -182,7 +182,9 @@ def _text_from_pages(
     except Exception as exc:  # noqa: BLE001
         # The message can quote the document, so only the type is
         # logged (#257).
-        log.warning("PDF OCR fallback failed: %s", type(exc).__name__)
+        # Rate limited (#889): Tesseract timing out on every scanned
+        # PDF would otherwise log once per attachment.
+        warn_rate_limited(log, "PDF OCR fallback failed: %s", type(exc).__name__)
         if len(digital_text) >= _MIN_DIGITAL_CHARS:
             # A mixed PDF keeps its digital text, as before page-level
             # OCR; its unread pages are lost, as past the cap.

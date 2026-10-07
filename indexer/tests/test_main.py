@@ -3404,7 +3404,7 @@ class TestRequeueStaleExtractions:
 
         assert "HEADER_MARK" in self._attachment_chunk_text(db)
         row = db._conn.execute("SELECT extractor FROM attachment_extractions").fetchone()
-        assert row["extractor"] == "docx@4"
+        assert row["extractor"] == "docx@5"
         assert main._requeue_stale_extractions(db, queue) == 0
 
     def test_alias_messages_are_requeued_and_rebuilt(self, tmp_path, monkeypatch):
@@ -3550,7 +3550,7 @@ class TestRequeueStaleExtractions:
                 attachment_indexing,
                 "extract_attachment",
                 lambda **_kw: ExtractionResult(
-                    status=STATUS_EMPTY, extractor="docx@4", text=None, error=None
+                    status=STATUS_EMPTY, extractor="docx@5", text=None, error=None
                 ),
             )
             main._drain_queue_batched(
@@ -4914,6 +4914,8 @@ class TestMainStartupAndLoop:
         refresh=None,
         embed_url="http://host.docker.internal:8001/v1",
         embed_vector=None,
+        sweep_paths=None,
+        recover=None,
     ):
         events: list[str] = []
         self._events = events
@@ -4928,7 +4930,9 @@ class TestMainStartupAndLoop:
         self._embedder = embedder
         monkeypatch.setattr(main, "OpenAIEmbedder", lambda **kw: embedder)
         monkeypatch.setattr(main, "touch_health_file", lambda: None)
-        monkeypatch.setattr(main, "sweep_paths", lambda db: events.append("sweep_paths"))
+        monkeypatch.setattr(
+            main, "sweep_paths", sweep_paths or (lambda db: events.append("sweep_paths"))
+        )
         monkeypatch.setattr(main, "Observer", lambda: _FakeObserver(events))
         monkeypatch.setattr(
             main,
@@ -4952,7 +4956,7 @@ class TestMainStartupAndLoop:
         )
         if drain is not None:
             monkeypatch.setattr(main, "_drain_queue_batched", drain)
-        monkeypatch.setattr(main, "_recover_zero_vector_threads", lambda *a, **kw: 0)
+        monkeypatch.setattr(main, "_recover_zero_vector_threads", recover or (lambda *a, **kw: 0))
         monkeypatch.setattr(
             main,
             "_enqueue_unindexed_messages",
@@ -5103,6 +5107,90 @@ class TestMainStartupAndLoop:
 
         init = next(e for e in events if e.startswith("initial_index"))
         assert events.index("sweep_paths") < events.index(init)
+
+    # --- #934: startup and recovery failures log the type only ------------
+
+    @staticmethod
+    def _error_lines(caplog, prefix):
+        return [
+            (r.levelno, r.getMessage()) for r in caplog.records if r.getMessage().startswith(prefix)
+        ]
+
+    def test_startup_rename_sweep_failure_logs_type_only(self, tmp_path, monkeypatch, caplog):
+        marker = "SYNTHETIC_934_MARKER"
+
+        def sweep(_db):
+            self._events.append("sweep_paths")
+            raise sqlite3.OperationalError(marker)
+
+        events = self._run_main(tmp_path, monkeypatch, sweep_due=False, sweep_paths=sweep)
+
+        assert events.count("sweep_paths") == 1
+        assert self._error_lines(caplog, "startup rename sweep failed") == [
+            (logging.ERROR, "startup rename sweep failed: OperationalError")
+        ]
+        assert marker not in caplog.text
+
+    @pytest.mark.parametrize("failing", ["sweep", "reap"])
+    def test_startup_reconciliation_failure_logs_type_only(
+        self, tmp_path, monkeypatch, caplog, failing
+    ):
+        from src.reconciler import ReconcilerConfig
+
+        marker = "SYNTHETIC_934_MARKER"
+        calls: list[str] = []
+
+        class _Raising:
+            def __init__(self, *_a, **_kw):
+                pass
+
+            def sweep(self):
+                calls.append("sweep")
+                if failing == "sweep":
+                    raise UnicodeDecodeError("utf-8", marker.encode(), 0, 1, marker)
+                return {}
+
+            def reap(self):
+                calls.append("reap")
+                raise LookupError(f"unknown encoding: {marker}")
+
+        monkeypatch.setattr(
+            main,
+            "load_config_from_env",
+            lambda _env: ReconcilerConfig(
+                enabled=True,
+                grace_days=7,
+                sweep_interval_secs=3600,
+                max_batch_pct=0.05,
+                force=False,
+            ),
+        )
+        monkeypatch.setattr(main, "Reconciler", _Raising)
+
+        self._run_main(tmp_path, monkeypatch, sweep_due=False)
+
+        assert calls == (["sweep"] if failing == "sweep" else ["sweep", "reap"])
+        expected = "UnicodeDecodeError" if failing == "sweep" else "LookupError"
+        assert self._error_lines(caplog, "startup reconciliation failed") == [
+            (logging.ERROR, f"startup reconciliation failed: {expected}")
+        ]
+        assert marker not in caplog.text
+
+    def test_periodic_recovery_sweep_failure_logs_type_only(self, tmp_path, monkeypatch, caplog):
+        marker = "SYNTHETIC_934_MARKER"
+        calls: list[int] = []
+
+        def recover(*_a, **_kw):
+            calls.append(1)
+            raise ValueError(marker)
+
+        self._run_main(tmp_path, monkeypatch, sweep_due=True, recover=recover)
+
+        assert calls
+        lines = self._error_lines(caplog, "periodic recovery sweep failed")
+        assert lines
+        assert set(lines) == {(logging.ERROR, "periodic recovery sweep failed: ValueError")}
+        assert marker not in caplog.text
 
     def test_remote_embedder_warns_once_with_host_only(self, tmp_path, monkeypatch, caplog):
         """#622: an embedder off the host receives mail text, so startup

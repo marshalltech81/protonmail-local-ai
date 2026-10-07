@@ -15,7 +15,6 @@ import math
 import os
 import re
 import secrets
-import threading
 import time
 import urllib.parse
 from collections.abc import Callable
@@ -39,6 +38,7 @@ from .lib.inference import (
     PromptBudget,
     default_token_budget,
 )
+from .lib.rate_limited_log import RateLimitedLog
 from .lib.reranker import DEFAULT_RERANK_TIMEOUT_SECS, CohereReranker, RerankConfig
 from .lib.sqlite import Database, read_stored_schema_version
 from .tools.brief import register_experimental_tools
@@ -650,58 +650,29 @@ class _HostOriginGuard:
         await self.app(scope, receive, send_and_log)
 
 
-class _RejectionLog:
+class _RejectionLog(RateLimitedLog):
     """Rate-limited logging of rejected requests (#878, Codex review
-    round 1 on #883).
+    round 1 on #883), on the shared ``RateLimitedLog`` (#889).
 
     A prober can send rejected requests as fast as it likes, so not
     every one gets a line. In each window of ``interval`` seconds the
     first rejection per reason is logged as ``rejected request:
-    reason=<reason>``; every rejection is counted. When a rejection
-    arrives after the window ended, a window that had more than one
-    rejection for some reason is reported as one ``rejected requests in
-    the last <N>s: <reason>=<count> ...`` line, N being the seconds the
-    window actually covered, and a new window starts. A window with no
-    later rejection is never summarised; its first lines are already
-    logged.
-
-    State is one counter per fixed reason, so it is bounded whatever the
-    traffic. The lock makes ``record`` safe from any thread; it never
-    awaits, so it is safe on the event loop too. Logging happens outside
-    the lock.
+    reason=<reason>``; every rejection is counted, and a window with
+    repeats is reported as one ``rejected requests in the last <N>s:
+    <reason>=<count> ...`` line when the next rejection arrives after it.
     """
 
     REASONS = ("missing_token", "invalid_token", "bad_host", "bad_origin")
 
     def __init__(self, interval: float, clock: Callable[[], float] = time.monotonic) -> None:
-        self._interval = interval
-        self._clock = clock
-        self._lock = threading.Lock()
-        self._window_start: float | None = None
-        self._counts = dict.fromkeys(self.REASONS, 0)
-
-    def record(self, reason: str) -> None:
-        if reason not in self._counts:
-            raise ValueError("unknown rejection reason")
-        summary: tuple[int, dict[str, int]] | None = None
-        with self._lock:
-            now = self._clock()
-            if self._window_start is None or now - self._window_start >= self._interval:
-                if self._window_start is not None and any(n > 1 for n in self._counts.values()):
-                    summary = (int(now - self._window_start), dict(self._counts))
-                self._window_start = now
-                self._counts = dict.fromkeys(self.REASONS, 0)
-            self._counts[reason] += 1
-            first = self._counts[reason] == 1
-        if summary is not None:
-            elapsed, counts = summary
-            log.warning(
-                "rejected requests in the last %ds: %s",
-                elapsed,
-                " ".join(f"{name}={n}" for name, n in counts.items() if n),
-            )
-        if first:
-            log.warning("rejected request: reason=%s", reason)
+        super().__init__(
+            log,
+            self.REASONS,
+            interval,
+            first_msg="rejected request: reason=%s",
+            summary_msg="rejected requests in the last %ds: %s",
+            clock=clock,
+        )
 
 
 # Seconds per rejection-log window.
