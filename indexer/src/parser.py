@@ -556,7 +556,37 @@ def _part_filename(part: email.message.Message) -> str | None:
     for name, value in part.raw_items():
         if name.lower() in ("content-disposition", "content-type"):
             headers[name] = _unfold(value)
-    return _raw_part_filename(headers)
+    return _decode_filename_words(_raw_part_filename(headers))
+
+
+def _decode_filename_words(filename: str | None) -> str | None:
+    """Decode the RFC 2047 encoded-words the standard library leaves in a
+    filename parameter, the same way as Subject (#924).
+
+    ``get_filename()`` decodes RFC 2231 only, so a filename sent as
+    encoded-words (often several, a long name folded by the sending
+    client) came back undecoded. ``_decode_header`` does the encoded-word
+    grammar through ``email.header.decode_header``, in one linear pass.
+    The undecoded value is kept when decoding raises (a NUL in the
+    charset label raises ``ValueError``), yields text that is not valid
+    Unicode (a ``unicode_escape`` word can decode to a lone surrogate),
+    or leaves nothing:
+    a filename never becomes empty, so it stays an attachment. The
+    exception is reported by type only; the filename is mail content.
+    """
+    if not filename or "=?" not in filename:
+        return filename
+    try:
+        decoded = _decode_header(filename)
+        decoded.encode("utf-8")
+    except (email.errors.HeaderParseError, ValueError, LookupError) as exc:
+        warn_rate_limited(
+            log,
+            "attachment filename encoded-words could not be decoded (%s); kept 1 filename as sent",
+            type(exc).__name__,
+        )
+        return filename
+    return decoded or filename
 
 
 def _raw_part_filename(part: email.message.Message) -> str | None:
