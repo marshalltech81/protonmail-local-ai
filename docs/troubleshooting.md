@@ -1216,8 +1216,8 @@ only, never filenames or text (`make logs`):
   PPTX that would decompress past its cap. For a legacy `.doc`,
   `.xls` or `.ppt` (#935, #957) the type names the tool's fate:
   `ToolTimeoutError`, `ToolCrashError` (killed by a signal, including
-  the `.xls` child's and the `.ppt` reader's CPU limit), `ToolExitError`
-  (an error, including the `.xls` child's memory limit, and any deck the
+  each tool's CPU limit), `ToolExitError` (an error, including each
+  tool's memory limit, and any deck the
   `.ppt` reader rejects or that needs more than its 128 MiB heap, such
   as a password-protected one), `ToolNotFoundError` (catdoc or the
   `.ppt` Java runtime missing from the image) or `XlsOutputError`.

@@ -6405,6 +6405,14 @@ _UNREPORTED_CAPS = {
         "the child is killed (ToolCrashError): a failed row with its rate-limited WARNING, "
         "counted as failed="
     ),
+    "src.extractors.doc:CHILD_MAX_ADDRESS_SPACE_BYTES": (
+        "catdoc fails (ToolExitError): a failed row with its rate-limited WARNING, "
+        "counted as failed="
+    ),
+    "src.extractors.doc:CHILD_MAX_CPU_SECONDS": (
+        "catdoc is killed (ToolCrashError): a failed row with its rate-limited WARNING, "
+        "counted as failed="
+    ),
     "src.extractors.ppt:CHILD_MAX_ADDRESS_SPACE_BYTES": (
         "the JVM fails (ToolExitError): a failed row with its rate-limited WARNING, "
         "counted as failed="
@@ -6417,6 +6425,7 @@ _UNREPORTED_CAPS = {
 
 _EXTRACTOR_MODULES = (
     "src.extractors",
+    "src.extractors._launcher",
     "src.extractors._runner",
     "src.extractors.doc",
     "src.extractors.docx",
@@ -6424,7 +6433,6 @@ _EXTRACTOR_MODULES = (
     "src.extractors.image",
     "src.extractors.pdf",
     "src.extractors.ppt",
-    "src.extractors.ppt_launcher",
     "src.extractors.pptx",
     "src.extractors.text",
     "src.extractors.xls",

@@ -9,10 +9,11 @@ as ``.xls``) still goes to ``xlsx``.
 The workbook is read by xlrd in a child process (``xls_child.py``),
 started as ``sys.executable -I`` through ``_runner.run_tool``. xlrd's
 work on opening a workbook is not bounded by the payload size, so the
-child caps its own address space and CPU time and the parent adds a
-wall-clock timeout; see ``xls_child`` for the limits and the per-sheet
-budgets, which match the xlsx extractor's. The child costs one Python
-start-up and an xlrd import per workbook, about a tenth of a second.
+runner's launcher caps the child's address space and CPU time before
+it starts, and the runner adds a wall-clock timeout; see ``xls_child``
+for the per-sheet budgets, which match the xlsx extractor's. The child
+costs a launcher and a child Python start-up and an xlrd import per
+workbook, about a tenth of a second.
 
 Any failure in the child (a limit hit, an xlrd error, a crash) ends it
 with no text; the parent raises a fixed-text error from ``_runner``,
@@ -95,12 +96,12 @@ def extract(
             sys.executable,
             "-I",
             str(_CHILD),
-            str(CHILD_MAX_ADDRESS_SPACE_BYTES),
-            str(CHILD_MAX_CPU_SECONDS),
         ],
         payload,
         timeout_seconds=XLS_TIMEOUT_SECONDS,
         max_output_bytes=_MAX_OUTPUT_BYTES,
+        max_address_space_bytes=CHILD_MAX_ADDRESS_SPACE_BYTES,
+        max_cpu_seconds=CHILD_MAX_CPU_SECONDS,
         suffix=".xls",
     )
     header, newline, body = output.data.partition(b"\n")

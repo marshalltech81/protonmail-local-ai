@@ -1,7 +1,8 @@
 """Child process of the legacy ``.xls`` extractor (#935).
 
 Run by ``xls.extract`` as
-``python -I xls_child.py <address space> <cpu seconds> <payload file>``; it
+``python -I xls_child.py <payload file>``, through the runner's
+launcher (``_launcher.py``); it
 imports only the standard library and xlrd, so it never loads the
 indexer (``-I`` also keeps this directory off ``sys.path``).
 
@@ -9,10 +10,10 @@ xlrd's ``open_workbook`` does work the payload cap does not bound
 before any caller code runs: its shared-string loop trusts a declared
 count and a signed skip length, so a few bytes can produce millions of
 strings, and its OLE2 directory walk recurses with no cycle check. The
-child therefore lowers its own address-space and CPU limits before it
-imports xlrd, to the values the parent passes (``xls.py``
-``CHILD_MAX_ADDRESS_SPACE_BYTES`` and ``CHILD_MAX_CPU_SECONDS``), and
-the parent adds a wall-clock timeout.
+launcher therefore lowers the address-space and CPU limits before this
+child starts, to the values ``xls.py`` passes
+(``CHILD_MAX_ADDRESS_SPACE_BYTES`` and ``CHILD_MAX_CPU_SECONDS``), and
+the runner adds a wall-clock timeout.
 A limit hit or any error ends the child with no text; the parent
 records a ``failed`` row.
 
@@ -41,7 +42,6 @@ no text, and xlrd's own diagnostics go to a discarding log file.
 
 from __future__ import annotations
 
-import resource
 import sys
 from typing import Any
 
@@ -176,27 +176,9 @@ def encode_output(text: str, caps: list[str]) -> bytes:
     return (",".join(caps) + "\n").encode("ascii") + text.encode("utf-8", errors="replace")
 
 
-def _limit_resources(address_space: int, cpu_seconds: int) -> None:  # pragma: no cover — child only
-    """Lower this process's limits; raises when Linux refuses one.
-
-    macOS refuses to lower ``RLIMIT_AS`` from its unlimited default
-    (``ValueError``), and the image runs on Linux only, so there the
-    address-space limit is skipped for local test runs; CI and the
-    image apply it."""
-    try:
-        resource.setrlimit(resource.RLIMIT_AS, (address_space, address_space))
-    except ValueError:
-        if sys.platform == "linux":
-            raise
-    # Past the soft limit the kernel sends SIGXCPU; past the hard one,
-    # SIGKILL.
-    resource.setrlimit(resource.RLIMIT_CPU, (cpu_seconds, cpu_seconds + 1))
-
-
 def main(argv: list[str]) -> int:  # pragma: no cover — runs only in the child
-    _limit_resources(int(argv[1]), int(argv[2]))
     try:
-        with open(argv[3], "rb") as handle:
+        with open(argv[1], "rb") as handle:
             payload = handle.read()
         text, caps = extract_text(payload)
     except BaseException:  # noqa: BLE001 — any error: no text, type withheld
