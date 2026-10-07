@@ -2033,6 +2033,30 @@ Rows for which `stat` / hash capture failed at parse time carry NULL
 identity values, which a future content-hash lookup must skip; the
 columns are populated lazily on the next reindex of the file.
 
+## Vulnerability Scans
+
+`.github/workflows/security.yml` runs Trivy over the repository: the
+uv lockfiles, `pyproject.toml` files and `indexer/java/pom.xml` for
+vulnerable dependencies, and the Dockerfiles for misconfiguration. It
+fails on HIGH or CRITICAL findings.
+
+### Image scan
+
+`.github/workflows/docker.yml` also scans the three built images
+(indexer, mcp-server, mbsync) with Trivy after `docker compose build`,
+on each change to a build input and weekly (#977). This covers what
+the lockfiles do not: Debian packages installed with apt (catdoc,
+Tesseract, Poppler and the base image's own packages), the Python
+packages actually installed, and the `.ppt` reader's jars in
+`/opt/ppt/lib`. The job fails on HIGH or CRITICAL findings that have a
+fixed version; findings with no fix yet are not gated (owner decision
+2026-10-07), but the full report for each image, every severity and
+unfixed findings included, is uploaded as the `trivy-image-reports`
+artifact.
+
+Not covered: the Java runtime that `jlink` builds into `/opt/ppt/jre`
+has no package records, so Trivy does not scan it (#1008).
+
 ## Privacy Model
 
 Three layers, each with its own boundary, plus the host's disk, where
