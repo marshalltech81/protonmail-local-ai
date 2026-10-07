@@ -5,7 +5,11 @@ mcp-server reads, or a Compose file interpolates, is a key in
 ``.env.example`` (commented or not), unless ``_NOT_DOCUMENTED`` names it
 with a reason.
 
-- Python reads come from an ``ast`` scan of both services' ``src/``.
+- Python reads come from an ``ast`` scan of both services' ``src/`` for
+  calls whose name argument is a string literal, plus the literal
+  elements of each service's ``_IDENTITY_SETTINGS`` tuple (read through
+  a loop). Any other read whose name is not a literal at the call site,
+  outside those named tuples, is not covered.
 - Compose names come from Compose itself (``docker compose config
   --variables`` over every overlay), not from scanning the YAML. Compose
   reports the outer name of a nested fallback (``${A:-${B}}``) and not
@@ -148,9 +152,41 @@ def _example_keys(path: Path) -> set[str]:
     return set(_EXAMPLE_KEY.findall(path.read_text(encoding="utf-8")))
 
 
+def _literal_name_tuple(path: Path, name: str) -> set[str]:
+    """The string elements of the module-level ``name = (...)`` in
+    ``path``. Fails if it is missing or not a literal tuple of strings, so
+    a rename or rewrite cannot silently drop it from the check."""
+    for node in ast.parse(path.read_text(encoding="utf-8")).body:
+        if (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id == name
+        ):
+            value = node.value
+            assert isinstance(value, ast.Tuple), f"{path}: {name} is not a literal tuple"
+            elements = [e.value for e in value.elts if isinstance(e, ast.Constant)]
+            assert len(elements) == len(value.elts) and all(isinstance(e, str) for e in elements), (
+                f"{path}: {name} has a non-string-literal element"
+            )
+            return {str(e) for e in elements}
+    raise AssertionError(f"{path}: no module-level {name} assignment")
+
+
+def _identity_settings(repo: Path) -> set[str]:
+    """Names each service reads through a loop over its
+    ``_IDENTITY_SETTINGS`` tuple (``os.environ.get(name)``), which the
+    literal-argument scan cannot see."""
+    return {
+        n
+        for service in ("indexer", "mcp-server")
+        for n in _literal_name_tuple(repo / service / "src" / "main.py", "_IDENTITY_SETTINGS")
+    }
+
+
 def _read_names(repo: Path) -> set[str]:
     python = _python_env_reads([repo / "indexer" / "src", repo / "mcp-server" / "src"])
-    return python | _compose_variables(repo)
+    return python | _identity_settings(repo) | _compose_variables(repo)
 
 
 def _undocumented(repo: Path) -> set[str]:
@@ -255,3 +291,41 @@ def test_a_dropped_env_example_key_is_caught(repo_copy):
         text.replace("\nRERANK_CANDIDATES=", "\nRERANK_CANDIDATEZ="), encoding="utf-8"
     )
     assert "RERANK_CANDIDATES" in _undocumented(repo_copy)
+
+
+# --- Review round 7: names read through the identity-settings tuples ---------
+
+
+def test_the_identity_settings_tuples_are_collected():
+    names = _identity_settings(_REPO)
+    assert {"MAILDIR_PATH", "EMBED_BATCH_SIZE"} <= names  # indexer
+    assert {"INFERENCE_MODE", "RERANK_MODE"} <= names  # mcp-server
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "OTHER = ('A_920',)\n",  # missing (renamed)
+        "_IDENTITY_SETTINGS = tuple(NAMES)\n",  # not a literal
+        "_IDENTITY_SETTINGS = ['A_920']\n",  # not a tuple
+        "_IDENTITY_SETTINGS = ('A_920', NAME)\n",  # a non-literal element
+    ],
+)
+def test_a_missing_or_non_literal_identity_tuple_fails(tmp_path, source):
+    path = tmp_path / "main.py"
+    path.write_text(source, encoding="utf-8")
+    with pytest.raises(AssertionError, match="_IDENTITY_SETTINGS"):
+        _literal_name_tuple(path, "_IDENTITY_SETTINGS")
+
+
+def test_a_name_read_only_through_an_identity_tuple_is_caught(repo_copy):
+    main = repo_copy / "mcp-server" / "src" / "main.py"
+    text = main.read_text(encoding="utf-8")
+    assert "_IDENTITY_SETTINGS = (\n" in text
+    main.write_text(
+        text.replace(
+            "_IDENTITY_SETTINGS = (\n", '_IDENTITY_SETTINGS = (\n    "TUPLE_ONLY_920",\n', 1
+        ),
+        encoding="utf-8",
+    )
+    assert _undocumented(repo_copy) == {"TUPLE_ONLY_920"}
