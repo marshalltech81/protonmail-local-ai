@@ -4,11 +4,15 @@ Every fixture here is synthetic. None comes from real mail.
 
 `tests/test_fixture_authors.py` (#980) reads the author metadata of
 every Office file under the indexer and mcp-server test trees (OLE2
-Author and Last Saved By, OOXML `docProps/core.xml` creator and
-lastModifiedBy, ODF creator fields) and fails unless each is empty or
-a synthetic name on its allowlist. Fix a failure by regenerating the
-file with its recipe below or scrubbing it the way
-`legacy-src/scrub-ppt-author.py` does.
+Author and Last Saved By, OLE2 DocumentSummaryInformation Company and
+Manager, OOXML `docProps/core.xml` creator and lastModifiedBy, OOXML
+`docProps/app.xml` Company and Manager, ODF creator fields) and fails
+unless each is empty or a synthetic name on its allowlist. Fix a
+failure by regenerating the file with its recipe below or scrubbing it
+the way `legacy-src/scrub-ppt-author.py` does. Names in binary records
+(the PowerPoint Current User stream, Word's associated-strings,
+revision and comment author tables, OOXML comment and revision
+authors) are not read (#1010); check those by hand before committing.
 
 ## Legacy binary Office files (#935)
 
