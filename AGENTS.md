@@ -487,6 +487,14 @@ is exactly what this forbids.
   happened. Measure the worst case with a plain timing before sizing
   a bound; figures taken under a profiler (`cProfile`, `tracemalloc`)
   overstate it several times over.
+- A third-party parser whose cost cannot be bounded in-process (it
+  allocates or loops on input before our code runs) runs in a child
+  process launched through `indexer/src/extractors/_runner.py`. The
+  runner enforces only a wall-clock timeout and an output cap; the
+  child wrapper itself must set `RLIMIT_AS` and `RLIMIT_CPU` before it
+  loads the parser, as `xls_child.py` does for xlrd. Measure a
+  candidate library on crafted input with plain timing and RSS before
+  choosing it: two `.xls` readers failed that test (#935).
 - A review finding that calls for new parsing of untrusted input, or
   any new mechanism rather than a guard (a check, a cap, a fallback),
   is a design decision: stop and ask, with "document the limitation"
@@ -571,6 +579,14 @@ Examples:
   Items that only explain a choice (no docs changed because none apply,
   a check not run because nothing it covers changed) need none. The
   issue holds fixed text, options and links, never mailbox content.
+- A pre-existing problem found while working (a review finding the PR
+  did not introduce, a bug seen while reading code, a flaky or wrong
+  test) that is not fixed in that PR gets its own GitHub issue at the
+  time, unless an open issue already tracks it (owner, 2026-10-07). A
+  review thread is resolved as pre-existing, out of scope or deferred
+  only with that issue's link in the reply, and the PR's "Not done"
+  lists it. Nothing found stays only in a thread, a PR body or a
+  commit message.
 - Merge (squash) only on the owner's explicit go-ahead.
 
 ## Common Commands
@@ -782,6 +798,10 @@ Notes:
   (`.semgrep/compose.test.yml`, `.semgrep/shell.sh`).
 - for Dockerfile, build, or container-runtime changes, run the smallest relevant `docker compose build ...` subset when practical
 - prefer real `.eml` fixtures for parser tests
+- a fixture generated with an office application (Word, PowerPoint,
+  LibreOffice) records the creating user in its metadata (OLE2
+  SummaryInformation, `docProps/core.xml`); set a synthetic author and
+  check the file before committing it (#980)
 - tests that need a process to die from a signal use `SIGKILL`; map
   other signals (`SIGSEGV`, `SIGABRT`, `SIGXCPU`) with a stubbed exit
   status, and run a real crash signal only on Linux in CI. A real
