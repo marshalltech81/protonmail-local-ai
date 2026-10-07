@@ -232,9 +232,11 @@ Do not make any of the following changes unless the repository owner explicitly 
   the startup sweep re-queues the messages carrying them once.
   Dead-lettered messages are skipped and keep their stale chunks until
   an operator runs `make requeue-dead`. A bump also re-runs that
-  module on every cached payload at the next start, so before bumping
-  a module whose post-open walk is not yet budgeted, read the issue or
-  PR that last chose not to bump it (#1036 declined a `docx` bump
+  module on every cached payload the startup sweep considers (the
+  sweep does nothing while `INDEXER_ATTACHMENT_EXTRACTION_ENABLED` is
+  off, and keeps `image-ocr` / `pdf-ocr` rows while OCR is off), so
+  before bumping a module whose post-open walk is not yet budgeted,
+  read the issue or PR that last chose not to bump it (#1036 declined a `docx` bump
   while #1031 is open; #1068 bumped it anyway and #1075 reverted it).
   A reverted bump leaves its number taken: a build in between may have
   stamped rows with it, and a row is never treated as stale by a
