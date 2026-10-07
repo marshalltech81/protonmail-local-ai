@@ -305,11 +305,15 @@ def _returned_ids(
     ``claimant_id`` or ``chunk_id``; a bare ``thread_id`` names no message.
     Two files can claim one Message-ID (#217), so a bare ``message_id``
     may name several claimants while a claimant or chunk ID names one.
+    A string returned as more than one kind of ID (a sender can set a
+    Message-ID equal to another message's claimant ID; the tools then
+    return neither) names no message and no claimant.
     """
     seen: set[str] = set()
     thread_of: dict[str, str] = {}
     message_of: dict[str, str] = {}
     claimants_of: dict[str, set[str]] = defaultdict(set)
+    kinds_of: dict[str, set[str]] = defaultdict(set)
 
     def visit(value: Any, thread: str | None) -> None:
         if isinstance(value, list):
@@ -338,6 +342,7 @@ def _returned_ids(
                 item = value.get(name)
                 if isinstance(item, str):
                     message_of[item] = message
+                    kinds_of[item].add(name)
                     if isinstance(claimant, str):
                         claimants_of[item].add(claimant)
         for child in value.values():
@@ -345,6 +350,10 @@ def _returned_ids(
 
     for call in calls:
         visit(call.get("result"), None)
+    for item, kinds in kinds_of.items():
+        if len(kinds) > 1:
+            del message_of[item]
+            claimants_of.pop(item, None)
     return seen, thread_of, message_of, dict(claimants_of)
 
 

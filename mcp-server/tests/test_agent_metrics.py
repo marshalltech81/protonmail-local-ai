@@ -437,6 +437,17 @@ class TestMessageCitations:
         score = score_trace(self._correction(), _trace([listing, read], cited=[cited]))
         assert score.message_citation_recall == recall
 
+    def test_an_id_naming_both_a_claimant_and_a_message_is_ambiguous(self) -> None:
+        # A sender can set a Message-ID equal to another message's claimant
+        # ID (the real tool then returns neither). The read correcting
+        # message's claimant ID is also the crafted root's Message-ID, so a
+        # citation of that string names two messages and is credited as none.
+        crafted = "a.2@x.example#0000abcd"
+        listing = _page(["a.1@x.example", crafted], has_more=False)
+        calls = [listing, _read("a.2@x.example", 0, None)]
+        score = score_trace(self._correction(), _trace(calls, cited=[crafted]))
+        assert score.message_citation_recall == 0.0
+
     def test_a_conflict_needs_both_sides_cited(self) -> None:
         scenario = _scenario(
             category="conflicting_sources",
