@@ -5,6 +5,7 @@ these keep the indexer-side inputs deterministic and the build clean.
 """
 
 import ast
+import inspect
 import io
 import json
 import logging
@@ -77,6 +78,26 @@ def test_ocr_binaries_are_installed_in_ci():
     if not _IN_CI:
         pytest.skip("only checked in CI")
     assert all(shutil.which(binary) is not None for binary in OCR_BINARIES)
+
+
+def test_ocr_binaries_cover_the_executables_the_ocr_path_starts():
+    """Review round 2 on #908 (AGENTS.md: a list that must cover every
+    item is checked against the code, not against itself): the preflight
+    list equals the commands the OCR libraries start. pytesseract names
+    its command in ``tesseract_cmd``; pdf2image names each Poppler
+    command in a ``_get_command_path("...")`` call. Excluded, with the
+    reason checked: ``pdftocairo``, which pdf2image runs only with
+    ``use_pdftocairo=True``, and the PDF extractor never passes it."""
+    import pdf2image.pdf2image as pdf2image_module
+    import pytesseract
+    from src.extractors import pdf as pdf_extractor
+
+    started = {pytesseract.pytesseract.tesseract_cmd}
+    started |= set(re.findall(r'_get_command_path\("(\w+)"', inspect.getsource(pdf2image_module)))
+    excluded = {"pdftocairo"}
+    assert excluded < started
+    assert "pdftocairo" not in inspect.getsource(pdf_extractor)
+    assert started - excluded == set(OCR_BINARIES)
 
 
 def test_ocr_fixtures_carry_no_metadata():

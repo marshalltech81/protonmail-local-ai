@@ -62,6 +62,8 @@ from tests.baseline.hash_embedder import HashEmbedder, embed_text
 # pdf2image starts Poppler's ``pdfinfo`` (the page count, before every
 # render) and ``pdftoppm`` (the render). A partial Poppler install can
 # have one without the other (review round 1), so both are checked.
+# ``test_ocr_binaries_cover_the_executables_the_ocr_path_starts`` checks
+# this list against the commands those libraries name (review round 2).
 OCR_BINARIES = ("tesseract", "pdftoppm", "pdfinfo")
 
 
