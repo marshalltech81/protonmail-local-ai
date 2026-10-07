@@ -74,6 +74,9 @@ jobs:
       - name: Run make status tests
         run: bash scripts/tests/make_status_test.sh
 
+      - name: Run backup-index and restore-index tests
+        run: bash scripts/tests/index_backup_test.sh
+
   indexer-pytest:
     name: indexer pytest
     runs-on: ubuntu-latest

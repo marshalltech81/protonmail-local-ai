@@ -772,10 +772,74 @@ Each migration runs in one transaction, so if the indexer stops part
 way (killed, disk full) the index stays at the last version that
 finished, and the next `make up` retries the rest; nothing needs to be
 deleted. If a retry keeps failing with the same error, rebuild the
-index as in the section above. v1 (#928) keys the attachment
+index as in the section above. If a migration finished but the
+result is wrong, restore the copy taken before the upgrade
+([Back up and restore the index](#back-up-and-restore-the-index)) and
+run the release that wrote it. v1 (#928) keys the attachment
 extraction cache by extractor module; after it, an attachment whose
 label selects a different extractor from the one that first read its
 bytes is re-extracted once, the next time its message is reprocessed.
+
+## Back up and restore the index
+
+Take a copy of the index before deploying a release that changes the
+schema (a new `indexer/src/migrations/` file), so a migration that
+commits but turns out wrong can be undone without a full rebuild from
+Maildir (#1005). The copy holds the whole mailbox: choose a directory
+outside the checkout, on an encrypted disk, and delete copies you no
+longer need (docs/architecture.md, "Backups").
+
+```bash
+make backup-index BACKUP_DIR="$HOME/protonmail-local-ai-backup"
+```
+
+The stack keeps running. The indexer container copies the index with
+SQLite's online backup API from a read-only connection, which reads one
+consistent snapshot while the indexer writes, into a temporary file next
+to the index in the index volume (so the volume needs free space for one
+more copy of `mail.db` while it runs). It runs `PRAGMA integrity_check`
+on that copy, streams it to `BACKUP_DIR/mail-<UTC timestamp>.db`, checks
+the SHA-256 of the host file against the container's, and removes the
+temporary file. The target prints the integrity result, the path, the
+size and the schema version, and writes nothing to `BACKUP_DIR` when
+the check fails. `BACKUP_DIR` is required; it is created with mode 700,
+an existing one must not be open to other users, a path inside the
+checkout is refused, and the file is mode 600. No mount or setting of
+the running containers changes.
+
+To go back to a copy:
+
+```bash
+make restore-index BACKUP="$HOME/protonmail-local-ai-backup/mail-20261007T120000Z.db"
+```
+
+It asks for `yes`, then:
+
+1. stops `mcp-server` and `indexer` (the stack must have been started
+   with `make up`, so the containers exist; mbsync keeps running);
+2. streams the file into a one-off container of the indexer's image with
+   the index volume, the indexer's user, a read-only root, no
+   capabilities and no network, which refuses the file unless
+   `PRAGMA integrity_check` is `ok`, the file is this project's index
+   and its schema version is not above the code's;
+3. removes the old index's `-wal` and `-shm` files and renames the copy
+   over `mail.db` (an old WAL left beside the restored file would be
+   replayed into it);
+4. starts `indexer` and `mcp-server` again (also when step 2 refused
+   the file, leaving the index unchanged) and waits up to
+   `RESTORE_WAIT_SECONDS` (900) for the indexer's startup lines,
+   printing the `Startup identity` line (`schema_stored`), any
+   `Migrating database` and `Database ready` lines and the
+   `Embedder identity verified` line.
+
+The current index is replaced, so take a `make backup-index` first if
+you may want it back. Mail that arrived after the copy was taken is
+indexed again when the indexer starts, since it queues every Maildir
+message the index does not hold. A copy at an older schema version is
+migrated again on that start, so restore it with the release that
+wrote it if the newer migration is the problem. The indexer refuses a
+copy made with a different embedder; see
+[Embedder identity mismatch](#embedder-identity-mismatch).
 
 ## Embedder identity mismatch
 

@@ -1433,6 +1433,12 @@ failure leaves the last applied version stamped and the next start
 retries it. A version above the code's, or a missing migration file,
 stops startup (`docs/troubleshooting.md`).
 
+Before deploying a release that adds a migration, take a snapshot with
+`make backup-index BACKUP_DIR=<directory outside the checkout>`: a
+migration that commits but turns out wrong is then undone with
+`make restore-index BACKUP=<file>` instead of a full rebuild from
+Maildir (`docs/troubleshooting.md`, "Back up and restore the index").
+
 | Version | Migration | Change |
 |---|---|---|
 | 0 | (initial schema) | First deployed schema (2026-10-03). |
@@ -2031,7 +2037,8 @@ Protecting them is the host's job, which makes it a setup requirement:
   encryption protects a powered-off machine, or one restarted and not
   yet unlocked at login. A screen lock does not re-lock FileVault, so a
   logged-in session that is only screen-locked is not protected by it.
-- **Backups.** Any backup of these volumes, or of a Maildir archive
+- **Backups.** Any backup of these volumes, of the index
+  (`make backup-index`), or of a Maildir archive
   (`docs/troubleshooting.md`), holds the whole mailbox: keep it
   encrypted (for example an encrypted Time Machine destination) and
   never inside the checkout. A backup of the checkout itself carries
