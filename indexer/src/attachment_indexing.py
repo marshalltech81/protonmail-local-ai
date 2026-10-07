@@ -42,6 +42,7 @@ from .database import Database
 from .extractors import (
     LEGACY_OLE2_ERROR,
     OCR_DISABLED_ERROR,
+    PERMANENT_FAILURE_ERRORS,
     SCANNED_PDF_OCR_DISABLED_ERROR,
     STATUS_EMPTY,
     STATUS_FAILED,
@@ -217,8 +218,11 @@ def _unsupported_still_holds(error: str | None, attachment: Attachment, ocr_enab
     image, or a PDF when the PDF extractor wrote the result (it found no
     digital text layer). An OLE2 result also holds for an occurrence
     that selects the DOCX or XLSX extractor, which the dispatcher would
-    reject the same way (#694). Any other result holds only while this
-    occurrence selects no extractor.
+    reject the same way (#694). An encrypted PDF, a PDF over a pypdf
+    limit or a workbook over the eager-part budget holds for every
+    occurrence: the extractor read the bytes as its format before
+    declining, so they decide the outcome, not the label (#931). Any
+    other result holds only while this occurrence selects no extractor.
     """
     module = resolved_extractor_module(attachment.content_type, attachment.filename)
     error = error or ""
@@ -226,6 +230,8 @@ def _unsupported_still_holds(error: str | None, attachment: Attachment, ocr_enab
     if "OCR disabled" in error and needs_ocr:
         return not ocr_enabled
     if error == LEGACY_OLE2_ERROR and module in {"docx", "xlsx"}:
+        return True
+    if error in PERMANENT_FAILURE_ERRORS:
         return True
     return module is None
 

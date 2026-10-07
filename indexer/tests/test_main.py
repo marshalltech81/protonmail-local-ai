@@ -3484,7 +3484,7 @@ class TestRequeueStaleExtractions:
         assert main._requeue_stale_extractions(db, queue) == 1
 
         with db.transaction():
-            db._conn.execute("UPDATE attachment_extractions SET extractor = 'xlsx@5'")
+            db._conn.execute("UPDATE attachment_extractions SET extractor = 'xlsx@6'")
         self._drain(db, queue)
         assert main._requeue_stale_extractions(db, queue) == 0
 

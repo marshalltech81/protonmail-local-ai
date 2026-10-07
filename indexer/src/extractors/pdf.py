@@ -39,7 +39,9 @@ password, so an owner-password-only PDF (print / copy restrictions, no
 open password) extracts like any other; AES needs ``cryptography``
 (#691). No other password is ever tried. A PDF that needs a real open
 password raises ``FileNotDecryptedError`` when its pages are read, and
-the dispatcher records that as a ``failed`` row by type.
+the dispatcher records that as ``unsupported`` with fixed text, as it
+does pypdf's ``LimitReachedError``: the same bytes always fail the same
+way (#931).
 """
 
 from __future__ import annotations

@@ -1276,7 +1276,9 @@ only, never filenames or text (`make logs`):
     legacy binary `.doc` / `.xls` and password-protected Office files (OLE2), recorded with
     "OLE2 compound file" rather than as `failed`, so they
     are not retried (#694; see `docs/architecture.md`, "Extractor
-    dispatch"). `too_large` is over
+    dispatch"). It also counts PDFs that need an open password or exceed
+    pypdf's limits, and workbooks over the XLSX eager-part budget, which
+    fail the same way every time (#931). `too_large` is over
     `INDEXER_ATTACHMENT_MAX_BYTES`, and `ocr_disabled` is an image or
     scanned PDF skipped while `INDEXER_OCR_ENABLED=false` (re-extracted
     once OCR is turned on).

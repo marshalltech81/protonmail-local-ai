@@ -1010,7 +1010,7 @@ as message bodies. Two extra tables sit alongside `message_chunks`:
 | Table | Keyed by | Purpose |
 |---|---|---|
 | `attachments` | attachment_occurrence_id | Per-occurrence row capturing filename + MIME + size as it appeared on a specific email. The occurrence id includes the message, payload hash, filename, and attachment slot so duplicate same-payload files in one email are still represented. |
-| `attachment_extractions` | attachment_id (= sha256 of payload) | Per-content-hash cache of extracted text + status. The expensive work (Tesseract OCR, pypdf parse, DOCX walk) runs at most once per unique payload, including within one indexing batch, where results not yet committed are shared by content hash. Non-success rows are also honored: `empty` short-circuits unconditionally; `too_large` short-circuits while the payload still exceeds `INDEXER_ATTACHMENT_MAX_BYTES`, and is re-extracted once the operator raises the cap far enough for it to fit (#693); `unsupported` short-circuits while it also holds for the occurrence at hand (an "OCR disabled" row, for an occurrence that needs OCR — an image, or a PDF whose row the PDF extractor wrote because it found no digital text layer — until OCR is turned on; an "OLE2 compound file" row also for an occurrence that selects the DOCX or XLSX extractor (#694); any other until the occurrence's MIME type or filename selects an extractor, since the same bytes can arrive as `.bin` first and `.txt` later); `failed` short-circuits within a 7-day retry window so a chronic failure stops re-running on every reappearance, but a real fix landed via dependency upgrade can pick the payload up later. The `extractor` column carries a version (`docx@5`); a row written by an older version of a fixed extractor (`extractors.EXTRACTOR_VERSIONS`) is refreshed by re-running that extractor from whichever occurrence of the bytes arrives (whatever its own filename or MIME type), and the indexer re-queues every message carrying those bytes once at startup so their chunks are rebuilt, except dead-lettered messages, which keep their stale chunks until `make requeue-dead` rescues them. Rows from a newer version (after a rollback) are kept. A row is deleted with the last `attachments` row that references it (see *Cascade on message removal*). A stale row an OCR extractor wrote (`image-ocr`, `pdf-ocr`) is kept and served while `INDEXER_OCR_ENABLED=false`, since a refresh could only replace its text with "OCR disabled"; it is refreshed once OCR is on. Likewise, once OCR is on, the startup sweep re-queues each message whose occurrence of bytes cached "OCR disabled" would now be OCR'd; an occurrence that selects no extractor (`.bin`) is not re-queued, since its reprocess would serve the same row. The sweep also re-queues, whatever the OCR setting, each message whose occurrence of bytes cached as "no extractor" now selects one, as when a release starts routing an extension such as `.heic` (#691) or `.dotx` (#937). Likewise, after `INDEXER_ATTACHMENT_MAX_BYTES` is raised, it re-queues every message carrying bytes cached `too_large` whose size (`attachments.size_bytes`) now fits; the re-run rewrites the row, so each is re-queued once, and bytes still over the cap are never re-queued (#693). |
+| `attachment_extractions` | attachment_id (= sha256 of payload) | Per-content-hash cache of extracted text + status. The expensive work (Tesseract OCR, pypdf parse, DOCX walk) runs at most once per unique payload, including within one indexing batch, where results not yet committed are shared by content hash. Non-success rows are also honored: `empty` short-circuits unconditionally; `too_large` short-circuits while the payload still exceeds `INDEXER_ATTACHMENT_MAX_BYTES`, and is re-extracted once the operator raises the cap far enough for it to fit (#693); `unsupported` short-circuits while it also holds for the occurrence at hand (an "OCR disabled" row, for an occurrence that needs OCR — an image, or a PDF whose row the PDF extractor wrote because it found no digital text layer — until OCR is turned on; an "OLE2 compound file" row also for an occurrence that selects the DOCX or XLSX extractor (#694); an encrypted-PDF, pypdf-limit or eager-part-budget row for every occurrence (#931); any other until the occurrence's MIME type or filename selects an extractor, since the same bytes can arrive as `.bin` first and `.txt` later); `failed` short-circuits within a 7-day retry window so a chronic failure stops re-running on every reappearance, but a real fix landed via dependency upgrade can pick the payload up later. The `extractor` column carries a version (`docx@5`); a row written by an older version of a fixed extractor (`extractors.EXTRACTOR_VERSIONS`) is refreshed by re-running that extractor from whichever occurrence of the bytes arrives (whatever its own filename or MIME type), and the indexer re-queues every message carrying those bytes once at startup so their chunks are rebuilt, except dead-lettered messages, which keep their stale chunks until `make requeue-dead` rescues them. Rows from a newer version (after a rollback) are kept. A row is deleted with the last `attachments` row that references it (see *Cascade on message removal*). A stale row an OCR extractor wrote (`image-ocr`, `pdf-ocr`) is kept and served while `INDEXER_OCR_ENABLED=false`, since a refresh could only replace its text with "OCR disabled"; it is refreshed once OCR is on. Likewise, once OCR is on, the startup sweep re-queues each message whose occurrence of bytes cached "OCR disabled" would now be OCR'd; an occurrence that selects no extractor (`.bin`) is not re-queued, since its reprocess would serve the same row. The sweep also re-queues, whatever the OCR setting, each message whose occurrence of bytes cached as "no extractor" now selects one, as when a release starts routing an extension such as `.heic` (#691) or `.dotx` (#937). Likewise, after `INDEXER_ATTACHMENT_MAX_BYTES` is raised, it re-queues every message carrying bytes cached `too_large` whose size (`attachments.size_bytes`) now fits; the re-run rewrites the row, so each is re-queued once, and bytes still over the cap are never re-queued (#693). |
 
 Per-occurrence chunks land in `message_chunks` with the
 `attachment_id` column populated and `kind` set to `attachment`. They embed exactly like body chunks
@@ -1069,8 +1069,23 @@ password, so an owner-password-only PDF (print or copy restrictions,
 no open password, common for statements and legal letters) extracts
 like any other, including AES-encrypted ones, which use the
 `cryptography` package (#691). No other password is tried. A PDF that
-needs a real open password is recorded as `failed` with
-`FileNotDecryptedError` and stays searchable by filename only.
+needs a real open password is recorded as `unsupported` ("encrypted
+PDF (open password required)") and stays searchable by filename only.
+
+Permanent extractor failures: an exception the same bytes always
+repeat is recorded `unsupported` with fixed text instead of `failed`,
+so it is not re-run every 7 days (#931): a PDF that needs an open
+password (pypdf `FileNotDecryptedError`), a PDF over one of pypdf's
+structural limits (`LimitReachedError`: page-tree depth, outline depth,
+`/ToUnicode` size and the like; "PDF structure exceeds pypdf limits"),
+and a workbook over the XLSX eager-part budget below ("workbook exceeds
+the eager-part budget"). Each is matched by exact exception class;
+anything else stays `failed`. The extractor read the bytes as its
+format before declining, so the row is served to every later
+occurrence of them, whatever its label. It is stamped with the
+extractor version (`pdf@5`), so a later version bump, for example one
+that raises a budget, refreshes it. Each logs a rate-limited WARNING
+(`extractor <module> declined ...; recorded unsupported, not retried`).
 
 The parsing libraries log and warn with values read from the
 attachment (pypdf's font dictionaries and encoding names, openpyxl's
@@ -1152,8 +1167,9 @@ the workbook and its relationships, styles, theme, core and custom
 properties, each worksheet's relationships, and chartsheets with their
 drawings, charts and images) are charged their declared sizes before
 openpyxl opens the workbook: 8 MiB per part, and 16 MiB and 4,096 reads
-across the workbook. A workbook over one of these fails as
-`XlsxEagerPartBudgetError` with no text kept (#428). External links
+across the workbook. A workbook over one of these is recorded
+`unsupported` ("workbook exceeds the eager-part budget", #931) with no
+text kept (#428). External links
 are not loaded at all.
 
 ### Cascade on message removal

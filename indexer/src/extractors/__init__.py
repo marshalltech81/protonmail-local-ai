@@ -252,7 +252,9 @@ class ExtractionResult:
     * ``"empty"`` — extractor ran cleanly but the document had no text
       to extract (truly empty page, image of a blank surface, etc.).
     * ``"unsupported"`` — no extractor registered for this MIME type
-      *or* the format's optional dependency is missing in this image.
+      *or* the format's optional dependency is missing in this image,
+      or the extractor declined in a way the same bytes always repeat
+      (``PERMANENT_FAILURE_ERRORS``, #931).
     * ``"too_large"`` — payload exceeded ``max_bytes``.
     * ``"failed"`` — extractor raised; ``error`` records the exception
       type only, since its message can quote the document. Indexer
@@ -302,7 +304,11 @@ class ExtractionResult:
 # ``failed`` rows the previous versions wrote for one are refreshed (#694).
 # docx 5: reads Word templates (``.dotx``), which ``docx.Document``
 # refused, so a template labelled ``.docx`` failed (#937).
-EXTRACTOR_VERSIONS: dict[str, int] = {"docx": 5, "image": 3, "pdf": 4, "text": 2, "xlsx": 5}
+# pdf 5, xlsx 6: a PDF that needs an open password or exceeds a pypdf
+# limit, and a workbook over the eager-part budget, are recorded
+# ``unsupported`` instead of ``failed``, so the ``failed`` rows the
+# previous versions wrote for them are refreshed (#931).
+EXTRACTOR_VERSIONS: dict[str, int] = {"docx": 5, "image": 3, "pdf": 5, "text": 2, "xlsx": 6}
 
 
 def _stamp_extractor(module_name: str, extractor_name: str) -> str:
@@ -382,6 +388,19 @@ LEGACY_OLE2_ERROR = "OLE2 compound file (legacy .doc / .xls or encrypted Office 
 
 # The fixed 8-byte signature every OLE2 compound file starts with.
 _OLE2_SIGNATURE = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+
+# ``unsupported`` errors for an extractor exception the same bytes always
+# repeat (#931), so a ``failed`` row would only re-run it every
+# ``_FAILED_CACHE_MAX_AGE``. Each is raised only after the extractor has
+# read the bytes as its format, so the result holds for every occurrence
+# of them, whatever its label. Fixed text: the exceptions' own messages
+# can quote the document.
+ENCRYPTED_PDF_ERROR = "encrypted PDF (open password required)"
+PDF_LIMIT_ERROR = "PDF structure exceeds pypdf limits"
+XLSX_EAGER_BUDGET_ERROR = "workbook exceeds the eager-part budget"
+PERMANENT_FAILURE_ERRORS = frozenset(
+    {ENCRYPTED_PDF_ERROR, PDF_LIMIT_ERROR, XLSX_EAGER_BUDGET_ERROR}
+)
 
 
 # Maps normalized MIME -> per-format extractor module name (under
@@ -577,6 +596,26 @@ def extract(
         # row that retries on every reappearance of the same payload.
         raise
     except Exception as exc:  # noqa: BLE001 — see comment below
+        permanent_error = _permanent_failure_error(module_name, exc)
+        if permanent_error is not None:
+            # The same bytes would fail the same way on every retry, so
+            # the result is ``unsupported``, served to later occurrences
+            # (#931). Stamped with the extractor so a version bump still
+            # refreshes it. It drops the attachment out of search, so it
+            # is a WARNING like a failure, rate limited; fixed text only.
+            warn_rate_limited(
+                log,
+                "extractor %s declined (dispatch_via=%s): %s; recorded unsupported, not retried",
+                module_name,
+                dispatch_via,
+                permanent_error,
+            )
+            return ExtractionResult(
+                status=STATUS_UNSUPPORTED,
+                extractor=_stamp_extractor(module_name, module_name),
+                text=None,
+                error=permanent_error,
+            )
         # Per-payload extractor errors (broken PDFs, malformed DOCX,
         # missing optional deps that slipped past _safe_import) become
         # ``failed`` rows so a single bad attachment cannot dead-letter
@@ -627,6 +666,28 @@ def extract(
         text=cleaned,
         error=None,
     )
+
+
+def _permanent_failure_error(module_name: str, exc: Exception) -> str | None:
+    """The fixed ``unsupported`` error for an exception from ``module_name``
+    that the same bytes always repeat, else ``None`` (#931). Matched by
+    exact class, never by message text: a subclass (pypdf's
+    ``WrongPasswordError``, raised only for a password we never supply)
+    or any other exception stays ``failed``. The extractor already ran,
+    so its module imports."""
+    if module_name == "pdf":
+        from pypdf.errors import FileNotDecryptedError, LimitReachedError
+
+        if type(exc) is FileNotDecryptedError:
+            return ENCRYPTED_PDF_ERROR
+        if type(exc) is LimitReachedError:
+            return PDF_LIMIT_ERROR
+    elif module_name == "xlsx":
+        from .xlsx import XlsxEagerPartBudgetError
+
+        if type(exc) is XlsxEagerPartBudgetError:
+            return XLSX_EAGER_BUDGET_ERROR
+    return None
 
 
 def resolved_extractor_module(content_type: str, filename: str) -> str | None:
