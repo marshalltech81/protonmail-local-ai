@@ -269,6 +269,24 @@ class TestLogToolCall:
         assert "Confidential-marker" not in text
         assert text.count("withheld=['fields']") == 2
 
+    def test_long_repeated_fields_list_is_withheld(self, caplog):
+        # Review round 1: a list of valid names longer than the row has
+        # fields (repeats add nothing) is withheld by name, so the line
+        # stays bounded.
+        import logging
+
+        logger = logging.getLogger("test-tool-log-fields-long")
+        with caplog.at_level(logging.INFO, logger="test-tool-log-fields-long"):
+            log_tool_call(logger, "query_messages", {"fields": ["subject"] * 10_000})
+            log_tool_call(
+                logger, "query_messages", {"fields": ["subject"] * 50 + ["Confidential-marker"]}
+            )
+        text = caplog.text
+        assert text.count("withheld=['fields']") == 2
+        assert "subject" not in text
+        assert "Confidential-marker" not in text
+        assert len(text) < 1000
+
     def test_fields_allowlist_is_every_query_messages_row_field(self):
         """The logging allowlist is the row model's own field names, so a
         new row field cannot be accepted by the tool but withheld here."""

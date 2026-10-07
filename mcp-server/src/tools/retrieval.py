@@ -960,6 +960,11 @@ def register_retrieval_tools(server, db):
         limit = clamp_int(limit, default=25, minimum=1, maximum=_MAX_QUERY_LIMIT)
         projection = None
         if fields is not None:
+            if len(fields) > len(QUERY_MESSAGE_FIELDS):
+                # Repeats add nothing: refuse the list before checking
+                # each name, with fixed text.
+                log.warning("query_messages rejected invalid fields")
+                raise ToolError(f"Error: fields lists at most {len(QUERY_MESSAGE_FIELDS)} names")
             unknown = [f for f in fields if f not in QUERY_MESSAGE_FIELDS]
             if unknown:
                 # The name goes back to the caller only; the log names

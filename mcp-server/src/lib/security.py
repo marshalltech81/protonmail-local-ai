@@ -113,7 +113,12 @@ def _is_iso_date(v: Any) -> bool:
 
 
 def _names_from(allowed: tuple[str, ...]) -> Callable[[Any], bool]:
-    return lambda v: isinstance(v, list) and all(isinstance(n, str) and n in allowed for n in v)
+    # At most one entry per allowed name, so a logged list is bounded.
+    return lambda v: (
+        isinstance(v, list)
+        and len(v) <= len(allowed)
+        and all(isinstance(n, str) and n in allowed for n in v)
+    )
 
 
 # The row fields ``query_messages`` can project onto with ``fields``

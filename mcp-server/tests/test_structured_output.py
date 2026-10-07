@@ -324,6 +324,21 @@ class TestQueryMessagesFields:
         plain = _call(server, "query_messages", sender="jane@example.com", limit=2)
         assert _call(server, "query_messages", **args, cursor=plain["next_cursor"]) == rest
 
+    def test_overlong_fields_list_is_rejected_with_fixed_text(self, messages_db, caplog):
+        # Review round 1: more names than a row has fields is rejected
+        # before any check per name; the log line stays bounded.
+        with caplog.at_level("DEBUG"):
+            result = _wire(_server(messages_db), "query_messages", {"fields": ["subject"] * 10_000})
+        assert result.is_error
+        text = result.content[0].text
+        assert "fields lists at most 22 names" in text
+        assert len(text) < 200
+        assert "'subject'" not in caplog.text
+        assert "query_messages rejected invalid fields" in caplog.text
+        # Up to one entry per field, repeats included, is accepted.
+        page = _call(_server(messages_db), "query_messages", fields=["subject"] * 22, limit=1)
+        assert set(page["messages"][0]) == {"claimant_id", "thread_id", "subject"}
+
     def test_unknown_field_is_rejected_by_name_and_not_logged(self, messages_db, caplog):
         marker = "privatemarkerf990"
         with caplog.at_level("DEBUG"):
