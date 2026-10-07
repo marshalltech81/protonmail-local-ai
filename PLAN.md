@@ -110,7 +110,11 @@ Follow-ups on corpus completeness and correctness:
   count split threads on the rebuilt index first), #756 (subject
   fallback chains recurring same-subject mail)
 - attachment coverage: #691 (optional decoders; fontTools waits on
-  py-pdf/pypdf#4156), #694, #695
+  py-pdf/pypdf#4156), #695, #923 (formats with no extractor), #946
+  (DOCX parse memory), #947 (PPTX charts, SmartArt and variants), #967
+  (python-docx loader cost); per-extractor extraction cache, schema v1
+  (#928, in progress); legacy `.ppt` through Apache POI (#957, in
+  progress)
 - bounded work: #781
 - index-side Unicode normalization left from #316: #782
 
@@ -143,8 +147,9 @@ groundedness 94 to 103, deterministic passes 92 to 96; the
 narrow-filter cases rise from 13 to 20 of 21 on correctness. In the
 decoy cases the answer now gives the in-scope value and names the
 decoy as context; the deterministic `must_not_include` check still
-fails them, since it sees only the value's presence (#894). Remaining:
-labels in `extract_from_emails` and the experimental tools (#895).
+fails them, since it sees only the value's presence (#894). The labels
+now also cover `extract_from_emails` and the experimental tools (#895;
+#915).
 
 ### Phase 1.5 — Minimal regression baseline
 
@@ -407,16 +412,16 @@ degraded-retrieval markers and rate-limited `/mcp` rejection logging
 #892), and mbsync sync-success and folder-name-safe repair logging
 (#879; #881), and rate-limited logging of attachment extraction outcomes, the OCR
 page cap and the parser's body and address caps (#871, #872; #884).
-Not yet covered: header truncation (#902), every extractor-internal
-truncation cap, audited as a class (#903), and the unlimited PDF
-OCR-fallback warning (#889).
-Open: embedder recovery and maintenance-loop recoveries (#873),
-queue heartbeat and per-pass maintenance summaries (#874), WAL and
-storage size (#875), a startup identity line with commit, boot ID,
-schema and a raw-value config hash (#887), a shared
-rate-limited logger (#889), the OCR cap on cache hits and multipage
-images (#891, #885), and a per-checkout uv cache for parallel runs
-(#896). Open decisions: log-only or exit when the Maildir watcher dies
+Done 2026-10-07: embedder retries and recoveries, the queue heartbeat,
+maintenance summaries and storage size (#873–#875; #904), the startup
+identity line (#887; #893), header truncation (#902; #913), every
+extractor truncation cap with a completeness test (#903; #917), the
+multipage TIFF OCR cap (#885; #916), one shared rate-limited logger per
+service (#889; #933), reconciler errors logged by type only (#934;
+#940) and a per-checkout uv cache (#896; #912). Open: the OCR cap on
+cache hits (#891), stale extractor-version counts in status (#979),
+Trivy scans of the built images (#977) and a merge gate on a Codex
+review of the head commit (#978). Open decisions: log-only or exit when the Maildir watcher dies
 (#870), telling a stall from a backlog in status (#876; parked trashed
 files currently show as "retrying"), and correlation IDs (#888).
 Every MCP tool declares safety annotations (#899; #900; Resolved
@@ -791,6 +796,33 @@ removed Bridge container are kept as history.
     auto-approves read-only tools can send excerpts to that provider
     without a prompt; the egress is disclosed at startup and by
     `make status`.
+
+32. **Attachment formats (2026-10-07, #694, #935, #936, #937, #957):**
+    `.pptx` through python-pptx and `.dotx` through python-docx's own
+    part registry, with pre-open package budgets. Legacy binary
+    formats: `.doc` through `catdoc`; `.xls` through xlrd in a child
+    process with its own memory and CPU limits, because python-calamine
+    allocates every sheet's full grid at open (1.6–2.7 GB from a 6.6 KB
+    file) and xlrd's shared-string loop is unbounded in-process; `.ppt`
+    through Apache POI on a trimmed Java runtime (#957, in progress),
+    because `catppt` reads no slide text from current PowerPoint decks
+    and office-oxide was judged too young for code beside the mail
+    database. Every external parser runs through one bounded runner
+    (temp file, no shell, timeout, output cap). Accepted risk: catdoc's
+    unfixed Debian CVEs; CI does not yet scan image packages (#977).
+33. **Per-extractor extraction cache (2026-10-07, #928):** the
+    attachment extraction cache is keyed by content hash and extractor
+    module, so one label's result is never served to an occurrence that
+    selects another extractor. It is the first change since the first
+    deployment that takes a `SCHEMA_VERSION` bump (to 1) and a numbered
+    migration (`0001`). Chosen over per-row special cases after #931's
+    review showed each workaround creating new cross-label cases. In
+    progress; #931 (permanent failures recorded `unsupported`, with the
+    pdf/xlsx version bump kept) is rebuilt on it.
+34. **Review and PR rules (2026-10-07, #944, #981):** every real gap in
+    a PR's "Not done" gets its own issue before the PR is called ready;
+    a gap in code, tests or docs that a PR adds counts as introduced by
+    it under the #751 exception.
 
 ## Notes for Agents
 
