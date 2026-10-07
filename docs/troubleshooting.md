@@ -1221,9 +1221,13 @@ only, never filenames or text (`make logs`):
     within the 10-megapixel page budget, so the PDF's OCR ran at the
     lower DPI the line names, which reads small print less reliably.
   - `xlsx_sheet_nodes`, `xlsx_row_nodes`, `xlsx_tag_bytes`: a
-    workbook's worksheet XML crossed a node budget (5,000,000 across the
-    workbook, 131,072 in one row) or a 1 MB start tag; the worksheet
-    is cut before that row and any later worksheet is read as empty.
+    worksheet's XML crossed a node budget (5,000,000 across the
+    workbook, 131,072 in one row) or a 1 MB start tag; that worksheet is
+    cut before the row that crossed it. Later worksheets are still read
+    within the budget left: after a row or tag cut that is the
+    workbook's remaining budget, and after a workbook-wide cut only what
+    was left before the cut row, so a later worksheet larger than that
+    is cut or read as empty as well.
   - `xlsx_expanded_cells`, `xlsx_text_chars`: the walk over a
     workbook's cells stopped at its cell budget (5,000,000, counting a
     row as 64 cells) or its 10,000,000-character text budget.
