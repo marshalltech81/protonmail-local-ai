@@ -1980,6 +1980,262 @@ def test_cached_no_extractor_row_for_a_dotx_is_re_extracted(tmp_path):
         assert persisted.text is not None and "SYNTHETIC_DOTX_FACT" in persisted.text
 
 
+def _encrypted_pdf_case(monkeypatch) -> tuple[bytes, str, str]:
+    from src.extractors import ENCRYPTED_PDF_ERROR
+
+    from tests.test_extractors import _encrypted_pdf
+
+    payload = _encrypted_pdf(
+        "SYNTHETIC_TEXT_MARKER with enough digital text to clear the floor",
+        user_password="SYNTHETIC_USER_PASSWORD",  # pragma: allowlist secret
+        algorithm="AES-256",
+    )
+    return payload, ENCRYPTED_PDF_ERROR, "pdf@5"
+
+
+def _pdf_limit_case(monkeypatch) -> tuple[bytes, str, str]:
+    from src.extractors import PDF_LIMIT_ERROR
+
+    from tests.test_extractors import _deep_page_tree_pdf
+
+    return _deep_page_tree_pdf("SYNTHETIC_TEXT_MARKER"), PDF_LIMIT_ERROR, "pdf@5"
+
+
+def _xlsx_budget_case(monkeypatch) -> tuple[bytes, str, str]:
+    """The #428 eager-budget fixture with its shared-string table over a
+    lowered per-part cap."""
+    from src.extractors import XLSX_EAGER_BUDGET_ERROR, xlsx
+
+    from tests.test_extractors import _eager_parts, _padded, _zip_parts
+
+    monkeypatch.setattr(xlsx, "_MAX_EAGER_PART_BYTES", 64 * 1024)
+    parts = _eager_parts()
+    strings = parts["xl/sharedStrings.xml"].replace(b"shared text", b"SYNTHETIC_TEXT_MARKER")
+    parts["xl/sharedStrings.xml"] = _padded(strings, 64 * 1024 + 1)
+    return _zip_parts(parts), XLSX_EAGER_BUDGET_ERROR, "xlsx@6"
+
+
+class TestPermanentFailureCacheRows:
+    """#931: an encrypted PDF, a PDF over a pypdf limit and a workbook over
+    the eager-part budget fail the same way in the same extractor, so they
+    are cached ``unsupported`` under that extractor's module (#928) and
+    served to every later occurrence that runs it, instead of a ``failed``
+    row the extractor re-runs every 7 days."""
+
+    _CASES = {
+        "encrypted-pdf": (_encrypted_pdf_case, "application/pdf", "locked.pdf", "pdf"),
+        "pdf-limit": (_pdf_limit_case, "application/pdf", "deep.pdf", "pdf"),
+        "xlsx-eager-budget": (
+            _xlsx_budget_case,
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "book.xlsx",
+            "xlsx",
+        ),
+    }
+
+    @staticmethod
+    def _commit(db: Database, plan: Any) -> None:
+        with db.transaction():
+            apply_attachment_writes(plan=plan, claimant_id="msg@x", thread_id="thread-x", db=db)
+
+    @pytest.mark.parametrize("case", sorted(_CASES))
+    def test_row_is_unsupported_and_served_to_its_modules_occurrences(
+        self, tmp_path, monkeypatch, caplog, case
+    ):
+        from src.extractors import pdf
+
+        caplog.set_level("DEBUG")
+        monkeypatch.setattr(pdf, "_extract_ocr", lambda *a, **kw: pytest.fail("OCR must not run"))
+        build, content_type, filename, module = self._CASES[case]
+        payload, error, extractor_name = build(monkeypatch)
+        calls = MagicMock(wraps=attachment_indexing.extract_attachment)
+        monkeypatch.setattr(attachment_indexing, "extract_attachment", calls)
+        db = _setup_db_for_attachment(tmp_path)
+
+        first = _attachment(
+            payload, filename=f"SYNTHETIC_FILENAME_MARKER_{filename}", content_type=content_type
+        )
+        plan = prepare_attachment_writes(db=db, **_kwargs(first))
+        assert (plan.status, plan.cached) == (STATUS_UNSUPPORTED, False)
+        self._commit(db, plan)
+        row = db.get_attachment_extraction(first.content_hash, module)
+        assert (row["extraction_status"], row["extractor"], row["extraction_error"]) == (
+            STATUS_UNSUPPORTED,
+            extractor_name,
+            error,
+        )
+
+        # Later occurrences that run the same extractor on the bytes.
+        extension = filename[filename.rindex(".") :]
+        for later_type, later_name in (
+            (content_type, filename),
+            ("application/octet-stream", f"other{extension}"),
+        ):
+            later = _attachment(payload, filename=later_name, content_type=later_type)
+            again = prepare_attachment_writes(db=db, **_kwargs(later))
+            assert (again.status, again.cached, again.chunks) == (STATUS_UNSUPPORTED, True, [])
+
+        assert calls.call_count == 1
+        for marker in (
+            "SYNTHETIC_TEXT_MARKER",
+            "SYNTHETIC_FILENAME_MARKER",
+            "SYNTHETIC_USER_PASSWORD",
+        ):
+            assert marker not in caplog.text
+
+    def test_alternating_labels_do_not_overwrite_the_permanent_row(self, tmp_path, monkeypatch):
+        """Review round 4, finding 1: the same bytes under a label that runs
+        another extractor (a ``.docx`` occurrence of a workbook over the
+        eager-part budget) write their own row, so a later ``.xlsx``
+        occurrence is still served the budget row, not a ``failed`` row it
+        would honour for 7 days and then re-scan."""
+        payload, error, extractor_name = _xlsx_budget_case(monkeypatch)
+        calls = MagicMock(wraps=attachment_indexing.extract_attachment)
+        monkeypatch.setattr(attachment_indexing, "extract_attachment", calls)
+        db = _setup_db_for_attachment(tmp_path)
+        xlsx_mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        docx_mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        as_xlsx = _attachment(payload, filename="book.xlsx", content_type=xlsx_mime)
+        as_docx = _attachment(payload, filename="book.docx", content_type=docx_mime)
+
+        self._commit(db, prepare_attachment_writes(db=db, **_kwargs(as_xlsx)))
+        docx_plan = prepare_attachment_writes(db=db, **_kwargs(as_docx))
+        assert docx_plan.cached is False
+        self._commit(db, docx_plan)
+        again = prepare_attachment_writes(db=db, **_kwargs(as_xlsx))
+
+        assert (again.status, again.cached) == (STATUS_UNSUPPORTED, True)
+        assert calls.call_count == 2
+        row = db.get_attachment_extraction(as_xlsx.content_hash, "xlsx")
+        assert (row["extraction_status"], row["extractor"], row["extraction_error"]) == (
+            STATUS_UNSUPPORTED,
+            extractor_name,
+            error,
+        )
+        docx_row = db.get_attachment_extraction(as_xlsx.content_hash, "docx")
+        assert docx_row is not None
+        assert docx_row["extraction_status"] != STATUS_UNSUPPORTED
+
+    def test_a_stale_row_is_refreshed_only_by_its_modules_occurrence(self, tmp_path, monkeypatch):
+        """Review round 4, finding 2: a stale ``xlsx@5`` row is refreshed by
+        an occurrence that runs XLSX; a ``.docx`` occurrence of the same
+        bytes runs DOCX into its own row and leaves the stale row alone."""
+        payload, error, extractor_name = _xlsx_budget_case(monkeypatch)
+        db = _setup_db_for_attachment(tmp_path)
+        xlsx_mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        docx_mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        as_xlsx = _attachment(payload, filename="book.xlsx", content_type=xlsx_mime)
+        as_docx = _attachment(payload, filename="book.docx", content_type=docx_mime)
+        db.store_attachment_extraction(
+            attachment_id=as_xlsx.content_hash,
+            extractor_module="xlsx",
+            extraction_status=STATUS_FAILED,
+            extractor="xlsx@5",
+            extracted_text=None,
+            extraction_error="XlsxEagerPartBudgetError",
+        )
+        calls = MagicMock(wraps=attachment_indexing.extract_attachment)
+        monkeypatch.setattr(attachment_indexing, "extract_attachment", calls)
+
+        self._commit(db, prepare_attachment_writes(db=db, **_kwargs(as_docx)))
+
+        assert calls.call_count == 1
+        assert [c.kwargs["filename"] for c in calls.call_args_list] == ["book.docx"]
+        stale = db.get_attachment_extraction(as_xlsx.content_hash, "xlsx")
+        assert (stale["extraction_status"], stale["extractor"]) == (STATUS_FAILED, "xlsx@5")
+
+        self._commit(db, prepare_attachment_writes(db=db, **_kwargs(as_xlsx)))
+
+        assert calls.call_count == 2
+        row = db.get_attachment_extraction(as_xlsx.content_hash, "xlsx")
+        assert (row["extraction_status"], row["extractor"], row["extraction_error"]) == (
+            STATUS_UNSUPPORTED,
+            extractor_name,
+            error,
+        )
+
+    @pytest.mark.parametrize(
+        ("case", "old_extractor", "old_error"),
+        [
+            ("encrypted-pdf", "pdf@4", "FileNotDecryptedError"),
+            ("pdf-limit", "pdf@4", "LimitReachedError"),
+            ("xlsx-eager-budget", "xlsx@5", "XlsxEagerPartBudgetError"),
+        ],
+    )
+    def test_stale_failed_row_is_refreshed_to_unsupported_once(
+        self, tmp_path, monkeypatch, case, old_extractor, old_error
+    ):
+        """A ``failed`` row the previous version wrote is stale after the
+        bump: refreshed once, through the real dispatcher, then served."""
+        build, content_type, filename, module = self._CASES[case]
+        payload, error, extractor_name = build(monkeypatch)
+        calls = MagicMock(wraps=attachment_indexing.extract_attachment)
+        monkeypatch.setattr(attachment_indexing, "extract_attachment", calls)
+        db = _setup_db_for_attachment(tmp_path)
+        attachment = _attachment(payload, filename=filename, content_type=content_type)
+        db.store_attachment_extraction(
+            attachment_id=attachment.content_hash,
+            extractor_module=module,
+            extraction_status=STATUS_FAILED,
+            extractor=old_extractor,
+            extracted_text=None,
+            extraction_error=old_error,
+        )
+
+        plan = prepare_attachment_writes(db=db, **_kwargs(attachment))
+        assert (plan.status, plan.cached) == (STATUS_UNSUPPORTED, False)
+        self._commit(db, plan)
+        row = db.get_attachment_extraction(attachment.content_hash, module)
+        assert (row["extraction_status"], row["extractor"], row["extraction_error"]) == (
+            STATUS_UNSUPPORTED,
+            extractor_name,
+            error,
+        )
+        again = prepare_attachment_writes(db=db, **_kwargs(attachment))
+        assert (again.status, again.cached) == (STATUS_UNSUPPORTED, True)
+        assert calls.call_count == 1
+
+    @pytest.mark.parametrize("case", sorted(_CASES))
+    def test_the_startup_sweep_does_not_requeue_a_held_row(self, monkeypatch, case):
+        """The row holds for good for its own module, so reprocessing an
+        occurrence that runs that module would only serve it again."""
+        from src.attachment_indexing import reprocess_reruns_extraction
+
+        build, content_type, filename, module = self._CASES[case]
+        _, error, _ = build(monkeypatch)
+        assert not reprocess_reruns_extraction(error, module, content_type, filename)
+
+    def test_a_later_extractor_version_still_refreshes_the_row(self, tmp_path, monkeypatch):
+        """The row carries the extractor stamp, so a version bump (for
+        example after raising the eager-part budget) re-runs it."""
+        from src import extractors
+
+        payload, error, extractor_name = _xlsx_budget_case(monkeypatch)
+        db = _setup_db_for_attachment(tmp_path)
+        attachment = _attachment(
+            payload,
+            filename="book.xlsx",
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        db.store_attachment_extraction(
+            attachment_id=attachment.content_hash,
+            extractor_module="xlsx",
+            extraction_status=STATUS_UNSUPPORTED,
+            extractor=extractor_name,
+            extracted_text=None,
+            extraction_error=error,
+        )
+        monkeypatch.setitem(
+            extractors.EXTRACTOR_VERSIONS, "xlsx", extractors.EXTRACTOR_VERSIONS["xlsx"] + 1
+        )
+        calls = MagicMock(wraps=attachment_indexing.extract_attachment)
+        monkeypatch.setattr(attachment_indexing, "extract_attachment", calls)
+
+        prepare_attachment_writes(db=db, **_kwargs(attachment))
+
+        assert calls.call_count == 1
+
+
 # ---------------------------------------------------------------------------
 # Per-module cache keying (#928)
 # ---------------------------------------------------------------------------

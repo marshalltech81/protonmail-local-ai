@@ -1335,7 +1335,9 @@ only, never filenames or text (`make logs`):
     as `ToolTimeoutError` or `ToolExitError` (see `docs/architecture.md`,
     "Extractor dispatch"). Binary files (PDF, ZIP, OLE2, PNG, JPEG,
     GIF) sent as text are recorded with "binary payload labelled as
-    text" (#932). `too_large` is over
+    text" (#932). It also counts PDFs that need an open password or
+    exceed pypdf's limits, and workbooks over the XLSX eager-part budget,
+    which fail the same way every time (#931). `too_large` is over
     `INDEXER_ATTACHMENT_MAX_BYTES`, and `ocr_disabled` is an image or
     scanned PDF skipped while `INDEXER_OCR_ENABLED=false` (re-extracted
     once OCR is turned on).
