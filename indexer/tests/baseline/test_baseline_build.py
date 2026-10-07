@@ -8,6 +8,7 @@ import json
 import logging
 import math
 import re
+import sys
 from pathlib import Path
 
 import pytest
@@ -15,7 +16,7 @@ from src.database import EMBEDDING_DIM, Database
 from src.extractors import EXTRACTOR_VERSIONS, _resolve_extractor
 
 from tests.baseline.build import build
-from tests.baseline.corpus import THREADS, thread_id, write_maildir
+from tests.baseline.corpus import THREADS, _docx, _xlsx, thread_id, write_maildir
 from tests.baseline.hash_embedder import HashEmbedder, embed_text
 
 _GOLDEN = Path(__file__).parents[3] / "mcp-server" / "tests" / "baseline" / "golden.json"
@@ -75,7 +76,9 @@ class TestBuild:
             db.close()
         # One thread per corpus entry means every reply found its root.
         assert threads == len(THREADS)
-        assert attachments == sum(len(m.attachments) for msgs in THREADS.values() for m in msgs)
+        # Plus one: t86's attached email carries its own attachment (#909).
+        listed = sum(len(m.attachments) for msgs in THREADS.values() for m in msgs)
+        assert attachments == listed + 1
 
         vectors = json.loads((out / "query_vectors.json").read_text(encoding="utf-8"))
         golden = json.loads(_GOLDEN.read_text(encoding="utf-8"))
@@ -139,6 +142,79 @@ class TestBuild:
         assert _resolve_extractor(ticket[2], ticket[1]) == ("pdf", "mime")
         assert ticket[4:] == ("success", f"pdf-digital@{EXTRACTOR_VERSIONS['pdf']}")
         assert len({pdf[3], pattern[3], ticket[3]}) == 3
+
+    def test_format_shapes_extract_as_documented(self, tmp_path, caplog):
+        """#909: t82's DOCX and t83's XLSX extract (the XLSX's second
+        sheet included), t84's JSON is ``unsupported``, t85's blank text
+        is ``empty``, t86's attached email is kept as an ``unsupported``
+        container whose own attachment is extracted, with no parser cap
+        firing, and t87's RFC 2231 filename is stored decoded."""
+        out = tmp_path / "out"
+        with caplog.at_level(logging.INFO, logger="indexer"):
+            build(out, _GOLDEN)
+
+        messages = [r.getMessage() for r in caplog.records]
+        assert not [m for m in messages if m.startswith("parser work caps")]
+        parser_caps = [
+            int(m.group(1))
+            for message in messages
+            if (m := re.search(r"^attachments n=\d+ .*\bparser_caps_messages=(\d+)\b", message))
+        ]
+        assert parser_caps and sum(parser_caps) == 0
+
+        db = Database(out / "mail.db")
+        try:
+            rows = db._conn.execute(
+                "SELECT a.thread_id, a.filename, a.content_type, e.extraction_status,"
+                " e.extractor, e.extracted_text"
+                " FROM attachments a JOIN attachment_extractions e USING (attachment_id)"
+                f" WHERE a.thread_id IN ({','.join('?' * 6)})"
+                " ORDER BY a.thread_id, a.filename",
+                tuple(thread_id(n) for n in range(82, 88)),
+            ).fetchall()
+        finally:
+            db.close()
+        shapes = [(tid.split(".")[0], *rest[:4]) for tid, *rest in rows]
+        docx = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        xlsx = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        assert shapes == [
+            ("t82", "rehearsal-notes.docx", docx, "success", f"docx@{EXTRACTOR_VERSIONS['docx']}"),
+            ("t83", "seed-swap.xlsx", xlsx, "success", f"xlsx@{EXTRACTOR_VERSIONS['xlsx']}"),
+            ("t84", "kite-roster.json", "application/json", "unsupported", None),
+            ("t85", "spring-rota.txt", "text/plain", "empty", f"text@{EXTRACTOR_VERSIONS['text']}"),
+            ("t86", "crossing.txt", "text/plain", "success", f"text@{EXTRACTOR_VERSIONS['text']}"),
+            ("t86", "ferry-crossing.eml", "message/rfc822", "unsupported", None),
+            (
+                "t87",
+                "fête-des-Mélèzes.txt",
+                "text/plain",
+                "success",
+                f"text@{EXTRACTOR_VERSIONS['text']}",
+            ),
+        ]
+        text = {row[1]: row[5] for row in rows}
+        assert "Ravensholm abbey" in text["rehearsal-notes.docx"]
+        assert (
+            "[Sheet: Pickup]\nCollect your sachets from the Quillon greenhouse"
+            in (text["seed-swap.xlsx"])
+        )
+        assert text["kite-roster.json"] is None and text["spring-rota.txt"] is None
+        assert "Corrigan" in text["crossing.txt"]
+        assert text["ferry-crossing.eml"] is None
+
+    def test_ooxml_attachments_are_platform_independent(self, monkeypatch):
+        """#909 review round 1: ``zipfile.ZipInfo`` records the creating
+        system from ``sys.platform`` (0 on Windows, 3 elsewhere), and the
+        claimant IDs and ``index_sha256`` hash the message bytes, so the
+        DOCX and XLSX threads must serialize identically on Windows."""
+
+        # The corpus builds its payloads at import, so build them anew.
+        def payloads() -> list[bytes]:
+            return [_docx(("Ravensholm abbey",)), _xlsx({"Pickup": (("Quillon",),)})]
+
+        here = payloads()
+        monkeypatch.setattr(sys, "platform", "win32")
+        assert payloads() == here
 
     def test_refuses_non_empty_output_dir(self, tmp_path):
         (tmp_path / "leftover").write_text("x")

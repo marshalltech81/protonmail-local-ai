@@ -1498,14 +1498,17 @@ Schema can say: `enum`, `format`, `pattern`, numeric or length limits,
 nested `properties` / `items`, `additionalProperties`, combinators and
 `$ref`. Fields the schema does not declare are kept.
 
-A thread whose answer was cut off at `INFERENCE_MAX_TOKENS`, or was not
+A thread whose answer was cut off (at `INFERENCE_MAX_TOKENS` or at the
+model's context window), or was not
 a JSON object, array of objects, or `null` / `[]`, or held a record that
 failed the schema check, is counted as failed, never as having no data.
 A failing record is dropped; the thread's other records are kept. An answer the provider stopped with a
 content filter or refusal is an error. When any
 thread fails, the records come back as the first content item and a
 second item says how many of the searched threads could not be
-extracted and why; if none were extracted the response says so rather
+extracted and why (a cut reply's count names the setting for its stop:
+`INFERENCE_MAX_TOKENS`, or `INFERENCE_CONTEXT_TOKENS` for the context
+window); if none were extracted the response says so rather
 than "No structured data … found", which is reserved for every thread
 answering `null` or `[]`.
 

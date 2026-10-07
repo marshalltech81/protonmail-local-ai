@@ -1010,7 +1010,7 @@ as message bodies. Two extra tables sit alongside `message_chunks`:
 | Table | Keyed by | Purpose |
 |---|---|---|
 | `attachments` | attachment_occurrence_id | Per-occurrence row capturing filename + MIME + size as it appeared on a specific email. The occurrence id includes the message, payload hash, filename, and attachment slot so duplicate same-payload files in one email are still represented. |
-| `attachment_extractions` | attachment_id (= sha256 of payload) | Per-content-hash cache of extracted text + status. The expensive work (Tesseract OCR, pypdf parse, DOCX walk) runs at most once per unique payload, including within one indexing batch, where results not yet committed are shared by content hash. Non-success rows are also honored: `empty` short-circuits unconditionally; `too_large` short-circuits while the payload still exceeds `INDEXER_ATTACHMENT_MAX_BYTES`, and is re-extracted once the operator raises the cap far enough for it to fit (#693); `unsupported` short-circuits while it also holds for the occurrence at hand (an "OCR disabled" row, for an occurrence that needs OCR — an image, or a PDF whose row the PDF extractor wrote because it found no digital text layer — until OCR is turned on; an "OLE2 compound file" row also for an occurrence that selects the DOCX, XLSX or PPTX extractor (#694, #936); any other until the occurrence's MIME type or filename selects an extractor, since the same bytes can arrive as `.bin` first and `.txt` later); `failed` short-circuits within a 7-day retry window so a chronic failure stops re-running on every reappearance, but a real fix landed via dependency upgrade can pick the payload up later. The `extractor` column carries a version (`docx@5`); a row written by an older version of a fixed extractor (`extractors.EXTRACTOR_VERSIONS`) is refreshed by re-running that extractor from whichever occurrence of the bytes arrives (whatever its own filename or MIME type), and the indexer re-queues every message carrying those bytes once at startup so their chunks are rebuilt, except dead-lettered messages, which keep their stale chunks until `make requeue-dead` rescues them. Rows from a newer version (after a rollback) are kept. A row is deleted with the last `attachments` row that references it (see *Cascade on message removal*). A stale row an OCR extractor wrote (`image-ocr`, `pdf-ocr`) is kept and served while `INDEXER_OCR_ENABLED=false`, since a refresh could only replace its text with "OCR disabled"; it is refreshed once OCR is on. Likewise, once OCR is on, the startup sweep re-queues each message whose occurrence of bytes cached "OCR disabled" would now be OCR'd; an occurrence that selects no extractor (`.bin`) is not re-queued, since its reprocess would serve the same row. The sweep also re-queues, whatever the OCR setting, each message whose occurrence of bytes cached as "no extractor" now selects one, as when a release starts routing an extension such as `.heic` (#691) or `.dotx` (#937). Likewise, after `INDEXER_ATTACHMENT_MAX_BYTES` is raised, it re-queues every message carrying bytes cached `too_large` whose size (`attachments.size_bytes`) now fits; the re-run rewrites the row, so each is re-queued once, and bytes still over the cap are never re-queued (#693). |
+| `attachment_extractions` | attachment_id (= sha256 of payload) | Per-content-hash cache of extracted text + status. The expensive work (Tesseract OCR, pypdf parse, DOCX walk) runs at most once per unique payload, including within one indexing batch, where results not yet committed are shared by content hash. Non-success rows are also honored: `empty` short-circuits unconditionally; `too_large` short-circuits while the payload still exceeds `INDEXER_ATTACHMENT_MAX_BYTES`, and is re-extracted once the operator raises the cap far enough for it to fit (#693); `unsupported` short-circuits while it also holds for the occurrence at hand (an "OCR disabled" row, for an occurrence that needs OCR — an image, or a PDF whose row the PDF extractor wrote because it found no digital text layer — until OCR is turned on; an "OLE2 compound file" row also for an occurrence that selects the DOCX, XLSX or PPTX extractor (#694, #936), and re-run for one labelled `.doc` / `.xls`, which selects a legacy extractor (#935); any other until the occurrence's MIME type or filename selects an extractor, since the same bytes can arrive as `.bin` first and `.txt` later); `failed` short-circuits within a 7-day retry window so a chronic failure stops re-running on every reappearance, but a real fix landed via dependency upgrade can pick the payload up later. The `extractor` column carries a version (`docx@5`); a row written by an older version of a fixed extractor (`extractors.EXTRACTOR_VERSIONS`) is refreshed by re-running that extractor from whichever occurrence of the bytes arrives (whatever its own filename or MIME type), and the indexer re-queues every message carrying those bytes once at startup so their chunks are rebuilt, except dead-lettered messages, which keep their stale chunks until `make requeue-dead` rescues them. Rows from a newer version (after a rollback) are kept. A row is deleted with the last `attachments` row that references it (see *Cascade on message removal*). A stale row an OCR extractor wrote (`image-ocr`, `pdf-ocr`) is kept and served while `INDEXER_OCR_ENABLED=false`, since a refresh could only replace its text with "OCR disabled"; it is refreshed once OCR is on. Likewise, once OCR is on, the startup sweep re-queues each message whose occurrence of bytes cached "OCR disabled" would now be OCR'd; an occurrence that selects no extractor (`.bin`) is not re-queued, since its reprocess would serve the same row. The sweep also re-queues, whatever the OCR setting, each message whose occurrence of bytes cached as "no extractor" now selects one, as when a release starts routing an extension such as `.heic` (#691) or `.dotx` (#937), and each message whose occurrence of bytes cached "OLE2 compound file" is labelled `.doc` / `.xls` (#935). Likewise, after `INDEXER_ATTACHMENT_MAX_BYTES` is raised, it re-queues every message carrying bytes cached `too_large` whose size (`attachments.size_bytes`) now fits; the re-run rewrites the row, so each is re-queued once, and bytes still over the cap are never re-queued (#693). |
 
 Per-occurrence chunks land in `message_chunks` with the
 `attachment_id` column populated and `kind` set to `attachment`. They embed exactly like body chunks
@@ -1036,21 +1036,62 @@ lazy-imported so a missing optional dependency (e.g. `python-docx`
 not in this image) downgrades to `unsupported` rather than crashing
 the indexer at startup.
 
-Legacy Office types: `application/msword` / `.doc` route to the DOCX
-extractor and `application/vnd.ms-excel` / `.xls` to the XLSX
-extractor, as a best effort for OOXML files mislabelled as a legacy
-type. A genuine legacy binary is an OLE2 compound file, which no OOXML
-extractor reads: when a payload bound for the DOCX, XLSX or PPTX
-extractor starts with the OLE2
-signature (`D0 CF 11 E0 A1 B1 1A E1`), the dispatcher records it
-`unsupported` ("OLE2 compound file") without running the extractor,
-so it is not retried every 7 days as a `failed` row would be (#694).
-The bytes alone decide, whatever the label, because the row is shared
-by content hash: an OLE2 file labelled `.docx` / `.xlsx` / `.pptx` (for
-example a password-protected OOXML package) is recorded the same way.
+Legacy Office types (#694, #935): `application/msword` / `.doc` and
+`application/vnd.ms-excel` / `.xls` select the `doc` and `xls`
+extractors. The container decides which one runs: a genuine legacy
+binary is an OLE2 compound file (it starts with `D0 CF 11 E0 A1 B1 1A
+E1`) and goes to the legacy extractor; any other payload goes to the
+DOCX or XLSX extractor, as a best effort for OOXML files mislabelled as
+a legacy type. An OLE2 payload whose label selects an OOXML extractor
+or none (for example a password-protected OOXML package, also OLE2,
+labelled `.docx` or `.pptx`) is recorded `unsupported` ("OLE2
+compound file") without running anything, since no OOXML parser (DOCX,
+XLSX, PPTX) can read it; a `failed` row would be retried every 7 days.
 That row is served for later occurrences that select the DOCX, XLSX or
-PPTX extractor or none. A ZIP payload, or anything else, still goes to the extractor.
-Neither `.doc` nor `.xls` text is extracted today.
+PPTX extractor or none, and
+re-run for one labelled `.doc` / `.xls`; the startup sweep re-queues
+the messages carrying such an occurrence once. A stale DOCX / XLSX
+row refreshed from a `.doc` / `.xls` occurrence runs the legacy
+extractor its label selects.
+
+- **`.doc`** text comes from `catdoc` (Debian's `catdoc` package in the
+  indexer image), run with `-d utf-8 -w` (UTF-8 output whatever the
+  locale, no line wrapping).
+- **`.xls`** is read by `xlrd` 2.0.2 in a child Python process
+  (`extractors/xls_child.py`, started as `python -I`). xlrd's work on
+  opening a workbook is not bounded by the payload size: its
+  shared-string loop trusts a declared count and a signed skip length
+  (6 KB of workbook can loop until memory runs out), and its OLE2
+  directory walk recurses with no cycle check (`RecursionError`). So
+  the child lowers its own address space (512 MiB) and CPU time (30 s)
+  before importing xlrd, and the parent kills it after 45 s. Inside
+  those limits it applies the XLSX extractor's budgets, counted while
+  reading: at most 1,024 sheets, loaded one at a time and unloaded after
+  each; 5,000,000 cells visited (padding included, plus 64 per row),
+  checked before the next sheet loads; 10,000,000 characters. A budget
+  that cut the text is logged through the extractor-cap WARNING
+  (`xls_sheets`, `xls_expanded_cells`, `xls_text_chars`). The child
+  costs a Python start-up and an xlrd import per workbook, about 0.1 s
+  in the image; a 20 MB workbook of 1,000,000 cells takes about 1.2 s
+  and 145 MB.
+
+Both run through one subprocess runner (`extractors/_runner.py`): the
+payload goes to a mode-600 file under `/tmp` (tmpfs), deleted after the
+run; the tool gets an argument list with no shell, no stdin and an
+environment of `LC_ALL=C.UTF-8` only; its stderr is discarded, since it
+can quote the document; and its stdout is read incrementally up to a
+byte cap (8 MiB for catdoc, whose text past the cap is not indexed and
+is reported as `doc_output_bytes`). A timeout (60 s for catdoc), a
+death by signal, a non-zero exit, or an xls child's malformed or
+oversized output records `failed` with a fixed error type
+(`ToolTimeoutError`, `ToolCrashError`, `ToolExitError`,
+`XlsOutputError`); nothing the tool printed reaches a log or
+`last_error`. catdoc has no Homebrew formula, so its tests skip on a
+Mac without it; CI installs it and fails if it is missing, and the
+image carries it.
+
+Legacy PowerPoint `.ppt` is not extracted yet (#957); `catppt` reads
+only placeholder text (#958).
 
 Word templates: the template MIME type
 (`application/vnd.openxmlformats-officedocument.wordprocessingml.template`)

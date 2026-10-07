@@ -560,6 +560,14 @@ Examples:
 - File P3 findings as issues rather than fixing them ahead of
   go-live or P1/P2 work. Exception (owner, 2026-10-02): a small P3
   with an agreed fix and no new mechanism may be fixed before go-live.
+- Every item in a PR's "Not done" section that is a real remaining gap
+  (a limitation, an unverified claim, a deferred finding, a skipped part
+  of the issue, a follow-up the code needs) gets its own GitHub issue
+  before the PR is reported ready, unless an open issue already tracks
+  it; write that issue's number next to the item (owner, 2026-10-07).
+  Items that only explain a choice (no docs changed because none apply,
+  a check not run because nothing it covers changed) need none. The
+  issue holds fixed text, options and links, never mailbox content.
 - Merge (squash) only on the owner's explicit go-ahead.
 
 ## Common Commands

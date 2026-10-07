@@ -517,8 +517,9 @@ can be revisited with an explicit owner decision.
   checked at startup (#650), so switching models or moving the embed
   endpoint needs a rebuild (#719); an embedder outage at startup stops
   the server (#661)
-- audio/video and calendar attachments are not extracted (#695);
-  PDF / DOCX / XLSX / PPTX / HTML / TXT / images are
+- audio/video and calendar attachments are not extracted (#695), nor
+  legacy PowerPoint `.ppt` (#957); PDF / DOCX / XLSX / PPTX / legacy DOC
+  and XLS (#935) / HTML / TXT / images are
 - pdf2image runs a second, untimed `pdfinfo` inside each render; the
   timed page count before it covers the realistic stall (#868)
 - `list_threads(filter_type=...)` rejects unsupported values cleanly;
