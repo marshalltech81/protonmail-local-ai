@@ -117,6 +117,9 @@ class InferenceCall:
     ms: float = 0.0
     outcome: str = "ok"  # "ok", "truncated" or "error"
     response: str | None = field(default=None, repr=False)
+    # The structured-output schema the tool passed, if any (#1095): the
+    # caller's schema shape, not mail content.
+    json_schema: dict | None = field(default=None, repr=False)
 
 
 @dataclass
@@ -143,15 +146,22 @@ class RecordingInference:
         self._inner = inner
         self.mode = inner.mode
         self.base_url = getattr(inner, "base_url", "")
+        # ``extract_from_emails`` reads this before sending a schema (#808).
+        self.structured_output = getattr(inner, "structured_output", False)
         self.calls: list[InferenceCall] = []
         self.billing_error = False
 
-    async def complete(self, system: str, user: str) -> str:
-        call = InferenceCall(system=system, user=user)
+    async def complete(self, system: str, user: str, json_schema: dict | None = None) -> str:
+        call = InferenceCall(system=system, user=user, json_schema=json_schema)
         self.calls.append(call)
         start = time.perf_counter()
         try:
-            call.response = await self._inner.complete(system, user)
+            # As ``intelligence.llm_complete`` does: the keyword is passed
+            # only when set, so a client taking ``(system, user)`` works.
+            if json_schema is None:
+                call.response = await self._inner.complete(system, user)
+            else:
+                call.response = await self._inner.complete(system, user, json_schema=json_schema)
             return call.response
         except InferenceTruncatedError as e:
             call.outcome, call.response = "truncated", e.partial

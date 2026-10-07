@@ -739,6 +739,44 @@ class TestRunner:
         assert asyncio.run(rec.complete("s", "u")) == "x"
         assert rec.calls[0].response == "x"
 
+    def test_recording_inference_plain_call_sends_no_schema_keyword(self):
+        """#1095: ``ScriptedClient.complete`` takes only ``(system, user)``,
+        so a plain call must not pass ``json_schema`` at all, and the
+        wrapper of a client without ``structured_output`` reports it off."""
+        inner = ScriptedClient("x")
+        rec = RecordingInference(inner)
+        assert rec.structured_output is False
+        assert asyncio.run(rec.complete("s", "u")) == "x"
+        assert inner.calls == [("s", "u")]
+        assert rec.calls[0].json_schema is None
+
+    def test_recording_inference_forwards_and_records_json_schema(self):
+        """#1095: a structured call reaches the inner client with the
+        schema as ``InferenceClient.complete`` takes it (keyword-only) and
+        the call records the schema, so an ``extract_from_emails``
+        adapter (#656) can take the structured path."""
+        schema = {"type": "object", "properties": {"n": {"type": "integer"}}}
+
+        class StructuredClient:
+            mode = "anthropic"
+            base_url = ""
+            structured_output = True
+
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, str, dict | None]] = []
+
+            async def complete(self, system: str, user: str, *, json_schema=None) -> str:
+                self.calls.append((system, user, json_schema))
+                return "{}"
+
+        inner = StructuredClient()
+        rec = RecordingInference(inner)
+        assert rec.structured_output is True
+        assert asyncio.run(rec.complete("s", "u", json_schema=schema)) == "{}"
+        assert inner.calls == [("s", "u", schema)]
+        assert rec.calls[0].json_schema == schema
+        assert rec.calls[0].response == "{}"
+
 
 # ---------------------------------------------- deterministic regressions
 
