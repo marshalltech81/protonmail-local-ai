@@ -1,4 +1,4 @@
-.PHONY: build build-nocache up down logs status requeue-dead clean sync sync-indexer sync-mcp test test-indexer test-mcp test-mbsync test-mbsync-tls test-mbsync-layout test-compose test-validate-env test-make-status test-image-pins test-trivy-flags trivy restart-indexer backup-index restore-index test-index-backup baseline eval-answers eval-answers-compare typecheck typecheck-indexer typecheck-mcp init-secrets validate-env help
+.PHONY: build build-nocache up down logs status requeue-dead clean sync sync-indexer sync-mcp test test-indexer test-mcp test-mbsync test-mbsync-tls test-mbsync-layout test-compose test-validate-env test-make-status test-image-pins test-trivy-flags trivy trivy-images restart-indexer backup-index restore-index test-index-backup baseline eval-answers eval-answers-compare typecheck typecheck-indexer typecheck-mcp init-secrets validate-env help
 
 # Per-checkout uv cache (#896): a cache shared between checkouts or
 # worktrees running make targets at the same time fails with missing-file
@@ -40,8 +40,9 @@ help:
 	@echo "  test-index-backup  Run backup-index and restore-index tests against a fake docker (no daemon)"
 	@echo "  test-make-status  Run make status tests against a fake docker (no daemon)"
 	@echo "  test-image-pins  Check tls_check.sh pins the python image the indexer and mcp-server Dockerfiles build from"
-	@echo "  test-trivy-flags  Check that make trivy and the Trivy jobs in .github/workflows/security.yml agree (no Trivy install)"
-	@echo "  trivy        Run the CI Trivy scans locally: dependency scans of indexer/ and mcp-server/, offline misconfig scan of the repository (needs trivy)"
+	@echo "  test-trivy-flags  Check that make trivy and the Trivy jobs in .github/workflows/security.yml and docker.yml agree (no Trivy install)"
+	@echo "  trivy        Run the CI Trivy scans locally: dependency scans of indexer/ and mcp-server/, offline misconfig scan of the repository, then the image gates (needs trivy and the built images)"
+	@echo "  trivy-images Run the CI Trivy image gates of .github/workflows/docker.yml on the built indexer, mcp-server and mbsync images (needs trivy, make build)"
 	@echo "  baseline     Run the retrieval regression baseline (UPDATE=1 rewrites the rank snapshot)"
 	@echo "  eval-answers Opt-in ask_mailbox answer-quality run on the synthetic corpus (calls INFERENCE_* and JUDGE_* providers)"
 	@echo "  eval-answers-compare  Compare two answer-evaluation reports (BASELINE=... CANDIDATE=...)"
@@ -259,23 +260,34 @@ test-image-pins:
 test-trivy-flags:
 	bash scripts/tests/trivy_flags_test.sh
 
-# The Trivy scans of .github/workflows/security.yml, locally (#1017):
-# the dependency (vuln) scans of indexer/ and mcp-server/ and the
-# offline misconfiguration scan of the repository (#1047), with the
-# workflow's severity, exit code and skip-dirs; test-trivy-flags fails
-# when the two drift. Every scan runs even when an earlier one fails,
-# as in CI. The dependency scans pass --offline-scan=false explicitly:
-# Trivy reads any option from a TRIVY_* variable, so an exported
-# TRIVY_OFFLINE_SCAN would otherwise make them skip the dependencies
-# not cached locally and still pass. TRIVY names the binary, and the
-# target warns when its version is not the one the workflow pins. The
-# image scans of docker.yml are not covered.
+# The Trivy scans of .github/workflows/security.yml and the image gates
+# of .github/workflows/docker.yml, locally (#1017, #1065): the
+# dependency (vuln) scans of indexer/ and mcp-server/ and the offline
+# misconfiguration scan of the repository (#1047), then the vuln scans
+# of the built indexer, mcp-server and mbsync images (#977), with the
+# workflows' severity, exit code, skip-dirs and ignore-unfixed;
+# test-trivy-flags fails when the Makefile and a workflow drift. Every
+# scan runs even when an earlier one fails, as in CI. The dependency
+# and image scans pass --offline-scan=false explicitly: Trivy reads any
+# option from a TRIVY_* variable, so an exported TRIVY_OFFLINE_SCAN
+# would otherwise make them skip the dependencies not cached locally
+# and still pass. TRIVY names the binary, and the targets warn when its
+# version is not the one the workflows pin. trivy-images runs the image
+# gates alone; they need the images `make build` produced, named
+# <project>-<service> as docker compose builds them (docker.yml fixes
+# the project name to protonmail-local-ai; locally it is the directory
+# name or COMPOSE_PROJECT_NAME), and fail, naming the image, when one
+# is not built. The gates scan whatever `make build` last produced,
+# not the checkout.
 TRIVY ?= trivy
 TRIVY_VERSION := v0.75.0
 TRIVY_SEVERITY := CRITICAL,HIGH
 TRIVY_MISCONFIG_SKIP_DIRS := .git,.ruff_cache,.pytest_cache,.venv,indexer/.venv,mcp-server/.venv,.uv-cache
+TRIVY_IMAGE_SERVICES := indexer mcp-server mbsync
 
-trivy:
+# The lines trivy and trivy-images start with: the binary is present,
+# and its version is the pinned one or a warning says so.
+define trivy-preflight
 	@command -v "$(TRIVY)" >/dev/null 2>&1 || { \
 		echo "trivy not found: install Trivy $(TRIVY_VERSION) (brew install trivy, or https://trivy.dev/docs/getting-started/installation/), or set TRIVY=<path>" >&2; \
 		exit 1; }
@@ -283,10 +295,40 @@ trivy:
 	if [ "v$$installed" != "$(TRIVY_VERSION)" ]; then \
 		echo "warning: trivy $$installed is installed but CI pins $(TRIVY_VERSION); findings may differ" >&2; \
 	fi
+endef
+
+# The image gates, as one shell fragment for a recipe that set
+# `status=0` before it and exits with `$$status` after it: resolve the
+# project name as docker compose does, refuse (status 1, no scan) when
+# an image is not built, else scan each image and keep going on a
+# finding.
+define trivy-image-scans
+	project=$$(docker compose config | sed -n 's/^name: //p'); \
+	if [ -z "$$project" ]; then echo "cannot read the Compose project name from docker compose config" >&2; exit 1; fi; \
+	built=1; \
+	for service in $(TRIVY_IMAGE_SERVICES); do \
+		docker image inspect "$$project-$$service" >/dev/null 2>&1 || { echo "image $$project-$$service is not built: run make build first" >&2; built=0; }; \
+	done; \
+	if [ "$$built" -eq 1 ]; then \
+		for service in $(TRIVY_IMAGE_SERVICES); do \
+			"$(TRIVY)" image --scanners vuln --severity $(TRIVY_SEVERITY) --exit-code 1 --ignore-unfixed --offline-scan=false "$$project-$$service" || status=1; \
+		done; \
+	else status=1; fi
+endef
+
+trivy:
+	$(trivy-preflight)
 	@status=0; \
 	"$(TRIVY)" fs --scanners vuln --severity $(TRIVY_SEVERITY) --exit-code 1 --offline-scan=false indexer || status=1; \
 	"$(TRIVY)" fs --scanners vuln --severity $(TRIVY_SEVERITY) --exit-code 1 --offline-scan=false mcp-server || status=1; \
 	"$(TRIVY)" fs --scanners misconfig --severity $(TRIVY_SEVERITY) --exit-code 1 --offline-scan --skip-dirs $(TRIVY_MISCONFIG_SKIP_DIRS) . || status=1; \
+	$(trivy-image-scans); \
+	exit $$status
+
+trivy-images:
+	$(trivy-preflight)
+	@status=0; \
+	$(trivy-image-scans); \
 	exit $$status
 
 # Retrieval regression baseline. Step 1 indexes the synthetic mailbox with
