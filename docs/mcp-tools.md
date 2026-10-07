@@ -1505,21 +1505,35 @@ inflated values fan out into that many model calls.
 The threads searched are the top `limit` hits for `query`, not every
 match, and nothing names the threads left out. For every occurrence
 (every invoice line for one material code from one vendor, say), the
-tool description points the calling model here:
+tool description gives the calling model a short form of this recipe,
+including the disclosure before reading; clients cannot read this
+file:
 
 1. Enumerate the attachments with `search_attachments`, a lexical
    match on the material code or its description, plus `from_addr`
    and `content_type` where they help. There is no pagination, so
    split the period into `date_from` / `date_to` windows narrow
    enough that each returns fewer than 50 results, the cap.
-2. Run `extract_from_emails` per window, with `participant` set to
+2. Before extracting, say how many threads will be read: each is one
+   model call, and its passages reach the inference provider.
+3. Run `extract_from_emails` per window, with `participant` set to
    the vendor's address (the tool has no `from_addr`) and a schema
    that declares its own `invoice_date` and `invoice_number`, or read
    each attachment's passages with `get_evidence(query,
-   thread_id=...)`.
-3. Reconcile: match the records' `citations` (`thread_id`,
-   `attachment_id`) and the `threads` searched against the
-   enumerated list, and report each attachment with no record.
+   thread_id=...)`. The windows do not select the same set:
+   `search_attachments` dates the message carrying the attachment,
+   while `extract_from_emails` takes any thread whose span overlaps the
+   window, so a January invoice in a thread with a June reply is listed
+   for January but can be extracted (and take one of the `limit`
+   slots) in June. Set `limit` to at least the window's thread count.
+4. Reconcile across all windows, not per window. A record links to
+   its source through its `_evidence` labels: look each label up by
+   `label` in that call's top-level `citations` list, whose entries
+   carry `thread_id`, `attachment_id`, `sent_at` and `occurred_at`.
+   Count a record once, against the enumerated attachment its
+   citations name; drop duplicates, set aside for review a record
+   that cites no enumerated attachment, and report each enumerated
+   attachment with no record.
 
 Limits the recipe does not remove:
 
@@ -1535,8 +1549,6 @@ Limits the recipe does not remove:
 - `_date` is the thread's last message date, not the invoice date.
 - Records are model output, checked by shape and citation labels
   only (below).
-- Each searched thread is one model call, and its passages reach the
-  inference provider: say how many threads a run will read first.
 
 **Schema forms and what is checked.** Each returned record is checked
 against the schema's declared fields and basic JSON types; this is a

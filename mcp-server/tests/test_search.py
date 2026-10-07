@@ -1484,7 +1484,12 @@ def test_evidence_descriptions_warn_passages_can_stop_before_a_resolution(tool, 
 
 def test_extract_description_points_to_the_population_recipe(empty_db):
     """#976 option 1: extraction covers the top ``limit`` threads only;
-    the description points to the search_attachments recipe."""
+    the description carries the search_attachments recipe itself.
+    Review round 1: a client cannot read docs/mcp-tools.md, so the
+    steps and the pre-read disclosure must be on the wire."""
     doc = _wire_descriptions(empty_db)["extract_from_emails"]
-    assert "search_attachments" in doc
-    assert "docs/mcp-tools.md" in doc
+    assert "Only the top ``limit`` threads are searched" in doc
+    assert "search_attachments in date windows under its 50 cap" in doc
+    assert "say how many threads will reach the model" in doc
+    assert "listed attachment with no record" in doc
+    assert "docs/mcp-tools.md" not in doc
