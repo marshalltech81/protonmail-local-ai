@@ -300,8 +300,13 @@ blocker must be named in `limitations`).
 A source counts as read only when a result returned its content, never
 because a listing (`query_messages`, `list_threads`, `find_contact`,
 `search_emails`) named it: its whole body through `get_message` paged
-from offset 0 to the end, or a `get_thread` row whose body came back
-uncut (`body_omitted_chars` 0; evidence past a cut needs `get_message`).
+from offset 0 to the end, each page returning body text (a message with
+no indexed body answers `body: null` and reads nothing), or a
+`get_thread` row whose body came back uncut (`body_omitted_chars` 0;
+evidence past a cut needs `get_message`). Reads are matched to
+citations by claimant ID (#217): when two files claim one Message-ID,
+reading one does not cover a citation of the other's claimant ID or
+passage, while a citation of the bare Message-ID names both.
 A source whose decisive text is in an attachment (an `attachment` item
 in the truth's `evidence`) is read only through a `get_evidence`
 passage with `source: attachment`: no tool returns a whole attachment

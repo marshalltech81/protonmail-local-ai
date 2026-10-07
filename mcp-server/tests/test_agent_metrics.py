@@ -96,14 +96,24 @@ def _passages(*message_ids: str) -> dict:
     }
 
 
-def _read(message_id: str, offset: int, next_offset: int | None) -> dict:
-    """A get_message call returning the body page of ``message_id`` at ``offset``."""
-    claimant = f"{message_id}#0000abcd"
+def _read(
+    message_id: str,
+    offset: int,
+    next_offset: int | None,
+    *,
+    body: str | None = "",
+    claimant: str | None = None,
+) -> dict:
+    """A get_message call returning the body page of ``message_id`` at
+    ``offset`` (``body`` trimmed to the empty string as the traces do;
+    ``None`` is a message with no indexed body)."""
+    claimant = claimant or f"{message_id}#0000abcd"
     return {
         "tool": "get_message",
         "arguments": {"message_id": claimant, "offset": offset},
         "result": {
             "message": {"message_id": message_id, "claimant_id": claimant, "thread_id": message_id},
+            "body": body,
             "body_offset": offset,
             "body_total_chars": 45_000,
             "next_offset": next_offset,
@@ -400,6 +410,32 @@ class TestMessageCitations:
         # No tool returns a whole attachment (#796), so its passage is the read.
         trace = _trace([_attachment_passage("a.2@x.example", source)], cited=["c-a.2@x.example"])
         assert score_trace(self._correction(), trace).message_citation_recall == recall
+
+    def test_a_read_with_no_indexed_body_does_not_credit_a_citation(self) -> None:
+        # get_message returns ``body: null`` (offset 0, no next page) for a
+        # message with no indexed body: nothing of its own came back.
+        calls = [
+            _passages("a.1@x.example", "a.2@x.example"),
+            _read("a.2@x.example", 0, None, body=None),
+        ]
+        score = score_trace(self._correction(), _trace(calls, cited=["c-a.2@x.example"]))
+        assert score.message_citation_recall == 0.0
+
+    @pytest.mark.parametrize(
+        ("cited", "recall"),
+        [("a.2@x.example#0000abcd", 0.0), ("a.2@x.example#0000ffff", 1.0), ("a.2@x.example", 1.0)],
+        ids=["listed-claimant", "read-claimant", "bare-message-id"],
+    )
+    def test_a_citation_is_credited_by_a_read_of_its_own_claimant(
+        self, cited: str, recall: float
+    ) -> None:
+        # Two files claim a.2 (#217): one is listed, the other read. Citing
+        # the listed file's claimant ID is not covered by the other's read;
+        # the bare Message-ID names both, so either read covers it.
+        listing = _page(["a.1@x.example", "a.2@x.example"], has_more=False)
+        read = _read("a.2@x.example", 0, None, claimant="a.2@x.example#0000ffff")
+        score = score_trace(self._correction(), _trace([listing, read], cited=[cited]))
+        assert score.message_citation_recall == recall
 
     def test_a_conflict_needs_both_sides_cited(self) -> None:
         scenario = _scenario(
@@ -764,6 +800,18 @@ class TestAnswerMessages:
         trace["calls"].append(_read("a.1@x.example", 20_000, None))
         assert score_trace(_counting(), trace).answer_messages_exact is True
 
+    def test_a_cited_claimant_needs_a_read_of_that_claimant(self) -> None:
+        # Two files claim a.1 (#217): the listed one is cited, another one
+        # read. Reads and citations are matched by claimant, not Message-ID.
+        trace = _counted([A1, B1], read=("b.1@x.example",))
+        trace["calls"].append(_read("a.1@x.example", 0, None, claimant="a.1@x.example#0000ffff"))
+        assert score_trace(_counting(), trace).answer_messages_exact is False
+
+    def test_a_read_with_no_indexed_body_does_not_count(self) -> None:
+        trace = _counted([A1, B1], read=("b.1@x.example",))
+        trace["calls"].append(_read("a.1@x.example", 0, None, body=None))
+        assert score_trace(_counting(), trace).answer_messages_exact is False
+
     def test_a_bare_thread_hit_is_not_a_message_citation(self) -> None:
         # A root's Message-ID is also its thread ID, so a search returning
         # only the threads must not let their IDs pass as cited messages.
@@ -850,6 +898,12 @@ class TestFullReads:
         last = _read("a.1@x.example", 20_000, None)
         last["result"] = {}
         trace = self._with_reads(_read("a.1@x.example", 0, 20_000), last)
+        assert score_trace(self._scenario(), trace).full_read_recall == 0.0
+
+    def test_a_message_with_no_indexed_body_is_not_read(self) -> None:
+        # The real tool answers ``body: null`` at offset 0 with no next page;
+        # a page counts only when it returned body text.
+        trace = self._with_reads(_read("a.1@x.example", 0, None, body=None))
         assert score_trace(self._scenario(), trace).full_read_recall == 0.0
 
     def test_none_without_full_read_messages(self) -> None:

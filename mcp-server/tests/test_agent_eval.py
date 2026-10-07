@@ -243,6 +243,20 @@ def _cite(trace: dict, *threads: int, count: int) -> None:
     trace["answer"]["count"] = count
 
 
+def _drop_reads_except(trace: dict, ref: str) -> None:
+    trace["calls"] = [
+        c
+        for c in trace["calls"]
+        if c["tool"] != "get_message" or c["arguments"]["message_id"].startswith(f"{ref}{_D}")
+    ]
+
+
+def _null_bodies(trace: dict) -> None:
+    for call in trace["calls"]:
+        if call["tool"] == "get_message":
+            call["result"]["body"] = None
+
+
 # The mistakes the counting scenario regresses against (#283), each made
 # on the reference trace: counting keyword matches, a message counted
 # twice, a long body read only to its first page, a wrong or missing
@@ -274,15 +288,10 @@ _COUNTING_FAILURES: list[tuple[str, Callable[[dict], None], str]] = [
     # The three short genuine messages counted from the "PIN" listing
     # alone, their bodies never read; only the long notice is paged (#804).
     ("cites-after-listing-only", lambda t: _drop_reads_except(t, "t41.1"), "answer_messages_exact"),
+    # Every get_message result answers ``body: null`` (no indexed body):
+    # the pages came back empty, so nothing was read (#804, review round 1).
+    ("reads-return-no-body", _null_bodies, "answer_messages_exact"),
 ]
-
-
-def _drop_reads_except(trace: dict, ref: str) -> None:
-    trace["calls"] = [
-        c
-        for c in trace["calls"]
-        if c["tool"] != "get_message" or c["arguments"]["message_id"].startswith(f"{ref}{_D}")
-    ]
 
 
 @pytest.mark.parametrize(
