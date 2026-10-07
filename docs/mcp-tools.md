@@ -406,7 +406,7 @@ or date_basis"), never read against them.
 | `sent_to` | UTC instant | `query_messages` `date_to` with `date_basis=sent` | its send date is at or before the instant |
 | `occurred_from` | UTC instant | `query_messages` `date_from` with `date_basis=occurred` | its delivery date (`occurred_at`) is at or after the instant; unknown without one |
 | `occurred_to` | UTC instant | `query_messages` `date_to` with `date_basis=occurred` | its delivery date is at or before the instant; unknown without one |
-| `dated` | clock name | `query_messages` `date_basis=occurred` | it has that clock (a delivery date), so it has a place in a page ordered by it |
+| `dated` | clock name | `query_messages` `date_basis=occurred` | it has that clock (a delivery date), so it has a place in a page ordered by it; unknown without one |
 | `has_attachments` | bool | `has_attachments` | its own attachment flag equals the value |
 | `seen` | bool | `query_messages` `seen` | its read flag equals the value |
 | `flagged` | bool | `query_messages` `flagged` | its flagged flag equals the value |
@@ -415,17 +415,25 @@ or date_basis"), never read against them.
 | `size_max` | bytes | `query_messages` `size_max` | its local file size is at most the value; unknown without a stored size |
 | `authority_class` | class name | `authority_class` | its From sender carries the class, outside Spam |
 
-**Unknown values
+**Unknown values and the `indeterminate` count
 ([#1085](https://github.com/marshalltech81/protonmail-local-ai/issues/1085)).**
 A leaf over a field the index can hold as NULL (`occurred_at` for a
 message without a parseable delivery date, `size_bytes` for one whose
 file size was not recorded) is neither true nor false of such a
-message: the message is left out of the matches and of
-`total_matches`, and under `date_basis=occurred` the `dated` leaf
-leaves it out of the page even without a date bound. The
-`indeterminate` count that reports how many messages were left out
-this way arrives with
-[#1086](https://github.com/marshalltech81/protonmail-local-ai/issues/1086).
+message. The leaves conjoin with SQL's three-valued AND: a message is
+a match when every leaf is true, rejected when any leaf is false, and
+otherwise *indeterminate*: left out of the matches and of
+`total_matches`, and counted in the response's `indeterminate` field,
+which the prose states whenever it is not 0. Under
+`date_basis=occurred` the `dated` leaf makes a message without a
+delivery date indeterminate even without a date bound, since it has no
+place in that ordering. The count is one extra `COUNT(*)` over the
+same predicate, read in the same snapshot, and runs only when a leaf
+that can be unknown is present; a query of decided leaves only (the
+default) costs nothing more and reports 0.
+[#1086](https://github.com/marshalltech81/protonmail-local-ai/issues/1086)
+extends the rule to content evaluability (capped bodies, failed
+extractions).
 
 **Thread-level evaluation (`search_emails`).** The thread filters are
 decided per leaf, each on its own: one message can satisfy the sender
@@ -1084,7 +1092,11 @@ identity remains ambiguous rather than combining unrelated namesakes.
 
 **Response contract.** The response states the filter interpretation,
 `total_matches` (over the whole set), `returned` with the match range,
-and `has_more`; when more remain it includes `next_cursor`. Under a
+and `has_more`; when more remain it includes `next_cursor`. The
+structured output always carries `indeterminate`, the number of
+messages the filters could neither accept nor reject ([unknown
+values](#filter-predicates)); the prose states it whenever it is not
+0, so a count is complete only when it is. Under a
 non-default `date_basis` the prose adds a `date_basis:` line naming
 the clock in use, and `date_bounds` is returned (with `basis`) even
 without a date bound, since the basis orders the page. Each

@@ -633,6 +633,12 @@ class QueryMessagesOutput(_Output):
     )
     date_bounds: DateBounds | None = Field(description=_DATE_BOUNDS_DESCRIPTION)
     total_matches: int = Field(description="Every matching message, not just this page.")
+    indeterminate: int = Field(
+        description="Messages the filters could neither accept nor reject, in neither "
+        "total_matches nor the pages: a size bound on a message without a stored size, or "
+        "date_basis=occurred on one without a delivery time. 0 when every filter could be "
+        "decided for every message."
+    )
     returned: int
     offset: int = Field(description="Matches returned by earlier pages.")
     has_more: bool

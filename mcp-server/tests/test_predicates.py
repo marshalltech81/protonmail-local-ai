@@ -459,7 +459,7 @@ class TestLeafRegistry:
         assert kind.param in _SAMPLES, f"{name}: no sample for parameter shape {kind.param!r}"
         params: list = []
         sql = kind.compile(_SAMPLES[kind.param], params)
-        assert sql.startswith("m.") or sql.startswith("instr(mcp_casefold(m.")
+        assert sql.startswith(("m.", "instr(mcp_casefold(m.", "NULLIF(m."))
         assert sql.count("?") == len(params)
         # The fragment runs as written against the schema.
         with closing(mixed_db._connect()) as conn:
@@ -801,6 +801,62 @@ class TestClockSizeAndRepliedLeaves:
         assert page.total_matches == len(expected)
 
     @pytest.mark.parametrize(
+        ("filters", "matches", "indeterminate"),
+        [
+            # Every leaf decided for every row: nothing is indeterminate
+            # (and no extra count query runs; see the spy test below).
+            ({}, 4, 0),
+            ({"replied": True}, 1, 0),
+            ({"date_basis": "sent", "date_from": "2024-02-15"}, 2, 0),
+            # c3 has no stored size: unknown under a size bound.
+            ({"size_min": 100}, 3, 1),
+            ({"size_max": 99}, 0, 1),
+            # Kleene AND: a false leaf decides the row even when another
+            # is unknown (c3 is not replied, so it is false, not unknown).
+            ({"size_min": 100, "replied": True}, 1, 0),
+            ({"size_min": 100, "replied": False}, 2, 1),
+            # c4 has no delivery time: unknown under the occurred basis,
+            # with or without a bound.
+            ({"date_basis": "occurred"}, 3, 1),
+            ({"date_basis": "occurred", "date_from": "2024-02-15"}, 2, 1),
+            ({"date_basis": "occurred", "date_to": "2024-01-01"}, 0, 1),
+            ({"date_basis": "occurred", "replied": True}, 1, 0),
+            # Two unknowns on two rows (c3's size, c4's clock) count once each.
+            ({"date_basis": "occurred", "size_min": 100}, 2, 2),
+            ({"date_basis": "occurred", "size_min": 100, "replied": False}, 1, 2),
+        ],
+    )
+    def test_indeterminate_counts_rows_neither_accepted_nor_rejected(
+        self, clocks_db, filters, matches, indeterminate
+    ):
+        page = clocks_db.query_messages(**filters)
+        assert (page.total_matches, page.indeterminate) == (matches, indeterminate)
+        # The count is read on the same snapshot and is independent of paging.
+        first = clocks_db.query_messages(**filters, limit=1)
+        assert first.indeterminate == indeterminate
+        if first.has_more:
+            rest = clocks_db.query_messages(**filters, limit=1, cursor=first.next_cursor)
+            assert rest.indeterminate == indeterminate
+
+    def test_indeterminate_count_runs_only_for_a_leaf_that_can_be_unknown(
+        self, clocks_db, monkeypatch
+    ):
+        statements: list[str] = []
+        real_connect = clocks_db._connect
+
+        def spying_connect():
+            conn = real_connect()
+            conn.set_trace_callback(statements.append)
+            return conn
+
+        monkeypatch.setattr(clocks_db, "_connect", spying_connect)
+        clocks_db.query_messages(replied=True)
+        assert not [s for s in statements if "IS NULL" in s]
+        statements.clear()
+        clocks_db.query_messages(size_min=100)
+        assert len([s for s in statements if ") IS NULL" in s]) == 1
+
+    @pytest.mark.parametrize(
         ("filters", "field"),
         [
             ({"date_basis": "internal"}, "date_basis"),
@@ -880,11 +936,11 @@ class TestClockSizeAndRepliedLeaves:
             ]
         )
         assert sql == (
-            "m.occurred_at IS NOT NULL AND m.sent_at >= ? AND m.occurred_at <= ? "
+            "NULLIF(m.occurred_at IS NOT NULL, 0) AND m.sent_at >= ? AND m.occurred_at <= ? "
             "AND m.replied = ? AND m.size_bytes >= ? AND m.size_bytes <= ?"
         )
         assert params == ["2024-01-01T00:00:00+00:00", "2024-12-31T23:59:59.999999+00:00", 1, 1, 2]
-        unknown_when_null = {"size_min", "size_max", "occurred_from", "occurred_to"}
+        unknown_when_null = {"size_min", "size_max", "occurred_from", "occurred_to", "dated"}
         for name, kind in LEAVES.items():
             expected = (
                 Evaluability.UNKNOWN_WHEN_NULL

@@ -997,7 +997,12 @@ def register_retrieval_tools(server, db):
             The filter interpretation, total_matches, the page's
             messages newest first by that time (send and delivery
             date, folder, subject, From / To / Cc, Message-ID, Thread
-            ID), and paging state.
+            ID), and paging state. ``indeterminate``, stated whenever
+            non-zero, counts messages the filters could neither accept
+            nor reject (no stored size under a size bound, no delivery
+            time under date_basis=occurred); they are in neither
+            total_matches nor the pages, so a count is complete only
+            when it is 0.
         """
         args = {
             "sender": sender,
@@ -1085,6 +1090,7 @@ def register_retrieval_tools(server, db):
             ],
             date_bounds=bounds,
             total_matches=page.total_matches,
+            indeterminate=page.indeterminate,
             returned=len(page.messages),
             offset=page.offset,
             has_more=page.has_more,
@@ -1097,6 +1103,14 @@ def register_retrieval_tools(server, db):
         if basis_line := _describe_date_basis(basis):
             lines.append(basis_line)
         lines.append(f"total_matches: {page.total_matches}")
+        if page.indeterminate:
+            # Stated whenever non-zero, so a count is never read as
+            # complete when some messages could not be decided.
+            lines.append(
+                f"indeterminate: {page.indeterminate} (messages the filters could neither "
+                "accept nor reject: no stored size, or no delivery time under "
+                "date_basis=occurred; in neither total_matches nor the pages)"
+            )
         # Counts only: the addresses themselves are in the structured
         # output (#801).
         for name, match in page.address_matches.items():

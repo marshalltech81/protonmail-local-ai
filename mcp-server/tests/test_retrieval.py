@@ -1553,6 +1553,60 @@ class TestQueryMessages:
             handler(size_min=2, size_max=1)
         )
 
+    def test_indeterminate_is_stated_whenever_non_zero(self, fake_server, tmp_path):
+        import sqlite3
+
+        import sqlite_vec
+        from src.lib.sqlite import Database
+
+        from tests.conftest import _build_schema, _insert_message
+
+        path = tmp_path / "unknown.db"
+        conn = sqlite3.connect(str(path))
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        _build_schema(conn)
+        # u1 has a size and a delivery time; u2 has neither.
+        _insert_message(
+            conn,
+            message_id="u1",
+            thread_id="t-u",
+            sent_at="2024-01-01T00:00:00+00:00",
+            occurred_at="2024-01-01T01:00:00+00:00",
+            from_=["a@example.com"],
+            size_bytes=200,
+        )
+        _insert_message(
+            conn,
+            message_id="u2",
+            thread_id="t-u",
+            sent_at="2024-01-02T00:00:00+00:00",
+            from_=["a@example.com"],
+            size_bytes=None,
+        )
+        conn.close()
+        handler = _handlers(fake_server, Database(str(path)))["query_messages"]
+        out = asyncio.run(handler(size_min=100))
+        assert out.structured_content["total_matches"] == 1
+        assert out.structured_content["indeterminate"] == 1
+        text = _text(out)
+        assert "total_matches: 1\nindeterminate: 1 (messages the filters could neither" in text
+        assert "in neither total_matches nor the pages)" in text
+        # Zero is in the structured output but not stated in the prose.
+        out = asyncio.run(handler(replied=False))
+        assert out.structured_content["indeterminate"] == 0
+        assert "indeterminate" not in _text(out)
+        # Under the occurred basis, u2's missing delivery time is unknown too.
+        out = asyncio.run(handler(date_basis="occurred"))
+        assert (
+            out.structured_content["total_matches"],
+            out.structured_content["indeterminate"],
+        ) == (
+            1,
+            1,
+        )
+
 
 _ERROR_MARKER = "privatemarkerq7z"
 

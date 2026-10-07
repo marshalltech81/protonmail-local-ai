@@ -30,6 +30,7 @@ from .predicates import (
     DEFAULT_EXCLUDED_FOLDERS,
     LEAVES,
     DateBasis,
+    Evaluability,
     InvalidFilterError,
     Leaf,
     _addr_matches,
@@ -883,6 +884,12 @@ class MessagePage:
     ``address_matches`` maps each given address filter (``sender``,
     ``recipient``, ``participant``) to the addresses it matched over the
     whole set, read in the same snapshot as ``total_matches``.
+    ``indeterminate`` counts the messages the predicates could neither
+    accept nor reject (#1085): no leaf false, some leaf unknown because
+    its field is NULL (``Evaluability.UNKNOWN_WHEN_NULL``: a size bound
+    on a message without a stored size, a bound or the ordering under
+    ``date_basis=occurred`` on one without a delivery time). They are in
+    neither ``total_matches`` nor the pages.
     """
 
     total_matches: int
@@ -891,6 +898,7 @@ class MessagePage:
     has_more: bool
     next_cursor: str | None
     address_matches: dict[str, AddressMatches] = field(default_factory=dict)
+    indeterminate: int = 0
 
 
 _INVALID_CURSOR = "invalid cursor; restart the query without a cursor"
@@ -3529,7 +3537,8 @@ class Database:
           else ``sent_at``), ``sent`` (``sent_at``) or ``occurred``
           (``occurred_at``) for the bounds, the order and the cursor. A
           message without the clock (no delivery time under
-          ``occurred``) is neither a match nor a miss and is left out.
+          ``occurred``) is neither a match nor a miss: left out and
+          counted in ``MessagePage.indeterminate``.
           ``internal`` is a legal value that is unavailable until #1092.
         - ``has_attachments``: the message's own attachment flag.
         - ``seen`` / ``flagged`` / ``replied``: the message's read,
@@ -3537,7 +3546,7 @@ class Database:
           flags).
         - ``size_min`` / ``size_max``: inclusive bounds in bytes on the
           local Maildir file's size; a message whose size is not stored
-          is left out, as above.
+          is left out and counted as indeterminate, as above.
         - ``authority_class``: the class the indexer gave the message's
           From sender (``AUTHORITY_CLASSES``); a message in
           ``AUTHORITY_EXCLUDED_FOLDERS`` never matches.
@@ -3601,6 +3610,18 @@ class Database:
                 name: _address_matches(conn, value, roles, where_sql, params, total)
                 for name, value, roles in address_filters
             }
+            # Rows the predicate could neither accept nor reject: the
+            # conjunction is NULL when no leaf is false and some leaf is
+            # unknown (its field NULL). Only a leaf that can be unknown
+            # makes the extra count worth a query.
+            indeterminate = 0
+            if any(
+                LEAVES[leaf.name].evaluability is Evaluability.UNKNOWN_WHEN_NULL for leaf in leaves
+            ):
+                indeterminate = conn.execute(
+                    f"SELECT COUNT(*) FROM messages m WHERE ({where_sql}) IS NULL",  # nosec B608
+                    params,
+                ).fetchone()[0]
             rows = conn.execute(
                 f"SELECT {_MESSAGE_COLUMNS} FROM messages m WHERE "  # nosec B608
                 + page_where_sql
@@ -3622,6 +3643,7 @@ class Database:
                 _encode_cursor(digest, records[-1], next_offset, basis) if has_more else None
             ),
             address_matches=address_matches,
+            indeterminate=indeterminate,
         )
 
     # -------------------------------------------------------------------------

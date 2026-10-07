@@ -365,10 +365,13 @@ class Evaluability(Enum):
     ``UNKNOWN_WHEN_NULL``: the field can be NULL (``size_bytes`` for a
     message whose file size was not recorded, ``occurred_at`` for one
     without a parseable topmost ``Received:`` header). Such a message is
-    neither matched nor missed: the comparison yields NULL, so it is
-    left out of the matches and of ``total_matches``; #1086 reports it
-    in the ``indeterminate`` count. Declared per leaf so the registry
-    test requires it; three-valued evaluation itself lands with #1086.
+    neither matched nor missed: the leaf's SQL yields NULL, so the
+    conjunction is unknown (SQL's three-valued AND: false if any leaf is
+    false, else unknown), the row is left out of the matches and of
+    ``total_matches``, and ``Database.query_messages`` counts it as
+    ``indeterminate`` (#1085). Every such leaf's SQL must be NULL exactly
+    when its field is, and every ``DECIDED`` leaf's 0 or 1, for that
+    count to hold. #1086 extends the rule to content evaluability.
     """
 
     DECIDED = "decided"
@@ -540,7 +543,10 @@ def _compile_bound(column: str, op: str) -> Callable[[Any, list], str]:
 
 
 def _compile_dated(basis: str, params: list) -> str:
-    return f"m.{DATE_BASES[basis].column} IS NOT NULL"
+    # 1 when the clock is stored, NULL (unknown) when it is not, so the
+    # conjunction is unknown, not false, for a row the basis cannot place
+    # and ``indeterminate`` counts it (``Database.query_messages``).
+    return f"NULLIF(m.{DATE_BASES[basis].column} IS NOT NULL, 0)"
 
 
 def _compile_flag(column: str) -> Callable[[bool, list], str]:
@@ -633,7 +639,7 @@ LEAVES: dict[str, LeafKind] = {
             _compile_bound("occurred_at", "<="),
             Evaluability.UNKNOWN_WHEN_NULL,
         ),
-        LeafKind("dated", "basis", _compile_dated, Evaluability.DECIDED),
+        LeafKind("dated", "basis", _compile_dated, Evaluability.UNKNOWN_WHEN_NULL),
         LeafKind(
             "has_attachments",
             "bool",
