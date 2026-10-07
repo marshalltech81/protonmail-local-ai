@@ -9,12 +9,14 @@ has a query vector. Two layers:
    thread, and every unanswerable case's golden question exists. A case
    cannot rest on a fact the corpus does not hold, and the references
    are checked against the corpus, not against what retrieval returns.
-2. The harness end to end. Every case runs through the real
-   ``ask_mailbox`` handler with a scripted answerer (no network) that
-   writes the case's expected values citing the supplied passages, and a
+2. The harness end to end. Every case runs through the real handler
+   of its tool (``ask_mailbox``, ``summarize_thread`` or
+   ``extract_from_emails``, #656) with a scripted answerer (no network)
+   that writes the case's expected values citing the supplied passages
+   (as a prose answer, or as one extracted record per thread), and a
    scripted judge. Each run must complete, its captured evidence must
    match the prompt the model received, a case whose evidence was all
-   supplied must pass every deterministic check, and the prompt-budget
+   supplied must pass every deterministic check, and each prompt-budget
    case must show its evidence omitted by prompt assembly and disclosed
    by the server's coverage note.
 """
@@ -32,6 +34,7 @@ import pytest
 import sqlite_vec
 from src.lib.inference import PromptBudget
 from src.lib.sqlite import Database
+from src.tools.intelligence import _declared_fields
 
 from tests.answer_eval import __main__ as cli
 from tests.answer_eval.cases import DIMENSIONS, Case, load_cases, message_id_of, thread_id_of
@@ -170,6 +173,11 @@ class _OracleAnswerer:
 
     It reads the labelled headers of the prompt it receives, as a model
     would, so it can only cite what prompt assembly actually supplied.
+    For a prose tool it answers in sentences; for ``extract_from_emails``
+    (one prompt per searched thread) it returns one record whose fields,
+    in the schema's order, take the case's ``must_include`` groups in
+    order, each citing the passage it was found in, or ``null`` when the
+    thread's passages hold none of them.
     """
 
     mode = "anthropic"
@@ -177,18 +185,62 @@ class _OracleAnswerer:
 
     def __init__(self, case: Case) -> None:
         self.case = case
+        # Prose: the value groups found in no passage of the prompt.
         self.unsupported: list[list[str]] = []
+        # Extraction: the value groups found in some thread's passages.
+        self.found: set[int] = set()
+
+    def misses(self) -> list[list[str]]:
+        """Value groups the answerer found in no passage it received."""
+        if self.case.tool == "extract_from_emails":
+            return [g for i, g in enumerate(self.case.must_include) if i not in self.found]
+        return self.unsupported
+
+    @staticmethod
+    def _passages(user: str, fold: bool = True) -> dict[str, str]:
+        """Each passage's text by label (case-folded and whitespace-collapsed
+        unless ``fold`` is off), without its header, whose message ID and
+        date would otherwise match short values such as "4"."""
+        blocks = re.split(r"(?=\[E\d+ \|)", user)
+        texts = {b.split(" |", 1)[0][1:]: b.split("]", 1)[1] for b in blocks if b.startswith("[E")}
+        return {label: _fold(t) if fold else " ".join(t.split()) for label, t in texts.items()}
+
+    def _extract(self, user: str) -> str:
+        passages = self._passages(user)
+        raw = self._passages(user, fold=False)
+        schema = self.case.arguments["schema"]
+        # The shorthand form's keys in order, or JSON Schema properties.
+        names = list(schema.get("properties", schema) if "properties" in schema else schema)
+        names = [n for n in names if n in _declared_fields(schema)]
+        record: dict[str, object] = {}
+        evidence: dict[str, list[str]] = {}
+        for index, (name, group) in enumerate(zip(names, self.case.must_include, strict=False)):
+            found = (
+                (value, lbl)
+                for value in group
+                for lbl, text in passages.items()
+                if _mentions(text, value)
+            )
+            value, hit = next(found, (None, None))
+            if hit is not None:
+                # The value as the cited passage spells it (an attachment
+                # may shout "HARBOR ROOFING"): the tool's value check is
+                # case-sensitive, and a model copies what it cites.
+                spelled = re.search(re.escape(value), raw[hit], re.IGNORECASE)
+                record[name] = spelled.group(0) if spelled else value
+                evidence[name] = [hit]
+                self.found.add(index)
+        if not record:
+            return "null"
+        return json.dumps({**record, "_evidence": evidence})
 
     async def complete(self, system: str, user: str) -> str:
+        if self.case.tool == "extract_from_emails":
+            return self._extract(user)
         if not self.case.answerable:
             return "Not found in the provided emails: nothing in them answers this."
         labels = dict(_LABEL.findall(user))  # label -> claimant ID
-        blocks = re.split(r"(?=\[E\d+ \|)", user)
-        # Each passage's text without its header, whose message ID and
-        # date would otherwise match short values such as "4".
-        passages = {
-            b.split(" |", 1)[0][1:]: _fold(b.split("]", 1)[1]) for b in blocks if b.startswith("[E")
-        }
+        passages = self._passages(user)
         sentences = []
         for group in self.case.required_evidence:
             wanted = {_ref_message(r) for r in group}
@@ -266,8 +318,9 @@ def _judge_config() -> LayerConfig:
     )
 
 
-# Value groups the scripted answerer found in no passage, per case.
-_ORACLE_MISSES: dict[str, list[list[str]]] = {}
+# The scripted answerer of each case, for the value groups it found in
+# no passage (``misses``).
+_ORACLES: dict[str, _OracleAnswerer] = {}
 
 
 # Details (passages supplied) per case, kept by ``_evaluate_all``.
@@ -280,7 +333,7 @@ def _evaluate_all(baseline_dir: Path, baseline_db: Database) -> list[dict]:
     judge = _StubJudge()
     for case in CASES:
         oracle = _OracleAnswerer(case)
-        _ORACLE_MISSES[case.id] = oracle.unsupported
+        _ORACLES[case.id] = oracle
         ctx = RunContext(
             db=baseline_db,
             embed_client=PrecomputedEmbedder(vectors),
@@ -308,12 +361,16 @@ def test_every_case_completes_and_is_judged(records: dict[str, dict]) -> None:
         assert r["status"] == "ok", cid
         assert r["judge"]["status"] == "ok", (cid, r["judge"]["error"])
         assert r["deterministic"]["checks"]["prompt_matches_capture"] == "pass", cid
+        assert r["tool"] == next(c.tool for c in CASES if c.id == cid), cid
 
 
 @pytest.mark.parametrize("case", CASES, ids=lambda c: c.id)
 def test_supplied_evidence_lets_a_correct_answer_pass(case: Case, records: dict[str, dict]) -> None:
     r = records[case.id]
     det = r["deterministic"]
+    if case.tool == "extract_from_emails":
+        # #656: the records the tool returned have the schema's shape.
+        assert det["checks"]["records_conform"] == "pass", (case.id, det["checks"])
     if det["prompt_coverage"] in (None, 1.0) or case.expected_handling == "disclose_missing":
         # #820: an omission the server's coverage note disclosed is what
         # a disclose_missing case expects.
@@ -340,7 +397,7 @@ def test_answerer_finds_every_value_where_evidence_arrived(records: dict[str, di
             continue
         excerpts = [_fold(f.excerpt) for f in by_id[cid].expected_facts]
         stated = [
-            g for g in _ORACLE_MISSES[cid] if any(_mentions(e, v) for e in excerpts for v in g)
+            g for g in _ORACLES[cid].misses() if any(_mentions(e, v) for e in excerpts for v in g)
         ]
         assert stated == [], cid
 
@@ -366,9 +423,11 @@ def test_cases_missing_evidence_are_the_known_ones(records: dict[str, dict]) -> 
     """Which cases lose evidence before the model sees it.
 
     The hashed embedder has no semantics, so one natural-language
-    question misses its thread; the prompt-budget case loses one source
-    to its budget by design. A change here is a retrieval or prompt
-    assembly change: explain it in the PR and update the sets.
+    question misses its thread; each prompt-budget case loses one source
+    to its budget by design (``ask-kayak-tight-budget`` a thread,
+    ``summarize-hall-open-points`` the message past the window, #656). A
+    change here is a retrieval or prompt assembly change: explain it in
+    the PR and update the sets.
     """
 
     def stages(det: dict) -> list[str]:
@@ -387,12 +446,13 @@ def test_cases_missing_evidence_are_the_known_ones(records: dict[str, dict]) -> 
     assert lost == {
         "ask-lisbon-dates": ["retrieval"],
         "ask-kayak-tight-budget": ["prompt_assembly"],
+        "summarize-hall-open-points": ["prompt_assembly"],
     }
 
 
 def test_prompt_budget_case_detects_omitted_evidence(records: dict[str, dict]) -> None:
     budget = [c for c in CASES if c.category == "prompt_budget"]
-    assert budget
+    assert {c.tool for c in budget} == {"ask_mailbox", "summarize_thread"}
     for case in budget:
         r = records[case.id]
         det = r["deterministic"]

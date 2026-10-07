@@ -1,6 +1,7 @@
-"""Run ``ask_mailbox`` for one case and capture what its model received.
+"""Run a case's tool and capture what its model received.
 
-The registered handler runs unchanged: ``register_intelligence_tools``
+The registered handler (``ask_mailbox``, ``summarize_thread`` or
+``extract_from_emails``, #656) runs unchanged: ``register_intelligence_tools``
 registers it on a stub server exactly as ``main.py`` does on FastMCP,
 and the case's arguments are passed to it as a client's would be. The
 evaluator reimplements neither retrieval nor prompt building.
@@ -8,17 +9,19 @@ evaluator reimplements neither retrieval nor prompt building.
 Two narrow wrappers capture the run, in memory only:
 
 - ``RecordingInference`` wraps the inference client, the boundary every
-  prompt crosses, and keeps each request's text and the reply. The
-  first request is the prompt after truncation, deduplication, fallback
-  thread text and budgeting; a repair call resends it with a fixed
-  instruction appended, so the evidence available to the final answer
-  is the first request's.
-- ``capture_evidence_maps`` wraps ``intelligence._build_evidence`` to
-  keep the label -> passage map the handler builds alongside that
-  prompt (thread, message, claimant, chunk). ``prompt_consistent``
-  then checks every captured label's header is in the prompt the model
-  actually received, so the map describes that prompt and not a second
-  retrieval.
+  prompt crosses, and keeps each request's text and the reply. For a
+  prose tool the first request is the prompt after truncation,
+  deduplication, fallback thread text and budgeting; a repair call
+  resends it with a fixed instruction appended, so the evidence
+  available to the final answer is the first request's.
+  ``extract_from_emails`` makes one request per searched thread.
+- ``capture_evidence_maps`` wraps the handlers' evidence builders
+  (``intelligence._build_evidence`` and ``_summarize_context``) to keep
+  the label -> passage maps built alongside those prompts (thread,
+  message, claimant, chunk); ``adapters.select_passages`` picks the map
+  that describes the prompt sent. ``prompt_consistent`` then checks
+  every captured label's header is in a prompt the model actually
+  received, so the map describes that prompt and not a second retrieval.
 
 Nothing here logs mailbox text; the captures stay on the returned
 ``CaseRun`` and reach disk only through an opted-in detail artifact.
@@ -49,9 +52,12 @@ from pydantic import ValidationError
 from src.lib.inference import TEMPLATE_RESERVE_TOKENS, InferenceTruncatedError, PromptBudget
 from src.lib.security import ProviderResponseError
 from src.tools import intelligence
-from src.tools.outputs import AskMailboxOutput
+from src.tools.outputs import AskMailboxOutput, ExtractFromEmailsOutput, SummarizeThreadOutput
 
+from tests.answer_eval.adapters import OUTPUT_MODELS, AnswerView, select_passages, view_of
 from tests.answer_eval.cases import BASELINE_DOMAIN, Case
+
+ToolOutput = AskMailboxOutput | SummarizeThreadOutput | ExtractFromEmailsOutput
 
 # Statuses a run can end in. Only ``ok`` has an output to grade.
 RUN_STATUSES = ("ok", "tool_error", "timeout", "invalid_output", "runner_error", "skipped")
@@ -127,13 +133,22 @@ class CaseRun:
     case_id: str
     status: str
     error: str | None = None  # fixed category or exception type name
-    output: AskMailboxOutput | None = None
+    output: ToolOutput | None = None
     passages: dict[str, Passage] = field(default_factory=dict)
     calls: list[InferenceCall] = field(default_factory=list)
     prompt_consistent: bool = True
     timings_ms: dict[str, float] = field(default_factory=dict)
     error_detail: str | None = field(default=None, repr=False)  # detail artifact only
     billing_error: bool = False  # a call hit ``is_billing_error``: stop the run
+    tool: str = "ask_mailbox"  # the case's tool, which ``view`` reads ``output`` through
+
+    @property
+    def view(self) -> AnswerView:
+        """The output as the graders, judge and reports read it
+        (``adapters.view_of``); only a run with an output has one."""
+        if self.output is None:
+            raise ValueError("a run without output has no view")
+        return view_of(self.tool, self.output)
 
 
 class RecordingInference:
@@ -225,28 +240,41 @@ class _ToolServer:
         return decorator
 
 
+# The handlers' evidence builders, each taking an ``evidence_map`` keyword:
+# ``ask_mailbox`` and ``extract_from_emails`` build through the first,
+# ``summarize_thread`` through the second.
+_EVIDENCE_BUILDERS = ("_build_evidence", "_summarize_context")
+
+
 @contextmanager
 def capture_evidence_maps(sink: list[dict[str, Any]]) -> Iterator[None]:
-    """Record the ``evidence_map`` of every ``_build_evidence`` call.
+    """Record the ``evidence_map`` of every evidence-builder call, in
+    call order.
 
-    The handler looks the function up as a module global on each call,
-    so replacing the attribute reaches it; the original runs unchanged.
-    Runs are sequential, so the swap is not shared between cases.
+    The handlers look the functions up as module globals on each call,
+    so replacing the attributes reaches them; the originals run
+    unchanged. Runs are sequential, so the swap is not shared between
+    cases.
     """
-    original = intelligence._build_evidence
+    originals = {name: getattr(intelligence, name) for name in _EVIDENCE_BUILDERS}
 
-    def spy(*args: Any, **kwargs: Any) -> Any:
-        result = original(*args, **kwargs)
-        evidence_map = kwargs.get("evidence_map")
-        if evidence_map is not None:
-            sink.append(evidence_map)
-        return result
+    def spy_for(original: Callable[..., Any]) -> Callable[..., Any]:
+        def spy(*args: Any, **kwargs: Any) -> Any:
+            result = original(*args, **kwargs)
+            evidence_map = kwargs.get("evidence_map")
+            if evidence_map is not None:
+                sink.append(evidence_map)
+            return result
 
-    intelligence._build_evidence = spy  # type: ignore[assignment]
+        return spy
+
+    for name, original in originals.items():
+        setattr(intelligence, name, spy_for(original))
     try:
         yield
     finally:
-        intelligence._build_evidence = original
+        for name, original in originals.items():
+            setattr(intelligence, name, original)
 
 
 def _passage(ref: Any) -> Passage:
@@ -301,7 +329,7 @@ class RunContext:
 
 
 async def run_case(case: Case, ctx: RunContext) -> CaseRun:
-    """Call the real ``ask_mailbox`` handler for ``case`` and capture it."""
+    """Call the real handler of the case's tool for ``case`` and capture it."""
     recorder = RecordingInference(ctx.inference_client)
     embedder = TimedEmbedder(ctx.embed_client)
     server = _ToolServer()
@@ -316,12 +344,12 @@ async def run_case(case: Case, ctx: RunContext) -> CaseRun:
         prompt_budget=prompt_budget_for(case, ctx.prompt_budget),
     )
     maps: list[dict[str, Any]] = []
-    run = CaseRun(case_id=case.id, status="ok")
+    run = CaseRun(case_id=case.id, status="ok", tool=case.tool)
     start = time.perf_counter()
     with capture_evidence_maps(maps):
         try:
             result = await asyncio.wait_for(
-                server.tools["ask_mailbox"](**case.arguments), ctx.case_timeout_secs
+                server.tools[case.tool](**case.arguments), ctx.case_timeout_secs
             )
         except TimeoutError:
             run.status, run.error = "timeout", "timeout"
@@ -335,11 +363,14 @@ async def run_case(case: Case, ctx: RunContext) -> CaseRun:
 
     run.calls = recorder.calls
     run.billing_error = recorder.billing_error
-    if maps:
-        run.passages = {label: _passage(ref) for label, ref in maps[-1].items()}
+    shown = select_passages(case.tool, maps)
+    run.passages = {label: _passage(ref) for label, ref in shown.items()}
     if run.calls:
-        first = run.calls[0].user
-        run.prompt_consistent = all(f"[{label} |" in first for label in run.passages)
+        # Every captured label's header is in a prompt the model received
+        # (the first, for a prose tool; its own thread's, for extraction).
+        run.prompt_consistent = all(
+            any(f"[{label} |" in call.user for call in run.calls) for label in run.passages
+        )
     inference_ms = sum(c.ms for c in run.calls)
     run.timings_ms = {
         "answer_total": round(total_ms, 1),
@@ -349,7 +380,7 @@ async def run_case(case: Case, ctx: RunContext) -> CaseRun:
     }
     if run.status == "ok":
         try:
-            run.output = AskMailboxOutput.model_validate(result.structured_content)
+            run.output = OUTPUT_MODELS[case.tool].model_validate(result.structured_content)
         except ValidationError:
             run.status, run.error = "invalid_output", "invalid_output"
     return run

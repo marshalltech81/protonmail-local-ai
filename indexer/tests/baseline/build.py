@@ -13,9 +13,11 @@ Usage, from ``indexer/``:
     uv run python -m tests.baseline.build <out_dir> <golden.json> [<cases.json>]
 
 ``cases.json`` (optional) is the answer-quality evaluation's case file
-(``mcp-server/tests/answer_eval/cases.json``); each case's
-``arguments.question`` gets a query vector too, so the evaluation can
-run ``ask_mailbox`` against this index.
+(``mcp-server/tests/answer_eval/cases.json``); the text each case's
+tool embeds (``case_queries``: an ``ask_mailbox`` question or an
+``extract_from_emails`` query; a ``summarize_thread`` case looks its
+thread up by ID and embeds nothing) gets a query vector too, so the
+evaluation can run the tools against this index.
 
 The build lowers two attachment caps so the capped-attachment shapes
 (t88, t89, #907) fit in small fixtures: ``INDEXER_ATTACHMENT_MAX_BYTES``
@@ -118,12 +120,25 @@ def check_capped_attachments(db_path: Path) -> None:
         )
 
 
+def case_queries(cases: dict) -> set[str]:
+    """The text each answer-evaluation case's tool embeds for retrieval:
+    ``arguments.question`` (``ask_mailbox``) or ``arguments.query``
+    (``extract_from_emails``). A ``summarize_thread`` case names its
+    thread by ID and embeds nothing, so it contributes no query."""
+    return {
+        case["arguments"][key]
+        for case in cases["cases"]
+        for key in ("question", "query")
+        if isinstance(case["arguments"].get(key), str)
+    }
+
+
 def build(out_dir: Path, golden_path: Path, cases_path: Path | None = None) -> dict[str, int]:
     """Build ``out_dir/mail.db`` and ``out_dir/query_vectors.json``.
 
     The query vectors cover the golden search queries and evidence
-    queries and, with ``cases_path``, every answer-evaluation case's
-    question.
+    queries and, with ``cases_path``, the text every answer-evaluation
+    case embeds (``case_queries``).
 
     Returns the indexing queue's final status counts. Raises
     ``RuntimeError`` if any message failed to index, so a broken corpus
@@ -167,8 +182,7 @@ def build(out_dir: Path, golden_path: Path, cases_path: Path | None = None) -> d
     # reachability checks make (#798); they rank nothing in the snapshot.
     queries = {q["query"] for q in golden["search"]} | set(golden.get("evidence_queries", []))
     if cases_path is not None:
-        cases = json.loads(cases_path.read_text(encoding="utf-8"))
-        queries |= {c["arguments"]["question"] for c in cases["cases"]}
+        queries |= case_queries(json.loads(cases_path.read_text(encoding="utf-8")))
     (out_dir / "query_vectors.json").write_text(
         json.dumps({q: embed_text(q) for q in sorted(queries)}), encoding="utf-8"
     )

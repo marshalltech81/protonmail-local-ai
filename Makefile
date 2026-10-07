@@ -44,7 +44,7 @@ help:
 	@echo "  trivy        Run the CI Trivy scans locally: dependency scans of indexer/ and mcp-server/, offline misconfig scan of the repository, then the image gates (needs trivy and the built images)"
 	@echo "  trivy-images Run the CI Trivy image gates of .github/workflows/docker.yml on the built indexer, mcp-server and mbsync images (needs trivy, make build)"
 	@echo "  baseline     Run the retrieval regression baseline (UPDATE=1 rewrites the rank snapshot)"
-	@echo "  eval-answers Opt-in ask_mailbox answer-quality run on the synthetic corpus (calls INFERENCE_* and JUDGE_* providers)"
+	@echo "  eval-answers Opt-in answer-quality run of the intelligence tools on the synthetic corpus (calls INFERENCE_* and JUDGE_* providers)"
 	@echo "  eval-answers-compare  Compare two answer-evaluation reports (BASELINE=... CANDIDATE=...)"
 	@echo "  clean        Remove all containers and volumes (destructive)"
 	@echo ""
@@ -343,9 +343,10 @@ baseline: sync-indexer sync-mcp
 	( cd mcp-server && BASELINE_DIR="$$dir/out" uv run pytest -q --no-cov tests/baseline $(if $(filter 1,$(UPDATE)),--update-baseline) ); \
 	status=$$?; rm -rf "$$dir"; exit $$status
 
-# Opt-in answer-quality evaluation of ask_mailbox (#604): builds the
-# synthetic baseline index, runs every case through the real handler with
-# the INFERENCE_* answerer and the optional JUDGE_* judge, and writes a
+# Opt-in answer-quality evaluation of ask_mailbox, summarize_thread and
+# extract_from_emails (#604, #656): builds the synthetic baseline index,
+# runs every case through the real handler of its tool with the
+# INFERENCE_* answerer and the optional JUDGE_* judge, and writes a
 # mode-600 report under EVAL_OUT (git-ignored by default). It calls the
 # configured providers, so it is never part of `make test` or CI. EVAL_ARGS
 # passes extra flags (e.g. `--case ask-roof-total --detail <path>`);
