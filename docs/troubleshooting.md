@@ -1144,10 +1144,7 @@ the model is told, in the prompt, so this log line is where it shows.
   the answer or summary was cut off (`outputs_cut` counts every cut
   reply, whatever stopped it; for `extract_from_emails`, the threads
   whose reply was lost). A reply cut before any text fails the call
-  with an error, and the line is still logged. When the repair reply
-  was the one cut, `prompt_tokens` is the repair prompt (for
-  `brief_issue` and `check_conclusion`, whenever a repair call was
-  made, cut or not). Raise
+  with an error, and the line is still logged. Raise
   `INFERENCE_MAX_TOKENS`. The reply reserve comes out of
   `INFERENCE_CONTEXT_TOKENS`, so raise that by the same amount if the
   model's window allows, or the prompt allowance shrinks.
@@ -1187,7 +1184,10 @@ the model is told, in the prompt, so this log line is where it shows.
 `prompt_tokens` is the estimated size of the prompt sent (the largest
 one for `extract_from_emails`; for it, `brief_issue` and
 `check_conclusion`, including the reply schema structured outputs
-add), counted at three characters per token.
+add), counted at three characters per token. For `ask_mailbox`,
+`summarize_thread`, `brief_issue` and `check_conclusion` it is the
+last prompt sent: the repair prompt whenever a repair call was made,
+whether or not its reply was cut (#984).
 
 The call's own `mcp.timings` line also carries a
 `token_limit_<limit>` count for each limit it hit, so the warning can

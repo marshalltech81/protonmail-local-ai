@@ -2874,24 +2874,26 @@ def register_intelligence_tools(
         user_prompt: str,
         evidence_map: Mapping[str, EvidenceRef],
         cuts: list[_ReplyCut],
-    ) -> tuple[str, AnswerCheck, bool]:
+    ) -> tuple[str, AnswerCheck, bool, str]:
         """Generate a prose answer, then check it against the evidence
         actually supplied (``_check_answer``, #284). A failed check gets
         one repair call with a fixed instruction, never more; whatever it
         returns is checked again and returned with its problems. An
         answer cut off at max_tokens is not repaired: a second try would
-        most likely be cut off too. Returns the answer, its check and
-        whether the repair call was made; a cut reply, from either call,
-        is recorded in ``cuts``, which the caller owns so it is filled
-        even when the call raises."""
-        answer = await llm_complete_prose(system, user_prompt, cuts)
+        most likely be cut off too. Returns the answer, its check,
+        whether the repair call was made and the last prompt sent
+        (system plus user: the repair prompt when the repair call was
+        made, #984); a cut reply, from either call, is recorded in
+        ``cuts``, which the caller owns so it is filled even when the
+        call raises."""
+        sent = user_prompt
+        answer = await llm_complete_prose(system, sent, cuts)
         check = _check_answer(answer, evidence_map)
         repair_attempted = bool(check.problems) and not answer.endswith(_TRUNCATED_NOTICE_SUFFIXES)
         if repair_attempted:
             reason = _repair_reason(check.problems)
-            answer = await llm_complete_prose(
-                system, user_prompt + _REPAIR_INSTRUCTION.format(reason=reason), cuts
-            )
+            sent = user_prompt + _REPAIR_INSTRUCTION.format(reason=reason)
+            answer = await llm_complete_prose(system, sent, cuts)
             check = _check_answer(answer, evidence_map)
         # Counts only: labels, statements and quotes are provider output.
         log.debug(
@@ -2906,7 +2908,7 @@ def register_intelligence_tools(
             sum(q.status == "verified" for q in check.quotes),
             "attempted" if repair_attempted else "not needed",
         )
-        return answer, check, repair_attempted
+        return answer, check, repair_attempted, system + sent
 
     # Config identifiers for the per-call timing line.
     timing_config = {"rerank": rerank_mode(reranker), "inference": inference_client.mode}
@@ -3202,7 +3204,7 @@ def register_intelligence_tools(
 
             cuts: list[_ReplyCut] = []
 
-            def warn_limits() -> None:
+            def warn_limits(prompt: str) -> None:
                 _warn_token_limits(
                     "ask_mailbox",
                     prompt_budget,
@@ -3215,25 +3217,24 @@ def register_intelligence_tools(
                     threads_dropped=coverage.threads_dropped,
                     passages_omitted=coverage.omitted if window_budget else 0,
                     passages_truncated=coverage.truncated if window_budget else 0,
-                    # The prompt of the reply that was cut (the repair
-                    # prompt when that was it), else the one sent.
-                    prompt_tokens=estimate_tokens(
-                        cuts[-1].prompt if cuts else ASK_SYSTEM + user_prompt
-                    ),
+                    # The last prompt sent: the repair prompt whenever
+                    # the repair call was made, cut or not (#984).
+                    prompt_tokens=estimate_tokens(prompt),
                 )
 
             # Generate, check the answer's citations, statements and quotes
             # against the evidence supplied, and repair once (#284).
             try:
-                answer, check, repair_attempted = await complete_checked(
+                answer, check, repair_attempted, sent = await complete_checked(
                     "ask_mailbox", ASK_SYSTEM, user_prompt, evidence_map, cuts
                 )
             except InferenceTruncatedError:
                 # Cut with nothing to show: the call fails, but the limit
-                # it hit is still logged.
-                warn_limits()
+                # it hit is still logged. The cut reply's prompt was the
+                # last one sent.
+                warn_limits(cuts[-1].prompt)
                 raise
-            warn_limits()
+            warn_limits(sent)
 
             citations = [_citation(evidence_map[label]) for label in check.used]
             lines = [answer, *_citation_lines(citations), *_problem_lines(check)]
@@ -3466,7 +3467,7 @@ def register_intelligence_tools(
 
             cuts: list[_ReplyCut] = []
 
-            def warn_limits() -> None:
+            def warn_limits(prompt: str) -> None:
                 _warn_token_limits(
                     "summarize_thread",
                     prompt_budget,
@@ -3478,24 +3479,22 @@ def register_intelligence_tools(
                     context_window_cuts=sum(c.reason == "context_window" for c in cuts),
                     context_chars_kept=len(context),
                     context_chars_wanted=wanted_chars,
-                    # The prompt of the reply that was cut (see ask_mailbox).
-                    prompt_tokens=estimate_tokens(
-                        cuts[-1].prompt if cuts else SUMMARIZE_SYSTEM + user_prompt
-                    ),
+                    # The last prompt sent (see ask_mailbox).
+                    prompt_tokens=estimate_tokens(prompt),
                 )
 
             # The citation contract of ask_mailbox (#284): every statement
             # and list item in every style is checked the same way, with
             # one bounded repair.
             try:
-                summary, check, repair_attempted = await complete_checked(
+                summary, check, repair_attempted, sent = await complete_checked(
                     "summarize_thread", SUMMARIZE_SYSTEM, user_prompt, evidence_map, cuts
                 )
             except InferenceTruncatedError:
                 # Cut with nothing to show (see ask_mailbox).
-                warn_limits()
+                warn_limits(cuts[-1].prompt)
                 raise
-            warn_limits()
+            warn_limits(sent)
             citations = [_citation(evidence_map[label]) for label in check.used]
             lines = [
                 f"Summary ({style}) — {subject}:\n\n{summary}",
