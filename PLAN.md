@@ -934,6 +934,10 @@ removed Bridge container are kept as history.
   on GitHub repeats its rule. Dependabot PRs carry `dependencies` as
   their type plus the area the update lands in
   (`.github/dependabot.yml`); the old ecosystem labels are retired.
+  A dependency between issues is a GitHub "blocked by" relation, set
+  when the issue is filed or when the dependency is found, with the
+  reason in the body's Relationships section; `Refs` lines are
+  context, not dependencies.
 - The Current Objective supersedes any older scope statement that
   froze the MCP API surface; Phases 0–5 are the priority order.
 - Edit this file only when a decision, roadmap status or known
