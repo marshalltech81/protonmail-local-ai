@@ -116,6 +116,45 @@ def _is_iso_date(v: Any) -> bool:
     return True
 
 
+def _names_from(allowed: tuple[str, ...]) -> Callable[[Any], bool]:
+    # At most one entry per allowed name, so a logged list is bounded.
+    return lambda v: (
+        isinstance(v, list)
+        and len(v) <= len(allowed)
+        and all(isinstance(n, str) and n in allowed for n in v)
+    )
+
+
+# The row fields ``query_messages`` can project onto with ``fields``
+# (#990): ``tools/outputs.ListedMessage``'s serialized field names, in
+# its order (pinned by ``tests/test_security.py``). Kept here because
+# this module cannot import ``tools.outputs`` without a cycle.
+QUERY_MESSAGE_FIELDS = (
+    "message_id",
+    "claimant_id",
+    "subject",
+    "sent_at",
+    "occurred_at",
+    "folder",
+    "has_attachments",
+    "seen",
+    "flagged",
+    "replied",
+    "in_reply_to",
+    "references",
+    "references_count",
+    "from",
+    "from_count",
+    "to",
+    "to_count",
+    "cc",
+    "cc_count",
+    "source_file",
+    "thread_id",
+    "pending_deletion",
+)
+
+
 # Tool parameters whose values can be logged — but only when the value
 # passes that field's own check. Arguments arrive from an LLM before any
 # validation, so a name alone proves nothing: ``style`` or
@@ -151,6 +190,8 @@ _LOGGABLE_TOOL_PARAMS: dict[str, Callable[[Any], bool]] = {
     "authority_class": _one_of(
         "counsel", "management", "vendor", "government", "personal", "other", "unclassified"
     ),
+    # ``query_messages``' projection: logged only when every name is a row field.
+    "fields": _names_from(QUERY_MESSAGE_FIELDS),
 }
 
 

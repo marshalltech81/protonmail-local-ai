@@ -23,14 +23,16 @@ the first sixteen hex digits of the raw file's SHA-256, for example
 `<id@x.example>` stored as `id@x.example#3f9a2c1b7d40e865`. It stays the same
 across flag renames and folder moves, since those do not change the
 file's bytes. Every message row, evidence chunk, and attachment hit
-carries both `message_id` (the header value) and `claimant_id`.
+carries both `message_id` (the header value) and `claimant_id`
+(a `query_messages` `fields` projection can leave out `message_id`).
 `get_message` accepts either; a bare Message-ID that several messages
 claim returns an error listing their claimant IDs instead of choosing
 one. Both claimants sit in the thread their Message-ID resolves to.
 
 Every message row (`get_thread`, `get_message`, `query_messages`),
 evidence chunk (`get_evidence`), and attachment hit
-(`search_attachments`) carries `source_file`: the raw message file the
+(`search_attachments`) carries `source_file` (unless a `query_messages`
+`fields` projection leaves it out): the raw message file the
 result came from, so an answer can be checked against the original
 bytes. It holds `source_type` (`maildir_message`), `locator` (the
 file's path in the Maildir volume as the indexer sees it, `/maildir/...`,
@@ -915,6 +917,7 @@ questions.
 | `authority_class` | string | none | The source-authority class of the message's From sender (any author, for a multi-author From): `counsel`, `management`, `vendor`, `government`, `personal`, `other`, or `unclassified`; a message in Spam never matches; blank is ignored, any other value is an error |
 | `limit` | int | `25` | Messages per page; clamped to `[1, 100]` |
 | `cursor` | string | none | `next_cursor` from the previous page of the same query |
+| `fields` | list of strings | none (every field) | Row fields to return; see Field projection below |
 
 All given filters must match; blank filters are ignored. With none,
 every indexed message outside Trash is enumerated, so a count from an
@@ -965,6 +968,28 @@ Message-ID, claimant ID, and Thread ID; the structured output adds In-Reply-To a
 up to 10 References. Header values are sender-controlled, so any past
 500 characters is cut with a marker. The count, the page, and its participants are read in one
 snapshot.
+
+**Field projection.** A corpus-building pass that pages through
+hundreds of rows rarely needs every field. `fields` lists the row
+fields to return, by their structured-output names (`message_id`,
+`subject`, `sent_at`, `occurred_at`, `folder`, `has_attachments`,
+`seen`, `flagged`, `replied`, `in_reply_to`, `references`,
+`references_count`, `from`, `from_count`, `to`, `to_count`, `cc`,
+`cc_count`, `source_file`, `pending_deletion`); `claimant_id` and
+`thread_id` are always included, so rows stay addressable. A usual
+minimal set is `["subject", "sent_at", "from", "has_attachments"]`.
+The text form shows only the projected fields it lists (the claimant
+and thread IDs always). The envelope (`filters`, `address_matches`,
+`date_bounds`, `total_matches`, `returned`, `offset`, `has_more`,
+`next_cursor`) is unchanged, and so is the cursor: it is built from the
+page's messages before projection, so a projected and an unprojected
+page continue each other. An unknown name is an error that names it,
+and a list of more than 22 names (one per field; repeats add nothing)
+is an error; the log records only that `fields` was rejected and why,
+in a warning rate-limited to one per reason per minute with a count of
+the repeats. Omitting `fields`
+returns every field, as before. Because rows can be projected, the
+output schema requires only `claimant_id` and `thread_id` in a row.
 
 **Paging.** Keyset pagination on `(effective_at, claimant_id)`: messages
 indexed while a caller pages never shift or duplicate later pages. A
