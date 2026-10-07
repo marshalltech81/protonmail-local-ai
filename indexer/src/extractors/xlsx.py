@@ -556,18 +556,22 @@ def _serialize(workbook: openpyxl.Workbook) -> str:
     parts: list[str] = []
     expanded_cells = 0
     chars_left = _MAX_TEXT_CHARS
+    # Whether the text budget cut or left unread a value (#903). A budget
+    # the last value spends exactly cuts nothing, so once it is spent the
+    # walk reads on, keeping nothing and charging the cell budget as
+    # before, until it meets a value (a cut) or the end (review round 1
+    # on #917).
+    cut = False
     for sheet in workbook.worksheets:
         # Read-only mode trusts the dimension record and stops at it.
         sheet.reset_dimensions()
         # Charge the header, and the blank line before it, before
         # copying the title (#435). A header that leaves no budget for a
-        # value would drop its sheet and end the walk anyway, so stop
-        # here rather than copy a title of any length only to drop it.
-        chars_left -= len(sheet.title) + _HEADER_OVERHEAD
-        if chars_left <= 0:
-            break
-        header = f"[Sheet: {sheet.title}]"
-        sheet_lines = [header]
+        # value keeps nothing of its sheet, so its title of any length
+        # is not copied; its rows are only looked at for a value.
+        if chars_left > 0:
+            chars_left -= len(sheet.title) + _HEADER_OVERHEAD
+        sheet_lines = [f"[Sheet: {sheet.title}]"] if chars_left > 0 else []
         for row in sheet.iter_rows(values_only=True):
             expanded_cells += len(row) + _ROW_COST
             if expanded_cells > _MAX_EXPANDED_CELLS:
@@ -575,8 +579,6 @@ def _serialize(workbook: openpyxl.Workbook) -> str:
             cells: list[str] = []
             blanks = 0  # empty cells since the last value
             for value in row:
-                if chars_left <= 0:
-                    break
                 if value is None:
                     blanks += 1
                     continue
@@ -588,31 +590,35 @@ def _serialize(workbook: openpyxl.Workbook) -> str:
                 # budget has left and one crossing it keeps its prefix.
                 room = chars_left - (blanks + 1)
                 if room <= 0:
-                    chars_left = 0
+                    cut = True
                     break
-                text = str(value)[:room]
+                raw = str(value)
+                text = raw[:room]
                 chars_left -= len(text)
+                cut = len(raw) > room
                 text = text.translate(_CELL_SEPARATORS).strip()
-                if not text:
+                if text:
+                    chars_left -= blanks + 1
+                    cells.extend([""] * blanks)
+                    cells.append(text)
+                    blanks = 0
+                else:
                     blanks += 1
-                    continue
-                chars_left -= blanks + 1
-                cells.extend([""] * blanks)
-                cells.append(text)
-                blanks = 0
+                if cut:
+                    break
             if cells:
                 sheet_lines.append("\t".join(cells))
-            if chars_left <= 0:
+            if cut:
                 break
         # Skip sheets with only the header line — empty sheet, nothing
         # the LLM can do with the title alone.
         if len(sheet_lines) > 1:
             parts.append("\n".join(sheet_lines))
-        if chars_left <= 0 or expanded_cells > _MAX_EXPANDED_CELLS:
+        if cut or expanded_cells > _MAX_EXPANDED_CELLS:
             break
     # A budget that ended the walk cut the text (#903).
     if expanded_cells > _MAX_EXPANDED_CELLS:
         warn_extractor_cap(log, "xlsx_expanded_cells", "xlsx walk stopped at the cell budget")
-    elif chars_left <= 0:
+    elif cut:
         warn_extractor_cap(log, "xlsx_text_chars", "xlsx walk stopped at the text budget")
     return "\n\n".join(parts)

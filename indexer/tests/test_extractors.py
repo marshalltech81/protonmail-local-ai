@@ -927,10 +927,11 @@ class TestXlsxSharedStringBudget:
         text, _ = xlsx.extract(payload)
 
         assert "tail" not in text
-        # Three full blank values, a fourth sliced to the budget's last
-        # characters, and a fifth with no room left: 100,000 characters
-        # scanned in all.
-        assert rows[0] == 5
+        # Three full blank values and a fourth sliced to the budget's last
+        # characters, where the walk stops because that value was cut
+        # (review round 1 on #917; a fifth row was parsed before): 100,000
+        # characters scanned in all.
+        assert rows[0] == 4
 
     @pytest.mark.parametrize(
         ("room", "expected"),
@@ -4828,3 +4829,47 @@ class TestExtractorCapsAreReported:
         assert pdf._ocr_dpi(buf.getvalue(), [0]) == pdf._OCR_DPI
         assert "extractor cap" not in caplog.text
         assert extractors.drain_extractor_counts()["extractor_caps"] == 0
+
+    @pytest.mark.parametrize(
+        ("sheets", "reported"),
+        [
+            # The last value spends the budget exactly: nothing is cut.
+            ([("Sheet", [["abcdef"]])], False),
+            # So does an empty sheet after it, whose header was never due.
+            ([("Sheet", [["abcdef"]]), ("two", [])], False),
+            # A row after the exactly spent budget is cut.
+            ([("Sheet", [["abcdef"], ["next"]])], True),
+            # As is a later sheet with a value.
+            ([("Sheet", [["abcdef"]]), ("two", [["next"]])], True),
+        ],
+        ids=["last-value", "empty-sheet-after", "row-after", "sheet-after"],
+    )
+    def test_text_budget_spent_exactly_reports_only_a_real_cut(
+        self, sheets, reported, monkeypatch, caplog
+    ):
+        """Review round 1: a budget spent exactly by the workbook's last
+        value reported ``xlsx_text_chars`` although nothing was cut. The
+        text returned is the same either way."""
+        from src import extractors
+        from src.extractors import xlsx
+
+        caplog.set_level("DEBUG")
+        # The header ``[Sheet: Sheet]`` and the blank line before it, then
+        # ``abcdef`` and its newline.
+        monkeypatch.setattr(xlsx, "_MAX_TEXT_CHARS", len("[Sheet: Sheet]") + 2 + 7)
+        text, _ = xlsx.extract(_titled_xlsx(sheets))
+        assert text == "[Sheet: Sheet]\nabcdef"
+        assert ("extractor cap xlsx_text_chars" in caplog.text) is reported
+        assert extractors.drain_extractor_counts()["extractor_caps"] == int(reported)
+
+    def test_spent_text_budget_stops_at_the_first_unread_value(self, monkeypatch):
+        """After an exactly spent budget the walk reads on only to find a
+        value it cannot keep, then stops: the rows after it are not
+        parsed."""
+        from src.extractors import xlsx
+
+        monkeypatch.setattr(xlsx, "_MAX_TEXT_CHARS", len("[Sheet: Sheet]") + 2 + 7)
+        rows = _count_parsed_rows(monkeypatch)
+        text, _ = xlsx.extract(_xlsx_bytes([["abcdef"], ["next"]] + [["more"]] * 50))
+        assert text == "[Sheet: Sheet]\nabcdef"
+        assert rows[0] == 2
