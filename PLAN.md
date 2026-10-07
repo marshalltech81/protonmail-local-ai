@@ -504,8 +504,10 @@ mbsync → Maildir → indexer; mbsync is not replaced (Deferred).
    the `,U=` in a Maildir file name is isync's near-side UID, never
    read; `.mbsyncstate` is never parsed (#1083, decision). Two
    byte-identical files claiming one Message-ID share a claimant ID
-   and are deliberately one row, so "one row per occurrence" holds
-   for distinct content only.
+   and today collapse into one row that tracks a single path, so
+   removing that copy can reap mail whose other copy survives (#1102,
+   P1); "one row per occurrence" does not hold for them until #1102 is
+   fixed.
 
 ## Not doing (decided 2026-09-26)
 

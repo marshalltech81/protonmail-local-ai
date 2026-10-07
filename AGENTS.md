@@ -562,8 +562,9 @@ Every open issue carries, on GitHub (owner, 2026-10-07):
   supply chain or bounded-work robustness, whatever the type)
 
 Each label's description on GitHub repeats its rule. Dependabot PRs
-carry `dependencies` as their type plus the area the update lands in
-(`.github/dependabot.yml`).
+are labelled `dependencies` as their type plus the area the update
+lands in; `.github/dependabot.yml` sets these labels once #1096 merges,
+and until then it still applies the retired ecosystem labels.
 
 A dependency between issues is a GitHub "blocked by" relation, set
 when the issue is filed or when the dependency is found, with the
