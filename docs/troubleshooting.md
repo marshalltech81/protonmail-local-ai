@@ -1338,15 +1338,24 @@ and sources in [Safety annotations](mcp-tools.md#safety-annotations)).
    cause on the WARNING or ERROR line before it.
 2. Optionally confirm the server serves the hints. From the repository
    root, list the tools through a client; every tool should print
-   `True False False`:
+   `True False False`. The client reads the token from its file and
+   uses the stdio adapter's HTTP client, which ignores `HTTP_PROXY`,
+   `ALL_PROXY` and the system proxy, so the token goes straight to
+   loopback and never to a proxy:
 
    ```bash
    cd mcp-server && uv run python - <<'EOF'
    import asyncio, pathlib
    from fastmcp import Client
+   from fastmcp.client.transports import StreamableHttpTransport
+   from src.stdio_adapter import _loopback_http_client
    token = pathlib.Path("../.secrets/mcp_auth_token.txt").read_text().strip()
+   transport = StreamableHttpTransport(
+       "http://127.0.0.1:3000/mcp", auth=token,
+       httpx_client_factory=_loopback_http_client,
+   )
    async def main():
-       async with Client("http://127.0.0.1:3000/mcp", auth=token) as c:
+       async with Client(transport) as c:
            for t in await c.list_tools():
                a = t.annotations
                print(t.name, a.readOnlyHint, a.destructiveHint, a.openWorldHint)
