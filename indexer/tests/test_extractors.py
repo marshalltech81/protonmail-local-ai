@@ -212,12 +212,12 @@ class TestFailedOutcomesAreLogged:
         each logged a WARNING. The first ``_WARNINGS_PER_WINDOW`` per
         window are logged; the rest are counted for the aggregate. The
         extraction results are unchanged."""
-        from src import extractors
+        from src import extractors, rate_limited_log
 
         caplog.set_level("INFO")
         clock = {"now": 1000.0}
-        monkeypatch.setattr(extractors.time, "monotonic", lambda: clock["now"])
-        monkeypatch.setattr(extractors, "_WARNINGS_PER_WINDOW", 2)
+        monkeypatch.setattr(rate_limited_log.time, "monotonic", lambda: clock["now"])
+        monkeypatch.setattr(extractors._LINE_BUDGET, "limit", 2)
 
         def boom(payload, **opts):
             raise ValueError("SYNTHETIC_EXC_MARKER")
@@ -3178,7 +3178,7 @@ class TestPdfPageLevelOcr:
 
         caplog.set_level("INFO")
         self._fake_ocr(monkeypatch, tmp_path)
-        monkeypatch.setattr(extractors, "_WARNINGS_PER_WINDOW", 2)
+        monkeypatch.setattr(extractors._LINE_BUDGET, "limit", 2)
         extractors.drain_extractor_counts()
         results = [self._extract("d" + "s" * 30, max_ocr_pages=5) for _ in range(5)]
         assert {(r.status, r.extractor) for r in results} == {(STATUS_SUCCESS, "pdf-ocr@4")}
@@ -4053,7 +4053,7 @@ class TestMultipageTiffOcrCap:
 
         caplog.set_level("INFO")
         self._ocr(monkeypatch)
-        monkeypatch.setattr(extractors, "_WARNINGS_PER_WINDOW", 2)
+        monkeypatch.setattr(extractors._LINE_BUDGET, "limit", 2)
         results = [self._extract(self._frames(3), max_ocr_pages=1) for _ in range(5)]
         assert {(r.status, r.text) for r in results} == {(STATUS_SUCCESS, "PAGE_0")}
         assert [r.levelname for r in self._cap_lines(caplog)] == ["WARNING", "WARNING"]
@@ -4996,7 +4996,7 @@ class TestExtractorCapsAreReported:
         from src import extractors
 
         caplog.set_level("DEBUG")
-        monkeypatch.setattr(extractors, "_WARNINGS_PER_WINDOW", 2)
+        monkeypatch.setattr(extractors._LINE_BUDGET, "limit", 2)
         for _ in range(5):
             _cap_extracted_chars(monkeypatch)
 
