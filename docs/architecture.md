@@ -1117,8 +1117,9 @@ Permanent extractor failures: an exception the same bytes always
 repeat is recorded `unsupported` with fixed text instead of `failed`,
 so it is not re-run every 7 days (#931): a PDF that needs an open
 password (pypdf `FileNotDecryptedError`), a PDF over one of pypdf's
-structural limits (`LimitReachedError`: page-tree depth, outline depth,
-`/ToUnicode` size and the like; "PDF structure exceeds pypdf limits"),
+structural limits while it is opened or its pages are listed
+(`LimitReachedError`, such as page-tree depth or entry count; "PDF
+structure exceeds pypdf limits"),
 and a workbook over the XLSX eager-part budget below ("workbook exceeds
 the eager-part budget"). Each is matched by exact exception class;
 anything else stays `failed`. The extractor read the bytes as its
@@ -1127,6 +1128,10 @@ occurrence of them, whatever its label. It is stamped with the
 extractor version (`pdf@5`), so a later version bump, for example one
 that raises a budget, refreshes it. Each logs a rate-limited WARNING
 (`extractor <module> declined ...; recorded unsupported, not retried`).
+A pypdf limit hit inside one page's text extraction (a `/ToUnicode`
+map over its size limit, for example) is not one of these: like any
+per-page error, that page is counted in `pdf_pages_failed` (and OCR'd
+when OCR is on) and the other pages' text is kept.
 
 The parsing libraries log and warn with values read from the
 attachment (pypdf's font dictionaries and encoding names, openpyxl's

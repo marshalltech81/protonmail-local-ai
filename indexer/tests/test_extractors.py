@@ -3618,6 +3618,41 @@ class TestPermanentFailuresAreUnsupported:
         for marker in ("SYNTHETIC_DEEP_TREE_MARKER", "SYNTHETIC_FILENAME_MARKER"):
             assert marker not in caplog.text
 
+    def test_a_page_level_pypdf_limit_keeps_the_other_pages(self, monkeypatch):
+        """Review round 1: a limit hit inside one page's text extraction
+        (``/ToUnicode`` size, for example) is a per-page failure, as
+        before: the page is counted in ``pdf_pages_failed`` (and OCR'd when
+        OCR is on) and the other pages' text is kept, rather than the
+        whole document being recorded ``unsupported``."""
+        from pypdf.errors import LimitReachedError
+        from src import extractors
+        from src.extractors import pdf
+
+        good_text = "digital words " * 20
+
+        class LimitPage:
+            def extract_text(self):
+                raise LimitReachedError("SYNTHETIC_PYPDF_MARKER")
+
+        class GoodPage:
+            def extract_text(self):
+                return good_text
+
+        class FakeReader:
+            def __init__(self, stream):
+                self.pages = [LimitPage(), GoodPage()]
+
+        monkeypatch.setattr(pdf.pypdf, "PdfReader", FakeReader)
+        extractors.drain_extractor_counts()
+
+        result = extract(
+            content_type="application/pdf", filename="a.pdf", payload=b"%PDF-1.7", ocr_enabled=False
+        )
+
+        assert (result.status, result.extractor) == (STATUS_SUCCESS, "pdf-digital@5")
+        assert result.text == good_text.strip()
+        assert extractors.drain_extractor_counts()["pdf_pages_failed"] == 1
+
     @pytest.mark.parametrize(
         ("module_name", "exc_path"),
         [
