@@ -3404,7 +3404,7 @@ class TestRequeueStaleExtractions:
 
         assert "HEADER_MARK" in self._attachment_chunk_text(db)
         row = db._conn.execute("SELECT extractor FROM attachment_extractions").fetchone()
-        assert row["extractor"] == "docx@3"
+        assert row["extractor"] == "docx@4"
         assert main._requeue_stale_extractions(db, queue) == 0
 
     def test_alias_messages_are_requeued_and_rebuilt(self, tmp_path, monkeypatch):
@@ -3484,7 +3484,7 @@ class TestRequeueStaleExtractions:
         assert main._requeue_stale_extractions(db, queue) == 1
 
         with db.transaction():
-            db._conn.execute("UPDATE attachment_extractions SET extractor = 'xlsx@4'")
+            db._conn.execute("UPDATE attachment_extractions SET extractor = 'xlsx@5'")
         self._drain(db, queue)
         assert main._requeue_stale_extractions(db, queue) == 0
 
@@ -3550,7 +3550,7 @@ class TestRequeueStaleExtractions:
                 attachment_indexing,
                 "extract_attachment",
                 lambda **_kw: ExtractionResult(
-                    status=STATUS_EMPTY, extractor="docx@3", text=None, error=None
+                    status=STATUS_EMPTY, extractor="docx@4", text=None, error=None
                 ),
             )
             main._drain_queue_batched(

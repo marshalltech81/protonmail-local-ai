@@ -1267,7 +1267,11 @@ only, never filenames or text (`make logs`):
     so none are lost, and the 5-minute flush still applies.
   - What the outcomes mean: `cached` counts attachments served from the
     extraction cache instead of extracted again. `unsupported` is a type
-    no extractor reads, `too_large` is over
+    no extractor reads, including Word templates (`.dotx`) and genuine
+    legacy binary `.doc` / `.xls` and password-protected Office files (OLE2), recorded with
+    "OLE2 compound file" rather than as `failed`, so they
+    are not retried (#694; see `docs/architecture.md`, "Extractor
+    dispatch"). `too_large` is over
     `INDEXER_ATTACHMENT_MAX_BYTES`, and `ocr_disabled` is an image or
     scanned PDF skipped while `INDEXER_OCR_ENABLED=false` (re-extracted
     once OCR is turned on).

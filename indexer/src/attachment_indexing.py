@@ -40,6 +40,7 @@ from threading import Lock
 from .chunker import MessageChunk, chunk_message
 from .database import Database
 from .extractors import (
+    LEGACY_OLE2_ERROR,
     OCR_DISABLED_ERROR,
     SCANNED_PDF_OCR_DISABLED_ERROR,
     STATUS_EMPTY,
@@ -214,7 +215,9 @@ def _unsupported_still_holds(error: str | None, attachment: Attachment, ocr_enab
     ``.bin`` first and ``.txt`` later (#210). An "OCR disabled" result
     holds until OCR is turned on for an occurrence that needs OCR: an
     image, or a PDF when the PDF extractor wrote the result (it found no
-    digital text layer). Any other result holds only while this
+    digital text layer). An OLE2 result also holds for an occurrence
+    that selects the DOCX or XLSX extractor, which the dispatcher would
+    reject the same way (#694). Any other result holds only while this
     occurrence selects no extractor.
     """
     module = resolved_extractor_module(attachment.content_type, attachment.filename)
@@ -222,6 +225,8 @@ def _unsupported_still_holds(error: str | None, attachment: Attachment, ocr_enab
     needs_ocr = module == "image" or (module == "pdf" and error == SCANNED_PDF_OCR_DISABLED_ERROR)
     if "OCR disabled" in error and needs_ocr:
         return not ocr_enabled
+    if error == LEGACY_OLE2_ERROR and module in {"docx", "xlsx"}:
+        return True
     return module is None
 
 

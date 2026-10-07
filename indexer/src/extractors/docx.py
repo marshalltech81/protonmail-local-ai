@@ -16,11 +16,13 @@ down, so a tiny file declaring a huge span multiplied extraction work
 flat list per top-level row so their text is copied once; lxml rejects
 XML nested deeper than 256 elements, which keeps the recursion shallow.
 
-Legacy ``.doc`` (binary Word, not OOXML) cannot be parsed by
-``python-docx``; the dispatcher routes those to this module too but
-the call will raise ``BadZipFile`` and surface as ``failed`` —
-acceptable until / unless a real ``.doc`` extractor (e.g. ``antiword``,
-``catdoc``) is added.
+Legacy ``.doc`` (binary Word, an OLE2 compound file, not OOXML) cannot
+be parsed by ``python-docx``. The dispatcher records any OLE2 payload
+``unsupported`` before this module runs, whatever its label (#694), so
+a ``.doc``-labelled payload reaches it only when it is not OLE2 (an
+OOXML file mislabelled as ``.doc``). Word templates (``.dotx``) are not routed here:
+``docx.Document`` refuses a package whose main part is the template
+type.
 """
 
 from __future__ import annotations

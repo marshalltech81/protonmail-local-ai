@@ -12,6 +12,8 @@ laptop without the Docker image's apt packages installed.
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 from src.extractors import (
     STATUS_EMPTY,
@@ -299,7 +301,7 @@ class TestFailedOutcomesAreLogged:
 
         assert result == ExtractionResult(
             status=STATUS_FAILED,
-            extractor="xlsx@4",
+            extractor="xlsx@5",
             text=None,
             error="zip member declares 300 uncompressed bytes (cap 4)",
         )
@@ -744,14 +746,14 @@ class TestDocxExtractor:
             filename="v.docx",
             payload=self._save(document),
         )
-        assert result.extractor == "docx@3"
+        assert result.extractor == "docx@4"
 
     def test_docx_version_2_rows_are_stale(self):
         # docx@2 missed first-page and even-page headers/footers (#299).
         from src import extractors
 
         assert extractors.stale_extractor_module("docx@2") == "docx"
-        assert extractors.stale_extractor_module("docx@3") is None
+        assert extractors.stale_extractor_module("docx@4") is None
 
     def test_versions_are_keyed_by_dispatch_module(self, monkeypatch):
         """The image module records ``image-ocr`` and the PDF module
@@ -783,7 +785,7 @@ class TestDocxExtractor:
             module_override="docx",
         )
         assert result.status == STATUS_SUCCESS
-        assert result.extractor == "docx@3"
+        assert result.extractor == "docx@4"
         assert "override text" in (result.text or "")
 
 
@@ -976,10 +978,10 @@ class TestXlsxSharedStringBudget:
             filename="book.xlsx",
             payload=_xlsx_bytes([["versioned"]]),
         )
-        assert result.extractor == "xlsx@4"
+        assert result.extractor == "xlsx@5"
         assert extractors.stale_extractor_module("xlsx") == "xlsx"
         assert extractors.stale_extractor_module("xlsx@3") == "xlsx"
-        assert extractors.stale_extractor_module("xlsx@4") is None
+        assert extractors.stale_extractor_module("xlsx@5") is None
 
 
 def _titled_xlsx(sheets: list[tuple[str, list[list[object]]]]) -> bytes:
@@ -4689,6 +4691,242 @@ class TestHeicImages:
         assert stale_extractor_module("image@2") == "image"
         assert stale_extractor_module("image-ocr@2") == "image"
         assert stale_extractor_module("image-ocr@3") is None
+
+
+def _docx_bytes(text: str) -> bytes:
+    import io
+
+    import docx
+
+    document = docx.Document()
+    document.add_paragraph(text)
+    buf = io.BytesIO()
+    document.save(buf)
+    return buf.getvalue()
+
+
+_OLE2_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+
+# Legacy binary Office labels: each routes to an OOXML extractor (#694).
+_LEGACY_LABELS = (
+    ("application/msword", "a.bin", "docx"),
+    ("application/octet-stream", "a.doc", "docx"),
+    ("application/vnd.ms-excel", "a.bin", "xlsx"),
+    ("application/octet-stream", "a.xls", "xlsx"),
+)
+
+
+def _count_extractor_calls(monkeypatch) -> list[str]:
+    """Wrap ``_safe_import`` so each per-format extractor call is recorded
+    by module name before the real extractor runs."""
+    from src import extractors
+
+    calls: list[str] = []
+    real_import = extractors._safe_import
+
+    def counting_import(module_name):
+        fn = real_import(module_name)
+        assert fn is not None
+
+        def wrapped(payload, **opts):
+            calls.append(module_name)
+            return fn(payload, **opts)
+
+        return wrapped
+
+    monkeypatch.setattr(extractors, "_safe_import", counting_import)
+    return calls
+
+
+class TestLegacyOfficeLabels:
+    """#694: ``application/msword`` / ``.doc`` and ``application/vnd.ms-excel``
+    / ``.xls`` route to the OOXML extractors as a best effort for OOXML files
+    mislabelled as a legacy type. A genuine legacy binary is an OLE2
+    compound file, which no OOXML parser can read."""
+
+    def test_zip_payload_with_a_legacy_label_still_reaches_the_ooxml_extractor(self, monkeypatch):
+        calls = _count_extractor_calls(monkeypatch)
+        cases = {
+            "docx": _docx_bytes("SYNTHETIC_DOC_TEXT"),
+            "xlsx": _xlsx_bytes([["SYNTHETIC_DOC_TEXT"]]),
+        }
+        for content_type, filename, module in _LEGACY_LABELS:
+            result = extract(content_type=content_type, filename=filename, payload=cases[module])
+            assert result.status == STATUS_SUCCESS, (content_type, filename)
+            assert result.extractor is not None
+            assert result.extractor.startswith(f"{module}@"), (content_type, filename)
+            assert "SYNTHETIC_DOC_TEXT" in (result.text or "")
+        assert calls == [module for _, _, module in _LEGACY_LABELS]
+
+    def test_other_payloads_with_a_legacy_label_still_fail_in_the_extractor(
+        self, monkeypatch, caplog
+    ):
+        """Neither ZIP nor OLE2: today's behaviour, the extractor runs and
+        its exception is recorded as ``failed`` by type, with a WARNING."""
+        caplog.set_level("INFO")
+        calls = _count_extractor_calls(monkeypatch)
+        payload = b"SYNTHETIC_PAYLOAD_MARKER not a zip and not OLE2"
+        for content_type, filename, module in _LEGACY_LABELS:
+            result = extract(content_type=content_type, filename=filename, payload=payload)
+            assert result.status == STATUS_FAILED, (content_type, filename)
+            assert result.extractor is not None
+            assert result.extractor.startswith(f"{module}@")
+            assert result.error == "BadZipFile"
+        assert calls == [module for _, _, module in _LEGACY_LABELS]
+        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+        assert len(warnings) == len(_LEGACY_LABELS)
+        assert "SYNTHETIC_PAYLOAD_MARKER" not in caplog.text
+
+    def test_ole2_payload_with_a_legacy_label_is_unsupported_without_an_extractor(
+        self, monkeypatch, caplog
+    ):
+        """A genuine ``.doc`` / ``.xls`` is recorded ``unsupported`` with a
+        fixed reason, not ``failed``, so it is not re-run every
+        ``_FAILED_CACHE_MAX_AGE``. The extractor is never called and no
+        per-item WARNING is logged: the attachments aggregate counts it."""
+        from src.extractors import LEGACY_OLE2_ERROR
+
+        caplog.set_level("DEBUG")
+        calls = _count_extractor_calls(monkeypatch)
+        payload = _OLE2_MAGIC + b"SYNTHETIC_PAYLOAD_MARKER" + bytes(512)
+        for content_type, filename, _ in _LEGACY_LABELS:
+            result = extract(content_type=content_type, filename=filename, payload=payload)
+            assert result == ExtractionResult(
+                status=STATUS_UNSUPPORTED, extractor=None, text=None, error=LEGACY_OLE2_ERROR
+            ), (content_type, filename)
+        assert calls == []
+        assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert "SYNTHETIC_PAYLOAD_MARKER" not in caplog.text
+        assert "SYNTHETIC_PAYLOAD_MARKER" not in LEGACY_OLE2_ERROR
+
+    def test_ole2_check_reads_only_the_signature(self, monkeypatch):
+        """A payload shorter than the signature, or one that only starts
+        like it, keeps today's path."""
+        calls = _count_extractor_calls(monkeypatch)
+        for payload in (_OLE2_MAGIC[:4], b"\xd0\xcf\x11\xe0\x00\x00\x00\x00junk"):
+            result = extract(content_type="application/msword", filename="a.doc", payload=payload)
+            assert result.status == STATUS_FAILED
+        assert calls == ["docx", "docx"]
+
+    def test_ole2_payload_refreshing_a_stale_row_is_unsupported(self, monkeypatch):
+        """The startup sweep refreshes a stale ``docx`` / ``xlsx`` row with
+        ``module_override``; a legacy-labelled OLE2 occurrence then records
+        ``unsupported`` rather than failing again."""
+        from src.extractors import LEGACY_OLE2_ERROR
+
+        calls = _count_extractor_calls(monkeypatch)
+        result = extract(
+            content_type="application/octet-stream",
+            filename="a.xls",
+            payload=_OLE2_MAGIC + bytes(64),
+            module_override="xlsx",
+        )
+        assert (result.status, result.error) == (STATUS_UNSUPPORTED, LEGACY_OLE2_ERROR)
+        assert calls == []
+
+    def test_ole2_outcome_does_not_depend_on_the_label(self, monkeypatch):
+        """Review round 1: the cache is shared by content hash, so the
+        outcome for the same bytes must not depend on which occurrence
+        arrives first. An OLE2 payload bound for either OOXML extractor is
+        ``unsupported`` under an OOXML label too (for example a
+        password-protected OOXML package, which is also OLE2), and when a
+        ``.bin`` occurrence refreshes a stale row."""
+        from src.extractors import LEGACY_OLE2_ERROR
+
+        calls = _count_extractor_calls(monkeypatch)
+        payload = _OLE2_MAGIC + bytes(64)
+        for content_type, filename, override in (
+            (
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                "a.doc",
+                None,
+            ),
+            ("application/octet-stream", "a.docx", None),
+            ("application/octet-stream", "a.xlsx", None),
+            ("application/octet-stream", "a.bin", "docx"),
+            ("application/octet-stream", "a.bin", "xlsx"),
+        ):
+            result = extract(
+                content_type=content_type,
+                filename=filename,
+                payload=payload,
+                module_override=override,
+            )
+            assert (result.status, result.error) == (STATUS_UNSUPPORTED, LEGACY_OLE2_ERROR), (
+                content_type,
+                filename,
+            )
+        assert calls == []
+
+    def test_ole2_payload_for_another_extractor_keeps_todays_path(self, monkeypatch):
+        """Only the OOXML extractors are guarded: the text extractor still
+        reads whatever an OLE2 payload labelled ``.txt`` holds."""
+        calls = _count_extractor_calls(monkeypatch)
+        result = extract(
+            content_type="text/plain", filename="a.txt", payload=_OLE2_MAGIC + b"words"
+        )
+        assert result.status == STATUS_SUCCESS
+        assert calls == ["text"]
+
+    def test_docx_and_xlsx_rows_from_before_the_ole2_check_are_stale(self):
+        """The recorded outcome changed for OLE2 payloads (``failed`` became
+        ``unsupported``), so rows the previous versions wrote re-extract."""
+        from src.extractors import EXTRACTOR_VERSIONS, stale_extractor_module
+
+        assert EXTRACTOR_VERSIONS["docx"] == 4
+        assert EXTRACTOR_VERSIONS["xlsx"] == 5
+        assert stale_extractor_module("docx@3") == "docx"
+        assert stale_extractor_module("xlsx@4") == "xlsx"
+        assert stale_extractor_module("docx@4") is None
+        assert stale_extractor_module("xlsx@5") is None
+
+
+_DOTX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.template"
+
+
+def _dotx_bytes(text: str) -> bytes:
+    """A synthetic Word template: a ``.docx`` whose main part declares the
+    template content type, as Word saves a ``.dotx``."""
+    import io
+    import zipfile
+
+    source = zipfile.ZipFile(io.BytesIO(_docx_bytes(text)))
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w") as archive:
+        for info in source.infolist():
+            data = source.read(info.filename)
+            if info.filename == "[Content_Types].xml":
+                assert b"document.main+xml" in data
+                data = data.replace(b"document.main+xml", b"template.main+xml")
+            archive.writestr(info, data)
+    return out.getvalue()
+
+
+class TestWordTemplates:
+    """#694: python-docx refuses a ``.dotx`` (its main part's content type
+    is not the document type), so ``.dotx`` stays unsupported rather than
+    being mapped to the DOCX extractor to fail on every template."""
+
+    def test_python_docx_does_not_open_a_dotx(self):
+        import io
+
+        import docx
+
+        with pytest.raises(ValueError, match="not a Word file"):
+            docx.Document(io.BytesIO(_dotx_bytes("SYNTHETIC_DOC_TEXT")))
+
+    def test_dotx_is_unsupported_by_mime_and_by_extension(self, monkeypatch):
+        from src.extractors import NO_EXTRACTOR_ERROR
+
+        calls = _count_extractor_calls(monkeypatch)
+        payload = _dotx_bytes("SYNTHETIC_DOC_TEXT")
+        for content_type, filename in (
+            (_DOTX_MIME, "a.bin"),
+            ("application/octet-stream", "a.dotx"),
+        ):
+            result = extract(content_type=content_type, filename=filename, payload=payload)
+            assert (result.status, result.error) == (STATUS_UNSUPPORTED, NO_EXTRACTOR_ERROR)
+        assert calls == []
 
 
 # #903: every truncation or skip cap inside an extractor is reported the

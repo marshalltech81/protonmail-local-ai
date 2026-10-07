@@ -311,7 +311,10 @@ class ExtractionResult:
 # pdf 4: lets ``MemoryError`` / ``RecursionError`` on a page escape as
 # host pressure; before, the page was skipped and the PDF could be
 # cached as a success with that page's text missing (#707).
-EXTRACTOR_VERSIONS: dict[str, int] = {"docx": 3, "image": 3, "pdf": 4, "text": 2, "xlsx": 4}
+# docx 4, xlsx 5: an OLE2 payload (a real ``.doc`` / ``.xls``, or an
+# encrypted OOXML file) is recorded ``unsupported`` instead of ``failed``, so the
+# ``failed`` rows the previous versions wrote for one are refreshed (#694).
+EXTRACTOR_VERSIONS: dict[str, int] = {"docx": 4, "image": 3, "pdf": 4, "text": 2, "xlsx": 5}
 
 
 def _stamp_extractor(module_name: str, extractor_name: str) -> str:
@@ -382,6 +385,16 @@ SCANNED_PDF_OCR_DISABLED_ERROR = f"{OCR_DISABLED_ERROR}; scanned PDF"
 # persisted text names neither (#257).
 NO_EXTRACTOR_ERROR = "no extractor for this content type or filename extension"
 
+# ``unsupported`` error for a payload bound for the DOCX or XLSX extractor
+# that is an OLE2 compound file, which neither OOXML extractor can read
+# (#694): a legacy binary ``.doc`` / ``.xls``, or a password-protected
+# OOXML package. Decided by the bytes alone, whatever the label, because
+# the result is cached by content hash for every occurrence.
+LEGACY_OLE2_ERROR = "OLE2 compound file (legacy .doc / .xls or encrypted Office file)"
+
+# The fixed 8-byte signature every OLE2 compound file starts with.
+_OLE2_SIGNATURE = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+
 
 # Maps normalized MIME -> per-format extractor module name (under
 # ``indexer.extractors``). The module is imported lazily so a missing
@@ -389,7 +402,12 @@ NO_EXTRACTOR_ERROR = "no extractor for this content type or filename extension"
 _MIME_DISPATCH: dict[str, str] = {
     "application/pdf": "pdf",
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
-    "application/msword": "docx",  # legacy .doc handled best-effort by docx path
+    # Legacy ``.doc`` / ``.xls`` labels: a best effort for OOXML files
+    # mislabelled as a legacy type. A real legacy binary (OLE2) is recorded
+    # ``unsupported`` before the extractor runs (``LEGACY_OLE2_ERROR``).
+    # Word templates (``.dotx``) are not routed: python-docx refuses a
+    # package whose main part is the template type (#694).
+    "application/msword": "docx",
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
     "application/vnd.ms-excel": "xlsx",
     "text/html": "html",
@@ -507,6 +525,21 @@ def extract(
             extractor=None,
             text=None,
             error=NO_EXTRACTOR_ERROR,
+        )
+
+    # An OLE2 payload (a real legacy ``.doc`` / ``.xls``) would only fail
+    # inside the OOXML parser and be re-run every ``_FAILED_CACHE_MAX_AGE``;
+    # record it as unsupported instead (#694). The bytes alone decide, not
+    # the label, so every occurrence of the same bytes, including a
+    # ``module_override`` refresh, records the same outcome (review round
+    # 1). A constant-size prefix check; the aggregate counts the result,
+    # so no per-item line.
+    if module_name in {"docx", "xlsx"} and payload.startswith(_OLE2_SIGNATURE):
+        return ExtractionResult(
+            status=STATUS_UNSUPPORTED,
+            extractor=None,
+            text=None,
+            error=LEGACY_OLE2_ERROR,
         )
 
     extractor_fn = _safe_import(module_name)
