@@ -1082,11 +1082,31 @@ def _iter_maildir_messages(root: Path):
     """Yield every message file under ``root`` whose parent is ``cur`` or
     ``new``, at any nesting depth. mbsync ``SubFolders Legacy`` writes
     ``Folders/.Clients/cur/msg`` — a flat ``iterdir`` over ``root`` would
-    miss every nested folder's mail. ``rglob`` includes the dot
-    directories."""
-    for filepath in root.rglob("*"):
-        if filepath.is_file() and filepath.parent.name in ("cur", "new"):
-            yield filepath
+    miss every nested folder's mail. ``os.walk`` includes the dot
+    directories and, unlike ``rglob``, reports a directory it cannot
+    read, so the walk ends with a WARNING counting them (#870): their
+    mail stays unindexed until a later walk finds them readable. A
+    directory that vanished mid-walk is gone, not unreadable."""
+    unreadable = 0
+
+    def _on_error(exc: OSError) -> None:
+        nonlocal unreadable
+        if not isinstance(exc, FileNotFoundError):
+            unreadable += 1
+
+    for dirpath, _dirnames, filenames in os.walk(root, onerror=_on_error):
+        if os.path.basename(dirpath) not in ("cur", "new"):
+            continue
+        for name in filenames:
+            filepath = Path(dirpath, name)
+            if filepath.is_file():
+                yield filepath
+    if unreadable:
+        log.warning(
+            "Maildir walk: skipped %d director(ies) it could not read; "
+            "their mail is not indexed until they are readable",
+            unreadable,
+        )
 
 
 # Exception types whose text cannot carry mail content, so
@@ -2988,6 +3008,21 @@ def main():
     last_summary = time.monotonic()
     try:
         while True:
+            # watchdog's dispatcher catches only ``queue.Empty``, so an
+            # exception escaping a handler (``enqueue`` or ``is_indexed``
+            # on a locked database, a full disk) ends the observer
+            # thread, and from then on only the periodic rescan finds
+            # new mail. Checked before the heartbeat so the healthcheck
+            # never reports a watcherless indexer as live; the exit is
+            # the stall guard's remedy, Compose restarts the container
+            # with a fresh watcher and the startup walk covers the gap
+            # (#870).
+            if not observer.is_alive():
+                log.error(
+                    "Maildir watcher thread stopped; new mail is found only by the "
+                    "periodic rescan; exiting so the container restarts"
+                )
+                raise SystemExit(1)
             touch_health_file()
             _maybe_log_queue_heartbeat(queue)
             # Drain any queued indexing jobs before yielding to the
