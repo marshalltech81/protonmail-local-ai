@@ -3913,6 +3913,132 @@ class TestRequeueNewlyDispatchedExtensions:
         assert self._queued(db) == {}
 
 
+class TestPptxStartsDispatching:
+    """#936: before the PPTX extractor, a ``.pptx`` attachment was cached
+    ``unsupported`` with no extractor. Once ``.pptx`` dispatches, the
+    startup sweep re-queues the message once and the real extractor reads
+    the deck, so its text becomes searchable."""
+
+    _write_eml = staticmethod(TestRequeueOcrDisabledExtractions._write_eml)
+    _drain = TestRequeueOcrDisabledExtractions._drain
+    _queued = staticmethod(TestRequeueOcrDisabledExtractions._queued)
+
+    PPTX_MIME = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+
+    @staticmethod
+    def _deck(text: str) -> bytes:
+        import io
+
+        from pptx import Presentation
+        from pptx.util import Inches
+
+        presentation = Presentation()
+        slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+        box = slide.shapes.add_textbox(Inches(1), Inches(1), Inches(4), Inches(1))
+        box.text_frame.text = text
+        buf = io.BytesIO()
+        presentation.save(buf)
+        return buf.getvalue()
+
+    def test_pptx_cached_without_an_extractor_is_requeued_and_read_once(
+        self, tmp_path, monkeypatch
+    ):
+        from src import extractors
+        from src.extractors import NO_EXTRACTOR_ERROR
+
+        maildir = tmp_path / "maildir"
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        db = Database(tmp_path / "mail.db")
+        queue = _make_queue(db)
+        paths = {}
+        for name, ctype, filename in (
+            ("by_mime", self.PPTX_MIME, "deck.bin"),
+            ("by_ext", "application/octet-stream", "deck.pptx"),
+        ):
+            path = maildir / "INBOX" / "cur" / f"{name}.eml"
+            payload = self._deck(f"SYNTHETICPPTXFACT {name}")
+            self._write_eml(path, f"{name}@example.com", payload, ctype, filename)
+            queue.enqueue(str(path), REASON_INITIAL_SCAN)
+            paths[name] = str(path)
+
+        # Before: neither label selects an extractor (today's behaviour on
+        # main before #936).
+        with monkeypatch.context() as before:
+            before.delitem(extractors._MIME_DISPATCH, self.PPTX_MIME, raising=False)
+            before.delitem(extractors._EXT_DISPATCH, ".pptx", raising=False)
+            self._drain(db, queue)
+            rows = db._conn.execute(
+                "SELECT extraction_status, extractor, extraction_error FROM attachment_extractions"
+            ).fetchall()
+            assert [tuple(r) for r in rows] == [("unsupported", None, NO_EXTRACTOR_ERROR)] * 2
+            assert main._requeue_stale_extractions(db, queue) == 0
+
+        # After: both messages are re-queued once and the deck is read.
+        assert main._requeue_stale_extractions(db, queue) == 2
+        assert self._queued(db) == {
+            paths["by_mime"]: REASON_REEXTRACT,
+            paths["by_ext"]: REASON_REEXTRACT,
+        }
+        self._drain(db, queue)
+        rows = db._conn.execute(
+            "SELECT extraction_status, extractor FROM attachment_extractions"
+        ).fetchall()
+        assert [tuple(r) for r in rows] == [("success", "pptx@1")] * 2
+        chunks = [
+            r["text"]
+            for r in db._conn.execute(
+                "SELECT text FROM message_chunks WHERE attachment_id IS NOT NULL"
+            )
+        ]
+        assert sorted(c for c in chunks if "SYNTHETICPPTXFACT" in c) == [
+            "SYNTHETICPPTXFACT by_ext",
+            "SYNTHETICPPTXFACT by_mime",
+        ]
+
+        # The rows are rewritten, so the next startup finds nothing.
+        assert main._requeue_stale_extractions(db, queue) == 0
+        assert self._queued(db) == {}
+
+    def test_malformed_deck_keeps_its_text_out_of_logs_and_errors(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """A deck python-pptx rejects is a ``failed`` attachment recorded
+        by type; the message still indexes, and the deck's text reaches
+        neither the log nor any persisted error."""
+        import io
+        import zipfile
+
+        marker = "SYNTHETIC_PPTX_LAST_ERROR_MARKER"
+        source = zipfile.ZipFile(io.BytesIO(self._deck("x")))
+        out = io.BytesIO()
+        with zipfile.ZipFile(out, "w") as archive:
+            for info in source.infolist():
+                data = source.read(info.filename)
+                if info.filename == "ppt/slides/slide1.xml":
+                    # A run with no ``a:t``: python-pptx raises on it.
+                    data = data.replace(b"<a:t>x</a:t>", f'<a:rPr lang="{marker}"/>'.encode())
+                    assert marker.encode() in data
+                archive.writestr(info.filename, data)
+
+        maildir = tmp_path / "maildir"
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        db = Database(tmp_path / "mail.db")
+        queue = _make_queue(db)
+        path = maildir / "INBOX" / "cur" / "bad.eml"
+        self._write_eml(path, "bad@example.com", out.getvalue(), self.PPTX_MIME, "deck.pptx")
+        queue.enqueue(str(path), REASON_INITIAL_SCAN)
+        caplog.set_level("DEBUG")
+        self._drain(db, queue)
+
+        rows = db._conn.execute(
+            "SELECT extraction_status, extractor, extraction_error FROM attachment_extractions"
+        ).fetchall()
+        assert [tuple(r) for r in rows] == [("failed", "pptx@1", "InvalidXmlError")]
+        errors = [r[0] for r in db._conn.execute("SELECT last_error FROM indexing_jobs")]
+        assert all(marker not in (e or "") for e in errors)
+        assert marker not in caplog.text
+
+
 class TestRequeueTooLargeThatNowFits:
     """#693: attachments cached ``too_large`` under a smaller
     ``INDEXER_ATTACHMENT_MAX_BYTES`` must be read once the operator raises

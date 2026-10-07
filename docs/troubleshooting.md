@@ -1184,9 +1184,11 @@ only, never filenames or text (`make logs`):
 
 - `extractor <module> failed (dispatch_via=<mime|extension|...>):
   <ExceptionType>` (WARNING), per extraction that fails: an encrypted
-  PDF that needs a password, a Tesseract error or timeout, a DOCX or
-  XLSX the parser rejects, or (`zip uncompressed-size cap exceeded`) a
-  DOCX or XLSX that would decompress past its cap. Many of these at
+  PDF that needs a password, a Tesseract error or timeout, a DOCX,
+  XLSX or PPTX the parser rejects (`PptxRelationshipChainError` is a
+  deck whose parts are chained too deep to open), or (`zip
+  uncompressed-size cap exceeded`) a DOCX, XLSX or PPTX that would
+  decompress past its cap. Many of these at
   once usually means the OCR toolchain or a parser library is
   broken, not the mail. A failed result is cached for 7 days, then
   retried when the same bytes arrive again.
@@ -1235,6 +1237,12 @@ only, never filenames or text (`make logs`):
   - `xlsx_expanded_cells`, `xlsx_text_chars`: the walk over a
     workbook's cells stopped at its cell budget (5,000,000, counting a
     row as 64 cells) or its 10,000,000-character text budget.
+  - `pptx_slides`, `pptx_shapes`, `pptx_table_cells`,
+    `pptx_text_chars`: the walk over a PowerPoint deck stopped at its
+    slide budget (5,000 slide-list entries), shape budget (100,000,
+    counting groups and the shapes in them), table budget (200,000 rows
+    and cells) or 10,000,000-character text budget; the slides after it
+    are not read.
 
   The other caps either skip or fail the whole attachment and show as
   `too_large` or `failed` instead (`INDEXER_ATTACHMENT_MAX_BYTES`, the
@@ -1272,7 +1280,8 @@ only, never filenames or text (`make logs`):
     so none are lost, and the 5-minute flush still applies.
   - What the outcomes mean: `cached` counts attachments served from the
     extraction cache instead of extracted again. `unsupported` is a type
-    no extractor reads, including genuine
+    no extractor reads, including PowerPoint slideshows and templates
+    (`.ppsx`, `.potx`) and genuine
     legacy binary `.doc` / `.xls` and password-protected Office files (OLE2), recorded with
     "OLE2 compound file" rather than as `failed`, so they
     are not retried (#694; see `docs/architecture.md`, "Extractor

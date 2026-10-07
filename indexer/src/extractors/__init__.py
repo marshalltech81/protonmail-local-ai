@@ -75,12 +75,12 @@ Image.MAX_IMAGE_PIXELS = GLOBAL_MAX_IMAGE_PIXELS
 
 log = logging.getLogger("indexer.extractor")
 
-# Cap the *uncompressed* size of any zip-based attachment (DOCX / XLSX).
+# Cap the *uncompressed* size of any zip-based attachment (DOCX / XLSX / PPTX).
 # The dispatcher's ``max_bytes`` already bounds the on-disk payload, but
 # a 1 MB workbook can decompress to multi-GB of XML (zip bomb). Reject
 # anything whose declared uncompressed size exceeds this cap before
-# python-docx / openpyxl get a chance to expand it. 200 MB covers any
-# realistic spreadsheet while keeping memory bounded.
+# python-docx / openpyxl / python-pptx get a chance to expand it. 200 MB
+# covers any realistic spreadsheet while keeping memory bounded.
 ZIP_MAX_UNCOMPRESSED_BYTES = 200 * 1024 * 1024
 
 # Counts the indexer reports in its periodic attachments aggregate
@@ -302,7 +302,17 @@ class ExtractionResult:
 # ``failed`` rows the previous versions wrote for one are refreshed (#694).
 # docx 5: reads Word templates (``.dotx``), which ``docx.Document``
 # refused, so a template labelled ``.docx`` failed (#937).
-EXTRACTOR_VERSIONS: dict[str, int] = {"docx": 5, "image": 3, "pdf": 4, "text": 2, "xlsx": 5}
+# pptx 1: the first PowerPoint extractor (#936). Rows cached ``unsupported``
+# for a ``.pptx`` before it carry no extractor, so no version marks them
+# stale; the "no extractor" sweep re-queues them instead.
+EXTRACTOR_VERSIONS: dict[str, int] = {
+    "docx": 5,
+    "image": 3,
+    "pdf": 4,
+    "pptx": 1,
+    "text": 2,
+    "xlsx": 5,
+}
 
 
 def _stamp_extractor(module_name: str, extractor_name: str) -> str:
@@ -373,8 +383,8 @@ SCANNED_PDF_OCR_DISABLED_ERROR = f"{OCR_DISABLED_ERROR}; scanned PDF"
 # persisted text names neither (#257).
 NO_EXTRACTOR_ERROR = "no extractor for this content type or filename extension"
 
-# ``unsupported`` error for a payload bound for the DOCX or XLSX extractor
-# that is an OLE2 compound file, which neither OOXML extractor can read
+# ``unsupported`` error for a payload bound for an OOXML extractor (DOCX,
+# XLSX, PPTX) that is an OLE2 compound file, which none of them can read
 # (#694): a legacy binary ``.doc`` / ``.xls``, or a password-protected
 # OOXML package. Decided by the bytes alone, whatever the label, because
 # the result is cached by content hash for every occurrence.
@@ -382,6 +392,10 @@ LEGACY_OLE2_ERROR = "OLE2 compound file (legacy .doc / .xls or encrypted Office 
 
 # The fixed 8-byte signature every OLE2 compound file starts with.
 _OLE2_SIGNATURE = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+
+# Extractors that read an OOXML package (a ZIP): each gets the OLE2 check
+# and the ZIP guard before its library opens the payload.
+OOXML_MODULES = frozenset({"docx", "pptx", "xlsx"})
 
 
 # Maps normalized MIME -> per-format extractor module name (under
@@ -399,6 +413,9 @@ _MIME_DISPATCH: dict[str, str] = {
     "application/msword": "docx",
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
     "application/vnd.ms-excel": "xlsx",
+    # Presentations only: python-pptx refuses a package whose main part is
+    # the slideshow (``.ppsx``) or template (``.potx``) type (#936).
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation": "pptx",
     "text/html": "html",
     "application/xhtml+xml": "html",
     "text/plain": "text",
@@ -416,6 +433,7 @@ _EXT_DISPATCH: dict[str, str] = {
     ".doc": "docx",
     ".xlsx": "xlsx",
     ".xls": "xlsx",
+    ".pptx": "pptx",
     ".html": "html",
     ".htm": "html",
     ".xhtml": "html",
@@ -524,7 +542,7 @@ def extract(
     # ``module_override`` refresh, records the same outcome (review round
     # 1). A constant-size prefix check; the aggregate counts the result,
     # so no per-item line.
-    if module_name in {"docx", "xlsx"} and payload.startswith(_OLE2_SIGNATURE):
+    if module_name in OOXML_MODULES and payload.startswith(_OLE2_SIGNATURE):
         return ExtractionResult(
             status=STATUS_UNSUPPORTED,
             extractor=None,
@@ -541,11 +559,11 @@ def extract(
             error=f"extractor module {module_name!r} not importable in this image",
         )
 
-    # Zip-based formats (DOCX, XLSX) need a zip-bomb pre-check: the
+    # Zip-based formats (DOCX, XLSX, PPTX) need a zip-bomb pre-check: the
     # ``max_bytes`` cap above only bounds the compressed payload; a
     # malicious workbook can declare 200× expansion in its central
     # directory. Reject before handing to lxml.
-    if module_name in {"docx", "xlsx"}:
+    if module_name in OOXML_MODULES:
         zip_error = _validate_zip_payload(payload)
         if zip_error is not None:
             # A ``failed`` row drops the attachment out of search, so it

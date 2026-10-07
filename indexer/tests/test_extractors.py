@@ -13,6 +13,7 @@ laptop without the Docker image's apt packages installed.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 
 import pytest
 from src.extractors import (
@@ -5031,6 +5032,505 @@ class TestWordTemplates:
         assert stale_extractor_module("docx@5") is None
 
 
+# #936: PowerPoint ``.pptx``. Every deck is built here with python-pptx
+# itself; crafted shapes python-pptx cannot write are made by editing the
+# saved XML.
+
+_PPTX_MIME = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+_PPSX_MIME = "application/vnd.openxmlformats-officedocument.presentationml.slideshow"
+_POTX_MIME = "application/vnd.openxmlformats-officedocument.presentationml.template"
+_PPTX_MARKER = "SYNTHETIC_PPTX_MARKER"
+
+
+def _deck(*slides) -> bytes:
+    """A deck with one blank slide per item; each item is a callable that
+    adds shapes to its slide."""
+    import io
+
+    from pptx import Presentation
+
+    presentation = Presentation()
+    for build in slides:
+        build(presentation.slides.add_slide(presentation.slide_layouts[6]))
+    buf = io.BytesIO()
+    presentation.save(buf)
+    return buf.getvalue()
+
+
+def _box(shapes, text: str):
+    from pptx.util import Inches
+
+    box = shapes.add_textbox(Inches(1), Inches(1), Inches(4), Inches(1))
+    box.text_frame.text = text
+    return box
+
+
+def _boxes(*texts: str):
+    """A slide builder adding one text box per text."""
+
+    def build(slide):
+        for text in texts:
+            _box(slide.shapes, text)
+
+    return build
+
+
+def _rewrite_deck(payload: bytes, edits: dict[str, Callable[[bytes], bytes]], extra=()) -> bytes:
+    """Re-zip ``payload`` with ``edits[name](xml) -> xml`` applied to
+    those members and ``extra`` (name, bytes) members added."""
+    import io
+    import zipfile
+
+    source = zipfile.ZipFile(io.BytesIO(payload))
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as archive:
+        for info in source.infolist():
+            data = source.read(info.filename)
+            if info.filename in edits:
+                data = edits[info.filename](data)
+            archive.writestr(info.filename, data)
+        for name, data in extra:
+            archive.writestr(name, data)
+    return out.getvalue()
+
+
+def _count_pptx_work(monkeypatch) -> dict[str, int]:
+    """Count the slides python-pptx resolves and the non-placeholder
+    shapes it builds, independently of the extractor's own budget."""
+    from pptx.parts.presentation import PresentationPart
+    from pptx.shapes import shapetree
+
+    counts = {"slides": 0, "shapes": 0}
+    real_slide = PresentationPart.related_slide
+    real_factory = shapetree.BaseShapeFactory
+
+    def related_slide(self, rId):
+        counts["slides"] += 1
+        return real_slide(self, rId)
+
+    def factory(shape_elm, parent):
+        counts["shapes"] += 1
+        return real_factory(shape_elm, parent)
+
+    monkeypatch.setattr(PresentationPart, "related_slide", related_slide)
+    monkeypatch.setattr(shapetree, "BaseShapeFactory", factory)
+    return counts
+
+
+class TestPptxExtractor:
+    """#936: text from slide shapes (text frames, tables, groups) and the
+    speaker notes, in slide order; no images and no OCR."""
+
+    @staticmethod
+    def _full_slide(slide):
+        from pptx.util import Inches
+
+        _box(slide.shapes, "Quarterly review")
+        table = slide.shapes.add_table(2, 2, Inches(1), Inches(2), Inches(4), Inches(1)).table
+        for (row, col), text in {
+            (0, 0): "Region",
+            (0, 1): "Revenue",
+            (1, 0): "North",
+            (1, 1): "TABLEFACT 42",
+        }.items():
+            table.cell(row, col).text = text
+        group = slide.shapes.add_group_shape()
+        _box(group.shapes, "GROUPFACT inside a group")
+        slide.notes_slide.notes_text_frame.text = "NOTESFACT said aloud"
+
+    def test_reads_text_tables_groups_and_notes_in_slide_order(self):
+        from src.extractors.pptx import extract as pptx_extract
+
+        text, name = pptx_extract(_deck(self._full_slide, _boxes("Second slide")))
+        assert name == "pptx"
+        assert text == (
+            "Quarterly review\n\nRegion Revenue\n\nNorth TABLEFACT 42\n\n"
+            "GROUPFACT inside a group\n\nNOTESFACT said aloud\n\nSecond slide"
+        )
+
+    @pytest.mark.parametrize(
+        ("content_type", "filename"),
+        [(_PPTX_MIME, "deck.bin"), ("application/octet-stream", "Deck.PPTX"), ("", "deck.pptx")],
+    )
+    def test_dispatches_by_mime_and_by_extension(self, content_type, filename, monkeypatch):
+        calls = _count_extractor_calls(monkeypatch)
+        result = extract(
+            content_type=content_type,
+            filename=filename,
+            payload=_deck(_boxes("ATTACHMENTFACT only in the deck")),
+        )
+        assert result == ExtractionResult(
+            status=STATUS_SUCCESS,
+            extractor="pptx@1",
+            text="ATTACHMENTFACT only in the deck",
+            error=None,
+        )
+        assert calls == ["pptx"]
+
+    def test_non_ascii_text_and_line_breaks(self):
+        from src.extractors.pptx import extract as pptx_extract
+
+        text, _ = pptx_extract(_deck(_boxes("Résumé — 東京 Ελληνικά 🙂", "first\vsecond")))
+        assert text == "Résumé — 東京 Ελληνικά 🙂\n\nfirst\nsecond"
+
+    def test_merged_table_cell_is_read_once(self):
+        from pptx.util import Inches
+        from src.extractors.pptx import extract as pptx_extract
+
+        def build(slide):
+            table = slide.shapes.add_table(1, 3, Inches(1), Inches(1), Inches(4), Inches(1)).table
+            table.cell(0, 0).text = "merged"
+            table.cell(0, 2).text = "last"
+            table.cell(0, 0).merge(table.cell(0, 1))
+            # A spanned cell is hidden by the merge; text left in it is
+            # not shown, so it is not read.
+            table.cell(0, 1).text_frame.text = "hidden"
+
+        text, _ = pptx_extract(_deck(build))
+        assert text == "merged last"
+
+    def test_picture_is_not_read(self, monkeypatch):
+        import io
+
+        from PIL import Image
+        from pptx.util import Inches
+        from src.extractors import image
+        from src.extractors.pptx import extract as pptx_extract
+
+        def no_ocr(*args, **kwargs):
+            raise AssertionError("pictures are not OCR'd")
+
+        monkeypatch.setattr(image, "extract", no_ocr)
+        png = io.BytesIO()
+        Image.new("RGB", (8, 8), color="white").save(png, "PNG")
+
+        def build(slide):
+            png.seek(0)
+            slide.shapes.add_picture(png, Inches(1), Inches(1))
+            _box(slide.shapes, "caption")
+
+        assert pptx_extract(_deck(build)) == ("caption", "pptx")
+
+    def test_shape_without_a_text_body_is_skipped(self):
+        from src.extractors.pptx import extract as pptx_extract
+
+        def build(slide):
+            bare = _box(slide.shapes, "removed")
+            bare._sp.remove(bare._sp.txBody)
+            _box(slide.shapes, "kept")
+
+        assert pptx_extract(_deck(build)) == ("kept", "pptx")
+
+    def test_notes_page_shapes_count_against_the_shape_budget(self, monkeypatch):
+        """A notes page has a slide image and a body placeholder: with the
+        slide's own box that is three shapes, so a budget of two stops on
+        the notes page and the next slide is not read."""
+        from src.extractors import pptx
+
+        def with_notes(slide):
+            _box(slide.shapes, "on the slide")
+            slide.notes_slide.notes_text_frame.text = "NOTESFACT"
+
+        payload = _deck(with_notes, _boxes("next slide"))
+        monkeypatch.setattr(pptx, "_MAX_SHAPES", 2)
+        counts = _count_pptx_work(monkeypatch)
+        assert pptx.extract(payload) == ("on the slide", "pptx")
+        assert counts == {"slides": 1, "shapes": 1}
+
+    def test_table_rows_are_listed_once(self, monkeypatch):
+        """python-pptx's row collection has no ``__iter__``: iterating it
+        indexes it, and each index lists every row again, so a table of
+        20,000 empty rows took about two minutes. The rows are listed once."""
+        import re
+        import time
+
+        from pptx.oxml.table import CT_Table
+        from pptx.util import Inches
+        from src.extractors import pptx
+
+        def build(slide):
+            table = slide.shapes.add_table(1, 1, Inches(1), Inches(1), Inches(4), Inches(1))
+            table.table.cell(0, 0).text = "header"
+            _box(slide.shapes, "after the table")
+
+        def many_rows(xml: bytes) -> bytes:
+            row = re.search(rb"<a:tr [^>]*>.*?</a:tr>", xml, re.S)
+            assert row is not None
+            return xml.replace(row.group(0), row.group(0) + b'<a:tr h="1"/>' * 20_000)
+
+        payload = _rewrite_deck(_deck(build), {"ppt/slides/slide1.xml": many_rows})
+        listings = [0]
+        real = CT_Table.tr_lst
+
+        def counting(self):
+            listings[0] += 1
+            return real.fget(self)
+
+        monkeypatch.setattr(CT_Table, "tr_lst", property(counting))
+        started = time.perf_counter()
+        assert pptx.extract(payload) == ("header\n\nafter the table", "pptx")
+        assert time.perf_counter() - started < 5.0
+        assert listings[0] == 1
+
+    def test_text_budget_can_end_in_the_notes(self, monkeypatch):
+        from src.extractors import pptx
+
+        def with_notes(slide):
+            _box(slide.shapes, "abc")
+            slide.notes_slide.notes_text_frame.text = "defgh"
+
+        payload = _deck(with_notes, _boxes("next slide"))
+        element = pptx._ELEMENT_COST
+        monkeypatch.setattr(pptx, "_MAX_TEXT_CHARS", (2 * element + 3) + (2 * element + 2))
+        counts = _count_pptx_work(monkeypatch)
+        assert pptx.extract(payload) == ("abc\n\nde", "pptx")
+        assert counts["slides"] == 1
+
+    def test_row_refused_before_its_first_cell_adds_no_line(self, monkeypatch):
+        from pptx.util import Inches
+        from src.extractors import pptx
+
+        def build(slide):
+            table = slide.shapes.add_table(2, 1, Inches(1), Inches(1), Inches(4), Inches(1))
+            table.table.cell(0, 0).text = "first"
+            table.table.cell(1, 0).text = "second"
+            _box(slide.shapes, "after the table")
+
+        payload = _deck(build)
+        monkeypatch.setattr(pptx, "_MAX_TABLE_CELLS", 2 + 1)
+        assert pptx.extract(payload) == ("first", "pptx")
+
+    def test_text_budget_can_end_inside_a_table_cell(self, monkeypatch, caplog):
+        from pptx.util import Inches
+        from src import extractors
+        from src.extractors import pptx
+
+        def build(slide):
+            table = slide.shapes.add_table(1, 3, Inches(1), Inches(1), Inches(4), Inches(1))
+            for col, text in enumerate(("abc", "defgh", "ijk")):
+                table.table.cell(0, col).text = text
+
+        payload = _deck(build)
+        element = pptx._ELEMENT_COST
+        monkeypatch.setattr(pptx, "_MAX_TEXT_CHARS", (2 * element + 3) + (2 * element + 2))
+        caplog.set_level("DEBUG")
+        extractors.drain_extractor_counts()
+        assert pptx.extract(payload) == ("abc de", "pptx")
+        assert "extractor cap pptx_text_chars" in caplog.text
+        assert extractors.drain_extractor_counts()["extractor_caps"] == 1
+
+    def test_deck_without_text_is_empty(self):
+        result = extract(content_type=_PPTX_MIME, filename="a.pptx", payload=_deck(_boxes()))
+        assert (result.status, result.extractor, result.text) == (STATUS_EMPTY, "pptx@1", None)
+
+    def test_repeated_slide_entries_read_the_slide_once(self, monkeypatch):
+        """A slide list naming one slide many times costs a slide-list
+        entry each, not a walk of the slide each."""
+        import re
+
+        from src.extractors.pptx import extract as pptx_extract
+
+        def repeat(xml: bytes) -> bytes:
+            entry = re.search(rb"<p:sldId [^>]*/>", xml)
+            assert entry is not None
+            return xml.replace(entry.group(0), entry.group(0) * 1000)
+
+        payload = _rewrite_deck(_deck(_boxes("once")), {"ppt/presentation.xml": repeat})
+        counts = _count_pptx_work(monkeypatch)
+        assert pptx_extract(payload) == ("once", "pptx")
+        assert counts == {"slides": 1000, "shapes": 1}
+
+    def test_deeply_nested_groups_are_walked_without_recursion(self):
+        """Groups nest as deep as lxml parses (256 elements); the walk
+        uses an explicit stack, so it passes under a recursion limit a
+        recursive walk of the same nesting would exceed."""
+        import inspect
+        import sys
+
+        from src.extractors.pptx import extract as pptx_extract
+
+        depth = 200
+
+        def build(slide):
+            shapes = slide.shapes
+            for _ in range(depth):
+                shapes = shapes.add_group_shape().shapes
+            _box(shapes, "DEEPFACT")
+
+        payload = _deck(build)
+        limit = sys.getrecursionlimit()
+        sys.setrecursionlimit(len(inspect.stack()) + 100)
+        try:
+            text, _ = pptx_extract(payload)
+        finally:
+            sys.setrecursionlimit(limit)
+        assert text == "DEEPFACT"
+
+    def test_group_nesting_past_the_xml_depth_limit_fails_by_type(self, caplog):
+        """A crafted group deeper than lxml parses fails as a parse error,
+        recorded by type, never as ``RecursionError``."""
+        group = (
+            '<p:grpSp><p:nvGrpSpPr><p:cNvPr id="5" name="g"/><p:cNvGrpSpPr/><p:nvPr/>'
+            "</p:nvGrpSpPr><p:grpSpPr/>"
+        )
+
+        def nest(xml: bytes) -> bytes:
+            inner = group * 300 + _PPTX_MARKER + "</p:grpSp>" * 300
+            return xml.replace(b"</p:spTree>", inner.encode() + b"</p:spTree>")
+
+        payload = _rewrite_deck(_deck(_boxes("x")), {"ppt/slides/slide1.xml": nest})
+        caplog.set_level("DEBUG")
+        result = extract(content_type=_PPTX_MIME, filename="a.pptx", payload=payload)
+        assert (result.status, result.error) == (STATUS_FAILED, "XMLSyntaxError")
+        assert _PPTX_MARKER not in caplog.text
+
+    def test_long_relationship_chain_fails_by_type_not_recursion(self, caplog):
+        """python-pptx follows relationships recursively while it opens a
+        package, so a chain of related parts raised ``RecursionError``,
+        which the dispatcher re-raises as host pressure. It is a property
+        of the file: a ``failed`` row with a fixed type."""
+        import time
+
+        rel = (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" Type="http://example.invalid/chain" Target="/c/p{0}.xml"/>'
+            "</Relationships>"
+        )
+        links = 2000
+        extra = [(f"c/p{i}.xml", b"<x/>") for i in range(links + 1)]
+        extra += [(f"c/_rels/p{i}.xml.rels", rel.format(i + 1).encode()) for i in range(links)]
+
+        def link(xml: bytes) -> bytes:
+            return xml.replace(
+                b"</Relationships>",
+                b'<Relationship Id="rIdChain" Type="http://example.invalid/chain"'
+                b' Target="/c/p0.xml"/></Relationships>',
+            )
+
+        payload = _rewrite_deck(
+            _deck(_boxes(_PPTX_MARKER)), {"ppt/_rels/presentation.xml.rels": link}, extra
+        )
+        caplog.set_level("DEBUG")
+        started = time.perf_counter()
+        result = extract(content_type=_PPTX_MIME, filename="a.pptx", payload=payload)
+        assert time.perf_counter() - started < 5.0
+        assert (result.status, result.error) == (STATUS_FAILED, "PptxRelationshipChainError")
+        assert result.extractor == "pptx@1"
+        assert _PPTX_MARKER not in caplog.text
+
+    def test_malformed_slide_fails_by_type_without_its_text(self, caplog):
+        """A run without its ``a:t`` raises inside python-pptx; the error
+        recorded and logged is the type alone."""
+
+        def break_run(xml: bytes) -> bytes:
+            return xml.replace(
+                b"</p:spTree>",
+                (
+                    '<p:sp><p:nvSpPr><p:cNvPr id="9" name="t"/><p:cNvSpPr txBox="1"/><p:nvPr/>'
+                    "</p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:p><a:r><a:rPr lang="
+                    f'"{_PPTX_MARKER}"/></a:r></a:p></p:txBody></p:sp></p:spTree>'
+                ).encode(),
+            )
+
+        payload = _rewrite_deck(_deck(_boxes("x")), {"ppt/slides/slide1.xml": break_run})
+        caplog.set_level("DEBUG")
+        result = extract(content_type=_PPTX_MIME, filename=f"{_PPTX_MARKER}.pptx", payload=payload)
+        assert result.status == STATUS_FAILED
+        assert result.error == "InvalidXmlError"
+        assert "InvalidXmlError" in caplog.text
+        assert _PPTX_MARKER not in caplog.text
+        assert _PPTX_MARKER not in (result.error or "")
+
+    def test_zip_guard_runs_before_python_pptx(self, monkeypatch, caplog):
+        calls = _count_extractor_calls(monkeypatch)
+        monkeypatch.setattr("src.extractors.ZIP_MAX_UNCOMPRESSED_BYTES", 64)
+        caplog.set_level("DEBUG")
+        result = extract(
+            content_type=_PPTX_MIME, filename="a.pptx", payload=_deck(_boxes(_PPTX_MARKER))
+        )
+        assert result.status == STATUS_FAILED
+        assert "uncompressed" in (result.error or "")
+        assert calls == []
+        assert _PPTX_MARKER not in caplog.text
+
+    def test_ole2_payload_labelled_pptx_is_unsupported(self, monkeypatch):
+        """An encrypted ``.pptx`` is an OLE2 compound file, which
+        python-pptx cannot open: recorded ``unsupported`` like an
+        encrypted ``.docx`` (#694), without running the extractor."""
+        from src.extractors import LEGACY_OLE2_ERROR
+
+        calls = _count_extractor_calls(monkeypatch)
+        for content_type, filename, override in (
+            (_PPTX_MIME, "a.bin", None),
+            ("application/octet-stream", "a.pptx", None),
+            ("application/octet-stream", "a.bin", "pptx"),
+        ):
+            result = extract(
+                content_type=content_type,
+                filename=filename,
+                payload=_OLE2_MAGIC + bytes(64),
+                module_override=override,
+            )
+            assert (result.status, result.error) == (STATUS_UNSUPPORTED, LEGACY_OLE2_ERROR)
+        assert calls == []
+
+    def test_pptx_starts_at_version_one(self):
+        from src.extractors import EXTRACTOR_VERSIONS, stale_extractor_module
+
+        assert EXTRACTOR_VERSIONS["pptx"] == 1
+        assert stale_extractor_module("pptx@1") is None
+
+
+def _retyped_deck(main_type: str) -> bytes:
+    """A deck whose main part declares another PresentationML type, as
+    PowerPoint saves a slideshow (``.ppsx``) or a template (``.potx``)."""
+
+    def retype(xml: bytes) -> bytes:
+        assert b"presentation.main+xml" in xml
+        return xml.replace(b"presentation.main+xml", main_type.encode())
+
+    return _rewrite_deck(_deck(_boxes("SLIDESHOWFACT")), {"[Content_Types].xml": retype})
+
+
+class TestPowerPointSlideshowsAndTemplates:
+    """#936: python-pptx refuses a package whose main part is the
+    slideshow or template type, so ``.ppsx`` / ``.potx`` stay unsupported
+    rather than being routed to fail on every file, as ``.dotx`` (#694)."""
+
+    @pytest.mark.parametrize("main_type", ["slideshow.main+xml", "template.main+xml"])
+    def test_python_pptx_does_not_open_them(self, main_type):
+        import io
+
+        from pptx import Presentation
+
+        with pytest.raises(ValueError, match="not a PowerPoint file"):
+            Presentation(io.BytesIO(_retyped_deck(main_type)))
+
+    @pytest.mark.parametrize(
+        ("content_type", "filename"),
+        [
+            (_PPSX_MIME, "a.bin"),
+            ("application/octet-stream", "a.ppsx"),
+            (_POTX_MIME, "a.bin"),
+            ("application/octet-stream", "a.potx"),
+        ],
+    )
+    def test_they_are_unsupported_by_mime_and_by_extension(
+        self, content_type, filename, monkeypatch
+    ):
+        from src.extractors import NO_EXTRACTOR_ERROR
+
+        calls = _count_extractor_calls(monkeypatch)
+        result = extract(
+            content_type=content_type,
+            filename=filename,
+            payload=_retyped_deck("slideshow.main+xml"),
+        )
+        assert (result.status, result.error) == (STATUS_UNSUPPORTED, NO_EXTRACTOR_ERROR)
+        assert calls == []
+
+
 # #903: every truncation or skip cap inside an extractor is reported the
 # same way: a fixed cap name in a rate-limited WARNING, and one
 # ``extractor_caps`` count in the attachments aggregate per cap per
@@ -5196,6 +5696,72 @@ def _cap_xlsx_text_chars(monkeypatch):
     assert rows[0] == 1
 
 
+def _cap_pptx_slides(monkeypatch):
+    from src.extractors import pptx
+
+    monkeypatch.setattr(pptx, "_MAX_SLIDES", 2)
+    payload = _deck(*[_boxes(f"{_CAP_MARKER} {i}") for i in range(5)])
+    counts = _count_pptx_work(monkeypatch)
+    text, _ = pptx.extract(payload)
+    assert text == f"{_CAP_MARKER} 0\n\n{_CAP_MARKER} 1"
+    # The third slide is resolved, refused, and nothing after it.
+    assert counts == {"slides": 3, "shapes": 2}
+
+
+def _cap_pptx_shapes(monkeypatch):
+    """Group members count as shapes: the group, then the box in it."""
+    from src.extractors import pptx
+
+    def build(slide):
+        _box(slide.shapes, f"{_CAP_MARKER} 0")
+        _box(slide.shapes.add_group_shape().shapes, f"{_CAP_MARKER} 1")
+        for i in range(2, 10):
+            _box(slide.shapes, f"{_CAP_MARKER} {i}")
+
+    monkeypatch.setattr(pptx, "_MAX_SHAPES", 3)
+    payload = _deck(build)
+    counts = _count_pptx_work(monkeypatch)
+    text, _ = pptx.extract(payload)
+    assert text == f"{_CAP_MARKER} 0\n\n{_CAP_MARKER} 1"
+    assert counts == {"slides": 1, "shapes": 4}
+
+
+def _cap_pptx_table_cells(monkeypatch):
+    """A row costs one unit and each of its cells one: the second row
+    keeps its first cell."""
+    from pptx.util import Inches
+    from src.extractors import pptx
+
+    def build(slide):
+        table = slide.shapes.add_table(3, 2, Inches(1), Inches(1), Inches(4), Inches(1)).table
+        for row in range(3):
+            for col in range(2):
+                table.cell(row, col).text = f"{_CAP_MARKER}{row}{col}"
+
+    monkeypatch.setattr(pptx, "_MAX_TABLE_CELLS", 3 + 2)
+    payload = _deck(build)
+    read = _count_calls(monkeypatch, pptx, "_text_lines")
+    text, _ = pptx.extract(payload)
+    assert text == f"{_CAP_MARKER}00 {_CAP_MARKER}01\n\n{_CAP_MARKER}10"
+    assert read[0] == 3
+
+
+def _cap_pptx_text_chars(monkeypatch):
+    """A paragraph costs ``_ELEMENT_COST``, and each element in it that
+    plus its characters: the second box keeps the five characters that
+    fit."""
+    from src.extractors import pptx
+
+    first = f"{_CAP_MARKER} 0"
+    element = pptx._ELEMENT_COST
+    monkeypatch.setattr(pptx, "_MAX_TEXT_CHARS", (2 * element + len(first)) + (2 * element + 5))
+    payload = _deck(_boxes(*[f"{_CAP_MARKER} {i}" for i in range(10)]))
+    counts = _count_pptx_work(monkeypatch)
+    text, _ = pptx.extract(payload)
+    assert text == f"{first}\n\n{_CAP_MARKER[:5]}"
+    assert counts == {"slides": 1, "shapes": 2}
+
+
 # Each reported cap, and an extraction that crosses it with its output
 # pinned (what the code returned before #903) and the work it did.
 _CAP_TRIGGERS = {
@@ -5207,6 +5773,10 @@ _CAP_TRIGGERS = {
     "xlsx_tag_bytes": _cap_xlsx_tag_bytes,
     "xlsx_expanded_cells": _cap_xlsx_expanded_cells,
     "xlsx_text_chars": _cap_xlsx_text_chars,
+    "pptx_slides": _cap_pptx_slides,
+    "pptx_shapes": _cap_pptx_shapes,
+    "pptx_table_cells": _cap_pptx_table_cells,
+    "pptx_text_chars": _cap_pptx_text_chars,
 }
 
 # Every cap constant in the extractor modules (``module:NAME``) and every
@@ -5221,6 +5791,10 @@ _REPORTED_CAPS = {
     "src.extractors.xlsx:_MAX_TAG_BYTES": "xlsx_tag_bytes",
     "src.extractors.xlsx:_MAX_EXPANDED_CELLS": "xlsx_expanded_cells",
     "src.extractors.xlsx:_MAX_TEXT_CHARS": "xlsx_text_chars",
+    "src.extractors.pptx:_MAX_SLIDES": "pptx_slides",
+    "src.extractors.pptx:_MAX_SHAPES": "pptx_shapes",
+    "src.extractors.pptx:_MAX_TABLE_CELLS": "pptx_table_cells",
+    "src.extractors.pptx:_MAX_TEXT_CHARS": "pptx_text_chars",
 }
 # ... or the reason it is not reported as an extractor cap.
 _WORKBOOK_FAILS = "fails the workbook (XlsxEagerPartBudgetError): a failed row, counted as failed="
@@ -5253,6 +5827,7 @@ _EXTRACTOR_MODULES = (
     "src.extractors.html",
     "src.extractors.image",
     "src.extractors.pdf",
+    "src.extractors.pptx",
     "src.extractors.text",
     "src.extractors.xlsx",
 )
@@ -5360,8 +5935,13 @@ class TestExtractorCapsAreReported:
                 filename="a.xlsx",
                 payload=_xlsx_bytes([["a", "b"], ["c", "d"]]),
             ),
+            lambda: extract(
+                content_type=_PPTX_MIME,
+                filename="a.pptx",
+                payload=_deck(TestPptxExtractor._full_slide, _boxes("b")),
+            ),
         ],
-        ids=["text", "xlsx"],
+        ids=["text", "xlsx", "pptx"],
     )
     def test_an_extraction_under_every_cap_reports_none(self, run, caplog):
         from src import extractors
@@ -5466,6 +6046,56 @@ class TestExtractorCapsAreReported:
         text, _ = xlsx.extract(_titled_xlsx(sheets))
         assert text == "[Sheet: Sheet]\nabcdef"
         assert ("extractor cap xlsx_text_chars" in caplog.text) is reported
+        assert extractors.drain_extractor_counts()["extractor_caps"] == int(reported)
+
+    @pytest.mark.parametrize(
+        ("cap", "setting", "slides", "reported"),
+        [
+            ("pptx_slides", 2, [["a"], ["b"]], False),
+            ("pptx_slides", 2, [["a"], ["b"], ["c"]], True),
+            ("pptx_shapes", 2, [["a", "b"]], False),
+            ("pptx_shapes", 2, [["a"], ["b", "c"]], True),
+            ("pptx_text_chars", 2 * 8 + 6, [["abcdef"]], False),
+            ("pptx_text_chars", 2 * 8 + 6, [["abcdef"], ["g"]], True),
+        ],
+    )
+    def test_pptx_budget_spent_exactly_reports_only_a_real_cut(
+        self, cap, setting, slides, reported, monkeypatch, caplog
+    ):
+        """As for the XLSX text budget (review round 1 on #903): a budget
+        the deck's last item spends exactly cut nothing."""
+        from src import extractors
+        from src.extractors import pptx
+
+        constant = {
+            "pptx_slides": "_MAX_SLIDES",
+            "pptx_shapes": "_MAX_SHAPES",
+            "pptx_text_chars": "_MAX_TEXT_CHARS",
+        }[cap]
+        assert pptx._ELEMENT_COST == 8
+        monkeypatch.setattr(pptx, constant, setting)
+        caplog.set_level("DEBUG")
+        pptx.extract(_deck(*[_boxes(*texts) for texts in slides]))
+        assert ("extractor cap" in caplog.text) is reported
+        assert extractors.drain_extractor_counts()["extractor_caps"] == int(reported)
+
+    @pytest.mark.parametrize(("rows", "reported"), [(1, False), (2, True)])
+    def test_pptx_cell_budget_spent_exactly_reports_only_a_real_cut(
+        self, rows, reported, monkeypatch, caplog
+    ):
+        from pptx.util import Inches
+        from src import extractors
+        from src.extractors import pptx
+
+        def build(slide):
+            table = slide.shapes.add_table(rows, 2, Inches(1), Inches(1), Inches(4), Inches(1))
+            for row in range(rows):
+                table.table.cell(row, 0).text = "x"
+
+        monkeypatch.setattr(pptx, "_MAX_TABLE_CELLS", 3)
+        caplog.set_level("DEBUG")
+        assert pptx.extract(_deck(build))[0] == "x"
+        assert ("extractor cap pptx_table_cells" in caplog.text) is reported
         assert extractors.drain_extractor_counts()["extractor_caps"] == int(reported)
 
     def test_spent_text_budget_stops_at_the_first_unread_value(self, monkeypatch):

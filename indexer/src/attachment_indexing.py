@@ -42,6 +42,7 @@ from .database import Database
 from .extractors import (
     LEGACY_OLE2_ERROR,
     OCR_DISABLED_ERROR,
+    OOXML_MODULES,
     SCANNED_PDF_OCR_DISABLED_ERROR,
     STATUS_EMPTY,
     STATUS_FAILED,
@@ -216,16 +217,16 @@ def _unsupported_still_holds(error: str | None, attachment: Attachment, ocr_enab
     holds until OCR is turned on for an occurrence that needs OCR: an
     image, or a PDF when the PDF extractor wrote the result (it found no
     digital text layer). An OLE2 result also holds for an occurrence
-    that selects the DOCX or XLSX extractor, which the dispatcher would
-    reject the same way (#694). Any other result holds only while this
-    occurrence selects no extractor.
+    that selects an OOXML extractor (DOCX, XLSX, PPTX), which the
+    dispatcher would reject the same way (#694). Any other result holds
+    only while this occurrence selects no extractor.
     """
     module = resolved_extractor_module(attachment.content_type, attachment.filename)
     error = error or ""
     needs_ocr = module == "image" or (module == "pdf" and error == SCANNED_PDF_OCR_DISABLED_ERROR)
     if "OCR disabled" in error and needs_ocr:
         return not ocr_enabled
-    if error == LEGACY_OLE2_ERROR and module in {"docx", "xlsx"}:
+    if error == LEGACY_OLE2_ERROR and module in OOXML_MODULES:
         return True
     return module is None
 
