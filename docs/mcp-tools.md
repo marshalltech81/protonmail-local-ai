@@ -1689,9 +1689,9 @@ replayed). The repaired brief is used when it parses; otherwise the
 first one when it parsed; otherwise the raw reply is returned with
 `status: "invalid_json"`. A reply cut off before it finished is not
 repaired and comes back with `status: "truncated"`, the stop in
-`truncation_reason`, and a fixed line before the raw reply naming the
-setting to change, as for `ask_mailbox`'s truncation notice:
-`max_tokens` when the reply reached `INFERENCE_MAX_TOKENS` (a brief
+`truncation_reason`, and the prose before the raw reply says where it
+was cut and which setting to change, in the same words as
+`extract_from_emails`' `Incomplete:` line: `max_tokens` when the reply reached `INFERENCE_MAX_TOKENS` (a brief
 needs more output than an `ask_mailbox` answer, so raise it, for
 example to 4096; anthropic mode defaults to 16000), `context_window`
 when the model's own window filled first (lower

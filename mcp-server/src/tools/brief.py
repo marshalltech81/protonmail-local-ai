@@ -33,7 +33,6 @@ from pydantic import BaseModel, ValidationError
 
 from ..lib.embed import embed_query
 from ..lib.inference import (
-    _TRUNCATION_MESSAGES,
     InferenceTruncatedError,
     PromptBudget,
     TruncationReason,
@@ -50,6 +49,7 @@ from ..lib.sqlite import (
 from ..lib.timings import count, rerank_mode, stage, timed_tool
 from ..lib.validation import clamp_int
 from .intelligence import (
+    _EXTRACT_CUT_TEXTS,
     _LABEL_RE,
     _MAX_ASK_THREADS,
     _QUOTE_RE,
@@ -777,14 +777,15 @@ def _scope_labels(
 
 def _raw_reply_line(reason: TruncationReason | None, kind: str, raw_text: str) -> str:
     """The prose before a reply that did not parse as a ``kind``: for a
-    cut reply, the fixed message naming the setting for its stop (#890,
-    #951), else that it was not valid JSON."""
-    if reason:
-        return f"\n{_TRUNCATION_MESSAGES[reason]}; the model's raw reply follows.\n\n{raw_text}"
-    return (
-        f"\nThe model's reply was not valid JSON in the {kind} format, even after one "
-        f"repair; its raw text follows.\n\n{raw_text}"
+    cut reply, extract_from_emails' fixed text for its stop, which names
+    the setting to change (#950, #951); else that it was not valid
+    JSON."""
+    why = (
+        _EXTRACT_CUT_TEXTS[reason]
+        if reason
+        else f"not valid JSON in the {kind} format, even after one repair"
     )
+    return f"\nThe model's reply was {why}; its raw text follows.\n\n{raw_text}"
 
 
 def register_experimental_tools(

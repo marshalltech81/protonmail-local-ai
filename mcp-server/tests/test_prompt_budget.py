@@ -1319,7 +1319,6 @@ class TestExperimentalTokenLimits:
     fixed text naming the setting for that stop. Neither the request,
     the mail nor the reply (each carries ``_MARKER``) reaches the log."""
 
-    _TEXTS = TestTruncationText._ERRORS
     _WRONG = TestTruncationText._WRONG
     _LIMITS = {"max_tokens": "output_max_tokens", "context_window": "context_window"}
 
@@ -1338,7 +1337,9 @@ class TestExperimentalTokenLimits:
         assert data["truncation_reason"] == reason
         assert data["raw_text"] == partial
         text = out.content[0].text
-        assert f"\n{self._TEXTS[reason]}; the model's raw reply follows.\n\n{partial}" in text
+        # The same per-stop wording as extract_from_emails (#950).
+        cut = TestTruncationText._EXTRACT_CUTS[reason]
+        assert f"\nThe model's reply was {cut}; its raw text follows.\n\n{partial}" in text
         assert self._WRONG[reason] not in text
         line = _one_limit_line(caplog)
         assert line["tool"] == tool
