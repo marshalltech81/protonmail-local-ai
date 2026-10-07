@@ -249,3 +249,81 @@ class TestLogging:
         assert "'evidence_attachment_copies_collapsed': 4" in deduped
         assert "evidence_attachment_copies_collapsed" not in default
         assert _MARKER not in caplog.text
+
+
+def _copies_db(tmp_path: Path, texts: list[str]) -> Database:
+    """One thread whose messages each carry ``att-plan`` with one
+    passage; message ``i`` is sent on day ``i + 1`` with ``texts[i]``."""
+    path = tmp_path / "copies.db"
+    conn = sqlite3.connect(str(path))
+    conn.enable_load_extension(True)
+    sqlite_vec.load(conn)
+    conn.enable_load_extension(False)
+    _build_schema(conn)
+    for i, text in enumerate(texts):
+        message_id = f"copy{i:02d}@plan.example"
+        _insert_message(
+            conn,
+            message_id=message_id,
+            thread_id="t-plan",
+            subject="venue plan",
+            sent_at=f"2025-09-{i + 1:02d}T09:00:00+00:00",
+            from_=[_COACH],
+            to=[_PARENT],
+            has_attachments=True,
+        )
+        _insert_attachment(
+            conn,
+            message_id=message_id,
+            thread_id="t-plan",
+            attachment_id="att-plan",
+            filename="plan.pdf",
+        )
+        _chunk(conn, f"copy-{i:02d}", message_id, text, 1.0 - i / 100, attachment_id="att-plan")
+    _finish_threads(conn)
+    conn.close()
+    return Database(str(path))
+
+
+class TestReviewRoundOne:
+    """Codex review round 1 on PR #1046."""
+
+    def test_copies_with_different_text_stay_separate(self, tmp_path):
+        # One payload whose copies were chunked differently (another
+        # extractor module, or stale chunks after an extractor version
+        # bump): same hash and chunk index, different text.
+        db = _copies_db(tmp_path, [_PLAN_0, f"Venue plan, re-extracted. {_MARKER}", _PLAN_0])
+        out = _evidence(db, thread_id="t-plan", dedupe_attachments=True)
+        by_id = {c["chunk_id"]: c for c in _chunks(out)}
+        assert sorted(by_id) == ["copy-00", "copy-01"]
+        assert [c["claimant_id"] for c in by_id["copy-00"]["carried_by"]] == [
+            claimant_of("copy02@plan.example")
+        ]
+        assert by_id["copy-01"]["carried_by"] == []
+        assert out.structured_content["attachment_copies_collapsed"] == 1
+
+    def test_carried_by_lists_at_most_ten_and_counts_every_carrier(self, tmp_path, caplog):
+        db = _copies_db(tmp_path, [_PLAN_0] * 13)
+        with caplog.at_level(logging.INFO):
+            out = _evidence(db, thread_id="t-plan", dedupe_attachments=True)
+        EvidenceOutput.model_validate(out.structured_content)
+        (chunk,) = _chunks(out)
+        assert chunk["chunk_id"] == "copy-00"
+        assert [c["claimant_id"] for c in chunk["carried_by"]] == [
+            claimant_of(f"copy{i:02d}@plan.example") for i in range(1, 11)
+        ]
+        assert chunk["carried_by_count"] == 12
+        assert out.structured_content["attachment_copies_collapsed"] == 12
+        text = out.content[0].text
+        assert f"msg {claimant_of('copy10@plan.example')} (2025-09-11), and 2 more" in text
+        assert claimant_of("copy11@plan.example") not in text
+        timing = next(r.getMessage() for r in caplog.records if r.name == "mcp.timings")
+        assert "'evidence_carriers_unlisted': 2" in timing
+        assert _MARKER not in caplog.text
+
+    def test_a_short_carrier_list_reports_its_count(self, dedupe_db):
+        out = _evidence(dedupe_db, thread_id="t-plan", dedupe_attachments=True)
+        by_id = {c["chunk_id"]: c for c in _chunks(out)}
+        assert by_id["first-0"]["carried_by_count"] == 2
+        assert by_id["other-0"]["carried_by_count"] == 0
+        assert "carried_by_count" not in by_id["first-body"]

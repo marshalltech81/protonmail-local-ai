@@ -114,21 +114,25 @@ def _carrier_date(chunk) -> tuple[bool, str]:
 
 
 def _collapse_attachment_copies(chunks: list) -> tuple[list, dict[str, list]]:
-    """``chunks`` with each attachment passage (same content hash and
-    chunk index) kept once, on its earliest carrying message, at the rank
-    of its best-ranked copy (#989); and, per kept ``chunk_id``, the other
-    copies, earliest first. Body passages pass through unchanged."""
-    copies: dict[tuple[str, int], list] = {}
+    """``chunks`` with each attachment passage (same content hash, chunk
+    index and text) kept once, on its earliest carrying message, at the
+    rank of its best-ranked copy (#989); and, per kept ``chunk_id``, the
+    other copies, earliest first. Body passages pass through unchanged.
+
+    The text is part of the key: copies of one payload can be chunked
+    differently (another extractor module, or a message left on an older
+    extractor version), and those are different passages."""
+    copies: dict[tuple[str, int, str], list] = {}
     for c in chunks:
         if c.attachment_id is not None:
-            copies.setdefault((c.attachment_id, c.chunk_index), []).append(c)
+            copies.setdefault((c.attachment_id, c.chunk_index, c.text), []).append(c)
     kept: list = []
     carried: dict[str, list] = {}
     for c in chunks:
         if c.attachment_id is None:
             kept.append(c)
             continue
-        group = copies[(c.attachment_id, c.chunk_index)]
+        group = copies[(c.attachment_id, c.chunk_index, c.text)]
         if c is not group[0]:
             continue
         # A stable sort: copies of one date keep their rank order.
@@ -960,6 +964,16 @@ def register_search_tools(
                 len(carried.get(c.chunk_id, ())) for *_, chunks in groups for c in chunks
             )
             count("evidence_attachment_copies_collapsed", collapsed)
+            # ``carried_by`` lists ``MAX_LISTED`` carriers per passage; the
+            # rest are counted in ``carried_by_count`` and here.
+            count(
+                "evidence_carriers_unlisted",
+                sum(
+                    max(0, len(carried.get(c.chunk_id, ())) - MAX_LISTED)
+                    for *_, chunks in groups
+                    for c in chunks
+                ),
+            )
             if collapsed:
                 notes.append(
                     f"dedupe_attachments collapsed {collapsed} repeated attachment passage(s)."
@@ -1013,8 +1027,13 @@ def register_search_tools(
                                         occurred_at=o.message_occurred_at,
                                         scope=_chunk_scope(o, labels),
                                     )
-                                    for o in carried.get(c.chunk_id, ())
+                                    for o in carried.get(c.chunk_id, [])[:MAX_LISTED]
                                 ]
+                                if dedupe_attachments and c.attachment_id is not None
+                                else None
+                            ),
+                            carried_by_count=(
+                                len(carried.get(c.chunk_id, ()))
                                 if dedupe_attachments and c.attachment_id is not None
                                 else None
                             ),
@@ -1075,13 +1094,15 @@ def register_search_tools(
                     fname = clip(chunk.attachment_filename or "attachment", HEADER_CHAR_LIMIT)
                     mime = clip(chunk.attachment_mime or "unknown", HEADER_CHAR_LIMIT)
                     lines.append(f'        Source: attachment "{fname}" ({mime})')
-                    if carried.get(chunk.chunk_id):
+                    others = carried.get(chunk.chunk_id, [])
+                    if others:
+                        unlisted = len(others) - MAX_LISTED
                         lines.append(
                             "        Also carried by: "
                             + ", ".join(
-                                f"msg {o.claimant_id} ({_msg_date(o)})"
-                                for o in carried[chunk.chunk_id]
+                                f"msg {o.claimant_id} ({_msg_date(o)})" for o in others[:MAX_LISTED]
                             )
+                            + (f", and {unlisted} more" if unlisted > 0 else "")
                         )
                 elif chunk.kind != "body":
                     lines.append(f"        Source: message body ({chunk.kind})")

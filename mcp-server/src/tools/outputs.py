@@ -391,8 +391,13 @@ class EvidenceChunk(_Output):
         exclude_if=lambda v: v is None,
         description="Only with dedupe_attachments, on attachment passages: the other "
         "messages of this thread carrying the same attachment (content hash) whose copy "
-        "of this passage was collapsed into this one, earliest first. This passage is on "
-        "the earliest carrier.",
+        "of this passage was collapsed into this one, earliest first, at most "
+        f"{MAX_LISTED}; see carried_by_count. This passage is on the earliest carrier.",
+    )
+    carried_by_count: int | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description="Only with carried_by: every message counted there, listed or not.",
     )
 
 

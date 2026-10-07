@@ -263,7 +263,8 @@ tool=search_emails outcome=ok total_ms=41.7 stages_ms={'query_embedding': 22.4, 
   `evidence_chunks_truncated` counts the passages it cut. With
   `dedupe_attachments`, `evidence_attachment_copies_collapsed` counts
   the [repeated attachment passages](#collapsing-repeated-attachments)
-  collapsed. A rejected
+  collapsed and `evidence_carriers_unlisted` the carriers past the ten
+  each `carried_by` lists. A rejected
   control logs `get_evidence rejected invalid <field>` once per field
   per minute, and later repeats as one count line.
 - `evidence_capped_threads` (the intelligence tools) counts the threads
@@ -622,16 +623,19 @@ forwarded) is indexed once per message, so by default each copy of a
 passage is returned
 ([#989](https://github.com/marshalltech81/protonmail-local-ai/issues/989)).
 With `dedupe_attachments=true`, attachment passages with the same
-`attachment_id` (the content hash) and `chunk_index` in one thread are
-returned once, on the earliest carrying message (by delivery date, else
+`attachment_id` (the content hash), `chunk_index` and text in one
+thread are returned once, on the earliest carrying message (by delivery date, else
 send date), at the rank of the best-ranked copy. That chunk's
 `carried_by` lists the other carrying messages, earliest first, each
-with its `claimant_id`, `sent_at`, `occurred_at` and `scope`; the prose
-adds an `Also carried by:` line. A different document under the same
-filename has a different content hash and stays separate, and body
-passages are untouched. Every attachment chunk carries `carried_by`
-(empty when no other message has the passage); body chunks and calls
-without the flag have none.
+with its `claimant_id`, `sent_at`, `occurred_at` and `scope`, at most
+10 of them; `carried_by_count` counts them all. The prose adds an
+`Also carried by:` line naming the same ten and `and N more`. A
+different document under the same filename has a different content
+hash and stays separate, and body passages are untouched. Copies of
+one payload whose text differs (chunked by another extractor module,
+or a message still on an older extractor version) also stay separate. Every attachment chunk carries `carried_by`
+and `carried_by_count` (empty and 0 when no other message has the
+passage); body chunks and calls without the flag have neither.
 
 The collapse runs on each thread's full ranked passage list, after
 `source` and `scope` and before the per-thread cap and the `limit`
