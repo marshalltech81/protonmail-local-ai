@@ -466,7 +466,16 @@ file size was not recorded) is neither true nor false of such a
 message, and so is `sender` (and the From side of `participant`) of a
 message whose `sender_ambiguous` is `true` or `null`, whether or not
 its stored From carries the value, since its author cannot be told
-([#1153](https://github.com/marshalltech81/protonmail-local-ai/issues/1153)). The leaves conjoin with SQL's three-valued AND: a message is
+([#1153](https://github.com/marshalltech81/protonmail-local-ai/issues/1153)).
+A `sender`, `recipient` or `participant` value matched as a substring
+(a name or fragment, not a full address) that matches none of a
+message's stored addresses and display names is unknown, not false,
+when its `participant_names_complete` is not `1`: `0` when the
+indexer's per-message name budget dropped a name, `null` for mail not
+reparsed since the upgrade that added it
+([#1140](https://github.com/marshalltech81/protonmail-local-ai/issues/1140)).
+A match on a stored address or name still decides it, and a full
+address never reads the flag. The leaves conjoin with SQL's three-valued AND: a message is
 a match when every leaf is true, rejected when any leaf is false, and
 otherwise *indeterminate*: left out of the matches and of
 `total_matches`, and counted in the response's `indeterminate` field,
@@ -805,7 +814,9 @@ matches, by the `sender` leaf `query_messages` uses
 exactly, anything else is a case-insensitive substring of the address
 or display name. A carrying message the leaf cannot decide (its
 `sender_ambiguous` is `true` or `null`, [Sender
-attribution](#sender-attribution)) keeps its attachments out of the
+attribution](#sender-attribution), or a name or fragment it does not
+match while its display names are not all indexed, [unknown
+values](#filter-predicates)) keeps its attachments out of the
 results, and this tool does not count them ([#1204](https://github.com/marshalltech81/protonmail-local-ai/issues/1204)); right after the upgrade
 that added `sender_ambiguous`, that is all mail indexed before it until
 the reparse drains, and
@@ -1064,7 +1075,9 @@ The aggregator matches the query against each `message_participants`
 row's canonical address or each display name the message wrote it
 with, one name at a time (a message that writes one address under two
 names keeps both, #1140; Unicode caseless: both sides are casefolded,
-so `STRASSE` matches `Straße`),
+so `STRASSE` matches `Straße`; until the reparse after that upgrade
+reaches a message, only its first names are stored, so `names` and
+the matches cover those),
 then aggregates every row of each matched canonical email (so the same
 contact across many threads collapses to one row, and a match on one
 display name still reports the contact's other names and threads), and
@@ -1163,7 +1176,9 @@ messages the filters could neither accept nor reject ([unknown
 values](#filter-predicates)); the prose states it whenever it is not
 0, naming the causes the given filters can have (`no stored size` for
 `size_min` / `size_max`; `sender ambiguous or not yet checked` for
-`sender` / `participant`). `total_matches` counts the definite matches:
+`sender` / `participant`; `display names not all indexed (reparse
+pending, or over the name budget)` for a `sender`, `recipient` or
+`participant` given as a name or fragment). `total_matches` counts the definite matches:
 it is the complete count only when `indeterminate` is 0, so report
 `indeterminate` with any count when it is not. A `sender` filter
 decides only messages whose `sender_ambiguous` is `false`, and a
@@ -1174,7 +1189,13 @@ its queued reparse runs, so every `sender` filter reports those
 matches as `indeterminate` (and `participant` those it finds only in
 From) until the reparse drains (`get_mailbox_status` `queue.reparse`);
 a message whose indexing job is dead-lettered stays indeterminate
-until `make requeue-dead`. Each
+until `make requeue-dead`. Likewise, right after the upgrade that added
+`message_participant_names`
+([#1140](https://github.com/marshalltech81/protonmail-local-ai/issues/1140)),
+every `sender`, `recipient` or `participant` filter given as a name or
+fragment reports each message it does not match as `indeterminate`
+until the reparse drains, since that mail's names past the first are
+not stored yet. Each
 message carries its send and delivery dates, folder, read state,
 [pending deletion](#pending-deletion), attachment flag, subject,
 From / To / Cc (at most 10 per role, with a count of the rest),
@@ -1532,7 +1553,9 @@ metadata, at query time (`Database.message_scope`, no schema change):
   `indeterminate` (a `from_addr` filter, or a `participant` filter not
   met through To or Cc, on a message
   whose `sender_ambiguous` is not `false`, [Sender
-  attribution](#sender-attribution)) is not in scope, so right after
+  attribution](#sender-attribution); a name or fragment that matches
+  nothing on a message whose display names are not all indexed) is not
+  in scope, so right after
   the upgrade that added `sender_ambiguous`, a `from_addr` request
   labels the passages of mail indexed before it `context` until the
   reparse drains.

@@ -946,6 +946,7 @@ class TestClockSizeAndRepliedLeaves:
             "occurred_to",
             "dated",
             "sender",
+            "recipient",
             "participant",
         }
         for name, kind in LEAVES.items():

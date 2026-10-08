@@ -276,6 +276,7 @@ class TestSenderAmbiguousMigration:
             "CREATE INDEX idx_message_participants_address_name "
             "ON message_participants(address, name)"
         )
+        db._conn.execute("ALTER TABLE messages DROP COLUMN participant_names_complete")
         db._conn.execute("ALTER TABLE messages DROP COLUMN sender_ambiguous")
         db._conn.execute("UPDATE schema_version SET version = 1")
         db._conn.commit()
@@ -312,29 +313,41 @@ class TestSenderAmbiguousMigration:
 class TestParticipantNamesMigration:
     """#1140: the real v3 -> v4 migration seeds
     ``message_participant_names`` with each participant's stored first
-    name and queues the reparse, which adds the other names with no
-    embedding call, chunkless threads included."""
+    name, leaves ``messages.participant_names_complete`` NULL (unknown)
+    on every message, dead letters included, and queues the reparse,
+    which adds the other names and sets the flag with no embedding call,
+    chunkless threads included."""
 
-    def test_backfill_through_the_reparse(self, tmp_path, caplog):
+    def test_backfill_through_the_reparse(self, tmp_path, caplog, monkeypatch):
         caplog.set_level(logging.DEBUG)
-        db, queue, paths = _index(tmp_path, ["one", None])
-        # Both messages write bob under two names.
-        for path in paths:
-            text = Path(path).read_text(encoding="utf-8")
-            Path(path).write_text(
+        import tests.test_reparse as this
+
+        original = this._write_eml
+
+        def two_names(path: Path, message_id: str, body: str | None) -> None:
+            # Every message writes bob under two names.
+            original(path, message_id, body)
+            text = path.read_text(encoding="utf-8")
+            path.write_text(
                 text.replace(
-                    "To: bob@example.com",
-                    f"To: Bob <bob@example.com>, {MARKER} <bob@example.com>",
+                    "To: bob@example.com", f"To: Bob <bob@example.com>, {MARKER} <bob@example.com>"
                 ),
                 encoding="utf-8",
             )
-            queue.enqueue(path, REASON_ON_CREATED)
-        _drain(db, queue, make_mock_embedder(_VECTOR))
+
+        monkeypatch.setattr(this, "_write_eml", two_names)
+        db, queue, paths = _index(tmp_path, ["one", None, "three"])
         all_names = {
             (r["claimant_id"], r["name"])
             for r in db._conn.execute("SELECT claimant_id, name FROM message_participant_names")
         }
         assert {name for _, name in all_names} == {"Bob", MARKER}
+        dead = paths[2]
+        [dead_claimant] = db._conn.execute(
+            "SELECT claimant_id FROM messages WHERE filepath = ?", (dead,)
+        ).fetchone()
+        queue.enqueue(dead, REASON_INITIAL_SCAN)
+        queue.mark_dead_terminal(dead, stage="parse", error="oversized: too large")
         chunks_before = db._conn.execute(
             "SELECT chunk_id FROM message_chunks ORDER BY chunk_id"
         ).fetchall()
@@ -347,31 +360,44 @@ class TestParticipantNamesMigration:
             "CREATE INDEX idx_message_participants_address_name "
             "ON message_participants(address, name)"
         )
+        db._conn.execute("ALTER TABLE messages DROP COLUMN participant_names_complete")
         db._conn.execute("UPDATE schema_version SET version = 3")
         db._conn.commit()
         db.close()
 
         db = Database(tmp_path / "mail.db")
         queue = IndexingQueue(db, max_attempts=3, base_backoff_seconds=0)
-        # Seeded with the first names only, and every file queued.
+        flags = db._conn.execute("SELECT participant_names_complete FROM messages").fetchall()
+        assert [r[0] for r in flags] == [None, None, None]
+        # Seeded with the first names only, and every live file queued;
+        # the dead-lettered job stays dead.
         seeded = {
             (r["claimant_id"], r["name"])
             for r in db._conn.execute("SELECT claimant_id, name FROM message_participant_names")
         }
         assert {name for _, name in seeded} == {"Bob"}
-        assert {fp: r["reason"] for fp, r in _jobs(db).items()} == dict.fromkeys(
-            paths, REASON_REPARSE
-        )
+        assert {fp: (r["reason"], r["status"]) for fp, r in _jobs(db).items()} == {
+            paths[0]: (REASON_REPARSE, "queued"),
+            paths[1]: (REASON_REPARSE, "queued"),
+            dead: (REASON_INITIAL_SCAN, "dead"),
+        }
 
         embedder = make_mock_embedder(_VECTOR)
-        assert _drain(db, queue, embedder) == len(paths)
+        assert _drain(db, queue, embedder) == 2
         assert embedder.embed_batch.call_count == 0
         assert embedder.embed.call_count == 0
         after = {
             (r["claimant_id"], r["name"])
             for r in db._conn.execute("SELECT claimant_id, name FROM message_participant_names")
         }
-        assert after == all_names
+        # The reparsed messages gain every name and a known flag; the
+        # dead-lettered one keeps its first name and stays unknown.
+        assert after == {(c, n) for c, n in all_names if c != dead_claimant or n == "Bob"}
+        by_path = {
+            r["filepath"]: r["participant_names_complete"]
+            for r in db._conn.execute("SELECT filepath, participant_names_complete FROM messages")
+        }
+        assert by_path == {paths[0]: 1, paths[1]: 1, dead: None}
         assert (
             db._conn.execute("SELECT chunk_id FROM message_chunks ORDER BY chunk_id").fetchall()
             == chunks_before

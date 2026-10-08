@@ -782,9 +782,25 @@ always kept; every further one spends one per-message budget of
 `MAX_EXTRA_PARTICIPANT_NAMES` (1,000) names and
 `MAX_EXTRA_PARTICIPANT_NAME_BYTES` (64,000) UTF-8 bytes, and a name
 past it is dropped and counted as the parser cap `participant_names`
-(see `docs/troubleshooting.md`). A dropped name is not yet recorded
-per message, so a name filter answers false rather than unknown for
-it (#1086).
+(see `docs/troubleshooting.md`).
+
+`messages.participant_names_complete` records, per message, whether
+that name stage kept every distinct name: `1` when it finished within
+the budget, `0` when the budget dropped one, `NULL` for mail not yet
+reparsed since the v4 upgrade (and for a dead-lettered message until
+`make requeue-dead`). It is written in the same transaction as the
+participant and name rows. It covers the name stage only: it does not
+certify that the participant rows or addresses are complete (an
+over-long or unparseable address header, the address budget, #1144);
+[#1086](https://github.com/marshalltech81/protonmail-local-ai/issues/1086)'s
+per-role completeness term needs its own column or an explicit backfill
+design. A `sender`, `recipient` or `participant` filter given as a name
+or fragment is decided by a match on a stored address or name; a
+message it does not match counts as a miss only when the flag is `1`,
+and is otherwise unknown (`indeterminate` in `query_messages`). A full
+address is matched exactly and never reads the flag. `find_contact` and
+its aggregators list and match only the stored names, so until the
+reparse reaches a message they see its first names only.
 Address headers are unfolded (RFC 5322 §2.2.3: a line break followed by
 a space or tab is removed, the whitespace kept) before they are parsed,
 and the Content-Disposition / Content-Type headers an attachment
@@ -2210,9 +2226,12 @@ message's rows (the #1144 address budget), but the thread's
 The v4 migration (`0004_participant_names.sql`, #1140) is one: it
 creates `message_participant_names`, seeds it with each participant
 row's stored first name, so name matching keeps what it saw before the
-upgrade, and queues the reparse, which adds the further names. Until
-the reparse reaches a message (or, for a dead-lettered one, until
-`make requeue-dead`), only its first names are stored, as before.
+upgrade, adds `messages.participant_names_complete` as `NULL` on every
+row, and queues the reparse, which adds the further names and sets the
+flag. Until the reparse reaches a message (or, for a dead-lettered one,
+until `make requeue-dead`), only its first names are stored and a name
+or fragment address filter that does not match it reports it as
+indeterminate rather than a miss.
 
 The migration that adds such data triggers the reparse itself: after
 its DDL it ends with `REPARSE_ENQUEUE_SQL` (`indexer/src/queue.py`),

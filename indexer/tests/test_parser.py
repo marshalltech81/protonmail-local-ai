@@ -5149,6 +5149,7 @@ class TestParticipantNames:
             ("to", "jane@example.test", "Jane Roe"),
             ("to", "jane@example.test", "J. Roe"),
         ]
+        assert msg.participant_names_complete is True
 
     def test_each_role_keeps_its_own_names_in_header_order(self):
         msg, _ = _parse_headers(
@@ -5201,8 +5202,9 @@ class TestParticipantNames:
             ("to", "jane@example.test", "SYNTHETIC_HEADER_MARKER 1"),
             ("to", "kim@example.test", "Kim"),
         ]
-        # The message keeps every recipient.
+        # The message keeps every recipient, and records the loss.
         assert len(msg.to_addrs) == 7
+        assert msg.participant_names_complete is False
         assert _cap_lines(caplog) == [
             f"parser work caps dropped content from {path}: participant_names=3"
         ]
@@ -5221,6 +5223,7 @@ class TestParticipantNames:
             b" =?utf-8?q?Jos=C3=A9?= <j@example.test>, Al <j@example.test>\r\n"
         )
         assert [name for _, _, name in msg.participant_names] == ["Jane", "Jo", "Al"]
+        assert msg.participant_names_complete is False
         assert _cap_lines(caplog) == [
             f"parser work caps dropped content from {path}: participant_names=1"
         ]

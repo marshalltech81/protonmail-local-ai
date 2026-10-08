@@ -730,6 +730,17 @@ class Database:
                 -- row from before v2 the reparse has not reached). No
                 -- default; mcp-server reads NULL as "can't tell".
                 sender_ambiguous INTEGER CHECK (sender_ambiguous IN (0, 1)),
+                -- 1 when the parser's display-name stage stored every
+                -- distinct name in ``message_participant_names``, 0 when
+                -- its per-message budget dropped one (#1140); NULL = not
+                -- yet known (a row from before v4 the reparse has not
+                -- reached). It covers that stage only: it does not
+                -- certify that the participant rows or addresses are
+                -- complete, which #1086's per-role term needs its own
+                -- column or backfill design for. No default; mcp-server
+                -- reads NULL as "can't tell".
+                participant_names_complete INTEGER
+                    CHECK (participant_names_complete IN (0, 1)),
                 FOREIGN KEY (claimant_id) REFERENCES message_thread_map(claimant_id)
                     ON DELETE CASCADE
             );
@@ -2775,13 +2786,27 @@ class Database:
         participant cascade only fires when the message itself is removed.
         """
         state = message_state(msg.filepath)
+        # ``from_addrs`` holds every author; ``from_addr`` alone for callers
+        # that build a Message by hand.
+        authors = msg.from_addrs or [msg.from_addr]
+        roles = [("from", authors), ("to", msg.to_addrs), ("cc", msg.cc_addrs)]
+        # Every distinct display name per (role, address) (#1140), within
+        # the parser's per-message budget, and whether that budget kept
+        # them all. A Message built without parsing derives both here.
+        names = msg.participant_names
+        complete = msg.participant_names_complete
+        if names is None:
+            dropped: Counter[str] = Counter()
+            names = participant_names(roles, dropped)
+            complete = not dropped["participant_names"]
         cur.execute(
             """
             INSERT INTO messages
                 (claimant_id, message_id, thread_id, filepath, folder, subject, sent_at,
                  occurred_at, in_reply_to, references_json, has_attachments, size_bytes,
-                 content_hash, indexed_at, seen, flagged, replied, sender_ambiguous)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 content_hash, indexed_at, seen, flagged, replied, sender_ambiguous,
+                 participant_names_complete)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(claimant_id) DO UPDATE SET
                 thread_id       = excluded.thread_id,
                 filepath        = excluded.filepath,
@@ -2798,7 +2823,8 @@ class Database:
                 seen            = excluded.seen,
                 flagged         = excluded.flagged,
                 replied         = excluded.replied,
-                sender_ambiguous = excluded.sender_ambiguous
+                sender_ambiguous = excluded.sender_ambiguous,
+                participant_names_complete = excluded.participant_names_complete
             """,
             (
                 msg.claimant_id,
@@ -2819,14 +2845,11 @@ class Database:
                 int(state.flagged),
                 int(state.replied),
                 int(msg.sender_ambiguous),
+                int(complete),
             ),
         )
         # Cascades to the message's ``message_participant_names`` rows.
         cur.execute("DELETE FROM message_participants WHERE claimant_id = ?", (msg.claimant_id,))
-        # ``from_addrs`` holds every author; ``from_addr`` alone for callers
-        # that build a Message by hand.
-        authors = msg.from_addrs or [msg.from_addr]
-        roles = [("from", authors), ("to", msg.to_addrs), ("cc", msg.cc_addrs)]
         # Entity writes are bounded per message (a crafted header can list
         # thousands of recipients) by distinct address, so a repeated
         # address cannot spend the budget; authors come first, so the
@@ -2850,12 +2873,7 @@ class Database:
                 ):
                     entity_addresses.add(address)
                     self._write_entity(cur, address)
-        # Every distinct display name per (role, address) (#1140), within
-        # the parser's per-message budget; each name of an entity's
-        # address is one of its aliases.
-        names = msg.participant_names
-        if names is None:
-            names = participant_names(roles, Counter())
+        # Each stored name of an entity's address is one of its aliases.
         cur.executemany(
             "INSERT INTO message_participant_names (claimant_id, role, address, name) "
             "VALUES (?, ?, ?, ?)",

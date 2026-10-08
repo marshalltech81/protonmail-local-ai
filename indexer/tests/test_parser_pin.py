@@ -64,6 +64,7 @@ _VERBATIM_FIELDS = (
     "size",
     "date_is_fallback",
     "sender_ambiguous",
+    "participant_names_complete",
 )
 _DERIVED_FIELDS = (
     "date",

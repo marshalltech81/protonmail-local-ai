@@ -342,6 +342,11 @@ class Message:
     # ``message_participant_names``. ``None`` for a Message built without
     # parsing (only in tests); the writer then derives them itself.
     participant_names: list[tuple[str, str, str]] | None = None
+    # False when the ``MAX_EXTRA_PARTICIPANT_*`` budget dropped a name
+    # from ``participant_names`` (#1140), stored as
+    # ``messages.participant_names_complete``. Read only with
+    # ``participant_names``.
+    participant_names_complete: bool = True
 
     @property
     def effective_date(self) -> datetime:
@@ -621,6 +626,7 @@ def parse_email_bytes(raw: bytes, source: SourceMetadata) -> Message | None:
         cc_addrs=addresses.cc_addrs,
         sender_ambiguous=addresses.sender_ambiguous,
         participant_names=names,
+        participant_names_complete=not caps["participant_names"],
         date=date,
         date_is_fallback=parsed_date is None,
         occurred_at=occurred_at,

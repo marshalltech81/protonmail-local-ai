@@ -335,7 +335,14 @@ def address_match_mode(value: str) -> str:
 
 def _participant_clause(value: str, roles: tuple[str, ...], params: list) -> str:
     """SQL restricting ``messages m`` to those where ``value`` appears in
-    one of ``roles``; appends the bound values to ``params``."""
+    one of ``roles``; appends the bound values to ``params``.
+
+    An exact address is 1 or 0 for every message. A substring is matched
+    against stored addresses and display names, which hold every name
+    only when ``m.participant_names_complete`` is 1 (#1140): a match is
+    1 whatever the flag, but no match is 0 only under 1, and unknown
+    (NULL) under 0 (the parser's name budget dropped a name) or NULL
+    (not reparsed since the v4 upgrade)."""
     role_sql = ",".join(["?"] * len(roles))
     if address_match_mode(value) == "exact":
         params.extend([canonical_addr(value), *roles])
@@ -344,8 +351,9 @@ def _participant_clause(value: str, roles: tuple[str, ...], params: list) -> str
             f"WHERE address = ? AND role IN ({role_sql}))"
         )
     return (
-        "m.claimant_id IN (SELECT p.claimant_id FROM message_participants p "  # nosec B608
-        f"WHERE {_substring_participant_rows(value, roles, params)})"
+        "CASE WHEN m.claimant_id IN (SELECT p.claimant_id FROM message_participants p "  # nosec B608
+        f"WHERE {_substring_participant_rows(value, roles, params)}) THEN 1 "
+        "WHEN m.participant_names_complete = 1 THEN 0 ELSE NULL END"
     )
 
 
@@ -381,7 +389,9 @@ class Evaluability(Enum):
     without a parseable topmost ``Received:`` header), or the leaf reads
     it only when another field says it can be trusted (``sender`` and
     the From side of ``participant``, when ``sender_ambiguous`` is not
-    0, #1153). Such a message is
+    0, #1153; a substring ``sender``, ``recipient`` or ``participant``
+    that matches nothing, when ``participant_names_complete`` is not 1,
+    #1140). Such a message is
     neither matched nor missed: the leaf's SQL yields NULL, so the
     conjunction is unknown (SQL's three-valued AND: false if any leaf is
     false, else unknown), the row is left out of the matches and of
@@ -634,7 +644,7 @@ LEAVES: dict[str, LeafKind] = {
         LeafKind(
             "sender", "address", _compile_sender, Evaluability.UNKNOWN_WHEN_NULL, _sender_test
         ),
-        LeafKind("recipient", "address", _compile_recipient, Evaluability.DECIDED),
+        LeafKind("recipient", "address", _compile_recipient, Evaluability.UNKNOWN_WHEN_NULL),
         LeafKind(
             "participant",
             "address",

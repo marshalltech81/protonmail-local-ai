@@ -444,9 +444,11 @@ def _v2_from_fresh(db: Database) -> None:
 
 def _v3_from_fresh(db: Database) -> None:
     """Turn a fresh database into the v3 shape: v3 is the current schema
-    without ``message_participant_names`` and with the participant
+    without ``message_participant_names`` and
+    ``messages.participant_names_complete``, and with the participant
     (address, name) index (#1140)."""
     db._conn.execute("DROP TABLE message_participant_names")
+    db._conn.execute("ALTER TABLE messages DROP COLUMN participant_names_complete")
     db._conn.execute(
         "CREATE INDEX idx_message_participants_address_name ON message_participants(address, name)"
     )
@@ -3827,6 +3829,7 @@ class TestMessagesTable:
             "flagged",
             "replied",
             "sender_ambiguous",
+            "participant_names_complete",
         }
         cols = {r["name"] for r in db._conn.execute("PRAGMA table_info(message_participants)")}
         assert cols == {"claimant_id", "role", "address", "name"}
@@ -3964,6 +3967,69 @@ class TestMessagesTable:
         _tombstone_thread(db, "t1")
         db.delete_thread_completely("t1")
         assert db._conn.execute("SELECT COUNT(*) FROM message_participant_names").fetchone()[0] == 0
+
+    def _complete(self, db, claimant_id):
+        return db._conn.execute(
+            "SELECT participant_names_complete FROM messages WHERE claimant_id = ?",
+            (claimant_id,),
+        ).fetchone()[0]
+
+    @pytest.mark.parametrize(("complete", "stored"), [(True, 1), (False, 0)])
+    def test_the_parsers_completeness_flag_is_stored(self, db, complete, stored):
+        msg = make_message(message_id="m1@example.com", to_addrs=["Bobby <bob@example.com>"])
+        msg.participant_names = [("to", "bob@example.com", "Bobby")]
+        msg.participant_names_complete = complete
+        db.upsert_thread(make_thread(messages=[msg], thread_id="t1"), _one_hot(0))
+        assert self._complete(db, msg.claimant_id) == stored
+
+    @pytest.mark.parametrize(
+        ("budget", "stored", "names"), [(1, 1, {"Bobby", "Robert"}), (0, 0, {"Bobby"})]
+    )
+    def test_the_fallback_path_stores_the_flag_from_its_own_budget(
+        self, db, monkeypatch, budget, stored, names
+    ):
+        """A Message built without parsing derives its names in the
+        writer; the flag comes from that pass's budget."""
+        from src import parser
+
+        monkeypatch.setattr(parser, "MAX_EXTRA_PARTICIPANT_NAMES", budget)
+        msg = make_message(
+            message_id="m1@example.com",
+            to_addrs=["Bobby <bob@example.com>", "Robert <bob@example.com>"],
+        )
+        assert msg.participant_names is None
+        db.upsert_thread(make_thread(messages=[msg], thread_id="t1"), _one_hot(0))
+        assert self._complete(db, msg.claimant_id) == stored
+        assert {n for _, _, n in self._names(db, msg.claimant_id)} == names
+
+    def test_the_replacement_is_atomic(self, db):
+        """A failed name write leaves the earlier flag, participant rows
+        and names in place: they change together or not at all."""
+        msg = make_message(
+            message_id="m1@example.com", to_addrs=["A <a@example.com>", "B <a@example.com>"]
+        )
+        db.upsert_thread(make_thread(messages=[msg], thread_id="t1"), _one_hot(0))
+        before = (
+            self._complete(db, msg.claimant_id),
+            self._participants(db, msg.claimant_id),
+            self._names(db, msg.claimant_id),
+        )
+        db._conn.execute(
+            "CREATE TRIGGER fail_names BEFORE INSERT ON message_participant_names "
+            "BEGIN SELECT RAISE(ABORT, 'injected'); END"
+        )
+        again = make_message(message_id="m1@example.com", to_addrs=["C <c@example.com>"])
+        again.participant_names = [("to", "c@example.com", "C")]
+        again.participant_names_complete = False
+        with pytest.raises(sqlite3.IntegrityError, match="injected"):
+            db.upsert_thread(make_thread(messages=[again], thread_id="t1"), _one_hot(0))
+        after = (
+            self._complete(db, msg.claimant_id),
+            self._participants(db, msg.claimant_id),
+            self._names(db, msg.claimant_id),
+        )
+        assert before == after
+        assert before[0] == 1
 
     def test_names_schema_contract(self, db):
         cols = [
