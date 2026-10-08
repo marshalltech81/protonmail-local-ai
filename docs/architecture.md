@@ -500,6 +500,30 @@ Threads with no chunk rows — empty bodies, or chunks whose embedding
 has not landed yet — never appear in the chunk lanes and rank on the
 thread-level lanes alone.
 
+**Evidence selection (#215, #858).** With evidence requested, each
+surfaced thread's passages are chosen from all of its chunks, not from
+the lanes' hits: the lanes keep one row per thread and do not record
+which chunk matched. Two FTS5 lookups scoped to the surfaced threads
+run first: which attachments' filename or MIME type match the query,
+and which chunks' text matches it. The keyword lookup is driven from
+the threads' chunks (`message_chunks` by `thread_id`, then a `rowid`
+probe into `message_chunks_fts`) and computes no `bm25()`, so its work
+grows with those threads' chunks, not with the mailbox. Each thread's
+slice is then, within its per-thread limit:
+
+1. the first chunk of a matched attachment, if one matched;
+2. the keyword-matched chunk nearest the query vector (ties by chunk
+   ID), unless the first slot already holds one;
+3. the rest: the matched attachments' other chunks, then the thread's
+   other attachment chunks, then body chunks, each group by vector
+   distance (by vector distance alone when no attachment matched).
+
+Query words are OR'd, so a common word in the question makes most
+chunks keyword matches, and slot 2 is then usually the nearest chunk
+anyway (#1246). Each passage records why it qualified as `selected_by`
+(`keyword_match`, `attachment_match` or `vector`). A failed keyword
+lookup keeps the order without slot 2.
+
 The rerank stage is best-effort: a transient rerank-service failure
 returns an empty result set from the reranker, and `hybrid_search`
 falls back to RRF order truncated to the caller's `limit`. A ranking
@@ -509,8 +533,8 @@ outage degrades quality without failing the whole query.
 Each candidate is sent to the reranker as `Subject: <thread subject>`,
 then one `Reply subject: <subject>` line per distinct message subject
 that differs from the thread's after reply-prefix normalization (a
-reply that changed the subject), then its best evidence chunk or, without
-evidence, its snippet. The added subjects are read from `messages`
+reply that changed the subject), then its first evidence passage
+(Evidence selection, above) or, without evidence, its snippet. The added subjects are read from `messages`
 (the first 50 per thread, oldest first) and capped at 5 subjects and
 500 characters per candidate. With `RERANK_MODE=none` none of this runs.
 
@@ -1008,8 +1032,9 @@ range. `ask_mailbox`, `get_evidence`, `extract_from_emails`,
 `docs/mcp-tools.md`, "Evidence scope"); the prompt-building tools
 state the filters in their prompt and ask the model to work from
 in-scope passages. The attachment-name bias that leads a thread's evidence with
-the file the query names is not date-scoped either: it orders
-passages within a qualifying thread. Ranking lanes are not date-scoped
+the file the query names, and the slot kept for a keyword-matched
+passage, are not date-scoped either: they order passages within a
+qualifying thread. Ranking lanes are not date-scoped
 per passage: a passage outside the range can still lift its thread's
 rank.
 `list_threads` sorts by `date_last`, newest first; `get_thread` lists

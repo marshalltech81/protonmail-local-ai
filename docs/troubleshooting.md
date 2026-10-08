@@ -1402,8 +1402,8 @@ same moment.
   `RERANK_BASE_URL`, `RERANK_MODEL`, the key in
   `.secrets/rerank_api_key.txt` and `RERANK_TIMEOUT_SECS`, or set
   `RERANK_MODE=none` until the provider is back.
-- `degraded_thread_vec` / `degraded_chunk_vec`, or any `_fts` /
-  `attachment_` lane on every call: the index is missing a table or is
+- `degraded_thread_vec` / `degraded_chunk_vec`, `degraded_keyword_chunks`,
+  or any `_fts` / `attachment_` lane on every call: the index is missing a table or is
   corrupt. Check the indexer's log, then rebuild as in
   [Indexer refuses to start](#indexer-refuses-to-start--wipe-the-sqlite-volume).
 

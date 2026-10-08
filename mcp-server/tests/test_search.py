@@ -1486,16 +1486,21 @@ def test_evidence_descriptions_warn_passages_can_stop_before_a_resolution(tool, 
         "attachment first, or read the thread's later messages with "
         "get_thread or get_message" in doc
     )
-    # Review round 8 (owner): the full order of
-    # ``get_evidence_chunks_for_threads``. With an attachment the query
-    # names, that attachment leads, then the thread's other attachments,
-    # then the body, each by similarity; otherwise similarity alone.
+    # Review round 8 (owner), and #858: the full order of
+    # ``get_evidence_chunks_for_threads``. The named attachment's first
+    # passage and the nearest keyword-matched passage lead; then the
+    # rest of that attachment, the thread's other attachments, then the
+    # body, each by similarity.
     assert (
         f"when the {asked} matches one of its attachments' filename or MIME type, "
-        "that attachment comes first, then its other attachments, then the body, "
-        "each by similarity" in doc
+        "that attachment's first passage, then the nearest passage holding a word "
+        f"of the {asked}" in doc
     )
-    assert "attachments can then fill every slot" in doc
+    assert (
+        "The rest of that attachment follows, then its other attachments, then the "
+        "body, each by similarity" in doc
+    )
+    assert "attachments can then fill every slot but the keyword one" in doc
 
 
 def test_ask_mailbox_description_states_its_slot_count_and_fallback(empty_db):

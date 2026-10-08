@@ -254,7 +254,10 @@ tool=search_emails outcome=ok total_ms=41.7 stages_ms={'query_embedding': 22.4, 
   (`search_attachments`), `attachment_indeterminate` (the
   `search_attachments` `sender` count; reported unavailable),
   `attachment_match` (no attachment-first
-  evidence ordering), `evidence_chunks` (no passages; the thread body
+  evidence ordering), `keyword_chunks` (no keyword-matched evidence
+  passage; every passage is `selected_by=vector` or `attachment_match`,
+  and a rate-limited `Keyword passage lookup failed` WARNING names the
+  exception type), `evidence_chunks` (no passages; the thread body
   is used), `recent_chunks` (`summarize_thread` without the latest
   replies), `rerank` (results in RRF order although `config` says
   `rerank=cohere`) and `rerank_subjects` (reranked without subjects).
@@ -715,11 +718,22 @@ ranked, so the result can surface different threads from an answer
 (more so with a reranker), and when the top threads are short the
 budget takes passages from lower-ranked threads.
 The `thread_id`-scoped path returns that thread's chunks ranked
-against the query the way `ask_mailbox` ranks them: chunks of any
-attachment whose filename or MIME type the query matches come first
-(strongest match first), then the thread's other attachment chunks,
-then body chunks, each group by vector distance. With no attachment
-match the order is vector distance alone. At `limit=6` the result is
+against the query the way `ask_mailbox` ranks them
+([#858](https://github.com/marshalltech81/protonmail-local-ai/issues/858)):
+
+1. the first chunk of an attachment whose filename or MIME type the
+   query matches, if one does;
+2. the chunk nearest the query whose text holds a word of the query,
+   unless the first chunk already does;
+3. the rest: the matched attachments' chunks (strongest match first),
+   then the thread's other attachment chunks, then body chunks, each
+   group by vector distance. With no attachment match, by vector
+   distance alone.
+
+Each chunk's `selected_by` says why it qualified: `keyword_match` (its
+text holds a word of the query; this wins when both apply),
+`attachment_match` or `vector`. Query words are OR'd, so with a common
+word in the query most chunks are keyword matches. At `limit=6` the result is
 the slice `ask_mailbox` gives its model for that thread. This path
 bypasses RRF fusion, so `include_scores` shows per-chunk vector
 distance but no lane provenance. A `thread_id` whose thread was reaped
@@ -1537,10 +1551,14 @@ is treated as absent, and a padded one is stripped, here and in
 Each thread gives at most six passages (`PROMPT_EVIDENCE_CHUNKS_PER_THREAD`),
 then cut to the per-thread prompt budget, ordered by similarity to the
 question, not by position. When the question matches one of the
-thread's attachments by filename or MIME type, that attachment's
-chunks come first, then the thread's other attachment chunks, then
-body chunks, each group by similarity, so attachments can fill every
-slot before a body message. A thread with no indexed chunks shows its
+thread's attachments by filename or MIME type, that attachment's first
+chunk comes first. The nearest chunk holding a word of the question
+comes next, unless the first one already holds one (#858). The rest
+follow: that attachment's chunks, then the thread's other attachment
+chunks, then body chunks, each group by similarity, so attachments can
+fill every slot but the keyword one before a body message. The budget
+can cut the second passage short or leave it out, and the evidence
+note discloses it. A thread with no indexed chunks shows its
 indexed text instead. So in a long thread the passages can stop before
 a late resolution: the message that settles the matter is often worded
 nothing like the question. The `ask_mailbox` and `get_evidence`
