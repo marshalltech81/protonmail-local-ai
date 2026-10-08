@@ -21,7 +21,18 @@ as failed extractions.
    The script writes the synthetic Maildir from
    `indexer/tests/baseline/corpus.py` and indexes it with the real
    `initial_index`, using a hashed embedder (words plus character
-   trigrams). It writes `mail.db` and `query_vectors.json`.
+   trigrams). It writes `mail.db` and `query_vectors.json`. Before
+   indexing it records the index's embedder identity (#1268): it
+   starts a loopback service that serves the hashed embedder in the
+   OpenAI-compatible `/v1/embeddings` shape
+   (`indexer/tests/baseline/embed_server.py`, `127.0.0.1` on a port
+   the kernel allocates), fetches the calibration vector from it with
+   the production `OpenAIEmbedder`, and records provider `openai`, that
+   endpoint and the model `baseline-hash-embedder`; then it stops the
+   service. Indexing itself still calls the hashed embedder directly.
+   `test_embedder_identity_baseline.py` serves it again on the recorded
+   port and checks that mcp-server's identity check accepts it there
+   and refuses it on another port.
 2. **Check** (`test_retrieval_baseline.py`, mcp-server environment,
    `BASELINE_DIR` set). This step runs every question in `golden.json`
    through `hybrid_search` (no reranker) and `query_messages`:
