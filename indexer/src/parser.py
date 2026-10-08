@@ -573,6 +573,7 @@ def parse_email_bytes(raw: bytes, source: SourceMetadata) -> Message | None:
             "no source authority or subject-fallback threading",
             caps["from_repeated"] + 1,
             path,
+            attachment=False,
         )
     if caps["address_repeated"]:
         warn_rate_limited(
@@ -581,6 +582,7 @@ def parse_email_bytes(raw: bytes, source: SourceMetadata) -> Message | None:
             caps["address_repeated"],
             path,
             level=logging.INFO,
+            attachment=False,
         )
 
     # Capture file identity. ``size`` is the length of the

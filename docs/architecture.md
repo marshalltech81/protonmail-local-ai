@@ -2090,7 +2090,10 @@ still indexed (mbsync renamed it and the watcher has not recorded the
 rename yet) waits once, 60 s and without spending an attempt, so the
 rename moves the job to the new path (`update_filepath`) instead of the
 reparse being dropped; a file still missing after that is dropped with
-reason `reparse_file_missing`.
+reason `reparse_file_missing`. A reparse can drop addresses from a
+message's rows (the #1144 address budget), but the thread's
+`participants` and `senders` keep them until a reap or a rebuild
+(#1173).
 
 The migration that adds such data triggers the reparse itself: after
 its DDL it ends with `REPARSE_ENQUEUE_SQL` (`indexer/src/queue.py`),

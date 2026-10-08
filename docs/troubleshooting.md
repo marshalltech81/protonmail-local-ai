@@ -1678,7 +1678,9 @@ subject-fallback threading`, and counts as
 alone (`In-Reply-To` and `References` still apply);
 `docs/mcp-tools.md`, "Sender attribution", says what clients see. These
 lines share the 20-per-5-minutes limit above, and name only the path
-and counts, never an address.
+and counts, never an address; one the limit withholds is counted as
+`suppressed_lines` on the queue heartbeat, not as `warnings_suppressed`,
+since it loses no attachment text.
 
 Only messages assessed safe supply the correspondent evidence a
 subject-only merge needs. Until the reparse after the v2 upgrade

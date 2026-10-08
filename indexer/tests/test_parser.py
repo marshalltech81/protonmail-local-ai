@@ -4812,6 +4812,7 @@ class TestRepeatedAddressHeaders:
         caplog.set_level("INFO")
         monkeypatch.setattr(extractors._LINE_BUDGET, "limit", 2)
         extractors.drain_extractor_counts()
+        extractors.drain_suppressed_lines()
         for _ in range(3):
             _parse_headers(b"From: a@example.test\r\nFrom: b@example.test\r\n")
         for _ in range(2):
@@ -4826,7 +4827,28 @@ class TestRepeatedAddressHeaders:
         assert counts["parser_sender_ambiguous_messages"] == 3
         assert counts["parser_recipients_merged_messages"] == 2
         assert counts["parser_caps_messages"] == 0
-        assert counts["warnings_suppressed"] == 3
+        # Review round 3: these lines lose no attachment text, so what
+        # the limit withholds is counted on the heartbeat
+        # (``suppressed_lines``), not as ``warnings_suppressed``.
+        assert counts["warnings_suppressed"] == 0
+        assert extractors.drain_suppressed_lines() == 3
+
+    def test_merged_only_traffic_keeps_the_attachments_line_at_info(self, monkeypatch):
+        """Review round 3: suppressed merge notices made the attachments
+        summary a WARNING through ``warnings_suppressed``."""
+        from src import attachment_indexing, extractors
+
+        monkeypatch.setattr(extractors._LINE_BUDGET, "limit", 2)
+        attachment_indexing.attachment_outcomes.drain()
+        extractors.drain_suppressed_lines()
+        for _ in range(25):
+            _parse_headers(b"From: a@example.test\r\nTo: b@x.test\r\nTo: c@x.test\r\n")
+        counts = attachment_indexing.attachment_outcomes.drain()
+        assert counts["parser_recipients_merged_messages"] == 25
+        assert counts["warnings_suppressed"] == 0
+        assert attachment_indexing.format_attachment_outcomes(counts)
+        assert not attachment_indexing.attachment_outcomes_degraded(counts)
+        assert extractors.drain_suppressed_lines() == 23
 
     def test_worst_case_message_parses_within_a_bound(self, monkeypatch):
         """Every address dimension at its cap at once: many fields, the
