@@ -800,8 +800,11 @@ kind of reindex that needs depends on whether search data changes too:
   `reparse` at startup; the indexer re-reads each file and rewrites its
   per-message rows, with no embedding calls (attachment text comes from
   the extraction cache). Search keeps working throughout; the data the
-  release adds is missing for a message until its reparse runs, and new
-  mail is indexed after the backlog. Progress is in the log every five
+  release adds is missing for a message until its reparse runs. New
+  mail, recovery and re-extraction jobs go ahead of the reparse, which
+  still advances at least one message per batch, so the queue
+  heartbeat's `oldest_due_age` grows while it runs without meaning
+  draining has stalled. Progress is in the log every five
   minutes (`reparse: remaining=... reparsed_since_last_heartbeat=...
   dead=...`), then one `reparse complete: ...` line; `make status`
   shows the remaining count (`queue.reparse`). A message that fails to
@@ -1231,7 +1234,10 @@ Queue and maintenance (all INFO unless noted):
   `parked_trashed` jobs belong to trashed messages waiting for the
   reaper, which is normal in mirror mode, not a failure. A growing
   `oldest_due_age` means due jobs are not being drained (an embedder
-  outage pauses draining; see above). The deferral counts are `defer`
+  outage pauses draining; see above), except during a reparse, whose
+  jobs wait behind newer mail while `reparse: remaining=` falls (see
+  [Reparse or rebuild after an upgrade](#reparse-or-rebuild-after-an-upgrade)).
+  The deferral counts are `defer`
   calls since the previous heartbeat, by stage. `suppressed_lines` is
   how many embed retry and recovery, health-file and ingestion-state
   lines the shared rate limit withheld since the previous heartbeat

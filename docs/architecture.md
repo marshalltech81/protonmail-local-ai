@@ -1812,7 +1812,9 @@ paths share the Phase 1 / Phase 2 implementation so seed-vector
 selection and failure isolation behave identically:
 
 **Initial scan order (#699, #752).** The queue hands out rows by due
-time (`next_attempt_at`), and the initial scan queues each unindexed
+time (`next_attempt_at`; reparse jobs form a second class with one
+slot per batch, see "Reparse in place" below), and the initial scan
+queues each unindexed
 message due at its own effective time (the topmost `Received:`, else
 `Date:`, read from its header block only by `message_sort_time`),
 capped at the walk's start; undated and future-dated messages are due
@@ -2091,11 +2093,28 @@ remains the way to retry it. `make reparse` (`src/reparse.py`, run in
 the indexer container like `make requeue-dead`) runs the same
 statement by hand, for recovery.
 
-Reparse jobs are due when queued and the queue hands rows out by due
-time, so mail that arrives during a reparse is indexed after the
-reparse backlog, as during an initial index. The reparse needs no
-schema change of its own: `reason` is free text with no `CHECK`
-constraint.
+Reparse jobs are due when queued, all at once, but they do not hold
+back other work (#1142). The queue hands out foreground jobs (every
+reason but `reparse`: fresh mail, recovery, rescans and re-extraction)
+first, so mail that arrives during a reparse is indexed by the next
+batch. While both kinds are due, each batch (`claim_batch`,
+`Database.queue_fetch_due_batch`) keeps one slot for the oldest due
+reparse job and fills the rest with foreground jobs; capacity one kind
+leaves unused goes to the other, so no slot is left empty, and each
+kind keeps its due order. With a batch size of 1
+(`INITIAL_INDEX_BATCH_SIZE` or `INDEXER_STEADY_STATE_BATCH_SIZE` set to
+1) the two kinds take turns, tracked in memory only. So a reparse
+advances by at least one job per batch, except while the embedder
+breaker is open (no batch is claimed) and while a job left
+`interrupted` by a crash runs alone first. While a reparse runs, the
+heartbeat's `oldest_due_age` grows: it reports the oldest due job, a
+reparse job behind the foreground ones, not a stalled drain. A reparse
+queued by a migration at startup is still drained by the initial index
+before startup deletion reconciliation runs. A claim is two indexed
+SELECTs, each of which may walk past every due job of the other kind;
+over 33,000 queued jobs it takes about 1.4 ms (#1142). The reparse
+needs no schema change of its own: `reason` is free text with no
+`CHECK` constraint.
 
 Visibility: with the queue heartbeat (every 5 min) the indexer logs
 `reparse: remaining=<n> reparsed_since_last_heartbeat=<n> dead=<n>`

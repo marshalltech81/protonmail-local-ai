@@ -33,7 +33,7 @@ from .extractors import (
     SCANNED_PDF_OCR_DISABLED_ERROR,
 )
 from .maildir import message_state
-from .queue import REPARSE_ENQUEUE_SQL
+from .queue import REASON_REPARSE, REPARSE_ENQUEUE_SQL
 from .threader import (
     FTS_SUBJECT_SCAN_CHARS,
     FTS_SUBJECT_SCAN_ROWS,
@@ -2177,25 +2177,43 @@ class Database:
         return cur.rowcount
 
     @_synchronized
-    def queue_fetch_due_batch(self, status: str, now_iso: str, limit: int) -> list[sqlite3.Row]:
-        """Return up to ``limit`` due ``status`` rows ordered by oldest-due first.
+    def queue_fetch_due_batch(
+        self, status: str, now_iso: str, limit: int, *, reparse_turn: bool = False
+    ) -> list[sqlite3.Row]:
+        """Return up to ``limit`` distinct due ``status`` rows, sharing the
+        batch between foreground rows and ``reparse`` rows (#1142).
 
-        One SELECT, so the batched indexer's gather phase picks up N
-        distinct rows at once; the claim has no in-flight tracking, so
-        rows stay due until the caller marks them.
+        Foreground rows (every reason but ``reparse``: fresh mail,
+        recovery, rescans, re-extraction) come first, so a reparse
+        backlog does not hold them back. When both classes are due and
+        ``limit > 1``, one slot is kept for the oldest due reparse row,
+        so a reparse still advances under a sustained foreground
+        backlog. Capacity one class leaves unused goes to the other, so
+        no slot is left empty while rows are due. At ``limit == 1``,
+        ``reparse_turn`` gives the slot to the reparse row when both are
+        due (``IndexingQueue.claim_batch`` alternates it). Each class
+        keeps its due order, and foreground rows are returned first.
+
+        Two SELECTs under the one lock, on disjoint classes, so the
+        batched indexer's gather phase picks up distinct rows; the claim
+        has no in-flight tracking, so rows stay due until the caller
+        marks them.
         """
-        return self._conn.execute(
-            """
+        query = """
             SELECT filepath, reason, status, attempts,
                    last_error, last_stage,
                    created_at, updated_at, next_attempt_at
             FROM indexing_jobs
-            WHERE status = ? AND next_attempt_at <= ?
+            WHERE status = ? AND next_attempt_at <= ? AND (reason = ?) = ?
             ORDER BY next_attempt_at ASC
             LIMIT ?
-            """,
-            (status, now_iso, limit),
+            """
+        reparse = self._conn.execute(query, (status, now_iso, REASON_REPARSE, 1, limit)).fetchall()
+        reserved = min(1, len(reparse)) if limit > 1 or reparse_turn else 0
+        foreground = self._conn.execute(
+            query, (status, now_iso, REASON_REPARSE, 0, limit - reserved)
         ).fetchall()
+        return foreground + reparse[: limit - len(foreground)]
 
     @_synchronized
     def queue_delete(self, filepath: str) -> None:
