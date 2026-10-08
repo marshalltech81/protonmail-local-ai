@@ -144,4 +144,4 @@ jobs:
 
       - name: Typecheck mcp-server
         working-directory: mcp-server
-        run: uv run mypy src
+        run: uv run mypy src tests/answer_eval
