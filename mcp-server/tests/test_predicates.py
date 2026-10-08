@@ -530,11 +530,11 @@ class TestCompilerAndDigest:
                 "m.effective_at >= ?",
                 "m.has_attachments = ?",
                 "m.flagged = ?",
-                "m.claimant_id IN (SELECT p.claimant_id FROM entities e "
+                "CASE WHEN m.folder IN (?) THEN 0 "
+                "WHEN m.sender_ambiguous = 0 THEN m.claimant_id IN (SELECT p.claimant_id "
+                "FROM entities e "
                 "JOIN message_participants p ON p.address = e.canonical_key AND p.role = 'from' "
-                "JOIN messages am ON am.claimant_id = p.claimant_id "
-                "WHERE e.kind = 'person' AND e.authority_class = ? "
-                "AND am.sender_ambiguous = 0 AND am.folder NOT IN (?))",
+                "WHERE e.kind = 'person' AND e.authority_class = ?) ELSE NULL END",
             ]
         )
         assert params == [
@@ -547,8 +547,8 @@ class TestCompilerAndDigest:
             "2024-01-01T00:00:00+00:00",
             1,
             1,
-            "counsel",
             "Spam",
+            "counsel",
         ]
 
     def test_digest_binds_the_leaf_list_in_order(self):
@@ -947,6 +947,7 @@ class TestClockSizeAndRepliedLeaves:
             "dated",
             "sender",
             "participant",
+            "authority_class",
         }
         for name, kind in LEAVES.items():
             expected = (

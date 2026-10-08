@@ -62,9 +62,13 @@ class TestAuthority:
         page = counsel_messages_db.query_messages(authority_class="counsel")
         assert _ids(page) == ["m5", "m1"]
         assert page.total_matches == 2
+        # Not a decided "no": the author cannot be told (#1161).
+        assert page.indeterminate == 1
         # The unclassified side does not gain it either: the leaf is a
         # positive class test, not a complement.
-        assert "m3" not in _ids(counsel_messages_db.query_messages(authority_class="unclassified"))
+        page = counsel_messages_db.query_messages(authority_class="unclassified")
+        assert "m3" not in _ids(page)
+        assert page.indeterminate == 1
         # The from rows are kept, but the sender filter cannot decide
         # it either: indeterminate, not a match (#1153).
         page = counsel_messages_db.query_messages(sender="jane@example.com")

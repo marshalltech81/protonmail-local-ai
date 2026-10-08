@@ -1061,8 +1061,10 @@ budget, and the indexer stores the flag as
 `messages.sender_ambiguous`: 0 for one `From`, 1 when the attribution
 is unsafe, NULL when not yet assessed (rows from before schema v2,
 until the reparse reaches them). Only 0 qualifies for authority
-(`_SENDER_CLASS_MESSAGES`, `mcp-server/src/lib/predicates.py`): NULL
-is "can't tell", so the `authority_class` filters are empty straight
+(`_compile_authority_class`, `mcp-server/src/lib/predicates.py`): 1
+and NULL are "can't tell", an unknown leaf that `query_messages`
+counts as `indeterminate` outside Spam (#1161; Spam stays a decided
+miss), so the `authority_class` filters are empty straight
 after the v2 upgrade and fill in as the reparse drains, and a message
 whose job is dead-lettered stays out of them until `make requeue-dead`.
 The `from` participant rows are kept, so sender filters and
