@@ -5691,6 +5691,82 @@ class TestDocxPackageBudget:
         assert _DOCX_BUDGET_MARKER not in caplog.text
         assert _DOCX_BUDGET_MARKER not in str(docx_extractor.DocxPackageBudgetError())
 
+    @pytest.mark.parametrize(
+        ("content_type", "filename", "to_payload"),
+        [
+            (_DOCX_MIME, f"{_DOCX_BUDGET_MARKER}.docx", lambda payload: payload),
+            (_DOTX_MIME, f"{_DOCX_BUDGET_MARKER}.dotx", _dotx_bytes),
+        ],
+        ids=["docx", "dotx"],
+    )
+    def test_stored_element_dense_xml_over_the_declared_budget_fails_before_opening(
+        self, content_type, filename, to_payload, monkeypatch, caplog
+    ):
+        """#1033: XML stored uncompressed does not expand, so it passed the
+        expansion budget. The worst case at the defaults: the main part
+        stored as element-dense XML almost filling the payload cap, plus
+        deflated element-dense XML just under the expansion budget. Every
+        other budget passes, and the declared total fails the document
+        before python-docx opens it or reads a member."""
+        import io
+        import time
+        import zipfile
+
+        from src import extractors
+        from src.extractors import DEFAULT_MAX_BYTES
+        from src.extractors import docx as docx_extractor
+
+        payload = _dense_stored_package(
+            to_payload(_docx_bytes(_DOCX_BUDGET_MARKER)),
+            "word/document.xml",
+            b"</w:body>",
+            b"<w:p/>",
+            pad_name="word/pad.xml",
+            expansion_budget=docx_extractor._MAX_EXPANSION_BYTES,
+        )
+        infos = zipfile.ZipFile(io.BytesIO(payload)).infolist()
+        assert len(payload) <= DEFAULT_MAX_BYTES
+        assert len(infos) <= docx_extractor._MAX_MEMBERS
+        assert sum(max(i.file_size - i.compress_size, 0) for i in infos) <= (
+            docx_extractor._MAX_EXPANSION_BYTES
+        )
+        assert sum(i.file_size for i in infos) > docx_extractor._MAX_DECLARED_BYTES
+        opened = _count_calls(monkeypatch, docx_extractor.Package, "open")
+        reads = _count_calls(monkeypatch, zipfile.ZipFile, "read")
+        extractors.drain_extractor_counts()
+
+        caplog.set_level("DEBUG")
+        started = time.perf_counter()
+        result = extract(content_type=content_type, filename=filename, payload=payload)
+        assert time.perf_counter() - started < 5.0
+        assert (result.status, result.error) == (STATUS_UNSUPPORTED, DOCX_PACKAGE_BUDGET_ERROR)
+        assert result.text is None
+        assert opened[0] == 0
+        assert reads[0] == 0
+        warnings = [r for r in caplog.records if "extractor docx declined" in r.getMessage()]
+        assert [r.levelname for r in warnings] == ["WARNING"]
+        assert extractors.drain_extractor_counts()["extractor_caps"] == 0
+        assert _DOCX_BUDGET_MARKER not in caplog.text
+
+    def test_document_with_large_stored_media_still_extracts(self, monkeypatch):
+        """#1033: media count against the declared budget too, so a
+        real-shaped document near the default payload cap still opens:
+        its pictures, together about 30 MiB, stored uncompressed."""
+        import io
+        import zipfile
+
+        from src.extractors import DEFAULT_MAX_BYTES
+        from src.extractors import docx as docx_extractor
+
+        payload = _with_large_media(_media_docx_bytes(3), "word/media/", 30 * 1024 * 1024)
+        infos = zipfile.ZipFile(io.BytesIO(payload)).infolist()
+        assert len(payload) <= DEFAULT_MAX_BYTES
+        assert sum(i.file_size for i in infos) > 30 * 1024 * 1024
+        opened = _count_calls(monkeypatch, docx_extractor.Package, "open")
+        result = extract(content_type=_DOCX_MIME, filename="a.docx", payload=payload)
+        assert (result.status, result.text) == (STATUS_SUCCESS, _MEDIA_DOCX_TEXT)
+        assert opened[0] == 1
+
     def test_package_budgets_spent_exactly_open_the_document(self, monkeypatch):
         import io
         import zipfile
@@ -5710,9 +5786,13 @@ class TestDocxPackageBudget:
             "_MAX_EXPANSION_BYTES",
             sum(max(i.file_size - i.compress_size, 0) for i in infos),
         )
+        monkeypatch.setattr(docx_extractor, "_MAX_DECLARED_BYTES", sum(i.file_size for i in infos))
         assert docx_extractor.extract(payload) == (_MEDIA_DOCX_TEXT, "docx")
 
-    @pytest.mark.parametrize("budget", ["_MAX_MEMBERS", "_MAX_RELS_BYTES", "_MAX_EXPANSION_BYTES"])
+    @pytest.mark.parametrize(
+        "budget",
+        ["_MAX_MEMBERS", "_MAX_RELS_BYTES", "_MAX_EXPANSION_BYTES", "_MAX_DECLARED_BYTES"],
+    )
     def test_one_unit_over_a_budget_fails(self, budget, monkeypatch):
         import io
         import zipfile
@@ -5725,10 +5805,42 @@ class TestDocxPackageBudget:
             "_MAX_MEMBERS": len(infos),
             "_MAX_RELS_BYTES": sum(i.file_size for i in infos if i.filename.endswith(".rels")),
             "_MAX_EXPANSION_BYTES": sum(max(i.file_size - i.compress_size, 0) for i in infos),
+            "_MAX_DECLARED_BYTES": sum(i.file_size for i in infos),
         }
         monkeypatch.setattr(docx_extractor, budget, spent[budget] - 1)
         with pytest.raises(docx_extractor.DocxPackageBudgetError):
             docx_extractor.extract(payload)
+
+    @pytest.mark.parametrize("layout", ["stored", "deflated", "mixed"])
+    def test_declared_budget_decides_the_same_whatever_the_compression(self, layout):
+        """#1033: the same members get the same declared-total decision
+        whether they are stored, deflated or a mix: at the budget exactly
+        they pass, one byte under it they fail."""
+        import io
+        import zipfile
+
+        from src.extractors import over_package_budget
+
+        members = [(f"c/p{i}.xml", b"<w:p/>" * (1000 + i)) for i in range(6)]
+        out = io.BytesIO()
+        with zipfile.ZipFile(out, "w") as archive:
+            for i, (name, data) in enumerate(members):
+                stored = layout == "stored" or (layout == "mixed" and i % 2 == 0)
+                compression = zipfile.ZIP_STORED if stored else zipfile.ZIP_DEFLATED
+                archive.writestr(name, data, compress_type=compression)
+        payload = out.getvalue()
+        total = sum(len(data) for _, data in members)
+
+        def over(max_declared: int) -> bool:
+            return over_package_budget(
+                payload,
+                max_members=100,
+                max_expansion_bytes=10 * total,
+                max_rels_bytes=0,
+                max_declared_bytes=max_declared,
+            )
+
+        assert (over(total), over(total - 1)) == (False, True)
 
     def test_payload_that_is_not_a_zip_is_left_to_python_docx(self, monkeypatch):
         from src.extractors import docx as docx_extractor
@@ -5789,6 +5901,66 @@ def _with_members(payload: bytes, members: list[tuple[str, bytes, int]]) -> byte
             archive.writestr(info, source.read(info.filename))
         for name, data, compression in members:
             archive.writestr(name, data, compress_type=compression)
+    return out.getvalue()
+
+
+def _dense_stored_package(
+    payload: bytes,
+    main_name: str,
+    close_tag: bytes,
+    unit: bytes,
+    *,
+    pad_name: str,
+    expansion_budget: int,
+) -> bytes:
+    """``payload`` with ``main_name`` padded with ``unit`` elements before
+    ``close_tag`` and stored uncompressed, almost filling the default
+    payload cap, plus a deflated ``pad_name`` member of the same elements
+    expanding just under ``expansion_budget`` (#1033's worst case)."""
+    import io
+    import zipfile
+
+    from src.extractors import DEFAULT_MAX_BYTES
+
+    margin = 1024 * 1024
+    source = zipfile.ZipFile(io.BytesIO(payload))
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as archive:
+        for info in source.infolist():
+            data = source.read(info.filename)
+            if info.filename == main_name:
+                head, tail = data.split(close_tag, 1)
+                count = (DEFAULT_MAX_BYTES - margin - len(data)) // len(unit)
+                data = head + unit * count + close_tag + tail
+                archive.writestr(info.filename, data, compress_type=zipfile.ZIP_STORED)
+            else:
+                archive.writestr(info, data)
+        pad = unit * ((expansion_budget - margin) // len(unit))
+        archive.writestr(pad_name, pad, compress_type=zipfile.ZIP_DEFLATED)
+    return out.getvalue()
+
+
+def _with_large_media(payload: bytes, prefix: str, total: int) -> bytes:
+    """``payload`` with each member under ``prefix`` (its pictures or
+    media) grown by incompressible bytes to ``total`` bytes together, all
+    stored uncompressed, as already-compressed media are."""
+    import io
+    import random
+    import zipfile
+
+    source = zipfile.ZipFile(io.BytesIO(payload))
+    media = [info for info in source.infolist() if info.filename.startswith(prefix)]
+    each = total // len(media)
+    noise = random.Random(1033).randbytes(each)
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as archive:
+        for info in source.infolist():
+            data = source.read(info.filename)
+            if info in media:
+                data = data + noise[: each - len(data)]
+                archive.writestr(info.filename, data, compress_type=zipfile.ZIP_STORED)
+            else:
+                archive.writestr(info, data)
     return out.getvalue()
 
 
@@ -6314,7 +6486,98 @@ class TestPptxExtractor:
         monkeypatch.setattr(
             pptx, "_MAX_RELS_BYTES", sum(i.file_size for i in infos if i.filename.endswith(".rels"))
         )
+        monkeypatch.setattr(
+            pptx,
+            "_MAX_EXPANSION_BYTES",
+            sum(max(i.file_size - i.compress_size, 0) for i in infos),
+        )
+        monkeypatch.setattr(pptx, "_MAX_DECLARED_BYTES", sum(i.file_size for i in infos))
         assert pptx.extract(payload) == ("exact", "pptx")
+
+    def test_one_byte_over_the_declared_budget_fails(self, monkeypatch):
+        import io
+        import zipfile
+
+        from src.extractors import pptx
+
+        payload = _deck(_boxes("exact"))
+        infos = zipfile.ZipFile(io.BytesIO(payload)).infolist()
+        monkeypatch.setattr(pptx, "_MAX_DECLARED_BYTES", sum(i.file_size for i in infos) - 1)
+        with pytest.raises(pptx.PptxPackageBudgetError):
+            pptx.extract(payload)
+
+    def test_stored_element_dense_xml_over_the_declared_budget_fails_before_opening(
+        self, monkeypatch, caplog
+    ):
+        """#1033: XML stored uncompressed does not expand, so it passed the
+        expansion budget. The worst case at the defaults: a slide stored
+        as element-dense XML almost filling the payload cap, plus deflated
+        element-dense XML just under the expansion budget. Every other
+        budget passes, and the declared total fails the deck before
+        python-pptx opens it or reads a member."""
+        import io
+        import time
+        import zipfile
+
+        from src import extractors
+        from src.extractors import DEFAULT_MAX_BYTES, pptx
+
+        payload = _dense_stored_package(
+            _deck(_boxes(_PPTX_MARKER)),
+            "ppt/slides/slide1.xml",
+            b"</p:spTree>",
+            b"<a:p/>",
+            pad_name="ppt/pad.xml",
+            expansion_budget=pptx._MAX_EXPANSION_BYTES,
+        )
+        infos = zipfile.ZipFile(io.BytesIO(payload)).infolist()
+        assert len(payload) <= DEFAULT_MAX_BYTES
+        assert len(infos) <= pptx._MAX_MEMBERS
+        assert sum(max(i.file_size - i.compress_size, 0) for i in infos) <= (
+            pptx._MAX_EXPANSION_BYTES
+        )
+        assert sum(i.file_size for i in infos) > pptx._MAX_DECLARED_BYTES
+        opened = _count_calls(monkeypatch, pptx.Package, "open")
+        reads = _count_calls(monkeypatch, zipfile.ZipFile, "read")
+        extractors.drain_extractor_counts()
+
+        caplog.set_level("DEBUG")
+        started = time.perf_counter()
+        result = extract(content_type=_PPTX_MIME, filename="a.pptx", payload=payload)
+        assert time.perf_counter() - started < 5.0
+        assert (result.status, result.error) == (STATUS_UNSUPPORTED, PPTX_PACKAGE_BUDGET_ERROR)
+        assert result.text is None
+        assert opened[0] == 0
+        assert reads[0] == 0
+        warnings = [r for r in caplog.records if "extractor pptx declined" in r.getMessage()]
+        assert [r.levelname for r in warnings] == ["WARNING"]
+        assert extractors.drain_extractor_counts()["extractor_caps"] == 0
+        assert _PPTX_MARKER not in caplog.text
+
+    def test_deck_with_large_stored_media_still_extracts(self, monkeypatch):
+        """#1033: media count against the declared budget too, so a
+        real-shaped deck near the default payload cap still opens: its
+        pictures, together about 30 MiB, stored uncompressed."""
+        import io
+        import zipfile
+
+        from src.extractors import DEFAULT_MAX_BYTES, pptx
+
+        def pictures(slide):
+            from pptx.util import Inches
+
+            _box(slide.shapes, "SYNTHETIC_DECK_MEDIA_FACT")
+            for i in range(3):
+                slide.shapes.add_picture(io.BytesIO(_png((8 + i, 8), "red")), Inches(1), Inches(2))
+
+        payload = _with_large_media(_deck(pictures), "ppt/media/", 30 * 1024 * 1024)
+        infos = zipfile.ZipFile(io.BytesIO(payload)).infolist()
+        assert len(payload) <= DEFAULT_MAX_BYTES
+        assert sum(i.file_size for i in infos) > 30 * 1024 * 1024
+        opened = _count_calls(monkeypatch, pptx.Package, "open")
+        result = extract(content_type=_PPTX_MIME, filename="a.pptx", payload=payload)
+        assert (result.status, result.text) == (STATUS_SUCCESS, "SYNTHETIC_DECK_MEDIA_FACT")
+        assert opened[0] == 1
 
     def test_payload_that_is_not_a_zip_is_left_to_python_pptx(self, monkeypatch):
         from src.extractors import pptx
@@ -7068,9 +7331,11 @@ _UNREPORTED_CAPS = {
     "src.extractors.docx:_MAX_EXPANSION_BYTES": _DOCUMENT_FAILS,
     "src.extractors.docx:_MAX_MEMBERS": _DOCUMENT_FAILS,
     "src.extractors.docx:_MAX_RELS_BYTES": _DOCUMENT_FAILS,
+    "src.extractors.docx:_MAX_DECLARED_BYTES": _DOCUMENT_FAILS,
     "src.extractors.pptx:_MAX_EXPANSION_BYTES": _DECK_FAILS,
     "src.extractors.pptx:_MAX_MEMBERS": _DECK_FAILS,
     "src.extractors.pptx:_MAX_RELS_BYTES": _DECK_FAILS,
+    "src.extractors.pptx:_MAX_DECLARED_BYTES": _DECK_FAILS,
     "src.extractors.xls:_MAX_OUTPUT_BYTES": (
         "child output past it cannot come from a working child: XlsOutputError, a failed row "
         "with its rate-limited WARNING, counted as failed="

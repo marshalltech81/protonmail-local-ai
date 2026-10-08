@@ -987,16 +987,22 @@ def _validate_zip_payload(payload: bytes) -> str | None:
 
 
 def over_package_budget(
-    payload: bytes, *, max_members: int, max_expansion_bytes: int, max_rels_bytes: int
+    payload: bytes,
+    *,
+    max_members: int,
+    max_expansion_bytes: int,
+    max_rels_bytes: int,
+    max_declared_bytes: int,
 ) -> bool:
     """True when an OOXML package is over one of its extractor's pre-open
-    budgets (#936, #967): more than ``max_members`` members, members
-    expanding by more than ``max_expansion_bytes`` past their compressed
-    size, or more than ``max_rels_bytes`` declared in relationship
-    (``.rels``) members. Reads only the central directory, as
-    ``_validate_zip_payload`` does; zipfile stops a member at its declared
-    size when the library reads it. A payload that is not a ZIP is left
-    to the library to reject."""
+    budgets (#936, #967, #1033): more than ``max_members`` members,
+    members expanding by more than ``max_expansion_bytes`` past their
+    compressed size, more than ``max_rels_bytes`` declared in relationship
+    (``.rels``) members, or more than ``max_declared_bytes`` declared in
+    all members together, stored or compressed. Reads only the central
+    directory, as ``_validate_zip_payload`` does; zipfile stops a member
+    at its declared size when the library reads it. A payload that is not
+    a ZIP is left to the library to reject."""
     import io
 
     try:
@@ -1006,8 +1012,12 @@ def over_package_budget(
         return False
     expansion = sum(max(info.file_size - info.compress_size, 0) for info in members)
     rels_bytes = sum(info.file_size for info in members if info.filename.endswith(".rels"))
+    declared = sum(info.file_size for info in members)
     return (
-        len(members) > max_members or expansion > max_expansion_bytes or rels_bytes > max_rels_bytes
+        len(members) > max_members
+        or expansion > max_expansion_bytes
+        or rels_bytes > max_rels_bytes
+        or declared > max_declared_bytes
     )
 
 
