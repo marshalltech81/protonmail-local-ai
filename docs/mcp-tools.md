@@ -1122,22 +1122,18 @@ audits") is answered with several exact lanes and their union (#992):
    word set, one `participant` (or `sender`) lane per person or domain
    involved. Every lane carries the same `folder`, date bounds and
    other predicates the question has, so the union has one scope.
-   Count and disclose each lane, and page it, as the paragraphs above
-   describe. A body-word lane can return hundreds of unrelated bulk
-   messages; narrow it with `sender` or dates and report the narrowing
-   as a gap.
+   Count, disclose and page each lane as the paragraphs above describe.
 2. Union the rows by `claimant_id`, keeping the lane or lanes that
-   found each, and classify each row before counting it. Read an
-   unclear row with [`get_message`](#get_message) first, by its
-   `claimant_id`, following its body offsets; page
-   [`get_thread`](#get_thread) only if the whole message is still
-   unclear and that wider scope was disclosed. Always read the whole
-   message before discarding a row, and stop once relevance is
-   established. A message with no indexed body returns parent-thread
-   context instead, so disclose that possibility before the first
-   read, and report such a row's missing body rather than discarding
-   it. Count the rows kept, not the threads read, and report the rows
-   dropped with their lane.
+   found each row.
+3. Report every row in one of three buckets, with its lane: relevant,
+   dropped, or unresolved. Any reading done to sort them follows the
+   disclosure and smallest-sample paragraphs above.
+
+`get_message` and `get_thread` return no attachment text; attachment
+passages come only through [`get_evidence`](#get_evidence), which
+ranks and caps a whole thread's passages. A missing passage therefore
+does not resolve a row, and a row with attachments whose body is not
+relevant stays unresolved, never dropped.
 
 The recipe supports this claim: the rows the lanes returned during the
 run, within their shared scope, subject to the snapshot caveat above.
@@ -1145,9 +1141,9 @@ It does not show coverage of the topic: a message that uses none of
 the lane terms or participants, or mentions the topic only in an
 attachment (`text` searches bodies only), is not found, and nothing
 shows it is missing (see the keyword-coverage paragraph above and
-#776). Report the lanes, their counts, the union size, the narrowing
-and the rows dropped, not "all messages about X". The bounded Boolean
-filter form (#1087) will replace the multi-call shape.
+#776). Report the lanes, their counts, the union size and the three
+buckets, not "all messages about X". The bounded Boolean filter form
+(#1087) will replace the multi-call shape.
 
 For outstanding-item questions, look for completion, corrections and
 reopening across threads and senders. A sent request or delivered advice
