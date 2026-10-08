@@ -1214,7 +1214,8 @@ byte cap (8 MiB for catdoc and for the `.ppt` reader, whose text past
 the cap is not indexed and is reported as `doc_output_bytes` /
 `ppt_output_bytes`). A timeout, a death by signal (a crash, or the CPU
 limit), a non-zero exit (a tool that fails an allocation under the
-address-space limit exits with an error), or an xls child's malformed or
+address-space limit exits with an error; the `.ppt` reader's reserved
+encrypted-deck status is the one exception, below), or an xls child's malformed or
 oversized output records `failed` with a fixed error type
 (`ToolTimeoutError`, `ToolCrashError`, `ToolExitError`,
 `XlsOutputError`); nothing the tool printed reaches a log or
@@ -1377,7 +1378,11 @@ the eager-part budget"), and a deck or document over the PPTX or DOCX
 pre-open package budgets ("presentation exceeds a pre-open package
 budget", "document exceeds a pre-open package budget"; #1032), which
 are decided from the ZIP central directory alone before the package is
-opened. Each is matched by exact exception class;
+opened, and a password-protected legacy `.ppt` ("encrypted legacy .ppt
+(open password required)"; #983): `PptText.java` exits with a reserved
+status (10) for POI's `EncryptedPowerPointFileException`, matched by
+exact class in Java, and only the `ppt` extractor reads that status.
+Each is matched by exact exception class;
 anything else stays `failed`. The row is keyed by the module that
 raised the error (#928), so it is served only to occurrences that run
 that module on the bytes; an occurrence whose label runs another
@@ -1391,7 +1396,12 @@ was deliberately not bumped (its walk is unbudgeted, #1031; see the
 DOCX budget paragraph above), so a `.docx` / `.dotx` package-budget row
 recorded `failed` before the mapping stays `failed` until the same
 bytes are processed again more than 7 days on, or until a `docx` bump
-follows #1031. Each logs a rate-limited WARNING
+follows #1031. `ppt` was not bumped either (#983): the deck's text is
+the same (none) either way, and a bump would re-run every cached deck
+at the next start to reclassify the encrypted ones, so an encrypted
+deck recorded `failed` (`ToolExitError`) before the mapping converts
+the same way, on its first re-run more than 7 days on. Each logs a
+rate-limited WARNING
 (`extractor <module> declined ...; recorded unsupported, not retried`).
 A pypdf limit hit inside one page's text extraction (a `/ToUnicode`
 map over its size limit, for example) is not one of these: like any

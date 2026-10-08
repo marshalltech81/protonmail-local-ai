@@ -342,6 +342,13 @@ class ExtractionResult:
 # previous versions wrote for them are refreshed (#931).
 # ppt 1: legacy binary ``.ppt`` (Apache POI in a Java process), recorded
 # ``unsupported`` before (#957).
+# ppt 1 still: a password-protected deck is recorded ``unsupported``
+# instead of ``failed`` (#983), with no bump: the text does not change
+# (none either way), and a bump would make the startup sweep re-run
+# every cached deck to reclassify the few encrypted ones. A ``failed``
+# row written for one before stays ``failed`` until the same bytes are
+# processed again more than 7 days on (a reparse, or another message
+# carrying them), when it converts.
 # pptx 1: the first ``.pptx`` extractor (#936). Rows cached ``unsupported``
 # for a ``.pptx`` before it carry no extractor, so no version marks them
 # stale; the "no extractor" sweep re-queues them instead.
@@ -480,6 +487,9 @@ PDF_LIMIT_ERROR = "PDF structure exceeds pypdf limits"
 XLSX_EAGER_BUDGET_ERROR = "workbook exceeds the eager-part budget"
 PPTX_PACKAGE_BUDGET_ERROR = "presentation exceeds a pre-open package budget"
 DOCX_PACKAGE_BUDGET_ERROR = "document exceeds a pre-open package budget"
+# A password-protected legacy ``.ppt`` (#983), from the reader's reserved
+# exit status.
+ENCRYPTED_PPT_ERROR = "encrypted legacy .ppt (open password required)"
 PERMANENT_FAILURE_ERRORS = frozenset(
     {
         ENCRYPTED_PDF_ERROR,
@@ -487,6 +497,7 @@ PERMANENT_FAILURE_ERRORS = frozenset(
         XLSX_EAGER_BUDGET_ERROR,
         PPTX_PACKAGE_BUDGET_ERROR,
         DOCX_PACKAGE_BUDGET_ERROR,
+        ENCRYPTED_PPT_ERROR,
     }
 )
 # Extractors that read an OOXML package (a ZIP): each gets the OLE2 check
@@ -840,6 +851,11 @@ def _permanent_failure_error(module_name: str, exc: Exception) -> str | None:
 
         if type(exc) is DocxPackageBudgetError:
             return DOCX_PACKAGE_BUDGET_ERROR
+    elif module_name == "ppt":
+        from .ppt import PptEncryptedError
+
+        if type(exc) is PptEncryptedError:
+            return ENCRYPTED_PPT_ERROR
     return None
 
 

@@ -19,9 +19,13 @@ a wall-clock timeout, stdout read up to ``_MAX_OUTPUT_BYTES`` and stderr
 discarded (POI's errors and Log4j's "no provider" line can quote the
 deck or are noise). Output past the byte cap is not indexed: the text
 before it is kept and the cap is reported through
-``warn_extractor_cap``. Any other failure (a limit, a parse error, a
-crash) raises a fixed-text error from ``_runner``, recorded by type name
-as a ``failed`` row.
+``warn_extractor_cap``. A password-protected deck makes the reader exit
+with ``ENCRYPTED_EXIT_STATUS`` (POI's encrypted-file exception, matched
+by exact class), raised here as ``PptEncryptedError`` and recorded
+``unsupported`` with fixed text, since we never supply a password and
+the same bytes fail the same way on every retry (#983). Any other
+failure (a limit, a parse error, a crash) raises a fixed-text error
+from ``_runner``, recorded by type name as a ``failed`` row.
 
 Each deck costs one JVM start-up: on the fixture decks, measured in the
 indexer image, 0.15 to 0.35 s wall time, 0.2 to 0.4 s of CPU and
@@ -35,7 +39,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from . import warn_extractor_cap
-from ._runner import ToolNotFoundError, run_tool
+from ._runner import ToolExitError, ToolNotFoundError, run_tool
 
 log = logging.getLogger("indexer.extractor.ppt")
 
@@ -50,6 +54,21 @@ PPT_HOME = Path("/opt/ppt")
 # the memory options below and the launcher's malloc arena cap.
 CHILD_MAX_ADDRESS_SPACE_BYTES = 512 * 1024 * 1024
 CHILD_MAX_CPU_SECONDS = 30
+
+# The status ``PptText.java`` exits with for POI's encrypted-file
+# exception (#983); kept equal to the Java constant by a test. Any other
+# non-zero status (1 for an uncaught exception or a JVM that cannot
+# start, 3 for the JVM's out-of-memory exit) stays ``failed``.
+ENCRYPTED_EXIT_STATUS = 10
+
+
+class PptEncryptedError(Exception):
+    """The deck is password-protected: POI cannot read it without the
+    password, which the indexer never has (#983)."""
+
+    def __init__(self) -> None:
+        super().__init__("legacy .ppt is password-protected")
+
 
 # Wall-clock seconds the JVM may run, past its CPU limit so a CPU-bound
 # run meets that limit first.
@@ -102,21 +121,26 @@ def extract(
     java = PPT_HOME / "jre" / "bin" / "java"
     if not java.is_file():
         raise ToolNotFoundError
-    output = run_tool(
-        [
-            str(java),
-            *_JVM_OPTIONS,
-            "-cp",
-            str(PPT_HOME / "lib" / "*"),
-            "PptText",
-        ],
-        payload,
-        timeout_seconds=PPT_TIMEOUT_SECONDS,
-        max_output_bytes=_MAX_OUTPUT_BYTES,
-        max_address_space_bytes=CHILD_MAX_ADDRESS_SPACE_BYTES,
-        max_cpu_seconds=CHILD_MAX_CPU_SECONDS,
-        suffix=".ppt",
-    )
+    try:
+        output = run_tool(
+            [
+                str(java),
+                *_JVM_OPTIONS,
+                "-cp",
+                str(PPT_HOME / "lib" / "*"),
+                "PptText",
+            ],
+            payload,
+            timeout_seconds=PPT_TIMEOUT_SECONDS,
+            max_output_bytes=_MAX_OUTPUT_BYTES,
+            max_address_space_bytes=CHILD_MAX_ADDRESS_SPACE_BYTES,
+            max_cpu_seconds=CHILD_MAX_CPU_SECONDS,
+            suffix=".ppt",
+        )
+    except ToolExitError as exc:
+        if exc.returncode == ENCRYPTED_EXIT_STATUS:
+            raise PptEncryptedError from None
+        raise
     if output.truncated:
         warn_extractor_cap(
             log,

@@ -1445,8 +1445,9 @@ only, never filenames or text (`make logs`):
   `ToolTimeoutError`, `ToolCrashError` (killed by a signal, including
   each tool's CPU limit), `ToolExitError` (an error, including each
   tool's memory limit, and any deck the
-  `.ppt` reader rejects or that needs more than its 128 MiB heap, such
-  as a password-protected one), `ToolNotFoundError` (catdoc or the
+  `.ppt` reader rejects or that needs more than its 128 MiB heap; a
+  password-protected deck is `unsupported` instead, below),
+  `ToolNotFoundError` (catdoc or the
   `.ppt` Java runtime missing from the image) or `XlsOutputError`.
   Many of these at
   once usually means the OCR toolchain or a parser library is
@@ -1461,7 +1462,8 @@ only, never filenames or text (`make logs`):
   over the PPTX / DOCX pre-open package budgets (#1032: a deck whose
   XML would decompress past 32 MiB, or with more than 20,000 members
   or 8 MiB of relationship parts; a `.docx` or `.dotx` past 32 MiB,
-  5,000 members or 4 MiB of relationship parts). The file stays
+  5,000 members or 4 MiB of relationship parts), or a password-protected
+  legacy `.ppt` (#983). The file stays
   searchable by filename and type only. A `.docx` or `.dotx` over a
   budget that was recorded `failed` (`DocxPackageBudgetError`) before
   #1032 is not re-queued at startup, because the `docx` extractor
@@ -1471,7 +1473,10 @@ only, never filenames or text (`make logs`):
   another reason) more than 7 days after it was recorded; that re-run
   reads the central directory once, never opens the document, and
   records it `unsupported`. A `docx` bump after #1031 converts the
-  rest at the next start.
+  rest at the next start. A password-protected `.ppt` recorded `failed`
+  (`ToolExitError`) before #983 converts the same way, since the `ppt`
+  version was not bumped either: on its first re-run more than 7 days
+  after it was recorded.
 - `PDF OCR fallback failed: <ExceptionType>` (WARNING): OCR of a PDF's
   pages without a text layer raised (a Tesseract error or timeout). A
   PDF with enough digital text keeps it and loses the scanned pages;
@@ -1583,9 +1588,10 @@ only, never filenames or text (`make logs`):
     "Extractor dispatch"). Binary files (PDF, ZIP, OLE2, PNG, JPEG,
     GIF) sent as text are recorded with "binary payload labelled as
     text" (#932). It also counts PDFs that need an open password or
-    exceed pypdf's limits, workbooks over the XLSX eager-part budget, and
+    exceed pypdf's limits, workbooks over the XLSX eager-part budget,
     decks and documents over the PPTX / DOCX pre-open package budgets,
-    which fail the same way every time (#931, #1032). `too_large` is over
+    and password-protected legacy `.ppt` decks, which fail the same way
+    every time (#931, #1032, #983). `too_large` is over
     `INDEXER_ATTACHMENT_MAX_BYTES`, and `ocr_disabled` is an image or
     scanned PDF skipped while `INDEXER_OCR_ENABLED=false` (re-extracted
     once OCR is turned on).

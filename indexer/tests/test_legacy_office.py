@@ -195,6 +195,15 @@ class TestRunTool:
         assert MARKER not in str(excinfo.value)
         assert MARKER not in caplog.text
 
+    def test_non_zero_exit_carries_its_status_and_fixed_text(self, tmp_path):
+        """#983: the status is kept for a caller that gives one a meaning
+        (only the ``ppt`` extractor does); the message stays fixed."""
+        tool = _fake_tool(tmp_path, f"sys.stderr.write({MARKER!r})\nsys.exit(10)")
+        with pytest.raises(ToolExitError) as excinfo:
+            run_tool([tool], b"x", timeout_seconds=30, max_output_bytes=10, **_LIMITS, suffix=".x")
+        assert excinfo.value.returncode == 10
+        assert str(excinfo.value) == "extraction tool exited with an error"
+
     def test_tool_runs_under_the_limits_it_is_given(self, tmp_path):
         """The launcher sets both limits and then ``execve``s the tool,
         which reports its own: the limits are inherited, not applied to
@@ -405,6 +414,18 @@ class TestDocExtractor:
         assert len(warnings) == 1
         assert error in warnings[0].getMessage()
         assert MARKER not in caplog.text
+
+    def test_the_ppt_encrypted_status_means_nothing_to_catdoc(self, tmp_path, monkeypatch):
+        """#983: only the ``ppt`` extractor reads that exit status; from
+        catdoc it is an ordinary failure."""
+        from src.extractors import doc, ppt
+
+        tool = _fake_tool(tmp_path, f"sys.exit({ppt.ENCRYPTED_EXIT_STATUS})")
+        monkeypatch.setattr(doc.shutil, "which", lambda _name: tool)
+        result = extract(
+            content_type="application/msword", filename="a.doc", payload=_OLE2_MAGIC + bytes(64)
+        )
+        assert (result.status, result.error) == (STATUS_FAILED, "ToolExitError")
 
     def test_catdoc_runs_under_both_limits(self, tmp_path, monkeypatch):
         """#995: a stand-in catdoc reports its own limits, so the launch
@@ -806,6 +827,9 @@ class TestXlsCapsReachTheLog:
 
 PPT_FIXTURE = FIXTURES / "legacy.ppt"
 PPT_LO_FIXTURE = FIXTURES / "legacy-lo.ppt"
+# Password-protected, written by POI (#983, fixtures/extractors/README.md).
+PPT_ENCRYPTED_FIXTURE = FIXTURES / "legacy-encrypted.ppt"
+ENCRYPTED_DECK_MARKER = "SYNTHETIC-ENCRYPTED-DECK"
 _PPT_MIME = "application/vnd.ms-powerpoint"
 
 # The image's runtime, or the one CI exports from indexer/Dockerfile.
@@ -889,6 +913,32 @@ class TestPptRealReader:
         assert (result.status, result.error) == (STATUS_FAILED, "ToolExitError")
         assert MARKER not in caplog.text
 
+    def test_encrypted_deck_is_a_fixed_unsupported_row(self, caplog):
+        """#983: POI raises its encrypted-file exception for a
+        password-protected deck; the reader exits with the reserved
+        status and the row is ``unsupported``, served for good, instead
+        of ``failed`` and re-run every 7 days."""
+        from src.extractors import ENCRYPTED_PPT_ERROR, STATUS_UNSUPPORTED
+
+        caplog.set_level("DEBUG")
+        payload = PPT_ENCRYPTED_FIXTURE.read_bytes()
+        assert payload.startswith(_OLE2_MAGIC)
+        # The slide text is only in the encrypted streams.
+        assert ENCRYPTED_DECK_MARKER.encode() not in payload
+        extractors.drain_extractor_counts()
+        result = _ppt(payload)
+        assert (result.status, result.extractor, result.text, result.error) == (
+            STATUS_UNSUPPORTED,
+            "ppt@1",
+            None,
+            ENCRYPTED_PPT_ERROR,
+        )
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        assert "recorded unsupported" in warnings[0].getMessage()
+        assert ENCRYPTED_PPT_ERROR in warnings[0].getMessage()
+        assert ENCRYPTED_DECK_MARKER not in caplog.text
+
 
 class TestPptExtractor:
     def test_java_runs_through_the_launcher_with_limits_and_options(self, tmp_path, monkeypatch):
@@ -970,6 +1020,58 @@ class TestPptExtractor:
         assert len(warnings) == 1
         assert error in warnings[0].getMessage()
         assert MARKER not in caplog.text
+
+    def test_encrypted_status_is_a_fixed_unsupported_row(self, tmp_path, monkeypatch, caplog):
+        """#983: the reserved status alone makes the row ``unsupported``;
+        what the reader wrote to stdout or stderr is still withheld."""
+        from src.extractors import ENCRYPTED_PPT_ERROR, STATUS_UNSUPPORTED, ppt
+
+        caplog.set_level("DEBUG")
+        body = (
+            f"sys.stderr.write({MARKER!r})\nsys.stdout.write({MARKER!r})\n"
+            f"sys.exit({ppt.ENCRYPTED_EXIT_STATUS})"
+        )
+        monkeypatch.setattr(ppt, "PPT_HOME", _fake_ppt_home(tmp_path, body))
+        result = extract(
+            content_type=_PPT_MIME,
+            filename=f"{MARKER}.ppt",
+            payload=_OLE2_MAGIC + MARKER.encode(),
+        )
+        assert (result.status, result.extractor, result.text, result.error) == (
+            STATUS_UNSUPPORTED,
+            "ppt@1",
+            None,
+            ENCRYPTED_PPT_ERROR,
+        )
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        assert "recorded unsupported" in warnings[0].getMessage()
+        assert MARKER not in caplog.text
+
+    @pytest.mark.parametrize("returncode", [1, 2, 3, 9, 11, 255])
+    def test_other_exit_statuses_stay_failed(self, tmp_path, monkeypatch, returncode):
+        """Any status but the reserved one (an uncaught exception, a JVM
+        that cannot start, a failed allocation) can be anything, so it
+        stays ``failed`` and is retried."""
+        from src.extractors import ppt
+
+        assert returncode != ppt.ENCRYPTED_EXIT_STATUS
+        monkeypatch.setattr(ppt, "PPT_HOME", _fake_ppt_home(tmp_path, f"sys.exit({returncode})"))
+        result = _ppt(_OLE2_MAGIC)
+        assert (result.status, result.error) == (STATUS_FAILED, "ToolExitError")
+
+    def test_reader_and_extractor_agree_on_the_encrypted_status(self):
+        """``PptText.java`` exits with the status ``ppt.py`` reads, for
+        POI's encrypted-file exception by exact class only."""
+        from src.extractors import ppt
+
+        source = (Path(__file__).parents[1] / "java" / "PptText.java").read_text()
+        declared = re.findall(r"static final int ENCRYPTED_EXIT_STATUS = (\d+);", source)
+        assert declared == [str(ppt.ENCRYPTED_EXIT_STATUS)]
+        assert "e.getClass() != EncryptedPowerPointFileException.class" in source
+        # Not 1 (an uncaught exception or a JVM start-up failure) and not
+        # 3 (the JVM's ExitOnOutOfMemoryError status).
+        assert ppt.ENCRYPTED_EXIT_STATUS not in {0, 1, 2, 3}
 
     @pytest.mark.parametrize("returncode", [-11, -24, -6])
     def test_signal_statuses_are_crash_rows(self, tmp_path, monkeypatch, returncode):
