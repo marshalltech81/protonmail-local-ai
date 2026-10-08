@@ -39,6 +39,37 @@ def _counted(db: Database, **kw):
     return db.search_attachments_with_count(**kw)
 
 
+def _child_count_rss(path, call_args: str) -> tuple[int, int]:
+    """``indeterminate`` and the peak-RSS growth (MB) of one
+    ``search_attachments_with_count(<call_args>, limit=1)`` on ``path``,
+    run in a child process: SQLite's allocations are not visible to
+    ``tracemalloc``. ``call_args`` is a fixed literal from the test."""
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    child = (
+        "import resource, sys\n"
+        "from src.lib.sqlite import Database\n"
+        "db = Database(sys.argv[1])\n"
+        "before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss\n"
+        f"found = db.search_attachments_with_count({call_args}, limit=1)\n"
+        "grown = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss - before\n"
+        "scale = 1 if sys.platform == 'darwin' else 1024\n"
+        "print(found.indeterminate, grown * scale // 2**20)\n"
+    )
+    out = subprocess.run(  # noqa: S603 (fixed interpreter and literal code)
+        [sys.executable, "-c", child, str(path)],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=True,
+    )
+    indeterminate, grown_mb = (int(v) for v in out.stdout.split())
+    return indeterminate, grown_mb
+
+
 @pytest.fixture
 def undecided_db(tmp_path) -> Database:
     """Thread ``t``: the vendor's decided ``v1``, the vendor's undecided
@@ -287,6 +318,64 @@ class TestAttachmentIndeterminateCount:
         large, large_count = steps(800)
         assert (small_count, large_count) == (400, 800)
         assert large < 3 * small
+
+    def test_a_long_filename_is_not_copied_per_matching_chunk(self, tmp_path):
+        """Codex round 2: the text-lane candidates grouped matching chunk
+        rows by the sender-controlled filename, so one 1 MB name on 300
+        matching chunks of an undecided message held ~300 MB in SQLite's
+        sorter. Chunks now reduce to occurrence IDs first. Peak RSS is
+        measured in a child process, since SQLite's allocations are not
+        visible to ``tracemalloc``; the old shape measured 1 GB at 500
+        chunks x 2 MB, this one 84 MB."""
+        from tests.conftest import _insert_chunk
+
+        conn, path = _open_built_db_conn(tmp_path, "long-name.db")
+        _insert_message(
+            conn,
+            message_id="u1",
+            thread_id="t",
+            sent_at="2024-01-10T00:00:00+00:00",
+            subject="synthetic",
+            from_=[VENDOR],
+            has_attachments=True,
+            sender_ambiguous=1,
+        )
+        _insert_attachment(
+            conn, message_id="u1", thread_id="t", attachment_id="u1-att", filename="n" * 2**20
+        )
+        _insert_extraction(conn, attachment_id="u1-att", extracted_text="ledger")
+        for i in range(300):
+            _insert_chunk(
+                conn,
+                chunk_id=f"c{i}",
+                message_id="u1",
+                thread_id="t",
+                text=f"ledger part {i}",
+                embedding=[1.0, 0.0, 0.0, 0.0],
+                chunk_index=i,
+                attachment_id="u1-att",
+            )
+        conn.close()
+        indeterminate, grown_mb = _child_count_rss(path, "query='ledger', sender='vendor'")
+        assert indeterminate == 1
+        assert grown_mb < 120
+
+    def test_a_long_senders_list_is_not_copied_per_candidate(self, tmp_path):
+        """The ``from_addr`` sibling: the per-thread count joined each
+        thread's ``senders`` JSON before grouping, copying it once per
+        candidate (300 x 1 MB here). It now groups first."""
+        import json
+
+        conn, path = _open_built_db_conn(tmp_path, "long-senders.db")
+        for i in range(300):
+            _add(conn, f"u{i}", "t", "2024-01-10T00:00:00+00:00", VENDOR, sender_ambiguous=1)
+        senders = [VENDOR, "x" * 2**20 + "@example.com"]
+        conn.execute("UPDATE threads SET senders = ?", (json.dumps(senders),))
+        conn.commit()
+        conn.close()
+        indeterminate, grown_mb = _child_count_rss(path, "sender='vendor', from_addr='vendor'")
+        assert indeterminate == 300
+        assert grown_mb < 120
 
     @pytest.mark.parametrize("query", [None, "ledger", "bravo"])
     def test_every_other_filter_applies(self, tmp_path, query):

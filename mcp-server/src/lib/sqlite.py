@@ -2021,14 +2021,19 @@ class Database:
                 f"f AS MATERIALIZED ( SELECT {columns} FROM attachments_fts "  # nosec B608
                 "JOIN attachments a ON attachments_fts.rowid = a.fts_rowid "
                 f"{joins}WHERE attachments_fts MATCH ? AND {where} ), "
-                "x AS MATERIALIZED ( SELECT a.attachment_id, a.claimant_id, a.filename, "
-                "MIN(a.thread_id) AS thread_id FROM ( "
-                "    SELECT rowid AS fts_rowid FROM message_chunks_fts "
+                # Matched chunks reduce to anchored occurrence IDs (fixed
+                # size) before any filename is read: grouping chunk rows
+                # by the sender-controlled filename copied it once per
+                # matching chunk (Codex round 2). One anchor per payload
+                # and message, so ``x`` holds each identity once.
+                "xo AS MATERIALIZED ( SELECT DISTINCT a.attachment_occurrence_id AS occ "
+                "FROM ( SELECT rowid AS fts_rowid FROM message_chunks_fts "
                 "    WHERE message_chunks_fts MATCH ? ) h "
                 "JOIN message_chunks c ON c.fts_rowid = h.fts_rowid "
                 f"JOIN attachments a ON a.attachment_occurrence_id = {_TEXT_LANE_ANCHOR} "
-                f"{joins}WHERE c.attachment_id IS NOT NULL AND {where} "
-                "GROUP BY a.attachment_id, a.claimant_id, a.filename ), "
+                f"{joins}WHERE c.attachment_id IS NOT NULL AND {where} ), "
+                f"x AS MATERIALIZED ( SELECT {columns} FROM xo "
+                "JOIN attachments a ON a.attachment_occurrence_id = xo.occ ), "
                 "extra AS ( SELECT attachment_id, claimant_id, filename FROM x "
                 "EXCEPT SELECT attachment_id, claimant_id, filename FROM f ), "
                 "cand AS ( SELECT thread_id FROM f UNION ALL "
@@ -2049,10 +2054,12 @@ class Database:
         if not from_addr:
             sql = "WITH " + ctes + " SELECT COUNT(*) FROM cand"  # nosec B608
             return conn.execute(sql, candidate_params).fetchone()[0]
+        # Count per thread first, then read each thread's ``senders`` once:
+        # joining before the grouping copied it per candidate.
         sql = (
             "WITH " + ctes + " "  # nosec B608
-            "SELECT t.senders, COUNT(*) AS n FROM cand "
-            "JOIN threads t ON t.thread_id = cand.thread_id GROUP BY cand.thread_id"
+            "SELECT t.senders, g.n FROM ( SELECT thread_id, COUNT(*) AS n FROM cand "
+            "GROUP BY thread_id ) g JOIN threads t ON t.thread_id = g.thread_id"
         )
         fa = from_addr.lower()
         return sum(
