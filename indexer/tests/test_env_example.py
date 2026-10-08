@@ -20,9 +20,13 @@ with a reason.
   the service's environment as Compose resolves it (``docker compose
   config --format json`` over every overlay) must be a literal Python
   read in that service's ``src/`` (``_NOT_READ_BY_PYTHON`` names the
-  exceptions), and a key counts as consumed when it is in such an
-  environment. ``_IDENTITY_SETTINGS`` entries are not reads here: a
-  name hashed for the config identity but no longer used still fails.
+  exceptions). A key counts as consumed when its value reaches such an
+  environment under its own name (Compose resolves the files with each
+  key set to a marker, base file first) and that service reads it; a
+  key a Python service reads must reach that service, so a shared
+  setting dropped from one service fails. ``_IDENTITY_SETTINGS``
+  entries are not reads here: a name hashed for the config identity but
+  no longer used still fails.
   Keys read only by shell (the mbsync scripts and template) are listed
   in ``_SHELL_ONLY`` with their reader; each entry must still be in its
   service's resolved environment and in ``--variables``, but no shell
@@ -129,13 +133,18 @@ def _python_env_reads(src_dirs: list[Path]) -> set[str]:
 
 
 def _compose_files(repo: Path) -> list[Path]:
+    """The base file first, then every overlay, so later files override
+    earlier ones as in the Makefile's ``-f docker-compose.yml -f ...``."""
     patterns = ("docker-compose*.yml", "docker-compose*.yaml", "compose*.yml", "compose*.yaml")
-    return sorted({p for pattern in patterns for p in repo.glob(pattern)})
+    base = repo / "docker-compose.yml"
+    overlays = sorted({p for pattern in patterns for p in repo.glob(pattern)} - {base})
+    return [base, *overlays]
 
 
-def _compose_config_json(repo: Path, *flags: str):
+def _compose_config_json(repo: Path, *flags: str, env: dict[str, str] | None = None):
     """``docker compose config <flags> --format json`` over every overlay,
-    parsed."""
+    parsed. ``env`` overrides the named variables (a shell variable wins
+    over ``.env``)."""
     docker = shutil.which("docker")
     if docker is None:
         if os.environ.get("CI"):
@@ -145,6 +154,7 @@ def _compose_config_json(repo: Path, *flags: str):
     result = subprocess.run(  # nosec B603 - fixed argv, no shell
         [docker, "compose", *files, "config", *flags, "--format", "json"],
         cwd=repo,
+        env={**os.environ, **(env or {})},
         capture_output=True,
         text=True,
         timeout=60,
@@ -166,6 +176,24 @@ def _service_environments(repo: Path) -> dict[str, set[str]]:
     Names only: the values are never kept."""
     services = _compose_config_json(repo)["services"]
     return {name: set(svc.get("environment") or {}) for name, svc in services.items()}
+
+
+def _delivered(repo: Path) -> set[tuple[str, str]]:
+    """``(service, KEY)`` for each ``.env.example`` key whose value reaches
+    that service's environment under its own name. Compose resolves the
+    configuration with every key set to a distinct numeric marker (a
+    valid port, since ``MCP_PORT`` is published), so a fixed value, or a
+    value interpolated from another name, does not count. Only the
+    markers are compared; no real ``.env`` value is kept."""
+    keys = sorted(_example_keys(repo / ".env.example"))
+    markers = {key: str(40000 + i) for i, key in enumerate(keys)}
+    services = _compose_config_json(repo, env=markers)["services"]
+    return {
+        (service, key)
+        for service, svc in services.items()
+        for key, value in (svc.get("environment") or {}).items()
+        if key in markers and value == markers[key]
+    }
 
 
 # A key line, set (``VAR=``) or commented out (``# VAR=``).
@@ -263,12 +291,22 @@ def _unread_pass_throughs(repo: Path) -> set[str]:
 
 
 def _consumed(repo: Path) -> set[str]:
-    """Names that reach a Python service that reads them."""
-    environments = _service_environments(repo)
+    """``.env.example`` keys that reach a Python service that reads them."""
+    reads = {service: _service_python_reads(repo, service) for service in _PYTHON_SERVICES}
+    return {key for service, key in _delivered(repo) if key in reads.get(service, set())}
+
+
+def _undelivered_reads(repo: Path) -> set[str]:
+    """``service:KEY`` for each ``.env.example`` key a Python service reads
+    that does not reach that service: a shared setting dropped from one
+    service is caught even while the other still consumes it."""
+    delivered = _delivered(repo)
+    keys = _example_keys(repo / ".env.example")
     return {
-        name
+        f"{service}:{key}"
         for service in _PYTHON_SERVICES
-        for name in environments[service] & _service_python_reads(repo, service)
+        for key in _service_python_reads(repo, service) & keys
+        if (service, key) not in delivered
     }
 
 
@@ -278,15 +316,16 @@ def _dead_keys(repo: Path) -> set[str]:
 
 
 def _stale_shell_only(repo: Path) -> set[str]:
-    """``_SHELL_ONLY`` entries Compose no longer passes to their service,
-    or that a Python service now consumes (so the entry hides nothing)."""
-    environments = _service_environments(repo)
+    """``_SHELL_ONLY`` entries whose key no longer reaches their service
+    under its own name, or that a Python service now consumes (so the
+    entry hides nothing)."""
+    delivered = _delivered(repo)
     variables = _compose_variables(repo)
     consumed = _consumed(repo)
     return {
         name
         for name, (service, _reader) in _SHELL_ONLY.items()
-        if name not in environments.get(service, set())
+        if (service, name) not in delivered
         or name not in variables
         or name in consumed
         or name not in _example_keys(repo / ".env.example")
@@ -539,3 +578,60 @@ def test_a_not_read_by_python_entry_dropped_from_compose_is_stale(reverse_copy):
     assert text.count(line) == 1
     compose.write_text(text.replace(line, ""), encoding="utf-8")
     assert _stale_not_read_by_python(reverse_copy) == {"indexer:HOME"}
+
+
+# --- Review round 1 ----------------------------------------------------------
+
+
+def _replace_once(path: Path, old: str, new: str) -> None:
+    text = path.read_text(encoding="utf-8")
+    assert text.count(old) == 1, old
+    path.write_text(text.replace(old, new), encoding="utf-8")
+
+
+_RERANK_CANDIDATES_LINE = "      RERANK_CANDIDATES: ${RERANK_CANDIDATES:-20}\n"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        '"20"',  # a fixed value: editing the key in .env no longer reaches it
+        "${RERANK_CANDIDATEZ_929:-20}",  # interpolated from another name
+    ],
+)
+def test_a_name_set_but_not_from_its_key_is_not_consumed(reverse_copy, value):
+    _replace_once(
+        reverse_copy / "docker-compose.yml",
+        _RERANK_CANDIDATES_LINE,
+        f"      RERANK_CANDIDATES: {value}\n",
+    )
+    assert _dead_keys(reverse_copy) == {"RERANK_CANDIDATES"}
+    assert _undelivered_reads(reverse_copy) == {"mcp-server:RERANK_CANDIDATES"}
+
+
+def test_the_base_compose_file_is_merged_before_its_overlays(reverse_copy):
+    # This overlay sorts before docker-compose.yml; merged after it, as
+    # every Makefile invocation does, its fixed value wins.
+    (reverse_copy / "docker-compose.a929.yml").write_text(
+        'services:\n  mcp-server:\n    environment:\n      RERANK_CANDIDATES: "20"\n',
+        encoding="utf-8",
+    )
+    assert _compose_files(reverse_copy)[0].name == "docker-compose.yml"
+    assert _dead_keys(reverse_copy) == {"RERANK_CANDIDATES"}
+
+
+def test_a_read_setting_dropped_from_one_service_is_caught(reverse_copy):
+    # Both services read EMBED_MODEL; the indexer still consumes it, so
+    # only the per-service edge shows the mcp-server lost it.
+    text = (reverse_copy / "docker-compose.yml").read_text(encoding="utf-8")
+    line = "      EMBED_MODEL: ${EMBED_MODEL}\n"
+    assert text.count(line) == 2
+    head, _, tail = text.rpartition(line)
+    (reverse_copy / "docker-compose.yml").write_text(head + tail, encoding="utf-8")
+    assert _undelivered_reads(reverse_copy) == {"mcp-server:EMBED_MODEL"}
+    assert not _dead_keys(reverse_copy)
+
+
+def test_every_env_example_key_a_python_service_reads_reaches_it():
+    missing = _undelivered_reads(_REPO)
+    assert not missing, f"pass the key to the service through Compose: {sorted(missing)}"
