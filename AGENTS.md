@@ -518,6 +518,12 @@ is exactly what this forbids.
   happened. Measure the worst case with a plain timing before sizing
   a bound; figures taken under a profiler (`cProfile`, `tracemalloc`)
   overstate it several times over.
+- A work-growth gate (the same work measured at a small and a large
+  corpus) uses realistic data: text at the density real mail has (at
+  least 20 tokens per chunk), every connection the path opens counted,
+  and the test shown to fail on the known-bad shape before it is
+  trusted. #1249's gate passed on three-token chunks that hid FTS5
+  segment growth (#1262).
 - A third-party parser whose cost cannot be bounded in-process (it
   allocates or loops on input before our code runs) runs in a child
   process launched through `indexer/src/extractors/_runner.py`
@@ -658,6 +664,12 @@ under about 80 characters.
   recheck every obligation that depended on the old boundary at the new
   one. #1125 moved its validation boundary twice, and #1134's re-check
   budget starved large threads (#1149); neither fix was a guard.
+- An implementing agent that finds the approved design contradicts
+  itself, or that leaves out or changes part of it, stops before
+  pushing. That choice is an owner decision and goes through the panel
+  below like any other (owner, 2026-10-08): the `get_attachment` total
+  and the `query_attachments` clock were both settled without it and
+  needed a retrospective panel.
 - Owner decisions (owner, 2026-10-08): every decision or recommendation
   brought to the owner (a re-scope trigger, a `decision` issue, a
   choice between options) first goes to a two-reviewer panel, Claude
