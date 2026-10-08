@@ -871,6 +871,136 @@ class TestByteIdenticalCopies:
         assert result["threads_reaped"] == 0
         assert result["blocked_threads"] == 0
 
+    def test_a_copy_restored_after_the_threads_listing_is_kept(
+        self, db, threader, embedder, maildir, monkeypatch
+    ):
+        """Codex round 7 on #1134: the per-thread listing, taken for an
+        earlier message, still showed a later message's copy as trashed
+        after mbsync restored it, so the thread was reaped although that
+        copy was live. A miss is resolved again with a fresh listing."""
+        thread_id, restored = self._thread_of_restorable_copies(db, threader, maildir)
+        rec = Reconciler(db, embedder, _default_config())
+        assert rec.sweep()["tombstoned"] == 3
+        first = restored[0]
+        first.with_name(first.name + "T").rename(first)
+        real_iterdir = Path.iterdir
+        pending = list(restored[1:])
+
+        def iterdir_then_restore(self):
+            listing = list(real_iterdir(self))
+            if self == maildir:
+                while pending:  # restored once the folder was listed
+                    path = pending.pop()
+                    path.with_name(path.name + "T").rename(path)
+            return iter(listing)
+
+        monkeypatch.setattr(Path, "iterdir", iterdir_then_restore)
+        result = rec.reap()
+
+        assert result["threads_reaped"] == 0
+        assert db.get_thread(thread_id) is not None
+        mapped = {r["filepath"] for r in db.iter_message_map()}
+        assert mapped == {str(p) for p in restored}
+        assert count_pending_deletions(db) == 0
+
+    def test_the_fresh_recheck_is_bounded_and_defers_the_thread(
+        self, db, threader, embedder, maildir, monkeypatch, caplog
+    ):
+        """The fresh re-checks share a budget of directory listings per
+        thread; once it is spent the thread is left for the next pass
+        rather than reaped on a listing that may be stale."""
+        import src.reconciler as reconciler_module
+
+        thread_id, _restored = self._thread_of_restorable_copies(db, threader, maildir)
+        rec = Reconciler(db, embedder, _default_config())
+        rec.sweep()
+        for n in range(3):  # every copy gone for good
+            (maildir / f"170000000{n}.K{n}.host:2,ST").unlink()
+        monkeypatch.setattr(reconciler_module, "_LIVE_COPY_RECHECK_LISTINGS", 1)
+        listed: list[Path] = []
+        real_iterdir = Path.iterdir
+
+        def counting_iterdir(self):
+            if self == maildir:
+                listed.append(self)
+            return real_iterdir(self)
+
+        monkeypatch.setattr(Path, "iterdir", counting_iterdir)
+        with caplog.at_level(logging.INFO, logger="indexer.reconciler"):
+            result = rec.reap()
+
+        assert result["threads_reaped"] == 0
+        assert db.get_thread(thread_id) is not None
+        # The thread's shared listing, then one fresh re-check: the budget.
+        assert len(listed) == 2
+        line = next(r for r in caplog.records if "re-check budget" in r.getMessage())
+        assert line.levelno == logging.WARNING
+        assert _COPY_MARKER not in caplog.text
+
+        monkeypatch.setattr(reconciler_module, "_LIVE_COPY_RECHECK_LISTINGS", 256)
+        assert rec.reap()["threads_reaped"] == 1
+
+    def _tombstone_backdated(self, db, path: Path, days: int) -> None:
+        entry = db.find_message_entry_by_filepath(str(path))
+        assert db.add_pending_deletion(str(path), entry["claimant_id"], entry["thread_id"])
+        marked = (datetime.now(UTC) - timedelta(days=days)).isoformat()
+        db._conn.execute(
+            "UPDATE pending_deletions SET marked_at = ? WHERE filepath = ?", (marked, str(path))
+        )
+        db._conn.commit()
+
+    def _marked_at(self, db, path: Path) -> datetime:
+        row = db._conn.execute(
+            "SELECT marked_at FROM pending_deletions WHERE filepath = ?", (str(path),)
+        ).fetchone()
+        return datetime.fromisoformat(row["marked_at"])
+
+    def test_remap_onto_an_older_tombstone_restarts_the_grace(
+        self, db, threader, embedder, maildir
+    ):
+        """Codex round 7 on #1134: the copy's own old tombstone survived
+        the remap (``add_pending_deletion`` ignores an existing row), so
+        the message was reaped a grace period after the copy was trashed,
+        not after the live path it was mapped to disappeared."""
+        kept = maildir / "1700000000.M1.host:2,ST"
+        mapped = maildir / "1700000001.M2.host:2,S"
+        _write_eml(kept, "grace1102@example.com")
+        thread_id = _index(kept, db, threader)
+        self._tombstone_backdated(db, kept, days=10)
+        mapped.write_bytes(kept.read_bytes())
+        _index(mapped, db, threader)  # live and mapped, no tombstone
+        mapped.unlink()
+        before = datetime.now(UTC)
+        rec = Reconciler(db, embedder, _default_config(grace_days=7))
+
+        assert rec.sweep()["remapped"] == 1
+
+        assert self._marked_at(db, kept) >= before
+        assert rec.reap()["threads_reaped"] == 0
+        assert db.get_thread(thread_id) is not None
+
+    def test_merging_two_tombstones_keeps_the_later_mark(self, db, threader, embedder, maildir):
+        """Codex round 7 on #1134: of two tombstones the copy's was kept
+        whatever its age."""
+        kept = maildir / "1700000000.M1.host:2,ST"
+        mapped = maildir / "1700000001.M2.host:2,S"
+        _write_eml(kept, "merge1102@example.com")
+        thread_id = _index(kept, db, threader)
+        self._tombstone_backdated(db, kept, days=10)
+        mapped.write_bytes(kept.read_bytes())
+        _index(mapped, db, threader)
+        self._tombstone_backdated(db, mapped, days=1)
+        later = self._marked_at(db, mapped)
+        mapped.unlink()
+        rec = Reconciler(db, embedder, _default_config(grace_days=7))
+
+        assert rec.sweep()["remapped"] == 1
+
+        assert count_pending_deletions(db) == 1
+        assert self._marked_at(db, kept) == later
+        assert rec.reap()["threads_reaped"] == 0
+        assert db.get_thread(thread_id) is not None
+
     def test_reap_drops_a_copys_dead_job(self, db, threader, embedder, maildir):
         """Codex round 4 on #1134: the reap unmarked a copy's path but
         kept its dead job, so the walk skipped the copy when it came back

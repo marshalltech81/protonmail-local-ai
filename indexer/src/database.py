@@ -2493,9 +2493,13 @@ class Database:
         A rename (``update_filepath``) carries the gone path's tombstone
         and queue row to ``new_path``. The copy is a file of its own and
         can already hold either (#1102). Its tombstone describes the file
-        that still exists, so it is kept and the gone path's dropped. Of
-        two queue rows the runnable one is kept: the copy's, unless it is
-        dead and the gone path's is not, since both index the same bytes.
+        that still exists, so it is kept and the gone path's dropped, but
+        its grace period never starts before the message lost its last
+        live path: of two tombstones the later mark is kept, and when the
+        gone path had none (the message was live through it) the copy's
+        restarts now. Of two queue rows the runnable one is kept: the
+        copy's, unless it is dead and the gone path's is not, since both
+        index the same bytes.
         """
         with self.transaction():
             cur = self._conn.cursor()
@@ -2507,6 +2511,14 @@ class Database:
                 or not Path(new_path).exists()
             ):
                 return False
+            # The later of the two marks, or now when the gone path had none.
+            cur.execute(
+                "UPDATE pending_deletions SET marked_at = COALESCE("
+                "(SELECT MAX(marked_at) FROM pending_deletions WHERE filepath IN (?, ?) "
+                "AND EXISTS (SELECT 1 FROM pending_deletions WHERE filepath = ?)), ?) "
+                "WHERE filepath = ?",
+                (old_path, new_path, old_path, datetime.now(UTC).isoformat(), new_path),
+            )
             cur.execute(
                 "DELETE FROM pending_deletions WHERE filepath = ? "
                 "AND EXISTS (SELECT 1 FROM pending_deletions WHERE filepath = ?)",

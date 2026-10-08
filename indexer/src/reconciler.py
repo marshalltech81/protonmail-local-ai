@@ -60,6 +60,14 @@ _REAP_ABSOLUTE_FLOOR = 10
 # silent retry.
 _BLOCKED_ESCALATION_THRESHOLD = 3
 
+# Directory listings the pre-reap live-copy check may spend per thread
+# re-resolving, with a fresh listing, a message whose copies the
+# thread's shared listing shows as gone or trashed (#1102): that listing
+# can predate mbsync restoring a later message's copy. Past the budget
+# the thread is left for the next pass instead of reaped on a listing
+# that may be stale. A listing of a large folder costs a few ms.
+_LIVE_COPY_RECHECK_LISTINGS = 256
+
 
 def _is_live(filepath: str | None, listings: dict[Path, dict[str, Path]]) -> bool:
     """True when the message file at ``filepath`` (or its flag-renamed
@@ -476,8 +484,10 @@ class Reconciler:
         if not survivor_rows:
             # Whole thread gone. Drop everything; the .eml files stay on
             # disk because the indexer never deletes Maildir files.
-            if self._keep_live_copies(tombs, copies):
+            kept, deferred = self._keep_live_copies(tombs, copies)
+            if kept:
                 self._clear_blocked(thread_id)
+            if kept or deferred:
                 return False, False
             if not self.db.delete_thread_completely(
                 thread_id, grace_cutoff=cutoff, copy_paths=copy_paths
@@ -614,8 +624,10 @@ class Reconciler:
         # pending_deletions rows inside a single BEGIN IMMEDIATE, so a
         # crash mid-reap cannot leave the thread row and the map
         # disagreeing about which messages belong.
-        if self._keep_live_copies(tombs, copies):
+        kept, deferred = self._keep_live_copies(tombs, copies)
+        if kept:
             self._clear_blocked(thread_id)
+        if kept or deferred:
             return False, False
         removed_filepaths = self.db.reap_thread_messages(
             rebuilt_thread,
@@ -638,9 +650,11 @@ class Reconciler:
         self._clear_blocked(thread_id)
         return False, True
 
-    def _keep_live_copies(self, tombs: list, copies: Mapping[str, list[str]]) -> bool:
+    def _keep_live_copies(self, tombs: list, copies: Mapping[str, list[str]]) -> tuple[int, bool]:
         """Remap each tombstoned message with a live byte-identical copy to
-        it, clearing its tombstone, and return whether any had one (#1102).
+        it, clearing its tombstone. Returns how many were kept and whether
+        the check was cut short (#1102); the caller reaps the thread only
+        when neither.
 
         The sweep found no live copy, but mbsync can restore one (drop its
         ``T`` flag) before the reap. That copy is not the mapped path, so
@@ -652,13 +666,31 @@ class Reconciler:
         blocked-attempts entry then: the reap it counted is cancelled.
 
         One directory cache per call, built fresh: the pass's cache may
-        predate the restore, and one cache per tombstone would list a
-        shared folder once per message.
+        predate the restore. That cache is shared by the thread's messages,
+        so it can predate a later message's copy coming back: a message it
+        shows with no live copy is resolved once more through a listing of
+        its own, within ``_LIVE_COPY_RECHECK_LISTINGS`` per thread. When
+        the budget is spent the check stops and the thread is deferred.
         """
         kept = 0
+        rechecks = 0
         listings: dict[Path, dict[str, Path]] = {}
         for tomb in tombs:
-            copy = _pick_copy(copies.get(tomb["claimant_id"], []), listings, live_only=True)
+            candidates = copies.get(tomb["claimant_id"], [])
+            if not candidates:
+                continue
+            copy = _pick_copy(candidates, listings, live_only=True)
+            if copy is None:
+                if rechecks >= _LIVE_COPY_RECHECK_LISTINGS:
+                    log.warning(
+                        "reaper: deferred a thread to the next pass; the live-copy "
+                        "re-check budget (%d directory listings) is spent",
+                        _LIVE_COPY_RECHECK_LISTINGS,
+                    )
+                    return kept, True
+                fresh: dict[Path, dict[str, Path]] = {}
+                copy = _pick_copy(candidates, fresh, live_only=True)
+                rechecks += len(fresh)
             if copy is None:
                 continue
             kept += 1
@@ -676,7 +708,7 @@ class Reconciler:
                 "since the sweep; retrying the thread next pass",
                 kept,
             )
-        return kept > 0
+        return kept, False
 
     # -----------------------------------------------------------------
     # Helpers

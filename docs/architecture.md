@@ -1681,8 +1681,10 @@ pass over `indexed_files` per sweep covering every missing message. If
 one exists (a live copy is preferred to a `T`-flagged one), the message
 is remapped to that copy: its locator, folder and S/F/R state move as
 for a rename, and a tombstone or queued job on the gone path moves too
-unless the copy already has its own. The copy's tombstone is kept; of
-two queued jobs the runnable one is kept (the copy's, unless it is dead
+unless the copy already has its own. The copy's tombstone is kept, but
+with the later of the two marks, or marked now when the gone path had
+none, so the grace period never starts before the message lost its
+last live path; of two queued jobs the runnable one is kept (the copy's, unless it is dead
 and the gone path's is not). The remap is refused when the watcher
 renamed the copy or moved the mapping since the sweep resolved it.
 After a refusal, or when the sweep's cached folder listing shows no
@@ -1709,7 +1711,12 @@ instead of staying marked indexed, or held by a dead job, with nothing
 left to repair it. Just before a thread's reap is written, the copies
 are checked on disk once more: if mbsync restored one since the sweep,
 the message moves to it, its tombstone is cleared and the thread is
-left for the next pass (logged at INFO with a count). A failure of the
+left for the next pass (logged at INFO with a count). That check shares
+one fresh folder listing per thread, and a message it shows with no
+live copy is resolved again through a listing of its own, up to 256
+directory listings per thread; past that budget the thread is left for
+the next pass (logged at WARNING) rather than reaped on a listing that
+may be stale. A failure of the
 rename sweep before a periodic rescan is logged at WARNING with its
 type and does not stop that rescan's walk, and its recovery is logged
 like the other recurring steps'. Known limitation (#1141): a copy that
