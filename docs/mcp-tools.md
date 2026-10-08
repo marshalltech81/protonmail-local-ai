@@ -1557,7 +1557,9 @@ one block plus one page and each call reads the whole stored text once
 (about 1 ms for the default 2,000,000-character cap, about 30 ms for
 50 MB, in the image). SQLite's own `length` and `substr` would stop at
 an embedded NUL, which plain-text extraction keeps. The log records
-only `offset`; the occurrence ID is withheld.
+only `offset`; the occurrence ID is withheld. An unknown ID logs
+the fixed `get_attachment failed: not_found` WARNING through a rate
+limiter: the first in each 60-second window, the rest counted.
 
 ---
 

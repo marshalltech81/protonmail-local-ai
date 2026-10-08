@@ -393,8 +393,42 @@ class TestPrivacyAndErrors:
         caplog.set_level(logging.DEBUG)
         with pytest.raises(ToolError, match="Attachment occurrence not found"):
             asyncio.run(handler(attachment_occurrence_id=MARKER))
-        assert "get_attachment failed: not found" in caplog.text
+        assert "get_attachment failed: not_found" in caplog.text
         assert MARKER not in caplog.text
+
+    def test_repeated_unknown_occurrences_log_one_warning(self, tmp_path, caplog):
+        """Codex round 1: a client can send unknown IDs as fast as it
+        likes, so the not-found WARNING is rate-limited; every call
+        still errors and gets its own timing line."""
+        handler = _handler(_db(tmp_path, {}))
+        caplog.set_level(logging.DEBUG)
+        for n in range(5):
+            with pytest.raises(ToolError, match="Attachment occurrence not found"):
+                asyncio.run(handler(attachment_occurrence_id=f"{MARKER}-{n}"))
+        warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert warnings.count("get_attachment failed: not_found") == 1
+        timing = [r.getMessage() for r in caplog.records if r.name == "mcp.timings"]
+        assert len(timing) == 5
+        assert all("outcome=error" in line for line in timing)
+        assert MARKER not in caplog.text
+
+    def test_the_not_found_summary_counts_the_suppressed_lines(self, caplog):
+        """The limiter's summary after its window, with the count."""
+        from src.tools.retrieval import _not_found_log
+
+        now = [0.0]
+        limiter = _not_found_log(clock=lambda: now[0])
+        caplog.set_level(logging.INFO)
+        for _ in range(4):
+            limiter.record("not_found")
+        now[0] = 61.0
+        limiter.record("not_found")
+        messages = [r.getMessage() for r in caplog.records]
+        assert messages == [
+            "get_attachment failed: not_found",
+            "get_attachment failed in the last 61s: not_found=4",
+            "get_attachment failed: not_found",
+        ]
 
     def test_mail_values_never_reach_the_log(self, tmp_path, caplog):
         db = _db(tmp_path, {0: ("success", f"{MARKER} " * 30_000, None)})

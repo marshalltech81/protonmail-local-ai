@@ -707,7 +707,7 @@ _CALLER_ERRORS = [
     (
         "get_attachment",
         {"attachment_occurrence_id": f"missing-{MARKER}"},
-        "get_attachment failed: not found",
+        "get_attachment failed: not_found",
     ),
     ("get_attachment", {"attachment_occurrence_id": _MARKER_OCCURRENCE_ID, "offset": -1}, "offset"),
     (

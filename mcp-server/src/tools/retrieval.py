@@ -5,7 +5,9 @@ Fetch thread and message context from the local SQLite index.
 
 import asyncio
 import logging
+import time
 import unicodedata
+from collections.abc import Callable
 from typing import Annotated, Any
 
 from fastmcp.exceptions import ToolError
@@ -109,6 +111,21 @@ SizeBound = Annotated[
 # Seconds per window of the rate-limited ``fields`` rejection warning:
 # a client can repeat a rejected projection as fast as it likes.
 _FIELDS_REJECTION_LOG_INTERVAL_SECS = 60.0
+
+
+def _not_found_log(clock: Callable[[], float] = time.monotonic) -> RateLimitedLog:
+    """get_attachment's rate-limited not-found WARNING: a client can
+    send unknown occurrence IDs as fast as it likes (Codex round 1 on
+    #796). Fixed text; the ID stays out of the log."""
+    return RateLimitedLog(
+        log,
+        ("not_found",),
+        _FIELDS_REJECTION_LOG_INTERVAL_SECS,
+        first_msg="get_attachment failed: %s",
+        summary_msg="get_attachment failed in the last %ds: %s",
+        clock=clock,
+    )
+
 
 # Recipients rendered per role before the rest are summarized as a count.
 _MAX_LISTED_PARTICIPANTS = 10
@@ -494,6 +511,7 @@ def register_retrieval_tools(server, db):
         summary_msg="query_messages rejected invalid fields in the last %ds: %s",
     )
     # The same for every other rejected argument, keyed by tool and field (#1039).
+    not_found = _not_found_log()
     rejections = ArgumentRejections(
         log,
         (
@@ -1644,7 +1662,7 @@ def register_retrieval_tools(server, db):
             )
             if found is None:
                 # Fixed text: the ID is the caller's and stays out of the log.
-                log.warning("get_attachment failed: not found")
+                not_found.record("not_found")
                 raise ToolError(f"Attachment occurrence not found: {attachment_occurrence_id}")
             a = found.record
             reason = None
