@@ -1698,6 +1698,22 @@ dead-lettered (they stay unassessed). An ambiguous message linked by
 move the thread's last-activity date, and so the order in which
 same-subject candidate threads are tried.
 
+### Raw 8-bit headers
+
+A header sent as raw bytes rather than RFC 2047 encoded-words (a
+Subject, or a display name in `From`, `To` or `Cc`) is decoded as UTF-8
+and logs nothing when the bytes are valid UTF-8 (#1147). Bytes in any
+other encoding are decoded with replacement characters, and the
+message logs one WARNING per affected header chunk, without the text:
+`raw 8-bit header is not UTF-8; decoded 1 header chunk with replacement
+characters`. A header without a parseable address is decoded twice (for
+the address and for the From fallback), so it logs two. These lines
+share the 20-per-5-minutes limit above and are counted as
+`suppressed_lines` when withheld. A charset label the codec rejects
+still logs `header encoded-word charset could not be decoded
+(<ExceptionType>)` instead ([Attachment filename shows `=?utf-8?...?=`
+text](#attachment-filename-shows-utf-8-text)).
+
 ### `authority_class` filters return nothing after an upgrade
 
 Schema v2 (#1144) records whether each message's sender attribution is

@@ -1327,6 +1327,9 @@ def _decode_header_parts(parts: list[tuple[bytes | str, str | None]]) -> str:
             # per word naming the exception type only (the label and text
             # are mail content).
             encoding = charset or "utf-8"
+            if encoding.lower() == _RAW_8BIT_CHARSET:
+                decoded.append(_decode_raw_8bit(part))
+                continue
             try:
                 decoded.append(part.decode(encoding, errors="replace"))
             except (LookupError, ValueError) as exc:
@@ -1340,6 +1343,27 @@ def _decode_header_parts(parts: list[tuple[bytes | str, str | None]]) -> str:
         else:
             decoded.append(part)
     return " ".join(decoded)
+
+
+# The label compat32 gives header bytes sent without an encoded-word
+# (raw 8-bit), and that the standard library writes when it re-encodes
+# them. No codec has this name, so it is handled here (#1147).
+_RAW_8BIT_CHARSET = "unknown-8bit"
+
+
+def _decode_raw_8bit(part: bytes) -> str:
+    """Decode a raw 8-bit header chunk: exactly and silently when it is
+    valid UTF-8, otherwise as UTF-8 with replacement characters and one
+    rate-limited WARNING, since characters were lost (#1147)."""
+    try:
+        return part.decode("utf-8")
+    except UnicodeDecodeError:
+        warn_rate_limited(
+            log,
+            "raw 8-bit header is not UTF-8; decoded 1 header chunk with replacement characters",
+            attachment=False,
+        )
+        return part.decode("utf-8", errors="replace")
 
 
 # RFC 5322 "specials": a display name containing any of these must be
