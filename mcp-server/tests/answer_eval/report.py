@@ -44,6 +44,7 @@ def case_record(
     return {
         "id": case.id,
         "category": case.category,
+        "tool": case.tool,
         "held_out": case.held_out,
         "answerable": case.answerable,
         "required_groups": len(case.required_evidence),
@@ -77,7 +78,7 @@ def case_record(
         },
         "attribution": causes,
         "inference_calls": len(run.calls),
-        "repair_attempted": run.output.repair_attempted if run.output else None,
+        "repair_attempted": run.view.repair_attempted if run.output else None,
         "passages_supplied": len(run.passages),
         "timings_ms": {**run.timings_ms, "judge": judge.ms},
         # The inference client returns text only, so token usage is not
@@ -89,15 +90,17 @@ def case_record(
 def detail_record(case: Case, run: CaseRun, judge: JudgeOutcome) -> dict[str, Any]:
     """Content-bearing record for the opted-in detail artifact only."""
     verdict = judge.verdict
+    view = run.view if run.output else None
     return {
         "id": case.id,
+        "tool": case.tool,
         "question": case.question,
-        "answer": run.output.answer if run.output else None,
+        "answer": view.answer if view else None,
         "tool_error": run.error_detail,
         # What the judge was allowed to excuse (review round 9).
-        "coverage_note": run.output.coverage_note if run.output else None,
+        "coverage_note": view.coverage_note if view else None,
         "omitted_facts": budget_omitted_facts(case, run),
-        "retrieved_threads": [t.thread_id for t in run.output.threads] if run.output else [],
+        "retrieved_threads": [t.thread_id for t in view.threads] if view else [],
         "passages": {
             label: {
                 "thread_id": p.thread_id,
@@ -238,8 +241,10 @@ def build_report(
     identity: dict[str, Any], records: list[dict[str, Any]], judge_configured: bool
 ) -> dict[str, Any]:
     by_category: dict[str, list[dict[str, Any]]] = {}
+    by_tool: dict[str, list[dict[str, Any]]] = {}
     for r in records:
         by_category.setdefault(r["category"], []).append(r)
+        by_tool.setdefault(r["tool"], []).append(r)
     return {
         "schema_version": REPORT_SCHEMA_VERSION,
         "kind": "answer_eval_run",
@@ -251,6 +256,9 @@ def build_report(
             "held_out": aggregate([r for r in records if r["held_out"]], judge_configured),
             "by_category": {
                 cat: aggregate(rs, judge_configured) for cat, rs in sorted(by_category.items())
+            },
+            "by_tool": {
+                tool: aggregate(rs, judge_configured) for tool, rs in sorted(by_tool.items())
             },
         },
         "cases": records,
