@@ -100,7 +100,10 @@ def _dedupe_by_canonical(addrs: list[str]) -> list[str]:
 # v2 (#1144): ``messages.sender_ambiguous`` records whether the sender
 # attribution is safe, NULL until a reparse assesses the message
 # (``migrations/0002_messages_sender_ambiguous.sql``).
-SCHEMA_VERSION = 2
+# v3 (#891): ``attachment_extractions.ocr_pages_skipped`` records the
+# scanned PDF pages the OCR cap left unread, NULL (unknown) on rows
+# cached before it (``migrations/0003_extraction_ocr_pages_skipped.sql``).
+SCHEMA_VERSION = 3
 SCHEMA_APPLICATION_ID = 0x504D4149  # "PMAI"
 
 # How long a ``reaped_messages`` record outlives the reap. The record
@@ -638,6 +641,9 @@ class Database:
             -- bytes under labels that pick different extractors get
             -- separate results. ``extractor_module`` is '' for an
             -- occurrence that selects no extractor.
+            -- ``ocr_pages_skipped`` is the scanned PDF pages the OCR page
+            -- cap left unread (#891): 0 when none, NULL when unknown (a
+            -- non-PDF result, or a row cached before schema v3).
             CREATE TABLE attachment_extractions (
                 attachment_id      TEXT NOT NULL,
                 extractor_module   TEXT NOT NULL,
@@ -646,6 +652,7 @@ class Database:
                 extracted_text     TEXT,
                 extraction_error   TEXT,
                 extracted_at       TEXT NOT NULL,
+                ocr_pages_skipped  INTEGER CHECK (ocr_pages_skipped >= 0),
                 PRIMARY KEY (attachment_id, extractor_module)
             );
 
@@ -1582,7 +1589,7 @@ class Database:
         """
         return self._conn.execute(
             "SELECT attachment_id, extractor_module, extraction_status, extractor, "
-            "extracted_text, extraction_error, extracted_at "
+            "extracted_text, extraction_error, extracted_at, ocr_pages_skipped "
             "FROM attachment_extractions WHERE attachment_id = ? AND extractor_module = ?",
             (attachment_id, extractor_module),
         ).fetchone()
@@ -1597,6 +1604,7 @@ class Database:
         extractor: str | None,
         extracted_text: str | None,
         extraction_error: str | None,
+        ocr_pages_skipped: int | None = None,
     ) -> None:
         """Persist (or replace) the extraction record for ``attachment_id``
         under ``extractor_module`` ('' when the occurrence selects no
@@ -1611,6 +1619,9 @@ class Database:
         * ``"too_large"`` — payload exceeds the configured byte cap
         * ``"failed"`` — extractor raised; ``extraction_error`` populated
 
+        ``ocr_pages_skipped`` is the scanned PDF pages the OCR page cap
+        left unread (#891), ``None`` when unknown.
+
         The same (attachment_id, extractor_module) is OR-REPLACE'd so a follow-up pass
         (e.g. after enabling OCR or bumping ``INDEXER_OCR_MAX_PAGES``)
         can upgrade a prior ``unsupported`` / ``empty`` status without
@@ -1624,8 +1635,8 @@ class Database:
                 """
                 INSERT OR REPLACE INTO attachment_extractions
                     (attachment_id, extractor_module, extraction_status, extractor,
-                     extracted_text, extraction_error, extracted_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                     extracted_text, extraction_error, extracted_at, ocr_pages_skipped)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     attachment_id,
@@ -1635,6 +1646,7 @@ class Database:
                     extracted_text,
                     extraction_error,
                     datetime.now(UTC).isoformat(),
+                    ocr_pages_skipped,
                 ),
             )
             self._commit_if_started(started)

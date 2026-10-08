@@ -270,6 +270,7 @@ class TestSenderAmbiguousMigration:
         chunks_before = db._conn.execute(
             "SELECT chunk_id FROM message_chunks ORDER BY chunk_id"
         ).fetchall()
+        db._conn.execute("ALTER TABLE attachment_extractions DROP COLUMN ocr_pages_skipped")
         db._conn.execute("ALTER TABLE messages DROP COLUMN sender_ambiguous")
         db._conn.execute("UPDATE schema_version SET version = 1")
         db._conn.commit()

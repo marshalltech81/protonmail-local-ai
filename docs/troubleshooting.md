@@ -1520,11 +1520,15 @@ only, never filenames or text (`make logs`):
   the pages past the cap are not read. Every capped PDF is also counted
   in the attachments line below (`ocr_capped_pdfs`, `ocr_pages_skipped`).
   Raising the cap applies only to PDFs extracted afterwards, since the
-  result is cached. Known limitation (#891): the cap is logged and
-  counted on the first extraction only. A later message carrying the
-  same PDF is served from the extraction cache and reports a plain
-  `success`, with no cap line and no `ocr_capped_pdfs` count, although
-  the cached text still lacks the unread pages.
+  result is cached. The cached result keeps the number of pages the cap
+  skipped (#891), so a later message carrying the same PDF, served from
+  the cache, logs `pdf OCR capped: cached result is missing <K> scanned
+  pages` (WARNING, rate limited like the line above) and is counted in
+  `ocr_capped_pdfs` and `ocr_pages_skipped` once its message commits.
+  A PDF cached before schema v3 has no recorded count: it is served as
+  a plain `success`, with no cap line and no count, until the same bytes
+  are extracted again for another reason. Nothing is re-extracted to
+  fill the count in.
 - `image OCR capped at <N> of at least <N+1> frames` (WARNING): a
   multipage TIFF had more frames than `INDEXER_OCR_MAX_PAGES`; the
   frames past the cap are not read. The indexer looks one frame past
@@ -1533,7 +1537,11 @@ only, never filenames or text (`make logs`):
   be read (<ExceptionType>)` is the same cap when that frame directory
   is corrupt; the frames already read are still indexed. Each is
   counted as `ocr_capped_images` in the attachments line below. The
-  same caching and #891 limitation as the PDF cap line apply.
+  same caching applies, but unlike the PDF cap the cached result does
+  not record the image cap: a later message served the cached TIFF
+  reports a plain `success`, with no cap line and no
+  `ocr_capped_images` count, although the cached text still lacks the
+  unread frames (#1201).
 - `extractor cap <name>: <fixed text and counts>` (WARNING): a cap
   inside an extractor cut the text it returned (#903). Logged once per
   cap per extraction, and counted as `extractor_caps` in the
@@ -1653,7 +1661,10 @@ only, never filenames or text (`make logs`):
     `ocr_capped_images`, `extractor_caps`, `warnings_suppressed`) and the
     per-attachment WARNINGs count every extraction attempt, retries included, and
     `parser_caps_messages` every parse of a capped message (see
-    below).
+    below). A PDF served capped from the cache or from an earlier
+    occurrence in the same batch is added to `ocr_capped_pdfs` and
+    `ocr_pages_skipped` once per occurrence whose message commits
+    (#891).
 
 The parser also caps the work one message can cost. A cap that loses
 content logs one WARNING line for that message, with its Maildir path

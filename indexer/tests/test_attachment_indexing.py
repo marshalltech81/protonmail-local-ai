@@ -2722,3 +2722,170 @@ def test_non_ole2_ppt_row_holds_for_ppt_occurrences_only(tmp_path, monkeypatch, 
     prepare_attachment_writes(db=db, **_kwargs(as_text))
     extractor.assert_called_once()
     assert "SYNTHETIC_NOT_A_DECK" not in caplog.text
+
+
+class TestOcrCapOnCacheHits:
+    """#891: the PDF OCR cap's skipped-page count is kept on the cached
+    extraction, so an occurrence served from the cache or from an earlier
+    result in its batch still counts as capped (``ocr_capped_pdfs``,
+    ``ocr_pages_skipped``) and logs the rate-limited cap WARNING, once per
+    occurrence whose message commits. A row written before the column
+    existed holds NULL (unknown) and counts as nothing. The served text is
+    unchanged."""
+
+    MARKER = "SYNTHETIC_CAPPED_PDF_MARKER"
+
+    @staticmethod
+    def _pdf_attachment(payload: bytes = b"%PDF-1.7 synthetic") -> Attachment:
+        return _attachment(
+            payload,
+            filename="SYNTHETIC_FILENAME_MARKER.pdf",
+            content_type="application/pdf",
+        )
+
+    def _store(self, db: Database, attachment: Attachment, skipped: int | None) -> None:
+        from src.extractors import EXTRACTOR_VERSIONS
+
+        db.store_attachment_extraction(
+            attachment_id=attachment.content_hash,
+            extractor_module=_module(attachment),
+            extraction_status=STATUS_SUCCESS,
+            extractor=f"pdf-ocr@{EXTRACTOR_VERSIONS['pdf']}",
+            extracted_text=f"{self.MARKER} cached text",
+            extraction_error=None,
+            ocr_pages_skipped=skipped,
+        )
+
+    @staticmethod
+    def _cap_lines(caplog) -> list[logging.LogRecord]:
+        return [r for r in caplog.records if "OCR capped" in r.getMessage()]
+
+    @pytest.fixture(autouse=True)
+    def _drained(self):
+        attachment_indexing.attachment_outcomes.drain()
+        yield
+        attachment_indexing.attachment_outcomes.drain()
+
+    def test_committed_cache_hit_counts_the_cap_and_warns(self, tmp_path, monkeypatch, caplog):
+        caplog.set_level("INFO")
+        db = _setup_db_for_attachment(tmp_path)
+        attachment = self._pdf_attachment()
+        self._store(db, attachment, 25)
+        extractor = MagicMock()
+        monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
+
+        plan = prepare_attachment_writes(db=db, **_kwargs(attachment))
+        extractor.assert_not_called()
+        assert (plan.status, plan.cached, plan.extraction_to_persist) == (
+            STATUS_SUCCESS,
+            True,
+            None,
+        )
+        assert [c.text for c in plan.chunks] == [f"{self.MARKER} cached text"]
+        # Prepared only: not counted until the message commits.
+        assert self._cap_lines(caplog) == []
+
+        attachment_indexing.record_committed_outcomes([plan])
+        counts = attachment_indexing.attachment_outcomes.drain()
+        assert (counts["ocr_capped_pdfs"], counts["ocr_pages_skipped"]) == (1, 25)
+        assert (counts["success"], counts["cached"]) == (1, 1)
+        assert attachment_indexing.attachment_outcomes_degraded(counts)
+        [line] = self._cap_lines(caplog)
+        assert line.levelname == "WARNING"
+        assert line.getMessage() == "pdf OCR capped: cached result is missing 25 scanned pages"
+        assert self.MARKER not in caplog.text
+        assert "SYNTHETIC_FILENAME_MARKER" not in caplog.text
+
+    def test_an_uncommitted_message_counts_nothing(self, tmp_path, caplog):
+        caplog.set_level("INFO")
+        db = _setup_db_for_attachment(tmp_path)
+        attachment = self._pdf_attachment()
+        self._store(db, attachment, 25)
+        prepare_attachment_writes(db=db, **_kwargs(attachment))
+        counts = attachment_indexing.attachment_outcomes.drain()
+        assert (counts["ocr_capped_pdfs"], counts["ocr_pages_skipped"]) == (0, 0)
+        assert self._cap_lines(caplog) == []
+
+    @pytest.mark.parametrize("skipped", [None, 0])
+    def test_unknown_or_uncapped_rows_count_nothing(self, tmp_path, caplog, skipped):
+        caplog.set_level("INFO")
+        db = _setup_db_for_attachment(tmp_path)
+        attachment = self._pdf_attachment()
+        self._store(db, attachment, skipped)
+        plan = prepare_attachment_writes(db=db, **_kwargs(attachment))
+        assert plan.ocr_pages_skipped == skipped
+        attachment_indexing.record_committed_outcomes([plan])
+        counts = attachment_indexing.attachment_outcomes.drain()
+        assert (counts["ocr_capped_pdfs"], counts["ocr_pages_skipped"]) == (0, 0)
+        assert (counts["success"], counts["cached"]) == (1, 1)
+        assert not attachment_indexing.attachment_outcomes_degraded(counts)
+        assert self._cap_lines(caplog) == []
+
+    def test_fresh_result_is_persisted_and_counted_by_the_extractor_only(
+        self, tmp_path, monkeypatch
+    ):
+        """A fresh extraction's cap is counted where it happens (the PDF
+        extractor); committing its plan does not count it again. The row
+        keeps the count, and a batch reuse of the result counts once."""
+        db = _setup_db_for_attachment(tmp_path)
+        attachment = self._pdf_attachment()
+        result = ExtractionResult(
+            status=STATUS_SUCCESS,
+            extractor="pdf-ocr@5",
+            text=f"{self.MARKER} fresh text",
+            error=None,
+            ocr_pages_skipped=7,
+        )
+        calls: list[str] = []
+
+        def stub_extract(**kwargs):
+            calls.append(kwargs["filename"])
+            return result
+
+        monkeypatch.setattr(attachment_indexing, "extract_attachment", stub_extract)
+        batch: dict[tuple[str, str], ExtractionResult] = {}
+        fresh = prepare_attachment_writes(db=db, batch_extractions=batch, **_kwargs(attachment))
+        reused = prepare_attachment_writes(
+            db=db, batch_extractions=batch, **_kwargs(attachment, occurrence_index=1)
+        )
+        assert len(calls) == 1
+        assert (fresh.cached, fresh.ocr_pages_skipped) == (False, 7)
+        assert (reused.cached, reused.ocr_pages_skipped) == (True, 7)
+        embedder = make_mock_embedder([0.1] * EMBEDDING_DIM)
+        for plan in (fresh, reused):
+            _embed_new_chunks(plan, db=db, claimant_id="msg@x", embedder=embedder)
+        with db.transaction():
+            for plan in (fresh, reused):
+                apply_attachment_writes(plan=plan, claimant_id="msg@x", thread_id="thread-x", db=db)
+        attachment_indexing.record_committed_outcomes([fresh, reused])
+        counts = attachment_indexing.attachment_outcomes.drain()
+        assert (counts["ocr_capped_pdfs"], counts["ocr_pages_skipped"]) == (1, 7)
+        row = db.get_attachment_extraction(attachment.content_hash, _module(attachment))
+        assert row["ocr_pages_skipped"] == 7
+        assert row["extracted_text"] == f"{self.MARKER} fresh text"
+
+        # A later message is served the stored row, with its count.
+        later = prepare_attachment_writes(db=db, **_kwargs(attachment, claimant_id="later@x"))
+        assert len(calls) == 1
+        assert (later.cached, later.ocr_pages_skipped) == (True, 7)
+
+    def test_cache_hit_warnings_are_rate_limited_and_every_occurrence_counted(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        from src import extractors
+
+        caplog.set_level("INFO")
+        monkeypatch.setattr(extractors._LINE_BUDGET, "limit", 2)
+        extractors.drain_extractor_counts()
+        db = _setup_db_for_attachment(tmp_path)
+        attachment = self._pdf_attachment()
+        self._store(db, attachment, 4)
+        plans = [
+            prepare_attachment_writes(db=db, **_kwargs(attachment, occurrence_index=i))
+            for i in range(5)
+        ]
+        attachment_indexing.record_committed_outcomes(plans)
+        counts = attachment_indexing.attachment_outcomes.drain()
+        assert (counts["ocr_capped_pdfs"], counts["ocr_pages_skipped"]) == (5, 20)
+        assert counts["warnings_suppressed"] == 3
+        assert [r.levelname for r in self._cap_lines(caplog)] == ["WARNING", "WARNING"]

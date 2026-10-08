@@ -61,6 +61,7 @@ from . import (
     note_ocr_capped,
     note_pdf_page_failed,
     note_pdf_pages_unrecovered,
+    record_ocr_pages_skipped,
     warn_extractor_cap,
     warn_rate_limited,
 )
@@ -165,7 +166,9 @@ def _text_from_pages(
         # The pages past the cap are never read (#871): counted for the
         # attachments aggregate, and the line is rate limited, since one
         # message can carry many capped PDFs (review round 2 on #884).
+        # The result carries the count too, so the cached row does (#891).
         note_ocr_capped(len(ocr_pages) - max_ocr_pages)
+        record_ocr_pages_skipped(len(ocr_pages) - max_ocr_pages)
         warn_rate_limited(
             log, "pdf OCR capped at %d of %d scanned pages", max_ocr_pages, len(ocr_pages)
         )
