@@ -240,11 +240,20 @@ class TestAttachmentIndeterminateCount:
         """Both lanes reach every undecided attachment, the worst case for
         removing the text lane's rows the filename lane already lists.
         SQLite VM steps for the whole call at 2N candidates stay well under
-        4x those at N: a per-row lookup into the filename candidates was
-        quadratic (Codex round 1 fix)."""
+        the 4x of a quadratic plan. The test schema lacks the indexer's
+        ``fts_rowid`` and attachment indexes, without which SQLite 3.46
+        (the image's) plans the existing lanes quadratically, so they
+        are created here as ``indexer/src/database.py`` creates them."""
 
         def steps(n: int) -> tuple[int, int | None]:
             conn, path = _open_built_db_conn(tmp_path, f"work-{n}.db")
+            conn.executescript(
+                "CREATE INDEX idx_attachments_attachment_id ON attachments(attachment_id);"
+                "CREATE INDEX idx_attachments_thread ON attachments(thread_id);"
+                "CREATE INDEX idx_attachments_claimant ON attachments(claimant_id);"
+                "CREATE INDEX idx_attachments_fts_rowid ON attachments(fts_rowid);"
+                "CREATE INDEX idx_message_chunks_fts_rowid ON message_chunks(fts_rowid);"
+            )
             for i in range(n):
                 _add(
                     conn,
