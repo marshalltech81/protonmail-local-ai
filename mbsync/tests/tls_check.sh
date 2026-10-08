@@ -269,7 +269,9 @@ if [[ "$near_mtime" == "$ARRIVAL_EPOCH" ]] \
 else
     fail "the synced file's mtime is the IMAP INTERNALDATE in UTC, and the pull writes nothing back"
     printf '     near file mtime "%s", INTERNALDATE in UTC %s\n' "$near_mtime" "$ARRIVAL_EPOCH"
-    docker logs "$STUB" 2>&1 | grep -E "fetch body|write command" | sed 's/^/     /'
+    # sed, not grep: no matching line must not stop the script under
+    # pipefail before the later checks run.
+    docker logs "$STUB" 2>&1 | sed -n -E '/fetch body|write command/s/^/     /p'
 fi
 
 # 2. Restart, same certificate.

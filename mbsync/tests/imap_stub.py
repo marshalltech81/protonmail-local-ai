@@ -8,7 +8,7 @@ CopyArrivalDate is on, #1132) and LOGOUT. INBOX holds one synthetic
 message whose INTERNALDATE has a non-UTC offset, so the check can compare
 the near file's mtime with that date in UTC. Every response is fixed:
 this is not an IMAP server. A command that would change the far side
-(APPEND, STORE, EXPUNGE, COPY, MOVE or a folder command, with or without
+(APPEND, STORE, EXPUNGE, CLOSE, COPY, MOVE or a folder command, with or without
 UID) is refused and logged as a write, so the check can show the pull
 never sends one. After LOGOUT it closes the TCP connection without a TLS
 close_notify, the harshest close a client can see, so the check also
@@ -39,8 +39,9 @@ MESSAGE = (
     b"\r\n"
     b"Synthetic body for the CopyArrivalDate check.\r\n"
 )
-# Commands that would change the far side.
-WRITES = {"APPEND", "STORE", "EXPUNGE", "COPY", "MOVE", "CREATE", "DELETE", "RENAME"}
+# Commands that would change the far side. CLOSE expunges every message
+# flagged \Deleted in a box opened with SELECT (RFC 3501 6.4.2).
+WRITES = {"APPEND", "STORE", "EXPUNGE", "CLOSE", "COPY", "MOVE", "CREATE", "DELETE", "RENAME"}
 # Only these command names are logged by name, so a client's TLS bytes
 # sent to the plaintext mode stay out of the log.
 KNOWN = {"CAPABILITY", "STARTTLS", "LOGIN", "AUTHENTICATE", "LIST", "SELECT", "EXAMINE"}
