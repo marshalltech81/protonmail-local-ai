@@ -186,6 +186,19 @@ repeats the old pair as a question. Their words avoid every golden
 search query's content words, the reserved words above and every
 ``unanswerable`` question's ``absent_terms``.
 
+Threads 100-101 back the late-disposition shape (#975), dated March to
+August 2026. t100 is a 12-message thread in which a site manager
+questions a recurring FC-4410 dispenser hire entry, the vendor explains
+it (t100.3), the matter is dropped, raised again and checked on site,
+and the disposition arrives late (t100.11: the vendor's route
+representative says the item was never placed, and a credit is being
+reviewed), followed by an unrelated reply (t100.12). t100.11 shares no
+word with the outcome question and holds the thread's only "credit";
+keep it that way, or the hashed embedder stops reproducing the #974
+miss. t101 bills the same item code to another site, undisputed. Their
+words avoid every golden search query's content words, the reserved
+words above and every ``unanswerable`` question's ``absent_terms``.
+
 Thread IDs are the root Message-IDs: ``t<NN>.1@baseline.example``.
 """
 
@@ -2672,6 +2685,162 @@ THREADS.update(
                 "Sam,\n\nI am drawing up the floor plan from Fergus's first email: 16 "
                 "trestles for $640, so four rows of four. Is that still right?"
                 "\n\nHester",
+            ),
+        ],
+    }
+)
+
+
+DELLA = "Della Okafor <della@larchmoorworks.example>"
+PIERS = "Piers Oduya <piers@ferncastlehygiene.example>"
+FERNCASTLE = "Ferncastle Hygiene Accounts <accounts@ferncastlehygiene.example>"
+
+THREADS.update(
+    {
+        # A long thread: a recurring entry is questioned early, discussed,
+        # dropped and raised again, and the disposition arrives late
+        # (t100.11) in words the question never uses; t100.12 is an
+        # unrelated reply after it (#975).
+        100: [
+            Msg(
+                "INBOX",
+                "Tue, 3 Mar 2026 09:10:00 +0000",
+                DELLA,
+                ME,
+                "Ferncastle Hygiene invoice",
+                "Sam,\n\nGoing through the February Ferncastle Hygiene invoice, there is a "
+                "recurring entry for FC-4410 dispenser hire at $38 a month. I cannot find "
+                "any dispenser of theirs on site. Do you know what this charge is "
+                "for?\n\nDella",
+            ),
+            Msg(
+                "INBOX",
+                "Thu, 5 Mar 2026 10:30:00 +0000",
+                DELLA,
+                PIERS,
+                "Re: Ferncastle Hygiene invoice",
+                "Hello Piers,\n\nOur Ferncastle Hygiene invoices carry an FC-4410 dispenser "
+                "hire charge each month. Could you tell us what that entry covers? We "
+                "cannot locate the unit.\n\nDella Okafor\nLarchmoor Works",
+                cc=ME,
+            ),
+            Msg(
+                "INBOX",
+                "Tue, 10 Mar 2026 15:20:00 +0000",
+                PIERS,
+                DELLA,
+                "Re: Ferncastle Hygiene invoice",
+                "Hi Della,\n\nThe FC-4410 entry is for the hand towel dispenser our route "
+                "team installed in your loading bay washroom last autumn. It is billed "
+                "as a hire each month, refills included.\n\nPiers Oduya\nAccounts, "
+                "Ferncastle Hygiene",
+                cc=ME,
+            ),
+            Msg(
+                "INBOX",
+                "Thu, 12 Mar 2026 08:45:00 +0000",
+                DELLA,
+                ME,
+                "Re: Ferncastle Hygiene invoice",
+                "Sam,\n\nPiers says the hire charge is a towel dispenser in the loading "
+                "bay washroom. I have not been in there for a while, so I will take his "
+                "word for it and leave the invoice as it is.\n\nDella",
+            ),
+            Msg(
+                "INBOX",
+                "Wed, 6 May 2026 11:05:00 +0000",
+                DELLA,
+                ME,
+                "Re: Ferncastle Hygiene invoice",
+                "Sam,\n\nThe FC-4410 hire is still on each Ferncastle invoice, and the "
+                "loading bay washroom has our own towel holder, not theirs. I would like "
+                "to question the charge again.\n\nDella",
+            ),
+            Msg(
+                "Sent",
+                "Thu, 7 May 2026 09:00:00 +0000",
+                ME,
+                DELLA,
+                "Re: Ferncastle Hygiene invoice",
+                "Della,\n\nAgreed. Please raise it with Piers again and ask him which "
+                "week the dispenser went in.\n\nSam",
+            ),
+            Msg(
+                "INBOX",
+                "Mon, 11 May 2026 14:40:00 +0000",
+                DELLA,
+                PIERS,
+                "Re: Ferncastle Hygiene invoice",
+                "Hello Piers,\n\nWe are still billed for the FC-4410 dispenser hire, but "
+                "there is no Ferncastle dispenser in the loading bay washroom. Could you "
+                "look through your install records for when it went in?\n\nDella",
+                cc=ME,
+            ),
+            Msg(
+                "INBOX",
+                "Wed, 20 May 2026 16:15:00 +0000",
+                PIERS,
+                DELLA,
+                "Re: Ferncastle Hygiene invoice",
+                "Hi Della,\n\nOur records list the FC-4410 dispenser on your account, so the "
+                "hire charge stands for now. I have asked our route team to look at the "
+                "unit on their next round.\n\nPiers",
+                cc=ME,
+            ),
+            Msg(
+                "INBOX",
+                "Thu, 4 Jun 2026 10:25:00 +0000",
+                DELLA,
+                ME,
+                "Re: Ferncastle Hygiene invoice",
+                "Sam,\n\nI walked every floor with the caretaker this morning. There is no "
+                "Ferncastle dispenser anywhere, only our own fittings. I have sent Piers "
+                "photos of the loading bay washroom.\n\nDella",
+            ),
+            Msg(
+                "INBOX",
+                "Thu, 25 Jun 2026 13:50:00 +0000",
+                DELLA,
+                ME,
+                "Re: Ferncastle Hygiene invoice",
+                "Sam,\n\nNothing back from Piers yet on the FC-4410 charge. The hire is on "
+                "the June invoice too. I will chase him again.\n\nDella",
+            ),
+            # The disposition: no word of the question's phrasing, and the
+            # only mention of a credit in the thread.
+            Msg(
+                "INBOX",
+                "Thu, 16 Jul 2026 15:35:00 +0000",
+                DELLA,
+                ME,
+                "Re: Ferncastle Hygiene invoice",
+                "Sam,\n\nGood news at last. Ruben Kestle, Ferncastle's route representative, "
+                "phoned me this morning. He says that item has not been placed here at "
+                "all; his team has no record of fitting it. Piers is now reviewing a "
+                "credit for each month we paid.\n\nDella",
+            ),
+            Msg(
+                "Sent",
+                "Fri, 17 Jul 2026 08:20:00 +0000",
+                ME,
+                DELLA,
+                "Re: Ferncastle Hygiene invoice",
+                "Della,\n\nThanks. Separately, can you reserve the van for Friday's "
+                "delivery run?\n\nSam",
+            ),
+        ],
+        # The same item code on another site's statement, billed and paid
+        # with nothing disputed (#975).
+        101: [
+            Msg(
+                "INBOX",
+                "Mon, 3 Aug 2026 07:00:00 +0000",
+                FERNCASTLE,
+                ME,
+                "Ferncastle Hygiene statement, Tollbridge office",
+                "Hello Sam,\n\nYour July statement for the Tollbridge office: the FC-4410 "
+                "dispenser hire charge was $38 and towel refills $54. Paid in full by "
+                "direct debit, thank you.\n\nFerncastle Hygiene Accounts",
             ),
         ],
     }

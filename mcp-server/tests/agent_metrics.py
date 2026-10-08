@@ -116,8 +116,9 @@ _STRIPPED_FILTERS = (
 # golden.json writes thread "t05" for "t05.1@baseline.example" and
 # message "t05.2" for "t05.2@baseline.example".
 _BASELINE_DOMAIN = "@baseline.example"
-# A golden message ref: thread "t24", message 2.
-_MESSAGE_REF = re.compile(r"t[0-9]{2}\.[1-9][0-9]*")
+# A golden message ref: thread "t24", message 2. Thread numbers have
+# two digits, or three past t99 (#975).
+_MESSAGE_REF = re.compile(r"t(?:[0-9]{2}|[1-9][0-9]{2})\.[1-9][0-9]*")
 # One scenario in HELD_OUT_MODULUS is held out, chosen by a hash of its
 # ID so membership is fixed when the scenario is written and never moves
 # when others are added.

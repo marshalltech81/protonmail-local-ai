@@ -9,6 +9,7 @@ from __future__ import annotations
 import pytest
 
 from tests.agent_metrics import (
+    _MESSAGE_REF,
     OutstandingAction,
     OutstandingTruth,
     Scenario,
@@ -1544,3 +1545,14 @@ class TestOutstandingCitationSets:
     def test_none_for_other_scenarios(self) -> None:
         score = score_trace(_scenario(), _trace([_search(["a.1@x.example"])]))
         assert score.citations_consistent is None
+
+
+class TestMessageRefs:
+    @pytest.mark.parametrize("ref", ["t05.1", "t99.2", "t100.1", "t100.11"])
+    def test_two_and_three_digit_threads_are_message_refs(self, ref: str) -> None:
+        """#975: the baseline corpus continues past t99."""
+        assert _MESSAGE_REF.fullmatch(ref)
+
+    @pytest.mark.parametrize("ref", ["t5.1", "t010.1", "t1000.1", "t100", "t100.0"])
+    def test_other_shapes_are_not_message_refs(self, ref: str) -> None:
+        assert not _MESSAGE_REF.fullmatch(ref)
