@@ -243,6 +243,7 @@ class TestRescanRecovery:
             return 0
 
         monkeypatch.setattr(main, "_enqueue_unindexed_messages", walk)
+        monkeypatch.setattr(main, "sweep_paths", lambda *_a, **_kw: {})
         state = main._IngestionStateRecorder(SimpleNamespace(), tmp_path)  # type: ignore[arg-type]
         main._run_periodic_rescan(None, None, state, skip_trashed=False)  # type: ignore[arg-type]
         clock["t"] += 1800
@@ -253,6 +254,57 @@ class TestRescanRecovery:
             "periodic Maildir rescan recovered after 1 failure(s) over 1800s"
         ]
         assert "periodic Maildir rescan failed: PermissionError" in caplog.text
+        assert MARKER not in caplog.text
+
+
+class TestRescanRenameSweepFailure:
+    def test_a_sweep_failure_does_not_stop_the_walk(self, tmp_path, monkeypatch, caplog):
+        """Codex round 4 on #1134: the rename sweep shared the walk's
+        ``try``, so a sweep failure (an unreadable directory) skipped the
+        walk that finds missed new mail in every other folder."""
+        caplog.set_level(logging.INFO)
+        walked: list[bool] = []
+
+        def sweep(*_a, **_kw):
+            raise OSError(13, "denied", MARKER)
+
+        monkeypatch.setattr(main, "sweep_paths", sweep)
+        monkeypatch.setattr(
+            main, "_enqueue_unindexed_messages", lambda *_a, **_kw: walked.append(True) or 0
+        )
+        state = main._IngestionStateRecorder(SimpleNamespace(), tmp_path)  # type: ignore[arg-type]
+        main._run_periodic_rescan(None, None, state, skip_trashed=False)  # type: ignore[arg-type]
+
+        assert walked == [True]
+        lines = [r for r in caplog.records if "rename sweep failed" in r.getMessage()]
+        assert [(r.levelno, r.getMessage()) for r in lines] == [
+            (logging.WARNING, "periodic rename sweep failed: PermissionError")
+        ]
+        assert not _messages(caplog, "periodic Maildir rescan failed")
+        assert MARKER not in caplog.text
+
+    def test_fail_then_succeed_logs_one_recovery(self, tmp_path, monkeypatch, caplog, clock):
+        """Codex round 5 on #1134: the sweep's failure had no recovery
+        line once it ran on its own."""
+        caplog.set_level(logging.INFO)
+        outcomes = [OSError(13, "denied", MARKER), None]
+
+        def sweep(*_a, **_kw):
+            err = outcomes.pop(0)
+            if err is not None:
+                raise err
+            return {}
+
+        monkeypatch.setattr(main, "sweep_paths", sweep)
+        monkeypatch.setattr(main, "_enqueue_unindexed_messages", lambda *_a, **_kw: 0)
+        state = main._IngestionStateRecorder(SimpleNamespace(), tmp_path)  # type: ignore[arg-type]
+        main._run_periodic_rescan(None, None, state, skip_trashed=False)  # type: ignore[arg-type]
+        clock["t"] += 1800
+        main._run_periodic_rescan(None, None, state, skip_trashed=False)  # type: ignore[arg-type]
+
+        assert _recoveries(caplog) == [
+            "periodic rename sweep recovered after 1 failure(s) over 1800s"
+        ]
         assert MARKER not in caplog.text
 
 

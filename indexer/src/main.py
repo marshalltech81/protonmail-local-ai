@@ -660,6 +660,7 @@ INGESTION_STATE_RECORDING = "ingestion state recording"
 WATCH_REFRESH = "Maildir watch refresh"
 PERIODIC_RECONCILIATION = "periodic reconciliation"
 PERIODIC_RESCAN = "periodic Maildir rescan"
+PERIODIC_RENAME_SWEEP = "periodic rename sweep"
 WAL_CHECKPOINT = "wal checkpoint"
 REAPED_RECORD_PRUNE = "reaped-record prune"
 RECOVERY_COMPONENTS = frozenset(
@@ -669,6 +670,7 @@ RECOVERY_COMPONENTS = frozenset(
         WATCH_REFRESH,
         PERIODIC_RECONCILIATION,
         PERIODIC_RESCAN,
+        PERIODIC_RENAME_SWEEP,
         WAL_CHECKPOINT,
         REAPED_RECORD_PRUNE,
     }
@@ -2615,7 +2617,7 @@ def _refresh_folder_watches(
     folder_watches.refresh()
     if not folder_watches.recovery_pending:
         return False
-    sweep_paths(db)
+    sweep_paths(db, maildir_root=MAILDIR_PATH)
     _enqueue_unindexed_messages(db, queue, MAILDIR_PATH, REASON_RESCAN, skip_trashed=skip_trashed)
     folder_watches.recovery_pending = False
     return True
@@ -2948,7 +2950,22 @@ def _run_periodic_rescan(
     skip_trashed: bool,
 ) -> None:
     """Re-walk the Maildir so a file whose watchdog event was missed is
-    still queued, then acknowledge the sync stamp read before the walk."""
+    still queued, then acknowledge the sync stamp read before the walk.
+
+    The rename sweep runs first, as at startup: it records renames the
+    watcher missed, so the walk does not re-index them as new mail, and
+    remaps a message whose file is gone to a byte-identical copy (#1102),
+    which the walk skips because the copy is already marked indexed. In
+    archive mode nothing else revisits that while the indexer runs."""
+    try:
+        sweep_paths(db, maildir_root=MAILDIR_PATH)
+    except Exception as e:
+        # The walk below still runs: it finds missed new mail in every
+        # readable folder, whatever stopped the sweep.
+        _streaks[PERIODIC_RENAME_SWEEP].failed()
+        log.warning("periodic rename sweep failed: %s", type(e).__name__)
+    else:
+        _streaks[PERIODIC_RENAME_SWEEP].succeeded()
     try:
         stamp = ingestion_state.read_stamp()
         _enqueue_unindexed_messages(
@@ -3099,7 +3116,7 @@ def main():
     # indexed: otherwise the walk reprocesses every file renamed while
     # the indexer was down as new mail.
     try:
-        sweep_paths(db)
+        sweep_paths(db, maildir_root=MAILDIR_PATH)
     except Exception as e:
         log.error("startup rename sweep failed: %s", type(e).__name__)
 

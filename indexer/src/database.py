@@ -11,6 +11,7 @@ import sqlite3
 import struct
 import threading
 import weakref
+from collections.abc import Sequence
 from contextlib import contextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from email.utils import parseaddr
@@ -2468,6 +2469,137 @@ class Database:
         ).fetchall()
 
     @_synchronized
+    def find_identical_copies(self, claimant_ids: list[str]) -> dict[str, list[str]]:
+        """Other indexed paths holding the same bytes as each claimant.
+
+        Byte-identical files share one claimant ID, and the mapping keeps
+        only the last path indexed; ``indexed_files`` keeps every path
+        (#1102). Returns ``claimant_id -> [filepath, ...]`` (path order)
+        for the paths whose ``content_hash`` matches the claimant's and
+        that are not its mapped path.
+
+        Two statements, whatever the count: the claimants' hashes by
+        primary key, then one pass over ``indexed_files`` (which has no
+        ``content_hash`` index) against that set. A join on the hash
+        would rescan ``indexed_files`` once per claimant.
+        """
+        if not claimant_ids:
+            return {}
+        wanted = self._conn.execute(
+            "SELECT m.claimant_id, m.filepath, msg.content_hash "
+            "FROM message_thread_map m "
+            "JOIN messages msg ON msg.claimant_id = m.claimant_id "
+            "WHERE m.claimant_id IN (SELECT value FROM json_each(?)) "
+            "AND msg.content_hash IS NOT NULL",
+            (json.dumps(claimant_ids),),
+        ).fetchall()
+        # The hash covers the raw bytes, Message-ID included, so it names
+        # one claimant.
+        by_hash = {row["content_hash"]: row for row in wanted}
+        if not by_hash:
+            return {}
+        rows = self._conn.execute(
+            "SELECT filepath, content_hash FROM indexed_files "
+            "WHERE content_hash IN (SELECT value FROM json_each(?)) "
+            "ORDER BY filepath",
+            (json.dumps(list(by_hash)),),
+        ).fetchall()
+        copies: dict[str, list[str]] = {}
+        for row in rows:
+            owner = by_hash[row["content_hash"]]
+            if row["filepath"] != owner["filepath"]:
+                copies.setdefault(owner["claimant_id"], []).append(row["filepath"])
+        return copies
+
+    @_synchronized
+    def remap_to_identical_copy(
+        self, old_path: str, new_path: str, *, folder: str | None = None
+    ) -> bool:
+        """Point a message whose file is gone at a byte-identical copy.
+
+        Returns False, changing nothing, unless ``old_path`` is still a
+        mapped path and ``new_path`` still exists, checked inside the
+        transaction: the watcher may have moved the mapping or renamed the
+        copy since the caller resolved it, and a rename that lands after
+        the commit carries the new mapping along with it.
+
+        A rename (``update_filepath``) carries the gone path's tombstone
+        and queue row to ``new_path``. The copy is a file of its own and
+        can already hold either (#1102). Its tombstone describes the file
+        that still exists, so it is kept and the gone path's dropped, but
+        its grace period never starts before the message lost its last
+        live path: of two tombstones the later mark is kept, and when the
+        gone path had none (the message was live through it) the copy's
+        restarts now. Of two queue rows the runnable one is kept: the
+        copy's, unless it is dead and the gone path's is not, since both
+        index the same bytes.
+        """
+        with self.transaction():
+            cur = self._conn.cursor()
+            if (
+                cur.execute(
+                    "SELECT 1 FROM message_thread_map WHERE filepath = ?", (old_path,)
+                ).fetchone()
+                is None
+                or not Path(new_path).exists()
+            ):
+                return False
+            # The later of the two marks, or now when the gone path had none.
+            cur.execute(
+                "UPDATE pending_deletions SET marked_at = COALESCE("
+                "(SELECT MAX(marked_at) FROM pending_deletions WHERE filepath IN (?, ?) "
+                "AND EXISTS (SELECT 1 FROM pending_deletions WHERE filepath = ?)), ?) "
+                "WHERE filepath = ?",
+                (old_path, new_path, old_path, datetime.now(UTC).isoformat(), new_path),
+            )
+            cur.execute(
+                "DELETE FROM pending_deletions WHERE filepath = ? "
+                "AND EXISTS (SELECT 1 FROM pending_deletions WHERE filepath = ?)",
+                (old_path, new_path),
+            )
+            # A dead row on the copy gives way to a runnable one on the gone
+            # path, which the rename below then moves onto the copy;
+            # otherwise the copy's row stays and the gone path's goes.
+            cur.execute(
+                "DELETE FROM indexing_jobs WHERE filepath = ? AND status = 'dead' "
+                "AND EXISTS (SELECT 1 FROM indexing_jobs "
+                "WHERE filepath = ? AND status != 'dead')",
+                (new_path, old_path),
+            )
+            cur.execute(
+                "DELETE FROM indexing_jobs WHERE filepath = ? "
+                "AND EXISTS (SELECT 1 FROM indexing_jobs WHERE filepath = ?)",
+                (old_path, new_path),
+            )
+            self.update_filepath(old_path, new_path, folder=folder)
+        return True
+
+    @staticmethod
+    def _unmark_paths(cur: sqlite3.Cursor, filepaths: list[str]) -> None:
+        """Drop the ``indexed_files`` rows of ``filepaths``: the other paths
+        holding the bytes of a message being reaped (#1102), looked up once
+        per reap pass with ``find_identical_copies``.
+
+        The reap runs only once the sweep found no surviving copy, so any
+        such path is gone or trashed now. Left marked, a copy that comes
+        back (a transient mount or folder outage) would be skipped by every
+        Maildir walk with no mapping left to repair it; unmarked, the walk
+        re-indexes it. Their ``indexing_jobs`` rows go too: the walk
+        skips a path with a dead job, so a returning copy would otherwise
+        wait for ``make requeue-dead``. Primary-key deletes; the caller
+        owns the transaction.
+        """
+        if filepaths:
+            paths = json.dumps(filepaths)
+            for table in ("indexed_files", "indexing_jobs"):
+                # Only fixed table names are interpolated; values are bound.
+                cur.execute(
+                    f"DELETE FROM {table} "  # nosec B608
+                    "WHERE filepath IN (SELECT value FROM json_each(?))",
+                    (paths,),
+                )
+
+    @_synchronized
     def find_message_entry_by_filepath(self, filepath: str) -> sqlite3.Row | None:
         return self._conn.execute(
             "SELECT claimant_id, message_id, thread_id, filepath FROM message_thread_map "
@@ -2890,7 +3022,13 @@ class Database:
         return cur.rowcount
 
     @_synchronized
-    def delete_thread_completely(self, thread_id: str, *, grace_cutoff: str | None = None) -> bool:
+    def delete_thread_completely(
+        self,
+        thread_id: str,
+        *,
+        grace_cutoff: str | None = None,
+        copy_paths: Sequence[str] = (),
+    ) -> bool:
         """Remove a thread and every derived row. Used when the last message
         in a thread has been reaped.
 
@@ -2899,6 +3037,10 @@ class Database:
         joined the thread) after the reaper read its tombstones — or, with
         ``grace_cutoff``, has a tombstone newer than it (restored and
         trashed again, so its grace period restarted).
+
+        ``copy_paths`` are other paths holding the bytes of the thread's
+        messages; they are unmarked in the same transaction (see
+        ``_unmark_paths``).
         """
         cur = self._conn.cursor()
         try:
@@ -2934,6 +3076,7 @@ class Database:
             ]
             for cid in claimant_ids:
                 self._delete_attachments_for_message(cur, cid)
+            self._unmark_paths(cur, list(copy_paths))
             # Read before the map delete cascades the participant rows away.
             mentions = self._participant_mentions(cur, claimant_ids)
             cur.execute(
@@ -2994,6 +3137,7 @@ class Database:
         reaped_claimant_ids: list[str],
         *,
         grace_cutoff: str | None = None,
+        copy_paths: Sequence[str] = (),
     ) -> list[str] | None:
         """Atomically rewrite a thread and remove reaped messages.
 
@@ -3008,6 +3152,9 @@ class Database:
         changing nothing, when a reaped message is no longer tombstoned
         (the watcher restored it after the reaper read its tombstones) or,
         with ``grace_cutoff``, its tombstone is newer than that.
+
+        ``copy_paths`` are other paths holding the reaped messages' bytes;
+        they are unmarked in the same transaction (see ``_unmark_paths``).
         """
         cur = self._conn.cursor()
         removed_filepaths: list[str] = []
@@ -3022,6 +3169,7 @@ class Database:
             # The replaced thread row held the reaped messages' words.
             self._mark_fts_scrub("threads_fts")
             mentions = self._participant_mentions(cur, reaped_claimant_ids)
+            self._unmark_paths(cur, list(copy_paths))
             for cid in reaped_claimant_ids:
                 fp = self._remove_message_row(cur, cid)
                 if fp is not None:
