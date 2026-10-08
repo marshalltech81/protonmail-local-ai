@@ -390,13 +390,45 @@ def test_attachment_shape_reaches_the_answering_model(
     its evidence (#1182); this test is what pins the passages. Each must
     reach the prompt whole: a passage cut to the budget may have lost the
     sentence or value the shape rests on (Codex round 2 on #1177)."""
-    supplied = {
+    supplied = _whole_passages(case_id)
+    wanted = {(message_id_of(ref), source) for ref, source in _ATTACHMENT_SHAPES[case_id]}
+    assert wanted <= supplied, (case_id, sorted(wanted - supplied))
+
+
+# Each #911 body-only case's shape, as for #910 above: every passage
+# holding an expected fact, plus the decoy. The negated value, the real
+# figure and the separate job billed at the negated value; the one
+# notice giving both rates and the effective date (each question); the
+# first order, the revision replacing count and price together, and the
+# later message repeating the old pair.
+_BODY_SHAPES = {
+    "ask-conservatory-real-price": {("t96.1", "body"), ("t97.1", "body"), ("t97.2", "body")},
+    "ask-darkroom-current": {("t98.1", "body")},
+    "ask-darkroom-from-2028": {("t98.1", "body")},
+    "ask-trestles-revised": {("t99.1", "body"), ("t99.2", "body"), ("t99.3", "body")},
+}
+
+
+@pytest.mark.parametrize("case_id", sorted(_BODY_SHAPES))
+def test_body_shape_reaches_the_answering_model(case_id: str, records: dict[str, dict]) -> None:
+    """#911: a negated-distractor, effective-date or paired-correction
+    case tests nothing unless every passage of its shape reaches the
+    prompt whole: the decoy (the separate job's bill, the later message
+    repeating the old pair) must be live, and a passage cut to the
+    budget may have lost the value or the date the case rests on."""
+    supplied = _whole_passages(case_id)
+    wanted = {(message_id_of(ref), source) for ref, source in _BODY_SHAPES[case_id]}
+    assert wanted <= supplied, (case_id, sorted(wanted - supplied))
+
+
+def _whole_passages(case_id: str) -> set[tuple[str | None, str]]:
+    """The (message, source) pairs of the passages a case's prompt
+    carried uncut."""
+    return {
         (p["message_id"], p["source"])
         for p in _DETAILS[case_id]["passages"].values()
         if not p["truncated"]
     }
-    wanted = {(message_id_of(ref), source) for ref, source in _ATTACHMENT_SHAPES[case_id]}
-    assert wanted <= supplied, (case_id, sorted(wanted - supplied))
 
 
 def test_cases_missing_evidence_are_the_known_ones(records: dict[str, dict]) -> None:

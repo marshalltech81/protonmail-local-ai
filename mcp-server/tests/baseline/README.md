@@ -177,6 +177,14 @@ harness in `tests/eval/` (`tests/retrieval_metrics.py`).
   a reply filed in Trash whose attachment carries a stale list (t95).
   `test_answer_eval_cases.py` checks both sides of each shape reach the
   answering model's prompt.
+  Threads 96-99 back three body-only answer-evaluation shapes (#911): a
+  price stated as "not" a value before the real figure (t97), with a
+  separate job from the same sender billed at that value (t96); a
+  notice giving the current subscription and a different one from a
+  stated future date (t98); and a revision that replaces a count and a
+  price together, followed by a message repeating the old pair (t99).
+  `test_answer_eval_cases.py` checks every passage of each shape,
+  decoys included, reaches the prompt uncut.
   Adding a thread can lower a recall floor's
   measured value; re-measure and explain it rather than lowering the
   floor silently.

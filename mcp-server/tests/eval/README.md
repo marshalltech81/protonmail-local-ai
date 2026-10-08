@@ -420,8 +420,10 @@ Cases must never be built from real mail.
 ### Cases
 
 `tests/answer_eval/cases.json` (schema v1, loaded and validated by
-`cases.py`) holds 43 cases over the baseline corpus: 41 for
-`ask_mailbox` and two for `summarize_thread` (below). The `ask_mailbox` cases: exact facts,
+`cases.py`) holds 47 cases over the baseline corpus: 45 for
+`ask_mailbox` and two for `summarize_thread` (below). The `ask_mailbox` cases: exact facts
+(including a current and a future rate in one notice, asked both ways:
+`ask-darkroom-current` and `ask-darkroom-from-2028`, #911),
 attachment-only answers, multiple required threads (including
 `ask-tofu-summary`, a summary of the four genuine messages of the
 counting scenario that must not repeat their PINs or link), narrow filters
@@ -433,7 +435,9 @@ failure can be told apart as a scope the model never saw or one it
 ignored; `ask-lido-locker-trash` moves the Trash decoy into an
 attachment, #910), later corrections (and a later message that does not
 change the fact; `ask-armchair-revised` is a revised attachment under
-the same filename, #910),
+the same filename, #910; `ask-conservatory-real-price` states the
+price as "not" a value first, and another thread bills that value;
+`ask-trestles-revised` replaces a count and a price together, #911),
 unresolved conflicts (`ask-wall-bill-attachment` is a body and its
 own attachment that disagree, #910), unanswerable questions, an empty result, a
 prompt-budget omission (the case's own `settings.prompt_tokens`), and
@@ -450,7 +454,7 @@ thread, never a message's body or one of its attachments, so any
 passage of the message satisfies the group: for a case that needs both
 the body and an attachment of one message (`ask-wall-bill-attachment`),
 coverage cannot show that only one was supplied or cited (#1182);
-`make baseline` checks instead that every passage of the #910 cases'
+`make baseline` checks instead that every passage of the #910 and #911 cases'
 shapes reaches the prompt. Held-out membership is
 `is_held_out(id)`, as for the agent scenarios; tune nothing against
 held-out cases.
@@ -520,7 +524,7 @@ call, it prints how many calls it will make and to which models (the
 `INFERENCE_MODEL` and `JUDGE_MODEL` settings), for example:
 
 ```text
-Planned provider calls: 43 answer calls to <model> (up to 43 more for citation repairs) and 43 judge calls to <model>; at most 129 provider calls.
+Planned provider calls: 47 answer calls to <model> (up to 47 more for citation repairs) and 47 judge calls to <model>; at most 141 provider calls.
 ```
 
 That is one answer call per selected case, plus a second (a citation
@@ -740,7 +744,11 @@ nothing). `must_include` checks that a value is present, not that the
 answer asserts it (#770): negation and correction are invisible to it,
 so "it does not need four chaperones; it needs three" passes a case
 expecting `four chaperones`. Correctness needs the judge; with
-`JUDGE_MODE=none` a deterministic pass is a floor, not a verdict. A `disclose_missing` case is graded on the tool's whole
+`JUDGE_MODE=none` a deterministic pass is a floor, not a verdict.
+`must_not_include` is the same check reversed, so a correct answer that
+names a negated or replaced value ("not $760") would fail it (#894):
+the correction cases leave it empty and list the old values in
+`must_not_assert`, which only the judge grades. A `disclose_missing` case is graded on the tool's whole
 disclosure (#820): when a required group was retrieved but left out of
 the prompt or reached it only cut short of its evidence (the case's fact
 excerpt no longer in the kept text), the server's `coverage_note`
