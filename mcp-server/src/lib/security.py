@@ -8,6 +8,8 @@ from collections.abc import Awaitable, Callable, Iterable, Mapping
 from datetime import datetime
 from typing import Any
 
+from .predicates import MAX_SIZE_BYTES
+
 _COMMON_SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     # No prefix group: replace the whole match outright.
     (re.compile(r"sk-ant-[A-Za-z0-9_-]+"), "[REDACTED]"),
@@ -195,10 +197,11 @@ _LOGGABLE_TOOL_PARAMS: dict[str, Callable[[Any], bool]] = {
     # ``query_messages``' projection: logged only when every name is a row field.
     "fields": _names_from(QUERY_MESSAGE_FIELDS),
     # ``query_messages``' answered flag, size bounds (numbers the caller
-    # chose, never mail) and clock choice (#1085; ``lib/predicates``).
+    # chose, never mail; only in the range ``normalize_size_bound``
+    # accepts) and clock choice (#1085; ``lib/predicates``).
     "replied": _is_bool,
-    "size_min": _is_int,
-    "size_max": _is_int,
+    "size_min": _int_in(0, MAX_SIZE_BYTES),
+    "size_max": _int_in(0, MAX_SIZE_BYTES),
     "date_basis": _one_of("effective", "sent", "occurred", "internal"),
 }
 
