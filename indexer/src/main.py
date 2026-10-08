@@ -1279,6 +1279,12 @@ PERMISSION_DEFER_SECS = 60
 # deletion reconciliation decides its message (see ``_drain_queue_batched``).
 TRASHED_DEFER_SECS = 60 * 60
 PERMISSION_DEFER_WINDOW_SECS = 24 * 60 * 60
+# A reparse job whose file vanished while its path is still indexed waits
+# once, this long, for the watcher to record the rename (see
+# ``_phase1_commit_thread``). A file still missing after that is really
+# gone and is dropped with reason ``reparse_file_missing``.
+REPARSE_RENAME_DEFER_SECS = 60
+REPARSE_RENAME_DEFERRED_ERROR = "FileNotFoundError: deferred until the rename is recorded"
 
 
 def _enqueued_within(row: sqlite3.Row, seconds: int) -> bool:
@@ -1312,7 +1318,29 @@ def _phase1_commit_thread(
     except FileNotFoundError:
         # mbsync flag-rename race: file moved between enqueue and parse.
         # Watchdog's IN_MOVED_TO will re-enqueue under the new name.
-        queue.mark_skipped(filepath, reason="file_missing")
+        # Not a reparse of a path still indexed, though: ``on_moved``
+        # only moves an indexed file's records (and its job, through
+        # ``update_filepath``), so dropping the job before the rename is
+        # recorded would lose the reparse. Wait for it once, without
+        # spending an attempt (Codex round 1 on #1143); a file still
+        # missing after that is gone and dropped.
+        if (
+            row["reason"] == REASON_REPARSE
+            and row["last_error"] != REPARSE_RENAME_DEFERRED_ERROR
+            and db.is_indexed(filepath)
+        ):
+            queue.defer(
+                filepath,
+                stage=STAGE_PARSE,
+                error=REPARSE_RENAME_DEFERRED_ERROR,
+                error_class=ERROR_CLASS_RETRYABLE,
+                delay_seconds=REPARSE_RENAME_DEFER_SECS,
+            )
+            return None
+        queue.mark_skipped(
+            filepath,
+            reason="reparse_file_missing" if row["reason"] == REASON_REPARSE else "file_missing",
+        )
         return None
     except PermissionError as e:
         # mbsync ``chmod go+r``s new files only after its whole sync
@@ -2089,6 +2117,10 @@ def _drain_queue_batched(
         rows = queue.claim_batch(batch_size)
         if not rows:
             break
+        # A reparse the heartbeat never saw queued (drained between two
+        # heartbeats) still gets its completion line (Codex round 1 on #1143).
+        if any(row["reason"] == REASON_REPARSE for row in rows):
+            _reparse_progress.active = True
         # A row still marked ``interrupted`` was mid-step when the
         # indexer died. An out-of-memory kill can come from the whole
         # batch's footprint rather than that message, and a restart

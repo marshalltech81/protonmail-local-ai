@@ -345,3 +345,89 @@ class TestReparseCommand:
         assert reparse.main([]) == 1
         assert not db_path.exists()
         assert "nothing to reparse" in capsys.readouterr().err
+
+
+class TestReviewRound1:
+    """Codex review round 1 on #1143."""
+
+    def test_a_reparse_drained_between_heartbeats_still_logs_completion(
+        self, tmp_path, caplog, clock
+    ):
+        """No heartbeat saw the backlog: the worker's own count still
+        leads to one completion line."""
+        caplog.set_level(logging.INFO)
+        db, queue, _paths = _index(tmp_path, ["a", "b"])
+        queue.enqueue_reparse()
+        _drain(db, queue, make_mock_embedder(_VECTOR))
+        caplog.clear()
+        clock["t"] += main.QUEUE_HEARTBEAT_INTERVAL_SECS
+        main._maybe_log_queue_heartbeat(queue)
+        [line] = _lines(caplog, "reparse")
+        assert line.getMessage() == (
+            "reparse complete: 2 message(s) reparsed since the indexer started, 0 dead-lettered"
+        )
+        db.close()
+
+    def test_an_all_dead_reparse_between_heartbeats_still_logs_completion(
+        self, tmp_path, monkeypatch, caplog, clock
+    ):
+        caplog.set_level(logging.INFO)
+        db, _queue, _paths = _index(tmp_path, ["a"])
+        queue = IndexingQueue(db, max_attempts=1, base_backoff_seconds=0)
+        queue.enqueue_reparse()
+
+        def boom(*_a, **_kw):
+            raise ValueError(MARKER)
+
+        monkeypatch.setattr(main, "parse_email", boom)
+        _drain(db, queue, make_mock_embedder(_VECTOR))
+        caplog.clear()
+        clock["t"] += main.QUEUE_HEARTBEAT_INTERVAL_SECS
+        main._maybe_log_queue_heartbeat(queue)
+        [line] = _lines(caplog, "reparse")
+        assert line.levelno == logging.WARNING
+        assert line.getMessage().startswith("reparse complete: 0 message(s) reparsed")
+        assert "1 dead-lettered" in line.getMessage()
+        assert MARKER not in caplog.text
+        db.close()
+
+    def test_a_rename_not_yet_recorded_keeps_the_reparse_job(self, tmp_path):
+        """The file was renamed on disk but ``on_moved`` has not moved its
+        records yet: the job waits for the rename instead of being
+        dropped, then reparses the new path."""
+        db, queue, paths = _index(tmp_path, ["a"])
+        queue.enqueue_reparse()
+        old = Path(paths[0])
+        new = old.with_name(old.name + "R")
+        old.rename(new)
+
+        _drain(db, queue, make_mock_embedder(_VECTOR))
+        row = _jobs(db)[str(old)]
+        assert (row["reason"], row["attempts"], row["last_stage"]) == (REASON_REPARSE, 0, "parse")
+        assert row["last_error"] == main.REPARSE_RENAME_DEFERRED_ERROR
+
+        db.update_filepath(str(old), str(new))  # what on_moved does
+        db._conn.execute("UPDATE indexing_jobs SET next_attempt_at = '2000-01-01T00:00:00+00:00'")
+        db._conn.commit()
+        embedder = make_mock_embedder(_VECTOR)
+        _drain(db, queue, embedder)
+        assert _jobs(db) == {}
+        assert main._reparse_progress.reparsed == 1
+        assert embedder.embed_batch.call_count == 0
+        db.close()
+
+    def test_a_file_still_missing_after_the_wait_is_dropped(self, tmp_path, caplog):
+        caplog.set_level(logging.INFO)
+        db, queue, paths = _index(tmp_path, ["a"])
+        queue.enqueue_reparse()
+        Path(paths[0]).unlink()
+        _drain(db, queue, make_mock_embedder(_VECTOR))
+        assert _jobs(db)[paths[0]]["last_error"] == main.REPARSE_RENAME_DEFERRED_ERROR
+        assert "reparse_file_missing" not in caplog.text
+        # Still missing once the wait is over: gone, so dropped.
+        db._conn.execute("UPDATE indexing_jobs SET next_attempt_at = '2000-01-01T00:00:00+00:00'")
+        db._conn.commit()
+        _drain(db, queue, make_mock_embedder(_VECTOR))
+        assert _jobs(db) == {}
+        assert "reason=reparse_file_missing" in caplog.text
+        db.close()

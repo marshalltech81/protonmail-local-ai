@@ -2047,7 +2047,12 @@ still at the zero placeholder is repaired as usual). So a reparse
 makes no embedding call. Attachment text comes from the extraction
 cache. Retries, dead letters, the stall guard and heartbeats are the
 queue's own, and a message that fails to parse dead-letters instead of
-failing a migration.
+failing a migration. A reparse job whose file is gone while its path is
+still indexed (mbsync renamed it and the watcher has not recorded the
+rename yet) waits once, 60 s and without spending an attempt, so the
+rename moves the job to the new path (`update_filepath`) instead of the
+reparse being dropped; a file still missing after that is dropped with
+reason `reparse_file_missing`.
 
 The migration that adds such data triggers the reparse itself: after
 its DDL it ends with `REPARSE_ENQUEUE_SQL` (`indexer/src/queue.py`),
@@ -2085,7 +2090,8 @@ Visibility: with the queue heartbeat (every 5 min) the indexer logs
 `reparse: remaining=<n> reparsed_since_last_heartbeat=<n> dead=<n>`
 while reparse jobs are queued, then one `reparse complete: <n>
 message(s) reparsed since the indexer started, <n> dead-lettered`
-line, at WARNING when any dead-lettered. `get_mailbox_status` reports
+line, at WARNING when any dead-lettered; a reparse drained between two
+heartbeats still gets its completion line. `get_mailbox_status` reports
 the queued reparse jobs as `queue.reparse` (a subset of `pending` and
 `retrying`), names them in the not-current reason, and `make status`
 prints a line saying search finds those messages but the data the
