@@ -379,8 +379,7 @@ class Reconciler:
         threads_rebuilt = 0
 
         for thread_id, tombs in grouped.items():
-            copy_paths = [p for t in tombs for p in copies.get(t["claimant_id"], [])]
-            reaped, rebuilt = self._reap_thread(thread_id, tombs, cutoff, copy_paths)
+            reaped, rebuilt = self._reap_thread(thread_id, tombs, cutoff, copies)
             threads_reaped += int(reaped)
             threads_rebuilt += int(rebuilt)
 
@@ -442,12 +441,18 @@ class Reconciler:
         self._escalated_threads.discard(thread_id)
 
     def _reap_thread(
-        self, thread_id: str, tombs: list, cutoff: str, copy_paths: list[str] | None = None
+        self,
+        thread_id: str,
+        tombs: list,
+        cutoff: str,
+        copies: Mapping[str, list[str]] | None = None,
     ) -> tuple[bool, bool]:
         """Reap one thread. Returns (fully_reaped, rebuilt).
 
-        ``copy_paths`` are the other indexed paths holding the reaped
-        messages' bytes, unmarked in the reap transaction.
+        ``copies`` maps a claimant to the other indexed paths holding its
+        bytes. They are checked again just before the reap is written
+        (``_keep_live_copies``) and otherwise unmarked in the reap
+        transaction.
 
         ``tombs`` is a snapshot; the database re-checks inside the reap
         transaction that each message is still tombstoned at or before
@@ -458,14 +463,18 @@ class Reconciler:
         # ``tombs`` was read, and a stale snapshot path would let the
         # deleted message be rebuilt into the thread as a survivor.
         dead_ids = {t["claimant_id"] for t in tombs}
+        copies = copies or {}
+        copy_paths = [p for t in tombs for p in copies.get(t["claimant_id"], [])]
         all_rows = self.db.get_thread_messages(thread_id)
         survivor_rows = [r for r in all_rows if r["claimant_id"] not in dead_ids]
 
         if not survivor_rows:
             # Whole thread gone. Drop everything; the .eml files stay on
             # disk because the indexer never deletes Maildir files.
+            if self._keep_live_copies(tombs, copies):
+                return False, False
             if not self.db.delete_thread_completely(
-                thread_id, grace_cutoff=cutoff, copy_paths=copy_paths or ()
+                thread_id, grace_cutoff=cutoff, copy_paths=copy_paths
             ):
                 log.info(
                     "reaper: a thread changed since its tombstones were read; retrying next pass",
@@ -599,12 +608,14 @@ class Reconciler:
         # pending_deletions rows inside a single BEGIN IMMEDIATE, so a
         # crash mid-reap cannot leave the thread row and the map
         # disagreeing about which messages belong.
+        if self._keep_live_copies(tombs, copies):
+            return False, False
         removed_filepaths = self.db.reap_thread_messages(
             rebuilt_thread,
             embedding,
             [tomb["claimant_id"] for tomb in tombs],
             grace_cutoff=cutoff,
-            copy_paths=copy_paths or (),
+            copy_paths=copy_paths,
         )
         if removed_filepaths is None:
             log.info(
@@ -619,6 +630,40 @@ class Reconciler:
         )
         self._clear_blocked(thread_id)
         return False, True
+
+    def _keep_live_copies(self, tombs: list, copies: Mapping[str, list[str]]) -> bool:
+        """Remap each tombstoned message with a live byte-identical copy to
+        it, clearing its tombstone, and return whether any had one (#1102).
+
+        The sweep found no live copy, but mbsync can restore one (drop its
+        ``T`` flag) before the reap. That copy is not the mapped path, so
+        the watcher clears nothing for it. Checked against the disk just
+        before the reap is written; the caller then skips the thread this
+        pass, so the next pass rebuilds it with the kept message among
+        the survivors. A remap the database refuses (the mapping moved
+        meanwhile) also skips the pass.
+        """
+        kept = 0
+        for tomb in tombs:
+            copy = _pick_copy(copies.get(tomb["claimant_id"], []), {}, live_only=True)
+            if copy is None:
+                continue
+            kept += 1
+            # Set: ``copies`` only holds claimants that are mapped.
+            mapped = tomb["mapped_filepath"]
+            dest_folder = _derive_folder(copy, self.maildir_root)
+            same_folder = dest_folder == _derive_folder(Path(mapped), self.maildir_root)
+            if self.db.remap_to_identical_copy(
+                mapped, str(copy), folder=None if same_folder else dest_folder
+            ) and self.db.has_pending_deletion(str(copy)):
+                self.db.clear_pending_deletion(str(copy))
+        if kept:
+            log.info(
+                "reaper: kept %d message(s) with a live identical copy restored "
+                "since the sweep; retrying the thread next pass",
+                kept,
+            )
+        return kept > 0
 
     # -----------------------------------------------------------------
     # Helpers

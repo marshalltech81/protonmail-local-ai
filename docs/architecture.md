@@ -1700,9 +1700,15 @@ no surviving copy is tombstoned as missing (and a trashed one with no
 live copy as trashed), so removing every copy still reaps it as before, and the reap
 then unmarks every path with the message's bytes, not only the mapped
 one (looked up once per reap pass, unmarked by path in each thread's
-reap transaction): a copy that comes back after a transient outage is re-indexed by
-the next Maildir walk instead of staying marked indexed with nothing
-left to repair it.
+reap transaction, with any queue row on those paths): a copy that comes
+back after a transient outage is re-indexed by the next Maildir walk
+instead of staying marked indexed, or held by a dead job, with nothing
+left to repair it. Just before a thread's reap is written, the copies
+are checked on disk once more: if mbsync restored one since the sweep,
+the message moves to it, its tombstone is cleared and the thread is
+left for the next pass (logged at INFO with a count). A failure of the
+rename sweep before a periodic rescan is logged at WARNING with its
+type and does not stop that rescan's walk.
 
 A **mass-delete brake** (`INDEXER_DELETION_MAX_BATCH_PCT`, default 5%) caps
 the fraction of total indexed messages the reaper will touch in a single

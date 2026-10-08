@@ -2856,8 +2856,13 @@ def _run_periodic_rescan(
     which the walk skips because the copy is already marked indexed. In
     archive mode nothing else revisits that while the indexer runs."""
     try:
-        stamp = ingestion_state.read_stamp()
         sweep_paths(db, maildir_root=MAILDIR_PATH)
+    except Exception as e:
+        # The walk below still runs: it finds missed new mail in every
+        # readable folder, whatever stopped the sweep.
+        log.warning("periodic rename sweep failed: %s", type(e).__name__)
+    try:
+        stamp = ingestion_state.read_stamp()
         _enqueue_unindexed_messages(
             db, queue, MAILDIR_PATH, REASON_RESCAN, skip_trashed=skip_trashed, summary_pass="rescan"
         )

@@ -2539,14 +2539,20 @@ class Database:
         such path is gone or trashed now. Left marked, a copy that comes
         back (a transient mount or folder outage) would be skipped by every
         Maildir walk with no mapping left to repair it; unmarked, the walk
-        re-indexes it. Primary-key deletes; the caller owns the
-        transaction.
+        re-indexes it. Their ``indexing_jobs`` rows go too: the walk
+        skips a path with a dead job, so a returning copy would otherwise
+        wait for ``make requeue-dead``. Primary-key deletes; the caller
+        owns the transaction.
         """
         if filepaths:
-            cur.execute(
-                "DELETE FROM indexed_files WHERE filepath IN (SELECT value FROM json_each(?))",
-                (json.dumps(filepaths),),
-            )
+            paths = json.dumps(filepaths)
+            for table in ("indexed_files", "indexing_jobs"):
+                # Only fixed table names are interpolated; values are bound.
+                cur.execute(
+                    f"DELETE FROM {table} "  # nosec B608
+                    "WHERE filepath IN (SELECT value FROM json_each(?))",
+                    (paths,),
+                )
 
     @_synchronized
     def find_message_entry_by_filepath(self, filepath: str) -> sqlite3.Row | None:

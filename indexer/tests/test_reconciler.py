@@ -693,6 +693,96 @@ class TestByteIdenticalCopies:
         assert rec.reap()["threads_reaped"] == 1
         assert db.get_thread(thread_id) is None
 
+    def test_a_copy_restored_between_sweep_and_reap_keeps_the_message(
+        self, db, threader, embedder, maildir, caplog
+    ):
+        """Codex round 4 on #1134: a copy whose T flag was removed after
+        the sweep is not the mapped path, so the watcher cleared nothing
+        and the reaper removed the message although the copy was live."""
+        kept = maildir / "1700000000.M1.host:2,ST"
+        mapped = maildir / "1700000001.M2.host:2,S"
+        thread_id = _index_copies(db, threader, kept, mapped, "restored1102@example.com")
+        claimant = db.find_message_entry_by_filepath(str(mapped))["claimant_id"]
+        trashed = maildir / "1700000001.M2.host:2,ST"
+        mapped.rename(trashed)
+        rec = Reconciler(db, embedder, _default_config())
+        assert rec.sweep()["tombstoned"] == 1
+        restored = maildir / "1700000000.M1.host:2,S"
+        kept.rename(restored)  # mbsync restores the unmapped copy
+
+        with caplog.at_level(logging.INFO, logger="indexer.reconciler"):
+            result = rec.reap()
+
+        assert result["threads_reaped"] == 0
+        assert db.get_thread(thread_id) is not None
+        assert _message_row(db, claimant)["filepath"] == str(restored)
+        assert count_pending_deletions(db) == 0
+        line = next(r for r in caplog.records if "live identical copy" in r.getMessage())
+        assert line.levelno == logging.INFO
+        assert "1 message(s)" in line.getMessage()
+        assert _COPY_MARKER not in caplog.text
+        assert rec.reap()["threads_reaped"] == 0
+
+    def test_a_copy_restored_before_a_partial_reap_keeps_the_message(
+        self, db, threader, embedder, maildir
+    ):
+        kept = maildir / "1700000000.M1.host:2,ST"
+        mapped = maildir / "1700000001.M2.host:2,S"
+        _write_eml(kept, "proot1102@example.com", subject="Root")
+        _index(kept, db, threader)
+        mapped.write_bytes(kept.read_bytes())
+        _index(mapped, db, threader)
+        claimant = db.find_message_entry_by_filepath(str(mapped))["claimant_id"]
+        reply = maildir / "1700000002.M3.host:2,S"
+        _write_eml(
+            reply,
+            "preply1102@example.com",
+            subject="Re: Root",
+            in_reply_to="proot1102@example.com",
+            date=datetime(2024, 2, 1, tzinfo=UTC),
+        )
+        _index(reply, db, threader)
+        trashed = maildir / "1700000001.M2.host:2,ST"
+        mapped.rename(trashed)
+        rec = Reconciler(db, embedder, _default_config())
+        rec.sweep()
+        restored = maildir / "1700000000.M1.host:2,S"
+        kept.rename(restored)
+
+        result = rec.reap()
+
+        assert result["threads_rebuilt"] == 0
+        assert _message_row(db, claimant)["filepath"] == str(restored)
+        assert count_pending_deletions(db) == 0
+
+    def test_reap_drops_a_copys_dead_job(self, db, threader, embedder, maildir):
+        """Codex round 4 on #1134: the reap unmarked a copy's path but
+        kept its dead job, so the walk skipped the copy when it came back
+        until an operator requeued dead jobs."""
+        from src import main
+        from src.queue import REASON_INITIAL_SCAN, IndexingQueue
+
+        kept = maildir / "1700000000.M1.host:2,S"
+        mapped = maildir / "1700000001.M2.host:2,S"
+        _index_copies(db, threader, kept, mapped, "deadjob1102@example.com")
+        queue = IndexingQueue(db)
+        queue.enqueue(str(kept), REASON_INITIAL_SCAN)
+        queue.mark_dead_terminal(str(kept), stage="embed", error="fixed text")
+        saved = kept.read_bytes()
+        kept.unlink()
+        mapped.unlink()
+        rec = Reconciler(db, embedder, _default_config())
+        rec.sweep()
+        assert rec.reap()["threads_reaped"] == 1
+
+        assert not queue.is_dead(str(kept))
+        assert not queue.has_pending_row(str(kept))
+        kept.write_bytes(saved)
+        assert (
+            main._enqueue_unindexed_messages(db, queue, maildir.parent.parent, REASON_INITIAL_SCAN)
+            == 1
+        )
+
     def test_archive_mode_rename_sweep_remaps_to_the_copy(self, db, threader, maildir, caplog):
         """Codex round 1 on #1134: archive mode has no reconciler, so the
         message kept the gone path, folder and flags for ever."""
