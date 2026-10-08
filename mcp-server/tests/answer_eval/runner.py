@@ -505,6 +505,7 @@ def corpus_manifest(path: Path = CORPUS_PATH) -> dict[str, CorpusMessage]:
                     # uncompressed, so the words an extractor finds are
                     # among these.
                     payload = part.get_payload(decode=True)
+                    assert isinstance(payload, bytes)  # a non-multipart part decodes to bytes
                     text.append(payload.decode("utf-8", "replace"))
                     # An image's words are what OCR reads from it: the
                     # corpus states the text its committed images show

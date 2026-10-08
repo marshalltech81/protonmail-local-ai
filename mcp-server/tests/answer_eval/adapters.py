@@ -41,7 +41,10 @@ from src.tools.outputs import (
 )
 
 # Each tool's structured output, which the runner validates a result against.
-OUTPUT_MODELS: dict[str, type] = {
+OUTPUT_MODELS: dict[
+    str,
+    type[AskMailboxOutput | SummarizeThreadOutput | BriefIssueOutput | CheckConclusionOutput],
+] = {
     "ask_mailbox": AskMailboxOutput,
     "summarize_thread": SummarizeThreadOutput,
     "brief_issue": BriefIssueOutput,
