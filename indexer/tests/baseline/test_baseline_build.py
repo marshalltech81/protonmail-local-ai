@@ -13,13 +13,17 @@ import math
 import os
 import re
 import shutil
+import socket
 import sys
+import urllib.parse
 from pathlib import Path
 
 import pypdf
 import pytest
 from PIL import Image
+from src import main
 from src.database import EMBEDDING_DIM, Database
+from src.embed_identity import CALIBRATION_TEXT, cosine_distance
 from src.extractors import EXTRACTOR_VERSIONS, _resolve_extractor
 
 from tests.baseline.build import OCR_BINARIES, build, case_queries, check_capped_attachments
@@ -42,6 +46,7 @@ from tests.baseline.corpus import (
     thread_id,
     write_maildir,
 )
+from tests.baseline.embed_server import MODEL as HASH_MODEL
 from tests.baseline.fixtures import generate
 from tests.baseline.hash_embedder import HashEmbedder, embed_text
 
@@ -253,9 +258,33 @@ class TestHashEmbedder:
 
 class TestBuild:
     @requires_ocr
-    def test_indexes_whole_corpus(self, tmp_path):
+    def test_indexes_whole_corpus(self, tmp_path, monkeypatch):
+        """Also #1268: before ``initial_index`` runs, the index records
+        the loopback hash-embedding service as its embedder (provider,
+        the allocated endpoint, model, calibration vector), and the
+        service is stopped once the build returns."""
         out = tmp_path / "out"
+        real_initial_index = main.initial_index
+        seen: list[dict | None] = []
+
+        def initial_index(db, *args, **kwargs):
+            seen.append(db.get_active_vector_generation())
+            return real_initial_index(db, *args, **kwargs)
+
+        monkeypatch.setattr(main, "initial_index", initial_index)
         assert build(out, _GOLDEN) == {"queued": 0, "dead": 0}
+
+        assert len(seen) == 1 and seen[0] is not None
+        record = seen[0]
+        assert record["provider"] == "openai"
+        assert record["model"] == HASH_MODEL
+        endpoint = urllib.parse.urlsplit(record["endpoint"])
+        assert (endpoint.scheme, endpoint.hostname, endpoint.path) == ("http", "127.0.0.1", "/v1")
+        assert endpoint.port and endpoint.port > 0
+        assert record["dimensions"] == EMBEDDING_DIM
+        assert cosine_distance(record["calibration_vector"], embed_text(CALIBRATION_TEXT)) < 1e-6
+        with pytest.raises(OSError):
+            socket.create_connection(("127.0.0.1", endpoint.port), timeout=1).close()
 
         db = Database(out / "mail.db")
         try:

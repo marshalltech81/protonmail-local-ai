@@ -6,7 +6,9 @@ hashed embedder, and write the golden questions' query vectors. The
 two services cannot share one Python process (both are a top-level
 ``src`` package), so the mcp-server side reads the database and the
 precomputed vectors from ``out_dir`` instead of re-implementing the
-embedder.
+embedder. Before indexing, the build records the loopback
+hash-embedding service (``embed_server.py``) as the index's embedder
+identity, with the port it was allocated (``record_embedder_identity``).
 
 Usage, from ``indexer/``:
 
@@ -47,7 +49,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from src import main
-from src.database import Database
+from src.database import EMBEDDING_DIM, Database
+from src.embed_identity import verify_or_record_embedder
+from src.embedder import OpenAIEmbedder
 from src.queue import IndexingQueue
 from src.threader import Threader
 
@@ -59,6 +63,8 @@ from tests.baseline.corpus import (
     TOO_LARGE_FILENAME,
     write_maildir,
 )
+from tests.baseline.embed_server import MODEL as HASH_MODEL
+from tests.baseline.embed_server import serve
 from tests.baseline.hash_embedder import HashEmbedder, embed_text
 
 # The binaries the OCR shapes run: pytesseract starts ``tesseract``, and
@@ -135,6 +141,36 @@ def case_queries(cases: dict) -> set[str]:
     }
 
 
+def record_embedder_identity(db: Database) -> None:
+    """Record the loopback hash-embedding service (``embed_server``) as
+    the index's embedder, as the indexer does at startup: the production
+    ``OpenAIEmbedder`` fetches the calibration vector from the service,
+    and the row holds provider ``openai``, the endpoint the kernel
+    allocated and ``HASH_MODEL``. mcp-server's identity check then
+    accepts the index only against that endpoint, so a later run serves
+    the service again on the recorded port (#1268).
+
+    The service stops before indexing: ``initial_index`` still calls
+    ``HashEmbedder`` directly. Over HTTP the vectors are the same, but
+    ``OpenAIEmbedder`` rejects the zero vector ``embed_text`` returns for
+    text without word characters, so routing the build through it could
+    change what is indexed.
+    """
+    with serve() as endpoint:
+        embedder = OpenAIEmbedder(endpoint, HASH_MODEL, api_key="unauthenticated")
+        try:
+            verify_or_record_embedder(
+                db,
+                embedder,
+                provider="openai",
+                endpoint=embedder.base_url,
+                model=HASH_MODEL,
+                dimensions=EMBEDDING_DIM,
+            )
+        finally:
+            embedder.client.close()
+
+
 def build(out_dir: Path, golden_path: Path, cases_path: Path | None = None) -> dict[str, int]:
     """Build ``out_dir/mail.db`` and ``out_dir/query_vectors.json``.
 
@@ -157,6 +193,7 @@ def build(out_dir: Path, golden_path: Path, cases_path: Path | None = None) -> d
 
     db = Database(out_dir / "mail.db")
     try:
+        record_embedder_identity(db)
         with (
             patch.object(main, "MAILDIR_PATH", maildir),
             patch.object(main, "_iter_maildir_messages", _sorted_walk),
