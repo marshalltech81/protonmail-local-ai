@@ -387,8 +387,14 @@ def test_attachment_shape_reaches_the_answering_model(
     """#910: an attachment-layer case tests nothing unless every passage
     of its shape is in the prompt the model received. ``required_evidence``
     names messages, so the grader counts any passage of a message as
-    its evidence (#1182); this test is what pins the passages."""
-    supplied = {(p["message_id"], p["source"]) for p in _DETAILS[case_id]["passages"].values()}
+    its evidence (#1182); this test is what pins the passages. Each must
+    reach the prompt whole: a passage cut to the budget may have lost the
+    sentence or value the shape rests on (Codex round 2 on #1177)."""
+    supplied = {
+        (p["message_id"], p["source"])
+        for p in _DETAILS[case_id]["passages"].values()
+        if not p["truncated"]
+    }
     wanted = {(message_id_of(ref), source) for ref, source in _ATTACHMENT_SHAPES[case_id]}
     assert wanted <= supplied, (case_id, sorted(wanted - supplied))
 
