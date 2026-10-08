@@ -188,7 +188,9 @@ harness in `tests/eval/` (`tests/retrieval_metrics.py`).
   the change. A corpus change also regenerates the parser pin
   (`PARSER_PIN_UPDATE=1 uv run pytest tests/test_parser_pin.py` in
   `indexer/`), which catalogues every corpus message; its diff must
-  be only the added or removed records.
+  be only the added or removed records, plus the messages after the
+  change renumbered under new file names with no other field changed,
+  since corpus files are numbered in sequence.
 - **Unexpected snapshot diff.** If a refactor PR produces a snapshot
   diff, treat it as a behaviour change and explain it in the PR. Do
   not regenerate the snapshot just to make the test pass.

@@ -436,8 +436,11 @@ documented as a setup requirement, #851), #768 (`make status`
 shows each provider as LOCAL or REMOTE, #830), #780 (#829), dependency
 and base-image digest refresh (#828), mbsync on Debian trixie
 (#833), and, 2026-10-08: `make trivy-images` for the image scans with
-a stale-image warning (#1065, #1103), image builds and CI that survive
-an unreachable Maven Central (#1069, #1070, #1105), a check that both
+a stale-image warning (#1065, #1103), fewer Maven Central contacts
+(the Trivy dependency scan caches the Maven repository, #1069, and
+pull-request image builds and the indexer test job restore the `.ppt`
+reader's build stage from the CI cache, #1070, #1105; runs on `main`
+and cold local builds still need Maven Central), a check that both
 workflows pin the same BuildKit image (#1122), and defaults for
 optional Compose settings (#1074). Open decisions: the runtime base images (#835), and bounding
 review rounds for test and eval-harness PRs (#838). Until the owner
