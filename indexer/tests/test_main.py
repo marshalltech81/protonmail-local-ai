@@ -4968,7 +4968,14 @@ class TestLateFolderWatches:
         _write_eml(maildir / "INBOX" / "cur" / "old.eml:2,S", "old@example.com")
         monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
         steps: list[str] = []
-        monkeypatch.setattr(main, "sweep_paths", lambda db: steps.append("sweep_paths"))
+        roots: list[object] = []
+
+        def sweep(db, **kw):
+            steps.append("sweep_paths")
+            # The copy remap derives folders from the root (#1102).
+            roots.append(kw.get("maildir_root"))
+
+        monkeypatch.setattr(main, "sweep_paths", sweep)
         queue = _make_queue(db)
         observer = _CountingObserver()
         refresher = main.FolderWatchRefresher(maildir, observer, handler=None)  # type: ignore[arg-type]
@@ -4981,6 +4988,7 @@ class TestLateFolderWatches:
         # Renames lost while the watch was replaced are healed before
         # the walk, as at startup.
         assert steps == ["sweep_paths"]
+        assert roots == [maildir]
         assert _job_reasons(db) == {
             "late.eml": main.REASON_RESCAN,
             "old.eml:2,S": main.REASON_RESCAN,
@@ -5018,7 +5026,7 @@ class TestLateFolderWatches:
 
             return run
 
-        monkeypatch.setattr(main, "sweep_paths", step("sweep_paths", lambda db: 0))
+        monkeypatch.setattr(main, "sweep_paths", step("sweep_paths", lambda db, **_kw: 0))
         monkeypatch.setattr(
             main, "_enqueue_unindexed_messages", step("_enqueue_unindexed_messages", real_walk)
         )
@@ -5323,7 +5331,7 @@ class TestMainStartupAndLoop:
         monkeypatch.setattr(main, "OpenAIEmbedder", lambda **kw: embedder)
         monkeypatch.setattr(main, "touch_health_file", health or (lambda: None))
         monkeypatch.setattr(
-            main, "sweep_paths", sweep_paths or (lambda db: events.append("sweep_paths"))
+            main, "sweep_paths", sweep_paths or (lambda db, **_kw: events.append("sweep_paths"))
         )
         monkeypatch.setattr(main, "Observer", observer or (lambda: _FakeObserver(events)))
         monkeypatch.setattr(
@@ -5511,7 +5519,7 @@ class TestMainStartupAndLoop:
     def test_startup_rename_sweep_failure_logs_type_only(self, tmp_path, monkeypatch, caplog):
         marker = "SYNTHETIC_934_MARKER"
 
-        def sweep(_db):
+        def sweep(_db, **_kw):
             self._events.append("sweep_paths")
             raise sqlite3.OperationalError(marker)
 

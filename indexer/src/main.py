@@ -2515,7 +2515,7 @@ def _refresh_folder_watches(
     folder_watches.refresh()
     if not folder_watches.recovery_pending:
         return False
-    sweep_paths(db)
+    sweep_paths(db, maildir_root=MAILDIR_PATH)
     _enqueue_unindexed_messages(db, queue, MAILDIR_PATH, REASON_RESCAN, skip_trashed=skip_trashed)
     folder_watches.recovery_pending = False
     return True
@@ -2999,7 +2999,7 @@ def main():
     # indexed: otherwise the walk reprocesses every file renamed while
     # the indexer was down as new mail.
     try:
-        sweep_paths(db)
+        sweep_paths(db, maildir_root=MAILDIR_PATH)
     except Exception as e:
         log.error("startup rename sweep failed: %s", type(e).__name__)
 

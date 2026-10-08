@@ -1674,19 +1674,24 @@ found".
 
 **Byte-identical copies.** Two files with the same bytes share one
 claimant ID (see *Claimant IDs*), so `message_thread_map` holds only
-the path indexed last, while `indexed_files` holds both (#1102). When the
+the path indexed last, while `indexed_files` holds both (#1102). When a
 sweep finds a message's mapped file gone, it first looks for another
-indexed path with the same `content_hash` that still exists, in one
-query per sweep covering every missing message. If one exists, the
-message is remapped to that copy (its locator, folder and S/F/R state,
-any tombstone or queued job on the old path moving with it, as for a
-rename) instead of being tombstoned as missing; the trash rule then
+indexed path with the same `content_hash` that still exists, with one
+pass over `indexed_files` per sweep covering every missing message. If
+one exists (a live copy is preferred to a `T`-flagged one), the message
+is remapped to that copy: its locator, folder and S/F/R state move as
+for a rename, and a tombstone or queued job on the gone path moves too
+unless the copy already has its own, which is kept. The trash rule then
 applies to the copy as to any file, so a `T`-flagged copy is tombstoned
-and a restored one clears an earlier tombstone. The sweep's INFO line
-counts these as `remapped=N`. Only a message with no surviving copy is
-tombstoned as missing, so removing every copy still reaps it as before.
-Without this, the surviving copy stayed marked indexed after the reap
-and no later walk re-queued it, so mail still on disk left search.
+and a live one clears an earlier tombstone. The always-on startup
+rename sweep does the same remap, so archive mode does not keep the
+gone path, folder and flags. The sweep's INFO line counts these as
+`remapped=N`. Only a message with no surviving copy is tombstoned as
+missing, so removing every copy still reaps it as before, and the reap
+then unmarks every path with the message's bytes, not only the mapped
+one: a copy that comes back after a transient outage is re-indexed by
+the next Maildir walk instead of staying marked indexed with nothing
+left to repair it.
 
 A **mass-delete brake** (`INDEXER_DELETION_MAX_BATCH_PCT`, default 5%) caps
 the fraction of total indexed messages the reaper will touch in a single

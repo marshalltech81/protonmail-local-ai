@@ -70,6 +70,44 @@ def _is_live(filepath: str | None, listings: dict[Path, dict[str, Path]]) -> boo
     return current is not None and not is_trashed(current)
 
 
+def _remap_to_identical_copies(
+    db: Database,
+    gone: list,
+    listings: dict[Path, dict[str, Path]],
+    maildir_root: Path | None,
+) -> dict[str, Path]:
+    """Remap each message in ``gone`` (map rows whose file no longer
+    exists) to a byte-identical copy still on disk, and return
+    ``claimant_id -> copy`` for those remapped (#1102).
+
+    Byte-identical files share one claimant ID and the mapping holds only
+    one of their paths, while ``indexed_files`` holds every path. One
+    lookup covers all of ``gone``. A live copy is preferred to a trashed
+    one, so a trashed copy that sorts first cannot get the message reaped
+    while a live copy remains. The remap moves the locator, folder and
+    S/F/R state; it never tombstones or clears anything, so each caller
+    applies its own trash rule to the copy.
+    """
+    copies = db.find_identical_copies([row["claimant_id"] for row in gone])
+    remapped: dict[str, Path] = {}
+    for row in gone:
+        found = [
+            current
+            for path in copies.get(row["claimant_id"], [])
+            if (current := resolve_current_path(Path(path), listings)) is not None
+        ]
+        if not found:
+            continue
+        copy = next((p for p in found if not is_trashed(p)), found[0])
+        dest_folder = _derive_folder(copy, maildir_root)
+        same_folder = dest_folder == _derive_folder(Path(row["filepath"]), maildir_root)
+        db.remap_to_identical_copy(
+            row["filepath"], str(copy), folder=None if same_folder else dest_folder
+        )
+        remapped[row["claimant_id"]] = copy
+    return remapped
+
+
 @dataclass(frozen=True)
 class ReconcilerConfig:
     enabled: bool
@@ -157,29 +195,11 @@ class Reconciler:
 
             self._apply_trash_rule(row, current, counts)
 
-        copies = self.db.find_identical_copies([row["claimant_id"] for row in gone])
+        remapped = _remap_to_identical_copies(self.db, gone, listings, self.maildir_root)
+        counts["remapped"] = len(remapped)
         for row in gone:
-            copy = next(
-                (
-                    found
-                    for path in copies.get(row["claimant_id"], [])
-                    if (found := resolve_current_path(Path(path), listings)) is not None
-                ),
-                None,
-            )
+            copy = remapped.get(row["claimant_id"])
             if copy is not None:
-                stored = Path(row["filepath"])
-                dest_folder = _derive_folder(copy, self.maildir_root)
-                self.db.update_filepath(
-                    row["filepath"],
-                    str(copy),
-                    folder=(
-                        dest_folder
-                        if dest_folder != _derive_folder(stored, self.maildir_root)
-                        else None
-                    ),
-                )
-                counts["remapped"] += 1
                 self._apply_trash_rule(row, copy, counts)
                 continue
             # File fully gone — under Expunge None this is unexpected, but
@@ -555,7 +575,7 @@ class Reconciler:
         return self.db.count_total_messages()
 
 
-def sweep_paths(db: Database) -> dict:
+def sweep_paths(db: Database, *, maildir_root: Path | None = None) -> dict:
     """Walk every indexed file and update the stored filepath when mbsync
     has renamed it in place (e.g. a flag-only rename such as ``S`` →
     ``SR``, or a ``new`` → ``cur`` promotion). Intended to be safe to
@@ -569,25 +589,29 @@ def sweep_paths(db: Database) -> dict:
     a tombstone a mirror-mode run left would otherwise report the restored
     message as pending deletion for ever (#860).
 
+    A message whose file is gone is remapped to a byte-identical copy
+    still on disk, as ``Reconciler.sweep`` does (#1102), so archive mode
+    does not keep the gone path, folder and flags for ever; a remap to a
+    live copy clears the message's tombstone like a restore.
+    ``maildir_root`` names the Maildir root for the copy's folder.
+
     Returns a summary dict so the caller can log how much drift there
     was (useful when diagnosing "new mail shows up in search late" on
     mailboxes where the indexer restarts often).
     """
     renamed = 0
-    unreachable = 0
     tombstones_cleared = 0
 
     listings: dict[Path, dict[str, Path]] = {}
+    gone = []
     for row in db.iter_message_map():
         stored = Path(row["filepath"])
         current = resolve_current_path(stored, listings)
 
         if current is None:
-            # File is no longer at any of the expected Maildir paths. A
-            # full sweep (with reconciliation enabled) would tombstone
-            # the row here; this lightweight variant just counts the
-            # miss so the operator can see the signal in logs.
-            unreachable += 1
+            # File is no longer at any of the expected Maildir paths:
+            # settled after the walk, with one copy lookup for all.
+            gone.append(row)
             continue
 
         if str(current) != row["filepath"]:
@@ -597,17 +621,29 @@ def sweep_paths(db: Database) -> dict:
             db.update_filepath(row["filepath"], str(current), clear_tombstone=restored)
             renamed += 1
 
-    if renamed or unreachable:
+    remapped = _remap_to_identical_copies(db, gone, listings, maildir_root)
+    for copy in remapped.values():
+        if not is_trashed(copy) and db.has_pending_deletion(str(copy)):
+            db.clear_pending_deletion(str(copy))
+            tombstones_cleared += 1
+    # A full sweep (with reconciliation enabled) would tombstone the
+    # rest; this lightweight variant just counts the miss so the
+    # operator can see the signal in logs.
+    unreachable = len(gone) - len(remapped)
+
+    if renamed or unreachable or remapped:
         log.info(
-            "startup rename sweep: renamed=%d unreachable=%d tombstones_cleared=%d",
+            "startup rename sweep: renamed=%d unreachable=%d tombstones_cleared=%d remapped=%d",
             renamed,
             unreachable,
             tombstones_cleared,
+            len(remapped),
         )
     return {
         "renamed": renamed,
         "unreachable": unreachable,
         "tombstones_cleared": tombstones_cleared,
+        "remapped": len(remapped),
     }
 
 

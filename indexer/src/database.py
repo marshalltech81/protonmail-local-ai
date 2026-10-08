@@ -2442,26 +2442,85 @@ class Database:
         only the last path indexed; ``indexed_files`` keeps every path
         (#1102). Returns ``claimant_id -> [filepath, ...]`` (path order)
         for the paths whose ``content_hash`` matches the claimant's and
-        that are not its mapped path. One query, whatever the count: the
-        IDs travel as a single JSON array.
+        that are not its mapped path.
+
+        Two statements, whatever the count: the claimants' hashes by
+        primary key, then one pass over ``indexed_files`` (which has no
+        ``content_hash`` index) against that set. A join on the hash
+        would rescan ``indexed_files`` once per claimant.
         """
         if not claimant_ids:
             return {}
-        rows = self._conn.execute(
-            "SELECT msg.claimant_id, f.filepath "
-            "FROM messages msg "
-            "JOIN message_thread_map m ON m.claimant_id = msg.claimant_id "
-            "JOIN indexed_files f ON f.content_hash = msg.content_hash "
-            "AND f.filepath != m.filepath "
-            "WHERE msg.claimant_id IN (SELECT value FROM json_each(?)) "
-            "AND msg.content_hash IS NOT NULL "
-            "ORDER BY msg.claimant_id, f.filepath",
+        wanted = self._conn.execute(
+            "SELECT m.claimant_id, m.filepath, msg.content_hash "
+            "FROM message_thread_map m "
+            "JOIN messages msg ON msg.claimant_id = m.claimant_id "
+            "WHERE m.claimant_id IN (SELECT value FROM json_each(?)) "
+            "AND msg.content_hash IS NOT NULL",
             (json.dumps(claimant_ids),),
+        ).fetchall()
+        # The hash covers the raw bytes, Message-ID included, so it names
+        # one claimant.
+        by_hash = {row["content_hash"]: row for row in wanted}
+        if not by_hash:
+            return {}
+        rows = self._conn.execute(
+            "SELECT filepath, content_hash FROM indexed_files "
+            "WHERE content_hash IN (SELECT value FROM json_each(?)) "
+            "ORDER BY filepath",
+            (json.dumps(list(by_hash)),),
         ).fetchall()
         copies: dict[str, list[str]] = {}
         for row in rows:
-            copies.setdefault(row["claimant_id"], []).append(row["filepath"])
+            owner = by_hash[row["content_hash"]]
+            if row["filepath"] != owner["filepath"]:
+                copies.setdefault(owner["claimant_id"], []).append(row["filepath"])
         return copies
+
+    @_synchronized
+    def remap_to_identical_copy(
+        self, old_path: str, new_path: str, *, folder: str | None = None
+    ) -> None:
+        """Point a message whose file is gone at a byte-identical copy.
+
+        A rename (``update_filepath``) carries the gone path's tombstone
+        and queue row to ``new_path``. The copy is a file of its own and
+        can already hold either: its tombstone (from when it was mapped)
+        or its queue row describes the file that still exists, so it is
+        kept and the gone path's row dropped rather than colliding with
+        it (#1102).
+        """
+        with self.transaction():
+            for table in ("pending_deletions", "indexing_jobs"):
+                # Only fixed table names are interpolated; values are bound.
+                self._conn.execute(
+                    f"DELETE FROM {table} WHERE filepath = ? "  # nosec B608
+                    f"AND EXISTS (SELECT 1 FROM {table} WHERE filepath = ?)",
+                    (old_path, new_path),
+                )
+            self.update_filepath(old_path, new_path, folder=folder)
+
+    @staticmethod
+    def _unmark_identical_copies(cur: sqlite3.Cursor, claimant_ids: list[str]) -> None:
+        """Drop the ``indexed_files`` rows of every path holding the bytes
+        of a message being reaped, not only its mapped path (#1102).
+
+        The reap runs only once the sweep found no surviving copy, so any
+        such path is gone or trashed now. Left marked, a copy that comes
+        back (a transient mount or folder outage) would be skipped by every
+        Maildir walk with no mapping left to repair it; unmarked, the walk
+        re-indexes it. One pass over ``indexed_files`` per call; the caller
+        owns the transaction and calls this before the message rows go.
+        """
+        if not claimant_ids:
+            return
+        cur.execute(
+            "DELETE FROM indexed_files WHERE content_hash IN ("
+            "SELECT content_hash FROM messages "
+            "WHERE claimant_id IN (SELECT value FROM json_each(?)) "
+            "AND content_hash IS NOT NULL)",
+            (json.dumps(claimant_ids),),
+        )
 
     @_synchronized
     def find_message_entry_by_filepath(self, filepath: str) -> sqlite3.Row | None:
@@ -2930,6 +2989,7 @@ class Database:
             ]
             for cid in claimant_ids:
                 self._delete_attachments_for_message(cur, cid)
+            self._unmark_identical_copies(cur, claimant_ids)
             # Read before the map delete cascades the participant rows away.
             mentions = self._participant_mentions(cur, claimant_ids)
             cur.execute(
@@ -3018,6 +3078,7 @@ class Database:
             # The replaced thread row held the reaped messages' words.
             self._mark_fts_scrub("threads_fts")
             mentions = self._participant_mentions(cur, reaped_claimant_ids)
+            self._unmark_identical_copies(cur, reaped_claimant_ids)
             for cid in reaped_claimant_ids:
                 fp = self._remove_message_row(cur, cid)
                 if fp is not None:

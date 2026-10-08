@@ -416,8 +416,16 @@ class TestByteIdenticalCopies:
             db._conn.set_trace_callback(None)
 
         assert summary["remapped"] == 3
-        lookups = [s for s in statements if "content_hash" in s and "indexed_files f" in s]
+        lookups = [s for s in statements if "FROM indexed_files" in s and "content_hash IN" in s]
         assert len(lookups) == 1, lookups
+        # Codex round 1 on #1134: a join on ``content_hash`` (no index)
+        # scanned ``indexed_files`` once per missing claimant. The lookup
+        # must read ``indexed_files`` once, whatever the count: its plan
+        # touches no other table, so nothing drives a per-row rescan.
+        plan = [r["detail"] for r in db._conn.execute("EXPLAIN QUERY PLAN " + lookups[0])]
+        tables = [d for d in plan if d.startswith(("SCAN", "SEARCH"))]
+        assert [d for d in tables if "indexed_files" in d], plan
+        assert all("indexed_files" in d or "json_each" in d for d in tables), plan
 
     def test_no_candidate_query_when_nothing_is_missing(self, db, threader, embedder, maildir):
         kept = maildir / "1700000000.M1.host:2,S"
@@ -431,7 +439,151 @@ class TestByteIdenticalCopies:
             db._conn.set_trace_callback(None)
 
         assert summary["remapped"] == 0
-        assert not [s for s in statements if "indexed_files f" in s]
+        assert not [s for s in statements if "content_hash IN" in s]
+
+    def test_a_live_copy_is_preferred_over_a_trashed_one(self, db, threader, embedder, maildir):
+        """Codex round 1 on #1134: the first candidate in path order was
+        taken even when trashed, so the message was tombstoned and later
+        reaped although a live copy remained."""
+        trashed = maildir / "1700000000.A1.host:2,ST"
+        live = maildir / "1700000002.Z1.host:2,S"
+        mapped = maildir / "1700000001.M2.host:2,S"
+        _index_copies(db, threader, trashed, mapped, "prefer@example.com")
+        live.write_bytes(mapped.read_bytes())
+        _index(live, db, threader)
+        _index(mapped, db, threader)  # the mapping is ``mapped`` again
+        claimant = db.find_message_entry_by_filepath(str(mapped))["claimant_id"]
+        mapped.unlink()
+
+        summary = Reconciler(db, embedder, _default_config()).sweep()
+
+        assert summary["remapped"] == 1
+        assert summary["tombstoned"] == 0
+        assert _message_row(db, claimant)["filepath"] == str(live)
+        assert count_pending_deletions(db) == 0
+
+    def test_remap_onto_a_tombstoned_copy_keeps_one_tombstone(
+        self, db, threader, embedder, maildir
+    ):
+        """Codex round 1 on #1134: both paths held a tombstone, and moving
+        the old one onto the copy hit the primary key and aborted the
+        whole sweep on every pass."""
+        kept = maildir / "1700000000.M1.host:2,ST"
+        mapped = maildir / "1700000001.M2.host:2,S"
+        _write_eml(kept, "twotombs@example.com")
+        _index(kept, db, threader)
+        entry = db.find_message_entry_by_filepath(str(kept))
+        assert db.add_pending_deletion(str(kept), entry["claimant_id"], entry["thread_id"])
+        mapped.write_bytes(kept.read_bytes())
+        _index(mapped, db, threader)
+        assert db.add_pending_deletion(str(mapped), entry["claimant_id"], entry["thread_id"])
+        mapped.unlink()
+
+        summary = Reconciler(db, embedder, _default_config()).sweep()
+
+        assert summary["remapped"] == 1
+        assert count_pending_deletions(db) == 1
+        assert db.has_pending_deletion(str(kept))
+        assert _message_row(db, entry["claimant_id"])["filepath"] == str(kept)
+
+    def test_remap_keeps_the_copys_own_job(self, db, threader, embedder, maildir):
+        """Codex round 1 on #1134: the rename's ``UPDATE OR REPLACE``
+        moved the gone path's dead job onto the copy, replacing the copy's
+        runnable one."""
+        from src.queue import REASON_INITIAL_SCAN, IndexingQueue
+
+        kept = maildir / "1700000000.M1.host:2,S"
+        mapped = maildir / "1700000001.M2.host:2,S"
+        _index_copies(db, threader, kept, mapped, "jobs@example.com")
+        queue = IndexingQueue(db)
+        queue.enqueue(str(kept), REASON_INITIAL_SCAN)
+        queue.enqueue(str(mapped), REASON_INITIAL_SCAN)
+        queue.mark_dead_terminal(str(mapped), stage="embed", error="fixed text")
+        mapped.unlink()
+
+        assert Reconciler(db, embedder, _default_config()).sweep()["remapped"] == 1
+
+        assert queue.has_pending_row(str(kept))
+        assert not queue.is_dead(str(kept))
+        assert not queue.has_pending_row(str(mapped))
+        assert not queue.is_dead(str(mapped))
+
+    def test_reaping_with_every_copy_gone_unmarks_every_copy(self, db, threader, embedder, maildir):
+        """Codex round 1 on #1134: the reap unmarked only the mapped path,
+        so a copy that came back after a transient outage stayed marked
+        indexed with no mapping left to repair, and was never re-queued."""
+        from src import main
+        from src.queue import REASON_INITIAL_SCAN, IndexingQueue
+
+        kept = maildir / "1700000000.M1.host:2,S"
+        mapped = maildir / "1700000001.M2.host:2,S"
+        _index_copies(db, threader, kept, mapped, "outage@example.com")
+        saved = kept.read_bytes()
+        kept.unlink()
+        mapped.unlink()
+        rec = Reconciler(db, embedder, _default_config())
+        rec.sweep()
+        assert rec.reap()["threads_reaped"] == 1
+
+        assert not db.is_indexed(str(kept))
+        assert not db.is_indexed(str(mapped))
+        kept.write_bytes(saved)
+        queued = main._enqueue_unindexed_messages(
+            db, IndexingQueue(db), maildir.parent.parent, REASON_INITIAL_SCAN
+        )
+        assert queued == 1
+
+    def test_partial_reap_unmarks_every_copy_of_the_reaped_message(
+        self, db, threader, embedder, maildir
+    ):
+        kept = maildir / "1700000000.M1.host:2,S"
+        mapped = maildir / "1700000001.M2.host:2,S"
+        _write_eml(kept, "root1102@example.com", subject="Root")
+        _index(kept, db, threader)
+        mapped.write_bytes(kept.read_bytes())
+        _index(mapped, db, threader)
+        reply = maildir / "1700000002.M3.host:2,S"
+        _write_eml(
+            reply,
+            "reply1102@example.com",
+            subject="Re: Root",
+            in_reply_to="root1102@example.com",
+            date=datetime(2024, 2, 1, tzinfo=UTC),
+        )
+        _index(reply, db, threader)
+        kept.unlink()
+        mapped.unlink()
+        rec = Reconciler(db, embedder, _default_config())
+        rec.sweep()
+
+        assert rec.reap()["threads_rebuilt"] == 1
+        assert not db.is_indexed(str(kept))
+        assert not db.is_indexed(str(mapped))
+        assert db.is_indexed(str(reply))
+
+    def test_archive_mode_rename_sweep_remaps_to_the_copy(self, db, threader, maildir, caplog):
+        """Codex round 1 on #1134: archive mode has no reconciler, so the
+        message kept the gone path, folder and flags for ever."""
+        root = maildir.parent.parent
+        kept = root / "Archive" / "cur" / "1700000000.M1.host:2,RS"
+        mapped = maildir / "1700000001.M2.host:2,S"
+        _index_copies(db, threader, kept, mapped, "archive@example.com")
+        claimant = db.find_message_entry_by_filepath(str(mapped))["claimant_id"]
+        mapped.unlink()
+
+        with caplog.at_level(logging.INFO, logger="indexer.reconciler"):
+            summary = sweep_paths(db, maildir_root=root)
+
+        assert summary["remapped"] == 1
+        assert summary["unreachable"] == 0
+        row = _message_row(db, claimant)
+        assert row["filepath"] == str(kept)
+        assert row["folder"] == "Archive"
+        assert row["replied"] == 1
+        line = next(r for r in caplog.records if "remapped=1" in r.getMessage())
+        assert line.levelno == logging.INFO
+        assert _COPY_MARKER not in caplog.text
+        assert count_pending_deletions(db) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -492,7 +644,12 @@ class TestSweepPaths:
 
         result = sweep_paths(db)
 
-        assert result == {"renamed": count, "unreachable": 0, "tombstones_cleared": 0}
+        assert result == {
+            "renamed": count,
+            "unreachable": 0,
+            "tombstones_cleared": 0,
+            "remapped": 0,
+        }
         assert len(listed) == len(set(listed)) == 1
 
     def test_does_not_tombstone_missing_files(self, db, threader, maildir):
@@ -565,7 +722,7 @@ class TestSweepPaths:
         with caplog.at_level(logging.INFO):
             result = sweep_paths(db)
 
-        assert result == {"renamed": 1, "unreachable": 0, "tombstones_cleared": 1}
+        assert result == {"renamed": 1, "unreachable": 0, "tombstones_cleared": 1, "remapped": 0}
         assert count_pending_deletions(db) == 0
         assert db.find_message_entry_by_filepath(str(live)) is not None
         assert db._conn.execute("SELECT count(*) FROM message_thread_map").fetchone()[0] == 1
@@ -573,7 +730,12 @@ class TestSweepPaths:
             (r.levelno, r.getMessage())
             for r in caplog.records
             if r.getMessage().startswith("startup rename sweep")
-        ] == [(logging.INFO, "startup rename sweep: renamed=1 unreachable=0 tombstones_cleared=1")]
+        ] == [
+            (
+                logging.INFO,
+                "startup rename sweep: renamed=1 unreachable=0 tombstones_cleared=1 remapped=0",
+            )
+        ]
         assert marker not in caplog.text
 
     def test_keeps_leftover_tombstone_while_file_stays_trashed(self, db, threader, maildir, caplog):
@@ -588,7 +750,7 @@ class TestSweepPaths:
         with caplog.at_level(logging.INFO):
             result = sweep_paths(db)
 
-        assert result == {"renamed": 1, "unreachable": 0, "tombstones_cleared": 0}
+        assert result == {"renamed": 1, "unreachable": 0, "tombstones_cleared": 0, "remapped": 0}
         assert db.has_pending_deletion(str(starred))
         assert not db.has_pending_deletion(str(path))
         assert count_pending_deletions(db) == 1
