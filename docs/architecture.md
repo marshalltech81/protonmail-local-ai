@@ -1045,9 +1045,32 @@ Treat the class as a description of who the message says it is from,
 not proof. One guard applies: Proton files most spoofed and
 DMARC-failing mail in Spam, so a message in the `Spam` folder never
 counts toward an `authority_class` filter (`AUTHORITY_EXCLUDED_FOLDERS`
-in `mcp-server/src/lib/sqlite.py`). Spoofed mail Proton leaves in the
+in `mcp-server/src/lib/predicates.py`). Spoofed mail Proton leaves in the
 inbox still matches; gating on DKIM/DMARC verdict headers is deferred
 until Bridge's headers have been checked on real mail (#463).
+
+A second guard covers a message whose sender cannot be told (#1144).
+The parser reads only the first of repeated `From` headers and flags the
+message, as it does one whose header scan stopped at its 10,000-field
+budget, and the indexer stores the flag as
+`messages.sender_ambiguous`: 0 for one `From`, 1 when the attribution
+is unsafe, NULL when not yet assessed (rows from before schema v2,
+until the reparse reaches them). Only 0 qualifies for authority
+(`_SENDER_CLASS_MESSAGES`, `mcp-server/src/lib/predicates.py`): NULL
+is "can't tell", so the `authority_class` filters are empty straight
+after the v2 upgrade and fill in as the reparse drains, and a message
+whose job is dead-lettered stays out of them until `make requeue-dead`.
+The `from` participant rows are kept, so sender filters and
+`find_contact` are unchanged; the threader skips the subject fallback
+for a flagged message, since that check trusts its author. Ambiguous
+messages cannot join by subject alone or supply correspondent evidence
+for another subject-only merge. NULL supplies no evidence; assessed
+messages in mixed threads can still qualify: the fallback's
+correspondent check reads the author and another recipient from the
+candidate thread's messages with `sender_ambiguous = 0` only
+(`Database.thread_has_assessed_correspondents`), each from any such
+message, and logs a rate-limited INFO count of candidates it turned
+down for that reason alone.
 
 The indexer loads the file once at startup, before opening the
 database. An absent file classifies nothing; a file that cannot be
@@ -1638,6 +1661,7 @@ already indexed without embedding calls (see *Reparse in place*).
 | Version | Migration | Change |
 |---|---|---|
 | 0 | (initial schema) | First deployed schema (2026-10-03). |
+| 2 | `0002_messages_sender_ambiguous.sql` | `messages.sender_ambiguous` (#1144): 0 / 1, NULL until assessed, no default. Every existing row starts NULL and the migration queues a reparse of every indexed file, which fills it without embedding calls; a dead-lettered job keeps its message NULL until `make requeue-dead`. Until the reparse reaches a message it matches no `authority_class` filter. |
 | 1 | `0001_extraction_cache_per_module.sql` | `attachment_extractions` keyed by (content hash, extractor module); `attachments.extractor_module` (#928). Each v0 row keeps its result and stamp and is keyed by its stamp's module (`docx@5` -> `docx`, `pdf-ocr@4` -> `pdf`), or '' when it has no stamp (`unsupported`, `too_large`); each occurrence is pointed at its payload's row, as before. No `EXTRACTOR_VERSIONS` bump comes with it, so nothing is re-extracted for the re-keying alone. An occurrence whose label selects another module than its row's moves to its own row the next time its message is reprocessed. |
 
 ## Deletion Reconciliation (mirror by default)
@@ -2130,7 +2154,10 @@ queue's own, and a message that fails to parse dead-letters instead of
 failing a migration. A reparse job whose file is gone while its path is
 still indexed waits for the rename like any other job for an indexed
 file (see the `FileNotFoundError` outcome under the queue's stage
-outcomes below).
+outcomes below). A reparse can drop addresses from a
+message's rows (the #1144 address budget), but the thread's
+`participants` and `senders` keep them until a reap or a rebuild
+(#1173).
 
 The migration that adds such data triggers the reparse itself: after
 its DDL it ends with `REPARSE_ENQUEUE_SQL` (`indexer/src/queue.py`),

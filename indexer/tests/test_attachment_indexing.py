@@ -1354,6 +1354,8 @@ class TestAttachmentOutcomeCounts:
             "ocr_capped_images": 0,
             "extractor_caps": 0,
             "parser_caps_messages": 0,
+            "parser_recipients_merged_messages": 0,
+            "parser_sender_ambiguous_messages": 0,
             "warnings_suppressed": 0,
         }
 
@@ -1454,12 +1456,15 @@ class TestAttachmentOutcomeCounts:
             "ocr_capped_images": 2,
             "extractor_caps": 4,
             "parser_caps_messages": 3,
+            "parser_recipients_merged_messages": 1,
+            "parser_sender_ambiguous_messages": 2,
             "warnings_suppressed": 6,
         }
         assert attachment_indexing.format_attachment_outcomes(counts) == (
             "attachments n=6 success=3 failed=1 unsupported=0 too_large=0 "
             "ocr_disabled=2 empty=0 cached=4 pdf_pages_failed=5 pdf_pages_unrecovered=9 ocr_capped_pdfs=7 "
             "ocr_pages_skipped=8 ocr_capped_images=2 extractor_caps=4 parser_caps_messages=3 "
+            "parser_recipients_merged_messages=1 parser_sender_ambiguous_messages=2 "
             "warnings_suppressed=6"
         )
 
@@ -1481,6 +1486,10 @@ class TestAttachmentOutcomeCounts:
         # An extractor cap cut the attachment's text (#903).
         ("extractor_caps", True),
         ("parser_caps_messages", True),
+        # Repeated To / Cc merged lose nothing; an ambiguous sender loses
+        # no attachment text (its own WARNING is per message) (#1144).
+        ("parser_recipients_merged_messages", False),
+        ("parser_sender_ambiguous_messages", False),
         ("warnings_suppressed", True),
     ]
 

@@ -134,6 +134,16 @@ def _format_participants(people: list[Participant], limit: int = _MAX_LISTED_PAR
     )
 
 
+# The prose ``Sender:`` line of a message whose sender attribution is
+# not known safe (#1144), keyed by ``MessageRecord.sender_ambiguous``.
+# True covers a repeated From and a header scan cut short, which the
+# index does not tell apart, so its words name neither.
+_SENDER_CHECK_WORDS = {
+    True: "ambiguous (sender attribution unsafe)",
+    None: "not yet checked",
+}
+
+
 def _header_lines(m: MessageRecord) -> list[str]:
     """A message's own headers, one per line; absent ones are omitted.
 
@@ -145,6 +155,8 @@ def _header_lines(m: MessageRecord) -> list[str]:
     for label, people in (("From", m.from_), ("To", m.to), ("Cc", m.cc)):
         if people:
             headers.append((label, _format_participants(people)))
+    if m.sender_ambiguous is not False:
+        headers.append(("Sender", _SENDER_CHECK_WORDS[m.sender_ambiguous]))
     headers.append(("Sent", m.sent_at))
     if m.occurred_at:
         headers.append(("Delivered", m.occurred_at))
@@ -237,6 +249,8 @@ def _listed_lines(i: int, m: MessageRecord, fields: frozenset[str] | None) -> li
         ("replied", "replied", m.replied),
         ("has_attachments", "attachments", m.has_attachments),
         ("pending_deletion", "pending deletion", m.pending_deletion),
+        ("sender_ambiguous", "sender ambiguous", m.sender_ambiguous is True),
+        ("sender_ambiguous", "sender not yet checked", m.sender_ambiguous is None),
     ):
         if on and shown(name):
             head.append(word)
