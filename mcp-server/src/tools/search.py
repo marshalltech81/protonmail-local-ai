@@ -1196,7 +1196,8 @@ def register_search_tools(
         ``sender`` is applied inside the search, before the cap. With
         ``sender``, ``indeterminate`` counts the attachments left out
         because ``sender`` could not decide their carrying message (its
-        sender ambiguous or not yet checked, or, for a name or domain
+        sender ambiguous or not yet checked, its From address list
+        incomplete or not yet checked, or, for a name or domain
         fragment, its display names not all indexed; not limited by
         ``limit``); report it when it is not 0, and read null as
         unavailable, never as 0.
@@ -1216,6 +1217,7 @@ def register_search_tools(
                     "Jane") as a case-insensitive substring of the
                     address or display name. Attachments on messages
                     it cannot decide (sender ambiguous or not yet
+                    checked; From address list incomplete or not yet
                     checked; for a fragment, display names not all
                     indexed) are left out and counted as
                     ``indeterminate``.
@@ -1322,7 +1324,12 @@ def register_search_tools(
             # query_messages names them: a name or domain fragment that
             # matches nothing is unknown while display names are not all
             # indexed (#1140); a full address never is.
-            causes = "sender ambiguous or not yet checked"
+            # A From list a parse cap cut, or one not assessed yet,
+            # cannot rule a sender out either (#1086).
+            causes = (
+                "sender ambiguous or not yet checked; address list incomplete "
+                "(an over-long or unparseable address), or not yet checked"
+            )
             if address_match_mode(given_sender) == "substring":
                 causes += "; display names not all indexed"
             if found.indeterminate is None:

@@ -457,7 +457,7 @@ class TestLeafRegistry:
         assert kind.param in _SAMPLES, f"{name}: no sample for parameter shape {kind.param!r}"
         params: list = []
         sql = kind.compile(_SAMPLES[kind.param], params)
-        assert sql.startswith(("m.", "instr(mcp_casefold(m.", "NULLIF(m.", "CASE WHEN m.", "(m."))
+        assert sql.startswith(("m.", "NULLIF(m.", "CASE WHEN ", "(CASE WHEN m."))
         assert sql.count("?") == len(params)
         # The fragment runs as written against the schema.
         with closing(mixed_db._connect()) as conn:
@@ -514,27 +514,35 @@ class TestCompilerAndDigest:
                 flagged=True,
             )
         )
+        # The old clause's match for each leaf, decided false only under
+        # its completeness flag (#1086).
+        body_word = (
+            "m.claimant_id IN (SELECT c.claimant_id FROM message_chunks_fts f "
+            "JOIN message_chunks c ON c.fts_rowid = f.rowid "
+            "WHERE message_chunks_fts MATCH ? AND c.attachment_id IS NULL)"
+        )
         assert sql == " AND ".join(
             [
                 "CASE WHEN m.sender_ambiguous = 0 THEN "
-                "m.claimant_id IN (SELECT claimant_id FROM message_participants "
-                "WHERE address = ? AND role IN (?)) ELSE NULL END",
-                "instr(mcp_casefold(m.subject), ?) > 0",
-                "m.claimant_id IN (SELECT c.claimant_id FROM message_chunks_fts f "
-                "JOIN message_chunks c ON c.fts_rowid = f.rowid "
-                "WHERE message_chunks_fts MATCH ? AND c.attachment_id IS NULL)",
-                "m.claimant_id IN (SELECT c.claimant_id FROM message_chunks_fts f "
-                "JOIN message_chunks c ON c.fts_rowid = f.rowid "
-                "WHERE message_chunks_fts MATCH ? AND c.attachment_id IS NULL)",
+                "CASE WHEN m.claimant_id IN (SELECT claimant_id FROM message_participants "
+                "WHERE address = ? AND role IN (?)) THEN 1 "
+                "WHEN m.from_addresses_complete = 1 THEN 0 ELSE NULL END ELSE NULL END",
+                "CASE WHEN instr(mcp_casefold(m.subject), ?) > 0 THEN 1 "
+                "WHEN m.subject_complete = 1 THEN 0 ELSE NULL END",
+                f"CASE WHEN ({body_word} AND {body_word}) THEN 1 "
+                "WHEN m.body_complete = 1 THEN 0 ELSE NULL END",
                 "m.folder NOT IN (?)",
                 "m.effective_at >= ?",
-                "m.has_attachments = ?",
+                "CASE WHEN m.has_attachments = 1 OR m.attachments_manifest_complete = 1 "
+                "THEN m.has_attachments = ? ELSE NULL END",
                 "m.flagged = ?",
                 "CASE WHEN m.folder IN (?) THEN 0 "
-                "WHEN m.sender_ambiguous = 0 THEN m.claimant_id IN (SELECT p.claimant_id "
+                "WHEN m.sender_ambiguous IS NOT 0 THEN NULL "
+                "WHEN m.claimant_id IN (SELECT p.claimant_id "
                 "FROM entities e "
                 "JOIN message_participants p ON p.address = e.canonical_key AND p.role = 'from' "
-                "WHERE e.kind = 'person' AND e.authority_class = ?) ELSE NULL END",
+                "WHERE e.kind = 'person' AND e.authority_class = ?) THEN 1 "
+                "WHEN m.from_addresses_complete = 1 THEN 0 ELSE NULL END",
             ]
         )
         assert params == [
@@ -949,6 +957,10 @@ class TestClockSizeAndRepliedLeaves:
             "recipient",
             "participant",
             "authority_class",
+            # #1086: content a parse cap can cut.
+            "subject",
+            "text",
+            "has_attachments",
         }
         for name, kind in LEAVES.items():
             expected = (

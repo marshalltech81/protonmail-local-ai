@@ -276,31 +276,61 @@ def _projected(result: CallToolResult, fields: frozenset[str] | None) -> CallToo
 
 
 # Why a query_messages filter can leave a message undecided, by the
-# filters that can: fixed text for the prose ``indeterminate`` line.
-# The names cause applies to a substring address filter only (a name or
-# fragment, not a full address): one that matches nothing cannot rule
-# out a message whose stored display names are incomplete or not yet
-# known (#1140), so ``_indeterminate_causes`` keeps it only for those.
-_NAMES_CAUSE = "display names not all indexed (reparse pending, or over the name budget)"
-_INDETERMINATE_CAUSES: tuple[tuple[frozenset[str], str], ...] = (
+# filters that can: a fixed key for the timing line and fixed text for
+# the prose ``indeterminate`` line. The names cause applies to a
+# substring address filter only (a name or fragment, not a full
+# address): one that matches nothing cannot rule out a message whose
+# stored display names are incomplete or not yet known (#1140), so
+# ``_indeterminate_causes`` keeps it only for those. The completeness
+# causes (#1086) are a stored subject, address list, body or attachment
+# list a parse cap cut, or one not assessed yet (mail awaiting the
+# reparse after an upgrade, or a body whose chunks are not committed).
+_NAMES_CAUSE = "display_names"
+_INDETERMINATE_CAUSES: tuple[tuple[str, frozenset[str], str], ...] = (
     (
+        "sender_ambiguous",
         frozenset({"sender", "participant", "authority_class"}),
         "sender ambiguous or not yet checked",
     ),
-    (frozenset({"sender", "recipient", "participant"}), _NAMES_CAUSE),
-    (frozenset({"size_min", "size_max"}), "no stored size"),
+    (
+        "address_list",
+        frozenset({"sender", "recipient", "participant", "authority_class"}),
+        "address list incomplete (an over-long or unparseable address), or not yet checked",
+    ),
+    (
+        _NAMES_CAUSE,
+        frozenset({"sender", "recipient", "participant"}),
+        "display names not all indexed (reparse pending, or over the name budget)",
+    ),
+    ("subject", frozenset({"subject"}), "subject cut to the stored length, or not yet checked"),
+    (
+        "body",
+        frozenset({"text"}),
+        "body not fully indexed (a parse cap, indexing not finished, or reparse pending)",
+    ),
+    (
+        "attachment_list",
+        frozenset({"has_attachments"}),
+        "attachment list incomplete (a parse cap), or not yet checked",
+    ),
+    ("size", frozenset({"size_min", "size_max"}), "no stored size"),
 )
+
+
+def _indeterminate_cause_entries(uses: list[FilterUse]) -> list[tuple[str, str]]:
+    """The ``(key, text)`` causes the given filters can have, in order."""
+    given = {u.filter for u in uses}
+    substring = {u.filter for u in uses if u.match == "substring"}
+    return [
+        (key, cause)
+        for key, names, cause in _INDETERMINATE_CAUSES
+        if (substring if key == _NAMES_CAUSE else given).intersection(names)
+    ]
 
 
 def _indeterminate_causes(uses: list[FilterUse]) -> list[str]:
     """The fixed-text causes the given filters can have, in order."""
-    given = {u.filter for u in uses}
-    substring = {u.filter for u in uses if u.match == "substring"}
-    return [
-        cause
-        for names, cause in _INDETERMINATE_CAUSES
-        if (substring if cause == _NAMES_CAUSE else given).intersection(names)
-    ]
+    return [cause for _, cause in _indeterminate_cause_entries(uses)]
 
 
 def _filter_uses(args: dict) -> list[FilterUse]:
@@ -930,9 +960,12 @@ def register_retrieval_tools(server, db):
         participant filter, or an authority_class filter on a message
         outside Spam whose sender is ambiguous or not yet checked; a name
         or fragment address filter that matches nothing on a message
-        whose display names are not all indexed; mail indexed before an
-        upgrade is both until its reparse runs); they are in neither
-        ``total_matches`` nor
+        whose display names are not all indexed; a subject, text,
+        has_attachments or address filter that finds nothing in a
+        message whose stored subject, body, attachment list or
+        addresses were cut by a parse limit or are not checked yet; mail
+        indexed before an upgrade is all of these until its reparse
+        runs); they are in neither ``total_matches`` nor
         the pages, so report ``indeterminate`` with any count when it is
         not 0.
 
@@ -1011,16 +1044,26 @@ def register_retrieval_tools(server, db):
                     as is one a name or fragment does not match while
                     its display names are not all indexed.
             recipient: To or Cc, matched like ``sender`` (without the
-                       ``sender_ambiguous`` rule).
+                       ``sender_ambiguous`` rule). A message whose
+                       stored address list for a role is incomplete or
+                       not yet checked is indeterminate, not a miss,
+                       when the value is not found (``sender`` and
+                       ``participant`` likewise).
             participant: Any role (From, To, or Cc), matched like
                          ``sender``. A To or Cc match counts whatever
                          ``sender_ambiguous`` is; otherwise such a
                          message is indeterminate, as for ``sender``.
             subject: Case-insensitive substring of the message subject.
+                     A message whose stored subject was cut, or is not
+                     checked yet, and does not contain it is
+                     indeterminate.
             text: Words that must ALL appear in the message body (word
                   match with stemming). Searches the message's own
                   text only — not attachments and not quoted earlier
                   replies. For attachment content use search_attachments.
+                  A message whose indexed body is incomplete (a parse
+                  limit, indexing not finished, or not checked yet)
+                  and lacks a word is indeterminate.
             folder: Exact folder name (see list_folders). Without it,
                     messages filed in Trash are left out; pass "Trash"
                     to list them.
@@ -1033,15 +1076,20 @@ def register_retrieval_tools(server, db):
                      ("2026-01-01T00:00:00-05:00"). The response's
                      ``date_bounds`` echoes the UTC instants applied.
             has_attachments: True for messages with attachments, False
-                             for messages without.
+                             for messages without. A message with no
+                             stored attachment whose attachment list is
+                             incomplete or not checked yet is
+                             indeterminate either way.
             authority_class: Messages whose sender the operator's rules
                              file classes as this: "counsel",
                              "management", "vendor", "government",
                              "personal", "other", or "unclassified"
                              (no rule matched). Spam-folder messages
                              never match; any other message whose
-                             sender is ambiguous or not yet checked is
-                             counted as indeterminate.
+                             sender is ambiguous or not yet checked, or
+                             whose From address list is incomplete or
+                             not yet checked with no classified address
+                             stored, is counted as indeterminate.
             seen: True for messages read in Proton, False for unread.
             flagged: True for flagged (starred) messages, False for the rest.
             replied: True for messages answered in Proton, False for the rest.
@@ -1064,7 +1112,9 @@ def register_retrieval_tools(server, db):
             nor reject (no stored size under a size bound; a sender whose
             attribution is ambiguous or not yet checked under a sender
             or participant filter, or an authority_class filter on a
-            message outside Spam); they are in neither
+            message outside Spam; stored content a parse limit cut, or
+            not checked yet, under a content or address filter); they
+            are in neither
             total_matches nor the pages, so a count is complete only
             when it is 0.
         """
@@ -1144,6 +1194,11 @@ def register_retrieval_tools(server, db):
         timings.count("indeterminate", page.indeterminate)
         timings.count("returned", len(page.messages))
         uses = _filter_uses(args)
+        if page.indeterminate:
+            # Why, by fixed key, so the line alone tells a reader which
+            # stored state left messages undecided (#1086).
+            for key, _ in _indeterminate_cause_entries(uses):
+                timings.count(f"indeterminate_cause_{key}", 1)
         output = QueryMessagesOutput(
             filters=uses,
             address_matches=[

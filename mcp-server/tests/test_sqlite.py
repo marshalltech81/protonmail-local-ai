@@ -6038,16 +6038,24 @@ class TestNameCompleteness:
             (
                 {"recipient": "zed"},
                 3,
-                "display names not all indexed (reparse pending, or over the name budget);",
+                "address list incomplete (an over-long or unparseable address), or not yet "
+                "checked; display names not all indexed (reparse pending, or over the name "
+                "budget);",
             ),
             (
                 {"sender": "zed", "size_min": 1},
                 4,
-                "sender ambiguous or not yet checked; display names not all indexed "
+                "sender ambiguous or not yet checked; address list incomplete (an over-long "
+                "or unparseable address), or not yet checked; display names not all indexed "
                 "(reparse pending, or over the name budget); no stored size;",
             ),
             # An exact sender cannot be undecided by its names.
-            ({"sender": "ann@one.test"}, 2, "sender ambiguous or not yet checked;"),
+            (
+                {"sender": "ann@one.test"},
+                2,
+                "sender ambiguous or not yet checked; address list incomplete (an over-long "
+                "or unparseable address), or not yet checked;",
+            ),
         ],
     )
     def test_prose_names_the_names_cause_for_substring_filters_only(

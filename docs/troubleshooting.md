@@ -839,7 +839,13 @@ kind of reindex that needs depends on whether search data changes too:
   added `message_participant_names`, #1140, every `sender`,
   `recipient` or `participant` filter given as a name or fragment
   reports each message it does not match as `indeterminate` until the
-  reparse drains, and `find_contact` sees only first names). New
+  reparse drains, and `find_contact` sees only first names; after the
+  release that added the per-message completeness flags, #1086, every
+  `subject`, `text`, `has_attachments`, `sender`, `recipient`,
+  `participant` and `authority_class` filter reports each message it
+  does not match as `indeterminate`, not as a miss, until the reparse
+  reaches it; a dead-lettered message stays `indeterminate` until
+  `make requeue-dead`). New
   mail, recovery and re-extraction jobs go ahead of the reparse, which
   still advances at least one message per batch, so the queue
   heartbeat's `oldest_due_age` grows while it runs without meaning
@@ -1748,10 +1754,22 @@ extractor reads (`.eml`) is not logged.
 | `address_chars` | Every recipient of one past 768,000 characters of `From`, `To` and `Cc` in all |
 | `address_elements` | Address-list entries past the message's 20,000th, unparsed |
 | `address_count` | Addresses past the message's 10,000th kept (one participant row each), unparsed |
+| `address_unparsed` | One address-list entry that yields no address a participant row can store: none at all (a comment, `<>`), one without `@`, or one that does not parse back to itself. An address without `@` is still shown in the thread's lists (#1086) |
 | `participant_names` | A display name past the first for its address and role (one address written under several names), past the message's 1,000 such names or 64,000 UTF-8 bytes of them: the address and its first name are kept, and the message's `participant_names_complete` is 0, so a name or fragment filter that does not match it reports it as indeterminate rather than a miss; `find_contact` lists only the stored names (#1140) |
 
 The caps bound what crafted mail can cost the single indexing worker,
 so they are not configurable. Ordinary mail does not reach them.
+
+Each message records which caps fired (`messages.caps_json`, the names
+and counts only) and whether the content its filters read is complete
+(#1086): the subject (`subject_length`), each address role (the
+`address_*` caps that fired while that header was read, a repeated
+`From`, or `address_fields` for all three), the attachment list
+(`attached_*`, `transport_decode`, `decoded_bytes`,
+`container_serialize`, `mime_parts`) and the body (`body_parts`,
+`mime_parts`). A filter that finds nothing in content a cap cut reports
+the message as `indeterminate` in `query_messages`, not as a miss
+(`docs/mcp-tools.md`, "Filter predicates").
 
 ### Repeated `From`, `To` or `Cc` headers
 

@@ -187,7 +187,8 @@ class TestTool:
         assert out.structured_content["indeterminate"] == 3
         # A name filter can also be undecided by its names (#1140).
         assert (
-            "sender ambiguous or not yet checked; display names not all indexed "
+            "sender ambiguous or not yet checked; address list incomplete (an over-long or "
+            "unparseable address), or not yet checked; display names not all indexed "
             "(reparse pending, or over the name budget); no stored size;"
         ) in out.content[0].text
 

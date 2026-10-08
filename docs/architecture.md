@@ -789,18 +789,51 @@ that name stage kept every distinct name: `1` when it finished within
 the budget, `0` when the budget dropped one, `NULL` for mail not yet
 reparsed since the v4 upgrade (and for a dead-lettered message until
 `make requeue-dead`). It is written in the same transaction as the
-participant and name rows. It covers the name stage only: it does not
-certify that the participant rows or addresses are complete (an
-over-long or unparseable address header, the address budget, #1144);
-[#1086](https://github.com/marshalltech81/protonmail-local-ai/issues/1086)'s
-per-role completeness term needs its own column or an explicit backfill
-design. A `sender`, `recipient` or `participant` filter given as a name
+participant and name rows. It covers the name stage only: whether
+the participant rows hold every address is the per-role completeness
+below. A `sender`, `recipient` or `participant` filter given as a name
 or fragment is decided by a match on a stored address or name; a
 message it does not match counts as a miss only when the flag is `1`,
 and is otherwise unknown (`indeterminate` in `query_messages`). A full
 address is matched exactly and never reads the flag. `find_contact` and
 its aggregators list and match only the stored names, so until the
 reparse reaches a message they see its first names only.
+
+**Completeness**
+([#1086](https://github.com/marshalltech81/protonmail-local-ai/issues/1086)).
+A filter that finds nothing in a message's stored content can only say
+"no" when that content is complete, so `messages` records it per
+message, each column `1` complete within the documented indexing
+semantics, `0` a known loss, `NULL` not assessed, with no default:
+
+| Column | `0` when | Written |
+|---|---|---|
+| `subject_complete` | the subject was cut (`subject_length`) | phase 1, with the row |
+| `from_addresses_complete`, `to_addresses_complete`, `cc_addresses_complete` | an `address_*` parser cap fired while that role's headers were read, or an entry yielded no storable address (`address_unparsed`); all three when the header scan stopped (`address_fields`); From also for a repeated `From`, whose later headers are not parsed | phase 1, with the row |
+| `attachments_manifest_complete` | a cap stopped the walk or left an attached email unwalked (`attached_depth`, `attached_fields`, `transport_decode`, `decoded_bytes`, `container_serialize`, `mime_parts`) | phase 1, with the row |
+| `body_complete` | text parts were left out of the body (`body_parts`, `mime_parts`) | phase 2c, in the transaction that commits the body chunks |
+
+`_write_message_record` writes the phase-1 columns from the parse and
+resets `body_complete` to `NULL` on every write, and
+`Database.set_body_complete` sets it in phase 2c beside
+`replace_message_chunks`, so it describes the committed chunks: `NULL`
+while a message is between the phases, after a phase-2 failure (the
+transaction rolls it back with the chunks) and for a message
+dead-lettered there. `caps_json` holds the parse's nonzero
+`PARSE_CAPS` counts as a JSON object of the fixed names to integers;
+the writer refuses any other name or value, so no content can reach
+it. The parser adds no new parsing for this: it attributes the
+existing cap counts to the role being read and counts the entries
+`_parse_addrs` already dropped as `address_unparsed`. The existing
+flags (`sender_ambiguous`, `participant_names_complete`, `size_bytes`
+and the clocks) record other facts and are unchanged. Attachment text
+completeness is not recorded here
+([#1242](https://github.com/marshalltech81/protonmail-local-ai/issues/1242)).
+
+The MCP leaves read these flags (`docs/mcp-tools.md`, "Filter
+predicates"): a stored match decides a leaf; finding nothing decides it
+false only under `1`, and `query_messages` counts the message as
+`indeterminate` otherwise.
 Address headers are unfolded (RFC 5322 §2.2.3: a line break followed by
 a space or tab is removed, the whitespace kept) before they are parsed,
 and the Content-Disposition / Content-Type headers an attachment
@@ -1797,6 +1830,8 @@ already indexed without embedding calls (see *Reparse in place*).
 | Version | Migration | Change |
 |---|---|---|
 | 0 | (initial schema) | First deployed schema (2026-10-03). |
+| 5 | `0005_message_completeness.sql` | Per-message completeness on `messages` (#1086): `subject_complete`, `from_addresses_complete`, `to_addresses_complete`, `cc_addresses_complete`, `attachments_manifest_complete`, `body_complete` (0 / 1, NULL until assessed, no default) and `caps_json`. Every existing row starts NULL and the migration queues a reparse, which fills them without embedding calls; a dead-lettered job keeps its message NULL until `make requeue-dead`. Until the reparse reaches a message, a subject, text, attachment, address or authority filter that does not match it counts it as indeterminate. |
+| 4 | `0004_participant_names.sql` | `message_participant_names` and `messages.participant_names_complete` (#1140), seeded with each participant's first name; the migration queues a reparse (see *Reparse in place*). |
 | 3 | `0003_extraction_ocr_pages_skipped.sql` | `attachment_extractions.ocr_pages_skipped` (#891): the scanned pages the PDF OCR cap left unread, NULL when unknown, no default. Every existing row starts NULL and counts as nothing; the column is the extractor's, not the parser's, so no reparse is queued, nothing is re-extracted and no `EXTRACTOR_VERSIONS` entry is bumped. |
 | 2 | `0002_messages_sender_ambiguous.sql` | `messages.sender_ambiguous` (#1144): 0 / 1, NULL until assessed, no default. Every existing row starts NULL and the migration queues a reparse of every indexed file, which fills it without embedding calls; a dead-lettered job keeps its message NULL until `make requeue-dead`. Until the reparse reaches a message it matches no `authority_class` filter. |
 | 1 | `0001_extraction_cache_per_module.sql` | `attachment_extractions` keyed by (content hash, extractor module); `attachments.extractor_module` (#928). Each v0 row keeps its result and stamp and is keyed by its stamp's module (`docx@5` -> `docx`, `pdf-ocr@4` -> `pdf`), or '' when it has no stamp (`unsupported`, `too_large`); each occurrence is pointed at its payload's row, as before. No `EXTRACTOR_VERSIONS` bump comes with it, so nothing is re-extracted for the re-keying alone. An occurrence whose label selects another module than its row's moves to its own row the next time its message is reprocessed. |
@@ -2305,6 +2340,16 @@ flag. Until the reparse reaches a message (or, for a dead-lettered one,
 until `make requeue-dead`), only its first names are stored and a name
 or fragment address filter that does not match it reports it as
 indeterminate rather than a miss.
+
+The v5 migration (`0005_message_completeness.sql`, #1086) is another:
+it adds the per-message completeness columns (see *Per-Message
+Records*) as `NULL` on every row and queues the reparse. Phase 1 of
+each reparse job writes the subject, address and attachment-list flags
+and `caps_json`; phase 2c, which on a reparse keeps every stored chunk
+and embeds nothing, writes `body_complete`. Until the reparse reaches
+a message (or, for a dead-lettered one, until `make requeue-dead`),
+every subject, text, attachment, address or `authority_class` filter
+that does not match it reports it as indeterminate.
 
 The migration that adds such data triggers the reparse itself: after
 its DDL it ends with `REPARSE_ENQUEUE_SQL` (`indexer/src/queue.py`),

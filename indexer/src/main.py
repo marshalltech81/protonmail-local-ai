@@ -1885,6 +1885,10 @@ def _phase2c_commit_vectors(
                 chunks=state.body_chunks,
                 embeddings_by_chunk_id=body_embs,
             )
+            # Whether the body chunks just written hold the whole body
+            # (#1086). Phase 1 reset it to NULL, so it is known only
+            # once these chunks commit, and rolls back with them.
+            db.set_body_complete(msg.claimant_id, msg.body_complete)
             for plan in state.attach_plans:
                 apply_attachment_writes(
                     plan=plan,

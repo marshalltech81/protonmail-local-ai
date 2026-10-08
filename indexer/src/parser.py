@@ -73,6 +73,10 @@ log = logging.getLogger("indexer.parser")
 # * ``address_elements`` / ``address_count``: address-list elements past
 #   ``MAX_ADDRESS_ELEMENTS``, or past ``MAX_MESSAGE_ADDRESSES`` kept
 #   addresses, are dropped unparsed (#1144);
+# * ``address_unparsed``: an address-list element that yields no address
+#   a participant row can store (none at all, one without ``@``, one that
+#   does not parse back to itself, or a parse that raised) is dropped
+#   (#1086);
 # * ``participant_names``: a display name past the first for its (role,
 #   address), past the ``MAX_EXTRA_PARTICIPANT_*`` budget, is not stored
 #   (#1140); the address and its first name are kept;
@@ -105,6 +109,7 @@ PARSE_CAPS: tuple[str, ...] = (
     "address_chars",
     "address_elements",
     "address_count",
+    "address_unparsed",
     "participant_names",
     "subject_length",
     "in_reply_to_length",
@@ -113,6 +118,32 @@ PARSE_CAPS: tuple[str, ...] = (
     "from_repeated",
 )
 PARSE_REPEATS: tuple[str, ...] = ("address_repeated", "from_repeated")
+
+# The ``PARSE_CAPS`` names whose content a filter reads (#1086): a
+# message they fired on is stored with that content incomplete, so its
+# completeness flag is cleared (``messages.*_complete``). The address
+# names are attributed to the role (From, To, Cc) being read when they
+# fire; ``address_fields`` stops the scan before any role is read and
+# clears all three.
+BODY_LOSS_CAPS: tuple[str, ...] = ("body_parts", "mime_parts")
+ATTACHMENT_LOSS_CAPS: tuple[str, ...] = (
+    "attached_depth",
+    "attached_fields",
+    "transport_decode",
+    "decoded_bytes",
+    "container_serialize",
+    "mime_parts",
+)
+ADDRESS_LOSS_CAPS: tuple[str, ...] = (
+    "address_header",
+    "address_element",
+    "address_length",
+    "address_occurrences",
+    "address_chars",
+    "address_elements",
+    "address_count",
+    "address_unparsed",
+)
 
 
 class OversizedMessageError(Exception):
@@ -347,6 +378,24 @@ class Message:
     # ``messages.participant_names_complete``. Read only with
     # ``participant_names``.
     participant_names_complete: bool = True
+    # Per-message completeness (#1086), each stored as a
+    # ``messages.*_complete`` column: False when a parse cap or a
+    # rejected element lost part of that content (``BODY_LOSS_CAPS``,
+    # ``ATTACHMENT_LOSS_CAPS``, ``ADDRESS_LOSS_CAPS`` by role, a
+    # repeated From, ``subject_length``). A filter that finds nothing in
+    # the stored content can answer "no" only when its flag is True.
+    # ``body_complete`` is stored with the body chunks (phase 2c), the
+    # others with the message row.
+    subject_complete: bool = True
+    from_addresses_complete: bool = True
+    to_addresses_complete: bool = True
+    cc_addresses_complete: bool = True
+    attachments_manifest_complete: bool = True
+    body_complete: bool = True
+    # The parse's nonzero ``PARSE_CAPS`` counts by name, in
+    # ``PARSE_CAPS`` order: fixed names and integers only, stored as
+    # ``messages.caps_json``.
+    parse_caps: dict[str, int] = field(default_factory=dict)
 
     @property
     def effective_date(self) -> datetime:
@@ -627,6 +676,13 @@ def parse_email_bytes(raw: bytes, source: SourceMetadata) -> Message | None:
         sender_ambiguous=addresses.sender_ambiguous,
         participant_names=names,
         participant_names_complete=not caps["participant_names"],
+        subject_complete=not caps["subject_length"],
+        from_addresses_complete=addresses.from_complete,
+        to_addresses_complete=addresses.to_complete,
+        cc_addresses_complete=addresses.cc_complete,
+        attachments_manifest_complete=not any(caps[name] for name in ATTACHMENT_LOSS_CAPS),
+        body_complete=not any(caps[name] for name in BODY_LOSS_CAPS),
+        parse_caps={name: caps[name] for name in PARSE_CAPS if caps[name]},
         date=date,
         date_is_fallback=parsed_date is None,
         occurred_at=occurred_at,
@@ -1664,6 +1720,15 @@ class _AddressHeaders:
     to_addrs: list[str]
     cc_addrs: list[str]
     sender_ambiguous: bool
+    # Whether every address of the role was kept (#1086).
+    from_complete: bool
+    to_complete: bool
+    cc_complete: bool
+
+
+def _address_losses(caps: Counter[str]) -> int:
+    """The addresses lost so far, summed over ``ADDRESS_LOSS_CAPS``."""
+    return sum(caps[name] for name in ADDRESS_LOSS_CAPS)
 
 
 def _read_address_headers(msg: email.message.Message, caps: Counter[str]) -> _AddressHeaders:
@@ -1678,7 +1743,9 @@ def _read_address_headers(msg: email.message.Message, caps: Counter[str]) -> _Ad
     order cannot spend its budget; later From headers are counted, and
     they, or a scan cut short, make the sender ambiguous. ``from_addr``
     is the first author, else the first From's decoded text when it
-    holds no parseable address.
+    holds no parseable address. A role is complete when no
+    ``ADDRESS_LOSS_CAPS`` count grew while it was read, the scan was not
+    cut short, and (for From) no later From went unparsed (#1086).
     """
     budget = _AddressBudget()
     found: dict[str, list[str]] = {"from": [], "to": [], "cc": []}
@@ -1695,6 +1762,7 @@ def _read_address_headers(msg: email.message.Message, caps: Counter[str]) -> _Ad
 
     from_addrs: list[str] = []
     from_text = ""
+    lost = _address_losses(caps)
     if found["from"]:
         value = _address_value(msg, "From", found["from"][0], budget, caps)
         if value is not None:
@@ -1703,10 +1771,13 @@ def _read_address_headers(msg: email.message.Message, caps: Counter[str]) -> _Ad
                 from_text = _decode_text_header(value)
     if len(found["from"]) > 1:
         caps["from_repeated"] += len(found["from"]) - 1
+    from_complete = complete and len(found["from"]) <= 1 and _address_losses(caps) == lost
 
     recipients: dict[str, list[str]] = {}
+    recipients_complete: dict[str, bool] = {}
     for role, header in (("to", "To"), ("cc", "Cc")):
         addrs: list[str] = []
+        lost = _address_losses(caps)
         for index, raw in enumerate(found[role]):
             value = _address_value(msg, header, raw, budget, caps)
             if value is None:
@@ -1715,6 +1786,7 @@ def _read_address_headers(msg: email.message.Message, caps: Counter[str]) -> _Ad
                 caps["address_repeated"] += 1
             addrs.extend(_parse_addrs(value, caps, budget))
         recipients[role] = addrs
+        recipients_complete[role] = complete and _address_losses(caps) == lost
 
     return _AddressHeaders(
         from_addr=from_addrs[0] if from_addrs else from_text,
@@ -1722,6 +1794,9 @@ def _read_address_headers(msg: email.message.Message, caps: Counter[str]) -> _Ad
         to_addrs=recipients["to"],
         cc_addrs=recipients["cc"],
         sender_ambiguous=len(found["from"]) > 1 or not complete,
+        from_complete=from_complete,
+        to_complete=recipients_complete["to"],
+        cc_complete=recipients_complete["cc"],
     )
 
 
@@ -1857,7 +1932,9 @@ def _parse_addrs(
     fixed, so name content can never become address syntax. Every step
     fails safe: an element that cannot be parsed costs only that
     recipient, never the message. ``caps`` (when given) counts the
-    recipients a work cap dropped, by ``PARSE_CAPS`` name. ``budget``
+    recipients a work cap dropped, by ``PARSE_CAPS`` name, and each
+    element that yields no storable address as ``address_unparsed``
+    (#1086). ``budget``
     (when given) is the message's ``_AddressBudget``: elements past its
     element or address limit are dropped unparsed. A message's raw
     length limits are checked before decoding, by
@@ -1897,6 +1974,7 @@ def _parse_addrs(
             budget.parse_calls += 1
             name, addr = email.utils.parseaddr(element)
             if not addr.strip():
+                caps["address_unparsed"] += 1
                 continue
             addr = restore(addr)
             # Every emitted string is re-parsed downstream — the identity
@@ -1911,13 +1989,20 @@ def _parse_addrs(
                 continue
             budget.parse_calls += 1
             if email.utils.parseaddr(addr)[1] != addr:
+                caps["address_unparsed"] += 1
                 continue
             name = _decode_display_name(restore(name)) if name else ""
             formatted = _format_address(name, addr)
         except Exception:
             # e.g. RecursionError from parseaddr on deeply nested comments,
             # whether in the element or re-created by restoring a token.
+            caps["address_unparsed"] += 1
             continue
+        if "@" not in addr:
+            # Kept (the From fallback and thread lists show it), but the
+            # participant writer stores only ``@``-bearing addresses
+            # (``canonical_addr``), so the role's rows are incomplete.
+            caps["address_unparsed"] += 1
         budget.addresses += 1
         addresses.append(formatted)
     return addresses
