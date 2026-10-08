@@ -271,6 +271,23 @@ def _decoded_payload(part: Any) -> bytes:
     return payload if isinstance(payload, bytes) else b""
 
 
+# The defects a lenient base64 decode records when it loses bytes: an
+# invalid character skipped, or a truncated quantum (the stdlib then
+# returns the undecoded text). A padding defect alone loses nothing.
+_DECODE_LOSS_DEFECTS = (
+    email.errors.InvalidBase64CharactersDefect,
+    email.errors.InvalidBase64LengthDefect,
+)
+
+
+def _decode_lost_bytes(part: email.message.Message) -> bool:
+    """Whether decoding this leaf part's payload (``_decoded_payload``,
+    which fills ``part.defects``) lost bytes (#1242, review round 2 on
+    #1286). Quoted-printable and uuencode failures record no defect, so
+    they are not detected."""
+    return any(isinstance(d, _DECODE_LOSS_DEFECTS) for d in part.defects)
+
+
 @dataclass
 class Attachment:
     """One MIME attachment from a message.
@@ -290,8 +307,9 @@ class Attachment:
     ``payload_complete`` is False for a container attachment whose body
     was not serialized (``_attachment_payload`` kept the empty payload:
     a parse cap, a failure, or a container nested inside another
-    attachment), so the bytes an extractor reads are not the
-    attachment's (#1242). Any other part's payload is its decoded bytes.
+    attachment), and for a leaf whose base64 decode lost bytes
+    (``_decode_lost_bytes``), so the bytes an extractor reads are not
+    the attachment's (#1242).
     """
 
     filename: str
@@ -1284,8 +1302,11 @@ def _extract_body_and_attachments(
                     payload=payload,
                     content_hash=hashlib.sha256(payload).hexdigest(),
                     # A container's payload is its serialized body; the
-                    # empty bytes mean it was not serialized (#1242).
-                    payload_complete=bool(payload) or not part.is_multipart(),
+                    # empty bytes mean it was not serialized. A leaf's is
+                    # its decoded bytes, read after the decode (#1242).
+                    payload_complete=(
+                        bool(payload) if part.is_multipart() else not _decode_lost_bytes(part)
+                    ),
                 )
             )
         inside = in_attachment or is_attachment

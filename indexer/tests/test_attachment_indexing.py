@@ -3020,6 +3020,27 @@ class TestOccurrenceTextComplete:
         self._apply(db, plan)
         assert self._row(db, plan) == (0, "text@3")
 
+    def test_payload_loss_stays_with_its_occurrence_when_bytes_share_a_row(
+        self, tmp_path, monkeypatch
+    ):
+        """Review round 2 on #1286: a defective decode can yield the same
+        bytes as an intact copy, so both use one cached row; the loss is
+        the occurrence's, never the row's."""
+        db = _setup_db_for_attachment(tmp_path)
+        intact = _attachment(b"ABCDEF")
+        lossy = _attachment(b"ABCDEF")
+        lossy.payload_complete = False
+        self._fresh(monkeypatch, complete=True)
+        batch: dict[tuple[str, str], ExtractionResult] = {}
+        first = prepare_attachment_writes(db=db, batch_extractions=batch, **_kwargs(lossy))
+        second = prepare_attachment_writes(
+            db=db, batch_extractions=batch, **_kwargs(intact, occurrence_index=1)
+        )
+        assert (first.text_complete, second.text_complete) == (False, True)
+        self._apply(db, first)
+        cached = db.get_attachment_extraction(intact.content_hash, _module(intact))
+        assert cached["text_complete"] == 1
+
     def test_a_stale_stamp_served_while_ocr_is_off_is_not_assessed(self, tmp_path):
         """An older OCR row is served while OCR is off; the startup sweep
         clears such occurrences, so publishing one does not restore it."""

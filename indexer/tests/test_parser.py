@@ -5508,3 +5508,55 @@ def test_a_nested_container_left_unserialized_is_incomplete(tmp_path):
         (False, False),
     ]
     assert msg.parse_caps == {}
+
+
+@pytest.mark.parametrize(
+    "body, payload, complete",
+    [
+        # No base64 characters at all: nothing decodes.
+        (b"!!!!", b"", False),
+        # Invalid characters skipped: a partial decode.
+        (b"QUJD!!!!REVG", b"ABCDEF", False),
+        # A truncated quantum: the last bytes are lost.
+        (b"QUJDR", None, False),
+        # Missing padding only: lossless.
+        (b"QUJDREVGSA", b"ABCDEFH", True),
+        # A valid empty payload.
+        (b"", b"", True),
+    ],
+    ids=["no_base64", "invalid_chars", "bad_length", "padding_only", "valid_empty"],
+)
+def test_a_base64_decode_defect_marks_the_payload_incomplete(tmp_path, body, payload, complete):
+    """Review round 2 on #1286: the stdlib decodes malformed base64
+    leniently and records a defect on the part; a payload decoded with an
+    invalid-character or invalid-length defect is not the attachment's
+    bytes, so it is marked incomplete. A padding defect alone loses
+    nothing."""
+    path = tmp_path / "b64.eml"
+    path.write_bytes(
+        _with_attachment(
+            b"Content-Type: text/plain\r\nContent-Transfer-Encoding: base64\r\n",
+            body,
+            _TXT_FILENAME,
+        )
+    )
+    msg = parse_email(path)
+    assert msg is not None
+    [attachment] = msg.attachments
+    if payload is not None:
+        assert attachment.payload == payload
+    assert attachment.payload_complete is complete
+
+
+def test_a_defect_on_a_serialized_container_does_not_matter(tmp_path):
+    """Only a leaf's own decode defects count: a serialized container's
+    payload is its body, whatever defects its subparts carry."""
+    inner = (
+        b"From: a@example.test\r\n"
+        b"Content-Type: text/plain\r\nContent-Transfer-Encoding: base64\r\n\r\n!!!!\r\n"
+    )
+    path = tmp_path / "container.eml"
+    path.write_bytes(_with_attachment(b"Content-Type: message/rfc822\r\n", inner))
+    msg = parse_email(path)
+    assert msg is not None
+    assert [(a.payload != b"", a.payload_complete) for a in msg.attachments] == [(True, True)]

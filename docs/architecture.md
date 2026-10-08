@@ -884,7 +884,10 @@ writes the occurrence's chunks, so they roll back with them.
   `too_large` result, and for a container attachment whose body was not
   serialized (`Attachment.payload_complete`: `_attachment_payload` kept
   the empty payload after a parse cap, a failure, or for a container
-  nested inside another attachment).
+  nested inside another attachment), and for a part whose base64
+  decode lost bytes (an invalid-character or invalid-length defect;
+  quoted-printable and uuencode failures record no defect and are not
+  detected).
 - For a `success` or `empty` result, the result's own
   `text_complete`, which the dispatcher sets: `0` when the attempt lost
   text (any `extractor_caps` cap, the `max_extracted_chars` cut, the
