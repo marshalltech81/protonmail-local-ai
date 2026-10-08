@@ -482,6 +482,13 @@ is exactly what this forbids.
   that answers the question.
 - Committed tests and fixtures stay synthetic, as above; never derive
   them from real mail.
+- GitHub issues, comments, PR descriptions and review replies are
+  public: describe a case from real mail (including the owner's field
+  reports) by its technical shape only. No quoted or paraphrased mail,
+  topics, sender or recipient categories, or case narratives; counts
+  the tools already report are fine (owner, 2026-10-08). Fix a leak by
+  deleting and re-posting, since an edit keeps the old text in its
+  history.
 
 ### Bound the work per input
 
