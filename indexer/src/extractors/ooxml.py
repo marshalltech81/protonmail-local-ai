@@ -19,8 +19,9 @@ run in the child, under the limits each format passes
 (``CHILD_MAX_ADDRESS_SPACE_BYTES``, ``CHILD_MAX_CPU_SECONDS`` and
 ``CHILD_TIMEOUT_SECONDS`` in ``docx.py``, ``pptx.py`` and ``xlsx.py``,
 sized from plain measurements in the indexer image). Starting the
-child and importing its library costs about 0.2 s per extraction in
-the image, which keeps no compiled bytecode.
+child and importing its library costs about 0.08 s per extraction in
+the image, which ships compiled bytecode for the standard library, the
+dependencies and ``src`` (#1230; about 0.2 s without it).
 
 The child writes one header line, then the text (``ooxml_child``):
 

@@ -110,8 +110,9 @@ log = logging.getLogger("indexer.extractor.pptx")
 # past the CPU limit so a CPU-bound child meets that first. Plainly
 # measured in the indexer image, child peak RSS and time:
 #
-# * a one-slide deck: 48 MB and 0.2 s, nearly all of it starting the
-#   child and importing python-pptx;
+# * a one-slide deck: 48 MB and 0.08 s, nearly all of it starting the
+#   child and importing python-pptx (0.2 s before the image shipped
+#   compiled bytecode, #1230; the cases below were measured then);
 # * 1,000 slides with notes and 200 pictures (26 MB): 135 MB and 0.6 s;
 # * 40 slides with 40 photos (30 MB): 106 MB and 0.3 s;
 # * 150,000 empty text boxes on one slide (stopped at the shape

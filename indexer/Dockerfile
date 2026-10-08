@@ -18,10 +18,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
  && rm -rf /var/lib/apt/lists/*
 
+# Bytecode is compiled here, for the dependencies (--compile-bytecode)
+# and for src/ (compileall), so the read-only runtime imports .pyc files
+# instead of compiling every module from source in each process. That
+# matters for the extractor children, which start a fresh interpreter
+# per extraction (#1230). PYTHONDONTWRITEBYTECODE stays set in both
+# stages, so nothing else writes bytecode. src/ uses checked-hash pycs,
+# which stay valid whatever mtime the copy into the runtime gives them.
 WORKDIR /app
 COPY pyproject.toml uv.lock ./
-RUN uv sync --locked --no-dev --no-install-project
+RUN uv sync --locked --no-dev --no-install-project --compile-bytecode
 COPY src/ ./src/
+RUN python -m compileall -q --invalidation-mode checked-hash src
 
 # -----------------------------------------------------------------------------
 # Stage 2: Legacy .ppt reader (#957) — Apache POI on a trimmed Java runtime
@@ -128,7 +136,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && rm -rf /var/lib/apt/lists/* \
  # The service runs from the uv-built virtualenv, which has no pip, so
  # the base image's pip (and the packages it vendors) is removed (#1007).
- && python -m pip uninstall --yes --no-cache-dir pip
+ && python -m pip uninstall --yes --no-cache-dir pip \
+ # The base image ships bytecode for only part of the standard library
+ # (the xml, decimal and pydoc modules the extractor children import
+ # have none), so it is compiled here, as the builder compiles the
+ # virtualenv and src/ (#1230).
+ && python -m compileall -q /usr/local/lib/python3.14
 
 # UID 1002 — distinct from mbsync (UID 1001) so a parser/extractor
 # exploit triggered by a malicious .eml or attachment doesn't end up
