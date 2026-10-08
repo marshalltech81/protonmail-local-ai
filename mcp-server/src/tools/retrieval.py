@@ -72,9 +72,9 @@ _MAX_QUERY_LIMIT = 100
 # null), but the argument model passes the raw value through, so the
 # handler's own strict check (``normalize_size_bound``: no ``true`` or
 # ``"100"`` coerced to an int, nothing that would overflow the bind)
-# rejects it through the rate-limited per-field log; a check in the
-# argument model would be refused before the handler, outside that log
-# (Codex round 3).
+# rejects it through the rate-limited per-field log with its own error
+# text (Codex round 3). A check in the argument model is now logged the
+# same way (#1131), but answers with pydantic's text and no timing line.
 SizeBound = Annotated[
     Any,
     WithJsonSchema(

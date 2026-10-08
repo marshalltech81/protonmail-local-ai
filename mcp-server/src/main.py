@@ -30,6 +30,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from .lib.argument_validation import ArgumentValidationLog, DropArgumentModelWarning
 from .lib.build_identity import git_commit as _git_commit
 from .lib.embed import DEFAULT_EMBED_TIMEOUT_SECS, EmbedClient
 from .lib.embed_identity import run_startup_identity_check
@@ -217,6 +218,10 @@ class _DropToolErrorDetail(logging.Filter):
 
 
 logging.getLogger("fastmcp.server.server").addFilter(_DropToolErrorDetail())
+# Its per-call ``Invalid arguments for tool`` line for an argument-model
+# rejection is replaced by ``ArgumentValidationLog``'s rate-limited one
+# (#1131), which ``main`` adds to the server.
+logging.getLogger("fastmcp.server.server").addFilter(DropArgumentModelWarning())
 
 
 class _DropRawHostOriginWarning(logging.Filter):
@@ -904,6 +909,9 @@ def main():
     # Streamable HTTP app ``_run_server`` serves, behind the
     # ``_TRANSPORT_SECURITY`` Host/Origin allowlist.
     server = FastMCP("protonmail-local-ai", version=_git_commit())
+    # Arguments the tools' argument models refuse are logged through the
+    # per-field rate limiter, like the handlers' own rejections (#1131).
+    server.add_middleware(ArgumentValidationLog(server))
 
     # Plain HTTP health endpoint used by the container healthcheck. Sits
     # outside the MCP protocol so `docker healthcheck` and operator scripts

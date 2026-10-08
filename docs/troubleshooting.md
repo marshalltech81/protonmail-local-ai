@@ -1307,10 +1307,12 @@ tool=get_thread outcome=error total_ms=1.9 stages_ms={} counts={} config={}
   <tool>.<field>=<count> ...` line, logged when the next rejection
   arrives after the minute ends. An argument the tool's own argument
   model refuses (a wrong type, for example `limit="abc"`) never
-  reaches the handler or this log: FastMCP logs its own `Invalid
-  arguments for tool '<tool>': {'error_count': ..., 'error_types':
-  [...]}` WARNING per call (codes and counts only, never the value),
-  with no rate limit (#1131).
+  reaches the handler, so it has no timing line; it is logged the
+  same way by the `mcp.tools.arguments` logger, keyed by the tool and
+  parameter (`other` for an argument name the tool does not have), and
+  FastMCP's own per-call `Invalid arguments for tool` WARNING is
+  dropped for it (#1131). These two kinds are counted by separate
+  limiters, so one call is never counted twice.
 - `total_ms` is the whole call; `stages_ms` the timed stages
   (retrieval lanes, embedding, rerank, inference) that ran.
 - `counts` holds result counts: `returned`, `total_matches` and
