@@ -226,6 +226,10 @@ class IndexingQueue:
         self._lock = threading.Lock()
         # ``defer`` calls per stage since the last heartbeat (#874).
         self._deferrals: Counter[str] = Counter()
+        # A batch of one goes to a reparse row next, when both classes are
+        # due (#1142). In memory only: a restart starting with a
+        # foreground row costs the reparse one turn.
+        self._reparse_turn = False
 
     # ----- writes --------------------------------------------------------
 
@@ -267,17 +271,28 @@ class IndexingQueue:
         self.db.queue_redate_untried(filepath=filepath, due_iso=due_at.isoformat())
 
     def claim_batch(self, limit: int) -> list[sqlite3.Row]:
-        """Return up to ``limit`` distinct oldest-due queued rows.
+        """Return up to ``limit`` distinct due queued rows, foreground
+        first with one slot kept for a reparse row while both are due
+        (``Database.queue_fetch_due_batch``, #1142).
 
-        Fetches a snapshot of N rows in one query — so the batched
+        Fetches N distinct rows under one lock — so the batched
         initial indexer's gather phase can pick up distinct messages
         without re-claiming the same row before marking it succeeded.
         Rows stay in 'queued' state; the caller must mark each one
         (succeeded / failed / skipped) by the end of the batch or they
         will be returned again on the next call. Claiming charges no
         attempt; only ``begin_attempt`` does.
+
+        A batch of one has no second slot to keep, so the two classes
+        take turns while both are due: after a foreground row the next
+        claim prefers a reparse row, and the other way round.
         """
-        return self.db.queue_fetch_due_batch(STATUS_QUEUED, _now_iso(), limit)
+        rows = self.db.queue_fetch_due_batch(
+            STATUS_QUEUED, _now_iso(), limit, reparse_turn=self._reparse_turn
+        )
+        if limit == 1 and rows:
+            self._reparse_turn = rows[0]["reason"] != REASON_REPARSE
+        return rows
 
     def begin_attempt(self, filepath: str) -> bool:
         """Charge one attempt to ``filepath`` before running one of its
