@@ -984,8 +984,9 @@ removed Bridge container are kept as history.
     took 24 of 34 corrective rounds. Each kept discovering its contract
     during review. AGENTS.md now treats a fix that adds a state or moves
     a validation boundary as a stop-and-ask design change at any round.
-    It also asks reviewers to report a defect's class with all its
-    siblings, and keeps procedure-style docs to verified claims.
+    It also asks reviewers to report a defect's class and all its
+    siblings in one round, and keeps procedure-style docs to verified
+    claims.
     Corrective and repeat-class rounds are measured over the next ten
     PRs (#1163).
 

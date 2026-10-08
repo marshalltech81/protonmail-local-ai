@@ -690,11 +690,13 @@ repository:
 
 - When you report a defect, name its class (for example: identity
   namespace, unknown or null value, filter scope, lifecycle phase,
-  validation boundary). In the same finding, list every sibling
-  instance of that class you can find in the diff and the code it
-  touches. Reporting one instance per round turns one fix into
-  several rounds (#1111 fixed a claimant mismatch in one scorer, then
-  in the next one round later).
+  validation boundary). Report every sibling instance you can find in
+  the diff and the code it touches in the same round, not one per
+  round: #1111 fixed a claimant mismatch in one scorer, then in the
+  next one round later. Put instances in one finding only when they
+  share a cause and a remedy and the PR introduced all of them (or
+  none). Report the others as separate findings that name the class,
+  so a pre-existing problem keeps its own issue and deferral.
 - Review a fix round against the obligations it touches, not only the
   lines it changed. A fix that moves validation or adds a state can
   break a guarantee elsewhere: rate-limited rejection, withheld log
