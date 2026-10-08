@@ -51,6 +51,7 @@ from tests.answer_eval.graders import FAIL, NA, PASS, attribute, budget_omitted_
 from tests.answer_eval.harness import evaluate
 from tests.answer_eval.judge import (
     JUDGE_SYSTEM,
+    RUBRIC,
     RUBRIC_VERSION,
     JudgeError,
     build_judge_prompt,
@@ -1413,7 +1414,14 @@ class TestJudge:
         )
         assert prompt.count("</untrusted_answer>") == 3  # the answer and two statements
         assert '"statement": 1' in JUDGE_SYSTEM
-        assert RUBRIC_VERSION == "ask-rubric-5"
+        assert RUBRIC_VERSION == "ask-rubric-6"
+
+    def test_temporal_rubric_covers_effective_dates(self):
+        """#911: the darkroom cases grade a value with a stated effective
+        date, which neither a later correction nor a newer message covers
+        (Codex round 2 on #1190)."""
+        assert "effective date" in RUBRIC["temporal_reasoning"]
+        assert "effective date" in JUDGE_SYSTEM
 
     def test_prompt_carries_the_server_coverage_note(self):
         """#820: the judge grades a disclose_missing answer together with

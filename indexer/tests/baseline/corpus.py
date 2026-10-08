@@ -173,6 +173,19 @@ are in the attachments only. Their words avoid every golden search
 query's content words, the reserved words above and every
 ``unanswerable`` question's ``absent_terms``.
 
+Threads 96-99 back three body-only answer-evaluation shapes (#911),
+dated March 2026 like t93-t95. In t97 the glazier says the
+conservatory price is not $760 and a later reply gives the real
+figure, while t96, a separate porch-door job from the same glazier, is
+billed at $760; t98 gives the darkroom subscription until a stated
+future date (1 January 2028) and a higher one from it, and its cases
+ask about 2027 and about after the change, never about today, so they
+do not depend on the day they run; in t99 a revision replaces the
+trestle count and price together, and a later message
+repeats the old pair as a question. Their words avoid every golden
+search query's content words, the reserved words above and every
+``unanswerable`` question's ``absent_terms``.
+
 Thread IDs are the root Message-IDs: ``t<NN>.1@baseline.example``.
 """
 
@@ -2564,6 +2577,101 @@ THREADS.update(
                         "Annual membership: $140\n",
                     ),
                 ),
+            ),
+        ],
+    }
+)
+
+
+LINNEA = "Linnea Thorsby <linnea@thorsbyglazing.example>"
+ORLA = "Orla Pennick <orla@fenwickarts.example>"
+FERGUS = "Fergus Lile <fergus@lilemarquees.example>"
+HESTER = "Hester Lusk <hester@cobblershall.example>"
+
+THREADS.update(
+    {
+        # A separate, earlier job from the same glazier billed at the
+        # amount t97.1 says the conservatory price is not (#911).
+        96: [
+            Msg(
+                "INBOX",
+                "Wed, 11 Mar 2026 14:00:00 +0000",
+                LINNEA,
+                ME,
+                "Porch door",
+                "Hi Sam,\n\nThe frosted pane in your porch door is fitted. The bill for "
+                "fitting it is $760, payable within two weeks.\n\nLinnea Thorsby\nThorsby Glazing",
+            ),
+        ],
+        # A negated value, then the real figure later in the thread (#911).
+        97: [
+            Msg(
+                "INBOX",
+                "Mon, 16 Mar 2026 09:30:00 +0000",
+                LINNEA,
+                ME,
+                "Conservatory panes",
+                "Hi Sam,\n\nA correction to my voicemail: the price for replacing the "
+                "panes in your conservatory is not $760. I will give you the real figure "
+                "once I have measured them on Thursday.\n\nLinnea Thorsby\nThorsby Glazing",
+            ),
+            Msg(
+                "INBOX",
+                "Thu, 19 Mar 2026 16:45:00 +0000",
+                LINNEA,
+                ME,
+                "Re: Conservatory panes",
+                "Hi Sam,\n\nI measured the conservatory this morning. Replacing the panes "
+                "will be $1,275, all in toughened glazing.\n\nLinnea",
+            ),
+        ],
+        # The current subscription and a different one from a stated
+        # future date, in one notice (#911).
+        98: [
+            Msg(
+                "INBOX",
+                "Tue, 17 Mar 2026 11:00:00 +0000",
+                ORLA,
+                ME,
+                "Your darkroom subscription",
+                "Hi Sam,\n\nYour darkroom key-holder subscription stays at $180 a year "
+                "until the higher rate of $215 a year takes effect on 1 January 2028. Nothing "
+                "changes before then, and your key works as usual.\n\nOrla Pennick\n"
+                "Fenwick Arts Centre",
+            ),
+        ],
+        # Count and price superseded together, then a later message that
+        # repeats the old pair as a question (#911).
+        99: [
+            Msg(
+                "INBOX",
+                "Mon, 23 Mar 2026 10:15:00 +0000",
+                FERGUS,
+                ME,
+                "Craft fair trestles",
+                "Hi Sam,\n\nConfirming your order for the craft fair on 18 April: 16 "
+                "trestles for $640, delivered to Cobbler's Hall the evening "
+                "before.\n\nFergus Lile\nLile Marquees",
+            ),
+            Msg(
+                "INBOX",
+                "Wed, 25 Mar 2026 13:20:00 +0000",
+                FERGUS,
+                ME,
+                "Re: Craft fair trestles",
+                "Hi Sam,\n\nRevised order, as you asked on the phone: 10 trestles "
+                "for $430 replaces 16 trestles for $640. Delivery is "
+                "unchanged.\n\nFergus",
+            ),
+            Msg(
+                "INBOX",
+                "Fri, 27 Mar 2026 17:05:00 +0000",
+                HESTER,
+                ME,
+                "Re: Craft fair trestles",
+                "Sam,\n\nI am drawing up the floor plan from Fergus's first email: 16 "
+                "trestles for $640, so four rows of four. Is that still right?"
+                "\n\nHester",
             ),
         ],
     }
