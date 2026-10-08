@@ -447,6 +447,15 @@ filters on the thread's recorded senders as before (#1154).
 and counts them as `indeterminate`, and the evidence-scope labels mark
 its passages `context` ([in scope or context](#evidence-scope-in-scope-or-context)).
 
+A message is attributed to its own (outer) `From` only. An attached
+email's `Subject`, `From`, `To`, `Cc`, `Date` and body are indexed as
+that attachment's text
+([#922](https://github.com/marshalltech81/protonmail-local-ai/issues/922)),
+so the search tools find them, but the inner `From` is a claim inside
+a claim: it is never a sender, participant or source-authority input,
+and the sender filters do not read it
+([#1235](https://github.com/marshalltech81/protonmail-local-ai/issues/1235)).
+
 ## Filter predicates
 
 Every message-level filter is one *leaf* of the predicate module

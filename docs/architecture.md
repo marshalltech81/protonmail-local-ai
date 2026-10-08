@@ -1401,8 +1401,42 @@ each message whose occurrence of it now selects a module.
   no slide text from decks current PowerPoint or LibreOffice save
   (#958).
 
-All three, and the OOXML extractors' child process below, run through
-one subprocess runner (`extractors/_runner.py`).
+Attached emails (#922): `message/rfc822`, `application/eml` and
+`.eml` select the `eml` extractor; `message/delivery-status` (a
+bounce's machine-readable report) selects none and is recorded
+`unsupported` ("no extractor"), unless its file name selects an
+extractor. The payload is the attached email itself (the parser's
+serialized form of a `message/rfc822` part, or an `.eml` file's
+bytes). Its text is, for the attached email and then each
+`message/rfc822` email nested in it, depth first and in document
+order: a `[Attached message, depth N]` line for a nested one, the
+first `Subject`, `From`, `To`, `Cc` and `Date` as labelled lines
+decoded with the parser's header decoder, and the body the parser
+would choose for that message, with no quote stripping. The inner
+`From` is a claim inside a claim: it is searchable attachment text
+only, never a participant, an authority input or a direction (#1235).
+The email's own attachments are not extracted here: inside a
+`message/rfc822` part the parser records each as an occurrence of its
+own. A nested `.eml` or `application/eml` file is such a leaf
+attachment; the attachments inside an `.eml` file are not walked by
+the parser at all. Every message of one payload shares one budget: 10,000 parts
+walked and 200 text parts decoded (the parser's per-message caps), 20
+levels of nesting, 64 MB of transfer-decoded nested emails, 2,000
+characters per header and 10,000,000 characters of text; a budget
+that cut the text is logged through the extractor-cap WARNING
+(`eml_*`) and marks the text incomplete. The extraction runs in the
+extractor child (decision 42) under 1 GiB of address space and 60 s of
+CPU, killed after 75 s: the standard library's parse of crafted
+structure (800,000 parts or 4 million header fields at the 32 MB
+`INDEXER_ATTACHMENT_MAX_BYTES` default) peaked at 688 to 995 MB and
+took 3 to 5 s in the image, and html2text on 32 MB of HTML took 18 to
+24 s; a 27 MB email with ten attachments took 0.3 s and 226 MB. A
+payload nested past Python's recursion limit (about 1,000 levels) is
+recorded `failed` as `RecursionError`.
+
+All three, the OOXML extractors' child process below and the `eml`
+extractor's run through one subprocess runner
+(`extractors/_runner.py`).
 It starts every tool through `extractors/_launcher.py` (`python -I`),
 which lowers its own address space (`RLIMIT_AS`) and CPU time
 (`RLIMIT_CPU`) to the limits the extractor passes, caps glibc at two
@@ -1432,7 +1466,7 @@ reserved encrypted-deck status is the one exception, below) records
 log or `last_error`.
 
 The Python extractor child (`extractors/extractor_child.py
-<module>`, for the OOXML formats and `.xls`) reports its result in a
+<module>`, for the OOXML formats, `.xls` and attached emails) reports its result in a
 framed protocol the runner parses as it arrives (#1291): `P` lines for
 progress, passed to the dispatcher's progress callback as they are
 read so a long extraction can refresh the heartbeat; a `C <name>` line
@@ -1459,6 +1493,7 @@ The limits on every external program the indexer runs:
 | extractor child, xlrd (`.xls`) | 512 MiB | 30 s | 45 s |
 | Java with Apache POI (`.ppt`) | 512 MiB | 30 s | 45 s |
 | extractor child, OOXML (`.docx`, `.pptx`, `.xlsx` and their variants) | 1 GiB | 30 s | 45 s |
+| extractor child, attached emails (`message/rfc822`, `application/eml`, `.eml`) | 1 GiB | 60 s | 75 s |
 | Tesseract (images, scanned PDFs) | none | none | `INDEXER_OCR_TIMEOUT_SECONDS` per page |
 | Poppler `pdfinfo` / `pdftoppm` (scanned PDFs) | none | none | the OCR render deadline (see `INDEXER_OCR_TIMEOUT_SECONDS`) |
 

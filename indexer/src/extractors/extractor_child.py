@@ -41,6 +41,7 @@ MODULES = {
     "pptx": "pptx",
     "xlsx": "xlsx",
     "xls": "xls_child",
+    "eml": "eml",
 }
 
 # The package this file belongs to (``src.extractors``), and the

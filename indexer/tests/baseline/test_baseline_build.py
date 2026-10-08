@@ -404,9 +404,10 @@ class TestBuild:
     def test_format_shapes_extract_as_documented(self, tmp_path, caplog):
         """#909: t82's DOCX and t83's XLSX extract (the XLSX's second
         sheet included), t84's JSON is ``unsupported``, t85's blank text
-        is ``empty``, t86's attached email is kept as an ``unsupported``
-        container whose own attachment is extracted, with no parser cap
-        firing, and t87's RFC 2231 filename is stored decoded."""
+        is ``empty``, t86's attached email is extracted by ``eml`` (#922):
+        its headers and body, not its own attachment, which is extracted
+        on its own, with no parser cap firing, and t87's RFC 2231
+        filename is stored decoded."""
         out = tmp_path / "out"
         with caplog.at_level(logging.INFO, logger="indexer"):
             build(out, _GOLDEN)
@@ -441,7 +442,13 @@ class TestBuild:
             ("t84", "kite-roster.json", "application/json", "unsupported", None),
             ("t85", "spring-rota.txt", "text/plain", "empty", f"text@{EXTRACTOR_VERSIONS['text']}"),
             ("t86", "crossing.txt", "text/plain", "success", f"text@{EXTRACTOR_VERSIONS['text']}"),
-            ("t86", "ferry-crossing.eml", "message/rfc822", "unsupported", None),
+            (
+                "t86",
+                "ferry-crossing.eml",
+                "message/rfc822",
+                "success",
+                f"eml@{EXTRACTOR_VERSIONS['eml']}",
+            ),
             (
                 "t87",
                 "fête-des-Mélèzes.txt",
@@ -458,7 +465,13 @@ class TestBuild:
         )
         assert text["kite-roster.json"] is None and text["spring-rota.txt"] is None
         assert "Corrigan" in text["crossing.txt"]
-        assert text["ferry-crossing.eml"] is None
+        assert text["ferry-crossing.eml"] == (
+            "Subject: Ferry crossing\n"
+            "From: Saltmarsh Ferries <bookings@saltmarshferries.example>\n"
+            "To: Hollis Vane <hollis@vanefamily.example>\n"
+            "Date: Fri, 13 Feb 2026 07:00:00 +0000\n\n"
+            "Hello Hollis,\n\nPlease wait by the gangway ten minutes early.\n\nSaltmarsh Ferries"
+        )
 
     @requires_ocr
     def test_capped_shapes_hit_the_build_caps(self, tmp_path, caplog):

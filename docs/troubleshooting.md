@@ -1624,6 +1624,14 @@ only, never filenames or text (`make logs`):
     `.doc`; the rest is not read (#935).
   - `ppt_output_bytes`: the `.ppt` reader wrote more than 8 MiB for a
     legacy `.ppt`; the rest is not read (#957).
+  - `eml_header_chars`, `eml_text_chars`, `eml_parts`, `eml_text_parts`,
+    `eml_nested_messages`: an attached email's text (#922) was cut: a
+    Subject, From, To, Cc or Date header over 2,000 characters, the
+    10,000,000-character text budget, the 10,000 parts or 200 text parts
+    shared by the attached email and the emails nested in it, or a
+    nested email left out (more than 20 levels deep, past 64 MB of
+    transfer-decoded nested emails, or a transfer encoding that does
+    not decode).
   - `pptx_slides`, `pptx_shapes`, `pptx_table_cells`,
     `pptx_text_chars`: the walk over a PowerPoint deck stopped at its
     slide budget (5,000 slide-list entries), shape budget (100,000,
@@ -1750,11 +1758,13 @@ something searchable is lost:
 - The attachments inside a base64 or quoted-printable attached email
   are not read.
 - The container's own payload is emptied while an extractor would have
-  read it, for example a delivery report named `status.txt`.
+  read it: an attached email, whose text the `eml` extractor reads
+  (#922), or for example a delivery report named `status.txt`.
 
 An attached email sent without a transfer encoding is still walked, so
-the attachments inside it are kept, and emptying a payload that no
-extractor reads (`.eml`) is not logged.
+the attachments inside it are kept even when its own payload is
+emptied; emptying a payload that no extractor reads (a delivery report
+with no extractor's file name) is not logged.
 
 | Cap | What was dropped |
 |---|---|

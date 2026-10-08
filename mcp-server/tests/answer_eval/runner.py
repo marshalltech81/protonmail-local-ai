@@ -502,7 +502,7 @@ def corpus_manifest(path: Path = CORPUS_PATH) -> dict[str, CorpusMessage]:
     file's SHA-256, so two files sharing a Message-ID with different
     bytes are two entries (#1275). A claimant built twice (a
     byte-identical copy) is an error. A thread's ID is its root file's
-    Message-ID. The tokens cover every part's headers and every decoded
+    Message-ID. The tokens cover every part's header names and values and every decoded
     text part and binary attachment, our own trusted bytes, and the text
     the corpus says its images show (``OCR_TEXT``). ``sent_at`` is the
     ``Date:`` header as the indexer normalizes it (``parser._parse_date``:
@@ -533,7 +533,9 @@ def corpus_manifest(path: Path = CORPUS_PATH) -> dict[str, CorpusMessage]:
                 sent = sent.replace(tzinfo=UTC)
             text = [message_id]
             for part in parsed.walk():  # every part's headers: attachment names and types
-                text += [str(v) for v in part.values()]
+                # Names too: an attached email's extracted text labels its
+                # headers by name ("Subject: ...", #922).
+                text += [f"{k} {v}" for k, v in part.items()]
                 if part.get_content_maintype() == "text":
                     text.append(part.get_content())
                 elif not part.is_multipart():

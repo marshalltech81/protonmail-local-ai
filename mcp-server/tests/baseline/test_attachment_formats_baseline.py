@@ -116,7 +116,7 @@ def test_empty_attachment_is_listed_without_evidence(tools: dict) -> None:
     assert _attachment_chunks(tools, "blank spring rota", "t85.1") == []
 
 
-def test_attached_email_attachment_is_indexed_and_its_body_is_not(tools: dict) -> None:
+def test_attached_email_is_attachment_text_and_not_the_body(tools: dict) -> None:
     (hit,) = _call(tools, "search_attachments", query="Corrigan")["results"]
     assert hit["message_id"] == _mid("t86.1")
     assert (hit["filename"], hit["content_type"]) == ("crossing.txt", "text/plain")
@@ -124,14 +124,16 @@ def test_attached_email_attachment_is_indexed_and_its_body_is_not(tools: dict) -
     (container,) = _call(tools, "search_attachments", content_type="message/rfc822")["results"]
     assert container["message_id"] == _mid("t86.1")
     assert container["filename"] == "ferry-crossing.eml"
-    assert container["extraction_status"] == "unsupported"
-    # The inner email's body ("gangway") is neither the outer body nor
-    # indexed text.
+    # #922: the attached email's headers and body are its attachment
+    # text, never the outer body (its exact text, without its own
+    # attachment's, is pinned in the indexer's baseline build test).
+    assert container["extraction_status"] == "success"
+    (inner,) = _call(tools, "search_attachments", query="gangway")["results"]
+    assert (inner["message_id"], inner["filename"]) == (_mid("t86.1"), "ferry-crossing.eml")
     message = _call(tools, "get_message", message_id=_mid("t86.1"))
     assert "Forwarding this one" in message["body"]
     assert "gangway" not in message["body"]
     assert _call(tools, "query_messages", text="gangway", limit=100)["messages"] == []
-    assert _call(tools, "search_attachments", query="gangway")["results"] == []
 
 
 def test_non_ascii_filename_is_stored_decoded_and_searchable(tools: dict) -> None:

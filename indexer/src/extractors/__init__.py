@@ -441,9 +441,15 @@ class ExtractionResult:
 # their type names, and the files the limits now fail are crafted
 # (measured in each module), so a bump would only re-run every cached
 # OOXML row through a child to change none of them.
+# eml 1: attached emails (``message/rfc822``, ``application/eml``,
+# ``.eml``), the first ``eml`` extractor (#922): a stamp only, as for
+# ``pptx`` 1. Their occurrences were cached ``unsupported`` ("no
+# extractor") with no stamp, so the "no extractor" sweep re-queues them
+# once.
 EXTRACTOR_VERSIONS: dict[str, int] = {
     "doc": 1,
     "docx": 7,
+    "eml": 1,
     "image": 3,
     "pdf": 5,
     "ppt": 1,
@@ -624,6 +630,9 @@ _MIME_DISPATCH: dict[str, str] = {
     "text/plain": "text",
     "text/csv": "text",
     "text/markdown": "text",
+    # Attached emails (#922). ``message/delivery-status`` stays unsupported.
+    "message/rfc822": "eml",
+    "application/eml": "eml",
 }
 
 # Filename-extension fallback for cases where Content-Type is missing,
@@ -650,6 +659,7 @@ _EXT_DISPATCH: dict[str, str] = {
     ".csv": "text",
     ".md": "text",
     ".markdown": "text",
+    ".eml": "eml",
     ".png": "image",
     ".jpg": "image",
     ".jpeg": "image",

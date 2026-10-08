@@ -423,6 +423,7 @@ class TestEveryToolRunsUnderLimits:
             "extractors/_runner.py",
             "extractors/doc.py",
             "extractors/docx.py",
+            "extractors/eml.py",
             "extractors/ooxml.py",
             "extractors/ppt.py",
             "extractors/pptx.py",

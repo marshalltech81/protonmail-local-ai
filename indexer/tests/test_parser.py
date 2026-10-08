@@ -4007,6 +4007,18 @@ def _chain_stops_at_the_depth_cap(msg) -> bool:
 # instead sets those parser limits for the shape (the #1144 address
 # budget, so a few short headers can exhaust it). ``pinned`` is the
 # parse result before the caps were logged.
+def _nested_rfc822_with_note(levels: int) -> bytes:
+    """``levels`` identity-encoded attached emails around a message that
+    carries a ``note.txt`` attachment."""
+    leaf = (
+        b'Content-Type: multipart/mixed; boundary="n"\r\n\r\n'
+        b"--n\r\nContent-Type: text/plain\r\n\r\nSYNTHETIC_TEXT_MARKER\r\n"
+        b'--n\r\nContent-Type: text/plain\r\nContent-Disposition: attachment; filename="note.txt"'
+        b"\r\n\r\nNOTE_BODY\r\n--n--\r\n"
+    )
+    return b"Content-Type: message/rfc822\r\n\r\n" * (levels - 1) + leaf
+
+
 _CAP_SHAPES = {
     "attached_depth": (
         _with_attachment(b"Content-Type: message/rfc822\r\n", _nested_rfc822(21), _TXT_FILENAME),
@@ -4082,6 +4094,47 @@ _CAP_SHAPES = {
                 b"From: a@example.test\r\nX: SYNTHETIC_HEADER_MARKER\x0brest\r\n\r\nhello"
             ),
             _TXT_FILENAME,
+        ),
+        False,
+        "container_serialize=1",
+        _only_attachment_is_empty,
+    ),
+    # #922: an attached email's payload is read by the ``eml``
+    # extractor, so one a cap emptied loses its text even when it is
+    # named ``.eml`` and the walk still keeps the attachments inside it.
+    "attached_depth_keeps_inner_attachment": (
+        _with_attachment(b"Content-Type: message/rfc822\r\n", _nested_rfc822_with_note(21)),
+        False,
+        "attached_depth=1",
+        lambda msg: (
+            [(a.filename, a.payload) for a in msg.attachments]
+            == [("SYNTHETIC_FILENAME_MARKER.eml", b""), ("note.txt", b"NOTE_BODY")]
+        ),
+    ),
+    "attached_fields_eml": (
+        _with_attachment(
+            b"Content-Type: message/rfc822\r\n",
+            b"From: a@example.test\r\n" + b"X-Field: SYNTHETIC_HEADER_MARKER\r\n" * 20_000,
+        ),
+        False,
+        "attached_fields=1",
+        _only_attachment_is_empty,
+    ),
+    "container_serialize_eml": (
+        _with_attachment(
+            b"Content-Type: message/rfc822\r\n",
+            b"From: a@example.test\r\nX: SYNTHETIC_HEADER_MARKER\x0brest\r\n\r\nhello",
+        ),
+        False,
+        "container_serialize=1",
+        _only_attachment_is_empty,
+    ),
+    "container_serialize_decoded_eml": (
+        _with_attachment(
+            _BASE64_RFC822,
+            base64.encodebytes(
+                b"From: a@example.test\r\nX: SYNTHETIC_HEADER_MARKER\x0brest\r\n\r\nhello"
+            ),
         ),
         False,
         "container_serialize=1",
@@ -4268,6 +4321,10 @@ _CAP_COMPLETENESS: dict[str, set[str]] = {
     "decoded_bytes": _MANIFEST,
     "container_serialize": _MANIFEST,
     "container_serialize_decoded": _MANIFEST,
+    "attached_depth_keeps_inner_attachment": _MANIFEST,
+    "attached_fields_eml": _MANIFEST,
+    "container_serialize_eml": _MANIFEST,
+    "container_serialize_decoded_eml": _MANIFEST,
     "body_parts": {"body_complete"},
     "mime_parts": {"body_complete", *_MANIFEST},
     "address_header": {"to_addresses_complete"},
@@ -4476,25 +4533,12 @@ def test_message_within_every_cap_logs_no_cap_line(tmp_path, caplog):
     assert "parser work caps" not in caplog.text
 
 
-def _nested_rfc822_with_note(levels: int) -> bytes:
-    """``levels`` identity-encoded attached emails around a message that
-    carries a ``note.txt`` attachment."""
-    leaf = (
-        b'Content-Type: multipart/mixed; boundary="n"\r\n\r\n'
-        b"--n\r\nContent-Type: text/plain\r\n\r\nSYNTHETIC_TEXT_MARKER\r\n"
-        b'--n\r\nContent-Type: text/plain\r\nContent-Disposition: attachment; filename="note.txt"'
-        b"\r\n\r\nNOTE_BODY\r\n--n--\r\n"
-    )
-    return b"Content-Type: message/rfc822\r\n\r\n" * (levels - 1) + leaf
-
-
-# Review round 1: caps that empty an identity-encoded container's payload
-# lose nothing when no extractor would read that payload (``.eml``): the
-# walk still descends into the container and keeps the attachments inside
-# it. Likewise a decoded container the generator refuses is still walked.
-# Each shape's parse result is pinned (unchanged from before the caps
-# were logged) and no cap line is logged. #902: a header value at its
-# cap is kept whole, so it is not counted either.
+# Review round 1: caps that empty a container's payload lose nothing
+# when no extractor would read that payload. Since #922 every attached
+# email's payload is read (``eml``), so those shapes moved to
+# ``_CAP_SHAPES``. Each shape's parse result is pinned (unchanged from
+# before the caps were logged) and no cap line is logged. #902: a header
+# value at its cap is kept whole, so it is not counted either.
 _NO_LOSS_SHAPES = {
     "subject_at_the_cap": (
         _headers(b"Subject: " + _LONG_SUBJECT[:SUBJECT_MAX_CHARS] + b"\r\n"),
@@ -4507,36 +4551,6 @@ _NO_LOSS_SHAPES = {
     "references_at_the_cap": (
         _headers(f"References: <a@example.test> <{_id_of(998)}>\r\n".encode()),
         lambda msg: msg.references == ["a@example.test", _id_of(998)],
-    ),
-    "identity_depth_keeps_inner_attachment": (
-        _with_attachment(b"Content-Type: message/rfc822\r\n", _nested_rfc822_with_note(21)),
-        lambda msg: (
-            [(a.filename, a.payload) for a in msg.attachments]
-            == [("SYNTHETIC_FILENAME_MARKER.eml", b""), ("note.txt", b"NOTE_BODY")]
-        ),
-    ),
-    "identity_fields": (
-        _with_attachment(
-            b"Content-Type: message/rfc822\r\n",
-            b"From: a@example.test\r\n" + b"X-Field: SYNTHETIC_HEADER_MARKER\r\n" * 20_000,
-        ),
-        _only_attachment_is_empty,
-    ),
-    "identity_serialize": (
-        _with_attachment(
-            b"Content-Type: message/rfc822\r\n",
-            b"From: a@example.test\r\nX: SYNTHETIC_HEADER_MARKER\x0brest\r\n\r\nhello",
-        ),
-        _only_attachment_is_empty,
-    ),
-    "decoded_serialize": (
-        _with_attachment(
-            _BASE64_RFC822,
-            base64.encodebytes(
-                b"From: a@example.test\r\nX: SYNTHETIC_HEADER_MARKER\x0brest\r\n\r\nhello"
-            ),
-        ),
-        _only_attachment_is_empty,
     ),
 }
 
@@ -4927,7 +4941,9 @@ def test_attached_container_children_are_queued_lazily(monkeypatch, caplog):
     # The preflight stops once the field budget is spent, and the walk
     # at the part cap: neither takes much past its cap.
     assert _CountingParts.taken <= parser.MAX_ATTACHED_MESSAGE_FIELDS + parser.MAX_WALKED_PARTS
-    assert caps == Counter({"mime_parts": 1})
+    # The bundle is named ``.eml``, which the ``eml`` extractor reads
+    # (#922), so its emptied payload is lost content too.
+    assert caps == Counter({"mime_parts": 1, "attached_fields": 1})
     assert elapsed < 5
 
 
@@ -5466,6 +5482,10 @@ _PAYLOAD_LOSS = {
     "decoded_bytes": 1,
     "container_serialize": 1,
     "container_serialize_decoded": 1,
+    "attached_depth_keeps_inner_attachment": 1,
+    "attached_fields_eml": 1,
+    "container_serialize_eml": 1,
+    "container_serialize_decoded_eml": 1,
 }
 
 

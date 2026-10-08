@@ -1262,14 +1262,37 @@ def _capped_parts_lost(nodes: list[_BodyNode], capped: list[tuple[int, bool]]) -
     return sum(1 for index, _ in capped if kept[index])
 
 
+@dataclass
+class BodyWalk:
+    """Body-only walks of several messages sharing one budget: the
+    attached-email extractor's (#922), which renders an attached email
+    and the attached emails nested in it.
+
+    In such a walk attachments are neither materialized nor walked into
+    (the enclosing message's parse indexes them); each ``message/rfc822``
+    attachment part met is added to ``nested``, in document order, for
+    the caller to walk as a message of its own. ``parts_left`` and
+    ``text_parts_left`` are what ``MAX_WALKED_PARTS`` and
+    ``MAX_BODY_TEXT_PARTS`` allow across all the walks together."""
+
+    parts_left: int = MAX_WALKED_PARTS
+    text_parts_left: int = MAX_BODY_TEXT_PARTS
+    nested: list[email.message.Message] = field(default_factory=list)
+
+
 def _extract_body_and_attachments(
     msg: email.message.Message,
     caps: Counter[str] | None = None,
+    walk: BodyWalk | None = None,
 ) -> tuple[str, list[Attachment]]:
     """The message's body text and attachments. ``caps`` (when given)
-    counts the content a work cap dropped, by ``PARSE_CAPS`` name."""
+    counts the content a work cap dropped, by ``PARSE_CAPS`` name. With
+    ``walk``, a body-only walk under its shared budget (``BodyWalk``):
+    no attachments are returned."""
     if caps is None:
         caps = Counter()
+    max_parts = MAX_WALKED_PARTS if walk is None else walk.parts_left
+    max_text_parts = MAX_BODY_TEXT_PARTS if walk is None else walk.text_parts_left
     attachments: list[Attachment] = []
     nodes: list[_BodyNode] = []
     text_parts = 0
@@ -1303,7 +1326,7 @@ def _extract_body_and_attachments(
         if part is None:
             frames.pop()
             continue
-        if walked >= MAX_WALKED_PARTS:
+        if walked >= max_parts:
             caps["mime_parts"] += 1
             break
         walked += 1
@@ -1311,7 +1334,10 @@ def _extract_body_and_attachments(
         filename = _part_filename(part)
         is_attachment = _is_attachment(part, filename)
         decoded: email.message.Message | None = None
-        if is_attachment:
+        if is_attachment and walk is not None:
+            if ct == "message/rfc822" and part.is_multipart():
+                walk.nested.append(part)
+        elif is_attachment:
             transport_lost: list[bool] = []
             payload, decoded = _attachment_payload(
                 part,
@@ -1359,6 +1385,8 @@ def _extract_body_and_attachments(
             nodes.append(_BodyNode(parent, alternative=False))
             nodes[parent].children.append(len(nodes) - 1)
         if part.is_multipart():
+            if walk is not None and is_attachment:
+                continue
             # A decoded container stands in for its transport form; its
             # children are one decode deeper.
             if decoded is not None:
@@ -1396,7 +1424,7 @@ def _extract_body_and_attachments(
             ct == "text/plain" or (part is msg and part.get_content_maintype() == "text")
         ):
             continue
-        if text_parts >= MAX_BODY_TEXT_PARTS:
+        if text_parts >= max_text_parts:
             # Counted below, once the body's selection is known.
             capped.append((len(nodes) - 1, not is_html))
             continue
@@ -1406,6 +1434,9 @@ def _extract_body_and_attachments(
         node.has_text = bool(node.text)
         node.has_plain = node.has_text and not is_html
 
+    if walk is not None:
+        walk.parts_left -= walked
+        walk.text_parts_left -= text_parts
     body = _assemble_body(nodes)
     if capped:
         lost = _capped_parts_lost(nodes, capped)
