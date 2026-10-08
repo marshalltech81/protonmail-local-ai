@@ -1409,10 +1409,15 @@ same moment.
   `RERANK_BASE_URL`, `RERANK_MODEL`, the key in
   `.secrets/rerank_api_key.txt` and `RERANK_TIMEOUT_SECS`, or set
   `RERANK_MODE=none` until the provider is back.
-- `degraded_thread_vec` / `degraded_chunk_vec`, `degraded_keyword_chunks`,
+- `degraded_thread_vec` / `degraded_chunk_vec`,
   or any `_fts` / `attachment_` lane on every call: the index is missing a table or is
   corrupt. Check the indexer's log, then rebuild as in
   [Indexer refuses to start](#indexer-refuses-to-start--wipe-the-sqlite-volume).
+- `degraded_keyword_chunks`: the keyword passage ranking, which runs on
+  a private in-memory SQLite database rather than the index (#1246),
+  failed; the `Keyword passage lookup failed` WARNING names the
+  exception type. Rebuilding the index does not change it; report the
+  type in an issue.
 
 ## The log shows "token limit hit"
 

@@ -3,9 +3,10 @@
 Each surfaced thread's passages were chosen by vector distance alone
 (after the chunks of an attachment the query named), so in a long
 thread the one chunk holding the query's exact word could fall outside
-the six. One thread-driven FTS lookup in ``get_query_evidence_chunks``
-now reserves a slot for a keyword-matched chunk, after the named
-attachment's representative. All data is synthetic; vectors are
+the six. Evidence selection now reserves a slot for a keyword-matched
+chunk, after the named attachment's representative, ranked by how rare
+in its thread the query words it holds are (#1246), from a scratch FTS
+table of the fetched candidates. All data is synthetic; vectors are
 crafted so dense order alone leaves the keyword chunk out.
 """
 
@@ -16,9 +17,15 @@ from pathlib import Path
 
 import pytest
 import sqlite_vec
+import src.lib.sqlite as sqlite_module
 from fastmcp.exceptions import ToolError
 from src.lib.inference import PromptBudget
-from src.lib.sqlite import PROMPT_EVIDENCE_CHUNKS_PER_THREAD, Database
+from src.lib.sqlite import (
+    PROMPT_EVIDENCE_CHUNKS_PER_THREAD,
+    Database,
+    _keyword_rank_keys,
+    _sanitize_fts_query,
+)
 from src.tools.brief import register_experimental_tools
 from src.tools.intelligence import register_intelligence_tools
 from src.tools.outputs import EvidenceChunk
@@ -238,6 +245,362 @@ class TestSlotOrder:
         assert [_ids(grouped[tid])[0] for tid in tids] == [f"{tid}-kw" for tid in tids]
 
 
+# --- rarity ranking (#1246) ---------------------------------------------------
+
+
+def _chunk(conn, tid: str, n: int, text: str, embedding: list[float], **kwargs) -> None:
+    _insert_chunk(
+        conn,
+        chunk_id=f"{tid}-{n}",
+        message_id=tid,
+        thread_id=tid,
+        text=text,
+        embedding=embedding,
+        chunk_index=n,
+        char_start=100 * n,
+        **kwargs,
+    )
+
+
+def _rarity_db(path: Path, build) -> Database:
+    conn = _open(path)
+    build(conn)
+    conn.close()
+    return Database(str(path))
+
+
+RARE_ID = "inv-40917"
+QUESTION = f"What is the status of invoice {RARE_ID}?"
+
+
+class TestRarityRanking:
+    def test_natural_question_rare_identifier_wins_the_slot(self, tmp_path):
+        """Every chunk holds a common word of the question; only the far
+        one holds its identifier. The slot used to go to the nearest
+        chunk holding any word; now the identifier's chunk wins."""
+
+        def build(conn):
+            _thread(conn, "t-q")
+            for i in range(_NEAR):
+                _chunk(conn, "t-q", i, f"the status meeting is on day {i}", _near(i))
+            _chunk(conn, "t-q", _NEAR, f"the invoice {RARE_ID} was paid", _FAR)
+
+        db = _rarity_db(tmp_path / "q.db", build)
+        chunks = _select(db, QUESTION, "t-q")
+        assert _ids(chunks) == [f"t-q-{_NEAR}"] + [f"t-q-{i}" for i in range(5)]
+        # Every chunk holds a query word, so every kept one is labelled.
+        assert _labels(chunks) == ["keyword_match"] * 6
+
+    def test_padded_tuple_orders_mixed_frequencies(self, tmp_path):
+        def build(conn):
+            _thread(conn, "t-mix")
+            # n = 12. alpha df 2 (chunks 0, 11); beta df 3 (11, 5, 6);
+            # gamma df 9 (0, 1-8).
+            _chunk(conn, "t-mix", 0, "alpha gamma", _near(0))
+            for i in range(1, 9):
+                _chunk(conn, "t-mix", i, "gamma beta" if i in (5, 6) else "gamma", _near(i))
+            _chunk(conn, "t-mix", 9, "filler", _near(9))
+            _chunk(conn, "t-mix", 10, "filler", _near(10))
+            _chunk(conn, "t-mix", 11, "alpha beta", _FAR)
+
+        db = _rarity_db(tmp_path / "mix.db", build)
+        all_chunks = db.get_evidence_chunks_for_threads(["t-mix"], _QUERY_VEC, per_thread_limit=99)
+        keys, unranked = _keyword_rank_keys("alpha beta gamma", all_chunks)
+        assert unranked == 0
+        pad = [13] * 14
+        assert keys["t-mix-11"] == (2, 3, *pad)
+        assert keys["t-mix-0"] == (2, 9, *pad)
+        assert keys["t-mix-5"] == (3, 9, *pad)
+        assert keys["t-mix-1"] == (9, 13, *pad)
+        assert "t-mix-9" not in keys
+        # [2, 3] beats the nearer [2, 9].
+        assert _ids(_select(db, "alpha beta gamma", "t-mix"))[0] == "t-mix-11"
+
+    def test_word_in_every_chunk_is_ignored_but_qualifies(self, tmp_path):
+        """No informative word: the nearest holder wins, as before."""
+
+        def build(conn):
+            _thread(conn, "t-all")
+            for i in range(4):
+                _chunk(conn, "t-all", i, f"status note {i}", _near(i))
+
+        db = _rarity_db(tmp_path / "all.db", build)
+        all_chunks = db.get_evidence_chunks_for_threads(["t-all"], _QUERY_VEC, per_thread_limit=99)
+        keys, _ = _keyword_rank_keys("status", all_chunks)
+        assert set(keys.values()) == {(5,) * 16}
+        chunks = _select(db, "status", "t-all")
+        assert _ids(chunks) == [f"t-all-{i}" for i in range(4)]
+        assert _labels(chunks) == ["keyword_match"] * 4
+
+    def test_frequency_is_per_thread(self, tmp_path):
+        """A word common in the mailbox can still be the rare one in a
+        thread: here ``renewal`` is in seven chunks overall but one of
+        t-b's three, where ``status`` is in two."""
+
+        def build(conn):
+            for tid in ("t-a", "t-b"):
+                _thread(conn, tid)
+            for i in range(6):
+                _chunk(conn, "t-a", i, "renewal", _near(i))
+            _chunk(conn, "t-a", 6, "other", _near(6))
+            _chunk(conn, "t-b", 0, "status", _near(0))
+            _chunk(conn, "t-b", 1, "status", _near(1))
+            _chunk(conn, "t-b", 2, "renewal", _FAR)
+
+        db = _rarity_db(tmp_path / "per.db", build)
+        grouped = db.get_query_evidence_chunks(
+            "renewal status", ["t-a", "t-b"], _QUERY_VEC, PROMPT_EVIDENCE_CHUNKS_PER_THREAD
+        )
+        # t-a: renewal is its only informative word (6 of 7): nearest holder.
+        assert _ids(grouped["t-a"])[0] == "t-a-0"
+        # t-b: renewal (1 of 3) is rarer than status (2 of 3).
+        assert _ids(grouped["t-b"])[0] == "t-b-2"
+
+    def test_stems_and_case_are_one_word(self, tmp_path):
+        """``Invoices`` and ``invoice`` share one porter token: one probe,
+        one frequency, no double count."""
+
+        def build(conn):
+            _thread(conn, "t-stem")
+            _chunk(conn, "t-stem", 0, "invoice", _near(0))
+            _chunk(conn, "t-stem", 1, "invoice ledger", _near(1))
+            _chunk(conn, "t-stem", 2, "nothing", _near(2))
+
+        db = _rarity_db(tmp_path / "stem.db", build)
+        all_chunks = db.get_evidence_chunks_for_threads(["t-stem"], _QUERY_VEC, per_thread_limit=99)
+        keys, unranked = _keyword_rank_keys("Invoices invoice INVOICE ledger", all_chunks)
+        assert unranked == 0
+        assert keys["t-stem-0"] == (2, *[4] * 15)
+        assert keys["t-stem-1"] == (1, 2, *[4] * 14)
+
+    def test_attachment_representative_with_a_common_word_keeps_two_slots(self, tmp_path):
+        """The representative holds a common query word; a body chunk
+        holds the rare one. They are different chunks, so both lead."""
+
+        def build(conn):
+            _thread(conn, "t-rep", attachments=True)
+            _insert_attachment(
+                conn,
+                message_id="t-rep",
+                thread_id="t-rep",
+                attachment_id="t-rep-ledger",
+                filename="ledger.pdf",
+            )
+            for i in range(4):
+                _chunk(
+                    conn,
+                    "t-rep",
+                    i,
+                    f"ledger status line {i}",
+                    _near(i),
+                    attachment_id="t-rep-ledger",
+                )
+            _chunk(conn, "t-rep", 4, "status update", _near(4))
+            _chunk(conn, "t-rep", 5, f"status of {RARE_ID}", _FAR)
+
+        db = _rarity_db(tmp_path / "rep.db", build)
+        chunks = _select(db, f"ledger status {RARE_ID}", "t-rep")
+        assert _ids(chunks)[:2] == ["t-rep-0", "t-rep-5"]
+        assert _labels(chunks)[:2] == ["keyword_match", "keyword_match"]
+
+    def test_chunk_without_valid_vector_is_not_a_candidate(self, tmp_path):
+        """A chunk the fetch cannot return neither wins nor counts in a
+        word's frequency: counting it would make ``alpha`` df 2 and hand
+        the slot to the farther ``beta`` chunk."""
+        nan = [float("nan"), 0.0, 0.0, 0.0]
+
+        def build(conn):
+            _thread(conn, "t-nan")
+            _chunk(conn, "t-nan", 0, "filler", _near(0))
+            _chunk(conn, "t-nan", 1, "alpha", _near(1))
+            _chunk(conn, "t-nan", 2, "beta", _near(2))
+            _chunk(conn, "t-nan", 3, "alpha", nan)
+
+        db = _rarity_db(tmp_path / "nan.db", build)
+        chunks = _select(db, "alpha beta", "t-nan")
+        assert _ids(chunks) == ["t-nan-1", "t-nan-0", "t-nan-2"]
+
+    def test_words_beyond_sixteen_qualify_and_are_disclosed(self, tmp_path, caplog):
+        caplog.set_level(logging.INFO)
+        words = [f"w{k:02d}x" for k in range(18)]
+
+        def build(conn):
+            _thread(conn, "t-many")
+            for i in range(_NEAR):
+                _chunk(conn, "t-many", i, f"filler {i}", _near(i))
+            # Only the seventeenth distinct word: qualifies, fully padded.
+            _chunk(conn, "t-many", _NEAR, f"{words[16]} {MARKER}", _FAR)
+
+        db = _rarity_db(tmp_path / "many.db", build)
+        all_chunks = db.get_evidence_chunks_for_threads(["t-many"], _QUERY_VEC, per_thread_limit=99)
+        keys, unranked = _keyword_rank_keys(" ".join(words), all_chunks)
+        assert unranked == 2
+        assert keys == {f"t-many-{_NEAR}": (_NEAR + 2,) * 16}
+
+        server = FakeMCPServer()
+        register_search_tools(server, db, FakeEmbedClient())
+        for _ in range(2):
+            out = asyncio.run(
+                server.tools["get_evidence"](
+                    query=" ".join(words) + f" {MARKER}", thread_id="t-many", limit=6
+                )
+            )
+            [thread] = out.structured_content["threads"]
+            assert thread["chunks"][0]["chunk_id"] == f"t-many-{_NEAR}"
+            assert thread["chunks"][0]["selected_by"] == "keyword_match"
+        warnings = [
+            r.getMessage()
+            for r in caplog.records
+            if r.levelno == logging.WARNING and "Keyword passage ranking" in r.getMessage()
+        ]
+        # Rate-limited: one line for two capped calls in the window.
+        assert warnings == [
+            "Keyword passage ranking used the first 16 distinct query words; "
+            "later words only qualify a passage: units_over_16"
+        ]
+        timing = [r.getMessage() for r in caplog.records if r.name == "mcp.timings"]
+        assert len(timing) == 2
+        # 18 words and the marker: three past the sixteenth.
+        assert all("'keyword_units_unranked': 3" in line for line in timing)
+        assert MARKER not in caplog.text
+
+    def test_ranked_word_beats_an_unranked_one(self, tmp_path):
+        words = [f"w{k:02d}x" for k in range(17)]
+
+        def build(conn):
+            _thread(conn, "t-rank")
+            _chunk(conn, "t-rank", 0, "filler", _near(0))
+            _chunk(conn, "t-rank", 1, words[16], _near(1))
+            _chunk(conn, "t-rank", 2, words[3], _FAR)
+
+        db = _rarity_db(tmp_path / "rank.db", build)
+        assert _ids(_select(db, " ".join(words), "t-rank"))[0] == "t-rank-2"
+
+
+# Each text is one chunk; each query is matched against all of them, in
+# the mailbox's ``message_chunks_fts`` and in the scratch table.
+_SHAPE_TEXTS = [
+    "Résumé attached for review",
+    "Résumé decomposed accents",
+    "resume plain",
+    "x-ray results and e-mail follow-up",
+    "xray as one word",
+    "contact alice@example.com or bob.smith@example.org",
+    "the host mail.example.net answered",
+    "version 3.14 released on 2024-01-02",
+    "naïve café Straße Ünïcödé",
+    "strasse spelled out",
+    "東京 会議 予定",
+    "emoji 🎉 party",
+    "snake_case_identifier and CamelCase",
+    "invoices were running late",
+    "an invoice arrived",
+]
+_SHAPE_QUERIES = [
+    "résumé",
+    "Résumé",
+    "resume",
+    "x-ray",
+    "e-mail follow-up",
+    "alice@example.com",
+    "@example.org",
+    "mail.example.net",
+    "3.14",
+    "2024-01-02",
+    "naive cafe",
+    "Straße",
+    "東京",
+    "🎉 party",
+    "snake_case_identifier",
+    "camelcase",
+    "invoice",
+    "running",
+    "-- @ . ...",
+    "What's the status of invoice INV-1?",
+]
+
+
+@pytest.mark.parametrize("query", _SHAPE_QUERIES)
+def test_scratch_matches_equal_mailbox_matches(tmp_path, query):
+    def build(conn):
+        _thread(conn, "t-shape")
+        for i, text in enumerate(_SHAPE_TEXTS):
+            _chunk(conn, "t-shape", i, text, _near(i))
+
+    db = _rarity_db(tmp_path / "shape.db", build)
+    fts_query = _sanitize_fts_query(query)
+    mailbox = (
+        {
+            r["chunk_id"]
+            for r in db._fetchall(
+                "SELECT c.chunk_id FROM message_chunks c JOIN message_chunks_fts f "
+                "ON f.rowid = c.fts_rowid WHERE message_chunks_fts MATCH ?",
+                (fts_query,),
+            )
+        }
+        if fts_query
+        else set()
+    )
+    all_chunks = db.get_evidence_chunks_for_threads(["t-shape"], _QUERY_VEC, per_thread_limit=99)
+    keys, _ = _keyword_rank_keys(query, all_chunks)
+    assert set(keys) == mailbox
+
+
+class _CountingScratch(sqlite3.Connection):
+    """Records the rows each ``executemany`` writes."""
+
+    inserted: list[tuple[str, int]]
+
+    def executemany(self, sql, rows, /):
+        rows = list(rows)
+        self.inserted.append((sql.split("(")[0].strip(), len(rows)))
+        return super().executemany(sql, rows)
+
+
+def test_scratch_inserts_exactly_the_fetched_rows(tmp_path, monkeypatch):
+    """The scratch table holds the fetched, vector-valid candidates and
+    nothing else, so its work is bounded by what the evidence fetch read."""
+
+    def build(conn):
+        for t in range(3):
+            tid = f"t-w{t}"
+            _thread(conn, tid)
+            for i in range(4 + t):
+                _chunk(conn, tid, i, f"{WORD} part {i}", _near(i))
+        # Not surfaced, and not a candidate.
+        _thread(conn, "t-other")
+        _chunk(conn, "t-other", 0, WORD, _near(0))
+        # Surfaced, but no valid vector: not fetched, not inserted.
+        _chunk(conn, "t-w0", 9, WORD, [float("nan"), 0.0, 0.0, 0.0])
+
+    db = _rarity_db(tmp_path / "work.db", build)
+    opened: list[_CountingScratch] = []
+
+    def connect():
+        conn = sqlite3.connect(":memory:", factory=_CountingScratch)
+        conn.inserted = []
+        opened.append(conn)
+        return conn
+
+    monkeypatch.setattr(sqlite_module, "_scratch_connection", connect)
+    grouped = db.get_query_evidence_chunks(
+        f"{WORD} part {WORD}", ["t-w0", "t-w1", "t-w2"], _QUERY_VEC, 99
+    )
+    fetched = sum(len(chunks) for chunks in grouped.values())
+    assert fetched == 4 + 5 + 6
+    [scratch] = opened
+    assert scratch.inserted == [("INSERT INTO units", 2), ("INSERT INTO candidates", fetched)]
+
+
+def test_no_query_words_skips_the_scratch_connection(kw_db, monkeypatch):
+    def connect():
+        raise AssertionError("scratch opened")
+
+    monkeypatch.setattr(sqlite_module, "_scratch_connection", connect)
+    chunks = _select(kw_db, "?! ,;", "t-long")
+    assert _labels(chunks) == ["vector"] * 6
+
+
 # --- work-growth gate ------------------------------------------------------
 
 
@@ -316,11 +679,6 @@ def _measure(monkeypatch, fn) -> tuple[int, object]:
     return steps[0], result
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="#1262: the thread-driven message_chunks_fts seek grows with the "
-    "index's segment count; #1246's candidate-only lookup passes",
-)
 def test_lookup_work_stays_flat_while_chunk_lane_grows(tmp_path, monkeypatch):
     """The acceptance gate (#858, #1262): the evidence lookup reads only the
     surfaced threads' chunks, so its VM steps, on every connection it uses,
@@ -450,16 +808,44 @@ def test_every_consumer_gets_the_keyword_passage(long_db, tool):
 # --- failure and budget ------------------------------------------------------
 
 
-def test_failed_lookup_keeps_selection_and_is_visible(long_db, monkeypatch, caplog):
+class _FailingScratch(sqlite3.Connection):
+    """Raises, with mail-like text in the message, on the statement
+    holding ``fail_on``."""
+
+    fail_on = ""
+    error: type[sqlite3.Error] = sqlite3.OperationalError
+
+    def execute(self, sql, params=(), /):
+        if self.fail_on in sql:
+            raise self.error(f"fts5: syntax error near {MARKER}")
+        return super().execute(sql, params)
+
+    def executemany(self, sql, rows, /):
+        if self.fail_on in sql:
+            raise self.error(f"fts5: syntax error near {MARKER}")
+        return super().executemany(sql, rows)
+
+
+@pytest.mark.parametrize(
+    ("fail_on", "error", "key"),
+    [
+        ("CREATE VIRTUAL TABLE units", sqlite3.OperationalError, "OperationalError"),
+        ("INSERT INTO candidates", sqlite3.DatabaseError, "DatabaseError"),
+        ("MATCH", sqlite3.IntegrityError, "other"),
+    ],
+)
+def test_failed_lookup_keeps_selection_and_is_visible(
+    long_db, monkeypatch, caplog, fail_on, error, key
+):
     caplog.set_level(logging.INFO)
-    real = long_db._fetchall
 
-    def fetchall(sql, params=()):
-        if "CROSS JOIN message_chunks_fts" in sql:
-            raise sqlite3.OperationalError(f"no such table {MARKER}")
-        return real(sql, params)
+    def connect():
+        conn = sqlite3.connect(":memory:", factory=_FailingScratch)
+        conn.fail_on = fail_on
+        conn.error = error
+        return conn
 
-    monkeypatch.setattr(long_db, "_fetchall", fetchall)
+    monkeypatch.setattr(sqlite_module, "_scratch_connection", connect)
     server = FakeMCPServer()
     register_search_tools(server, long_db, FakeEmbedClient())
     for _ in range(3):
@@ -477,7 +863,7 @@ def test_failed_lookup_keeps_selection_and_is_visible(long_db, monkeypatch, capl
         if r.levelno == logging.WARNING and "Keyword passage lookup" in r.getMessage()
     ]
     # Rate-limited: one line for three failures in the window.
-    assert warnings == ["Keyword passage lookup failed; keeping vector order: OperationalError"]
+    assert warnings == [f"Keyword passage lookup failed; keeping vector order: {key}"]
     timing = [r.getMessage() for r in caplog.records if r.name == "mcp.timings"]
     assert len(timing) == 3
     assert all("'degraded_keyword_chunks': 1" in line for line in timing)

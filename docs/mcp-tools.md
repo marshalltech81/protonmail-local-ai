@@ -273,6 +273,12 @@ tool=search_emails outcome=ok total_ms=41.7 stages_ms={'query_embedding': 22.4, 
   `from_name_matches_capped` is 1 when more than 10 matched
   ([Resolving `from_name`](#search_emails)). Numbers only: the
   addresses are never logged.
+- `keyword_units_unranked` (the tools that select evidence passages)
+  is the number of distinct query words past the 16 the keyword
+  passage ranking compares; those words still make a passage a keyword
+  match but do not rank it, and a rate-limited `Keyword passage
+  ranking used the first 16 distinct query words` WARNING says so
+  ([#1246](https://github.com/marshalltech81/protonmail-local-ai/issues/1246)).
 - `evidence_filtered` is 1 when a `get_evidence` call used a
   [precision control](#precision-controls) or `dedupe_attachments`. With `scope=in_scope`,
   `evidence_context_dropped` counts the `context` passages left out and
@@ -756,8 +762,9 @@ against the query the way `ask_mailbox` ranks them
 
 1. the first chunk of an attachment whose filename or MIME type the
    query matches, if one does;
-2. the chunk nearest the query whose text holds a word of the query,
-   unless the first chunk already does;
+2. the chunk holding the query words that are rarest in that thread
+   (nearest the query on a tie), unless that is the first chunk
+   ([#1246](https://github.com/marshalltech81/protonmail-local-ai/issues/1246));
 3. the rest: the matched attachments' chunks (strongest match first),
    then the thread's other attachment chunks, then body chunks, each
    group by vector distance. With no attachment match, by vector
@@ -765,8 +772,10 @@ against the query the way `ask_mailbox` ranks them
 
 Each chunk's `selected_by` says why it qualified: `keyword_match` (its
 text holds a word of the query; this wins when both apply),
-`attachment_match` or `vector`. Query words are OR'd, so with a common
-word in the query most chunks are keyword matches. At `limit=6` the result is
+`attachment_match` or `vector`. A word in every chunk of the thread
+does not count toward the ranking, and only the first 16 distinct
+query words are ranked (later ones still make a chunk a keyword
+match). At `limit=6` the result is
 the slice `ask_mailbox` gives its model for that thread. This path
 bypasses RRF fusion, so `include_scores` shows per-chunk vector
 distance but no lane provenance. A `thread_id` whose thread was reaped
@@ -1699,8 +1708,8 @@ Each thread gives at most six passages (`PROMPT_EVIDENCE_CHUNKS_PER_THREAD`),
 then cut to the per-thread prompt budget, ordered by similarity to the
 question, not by position. When the question matches one of the
 thread's attachments by filename or MIME type, that attachment's first
-chunk comes first. The nearest chunk holding a word of the question
-comes next, unless the first one already holds one (#858). The rest
+chunk comes first. The chunk holding the question's rarest words in
+that thread comes next, unless it is the first one (#858, #1246). The rest
 follow: that attachment's chunks, then the thread's other attachment
 chunks, then body chunks, each group by similarity, so attachments can
 fill every slot but the keyword one before a body message. The budget

@@ -1488,13 +1488,13 @@ def test_evidence_descriptions_warn_passages_can_stop_before_a_resolution(tool, 
     )
     # Review round 8 (owner), and #858: the full order of
     # ``get_evidence_chunks_for_threads``. The named attachment's first
-    # passage and the nearest keyword-matched passage lead; then the
-    # rest of that attachment, the thread's other attachments, then the
-    # body, each by similarity.
+    # passage and the best-ranked keyword-matched passage (#1246) lead;
+    # then the rest of that attachment, the thread's other attachments,
+    # then the body, each by similarity.
     assert (
         f"when the {asked} matches one of its attachments' filename or MIME type, "
-        "that attachment's first passage, then the nearest passage holding a word "
-        f"of the {asked}" in doc
+        "that attachment's first passage, then the passage holding the rarest words "
+        f"of the {asked} in that thread" in doc
     )
     assert (
         "The rest of that attachment follows, then its other attachments, then the "
