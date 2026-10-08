@@ -1089,10 +1089,15 @@ def register_retrieval_tools(server, db):
         intended person's exact address once resolved. Report truncated
         headers or unresolved identities as limits; ask the user if
         identity remains ambiguous rather than combining namesakes.
-        For outstanding-item questions,
-        check for completion, corrections and reopening in different threads and
-        senders before calling an item open or closed. A sent request or
-        delivered advice does not establish that the action was completed.
+        For outstanding-item questions, check for completion, corrections,
+        reopening and later guidance in different threads and senders before
+        calling an item open or closed. A message in Sent supports only that
+        it was transmitted. Only a message that explicitly acknowledges that
+        transmission supports receipt; a later reply in the same thread does
+        not, as it may answer something else. Neither establishes that the
+        action was carried out; nor does a sent request or delivered advice.
+        Label each finding confirmed, proposed or unverified, with message
+        references.
         State the scope and any unread pages, missing indexed bodies or
         unavailable attachment text instead of claiming full coverage.
 

@@ -131,6 +131,26 @@ def test_exhaustive_workflow_guidance_is_in_registered_descriptions(tool, guidan
     assert guidance in description
 
 
+@pytest.mark.parametrize("tool", ["query_messages", "search_emails"])
+@pytest.mark.parametrize(
+    "guidance",
+    [
+        "later guidance in different threads and senders before calling an item open or closed",
+        "A message in Sent supports only that it was transmitted.",
+        "Only a message that explicitly acknowledges that transmission supports receipt;",
+        "a later reply in the same thread does not, as it may answer something else.",
+        "Neither establishes that the action was carried out;",
+        "Label each finding confirmed, proposed or unverified, with message references.",
+    ],
+)
+def test_verification_recipe_is_in_the_client_visible_description(tool, guidance) -> None:
+    # #1237: FastMCP sends only the docstring before ``Args:`` (#1011),
+    # so the recipe must sit there for a client to receive it.
+    doc = inspect.getdoc(_registered_tools()[tool]) or ""
+    client_visible = " ".join(doc.split("\nArgs:", 1)[0].split())
+    assert guidance in client_visible
+
+
 def test_every_scenario_has_one_reference_trace() -> None:
     traced = [t["scenario"] for t in TRACES]
     assert sorted(traced) == sorted(SCENARIOS)
