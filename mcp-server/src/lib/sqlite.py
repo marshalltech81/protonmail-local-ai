@@ -953,8 +953,9 @@ class MessagePage:
     ``indeterminate`` counts the messages the predicates could neither
     accept nor reject (#1085): no leaf false, some leaf unknown because
     it cannot be decided (``Evaluability.UNKNOWN_WHEN_NULL``: a size bound
-    on a message without a stored size, a sender or participant filter
-    on one whose ``sender_ambiguous`` is not 0, a bound or the ordering under
+    on a message without a stored size, a sender, participant or
+    authority filter on one whose ``sender_ambiguous`` is not 0 (outside
+    Spam, for authority), a bound or the ordering under
     ``date_basis=occurred`` on one without a delivery time). They are in
     neither ``total_matches`` nor the pages.
     """
@@ -3656,7 +3657,9 @@ class Database:
           is left out and counted as indeterminate, as above.
         - ``authority_class``: the class the indexer gave the message's
           From sender (``AUTHORITY_CLASSES``); a message in
-          ``AUTHORITY_EXCLUDED_FOLDERS`` never matches.
+          ``AUTHORITY_EXCLUDED_FOLDERS`` never matches, and any other
+          whose ``sender_ambiguous`` is not 0 is counted as
+          indeterminate (#1161).
 
         Raises ``ValueError`` for an invalid date, a ``text`` with no
         words or more than ``_MAX_TEXT_TERMS``, an unavailable or

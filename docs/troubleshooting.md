@@ -833,7 +833,7 @@ kind of reindex that needs depends on whether search data changes too:
   the extraction cache). Search keeps working throughout; the data the
   release adds is missing for a message until its reparse runs (after
   the release that added `sender_ambiguous`, `query_messages` counts
-  such a message as `indeterminate` under a sender filter,
+  such a message as `indeterminate` under a sender or authority filter,
   `docs/mcp-tools.md` "Sender attribution"). New
   mail, recovery and re-extraction jobs go ahead of the reparse, which
   still advances at least one message per batch, so the queue
@@ -1750,7 +1750,8 @@ stopped at `address_fields`). It logs one WARNING, `parser kept the first
 of <n> From headers in <path>; sender ambiguous, no source authority or
 subject-fallback threading`, and counts as
 `parser_sender_ambiguous_messages`. Such a message never matches an
-`authority_class` filter and is never joined to a thread by subject
+`authority_class` filter (`query_messages` counts it as
+`indeterminate` unless it is in Spam) and is never joined to a thread by subject
 alone (`In-Reply-To` and `References` still apply);
 `docs/mcp-tools.md`, "Sender attribution", says what clients see. These
 lines share the 20-per-5-minutes limit above, and name only the path

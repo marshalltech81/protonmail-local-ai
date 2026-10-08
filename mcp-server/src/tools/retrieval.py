@@ -278,7 +278,10 @@ def _projected(result: CallToolResult, fields: frozenset[str] | None) -> CallToo
 # Why a query_messages filter can leave a message undecided, by the
 # filters that can: fixed text for the prose ``indeterminate`` line.
 _INDETERMINATE_CAUSES: tuple[tuple[frozenset[str], str], ...] = (
-    (frozenset({"sender", "participant"}), "sender ambiguous or not yet checked"),
+    (
+        frozenset({"sender", "participant", "authority_class"}),
+        "sender ambiguous or not yet checked",
+    ),
     (frozenset({"size_min", "size_max"}), "no stored size"),
 )
 
@@ -906,9 +909,10 @@ def register_retrieval_tools(server, db):
         ``total_matches`` counts the messages the filters definitely
         match; it is the complete count only when ``indeterminate`` is
         0. ``indeterminate`` counts messages a filter could not decide
-        (a size bound on a message without a stored size; a sender or
-        participant filter on a message whose sender is ambiguous or not
-        yet checked, as mail indexed before an upgrade is until its
+        (a size bound on a message without a stored size; a sender,
+        participant or authority_class filter on a message whose sender
+        is ambiguous or not yet checked, as mail indexed before an
+        upgrade is until its
         reparse runs); they are in neither ``total_matches`` nor
         the pages, so report ``indeterminate`` with any count when it is
         not 0.
@@ -1011,7 +1015,9 @@ def register_retrieval_tools(server, db):
                              "management", "vendor", "government",
                              "personal", "other", or "unclassified"
                              (no rule matched). Spam-folder messages
-                             never match.
+                             never match; any other message whose
+                             sender is ambiguous or not yet checked is
+                             counted as indeterminate.
             seen: True for messages read in Proton, False for unread.
             flagged: True for flagged (starred) messages, False for the rest.
             replied: True for messages answered in Proton, False for the rest.
@@ -1032,8 +1038,8 @@ def register_retrieval_tools(server, db):
             ID), and paging state. ``indeterminate``, stated whenever
             non-zero, counts messages the filters could neither accept
             nor reject (no stored size under a size bound; a sender whose
-            attribution is ambiguous or not yet checked under a sender or
-            participant filter); they are in neither
+            attribution is ambiguous or not yet checked under a sender,
+            participant or authority_class filter); they are in neither
             total_matches nor the pages, so a count is complete only
             when it is 0.
         """
