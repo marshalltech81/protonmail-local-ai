@@ -34,6 +34,7 @@ from .predicates import (
     InvalidFilterError,
     Leaf,
     _addr_matches,
+    _given,
     _normalize_date_range,
     _substring_participant_rows,
     address_match_mode,
@@ -1801,6 +1802,7 @@ class Database:
         date_to: str | None = None,
         extracted_only: bool = False,
         limit: int = 20,
+        sender: str | None = None,
     ) -> list[AttachmentResult]:
         """Search indexed attachments by filename, MIME type, and extracted text.
 
@@ -1819,14 +1821,16 @@ class Database:
         includes the whole day); ``extracted_only`` keeps only
         attachments whose text extraction succeeded; ``from_addr`` keeps
         only attachments on threads the address sent on (matched against
-        the thread's From-line senders, post-query in Python). A blank
-        ``content_type`` is no filter, normalized here once so every lane
-        applies the same rule.
+        the thread's From-line senders, post-query in Python); ``sender``
+        keeps only attachments whose carrying message's From matches, by
+        ``query_messages``' ``sender`` leaf, in SQL in every lane
+        (#1056). A blank ``content_type`` or ``sender`` is no filter,
+        normalized here once so every lane applies the same rule.
         """
         if content_type is not None and not content_type.strip():
             content_type = None
         extra_clauses, extra_params = self._attachment_filter_clauses(
-            content_type, date_from, date_to, extracted_only
+            content_type, date_from, date_to, extracted_only, _given(sender)
         )
         # ``from_addr`` is matched in Python against the parent thread's
         # senders (the attachments table carries no sender column).
@@ -1866,6 +1870,7 @@ class Database:
         date_from: str | None,
         date_to: str | None,
         extracted_only: bool,
+        sender: str | None = None,
     ) -> tuple[list[str], list]:
         """Build the SQL WHERE fragment shared by every attachment lane.
 
@@ -1902,6 +1907,17 @@ class Database:
             # extraction row at all (status reads NULL) — the intent of
             # "only attachments whose text I could actually read".
             clauses.append("e.extraction_status = 'success'")
+        if sender:
+            # The carrying message's From through the ``sender`` leaf
+            # ``query_messages`` compiles (#1056), so both tools share
+            # one match rule. A leaf unknown for the message keeps the
+            # attachment out, as it keeps the message off a page.
+            sender_sql, sender_params = compile_leaves([Leaf("sender", sender)])
+            clauses.append(
+                "EXISTS (SELECT 1 FROM messages m WHERE m.claimant_id = a.claimant_id "  # nosec B608
+                f"AND {sender_sql})"
+            )
+            params += sender_params
         return clauses, params
 
     def _attachment_filename_lane(

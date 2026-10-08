@@ -429,7 +429,7 @@ different filters"), never read against them.
 
 | Leaf | Value | Built by | Matches a message when |
 |---|---|---|---|
-| `sender` | address, domain or name fragment | `query_messages` `sender`; `search_emails` `from_addr` and the tools that share it | its From role carries the value ([address matching](#query_messages)) |
+| `sender` | address, domain or name fragment | `query_messages` `sender`; `search_attachments` `sender`, on the carrying message; `search_emails` `from_addr` and the tools that share it | its From role carries the value ([address matching](#query_messages)) |
 | `recipient` | address, domain or name fragment | `query_messages` `recipient` | its To or Cc role carries the value |
 | `participant` | address, domain or name fragment | `participant` on `query_messages`, `search_emails` and the tools that share it | any role carries the value |
 | `subject` | text | `query_messages` `subject` | its own subject contains the text, casefolded |
@@ -789,6 +789,18 @@ or approved scope and ask before expanding it. There is no exact total.
 `from_addr` selects threads, so previews can come from other participants;
 include that conversation scope in the disclosure.
 
+`sender` (#1056) keeps only attachments whose carrying message's From
+matches, by the `sender` leaf `query_messages` uses
+([Filter predicates](#filter-predicates)): a full address matches
+exactly, anything else is a case-insensitive substring of the address
+or display name, and a message's `sender_ambiguous` is treated as
+there ([Sender attribution](#sender-attribution)). It is applied in
+each lane's SQL before the lane's limit, so unlike `from_addr` it does
+not depend on a candidate window. Each result's `senders` is still its
+thread's senders, not the carrying message's From. The response does
+not say which match mode applied or how many distinct addresses
+matched; `query_messages(sender=..., has_attachments=true)` does.
+
 Check `extraction_status`: any value other than `success` (`failed`,
 `unsupported`, `too_large`, `empty` or null) means no extracted text is
 available, not absence of relevant content. To assess coverage,
@@ -798,13 +810,15 @@ files whose filename and MIME type do not match. There is no pagination beyond
 the 50-result cap. Report limited results and unread document text as
 coverage limits rather than claiming an exhaustive attachment audit.
 With `from_addr`, sender filtering happens after a bounded candidate scan,
-so even fewer than 50 results (including zero) can omit matching attachments.
+so even fewer than 50 results (including zero) can omit matching attachments
+([#1196](https://github.com/marshalltech81/protonmail-local-ai/issues/1196)).
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `query` | string | none | Match against filename, MIME type, and extracted text; omit to list by filter alone |
 | `content_type` | string | none | Exact MIME-type filter, e.g. `application/pdf`; blank means no filter |
 | `from_addr` | string | none | Restrict to attachments on threads sent by this address or domain |
+| `sender` | string | none | Restrict to attachments whose carrying message is From this address, domain or name fragment, matched as `query_messages` `sender`; blank means no filter |
 | `date_from` | string | none | ISO 8601 date lower bound on the carrying message's effective time (`occurred_at`, else `sent_at`) |
 | `date_to` | string | none | ISO 8601 date upper bound. Date-only bounds are UTC days; give an offset for a local-time bound. `date_bounds` echoes the UTC instants applied, as in `search_emails` |
 | `extracted_only` | bool | `false` | Return only attachments whose text extraction succeeded |
@@ -1816,7 +1830,9 @@ mail a population run will read; the steps are not sent to clients:
    the calling model, and each extracted thread is one model call
    whose passages reach the inference provider.
 2. Enumerate the attachments with `search_attachments`, a lexical
-   match on the material code or its description, plus `from_addr`
+   match on the material code or its description, plus `sender` (the
+   vendor's address, matched on the message carrying each attachment;
+   `from_addr` would take every attachment in the vendor's threads)
    and `content_type` where they help, and `limit=50` (the default,
    20, would look like a window under the cap). There is no
    pagination, so split the period into `date_from` / `date_to`
@@ -1838,11 +1854,12 @@ mail a population run will read; the steps are not sent to clients:
    window, so a January invoice in a thread with a June reply is listed
    for January but can be extracted (and take one of the `limit`
    slots) in June. Set `limit` to at least the window's thread count.
-   `participant` and `from_addr` select whole threads, so attachments
-   carried by other people's messages in the vendor's threads are
-   enumerated and extracted too: check a record's sender from its
-   citation's `sender` before counting it. That `sender`, like the
-   `from_addr` and `participant` filters, is the claimed From address:
+   `participant` selects whole threads, so attachments carried by
+   other people's messages in the vendor's threads are extracted too,
+   though step 2's `sender` leaves them out of the enumeration: check
+   a record's sender from its citation's `sender` before counting it.
+   That `sender`, like the `sender` and `participant` filters, is the
+   claimed From address:
    the index does not authenticate senders and Spam stays searchable
    (`docs/architecture.md`, "Known limitation"), so a forged From
    matches too. Counting a record as the vendor's mail needs
@@ -1868,8 +1885,8 @@ Limits the recipe does not remove:
 
 - `search_attachments` leaves out Trash and attachments whose text
   extraction did not succeed and whose filename and MIME type do not
-  match; its `from_addr` filter runs after a bounded candidate scan,
-  so even a window under 50 can miss matches.
+  match; its `from_addr` filter (not `sender`) runs after a bounded
+  candidate scan, so a window under 50 filtered by it can miss matches.
 - Each thread's passages are chosen by similarity to `query` (with
   the exceptions under `ask_mailbox`) and cut to a budget, so an invoice page whose line is not near the query
   can be missing from a searched thread

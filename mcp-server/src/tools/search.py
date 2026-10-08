@@ -1145,6 +1145,7 @@ def register_search_tools(
         query: str | None = None,
         content_type: str | None = None,
         from_addr: str | None = None,
+        sender: str | None = None,
         date_from: str | None = None,
         date_to: str | None = None,
         extracted_only: bool = False,
@@ -1178,6 +1179,8 @@ def register_search_tools(
         before expanding it. The tool does not report an exact total.
         ``from_addr`` selects threads, so previews can come from other
         participants; include that conversation scope in the disclosure.
+        ``sender`` instead keeps only attachments the address's own
+        messages carried.
 
         Check each result's ``extraction_status``: anything other than
         ``success`` (``failed``, ``unsupported``, ``too_large``, ``empty`` or null)
@@ -1190,6 +1193,7 @@ def register_search_tools(
         as coverage limits; do not claim an exhaustive attachment audit.
         With ``from_addr``, the sender filter runs after a bounded candidate
         scan: even fewer than 50 results (including zero) can omit matches.
+        ``sender`` is applied inside the search, before the cap.
 
         Args:
             query: Text to match against filename, MIME type, and
@@ -1199,6 +1203,12 @@ def register_search_tools(
             from_addr: Restrict to attachments on threads sent by this
                        address or domain ("jane@example.com",
                        "@example.com").
+            sender: Restrict to attachments whose message carrying the
+                    attachment is From this address, matched as
+                    query_messages matches its ``sender``: a full
+                    address exactly, anything else ("@example.com",
+                    "Jane") as a case-insensitive substring of the
+                    address or display name.
             date_from: ISO 8601 date lower bound on the message
                        carrying the attachment: its delivery date
                        (occurred_at), else its send date (sent_at).
@@ -1224,6 +1234,7 @@ def register_search_tools(
                 "query": query,
                 "content_type": content_type,
                 "from_addr": from_addr,
+                "sender": sender,
                 "date_from": date_from,
                 "date_to": date_to,
                 "extracted_only": extracted_only,
@@ -1244,6 +1255,7 @@ def register_search_tools(
                     query=query,
                     content_type=content_type,
                     from_addr=from_addr,
+                    sender=sender,
                     date_from=date_from,
                     date_to=date_to,
                     extracted_only=extracted_only,
