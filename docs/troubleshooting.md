@@ -831,7 +831,10 @@ kind of reindex that needs depends on whether search data changes too:
   `reparse` at startup; the indexer re-reads each file and rewrites its
   per-message rows, with no embedding calls (attachment text comes from
   the extraction cache). Search keeps working throughout; the data the
-  release adds is missing for a message until its reparse runs. New
+  release adds is missing for a message until its reparse runs (after
+  the release that added `sender_ambiguous`, `query_messages` counts
+  such a message as `indeterminate` under a sender filter,
+  `docs/mcp-tools.md` "Sender attribution"). New
   mail, recovery and re-extraction jobs go ahead of the reparse, which
   still advances at least one message per batch, so the queue
   heartbeat's `oldest_due_age` grows while it runs without meaning

@@ -403,8 +403,12 @@ Only `false` qualifies for the `authority_class` filters: `true` and
 `null` never match any class, `unclassified` included, because the
 author cannot be told. So right after the upgrade the `authority_class`
 filters match fewer messages, and none at first, until the reparse
-drains (`get_mailbox_status` shows the queue). The `from` rows are kept, so
-the `sender` filters still find the message. The prose of
+drains (`get_mailbox_status` shows the queue). The `from` rows are kept,
+but `query_messages`' `sender` filter cannot decide such a message: it
+counts it as `indeterminate`, not as a match, and `participant` does
+the same unless the value is in its To or Cc
+([#1153](https://github.com/marshalltech81/protonmail-local-ai/issues/1153);
+[unknown values](#filter-predicates)). The prose of
 `get_message` adds a `Sender:` line, and a `query_messages` row the
 words `sender ambiguous` or `sender not yet checked`, unless the value is `false`.
 In an intelligence prompt the passage header's sender is followed by
@@ -412,6 +416,9 @@ In an intelligence prompt the passage header's sender is followed by
 checked)`, and the prose `Citations:` list repeats the note.
 `find_contact` is unchanged, and `search_emails` decides its sender
 filters on the thread's recorded senders as before (#1154).
+`search_attachments` `sender` leaves such a message's attachments out,
+and the evidence-scope labels mark its passages `context`
+([in scope or context](#evidence-scope-in-scope-or-context)).
 
 ## Filter predicates
 
@@ -429,9 +436,9 @@ different filters"), never read against them.
 
 | Leaf | Value | Built by | Matches a message when |
 |---|---|---|---|
-| `sender` | address, domain or name fragment | `query_messages` `sender`; `search_attachments` `sender`, on the carrying message; `search_emails` `from_addr` and the tools that share it | its From role carries the value ([address matching](#query_messages)) |
+| `sender` | address, domain or name fragment | `query_messages` `sender`; `search_attachments` `sender`, on the carrying message; `search_emails` `from_addr` and the tools that share it | its From role carries the value ([address matching](#query_messages)); unknown when its `sender_ambiguous` is not `false` ([Sender attribution](#sender-attribution)) |
 | `recipient` | address, domain or name fragment | `query_messages` `recipient` | its To or Cc role carries the value |
-| `participant` | address, domain or name fragment | `participant` on `query_messages`, `search_emails` and the tools that share it | any role carries the value |
+| `participant` | address, domain or name fragment | `participant` on `query_messages`, `search_emails` and the tools that share it | its To or Cc role carries the value, or its From role does as for `sender` (SQL three-valued OR: unknown when To and Cc do not and `sender` is unknown) |
 | `subject` | text | `query_messages` `subject` | its own subject contains the text, casefolded |
 | `text` | words | `query_messages` `text` | every word occurs in its indexed body (FTS, stemmed; at most 16 words) |
 | `folder` | folder names | `query_messages` `folder`; `search_emails` `folders` | it is filed in one of them |
@@ -456,7 +463,10 @@ different filters"), never read against them.
 A leaf over a field the index can hold as NULL (`occurred_at` for a
 message without a parseable delivery date, `size_bytes` for one whose
 file size was not recorded) is neither true nor false of such a
-message. The leaves conjoin with SQL's three-valued AND: a message is
+message, and so is `sender` (and the From side of `participant`) of a
+message whose `sender_ambiguous` is `true` or `null`, whether or not
+its stored From carries the value, since its author cannot be told
+([#1153](https://github.com/marshalltech81/protonmail-local-ai/issues/1153)). The leaves conjoin with SQL's three-valued AND: a message is
 a match when every leaf is true, rejected when any leaf is false, and
 otherwise *indeterminate*: left out of the matches and of
 `total_matches`, and counted in the response's `indeterminate` field,
@@ -793,8 +803,14 @@ include that conversation scope in the disclosure.
 matches, by the `sender` leaf `query_messages` uses
 ([Filter predicates](#filter-predicates)): a full address matches
 exactly, anything else is a case-insensitive substring of the address
-or display name, and a message's `sender_ambiguous` is treated as
-there ([Sender attribution](#sender-attribution)). It is applied in
+or display name. A carrying message the leaf cannot decide (its
+`sender_ambiguous` is `true` or `null`, [Sender
+attribution](#sender-attribution)) keeps its attachments out of the
+results, and this tool does not count them ([#1204](https://github.com/marshalltech81/protonmail-local-ai/issues/1204)); right after the upgrade
+that added `sender_ambiguous`, that is all mail indexed before it until
+the reparse drains, and
+`query_messages(sender=..., has_attachments=true)` reports them as
+`indeterminate`. It is applied in
 each lane's SQL before the lane's limit, so unlike `from_addr` it does
 not depend on a candidate window. Each result's `senders` is still its
 thread's senders, not the carrying message's From. The response does
@@ -1141,9 +1157,20 @@ and `has_more`; when more remain it includes `next_cursor`. The
 structured output always carries `indeterminate`, the number of
 messages the filters could neither accept nor reject ([unknown
 values](#filter-predicates)); the prose states it whenever it is not
-0. `total_matches` counts the definite matches: it is the complete
-count only when `indeterminate` is 0, so report `indeterminate` with
-any count when it is not. Each
+0, naming the causes the given filters can have (`no stored size` for
+`size_min` / `size_max`; `sender ambiguous or not yet checked` for
+`sender` / `participant`). `total_matches` counts the definite matches:
+it is the complete count only when `indeterminate` is 0, so report
+`indeterminate` with any count when it is not. A `sender` filter
+decides only messages whose `sender_ambiguous` is `false`, and a
+`participant` filter decides the others only through To or Cc
+([Sender attribution](#sender-attribution)). Right after the upgrade
+that added `sender_ambiguous`, mail indexed before it is `null` until
+its queued reparse runs, so every `sender` filter reports those
+matches as `indeterminate` (and `participant` those it finds only in
+From) until the reparse drains (`get_mailbox_status` `queue.reparse`);
+a message whose indexing job is dead-lettered stays indeterminate
+until `make requeue-dead`. Each
 message carries its send and delivery dates, folder, read state,
 [pending deletion](#pending-deletion), attachment flag, subject,
 From / To / Cc (at most 10 per role, with a count of the rest),
@@ -1497,7 +1524,14 @@ metadata, at query time (`Database.message_scope`, no schema change):
   `participant` in its From, To or Cc; its effective time
   (`occurred_at`, else `sent_at`) within `date_from` / `date_to`; and
   the folder it is filed in within `folders`, or, without `folders`,
-  any folder but Trash.
+  any folder but Trash. A message `query_messages` would count as
+  `indeterminate` (a `from_addr` filter, or a `participant` filter not
+  met through To or Cc, on a message
+  whose `sender_ambiguous` is not `false`, [Sender
+  attribution](#sender-attribution)) is not in scope, so right after
+  the upgrade that added `sender_ambiguous`, a `from_addr` request
+  labels the passages of mail indexed before it `context` until the
+  reparse drains.
 - **`context`**: any other message of a qualifying thread. A passage
   of a thread's combined text (a thread with no indexed chunks) is in
   scope only when every message of the thread is.

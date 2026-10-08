@@ -65,8 +65,11 @@ class TestAuthority:
         # The unclassified side does not gain it either: the leaf is a
         # positive class test, not a complement.
         assert "m3" not in _ids(counsel_messages_db.query_messages(authority_class="unclassified"))
-        # The from rows are kept: the sender filter still finds it.
-        assert "m3" in _ids(counsel_messages_db.query_messages(sender="jane@example.com"))
+        # The from rows are kept, but the sender filter cannot decide
+        # it either: indeterminate, not a match (#1153).
+        page = counsel_messages_db.query_messages(sender="jane@example.com")
+        assert "m3" not in _ids(page)
+        assert page.indeterminate >= 1
 
     @pytest.mark.parametrize("value", [1, None])
     def test_every_search_path_excludes_unsafe_and_unassessed(self, counsel_seeded_db, value):
@@ -118,8 +121,13 @@ class TestMessageRows:
         _set_flag(messages_db, "message_id = 'm3'", 1)
         _set_flag(messages_db, "message_id = 'm5'", None)
         register_retrieval_tools(fake_server, messages_db)
-        out = asyncio.run(fake_server.tools["query_messages"](sender="jane@example.com"))
-        rows = {m["message_id"]: m["sender_ambiguous"] for m in out.structured_content["messages"]}
+        # No sender filter: it would leave m3 and m5 undecided (#1153).
+        out = asyncio.run(fake_server.tools["query_messages"](limit=100))
+        rows = {
+            m["message_id"]: m["sender_ambiguous"]
+            for m in out.structured_content["messages"]
+            if m["message_id"] in ("m1", "m3", "m5")
+        }
         assert rows == {"m1": False, "m3": True, "m5": None}
         text = out.content[0].text
         assert "sender ambiguous" in text

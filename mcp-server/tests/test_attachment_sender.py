@@ -234,7 +234,9 @@ def shapes_db(tmp_path) -> Database:
 def test_matches_exactly_what_query_messages_sender_matches(shapes_db, value, query):
     """The carrying messages ``sender`` keeps are exactly the messages
     ``query_messages(sender=...)`` matches, whatever the value's shape
-    or the message's ``sender_ambiguous``: one compiled leaf, one rule."""
+    or the message's ``sender_ambiguous``: one compiled leaf, one rule.
+    A carrying message the leaf cannot decide (``sender_ambiguous`` 1
+    or NULL, #1153) is in neither."""
     page = shapes_db.query_messages(sender=value, limit=100)
     expected = {m.claimant_id for m in page.messages}
     found = {a.claimant_id for a in shapes_db.search_attachments(query=query, sender=value)}
@@ -243,14 +245,17 @@ def test_matches_exactly_what_query_messages_sender_matches(shapes_db, value, qu
 
 def test_the_differential_catalogue_covers_both_match_modes(shapes_db):
     """Guard the catalogue: exact and substring values both match some
-    message and some match none, across every ``sender_ambiguous`` state."""
+    message and some match none, and each matching value also has
+    messages the leaf cannot decide (``sender_ambiguous`` 1 or NULL,
+    #1153), which neither tool returns."""
     matched = {
         value: {m.claimant_id for m in shapes_db.query_messages(sender=value, limit=100).messages}
         for value in _SHAPES
     }
-    assert matched["vendor@example.com"] == {claimant_of(m) for m in ("s0", "s1", "s2")}
+    assert matched["vendor@example.com"] == {claimant_of("s0")}
     assert matched["straße"] == {claimant_of("s4")}
-    assert matched["colleague"] == {claimant_of(m) for m in ("s3", "s5", "s6")}
+    assert matched["colleague"] == {claimant_of("s3")}
+    assert shapes_db.query_messages(sender="vendor@example.com").indeterminate == 4
     assert matched["nobody@nowhere.test"] == set()
 
 

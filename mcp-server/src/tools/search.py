@@ -1208,7 +1208,10 @@ def register_search_tools(
                     query_messages matches its ``sender``: a full
                     address exactly, anything else ("@example.com",
                     "Jane") as a case-insensitive substring of the
-                    address or display name.
+                    address or display name. Attachments on messages
+                    whose sender is ambiguous or not yet checked are
+                    left out, uncounted (query_messages counts them as
+                    indeterminate).
             date_from: ISO 8601 date lower bound on the message
                        carrying the attachment: its delivery date
                        (occurred_at), else its send date (sent_at).

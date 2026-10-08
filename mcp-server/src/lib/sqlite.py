@@ -952,8 +952,9 @@ class MessagePage:
     whole set, read in the same snapshot as ``total_matches``.
     ``indeterminate`` counts the messages the predicates could neither
     accept nor reject (#1085): no leaf false, some leaf unknown because
-    its field is NULL (``Evaluability.UNKNOWN_WHEN_NULL``: a size bound
-    on a message without a stored size, a bound or the ordering under
+    it cannot be decided (``Evaluability.UNKNOWN_WHEN_NULL``: a size bound
+    on a message without a stored size, a sender or participant filter
+    on one whose ``sender_ambiguous`` is not 0, a bound or the ordering under
     ``date_basis=occurred`` on one without a delivery time). They are in
     neither ``total_matches`` nor the pages.
     """
@@ -1910,8 +1911,10 @@ class Database:
         if sender:
             # The carrying message's From through the ``sender`` leaf
             # ``query_messages`` compiles (#1056), so both tools share
-            # one match rule. A leaf unknown for the message keeps the
-            # attachment out, as it keeps the message off a page.
+            # one match rule. A leaf unknown for the message (its
+            # ``sender_ambiguous`` not 0, #1153) keeps the attachment
+            # out, as it keeps the message off a page; this tool does
+            # not count them (#1204).
             sender_sql, sender_params = compile_leaves([Leaf("sender", sender)])
             clauses.append(
                 "EXISTS (SELECT 1 FROM messages m WHERE m.claimant_id = a.claimant_id "  # nosec B608
@@ -3109,6 +3112,11 @@ class Database:
           is labelled by where it was moved to. Without ``folders``, the
           default scope: any folder but ``DEFAULT_EXCLUDED_FOLDERS``.
 
+        A message a leaf cannot decide (a sender filter on one whose
+        ``sender_ambiguous`` is not 0, #1153) is labelled context, never
+        in scope: the ``COALESCE`` below reads unknown as "not shown to
+        be in scope", not as a known miss.
+
         Labels only: nothing here selects or ranks. One connection; the
         thread list is batched under ``_IN_CLAUSE_BATCH_SIZE``.
         """
@@ -3616,7 +3624,10 @@ class Database:
         ``cursor``. Blank predicates are ignored.
 
         - ``sender`` (From), ``recipient`` (To or Cc), ``participant``
-          (any role): see ``address_match_mode``.
+          (any role): see ``address_match_mode``. The From role decides
+          only for a message whose ``sender_ambiguous`` is 0; otherwise
+          ``sender`` is unknown and ``participant`` is unless To or Cc
+          matches, and the message is counted as indeterminate (#1153).
         - ``subject``: Unicode caseless (casefolded) substring of the
           message's own subject.
         - ``text``: every word must occur in the message's indexed body

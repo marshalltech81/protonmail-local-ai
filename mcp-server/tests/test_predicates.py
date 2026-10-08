@@ -457,7 +457,7 @@ class TestLeafRegistry:
         assert kind.param in _SAMPLES, f"{name}: no sample for parameter shape {kind.param!r}"
         params: list = []
         sql = kind.compile(_SAMPLES[kind.param], params)
-        assert sql.startswith(("m.", "instr(mcp_casefold(m.", "NULLIF(m."))
+        assert sql.startswith(("m.", "instr(mcp_casefold(m.", "NULLIF(m.", "CASE WHEN m.", "(m."))
         assert sql.count("?") == len(params)
         # The fragment runs as written against the schema.
         with closing(mixed_db._connect()) as conn:
@@ -516,8 +516,9 @@ class TestCompilerAndDigest:
         )
         assert sql == " AND ".join(
             [
+                "CASE WHEN m.sender_ambiguous = 0 THEN "
                 "m.claimant_id IN (SELECT claimant_id FROM message_participants "
-                "WHERE address = ? AND role IN (?))",
+                "WHERE address = ? AND role IN (?)) ELSE NULL END",
                 "instr(mcp_casefold(m.subject), ?) > 0",
                 "m.claimant_id IN (SELECT c.claimant_id FROM message_chunks_fts f "
                 "JOIN message_chunks c ON c.fts_rowid = f.rowid "
@@ -938,7 +939,15 @@ class TestClockSizeAndRepliedLeaves:
             "AND m.replied = ? AND m.size_bytes >= ? AND m.size_bytes <= ?"
         )
         assert params == ["2024-01-01T00:00:00+00:00", "2024-12-31T23:59:59.999999+00:00", 1, 1, 2]
-        unknown_when_null = {"size_min", "size_max", "occurred_from", "occurred_to", "dated"}
+        unknown_when_null = {
+            "size_min",
+            "size_max",
+            "occurred_from",
+            "occurred_to",
+            "dated",
+            "sender",
+            "participant",
+        }
         for name, kind in LEAVES.items():
             expected = (
                 Evaluability.UNKNOWN_WHEN_NULL
