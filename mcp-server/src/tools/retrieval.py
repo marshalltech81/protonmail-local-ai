@@ -6,11 +6,11 @@ Fetch thread and message context from the local SQLite index.
 import asyncio
 import logging
 import unicodedata
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any
 
 from fastmcp.exceptions import ToolError
 from mcp.types import CallToolResult
-from pydantic import WithJsonSchema
+from pydantic import Field, WithJsonSchema
 
 # Module import: get_thread and get_message have a local named ``count``.
 from ..lib import timings
@@ -22,6 +22,7 @@ from ..lib.predicates import (
 from ..lib.rate_limited_log import ArgumentRejections, RateLimitedLog
 from ..lib.security import QUERY_MESSAGE_FIELDS, log_tool_call
 from ..lib.sqlite import (
+    EXTRACTION_STATUS_FILTERS,
     FILTER_TYPE_ERROR,
     LIST_THREAD_FILTERS,
     AmbiguousMessageId,
@@ -74,12 +75,14 @@ _MAX_QUERY_LIMIT = 100
 # query_attachments' ceiling, search_attachments' cap (#796).
 _MAX_ATTACHMENT_QUERY_LIMIT = 50
 
-# query_attachments' ``extraction_status`` values
-# (``lib/sqlite.EXTRACTION_STATUS_FILTERS``, pinned by
-# ``tests/test_query_attachments.py``), plus "" so a client that sends
-# an unset string as blank gets the blank-filter rule (Codex round 1).
-ExtractionStatusFilter = Literal[
-    "success", "empty", "unsupported", "too_large", "failed", "none", ""
+# query_attachments' ``extraction_status``: one of
+# ``lib/sqlite.EXTRACTION_STATUS_FILTERS``, or blank, with surrounding
+# whitespace allowed, checked at the schema boundary. The database
+# strips the value and ignores a blank one, as for every other filter
+# (Codex rounds 1 and 2).
+ExtractionStatusFilter = Annotated[
+    str,
+    Field(pattern=r"^\s*(?:" + "|".join(EXTRACTION_STATUS_FILTERS) + r")?\s*$"),
 ]
 
 # A ``size_min`` / ``size_max`` argument (#1085). The published schema
@@ -1363,7 +1366,7 @@ def register_retrieval_tools(server, db):
             content_type: Exact MIME type, e.g. "application/pdf".
             extraction_status: success, empty, unsupported, too_large,
                                failed, or none (no extraction recorded);
-                               blank is ignored.
+                               blank is ignored, anything else an error.
             claimant_id: Exact claimant ID of the carrying message.
             thread_id: Exact thread ID.
             limit: Attachments per page (default 20, clamped to [1, 50]).
@@ -1430,7 +1433,7 @@ def register_retrieval_tools(server, db):
         if page.indeterminate:
             # Fixed text naming the causes the given filters can have.
             causes = _indeterminate_causes(uses)
-            if extraction_status and extraction_status != "none":
+            if (extraction_status or "").strip() not in ("", "none"):
                 causes.append("no extraction recorded yet")
             lines.append(
                 f"indeterminate: {page.indeterminate} (attachments the filters could neither "

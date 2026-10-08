@@ -10,7 +10,6 @@ synthetic.
 
 import asyncio
 import logging
-from typing import get_args
 
 import pytest
 from fastmcp import Client, FastMCP
@@ -19,7 +18,7 @@ from src.lib.predicates import InvalidFilterError
 from src.lib.security import _LOGGABLE_TOOL_PARAMS
 from src.lib.sqlite import ATTACHMENT_META_CHARS, EXTRACTION_STATUS_FILTERS, Database
 from src.tools.outputs import HEADER_CHAR_LIMIT
-from src.tools.retrieval import ExtractionStatusFilter, register_retrieval_tools
+from src.tools.retrieval import register_retrieval_tools
 
 from tests.conftest import _insert_attachment, _insert_extraction, _insert_message, claimant_of
 from tests.test_sqlite import _open_built_db_conn, _snapshot_db
@@ -627,22 +626,40 @@ class TestTool:
                 )
                 # Codex round 1: a client that sends unset strings as ""
                 # gets the blank-filter rule, as for every other filter.
-                blank = await client.call_tool_mcp(
-                    "query_attachments", {"extraction_status": "", "limit": 3}
-                )
-                return tool, ok, bad, blank
+                blanks = [
+                    await client.call_tool_mcp(
+                        "query_attachments", {"extraction_status": value, "limit": 3}
+                    )
+                    for value in ("", "   ", "\t")
+                ]
+                # Codex round 2: every value the database accepts, padded
+                # or not, passes the schema; anything else does not.
+                accepted = [
+                    await client.call_tool_mcp(
+                        "query_attachments", {"extraction_status": value, "limit": 1}
+                    )
+                    for status in EXTRACTION_STATUS_FILTERS
+                    for value in (status, f" {status} ")
+                ]
+                rejected = [
+                    await client.call_tool_mcp(
+                        "query_attachments", {"extraction_status": value, "limit": 1}
+                    )
+                    for value in ("Success", "success,failed", "nonex", "pending", " - ")
+                ]
+                return tool, ok, bad, blanks, accepted, rejected
 
-        tool, ok, bad, blank = asyncio.run(run())
-        assert tool.input_schema["properties"]["extraction_status"]["anyOf"][0]["enum"] == [
-            *EXTRACTION_STATUS_FILTERS,
-            "",
-        ]
+        tool, ok, bad, blanks, accepted, rejected = asyncio.run(run())
         assert not ok.is_error
         assert ok.structured_content["returned"] == 3
         assert bad.is_error
-        assert not blank.is_error
-        assert blank.structured_content["filters"] == []
-        assert blank.structured_content["total_matches"] == 60
+        for blank in blanks:
+            assert not blank.is_error
+            assert blank.structured_content["filters"] == []
+            assert blank.structured_content["total_matches"] == 60
+        assert not any(r.is_error for r in accepted)
+        assert all(r.is_error for r in rejected)
+        assert "extraction_status" in tool.input_schema["properties"]
         # Codex round 1: the served description asks for a count and a
         # disclosure before paging metadata, and claims no reader.
         description = " ".join(tool.description.split())
@@ -697,6 +714,29 @@ class TestTool:
         tool = _handlers(fake_server, db)["query_attachments"]
         assert asyncio.run(tool(limit=500)).structured_content["returned"] == 50
         assert asyncio.run(tool(limit=0)).structured_content["returned"] == 1
+
+    def test_padded_none_names_no_extraction_cause(self, fake_server, tmp_path):
+        """A padded ``none`` is ``none``: an occurrence the sender leaf
+        cannot decide is indeterminate for the sender only."""
+        conn, path = _open_built_db_conn(tmp_path, "padded.db")
+        _insert_message(
+            conn,
+            message_id="u@x.test",
+            thread_id="t",
+            sent_at=_TIE,
+            from_=["jane@example.com"],
+            sender_ambiguous=None,
+        )
+        _insert_attachment(
+            conn, message_id="u@x.test", thread_id="t", attachment_id="p", filename="f"
+        )
+        conn.close()
+        tool = _handlers(fake_server, Database(str(path)))["query_attachments"]
+        out = asyncio.run(tool(sender="jane@example.com", extraction_status=" none "))
+        assert out.structured_content["indeterminate"] == 1
+        text = out.content[0].text
+        assert "sender ambiguous or not yet checked" in text
+        assert "no extraction recorded yet" not in text
 
     def test_empty_results_say_whether_any_are_undecided(self, fake_server, corpus):
         db, _ = corpus
@@ -757,10 +797,9 @@ class TestTool:
             asyncio.run(tool())
         assert MARKER not in caplog.text
 
-    def test_schema_enum_and_log_allowlist_are_the_database_statuses(self):
-        """The tool's schema enum and the logging allowlist are written
-        out; both must be the database's ``EXTRACTION_STATUS_FILTERS``."""
-        assert set(get_args(ExtractionStatusFilter)) == {*EXTRACTION_STATUS_FILTERS, ""}
+    def test_log_allowlist_is_the_database_statuses(self):
+        """The logging allowlist is written out; it must be the
+        database's ``EXTRACTION_STATUS_FILTERS``."""
         check = _LOGGABLE_TOOL_PARAMS["extraction_status"]
         assert all(check(v) for v in EXTRACTION_STATUS_FILTERS)
         assert not check(MARKER)

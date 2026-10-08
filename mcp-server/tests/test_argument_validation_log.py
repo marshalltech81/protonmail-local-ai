@@ -176,6 +176,21 @@ def test_the_client_error_is_unchanged(seeded_db, fastmcp_filter):
     assert [r.model_dump() for r in _call_all(_server(seeded_db), calls)] == expected
 
 
+def test_a_pattern_rejection_is_logged_per_field_without_the_value(
+    seeded_db, caplog, fastmcp_filter
+):
+    """query_attachments checks ``extraction_status`` against a pattern
+    in the schema (#796): a value it refuses is logged like a wrong type,
+    by tool and field, and the value stays out of the log."""
+    with caplog.at_level(logging.INFO):
+        [result] = _call_all(
+            _server(seeded_db), [("query_attachments", "", {"extraction_status": MARKER})]
+        )
+    assert result.is_error
+    assert "rejected invalid argument: query_attachments.extraction_status" in _warnings(caplog)
+    assert MARKER not in caplog.text
+
+
 def test_handler_and_schema_rejections_each_count_once(seeded_db, caplog, fastmcp_filter):
     """``size_min`` is checked in the handler (its own limiter);
     ``limit`` by the argument model (the middleware's). Neither is
