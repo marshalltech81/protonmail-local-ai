@@ -373,14 +373,17 @@ class Evaluability(Enum):
     message, so it is true or false of each message, never unknown.
     ``UNKNOWN_WHEN_NULL``: the field can be NULL (``size_bytes`` for a
     message whose file size was not recorded, ``occurred_at`` for one
-    without a parseable topmost ``Received:`` header). Such a message is
+    without a parseable topmost ``Received:`` header), or the leaf reads
+    it only when another field says it can be trusted (``sender`` and
+    the From side of ``participant``, when ``sender_ambiguous`` is not
+    0, #1153). Such a message is
     neither matched nor missed: the leaf's SQL yields NULL, so the
     conjunction is unknown (SQL's three-valued AND: false if any leaf is
     false, else unknown), the row is left out of the matches and of
     ``total_matches``, and ``Database.query_messages`` counts it as
     ``indeterminate`` (#1085). Every such leaf's SQL must be NULL exactly
-    when its field is, and every ``DECIDED`` leaf's 0 or 1, for that
-    count to hold. #1086 extends the rule to content evaluability.
+    when it cannot be decided, and every ``DECIDED`` leaf's 0 or 1, for
+    that count to hold. #1086 extends the rule to content evaluability.
     """
 
     DECIDED = "decided"
@@ -504,7 +507,15 @@ ADDRESS_ROLES: dict[str, tuple[str, ...]] = {
 
 
 def _compile_sender(value: str, params: list) -> str:
-    return _participant_clause(value, ADDRESS_ROLES["sender"], params)
+    # The From role decides the leaf only when the message's sender
+    # attribution is known safe (``sender_ambiguous = 0``, #1144). For 1
+    # (a repeated From, or a header scan cut short) or NULL (not
+    # assessed yet) the author cannot be told, so the leaf is unknown
+    # whether or not the stored From carries the value (#1153).
+    return (
+        "CASE WHEN m.sender_ambiguous = 0 THEN "
+        f"{_participant_clause(value, ADDRESS_ROLES['sender'], params)} ELSE NULL END"
+    )
 
 
 def _compile_recipient(value: str, params: list) -> str:
@@ -512,7 +523,10 @@ def _compile_recipient(value: str, params: list) -> str:
 
 
 def _compile_participant(value: str, params: list) -> str:
-    return _participant_clause(value, ADDRESS_ROLES["participant"], params)
+    # SQL's three-valued OR: a To or Cc match decides the leaf whatever
+    # the sender flag; otherwise the From side answers as ``sender`` does.
+    recipient = _compile_recipient(value, params)
+    return f"({recipient} OR {_compile_sender(value, params)})"
 
 
 def _compile_subject(value: str, params: list) -> str:
@@ -612,10 +626,16 @@ def _has_attachments_test(state: bool) -> Callable[[Any], bool]:
 LEAVES: dict[str, LeafKind] = {
     kind.name: kind
     for kind in (
-        LeafKind("sender", "address", _compile_sender, Evaluability.DECIDED, _sender_test),
+        LeafKind(
+            "sender", "address", _compile_sender, Evaluability.UNKNOWN_WHEN_NULL, _sender_test
+        ),
         LeafKind("recipient", "address", _compile_recipient, Evaluability.DECIDED),
         LeafKind(
-            "participant", "address", _compile_participant, Evaluability.DECIDED, _participant_test
+            "participant",
+            "address",
+            _compile_participant,
+            Evaluability.UNKNOWN_WHEN_NULL,
+            _participant_test,
         ),
         LeafKind("subject", "text", _compile_subject, Evaluability.DECIDED),
         LeafKind("text", "words", _compile_text, Evaluability.DECIDED),
