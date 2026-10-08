@@ -127,8 +127,10 @@ class TestGetMailboxStatusStandalone:
             indexer_seen_at=datetime.now(UTC).isoformat(),
         )
         monkeypatch.setenv("SQLITE_PATH", seeded_db.path)
+        monkeypatch.setenv("GIT_COMMIT", "abc1234-dirty")
         status = get_mailbox_status()
         assert status["status"] == "ok"
+        assert status["server_version"] == "abc1234-dirty"
         assert status["current"] is True
         assert status["total_threads"] == 3
         assert status["total_messages"] == 3

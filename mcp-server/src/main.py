@@ -30,6 +30,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from .lib.build_identity import git_commit as _git_commit
 from .lib.embed import DEFAULT_EMBED_TIMEOUT_SECS, EmbedClient
 from .lib.embed_identity import run_startup_identity_check
 from .lib.inference import (
@@ -60,11 +61,6 @@ log = logging.getLogger("mcp-server")
 # token or a missing index still leaves it in the log (Codex review rounds
 # 3 and 4 on #893). Every input is a raw environment string or a read that
 # never raises.
-
-# A source commit as the Makefile passes it (``git rev-parse --short
-# HEAD``, plus ``-dirty``): anything else is logged as ``unknown``, so a
-# stray value cannot add text or a line to the log.
-_GIT_COMMIT_PATTERN = re.compile(r"[0-9A-Za-z._-]{1,64}")
 
 # The settings the config hash covers, named one by one. Non-secret
 # values only (the index path, modes, endpoints, models and limits):
@@ -106,13 +102,6 @@ _IDENTITY_EXCLUDED = {
 }
 
 
-def _git_commit() -> str:
-    """The commit the image was built from (``GIT_COMMIT``, baked in by
-    the Dockerfile), or ``unknown``."""
-    value = os.environ.get("GIT_COMMIT", "").strip()
-    return value if _GIT_COMMIT_PATTERN.fullmatch(value) else "unknown"
-
-
 def _hashable_url(value: str) -> str:
     """``value`` unless it carries userinfo, so the hash cannot be used to
     test guesses at a password offline (Codex round 6 on #893). Never
@@ -150,8 +139,8 @@ def _log_startup_identity() -> None:
     random ID for this start, the schema version stamped in the index
     (``read_stored_schema_version``) and the first 12 hex digits of a
     SHA-256 over the raw ``_IDENTITY_SETTINGS`` values. The schema
-    version lives in the indexer; this service has no version of its own
-    to compare."""
+    version lives in the indexer; this service has no schema version of
+    its own to compare."""
     log.info(
         "Startup identity: service=mcp-server commit=%s boot=%s schema_stored=%s config=%s",
         _git_commit(),
@@ -914,7 +903,7 @@ def main():
     # FastMCP server — provides the @server.tool() decorator and the
     # Streamable HTTP app ``_run_server`` serves, behind the
     # ``_TRANSPORT_SECURITY`` Host/Origin allowlist.
-    server = FastMCP("protonmail-local-ai")
+    server = FastMCP("protonmail-local-ai", version=_git_commit())
 
     # Plain HTTP health endpoint used by the container healthcheck. Sits
     # outside the MCP protocol so `docker healthcheck` and operator scripts

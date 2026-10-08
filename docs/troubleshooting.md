@@ -30,6 +30,15 @@ as secrets. No other check needs or shows one.
 
 ## Which build and settings is a container running?
 
+Ask the MCP client "What version of the mail tools are you running?"
+`get_mailbox_status` returns `server_version` in both its text and structured
+output. This is the MCP server image's source commit, including `-dirty`
+for local changes, or `unknown` when build identity is unavailable. The
+same value is advertised as the MCP server's version over Streamable HTTP.
+Claude Desktop's stdio adapter advertises its own FastMCP version instead;
+use the tool's `server_version` to identify the deployed server through it.
+It does not report the indexer or mbsync build, or the database schema version.
+
 Each service logs one `Startup identity` line when it starts, before it
 parses or checks any setting, so the line is there even when startup
 then fails (a malformed setting, a missing token, a refused index or a
