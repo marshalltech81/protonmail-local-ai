@@ -99,6 +99,16 @@ def _build_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX idx_message_participants_address
             ON message_participants(address, role);
 
+        CREATE TABLE message_participant_names (
+            claimant_id TEXT NOT NULL,
+            role        TEXT NOT NULL,
+            address     TEXT NOT NULL,
+            name        TEXT NOT NULL,
+            PRIMARY KEY (claimant_id, role, address, name)
+        );
+        CREATE INDEX idx_message_participant_names_address_name
+            ON message_participant_names(address, name);
+
         CREATE VIRTUAL TABLE threads_fts USING fts5(
             subject, participants, body,
             content='',
@@ -541,6 +551,13 @@ def _insert_message_record(
             "INSERT OR IGNORE INTO message_participants VALUES (?, ?, ?, ?)",
             (claimant_of(message_id, variant), role, address, name or None),
         )
+        if name:
+            # Every distinct name per (role, address), as the indexer
+            # stores them (#1140); the participant row keeps the first.
+            cur.execute(
+                "INSERT OR IGNORE INTO message_participant_names VALUES (?, ?, ?, ?)",
+                (claimant_of(message_id, variant), role, address, name),
+            )
         _insert_entity(cur, address, name)
 
 

@@ -9,11 +9,10 @@ import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from email.utils import parseaddr
 from itertools import islice
 
 from .extractors import warn_rate_limited
-from .parser import NO_SUBJECT, Message
+from .parser import NO_SUBJECT, Message, canonical_addr
 
 # Reply / forward prefixes the subject normalizer strips before grouping.
 # Hoisted to module level so the compiled regex is reused across every
@@ -53,40 +52,6 @@ _SUBJECT_PREFIX_RE = re.compile(
     re.IGNORECASE,
 )
 _SUBJECT_WHITESPACE_RE = re.compile(r"\s+")
-
-
-def canonical_addr(value: str) -> str:
-    """Normalize an address string to a lowercase bare email for matching.
-
-    RFC 2822 ``From`` / ``To`` headers can carry the same person as
-    ``Bob Smith <bob@example.com>``, ``bob@example.com``, or
-    ``"Bob S." <bob@example.com>`` — stable string comparison treats
-    those three as different participants and produces false misses for
-    subject-fallback matching and duplicate entries in participant
-    lists. ``parseaddr`` extracts the bare address; lowercasing makes
-    the match case-insensitive.
-
-    Returns an empty string when no usable email address can be
-    recovered. ``parseaddr`` is permissive and will return a first-token
-    value like ``"just"`` for a header like ``"just a name"`` — rejecting
-    results without an ``@`` keeps malformed entries from becoming their
-    own spurious "participant" and from matching other malformed entries
-    to each other.
-    """
-    if not value:
-        return ""
-    try:
-        _, addr = parseaddr(value)
-    except Exception:
-        # parseaddr recurses on nested comments; hostile input (which
-        # reaches here via thread participants and the from_addr
-        # fallback for unparseable From headers) must degrade to
-        # "no address", never abort threading.
-        return ""
-    addr = addr.strip().lower()
-    if "@" not in addr:
-        return ""
-    return addr
 
 
 # Subject-only fallback is a last-resort threading path: any two messages

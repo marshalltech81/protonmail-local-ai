@@ -271,6 +271,11 @@ class TestSenderAmbiguousMigration:
             "SELECT chunk_id FROM message_chunks ORDER BY chunk_id"
         ).fetchall()
         db._conn.execute("ALTER TABLE attachment_extractions DROP COLUMN ocr_pages_skipped")
+        db._conn.execute("DROP TABLE message_participant_names")
+        db._conn.execute(
+            "CREATE INDEX idx_message_participants_address_name "
+            "ON message_participants(address, name)"
+        )
         db._conn.execute("ALTER TABLE messages DROP COLUMN sender_ambiguous")
         db._conn.execute("UPDATE schema_version SET version = 1")
         db._conn.commit()
@@ -299,6 +304,83 @@ class TestSenderAmbiguousMigration:
         assert (
             db._conn.execute("SELECT chunk_id FROM message_chunks ORDER BY chunk_id").fetchall()
             == chunks_before
+        )
+        assert MARKER not in caplog.text
+        db.close()
+
+
+class TestParticipantNamesMigration:
+    """#1140: the real v3 -> v4 migration seeds
+    ``message_participant_names`` with each participant's stored first
+    name and queues the reparse, which adds the other names with no
+    embedding call, chunkless threads included."""
+
+    def test_backfill_through_the_reparse(self, tmp_path, caplog):
+        caplog.set_level(logging.DEBUG)
+        db, queue, paths = _index(tmp_path, ["one", None])
+        # Both messages write bob under two names.
+        for path in paths:
+            text = Path(path).read_text(encoding="utf-8")
+            Path(path).write_text(
+                text.replace(
+                    "To: bob@example.com",
+                    f"To: Bob <bob@example.com>, {MARKER} <bob@example.com>",
+                ),
+                encoding="utf-8",
+            )
+            queue.enqueue(path, REASON_ON_CREATED)
+        _drain(db, queue, make_mock_embedder(_VECTOR))
+        all_names = {
+            (r["claimant_id"], r["name"])
+            for r in db._conn.execute("SELECT claimant_id, name FROM message_participant_names")
+        }
+        assert {name for _, name in all_names} == {"Bob", MARKER}
+        chunks_before = db._conn.execute(
+            "SELECT chunk_id FROM message_chunks ORDER BY chunk_id"
+        ).fetchall()
+        vectors_before = db._conn.execute(
+            "SELECT thread_id, embedding FROM threads_vec ORDER BY thread_id"
+        ).fetchall()
+        # The v3 shape: no names table, the old (address, name) index.
+        db._conn.execute("DROP TABLE message_participant_names")
+        db._conn.execute(
+            "CREATE INDEX idx_message_participants_address_name "
+            "ON message_participants(address, name)"
+        )
+        db._conn.execute("UPDATE schema_version SET version = 3")
+        db._conn.commit()
+        db.close()
+
+        db = Database(tmp_path / "mail.db")
+        queue = IndexingQueue(db, max_attempts=3, base_backoff_seconds=0)
+        # Seeded with the first names only, and every file queued.
+        seeded = {
+            (r["claimant_id"], r["name"])
+            for r in db._conn.execute("SELECT claimant_id, name FROM message_participant_names")
+        }
+        assert {name for _, name in seeded} == {"Bob"}
+        assert {fp: r["reason"] for fp, r in _jobs(db).items()} == dict.fromkeys(
+            paths, REASON_REPARSE
+        )
+
+        embedder = make_mock_embedder(_VECTOR)
+        assert _drain(db, queue, embedder) == len(paths)
+        assert embedder.embed_batch.call_count == 0
+        assert embedder.embed.call_count == 0
+        after = {
+            (r["claimant_id"], r["name"])
+            for r in db._conn.execute("SELECT claimant_id, name FROM message_participant_names")
+        }
+        assert after == all_names
+        assert (
+            db._conn.execute("SELECT chunk_id FROM message_chunks ORDER BY chunk_id").fetchall()
+            == chunks_before
+        )
+        assert (
+            db._conn.execute(
+                "SELECT thread_id, embedding FROM threads_vec ORDER BY thread_id"
+            ).fetchall()
+            == vectors_before
         )
         assert MARKER not in caplog.text
         db.close()

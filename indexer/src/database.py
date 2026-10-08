@@ -11,6 +11,7 @@ import sqlite3
 import struct
 import threading
 import weakref
+from collections import Counter
 from collections.abc import Sequence
 from contextlib import contextmanager, suppress
 from datetime import UTC, datetime, timedelta
@@ -34,6 +35,7 @@ from .extractors import (
     SCANNED_PDF_OCR_DISABLED_ERROR,
 )
 from .maildir import message_state
+from .parser import participant_names
 from .queue import REASON_REPARSE, REPARSE_ENQUEUE_SQL
 from .threader import (
     FTS_SUBJECT_SCAN_CHARS,
@@ -103,7 +105,10 @@ def _dedupe_by_canonical(addrs: list[str]) -> list[str]:
 # v3 (#891): ``attachment_extractions.ocr_pages_skipped`` records the
 # scanned PDF pages the OCR cap left unread, NULL (unknown) on rows
 # cached before it (``migrations/0003_extraction_ocr_pages_skipped.sql``).
-SCHEMA_VERSION = 3
+# v4 (#1140): ``message_participant_names`` keeps every distinct display
+# name per (message, role, address), seeded from the stored first names
+# and filled by a reparse (``migrations/0004_participant_names.sql``).
+SCHEMA_VERSION = 4
 SCHEMA_APPLICATION_ID = 0x504D4149  # "PMAI"
 
 # How long a ``reaped_messages`` record outlives the reap. The record
@@ -755,10 +760,25 @@ class Database:
             );
             CREATE INDEX idx_message_participants_address
                 ON message_participants(address, role);
+            -- Every distinct display name a participant was written
+            -- with in one message (#1140); ``message_participants.name``
+            -- keeps the first. Name matching, find_contact and entity
+            -- aliases read these. Bounded per message by the parser's
+            -- ``MAX_EXTRA_PARTICIPANT_*`` budget.
+            CREATE TABLE message_participant_names (
+                claimant_id TEXT NOT NULL,
+                role        TEXT NOT NULL,
+                address     TEXT NOT NULL,
+                name        TEXT NOT NULL,
+                PRIMARY KEY (claimant_id, role, address, name),
+                FOREIGN KEY (claimant_id, role, address)
+                    REFERENCES message_participants(claimant_id, role, address)
+                    ON DELETE CASCADE
+            );
             -- The reap's alias prune asks whether any surviving row
             -- still carries an (address, display name) pair (#464).
-            CREATE INDEX idx_message_participants_address_name
-                ON message_participants(address, name);
+            CREATE INDEX idx_message_participant_names_address_name
+                ON message_participant_names(address, name);
 
             CREATE TABLE indexed_files (
                 filepath     TEXT PRIMARY KEY,
@@ -2801,6 +2821,7 @@ class Database:
                 int(msg.sender_ambiguous),
             ),
         )
+        # Cascades to the message's ``message_participant_names`` rows.
         cur.execute("DELETE FROM message_participants WHERE claimant_id = ?", (msg.claimant_id,))
         # ``from_addrs`` holds every author; ``from_addr`` alone for callers
         # that build a Message by hand.
@@ -2828,12 +2849,31 @@ class Database:
                     and len(entity_addresses) < MAX_ENTITY_PARTICIPANTS_PER_MESSAGE
                 ):
                     entity_addresses.add(address)
-                    self._write_entity(cur, address, name)
+                    self._write_entity(cur, address)
+        # Every distinct display name per (role, address) (#1140), within
+        # the parser's per-message budget; each name of an entity's
+        # address is one of its aliases.
+        names = msg.participant_names
+        if names is None:
+            names = participant_names(roles, Counter())
+        cur.executemany(
+            "INSERT INTO message_participant_names (claimant_id, role, address, name) "
+            "VALUES (?, ?, ?, ?)",
+            [(msg.claimant_id, role, address, name) for role, address, name in names],
+        )
+        cur.executemany(
+            "INSERT OR IGNORE INTO entity_aliases (entity_id, alias) VALUES (?, ?)",
+            [
+                (person_entity_id(address), name)
+                for _, address, name in names
+                if address in entity_addresses
+            ],
+        )
 
-    def _write_entity(self, cur: sqlite3.Cursor, address: str, name: str | None) -> None:
+    def _write_entity(self, cur: sqlite3.Cursor, address: str) -> None:
         """Record ``address`` as a person entity (with its organization,
-        if any) and ``name`` as one of its aliases, each classified by the
-        current authority rules. Deterministic IDs and ``ON CONFLICT``
+        if any), classified by the current authority rules. Its aliases
+        are written by the caller. Deterministic IDs and ``ON CONFLICT``
         writes make a reprocess rewrite the same rows. Runs inside
         ``_write_message_record``'s transaction."""
         rules = self._authority_rules
@@ -2858,11 +2898,6 @@ class Database:
             "authority_rule = excluded.authority_rule",
             (person_id, address, org_id, *rules.classify(address)),
         )
-        if name:
-            cur.execute(
-                "INSERT OR IGNORE INTO entity_aliases (entity_id, alias) VALUES (?, ?)",
-                (person_id, name),
-            )
 
     @_synchronized
     def set_authority_rules(self, rules: AuthorityRules) -> int:
@@ -3331,8 +3366,10 @@ class Database:
         cur: sqlite3.Cursor, claimant_ids: list[str]
     ) -> set[tuple[str, str | None]]:
         """The given messages' participants that own a person entity, as
-        distinct ``(address, alias)`` pairs (``alias`` is ``None`` when
-        the row's display name is not one of the entity's aliases). Read
+        distinct ``(address, alias)`` pairs, one per display name the
+        message stored for the address (``message_participant_names``);
+        ``alias`` is ``None`` when a name is not one of the entity's
+        aliases, or the address has no stored name. Read
         before the rows cascade away, so ``_prune_orphan_entities`` knows
         which entities and aliases the reap may have orphaned.
 
@@ -3347,8 +3384,11 @@ class Database:
                 for r in cur.execute(
                     "SELECT DISTINCT p.address, a.alias FROM message_participants p "
                     "JOIN entities e ON e.entity_id = ? || p.address "
+                    "LEFT JOIN message_participant_names n "
+                    "ON n.claimant_id = p.claimant_id AND n.role = p.role "
+                    "AND n.address = p.address "
                     "LEFT JOIN entity_aliases a "
-                    "ON a.entity_id = e.entity_id AND a.alias = p.name "
+                    "ON a.entity_id = e.entity_id AND a.alias = n.name "
                     "WHERE p.claimant_id = ?",
                     (PERSON_PREFIX, cid),
                 )
@@ -3367,8 +3407,9 @@ class Database:
 
         - a person with no participant row left is deleted, and its
           aliases with it (``ON DELETE CASCADE``);
-        - a surviving person loses each alias no remaining participant
-          row carries for its address;
+        - a surviving person loses each alias no remaining message
+          stores as a display name of its address
+          (``message_participant_names``);
         - an organization of a deleted person is deleted once no person
           belongs to it.
         """
@@ -3395,7 +3436,7 @@ class Database:
         ):
             cur.execute(
                 "DELETE FROM entity_aliases WHERE entity_id = ? AND alias = ? "
-                "AND NOT EXISTS (SELECT 1 FROM message_participants "
+                "AND NOT EXISTS (SELECT 1 FROM message_participant_names "
                 "WHERE address = ? AND name = ?)",
                 (person_entity_id(address), name, address, name),
             )

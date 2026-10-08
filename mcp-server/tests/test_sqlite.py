@@ -5851,3 +5851,81 @@ class TestEffectiveTime:
                 )
             )
         assert "idx_messages_effective" in plan
+
+
+class TestParticipantDisplayNames:
+    """#1140: a message that writes one address under two names stores
+    both (``message_participant_names``); the participant row keeps the
+    first. Name matching, matched-address reporting and find_contact
+    read every name, each on its own."""
+
+    @staticmethod
+    def _db(tmp_path) -> Database:
+        from tests.conftest import _insert_message
+
+        conn, path = _open_built_db_conn(tmp_path, "names.db")
+        _insert_message(
+            conn,
+            message_id="d1",
+            thread_id="t1",
+            sent_at="2024-01-01T09:00:00+00:00",
+            from_=["Ann <ann@one.example>", "Annabel <ANN@one.example>"],
+            to=["Kim <kim@two.example>", "Kimberly <kim@two.example>"],
+        )
+        _insert_message(
+            conn,
+            message_id="d2",
+            thread_id="t2",
+            sent_at="2024-02-01T09:00:00+00:00",
+            from_=["Lee <lee@three.example>"],
+            to=["ann@one.example"],
+        )
+        conn.close()
+        return Database(str(path))
+
+    def test_the_participant_row_keeps_the_first_name(self, tmp_path):
+        db = self._db(tmp_path)
+        page = db.query_messages(sender="ann@one.example")
+        [record] = page.messages
+        assert [(p.name, p.address) for p in record.from_] == [("Ann", "ann@one.example")]
+
+    @pytest.mark.parametrize(
+        ("field", "value", "address"),
+        [
+            ("sender", "annabel", "ann@one.example"),
+            ("recipient", "KIMBERLY", "kim@two.example"),
+            ("participant", "kimberly", "kim@two.example"),
+        ],
+    )
+    def test_a_later_name_matches_and_reports_its_address(self, tmp_path, field, value, address):
+        db = self._db(tmp_path)
+        page = db.query_messages(**{field: value})
+        assert _ids(page) == ["d1"]
+        assert page.total_matches == 1
+        assert page.address_matches[field].addresses == [address]
+
+    def test_no_match_spans_two_names(self, tmp_path):
+        db = self._db(tmp_path)
+        for value in ("ann annabel", "annannabel", "kim kimberly"):
+            page = db.query_messages(participant=value)
+            assert page.total_matches == 0, value
+            assert page.address_matches["participant"].distinct == 0
+
+    def test_find_contact_matches_and_reports_every_name(self, tmp_path):
+        db = self._db(tmp_path)
+        [contact] = db.find_contact("annabel")
+        assert contact["email"] == "ann@one.example"
+        assert contact["names"] == ["Ann", "Annabel"]
+        # The d2 recipient row counts too: every row of the address.
+        assert contact["thread_count"] == 2
+        [contact] = db.find_contact("kimberly")
+        assert contact["names"] == ["Kim", "Kimberly"]
+
+    def test_senders_only_matches_and_reports_a_later_from_name(self, tmp_path):
+        db = self._db(tmp_path)
+        [contact] = db.find_contact("annabel", senders_only=True)
+        assert contact["email"] == "ann@one.example"
+        assert contact["names"] == ["Ann", "Annabel"]
+        assert contact["thread_count"] == 1
+        # A recipient-only name is not a sender match.
+        assert db.find_contact("kimberly", senders_only=True) == []

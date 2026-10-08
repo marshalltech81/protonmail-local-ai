@@ -119,6 +119,10 @@ def test_index_is_recognized_as_synthetic(baseline_db: Database) -> None:
         "(SELECT MIN(rowid) FROM threads)",
         "UPDATE message_participants SET name = 'privatemarker' WHERE rowid = "
         "(SELECT MIN(rowid) FROM message_participants)",
+        # #1140: a display name past the first.
+        "INSERT INTO message_participant_names SELECT claimant_id, role, address, "
+        "'privatemarker' FROM message_participants WHERE rowid = "
+        "(SELECT MIN(rowid) FROM message_participants)",
         "UPDATE attachments SET filename = 'privatemarker.pdf' WHERE rowid = "
         "(SELECT MIN(rowid) FROM attachments)",
         "UPDATE messages SET subject = 'privatemarker' WHERE rowid = "

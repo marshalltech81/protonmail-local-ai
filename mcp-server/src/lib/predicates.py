@@ -324,7 +324,8 @@ def address_match_mode(value: str) -> str:
     ``"exact"`` when ``value`` holds a full address (``jane@example.com``,
     ``Jane <jane@example.com>``): canonical equality, an indexed lookup.
     ``"substring"`` otherwise (a domain like ``@example.com`` or a name
-    fragment): case-insensitive substring of the address or display name.
+    fragment): case-insensitive substring of the address or of any one
+    display name it was written with.
     """
     # Nested-comment input that makes parseaddr recurse canonicalizes to
     # "", so it can only be a substring.
@@ -343,21 +344,25 @@ def _participant_clause(value: str, roles: tuple[str, ...], params: list) -> str
             f"WHERE address = ? AND role IN ({role_sql}))"
         )
     return (
-        "m.claimant_id IN (SELECT claimant_id FROM message_participants "  # nosec B608
+        "m.claimant_id IN (SELECT p.claimant_id FROM message_participants p "  # nosec B608
         f"WHERE {_substring_participant_rows(value, roles, params)})"
     )
 
 
 def _substring_participant_rows(value: str, roles: tuple[str, ...], params: list) -> str:
-    """SQL selecting the ``message_participants`` rows in ``roles`` whose
-    address or display name contains ``value``; appends the bound values
-    to ``params``."""
+    """SQL selecting the ``message_participants p`` rows in ``roles``
+    whose address, or any one display name the message wrote it with
+    (``message_participant_names``, #1140), contains ``value``; appends
+    the bound values to ``params``. Each name is matched on its own, so
+    no match spans two names."""
     role_sql = ",".join(["?"] * len(roles))
     # Addresses are stored lowercased; names fold with ``mcp_casefold``.
     params.extend([*roles, value.strip().lower(), value.strip().casefold()])
     return (
-        f"role IN ({role_sql}) "  # nosec B608
-        "AND (instr(address, ?) > 0 OR instr(mcp_casefold(name), ?) > 0)"
+        f"p.role IN ({role_sql}) "  # nosec B608
+        "AND (instr(p.address, ?) > 0 OR EXISTS (SELECT 1 FROM message_participant_names n "
+        "WHERE n.claimant_id = p.claimant_id AND n.role = p.role AND n.address = p.address "
+        "AND instr(mcp_casefold(n.name), ?) > 0))"
     )
 
 

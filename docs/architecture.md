@@ -768,6 +768,23 @@ result (see `docs/mcp-tools.md`). `message_participants`
 normalizes From / To / Cc into one row per (message, role, address),
 with `address` canonical and lowercased and the display name kept as
 written; malformed entries with no recoverable address are skipped.
+The row's `name` is the first display name the message gave that
+address in that role. When the message writes the address under more
+than one name (twice in one header, or again under a later role), every
+distinct decoded name is kept in `message_participant_names`, one row
+per (message, role, address, name), original casing kept and exact
+duplicates once (#1140). Name matching (`sender` / `recipient` /
+`participant` substrings and their matched-address report),
+`find_contact` and entity aliases read that table, each name on its
+own, so no match spans two names; display and per-passage attribution
+keep the row's first name. The first name of each (role, address) is
+always kept; every further one spends one per-message budget of
+`MAX_EXTRA_PARTICIPANT_NAMES` (1,000) names and
+`MAX_EXTRA_PARTICIPANT_NAME_BYTES` (64,000) UTF-8 bytes, and a name
+past it is dropped and counted as the parser cap `participant_names`
+(see `docs/troubleshooting.md`). A dropped name is not yet recorded
+per message, so a name filter answers false rather than unknown for
+it (#1086).
 Address headers are unfolded (RFC 5322 §2.2.3: a line break followed by
 a space or tab is removed, the whitespace kept) before they are parsed,
 and the Content-Disposition / Content-Type headers an attachment
@@ -820,8 +837,9 @@ JSON.
 
 Both are written inside `upsert_thread`'s transaction, after the
 message's `message_thread_map` row. `messages` references
-`message_thread_map` and `message_participants` references `messages`,
-both `ON DELETE CASCADE`, so every existing removal path — reaper,
+`message_thread_map`, `message_participants` references `messages`,
+and `message_participant_names` references its
+`message_participants` row, all `ON DELETE CASCADE`, so every existing removal path — reaper,
 whole-thread delete, rebuild — cleans them up without separate code.
 
 Every message-level filter the tools accept (`sender`, `recipient`,
@@ -990,6 +1008,7 @@ transaction:
 
 - a **person** entity per canonical address (`entity_id`
   `person:<address>`), with every display name seen for that address
+  (every one a message stores in `message_participant_names`, #1140)
   recorded in `entity_aliases`. Two different addresses are never
   merged, however similar their names: display names are
   sender-controlled.
@@ -1004,9 +1023,8 @@ transaction:
 IDs are derived from the address and domain, so reprocessing a message
 rewrites the same rows. Entity and alias writes are capped at
 `MAX_ENTITY_PARTICIPANTS_PER_MESSAGE` (200) distinct addresses per
-message, authors first (a repeated address is written once, with the
-first display name it carries in that message, and does not count
-again), so a crafted header listing thousands of recipients
+message, authors first (a repeated address is one entity, with every
+display name the message stores for it, and does not count again), so a crafted header listing thousands of recipients
 cannot drive unbounded writes; later participants still get their
 `message_participants` rows, just no new entity. The MCP server's
 `find_contact` reports each contact's organization.
@@ -1018,15 +1036,15 @@ only:
 
 - a person with no `message_participants` row left for its address,
   with its aliases;
-- an alias that no remaining row carries for its address, while the
-  person stays;
+- an alias that no remaining message stores as a display name of its
+  address (`message_participant_names`), while the person stays;
 - an organization of a deleted person once no person belongs to it.
 
 Entities and aliases still mentioned by surviving mail are untouched.
 The sweep examines only the reaped messages' addresses that own an
 entity (so recipients past the per-message entity cap cost nothing
 beyond the one read that filters them out), each with an indexed
-lookup (`idx_message_participants_address_name` serves the
+lookup (`idx_message_participant_names_address_name` serves the
 alias check), so its cost follows those messages, not the size of the
 table. No MCP output changes: every read joins through
 `message_participants`, so a pruned entity could never surface.
@@ -2188,6 +2206,13 @@ outcomes below). A reparse can drop addresses from a
 message's rows (the #1144 address budget), but the thread's
 `participants` and `senders` keep them until a reap or a rebuild
 (#1173).
+
+The v4 migration (`0004_participant_names.sql`, #1140) is one: it
+creates `message_participant_names`, seeds it with each participant
+row's stored first name, so name matching keeps what it saw before the
+upgrade, and queues the reparse, which adds the further names. Until
+the reparse reaches a message (or, for a dead-lettered one, until
+`make requeue-dead`), only its first names are stored, as before.
 
 The migration that adds such data triggers the reparse itself: after
 its DDL it ends with `REPARSE_ENQUEUE_SQL` (`indexer/src/queue.py`),

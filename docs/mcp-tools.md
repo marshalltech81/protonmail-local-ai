@@ -1061,8 +1061,10 @@ you need a different matching contact than that one (then pass it as
 | `limit` | int | `10` | Maximum contacts to return; clamped to `[1, 50]` |
 
 The aggregator matches the query against each `message_participants`
-row's canonical address or display name (Unicode caseless: both sides
-are casefolded, so `STRASSE` matches `Straße`),
+row's canonical address or each display name the message wrote it
+with, one name at a time (a message that writes one address under two
+names keeps both, #1140; Unicode caseless: both sides are casefolded,
+so `STRASSE` matches `Straße`),
 then aggregates every row of each matched canonical email (so the same
 contact across many threads collapses to one row, and a match on one
 display name still reports the contact's other names and threads), and
@@ -1122,8 +1124,10 @@ unfiltered query is not a mailbox-wide total: Trash takes a separate
 (`jane@example.com`, `Jane <jane@example.com>`) matches by canonical
 equality through the `message_participants(address, role)` index.
 Anything else (`@example.com`, `Jane`) is a case-insensitive substring
-of the address or display name; the display name compares casefolded
-(Unicode caseless). The response names the mode used for
+of the address or of a display name; display names compare casefolded
+(Unicode caseless). Every distinct name a message wrote the address
+with in that role is matched, each on its own, so a value never
+matches across two names (#1140). The response names the mode used for
 each filter.
 
 **Matched addresses.** For each `sender`, `recipient` or `participant`

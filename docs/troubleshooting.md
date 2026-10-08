@@ -1733,6 +1733,7 @@ extractor reads (`.eml`) is not logged.
 | `address_chars` | Every recipient of one past 768,000 characters of `From`, `To` and `Cc` in all |
 | `address_elements` | Address-list entries past the message's 20,000th, unparsed |
 | `address_count` | Addresses past the message's 10,000th kept (one participant row each), unparsed |
+| `participant_names` | A display name past the first for its address and role (one address written under several names), past the message's 1,000 such names or 64,000 UTF-8 bytes of them: the address and its first name are kept, so name filters and `find_contact` miss only that name (#1140) |
 
 The caps bound what crafted mail can cost the single indexing worker,
 so they are not configurable. Ordinary mail does not reach them.
