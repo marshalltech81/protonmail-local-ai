@@ -38,7 +38,10 @@ updates:
     labels: [dependencies, area/mcp-server]
 
   # indexer Java libraries for the legacy .ppt reader (#957). POI's two
-  # artifacts share a version, so they move together.
+  # artifacts share a version, so they move together. A bump also needs
+  # indexer/java/checksums/checksums.sha256 rewritten with
+  # `make ppt-checksums` and committed to the PR (#1117): the builds
+  # check every artifact against it and fail until then.
   - package-ecosystem: maven
     directory: /indexer/java
     schedule:

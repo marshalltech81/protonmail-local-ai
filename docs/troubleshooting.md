@@ -601,6 +601,33 @@ both `indexer/pyproject.toml` and `mcp-server/pyproject.toml` pin
 docker compose build indexer mcp-server
 ```
 
+## The indexer build fails with a trusted checksum mismatch
+
+The `ppt-builder` step checks every Java artifact Maven resolves
+against `indexer/java/checksums/checksums.sha256` (#1117;
+`docs/architecture.md`, "Maven trusted checksums"). It fails with one
+of two errors:
+
+- `Missing from summaryFile trusted checksum(s) [SHA-256] for artifact
+  ...`: `indexer/java/pom.xml` changed (a Dependabot bump, a local
+  edit) without the file. Run `make ppt-checksums`, review the diff
+  and commit the file with the pom change.
+- `Artifact ... trusted checksum mismatch: summaryFile=...;
+  calculated=...`: the copy Maven found differs from the committed
+  checksum. When the file came from `make ppt-checksums` on a clean
+  checkout, the copy in the build's Maven cache was changed after it
+  was downloaded, by another build on the same builder or by hand.
+  Treat it as tampering: do not edit the line to match. Empty the
+  cache and rebuild, which downloads every artifact again:
+
+  ```bash
+  make build-nocache SERVICES=indexer
+  ```
+
+  If the rebuild still fails, the artifact Maven Central serves no
+  longer matches the committed checksum: report it as a security
+  issue rather than regenerating the file.
+
 ## Index is empty after startup
 
 The initial sync may still be running. Check:

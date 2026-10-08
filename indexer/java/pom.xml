@@ -6,6 +6,12 @@
   this file: indexer/Dockerfile runs `mvn dependency:copy-dependencies`
   on it with strict checksums to fetch the jars, then compiles
   PptText.java against them with javac.
+
+  Every artifact Maven resolves for it must match its SHA-256 in
+  checksums/checksums.sha256 (#1117). After changing this file (a
+  Dependabot bump included), run `make ppt-checksums` and commit the
+  rewritten checksums file with it, or the indexer build and the Trivy
+  dependency scan fail.
 -->
 <project xmlns="http://maven.apache.org/POM/4.0.0"
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"

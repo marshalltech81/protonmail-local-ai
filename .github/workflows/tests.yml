@@ -83,6 +83,9 @@ jobs:
       - name: Run the Trivy flag checks
         run: bash scripts/tests/trivy_flags_test.sh
 
+      - name: Run the Maven trusted-checksum checks
+        run: bash scripts/tests/maven_checksums_test.sh
+
   indexer-pytest:
     name: indexer pytest
     runs-on: ubuntu-latest
@@ -124,8 +127,8 @@ jobs:
       # The stage's ppt-builder layers are restored from the GitHub
       # Actions cache (BuildKit's gha backend, scope indexer-ppt: the
       # cache docker.yml writes and reads, #1105), so Maven Central is
-      # contacted only when indexer/java/pom.xml or a layer before it
-      # changed; a fresh runner otherwise fetched the .ppt reader's jars
+      # contacted only when indexer/java/pom.xml, its checksums file or
+      # a layer before them changed; a fresh runner otherwise fetched the .ppt reader's jars
       # on every run and failed with Maven Central's 429s and 502s
       # (#1070). The build runs on a docker-container builder because
       # the runner's default builder cannot import or export a cache.
