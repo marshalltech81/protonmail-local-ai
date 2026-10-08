@@ -24,7 +24,9 @@ A deliberate parser change regenerates the snapshot with
 ``PARSER_PIN_UPDATE=1 uv run pytest tests/test_parser_pin.py`` and the
 PR explains the diff, as for ``make baseline UPDATE=1``. So does adding
 a corpus message or a shape, since the catalogue grows with them: the
-regenerated file then differs only by the added records (#1124).
+regenerated file then differs only by the added records, plus the
+corpus messages after an insertion or removal renumbered under new
+file names with no other field changed (#1124).
 """
 
 import hashlib
