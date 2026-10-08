@@ -87,9 +87,11 @@ def not_current_reasons(
             reasons.append(f"the indexer last reported {_age(age)} ago")
     waiting = queue.pending + queue.retrying
     if waiting:
+        reparse = f"; {queue.reparse:,} of them already indexed and being reparsed"
         reasons.append(
             f"{_messages(waiting)} waiting to be indexed "
-            f"({queue.pending:,} pending, {queue.retrying:,} retrying)"
+            f"({queue.pending:,} pending, {queue.retrying:,} retrying"
+            f"{reparse if queue.reparse else ''})"
         )
     return reasons
 
@@ -146,6 +148,14 @@ def _render(out: MailboxStatusOutput) -> str:
         f"Indexer seen:   {_when(out.indexer_last_seen_at, out.checked_at)}",
         f"Queue:          {q.pending:,} pending, {q.retrying:,} retrying, {q.dead:,} dead",
     ]
+    if q.reparse:
+        one = q.reparse == 1
+        lines.append(
+            f"  {q.reparse:,} waiting message{'' if one else 's'} "
+            f"{'is' if one else 'are'} already indexed and being reparsed after an "
+            f"upgrade: search finds {'it' if one else 'them'}, but data the upgrade "
+            "adds is missing until the reparse finishes."
+        )
     if q.dead:
         lines.append(
             f"  {_messages(q.dead)} failed permanently and "
@@ -199,7 +209,8 @@ def register_system_tools(server, db):
 
         Returns:
             current and the reasons it is false, last sync time, indexer
-            liveness, queue counts (pending, retrying, dead), total threads
+            liveness, queue counts (pending, retrying, dead, and how many
+            waiting messages are already indexed and being reparsed), total threads
             and messages, the date range, and how many Message-IDs more
             than one file claims (counts only).
         """

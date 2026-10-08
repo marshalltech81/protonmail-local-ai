@@ -323,6 +323,7 @@ make down         # Stop the full stack
 make logs         # Tail all logs
 make status       # Containers, privacy posture (LOCAL or REMOTE per layer) and index currency
 make requeue-dead # Requeue dead-lettered indexing jobs once the cause is fixed
+make reparse      # Re-read every indexed message in place (no embedding calls)
 make clean        # Remove everything (destructive)
 ```
 

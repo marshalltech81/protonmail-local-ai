@@ -356,6 +356,8 @@ class TestQueueHeartbeatCounts:
             "parked_trashed": 1,
             "dead": 1,
             "oldest_due_age": 125,
+            "reparse": 0,
+            "reparse_dead": 0,
         }
         db.close()
 
@@ -369,6 +371,8 @@ class TestQueueHeartbeatCounts:
             "parked_trashed": 0,
             "dead": 0,
             "oldest_due_age": 0,
+            "reparse": 0,
+            "reparse_dead": 0,
         }
         db.close()
 

@@ -1630,6 +1630,10 @@ migration that commits but turns out wrong is then undone with
 from the release before the migration, instead of a full rebuild from
 Maildir (`docs/troubleshooting.md`, "Back up and restore the index").
 
+A migration that adds parser-produced per-message data ends with the
+shared reparse statement, so the worker fills the new data for mail
+already indexed without embedding calls (see *Reparse in place*).
+
 | Version | Migration | Change |
 |---|---|---|
 | 0 | (initial schema) | First deployed schema (2026-10-03). |
@@ -2038,6 +2042,75 @@ request, the PDF and image extractors refresh it after every page they
 read or OCR, so a scanned PDF that runs for ~20 minutes stays healthy
 (#485). Pages do not restart the stall guard's clock, which stays per
 attachment; a page that hangs refreshes nothing.
+
+### Reparse in place (#1078)
+
+A parser change that adds per-message data (a new `messages` column, a
+new per-message table) but changes no chunk ID, chunk text, embedding
+input (body text, the subject line of the first chunk), Message-ID or
+threading reaches mail already indexed by a **reparse**: every indexed
+file is queued with reason `reparse`, and the worker runs it through
+the ordinary pipeline. Phase 1 re-parses the file and rewrites its
+per-message rows through `upsert_thread`; Phase 2a finds every chunk ID
+already stored and queues nothing to embed; a chunkless thread keeps
+its stored subject-fallback vector instead of embedding it again (one
+still at the zero placeholder is repaired as usual). So a reparse
+makes no embedding call. Attachment text comes from the extraction
+cache. Retries, dead letters, the stall guard and heartbeats are the
+queue's own, and a message that fails to parse dead-letters instead of
+failing a migration. A reparse job whose file is gone while its path is
+still indexed (mbsync renamed it and the watcher has not recorded the
+rename yet) waits once, 60 s and without spending an attempt, so the
+rename moves the job to the new path (`update_filepath`) instead of the
+reparse being dropped; a file still missing after that is dropped with
+reason `reparse_file_missing`.
+
+The migration that adds such data triggers the reparse itself: after
+its DDL it ends with `REPARSE_ENQUEUE_SQL` (`indexer/src/queue.py`),
+copied verbatim (a test checks every migration that queues a reparse
+uses it):
+
+```sql
+INSERT INTO indexing_jobs
+    (filepath, reason, status, attempts, created_at, updated_at, next_attempt_at)
+SELECT filepath, 'reparse', 'queued', 0,
+       strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'),
+       strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'),
+       strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+FROM indexed_files WHERE true
+ON CONFLICT(filepath) DO NOTHING;
+```
+
+The statement only inserts, inside the migration's transaction, so the
+parse runs later in the worker, not under the migration's write lock.
+`filepath` is the queue's primary key and the conflict clause leaves
+every existing job as it is: a pending or retrying job keeps its
+reason, attempts, error and due time (it re-parses the file in full
+when it runs), and a dead-lettered job stays dead; `make requeue-dead`
+remains the way to retry it. `make reparse` (`src/reparse.py`, run in
+the indexer container like `make requeue-dead`) runs the same
+statement by hand, for recovery.
+
+Reparse jobs are due when queued and the queue hands rows out by due
+time, so mail that arrives during a reparse is indexed after the
+reparse backlog, as during an initial index. The reparse needs no
+schema change of its own: `reason` is free text with no `CHECK`
+constraint.
+
+Visibility: with the queue heartbeat (every 5 min) the indexer logs
+`reparse: remaining=<n> reparsed_since_last_heartbeat=<n> dead=<n>`
+while reparse jobs are queued, then one `reparse complete: <n>
+message(s) reparsed since the indexer started, <n> dead-lettered`
+line, at WARNING when any dead-lettered; a reparse drained between two
+heartbeats still gets its completion line. `get_mailbox_status` reports
+the queued reparse jobs as `queue.reparse` (a subset of `pending` and
+`retrying`), names them in the not-current reason, and `make status`
+prints a line saying search finds those messages but the data the
+upgrade adds is missing until the reparse finishes.
+
+A change that alters chunk IDs, chunk text or embedding input needs a
+rebuild instead (PLAN.md Phase 2, "Two kinds of reindex"; today, a
+rebuild from Maildir, `docs/troubleshooting.md`).
 
 ### Ingestion completeness
 

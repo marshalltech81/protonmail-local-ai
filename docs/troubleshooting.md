@@ -25,7 +25,7 @@ as secrets. No other check needs or shows one.
 | `make up` fails with `container mbsync is unhealthy` | mbsync syncing | [`make up` fails — mbsync is unhealthy](#make-up-fails--mbsync-is-unhealthy) |
 | mbsync is healthy, `get_mailbox_status` says `last successful mail sync was ... ago` | Last successful sync (recent syncs failing, or one long run in progress); or the indexer has not acknowledged a newer stamp (see the indexer rows) | `docker compose logs mbsync --tail 50`: repeated `Sync failed` lines, or no `Syncing...` since a long run started ([deadline](#mbsync-stopped-a-sync-at-its-deadline)) |
 | `get_mailbox_status` says `the indexer has not reported` or `the indexer last reported ... ago` | Index current: indexer down or stalled | `docker compose logs indexer --tail 50` and `docker inspect indexer --format='{{json .State.Health}}'` |
-| `get_mailbox_status` says `... waiting to be indexed` | Index current: indexing behind | Normal after a large sync; if it does not fall, see [Tuning indexing retries](#tuning-indexing-retries) |
+| `get_mailbox_status` says `... waiting to be indexed` | Index current: indexing behind, or a reparse after an upgrade (the reason then adds `... already indexed and being reparsed`) | Normal after a large sync or an upgrade; if it does not fall, see [Tuning indexing retries](#tuning-indexing-retries) and [Reparse or rebuild after an upgrade](#reparse-or-rebuild-after-an-upgrade) |
 | `get_mailbox_status` is current but a message is missing | Index: a dead-lettered message (`current` ignores the `dead` count), or none: the mail reached Proton after the last sync | If the `dead` count is non-zero, fix its cause and run `make requeue-dead` (see [Tuning indexing retries](#tuning-indexing-retries)); otherwise wait one `SYNC_INTERVAL` |
 
 ## Which build and settings is a container running?
@@ -779,6 +779,40 @@ and then restore the copy taken before the upgrade, in that order
 extraction cache by extractor module; after it, an attachment whose
 label selects a different extractor from the one that first read its
 bytes is re-extracted once, the next time its message is reprocessed.
+
+## Reparse or rebuild after an upgrade
+
+Some releases change what the parser stores for each message. Which
+kind of reindex that needs depends on whether search data changes too:
+
+- **Reparse** (#1078): the change adds per-message data (a column, a
+  table) but changes no chunk, chunk text, embedding input, Message-ID
+  or threading. Its migration queues every indexed message with reason
+  `reparse` at startup; the indexer re-reads each file and rewrites its
+  per-message rows, with no embedding calls (attachment text comes from
+  the extraction cache). Search keeps working throughout; the data the
+  release adds is missing for a message until its reparse runs, and new
+  mail is indexed after the backlog. Progress is in the log every five
+  minutes (`reparse: remaining=... reparsed_since_last_heartbeat=...
+  dead=...`), then one `reparse complete: ...` line; `make status`
+  shows the remaining count (`queue.reparse`). A message that fails to
+  parse dead-letters like any other; fix the cause, then
+  `make requeue-dead`.
+- **Rebuild**: the change alters chunks or what is embedded (for
+  example a new chunk ID derivation or chunker), or the embedder
+  model. Every message must be embedded again; rebuild from Maildir as
+  in [Indexer refuses to start](#indexer-refuses-to-start--wipe-the-sqlite-volume).
+
+The release notes and the migration's header say which applies.
+`make reparse` queues the same reparse by hand, for recovery (for
+example when a reparse's jobs were cleared another way). Messages that
+already have a job keep it, and dead-lettered ones stay dead until
+`make requeue-dead`. It runs inside the indexer container, so the
+stack must be up:
+
+```bash
+make reparse
+```
 
 ## Back up and restore the index
 
