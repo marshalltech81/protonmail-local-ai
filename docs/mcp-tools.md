@@ -1256,10 +1256,15 @@ another query, or a malformed one, is rejected with an error rather
 than silently restarting.
 
 To examine every match, follow `next_cursor` until `has_more` is false.
-Each page uses a fresh index snapshot; new matches ahead of the cursor can
-be missed. A changed `total_matches` signals churn, but an unchanged total
-does not prove a stable set. Scope coverage to the indexed results observed
-during the run, not a point-in-time complete mailbox.
+Each page uses a fresh index snapshot, so the matching set can change
+between pages, and a message that matches when the run ends can still be
+missed: one that arrives ahead of the cursor, or one already in the set
+that leaves it while its page is read (moved to another folder, for
+example) and comes back afterwards. Counts do not rule this out: every
+page's `total_matches`, the final total and the number of rows received
+can all agree while a member was never returned ([#1218](https://github.com/marshalltech81/protonmail-local-ai/issues/1218)).
+A changed `total_matches` signals churn. Scope coverage to the indexed
+results observed during the run, not a point-in-time complete mailbox.
 
 Start with narrow filters and `limit=1` to obtain the count. Before bulk
 paging or reading bodies, tell the user the scope and how many messages
