@@ -846,6 +846,16 @@ superseded entries keep their number and one line.
     in-memory index, never a corpus-wide scan (#858, #1246). The
     choices behind each are in the issues' decision comments.
 
+41. **Message-ID grouping (2026-10-08, #991):** `query_messages`
+    gets an opt-in mode that returns one row per Message-ID; the
+    default stays one row per claimant, and every claimant remains
+    reachable. A group matches when one of its claimants matches the
+    whole filter on its own, and is represented by a matching copy.
+    Grouping is by a sender-controlled identifier, never proof of
+    identical content. `search_emails` and `get_evidence` do not
+    group. A `distinct_message_ids` count ships first. The full
+    contract is in #991's decision comment.
+
 ## Notes for Agents
 
 - Read `AGENTS.md` before making changes.
