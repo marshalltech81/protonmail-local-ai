@@ -13,6 +13,7 @@ against its tool's schema with jsonschema.
 
 import asyncio
 import json
+import logging
 import sqlite3
 
 import jsonschema
@@ -476,33 +477,37 @@ class TestDateBoundsEcho:
 
 
 class TestSizeBoundsOnTheWire:
-    """``size_min`` / ``size_max`` are checked by the tool's argument
-    model before the handler runs (#1085, Codex round 1): strictly, so a
-    string or a bool is not coerced to an int, and within SQLite's
-    INTEGER range, so an oversized value never reaches the bind."""
+    """``size_min`` / ``size_max`` are checked strictly (a string or a
+    bool is not coerced to an int) and within SQLite's INTEGER range, so
+    an oversized value never reaches the bind (#1085, Codex round 1).
+    The published schema states the contract, and the check runs in the
+    handler, so a rejection reaches the rate-limited per-field log
+    rather than only FastMCP's argument-model warning (Codex round 3)."""
 
     def test_schema_states_the_range(self, messages_db):
         props = _tools(_server(messages_db))["query_messages"].input_schema["properties"]
         for name in ("size_min", "size_max"):
-            integer = next(s for s in props[name]["anyOf"] if s.get("type") == "integer")
-            assert (integer["minimum"], integer["maximum"]) == (0, 2**63 - 1)
+            assert props[name]["anyOf"] == [
+                {"maximum": 2**63 - 1, "minimum": 0, "type": "integer"},
+                {"type": "null"},
+            ]
 
-    @pytest.mark.parametrize(
-        ("value", "reason"),
-        [
-            ("100", "Input should be a valid integer"),
-            (True, "Input should be a valid integer"),
-            (1.5, "Input should be a valid integer"),
-            (-1, "greater than or equal to 0"),
-            (2**63, "less than or equal to 9223372036854775807"),
-        ],
-    )
+    @pytest.mark.parametrize("value", ["100", True, 1.5, -1, 2**63])
     @pytest.mark.parametrize("name", ["size_min", "size_max"])
-    def test_wrong_type_or_range_is_a_schema_error(self, messages_db, name, value, reason):
-        result = _wire(_server(messages_db), "query_messages", {name: value})
+    def test_wrong_type_or_range_is_rejected_through_the_limiter(
+        self, messages_db, caplog, name, value
+    ):
+        with caplog.at_level(logging.INFO):
+            result = _wire(_server(messages_db), "query_messages", {name: value})
         assert result.is_error
-        assert reason in result.content[0].text
-        assert "OverflowError" not in result.content[0].text
+        text = result.content[0].text
+        assert f"{name} must be an integer from 0 to 9223372036854775807" in text
+        assert "OverflowError" not in text
+        warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert f"rejected invalid argument: query_messages.{name}" in warnings
+        assert not any("Invalid arguments for tool" in w for w in warnings)
+        timing = [r.getMessage() for r in caplog.records if r.name == "mcp.timings"]
+        assert len(timing) == 1 and "outcome=error" in timing[0]
 
     def test_in_range_integers_filter(self, messages_db):
         server = _server(messages_db)

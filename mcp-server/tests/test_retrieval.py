@@ -1553,7 +1553,7 @@ class TestQueryMessages:
             handler(size_min=2, size_max=1)
         )
 
-    def test_indeterminate_is_stated_whenever_non_zero(self, fake_server, tmp_path):
+    def test_indeterminate_is_stated_whenever_non_zero(self, fake_server, tmp_path, caplog):
         import sqlite3
 
         import sqlite_vec
@@ -1587,12 +1587,18 @@ class TestQueryMessages:
         )
         conn.close()
         handler = _handlers(fake_server, Database(str(path)))["query_messages"]
-        out = asyncio.run(handler(size_min=100))
+        with caplog.at_level("INFO", logger="mcp.timings"):
+            out = asyncio.run(handler(size_min=100))
         assert out.structured_content["total_matches"] == 1
         assert out.structured_content["indeterminate"] == 1
         text = _text(out)
         assert "total_matches: 1\nindeterminate: 1 (messages the filters could neither" in text
         assert "in neither total_matches nor the pages)" in text
+        # The timing line says so too (Codex round 3), so the log never
+        # shows a call that could not decide every message as complete.
+        timing = [r.getMessage() for r in caplog.records if r.name == "mcp.timings"]
+        assert len(timing) == 1 and "outcome=ok" in timing[0]
+        assert "'total_matches': 1, 'indeterminate': 1, 'returned': 1" in timing[0]
         # Zero is in the structured output but not stated in the prose.
         out = asyncio.run(handler(replied=False))
         assert out.structured_content["indeterminate"] == 0

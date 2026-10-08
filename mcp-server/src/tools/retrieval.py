@@ -6,11 +6,11 @@ Fetch thread and message context from the local SQLite index.
 import asyncio
 import logging
 import unicodedata
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastmcp.exceptions import ToolError
 from mcp.types import CallToolResult
-from pydantic import Field
+from pydantic import WithJsonSchema
 
 # Module import: get_thread and get_message have a local named ``count``.
 from ..lib import timings
@@ -70,12 +70,25 @@ log = logging.getLogger("mcp.tools.retrieval")
 # large page only bloats one response.
 _MAX_QUERY_LIMIT = 100
 
-# A ``size_min`` / ``size_max`` argument (#1085): validated by the tool's
-# argument model before the handler runs, strictly (no ``true`` or
-# ``"100"`` coerced to an int) and within SQLite's INTEGER range, so the
-# published schema states the contract and an oversized value cannot
-# reach the bind (``OverflowError``).
-SizeBound = Annotated[int, Field(strict=True, ge=0, le=MAX_SIZE_BYTES)] | None
+# A ``size_min`` / ``size_max`` argument (#1085). The published schema
+# states the contract (an integer from 0 to SQLite's INTEGER maximum, or
+# null), but the argument model passes the raw value through, so the
+# handler's own strict check (``normalize_size_bound``: no ``true`` or
+# ``"100"`` coerced to an int, nothing that would overflow the bind)
+# rejects it through the rate-limited per-field log; a check in the
+# argument model would be refused before the handler, outside that log
+# (Codex round 3).
+SizeBound = Annotated[
+    Any,
+    WithJsonSchema(
+        {
+            "anyOf": [
+                {"maximum": MAX_SIZE_BYTES, "minimum": 0, "type": "integer"},
+                {"type": "null"},
+            ]
+        }
+    ),
+]
 
 # Seconds per window of the rate-limited ``fields`` rejection warning:
 # a client can repeat a rejected projection as fast as it likes.
@@ -1076,6 +1089,9 @@ def register_retrieval_tools(server, db):
             raise ToolError(f"Error: {type(e).__name__}") from e
 
         timings.count("total_matches", page.total_matches)
+        # On the timing line too, so a call that could not decide every
+        # message is not read as complete from the log (Codex round 3).
+        timings.count("indeterminate", page.indeterminate)
         timings.count("returned", len(page.messages))
         uses = _filter_uses(args)
         output = QueryMessagesOutput(

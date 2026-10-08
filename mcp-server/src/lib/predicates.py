@@ -472,8 +472,9 @@ def normalize_size_bound(name: str, value: Any) -> int | None:
     """A ``size_min`` / ``size_max`` filter to apply: ``None`` when not
     given, otherwise the value, which must be an integer from 0 to
     ``MAX_SIZE_BYTES`` (fixed-text ``InvalidFilterError`` otherwise).
-    The tool's argument model enforces the same (strict, before
-    coercion); this check is the ``Database`` API's own."""
+    The ``query_messages`` tool passes the raw argument through to this
+    check (its schema states the range), so a rejection reaches the
+    rate-limited per-field log."""
     if value is None:
         return None
     if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= MAX_SIZE_BYTES:
