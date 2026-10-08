@@ -80,12 +80,11 @@ as failed extractions.
      rests on such a tie passes locally and fails in CI. If a corpus edit trips this, reword the new text
      until the snapshot no longer depends on the tie.
    - **Answer-evaluation cases** (`test_answer_eval_cases.py`). The
-     build also embeds every question and extraction query in
+     build also embeds every question in
      `tests/answer_eval/cases.json`. Each case's fact excerpts must be
      in the indexed text of the messages they cite, and every case runs
-     through the real handler of its tool (`ask_mailbox`,
-     `summarize_thread` or `extract_from_emails`) with a scripted
-     answerer and judge (no network); see `tests/eval/README.md`.
+     through the real handler of its tool (`ask_mailbox` or
+     `summarize_thread`) with a scripted answerer and judge (no network); see `tests/eval/README.md`.
 
 The hashed embedder has no sense of meaning, so the baseline catches
 broken plumbing (ingestion, schema, lanes, fusion, filters). It does

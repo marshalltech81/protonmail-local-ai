@@ -2,11 +2,7 @@
 
 Every tool is graded through its ``adapters.AnswerView`` (#656): the
 answer text, the threads searched, the cited labels, the tool's own
-citation check and the server's coverage note. For
-``extract_from_emails`` the answer is the records rendered as
-statements, and ``records_conform`` also checks each record's shape
-(the schema's declared fields and types, and the provenance fields the
-server adds); a breach there is the tool's, not the model's.
+citation check and the server's coverage note.
 
 Each check is ``pass``, ``fail`` or ``not_applicable``. Evidence groups
 are scored at three stages, so a miss can be traced to where it
@@ -29,14 +25,8 @@ retrieval never found.
 import re
 from dataclasses import dataclass, field
 
-from src.tools.intelligence import (
-    _NOT_FOUND_PREFIX,
-    _PROVENANCE_FIELDS,
-    _TRUNCATED_NOTICE_SUFFIXES,
-    _record_conforms,
-)
+from src.tools.intelligence import _NOT_FOUND_PREFIX, _TRUNCATED_NOTICE_SUFFIXES
 
-from tests.answer_eval.adapters import NO_RECORDS  # EXTRACTION_INCOMPLETE is no abstention
 from tests.answer_eval.cases import Case, message_id_of, thread_id_of
 from tests.answer_eval.runner import CaseRun, Passage
 
@@ -49,7 +39,6 @@ _NO_RESULTS = "No relevant emails found"
 # Checks whose failure points at what the model did with its evidence.
 SYNTHESIS_CHECKS = (
     "answer_complete",
-    "extraction_complete",
     "citations_resolve",
     "citation_checks",
     "expected_values",
@@ -124,24 +113,8 @@ def _meets(ref: str, passage: Passage) -> bool:
 
 
 def is_abstention(answer: str) -> bool:
-    """A not-found or no-results answer, or an extraction without records
-    (``adapters.NO_RECORDS``)."""
-    return answer.lstrip().startswith((_NOT_FOUND_PREFIX, _NO_RESULTS, NO_RECORDS))
-
-
-def _record_shape_ok(record: object, schema: dict) -> bool:
-    """Shape only: an object carrying the server's provenance fields
-    (``_source_thread`` and ``_date`` strings, an ``_evidence`` object)
-    whose declared fields have the schema's types (the tool's own
-    ``_record_conforms``). Values are not judged here."""
-    return (
-        isinstance(record, dict)
-        and all(name in record for name in _PROVENANCE_FIELDS)
-        and isinstance(record["_source_thread"], str)
-        and isinstance(record["_date"], str)
-        and isinstance(record["_evidence"], dict)
-        and _record_conforms(record, schema)
-    )
+    stripped = answer.lstrip()
+    return stripped.startswith(_NOT_FOUND_PREFIX) or stripped.startswith(_NO_RESULTS)
 
 
 def _shows_evidence(case: Case, passage: Passage) -> bool:
@@ -224,17 +197,6 @@ def grade_run(case: Case, run: CaseRun) -> DeterministicResult:
         checks["omission_disclosed"] = NA
     checks["answer_complete"] = FAIL if answer.endswith(_TRUNCATED_NOTICE_SUFFIXES) else PASS
     checks["prompt_matches_capture"] = PASS if run.prompt_consistent else FAIL
-    if out.records is None:
-        checks["records_conform"] = NA
-        checks["extraction_complete"] = NA
-    else:
-        # The prose tools' ``answer_complete`` for an extraction: a reply
-        # cut off, malformed or nonconforming for some thread leaves data
-        # missing, whatever the records say (Codex round 2 on #656's PR).
-        checks["extraction_complete"] = FAIL if out.incomplete else PASS
-        schema = case.arguments["schema"]
-        conform = all(_record_shape_ok(r, schema) for r in out.records)
-        checks["records_conform"] = PASS if conform else FAIL
     result.citation_problem_kinds = sorted({p.kind for p in out.citation_problems})
     unknown = "unknown_labels" in result.citation_problem_kinds
     resolves = all(label in run.passages for label in cited_labels) and not unknown
@@ -330,9 +292,6 @@ def attribute(
         causes.append("synthesis")
     if det.checks.get("prompt_matches_capture") == FAIL or judge_error:
         causes.append("evaluator_infrastructure")
-    # A record the tool returned outside its own shape contract.
-    if det.checks.get("records_conform") == FAIL:
-        causes.append("answer_infrastructure")
     failing = not det.passed or semantic_failed or judge_error
     if failing and not causes:
         causes.append("unknown")

@@ -1,7 +1,7 @@
 """Run a case's tool and capture what its model received.
 
-The registered handler (``ask_mailbox``, ``summarize_thread`` or
-``extract_from_emails``, #656) runs unchanged: ``register_intelligence_tools``
+The registered handler (``ask_mailbox`` or ``summarize_thread``, #656)
+runs unchanged: ``register_intelligence_tools``
 registers it on a stub server exactly as ``main.py`` does on FastMCP,
 and the case's arguments are passed to it as a client's would be. The
 evaluator reimplements neither retrieval nor prompt building.
@@ -9,18 +9,17 @@ evaluator reimplements neither retrieval nor prompt building.
 Two narrow wrappers capture the run, in memory only:
 
 - ``RecordingInference`` wraps the inference client, the boundary every
-  prompt crosses, and keeps each request's text and the reply. For a
-  prose tool the first request is the prompt after truncation,
-  deduplication, fallback thread text and budgeting; a repair call
-  resends it with a fixed instruction appended, so the evidence
-  available to the final answer is the first request's.
-  ``extract_from_emails`` makes one request per searched thread.
+  prompt crosses, and keeps each request's text and the reply. The
+  first request is the prompt after truncation, deduplication, fallback
+  thread text and budgeting; a repair call resends it with a fixed
+  instruction appended, so the evidence available to the final answer
+  is the first request's.
 - ``capture_evidence_maps`` wraps the handlers' evidence builders
   (``intelligence._build_evidence`` and ``_summarize_context``) to keep
   the label -> passage maps built alongside those prompts (thread,
   message, claimant, chunk); ``adapters.select_passages`` picks the map
   that describes the prompt sent. ``prompt_consistent`` then checks
-  every captured label's header is in a prompt the model actually
+  every captured label's header is in the prompt the model actually
   received, so the map describes that prompt and not a second retrieval.
 
 Nothing here logs mailbox text; the captures stay on the returned
@@ -52,7 +51,7 @@ from pydantic import ValidationError
 from src.lib.inference import TEMPLATE_RESERVE_TOKENS, InferenceTruncatedError, PromptBudget
 from src.lib.security import ProviderResponseError
 from src.tools import intelligence
-from src.tools.outputs import AskMailboxOutput, ExtractFromEmailsOutput, SummarizeThreadOutput
+from src.tools.outputs import AskMailboxOutput, SummarizeThreadOutput
 
 from tests.answer_eval.adapters import (
     OUTPUT_MODELS,
@@ -63,7 +62,7 @@ from tests.answer_eval.adapters import (
 )
 from tests.answer_eval.cases import BASELINE_DOMAIN, Case
 
-ToolOutput = AskMailboxOutput | SummarizeThreadOutput | ExtractFromEmailsOutput
+ToolOutput = AskMailboxOutput | SummarizeThreadOutput
 
 # Statuses a run can end in. Only ``ok`` has an output to grade.
 RUN_STATUSES = ("ok", "tool_error", "timeout", "invalid_output", "runner_error", "skipped")
@@ -247,8 +246,8 @@ class _ToolServer:
 
 
 # The handlers' evidence builders, each taking an ``evidence_map`` keyword:
-# ``ask_mailbox`` and ``extract_from_emails`` build through the first,
-# ``summarize_thread`` through the second.
+# ``ask_mailbox`` builds through the first, ``summarize_thread`` through
+# the second.
 _EVIDENCE_BUILDERS = ("_build_evidence", "_summarize_context")
 
 
@@ -376,11 +375,8 @@ async def run_case(case: Case, ctx: RunContext) -> CaseRun:
     for label in window_cut_labels(case.tool, maps):
         run.passages[label] = replace(run.passages[label], truncated=True)
     if run.calls:
-        # Every captured label's header is in a prompt the model received
-        # (the first, for a prose tool; its own thread's, for extraction).
-        run.prompt_consistent = all(
-            any(f"[{label} |" in call.user for call in run.calls) for label in run.passages
-        )
+        first = run.calls[0].user
+        run.prompt_consistent = all(f"[{label} |" in first for label in run.passages)
     inference_ms = sum(c.ms for c in run.calls)
     run.timings_ms = {
         "answer_total": round(total_ms, 1),

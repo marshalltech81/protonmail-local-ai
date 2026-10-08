@@ -96,8 +96,6 @@ def detail_record(case: Case, run: CaseRun, judge: JudgeOutcome) -> dict[str, An
         "tool": case.tool,
         "question": case.question,
         "answer": view.answer if view else None,
-        # extract_from_emails: the records themselves (provider output).
-        "records": view.records if view else None,
         "tool_error": run.error_detail,
         # What the judge was allowed to excuse (review round 9).
         "coverage_note": view.coverage_note if view else None,

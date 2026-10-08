@@ -343,8 +343,8 @@ baseline: sync-indexer sync-mcp
 	( cd mcp-server && BASELINE_DIR="$$dir/out" uv run pytest -q --no-cov tests/baseline $(if $(filter 1,$(UPDATE)),--update-baseline) ); \
 	status=$$?; rm -rf "$$dir"; exit $$status
 
-# Opt-in answer-quality evaluation of ask_mailbox, summarize_thread and
-# extract_from_emails (#604, #656): builds the synthetic baseline index,
+# Opt-in answer-quality evaluation of ask_mailbox and summarize_thread
+# (#604, #656): builds the synthetic baseline index,
 # runs every case through the real handler of its tool with the
 # INFERENCE_* answerer and the optional JUDGE_* judge, and writes a
 # mode-600 report under EVAL_OUT (git-ignored by default). It calls the

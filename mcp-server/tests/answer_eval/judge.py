@@ -178,17 +178,11 @@ def build_judge_prompt(
 
     An ``ask_mailbox`` case opens with its question, exactly as before
     #656; another tool's case opens with the tool and its task
-    (``Case.question``), and an extraction says what its numbered
-    statements are."""
+    (``Case.question``)."""
     if case.tool == "ask_mailbox":
         lines = [f"Question: {case.question}"]
     else:
         lines = [f"Task ({case.tool}): {case.question}"]
-        if case.tool == "extract_from_emails":
-            lines.append(
-                "Each numbered statement is one extracted record: its fields and values, "
-                "each value followed by the labels it cites."
-            )
     lines += ["", f"Expected handling: {_HANDLING_TEXT[case.expected_handling]}"]
     if case.expected_handling == "disclose_missing":
         note = _fence(coverage_note) if coverage_note else "none"

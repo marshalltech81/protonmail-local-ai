@@ -14,9 +14,8 @@ Usage, from ``indexer/``:
 
 ``cases.json`` (optional) is the answer-quality evaluation's case file
 (``mcp-server/tests/answer_eval/cases.json``); the text each case's
-tool embeds (``case_queries``: an ``ask_mailbox`` question or an
-``extract_from_emails`` query; a ``summarize_thread`` case looks its
-thread up by ID and embeds nothing) gets a query vector too, so the
+tool embeds (``case_queries``: an ``ask_mailbox`` question; a
+``summarize_thread`` case looks its thread up by ID and embeds nothing) gets a query vector too, so the
 evaluation can run the tools against this index.
 
 The build lowers two attachment caps so the capped-attachment shapes
@@ -122,14 +121,13 @@ def check_capped_attachments(db_path: Path) -> None:
 
 def case_queries(cases: dict) -> set[str]:
     """The text each answer-evaluation case's tool embeds for retrieval:
-    ``arguments.question`` (``ask_mailbox``) or ``arguments.query``
-    (``extract_from_emails``). A ``summarize_thread`` case names its
-    thread by ID and embeds nothing, so it contributes no query."""
+    ``arguments.question`` (``ask_mailbox``). A ``summarize_thread``
+    case names its thread by ID and embeds nothing, so it contributes no
+    query."""
     return {
-        case["arguments"][key]
+        case["arguments"]["question"]
         for case in cases["cases"]
-        for key in ("question", "query")
-        if isinstance(case["arguments"].get(key), str)
+        if isinstance(case["arguments"].get("question"), str)
     }
 
 

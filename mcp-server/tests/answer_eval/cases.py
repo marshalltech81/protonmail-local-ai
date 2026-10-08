@@ -7,14 +7,11 @@ them, machine-checkable values, and which rubric dimensions apply. The
 split rule is the agent scenarios' (``tests/agent_metrics.is_held_out``):
 membership is fixed by the case ID, so adding cases never moves one.
 
-A case ID starts with its tool's short name (``ask-``, ``summarize-``,
-``extract-``). Per tool (#656): ``ask_mailbox`` needs a ``question``;
+A case ID starts with its tool's short name (``ask-``, ``summarize-``).
+Per tool (#656): ``ask_mailbox`` needs a ``question``;
 ``summarize_thread`` needs a baseline ``thread_id`` (a direct lookup, so
 nothing is embedded; a subject-phrase lookup is not a case shape yet),
-and its evidence and fact sources must be in that thread;
-``extract_from_emails`` needs a ``query`` and a non-empty ``schema``
-object declaring no provenance field, and its ``limit``, when given, is a whole number from 1 (each
-searched thread is one paid model call).
+and its evidence and fact sources must be in that thread.
 
 Refs follow the baseline's convention: ``t24`` is the thread rooted at
 ``t24.1@baseline.example`` and ``t24.2`` the message
@@ -29,7 +26,6 @@ from pathlib import Path
 from typing import Any, TypeGuard, get_args
 
 from src.lib.inference import MIN_PROMPT_TOKENS
-from src.tools.intelligence import _PROVENANCE_FIELDS, _declared_fields
 from src.tools.outputs import SummaryStyle
 
 from tests.agent_metrics import is_held_out
@@ -39,12 +35,8 @@ CASES_PATH = Path(__file__).with_name("cases.json")
 BASELINE_DOMAIN = "@baseline.example"
 # The tools the evaluation has an adapter for (``adapters.py``); the
 # experimental tools are not among them (#656, #291).
-TOOLS = ("ask_mailbox", "summarize_thread", "extract_from_emails")
-_ID_PREFIX = {
-    "ask_mailbox": "ask",
-    "summarize_thread": "summarize",
-    "extract_from_emails": "extract",
-}
+TOOLS = ("ask_mailbox", "summarize_thread")
+_ID_PREFIX = {"ask_mailbox": "ask", "summarize_thread": "summarize"}
 
 # Rubric dimensions; a case says which apply (see judge.RUBRIC).
 DIMENSIONS = (
@@ -77,11 +69,8 @@ _ARGUMENTS = {
         {"question", "from_addr", "date_from", "date_to", "folders", "max_threads"}
     ),
     "summarize_thread": frozenset({"thread_id", "style"}),
-    "extract_from_emails": frozenset(
-        {"query", "schema", "folders", "date_from", "date_to", "limit", "from_name", "participant"}
-    ),
 }
-_CASE_ID = re.compile(r"(?:ask|summarize|extract)-[a-z0-9]+(?:-[a-z0-9]+)*")
+_CASE_ID = re.compile(r"(?:ask|summarize)-[a-z0-9]+(?:-[a-z0-9]+)*")
 # A baseline thread's ID: its root message (``thread_id_of``).
 _THREAD_ID = re.compile(r"t[0-9]{2}\.1" + re.escape(BASELINE_DOMAIN))
 # The handler summarizes any other style as ``brief`` (Codex round 1 on
@@ -153,25 +142,19 @@ class Case:
     def question(self) -> str:
         """The case's task in words, for the judge prompt and the detail
         record: ``ask_mailbox``'s question, or a fixed sentence naming a
-        summary's thread and style or an extraction's request and fields."""
+        summary's thread and style."""
         if self.tool == "ask_mailbox":
             return str(self.arguments["question"])
-        if self.tool == "summarize_thread":
-            style = self.arguments.get("style", "brief")
-            return f"Summarize the thread {self.arguments['thread_id']} in the {style} style."
-        fields = ", ".join(sorted(_declared_fields(self.arguments["schema"])))
-        query = self.arguments["query"]
-        return f"Extract records for the request {query!r} with the fields {fields}."
+        style = self.arguments.get("style", "brief")
+        return f"Summarize the thread {self.arguments['thread_id']} in the {style} style."
 
     @property
     def embedded_query(self) -> str | None:
         """The text the tool embeds for retrieval, which the index build
-        must hold a query vector for: the question or the extraction
-        query. ``None`` for a summary, whose thread is looked up by ID."""
+        must hold a query vector for: the question. ``None`` for a
+        summary, whose thread is looked up by ID."""
         if self.tool == "ask_mailbox":
             return str(self.arguments["question"])
-        if self.tool == "extract_from_emails":
-            return str(self.arguments["query"])
         return None
 
 
@@ -203,7 +186,7 @@ def _parse_case(row: dict[str, Any]) -> Case:
         _require(
             isinstance(args.get("question"), str) and args["question"].strip(), cid, "question"
         )
-    elif tool == "summarize_thread":
+    else:
         thread_id = args.get("thread_id")
         _require(
             isinstance(thread_id, str) and bool(_THREAD_ID.fullmatch(thread_id)), cid, "thread_id"
@@ -213,18 +196,6 @@ def _parse_case(row: dict[str, Any]) -> Case:
             cid,
             f"style must be one of {sorted(_SUMMARY_STYLES)}",
         )
-    else:
-        _require(isinstance(args.get("query"), str) and args["query"].strip(), cid, "query")
-        _require(isinstance(args.get("schema"), dict) and bool(args["schema"]), cid, "schema")
-        # The handler refuses these names before any work (#329), which
-        # would grade as a tool error rather than a bad case.
-        _require(
-            not set(_PROVENANCE_FIELDS) & _declared_fields(args["schema"]),
-            cid,
-            f"schema must not declare {', '.join(_PROVENANCE_FIELDS)}",
-        )
-        limit = args.get("limit", 1)
-        _require(type(limit) is int and limit >= 1, cid, "limit must be an integer >= 1")
     _require(row.get("held_out") is is_held_out(cid), cid, "held_out must equal is_held_out(id)")
     answerable = row.get("answerable")
     _require(isinstance(answerable, bool), cid, "answerable must be a boolean")

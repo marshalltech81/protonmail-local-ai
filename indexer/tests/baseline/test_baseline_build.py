@@ -222,34 +222,28 @@ class TestBuild:
         )
 
     def test_case_queries_are_what_each_tool_embeds(self):
-        """#656: an ask_mailbox question and an extract_from_emails query
-        are embedded; a summarize_thread case (a thread ID lookup) is not."""
+        """#656: an ask_mailbox question is embedded; a summarize_thread
+        case (a thread ID lookup) is not."""
         cases = {
             "cases": [
                 {"tool": "ask_mailbox", "arguments": {"question": "Synthetic question?"}},
-                {
-                    "tool": "extract_from_emails",
-                    "arguments": {"query": "synthetic invoices", "schema": {"a": "string"}},
-                },
                 {
                     "tool": "summarize_thread",
                     "arguments": {"thread_id": "t05.1@baseline.example", "style": "brief"},
                 },
             ]
         }
-        assert case_queries(cases) == {"Synthetic question?", "synthetic invoices"}
+        assert case_queries(cases) == {"Synthetic question?"}
 
     @requires_ocr
     def test_embeds_answer_eval_case_questions(self, tmp_path):
         cases = tmp_path / "cases.json"
         question = "Synthetic question about the roof?"
-        query = "synthetic invoices"
         cases.write_text(
             json.dumps(
                 {
                     "cases": [
                         {"arguments": {"question": question}},
-                        {"arguments": {"query": query, "schema": {"a": "string"}}},
                         {"arguments": {"thread_id": "t05.1@baseline.example"}},
                     ]
                 }
@@ -262,9 +256,8 @@ class TestBuild:
         golden = json.loads(_GOLDEN.read_text(encoding="utf-8"))
         assert set(vectors) == {q["query"] for q in golden["search"]} | set(
             golden["evidence_queries"]
-        ) | {question, query}
+        ) | {question}
         assert vectors[question] == embed_text(question)
-        assert vectors[query] == embed_text(query)
 
     @requires_ocr
     def test_attachment_shapes_extract_as_documented(self, tmp_path, caplog):
