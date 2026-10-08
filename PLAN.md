@@ -855,6 +855,25 @@ superseded entries keep their number and one line.
     identical content. `search_emails` and `get_evidence` do not
     group. A `distinct_message_ids` count ships first. The full
     contract is in #991's decision comment.
+42. **Extraction isolation (2026-10-08, #1290):** every attachment
+    extractor, format preflight included, runs as a disposable,
+    resource-limited child through the hardened `run_tool`
+    (process-tree kill, parent-owned scratch, limits sized for every
+    process the child's tree runs at once, output caps derived from
+    the configured input budget times the decode's worst expansion).
+    Only `text` is exempt: a fixed codec set and constant-pass decoding
+    with no structural parsing, locked by a CI test (#1295). Order:
+    #1230, the runner (#1291), `image` (#1292), `pdf` (#1293), `html`
+    with body HTML conversion (#1294), then #922; extracted text stays
+    byte-identical. The stdlib message parse stays in-process for now:
+    its read cap precedes parsing, structural caps follow it, and
+    worst-case containment is not established. Its `RecursionError`
+    becomes a terminal dead letter (#1296); whole-message isolation is
+    its own decision if a measured shape shows the parse unbounded.
+    Concurrency (#698) is bounded disposable launches; a persistent
+    worker needs its own decision proving containment equal to a fresh
+    process. Process separation is not filesystem or network
+    confinement, which stays #698's requirement (#1236).
 
 ## Notes for Agents
 

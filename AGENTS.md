@@ -524,14 +524,26 @@ is exactly what this forbids.
   and the test shown to fail on the known-bad shape before it is
   trusted. #1249's gate passed on three-token chunks that hid FTS5
   segment growth (#1262).
-- A third-party parser whose cost cannot be bounded in-process (it
-  allocates or loops on input before our code runs) runs in a child
-  process launched through `indexer/src/extractors/_runner.py`
-  `run_tool`. It enforces a wall-clock timeout and an output cap, and
-  starts the tool through `_launcher.py`, which sets `RLIMIT_AS` and
-  `RLIMIT_CPU` to the limits the caller passes before the parser loads;
-  every caller passes both, sized by a plain measurement of the tool
-  in the image (#995). Measure a
+- Every attachment extractor and structural format preflight runs in
+  a child process launched through `indexer/src/extractors/_runner.py`
+  `run_tool` (PLAN.md decision 42, #1290); parent-side byte limits and
+  constant-size signature routing may stay in the parent. Only `text`
+  is exempt: a fixed codec set and constant-pass decoding with no
+  structural parsing, locked by a CI test (#1295). `run_tool` enforces
+  a wall-clock timeout and an output cap, and starts the tool through
+  `_launcher.py`, which sets `RLIMIT_AS` and `RLIMIT_CPU` to the limits
+  the caller passes before the parser loads; every caller passes both,
+  sized by a plain measurement in the Linux image of every process the
+  child's tree runs at once (#995). Tools the child starts inherit its
+  limits and die with it; the parent owns and cleans its scratch.
+  Status, progress, cap names, counts and type names cross the pipe as
+  fixed tokens; truncated protocol output is `failed`, never text, and
+  cut raw-tool output is incomplete text. Never log child output or
+  stderr. A limit hit in a child is a per-payload `failed` row; a
+  parent `MemoryError` or `RecursionError` stays host pressure. Body
+  HTML conversion uses the `html` child. Process separation is not
+  filesystem or network confinement. Until #1291–#1294 land, `pdf`,
+  `image` and `html` still run in-process. Measure a
   candidate library on crafted input with plain timing and RSS before
   choosing it: two `.xls` readers failed that test (#935).
 - A review finding that calls for new parsing of untrusted input, or
