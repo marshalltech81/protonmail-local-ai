@@ -466,6 +466,11 @@ can be revisited with an explicit owner decision.
   investment; it is the vendor's app on the host. The stable contract
   is Bridge → mbsync → **Maildir** (product boundary) → indexer, which
   leaves room for other mail connectors later.
+- **Attachment export or download** (decided 2026-10-08, decision 39
+  reversed). Original attachment bytes are fetched from the Proton
+  inbox; the tools serve extracted text only (`query_attachments`,
+  `get_attachment`), with no operator export command and no MCP
+  download.
 - **mypy → pyright migration** — wait for a real trigger.
 
 ## Deferred (not dead — revisit on a real trigger)
@@ -818,8 +823,10 @@ superseded entries keep their number and one line.
     re-serialised form, not the bytes as sent.
     `search_attachments` returns each hit's `attachment_occurrence_id`
     to select from. The MCP server stays read-only with no Maildir
-    access; a download route or resource needs its own decision. This
-    resolves the "attachment download support" deferral.
+    access; a download route or resource needs its own decision.
+    **Reversed by the owner the same day:** no export command is built.
+    The owner retrieves original attachments from the Proton inbox, and
+    the system serves extracted text only (see Not doing).
 
 40. **Attachments, completeness and evidence ranking (2026-10-08):**
     DOCX, PPTX and XLSX extraction runs in a child process with memory,
