@@ -906,9 +906,20 @@ ctime, so the mtime stays; `mbsync/tests/layout_check.sh` check 8
 syncs a message with a known far-side date through the shipped image
 and reads the mtime back after each step. Its far side is a Maildir
 store standing in for Bridge, whose date isync takes from the far
-file's mtime, so the check covers how isync writes and keeps the date,
-not how it parses an IMAP INTERNALDATE or what date Bridge reports
-(#1132). A file synced before the option carries the time
+file's mtime. The IMAP half is `mbsync/tests/tls_check.sh` check 1a
+(`make test-mbsync-tls`, #1132): the shipped image, with the config the
+entrypoint renders, pulls one synthetic message from the test IMAP
+server (`mbsync/tests/imap_stub.py`, implicit TLS) whose INTERNALDATE
+is `02-Jan-2020 05:04:05 +0200`. The check shows isync asks for
+INTERNALDATE in its `UID FETCH`, parses the offset, and gives the file
+the mtime 2020-01-02T03:04:05Z; without `CopyArrivalDate` the check
+fails. The server refuses any command that would change the far side
+(APPEND, STORE, EXPUNGE and the like), and the check fails if the pull
+sends one. What stays unverified is Bridge itself: which date the
+Proton Mail Bridge app reports as INTERNALDATE (Proton's arrival time,
+or something else such as the `Date:` header) has not been checked
+against the app, so the mtime is the date Bridge reports, not a proven
+arrival time. A file synced before the option carries the time
 mbsync wrote it, the first sync for the existing corpus, and nothing
 tells the two apart from the file alone. The indexer does not read
 mtimes yet: `indexed_files.mtime_ns` is identity metadata, written at

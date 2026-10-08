@@ -14,6 +14,10 @@ set -Eeuo pipefail
 #      it neither connects nor pins.
 #   1. mbsync waits while the server is down, then syncs once it is up
 #      (implicit TLS, LOGIN over TLS, first-boot pin, success stamp).
+#  1a. That pull of the stub's one message asks for its INTERNALDATE
+#      (CopyArrivalDate) and gives the file it writes that date, whose
+#      offset is not UTC, as its mtime in UTC; it sends no command that
+#      would change the far side (#1132).
 #   2. A restart against the same certificate is accepted.
 #   3. A different certificate at that address is refused, by the
 #      expected fingerprint and, with that set to the new certificate,
@@ -41,6 +45,9 @@ readonly NETWORK="$RUN_ID"
 readonly STUB="${RUN_ID}-bridge"
 readonly MBSYNC="${RUN_ID}-mbsync"
 readonly WAIT_SECONDS=90
+# imap_stub.py's INTERNALDATE, 02-Jan-2020 05:04:05 +0200, in UTC:
+# 2020-01-02T03:04:05Z.
+readonly ARRIVAL_EPOCH=1577934245
 IMAGE="${MBSYNC_IMAGE:-}"
 WORK="$(mktemp -d)"
 readonly WORK
@@ -239,6 +246,30 @@ if wait_for_log "$MBSYNC" "Waiting for ProtonBridge IMAP" && sleep 4 \
     fi
 else
     fail "waits for an unavailable Bridge, then pins and syncs over implicit TLS"
+fi
+
+# 1a. The pull asked for INTERNALDATE (CopyArrivalDate) and the file it
+# wrote has the stub's INTERNALDATE, 02-Jan-2020 05:04:05 +0200, in UTC as
+# its mtime; it sent nothing that would change the far side (#1132). The
+# image's stat reads the time, so the host's stat dialect never enters.
+near_file=""
+near_mtime=""
+if [[ -d "$WORK/maildir/INBOX" ]]; then
+    near_file="$(find "$WORK/maildir/INBOX" -type f \( -path '*/new/*' -o -path '*/cur/*' \) -print -quit)"
+fi
+if [[ -n "$near_file" ]]; then
+    near_mtime="$(docker run --rm --read-only --user "$(id -u):$(id -g)" --cap-drop ALL \
+        --security-opt no-new-privileges:true -v "$WORK/maildir:/maildir:ro" \
+        --entrypoint stat "$IMAGE" -c %Y "/maildir${near_file#"$WORK/maildir"}")"
+fi
+if [[ "$near_mtime" == "$ARRIVAL_EPOCH" ]] \
+    && log_has "$STUB" "stub: fetch body internaldate=True" \
+    && ! log_has "$STUB" "stub: write command refused"; then
+    pass "the synced file's mtime is the IMAP INTERNALDATE in UTC, and the pull writes nothing back"
+else
+    fail "the synced file's mtime is the IMAP INTERNALDATE in UTC, and the pull writes nothing back"
+    printf '     near file mtime "%s", INTERNALDATE in UTC %s\n' "$near_mtime" "$ARRIVAL_EPOCH"
+    docker logs "$STUB" 2>&1 | grep -E "fetch body|write command" | sed 's/^/     /'
 fi
 
 # 2. Restart, same certificate.
