@@ -124,19 +124,27 @@ def _reset_extractor_warning_budget(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _ooxml_child_in_process(request, monkeypatch):
-    """Run the OOXML extractors' child (#1040) in this process, through
-    the same output encoding and parsing, so a test can patch a walk's
-    budgets or count its calls. A test marked ``real_ooxml_child`` starts
-    the real child process instead (``tests/test_ooxml_child.py``)."""
-    if request.node.get_closest_marker("real_ooxml_child"):
+    """Run the extractor child (#1040, #1291) in this process for the
+    OOXML extractors, through the same frames and parsing, so a test can
+    patch a walk's budgets or count its calls. The ``xls`` extractor
+    starts the real child, as before. A test marked
+    ``real_extractor_child`` starts the real child process for every
+    module (``tests/test_ooxml_child.py``)."""
+    if request.node.get_closest_marker("real_extractor_child"):
         return
-    from src.extractors import ooxml, ooxml_child
-    from src.extractors._runner import ToolOutput
+    from src.extractors import OOXML_MODULES, _runner, extractor_child
 
-    def run_tool(argv, payload, **_kwargs):
-        return ToolOutput(ooxml_child.run(argv[-1], payload), truncated=False)
+    real = _runner.run_tool
 
-    monkeypatch.setattr(ooxml, "run_tool", run_tool)
+    def run_tool(argv, payload, *, on_output=None, **kwargs):
+        module = argv[-1]
+        if argv[-2] != str(_runner._CHILD) or module not in OOXML_MODULES:
+            return real(argv, payload, on_output=on_output, **kwargs)
+        assert on_output is not None
+        on_output(extractor_child.run(module, payload))
+        return _runner.ToolOutput(b"", truncated=False)
+
+    monkeypatch.setattr(_runner, "run_tool", run_tool)
 
 
 @pytest.fixture

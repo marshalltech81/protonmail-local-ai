@@ -1350,8 +1350,9 @@ each message whose occurrence of it now selects a module.
   in the image, the fixture and LibreOffice-written documents of 8.8 and
   21.9 MB take 0.002 to 0.11 s of CPU and complete under 4 to 5 MiB of
   address space.
-- **`.xls`** is read by `xlrd` 2.0.2 in a child Python process
-  (`extractors/xls_child.py`, started as `python -I`). xlrd's work on
+- **`.xls`** is read by `xlrd` 2.0.2 in the extractor child
+  (`extractors/extractor_child.py` running the walk in
+  `extractors/xls_child.py`, started as `python -I`). xlrd's work on
   opening a workbook is not bounded by the payload size: its
   shared-string loop trusts a declared count and a signed skip length
   (6 KB of workbook can loop until memory runs out), and its OLE2
@@ -1364,10 +1365,13 @@ each message whose occurrence of it now selects a module.
   checked before the next sheet loads; 10,000,000 characters. A budget
   that cut the text is logged through the extractor-cap WARNING
   (`xls_sheets`, `xls_expanded_cells`, `xls_text_chars`). The child
-  costs a Python start-up and an xlrd import per workbook, about
-  0.02 s in the image on the fixture workbook (0.06 s before the image
-  shipped compiled bytecode, #1230); a 20 MB workbook of 1,000,000 cells takes about 1.2 s
-  and 145 MB.
+  costs a Python start-up, the extractors package and an xlrd import
+  per workbook, about 0.06 s and 39 MiB of address space in the image
+  on the fixture workbook (0.02 s and 21 MiB while the child imported
+  xlrd alone, before #1291); a 20 MB workbook of
+  1,000,000 cells takes about 1.2 s and 145 MB. An xlrd error, or the
+  child's own `MemoryError` or `RecursionError`, is recorded `failed`
+  under its type name (`CompDocError`, `XLRDError`, ...).
 - **`.ppt`** is read by Apache POI 5.5.1's HSLF reader
   (`SlideShowExtractor`: slide text, placeholders and text boxes alike,
   and speaker notes; masters and comments are left out) in a Java
@@ -1405,20 +1409,42 @@ which lowers its own address space (`RLIMIT_AS`) and CPU time
 malloc arenas (the JVM needs it to start under its limit), and
 `execve`s the tool, so the limits hold before the tool reads a byte;
 `run_tool` has no default limits, and a test checks that each caller
-passes both (#995). The payload goes to a mode-600 file under `/tmp`
-(tmpfs), deleted after the run; the tool gets an argument list with no shell, no stdin and an
-environment of `LC_ALL=C.UTF-8` only; its stderr is discarded, since it
-can quote the document; and its stdout is read incrementally up to a
-byte cap (8 MiB for catdoc and for the `.ppt` reader, whose text past
-the cap is not indexed and is reported as `doc_output_bytes` /
-`ppt_output_bytes`). A timeout, a death by signal (a crash, or the CPU
-limit), a non-zero exit (a tool that fails an allocation under the
-address-space limit exits with an error; the `.ppt` reader's reserved
-encrypted-deck status is the one exception, below), or an xls child's malformed or
-oversized output records `failed` with a fixed error type
-(`ToolTimeoutError`, `ToolCrashError`, `ToolExitError`,
-`XlsOutputError`); nothing the tool printed reaches a log or
-`last_error`. catdoc has no Homebrew formula, so its tests skip on a
+passes both (#995). A process the tool starts inherits both limits.
+The tool runs in its own session, and its whole process group is
+killed with `SIGKILL` when the run ends (a timeout, the output cap, an
+error or a normal exit), before the tool is reaped, so no process it
+started outlives it (#1291). Each run gets a scratch directory the
+runner owns, mode 700 under `/tmp` (tmpfs), which is the tool's
+`TMPDIR` and holds the payload as a mode-600 file; it is removed with
+everything in it once the group is dead, so a killed tool leaks no
+files. The tool gets an argument list with no shell, no stdin and an
+environment of `LC_ALL=C.UTF-8` and `TMPDIR` only; its stderr is
+discarded, since it can quote the document; and its stdout is read
+incrementally up to a byte cap (8 MiB for catdoc and for the `.ppt`
+reader, whose text past the cap is not indexed, is reported as
+`doc_output_bytes` / `ppt_output_bytes` and leaves the attachment's
+text marked incomplete). A timeout, a death by signal (a crash, or the
+CPU limit) or a non-zero exit (a tool that fails an allocation under
+the address-space limit exits with an error; the `.ppt` reader's
+reserved encrypted-deck status is the one exception, below) records
+`failed` with a fixed error type (`ToolTimeoutError`,
+`ToolCrashError`, `ToolExitError`); nothing the tool printed reaches a
+log or `last_error`.
+
+The Python extractor child (`extractors/extractor_child.py
+<module>`, for the OOXML formats and `.xls`) reports its result in a
+framed protocol the runner parses as it arrives (#1291): `P` lines for
+progress, passed to the dispatcher's progress callback as they are
+read so a long extraction can refresh the heartbeat; a `C <name>` line
+per budget that cut the text, checked against the extractor's own
+list; `N <name> <count>` for a count the extractor allows; and then
+either `E <type name>` (the extraction raised) or `T <length>` and
+exactly that many bytes of UTF-8 text, with nothing after. Output
+that breaks this (an unknown frame or name, a short or long text,
+bytes after the last frame, no result frame) or that the byte cap cut
+is recorded `failed` as `ChildOutputError`, never cached as text. The
+child's byte cap is its text budget at UTF-8's worst case of four
+bytes a character plus the frames, so a working child never meets it. catdoc has no Homebrew formula, so its tests skip on a
 Mac without it; CI installs it and fails if it is missing, and the
 image carries it. The `.ppt` runtime is built for Linux, so the tests
 that run the real reader skip on a Mac unless `INDEXER_TEST_PPT_HOME`
@@ -1430,9 +1456,9 @@ The limits on every external program the indexer runs:
 | Program | Address space | CPU time | Wall clock |
 |---|---|---|---|
 | catdoc (`.doc`) | 64 MiB | 10 s | 60 s |
-| xlrd child (`.xls`) | 512 MiB | 30 s | 45 s |
+| extractor child, xlrd (`.xls`) | 512 MiB | 30 s | 45 s |
 | Java with Apache POI (`.ppt`) | 512 MiB | 30 s | 45 s |
-| OOXML child (`.docx`, `.pptx`, `.xlsx` and their variants) | 1 GiB | 30 s | 45 s |
+| extractor child, OOXML (`.docx`, `.pptx`, `.xlsx` and their variants) | 1 GiB | 30 s | 45 s |
 | Tesseract (images, scanned PDFs) | none | none | `INDEXER_OCR_TIMEOUT_SECONDS` per page |
 | Poppler `pdfinfo` / `pdftoppm` (scanned PDFs) | none | none | the OCR render deadline (see `INDEXER_OCR_TIMEOUT_SECONDS`) |
 
@@ -1452,21 +1478,21 @@ expanded: a synthetic 0.5 MB document whose main part declares a few KB
 but decompresses to 512 MiB peaked the indexer at about 1.1 GB. So the
 whole DOCX, PPTX and XLSX extraction, the pre-open budgets, XLSX's
 eager member reads and the walk included, runs in a child Python
-process (`extractors/ooxml_child.py`, started as `python -I` through
-the runner) under 1 GiB of address space and 30 s of CPU, killed after
-45 s; the dispatcher's ZIP guard and OLE2 check, which read only the
-central directory and the first bytes, stay in the indexer. The child
-writes one header line and then the text: the names of the walk
-budgets that cut the text, which the parent checks against the
-format's own list and logs through the extractor-cap WARNING as
-before, or `!` and the type name of the exception the extraction
-raised. A package-budget or eager-part-budget rejection is raised again
-in the parent and recorded `unsupported` as before; any other type
-name (`BadZipFile`, `DocxRelationshipChainError`, ...) is recorded
-`failed` under that name, as it was in process. Output with no header
-line, an unknown cap or type name, text after a type name, bytes that
-are not UTF-8, or output cut at the 48 MiB byte cap is `failed`
-(`OoxmlOutputError`), never cached as text. A `MemoryError` or
+process (the extractor child, `extractors/extractor_child.py`, started
+as `python -I` through the runner) under 1 GiB of address space and
+30 s of CPU, killed after 45 s; the dispatcher's ZIP guard and OLE2
+check, which read only the central directory and the first bytes, stay
+in the indexer. The child reports in the runner's framed protocol
+(above): the names of the walk budgets that cut the text, which the
+parent checks against the format's own list and logs through the
+extractor-cap WARNING as before, and the text; or the type name of the
+exception the extraction raised. A package-budget or eager-part-budget
+rejection is raised again in the parent and recorded `unsupported` as
+before; any other type name (`BadZipFile`,
+`DocxRelationshipChainError`, ...) is recorded `failed` under that
+name, as it was in process. Output that breaks the protocol or is cut
+at the 48 MiB byte cap is `failed` (`ChildOutputError`), never cached
+as text. A `MemoryError` or
 `RecursionError` in the child is the child's limit, not host pressure:
 it is recorded `failed` by type, where in process the dispatcher
 re-raised it; lxml reports a failed allocation as `XMLSyntaxError`, so

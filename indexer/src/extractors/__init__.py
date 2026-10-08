@@ -43,7 +43,7 @@ import defusedxml
 from PIL import Image
 
 from ..rate_limited_log import LineBudget
-from .ooxml import OoxmlChildError
+from ._runner import ChildError
 
 # ``defuse_stdlib`` swaps the standard-library XML parsers (``xml.etree``,
 # ``xml.sax``, ``xml.dom.*``, ``xml.parsers.expat``, ``xmlrpc.client``)
@@ -863,9 +863,9 @@ def extract(
         # Parser exceptions quote the document (text, member names), so
         # only the type is logged and persisted (#257). WARNING, since
         # the attachment drops out of search (#871), rate limited. An
-        # OOXML extraction runs in a child process (#1040), which
-        # reports the type name of what it raised.
-        error_type = exc.type_name if isinstance(exc, OoxmlChildError) else type(exc).__name__
+        # extraction in the extractor child (#1040, #1291) reports the
+        # type name of what it raised.
+        error_type = exc.type_name if isinstance(exc, ChildError) else type(exc).__name__
         _warn_failed(module_name, dispatch_via, error_type)
         return ExtractionResult(
             status=STATUS_FAILED,

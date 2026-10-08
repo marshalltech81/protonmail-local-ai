@@ -19,6 +19,7 @@ import re
 import resource
 import shutil
 import struct
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -70,6 +71,30 @@ def _fake_tool(tmp_path: Path, body: str) -> str:
     path.write_text(f"#!{sys.executable}\nimport json, os, resource, signal, sys, time\n{body}\n")
     path.chmod(0o700)
     return str(path)
+
+
+def _stub_exit_status(monkeypatch, returncode: int) -> None:
+    """Make a tool's exit status read as ``returncode``: the real tool
+    is still reaped, so no process is left behind."""
+    real_wait = subprocess.Popen.wait
+
+    def wait(self, timeout=None):
+        real_wait(self, timeout)
+        return returncode
+
+    monkeypatch.setattr(subprocess.Popen, "wait", wait)
+
+
+def _process_exists(pid: int) -> bool:
+    """Whether ``pid`` is a live process (a zombie counts as gone)."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    if sys.platform == "linux":
+        with open(f"/proc/{pid}/stat") as stat:
+            return stat.read().rsplit(")", 1)[1].split()[0] != "Z"
+    return True
 
 
 def _peak_rss_bytes() -> int:
@@ -169,9 +194,8 @@ class TestRunTool:
     def test_any_signal_maps_to_the_crash_error(self, monkeypatch, tmp_path, returncode):
         """SIGSEGV, SIGXCPU and SIGABRT, by the status the parent sees:
         stubbed, so no tool crashes for real."""
-        import subprocess
 
-        monkeypatch.setattr(subprocess.Popen, "wait", lambda self, timeout=None: returncode)
+        _stub_exit_status(monkeypatch, returncode)
         tool = _fake_tool(tmp_path, "pass")
         with pytest.raises(ToolCrashError):
             run_tool([tool], b"x", timeout_seconds=30, max_output_bytes=10, **_LIMITS, suffix=".x")
@@ -261,6 +285,94 @@ class TestRunTool:
                 suffix=".x",
             )
 
+    def test_payload_is_in_a_private_scratch_directory_that_is_the_tools_tmpdir(self, tmp_path):
+        tool = _fake_tool(
+            tmp_path,
+            "path = sys.argv[-1]\n"
+            "print(json.dumps({'dir': os.path.dirname(path), 'tmpdir': os.environ['TMPDIR'], "
+            "'mode': oct(os.stat(os.path.dirname(path)).st_mode & 0o777)}))",
+        )
+        output = run_tool(
+            [tool], b"x", timeout_seconds=30, max_output_bytes=4096, **_LIMITS, suffix=".x"
+        )
+        seen = json.loads(output.data)
+        assert seen["dir"] == seen["tmpdir"]
+        assert seen["mode"] == "0o700"
+        assert not Path(seen["dir"]).exists()
+
+    @pytest.mark.parametrize("end", ["timeout", "cap", "exit", "error"])
+    def test_scratch_files_are_removed_however_the_run_ends(self, tmp_path, monkeypatch, end):
+        """#1291: a file the tool (or a tool it starts) writes to its
+        scratch directory is removed with it, also when the tool is
+        killed."""
+        from src.extractors import _runner
+
+        scratch_root = tmp_path / "tmp"
+        scratch_root.mkdir()
+        monkeypatch.setattr(_runner, "_TMP_DIR", str(scratch_root))
+        finish = {
+            "timeout": "time.sleep(60)",
+            "cap": "sys.stdout.write('a' * 100)",
+            "exit": "pass",
+            "error": "sys.exit(2)",
+        }[end]
+        tool = _fake_tool(
+            tmp_path,
+            "scratch = os.path.dirname(sys.argv[-1])\n"
+            "open(os.path.join(scratch, 'left-behind'), 'w').write('x')\n"
+            "os.makedirs(os.path.join(scratch, 'sub', 'dir'))\n" + finish,
+        )
+        try:
+            run_tool([tool], b"x", timeout_seconds=2, max_output_bytes=10, **_LIMITS, suffix=".x")
+        except ToolTimeoutError, ToolExitError:
+            pass
+        assert list(scratch_root.iterdir()) == []
+
+    @pytest.mark.parametrize("end", ["timeout", "cap", "exit"])
+    def test_processes_the_tool_starts_are_killed_with_it(self, tmp_path, end):
+        """#1291: the tool runs in its own session and its whole process
+        group is killed (``SIGKILL``) when the run ends: a grandchild
+        does not outlive a timeout, the output cap or a normal exit."""
+        pid_file = tmp_path / "grandchild.pid"
+        finish = {
+            "timeout": "time.sleep(60)",
+            "cap": "sys.stdout.write('a' * 100)\nsys.stdout.flush()\ntime.sleep(60)",
+            "exit": "pass",
+        }[end]
+        tool = _fake_tool(
+            tmp_path,
+            "import subprocess\n"
+            "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], "
+            "stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+            f"open({str(pid_file)!r}, 'w').write(str(child.pid))\n" + finish,
+        )
+        started = time.monotonic()
+        try:
+            run_tool([tool], b"x", timeout_seconds=2, max_output_bytes=10, **_LIMITS, suffix=".x")
+        except ToolTimeoutError:
+            assert end == "timeout"
+        assert time.monotonic() - started < 15
+        grandchild = int(pid_file.read_text())
+        deadline = time.monotonic() + 10
+        while _process_exists(grandchild):
+            assert time.monotonic() < deadline, "the grandchild outlived the run"
+            time.sleep(0.05)
+
+    def test_output_is_streamed_to_the_callback(self, tmp_path):
+        tool = _fake_tool(tmp_path, "sys.stdout.write('abc')")
+        seen: list[bytes] = []
+        output = run_tool(
+            [tool],
+            b"x",
+            timeout_seconds=30,
+            max_output_bytes=2,
+            **_LIMITS,
+            suffix=".x",
+            on_output=seen.append,
+        )
+        assert output == ToolOutput(b"", truncated=True)
+        assert b"".join(seen) == b"ab"
+
     def test_tool_gets_no_inherited_environment(self, tmp_path, monkeypatch):
         monkeypatch.setenv("SYNTHETIC_SECRET_ENV", MARKER)
         tool = _fake_tool(tmp_path, "print(sorted(os.environ))")
@@ -271,7 +383,8 @@ class TestRunTool:
 
 
 def _run_tool_calls() -> dict[str, list[ast.Call]]:
-    """Every call to ``run_tool`` in the indexer's source, by file."""
+    """Every call to ``run_tool`` or ``run_child`` (which calls
+    ``run_tool``) in the indexer's source, by file."""
     src = Path(extractors.__file__).parents[1]
     calls: dict[str, list[ast.Call]] = {}
     for path in sorted(src.rglob("*.py")):
@@ -280,7 +393,7 @@ def _run_tool_calls() -> dict[str, list[ast.Call]]:
                 continue
             func = node.func
             name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
-            if name == "run_tool":
+            if name in {"run_tool", "run_child"}:
                 calls.setdefault(str(path.relative_to(src)), []).append(node)
     return calls
 
@@ -304,13 +417,17 @@ class TestEveryToolRunsUnderLimits:
 
     def test_every_run_tool_caller_passes_both_limits(self):
         calls = _run_tool_calls()
-        # Guards the scan: it finds the four callers (and nothing
-        # passes limits through ``**kwargs``, which it could not check).
+        # Guards the scan: it finds the callers (and nothing passes
+        # limits through ``**kwargs``, which it could not check).
         assert set(calls) == {
+            "extractors/_runner.py",
             "extractors/doc.py",
-            "extractors/xls.py",
-            "extractors/ppt.py",
+            "extractors/docx.py",
             "extractors/ooxml.py",
+            "extractors/ppt.py",
+            "extractors/pptx.py",
+            "extractors/xls.py",
+            "extractors/xlsx.py",
         }
         for path, nodes in calls.items():
             for node in nodes:
@@ -459,14 +576,13 @@ class TestDocExtractor:
         """SIGSEGV, SIGXCPU (the CPU limit) and SIGKILL (its hard limit),
         by the status the parent sees: stubbed, so nothing crashes for
         real on macOS."""
-        import subprocess
 
         from src.extractors import doc
 
         caplog.set_level("DEBUG")
         tool = _fake_tool(tmp_path, f"sys.stdout.write({MARKER!r})")
         monkeypatch.setattr(doc.shutil, "which", lambda _name: tool)
-        monkeypatch.setattr(subprocess.Popen, "wait", lambda self, timeout=None: returncode)
+        _stub_exit_status(monkeypatch, returncode)
         result = extract(content_type="application/msword", filename="a.doc", payload=_OLE2_MAGIC)
         assert (result.status, result.error, result.text) == (STATUS_FAILED, "ToolCrashError", None)
         assert MARKER not in caplog.text
@@ -583,7 +699,7 @@ class TestXlsExtractor:
     @linux_only
     def test_sst_loop_meets_the_address_space_limit(self, monkeypatch):
         """The shared-string loop runs until the child's address space
-        runs out (MemoryError, exit 3): a bounded failed row. The parent's
+        runs out: the child reports MemoryError, a bounded failed row. The parent's
         own memory does not grow with it."""
         from src.extractors import xls
 
@@ -591,7 +707,7 @@ class TestXlsExtractor:
         before = _peak_rss_bytes()
         started = time.monotonic()
         result = _xls(_sst_bomb())
-        assert (result.status, result.error) == (STATUS_FAILED, "ToolExitError")
+        assert (result.status, result.error) == (STATUS_FAILED, "MemoryError")
         assert time.monotonic() - started < 30
         assert _peak_rss_bytes() - before < 64 * 1024 * 1024
 
@@ -625,54 +741,15 @@ class TestXlsExtractor:
         with pytest.raises(RecursionError):
             xls_child.extract_text(payload)
         # ... which the dispatcher would treat as host pressure. In the
-        # child it is a fixed failed row.
+        # child it is a failed row reported by type.
         result = _xls(payload)
-        assert (result.status, result.error) == (STATUS_FAILED, "ToolExitError")
+        assert (result.status, result.error) == (STATUS_FAILED, "RecursionError")
 
     def test_garbage_ole2_is_failed_without_quoting_it(self, caplog):
         caplog.set_level("DEBUG")
         result = _xls(_OLE2_MAGIC + MARKER.encode() + bytes(1024))
-        assert (result.status, result.error) == (STATUS_FAILED, "ToolExitError")
+        assert (result.status, result.error) == (STATUS_FAILED, "CompDocError")
         assert MARKER not in caplog.text
-
-    @pytest.mark.parametrize(
-        "data",
-        [b"no newline", b"unknown_cap\ntext", b"x" * 10],
-    )
-    def test_malformed_child_output_is_failed(self, monkeypatch, data):
-        from src.extractors import xls
-
-        monkeypatch.setattr(xls, "run_tool", lambda *_a, **_k: ToolOutput(data, truncated=False))
-        result = _xls(_OLE2_MAGIC)
-        assert (result.status, result.error) == (STATUS_FAILED, "XlsOutputError")
-
-    def test_truncated_child_output_is_failed(self, monkeypatch):
-        from src.extractors import xls
-
-        monkeypatch.setattr(
-            xls, "run_tool", lambda *_a, **_k: ToolOutput(b"\ntext", truncated=True)
-        )
-        result = _xls(_OLE2_MAGIC)
-        assert (result.status, result.error) == (STATUS_FAILED, "XlsOutputError")
-
-    def test_child_runs_isolated_with_the_limits(self, monkeypatch):
-        from src.extractors import xls
-
-        seen: list[tuple[list[str], int, int]] = []
-
-        def fake_run_tool(argv, payload, **kwargs):
-            seen.append((argv, kwargs["max_address_space_bytes"], kwargs["max_cpu_seconds"]))
-            return ToolOutput(b"\n", truncated=False)
-
-        monkeypatch.setattr(xls, "run_tool", fake_run_tool)
-        xls.extract(_OLE2_MAGIC)
-        assert seen == [
-            (
-                [sys.executable, "-I", str(Path(xls.__file__).with_name("xls_child.py"))],
-                xls.CHILD_MAX_ADDRESS_SPACE_BYTES,
-                xls.CHILD_MAX_CPU_SECONDS,
-            )
-        ]
 
 
 class TestXlsChildWalk:
@@ -795,35 +872,6 @@ class TestXlsChildWalk:
                 pass
 
         assert xls_child._walk(Book()) == ("[Sheet: S]\na b\t\t\tc d", [])
-
-    def test_output_encoding(self):
-        from src.extractors import xls_child
-
-        assert xls_child.encode_output("Zürich", ["xls_sheets"]) == "xls_sheets\nZürich".encode()
-        assert xls_child.encode_output("", []) == b"\n"
-
-
-class TestXlsCapsReachTheLog:
-    """The child reports a cap by name; the parent logs it through
-    ``warn_extractor_cap``, once, without workbook text."""
-
-    def test_child_cap_is_logged_and_counted(self, monkeypatch, caplog):
-        from src.extractors import xls
-
-        caplog.set_level("DEBUG")
-        extractors.drain_extractor_counts()
-        monkeypatch.setattr(
-            xls,
-            "run_tool",
-            lambda *_a, **_k: ToolOutput(f"xls_sheets\n{MARKER}".encode(), truncated=False),
-        )
-        result = _xls(_OLE2_MAGIC)
-        assert result.status == STATUS_SUCCESS
-        lines = [r for r in caplog.records if "extractor cap" in r.getMessage()]
-        assert [r.levelno for r in lines] == [logging.WARNING]
-        assert "extractor cap xls_sheets:" in lines[0].getMessage()
-        assert extractors.drain_extractor_counts()["extractor_caps"] == 1
-        assert MARKER not in caplog.text
 
 
 # ---------------------------------------------------------------------------
@@ -1082,12 +1130,11 @@ class TestPptExtractor:
     def test_signal_statuses_are_crash_rows(self, tmp_path, monkeypatch, returncode):
         """SIGSEGV, SIGXCPU (the CPU limit) and SIGABRT, by the status the
         parent sees: stubbed, so nothing crashes for real on macOS."""
-        import subprocess
 
         from src.extractors import ppt
 
         monkeypatch.setattr(ppt, "PPT_HOME", _fake_ppt_home(tmp_path, "pass"))
-        monkeypatch.setattr(subprocess.Popen, "wait", lambda self, timeout=None: returncode)
+        _stub_exit_status(monkeypatch, returncode)
         result = _ppt(_OLE2_MAGIC)
         assert (result.status, result.error) == (STATUS_FAILED, "ToolCrashError")
 
@@ -1196,3 +1243,27 @@ class TestPptExtractor:
         monkeypatch.setattr(ppt, "run_tool", raise_)
         with pytest.raises(error):
             _ppt(_OLE2_MAGIC)
+
+
+@pytest.mark.parametrize("module", ["doc", "ppt"])
+@pytest.mark.parametrize("truncated", [True, False])
+def test_cut_raw_tool_output_is_incomplete_text(tmp_path, monkeypatch, module, truncated):
+    """#1291: a raw tool's output the byte cap cut is kept, and the
+    attachment's text is reported incomplete (#1242); uncut output is
+    complete."""
+    from src.extractors import doc, ppt
+
+    body = f"sys.stdout.write('SYNTHETIC text ' + 'a' * {200 if truncated else 10})"
+    if module == "doc":
+        tool = _fake_tool(tmp_path, body)
+        monkeypatch.setattr(doc.shutil, "which", lambda _name: tool)
+        monkeypatch.setattr(doc, "_MAX_OUTPUT_BYTES", 100)
+        mime = "application/msword"
+    else:
+        monkeypatch.setattr(ppt, "PPT_HOME", _fake_ppt_home(tmp_path, body))
+        monkeypatch.setattr(ppt, "_MAX_OUTPUT_BYTES", 100)
+        mime = _PPT_MIME
+    result = extract(content_type=mime, filename=f"a.{module}", payload=_OLE2_MAGIC)
+    assert result.status == STATUS_SUCCESS
+    assert len(result.text or "") == (100 if truncated else 25)
+    assert result.text_complete is not truncated

@@ -1,10 +1,8 @@
-"""Child process of the legacy ``.xls`` extractor (#935).
+"""The legacy ``.xls`` walk, run in the extractor child (#935, #1291).
 
-Run by ``xls.extract`` as
-``python -I xls_child.py <payload file>``, through the runner's
-launcher (``_launcher.py``); it
-imports only the standard library and xlrd, so it never loads the
-indexer (``-I`` also keeps this directory off ``sys.path``).
+``xls.extract`` runs it as
+``python -I extractor_child.py xls <payload file>``, through the
+runner's launcher (``_launcher.py``).
 
 xlrd's ``open_workbook`` does work the payload cap does not bound
 before any caller code runs: its shared-string loop trusts a declared
@@ -14,7 +12,7 @@ launcher therefore lowers the address-space and CPU limits before this
 child starts, to the values ``xls.py`` passes
 (``CHILD_MAX_ADDRESS_SPACE_BYTES`` and ``CHILD_MAX_CPU_SECONDS``), and
 the runner adds a wall-clock timeout.
-A limit hit or any error ends the child with no text; the parent
+A limit hit or any error ends the walk with no text; the parent
 records a ``failed`` row.
 
 Within those limits the walk follows the xlsx extractor's budgets,
@@ -34,15 +32,13 @@ counted while reading:
 Each budget that ended the walk is reported back by name for the parent
 to log through ``warn_extractor_cap``.
 
-Output on stdout: one line of comma-separated cap names, then the text
-as UTF-8. Nothing is written to stderr on purpose: an error's message
-can quote the workbook, so errors end the child with exit status 3 and
-no text, and xlrd's own diagnostics go to a discarding log file.
+An error is reported by type name only (``extractor_child``), since its
+message can quote the workbook, and xlrd's own diagnostics go to a
+discarding log file.
 """
 
 from __future__ import annotations
 
-import sys
 from typing import Any
 
 # The xlsx extractor's budgets (see ``xlsx.py``), with the sheet count
@@ -54,9 +50,6 @@ _ROW_COST = 64
 _MAX_TEXT_CHARS = 10_000_000
 _HEADER_OVERHEAD = len("[Sheet: ]") + 2
 _CELL_SEPARATORS = str.maketrans("\t\r\n", "   ")
-
-# Exit status for any error in the walk (type and text withheld).
-_EXIT_ERROR = 3
 
 
 class _DiscardLog:
@@ -169,24 +162,3 @@ def _number_text(value: float) -> str:
     if value.is_integer() and abs(value) < 1e15:
         return str(int(value))
     return repr(value)
-
-
-def encode_output(text: str, caps: list[str]) -> bytes:
-    """The child's stdout: the cap names on one line, then the text."""
-    return (",".join(caps) + "\n").encode("ascii") + text.encode("utf-8", errors="replace")
-
-
-def main(argv: list[str]) -> int:  # pragma: no cover — runs only in the child
-    try:
-        with open(argv[1], "rb") as handle:
-            payload = handle.read()
-        text, caps = extract_text(payload)
-    except BaseException:  # noqa: BLE001 — any error: no text, type withheld
-        return _EXIT_ERROR
-    sys.stdout.buffer.write(encode_output(text, caps))
-    sys.stdout.buffer.flush()
-    return 0
-
-
-if __name__ == "__main__":  # pragma: no cover — runs only in the child
-    sys.exit(main(sys.argv))
