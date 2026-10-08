@@ -7,11 +7,16 @@ them, machine-checkable values, and which rubric dimensions apply. The
 split rule is the agent scenarios' (``tests/agent_metrics.is_held_out``):
 membership is fixed by the case ID, so adding cases never moves one.
 
-A case ID starts with its tool's short name (``ask-``, ``summarize-``).
-Per tool (#656): ``ask_mailbox`` needs a ``question``;
-``summarize_thread`` needs a baseline ``thread_id`` (a direct lookup, so
-nothing is embedded; a subject-phrase lookup is not a case shape yet),
-and its evidence and fact sources must be in that thread.
+A case ID starts with its tool's short name (``ask-``, ``summarize-``,
+``brief-``, ``check-``). Per tool (#656): ``ask_mailbox`` needs a
+``question``; ``summarize_thread`` needs a baseline ``thread_id`` (a
+direct lookup, so nothing is embedded; a subject-phrase lookup is not a
+case shape yet), and its evidence and fact sources must be in that
+thread. The experimental tools (#1240) need a ``topic``
+(``brief_issue``) or a ``conclusion`` of at most the handler's 2,000
+characters (``check_conclusion``). ``ask_mailbox`` and both experimental
+tools also take the scope filters, whose types are checked here; their
+values are the handler's to validate.
 
 Refs follow the baseline's convention: ``t24`` is the thread rooted at
 ``t24.1@baseline.example`` and ``t24.2`` the message
@@ -26,6 +31,8 @@ from pathlib import Path
 from typing import Any, TypeGuard, get_args
 
 from src.lib.inference import MIN_PROMPT_TOKENS
+from src.tools.brief import _MAX_CONCLUSION_CHARS
+from src.tools.intelligence import _MAX_ASK_THREADS
 from src.tools.outputs import SummaryStyle
 
 from tests.agent_metrics import is_held_out
@@ -33,10 +40,22 @@ from tests.agent_metrics import is_held_out
 CASES_SCHEMA_VERSION = 1
 CASES_PATH = Path(__file__).with_name("cases.json")
 BASELINE_DOMAIN = "@baseline.example"
-# The tools the evaluation has an adapter for (``adapters.py``); the
-# experimental tools are not among them (#656, #291).
-TOOLS = ("ask_mailbox", "summarize_thread")
-_ID_PREFIX = {"ask_mailbox": "ask", "summarize_thread": "summarize"}
+# The tools the evaluation has an adapter for (``adapters.py``):
+# ``extract_from_emails`` is not among them (#1137).
+TOOLS = ("ask_mailbox", "summarize_thread", "brief_issue", "check_conclusion")
+_ID_PREFIX = {
+    "ask_mailbox": "ask",
+    "summarize_thread": "summarize",
+    "brief_issue": "brief",
+    "check_conclusion": "check",
+}
+# Each tool's one required text argument, which it embeds for retrieval;
+# ``summarize_thread`` takes a thread ID instead and embeds nothing.
+_TEXT_ARGUMENT = {
+    "ask_mailbox": "question",
+    "brief_issue": "topic",
+    "check_conclusion": "conclusion",
+}
 
 # Rubric dimensions; a case says which apply (see judge.RUBRIC).
 DIMENSIONS = (
@@ -64,13 +83,15 @@ CATEGORIES = frozenset(
 )
 HANDLINGS = frozenset({"answer", "disclose_conflict", "disclose_missing", "abstain"})
 REVIEW_STATES = frozenset({"ai_drafted", "owner_verified"})
+# The scope filters ``ask_mailbox`` and the experimental tools share.
+_SCOPE_FILTERS = frozenset({"from_addr", "date_from", "date_to", "folders", "max_threads"})
 _ARGUMENTS = {
-    "ask_mailbox": frozenset(
-        {"question", "from_addr", "date_from", "date_to", "folders", "max_threads"}
-    ),
+    "ask_mailbox": _SCOPE_FILTERS | {"question"},
     "summarize_thread": frozenset({"thread_id", "style"}),
+    "brief_issue": _SCOPE_FILTERS | {"topic"},
+    "check_conclusion": _SCOPE_FILTERS | {"conclusion"},
 }
-_CASE_ID = re.compile(r"(?:ask|summarize)-[a-z0-9]+(?:-[a-z0-9]+)*")
+_CASE_ID = re.compile(r"(?:ask|summarize|brief|check)-[a-z0-9]+(?:-[a-z0-9]+)*")
 # A baseline thread number as ``corpus.thread_id`` writes it: two
 # digits, or three past t99 (#975).
 _THREAD_NUMBER = r"t(?:[0-9]{2}|[1-9][0-9]{2})"
@@ -145,20 +166,24 @@ class Case:
     def question(self) -> str:
         """The case's task in words, for the judge prompt and the detail
         record: ``ask_mailbox``'s question, or a fixed sentence naming a
-        summary's thread and style."""
+        summary's thread and style, a brief's topic or the conclusion to
+        check."""
         if self.tool == "ask_mailbox":
             return str(self.arguments["question"])
+        if self.tool == "brief_issue":
+            return f"Brief the issue: {self.arguments['topic']}"
+        if self.tool == "check_conclusion":
+            return f"Check this conclusion against the mailbox: {self.arguments['conclusion']}"
         style = self.arguments.get("style", "brief")
         return f"Summarize the thread {self.arguments['thread_id']} in the {style} style."
 
     @property
     def embedded_query(self) -> str | None:
         """The text the tool embeds for retrieval, which the index build
-        must hold a query vector for: the question. ``None`` for a
-        summary, whose thread is looked up by ID."""
-        if self.tool == "ask_mailbox":
-            return str(self.arguments["question"])
-        return None
+        must hold a query vector for: the question, topic or conclusion.
+        ``None`` for a summary, whose thread is looked up by ID."""
+        argument = _TEXT_ARGUMENT.get(self.tool)
+        return None if argument is None else str(self.arguments[argument])
 
 
 def _require(cond: bool, case_id: str, what: str) -> None:
@@ -168,6 +193,20 @@ def _require(cond: bool, case_id: str, what: str) -> None:
 
 def _str_list(value: object) -> bool:
     return isinstance(value, list) and all(isinstance(v, str) and v.strip() for v in value)
+
+
+def _scope_filters_ok(args: dict[str, Any]) -> bool:
+    """The shared scope filters, when given, have the handler's types:
+    ``folders`` a list of names, ``from_addr`` and the dates strings,
+    ``max_threads`` an integer in the handler's range (it would coerce or
+    clamp any other value, a task the case does not state)."""
+    max_threads = args.get("max_threads", 1)
+    return (
+        ("folders" not in args or _str_list(args["folders"]))
+        and all(isinstance(args.get(k, ""), str) for k in ("from_addr", "date_from", "date_to"))
+        and type(max_threads) is int
+        and 1 <= max_threads <= _MAX_ASK_THREADS
+    )
 
 
 def _refs(value: object) -> bool:
@@ -185,10 +224,17 @@ def _parse_case(row: dict[str, Any]) -> Case:
     _require(row.get("category") in CATEGORIES, cid, "unknown category")
     args = row.get("arguments")
     _require(isinstance(args, dict) and set(args) <= _ARGUMENTS[tool], cid, "bad arguments keys")
-    if tool == "ask_mailbox":
-        _require(
-            isinstance(args.get("question"), str) and args["question"].strip(), cid, "question"
-        )
+    if tool in _TEXT_ARGUMENT:
+        name = _TEXT_ARGUMENT[tool]
+        _require(isinstance(args.get(name), str) and args[name].strip(), cid, name)
+        if tool == "check_conclusion":
+            # The handler refuses a longer conclusion as a tool error.
+            _require(
+                len(args[name]) <= _MAX_CONCLUSION_CHARS,
+                cid,
+                f"conclusion must be at most {_MAX_CONCLUSION_CHARS} characters",
+            )
+        _require(_scope_filters_ok(args), cid, "scope filter types")
     else:
         thread_id = args.get("thread_id")
         _require(
