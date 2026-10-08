@@ -2087,6 +2087,21 @@ def _docx_budget_case(monkeypatch) -> tuple[bytes, str, str]:
     return _docx_bytes("SYNTHETIC_TEXT_MARKER"), DOCX_PACKAGE_BUDGET_ERROR, "docx@5"
 
 
+def _ppt_encrypted_case(monkeypatch) -> tuple[bytes, str, str]:
+    """A password-protected legacy deck (#983). The reader is stubbed at
+    the extractor, which raises what ``ppt.extract`` raises for the
+    reader's encrypted status; ``test_legacy_office`` runs the real
+    reader on a real encrypted deck and maps the real status."""
+    from src import extractors
+    from src.extractors import ENCRYPTED_PPT_ERROR, ppt
+
+    def encrypted(payload, **_opts):
+        raise ppt.PptEncryptedError
+
+    monkeypatch.setitem(extractors._IMPORT_CACHE, "ppt", encrypted)
+    return _OLE2_MAGIC + b"SYNTHETIC_TEXT_MARKER" + bytes(64), ENCRYPTED_PPT_ERROR, "ppt@1"
+
+
 class TestPermanentFailureCacheRows:
     """#931: an encrypted PDF, a PDF over a pypdf limit and a workbook over
     the eager-part budget fail the same way in the same extractor, so they
@@ -2117,6 +2132,7 @@ class TestPermanentFailureCacheRows:
             "doc.docx",
             "docx",
         ),
+        "ppt-encrypted": (_ppt_encrypted_case, "application/vnd.ms-powerpoint", "deck.ppt", "ppt"),
     }
 
     def test_every_permanent_error_has_a_case(self, monkeypatch):
@@ -2293,6 +2309,53 @@ class TestPermanentFailureCacheRows:
         again = prepare_attachment_writes(db=db, **_kwargs(attachment))
         assert (again.status, again.cached) == (STATUS_UNSUPPORTED, True)
         assert calls.call_count == 1
+
+    @pytest.mark.parametrize(("age_days", "reruns"), [(1, False), (8, True)])
+    def test_a_pre_fix_ppt_failed_row_converts_on_its_first_retry(
+        self, tmp_path, monkeypatch, age_days, reruns
+    ):
+        """#983 came with no ``ppt`` bump: a ``failed`` row the reader
+        wrote for an encrypted deck before the fix is honoured for 7 days
+        like any ``failed`` row; the first occurrence processed after
+        that re-runs the reader once and records ``unsupported``, which
+        is then served for good."""
+        from src.extractors import is_stale_extractor
+
+        payload, error, extractor_name = _ppt_encrypted_case(monkeypatch)
+        assert not is_stale_extractor(extractor_name)
+        db = _setup_db_for_attachment(tmp_path)
+        attachment = _attachment(
+            payload, filename="deck.ppt", content_type="application/vnd.ms-powerpoint"
+        )
+        stamp = (datetime.now(UTC) - timedelta(days=age_days)).isoformat()
+        db._conn.execute(
+            "INSERT INTO attachment_extractions "
+            "(attachment_id, extractor_module, extraction_status, extractor, extracted_text, "
+            "extraction_error, extracted_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (attachment.content_hash, "ppt", STATUS_FAILED, "ppt@1", None, "ToolExitError", stamp),
+        )
+        db._conn.commit()
+        calls = MagicMock(wraps=attachment_indexing.extract_attachment)
+        monkeypatch.setattr(attachment_indexing, "extract_attachment", calls)
+
+        plan = prepare_attachment_writes(db=db, **_kwargs(attachment))
+        self._commit(db, plan)
+        row = db.get_attachment_extraction(attachment.content_hash, "ppt")
+        if not reruns:
+            assert (plan.status, plan.cached, calls.call_count) == (STATUS_FAILED, True, 0)
+            assert (row["extraction_status"], row["extraction_error"]) == (
+                STATUS_FAILED,
+                "ToolExitError",
+            )
+            return
+        assert (plan.status, plan.cached, calls.call_count) == (STATUS_UNSUPPORTED, False, 1)
+        assert (row["extraction_status"], row["extractor"], row["extraction_error"]) == (
+            STATUS_UNSUPPORTED,
+            extractor_name,
+            error,
+        )
+        again = prepare_attachment_writes(db=db, **_kwargs(attachment))
+        assert (again.status, again.cached, calls.call_count) == (STATUS_UNSUPPORTED, True, 1)
 
     @pytest.mark.parametrize("case", sorted(_CASES))
     def test_the_startup_sweep_does_not_requeue_a_held_row(self, monkeypatch, case):

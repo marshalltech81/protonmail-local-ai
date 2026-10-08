@@ -27,7 +27,9 @@ output is treated as data:
 * A timeout, a death by signal (a crash, or the CPU limit) and a
   non-zero exit (a tool that fails an allocation under the
   address-space limit exits with an error) raise fixed-text exceptions,
-  which the dispatcher records by type name as a ``failed`` row.
+  which the dispatcher records by type name as a ``failed`` row. The
+  exit status rides on ``ToolExitError``; only the ``ppt`` extractor
+  reads it, for its reader's encrypted-deck status (#983).
 """
 
 from __future__ import annotations
@@ -77,10 +79,13 @@ class ToolCrashError(Exception):
 
 
 class ToolExitError(Exception):
-    """The tool exited with a non-zero status."""
+    """The tool exited with a non-zero status, kept as ``returncode`` for
+    a caller whose tool gives one status a fixed meaning (the ``ppt``
+    reader's encrypted-deck status, #983). The message stays fixed."""
 
-    def __init__(self) -> None:
+    def __init__(self, returncode: int | None = None) -> None:
         super().__init__("extraction tool exited with an error")
+        self.returncode = returncode
 
 
 @dataclass(frozen=True)
@@ -176,5 +181,5 @@ def _run(argv: list[str], timeout_seconds: float, max_output_bytes: int) -> Tool
     if returncode < 0:
         raise ToolCrashError
     if returncode > 0:
-        raise ToolExitError
+        raise ToolExitError(returncode)
     return ToolOutput(b"".join(chunks), truncated=False)

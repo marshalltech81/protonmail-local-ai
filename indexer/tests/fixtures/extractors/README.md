@@ -103,6 +103,24 @@ read (#958).
 `legacy-lo.ppt` has slide 1's text only. Most of its size is the
 preview image LibreOffice writes into the summary information.
 
+`legacy-encrypted.ppt` is a password-protected deck (#983), written by
+the reader the indexer runs, so a test sees the exception that reader
+raises for it.
+
+- **Tool:** Apache POI 5.5.1 (the version `indexer/java/pom.xml` pins),
+  on the JDK of the indexer's `ppt-builder` build stage.
+- **Command:** `legacy-src/generate-encrypted-ppt.sh` (needs Docker). It
+  builds that stage and runs `legacy-src/EncryptedPpt.java` in it with
+  no network.
+- **Content:** POI's blank deck plus one slide whose text box holds "The
+  SYNTHETIC-ENCRYPTED-DECK code is 6021.", encrypted (RC4 CryptoAPI)
+  with the synthetic password the script sets; the slide text and the
+  summary information are in the encrypted streams only. The author,
+  last-author and Current User names are "Synthetic Author": POI's
+  blank-deck template carries a real name in its Current User stream,
+  so the script replaces it. Checked by hand before committing: the
+  only readable name in the file is "Synthetic Author".
+
 What the tests rely on:
 
 - **`legacy.doc`:** the attachment-only fact "The COBALT-LANTERN ledger

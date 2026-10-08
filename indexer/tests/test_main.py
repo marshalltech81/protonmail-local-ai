@@ -4367,6 +4367,58 @@ class TestLegacyPptThroughThePipeline:
         assert all(marker not in (r["last_error"] or "") for r in jobs)
         assert marker not in caplog.text
 
+    def test_encrypted_deck_is_unsupported_and_never_requeued(self, tmp_path, monkeypatch, caplog):
+        """#983: the reader's encrypted status records a fixed
+        ``unsupported`` row through the pipeline, no deck text reaches the
+        log or a job row, and the startup sweep leaves the row alone,
+        as it does a ``failed`` row written before the fix (no ``ppt``
+        version bump)."""
+        from src.extractors import ENCRYPTED_PPT_ERROR, ppt
+
+        caplog.set_level("DEBUG")
+        marker = "SYNTHETIC_DECK_MARKER"
+        home = tmp_path / "ppt"
+        java = home / "jre" / "bin" / "java"
+        java.parent.mkdir(parents=True)
+        java.write_text(
+            f"#!{sys.executable}\nimport sys\n"
+            f"sys.stderr.write({marker!r})\nsys.stdout.write({marker!r})\n"
+            f"sys.exit({ppt.ENCRYPTED_EXIT_STATUS})\n"
+        )
+        java.chmod(0o700)
+        monkeypatch.setattr(ppt, "PPT_HOME", home)
+        db, queue, _ = self._enqueue(
+            tmp_path,
+            monkeypatch,
+            {
+                "deck": (
+                    self._OLE2 + marker.encode(),
+                    "application/vnd.ms-powerpoint",
+                    f"{marker}.ppt",
+                ),
+                "old": (self._OLE2 + b"older deck", "application/vnd.ms-powerpoint", "old.ppt"),
+            },
+        )
+        self._drain(db, queue)
+        rows = db._conn.execute(
+            "SELECT extraction_status, extractor, extraction_error FROM attachment_extractions"
+        ).fetchall()
+        assert [tuple(r) for r in rows] == [("unsupported", "ppt@1", ENCRYPTED_PPT_ERROR)] * 2
+        assert db._conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 2
+        jobs = db._conn.execute("SELECT last_error FROM indexing_jobs").fetchall()
+        assert all(marker not in (r["last_error"] or "") for r in jobs)
+        assert marker not in caplog.text
+        # One row as the reader wrote it before the fix.
+        db._conn.execute(
+            "UPDATE attachment_extractions SET extraction_status = 'failed', "
+            "extraction_error = 'ToolExitError' WHERE rowid = (SELECT MIN(rowid) "
+            "FROM attachment_extractions)"
+        )
+        db._conn.commit()
+
+        assert main._requeue_stale_extractions(db, queue) == 0
+        assert self._queued(db) == {}
+
 
 class TestRequeueTooLargeThatNowFits:
     """#693: attachments cached ``too_large`` under a smaller

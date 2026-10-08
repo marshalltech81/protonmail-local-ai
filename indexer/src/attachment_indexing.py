@@ -238,10 +238,11 @@ def _unsupported_still_holds(error: str | None, module: str, ocr_enabled: bool) 
     "not an OLE2 compound file" result under the ``ppt`` label and the
     "no extractor" result are decided by the label and the bytes alone
     (#694, #932, #957), so they hold for good. So do an encrypted PDF, a
-    PDF over a pypdf limit, a workbook over the eager-part budget and a
-    deck or document over a pre-open package budget: the module that
-    raised them would decline the same bytes again, and the row is that
-    module's own (#931, #1032). Any other result (an
+    PDF over a pypdf limit, a workbook over the eager-part budget, a
+    deck or document over a pre-open package budget and an encrypted
+    legacy ``.ppt``: the module that raised them would decline the same
+    bytes again, and the row is that module's own (#931, #1032, #983).
+    Any other result (an
     extractor not importable in this image) holds only while the
     occurrence selects no extractor.
     """
