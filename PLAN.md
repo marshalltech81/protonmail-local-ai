@@ -471,9 +471,10 @@ extractor-version counts in status (#979, decision), the unscanned
 jlink runtime (#1008) and a merge gate on a Codex review of the head
 commit (#978). Done 2026-10-08: the indexer exits when the Maildir
 watcher thread dies, so the restart restores it, and counts the
-directories its walks cannot read (#870). Open decisions: telling a
-stall from a backlog in status (#876; parked trashed files currently
-show as "retrying"), and correlation IDs (#888).
+directories its walks cannot read (#870), and status reports parked
+trashed and deferred jobs apart from retries (#1165). Open decisions:
+telling a stall from a backlog in status (#876), and correlation IDs
+(#888).
 Every MCP tool declares safety annotations (#899; #900; Resolved
 decisions 31).
 
