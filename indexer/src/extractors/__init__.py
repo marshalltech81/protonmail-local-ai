@@ -30,12 +30,13 @@ operators can act on.
 
 from __future__ import annotations
 
+import functools
 import importlib
 import logging
 import os
 import zipfile
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from threading import Lock, local
 
 import defusedxml
@@ -164,6 +165,8 @@ def note_pdf_pages_unrecovered(pages: int) -> None:
     global _pdf_pages_unrecovered
     with _counts_lock:
         _pdf_pages_unrecovered += pages
+    if pages:
+        note_text_lost()
 
 
 def note_ocr_capped(pages_skipped: int) -> None:
@@ -173,13 +176,24 @@ def note_ocr_capped(pages_skipped: int) -> None:
     with _counts_lock:
         _ocr_capped_pdfs += 1
         _ocr_pages_skipped += pages_skipped
+    note_text_lost()
 
 
 # The pages the PDF OCR cap skipped in the extraction running on this
-# thread (#891): ``extract`` sets it before a PDF extractor runs and reads
-# it after, so the count lands on the result without changing every
-# extractor's return shape.
+# thread (#891), and whether any text was lost in it (#1242): ``extract``
+# sets them before an extractor runs and reads them after, so they land
+# on the result without changing every extractor's return shape.
 _attempt = local()
+
+
+def note_text_lost() -> None:
+    """Record that the extraction running on this thread lost text: a
+    cap, a page no reader recovered, or a scanned page left unread
+    (#1242). Its result then never certifies that the attachment's text
+    is complete (``ExtractionResult.text_complete``). Every count and cap
+    warning above calls it; an extractor calls it directly for a loss
+    with no count of its own."""
+    _attempt.text_lost = True
 
 
 def record_ocr_pages_skipped(pages_skipped: int) -> None:
@@ -193,6 +207,7 @@ def note_ocr_capped_image() -> None:
     global _ocr_capped_images
     with _counts_lock:
         _ocr_capped_images += 1
+    note_text_lost()
 
 
 def warn_extractor_cap(logger: logging.Logger, cap: str, msg: str, *args: object) -> None:
@@ -202,6 +217,7 @@ def warn_extractor_cap(logger: logging.Logger, cap: str, msg: str, *args: object
     global _extractor_caps
     with _counts_lock:
         _extractor_caps += 1
+    note_text_lost()
     warn_rate_limited(logger, "extractor cap %s: " + msg, cap, *args)
 
 
@@ -303,6 +319,15 @@ class ExtractionResult:
     unread (#891): set on a ``success`` or ``empty`` PDF result (0 when
     none), ``None`` (unknown) otherwise. Kept with the cached row so an
     occurrence served from the cache still counts as capped.
+
+    ``text_complete`` (#1242) is whether ``text`` holds all the text the
+    extractor could read: ``True`` only for a ``success`` or ``empty``
+    result whose extraction lost nothing (``note_text_lost``: an
+    extractor cap, the dispatcher's ``max_extracted_chars`` cut, the PDF
+    digital-page or OCR page cap, a PDF page no reader recovered, a
+    scanned page left unread, an image's OCR frame cap). ``False`` for
+    every other status, which never certifies absence. ``None`` when not
+    known (a result built without it). Kept with the cached row.
     """
 
     status: str
@@ -310,6 +335,7 @@ class ExtractionResult:
     text: str | None
     error: str | None
     ocr_pages_skipped: int | None = None
+    text_complete: bool | None = None
 
 
 # Version of each extractor module whose output changed for the same
@@ -649,6 +675,25 @@ _IMAGE_MIME_PREFIX = "image/"
 DEFAULT_MAX_BYTES = 32 * 1024 * 1024
 
 
+def _recording_text_completeness[**P](
+    fn: Callable[P, ExtractionResult],
+) -> Callable[P, ExtractionResult]:
+    """Set ``text_complete`` on every result ``fn`` returns (#1242): the
+    attempt's loss flag is cleared first, any loss recorded during it
+    (``note_text_lost``) makes the result incomplete, and a status other
+    than ``success`` or ``empty`` is never complete."""
+
+    @functools.wraps(fn)
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -> ExtractionResult:
+        _attempt.text_lost = False
+        result = fn(*args, **kwargs)
+        complete = result.status in (STATUS_SUCCESS, STATUS_EMPTY) and not _attempt.text_lost
+        return replace(result, text_complete=complete)
+
+    return wrapper
+
+
+@_recording_text_completeness
 def extract(
     *,
     content_type: str,

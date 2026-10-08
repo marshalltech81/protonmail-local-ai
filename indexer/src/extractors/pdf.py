@@ -61,6 +61,7 @@ from . import (
     note_ocr_capped,
     note_pdf_page_failed,
     note_pdf_pages_unrecovered,
+    note_text_lost,
     record_ocr_pages_skipped,
     warn_extractor_cap,
     warn_rate_limited,
@@ -151,6 +152,10 @@ def _text_from_pages(
 
     if not ocr_enabled:
         if len(digital_text) >= _MIN_DIGITAL_CHARS:
+            # A page under the floor is one OCR would read: with OCR off
+            # its text, if it is a scan, is lost (#1242).
+            if any(len(text) < _MIN_DIGITAL_CHARS for text in digital_pages):
+                note_text_lost()
             return digital_text, "pdf-digital"
         # The digital text layer is below the useful threshold, so this
         # PDF likely needs OCR. Return a sentinel extractor name so the
@@ -195,6 +200,7 @@ def _text_from_pages(
         if len(digital_text) >= _MIN_DIGITAL_CHARS:
             # A mixed PDF keeps its digital text, as before page-level
             # OCR; its unread pages are lost, as past the cap.
+            note_text_lost()
             return digital_text, "pdf-digital"
         # The digital text layer was below the usable threshold, so
         # swallowing the failure would cache the attachment as empty /

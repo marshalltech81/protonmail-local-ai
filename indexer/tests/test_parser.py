@@ -5449,3 +5449,36 @@ class TestParticipantNames:
         # address for the names.
         assert calls["n"] == budget.parse_calls + (kept - 1) + 2 * kept
         assert elapsed < 30
+
+
+# #1242: the attachments whose payload a cap emptied, per cap shape (one
+# each; none for a shape that drops no attachment payload). An emptied
+# payload is not the attachment's, so its extracted text never counts as
+# complete.
+_PAYLOAD_LOSS = {
+    "attached_depth": 1,
+    "attached_fields": 1,
+    "attached_depth_decoded": 1,
+    "attached_depth_decode_chain": 1,
+    "transport_decode_base64": 1,
+    "transport_decode_8bit": 1,
+    "decoded_bytes": 1,
+    "container_serialize": 1,
+    "container_serialize_decoded": 1,
+}
+
+
+@pytest.mark.parametrize("shape", sorted(_CAP_SHAPES))
+def test_cap_shape_marks_exactly_the_emptied_payloads(tmp_path, monkeypatch, shape):
+    msg, _ = _parse_cap_shape(tmp_path, monkeypatch, shape)
+    lost = [a for a in msg.attachments if not a.payload_complete]
+    assert len(lost) == _PAYLOAD_LOSS.get(shape, 0)
+    assert all(a.payload == b"" for a in lost)
+
+
+def test_an_attachment_with_its_payload_is_complete(tmp_path):
+    path = tmp_path / "plain.eml"
+    path.write_bytes(_with_attachment(b"Content-Type: text/plain\r\n", b"SYNTHETIC_TEXT"))
+    msg = parse_email(path)
+    assert msg is not None
+    assert [(a.payload, a.payload_complete) for a in msg.attachments] == [(b"SYNTHETIC_TEXT", True)]

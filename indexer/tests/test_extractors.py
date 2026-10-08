@@ -274,7 +274,11 @@ class TestFailedOutcomesAreLogged:
         )
 
         assert result == ExtractionResult(
-            status=STATUS_FAILED, extractor="text@3", text=None, error="ValueError"
+            status=STATUS_FAILED,
+            extractor="text@3",
+            text=None,
+            error="ValueError",
+            text_complete=False,
         )
         [record] = [r for r in caplog.records if r.name == "indexer.extractor"]
         assert record.levelname == "WARNING"
@@ -307,6 +311,7 @@ class TestFailedOutcomesAreLogged:
             extractor="xlsx@6",
             text=None,
             error="zip member declares 300 uncompressed bytes (cap 4)",
+            text_complete=False,
         )
         [record] = [r for r in caplog.records if r.name == "indexer.extractor"]
         assert record.levelname == "WARNING"
@@ -3203,6 +3208,9 @@ class TestPdfPageLevelOcr:
         counts = extractors.drain_extractor_counts()
         assert counts["pdf_pages_failed"] == len(failing)
         assert counts["pdf_pages_unrecovered"] == unrecovered
+        # A page no reader recovered, or one the OCR cap left unread,
+        # makes the text incomplete (#1242).
+        assert result.text_complete is (unrecovered == 0 and not counts["ocr_capped_pdfs"])
         # Put the counts back for the aggregate line.
         for _ in range(counts["pdf_pages_failed"]):
             extractors.note_pdf_page_failed()
@@ -3650,7 +3658,11 @@ class TestPermanentFailuresAreUnsupported:
         )
 
         assert result == ExtractionResult(
-            status=STATUS_UNSUPPORTED, extractor="pdf@5", text=None, error=PDF_LIMIT_ERROR
+            status=STATUS_UNSUPPORTED,
+            extractor="pdf@5",
+            text=None,
+            error=PDF_LIMIT_ERROR,
+            text_complete=False,
         )
         assert PDF_LIMIT_ERROR == "PDF structure exceeds pypdf limits"
         [record] = [r for r in caplog.records if r.name == "indexer.extractor"]
@@ -3694,7 +3706,11 @@ class TestPermanentFailuresAreUnsupported:
 
         version = extractors.EXTRACTOR_VERSIONS[module]
         assert result == ExtractionResult(
-            status=STATUS_UNSUPPORTED, extractor=f"{module}@{version}", text=None, error=error
+            status=STATUS_UNSUPPORTED,
+            extractor=f"{module}@{version}",
+            text=None,
+            error=error,
+            text_complete=False,
         )
         assert opened[0] == 0
         [record] = [r for r in caplog.records if r.name == "indexer.extractor"]
@@ -4338,6 +4354,8 @@ class TestMultipageTiffOcrCap:
         # One seek to the second frame, one probe past the cap; the probed
         # frame is never OCR'd and the frame chain is not walked further.
         assert seeks == [1, 2]
+        # The unread frames make the text incomplete (#1242).
+        assert result.text_complete is False
         [line] = self._cap_lines(caplog)
         assert line.levelname == "WARNING"
         assert line.getMessage() == "image OCR capped at 2 of at least 3 frames"
@@ -4370,6 +4388,7 @@ class TestMultipageTiffOcrCap:
         assert result.status == STATUS_SUCCESS
         assert seen == [f"PAGE_{i}" for i in range(frames)]
         assert seeks == expected_seeks
+        assert result.text_complete is True
         assert self._cap_lines(caplog) == []
         assert extractors.drain_extractor_counts()["ocr_capped_images"] == 0
 
@@ -4390,6 +4409,8 @@ class TestMultipageTiffOcrCap:
         assert result == intact
         assert seen == ["PAGE_0", "PAGE_1"]
         assert seeks == [1, 2]
+        # The unread frames make the text incomplete (#1242).
+        assert result.text_complete is False
         [line] = self._cap_lines(caplog)
         assert line.levelname == "WARNING"
         assert line.getMessage() == (
@@ -5286,7 +5307,11 @@ class TestBinaryPayloadLabelledAsText:
         payload = _BINARY_SIGNATURES[signature] + b"SYNTHETIC_PAYLOAD_MARKER" + bytes(64)
         result = extract(content_type=content_type, filename=filename, payload=payload)
         assert result == ExtractionResult(
-            status=STATUS_UNSUPPORTED, extractor=None, text=None, error=BINARY_AS_TEXT_ERROR
+            status=STATUS_UNSUPPORTED,
+            extractor=None,
+            text=None,
+            error=BINARY_AS_TEXT_ERROR,
+            text_complete=False,
         )
         assert calls == []
         assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
@@ -6162,6 +6187,7 @@ class TestPptxExtractor:
             extractor="pptx@3",
             text="ATTACHMENTFACT only in the deck",
             error=None,
+            text_complete=True,
         )
         assert calls == ["pptx"]
 
@@ -7587,6 +7613,17 @@ class TestExtractorCapsAreReported:
         assert counts["warnings_suppressed"] == 0
         assert _CAP_MARKER not in caplog.text
 
+    @pytest.mark.parametrize("cap", sorted(_CAP_TRIGGERS))
+    def test_cap_marks_the_attempt_text_incomplete(self, cap, monkeypatch):
+        """#1242: every reported cap records a text loss on the running
+        attempt, so its result never certifies complete text. The set
+        comes from the cap catalogue above, not from the flag's callers."""
+        from src import extractors
+
+        extractors._attempt.text_lost = False
+        _CAP_TRIGGERS[cap](monkeypatch)
+        assert extractors._attempt.text_lost is True
+
     def test_cap_lines_share_the_warning_rate_limit(self, monkeypatch, caplog):
         """A sender can attach many capped files: past the window's budget
         the line is withheld, and still counted."""
@@ -7629,7 +7666,9 @@ class TestExtractorCapsAreReported:
         from src import extractors
 
         caplog.set_level("DEBUG")
-        assert run().status == STATUS_SUCCESS
+        result = run()
+        assert result.status == STATUS_SUCCESS
+        assert result.text_complete is True
         assert "extractor cap" not in caplog.text
         assert extractors.drain_extractor_counts()["extractor_caps"] == 0
 
@@ -7791,3 +7830,107 @@ class TestExtractorCapsAreReported:
         text, _ = xlsx.extract(_xlsx_bytes([["abcdef"], ["next"]] + [["more"]] * 50))
         assert text == "[Sheet: Sheet]\nabcdef"
         assert rows[0] == 2
+
+
+class TestTextComplete:
+    """#1242: ``ExtractionResult.text_complete`` is True only for a
+    ``success`` or ``empty`` result whose attempt lost no text, False for
+    every other status, and each attempt starts clean."""
+
+    MARKER = "SYNTHETIC_COMPLETE_MARKER"
+    LONG = "digital text long enough to pass the floor of forty characters"
+
+    def test_clean_success_and_empty_are_complete(self):
+        ok = extract(content_type="text/plain", filename="a.txt", payload=self.MARKER.encode())
+        assert (ok.status, ok.text_complete) == (STATUS_SUCCESS, True)
+        empty = extract(content_type="text/plain", filename="a.txt", payload=b"   ")
+        assert (empty.status, empty.text_complete) == (STATUS_EMPTY, True)
+
+    def test_dispatcher_truncation_is_incomplete_and_the_next_attempt_starts_clean(self):
+        cut = extract(
+            content_type="text/plain",
+            filename="a.txt",
+            payload=(self.MARKER * 10).encode(),
+            max_extracted_chars=8,
+        )
+        assert (cut.status, cut.text_complete) == (STATUS_SUCCESS, False)
+        after = extract(content_type="text/plain", filename="a.txt", payload=b"short")
+        assert after.text_complete is True
+
+    def test_never_complete_statuses(self, monkeypatch):
+        too_large = extract(
+            content_type="text/plain", filename="a.txt", payload=b"x" * 10, max_bytes=4
+        )
+        no_extractor = extract(content_type="application/zip", filename="a.zip", payload=b"x")
+        image_ocr_off = extract(
+            content_type="image/png", filename="a.png", payload=b"x", ocr_enabled=False
+        )
+
+        def boom(payload, **opts):
+            raise ValueError("SYNTHETIC_COMPLETE_MARKER")
+
+        monkeypatch.setattr("src.extractors._safe_import", lambda module_name: boom)
+        failed = extract(content_type="text/plain", filename="a.txt", payload=b"x")
+        assert [
+            (r.status, r.text_complete) for r in (too_large, no_extractor, image_ocr_off, failed)
+        ] == [
+            (STATUS_TOO_LARGE, False),
+            (STATUS_UNSUPPORTED, False),
+            (STATUS_UNSUPPORTED, False),
+            (STATUS_FAILED, False),
+        ]
+
+    @staticmethod
+    def _pdf(monkeypatch, pages, ocr=None):
+        from src.extractors import pdf
+
+        monkeypatch.setattr(pdf, "_extract_digital_pages", lambda payload, **_: list(pages))
+        monkeypatch.setattr(
+            pdf, "_extract_ocr", ocr or (lambda payload, pages, **_: dict.fromkeys(pages, "ocr"))
+        )
+
+    @pytest.mark.parametrize(
+        "pages, ocr_enabled, cap, complete",
+        [
+            # Every page has its digital text: nothing to OCR.
+            ((LONG, LONG), False, 20, True),
+            ((LONG, LONG), True, 20, True),
+            # OCR off: a page under the floor is one OCR would read.
+            ((LONG, ""), False, 20, False),
+            # OCR on reads it.
+            ((LONG, ""), True, 20, True),
+            # The OCR page cap leaves a scanned page unread.
+            (("", "", ""), True, 2, False),
+        ],
+    )
+    def test_pdf_pages(self, monkeypatch, pages, ocr_enabled, cap, complete):
+        self._pdf(monkeypatch, pages)
+        result = extract(
+            content_type="application/pdf",
+            filename="a.pdf",
+            payload=b"%PDF-1.7",
+            ocr_enabled=ocr_enabled,
+            max_ocr_pages=cap,
+        )
+        assert result.status == STATUS_SUCCESS
+        assert result.text_complete is complete
+
+    def test_pdf_ocr_failure_keeping_digital_text_is_incomplete(self, monkeypatch, caplog):
+        def fail(payload, **_):
+            raise RuntimeError("SYNTHETIC_COMPLETE_MARKER")
+
+        self._pdf(monkeypatch, (self.LONG, ""), ocr=fail)
+        result = extract(content_type="application/pdf", filename="a.pdf", payload=b"%PDF-1.7")
+        assert (result.status, result.extractor) == (STATUS_SUCCESS, "pdf-digital@5")
+        assert result.text_complete is False
+        assert self.MARKER not in caplog.text
+
+    def test_a_loss_outside_an_attempt_does_not_leak_into_the_next(self):
+        """A count noted outside an extraction (a committed cache hit's OCR
+        cap, ``record_committed_outcomes``) does not mark the next one."""
+        from src import extractors
+
+        extractors.note_ocr_capped(3)
+        result = extract(content_type="text/plain", filename="a.txt", payload=b"fine")
+        assert result.text_complete is True
+        extractors.drain_extractor_counts()

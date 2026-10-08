@@ -2541,6 +2541,25 @@ def _recover_zero_vector_threads(
     return re_enqueued
 
 
+def _clear_stale_text_completeness(db: Database) -> int:
+    """Clear ``text_complete`` on every attachment occurrence whose text
+    an older version of its extractor produced (``EXTRACTOR_VERSIONS``,
+    #1242), and log how many, with the stamps (fixed module names).
+    Every older version counts, whatever the OCR setting. Returns the
+    number cleared."""
+    stale = sorted(name for name in db.get_assessed_text_extractors() if is_stale_extractor(name))
+    cleared = db.clear_text_complete_for_extractors(stale)
+    if cleared:
+        log.info(
+            "cleared attachment text completeness on %d occurrence(s) extracted by an "
+            "older extractor version (%s); each is unknown until its message is "
+            "processed again.",
+            cleared,
+            ", ".join(stale),
+        )
+    return cleared
+
+
 def _requeue_stale_extractions(db: Database, queue: IndexingQueue) -> int:
     """Re-queue messages whose cached attachment extraction came from an
     older version of an extractor (see ``extractors.EXTRACTOR_VERSIONS``),
@@ -2565,10 +2584,17 @@ def _requeue_stale_extractions(db: Database, queue: IndexingQueue) -> int:
     rewrites the row, and bytes still over the cap are never re-queued
     (#693).
     Like the zero-vector recovery sweep, files already queued or
-    dead-lettered are left alone. Skipped entirely when attachment
-    extraction is disabled, since the drain would not re-stamp the rows.
+    dead-lettered are left alone. Skipped when attachment extraction is
+    disabled, since the drain would not re-stamp the rows.
     Returns the number of files re-queued.
+
+    First, whatever the extraction setting, every occurrence whose text
+    came from an older extractor version has its ``text_complete``
+    cleared to NULL (#1242), dead-lettered messages' included: the old
+    version's text no longer certifies anything. Only a later commit of
+    the occurrence's chunks sets it again.
     """
+    _clear_stale_text_completeness(db)
     if not INDEXER_ATTACHMENT_EXTRACTION_ENABLED:
         return 0
     stale = [

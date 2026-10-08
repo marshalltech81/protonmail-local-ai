@@ -3835,6 +3835,66 @@ class TestRequeueStaleExtractions:
         ).fetchall()
         return " ".join(r["text"] for r in rows)
 
+    @staticmethod
+    def _occurrence(db) -> tuple:
+        return tuple(
+            db._conn.execute("SELECT text_complete, text_extractor FROM attachments").fetchone()
+        )
+
+    @pytest.mark.parametrize("extraction_enabled", [True, False])
+    def test_a_version_bump_clears_text_completeness_until_republished(
+        self, tmp_path, monkeypatch, caplog, extraction_enabled
+    ):
+        """#1242: the occurrence's flag is written with its chunks; a bump
+        of its extractor's version clears it at startup, for a
+        dead-lettered message too and whatever the extraction setting,
+        and only a later commit of its chunks sets it again."""
+        caplog.set_level(logging.INFO)
+        maildir = tmp_path / "SYNTHETIC_PATH_MARKER"
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        path = maildir / "INBOX" / "cur" / "contract.eml"
+        self._write_docx_eml(path, "contract@example.com")
+        db = Database(tmp_path / "mail.db")
+        queue = _make_queue(db)
+        queue.enqueue(str(path), REASON_INITIAL_SCAN)
+        self._drain(db, queue)
+        assert self._occurrence(db) == (1, "docx@7")
+
+        # Nothing is stale: nothing is cleared or logged.
+        assert main._clear_stale_text_completeness(db) == 0
+        assert self._occurrence(db) == (1, "docx@7")
+
+        from src.extractors import EXTRACTOR_VERSIONS
+
+        monkeypatch.setitem(EXTRACTOR_VERSIONS, "docx", 8)
+        monkeypatch.setattr(main, "INDEXER_ATTACHMENT_EXTRACTION_ENABLED", extraction_enabled)
+        queue.enqueue(str(path), REASON_INITIAL_SCAN)
+        queue.mark_dead_terminal(str(path), stage="parse", error="x")
+        caplog.clear()
+        assert main._requeue_stale_extractions(db, queue) == 0
+        assert self._occurrence(db) == (None, "docx@7")
+        lines = [r for r in caplog.records if "attachment text completeness" in r.getMessage()]
+        assert [(r.levelname, r.getMessage()) for r in lines] == [
+            (
+                "INFO",
+                "cleared attachment text completeness on 1 occurrence(s) extracted by an older "
+                "extractor version (docx@7); each is unknown until its message is processed "
+                "again.",
+            )
+        ]
+        assert "SYNTHETIC_PATH_MARKER" not in caplog.text
+        assert "HEADER_MARK" not in caplog.text
+        # Once cleared, a later start has nothing to clear.
+        assert main._clear_stale_text_completeness(db) == 0
+
+        if not extraction_enabled:
+            return
+        # ``make requeue-dead`` re-runs it: the re-extraction under the
+        # new version commits its chunks and the flag with them.
+        queue.enqueue(str(path), REASON_REEXTRACT)
+        self._drain(db, queue)
+        assert self._occurrence(db) == (1, "docx@8")
+
     def test_old_version_rows_are_re_extracted_once(self, tmp_path, monkeypatch):
         maildir = tmp_path / "maildir"
         monkeypatch.setattr(main, "MAILDIR_PATH", maildir)

@@ -1316,6 +1316,12 @@ Queue and maintenance (all INFO unless noted):
   requeue-dead to refresh them).`, at startup after an extractor
   change. WARNING when any dead-lettered message was skipped: those
   keep their old attachment text until you run `make requeue-dead`.
+- `cleared attachment text completeness on <n> occurrence(s) extracted
+  by an older extractor version (...); each is unknown until its
+  message is processed again.`, at startup after an extractor change
+  (#1242): those attachments' text no longer counts as complete until
+  the re-queued messages are indexed again (dead-lettered ones after
+  `make requeue-dead`).
 - `maintenance pass=rescan ms=<ms> seen=<n> queued=<n>
   skipped_dead=<n>`, after each periodic Maildir rescan, even when it
   queued nothing. `seen` is message files walked, `queued` the ones

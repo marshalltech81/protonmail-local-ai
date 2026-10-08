@@ -427,8 +427,15 @@ _V5_COLUMNS = (
 
 
 def _drop_v5_columns(db: Database) -> None:
+    """The v4 shape's missing columns: v5's and v6's (#1242)."""
     for column in _V5_COLUMNS:
         db._conn.execute(f"ALTER TABLE messages DROP COLUMN {column}")
+    for table, column in (
+        ("attachments", "text_complete"),
+        ("attachments", "text_extractor"),
+        ("attachment_extractions", "text_complete"),
+    ):
+        db._conn.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
 
 
 def _completeness(db: Database) -> dict[str, tuple]:

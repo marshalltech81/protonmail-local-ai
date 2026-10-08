@@ -108,6 +108,7 @@ def _record(msg: Message, root: Path) -> dict[str, Any]:
             "content_hash": f"sha256:{a.content_hash}",
             "payload_length": len(a.payload),
             "payload": _digest(a.payload),
+            "payload_complete": a.payload_complete,
         }
         for a in msg.attachments
     ]

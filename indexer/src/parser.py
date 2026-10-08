@@ -286,6 +286,10 @@ class Attachment:
     extractor module the label selects, the deduplication key in
     ``attachment_extractions`` — a forwarded PDF is OCR'd / parsed once
     per content, regardless of how many emails carry it.
+
+    ``payload_complete`` is False when a parse cap emptied the payload
+    (``_attachment_payload`` counted it in ``PARSE_CAPS``), so the bytes
+    an extractor reads are not the attachment's (#1242).
     """
 
     filename: str
@@ -293,6 +297,7 @@ class Attachment:
     size: int
     payload: bytes = b""
     content_hash: str = ""
+    payload_complete: bool = True
 
 
 # Hex digits of the file hash in a claimant ID (see ``claimant_id``).
@@ -1261,6 +1266,8 @@ def _extract_body_and_attachments(
         is_attachment = _is_attachment(part, filename)
         decoded: email.message.Message | None = None
         if is_attachment:
+            # A cap counted here emptied this attachment's payload.
+            caps_before = caps.total()
             payload, decoded = _attachment_payload(
                 part,
                 serialize_containers=not in_attachment,
@@ -1276,6 +1283,7 @@ def _extract_body_and_attachments(
                     size=len(payload),
                     payload=payload,
                     content_hash=hashlib.sha256(payload).hexdigest(),
+                    payload_complete=caps.total() == caps_before,
                 )
             )
         inside = in_attachment or is_attachment
