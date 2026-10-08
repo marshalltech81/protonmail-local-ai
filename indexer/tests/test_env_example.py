@@ -58,6 +58,11 @@ _ENV_NAME = re.compile(r"[A-Z][A-Z0-9_]{2,}")
 # / ``_flag_env`` and ``_read_secret`` (a secret file with an env
 # fallback). Any other ``*_env`` helper is matched by its suffix.
 _ENV_HELPERS = {"getenv", "_int", "_pct", "_bool", "_mode", "_float", "_read_secret"}
+# Matched by the ``*_env`` suffix but read nothing: the mcp-server's
+# ``_require_env`` checks a value already read and takes variable names
+# only for its error text. Counting it would let a validator stand in
+# for a removed read.
+_NOT_ENV_READERS = {"_require_env"}
 # ``queue`` and ``reconciler`` read from a mapping parameter named ``env``.
 _ENV_RECEIVERS = {"environ", "env"}
 
@@ -110,7 +115,7 @@ def _python_env_reads(src_dirs: list[Path]) -> set[str]:
                             if isinstance(value, ast.Attribute)
                             else getattr(value, "id", "")
                         )
-                    if (
+                    if fn not in _NOT_ENV_READERS and (
                         (fn == "get" and receiver in _ENV_RECEIVERS)
                         or fn in _ENV_HELPERS
                         or fn.endswith("_env")
@@ -199,24 +204,31 @@ def _delivered(repo: Path) -> set[tuple[str, str]]:
     """``(service, KEY)`` for each ``.env.example`` key whose value reaches
     that service's environment under its own name in every file
     combination. Compose resolves the configuration with every key set to
-    a distinct numeric marker (a valid port, since ``MCP_PORT`` is
-    published), so a fixed value, or a value interpolated from another
-    name, does not count. Only the markers are compared; no real ``.env``
-    value is kept."""
-    keys = sorted(_example_keys(repo / ".env.example"))
-    markers = {key: str(40000 + i) for i, key in enumerate(keys)}
-    per_combination = []
-    for files in _compose_combinations(repo):
-        services = _compose_config_json(repo, env=markers, files=files)["services"]
-        per_combination.append(
-            {
-                (service, key)
-                for service, svc in services.items()
-                for key, value in (svc.get("environment") or {}).items()
-                if key in markers and value == markers[key]
-            }
-        )
-    return set.intersection(*per_combination)
+    a distinct numeric marker, twice with different marker sets, so a
+    fixed value (even one equal to a marker), or a value interpolated
+    from another name, does not count. Only the markers are compared; no
+    real ``.env`` value is kept."""
+    per_resolution = []
+    for markers in _marker_sets(_example_keys(repo / ".env.example")):
+        for files in _compose_combinations(repo):
+            services = _compose_config_json(repo, env=markers, files=files)["services"]
+            per_resolution.append(
+                {
+                    (service, key)
+                    for service, svc in services.items()
+                    for key, value in (svc.get("environment") or {}).items()
+                    if key in markers and value == markers[key]
+                }
+            )
+    return set.intersection(*per_resolution)
+
+
+def _marker_sets(keys: set[str]) -> list[dict[str, str]]:
+    """Two disjoint sets of distinct numeric markers, one value per key.
+    Numeric and below 65536 because ``MCP_PORT`` is a published port."""
+    ordered = sorted(keys)
+    assert len(ordered) < 10000
+    return [{key: str(base + i) for i, key in enumerate(ordered)} for base in (40000, 50000)]
 
 
 # A key line, set (``VAR=``) or commented out (``# VAR=``).
@@ -681,6 +693,40 @@ def test_an_exclusion_only_an_overlay_supplies_is_stale(reverse_copy):
 def test_every_overlay_combination_is_resolved():
     names = [[p.name for p in files] for files in _compose_combinations(_REPO)]
     assert names == [["docker-compose.yml"], ["docker-compose.yml", "docker-compose.hardened.yml"]]
+
+
+def test_a_fixed_value_equal_to_one_marker_is_not_delivered(reverse_copy):
+    # A literal that happens to equal the first marker set's value must
+    # still fail: the second set gives it a different value.
+    marker = _marker_sets(_example_keys(reverse_copy / ".env.example"))[0]["MCP_PORT"]
+    _replace_once(
+        reverse_copy / "docker-compose.yml",
+        "      MCP_PORT: ${MCP_PORT:-3000}\n",
+        f'      MCP_PORT: "{marker}"\n',
+    )
+    assert _undelivered_reads(reverse_copy) == {"mcp-server:MCP_PORT"}
+    assert _dead_keys(reverse_copy) == {"MCP_PORT"}
+
+
+def test_a_validator_naming_a_variable_is_not_a_read(tmp_path):
+    # ``_require_env`` checks a value already read; its literal arguments
+    # name variables but read nothing.
+    (tmp_path / "m.py").write_text(
+        "_require_env('MODE_929', mode, 'VALUE_929', value)\n", encoding="utf-8"
+    )
+    assert _python_env_reads([tmp_path]) == set()
+
+
+def test_a_read_replaced_by_a_constant_but_still_validated_is_caught(reverse_copy):
+    main = reverse_copy / "mcp-server" / "src" / "main.py"
+    _replace_once(
+        main,
+        'EMBED_MODE = _normalize_mode("EMBED_MODE", os.environ.get("EMBED_MODE", "openai"), '
+        "_EMBED_MODES)",
+        'EMBED_MODE = "openai"',
+    )
+    assert '_require_env("EMBED_MODE"' in main.read_text(encoding="utf-8")
+    assert _unread_pass_throughs(reverse_copy) == {"mcp-server:EMBED_MODE"}
 
 
 def test_every_env_example_key_a_python_service_reads_reaches_it():
