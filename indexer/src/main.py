@@ -659,6 +659,7 @@ INGESTION_STATE_RECORDING = "ingestion state recording"
 WATCH_REFRESH = "Maildir watch refresh"
 PERIODIC_RECONCILIATION = "periodic reconciliation"
 PERIODIC_RESCAN = "periodic Maildir rescan"
+PERIODIC_RENAME_SWEEP = "periodic rename sweep"
 WAL_CHECKPOINT = "wal checkpoint"
 REAPED_RECORD_PRUNE = "reaped-record prune"
 RECOVERY_COMPONENTS = frozenset(
@@ -668,6 +669,7 @@ RECOVERY_COMPONENTS = frozenset(
         WATCH_REFRESH,
         PERIODIC_RECONCILIATION,
         PERIODIC_RESCAN,
+        PERIODIC_RENAME_SWEEP,
         WAL_CHECKPOINT,
         REAPED_RECORD_PRUNE,
     }
@@ -2860,7 +2862,10 @@ def _run_periodic_rescan(
     except Exception as e:
         # The walk below still runs: it finds missed new mail in every
         # readable folder, whatever stopped the sweep.
+        _streaks[PERIODIC_RENAME_SWEEP].failed()
         log.warning("periodic rename sweep failed: %s", type(e).__name__)
+    else:
+        _streaks[PERIODIC_RENAME_SWEEP].succeeded()
     try:
         stamp = ingestion_state.read_stamp()
         _enqueue_unindexed_messages(

@@ -755,6 +755,72 @@ class TestByteIdenticalCopies:
         assert _message_row(db, claimant)["filepath"] == str(restored)
         assert count_pending_deletions(db) == 0
 
+    def _thread_of_restorable_copies(self, db, threader, maildir) -> tuple[str, list[Path]]:
+        """Three messages of one thread, each with two trashed identical
+        copies, tombstoned by a sweep; returns the thread and the unmapped
+        copies' live (restored) names, not yet on disk."""
+        restored = []
+        parent = None
+        for n in range(3):
+            kept = maildir / f"170000000{n}.K{n}.host:2,ST"
+            mapped = maildir / f"170000001{n}.M{n}.host:2,S"
+            _write_eml(
+                kept,
+                f"chain{n}@example.com",
+                subject="Re: Chain" if parent else "Chain",
+                in_reply_to=parent,
+                date=datetime(2024, 1, 1 + n, tzinfo=UTC),
+            )
+            thread_id = _index(kept, db, threader)
+            mapped.write_bytes(kept.read_bytes())
+            _index(mapped, db, threader)
+            mapped.rename(maildir / f"170000001{n}.M{n}.host:2,ST")
+            restored.append(maildir / f"170000000{n}.K{n}.host:2,S")
+            parent = f"chain{n}@example.com"
+        return thread_id, restored
+
+    def test_live_copy_check_lists_each_directory_once_per_thread(
+        self, db, threader, embedder, maildir, monkeypatch
+    ):
+        """Codex round 5 on #1134: the pre-reap check resolved each
+        tombstone's copies with an empty cache, listing the same folder
+        once per tombstone."""
+        thread_id, restored = self._thread_of_restorable_copies(db, threader, maildir)
+        rec = Reconciler(db, embedder, _default_config())
+        assert rec.sweep()["tombstoned"] == 3
+        for path in restored:
+            path.with_name(path.name + "T").rename(path)
+        listed: list[Path] = []
+        real_iterdir = Path.iterdir
+
+        def counting_iterdir(self):
+            if self == maildir:
+                listed.append(self)
+            return real_iterdir(self)
+
+        monkeypatch.setattr(Path, "iterdir", counting_iterdir)
+        result = rec.reap()
+
+        assert result["threads_reaped"] == 0
+        assert len(listed) == 1
+        assert db.get_thread(thread_id) is not None
+        assert count_pending_deletions(db) == 0
+
+    def test_a_kept_thread_is_no_longer_counted_as_blocked(self, db, threader, embedder, maildir):
+        """Codex round 5 on #1134: a thread an earlier pass recorded as
+        blocked kept its entry after a live copy cancelled the reap."""
+        thread_id, restored = self._thread_of_restorable_copies(db, threader, maildir)
+        rec = Reconciler(db, embedder, _default_config())
+        rec.sweep()
+        for path in restored:
+            path.with_name(path.name + "T").rename(path)
+        rec._blocked_thread_attempts[thread_id] = 2
+
+        result = rec.reap()
+
+        assert result["threads_reaped"] == 0
+        assert result["blocked_threads"] == 0
+
     def test_reap_drops_a_copys_dead_job(self, db, threader, embedder, maildir):
         """Codex round 4 on #1134: the reap unmarked a copy's path but
         kept its dead job, so the walk skipped the copy when it came back

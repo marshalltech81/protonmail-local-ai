@@ -1708,7 +1708,11 @@ are checked on disk once more: if mbsync restored one since the sweep,
 the message moves to it, its tombstone is cleared and the thread is
 left for the next pass (logged at INFO with a count). A failure of the
 rename sweep before a periodic rescan is logged at WARNING with its
-type and does not stop that rescan's walk.
+type and does not stop that rescan's walk, and its recovery is logged
+like the other recurring steps'. Known limitation (#1141): a copy that
+is not the mapped path and is moved to another folder keeps its old
+path in `indexed_files`, so the lookup cannot find it until the next
+periodic rescan indexes the destination.
 
 A **mass-delete brake** (`INDEXER_DELETION_MAX_BATCH_PCT`, default 5%) caps
 the fraction of total indexed messages the reaper will touch in a single

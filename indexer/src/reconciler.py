@@ -472,6 +472,7 @@ class Reconciler:
             # Whole thread gone. Drop everything; the .eml files stay on
             # disk because the indexer never deletes Maildir files.
             if self._keep_live_copies(tombs, copies):
+                self._clear_blocked(thread_id)
                 return False, False
             if not self.db.delete_thread_completely(
                 thread_id, grace_cutoff=cutoff, copy_paths=copy_paths
@@ -609,6 +610,7 @@ class Reconciler:
         # crash mid-reap cannot leave the thread row and the map
         # disagreeing about which messages belong.
         if self._keep_live_copies(tombs, copies):
+            self._clear_blocked(thread_id)
             return False, False
         removed_filepaths = self.db.reap_thread_messages(
             rebuilt_thread,
@@ -641,11 +643,17 @@ class Reconciler:
         before the reap is written; the caller then skips the thread this
         pass, so the next pass rebuilds it with the kept message among
         the survivors. A remap the database refuses (the mapping moved
-        meanwhile) also skips the pass.
+        meanwhile) also skips the pass. The caller clears the thread's
+        blocked-attempts entry then: the reap it counted is cancelled.
+
+        One directory cache per call, built fresh: the pass's cache may
+        predate the restore, and one cache per tombstone would list a
+        shared folder once per message.
         """
         kept = 0
+        listings: dict[Path, dict[str, Path]] = {}
         for tomb in tombs:
-            copy = _pick_copy(copies.get(tomb["claimant_id"], []), {}, live_only=True)
+            copy = _pick_copy(copies.get(tomb["claimant_id"], []), listings, live_only=True)
             if copy is None:
                 continue
             kept += 1
