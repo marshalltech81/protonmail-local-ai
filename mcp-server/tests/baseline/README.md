@@ -84,8 +84,9 @@ as failed extractions.
      `tests/answer_eval/cases.json`. Each case's fact excerpts must be
      in the indexed text of the messages they cite, and every case runs
      through the real handler of its tool (`ask_mailbox`,
-     `summarize_thread`, `extract_from_emails` or an experimental tool)
-     with a scripted answerer and judge (no network); see `tests/eval/README.md`.
+     `summarize_thread` or an experimental tool) with a scripted
+     answerer and judge (no network); `extract_from_emails` cases are
+     checked against the corpus only (#1287). See `tests/eval/README.md`.
 
 The hashed embedder has no sense of meaning, so the baseline catches
 broken plumbing (ingestion, schema, lanes, fusion, filters). It does

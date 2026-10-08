@@ -500,6 +500,9 @@ may give are the tool's filters (`folders`, `date_from`, `date_to`,
 cases are smoke cases, each with `limit` 2: `extract-pool-bids` (bids
 in a message body), `extract-roof-estimate` (a total found only in an
 attached estimate) and `extract-cabin-wifi` (nothing to extract).
+`make baseline` checks their references against the corpus but does
+not run them end to end: its scripted answerer cannot yet return one
+record per expected item (#1287).
 
 **Experimental tools (#1240).** A `brief_issue` case needs a `topic`
 and a `check_conclusion` case a `conclusion` of at most 2,000
@@ -519,8 +522,9 @@ the mailbox does not address).
 
 `make baseline` checks every excerpt is in the indexed text of the
 message it cites, so a reference cannot drift from the corpus or rest on
-what retrieval returned, and runs every case through the real handler
-of its tool with a scripted answerer and judge. The expected facts were
+what retrieval returned, and runs every case except the
+`extract_from_emails` ones (#1287) through the real handler of its tool
+with a scripted answerer and judge. The expected facts were
 drafted with AI from the synthetic corpus and are marked
 `"review": "ai_drafted"` until the owner verifies them.
 
