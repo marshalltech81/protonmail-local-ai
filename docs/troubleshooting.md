@@ -1527,14 +1527,8 @@ only, never filenames or text (`make logs`):
   legacy `.ppt` (#983). The file stays
   searchable by filename and type only. A `.docx` or `.dotx` over a
   budget that was recorded `failed` (`DocxPackageBudgetError`) before
-  #1032 is not re-queued at startup, because the `docx` extractor
-  version was deliberately not bumped while its walk after the open is
-  unbudgeted (#1031). It stays `failed` until the same bytes are
-  processed again (a new occurrence, or the message reprocessed for
-  another reason) more than 7 days after it was recorded; that re-run
-  reads the central directory once, never opens the document, and
-  records it `unsupported`. A `docx` bump after #1031 converts the
-  rest at the next start. A password-protected `.ppt` recorded `failed`
+  #1032 is re-queued once at the first start after the `docx@7` bump
+  (#1031) and recorded `unsupported`. A password-protected `.ppt` recorded `failed`
   (`ToolExitError`) before #983 converts the same way, since the `ppt`
   version was not bumped either: on its first re-run more than 7 days
   after it was recorded.
@@ -1604,6 +1598,15 @@ only, never filenames or text (`make logs`):
     counting groups and the shapes in them), table budget (200,000 rows
     and cells) or 10,000,000-character text budget; the slides after it
     are not read.
+  - `docx_blocks`, `docx_table_cells`, `docx_text_elements`,
+    `docx_text_chars`: the walk over a Word document or template
+    stopped at its block budget (500,000 paragraphs and tables, a
+    section costing 20 more, with a header or footer part read again
+    for each section that defines it), table budget (500,000 rows and
+    cells), text-element budget (2,000,000 runs, hyperlinks and the
+    text, tab and break elements in runs) or 10,000,000-character text
+    budget (#1031). The body is read before the headers and footers,
+    so a cut in the body leaves them unread.
 
   The other caps either skip or fail the whole attachment and show as
   `too_large` or `failed` instead (`INDEXER_ATTACHMENT_MAX_BYTES`, the

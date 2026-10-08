@@ -348,7 +348,8 @@ class TestMigrationV1:
     def test_migrated_rows_keep_their_stamps_so_no_version_is_stale(self, tmp_path):
         """No ``EXTRACTOR_VERSIONS`` bump comes with the re-keying: rows
         keep their stamps, so the current ones stay current. ``pdf-ocr@4``
-        is stale from #931's own ``pdf`` bump, not from the migration."""
+        is stale from #931's own ``pdf`` bump and ``docx@5`` from #1031's
+        ``docx`` bump, not from the migration."""
         from src.extractors import is_stale_extractor
 
         _build_v0_database(tmp_path / "v0.db")
@@ -356,7 +357,7 @@ class TestMigrationV1:
         try:
             assert sorted(
                 name for name in db.get_extractor_names() if is_stale_extractor(name)
-            ) == ["pdf-ocr@4", "text@2"]
+            ) == ["docx@5", "pdf-ocr@4", "text@2"]
         finally:
             db.close()
 
