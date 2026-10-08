@@ -821,6 +821,21 @@ superseded entries keep their number and one line.
     access; a download route or resource needs its own decision. This
     resolves the "attachment download support" deferral.
 
+39. **Attachments, completeness and evidence ranking (2026-10-08):**
+    DOCX, PPTX and XLSX extraction runs in a child process with memory,
+    CPU and wall-clock limits (#1040); per-message extraction launches
+    stay unbounded as an accepted P2 risk until a scheduling design
+    lands (#1236). Attachments are enumerated exhaustively by
+    `query_attachments` and read in full by `get_attachment`, whose
+    streaming reader reports an exact `total_chars` on every page;
+    `date_basis` for both listing tools comes with #1150 (#796).
+    Per-message completeness flags make a leaf answer "can't tell"
+    unless the relevant flag says the stored data is complete,
+    `authority_class` included (#1086). The keyword-matched evidence
+    passage is ranked by in-thread word rarity over a candidate-only
+    in-memory index, never a corpus-wide scan (#858, #1246). The
+    choices behind each are in the issues' decision comments.
+
 ## Notes for Agents
 
 - Read `AGENTS.md` before making changes.
