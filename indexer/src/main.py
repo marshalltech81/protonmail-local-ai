@@ -115,6 +115,7 @@ from .queue import (
     REASON_ON_MOVED,
     REASON_RECOVERY,
     REASON_REEXTRACT,
+    REASON_REPARSE,
     REASON_RESCAN,
     STAGE_EMBED,
     STAGE_PARSE,
@@ -1051,6 +1052,53 @@ QUEUE_HEARTBEAT_INTERVAL_SECS = 300.0
 _last_queue_heartbeat: float | None = None
 
 
+@dataclass
+class _ReparseProgress:
+    """Reparse jobs committed (#1078): ``reparsed`` since the indexer
+    started, ``logged`` as of the last progress line, and whether that
+    line saw a backlog, so the heartbeat logs one completion line."""
+
+    reparsed: int = 0
+    logged: int = 0
+    active: bool = False
+
+
+_reparse_progress = _ReparseProgress()
+
+
+def _log_reparse_progress(remaining: int, dead: int) -> None:
+    """With the queue heartbeat: one progress line per interval while
+    reparse jobs are queued, then one completion line (WARNING when some
+    dead-lettered). Counts and fixed text only."""
+    p = _reparse_progress
+    if remaining:
+        log.info(
+            "reparse: remaining=%d reparsed_since_last_heartbeat=%d dead=%d",
+            remaining,
+            p.reparsed - p.logged,
+            dead,
+        )
+        p.logged = p.reparsed
+        p.active = True
+        return
+    if not p.active:
+        return
+    p.active = False
+    p.logged = p.reparsed
+    if dead:
+        log.warning(
+            "reparse complete: %d message(s) reparsed since the indexer started, "
+            "%d dead-lettered (make requeue-dead retries them)",
+            p.reparsed,
+            dead,
+        )
+    else:
+        log.info(
+            "reparse complete: %d message(s) reparsed since the indexer started, 0 dead-lettered",
+            p.reparsed,
+        )
+
+
 def _maybe_log_queue_heartbeat(queue: IndexingQueue) -> None:
     """Log the queue's state at most once per
     ``QUEUE_HEARTBEAT_INTERVAL_SECS``. Called each main-loop tick and
@@ -1088,6 +1136,7 @@ def _maybe_log_queue_heartbeat(queue: IndexingQueue) -> None:
         d[STAGE_TRASHED],
         drain_suppressed_lines(),
     )
+    _log_reparse_progress(c["reparse"], c["reparse_dead"])
 
 
 def _steady_state_summary_due(
@@ -1213,6 +1262,10 @@ class _BatchedMsg:
     # permanently stuck at zero (search quality regression). Mirrors
     # the old ``_seed_thread_embedding`` subject fallback.
     subject_fallback_offset: int | None = None
+    # Phase 1 kept the thread's stored non-zero vector as its seed (the
+    # thread has no chunks). A reparse then reuses it instead of
+    # embedding the subject fallback again (#1078).
+    kept_prior_vector: bool = False
     parse_ms: float = 0.0
     thread_ms: float = 0.0
     phase1_ms: float = 0.0
@@ -1226,6 +1279,12 @@ PERMISSION_DEFER_SECS = 60
 # deletion reconciliation decides its message (see ``_drain_queue_batched``).
 TRASHED_DEFER_SECS = 60 * 60
 PERMISSION_DEFER_WINDOW_SECS = 24 * 60 * 60
+# A reparse job whose file vanished while its path is still indexed waits
+# once, this long, for the watcher to record the rename (see
+# ``_phase1_commit_thread``). A file still missing after that is really
+# gone and is dropped with reason ``reparse_file_missing``.
+REPARSE_RENAME_DEFER_SECS = 60
+REPARSE_RENAME_DEFERRED_ERROR = "FileNotFoundError: deferred until the rename is recorded"
 
 
 def _enqueued_within(row: sqlite3.Row, seconds: int) -> bool:
@@ -1259,7 +1318,29 @@ def _phase1_commit_thread(
     except FileNotFoundError:
         # mbsync flag-rename race: file moved between enqueue and parse.
         # Watchdog's IN_MOVED_TO will re-enqueue under the new name.
-        queue.mark_skipped(filepath, reason="file_missing")
+        # Not a reparse of a path still indexed, though: ``on_moved``
+        # only moves an indexed file's records (and its job, through
+        # ``update_filepath``), so dropping the job before the rename is
+        # recorded would lose the reparse. Wait for it once, without
+        # spending an attempt (Codex round 1 on #1143); a file still
+        # missing after that is gone and dropped.
+        if (
+            row["reason"] == REASON_REPARSE
+            and row["last_error"] != REPARSE_RENAME_DEFERRED_ERROR
+            and db.is_indexed(filepath)
+        ):
+            queue.defer(
+                filepath,
+                stage=STAGE_PARSE,
+                error=REPARSE_RENAME_DEFERRED_ERROR,
+                error_class=ERROR_CLASS_RETRYABLE,
+                delay_seconds=REPARSE_RENAME_DEFER_SECS,
+            )
+            return None
+        queue.mark_skipped(
+            filepath,
+            reason="reparse_file_missing" if row["reason"] == REASON_REPARSE else "file_missing",
+        )
         return None
     except PermissionError as e:
         # mbsync ``chmod go+r``s new files only after its whole sync
@@ -1338,10 +1419,12 @@ def _phase1_commit_thread(
     # case during an initial scan does one PK lookup instead of two
     # empty reads.
     existing_chunk_embs, prior_vec = db.get_phase1_seed_state(thread.thread_id)
+    kept_prior_vector = False
     if existing_chunk_embs:
         seed_vector = mean_vector(existing_chunk_embs)
     elif prior_vec is not None and any(v != 0.0 for v in prior_vec):
         seed_vector = prior_vec
+        kept_prior_vector = True
     else:
         seed_vector = _ZERO_THREAD_VECTOR
     try:
@@ -1362,6 +1445,7 @@ def _phase1_commit_thread(
         parse_ms=parse_ms,
         thread_ms=thread_ms,
         phase1_ms=phase1_ms,
+        kept_prior_vector=kept_prior_vector,
     )
 
 
@@ -1572,8 +1656,18 @@ def _phase2a_collect_chunks(
         # ``get_thread_chunk_embeddings`` would impose on chatty
         # threads where this gate fires for every chunkless arrival.
         has_new_chunks = bool(new_body) or any(plan_new for plan_new in attach_new_chunks)
-        if not has_new_chunks and (
-            clears_chunks or not db.thread_has_chunks(state.thread.thread_id)
+        # A reparse changes no chunk text or embedding input (that would
+        # be a rebuild; docs/architecture.md, "Reparse in place"), so a
+        # chunkless thread's stored subject-fallback vector is still the
+        # one this fallback would embed: keep it and make no call
+        # (#1078). A vector still at the zero placeholder is repaired.
+        keeps_vector = (
+            state.row["reason"] == REASON_REPARSE and state.kept_prior_vector and not clears_chunks
+        )
+        if (
+            not has_new_chunks
+            and not keeps_vector
+            and (clears_chunks or not db.thread_has_chunks(state.thread.thread_id))
         ):
             # Source the fallback text from the thread's stored
             # ``display_subject`` rather than from ``state.msg.subject``.
@@ -2023,6 +2117,10 @@ def _drain_queue_batched(
         rows = queue.claim_batch(batch_size)
         if not rows:
             break
+        # A reparse the heartbeat never saw queued (drained between two
+        # heartbeats) still gets its completion line (Codex round 1 on #1143).
+        if any(row["reason"] == REASON_REPARSE for row in rows):
+            _reparse_progress.active = True
         # A row still marked ``interrupted`` was mid-step when the
         # indexer died. An out-of-memory kill can come from the whole
         # batch's footprint rather than that message, and a restart
@@ -2157,6 +2255,8 @@ def _drain_queue_batched(
             db_write_ms = (time.perf_counter() - t0) * 1000
             if ok:
                 queue.mark_succeeded(entry.row["filepath"])
+                if entry.row["reason"] == REASON_REPARSE:
+                    _reparse_progress.reparsed += 1
                 # ``db_write_ms`` aggregates BOTH DB-write phases:
                 # Phase 1's ``upsert_thread`` (recorded as
                 # ``entry.phase1_ms``) plus the Phase 2c per-message

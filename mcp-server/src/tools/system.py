@@ -12,6 +12,7 @@ from fastmcp.exceptions import ToolError
 from mcp.types import CallToolResult
 
 from ..lib import timings
+from ..lib.build_identity import git_commit
 from .outputs import MailboxStatusOutput, QueueCounts, read_only, tool_result
 
 log = logging.getLogger("mcp.tools.system")
@@ -87,9 +88,11 @@ def not_current_reasons(
             reasons.append(f"the indexer last reported {_age(age)} ago")
     waiting = queue.pending + queue.retrying
     if waiting:
+        reparse = f"; {queue.reparse:,} of them already indexed and being reparsed"
         reasons.append(
             f"{_messages(waiting)} waiting to be indexed "
-            f"({queue.pending:,} pending, {queue.retrying:,} retrying)"
+            f"({queue.pending:,} pending, {queue.retrying:,} retrying"
+            f"{reparse if queue.reparse else ''})"
         )
     return reasons
 
@@ -115,6 +118,7 @@ def _mailbox_status(db) -> MailboxStatusOutput:
         now=now,
     )
     return MailboxStatusOutput(
+        server_version=git_commit(),
         current=not reasons,
         not_current_reasons=reasons,
         last_sync_at=last_sync_at,
@@ -138,7 +142,11 @@ def _when(value: datetime | None, now: datetime) -> str:
 
 
 def _render(out: MailboxStatusOutput) -> str:
-    lines = ["=== Mailbox Status ===", f"Current:        {'yes' if out.current else 'no'}"]
+    lines = [
+        "=== Mailbox Status ===",
+        f"Server version: {out.server_version}",
+        f"Current:        {'yes' if out.current else 'no'}",
+    ]
     lines += [f"  - {reason}" for reason in out.not_current_reasons]
     q = out.queue
     lines += [
@@ -146,6 +154,14 @@ def _render(out: MailboxStatusOutput) -> str:
         f"Indexer seen:   {_when(out.indexer_last_seen_at, out.checked_at)}",
         f"Queue:          {q.pending:,} pending, {q.retrying:,} retrying, {q.dead:,} dead",
     ]
+    if q.reparse:
+        one = q.reparse == 1
+        lines.append(
+            f"  {q.reparse:,} waiting message{'' if one else 's'} "
+            f"{'is' if one else 'are'} already indexed and being reparsed after an "
+            f"upgrade: search finds {'it' if one else 'them'}, but data the upgrade "
+            "adds is missing until the reparse finishes."
+        )
     if q.dead:
         lines.append(
             f"  {_messages(q.dead)} failed permanently and "
@@ -186,8 +202,9 @@ def register_system_tools(server, db):
     @timings.timed_tool("get_mailbox_status")
     async def get_mailbox_status() -> CallToolResult:
         """
-        Report whether the local email index is current, and what it holds.
+        Report the server version, whether the local email index is current, and what it holds.
         Call this before answering questions about email content.
+        Also call this when asked which version or build of this server is running.
 
         This server answers only from the local index, which mbsync fills
         from Proton every few minutes; it never contacts Proton itself. The
@@ -198,8 +215,11 @@ def register_system_tools(server, db):
         sync is never searchable yet.
 
         Returns:
+            server_version (the deployed source commit, with -dirty for
+            local changes, or unknown when build identity is unavailable),
             current and the reasons it is false, last sync time, indexer
-            liveness, queue counts (pending, retrying, dead), total threads
+            liveness, queue counts (pending, retrying, dead, and how many
+            waiting messages are already indexed and being reparsed), total threads
             and messages, the date range, and how many Message-IDs more
             than one file claims (counts only).
         """
