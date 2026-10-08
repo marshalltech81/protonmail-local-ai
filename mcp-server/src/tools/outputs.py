@@ -696,6 +696,12 @@ class QueueCounts(_Output):
         description="Messages that failed permanently and are incompletely indexed: "
         "missing from search, or found only by keyword, until an operator requeues them."
     )
+    reparse: int = Field(
+        default=0,
+        description="Of the pending and retrying messages, those already indexed and being "
+        "read again after an upgrade (a reparse): search finds them meanwhile, but data the "
+        "upgrade adds is missing until the reparse finishes.",
+    )
 
 
 class MailboxStatusOutput(_Output):

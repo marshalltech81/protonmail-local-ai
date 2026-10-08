@@ -1331,6 +1331,11 @@ class TestStatsAndFolders:
                 # attempt was spent.
                 ("queued", 0, "operator_action_required"),
                 ("dead", 5, "retryable"),
+                # Reparse jobs (#1078) count in their bucket and again
+                # under ``reparse`` while queued; a dead one only as dead.
+                ("queued", 0, None, "reparse"),
+                ("queued", 1, "retryable", "reparse"),
+                ("dead", 5, "retryable", "reparse"),
             ),
         )
         stats = seeded_db.get_mailbox_status()
@@ -1338,7 +1343,7 @@ class TestStatsAndFolders:
         assert stats["total_messages"] == 3
         assert stats["oldest_message"] is not None
         assert stats["newest_message"] is not None
-        assert stats["queue"] == {"pending": 2, "retrying": 2, "dead": 1}
+        assert stats["queue"] == {"pending": 3, "retrying": 3, "dead": 2, "reparse": 2}
         assert stats["ingestion"] == {
             "sync_completed_at": "2026-09-28T12:00:00+00:00",
             "sync_interval_secs": 60,
@@ -1347,7 +1352,7 @@ class TestStatsAndFolders:
 
     def test_get_mailbox_status_before_the_indexer_reports(self, empty_db: Database):
         stats = empty_db.get_mailbox_status()
-        assert stats["queue"] == {"pending": 0, "retrying": 0, "dead": 0}
+        assert stats["queue"] == {"pending": 0, "retrying": 0, "dead": 0, "reparse": 0}
         assert stats["ingestion"] is None
         assert stats["conflicting_message_ids"] == 0
         assert stats["extra_claimant_files"] == 0

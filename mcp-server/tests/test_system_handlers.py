@@ -69,6 +69,28 @@ class TestGetMailboxStatus:
             assert f"  - {reason}" in text
         assert "Queue:          1 pending, 1 retrying, 1 dead" in text
         assert "1 message failed permanently and is incompletely indexed" in text
+        assert "reparse" not in text
+
+    def test_a_reparse_backlog_is_told_apart(self, fake_server, seeded_db):
+        """#1078: a reparse backlog is not an empty queue, and not new
+        mail either."""
+        write_ingestion(
+            seeded_db.path,
+            sync_completed_at=_ago(seconds=30),
+            sync_interval_secs=60,
+            indexer_seen_at=_ago(seconds=5),
+            jobs=(("queued", 0, None, "reparse"), ("queued", 0, None)),
+        )
+        out = asyncio.run(_handler(fake_server, seeded_db)())
+        text = _text(out)
+        assert out.structured_content["current"] is False
+        assert out.structured_content["queue"]["reparse"] == 1
+        assert "Queue:          2 pending, 0 retrying, 0 dead" in text
+        assert (
+            "  1 waiting message is already indexed and being reparsed after an upgrade: "
+            "search finds it, but data the upgrade adds is missing until the reparse "
+            "finishes." in text
+        )
 
     def test_no_message_id_conflicts(self, fake_server, seeded_db):
         out = asyncio.run(_handler(fake_server, seeded_db)())

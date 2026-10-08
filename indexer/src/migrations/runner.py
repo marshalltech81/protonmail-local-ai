@@ -14,6 +14,15 @@ Each migration runs inside its own ``BEGIN IMMEDIATE`` / ``COMMIT`` so
 a failing migration leaves the database stamped at the last
 successfully applied version. The next startup retries only from the
 failing migration onward.
+
+A migration that adds per-message data only the parser produces (a new
+``messages`` column or per-message table) and keeps chunk IDs ends with
+``queue.REPARSE_ENQUEUE_SQL``, copied verbatim: it queues every indexed
+file with reason ``reparse`` and leaves existing jobs (pending,
+retrying, dead) alone, and the worker re-parses them afterwards without
+embedding calls (#1078; docs/architecture.md, "Reparse in place"). Do
+not parse mail inside a migration: it runs under one write lock with
+no progress, retries or dead-letter path.
 """
 
 from __future__ import annotations
