@@ -786,7 +786,9 @@ failing the message, with one rate-limited WARNING per word naming the
 exception type (#942). Header bytes sent raw, without an encoded-word
 (labelled `unknown-8bit`, which no codec names), are decoded as UTF-8
 with no log line when they are valid UTF-8; otherwise with replacement
-characters and one rate-limited WARNING per chunk (#1147). A value whose encoded-words still do not
+characters and one rate-limited WARNING per chunk (#1147). An
+encoded-word beside raw bytes in Subject or the From fallback is kept
+as sent, with its own rate-limited WARNING (#1186). A value whose encoded-words still do not
 decode is kept as sent, with
 one rate-limited WARNING naming the exception type, and a value that
 decodes to nothing is kept as sent too, so the part stays an

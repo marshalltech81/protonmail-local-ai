@@ -1707,7 +1707,11 @@ other encoding are decoded with replacement characters, and the
 message logs one WARNING per affected header chunk, without the text:
 `raw 8-bit header is not UTF-8; decoded 1 header chunk with replacement
 characters`. A header without a parseable address is decoded twice (for
-the address and for the From fallback), so it logs two. These lines
+the address and for the From fallback), so it logs two. An RFC 2047
+encoded-word in the same Subject or From fallback as raw bytes is kept
+as sent, `=?...?=` text included (#1186), and logs `raw 8-bit header
+holds encoded-words that were not decoded; kept 1 header as sent`
+(WARNING); in a display name it is decoded. These lines
 share the 20-per-5-minutes limit above and are counted as
 `suppressed_lines` when withheld. A charset label the codec rejects
 still logs `header encoded-word charset could not be decoded
