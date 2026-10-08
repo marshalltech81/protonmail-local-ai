@@ -5,6 +5,7 @@ Supports BM25 keyword search, vector similarity search, and hybrid fusion.
 """
 
 import base64
+import codecs
 import hashlib
 import json
 import logging
@@ -1331,6 +1332,94 @@ _ATTACHMENT_FROM = (
     "LEFT JOIN attachment_extractions e ON e.attachment_id = a.attachment_id "
     "AND e.extractor_module = a.extractor_module"
 )
+
+
+# The columns ``_row_to_occurrence`` reads, over ``_ATTACHMENT_FROM``.
+_OCCURRENCE_COLUMNS = (
+    "a.attachment_occurrence_id, a.attachment_id, a.extractor_module, "
+    "a.claimant_id, m.message_id, m.thread_id, "
+    f"substr(CAST(a.filename AS BLOB), 1, {_ATTACHMENT_META_BYTES + 1}) AS filename_head, "
+    f"substr(CAST(a.content_type AS BLOB), 1, {_ATTACHMENT_META_BYTES + 1}) "
+    "AS content_type_head, "
+    "a.size_bytes, m.folder, m.sent_at, m.occurred_at, m.effective_at, "
+    f"{_SOURCE_COLUMNS}, e.extraction_status, e.extractor, e.extracted_at, "
+    "e.ocr_pages_skipped"
+)
+
+# The indexer's fixed ``extraction_error`` texts for an ``unsupported``
+# result that needs OCR while it is off (``indexer/src/extractors``
+# ``OCR_DISABLED_ERROR`` and ``SCANNED_PDF_OCR_DISABLED_ERROR``, which
+# this service cannot import). Matched exactly, as the indexer's own
+# re-queue query does; the stored error is never returned.
+OCR_DISABLED_ERRORS = (
+    "OCR disabled (INDEXER_OCR_ENABLED=false)",
+    "OCR disabled (INDEXER_OCR_ENABLED=false); scanned PDF",
+)
+
+# ``get_attachment``'s reader (#796). The stored text is read through
+# incremental blob I/O in blocks of this many bytes: SQLite's ``length``
+# and ``substr`` stop at an embedded NUL, which plain-text extraction
+# keeps, and a ``SELECT`` of the column loads the whole value, which is
+# unbounded when ``INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS=0`` turns the
+# extraction cap off.
+TEXT_READ_BLOCK_BYTES = 64 * 1024
+# UTF-8 continuation bytes: every other byte starts a character.
+_UTF8_CONTINUATION_BYTES = bytes(range(0x80, 0xC0))
+_UTF8_DECODER = codecs.getincrementaldecoder("utf-8")
+
+
+@dataclass
+class AttachmentText:
+    """One occurrence and a window of its stored extracted text, as
+    ``Database.get_attachment_text`` reads them.
+
+    ``window`` holds at most the requested number of code points from
+    ``offset`` (fewer when the text ends first) and ``total_chars``
+    counts the whole stored text; both are ``None`` unless the
+    extraction succeeded and stored text. ``ocr_disabled`` is true for
+    an ``unsupported`` result recorded because OCR was off.
+    """
+
+    record: AttachmentOccurrenceRecord
+    ocr_disabled: bool
+    window: str | None
+    total_chars: int | None
+
+
+def _read_text_window(blob, offset: int, chars: int) -> tuple[str, int]:
+    """The at most ``chars`` code points of UTF-8 ``blob`` starting at
+    code point ``offset``, and the number of code points in the whole of
+    it.
+
+    Reads ``TEXT_READ_BLOCK_BYTES`` at a time. Blocks are decoded only
+    until the window is full, so the bytes decoded are at most the
+    window's end plus one block, and memory holds one block and the
+    window; the rest is counted block by block (bytes that start a
+    character) and nothing of it is kept. A window that starts past the
+    end is empty.
+    """
+    decoder = _UTF8_DECODER()
+    decoded = 0
+    parts: list[str] = []
+    held = 0
+    while held < chars:
+        block = blob.read(TEXT_READ_BLOCK_BYTES)
+        if not block:
+            decoder.decode(b"", final=True)
+            return "".join(parts), decoded
+        text = decoder.decode(block)
+        if decoded + len(text) > offset:
+            start = max(offset - decoded, 0)
+            piece = text[start : start + chars - held]
+            parts.append(piece)
+            held += len(piece)
+        decoded += len(text)
+    # A character the last decoded block split is counted at its first
+    # byte, which the decoder holds; its other bytes are continuations.
+    total = decoded + (1 if decoder.getstate()[0] else 0)
+    while block := blob.read(TEXT_READ_BLOCK_BYTES):
+        total += len(block.translate(None, _UTF8_CONTINUATION_BYTES))
+    return "".join(parts), total
 
 
 def _row_to_occurrence(r) -> AttachmentOccurrenceRecord:
@@ -4441,15 +4530,7 @@ class Database:
                 "SELECT a.attachment_occurrence_id AS occ, m.effective_at AS clock, "
                 f"a.claimant_id AS cid {_ATTACHMENT_FROM} WHERE {page_where_sql} "
                 "ORDER BY clock DESC, cid DESC, occ DESC LIMIT ? ) "
-                "SELECT a.attachment_occurrence_id, a.attachment_id, a.extractor_module, "
-                "a.claimant_id, m.message_id, m.thread_id, "
-                f"substr(CAST(a.filename AS BLOB), 1, {_ATTACHMENT_META_BYTES + 1}) "
-                "AS filename_head, "
-                f"substr(CAST(a.content_type AS BLOB), 1, {_ATTACHMENT_META_BYTES + 1}) "
-                "AS content_type_head, "
-                "a.size_bytes, m.folder, m.sent_at, m.occurred_at, m.effective_at, "
-                f"{_SOURCE_COLUMNS}, e.extraction_status, e.extractor, e.extracted_at, "
-                "e.ocr_pages_skipped "
+                f"SELECT {_OCCURRENCE_COLUMNS} "
                 "FROM page JOIN attachments a ON a.attachment_occurrence_id = page.occ "
                 "JOIN messages m ON m.claimant_id = a.claimant_id "
                 "LEFT JOIN attachment_extractions e ON e.attachment_id = a.attachment_id "
@@ -4472,6 +4553,49 @@ class Database:
             next_cursor=(
                 _encode_attachment_cursor(digest, records[-1], next_offset) if has_more else None
             ),
+        )
+
+    def get_attachment_text(
+        self, attachment_occurrence_id: str, offset: int, window_chars: int
+    ) -> AttachmentText | None:
+        """One attachment occurrence, whatever its message's folder, and
+        ``window_chars`` code points of its stored extracted text from
+        ``offset``, read in one snapshot (#796). ``None`` when no
+        occurrence has the ID.
+
+        The text is read only for a ``success`` extraction that stored
+        text, through a read-only ``blobopen`` on the extraction row,
+        looked up in the same read transaction; no query selects the
+        column (``_read_text_window``).
+        """
+        with closing(self._connect()) as conn:
+            conn.execute("BEGIN")
+            # ``typeof`` reads the column's type from the record header,
+            # not its value.
+            row = conn.execute(
+                f"SELECT {_OCCURRENCE_COLUMNS}, e.rowid AS extraction_rowid, "  # nosec B608
+                "typeof(e.extracted_text) AS text_type, "
+                "COALESCE(e.extraction_error IN (?, ?), 0) AS ocr_disabled "
+                f"{_ATTACHMENT_FROM} WHERE a.attachment_occurrence_id = ?",
+                (*OCR_DISABLED_ERRORS, attachment_occurrence_id),
+            ).fetchone()
+            if row is None:
+                return None
+            window = total = None
+            if row["extraction_status"] == "success" and row["text_type"] == "text":
+                with conn.blobopen(
+                    "attachment_extractions",
+                    "extracted_text",
+                    row["extraction_rowid"],
+                    readonly=True,
+                ) as blob:
+                    window, total = _read_text_window(blob, offset, window_chars)
+            conn.rollback()
+        return AttachmentText(
+            record=_row_to_occurrence(row),
+            ocr_disabled=bool(row["ocr_disabled"]) and row["extraction_status"] == "unsupported",
+            window=window,
+            total_chars=total,
         )
 
     # -------------------------------------------------------------------------

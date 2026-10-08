@@ -30,7 +30,9 @@ from tests.conftest import (
     FakeEmbedClient,
     FakeInferenceClient,
     _build_schema,
+    _insert_attachment,
     _insert_chunk,
+    _insert_extraction,
     _insert_message,
     _insert_thread,
     insert_reaped,
@@ -585,10 +587,12 @@ class TestDegradedRetrieval:
         assert all(_degraded(line) == {} for line in lines)
 
 
-# The seven tools #886 gave a completion line, and query_attachments (#796).
+# The seven tools #886 gave a completion line, and query_attachments and
+# get_attachment (#796).
 _COMPLETION_TOOLS = (
     "query_messages",
     "query_attachments",
+    "get_attachment",
     "get_message",
     "get_thread",
     "list_threads",
@@ -601,6 +605,7 @@ _MARKER_MESSAGE_ID = f"{MARKER}-mid@example.com"
 _MARKER_THREAD_ID = f"t-{MARKER}"
 _MARKER_FOLDER = f"{MARKER}-folder"
 _MARKER_ADDRESS = f"{MARKER}@example.com"
+_MARKER_OCCURRENCE_ID = f"{MARKER}-occurrence"
 
 
 def _open_db(path: Path) -> sqlite3.Connection:
@@ -634,6 +639,23 @@ def marker_messages_db(tmp_path: Path):
     db_path = tmp_path / "marker-messages.db"
     conn = _open_db(db_path)
     _insert_marker_message(conn)
+    # One attachment whose occurrence ID, filename and extracted text
+    # carry the marker, for query_attachments and get_attachment.
+    _insert_attachment(
+        conn,
+        message_id=_MARKER_MESSAGE_ID,
+        thread_id=_MARKER_THREAD_ID,
+        attachment_id=f"{MARKER}-payload",
+        filename=f"{MARKER}.txt",
+        occurrence_id=_MARKER_OCCURRENCE_ID,
+        extractor_module="text",
+    )
+    _insert_extraction(
+        conn,
+        attachment_id=f"{MARKER}-payload",
+        extracted_text=f"the {MARKER} attachment text",
+        extractor_module="text",
+    )
     conn.close()
     return Database(str(db_path))
 
@@ -650,12 +672,11 @@ _SUCCESS_CALLS: dict[str, tuple[dict, dict]] = {
         {"sender": _MARKER_ADDRESS, "text": MARKER, "folder": _MARKER_FOLDER},
         {"total_matches": 1, "indeterminate": 0, "returned": 1},
     ),
-    # The marker message carries no attachment: the filters echo the
-    # marker in the prose, and the counts are taken all the same.
     "query_attachments": (
         {"sender": _MARKER_ADDRESS, "filename": MARKER, "folder": _MARKER_FOLDER},
-        {"total_matches": 0, "indeterminate": 0, "returned": 0},
+        {"total_matches": 1, "indeterminate": 0, "returned": 1},
     ),
+    "get_attachment": ({"attachment_occurrence_id": _MARKER_OCCURRENCE_ID}, {"attachments": 1}),
     "get_message": ({"message_id": _MARKER_MESSAGE_ID}, {"messages": 1}),
     "get_thread": ({"thread_id": _MARKER_THREAD_ID}, {"messages": 1}),
     "list_threads": ({"folder": _MARKER_FOLDER}, {"threads": 1}),
@@ -668,6 +689,7 @@ _SUCCESS_CALLS: dict[str, tuple[dict, dict]] = {
 _DB_METHODS = {
     "query_messages": "query_messages",
     "query_attachments": "query_attachments",
+    "get_attachment": "get_attachment_text",
     "get_message": "get_message_view",
     "get_thread": "get_thread_page",
     "list_threads": "list_threads",
@@ -682,6 +704,17 @@ _CALLER_ERRORS = [
     ("query_messages", {"text": MARKER, "date_from": f"{MARKER}-01"}, "date_from"),
     ("query_attachments", {"filename": MARKER, "date_from": f"{MARKER}-01"}, "date_from"),
     ("query_attachments", {"cursor": MARKER}, "query_attachments.cursor"),
+    (
+        "get_attachment",
+        {"attachment_occurrence_id": f"missing-{MARKER}"},
+        "get_attachment failed: not found",
+    ),
+    ("get_attachment", {"attachment_occurrence_id": _MARKER_OCCURRENCE_ID, "offset": -1}, "offset"),
+    (
+        "get_attachment",
+        {"attachment_occurrence_id": _MARKER_OCCURRENCE_ID, "offset": 10**6},
+        "offset",
+    ),
     ("get_message", {"message_id": f"missing-{MARKER}"}, "get_message failed: not found"),
     ("get_message", {"message_id": _MARKER_MESSAGE_ID, "offset": -1}, "offset"),
     ("get_message", {"message_id": _MARKER_MESSAGE_ID, "offset": 10**6}, "offset"),
