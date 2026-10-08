@@ -875,6 +875,19 @@ superseded entries keep their number and one line.
     process. Process separation is not filesystem or network
     confinement, which stays #698's requirement (#1236).
 
+43. **Defence in depth (2026-10-08):** each trust boundary (untrusted
+    mail and attachments, secrets, network exposure, Bridge TLS) keeps
+    every control it has: none is removed, relaxed, replaced or made
+    conditional because another covers the same threat without an owner
+    decision. It sets no minimum number of controls, since some
+    boundaries have one by nature (pull-only sync is one setting;
+    keeping mail out of logs is coding discipline plus marker tests),
+    and an additional layer is a design decision, never a review finding
+    against a PR that does not touch the boundary. The boundaries, their
+    controls, shared assumptions and accepted limits are documented in
+    `docs/architecture.md` "Trust boundaries" (#1299); it is
+    documentation, not a test.
+
 ## Notes for Agents
 
 - Read `AGENTS.md` before making changes.

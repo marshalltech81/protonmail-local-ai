@@ -45,6 +45,16 @@ When making changes, follow these priorities in order:
 6. Keep runtime images minimal and non-root.
 7. Preserve thread-level indexing and hybrid search behavior.
 
+Defence in depth holds at each trust boundary (untrusted mail and
+attachments, secrets, network exposure, Bridge TLS; the "Trust
+boundaries" table in `docs/architecture.md`, #1299): every control there
+stands on its own, and none is removed, relaxed, replaced or made
+conditional because another control covers the same threat. Doing so is
+a design change: stop and ask. A boundary that lacks a further control
+is an issue under the existing rules, never a finding against a PR that
+does not touch it. There is no minimum number of controls (PLAN.md
+decision 43).
+
 ## Read This Before Editing
 
 Before making non-trivial changes, read:
@@ -736,6 +746,13 @@ repository:
   lines it changed. A fix that moves validation or adds a state can
   break a guarantee elsewhere: rate-limited rejection, withheld log
   values, eventual progress.
+- Name the trust boundary and control a change touches. A PR that
+  removes, relaxes, replaces or makes conditional a control at a trust
+  boundary is a finding at any round (it is introduced by the PR,
+  #751). Defence in depth sets no minimum control count: a proposal for
+  an additional layer is a design decision, not a finding, and a
+  boundary's missing layer is filed as an issue, not raised against a
+  PR that does not touch it.
 
 ## Common Commands
 
@@ -1082,6 +1099,8 @@ Stop and ask for direction before proceeding if a proposed change would:
 - add hand-written parsing of attacker-controlled input (MIME, headers,
   document formats) where the standard library or an existing
   dependency already parses it, even to fix a review finding
+- remove, relax, replace or make conditional a control at a trust
+  boundary, whatever other control covers the same threat
 
 ## Out of Scope for Root AGENTS.md
 
