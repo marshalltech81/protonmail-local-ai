@@ -14,7 +14,9 @@ The search, retrieval, and system tools (Groups 1, 2, and 4) publish an
   `get_evidence` / `search_attachments` carry `attachment_id`. Paging
   state is typed as well (`get_thread.next_offset`,
   `query_messages.next_cursor` / `has_more` / `total_matches`, and the
-  same fields on `query_attachments`).
+  same fields on `query_attachments`, whose
+  `attachments[].attachment_occurrence_id` → `get_attachment`, paged by
+  `next_offset`).
 
 **Message-ID and claimant ID.** The sender sets a message's Message-ID,
 so two different indexed files can carry the same one (a reused or
@@ -247,7 +249,9 @@ tool=search_emails outcome=ok total_ms=41.7 stages_ms={'query_embedding': 22.4, 
   have (`sender_ambiguous`, `address_list`, `display_names`, `subject`,
   `body`, `attachment_list`, `size`; [Response
   contract](#query_messages)), `messages`
-  (`get_thread`, `get_message`), `threads` (`list_threads`),
+  (`get_thread`, `get_message`), `attachments` (`get_attachment`, with
+  `text_unavailable_<status>` when it returns no text; `none` for no
+  extraction recorded), `threads` (`list_threads`),
   `contacts` (`find_contact`) and `folders` (`list_folders`). They run
   no timed stages, so their `stages_ms` and `config` are empty, as are
   `get_mailbox_status`'s `counts`.
@@ -273,6 +277,12 @@ tool=search_emails outcome=ok total_ms=41.7 stages_ms={'query_embedding': 22.4, 
   `from_name_matches_capped` is 1 when more than 10 matched
   ([Resolving `from_name`](#search_emails)). Numbers only: the
   addresses are never logged.
+- `keyword_units_unranked` (the tools that select evidence passages)
+  is the number of distinct query words past the 16 the keyword
+  passage ranking compares; those words still make a passage a keyword
+  match but do not rank it, and a rate-limited `Keyword passage
+  ranking used the first 16 distinct query words` WARNING says so
+  ([#1246](https://github.com/marshalltech81/protonmail-local-ai/issues/1246)).
 - `evidence_filtered` is 1 when a `get_evidence` call used a
   [precision control](#precision-controls) or `dedupe_attachments`. With `scope=in_scope`,
   `evidence_context_dropped` counts the `context` passages left out and
@@ -334,9 +344,10 @@ before.
   without `folder` (pass `folder="Trash"` to list them),
   `query_attachments` likewise for the attachments those messages
   carry, and `search_attachments`, which has no folder filter.
-- Tools that read one named thread or message (`get_thread`,
-  `get_message`, `get_evidence` with `thread_id`, `summarize_thread`
-  with a thread ID) and the folder browsers (`list_threads`,
+- Tools that read one named thread, message or attachment
+  (`get_thread`, `get_message`, `get_attachment`, `get_evidence` with
+  `thread_id`, `summarize_thread` with a thread ID) and the folder
+  browsers (`list_threads`,
   `list_folders`) are unaffected.
 - The exclusion counts as a filter for the vector lanes' window
   widening, so a mailbox whose closest matches are in Trash still finds
@@ -767,8 +778,9 @@ against the query the way `ask_mailbox` ranks them
 
 1. the first chunk of an attachment whose filename or MIME type the
    query matches, if one does;
-2. the chunk nearest the query whose text holds a word of the query,
-   unless the first chunk already does;
+2. the chunk holding the query words that are rarest in that thread
+   (nearest the query on a tie), unless that is the first chunk
+   ([#1246](https://github.com/marshalltech81/protonmail-local-ai/issues/1246));
 3. the rest: the matched attachments' chunks (strongest match first),
    then the thread's other attachment chunks, then body chunks, each
    group by vector distance. With no attachment match, by vector
@@ -776,8 +788,10 @@ against the query the way `ask_mailbox` ranks them
 
 Each chunk's `selected_by` says why it qualified: `keyword_match` (its
 text holds a word of the query; this wins when both apply),
-`attachment_match` or `vector`. Query words are OR'd, so with a common
-word in the query most chunks are keyword matches. At `limit=6` the result is
+`attachment_match` or `vector`. A word in every chunk of the thread
+does not count toward the ranking, and only the first 16 distinct
+query words are ranked (later ones still make a chunk a keyword
+match). At `limit=6` the result is
 the slice `ask_mailbox` gives its model for that thread. This path
 bypasses RRF fusion, so `include_scores` shows per-chunk vector
 distance but no lane provenance. A `thread_id` whose thread was reaped
@@ -1025,7 +1039,9 @@ text)` and the structured output sets `indexed_thread_text_scope:
 "context"`, the label `ask_mailbox` gives such passages.
 Report the gap; do not attribute the context to the message or treat
 the missing body as proof that it contained no relevant evidence.
-Attachment text is not included — use `get_evidence` for that. The
+Attachment text is not included — use `get_evidence` for passages, or
+list the message's attachments with `query_attachments`
+(`claimant_id`) and read one with [`get_attachment`](#get_attachment). The
 prose ends its header block with the raw source file's path, size, and
 SHA-256.
 
@@ -1472,11 +1488,13 @@ the carrying message's folder, `sent_at`, `occurred_at` and
 `ocr_pages_skipped` (all null when none is recorded). The counts and
 the page are read in one snapshot.
 
-It returns no attachment text, and no tool reads a listed attachment's
-whole text yet (#796): [`get_evidence`](#get_evidence) and
-[`ask_mailbox`](#ask_mailbox) return ranked, capped passages chosen by
-a query, which can leave the listed attachment out or show another copy
-of the same bytes. Report unread attachment text as a coverage limit.
+It returns no attachment text. To read a listed attachment's stored
+text, pass its `attachment_occurrence_id` to
+[`get_attachment`](#get_attachment); [`get_evidence`](#get_evidence)
+and [`ask_mailbox`](#ask_mailbox) return ranked, capped passages chosen
+by a query, which can leave the listed attachment out or show another
+copy of the same bytes. Report unread attachment text as a coverage
+limit.
 
 Rows carry private mail metadata (filenames, IDs, folders) and go to
 the calling model, which may be remote. Start with narrow filters and
@@ -1502,6 +1520,74 @@ at most `limit + 1` occurrences. On a synthetic index of 75,000
 occurrences a page took about 60 ms unfiltered. The log records only
 `extraction_status`, `limit` and valid ISO dates; filenames, MIME types, IDs,
 addresses, folders and cursors are withheld.
+
+### `get_attachment`
+Read one attachment occurrence's whole stored extracted text, one page
+at a time
+([#796](https://github.com/marshalltech81/protonmail-local-ai/issues/796)).
+Pass an `attachment_occurrence_id` from
+[`query_attachments`](#query_attachments). The occurrence is read
+whatever its message's folder, Trash included, as the other tools that
+read one named item are.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `attachment_occurrence_id` | string | required | One attachment on one message, from `query_attachments` |
+| `offset` | int | `0` | Text character to start the page at; pass the previous response's `next_offset` |
+
+**Response contract.** `attachment` is the occurrence as
+`query_attachments` lists it (IDs, filename and MIME type cut at 500
+characters with flags, size, the carrying message's folder and dates,
+`source_file`, and the extraction's status, extractor, time and
+`ocr_pages_skipped`). The text comes in pages of 20,000 characters, as
+`get_message` pages a body: `text` is the page, `text_offset` its first
+character, `text_total_chars` the whole stored text's length and
+`next_offset` the next page's offset (null at the end). Offsets count
+characters (code points), and a page never ends inside a combining
+sequence or zero-width-joined pair; both tools cut pages with one
+helper, so they end in the same places. Paging from 0 through each
+`next_offset` returns the stored text exactly, NUL characters included.
+An offset past the end is an error.
+
+"Whole" means the stored extraction, not the original file. The
+indexer's extraction cap (`INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS`) and
+extractor work caps may have cut it, and the index does not record
+whether they did, so `truncated` is always null
+([#1261](https://github.com/marshalltech81/protonmail-local-ai/issues/1261)).
+`ocr_pages_skipped` counts scanned PDF pages the OCR page cap left
+unread.
+
+| Extraction | `text` | `unavailable_reason` |
+|---|---|---|
+| `success` | the stored text | null |
+| `empty` | `""` | null |
+| `failed` | null | `extraction failed` (the stored error is never returned) |
+| `unsupported` | null | `no extractor reads this file type`, or, when OCR was off, `the file needs OCR, which is off (INDEXER_OCR_ENABLED=false)` |
+| `too_large` | null | the file is over the indexer's attachment size limit |
+| none recorded | null | no extraction is recorded yet (not run yet, or extraction off) |
+
+Report null text as unread text, not as an attachment that says
+nothing relevant. An unknown `attachment_occurrence_id` is an error.
+
+The text goes to the calling model, which may be remote. Before
+reading more than one attachment, or every page of a long one, tell
+the user which attachments and roughly how much text will be read
+(each page states the total), and prefer the smallest sample that
+answers the question.
+
+**Cost.** One read transaction looks the occurrence up and opens its
+extraction row with a read-only incremental blob read (`blobopen`); no
+query selects the text column, so a long row is never loaded whole,
+even with the extraction cap off. The reader decodes 64 KiB blocks of
+UTF-8 from the start only until the page is complete, then counts the
+rest's characters block by block without keeping them, so memory is
+one block plus one page and each call reads the whole stored text once
+(about 1 ms for the default 2,000,000-character cap, about 30 ms for
+50 MB, in the image). SQLite's own `length` and `substr` would stop at
+an embedded NUL, which plain-text extraction keeps. The log records
+only `offset`; the occurrence ID is withheld. An unknown ID logs
+the fixed `get_attachment failed: not_found` WARNING through a rate
+limiter: the first in each 60-second window, the rest counted.
 
 ---
 
@@ -1718,8 +1804,8 @@ Each thread gives at most six passages (`PROMPT_EVIDENCE_CHUNKS_PER_THREAD`),
 then cut to the per-thread prompt budget, ordered by similarity to the
 question, not by position. When the question matches one of the
 thread's attachments by filename or MIME type, that attachment's first
-chunk comes first. The nearest chunk holding a word of the question
-comes next, unless the first one already holds one (#858). The rest
+chunk comes first. The chunk holding the question's rarest words in
+that thread comes next, unless it is the first one (#858, #1246). The rest
 follow: that attachment's chunks, then the thread's other attachment
 chunks, then body chunks, each group by similarity, so attachments can
 fill every slot but the keyword one before a body message. The budget

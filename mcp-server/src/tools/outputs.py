@@ -762,6 +762,31 @@ class QueryAttachmentsOutput(_Output):
     )
 
 
+class GetAttachmentOutput(_Output):
+    attachment: ListedAttachment
+    text: str | None = Field(
+        description="One page of the stored extracted text: the characters from "
+        "text_offset, at most 20,000; '' for an empty extraction or at the text's end; "
+        "null when no text is available (see unavailable_reason). Extracted text, not "
+        "the file."
+    )
+    text_offset: int = Field(description="Character of the stored text this page starts at.")
+    text_total_chars: int = Field(
+        description="Characters in the whole stored text; 0 when there is none."
+    )
+    next_offset: int | None = Field(
+        description="Pass as offset for the next page; null when this page reaches the end. "
+        "Paging from 0 to the end returns the whole stored text."
+    )
+    unavailable_reason: str | None = Field(
+        description="Why text is null, in fixed words; null when text is set."
+    )
+    truncated: bool | None = Field(
+        description="Whether an extraction cap cut the stored text. Always null: the index "
+        "does not record it yet (#1261)."
+    )
+
+
 def project_rows(content: dict[str, Any], fields: frozenset[str]) -> dict[str, Any]:
     """``content`` (a dumped ``QueryMessagesOutput``) with each row cut to
     ``fields``, in the row's own field order."""

@@ -335,7 +335,8 @@ def parse_verdict(
         raise JudgeError("judge_incomplete_assessment", "no claims for a non-abstaining answer")
 
     facts: dict[str, bool] = {}
-    for f in data.get("facts") if isinstance(data.get("facts"), list) else []:
+    raw_facts = data.get("facts")
+    for f in raw_facts if isinstance(raw_facts, list) else []:
         if not isinstance(f, dict) or not isinstance(f.get("covered"), bool):
             raise JudgeError("judge_malformed_output", "fact")
         facts[str(f.get("id"))] = f["covered"]
@@ -344,7 +345,8 @@ def parse_verdict(
         raise JudgeError("judge_incomplete_assessment", "facts do not match the case")
 
     prohibited: dict[int, bool] = {}
-    for p in data.get("prohibited") if isinstance(data.get("prohibited"), list) else []:
+    raw_prohibited = data.get("prohibited")
+    for p in raw_prohibited if isinstance(raw_prohibited, list) else []:
         index = p.get("index") if isinstance(p, dict) else None
         if not isinstance(index, int) or isinstance(index, bool):
             raise JudgeError("judge_malformed_output", "prohibited")

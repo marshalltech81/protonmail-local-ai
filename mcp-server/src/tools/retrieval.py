@@ -5,7 +5,9 @@ Fetch thread and message context from the local SQLite index.
 
 import asyncio
 import logging
+import time
 import unicodedata
+from collections.abc import Callable
 from typing import Annotated, Any
 
 from fastmcp.exceptions import ToolError
@@ -44,6 +46,7 @@ from .outputs import (
     FilterUse,
     FindContactOutput,
     Folder,
+    GetAttachmentOutput,
     GetMessageOutput,
     GetThreadOutput,
     ListedAttachment,
@@ -109,6 +112,21 @@ SizeBound = Annotated[
 # a client can repeat a rejected projection as fast as it likes.
 _FIELDS_REJECTION_LOG_INTERVAL_SECS = 60.0
 
+
+def _not_found_log(clock: Callable[[], float] = time.monotonic) -> RateLimitedLog:
+    """get_attachment's rate-limited not-found WARNING: a client can
+    send unknown occurrence IDs as fast as it likes (Codex round 1 on
+    #796). Fixed text; the ID stays out of the log."""
+    return RateLimitedLog(
+        log,
+        ("not_found",),
+        _FIELDS_REJECTION_LOG_INTERVAL_SECS,
+        first_msg="get_attachment failed: %s",
+        summary_msg="get_attachment failed in the last %ds: %s",
+        clock=clock,
+    )
+
+
 # Recipients rendered per role before the rest are summarized as a count.
 _MAX_LISTED_PARTICIPANTS = 10
 
@@ -126,6 +144,9 @@ _THREAD_BODY_CHAR_LIMIT = 4000
 # 4,000 characters). Five get_thread body cuts, so a long message reads in
 # a few calls.
 _MESSAGE_BODY_PAGE_CHARS = 20_000
+# Code points ``_page_cut`` needs from a page's start: the page and one
+# past its end, since a cut looks at the characters on both sides of it.
+_PAGE_WINDOW_CHARS = _MESSAGE_BODY_PAGE_CHARS + 1
 # A page cut that would split a combining sequence moves back at most
 # this many code points; past that (a run of marks longer than any real
 # grapheme) the cut stays where it is. Reconstruction is exact either way.
@@ -209,32 +230,51 @@ def _joins_previous(text: str, i: int) -> bool:
     )
 
 
-def _body_page(text: str, offset: int) -> tuple[str, int | None]:
-    """The page of ``text`` starting at ``offset`` and the next page's
-    offset (``None`` at the end).
-
-    Python strings index by code point, so a cut never splits one; a cut
-    that would separate a combining mark or a zero-width-joined pair from
-    the character before it moves back to that character (at most
-    ``_MAX_CUT_BACKOFF`` code points, and never to ``offset`` itself, so
-    every page makes progress).
-    """
-    if offset < 0 or offset > len(text):
+def _check_offset(offset: int, total_chars: int, noun: str) -> None:
+    """Raise ``InvalidFilterError`` unless ``0 <= offset <= total_chars``."""
+    if offset < 0 or offset > total_chars:
         raise InvalidFilterError(
             "offset",
-            f"offset {offset} is past the end of the body ({len(text):,} characters)"
+            f"offset {offset} is past the end of the {noun} ({total_chars:,} characters)"
             if offset > 0
             else f"offset must be 0 or more, got {offset}",
         )
-    end = offset + _MESSAGE_BODY_PAGE_CHARS
-    if end >= len(text):
-        return text[offset:], None
+
+
+def _page_cut(window: str) -> int | None:
+    """Where a page that starts at ``window[0]`` ends, in code points
+    from that start, or ``None`` when the page reaches the end of the
+    text.
+
+    ``window`` is the text from the page's start: at most
+    ``_PAGE_WINDOW_CHARS`` code points, fewer only when the text ends
+    inside it. Python strings index by code point, so a cut never splits
+    one; a cut that would separate a combining mark or a zero-width-joined
+    pair from the character before it moves back to that character (at
+    most ``_MAX_CUT_BACKOFF`` code points, and never to the page's start,
+    so every page makes progress). ``get_message`` and ``get_attachment``
+    both cut here, so their pages end in the same places (#796).
+    """
+    end = _MESSAGE_BODY_PAGE_CHARS
+    if len(window) <= end:
+        return None
     cut = end
-    while cut > offset + 1 and end - cut < _MAX_CUT_BACKOFF and _joins_previous(text, cut):
+    while cut > 1 and end - cut < _MAX_CUT_BACKOFF and _joins_previous(window, cut):
         cut -= 1
-    if _joins_previous(text, cut):
+    if _joins_previous(window, cut):
         cut = end
-    return text[offset:cut], cut
+    return cut
+
+
+def _body_page(text: str, offset: int) -> tuple[str, int | None]:
+    """The page of ``text`` starting at ``offset`` and the next page's
+    offset (``None`` at the end), cut by ``_page_cut``."""
+    _check_offset(offset, len(text), "body")
+    window = text[offset : offset + _PAGE_WINDOW_CHARS]
+    cut = _page_cut(window)
+    if cut is None:
+        return window, None
+    return window[:cut], offset + cut
 
 
 def _thread_message(m: MessageRecord, body: MessageBody | None) -> ThreadMessage:
@@ -440,6 +480,28 @@ def _attachment_lines(i: int, a: AttachmentOccurrenceRecord) -> list[str]:
     ]
 
 
+# Why get_attachment has no text for an occurrence, by its extraction
+# status (``None``: no extraction recorded). Fixed words: a failed row's
+# stored error is never returned (#796).
+_UNAVAILABLE_REASONS = {
+    None: "no extraction is recorded for this attachment yet (not run yet, or attachment "
+    "extraction is off)",
+    "failed": "extraction failed",
+    "unsupported": "no extractor reads this file type",
+    "too_large": "the file is over the indexer's attachment size limit, so it was not extracted",
+    # A success row is read only when it stored text.
+    "success": "the extraction succeeded but stored no text",
+}
+_OCR_DISABLED_REASON = "the file needs OCR, which is off (INDEXER_OCR_ENABLED=false)"
+
+
+def _unavailable_reason(status: str | None, ocr_disabled: bool) -> str:
+    """The fixed reason ``get_attachment`` gives for returning no text."""
+    if ocr_disabled:
+        return _OCR_DISABLED_REASON
+    return _UNAVAILABLE_REASONS[status]
+
+
 def register_retrieval_tools(server, db):
     fields_rejections = RateLimitedLog(
         log,
@@ -449,8 +511,17 @@ def register_retrieval_tools(server, db):
         summary_msg="query_messages rejected invalid fields in the last %ds: %s",
     )
     # The same for every other rejected argument, keyed by tool and field (#1039).
+    not_found = _not_found_log()
     rejections = ArgumentRejections(
-        log, ("get_message", "list_threads", "query_messages", "query_attachments", "find_contact")
+        log,
+        (
+            "get_message",
+            "list_threads",
+            "query_messages",
+            "query_attachments",
+            "get_attachment",
+            "find_contact",
+        ),
     )
     local_only_note = (
         "mcp-server has no live Bridge access. "
@@ -704,7 +775,9 @@ def register_retrieval_tools(server, db):
         when more remain, the ``offset`` for the next call. Calling
         with each ``next_offset`` in turn returns the whole body.
         Attachment text is NOT included here; use get_evidence or
-        ask_mailbox for attachment content. When no body chunks are
+        ask_mailbox for attachment content, or list the message's
+        attachments with query_attachments (``claimant_id``) and read
+        one in full with get_attachment. When no body chunks are
         indexed for the message, ``body: null`` means no indexed body;
         ``indexed_thread_text`` is conversation context, not this
         message's text (``indexed_thread_text_scope`` says context, as
@@ -1393,11 +1466,12 @@ def register_retrieval_tools(server, db):
         tell the user the scope and how many rows you will page, and
         prefer the smallest sample that answers the question.
 
-        This tool lists metadata only, no attachment text. No tool reads a
-        listed attachment's whole text yet: get_evidence and ask_mailbox
-        return ranked, capped passages by query, which may leave the
-        listed attachment out or show another copy of the same bytes.
-        Report unread attachment text as a coverage limit.
+        This tool lists metadata only, no attachment text. To read a
+        listed attachment's stored text, pass its
+        ``attachment_occurrence_id`` to get_attachment; get_evidence and
+        ask_mailbox return ranked, capped passages by query, which may
+        leave the listed attachment out or show another copy of the same
+        bytes. Report unread attachment text as a coverage limit.
 
         Paging: when ``has_more`` is true, call again with the SAME
         filters plus ``cursor`` set to ``next_cursor``; ``limit`` may
@@ -1532,6 +1606,139 @@ def register_retrieval_tools(server, db):
             lines.extend(_attachment_lines(i, a))
             lines.append("")
         return tool_result("\n".join(lines).rstrip(), output)
+
+    @server.tool(
+        output_schema=GetAttachmentOutput.model_json_schema(),
+        annotations=read_only("Get Attachment"),
+    )
+    @timings.timed_tool("get_attachment")
+    async def get_attachment(
+        attachment_occurrence_id: str,
+        offset: int = 0,
+    ) -> CallToolResult:
+        """
+        Read one attachment's whole extracted text, one page at a time.
+        Pass an ``attachment_occurrence_id`` from query_attachments; the
+        attachment is read whatever its message's folder, Trash included.
+
+        The text goes to the calling model, which may be remote. Before
+        reading more than one attachment, or every page of a long one,
+        tell the user which attachments and roughly how much text you
+        will read (each page states the total), and prefer the smallest
+        sample that answers the question.
+
+        The text is returned in pages of 20,000 characters: the
+        response states which characters it shows of how many and, when
+        more remain, the ``offset`` for the next call. Calling with each
+        ``next_offset`` in turn returns the whole stored text. That is
+        the text the indexer extracted and stored, not the original
+        file: an extraction cap may have cut it, which the index does
+        not record yet (``truncated`` is always null), and
+        ``ocr_pages_skipped`` counts scanned PDF pages the OCR page cap
+        left unread. Only a ``success`` extraction has text; an
+        ``empty`` one returns "". Otherwise ``text`` is null and
+        ``unavailable_reason`` says why (no extraction recorded yet,
+        extraction failed, no extractor for the file type, OCR off, or
+        the file over the size limit): report it as unread text, not as
+        an attachment that says nothing relevant.
+
+        Args:
+            attachment_occurrence_id: An ``attachment_occurrence_id``
+                from query_attachments (one attachment on one message).
+            offset: Text character to start the page at (default 0); pass
+                the previous response's next_offset to read on.
+
+        Returns:
+            The attachment's metadata (as query_attachments lists it) and
+            one page of its stored extracted text, or the reason none is
+            available.
+        """
+        log_tool_call(
+            log,
+            "get_attachment",
+            {"attachment_occurrence_id": attachment_occurrence_id, "offset": offset},
+        )
+        try:
+            if offset < 0:
+                # Rejected before any read; past-the-end needs the count.
+                _check_offset(offset, 0, "text")
+            found = await asyncio.to_thread(
+                db.get_attachment_text, attachment_occurrence_id, offset, _PAGE_WINDOW_CHARS
+            )
+            if found is None:
+                # Fixed text: the ID is the caller's and stays out of the log.
+                not_found.record("not_found")
+                raise ToolError(f"Attachment occurrence not found: {attachment_occurrence_id}")
+            a = found.record
+            reason = None
+            if a.extraction_status == "empty":
+                window, total = "", 0
+            elif found.window is not None and found.total_chars is not None:
+                window, total = found.window, found.total_chars
+            else:
+                window, total = None, 0
+                reason = _unavailable_reason(a.extraction_status, found.ocr_disabled)
+            _check_offset(offset, total, "text")
+            next_offset = None
+            page = window
+            if window is not None and (cut := _page_cut(window)) is not None:
+                page, next_offset = window[:cut], offset + cut
+        except ToolError:
+            raise
+        except InvalidFilterError as e:
+            # The message quotes the offset; log only the field.
+            rejections.reject("get_attachment", e.field_name)
+            raise ToolError(f"Error: {e}") from e
+        except Exception as e:
+            log.error("get_attachment error: %s", type(e).__name__)
+            raise ToolError(f"Error: {type(e).__name__}") from e
+
+        timings.count("attachments", 1)
+        if reason is not None:
+            # A read that returns no text is a degraded answer: say so
+            # on the timing line, by status (a fixed value), not per file.
+            timings.count(f"text_unavailable_{a.extraction_status or 'none'}", 1)
+        output = GetAttachmentOutput(
+            attachment=_listed_attachment(a),
+            text=page,
+            text_offset=offset,
+            text_total_chars=total,
+            next_offset=next_offset,
+            unavailable_reason=reason,
+            truncated=None,
+        )
+        head, *rest = _attachment_lines(1, a)
+        lines = [
+            f"Carrying message: {head.removeprefix('1. ')}",
+            *(line.strip() for line in rest),
+            f"Mode: {local_only_note}",
+        ]
+        if page is None:
+            lines += ["", f"No extracted text: {reason}."]
+        elif not page and offset:
+            lines += ["", f"No text past offset {offset}; the text has {total:,} characters."]
+        elif not page:
+            lines += ["", "The extraction is empty: no text was found in the file."]
+        else:
+            shown = (
+                ""
+                if offset == 0 and next_offset is None
+                else f"; characters {offset + 1:,}-{offset + len(page):,} of {total:,}"
+            )
+            lines += [
+                "",
+                "Extracted text (as stored by the indexer, not the original file; "
+                f"an extraction cap may have cut it{shown}):",
+                "",
+                page,
+            ]
+            if next_offset is not None:
+                lines += [
+                    "",
+                    f"[{total - next_offset:,} more characters: "
+                    f"call get_attachment with offset={next_offset}]",
+                ]
+        return tool_result("\n".join(lines), output)
 
     @server.tool(
         output_schema=FindContactOutput.model_json_schema(),

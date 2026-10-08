@@ -415,7 +415,7 @@ typecheck-indexer: sync-indexer
 	cd indexer && uv run mypy src
 
 typecheck-mcp: sync-mcp
-	cd mcp-server && uv run mypy src
+	cd mcp-server && uv run mypy src tests/answer_eval
 
 # Remove all containers and volumes
 # WARNING: This deletes the local Maildir, your email index and mbsync's

@@ -1383,7 +1383,8 @@ tool=get_thread outcome=error total_ms=1.9 stages_ms={} counts={} config={}
   `indeterminate` (messages the filters could neither accept nor
   reject; non-zero means the count is not complete) for
   `query_messages` and `query_attachments` (there: attachment occurrences),
-  `messages`, `threads`, `contacts`, `folders` for the
+  `messages`, `attachments` (with `text_unavailable_<status>` when
+  `get_attachment` returns no text), `threads`, `contacts`, `folders` for the
   other retrieval tools, and the lane and degradation counts of the
   search and intelligence tools.
 - `config` names the rerank and inference modes the call used.
@@ -1409,10 +1410,15 @@ same moment.
   `RERANK_BASE_URL`, `RERANK_MODEL`, the key in
   `.secrets/rerank_api_key.txt` and `RERANK_TIMEOUT_SECS`, or set
   `RERANK_MODE=none` until the provider is back.
-- `degraded_thread_vec` / `degraded_chunk_vec`, `degraded_keyword_chunks`,
+- `degraded_thread_vec` / `degraded_chunk_vec`,
   or any `_fts` / `attachment_` lane on every call: the index is missing a table or is
   corrupt. Check the indexer's log, then rebuild as in
   [Indexer refuses to start](#indexer-refuses-to-start--wipe-the-sqlite-volume).
+- `degraded_keyword_chunks`: the keyword passage ranking, which runs on
+  a private in-memory SQLite database rather than the index (#1246),
+  failed; the `Keyword passage lookup failed` WARNING names the
+  exception type. Rebuilding the index does not change it; report the
+  type in an issue.
 
 ## The log shows "token limit hit"
 

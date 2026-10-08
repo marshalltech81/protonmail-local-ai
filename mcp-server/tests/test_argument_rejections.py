@@ -114,6 +114,7 @@ _REJECTED_CALLS = [
     ("query_messages", {"cursor": MARKER}, "cursor"),
     ("query_attachments", {"filename": MARKER, **_BAD_DATE}, "date_from"),
     ("query_attachments", {"cursor": MARKER}, "cursor"),
+    ("get_attachment", {"attachment_occurrence_id": MARKER, "offset": -1}, "offset"),
     ("get_message", {"message_id": "m2", "offset": -1}, "offset"),
     ("list_threads", {"filter_type": MARKER}, "filter_type"),
     ("find_contact", {"query": "   "}, "query"),

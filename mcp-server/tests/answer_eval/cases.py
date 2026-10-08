@@ -34,7 +34,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, TypeGuard, get_args
+from typing import Any, NoReturn, TypeGuard, get_args
 
 from src.lib.inference import MIN_PROMPT_TOKENS
 from src.tools.brief import _MAX_CONCLUSION_CHARS
@@ -212,9 +212,15 @@ class Case:
         return None if argument is None else str(self.arguments[argument])
 
 
+def _fail(case_id: str, what: str) -> NoReturn:
+    raise CaseError(f"case {case_id}: {what}")
+
+
 def _require(cond: bool, case_id: str, what: str) -> None:
+    """Raise unless ``cond`` holds. A check whose value is used afterwards
+    calls ``_fail`` under an ``if not`` instead, so mypy narrows it."""
     if not cond:
-        raise CaseError(f"case {case_id}: {what}")
+        _fail(case_id, what)
 
 
 def _str_list(value: object) -> bool:
@@ -263,12 +269,14 @@ def _parse_case(row: dict[str, Any]) -> Case:
     if not is_case_id(cid):
         raise CaseError("a case has a missing or malformed id")
     tool = row.get("tool")
-    _require(tool in TOOLS, cid, "unknown tool")
+    if tool not in TOOLS:
+        _fail(cid, "unknown tool")
     prefix = _ID_PREFIX[tool]
     _require(cid.startswith(f"{prefix}-"), cid, f"id must start with {prefix}-")
     _require(row.get("category") in CATEGORIES, cid, "unknown category")
     args = row.get("arguments")
-    _require(isinstance(args, dict) and set(args) <= _ARGUMENTS[tool], cid, "bad arguments keys")
+    if not (isinstance(args, dict) and set(args) <= _ARGUMENTS[tool]):
+        _fail(cid, "bad arguments keys")
     if tool in _TEXT_ARGUMENT:
         name = _TEXT_ARGUMENT[tool]
         _require(isinstance(args.get(name), str) and args[name].strip(), cid, name)
@@ -302,20 +310,25 @@ def _parse_case(row: dict[str, Any]) -> Case:
         )
     _require(row.get("held_out") is is_held_out(cid), cid, "held_out must equal is_held_out(id)")
     answerable = row.get("answerable")
-    _require(isinstance(answerable, bool), cid, "answerable must be a boolean")
+    if not isinstance(answerable, bool):
+        _fail(cid, "answerable must be a boolean")
     handling = row.get("expected_handling")
-    _require(handling in HANDLINGS, cid, "unknown expected_handling")
+    if handling not in HANDLINGS:
+        _fail(cid, "unknown expected_handling")
     _require((handling == "abstain") is (not answerable), cid, "abstain iff not answerable")
 
     groups = row.get("required_evidence")
-    _require(isinstance(groups, list) and all(_refs(g) and g for g in groups), cid, "evidence")
+    if not (isinstance(groups, list) and all(_refs(g) and g for g in groups)):
+        _fail(cid, "evidence")
     _require(bool(groups) is answerable, cid, "answerable cases, and only they, need evidence")
 
     facts_raw = row.get("expected_facts")
-    _require(isinstance(facts_raw, list), cid, "expected_facts must be a list")
+    if not isinstance(facts_raw, list):
+        _fail(cid, "expected_facts must be a list")
     facts = []
     for f in facts_raw:
-        _require(isinstance(f, dict) and _FACT_ID.fullmatch(str(f.get("id"))), cid, "fact id")
+        if not (isinstance(f, dict) and _FACT_ID.fullmatch(str(f.get("id")))):
+            _fail(cid, "fact id")
         _require(isinstance(f.get("fact"), str) and f["fact"].strip(), cid, "fact text")
         _require(_refs(f.get("sources")) and f["sources"], cid, "fact sources")
         _require(isinstance(f.get("excerpt"), str) and f["excerpt"].strip(), cid, "fact excerpt")
@@ -336,13 +349,16 @@ def _parse_case(row: dict[str, Any]) -> Case:
 
     _require(_str_list(row.get("must_not_assert")), cid, "must_not_assert")
     det = row.get("deterministic")
-    _require(isinstance(det, dict), cid, "deterministic must be an object")
+    if not isinstance(det, dict):
+        _fail(cid, "deterministic must be an object")
     include = det.get("must_include")
-    _require(isinstance(include, list) and all(_str_list(g) and g for g in include), cid, "include")
+    if not (isinstance(include, list) and all(_str_list(g) and g for g in include)):
+        _fail(cid, "include")
     _require(_str_list(det.get("must_not_include")), cid, "must_not_include")
 
     criteria = row.get("criteria")
-    _require(isinstance(criteria, dict) and set(criteria) == set(DIMENSIONS), cid, "criteria keys")
+    if not (isinstance(criteria, dict) and set(criteria) == set(DIMENSIONS)):
+        _fail(cid, "criteria keys")
     _require(all(isinstance(v, bool) for v in criteria.values()), cid, "criteria values")
     _require(criteria["relevance"] is True, cid, "relevance always applies")
     if not answerable or handling != "answer":

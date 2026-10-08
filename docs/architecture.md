@@ -500,29 +500,46 @@ Threads with no chunk rows — empty bodies, or chunks whose embedding
 has not landed yet — never appear in the chunk lanes and rank on the
 thread-level lanes alone.
 
-**Evidence selection (#215, #858).** With evidence requested, each
-surfaced thread's passages are chosen from all of its chunks, not from
-the lanes' hits: the lanes keep one row per thread and do not record
-which chunk matched. Two FTS5 lookups scoped to the surfaced threads
-run first: which attachments' filename or MIME type match the query,
-and which chunks' text matches it. The keyword lookup is driven from
-the threads' chunks (`message_chunks` by `thread_id`, then a `rowid`
-probe into `message_chunks_fts`) and computes no `bm25()`, so its work
-grows with those threads' chunks, not with the mailbox. Each thread's
-slice is then, within its per-thread limit:
+**Evidence selection (#215, #858, #1246).** With evidence requested,
+each surfaced thread's passages are chosen from all of its chunks, not
+from the lanes' hits: the lanes keep one row per thread and do not
+record which chunk matched. An FTS5 lookup scoped to the surfaced
+threads finds which attachments' filename or MIME type match the
+query. The threads' chunks with a valid vector (the candidates) are
+then fetched with their text, and the query's words are matched
+against that text alone: it goes into a contentless FTS5 table with
+the chunk index's tokenizer (`porter unicode61`) on a private
+in-memory connection, so a word matches a candidate exactly when it
+matches that chunk in `message_chunks_fts`. Neither the mailbox index
+nor `bm25()` is read, so the work grows with the surfaced threads'
+chunks, not with the mailbox or its index segments (#1262).
+
+The query's words (the units the FTS sanitizer quotes) are
+deduplicated by their token sequence, so `Invoices` and `invoice`
+count once. Within each thread, a word's frequency is how many
+candidates hold it; a word every candidate holds is ignored. A
+candidate holding any query word is keyword-matched; it ranks by the
+frequencies of the words it holds, rarest first, compared as a list
+padded to 16 entries with one more than the thread's candidate count,
+then by vector distance, then by chunk ID. So the passage holding the
+question's rarest word (an invoice number, a name) wins over nearer
+passages holding only its common words, and a thread whose matches
+are all uninformative keeps the nearest one. Only the first 16
+distinct words are ranked; later ones still make a candidate
+keyword-matched, and a query with more logs a rate-limited WARNING
+and `keyword_units_unranked` on the timing line. Each thread's slice
+is then, within its per-thread limit:
 
 1. the first chunk of a matched attachment, if one matched;
-2. the keyword-matched chunk nearest the query vector (ties by chunk
-   ID), unless the first slot already holds one;
+2. the best-ranked keyword-matched chunk, unless it is the chunk in
+   slot 1;
 3. the rest: the matched attachments' other chunks, then the thread's
    other attachment chunks, then body chunks, each group by vector
    distance (by vector distance alone when no attachment matched).
 
-Query words are OR'd, so a common word in the question makes most
-chunks keyword matches, and slot 2 is then usually the nearest chunk
-anyway (#1246). Each passage records why it qualified as `selected_by`
+Each passage records why it qualified as `selected_by`
 (`keyword_match`, `attachment_match` or `vector`). A failed keyword
-lookup keeps the order without slot 2.
+ranking keeps the order without slot 2.
 
 The rerank stage is best-effort: a transient rerank-service failure
 returns an empty result set from the reranker, and `hybrid_search`

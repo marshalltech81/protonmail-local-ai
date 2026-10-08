@@ -5,6 +5,7 @@ Supports BM25 keyword search, vector similarity search, and hybrid fusion.
 """
 
 import base64
+import codecs
 import hashlib
 import json
 import logging
@@ -86,6 +87,11 @@ _COUNT_FAILURE_KEYS = (
 _COUNT_FAILURE_LOG_SECS = 60.0
 # ``sqlite3.Error`` subclasses the keyword passage lookup can raise.
 _KEYWORD_CHUNK_FAILURE_KEYS = ("OperationalError", "DatabaseError", "other")
+# Distinct query units the keyword passage ranking probes one by one
+# (#1246). Later units only qualify a chunk, through one OR probe.
+_KEYWORD_RANKED_UNITS = 16
+# Rate-limit key for the WARNING that a query had more units than that.
+_KEYWORD_UNRANKED_KEYS = ("units_over_16",)
 
 # Oversample factor for the chunk and attachment FTS lanes, where one
 # thread can legitimately own many matching rows (a long thread, a
@@ -226,14 +232,18 @@ def _sanitize_fts_query(query: str) -> str:
     search-box expectation. One pass over the characters, so the work is
     linear in the query length.
     """
-    tokens = [
+    return " OR ".join(f'"{t}"' for t in _fts_query_units(query))
+
+
+def _fts_query_units(query: str) -> list[str]:
+    """The word-like tokens ``_sanitize_fts_query`` quotes, in query
+    order, duplicates kept. None holds a ``"``, so each quotes safely
+    as one FTS5 phrase."""
+    return [
         "".join(chars)
         for is_token, chars in groupby(query or "", key=_is_fts_query_token_char)
         if is_token
     ]
-    if not tokens:
-        return ""
-    return " OR ".join(f'"{t}"' for t in tokens)
 
 
 @dataclass
@@ -1333,6 +1343,94 @@ _ATTACHMENT_FROM = (
 )
 
 
+# The columns ``_row_to_occurrence`` reads, over ``_ATTACHMENT_FROM``.
+_OCCURRENCE_COLUMNS = (
+    "a.attachment_occurrence_id, a.attachment_id, a.extractor_module, "
+    "a.claimant_id, m.message_id, m.thread_id, "
+    f"substr(CAST(a.filename AS BLOB), 1, {_ATTACHMENT_META_BYTES + 1}) AS filename_head, "
+    f"substr(CAST(a.content_type AS BLOB), 1, {_ATTACHMENT_META_BYTES + 1}) "
+    "AS content_type_head, "
+    "a.size_bytes, m.folder, m.sent_at, m.occurred_at, m.effective_at, "
+    f"{_SOURCE_COLUMNS}, e.extraction_status, e.extractor, e.extracted_at, "
+    "e.ocr_pages_skipped"
+)
+
+# The indexer's fixed ``extraction_error`` texts for an ``unsupported``
+# result that needs OCR while it is off (``indexer/src/extractors``
+# ``OCR_DISABLED_ERROR`` and ``SCANNED_PDF_OCR_DISABLED_ERROR``, which
+# this service cannot import). Matched exactly, as the indexer's own
+# re-queue query does; the stored error is never returned.
+OCR_DISABLED_ERRORS = (
+    "OCR disabled (INDEXER_OCR_ENABLED=false)",
+    "OCR disabled (INDEXER_OCR_ENABLED=false); scanned PDF",
+)
+
+# ``get_attachment``'s reader (#796). The stored text is read through
+# incremental blob I/O in blocks of this many bytes: SQLite's ``length``
+# and ``substr`` stop at an embedded NUL, which plain-text extraction
+# keeps, and a ``SELECT`` of the column loads the whole value, which is
+# unbounded when ``INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS=0`` turns the
+# extraction cap off.
+TEXT_READ_BLOCK_BYTES = 64 * 1024
+# UTF-8 continuation bytes: every other byte starts a character.
+_UTF8_CONTINUATION_BYTES = bytes(range(0x80, 0xC0))
+_UTF8_DECODER = codecs.getincrementaldecoder("utf-8")
+
+
+@dataclass
+class AttachmentText:
+    """One occurrence and a window of its stored extracted text, as
+    ``Database.get_attachment_text`` reads them.
+
+    ``window`` holds at most the requested number of code points from
+    ``offset`` (fewer when the text ends first) and ``total_chars``
+    counts the whole stored text; both are ``None`` unless the
+    extraction succeeded and stored text. ``ocr_disabled`` is true for
+    an ``unsupported`` result recorded because OCR was off.
+    """
+
+    record: AttachmentOccurrenceRecord
+    ocr_disabled: bool
+    window: str | None
+    total_chars: int | None
+
+
+def _read_text_window(blob, offset: int, chars: int) -> tuple[str, int]:
+    """The at most ``chars`` code points of UTF-8 ``blob`` starting at
+    code point ``offset``, and the number of code points in the whole of
+    it.
+
+    Reads ``TEXT_READ_BLOCK_BYTES`` at a time. Blocks are decoded only
+    until the window is full, so the bytes decoded are at most the
+    window's end plus one block, and memory holds one block and the
+    window; the rest is counted block by block (bytes that start a
+    character) and nothing of it is kept. A window that starts past the
+    end is empty.
+    """
+    decoder = _UTF8_DECODER()
+    decoded = 0
+    parts: list[str] = []
+    held = 0
+    while held < chars:
+        block = blob.read(TEXT_READ_BLOCK_BYTES)
+        if not block:
+            decoder.decode(b"", final=True)
+            return "".join(parts), decoded
+        text = decoder.decode(block)
+        if decoded + len(text) > offset:
+            start = max(offset - decoded, 0)
+            piece = text[start : start + chars - held]
+            parts.append(piece)
+            held += len(piece)
+        decoded += len(text)
+    # A character the last decoded block split is counted at its first
+    # byte, which the decoder holds; its other bytes are continuations.
+    total = decoded + (1 if decoder.getstate()[0] else 0)
+    while block := blob.read(TEXT_READ_BLOCK_BYTES):
+        total += len(block.translate(None, _UTF8_CONTINUATION_BYTES))
+    return "".join(parts), total
+
+
 def _row_to_occurrence(r) -> AttachmentOccurrenceRecord:
     filename, filename_clipped = _clipped_text(r["filename_head"])
     content_type, content_type_clipped = _clipped_text(r["content_type_head"])
@@ -1619,6 +1717,18 @@ class Database:
             _COUNT_FAILURE_LOG_SECS,
             first_msg="Keyword passage lookup failed; keeping vector order: %s",
             summary_msg="Keyword passage lookup failed in the last %ds: %s",
+        )
+        # A query with more distinct words than the ranking probes one by
+        # one (#1246) repeats per call too.
+        self._keyword_unranked = RateLimitedLog(
+            log,
+            _KEYWORD_UNRANKED_KEYS,
+            _COUNT_FAILURE_LOG_SECS,
+            first_msg=(
+                "Keyword passage ranking used the first 16 distinct query words; "
+                "later words only qualify a passage: %s"
+            ),
+            summary_msg="Keyword passage ranking capped in the last %ds: %s",
         )
         # Fail fast at startup with the same checks ``_connect`` runs
         # on every access. Catches a missing volume / typo'd
@@ -3072,50 +3182,31 @@ class Database:
             timings.count("degraded_chunk_vec", 1)
             return None
 
-    def _keyword_matched_chunks(self, query: str, thread_ids: list[str]) -> dict[str, set[str]]:
-        """Map each of ``thread_ids`` to its chunks whose text matches
-        ``query`` in ``message_chunks_fts`` (#858).
+    def _keyword_ranking(
+        self, query: str, chunks_by_thread: dict[str, list[ChunkResult]]
+    ) -> dict[str, tuple[int, ...]]:
+        """``_keyword_rank_keys`` of the fetched candidates, made visible.
 
-        Driven from the threads' chunks: ``CROSS JOIN`` fixes the join
-        order, so SQLite walks ``message_chunks`` by ``thread_id`` and
-        asks FTS5 only whether each chunk's ``rowid`` matches. With a
-        plain ``JOIN`` the planner drives from the FTS index instead and
-        reads every matching chunk in the mailbox. No ``bm25()``: its IDF
-        pass reads each phrase's whole doclist, so its cost grows with
-        the corpus whatever the ``LIMIT``. The work is bounded by the
-        surfaced threads' chunks, which the evidence fetch reads anyway
-        (``test_lookup_work_stays_flat_while_chunk_lane_grows``), so no
-        row cap is needed and no thread starves another.
-
-        Falls back to an empty map on any error, which keeps the
-        existing selection; the failure is a rate-limited WARNING (type
-        only) and ``degraded_keyword_chunks`` on the timing line.
+        A query with more distinct words than the ranking probes adds
+        ``keyword_units_unranked`` to the timing line and a rate-limited
+        WARNING. Any SQLite error falls back to an empty map, which keeps
+        the selection without a keyword slot; the failure is a
+        rate-limited WARNING (type only: the error can quote mail text)
+        and ``degraded_keyword_chunks`` on the timing line.
         """
-        fts_query = _sanitize_fts_query(query)
-        if not thread_ids or not fts_query:
-            return {}
-        placeholders = ",".join(["?"] * len(thread_ids))
-        sql = (
-            "SELECT c.thread_id, c.chunk_id "
-            "FROM message_chunks c "
-            "CROSS JOIN message_chunks_fts ON message_chunks_fts.rowid = c.fts_rowid "
-            f"WHERE c.thread_id IN ({placeholders}) "  # nosec B608
-            "AND message_chunks_fts MATCH ?"
-        )
         try:
-            rows = self._fetchall(sql, [*thread_ids, fts_query])
+            keys, unranked = _keyword_rank_keys(query, chunks_by_thread)
         except sqlite3.Error as e:
-            # Type only: the error can quote stored mail.
             name = type(e).__name__
             self._keyword_chunk_failures.record(
                 name if name in _KEYWORD_CHUNK_FAILURE_KEYS else "other"
             )
             timings.count("degraded_keyword_chunks", 1)
             return {}
-        matched: dict[str, set[str]] = {}
-        for r in rows:
-            matched.setdefault(r["thread_id"], set()).add(r["chunk_id"])
-        return matched
+        if unranked:
+            self._keyword_unranked.record(_KEYWORD_UNRANKED_KEYS[0])
+            timings.count("keyword_units_unranked", unranked)
+        return keys
 
     def get_query_evidence_chunks(
         self,
@@ -3127,22 +3218,21 @@ class Database:
         """Per-thread evidence for ``query_text``, as ``ask_mailbox`` sees it.
 
         Looks up which of the threads' attachments the query names
-        (``_matched_attachments``) and which of their chunks hold the
-        query's words (``_keyword_matched_chunks``), and passes both to
-        ``get_evidence_chunks_for_threads``, which orders each thread's
-        slice from them. ``hybrid_search(with_evidence=True)`` and the
-        thread-scoped ``get_evidence`` path both call this, so an audit
-        of one thread returns the passages ``ask_mailbox`` was given for
-        it (#461).
+        (``_matched_attachments``) and passes them and the query to
+        ``get_evidence_chunks_for_threads``, which ranks the fetched
+        chunks against the query's words (``_keyword_rank_keys``) and
+        orders each thread's slice from both.
+        ``hybrid_search(with_evidence=True)`` and the thread-scoped
+        ``get_evidence`` path both call this, so an audit of one thread
+        returns the passages ``ask_mailbox`` was given for it (#461).
         """
         matched_attachments = self._matched_attachments(query_text, thread_ids)
-        keyword_chunks = self._keyword_matched_chunks(query_text, thread_ids)
         return self.get_evidence_chunks_for_threads(
             thread_ids,
             embedding,
             per_thread_limit=per_thread_limit,
             matched_attachments=matched_attachments,
-            keyword_chunks=keyword_chunks,
+            keyword_query=query_text,
         )
 
     def get_evidence_chunks_for_threads(
@@ -3151,7 +3241,7 @@ class Database:
         embedding: list[float],
         per_thread_limit: int = 3,
         matched_attachments: dict[str, list[str]] | None = None,
-        keyword_chunks: dict[str, set[str]] | None = None,
+        keyword_query: str | None = None,
     ) -> dict[str, list[ChunkResult]]:
         """Return up to ``per_thread_limit`` best-matching chunks per thread.
 
@@ -3186,19 +3276,22 @@ class Database:
         higher dense similarity. Remembering only the thread let the cap
         keep unrelated attachments and drop the one that matched.
 
-        ``keyword_chunks``: per thread, the chunks whose text matches the
-        query (#858). Two slots lead each thread's slice, then the rest
-        in the order above:
+        ``keyword_query``: the query whose words rank the fetched chunks
+        (#858, #1246; ``_keyword_rank_keys``). A chunk holding any of its
+        words is keyword-matched. Two slots lead each thread's slice,
+        then the rest in the order above:
 
         1. the matched attachments' first chunk, when one matched;
-        2. the keyword-matched chunk nearest the query (ties by
-           ``chunk_id``), unless slot 1 already is one, in which case
-           the two collapse into that slot.
+        2. the keyword-matched chunk whose matched words are rarest in
+           its thread, then nearest the query, then by ``chunk_id``,
+           unless that is the chunk in slot 1, in which case the two
+           collapse into that slot.
 
         So the matched attachment can no longer fill every slot, and a
-        long thread keeps the passage holding the query's word even when
-        other chunks are nearer. Each chunk's ``selected_by`` says why it
-        qualified: ``keyword_match`` wins over ``attachment_match``.
+        long thread keeps the passage holding the query's rarest word
+        even when other chunks are nearer or hold its common words. Each
+        chunk's ``selected_by`` says why it qualified: ``keyword_match``
+        wins over ``attachment_match``.
         """
         if not thread_ids:
             return {}
@@ -3267,11 +3360,12 @@ class Database:
                 all_chunks[r["thread_id"]].append(_row_to_chunk_result(r))
 
         matched_by_thread = matched_attachments or {}
-        keyword_by_thread = keyword_chunks or {}
+        # Ranked from the rows just fetched, so the keyword slot sees
+        # exactly the chunks the slice can hold.
+        lexical = self._keyword_ranking(keyword_query, all_chunks) if keyword_query else {}
         grouped: dict[str, list[ChunkResult]] = {}
         for tid, chunks in all_chunks.items():
             matched = matched_by_thread.get(tid)
-            lexical = keyword_by_thread.get(tid, set())
             if matched:
                 # Matched attachments by match strength, then other
                 # attachments, then body; the stable sort keeps
@@ -4441,15 +4535,7 @@ class Database:
                 "SELECT a.attachment_occurrence_id AS occ, m.effective_at AS clock, "
                 f"a.claimant_id AS cid {_ATTACHMENT_FROM} WHERE {page_where_sql} "
                 "ORDER BY clock DESC, cid DESC, occ DESC LIMIT ? ) "
-                "SELECT a.attachment_occurrence_id, a.attachment_id, a.extractor_module, "
-                "a.claimant_id, m.message_id, m.thread_id, "
-                f"substr(CAST(a.filename AS BLOB), 1, {_ATTACHMENT_META_BYTES + 1}) "
-                "AS filename_head, "
-                f"substr(CAST(a.content_type AS BLOB), 1, {_ATTACHMENT_META_BYTES + 1}) "
-                "AS content_type_head, "
-                "a.size_bytes, m.folder, m.sent_at, m.occurred_at, m.effective_at, "
-                f"{_SOURCE_COLUMNS}, e.extraction_status, e.extractor, e.extracted_at, "
-                "e.ocr_pages_skipped "
+                f"SELECT {_OCCURRENCE_COLUMNS} "
                 "FROM page JOIN attachments a ON a.attachment_occurrence_id = page.occ "
                 "JOIN messages m ON m.claimant_id = a.claimant_id "
                 "LEFT JOIN attachment_extractions e ON e.attachment_id = a.attachment_id "
@@ -4472,6 +4558,49 @@ class Database:
             next_cursor=(
                 _encode_attachment_cursor(digest, records[-1], next_offset) if has_more else None
             ),
+        )
+
+    def get_attachment_text(
+        self, attachment_occurrence_id: str, offset: int, window_chars: int
+    ) -> AttachmentText | None:
+        """One attachment occurrence, whatever its message's folder, and
+        ``window_chars`` code points of its stored extracted text from
+        ``offset``, read in one snapshot (#796). ``None`` when no
+        occurrence has the ID.
+
+        The text is read only for a ``success`` extraction that stored
+        text, through a read-only ``blobopen`` on the extraction row,
+        looked up in the same read transaction; no query selects the
+        column (``_read_text_window``).
+        """
+        with closing(self._connect()) as conn:
+            conn.execute("BEGIN")
+            # ``typeof`` reads the column's type from the record header,
+            # not its value.
+            row = conn.execute(
+                f"SELECT {_OCCURRENCE_COLUMNS}, e.rowid AS extraction_rowid, "  # nosec B608
+                "typeof(e.extracted_text) AS text_type, "
+                "COALESCE(e.extraction_error IN (?, ?), 0) AS ocr_disabled "
+                f"{_ATTACHMENT_FROM} WHERE a.attachment_occurrence_id = ?",
+                (*OCR_DISABLED_ERRORS, attachment_occurrence_id),
+            ).fetchone()
+            if row is None:
+                return None
+            window = total = None
+            if row["extraction_status"] == "success" and row["text_type"] == "text":
+                with conn.blobopen(
+                    "attachment_extractions",
+                    "extracted_text",
+                    row["extraction_rowid"],
+                    readonly=True,
+                ) as blob:
+                    window, total = _read_text_window(blob, offset, window_chars)
+            conn.rollback()
+        return AttachmentText(
+            record=_row_to_occurrence(row),
+            ocr_disabled=bool(row["ocr_disabled"]) and row["extraction_status"] == "unsupported",
+            window=window,
+            total_chars=total,
         )
 
     # -------------------------------------------------------------------------
@@ -4498,22 +4627,120 @@ class Database:
 
 
 def _lead_with_keyword_chunk(
-    ordered: list[ChunkResult], named: set[str], lexical: set[str]
+    ordered: list[ChunkResult], named: set[str], lexical: dict[str, tuple[int, ...]]
 ) -> list[ChunkResult]:
     """``ordered`` with its two reserved slots first (#858): the named
     attachments' representative (``ordered[0]`` when it belongs to one),
-    then the keyword-matched chunk nearest the query, ties by
-    ``chunk_id``, unless the representative is itself keyword-matched.
+    then the keyword-matched chunk with the lowest rarity key in
+    ``lexical`` (``_keyword_rank_keys``), then the nearest, then by
+    ``chunk_id``. The two collapse into one slot only when they are the
+    same chunk (#1246).
     """
     head = ordered[:1] if ordered and ordered[0].attachment_id in named else []
-    if not any(c.chunk_id in lexical for c in head):
-        candidates = [c for c in ordered if c.chunk_id in lexical]
-        if candidates:
-            head.append(min(candidates, key=lambda c: (c.score, c.chunk_id)))
+    candidates = [c for c in ordered if c.chunk_id in lexical]
+    if candidates:
+        winner = min(candidates, key=lambda c: (lexical[c.chunk_id], c.score, c.chunk_id))
+        if all(c.chunk_id != winner.chunk_id for c in head):
+            head.append(winner)
     if not head:
         return ordered
     chosen = {c.chunk_id for c in head}
     return head + [c for c in ordered if c.chunk_id not in chosen]
+
+
+def _scratch_connection() -> sqlite3.Connection:
+    """A private in-memory database for the keyword passage ranking
+    (#1246). The mailbox connection is ``query_only``, which refuses
+    even a temporary virtual table."""
+    return sqlite3.connect(":memory:")
+
+
+def _keyword_rank_keys(
+    query: str, chunks_by_thread: dict[str, list[ChunkResult]]
+) -> tuple[dict[str, tuple[int, ...]], int]:
+    """Rank the fetched candidate chunks by how rare, in their own
+    thread, the query words they hold are (#1246).
+
+    Returns a key for each chunk holding any of the query's words, and
+    the number of distinct words beyond the first
+    ``_KEYWORD_RANKED_UNITS`` (they only qualify a chunk).
+
+    The candidates' text goes into a contentless FTS5 table with the
+    chunk index's tokenizer (``porter unicode61``) on a scratch
+    in-memory connection, so a word matches a candidate here exactly
+    when it matches that chunk in ``message_chunks_fts``: the indexer
+    writes the same text to both. The work is the candidates' text,
+    which the evidence fetch has already read, and at most
+    ``_KEYWORD_RANKED_UNITS`` + 1 probes of it, whatever the mailbox
+    holds (``test_lookup_work_stays_flat_while_chunk_lane_grows``).
+    No ``bm25()`` and no mailbox index: either grows with the corpus.
+
+    The sanitizer's words are deduplicated by the tokenizer's own token
+    sequence (``invoices`` and ``Invoice`` are one word), first
+    occurrence kept; a word with no token matches nothing and is
+    dropped. Each of the first ``_KEYWORD_RANKED_UNITS`` is one quoted
+    ``MATCH`` probe; the rest go into one OR probe.
+
+    Within a thread of ``n`` candidates, a word's document frequency is
+    how many of them hold it; a word every candidate holds says nothing
+    and is left out of the key, though it still qualifies. A chunk's key
+    is the frequencies of the words it holds, ascending, padded to
+    ``_KEYWORD_RANKED_UNITS`` with ``n + 1``, so the rarest word decides
+    first, then the second rarest ([2, 3] before [2, 9]), and a chunk
+    holding only uninformative or unranked words ties at the full
+    padding, leaving the choice to vector distance as before.
+    """
+    units = list(dict.fromkeys(_fts_query_units(query)))
+    candidates = [c for chunks in chunks_by_thread.values() for c in chunks]
+    if not units or not candidates:
+        return {}, 0
+    with closing(_scratch_connection()) as scratch:
+        scratch.execute("CREATE VIRTUAL TABLE units USING fts5(u, tokenize='porter unicode61')")
+        scratch.execute("CREATE VIRTUAL TABLE unit_tokens USING fts5vocab(units, 'instance')")
+        scratch.executemany("INSERT INTO units (rowid, u) VALUES (?, ?)", list(enumerate(units)))
+        tokens: dict[int, list[str]] = {}
+        for doc, term in scratch.execute("SELECT doc, term FROM unit_tokens ORDER BY doc, offset"):
+            tokens.setdefault(doc, []).append(term)
+        distinct: dict[tuple[str, ...], str] = {}
+        for i, unit in enumerate(units):
+            if i in tokens:
+                distinct.setdefault(tuple(tokens[i]), unit)
+        probes = list(distinct.values())
+        ranked = probes[:_KEYWORD_RANKED_UNITS]
+        unranked = probes[_KEYWORD_RANKED_UNITS:]
+
+        scratch.execute(
+            "CREATE VIRTUAL TABLE candidates USING fts5(text, content='', "
+            "tokenize='porter unicode61')"
+        )
+        scratch.executemany(
+            "INSERT INTO candidates (rowid, text) VALUES (?, ?)",
+            [(i, c.text) for i, c in enumerate(candidates)],
+        )
+        probe = "SELECT rowid FROM candidates WHERE candidates MATCH ?"
+        hits = [{row[0] for row in scratch.execute(probe, (f'"{unit}"',))} for unit in ranked]
+        qualified: set[int] = set()
+        if unranked:
+            qualified = {
+                row[0] for row in scratch.execute(probe, (" OR ".join(f'"{u}"' for u in unranked),))
+            }
+
+    keys: dict[str, tuple[int, ...]] = {}
+    start = 0
+    for chunks in chunks_by_thread.values():
+        n = len(chunks)
+        rows = range(start, start + n)
+        start += n
+        frequencies = [sum(1 for i in rows if i in hit) for hit in hits]
+        for i, chunk in zip(rows, chunks, strict=True):
+            held = [df for df, hit in zip(frequencies, hits, strict=True) if i in hit]
+            if not held and i not in qualified:
+                continue
+            informative = sorted(df for df in held if df < n)
+            keys[chunk.chunk_id] = tuple(
+                informative + [n + 1] * (_KEYWORD_RANKED_UNITS - len(informative))
+            )
+    return keys, len(unranked)
 
 
 def _has_valid_distance(row: sqlite3.Row) -> bool:
