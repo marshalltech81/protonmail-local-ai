@@ -881,9 +881,10 @@ written by `apply_attachment_writes` in the phase-2c transaction that
 writes the occurrence's chunks, so they roll back with them.
 
 - `0` for a `failed`, `unsupported` (including "OCR disabled") or
-  `too_large` result, and for a payload a parse cap emptied
-  (`Attachment.payload_complete`, set when `_attachment_payload` counts
-  a `PARSE_CAPS` name).
+  `too_large` result, and for a container attachment whose body was not
+  serialized (`Attachment.payload_complete`: `_attachment_payload` kept
+  the empty payload after a parse cap, a failure, or for a container
+  nested inside another attachment).
 - For a `success` or `empty` result, the result's own
   `text_complete`, which the dispatcher sets: `0` when the attempt lost
   text (any `extractor_caps` cap, the `max_extracted_chars` cut, the

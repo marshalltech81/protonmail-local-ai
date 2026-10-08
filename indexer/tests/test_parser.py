@@ -5451,15 +5451,16 @@ class TestParticipantNames:
         assert elapsed < 30
 
 
-# #1242: the attachments whose payload a cap emptied, per cap shape (one
-# each; none for a shape that drops no attachment payload). An emptied
-# payload is not the attachment's, so its extracted text never counts as
-# complete.
+# #1242: the container attachments left unserialized, per cap shape (none
+# for a shape that drops no attachment payload). An emptied payload is
+# not the attachment's, so its extracted text never counts as complete.
 _PAYLOAD_LOSS = {
     "attached_depth": 1,
     "attached_fields": 1,
     "attached_depth_decoded": 1,
-    "attached_depth_decode_chain": 1,
+    # The 19 nested containers kept empty by design (only the top one is
+    # serialized), plus the one the depth cap stopped.
+    "attached_depth_decode_chain": 20,
     "transport_decode_base64": 1,
     "transport_decode_8bit": 1,
     "decoded_bytes": 1,
@@ -5482,3 +5483,28 @@ def test_an_attachment_with_its_payload_is_complete(tmp_path):
     msg = parse_email(path)
     assert msg is not None
     assert [(a.payload, a.payload_complete) for a in msg.attachments] == [(b"SYNTHETIC_TEXT", True)]
+
+
+def test_a_nested_container_left_unserialized_is_incomplete(tmp_path):
+    """Review round 1 on #1286: a container inside an attachment keeps
+    the empty payload by design (only the outermost is serialized), with
+    no cap counted. Under an extractable label (``.txt``) its empty bytes
+    would read as a complete empty text, so it is marked incomplete; the
+    outer container, serialized, is complete."""
+    inner = (
+        b"From: a@example.test\r\n"
+        b'Content-Type: multipart/mixed; boundary="i"\r\n\r\n'
+        b"--i\r\nContent-Type: text/plain\r\n\r\nINNER_BODY\r\n"
+        b"--i\r\nContent-Type: message/rfc822\r\n" + _TXT_FILENAME + b"\r\n"
+        b"From: b@example.test\r\n\r\nSYNTHETIC_TEXT_MARKER\r\n"
+        b"--i--\r\n"
+    )
+    path = tmp_path / "nested.eml"
+    path.write_bytes(_with_attachment(b"Content-Type: message/rfc822\r\n", inner))
+    msg = parse_email(path)
+    assert msg is not None
+    assert [(a.payload != b"", a.payload_complete) for a in msg.attachments] == [
+        (True, True),
+        (False, False),
+    ]
+    assert msg.parse_caps == {}
