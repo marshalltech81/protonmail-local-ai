@@ -1662,6 +1662,25 @@ class Database:
         return [r["filepath"] for r in rows]
 
     @_synchronized
+    def find_unrecorded_completeness_attachments(self) -> list[sqlite3.Row]:
+        """Every attachment occurrence whose cached ``success`` or
+        ``empty`` extraction has no completeness record (#1285), with its
+        message's Maildir filepath, the row's status and extractor stamp
+        and its ``text_complete`` (NULL)."""
+        return self._conn.execute(
+            """
+            SELECT m.filepath, e.extraction_status, e.extractor, e.text_complete
+            FROM attachment_extractions e
+            JOIN attachments a ON a.attachment_id = e.attachment_id
+                AND a.extractor_module = e.extractor_module
+            JOIN message_thread_map m ON m.claimant_id = a.claimant_id
+            WHERE e.text_complete IS NULL
+              AND e.extraction_status IN ('success', 'empty')
+            ORDER BY m.filepath
+            """
+        ).fetchall()
+
+    @_synchronized
     def find_ocr_disabled_attachments(self) -> list[sqlite3.Row]:
         """Every attachment occurrence whose cached extraction is an "OCR
         disabled" result, with its message's Maildir filepath, filename,

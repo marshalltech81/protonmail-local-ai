@@ -20,10 +20,21 @@ ALTER TABLE attachments ADD COLUMN text_extractor TEXT;
 ALTER TABLE attachment_extractions ADD COLUMN text_complete INTEGER
     CHECK (text_complete IN (0, 1));
 
--- No defaults and no reparse: every existing row starts NULL. A reparse
--- would serve the cached results, which carry no completeness record
--- before this version, so it could only turn NULL into 0 for
--- occurrences that are never complete anyway; both read as "can't
--- tell". An occurrence using a cached result stays NULL until those
--- bytes are extracted again (a version bump, a retried failure, OCR
--- turned on, a raised size cap) and its message is processed again.
+-- No defaults: every existing row starts NULL, and the reparse below
+-- fills them (#1285). It re-reads each message, so the parser's payload
+-- loss is known again, and a ``success`` or ``empty`` cached result with
+-- no record (every one cached before this version) is re-extracted once
+-- and gets one; chunks whose text is unchanged keep their IDs, so
+-- nothing is re-embedded for them. An ``-ocr`` result is kept while OCR
+-- is off (its text could only be replaced by "OCR disabled"); the
+-- startup sweep re-queues its messages once OCR is on. A dead-lettered
+-- job is left as it is, so its occurrences stay NULL until
+-- ``make requeue-dead``.
+INSERT INTO indexing_jobs
+    (filepath, reason, status, attempts, created_at, updated_at, next_attempt_at)
+SELECT filepath, 'reparse', 'queued', 0,
+       strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'),
+       strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'),
+       strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+FROM indexed_files WHERE true
+ON CONFLICT(filepath) DO NOTHING;

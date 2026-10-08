@@ -413,6 +413,21 @@ def occurrence_text_complete(
     return extraction_complete
 
 
+def completeness_unrecorded(
+    status: str, extractor: str | None, text_complete: object, *, ocr_enabled: bool
+) -> bool:
+    """Whether a cached result is refreshed for want of a completeness
+    record (#1285): a ``success`` or ``empty`` row with none (cached
+    before schema v6). A fresh result always records one, so a refreshed
+    row is served from then on. An ``-ocr`` row is kept while OCR is off,
+    as ``extractors.stale_extractor_module`` keeps a stale one: a refresh
+    could only replace its text with "OCR disabled". The startup sweep
+    re-queues by the same predicate."""
+    if text_complete is not None or status not in {STATUS_SUCCESS, STATUS_EMPTY}:
+        return False
+    return ocr_enabled or not (extractor or "").partition("@")[0].endswith("-ocr")
+
+
 def _resolve_extracted_text(
     *,
     attachment: Attachment,
@@ -473,9 +488,16 @@ def _resolve_extracted_text(
     # A row written by an older version of a since-fixed extractor would
     # otherwise be served forever: it is re-extracted, and only by an
     # occurrence that selects its module.
+    # A row with no completeness record is re-extracted once (#1285).
     if (
         cached is not None
         and not is_stale_extractor(cached["extractor"], ocr_enabled=ocr_enabled)
+        and not completeness_unrecorded(
+            cached["extraction_status"],
+            cached["extractor"],
+            cached["text_complete"],
+            ocr_enabled=ocr_enabled,
+        )
         and _cache_hit_short_circuits(cached, attachment, module, ocr_enabled, max_bytes)
     ):
         # Successful hits return the stored text; non-success hits

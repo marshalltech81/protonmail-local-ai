@@ -518,16 +518,25 @@ def _store_occurrence(db: Database, *, claimant_id: str, occurrence: str, attach
 class TestMigrationV6:
     """#1242: v5 -> v6 adds per-occurrence attachment text completeness
     and the cached result's, NULL (not assessed) on every existing row,
-    and queues nothing: a reparse would serve the cached results, which
-    carry no record."""
+    and queues the reparse (#1285): it re-reads each message, and a
+    cached result with no record is re-extracted once."""
 
     def test_v5_database_migrates_to_the_fresh_v6_shape(self, tmp_path, caplog):
         caplog.set_level("INFO")
         db = Database(tmp_path / "v5.db")
         msg = make_message(message_id="old@x")
+        pending = make_message(message_id="pending@x", filepath="/maildir/INBOX/cur/pending")
         db.upsert_thread(make_thread(messages=[msg]), FAKE_EMBEDDING)
+        db.upsert_thread(make_thread(messages=[pending], thread_id="t-pending"), FAKE_EMBEDDING)
         _v5_from_fresh(db)
         _store_occurrence(db, claimant_id=msg.claimant_id, occurrence="occ-1", attachment_id="h1")
+        # A job still pending from the v5 reparse keeps its row.
+        db._conn.execute(
+            "INSERT INTO indexing_jobs (filepath, reason, status, attempts, created_at, "
+            "updated_at, next_attempt_at) VALUES (?, 'reparse', 'retrying', 2, "
+            "'2026-01-01', '2026-01-01', '2026-01-02')",
+            (pending.filepath,),
+        )
         db._conn.commit()
         db.close()
         migrated = Database(tmp_path / "v5.db")
@@ -547,7 +556,14 @@ class TestMigrationV6:
                 "SELECT text_complete, extracted_text FROM attachment_extractions"
             ).fetchone()
             assert tuple(cached) == (None, "SYNTHETIC_V6_MARKER")
-            assert migrated._conn.execute("SELECT COUNT(*) FROM indexing_jobs").fetchone()[0] == 0
+            jobs = migrated._conn.execute(
+                "SELECT filepath, reason, status, attempts, next_attempt_at FROM indexing_jobs "
+                "ORDER BY filepath"
+            ).fetchall()
+            by_path = {r["filepath"]: tuple(r)[1:] for r in jobs}
+            assert by_path[pending.filepath] == ("reparse", "retrying", 2, "2026-01-02")
+            assert by_path[msg.filepath][:3] == ("reparse", "queued", 0)
+            assert len(by_path) == 2
         finally:
             migrated.close()
             fresh.close()

@@ -53,6 +53,7 @@ from .attachment_indexing import (
     apply_attachment_writes,
     attachment_outcomes,
     attachment_outcomes_degraded,
+    completeness_unrecorded,
     format_attachment_outcomes,
     prepare_attachment_writes,
     record_committed_outcomes,
@@ -2582,7 +2583,10 @@ def _requeue_stale_extractions(db: Database, queue: IndexingQueue) -> int:
     ``INDEXER_ATTACHMENT_MAX_BYTES`` (the operator raised the cap) is
     re-extracted, so every message using it is re-queued; the re-run
     rewrites the row, and bytes still over the cap are never re-queued
-    (#693).
+    (#693). A ``success`` or ``empty`` row with no completeness record
+    (cached before schema v6) is re-extracted on reprocess, so its
+    messages are re-queued too, except an ``-ocr`` row while OCR is off
+    (``completeness_unrecorded``, #1285).
     Like the zero-vector recovery sweep, files already queued or
     dead-lettered are left alone. Skipped when attachment extraction is
     disabled, since the drain would not re-stamp the rows.
@@ -2618,6 +2622,20 @@ def _requeue_stale_extractions(db: Database, queue: IndexingQueue) -> int:
         for row in db.find_too_large_attachments()
         if too_large_fits(row["size_bytes"], INDEXER_ATTACHMENT_MAX_BYTES)
     )
+    # A cached result with no completeness record (#1285): the reparse
+    # the v6 migration queued covers most; this catches the ``-ocr`` rows
+    # kept while OCR was off, once it is on.
+    unrecorded = {
+        row["filepath"]
+        for row in db.find_unrecorded_completeness_attachments()
+        if completeness_unrecorded(
+            row["extraction_status"],
+            row["extractor"],
+            row["text_complete"],
+            ocr_enabled=INDEXER_OCR_ENABLED,
+        )
+    }
+    filepaths.update(unrecorded)
     if INDEXER_OCR_ENABLED:
         filepaths.update(
             row["filepath"]
@@ -2630,6 +2648,7 @@ def _requeue_stale_extractions(db: Database, queue: IndexingQueue) -> int:
             )
         )
     re_enqueued = 0
+    re_enqueued_unrecorded = 0
     skipped_dead = 0
     for filepath in sorted(filepaths):
         if queue.has_pending_row(filepath):
@@ -2639,15 +2658,18 @@ def _requeue_stale_extractions(db: Database, queue: IndexingQueue) -> int:
             continue
         queue.enqueue(filepath, REASON_REEXTRACT)
         re_enqueued += 1
+        re_enqueued_unrecorded += filepath in unrecorded
     if re_enqueued or skipped_dead:
         # A dead-lettered message keeps its stale attachment text (#874).
         log.log(
             logging.WARNING if skipped_dead else logging.INFO,
-            "re-queued %d message(s) whose attachments were extracted by an older "
-            "extractor version (%s), skipped while OCR was off, had no extractor, "
-            "or now fit under INDEXER_ATTACHMENT_MAX_BYTES; skipped %d dead-lettered "
+            "re-queued %d message(s) (%d for a missing text-completeness record) whose "
+            "attachments were extracted by an older extractor version (%s), skipped "
+            "while OCR was off, had no extractor, or now fit under "
+            "INDEXER_ATTACHMENT_MAX_BYTES; skipped %d dead-lettered "
             "(run make requeue-dead to refresh them).",
             re_enqueued,
+            re_enqueued_unrecorded,
             ", ".join(sorted(stale)) or "none",
             skipped_dead,
         )

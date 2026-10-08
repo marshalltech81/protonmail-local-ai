@@ -3841,6 +3841,91 @@ class TestRequeueStaleExtractions:
             db._conn.execute("SELECT text_complete, text_extractor FROM attachments").fetchone()
         )
 
+    def test_a_reparse_refreshes_an_unrecorded_row_once(self, tmp_path, monkeypatch):
+        """#1285: after the v6 migration's reparse, a cached row with no
+        completeness record is re-extracted once and the occurrence gets
+        its flag; a second reparse makes no extraction call."""
+        from src import attachment_indexing
+        from src.queue import REASON_REPARSE
+
+        maildir = tmp_path / "maildir"
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        path = maildir / "INBOX" / "cur" / "contract.eml"
+        self._write_docx_eml(path, "contract@example.com")
+        db = Database(tmp_path / "mail.db")
+        queue = _make_queue(db)
+        queue.enqueue(str(path), REASON_INITIAL_SCAN)
+        self._drain(db, queue)
+        # The state a v5 index is left in by the migration.
+        db._conn.execute("UPDATE attachment_extractions SET text_complete = NULL")
+        db._conn.execute("UPDATE attachments SET text_complete = NULL, text_extractor = NULL")
+        db._conn.commit()
+        calls: list[str] = []
+        real = attachment_indexing.extract_attachment
+
+        def counting(**kwargs):
+            calls.append(kwargs["filename"])
+            return real(**kwargs)
+
+        monkeypatch.setattr(attachment_indexing, "extract_attachment", counting)
+        assert queue.enqueue_reparse() == 1
+        self._drain(db, queue)
+        assert len(calls) == 1
+        assert self._occurrence(db) == (1, "docx@7")
+        assert queue.enqueue_reparse() == 1
+        self._drain(db, queue)
+        assert len(calls) == 1
+        assert self._occurrence(db) == (1, "docx@7")
+        assert REASON_REPARSE == "reparse"
+
+    @pytest.mark.parametrize("ocr_enabled, requeued", [(False, 0), (True, 1)])
+    def test_the_sweep_requeues_unrecorded_ocr_rows_once_ocr_is_on(
+        self, tmp_path, monkeypatch, caplog, ocr_enabled, requeued
+    ):
+        """#1285: an ``-ocr`` row with no record is kept while OCR is off;
+        once OCR is on, the startup sweep re-queues its messages so the
+        row is refreshed. The count is on the sweep's line."""
+        caplog.set_level(logging.INFO)
+        maildir = tmp_path / "SYNTHETIC_PATH_MARKER"
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        path = maildir / "INBOX" / "cur" / "contract.eml"
+        self._write_docx_eml(path, "contract@example.com")
+        db = Database(tmp_path / "mail.db")
+        queue = _make_queue(db)
+        queue.enqueue(str(path), REASON_INITIAL_SCAN)
+        self._drain(db, queue)
+        db._conn.execute(
+            "UPDATE attachment_extractions SET text_complete = NULL, extractor = 'docx-ocr@7'"
+        )
+        db._conn.commit()
+        monkeypatch.setattr(main, "INDEXER_OCR_ENABLED", ocr_enabled)
+        caplog.clear()
+        assert main._requeue_stale_extractions(db, queue) == requeued
+        lines = [r.getMessage() for r in caplog.records if "re-queued" in r.getMessage()]
+        if requeued:
+            [line] = lines
+            assert f"{requeued} for a missing text-completeness record" in line
+        else:
+            assert lines == []
+        assert "SYNTHETIC_PATH_MARKER" not in caplog.text
+
+    def test_the_sweep_leaves_recorded_and_pending_rows_alone(self, tmp_path, monkeypatch):
+        maildir = tmp_path / "maildir"
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        path = maildir / "INBOX" / "cur" / "contract.eml"
+        self._write_docx_eml(path, "contract@example.com")
+        db = Database(tmp_path / "mail.db")
+        queue = _make_queue(db)
+        queue.enqueue(str(path), REASON_INITIAL_SCAN)
+        self._drain(db, queue)
+        # Recorded: nothing to refresh.
+        assert main._requeue_stale_extractions(db, queue) == 0
+        # Unrecorded but already queued (the migration's reparse): kept.
+        db._conn.execute("UPDATE attachment_extractions SET text_complete = NULL")
+        db._conn.commit()
+        assert queue.enqueue_reparse() == 1
+        assert main._requeue_stale_extractions(db, queue) == 0
+
     @pytest.mark.parametrize("extraction_enabled", [True, False])
     def test_a_version_bump_clears_text_completeness_until_republished(
         self, tmp_path, monkeypatch, caplog, extraction_enabled
@@ -4294,7 +4379,11 @@ class TestRequeueOcrDisabledExtractions:
 
         extractor = MagicMock(
             return_value=ExtractionResult(
-                status=STATUS_SUCCESS, extractor="image-ocr@3", text="scanned words", error=None
+                status=STATUS_SUCCESS,
+                extractor="image-ocr@3",
+                text="scanned words",
+                error=None,
+                text_complete=True,
             )
         )
         monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
@@ -4462,7 +4551,11 @@ class TestRequeueNewlyDispatchedExtensions:
 
         extractor = MagicMock(
             return_value=ExtractionResult(
-                status=STATUS_SUCCESS, extractor="image-ocr@3", text="photo words", error=None
+                status=STATUS_SUCCESS,
+                extractor="image-ocr@3",
+                text="photo words",
+                error=None,
+                text_complete=True,
             )
         )
         monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
@@ -4569,7 +4662,11 @@ class TestRequeueLegacyOle2Rows:
 
         extractor = MagicMock(
             return_value=ExtractionResult(
-                status=STATUS_SUCCESS, extractor="doc@1", text="legacy words", error=None
+                status=STATUS_SUCCESS,
+                extractor="doc@1",
+                text="legacy words",
+                error=None,
+                text_complete=True,
             )
         )
         monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
@@ -4764,7 +4861,11 @@ class TestLegacyPptThroughThePipeline:
         }
         extractor = MagicMock(
             return_value=ExtractionResult(
-                status=STATUS_SUCCESS, extractor="ppt@1", text="slide words", error=None
+                status=STATUS_SUCCESS,
+                extractor="ppt@1",
+                text="slide words",
+                error=None,
+                text_complete=True,
             )
         )
         monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
