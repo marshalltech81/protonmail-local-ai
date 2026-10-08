@@ -288,6 +288,21 @@ def _decode_lost_bytes(part: email.message.Message) -> bool:
     return any(isinstance(d, _DECODE_LOSS_DEFECTS) for d in part.defects)
 
 
+def _base64_transport_lost(data: bytes) -> bool:
+    """Whether a container's base64 transport text loses bytes when
+    decoded (#1242, review round 4 on #1286). ``_decode_transport_form``
+    decodes it leniently (``base64.b64decode`` drops characters outside
+    the alphabet), and its bytes are kept; this decodes the same text once
+    more through the stdlib leaf decoder, only to read the defects it
+    records, and discards that output. One linear pass, run only on a
+    transport the decodable-bytes budget already admitted."""
+    pseudo = email.message.Message()
+    pseudo["Content-Transfer-Encoding"] = "base64"
+    pseudo.set_payload(data.decode("ascii", "surrogateescape"))
+    pseudo.get_payload(decode=True)
+    return _decode_lost_bytes(pseudo)
+
+
 @dataclass
 class Attachment:
     """One MIME attachment from a message.
@@ -944,6 +959,7 @@ def _attachment_payload(
     caps: Counter[str],
     payload_read: bool,
     decode_depth: int = 0,
+    transport_lost: list[bool] | None = None,
 ) -> tuple[bytes, email.message.Message | None]:
     """The bytes an attachment carries, and, for a transfer-encoded
     attached email, its decoded tree to traverse (else ``None``).
@@ -977,6 +993,10 @@ def _attachment_payload(
     its ``PARSE_CAPS`` name: always when a decoded tree is left unwalked,
     and for an emptied payload only when ``payload_read`` (an extractor
     would read this attachment's payload).
+
+    ``transport_lost`` (when given) gets ``True`` appended when a base64
+    transport decoded but lost bytes (``_base64_transport_lost``); the
+    returned bytes are the lenient decode's either way (#1242).
     """
     if not part.is_multipart():
         return _decoded_payload(part), None
@@ -1012,6 +1032,12 @@ def _attachment_payload(
         if decoded is None:
             caps["transport_decode"] += 1
             return b"", None
+        if (
+            transport_lost is not None
+            and encoding == "base64"
+            and _base64_transport_lost(transport)
+        ):
+            transport_lost.append(True)
         # From here the decoded container is the part: the same depth
         # check, serialization and traversal as an identity-encoded one.
         part = decoded
@@ -1286,6 +1312,7 @@ def _extract_body_and_attachments(
         is_attachment = _is_attachment(part, filename)
         decoded: email.message.Message | None = None
         if is_attachment:
+            transport_lost: list[bool] = []
             payload, decoded = _attachment_payload(
                 part,
                 serialize_containers=not in_attachment,
@@ -1293,6 +1320,7 @@ def _extract_body_and_attachments(
                 caps=caps,
                 payload_read=resolved_extractor_module(ct, filename or "unnamed") is not None,
                 decode_depth=decode_depth,
+                transport_lost=transport_lost,
             )
             attachments.append(
                 Attachment(
@@ -1302,10 +1330,14 @@ def _extract_body_and_attachments(
                     payload=payload,
                     content_hash=hashlib.sha256(payload).hexdigest(),
                     # A container's payload is its serialized body; the
-                    # empty bytes mean it was not serialized. A leaf's is
-                    # its decoded bytes, read after the decode (#1242).
+                    # empty bytes mean it was not serialized, and a lossy
+                    # base64 transport means it is not the sender's. A
+                    # leaf's is its decoded bytes, read after the decode
+                    # (#1242).
                     payload_complete=(
-                        bool(payload) if part.is_multipart() else not _decode_lost_bytes(part)
+                        bool(payload) and not transport_lost
+                        if part.is_multipart()
+                        else not _decode_lost_bytes(part)
                     ),
                 )
             )

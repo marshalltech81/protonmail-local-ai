@@ -5560,3 +5560,83 @@ def test_a_defect_on_a_serialized_container_does_not_matter(tmp_path):
     msg = parse_email(path)
     assert msg is not None
     assert [(a.payload != b"", a.payload_complete) for a in msg.attachments] == [(True, True)]
+
+
+class TestContainerTransportDecodeLoss:
+    """Review round 4 on #1286: a base64 attached email decoded leniently
+    (``_decode_transport_form`` keeps today's decoder and bytes) is checked
+    once more through the stdlib leaf decoder, as a diagnostic only; an
+    invalid-character or invalid-length defect marks the container's
+    payload incomplete. Quoted-printable is not checked (#1288)."""
+
+    _INNER = b"From: a@example.test\r\nSubject: s\r\n\r\nSYNTHETIC_TEXT_MARKER body text\r\n"
+
+    def _parse(self, tmp_path, monkeypatch, headers: bytes, body: bytes):
+        from src import parser as parser_module
+
+        calls: list[int] = []
+        real = parser_module._base64_transport_lost
+
+        def counting(data):
+            calls.append(len(data))
+            return real(data)
+
+        monkeypatch.setattr(parser_module, "_base64_transport_lost", counting)
+        path = tmp_path / "t.eml"
+        path.write_bytes(_with_attachment(headers, body))
+        msg = parse_email(path)
+        assert msg is not None
+        return msg, calls
+
+    def test_a_clean_base64_attached_email_is_complete(self, tmp_path, monkeypatch):
+        msg, calls = self._parse(
+            tmp_path, monkeypatch, _BASE64_RFC822, base64.encodebytes(self._INNER)
+        )
+        [attachment] = msg.attachments
+        assert attachment.payload and attachment.payload_complete is True
+        assert len(calls) == 1
+
+    def test_replaced_non_alphabet_characters_make_it_incomplete(self, tmp_path, monkeypatch):
+        encoded = base64.encodebytes(self._INNER)
+        lossy = encoded[:8] + b"!!!!" + encoded[12:]
+        msg, calls = self._parse(tmp_path, monkeypatch, _BASE64_RFC822, lossy)
+        [attachment] = msg.attachments
+        # The returned bytes are today's lenient decode, unchanged.
+        assert attachment.payload != b""
+        assert attachment.payload_complete is False
+        assert len(calls) == 1
+        assert msg.parse_caps == {}
+
+    def test_an_undecodable_transport_keeps_todays_behaviour(self, tmp_path, monkeypatch):
+        msg, calls = self._parse(tmp_path, monkeypatch, _BASE64_RFC822, b"A")
+        [attachment] = msg.attachments
+        assert (attachment.payload, attachment.payload_complete) == (b"", False)
+        assert msg.parse_caps == {"transport_decode": 1}
+        # The diagnostic runs only on a transport that decoded.
+        assert calls == []
+
+    def test_quoted_printable_is_not_checked(self, tmp_path, monkeypatch):
+        import quopri
+
+        msg, calls = self._parse(
+            tmp_path,
+            monkeypatch,
+            b"Content-Type: message/rfc822\r\nContent-Transfer-Encoding: quoted-printable\r\n",
+            quopri.encodestring(self._INNER),
+        )
+        [attachment] = msg.attachments
+        assert attachment.payload and attachment.payload_complete is True
+        assert calls == []
+
+    def test_the_check_runs_behind_the_decodable_budget(self, tmp_path, monkeypatch):
+        """Over ``budget.decodable`` the transport is never decoded, so
+        the diagnostic does not run either."""
+        from src import parser as parser_module
+
+        budget = parser_module._SerializationBudget
+        monkeypatch.setattr(parser_module, "_SerializationBudget", lambda: budget(decodable=10))
+        msg, calls = self._parse(
+            tmp_path, monkeypatch, _BASE64_RFC822, base64.encodebytes(self._INNER)
+        )
+        assert msg.parse_caps == {"decoded_bytes": 1}
+        assert calls == []

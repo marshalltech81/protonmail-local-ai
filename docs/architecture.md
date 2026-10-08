@@ -885,9 +885,13 @@ writes the occurrence's chunks, so they roll back with them.
   serialized (`Attachment.payload_complete`: `_attachment_payload` kept
   the empty payload after a parse cap, a failure, or for a container
   nested inside another attachment), and for a part whose base64
-  decode lost bytes (an invalid-character or invalid-length defect;
-  quoted-printable and uuencode failures record no defect and are not
-  detected).
+  decode lost bytes (an invalid-character or invalid-length defect). For
+  a base64 attached email, whose transport form the parser decodes
+  leniently, the same text is decoded once more through the stdlib leaf
+  decoder only to read those defects (one linear pass behind the
+  decodable-bytes budget; the bytes kept are the lenient decode's).
+  Quoted-printable and uuencode failures record no defect and are not
+  detected (#1288).
 - For a `success` or `empty` result, the result's own
   `text_complete`, which the dispatcher sets: `0` when the attempt lost
   text (any `extractor_caps` cap, the `max_extracted_chars` cut, the

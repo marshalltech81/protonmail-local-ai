@@ -3056,6 +3056,35 @@ class TestOccurrenceTextComplete:
         cached = db.get_attachment_extraction(intact.content_hash, _module(intact))
         assert cached["text_complete"] == 1
 
+    def test_a_lossy_transport_attached_email_is_zero(self, tmp_path, monkeypatch):
+        """Review round 4 on #1286: a parsed attached email whose base64
+        transport lost bytes is stored ``text_complete = 0`` even when its
+        extraction succeeds."""
+        import base64
+
+        from src.parser import parse_email
+
+        inner = b"From: a@example.test\r\n\r\nSYNTHETIC_OCCURRENCE_MARKER body\r\n"
+        encoded = base64.encodebytes(inner)
+        lossy = encoded[:8] + b"!!!!" + encoded[12:]
+        path = tmp_path / "m.eml"
+        path.write_bytes(
+            b"Message-ID: <lossy@example.test>\r\nFrom: s@example.test\r\n"
+            b"Date: Mon, 28 Sep 2026 12:00:00 +0000\r\nMIME-Version: 1.0\r\n"
+            b'Content-Type: multipart/mixed; boundary="b"\r\n\r\n'
+            b"--b\r\nContent-Type: text/plain\r\n\r\nPARENT\r\n"
+            b"--b\r\nContent-Type: message/rfc822\r\nContent-Transfer-Encoding: base64\r\n"
+            b'Content-Disposition: attachment; filename="fwd.txt"\r\n\r\n' + lossy + b"--b--\r\n"
+        )
+        msg = parse_email(path)
+        assert msg is not None
+        [attachment] = msg.attachments
+        db = _setup_db_for_attachment(tmp_path)
+        self._fresh(monkeypatch, complete=True)
+        plan = prepare_attachment_writes(db=db, **_kwargs(attachment))
+        self._apply(db, plan)
+        assert self._row(db, plan) == (0, "text@3")
+
     def test_a_stale_stamp_served_while_ocr_is_off_is_not_assessed(self, tmp_path):
         """An older OCR row is served while OCR is off; the startup sweep
         clears such occurrences, so publishing one does not restore it."""
