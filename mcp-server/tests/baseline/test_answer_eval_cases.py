@@ -365,12 +365,17 @@ def test_decoy_reaches_the_answering_model(case_id: str, records: dict[str, dict
 
 
 # Each #910 attachment-layer case's shape, as the (message, source)
-# passages it rests on: the body and the attachment that disagree, the
-# replaced sheet and its revision, and the Trash reply's stale
-# attachment beside the in-scope body.
+# passages it rests on: every passage holding an expected fact, plus
+# the decoy. The body and the attachment that disagree; the replaced
+# sheet, its revision and the body line saying it replaces the first;
+# the in-scope body and the Trash reply's stale attachment.
 _ATTACHMENT_SHAPES = {
     "ask-wall-bill-attachment": {("t93.1", "body"), ("t93.1", "attachment")},
-    "ask-armchair-revised": {("t94.1", "attachment"), ("t94.2", "attachment")},
+    "ask-armchair-revised": {
+        ("t94.1", "attachment"),
+        ("t94.2", "attachment"),
+        ("t94.2", "body"),
+    },
     "ask-lido-locker-trash": {("t95.1", "body"), ("t95.2", "attachment")},
 }
 
@@ -379,8 +384,10 @@ _ATTACHMENT_SHAPES = {
 def test_attachment_shape_reaches_the_answering_model(
     case_id: str, records: dict[str, dict]
 ) -> None:
-    """#910: an attachment-layer case tests nothing unless both sides
-    of its shape are passages in the prompt the model received."""
+    """#910: an attachment-layer case tests nothing unless every passage
+    of its shape is in the prompt the model received. ``required_evidence``
+    names messages, so the grader counts any passage of a message as
+    its evidence (#1182); this test is what pins the passages."""
     supplied = {(p["message_id"], p["source"]) for p in _DETAILS[case_id]["passages"].values()}
     wanted = {(message_id_of(ref), source) for ref, source in _ATTACHMENT_SHAPES[case_id]}
     assert wanted <= supplied, (case_id, sorted(wanted - supplied))

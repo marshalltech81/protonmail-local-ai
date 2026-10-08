@@ -445,7 +445,13 @@ message matters, as for a correction), expected facts with the corpus
 excerpt that establishes each, prohibited assertions, machine-checkable
 `must_include` / `must_not_include` strings, the expected handling
 (answer, disclose a conflict, disclose missing evidence, abstain) and
-which rubric dimensions apply. Held-out membership is
+which rubric dimensions apply. Evidence refs name a message or a
+thread, never a message's body or one of its attachments, so any
+passage of the message satisfies the group: for a case that needs both
+the body and an attachment of one message (`ask-wall-bill-attachment`),
+coverage cannot show that only one was supplied or cited (#1182);
+`make baseline` checks instead that every passage of the #910 cases'
+shapes reaches the prompt. Held-out membership is
 `is_held_out(id)`, as for the agent scenarios; tune nothing against
 held-out cases.
 
