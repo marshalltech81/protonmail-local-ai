@@ -1008,8 +1008,10 @@ class MessagePage:
     on a message without a stored size, a sender, participant or
     authority filter on one whose ``sender_ambiguous`` is not 0 (outside
     Spam, for authority), a bound or the ordering under
-    ``date_basis=occurred`` on one without a delivery time). They are in
-    neither ``total_matches`` nor the pages.
+    ``date_basis=occurred`` on one without a delivery time, a subject,
+    text, attachment or address filter that finds nothing in stored
+    content whose ``messages.*_complete`` flag is not 1, #1086). They are
+    in neither ``total_matches`` nor the pages.
     """
 
     total_matches: int
@@ -4202,6 +4204,11 @@ class Database:
         - ``text``: every word must occur in the message's indexed body
           (FTS word match with stemming, any chunk; attachment text and
           stripped quoted replies are not searched).
+        - ``subject``, ``text``, ``has_attachments`` and the address
+          filters: a stored match decides; finding nothing is a miss
+          only when the stored subject, body, attachment list or role's
+          addresses are complete (``messages.*_complete`` 1), and the
+          message is otherwise counted as indeterminate (#1086).
         - ``folder``: exact folder name. Without it, messages filed in a
           ``DEFAULT_EXCLUDED_FOLDERS`` folder are left out.
         - ``date_from`` / ``date_to``: inclusive bounds on the clock

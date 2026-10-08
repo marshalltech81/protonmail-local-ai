@@ -643,6 +643,29 @@ class TestSearchAttachmentsIndeterminateTool:
         assert "display names not all indexed" in line
         assert "sender ambiguous or not yet checked" in line
 
+    def test_an_incomplete_from_list_is_counted_and_named(self, fake_server, fake_embed, tmp_path):
+        """#1086: the ``sender`` leaf cannot rule out a message whose From
+        list a parse cap cut, or one not assessed yet; the count includes
+        it and the fixed text names that cause, for a full address too."""
+        conn, path = _open_built_db_conn(tmp_path, "from-list.db")
+        _add(conn, "f1", "t", "2024-01-10T00:00:00+00:00", COLLEAGUE)
+        _add(conn, "f2", "t", "2024-01-11T00:00:00+00:00", COLLEAGUE)
+        conn.execute(
+            "UPDATE messages SET from_addresses_complete = 0 WHERE claimant_id = ?",
+            (claimant_of("f1"),),
+        )
+        conn.commit()
+        conn.close()
+        db = Database(str(path))
+        assert _counted(db, sender="vendor@example.com").indeterminate == 1
+        out = self._call(fake_server, fake_embed, db, sender="vendor@example.com")
+        assert out.structured_content["indeterminate"] == 1
+        line = out.content[0].text.splitlines()[1]
+        assert (
+            "address list incomplete (an over-long or unparseable address), or not yet checked"
+            in line
+        )
+
     def test_zero_is_stated_with_a_sender(self, fake_server, fake_embed, carrier_db):
         out = self._call(fake_server, fake_embed, carrier_db, sender="nobody@nowhere.test")
         assert out.structured_content["indeterminate"] == 0

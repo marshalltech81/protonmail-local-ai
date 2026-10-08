@@ -65,6 +65,13 @@ _VERBATIM_FIELDS = (
     "date_is_fallback",
     "sender_ambiguous",
     "participant_names_complete",
+    "subject_complete",
+    "from_addresses_complete",
+    "to_addresses_complete",
+    "cc_addresses_complete",
+    "attachments_manifest_complete",
+    "body_complete",
+    "parse_caps",
 )
 _DERIVED_FIELDS = (
     "date",

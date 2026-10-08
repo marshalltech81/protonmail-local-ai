@@ -276,6 +276,7 @@ class TestSenderAmbiguousMigration:
             "CREATE INDEX idx_message_participants_address_name "
             "ON message_participants(address, name)"
         )
+        _drop_v5_columns(db)
         db._conn.execute("ALTER TABLE messages DROP COLUMN participant_names_complete")
         db._conn.execute("ALTER TABLE messages DROP COLUMN sender_ambiguous")
         db._conn.execute("UPDATE schema_version SET version = 1")
@@ -360,6 +361,7 @@ class TestParticipantNamesMigration:
             "CREATE INDEX idx_message_participants_address_name "
             "ON message_participants(address, name)"
         )
+        _drop_v5_columns(db)
         db._conn.execute("ALTER TABLE messages DROP COLUMN participant_names_complete")
         db._conn.execute("UPDATE schema_version SET version = 3")
         db._conn.commit()
@@ -408,6 +410,147 @@ class TestParticipantNamesMigration:
             ).fetchall()
             == vectors_before
         )
+        assert MARKER not in caplog.text
+        db.close()
+
+
+# The columns v5 adds to ``messages`` (#1086).
+_V5_COLUMNS = (
+    "subject_complete",
+    "from_addresses_complete",
+    "to_addresses_complete",
+    "cc_addresses_complete",
+    "attachments_manifest_complete",
+    "body_complete",
+    "caps_json",
+)
+
+
+def _drop_v5_columns(db: Database) -> None:
+    for column in _V5_COLUMNS:
+        db._conn.execute(f"ALTER TABLE messages DROP COLUMN {column}")
+
+
+def _completeness(db: Database) -> dict[str, tuple]:
+    return {
+        row["filepath"]: tuple(row)[1:]
+        for row in db._conn.execute(f"SELECT filepath, {', '.join(_V5_COLUMNS)} FROM messages")
+    }
+
+
+_COMPLETE = (1, 1, 1, 1, 1, 1, "{}")
+
+
+class TestCompletenessMigration:
+    """#1086: the real v4 -> v5 migration leaves every message's
+    completeness NULL (not assessed), dead letters included, and queues
+    the reparse, which fills it with no embedding call."""
+
+    def test_backfill_through_the_reparse(self, tmp_path, caplog):
+        caplog.set_level(logging.DEBUG)
+        db, queue, paths = _index(tmp_path, ["one", None, "three"])
+        live, chunkless, dead = paths
+        assert set(_completeness(db).values()) == {_COMPLETE}
+        queue.enqueue(dead, REASON_INITIAL_SCAN)
+        queue.mark_dead_terminal(dead, stage="parse", error="oversized: too large")
+        chunks_before = db._conn.execute(
+            "SELECT chunk_id FROM message_chunks ORDER BY chunk_id"
+        ).fetchall()
+        _drop_v5_columns(db)
+        db._conn.execute("UPDATE schema_version SET version = 4")
+        db._conn.commit()
+        db.close()
+
+        db = Database(tmp_path / "mail.db")
+        queue = IndexingQueue(db, max_attempts=3, base_backoff_seconds=0)
+        unknown = (None,) * len(_V5_COLUMNS)
+        assert _completeness(db) == {live: unknown, chunkless: unknown, dead: unknown}
+        assert {fp: (r["reason"], r["status"]) for fp, r in _jobs(db).items()} == {
+            live: (REASON_REPARSE, "queued"),
+            chunkless: (REASON_REPARSE, "queued"),
+            dead: (REASON_INITIAL_SCAN, "dead"),
+        }
+
+        embedder = make_mock_embedder(_VECTOR)
+        assert _drain(db, queue, embedder) == 2
+        assert embedder.embed_batch.call_count == 0
+        assert embedder.embed.call_count == 0
+        # A chunkless body is complete: there was nothing to lose.
+        assert _completeness(db) == {live: _COMPLETE, chunkless: _COMPLETE, dead: unknown}
+        assert (
+            db._conn.execute("SELECT chunk_id FROM message_chunks ORDER BY chunk_id").fetchall()
+            == chunks_before
+        )
+        assert MARKER not in caplog.text
+        db.close()
+
+
+class TestBodyCompletePublication:
+    """#1086: ``body_complete`` describes the committed body chunks, so
+    phase 2c stores it in their transaction and phase 1 resets it."""
+
+    def _body_complete(self, db, path):
+        return db._conn.execute(
+            "SELECT body_complete FROM messages WHERE filepath = ?", (path,)
+        ).fetchone()[0]
+
+    def test_a_capped_body_is_stored_incomplete(self, tmp_path, monkeypatch):
+        from src import parser
+
+        monkeypatch.setattr(parser, "MAX_BODY_TEXT_PARTS", 1)
+        path = tmp_path / "INBOX" / "cur" / "parts:2,S"
+        path.parent.mkdir(parents=True)
+        path.write_bytes(
+            b"From: a@example.com\r\nMessage-ID: <parts@example.com>\r\n"
+            b"Date: Mon, 01 Jan 2024 12:00:00 +0000\r\n"
+            b'Content-Type: multipart/mixed; boundary="b"\r\n\r\n'
+            b"--b\r\nContent-Type: text/plain\r\n\r\nfirst\r\n"
+            b"--b\r\nContent-Type: text/plain\r\n\r\nSYNTHETIC_REPARSE_MARKER\r\n--b--\r\n"
+        )
+        db = Database(tmp_path / "mail.db")
+        queue = IndexingQueue(db, max_attempts=3, base_backoff_seconds=0)
+        queue.enqueue(str(path), REASON_INITIAL_SCAN)
+        _drain(db, queue, make_mock_embedder(_VECTOR))
+        assert self._body_complete(db, str(path)) == 0
+        caps = db._conn.execute("SELECT caps_json FROM messages").fetchone()[0]
+        assert caps == '{"body_parts": 1}'
+        db.close()
+
+    def test_a_failed_phase_2c_leaves_it_unknown(self, tmp_path, monkeypatch, caplog):
+        """Phase 1 commits the message row and resets the flag; a 2c
+        failure after the flag was written rolls it back with the
+        chunks, so a message once complete is not left claiming chunks
+        this pass did not commit."""
+        caplog.set_level(logging.DEBUG)
+        db, queue, paths = _index(tmp_path, ["one"])
+        assert self._body_complete(db, paths[0]) == 1
+        calls = []
+        real = db.set_body_complete
+
+        def then_fail(claimant_id, complete):
+            calls.append(complete)
+            real(claimant_id, complete)
+
+        def boom(*_a, **_kw):
+            raise sqlite3.OperationalError("injected")
+
+        monkeypatch.setattr(db, "set_body_complete", then_fail)
+        monkeypatch.setattr(db, "replace_thread_vector", boom)
+        queue.enqueue_reparse()
+        _drain(db, queue, make_mock_embedder(_VECTOR))
+        # Every attempt wrote the flag and rolled it back; the job ends
+        # dead-lettered with the flag unknown.
+        assert calls == [True] * 3
+        assert self._body_complete(db, paths[0]) is None
+        job = _jobs(db)[paths[0]]
+        assert (job["status"], job["last_error"]) == ("dead", "OperationalError")
+        # The phase 1 flags are committed: they describe the message row.
+        assert _completeness(db)[paths[0]][:5] == (1, 1, 1, 1, 1)
+
+        monkeypatch.undo()
+        assert queue.requeue_dead() == 1
+        _drain(db, queue, make_mock_embedder(_VECTOR))
+        assert self._body_complete(db, paths[0]) == 1
         assert MARKER not in caplog.text
         db.close()
 

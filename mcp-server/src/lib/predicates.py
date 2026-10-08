@@ -321,28 +321,45 @@ def address_match_mode(value: str) -> str:
     return "exact" if canonical and not canonical.startswith("@") else "substring"
 
 
-def _participant_clause(value: str, roles: tuple[str, ...], params: list) -> str:
-    """SQL restricting ``messages m`` to those where ``value`` appears in
-    one of ``roles``; appends the bound values to ``params``.
+# The ``messages`` flag that says a role's stored addresses are complete
+# (#1086): 1 when the parser kept every address of that header, 0 when
+# a cap or an unparseable element lost one, NULL when not assessed.
+ROLE_COMPLETE_COLUMNS = {
+    "from": "from_addresses_complete",
+    "to": "to_addresses_complete",
+    "cc": "cc_addresses_complete",
+}
 
-    An exact address is 1 or 0 for every message. A substring is matched
-    against stored addresses and display names, which hold every name
-    only when ``m.participant_names_complete`` is 1 (#1140): a match is
-    1 whatever the flag, but no match is 0 only under 1, and unknown
-    (NULL) under 0 (the parser's name budget dropped a name) or NULL
-    (not reparsed since the v4 upgrade)."""
+
+def _participant_clause(value: str, roles: tuple[str, ...], params: list) -> str:
+    """SQL deciding whether ``value`` appears in one of ``roles`` of
+    ``messages m``; appends the bound values to ``params``.
+
+    A stored match is 1. No match is 0 only when every role's stored
+    addresses are complete (``ROLE_COMPLETE_COLUMNS`` all 1, #1086) and,
+    for a substring, every display name is stored
+    (``m.participant_names_complete`` 1, #1140); otherwise it is unknown
+    (NULL): a cap or an unparseable element lost an address, the name
+    budget dropped a name, or the message is not assessed yet (not
+    reparsed since the upgrade that added the flag). An exact address is
+    matched by canonical equality, a substring against stored addresses
+    and display names."""
     role_sql = ",".join(["?"] * len(roles))
+    complete = [f"m.{ROLE_COMPLETE_COLUMNS[role]} = 1" for role in roles]
     if address_match_mode(value) == "exact":
         params.extend([canonical_addr(value), *roles])
-        return (
+        match = (
             "m.claimant_id IN (SELECT claimant_id FROM message_participants "  # nosec B608
             f"WHERE address = ? AND role IN ({role_sql}))"
         )
-    return (
-        "CASE WHEN m.claimant_id IN (SELECT p.claimant_id FROM message_participants p "  # nosec B608
-        f"WHERE {_substring_participant_rows(value, roles, params)}) THEN 1 "
-        "WHEN m.participant_names_complete = 1 THEN 0 ELSE NULL END"
-    )
+    else:
+        match = (
+            "m.claimant_id IN (SELECT p.claimant_id FROM message_participants p "  # nosec B608
+            f"WHERE {_substring_participant_rows(value, roles, params)})"
+        )
+        complete.append("m.participant_names_complete = 1")
+    # The column names are constants; the values are bound.
+    return f"CASE WHEN {match} THEN 1 WHEN {' AND '.join(complete)} THEN 0 ELSE NULL END"
 
 
 def _substring_participant_rows(value: str, roles: tuple[str, ...], params: list) -> str:
@@ -387,7 +404,11 @@ class Evaluability(Enum):
     ``total_matches``, and ``Database.query_messages`` counts it as
     ``indeterminate`` (#1085). Every such leaf's SQL must be NULL exactly
     when it cannot be decided, and every ``DECIDED`` leaf's 0 or 1, for
-    that count to hold. #1086 extends the rule to content evaluability.
+    that count to hold. #1086 extends the rule to stored content: a
+    ``subject``, ``text``, ``has_attachments`` or address leaf that finds
+    nothing is false only when the content it reads is complete
+    (``messages.*_complete`` 1), and unknown under 0 (a parse cap lost
+    part of it) or NULL (not assessed yet).
     """
 
     DECIDED = "decided"
@@ -533,23 +554,36 @@ def _compile_participant(value: str, params: list) -> str:
     return f"({recipient} OR {_compile_sender(value, params)})"
 
 
+def _decided_by(match: str, complete: str) -> str:
+    """``match`` as a leaf over stored content: 1 when it holds, 0 when
+    it does not and the content is complete (``complete`` is a
+    ``messages`` flag, 1 complete, #1086), otherwise unknown (NULL: a
+    parse cap lost part of the content, or it is not assessed yet)."""
+    return f"CASE WHEN {match} THEN 1 WHEN m.{complete} = 1 THEN 0 ELSE NULL END"
+
+
 def _compile_subject(value: str, params: list) -> str:
+    # The stored subject is cut to the parser's limit; a cut one cannot
+    # rule a value out (``subject_complete`` 0).
     params.append(value.casefold())
-    return "instr(mcp_casefold(m.subject), ?) > 0"
+    return _decided_by("instr(mcp_casefold(m.subject), ?) > 0", "subject_complete")
 
 
 def _compile_text(terms: tuple[str, ...], params: list) -> str:
     # One subquery per word, so the words may fall in different chunks
     # of the same message. Each is a quoted FTS phrase; unicode61 never
     # keeps a quote inside a token, but doubling any (FTS5 string
-    # escaping) keeps FTS syntax out regardless.
+    # escaping) keeps FTS syntax out regardless. The body chunks hold
+    # the whole body only under ``body_complete`` 1, written with them
+    # (#1086).
     params.extend('"' + term.replace('"', '""') + '"' for term in terms)
-    return " AND ".join(
+    match = " AND ".join(
         "m.claimant_id IN (SELECT c.claimant_id FROM message_chunks_fts f "
         "JOIN message_chunks c ON c.fts_rowid = f.rowid "
         "WHERE message_chunks_fts MATCH ? AND c.attachment_id IS NULL)"
         for _ in terms
     )
+    return _decided_by(f"({match})", "body_complete")
 
 
 def _compile_folder(folders: tuple[str, ...], params: list) -> str:
@@ -581,6 +615,18 @@ def _compile_dated(basis: str, params: list) -> str:
     return f"NULLIF(m.{DATE_BASES[basis].column} IS NOT NULL, 0)"
 
 
+def _compile_has_attachments(state: bool, params: list) -> str:
+    # A stored attachment decides the leaf either way. An empty list
+    # rules attachments out only when the parser walked the whole
+    # message (``attachments_manifest_complete`` 1, #1086); otherwise
+    # it is unknown.
+    params.append(1 if state else 0)
+    return (
+        "CASE WHEN m.has_attachments = 1 OR m.attachments_manifest_complete = 1 "
+        "THEN m.has_attachments = ? ELSE NULL END"
+    )
+
+
 def _compile_flag(column: str) -> Callable[[bool, list], str]:
     """The compiler for a 0/1 column of ``messages`` matched either way."""
 
@@ -600,13 +646,18 @@ def _compile_authority_class(value: str, params: list) -> str:
     # be told, so the leaf is unknown (#1161, owner 2026-10-08). After
     # the v2 upgrade every message is NULL until the queued reparse
     # reaches it, so ``query_messages`` counts those as indeterminate
-    # until it drains; a dead-lettered message stays NULL.
+    # until it drains; a dead-lettered message stays NULL. A safe
+    # sender with a stored address of the class is a match; one without
+    # is a miss only when its From list is complete
+    # (``from_addresses_complete`` 1), and otherwise unknown (#1086,
+    # owner 2026-10-08).
     params.extend([*AUTHORITY_EXCLUDED_FOLDERS, value])
     return (
         # The f-string adds ``?`` placeholders only; the values are bound.
         f"CASE WHEN m.folder IN ({','.join('?' * len(AUTHORITY_EXCLUDED_FOLDERS))}) THEN 0 "
-        f"WHEN m.sender_ambiguous = 0 THEN m.claimant_id IN ({_SENDER_CLASS_MESSAGES}) "
-        "ELSE NULL END"
+        "WHEN m.sender_ambiguous IS NOT 0 THEN NULL "
+        f"WHEN m.claimant_id IN ({_SENDER_CLASS_MESSAGES}) THEN 1 "
+        "WHEN m.from_addresses_complete = 1 THEN 0 ELSE NULL END"
     )
 
 
@@ -655,8 +706,8 @@ LEAVES: dict[str, LeafKind] = {
             Evaluability.UNKNOWN_WHEN_NULL,
             _participant_test,
         ),
-        LeafKind("subject", "text", _compile_subject, Evaluability.DECIDED),
-        LeafKind("text", "words", _compile_text, Evaluability.DECIDED),
+        LeafKind("subject", "text", _compile_subject, Evaluability.UNKNOWN_WHEN_NULL),
+        LeafKind("text", "words", _compile_text, Evaluability.UNKNOWN_WHEN_NULL),
         LeafKind("folder", "folders", _compile_folder, Evaluability.DECIDED),
         LeafKind("not_in_folders", "folders", _compile_not_in_folders, Evaluability.DECIDED),
         LeafKind(
@@ -695,8 +746,8 @@ LEAVES: dict[str, LeafKind] = {
         LeafKind(
             "has_attachments",
             "bool",
-            _compile_flag("has_attachments"),
-            Evaluability.DECIDED,
+            _compile_has_attachments,
+            Evaluability.UNKNOWN_WHEN_NULL,
             _has_attachments_test,
         ),
         LeafKind("seen", "bool", _compile_flag("seen"), Evaluability.DECIDED),

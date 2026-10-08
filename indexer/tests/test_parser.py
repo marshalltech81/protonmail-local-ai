@@ -4163,6 +4163,15 @@ _CAP_SHAPES = {
         "address_count=2",
         lambda msg: msg.to_addrs == ["bob@example.test"],
     ),
+    # #1086: an element that yields no address the participant rows
+    # can store (a comment only, here) is dropped, as before, and now
+    # counted.
+    "address_unparsed": (
+        _addresses(b"bob@example.test, (SYNTHETIC_HEADER_MARKER)"),
+        False,
+        "address_unparsed=1",
+        lambda msg: msg.to_addrs == ["bob@example.test"],
+    ),
     # #1140: display names past the first for a participant spend one
     # per-message budget; the recipient is kept.
     "participant_names": (
@@ -4241,6 +4250,190 @@ def test_cap_that_drops_content_logs_one_warning(tmp_path, monkeypatch, caplog, 
     ]
     for marker in ("SYNTHETIC_HEADER_MARKER", "SYNTHETIC_FILENAME_MARKER", "SYNTHETIC_TEXT_MARKER"):
         assert marker not in caplog.text
+
+
+# #1086: the completeness flags each cap shape clears; every other flag
+# stays True. The address caps clear the role they fired in (To in
+# these shapes), except the header scan cut short, which loses later
+# headers of every role.
+_ROLES = {"from_addresses_complete", "to_addresses_complete", "cc_addresses_complete"}
+_MANIFEST = {"attachments_manifest_complete"}
+_CAP_COMPLETENESS: dict[str, set[str]] = {
+    "attached_depth": _MANIFEST,
+    "attached_fields": _MANIFEST,
+    "attached_depth_decoded": _MANIFEST,
+    "attached_depth_decode_chain": _MANIFEST,
+    "transport_decode_base64": _MANIFEST,
+    "transport_decode_8bit": _MANIFEST,
+    "decoded_bytes": _MANIFEST,
+    "container_serialize": _MANIFEST,
+    "container_serialize_decoded": _MANIFEST,
+    "body_parts": {"body_complete"},
+    "mime_parts": {"body_complete", *_MANIFEST},
+    "address_header": {"to_addresses_complete"},
+    "address_element": {"to_addresses_complete"},
+    "address_length": {"to_addresses_complete"},
+    "address_fields": _ROLES,
+    "address_occurrences": {"to_addresses_complete"},
+    "address_chars": {"to_addresses_complete"},
+    "address_elements": {"to_addresses_complete"},
+    "address_count": {"to_addresses_complete"},
+    "address_unparsed": {"to_addresses_complete"},
+    # Covered by ``participant_names_complete`` (#1140), not by these.
+    "participant_names": set(),
+    "subject_length": {"subject_complete"},
+    # Threading input only; no filter reads them.
+    "in_reply_to_length": set(),
+    "references_length": set(),
+}
+_COMPLETENESS_FLAGS = (
+    "subject_complete",
+    "from_addresses_complete",
+    "to_addresses_complete",
+    "cc_addresses_complete",
+    "attachments_manifest_complete",
+    "body_complete",
+)
+
+
+def _completeness(msg) -> dict[str, bool]:
+    return {name: getattr(msg, name) for name in _COMPLETENESS_FLAGS}
+
+
+def test_every_cap_shape_states_its_completeness():
+    assert set(_CAP_COMPLETENESS) == set(_CAP_SHAPES)
+
+
+@pytest.mark.parametrize("shape", sorted(_CAP_SHAPES))
+def test_cap_shape_clears_exactly_its_completeness_flags(tmp_path, monkeypatch, caplog, shape):
+    """#1086: a cap that loses content clears the flag of what it lost,
+    and only that; ``parse_caps`` holds the names and counts the cap
+    line shows, never content."""
+    caplog.set_level("DEBUG")
+    msg, _ = _parse_cap_shape(tmp_path, monkeypatch, shape)
+    cleared = _CAP_COMPLETENESS[shape]
+    assert _completeness(msg) == {name: name not in cleared for name in _COMPLETENESS_FLAGS}
+    expected = dict(
+        (name, int(count)) for name, count in re.findall(r"(\w+)=(\d+)", _CAP_SHAPES[shape][2])
+    )
+    assert msg.parse_caps == expected
+    assert set(msg.parse_caps) <= set(PARSE_CAPS)
+    for marker in ("SYNTHETIC_HEADER_MARKER", "SYNTHETIC_FILENAME_MARKER", "SYNTHETIC_TEXT_MARKER"):
+        assert marker not in repr(msg.parse_caps)
+        assert marker not in caplog.text
+
+
+class TestCompletenessByRole:
+    """#1086: an address loss clears the completeness flag of the role
+    it happened in, never another's."""
+
+    def test_a_plain_message_is_complete_with_no_caps(self):
+        msg, _ = _parse_headers(
+            b"From: a@example.test\r\nTo: b@example.test\r\nCc: c@example.test\r\n"
+        )
+        assert all(_completeness(msg).values())
+        assert msg.parse_caps == {}
+
+    def test_absent_headers_lose_nothing(self):
+        msg, _ = _parse_headers(b"")
+        assert all(_completeness(msg).values())
+
+    def test_repeated_to_and_cc_lose_nothing(self):
+        msg, _ = _parse_headers(
+            b"From: a@example.test\r\nTo: b@example.test\r\nTo: c@example.test\r\n"
+            b"Cc: d@example.test\r\nCc: e@example.test\r\n"
+        )
+        assert all(_completeness(msg).values())
+        assert msg.parse_caps == {"address_repeated": 2}
+
+    def test_a_repeated_from_is_an_incomplete_from_list(self):
+        """Only the first From header is parsed, so the others'
+        addresses are not stored."""
+        msg, _ = _parse_headers(
+            b"From: a@example.test\r\nFrom: b@example.test\r\nTo: c@example.test\r\n"
+        )
+        assert msg.from_addresses_complete is False
+        assert (msg.to_addresses_complete, msg.cc_addresses_complete) == (True, True)
+        assert msg.parse_caps == {"from_repeated": 1}
+
+    @pytest.mark.parametrize("role", ["From", "To", "Cc"])
+    @pytest.mark.parametrize(
+        "value",
+        [
+            # Over ``_MAX_ADDRESS_HEADER_CHARS``: the whole header lost.
+            b"x@example.test, " + b"SYNTHETIC_HEADER_MARKER@example.test, " * 7_000,
+            # One element over ``_MAX_ADDRESS_ELEMENT_CHARS``.
+            b"x@example.test, " + b"SYNTHETIC_HEADER_MARKER" * 6_000 + b"@example.test",
+            # One address over ``_MAX_ADDRESS_CHARS``.
+            b"x@example.test, " + _LONG_LOCAL + b"@example.test",
+            # Elements that yield no storable address.
+            b"x@example.test, (SYNTHETIC_HEADER_MARKER)",
+            b"x@example.test, SYNTHETIC_HEADER_MARKER",
+            b"x@example.test, <>",
+        ],
+        ids=["header", "element", "length", "comment", "no_at", "empty_angle"],
+    )
+    def test_a_loss_clears_only_its_role(self, role, value, caplog):
+        caplog.set_level("DEBUG")
+        others = {"From": b"f@example.test", "To": b"t@example.test", "Cc": b"c@example.test"}
+        headers = b"".join(
+            name.encode() + b": " + (value if name == role else others[name]) + b"\r\n"
+            for name in ("From", "To", "Cc")
+        )
+        msg, _ = _parse_headers(headers)
+        flags = _completeness(msg)
+        assert {name for name, ok in flags.items() if not ok} == {
+            f"{role.lower()}_addresses_complete"
+        }
+        assert msg.parse_caps
+        assert "SYNTHETIC_HEADER_MARKER" not in caplog.text
+
+    def test_an_unparsed_from_with_no_address_is_incomplete(self):
+        """A From with no parseable address keeps its text as
+        ``from_addr`` for display, but no participant row can hold it."""
+        msg, _ = _parse_headers(b"From: SYNTHETIC_HEADER_MARKER\r\nTo: t@example.test\r\n")
+        assert msg.from_addresses_complete is False
+        assert msg.to_addresses_complete is True
+        assert msg.parse_caps == {"address_unparsed": 1}
+
+    def test_a_budget_spent_in_one_role_clears_the_role_that_lost(self, monkeypatch):
+        """The occurrence budget is shared; the role whose occurrence it
+        refused is the incomplete one."""
+        from src import parser
+
+        monkeypatch.setattr(parser, "MAX_ADDRESS_OCCURRENCES", 2)
+        msg, _ = _parse_headers(
+            b"From: f@example.test\r\nTo: t@example.test\r\nCc: c@example.test\r\n"
+        )
+        assert (
+            msg.from_addresses_complete,
+            msg.to_addresses_complete,
+            msg.cc_addresses_complete,
+        ) == (True, True, False)
+
+    def test_counting_unparsed_elements_adds_no_parse_work(self, monkeypatch):
+        """Each element still costs at most the two ``parseaddr`` calls
+        the budget counts; the new counter reads only their results."""
+        from src import parser
+
+        calls = {"n": 0}
+        real = parser.email.utils.parseaddr
+
+        def counting(value, *args, **kwargs):
+            calls["n"] += 1
+            return real(value, *args, **kwargs)
+
+        made = _budget_spy(monkeypatch)
+        monkeypatch.setattr(parser.email.utils, "parseaddr", counting)
+        to = b", ".join(b"(c%d)" % i for i in range(5_000))
+        start = time.perf_counter()
+        msg, _ = _parse_headers(b"To: " + to + b"\r\n")
+        elapsed = time.perf_counter() - start
+        (budget,) = made
+        assert msg.parse_caps == {"address_unparsed": 5_000}
+        assert budget.parse_calls == 5_000
+        assert calls["n"] == budget.parse_calls
+        assert elapsed < 10
 
 
 def test_several_caps_share_one_line_in_a_fixed_order(tmp_path, caplog):

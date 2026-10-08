@@ -35,7 +35,7 @@ from .extractors import (
     SCANNED_PDF_OCR_DISABLED_ERROR,
 )
 from .maildir import message_state
-from .parser import participant_names
+from .parser import PARSE_CAPS, participant_names
 from .queue import REASON_REPARSE, REPARSE_ENQUEUE_SQL
 from .threader import (
     FTS_SUBJECT_SCAN_CHARS,
@@ -48,6 +48,21 @@ from .threader import (
 )
 
 log = logging.getLogger("indexer.database")
+
+
+def _caps_json(caps: dict[str, int]) -> str:
+    """``caps`` as the ``messages.caps_json`` value: ``PARSE_CAPS`` names
+    to positive counts, in ``PARSE_CAPS`` order (#1086).
+
+    Raises ``ValueError`` with fixed text for any other name or value,
+    so nothing but those names and integers can reach the column.
+    """
+    if any(name not in PARSE_CAPS for name in caps) or any(
+        isinstance(count, bool) or not isinstance(count, int) or count < 1
+        for count in caps.values()
+    ):
+        raise ValueError("parse caps must map PARSE_CAPS names to positive counts")
+    return json.dumps({name: caps[name] for name in PARSE_CAPS if name in caps})
 
 
 def _close_connection(conn: sqlite3.Connection) -> None:
@@ -108,7 +123,11 @@ def _dedupe_by_canonical(addrs: list[str]) -> list[str]:
 # v4 (#1140): ``message_participant_names`` keeps every distinct display
 # name per (message, role, address), seeded from the stored first names
 # and filled by a reparse (``migrations/0004_participant_names.sql``).
-SCHEMA_VERSION = 4
+# v5 (#1086): per-message completeness on ``messages`` (subject, From /
+# To / Cc addresses, attachment list, body) and the parse's cap counts,
+# NULL until a reparse assesses the message
+# (``migrations/0005_message_completeness.sql``).
+SCHEMA_VERSION = 5
 SCHEMA_APPLICATION_ID = 0x504D4149  # "PMAI"
 
 # How long a ``reaped_messages`` record outlives the reap. The record
@@ -741,6 +760,27 @@ class Database:
                 -- reads NULL as "can't tell".
                 participant_names_complete INTEGER
                     CHECK (participant_names_complete IN (0, 1)),
+                -- #1086: whether the stored content a filter reads is
+                -- complete. 1 = complete within the documented indexing
+                -- semantics, 0 = a parse cap or a rejected element lost
+                -- part of it, NULL = not assessed (a row from before v5
+                -- the reparse has not reached). Written by
+                -- ``_write_message_record`` from the parse, except
+                -- ``body_complete``, which that write resets to NULL and
+                -- phase 2c sets in the transaction that commits the body
+                -- chunks (``set_body_complete``). No defaults; mcp-server
+                -- reads NULL as "can't tell".
+                subject_complete INTEGER CHECK (subject_complete IN (0, 1)),
+                from_addresses_complete INTEGER CHECK (from_addresses_complete IN (0, 1)),
+                to_addresses_complete INTEGER CHECK (to_addresses_complete IN (0, 1)),
+                cc_addresses_complete INTEGER CHECK (cc_addresses_complete IN (0, 1)),
+                attachments_manifest_complete INTEGER
+                    CHECK (attachments_manifest_complete IN (0, 1)),
+                body_complete INTEGER CHECK (body_complete IN (0, 1)),
+                -- The parse's nonzero ``PARSE_CAPS`` counts as a JSON
+                -- object of fixed names to integers, never content;
+                -- NULL before v5's reparse.
+                caps_json TEXT,
                 FOREIGN KEY (claimant_id) REFERENCES message_thread_map(claimant_id)
                     ON DELETE CASCADE
             );
@@ -2777,6 +2817,20 @@ class Database:
             (thread_id,),
         ).fetchall()
 
+    @_synchronized
+    def set_body_complete(self, claimant_id: str, complete: bool) -> None:
+        """Store whether the message's body chunks are complete (#1086).
+
+        Phase 2c calls it inside the transaction that commits the body
+        chunks, so the flag and the chunks it describes land or roll
+        back together; ``_write_message_record`` resets it to NULL first.
+        """
+        with self.transaction():
+            self._conn.execute(
+                "UPDATE messages SET body_complete = ? WHERE claimant_id = ?",
+                (int(complete), claimant_id),
+            )
+
     def _write_message_record(self, cur: sqlite3.Cursor, msg, thread_id: str) -> None:
         """Upsert ``msg``'s ``messages`` row and replace its participants.
 
@@ -2799,14 +2853,18 @@ class Database:
             dropped: Counter[str] = Counter()
             names = participant_names(roles, dropped)
             complete = not dropped["participant_names"]
+        caps_json = _caps_json(msg.parse_caps)
         cur.execute(
             """
             INSERT INTO messages
                 (claimant_id, message_id, thread_id, filepath, folder, subject, sent_at,
                  occurred_at, in_reply_to, references_json, has_attachments, size_bytes,
                  content_hash, indexed_at, seen, flagged, replied, sender_ambiguous,
-                 participant_names_complete)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 participant_names_complete, subject_complete, from_addresses_complete,
+                 to_addresses_complete, cc_addresses_complete,
+                 attachments_manifest_complete, body_complete, caps_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    NULL, ?)
             ON CONFLICT(claimant_id) DO UPDATE SET
                 thread_id       = excluded.thread_id,
                 filepath        = excluded.filepath,
@@ -2824,7 +2882,15 @@ class Database:
                 flagged         = excluded.flagged,
                 replied         = excluded.replied,
                 sender_ambiguous = excluded.sender_ambiguous,
-                participant_names_complete = excluded.participant_names_complete
+                participant_names_complete = excluded.participant_names_complete,
+                subject_complete = excluded.subject_complete,
+                from_addresses_complete = excluded.from_addresses_complete,
+                to_addresses_complete = excluded.to_addresses_complete,
+                cc_addresses_complete = excluded.cc_addresses_complete,
+                attachments_manifest_complete = excluded.attachments_manifest_complete,
+                -- Not known until phase 2c commits this parse's chunks.
+                body_complete = NULL,
+                caps_json = excluded.caps_json
             """,
             (
                 msg.claimant_id,
@@ -2846,6 +2912,12 @@ class Database:
                 int(state.replied),
                 int(msg.sender_ambiguous),
                 int(complete),
+                int(msg.subject_complete),
+                int(msg.from_addresses_complete),
+                int(msg.to_addresses_complete),
+                int(msg.cc_addresses_complete),
+                int(msg.attachments_manifest_complete),
+                caps_json,
             ),
         )
         # Cascades to the message's ``message_participant_names`` rows.

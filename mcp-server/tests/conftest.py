@@ -79,7 +79,15 @@ def _build_schema(conn: sqlite3.Connection) -> None:
             replied         INTEGER NOT NULL DEFAULT 0,
             sender_ambiguous INTEGER CHECK (sender_ambiguous IN (0, 1)),
             participant_names_complete INTEGER
-                CHECK (participant_names_complete IN (0, 1))
+                CHECK (participant_names_complete IN (0, 1)),
+            subject_complete INTEGER CHECK (subject_complete IN (0, 1)),
+            from_addresses_complete INTEGER CHECK (from_addresses_complete IN (0, 1)),
+            to_addresses_complete INTEGER CHECK (to_addresses_complete IN (0, 1)),
+            cc_addresses_complete INTEGER CHECK (cc_addresses_complete IN (0, 1)),
+            attachments_manifest_complete INTEGER
+                CHECK (attachments_manifest_complete IN (0, 1)),
+            body_complete INTEGER CHECK (body_complete IN (0, 1)),
+            caps_json TEXT
         );
 
         -- The indexer's ``messages`` indexes, so query plans match.
@@ -491,6 +499,18 @@ def insert_reaped(
     return claimant
 
 
+# The #1086 completeness columns of a message the indexer parsed in
+# full and whose body chunks are committed.
+COMPLETE: dict[str, int | None] = {
+    "subject_complete": 1,
+    "from_addresses_complete": 1,
+    "to_addresses_complete": 1,
+    "cc_addresses_complete": 1,
+    "attachments_manifest_complete": 1,
+    "body_complete": 1,
+}
+
+
 def _insert_message_record(
     cur: sqlite3.Cursor,
     *,
@@ -511,22 +531,27 @@ def _insert_message_record(
     size_bytes: int | None = 100,
     sender_ambiguous: int | None = 0,
     participant_names_complete: int | None = 1,
+    completeness: dict[str, int | None] | None = None,
 ) -> None:
     """Insert one ``messages`` row and its ``message_participants``.
 
     ``participants`` is ``(role, display string)`` pairs; addresses are
     canonicalized and names split out the way the indexer writes them.
     ``size_bytes`` is the stored file size, ``None`` for a row without one.
+    ``completeness`` overrides the #1086 completeness columns, which are
+    otherwise all 1 (complete) with no caps.
     """
+    flags = {**COMPLETE, **(completeness or {})}
     cur.execute(
-        """
+        f"""
         INSERT INTO messages
             (claimant_id, message_id, thread_id, filepath, folder, subject, sent_at,
              occurred_at, in_reply_to, references_json, has_attachments, size_bytes,
              content_hash, indexed_at, seen, flagged, replied, sender_ambiguous,
-             participant_names_complete)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
+             participant_names_complete, {", ".join(flags)}, caps_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                {", ".join("?" * len(flags))}, '{{}}')
+        """,  # nosec B608
         (
             claimant_of(message_id, variant),
             message_id,
@@ -547,6 +572,7 @@ def _insert_message_record(
             int(replied),
             sender_ambiguous,
             participant_names_complete,
+            *flags.values(),
         ),
     )
     for role, value in participants:
@@ -622,6 +648,7 @@ def _insert_message(
     size_bytes: int | None = 100,
     sender_ambiguous: int | None = 0,
     participant_names_complete: int | None = 1,
+    completeness: dict[str, int | None] | None = None,
 ) -> None:
     """Insert one message with full per-message control.
 
@@ -688,6 +715,7 @@ def _insert_message(
         size_bytes=size_bytes,
         sender_ambiguous=sender_ambiguous,
         participant_names_complete=participant_names_complete,
+        completeness=completeness,
     )
     conn.commit()
     if body is not None:

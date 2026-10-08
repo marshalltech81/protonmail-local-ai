@@ -116,9 +116,9 @@ class TestSchema:
 
     def test_fresh_install_is_stamped_the_current_version(self, db):
         """A fresh install creates the current schema directly and stamps
-        v4 (#1140), skipping the migration files."""
-        assert SCHEMA_VERSION == 4
-        assert db._conn.execute("SELECT version FROM schema_version").fetchone()[0] == 4
+        v5 (#1086), skipping the migration files."""
+        assert SCHEMA_VERSION == 5
+        assert db._conn.execute("SELECT version FROM schema_version").fetchone()[0] == 5
 
     def test_fresh_install_has_a_nullable_ocr_pages_skipped_column(self, db):
         """#891: a count, NULL when unknown, with no default."""
@@ -316,7 +316,7 @@ class TestMigrationV1:
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [1, 2, 3, 4]" in caplog.text
+        assert "applied migrations: [1, 2, 3, 4, 5]" in caplog.text
         assert "SYNTHETIC" not in caplog.text
 
     def test_v0_rows_are_carried_over_under_their_stamps_module(self, tmp_path):
@@ -448,6 +448,7 @@ def _v3_from_fresh(db: Database) -> None:
     without ``message_participant_names`` and
     ``messages.participant_names_complete``, and with the participant
     (address, name) index (#1140)."""
+    _v4_from_fresh(db)
     db._conn.execute("DROP TABLE message_participant_names")
     db._conn.execute("ALTER TABLE messages DROP COLUMN participant_names_complete")
     db._conn.execute(
@@ -455,6 +456,162 @@ def _v3_from_fresh(db: Database) -> None:
     )
     db._conn.execute("UPDATE schema_version SET version = 3")
     db._conn.commit()
+
+
+# The columns v5 adds to ``messages`` (#1086).
+_V5_COLUMNS = (
+    "subject_complete",
+    "from_addresses_complete",
+    "to_addresses_complete",
+    "cc_addresses_complete",
+    "attachments_manifest_complete",
+    "body_complete",
+    "caps_json",
+)
+
+
+def _v4_from_fresh(db: Database) -> None:
+    """Turn a fresh database into the v4 shape: v4 is the current schema
+    without the per-message completeness columns (#1086)."""
+    for column in _V5_COLUMNS:
+        db._conn.execute(f"ALTER TABLE messages DROP COLUMN {column}")
+    db._conn.execute("UPDATE schema_version SET version = 4")
+    db._conn.commit()
+
+
+class TestMigrationV5:
+    """#1086: v4 -> v5 adds the completeness columns, NULL (not
+    assessed) on every existing row, and queues the reparse."""
+
+    def test_v4_database_migrates_to_the_fresh_v5_shape(self, tmp_path, caplog):
+        caplog.set_level("INFO")
+        db = Database(tmp_path / "v4.db")
+        msg = make_message(message_id="old@x")
+        db.upsert_thread(make_thread(messages=[msg]), FAKE_EMBEDDING)
+        _v4_from_fresh(db)
+        db.close()
+        migrated = Database(tmp_path / "v4.db")
+        fresh = Database(tmp_path / "fresh.db")
+        try:
+            assert migrated._conn.execute("SELECT version FROM schema_version").fetchone()[0] == 5
+            assert _schema_shape(migrated._conn) == _schema_shape(fresh._conn)
+            row = migrated._conn.execute(
+                f"SELECT {', '.join(_V5_COLUMNS)} FROM messages"
+            ).fetchone()
+            assert tuple(row) == (None,) * len(_V5_COLUMNS)
+            jobs = migrated._conn.execute("SELECT reason, status FROM indexing_jobs").fetchall()
+            assert [tuple(r) for r in jobs] == [("reparse", "queued")]
+        finally:
+            migrated.close()
+            fresh.close()
+        assert "applied migrations: [5]" in caplog.text
+
+    @pytest.mark.parametrize("column", [c for c in _V5_COLUMNS if c != "caps_json"])
+    def test_the_flag_columns_reject_other_values(self, db, column):
+        msg = make_message(message_id="chk@x")
+        db.upsert_thread(make_thread(messages=[msg]), FAKE_EMBEDDING)
+        with pytest.raises(sqlite3.IntegrityError, match="CHECK"):
+            db._conn.execute(f"UPDATE messages SET {column} = 2")
+
+    @pytest.mark.parametrize("column", _V5_COLUMNS)
+    def test_the_columns_are_nullable_with_no_default(self, db, column):
+        cols = {r["name"]: r for r in db._conn.execute("PRAGMA table_info(messages)")}
+        assert cols[column]["dflt_value"] is None
+        assert cols[column]["notnull"] == 0
+
+
+class TestCompletenessColumns:
+    """#1086: ``_write_message_record`` writes the parser's completeness
+    flags and caps on insert and on every update, and resets
+    ``body_complete`` to NULL until phase 2c stores it with the chunks
+    (``set_body_complete``)."""
+
+    _PHASE1 = (
+        "subject_complete",
+        "from_addresses_complete",
+        "to_addresses_complete",
+        "cc_addresses_complete",
+        "attachments_manifest_complete",
+    )
+
+    @staticmethod
+    def _row(db, claimant_id):
+        return db._conn.execute(
+            f"SELECT {', '.join(_V5_COLUMNS)} FROM messages WHERE claimant_id = ?",
+            (claimant_id,),
+        ).fetchone()
+
+    def test_a_complete_message_writes_ones_and_no_caps(self, db):
+        msg = make_message(message_id="ok@x")
+        db.upsert_thread(make_thread(messages=[msg]), FAKE_EMBEDDING)
+        row = self._row(db, msg.claimant_id)
+        assert [row[c] for c in self._PHASE1] == [1] * len(self._PHASE1)
+        assert row["body_complete"] is None
+        assert json.loads(row["caps_json"]) == {}
+
+    @pytest.mark.parametrize("flag", _PHASE1)
+    def test_each_flag_is_written_on_its_own(self, db, flag):
+        msg = make_message(message_id="one@x")
+        setattr(msg, flag, False)
+        db.upsert_thread(make_thread(messages=[msg]), FAKE_EMBEDDING)
+        row = self._row(db, msg.claimant_id)
+        assert {c: row[c] for c in self._PHASE1} == {c: int(c != flag) for c in self._PHASE1}
+
+    def test_caps_json_holds_names_and_counts_only(self, db):
+        msg = make_message(message_id="caps@x", subject="SYNTHETIC_CAPS_MARKER")
+        msg.parse_caps = {"address_header": 1, "body_parts": 5}
+        db.upsert_thread(make_thread(messages=[msg]), FAKE_EMBEDDING)
+        stored = self._row(db, msg.claimant_id)["caps_json"]
+        assert json.loads(stored) == {"address_header": 1, "body_parts": 5}
+        assert "SYNTHETIC_CAPS_MARKER" not in stored
+
+    @pytest.mark.parametrize(
+        "caps",
+        [
+            {"SYNTHETIC_CAPS_MARKER": 1},
+            {"address_header": "SYNTHETIC_CAPS_MARKER"},
+            {"body_parts": 0},
+        ],
+    )
+    def test_caps_json_refuses_anything_but_parse_cap_counts(self, db, caps):
+        """The writer is the boundary: a name outside ``PARSE_CAPS`` or a
+        value that is not a positive int never reaches the column, and
+        the refusal quotes neither."""
+        msg = make_message(message_id="bad@x")
+        msg.parse_caps = caps
+        with pytest.raises(ValueError, match="PARSE_CAPS") as excinfo:
+            db.upsert_thread(make_thread(messages=[msg]), FAKE_EMBEDDING)
+        assert "SYNTHETIC_CAPS_MARKER" not in str(excinfo.value)
+
+    def test_update_rewrites_the_flags_and_resets_body_complete(self, db):
+        msg = make_message(message_id="up@x")
+        thread = make_thread(messages=[msg])
+        db.upsert_thread(thread, FAKE_EMBEDDING)
+        db.set_body_complete(msg.claimant_id, True)
+        assert self._row(db, msg.claimant_id)["body_complete"] == 1
+        msg.to_addresses_complete = False
+        msg.parse_caps = {"address_count": 3}
+        db.upsert_thread(thread, FAKE_EMBEDDING)
+        row = self._row(db, msg.claimant_id)
+        assert row["to_addresses_complete"] == 0
+        assert json.loads(row["caps_json"]) == {"address_count": 3}
+        # Phase 1 again: this pass has not committed the chunks yet.
+        assert row["body_complete"] is None
+
+    @pytest.mark.parametrize(("complete", "stored"), [(True, 1), (False, 0)])
+    def test_set_body_complete_stores_the_flag(self, db, complete, stored):
+        msg = make_message(message_id="b@x")
+        db.upsert_thread(make_thread(messages=[msg]), FAKE_EMBEDDING)
+        db.set_body_complete(msg.claimant_id, complete)
+        assert self._row(db, msg.claimant_id)["body_complete"] == stored
+
+    def test_set_body_complete_rolls_back_with_its_transaction(self, db):
+        msg = make_message(message_id="rb@x")
+        db.upsert_thread(make_thread(messages=[msg]), FAKE_EMBEDDING)
+        with pytest.raises(RuntimeError), db.transaction():
+            db.set_body_complete(msg.claimant_id, True)
+            raise RuntimeError("injected")
+        assert self._row(db, msg.claimant_id)["body_complete"] is None
 
 
 class TestMigrationV2:
@@ -477,7 +634,7 @@ class TestMigrationV2:
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [2, 3, 4]" in caplog.text
+        assert "applied migrations: [2, 3, 4, 5]" in caplog.text
 
     def test_the_migrated_column_rejects_other_values(self, tmp_path):
         db = Database(tmp_path / "v1.db")
@@ -521,12 +678,12 @@ class TestMigrationV3:
         migrated = Database(tmp_path / "v2.db")
         fresh = Database(tmp_path / "fresh.db")
         try:
-            assert migrated._conn.execute("SELECT version FROM schema_version").fetchone()[0] == 4
+            assert migrated._conn.execute("SELECT version FROM schema_version").fetchone()[0] == 5
             assert _schema_shape(migrated._conn) == _schema_shape(fresh._conn)
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [3, 4]" in caplog.text
+        assert "applied migrations: [3, 4, 5]" in caplog.text
         assert "SYNTHETIC" not in caplog.text
 
     def test_existing_rows_are_unknown_and_nothing_is_queued(self, tmp_path, monkeypatch):
@@ -3831,6 +3988,7 @@ class TestMessagesTable:
             "replied",
             "sender_ambiguous",
             "participant_names_complete",
+            *_V5_COLUMNS,
         }
         cols = {r["name"] for r in db._conn.execute("PRAGMA table_info(message_participants)")}
         assert cols == {"claimant_id", "role", "address", "name"}

@@ -241,7 +241,12 @@ tool=search_emails outcome=ok total_ms=41.7 stages_ms={'query_embedding': 22.4, 
   `thread_vec_expansions` / `chunk_vec_expansions` (re-queries with a
   wider window). The retrieval tools record what they returned (#886):
   `total_matches` and `returned` (`query_messages`, `query_attachments`), `indeterminate`
-  (`query_messages`, `query_attachments`, and `search_attachments` with `sender`), `messages`
+  (`query_messages`, `query_attachments`, and `search_attachments` with `sender`), and, when
+  `query_messages`' or `query_attachments`' `indeterminate` is not 0, one
+  `indeterminate_cause_<cause>` count of 1 per cause its filters can
+  have (`sender_ambiguous`, `address_list`, `display_names`, `subject`,
+  `body`, `attachment_list`, `size`; [Response
+  contract](#query_messages)), `messages`
   (`get_thread`, `get_message`), `threads` (`list_threads`),
   `contacts` (`find_contact`) and `folders` (`list_folders`). They run
   no timed stages, so their `stages_ms` and `config` are empty, as are
@@ -447,11 +452,11 @@ different filters"), never read against them.
 
 | Leaf | Value | Built by | Matches a message when |
 |---|---|---|---|
-| `sender` | address, domain or name fragment | `query_messages` `sender`; `search_attachments` `sender`, on the carrying message; `search_emails` `from_addr` and the tools that share it | its From role carries the value ([address matching](#query_messages)); unknown when its `sender_ambiguous` is not `false` ([Sender attribution](#sender-attribution)) |
-| `recipient` | address, domain or name fragment | `query_messages` `recipient` | its To or Cc role carries the value |
+| `sender` | address, domain or name fragment | `query_messages` `sender`; `search_attachments` `sender`, on the carrying message; `search_emails` `from_addr` and the tools that share it | its From role carries the value ([address matching](#query_messages)); unknown when its `sender_ambiguous` is not `false` ([Sender attribution](#sender-attribution)), or when it does not and its From addresses are not complete ([unknown values](#filter-predicates)) |
+| `recipient` | address, domain or name fragment | `query_messages` `recipient` | its To or Cc role carries the value; unknown when neither does and either role's addresses are not complete |
 | `participant` | address, domain or name fragment | `participant` on `query_messages`, `search_emails` and the tools that share it | its To or Cc role carries the value, or its From role does as for `sender` (SQL three-valued OR: unknown when To and Cc do not and `sender` is unknown) |
-| `subject` | text | `query_messages` `subject` | its own subject contains the text, casefolded |
-| `text` | words | `query_messages` `text` | every word occurs in its indexed body (FTS, stemmed; at most 16 words) |
+| `subject` | text | `query_messages` `subject` | its own subject contains the text, casefolded; unknown when it does not and the stored subject was cut or not checked |
+| `text` | words | `query_messages` `text` | every word occurs in its indexed body (FTS, stemmed; at most 16 words); unknown when one does not and the indexed body is not complete |
 | `folder` | folder names | `query_messages` `folder`; `search_emails` `folders` | it is filed in one of them |
 | `not_in_folders` | folder names | the default scope, when no folder is named | it is filed in none of them (`Trash`; [Trash](#trash-is-left-out-by-default)) |
 | `effective_from` | UTC instant | `date_from` | its effective time is at or after the instant |
@@ -461,13 +466,13 @@ different filters"), never read against them.
 | `occurred_from` | UTC instant | no tool yet (#1150) | its delivery date (`occurred_at`) is at or after the instant; unknown without one |
 | `occurred_to` | UTC instant | no tool yet (#1150) | its delivery date is at or before the instant; unknown without one |
 | `dated` | clock name | no tool yet (#1150) | it has that clock (a delivery date), so it has a place in a page ordered by it; unknown without one |
-| `has_attachments` | bool | `has_attachments` | its own attachment flag equals the value |
+| `has_attachments` | bool | `has_attachments` | its own attachment flag equals the value; unknown when it stores no attachment and its attachment list is not complete |
 | `seen` | bool | `query_messages` `seen` | its read flag equals the value |
 | `flagged` | bool | `query_messages` `flagged` | its flagged flag equals the value |
 | `replied` | bool | `query_messages` `replied` | its answered flag (the Maildir `R` flag) equals the value |
 | `size_min` | bytes | `query_messages` `size_min` | its local file size is at least the value; unknown without a stored size |
 | `size_max` | bytes | `query_messages` `size_max` | its local file size is at most the value; unknown without a stored size |
-| `authority_class` | class name | `authority_class` | its From sender carries the class, outside Spam, and its `sender_ambiguous` is `false`; unknown outside Spam when its `sender_ambiguous` is not `false` ([Sender attribution](#sender-attribution)) |
+| `authority_class` | class name | `authority_class` | its From sender carries the class, outside Spam, and its `sender_ambiguous` is `false`; unknown outside Spam when its `sender_ambiguous` is not `false` ([Sender attribution](#sender-attribution)), or when no stored From address carries the class and its From addresses are not complete |
 
 `query_attachments` builds the same leaves as `query_messages` for its
 `sender`, `recipient`, `participant`, `folder` and date filters and
@@ -504,9 +509,30 @@ match."). `total_matches` is then not the complete count: report
 same predicate, read in the same snapshot, and runs only when a leaf
 that can be unknown is present; a query of decided leaves only (the
 default) costs nothing more and reports 0.
-[#1086](https://github.com/marshalltech81/protonmail-local-ai/issues/1086)
-extends the rule to content evaluability (capped bodies, failed
-extractions).
+
+**Stored content that may be incomplete
+([#1086](https://github.com/marshalltech81/protonmail-local-ai/issues/1086)).**
+The indexer records per message whether the content each filter reads
+is complete: the subject (cut at 2,000 characters), the From, To and Cc
+addresses (each role on its own: a header over a parse limit, an entry
+that yields no storable address, or, for all three, a header scan cut
+short; a repeated `From` leaves its later headers unread), the
+attachment list (a parse limit that stopped the walk) and the indexed
+body (text parts past a parse limit). Each flag is `1` complete, `0`
+known loss, or `null` not assessed: mail indexed before the upgrade
+that added them until its reparse runs, a dead-lettered message until
+`make requeue-dead`, and, for the body only, a message whose body
+chunks are not committed yet. A stored match still decides a leaf; a
+leaf that finds nothing is false only under `1`, and unknown under `0`
+or `null`. So `subject`, `text`, `has_attachments`, `sender`,
+`recipient`, `participant` and `authority_class` (outside Spam) can
+leave a message indeterminate, inside the gates above (`sender` and
+the From side of `participant` and `authority_class` are still unknown
+whenever `sender_ambiguous` is not `false`). `has_attachments` is
+decided either way by a stored attachment, and an empty list decides
+it only when complete. Attachment *text* (`search_attachments`) is not
+covered: its completeness is
+[#1242](https://github.com/marshalltech81/protonmail-local-ai/issues/1242).
 
 **Thread-level evaluation (`search_emails`).** The thread filters are
 decided per leaf, each on its own: one message can satisfy the sender
@@ -843,9 +869,10 @@ matches, by the `sender` leaf `query_messages` uses
 exactly, anything else is a case-insensitive substring of the address
 or display name. A carrying message the leaf cannot decide (its
 `sender_ambiguous` is `true` or `null`, [Sender
-attribution](#sender-attribution), or a name or fragment it does not
-match while its display names are not all indexed, [unknown
-values](#filter-predicates)) keeps its attachments out of the
+attribution](#sender-attribution), or a value it does not match while
+its From addresses or, for a name or fragment, its display names are
+not all indexed, [unknown values](#filter-predicates)) keeps its
+attachments out of the
 results; right after the upgrade that added `sender_ambiguous`, that is
 all mail indexed before it until the reparse drains. With a non-blank
 `sender` the response counts them as `indeterminate`
@@ -1155,18 +1182,18 @@ questions.
 | `sender` | string | none | From address (see address matching below) |
 | `recipient` | string | none | To or Cc address |
 | `participant` | string | none | Any role: From, To, or Cc |
-| `subject` | string | none | Unicode caseless substring of the message's own subject (casefolded, so `STRASSE` matches `Straße`) |
-| `text` | string | none | Every word must appear in the message's indexed body (FTS word match with stemming; words may be in different chunks). Attachment text and stripped quoted replies are not searched; at most 16 words |
+| `subject` | string | none | Unicode caseless substring of the message's own subject (casefolded, so `STRASSE` matches `Straße`); a message whose stored subject was cut or is not checked yet and does not contain it is `indeterminate` |
+| `text` | string | none | Every word must appear in the message's indexed body (FTS word match with stemming; words may be in different chunks). Attachment text and stripped quoted replies are not searched; at most 16 words. A message whose indexed body is not complete and lacks a word is `indeterminate` |
 | `folder` | string | none | Exact folder name. Without it, messages filed in Trash are left out; pass `"Trash"` to list them ([Trash](#trash-is-left-out-by-default)) |
 | `date_from` | string | none | Inclusive ISO 8601 lower bound on the message's effective time (`occurred_at`, else `sent_at`) |
 | `date_to` | string | none | Inclusive upper bound; a date-only value covers the whole UTC day. Give an offset for a local-time bound; `date_bounds` echoes the UTC instants applied ([date bounds](#search_emails)) |
-| `has_attachments` | bool | none | The message's own attachment flag, either way |
+| `has_attachments` | bool | none | The message's own attachment flag, either way; a message with no stored attachment whose attachment list is not complete is `indeterminate` either way |
 | `seen` | bool | none | `true` for messages read in Proton, `false` for unread ([read state](#read-state)) |
 | `flagged` | bool | none | `true` for flagged (starred) messages, `false` for the rest |
 | `replied` | bool | none | `true` for messages answered in Proton (the Maildir `R` flag), `false` for the rest |
 | `size_min` | int | none | Inclusive lower bound in bytes on the message's local Maildir file size: not IMAP `RFC822.SIZE` (isync writes LF line endings, so a message is about one byte per line smaller than the server's size). A message whose size is not stored is left out. An integer from 0 to 2^63-1 (SQLite's INTEGER range, stated in the schema as `minimum` / `maximum`), checked strictly, so `"100"` or `true` is an error, not a coerced filter, logged through the rate-limited `rejected invalid argument: query_messages.size_min` warning; `size_min` above `size_max` is an error |
 | `size_max` | int | none | Inclusive upper bound in bytes, likewise |
-| `authority_class` | string | none | The source-authority class of the message's From sender (any author, for a multi-author From): `counsel`, `management`, `vendor`, `government`, `personal`, `other`, or `unclassified`; a message in Spam never matches, and any other whose `sender_ambiguous` is not `false` is counted as `indeterminate`, not matched ([Sender attribution](#sender-attribution)); blank is ignored, any other value is an error |
+| `authority_class` | string | none | The source-authority class of the message's From sender (any author, for a multi-author From): `counsel`, `management`, `vendor`, `government`, `personal`, `other`, or `unclassified`; a message in Spam never matches, and any other whose `sender_ambiguous` is not `false`, or whose From addresses are not complete with none of the class stored, is counted as `indeterminate`, not matched ([Sender attribution](#sender-attribution)); blank is ignored, any other value is an error |
 | `limit` | int | `25` | Messages per page; clamped to `[1, 100]` |
 | `cursor` | string | none | `next_cursor` from the previous page of the same query |
 | `fields` | list of strings | none (every field) | Row fields to return; see Field projection below |
@@ -1220,9 +1247,14 @@ messages the filters could neither accept nor reject ([unknown
 values](#filter-predicates)); the prose states it whenever it is not
 0, naming the causes the given filters can have (`no stored size` for
 `size_min` / `size_max`; `sender ambiguous or not yet checked` for
-`sender` / `participant` / `authority_class`; `display names not all
-indexed (reparse pending, or over the name budget)` for a `sender`,
-`recipient` or `participant` given as a name or fragment). `total_matches` counts the definite matches:
+`sender` / `participant` / `authority_class`; `address list incomplete (an over-long or unparseable address), or not yet checked` for
+`sender` / `recipient` / `participant` / `authority_class`; `display
+names not all indexed (reparse pending, or over the name budget)` for a
+`sender`, `recipient` or `participant` given as a name or fragment;
+`subject cut to the stored length, or not yet checked` for `subject`;
+`body not fully indexed (a parse cap, indexing not finished, or reparse
+pending)` for `text`; `attachment list incomplete (a parse cap), or not
+yet checked` for `has_attachments`). `total_matches` counts the definite matches:
 it is the complete count only when `indeterminate` is 0, so report
 `indeterminate` with any count when it is not. A `sender` filter
 decides only messages whose `sender_ambiguous` is `false`, and a
@@ -1240,7 +1272,11 @@ until `make requeue-dead`. Likewise, right after the upgrade that added
 every `sender`, `recipient` or `participant` filter given as a name or
 fragment reports each message it does not match as `indeterminate`
 until the reparse drains, since that mail's names past the first are
-not stored yet. Each
+not stored yet. And right after the upgrade that added the per-message
+completeness flags (#1086), every `subject`, `text`,
+`has_attachments`, address or `authority_class` filter reports each
+message it does not match as `indeterminate` until the reparse
+reaches it ([stored content](#filter-predicates)). Each
 message carries its send and delivery dates, folder, read state,
 [pending deletion](#pending-deletion), attachment flag, subject,
 From / To / Cc (at most 10 per role, with a count of the rest),
@@ -1385,7 +1421,12 @@ messages. There is no `date_basis`: the clock is effective time, as in
 **Unknown values.** A filter can leave an occurrence undecided: a
 message filter for the reasons it leaves a message undecided in
 `query_messages` (a carrying message whose sender is ambiguous or not
-yet checked, or whose display names are not all indexed), and an
+yet checked, whose stored addresses for the filtered role were cut by a
+parse limit or are not checked yet, [stored
+content](#filter-predicates), or whose display names are not all
+indexed; right after the upgrade that added the completeness flags,
+#1086, every address filter reports each attachment on mail it does not
+match as `indeterminate` until the reparse reaches that mail), and an
 `extraction_status` other than `none` on an occurrence with no
 extraction recorded for its payload and extractor module (not run yet,
 or extraction off), since it may still be extracted with that status.
@@ -1704,9 +1745,9 @@ metadata, at query time (`Database.message_scope`, no schema change):
   `indeterminate` (a `from_addr` filter, or a `participant` filter not
   met through To or Cc, on a message
   whose `sender_ambiguous` is not `false`, [Sender
-  attribution](#sender-attribution); a name or fragment that matches
-  nothing on a message whose display names are not all indexed) is not
-  in scope, so right after
+  attribution](#sender-attribution); a value that matches nothing on a
+  message whose addresses in those roles, or for a name or fragment its
+  display names, are not all indexed) is not in scope, so right after
   the upgrade that added `sender_ambiguous`, a `from_addr` request
   labels the passages of mail indexed before it `context` until the
   reparse drains.

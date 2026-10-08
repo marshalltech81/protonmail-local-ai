@@ -804,3 +804,71 @@ class TestTool:
         assert all(check(v) for v in EXTRACTION_STATUS_FILTERS)
         assert not check(MARKER)
         assert not check("None")
+
+
+class TestAddressCompleteness:
+    """#1086: an address filter that finds nothing on a carrying message
+    whose stored addresses for that role are incomplete (0) or not yet
+    checked (NULL) cannot rule it out: the occurrence is indeterminate,
+    not a miss. A stored match still decides it."""
+
+    @pytest.fixture
+    def db(self, tmp_path):
+        conn, path = _open_built_db_conn(tmp_path, "completeness.db")
+        # (message, From, To, completeness overrides)
+        for i, (mid, from_, to, flags) in enumerate(
+            (
+                ("hit", "jane@example.com", "carol@example.net", {"to_addresses_complete": None}),
+                ("whole", "bob@example.org", "dan@example.net", {}),
+                ("to-null", "bob@example.org", "dan@example.net", {"to_addresses_complete": None}),
+                ("cc-zero", "bob@example.org", "dan@example.net", {"cc_addresses_complete": 0}),
+                ("from-zero", "bob@example.org", "dan@example.net", {"from_addresses_complete": 0}),
+            )
+        ):
+            _insert_message(
+                conn,
+                message_id=mid,
+                thread_id=f"t-{mid}",
+                sent_at=f"2024-04-0{i + 1}T09:00:00+00:00",
+                from_=[from_],
+                to=[to],
+                has_attachments=True,
+                completeness=flags,
+            )
+            _insert_attachment(
+                conn, message_id=mid, thread_id=f"t-{mid}", attachment_id=f"p-{mid}", filename="f"
+            )
+        conn.commit()
+        conn.close()
+        return Database(str(path))
+
+    @pytest.mark.parametrize(
+        ("filters", "matches", "indeterminate"),
+        [
+            # To NULL on "hit" does not matter: the stored To decides.
+            ({"recipient": "carol@example.net"}, 1, 2),
+            ({"recipient": "carol"}, 1, 2),
+            # The From flag alone, for the sender role.
+            ({"sender": "jane@example.com"}, 1, 1),
+            # Any role incomplete leaves participant unknown on a miss.
+            ({"participant": "carol@example.net"}, 1, 3),
+        ],
+    )
+    def test_counts(self, db, filters, matches, indeterminate):
+        page = db.query_attachments(**filters, limit=1)
+        assert (page.total_matches, page.indeterminate) == (matches, indeterminate)
+        # status_counts covers the definite matches only.
+        assert sum(page.status_counts.values()) == matches
+
+    def test_prose_and_timing_line_name_the_cause(self, fake_server, db, caplog):
+        tool = _handlers(fake_server, db)["query_attachments"]
+        caplog.set_level(logging.INFO)
+        out = asyncio.run(tool(recipient="carol@example.net"))
+        assert out.structured_content["indeterminate"] == 2
+        assert (
+            "address list incomplete (an over-long or unparseable address), or not yet checked"
+            in out.content[0].text
+        )
+        [line] = [r.getMessage() for r in caplog.records if r.name == "mcp.timings"]
+        assert "'indeterminate_cause_address_list': 1" in line
+        assert "indeterminate_cause_sender_ambiguous" not in line
