@@ -300,7 +300,8 @@ class TestSearchAttachmentsSenderTool:
         out = asyncio.run(
             _handler(fake_server, fake_embed, carrier_db)(sender="nobody@nowhere.test")
         )
-        assert out.content[0].text == "No attachments found."
+        # With a sender the count is stated, 0 included (#1204).
+        assert out.content[0].text == "No attachments found.\nindeterminate: 0"
         assert out.structured_content["results"] == []
 
     def test_sender_value_never_reaches_logs(self, fake_server, fake_embed, carrier_db, caplog):

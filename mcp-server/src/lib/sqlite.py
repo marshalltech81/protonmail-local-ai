@@ -243,6 +243,21 @@ _SOURCE_COLUMNS = (
     "m.size_bytes AS source_size_bytes, m.indexed_at AS source_indexed_at"
 )
 
+# The attachment occurrence a ``search_attachments`` text-lane chunk ``c``
+# is reported as: the lowest occurrence of its payload in its message
+# whose extraction succeeded and that passes ``content_type`` (bound
+# twice, ``?`` / ``?``). Shared by the lane and its ``indeterminate``
+# count (#1204) so both anchor alike; see ``_attachment_text_lane``.
+_TEXT_LANE_ANCHOR = (
+    "( SELECT MIN(a2.attachment_occurrence_id) FROM attachments a2 "
+    "JOIN attachment_extractions e2 ON e2.attachment_id = a2.attachment_id "
+    "  AND e2.extractor_module = a2.extractor_module "
+    "  AND e2.extraction_status = 'success' "
+    "WHERE a2.attachment_id = c.attachment_id "
+    "  AND a2.claimant_id = c.claimant_id "
+    "  AND (? IS NULL OR a2.content_type = ?) )"
+)
+
 
 # Characters of a sender's display name and of its address fetched with
 # each evidence chunk. Both are sender-controlled and repeat on every
@@ -497,6 +512,19 @@ class AttachmentResult:
     score: float = 0.0
     # Raw file of the message carrying the attachment.
     source_file: SourceFile | None = None
+
+
+@dataclass
+class AttachmentSearch:
+    """``Database.search_attachments_with_count``'s answer.
+
+    ``indeterminate`` is ``None`` without a ``sender`` filter, and also
+    when the count failed (unavailable, never 0); with a ``sender``, the
+    candidates the ``sender`` leaf left undecided (#1204).
+    """
+
+    results: list[AttachmentResult]
+    indeterminate: int | None = None
 
 
 def _row_to_attachment_result(r) -> AttachmentResult:
@@ -1356,6 +1384,17 @@ class Database:
         with closing(self._connect()) as conn:
             return conn.execute(sql, params).fetchone()
 
+    def _lane_rows(
+        self, sql: str, params: list, conn: sqlite3.Connection | None
+    ) -> list[sqlite3.Row]:
+        """``sql``'s rows on ``conn`` (a caller's read transaction), or
+        on a fresh connection without one. A statement's error leaves
+        ``conn``'s transaction open, so a lane that catches it keeps the
+        caller's snapshot."""
+        if conn is not None:
+            return conn.execute(sql, params).fetchall()
+        return self._fetchall(sql, params)
+
     def _default_folder_scope(
         self, folders: list[str] | None, conn: sqlite3.Connection | None = None
     ) -> list[str] | None:
@@ -1805,6 +1844,29 @@ class Database:
         limit: int = 20,
         sender: str | None = None,
     ) -> list[AttachmentResult]:
+        """The results of ``search_attachments_with_count``."""
+        return self.search_attachments_with_count(
+            query=query,
+            content_type=content_type,
+            from_addr=from_addr,
+            date_from=date_from,
+            date_to=date_to,
+            extracted_only=extracted_only,
+            limit=limit,
+            sender=sender,
+        ).results
+
+    def search_attachments_with_count(
+        self,
+        query: str | None = None,
+        content_type: str | None = None,
+        from_addr: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        extracted_only: bool = False,
+        limit: int = 20,
+        sender: str | None = None,
+    ) -> AttachmentSearch:
         """Search indexed attachments by filename, MIME type, and extracted text.
 
         Two FTS lanes run when ``query`` is set: ``attachments_fts``
@@ -1827,11 +1889,18 @@ class Database:
         ``query_messages``' ``sender`` leaf, in SQL in every lane
         (#1056). A blank ``content_type`` or ``sender`` is no filter,
         normalized here once so every lane applies the same rule.
+
+        With a ``sender``, ``indeterminate`` counts the candidates whose
+        carrying message the leaf leaves undecided (#1204;
+        ``_attachment_undecided_count``). The lanes and the count run in
+        one read transaction, so the results and the count partition the
+        same snapshot even while the indexer commits a reparse.
         """
         if content_type is not None and not content_type.strip():
             content_type = None
+        sender = _given(sender)
         extra_clauses, extra_params = self._attachment_filter_clauses(
-            content_type, date_from, date_to, extracted_only, _given(sender)
+            content_type, date_from, date_to, extracted_only, sender
         )
         # ``from_addr`` is matched in Python against the parent thread's
         # senders (the attachments table carries no sender column).
@@ -1841,29 +1910,143 @@ class Database:
         fetch_limit = limit * (_FILTERED_OVERSAMPLE if from_addr else 1)
 
         fts_query = _sanitize_fts_query(query) if query else ""
-        if fts_query:
-            results = self._attachment_filename_lane(
-                fts_query, extra_clauses, extra_params, fetch_limit
-            )
-            seen = {(r.attachment_id, r.claimant_id, r.filename) for r in results}
-            for r in self._attachment_text_lane(
-                fts_query, content_type, extra_clauses, extra_params, fetch_limit
-            ):
-                key = (r.attachment_id, r.claimant_id, r.filename)
-                if key not in seen:
-                    seen.add(key)
-                    results.append(r)
-        elif query:
+        if query and not fts_query:
             # A query that sanitized to nothing (pure punctuation) is an
-            # explicit no-match rather than a silent unfiltered scan.
-            return []
-        else:
-            results = self._attachment_scan(extra_clauses, extra_params, fetch_limit)
+            # explicit no-match rather than a silent unfiltered scan; it
+            # has no candidates, so none is undecided either.
+            return AttachmentSearch([], 0 if sender else None)
+
+        with closing(self._connect()) as conn:
+            # One read transaction: the lanes and the count read the same
+            # snapshot (the shape of ``query_messages``). A lane's
+            # statement-level error is caught in the lane and does not end
+            # the transaction.
+            conn.execute("BEGIN")
+            if fts_query:
+                results = self._attachment_filename_lane(
+                    fts_query, extra_clauses, extra_params, fetch_limit, conn
+                )
+                seen = {(r.attachment_id, r.claimant_id, r.filename) for r in results}
+                for r in self._attachment_text_lane(
+                    fts_query, content_type, extra_clauses, extra_params, fetch_limit, conn
+                ):
+                    key = (r.attachment_id, r.claimant_id, r.filename)
+                    if key not in seen:
+                        seen.add(key)
+                        results.append(r)
+            else:
+                results = self._attachment_scan(extra_clauses, extra_params, fetch_limit, conn)
+
+            indeterminate: int | None = None
+            if sender:
+                try:
+                    indeterminate = self._attachment_undecided_count(
+                        conn,
+                        fts_query,
+                        content_type,
+                        date_from,
+                        date_to,
+                        extracted_only,
+                        sender,
+                        from_addr,
+                    )
+                except (sqlite3.Error, ValueError) as e:
+                    # Unavailable, never 0: a 0 would read as "every
+                    # candidate decided". Type only: the error can quote
+                    # stored mail.
+                    log.warning(
+                        "Attachment search indeterminate count unavailable: %s",
+                        type(e).__name__,
+                    )
+                    timings.count("degraded_attachment_indeterminate", 1)
+            conn.rollback()
 
         if from_addr:
             fa = from_addr.lower()
             results = [r for r in results if _addr_matches(r.senders, fa)]
-        return results[:limit]
+        return AttachmentSearch(results[:limit], indeterminate)
+
+    def _attachment_undecided_count(
+        self,
+        conn: sqlite3.Connection,
+        fts_query: str,
+        content_type: str | None,
+        date_from: str | None,
+        date_to: str | None,
+        extracted_only: bool,
+        sender: str,
+        from_addr: str | None,
+    ) -> int:
+        """Candidates whose carrying message the ``sender`` leaf leaves
+        undecided (its SQL is NULL: ``sender_ambiguous`` not 0, #1153).
+
+        The candidates are what the lanes reach with no limit: the
+        filename lane, the text lane with its anchored occurrence, or the
+        filtered scan without a query. Every filter applies except the
+        ``sender`` ``EXISTS``, replaced by the leaf ``IS NULL``; the
+        Trash exclusion stays. A candidate is counted once per
+        ``(attachment_id, claimant_id, filename)``, the identity the
+        result merger dedupes by. ``from_addr`` is applied per thread in
+        Python, as the results apply it. Raises ``sqlite3.Error`` or
+        ``ValueError`` (a malformed ``senders`` row) for the caller to
+        report the count unavailable.
+        """
+        clauses, params = self._attachment_filter_clauses(
+            content_type, date_from, date_to, extracted_only
+        )
+        sender_sql, sender_params = compile_leaves([Leaf("sender", sender)])
+        clauses.append(
+            "EXISTS (SELECT 1 FROM messages m WHERE m.claimant_id = a.claimant_id "  # nosec B608
+            f"AND ({sender_sql}) IS NULL)"
+        )
+        params += sender_params
+        where = " AND ".join(clauses)
+        joins = (
+            "JOIN threads t ON a.thread_id = t.thread_id "
+            "LEFT JOIN attachment_extractions e ON e.attachment_id = a.attachment_id "
+            "AND e.extractor_module = a.extractor_module "
+        )
+        columns = "a.attachment_id, a.claimant_id, a.filename, a.thread_id"
+        if fts_query:
+            # The two lanes' candidates, as each lane selects them: the
+            # text lane's occurrence is its anchor (``_attachment_text_lane``).
+            candidates = (
+                f"SELECT {columns} FROM attachments_fts "  # nosec B608
+                "JOIN attachments a ON attachments_fts.rowid = a.fts_rowid "
+                f"{joins}WHERE attachments_fts MATCH ? AND {where} "
+                "UNION "
+                f"SELECT {columns} FROM ( "
+                "    SELECT rowid AS fts_rowid FROM message_chunks_fts "
+                "    WHERE message_chunks_fts MATCH ? ) h "
+                "JOIN message_chunks c ON c.fts_rowid = h.fts_rowid "
+                f"JOIN attachments a ON a.attachment_occurrence_id = {_TEXT_LANE_ANCHOR} "
+                f"{joins}WHERE c.attachment_id IS NOT NULL AND {where}"
+            )
+            candidate_params = [
+                fts_query,
+                *params,
+                fts_query,
+                content_type,
+                content_type,
+                *params,
+            ]
+        else:
+            candidates = f"SELECT {columns} FROM attachments a {joins}WHERE {where}"  # nosec B608
+            candidate_params = list(params)
+        # UNION and the GROUP BY remove duplicates by the merger's
+        # identity; each is counted under one thread.
+        sql = (
+            "WITH cand AS ( " + candidates + " ), "  # nosec B608
+            "uniq AS ( SELECT MIN(thread_id) AS thread_id FROM cand "
+            "    GROUP BY attachment_id, claimant_id, filename ) "
+            "SELECT uniq.thread_id, t.senders, COUNT(*) AS n FROM uniq "
+            "JOIN threads t ON t.thread_id = uniq.thread_id GROUP BY uniq.thread_id"
+        )
+        rows = conn.execute(sql, candidate_params).fetchall()
+        if not from_addr:
+            return sum(r["n"] for r in rows)
+        fa = from_addr.lower()
+        return sum(r["n"] for r in rows if _addr_matches(json.loads(r["senders"]), fa))
 
     @staticmethod
     def _attachment_filter_clauses(
@@ -1913,8 +2096,9 @@ class Database:
             # ``query_messages`` compiles (#1056), so both tools share
             # one match rule. A leaf unknown for the message (its
             # ``sender_ambiguous`` not 0, #1153) keeps the attachment
-            # out, as it keeps the message off a page; this tool does
-            # not count them (#1204).
+            # out, as it keeps the message off a page; the tool counts
+            # them as ``indeterminate`` (``_attachment_undecided_count``,
+            # #1204).
             sender_sql, sender_params = compile_leaves([Leaf("sender", sender)])
             clauses.append(
                 "EXISTS (SELECT 1 FROM messages m WHERE m.claimant_id = a.claimant_id "  # nosec B608
@@ -1929,8 +2113,10 @@ class Database:
         extra_clauses: list[str],
         extra_params: list,
         limit: int,
+        conn: sqlite3.Connection | None = None,
     ) -> list[AttachmentResult]:
-        """Attachments whose filename / content type match ``fts_query``."""
+        """Attachments whose filename / content type match ``fts_query``.
+        ``conn`` runs the lane inside a caller's snapshot."""
         where = ["attachments_fts MATCH ?", *extra_clauses]
         params = [fts_query, *extra_params, limit]
         # WHERE clauses are fixed literals (the MATCH plus the
@@ -1954,7 +2140,7 @@ class Database:
             "ORDER BY score LIMIT ?"
         )
         try:
-            rows = self._fetchall(sql, params)
+            rows = self._lane_rows(sql, params, conn)
         except sqlite3.OperationalError as e:
             log.warning("Attachment filename search unavailable: %s", type(e).__name__)
             timings.count("degraded_attachment_filename", 1)
@@ -1968,6 +2154,7 @@ class Database:
         extra_clauses: list[str],
         extra_params: list,
         limit: int,
+        conn: sqlite3.Connection | None = None,
     ) -> list[AttachmentResult]:
         """Attachments whose extracted text matches ``fts_query``.
 
@@ -1993,7 +2180,8 @@ class Database:
         the scored hits are a MATERIALIZED CTE (which SQLite does not
         flatten into the GROUP BY). The filters apply before the grouping,
         so a narrowly filtered search does not aggregate every matching
-        chunk in the mailbox.
+        chunk in the mailbox. ``conn`` runs the lane inside a caller's
+        snapshot.
         """
         where = ["c.attachment_id IS NOT NULL", *extra_clauses]
         params = [fts_query, content_type, content_type, *extra_params, limit]
@@ -2004,14 +2192,7 @@ class Database:
             "best AS ( "
             "    SELECT a.attachment_occurrence_id, MIN(h.score) AS score "
             "    FROM hits h JOIN message_chunks c ON c.fts_rowid = h.fts_rowid "
-            "    JOIN attachments a ON a.attachment_occurrence_id = ( "
-            "        SELECT MIN(a2.attachment_occurrence_id) FROM attachments a2 "
-            "        JOIN attachment_extractions e2 ON e2.attachment_id = a2.attachment_id "
-            "          AND e2.extractor_module = a2.extractor_module "
-            "          AND e2.extraction_status = 'success' "
-            "        WHERE a2.attachment_id = c.attachment_id "
-            "          AND a2.claimant_id = c.claimant_id "
-            "          AND (? IS NULL OR a2.content_type = ?) ) "
+            f"    JOIN attachments a ON a.attachment_occurrence_id = {_TEXT_LANE_ANCHOR} "
             "    JOIN threads t ON a.thread_id = t.thread_id "
             "    LEFT JOIN attachment_extractions e ON e.attachment_id = a.attachment_id "
             "AND e.extractor_module = a.extractor_module "
@@ -2034,7 +2215,7 @@ class Database:
             "ORDER BY score LIMIT ?"
         )
         try:
-            rows = self._fetchall(sql, params)
+            rows = self._lane_rows(sql, params, conn)
         except sqlite3.OperationalError as e:
             log.warning("Attachment text search unavailable: %s", type(e).__name__)
             timings.count("degraded_attachment_text", 1)
@@ -2055,8 +2236,10 @@ class Database:
         extra_clauses: list[str],
         extra_params: list,
         limit: int,
+        conn: sqlite3.Connection | None = None,
     ) -> list[AttachmentResult]:
-        """List attachments by structured filters only (no text query)."""
+        """List attachments by structured filters only (no text query).
+        ``conn`` runs the scan inside a caller's snapshot."""
         # ``1=1`` keeps the AND-join valid when no filter clause is set.
         where = ["1=1", *extra_clauses]
         params = [*extra_params, limit]
@@ -2078,7 +2261,7 @@ class Database:
             "ORDER BY m.effective_at DESC LIMIT ?"
         )
         try:
-            rows = self._fetchall(sql, params)
+            rows = self._lane_rows(sql, params, conn)
         except sqlite3.OperationalError as e:
             log.warning("Attachment scan unavailable: %s", type(e).__name__)
             timings.count("degraded_attachment_scan", 1)

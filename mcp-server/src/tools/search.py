@@ -11,7 +11,7 @@ from fastmcp.exceptions import ToolError
 from mcp.types import CallToolResult
 
 from ..lib.embed import embed_query
-from ..lib.predicates import validate_date_range
+from ..lib.predicates import _given, validate_date_range
 from ..lib.rate_limited_log import ArgumentRejections, RateLimitedLog
 from ..lib.security import log_tool_call, safe_provider_exception_text
 from ..lib.sqlite import (
@@ -1193,7 +1193,11 @@ def register_search_tools(
         as coverage limits; do not claim an exhaustive attachment audit.
         With ``from_addr``, the sender filter runs after a bounded candidate
         scan: even fewer than 50 results (including zero) can omit matches.
-        ``sender`` is applied inside the search, before the cap.
+        ``sender`` is applied inside the search, before the cap. With
+        ``sender``, ``indeterminate`` counts the attachments left out
+        because their carrying message's sender is ambiguous or not yet
+        checked (not limited by ``limit``); report it when it is not 0,
+        and read null as unavailable, never as 0.
 
         Args:
             query: Text to match against filename, MIME type, and
@@ -1210,8 +1214,7 @@ def register_search_tools(
                     "Jane") as a case-insensitive substring of the
                     address or display name. Attachments on messages
                     whose sender is ambiguous or not yet checked are
-                    left out, uncounted (query_messages counts them as
-                    indeterminate).
+                    left out and counted as ``indeterminate``.
             date_from: ISO 8601 date lower bound on the message
                        carrying the attachment: its delivery date
                        (occurred_at), else its send date (sent_at).
@@ -1253,8 +1256,8 @@ def register_search_tools(
             raise ToolError(f"Attachment search error: {e}") from e
         try:
             with stage("attachment_search"):
-                results = await asyncio.to_thread(
-                    db.search_attachments,
+                found = await asyncio.to_thread(
+                    db.search_attachments_with_count,
                     query=query,
                     content_type=content_type,
                     from_addr=from_addr,
@@ -1264,6 +1267,7 @@ def register_search_tools(
                     extracted_only=extracted_only,
                     limit=limit,
                 )
+            results = found.results
             count("results", len(results))
         except InvalidFilterError as e:
             # The message quotes the rejected value, which log_tool_call
@@ -1303,13 +1307,43 @@ def register_search_tools(
                 )
                 for a in results
             ],
+            indeterminate=found.indeterminate,
         )
+        # Stated whenever ``sender`` is given, so a short or empty list is
+        # never read as complete when carrying messages could not be
+        # decided (#1204). Fixed text and a count only.
+        indeterminate_line = None
+        if _given(sender):
+            if found.indeterminate is None:
+                indeterminate_line = (
+                    "indeterminate: unavailable (the count of attachments whose carrying "
+                    "message's sender is ambiguous or not yet checked failed; such "
+                    "attachments may be left out)"
+                )
+            else:
+                count("indeterminate", found.indeterminate)
+                indeterminate_line = f"indeterminate: {found.indeterminate}"
+                if found.indeterminate:
+                    indeterminate_line += (
+                        " (attachments whose carrying message's sender is ambiguous or not "
+                        "yet checked, so sender could neither accept nor reject them; not in "
+                        "the results)"
+                    )
         bounds_line = describe_date_bounds(bounds)
         if not results:
-            empty = "No attachments found."
-            return tool_result(f"{empty}\n{bounds_line}" if bounds_line else empty, output)
+            # Undecided attachments may still match.
+            known = found.indeterminate is None or found.indeterminate > 0
+            lines = [
+                "No attachments are known to match."
+                if indeterminate_line and known
+                else "No attachments found."
+            ]
+            lines += [line for line in (indeterminate_line, bounds_line) if line]
+            return tool_result("\n".join(lines), output)
 
         lines = [f"Found {len(results)} attachment(s):"]
+        if indeterminate_line:
+            lines.append(indeterminate_line)
         if bounds_line:
             lines.append(bounds_line)
         lines.append("")
