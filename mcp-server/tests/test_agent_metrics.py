@@ -96,14 +96,24 @@ def _passages(*message_ids: str) -> dict:
     }
 
 
-def _read(message_id: str, offset: int, next_offset: int | None) -> dict:
-    """A get_message call returning the body page of ``message_id`` at ``offset``."""
-    claimant = f"{message_id}#0000abcd"
+def _read(
+    message_id: str,
+    offset: int,
+    next_offset: int | None,
+    *,
+    body: str | None = "",
+    claimant: str | None = None,
+) -> dict:
+    """A get_message call returning the body page of ``message_id`` at
+    ``offset`` (``body`` trimmed to the empty string as the traces do;
+    ``None`` is a message with no indexed body)."""
+    claimant = claimant or f"{message_id}#0000abcd"
     return {
         "tool": "get_message",
         "arguments": {"message_id": claimant, "offset": offset},
         "result": {
             "message": {"message_id": message_id, "claimant_id": claimant, "thread_id": message_id},
+            "body": body,
             "body_offset": offset,
             "body_total_chars": 45_000,
             "next_offset": next_offset,
@@ -111,13 +121,20 @@ def _read(message_id: str, offset: int, next_offset: int | None) -> dict:
     }
 
 
-def _counted(cited: list[str], count: object = 2, text: str = "synthetic") -> dict:
-    """A counting trace: one listing of a.1, b.1 and the decoy d.1, then an answer."""
+def _counted(
+    cited: list[str],
+    count: object = 2,
+    text: str = "synthetic",
+    read: tuple[str, ...] = ("a.1@x.example", "b.1@x.example"),
+) -> dict:
+    """A counting trace: one listing of a.1, b.1 and the decoy d.1, a
+    one-page ``get_message`` read of each of ``read``, then an answer."""
     listing = _page(["a.1@x.example", "b.1@x.example", "d.1@x.example"], has_more=False)
     answer: dict = {"text": text, "cited": cited}
     if count is not None:
         answer["count"] = count
-    return {"scenario": "s1", "calls": [listing], "answer": answer}
+    reads = [_read(m, 0, None) for m in read]
+    return {"scenario": "s1", "calls": [listing, *reads], "answer": answer}
 
 
 def _counting(**overrides: object) -> Scenario:
@@ -297,7 +314,9 @@ class TestCitations:
 
 
 class TestMessageCitations:
-    """Corrections and conflicts are scored on the messages the answer cites."""
+    """Corrections and conflicts are scored on the messages the answer
+    cites, a citation counting only when the trace read the message's
+    content (#804, as for outstanding items)."""
 
     def _correction(self) -> Scenario:
         # a.2 corrects a.1 in the same thread: citing the thread is not enough.
@@ -306,10 +325,17 @@ class TestMessageCitations:
             expected_tools=["get_evidence"],
             required_evidence=[["a.1@x.example"]],
             required_citations=[["a.2@x.example"]],
+            max_calls=3,
         )
 
+    def _found_and_read(self, *message_ids: str) -> list[dict]:
+        """A get_evidence lookup finding a.1 and a.2, then a one-page
+        ``get_message`` read of each of ``message_ids``."""
+        passages = _passages("a.1@x.example", "a.2@x.example")
+        return [passages, *(_read(m, 0, None) for m in message_ids)]
+
     def test_citing_the_correcting_message_passes(self) -> None:
-        trace = _trace([_passages("a.1@x.example", "a.2@x.example")], cited=["c-a.2@x.example"])
+        trace = _trace(self._found_and_read("a.2@x.example"), cited=["c-a.2@x.example"])
         score = score_trace(self._correction(), trace)
         assert score.message_citation_recall == 1.0
         assert score.failures == []
@@ -317,21 +343,21 @@ class TestMessageCitations:
     def test_citing_only_the_superseded_message_fails(self) -> None:
         # Thread-level citation recall passes (a.1 covers its thread); the
         # message-level score catches the stale answer.
-        trace = _trace([_passages("a.1@x.example", "a.2@x.example")], cited=["c-a.1@x.example"])
-        score = score_trace(self._correction(), trace)
+        calls = self._found_and_read("a.1@x.example", "a.2@x.example")
+        score = score_trace(self._correction(), _trace(calls, cited=["c-a.1@x.example"]))
         assert score.citation_recall == 1.0
         assert score.message_citation_recall == 0.0
         assert "message_citation_recall" in score.failures
 
     def test_citing_both_the_old_and_the_correcting_message_passes(self) -> None:
         trace = _trace(
-            [_passages("a.1@x.example", "a.2@x.example")],
+            self._found_and_read("a.1@x.example", "a.2@x.example"),
             cited=["a.1@x.example#0000abcd", "a.2@x.example#0000abcd"],
         )
         assert score_trace(self._correction(), trace).message_citation_recall == 1.0
 
-    def test_a_cited_message_id_counts_when_a_result_returned_it(self) -> None:
-        trace = _trace([_passages("a.2@x.example")], cited=["a.2@x.example"])
+    def test_a_cited_message_id_counts_when_its_body_was_read(self) -> None:
+        trace = _trace(self._found_and_read("a.2@x.example"), cited=["a.2@x.example"])
         assert score_trace(self._correction(), trace).message_citation_recall == 1.0
 
     def test_a_cited_id_no_tool_returned_does_not_count(self) -> None:
@@ -345,10 +371,82 @@ class TestMessageCitations:
         # The thread ID is its root's Message-ID, so it names the root
         # message only, never the reply that corrects it.
         trace = _trace(
-            [_search(["a.1@x.example"]), _passages("a.1@x.example", "a.2@x.example")],
+            [_search(["a.1@x.example"]), *self._found_and_read("a.2@x.example")],
             cited=["a.1@x.example"],
         )
         assert score_trace(self._correction(), trace).message_citation_recall == 0.0
+
+    def test_a_listing_alone_does_not_credit_a_citation(self) -> None:
+        # The listing returned the cited ID (the citation is valid) but no
+        # content, so the correcting message was never read.
+        listing = _page(["a.1@x.example", "a.2@x.example"], has_more=False)
+        trace = _trace([listing], cited=["a.2@x.example#0000abcd"])
+        score = score_trace(self._correction(), trace)
+        assert score.citation_validity == 1.0
+        assert score.message_citation_recall == 0.0
+        assert "message_citation_recall" in score.failures
+
+    def test_a_body_passage_alone_does_not_credit_a_citation(self) -> None:
+        # A get_evidence body passage shows part of the message, not that
+        # the agent read it; the whole body needs get_message or get_thread.
+        trace = _trace([_passages("a.1@x.example", "a.2@x.example")], cited=["c-a.2@x.example"])
+        score = score_trace(self._correction(), trace)
+        assert score.citation_validity == 1.0
+        assert score.message_citation_recall == 0.0
+
+    @pytest.mark.parametrize(("omitted", "recall"), [(0, 1.0), (1, 0.0)], ids=["uncut", "cut"])
+    def test_an_uncut_get_thread_body_credits_a_citation(self, omitted: int, recall: float) -> None:
+        calls = [
+            _passages("a.1@x.example", "a.2@x.example"),
+            _thread_read(["a.2@x.example"], omitted),
+        ]
+        trace = _trace(calls, cited=["a.2@x.example"])
+        assert score_trace(self._correction(), trace).message_citation_recall == recall
+
+    @pytest.mark.parametrize(
+        ("source", "recall"), [("attachment", 1.0), ("body", 0.0)], ids=["attachment", "body"]
+    )
+    def test_an_attachment_passage_credits_a_citation(self, source: str, recall: float) -> None:
+        # No tool returns a whole attachment (#796), so its passage is the read.
+        trace = _trace([_attachment_passage("a.2@x.example", source)], cited=["c-a.2@x.example"])
+        assert score_trace(self._correction(), trace).message_citation_recall == recall
+
+    def test_a_read_with_no_indexed_body_does_not_credit_a_citation(self) -> None:
+        # get_message returns ``body: null`` (offset 0, no next page) for a
+        # message with no indexed body: nothing of its own came back.
+        calls = [
+            _passages("a.1@x.example", "a.2@x.example"),
+            _read("a.2@x.example", 0, None, body=None),
+        ]
+        score = score_trace(self._correction(), _trace(calls, cited=["c-a.2@x.example"]))
+        assert score.message_citation_recall == 0.0
+
+    @pytest.mark.parametrize(
+        ("cited", "recall"),
+        [("a.2@x.example#0000abcd", 0.0), ("a.2@x.example#0000ffff", 1.0), ("a.2@x.example", 1.0)],
+        ids=["listed-claimant", "read-claimant", "bare-message-id"],
+    )
+    def test_a_citation_is_credited_by_a_read_of_its_own_claimant(
+        self, cited: str, recall: float
+    ) -> None:
+        # Two files claim a.2 (#217): one is listed, the other read. Citing
+        # the listed file's claimant ID is not covered by the other's read;
+        # the bare Message-ID names both, so either read covers it.
+        listing = _page(["a.1@x.example", "a.2@x.example"], has_more=False)
+        read = _read("a.2@x.example", 0, None, claimant="a.2@x.example#0000ffff")
+        score = score_trace(self._correction(), _trace([listing, read], cited=[cited]))
+        assert score.message_citation_recall == recall
+
+    def test_an_id_naming_both_a_claimant_and_a_message_is_ambiguous(self) -> None:
+        # A sender can set a Message-ID equal to another message's claimant
+        # ID (the real tool then returns neither). The read correcting
+        # message's claimant ID is also the crafted root's Message-ID, so a
+        # citation of that string names two messages and is credited as none.
+        crafted = "a.2@x.example#0000abcd"
+        listing = _page(["a.1@x.example", crafted], has_more=False)
+        calls = [listing, _read("a.2@x.example", 0, None)]
+        score = score_trace(self._correction(), _trace(calls, cited=[crafted]))
+        assert score.message_citation_recall == 0.0
 
     def test_a_conflict_needs_both_sides_cited(self) -> None:
         scenario = _scenario(
@@ -356,8 +454,9 @@ class TestMessageCitations:
             expected_tools=["get_evidence"],
             required_evidence=[["a.1@x.example"]],
             required_citations=[["a.1@x.example"], ["a.2@x.example"]],
+            max_calls=3,
         )
-        calls = [_passages("a.1@x.example", "a.2@x.example")]
+        calls = self._found_and_read("a.1@x.example", "a.2@x.example")
         one_side = score_trace(scenario, _trace(calls, cited=["c-a.2@x.example"]))
         assert one_side.message_citation_recall == 0.5
         assert "message_citation_recall" in one_side.failures
@@ -679,8 +778,10 @@ class TestAnswerMessages:
         assert score.failures == []
 
     def test_citing_a_decoy_fails(self) -> None:
-        # The decoy matched the same lookup; counting it is the failure.
-        score = score_trace(_counting(), _counted([A1, B1, D1], count=3))
+        # The decoy matched the same lookup; counting it is the failure,
+        # however carefully it was read.
+        read = ("a.1@x.example", "b.1@x.example", "d.1@x.example")
+        score = score_trace(_counting(), _counted([A1, B1, D1], count=3, read=read))
         assert score.answer_messages_exact is False
         assert "answer_messages_exact" in score.failures
 
@@ -693,6 +794,34 @@ class TestAnswerMessages:
         score = score_trace(_counting(), _counted([A1, "a.1@x.example", B1]))
         assert score.answer_messages_exact is True
         assert score.answer_count_correct is True
+
+    def test_citing_after_a_listing_only_fails(self) -> None:
+        # The listing returned both cited IDs (valid citations) but no
+        # content: a message counted without reading it fails (#804).
+        score = score_trace(_counting(), _counted([A1, B1], read=()))
+        assert score.citation_validity == 1.0
+        assert score.answer_messages_exact is False
+        assert "answer_messages_exact" in score.failures
+        assert score.answer_count_correct is True
+
+    def test_a_cited_message_read_only_to_its_first_page_fails(self) -> None:
+        trace = _counted([A1, B1], read=("b.1@x.example",))
+        trace["calls"].append(_read("a.1@x.example", 0, 20_000))
+        assert score_trace(_counting(), trace).answer_messages_exact is False
+        trace["calls"].append(_read("a.1@x.example", 20_000, None))
+        assert score_trace(_counting(), trace).answer_messages_exact is True
+
+    def test_a_cited_claimant_needs_a_read_of_that_claimant(self) -> None:
+        # Two files claim a.1 (#217): the listed one is cited, another one
+        # read. Reads and citations are matched by claimant, not Message-ID.
+        trace = _counted([A1, B1], read=("b.1@x.example",))
+        trace["calls"].append(_read("a.1@x.example", 0, None, claimant="a.1@x.example#0000ffff"))
+        assert score_trace(_counting(), trace).answer_messages_exact is False
+
+    def test_a_read_with_no_indexed_body_does_not_count(self) -> None:
+        trace = _counted([A1, B1], read=("b.1@x.example",))
+        trace["calls"].append(_read("a.1@x.example", 0, None, body=None))
+        assert score_trace(_counting(), trace).answer_messages_exact is False
 
     def test_a_bare_thread_hit_is_not_a_message_citation(self) -> None:
         # A root's Message-ID is also its thread ID, so a search returning
@@ -733,7 +862,8 @@ class TestFullReads:
         return _counting(full_read_messages=["a.1@x.example"])
 
     def _with_reads(self, *reads: dict) -> dict:
-        trace = _counted([A1, B1])
+        # Only ``reads`` page a.1; b.1 is read in one page as usual.
+        trace = _counted([A1, B1], read=("b.1@x.example",))
         trace["calls"] += list(reads)
         return trace
 
@@ -779,6 +909,12 @@ class TestFullReads:
         last = _read("a.1@x.example", 20_000, None)
         last["result"] = {}
         trace = self._with_reads(_read("a.1@x.example", 0, 20_000), last)
+        assert score_trace(self._scenario(), trace).full_read_recall == 0.0
+
+    def test_a_message_with_no_indexed_body_is_not_read(self) -> None:
+        # The real tool answers ``body: null`` at offset 0 with no next page;
+        # a page counts only when it returned body text.
+        trace = self._with_reads(_read("a.1@x.example", 0, None, body=None))
         assert score_trace(self._scenario(), trace).full_read_recall == 0.0
 
     def test_none_without_full_read_messages(self) -> None:
@@ -878,7 +1014,7 @@ class TestSummarize:
 
     def test_reports_the_counting_aggregates(self) -> None:
         scenario = _counting(full_read_messages=["a.1@x.example"], forbidden_answer_text=["583914"])
-        trace = _counted([A1, B1, D1], count=3, text="PIN 583914")
+        trace = _counted([A1, B1, D1], count=3, text="PIN 583914", read=("b.1@x.example",))
         out = summarize([score_trace(scenario, trace)])
         assert "Answer set exact:    0.00% (0/1)" in out
         assert "Answer count correct: 0.00% (0/1)" in out
@@ -1071,6 +1207,20 @@ class TestOutstandingReads:
         assert score.required_evidence_coverage == 3 / 4
         assert score.conclusion_citation_support == 2 / 3
         assert {"required_evidence_coverage", "conclusion_citation_support"} <= set(score.failures)
+
+    def test_a_conclusion_is_supported_by_a_read_of_its_own_claimant(self) -> None:
+        # Two files claim a.2 (#217): the listed one is cited, another one
+        # read. The source counts as covered (its Message-ID was read), but
+        # the conclusion cites a file nothing returned the content of.
+        read = [m for m in _LISTED if m != "a.2"]
+        trace = _outstanding_trace(read=read)
+        other = _thread_read(["a.2@x.example"])
+        other["result"]["messages"][0]["claimant_id"] = "a.2@x.example#0000ffff"
+        trace["calls"].append(other)
+        score = score_trace(_outstanding(), trace)
+        assert score.required_evidence_coverage == 1.0
+        assert score.conclusion_citation_support == 2 / 3
+        assert "conclusion_citation_support" in score.failures
 
     def test_a_cut_get_thread_body_is_not_a_read(self) -> None:
         read = [m for m in _LISTED if m != "a.2"]

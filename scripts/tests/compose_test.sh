@@ -43,7 +43,6 @@ render() {
         ${GIT_COMMIT:+GIT_COMMIT="$GIT_COMMIT"} \
         ${EMBED_BASE_URL:+EMBED_BASE_URL="$EMBED_BASE_URL"} \
         ${EMBED_MODEL:+EMBED_MODEL="$EMBED_MODEL"} \
-        ${INFERENCE_BASE_URL:+INFERENCE_BASE_URL="$INFERENCE_BASE_URL"} \
         docker compose --project-directory "$ROOT_DIR" --env-file /dev/null "${args[@]}" \
         config --format json >"$WORK/config.json" 2>"$WORK/compose.err" || {
         cat "$WORK/compose.err"
@@ -642,16 +641,21 @@ mbsync_keeps_its_hardening_and_no_port_is_exposed() {
     expect '.services.mbsync | has("extra_hosts") | not' || return 1
 }
 
-# The optional rerank settings default to empty (#1058): a .env that sets
-# the required endpoints but omits RERANK_BASE_URL and RERANK_MODEL (one
-# written before the rerank layer landed, or one that leaves them out
-# with RERANK_MODE=none) renders with no "variable is not set" warning.
-# validate-env.sh still requires both when RERANK_MODE=cohere.
-omitted_rerank_settings_render_without_a_warning() {
-    EMBED_BASE_URL=default EMBED_MODEL=synthetic-embed INFERENCE_BASE_URL=default render "$BASE"
+# The optional rerank and inference settings default to empty (#1058,
+# #1074): a .env that sets the required endpoints but omits
+# RERANK_BASE_URL, RERANK_MODEL and INFERENCE_BASE_URL (one written
+# before those layers landed, or one that leaves them out with
+# RERANK_MODE=none and INFERENCE_MODE=none) renders with no "variable is
+# not set" warning. validate-env.sh still requires the rerank pair when
+# RERANK_MODE=cohere and INFERENCE_BASE_URL when INFERENCE_MODE is not
+# none.
+omitted_rerank_and_inference_settings_render_without_a_warning() {
+    EMBED_BASE_URL=default EMBED_MODEL=synthetic-embed render "$BASE"
     expect '.services["mcp-server"].environment.RERANK_MODE == "none"' || return 1
     expect '.services["mcp-server"].environment.RERANK_BASE_URL == ""' || return 1
     expect '.services["mcp-server"].environment.RERANK_MODEL == ""' || return 1
+    expect '.services["mcp-server"].environment.INFERENCE_MODE == "none"' || return 1
+    expect '.services["mcp-server"].environment.INFERENCE_BASE_URL == ""' || return 1
     if grep -F 'is not set' "$WORK/compose.err"; then
         return 1
     fi
@@ -785,8 +789,8 @@ check "merged hardening rejects new users, secrets, hooks and devices" \
     merged_hardening_rejects_new_grants
 check "merged hardening rejects a service a top-level include brings in" \
     merged_hardening_rejects_an_included_service
-check "omitted rerank settings render without a warning" \
-    omitted_rerank_settings_render_without_a_warning
+check "omitted rerank and inference settings render without a warning" \
+    omitted_rerank_and_inference_settings_render_without_a_warning
 check "every image is built with the source commit" every_image_is_built_with_the_source_commit
 check "make build passes the source commit" make_build_passes_the_source_commit
 

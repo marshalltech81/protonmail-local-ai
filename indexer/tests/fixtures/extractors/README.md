@@ -14,6 +14,37 @@ the way `legacy-src/scrub-ppt-author.py` does. Names in binary records
 revision and comment author tables, OOXML comment and revision
 authors) are not read (#1010); check those by hand before committing.
 
+## CFF-font PDF (#691)
+
+`cff-font.pdf` (2,189 bytes) is the extraction canary for the fontTools
+gap: pypdf reads the built-in encoding of an embedded CFF font only with
+fontTools, which stays out of the image until py-pdf/pypdf#4156 bounds
+its cost. `tests/test_extractors.py` `TestCffFontPdf` asserts the
+sentence under a strict `xfail`, so the suite shows the gap today and
+fails the day fontTools lands, which is also when `EXTRACTOR_VERSIONS["pdf"]`
+must be bumped so cached rows re-extract.
+
+- **Tool:** `cff-src/generate-cff-pdf.py`, run with
+  `uv run cff-src/generate-cff-pdf.py` from this directory. Its inline
+  script metadata pins `fonttools==4.66.1` and `pypdf==6.19.0`, and uv
+  runs it in its own environment: fontTools is not an indexer dependency
+  and does not touch `indexer/uv.lock`. The output is byte-for-byte
+  reproducible with those versions.
+- **Content:** one page whose only text is set in a Type1 font with an
+  embedded CFF program (`/FontFile3`, `/Subtype /Type1C`) and no
+  `/Encoding` or `/ToUnicode`. The font holds `.notdef`, `space` and the
+  52 ASCII letters as plain boxes, and its built-in encoding places each
+  letter's glyph at the letter's ROT13 code. The content stream holds the
+  ROT13 of "Synthetic CFF marker: the quick brown fox jumps over the lazy
+  dog." (66 characters, over the 40-character digital-text floor, so OCR
+  never runs).
+- **What extracts:** without fontTools, pypdf falls back to
+  StandardEncoding and returns the ROT13 text as `success` /
+  `pdf-digital@5`; with fontTools 4.66.1 it returns the sentence.
+- **Metadata:** no document information dictionary (`writer.metadata =
+  None`, so pypdf writes no `/Producer`), no XMP stream and no `/ID`.
+  `TestCffFontPdf` checks the metadata and the font shape on every run.
+
 ## Legacy binary Office files (#935)
 
 `legacy.doc`, `legacy.xls`, `legacy.ppt` and `legacy-lo.ppt` are real

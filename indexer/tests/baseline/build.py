@@ -25,9 +25,19 @@ and ``INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS`` to
 The baseline's capped results are therefore not production behaviour.
 ``check_capped_attachments`` fails the build if any other attachment is
 cut by them.
+
+The OCR shapes (t90-t92, #908, #1113) run Tesseract and Poppler, so the
+build needs ``tesseract``, ``pdftoppm`` and ``pdfinfo`` on ``PATH``
+(macOS: ``brew install tesseract poppler``) and fails naming the missing
+one, rather than recording the shapes as failed or OCR-disabled. It
+forces OCR on (``INDEXER_OCR_ENABLED``) and lowers
+``INDEXER_OCR_MAX_PAGES`` to ``CAPPED_OCR_MAX_PAGES`` (2; production
+default 20), so t91's three-page scan has a page past the cap and t92's
+three-frame TIFF a frame past it.
 """
 
 import json
+import shutil
 import sqlite3
 import sys
 from contextlib import closing
@@ -42,11 +52,33 @@ from src.threader import Threader
 from tests.baseline.corpus import (
     CAPPED_ATTACHMENT_MAX_BYTES,
     CAPPED_ATTACHMENT_MAX_CHARS,
+    CAPPED_OCR_MAX_PAGES,
     CHAR_CAPPED_FILENAME,
     TOO_LARGE_FILENAME,
     write_maildir,
 )
 from tests.baseline.hash_embedder import HashEmbedder, embed_text
+
+# The binaries the OCR shapes run: pytesseract starts ``tesseract``, and
+# pdf2image starts Poppler's ``pdfinfo`` (the page count, before every
+# render) and ``pdftoppm`` (the render). A partial Poppler install can
+# have one without the other (review round 1), so both are checked.
+# ``test_ocr_binaries_cover_the_executables_the_ocr_path_starts`` checks
+# this list against the commands those libraries name (review round 2).
+OCR_BINARIES = ("tesseract", "pdftoppm", "pdfinfo")
+
+
+def require_ocr_binaries() -> None:
+    """Raise ``RuntimeError`` naming the first OCR binary missing from
+    ``PATH``, so a build without it fails up front instead of recording
+    t90-t92 as failed extractions."""
+    for binary in OCR_BINARIES:
+        if shutil.which(binary) is None:
+            raise RuntimeError(
+                f"the baseline's OCR shapes (t90-t92) need {binary} on PATH; install"
+                " Tesseract and Poppler (macOS: brew install tesseract poppler;"
+                " Debian/Ubuntu: apt-get install tesseract-ocr poppler-utils)"
+            )
 
 
 def _sorted_walk(root: Path):
@@ -102,6 +134,7 @@ def build(out_dir: Path, golden_path: Path, cases_path: Path | None = None) -> d
     # files and silently reuse stale state.
     if out_dir.exists() and any(out_dir.iterdir()):
         raise RuntimeError(f"{out_dir} is not empty; build into a fresh directory")
+    require_ocr_binaries()
     out_dir.mkdir(parents=True, exist_ok=True)
     maildir = out_dir / "maildir"
     write_maildir(maildir)
@@ -116,6 +149,11 @@ def build(out_dir: Path, golden_path: Path, cases_path: Path | None = None) -> d
             patch.object(
                 main, "INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS", CAPPED_ATTACHMENT_MAX_CHARS
             ),
+            # OCR on whatever the environment says, and t91's scan one
+            # page past the cap (#908) and t92's TIFF one frame past it
+            # (#1113).
+            patch.object(main, "INDEXER_OCR_ENABLED", True),
+            patch.object(main, "INDEXER_OCR_MAX_PAGES", CAPPED_OCR_MAX_PAGES),
         ):
             main.initial_index(db, HashEmbedder(), Threader(db), IndexingQueue(db))
         stats = IndexingQueue(db).stats()

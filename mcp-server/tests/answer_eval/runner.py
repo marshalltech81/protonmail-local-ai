@@ -117,6 +117,9 @@ class InferenceCall:
     ms: float = 0.0
     outcome: str = "ok"  # "ok", "truncated" or "error"
     response: str | None = field(default=None, repr=False)
+    # The structured-output schema the tool passed, if any (#1095): the
+    # caller's schema shape, not mail content.
+    json_schema: dict | None = field(default=None, repr=False)
 
 
 @dataclass
@@ -143,15 +146,22 @@ class RecordingInference:
         self._inner = inner
         self.mode = inner.mode
         self.base_url = getattr(inner, "base_url", "")
+        # ``extract_from_emails`` reads this before sending a schema (#808).
+        self.structured_output = getattr(inner, "structured_output", False)
         self.calls: list[InferenceCall] = []
         self.billing_error = False
 
-    async def complete(self, system: str, user: str) -> str:
-        call = InferenceCall(system=system, user=user)
+    async def complete(self, system: str, user: str, json_schema: dict | None = None) -> str:
+        call = InferenceCall(system=system, user=user, json_schema=json_schema)
         self.calls.append(call)
         start = time.perf_counter()
         try:
-            call.response = await self._inner.complete(system, user)
+            # As ``intelligence.llm_complete`` does: the keyword is passed
+            # only when set, so a client taking ``(system, user)`` works.
+            if json_schema is None:
+                call.response = await self._inner.complete(system, user)
+            else:
+                call.response = await self._inner.complete(system, user, json_schema=json_schema)
             return call.response
         except InferenceTruncatedError as e:
             call.outcome, call.response = "truncated", e.partial
@@ -408,7 +418,8 @@ def corpus_manifest(path: Path = CORPUS_PATH) -> dict[str, CorpusMessage]:
     both services own a top-level ``tests`` package), which serializes
     byte-identically; the indexer's claimant ID is the Message-ID plus a
     prefix of that SHA-256. The tokens cover every part's headers and
-    every decoded text part and binary attachment, our own trusted bytes. ``sent_at`` is the
+    every decoded text part and binary attachment, our own trusted bytes,
+    and the text the corpus says its images show (``OCR_TEXT``). ``sent_at`` is the
     ``Date:`` header as the indexer normalizes it (``parser._parse_date``:
     UTC, ISO format); the corpus writes no ``Received:`` header, so the
     indexer stores no ``occurred_at``.
@@ -440,6 +451,10 @@ def corpus_manifest(path: Path = CORPUS_PATH) -> dict[str, CorpusMessage]:
                     # among these.
                     payload = part.get_payload(decode=True)
                     text.append(payload.decode("utf-8", "replace"))
+                    # An image's words are what OCR reads from it: the
+                    # corpus states the text its committed images show
+                    # (#908), keyed by attachment filename.
+                    text.append(corpus.OCR_TEXT.get(part.get_filename() or "", ""))
             manifest[message_id] = CorpusMessage(
                 hashlib.sha256(raw).hexdigest(),
                 f"t{n:02d}.1{BASELINE_DOMAIN}",

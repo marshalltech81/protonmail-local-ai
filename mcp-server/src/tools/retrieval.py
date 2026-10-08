@@ -12,6 +12,7 @@ from mcp.types import CallToolResult
 
 # Module import: get_thread and get_message have a local named ``count``.
 from ..lib import timings
+from ..lib.predicates import validate_date_range
 from ..lib.rate_limited_log import ArgumentRejections, RateLimitedLog
 from ..lib.security import QUERY_MESSAGE_FIELDS, log_tool_call
 from ..lib.sqlite import (
@@ -25,7 +26,6 @@ from ..lib.sqlite import (
     ReapedSource,
     address_match_mode,
     canonical_addr,
-    validate_date_range,
 )
 from ..lib.validation import clamp_int
 from .outputs import (

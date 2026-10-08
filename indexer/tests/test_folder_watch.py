@@ -110,6 +110,31 @@ class TestReadableDirs:
         assert str(tmp_path / "INBOX") in found
         assert not any(p.startswith(str(tmp_path / "Late")) for p in found)
 
+    @needs_unprivileged
+    def test_counts_unreadable_directories_without_naming_them(self, tmp_path, unreadable, caplog):
+        """One WARNING per walk with the count only (#870): a folder the
+        indexer cannot read is unwatched, so its mail reaches the index
+        only through a later Maildir walk."""
+        caplog.set_level(logging.INFO, logger=folder_watch.__name__)
+        _folder(tmp_path, "INBOX")
+        unreadable(_folder(tmp_path, FOLDER_MARKER))
+        unreadable(_folder(tmp_path, f"{FOLDER_MARKER}-2"))
+
+        readable_dirs(tmp_path)
+
+        (line,) = [r for r in caplog.records if "could not be read" in r.getMessage()]
+        assert line.levelno == logging.WARNING
+        assert "2 director" in line.getMessage()
+        assert FOLDER_MARKER not in caplog.text
+
+    def test_a_readable_tree_logs_nothing(self, tmp_path, caplog):
+        caplog.set_level(logging.INFO, logger=folder_watch.__name__)
+        _folder(tmp_path, "INBOX")
+
+        readable_dirs(tmp_path)
+
+        assert not caplog.records
+
     def test_skips_symlinks(self, tmp_path):
         _folder(tmp_path, "INBOX")
         (tmp_path / "link").symlink_to(tmp_path / "INBOX")
@@ -141,7 +166,8 @@ class TestReadableDirs:
         )
         assert str(tmp_path / "INBOX" / "cur") in found
 
-    def test_a_directory_that_vanishes_ends_its_branch(self, tmp_path, monkeypatch):
+    def test_a_directory_that_vanishes_ends_its_branch(self, tmp_path, monkeypatch, caplog):
+        caplog.set_level(logging.INFO, logger=folder_watch.__name__)
         _folder(tmp_path, "INBOX")
         real_scandir = os.scandir
 
@@ -153,6 +179,8 @@ class TestReadableDirs:
         monkeypatch.setattr(folder_watch.os, "scandir", flaky_scandir)
 
         assert set(readable_dirs(tmp_path)) == {str(tmp_path / "INBOX")}
+        # Gone, not unreadable: nothing to count.
+        assert not caplog.records
 
 
 class TestFolderWatchRefresher:

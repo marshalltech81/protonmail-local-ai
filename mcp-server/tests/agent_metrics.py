@@ -17,7 +17,10 @@ synthetic mailbox) and a trace of the calls an agent made, score
   answer cites (a cited message or passage covers its thread);
 - **message citation recall**: the fraction of required citation groups
   (message IDs) the answer cites, a cited passage or claimant ID
-  counting as its message. A correction scenario requires the
+  counting as its message, and only when a result returned that
+  message's content (``_content_reads``: its whole body, or an
+  attachment passage; a listing or a body passage reads nothing, #804).
+  A correction scenario requires the
   correcting message, which thread-level citation recall cannot tell
   from the message it corrects; a conflicting-sources scenario requires
   each side of the disagreement;
@@ -33,8 +36,9 @@ synthetic mailbox) and a trace of the calls an agent made, score
 - **unnecessary calls**: calls over the scenario's budget, and calls
   identical (tool and arguments) to an earlier one;
 - **counting** (scenarios listing ``expected_answer_messages``): whether
-  the answer cites exactly those messages (a decoy cited or a message
-  left out fails; two IDs of one message count once), and whether its
+  the answer cites exactly those messages (a decoy cited, a message
+  left out or a cited message whose content no result returned fails;
+  two IDs of one message count once), and whether its
   ``count`` is a JSON integer equal to their number;
 - **full reads**: the fraction of ``full_read_messages`` whose body the
   ``get_message`` results cover from offset 0 through each
@@ -89,8 +93,9 @@ ID_FIELDS = ("thread_id", "message_id", "claimant_id", "chunk_id")
 PAGING_FIELDS = ("has_more", "next_cursor", "messages")
 ENUMERATING_TOOL = "query_messages"
 # ``get_message`` fields that say which body page a result holds: the
-# message, the page's start and the next page's start (``None`` at the end).
-READ_FIELDS = ("message", "body_offset", "next_offset")
+# message, the page's text (``None`` when no body is indexed), the page's
+# start and the next page's start (``None`` at the end).
+READ_FIELDS = ("message", "body", "body_offset", "next_offset")
 READING_TOOL = "get_message"
 # Its arguments that page rather than filter: the agent picks the page
 # size, and the cursor is checked against the previous page.
@@ -287,18 +292,28 @@ class AgentScore:
         return failed
 
 
-def _returned_ids(calls: Sequence[dict]) -> tuple[set[str], dict[str, str], dict[str, str]]:
-    """IDs the tool results returned, each ID's thread, and each ID's message.
+def _returned_ids(
+    calls: Sequence[dict],
+) -> tuple[set[str], dict[str, str], dict[str, str], dict[str, set[str]]]:
+    """IDs the tool results returned, each ID's thread, each ID's message,
+    and the claimant IDs each ID was returned with.
 
     A message row carries its thread in a ``thread_id`` beside it or, in
     ``get_thread``, in the ``thread`` summary of the enclosing result, so
     the nearest enclosing thread ID is the message's thread. A row with a
     ``message_id`` names that message by its ``message_id``,
     ``claimant_id`` or ``chunk_id``; a bare ``thread_id`` names no message.
+    Two files can claim one Message-ID (#217), so a bare ``message_id``
+    may name several claimants while a claimant or chunk ID names one.
+    A string returned as more than one kind of ID (a sender can set a
+    Message-ID equal to another message's claimant ID; the tools then
+    return neither) names no message and no claimant.
     """
     seen: set[str] = set()
     thread_of: dict[str, str] = {}
     message_of: dict[str, str] = {}
+    claimants_of: dict[str, set[str]] = defaultdict(set)
+    kinds_of: dict[str, set[str]] = defaultdict(set)
 
     def visit(value: Any, thread: str | None) -> None:
         if isinstance(value, list):
@@ -322,16 +337,24 @@ def _returned_ids(calls: Sequence[dict]) -> tuple[set[str], dict[str, str], dict
                     thread_of[item] = thread
         message = value.get("message_id")
         if isinstance(message, str):
+            claimant = value.get("claimant_id")
             for name in ("message_id", "claimant_id", "chunk_id"):
                 item = value.get(name)
                 if isinstance(item, str):
                     message_of[item] = message
+                    kinds_of[item].add(name)
+                    if isinstance(claimant, str):
+                        claimants_of[item].add(claimant)
         for child in value.values():
             visit(child, thread)
 
     for call in calls:
         visit(call.get("result"), None)
-    return seen, thread_of, message_of
+    for item, kinds in kinds_of.items():
+        if len(kinds) > 1:
+            del message_of[item]
+            claimants_of.pop(item, None)
+    return seen, thread_of, message_of, dict(claimants_of)
 
 
 def _groups_covered(ids: set[str], groups: list[list[str]]) -> float:
@@ -402,14 +425,17 @@ def _enumeration_chains(calls: Sequence[dict], predicates: dict[str, Any]) -> li
     return chains
 
 
-def _fully_read(calls: Sequence[dict]) -> set[str]:
-    """Message IDs whose body some ``get_message`` results cover from the
-    first page to the last.
+def _fully_read(calls: Sequence[dict]) -> dict[str, str]:
+    """The message ID, by claimant ID, of each message whose body some
+    ``get_message`` results cover from the first page to the last.
 
     Pages are read from the results (``READ_FIELDS``), never from the
     arguments, and chained per claimant ID: the page at offset 0, then the
     page starting at its ``next_offset``, and so on until a page whose
     ``next_offset`` is ``None``. A skipped or missing page breaks the chain.
+    A page counts only when it returned body text (``body`` a string): a
+    message with no indexed body answers ``body: null`` at offset 0 with
+    no next page, and reads nothing.
     """
     pages: dict[str, dict[int, int | None]] = defaultdict(dict)
     message_of: dict[str, str] = {}
@@ -421,6 +447,7 @@ def _fully_read(calls: Sequence[dict]) -> set[str]:
         offset = result.get("body_offset")
         if (
             not isinstance(message, dict)
+            or not isinstance(result.get("body"), str)
             or not isinstance(offset, int)
             or "next_offset" not in result
         ):
@@ -429,22 +456,22 @@ def _fully_read(calls: Sequence[dict]) -> set[str]:
         if isinstance(claimant, str) and isinstance(message_id, str):
             pages[claimant][offset] = result["next_offset"]
             message_of[claimant] = message_id
-    read: set[str] = set()
+    read: dict[str, str] = {}
     for claimant, chain in pages.items():
         start: int | None = 0
         # Each step moves forward, so the walk ends within len(chain) steps.
         while isinstance(start, int) and start in chain:
             following = chain[start]
             if following is None:
-                read.add(message_of[claimant])
+                read[claimant] = message_of[claimant]
                 break
             start = following if isinstance(following, int) and following > start else None
     return read
 
 
-def _content_reads(calls: Sequence[dict]) -> tuple[set[str], set[str]]:
-    """Message IDs whose whole body, and those with an attachment passage,
-    some result returned.
+def _content_reads(calls: Sequence[dict]) -> tuple[dict[str, str], dict[str, str]]:
+    """The message ID, by claimant ID, of each message whose whole body,
+    and of each with an attachment passage, some result returned.
 
     A listing (``query_messages``, ``list_threads``, ``find_contact``,
     ``search_emails``) names messages but returns no content, so it reads
@@ -455,10 +482,11 @@ def _content_reads(calls: Sequence[dict]) -> tuple[set[str], set[str]]:
     passage whose ``source`` is ``attachment``: no tool returns a whole
     attachment (#796), and a ``search_attachments`` snippet is a preview
     the scorer cannot check holds the evidence, since traces carry IDs, not
-    text.
+    text. Reads are keyed by claimant ID (#217): reading one file that
+    claims a Message-ID says nothing about another file claiming it.
     """
     bodies = _fully_read(calls)
-    attachments: set[str] = set()
+    attachments: dict[str, str] = {}
     for call in calls:
         result = call.get("result") or {}
         if call["tool"] == "get_thread":
@@ -466,10 +494,11 @@ def _content_reads(calls: Sequence[dict]) -> tuple[set[str], set[str]]:
                 if (
                     isinstance(row, dict)
                     and isinstance(row.get("message_id"), str)
+                    and isinstance(row.get("claimant_id"), str)
                     and isinstance(row.get("body"), str)
                     and row.get("body_omitted_chars") == 0
                 ):
-                    bodies.add(row["message_id"])
+                    bodies[row["claimant_id"]] = row["message_id"]
         elif call["tool"] == "get_evidence":
             for thread in result.get("threads", []):
                 for chunk in thread.get("chunks", []) if isinstance(thread, dict) else []:
@@ -477,8 +506,9 @@ def _content_reads(calls: Sequence[dict]) -> tuple[set[str], set[str]]:
                         isinstance(chunk, dict)
                         and chunk.get("source") == "attachment"
                         and isinstance(chunk.get("message_id"), str)
+                        and isinstance(chunk.get("claimant_id"), str)
                     ):
-                        attachments.add(chunk["message_id"])
+                        attachments[chunk["claimant_id"]] = chunk["message_id"]
     return bodies, attachments
 
 
@@ -488,6 +518,7 @@ def _score_outstanding(
     all_cited: list[str],
     calls: Sequence[dict],
     message_of: dict[str, str],
+    claimants_of: dict[str, set[str]],
     full_read_recall: float | None,
 ) -> dict[str, Any]:
     """The outstanding-items scores of ``answer`` (see ``score_trace``).
@@ -545,21 +576,28 @@ def _score_outstanding(
     # other (``_content_reads``). A listing that only names it reads nothing.
     bodies, attachment_passages = _content_reads(calls)
     attachment_sources = set(truth.attachment_sources)
-    read = {
-        m
-        for a in truth.actions
-        for m in a.required_sources
-        if m in (attachment_passages if m in attachment_sources else bodies)
-    }
+
+    def reads_of(message: str) -> dict[str, str]:
+        return attachment_passages if message in attachment_sources else bodies
+
+    read = {m for a in truth.actions for m in a.required_sources if m in set(reads_of(m).values())}
 
     # Every conclusion must cite a required source of its action that the
-    # trace read; a superseded source is not one.
+    # trace read; a superseded source is not one. The read must be of the
+    # file the citation names (#217): a cited claimant or passage needs its
+    # own claimant read, a bare Message-ID any file claiming it.
+    def source_read(cited_id: str, required: set[str]) -> bool:
+        message = message_of.get(cited_id)
+        if message is None or message not in required:
+            return False
+        return bool(claimants_of.get(cited_id, set()) & set(reads_of(message)))
+
     conclusions = items + excluded
     supported = sum(
         1
         for entry in conclusions
         if (a := by_id.get(entry.get("action", ""))) is not None
-        and messages(entry.get("cited", [])) & set(a.required_sources) & read
+        and any(source_read(c, set(a.required_sources)) for c in entry.get("cited", []))
     )
     # The canonical citation set (top-level and per-conclusion, see
     # ``score_trace``), so a forbidden source cited anywhere counts.
@@ -620,7 +658,7 @@ def score_trace(scenario: Scenario, trace: dict) -> AgentScore:
         citations_consistent = set(cited) == set(own)
         cited = list(dict.fromkeys(cited + own))
     abstained = answer.get("abstained") is True
-    seen, thread_of, message_of = _returned_ids(calls)
+    seen, thread_of, message_of, claimants_of = _returned_ids(calls)
 
     tool_selected = bool(calls) and calls[0]["tool"] in scenario.expected_tools
 
@@ -642,9 +680,21 @@ def score_trace(scenario: Scenario, trace: dict) -> AgentScore:
         covered = set(cited) | {thread_of[c] for c in cited if c in thread_of}
         citation_recall = _groups_covered(covered, scenario.required_evidence)
 
+    # A cited message counts for the message-level scorers only when a
+    # result returned its content (``_content_reads``, as for outstanding
+    # items): a listing or a body passage that named it reads nothing.
+    # Reads and citations are matched by claimant ID (#217): a cited
+    # claimant or passage needs its own file read, while a bare Message-ID
+    # names every file claiming it, so any of their reads covers it.
+    bodies, attachment_passages = _content_reads(calls)
+    read_claimants = set(bodies) | set(attachment_passages)
+
+    def content_read(cited_id: str) -> bool:
+        return bool(claimants_of.get(cited_id, set()) & read_claimants)
+
     message_citation_recall: float | None = None
     if scenario.required_citations:
-        cited_messages = {message_of[c] for c in cited if c in message_of}
+        cited_messages = {message_of[c] for c in cited if c in message_of and content_read(c)}
         message_citation_recall = _groups_covered(cited_messages, scenario.required_citations)
 
     # Abstaining means answering nothing, so an abstention citing a source
@@ -680,15 +730,16 @@ def score_trace(scenario: Scenario, trace: dict) -> AgentScore:
 
     # A counting answer must cite exactly the expected messages: a decoy
     # cited or a message left out fails. A cited ID counts as the message
-    # a result returned it with, so two IDs of one message are one message.
-    # An ID no result returned as a message fails, even when it equals a
-    # returned thread ID: a root's Message-ID is also its thread's ID.
+    # a result returned it with, so two IDs of one message are one message,
+    # and only when that message's content was read (``content_read``
+    # above). An ID no result returned as a message fails, even when it
+    # equals a returned thread ID: a root's Message-ID is also its thread's ID.
     answer_messages_exact: bool | None = None
     answer_count_correct: bool | None = None
     if scenario.expected_answer_messages:
         expected_answers = set(scenario.expected_answer_messages)
         answer_messages_exact = (
-            all(c in message_of for c in cited)
+            all(c in message_of and content_read(c) for c in cited)
             and {message_of[c] for c in cited} == expected_answers
         )
         count = answer.get("count")
@@ -701,7 +752,7 @@ def score_trace(scenario: Scenario, trace: dict) -> AgentScore:
 
     full_read_recall: float | None = None
     if scenario.full_read_messages:
-        read = _fully_read(calls)
+        read = set(_fully_read(calls).values())
         full_read_recall = sum(m in read for m in scenario.full_read_messages) / len(
             scenario.full_read_messages
         )
@@ -716,7 +767,7 @@ def score_trace(scenario: Scenario, trace: dict) -> AgentScore:
     outstanding: dict[str, Any] = {}
     if scenario.outstanding is not None:
         outstanding = _score_outstanding(
-            scenario.outstanding, answer, cited, calls, message_of, full_read_recall
+            scenario.outstanding, answer, cited, calls, message_of, claimants_of, full_read_recall
         )
 
     signatures = [json.dumps([c["tool"], c["arguments"]], sort_keys=True) for c in calls]

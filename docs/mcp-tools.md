@@ -376,6 +376,51 @@ rebuild then reads as `not found`. A message restored upstream is
 indexed again under the same claimant ID and reads as live. Other
 tools that take a thread ID (`summarize_thread`) are unchanged.
 
+## Filter predicates
+
+Every message-level filter is one *leaf* of the predicate module
+`mcp-server/src/lib/predicates.py`
+([#1084](https://github.com/marshalltech81/protonmail-local-ai/issues/1084)):
+a named predicate over one message with one value, compiled to SQL in
+one place. `query_messages` and the evidence-scope labels of the
+intelligence tools ([in scope or context](#evidence-scope-in-scope-or-context))
+conjoin their leaves on each message; `search_emails` and the tools
+that share its filters decide each leaf on its own against the thread
+(below). A `query_messages` cursor is bound to a digest of its leaf
+list: passed with other filters it is rejected ("cursor was issued for
+different filters"), never read against them.
+
+| Leaf | Value | Built by | Matches a message when |
+|---|---|---|---|
+| `sender` | address, domain or name fragment | `query_messages` `sender`; `search_emails` `from_addr` and the tools that share it | its From role carries the value ([address matching](#query_messages)) |
+| `recipient` | address, domain or name fragment | `query_messages` `recipient` | its To or Cc role carries the value |
+| `participant` | address, domain or name fragment | `participant` on `query_messages`, `search_emails` and the tools that share it | any role carries the value |
+| `subject` | text | `query_messages` `subject` | its own subject contains the text, casefolded |
+| `text` | words | `query_messages` `text` | every word occurs in its indexed body (FTS, stemmed; at most 16 words) |
+| `folder` | folder names | `query_messages` `folder`; `search_emails` `folders` | it is filed in one of them |
+| `not_in_folders` | folder names | the default scope, when no folder is named | it is filed in none of them (`Trash`; [Trash](#trash-is-left-out-by-default)) |
+| `effective_from` | UTC instant | `date_from` | its effective time is at or after the instant |
+| `effective_to` | UTC instant | `date_to` | its effective time is at or before the instant |
+| `has_attachments` | bool | `has_attachments` | its own attachment flag equals the value |
+| `seen` | bool | `query_messages` `seen` | its read flag equals the value |
+| `flagged` | bool | `query_messages` `flagged` | its flagged flag equals the value |
+| `authority_class` | class name | `authority_class` | its From sender carries the class, outside Spam |
+
+**Thread-level evaluation (`search_emails`).** The thread filters are
+decided per leaf, each on its own: one message can satisfy the sender
+leaf and another the date leaf, and the thread matches, while
+`query_messages` with the same filters finds no message. `sender` and
+`participant` are matched against the thread's recorded senders and
+participants (the display strings on the thread row: each message's
+primary author, and everyone on any of its messages) with the same
+canonical-equality-or-substring rule as the per-message leaves; the
+date bounds against the thread's effective-time span (`date_last` on
+or after `date_from`, `date_first` on or before `date_to`);
+`has_attachments` against the thread's own flag; `folder` and
+`authority_class` by the existence of a message of the thread
+satisfying the leaf. These are the semantics from before the module
+existed, kept so results and the retrieval baseline do not move.
+
 ## Group 1 — Search
 
 ### `search_emails`
@@ -390,7 +435,7 @@ contents of a returned thread, follow up with `get_thread` or
 | `query` | string | required | Natural language or keyword query |
 | `mode` | string | `hybrid` | `hybrid`, `semantic`, or `keyword` |
 | `folders` | list | all but Trash | Scope to threads with a message in any of these folders (the membership `list_threads` uses). Without it, threads filed only in Trash are left out; name `"Trash"` to include them ([Trash](#trash-is-left-out-by-default)) |
-| `from_addr` | string | none | Filter by canonical sender address (or domain like `@example.com`); substring fallback when the value can't canonicalize |
+| `from_addr` | string | none | Filter by canonical sender address (or domain like `@example.com`); substring fallback when the value can't canonicalize. Decided on the thread's recorded senders, so a thread matches when any message's primary author matches, while `query_messages` `sender` checks each message's From role ([Filter predicates](#filter-predicates)) |
 | `from_name` | string | none | Filter by sender name; resolved through `find_contact` to a canonical address before applying, matching any display name the address carries in a From header on a thread it primarily sent (the index keeps no author order within one message, so a name written for it as a second author on such a thread also matches). Use when the user names a person but not their email. `from_addr` wins if both are given. |
 | `date_from` | string | none | ISO 8601 date lower bound |
 | `date_to` | string | none | ISO 8601 date upper bound |

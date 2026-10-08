@@ -73,6 +73,56 @@ jobs:
           make init-secrets
           printf 'placeholder-bridge-pass' > .secrets/bridge_pass.txt
 
+      # The indexer's ppt-builder stage fetches the .ppt reader's jars
+      # from Maven Central, whose outages and rate limits have failed
+      # this job (#1070). The stage's layers are kept in the GitHub
+      # Actions cache: the step below builds that stage alone on a
+      # docker-container builder (the runner's default builder cannot
+      # export a cache), importing and exporting the cache under its own
+      # scope, so the compose build that follows, on the same builder,
+      # finds the stage built and Maven does not run unless
+      # indexer/java/pom.xml or a layer before it changed. The step
+      # loads the stage as an image rather than building cache-only:
+      # restored layers are lazy references into the cache backend that
+      # only the restoring build can fetch, and a later build on the
+      # builder silently rebuilds a stage it cannot fetch (seen in CI,
+      # reproduced locally); loading forces every layer down. Only the
+      # layer cache survives a run: the BuildKit cache mount that keeps
+      # the Maven repository across local rebuilds lives in the builder,
+      # which every run creates anew.
+      #
+      # Only a pull-request run restores the stage. Every run on main
+      # (a push, the weekly schedule, a manual dispatch) builds it cold,
+      # so the image keeps picking up Debian's OpenJDK and Maven
+      # updates: a restored apt layer is never rerun, and Trivy cannot
+      # see the jlink runtime built from it (#1008). Those cold builds
+      # are the only writers of the cache pull-request runs read (a
+      # pull request's own export lands in its ref's cache, which runs
+      # on main never see), so two of them overlapping cannot leave an
+      # older stage in it, and a restored stage is never older than the
+      # last build on main. A failed export (the cache API throttles) is
+      # ignored, with a warning in the build log: the next run is cold
+      # instead of this one failing before the images are built and
+      # scanned.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          # BuildKit pinned by digest, like the images; the action's
+          # default is the moving buildx-stable-1 tag. Dependabot does
+          # not track a driver option: bump the tag and digest by hand,
+          # together with tests.yml's (scripts/tests/image_pin_test.sh
+          # fails while they differ, #1122).
+          driver-opts: image=moby/buildkit:v0.33.1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
+
+      - name: Build the .ppt reader stage (from the cache on pull-request runs)
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: indexer
+          target: ppt-builder
+          load: true
+          cache-from: ${{ github.event_name == 'pull_request' && 'type=gha,scope=indexer-ppt' || '' }}
+          cache-to: type=gha,mode=max,scope=indexer-ppt,ignore-error=true
+
       # A fixed project name gives the images fixed names to scan.
       - name: Build local images
         id: build
@@ -133,6 +183,55 @@ jobs:
           name: trivy-image-reports
           path: trivy-image-*.txt
           if-no-files-found: error
+
+      # A CycloneDX SBOM per image (#767): the packages Trivy found in
+      # the scans above (Debian packages, Python packages, the .ppt
+      # reader's jars), with no vulnerability data, which the reports
+      # carry. Trivy reads the built image from the daemon, not the
+      # checkout, so no .env or secret file is read. The jlink-built
+      # Java runtime is missing here too (#1008). Exit code 0: an SBOM
+      # step is never a gate.
+      - name: Generate indexer image SBOM
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          skip-setup-trivy: true
+          scan-type: image
+          image-ref: protonmail-local-ai-indexer
+          format: cyclonedx
+          output: sbom-indexer.cdx.json
+          exit-code: "0"
+
+      - name: Generate mcp-server image SBOM
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          skip-setup-trivy: true
+          scan-type: image
+          image-ref: protonmail-local-ai-mcp-server
+          format: cyclonedx
+          output: sbom-mcp-server.cdx.json
+          exit-code: "0"
+
+      - name: Generate mbsync image SBOM
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          skip-setup-trivy: true
+          scan-type: image
+          image-ref: protonmail-local-ai-mbsync
+          format: cyclonedx
+          output: sbom-mbsync.cdx.json
+          exit-code: "0"
+
+      - name: Upload image SBOMs
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: image-sboms
+          path: sbom-*.cdx.json
+          if-no-files-found: error
+          retention-days: 14
 
       # The gate: HIGH and CRITICAL, as in security.yml. It skips findings
       # Debian or upstream has not fixed yet (owner decision 2026-10-07,

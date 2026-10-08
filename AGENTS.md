@@ -549,6 +549,48 @@ Examples:
 - `chore(pre-commit): add detect-secrets baseline`
 - `style: apply pre-commit autofixes across repo`
 
+## Issue Conventions
+
+Every open issue carries, on GitHub (owner, 2026-10-07):
+
+- exactly one **type** label: `bug` (behaves wrongly or unsafely),
+  `enhancement` (new or changed behaviour, including measurement that
+  leads to it), `documentation`, `test` (a test, fixture or eval-harness
+  gap; nothing shipped changes) or `chore` (tooling, CI, build,
+  housekeeping, or an investigation with no product change)
+- exactly one **priority** label, `P0`–`P3`, as the review rules above
+  use them
+- one or more **area** labels, `area/mbsync`, `area/indexer`,
+  `area/parser`, `area/extractors`, `area/database`, `area/mcp-server`,
+  `area/mcp-tools`, `area/eval`, `area/docker`, `area/ci`,
+  `area/tooling`, `area/docs`, matching the commit scopes below
+- one **milestone**: a PLAN.md phase, *Corpus and contract follow-ups*
+  (Phase 0 and 1 follow-ups), *Operations and hardening* or *Evidence
+  model*
+- flags where they apply: `decision` (waits on an owner choice between
+  stated options) and `security` (privacy, secrets, exposure, TLS,
+  supply chain or bounded-work robustness, whatever the type)
+
+Each label's description on GitHub repeats its rule. Dependabot PRs
+are labelled `dependencies` as their type plus the area the update
+lands in, as `.github/dependabot.yml` sets them.
+
+Relations between issues are GitHub relations, not only prose, set
+when the issue is filed or when the relation is found, with the
+reason in the body's Relationships section: a dependency is a
+"blocked by" relation, and a part or follow-up of a larger issue
+(a "Parent:" or "Follow-up to" line, open or closed parent) is a
+sub-issue of it. A `Refs` line is context, not a relation.
+
+Titles are `<component>: <what is wrong | what will be true>`, or
+`Decision: <the choice, naming the component>`. The component is the
+noun a reader would grep for (a service, module, tool name, format or
+surface), more specific than the area label. A bug states the observed
+behaviour in the present tense; an enhancement states the outcome.
+`Decision:` is the only status word allowed; no type, priority, phase
+or issue number goes in a title. Sentence case, no trailing period,
+under about 80 characters.
+
 ## Pull Requests and Review
 
 - When a PR first lands, one test-first commit per issue, with a
@@ -823,11 +865,19 @@ Notes:
   `.github/workflows/security.yml` locally (the dependency scans of
   `indexer/` and `mcp-server/` and the offline misconfiguration scan of
   the repository, with the workflow's flags; needs `trivy` on `PATH`,
-  and warns when its version is not the pinned one). The flag values
-  live in the Makefile and the workflow; `make test-trivy-flags` (part
-  of `make test`, no Trivy needed) fails when they differ, so a change
-  to one is made in both. The image scans in
-  `.github/workflows/docker.yml` have no local target.
+  and warns when its version is not the pinned one), then the image
+  gates of `.github/workflows/docker.yml` (the vuln scans of the built
+  indexer, mcp-server and mbsync images, fixable HIGH/CRITICAL only;
+  `make trivy-images` runs these alone). The image gates need the
+  images `make build` last produced, named as `docker compose build`
+  names them, and fail naming the image when one is not built; rebuild
+  first, since they scan the image, not the checkout (they warn, without
+  failing, when an image's `org.opencontainers.image.revision` label is
+  missing or differs from the checkout's commit, and always on a
+  `-dirty` checkout, #1103). The flag values
+  live in the Makefile and the workflows; `make test-trivy-flags` (part
+  of `make test`, no Trivy or Docker needed) fails when they differ, so
+  a change to one is made in both.
 - for Dockerfile, build, or container-runtime changes, run the smallest relevant `docker compose build ...` subset when practical
 - prefer real `.eml` fixtures for parser tests
 - a fixture generated with an office application (Word, PowerPoint,
@@ -875,7 +925,7 @@ Notes:
 - MCP search changes should verify hybrid/RRF behavior where applicable
 - mbsync entrypoint changes should update `mbsync/tests/entrypoint_test.sh`, which loads the real functions with external commands mocked; changes to mbsync's TLS or connection settings should also pass `make test-mbsync-tls` (the shipped image against a synthetic implicit-TLS server)
 - changes to `mbsync/mbsyncrc.template` should pass `make test-mbsync-layout` (the shipped image's isync against synthetic Maildir stores: folder layout, and spurious and genuine UIDVALIDITY changes with the documented recovery)
-- a base-image digest bump in `indexer/Dockerfile` or `mcp-server/Dockerfile` (Dependabot's or by hand) moves `PYTHON_IMAGE` in `mbsync/tests/tls_check.sh` with it; `scripts/tests/image_pin_test.sh` (`make test-image-pins`, also in CI) fails while the three differ, since Dependabot does not update the script
+- a base-image digest bump in `indexer/Dockerfile` or `mcp-server/Dockerfile` (Dependabot's or by hand) moves `PYTHON_IMAGE` in `mbsync/tests/tls_check.sh` with it; `scripts/tests/image_pin_test.sh` (`make test-image-pins`, also in CI) fails while the three differ, since Dependabot does not update the script. The same test fails while `.github/workflows/docker.yml` and `.github/workflows/tests.yml` pass `docker/setup-buildx-action` different `driver-opts: image=moby/buildkit:...` references (#1122): Dependabot does not track a driver option, so a BuildKit bump moves both by hand, together
 - Compose changes that touch service selection, dependencies, hardening or ports should keep `scripts/tests/compose_test.sh` passing; it also checks the required hardening on the merged config of every overlay combination the Makefile uses, and that every base service starts with no profile active, so a new overlay, combination or profile-activating target is added to its list
 - indexing, chunking, embedding-storage, or retrieval changes should pass `make baseline`; if ranking changes on purpose, regenerate the snapshot with `make baseline UPDATE=1` and explain the snapshot diff in the PR
 - `ask_mailbox` prompt or answer-path changes can be compared with the opt-in `make eval-answers` / `make eval-answers-compare` (synthetic corpus only, calls the configured `INFERENCE_*` and `JUDGE_*` providers, never in CI; see `mcp-server/tests/eval/README.md`)

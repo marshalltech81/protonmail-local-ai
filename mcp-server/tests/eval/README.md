@@ -154,7 +154,14 @@ outstanding items have their own sections below):
   `t17`). The scenario lists the correcting message in
   `required_citations`, and *message citation recall* requires the
   answer to cite it: a cited passage (`chunk_id`) or `claimant_id`
-  counts as the message the tool result returned it with. Citing only
+  counts as the message the tool result returned it with, and only
+  when the trace read that message's content as the outstanding-items
+  section below defines a read (#804): its whole body through
+  `get_message` or an uncut `get_thread` row, or a `get_evidence`
+  attachment passage. A listing (`query_messages`, `find_contact`) or
+  a `get_evidence` body passage that named the message does not count,
+  so the reference traces read the cited message after finding it.
+  Citing only
   the superseded message passes thread-level citation recall but fails
   here. Citing both is fine. `make baseline` checks that every
   `required_citations` ref is an indexed message in its thread.
@@ -200,7 +207,11 @@ question; instead it lists:
 - `expected_answer_messages`: message refs the answer must cite
   **exactly**: a decoy cited or a message missing fails *answer set
   exact*. A cited ID counts as the message a result returned it with, so
-  a message cited twice (or by two IDs) counts once. The answer also
+  a message cited twice (or by two IDs) counts once, and only when the
+  trace read that message's content (a `get_message` read to the end,
+  an uncut `get_thread` row or a `get_evidence` attachment passage, as
+  for message citation recall above and outstanding items below, #804):
+  a message counted from a `query_messages` listing alone fails. The answer also
   records `"count"`, a JSON integer like `abstained`, which must equal
   the set's size (*answer count correct*); a missing, string, float or
   boolean count fails.
@@ -223,7 +234,8 @@ while the three together reach every genuine message.
 `tests/test_agent_eval.py` mutates the reference trace into each
 observed mistake (keyword matches counted, a decoy cited, a message
 counted twice, a long body read to page 1 only, a wrong or missing
-count, a PIN or the link repeated) and checks each is caught. The
+count, a PIN or the link repeated, the short messages counted from
+their listing without a read) and checks each is caught. The
 `ask_mailbox` case `ask-tofu-summary` (below) covers summary accuracy
 separately.
 
@@ -288,8 +300,13 @@ blocker must be named in `limitations`).
 A source counts as read only when a result returned its content, never
 because a listing (`query_messages`, `list_threads`, `find_contact`,
 `search_emails`) named it: its whole body through `get_message` paged
-from offset 0 to the end, or a `get_thread` row whose body came back
-uncut (`body_omitted_chars` 0; evidence past a cut needs `get_message`).
+from offset 0 to the end, each page returning body text (a message with
+no indexed body answers `body: null` and reads nothing), or a
+`get_thread` row whose body came back uncut (`body_omitted_chars` 0;
+evidence past a cut needs `get_message`). Reads are matched to
+citations by claimant ID (#217): when two files claim one Message-ID,
+reading one does not cover a citation of the other's claimant ID or
+passage, while a citation of the bare Message-ID names both.
 A source whose decisive text is in an attachment (an `attachment` item
 in the truth's `evidence`) is read only through a `get_evidence`
 passage with `source: attachment`: no tool returns a whole attachment

@@ -175,6 +175,9 @@ mbsync writes one Maildir per Proton folder (`mbsync/mbsyncrc.template`):
   or `mbsyncstate.lock` would be one of those files, so the channel's
   `Patterns` leave it, and everything below it, out. It is not synced and
   nothing reports it.
+- **File mtime:** `CopyArrivalDate yes`. A file mbsync writes gets the
+  message's IMAP INTERNALDATE as its mtime (#1081); see
+  [Message time](#message-time) for what that is and is not.
 - **Indexer:** a message's folder is the path below `/maildir` to the
   directory holding its `cur`/`new`, with the one leading dot of every
   component after the first removed (`indexer/src/parser.py`
@@ -694,6 +697,17 @@ body chunks for the same message.
 Threads are the retrieval unit; `messages` is the authoritative
 per-message record.
 
+**Parser seam.** `indexer/src/parser.py` parses in two halves (#1077).
+`parse_email_bytes(raw, source)` turns a message's RFC 822 bytes into a
+`Message` and reads nothing from disk; `parse_email(path)`, the Maildir
+adapter, reads the file under the size cap and builds the
+`SourceMetadata` it hands over: the folder, the Maildir flags, the
+file's size and mtime, and its path, which only names the message in
+log lines and the `filepath` record. Everything below the parser
+(threading, chunking, extraction, the database writer) sees the
+`Message`, so another source (an mbox import, say) would plug in at
+`parse_email_bytes` with its own adapter.
+
 **Claimant IDs.** A Message-ID is set by the sender, so two different
 files can claim the same one, by accident or to overwrite another
 message's evidence. Every per-message row is therefore keyed by a
@@ -805,6 +819,19 @@ message's `message_thread_map` row. `messages` references
 both `ON DELETE CASCADE`, so every existing removal path — reaper,
 whole-thread delete, rebuild — cleans them up without separate code.
 
+Every message-level filter the tools accept (`sender`, `recipient`,
+`participant`, `subject`, `text`, `folder`, the effective-time bounds,
+the attachment and read flags, `authority_class`) is a leaf of one
+predicate module, `mcp-server/src/lib/predicates.py` (#1084): each
+leaf has a name, a value shape, one SQL compiler over a `messages` row
+and an evaluability rule, and adapters build the leaf list for
+`query_messages` (conjoined on one message, with the keyset cursor
+bound to a digest of the list), for the evidence-scope labels (the
+same, as a label per message) and for `search_emails`' thread filters
+(each leaf decided on its own against the thread, as before). A new
+predicate is written once there; `docs/mcp-tools.md`, "Filter
+predicates", lists the leaves.
+
 ## Message time
 
 The index records two times per message, `sent_at` and `occurred_at`,
@@ -867,6 +894,27 @@ lag the message whenever Phase 2 failed.
 bookkeeping, not message time, and no tool returns them as a message
 date. Bitemporal modeling (when a claim was made versus when the event
 it describes happened) waits for Phase 5.
+
+*Maildir file mtime.* Since `CopyArrivalDate yes` in
+`mbsync/mbsyncrc.template` (#1081), the mtime of a file mbsync writes
+is the message's IMAP INTERNALDATE as Bridge reports it, the server's
+arrival time that IMAP `SINCE` / `BEFORE` search on (isync's manual:
+IMAP does not guarantee the internal date is the arrival time, but it
+is usually close). The flag rename isync performs for a flag change
+and the entrypoint's post-sync `chmod go+r` move only the file's
+ctime, so the mtime stays; `mbsync/tests/layout_check.sh` check 8
+syncs a message with a known far-side date through the shipped image
+and reads the mtime back after each step. Its far side is a Maildir
+store standing in for Bridge, whose date isync takes from the far
+file's mtime, so the check covers how isync writes and keeps the date,
+not how it parses an IMAP INTERNALDATE or what date Bridge reports
+(#1132). A file synced before the option carries the time
+mbsync wrote it, the first sync for the existing corpus, and nothing
+tells the two apart from the file alone. The indexer does not read
+mtimes yet: `indexed_files.mtime_ns` is identity metadata, written at
+parse time and carried across renames, and no tool returns it.
+Persisting the arrival time as `internal_at`, with a stamp that marks
+pre-option files unavailable, is #1081's remaining work.
 
 **Outputs.** Every per-message and per-passage result returns
 `sent_at` and, beside it, `occurred_at` (null when unknown), in the
@@ -1098,7 +1146,10 @@ each message whose occurrence of it now selects a module.
   (`java.base`, `java.desktop`, `java.xml`, `java.logging`,
   `jdk.unsupported`); both live under `/opt/ppt` in the image. The
   build's `ppt-builder` stage fetches the jars pinned in
-  `indexer/java/pom.xml` with Maven (strict checksums), compiles the
+  `indexer/java/pom.xml` with Maven (strict checksums on download, into
+  a BuildKit cache mount with its own id that a later rebuild reuses
+  and that trusts every build the operator runs on that builder,
+  #1070), compiles the
   reader and writes the runtime; the JDK and Maven stay in that stage,
   and the runtime image grows by about 67 MB (411 to 478 MB). Java runs
   under 512 MiB of address space and 30 s of CPU, and the parent kills
@@ -1991,6 +2042,22 @@ whose event was missed — restart, event coalescing, a delivery
 while the observer was not running — is therefore indexed
 eventually rather than omitted until the next container restart.
 
+watchdog's dispatcher thread catches only its own empty-queue
+timeout, so an exception escaping a handler (`enqueue` or
+`is_indexed` on a locked database, a full disk) ends it, and from
+then on only the rescan finds new mail. Every heartbeat
+(`touch_health_file`: per message, embed request and attachment page,
+during the initial index as well as each pass of the main loop)
+checks `observer.is_alive()` before it refreshes the health file; a
+dead thread logs an ERROR and exits the process with status 1, the
+stall guard's remedy, so Compose restarts the indexer with a fresh
+watcher and the startup walk covers the gap (#870). The handlers are
+not wrapped in a catch-all: the failure must stay visible. The
+Maildir walk and the watch's directory walk each log a WARNING with
+the number of directories they could not read, since mail in them is
+neither indexed nor watched until they are readable; the count never
+carries folder names.
+
 mbsync creates each folder directory 0700 and makes it readable to
 the indexer's UID only in its post-sync permission repair, which runs
 after every sync attempt, failed ones included, and before the
@@ -2137,7 +2204,11 @@ vulnerable dependencies, and the Dockerfiles for misconfiguration. It
 fails on HIGH or CRITICAL findings. The misconfiguration scan runs
 offline (`--offline-scan`): Trivy's Maven analyzer would otherwise
 resolve `pom.xml` from Maven Central, which rate-limits the shared CI
-runners (#1047); the dependency scan still resolves it. `make trivy`
+runners (#1047). The dependency scan still resolves it, from a cached
+`~/.m2/repository` keyed on `indexer/java/pom.xml` that the job fills
+with `mvn dependency:resolve` (strict checksums, JDK 21 like the image
+build) before the scan; Trivy reads POMs from that directory before
+asking Maven Central, so a warm cache makes no request (#1069). `make trivy`
 runs the same scans locally with the same flags (#1017), skipping the
 per-checkout `.uv-cache` as the workflow does;
 `scripts/tests/trivy_flags_test.sh` fails when the two differ.
@@ -2146,7 +2217,24 @@ per-checkout `.uv-cache` as the workflow does;
 
 `.github/workflows/docker.yml` also scans the three built images
 (indexer, mcp-server, mbsync) with Trivy after `docker compose build`,
-on each change to a build input and weekly (#977). This covers what
+on each change to a build input and weekly (#977). Before that build,
+a pull-request run restores the indexer's `ppt-builder` stage from the
+GitHub Actions cache (BuildKit's `gha` backend, #1070), so Maven
+Central is contacted only when `indexer/java/pom.xml` or a layer
+before it changed. Every run on `main` (a push, the weekly schedule, a
+manual dispatch) restores nothing: it builds the stage from the
+current Debian packages (a restored apt layer is never rerun, and
+Trivy cannot see the `jlink` runtime) and writes the cache
+pull-request runs restore, so a restored stage is never older than the
+last build on `main`. The `indexer pytest` job of
+`.github/workflows/tests.yml`, which exports the `ppt-runtime` stage
+for the indexer's `.ppt` tests, restores and writes the same cache
+under the same rule (#1105), so it too reaches Maven Central only on
+a run on `main` or after a change to the stage's inputs; that export
+is one build, which fetches the restored layers it copies, so it
+needs no loaded image. The runner's BuildKit is new on every
+run, so the Dockerfile's cache mount of the Maven repository helps
+local rebuilds only. This covers what
 the lockfiles do not: Debian packages installed with apt (catdoc,
 Tesseract, Poppler and the base image's own packages), the Python
 packages actually installed, and the `.ppt` reader's jars in
@@ -2156,8 +2244,41 @@ fixed version; findings with no fix yet are not gated (owner decision
 unfixed findings included, is uploaded as the `trivy-image-reports`
 artifact.
 
+The same job writes a software bill of materials per image (#767):
+Trivy's CycloneDX JSON output for each built image, listing the
+packages the scan above saw (Debian packages, Python packages, the
+`.ppt` reader's jars) with no vulnerability data, which the reports
+carry. The three files (`sbom-indexer.cdx.json`,
+`sbom-mcp-server.cdx.json`, `sbom-mbsync.cdx.json`) are uploaded as
+the `image-sboms` artifact of the run, kept for 14 days: open the run
+under the repository's Actions tab (the Docker workflow) and download
+the artifact from its summary page, or run `gh run download <run-id>
+-n image-sboms`. An SBOM lists packages, never mail data, and Trivy
+reads the built image from the Docker daemon, not the checkout. There
+is no local target for it; `trivy image --format cyclonedx --output
+<file> <image>` with the pinned Trivy produces the same file.
+
 Not covered: the Java runtime that `jlink` builds into `/opt/ppt/jre`
-has no package records, so Trivy does not scan it (#1008).
+has no package records, so Trivy neither scans it nor lists it in the
+SBOM (#1008).
+
+`make trivy` runs the same three gates after its filesystem scans, and
+`make trivy-images` runs them alone (#1065), with the workflow's
+scanners, severity, exit code and `--ignore-unfixed`. They scan the
+images `make build` last produced, as `docker compose config --images`
+lists them (the project name, then `-indexer`, `-mcp-server`,
+`-mbsync`), and fail with a message naming the image when one is not
+built; rebuild before scanning a change,
+since the gates read the image, not the checkout. Before scanning,
+they print a warning naming each image whose
+`org.opencontainers.image.revision` label is missing or is not the
+commit `make build` would stamp now (`SOURCE_COMMIT`), with both
+values (#1103); a `-dirty` checkout always warns, because its files may
+have changed since the build. The warning does not fail the target, and
+the scans still run. The full reports
+have no local equivalent: run `trivy image <name>` by hand for every
+severity. `scripts/tests/trivy_flags_test.sh` derives the gates from
+`docker.yml` and fails when the Makefile drifts from them.
 
 ## Privacy Model
 
