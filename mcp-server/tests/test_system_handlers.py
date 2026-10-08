@@ -171,7 +171,7 @@ class TestGetMailboxStatus:
         assert (
             "  2 messages are deferred without a failure of their own (a file the "
             "indexer cannot read yet, an embedder outage or configuration error, or a "
-            "reparse waiting for a rename); the indexer retries them without spending "
+            "job waiting for a rename); the indexer retries them without spending "
             "attempts." in text
         )
 
@@ -189,7 +189,7 @@ class TestGetMailboxStatus:
         text = _text(asyncio.run(_handler(fake_server, seeded_db)()))
         assert (
             "  1 message is deferred without a failure of its own (a file the indexer "
-            "cannot read yet, an embedder outage or configuration error, or a reparse "
+            "cannot read yet, an embedder outage or configuration error, or a job "
             "waiting for a rename); the indexer retries it without spending attempts." in text
         )
         assert (

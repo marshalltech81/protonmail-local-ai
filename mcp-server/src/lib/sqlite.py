@@ -853,7 +853,7 @@ MESSAGE_ID_CONFLICTS_SQL = """
 # - ``trashed``: an indexed file that is now T-flagged, parked until the
 #   reaper removes it or the file is restored.
 # - ``parse`` with one of ``QUEUE_DEFERRED_PARSE_ERRORS``: a file the
-#   indexer cannot read yet, or a reparse waiting for a rename.
+#   indexer cannot read yet, or a job waiting for a rename.
 # - ``embed`` with no attempt spent, or with
 #   ``operator_action_required`` (only a deferral records that class): an
 #   embedder outage or configuration error. A job that had already

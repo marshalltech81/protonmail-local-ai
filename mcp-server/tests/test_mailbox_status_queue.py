@@ -2,7 +2,7 @@
 
 A job the indexer deferred by design (a parked trashed file, an
 unreadable file waiting for mbsync, an embedder outage or configuration
-error, a reparse waiting for a rename) is not a failing job. Status
+error, a job waiting for a rename) is not a failing job. Status
 reports each kind in its own bucket, so parked trashed files cannot hold
 the index non-current, and a deferral reads as such rather than as a
 retry.

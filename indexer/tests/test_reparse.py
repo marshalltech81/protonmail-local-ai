@@ -461,7 +461,7 @@ class TestReviewRound1:
         _drain(db, queue, make_mock_embedder(_VECTOR))
         row = _jobs(db)[str(old)]
         assert (row["reason"], row["attempts"], row["last_stage"]) == (REASON_REPARSE, 0, "parse")
-        assert row["last_error"] == main.REPARSE_RENAME_DEFERRED_ERROR
+        assert row["last_error"] == main.RENAME_DEFERRED_ERROR
 
         db.update_filepath(str(old), str(new))  # what on_moved does
         db._conn.execute("UPDATE indexing_jobs SET next_attempt_at = '2000-01-01T00:00:00+00:00'")
@@ -479,12 +479,12 @@ class TestReviewRound1:
         queue.enqueue_reparse()
         Path(paths[0]).unlink()
         _drain(db, queue, make_mock_embedder(_VECTOR))
-        assert _jobs(db)[paths[0]]["last_error"] == main.REPARSE_RENAME_DEFERRED_ERROR
-        assert "reparse_file_missing" not in caplog.text
+        assert _jobs(db)[paths[0]]["last_error"] == main.RENAME_DEFERRED_ERROR
+        assert "file_missing" not in caplog.text
         # Still missing once the wait is over: gone, so dropped.
         db._conn.execute("UPDATE indexing_jobs SET next_attempt_at = '2000-01-01T00:00:00+00:00'")
         db._conn.commit()
         _drain(db, queue, make_mock_embedder(_VECTOR))
         assert _jobs(db) == {}
-        assert "reason=reparse_file_missing" in caplog.text
+        assert "reason=file_missing" in caplog.text
         db.close()
