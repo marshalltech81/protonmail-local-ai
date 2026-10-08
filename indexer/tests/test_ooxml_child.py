@@ -5,9 +5,9 @@ central directory declares, and ``zipfile`` decompresses a member's
 whole stream before it cuts the result to the declared size. So the
 whole extraction runs in a child process under an address-space and a
 CPU limit (``src/extractors/ooxml.py``), and its result crosses the
-process boundary as one header line and the text.
+process boundary in the runner's framed protocol (``_runner``).
 
-Tests marked ``real_ooxml_child`` start the real child; every other
+Tests marked ``real_extractor_child`` start the real child; every other
 test in the suite runs it in process (``tests/conftest.py``). Payloads
 are synthetic.
 """
@@ -35,16 +35,14 @@ from src.extractors import (
     STATUS_SUCCESS,
     STATUS_UNSUPPORTED,
     XLSX_EAGER_BUDGET_ERROR,
+    _runner,
     extract,
+    extractor_child,
     ooxml,
-    ooxml_child,
     over_package_budget,
 )
 from src.extractors._runner import (
-    ToolCrashError,
     ToolExitError,
-    ToolOutput,
-    ToolTimeoutError,
     run_tool,
 )
 
@@ -75,7 +73,7 @@ _MAIN_MEMBER = {
 }
 _FORMATS = tuple(_MIME)
 
-real_child = pytest.mark.real_ooxml_child
+real_child = pytest.mark.real_extractor_child
 linux_only = pytest.mark.skipif(
     sys.platform != "linux",
     reason=(
@@ -144,15 +142,15 @@ _FRESH_PROCESS = """
 import json, resource, sys
 sys.path.insert(0, ".")
 import importlib
-from src.extractors import extract, ooxml
+from src.extractors import _runner, extract
 module, path, mime = sys.argv[1:]
 importlib.import_module("src.extractors." + module).CHILD_MAX_ADDRESS_SPACE_BYTES = 4 << 30
 calls = []
-real = ooxml.run_tool
+real = _runner.run_tool
 def spy(*args, **kwargs):
     calls.append(1)
     return real(*args, **kwargs)
-ooxml.run_tool = spy
+_runner.run_tool = spy
 result = extract(content_type=mime, filename="a." + module, payload=open(path, "rb").read())
 if sys.platform == "darwin":
     scale = 1
@@ -190,11 +188,11 @@ def run_tool_calls(monkeypatch):
     the real one."""
     calls: list[tuple[list[str], dict[str, object]]] = []
 
-    def spy(argv, payload, **kwargs):
+    def spy(argv, payload, *, on_output, **kwargs):
         calls.append((argv, kwargs))
-        return run_tool(argv, payload, **kwargs)
+        return run_tool(argv, payload, on_output=on_output, **kwargs)
 
-    monkeypatch.setattr(ooxml, "run_tool", spy)
+    monkeypatch.setattr(_runner, "run_tool", spy)
     return calls
 
 
@@ -283,10 +281,10 @@ class TestRealChild:
         """The real child returns what the in-process run returns, through
         the launcher, with the format's limits."""
         payload = _payload(module, f"{MARKER} Café crème, Zürich")
-        expected = ooxml_child.run(module, payload)
+        expected = extractor_child.run(module, payload)
         result = _extract(module, payload)
         assert result.status == STATUS_SUCCESS
-        assert result.text == expected.partition(b"\n")[2].decode().strip()
+        assert result.text == expected.split(b"\n", 1)[1].decode().strip()
         assert "Café crème" in result.text
         mod = _module(module)
         assert run_tool_calls == [
@@ -294,7 +292,7 @@ class TestRealChild:
                 [
                     sys.executable,
                     "-I",
-                    str(Path(ooxml.__file__).with_name("ooxml_child.py")),
+                    str(Path(ooxml.__file__).with_name("extractor_child.py")),
                     module,
                 ],
                 {
@@ -392,7 +390,7 @@ class TestRealChild:
         assert time.monotonic() - started < 15
 
     def test_an_unknown_format_is_refused_by_the_child(self):
-        child = str(Path(ooxml.__file__).with_name("ooxml_child.py"))
+        child = str(Path(ooxml.__file__).with_name("extractor_child.py"))
         with pytest.raises(ToolExitError) as raised:
             run_tool(
                 [sys.executable, "-I", child, "pdf"],
@@ -404,158 +402,3 @@ class TestRealChild:
                 suffix=".pdf",
             )
         assert raised.value.returncode == 2
-
-
-# ---------------------------------------------------------------------------
-# The protocol, with the runner stubbed
-# ---------------------------------------------------------------------------
-
-
-def _stub_output(monkeypatch, data: bytes, *, truncated: bool = False) -> None:
-    monkeypatch.setattr(ooxml, "run_tool", lambda *_a, **_k: ToolOutput(data, truncated=truncated))
-
-
-class TestProtocol:
-    @pytest.mark.parametrize("module", _FORMATS)
-    @pytest.mark.parametrize(
-        "data",
-        [
-            pytest.param(b"no header line", id="no-newline"),
-            pytest.param(b"", id="empty"),
-            pytest.param(b"unknown_cap\ntext", id="unknown-cap"),
-            pytest.param(b"docx_blocks,pptx_shapes,xlsx_text_chars\ntext", id="other-format-cap"),
-            pytest.param(b"!ValueError\ntext after a type name", id="text-after-type"),
-            pytest.param(b"!\n", id="empty-type"),
-            pytest.param(b"!1Error\n", id="type-not-identifier"),
-            pytest.param(b"!Value Error\n", id="type-with-space"),
-            pytest.param(b"!" + b"E" * 101 + b"\n", id="type-too-long"),
-            pytest.param("!Érreur\n".encode(), id="type-not-ascii"),
-            pytest.param(b"\n\xff\xfe not utf-8", id="body-not-utf8"),
-        ],
-    )
-    def test_malformed_output_is_failed_not_cached_as_text(self, module, data, monkeypatch):
-        _stub_output(monkeypatch, data)
-        result = _extract(module, _payload(module))
-        assert (result.status, result.error, result.text) == (
-            STATUS_FAILED,
-            "OoxmlOutputError",
-            None,
-        )
-
-    @pytest.mark.parametrize("module", _FORMATS)
-    def test_truncated_output_is_failed_not_cached_as_text(self, module, monkeypatch):
-        """Bytes the runner cut at its cap are rejected, even when what was
-        read looks well formed."""
-        _stub_output(monkeypatch, f"\n{MARKER}".encode(), truncated=True)
-        result = _extract(module, _payload(module))
-        assert (result.status, result.error, result.text) == (
-            STATUS_FAILED,
-            "OoxmlOutputError",
-            None,
-        )
-
-    @pytest.mark.parametrize(
-        ("module", "cap"),
-        [(m, c) for m in ("docx", "pptx") for c in sorted(_module(m)._CAP_NAMES)]
-        + [("xlsx", c) for c in sorted(_module("xlsx")._CAP_MESSAGES)],
-    )
-    def test_each_cap_name_is_accepted_logged_and_counted(self, module, cap, monkeypatch, caplog):
-        extractors.drain_extractor_counts()
-        caplog.set_level("DEBUG")
-        _stub_output(monkeypatch, f"{cap},{cap}\n{MARKER} text".encode())
-        result = _extract(module, _payload(module))
-        assert result.status == STATUS_SUCCESS
-        assert result.text == f"{MARKER} text"
-        lines = [r for r in caplog.records if "extractor cap" in r.getMessage()]
-        # Reported twice, logged and counted once.
-        assert [r.levelno for r in lines] == [logging.WARNING]
-        assert lines[0].getMessage().startswith(f"extractor cap {cap}: ")
-        assert extractors.drain_extractor_counts()["extractor_caps"] == 1
-        assert MARKER not in caplog.text
-
-    @pytest.mark.parametrize(
-        ("module", "type_name", "error"),
-        [
-            ("docx", "DocxPackageBudgetError", DOCX_PACKAGE_BUDGET_ERROR),
-            ("pptx", "PptxPackageBudgetError", PPTX_PACKAGE_BUDGET_ERROR),
-            ("xlsx", "XlsxEagerPartBudgetError", XLSX_EAGER_BUDGET_ERROR),
-        ],
-    )
-    def test_a_permanent_rejection_is_unsupported(self, module, type_name, error, monkeypatch):
-        _stub_output(monkeypatch, f"!{type_name}\n".encode())
-        result = _extract(module, _payload(module))
-        assert (result.status, result.error) == (STATUS_UNSUPPORTED, error)
-
-    @pytest.mark.parametrize(
-        ("module", "type_name"),
-        [
-            # Another format's permanent rejection is only a type name here.
-            ("docx", "PptxPackageBudgetError"),
-            ("pptx", "XlsxEagerPartBudgetError"),
-            ("xlsx", "DocxPackageBudgetError"),
-            ("docx", "MemoryError"),
-            ("xlsx", "RecursionError"),
-        ],
-    )
-    def test_any_other_type_is_failed_by_that_name(self, module, type_name, monkeypatch, caplog):
-        caplog.set_level("DEBUG")
-        _stub_output(monkeypatch, f"!{type_name}\n".encode())
-        result = _extract(module, _payload(module))
-        assert (result.status, result.error) == (STATUS_FAILED, type_name)
-        assert f"extractor {module} failed (dispatch_via=mime): {type_name}" in caplog.text
-
-    @pytest.mark.parametrize("module", _FORMATS)
-    @pytest.mark.parametrize("error", [ToolTimeoutError, ToolCrashError, ToolExitError])
-    def test_runner_failures_are_failed_rows_rate_limited(self, module, error, monkeypatch, caplog):
-        """A timeout, a signal (a crash or the CPU limit) and a non-zero
-        exit (the address-space limit when the child cannot report it):
-        ``failed`` by type, each a WARNING within the rate limit, the rest
-        counted as suppressed."""
-
-        def fail(*_a, **_k):
-            raise error
-
-        monkeypatch.setattr(ooxml, "run_tool", fail)
-        extractors.drain_extractor_counts()
-        caplog.set_level("DEBUG")
-        payload = _payload(module)
-        attempts = extractors._WARNINGS_PER_WINDOW + 5
-        for _ in range(attempts):
-            result = _extract(module, payload)
-            assert (result.status, result.error) == (STATUS_FAILED, error.__name__)
-        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-        assert len(warnings) == extractors._WARNINGS_PER_WINDOW
-        assert all(error.__name__ in r.getMessage() for r in warnings)
-        assert extractors.drain_extractor_counts()["warnings_suppressed"] == 5
-        assert MARKER not in caplog.text
-
-
-# ---------------------------------------------------------------------------
-# The child's own side, in process
-# ---------------------------------------------------------------------------
-
-
-class TestChildSide:
-    @pytest.mark.parametrize("module", _FORMATS)
-    @pytest.mark.parametrize("error", [MemoryError, RecursionError, ValueError])
-    def test_any_exception_is_reported_by_type_only(self, module, error, monkeypatch):
-        """Host-pressure types too: in the child they are its own limit."""
-        mod = _module(module)
-
-        def boom(_payload):
-            raise error(MARKER)
-
-        monkeypatch.setattr(mod, "extract_text", boom)
-        assert ooxml_child.run(module, b"x") == f"!{error.__name__}\n".encode()
-        result = _extract(module, b"PK\x03\x04")
-        assert (result.status, result.error) == (STATUS_FAILED, error.__name__)
-
-    def test_output_encoding(self):
-        assert ooxml_child.encode_output("Zürich", ["a", "b"]) == "a,b\nZürich".encode()
-        assert ooxml_child.encode_output("", []) == b"\n"
-        # A lone surrogate cannot be UTF-8: replaced, never a broken body.
-        assert ooxml_child.encode_output("\ud800", []) == b"\n?"
-
-    def test_every_format_the_dispatcher_runs_in_the_child_is_a_child_module(self):
-        """The dispatcher's OOXML modules and the child's list agree."""
-        assert ooxml_child.MODULES == extractors.OOXML_MODULES

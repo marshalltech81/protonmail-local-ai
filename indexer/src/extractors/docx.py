@@ -311,7 +311,7 @@ def extract(
     max_ocr_pages: int = 20,  # noqa: ARG001
     ocr_timeout_seconds: float | None = None,  # noqa: ARG001
     max_pdf_pages: int | None = None,  # noqa: ARG001
-    on_progress: Callable[[], None] | None = None,  # noqa: ARG001
+    on_progress: Callable[[], None] | None = None,
 ) -> tuple[str, str]:
     """Extract text from a DOCX or DOTX payload in the child process
     (``ooxml``, #1040). Returns (text, "docx")."""
@@ -323,6 +323,7 @@ def extract(
         timeout_seconds=CHILD_TIMEOUT_SECONDS,
         caps=_CAP_NAMES,
         permanent={"DocxPackageBudgetError": DocxPackageBudgetError},
+        on_progress=on_progress,
     )
     for cap in caps:
         warn_extractor_cap(log, cap, "document truncated at a walk budget")
@@ -331,7 +332,7 @@ def extract(
 
 def extract_text(payload: bytes) -> tuple[str, list[str]]:
     """The document's text and the names of the walk budgets that cut
-    it. Runs in the child process (``ooxml_child``)."""
+    it. Runs in the child process (``extractor_child``)."""
     document = _open_document(payload)
 
     budget = _Budget()

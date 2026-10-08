@@ -308,7 +308,7 @@ def extract(
     max_ocr_pages: int = 20,  # noqa: ARG001
     ocr_timeout_seconds: float | None = None,  # noqa: ARG001
     max_pdf_pages: int | None = None,  # noqa: ARG001
-    on_progress: Callable[[], None] | None = None,  # noqa: ARG001
+    on_progress: Callable[[], None] | None = None,
 ) -> tuple[str, str]:
     """Extract text from a PPTX, PPTM, PPSX, POTX, PPSM or POTM payload
     in the child process (``ooxml``, #1040). Returns (text, "pptx")."""
@@ -320,6 +320,7 @@ def extract(
         timeout_seconds=CHILD_TIMEOUT_SECONDS,
         caps=_CAP_NAMES,
         permanent={"PptxPackageBudgetError": PptxPackageBudgetError},
+        on_progress=on_progress,
     )
     for cap in caps:
         warn_extractor_cap(log, cap, "presentation truncated at a walk budget")
@@ -328,7 +329,7 @@ def extract(
 
 def extract_text(payload: bytes) -> tuple[str, list[str]]:
     """The deck's text and the names of the walk budgets that cut it.
-    Runs in the child process (``ooxml_child``)."""
+    Runs in the child process (``extractor_child``)."""
     _check_package(payload)
     try:
         presentation = _open_presentation(payload)

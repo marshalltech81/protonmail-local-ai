@@ -1529,13 +1529,17 @@ only, never filenames or text (`make logs`):
   `.ppt` reader rejects or that needs more than its 128 MiB heap; a
   password-protected deck is `unsupported` instead, below),
   `ToolNotFoundError` (catdoc or the
-  `.ppt` Java runtime missing from the image) or `XlsOutputError`.
+  `.ppt` Java runtime missing from the image). A `.xls` that xlrd
+  rejects is failed under xlrd's own type name (`CompDocError`,
+  `XLRDError`, ...), and one that needs more than its 512 MiB is
+  `MemoryError` (#1291).
   A DOCX, XLSX or PPTX is extracted in a child process with 1 GiB of
   address space, 30 s of CPU and a 45 s timeout (#1040): a file that
   needs more is `MemoryError` (or `XMLSyntaxError`, lxml's name for a
-  failed allocation), `ToolCrashError` or `ToolTimeoutError`, and
-  `OoxmlOutputError` means the child's output was malformed or past its
-  cap. The limits and what they were measured on are in
+  failed allocation), `ToolCrashError` or `ToolTimeoutError`. For a
+  `.xls`, `.docx`, `.xlsx` or `.pptx`, `ChildOutputError` means the
+  extractor child's output broke its protocol or passed its byte cap
+  (#1291). The limits and what they were measured on are in
   `docs/architecture.md` ("OOXML extraction runs in a child process").
   Many of these at
   once usually means the OCR toolchain or a parser library is

@@ -6,34 +6,35 @@ labelled ``.xls`` / ``application/vnd.ms-excel`` here; a
 ``.xls``-labelled payload that is not OLE2 (an OOXML file mislabelled
 as ``.xls``) still goes to ``xlsx``.
 
-The workbook is read by xlrd in a child process (``xls_child.py``),
-started as ``sys.executable -I`` through ``_runner.run_tool``. xlrd's
-work on opening a workbook is not bounded by the payload size, so the
-runner's launcher caps the child's address space and CPU time before
-it starts, and the runner adds a wall-clock timeout; see ``xls_child``
-for the per-sheet budgets, which match the xlsx extractor's. The child
-costs a launcher and a child Python start-up and an xlrd import per
-workbook, about 0.02 s on the fixture workbook since the image ships
-compiled bytecode (0.06 s before, #1230).
+The workbook is read by xlrd in the extractor child
+(``extractor_child.py``, running the walk in ``xls_child.py``),
+started through ``_runner.run_child``. xlrd's work on opening a
+workbook is not bounded by the payload size, so the runner's launcher
+caps the child's address space and CPU time before it starts, and the
+runner adds a wall-clock timeout; see ``xls_child`` for the per-sheet
+budgets, which match the xlsx extractor's. The child costs a launcher
+and a child Python start-up, the extractors package and an xlrd import
+per workbook, measured plainly in the image on the fixture workbook:
+about 0.06 s and 39 MiB of address space (0.02 s and 21 MiB while the
+child imported xlrd alone, before #1291).
 
-Any failure in the child (a limit hit, an xlrd error, a crash) ends it
-with no text; the parent raises a fixed-text error from ``_runner``,
+A limit hit, a timeout or a crash raises a fixed-text error from
+``_runner``; an xlrd error (or the child's ``MemoryError`` or
+``RecursionError``) is reported by type name as ``ChildError``. Each is
 recorded by type name as a ``failed`` row. Output past
 ``_MAX_OUTPUT_BYTES`` cannot come from a working child, whose text
-budget is smaller, so it fails the workbook too. The budgets the child
-reports as having cut the text are logged here through
-``warn_extractor_cap``.
+budget is smaller, so it fails the workbook too
+(``ChildOutputError``). The budgets the child reports as having cut
+the text are logged here through ``warn_extractor_cap``.
 """
 
 from __future__ import annotations
 
 import logging
-import sys
 from collections.abc import Callable
-from pathlib import Path
 
 from . import warn_extractor_cap
-from ._runner import run_tool
+from ._runner import run_child
 
 log = logging.getLogger("indexer.extractor.xls")
 
@@ -50,9 +51,10 @@ log = logging.getLogger("indexer.extractor.xls")
 # * a 6 KB workbook whose shared-string table declares 2^31 - 1 strings
 #   and re-reads one forever (a negative phonetic size): the address
 #   space runs out after 17.5 s of CPU and 466 MB RSS, and the child
-#   exits with an error (at 1 GiB it took 35 s).
+#   fails (it reports MemoryError since #1291; at 1 GiB it took 35 s).
 #
-# 512 MiB is about 2.7 times the largest benign peak; the CPU limit
+# 512 MiB is about 2.5 times the largest benign peak with the 18 MiB
+# of address space the extractors package adds (#1291); the CPU limit
 # ends a loop that allocates nothing.
 CHILD_MAX_ADDRESS_SPACE_BYTES = 512 * 1024 * 1024
 CHILD_MAX_CPU_SECONDS = 30
@@ -62,7 +64,8 @@ CHILD_MAX_CPU_SECONDS = 30
 XLS_TIMEOUT_SECONDS = 45.0
 
 # Bytes of the child's output read: its text budget (10,000,000
-# characters) at up to four bytes each, plus the cap line.
+# characters) at UTF-8's worst case of four bytes each, plus the
+# frames.
 _MAX_OUTPUT_BYTES = 40 * 1024 * 1024 + 1024
 
 # The cap names the child may report, and what each logs.
@@ -72,15 +75,6 @@ _CAP_MESSAGES = {
     "xls_text_chars": "xls walk stopped at the text budget",
 }
 
-_CHILD = Path(__file__).with_name("xls_child.py")
-
-
-class XlsOutputError(Exception):
-    """The child's output was over the byte cap or not in its format."""
-
-    def __init__(self) -> None:
-        super().__init__("xls child output malformed or over its cap")
-
 
 def extract(
     payload: bytes,
@@ -89,28 +83,19 @@ def extract(
     max_ocr_pages: int = 20,  # noqa: ARG001
     ocr_timeout_seconds: float | None = None,  # noqa: ARG001
     max_pdf_pages: int | None = None,  # noqa: ARG001
-    on_progress: Callable[[], None] | None = None,  # noqa: ARG001
+    on_progress: Callable[[], None] | None = None,
 ) -> tuple[str, str]:
     """Extract text from a legacy ``.xls`` payload. Returns (text, "xls")."""
-    output = run_tool(
-        [
-            sys.executable,
-            "-I",
-            str(_CHILD),
-        ],
+    result = run_child(
+        "xls",
         payload,
-        timeout_seconds=XLS_TIMEOUT_SECONDS,
-        max_output_bytes=_MAX_OUTPUT_BYTES,
         max_address_space_bytes=CHILD_MAX_ADDRESS_SPACE_BYTES,
         max_cpu_seconds=CHILD_MAX_CPU_SECONDS,
-        suffix=".xls",
+        timeout_seconds=XLS_TIMEOUT_SECONDS,
+        max_output_bytes=_MAX_OUTPUT_BYTES,
+        caps=frozenset(_CAP_MESSAGES),
+        on_progress=on_progress,
     )
-    header, newline, body = output.data.partition(b"\n")
-    if output.truncated or not newline:
-        raise XlsOutputError
-    caps = header.decode("ascii", errors="replace").split(",") if header else []
-    if not set(caps) <= set(_CAP_MESSAGES):
-        raise XlsOutputError
-    for cap in caps:
+    for cap in result.caps:
         warn_extractor_cap(log, cap, _CAP_MESSAGES[cap])
-    return body.decode("utf-8", errors="replace"), "xls"
+    return result.text, "xls"

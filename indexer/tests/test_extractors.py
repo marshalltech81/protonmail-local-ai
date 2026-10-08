@@ -7318,17 +7318,16 @@ def _run_xls_child_in_process(monkeypatch, **budgets):
     hand its output to the real parent."""
     from pathlib import Path
 
-    from src.extractors import xls, xls_child
-    from src.extractors._runner import ToolOutput
+    from src.extractors import _runner, extractor_child, xls, xls_child
 
     for name, value in budgets.items():
         monkeypatch.setattr(xls_child, name, value)
 
-    def run_tool(_argv, payload, **_kwargs):
-        text, caps = xls_child.extract_text(payload)
-        return ToolOutput(xls_child.encode_output(text, caps), truncated=False)
+    def run_tool(_argv, payload, *, on_output, **_kwargs):
+        on_output(extractor_child.run("xls", payload))
+        return _runner.ToolOutput(b"", truncated=False)
 
-    monkeypatch.setattr(xls, "run_tool", run_tool)
+    monkeypatch.setattr(_runner, "run_tool", run_tool)
     fixture = Path(__file__).parent / "fixtures" / "extractors" / "legacy.xls"
     text, _ = xls.extract(fixture.read_bytes())
     return text
@@ -7474,19 +7473,23 @@ _UNREPORTED_CAPS = {
     "src.extractors.pptx:_MAX_RELS_BYTES": _DECK_FAILS,
     "src.extractors.pptx:_MAX_DECLARED_BYTES": _DECK_FAILS,
     "src.extractors.xls:_MAX_OUTPUT_BYTES": (
-        "child output past it cannot come from a working child: XlsOutputError, a failed row "
+        "child output past it cannot come from a working child: ChildOutputError, a failed row "
         "with its rate-limited WARNING, counted as failed="
     ),
     "src.extractors.xls:CHILD_MAX_ADDRESS_SPACE_BYTES": (
-        "the child fails (ToolExitError): a failed row with its rate-limited WARNING, "
-        "counted as failed="
+        "the child fails (MemoryError, or ToolExitError when it cannot report it): a failed "
+        "row with its rate-limited WARNING, counted as failed="
     ),
     "src.extractors.xls:CHILD_MAX_CPU_SECONDS": (
         "the child is killed (ToolCrashError): a failed row with its rate-limited WARNING, "
         "counted as failed="
     ),
+    "src.extractors._runner:_MAX_FRAME_LINE": (
+        "a longer protocol line cannot come from a working child: ChildOutputError, a failed "
+        "row with its rate-limited WARNING, counted as failed="
+    ),
     "src.extractors.ooxml:_MAX_OUTPUT_BYTES": (
-        "child output past it cannot come from a working child: OoxmlOutputError, a failed row "
+        "child output past it cannot come from a working child: ChildOutputError, a failed row "
         "with its rate-limited WARNING, counted as failed="
     ),
     **{
@@ -7528,8 +7531,8 @@ _EXTRACTOR_MODULES = (
     "src.extractors.doc",
     "src.extractors.docx",
     "src.extractors.html",
+    "src.extractors.extractor_child",
     "src.extractors.ooxml",
-    "src.extractors.ooxml_child",
     "src.extractors.image",
     "src.extractors.pdf",
     "src.extractors.ppt",

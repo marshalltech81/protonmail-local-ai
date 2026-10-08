@@ -10,81 +10,57 @@ passes every budget and is still expanded in memory. A read through
 the public API never sees the understatement, and the sender also
 controls the CRC, so it cannot be caught in-process.
 
-The whole extraction therefore runs in a child Python process
-(``ooxml_child.py``), started through ``_runner.run_tool``: the
+The whole extraction therefore runs in the extractor child
+(``extractor_child.py``), started through ``_runner.run_child``: the
 launcher lowers the child's address space (``RLIMIT_AS``) and CPU time
 (``RLIMIT_CPU``) before it starts, and the runner adds a wall-clock
-timeout. The pre-open budgets, the eager member reads and the walk all
-run in the child, under the limits each format passes
-(``CHILD_MAX_ADDRESS_SPACE_BYTES``, ``CHILD_MAX_CPU_SECONDS`` and
-``CHILD_TIMEOUT_SECONDS`` in ``docx.py``, ``pptx.py`` and ``xlsx.py``,
-sized from plain measurements in the indexer image). Starting the
-child and importing its library costs about 0.08 s per extraction in
-the image, which ships compiled bytecode for the standard library, the
-dependencies and ``src`` (#1230; about 0.2 s without it).
+timeout, kills the child's process group when the run ends and removes
+its scratch directory (#1291). The pre-open budgets, the eager member
+reads and the walk all run in the child, under the limits each format
+passes (``CHILD_MAX_ADDRESS_SPACE_BYTES``, ``CHILD_MAX_CPU_SECONDS``
+and ``CHILD_TIMEOUT_SECONDS`` in ``docx.py``, ``pptx.py`` and
+``xlsx.py``, sized from plain measurements in the indexer image).
+Starting the child and importing its library costs about 0.08 s per
+extraction in the image, which ships compiled bytecode for the
+standard library, the dependencies and ``src`` (#1230; about 0.2 s
+without it).
 
-The child writes one header line, then the text (``ooxml_child``):
+The child's result crosses the pipe in the runner's framed protocol
+(``_runner``): the names of the walk budgets that cut the text, each
+checked against the format's own list and logged through
+``warn_extractor_cap`` by the caller, and the text; or the type name of
+the exception the extraction raised. A type name in the format's
+``permanent`` map is raised as that class, so the dispatcher records it
+``unsupported`` as before (#931, #1032); any other is raised as
+``ChildError``, which the dispatcher records ``failed`` under that type
+name, as it recorded the exception in-process.
 
-* a comma-separated list of the walk budgets that cut the text, each
-  checked here against the format's own list and logged through
-  ``warn_extractor_cap`` by the caller; or
-* ``!`` and the type name of the exception the extraction raised, with
-  no text. A type name in the format's ``permanent`` map is raised here
-  as that class, so the dispatcher records it ``unsupported`` as before
-  (#931, #1032); any other is raised as ``OoxmlChildError``, which the
-  dispatcher records ``failed`` under that type name, as it recorded
-  the exception in-process.
-
-Output that is not in this format (no header line, an unknown cap or
-type name, text after a type name, bytes that are not UTF-8) or that
-the runner cut at its byte cap is rejected as ``OoxmlOutputError``,
-never returned as text. A timeout, a death by signal (a crash, or the
-CPU limit) and a non-zero exit raise the runner's fixed-text errors.
-All of these are recorded ``failed`` by type name, with a rate-limited
-WARNING from the dispatcher. A ``MemoryError`` or ``RecursionError``
-in the child is the child's limit, not host pressure: it is reported
-by type and recorded ``failed``, where in-process the dispatcher
-re-raised it. The address-space limit can also surface as a parser's
-own error type: lxml reports a failed allocation as ``XMLSyntaxError``.
+Output that breaks the protocol or that the runner cut at its byte cap
+is rejected as ``ChildOutputError``, never returned as text. A timeout,
+a death by signal (a crash, or the CPU limit) and a non-zero exit raise
+the runner's fixed-text errors. All of these are recorded ``failed`` by
+type name, with a rate-limited WARNING from the dispatcher. A
+``MemoryError`` or ``RecursionError`` in the child is the child's
+limit, not host pressure: it is reported by type and recorded
+``failed``, where in-process the dispatcher re-raised it. The
+address-space limit can also surface as a parser's own error type:
+lxml reports a failed allocation as ``XMLSyntaxError``.
 """
 
 from __future__ import annotations
 
-import re
-import sys
-from collections.abc import Mapping
-from pathlib import Path
+from collections.abc import Callable, Mapping
 
-from ._runner import run_tool
+from . import _runner
 
-_CHILD = Path(__file__).with_name("ooxml_child.py")
-
-# Bytes of the child's output read. Each format's text budget is
-# 10,000,000 characters at up to four bytes each. The XLSX walk charges
-# its separators to that budget; the DOCX and PPTX walks do not charge
-# the blank lines between lines and the spaces between table cells,
-# which their block, paragraph and cell budgets hold under 4 MB.
+# Bytes of the child's output read: each format's text budget
+# (10,000,000 characters) at UTF-8's worst case of four bytes each,
+# plus the frames. The XLSX walk charges its separators to that budget;
+# the DOCX and PPTX walks do not charge the blank lines between lines
+# and the spaces between table cells, which their block, paragraph and
+# cell budgets hold under 4 MB. Output past it cannot come from a
+# working child.
 _MAX_OUTPUT_BYTES = 48 * 1024 * 1024
-
-# What a reported type name must look like: a Python identifier.
-_TYPE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,99}")
-
-
-class OoxmlOutputError(Exception):
-    """The child's output was cut at the byte cap or not in its format."""
-
-    def __init__(self) -> None:
-        super().__init__("ooxml child output malformed or over its cap")
-
-
-class OoxmlChildError(Exception):
-    """The extraction raised in the child. ``type_name`` is the
-    exception's type name, which the dispatcher records; the message is
-    fixed, as the exception's own could quote the document."""
-
-    def __init__(self, type_name: str) -> None:
-        super().__init__("ooxml extraction raised in the child process")
-        self.type_name = type_name
 
 
 def run_child(
@@ -96,39 +72,20 @@ def run_child(
     timeout_seconds: float,
     caps: frozenset[str],
     permanent: Mapping[str, type[Exception]],
+    on_progress: Callable[[], None] | None = None,
 ) -> tuple[str, list[str]]:
     """Run ``module``'s extraction of ``payload`` in the child under the
-    format's limits; the wall-clock timeout is past the CPU limit, so a
-    CPU-bound child meets that first. Returns the text and the names of
-    the budgets that cut it (each in ``caps``)."""
-    output = run_tool(
-        [sys.executable, "-I", str(_CHILD), module],
+    format's limits. Returns the text and the names of the budgets that
+    cut it (each in ``caps``)."""
+    result = _runner.run_child(
+        module,
         payload,
-        timeout_seconds=timeout_seconds,
-        max_output_bytes=_MAX_OUTPUT_BYTES,
         max_address_space_bytes=max_address_space_bytes,
         max_cpu_seconds=max_cpu_seconds,
-        suffix=f".{module}",
+        timeout_seconds=timeout_seconds,
+        max_output_bytes=_MAX_OUTPUT_BYTES,
+        caps=caps,
+        permanent=permanent,
+        on_progress=on_progress,
     )
-    if output.truncated:
-        raise OoxmlOutputError
-    header, newline, body = output.data.partition(b"\n")
-    if not newline:
-        raise OoxmlOutputError
-    try:
-        line = header.decode("ascii")
-        text = body.decode("utf-8")
-    except UnicodeDecodeError:
-        raise OoxmlOutputError from None
-    if line.startswith("!"):
-        type_name = line[1:]
-        if text or not _TYPE_NAME.fullmatch(type_name):
-            raise OoxmlOutputError
-        error = permanent.get(type_name)
-        if error is not None:
-            raise error()
-        raise OoxmlChildError(type_name)
-    reported = line.split(",") if line else []
-    if not set(reported) <= caps:
-        raise OoxmlOutputError
-    return text, list(dict.fromkeys(reported))
+    return result.text, result.caps
