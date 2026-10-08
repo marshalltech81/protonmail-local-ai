@@ -185,10 +185,16 @@ def _extract_view(output: ExtractFromEmailsOutput) -> AnswerView:
     statements = [_record_statement(r) for r in records]
     notice = output.notice
     incomplete = notice is not None and notice.startswith(_INCOMPLETE_PREFIX)
+    abstained = not statements and not incomplete
     if statements:
         answer = "\n".join(s.text for s in statements)
+    elif incomplete:
+        answer = EXTRACTION_INCOMPLETE
+        # A non-abstaining answer needs a statement for the judge's
+        # claims to name (``judge.parse_verdict``); this one cites nothing.
+        statements = [AnswerStatement(text=answer, labels=[], status="not_checked")]
     else:
-        answer = EXTRACTION_INCOMPLETE if incomplete else NO_RECORDS
+        answer = NO_RECORDS
     return AnswerView(
         answer,
         output.threads,
@@ -197,7 +203,7 @@ def _extract_view(output: ExtractFromEmailsOutput) -> AnswerView:
         statements,
         notice,
         None,
-        abstained=not statements and not incomplete,
+        abstained=abstained,
         complete=not incomplete,
         records=records,
     )

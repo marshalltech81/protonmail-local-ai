@@ -42,7 +42,7 @@ from tests.answer_eval.judge import JudgeOutcome, build_judge_prompt
 from tests.answer_eval.report import build_report, case_record, detail_record
 from tests.answer_eval.runner import CaseRun, RunContext, capture_evidence_maps, run_case
 from tests.conftest import FakeEmbedClient
-from tests.test_answer_eval import MARKER, ScriptedClient, _identity, _passage
+from tests.test_answer_eval import MARKER, ScriptedClient, _identity, _judge_config, _passage
 
 CASES = {c.id: c for c in load_cases()}
 SUMMARIZE = "summarize-pool-bids"
@@ -577,6 +577,52 @@ class TestCapture:
         assert det.checks["answer_complete"] == FAIL
         assert "synthesis" in attribute(case, run, det, False, False)
 
+    def test_extract_all_threads_failed_can_be_judged(self, chunked_db):
+        """Codex round 2 on #1273: a non-abstaining answer needs a statement
+        for the judge's claims to name, so the incomplete marker is one
+        (citing nothing); a valid verdict is then possible and the case is
+        not recorded as an evaluator error."""
+        case = dataclasses.replace(
+            CASES[EXTRACT], arguments={"query": "invoice", "schema": {"invoice": "string"}}
+        )
+        verdict = json.dumps(
+            {
+                "claims": [
+                    {
+                        "claim": "c",
+                        "statement": 1,
+                        "cited": [],
+                        "verdict": "insufficient_evidence",
+                        "explanation": "nothing extracted",
+                    }
+                ],
+                "facts": [{"id": f.id, "covered": False} for f in case.expected_facts],
+                "prohibited": [
+                    {"index": i, "asserted": False} for i in range(1, len(case.must_not_assert) + 1)
+                ],
+                "dimensions": {
+                    d: {"result": "fail" if case.criteria[d] else "not_applicable"}
+                    for d in case.criteria
+                },
+            }
+        )
+        judge = ScriptedClient(verdict)
+        rows, _ = asyncio.run(
+            evaluate(
+                [case],
+                _ctx(chunked_db, ScriptedClient(InferenceTruncatedError("{"))),
+                judge_client=judge,
+                judge_config=_judge_config(),
+            )
+        )
+        [row] = rows
+        view_statements = judge.calls[0][1]
+        assert EXTRACTION_INCOMPLETE in view_statements
+        assert row["judge"]["status"] == "ok", row["judge"]
+        assert row["deterministic"]["checks"]["answer_complete"] == FAIL
+        assert "evaluator_infrastructure" not in row["attribution"]
+        assert "synthesis" in row["attribution"]
+
     def test_extract_provider_failure_keeps_content_out_of_logs(self, chunked_db, caplog):
         case = dataclasses.replace(
             CASES[EXTRACT], arguments={"query": "invoice", "schema": {"invoice": "string"}}
@@ -903,6 +949,10 @@ class TestViews:
         assert view.coverage_note == notice
         if not records:
             assert view.answer == EXTRACTION_INCOMPLETE
+            # Codex round 2 on #1273: one statement for the judge to name.
+            assert view.statements == [
+                AnswerStatement(text=EXTRACTION_INCOMPLETE, labels=[], status="not_checked")
+            ]
 
 
 # ---------------------------------------------------------------- grading
