@@ -38,6 +38,7 @@ from src.lib.security import safe_provider_exception_text
 from src.tools.intelligence import _escape_delimiter_tags, _strip_code_fence
 from src.tools.outputs import AnswerStatement
 
+from tests.answer_eval.adapters import EntryStatement
 from tests.answer_eval.cases import DIMENSIONS, Case
 from tests.answer_eval.cli_judge import CliJudgeError
 from tests.answer_eval.config import LayerConfig
@@ -430,7 +431,7 @@ async def judge_answer(
     passages: dict[str, Passage],
     answer_abstained: bool,
     *,
-    statements: Sequence[AnswerStatement],
+    statements: Sequence[AnswerStatement | EntryStatement],
     coverage_note: str | None = None,
     omitted_facts: Sequence[str] = (),
     timeout_secs: float | None = None,

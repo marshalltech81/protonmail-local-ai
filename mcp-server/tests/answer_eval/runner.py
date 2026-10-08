@@ -1,9 +1,13 @@
 """Run a case's tool and capture what its model received.
 
-The registered handler (``ask_mailbox`` or ``summarize_thread``, #656)
-runs unchanged: ``register_intelligence_tools``
-registers it on a stub server exactly as ``main.py`` does on FastMCP,
-and the case's arguments are passed to it as a client's would be. The
+The registered handler (``ask_mailbox`` or ``summarize_thread``, #656;
+the experimental ``brief_issue`` or ``check_conclusion``, #1240) runs
+unchanged: ``register_intelligence_tools`` and
+``register_experimental_tools`` register them on a stub server exactly
+as ``main.py`` does on FastMCP, and the case's arguments are passed to
+it as a client's would be. The stub always has the experimental tools:
+the evaluation enables them for itself, whatever the server's
+``MCP_EXPERIMENTAL_TOOLS`` says, and reads no such setting. The
 evaluator reimplements neither retrieval nor prompt building.
 
 Two narrow wrappers capture the run, in memory only:
@@ -15,7 +19,8 @@ Two narrow wrappers capture the run, in memory only:
   instruction appended, so the evidence available to the final answer
   is the first request's.
 - ``capture_evidence_maps`` wraps the handlers' evidence builders
-  (``intelligence._build_evidence`` and ``_summarize_context``) to keep
+  (``intelligence._build_evidence``, also under ``brief``'s own import of
+  it, and ``_summarize_context``) to keep
   the label -> passage maps built alongside those prompts (thread,
   message, claimant, chunk); ``adapters.select_passages`` picks the map
   that describes the prompt sent. ``prompt_consistent`` then checks
@@ -50,8 +55,13 @@ from fastmcp.exceptions import ToolError
 from pydantic import ValidationError
 from src.lib.inference import TEMPLATE_RESERVE_TOKENS, InferenceTruncatedError, PromptBudget
 from src.lib.security import ProviderResponseError
-from src.tools import intelligence
-from src.tools.outputs import AskMailboxOutput, SummarizeThreadOutput
+from src.tools import brief, intelligence
+from src.tools.outputs import (
+    AskMailboxOutput,
+    BriefIssueOutput,
+    CheckConclusionOutput,
+    SummarizeThreadOutput,
+)
 
 from tests.answer_eval.adapters import (
     OUTPUT_MODELS,
@@ -62,7 +72,7 @@ from tests.answer_eval.adapters import (
 )
 from tests.answer_eval.cases import BASELINE_DOMAIN, Case
 
-ToolOutput = AskMailboxOutput | SummarizeThreadOutput
+ToolOutput = AskMailboxOutput | SummarizeThreadOutput | BriefIssueOutput | CheckConclusionOutput
 
 # Statuses a run can end in. Only ``ok`` has an output to grade.
 RUN_STATUSES = ("ok", "tool_error", "timeout", "invalid_output", "runner_error", "skipped")
@@ -245,10 +255,16 @@ class _ToolServer:
         return decorator
 
 
-# The handlers' evidence builders, each taking an ``evidence_map`` keyword:
-# ``ask_mailbox`` builds through the first, ``summarize_thread`` through
-# the second.
-_EVIDENCE_BUILDERS = ("_build_evidence", "_summarize_context")
+# The handlers' evidence builders, each taking an ``evidence_map`` keyword,
+# as the module global each handler looks up: ``ask_mailbox`` builds
+# through ``intelligence._build_evidence``, ``summarize_thread`` through
+# ``_summarize_context``, and the experimental tools through ``brief``'s
+# own imported name for ``_build_evidence`` (#1240).
+_EVIDENCE_BUILDERS = (
+    (intelligence, "_build_evidence"),
+    (intelligence, "_summarize_context"),
+    (brief, "_build_evidence"),
+)
 
 
 @contextmanager
@@ -261,7 +277,7 @@ def capture_evidence_maps(sink: list[dict[str, Any]]) -> Iterator[None]:
     unchanged. Runs are sequential, so the swap is not shared between
     cases.
     """
-    originals = {name: getattr(intelligence, name) for name in _EVIDENCE_BUILDERS}
+    originals = [(module, name, getattr(module, name)) for module, name in _EVIDENCE_BUILDERS]
 
     def spy_for(original: Callable[..., Any]) -> Callable[..., Any]:
         def spy(*args: Any, **kwargs: Any) -> Any:
@@ -273,13 +289,13 @@ def capture_evidence_maps(sink: list[dict[str, Any]]) -> Iterator[None]:
 
         return spy
 
-    for name, original in originals.items():
-        setattr(intelligence, name, spy_for(original))
+    for module, name, original in originals:
+        setattr(module, name, spy_for(original))
     try:
         yield
     finally:
-        for name, original in originals.items():
-            setattr(intelligence, name, original)
+        for module, name, original in originals:
+            setattr(module, name, original)
 
 
 def _passage(ref: Any) -> Passage:
@@ -338,16 +354,18 @@ async def run_case(case: Case, ctx: RunContext) -> CaseRun:
     recorder = RecordingInference(ctx.inference_client)
     embedder = TimedEmbedder(ctx.embed_client)
     server = _ToolServer()
-    intelligence.register_intelligence_tools(
-        server,
-        ctx.db,
-        embedder,
-        recorder,
-        reranker=None,
-        secret_values=ctx.secret_values,
-        expected_embed_dim=ctx.expected_embed_dim,
-        prompt_budget=prompt_budget_for(case, ctx.prompt_budget),
-    )
+    # The experimental tools too, for this stub only (#1240).
+    for register in (intelligence.register_intelligence_tools, brief.register_experimental_tools):
+        register(
+            server,
+            ctx.db,
+            embedder,
+            recorder,
+            reranker=None,
+            secret_values=ctx.secret_values,
+            expected_embed_dim=ctx.expected_embed_dim,
+            prompt_budget=prompt_budget_for(case, ctx.prompt_budget),
+        )
     maps: list[dict[str, Any]] = []
     run = CaseRun(case_id=case.id, status="ok", tool=case.tool)
     start = time.perf_counter()

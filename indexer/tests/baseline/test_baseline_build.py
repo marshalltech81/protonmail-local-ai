@@ -278,7 +278,8 @@ class TestBuild:
 
     def test_case_queries_are_what_each_tool_embeds(self):
         """#656: an ask_mailbox question is embedded; a summarize_thread
-        case (a thread ID lookup) is not."""
+        case (a thread ID lookup) is not. #1240: brief_issue embeds its
+        topic and check_conclusion its conclusion."""
         cases = {
             "cases": [
                 {"tool": "ask_mailbox", "arguments": {"question": "Synthetic question?"}},
@@ -286,9 +287,15 @@ class TestBuild:
                     "tool": "summarize_thread",
                     "arguments": {"thread_id": "t05.1@baseline.example", "style": "brief"},
                 },
+                {"tool": "brief_issue", "arguments": {"topic": "Synthetic topic"}},
+                {"tool": "check_conclusion", "arguments": {"conclusion": "Synthetic claim."}},
             ]
         }
-        assert case_queries(cases) == {"Synthetic question?"}
+        assert case_queries(cases) == {
+            "Synthetic question?",
+            "Synthetic topic",
+            "Synthetic claim.",
+        }
 
     @requires_ocr
     def test_embeds_answer_eval_case_questions(self, tmp_path):

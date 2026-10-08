@@ -10,7 +10,8 @@ has a query vector. Two layers:
    cannot rest on a fact the corpus does not hold, and the references
    are checked against the corpus, not against what retrieval returns.
 2. The harness end to end. Every case runs through the real handler
-   of its tool (``ask_mailbox`` or ``summarize_thread``, #656) with a
+   of its tool (``ask_mailbox`` or ``summarize_thread``, #656, or an
+   experimental tool, #1240) with a
    scripted answerer (no network) that writes the case's expected
    values citing the supplied passages, and a scripted judge. Each run
    must complete, its captured evidence must match the prompt the model
@@ -185,6 +186,38 @@ class _OracleAnswerer:
         self.unsupported: list[list[str]] = []
 
     async def complete(self, system: str, user: str) -> str:
+        """Prose for ``ask_mailbox`` and ``summarize_thread``; for the
+        experimental tools (#1240) the same sentences as the JSON reply
+        their prompts ask for, each sentence one entry citing its label."""
+        text = self._prose(user)
+        if self.case.tool not in ("brief_issue", "check_conclusion"):
+            return text
+        abstained = text.startswith("Not found")
+        entries = [
+            (s.split(" [")[0], re.findall(r"\[(E\d+)\]", s))
+            for s in ([] if abstained else re.split(r"(?<=\.) ", text))
+        ]
+        if self.case.tool == "brief_issue":
+            decisions = [{"decision": t, "labels": labels} for t, labels in entries]
+            return json.dumps(
+                {
+                    "chronology": [],
+                    "positions": [],
+                    "decisions": decisions,
+                    "open_questions": [],
+                    "conflicts": [],
+                    "insufficient_evidence": abstained,
+                }
+            )
+        findings = [
+            {"relation": "supports", "explanation": t, "labels": labels} for t, labels in entries
+        ]
+        verdict = "The passages do not address it." if abstained else "Supported."
+        return json.dumps(
+            {"verdict_summary": verdict, "findings": findings, "insufficient_evidence": abstained}
+        )
+
+    def _prose(self, user: str) -> str:
         if not self.case.answerable:
             return "Not found in the provided emails: nothing in them answers this."
         labels = dict(_LABEL.findall(user))  # label -> claimant ID
@@ -314,6 +347,21 @@ def test_every_case_completes_and_is_judged(records: dict[str, dict]) -> None:
         assert r["judge"]["status"] == "ok", (cid, r["judge"]["error"])
         assert r["deterministic"]["checks"]["prompt_matches_capture"] == "pass", cid
         assert r["tool"] == next(c.tool for c in CASES if c.id == cid), cid
+
+
+def test_experimental_smoke_cases_pass_end_to_end(records: dict[str, dict]) -> None:
+    """#1240: each experimental tool's smoke cases run through the real
+    handler, pass every deterministic check on the first reply, and the
+    abstention cases abstain through the tool's own flag."""
+    smoke = [c for c in CASES if c.tool in ("brief_issue", "check_conclusion")]
+    assert {c.tool for c in smoke} == {"brief_issue", "check_conclusion"}
+    for case in smoke:
+        r = records[case.id]
+        assert r["deterministic"]["passed"], (case.id, r["deterministic"]["checks"])
+        assert r["repair_attempted"] is False, case.id
+        assert r["deterministic"]["abstained"] is (not case.answerable), case.id
+        if case.answerable:
+            assert r["deterministic"]["citation_coverage"] == 1.0, case.id
 
 
 @pytest.mark.parametrize("case", CASES, ids=lambda c: c.id)
