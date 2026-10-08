@@ -60,7 +60,13 @@ from tests.answer_eval.cases import Case
 # Each tool's structured output, which the runner validates a result against.
 OUTPUT_MODELS: dict[
     str,
-    type[AskMailboxOutput | SummarizeThreadOutput | BriefIssueOutput | CheckConclusionOutput],
+    type[
+        AskMailboxOutput
+        | SummarizeThreadOutput
+        | ExtractFromEmailsOutput
+        | BriefIssueOutput
+        | CheckConclusionOutput
+    ],
 ] = {
     "ask_mailbox": AskMailboxOutput,
     "summarize_thread": SummarizeThreadOutput,
