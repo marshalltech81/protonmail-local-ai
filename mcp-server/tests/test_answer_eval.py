@@ -76,7 +76,6 @@ from tests.answer_eval.runner import (
     ProviderBillingError,
     RecordingInference,
     RunContext,
-    _claimant_message,
     capture_evidence_maps,
     claimant_hash_chars,
     corpus_manifest,
@@ -730,9 +729,11 @@ class TestRunner:
     def test_corpus_manifest_hashes_committed_bytes(self):
         manifest = corpus_manifest()
         assert len(manifest) > 50
-        for message_id, entry in manifest.items():
+        for claimant, entry in manifest.items():
+            message_id = entry.message_id
             assert re.fullmatch(r"t(?:\d{2}|[1-9]\d{2})\.\d+@baseline\.example", message_id)
             assert re.fullmatch(r"[0-9a-f]{64}", entry.sha256)
+            assert claimant == f"{message_id}#{entry.sha256[:16]}"
             assert entry.thread_id == thread_id_of(message_id.split("@")[0]) and entry.tokens
 
     @pytest.mark.parametrize(
@@ -742,11 +743,10 @@ class TestRunner:
         """#675: only the indexer's ``CLAIMANT_HASH_CHARS`` (16), read
         from its source, is accepted; #640 changed it from 8 once."""
         manifest = corpus_manifest()
-        message_id, entry = next(iter(manifest.items()))
-        claimant = f"{message_id}#{entry.sha256[:suffix_chars]}"
-        assert (_claimant_message(claimant, manifest) == message_id) is ok
-        wrong = f"{message_id}#{'0' * 16}"
-        assert _claimant_message(wrong, manifest) is None
+        entry = next(iter(manifest.values()))
+        claimant = f"{entry.message_id}#{entry.sha256[:suffix_chars]}"
+        assert (claimant in manifest) is ok
+        assert f"{entry.message_id}#{'0' * 16}" not in manifest
 
     def test_claimant_hash_chars_fails_closed_without_the_constant(self, tmp_path):
         parser = tmp_path / "parser.py"
@@ -1934,7 +1934,14 @@ class TestCli:
         argv = ["run", "--preflight", "--index-dir", missing, "--out", str(out), "--case", "nope"]
         assert cli.main(argv) == cli.EXIT_CONFIG
 
-    def test_run_refuses_a_non_synthetic_index(self, messages_db, tmp_path, capsys):
+    def test_run_refuses_a_non_synthetic_index(self, messages_db, tmp_path, capsys, monkeypatch):
+        """#1275: the refusal comes before any provider is configured,
+        so no client is created and nothing is sent."""
+
+        def no_provider(*_a, **_k):
+            raise AssertionError("a provider was configured")
+
+        monkeypatch.setattr(cli, "load_layer", no_provider)
         index = tmp_path / "index"
         index.mkdir()
         shutil.copy(messages_db.path, index / "mail.db")
