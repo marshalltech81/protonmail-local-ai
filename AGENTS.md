@@ -663,8 +663,10 @@ under about 80 characters.
   choice between options) first goes to a two-reviewer panel, Claude
   Fable 5.1 and Codex GPT-6.1 Sol, both at high reasoning effort. When
   Fable hits its usage limit, the Claude side falls back to Claude Opus
-  5.5 at high effort and the panel continues; the recommendation says
-  which model answered (owner, 2026-10-08). Each
+  5.5 at high effort and the panel continues; when the headless CLI is
+  out of budget for both, the Claude side runs as an in-session
+  subagent on the same prompt. The recommendation says which model
+  answered (owner, 2026-10-08). Each
   assesses it independently and read-only against the code, then they
   exchange views until they agree or three rounds pass. Verify their
   file and line claims, and present one recommendation for the owner
