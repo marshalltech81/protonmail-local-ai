@@ -884,6 +884,79 @@
       "deterministic": {"must_include": [], "must_not_include": []},
       "criteria": {"factual_correctness": true, "citation_support": true, "completeness": true, "temporal_reasoning": false, "conflict_uncertainty": true, "relevance": true},
       "review": "ai_drafted"
+    },
+    {
+      "id": "brief-pool-bids",
+      "category": "exact_fact",
+      "tool": "brief_issue",
+      "arguments": {"topic": "pool resurfacing bids from Bluewater Pools, Crestline Aquatics and Tidewater Plaster"},
+      "held_out": false,
+      "answerable": true,
+      "expected_handling": "answer",
+      "required_evidence": [["t05.1"], ["t05.3"]],
+      "expected_facts": [
+        {"id": "f1", "fact": "Three pool resurfacing bids came in: Bluewater Pools at $38,400, Crestline Aquatics at $44,900 and Tidewater Plaster at $47,250.", "sources": ["t05.1"], "excerpt": "Bluewater Pools at $38,400, Crestline Aquatics at $44,900, and Tidewater Plaster at $47,250"},
+        {"id": "f2", "fact": "The committee will present Bluewater and Crestline to the board.", "sources": ["t05.3"], "excerpt": "present Bluewater and Crestline to the board"}
+      ],
+      "must_not_assert": [
+        "A bid was accepted or a contractor chosen."
+      ],
+      "deterministic": {"must_include": [["Bluewater"], ["Crestline"]], "must_not_include": []},
+      "criteria": {"factual_correctness": true, "citation_support": true, "completeness": true, "temporal_reasoning": false, "conflict_uncertainty": false, "relevance": true},
+      "review": "ai_drafted"
+    },
+    {
+      "id": "brief-cabin-wifi",
+      "category": "unanswerable",
+      "tool": "brief_issue",
+      "arguments": {"topic": "the wifi password at the Pinecrest cabin"},
+      "held_out": false,
+      "answerable": false,
+      "expected_handling": "abstain",
+      "golden_unanswerable": "cabin-wifi",
+      "required_evidence": [],
+      "expected_facts": [],
+      "must_not_assert": [
+        "Any wifi network name or password."
+      ],
+      "deterministic": {"must_include": [], "must_not_include": []},
+      "criteria": {"factual_correctness": false, "citation_support": false, "completeness": false, "temporal_reasoning": false, "conflict_uncertainty": true, "relevance": true},
+      "review": "ai_drafted"
+    },
+    {
+      "id": "check-roof-total",
+      "category": "attachment_only",
+      "tool": "check_conclusion",
+      "arguments": {"conclusion": "The Harbor Roofing estimate for the roof repair totals $14,200."},
+      "held_out": false,
+      "answerable": true,
+      "expected_handling": "answer",
+      "required_evidence": [["t01.1"]],
+      "expected_facts": [
+        {"id": "f1", "fact": "The Harbor Roofing estimate totals $14,200.", "sources": ["t01.1"], "excerpt": "TOTAL: $14,200"}
+      ],
+      "must_not_assert": [],
+      "deterministic": {"must_include": [["14,200"]], "must_not_include": []},
+      "criteria": {"factual_correctness": true, "citation_support": true, "completeness": true, "temporal_reasoning": false, "conflict_uncertainty": false, "relevance": true},
+      "review": "ai_drafted"
+    },
+    {
+      "id": "check-electrician-quote",
+      "category": "unanswerable",
+      "tool": "check_conclusion",
+      "arguments": {"conclusion": "The electrician quoted a price to replace the breaker panel."},
+      "held_out": false,
+      "answerable": false,
+      "expected_handling": "abstain",
+      "golden_unanswerable": "electrician-quote",
+      "required_evidence": [],
+      "expected_facts": [],
+      "must_not_assert": [
+        "Any price for electrical or breaker-panel work."
+      ],
+      "deterministic": {"must_include": [], "must_not_include": []},
+      "criteria": {"factual_correctness": false, "citation_support": false, "completeness": false, "temporal_reasoning": false, "conflict_uncertainty": true, "relevance": true},
+      "review": "ai_drafted"
     }
   ]
 }
