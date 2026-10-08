@@ -631,6 +631,15 @@ under about 80 characters.
   and say whether the choice can change what the tools return.
   Choosing to fix one round does not accept later rounds' findings.
   An agent working the PR stops and reports instead of pushing.
+- Owner decisions (owner, 2026-10-08): every decision or recommendation
+  brought to the owner (a re-scope trigger, a `decision` issue, a
+  choice between options) first goes to a two-reviewer panel, Claude
+  Fable 5.1 and Codex GPT-6.1 Sol, both at high reasoning effort,
+  reviewing read-only against the code, with a round in which each
+  answers the other. Recommend the option that gives the most
+  accurate outcome, with its cost and any split the panel could not
+  settle, for the owner to approve. Briefs carry code and design
+  only, never mailbox content.
 - File P3 findings as issues rather than fixing them ahead of
   go-live or P1/P2 work. Exception (owner, 2026-10-02): a small P3
   with an agreed fix and no new mechanism may be fixed before go-live.
@@ -928,6 +937,7 @@ Notes:
 - a base-image digest bump in `indexer/Dockerfile` or `mcp-server/Dockerfile` (Dependabot's or by hand) moves `PYTHON_IMAGE` in `mbsync/tests/tls_check.sh` with it; `scripts/tests/image_pin_test.sh` (`make test-image-pins`, also in CI) fails while the three differ, since Dependabot does not update the script. The same test fails while `.github/workflows/docker.yml` and `.github/workflows/tests.yml` pass `docker/setup-buildx-action` different `driver-opts: image=moby/buildkit:...` references (#1122): Dependabot does not track a driver option, so a BuildKit bump moves both by hand, together
 - Compose changes that touch service selection, dependencies, hardening or ports should keep `scripts/tests/compose_test.sh` passing; it also checks the required hardening on the merged config of every overlay combination the Makefile uses, and that every base service starts with no profile active, so a new overlay, combination or profile-activating target is added to its list
 - indexing, chunking, embedding-storage, or retrieval changes should pass `make baseline`; if ranking changes on purpose, regenerate the snapshot with `make baseline UPDATE=1` and explain the snapshot diff in the PR
+- a PR that adds or removes baseline-corpus messages also regenerates the parser pin (`cd indexer && PARSER_PIN_UPDATE=1 uv run pytest tests/test_parser_pin.py`); its diff must be only the added or removed records (#1124)
 - `ask_mailbox` or `summarize_thread` prompt or answer-path changes can be compared with the opt-in `make eval-answers` / `make eval-answers-compare` (synthetic corpus only, calls the configured `INFERENCE_*` and `JUDGE_*` providers, never in CI; see `mcp-server/tests/eval/README.md`)
 - before opening PRs that touch TLS, auth, logging, subprocess execution, or credential handling, run `bandit -r src/` and resolve any findings rated medium or higher (a CI job in `.github/workflows/security.yml` enforces this at medium+ severity for both services)
 

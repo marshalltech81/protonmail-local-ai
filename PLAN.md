@@ -69,7 +69,9 @@ The stack runs three containers beside the Proton Mail Bridge app:
   migrations for any change since the first deployment; 4096-dim L2-normalized vectors; per-message records
   keyed by claimant ID).
   Initial scan and steady state drain one durable `indexing_jobs`
-  queue through a two-phase batched path.
+  queue through a two-phase batched path; indexed mail is reparsed in
+  place through the same queue when a parser change needs it (#1078),
+  with fresh mail going ahead of the backlog (#1142).
 - **mcp-server** — hybrid five-lane search (thread FTS, chunk FTS,
   attachment FTS, thread vec, chunk vec → RRF, optional Cohere
   rerank), exhaustive `query_messages`, and intelligence tools
@@ -112,7 +114,8 @@ Follow-ups on corpus completeness and correctness:
   2026-10-07: 694 of 5,979 multi-message threads have a subject-joined
   message, 3 span more than 180 days; owner picks an option)
 - attachment coverage: #691 (optional decoders; fontTools waits on
-  py-pdf/pypdf#4156), #695, #923 (formats with no extractor), #947
+  py-pdf/pypdf#4156, and the CFF-font PDF gap is pinned by a strict
+  xfail), #695, #923 (formats with no extractor), #947
   (PPTX charts and SmartArt; the `.pptm`, `.ppsx`, `.potx`, `.ppsm`
   and `.potm` variants are routed since #1043 and #1068)
 - bounded work: #781
@@ -288,7 +291,8 @@ answers real knowledge questions, and identify why failures occur.
    first billing or usage-limit error (#839, #866).
 
    Remaining: #283 (pass thresholds, live-client trace replay, latency
-   and cost), #655, #656, #657, #818, #826, #834, #894 (decoy cases
+   and cost), #655, #656 (the `summarize_thread` adapter is done;
+   `extract_from_emails` is #1137, the experimental tools remain), #657, #818, #826, #834, #894 (decoy cases
    fail `must_not_include` on a correct answer), #897 (one judge error
    marks a run incomplete). Real-mail failures to explain: #774, #776. Evals use the synthetic corpus only; questions from real
    mail would send mail to the model provider and wait on an owner
@@ -328,7 +332,7 @@ Also in this milestone: #764 (default inference model).
 
 ### Phase 4 — Deterministic knowledge scaffolding
 
-**Status: mostly done; item 5 open.** Milestone *Phase 4*. Items 1 and 2 were built
+**Status: mostly done; item 5 in progress.** Milestone *Phase 4*. Items 1 and 2 were built
 before go-live, so their tables are in the v0 schema; any later
 Phase 4 schema change needs a numbered migration.
 
@@ -373,7 +377,8 @@ Phase 4 schema change needs a numbered migration.
    negation); the bounded `all` / `any` / `negate` form with a leaf
    cap that also counts `any` groups (empty groups rejected) and
    three-valued evaluation; the form is fixed at two levels, so there
-   is no nesting to bound (#1087, delivers #992 option 2);
+   is no nesting to bound (#1087, delivers #992 option 2; option 1,
+   the documented multi-lane recipe, is done);
    explicit address-mode and `body_words` leaves (#1088); grouped
    aggregation as its own tool over the same engine (#823); leaves
    that wait on the evidence model: `header_exists` /
@@ -383,7 +388,9 @@ Phase 4 schema change needs a numbered migration.
    Omitted by decision: IMAP UID, KEYWORD (labels are outside the
    corpus by the sync patterns, a separate corpus decision), DRAFT
    and DELETED (#955 becomes a leaf if wanted). #824, #955 and #1056
-   become leaves on the compiler. **Not started.**
+   become leaves on the compiler. **In progress:** the predicate
+   module (#1084) and `replied` and size with their `indeterminate`
+   count (#1085) are done; the rest is open.
 
 ### Phase 5 — Knowledge reasoning
 
@@ -423,11 +430,16 @@ input by definition.
 
 Not a phase: the running deployment's resource, throughput, privacy
 and supply-chain work. Milestone *Operations and hardening*: #488,
-#697, #698, #777, #778, #767, #769. Done: #765 (at-rest protection
+#697, #698, #777, #778, #767 (a CycloneDX SBOM per image is done; the
+dependency license check is open), #769. Done: #765 (at-rest protection
 documented as a setup requirement, #851), #768 (`make status`
 shows each provider as LOCAL or REMOTE, #830), #780 (#829), dependency
-and base-image digest refresh (#828), and mbsync on Debian trixie
-(#833). Open decisions: the runtime base images (#835), and bounding
+and base-image digest refresh (#828), mbsync on Debian trixie
+(#833), and, 2026-10-08: `make trivy-images` for the image scans with
+a stale-image warning (#1065, #1103), image builds and CI that survive
+an unreachable Maven Central (#1069, #1070, #1105), a check that both
+workflows pin the same BuildKit image (#1122), and defaults for
+optional Compose settings (#1074). Open decisions: the runtime base images (#835), and bounding
 review rounds for test and eval-harness PRs (#838). Until the owner
 decides #835, the AGENTS.md constraint "Do not switch runtime images to
 Alpine" stands, and no image moves to Alpine or distroless. #835 records
@@ -454,9 +466,11 @@ after #1006/#1007 refreshed the base digests and removed pip from the
 runtime images). Open: the OCR cap on cache hits (#891), stale
 extractor-version counts in status (#979, decision), the unscanned
 jlink runtime (#1008) and a merge gate on a Codex review of the head
-commit (#978). Open decisions: log-only or exit when the Maildir watcher dies
-(#870), telling a stall from a backlog in status (#876; parked trashed
-files currently show as "retrying"), and correlation IDs (#888).
+commit (#978). Done 2026-10-08: the indexer exits when the Maildir
+watcher thread dies, so the restart restores it, and counts the
+directories its walks cannot read (#870). Open decisions: telling a
+stall from a backlog in status (#876; parked trashed files currently
+show as "retrying"), and correlation IDs (#888).
 Every MCP tool declares safety annotations (#899; #900; Resolved
 decisions 31).
 
@@ -472,10 +486,12 @@ structures from that evidence. The product boundary stays Bridge →
 mbsync → Maildir → indexer; mbsync is not replaced (Deferred).
 
 1. **Parser seam** — `parse_email_bytes(raw, source_metadata)` with
-   Maildir as the adapter; no behaviour change (#1077).
+   Maildir as the adapter; no behaviour change (#1077). **Done.**
 2. **Reparse class** — an in-place full reparse through the job queue
    for changes that keep chunk IDs, the executable form of #786's
-   "reparse" (#1078, decision). Each schema change below is its own
+   "reparse" (#1078). **Done:** `reason = 'reparse'` jobs and
+   `make reparse`, with fresh mail ahead of the backlog (#1142); no
+   column has used it yet. Each schema change below is its own
    PR with its own migration and `SCHEMA_VERSION` bump (AGENTS.md:
    schema-adjacent fixes get their own PR); a new column reads as
    unknown, and the capability report (#1093) says "supported after
@@ -494,7 +510,10 @@ mbsync → Maildir → indexer; mbsync is not replaced (Deferred).
 5. **Arrival time** — experiment: `CopyArrivalDate yes` in the mbsync
    template, a layout test proving the mtime equals Bridge's
    INTERNALDATE, `internal_at` with an `unavailable` status for files
-   that predate the option (#1081). Recovering it for existing mail
+   that predate the option (#1081). `CopyArrivalDate yes` is on, and
+   isync's INTERNALDATE handling is checked over IMAP against a test
+   server (#1132); which date the Bridge app reports is unverified
+   (#1138), and `internal_at` waits on it. Recovering it for existing mail
    would be a cold re-pull, an explicit operation, not part of this.
 6. **Content-hash identity** — whether messages without a usable
    Message-ID are indexed instead of dead-lettered (#1082, decision,
