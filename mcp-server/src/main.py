@@ -775,6 +775,94 @@ async def _health_response(db: Database) -> JSONResponse:
     return JSONResponse({"status": "ok"})
 
 
+def _build_server(
+    db: Database,
+    embed_client: EmbedClient,
+    *,
+    inference_client: InferenceClient | None,
+    reranker: CohereReranker | None,
+    prompt_budget: PromptBudget | None,
+    secret_values: list[str],
+    expected_embed_dim: int | None,
+    experimental_tools: bool,
+) -> FastMCP:
+    """The FastMCP server with every tool group ``main`` serves (#1267).
+
+    The one place the server is composed: ``main`` serves it through
+    ``_build_app``, and the planned agent-eval recorder (#1269) is to
+    build its server here too, so the two cannot drift. It takes
+    clients and settings that are already validated.
+
+    Intelligence tools require inference; the group is skipped when
+    ``inference_client`` is ``None`` (``INFERENCE_MODE=none``) so a
+    mailbox without an inference provider still serves keyword /
+    semantic / hybrid retrieval cleanly. Experimental tools need both
+    ``experimental_tools`` (``MCP_EXPERIMENTAL_TOOLS``) and inference.
+    """
+    # FastMCP server — provides the @server.tool() decorator and the
+    # Streamable HTTP app ``_run_server`` serves, behind the
+    # ``_TRANSPORT_SECURITY`` Host/Origin allowlist.
+    server = FastMCP("protonmail-local-ai", version=_git_commit())
+    # Arguments the tools' argument models refuse are logged through the
+    # per-field rate limiter, like the handlers' own rejections (#1131).
+    server.add_middleware(ArgumentValidationLog(server))
+
+    # Plain HTTP health endpoint used by the container healthcheck. Sits
+    # outside the MCP protocol so `docker healthcheck` and operator scripts
+    # can probe liveness without speaking MCP. Returns 200 when the SQLite
+    # index is reachable via the read-only connection — enough to catch a
+    # missing volume mount or a corrupt DB without exercising any write
+    # path. The error string is intentionally generic in the response so
+    # the endpoint does not leak DB paths or schema details to anyone who
+    # can reach localhost:MCP_PORT.
+    @server.custom_route("/health", methods=["GET"], include_in_schema=False)
+    async def health(_: Request) -> JSONResponse:
+        return await _health_response(db)
+
+    register_search_tools(
+        server,
+        db,
+        embed_client,
+        reranker=reranker,
+        secret_values=secret_values,
+        expected_embed_dim=expected_embed_dim,
+    )
+    register_retrieval_tools(server, db)
+    if inference_client is not None:
+        register_intelligence_tools(
+            server,
+            db,
+            embed_client,
+            inference_client,
+            reranker=reranker,
+            secret_values=secret_values,
+            expected_embed_dim=expected_embed_dim,
+            prompt_budget=prompt_budget,
+        )
+    else:
+        log.info("Intelligence tools not registered (INFERENCE_MODE=none).")
+    # Experimental tools are opt-in, and the current ones need inference.
+    if experimental_tools and inference_client is not None:
+        register_experimental_tools(
+            server,
+            db,
+            embed_client,
+            inference_client,
+            reranker=reranker,
+            secret_values=secret_values,
+            expected_embed_dim=expected_embed_dim,
+            prompt_budget=prompt_budget,
+        )
+        log.info(
+            "Experimental tools registered (MCP_EXPERIMENTAL_TOOLS=true): "
+            "brief_issue, check_conclusion."
+        )
+    elif experimental_tools:
+        log.info("Experimental tools not registered: they need inference (INFERENCE_MODE=none).")
+    register_system_tools(server, db)
+    return server
+
+
 def _run_server(server: FastMCP) -> None:
     """Serve ``server`` over Streamable HTTP with uvicorn.
 
@@ -905,77 +993,22 @@ def main():
         deadline_secs=EMBED_TIMEOUT_SECS,
     )
 
-    # FastMCP server — provides the @server.tool() decorator and the
-    # Streamable HTTP app ``_run_server`` serves, behind the
-    # ``_TRANSPORT_SECURITY`` Host/Origin allowlist.
-    server = FastMCP("protonmail-local-ai", version=_git_commit())
-    # Arguments the tools' argument models refuse are logged through the
-    # per-field rate limiter, like the handlers' own rejections (#1131).
-    server.add_middleware(ArgumentValidationLog(server))
-
-    # Plain HTTP health endpoint used by the container healthcheck. Sits
-    # outside the MCP protocol so `docker healthcheck` and operator scripts
-    # can probe liveness without speaking MCP. Returns 200 when the SQLite
-    # index is reachable via the read-only connection — enough to catch a
-    # missing volume mount or a corrupt DB without exercising any write
-    # path. The error string is intentionally generic in the response so
-    # the endpoint does not leak DB paths or schema details to anyone who
-    # can reach localhost:MCP_PORT.
-    @server.custom_route("/health", methods=["GET"], include_in_schema=False)
-    async def health(_: Request) -> JSONResponse:
-        return await _health_response(db)
-
     # All operator-configured API keys, scrubbed from any exception
     # text echoed back to the caller or written to logs. The empty
     # filter strips disabled-layer placeholders so ``redact_sensitive_text``
     # doesn't waste a no-op replace pass on them.
     secret_values = [k for k in (INFERENCE_API_KEY, EMBED_API_KEY, RERANK_API_KEY) if k]
 
-    # Register all tool groups. Intelligence tools require inference;
-    # the group is skipped when ``INFERENCE_MODE=none`` so a mailbox
-    # without an inference provider still serves keyword / semantic /
-    # hybrid retrieval cleanly.
-    register_search_tools(
-        server,
+    server = _build_server(
         db,
         embed_client,
+        inference_client=inference_client,
         reranker=reranker,
+        prompt_budget=prompt_budget,
         secret_values=secret_values,
         expected_embed_dim=expected_embed_dim,
+        experimental_tools=MCP_EXPERIMENTAL_TOOLS,
     )
-    register_retrieval_tools(server, db)
-    if inference_client is not None:
-        register_intelligence_tools(
-            server,
-            db,
-            embed_client,
-            inference_client,
-            reranker=reranker,
-            secret_values=secret_values,
-            expected_embed_dim=expected_embed_dim,
-            prompt_budget=prompt_budget,
-        )
-    else:
-        log.info("Intelligence tools not registered (INFERENCE_MODE=none).")
-    # Experimental tools are opt-in, and the current ones need inference.
-    if MCP_EXPERIMENTAL_TOOLS and inference_client is not None:
-        register_experimental_tools(
-            server,
-            db,
-            embed_client,
-            inference_client,
-            reranker=reranker,
-            secret_values=secret_values,
-            expected_embed_dim=expected_embed_dim,
-            prompt_budget=prompt_budget,
-        )
-        log.info(
-            "Experimental tools registered (MCP_EXPERIMENTAL_TOOLS=true): "
-            "brief_issue, check_conclusion."
-        )
-    elif MCP_EXPERIMENTAL_TOOLS:
-        log.info("Experimental tools not registered: they need inference (INFERENCE_MODE=none).")
-    register_system_tools(server, db)
 
     log.info(f"MCP server starting on port {MCP_PORT}")
     log.info(f"  SQLite:   {SQLITE_PATH}")
