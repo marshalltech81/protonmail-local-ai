@@ -12,6 +12,12 @@ set -Eeuo pipefail
 # Run: bash scripts/tests/index_backup_test.sh
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
+# Read from the code, so a schema bump does not break this test.
+CODE_SCHEMA_VERSION="$(grep -E '^SCHEMA_VERSION = ' "$REPO/indexer/src/database.py" | cut -d'#' -f1 | awk '{print $3}')"
+if [[ ! "$CODE_SCHEMA_VERSION" =~ ^[0-9]+$ ]]; then
+    printf 'cannot read SCHEMA_VERSION from indexer/src/database.py\n' >&2
+    exit 1
+fi
 WORK="$(mktemp -d)"
 WORK="$(cd "$WORK" && pwd -P)"
 trap 'rm -rf "$WORK"' EXIT
@@ -20,10 +26,11 @@ MARKER=synthetic-mail-marker-1005
 
 mkdir -p "$WORK/bin" "$WORK/stub/src"
 touch "$WORK/stub/src/__init__.py"
-# The values restore-index.sh imports from the indexer image; a case
-# below checks they match indexer/src/database.py.
-cat >"$WORK/stub/src/database.py" <<'EOF'
-SCHEMA_VERSION = 1
+# The values restore-index.sh imports from the indexer image. The
+# version is read from indexer/src/database.py; a case below checks the
+# application ID matches it.
+cat >"$WORK/stub/src/database.py" <<EOF
+SCHEMA_VERSION = $CODE_SCHEMA_VERSION
 SCHEMA_APPLICATION_ID = 0x504D4149
 EOF
 # FAKE_FAIL_REPLACE makes os.replace fail, as an I/O error at the swap
@@ -174,7 +181,7 @@ chmod +x "$WORK/bin/date"
 # index carrying the marker, with uncheckpointed rows left in the WAL.
 make_db() {
     rm -f "$1" "$1-wal" "$1-shm"
-    MARKER="$MARKER" python3 - "$1" "${2:-1}" "${3:-$((0x504D4149))}" "${4:-}" <<'EOF'
+    MARKER="$MARKER" python3 - "$1" "${2:-$CODE_SCHEMA_VERSION}" "${3:-$((0x504D4149))}" "${4:-}" <<'EOF'
 import os, sqlite3, sys
 path, version, app_id, mode = sys.argv[1:]
 marker = os.environ["MARKER"]
@@ -251,7 +258,7 @@ backup_writes_a_checked_private_copy() {
     [[ "$(mode_of "$WORK/backups/index")" == 0o700 ]]
     [[ "$(mode_of "$copy")" == 0o600 ]]
     grep -F "Index backup: $copy" "$WORK/out" >/dev/null
-    grep -E "^Size: $(wc -c <"$copy" | tr -d ' ') bytes, schema version 1, " "$WORK/out" >/dev/null
+    grep -E "^Size: $(wc -c <"$copy" | tr -d ' ') bytes, schema version $CODE_SCHEMA_VERSION, " "$WORK/out" >/dev/null
     grep -Fx 'integrity_check: ok' "$WORK/out" >/dev/null
     [[ "$(query "$copy" 'SELECT count(*) FROM t')" == 200 ]]
     # One self-contained file: rollback-journal mode, not WAL.
@@ -529,7 +536,7 @@ restore_replaces_the_index() {
     local order
     order=$(grep -E '^(start|logs)' "$WORK/docker.log" | cut -d' ' -f1-2 | uniq | tr '\n' ',')
     [[ "$order" == "start indexer,logs --since,start mcp-server," ]]
-    grep -F 'backup schema version: 1 (code: 1)' "$WORK/out" >/dev/null
+    grep -F "backup schema version: $CODE_SCHEMA_VERSION (code: $CODE_SCHEMA_VERSION)" "$WORK/out" >/dev/null
     grep -F 'Embedder identity verified' "$WORK/out" >/dev/null
     grep -F 'schema_stored=1' "$WORK/out" >/dev/null
     grep -F "Index restored from $WORK/backup.db" "$WORK/out" >/dev/null
@@ -643,7 +650,7 @@ restore_refuses_a_corrupt_backup() {
 }
 
 restore_refuses_a_newer_schema() {
-    refused_restore 'backup schema is newer than this code' 2
+    refused_restore 'backup schema is newer than this code' "$((CODE_SCHEMA_VERSION + 1))"
 }
 
 restore_refuses_a_foreign_file() {
@@ -998,11 +1005,8 @@ restore_starts_nothing_while_the_container_runs() {
 }
 
 stub_matches_the_indexer() {
-    local name
-    for name in SCHEMA_VERSION SCHEMA_APPLICATION_ID; do
-        [[ "$(grep -E "^$name = " "$REPO/indexer/src/database.py" | cut -d'#' -f1 | tr -d ' ')" == \
-            "$(grep -E "^$name = " "$WORK/stub/src/database.py" | tr -d ' ')" ]]
-    done
+    [[ "$(grep -E '^SCHEMA_APPLICATION_ID = ' "$REPO/indexer/src/database.py" | cut -d'#' -f1 | tr -d ' ')" == \
+        "$(grep -E '^SCHEMA_APPLICATION_ID = ' "$WORK/stub/src/database.py" | tr -d ' ')" ]]
 }
 
 # Runs each case in a subshell with errexit on, outside any condition.

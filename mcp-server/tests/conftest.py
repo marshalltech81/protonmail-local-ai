@@ -76,7 +76,8 @@ def _build_schema(conn: sqlite3.Connection) -> None:
             indexed_at      TEXT NOT NULL,
             seen            INTEGER NOT NULL DEFAULT 0,
             flagged         INTEGER NOT NULL DEFAULT 0,
-            replied         INTEGER NOT NULL DEFAULT 0
+            replied         INTEGER NOT NULL DEFAULT 0,
+            sender_ambiguous INTEGER CHECK (sender_ambiguous IN (0, 1))
         );
 
         -- The indexer's ``messages`` indexes, so query plans match.
@@ -244,12 +245,13 @@ def write_ingestion(
     sync_completed_at: str | None = None,
     sync_interval_secs: int | None = None,
     indexer_seen_at: str | None = None,
-    jobs: tuple[tuple[str, int, str | None] | tuple[str, int, str | None, str], ...] = (),
+    jobs: tuple[tuple[str | int | None, ...], ...] = (),
 ) -> None:
     """Write the indexer-owned ``ingestion_state`` row (when
     ``indexer_seen_at`` is given) and ``indexing_jobs`` rows as
-    ``(status, attempts, last_error_class[, reason])`` into a fixture
-    database (reason ``x`` when omitted)."""
+    ``(status, attempts, last_error_class[, reason[, last_stage[, last_error]]])``
+    into a fixture database (reason ``x`` when omitted, stage and error
+    NULL)."""
     conn = sqlite3.connect(db_path)
     try:
         if indexer_seen_at is not None:
@@ -257,17 +259,23 @@ def write_ingestion(
                 "INSERT INTO ingestion_state VALUES (1, ?, ?, ?)",
                 (sync_completed_at, sync_interval_secs, indexer_seen_at),
             )
-        for i, (status, attempts, error_class, *reason) in enumerate(jobs):
+        for i, job in enumerate(jobs):
+            status, attempts, error_class, reason, last_stage, last_error = (
+                *job,
+                *("x", None, None)[len(job) - 3 :],
+            )
             conn.execute(
                 "INSERT INTO indexing_jobs (filepath, reason, status, attempts, "
-                "last_error_class, created_at, updated_at, next_attempt_at) "
-                "VALUES (?, ?, ?, ?, ?, '', '', '')",
+                "last_error_class, last_stage, last_error, created_at, updated_at, "
+                "next_attempt_at) VALUES (?, ?, ?, ?, ?, ?, ?, '', '', '')",
                 (
                     f"/maildir/INBOX/cur/{i}",
-                    reason[0] if reason else "x",
+                    reason,
                     status,
                     attempts,
                     error_class,
+                    last_stage,
+                    last_error,
                 ),
             )
         conn.commit()
@@ -488,6 +496,7 @@ def _insert_message_record(
     flagged: bool = False,
     replied: bool = False,
     size_bytes: int | None = 100,
+    sender_ambiguous: int | None = 0,
 ) -> None:
     """Insert one ``messages`` row and its ``message_participants``.
 
@@ -500,8 +509,8 @@ def _insert_message_record(
         INSERT INTO messages
             (claimant_id, message_id, thread_id, filepath, folder, subject, sent_at,
              occurred_at, in_reply_to, references_json, has_attachments, size_bytes,
-             content_hash, indexed_at, seen, flagged, replied)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             content_hash, indexed_at, seen, flagged, replied, sender_ambiguous)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             claimant_of(message_id, variant),
@@ -521,6 +530,7 @@ def _insert_message_record(
             int(seen),
             int(flagged),
             int(replied),
+            sender_ambiguous,
         ),
     )
     for role, value in participants:
@@ -587,6 +597,7 @@ def _insert_message(
     flagged: bool = False,
     replied: bool = False,
     size_bytes: int | None = 100,
+    sender_ambiguous: int | None = 0,
 ) -> None:
     """Insert one message with full per-message control.
 
@@ -651,6 +662,7 @@ def _insert_message(
         flagged=flagged,
         replied=replied,
         size_bytes=size_bytes,
+        sender_ambiguous=sender_ambiguous,
     )
     conn.commit()
     if body is not None:

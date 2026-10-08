@@ -246,6 +246,63 @@ class TestReparseAfterAParserChange:
         db.close()
 
 
+class TestSenderAmbiguousMigration:
+    """#1144: the real v1 -> v2 migration leaves every message NULL (not
+    assessed), queues the reparse, and the reparse fills 0 / 1 with no
+    embedding call; a dead-lettered job keeps its message NULL."""
+
+    def test_backfill_through_the_reparse(self, tmp_path, caplog):
+        caplog.set_level(logging.DEBUG)
+        db, queue, paths = _index(tmp_path, ["one", "three"])
+        plain, dead = paths
+        # A message with a repeated From, indexed as a v1 indexer left it.
+        repeated = str(tmp_path / "INBOX" / "cur" / "rep:2,S")
+        _write_eml(Path(repeated), "rep@example.com", f"two {MARKER}")
+        text = Path(repeated).read_text(encoding="utf-8")
+        Path(repeated).write_text(
+            text.replace("To: ", "From: SYNTHETIC_REPARSE_MARKER@example.com\r\nTo: ", 1),
+            encoding="utf-8",
+        )
+        queue.enqueue(repeated, REASON_ON_CREATED)
+        _drain(db, queue, make_mock_embedder(_VECTOR))
+        queue.enqueue(dead, REASON_INITIAL_SCAN)
+        queue.mark_dead_terminal(dead, stage="parse", error="oversized: too large")
+        chunks_before = db._conn.execute(
+            "SELECT chunk_id FROM message_chunks ORDER BY chunk_id"
+        ).fetchall()
+        db._conn.execute("ALTER TABLE messages DROP COLUMN sender_ambiguous")
+        db._conn.execute("UPDATE schema_version SET version = 1")
+        db._conn.commit()
+        db.close()
+
+        db = Database(tmp_path / "mail.db")
+        queue = IndexingQueue(db, max_attempts=3, base_backoff_seconds=0)
+        flags = db._conn.execute("SELECT sender_ambiguous FROM messages").fetchall()
+        assert [r[0] for r in flags] == [None, None, None]
+        jobs = _jobs(db)
+        assert {fp: (r["reason"], r["status"]) for fp, r in jobs.items()} == {
+            plain: (REASON_REPARSE, "queued"),
+            repeated: (REASON_REPARSE, "queued"),
+            dead: (REASON_INITIAL_SCAN, "dead"),
+        }
+
+        embedder = make_mock_embedder(_VECTOR)
+        _drain(db, queue, embedder)
+        assert embedder.embed_batch.call_count == 0
+        assert embedder.embed.call_count == 0
+        by_path = {
+            r["filepath"]: r["sender_ambiguous"]
+            for r in db._conn.execute("SELECT filepath, sender_ambiguous FROM messages")
+        }
+        assert by_path == {plain: 0, repeated: 1, dead: None}
+        assert (
+            db._conn.execute("SELECT chunk_id FROM message_chunks ORDER BY chunk_id").fetchall()
+            == chunks_before
+        )
+        assert MARKER not in caplog.text
+        db.close()
+
+
 def _lines(caplog, prefix: str) -> list[logging.LogRecord]:
     return [r for r in caplog.records if r.getMessage().startswith(prefix)]
 

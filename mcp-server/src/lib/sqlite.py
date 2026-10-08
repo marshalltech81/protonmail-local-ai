@@ -319,6 +319,9 @@ class ChunkResult:
     ``Name <address>`` (or the bare address), so a prompt can attribute
     the passage to its own author; ``None`` for query paths that do not
     SELECT it or a message with no recorded sender.
+    ``message_sender_ambiguous`` is that message's
+    ``messages.sender_ambiguous`` (``MessageRecord.sender_ambiguous``);
+    ``None`` when not assessed or not SELECTed.
 
     ``kind`` is what the chunk's text is (``message_chunks.kind``, #646):
     ``body``, ``quote``, ``signature``, ``forwarded``, ``calendar`` or
@@ -341,6 +344,7 @@ class ChunkResult:
     message_occurred_at: str | None = None
     source_file: SourceFile | None = None
     message_sender: str | None = None
+    message_sender_ambiguous: bool | None = None
     kind: ChunkKind = "body"
 
 
@@ -372,6 +376,11 @@ def _row_to_chunk_result(r) -> ChunkResult:
         message_occurred_at=(r["message_occurred_at"] if "message_occurred_at" in keys else None),
         source_file=_row_to_source(r),
         message_sender=r["message_sender"] if "message_sender" in keys else None,
+        message_sender_ambiguous=(
+            _optional_flag(r["message_sender_ambiguous"])
+            if "message_sender_ambiguous" in keys
+            else None
+        ),
         kind=r["kind"],
     )
 
@@ -562,6 +571,11 @@ class MessageRecord:
     # The reconciler tombstoned the indexed file (``T``-flagged or
     # missing): it awaits the reaper under mirror retention.
     pending_deletion: bool = False
+    # ``messages.sender_ambiguous`` (#1144): False for one From header,
+    # True when the sender attribution is unsafe (a repeated From, or
+    # the indexer's header scan stopped short), None when not yet
+    # assessed. Only False qualifies for source authority.
+    sender_ambiguous: bool | None = None
 
     @property
     def effective_at(self) -> str:
@@ -582,9 +596,7 @@ _MESSAGE_COLUMNS = (
     "m.message_id, m.claimant_id, m.thread_id, m.subject, m.sent_at, m.occurred_at, "
     "m.folder, "
     "m.has_attachments, m.in_reply_to, m.references_json, m.seen, m.flagged, m.replied, "
-    + _PENDING_DELETION_COLUMN
-    + ", "
-    + _SOURCE_COLUMNS
+    "m.sender_ambiguous, " + _PENDING_DELETION_COLUMN + ", " + _SOURCE_COLUMNS
 )
 
 
@@ -605,7 +617,13 @@ def _row_to_message_record(r) -> MessageRecord:
         flagged=bool(r["flagged"]),
         replied=bool(r["replied"]),
         pending_deletion=bool(r["pending_deletion"]),
+        sender_ambiguous=_optional_flag(r["sender_ambiguous"]),
     )
+
+
+def _optional_flag(value: int | None) -> bool | None:
+    """A nullable 0 / 1 column as ``bool``, keeping NULL as ``None``."""
+    return None if value is None else bool(value)
 
 
 def _attach_participants(conn: sqlite3.Connection, records: list[MessageRecord]) -> None:
@@ -818,11 +836,58 @@ MAX_LISTED_CLAIMANTS = 20
 
 # Message-ID conflicts for ``get_mailbox_status`` (#455): the number of
 # Message-IDs claimed by more than one file, and the files beyond the
-# first claimant of each. Grouping on ``message_id`` walks the
-# ``idx_messages_message`` index alone (a covering scan), not the table.
+# first claimant of each. Grouping on ``message_id`` walks a covering
+# index led by ``message_id`` alone (the planner may pick either such
+# index), not the table.
 MESSAGE_ID_CONFLICTS_SQL = """
     SELECT COUNT(*), COALESCE(SUM(n - 1), 0)
     FROM (SELECT COUNT(*) AS n FROM messages GROUP BY message_id HAVING COUNT(*) > 1)
+"""
+
+# Queue buckets for ``get_mailbox_status`` (#1165), from what the
+# indexer's ``IndexingQueue.defer`` call sites store. A deferral keeps
+# the job's attempts and records a failure class, so it is told apart
+# from a retry by its stage and, where the stage is shared with the
+# normal failure path, by its fixed error text or class:
+#
+# - ``trashed``: an indexed file that is now T-flagged, parked until the
+#   reaper removes it or the file is restored.
+# - ``parse`` with one of ``QUEUE_DEFERRED_PARSE_ERRORS``: a file the
+#   indexer cannot read yet, or a reparse waiting for a rename.
+# - ``embed`` with no attempt spent, or with
+#   ``operator_action_required`` (only a deferral records that class): an
+#   embedder outage or configuration error. A job that had already
+#   failed before an outage deferred it cannot be told from an embed
+#   failure, and stays under ``retrying``.
+#
+# A job requeued by ``make requeue-dead`` keeps its stage and error but
+# has no class, so every deferral rule requires one. ``tests/
+# test_mailbox_status_queue.py`` checks each indexer ``defer`` call site
+# lands outside ``pending`` and ``retrying``.
+QUEUE_DEFERRED_PARSE_ERRORS = (
+    "PermissionError: deferred until mbsync opens the file",
+    "FileNotFoundError: deferred until the rename is recorded",
+)
+QUEUE_BUCKETS_SQL = """
+    SELECT bucket, COUNT(*) AS n, COALESCE(SUM(reason = 'reparse'), 0) AS reparse
+    FROM (
+        SELECT reason, CASE
+            WHEN status = 'dead' THEN 'dead'
+            WHEN status != 'queued' THEN 'other'
+            WHEN last_error_class IS NOT NULL AND last_stage = 'trashed'
+                THEN 'parked_trashed'
+            WHEN last_error_class IS NOT NULL AND last_stage = 'parse'
+                 AND last_error IN (:permission, :rename)
+                THEN 'deferred'
+            WHEN last_error_class IS NOT NULL AND last_stage = 'embed'
+                 AND (attempts = 0 OR last_error_class = 'operator_action_required')
+                THEN 'deferred'
+            WHEN attempts > 0 OR last_error_class IS NOT NULL THEN 'retrying'
+            ELSE 'pending'
+        END AS bucket
+        FROM indexing_jobs
+    )
+    GROUP BY bucket
 """
 
 
@@ -2582,6 +2647,7 @@ class Database:
                 "c.text, c.char_start, c.char_end, c.attachment_id, c.kind, "
                 "m.sent_at AS message_date, "
                 "m.occurred_at AS message_occurred_at, "
+                "m.sender_ambiguous AS message_sender_ambiguous, "
                 "a.filename AS attachment_filename, "
                 "a.content_type AS attachment_mime, "
                 f"{_SOURCE_COLUMNS}, "
@@ -2704,6 +2770,7 @@ class Database:
                 "NULL AS attachment_mime, "
                 "m.sent_at AS message_date, "
                 "m.occurred_at AS message_occurred_at, "
+                "m.sender_ambiguous AS message_sender_ambiguous, "
                 f"{_CHUNK_SENDER_SQL}, "
                 "0.0 AS score "
                 "FROM message_chunks c "
@@ -3345,13 +3412,15 @@ class Database:
         snapshot so the counts and the queue agree.
 
         Queue rows are ``pending`` (not yet failed), ``retrying``
-        (failed at least once, will retry), or ``dead`` (gave up). A job
-        deferred during an embedder outage keeps ``attempts = 0`` but
-        records its failure class, so the class marks it as retrying; a
-        dead job requeued by ``make requeue-dead`` clears both and is
-        pending again. ``reparse`` counts the pending and retrying jobs
-        that re-read an already indexed message (reason ``reparse``,
-        #1078), so a reparse backlog reads as such.
+        (failed at least once, will retry), ``deferred`` (postponed by
+        the indexer without a failure of its own), ``parked_trashed``
+        (an indexed file now trashed, waiting for the reaper) or
+        ``dead`` (gave up); see ``QUEUE_BUCKETS_SQL`` (#1165). A dead
+        job requeued by ``make requeue-dead`` clears its attempts and
+        class and is pending again. ``reparse`` counts the pending,
+        retrying and deferred jobs that re-read an already indexed
+        message (reason ``reparse``, #1078), so a reparse backlog reads
+        as such.
 
         Message-ID conflicts (#455) are counts only: how many Message-IDs
         more than one file claims, and how many files beyond the first
@@ -3367,22 +3436,22 @@ class Database:
             row = conn.execute("SELECT MIN(date_first), MAX(date_last) FROM threads").fetchone()
             stats["oldest_message"] = row[0]
             stats["newest_message"] = row[1]
-            queue = conn.execute(
-                """
-                SELECT
-                    COALESCE(SUM(status = 'queued' AND NOT (attempts > 0 OR last_error_class IS NOT NULL)), 0),
-                    COALESCE(SUM(status = 'queued' AND (attempts > 0 OR last_error_class IS NOT NULL)), 0),
-                    COALESCE(SUM(status = 'dead'), 0),
-                    COALESCE(SUM(status = 'queued' AND reason = 'reparse'), 0)
-                FROM indexing_jobs
-                """
-            ).fetchone()
-            stats["queue"] = {
-                "pending": queue[0],
-                "retrying": queue[1],
-                "dead": queue[2],
-                "reparse": queue[3],
+            permission, rename = QUEUE_DEFERRED_PARSE_ERRORS
+            buckets = {
+                row["bucket"]: (row["n"], row["reparse"])
+                for row in conn.execute(
+                    QUEUE_BUCKETS_SQL,
+                    {"permission": permission, "rename": rename},
+                )
             }
+            stats["queue"] = {
+                name: buckets.get(name, (0, 0))[0]
+                for name in ("pending", "retrying", "deferred", "parked_trashed", "dead")
+            }
+            # Reparse jobs still waiting to be indexed (#1078).
+            stats["queue"]["reparse"] = sum(
+                buckets.get(name, (0, 0))[1] for name in ("pending", "retrying", "deferred")
+            )
             state = conn.execute(
                 "SELECT sync_completed_at, sync_interval_secs, indexer_seen_at FROM ingestion_state"
             ).fetchone()

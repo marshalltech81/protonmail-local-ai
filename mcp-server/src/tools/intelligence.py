@@ -1712,6 +1712,7 @@ def _citation(ref: EvidenceRef) -> Citation:
         message_id=chunk.message_id,
         thread_id=ref.thread_id,
         sender=clip(chunk.message_sender, HEADER_CHAR_LIMIT) if chunk.message_sender else None,
+        sender_ambiguous=chunk.message_sender_ambiguous,
         sent_at=chunk.message_date,
         occurred_at=chunk.message_occurred_at,
         source="body" if chunk.attachment_id is None else "attachment",
@@ -1994,9 +1995,8 @@ _LABELLED_HEADER_MAX_CHARS = 512
 _LABELLED_FIELD_CHARS = 96
 
 
-def _short(value: str) -> str:
-    """``value`` cut to ``_LABELLED_FIELD_CHARS`` characters."""
-    limit = _LABELLED_FIELD_CHARS
+def _short(value: str, limit: int = _LABELLED_FIELD_CHARS) -> str:
+    """``value`` cut to ``limit`` (``_LABELLED_FIELD_CHARS``) characters."""
     return value if len(value) <= limit else value[: limit - 1] + "…"
 
 
@@ -2015,6 +2015,18 @@ def _short_id(claimant_id: str) -> str:
     return claimant_id[: limit - keep - 1] + "…" + claimant_id[-keep:]
 
 
+def sender_check(sender_ambiguous: bool | None) -> str:
+    """The note after a passage's sender in a prompt or the prose
+    citations (#1144): nothing when the message has one From header,
+    otherwise why its sender may not be its author. Fixed text; True
+    covers a repeated From and a header scan cut short alike."""
+    if sender_ambiguous is False:
+        return ""
+    if sender_ambiguous:
+        return " (unverified: sender attribution unsafe)"
+    return " (unverified: sender not yet checked)"
+
+
 def _render_chunk_header(
     chunk: ChunkResult, char_end: int, label: str | None, short: bool, scope: str | None = None
 ) -> str:
@@ -2030,7 +2042,15 @@ def _render_chunk_header(
         claimant = (
             _short_id(chunk.claimant_id) if short else clip(chunk.claimant_id, HEADER_CHAR_LIMIT)
         )
-        sender = cut(chunk.message_sender or "unknown sender")
+        # The note is fixed text and never cut: in the short form the
+        # sender gives up its room, so the field stays one field wide.
+        note = sender_check(chunk.message_sender_ambiguous)
+        name = chunk.message_sender or "unknown sender"
+        sender = (
+            _short(name, _LABELLED_FIELD_CHARS - len(note))
+            if short
+            else clip(name, HEADER_CHAR_LIMIT)
+        ) + note
         sent = (chunk.message_date or "unknown date")[:16]
         prefix = f"{label} | message {claimant} | from {sender} | sent {sent} | "
         if scope:
@@ -2653,7 +2673,8 @@ def _citation_lines(citations: list[Citation]) -> list[str]:
         where = (
             "thread text"
             if c.source == "thread"
-            else f"{c.sender or 'unknown sender'}, {(c.sent_at or 'unknown date')[:10]}"
+            else f"{c.sender or 'unknown sender'}{sender_check(c.sender_ambiguous)}, "
+            f"{(c.sent_at or 'unknown date')[:10]}"
             + (f", delivered {c.occurred_at[:10]}" if c.occurred_at else "")
             + (f", attachment {c.attachment_filename}" if c.source == "attachment" else "")
         )

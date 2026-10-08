@@ -1327,9 +1327,9 @@ class TestStatsAndFolders:
                 ("queued", 0, None),
                 ("queued", 0, None),
                 ("queued", 2, "retryable"),
-                # Deferred during an embedder outage: failed, but no
-                # attempt was spent.
-                ("queued", 0, "operator_action_required"),
+                # Deferred for an embedder configuration error: no
+                # attempt spent, reported apart from retries (#1165).
+                ("queued", 0, "operator_action_required", "x", "embed", "AuthenticationError"),
                 ("dead", 5, "retryable"),
                 # Reparse jobs (#1078) count in their bucket and again
                 # under ``reparse`` while queued; a dead one only as dead.
@@ -1343,7 +1343,14 @@ class TestStatsAndFolders:
         assert stats["total_messages"] == 3
         assert stats["oldest_message"] is not None
         assert stats["newest_message"] is not None
-        assert stats["queue"] == {"pending": 3, "retrying": 3, "dead": 2, "reparse": 2}
+        assert stats["queue"] == {
+            "pending": 3,
+            "retrying": 2,
+            "deferred": 1,
+            "parked_trashed": 0,
+            "dead": 2,
+            "reparse": 2,
+        }
         assert stats["ingestion"] == {
             "sync_completed_at": "2026-09-28T12:00:00+00:00",
             "sync_interval_secs": 60,
@@ -1352,7 +1359,14 @@ class TestStatsAndFolders:
 
     def test_get_mailbox_status_before_the_indexer_reports(self, empty_db: Database):
         stats = empty_db.get_mailbox_status()
-        assert stats["queue"] == {"pending": 0, "retrying": 0, "dead": 0, "reparse": 0}
+        assert stats["queue"] == {
+            "pending": 0,
+            "retrying": 0,
+            "deferred": 0,
+            "parked_trashed": 0,
+            "dead": 0,
+            "reparse": 0,
+        }
         assert stats["ingestion"] is None
         assert stats["conflicting_message_ids"] == 0
         assert stats["extra_claimant_files"] == 0
@@ -1370,18 +1384,31 @@ class TestStatsAndFolders:
         assert stats["extra_claimant_files"] == 3
         assert stats["total_messages"] == 6
 
-    def test_message_id_conflict_count_reads_only_the_message_id_index(self, empty_db: Database):
-        """The count must stay cheap on a large mailbox: SQLite walks the
-        ``message_id`` index alone (a covering scan) rather than the
-        ``messages`` table rows."""
+    def test_message_id_conflict_count_uses_a_covering_message_id_index(self, empty_db: Database):
+        """The count must stay cheap on a large mailbox (#455): SQLite walks
+        a covering index led by ``message_id`` rather than the ``messages``
+        table rows, with no temporary sort. Two indexes qualify
+        (``idx_messages_message`` and ``idx_messages_message_effective``)
+        and the planner's choice between them varies with the SQLite
+        version and the table's columns, so the test checks the index's
+        leading column, not its name."""
         from src.lib.sqlite import MESSAGE_ID_CONFLICTS_SQL
 
         with closing(empty_db._connect()) as conn:
             plan = [
                 row[3] for row in conn.execute(f"EXPLAIN QUERY PLAN {MESSAGE_ID_CONFLICTS_SQL}")
             ]
-        message_scans = [step for step in plan if "messages" in step]
-        assert message_scans == ["SCAN messages USING COVERING INDEX idx_messages_message"]
+            message_scans = [step for step in plan if "messages" in step]
+            assert len(message_scans) == 1, plan
+            prefix = "SCAN messages USING COVERING INDEX "
+            assert message_scans[0].startswith(prefix), plan
+            index_name = message_scans[0].removeprefix(prefix)
+            first_column = conn.execute(
+                "SELECT name FROM pragma_index_info(?) WHERE seqno = 0", (index_name,)
+            ).fetchone()
+            assert first_column is not None, index_name
+            assert first_column[0] == "message_id", index_name
+            assert not any("USE TEMP B-TREE" in step for step in plan), plan
 
     def test_list_folders_ranked_by_thread_count(self, seeded_db: Database):
         folders = seeded_db.list_folders()

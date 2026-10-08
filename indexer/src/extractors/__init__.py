@@ -113,10 +113,12 @@ ZIP_MAX_UNCOMPRESSED_BYTES = 200 * 1024 * 1024
 #   limit below withheld (the budget's ``attachment`` bucket).
 # * the budget's ``line`` bucket: the repeated indexer lines that share
 #   the rate limit (embed retries and recoveries, health-file and
-#   ingestion-state failures, #873), withheld. Counted apart from the
-#   attachment WARNINGs, and reported on the queue heartbeat as
-#   ``suppressed_lines``, because a suppressed embed line says nothing
-#   about attachment text (Codex round 2 on #904).
+#   ingestion-state failures, #873, and the parser's repeated-header
+#   lines: merged To/Cc and ambiguous From, #1144), withheld. Counted
+#   apart from the attachment WARNINGs, and reported on the queue
+#   heartbeat as ``suppressed_lines``, because a suppressed embed or
+#   repeated-header line says nothing about attachment text (Codex
+#   round 2 on #904, round 3 on #1158).
 #
 # Kept in this always-imported module because ``pdf`` is imported lazily.
 # A few integers and a window start: the state stays bounded.
@@ -128,6 +130,8 @@ _ocr_pages_skipped = 0
 _ocr_capped_images = 0
 _extractor_caps = 0
 _parser_caps_messages = 0
+_parser_recipients_merged_messages = 0
+_parser_sender_ambiguous_messages = 0
 
 # At most this many per-attachment WARNINGs per window, shared by every
 # kind (review rounds 1 and 2 on #884): a sender can attach many distinct
@@ -191,10 +195,21 @@ def note_parser_caps_message() -> None:
         _parser_caps_messages += 1
 
 
+def note_parser_address_repeats(*, merged: bool, ambiguous: bool) -> None:
+    """Count one message whose repeated To / Cc headers were merged
+    (``merged``), and one whose sender is ambiguous (``ambiguous``),
+    for the aggregate line (#1144)."""
+    global _parser_recipients_merged_messages, _parser_sender_ambiguous_messages
+    with _counts_lock:
+        _parser_recipients_merged_messages += int(merged)
+        _parser_sender_ambiguous_messages += int(ambiguous)
+
+
 def drain_extractor_counts() -> dict[str, int]:
     """Return the counts above since the last call, and reset them."""
     global _pdf_pages_failed, _pdf_pages_unrecovered, _ocr_capped_pdfs
     global _ocr_pages_skipped, _ocr_capped_images, _extractor_caps, _parser_caps_messages
+    global _parser_recipients_merged_messages, _parser_sender_ambiguous_messages
     with _counts_lock:
         counts = {
             "pdf_pages_failed": _pdf_pages_failed,
@@ -204,11 +219,14 @@ def drain_extractor_counts() -> dict[str, int]:
             "ocr_capped_images": _ocr_capped_images,
             "extractor_caps": _extractor_caps,
             "parser_caps_messages": _parser_caps_messages,
+            "parser_recipients_merged_messages": _parser_recipients_merged_messages,
+            "parser_sender_ambiguous_messages": _parser_sender_ambiguous_messages,
             "warnings_suppressed": _LINE_BUDGET.drain(_ATTACHMENT_LINES),
         }
         _pdf_pages_failed = _pdf_pages_unrecovered = _ocr_capped_pdfs = 0
         _ocr_pages_skipped = _ocr_capped_images = _extractor_caps = 0
         _parser_caps_messages = 0
+        _parser_recipients_merged_messages = _parser_sender_ambiguous_messages = 0
     return counts
 
 

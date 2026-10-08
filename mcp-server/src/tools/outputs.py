@@ -160,6 +160,16 @@ def thread_summary(t: ThreadResult) -> ThreadSummary:
     )
 
 
+# ``sender_ambiguous`` on a message and on a citation (#1144).
+_SENDER_AMBIGUOUS_DESCRIPTION = (
+    "{subject} sender attribution: false when it has one From header; true when "
+    "it repeats From (or its headers were too many to rule that out), so from "
+    "lists the first From header only and may not be the author; null when the "
+    "indexer has not assessed it yet (mail indexed before the upgrade, until "
+    "its reparse). Only false counts toward the authority_class filters."
+)
+
+
 class MessageHeaders(_Output):
     message_id: str = Field(
         description="RFC 5322 Message-ID. The sender sets it, so two indexed messages "
@@ -192,6 +202,9 @@ class MessageHeaders(_Output):
     to_count: int
     cc: list[Participant]
     cc_count: int
+    sender_ambiguous: bool | None = Field(
+        description=_SENDER_AMBIGUOUS_DESCRIPTION.format(subject="The message's")
+    )
     source_file: Source | None = Field(description=_SOURCE_FILE_DESCRIPTION)
 
 
@@ -241,6 +254,7 @@ def message_headers(m: MessageRecord) -> MessageHeaders:
         to_count=len(m.to),
         cc=listed(m.cc, people),
         cc_count=len(m.cc),
+        sender_ambiguous=m.sender_ambiguous,
         source_file=source(m.source_file),
     )
 
@@ -702,13 +716,25 @@ class ListFoldersOutput(_Output):
 class QueueCounts(_Output):
     pending: int = Field(description="Messages found in the Maildir, not yet indexed.")
     retrying: int = Field(description="Messages that failed to index and will be retried.")
+    deferred: int = Field(
+        default=0,
+        description="Messages the indexer postponed without a failure of their own (a file "
+        "it cannot read yet, an embedder outage or configuration error, or a reparse waiting "
+        "for a rename); retried without spending attempts. They make current false.",
+    )
+    parked_trashed: int = Field(
+        default=0,
+        description="Trashed files already indexed and waiting for the reaper to remove "
+        "them (or for the file to be restored). They do not make current false.",
+    )
     dead: int = Field(
         description="Messages that failed permanently and are incompletely indexed: "
         "missing from search, or found only by keyword, until an operator requeues them."
     )
     reparse: int = Field(
         default=0,
-        description="Of the pending and retrying messages, those already indexed and being "
+        description="Of the pending, retrying and deferred messages, those already indexed "
+        "and being "
         "read again after an upgrade (a reparse): search finds them meanwhile, but data the "
         "upgrade adds is missing until the reparse finishes.",
     )
@@ -721,7 +747,7 @@ class MailboxStatusOutput(_Output):
     )
     current: bool = Field(
         description="True only when mail synced from Proton recently, the indexer is "
-        "running, and no message is waiting to be indexed. Mail that reached Proton "
+        "running, and no message is pending, retrying or deferred. Mail that reached Proton "
         "after last_sync_at is not searchable either way."
     )
     not_current_reasons: list[str] = Field(description="Why current is false; empty when true.")
@@ -764,6 +790,11 @@ class Citation(_Output):
     thread_id: str
     sender: str | None = Field(
         description="That message's sender, cut for length; null when none is recorded."
+    )
+    sender_ambiguous: bool | None = Field(
+        default=None,
+        description=_SENDER_AMBIGUOUS_DESCRIPTION.format(subject="That message's")
+        + " Null too for source thread.",
     )
     sent_at: str | None = Field(
         description="That message's own sent date (not the thread's); null when unknown."
