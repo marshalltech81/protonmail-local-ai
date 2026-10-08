@@ -170,6 +170,13 @@ harness in `tests/eval/` (`tests/retrieval_metrics.py`).
   vectors), so a difference could still move t90, t91 or t92 within
   another question's top 10 in the snapshot; treat that as an OCR
   difference, not a retrieval change.
+  Threads 93-95 back three attachment-layer answer-evaluation cases
+  (#910): a body and its attachment that give different amounts (t93,
+  also the golden question `conflict-attach-body`), a revised
+  attachment under the same filename that replaces the first (t94), and
+  a reply filed in Trash whose attachment carries a stale list (t95).
+  `test_answer_eval_cases.py` checks both sides of each shape reach the
+  answering model's prompt.
   Adding a thread can lower a recall floor's
   measured value; re-measure and explain it rather than lowering the
   floor silently.

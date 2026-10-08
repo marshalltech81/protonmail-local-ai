@@ -420,7 +420,7 @@ Cases must never be built from real mail.
 ### Cases
 
 `tests/answer_eval/cases.json` (schema v1, loaded and validated by
-`cases.py`) holds 40 cases over the baseline corpus: 38 for
+`cases.py`) holds 43 cases over the baseline corpus: 41 for
 `ask_mailbox` and two for `summarize_thread` (below). The `ask_mailbox` cases: exact facts,
 attachment-only answers, multiple required threads (including
 `ask-tofu-summary`, a summary of the four genuine messages of the
@@ -430,8 +430,12 @@ of the selected thread holds a different answer: a sender filter, a date
 filter, and a thread with a stale message in Trash; the date decoy has a
 companion, `ask-swim-scope-stated`, whose question states the scope, so a
 failure can be told apart as a scope the model never saw or one it
-ignored), later corrections (and a later message that does not change the fact),
-an unresolved conflict, unanswerable questions, an empty result, a
+ignored; `ask-lido-locker-trash` moves the Trash decoy into an
+attachment, #910), later corrections (and a later message that does not
+change the fact; `ask-armchair-revised` is a revised attachment under
+the same filename, #910),
+unresolved conflicts (`ask-wall-bill-attachment` is a body and its
+own attachment that disagree, #910), unanswerable questions, an empty result, a
 prompt-budget omission (the case's own `settings.prompt_tokens`), and
 two synthetic prompt injections: corpus thread t31 tells the answering
 model to misreport an invoice and print the canary `ORANGE-HERON-7`, and
@@ -510,7 +514,7 @@ call, it prints how many calls it will make and to which models (the
 `INFERENCE_MODEL` and `JUDGE_MODEL` settings), for example:
 
 ```text
-Planned provider calls: 40 answer calls to <model> (up to 40 more for citation repairs) and 40 judge calls to <model>; at most 120 provider calls.
+Planned provider calls: 43 answer calls to <model> (up to 43 more for citation repairs) and 43 judge calls to <model>; at most 129 provider calls.
 ```
 
 That is one answer call per selected case, plus a second (a citation

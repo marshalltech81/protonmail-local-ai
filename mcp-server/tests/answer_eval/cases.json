@@ -678,6 +678,64 @@
       "review": "ai_drafted"
     },
     {
+      "id": "ask-wall-bill-attachment",
+      "category": "conflicting_sources",
+      "tool": "ask_mailbox",
+      "arguments": {"question": "How much is the Holloway Stonework bill for rebuilding the dry-stone wall at my allotment?"},
+      "held_out": true,
+      "answerable": true,
+      "expected_handling": "disclose_conflict",
+      "required_evidence": [["t93.1"]],
+      "expected_facts": [
+        {"id": "f1", "fact": "Tamsin Holloway's message says the bill comes to $3,480, as agreed on site.", "sources": ["t93.1"], "excerpt": "comes to $3,480, as we agreed on site"},
+        {"id": "f2", "fact": "The attached itemised sheet (wall-bill.txt) gives an amount of $3,840.", "sources": ["t93.1"], "excerpt": "AMOUNT: $3,840"},
+        {"id": "f3", "fact": "The message body and its attachment disagree, and no later message says which is right.", "sources": ["t93.1"], "excerpt": "AMOUNT: $3,840"}
+      ],
+      "must_not_assert": ["The bill is definitely $3,480.", "The bill is definitely $3,840."],
+      "deterministic": {"must_include": [["3,480"], ["3,840"]], "must_not_include": []},
+      "criteria": {"factual_correctness": true, "citation_support": true, "completeness": true, "temporal_reasoning": false, "conflict_uncertainty": true, "relevance": true},
+      "review": "ai_drafted"
+    },
+    {
+      "id": "ask-armchair-revised",
+      "category": "correction",
+      "tool": "ask_mailbox",
+      "arguments": {"question": "What will Kestrel Upholstery charge to re-cover my wingback armchair?"},
+      "held_out": false,
+      "answerable": true,
+      "expected_handling": "answer",
+      "required_evidence": [["t94.2"]],
+      "expected_facts": [
+        {"id": "f1", "fact": "The revised sheet, attached to Ottilie's second message, gives an amount of $1,140 (seven metres of velvet).", "sources": ["t94.2"], "excerpt": "AMOUNT: $1,140"},
+        {"id": "f2", "fact": "Ottilie says the second sheet replaces the first, which priced nine metres of velvet.", "sources": ["t94.2"], "excerpt": "This sheet replaces the first one"}
+      ],
+      "must_not_assert": ["Re-covering the armchair costs $1,260 (the first sheet's amount, since replaced)."],
+      "deterministic": {"must_include": [["1,140"]], "must_not_include": []},
+      "criteria": {"factual_correctness": true, "citation_support": true, "completeness": true, "temporal_reasoning": true, "conflict_uncertainty": false, "relevance": true},
+      "review": "ai_drafted"
+    },
+    {
+      "id": "ask-lido-locker-trash",
+      "category": "narrow_filter",
+      "tool": "ask_mailbox",
+      "arguments": {"question": "Which locker do I have at Fernhill Lido, and what is the annual membership?"},
+      "held_out": true,
+      "answerable": true,
+      "expected_handling": "answer",
+      "required_evidence": [["t95.1"]],
+      "expected_facts": [
+        {"id": "f1", "fact": "Sam's locker is K-27, by the sauna.", "sources": ["t95.1"], "excerpt": "Your locker is K-27, by the sauna"},
+        {"id": "f2", "fact": "Annual membership is $95.", "sources": ["t95.1"], "excerpt": "annual membership is $95"}
+      ],
+      "must_not_assert": [
+        "Sam's locker is M-58 (from last year's list attached to a message filed in Trash).",
+        "Annual membership is $140 (from last year's list attached to a message filed in Trash)."
+      ],
+      "deterministic": {"must_include": [["K-27"], ["$95"]], "must_not_include": ["M-58", "$140"]},
+      "criteria": {"factual_correctness": true, "citation_support": true, "completeness": true, "temporal_reasoning": false, "conflict_uncertainty": false, "relevance": true},
+      "review": "ai_drafted"
+    },
+    {
       "id": "summarize-pool-bids",
       "category": "exact_fact",
       "tool": "summarize_thread",
