@@ -87,25 +87,39 @@ def _remap_to_identical_copies(
     while a live copy remains. The remap moves the locator, folder and
     S/F/R state; it never tombstones or clears anything, so each caller
     applies its own trash rule to the copy.
+
+    The database refuses a remap whose copy vanished after it was
+    resolved (the watcher renamed it meanwhile); the copies are then
+    resolved once more without the pass's directory cache, which is
+    stale for that folder, and the remap retried once.
     """
     copies = db.find_identical_copies([row["claimant_id"] for row in gone])
     remapped: dict[str, Path] = {}
     for row in gone:
-        found = [
-            current
-            for path in copies.get(row["claimant_id"], [])
-            if (current := resolve_current_path(Path(path), listings)) is not None
-        ]
-        if not found:
-            continue
-        copy = next((p for p in found if not is_trashed(p)), found[0])
-        dest_folder = _derive_folder(copy, maildir_root)
-        same_folder = dest_folder == _derive_folder(Path(row["filepath"]), maildir_root)
-        db.remap_to_identical_copy(
-            row["filepath"], str(copy), folder=None if same_folder else dest_folder
-        )
-        remapped[row["claimant_id"]] = copy
+        candidates = copies.get(row["claimant_id"], [])
+        for cache in (listings, {}):
+            copy = _pick_copy(candidates, cache)
+            if copy is None:
+                break
+            dest_folder = _derive_folder(copy, maildir_root)
+            same_folder = dest_folder == _derive_folder(Path(row["filepath"]), maildir_root)
+            if db.remap_to_identical_copy(
+                row["filepath"], str(copy), folder=None if same_folder else dest_folder
+            ):
+                remapped[row["claimant_id"]] = copy
+                break
     return remapped
+
+
+def _pick_copy(candidates: list[str], listings: dict[Path, dict[str, Path]]) -> Path | None:
+    """The current path of the first live candidate, else of the first
+    trashed one; ``None`` when no candidate exists on disk."""
+    found = [
+        current
+        for path in candidates
+        if (current := resolve_current_path(Path(path), listings)) is not None
+    ]
+    return next((p for p in found if not is_trashed(p)), found[0] if found else None)
 
 
 @dataclass(frozen=True)
@@ -331,11 +345,17 @@ class Reconciler:
         for tomb in tombstones:
             grouped.setdefault(tomb["thread_id"], []).append(tomb)
 
+        # Other paths holding a reaped message's bytes are unmarked with
+        # it (#1102); one lookup for the whole pass, since
+        # ``indexed_files`` has no ``content_hash`` index.
+        copies = self.db.find_identical_copies([t["claimant_id"] for t in tombstones])
+
         threads_reaped = 0
         threads_rebuilt = 0
 
         for thread_id, tombs in grouped.items():
-            reaped, rebuilt = self._reap_thread(thread_id, tombs, cutoff)
+            copy_paths = [p for t in tombs for p in copies.get(t["claimant_id"], [])]
+            reaped, rebuilt = self._reap_thread(thread_id, tombs, cutoff, copy_paths)
             threads_reaped += int(reaped)
             threads_rebuilt += int(rebuilt)
 
@@ -396,8 +416,13 @@ class Reconciler:
         self._blocked_thread_attempts.pop(thread_id, None)
         self._escalated_threads.discard(thread_id)
 
-    def _reap_thread(self, thread_id: str, tombs: list, cutoff: str) -> tuple[bool, bool]:
+    def _reap_thread(
+        self, thread_id: str, tombs: list, cutoff: str, copy_paths: list[str] | None = None
+    ) -> tuple[bool, bool]:
         """Reap one thread. Returns (fully_reaped, rebuilt).
+
+        ``copy_paths`` are the other indexed paths holding the reaped
+        messages' bytes, unmarked in the reap transaction.
 
         ``tombs`` is a snapshot; the database re-checks inside the reap
         transaction that each message is still tombstoned at or before
@@ -414,7 +439,9 @@ class Reconciler:
         if not survivor_rows:
             # Whole thread gone. Drop everything; the .eml files stay on
             # disk because the indexer never deletes Maildir files.
-            if not self.db.delete_thread_completely(thread_id, grace_cutoff=cutoff):
+            if not self.db.delete_thread_completely(
+                thread_id, grace_cutoff=cutoff, copy_paths=copy_paths or ()
+            ):
                 log.info(
                     "reaper: a thread changed since its tombstones were read; retrying next pass",
                 )
@@ -552,6 +579,7 @@ class Reconciler:
             embedding,
             [tomb["claimant_id"] for tomb in tombs],
             grace_cutoff=cutoff,
+            copy_paths=copy_paths or (),
         )
         if removed_filepaths is None:
             log.info(

@@ -257,10 +257,12 @@ class TestSweep:
 _COPY_MARKER = "ZQXCOPYMARKER1102"
 
 
-def _index_copies(db, threader, first: Path, second: Path, message_id: str) -> str:
+def _index_copies(
+    db, threader, first: Path, second: Path, message_id: str, subject: str = "Subject"
+) -> str:
     """Index ``first`` and a byte-identical copy at ``second``. Both claim
     one claimant ID, so the mapping keeps only ``second``, the latest."""
-    _write_eml(first, message_id, subject=f"Subject {_COPY_MARKER}", body=_COPY_MARKER)
+    _write_eml(first, message_id, subject=f"{subject} {_COPY_MARKER}", body=_COPY_MARKER)
     second.parent.mkdir(parents=True, exist_ok=True)
     second.write_bytes(first.read_bytes())
     thread_id = _index(first, db, threader)
@@ -560,6 +562,97 @@ class TestByteIdenticalCopies:
         assert not db.is_indexed(str(kept))
         assert not db.is_indexed(str(mapped))
         assert db.is_indexed(str(reply))
+
+    def test_remap_keeps_the_runnable_job_when_the_copys_is_dead(
+        self, db, threader, embedder, maildir
+    ):
+        """Codex round 2 on #1134: the gone path's runnable job was always
+        dropped in favour of the copy's, even when the copy's was dead."""
+        from src.queue import REASON_INITIAL_SCAN, IndexingQueue
+
+        kept = maildir / "1700000000.M1.host:2,S"
+        mapped = maildir / "1700000001.M2.host:2,S"
+        _index_copies(db, threader, kept, mapped, "deadcopy@example.com")
+        queue = IndexingQueue(db)
+        queue.enqueue(str(kept), REASON_INITIAL_SCAN)
+        queue.mark_dead_terminal(str(kept), stage="embed", error="fixed text")
+        queue.enqueue(str(mapped), REASON_INITIAL_SCAN)
+        mapped.unlink()
+
+        assert Reconciler(db, embedder, _default_config()).sweep()["remapped"] == 1
+
+        assert queue.has_pending_row(str(kept))
+        assert not queue.is_dead(str(kept))
+        assert not queue.has_pending_row(str(mapped))
+
+    def test_reap_unmarks_copies_with_one_scan_per_pass(self, db, threader, embedder, maildir):
+        """Codex round 2 on #1134: the unmark scanned ``indexed_files``
+        (no ``content_hash`` index) once per reaped thread. The pass looks
+        the copies up once; each reap transaction then unmarks by path."""
+        paths = []
+        for n in range(3):
+            kept = maildir / f"170000000{n}.K{n}.host:2,S"
+            mapped = maildir / f"170000001{n}.M{n}.host:2,S"
+            _index_copies(
+                db, threader, kept, mapped, f"reapmany{n}@example.com", subject=f"Topic {n}"
+            )
+            kept.unlink()
+            mapped.unlink()
+            paths += [kept, mapped]
+        rec = Reconciler(db, embedder, _default_config())
+        rec.sweep()
+        statements: list[str] = []
+        db._conn.set_trace_callback(statements.append)
+        try:
+            assert rec.reap()["threads_reaped"] == 3
+        finally:
+            db._conn.set_trace_callback(None)
+
+        scans = [s for s in statements if "indexed_files" in s and "content_hash" in s]
+        assert len(scans) == 1, scans
+        assert not any(db.is_indexed(str(p)) for p in paths)
+
+    def test_a_copy_renamed_before_the_remap_is_followed(
+        self, db, threader, embedder, maildir, monkeypatch
+    ):
+        """Codex round 2 on #1134: the watcher renamed the chosen copy
+        between the sweep resolving it and the remap, which then mapped
+        the message to a path that no longer existed."""
+        import src.reconciler as reconciler_module
+
+        kept = maildir / "1700000000.M1.host:2,S"
+        mapped = maildir / "1700000001.M2.host:2,S"
+        _index_copies(db, threader, kept, mapped, "raced@example.com")
+        claimant = db.find_message_entry_by_filepath(str(mapped))["claimant_id"]
+        mapped.unlink()
+        replied = maildir / "1700000000.M1.host:2,RS"
+        real_resolve = reconciler_module.resolve_current_path
+        raced: list[bool] = []
+
+        def resolve_then_rename(stored, listings=None):
+            current = real_resolve(stored, listings)
+            if current == kept and not raced:
+                raced.append(True)
+                kept.rename(replied)
+                db.update_filepath(str(kept), str(replied))  # the watcher's write
+            return current
+
+        monkeypatch.setattr(reconciler_module, "resolve_current_path", resolve_then_rename)
+        summary = sweep_paths(db)
+
+        assert raced
+        assert summary["remapped"] == 1
+        assert _message_row(db, claimant)["filepath"] == str(replied)
+        assert db.find_message_entry_by_filepath(str(replied))["claimant_id"] == claimant
+
+    def test_remap_is_refused_when_the_mapping_moved(self, db, threader, maildir):
+        kept = maildir / "1700000000.M1.host:2,S"
+        mapped = maildir / "1700000001.M2.host:2,S"
+        _index_copies(db, threader, kept, mapped, "movedmap@example.com")
+
+        assert not db.remap_to_identical_copy("/gone/elsewhere", str(kept))
+        assert not db.remap_to_identical_copy(str(mapped), str(maildir / "absent"))
+        assert db.find_message_entry_by_filepath(str(mapped)) is not None
 
     def test_archive_mode_rename_sweep_remaps_to_the_copy(self, db, threader, maildir, caplog):
         """Codex round 1 on #1134: archive mode has no reconciler, so the

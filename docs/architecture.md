@@ -1681,7 +1681,11 @@ pass over `indexed_files` per sweep covering every missing message. If
 one exists (a live copy is preferred to a `T`-flagged one), the message
 is remapped to that copy: its locator, folder and S/F/R state move as
 for a rename, and a tombstone or queued job on the gone path moves too
-unless the copy already has its own, which is kept. The trash rule then
+unless the copy already has its own. The copy's tombstone is kept; of
+two queued jobs the runnable one is kept (the copy's, unless it is dead
+and the gone path's is not). The remap is refused, and retried once
+after resolving the copy again, when the watcher renamed the copy or
+moved the mapping since the sweep resolved it. The trash rule then
 applies to the copy as to any file, so a `T`-flagged copy is tombstoned
 and a live one clears an earlier tombstone. The always-on startup
 rename sweep does the same remap, so archive mode does not keep the
@@ -1689,7 +1693,8 @@ gone path, folder and flags. The sweep's INFO line counts these as
 `remapped=N`. Only a message with no surviving copy is tombstoned as
 missing, so removing every copy still reaps it as before, and the reap
 then unmarks every path with the message's bytes, not only the mapped
-one: a copy that comes back after a transient outage is re-indexed by
+one (looked up once per reap pass, unmarked by path in each thread's
+reap transaction): a copy that comes back after a transient outage is re-indexed by
 the next Maildir walk instead of staying marked indexed with nothing
 left to repair it.
 
@@ -2182,16 +2187,22 @@ state intact: a file whose Phase 1 committed but whose Phase 2 is still
 pending is already indexed, so the rename is not re-enqueued, and a job
 left on the old path would be dropped as missing.
 
-The columns exist to let future reconciler passes distinguish a
-flag-only rename from a genuine content change, and to spot a "file
-vanished from path A but the same `content_hash` reappears at path B"
-rename that mbsync performed without emitting an `on_moved` event.
-No code reads them yet: a content-hash lookup and its consumers would
-land together with such a pass.
+`content_hash` is read by one lookup, `find_identical_copies`: when a
+message's mapped file is gone, the reconciler sweep and the startup
+rename sweep look for another indexed path with the same bytes and
+remap the message to it, and the reaper unmarks every such path of a
+message it removes (see *Byte-identical copies* under *Deletion
+Reconciliation*, #1102). `indexed_files` has no `content_hash` index,
+so the lookup reads the wanted hashes by claimant ID and makes one pass
+over `indexed_files` per sweep or reap pass. `size` and `mtime_ns` are
+not read; they remain for a future pass that tells a flag-only rename
+from a genuine content change.
 
 Rows for which `stat` / hash capture failed at parse time carry NULL
-identity values, which a future content-hash lookup must skip; the
-columns are populated lazily on the next reindex of the file.
+identity values. The lookup skips a message whose own hash is NULL, and
+a NULL row never matches a hash, so such a message is handled as before
+(tombstoned as missing when its file is gone); the columns are
+populated lazily on the next reindex of the file.
 
 ## Vulnerability Scans
 
