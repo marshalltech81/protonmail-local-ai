@@ -1315,26 +1315,45 @@ default cap plus the 16 MiB of expansion above. With a raised
 (large photos) is recorded `unsupported`. An over-budget document is recorded
 `unsupported` ("document exceeds a pre-open package budget"), not
 `failed`, since the same bytes trip the budget on every run (#1032; see
-*Permanent extractor failures* below). The DOCX version is not bumped,
-neither by the budgets (#1036, nor the declared total, #1033) nor by the mapping (#1032; PR #1068's
-bump to `docx@6` was reverted): a bump would re-run every cached
-document once through the walk after the open, which has no budget of
-its own yet (#1031), and re-record an over-budget document that was
-read in full before the budgets as `unsupported`. So a document read in
-full before keeps its cached text. A package-budget row recorded
-`failed` before the mapping is not re-queued by the startup sweep, so
-it stays `failed` until the same bytes are processed again (a new
-occurrence, or the message reprocessed for another reason) more than
-7 days after it was recorded; that re-run reads the central directory
-once, never opens the document, and records the row `unsupported`
-under the mapping. A deliberate `docx` bump, once #1031 lands,
-converts whatever rows remain at the next start. A row stamped
-`docx@6` by a build between #1068 and its revert (#1075) is kept, since
-a newer row is never downgraded; rolling back to such a build treats
-the `docx@5` rows written since as stale and re-runs them through the
-unbudgeted walk at its next start, which is that build's behaviour.
+*Permanent extractor failures* below). Neither the budgets (#1036, nor
+the declared total, #1033) nor the mapping (#1032; PR #1068's bump to
+`docx@6` was reverted by #1075) bumped the DOCX version, because the
+walk after the open had no budget yet; the walk budgets below (#1031)
+came with the bump to `docx@7` (6 stays taken by the reverted bump).
+So at the next start every cached DOCX row stamped `docx@5` or
+`docx@6` is re-queued once and re-extracted through the budgeted walk:
+a document read in full before reads the same text unless it is over
+a walk budget, and a package-budget row recorded `failed` before the
+mapping is re-recorded `unsupported`. Dead-lettered messages are
+skipped and keep their old rows until `make requeue-dead`.
 `DocxRelationshipChainError` (#945)
 still applies to a chain under these budgets.
+
+After the open, the DOCX extractor walks the document's XML itself,
+one child element at a time (#1031). python-docx's
+`iter_inner_content()` and `Paragraph.text` select a container's
+paragraphs and tables, a paragraph's runs and hyperlinks, and a run's
+text elements with XPath unions, which libxml2 merges in time
+quadratic in the number of siblings: plainly timed, 1 MiB of a
+paragraph alternating runs and hyperlinks took 4.2 s and a synthetic
+1,500-page report 15 s, and 31 MiB of either shape ran past five
+minutes. The walk keeps the same elements in the same order
+(`indexer/tests/test_docx_walk.py` pins the text on a catalogue of
+shapes) and reads the report in about half a second. It counts its
+work against four budgets per document: 500,000 blocks (each
+paragraph and table in the body, headers, footers and table cells,
+plus 20 for each section's header and footer references; a header
+part several sections define is read, and charged, once per section),
+500,000 table rows and cells, 2,000,000 text elements (runs,
+hyperlinks, and the text, tab and break elements in runs) and
+10,000,000 characters. The first budget to run out keeps the text read
+so far and logs its extractor-cap WARNING (`docx_blocks`,
+`docx_table_cells`, `docx_text_elements`, `docx_text_chars`). The
+synthetic report uses about 75,000 blocks, 18,000 table cells and
+270,000 text elements. The worst synthetic shapes inside the package
+budgets now extract in about a second, and the walk adds little to the
+memory the open already peaks at (about 780 MiB for 31 MiB of empty
+paragraphs, where the old walk peaked at 1.3 GB).
 
 PowerPoint (#936): `application/vnd.openxmlformats-officedocument.presentationml.presentation`
 and `.pptx` route to the PPTX extractor (`python-pptx`), which reads,
@@ -1407,11 +1426,9 @@ that raises a budget, refreshes it; the bumps that came with the
 `pdf`, `xlsx` and `pptx` mappings (`pdf@5`, `xlsx@6`, `pptx@3`)
 refreshed the `failed` rows the previous versions wrote, since the
 startup sweep re-runs only stale rows, never aged `failed` ones. `docx`
-was deliberately not bumped (its walk is unbudgeted, #1031; see the
-DOCX budget paragraph above), so a `.docx` / `.dotx` package-budget row
-recorded `failed` before the mapping stays `failed` until the same
-bytes are processed again more than 7 days on, or until a `docx` bump
-follows #1031. `ppt` was not bumped either (#983): the deck's text is
+was not bumped with its mapping, while its walk was unbudgeted; the
+bump to `docx@7` with the walk budgets (#1031; see the DOCX budget
+paragraph above) refreshes those rows the same way. `ppt` was not bumped (#983): the deck's text is
 the same (none) either way, and a bump would re-run every cached deck
 at the next start to reclassify the encrypted ones, so an encrypted
 deck recorded `failed` (`ToolExitError`) before the mapping converts

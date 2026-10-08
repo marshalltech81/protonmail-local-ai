@@ -155,7 +155,7 @@ def _process_with_cached_extractor(
     )
     extractor = MagicMock(
         return_value=ExtractionResult(
-            status=STATUS_SUCCESS, extractor="docx@5", text="fresh text", error=None
+            status=STATUS_SUCCESS, extractor="docx@7", text="fresh text", error=None
         )
     )
     monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
@@ -185,7 +185,7 @@ def test_cache_row_from_an_older_extractor_version_is_re_extracted(tmp_path, mon
         db = _seed_thread_for_cache_test(tmp_path / status)
         extractor, row = _process_with_cached_extractor(db, "docx", status, text, monkeypatch)
         extractor.assert_called_once()
-        assert row["extractor"] == "docx@5"
+        assert row["extractor"] == "docx@7"
         assert row["extracted_text"] == "fresh text"
 
 
@@ -196,7 +196,7 @@ def test_cache_row_from_docx_version_2_is_re_extracted(tmp_path, monkeypatch):
         db = _seed_thread_for_cache_test(tmp_path / status)
         extractor, row = _process_with_cached_extractor(db, "docx@2", status, text, monkeypatch)
         extractor.assert_called_once()
-        assert row["extractor"] == "docx@5"
+        assert row["extractor"] == "docx@7"
         assert row["extracted_text"] == "fresh text"
 
 
@@ -267,24 +267,24 @@ def test_stale_ocr_row_is_served_while_ocr_is_off(tmp_path, monkeypatch):
 def test_cache_row_from_the_current_extractor_version_is_reused(tmp_path, monkeypatch):
     db = _seed_thread_for_cache_test(tmp_path)
     extractor, _ = _process_with_cached_extractor(
-        db, "docx@5", STATUS_SUCCESS, "cached text", monkeypatch
+        db, "docx@7", STATUS_SUCCESS, "cached text", monkeypatch
     )
     extractor.assert_not_called()
 
 
 def test_cache_row_from_a_newer_extractor_version_is_reused(tmp_path, monkeypatch):
     # After a rollback, rows the newer release wrote must not be
-    # downgraded by the older walker. ``docx@6`` is one above the
-    # current version (5), so this is not the current-version case above.
+    # downgraded by the older walker. ``docx@8`` is one above the
+    # current version (7), so this is not the current-version case above.
     from src.extractors import EXTRACTOR_VERSIONS
 
-    assert EXTRACTOR_VERSIONS["docx"] == 5
+    assert EXTRACTOR_VERSIONS["docx"] == 7
     db = _seed_thread_for_cache_test(tmp_path)
     extractor, row = _process_with_cached_extractor(
-        db, "docx@6", STATUS_SUCCESS, "newer text", monkeypatch
+        db, "docx@8", STATUS_SUCCESS, "newer text", monkeypatch
     )
     extractor.assert_not_called()
-    assert row["extractor"] == "docx@6"
+    assert row["extractor"] == "docx@8"
 
 
 def test_stale_row_is_left_to_the_occurrences_that_select_its_module(tmp_path, monkeypatch):
@@ -325,14 +325,14 @@ def test_reused_terminal_row_clears_the_stale_chunks(tmp_path, monkeypatch):
     it, so it must still drop the chunks its own stale extraction left."""
     db = _seed_thread_for_cache_test(tmp_path)
     attachment_id = hashlib.sha256(b"docx bytes").hexdigest()
-    _process_with_cached_extractor(db, "docx@5", STATUS_SUCCESS, "old text", monkeypatch)
+    _process_with_cached_extractor(db, "docx@7", STATUS_SUCCESS, "old text", monkeypatch)
     assert db.get_chunk_ids_for_message("message@example.com", attachment_id=attachment_id)
 
     db.store_attachment_extraction(
         attachment_id=attachment_id,
         extractor_module="docx",
         extraction_status=STATUS_EMPTY,
-        extractor="docx@5",
+        extractor="docx@7",
         extracted_text=None,
         extraction_error=None,
     )
@@ -361,14 +361,14 @@ def test_re_extraction_without_text_clears_the_stale_chunks(tmp_path, monkeypatc
     later sweep would repair it."""
     db = _seed_thread_for_cache_test(tmp_path)
     attachment_id = hashlib.sha256(b"docx bytes").hexdigest()
-    _process_with_cached_extractor(db, "docx@5", STATUS_SUCCESS, "old text", monkeypatch)
+    _process_with_cached_extractor(db, "docx@7", STATUS_SUCCESS, "old text", monkeypatch)
     assert db.get_chunk_ids_for_message("message@example.com", attachment_id=attachment_id)
 
     with db.transaction():
         db._conn.execute("UPDATE attachment_extractions SET extractor = 'docx'")
     extractor = MagicMock(
         return_value=ExtractionResult(
-            status=STATUS_EMPTY, extractor="docx@5", text=None, error=None
+            status=STATUS_EMPTY, extractor="docx@7", text=None, error=None
         )
     )
     monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
@@ -1989,7 +1989,7 @@ def test_cached_no_extractor_row_for_a_dotx_is_re_extracted(tmp_path):
         assert (plan.status, plan.cached) == (STATUS_SUCCESS, False)
         persisted = plan.extraction_to_persist
         assert persisted is not None
-        assert (persisted.status, persisted.extractor) == (STATUS_SUCCESS, "docx@5")
+        assert (persisted.status, persisted.extractor) == (STATUS_SUCCESS, "docx@7")
         assert persisted.text is not None and "SYNTHETIC_DOTX_FACT" in persisted.text
 
 
@@ -2093,7 +2093,7 @@ def _docx_budget_case(monkeypatch) -> tuple[bytes, str, str]:
     from tests.test_extractors import _docx_bytes
 
     monkeypatch.setattr(docx, "_MAX_MEMBERS", 1)
-    return _docx_bytes("SYNTHETIC_TEXT_MARKER"), DOCX_PACKAGE_BUDGET_ERROR, "docx@5"
+    return _docx_bytes("SYNTHETIC_TEXT_MARKER"), DOCX_PACKAGE_BUDGET_ERROR, "docx@7"
 
 
 def _ppt_encrypted_case(monkeypatch) -> tuple[bytes, str, str]:
@@ -2280,7 +2280,7 @@ class TestPermanentFailureCacheRows:
             ("pdf-limit", "pdf@4", "LimitReachedError"),
             ("xlsx-eager-budget", "xlsx@5", "XlsxEagerPartBudgetError"),
             ("pptx-package-budget", "pptx@2", "PptxPackageBudgetError"),
-            ("docx-package-budget", "docx@4", "DocxPackageBudgetError"),
+            ("docx-package-budget", "docx@5", "DocxPackageBudgetError"),
         ],
     )
     def test_stale_failed_row_is_refreshed_to_unsupported_once(
@@ -2288,9 +2288,9 @@ class TestPermanentFailureCacheRows:
     ):
         """A ``failed`` row a previous version wrote is stale after the
         bump: refreshed once, through the real dispatcher, then served.
-        ``docx`` was not bumped with its mapping (#1036, #1031), so its
-        case uses the stamp the #937 bump made stale; a ``docx@5``
-        ``failed`` row stays ``failed`` (``test_main`` checks the sweep)."""
+        ``docx`` was not bumped with its mapping (#1036); the bump with
+        the budgeted walk (#1031) makes its ``docx@5`` ``failed`` rows
+        stale."""
         build, content_type, filename, module = self._CASES[case]
         payload, error, extractor_name = build(monkeypatch)
         calls = MagicMock(wraps=attachment_indexing.extract_attachment)

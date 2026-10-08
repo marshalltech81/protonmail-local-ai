@@ -400,9 +400,17 @@ class ExtractionResult:
 # one labelled ``.pptx`` failed by type (#1042); the bump above refreshes
 # those rows, and ``.ppsm`` / ``.potm`` occurrences cached "no extractor"
 # carry no version and are re-queued by that sweep.
+# docx 7: the walk after the open reads the XML one element at a time
+# under walk budgets (#1031), so a document over a budget now returns
+# partial text where it returned all of it, after minutes, before. The
+# text of a document inside the budgets is unchanged. The bump re-runs
+# every cached DOCX row once through the budgeted walk: the ``docx@5``
+# rows, including the ``failed`` rows version 5 wrote for a document
+# over a pre-open budget, which are now recorded ``unsupported``
+# (#1032), and any ``docx@6`` row the build described above wrote.
 EXTRACTOR_VERSIONS: dict[str, int] = {
     "doc": 1,
-    "docx": 5,
+    "docx": 7,
     "image": 3,
     "pdf": 5,
     "ppt": 1,

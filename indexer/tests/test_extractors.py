@@ -749,14 +749,14 @@ class TestDocxExtractor:
             filename="v.docx",
             payload=self._save(document),
         )
-        assert result.extractor == "docx@5"
+        assert result.extractor == "docx@7"
 
     def test_docx_version_2_rows_are_stale(self):
         # docx@2 missed first-page and even-page headers/footers (#299).
         from src import extractors
 
         assert extractors.stale_extractor_module("docx@2") == "docx"
-        assert extractors.stale_extractor_module("docx@5") is None
+        assert extractors.stale_extractor_module("docx@7") is None
 
     def test_versions_are_keyed_by_dispatch_module(self, monkeypatch):
         """The image module records ``image-ocr`` and the PDF module
@@ -3715,15 +3715,14 @@ class TestPermanentFailuresAreUnsupported:
         """#1032: the ``failed`` rows ``pptx@2`` wrote for a deck over a
         budget are stale, so the startup sweep re-runs them once and they
         are recorded ``unsupported``. The PPTX walk is budgeted (#936), so
-        the re-run is bounded. ``docx`` is deliberately not bumped: see
-        ``TestDocxPackageBudget.test_package_budgets_do_not_make_cached_rows_stale``."""
+        the re-run is bounded. ``docx`` was bumped only once its walk was
+        budgeted too: see
+        ``TestDocxPackageBudget.test_cached_rows_are_stale_once_the_walk_is_budgeted``."""
         from src.extractors import EXTRACTOR_VERSIONS, stale_extractor_module
 
         assert EXTRACTOR_VERSIONS["pptx"] == 3
-        assert EXTRACTOR_VERSIONS["docx"] == 5
         assert stale_extractor_module("pptx@2") == "pptx"
         assert stale_extractor_module("pptx@3") is None
-        assert stale_extractor_module("docx@5") is None
 
     def test_a_page_level_pypdf_limit_keeps_the_other_pages(self, monkeypatch):
         """Review round 1: a limit hit inside one page's text extraction
@@ -5496,7 +5495,6 @@ class TestWordTemplates:
 
         assert EXTRACTOR_VERSIONS["docx"] >= 5
         assert stale_extractor_module("docx@4") == "docx"
-        assert stale_extractor_module("docx@5") is None
 
 
 _DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -5592,7 +5590,7 @@ class TestDocxRelationshipChain:
         while the opened document is walked stays host pressure."""
         from src.extractors import docx as docx_extractor
 
-        def boom(blocks):
+        def boom(*_args):
             raise RecursionError
 
         monkeypatch.setattr(docx_extractor, "_block_lines", boom)
@@ -5902,20 +5900,19 @@ class TestDocxPackageBudget:
         assert docx_extractor.extract(payload) == (_DOCX_BUDGET_MARKER, "docx")
         assert time.perf_counter() - started < 5.0
 
-    def test_package_budgets_do_not_make_cached_rows_stale(self):
-        """#1036 (review round 1) shipped the budgets with no ``docx``
-        bump, and the #1032 permanent-failure mapping keeps it: a bump
-        would re-run every cached document through the walk after the
-        open, which has no budget yet (#1031), and re-record an
-        over-budget document read in full before the budgets as
-        ``unsupported``. The few ``failed`` package-budget rows version 5
-        wrote stay ``failed`` until the same bytes are processed again
-        (a new occurrence, or a reprocess for another reason) more than
-        7 days on, or until #1031 lands and a deliberate bump follows."""
+    def test_cached_rows_are_stale_once_the_walk_is_budgeted(self):
+        """#1036 shipped the package budgets with no ``docx`` bump, and the
+        #1032 permanent-failure mapping kept it, because a bump would have
+        re-run every cached document through the unbudgeted walk after
+        the open. #1031 budgets that walk and bumps ``docx`` to 7 (6 is
+        taken by the reverted #1068), so the ``docx@5`` rows, the
+        ``failed`` package-budget rows among them, re-extract once."""
         from src.extractors import EXTRACTOR_VERSIONS, stale_extractor_module
 
-        assert EXTRACTOR_VERSIONS["docx"] == 5
-        assert stale_extractor_module("docx@5") is None
+        assert EXTRACTOR_VERSIONS["docx"] == 7
+        assert stale_extractor_module("docx@5") == "docx"
+        assert stale_extractor_module("docx@6") == "docx"
+        assert stale_extractor_module("docx@7") is None
 
     def test_long_chain_still_fails_as_a_chain_under_the_budgets(self):
         """#968's behaviour holds: a chain under the package budgets still
@@ -7193,6 +7190,71 @@ def _cap_pptx_text_chars(monkeypatch):
     assert counts == {"slides": 1, "shapes": 2}
 
 
+def _cap_docx_blocks(monkeypatch):
+    """A paragraph costs one block: the third is refused unread, and so
+    is the header after it."""
+    from src.extractors import docx
+
+    from tests.test_docx_walk import _p, docx_payload
+
+    monkeypatch.setattr(docx, "_MAX_BLOCKS", 2)
+    payload = docx_payload(
+        "".join(_p(f"{_CAP_MARKER} {i}") for i in range(10)), header=_p(f"{_CAP_MARKER} h")
+    )
+    read = _count_calls(monkeypatch, docx, "_paragraph_text")
+    text, _ = docx.extract(payload)
+    assert text == f"{_CAP_MARKER} 0\n\n{_CAP_MARKER} 1"
+    assert read[0] == 2
+
+
+def _cap_docx_table_cells(monkeypatch):
+    """A row costs one unit and each of its cells one: the second row
+    keeps its first cell."""
+    from src.extractors import docx
+
+    from tests.test_docx_walk import _p, _tbl, _tc, _tr, docx_payload
+
+    rows = [_tr(*[_tc(_p(f"{_CAP_MARKER}{r}{c}")) for c in range(2)]) for r in range(3)]
+    monkeypatch.setattr(docx, "_MAX_TABLE_CELLS", 3 + 2)
+    payload = docx_payload(_tbl(*rows))
+    read = _count_calls(monkeypatch, docx, "_paragraph_text")
+    text, _ = docx.extract(payload)
+    assert text == f"{_CAP_MARKER}00 {_CAP_MARKER}01\n\n{_CAP_MARKER}10"
+    assert read[0] == 3
+
+
+def _cap_docx_text_elements(monkeypatch):
+    """A run costs one element and its text element one: the second
+    paragraph keeps its first run."""
+    from src.extractors import docx
+
+    from tests.test_docx_walk import _p, docx_payload
+
+    monkeypatch.setattr(docx, "_MAX_TEXT_ELEMENTS", 2 + 2 + 2)
+    payload = docx_payload(
+        "".join(_p(f"{_CAP_MARKER} {i}a", f" {_CAP_MARKER} {i}b") for i in range(5))
+    )
+    read = _count_calls(monkeypatch, docx, "_paragraph_text")
+    text, _ = docx.extract(payload)
+    assert text == f"{_CAP_MARKER} 0a {_CAP_MARKER} 0b\n\n{_CAP_MARKER} 1a"
+    assert read[0] == 2
+
+
+def _cap_docx_text_chars(monkeypatch):
+    """The second paragraph keeps the five characters that fit."""
+    from src.extractors import docx
+
+    from tests.test_docx_walk import _p, docx_payload
+
+    first = f"{_CAP_MARKER} 0"
+    monkeypatch.setattr(docx, "_MAX_TEXT_CHARS", len(first) + 5)
+    payload = docx_payload("".join(_p(f"{_CAP_MARKER} {i}") for i in range(10)))
+    read = _count_calls(monkeypatch, docx, "_paragraph_text")
+    text, _ = docx.extract(payload)
+    assert text == f"{first}\n\n{_CAP_MARKER[:5]}"
+    assert read[0] == 2
+
+
 def _cap_doc_output_bytes(monkeypatch):
     """A tool writing past the byte cap: the bytes before it are kept,
     and no more are read."""
@@ -7303,6 +7365,10 @@ _CAP_TRIGGERS = {
     "pptx_shapes": _cap_pptx_shapes,
     "pptx_table_cells": _cap_pptx_table_cells,
     "pptx_text_chars": _cap_pptx_text_chars,
+    "docx_blocks": _cap_docx_blocks,
+    "docx_table_cells": _cap_docx_table_cells,
+    "docx_text_elements": _cap_docx_text_elements,
+    "docx_text_chars": _cap_docx_text_chars,
     "doc_output_bytes": _cap_doc_output_bytes,
     "ppt_output_bytes": _cap_ppt_output_bytes,
     "xls_sheets": _cap_xls_sheets,
@@ -7326,6 +7392,10 @@ _REPORTED_CAPS = {
     "src.extractors.pptx:_MAX_SHAPES": "pptx_shapes",
     "src.extractors.pptx:_MAX_TABLE_CELLS": "pptx_table_cells",
     "src.extractors.pptx:_MAX_TEXT_CHARS": "pptx_text_chars",
+    "src.extractors.docx:_MAX_BLOCKS": "docx_blocks",
+    "src.extractors.docx:_MAX_TABLE_CELLS": "docx_table_cells",
+    "src.extractors.docx:_MAX_TEXT_ELEMENTS": "docx_text_elements",
+    "src.extractors.docx:_MAX_TEXT_CHARS": "docx_text_chars",
     "src.extractors.doc:_MAX_OUTPUT_BYTES": "doc_output_bytes",
     "src.extractors.ppt:_MAX_OUTPUT_BYTES": "ppt_output_bytes",
     "src.extractors.xls_child:_MAX_SHEETS": "xls_sheets",

@@ -245,11 +245,13 @@ Do not make any of the following changes unless the repository owner explicitly 
   off, and keeps `image-ocr` / `pdf-ocr` rows while OCR is off), so
   before bumping a module whose post-open walk is not yet budgeted,
   read the issue or PR that last chose not to bump it (#1036 declined a `docx` bump
-  while #1031 is open; #1068 bumped it anyway and #1075 reverted it).
+  while #1031 was open; #1068 bumped it anyway and #1075 reverted it).
   A reverted bump leaves its number taken: a build in between may have
   stamped rows with it, and a row is never treated as stale by a
-  lower-or-equal version, so the next `docx` bump goes to 7, not 6
-  (`test_docx_rows_stamped_by_the_reverted_bump_are_kept` pins this).
+  lower-or-equal version, so the next `docx` bump went to 7, not 6,
+  when #1031 budgeted the walk
+  (`test_docx_rows_before_the_budgeted_walk_are_re_extracted_once`
+  checks that `docx@6` rows re-extract).
 
 ## Bridge-Specific Guardrails
 

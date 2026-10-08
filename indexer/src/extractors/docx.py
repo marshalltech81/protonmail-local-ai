@@ -16,6 +16,23 @@ down, so a tiny file declaring a huge span multiplied extraction work
 flat list per top-level row so their text is copied once; lxml rejects
 XML nested deeper than 256 elements, which keeps the recursion shallow.
 
+The walk reads the opened XML directly, one child element at a time,
+and keeps what python-docx's ``iter_inner_content()`` and
+``Paragraph.text`` keep, in the same order (#1031). Those select a
+container's paragraphs and tables, a paragraph's runs and hyperlinks,
+and a run's text elements with XPath unions, which libxml2 merges in
+time quadratic in the number of siblings: plainly timed, 1 MiB of a
+paragraph alternating runs and hyperlinks took 4.2 s, and a 1,500-page
+synthetic report 15 s. ``tests/test_docx_walk.py`` pins the text the
+old walk returned on a catalogue of shapes. The walk is also bounded,
+counted as it goes: blocks (paragraphs and tables, plus a cost per
+section for its header and footer references), table rows and cells,
+text elements and characters, each charged before the item is read.
+When a budget runs out the text collected so far is returned, as the
+PPTX extractor does: the first budget to run out logs a rate-limited
+WARNING naming it and is counted in the attachments aggregate's
+``extractor_caps`` (#903).
+
 Legacy ``.doc`` (binary Word, an OLE2 compound file, not OOXML) cannot
 be parsed by ``python-docx``. The dispatcher never hands this module an
 OLE2 payload: one labelled ``.doc`` goes to the ``doc`` extractor
@@ -61,19 +78,62 @@ re-raises it.
 from __future__ import annotations
 
 import io
-from collections.abc import Callable, Iterable
+import logging
+from collections.abc import Callable
 
 from docx.document import Document as DocxDocument
 from docx.opc.constants import CONTENT_TYPE as CT
 from docx.opc.part import PartFactory
-from docx.oxml.table import CT_Row
+from docx.oxml.ns import qn
+from docx.oxml.table import CT_Tc
+from docx.oxml.xmlchemy import BaseOxmlElement
 from docx.package import Package
 from docx.parts.document import DocumentPart
 from docx.section import _Footer, _Header
-from docx.table import Table, _Cell
-from docx.text.paragraph import Paragraph
 
-from . import over_package_budget
+from . import over_package_budget, warn_extractor_cap
+
+log = logging.getLogger("indexer.extractor.docx")
+
+_W_P = qn("w:p")
+_W_TBL = qn("w:tbl")
+_W_TR = qn("w:tr")
+_W_TC = qn("w:tc")
+_W_R = qn("w:r")
+_W_HYPERLINK = qn("w:hyperlink")
+# The run children whose text python-docx's ``Run.text`` joins.
+_RUN_TEXT_TAGS = tuple(qn(f"w:{tag}") for tag in ("br", "cr", "noBreakHyphen", "ptab", "t", "tab"))
+
+# Walk budgets (#1031). The walk reads each element once, so it is linear
+# in the XML, but the package budgets below still let a crafted part hold
+# millions of elements, and a header part several sections define is
+# read once per section. Plainly timed (M-series Mac), the walk reads an
+# empty paragraph in about 0.3 microseconds, a short paragraph with text
+# in about 2, a table cell in about 0.7 and a text element in about
+# 0.3; a section's header and footer references take about 37. A
+# synthetic 1,500-page report (60,000 formatted paragraphs and 150
+# tables of 100 cells) uses about 75,000 blocks, 18,000 table cells,
+# 270,000 text elements and 5.8 million characters, and reads in about
+# half a second.
+#
+# Paragraphs and tables in the body, headers, footers and table cells.
+# A section costs ``_SECTION_COST`` more, for its header and footer
+# references. 500,000 short paragraphs read in about 1.2 s.
+_MAX_BLOCKS = 500_000
+_SECTION_COST = 20
+
+# Table rows and cells, nested tables included: about 0.35 s.
+_MAX_TABLE_CELLS = 500_000
+
+# Runs, hyperlinks, and the text, tab and break elements in runs: about
+# 0.6 s.
+_MAX_TEXT_ELEMENTS = 2_000_000
+
+# Characters read. Five times the dispatcher's default
+# ``INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS`` (2,000,000), as in the PPTX
+# and XLSX extractors, so the dispatcher's cap still decides the stored
+# length unless an operator raises it past this.
+_MAX_TEXT_CHARS = 10_000_000
 
 # python-docx 1.2.0 has no constant for the Word template main part.
 WML_TEMPLATE_MAIN = (
@@ -168,6 +228,40 @@ def _open_document(payload: bytes) -> DocxDocument:
     return part.document
 
 
+class _Budget:
+    """The four walk budgets of one extraction. ``take`` charges one item
+    before it is read; when that item does not fit, the budget it ran out
+    of is recorded in ``cut`` and the walk stops."""
+
+    def __init__(self) -> None:
+        self.left = {
+            "docx_blocks": _MAX_BLOCKS,
+            "docx_table_cells": _MAX_TABLE_CELLS,
+            "docx_text_elements": _MAX_TEXT_ELEMENTS,
+            "docx_text_chars": _MAX_TEXT_CHARS,
+        }
+        self.cut: str | None = None
+
+    def take(self, cap: str, units: int = 1) -> bool:
+        if self.left[cap] < units:
+            self.cut = cap
+            return False
+        self.left[cap] -= units
+        return True
+
+    def take_text(self, text: str) -> str:
+        """Charge ``text``'s characters and return the part of it that
+        fits. When not all of it fits, the budget is spent and recorded
+        in ``cut``."""
+        left = self.left["docx_text_chars"]
+        if len(text) <= left:
+            self.left["docx_text_chars"] = left - len(text)
+            return text
+        self.left["docx_text_chars"] = 0
+        self.cut = "docx_text_chars"
+        return text[:left]
+
+
 def extract(
     payload: bytes,
     *,
@@ -180,16 +274,20 @@ def extract(
     """Extract text from a DOCX or DOTX payload. Returns (text, "docx")."""
     document = _open_document(payload)
 
-    parts: list[str] = []
+    budget = _Budget()
     # Body paragraphs keep the document's natural paragraph structure —
     # the chunker keys off blank-line gaps between paragraphs.
-    parts.extend(_block_lines(document.iter_inner_content()))
-    parts.extend(_header_footer_lines(document))
-    return "\n\n".join(parts), "docx"
+    lines: list[str] = []
+    if _block_lines(document.element.body, budget, lines):
+        _header_footer_lines(document, budget, lines)
+    if budget.cut is not None:
+        warn_extractor_cap(log, budget.cut, "document truncated after %d lines", len(lines))
+    return "\n\n".join(lines), "docx"
 
 
-def _header_footer_lines(document: DocxDocument) -> list[str]:
-    """Lines of every header and footer Word displays, each part once.
+def _header_footer_lines(document: DocxDocument, budget: _Budget, lines: list[str]) -> bool:
+    """Append the lines of every header and footer Word displays, each
+    part once. False once a budget ran out.
 
     A section has a default, a first-page and an even-page header and
     footer. The first-page pair shows when the section's
@@ -200,12 +298,15 @@ def _header_footer_lines(document: DocxDocument) -> list[str]:
     by recursing through every earlier section, so it is tracked here
     instead: the latest definition of each kind waits in ``pending``
     until a section shows it, and is read once. Each section's settings
-    and references are visited once, so the work is linear in the XML.
+    and references are visited once, so the work is linear in the XML;
+    each section costs ``_SECTION_COST`` blocks. A part several sections
+    define is read again for each, every read charged.
     """
     even_pages = document.settings.odd_and_even_pages_header_footer
     pending: dict[str, _Header | _Footer] = {}
-    lines: list[str] = []
     for section in document.sections:
+        if not budget.take("docx_blocks", _SECTION_COST):
+            return False
         first_page = section.different_first_page_header_footer
         for kind, part, shown in (
             ("header", section.header, True),
@@ -217,56 +318,123 @@ def _header_footer_lines(document: DocxDocument) -> list[str]:
         ):
             if not part.is_linked_to_previous:
                 pending[kind] = part
-            if shown and kind in pending:
-                lines.extend(_block_lines(pending.pop(kind).iter_inner_content()))
-    return lines
+            if (
+                shown
+                and kind in pending
+                and not _block_lines(pending.pop(kind)._element, budget, lines)
+            ):
+                return False
+    return True
 
 
-def _block_lines(blocks: Iterable[Paragraph | Table]) -> list[str]:
-    """One line per non-empty paragraph and one per non-empty table row."""
-    lines: list[str] = []
-    for block in blocks:
-        if isinstance(block, Paragraph):
-            text = block.text.strip()
+def _block_lines(container: BaseOxmlElement, budget: _Budget, lines: list[str]) -> bool:
+    """Append one line per non-empty paragraph and one per non-empty table
+    row of a body, header or footer, in document order. False once a
+    budget ran out.
+
+    The blocks are the container's ``w:p`` and ``w:tbl`` children, read
+    one at a time. python-docx's ``iter_inner_content()`` selects them
+    with the XPath union ``./w:p | ./w:tbl``, which libxml2 merges in
+    time quadratic in the number of blocks before returning the first
+    (#1031).
+    """
+    for block in container.iterchildren(_W_P, _W_TBL):
+        if not budget.take("docx_blocks"):
+            return False
+        if block.tag == _W_P:
+            text = _paragraph_text(block, budget)
             if text:
                 lines.append(text)
-        else:
-            lines.extend(_table_lines(block))
-    return lines
+            if budget.cut is not None:
+                return False
+        elif not _table_lines(block, budget, lines):
+            return False
+    return True
 
 
-def _table_lines(table: Table) -> list[str]:
+def _table_lines(tbl: BaseOxmlElement, budget: _Budget, lines: list[str]) -> bool:
     """Serialize each row as space-joined cells so a header row like
     "Invoice #  Date  Amount" stays on one line and matches a search for
     any of those tokens. Empty cells are dropped from the row to avoid
-    runs of double-spaces that would dilute FTS scoring.
+    runs of double-spaces that would dilute FTS scoring. Each row costs
+    one table-cell unit. False once a budget ran out.
     """
-    lines: list[str] = []
-    for row in table.rows:
+    for tr in tbl.iterchildren(_W_TR):
+        if not budget.take("docx_table_cells"):
+            return False
         pieces: list[str] = []
-        _row_pieces(row._tr, table, pieces)
+        complete = _row_pieces(tr, budget, pieces)
         if pieces:
             lines.append(" ".join(pieces))
-    return lines
+        if not complete:
+            return False
+    return True
 
 
-def _row_pieces(tr: CT_Row, table: Table, pieces: list[str]) -> None:
+def _row_pieces(tr: BaseOxmlElement, budget: _Budget, pieces: list[str]) -> bool:
     """Append the text of each cell in ``tr``, nested tables included.
+    Each cell, and each row of a nested table, costs one table-cell unit,
+    and each block in a cell one block. False once a budget ran out.
 
     Everything under a top-level row is appended to one flat list and
     joined once, so text inside nested tables is copied once rather than
     once per level of nesting.
     """
-    for tc in tr.tc_lst:
+    for tc in tr.iterchildren(_W_TC):
+        if not budget.take("docx_table_cells"):
+            return False
         # A vertically merged cell's continuation rows hold no content
         # of their own; ``row.cells`` would repeat the first row's.
-        if tc.vMerge == "continue":
+        if isinstance(tc, CT_Tc) and tc.vMerge == "continue":
             continue
-        for block in _Cell(tc, table).iter_inner_content():
-            if isinstance(block, Paragraph):
-                text = block.text.strip()
+        for block in tc.iterchildren(_W_P, _W_TBL):
+            if not budget.take("docx_blocks"):
+                return False
+            if block.tag == _W_P:
+                text = _paragraph_text(block, budget)
                 if text:
                     pieces.append(text)
-            else:
-                for nested_row in block.rows:
-                    _row_pieces(nested_row._tr, block, pieces)
+                if budget.cut is not None:
+                    return False
+                continue
+            for nested_tr in block.iterchildren(_W_TR):
+                if not budget.take("docx_table_cells"):
+                    return False
+                if not _row_pieces(nested_tr, budget, pieces):
+                    return False
+    return True
+
+
+def _paragraph_text(p: BaseOxmlElement, budget: _Budget) -> str:
+    """The paragraph's text, stripped: what python-docx's
+    ``Paragraph.text`` returns, read one element at a time.
+
+    That property joins the text of the paragraph's ``w:r`` and
+    ``w:hyperlink`` children, a hyperlink's being that of its ``w:r``
+    children and a run's that of its ``w:br``, ``w:cr``,
+    ``w:noBreakHyphen``, ``w:ptab``, ``w:t`` and ``w:tab`` children, each
+    mapped by the element's own ``str()``. It selects both lists with
+    XPath unions, quadratic as in ``_block_lines``. Each of those
+    elements costs one text-element unit, and its characters text-char
+    units. When a budget runs out, the text read so far is returned with
+    ``budget.cut`` set.
+    """
+    pieces: list[str] = []
+    for child in p.iterchildren(_W_R, _W_HYPERLINK):
+        if not budget.take("docx_text_elements"):
+            break
+        runs = (child,) if child.tag == _W_R else child.iterchildren(_W_R)
+        for run in runs:
+            if run is not child and not budget.take("docx_text_elements"):
+                break
+            for item in run.iterchildren(*_RUN_TEXT_TAGS):
+                if not budget.take("docx_text_elements"):
+                    break
+                pieces.append(budget.take_text(str(item)))
+                if budget.cut is not None:
+                    break
+            if budget.cut is not None:
+                break
+        if budget.cut is not None:
+            break
+    return "".join(pieces).strip()
