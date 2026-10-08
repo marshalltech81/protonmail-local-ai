@@ -424,7 +424,9 @@ message. The leaves conjoin with SQL's three-valued AND: a message is
 a match when every leaf is true, rejected when any leaf is false, and
 otherwise *indeterminate*: left out of the matches and of
 `total_matches`, and counted in the response's `indeterminate` field,
-which the prose states whenever it is not 0. Under
+which the prose states whenever it is not 0 (an empty first page then
+ends "No messages are known to match." rather than "No messages
+match."). Under
 `date_basis=occurred` the `dated` leaf makes a message without a
 delivery date indeterminate even without a date bound, since it has no
 place in that ordering. The count is one extra `COUNT(*)` over the
@@ -1039,7 +1041,7 @@ questions.
 | `folder` | string | none | Exact folder name. Without it, messages filed in Trash are left out; pass `"Trash"` to list them ([Trash](#trash-is-left-out-by-default)) |
 | `date_from` | string | none | Inclusive ISO 8601 lower bound on the message's effective time (`occurred_at`, else `sent_at`) |
 | `date_to` | string | none | Inclusive upper bound; a date-only value covers the whole UTC day. Give an offset for a local-time bound; `date_bounds` echoes the UTC instants applied ([date bounds](#search_emails)) |
-| `date_basis` | string | `effective` | The message clock the date bounds, the order and the cursor use: `effective` (delivery date, else send date; [Message time](architecture.md#message-time)), `sent` (`sent_at`, the `Date:` header) or `occurred` (`occurred_at`, the delivery date; messages without one are left out, see [unknown values](#filter-predicates)). `internal` (server arrival time) is a legal value that answers "unavailable until [#1092](https://github.com/marshalltech81/protonmail-local-ai/issues/1092)"; any other value is an error. `date_bounds` echoes the basis |
+| `date_basis` | string | `effective` | The message clock the date bounds, the order and the cursor use: `effective` (delivery date, else send date; [Message time](architecture.md#message-time)), `sent` (`sent_at`, the `Date:` header) or `occurred` (`occurred_at`, the delivery date; messages without one are left out, see [unknown values](#filter-predicates)). `internal` (server arrival time) is a legal value that answers "unavailable until [#1092](https://github.com/marshalltech81/protonmail-local-ai/issues/1092)"; any other value, or a non-string, is an error, logged through the rate-limited `rejected invalid argument: query_messages.date_basis` warning. `date_bounds` echoes the basis |
 | `has_attachments` | bool | none | The message's own attachment flag, either way |
 | `seen` | bool | none | `true` for messages read in Proton, `false` for unread ([read state](#read-state)) |
 | `flagged` | bool | none | `true` for flagged (starred) messages, `false` for the rest |

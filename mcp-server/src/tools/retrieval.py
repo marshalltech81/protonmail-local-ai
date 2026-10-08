@@ -90,6 +90,11 @@ SizeBound = Annotated[
     ),
 ]
 
+# A ``date_basis`` argument (#1085): published as a string, but passed
+# through raw like ``SizeBound``, so ``normalize_date_basis`` rejects a
+# non-string through the rate-limited per-field log (Codex round 5).
+DateBasisArg = Annotated[Any, WithJsonSchema({"type": "string"})]
+
 # Seconds per window of the rate-limited ``fields`` rejection warning:
 # a client can repeat a rejected projection as fast as it likes.
 _FIELDS_REJECTION_LOG_INTERVAL_SECS = 60.0
@@ -888,7 +893,7 @@ def register_retrieval_tools(server, db):
         replied: bool | None = None,
         size_min: SizeBound = None,
         size_max: SizeBound = None,
-        date_basis: str = "effective",
+        date_basis: DateBasisArg = "effective",
         limit: int = 25,
         cursor: str | None = None,
         fields: list[str] | None = None,
@@ -1138,7 +1143,13 @@ def register_retrieval_tools(server, db):
         if not page.messages:
             lines.append("returned: 0")
             lines.append("has_more: false")
-            lines.append("No messages match." if page.offset == 0 else "No further messages.")
+            if page.offset:
+                lines.append("No further messages.")
+            elif page.indeterminate:
+                # Undecided messages may still match (Codex round 5).
+                lines.append("No messages are known to match.")
+            else:
+                lines.append("No messages match.")
             return _projected(tool_result("\n".join(lines), output), projection)
 
         first, last = page.offset + 1, page.offset + len(page.messages)

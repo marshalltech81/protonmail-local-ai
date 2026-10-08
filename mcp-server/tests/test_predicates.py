@@ -1005,3 +1005,16 @@ class TestClockSizeAndRepliedLeaves:
             with pytest.raises(InvalidFilterError):
                 clocks_db.query_messages(size_min=_MARKER)
         assert _MARKER not in caplog.text
+
+
+@pytest.mark.parametrize("value", [[], 3, True, 1.5, {"basis": "sent"}])
+def test_normalize_date_basis_rejects_a_non_string_with_fixed_text(value):
+    """A raw non-string from the wire is an ``InvalidFilterError`` with
+    fixed text, not an ``AttributeError`` from ``.strip()`` (#1085,
+    Codex round 5)."""
+    from src.lib.predicates import normalize_date_basis
+
+    with pytest.raises(InvalidFilterError) as info:
+        normalize_date_basis(value)
+    assert info.value.field_name == "date_basis"
+    assert str(info.value) == "date_basis must be a string"

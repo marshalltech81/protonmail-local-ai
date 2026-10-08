@@ -444,11 +444,15 @@ UNAVAILABLE_DATE_BASES: dict[str, str] = {
 }
 
 
-def normalize_date_basis(value: str | None) -> str:
+def normalize_date_basis(value: Any) -> str:
     """The ``date_basis`` to apply: ``DEFAULT_DATE_BASIS`` for a missing
     or blank value, otherwise the stripped name of a ``DATE_BASES``
-    entry. Raises ``InvalidFilterError`` (fixed text) for an unavailable
+    entry. Raises ``InvalidFilterError`` (fixed text) for a non-string
+    (the ``query_messages`` tool passes the raw argument through, so the
+    rejection reaches the rate-limited per-field log) or an unavailable
     or unknown basis."""
+    if value is not None and not isinstance(value, str):
+        raise InvalidFilterError("date_basis", "date_basis must be a string")
     if value is None or not value.strip():
         return DEFAULT_DATE_BASIS
     value = value.strip()

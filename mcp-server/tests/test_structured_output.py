@@ -525,6 +525,35 @@ class TestSizeBoundsOnTheWire:
             ]
 
 
+class TestDateBasisOnTheWire:
+    """``date_basis`` publishes a string schema, but the raw value
+    reaches the handler, so a non-string is rejected with fixed text
+    through the rate-limited per-field log rather than only FastMCP's
+    argument-model warning (#1085, Codex round 5)."""
+
+    def test_schema_is_a_string_defaulting_to_effective(self, messages_db):
+        props = _tools(_server(messages_db))["query_messages"].input_schema["properties"]
+        schema = dict(props["date_basis"])
+        assert schema.pop("description").startswith("Which message clock")
+        assert schema == {"default": "effective", "type": "string"}
+
+    @pytest.mark.parametrize("value", [[], 3, True, 1.5, {"basis": "sent"}])
+    def test_non_string_is_rejected_through_the_limiter(self, messages_db, caplog, value):
+        with caplog.at_level(logging.INFO):
+            result = _wire(_server(messages_db), "query_messages", {"date_basis": value})
+        assert result.is_error
+        assert "date_basis must be a string" in result.content[0].text
+        warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert "rejected invalid argument: query_messages.date_basis" in warnings
+        assert not any("Invalid arguments for tool" in w for w in warnings)
+        timing = [r.getMessage() for r in caplog.records if r.name == "mcp.timings"]
+        assert len(timing) == 1 and "outcome=error" in timing[0]
+
+    def test_string_values_still_apply(self, messages_db):
+        server = _server(messages_db)
+        assert _call(server, "query_messages", date_basis=" sent ")["total_matches"] == 5
+
+
 @pytest.mark.parametrize(
     ("name", "args", "key"),
     [

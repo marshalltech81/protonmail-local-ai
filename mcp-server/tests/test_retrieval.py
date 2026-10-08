@@ -1603,6 +1603,22 @@ class TestQueryMessages:
         out = asyncio.run(handler(replied=False))
         assert out.structured_content["indeterminate"] == 0
         assert "indeterminate" not in _text(out)
+        # An empty page is not stated as a definite "no match" while some
+        # messages are undecided (Codex round 5): u2 might still match.
+        out = asyncio.run(handler(size_min=10_000))
+        assert (
+            out.structured_content["total_matches"],
+            out.structured_content["indeterminate"],
+        ) == (0, 1)
+        assert _text(out).endswith("No messages are known to match.")
+        assert "No messages match." not in _text(out)
+        # With nothing undecided, the empty page is a definite answer.
+        out = asyncio.run(handler(size_min=10_000, replied=True))
+        assert (
+            out.structured_content["total_matches"],
+            out.structured_content["indeterminate"],
+        ) == (0, 0)
+        assert _text(out).endswith("No messages match.")
         # Under the occurred basis, u2's missing delivery time is unknown too.
         out = asyncio.run(handler(date_basis="occurred"))
         assert (
@@ -1612,6 +1628,19 @@ class TestQueryMessages:
             1,
             1,
         )
+        # A later page that comes back empty (its rows went between
+        # calls) says so, whatever the indeterminate count.
+        first = asyncio.run(handler(replied=False, limit=1))
+        assert first.structured_content["has_more"] is True
+        conn = sqlite3.connect(str(path))
+        conn.execute("DELETE FROM messages")
+        conn.commit()
+        conn.close()
+        later = asyncio.run(
+            handler(replied=False, limit=1, cursor=first.structured_content["next_cursor"])
+        )
+        assert later.structured_content["returned"] == 0
+        assert _text(later).endswith("No further messages.")
 
 
 _ERROR_MARKER = "privatemarkerq7z"
