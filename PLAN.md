@@ -165,9 +165,9 @@ labelled `in_scope` / `context` (decision 29).
 ### Phase 1.5 — Minimal regression baseline
 
 **Status: done (2026-09-28).** `make baseline` and the CI job
-`retrieval baseline`. Refactor PRs show no snapshot diff; behaviour
-changes show a reviewed snapshot diff with golden checks still
-passing.
+`retrieval baseline`. Phase 2 must demonstrate behavior preservation
+against it: refactor PRs show no snapshot diff; behaviour changes show
+a reviewed snapshot diff with golden checks still passing.
 
 ### Phase 2 — Swappable embedding / vector generations
 
@@ -175,8 +175,9 @@ passing.
 unchanged (decision 24).** Not required for V1.
 
 **Exit criterion:** changing embedding models never requires altering
-the source corpus or the versioned schema. A context-compatible model
-switch regenerates vectors only (runtime `gNN` tables exempt from
+the source corpus or the versioned schema (no numbered migration and
+no `SCHEMA_VERSION` bump). Everything derived is disposable and
+regenerable: a context-compatible model switch regenerates vectors only (runtime `gNN` tables exempt from
 `SCHEMA_VERSION`); an incompatible one regenerates chunks and vectors
 through the staged rebuild below.
 
@@ -187,7 +188,9 @@ Live generations only if the maintenance window proves unacceptable.
 
 1. **`vector_generations` registry** — provider, resolved endpoint,
    model, revision, dimensions, tokenizer, context window,
-   chunk_config_hash, status. **First slice done** (#650): the
+   chunk_config_hash, status (building / caught-up / active /
+   retained / retired). Dimension read from metadata, never a
+   constant. **First slice done** (#650): the
    embedder identity record and calibration vector, checked at startup
    by both services. Open: #719, #648, #661.
 2. **Per-generation vec tables and the blue/green lifecycle** — only if
@@ -200,7 +203,8 @@ Live generations only if the maintenance window proves unacceptable.
    sets (`EMBED_*`, `EMBED_NEXT_*`) and failing closed unless every
    live generation has a matching client; activation by registry
    change plus restart; reusing stored chunks only when the candidate
-   tokenizer fits every stored input; #283's evidence-recall eval as
+   tokenizer fits every stored input, by counting, with a supported
+   query length; #283's evidence-recall eval as
    the activation gate; one generation per query (embed outside any
    transaction, re-read the ID in the snapshot, retry once, else fail
    closed); dual-writes enabled before the build watermark, backfill
@@ -216,15 +220,21 @@ Live generations only if the maintenance window proves unacceptable.
 4. **Chunk `kind` tags** (body / quote / signature / forwarded /
    calendar). **Stored** (#659); using them in retrieval is #660.
 5. **Spike: retire hand-rolled address parsing behind the existing
-   bounds** (#787): parse each element `_split_address_list` yields
-   with `email.headerregistry` instead of `_parse_addrs`, as a
-   differential over every parser fixture. A helper is retired only
-   where the differential is equivalent and its bounds survive; a
-   retired helper lands with a rebuild.
+   bounds** (#787). The initial `compat32` parse, the encoded-word
+   scanner, the address pre-screen (`_split_address_list`), the
+   attachment classifier and `_safe_decode` all stay. What is left:
+   parse each element `_split_address_list` yields with
+   `email.headerregistry` instead of `_parse_addrs`, possibly retiring
+   `_format_address`, as a differential over every parser fixture and
+   encoding-parity shape. A helper is retired only where the
+   differential is equivalent and its bounds survive; if nothing
+   retires without a new bound, close it and record why. A retired
+   helper lands with a rebuild.
 
 **Rebuild bundle.** Fixes that change chunk IDs, bodies or message
-identity share one rebuild, each still its own reviewed PR. Open:
-#782.
+identity share one rebuild rather than one each, each still its own
+reviewed PR, gated behind the pipeline configuration if it must land
+before the rebuild. Open: #782.
 
 **Two kinds of reindex.** A context-compatible model switch is a
 table switch inside the live file (items 1–2). A chunk-ID change is a
@@ -319,9 +329,14 @@ schema change needs a numbered migration.
    participant leaves answering unknown on it (#1153), and
    `search_attachments` sender (#1056). **Open, in order:**
    per-message content evaluability (#1086, before any negation); the
-   bounded `all` / `any` / `negate` form, fixed at two levels (#1087);
-   explicit address-mode and `body_words` leaves (#1088); grouped
-   aggregation as its own tool (#823); `date_basis` (#1150); leaves
+   bounded `all` / `any` / `negate` form with a leaf cap that also
+   counts `any` groups (empty groups rejected) and three-valued
+   evaluation, fixed at two levels so there is no nesting to bound
+   (#1087); explicit address-mode and `body_words` leaves (#1088);
+   grouped aggregation as its own tool over the same engine (#823); the
+   selectable clock `date_basis` (#1150, depending on #1080 for
+   `sent`), counting its own NULL clocks the same way so no basis ever
+   drops unknown rows silently; leaves
    that wait on the evidence model (#1089 headers, #1090 Bcc, #1091
    attachment text, #1092 internal date); a capability report in
    `get_mailbox_status` (#1093). Omitted by decision: IMAP UID,
@@ -386,25 +401,34 @@ indexer; mbsync is not replaced (Deferred).
 2. **Reparse class** — an in-place full reparse through the job queue
    for changes that keep chunk IDs (#1078). **Done**, with fresh mail
    ahead of the backlog (#1142). Each schema change below is its own
-   PR with its own migration; a new column reads as unknown until a
-   reparse fills it. Changes that land close together may share one
+   PR with its own migration and `SCHEMA_VERSION` bump; a new column
+   reads as unknown, and the capability report (#1093) says "supported
+   after backfill", until a reparse fills it. Changes that land close together may share one
    reparse run, never one migration.
 3. **All headers** — a `message_headers` table keeping duplicates and
-   order under one aggregate budget, values never logged, storing
-   whether the budget was hit so a header predicate on a capped
-   message is indeterminate (#1079).
+   order under one aggregate budget (fields, bytes, largest value in
+   one guard); values never reach logs (#1079). Keyed by claimant ID,
+   and added to the AGENTS.md per-message-row list by the same PR. The
+   same migration stores whether the budget was hit, so a header
+   predicate on a capped message is indeterminate, not false. Narrows
+   #825 to normalization; prerequisite for #463 options 2 and 3.
 4. **Unknown dates stay unknown** — nullable `sent_at` with a status;
    `effective_at` remains the ordering fallback, documented as not
    evidence (#1080).
-5. **Arrival time** — `CopyArrivalDate yes` is on; `internal_at` with
-   an `unavailable` status for older files waits on verifying which
-   date the Bridge app reports (#1081, #1138). Recovering it for
+5. **Arrival time** — `CopyArrivalDate yes` is on in the mbsync
+   template, with a layout test proving the mtime equals the server's
+   INTERNALDATE; `internal_at` with an `unavailable` status for files
+   that predate the option waits on verifying which date the Bridge
+   app reports (#1081, #1138). Recovering it for
    existing mail would be an explicit cold re-pull.
 6. **Content-hash identity** — whether messages without a usable
    Message-ID are indexed instead of dead-lettered (#1082, decision).
    Adopting it changes the AGENTS.md claimant-ID and thread-membership
    constraints, so the decision must define the synthetic message and
-   thread identity and update AGENTS.md in the same PR.
+   thread identity (such a message never becomes a thread other
+   messages resolve to by ID, and two of them never merge by an empty
+   ID) and update AGENTS.md in the same PR. Until then the claimant-ID
+   invariant stands unchanged.
 7. **Occurrence model** — one `messages` row is one occurrence while
    Proton folders are exclusive and the virtual folders are excluded;
    the `,U=` in a Maildir file name is never read; `.mbsyncstate` is
@@ -461,7 +485,9 @@ can be revisited with an explicit owner decision.
 - reporting child folders skipped under isync's reserved names.
   Trigger: a real report
 - replacing mbsync with a read-only IMAP acquisition layer (decision
-  35): Maildir already carries folder, flags and arrival time; a
+  35): Maildir already carries folder, flags and (with
+  `CopyArrivalDate`, for files synced since it was enabled, once
+  Bridge's reported date is verified, #1138) the arrival time; a
   Python IMAP client would re-open the TLS and fingerprint path, add a
   container and an untrusted-input surface, and reverse the Maildir
   boundary. Bridge `UID SEARCH` is a hand-run differential target for
