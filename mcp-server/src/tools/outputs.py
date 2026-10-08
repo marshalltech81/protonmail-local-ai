@@ -395,6 +395,14 @@ class EvidenceChunk(_Output):
     text: str
     text_truncated: bool = Field(description="True when text was cut for length.")
     vector_distance: float | None = Field(description="Only with include_scores.")
+    selected_by: Literal["keyword_match", "attachment_match", "vector"] = Field(
+        description=(
+            "Why the passage was selected: keyword_match (its text holds a word of the "
+            "query), attachment_match (it is from an attachment whose filename or MIME "
+            "type the query matched) or vector (similarity to the query alone). "
+            "keyword_match wins when both apply."
+        )
+    )
     source_file: Source | None = Field(
         description="The raw file of message_id (for an attachment chunk, the message "
         "carrying the attachment); null when none is recorded."

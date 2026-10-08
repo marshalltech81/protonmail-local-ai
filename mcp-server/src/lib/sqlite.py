@@ -84,6 +84,8 @@ _COUNT_FAILURE_KEYS = (
     "other",
 )
 _COUNT_FAILURE_LOG_SECS = 60.0
+# ``sqlite3.Error`` subclasses the keyword passage lookup can raise.
+_KEYWORD_CHUNK_FAILURE_KEYS = ("OperationalError", "DatabaseError", "other")
 
 # Oversample factor for the chunk and attachment FTS lanes, where one
 # thread can legitimately own many matching rows (a long thread, a
@@ -311,6 +313,11 @@ def _row_to_source(r) -> SourceFile | None:
 # ``message_chunks.kind`` values; the indexer's ``chunker.CHUNK_KINDS``.
 ChunkKind = Literal["body", "quote", "signature", "forwarded", "calendar", "attachment"]
 
+# Why evidence selection kept a passage (#858): it holds one of the
+# query's words, it belongs to an attachment whose filename or MIME type
+# the query matched, or neither (vector distance alone).
+SelectedBy = Literal["keyword_match", "attachment_match", "vector"]
+
 
 @dataclass
 class ChunkResult:
@@ -355,6 +362,9 @@ class ChunkResult:
     ``kind`` is what the chunk's text is (``message_chunks.kind``, #646):
     ``body``, ``quote``, ``signature``, ``forwarded``, ``calendar`` or
     ``attachment``.
+
+    ``selected_by`` is why ``get_evidence_chunks_for_threads`` kept the
+    chunk (``SelectedBy``); ``vector`` for every other query path.
     """
 
     chunk_id: str
@@ -375,6 +385,7 @@ class ChunkResult:
     message_sender: str | None = None
     message_sender_ambiguous: bool | None = None
     kind: ChunkKind = "body"
+    selected_by: SelectedBy = "vector"
 
 
 def _row_to_chunk_result(r) -> ChunkResult:
@@ -1597,6 +1608,15 @@ class Database:
             _COUNT_FAILURE_LOG_SECS,
             first_msg="Attachment search indeterminate count unavailable: %s",
             summary_msg="Attachment search indeterminate count unavailable in the last %ds: %s",
+        )
+        # A failing keyword passage lookup (#858) repeats on every
+        # evidence call; same first-per-window shape.
+        self._keyword_chunk_failures = RateLimitedLog(
+            log,
+            _KEYWORD_CHUNK_FAILURE_KEYS,
+            _COUNT_FAILURE_LOG_SECS,
+            first_msg="Keyword passage lookup failed; keeping vector order: %s",
+            summary_msg="Keyword passage lookup failed in the last %ds: %s",
         )
         # Fail fast at startup with the same checks ``_connect`` runs
         # on every access. Catches a missing volume / typo'd
@@ -3050,6 +3070,51 @@ class Database:
             timings.count("degraded_chunk_vec", 1)
             return None
 
+    def _keyword_matched_chunks(self, query: str, thread_ids: list[str]) -> dict[str, set[str]]:
+        """Map each of ``thread_ids`` to its chunks whose text matches
+        ``query`` in ``message_chunks_fts`` (#858).
+
+        Driven from the threads' chunks: ``CROSS JOIN`` fixes the join
+        order, so SQLite walks ``message_chunks`` by ``thread_id`` and
+        asks FTS5 only whether each chunk's ``rowid`` matches. With a
+        plain ``JOIN`` the planner drives from the FTS index instead and
+        reads every matching chunk in the mailbox. No ``bm25()``: its IDF
+        pass reads each phrase's whole doclist, so its cost grows with
+        the corpus whatever the ``LIMIT``. The work is bounded by the
+        surfaced threads' chunks, which the evidence fetch reads anyway
+        (``test_lookup_work_stays_flat_while_chunk_lane_grows``), so no
+        row cap is needed and no thread starves another.
+
+        Falls back to an empty map on any error, which keeps the
+        existing selection; the failure is a rate-limited WARNING (type
+        only) and ``degraded_keyword_chunks`` on the timing line.
+        """
+        fts_query = _sanitize_fts_query(query)
+        if not thread_ids or not fts_query:
+            return {}
+        placeholders = ",".join(["?"] * len(thread_ids))
+        sql = (
+            "SELECT c.thread_id, c.chunk_id "
+            "FROM message_chunks c "
+            "CROSS JOIN message_chunks_fts ON message_chunks_fts.rowid = c.fts_rowid "
+            f"WHERE c.thread_id IN ({placeholders}) "  # nosec B608
+            "AND message_chunks_fts MATCH ?"
+        )
+        try:
+            rows = self._fetchall(sql, [*thread_ids, fts_query])
+        except sqlite3.Error as e:
+            # Type only: the error can quote stored mail.
+            name = type(e).__name__
+            self._keyword_chunk_failures.record(
+                name if name in _KEYWORD_CHUNK_FAILURE_KEYS else "other"
+            )
+            timings.count("degraded_keyword_chunks", 1)
+            return {}
+        matched: dict[str, set[str]] = {}
+        for r in rows:
+            matched.setdefault(r["thread_id"], set()).add(r["chunk_id"])
+        return matched
+
     def get_query_evidence_chunks(
         self,
         query_text: str,
@@ -3060,19 +3125,22 @@ class Database:
         """Per-thread evidence for ``query_text``, as ``ask_mailbox`` sees it.
 
         Looks up which of the threads' attachments the query names
-        (``_matched_attachments``) and passes them to
-        ``get_evidence_chunks_for_threads`` so their chunks lead each
-        thread's slice. ``hybrid_search(with_evidence=True)`` and the
+        (``_matched_attachments``) and which of their chunks hold the
+        query's words (``_keyword_matched_chunks``), and passes both to
+        ``get_evidence_chunks_for_threads``, which orders each thread's
+        slice from them. ``hybrid_search(with_evidence=True)`` and the
         thread-scoped ``get_evidence`` path both call this, so an audit
         of one thread returns the passages ``ask_mailbox`` was given for
         it (#461).
         """
         matched_attachments = self._matched_attachments(query_text, thread_ids)
+        keyword_chunks = self._keyword_matched_chunks(query_text, thread_ids)
         return self.get_evidence_chunks_for_threads(
             thread_ids,
             embedding,
             per_thread_limit=per_thread_limit,
             matched_attachments=matched_attachments,
+            keyword_chunks=keyword_chunks,
         )
 
     def get_evidence_chunks_for_threads(
@@ -3081,6 +3149,7 @@ class Database:
         embedding: list[float],
         per_thread_limit: int = 3,
         matched_attachments: dict[str, list[str]] | None = None,
+        keyword_chunks: dict[str, set[str]] | None = None,
     ) -> dict[str, list[ChunkResult]]:
         """Return up to ``per_thread_limit`` best-matching chunks per thread.
 
@@ -3114,6 +3183,20 @@ class Database:
         even when a body chunk, or another attachment's chunk, has
         higher dense similarity. Remembering only the thread let the cap
         keep unrelated attachments and drop the one that matched.
+
+        ``keyword_chunks``: per thread, the chunks whose text matches the
+        query (#858). Two slots lead each thread's slice, then the rest
+        in the order above:
+
+        1. the matched attachments' first chunk, when one matched;
+        2. the keyword-matched chunk nearest the query (ties by
+           ``chunk_id``), unless slot 1 already is one, in which case
+           the two collapse into that slot.
+
+        So the matched attachment can no longer fill every slot, and a
+        long thread keeps the passage holding the query's word even when
+        other chunks are nearer. Each chunk's ``selected_by`` says why it
+        qualified: ``keyword_match`` wins over ``attachment_match``.
         """
         if not thread_ids:
             return {}
@@ -3182,9 +3265,11 @@ class Database:
                 all_chunks[r["thread_id"]].append(_row_to_chunk_result(r))
 
         matched_by_thread = matched_attachments or {}
+        keyword_by_thread = keyword_chunks or {}
         grouped: dict[str, list[ChunkResult]] = {}
         for tid, chunks in all_chunks.items():
             matched = matched_by_thread.get(tid)
+            lexical = keyword_by_thread.get(tid, set())
             if matched:
                 # Matched attachments by match strength, then other
                 # attachments, then body; the stable sort keeps
@@ -3199,7 +3284,14 @@ class Database:
                 )
             else:
                 ordered = chunks
-            grouped[tid] = ordered[:per_thread_limit]
+            named = set(matched or ())
+            kept = _lead_with_keyword_chunk(ordered, named, lexical)[:per_thread_limit]
+            for chunk in kept:
+                if chunk.chunk_id in lexical:
+                    chunk.selected_by = "keyword_match"
+                elif chunk.attachment_id in named:
+                    chunk.selected_by = "attachment_match"
+            grouped[tid] = kept
         return grouped
 
     def get_recent_chunks_for_thread(
@@ -4396,6 +4488,25 @@ class Database:
             body_text=row["body_text"] or "",
             score=float(row["score"]) if "score" in row.keys() else 0.0,
         )
+
+
+def _lead_with_keyword_chunk(
+    ordered: list[ChunkResult], named: set[str], lexical: set[str]
+) -> list[ChunkResult]:
+    """``ordered`` with its two reserved slots first (#858): the named
+    attachments' representative (``ordered[0]`` when it belongs to one),
+    then the keyword-matched chunk nearest the query, ties by
+    ``chunk_id``, unless the representative is itself keyword-matched.
+    """
+    head = ordered[:1] if ordered and ordered[0].attachment_id in named else []
+    if not any(c.chunk_id in lexical for c in head):
+        candidates = [c for c in ordered if c.chunk_id in lexical]
+        if candidates:
+            head.append(min(candidates, key=lambda c: (c.score, c.chunk_id)))
+    if not head:
+        return ordered
+    chosen = {c.chunk_id for c in head}
+    return head + [c for c in ordered if c.chunk_id not in chosen]
 
 
 def _has_valid_distance(row: sqlite3.Row) -> bool:

@@ -170,7 +170,10 @@ def _swim_db(tmp_path: Path, skip: tuple[str, ...] = ()) -> Database:
             [_DANA],
             crowd[:20] + [_PARENT],
             crowd[20:],
-            "The swim club meeting is on Friday.",
+            # No word of ``_QUESTION``: a keyword match would take a
+            # reserved evidence slot (#858) and push ``nov`` out of
+            # extract_from_emails' three.
+            "The club meeting is on Friday.",
         ),
         (
             "trash",

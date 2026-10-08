@@ -20,6 +20,7 @@
               "message_id": "note@trip.example",
               "occurred_at": null,
               "scope": "in_scope",
+              "selected_by": "keyword_match",
               "sent_at": "2025-09-25T09:00:00+00:00",
               "source": "body",
               "source_file": {
@@ -54,6 +55,7 @@
               "message_id": "lead@trip.example",
               "occurred_at": null,
               "scope": "in_scope",
+              "selected_by": "vector",
               "sent_at": "2025-09-10T09:00:00+00:00",
               "source": "body",
               "source_file": {
@@ -80,6 +82,7 @@
               "message_id": "help@trip.example",
               "occurred_at": null,
               "scope": "context",
+              "selected_by": "vector",
               "sent_at": "2025-09-20T09:00:00+00:00",
               "source": "body",
               "source_file": {
@@ -106,6 +109,7 @@
               "message_id": "lead@trip.example",
               "occurred_at": null,
               "scope": "in_scope",
+              "selected_by": "vector",
               "sent_at": "2025-09-10T09:00:00+00:00",
               "source": "body",
               "source_file": {
@@ -132,6 +136,7 @@
               "message_id": "lead@trip.example",
               "occurred_at": null,
               "scope": "in_scope",
+              "selected_by": "vector",
               "sent_at": "2025-09-10T09:00:00+00:00",
               "source": "attachment",
               "source_file": {
@@ -158,6 +163,7 @@
               "message_id": "lead@trip.example",
               "occurred_at": null,
               "scope": "in_scope",
+              "selected_by": "vector",
               "sent_at": "2025-09-10T09:00:00+00:00",
               "source": "attachment",
               "source_file": {
@@ -202,6 +208,7 @@
               "message_id": "note@trip.example",
               "occurred_at": null,
               "scope": "in_scope",
+              "selected_by": "keyword_match",
               "sent_at": "2025-09-25T09:00:00+00:00",
               "source": "body",
               "source_file": {
@@ -236,6 +243,7 @@
               "message_id": "lead@trip.example",
               "occurred_at": null,
               "scope": "in_scope",
+              "selected_by": "vector",
               "sent_at": "2025-09-10T09:00:00+00:00",
               "source": "body",
               "source_file": {
@@ -262,6 +270,7 @@
               "message_id": "help@trip.example",
               "occurred_at": null,
               "scope": "context",
+              "selected_by": "vector",
               "sent_at": "2025-09-20T09:00:00+00:00",
               "source": "body",
               "source_file": {
@@ -288,6 +297,7 @@
               "message_id": "lead@trip.example",
               "occurred_at": null,
               "scope": "in_scope",
+              "selected_by": "vector",
               "sent_at": "2025-09-10T09:00:00+00:00",
               "source": "body",
               "source_file": {
@@ -314,6 +324,7 @@
               "message_id": "lead@trip.example",
               "occurred_at": null,
               "scope": "in_scope",
+              "selected_by": "vector",
               "sent_at": "2025-09-10T09:00:00+00:00",
               "source": "attachment",
               "source_file": {
@@ -340,6 +351,7 @@
               "message_id": "lead@trip.example",
               "occurred_at": null,
               "scope": "in_scope",
+              "selected_by": "vector",
               "sent_at": "2025-09-10T09:00:00+00:00",
               "source": "attachment",
               "source_file": {
@@ -384,6 +396,7 @@
               "message_id": "lead@trip.example",
               "occurred_at": null,
               "scope": "in_scope",
+              "selected_by": "vector",
               "sent_at": "2025-09-10T09:00:00+00:00",
               "source": "body",
               "source_file": {
@@ -410,6 +423,7 @@
               "message_id": "help@trip.example",
               "occurred_at": null,
               "scope": "in_scope",
+              "selected_by": "vector",
               "sent_at": "2025-09-20T09:00:00+00:00",
               "source": "body",
               "source_file": {
@@ -436,6 +450,7 @@
               "message_id": "lead@trip.example",
               "occurred_at": null,
               "scope": "in_scope",
+              "selected_by": "vector",
               "sent_at": "2025-09-10T09:00:00+00:00",
               "source": "body",
               "source_file": {
@@ -462,6 +477,7 @@
               "message_id": "lead@trip.example",
               "occurred_at": null,
               "scope": "in_scope",
+              "selected_by": "vector",
               "sent_at": "2025-09-10T09:00:00+00:00",
               "source": "attachment",
               "source_file": {
@@ -488,6 +504,7 @@
               "message_id": "lead@trip.example",
               "occurred_at": null,
               "scope": "in_scope",
+              "selected_by": "vector",
               "sent_at": "2025-09-10T09:00:00+00:00",
               "source": "attachment",
               "source_file": {
@@ -532,6 +549,7 @@
               "message_id": "note@trip.example",
               "occurred_at": null,
               "scope": "in_scope",
+              "selected_by": "keyword_match",
               "sent_at": "2025-09-25T09:00:00+00:00",
               "source": "body",
               "source_file": {
@@ -569,6 +587,7 @@
               "message_id": "lead@trip.example",
               "occurred_at": null,
               "scope": "in_scope",
+              "selected_by": "vector",
               "sent_at": "2025-09-10T09:00:00+00:00",
               "source": "body",
               "source_file": {
@@ -595,6 +614,7 @@
               "message_id": "help@trip.example",
               "occurred_at": null,
               "scope": "in_scope",
+              "selected_by": "vector",
               "sent_at": "2025-09-20T09:00:00+00:00",
               "source": "body",
               "source_file": {
@@ -621,6 +641,7 @@
               "message_id": "lead@trip.example",
               "occurred_at": null,
               "scope": "in_scope",
+              "selected_by": "vector",
               "sent_at": "2025-09-10T09:00:00+00:00",
               "source": "body",
               "source_file": {
@@ -647,6 +668,7 @@
               "message_id": "lead@trip.example",
               "occurred_at": null,
               "scope": "in_scope",
+              "selected_by": "vector",
               "sent_at": "2025-09-10T09:00:00+00:00",
               "source": "attachment",
               "source_file": {
@@ -673,6 +695,7 @@
               "message_id": "lead@trip.example",
               "occurred_at": null,
               "scope": "in_scope",
+              "selected_by": "vector",
               "sent_at": "2025-09-10T09:00:00+00:00",
               "source": "attachment",
               "source_file": {
