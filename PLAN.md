@@ -60,9 +60,11 @@ Outcomes:
 
 1. **Every attachment in a defined scope can be listed and read in
    full**, with paging and message and folder filters (#796).
-   **Done** (`query_attachments`, `get_attachment`). Open: whether an
-   extraction cap cut the stored text (#1261) and per-occurrence text
-   completeness (#1242).
+   **In progress:** every stored occurrence can be listed
+   (`query_attachments`) and its stored text read (`get_attachment`).
+   Open: whether an extraction cap cut the stored text (#1261),
+   per-occurrence text completeness (#1242) and occurrences missing from
+   a message whose attachment manifest is incomplete (#1282).
 2. **A population can be built and counted on the server** through
    bounded Boolean filters, explicit address, body, header and
    attachment predicates, grouped counts and exhaustive thread
@@ -151,7 +153,7 @@ transient infrastructure failures never cause permanent source
 omission.
 
 Open follow-ups that matter most: bounded work on crafted attachments
-(#1031, #1040, both P1; #1021), threading (#752 replies indexed before
+(#1021, #1236), threading (#752 replies indexed before
 their root stay split; #756 subject fallback, owner picks an option),
 attachment formats without an extractor (#695, #923, #947, #691).
 
@@ -335,8 +337,8 @@ schema change needs a numbered migration.
    participant leaves answering unknown on it (#1153),
    `search_attachments` sender (#1056), stored display names with
    their completeness (#1140), and per-message completeness of body,
-   subject, addresses and attachment manifest (#1086), which
-   `query_attachments` shares. **Open, in order:** per-occurrence
+   subject, addresses and attachment manifest (#1086), whose address
+   terms `query_attachments` shares. **Open, in order:** per-occurrence
    attachment-text completeness (#1242, before any negation or #1091); the
    bounded `all` / `any` / `negate` form with a leaf cap that also
    counts `any` groups (empty groups rejected) and three-valued
@@ -833,12 +835,13 @@ superseded entries keep their number and one line.
     CPU and wall-clock limits (#1040); per-message extraction launches
     stay unbounded as an accepted P2 risk until a scheduling design
     lands (#1236). Attachments are enumerated exhaustively by
-    `query_attachments` and read in full by `get_attachment`, whose
+    `query_attachments` and their stored text read by `get_attachment`, whose
     streaming reader reports an exact `total_chars` on every page;
     `date_basis` for both listing tools comes with #1150 (#796).
-    Per-message completeness flags make a leaf answer "can't tell"
-    unless the relevant flag says the stored data is complete,
-    `authority_class` included (#1086). The keyword-matched evidence
+    Per-message completeness flags keep a leaf from answering a
+    confident "no" on incomplete data: a stored match still answers
+    yes, and finding nothing answers "can't tell" unless the relevant
+    flag says the data is complete, `authority_class` included (#1086). The keyword-matched evidence
     passage is ranked by in-thread word rarity over a candidate-only
     in-memory index, never a corpus-wide scan (#858, #1246). The
     choices behind each are in the issues' decision comments.
