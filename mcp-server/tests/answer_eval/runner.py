@@ -70,7 +70,7 @@ from tests.answer_eval.adapters import (
     view_of,
     window_cut_labels,
 )
-from tests.answer_eval.cases import BASELINE_DOMAIN, Case
+from tests.answer_eval.cases import Case
 
 ToolOutput = AskMailboxOutput | SummarizeThreadOutput | BriefIssueOutput | CheckConclusionOutput
 
@@ -438,10 +438,22 @@ def _thread_word_ok(word: str, allowed: set[str]) -> bool:
 
 @dataclass(frozen=True)
 class CorpusMessage:
+    message_id: str  # as the indexer's parser derives it from the built file
     sha256: str  # of the message's bytes, in full
-    thread_id: str
+    thread_id: str  # the thread root's ``message_id``
     sent_at: str  # ``messages.sent_at`` as the indexer stores it
     tokens: set[str] = field(repr=False)
+
+
+def _parsed_message_id(raw: bytes) -> str:
+    """The Message-ID as the indexer's parser derives it from a file's
+    bytes (``parser.parse_message``: a compat32 parse, then
+    ``_clean_id``)."""
+    header = str(email.message_from_bytes(raw).get("Message-ID", ""))
+    message_id = header.strip().strip("<>").strip()
+    if not message_id:
+        raise NonSyntheticIndexError("a committed synthetic corpus message has no Message-ID")
+    return message_id
 
 
 @functools.cache
@@ -466,15 +478,20 @@ def claimant_hash_chars(path: Path = PARSER_PATH) -> int:
 
 
 def corpus_manifest(path: Path = CORPUS_PATH) -> dict[str, CorpusMessage]:
-    """Message-ID -> its bytes' SHA-256, thread and word tokens, for every
-    committed corpus message.
+    """Claimant ID -> its Message-ID, bytes' SHA-256, thread, date and
+    word tokens, for every committed corpus message.
 
     Built from the committed ``corpus.py`` (stdlib only, loaded by path:
     both services own a top-level ``tests`` package), which serializes
-    byte-identically; the indexer's claimant ID is the Message-ID plus a
-    prefix of that SHA-256. The tokens cover every part's headers and
-    every decoded text part and binary attachment, our own trusted bytes,
-    and the text the corpus says its images show (``OCR_TEXT``). ``sent_at`` is the
+    byte-identically. Each built file's claimant ID is the indexer's
+    (``parser.claimant_id``): the Message-ID the parser derives from the
+    file plus the first ``claimant_hash_chars()`` hex digits of the
+    file's SHA-256, so two files sharing a Message-ID with different
+    bytes are two entries (#1275). A claimant built twice (a
+    byte-identical copy) is an error. A thread's ID is its root file's
+    Message-ID. The tokens cover every part's headers and every decoded
+    text part and binary attachment, our own trusted bytes, and the text
+    the corpus says its images show (``OCR_TEXT``). ``sent_at`` is the
     ``Date:`` header as the indexer normalizes it (``parser._parse_date``:
     UTC, ISO format); the corpus writes no ``Received:`` header, so the
     indexer stores no ``occurred_at``.
@@ -484,11 +501,19 @@ def corpus_manifest(path: Path = CORPUS_PATH) -> dict[str, CorpusMessage]:
         raise NonSyntheticIndexError("the committed synthetic corpus could not be loaded")
     corpus = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(corpus)
+    hash_chars = claimant_hash_chars()
     manifest: dict[str, CorpusMessage] = {}
     for n in sorted(corpus.THREADS):
-        for index, msg in enumerate(corpus.THREADS[n]):
-            raw = corpus.build_message(n, index, msg)
-            message_id = f"t{n:02d}.{index + 1}{BASELINE_DOMAIN}"
+        built = [corpus.build_message(n, i, msg) for i, msg in enumerate(corpus.THREADS[n])]
+        thread_id = _parsed_message_id(built[0])
+        for raw in built:
+            message_id = _parsed_message_id(raw)
+            sha256 = hashlib.sha256(raw).hexdigest()
+            claimant = f"{message_id}#{sha256[:hash_chars]}"
+            if claimant in manifest:
+                raise NonSyntheticIndexError(
+                    "the committed synthetic corpus builds one claimant ID more than once"
+                )
             parsed = email.message_from_bytes(raw, policy=email.policy.default)
             sent = email.utils.parsedate_to_datetime(str(parsed["Date"]))
             if sent.tzinfo is None:
@@ -511,41 +536,35 @@ def corpus_manifest(path: Path = CORPUS_PATH) -> dict[str, CorpusMessage]:
                     # corpus states the text its committed images show
                     # (#908), keyed by attachment filename.
                     text.append(corpus.OCR_TEXT.get(part.get_filename() or "", ""))
-            manifest[message_id] = CorpusMessage(
-                hashlib.sha256(raw).hexdigest(),
-                f"t{n:02d}.1{BASELINE_DOMAIN}",
+            manifest[claimant] = CorpusMessage(
+                message_id,
+                sha256,
+                thread_id,
                 sent.astimezone(UTC).isoformat(),
                 _tokens(" ".join(text)),
             )
     return manifest
 
 
-def _claimant_message(claimant: str, manifest: dict[str, CorpusMessage]) -> str | None:
-    """The corpus Message-ID ``claimant`` belongs to, or None when it is
-    not ``<corpus Message-ID>#<first claimant_hash_chars() hex digits of
-    that message's SHA-256>``, as the indexer derives it."""
-    message_id, _, suffix = claimant.rpartition("#")
-    entry = manifest.get(message_id)
-    if entry is None or suffix != entry.sha256[: claimant_hash_chars()]:
-        return None
-    return message_id
-
-
 def index_identity(db: Any, manifest_path: Path = CORPUS_PATH) -> dict[str, object]:
     """Fingerprint of the index, refusing anything but the committed corpus.
 
     The evaluation sends evidence to the configured providers, and a
-    real mailbox is out of its scope, so the index must hold exactly one
-    claimant per committed corpus message, each its Message-ID plus the
-    first ``claimant_hash_chars()`` hex digits of that message's SHA-256
-    (``corpus_manifest``); each message's stored Message-ID (a passage's
-    origin in the judge prompt) and dates (the labelled chunk header's)
-    must be the corpus message's; and every indexed text a prompt can
-    carry may use only words of the corpus messages it belongs to: chunk
-    text, message subjects, participants (the chunk header's sender),
-    attachment names and types, and thread subjects, display subjects,
-    snippets, bodies and participants. Private text stored under copied
-    baseline IDs fails the last two checks. Messages name no content.
+    real mailbox is out of its scope, so the index's claimant IDs must
+    be exactly the set ``corpus_manifest`` builds (each built file's
+    Message-ID plus the first ``claimant_hash_chars()`` hex digits of
+    its SHA-256; two files sharing a Message-ID are two claimants,
+    #1275). Each claimant is then checked against its own entry, never
+    a sibling's: its stored Message-ID (a passage's origin in the judge
+    prompt) and dates (the labelled chunk header's) must be the entry's,
+    and every per-message text a prompt can carry (chunk text, message
+    subject, participants (the chunk header's sender), attachment names
+    and types) may use only that file's words. Thread subjects, display
+    subjects, snippets, bodies and participants may use the words of
+    the thread's files together. This is a token allowlist, not byte
+    authentication: private text stored under copied baseline IDs is
+    refused when it uses a word its file lacks. Messages name no
+    content.
     """
     manifest = corpus_manifest(manifest_path)
     refused = NonSyntheticIndexError(
@@ -553,26 +572,25 @@ def index_identity(db: Any, manifest_path: Path = CORPUS_PATH) -> dict[str, obje
         "runs only against an index built by tests.baseline.build"
     )
     with closing(db._connect()) as conn:
-        claimants = {str(c) for (c,) in conn.execute("SELECT claimant_id FROM messages")}
-        owner = {c: _claimant_message(c, manifest) for c in claimants}
-        owned = [m for m in owner.values() if m is not None]
-        # Every claimant a corpus message, every corpus message claimed once.
-        if len(owned) != len(owner) or sorted(owned) != sorted(manifest):
+        claimants = [str(c) for (c,) in conn.execute("SELECT claimant_id FROM messages")]
+        # Every claimant a built corpus file, every built file claimed once.
+        if sorted(claimants) != sorted(manifest):
             raise refused
         # The claimant's own Message-ID, and its dates as the indexer
         # stores them: no Received header, so no occurred_at.
         for claimant, stored_id, sent_at, occurred_at in conn.execute(
             "SELECT claimant_id, message_id, sent_at, occurred_at FROM messages"
         ):
-            message_id = owner[str(claimant)]
-            if message_id is None or (stored_id, sent_at, occurred_at) != (
-                message_id,
-                manifest[message_id].sent_at,
+            entry = manifest.get(str(claimant))
+            if entry is None or (stored_id, sent_at, occurred_at) != (
+                entry.message_id,
+                entry.sent_at,
                 None,
             ):
                 raise refused
         # Per-message text a prompt can carry: chunk text, and the chunk
-        # header's sender and attachment name and type.
+        # header's sender and attachment name and type, each against its
+        # own claimant's tokens.
         per_message = (
             "SELECT claimant_id, text FROM message_chunks",
             "SELECT claimant_id, subject FROM messages",
@@ -585,10 +603,8 @@ def index_identity(db: Any, manifest_path: Path = CORPUS_PATH) -> dict[str, obje
         )
         for query in per_message:
             for claimant, text in conn.execute(query):
-                message_id = owner.get(str(claimant))
-                if message_id is None:
-                    raise refused
-                if not _tokens(str(text or "")) <= manifest[message_id].tokens:
+                entry = manifest.get(str(claimant))
+                if entry is None or not _tokens(str(text or "")) <= entry.tokens:
                     raise refused
         thread_tokens: dict[str, set[str]] = {}
         for entry in manifest.values():

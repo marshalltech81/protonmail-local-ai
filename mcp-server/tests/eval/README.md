@@ -402,20 +402,23 @@ deterministic checks first, then an optional, separately configured AI
 judge. It is an offline development tool (#604): it changes nothing in
 the server, the containers or the tool outputs.
 
-**Synthetic data only.** The runner refuses any index that is not the
-committed synthetic corpus: its claimant IDs must be exactly those
-computed from `indexer/tests/baseline/corpus.py` (Message-ID plus the
-first `CLAIMANT_HASH_CHARS` hex digits, read from `indexer/src/parser.py`,
-of the SHA-256 of each message's bytes), each message's stored Message-ID and its sent
-and delivery dates must be the corpus message's (the dates as the
-indexer normalizes them), and every indexed
-text a prompt can carry
-(chunk text, message subjects and participants, attachment names and
-types, thread subjects, display subjects, snippets, bodies and
-participants) may use only
-words of the corpus messages it belongs to, so private text stored under
-copied baseline IDs is refused too. It never reads or sends a real
-mailbox; a private-mailbox mode would be a separate owner decision.
+**Synthetic data only.** Before any provider is configured, the runner
+refuses any index that is not the committed synthetic corpus. Its
+claimant IDs must be exactly the set built from
+`indexer/tests/baseline/corpus.py`: for each built file, the Message-ID
+the indexer's parser reads from it plus the first `CLAIMANT_HASH_CHARS`
+hex digits (read from `indexer/src/parser.py`) of the SHA-256 of its
+bytes, so two files sharing one Message-ID are two claimants, as in the
+indexer (#1275). Each claimant is checked against its own file, never a
+sibling's: its stored Message-ID and its sent and delivery dates must be
+the file's (the dates as the indexer normalizes them), and its chunk
+text, subject, participants and attachment names and types may use only
+that file's words. Thread subjects, display subjects, snippets, bodies
+and participants may use the words of the thread's files. This is a
+token allowlist, not byte authentication: private text stored under
+copied baseline IDs is refused when it uses a word its file lacks. It
+never reads or sends a real mailbox; a private-mailbox mode would be a
+separate owner decision.
 Cases must never be built from real mail.
 
 ### Cases
