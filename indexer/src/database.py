@@ -127,7 +127,11 @@ def _dedupe_by_canonical(addrs: list[str]) -> list[str]:
 # To / Cc addresses, attachment list, body) and the parse's cap counts,
 # NULL until a reparse assesses the message
 # (``migrations/0005_message_completeness.sql``).
-SCHEMA_VERSION = 5
+# v6 (#1242): per-occurrence attachment text completeness
+# (``attachments.text_complete`` and the ``text_extractor`` stamp that
+# applied) and the cached result's (``attachment_extractions.text_complete``),
+# NULL until assessed (``migrations/0006_attachment_text_complete.sql``).
+SCHEMA_VERSION = 6
 SCHEMA_APPLICATION_ID = 0x504D4149  # "PMAI"
 
 # How long a ``reaped_messages`` record outlives the reap. The record
@@ -648,6 +652,15 @@ class Database:
                 -- the key of the ``attachment_extractions`` row it uses
                 -- (#928).
                 extractor_module          TEXT NOT NULL DEFAULT '',
+                -- Whether this occurrence's committed attachment chunks
+                -- hold all its text (#1242): 1 complete, 0 a known loss
+                -- or a status that never certifies absence, NULL not
+                -- assessed. Written with the chunks in phase 2c, with
+                -- ``text_extractor``, the extractor stamp of the result
+                -- that applied (NULL when none ran); an
+                -- ``EXTRACTOR_VERSIONS`` bump clears it at startup.
+                text_complete             INTEGER CHECK (text_complete IN (0, 1)),
+                text_extractor            TEXT,
                 FOREIGN KEY (claimant_id) REFERENCES message_thread_map(claimant_id)
                     ON DELETE CASCADE,
                 FOREIGN KEY (thread_id) REFERENCES threads(thread_id)
@@ -668,6 +681,9 @@ class Database:
             -- ``ocr_pages_skipped`` is the scanned PDF pages the OCR page
             -- cap left unread (#891): 0 when none, NULL when unknown (a
             -- non-PDF result, or a row cached before schema v3).
+            -- ``text_complete`` is whether the result lost no text
+            -- (#1242): 0 / 1, NULL when unknown (a row cached before
+            -- schema v6).
             CREATE TABLE attachment_extractions (
                 attachment_id      TEXT NOT NULL,
                 extractor_module   TEXT NOT NULL,
@@ -677,6 +693,7 @@ class Database:
                 extraction_error   TEXT,
                 extracted_at       TEXT NOT NULL,
                 ocr_pages_skipped  INTEGER CHECK (ocr_pages_skipped >= 0),
+                text_complete      INTEGER CHECK (text_complete IN (0, 1)),
                 PRIMARY KEY (attachment_id, extractor_module)
             );
 
@@ -1556,6 +1573,65 @@ class Database:
             raise
 
     @_synchronized
+    def set_attachment_text_complete(
+        self, occurrence_id: str, complete: bool | None, text_extractor: str | None
+    ) -> None:
+        """Record whether an occurrence's attachment chunks hold all its
+        text, and the extractor stamp of the result that applied (#1242).
+
+        Called in phase 2c inside the transaction that commits the
+        occurrence's chunks (``apply_attachment_writes``), so it rolls
+        back with them and always describes the committed chunks."""
+        cur = self._conn.cursor()
+        started = False
+        try:
+            started = self._begin_if_needed(cur)
+            cur.execute(
+                "UPDATE attachments SET text_complete = ?, text_extractor = ? "
+                "WHERE attachment_occurrence_id = ?",
+                (None if complete is None else int(complete), text_extractor, occurrence_id),
+            )
+            self._commit_if_started(started)
+        except Exception:
+            self._rollback_if_started(started)
+            raise
+
+    @_synchronized
+    def get_assessed_text_extractors(self) -> list[str]:
+        """Distinct extractor stamps of occurrences whose text
+        completeness is recorded (#1242)."""
+        rows = self._conn.execute(
+            "SELECT DISTINCT text_extractor FROM attachments "
+            "WHERE text_extractor IS NOT NULL AND text_complete IS NOT NULL"
+        ).fetchall()
+        return [r["text_extractor"] for r in rows]
+
+    @_synchronized
+    def clear_text_complete_for_extractors(self, extractors: list[str]) -> int:
+        """Set ``text_complete`` to NULL on every occurrence whose text
+        came from one of ``extractors`` (#1242), dead-lettered messages'
+        included, and return how many changed. One statement, so it
+        commits whole."""
+        if not extractors:
+            return 0
+        placeholders = ",".join(["?"] * len(extractors))
+        cur = self._conn.cursor()
+        started = False
+        try:
+            started = self._begin_if_needed(cur)
+            cur.execute(
+                "UPDATE attachments SET text_complete = NULL WHERE text_complete IS NOT NULL "
+                f"AND text_extractor IN ({placeholders})",  # nosec B608 — placeholders only
+                extractors,
+            )
+            changed = cur.rowcount
+            self._commit_if_started(started)
+        except Exception:
+            self._rollback_if_started(started)
+            raise
+        return changed
+
+    @_synchronized
     def get_extractor_names(self) -> list[str]:
         """Distinct extractor names recorded in the extraction cache."""
         rows = self._conn.execute(
@@ -1584,6 +1660,27 @@ class Database:
             extractors,
         ).fetchall()
         return [r["filepath"] for r in rows]
+
+    @_synchronized
+    def find_unrecorded_completeness_attachments(self) -> list[sqlite3.Row]:
+        """The messages with an attachment occurrence whose cached
+        ``success`` or ``empty`` extraction has no completeness record
+        (#1285): one row per Maildir filepath, row status and extractor
+        stamp (not per occurrence, so a message with many attachments
+        costs one row, review round 3 on #1286), with ``text_complete``
+        (NULL)."""
+        return self._conn.execute(
+            """
+            SELECT DISTINCT m.filepath, e.extraction_status, e.extractor, e.text_complete
+            FROM attachment_extractions e
+            JOIN attachments a ON a.attachment_id = e.attachment_id
+                AND a.extractor_module = e.extractor_module
+            JOIN message_thread_map m ON m.claimant_id = a.claimant_id
+            WHERE e.text_complete IS NULL
+              AND e.extraction_status IN ('success', 'empty')
+            ORDER BY m.filepath
+            """
+        ).fetchall()
 
     @_synchronized
     def find_ocr_disabled_attachments(self) -> list[sqlite3.Row]:
@@ -1660,7 +1757,7 @@ class Database:
         """
         return self._conn.execute(
             "SELECT attachment_id, extractor_module, extraction_status, extractor, "
-            "extracted_text, extraction_error, extracted_at, ocr_pages_skipped "
+            "extracted_text, extraction_error, extracted_at, ocr_pages_skipped, text_complete "
             "FROM attachment_extractions WHERE attachment_id = ? AND extractor_module = ?",
             (attachment_id, extractor_module),
         ).fetchone()
@@ -1676,6 +1773,7 @@ class Database:
         extracted_text: str | None,
         extraction_error: str | None,
         ocr_pages_skipped: int | None = None,
+        text_complete: bool | None = None,
     ) -> None:
         """Persist (or replace) the extraction record for ``attachment_id``
         under ``extractor_module`` ('' when the occurrence selects no
@@ -1691,7 +1789,8 @@ class Database:
         * ``"failed"`` — extractor raised; ``extraction_error`` populated
 
         ``ocr_pages_skipped`` is the scanned PDF pages the OCR page cap
-        left unread (#891), ``None`` when unknown.
+        left unread (#891), ``None`` when unknown. ``text_complete`` is
+        whether the result lost no text (#1242), ``None`` when unknown.
 
         The same (attachment_id, extractor_module) is OR-REPLACE'd so a follow-up pass
         (e.g. after enabling OCR or bumping ``INDEXER_OCR_MAX_PAGES``)
@@ -1706,8 +1805,9 @@ class Database:
                 """
                 INSERT OR REPLACE INTO attachment_extractions
                     (attachment_id, extractor_module, extraction_status, extractor,
-                     extracted_text, extraction_error, extracted_at, ocr_pages_skipped)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                     extracted_text, extraction_error, extracted_at, ocr_pages_skipped,
+                     text_complete)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     attachment_id,
@@ -1718,6 +1818,7 @@ class Database:
                     extraction_error,
                     datetime.now(UTC).isoformat(),
                     ocr_pages_skipped,
+                    None if text_complete is None else int(text_complete),
                 ),
             )
             self._commit_if_started(started)

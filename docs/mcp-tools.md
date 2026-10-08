@@ -542,8 +542,9 @@ the From side of `participant` and `authority_class` are still unknown
 whenever `sender_ambiguous` is not `false`). `has_attachments` is
 decided either way by a stored attachment, and an empty list decides
 it only when complete. Attachment *text* (`search_attachments`) is not
-covered: its completeness is
-[#1242](https://github.com/marshalltech81/protonmail-local-ai/issues/1242).
+covered: the indexer records its completeness per attachment
+([#1242](https://github.com/marshalltech81/protonmail-local-ai/issues/1242)),
+but no filter reads it yet.
 
 **Thread-level evaluation (`search_emails`).** The thread filters are
 decided per leaf, each on its own: one message can satisfy the sender

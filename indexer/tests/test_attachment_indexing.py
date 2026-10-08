@@ -97,6 +97,7 @@ def test_successful_cached_extraction_is_reused(tmp_path, monkeypatch):
         extractor="text@3",
         extracted_text="cached text",
         extraction_error=None,
+        text_complete=True,
     )
     extractor = MagicMock()
     monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
@@ -151,6 +152,8 @@ def _process_with_cached_extractor(
         extraction_status=status,
         extractor=extractor_name,
         extracted_text=text,
+        # A record, as every row cached since schema v6 has (#1242).
+        text_complete=True,
         extraction_error=None,
     )
     extractor = MagicMock(
@@ -249,6 +252,7 @@ def test_stale_ocr_row_is_served_while_ocr_is_off(tmp_path, monkeypatch):
         extractor="image-ocr",
         extracted_text="old ocr text",
         extraction_error=None,
+        text_complete=True,
     )
     extractor = MagicMock()
     monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
@@ -301,6 +305,7 @@ def test_stale_row_is_left_to_the_occurrences_that_select_its_module(tmp_path, m
         extractor="docx",
         extracted_text="old text",
         extraction_error=None,
+        text_complete=True,
     )
     extractor = MagicMock(wraps=attachment_indexing.extract_attachment)
     monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
@@ -335,6 +340,7 @@ def test_reused_terminal_row_clears_the_stale_chunks(tmp_path, monkeypatch):
         extractor="docx@7",
         extracted_text=None,
         extraction_error=None,
+        text_complete=True,
     )
     extractor = MagicMock()
     monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
@@ -411,6 +417,7 @@ def _run_process_with_cached_status(
         extractor="text@3",
         extracted_text=None,
         extraction_error=error,
+        text_complete=status in {STATUS_SUCCESS, STATUS_EMPTY},
     )
     extractor = MagicMock()
     monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
@@ -476,7 +483,11 @@ def test_cached_too_large_extraction_is_re_run_once_the_payload_fits(tmp_path, m
         )
         extractor = MagicMock(
             return_value=ExtractionResult(
-                status=STATUS_SUCCESS, extractor="text@3", text="now extracted", error=None
+                status=STATUS_SUCCESS,
+                extractor="text@3",
+                text="now extracted",
+                error=None,
+                text_complete=True,
             )
         )
         monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
@@ -882,6 +893,7 @@ class TestPrepareApplyBoundary:
             extractor="text@3",
             extracted_text="cached body",
             extraction_error=None,
+            text_complete=True,
         )
 
         extractor = MagicMock()
@@ -1933,6 +1945,7 @@ class TestBinaryPayloadLabelledAsText:
             extractor="text@2",
             extracted_text="%PDF-1.7 \ufffd\ufffd",
             extraction_error=None,
+            text_complete=True,
         )
         plan = prepare_attachment_writes(db=db, **_kwargs(attachment))
         assert (plan.status, plan.cached, plan.chunks) == (STATUS_UNSUPPORTED, False, [])
@@ -2754,6 +2767,7 @@ class TestOcrCapOnCacheHits:
             extracted_text=f"{self.MARKER} cached text",
             extraction_error=None,
             ocr_pages_skipped=skipped,
+            text_complete=True,
         )
 
     @staticmethod
@@ -2835,6 +2849,7 @@ class TestOcrCapOnCacheHits:
             text=f"{self.MARKER} fresh text",
             error=None,
             ocr_pages_skipped=7,
+            text_complete=True,
         )
         calls: list[str] = []
 
@@ -2889,3 +2904,340 @@ class TestOcrCapOnCacheHits:
         assert (counts["ocr_capped_pdfs"], counts["ocr_pages_skipped"]) == (5, 20)
         assert counts["warnings_suppressed"] == 3
         assert [r.levelname for r in self._cap_lines(caplog)] == ["WARNING", "WARNING"]
+
+
+class TestOccurrenceTextComplete:
+    """#1242: each occurrence records whether its committed attachment
+    chunks hold all its text, and the extractor stamp of the result that
+    applied, in the transaction that writes its chunks."""
+
+    MARKER = "SYNTHETIC_OCCURRENCE_MARKER"
+
+    @staticmethod
+    def _row(db: Database, plan) -> tuple:
+        return tuple(
+            db._conn.execute(
+                "SELECT text_complete, text_extractor FROM attachments "
+                "WHERE attachment_occurrence_id = ?",
+                (plan.occurrence_id,),
+            ).fetchone()
+        )
+
+    @staticmethod
+    def _apply(db: Database, plan, claimant_id: str = "msg@x") -> None:
+        _embed_new_chunks(
+            plan, db=db, claimant_id=claimant_id, embedder=make_mock_embedder([0.1] * EMBEDDING_DIM)
+        )
+        with db.transaction():
+            apply_attachment_writes(plan=plan, claimant_id=claimant_id, thread_id="thread-x", db=db)
+
+    def _fresh(self, monkeypatch, *, status=STATUS_SUCCESS, complete=True, extractor="text@3"):
+        result = ExtractionResult(
+            status=status,
+            extractor=extractor,
+            text=f"{self.MARKER} text" if status == STATUS_SUCCESS else None,
+            error=None,
+            text_complete=complete,
+        )
+        monkeypatch.setattr(attachment_indexing, "extract_attachment", lambda **_: result)
+
+    @pytest.mark.parametrize("complete, stored", [(True, 1), (False, 0)])
+    def test_a_fresh_result_is_recorded_on_the_occurrence_and_the_cache(
+        self, tmp_path, monkeypatch, complete, stored
+    ):
+        db = _setup_db_for_attachment(tmp_path)
+        attachment = _attachment(f"{self.MARKER} payload".encode())
+        self._fresh(monkeypatch, complete=complete)
+        plan = prepare_attachment_writes(db=db, **_kwargs(attachment))
+        assert (plan.text_complete, plan.text_extractor) == (complete, "text@3")
+        self._apply(db, plan)
+        assert self._row(db, plan) == (stored, "text@3")
+        cached = db.get_attachment_extraction(attachment.content_hash, _module(attachment))
+        assert cached["text_complete"] == stored
+
+    @pytest.mark.parametrize("cached_flag, expected", [(1, 1), (0, 0)])
+    def test_a_cached_result_passes_on_its_record(
+        self, tmp_path, monkeypatch, cached_flag, expected
+    ):
+        """A row with no record is refreshed instead
+        (``TestUnrecordedCacheRowsAreRefreshedOnce``)."""
+        db = _setup_db_for_attachment(tmp_path)
+        attachment = _attachment()
+        db.store_attachment_extraction(
+            attachment_id=attachment.content_hash,
+            extractor_module=_module(attachment),
+            extraction_status=STATUS_SUCCESS,
+            extractor="text@3",
+            extracted_text=f"{self.MARKER} cached",
+            extraction_error=None,
+            text_complete=None if cached_flag is None else bool(cached_flag),
+        )
+        extractor = MagicMock()
+        monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
+        plan = prepare_attachment_writes(db=db, **_kwargs(attachment))
+        extractor.assert_not_called()
+        self._apply(db, plan)
+        assert self._row(db, plan) == (expected, "text@3")
+
+    def test_a_batch_reuse_carries_the_result_record(self, tmp_path, monkeypatch):
+        db = _setup_db_for_attachment(tmp_path)
+        attachment = _attachment()
+        self._fresh(monkeypatch, complete=False)
+        batch: dict[tuple[str, str], ExtractionResult] = {}
+        prepare_attachment_writes(db=db, batch_extractions=batch, **_kwargs(attachment))
+        reused = prepare_attachment_writes(
+            db=db, batch_extractions=batch, **_kwargs(attachment, occurrence_index=1)
+        )
+        assert (reused.cached, reused.text_complete) == (True, False)
+
+    @pytest.mark.parametrize(
+        "status, extractor, complete",
+        [
+            (STATUS_FAILED, "text@3", None),
+            (STATUS_UNSUPPORTED, None, None),
+            (STATUS_TOO_LARGE, None, None),
+            # Even a result that claims completeness.
+            (STATUS_FAILED, "text@3", True),
+        ],
+    )
+    def test_a_status_that_never_certifies_absence_is_zero(
+        self, tmp_path, monkeypatch, status, extractor, complete
+    ):
+        db = _setup_db_for_attachment(tmp_path)
+        attachment = _attachment()
+        self._fresh(monkeypatch, status=status, complete=complete, extractor=extractor)
+        plan = prepare_attachment_writes(db=db, **_kwargs(attachment))
+        assert plan.text_complete is False
+        self._apply(db, plan)
+        assert self._row(db, plan) == (0, extractor)
+
+    def test_ocr_disabled_from_the_cache_is_zero(self, tmp_path):
+        db = _setup_db_for_attachment(tmp_path)
+        attachment = _attachment(b"\x89PNG\r\n\x1a\n", filename="a.png", content_type="image/png")
+        db.store_attachment_extraction(
+            attachment_id=attachment.content_hash,
+            extractor_module=_module(attachment),
+            extraction_status=STATUS_UNSUPPORTED,
+            extractor=None,
+            extracted_text=None,
+            extraction_error="OCR disabled (INDEXER_OCR_ENABLED=false)",
+        )
+        plan = prepare_attachment_writes(db=db, **_kwargs(attachment, ocr_enabled=False))
+        self._apply(db, plan)
+        assert self._row(db, plan) == (0, None)
+
+    def test_a_payload_a_parse_cap_emptied_is_zero(self, tmp_path, monkeypatch):
+        db = _setup_db_for_attachment(tmp_path)
+        attachment = _attachment(b"")
+        attachment.payload_complete = False
+        self._fresh(monkeypatch, status=STATUS_EMPTY, complete=True)
+        plan = prepare_attachment_writes(db=db, **_kwargs(attachment))
+        self._apply(db, plan)
+        assert self._row(db, plan) == (0, "text@3")
+
+    def test_payload_loss_stays_with_its_occurrence_when_bytes_share_a_row(
+        self, tmp_path, monkeypatch
+    ):
+        """Review round 2 on #1286: a defective decode can yield the same
+        bytes as an intact copy, so both use one cached row; the loss is
+        the occurrence's, never the row's."""
+        db = _setup_db_for_attachment(tmp_path)
+        intact = _attachment(b"ABCDEF")
+        lossy = _attachment(b"ABCDEF")
+        lossy.payload_complete = False
+        self._fresh(monkeypatch, complete=True)
+        batch: dict[tuple[str, str], ExtractionResult] = {}
+        first = prepare_attachment_writes(db=db, batch_extractions=batch, **_kwargs(lossy))
+        second = prepare_attachment_writes(
+            db=db, batch_extractions=batch, **_kwargs(intact, occurrence_index=1)
+        )
+        assert (first.text_complete, second.text_complete) == (False, True)
+        self._apply(db, first)
+        cached = db.get_attachment_extraction(intact.content_hash, _module(intact))
+        assert cached["text_complete"] == 1
+
+    def test_a_lossy_transport_attached_email_is_zero(self, tmp_path, monkeypatch):
+        """Review round 4 on #1286: a parsed attached email whose base64
+        transport lost bytes is stored ``text_complete = 0`` even when its
+        extraction succeeds."""
+        import base64
+
+        from src.parser import parse_email
+
+        inner = b"From: a@example.test\r\n\r\nSYNTHETIC_OCCURRENCE_MARKER body\r\n"
+        encoded = base64.encodebytes(inner)
+        lossy = encoded[:8] + b"!!!!" + encoded[12:]
+        path = tmp_path / "m.eml"
+        path.write_bytes(
+            b"Message-ID: <lossy@example.test>\r\nFrom: s@example.test\r\n"
+            b"Date: Mon, 28 Sep 2026 12:00:00 +0000\r\nMIME-Version: 1.0\r\n"
+            b'Content-Type: multipart/mixed; boundary="b"\r\n\r\n'
+            b"--b\r\nContent-Type: text/plain\r\n\r\nPARENT\r\n"
+            b"--b\r\nContent-Type: message/rfc822\r\nContent-Transfer-Encoding: base64\r\n"
+            b'Content-Disposition: attachment; filename="fwd.txt"\r\n\r\n' + lossy + b"--b--\r\n"
+        )
+        msg = parse_email(path)
+        assert msg is not None
+        [attachment] = msg.attachments
+        db = _setup_db_for_attachment(tmp_path)
+        self._fresh(monkeypatch, complete=True)
+        plan = prepare_attachment_writes(db=db, **_kwargs(attachment))
+        self._apply(db, plan)
+        assert self._row(db, plan) == (0, "text@3")
+
+    def test_a_stale_stamp_served_while_ocr_is_off_is_not_assessed(self, tmp_path):
+        """An older OCR row is served while OCR is off; the startup sweep
+        clears such occurrences, so publishing one does not restore it."""
+        db = _setup_db_for_attachment(tmp_path)
+        attachment = _attachment(b"%PDF-1.7 x", filename="a.pdf", content_type="application/pdf")
+        db.store_attachment_extraction(
+            attachment_id=attachment.content_hash,
+            extractor_module=_module(attachment),
+            extraction_status=STATUS_SUCCESS,
+            extractor="pdf-ocr@4",
+            extracted_text=f"{self.MARKER} old",
+            extraction_error=None,
+            text_complete=True,
+        )
+        plan = prepare_attachment_writes(db=db, **_kwargs(attachment, ocr_enabled=False))
+        assert plan.cached is True
+        self._apply(db, plan)
+        assert self._row(db, plan) == (None, "pdf-ocr@4")
+
+    def test_the_flag_rolls_back_with_the_chunks(self, tmp_path, monkeypatch):
+        """Only a committed publication of the chunks sets the flag: a
+        failed phase-2c transaction leaves the occurrence as it was."""
+        db = _setup_db_for_attachment(tmp_path)
+        attachment = _attachment()
+        self._fresh(monkeypatch, complete=True)
+        plan = prepare_attachment_writes(db=db, **_kwargs(attachment))
+        self._apply(db, plan)
+        db.clear_text_complete_for_extractors(["text@3"])
+        assert self._row(db, plan) == (None, "text@3")
+        again = prepare_attachment_writes(db=db, **_kwargs(attachment))
+        with pytest.raises(RuntimeError), db.transaction():
+            apply_attachment_writes(plan=again, claimant_id="msg@x", thread_id="thread-x", db=db)
+            raise RuntimeError("phase 2c failed")
+        assert self._row(db, plan) == (None, "text@3")
+        self._apply(db, again)
+        assert self._row(db, plan) == (1, "text@3")
+
+    def test_a_copy_whose_chunks_another_copy_holds_still_records_its_own(
+        self, tmp_path, monkeypatch
+    ):
+        db = _setup_db_for_attachment(tmp_path)
+        attachment = _attachment()
+        self._fresh(monkeypatch, complete=True)
+        plan = prepare_attachment_writes(db=db, **_kwargs(attachment))
+        plan.chunks = []
+        plan.clears_stale_chunks = False
+        self._apply(db, plan)
+        assert self._row(db, plan) == (1, "text@3")
+
+
+class TestUnrecordedCacheRowsAreRefreshedOnce:
+    """#1285 (folded into #1242): a ``success`` or ``empty`` cache row
+    with no completeness record (cached before schema v6) is re-extracted
+    once, so the reparse fills the flag; the refreshed row has a record
+    and is served from then on. An ``-ocr`` row is kept while OCR is off,
+    as a stale one is."""
+
+    MARKER = "SYNTHETIC_UNRECORDED_MARKER"
+
+    def _store(self, db, attachment, *, status=STATUS_SUCCESS, extractor="text@3", record=None):
+        db.store_attachment_extraction(
+            attachment_id=attachment.content_hash,
+            extractor_module=_module(attachment),
+            extraction_status=status,
+            extractor=extractor,
+            extracted_text=f"{self.MARKER} cached" if status == STATUS_SUCCESS else None,
+            extraction_error=None,
+            text_complete=record,
+        )
+
+    @staticmethod
+    def _counting(monkeypatch) -> list[str]:
+        calls: list[str] = []
+        real = attachment_indexing.extract_attachment
+
+        def counting(**kwargs):
+            calls.append(kwargs["filename"])
+            return real(**kwargs)
+
+        monkeypatch.setattr(attachment_indexing, "extract_attachment", counting)
+        return calls
+
+    @staticmethod
+    def _apply(db, plan, claimant_id="msg@x"):
+        _embed_new_chunks(
+            plan, db=db, claimant_id=claimant_id, embedder=make_mock_embedder([0.1] * EMBEDDING_DIM)
+        )
+        with db.transaction():
+            apply_attachment_writes(plan=plan, claimant_id=claimant_id, thread_id="thread-x", db=db)
+
+    @pytest.mark.parametrize("status", [STATUS_SUCCESS, STATUS_EMPTY])
+    def test_an_unrecorded_row_is_extracted_once_then_served(self, tmp_path, monkeypatch, status):
+        db = _setup_db_for_attachment(tmp_path)
+        payload = f"{self.MARKER} payload".encode() if status == STATUS_SUCCESS else b"   "
+        attachment = _attachment(payload)
+        self._store(db, attachment, status=status)
+        calls = self._counting(monkeypatch)
+        first = prepare_attachment_writes(db=db, **_kwargs(attachment))
+        assert (len(calls), first.cached, first.text_complete) == (1, False, True)
+        self._apply(db, first)
+        row = db.get_attachment_extraction(attachment.content_hash, _module(attachment))
+        assert row["text_complete"] == 1
+        again = prepare_attachment_writes(db=db, **_kwargs(attachment))
+        assert (len(calls), again.cached, again.text_complete) == (1, True, True)
+
+    @pytest.mark.parametrize("record", [0, 1])
+    def test_a_recorded_row_is_served(self, tmp_path, monkeypatch, record):
+        db = _setup_db_for_attachment(tmp_path)
+        attachment = _attachment()
+        self._store(db, attachment, record=bool(record))
+        calls = self._counting(monkeypatch)
+        plan = prepare_attachment_writes(db=db, **_kwargs(attachment))
+        assert (calls, plan.cached, plan.text_complete) == ([], True, bool(record))
+
+    def test_an_unrecorded_failure_within_its_window_is_served(self, tmp_path, monkeypatch):
+        """Only ``success`` and ``empty`` rows are refreshed: any other
+        status is never complete, whatever its record."""
+        db = _setup_db_for_attachment(tmp_path)
+        attachment = _attachment()
+        self._store(db, attachment, status=STATUS_FAILED)
+        calls = self._counting(monkeypatch)
+        plan = prepare_attachment_writes(db=db, **_kwargs(attachment))
+        assert (calls, plan.cached, plan.text_complete) == ([], True, False)
+
+    def test_an_unrecorded_ocr_row_is_kept_while_ocr_is_off(self, tmp_path, monkeypatch):
+        db = _setup_db_for_attachment(tmp_path)
+        attachment = _attachment(b"%PDF-1.7 x", filename="a.pdf", content_type="application/pdf")
+        self._store(db, attachment, extractor="pdf-ocr@5")
+        calls = self._counting(monkeypatch)
+        plan = prepare_attachment_writes(db=db, **_kwargs(attachment, ocr_enabled=False))
+        assert (calls, plan.cached, plan.text_complete) == ([], True, None)
+        assert [c.text for c in plan.chunks] == [f"{self.MARKER} cached"]
+
+    def test_shared_bytes_across_batches_are_extracted_once(self, tmp_path, monkeypatch):
+        """Two messages carry the same bytes in different batches: the
+        first refreshes the row, the second is served it, and each
+        occurrence gets its flag."""
+        db = _setup_db_for_attachment(tmp_path)
+        db.upsert_thread(
+            make_thread(messages=[make_message(message_id="other@x")], thread_id="thread-x"),
+            [0.0] * EMBEDDING_DIM,
+        )
+        attachment = _attachment()
+        self._store(db, attachment)
+        calls = self._counting(monkeypatch)
+        first = prepare_attachment_writes(db=db, batch_extractions={}, **_kwargs(attachment))
+        self._apply(db, first)
+        second = prepare_attachment_writes(
+            db=db, batch_extractions={}, **_kwargs(attachment, claimant_id="other@x")
+        )
+        self._apply(db, second, claimant_id="other@x")
+        assert len(calls) == 1
+        flags = db._conn.execute(
+            "SELECT text_complete FROM attachments ORDER BY attachment_occurrence_id"
+        ).fetchall()
+        assert [r[0] for r in flags] == [1, 1]
