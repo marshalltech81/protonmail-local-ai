@@ -1185,6 +1185,7 @@ is still failing.
 | `ingestion state recording` | `recording ingestion state failed: <type>` (ERROR) | At most every 30 s, retried on each heartbeat until it succeeds |
 | `Maildir watch refresh` | `Maildir watch refresh failed: <type>` (ERROR) | After each mbsync sync, and every `INDEXER_RECOVERY_SWEEP_INTERVAL_SECS` |
 | `periodic Maildir rescan` | `periodic Maildir rescan failed: <type>` (ERROR) | Every `INDEXER_RECOVERY_SWEEP_INTERVAL_SECS` (30 min) |
+| `periodic rename sweep` | `periodic rename sweep failed: <type>` (WARNING) | Before each periodic Maildir rescan; the rescan's walk runs either way |
 | `periodic reconciliation` | `periodic reconciliation failed: <type>` (ERROR) | Every `INDEXER_DELETION_SWEEP_INTERVAL_SECS`, with deletion reconciliation on |
 | `reaped-record prune` | `reaped-record prune failed: <type>` (ERROR) | At startup and with each reconciliation interval |
 | `wal checkpoint` | `wal checkpoint failed: <type>` (ERROR) | At startup and every `INDEXER_WAL_CHECKPOINT_INTERVAL_SECS` (10 min) |
