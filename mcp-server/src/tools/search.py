@@ -285,6 +285,16 @@ def register_search_tools(
         thread_id from the subject — IDs are opaque; pass only a
         ``Thread ID`` that a tool result returned.
 
+        For outstanding-item questions, check for completion, corrections,
+        reopening and later guidance in different threads and senders before
+        calling an item open or closed. A message in Sent supports only that
+        it was transmitted. Only a message that explicitly acknowledges that
+        transmission supports receipt; a later reply in the same thread does
+        not, as it may answer something else. Neither establishes that the
+        action was carried out; nor does a sent request or delivered advice.
+        Label each finding confirmed, proposed or unverified, with message
+        references.
+
         Args:
             query: Natural language or keyword query
             mode: "hybrid" (default), "semantic", or "keyword"
