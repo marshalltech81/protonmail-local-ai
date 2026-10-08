@@ -92,21 +92,26 @@ def _remap_to_identical_copies(
     S/F/R state; it never tombstones or clears anything, so each caller
     applies its own trash rule to the copy.
 
-    The database refuses a remap whose copy vanished after it was
-    resolved (the watcher renamed it meanwhile); the copies are then
-    resolved once more without the pass's directory cache, which is
-    stale for that folder, and the remap retried once.
+    When the pass's directory cache shows no copy, or the database
+    refuses a remap because the copy vanished after it was resolved (the
+    watcher renamed it meanwhile), the copies are resolved once more
+    through a fresh listing shared by the whole retry phase, and the
+    remap retried once: the pass's cache can be stale for that folder.
     """
     if not moves:
         return {}
     copies = db.find_identical_copies([row["claimant_id"] for row, _, _ in moves])
     remapped: dict[str, Path] = {}
+    # The retry phase's own listing: fresh, built on first use, shared
+    # by every message so a folder is listed once more per pass at most.
+    fresh: dict[Path, dict[str, Path]] = {}
     for row, from_path, live_only in moves:
         candidates = copies.get(row["claimant_id"], [])
-        for cache in (listings, {}):
+        for cache in (listings, fresh):
             copy = _pick_copy(candidates, cache, live_only=live_only)
             if copy is None:
-                break
+                # The pass's listing can predate a copy coming back.
+                continue
             dest_folder = _derive_folder(copy, maildir_root)
             same_folder = dest_folder == _derive_folder(Path(from_path), maildir_root)
             if db.remap_to_identical_copy(

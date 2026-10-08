@@ -645,6 +645,56 @@ class TestByteIdenticalCopies:
         assert _message_row(db, claimant)["filepath"] == str(replied)
         assert db.find_message_entry_by_filepath(str(replied))["claimant_id"] == claimant
 
+    def test_a_copy_restored_after_the_cached_listing_is_found_on_retry(
+        self, db, threader, maildir, monkeypatch
+    ):
+        """Codex round 6 on #1134: a copy absent when the sweep listed its
+        folder, and back (flag-renamed) before the copy lookup, was missed
+        through the stale listing and no cache-free attempt followed. The
+        retry uses one fresh listing for the whole retry phase."""
+        import src.reconciler as reconciler_module
+
+        away = maildir.parent.parent / "away"
+        away.mkdir()
+        restore = []
+        claimants = []
+        for n in range(2):
+            kept = maildir / f"170000000{n}.K{n}.host:2,S"
+            mapped = maildir / f"170000001{n}.M{n}.host:2,S"
+            _index_copies(db, threader, kept, mapped, f"retry{n}@example.com", subject=f"R{n}")
+            claimants.append(db.find_message_entry_by_filepath(str(mapped))["claimant_id"])
+            mapped.unlink()
+            kept.rename(away / kept.name)
+            restore.append((away / kept.name, maildir / f"170000000{n}.K{n}.host:2,RS"))
+
+        real_resolve = reconciler_module.resolve_current_path
+
+        def resolve_then_restore(stored, listings=None):
+            current = real_resolve(stored, listings)
+            while restore:  # mbsync puts the copies back, flag-renamed
+                src, dest = restore.pop()
+                src.rename(dest)
+            return current
+
+        listed: list[Path] = []
+        real_iterdir = Path.iterdir
+
+        def counting_iterdir(self):
+            if self == maildir:
+                listed.append(self)
+            return real_iterdir(self)
+
+        monkeypatch.setattr(reconciler_module, "resolve_current_path", resolve_then_restore)
+        monkeypatch.setattr(Path, "iterdir", counting_iterdir)
+        summary = sweep_paths(db)
+
+        assert summary["remapped"] == 2
+        for n, claimant in enumerate(claimants):
+            row = _message_row(db, claimant)
+            assert row["filepath"] == str(maildir / f"170000000{n}.K{n}.host:2,RS")
+        # Once for the sweep's cached listing, once for the shared retry.
+        assert len(listed) == 2
+
     def test_remap_is_refused_when_the_mapping_moved(self, db, threader, maildir):
         kept = maildir / "1700000000.M1.host:2,S"
         mapped = maildir / "1700000001.M2.host:2,S"

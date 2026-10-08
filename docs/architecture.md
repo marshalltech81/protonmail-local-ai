@@ -1683,9 +1683,12 @@ is remapped to that copy: its locator, folder and S/F/R state move as
 for a rename, and a tombstone or queued job on the gone path moves too
 unless the copy already has its own. The copy's tombstone is kept; of
 two queued jobs the runnable one is kept (the copy's, unless it is dead
-and the gone path's is not). The remap is refused, and retried once
-after resolving the copy again, when the watcher renamed the copy or
-moved the mapping since the sweep resolved it. The trash rule then
+and the gone path's is not). The remap is refused when the watcher
+renamed the copy or moved the mapping since the sweep resolved it.
+After a refusal, or when the sweep's cached folder listing shows no
+copy (it can predate a copy coming back), the copies are resolved once
+more through one fresh listing shared by the whole retry phase, so each
+folder is listed at most once more per sweep. The trash rule then
 applies to the copy as to any file, so a `T`-flagged copy is tombstoned
 and a live one clears an earlier tombstone. A mapped file that still
 exists but is `T`-flagged is checked the same way, for a live copy
