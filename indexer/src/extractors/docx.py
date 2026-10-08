@@ -71,8 +71,17 @@ opens it, so a long chain of related parts raises ``RecursionError``
 there (#945). Only the open is guarded: the error becomes
 ``DocxRelationshipChainError``, recorded ``failed`` by type, since a
 chain of crafted parts is a property of the file, not host pressure. A
-``RecursionError`` anywhere else still reaches the dispatcher, which
-re-raises it.
+``RecursionError`` anywhere else keeps its own type.
+
+The pre-open budgets trust the member sizes the ZIP central directory
+declares, and a member that understates its size is still decompressed
+whole when python-docx reads it. So the whole extraction, budgets
+included, runs in a child process under an address-space and a CPU
+limit (``ooxml``, #1040): ``extract`` starts it, and ``extract_text``
+is what runs in it. A ``MemoryError`` or ``RecursionError`` there is
+the child's failure, recorded ``failed`` by type, not host pressure.
+The child reports the budget that cut the text by name, and this module
+logs it.
 """
 
 from __future__ import annotations
@@ -92,6 +101,7 @@ from docx.parts.document import DocumentPart
 from docx.section import _Footer, _Header
 
 from . import over_package_budget, warn_extractor_cap
+from .ooxml import run_child
 
 log = logging.getLogger("indexer.extractor.docx")
 
@@ -184,6 +194,36 @@ _MAX_MEMBERS = 5_000
 _MAX_RELS_BYTES = 4 * 1024 * 1024
 
 
+# Address space (``RLIMIT_AS``), CPU seconds (``RLIMIT_CPU``) and
+# wall-clock seconds the extraction's child process may use (#1040),
+# past the CPU limit so a CPU-bound child meets that first. Plainly
+# measured in the indexer image, child peak RSS and time:
+#
+# * a one-paragraph document: 45 MB and 0.2 s, nearly all of it
+#   starting the child and importing python-docx;
+# * a synthetic 1,500-page report (60,000 formatted paragraphs and 150
+#   tables, stopped at the text budget): 220 MB and 0.7 s;
+# * 500 pages with 2,000 pictures (30 MB): 148 MB and 0.4 s;
+# * 600,000 empty paragraphs (stopped at the block budget): 117 MB and
+#   0.4 s; 1 MiB of a paragraph alternating runs and hyperlinks (#1031):
+#   54 MB and 0.3 s;
+# * 47 MiB of stored element-dense XML, inside the pre-open budgets:
+#   1,137 MB and 0.9 s;
+# * a 0.5 MB document whose ``word/document.xml`` declares a few KB but
+#   decompresses to 512 MiB (#1040): 1,069 MB and 0.5 s.
+#
+# 1 GiB is about 4.6 times the largest benign peak; the last two fail
+# under it, as ``XMLSyntaxError`` (lxml reports a failed allocation as
+# one) and ``MemoryError``. The CPU limit is many times the slowest
+# case, as in the XLSX extractor.
+CHILD_MAX_ADDRESS_SPACE_BYTES = 1024 * 1024 * 1024
+CHILD_MAX_CPU_SECONDS = 30
+CHILD_TIMEOUT_SECONDS = 45.0
+
+# The walk budgets the child may report as having cut the text.
+_CAP_NAMES = frozenset({"docx_blocks", "docx_table_cells", "docx_text_elements", "docx_text_chars"})
+
+
 class DocxPackageBudgetError(Exception):
     """The package is over a budget checked before python-docx opens it:
     expansion, declared size, member count or relationship bytes. Fixed
@@ -271,7 +311,25 @@ def extract(
     max_pdf_pages: int | None = None,  # noqa: ARG001
     on_progress: Callable[[], None] | None = None,  # noqa: ARG001
 ) -> tuple[str, str]:
-    """Extract text from a DOCX or DOTX payload. Returns (text, "docx")."""
+    """Extract text from a DOCX or DOTX payload in the child process
+    (``ooxml``, #1040). Returns (text, "docx")."""
+    text, caps = run_child(
+        "docx",
+        payload,
+        max_address_space_bytes=CHILD_MAX_ADDRESS_SPACE_BYTES,
+        max_cpu_seconds=CHILD_MAX_CPU_SECONDS,
+        timeout_seconds=CHILD_TIMEOUT_SECONDS,
+        caps=_CAP_NAMES,
+        permanent={"DocxPackageBudgetError": DocxPackageBudgetError},
+    )
+    for cap in caps:
+        warn_extractor_cap(log, cap, "document truncated at a walk budget")
+    return text, "docx"
+
+
+def extract_text(payload: bytes) -> tuple[str, list[str]]:
+    """The document's text and the names of the walk budgets that cut
+    it. Runs in the child process (``ooxml_child``)."""
     document = _open_document(payload)
 
     budget = _Budget()
@@ -280,9 +338,7 @@ def extract(
     lines: list[str] = []
     if _block_lines(document.element.body, budget, lines):
         _header_footer_lines(document, budget, lines)
-    if budget.cut is not None:
-        warn_extractor_cap(log, budget.cut, "document truncated after %d lines", len(lines))
-    return "\n\n".join(lines), "docx"
+    return "\n\n".join(lines), [budget.cut] if budget.cut is not None else []
 
 
 def _header_footer_lines(document: DocxDocument, budget: _Budget, lines: list[str]) -> bool:

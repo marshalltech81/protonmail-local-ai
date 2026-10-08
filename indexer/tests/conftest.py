@@ -122,6 +122,23 @@ def _reset_extractor_warning_budget(monkeypatch):
         monkeypatch.setattr(main, "_wal_busy_passes", 0)
 
 
+@pytest.fixture(autouse=True)
+def _ooxml_child_in_process(request, monkeypatch):
+    """Run the OOXML extractors' child (#1040) in this process, through
+    the same output encoding and parsing, so a test can patch a walk's
+    budgets or count its calls. A test marked ``real_ooxml_child`` starts
+    the real child process instead (``tests/test_ooxml_child.py``)."""
+    if request.node.get_closest_marker("real_ooxml_child"):
+        return
+    from src.extractors import ooxml, ooxml_child
+    from src.extractors._runner import ToolOutput
+
+    def run_tool(argv, payload, **_kwargs):
+        return ToolOutput(ooxml_child.run(argv[-1], payload), truncated=False)
+
+    monkeypatch.setattr(ooxml, "run_tool", run_tool)
+
+
 @pytest.fixture
 def db(tmp_path: Path) -> Database:
     database = Database(tmp_path / "test.db")

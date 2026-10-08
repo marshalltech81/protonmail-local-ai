@@ -42,6 +42,7 @@ import defusedxml
 from PIL import Image
 
 from ..rate_limited_log import LineBudget
+from .ooxml import OoxmlChildError
 
 # ``defuse_stdlib`` swaps the standard-library XML parsers (``xml.etree``,
 # ``xml.sax``, ``xml.dom.*``, ``xml.parsers.expat``, ``xmlrpc.client``)
@@ -408,6 +409,12 @@ class ExtractionResult:
 # rows, including the ``failed`` rows version 5 wrote for a document
 # over a pre-open budget, which are now recorded ``unsupported``
 # (#1032), and any ``docx@6`` row the build described above wrote.
+# docx 7, pptx 3, xlsx 6 still: the extraction runs in a child process
+# under an address-space and a CPU limit (#1040), with no bump. The text
+# and status of a file inside the limits are unchanged, failures keep
+# their type names, and the files the limits now fail are crafted
+# (measured in each module), so a bump would only re-run every cached
+# OOXML row through a child to change none of them.
 EXTRACTOR_VERSIONS: dict[str, int] = {
     "doc": 1,
     "docx": 7,
@@ -810,13 +817,16 @@ def extract(
         # excluded above precisely because they are not per-payload.
         # Parser exceptions quote the document (text, member names), so
         # only the type is logged and persisted (#257). WARNING, since
-        # the attachment drops out of search (#871), rate limited.
-        _warn_failed(module_name, dispatch_via, type(exc).__name__)
+        # the attachment drops out of search (#871), rate limited. An
+        # OOXML extraction runs in a child process (#1040), which
+        # reports the type name of what it raised.
+        error_type = exc.type_name if isinstance(exc, OoxmlChildError) else type(exc).__name__
+        _warn_failed(module_name, dispatch_via, error_type)
         return ExtractionResult(
             status=STATUS_FAILED,
             extractor=_stamp_extractor(module_name, module_name),
             text=None,
-            error=type(exc).__name__,
+            error=error_type,
         )
 
     if extractor_name == "pdf-ocr-disabled":
@@ -1036,8 +1046,11 @@ def over_package_budget(
     compressed size, more than ``max_rels_bytes`` declared in relationship
     (``.rels``) members, or more than ``max_declared_bytes`` declared in
     all members together, stored or compressed. Reads only the central
-    directory, as ``_validate_zip_payload`` does; zipfile stops a member
-    at its declared size when the library reads it. A payload that is not
+    directory, as ``_validate_zip_payload`` does. zipfile returns no more
+    of a member than its declared size, but decompresses the member's
+    whole stream first, so a member that understates its size is
+    expanded anyway; the extractors call this in their child process,
+    whose address-space limit bounds that (#1040). A payload that is not
     a ZIP is left to the library to reject."""
     import io
 
