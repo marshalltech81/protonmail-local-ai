@@ -1127,15 +1127,17 @@ audits") is answered with several exact lanes and their union (#992):
    messages; narrow it with `sender` or dates and report the narrowing
    as a gap.
 2. Union the rows by `claimant_id`, keeping the lane or lanes that
-   found each, and classify each row before counting it. Read further
-   in a row's thread (page `get_thread`, follow body offsets with
-   `get_message`) only while its relevance is still unclear from what
-   has been read, and always read its whole message before discarding
-   it; stop once relevance is established, as the smallest-sample
-   guidance above asks
-   ([`get_thread`](#get_thread), [`get_message`](#get_message)). Count
-   the rows kept, not the threads read, and report the rows dropped
-   with their lane.
+   found each, and classify each row before counting it. Read an
+   unclear row with [`get_message`](#get_message) first, by its
+   `claimant_id`, following its body offsets; page
+   [`get_thread`](#get_thread) only if the whole message is still
+   unclear and that wider scope was disclosed. Always read the whole
+   message before discarding a row, and stop once relevance is
+   established. A message with no indexed body returns parent-thread
+   context instead, so disclose that possibility before the first
+   read, and report such a row's missing body rather than discarding
+   it. Count the rows kept, not the threads read, and report the rows
+   dropped with their lane.
 
 The recipe supports this claim: the rows the lanes returned during the
 run, within their shared scope, subject to the snapshot caveat above.
