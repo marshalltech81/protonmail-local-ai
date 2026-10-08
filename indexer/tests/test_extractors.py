@@ -3089,6 +3089,43 @@ class TestPdfPageLevelOcr:
         assert "SYNTHETIC_FILENAME_MARKER" not in caplog.text
         assert self.SCANNED not in caplog.text
 
+    @pytest.mark.parametrize(
+        "layout, cap, ocr, fail, status, skipped, ocr_calls",
+        [
+            # Capped: the pages past the cap are recorded on the result.
+            ("d" + "s" * 30, 5, True, False, STATUS_SUCCESS, 25, 5),
+            # Every scanned page read, or none to read: known, zero.
+            ("sss", 20, True, False, STATUS_SUCCESS, 0, 3),
+            ("dd", 1, True, False, STATUS_SUCCESS, 0, 0),
+            # OCR off with enough digital text: the cap never applied.
+            ("dd", 1, False, False, STATUS_SUCCESS, 0, 0),
+            # Capped, then OCR failed: the digital text is kept, and the
+            # capped pages are as unread as before.
+            ("dsss", 1, True, True, STATUS_SUCCESS, 2, 1),
+            # OCR off on a scanned PDF: ``unsupported``, nothing known.
+            ("sss", 1, False, False, STATUS_UNSUPPORTED, None, 0),
+            # OCR failed with no digital text: ``failed``, nothing known.
+            ("sss", 1, True, True, STATUS_FAILED, None, 1),
+        ],
+    )
+    def test_result_records_the_pages_the_cap_skipped(
+        self, monkeypatch, tmp_path, layout, cap, ocr, fail, status, skipped, ocr_calls
+    ):
+        """#891: the count the cap left unread travels on the result, so
+        the extraction cache can keep it. The text is unchanged."""
+        work = self._fake_ocr(monkeypatch, tmp_path, fail=fail)
+        result = self._extract(layout, max_ocr_pages=cap, ocr_enabled=ocr)
+        assert result.status == status
+        assert result.ocr_pages_skipped == skipped
+        assert work["ocr_calls"] == ocr_calls
+
+    def test_the_count_does_not_carry_into_the_next_extraction(self, monkeypatch, tmp_path):
+        self._fake_ocr(monkeypatch, tmp_path)
+        assert self._extract("d" + "s" * 30, max_ocr_pages=5).ocr_pages_skipped == 25
+        assert self._extract("dss", max_ocr_pages=5).ocr_pages_skipped == 0
+        text = extract(content_type="text/plain", filename="a.txt", payload=b"plain words")
+        assert (text.status, text.ocr_pages_skipped) == (STATUS_SUCCESS, None)
+
     @staticmethod
     def _fail_pypdf_pages(monkeypatch, failing: set[int]) -> None:
         """Make pypdf raise on the pages at these 0-based indexes: the

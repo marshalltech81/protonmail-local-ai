@@ -116,9 +116,15 @@ class TestSchema:
 
     def test_fresh_install_is_stamped_the_current_version(self, db):
         """A fresh install creates the current schema directly and stamps
-        v2 (#1144), skipping the migration files."""
-        assert SCHEMA_VERSION == 2
-        assert db._conn.execute("SELECT version FROM schema_version").fetchone()[0] == 2
+        v3 (#891), skipping the migration files."""
+        assert SCHEMA_VERSION == 3
+        assert db._conn.execute("SELECT version FROM schema_version").fetchone()[0] == 3
+
+    def test_fresh_install_has_a_nullable_ocr_pages_skipped_column(self, db):
+        """#891: a count, NULL when unknown, with no default."""
+        cols = {r["name"]: r for r in db._conn.execute("PRAGMA table_info(attachment_extractions)")}
+        col = cols["ocr_pages_skipped"]
+        assert (col["type"], col["notnull"], col["dflt_value"]) == ("INTEGER", 0, None)
 
     def test_fresh_install_has_a_nullable_sender_ambiguous_column(self, db):
         """#1144: 0, 1 or NULL (not yet assessed), with no default."""
@@ -310,7 +316,7 @@ class TestMigrationV1:
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [1, 2]" in caplog.text
+        assert "applied migrations: [1, 2, 3]" in caplog.text
         assert "SYNTHETIC" not in caplog.text
 
     def test_v0_rows_are_carried_over_under_their_stamps_module(self, tmp_path):
@@ -419,10 +425,19 @@ class TestMigrationV1:
 
 
 def _v1_from_fresh(db: Database) -> None:
-    """Turn a fresh database into the v1 shape: v1 is the current schema
+    """Turn a fresh database into the v1 shape: v1 is the v2 schema
     without ``messages.sender_ambiguous`` (#1144)."""
+    _v2_from_fresh(db)
     db._conn.execute("ALTER TABLE messages DROP COLUMN sender_ambiguous")
     db._conn.execute("UPDATE schema_version SET version = 1")
+    db._conn.commit()
+
+
+def _v2_from_fresh(db: Database) -> None:
+    """Turn a fresh database into the v2 shape: v2 is the current schema
+    without ``attachment_extractions.ocr_pages_skipped`` (#891)."""
+    db._conn.execute("ALTER TABLE attachment_extractions DROP COLUMN ocr_pages_skipped")
+    db._conn.execute("UPDATE schema_version SET version = 2")
     db._conn.commit()
 
 
@@ -438,12 +453,15 @@ class TestMigrationV2:
         migrated = Database(tmp_path / "v1.db")
         fresh = Database(tmp_path / "fresh.db")
         try:
-            assert migrated._conn.execute("SELECT version FROM schema_version").fetchone()[0] == 2
+            assert (
+                migrated._conn.execute("SELECT version FROM schema_version").fetchone()[0]
+                == SCHEMA_VERSION
+            )
             assert _schema_shape(migrated._conn) == _schema_shape(fresh._conn)
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [2]" in caplog.text
+        assert "applied migrations: [2, 3]" in caplog.text
 
     def test_the_migrated_column_rejects_other_values(self, tmp_path):
         db = Database(tmp_path / "v1.db")
@@ -455,6 +473,65 @@ class TestMigrationV2:
             db.upsert_thread(make_thread(messages=[msg]), FAKE_EMBEDDING)
             with pytest.raises(sqlite3.IntegrityError, match="CHECK"):
                 db._conn.execute("UPDATE messages SET sender_ambiguous = 2")
+        finally:
+            db.close()
+
+
+class TestMigrationV3:
+    """#891: v2 -> v3 adds ``attachment_extractions.ocr_pages_skipped``,
+    NULL (unknown) on every existing row. The column is the extractor's,
+    not the parser's, so nothing is re-queued and nothing re-extracted."""
+
+    @staticmethod
+    def _v2_with_rows(path) -> None:
+        db = Database(path)
+        _v2_from_fresh(db)
+        db._conn.execute(
+            "INSERT INTO attachment_extractions (attachment_id, extractor_module, "
+            "extraction_status, extractor, extracted_text, extraction_error, extracted_at) "
+            "VALUES ('h-pdf', 'pdf', 'success', 'pdf-ocr@5', 'SYNTHETIC_PDF_TEXT', NULL, "
+            "'2026-10-01T00:00:00+00:00')"
+        )
+        db._conn.execute(
+            "INSERT INTO indexed_files (filepath, content_hash, indexed_at) "
+            "VALUES ('/m/one', 'c', '2026-10-01T00:00:00+00:00')"
+        )
+        db._conn.commit()
+        db.close()
+
+    def test_v2_database_migrates_to_the_fresh_v3_shape(self, tmp_path, caplog):
+        caplog.set_level("INFO")
+        self._v2_with_rows(tmp_path / "v2.db")
+        migrated = Database(tmp_path / "v2.db")
+        fresh = Database(tmp_path / "fresh.db")
+        try:
+            assert migrated._conn.execute("SELECT version FROM schema_version").fetchone()[0] == 3
+            assert _schema_shape(migrated._conn) == _schema_shape(fresh._conn)
+        finally:
+            migrated.close()
+            fresh.close()
+        assert "applied migrations: [3]" in caplog.text
+        assert "SYNTHETIC" not in caplog.text
+
+    def test_existing_rows_are_unknown_and_nothing_is_queued(self, tmp_path):
+        self._v2_with_rows(tmp_path / "v2.db")
+        db = Database(tmp_path / "v2.db")
+        try:
+            row = db.get_attachment_extraction("h-pdf", "pdf")
+            assert row["ocr_pages_skipped"] is None
+            assert row["extracted_text"] == "SYNTHETIC_PDF_TEXT"
+            assert row["extractor"] == "pdf-ocr@5"
+            # Not a parser column: no reparse job (``REPARSE_ENQUEUE_SQL``).
+            assert db._conn.execute("SELECT COUNT(*) FROM indexing_jobs").fetchone()[0] == 0
+        finally:
+            db.close()
+
+    def test_the_migrated_column_rejects_a_negative_count(self, tmp_path):
+        self._v2_with_rows(tmp_path / "v2.db")
+        db = Database(tmp_path / "v2.db")
+        try:
+            with pytest.raises(sqlite3.IntegrityError, match="CHECK"):
+                db._conn.execute("UPDATE attachment_extractions SET ocr_pages_skipped = -1")
         finally:
             db.close()
 
@@ -2620,6 +2697,44 @@ class TestAttachmentExtractionCache:
         row = db.get_attachment_extraction(attachment_id, "pdf")
         assert row["extraction_status"] == "success"
         assert row["extracted_text"] == "now we have text"
+
+    @pytest.mark.parametrize("skipped", [None, 0, 7])
+    def test_ocr_pages_skipped_roundtrips_and_is_replaced(self, db, skipped):
+        """#891: the PDF OCR cap's skipped-page count is stored with the
+        row (NULL = unknown) and replaced with it."""
+        attachment_id = "hash-f" * 8
+        db.store_attachment_extraction(
+            attachment_id=attachment_id,
+            extractor_module="pdf",
+            extraction_status="success",
+            extractor="pdf-ocr@5",
+            extracted_text="text",
+            extraction_error=None,
+            ocr_pages_skipped=3,
+        )
+        assert db.get_attachment_extraction(attachment_id, "pdf")["ocr_pages_skipped"] == 3
+        db.store_attachment_extraction(
+            attachment_id=attachment_id,
+            extractor_module="pdf",
+            extraction_status="success",
+            extractor="pdf-ocr@5",
+            extracted_text="text",
+            extraction_error=None,
+            ocr_pages_skipped=skipped,
+        )
+        assert db.get_attachment_extraction(attachment_id, "pdf")["ocr_pages_skipped"] == skipped
+
+    def test_ocr_pages_skipped_defaults_to_unknown(self, db):
+        attachment_id = "hash-g" * 8
+        db.store_attachment_extraction(
+            attachment_id=attachment_id,
+            extractor_module="text",
+            extraction_status="success",
+            extractor="text@3",
+            extracted_text="text",
+            extraction_error=None,
+        )
+        assert db.get_attachment_extraction(attachment_id, "text")["ocr_pages_skipped"] is None
 
 
 class TestChunkKind:

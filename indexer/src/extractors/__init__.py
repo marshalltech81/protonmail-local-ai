@@ -36,7 +36,7 @@ import os
 import zipfile
 from collections.abc import Callable
 from dataclasses import dataclass
-from threading import Lock
+from threading import Lock, local
 
 import defusedxml
 from PIL import Image
@@ -94,6 +94,9 @@ ZIP_MAX_UNCOMPRESSED_BYTES = 200 * 1024 * 1024
 #   or the OCR cap leaving the page unread).
 # * ``ocr_capped_pdfs`` / ``ocr_pages_skipped``: scanned PDFs whose OCR
 #   stopped at ``max_ocr_pages``, and the scanned pages left unread.
+#   ``attachment_indexing.record_committed_outcomes`` adds the capped
+#   PDFs served from the cache or the batch, per committed occurrence
+#   (#891).
 # * ``ocr_capped_images``: multipage images (TIFF) whose OCR stopped at
 #   ``max_ocr_pages`` with a frame left unread (#885). Their unread
 #   frames are not counted: the image extractor seeks one frame past
@@ -169,6 +172,19 @@ def note_ocr_capped(pages_skipped: int) -> None:
     with _counts_lock:
         _ocr_capped_pdfs += 1
         _ocr_pages_skipped += pages_skipped
+
+
+# The pages the PDF OCR cap skipped in the extraction running on this
+# thread (#891): ``extract`` sets it before a PDF extractor runs and reads
+# it after, so the count lands on the result without changing every
+# extractor's return shape.
+_attempt = local()
+
+
+def record_ocr_pages_skipped(pages_skipped: int) -> None:
+    """Record on the running extraction's result the scanned pages the
+    PDF OCR cap left unread."""
+    _attempt.ocr_pages_skipped = pages_skipped
 
 
 def note_ocr_capped_image() -> None:
@@ -281,12 +297,18 @@ class ExtractionResult:
       treats this as terminal for the attachment (won't keep
       retrying), but a future re-extraction sweep can re-run after a
       library upgrade.
+
+    ``ocr_pages_skipped`` is the scanned pages the PDF OCR page cap left
+    unread (#891): set on a ``success`` or ``empty`` PDF result (0 when
+    none), ``None`` (unknown) otherwise. Kept with the cached row so an
+    occurrence served from the cache still counts as capped.
     """
 
     status: str
     extractor: str | None
     text: str | None
     error: str | None
+    ocr_pages_skipped: int | None = None
 
 
 # Version of each extractor module whose output changed for the same
@@ -732,6 +754,9 @@ def extract(
                 error=zip_error,
             )
 
+    # Known zero for a PDF unless its OCR cap records a count; unknown for
+    # every other module (#891).
+    _attempt.ocr_pages_skipped = 0 if module_name == "pdf" else None
     try:
         text, extractor_name = extractor_fn(
             payload,
@@ -795,6 +820,7 @@ def extract(
         )
 
     extractor_name = _stamp_extractor(module_name, extractor_name)
+    ocr_pages_skipped = _attempt.ocr_pages_skipped
     cleaned = (text or "").strip()
     if not cleaned:
         return ExtractionResult(
@@ -802,6 +828,7 @@ def extract(
             extractor=extractor_name,
             text=None,
             error=None,
+            ocr_pages_skipped=ocr_pages_skipped,
         )
     if max_extracted_chars is not None and len(cleaned) > max_extracted_chars:
         # Text past the cap is not indexed: WARNING, rate limited (#903).
@@ -819,6 +846,7 @@ def extract(
         extractor=extractor_name,
         text=cleaned,
         error=None,
+        ocr_pages_skipped=ocr_pages_skipped,
     )
 
 

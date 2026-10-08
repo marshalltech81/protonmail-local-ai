@@ -55,7 +55,9 @@ from .extractors import (
     extraction_module,
     is_stale_extractor,
     label_extraction_modules,
+    note_ocr_capped,
     ole2_extraction_module,
+    warn_rate_limited,
 )
 from .extractors import (
     extract as extract_attachment,
@@ -157,9 +159,22 @@ _DEGRADED_FIELDS = (
 
 
 def record_committed_outcomes(plans: list[AttachmentWritePlan]) -> None:
-    """Count the outcome of each plan of a message whose writes committed."""
+    """Count the outcome of each plan of a message whose writes committed.
+
+    A plan served from the cache or the batch whose result the PDF OCR
+    cap cut is counted as capped here, as the PDF extractor counts a
+    fresh extraction (#891), and logs the same rate-limited WARNING. An
+    unknown count (``None``, a row cached before schema v3) counts as
+    nothing."""
     for plan in plans:
         attachment_outcomes.record(plan.status, plan.extraction_error, cached=plan.cached)
+        if plan.cached and plan.ocr_pages_skipped:
+            note_ocr_capped(plan.ocr_pages_skipped)
+            warn_rate_limited(
+                log,
+                "pdf OCR capped: cached result is missing %d scanned pages",
+                plan.ocr_pages_skipped,
+            )
 
 
 def attachment_outcomes_degraded(counts: dict[str, int]) -> bool:
@@ -365,6 +380,9 @@ class AttachmentWritePlan:
     # commits (``record_committed_outcomes``).
     extraction_error: str | None = None
     cached: bool = False
+    # The scanned PDF pages the OCR cap left unread in that result, or
+    # ``None`` when unknown (#891).
+    ocr_pages_skipped: int | None = None
 
 
 def _resolve_extracted_text(
@@ -379,11 +397,12 @@ def _resolve_extracted_text(
     max_pdf_pages: int | None = None,
     batch_extractions: dict[tuple[str, str], ExtractionResult] | None = None,
     on_progress: Callable[[], None] | None = None,
-) -> tuple[str | None, str, ExtractionResult | None, str | None, bool]:
-    """Return ``(text, status, extraction_to_persist, error, cached)``:
-    ``error`` is the extraction error behind ``status`` and ``cached``
-    whether the result was served without extracting, for the outcome
-    counts.
+) -> tuple[str | None, str, ExtractionResult | None, str | None, bool, int | None]:
+    """Return ``(text, status, extraction_to_persist, error, cached,
+    ocr_pages_skipped)``: ``error`` is the extraction error behind
+    ``status``, ``cached`` whether the result was served without
+    extracting and ``ocr_pages_skipped`` the result's OCR-cap count
+    (``None`` when unknown), for the outcome counts.
 
     A successful cache hit short-circuits and returns the stored text
     with ``extraction_to_persist=None`` so the apply phase does not
@@ -407,7 +426,7 @@ def _resolve_extracted_text(
     pending = batch_extractions.get(key) if batch_extractions is not None else None
     if pending is not None:
         text = pending.text if pending.status == STATUS_SUCCESS else None
-        return text, pending.status, pending, pending.error, True
+        return text, pending.status, pending, pending.error, True, pending.ocr_pages_skipped
 
     cached = db.get_attachment_extraction(attachment.content_hash, module)
     # A row written by an older version of a since-fixed extractor would
@@ -423,7 +442,14 @@ def _resolve_extracted_text(
         # return ``None`` text so the caller skips chunking but the
         # apply phase also skips re-persisting an unchanged row.
         text = cached["extracted_text"] if cached["extraction_status"] == STATUS_SUCCESS else None
-        return text, cached["extraction_status"], None, cached["extraction_error"], True
+        return (
+            text,
+            cached["extraction_status"],
+            None,
+            cached["extraction_error"],
+            True,
+            cached["ocr_pages_skipped"],
+        )
 
     result = extract_attachment(
         content_type=attachment.content_type,
@@ -440,7 +466,7 @@ def _resolve_extracted_text(
     if batch_extractions is not None:
         batch_extractions[key] = result
     text = result.text if result.status == STATUS_SUCCESS else None
-    return text, result.status, result, result.error, False
+    return text, result.status, result, result.error, False, result.ocr_pages_skipped
 
 
 def prepare_attachment_writes(
@@ -490,7 +516,14 @@ def prepare_attachment_writes(
         occurrence_index=occurrence_index,
     )
 
-    text, status, extraction_to_persist, extraction_error, cached = _resolve_extracted_text(
+    (
+        text,
+        status,
+        extraction_to_persist,
+        extraction_error,
+        cached,
+        ocr_pages_skipped,
+    ) = _resolve_extracted_text(
         attachment=attachment,
         db=db,
         ocr_enabled=ocr_enabled,
@@ -517,6 +550,7 @@ def prepare_attachment_writes(
             extraction_to_persist=extraction_to_persist,
             extraction_error=extraction_error,
             cached=cached,
+            ocr_pages_skipped=ocr_pages_skipped,
         )
 
     # Chunk the extracted text. The chunker takes
@@ -540,6 +574,7 @@ def prepare_attachment_writes(
         chunks=chunks,
         extraction_error=extraction_error,
         cached=cached,
+        ocr_pages_skipped=ocr_pages_skipped,
     )
 
 
@@ -592,6 +627,7 @@ def apply_attachment_writes(
             extractor=result.extractor,
             extracted_text=result.text,
             extraction_error=result.error,
+            ocr_pages_skipped=result.ocr_pages_skipped,
         )
 
     if not plan.chunks or plan.status != STATUS_SUCCESS:
