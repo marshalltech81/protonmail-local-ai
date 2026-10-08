@@ -649,12 +649,13 @@ under about 80 characters.
 - Owner decisions (owner, 2026-10-08): every decision or recommendation
   brought to the owner (a re-scope trigger, a `decision` issue, a
   choice between options) first goes to a two-reviewer panel, Claude
-  Fable 5.1 and Codex GPT-6.1 Sol, both at high reasoning effort,
-  reviewing read-only against the code, with a round in which each
-  answers the other. Recommend the option that gives the most
-  accurate outcome, with its cost and any split the panel could not
-  settle, for the owner to approve. Briefs carry code and design
-  only, never mailbox content.
+  Fable 5.1 and Codex GPT-6.1 Sol, both at high reasoning effort. Each
+  assesses it independently and read-only against the code, then they
+  exchange views until they agree or three rounds pass. Verify their
+  file and line claims, and present one recommendation for the owner
+  to approve: the option that gives the most accurate outcome first,
+  its cost, and any split the panel could not settle. Briefs carry
+  code and design only, never mailbox content.
 - File P3 findings as issues rather than fixing them ahead of
   go-live or P1/P2 work. Exception (owner, 2026-10-02): a small P3
   with an agreed fix and no new mechanism may be fixed before go-live.
@@ -674,13 +675,6 @@ under about 80 characters.
   only with that issue's link in the reply, and the PR's "Not done"
   lists it. Nothing found stays only in a thread, a PR body or a
   commit message.
-- Owner decisions (owner, 2026-10-08): before bringing the owner a
-  design choice, have Claude (Fable 5.1, high effort) and Codex
-  (GPT-6.1-Sol, high reasoning) each assess it independently and
-  read-only in the repository, then exchange views until they agree
-  or three rounds pass. Verify their file and line claims, and present
-  one recommendation: the most accurate option first, its cost, and
-  where the two disagreed. Never put mailbox content in the brief.
 - Merge (squash) only on the owner's explicit go-ahead.
 
 ## Review guidelines
