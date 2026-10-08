@@ -21,8 +21,9 @@ with a reason.
   config --format json`` over every overlay) must be a literal Python
   read in that service's ``src/`` (``_NOT_READ_BY_PYTHON`` names the
   exceptions). A key counts as consumed when its value reaches such an
-  environment under its own name (Compose resolves the files with each
-  key set to a marker, base file first) and that service reads it; a
+  environment under its own name (Compose resolves the base file alone,
+  as ``make up`` runs it, and with each overlay, every key set to a
+  marker) and that service reads it; a
   key a Python service reads must reach that service, so a shared
   setting dropped from one service fails. ``_IDENTITY_SETTINGS``
   entries are not reads here: a name hashed for the config identity but
@@ -141,18 +142,21 @@ def _compose_files(repo: Path) -> list[Path]:
     return [base, *overlays]
 
 
-def _compose_config_json(repo: Path, *flags: str, env: dict[str, str] | None = None):
-    """``docker compose config <flags> --format json`` over every overlay,
-    parsed. ``env`` overrides the named variables (a shell variable wins
-    over ``.env``)."""
+def _compose_config_json(
+    repo: Path, *flags: str, env: dict[str, str] | None = None, files: list[Path] | None = None
+):
+    """``docker compose config <flags> --format json`` over ``files``
+    (default: every file, base first), parsed. ``env`` overrides the named
+    variables (a shell variable wins over ``.env``)."""
     docker = shutil.which("docker")
     if docker is None:
         if os.environ.get("CI"):
             pytest.fail("docker is required in CI to read the Compose configuration")
         pytest.skip("docker is not installed")
-    files = [arg for path in _compose_files(repo) for arg in ("-f", str(path))]
+    paths = _compose_files(repo) if files is None else files
+    args = [arg for path in paths for arg in ("-f", str(path))]
     result = subprocess.run(  # nosec B603 - fixed argv, no shell
-        [docker, "compose", *files, "config", *flags, "--format", "json"],
+        [docker, "compose", *args, "config", *flags, "--format", "json"],
         cwd=repo,
         env={**os.environ, **(env or {})},
         capture_output=True,
@@ -170,30 +174,49 @@ def _compose_variables(repo: Path) -> set[str]:
     return set(_compose_config_json(repo, "--variables"))
 
 
-def _service_environments(repo: Path) -> dict[str, set[str]]:
-    """Each service's environment names as Compose resolves them (every
-    overlay merged, value-less entries and nested defaults included).
+def _compose_combinations(repo: Path) -> list[list[Path]]:
+    """The file sets a deployment runs: the base file alone (``make up``)
+    and the base file with each overlay, as ``scripts/tests/compose_test.sh``
+    checks them."""
+    base, *overlays = _compose_files(repo)
+    return [[base], *([base, overlay] for overlay in overlays)]
+
+
+def _service_environments(repo: Path) -> list[dict[str, set[str]]]:
+    """Per file combination, each service's environment names as Compose
+    resolves them (value-less entries and nested defaults included).
     Names only: the values are never kept."""
-    services = _compose_config_json(repo)["services"]
-    return {name: set(svc.get("environment") or {}) for name, svc in services.items()}
+    environments = []
+    for files in _compose_combinations(repo):
+        services = _compose_config_json(repo, files=files)["services"]
+        environments.append(
+            {name: set(svc.get("environment") or {}) for name, svc in services.items()}
+        )
+    return environments
 
 
 def _delivered(repo: Path) -> set[tuple[str, str]]:
     """``(service, KEY)`` for each ``.env.example`` key whose value reaches
-    that service's environment under its own name. Compose resolves the
-    configuration with every key set to a distinct numeric marker (a
-    valid port, since ``MCP_PORT`` is published), so a fixed value, or a
-    value interpolated from another name, does not count. Only the
-    markers are compared; no real ``.env`` value is kept."""
+    that service's environment under its own name in every file
+    combination. Compose resolves the configuration with every key set to
+    a distinct numeric marker (a valid port, since ``MCP_PORT`` is
+    published), so a fixed value, or a value interpolated from another
+    name, does not count. Only the markers are compared; no real ``.env``
+    value is kept."""
     keys = sorted(_example_keys(repo / ".env.example"))
     markers = {key: str(40000 + i) for i, key in enumerate(keys)}
-    services = _compose_config_json(repo, env=markers)["services"]
-    return {
-        (service, key)
-        for service, svc in services.items()
-        for key, value in (svc.get("environment") or {}).items()
-        if key in markers and value == markers[key]
-    }
+    per_combination = []
+    for files in _compose_combinations(repo):
+        services = _compose_config_json(repo, env=markers, files=files)["services"]
+        per_combination.append(
+            {
+                (service, key)
+                for service, svc in services.items()
+                for key, value in (svc.get("environment") or {}).items()
+                if key in markers and value == markers[key]
+            }
+        )
+    return set.intersection(*per_combination)
 
 
 # A key line, set (``VAR=``) or commented out (``# VAR=``).
@@ -278,13 +301,13 @@ def _service_python_reads(repo: Path, service: str) -> set[str]:
 
 def _unread_pass_throughs(repo: Path) -> set[str]:
     """``service:NAME`` for each name a Python service's resolved
-    environment sets that its ``src/`` does not read: a stale
-    pass-through."""
+    environment sets, in any file combination, that its ``src/`` does
+    not read: a stale pass-through."""
     environments = _service_environments(repo)
     return {
         f"{service}:{name}"
         for service in _PYTHON_SERVICES
-        for name in environments[service]
+        for name in set().union(*(env[service] for env in environments))
         - _service_python_reads(repo, service)
         - set(_NOT_READ_BY_PYTHON.get(service, {}))
     }
@@ -333,14 +356,16 @@ def _stale_shell_only(repo: Path) -> set[str]:
 
 
 def _stale_not_read_by_python(repo: Path) -> set[str]:
-    """``_NOT_READ_BY_PYTHON`` entries no longer in their service's
-    resolved environment, or now read by its ``src/``."""
+    """``_NOT_READ_BY_PYTHON`` entries missing from their service's
+    resolved environment in any file combination, or now read by its
+    ``src/``."""
     environments = _service_environments(repo)
     return {
         f"{service}:{name}"
         for service, names in _NOT_READ_BY_PYTHON.items()
         for name in names
-        if name not in environments[service] or name in _service_python_reads(repo, service)
+        if any(name not in env[service] for env in environments)
+        or name in _service_python_reads(repo, service)
     }
 
 
@@ -508,10 +533,10 @@ def test_reverse_check_exclusions_are_still_needed_and_reasoned():
 
 def test_the_resolved_environments_are_read():
     # A Compose call that silently returned nothing would pass vacuously.
-    environments = _service_environments(_REPO)
-    assert {"EMBED_MODEL", "HOME"} <= environments["indexer"]
-    assert {"RERANK_CANDIDATES", "MCP_PORT"} <= environments["mcp-server"]
-    assert {"BRIDGE_USER", "SYNC_INTERVAL"} <= environments["mbsync"]
+    for environments in _service_environments(_REPO):
+        assert {"EMBED_MODEL", "HOME"} <= environments["indexer"]
+        assert {"RERANK_CANDIDATES", "MCP_PORT"} <= environments["mcp-server"]
+        assert {"BRIDGE_USER", "SYNC_INTERVAL"} <= environments["mbsync"]
 
 
 @pytest.fixture
@@ -630,6 +655,32 @@ def test_a_read_setting_dropped_from_one_service_is_caught(reverse_copy):
     (reverse_copy / "docker-compose.yml").write_text(head + tail, encoding="utf-8")
     assert _undelivered_reads(reverse_copy) == {"mcp-server:EMBED_MODEL"}
     assert not _dead_keys(reverse_copy)
+
+
+def test_a_binding_only_an_overlay_supplies_is_caught(reverse_copy):
+    # ``make up`` runs the base file alone, so a setting that only an
+    # optional overlay passes never reaches the default deployment.
+    _replace_once(reverse_copy / "docker-compose.yml", _RERANK_CANDIDATES_LINE, "")
+    (reverse_copy / "docker-compose.extra929.yml").write_text(
+        "services:\n  mcp-server:\n    environment:\n" + _RERANK_CANDIDATES_LINE,
+        encoding="utf-8",
+    )
+    assert _dead_keys(reverse_copy) == {"RERANK_CANDIDATES"}
+    assert _undelivered_reads(reverse_copy) == {"mcp-server:RERANK_CANDIDATES"}
+
+
+def test_an_exclusion_only_an_overlay_supplies_is_stale(reverse_copy):
+    _replace_once(reverse_copy / "docker-compose.yml", "      HOME: /home/indexer\n", "")
+    (reverse_copy / "docker-compose.extra929.yml").write_text(
+        "services:\n  indexer:\n    environment:\n      HOME: /home/indexer\n",
+        encoding="utf-8",
+    )
+    assert _stale_not_read_by_python(reverse_copy) == {"indexer:HOME"}
+
+
+def test_every_overlay_combination_is_resolved():
+    names = [[p.name for p in files] for files in _compose_combinations(_REPO)]
+    assert names == [["docker-compose.yml"], ["docker-compose.yml", "docker-compose.hardened.yml"]]
 
 
 def test_every_env_example_key_a_python_service_reads_reaches_it():
