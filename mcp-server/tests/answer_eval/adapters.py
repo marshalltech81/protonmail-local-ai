@@ -4,8 +4,8 @@ The case schema, the capture, the deterministic graders, the judge
 rubric and the reports are shared by every tool (#656: extend, not
 fork). What differs per tool is collected here: the handler's output
 model, which captured evidence map describes the prompt the model saw,
-and ``AnswerView``, the one shape of a tool's output that the graders,
-the judge and the reports read.
+how many provider calls a case makes, and ``AnswerView``, the one shape
+of a tool's output that the graders, the judge and the reports read.
 
 - ``ask_mailbox``: the answer, its statements, citations, the threads
   searched and the server's coverage note, as the tool returns them.
@@ -24,29 +24,61 @@ the judge and the reports read.
   Neither tool writes a coverage note: what the prompt budget left out
   is stated only in the prompt, so a ``disclose_missing`` case cannot
   pass for them.
-
-``extract_from_emails`` has no adapter yet (#1137).
+- ``extract_from_emails`` (#1137): each record is one statement,
+  rendered as ``field: value [E1]; ...`` with the labels its
+  server-checked ``_evidence`` cites, so the citation checks,
+  ``must_include`` and the judge's per-statement claims apply to records
+  as they do to prose. The answer is those statements, one per line.
+  The tool's ``notice`` is the coverage note, and there is no repair
+  call. A notice opening ``Incomplete:`` (some searched thread's reply
+  was cut off, malformed or nonconforming) makes the view incomplete,
+  with or without records. With no records and a complete extraction
+  the view abstains (the flag, not the text, so no other tool's answer
+  can match it); with no records and an incomplete one it does not.
+  Field names are the case's own; values are provider output and reach
+  only the detail artifact, as answers do.
 """
 
+import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from src.lib.validation import clamp_int
+from src.tools.intelligence import _MAX_EXTRACT_LIMIT, _PROVENANCE_FIELDS
 from src.tools.outputs import (
     AnswerStatement,
     AskMailboxOutput,
     BriefIssueOutput,
     CheckConclusionOutput,
+    ExtractFromEmailsOutput,
     SummarizeThreadOutput,
 )
+
+from tests.answer_eval.cases import Case
 
 # Each tool's structured output, which the runner validates a result against.
 OUTPUT_MODELS: dict[str, type] = {
     "ask_mailbox": AskMailboxOutput,
     "summarize_thread": SummarizeThreadOutput,
+    "extract_from_emails": ExtractFromEmailsOutput,
     "brief_issue": BriefIssueOutput,
     "check_conclusion": CheckConclusionOutput,
 }
+
+# The extract view's answer when the tool returned no records (fixed
+# text): an abstention through the view's flag ...
+NO_RECORDS = "No records extracted"
+# ... unless the tool's notice reports an incomplete extraction.
+EXTRACTION_INCOMPLETE = "Extraction incomplete: no records"
+# How ``extract_from_emails`` opens its notice when a thread's reply was
+# cut off, not JSON, or a record failed the schema check (the fixed text
+# ``f"Incomplete: {failed} of {len(results)} threads could not be
+# extracted ..."`` in ``src/tools/intelligence.py``). An evidence or
+# structured-output note alone does not start with it.
+_INCOMPLETE_PREFIX = "Incomplete:"
+# ``extract_from_emails``'s default ``limit`` (one model call per thread).
+_EXTRACT_DEFAULT_LIMIT = 20
 
 
 @dataclass(frozen=True)
@@ -79,8 +111,11 @@ class AnswerView:
     # The tool's own abstention flag (the experimental tools'
     # ``insufficient_evidence``); the other tools abstain in words only.
     abstained: bool = False
-    # False when the tool could not parse the model's reply at all.
+    # False when the tool could not parse the model's reply at all, or
+    # (``extract_from_emails``) could not extract some searched thread.
     complete: bool = True
+    # ``extract_from_emails`` only: the records, for ``records_conform``.
+    records: list[dict[str, Any]] | None = field(default=None, repr=False)
 
 
 def view_of(tool: str, output: Any) -> AnswerView:
@@ -105,11 +140,58 @@ def view_of(tool: str, output: Any) -> AnswerView:
             output.coverage_note,
             output.repair_attempted,
         )
+    if tool == "extract_from_emails":
+        return _extract_view(output)
     if tool == "brief_issue":
         return _brief_view(output)
     if tool == "check_conclusion":
         return _check_view(output)
     raise KeyError(tool)
+
+
+def _record_statement(record: Mapping[str, Any]) -> AnswerStatement:
+    """One extracted record as a statement: ``field: value [E1]; ...``,
+    each value followed by the labels its (server-checked) ``_evidence``
+    entry cites; the provenance fields the server adds are left out."""
+    evidence = record.get("_evidence")
+    cited: Mapping[str, Any] = evidence if isinstance(evidence, Mapping) else {}
+    parts: list[str] = []
+    labels: list[str] = []
+    for name, value in record.items():
+        if name in _PROVENANCE_FIELDS:
+            continue
+        own = cited.get(name)
+        own_labels = [x for x in own if isinstance(x, str)] if isinstance(own, list) else []
+        parts.append(f"{name}: {json.dumps(value, ensure_ascii=False)}" + _cites(own_labels))
+        labels += [label for label in own_labels if label not in labels]
+    return AnswerStatement(
+        text="; ".join(parts) + ".", labels=labels, status="cited" if labels else "uncited"
+    )
+
+
+def _extract_view(output: ExtractFromEmailsOutput) -> AnswerView:
+    """Records as statements (``_record_statement``), the notice as the
+    coverage note; see the module docstring for no records."""
+    records = list(output.records)
+    statements = [_record_statement(r) for r in records]
+    notice = output.notice
+    incomplete = notice is not None and notice.startswith(_INCOMPLETE_PREFIX)
+    if statements:
+        answer = "\n".join(s.text for s in statements)
+    else:
+        answer = EXTRACTION_INCOMPLETE if incomplete else NO_RECORDS
+    return AnswerView(
+        answer,
+        output.threads,
+        output.citations,
+        output.citation_problems,
+        statements,
+        notice,
+        None,
+        abstained=not statements and not incomplete,
+        complete=not incomplete,
+        records=records,
+    )
 
 
 # The tools' own prose for a reply that set ``insufficient_evidence``.
@@ -246,8 +328,33 @@ def select_passages(tool: str, maps: Sequence[Mapping[str, Any]]) -> dict[str, A
     captured; none when retrieval found no message passage). ``summarize_thread``
     builds the shown map first and then, when the window cut the context,
     the map the tool's own caps alone would show (#949), so the first is
-    the prompt's.
+    the prompt's. ``extract_from_emails`` builds one map per searched
+    thread, each for its own prompt, with labels numbered across the
+    call, so they merge without collision.
     """
+    if tool == "extract_from_emails":
+        merged: dict[str, Any] = {}
+        for evidence_map in maps:
+            merged.update(evidence_map)
+        return merged
     if not maps:
         return {}
     return dict(maps[0] if tool == "summarize_thread" else maps[-1])
+
+
+def planned_calls(case: Case) -> tuple[int, int]:
+    """(answer calls, possible citation-repair calls) one case makes.
+
+    Every tool makes one call plus one repair when the first reply fails
+    its check, except ``extract_from_emails``: one call per searched
+    thread, at most its ``limit`` as the handler clamps it, and no repair.
+    """
+    if case.tool == "extract_from_emails":
+        limit = clamp_int(
+            case.arguments.get("limit", _EXTRACT_DEFAULT_LIMIT),
+            default=_EXTRACT_DEFAULT_LIMIT,
+            minimum=1,
+            maximum=_MAX_EXTRACT_LIMIT,
+        )
+        return limit, 0
+    return 1, 1

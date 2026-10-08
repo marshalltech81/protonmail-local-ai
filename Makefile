@@ -380,8 +380,9 @@ baseline: sync-indexer sync-mcp
 	( cd mcp-server && BASELINE_DIR="$$dir/out" uv run pytest -q --no-cov tests/baseline $(if $(filter 1,$(UPDATE)),--update-baseline) ); \
 	status=$$?; rm -rf "$$dir"; exit $$status
 
-# Opt-in answer-quality evaluation of ask_mailbox, summarize_thread and
-# the experimental brief_issue and check_conclusion (#604, #656, #1240;
+# Opt-in answer-quality evaluation of ask_mailbox, summarize_thread,
+# extract_from_emails (#1137) and the experimental brief_issue and
+# check_conclusion (#604, #656, #1240;
 # the experimental tools are registered for the run only, whatever
 # MCP_EXPERIMENTAL_TOOLS says): builds the synthetic baseline index,
 # runs every case through the real handler of its tool with the

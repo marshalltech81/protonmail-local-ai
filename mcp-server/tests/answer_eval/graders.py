@@ -6,7 +6,12 @@ citation check and the server's coverage note. Two checks also read a
 flag of the view, for the experimental tools (#1240), which state both
 in structured fields rather than in the text: ``abstention`` takes their
 ``insufficient_evidence`` as an abstention, and ``answer_complete``
-fails a reply they could not parse.
+fails a reply they could not parse. ``extract_from_emails`` (#1137)
+uses the same flags (no records from a complete extraction abstains;
+an ``Incomplete:`` notice fails ``answer_complete``), and
+``records_conform`` checks each record's shape (the provenance fields
+the server adds, and the schema's declared fields and types); a breach
+there is the tool's, not the model's.
 
 Each check is ``pass``, ``fail`` or ``not_applicable``. Evidence groups
 are scored at three stages, so a miss can be traced to where it
@@ -29,7 +34,12 @@ retrieval never found.
 import re
 from dataclasses import dataclass, field
 
-from src.tools.intelligence import _NOT_FOUND_PREFIX, _TRUNCATED_NOTICE_SUFFIXES
+from src.tools.intelligence import (
+    _NOT_FOUND_PREFIX,
+    _PROVENANCE_FIELDS,
+    _TRUNCATED_NOTICE_SUFFIXES,
+    _record_conforms,
+)
 
 from tests.answer_eval.cases import Case, message_id_of, thread_id_of
 from tests.answer_eval.runner import CaseRun, Passage
@@ -121,6 +131,21 @@ def is_abstention(answer: str) -> bool:
     return stripped.startswith(_NOT_FOUND_PREFIX) or stripped.startswith(_NO_RESULTS)
 
 
+def _record_shape_ok(record: object, schema: dict) -> bool:
+    """Shape only: an object carrying the server's provenance fields
+    (``_source_thread`` and ``_date`` strings, an ``_evidence`` object)
+    whose declared fields have the schema's types (the tool's own
+    ``_record_conforms``). Values are not judged here."""
+    return (
+        isinstance(record, dict)
+        and all(name in record for name in _PROVENANCE_FIELDS)
+        and isinstance(record["_source_thread"], str)
+        and isinstance(record["_date"], str)
+        and isinstance(record["_evidence"], dict)
+        and _record_conforms(record, schema)
+    )
+
+
 def _shows_evidence(case: Case, passage: Passage) -> bool:
     """Whether a supplied passage still shows the evidence it carries: a
     whole passage does; one cut to fit the budget does when it keeps the
@@ -208,6 +233,12 @@ def grade_run(case: Case, run: CaseRun) -> DeterministicResult:
     cut = answer.endswith(_TRUNCATED_NOTICE_SUFFIXES) or not out.complete
     checks["answer_complete"] = FAIL if cut else PASS
     checks["prompt_matches_capture"] = PASS if run.prompt_consistent else FAIL
+    if out.records is None:
+        checks["records_conform"] = NA
+    else:
+        schema = case.arguments["schema"]
+        conform = all(_record_shape_ok(r, schema) for r in out.records)
+        checks["records_conform"] = PASS if conform else FAIL
     result.citation_problem_kinds = sorted({p.kind for p in out.citation_problems})
     unknown = "unknown_labels" in result.citation_problem_kinds
     resolves = all(label in run.passages for label in cited_labels) and not unknown
@@ -303,6 +334,9 @@ def attribute(
         causes.append("synthesis")
     if det.checks.get("prompt_matches_capture") == FAIL or judge_error:
         causes.append("evaluator_infrastructure")
+    # A record the tool returned outside its own shape contract.
+    if det.checks.get("records_conform") == FAIL:
+        causes.append("answer_infrastructure")
     failing = not det.passed or semantic_failed or judge_error
     if failing and not causes:
         causes.append("unknown")

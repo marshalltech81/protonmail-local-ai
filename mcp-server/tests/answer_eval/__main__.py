@@ -28,7 +28,7 @@ import os
 import re
 import sqlite3
 import sys
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -36,9 +36,11 @@ from typing import Any
 from src.lib.inference import PromptBudget
 from src.lib.sqlite import Database
 
+from tests.answer_eval.adapters import planned_calls
 from tests.answer_eval.cases import (
     CASES_PATH,
     CASES_SCHEMA_VERSION,
+    Case,
     CaseError,
     is_case_id,
     load_cases,
@@ -84,13 +86,16 @@ def _check_output_path(path: Path, base: Path) -> Path:
     return resolved
 
 
-def _plan_calls(selected: int, env: Mapping[str, str]) -> None:
+def _plan_calls(cases: Sequence[Case], env: Mapping[str, str]) -> None:
     """Print the provider calls the run will make and apply
     ``EVAL_MAX_CALLS`` (#839), before the index build or any call.
 
-    Each case makes one answer call, plus one citation-repair call when
-    its first answer fails the citation check, and one judge call unless
-    ``JUDGE_MODE=none``. The cap applies to the most the run can make.
+    A case makes one answer call, plus one citation-repair call when its
+    first answer fails the citation check; an ``extract_from_emails``
+    case makes one call per searched thread, at most its ``limit``, and
+    no repair (``adapters.planned_calls``, #1137). Each case makes one
+    judge call unless ``JUDGE_MODE=none``. The cap applies to the most
+    the run can make.
     The model names are the operator's own settings.
 
     The API clients make one request per call (SDK retries are off). A
@@ -100,6 +105,9 @@ def _plan_calls(selected: int, env: Mapping[str, str]) -> None:
     caps them, so for those modes the figures are launches, not provider
     calls.
     """
+    selected = len(cases)
+    answers = sum(planned_calls(c)[0] for c in cases)
+    repairs = sum(planned_calls(c)[1] for c in cases)
     judge_mode = env.get("JUDGE_MODE", "none").strip().lower()
     answer_model = env.get("INFERENCE_MODEL", "").strip() or "(INFERENCE_MODEL unset)"
     judge_model = env.get("JUDGE_MODEL", "").strip() or "(JUDGE_MODEL unset)"
@@ -115,9 +123,9 @@ def _plan_calls(selected: int, env: Mapping[str, str]) -> None:
         )
     else:
         judge_calls, judge = selected, f"{selected} judge calls to {judge_model}"
-    most = 2 * selected + judge_calls
+    most = answers + repairs + judge_calls
     print(
-        f"Planned provider calls: {selected} answer calls to {answer_model} (up to {selected} "
+        f"Planned provider calls: {answers} answer calls to {answer_model} (up to {repairs} "
         f"more for citation repairs) and {judge}; at most {most} {unit}.",
         file=sys.stderr,
     )
@@ -152,7 +160,7 @@ def _run(args: argparse.Namespace) -> int:
         if unknown:
             raise CaseError(f"unknown case ids: {sorted(unknown)}")
         cases = [c for c in cases if c.id in set(args.case)]
-    _plan_calls(len(cases), os.environ)
+    _plan_calls(cases, os.environ)
     if args.preflight:
         # make runs this before building the index, so a bad argument
         # fails in seconds (#814).

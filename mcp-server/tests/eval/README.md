@@ -394,9 +394,9 @@ The smallest extension, proposed and not built:
 ## Answer-quality evaluation (intelligence and experimental tools; synthetic corpus)
 
 `tests/answer_eval/` runs the real `ask_mailbox` and `summarize_thread`
-handlers (#656) and the experimental `brief_issue` and
-`check_conclusion` handlers (#1240; `extract_from_emails` has no
-adapter yet, #1137), captures what each
+handlers (#656), the `extract_from_emails` handler (#1137) and the
+experimental `brief_issue` and `check_conclusion` handlers (#1240),
+captures what each
 model call actually received, and grades the answer twice:
 deterministic checks first, then an optional, separately configured AI
 judge. It is an offline development tool (#604): it changes nothing in
@@ -421,9 +421,9 @@ Cases must never be built from real mail.
 ### Cases
 
 `tests/answer_eval/cases.json` (schema v1, loaded and validated by
-`cases.py`) holds 53 cases over the baseline corpus: 47 for
-`ask_mailbox`, two for `summarize_thread` and two smoke cases for each
-experimental tool (below). The `ask_mailbox` cases: exact facts
+`cases.py`) holds 56 cases over the baseline corpus: 47 for
+`ask_mailbox`, two for `summarize_thread`, three smoke cases for
+`extract_from_emails` and two for each experimental tool (below). The `ask_mailbox` cases: exact facts
 (including a rate before and a different one after a stated future date
 in one notice, asked for 2027 and for after the change:
 `ask-darkroom-rate-2027` and `ask-darkroom-from-2028`, #911; and
@@ -473,9 +473,9 @@ xfail that a fix turns into a pass. Held-out membership is
 held-out cases.
 
 **Other tools (#656).** A case's `tool` is `ask_mailbox`,
-`summarize_thread`, `brief_issue` or `check_conclusion`, and its id
-starts with the tool's short name (`ask-`, `summarize-`, `brief-`,
-`check-`). A
+`summarize_thread`, `extract_from_emails`, `brief_issue` or
+`check_conclusion`, and its id starts with the tool's short name
+(`ask-`, `summarize-`, `extract-`, `brief-`, `check-`). A
 `summarize_thread` case names a baseline thread ID directly and one of
 the tool's four styles (the handler would summarize any other as
 `brief`); nothing is embedded for it, and its evidence and fact
@@ -488,6 +488,18 @@ against the answer or the summary), expected handling and criteria. The shipped 
 thread under a 1,600-token prompt window, `settings.prompt_tokens`, so
 the window leaves out the message holding the two open points: a
 `disclose_missing` case, like `ask-kayak-tight-budget`).
+
+**`extract_from_emails` (#1137).** A case needs a `query` (embedded, so
+the index build embeds it too) and a non-empty `schema` object that
+declares none of `_source_thread`, `_date` and `_evidence` (the handler
+refuses those names before any work, so the case file rejects them).
+Each searched thread is one paid model call, so a case sets a small
+`limit`, a whole number from 1 to the handler's 50. The other keys it
+may give are the tool's filters (`folders`, `date_from`, `date_to`,
+`from_name`, `participant`), with the handler's types. The shipped
+cases are smoke cases, each with `limit` 2: `extract-pool-bids` (bids
+in a message body), `extract-roof-estimate` (a total found only in an
+attached estimate) and `extract-cabin-wifi` (nothing to extract).
 
 **Experimental tools (#1240).** A `brief_issue` case needs a `topic`
 and a `check_conclusion` case a `conclusion` of at most 2,000
@@ -559,7 +571,9 @@ Planned provider calls: 49 answer calls to <model> (up to 49 more for citation r
 
 That is one answer call per selected case, plus a second (a citation
 repair) for each case whose first answer fails the citation check, and
-one judge call per case unless `JUDGE_MODE=none`. Select fewer cases
+one judge call per case unless `JUDGE_MODE=none`. An
+`extract_from_emails` case instead makes one answer call per searched
+thread, at most its `limit`, and no repair. Select fewer cases
 with `--case` (in `EVAL_ARGS`) to cut the count. A case skipped at run
 time because the runtime budget ran out makes no calls. Under `make`,
 the line prints twice: once for the argument check, once for the run.
@@ -750,11 +764,13 @@ Two narrow wrappers capture each run in memory: the inference client
 after truncation, deduplication, fallback thread text and budgeting; a
 repair call resends that prompt with a fixed instruction) and the
 handlers' evidence builders' label maps (`_build_evidence` for
-`ask_mailbox` and the experimental tools, `_summarize_context` for
-`summarize_thread`, whose first map is the prompt's: each label's
-thread, message, claimant and chunk).
-A check confirms every captured label is in the prompt the model
-received.
+`ask_mailbox`, `extract_from_emails` and the experimental tools,
+`_summarize_context` for `summarize_thread`, whose first map is the
+prompt's: each label's thread, message, claimant and chunk).
+`extract_from_emails` sends one prompt per searched thread and builds
+one map for each, with labels numbered across the call, so its maps are
+merged. A check confirms every captured label is in the prompt the model
+received (for an extraction, in one of its prompts).
 
 Every tool is graded through one view of its output (`adapters.py`,
 #656): `ask_mailbox`'s answer as it is; `summarize_thread`'s summary,
@@ -767,7 +783,16 @@ sources) and those statements, one per line, as the answer. Their
 `insufficient_evidence` flag is the abstention, a reply the tool could
 not parse (status `invalid_json` or `truncated`) fails "answer not cut
 off", and they write no coverage note, so a `disclose_missing` case
-cannot pass for them. A summary passage the
+cannot pass for them. For `extract_from_emails` (#1137), each record is
+one statement, `field: value [E1]; ...` with the labels its
+server-checked `_evidence` cites (the provenance fields left out), and
+those statements, one per line, are the answer; the tool's `notice` is
+the coverage note, and there is no repair call. No records from a
+complete extraction is the abstention (a flag of the view, so no other
+tool's answer can match it by its words). A notice opening
+`Incomplete:` (some searched thread's reply was cut off, malformed or
+did not match the schema) fails "answer not cut off" with or without
+records, and with no records it is no abstention. A summary passage the
 window cut short is captured as truncated, the thread's indexed text
 (E1, which has no chunk offsets) included, by comparing the shown map
 with the one the tool's caps alone would show.
@@ -802,10 +827,17 @@ reports only budget omissions). Each evidence group is also scored as retrieved,
 the prompt and cited, so a failure is attributed to `retrieval`,
 `prompt_assembly`, `synthesis`, `evaluator_infrastructure` or
 `answer_infrastructure` (several may apply; `unknown` otherwise).
+For `extract_from_emails`, "records conform" also checks each record's
+shape: the provenance fields the server adds (`_source_thread` and
+`_date` strings, an `_evidence` object) and the schema's declared
+fields and types (the tool's own check). Values are not judged there,
+and a failure is attributed to `answer_infrastructure`; the check is
+not applicable to the other tools.
 
 The judge (`judge.py`, rubric `ask-rubric-6`; `-6` added effective dates to `temporal_reasoning`, #911) receives the question
-(for another tool, the tool and its task; an `ask_mailbox` prompt is
-unchanged by #656, so the rubric version stays),
+(for another tool, the tool and its task, and for an extraction a
+line saying each numbered statement is one record; an `ask_mailbox`
+prompt is unchanged by #656, so the rubric version stays),
 expected handling (for `disclose_missing`, with the tool's
 `coverage_note`, labelled as server text and graded together with the
 answer, and the reference facts whose evidence was retrieved but left
@@ -849,7 +881,8 @@ coverage, those that need evidence; for dimension and missing-fact
 rates, every applicable dimension and expected fact), so errors, skips
 and unjudged answers count as failures and never improve a score. Token usage is not exposed by the inference client and no cost is
 computed. `--detail` writes a separate mode-600 artifact with the
-content (answers, passages, prompts, judge claims and explanations);
+content (answers, an extraction's records, passages, prompts, judge
+claims and explanations);
 both refuse a path inside the repository other than `.answer-eval/`.
 Delete old runs with `rm -r .answer-eval`. Never upload either.
 
@@ -872,8 +905,8 @@ never fails a run. CI runs only the scripted path (`make baseline` and
 
 Not yet covered (follow-ups): judge calibration against human labels
 and repeated runs to measure variation, quality thresholds,
-`extract_from_emails` (#1137), measurement cases for the experimental
-tools (#291), a real-model synthetic index, and token usage.
+measurement cases for the experimental tools (#291), a real-model
+synthetic index, and token usage.
 
 ## What this harness does NOT do
 

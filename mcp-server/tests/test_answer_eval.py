@@ -36,6 +36,7 @@ from src.tools.outputs import AnswerStatement
 
 from tests.agent_metrics import is_held_out
 from tests.answer_eval import __main__ as cli
+from tests.answer_eval.adapters import planned_calls
 from tests.answer_eval.cases import (
     CASES_PATH,
     CATEGORIES,
@@ -2391,8 +2392,12 @@ class TestCostGuard:
 
     def test_every_selected_case_is_counted(self, tmp_path, monkeypatch, capsys):
         assert self._preflight(tmp_path, monkeypatch, self._JUDGED) == cli.EXIT_OK
-        n = len(CASES)
-        assert f"{n} answer calls" in capsys.readouterr().err
+        # One answer call per case, except an extract_from_emails case,
+        # which makes one per searched thread (#1137, ``planned_calls``).
+        answers = sum(planned_calls(c)[0] for c in CASES.values())
+        assert answers > len(CASES)
+        err = capsys.readouterr().err
+        assert f"{answers} answer calls" in err and f"{len(CASES)} judge calls" in err
 
     def test_cap_refuses_a_larger_run_before_any_call(self, tmp_path, monkeypatch, capsys):
         env = {**self._JUDGED, "EVAL_MAX_CALLS": "5"}
