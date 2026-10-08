@@ -1114,66 +1114,35 @@ Exhausting a keyword query does not establish exhaustive coverage of a
 topic. Consider alternate wording, read candidate messages, and keep the
 counting unit explicit (messages, threads, or distinct bills/items).
 
-**Multi-lane enumeration.** A broad question ("every message about a
-committee's finances and audits") has no single filter set: a call
-takes one AND of filters, and the ranked tools are capped. Run several
-exact lanes with this tool and union them (#992, option 1):
+**Multi-lane enumeration.** A call takes one AND of filters, so a
+broad question ("every message about a committee's finances and
+audits") is answered with several exact lanes and their union (#992):
 
-1. Choose the lanes from the question: one `subject` lane per subject
-   term, one `text` lane per body word set (the words a body must
-   contain, at most 16), and one `participant` (or `sender`) lane per
-   person or domain known to be involved. Give every lane the same
-   `folder`, date bounds and every other predicate the question
-   carries (`recipient`, `has_attachments`, `seen`, `flagged`,
-   `authority_class`), so the union has one scope; a lane that drops
-   one of them includes messages outside it.
-2. Run each lane with `limit=1` to get its `total_matches`, and tell
-   the user the lane counts before paging. A single body-word lane can
-   return hundreds of unrelated bulk messages (newsletters and
-   marketing that happen to use the word): narrow such a lane with
-   `sender`, `date_from` / `date_to` or a second `text` word rather than
-   paging through it, and report which lane was narrowed and how,
-   since the narrowing is a gap in the union.
-3. Page each lane to `has_more=false`, with `fields` kept to what the
-   union needs (`["subject", "sent_at", "from"]`; `thread_id` is always
-   included).
-4. Union the rows by `claimant_id`, keeping for each message the lane
-   or lanes that found it: several matching messages can share a
-   thread, and a union keyed by thread would drop them before the
-   count. Then group the rows by `thread_id` for the reads, carrying
-   the lanes up: a thread found only by a body-word lane is weaker
-   evidence than one a subject or participant lane also found, and the
-   report should let the user see that.
-5. Classify each unioned row before counting: read its thread
-   (`get_thread`) for context, decide per message, and drop the rows
-   that are noise. A thread read brings in messages that no lane
-   matched, and a kept thread can still hold matched rows that are
-   not about the topic, so count from the rows kept, not from the
-   threads read, and report the rows dropped with the lane that found
-   each.
+1. Lanes: one `subject` lane per subject term, one `text` lane per body
+   word set, one `participant` (or `sender`) lane per person or domain
+   involved. Every lane carries the same `folder`, date bounds and
+   other predicates the question has, so the union has one scope.
+   Count and disclose each lane, and page it, as the paragraphs above
+   describe. A body-word lane can return hundreds of unrelated bulk
+   messages; narrow it with `sender` or dates and report the narrowing
+   as a gap.
+2. Union the rows by `claimant_id`, keeping the lane or lanes that
+   found each, and classify each row before counting it. Page
+   `get_thread` until every candidate claimant has been returned and
+   follow body offsets with `get_message` before classifying a row
+   ([`get_thread`](#get_thread), [`get_message`](#get_message)). Count
+   the rows kept, not the threads read, and report the rows dropped
+   with their lane.
 
-What the union can claim: the rows the lanes returned during the
-run, within the lanes' shared scope (the `folder`, date bounds and
-other predicates every lane carried; outside Trash only when `folder`
-is omitted), with the churn caveat above: a message indexed during
-the run that sorts ahead of a lane's cursor is missed, so the rows
-returned are not every match in any one snapshot. State that scope
-with the claim. What it cannot claim: coverage of the topic. A message
-about the concept that uses none of the lane terms and comes from none
-of the lane participants is not found, and nothing in the result shows
-that it is missing; paging a lane to the end proves the lane, not the
-concept (the paragraph above, and the completeness claims under
-evaluation in #776). Attachment text is outside the recipe: `text`
-searches body chunks only, and `get_thread` returns no attachment
-text, so a message whose only mention of the topic is in an
-attachment is not found and a candidate cannot be classified by its
-attachments here; say so in the report, and treat `search_attachments`
-and `get_evidence` as ranked and capped, not as a lane. Report the
-lanes, their counts, the union size, the narrowing and the rows
-dropped, not "all messages about X". The bounded Boolean filter form
-(#1087: `all` of leaves and `any` groups with `negate`, one call and
-one cursor) will replace this multi-call shape; the lanes and the
-claim stay the same.
+The recipe supports this claim: the rows the lanes returned during the
+run, within their shared scope, subject to the snapshot caveat above.
+It does not show coverage of the topic: a message that uses none of
+the lane terms or participants, or mentions the topic only in an
+attachment (`text` searches bodies only), is not found, and nothing
+shows it is missing (see the keyword-coverage paragraph above and
+#776). Report the lanes, their counts, the union size, the narrowing
+and the rows dropped, not "all messages about X". The bounded Boolean
+filter form (#1087) will replace the multi-call shape.
 
 For outstanding-item questions, look for completion, corrections and
 reopening across threads and senders. A sent request or delivered advice
