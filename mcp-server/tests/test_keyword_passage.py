@@ -1,0 +1,505 @@
+"""Evidence selection keeps the passage a keyword match found (#858).
+
+Each surfaced thread's passages were chosen by vector distance alone
+(after the chunks of an attachment the query named), so in a long
+thread the one chunk holding the query's exact word could fall outside
+the six. One thread-driven FTS lookup in ``get_query_evidence_chunks``
+now reserves a slot for a keyword-matched chunk, after the named
+attachment's representative. All data is synthetic; vectors are
+crafted so dense order alone leaves the keyword chunk out.
+"""
+
+import asyncio
+import logging
+import sqlite3
+from pathlib import Path
+
+import pytest
+import sqlite_vec
+from fastmcp.exceptions import ToolError
+from src.lib.inference import PromptBudget
+from src.lib.sqlite import PROMPT_EVIDENCE_CHUNKS_PER_THREAD, Database
+from src.tools.brief import register_experimental_tools
+from src.tools.intelligence import register_intelligence_tools
+from src.tools.outputs import EvidenceChunk
+from src.tools.search import register_search_tools
+
+from tests.conftest import (
+    FakeEmbedClient,
+    FakeInferenceClient,
+    FakeMCPServer,
+    _build_schema,
+    _insert_attachment,
+    _insert_chunk,
+    _insert_thread,
+)
+
+WORD = "zebraquota"
+KW_TEXT = f"reference {WORD} recorded here"
+MARKER = "zqxmarker8581"
+_NEAR = 10  # more near chunks than any thread keeps
+_QUERY_VEC = [1.0, 0.0, 0.0, 0.0]
+_FAR = [0.0, 0.0, 0.0, 1.0]
+
+
+def _near(i: int) -> list[float]:
+    return [1.0, 0.01 * (i + 1), 0.0, 0.0]
+
+
+def _open(path: Path) -> sqlite3.Connection:
+    conn = sqlite3.connect(str(path))
+    conn.enable_load_extension(True)
+    sqlite_vec.load(conn)
+    conn.enable_load_extension(False)
+    _build_schema(conn)
+    return conn
+
+
+def _thread(conn, tid: str, *, subject: str = "routine status", attachments: bool = False):
+    _insert_thread(
+        conn,
+        thread_id=tid,
+        subject=subject,
+        participants=["alice@example.com", "bob@example.com"],
+        senders=["alice@example.com"],
+        body_text="routine status update",
+        has_attachments=attachments,
+        embedding=_QUERY_VEC,
+    )
+
+
+def _near_body(conn, tid: str, n: int = _NEAR) -> None:
+    for i in range(n):
+        _insert_chunk(
+            conn,
+            chunk_id=f"{tid}-body-{i}",
+            message_id=tid,
+            thread_id=tid,
+            text=f"routine status update part {i}",
+            embedding=_near(i),
+            chunk_index=i,
+            char_start=100 * i,
+        )
+
+
+def _keyword_chunk(conn, tid: str, *, chunk_id: str | None = None, variant: str = "") -> None:
+    _insert_chunk(
+        conn,
+        chunk_id=chunk_id or f"{tid}-kw",
+        message_id=tid,
+        thread_id=tid,
+        text=KW_TEXT,
+        embedding=_FAR,
+        chunk_index=_NEAR,
+        char_start=100 * _NEAR,
+        variant=variant,
+    )
+
+
+def _long(conn, tid: str = "t-long") -> None:
+    """A long thread whose only keyword chunk is the farthest one."""
+    _thread(conn, tid)
+    _near_body(conn, tid)
+    _keyword_chunk(conn, tid)
+
+
+def _attached(conn, tid: str = "t-att", *, rep_text: str = "line item {i} amount") -> None:
+    """A thread whose named attachment has more near chunks than the cap,
+    plus a far body chunk holding the keyword."""
+    _thread(conn, tid, attachments=True)
+    _insert_attachment(
+        conn, message_id=tid, thread_id=tid, attachment_id=f"{tid}-ledger", filename="ledger.pdf"
+    )
+    for i in range(_NEAR):
+        _insert_chunk(
+            conn,
+            chunk_id=f"{tid}-att-{i}",
+            message_id=tid,
+            thread_id=tid,
+            text=rep_text.format(i=i) if i == 0 else f"line item {i} amount",
+            embedding=_near(i),
+            chunk_index=i,
+            attachment_id=f"{tid}-ledger",
+        )
+    _keyword_chunk(conn, tid)
+
+
+@pytest.fixture
+def kw_db(tmp_path: Path) -> Database:
+    conn = _open(tmp_path / "kw.db")
+    _long(conn)
+    _attached(conn)
+    _attached(conn, "t-overlap", rep_text=f"line item {{i}} amount {WORD}")
+    # Found by the thread's subject, not by any chunk.
+    _thread(conn, "t-subj", subject=f"{WORD} notice")
+    _near_body(conn, "t-subj")
+    # Found by an attachment's filename, not by any chunk.
+    _thread(conn, "t-file", attachments=True)
+    _insert_attachment(
+        conn,
+        message_id="t-file",
+        thread_id="t-file",
+        attachment_id="t-file-a",
+        filename=f"{WORD}.pdf",
+    )
+    _near_body(conn, "t-file")
+    # Two files claim one Message-ID; each carries the same keyword chunk.
+    _thread(conn, "t-dup")
+    _near_body(conn, "t-dup")
+    _keyword_chunk(conn, "t-dup", chunk_id="t-dup-kw-b", variant="b")
+    _keyword_chunk(conn, "t-dup", chunk_id="t-dup-kw-a")
+    conn.close()
+    return Database(str(tmp_path / "kw.db"))
+
+
+@pytest.fixture
+def long_db(tmp_path: Path) -> Database:
+    conn = _open(tmp_path / "long.db")
+    _long(conn)
+    conn.close()
+    return Database(str(tmp_path / "long.db"))
+
+
+def _select(db: Database, query: str, tid: str, limit: int = PROMPT_EVIDENCE_CHUNKS_PER_THREAD):
+    return db.get_query_evidence_chunks(query, [tid], _QUERY_VEC, limit)[tid]
+
+
+def _ids(chunks) -> list[str]:
+    return [c.chunk_id for c in chunks]
+
+
+def _labels(chunks) -> list[str]:
+    return [c.selected_by for c in chunks]
+
+
+class TestSlotOrder:
+    def test_keyword_chunk_outside_six_nearest_is_selected(self, kw_db):
+        chunks = _select(kw_db, WORD, "t-long")
+        assert _ids(chunks) == ["t-long-kw"] + [f"t-long-body-{i}" for i in range(5)]
+        assert _labels(chunks) == ["keyword_match"] + ["vector"] * 5
+
+    def test_matched_attachment_cannot_crowd_out_keyword_chunk(self, kw_db):
+        chunks = _select(kw_db, f"ledger {WORD}", "t-att")
+        assert _ids(chunks) == ["t-att-att-0", "t-att-kw"] + [f"t-att-att-{i}" for i in range(1, 5)]
+        assert _labels(chunks) == ["attachment_match", "keyword_match"] + ["attachment_match"] * 4
+
+    def test_attachment_representative_that_matches_keywords_takes_one_slot(self, kw_db):
+        """Overlap collapses: the representative holds the word, so it
+        fills both reservations and is labelled keyword_match."""
+        chunks = _select(kw_db, f"ledger {WORD}", "t-overlap")
+        assert _ids(chunks) == [f"t-overlap-att-{i}" for i in range(6)]
+        assert _labels(chunks) == ["keyword_match"] + ["attachment_match"] * 5
+
+    def test_no_keyword_match_keeps_vector_order(self, kw_db):
+        chunks = _select(kw_db, "nonexistentword", "t-long")
+        assert _ids(chunks) == [f"t-long-body-{i}" for i in range(6)]
+        assert _labels(chunks) == ["vector"] * 6
+
+    def test_attachment_match_without_keyword_chunk_keeps_existing_order(self, kw_db):
+        chunks = _select(kw_db, "ledger", "t-att")
+        assert _ids(chunks) == [f"t-att-att-{i}" for i in range(6)]
+        assert _labels(chunks) == ["attachment_match"] * 6
+
+    @pytest.mark.parametrize("tid", ["t-subj", "t-file"])
+    def test_thread_or_filename_only_match_has_no_keyword_passage(self, kw_db, tid):
+        chunks = _select(kw_db, WORD, tid)
+        assert _ids(chunks) == [f"{tid}-body-{i}" for i in range(6)]
+        assert "keyword_match" not in _labels(chunks)
+
+    def test_duplicate_claimants_pick_is_deterministic(self, kw_db):
+        """Equal distances: the lower chunk_id wins the slot, every time."""
+        for _ in range(3):
+            chunks = _select(kw_db, WORD, "t-dup")
+            assert _ids(chunks)[0] == "t-dup-kw-a"
+            assert "t-dup-kw-b" not in _ids(chunks)
+
+    def test_per_thread_limit_still_caps(self, kw_db):
+        assert _ids(_select(kw_db, WORD, "t-long", limit=1)) == ["t-long-kw"]
+        assert _ids(_select(kw_db, f"ledger {WORD}", "t-att", limit=1)) == ["t-att-att-0"]
+        assert _ids(_select(kw_db, f"ledger {WORD}", "t-att", limit=2)) == [
+            "t-att-att-0",
+            "t-att-kw",
+        ]
+
+    def test_every_one_of_fifty_threads_keeps_its_keyword_chunk(self, tmp_path):
+        """One lookup for every surfaced thread, with no pooled row cap:
+        no thread's keyword chunk is starved by another's."""
+        conn = _open(tmp_path / "fifty.db")
+        tids = [f"t{i:02d}" for i in range(50)]
+        for tid in tids:
+            _thread(conn, tid)
+            _near_body(conn, tid, n=7)
+            _keyword_chunk(conn, tid)
+        conn.close()
+        db = Database(str(tmp_path / "fifty.db"))
+        grouped = db.get_query_evidence_chunks(
+            WORD, tids, _QUERY_VEC, PROMPT_EVIDENCE_CHUNKS_PER_THREAD
+        )
+        assert [_ids(grouped[tid])[0] for tid in tids] == [f"{tid}-kw" for tid in tids]
+
+
+# --- work-growth gate ------------------------------------------------------
+
+
+_DATE = "2024-01-01T00:00:00+00:00"
+
+
+def _corpus(path: Path, chunks: int, per_thread: int = 10) -> Database:
+    """``chunks`` chunks, every one holding the query word (the worst
+    case for a ``MATCH``), with the indexer's two ``message_chunks``
+    indexes the lookup relies on (``indexer/src/database.py``)."""
+    conn = _open(path)
+    conn.executescript(
+        "CREATE INDEX idx_message_chunks_thread ON message_chunks(thread_id);"
+        "CREATE INDEX idx_message_chunks_fts_rowid ON message_chunks(fts_rowid);"
+    )
+    cur = conn.cursor()
+    threads = chunks // per_thread
+    cur.executemany(
+        "INSERT INTO threads (thread_id, subject, participants, folder, date_first, "
+        "date_last, message_ids) VALUES (?, 's', '[]', 'INBOX', ?, ?, '[]')",
+        [(f"t{t}", _DATE, _DATE) for t in range(threads)],
+    )
+    for i in range(chunks):
+        cur.execute(
+            "INSERT INTO message_chunks_fts (text) VALUES (?)",
+            (f"common filler word{i % 97}",),
+        )
+        cur.execute(
+            "INSERT INTO message_chunks (chunk_id, claimant_id, thread_id, chunk_index, text, "
+            "char_start, char_end, token_est, chunked_at, fts_rowid, kind) "
+            "VALUES (?, 'm', ?, 0, '', 0, 0, 1, '2024', ?, 'body')",
+            (f"c{i}", f"t{i // per_thread}", cur.lastrowid),
+        )
+    conn.commit()
+    conn.close()
+    return Database(str(path))
+
+
+def _counting(db: Database, monkeypatch) -> list[int]:
+    """Count the SQLite VM steps every connection ``db`` opens runs."""
+    steps = [0]
+    real = db._connect
+
+    def connect():
+        conn = real()
+
+        def tick() -> int:
+            steps[0] += 1
+            return 0
+
+        conn.set_progress_handler(tick, 1)
+        return conn
+
+    monkeypatch.setattr(db, "_connect", connect)
+    return steps
+
+
+def _measure(db: Database, monkeypatch, fn) -> tuple[int, object]:
+    steps = _counting(db, monkeypatch)
+    result = fn()
+    monkeypatch.undo()
+    return steps[0], result
+
+
+def test_lookup_work_stays_flat_while_chunk_lane_grows(tmp_path, monkeypatch):
+    """The acceptance gate: the lookup reads only the surfaced threads'
+    chunks, so its VM steps barely move from 1k to 50k chunks, while the
+    corpus-wide chunk lane's grow with the corpus."""
+    surfaced = [f"t{2 * i}" for i in range(50)]
+    lookup: dict[int, int] = {}
+    lane: dict[int, int] = {}
+    for size in (1_000, 50_000):
+        db = _corpus(tmp_path / f"c{size}.db", size)
+        lookup[size], matched = _measure(
+            db, monkeypatch, lambda db=db: db._keyword_matched_chunks("common", surfaced)
+        )
+        # Work done, not only the result: every surfaced chunk matched.
+        assert set(matched) == set(surfaced)
+        assert all(len(ids) == 10 for ids in matched.values())
+        lane[size], _ = _measure(
+            db, monkeypatch, lambda db=db: db._chunk_keyword_search("common", 50)
+        )
+    assert lookup[50_000] < 2 * lookup[1_000], lookup
+    assert lane[50_000] > 10 * lane[1_000], lane
+
+
+# --- consumers ---------------------------------------------------------------
+
+
+def _evidence(db: Database, **kwargs) -> dict:
+    server = FakeMCPServer()
+    register_search_tools(server, db, FakeEmbedClient())
+    return asyncio.run(server.tools["get_evidence"](**kwargs)).structured_content
+
+
+class TestGetEvidence:
+    def test_get_evidence_reports_selected_by(self, kw_db):
+        out = _evidence(kw_db, query=f"ledger {WORD}", thread_id="t-att", limit=3)
+        [thread] = out["threads"]
+        assert [(c["chunk_id"], c["selected_by"]) for c in thread["chunks"]] == [
+            ("t-att-att-0", "attachment_match"),
+            ("t-att-kw", "keyword_match"),
+            ("t-att-att-1", "attachment_match"),
+        ]
+
+    def test_get_evidence_source_body_keeps_keyword_chunk(self, kw_db):
+        """Precision filters read the full ranked list in the new order."""
+        out = _evidence(kw_db, query=f"ledger {WORD}", max_threads=5, source="body")
+        by_thread = {t["thread_id"]: t["chunks"] for t in out["threads"]}
+        assert by_thread["t-att"][0]["chunk_id"] == "t-att-kw"
+        assert by_thread["t-att"][0]["selected_by"] == "keyword_match"
+
+    def test_selected_by_is_in_the_published_schema(self):
+        prop = EvidenceChunk.model_json_schema()["properties"]["selected_by"]
+        assert prop["enum"] == ["keyword_match", "attachment_match", "vector"]
+
+
+class _CaptureReranker:
+    candidates = 10
+
+    def __init__(self) -> None:
+        self.documents: list[str] = []
+
+    def rerank(self, query, documents, top_n):
+        self.documents = list(documents)
+        return [(i, float(len(documents) - i)) for i in range(len(documents))][:top_n]
+
+
+def test_reranker_sees_keyword_chunk_first(long_db):
+    """The reranker reads passage zero; for a thread with a keyword hit
+    and no named attachment, that is now the keyword chunk."""
+    reranker = _CaptureReranker()
+    long_db.hybrid_search(
+        query_text=WORD,
+        query_embedding=_QUERY_VEC,
+        limit=5,
+        with_evidence=True,
+        reranker=reranker,
+        evidence_per_thread=PROMPT_EVIDENCE_CHUNKS_PER_THREAD,
+    )
+    [doc] = reranker.documents
+    assert doc.endswith(KW_TEXT)
+
+
+@pytest.mark.parametrize(
+    "tool",
+    [
+        "ask_mailbox",
+        "extract_from_emails",
+        "brief_issue",
+        "check_conclusion",
+        "get_evidence",
+        "get_evidence_thread",
+    ],
+)
+def test_every_consumer_gets_the_keyword_passage(long_db, tool):
+    inference = FakeInferenceClient()
+    server = FakeMCPServer()
+    register_intelligence_tools(server, long_db, FakeEmbedClient(), inference)
+    register_experimental_tools(server, long_db, FakeEmbedClient(), inference)
+    register_search_tools(server, long_db, FakeEmbedClient())
+    calls = {
+        "ask_mailbox": lambda: server.tools["ask_mailbox"](question=WORD),
+        "extract_from_emails": lambda: server.tools["extract_from_emails"](
+            query=WORD, schema={"n": "string"}
+        ),
+        "brief_issue": lambda: server.tools["brief_issue"](topic=WORD),
+        "check_conclusion": lambda: server.tools["check_conclusion"](conclusion=WORD),
+        "get_evidence": lambda: server.tools["get_evidence"](query=WORD, max_threads=1),
+        "get_evidence_thread": lambda: server.tools["get_evidence"](
+            query=WORD, thread_id="t-long", limit=PROMPT_EVIDENCE_CHUNKS_PER_THREAD
+        ),
+    }
+    try:
+        out = asyncio.run(calls[tool]())
+    except ToolError:
+        out = None  # the canned reply need not parse; the prompt was sent
+    if tool.startswith("get_evidence"):
+        [thread] = out.structured_content["threads"]
+        assert thread["chunks"][0]["chunk_id"] == "t-long-kw"
+    else:
+        assert inference.complete_calls
+        assert any(KW_TEXT in user for _system, user in inference.complete_calls)
+
+
+# --- failure and budget ------------------------------------------------------
+
+
+def test_failed_lookup_keeps_selection_and_is_visible(long_db, monkeypatch, caplog):
+    caplog.set_level(logging.INFO)
+    real = long_db._fetchall
+
+    def fetchall(sql, params=()):
+        if "CROSS JOIN message_chunks_fts" in sql:
+            raise sqlite3.OperationalError(f"no such table {MARKER}")
+        return real(sql, params)
+
+    monkeypatch.setattr(long_db, "_fetchall", fetchall)
+    server = FakeMCPServer()
+    register_search_tools(server, long_db, FakeEmbedClient())
+    for _ in range(3):
+        out = asyncio.run(
+            server.tools["get_evidence"](query=f"{WORD} {MARKER}", thread_id="t-long", limit=6)
+        )
+        [thread] = out.structured_content["threads"]
+        # The existing selection: vector order, nothing keyword-labelled.
+        assert [c["chunk_id"] for c in thread["chunks"]] == [f"t-long-body-{i}" for i in range(6)]
+        assert {c["selected_by"] for c in thread["chunks"]} == {"vector"}
+
+    warnings = [
+        r.getMessage()
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "Keyword passage lookup" in r.getMessage()
+    ]
+    # Rate-limited: one line for three failures in the window.
+    assert warnings == ["Keyword passage lookup failed; keeping vector order: OperationalError"]
+    timing = [r.getMessage() for r in caplog.records if r.name == "mcp.timings"]
+    assert len(timing) == 3
+    assert all("'degraded_keyword_chunks': 1" in line for line in timing)
+    assert MARKER not in caplog.text
+
+
+def test_second_position_keyword_passage_omission_is_disclosed(tmp_path):
+    """Selection does not guarantee visibility: a long named-attachment
+    representative fills the thread's share, the keyword passage behind
+    it is left out, and the coverage note says so."""
+    conn = _open(tmp_path / "budget.db")
+    for t in range(5):
+        tid = f"t-b{t}"
+        _thread(conn, tid, attachments=True)
+        _insert_attachment(
+            conn, message_id=tid, thread_id=tid, attachment_id=f"{tid}-a", filename="ledger.pdf"
+        )
+        _insert_chunk(
+            conn,
+            chunk_id=f"{tid}-att",
+            message_id=tid,
+            thread_id=tid,
+            text="line item amount " + "x" * 8000,
+            embedding=_near(0),
+            attachment_id=f"{tid}-a",
+        )
+        _keyword_chunk(conn, tid)
+    conn.close()
+    db = Database(str(tmp_path / "budget.db"))
+
+    selected = db.get_query_evidence_chunks(
+        f"ledger {WORD}", ["t-b0"], _QUERY_VEC, PROMPT_EVIDENCE_CHUNKS_PER_THREAD
+    )["t-b0"]
+    assert _ids(selected) == ["t-b0-att", "t-b0-kw"]
+
+    inference = FakeInferenceClient()
+    server = FakeMCPServer()
+    register_intelligence_tools(
+        server,
+        db,
+        FakeEmbedClient(),
+        inference,
+        prompt_budget=PromptBudget(context_tokens=4096, max_output_tokens=1024),
+    )
+    asyncio.run(server.tools["ask_mailbox"](question=f"ledger {WORD}"))
+    # The first call is the answer; a later one is the citation repair.
+    _system, user = inference.complete_calls[0]
+    assert KW_TEXT not in user
+    assert "Evidence note: to fit the prompt budget, 5 retrieved passages were left out" in user

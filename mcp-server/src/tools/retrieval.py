@@ -10,20 +10,23 @@ from typing import Annotated, Any
 
 from fastmcp.exceptions import ToolError
 from mcp.types import CallToolResult
-from pydantic import WithJsonSchema
+from pydantic import Field, WithJsonSchema
 
 # Module import: get_thread and get_message have a local named ``count``.
 from ..lib import timings
 from ..lib.predicates import (
+    ADDRESS_ROLES,
     MAX_SIZE_BYTES,
     validate_date_range,
 )
 from ..lib.rate_limited_log import ArgumentRejections, RateLimitedLog
 from ..lib.security import QUERY_MESSAGE_FIELDS, log_tool_call
 from ..lib.sqlite import (
+    EXTRACTION_STATUS_FILTERS,
     FILTER_TYPE_ERROR,
     LIST_THREAD_FILTERS,
     AmbiguousMessageId,
+    AttachmentOccurrenceRecord,
     InvalidFilterError,
     MessageBody,
     MessageRecord,
@@ -43,8 +46,10 @@ from .outputs import (
     Folder,
     GetMessageOutput,
     GetThreadOutput,
+    ListedAttachment,
     ListFoldersOutput,
     ListThreadsOutput,
+    QueryAttachmentsOutput,
     QueryMessagesOutput,
     ReapedMessage,
     ThreadMessage,
@@ -57,6 +62,7 @@ from .outputs import (
     query_messages_output_schema,
     read_only,
     reaped_source,
+    source,
     thread_summary,
     tool_result,
 )
@@ -66,6 +72,18 @@ log = logging.getLogger("mcp.tools.retrieval")
 # Ceiling on query_messages page size: enumeration pages by cursor, so a
 # large page only bloats one response.
 _MAX_QUERY_LIMIT = 100
+# query_attachments' ceiling, search_attachments' cap (#796).
+_MAX_ATTACHMENT_QUERY_LIMIT = 50
+
+# query_attachments' ``extraction_status``: one of
+# ``lib/sqlite.EXTRACTION_STATUS_FILTERS``, or blank, with surrounding
+# whitespace allowed, checked at the schema boundary. The database
+# strips the value and ignores a blank one, as for every other filter
+# (Codex rounds 1 and 2).
+ExtractionStatusFilter = Annotated[
+    str,
+    Field(pattern=r"^\s*(?:" + "|".join(EXTRACTION_STATUS_FILTERS) + r")?\s*$"),
+]
 
 # A ``size_min`` / ``size_max`` argument (#1085). The published schema
 # states the contract (an integer from 0 to SQLite's INTEGER maximum, or
@@ -347,7 +365,7 @@ def _filter_uses(args: dict) -> list[FilterUse]:
                 )
             else:
                 uses.append(FilterUse(filter=key, value=value.strip(), match="substring"))
-        elif key == "subject":
+        elif key in ("subject", "filename"):
             uses.append(FilterUse(filter=key, value=value.strip(), match="substring"))
         elif key == "text":
             uses.append(FilterUse(filter=key, value=value.strip(), match="all_words"))
@@ -358,21 +376,68 @@ def _filter_uses(args: dict) -> list[FilterUse]:
     return uses
 
 
-def _describe_filters(uses: list[FilterUse]) -> str:
-    """The prose form of ``_filter_uses``."""
+def _describe_filters(
+    uses: list[FilterUse], none: str = "no filters (every indexed message outside Trash)"
+) -> str:
+    """The prose form of ``_filter_uses``; ``none`` without any filter."""
     parts = []
     for u in uses:
         if u.match == "exact_address":
             parts.append(f"{u.filter}={u.value} (exact address)")
-        elif u.match == "substring" and u.filter != "subject":
+        elif u.match == "substring" and u.filter in ADDRESS_ROLES:
             parts.append(f"{u.filter}={u.value!r} (substring of address or name)")
         elif u.match == "substring":
-            parts.append(f"subject={u.value!r} (case-insensitive substring)")
+            parts.append(f"{u.filter}={u.value!r} (case-insensitive substring)")
         elif u.match == "all_words":
             parts.append(f"text={u.value!r} (all words, message body)")
         else:
             parts.append(f"{u.filter}={u.value!r}")
-    return ", ".join(parts) or "no filters (every indexed message outside Trash)"
+    return ", ".join(parts) or none
+
+
+def _listed_attachment(a: AttachmentOccurrenceRecord) -> ListedAttachment:
+    """One query_attachments row; filename and MIME type come cut."""
+    return ListedAttachment(
+        attachment_occurrence_id=a.attachment_occurrence_id,
+        attachment_id=a.attachment_id,
+        extractor_module=a.extractor_module,
+        claimant_id=a.claimant_id,
+        message_id=a.message_id,
+        thread_id=a.thread_id,
+        filename=a.filename,
+        filename_clipped=a.filename_clipped,
+        content_type=a.content_type,
+        content_type_clipped=a.content_type_clipped,
+        size_bytes=a.size_bytes,
+        folder=a.folder,
+        sent_at=a.sent_at,
+        occurred_at=a.occurred_at,
+        source_file=source(a.source_file),
+        extraction_status=a.extraction_status,
+        extractor=a.extractor,
+        extracted_at=a.extracted_at,
+        ocr_pages_skipped=a.ocr_pages_skipped,
+    )
+
+
+def _attachment_lines(i: int, a: AttachmentOccurrenceRecord) -> list[str]:
+    """Row ``i`` of a query_attachments page in prose."""
+    head = [a.sent_at]
+    if a.occurred_at:
+        head.append(f"delivered {a.occurred_at}")
+    head.append(clip(a.folder, HEADER_CHAR_LIMIT))
+    name = a.filename + (" … [cut]" if a.filename_clipped else "")
+    mime = a.content_type + (" … [cut]" if a.content_type_clipped else "")
+    extraction = a.extraction_status or "none recorded"
+    if a.ocr_pages_skipped:
+        extraction += f" ({a.ocr_pages_skipped} scanned pages not OCRed)"
+    return [
+        f"{i}. " + " | ".join(head),
+        f"   File: {name} ({mime}, {a.size_bytes / 1024:.1f} KB)",
+        f"   Extraction: {extraction}",
+        f"   Occurrence ID: {a.attachment_occurrence_id} | Attachment ID: {a.attachment_id}",
+        f"   Claimant ID: {a.claimant_id} | Thread ID: {a.thread_id}",
+    ]
 
 
 def register_retrieval_tools(server, db):
@@ -385,7 +450,7 @@ def register_retrieval_tools(server, db):
     )
     # The same for every other rejected argument, keyed by tool and field (#1039).
     rejections = ArgumentRejections(
-        log, ("get_message", "list_threads", "query_messages", "find_contact")
+        log, ("get_message", "list_threads", "query_messages", "query_attachments", "find_contact")
     )
     local_only_note = (
         "mcp-server has no live Bridge access. "
@@ -1265,6 +1330,203 @@ def register_retrieval_tools(server, db):
             lines.append("")
 
         return _projected(tool_result("\n".join(lines), output), projection)
+
+    @server.tool(
+        output_schema=QueryAttachmentsOutput.model_json_schema(),
+        annotations=read_only("Query Attachments"),
+    )
+    @timings.timed_tool("query_attachments")
+    async def query_attachments(
+        sender: str | None = None,
+        recipient: str | None = None,
+        participant: str | None = None,
+        folder: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        filename: str | None = None,
+        content_type: str | None = None,
+        extraction_status: ExtractionStatusFilter | None = None,
+        claimant_id: str | None = None,
+        thread_id: str | None = None,
+        limit: int = 20,
+        cursor: str | None = None,
+    ) -> CallToolResult:
+        """
+        Enumerate EVERY attachment matching exact criteria, with a total
+        count. Not ranked: one row per attachment occurrence (one file on
+        one message; the same bytes attached twice are two rows sharing
+        an ``attachment_id``), newest carrying message first. Use it for
+        "list every attachment" or "how many PDFs" questions;
+        ``search_attachments`` ranks by filename and extracted text and
+        caps at 50 results, so it cannot answer "all" or "how many".
+
+        All given filters must match (AND); blank filters are ignored.
+        Message filters (sender, recipient, participant, folder, dates)
+        apply to the message carrying the attachment and match as in
+        ``query_messages``. Attachments on messages in Trash are left out
+        unless ``folder="Trash"``.
+
+        ``total_matches`` counts the occurrences the filters definitely
+        match; it is the complete count only when ``indeterminate`` is 0.
+        ``indeterminate`` counts occurrences a filter could not decide (a
+        sender or participant filter on a carrying message whose sender
+        is ambiguous or not yet checked; an address filter that finds
+        nothing on one whose stored addresses for that role were cut by
+        a parse limit or are not checked yet; a name or fragment address
+        filter on one whose display names are not all indexed; an
+        ``extraction_status`` other than ``none`` on an occurrence with
+        no extraction recorded yet); they are in neither
+        ``total_matches`` nor the pages, so report it with any count when
+        it is not 0. ``status_counts`` splits ``total_matches`` by
+        extraction status; ``none`` means no extraction is recorded, and
+        anything but ``success`` means no extracted text is available,
+        not that the file is irrelevant.
+
+        Start with narrow filters and ``limit=1`` to obtain the count.
+        Rows carry private mail metadata (filenames, IDs, folders)
+        and go to the calling model, which may be remote: before paging,
+        tell the user the scope and how many rows you will page, and
+        prefer the smallest sample that answers the question.
+
+        This tool lists metadata only, no attachment text. No tool reads a
+        listed attachment's whole text yet: get_evidence and ask_mailbox
+        return ranked, capped passages by query, which may leave the
+        listed attachment out or show another copy of the same bytes.
+        Report unread attachment text as a coverage limit.
+
+        Paging: when ``has_more`` is true, call again with the SAME
+        filters plus ``cursor`` set to ``next_cursor``; ``limit`` may
+        change between pages. Never report a partial page as the
+        complete answer; a count needs only ``total_matches`` and
+        ``indeterminate``. Each page uses a fresh index snapshot, so an
+        attachment indexed or moved while paging can be missed; a
+        changed ``total_matches`` signals churn, but matching totals do
+        not prove nothing was missed.
+
+        Args:
+            sender: From address of the carrying message, matched as in
+                    query_messages: a full address exactly, anything else
+                    as a case-insensitive substring of the address or
+                    display name.
+            recipient: To or Cc of the carrying message, likewise.
+            participant: Any role of the carrying message, likewise.
+            folder: Exact folder name of the carrying message (see
+                    list_folders); pass "Trash" to list Trash.
+            date_from: ISO 8601 lower bound, inclusive, on the carrying
+                       message's delivery date (occurred_at), else its
+                       send date (sent_at).
+            date_to: ISO 8601 upper bound, inclusive; a date-only value
+                     covers the whole UTC day. ``date_bounds`` echoes the
+                     UTC instants applied.
+            filename: Case-insensitive substring of the filename, taken
+                      literally (no wildcards).
+            content_type: Exact MIME type, e.g. "application/pdf".
+            extraction_status: success, empty, unsupported, too_large,
+                               failed, or none (no extraction recorded);
+                               blank is ignored, anything else an error.
+            claimant_id: Exact claimant ID of the carrying message.
+            thread_id: Exact thread ID.
+            limit: Attachments per page (default 20, clamped to [1, 50]).
+            cursor: ``next_cursor`` from the previous page of the same query.
+
+        Returns:
+            The filter interpretation, total_matches, indeterminate,
+            status_counts, and the page's attachments (occurrence,
+            payload, claimant and thread IDs, filename and MIME type cut
+            at 500 characters with a flag, size, folder, send and
+            delivery dates, source file and extraction metadata), with
+            paging state.
+        """
+        args = {
+            "sender": sender,
+            "recipient": recipient,
+            "participant": participant,
+            "folder": folder,
+            "date_from": date_from,
+            "date_to": date_to,
+            "filename": filename,
+            "content_type": content_type,
+            "extraction_status": extraction_status,
+            "claimant_id": claimant_id,
+            "thread_id": thread_id,
+        }
+        log_tool_call(log, "query_attachments", {**args, "limit": limit, "cursor": cursor})
+        limit = clamp_int(limit, default=20, minimum=1, maximum=_MAX_ATTACHMENT_QUERY_LIMIT)
+        try:
+            bounds = date_bounds(*validate_date_range(date_from, date_to))
+            page = await asyncio.to_thread(db.query_attachments, **args, limit=limit, cursor=cursor)
+        except InvalidFilterError as e:
+            # The message can quote the rejected value; return it to the
+            # caller and log only the field (#257).
+            rejections.reject("query_attachments", e.field_name)
+            raise ToolError(f"Error: {e}") from e
+        except Exception as e:
+            log.error("query_attachments error: %s", type(e).__name__)
+            raise ToolError(f"Error: {type(e).__name__}") from e
+
+        timings.count("total_matches", page.total_matches)
+        timings.count("indeterminate", page.indeterminate)
+        timings.count("returned", len(page.attachments))
+        uses = _filter_uses(args)
+        if page.indeterminate:
+            # Why, by fixed key, as query_messages does (#1086).
+            for key, _ in _indeterminate_cause_entries(uses):
+                timings.count(f"indeterminate_cause_{key}", 1)
+        output = QueryAttachmentsOutput(
+            filters=uses,
+            date_bounds=bounds,
+            total_matches=page.total_matches,
+            indeterminate=page.indeterminate,
+            status_counts=page.status_counts,
+            returned=len(page.attachments),
+            offset=page.offset,
+            has_more=page.has_more,
+            next_cursor=page.next_cursor,
+            attachments=[_listed_attachment(a) for a in page.attachments],
+        )
+        lines = [
+            "Query: "
+            + _describe_filters(uses, "no filters (every indexed attachment outside Trash)")
+        ]
+        if bounds_line := describe_date_bounds(bounds):
+            lines.append(bounds_line)
+        lines.append(f"total_matches: {page.total_matches}")
+        if page.indeterminate:
+            # Fixed text naming the causes the given filters can have.
+            causes = _indeterminate_causes(uses)
+            if (extraction_status or "").strip() not in ("", "none"):
+                causes.append("no extraction recorded yet")
+            lines.append(
+                f"indeterminate: {page.indeterminate} (attachments the filters could neither "
+                f"accept nor reject: {'; '.join(causes)}; in neither total_matches nor "
+                "the pages)"
+            )
+        lines.append(
+            "extraction_status over all matches: "
+            + ", ".join(f"{status}={n}" for status, n in page.status_counts.items())
+        )
+        if not page.attachments:
+            lines.append("returned: 0")
+            lines.append("has_more: false")
+            if page.offset:
+                lines.append("No further attachments.")
+            elif page.indeterminate:
+                lines.append("No attachments are known to match.")
+            else:
+                lines.append("No attachments match.")
+            return tool_result("\n".join(lines), output)
+
+        first, last = page.offset + 1, page.offset + len(page.attachments)
+        lines.append(f"returned: {len(page.attachments)} (matches {first}-{last})")
+        lines.append(f"has_more: {'true' if page.has_more else 'false'}")
+        if page.next_cursor:
+            lines.append(f"next_cursor: {page.next_cursor}")
+            lines.append("(Call again with the same filters and this cursor for the next page.)")
+        lines.append("")
+        for i, a in enumerate(page.attachments, first):
+            lines.extend(_attachment_lines(i, a))
+            lines.append("")
+        return tool_result("\n".join(lines).rstrip(), output)
 
     @server.tool(
         output_schema=FindContactOutput.model_json_schema(),

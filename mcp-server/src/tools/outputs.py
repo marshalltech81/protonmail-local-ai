@@ -395,6 +395,14 @@ class EvidenceChunk(_Output):
     text: str
     text_truncated: bool = Field(description="True when text was cut for length.")
     vector_distance: float | None = Field(description="Only with include_scores.")
+    selected_by: Literal["keyword_match", "attachment_match", "vector"] = Field(
+        description=(
+            "Why the passage was selected: keyword_match (its text holds a word of the "
+            "query), attachment_match (it is from an attachment whose filename or MIME "
+            "type the query matched) or vector (similarity to the query alone). "
+            "keyword_match wins when both apply."
+        )
+    )
     source_file: Source | None = Field(
         description="The raw file of message_id (for an attachment chunk, the message "
         "carrying the attachment); null when none is recorded."
@@ -670,6 +678,88 @@ def query_messages_output_schema() -> dict[str, Any]:
     schema = QueryMessagesOutput.model_json_schema()
     schema["$defs"]["ListedMessage"]["required"] = ["claimant_id", "thread_id"]
     return schema
+
+
+class ListedAttachment(_Output):
+    attachment_occurrence_id: str = Field(
+        description="This occurrence: one attachment on one message. Unique per row."
+    )
+    attachment_id: str = Field(
+        description="Content hash of the payload; the same bytes on several messages, or "
+        "twice on one, share it."
+    )
+    extractor_module: str = Field(
+        description="The extractor this occurrence's MIME type and filename select ('' for "
+        "none); with attachment_id, it keys the extraction the row reports."
+    )
+    claimant_id: str = Field(
+        description="The message carrying the attachment; pass it to get_message."
+    )
+    message_id: str
+    thread_id: str
+    filename: str = Field(
+        description=f"At most {HEADER_CHAR_LIMIT} characters; see filename_clipped."
+    )
+    filename_clipped: bool = Field(description="True when the stored filename is longer.")
+    content_type: str = Field(
+        description=f"At most {HEADER_CHAR_LIMIT} characters; see content_type_clipped."
+    )
+    content_type_clipped: bool = Field(description="True when the stored MIME type is longer.")
+    size_bytes: int
+    folder: str = Field(description="Folder of the message carrying the attachment.")
+    sent_at: str = Field(
+        description="Send date of the carrying message (its Date: header) in UTC, ISO 8601."
+    )
+    occurred_at: str | None = Field(
+        description="Delivery date of the carrying message (its topmost Received: header) in "
+        "UTC, ISO 8601; null when absent or unparseable. Rows are ordered by occurred_at, "
+        "else sent_at."
+    )
+    source_file: Source | None = Field(
+        description="The raw file of the message carrying the attachment; null when "
+        "none is recorded."
+    )
+    extraction_status: str | None = Field(
+        description="success, empty, unsupported, too_large or failed; null when no "
+        "extraction is recorded for the payload and extractor_module (not yet run, or "
+        "extraction off)."
+    )
+    extractor: str | None = Field(description="The extractor that ran; null without one.")
+    extracted_at: str | None = Field(description="When the extraction ran; null without one.")
+    ocr_pages_skipped: int | None = Field(
+        description="Scanned PDF pages the OCR page cap left unread; null when unknown."
+    )
+
+
+class QueryAttachmentsOutput(_Output):
+    filters: list[FilterUse] = Field(description="How each given filter was applied; empty: none.")
+    date_bounds: DateBounds | None = Field(description=_DATE_BOUNDS_DESCRIPTION)
+    total_matches: int = Field(
+        description="Every attachment occurrence the filters definitely match, not just this "
+        "page; the complete count only when indeterminate is 0."
+    )
+    indeterminate: int = Field(
+        description="Occurrences the filters could neither accept nor reject (a sender or "
+        "participant filter on a carrying message whose sender is ambiguous or not yet "
+        "checked; a name or fragment address filter on one whose display names are not all "
+        "indexed; an extraction_status other than none on an occurrence with no extraction "
+        "recorded), in neither total_matches nor the pages. When not 0, report it with any "
+        "count."
+    )
+    status_counts: dict[str, int] = Field(
+        description="total_matches split by extraction status over every match, not just "
+        "this page; none counts occurrences with no extraction recorded."
+    )
+    returned: int
+    offset: int = Field(description="Matches returned by earlier pages.")
+    has_more: bool
+    next_cursor: str | None = Field(
+        description="Pass with the same filters for the next page; null when has_more is false."
+    )
+    attachments: list[ListedAttachment] = Field(
+        description="Newest carrying message first by delivery date, else send date "
+        "(occurred_at, else sent_at); claimant_id then attachment_occurrence_id break ties."
+    )
 
 
 def project_rows(content: dict[str, Any], fields: frozenset[str]) -> dict[str, Any]:

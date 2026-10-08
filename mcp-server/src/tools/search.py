@@ -582,11 +582,14 @@ def register_search_tools(
         retrieved, in the same order. A smaller limit keeps the first
         limit chunks of it.
 
-        Each thread's passages are ordered by similarity to the query;
-        when the query matches one of its attachments' filename or MIME
-        type, that attachment comes first, then its other attachments,
-        then the body, each by similarity, and attachments can then
-        fill every slot (six per thread mailbox-wide, limit with
+        Each thread's passages are ordered by similarity to the query,
+        after up to two that lead: when the query matches one of its
+        attachments' filename or MIME type, that attachment's first
+        passage, then the nearest passage holding a word of the query
+        (each chunk's selected_by says which). The rest of that
+        attachment follows, then its other attachments, then the body,
+        each by similarity, and attachments can then fill every slot but the
+        keyword one (six per thread mailbox-wide, limit with
         thread_id) before a body message. A thread with no passages is
         listed with an empty chunks list (with max_threads) or left
         out; read it with get_thread. So passages can stop before a
@@ -1033,6 +1036,7 @@ def register_search_tools(
                             text=c.text[:chunk_chars],
                             text_truncated=len(c.text) > chunk_chars,
                             vector_distance=c.score if include_scores else None,
+                            selected_by=c.selected_by,
                             source_file=source_ref(c.source_file),
                             scope=_chunk_scope(c, labels),
                             carried_by=(
@@ -1191,6 +1195,7 @@ def register_search_tools(
         files whose filename and MIME type do not match. There is no pagination
         beyond the 50-result cap, so report limited results and unread document text
         as coverage limits; do not claim an exhaustive attachment audit.
+        For a complete list or an exact count, use query_attachments.
         With ``from_addr``, the sender filter runs after a bounded candidate
         scan: even fewer than 50 results (including zero) can omit matches.
         ``sender`` is applied inside the search, before the cap. With
