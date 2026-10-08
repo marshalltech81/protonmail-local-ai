@@ -821,7 +821,7 @@ superseded entries keep their number and one line.
     access; a download route or resource needs its own decision. This
     resolves the "attachment download support" deferral.
 
-39. **Attachments, completeness and evidence ranking (2026-10-08):**
+40. **Attachments, completeness and evidence ranking (2026-10-08):**
     DOCX, PPTX and XLSX extraction runs in a child process with memory,
     CPU and wall-clock limits (#1040); per-message extraction launches
     stay unbounded as an accepted P2 risk until a scheduling design
