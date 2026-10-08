@@ -324,9 +324,9 @@ class TestPipeline:
             (paths[0],),
         ).fetchone()
         assert (row["reason"], row["attempts"]) == (REASON_REPARSE, 0)
-        assert row["last_error"] == main.REPARSE_RENAME_DEFERRED_ERROR
+        assert row["last_error"] == main.RENAME_DEFERRED_ERROR
         wait = datetime.fromisoformat(row["next_attempt_at"]) - datetime.now(UTC)
-        assert wait > timedelta(seconds=main.REPARSE_RENAME_DEFER_SECS - 10)
+        assert wait > timedelta(seconds=main.RENAME_DEFER_SECS - 10)
         assert db.find_message_entry_by_filepath(fresh) is not None
         # Not claimed again before the wait ends.
         assert paths[0] not in [r["filepath"] for r in queue.claim_batch(8)]

@@ -172,7 +172,7 @@ def _render(out: MailboxStatusOutput) -> str:
         lines.append(
             f"  {_messages(q.deferred)} {'is' if one else 'are'} deferred "
             f"without a failure of {'its' if one else 'their'} own (a file the indexer "
-            "cannot read yet, an embedder outage or configuration error, or a reparse "
+            "cannot read yet, an embedder outage or configuration error, or a job "
             f"waiting for a rename); the indexer retries {'it' if one else 'them'} "
             "without spending attempts."
         )

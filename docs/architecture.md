@@ -2128,11 +2128,9 @@ makes no embedding call. Attachment text comes from the extraction
 cache. Retries, dead letters, the stall guard and heartbeats are the
 queue's own, and a message that fails to parse dead-letters instead of
 failing a migration. A reparse job whose file is gone while its path is
-still indexed (mbsync renamed it and the watcher has not recorded the
-rename yet) waits once, 60 s and without spending an attempt, so the
-rename moves the job to the new path (`update_filepath`) instead of the
-reparse being dropped; a file still missing after that is dropped with
-reason `reparse_file_missing`.
+still indexed waits for the rename like any other job for an indexed
+file (see the `FileNotFoundError` outcome under the queue's stage
+outcomes below).
 
 The migration that adds such data triggers the reparse itself: after
 its DDL it ends with `REPARSE_ENQUEUE_SQL` (`indexer/src/queue.py`),
@@ -2282,12 +2280,21 @@ counted on the queue heartbeat's `suppressed_lines`); the sweep reports
 Two stage outcomes short-circuit the retry path entirely:
 
 - `FileNotFoundError` at parse — almost always because mbsync renamed
-  the file (added an IMAP flag suffix) between enqueue and read. The
-  path is permanently invalid; the renamed file enters the queue under
-  its new name via a fresh `IN_MOVED_TO` event. The worker calls
+  the file (added an IMAP flag suffix) between enqueue and read, and
+  the watcher has not recorded the rename yet. For a path that is not
+  indexed, the renamed file enters the queue under its new name via a
+  fresh `IN_MOVED_TO` event, so the worker calls
   `mark_skipped(reason="file_missing")` instead of `mark_failed`: row
   deleted, no retry, no dead-letter, and an INFO
-  `skipped: <path> reason=file_missing` log line.
+  `skipped: <path> reason=file_missing` log line. A path that is still
+  indexed gets no fresh event: `on_moved` only moves the file's records
+  and its job (`update_filepath`). So a job for an indexed file
+  (`reparse`, `reextract`, `recovery`, or a retry whose Phase 2 had not
+  finished) is first deferred once, 60 s and without spending an
+  attempt (counted under `parse=` in the heartbeat's deferrals), and
+  the rename carries it to the new path (#1145). A file still missing
+  after that wait is dropped as above, so a rename the watcher records
+  only after the wait still loses the job.
 - `PermissionError` at parse is deferred (60 s) without spending an
   attempt. mbsync `chmod go+r`s new files only after its whole sync
   finishes, so during a long sync a delivered file stays unreadable to

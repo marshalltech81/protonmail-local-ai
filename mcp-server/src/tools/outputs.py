@@ -705,7 +705,7 @@ class QueueCounts(_Output):
     deferred: int = Field(
         default=0,
         description="Messages the indexer postponed without a failure of their own (a file "
-        "it cannot read yet, an embedder outage or configuration error, or a reparse waiting "
+        "it cannot read yet, an embedder outage or configuration error, or a job waiting "
         "for a rename); retried without spending attempts. They make current false.",
     )
     parked_trashed: int = Field(

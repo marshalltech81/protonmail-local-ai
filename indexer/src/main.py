@@ -1281,12 +1281,15 @@ PERMISSION_DEFER_SECS = 60
 # deletion reconciliation decides its message (see ``_drain_queue_batched``).
 TRASHED_DEFER_SECS = 60 * 60
 PERMISSION_DEFER_WINDOW_SECS = 24 * 60 * 60
-# A reparse job whose file vanished while its path is still indexed waits
-# once, this long, for the watcher to record the rename (see
-# ``_phase1_commit_thread``). A file still missing after that is really
-# gone and is dropped with reason ``reparse_file_missing``.
-REPARSE_RENAME_DEFER_SECS = 60
-REPARSE_RENAME_DEFERRED_ERROR = "FileNotFoundError: deferred until the rename is recorded"
+# A job whose file vanished while its path is still indexed waits once,
+# this long, for the watcher to record the rename (see
+# ``_phase1_commit_thread``). A file still missing after that wait is
+# dropped with reason ``file_missing``; a rename the watcher records
+# later than that still loses the job. The error text is persisted in
+# ``last_error`` (it marks the wait as spent) and matched by the MCP
+# server's status, so it never changes.
+RENAME_DEFER_SECS = 60
+RENAME_DEFERRED_ERROR = "FileNotFoundError: deferred until the rename is recorded"
 
 
 def _enqueued_within(row: sqlite3.Row, seconds: int) -> bool:
@@ -1319,30 +1322,24 @@ def _phase1_commit_thread(
         msg = parse_email(Path(filepath), maildir_root=MAILDIR_PATH)
     except FileNotFoundError:
         # mbsync flag-rename race: file moved between enqueue and parse.
-        # Watchdog's IN_MOVED_TO will re-enqueue under the new name.
-        # Not a reparse of a path still indexed, though: ``on_moved``
-        # only moves an indexed file's records (and its job, through
-        # ``update_filepath``), so dropping the job before the rename is
-        # recorded would lose the reparse. Wait for it once, without
-        # spending an attempt (Codex round 1 on #1143); a file still
-        # missing after that is gone and dropped.
-        if (
-            row["reason"] == REASON_REPARSE
-            and row["last_error"] != REPARSE_RENAME_DEFERRED_ERROR
-            and db.is_indexed(filepath)
-        ):
+        # For a path not yet indexed, watchdog's IN_MOVED_TO re-enqueues
+        # under the new name. Not for a path still indexed, whatever the
+        # job's reason (reparse, reextract, recovery, a Phase 2 retry):
+        # ``on_moved`` then only moves the file's records (and its job,
+        # through ``update_filepath``) and enqueues nothing, so dropping
+        # the job before the rename is recorded would lose its work.
+        # Wait for it once, without spending an attempt (#1143, #1145);
+        # a file still missing after that wait is dropped.
+        if row["last_error"] != RENAME_DEFERRED_ERROR and db.is_indexed(filepath):
             queue.defer(
                 filepath,
                 stage=STAGE_PARSE,
-                error=REPARSE_RENAME_DEFERRED_ERROR,
+                error=RENAME_DEFERRED_ERROR,
                 error_class=ERROR_CLASS_RETRYABLE,
-                delay_seconds=REPARSE_RENAME_DEFER_SECS,
+                delay_seconds=RENAME_DEFER_SECS,
             )
             return None
-        queue.mark_skipped(
-            filepath,
-            reason="reparse_file_missing" if row["reason"] == REASON_REPARSE else "file_missing",
-        )
+        queue.mark_skipped(filepath, reason="file_missing")
         return None
     except PermissionError as e:
         # mbsync ``chmod go+r``s new files only after its whole sync
