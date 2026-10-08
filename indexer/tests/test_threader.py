@@ -8,12 +8,18 @@ and participant deduplication.
 
 import re
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from src import threader
 from src.database import EMBEDDING_DIM  # noqa: F401  -- via reuse
-from src.threader import Thread, Threader, _normalize_subject, canonical_addr
+from src.threader import (
+    SUBJECT_FALLBACK_WINDOW,
+    Thread,
+    Threader,
+    _normalize_subject,
+    canonical_addr,
+)
 
 from tests.conftest import make_message, make_thread
 
@@ -1137,6 +1143,18 @@ class TestSubjectFallbackProvenance:
         assert _rejections(caplog) == []
         rows = db._conn.execute("SELECT last_error FROM indexing_jobs").fetchall()
         assert all(_PROV_MARKER not in (r[0] or "") for r in rows)
+
+    def test_a_candidate_outside_the_date_window_is_not_a_provenance_rejection(
+        self, db, threader, caplog
+    ):
+        # Review round 4: the date window rejects this candidate whatever
+        # its evidence, so it must not count as a provenance rejection.
+        caplog.set_level("DEBUG")
+        forged = _index(db, threader, _msg("far1", ambiguous=True, subject=f"{_PROV_MARKER} plan"))
+        late = _msg("far2", day=1)
+        late.date = late.date + SUBJECT_FALLBACK_WINDOW + timedelta(days=1)
+        assert _index(db, threader, late) != forged
+        assert _rejections(caplog) == []
 
     def test_the_helper_checks_each_leg_on_its_own(self, db, threader):
         root = _index(db, threader, _msg("h1", subject=f"{_PROV_MARKER} plan", day=1))

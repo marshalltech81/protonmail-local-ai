@@ -337,6 +337,11 @@ class Threader:
         if thread is None:
             return False, False
 
+        # The date window first: a candidate it rejects is not counted as
+        # a provenance rejection whatever its evidence.
+        if abs(message.effective_date - thread.date_last) > SUBJECT_FALLBACK_WINDOW:
+            return False, False
+
         authors = {canonical_addr(addr) for addr in _authors(message)}
         authors.discard("")
         recipients = {canonical_addr(addr) for addr in [*message.to_addrs, *message.cc_addrs]}
@@ -350,9 +355,7 @@ class Threader:
             thread_canonical = {canonical_addr(addr) for addr in thread.participants}
             unproven = bool(authors & thread_canonical) and bool(recipients & thread_canonical)
             return False, unproven
-
-        delta = abs(message.effective_date - thread.date_last)
-        return delta <= SUBJECT_FALLBACK_WINDOW, False
+        return True, False
 
     @staticmethod
     def _participants(messages: list[Message]) -> list[str]:
