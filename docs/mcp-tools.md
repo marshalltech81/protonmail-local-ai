@@ -1127,9 +1127,12 @@ audits") is answered with several exact lanes and their union (#992):
    messages; narrow it with `sender` or dates and report the narrowing
    as a gap.
 2. Union the rows by `claimant_id`, keeping the lane or lanes that
-   found each, and classify each row before counting it. Page
-   `get_thread` until every candidate claimant has been returned and
-   follow body offsets with `get_message` before classifying a row
+   found each, and classify each row before counting it. Read further
+   in a row's thread (page `get_thread`, follow body offsets with
+   `get_message`) only while its relevance is still unclear from what
+   has been read, and always read its whole message before discarding
+   it; stop once relevance is established, as the smallest-sample
+   guidance above asks
    ([`get_thread`](#get_thread), [`get_message`](#get_message)). Count
    the rows kept, not the threads read, and report the rows dropped
    with their lane.
