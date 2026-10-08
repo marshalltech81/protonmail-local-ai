@@ -823,8 +823,9 @@ every call with `sender`, `0` and the empty reply included (an empty
 reply with a non-zero count reads `No attachments are known to match.`);
 without `sender` the structured field is `null` and the prose omits it.
 When the count fails it is `null` and the prose says `indeterminate:
-unavailable`, never `0`; the server logs a WARNING and the call's timing
-line carries `degraded_attachment_indeterminate`. The lanes and the
+unavailable`, never `0`; the server logs a WARNING (the first per
+exception type each minute, then a count) and the call's timing line
+carries `degraded_attachment_indeterminate`. The lanes and the
 count read one snapshot. It is applied in
 each lane's SQL before the lane's limit, so unlike `from_addr` it does
 not depend on a candidate window. Each result's `senders` is still its

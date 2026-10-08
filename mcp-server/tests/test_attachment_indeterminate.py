@@ -255,6 +255,9 @@ class TestAttachmentIndeterminateCount:
             def fetchone(self):
                 return self._rows[0]
 
+            def __iter__(self):
+                return iter(self._rows)
+
         undecided_db._connect = traced_connect  # type: ignore[method-assign]
         assert _counted(undecided_db, query=query, sender="vendor").indeterminate == 2
         ((sql, rows),) = counts
@@ -376,6 +379,58 @@ class TestAttachmentIndeterminateCount:
         indeterminate, grown_mb = _child_count_rss(path, "sender='vendor', from_addr='vendor'")
         assert indeterminate == 300
         assert grown_mb < 120
+
+    def test_from_addr_rows_are_streamed_not_collected(self, tmp_path):
+        """Codex round 3: with ``from_addr`` the per-thread rows (each
+        carrying its ``senders`` JSON) were collected with ``fetchall``
+        before summing; 200 threads x 1 MB of senders held them all at
+        once. They are read from the cursor one at a time."""
+        import json
+
+        conn, path = _open_built_db_conn(tmp_path, "many-senders.db")
+        for i in range(200):
+            _add(conn, f"u{i}", f"t{i}", "2024-01-10T00:00:00+00:00", VENDOR, sender_ambiguous=1)
+        senders = [VENDOR, "x" * 2**20 + "@example.com"]
+        conn.execute("UPDATE threads SET senders = ?", (json.dumps(senders),))
+        conn.commit()
+        conn.close()
+        indeterminate, grown_mb = _child_count_rss(path, "sender='vendor', from_addr='vendor'")
+        assert indeterminate == 200
+        assert grown_mb < 120
+
+    def test_repeated_count_failures_are_rate_limited(self, undecided_db, monkeypatch, caplog):
+        """Codex round 3: a count that keeps failing logs its WARNING
+        once per window, then one summary line with the count; every
+        call still reports unavailable and marks its own timing line."""
+        from src.lib.rate_limited_log import RateLimitedLog
+
+        now = [0.0]
+        undecided_db._count_failures = RateLimitedLog(
+            logging.getLogger("mcp.sqlite"),
+            undecided_db._count_failures._keys,
+            60.0,
+            first_msg=undecided_db._count_failures._first_msg,
+            summary_msg=undecided_db._count_failures._summary_msg,
+            clock=lambda: now[0],
+        )
+
+        def boom(*args, **kwargs):
+            raise sqlite3.OperationalError(MARKER)
+
+        monkeypatch.setattr(undecided_db, "_attachment_undecided_count", boom)
+        with caplog.at_level(logging.WARNING):
+            for _ in range(3):
+                found = _counted(undecided_db, sender="vendor")
+                assert found.indeterminate is None
+            now[0] = 61.0
+            _counted(undecided_db, sender="vendor")
+        lines = [r.getMessage() for r in caplog.records if r.name == "mcp.sqlite"]
+        assert lines == [
+            "Attachment search indeterminate count unavailable: OperationalError",
+            "Attachment search indeterminate count unavailable in the last 61s: OperationalError=3",
+            "Attachment search indeterminate count unavailable: OperationalError",
+        ]
+        assert MARKER not in caplog.text
 
     @pytest.mark.parametrize("query", [None, "ledger", "bravo"])
     def test_every_other_filter_applies(self, tmp_path, query):

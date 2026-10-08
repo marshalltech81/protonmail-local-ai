@@ -47,6 +47,7 @@ from .predicates import (
     query_messages_leaves,
     search_emails_leaves,
 )
+from .rate_limited_log import RateLimitedLog
 from .reranker import RerankerBackend
 
 log = logging.getLogger("mcp.sqlite")
@@ -71,6 +72,17 @@ class VectorLanesUnavailableError(RuntimeError):
 # are present to preserve recall.
 _UNFILTERED_OVERSAMPLE = 2
 _FILTERED_OVERSAMPLE = 4
+
+# Rate-limit keys (fixed exception type names) and window for the
+# ``search_attachments`` indeterminate-count failure WARNING (#1204).
+_COUNT_FAILURE_KEYS = (
+    "OperationalError",
+    "DatabaseError",
+    "ValueError",
+    "JSONDecodeError",
+    "other",
+)
+_COUNT_FAILURE_LOG_SECS = 60.0
 
 # Oversample factor for the chunk and attachment FTS lanes, where one
 # thread can legitimately own many matching rows (a long thread, a
@@ -1325,6 +1337,16 @@ class Database:
 
     def __init__(self, path: str):
         self.path = path
+        # A failing ``search_attachments`` indeterminate count (#1204)
+        # repeats on every sender-filtered call a client sends: the first
+        # failure per type and window is logged, the rest counted.
+        self._count_failures = RateLimitedLog(
+            log,
+            _COUNT_FAILURE_KEYS,
+            _COUNT_FAILURE_LOG_SECS,
+            first_msg="Attachment search indeterminate count unavailable: %s",
+            summary_msg="Attachment search indeterminate count unavailable in the last %ds: %s",
+        )
         # Fail fast at startup with the same checks ``_connect`` runs
         # on every access. Catches a missing volume / typo'd
         # SQLITE_PATH / unhealthy indexer at process start instead of
@@ -1953,11 +1975,10 @@ class Database:
                 except (sqlite3.Error, ValueError) as e:
                     # Unavailable, never 0: a 0 would read as "every
                     # candidate decided". Type only: the error can quote
-                    # stored mail.
-                    log.warning(
-                        "Attachment search indeterminate count unavailable: %s",
-                        type(e).__name__,
-                    )
+                    # stored mail. Rate-limited; the timing line still
+                    # marks every call.
+                    name = type(e).__name__
+                    self._count_failures.record(name if name in _COUNT_FAILURE_KEYS else "other")
                     timings.count("degraded_attachment_indeterminate", 1)
             conn.rollback()
 
@@ -2055,7 +2076,8 @@ class Database:
             sql = "WITH " + ctes + " SELECT COUNT(*) FROM cand"  # nosec B608
             return conn.execute(sql, candidate_params).fetchone()[0]
         # Count per thread first, then read each thread's ``senders`` once:
-        # joining before the grouping copied it per candidate.
+        # joining before the grouping copied it per candidate. The rows
+        # are read from the cursor one at a time, never collected.
         sql = (
             "WITH " + ctes + " "  # nosec B608
             "SELECT t.senders, g.n FROM ( SELECT thread_id, COUNT(*) AS n FROM cand "
@@ -2064,7 +2086,7 @@ class Database:
         fa = from_addr.lower()
         return sum(
             r["n"]
-            for r in conn.execute(sql, candidate_params).fetchall()
+            for r in conn.execute(sql, candidate_params)
             if _addr_matches(json.loads(r["senders"]), fa)
         )
 
