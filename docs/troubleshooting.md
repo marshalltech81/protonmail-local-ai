@@ -1302,10 +1302,17 @@ tool=get_thread outcome=error total_ms=1.9 stages_ms={} counts={} config={}
   logged once per key per minute; later repeats in that minute are
   counted into one `rejected invalid arguments in the last <N>s:
   <tool>.<field>=<count> ...` line, logged when the next rejection
-  arrives after the minute ends.
+  arrives after the minute ends. An argument the tool's own argument
+  model refuses (a wrong type, for example `limit="abc"`) never
+  reaches the handler or this log: FastMCP logs its own `Invalid
+  arguments for tool '<tool>': {'error_count': ..., 'error_types':
+  [...]}` WARNING per call (codes and counts only, never the value),
+  with no rate limit (#1131).
 - `total_ms` is the whole call; `stages_ms` the timed stages
   (retrieval lanes, embedding, rerank, inference) that ran.
-- `counts` holds result counts: `returned` and `total_matches` for
+- `counts` holds result counts: `returned`, `total_matches` and
+  `indeterminate` (messages the filters could neither accept nor
+  reject; non-zero means the count is not complete) for
   `query_messages`, `messages`, `threads`, `contacts`, `folders` for the
   other retrieval tools, and the lane and degradation counts of the
   search and intelligence tools.

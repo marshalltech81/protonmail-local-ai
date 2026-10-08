@@ -6,13 +6,18 @@ Fetch thread and message context from the local SQLite index.
 import asyncio
 import logging
 import unicodedata
+from typing import Annotated, Any
 
 from fastmcp.exceptions import ToolError
 from mcp.types import CallToolResult
+from pydantic import WithJsonSchema
 
 # Module import: get_thread and get_message have a local named ``count``.
 from ..lib import timings
-from ..lib.predicates import validate_date_range
+from ..lib.predicates import (
+    MAX_SIZE_BYTES,
+    validate_date_range,
+)
 from ..lib.rate_limited_log import ArgumentRejections, RateLimitedLog
 from ..lib.security import QUERY_MESSAGE_FIELDS, log_tool_call
 from ..lib.sqlite import (
@@ -61,6 +66,26 @@ log = logging.getLogger("mcp.tools.retrieval")
 # Ceiling on query_messages page size: enumeration pages by cursor, so a
 # large page only bloats one response.
 _MAX_QUERY_LIMIT = 100
+
+# A ``size_min`` / ``size_max`` argument (#1085). The published schema
+# states the contract (an integer from 0 to SQLite's INTEGER maximum, or
+# null), but the argument model passes the raw value through, so the
+# handler's own strict check (``normalize_size_bound``: no ``true`` or
+# ``"100"`` coerced to an int, nothing that would overflow the bind)
+# rejects it through the rate-limited per-field log; a check in the
+# argument model would be refused before the handler, outside that log
+# (Codex round 3).
+SizeBound = Annotated[
+    Any,
+    WithJsonSchema(
+        {
+            "anyOf": [
+                {"maximum": MAX_SIZE_BYTES, "minimum": 0, "type": "integer"},
+                {"type": "null"},
+            ]
+        }
+    ),
+]
 
 # Seconds per window of the rate-limited ``fields`` rejection warning:
 # a client can repeat a rejected projection as fast as it likes.
@@ -266,7 +291,7 @@ def _filter_uses(args: dict) -> list[FilterUse]:
             uses.append(FilterUse(filter=key, value=value.strip(), match="substring"))
         elif key == "text":
             uses.append(FilterUse(filter=key, value=value.strip(), match="all_words"))
-        elif key in ("date_from", "date_to"):
+        elif key in ("date_from", "date_to", "size_min", "size_max"):
             uses.append(FilterUse(filter=key, value=value, match="inclusive_bound"))
         else:
             uses.append(FilterUse(filter=key, value=value, match="equals"))
@@ -857,14 +882,23 @@ def register_retrieval_tools(server, db):
         authority_class: str | None = None,
         seen: bool | None = None,
         flagged: bool | None = None,
+        replied: bool | None = None,
+        size_min: SizeBound = None,
+        size_max: SizeBound = None,
         limit: int = 25,
         cursor: str | None = None,
         fields: list[str] | None = None,
     ) -> CallToolResult:
         """
-        Enumerate EVERY message matching exact criteria, with an exact
-        total count. Not ranked, not fuzzy: the complete matching set,
-        newest first, one message per row.
+        Enumerate EVERY message matching exact criteria, with a total
+        count. Not ranked, not fuzzy: every message the filters
+        definitely match, newest first, one message per row.
+        ``total_matches`` counts the messages the filters definitely
+        match; it is the complete count only when ``indeterminate`` is
+        0. ``indeterminate`` counts messages a filter could not decide
+        (a size bound on a message without a stored size); they are in
+        neither ``total_matches`` nor the pages, so report
+        ``indeterminate`` with any count when it is not 0.
 
         Use this for exhaustive or counting questions — "how many
         emails did Jane send me in 2024?", "list every message from
@@ -895,7 +929,8 @@ def register_retrieval_tools(server, db):
         again with the SAME filters plus ``cursor`` set to the returned
         ``next_cursor``. Never report a partial page as the complete
         answer. To examine every match, continue until ``has_more`` is
-        false; a count of these exact criteria needs only ``total_matches``.
+        false; a count of these exact criteria needs only ``total_matches``
+        and ``indeterminate``, not the pages.
         An exhausted keyword query does not prove exhaustive coverage of
         a topic: consider alternate wording, read candidate messages,
         and distinguish messages from threads or distinct bills/items.
@@ -961,6 +996,12 @@ def register_retrieval_tools(server, db):
                              never match.
             seen: True for messages read in Proton, False for unread.
             flagged: True for flagged (starred) messages, False for the rest.
+            replied: True for messages answered in Proton, False for the rest.
+            size_min: Inclusive lower bound in bytes (an integer from 0
+                      to 2^63-1) on the message's local file size (not
+                      the server's RFC822.SIZE); messages without a
+                      stored size are left out.
+            size_max: Inclusive upper bound in bytes, likewise.
             limit: Messages per page (default 25, clamped to [1, 100]).
             cursor: ``next_cursor`` from the previous page of the same query.
             fields: Row fields to return; claimant_id and thread_id are
@@ -970,7 +1011,11 @@ def register_retrieval_tools(server, db):
             The filter interpretation, total_matches, the page's
             messages newest first by that time (send and delivery
             date, folder, subject, From / To / Cc, Message-ID, Thread
-            ID), and paging state.
+            ID), and paging state. ``indeterminate``, stated whenever
+            non-zero, counts messages the filters could neither accept
+            nor reject (no stored size under a size bound); they are in neither
+            total_matches nor the pages, so a count is complete only
+            when it is 0.
         """
         args = {
             "sender": sender,
@@ -985,9 +1030,19 @@ def register_retrieval_tools(server, db):
             "authority_class": authority_class,
             "seen": seen,
             "flagged": flagged,
+            "replied": replied,
+            "size_min": size_min,
+            "size_max": size_max,
         }
         log_tool_call(
-            log, "query_messages", {**args, "limit": limit, "cursor": cursor, "fields": fields}
+            log,
+            "query_messages",
+            {
+                **args,
+                "limit": limit,
+                "cursor": cursor,
+                "fields": fields,
+            },
         )
         limit = clamp_int(limit, default=25, minimum=1, maximum=_MAX_QUERY_LIMIT)
         projection = None
@@ -1014,6 +1069,10 @@ def register_retrieval_tools(server, db):
             rejections.reject("query_messages", e.field_name)
             raise ToolError(f"Error: {e}") from e
 
+        # No date_basis: the Database clock machinery (lib/predicates
+        # DATE_BASES, the cursor clock) stays fixed to effective time
+        # here; serving another clock was split out of #1085 (owner,
+        # 2026-10-08) and waits for #1150 (with #1087).
         try:
             page = await asyncio.to_thread(db.query_messages, **args, limit=limit, cursor=cursor)
         except InvalidFilterError as e:
@@ -1029,6 +1088,9 @@ def register_retrieval_tools(server, db):
             raise ToolError(f"Error: {type(e).__name__}") from e
 
         timings.count("total_matches", page.total_matches)
+        # On the timing line too, so a call that could not decide every
+        # message is not read as complete from the log (Codex round 3).
+        timings.count("indeterminate", page.indeterminate)
         timings.count("returned", len(page.messages))
         uses = _filter_uses(args)
         output = QueryMessagesOutput(
@@ -1043,6 +1105,7 @@ def register_retrieval_tools(server, db):
             ],
             date_bounds=bounds,
             total_matches=page.total_matches,
+            indeterminate=page.indeterminate,
             returned=len(page.messages),
             offset=page.offset,
             has_more=page.has_more,
@@ -1053,6 +1116,13 @@ def register_retrieval_tools(server, db):
         if bounds_line := describe_date_bounds(bounds):
             lines.append(bounds_line)
         lines.append(f"total_matches: {page.total_matches}")
+        if page.indeterminate:
+            # Stated whenever non-zero, so a count is never read as
+            # complete when some messages could not be decided.
+            lines.append(
+                f"indeterminate: {page.indeterminate} (messages the filters could neither "
+                "accept nor reject: no stored size; in neither total_matches nor the pages)"
+            )
         # Counts only: the addresses themselves are in the structured
         # output (#801).
         for name, match in page.address_matches.items():
@@ -1064,7 +1134,13 @@ def register_retrieval_tools(server, db):
         if not page.messages:
             lines.append("returned: 0")
             lines.append("has_more: false")
-            lines.append("No messages match." if page.offset == 0 else "No further messages.")
+            if page.offset:
+                lines.append("No further messages.")
+            elif page.indeterminate:
+                # Undecided messages may still match (Codex round 5).
+                lines.append("No messages are known to match.")
+            else:
+                lines.append("No messages match.")
             return _projected(tool_result("\n".join(lines), output), projection)
 
         first, last = page.offset + 1, page.offset + len(page.messages)

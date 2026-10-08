@@ -604,7 +604,7 @@ class ListThreadsOutput(_Output):
 
 class FilterUse(_Output):
     filter: str
-    value: str | bool = Field(
+    value: str | bool | int = Field(
         description="The value as applied (a canonical address for exact_address)."
     )
     match: Literal["exact_address", "substring", "all_words", "equals", "inclusive_bound"]
@@ -630,7 +630,16 @@ class QueryMessagesOutput(_Output):
         "matched; empty without one."
     )
     date_bounds: DateBounds | None = Field(description=_DATE_BOUNDS_DESCRIPTION)
-    total_matches: int = Field(description="Every matching message, not just this page.")
+    total_matches: int = Field(
+        description="Every message the filters definitely match, not just this page; the "
+        "complete count only when indeterminate is 0."
+    )
+    indeterminate: int = Field(
+        description="Messages the filters could neither accept nor reject (a size bound on "
+        "a message without a stored size), in neither total_matches nor the pages. 0 when "
+        "every filter could be decided for every message; when not 0, report it with any "
+        "count."
+    )
     returned: int
     offset: int = Field(description="Matches returned by earlier pages.")
     has_more: bool
@@ -638,8 +647,9 @@ class QueryMessagesOutput(_Output):
         description="Pass with the same filters for the next page; null when has_more is false."
     )
     messages: list[ListedMessage] = Field(
-        description="Newest send date first. With fields, each row holds only those "
-        "fields plus claimant_id and thread_id."
+        description="Newest first by delivery date, else send date (occurred_at, else "
+        "sent_at). With fields, each row holds only those fields plus claimant_id and "
+        "thread_id."
     )
 
 

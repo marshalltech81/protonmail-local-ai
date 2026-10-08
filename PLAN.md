@@ -347,7 +347,7 @@ Phase 4 schema change needs a numbered migration.
    ordering (`docs/architecture.md`, "Message time"). **Done** (#593,
    #597, #599). Amended 2026-10-07 (Resolved decisions 35): the
    effective time stays the default basis; `date_basis` lets a caller
-   choose `sent`, `occurred` or `internal` (#1085, #1092), and a
+   choose `sent`, `occurred` or `internal` (#1150, #1092), and a
    missing `Date:` stays unknown instead of being dated at indexing
    (#1080). Bitemporal claims wait for Phase 5.
 4. **Deletion/retention semantics.** Mirror is the default, archive
@@ -363,10 +363,12 @@ Phase 4 schema change needs a numbered migration.
    `query_messages` is already an exact enumerator with good address
    semantics; what it lacks is composition, an explicit clock and a
    way to say "could not tell". One leaf compiler serves the three
-   filter implementations (#1084), then: `replied`, size and
-   `date_basis` (#1085), which ships the `indeterminate` count for
-   its own NULL clocks and sizes, read from the row with no new
-   storage, so no basis ever drops unknown rows silently; per-message
+   filter implementations (#1084), then: `replied` and size (#1085),
+   which ships the `indeterminate` count for unknown sizes, read from
+   the row with no new storage; the selectable clock, `date_basis`
+   (#1150, depending on #1080 for `sent`), counting its own NULL
+   clocks the same way so no basis ever drops unknown rows silently;
+   per-message
    content evaluability generalizing that count (#1086, before any
    negation); the bounded `all` / `any` / `negate` form with a leaf
    cap that also counts `any` groups (empty groups rejected) and

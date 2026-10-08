@@ -242,6 +242,24 @@ class TestLogToolCall:
         assert "Confidential-marker" not in text
         assert text.count("withheld=['filter_type']") == 1
 
+    def test_size_bounds_log_only_values_the_tool_accepts(self, caplog):
+        """``size_min`` / ``size_max`` are logged only inside
+        ``normalize_size_bound``'s range (Codex round 4 on #1125): a
+        negative or oversized value, which the tool rejects, is withheld
+        by name."""
+        import logging
+
+        logger = logging.getLogger("test-tool-log-size")
+        with caplog.at_level(logging.INFO, logger="test-tool-log-size"):
+            log_tool_call(logger, "query_messages", {"size_min": 100, "size_max": 2**63 - 1})
+            log_tool_call(logger, "query_messages", {"size_min": -1})
+            log_tool_call(logger, "query_messages", {"size_max": 2**63})
+        lines = [r.getMessage() for r in caplog.records]
+        assert len(lines) == 3
+        assert f"{{'size_min': 100, 'size_max': {2**63 - 1}}} withheld=[]" in lines[0]
+        assert "-1" not in lines[1] and "withheld=['size_min']" in lines[1]
+        assert str(2**63) not in lines[2] and "withheld=['size_max']" in lines[2]
+
     def test_state_filters_log_only_booleans(self, caplog):
         import logging
 

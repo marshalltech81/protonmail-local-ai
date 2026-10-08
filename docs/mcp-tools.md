@@ -437,10 +437,38 @@ different filters"), never read against them.
 | `not_in_folders` | folder names | the default scope, when no folder is named | it is filed in none of them (`Trash`; [Trash](#trash-is-left-out-by-default)) |
 | `effective_from` | UTC instant | `date_from` | its effective time is at or after the instant |
 | `effective_to` | UTC instant | `date_to` | its effective time is at or before the instant |
+| `sent_from` | UTC instant | no tool yet ([#1150](https://github.com/marshalltech81/protonmail-local-ai/issues/1150)) | its send date (`sent_at`) is at or after the instant |
+| `sent_to` | UTC instant | no tool yet (#1150) | its send date is at or before the instant |
+| `occurred_from` | UTC instant | no tool yet (#1150) | its delivery date (`occurred_at`) is at or after the instant; unknown without one |
+| `occurred_to` | UTC instant | no tool yet (#1150) | its delivery date is at or before the instant; unknown without one |
+| `dated` | clock name | no tool yet (#1150) | it has that clock (a delivery date), so it has a place in a page ordered by it; unknown without one |
 | `has_attachments` | bool | `has_attachments` | its own attachment flag equals the value |
 | `seen` | bool | `query_messages` `seen` | its read flag equals the value |
 | `flagged` | bool | `query_messages` `flagged` | its flagged flag equals the value |
+| `replied` | bool | `query_messages` `replied` | its answered flag (the Maildir `R` flag) equals the value |
+| `size_min` | bytes | `query_messages` `size_min` | its local file size is at least the value; unknown without a stored size |
+| `size_max` | bytes | `query_messages` `size_max` | its local file size is at most the value; unknown without a stored size |
 | `authority_class` | class name | `authority_class` | its From sender carries the class, outside Spam, and its `sender_ambiguous` is `false` ([Sender attribution](#sender-attribution)) |
+
+**Unknown values and the `indeterminate` count
+([#1085](https://github.com/marshalltech81/protonmail-local-ai/issues/1085)).**
+A leaf over a field the index can hold as NULL (`occurred_at` for a
+message without a parseable delivery date, `size_bytes` for one whose
+file size was not recorded) is neither true nor false of such a
+message. The leaves conjoin with SQL's three-valued AND: a message is
+a match when every leaf is true, rejected when any leaf is false, and
+otherwise *indeterminate*: left out of the matches and of
+`total_matches`, and counted in the response's `indeterminate` field,
+which the prose states whenever it is not 0 (an empty first page then
+ends "No messages are known to match." rather than "No messages
+match."). `total_matches` is then not the complete count: report
+`indeterminate` with it. The count is one extra `COUNT(*)` over the
+same predicate, read in the same snapshot, and runs only when a leaf
+that can be unknown is present; a query of decided leaves only (the
+default) costs nothing more and reports 0.
+[#1086](https://github.com/marshalltech81/protonmail-local-ai/issues/1086)
+extends the rule to content evaluability (capped bodies, failed
+extractions).
 
 **Thread-level evaluation (`search_emails`).** The thread filters are
 decided per leaf, each on its own: one message can satisfy the sender
@@ -1024,10 +1052,10 @@ that set it (`address:<pattern>` or `domain:<pattern>`, null when
 unclassified).
 
 ### `query_messages`
-Enumerate **every** message matching exact criteria, with an exact
-total. Unlike `search_emails`, which ranks threads by relevance and
-returns the top `limit`, this returns the complete matching set of
-individual messages, newest effective time (`occurred_at`, else
+Enumerate **every** message matching exact criteria, with a total
+count. Unlike `search_emails`, which ranks threads by relevance and
+returns the top `limit`, this returns every individual message the
+filters definitely match, newest effective time (`occurred_at`, else
 `sent_at`) first (claimant ID breaks ties),
 and pages through it with a cursor. Use it for "all" and "how many"
 questions.
@@ -1045,6 +1073,9 @@ questions.
 | `has_attachments` | bool | none | The message's own attachment flag, either way |
 | `seen` | bool | none | `true` for messages read in Proton, `false` for unread ([read state](#read-state)) |
 | `flagged` | bool | none | `true` for flagged (starred) messages, `false` for the rest |
+| `replied` | bool | none | `true` for messages answered in Proton (the Maildir `R` flag), `false` for the rest |
+| `size_min` | int | none | Inclusive lower bound in bytes on the message's local Maildir file size: not IMAP `RFC822.SIZE` (isync writes LF line endings, so a message is about one byte per line smaller than the server's size). A message whose size is not stored is left out. An integer from 0 to 2^63-1 (SQLite's INTEGER range, stated in the schema as `minimum` / `maximum`), checked strictly, so `"100"` or `true` is an error, not a coerced filter, logged through the rate-limited `rejected invalid argument: query_messages.size_min` warning; `size_min` above `size_max` is an error |
+| `size_max` | int | none | Inclusive upper bound in bytes, likewise |
 | `authority_class` | string | none | The source-authority class of the message's From sender (any author, for a multi-author From): `counsel`, `management`, `vendor`, `government`, `personal`, `other`, or `unclassified`; a message in Spam never matches, nor does one whose `sender_ambiguous` is not `false` ([Sender attribution](#sender-attribution)); blank is ignored, any other value is an error |
 | `limit` | int | `25` | Messages per page; clamped to `[1, 100]` |
 | `cursor` | string | none | `next_cursor` from the previous page of the same query |
@@ -1091,7 +1122,13 @@ identity remains ambiguous rather than combining unrelated namesakes.
 
 **Response contract.** The response states the filter interpretation,
 `total_matches` (over the whole set), `returned` with the match range,
-and `has_more`; when more remain it includes `next_cursor`. Each
+and `has_more`; when more remain it includes `next_cursor`. The
+structured output always carries `indeterminate`, the number of
+messages the filters could neither accept nor reject ([unknown
+values](#filter-predicates)); the prose states it whenever it is not
+0. `total_matches` counts the definite matches: it is the complete
+count only when `indeterminate` is 0, so report `indeterminate` with
+any count when it is not. Each
 message carries its send and delivery dates, folder, read state,
 [pending deletion](#pending-deletion), attachment flag, subject,
 From / To / Cc (at most 10 per role, with a count of the rest),
@@ -1147,8 +1184,10 @@ disclosure, and ask before a content call would exceed the requested or
 approved scope. Filtering the list does not restrict the context returned
 by `get_message` or `get_thread`.
 
-A count of the exact filter criteria needs only `total_matches`; reading
-every page is necessary when classifying or examining each message.
+A count of the exact filter criteria needs only `total_matches` and
+`indeterminate` (the count is complete only when `indeterminate` is 0;
+otherwise report both); reading every page is necessary when
+classifying or examining each message.
 Exhausting a keyword query does not establish exhaustive coverage of a
 topic. Consider alternate wording, read candidate messages, and keep the
 counting unit explicit (messages, threads, or distinct bills/items).
