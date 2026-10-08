@@ -178,6 +178,14 @@ recording_is_pinned() {
         printf '%s: no ppt-checksums target exporting the stage to indexer/java/checksums\n' "$MAKEFILE"
         return 1
     fi
+    # Both stages the recording runs in skip the layer cache, so a cached
+    # ppt-tools layer cannot record with an older Maven than a clean
+    # build installs.
+    if ! grep -E -- '--target ppt-checksums .*--no-cache-filter ppt-tools,ppt-checksums-record ' \
+        "$root/$MAKEFILE" >/dev/null; then
+        printf '%s: ppt-checksums does not skip the layer cache of ppt-tools and ppt-checksums-record\n' "$MAKEFILE"
+        return 1
+    fi
 }
 
 # Prints the repository paths of a jar and a POM for every dependency and
@@ -322,6 +330,12 @@ a_recording_without_record_is_detected() {
     expect_failure recording_is_pinned "$root" "ppt-checksums-record: the Maven Resolver flags differ"
 }
 
+a_recording_on_cached_tools_is_detected() {
+    local root
+    root="$(edited_fixture record-cached-tools "$MAKEFILE" "s/--no-cache-filter [^ ]+ /--no-cache-filter ppt-checksums-record /")"
+    expect_failure recording_is_pinned "$root" "does not skip the layer cache of ppt-tools"
+}
+
 a_bumped_dependency_is_detected() {
     local root
     root="$(edited_fixture dep-bump "$POM" "s#<version>2\\.22\\.0</version>#<version>2.99.0</version>#")"
@@ -374,6 +388,7 @@ check "a summary file not copied into the build is detected" a_missing_copy_is_d
 check "a dropped --strict-checksums is detected" a_dropped_strict_checksums_is_detected
 check "a recording run with a cache mount is detected" a_cached_recording_is_detected
 check "a recording run that does not record is detected" a_recording_without_record_is_detected
+check "a recording on a cached ppt-tools stage is detected" a_recording_on_cached_tools_is_detected
 check "a dependency bumped without new checksums is detected" a_bumped_dependency_is_detected
 check "a plugin bumped without new checksums is detected" a_bumped_plugin_is_detected
 check "a malformed summary line is detected" a_malformed_line_is_detected

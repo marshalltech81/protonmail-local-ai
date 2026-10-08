@@ -2476,7 +2476,9 @@ A change to `indexer/java/pom.xml`, a Dependabot bump included, needs
 the file rewritten: run `make ppt-checksums` and commit the result
 with the change. The target builds the Dockerfile's `ppt-checksums`
 stage, which runs the image's own Maven with no cache mount, without
-the layer cache, and with no summary file, so every artifact is
+the layer cache (for `ppt-tools` too, so the JDK and Maven are the
+ones a clean build installs), and with no summary file, so every
+artifact is
 downloaded from Maven Central, checked against Central's checksum
 file (`--strict-checksums`) and recorded; review the diff as you would
 the pom change. The file is written in a stable order, so two runs

@@ -136,10 +136,12 @@ build-nocache:
 # and the Trivy dependency scan check each artifact against (#1117).
 # Run it after a change to indexer/java/pom.xml (a Dependabot bump) and
 # commit the file with it. It builds the Dockerfile's ppt-checksums
-# stage: the image's own Maven, from an empty repository and never from
-# the layer cache, downloads from Maven Central and records.
+# stage: the Maven a clean build installs (ppt-tools is rebuilt too, so
+# a cached apt layer cannot record with an older Maven), from an empty
+# repository and never from the layer cache, downloads from Maven
+# Central and records.
 ppt-checksums:
-	docker build --target ppt-checksums --no-cache-filter ppt-checksums-record --provenance=false --output type=local,dest=indexer/java/checksums indexer
+	docker build --target ppt-checksums --no-cache-filter ppt-tools,ppt-checksums-record --provenance=false --output type=local,dest=indexer/java/checksums indexer
 
 validate-env:
 	./scripts/validate-env.sh
