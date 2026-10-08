@@ -1216,8 +1216,8 @@ Maildir watcher and walks (#870):
   the kernel's inotify queue (its length is the Docker host kernel's
   `fs.inotify.max_queued_events`) and Linux dropped the events after
   it (#1108). The indexer re-schedules the Maildir watch and runs a
-  Maildir walk (`maintenance pass=rescan` follows) at once, retried
-  every 60 s while it fails, and until a walk completes
+  Maildir walk (`maintenance pass=rescan` follows) at once, both
+  retried every 60 s while either fails, and until that walk completes
   `get_mailbox_status` does not count a sync as ingested from the
   watcher alone. `Maildir watcher: recovered from <n> inotify queue
   overflow(s); a Maildir walk queued the mail their dropped events

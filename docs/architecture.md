@@ -2275,13 +2275,15 @@ and adds one to an overflow count in `_IngestionStateRecorder`. The
 main loop then forces a re-schedule of the folder watch (a dropped
 directory-create event leaves that directory unwatched, and a
 recreated directory can reuse its inode, so the refresh's own check
-cannot see it) and runs the periodic rescan (rename sweep and walk)
-at once, and repeats both at most once per
+cannot see it) and, once that succeeds, runs the periodic rescan
+(rename sweep and walk), at once, and repeats both at most once per
 `OVERFLOW_RESCAN_RETRY_SECS` (60 s) while the recovery is still owed;
-an overflow after a completed recovery is handled at once again.
-Each walk (the startup walk too) takes the
-count before it starts; only a walk that completes with no overflow
-since then clears the recovery, and logs it. Until then the watcher's
+an overflow after a completed recovery is handled at once again. The
+recovery walk takes the count before it starts; only such a walk that
+completes with no overflow since then clears the recovery, and logs
+it. The startup walk and the ordinary periodic rescan re-schedule no
+watch, so they leave an overflow owed (one during startup is
+recovered on the main loop's first pass). Until then the watcher's
 stamp acknowledgements are held back (see "Index currency" below).
 Other platforms' watchdog backends have no inotify queue, and the
 hook is not installed there.
@@ -2415,9 +2417,11 @@ is queued:
   content, which a later sync may already have replaced. After an
   inotify queue overflow this no longer holds, since some delivery
   events were dropped (#1108): the last stamp handled is held
-  instead (stamps arrive in sync order) and acknowledged when a walk that started after the latest
-  overflow completes. Every delivery the overflow dropped was on disk
-  before that walk began, and later ones reached the watcher in order.
+  instead (stamps arrive in sync order) and acknowledged when the
+  recovery walk (after a forced watch re-schedule) that started after
+  the latest overflow completes. Every delivery the overflow dropped
+  was on disk before that walk began, and later ones reached the
+  watcher in order.
 - when a Maildir walk (startup or the periodic rescan) finishes: the
   stamp read before the walk is acknowledged.
 

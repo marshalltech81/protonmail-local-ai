@@ -790,10 +790,11 @@ class _IngestionStateRecorder:
     An inotify queue overflow breaks the first rule: the kernel dropped
     events, so the watcher may handle a stamp whose deliveries it never
     saw (#1108). ``_overflows`` counts the overflows the watcher
-    reported; ``_covered`` is the count at the start of the last Maildir
-    walk that completed. While ``_overflows`` is ahead, the last stamp
-    the watcher handles is held instead of acknowledged, and a walk that
-    started after the latest overflow acknowledges it when it
+    reported; ``_covered`` is the count at the start of the last
+    overflow recovery walk that completed (one that follows a forced
+    watch re-schedule). While ``_overflows`` is ahead, the last stamp
+    the watcher handles is held instead of acknowledged, and a recovery
+    walk that started after the latest overflow acknowledges it when it
     completes: every delivery the overflow dropped was on disk before
     that walk began, and the ones after it reached the watcher in order.
 
@@ -2798,9 +2799,6 @@ def initial_index(
     # 5-attempt × 30s backoff cascade against the same poison-pill
     # payloads — observed to add up to ~30 minutes of wasted embedding
     # service load per dead file per restart.
-    # The watcher is already running: an inotify overflow before this
-    # walk is covered by it (#1108).
-    overflows = ingestion_state.walk_started() if ingestion_state is not None else 0
     stamp = ingestion_state.read_stamp() if ingestion_state is not None else None
     _enqueue_unindexed_messages(
         db,
@@ -2821,7 +2819,6 @@ def initial_index(
     )
     if ingestion_state is not None:
         ingestion_state.acknowledge(stamp)
-        ingestion_state.walk_completed(overflows)
 
     # Recovery sweep — re-enqueue messages stuck on chunkless zero-vector
     # threads from a prior crash mid-batch (queued row that mark_failed /
@@ -3020,18 +3017,19 @@ def _run_watch_refresh(
     *,
     skip_trashed: bool,
     summary: bool = False,
-) -> None:
+) -> bool:
     """``_refresh_folder_watches`` for the main loop: a failure is logged
     by type and retried on the next signal or sweep, and the first
     success after failures logs the recovery (#873). ``summary`` (the
-    periodic pass) logs its duration and watch count (#874)."""
+    periodic pass) logs its duration and watch count (#874). Returns
+    whether the refresh succeeded."""
     started = _monotonic()
     try:
         _refresh_folder_watches(folder_watches, db, queue, skip_trashed=skip_trashed)
     except Exception as e:
         _streaks[WATCH_REFRESH].failed()
         log.error("Maildir watch refresh failed: %s", type(e).__name__)
-        return
+        return False
     _streaks[WATCH_REFRESH].succeeded()
     if summary:
         log.info(
@@ -3039,6 +3037,7 @@ def _run_watch_refresh(
             (_monotonic() - started) * 1000,
             folder_watches.watched_dirs,
         )
+    return True
 
 
 def _run_periodic_reconcile(reconciler: Reconciler | None, db: Database) -> None:
@@ -3086,9 +3085,15 @@ def _run_periodic_rescan(
     ingestion_state: _IngestionStateRecorder,
     *,
     skip_trashed: bool,
+    overflow_recovery: bool = False,
 ) -> None:
     """Re-walk the Maildir so a file whose watchdog event was missed is
     still queued, then acknowledge the sync stamp read before the walk.
+
+    ``overflow_recovery``: the walk follows a forced watch re-schedule
+    after an inotify queue overflow (#1108), so its completion clears
+    the overflows it started after. Only that walk does: an overflow can
+    also have dropped the event that would have watched a directory.
 
     The rename sweep runs first, as at startup: it records renames the
     watcher missed, so the walk does not re-index them as new mail, and
@@ -3106,7 +3111,7 @@ def _run_periodic_rescan(
         _streaks[PERIODIC_RENAME_SWEEP].succeeded()
     try:
         # Taken before the walk: only overflows it started after count as
-        # covered when it completes (#1108).
+        # covered when it completes.
         overflows = ingestion_state.walk_started()
         stamp = ingestion_state.read_stamp()
         _enqueue_unindexed_messages(
@@ -3119,7 +3124,8 @@ def _run_periodic_rescan(
         log.error("periodic Maildir rescan failed: %s", type(e).__name__)
         return
     _streaks[PERIODIC_RESCAN].succeeded()
-    ingestion_state.walk_completed(overflows)
+    if overflow_recovery:
+        ingestion_state.walk_completed(overflows)
 
 
 def _log_reconciler_config(cfg: ReconcilerConfig) -> None:
@@ -3404,10 +3410,16 @@ def main():
                 or now - last_overflow_rescan >= OVERFLOW_RESCAN_RETRY_SECS
             ):
                 directory_created.set()
-                _run_watch_refresh(folder_watches, db, queue, skip_trashed=reconciler is not None)
-                _run_periodic_rescan(
-                    db, queue, ingestion_state, skip_trashed=reconciler is not None
-                )
+                if _run_watch_refresh(
+                    folder_watches, db, queue, skip_trashed=reconciler is not None
+                ):
+                    _run_periodic_rescan(
+                        db,
+                        queue,
+                        ingestion_state,
+                        skip_trashed=reconciler is not None,
+                        overflow_recovery=True,
+                    )
                 # The interval limits retries within one recovery; the
                 # next overflow after it is walked at once.
                 last_overflow_rescan = now if ingestion_state.recovery_pending else None

@@ -3565,7 +3565,9 @@ class TestInotifyOverflow:
         assert self._acked(db, recorder) is None
         assert not _recovered_lines(caplog)
 
-        main._run_periodic_rescan(db, _make_queue(db), recorder, skip_trashed=False)
+        main._run_periodic_rescan(
+            db, _make_queue(db), recorder, skip_trashed=False, overflow_recovery=True
+        )
 
         assert not recorder.recovery_pending
         # No stamp on disk for the walk to read: the held one is what
@@ -3591,7 +3593,9 @@ class TestInotifyOverflow:
             return n
 
         monkeypatch.setattr(main, "_enqueue_unindexed_messages", walk)
-        main._run_periodic_rescan(db, _make_queue(db), recorder, skip_trashed=False)
+        main._run_periodic_rescan(
+            db, _make_queue(db), recorder, skip_trashed=False, overflow_recovery=True
+        )
 
         assert seen_during == [None]
         assert self._acked(db, recorder) == "2026-09-28T12:05:00+00:00"
@@ -3608,14 +3612,18 @@ class TestInotifyOverflow:
 
         with monkeypatch.context() as m:
             m.setattr(main, "_iter_maildir_messages", boom)
-            main._run_periodic_rescan(db, _make_queue(db), recorder, skip_trashed=False)
+            main._run_periodic_rescan(
+                db, _make_queue(db), recorder, skip_trashed=False, overflow_recovery=True
+            )
 
         assert recorder.recovery_pending
         assert self._acked(db, recorder) is None
         assert not _recovered_lines(caplog)
         assert "periodic Maildir rescan failed: OSError" in caplog.text
 
-        main._run_periodic_rescan(db, _make_queue(db), recorder, skip_trashed=False)
+        main._run_periodic_rescan(
+            db, _make_queue(db), recorder, skip_trashed=False, overflow_recovery=True
+        )
         assert not recorder.recovery_pending
         assert self._acked(db, recorder) == STAMP.completed_at
         assert len(_recovered_lines(caplog)) == 1
@@ -3635,13 +3643,17 @@ class TestInotifyOverflow:
             return real_walk(*a, **kw)
 
         monkeypatch.setattr(main, "_enqueue_unindexed_messages", walk)
-        main._run_periodic_rescan(db, _make_queue(db), recorder, skip_trashed=False)
+        main._run_periodic_rescan(
+            db, _make_queue(db), recorder, skip_trashed=False, overflow_recovery=True
+        )
         assert recorder.recovery_pending
         handler.on_moved(_stamp_moved_event(maildir))
         assert self._acked(db, recorder) is None
         assert not _recovered_lines(caplog)
 
-        main._run_periodic_rescan(db, _make_queue(db), recorder, skip_trashed=False)
+        main._run_periodic_rescan(
+            db, _make_queue(db), recorder, skip_trashed=False, overflow_recovery=True
+        )
         assert not recorder.recovery_pending
         assert self._acked(db, recorder) == STAMP.completed_at
         lines = _recovered_lines(caplog)
@@ -3659,7 +3671,9 @@ class TestInotifyOverflow:
         handler.on_moved(_stamp_moved_event(maildir, "2026-09-28T12:05:00Z"))
         handler.on_moved(_stamp_moved_event(maildir, "2026-09-28T12:00:00Z"))
 
-        main._run_periodic_rescan(db, _make_queue(db), recorder, skip_trashed=False)
+        main._run_periodic_rescan(
+            db, _make_queue(db), recorder, skip_trashed=False, overflow_recovery=True
+        )
 
         assert self._acked(db, recorder) == STAMP.completed_at
 
@@ -3673,7 +3687,7 @@ class TestInotifyOverflow:
         recorder.overflow_seen()
         assert len(_overflow_lines(caplog)) == 1
 
-        main._run_periodic_rescan(db, queue, recorder, skip_trashed=False)
+        main._run_periodic_rescan(db, queue, recorder, skip_trashed=False, overflow_recovery=True)
 
         assert queue.has_pending_row(str(dropped))
         assert not recorder.recovery_pending
@@ -3683,7 +3697,24 @@ class TestInotifyOverflow:
     def test_a_walk_with_nothing_owed_logs_no_recovery(self, tmp_path, db, monkeypatch, caplog):
         caplog.set_level(logging.INFO)
         _, recorder, _ = self._setup(tmp_path, db, monkeypatch)
+        main._run_periodic_rescan(
+            db, _make_queue(db), recorder, skip_trashed=False, overflow_recovery=True
+        )
+        assert not _recovered_lines(caplog)
+
+    def test_an_ordinary_periodic_rescan_leaves_the_overflow_owed(
+        self, tmp_path, db, monkeypatch, caplog
+    ):
+        """Codex round 3 on #1199: only the overflow recovery, which
+        forces a watch re-schedule before its walk, clears the debt; the
+        ordinary rescan re-schedules nothing."""
+        caplog.set_level(logging.INFO)
+        maildir, recorder, handler = self._setup(tmp_path, db, monkeypatch)
+        recorder.overflow_seen()
+        handler.on_moved(_stamp_moved_event(maildir))
         main._run_periodic_rescan(db, _make_queue(db), recorder, skip_trashed=False)
+        assert recorder.recovery_pending
+        assert self._acked(db, recorder) is None
         assert not _recovered_lines(caplog)
 
     # --- startup -------------------------------------------------------------
@@ -3698,15 +3729,17 @@ class TestInotifyOverflow:
             db, make_mock_embedder(), Threader(db), _make_queue(db), ingestion_state=recorder
         )
 
-    def test_initial_walk_covers_an_overflow_before_it(self, tmp_path, db, monkeypatch, caplog):
-        """The watcher starts before the initial walk, so an overflow can
-        land first; the walk then covers it."""
+    def test_initial_walk_leaves_an_earlier_overflow_owed(self, tmp_path, db, monkeypatch, caplog):
+        """Codex round 3 on #1199: the watcher starts before the initial
+        walk, so an overflow can land first. The walk queues the files on
+        disk but re-schedules no watch, so the recovery stays owed until
+        the main loop's forced re-schedule and walk."""
         caplog.set_level(logging.INFO)
         _, recorder, _ = self._setup(tmp_path, db, monkeypatch)
         recorder.overflow_seen()
         self._initial_index(db, recorder, monkeypatch)
-        assert not recorder.recovery_pending
-        assert len(_recovered_lines(caplog)) == 1
+        assert recorder.recovery_pending
+        assert not _recovered_lines(caplog)
 
     def test_overflow_during_the_initial_walk_stays_owed(self, tmp_path, db, monkeypatch, caplog):
         caplog.set_level(logging.INFO)
@@ -3731,7 +3764,9 @@ class TestInotifyOverflow:
         self._initial_index(db, recorder, monkeypatch, drain=drain)
         assert recorder.recovery_pending
         assert self._acked(db, recorder) is None
-        main._run_periodic_rescan(db, _make_queue(db), recorder, skip_trashed=False)
+        main._run_periodic_rescan(
+            db, _make_queue(db), recorder, skip_trashed=False, overflow_recovery=True
+        )
         assert self._acked(db, recorder) == STAMP.completed_at
 
 
@@ -6138,6 +6173,26 @@ class TestMainStartupAndLoop:
         refreshes = [i for i, e in enumerate(loop) if e.startswith("refresh:")]
         walk = next(i for i, e in enumerate(loop) if e.startswith(f"walk:{main.REASON_RESCAN}:"))
         assert len(refreshes) == 1 and refreshes[0] < walk
+
+    def test_failed_watch_refresh_leaves_the_overflow_owed(self, tmp_path, monkeypatch, caplog):
+        """Codex round 3 on #1199: the walk clears the debt only after a
+        successful forced re-schedule; a refresh that fails is retried
+        with the walk after the interval."""
+
+        def refresh(fw, db, queue, **kw):
+            raise OSError(5, "io")
+
+        events = self._run_main(
+            tmp_path,
+            monkeypatch,
+            sweep_due=False,
+            health=self._overflow_after_initial_index(),
+            refresh=refresh,
+        )
+
+        assert not any(e.startswith(f"walk:{main.REASON_RESCAN}:") for e in events)
+        assert main._ingestion_state.recovery_pending
+        assert "Maildir watch refresh failed: OSError" in caplog.text
 
     def test_a_new_overflow_after_a_recovery_is_walked_at_once(self, tmp_path, monkeypatch):
         """Codex round 1 on #1199: the retry interval limits retries
