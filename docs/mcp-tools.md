@@ -14,7 +14,9 @@ The search, retrieval, and system tools (Groups 1, 2, and 4) publish an
   `get_evidence` / `search_attachments` carry `attachment_id`. Paging
   state is typed as well (`get_thread.next_offset`,
   `query_messages.next_cursor` / `has_more` / `total_matches`, and the
-  same fields on `query_attachments`).
+  same fields on `query_attachments`, whose
+  `attachments[].attachment_occurrence_id` → `get_attachment`, paged by
+  `next_offset`).
 
 **Message-ID and claimant ID.** The sender sets a message's Message-ID,
 so two different indexed files can carry the same one (a reused or
@@ -247,7 +249,9 @@ tool=search_emails outcome=ok total_ms=41.7 stages_ms={'query_embedding': 22.4, 
   have (`sender_ambiguous`, `address_list`, `display_names`, `subject`,
   `body`, `attachment_list`, `size`; [Response
   contract](#query_messages)), `messages`
-  (`get_thread`, `get_message`), `threads` (`list_threads`),
+  (`get_thread`, `get_message`), `attachments` (`get_attachment`, with
+  `text_unavailable_<status>` when it returns no text; `none` for no
+  extraction recorded), `threads` (`list_threads`),
   `contacts` (`find_contact`) and `folders` (`list_folders`). They run
   no timed stages, so their `stages_ms` and `config` are empty, as are
   `get_mailbox_status`'s `counts`.
@@ -334,9 +338,10 @@ before.
   without `folder` (pass `folder="Trash"` to list them),
   `query_attachments` likewise for the attachments those messages
   carry, and `search_attachments`, which has no folder filter.
-- Tools that read one named thread or message (`get_thread`,
-  `get_message`, `get_evidence` with `thread_id`, `summarize_thread`
-  with a thread ID) and the folder browsers (`list_threads`,
+- Tools that read one named thread, message or attachment
+  (`get_thread`, `get_message`, `get_attachment`, `get_evidence` with
+  `thread_id`, `summarize_thread` with a thread ID) and the folder
+  browsers (`list_threads`,
   `list_folders`) are unaffected.
 - The exclusion counts as a filter for the vector lanes' window
   widening, so a mailbox whose closest matches are in Trash still finds
@@ -1025,7 +1030,9 @@ text)` and the structured output sets `indexed_thread_text_scope:
 "context"`, the label `ask_mailbox` gives such passages.
 Report the gap; do not attribute the context to the message or treat
 the missing body as proof that it contained no relevant evidence.
-Attachment text is not included — use `get_evidence` for that. The
+Attachment text is not included — use `get_evidence` for passages, or
+list the message's attachments with `query_attachments`
+(`claimant_id`) and read one with [`get_attachment`](#get_attachment). The
 prose ends its header block with the raw source file's path, size, and
 SHA-256.
 
@@ -1472,11 +1479,13 @@ the carrying message's folder, `sent_at`, `occurred_at` and
 `ocr_pages_skipped` (all null when none is recorded). The counts and
 the page are read in one snapshot.
 
-It returns no attachment text, and no tool reads a listed attachment's
-whole text yet (#796): [`get_evidence`](#get_evidence) and
-[`ask_mailbox`](#ask_mailbox) return ranked, capped passages chosen by
-a query, which can leave the listed attachment out or show another copy
-of the same bytes. Report unread attachment text as a coverage limit.
+It returns no attachment text. To read a listed attachment's stored
+text, pass its `attachment_occurrence_id` to
+[`get_attachment`](#get_attachment); [`get_evidence`](#get_evidence)
+and [`ask_mailbox`](#ask_mailbox) return ranked, capped passages chosen
+by a query, which can leave the listed attachment out or show another
+copy of the same bytes. Report unread attachment text as a coverage
+limit.
 
 Rows carry private mail metadata (filenames, IDs, folders) and go to
 the calling model, which may be remote. Start with narrow filters and
@@ -1502,6 +1511,74 @@ at most `limit + 1` occurrences. On a synthetic index of 75,000
 occurrences a page took about 60 ms unfiltered. The log records only
 `extraction_status`, `limit` and valid ISO dates; filenames, MIME types, IDs,
 addresses, folders and cursors are withheld.
+
+### `get_attachment`
+Read one attachment occurrence's whole stored extracted text, one page
+at a time
+([#796](https://github.com/marshalltech81/protonmail-local-ai/issues/796)).
+Pass an `attachment_occurrence_id` from
+[`query_attachments`](#query_attachments). The occurrence is read
+whatever its message's folder, Trash included, as the other tools that
+read one named item are.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `attachment_occurrence_id` | string | required | One attachment on one message, from `query_attachments` |
+| `offset` | int | `0` | Text character to start the page at; pass the previous response's `next_offset` |
+
+**Response contract.** `attachment` is the occurrence as
+`query_attachments` lists it (IDs, filename and MIME type cut at 500
+characters with flags, size, the carrying message's folder and dates,
+`source_file`, and the extraction's status, extractor, time and
+`ocr_pages_skipped`). The text comes in pages of 20,000 characters, as
+`get_message` pages a body: `text` is the page, `text_offset` its first
+character, `text_total_chars` the whole stored text's length and
+`next_offset` the next page's offset (null at the end). Offsets count
+characters (code points), and a page never ends inside a combining
+sequence or zero-width-joined pair; both tools cut pages with one
+helper, so they end in the same places. Paging from 0 through each
+`next_offset` returns the stored text exactly, NUL characters included.
+An offset past the end is an error.
+
+"Whole" means the stored extraction, not the original file. The
+indexer's extraction cap (`INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS`) and
+extractor work caps may have cut it, and the index does not record
+whether they did, so `truncated` is always null
+([#1261](https://github.com/marshalltech81/protonmail-local-ai/issues/1261)).
+`ocr_pages_skipped` counts scanned PDF pages the OCR page cap left
+unread.
+
+| Extraction | `text` | `unavailable_reason` |
+|---|---|---|
+| `success` | the stored text | null |
+| `empty` | `""` | null |
+| `failed` | null | `extraction failed` (the stored error is never returned) |
+| `unsupported` | null | `no extractor reads this file type`, or, when OCR was off, `the file needs OCR, which is off (INDEXER_OCR_ENABLED=false)` |
+| `too_large` | null | the file is over the indexer's attachment size limit |
+| none recorded | null | no extraction is recorded yet (not run yet, or extraction off) |
+
+Report null text as unread text, not as an attachment that says
+nothing relevant. An unknown `attachment_occurrence_id` is an error.
+
+The text goes to the calling model, which may be remote. Before
+reading more than one attachment, or every page of a long one, tell
+the user which attachments and roughly how much text will be read
+(each page states the total), and prefer the smallest sample that
+answers the question.
+
+**Cost.** One read transaction looks the occurrence up and opens its
+extraction row with a read-only incremental blob read (`blobopen`); no
+query selects the text column, so a long row is never loaded whole,
+even with the extraction cap off. The reader decodes 64 KiB blocks of
+UTF-8 from the start only until the page is complete, then counts the
+rest's characters block by block without keeping them, so memory is
+one block plus one page and each call reads the whole stored text once
+(about 1 ms for the default 2,000,000-character cap, about 30 ms for
+50 MB, in the image). SQLite's own `length` and `substr` would stop at
+an embedded NUL, which plain-text extraction keeps. The log records
+only `offset`; the occurrence ID is withheld. An unknown ID logs
+the fixed `get_attachment failed: not_found` WARNING through a rate
+limiter: the first in each 60-second window, the rest counted.
 
 ---
 

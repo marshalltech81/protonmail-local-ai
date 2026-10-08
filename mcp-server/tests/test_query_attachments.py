@@ -661,11 +661,11 @@ class TestTool:
         assert all(r.is_error for r in rejected)
         assert "extraction_status" in tool.input_schema["properties"]
         # Codex round 1: the served description asks for a count and a
-        # disclosure before paging metadata, and claims no reader.
+        # disclosure before paging metadata; #796 PR 2 names the reader.
         description = " ".join(tool.description.split())
         assert "limit=1" in description
         assert "how many rows you will page" in description
-        assert "No tool reads a listed attachment's whole text yet" in description
+        assert "pass its ``attachment_occurrence_id`` to get_attachment" in description
 
     def test_prose_row_and_a_page_emptied_by_churn(self, fake_server, tmp_path):
         conn, path = _open_built_db_conn(tmp_path, "prose.db")
