@@ -373,6 +373,8 @@ services strip it. It fails fast if:
   counts as not one) or is not `600`; on a Linux host, also when it does
   not grant the indexer (UID 1002) read access through an ACL naming
   that UID alone (see "Source-authority rules" below)
+- `config/identity.toml`, when present, fails the same checks (see
+  "Your own addresses" below)
 - numeric or enum settings such as `SYNC_INTERVAL`, `MCP_PORT`, `MCP_TRANSPORT`, or `INFERENCE_MODE` are invalid
   (`MCP_TRANSPORT` accepts only `streamable-http` or unset; the removed `sse`
   and `dual` fail with migration steps)
@@ -533,6 +535,44 @@ spoofed and DMARC-failing mail lands, never counts toward an
 `authority_class` filter; spoofed mail that reaches the inbox still
 does. Checking DKIM/DMARC verdicts is deferred until Bridge's headers
 have been checked on real mail.
+
+### Your own addresses (optional)
+
+List the addresses you send from in `config/identity.toml`, so the index
+can tell mail you sent from mail you received (message direction,
+#824). The indexer stores the list today; the MCP tools that use it
+are not built yet. Without the file your addresses are unconfigured.
+
+```bash
+install -m 600 config/identity.toml.example config/identity.toml
+# Linux host only: let the indexer's UID 1002, and no one else, read it
+setfacl -m u:1002:r config/identity.toml
+# edit: addresses = ["you@your-domain", ...]
+make restart-indexer   # a running stack; on first run, make up
+```
+
+List every address exactly: each alias, each custom-domain address and
+each address of every account in Bridge. Nothing is inferred: a domain, a plus-alias
+(`you+lists@...`) or the Sent folder adds no address, so an address you
+leave out reads as someone else's, and mail you sent from it reads as
+received. Case does not matter.
+
+The file is gitignored and holds real addresses, so treat it as
+`config/authority.toml` above: never commit it, keep it a regular file
+at `600` (on Linux, plus the ACL for UID 1002 alone), and restart with
+`make restart-indexer` so the mode is checked; `make up` and `make
+restart-indexer` fail as they do for that file, with the same fix
+commands. The path `/config/identity.toml` is fixed.
+
+The indexer reads the file at startup and stores the addresses in the
+index, so an edit takes effect at the next `make restart-indexer`, with
+no reindex and no MCP server restart. The log line `Operator identity:
+<n> address(es)` confirms the count (it never prints an address). An
+empty or malformed file (invalid TOML, a key other than `addresses`, an
+entry that is not a bare `name@domain` address, an address listed
+twice, more than 1,000 addresses or more than 64 KiB) stops the indexer
+at startup with an error naming the entry's position. Removing the file
+clears the stored addresses at the next start.
 
 ### Pointing at a different embedder provider
 

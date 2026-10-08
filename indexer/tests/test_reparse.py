@@ -427,7 +427,10 @@ _V5_COLUMNS = (
 
 
 def _drop_v5_columns(db: Database) -> None:
-    """The v4 shape's missing columns: v5's and v6's (#1242)."""
+    """The v4 shape's missing columns: v5's and v6's (#1242), and v7's
+    tables (#824)."""
+    db._conn.execute("DROP TABLE operator_addresses")
+    db._conn.execute("DROP TABLE operator_identity")
     for column in _V5_COLUMNS:
         db._conn.execute(f"ALTER TABLE messages DROP COLUMN {column}")
     for table, column in (

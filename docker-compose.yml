@@ -238,8 +238,10 @@ services:
       - maildir-volume:/maildir:ro
       - sqlite-volume:/data
       # Operator config, read-only. The indexer reads the optional
-      # source-authority rules at the fixed path /config/authority.toml;
-      # see config/authority.toml.example.
+      # source-authority rules at the fixed path /config/authority.toml
+      # and the operator's own addresses at /config/identity.toml; see
+      # the .example files. mcp-server has no /config mount: it reads
+      # the stored identity from SQLite.
       # The directory is mounted rather than the file, so an absent file
       # stays absent instead of Docker creating a directory in its place.
       - ./config:/config:ro

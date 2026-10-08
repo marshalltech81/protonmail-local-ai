@@ -23,6 +23,7 @@ the rule that matched (provenance) and is never a ranking weight. No
 model classifies anything.
 """
 
+import hashlib
 import re
 import stat
 import tomllib
@@ -186,6 +187,47 @@ def _is_bare_domain(value: str) -> bool:
     )
 
 
+def _read_operator_toml(
+    path: Path, max_bytes: int, what: str, error: type[ValueError]
+) -> dict | None:
+    """Parse an operator-written TOML file of at most ``max_bytes``.
+
+    ``None`` when the file is absent. Anything else that is not a
+    readable regular file within the bound, or not TOML, raises
+    ``error``; the message names ``what``, the path and at most a line
+    number, never the file's text (it holds addresses).
+    """
+    # Only a missing final path entry means "absent". Any other
+    # failure to inspect it (a dangling symlink, an unsearchable parent)
+    # fails closed rather than silently loading nothing.
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise error(f"{what} {path} could not be inspected ({type(exc).__name__})") from None
+    try:
+        mode = path.stat().st_mode
+    except OSError as exc:
+        raise error(f"{what} {path} could not be inspected ({type(exc).__name__})") from None
+    if not stat.S_ISREG(mode):
+        raise error(f"{what} {path} is not a regular file")
+    try:
+        with path.open("rb") as handle:
+            raw = handle.read(max_bytes + 1)
+    except OSError as exc:
+        raise error(f"{what} {path} could not be read ({type(exc).__name__})") from None
+    if len(raw) > max_bytes:
+        raise error(f"{what} {path} is larger than {max_bytes} bytes")
+    try:
+        data = tomllib.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        where = getattr(exc, "lineno", None)
+        suffix = f" (line {where})" if where else ""
+        raise error(f"{what} {path} is not valid TOML{suffix}") from None
+    return data
+
+
 def load_authority_rules(path: Path) -> AuthorityRules:
     """Load the operator rules file at ``path``.
 
@@ -203,42 +245,11 @@ def load_authority_rules(path: Path) -> AuthorityRules:
         domains = ["lawfirm.example"]
         addresses = ["outside.counsel@mail.example"]
     """
-    # Only a missing final path entry means "no rules". Any other
-    # failure to inspect it (a dangling symlink, an unsearchable parent)
-    # fails closed rather than silently classifying nothing.
-    try:
-        path.lstat()
-    except FileNotFoundError:
+    data = _read_operator_toml(
+        path, AUTHORITY_RULES_MAX_BYTES, "authority rules", AuthorityRulesError
+    )
+    if data is None:
         return AuthorityRules()
-    except OSError as exc:
-        raise AuthorityRulesError(
-            f"authority rules {path} could not be inspected ({type(exc).__name__})"
-        ) from None
-    try:
-        mode = path.stat().st_mode
-    except OSError as exc:
-        raise AuthorityRulesError(
-            f"authority rules {path} could not be inspected ({type(exc).__name__})"
-        ) from None
-    if not stat.S_ISREG(mode):
-        raise AuthorityRulesError(f"authority rules {path} is not a regular file")
-    try:
-        with path.open("rb") as handle:
-            raw = handle.read(AUTHORITY_RULES_MAX_BYTES + 1)
-    except OSError as exc:
-        raise AuthorityRulesError(
-            f"authority rules {path} could not be read ({type(exc).__name__})"
-        ) from None
-    if len(raw) > AUTHORITY_RULES_MAX_BYTES:
-        raise AuthorityRulesError(
-            f"authority rules {path} is larger than {AUTHORITY_RULES_MAX_BYTES} bytes"
-        )
-    try:
-        data = tomllib.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
-        where = getattr(exc, "lineno", None)
-        suffix = f" (line {where})" if where else ""
-        raise AuthorityRulesError(f"authority rules {path} is not valid TOML{suffix}") from None
 
     addresses: dict[str, str] = {}
     domains: dict[str, str] = {}
@@ -292,3 +303,96 @@ def load_authority_rules(path: Path) -> AuthorityRules:
                     )
                 target[pattern] = cls
     return AuthorityRules(addresses=addresses, domains=domains)
+
+
+# ---------------------------------------------------------------------------
+# Operator identity
+# ---------------------------------------------------------------------------
+
+# Work bounds for ``config/identity.toml``: the size is checked before
+# parsing and the address count before any address is normalised.
+IDENTITY_MAX_BYTES = 64 * 1024
+IDENTITY_MAX_ADDRESSES = 1_000
+
+_IDENTITY_KEY = "addresses"
+
+
+class OperatorIdentityError(ValueError):
+    """The identity file is unusable. The message names the entry's
+    position, never an address."""
+
+
+@dataclass(frozen=True)
+class OperatorIdentity:
+    """The operator's own canonical addresses (#824).
+
+    Exact addresses only, normalised as ``canonical_addr`` normalises a
+    participant address, so a stored participant address is in the set
+    exactly when the operator listed it. No domain or plus-alias
+    inference.
+    """
+
+    addresses: frozenset[str]
+
+
+def identity_digest(addresses: frozenset[str]) -> str:
+    """SHA-256 (hex) of the sorted addresses, each followed by ``\n``;
+    the empty set's digest is that of the empty string."""
+    return hashlib.sha256("".join(f"{a}\n" for a in sorted(addresses)).encode()).hexdigest()
+
+
+def load_operator_identity(path: Path) -> OperatorIdentity | None:
+    """Load the operator identity file at ``path``.
+
+    ``None`` when the file is absent: the operator has not configured
+    their addresses. Anything else that is not a valid file (not a
+    regular file, unreadable, too large, not TOML, a key other than
+    ``addresses``, no addresses, an entry that is not a bare canonical
+    address, an address listed twice, too many addresses) raises
+    ``OperatorIdentityError`` so the indexer fails closed at startup.
+
+    Format::
+
+        addresses = ["me@mail.example", "alias@mail.example"]
+    """
+    data = _read_operator_toml(path, IDENTITY_MAX_BYTES, "operator identity", OperatorIdentityError)
+    if data is None:
+        return None
+    # Errors name positions, never the file's text: a mistyped key may
+    # itself be an address.
+    for key_number, key in enumerate(data, 1):
+        if key != _IDENTITY_KEY:
+            raise OperatorIdentityError(
+                f"operator identity {path}: unknown key (key {key_number}); use {_IDENTITY_KEY}"
+            )
+    entries = data.get(_IDENTITY_KEY, [])
+    if not isinstance(entries, list) or not all(isinstance(e, str) for e in entries):
+        raise OperatorIdentityError(
+            f"operator identity {path}: {_IDENTITY_KEY} must be a list of strings"
+        )
+    if not entries:
+        raise OperatorIdentityError(
+            f"operator identity {path} lists no addresses; list at least one, or remove the file"
+        )
+    if len(entries) > IDENTITY_MAX_ADDRESSES:
+        raise OperatorIdentityError(
+            f"operator identity {path}: at most {IDENTITY_MAX_ADDRESSES} addresses are allowed"
+        )
+    addresses: set[str] = set()
+    for index, entry in enumerate(entries):
+        address = entry.strip().lower()
+        where = f"{_IDENTITY_KEY}[{index}]"
+        if (
+            canonical_addr(address) != address
+            or address.startswith("@")
+            or not _is_bare_domain(address_domain(address))
+        ):
+            raise OperatorIdentityError(
+                f"operator identity {path}: {where} must be a bare address (name@domain)"
+            )
+        if address in addresses:
+            raise OperatorIdentityError(
+                f"operator identity {path}: {where} lists an address more than once"
+            )
+        addresses.add(address)
+    return OperatorIdentity(addresses=frozenset(addresses))

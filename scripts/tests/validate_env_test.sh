@@ -715,6 +715,48 @@ non_regular_authority_path_fails() {
     fails_with 'config/authority.toml must be a regular file'
 }
 
+# --- Operator identity file (#824) ----------------------------------------
+# config/identity.toml is optional, holds real addresses and goes
+# through the same check as the authority file.
+
+write_identity() {
+    mkdir -p "$ROOT/config"
+    printf 'addresses = ["me@mail.example"]\n' >"$ROOT/config/identity.toml"
+    chmod "$1" "$ROOT/config/identity.toml"
+}
+
+private_identity_file_passes() {
+    stub_host Darwin
+    setup
+    write_identity 600
+    passes
+}
+
+loose_identity_file_fails() {
+    stub_host Darwin
+    setup
+    write_identity 644
+    fails_with "config/identity.toml must have mode 600, found 644"
+}
+
+symlinked_identity_file_fails() {
+    stub_host Darwin
+    setup
+    write_identity 600
+    mv "$ROOT/config/identity.toml" "$ROOT/config/me.toml"
+    ln -s me.toml "$ROOT/config/identity.toml"
+    fails_with 'config/identity.toml must be a regular file, not a symlink'
+}
+
+linux_operator_owned_identity_file_fails_with_command() {
+    stub_host Linux 4242
+    setup
+    write_identity 600
+    fails_with 'not readable by the indexer (UID 1002)'
+    grep -F "setfacl -b $ROOT/config/identity.toml && chmod 600 $ROOT/config/identity.toml && setfacl -m u:1002:r $ROOT/config/identity.toml" \
+        "$WORK/output"
+}
+
 # On Linux the operator's own 600 file is unreadable to UID 1002, so it
 # fails with the exact command that grants only that UID read.
 linux_operator_owned_authority_file_fails_with_command() {
@@ -1101,6 +1143,11 @@ check "a private authority file passes" private_authority_file_passes
 check "an authority file not 600 fails" loose_authority_file_fails
 check "a symlinked authority file fails" symlinked_authority_file_fails
 check "a non-regular authority path fails" non_regular_authority_path_fails
+check "a private identity file passes" private_identity_file_passes
+check "an identity file not 600 fails" loose_identity_file_fails
+check "a symlinked identity file fails" symlinked_identity_file_fails
+check "Linux: an operator-owned 600 identity file fails with the command" \
+    linux_operator_owned_identity_file_fails_with_command
 check "Linux: an operator-owned 600 authority file fails with the command" \
     linux_operator_owned_authority_file_fails_with_command
 check "Linux: an authority file owned by UID 1002 passes" linux_authority_file_owned_by_indexer_passes

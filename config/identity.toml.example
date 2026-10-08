@@ -1,0 +1,23 @@
+# Your own addresses (optional; for message direction, #824).
+#
+# Copy to config/identity.toml (gitignored: it holds real addresses) at
+# mode 600, list every address you send from, and run
+# `make restart-indexer`, which checks the mode before restarting.
+#
+#   addresses — bare addresses (name@domain), matched exactly
+#               (case-insensitive). List every alias and every
+#               address of every account in Bridge: nothing is
+#               inferred from a domain, a plus-alias or the Sent
+#               folder, so an address you leave out reads as someone
+#               else's.
+#
+# An address may appear only once; at most 1,000 addresses and 64 KiB.
+# Without this file, the operator's addresses are unconfigured and
+# direction is unknown. An empty or malformed file stops the indexer at
+# startup with an error naming the offending entry's position.
+
+addresses = [
+    "me@mail.example",
+    "me+lists@mail.example",
+    "alias@other.example",
+]

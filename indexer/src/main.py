@@ -84,7 +84,14 @@ from .embedder import (
     classify_embed_failure,
     scrub_embed_error,
 )
-from .entities import AuthorityRules, AuthorityRulesError, load_authority_rules
+from .entities import (
+    AuthorityRules,
+    AuthorityRulesError,
+    OperatorIdentity,
+    OperatorIdentityError,
+    load_authority_rules,
+    load_operator_identity,
+)
 from .extractors import (
     DEFAULT_MAX_BYTES,
     ExtractionResult,
@@ -308,6 +315,10 @@ SQLITE_PATH = Path(os.environ.get("SQLITE_PATH", "/data/mail.db"))
 # at the fixed path where compose mounts ``./config`` read-only.
 # Absent: every entity is unclassified. Malformed: startup fails.
 AUTHORITY_RULES_PATH = Path("/config/authority.toml")
+# The operator's own addresses (``config/identity.toml.example``, #824),
+# on the same read-only mount. Absent: stored as unconfigured. Empty or
+# malformed: startup fails.
+OPERATOR_IDENTITY_PATH = Path("/config/identity.toml")
 
 # OpenAI-compatible embedder configuration. The operator supplies the
 # provider. Set ``EMBED_MODEL`` to a model id served at the chosen
@@ -2967,6 +2978,21 @@ def _load_authority_rules(path: Path) -> AuthorityRules:
     return rules
 
 
+def _load_operator_identity(path: Path) -> OperatorIdentity | None:
+    """Load the operator identity file, failing closed on an empty or
+    malformed one. The error names the entry's position and the log
+    line a count, never an address."""
+    try:
+        identity = load_operator_identity(path)
+    except OperatorIdentityError as exc:
+        raise SystemExit(f"Invalid operator identity: {exc}") from None
+    if identity is None:
+        log.info("Operator identity: none at %s; message direction is unknown", path)
+    else:
+        log.info("Operator identity: %d address(es) from %s", len(identity.addresses), path)
+    return identity
+
+
 def _prune_reaped_records(db: Database) -> None:
     """Expire ``reaped_messages`` records past their retention window."""
     try:
@@ -3205,7 +3231,9 @@ def main():
 
     # Before opening the database, so a malformed file fails fast.
     authority_rules = _load_authority_rules(AUTHORITY_RULES_PATH)
+    operator_identity = _load_operator_identity(OPERATOR_IDENTITY_PATH)
     db = Database(SQLITE_PATH)
+    db.set_operator_identity(operator_identity)
     reclassified = db.set_authority_rules(authority_rules)
     if reclassified:
         log.info("Authority rules: reclassified %d existing entities", reclassified)

@@ -22,7 +22,7 @@ help:
 	@echo "  ppt-checksums Rewrite indexer/java/checksums/checksums.sha256 after an indexer/java/pom.xml change (downloads from Maven Central)"
 	@echo "  up           Start the full stack (mbsync reaches the Bridge app on the host)"
 	@echo "  down         Stop the full stack"
-	@echo "  restart-indexer  Run validate-env, then restart the indexer (after editing config/authority.toml)"
+	@echo "  restart-indexer  Run validate-env, then restart the indexer (after editing config/authority.toml or config/identity.toml)"
 	@echo "  logs         Tail logs from all containers"
 	@echo "  status       Show container, privacy (LOCAL or REMOTE) and index status"
 	@echo "  backup-index Copy the live index to BACKUP_DIR=<dir outside the checkout> (mode 700/600), checked with integrity_check"
@@ -150,8 +150,9 @@ validate-env:
 up: init-secrets validate-env
 	docker compose up -d
 
-# Restart the indexer after editing config/authority.toml, running the
-# same preflight as `make up` first so a loosened file mode fails here.
+# Restart the indexer after editing config/authority.toml or
+# config/identity.toml, running the same preflight as `make up` first so
+# a loosened file mode fails here.
 # `restart` keeps each container's existing configuration, so the
 # hardened overlay stays in effect if the stack was started with it.
 restart-indexer: validate-env
