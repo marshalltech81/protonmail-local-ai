@@ -10,9 +10,10 @@ membership is fixed by the case ID, so adding cases never moves one.
 A case ID starts with its tool's short name (``ask-``, ``summarize-``,
 ``extract-``). Per tool (#656): ``ask_mailbox`` needs a ``question``;
 ``summarize_thread`` needs a baseline ``thread_id`` (a direct lookup, so
-nothing is embedded; a subject-phrase lookup is not a case shape yet);
+nothing is embedded; a subject-phrase lookup is not a case shape yet),
+and its evidence and fact sources must be in that thread;
 ``extract_from_emails`` needs a ``query`` and a non-empty ``schema``
-object, and its ``limit``, when given, is a whole number from 1 (each
+object declaring no provenance field, and its ``limit``, when given, is a whole number from 1 (each
 searched thread is one paid model call).
 
 Refs follow the baseline's convention: ``t24`` is the thread rooted at
@@ -28,7 +29,7 @@ from pathlib import Path
 from typing import Any, TypeGuard, get_args
 
 from src.lib.inference import MIN_PROMPT_TOKENS
-from src.tools.intelligence import _declared_fields
+from src.tools.intelligence import _PROVENANCE_FIELDS, _declared_fields
 from src.tools.outputs import SummaryStyle
 
 from tests.agent_metrics import is_held_out
@@ -215,6 +216,13 @@ def _parse_case(row: dict[str, Any]) -> Case:
     else:
         _require(isinstance(args.get("query"), str) and args["query"].strip(), cid, "query")
         _require(isinstance(args.get("schema"), dict) and bool(args["schema"]), cid, "schema")
+        # The handler refuses these names before any work (#329), which
+        # would grade as a tool error rather than a bad case.
+        _require(
+            not set(_PROVENANCE_FIELDS) & _declared_fields(args["schema"]),
+            cid,
+            f"schema must not declare {', '.join(_PROVENANCE_FIELDS)}",
+        )
         limit = args.get("limit", 1)
         _require(type(limit) is int and limit >= 1, cid, "limit must be an integer >= 1")
     _require(row.get("held_out") is is_held_out(cid), cid, "held_out must equal is_held_out(id)")
@@ -241,6 +249,15 @@ def _parse_case(row: dict[str, Any]) -> Case:
         facts.append(Fact(f["id"], f["fact"], tuple(f["sources"]), f["excerpt"], tuple(values)))
     _require(len({f.id for f in facts}) == len(facts), cid, "duplicate fact ids")
     _require(bool(facts) is answerable, cid, "answerable cases, and only they, need facts")
+    if tool == "summarize_thread":
+        # The handler sees only the named thread, so evidence elsewhere
+        # could never be retrieved and would grade as a regression.
+        refs = [r for g in groups for r in g] + [r for f in facts for r in f.sources]
+        _require(
+            all(thread_id_of(r) == args["thread_id"] for r in refs),
+            cid,
+            "evidence and fact sources must be in the summarized thread",
+        )
 
     _require(_str_list(row.get("must_not_assert")), cid, "must_not_assert")
     det = row.get("deterministic")

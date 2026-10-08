@@ -452,9 +452,12 @@ held-out cases.
 tool's short name (`ask-`, `summarize-`, `extract-`). A
 `summarize_thread` case names a baseline thread ID directly and one of
 the tool's four styles (the handler would summarize any other as
-`brief`); nothing is embedded for it. An `extract_from_emails` case gives
-the `query`, the `schema` and a small `limit`, since each searched
-thread is one paid model call. The same fields apply to every tool:
+`brief`); nothing is embedded for it, and its evidence and fact
+sources must all be in that thread, the only one the tool reads. An
+`extract_from_emails` case gives the `query`, the `schema` and a small
+`limit`, since each searched thread is one paid model call; the schema
+must not declare `_source_thread`, `_date` or `_evidence`, which the
+tool refuses as reserved for provenance. The same fields apply to every tool:
 `required_evidence`, `expected_facts` with corpus excerpts,
 `must_include` / `must_not_include` (matched against the summary, or
 against the extracted records rendered as `field: value [E1]; ...`

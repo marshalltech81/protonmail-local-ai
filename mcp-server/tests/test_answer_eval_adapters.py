@@ -148,10 +148,22 @@ class TestCaseSchema:
             # brief, so a typo would grade a task the case does not state.
             (SUMMARIZE, lambda r: r["arguments"].update(style="action_item")),
             (SUMMARIZE, lambda r: r["arguments"].update(style="Brief")),
+            # Codex round 3: the handler sees only the named thread, so
+            # evidence or a fact source in another thread can never be
+            # retrieved and would grade as a product regression.
+            (SUMMARIZE, lambda r: r["required_evidence"].append(["t01.1"])),
+            (SUMMARIZE, lambda r: r["required_evidence"][0].append("t01")),
+            (SUMMARIZE, lambda r: r["expected_facts"][0]["sources"].append("t01.1")),
             (EXTRACT, lambda r: r["arguments"].pop("schema")),
             (EXTRACT, lambda r: r["arguments"].update(schema="vendor")),
             (EXTRACT, lambda r: r["arguments"].update(schema={})),
             (EXTRACT, lambda r: r["arguments"].update(query="")),
+            # Codex round 3: the handler refuses a schema declaring a
+            # provenance field before any work, which would grade as a
+            # tool error rather than a bad case.
+            (EXTRACT, lambda r: r["arguments"]["schema"].update(_source_thread="string")),
+            (EXTRACT, lambda r: r["arguments"]["schema"].update(_date="string")),
+            (EXTRACT, lambda r: r["arguments"]["schema"].update(_evidence="string")),
             (EXTRACT, lambda r: r["arguments"].update(limit=0)),
             (EXTRACT, lambda r: r["arguments"].update(limit="5")),
             (EXTRACT, lambda r: r["arguments"].update(question="why?")),
