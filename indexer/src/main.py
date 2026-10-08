@@ -791,9 +791,9 @@ class _IngestionStateRecorder:
     events, so the watcher may handle a stamp whose deliveries it never
     saw (#1108). ``_overflows`` counts the overflows the watcher
     reported; ``_covered`` is the count at the start of the last Maildir
-    walk that completed. While ``_overflows`` is ahead, a stamp the
-    watcher handles is held (the newest) instead of acknowledged, and a
-    walk that started after the latest overflow acknowledges it when it
+    walk that completed. While ``_overflows`` is ahead, the last stamp
+    the watcher handles is held instead of acknowledged, and a walk that
+    started after the latest overflow acknowledges it when it
     completes: every delivery the overflow dropped was on disk before
     that walk began, and the ones after it reached the watcher in order.
 
@@ -834,8 +834,10 @@ class _IngestionStateRecorder:
         overflow's recovery walk is owed."""
         with self._lock:
             if self._overflows > self._covered:
-                if self._held is None or stamp.completed_at > self._held.completed_at:
-                    self._held = stamp
+                # Keep the last one handled: watchdog dispatches stamps
+                # in sync order, so it is the newest sync even when a
+                # clock rollback makes its time sort earlier.
+                self._held = stamp
                 return
             self._acknowledge(stamp)
 
@@ -3394,12 +3396,14 @@ def main():
             # walk now rather than at the next periodic rescan, and again
             # until a walk started after the latest overflow completes.
             # A dropped directory-create event leaves that directory
-            # unwatched, so re-watch first; the walk after it then also
-            # covers the re-schedule gap.
+            # unwatched, and a recreated directory can reuse its inode,
+            # so force a re-schedule first, as a create event does; the
+            # walk after it then also covers the re-schedule gap.
             if ingestion_state.recovery_pending and (
                 last_overflow_rescan is None
                 or now - last_overflow_rescan >= OVERFLOW_RESCAN_RETRY_SECS
             ):
+                directory_created.set()
                 _run_watch_refresh(folder_watches, db, queue, skip_trashed=reconciler is not None)
                 _run_periodic_rescan(
                     db, queue, ingestion_state, skip_trashed=reconciler is not None

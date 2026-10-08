@@ -3648,6 +3648,21 @@ class TestInotifyOverflow:
         assert len(lines) == 1
         assert "recovered from 2 inotify queue overflow(s)" in lines[0].getMessage()
 
+    def test_held_stamp_follows_arrival_order_across_a_clock_rollback(
+        self, tmp_path, db, monkeypatch
+    ):
+        """Codex round 2 on #1199: watchdog dispatches stamps in sync
+        order, so the last one handled is the newest sync even when the
+        clock rolled back between two syncs and its time sorts earlier."""
+        maildir, recorder, handler = self._setup(tmp_path, db, monkeypatch)
+        recorder.overflow_seen()
+        handler.on_moved(_stamp_moved_event(maildir, "2026-09-28T12:05:00Z"))
+        handler.on_moved(_stamp_moved_event(maildir, "2026-09-28T12:00:00Z"))
+
+        main._run_periodic_rescan(db, _make_queue(db), recorder, skip_trashed=False)
+
+        assert self._acked(db, recorder) == STAMP.completed_at
+
     def test_overflow_with_no_stamp_is_recovered(self, tmp_path, db, monkeypatch, caplog):
         """The walk queues the mail the dropped events announced."""
         caplog.set_level(logging.INFO)
@@ -6089,6 +6104,26 @@ class TestMainStartupAndLoop:
         assert sum(e.startswith(f"walk:{main.REASON_RESCAN}:") for e in events) == 1
         assert not main._ingestion_state.recovery_pending
         assert "recovered from 1 inotify queue overflow(s)" in caplog.text
+
+    def test_overflow_recovery_forces_a_watch_reschedule(self, tmp_path, monkeypatch):
+        """Codex round 2 on #1199: an overflow can drop a directory's
+        delete and create events, and a recreated directory can reuse its
+        inode, so the refresh's own walk cannot see it. The recovery
+        forces the re-schedule, as a directory-create event does."""
+        forced: list[bool] = []
+
+        def refresh(fw, db, queue, **kw):
+            forced.append(fw._directory_created.is_set())
+
+        self._run_main(
+            tmp_path,
+            monkeypatch,
+            sweep_due=False,
+            health=self._overflow_after_initial_index(),
+            refresh=refresh,
+        )
+
+        assert forced == [True]
 
     def test_overflow_recovery_refreshes_the_watch_before_its_walk(self, tmp_path, monkeypatch):
         """Codex round 1 on #1199: an overflow can drop a directory's

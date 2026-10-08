@@ -2272,11 +2272,14 @@ a word. At startup the indexer wraps watchdog's inotify buffer parser
 (`Inotify._parse_event_buffer`, `_install_inotify_overflow_hook`) so
 each overflow record logs a fixed-text WARNING (shared line budget)
 and adds one to an overflow count in `_IngestionStateRecorder`. The
-main loop then refreshes the folder watch (a dropped directory-create
-event leaves that directory unwatched) and runs the periodic rescan
-(rename sweep and walk) at once, and repeats both at most once per
+main loop then forces a re-schedule of the folder watch (a dropped
+directory-create event leaves that directory unwatched, and a
+recreated directory can reuse its inode, so the refresh's own check
+cannot see it) and runs the periodic rescan (rename sweep and walk)
+at once, and repeats both at most once per
 `OVERFLOW_RESCAN_RETRY_SECS` (60 s) while the recovery is still owed;
-an overflow after a completed recovery is handled at once again. Each walk (the startup walk too) takes the
+an overflow after a completed recovery is handled at once again.
+Each walk (the startup walk too) takes the
 count before it starts; only a walk that completes with no overflow
 since then clears the recovery, and logs it. Until then the watcher's
 stamp acknowledgements are held back (see "Index currency" below).
@@ -2411,8 +2414,8 @@ is queued:
   The sync is read from the temporary file's name, not the stamp's
   content, which a later sync may already have replaced. After an
   inotify queue overflow this no longer holds, since some delivery
-  events were dropped (#1108): the stamp is held instead, the newest
-  one, and acknowledged when a walk that started after the latest
+  events were dropped (#1108): the last stamp handled is held
+  instead (stamps arrive in sync order) and acknowledged when a walk that started after the latest
   overflow completes. Every delivery the overflow dropped was on disk
   before that walk began, and later ones reached the watcher in order.
 - when a Maildir walk (startup or the periodic rescan) finishes: the
