@@ -403,7 +403,7 @@ def test_attachment_shape_reaches_the_answering_model(
 # later message repeating the old pair.
 _BODY_SHAPES = {
     "ask-conservatory-real-price": {("t96.1", "body"), ("t97.1", "body"), ("t97.2", "body")},
-    "ask-darkroom-current": {("t98.1", "body")},
+    "ask-darkroom-rate-2027": {("t98.1", "body")},
     "ask-darkroom-from-2028": {("t98.1", "body")},
     "ask-trestles-revised": {("t99.1", "body"), ("t99.2", "body"), ("t99.3", "body")},
 }

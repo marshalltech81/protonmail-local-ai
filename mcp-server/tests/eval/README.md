@@ -422,8 +422,9 @@ Cases must never be built from real mail.
 `tests/answer_eval/cases.json` (schema v1, loaded and validated by
 `cases.py`) holds 47 cases over the baseline corpus: 45 for
 `ask_mailbox` and two for `summarize_thread` (below). The `ask_mailbox` cases: exact facts
-(including a current and a future rate in one notice, asked both ways:
-`ask-darkroom-current` and `ask-darkroom-from-2028`, #911),
+(including a rate before and a different one after a stated future date
+in one notice, asked for 2027 and for after the change:
+`ask-darkroom-rate-2027` and `ask-darkroom-from-2028`, #911),
 attachment-only answers, multiple required threads (including
 `ask-tofu-summary`, a summary of the four genuine messages of the
 counting scenario that must not repeat their PINs or link), narrow filters

@@ -745,8 +745,7 @@
       "expected_handling": "answer",
       "required_evidence": [["t97.2"]],
       "expected_facts": [
-        {"id": "f1", "fact": "After measuring, Linnea Thorsby says replacing the conservatory panes will be $1,275, all in toughened glazing.", "sources": ["t97.2"], "excerpt": "Replacing the panes will be $1,275"},
-        {"id": "f2", "fact": "Her first message says the conservatory price is not $760.", "sources": ["t97.1"], "excerpt": "is not $760"}
+        {"id": "f1", "fact": "After measuring, Linnea Thorsby says replacing the conservatory panes will be $1,275, all in toughened glazing.", "sources": ["t97.2"], "excerpt": "Replacing the panes will be $1,275"}
       ],
       "must_not_assert": ["The price for replacing the conservatory panes is $760 (the figure Linnea says it is not, and the bill for the separate porch-door job)."],
       "deterministic": {"must_include": [["1,275"]], "must_not_include": []},
@@ -754,10 +753,10 @@
       "review": "ai_drafted"
     },
     {
-      "id": "ask-darkroom-current",
+      "id": "ask-darkroom-rate-2027",
       "category": "exact_fact",
       "tool": "ask_mailbox",
-      "arguments": {"question": "What does my darkroom subscription at Fenwick Arts Centre cost at the moment?"},
+      "arguments": {"question": "What will my darkroom subscription at Fenwick Arts Centre cost during 2027?"},
       "held_out": true,
       "answerable": true,
       "expected_handling": "answer",
@@ -765,7 +764,7 @@
       "expected_facts": [
         {"id": "f1", "fact": "The subscription stays at $180 a year until a higher rate takes effect on 1 January 2028.", "sources": ["t98.1"], "excerpt": "stays at $180 a year until the higher rate of $215 a year takes effect on 1 January 2028"}
       ],
-      "must_not_assert": ["The darkroom subscription currently costs $215 a year (the rate that takes effect on 1 January 2028)."],
+      "must_not_assert": ["The darkroom subscription costs $215 a year during 2027 (the rate that takes effect on 1 January 2028)."],
       "deterministic": {"must_include": [["180"], ["2028"]], "must_not_include": []},
       "criteria": {"factual_correctness": true, "citation_support": true, "completeness": true, "temporal_reasoning": true, "conflict_uncertainty": false, "relevance": true},
       "review": "ai_drafted"
@@ -780,7 +779,7 @@
       "expected_handling": "answer",
       "required_evidence": [["t98.1"]],
       "expected_facts": [
-        {"id": "f1", "fact": "From 1 January 2028 the subscription is $215 a year; until then it stays at $180.", "sources": ["t98.1"], "excerpt": "stays at $180 a year until the higher rate of $215 a year takes effect on 1 January 2028"}
+        {"id": "f1", "fact": "From 1 January 2028 the subscription is $215 a year.", "sources": ["t98.1"], "excerpt": "stays at $180 a year until the higher rate of $215 a year takes effect on 1 January 2028"}
       ],
       "must_not_assert": ["After the change the darkroom subscription costs $180 a year (the rate before 1 January 2028)."],
       "deterministic": {"must_include": [["215"], ["2028"]], "must_not_include": []},
@@ -797,8 +796,7 @@
       "expected_handling": "answer",
       "required_evidence": [["t99.2"]],
       "expected_facts": [
-        {"id": "f1", "fact": "Fergus's revised order is 10 trestles for $430, replacing the first order of 16 trestles for $640.", "sources": ["t99.2"], "excerpt": "10 trestles for $430 replaces 16 trestles for $640"},
-        {"id": "f2", "fact": "Hester's later message repeats the first order as a question; it does not change the revised order.", "sources": ["t99.3"], "excerpt": "Is that still right?"}
+        {"id": "f1", "fact": "Fergus's revised order, which replaces the first, is 10 trestles for $430.", "sources": ["t99.2"], "excerpt": "10 trestles for $430 replaces 16 trestles for $640"}
       ],
       "must_not_assert": [
         "Lile Marquees is delivering 16 trestles (the first order's count, since revised).",

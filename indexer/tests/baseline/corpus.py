@@ -177,10 +177,11 @@ Threads 96-99 back three body-only answer-evaluation shapes (#911),
 dated March 2026 like t93-t95. In t97 the glazier says the
 conservatory price is not $760 and a later reply gives the real
 figure, while t96, a separate porch-door job from the same glazier, is
-billed at $760; t98 gives the darkroom subscription now and a higher
-one from a stated future date (1 January 2028, so "now" stays before
-it whenever the evaluation runs before then); in t99 a revision
-replaces the table count and price together, and a later message
+billed at $760; t98 gives the darkroom subscription until a stated
+future date (1 January 2028) and a higher one from it, and its cases
+ask about 2027 and about after the change, never about today, so they
+do not depend on the day they run; in t99 a revision replaces the
+trestle count and price together, and a later message
 repeats the old pair as a question. Their words avoid every golden
 search query's content words, the reserved words above and every
 ``unanswerable`` question's ``absent_terms``.
