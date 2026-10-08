@@ -1259,6 +1259,34 @@ the class; a thread when one of its non-Spam messages does) and on
 `find_contact` results, which stay per contact and ignore folders.
 Filtering removes results without reordering or rescoring the rest.
 
+### Operator identity
+
+The operator's own addresses come only from an operator-written file,
+`config/identity.toml` (`addresses = [...]`, mounted read-only at
+`/config`; see `config/identity.toml.example` and `docs/setup.md`). They
+are exact canonical addresses, normalised as `canonical_addr` normalises
+a participant address (`message_participants.address`), so a stored
+participant address is in the set exactly when the operator listed it.
+Nothing is inferred from a domain, a plus-alias or the Sent folder.
+They are for message direction (#824); nothing reads them yet.
+
+The indexer loads the file at startup (`load_operator_identity`,
+`indexer/src/entities.py`; at most 64 KiB and 1,000 addresses, errors
+naming the entry's position, never an address) and replaces, in one
+transaction, both tables (`Database.set_operator_identity`):
+
+| Table | Holds |
+|---|---|
+| `operator_addresses` | One row per listed address. |
+| `operator_identity` | One row: `state` (`configured`, or `unconfigured` when the file is absent), `address_count` and `address_digest`, the SHA-256 (hex) of the sorted addresses, each followed by a newline. Unconfigured with no addresses has the digest of the empty string. |
+
+An absent file clears the set and records `unconfigured`; an empty or
+malformed one stops the indexer. A fresh index, or one migrated to
+schema v7, reads `unconfigured` until the indexer's first start writes
+the file's state. Editing the file takes an indexer restart, with no
+reindex: nothing per message depends on it. The MCP server will read
+the tables from SQLite and gets no `/config` mount.
+
 ## Attachment Indexing
 
 Email attachments flow through the same chunker and embedder pipeline
@@ -1924,6 +1952,7 @@ already indexed without embedding calls (see *Reparse in place*).
 | Version | Migration | Change |
 |---|---|---|
 | 0 | (initial schema) | First deployed schema (2026-10-03). |
+| 7 | `0007_operator_identity.sql` | `operator_addresses` and `operator_identity` (#824; see *Operator identity*), seeded `unconfigured` with no addresses until the indexer's next start loads `config/identity.toml`. No per-message column, so no reparse is queued. |
 | 6 | `0006_attachment_text_complete.sql` | Attachment text completeness (#1242): `attachments.text_complete` (0 / 1, NULL until assessed, no default) and `attachments.text_extractor`, and `attachment_extractions.text_complete` (NULL when unknown). Every existing row starts NULL and the migration queues a reparse (see *Reparse in place*), which re-extracts each cached `success` or `empty` result once, since none has a record yet (#1285). |
 | 5 | `0005_message_completeness.sql` | Per-message completeness on `messages` (#1086): `subject_complete`, `from_addresses_complete`, `to_addresses_complete`, `cc_addresses_complete`, `attachments_manifest_complete`, `body_complete` (0 / 1, NULL until assessed, no default) and `caps_json`. Every existing row starts NULL and the migration queues a reparse, which fills them without embedding calls; a dead-lettered job keeps its message NULL until `make requeue-dead`. Until the reparse reaches a message, a subject, text, attachment, address or authority filter that does not match it counts it as indeterminate. |
 | 4 | `0004_participant_names.sql` | `message_participant_names` and `messages.participant_names_complete` (#1140), seeded with each participant's first name; the migration queues a reparse (see *Reparse in place*). |

@@ -325,6 +325,8 @@ Secrets are a hard boundary.
 - `config/authority.toml` (the operator's source-authority rules: real
   addresses and domains; only `config/authority.toml.example` with
   `.example` domains is tracked)
+- `config/identity.toml` (the operator's own addresses; only
+  `config/identity.toml.example` with `.example` domains is tracked)
 - any ad hoc export containing credentials, tokens, or private keys
 
 ### Credential-specific rules

@@ -24,6 +24,8 @@ from .chunker import l2_normalize, truncate_to_tokens
 from .entities import (
     PERSON_PREFIX,
     AuthorityRules,
+    OperatorIdentity,
+    identity_digest,
     org_entity_id,
     organization_domain,
     person_entity_id,
@@ -131,7 +133,12 @@ def _dedupe_by_canonical(addrs: list[str]) -> list[str]:
 # (``attachments.text_complete`` and the ``text_extractor`` stamp that
 # applied) and the cached result's (``attachment_extractions.text_complete``),
 # NULL until assessed (``migrations/0006_attachment_text_complete.sql``).
-SCHEMA_VERSION = 6
+# v7 (#824): ``operator_addresses`` and ``operator_identity`` hold the
+# operator's own addresses from ``config/identity.toml``, its loaded
+# state, address count and digest, replaced at every indexer start; no
+# per-message column and no reparse
+# (``migrations/0007_operator_identity.sql``).
+SCHEMA_VERSION = 7
 SCHEMA_APPLICATION_ID = 0x504D4149  # "PMAI"
 
 # How long a ``reaped_messages`` record outlives the reap. The record
@@ -917,6 +924,7 @@ class Database:
         """)
         self._run_entity_schema_script(cur)
         self._run_vector_generation_schema_script(cur)
+        self._run_operator_identity_schema_script(cur)
 
     @staticmethod
     def _run_entity_schema_script(cur: sqlite3.Cursor) -> None:
@@ -999,6 +1007,38 @@ class Database:
             "ON vector_generations(status) WHERE status = 'active'",
         ):
             cur.execute(statement)
+
+    @staticmethod
+    def _run_operator_identity_schema_script(cur: sqlite3.Cursor) -> None:
+        """The operator's own addresses (#824), inside the initial
+        schema's open transaction; ``migrations/0007_operator_identity.sql``
+        creates the same tables on an existing index.
+
+        ``operator_addresses`` holds the canonical addresses listed in
+        ``config/identity.toml``. ``operator_identity`` is one row: the
+        loaded ``state`` (``configured``, or ``unconfigured`` when the
+        file is absent), the address count and ``identity_digest`` of
+        the set (``src/entities.py``). ``set_operator_identity`` replaces
+        both at every indexer start; until the first one the row reads
+        unconfigured.
+        """
+        for statement in (
+            "CREATE TABLE operator_addresses (address TEXT PRIMARY KEY) WITHOUT ROWID",
+            """
+            CREATE TABLE operator_identity (
+                id             INTEGER PRIMARY KEY CHECK (id = 1),
+                state          TEXT NOT NULL CHECK (state IN ('configured', 'unconfigured')),
+                address_count  INTEGER NOT NULL,
+                address_digest TEXT NOT NULL
+            )
+            """,
+        ):
+            cur.execute(statement)
+        cur.execute(
+            "INSERT INTO operator_identity (id, state, address_count, address_digest) "
+            "VALUES (1, 'unconfigured', 0, ?)",
+            (identity_digest(frozenset()),),
+        )
 
     # -------------------------------------------------------------------------
     # Write operations
@@ -3117,6 +3157,31 @@ class Database:
                 changes,
             )
         return len(changes)
+
+    @_synchronized
+    def set_operator_identity(self, identity: OperatorIdentity | None) -> None:
+        """Replace the stored operator addresses, state, count and digest
+        in one transaction (#824). ``None`` (no identity file) clears the
+        set and records ``unconfigured``. A failure rolls the whole
+        replacement back, so readers never see a mixed set."""
+        addresses = identity.addresses if identity is not None else frozenset()
+        with self.transaction():
+            self._conn.execute("DELETE FROM operator_addresses")
+            self._conn.executemany(
+                "INSERT INTO operator_addresses (address) VALUES (?)",
+                [(address,) for address in sorted(addresses)],
+            )
+            self._conn.execute(
+                "INSERT INTO operator_identity (id, state, address_count, address_digest) "
+                "VALUES (1, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET state = excluded.state, "
+                "address_count = excluded.address_count, "
+                "address_digest = excluded.address_digest",
+                (
+                    "configured" if identity is not None else "unconfigured",
+                    len(addresses),
+                    identity_digest(addresses),
+                ),
+            )
 
     @_synchronized
     def update_filepath(

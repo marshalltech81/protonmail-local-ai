@@ -52,6 +52,9 @@ logs/
 # Operator source-authority rules: real addresses and domains. The
 # ``.example`` companion is tracked.
 config/authority.toml
+# The operator's own addresses (#824). The ``.example`` companion is
+# tracked.
+config/identity.toml
 
 # Eval queries grounded in a real mailbox — must never be committed.
 # The ``.example`` companions are tracked as schema/templates.

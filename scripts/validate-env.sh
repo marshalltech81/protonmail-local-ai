@@ -10,6 +10,7 @@ readonly EMBED_KEY_FILE="${ROOT_DIR}/.secrets/embed_api_key.txt"
 readonly RERANK_KEY_FILE="${ROOT_DIR}/.secrets/rerank_api_key.txt"
 readonly MCP_TOKEN_FILE="${ROOT_DIR}/.secrets/mcp_auth_token.txt"
 readonly AUTHORITY_FILE="${ROOT_DIR}/config/authority.toml"
+readonly IDENTITY_FILE="${ROOT_DIR}/config/identity.toml"
 
 require_file() {
     local path="$1"
@@ -230,10 +231,10 @@ require_indexer_readable_on_linux() {
     fi
 }
 
-# The optional source-authority rules file holds real addresses and
-# domains, so it is held to the secret files' 600 (on Linux, 600 plus
-# an ACL for the indexer alone, and no other host account with its
-# UID; see above). A symlink is rejected:
+# The optional source-authority rules file and the optional operator
+# identity file hold real addresses and domains, so each is held to the
+# secret files' 600 (on Linux, 600 plus an ACL for the indexer alone,
+# and no other host account with its UID; see above). A symlink is rejected:
 # Compose mounts config/ as a directory, so a link whose target the
 # container cannot reach would pass here and stop the indexer at
 # startup; so is anything else that is not a regular file, which the
@@ -912,6 +913,7 @@ require_mode_600 "$EMBED_KEY_FILE"
 require_mode_600 "$RERANK_KEY_FILE"
 require_mode_600 "$MCP_TOKEN_FILE"
 require_private_optional_file "$AUTHORITY_FILE"
+require_private_optional_file "$IDENTITY_FILE"
 
 # Every enabled layer requires a non-empty API key — uniform rule
 # across the three operator-supplied layers. Operators pointing at an
