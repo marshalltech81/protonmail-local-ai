@@ -2272,9 +2272,11 @@ a word. At startup the indexer wraps watchdog's inotify buffer parser
 (`Inotify._parse_event_buffer`, `_install_inotify_overflow_hook`) so
 each overflow record logs a fixed-text WARNING (shared line budget)
 and adds one to an overflow count in `_IngestionStateRecorder`. The
-main loop then runs the periodic rescan (rename sweep and walk) at
-once, and again at most once per `OVERFLOW_RESCAN_RETRY_SECS` (60 s)
-while the walk fails. Each walk (the startup walk too) takes the
+main loop then refreshes the folder watch (a dropped directory-create
+event leaves that directory unwatched) and runs the periodic rescan
+(rename sweep and walk) at once, and repeats both at most once per
+`OVERFLOW_RESCAN_RETRY_SECS` (60 s) while the recovery is still owed;
+an overflow after a completed recovery is handled at once again. Each walk (the startup walk too) takes the
 count before it starts; only a walk that completes with no overflow
 since then clears the recovery, and logs it. Until then the watcher's
 stamp acknowledgements are held back (see "Index currency" below).

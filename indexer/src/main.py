@@ -3393,14 +3393,20 @@ def main():
             # An inotify queue overflow dropped watcher events (#1108):
             # walk now rather than at the next periodic rescan, and again
             # until a walk started after the latest overflow completes.
+            # A dropped directory-create event leaves that directory
+            # unwatched, so re-watch first; the walk after it then also
+            # covers the re-schedule gap.
             if ingestion_state.recovery_pending and (
                 last_overflow_rescan is None
                 or now - last_overflow_rescan >= OVERFLOW_RESCAN_RETRY_SECS
             ):
+                _run_watch_refresh(folder_watches, db, queue, skip_trashed=reconciler is not None)
                 _run_periodic_rescan(
                     db, queue, ingestion_state, skip_trashed=reconciler is not None
                 )
-                last_overflow_rescan = now
+                # The interval limits retries within one recovery; the
+                # next overflow after it is walked at once.
+                last_overflow_rescan = now if ingestion_state.recovery_pending else None
 
             # WAL checkpoint: keep the WAL file size bounded over a
             # long-running container. SQLite's automatic checkpoint

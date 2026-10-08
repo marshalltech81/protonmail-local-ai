@@ -6090,6 +6090,48 @@ class TestMainStartupAndLoop:
         assert not main._ingestion_state.recovery_pending
         assert "recovered from 1 inotify queue overflow(s)" in caplog.text
 
+    def test_overflow_recovery_refreshes_the_watch_before_its_walk(self, tmp_path, monkeypatch):
+        """Codex round 1 on #1199: an overflow can drop a directory's
+        create event, and watchdog then never watches it. The watch
+        refresh finds the directory; it runs before the walk, so the
+        walk that lowers the fence covers the re-schedule gap too."""
+        events = self._run_main(
+            tmp_path, monkeypatch, sweep_due=False, health=self._overflow_after_initial_index()
+        )
+
+        loop = events[events.index("observer_start") :]
+        refreshes = [i for i, e in enumerate(loop) if e.startswith("refresh:")]
+        walk = next(i for i, e in enumerate(loop) if e.startswith(f"walk:{main.REASON_RESCAN}:"))
+        assert len(refreshes) == 1 and refreshes[0] < walk
+
+    def test_a_new_overflow_after_a_recovery_is_walked_at_once(self, tmp_path, monkeypatch):
+        """Codex round 1 on #1199: the retry interval limits retries
+        within one recovery, not the first walk of the next one."""
+        monkeypatch.setattr(main, "OVERFLOW_RESCAN_RETRY_SECS", 3600)
+        beats: list[int] = []
+
+        def health():
+            # Heartbeats with the recorder: after initial_index, then one
+            # per tick. Overflow on the first (walked on tick 1) and the
+            # third (tick 2, after tick 1's walk recovered).
+            if main._ingestion_state is None:
+                return
+            beats.append(1)
+            if len(beats) in (1, 3):
+                main._ingestion_state.overflow_seen()
+
+        ticks: list[int] = []
+
+        def sleep(_seconds):
+            ticks.append(1)
+            if len(ticks) == 3:
+                raise KeyboardInterrupt
+
+        events = self._run_main(tmp_path, monkeypatch, sweep_due=False, health=health, sleep=sleep)
+
+        assert sum(e.startswith(f"walk:{main.REASON_RESCAN}:") for e in events) == 2
+        assert not main._ingestion_state.recovery_pending
+
     def test_no_overflow_runs_no_early_rescan(self, tmp_path, monkeypatch):
         events = self._run_main(tmp_path, monkeypatch, sweep_due=False)
         assert not any(e.startswith(f"walk:{main.REASON_RESCAN}:") for e in events)
