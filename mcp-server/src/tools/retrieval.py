@@ -277,10 +277,30 @@ def _projected(result: CallToolResult, fields: frozenset[str] | None) -> CallToo
 
 # Why a query_messages filter can leave a message undecided, by the
 # filters that can: fixed text for the prose ``indeterminate`` line.
+# The names cause applies to a substring address filter only (a name or
+# fragment, not a full address): one that matches nothing cannot rule
+# out a message whose stored display names are incomplete or not yet
+# known (#1140), so ``_indeterminate_causes`` keeps it only for those.
+_NAMES_CAUSE = "display names not all indexed (reparse pending, or over the name budget)"
 _INDETERMINATE_CAUSES: tuple[tuple[frozenset[str], str], ...] = (
-    (frozenset({"sender", "participant"}), "sender ambiguous or not yet checked"),
+    (
+        frozenset({"sender", "participant", "authority_class"}),
+        "sender ambiguous or not yet checked",
+    ),
+    (frozenset({"sender", "recipient", "participant"}), _NAMES_CAUSE),
     (frozenset({"size_min", "size_max"}), "no stored size"),
 )
+
+
+def _indeterminate_causes(uses: list[FilterUse]) -> list[str]:
+    """The fixed-text causes the given filters can have, in order."""
+    given = {u.filter for u in uses}
+    substring = {u.filter for u in uses if u.match == "substring"}
+    return [
+        cause
+        for names, cause in _INDETERMINATE_CAUSES
+        if (substring if cause == _NAMES_CAUSE else given).intersection(names)
+    ]
 
 
 def _filter_uses(args: dict) -> list[FilterUse]:
@@ -907,9 +927,12 @@ def register_retrieval_tools(server, db):
         match; it is the complete count only when ``indeterminate`` is
         0. ``indeterminate`` counts messages a filter could not decide
         (a size bound on a message without a stored size; a sender or
-        participant filter on a message whose sender is ambiguous or not
-        yet checked, as mail indexed before an upgrade is until its
-        reparse runs); they are in neither ``total_matches`` nor
+        participant filter, or an authority_class filter on a message
+        outside Spam whose sender is ambiguous or not yet checked; a name
+        or fragment address filter that matches nothing on a message
+        whose display names are not all indexed; mail indexed before an
+        upgrade is both until its reparse runs); they are in neither
+        ``total_matches`` nor
         the pages, so report ``indeterminate`` with any count when it is
         not 0.
 
@@ -982,8 +1005,11 @@ def register_retrieval_tools(server, db):
                     across all matches; above 1, a name may cover
                     different people. A message whose sender is
                     ambiguous or not yet checked (``sender_ambiguous``
-                    not false) is counted as indeterminate, not matched.
-            recipient: To or Cc, matched like ``sender``.
+                    not false) is counted as indeterminate, not matched,
+                    as is one a name or fragment does not match while
+                    its display names are not all indexed.
+            recipient: To or Cc, matched like ``sender`` (without the
+                       ``sender_ambiguous`` rule).
             participant: Any role (From, To, or Cc), matched like
                          ``sender``. A To or Cc match counts whatever
                          ``sender_ambiguous`` is; otherwise such a
@@ -1011,7 +1037,9 @@ def register_retrieval_tools(server, db):
                              "management", "vendor", "government",
                              "personal", "other", or "unclassified"
                              (no rule matched). Spam-folder messages
-                             never match.
+                             never match; any other message whose
+                             sender is ambiguous or not yet checked is
+                             counted as indeterminate.
             seen: True for messages read in Proton, False for unread.
             flagged: True for flagged (starred) messages, False for the rest.
             replied: True for messages answered in Proton, False for the rest.
@@ -1032,8 +1060,9 @@ def register_retrieval_tools(server, db):
             ID), and paging state. ``indeterminate``, stated whenever
             non-zero, counts messages the filters could neither accept
             nor reject (no stored size under a size bound; a sender whose
-            attribution is ambiguous or not yet checked under a sender or
-            participant filter); they are in neither
+            attribution is ambiguous or not yet checked under a sender
+            or participant filter, or an authority_class filter on a
+            message outside Spam); they are in neither
             total_matches nor the pages, so a count is complete only
             when it is 0.
         """
@@ -1140,8 +1169,7 @@ def register_retrieval_tools(server, db):
             # Stated whenever non-zero, so a count is never read as
             # complete when some messages could not be decided. Fixed
             # text naming the causes the given filters can have.
-            given = {u.filter for u in uses}
-            causes = [cause for names, cause in _INDETERMINATE_CAUSES if given.intersection(names)]
+            causes = _indeterminate_causes(uses)
             lines.append(
                 f"indeterminate: {page.indeterminate} (messages the filters could neither "
                 f"accept nor reject: {'; '.join(causes)}; in neither total_matches nor "

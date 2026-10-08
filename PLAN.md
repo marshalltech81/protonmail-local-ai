@@ -46,6 +46,55 @@ MCP API surface.
 knowledge — not that users can never delete. Deletion/retention
 semantics are a roadmap item (Phase 4 item 4).
 
+## V1 Finish Line
+
+Adopted 2026-10-08 (decision 38). **V1 is a read-only mailbox evidence
+system that can enumerate, inspect, aggregate and reason over a
+defined population of mail, makes missing evidence and uncertainty
+explicit, and can be rebuilt from Maildir.** Issues outside these
+outcomes and gates are not prerequisites.
+
+Outcomes:
+
+1. **Every attachment in a defined scope can be listed and read in
+   full**, with paging and message and folder filters (#796).
+2. **A population can be built and counted on the server** through
+   bounded Boolean filters, explicit address, body, header and
+   attachment predicates, grouped counts and exhaustive thread
+   grouping. Incomplete parsing or extraction answers `indeterminate`,
+   never a confident "no" (#1086 first, then #1087, #823).
+3. **Source metadata stays evidence:** bounded ordered headers,
+   unknown send dates kept unknown, verified arrival time, participant
+   and Bcc semantics, authority from the stored sender only when it is
+   safe ("Evidence model").
+4. **Retrieval supplies the passage that answers**, not only the right
+   thread: the keyword-matched passage, which message matched, and later
+   corrections or closures in the thread (#858, #987, #974).
+5. **Structured extraction runs over a known set and discloses
+   coverage:** explicitly selected messages or attachments, with
+   omitted or truncated source text reported (#976, #1057).
+6. **Reasoning over change and disagreement meets the answer-quality
+   bar below.** The bar is the requirement, not a particular checking
+   mechanism (Phase 5).
+
+Release gates:
+
+- **Corpus and privacy correctness:** no open P0 or P1 issue. The
+  bounded-work P1s (#1031, #1040) come before further predicate work.
+- **Measured answer quality:** written pass thresholds for evidence
+  recall, supported conclusions, chronology, abstention, exhaustive
+  workflows and truncation disclosure, met on the synthetic eval
+  corpus. The deterministic baseline tests wiring, not answer quality.
+- **Deployed:** the release runs on the live mailbox after an upgrade,
+  with any queued reparse drained and status healthy.
+- **Operational bounds:** recovery verified, request deadlines, and
+  resource limits for the supported deployment.
+
+Not required for V1: swapping the embedding model without a code
+change (#719 stays an open decision), sending mail, a web UI, hosted
+clients, Linux support, every attachment format, saved monitors and
+persisted claims.
+
 ## Current State
 
 Live since the first deployment on 2026-10-03. The index was rebuilt
@@ -990,6 +1039,13 @@ removed Bridge container are kept as history.
     claims.
     Corrective and repeat-class rounds are measured over the next ten
     PRs (#1163).
+
+38. **V1 finish line (2026-10-08):** the outcomes and release gates in
+    "V1 Finish Line" define done. They adopt an external assessment
+    (Codex, static read of `17b9904e`) with four changes: the bounded-work
+    P1s come first, #1086 leads the predicate work, reasoning is gated
+    by measured answer quality rather than features, and embedder swap
+    without code change (#719) is optional. A deployment gate was added.
 
 ## Notes for Agents
 

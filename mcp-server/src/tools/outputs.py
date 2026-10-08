@@ -644,8 +644,9 @@ class QueryMessagesOutput(_Output):
     )
     indeterminate: int = Field(
         description="Messages the filters could neither accept nor reject (a size bound on "
-        "a message without a stored size; a sender or participant filter on one whose sender "
-        "is ambiguous or not yet checked), in neither total_matches nor the pages. 0 when "
+        "a message without a stored size; a sender or participant filter, or an "
+        "authority_class filter on a message outside Spam whose sender is ambiguous or not yet "
+        "checked), in neither total_matches nor the pages. 0 when "
         "every filter could be decided for every message; when not 0, report it with any "
         "count."
     )

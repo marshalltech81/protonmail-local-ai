@@ -993,8 +993,9 @@ class MessagePage:
     ``indeterminate`` counts the messages the predicates could neither
     accept nor reject (#1085): no leaf false, some leaf unknown because
     it cannot be decided (``Evaluability.UNKNOWN_WHEN_NULL``: a size bound
-    on a message without a stored size, a sender or participant filter
-    on one whose ``sender_ambiguous`` is not 0, a bound or the ordering under
+    on a message without a stored size, a sender, participant or
+    authority filter on one whose ``sender_ambiguous`` is not 0 (outside
+    Spam, for authority), a bound or the ordering under
     ``date_basis=occurred`` on one without a delivery time). They are in
     neither ``total_matches`` nor the pages.
     """
@@ -1123,18 +1124,24 @@ def _aggregate_participants(
 
     The query selects addresses; every row of a selected address then
     aggregates, so a name match reports the contact's other names and
-    threads too. Addresses are stored canonical (lowercased); names
+    threads too. Names are every display name each message wrote the
+    address with (``message_participant_names``, #1140), each matched
+    on its own. Addresses are stored canonical (lowercased); names
     need the Unicode-aware ``mcp_casefold``.
     """
     by_email: dict[str, dict] = {}
     rows = conn.execute(
         """
-        SELECT DISTINCT p.address, p.name, m.thread_id
+        SELECT DISTINCT p.address, n.name, m.thread_id
         FROM message_participants p
         JOIN messages m ON m.claimant_id = p.claimant_id
+        LEFT JOIN message_participant_names n
+            ON n.claimant_id = p.claimant_id AND n.role = p.role AND n.address = p.address
         WHERE p.address IN (
-            SELECT address FROM message_participants
-            WHERE instr(address, ?) > 0 OR instr(mcp_casefold(name), ?) > 0
+            SELECT address FROM message_participants WHERE instr(address, ?) > 0
+            UNION
+            SELECT address FROM message_participant_names
+            WHERE instr(mcp_casefold(name), ?) > 0
         )
         """,
         (needle, name_needle),
@@ -1182,8 +1189,9 @@ def _aggregate_senders(
 
     An address counts on a thread whose ``senders`` (each message's
     primary author, one display string per address) lists it. Its
-    names are that senders entry plus its From rows on those threads,
-    so a name first used on a later message still matches. The index
+    names are that senders entry plus every display name its From rows
+    on those threads were written with (``message_participant_names``,
+    #1140), so a name first used on a later message still matches. The index
     records no author order within a message, so a name written for
     the address as a secondary author on a thread it primarily sent
     counts too.
@@ -1200,9 +1208,11 @@ def _aggregate_senders(
         row["address"]
         for row in conn.execute(
             """
-            SELECT DISTINCT address FROM message_participants
-            WHERE role = 'from'
-              AND (instr(address, ?) > 0 OR instr(mcp_casefold(name), ?) > 0)
+            SELECT address FROM message_participants
+            WHERE role = 'from' AND instr(address, ?) > 0
+            UNION
+            SELECT address FROM message_participant_names
+            WHERE role = 'from' AND instr(mcp_casefold(name), ?) > 0
             """,
             (needle, name_needle),
         )
@@ -1214,9 +1224,11 @@ def _aggregate_senders(
     if folders:
         _append_folder_membership_sql(where, params, "m.thread_id", folders)
     rows = conn.execute(
-        "SELECT DISTINCT p.address, p.name, m.thread_id "
+        "SELECT DISTINCT p.address, n.name, m.thread_id "
         "FROM message_participants p "
         "JOIN messages m ON m.claimant_id = p.claimant_id "
+        "LEFT JOIN message_participant_names n "
+        "ON n.claimant_id = p.claimant_id AND n.role = p.role AND n.address = p.address "
         "WHERE " + " AND ".join(where),  # nosec B608
         params,
     ).fetchall()
@@ -3736,7 +3748,8 @@ class Database:
         """Resolve a name / address / domain fragment to indexed contacts.
 
         Matches the query against each indexed ``message_participants``
-        row's address (lowercased) or display name (Unicode caseless,
+        row's address (lowercased) or each display name the message
+        wrote it with (``message_participant_names``; Unicode caseless,
         both sides casefolded), then
         aggregates every row of each matched canonical email (not only
         the matching rows), so the same contact across many threads
@@ -3881,7 +3894,9 @@ class Database:
           is left out and counted as indeterminate, as above.
         - ``authority_class``: the class the indexer gave the message's
           From sender (``AUTHORITY_CLASSES``); a message in
-          ``AUTHORITY_EXCLUDED_FOLDERS`` never matches.
+          ``AUTHORITY_EXCLUDED_FOLDERS`` never matches, and any other
+          whose ``sender_ambiguous`` is not 0 is counted as
+          indeterminate (#1161).
 
         Raises ``ValueError`` for an invalid date, a ``text`` with no
         words or more than ``_MAX_TEXT_TERMS``, an unavailable or
