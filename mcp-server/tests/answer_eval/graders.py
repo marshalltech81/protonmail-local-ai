@@ -2,7 +2,11 @@
 
 Every tool is graded through its ``adapters.AnswerView`` (#656): the
 answer text, the threads searched, the cited labels, the tool's own
-citation check and the server's coverage note.
+citation check and the server's coverage note. Two checks also read a
+flag of the view, for the experimental tools (#1240), which state both
+in structured fields rather than in the text: ``abstention`` takes their
+``insufficient_evidence`` as an abstention, and ``answer_complete``
+fails a reply they could not parse.
 
 Each check is ``pass``, ``fail`` or ``not_applicable``. Evidence groups
 are scored at three stages, so a miss can be traced to where it
@@ -161,6 +165,10 @@ def grade_run(case: Case, run: CaseRun) -> DeterministicResult:
         return result
     out = run.view
     answer = out.answer
+    # An abstention in words, or the experimental tools' own
+    # insufficient-evidence flag (#1240), which their entries carry
+    # instead of a not-found sentence.
+    abstained = is_abstention(answer) or out.abstained
     retrieved = {t.thread_id for t in out.threads}
     cited_labels = [c.label for c in out.citations]
     cited = [run.passages[label] for label in cited_labels if label in run.passages]
@@ -195,7 +203,10 @@ def grade_run(case: Case, run: CaseRun) -> DeterministicResult:
         checks["omission_disclosed"] = PASS if disclosed else FAIL
     else:
         checks["omission_disclosed"] = NA
-    checks["answer_complete"] = FAIL if answer.endswith(_TRUNCATED_NOTICE_SUFFIXES) else PASS
+    # #1240: an experimental tool reports a reply it could not parse in
+    # its status, not with a notice at the end of the text.
+    cut = answer.endswith(_TRUNCATED_NOTICE_SUFFIXES) or not out.complete
+    checks["answer_complete"] = FAIL if cut else PASS
     checks["prompt_matches_capture"] = PASS if run.prompt_consistent else FAIL
     result.citation_problem_kinds = sorted({p.kind for p in out.citation_problems})
     unknown = "unknown_labels" in result.citation_problem_kinds
@@ -209,7 +220,7 @@ def grade_run(case: Case, run: CaseRun) -> DeterministicResult:
         # also needs an answer that abstains or rests on at least one
         # intact citation: an uncited claim about omitted evidence is a
         # guess too (review round 8).
-        grounded = is_abstention(answer) or any(g.cited_intact for g in result.groups)
+        grounded = abstained or any(g.cited_intact for g in result.groups)
         stated = _fold(answer)
         for refs, g in zip(case.required_evidence, result.groups, strict=True):
             # Review round 9: when the group's facts list the values that
@@ -224,7 +235,7 @@ def grade_run(case: Case, run: CaseRun) -> DeterministicResult:
                 for v in f.values
             ]
             if values:
-                avoids = is_abstention(answer) or not any(_mentions(stated, v) for v in values)
+                avoids = abstained or not any(_mentions(stated, v) for v in values)
             else:
                 avoids = grounded
             g.met = g.cited_intact or (
@@ -248,7 +259,7 @@ def grade_run(case: Case, run: CaseRun) -> DeterministicResult:
     else:
         checks["forbidden_values"] = NA
 
-    result.abstained = is_abstention(answer)
+    result.abstained = abstained
     if case.answerable:
         # Abstaining is the disclosure only when no group was lost to retrieval.
         excused = disclosed and all(g.retrieved for g in result.groups)

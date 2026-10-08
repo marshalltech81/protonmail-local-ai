@@ -247,7 +247,7 @@ separately.
 - Whether the answer explains its reading of "TOFU", and how confident
   it sounds, are prose, which the agent scorers do not grade. The
   answer-quality judge grades the intelligence tools' own answers
-  (`ask_mailbox`, `summarize_thread`), not an agent's.
+  (`ask_mailbox`, `summarize_thread` and the experimental tools), not an agent's.
 - Incomplete indexing cannot be exercised on the fully built baseline
   index, so whether an answer discloses it is untested.
 
@@ -370,7 +370,7 @@ the reference traces are the only traces scored today.
 No live tool-using agent harness exists (#283, #775, #798). Every
 scored trace is scripted, so nothing here measures what a real agent
 does with the tools; `make eval-answers` runs only the intelligence
-tools' own model (`ask_mailbox`, `summarize_thread`), not an agent
+tools' own model (`ask_mailbox`, `summarize_thread` and the experimental tools), not an agent
 choosing tools.
 
 The smallest extension, proposed and not built:
@@ -391,11 +391,12 @@ The smallest extension, proposed and not built:
   by `score_trace`. Recorded traces stay git-ignored, like
   `.answer-eval/`.
 
-## Answer-quality evaluation (`ask_mailbox`, `summarize_thread`; synthetic corpus)
+## Answer-quality evaluation (intelligence and experimental tools; synthetic corpus)
 
 `tests/answer_eval/` runs the real `ask_mailbox` and `summarize_thread`
-handlers (#656; `extract_from_emails` has no adapter yet, #1137, nor
-have the experimental `brief_issue` and `check_conclusion`, #291), captures what each
+handlers (#656) and the experimental `brief_issue` and
+`check_conclusion` handlers (#1240; `extract_from_emails` has no
+adapter yet, #1137), captures what each
 model call actually received, and grades the answer twice:
 deterministic checks first, then an optional, separately configured AI
 judge. It is an offline development tool (#604): it changes nothing in
@@ -420,8 +421,9 @@ Cases must never be built from real mail.
 ### Cases
 
 `tests/answer_eval/cases.json` (schema v1, loaded and validated by
-`cases.py`) holds 49 cases over the baseline corpus: 47 for
-`ask_mailbox` and two for `summarize_thread` (below). The `ask_mailbox` cases: exact facts
+`cases.py`) holds 53 cases over the baseline corpus: 47 for
+`ask_mailbox`, two for `summarize_thread` and two smoke cases for each
+experimental tool (below). The `ask_mailbox` cases: exact facts
 (including a rate before and a different one after a stated future date
 in one notice, asked for 2027 and for after the change:
 `ask-darkroom-rate-2027` and `ask-darkroom-from-2028`, #911; and
@@ -470,9 +472,10 @@ xfail that a fix turns into a pass. Held-out membership is
 `is_held_out(id)`, as for the agent scenarios; tune nothing against
 held-out cases.
 
-**Other tools (#656).** A case's `tool` is `ask_mailbox` or
-`summarize_thread`, and its id starts with the tool's short name
-(`ask-`, `summarize-`). A
+**Other tools (#656).** A case's `tool` is `ask_mailbox`,
+`summarize_thread`, `brief_issue` or `check_conclusion`, and its id
+starts with the tool's short name (`ask-`, `summarize-`, `brief-`,
+`check-`). A
 `summarize_thread` case names a baseline thread ID directly and one of
 the tool's four styles (the handler would summarize any other as
 `brief`); nothing is embedded for it, and its evidence and fact
@@ -485,6 +488,22 @@ against the answer or the summary), expected handling and criteria. The shipped 
 thread under a 1,600-token prompt window, `settings.prompt_tokens`, so
 the window leaves out the message holding the two open points: a
 `disclose_missing` case, like `ask-kayak-tight-budget`).
+
+**Experimental tools (#1240).** A `brief_issue` case needs a `topic`
+and a `check_conclusion` case a `conclusion` of at most 2,000
+characters (the handler refuses a longer one); both take the scope
+filters `ask_mailbox` takes (`folders`, `from_addr`, `date_from`,
+`date_to`, `max_threads`), and the case file rejects any other key and
+a filter of the wrong type. Each tool embeds its topic or conclusion,
+so the index build embeds it too. The evaluation registers both tools
+on its own in-process server whatever `MCP_EXPERIMENTAL_TOOLS` says,
+and reads no such setting: nothing needs enabling for a run, and the
+server's setting is unchanged. The shipped cases are smoke cases, enough
+to prove the path end to end; the measurement cases are #291's:
+`brief-pool-bids` (the bids and the shortlist across two messages),
+`brief-cabin-wifi` (an unanswerable topic), `check-roof-total` (a
+conclusion an attachment supports) and `check-electrician-quote` (one
+the mailbox does not address).
 
 `make baseline` checks every excerpt is in the indexed text of the
 message it cites, so a reference cannot drift from the corpus or rest on
@@ -731,15 +750,24 @@ Two narrow wrappers capture each run in memory: the inference client
 after truncation, deduplication, fallback thread text and budgeting; a
 repair call resends that prompt with a fixed instruction) and the
 handlers' evidence builders' label maps (`_build_evidence` for
-`ask_mailbox`, `_summarize_context` for `summarize_thread`, whose first
-map is the prompt's: each label's thread, message, claimant and chunk).
+`ask_mailbox` and the experimental tools, `_summarize_context` for
+`summarize_thread`, whose first map is the prompt's: each label's
+thread, message, claimant and chunk).
 A check confirms every captured label is in the prompt the model
 received.
 
 Every tool is graded through one view of its output (`adapters.py`,
 #656): `ask_mailbox`'s answer as it is; `summarize_thread`'s summary,
 with the one thread summarized as the threads and its window note as
-the coverage note. A summary passage the
+the coverage note; for the experimental tools (#1240), each entry of
+the reply as a statement (a brief's chronology, positions, decisions,
+open questions and conflicts with their section and index; a check's
+verdict, then each finding with its stance and the labels of its
+sources) and those statements, one per line, as the answer. Their
+`insufficient_evidence` flag is the abstention, a reply the tool could
+not parse (status `invalid_json` or `truncated`) fails "answer not cut
+off", and they write no coverage note, so a `disclose_missing` case
+cannot pass for them. A summary passage the
 window cut short is captured as truncated, the thread's indexed text
 (E1, which has no chunk offsets) included, by comparing the shown map
 with the one the tool's caps alone would show.
@@ -844,9 +872,8 @@ never fails a run. CI runs only the scripted path (`make baseline` and
 
 Not yet covered (follow-ups): judge calibration against human labels
 and repeated runs to measure variation, quality thresholds,
-`extract_from_emails` (#1137), the experimental tools (`brief_issue`,
-`check_conclusion`; #656, #291), a real-model synthetic index, and
-token usage.
+`extract_from_emails` (#1137), measurement cases for the experimental
+tools (#291), a real-model synthetic index, and token usage.
 
 ## What this harness does NOT do
 
