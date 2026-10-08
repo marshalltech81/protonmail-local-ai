@@ -376,6 +376,20 @@ class TestContextTokens:
     def test_small_window_starts(self, monkeypatch):
         assert self._run_main(monkeypatch, context=4096, max_tokens=1024)
 
+    @pytest.mark.parametrize("commit", ["abc1234", "abc1234-dirty", "unknown"])
+    def test_client_sees_application_version(self, monkeypatch, commit):
+        from fastmcp import Client
+
+        monkeypatch.setenv("GIT_COMMIT", commit)
+        [(server,)] = self._run_main(monkeypatch, context=4096, max_tokens=1024)
+
+        async def check():
+            async with Client(server) as client:
+                assert client.server_info.name == "protonmail-local-ai"
+                assert client.server_info.version == commit
+
+        asyncio.run(check())
+
     def test_window_is_not_checked_without_inference(self, monkeypatch, caplog):
         caplog.set_level(logging.INFO)
         assert self._run_main(monkeypatch, context=1, max_tokens=1024, mode="none")

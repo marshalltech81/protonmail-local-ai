@@ -1153,6 +1153,37 @@ Exhausting a keyword query does not establish exhaustive coverage of a
 topic. Consider alternate wording, read candidate messages, and keep the
 counting unit explicit (messages, threads, or distinct bills/items).
 
+**Multi-lane enumeration.** A call takes one AND of filters, so a
+broad question ("every message about a committee's finances and
+audits") is answered with several exact lanes and their union (#992):
+
+1. Lanes: one `subject` lane per subject term, one `text` lane per body
+   word set, one `participant` (or `sender`) lane per person or domain
+   involved. Every lane carries the same `folder`, date bounds and
+   other predicates the question has, so the union has one scope.
+   Count, disclose and page each lane as the paragraphs above describe.
+2. Union the rows by `claimant_id`, keeping the lane or lanes that
+   found each row.
+3. Report every row in one of three buckets, with its lane: relevant,
+   dropped, or unresolved. Any reading done to sort them follows the
+   disclosure and smallest-sample paragraphs above.
+
+`get_message` and `get_thread` return no attachment text; attachment
+passages come only through [`get_evidence`](#get_evidence), which
+ranks and caps a whole thread's passages. A missing passage therefore
+does not resolve a row, and a row with attachments whose body is not
+relevant stays unresolved, never dropped.
+
+The recipe supports this claim: the rows the lanes returned during the
+run, within their shared scope, subject to the snapshot caveat above.
+It does not show coverage of the topic: a message that uses none of
+the lane terms or participants, or mentions the topic only in an
+attachment (`text` searches bodies only), is not found, and nothing
+shows it is missing (see the keyword-coverage paragraph above and
+#776). Report the lanes, their counts, the union size and the three
+buckets, not "all messages about X". The bounded Boolean filter form
+(#1087) will replace the multi-call shape.
+
 For outstanding-item questions, look for completion, corrections and
 reopening across threads and senders. A sent request or delivered advice
 does not prove the action was completed. State the scope and disclose
@@ -2170,16 +2201,18 @@ earlier one is the model's reading of a passage that states the change.
 ## Group 4 — System
 
 ### `get_mailbox_status`
-Reports whether the local index is current and what it holds.
+Reports the deployed MCP server version, whether the local index is current,
+and what it holds. Call this when asked which version or build is running.
 **Call this first** before answering questions about email content.
 
 | Field | Meaning |
 |---|---|
+| `server_version` | MCP server image's source commit, including `-dirty` for local changes; `unknown` when build identity is unavailable. This identifies the server code, not the MCP protocol or SQLite schema version |
 | `current` | `true` only when all three hold: mbsync completed a sync within three sync intervals (never less than 5 minutes), the indexer reported within 10 minutes, and no message is pending or retrying. A sync or indexer timestamp more than 2 minutes ahead of the server clock also makes it `false` |
 | `not_current_reasons` | One line per failed condition; empty when `current` is `true` |
 | `last_sync_at` / `sync_interval_secs` | mbsync's last successful sync from Bridge, and how often it syncs |
 | `indexer_last_seen_at` | When the indexer last reported (at most every 30 s with its health heartbeat, including during the initial index) |
-| `queue` | `pending` (found, not yet failed), `retrying` (failed at least once, including jobs deferred during an embedder outage; will retry), `dead` (failed permanently and incompletely indexed: missing from search, or found only by keyword, until `make requeue-dead`) |
+| `queue` | `pending` (found, not yet failed), `retrying` (failed at least once, including jobs deferred during an embedder outage; will retry), `dead` (failed permanently and incompletely indexed: missing from search, or found only by keyword, until `make requeue-dead`), `reparse` (of the pending and retrying jobs, those re-reading a message already indexed after an upgrade, #1078: searchable meanwhile, but data the upgrade adds is missing until it runs) |
 | `total_threads`, `total_messages`, `oldest_message`, `newest_message` | What the index holds |
 | `conflicting_message_ids` | How many Message-IDs more than one indexed file claims (see "Message-ID and claimant ID" above); 0 when none |
 | `extra_claimant_files` | Files beyond the first claimant of each conflicting Message-ID (two Message-IDs with 2 and 3 claimants give 3) |

@@ -1,5 +1,9 @@
 """Deterministic graders: run first, and never overridden by the judge.
 
+Every tool is graded through its ``adapters.AnswerView`` (#656): the
+answer text, the threads searched, the cited labels, the tool's own
+citation check and the server's coverage note.
+
 Each check is ``pass``, ``fail`` or ``not_applicable``. Evidence groups
 are scored at three stages, so a miss can be traced to where it
 happened: *retrieved* (the ref's thread is among the threads the tool
@@ -136,7 +140,7 @@ def budget_omitted_facts(case: Case, run: CaseRun) -> list[str]:
     disclose; a fact retrieval never found is not among them."""
     if run.output is None:
         return []
-    retrieved = {t.thread_id for t in run.output.threads}
+    retrieved = {t.thread_id for t in run.view.threads}
     return [
         f.id
         for f in case.expected_facts
@@ -155,7 +159,7 @@ def grade_run(case: Case, run: CaseRun) -> DeterministicResult:
     result = DeterministicResult()
     if run.status != "ok" or run.output is None:
         return result
-    out = run.output
+    out = run.view
     answer = out.answer
     retrieved = {t.thread_id for t in out.threads}
     cited_labels = [c.label for c in out.citations]

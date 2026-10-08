@@ -90,6 +90,13 @@ filterwarnings = [
     # rather than blanket-ignoring DeprecationWarning so a future
     # deprecation in our own code still surfaces.
     "ignore:defusedxml.cElementTree is deprecated:DeprecationWarning",
+    # An unclosed sqlite3 connection (or file) fails the suite (#1110).
+    # Python ignores ResourceWarning by default, so the first line makes
+    # it raise; a leak the garbage collector finalizes then surfaces as an
+    # unraisable exception, which pytest reports only as a warning unless
+    # the second line makes that an error too.
+    "error::ResourceWarning",
+    "error::pytest.PytestUnraisableExceptionWarning",
 ]
 
 [tool.coverage.run]

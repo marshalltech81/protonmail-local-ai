@@ -16,7 +16,10 @@ set -Eeuo pipefail
 # version other than the pinned one and prints the install hint when
 # trivy is missing. `make trivy-images` runs the image gates alone
 # against a fake `docker` and fails, naming the image, when one is not
-# built. No Trivy install, no Docker and no network needed.
+# built, and warns, without failing, when an image's
+# org.opencontainers.image.revision label is missing or is not the
+# checkout's SOURCE_COMMIT, or the checkout is -dirty (#1103). No Trivy
+# install, no Docker and no network needed.
 #
 # Run: bash scripts/tests/trivy_flags_test.sh
 
@@ -167,13 +170,29 @@ chmod 755 "$WORK/bin/trivy"
 # lists the gated services' images under the project `fakeproj`, in
 # the reverse of docker.yml's order, so a hard-coded image name or a
 # name built from a parsed project name fails the test; `image
-# inspect` fails for the images listed in $FAKE_DOCKER_MISSING.
+# inspect` fails for the images listed in $FAKE_DOCKER_MISSING, and
+# with `--format` prints the image's revision label from
+# $FAKE_DOCKER_LABELS ("image=label" words; an empty line for an image
+# not listed, as docker prints for a missing label).
 cat >"$WORK/bin/docker" <<'EOF'
 #!/bin/bash
 set -Eeuo pipefail
 case "$1 $2 ${3:-}" in
     "compose config --images") printf '%s\n' "$FAKE_DOCKER_IMAGES" ;;
-    "image inspect "*) [[ " ${FAKE_DOCKER_MISSING:-} " == *" $3 "* ]] && exit 1; exit 0 ;;
+    "image inspect "*)
+        image="${!#}"
+        [[ " ${FAKE_DOCKER_MISSING:-} " == *" $image "* ]] && exit 1
+        if [[ "$3" == --format ]]; then
+            if [[ "$4" != *'"org.opencontainers.image.revision"'* ]]; then
+                printf 'fake docker: unexpected format: %s\n' "$4" >&2
+                exit 2
+            fi
+            for entry in ${FAKE_DOCKER_LABELS:-}; do
+                if [[ "${entry%%=*}" == "$image" ]]; then printf '%s' "${entry#*=}"; fi
+            done
+            printf '\n'
+        fi
+        exit 0 ;;
     *) printf 'fake docker: unexpected call: %s\n' "$*" >&2; exit 2 ;;
 esac
 EOF
@@ -183,6 +202,19 @@ for ((i = ${#GATE_SERVICES[@]} - 1; i >= 0; i--)); do
     FAKE_DOCKER_IMAGES+="${FAKE_DOCKER_IMAGES:+$'\n'}fakeproj-${GATE_SERVICES[$i]}"
 done
 FAKE_DOCKER_MISSING=""
+# The checkout's commit, set through the Makefile's GIT_COMMIT_OVERRIDE
+# so the test does not depend on the real checkout; every image is
+# labelled with it unless a check says otherwise.
+FAKE_SOURCE=abc1234
+# labels_all LABEL: every listed image carries revision LABEL.
+labels_all() {
+    local image
+    FAKE_DOCKER_LABELS=""
+    for image in $FAKE_DOCKER_IMAGES; do
+        FAKE_DOCKER_LABELS+="${FAKE_DOCKER_LABELS:+ }$image=$1"
+    done
+}
+labels_all "$FAKE_SOURCE"
 
 # run_make VERSION EXIT [TARGET]: runs `make TARGET` (trivy by default)
 # against the fake trivy, which reports VERSION and exits EXIT from
@@ -192,8 +224,9 @@ run_make() {
     : >"$WORK/calls"
     MAKE_STATUS=0
     PATH="$WORK/bin:$PATH" FAKE_DOCKER_IMAGES="$FAKE_DOCKER_IMAGES" FAKE_DOCKER_MISSING="$FAKE_DOCKER_MISSING" \
+        FAKE_DOCKER_LABELS="$FAKE_DOCKER_LABELS" \
         FAKE_TRIVY_LOG="$WORK/calls" FAKE_TRIVY_VERSION="${1#v}" FAKE_TRIVY_EXIT="$2" \
-        make -s -C "$ROOT" "${3:-trivy}" TRIVY="$WORK/bin/trivy" \
+        make -s -C "$ROOT" "${3:-trivy}" TRIVY="$WORK/bin/trivy" GIT_COMMIT_OVERRIDE="$FAKE_SOURCE" \
         >"$WORK/out" 2>"$WORK/err" || MAKE_STATUS=$?
 }
 
@@ -358,6 +391,66 @@ check "make trivy fails when an image is not built" "$ok"
 ok=false; [[ "$(wc -l <"$WORK/calls")" -eq "${#EXPECTED[@]}" ]] && ok=true
 check "make trivy still runs the fs scans when an image is not built" "$ok"
 FAKE_DOCKER_MISSING=""
+
+# --- the revision label (#1103) -------------------------------------------
+
+# revision_warnings: the revision-label warning lines of the last run.
+revision_warnings() {
+    grep '^warning: image .* revision' "$WORK/err" || true
+}
+# check_still_scans WHAT: a revision warning changes nothing else: make
+# trivy-images succeeds and every image gate runs.
+check_still_scans() {
+    ok=false; [[ "$MAKE_STATUS" -eq 0 ]] && ok=true
+    check "make trivy-images still succeeds with $1" "$ok"
+    ok=false; [[ "$(wc -l <"$WORK/calls")" -eq "${#GATES[@]}" ]] && ok=true
+    check "every image gate still runs with $1" "$ok"
+}
+
+# Every label matches the checkout: no warning.
+run_make "$VERSION" 0 trivy-images
+ok=false; [[ -z "$(revision_warnings)" ]] && ok=true
+check "no revision warning when every label matches the checkout" "$ok"
+
+# One image built from another commit: one warning naming the image and
+# both values; make trivy warns the same way.
+STALE="fakeproj-${GATE_SERVICES[0]}"
+FAKE_DOCKER_LABELS="${FAKE_DOCKER_LABELS/"$STALE=$FAKE_SOURCE"/"$STALE=0ld0ld0"}"
+run_make "$VERSION" 0 trivy-images
+check_still_scans "a stale image"
+ok=false; [[ "$(revision_warnings | wc -l)" -eq 1 ]] && ok=true
+check "one revision warning for one stale image" "$ok"
+ok=false; revision_warnings | grep -q "image $STALE .*0ld0ld0.*$FAKE_SOURCE" && ok=true
+check "the warning names the stale image, its label and the checkout" "$ok"
+run_make "$VERSION" 0
+ok=false; [[ "$(revision_warnings | wc -l)" -eq 1 ]] && ok=true
+check "make trivy warns about the stale image too" "$ok"
+ok=false; [[ "$MAKE_STATUS" -eq 0 && "$(wc -l <"$WORK/calls")" -eq "$TOTAL" ]] && ok=true
+check "make trivy still succeeds and runs every scan with a stale image" "$ok"
+
+# An image with no revision label: a warning that says so.
+labels_all "$FAKE_SOURCE"
+UNLABELLED="fakeproj-${GATE_SERVICES[1]}"
+FAKE_DOCKER_LABELS="${FAKE_DOCKER_LABELS/"$UNLABELLED=$FAKE_SOURCE"/}"
+run_make "$VERSION" 0 trivy-images
+check_still_scans "an unlabelled image"
+ok=false; [[ "$(revision_warnings | wc -l)" -eq 1 ]] && ok=true
+check "one revision warning for one unlabelled image" "$ok"
+ok=false; revision_warnings | grep -q "image $UNLABELLED .*no revision label.*$FAKE_SOURCE" && ok=true
+check "the warning names the unlabelled image and the checkout" "$ok"
+
+# A -dirty checkout: every image warns, even one labelled with the same
+# -dirty value, since the files may have changed since that build.
+FAKE_SOURCE=abc1234-dirty
+labels_all "$FAKE_SOURCE"
+run_make "$VERSION" 0 trivy-images
+check_still_scans "a dirty checkout"
+ok=false; [[ "$(revision_warnings | wc -l)" -eq "${#GATES[@]}" ]] && ok=true
+check "a dirty checkout warns once per image" "$ok"
+ok=false; revision_warnings | grep -q "image $STALE .*abc1234-dirty.*abc1234-dirty.*-dirty checkout" && ok=true
+check "the dirty warning names both values and says a -dirty checkout always differs" "$ok"
+FAKE_SOURCE=abc1234
+labels_all "$FAKE_SOURCE"
 
 if ((FAILURES > 0)); then
     printf '%d check(s) failed.\n' "$FAILURES" >&2

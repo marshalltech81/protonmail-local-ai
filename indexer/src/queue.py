@@ -97,6 +97,30 @@ REASON_INITIAL_SCAN = "initial_scan"
 REASON_RECOVERY = "recovery"
 REASON_RESCAN = "rescan"
 REASON_REEXTRACT = "reextract"
+# Re-read an already indexed message so a parser change that keeps chunk
+# IDs fills its per-message rows (#1078). Queued by ``REPARSE_ENQUEUE_SQL``.
+REASON_REPARSE = "reparse"
+
+# Queue every indexed source file for a reparse, in one statement. A
+# migration that adds parser-produced per-message data ends with this
+# statement verbatim, and ``make reparse`` (``src/reparse.py``) runs the
+# same text, so both share one contract (docs/architecture.md, "Reparse
+# in place"). ``ON CONFLICT DO NOTHING`` leaves every existing row as it
+# is: a pending or retrying job keeps its reason, attempts, error and due
+# time (the worker parses it in full anyway), and a dead-lettered job
+# stays dead until ``make requeue-dead``. ``WHERE true`` is SQLite's
+# required disambiguation for an upsert on ``INSERT ... SELECT``. The
+# timestamp has the shape ``datetime.isoformat()`` gives in UTC, so it
+# sorts and parses with the rows Python writes.
+REPARSE_ENQUEUE_SQL = """\
+INSERT INTO indexing_jobs
+    (filepath, reason, status, attempts, created_at, updated_at, next_attempt_at)
+SELECT filepath, 'reparse', 'queued', 0,
+       strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'),
+       strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'),
+       strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+FROM indexed_files WHERE true
+ON CONFLICT(filepath) DO NOTHING;"""
 
 # Stages ``defer`` is called with. The queue heartbeat counts deferrals
 # per stage, and tells permission deferrals and parked trashed files
@@ -202,6 +226,10 @@ class IndexingQueue:
         self._lock = threading.Lock()
         # ``defer`` calls per stage since the last heartbeat (#874).
         self._deferrals: Counter[str] = Counter()
+        # A batch of one goes to a reparse row next, when both classes are
+        # due (#1142). In memory only: a restart starting with a
+        # foreground row costs the reparse one turn.
+        self._reparse_turn = False
 
     # ----- writes --------------------------------------------------------
 
@@ -229,6 +257,12 @@ class IndexingQueue:
             due_iso=due_at.isoformat() if due_at is not None else None,
         )
 
+    def enqueue_reparse(self) -> int:
+        """Queue every indexed file for a reparse (``REPARSE_ENQUEUE_SQL``)
+        and return how many jobs were added; files that already have a
+        job keep it. ``make reparse`` calls this."""
+        return self.db.queue_enqueue_reparse()
+
     def redate_untried(self, filepath: str, due_at: datetime) -> None:
         """Move a queued row that has never been tried to ``due_at``, as
         ``enqueue(due_at=)`` would have placed it (#699). A row with an
@@ -237,17 +271,28 @@ class IndexingQueue:
         self.db.queue_redate_untried(filepath=filepath, due_iso=due_at.isoformat())
 
     def claim_batch(self, limit: int) -> list[sqlite3.Row]:
-        """Return up to ``limit`` distinct oldest-due queued rows.
+        """Return up to ``limit`` distinct due queued rows, foreground
+        first with one slot kept for a reparse row while both are due
+        (``Database.queue_fetch_due_batch``, #1142).
 
-        Fetches a snapshot of N rows in one query — so the batched
+        Fetches N distinct rows under one lock — so the batched
         initial indexer's gather phase can pick up distinct messages
         without re-claiming the same row before marking it succeeded.
         Rows stay in 'queued' state; the caller must mark each one
         (succeeded / failed / skipped) by the end of the batch or they
         will be returned again on the next call. Claiming charges no
         attempt; only ``begin_attempt`` does.
+
+        A batch of one has no second slot to keep, so the two classes
+        take turns while both are due: after a foreground row the next
+        claim prefers a reparse row, and the other way round.
         """
-        return self.db.queue_fetch_due_batch(STATUS_QUEUED, _now_iso(), limit)
+        rows = self.db.queue_fetch_due_batch(
+            STATUS_QUEUED, _now_iso(), limit, reparse_turn=self._reparse_turn
+        )
+        if limit == 1 and rows:
+            self._reparse_turn = rows[0]["reason"] != REASON_REPARSE
+        return rows
 
     def begin_attempt(self, filepath: str) -> bool:
         """Charge one attempt to ``filepath`` before running one of its
@@ -531,7 +576,9 @@ class IndexingQueue:
         ``parked_trashed`` rows are trashed files waiting to be reaped;
         ``retrying`` is every other queued row (failures, including a
         permission error past its deferral window, embedder deferrals,
-        a row interrupted mid-step). ``oldest_due_age``
+        a row interrupted mid-step). ``reparse`` counts the queued rows,
+        in any of those buckets, whose reason is ``reparse`` and
+        ``reparse_dead`` the dead ones (#1078). ``oldest_due_age``
         is how long, in seconds, the longest-waiting due row has been due
         (0 when none is due): it grows while draining is stalled.
         """
@@ -541,6 +588,7 @@ class IndexingQueue:
             permission_stage=STAGE_PARSE,
             permission_deferred_error=PERMISSION_DEFERRED_ERROR,
             trashed_stage=STAGE_TRASHED,
+            reparse_reason=REASON_REPARSE,
         )
         age = 0
         if oldest_due is not None:
@@ -552,6 +600,8 @@ class IndexingQueue:
             "parked_trashed": counts.get("parked_trashed", 0),
             "dead": counts.get("dead", 0),
             "oldest_due_age": age,
+            "reparse": counts["reparse"],
+            "reparse_dead": counts["reparse_dead"],
         }
 
 

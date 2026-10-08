@@ -108,6 +108,15 @@ class TestNotCurrentReasons:
         reasons = _reasons(queue=QueueCounts(pending=3, retrying=2, dead=1))
         assert reasons == ["5 messages waiting to be indexed (3 pending, 2 retrying)"]
 
+    def test_a_reparse_backlog_is_named(self):
+        """A reparse (#1078) re-reads mail already indexed: the reason
+        says so, rather than reading as missing mail."""
+        reasons = _reasons(queue=QueueCounts(pending=3, retrying=2, dead=1, reparse=4))
+        assert reasons == [
+            "5 messages waiting to be indexed (3 pending, 2 retrying; "
+            "4 of them already indexed and being reparsed)"
+        ]
+
 
 class TestGetMailboxStatusStandalone:
     def test_returns_real_status_from_populated_index(self, seeded_db, monkeypatch):
@@ -118,12 +127,14 @@ class TestGetMailboxStatusStandalone:
             indexer_seen_at=datetime.now(UTC).isoformat(),
         )
         monkeypatch.setenv("SQLITE_PATH", seeded_db.path)
+        monkeypatch.setenv("GIT_COMMIT", "abc1234-dirty")
         status = get_mailbox_status()
         assert status["status"] == "ok"
+        assert status["server_version"] == "abc1234-dirty"
         assert status["current"] is True
         assert status["total_threads"] == 3
         assert status["total_messages"] == 3
-        assert status["queue"] == {"pending": 0, "retrying": 0, "dead": 0}
+        assert status["queue"] == {"pending": 0, "retrying": 0, "dead": 0, "reparse": 0}
         assert "checked_at" in status
 
     def test_empty_index_is_not_current(self, empty_db, monkeypatch):

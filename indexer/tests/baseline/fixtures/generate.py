@@ -1,6 +1,6 @@
-"""Regenerate the baseline's OCR fixtures (#908).
+"""Regenerate the baseline's OCR fixtures (#908, #1113).
 
-Two synthetic images of text, rendered with Pillow's bundled font so
+Three synthetic images of text, rendered with Pillow's bundled font so
 the recipe needs no system font:
 
 - ``chalkboard.png`` (t90): one line, the corpus's ``OCR_IMAGE_TEXT``,
@@ -8,15 +8,24 @@ the recipe needs no system font:
 - ``scanned-notes.pdf`` (t91): one such line per page, the corpus's
   ``OCR_PDF_PAGES``, each page an 8-bit grey image with no text layer,
   so the PDF extractor OCRs every page and the build's lowered page cap
-  drops the last.
+  drops the last;
+- ``headland-fax.tiff`` (t92, #1113): one such line per frame, the
+  corpus's ``OCR_TIFF_FRAMES``, a multipage TIFF the image OCR
+  extractor reads frame by frame up to the same page cap, so the last
+  frame is left unread and the extractor logs the cap (#885).
 
 The PDF is written by hand (an image XObject per page, Flate compressed,
 a cross-reference table with the real offsets): Pillow's PDF writer
 stamps a title and creation and modification dates into an ``/Info``
 dictionary, and a committed fixture must carry no such metadata
 (``AGENTS.md``). The PNG is Pillow's, which writes no text chunks. The
-corpus attaches the committed bytes, so regenerating (a Pillow or zlib
-change can move bytes) changes nothing until the files are committed.
+TIFF is Pillow's ``save_all`` with Deflate compression (the raw frames
+would be 480 KB, past the build's lowered attachment byte cap; deflated
+they are 15 KB), which writes only the structural tags of each frame
+and no ASCII tag (no Software, DateTime, Artist or ImageDescription).
+The corpus attaches the committed bytes, so regenerating (a Pillow or
+zlib change can move bytes) changes nothing until the files are
+committed.
 
 Usage, from ``indexer/``:
 
@@ -52,6 +61,8 @@ OCR_IMAGE_FILENAME: str = _corpus_constant("OCR_IMAGE_FILENAME")
 OCR_IMAGE_TEXT: str = _corpus_constant("OCR_IMAGE_TEXT")
 OCR_CAPPED_PDF_FILENAME: str = _corpus_constant("OCR_CAPPED_PDF_FILENAME")
 OCR_PDF_PAGES: tuple[str, ...] = _corpus_constant("OCR_PDF_PAGES")
+OCR_CAPPED_TIFF_FILENAME: str = _corpus_constant("OCR_CAPPED_TIFF_FILENAME")
+OCR_TIFF_FRAMES: tuple[str, ...] = _corpus_constant("OCR_TIFF_FRAMES")
 
 
 def _render(text: str) -> Image.Image:
@@ -104,13 +115,16 @@ def _image_pdf(pages: list[Image.Image]) -> bytes:
     return out
 
 
-def write(out_dir: Path) -> tuple[Path, Path]:
-    """Write both images under ``out_dir``; return their paths."""
+def write(out_dir: Path) -> tuple[Path, Path, Path]:
+    """Write the three images under ``out_dir``; return their paths."""
     image, pdf = out_dir / OCR_IMAGE_FILENAME, out_dir / OCR_CAPPED_PDF_FILENAME
+    tiff = out_dir / OCR_CAPPED_TIFF_FILENAME
     _render(OCR_IMAGE_TEXT).save(image, "PNG")
     pdf.write_bytes(_image_pdf([_render(line) for line in OCR_PDF_PAGES]))
-    return image, pdf
+    first, *rest = [_render(line) for line in OCR_TIFF_FRAMES]
+    first.save(tiff, "TIFF", save_all=True, append_images=rest, compression="tiff_adobe_deflate")
+    return image, pdf, tiff
 
 
 if __name__ == "__main__":
-    print("wrote {} and {}".format(*write(_HERE)))
+    print("wrote {}, {} and {}".format(*write(_HERE)))

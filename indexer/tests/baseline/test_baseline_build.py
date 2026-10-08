@@ -22,7 +22,7 @@ from PIL import Image
 from src.database import EMBEDDING_DIM, Database
 from src.extractors import EXTRACTOR_VERSIONS, _resolve_extractor
 
-from tests.baseline.build import OCR_BINARIES, build, check_capped_attachments
+from tests.baseline.build import OCR_BINARIES, build, case_queries, check_capped_attachments
 from tests.baseline.corpus import (
     _FIXTURES,
     CAPPED_ATTACHMENT_MAX_BYTES,
@@ -30,9 +30,11 @@ from tests.baseline.corpus import (
     CAPPED_OCR_MAX_PAGES,
     CHAR_CAPPED_FILENAME,
     OCR_CAPPED_PDF_FILENAME,
+    OCR_CAPPED_TIFF_FILENAME,
     OCR_IMAGE_FILENAME,
     OCR_IMAGE_TEXT,
     OCR_PDF_PAGES,
+    OCR_TIFF_FRAMES,
     THREADS,
     TOO_LARGE_FILENAME,
     _docx,
@@ -45,7 +47,7 @@ from tests.baseline.hash_embedder import HashEmbedder, embed_text
 
 _GOLDEN = Path(__file__).parents[3] / "mcp-server" / "tests" / "baseline" / "golden.json"
 
-# The build runs OCR on t90 and t91 (#908), so off CI the tests that
+# The build runs OCR on t90-t92 (#908, #1113), so off CI the tests that
 # build skip without Tesseract and Poppler, as the catdoc tests do
 # (``test_legacy_office.py``); CI installs both, and
 # ``test_ocr_binaries_are_installed_in_ci`` fails there if one is missing.
@@ -100,10 +102,34 @@ def test_ocr_binaries_cover_the_executables_the_ocr_path_starts():
     assert started - excluded == set(OCR_BINARIES)
 
 
+# The TIFF tags Pillow's ``save_all`` writes for an 8-bit grey frame:
+# geometry, sample layout, compression and strip placement. Any other
+# tag, and any ASCII tag at all (Software 305, DateTime 306, Artist 315,
+# ImageDescription 270, Make 271, Model 272, HostComputer 316), would be
+# metadata the fixture must not carry.
+_TIFF_STRUCTURAL_TAGS = {256, 257, 258, 259, 262, 273, 278, 279, 284}
+_TIFF_ASCII_TYPE = 2
+
+
+def _tiff_frames(raw: bytes) -> list[dict[int, int]]:
+    """Each frame's tag number -> TIFF type, seeking frame by frame."""
+    frames = []
+    with Image.open(io.BytesIO(raw)) as image:
+        assert image.format == "TIFF"
+        while True:
+            frames.append({tag: image.tag_v2.tagtype[tag] for tag in image.tag_v2})
+            try:
+                image.seek(len(frames))
+            except EOFError:
+                return frames
+
+
 def test_ocr_fixtures_carry_no_metadata():
-    """#908: the committed images name no author or tool: the PNG has
-    only its header, data and end chunks, and the PDF has no Info
-    dictionary, no text layer and ``OCR_PDF_PAGES`` pages."""
+    """#908, #1113: the committed images name no author or tool: the PNG
+    has only its header, data and end chunks, the PDF has no Info
+    dictionary, no text layer and ``OCR_PDF_PAGES`` pages, and every
+    frame of the TIFF carries only structural tags (no ASCII tag) and
+    there are ``OCR_TIFF_FRAMES`` of them."""
     png = (_FIXTURES / OCR_IMAGE_FILENAME).read_bytes()
     chunks, offset = [], 8
     while offset < len(png):
@@ -117,6 +143,11 @@ def test_ocr_fixtures_carry_no_metadata():
     assert reader.metadata is None
     assert [page.extract_text() for page in reader.pages] == [""] * len(OCR_PDF_PAGES)
     assert len(OCR_PDF_PAGES) == CAPPED_OCR_MAX_PAGES + 1
+    frames = _tiff_frames((_FIXTURES / OCR_CAPPED_TIFF_FILENAME).read_bytes())
+    assert len(frames) == len(OCR_TIFF_FRAMES) == CAPPED_OCR_MAX_PAGES + 1
+    for tags in frames:
+        assert set(tags) <= _TIFF_STRUCTURAL_TAGS, sorted(set(tags) - _TIFF_STRUCTURAL_TAGS)
+        assert _TIFF_ASCII_TYPE not in tags.values()
 
 
 def test_generator_reads_the_corpus_text_from_its_source():
@@ -137,16 +168,31 @@ def test_generator_reads_the_corpus_text_from_its_source():
         generate.OCR_IMAGE_TEXT,
         generate.OCR_CAPPED_PDF_FILENAME,
         generate.OCR_PDF_PAGES,
-    ) == (OCR_IMAGE_FILENAME, OCR_IMAGE_TEXT, OCR_CAPPED_PDF_FILENAME, OCR_PDF_PAGES)
+        generate.OCR_CAPPED_TIFF_FILENAME,
+        generate.OCR_TIFF_FRAMES,
+    ) == (
+        OCR_IMAGE_FILENAME,
+        OCR_IMAGE_TEXT,
+        OCR_CAPPED_PDF_FILENAME,
+        OCR_PDF_PAGES,
+        OCR_CAPPED_TIFF_FILENAME,
+        OCR_TIFF_FRAMES,
+    )
     with pytest.raises(LookupError, match="NOT_A_CORPUS_CONSTANT"):
         generate._corpus_constant("NOT_A_CORPUS_CONSTANT")
 
 
-def test_generator_writes_both_images(tmp_path):
-    """The recipe writes a grey PNG of the fixture size and a PDF with
-    one image page per line, no text layer and no Info dictionary."""
-    png, pdf = generate.write(tmp_path)
-    assert (png.name, pdf.name) == (OCR_IMAGE_FILENAME, OCR_CAPPED_PDF_FILENAME)
+def test_generator_writes_the_three_images(tmp_path):
+    """The recipe writes a grey PNG of the fixture size, a PDF with one
+    image page per line, no text layer and no Info dictionary, and a
+    TIFF with one grey frame of the fixture size per line, every frame
+    carrying only structural tags (#1113)."""
+    png, pdf, tiff = generate.write(tmp_path)
+    assert (png.name, pdf.name, tiff.name) == (
+        OCR_IMAGE_FILENAME,
+        OCR_CAPPED_PDF_FILENAME,
+        OCR_CAPPED_TIFF_FILENAME,
+    )
     with Image.open(png) as image:
         assert (image.format, image.mode, image.size) == ("PNG", "L", generate._SIZE)
     raw = pdf.read_bytes()
@@ -154,6 +200,15 @@ def test_generator_writes_both_images(tmp_path):
     reader = pypdf.PdfReader(io.BytesIO(raw))
     assert reader.metadata is None
     assert [page.extract_text() for page in reader.pages] == [""] * len(OCR_PDF_PAGES)
+    frames = _tiff_frames(tiff.read_bytes())
+    assert len(frames) == len(OCR_TIFF_FRAMES)
+    assert all(set(tags) <= _TIFF_STRUCTURAL_TAGS for tags in frames)
+    assert all(_TIFF_ASCII_TYPE not in tags.values() for tags in frames)
+    with Image.open(tiff) as image:
+        assert (image.mode, image.size) == ("L", generate._SIZE)
+    # Deflated: the raw frames would be past the build's lowered
+    # attachment byte cap and t92 would index as ``too_large``.
+    assert tiff.stat().st_size < CAPPED_ATTACHMENT_MAX_BYTES
 
 
 def _read_tree(root: Path) -> dict[str, bytes]:
@@ -221,11 +276,34 @@ class TestBuild:
             golden["evidence_queries"]
         )
 
+    def test_case_queries_are_what_each_tool_embeds(self):
+        """#656: an ask_mailbox question is embedded; a summarize_thread
+        case (a thread ID lookup) is not."""
+        cases = {
+            "cases": [
+                {"tool": "ask_mailbox", "arguments": {"question": "Synthetic question?"}},
+                {
+                    "tool": "summarize_thread",
+                    "arguments": {"thread_id": "t05.1@baseline.example", "style": "brief"},
+                },
+            ]
+        }
+        assert case_queries(cases) == {"Synthetic question?"}
+
     @requires_ocr
     def test_embeds_answer_eval_case_questions(self, tmp_path):
         cases = tmp_path / "cases.json"
         question = "Synthetic question about the roof?"
-        cases.write_text(json.dumps({"cases": [{"arguments": {"question": question}}]}))
+        cases.write_text(
+            json.dumps(
+                {
+                    "cases": [
+                        {"arguments": {"question": question}},
+                        {"arguments": {"thread_id": "t05.1@baseline.example"}},
+                    ]
+                }
+            )
+        )
         out = tmp_path / "out"
         build(out, _GOLDEN, cases)
 
@@ -445,12 +523,15 @@ class TestBuild:
 
     @requires_ocr
     def test_ocr_shapes_extract_as_documented(self, tmp_path, caplog):
-        """#908: t90's PNG is read by the image OCR extractor, and t91's
-        scanned PDF by the PDF extractor's OCR fallback up to the build's
-        lowered page cap: its first pages are extracted and the last is
-        not, with one ``pdf OCR capped`` WARNING and the aggregate
-        counts. OCR'd words are matched case-insensitively with
-        whitespace normalised, since Tesseract versions differ."""
+        """#908, #1113: t90's PNG is read by the image OCR extractor,
+        t91's scanned PDF by the PDF extractor's OCR fallback up to the
+        build's lowered page cap, and t92's multipage TIFF by the image
+        OCR extractor frame by frame up to the same cap: the first pages
+        and frames are extracted and the last of each is not, with one
+        ``pdf OCR capped`` and one ``image OCR capped`` WARNING (#885),
+        in indexing order, and the aggregate counts. OCR'd words are
+        matched case-insensitively with whitespace normalised, since
+        Tesseract versions differ."""
         out = tmp_path / "out"
         with caplog.at_level(logging.INFO, logger="indexer"):
             build(out, _GOLDEN)
@@ -460,11 +541,17 @@ class TestBuild:
             (
                 logging.WARNING,
                 f"pdf OCR capped at {CAPPED_OCR_MAX_PAGES} of {len(OCR_PDF_PAGES)} scanned pages",
-            )
+            ),
+            (
+                logging.WARNING,
+                f"image OCR capped at {CAPPED_OCR_MAX_PAGES} of at least"
+                f" {CAPPED_OCR_MAX_PAGES + 1} frames",
+            ),
         ]
         assert _aggregate(caplog, "ocr_capped_pdfs") == 1
         assert _aggregate(caplog, "ocr_pages_skipped") == len(OCR_PDF_PAGES) - CAPPED_OCR_MAX_PAGES
-        for line in (OCR_IMAGE_TEXT, *OCR_PDF_PAGES):
+        assert _aggregate(caplog, "ocr_capped_images") == 1
+        for line in (OCR_IMAGE_TEXT, *OCR_PDF_PAGES, *OCR_TIFF_FRAMES):
             assert _norm(line).split()[0] not in caplog.text.casefold()
 
         db = Database(out / "mail.db")
@@ -473,12 +560,12 @@ class TestBuild:
                 "SELECT a.filename, a.content_type, e.extraction_status, e.extractor,"
                 " e.extracted_text"
                 " FROM attachments a JOIN attachment_extractions e USING (attachment_id)"
-                " WHERE a.thread_id IN (?, ?) ORDER BY a.thread_id",
-                (thread_id(90), thread_id(91)),
+                " WHERE a.thread_id IN (?, ?, ?) ORDER BY a.thread_id",
+                (thread_id(90), thread_id(91), thread_id(92)),
             ).fetchall()
         finally:
             db.close()
-        image, scan = rows
+        image, scan, fax = rows
         assert image[:4] == (
             OCR_IMAGE_FILENAME,
             "image/png",
@@ -495,6 +582,16 @@ class TestBuild:
         read, (lost,) = OCR_PDF_PAGES[:CAPPED_OCR_MAX_PAGES], OCR_PDF_PAGES[CAPPED_OCR_MAX_PAGES:]
         assert all(_norm(page) in _norm(scan[4]) for page in read)
         assert _norm(lost).split()[0] not in _norm(scan[4])
+        assert fax[:4] == (
+            OCR_CAPPED_TIFF_FILENAME,
+            "image/tiff",
+            "success",
+            f"image-ocr@{EXTRACTOR_VERSIONS['image']}",
+        )
+        read_frames = OCR_TIFF_FRAMES[:CAPPED_OCR_MAX_PAGES]
+        (lost_frame,) = OCR_TIFF_FRAMES[CAPPED_OCR_MAX_PAGES:]
+        assert all(_norm(frame) in _norm(fax[4]) for frame in read_frames)
+        assert _norm(lost_frame).split()[0] not in _norm(fax[4])
 
     def test_refuses_non_empty_output_dir(self, tmp_path):
         (tmp_path / "leftover").write_text("x")

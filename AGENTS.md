@@ -871,7 +871,10 @@ Notes:
   `make trivy-images` runs these alone). The image gates need the
   images `make build` last produced, named as `docker compose build`
   names them, and fail naming the image when one is not built; rebuild
-  first, since they scan the image, not the checkout. The flag values
+  first, since they scan the image, not the checkout (they warn, without
+  failing, when an image's `org.opencontainers.image.revision` label is
+  missing or differs from the checkout's commit, and always on a
+  `-dirty` checkout, #1103). The flag values
   live in the Makefile and the workflows; `make test-trivy-flags` (part
   of `make test`, no Trivy or Docker needed) fails when they differ, so
   a change to one is made in both.
@@ -922,10 +925,10 @@ Notes:
 - MCP search changes should verify hybrid/RRF behavior where applicable
 - mbsync entrypoint changes should update `mbsync/tests/entrypoint_test.sh`, which loads the real functions with external commands mocked; changes to mbsync's TLS or connection settings should also pass `make test-mbsync-tls` (the shipped image against a synthetic implicit-TLS server)
 - changes to `mbsync/mbsyncrc.template` should pass `make test-mbsync-layout` (the shipped image's isync against synthetic Maildir stores: folder layout, and spurious and genuine UIDVALIDITY changes with the documented recovery)
-- a base-image digest bump in `indexer/Dockerfile` or `mcp-server/Dockerfile` (Dependabot's or by hand) moves `PYTHON_IMAGE` in `mbsync/tests/tls_check.sh` with it; `scripts/tests/image_pin_test.sh` (`make test-image-pins`, also in CI) fails while the three differ, since Dependabot does not update the script
+- a base-image digest bump in `indexer/Dockerfile` or `mcp-server/Dockerfile` (Dependabot's or by hand) moves `PYTHON_IMAGE` in `mbsync/tests/tls_check.sh` with it; `scripts/tests/image_pin_test.sh` (`make test-image-pins`, also in CI) fails while the three differ, since Dependabot does not update the script. The same test fails while `.github/workflows/docker.yml` and `.github/workflows/tests.yml` pass `docker/setup-buildx-action` different `driver-opts: image=moby/buildkit:...` references (#1122): Dependabot does not track a driver option, so a BuildKit bump moves both by hand, together
 - Compose changes that touch service selection, dependencies, hardening or ports should keep `scripts/tests/compose_test.sh` passing; it also checks the required hardening on the merged config of every overlay combination the Makefile uses, and that every base service starts with no profile active, so a new overlay, combination or profile-activating target is added to its list
 - indexing, chunking, embedding-storage, or retrieval changes should pass `make baseline`; if ranking changes on purpose, regenerate the snapshot with `make baseline UPDATE=1` and explain the snapshot diff in the PR
-- `ask_mailbox` prompt or answer-path changes can be compared with the opt-in `make eval-answers` / `make eval-answers-compare` (synthetic corpus only, calls the configured `INFERENCE_*` and `JUDGE_*` providers, never in CI; see `mcp-server/tests/eval/README.md`)
+- `ask_mailbox` or `summarize_thread` prompt or answer-path changes can be compared with the opt-in `make eval-answers` / `make eval-answers-compare` (synthetic corpus only, calls the configured `INFERENCE_*` and `JUDGE_*` providers, never in CI; see `mcp-server/tests/eval/README.md`)
 - before opening PRs that touch TLS, auth, logging, subprocess execution, or credential handling, run `bandit -r src/` and resolve any findings rated medium or higher (a CI job in `.github/workflows/security.yml` enforces this at medium+ severity for both services)
 
 Run tests with:

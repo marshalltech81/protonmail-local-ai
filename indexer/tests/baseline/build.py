@@ -13,9 +13,10 @@ Usage, from ``indexer/``:
     uv run python -m tests.baseline.build <out_dir> <golden.json> [<cases.json>]
 
 ``cases.json`` (optional) is the answer-quality evaluation's case file
-(``mcp-server/tests/answer_eval/cases.json``); each case's
-``arguments.question`` gets a query vector too, so the evaluation can
-run ``ask_mailbox`` against this index.
+(``mcp-server/tests/answer_eval/cases.json``); the text each case's
+tool embeds (``case_queries``: an ``ask_mailbox`` question; a
+``summarize_thread`` case looks its thread up by ID and embeds nothing) gets a query vector too, so the
+evaluation can run the tools against this index.
 
 The build lowers two attachment caps so the capped-attachment shapes
 (t88, t89, #907) fit in small fixtures: ``INDEXER_ATTACHMENT_MAX_BYTES``
@@ -26,13 +27,14 @@ The baseline's capped results are therefore not production behaviour.
 ``check_capped_attachments`` fails the build if any other attachment is
 cut by them.
 
-The OCR shapes (t90, t91, #908) run Tesseract and Poppler, so the build
-needs ``tesseract``, ``pdftoppm`` and ``pdfinfo`` on ``PATH`` (macOS:
-``brew install tesseract poppler``) and fails naming the missing one, rather than
-recording the shapes as failed or OCR-disabled. It forces OCR on
-(``INDEXER_OCR_ENABLED``) and lowers ``INDEXER_OCR_MAX_PAGES`` to
-``CAPPED_OCR_MAX_PAGES`` (2; production default 20), so t91's
-three-page scan has a page past the cap.
+The OCR shapes (t90-t92, #908, #1113) run Tesseract and Poppler, so the
+build needs ``tesseract``, ``pdftoppm`` and ``pdfinfo`` on ``PATH``
+(macOS: ``brew install tesseract poppler``) and fails naming the missing
+one, rather than recording the shapes as failed or OCR-disabled. It
+forces OCR on (``INDEXER_OCR_ENABLED``) and lowers
+``INDEXER_OCR_MAX_PAGES`` to ``CAPPED_OCR_MAX_PAGES`` (2; production
+default 20), so t91's three-page scan has a page past the cap and t92's
+three-frame TIFF a frame past it.
 """
 
 import json
@@ -70,11 +72,11 @@ OCR_BINARIES = ("tesseract", "pdftoppm", "pdfinfo")
 def require_ocr_binaries() -> None:
     """Raise ``RuntimeError`` naming the first OCR binary missing from
     ``PATH``, so a build without it fails up front instead of recording
-    t90 and t91 as failed extractions."""
+    t90-t92 as failed extractions."""
     for binary in OCR_BINARIES:
         if shutil.which(binary) is None:
             raise RuntimeError(
-                f"the baseline's OCR shapes (t90, t91) need {binary} on PATH; install"
+                f"the baseline's OCR shapes (t90-t92) need {binary} on PATH; install"
                 " Tesseract and Poppler (macOS: brew install tesseract poppler;"
                 " Debian/Ubuntu: apt-get install tesseract-ocr poppler-utils)"
             )
@@ -118,12 +120,24 @@ def check_capped_attachments(db_path: Path) -> None:
         )
 
 
+def case_queries(cases: dict) -> set[str]:
+    """The text each answer-evaluation case's tool embeds for retrieval:
+    ``arguments.question`` (``ask_mailbox``). A ``summarize_thread``
+    case names its thread by ID and embeds nothing, so it contributes no
+    query."""
+    return {
+        case["arguments"]["question"]
+        for case in cases["cases"]
+        if isinstance(case["arguments"].get("question"), str)
+    }
+
+
 def build(out_dir: Path, golden_path: Path, cases_path: Path | None = None) -> dict[str, int]:
     """Build ``out_dir/mail.db`` and ``out_dir/query_vectors.json``.
 
     The query vectors cover the golden search queries and evidence
-    queries and, with ``cases_path``, every answer-evaluation case's
-    question.
+    queries and, with ``cases_path``, the text every answer-evaluation
+    case embeds (``case_queries``).
 
     Returns the indexing queue's final status counts. Raises
     ``RuntimeError`` if any message failed to index, so a broken corpus
@@ -149,7 +163,8 @@ def build(out_dir: Path, golden_path: Path, cases_path: Path | None = None) -> d
                 main, "INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS", CAPPED_ATTACHMENT_MAX_CHARS
             ),
             # OCR on whatever the environment says, and t91's scan one
-            # page past the cap (#908).
+            # page past the cap (#908) and t92's TIFF one frame past it
+            # (#1113).
             patch.object(main, "INDEXER_OCR_ENABLED", True),
             patch.object(main, "INDEXER_OCR_MAX_PAGES", CAPPED_OCR_MAX_PAGES),
         ):
@@ -167,8 +182,7 @@ def build(out_dir: Path, golden_path: Path, cases_path: Path | None = None) -> d
     # reachability checks make (#798); they rank nothing in the snapshot.
     queries = {q["query"] for q in golden["search"]} | set(golden.get("evidence_queries", []))
     if cases_path is not None:
-        cases = json.loads(cases_path.read_text(encoding="utf-8"))
-        queries |= {c["arguments"]["question"] for c in cases["cases"]}
+        queries |= case_queries(json.loads(cases_path.read_text(encoding="utf-8")))
     (out_dir / "query_vectors.json").write_text(
         json.dumps({q: embed_text(q) for q in sorted(queries)}), encoding="utf-8"
     )

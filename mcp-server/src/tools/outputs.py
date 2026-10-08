@@ -706,9 +706,19 @@ class QueueCounts(_Output):
         description="Messages that failed permanently and are incompletely indexed: "
         "missing from search, or found only by keyword, until an operator requeues them."
     )
+    reparse: int = Field(
+        default=0,
+        description="Of the pending and retrying messages, those already indexed and being "
+        "read again after an upgrade (a reparse): search finds them meanwhile, but data the "
+        "upgrade adds is missing until the reparse finishes.",
+    )
 
 
 class MailboxStatusOutput(_Output):
+    server_version: str = Field(
+        description="MCP server's deployed source commit, with -dirty for local changes; "
+        "unknown when build identity is unavailable. Not the MCP protocol or database schema version."
+    )
     current: bool = Field(
         description="True only when mail synced from Proton recently, the indexer is "
         "running, and no message is waiting to be indexed. Mail that reached Proton "

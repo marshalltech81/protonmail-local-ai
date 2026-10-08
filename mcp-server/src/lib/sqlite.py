@@ -3349,7 +3349,9 @@ class Database:
         deferred during an embedder outage keeps ``attempts = 0`` but
         records its failure class, so the class marks it as retrying; a
         dead job requeued by ``make requeue-dead`` clears both and is
-        pending again.
+        pending again. ``reparse`` counts the pending and retrying jobs
+        that re-read an already indexed message (reason ``reparse``,
+        #1078), so a reparse backlog reads as such.
 
         Message-ID conflicts (#455) are counts only: how many Message-IDs
         more than one file claims, and how many files beyond the first
@@ -3370,11 +3372,17 @@ class Database:
                 SELECT
                     COALESCE(SUM(status = 'queued' AND NOT (attempts > 0 OR last_error_class IS NOT NULL)), 0),
                     COALESCE(SUM(status = 'queued' AND (attempts > 0 OR last_error_class IS NOT NULL)), 0),
-                    COALESCE(SUM(status = 'dead'), 0)
+                    COALESCE(SUM(status = 'dead'), 0),
+                    COALESCE(SUM(status = 'queued' AND reason = 'reparse'), 0)
                 FROM indexing_jobs
                 """
             ).fetchone()
-            stats["queue"] = {"pending": queue[0], "retrying": queue[1], "dead": queue[2]}
+            stats["queue"] = {
+                "pending": queue[0],
+                "retrying": queue[1],
+                "dead": queue[2],
+                "reparse": queue[3],
+            }
             state = conn.execute(
                 "SELECT sync_completed_at, sync_interval_secs, indexer_seen_at FROM ingestion_state"
             ).fetchone()

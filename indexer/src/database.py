@@ -33,6 +33,7 @@ from .extractors import (
     SCANNED_PDF_OCR_DISABLED_ERROR,
 )
 from .maildir import message_state
+from .queue import REASON_REPARSE, REPARSE_ENQUEUE_SQL
 from .threader import (
     FTS_SUBJECT_SCAN_CHARS,
     FTS_SUBJECT_SCAN_ROWS,
@@ -2168,25 +2169,51 @@ class Database:
         self._conn.commit()
 
     @_synchronized
-    def queue_fetch_due_batch(self, status: str, now_iso: str, limit: int) -> list[sqlite3.Row]:
-        """Return up to ``limit`` due ``status`` rows ordered by oldest-due first.
+    def queue_enqueue_reparse(self) -> int:
+        """Run ``REPARSE_ENQUEUE_SQL`` (the statement a migration ends
+        with) and return how many jobs it queued."""
+        cur = self._conn.execute(REPARSE_ENQUEUE_SQL)
+        self._conn.commit()
+        return cur.rowcount
 
-        One SELECT, so the batched indexer's gather phase picks up N
-        distinct rows at once; the claim has no in-flight tracking, so
-        rows stay due until the caller marks them.
+    @_synchronized
+    def queue_fetch_due_batch(
+        self, status: str, now_iso: str, limit: int, *, reparse_turn: bool = False
+    ) -> list[sqlite3.Row]:
+        """Return up to ``limit`` distinct due ``status`` rows, sharing the
+        batch between foreground rows and ``reparse`` rows (#1142).
+
+        Foreground rows (every reason but ``reparse``: fresh mail,
+        recovery, rescans, re-extraction) come first, so a reparse
+        backlog does not hold them back. When both classes are due and
+        ``limit > 1``, one slot is kept for the oldest due reparse row,
+        so a reparse still advances under a sustained foreground
+        backlog. Capacity one class leaves unused goes to the other, so
+        no slot is left empty while rows are due. At ``limit == 1``,
+        ``reparse_turn`` gives the slot to the reparse row when both are
+        due (``IndexingQueue.claim_batch`` alternates it). Each class
+        keeps its due order, and foreground rows are returned first.
+
+        Two SELECTs under the one lock, on disjoint classes, so the
+        batched indexer's gather phase picks up distinct rows; the claim
+        has no in-flight tracking, so rows stay due until the caller
+        marks them.
         """
-        return self._conn.execute(
-            """
+        query = """
             SELECT filepath, reason, status, attempts,
                    last_error, last_stage,
                    created_at, updated_at, next_attempt_at
             FROM indexing_jobs
-            WHERE status = ? AND next_attempt_at <= ?
+            WHERE status = ? AND next_attempt_at <= ? AND (reason = ?) = ?
             ORDER BY next_attempt_at ASC
             LIMIT ?
-            """,
-            (status, now_iso, limit),
+            """
+        reparse = self._conn.execute(query, (status, now_iso, REASON_REPARSE, 1, limit)).fetchall()
+        reserved = min(1, len(reparse)) if limit > 1 or reparse_turn else 0
+        foreground = self._conn.execute(
+            query, (status, now_iso, REASON_REPARSE, 0, limit - reserved)
         ).fetchall()
+        return foreground + reparse[: limit - len(foreground)]
 
     @_synchronized
     def queue_delete(self, filepath: str) -> None:
@@ -2392,6 +2419,7 @@ class Database:
         permission_stage: str,
         permission_deferred_error: str,
         trashed_stage: str,
+        reparse_reason: str,
     ) -> tuple[dict[str, int], str | None]:
         """Rows per heartbeat bucket and the earliest due time among due
         queued rows, in one pass over ``indexing_jobs`` (see
@@ -2407,6 +2435,7 @@ class Database:
                        ELSE 'retrying'
                    END AS bucket,
                    COUNT(*) AS n,
+                   SUM(reason = :reparse) AS reparse,
                    MIN(CASE WHEN status = 'queued' AND next_attempt_at <= :now
                             THEN next_attempt_at END) AS oldest_due
             FROM indexing_jobs
@@ -2417,9 +2446,13 @@ class Database:
                 "perm_stage": permission_stage,
                 "perm_deferred": permission_deferred_error,
                 "now": now_iso,
+                "reparse": reparse_reason,
             },
         ).fetchall()
         counts = {row["bucket"]: int(row["n"]) for row in rows}
+        # Reparse jobs across the buckets (#1078): queued ones, then dead.
+        counts["reparse"] = sum(int(row["reparse"]) for row in rows if row["bucket"] != "dead")
+        counts["reparse_dead"] = sum(int(row["reparse"]) for row in rows if row["bucket"] == "dead")
         due = [row["oldest_due"] for row in rows if row["oldest_due"] is not None]
         return counts, min(due) if due else None
 

@@ -175,6 +175,9 @@ mbsync writes one Maildir per Proton folder (`mbsync/mbsyncrc.template`):
   or `mbsyncstate.lock` would be one of those files, so the channel's
   `Patterns` leave it, and everything below it, out. It is not synced and
   nothing reports it.
+- **File mtime:** `CopyArrivalDate yes`. A file mbsync writes gets the
+  message's IMAP INTERNALDATE as its mtime (#1081); see
+  [Message time](#message-time) for what that is and is not.
 - **Indexer:** a message's folder is the path below `/maildir` to the
   directory holding its `cur`/`new`, with the one leading dot of every
   component after the first removed (`indexer/src/parser.py`
@@ -893,6 +896,38 @@ bookkeeping, not message time, and no tool returns them as a message
 date. Bitemporal modeling (when a claim was made versus when the event
 it describes happened) waits for Phase 5.
 
+*Maildir file mtime.* Since `CopyArrivalDate yes` in
+`mbsync/mbsyncrc.template` (#1081), the mtime of a file mbsync writes
+is the message's IMAP INTERNALDATE as Bridge reports it, the server's
+arrival time that IMAP `SINCE` / `BEFORE` search on (isync's manual:
+IMAP does not guarantee the internal date is the arrival time, but it
+is usually close). The flag rename isync performs for a flag change
+and the entrypoint's post-sync `chmod go+r` move only the file's
+ctime, so the mtime stays; `mbsync/tests/layout_check.sh` check 8
+syncs a message with a known far-side date through the shipped image
+and reads the mtime back after each step. Its far side is a Maildir
+store standing in for Bridge, whose date isync takes from the far
+file's mtime. The IMAP half is `mbsync/tests/tls_check.sh` check 1a
+(`make test-mbsync-tls`, #1132): the shipped image, with the config the
+entrypoint renders, pulls one synthetic message from the test IMAP
+server (`mbsync/tests/imap_stub.py`, implicit TLS) whose INTERNALDATE
+is `02-Jan-2020 05:04:05 +0200`. The check shows isync asks for
+INTERNALDATE in its `UID FETCH`, parses the offset, and gives the file
+the mtime 2020-01-02T03:04:05Z; without `CopyArrivalDate` the check
+fails. The server refuses any command that would change the far side
+(APPEND, STORE, EXPUNGE and the like), and the check fails if the pull
+sends one. What stays unverified is Bridge itself: which date the
+Proton Mail Bridge app reports as INTERNALDATE (Proton's arrival time,
+or something else such as the `Date:` header) has not been checked
+against the app, so the mtime is the date Bridge reports, not a proven
+arrival time. A file synced before the option carries the time
+mbsync wrote it, the first sync for the existing corpus, and nothing
+tells the two apart from the file alone. The indexer does not read
+mtimes yet: `indexed_files.mtime_ns` is identity metadata, written at
+parse time and carried across renames, and no tool returns it.
+Persisting the arrival time as `internal_at`, with a stamp that marks
+pre-option files unavailable, is #1081's remaining work.
+
 **Outputs.** Every per-message and per-passage result returns
 `sent_at` and, beside it, `occurred_at` (null when unknown), in the
 stored string form: message headers (`get_message`, `get_thread`,
@@ -1596,6 +1631,10 @@ migration that commits but turns out wrong is then undone with
 from the release before the migration, instead of a full rebuild from
 Maildir (`docs/troubleshooting.md`, "Back up and restore the index").
 
+A migration that adds parser-produced per-message data ends with the
+shared reparse statement, so the worker fills the new data for mail
+already indexed without embedding calls (see *Reparse in place*).
+
 | Version | Migration | Change |
 |---|---|---|
 | 0 | (initial schema) | First deployed schema (2026-10-03). |
@@ -1774,7 +1813,9 @@ paths share the Phase 1 / Phase 2 implementation so seed-vector
 selection and failure isolation behave identically:
 
 **Initial scan order (#699, #752).** The queue hands out rows by due
-time (`next_attempt_at`), and the initial scan queues each unindexed
+time (`next_attempt_at`; reparse jobs form a second class with one
+slot per batch, see "Reparse in place" below), and the initial scan
+queues each unindexed
 message due at its own effective time (the topmost `Received:`, else
 `Date:`, read from its header block only by `message_sort_time`),
 capped at the walk's start; undated and future-dated messages are due
@@ -2004,6 +2045,92 @@ request, the PDF and image extractors refresh it after every page they
 read or OCR, so a scanned PDF that runs for ~20 minutes stays healthy
 (#485). Pages do not restart the stall guard's clock, which stays per
 attachment; a page that hangs refreshes nothing.
+
+### Reparse in place (#1078)
+
+A parser change that adds per-message data (a new `messages` column, a
+new per-message table) but changes no chunk ID, chunk text, embedding
+input (body text, the subject line of the first chunk), Message-ID or
+threading reaches mail already indexed by a **reparse**: every indexed
+file is queued with reason `reparse`, and the worker runs it through
+the ordinary pipeline. Phase 1 re-parses the file and rewrites its
+per-message rows through `upsert_thread`; Phase 2a finds every chunk ID
+already stored and queues nothing to embed; a chunkless thread keeps
+its stored subject-fallback vector instead of embedding it again (one
+still at the zero placeholder is repaired as usual). So a reparse
+makes no embedding call. Attachment text comes from the extraction
+cache. Retries, dead letters, the stall guard and heartbeats are the
+queue's own, and a message that fails to parse dead-letters instead of
+failing a migration. A reparse job whose file is gone while its path is
+still indexed (mbsync renamed it and the watcher has not recorded the
+rename yet) waits once, 60 s and without spending an attempt, so the
+rename moves the job to the new path (`update_filepath`) instead of the
+reparse being dropped; a file still missing after that is dropped with
+reason `reparse_file_missing`.
+
+The migration that adds such data triggers the reparse itself: after
+its DDL it ends with `REPARSE_ENQUEUE_SQL` (`indexer/src/queue.py`),
+copied verbatim (a test checks every migration that queues a reparse
+uses it):
+
+```sql
+INSERT INTO indexing_jobs
+    (filepath, reason, status, attempts, created_at, updated_at, next_attempt_at)
+SELECT filepath, 'reparse', 'queued', 0,
+       strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'),
+       strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'),
+       strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+FROM indexed_files WHERE true
+ON CONFLICT(filepath) DO NOTHING;
+```
+
+The statement only inserts, inside the migration's transaction, so the
+parse runs later in the worker, not under the migration's write lock.
+`filepath` is the queue's primary key and the conflict clause leaves
+every existing job as it is: a pending or retrying job keeps its
+reason, attempts, error and due time (it re-parses the file in full
+when it runs), and a dead-lettered job stays dead; `make requeue-dead`
+remains the way to retry it. `make reparse` (`src/reparse.py`, run in
+the indexer container like `make requeue-dead`) runs the same
+statement by hand, for recovery.
+
+Reparse jobs are due when queued, all at once, but they do not hold
+back other work (#1142). The queue hands out foreground jobs (every
+reason but `reparse`: fresh mail, recovery, rescans and re-extraction)
+first, so mail that arrives during a reparse is indexed by the next
+batch. While both kinds are due, each batch (`claim_batch`,
+`Database.queue_fetch_due_batch`) keeps one slot for the oldest due
+reparse job and fills the rest with foreground jobs; capacity one kind
+leaves unused goes to the other, so no slot is left empty, and each
+kind keeps its due order. With a batch size of 1
+(`INITIAL_INDEX_BATCH_SIZE` or `INDEXER_STEADY_STATE_BATCH_SIZE` set to
+1) the two kinds take turns, tracked in memory only. So a reparse
+advances by at least one job per batch, except while the embedder
+breaker is open (no batch is claimed) and while a job left
+`interrupted` by a crash runs alone first. While a reparse runs, the
+heartbeat's `oldest_due_age` grows: it reports the oldest due job, a
+reparse job behind the foreground ones, not a stalled drain. A reparse
+queued by a migration at startup is still drained by the initial index
+before startup deletion reconciliation runs. A claim is two indexed
+SELECTs, each of which may walk past every due job of the other kind;
+over 33,000 queued jobs it takes about 1.4 ms (#1142). The reparse
+needs no schema change of its own: `reason` is free text with no
+`CHECK` constraint.
+
+Visibility: with the queue heartbeat (every 5 min) the indexer logs
+`reparse: remaining=<n> reparsed_since_last_heartbeat=<n> dead=<n>`
+while reparse jobs are queued, then one `reparse complete: <n>
+message(s) reparsed since the indexer started, <n> dead-lettered`
+line, at WARNING when any dead-lettered; a reparse drained between two
+heartbeats still gets its completion line. `get_mailbox_status` reports
+the queued reparse jobs as `queue.reparse` (a subset of `pending` and
+`retrying`), names them in the not-current reason, and `make status`
+prints a line saying search finds those messages but the data the
+upgrade adds is missing until the reparse finishes.
+
+A change that alters chunk IDs, chunk text or embedding input needs a
+rebuild instead (PLAN.md Phase 2, "Two kinds of reindex"; today, a
+rebuild from Maildir, `docs/troubleshooting.md`).
 
 ### Ingestion completeness
 
@@ -2246,7 +2373,13 @@ images `make build` last produced, as `docker compose config --images`
 lists them (the project name, then `-indexer`, `-mcp-server`,
 `-mbsync`), and fail with a message naming the image when one is not
 built; rebuild before scanning a change,
-since the gates read the image, not the checkout. The full reports
+since the gates read the image, not the checkout. Before scanning,
+they print a warning naming each image whose
+`org.opencontainers.image.revision` label is missing or is not the
+commit `make build` would stamp now (`SOURCE_COMMIT`), with both
+values (#1103); a `-dirty` checkout always warns, because its files may
+have changed since the build. The warning does not fail the target, and
+the scans still run. The full reports
 have no local equivalent: run `trivy image <name>` by hand for every
 severity. `scripts/tests/trivy_flags_test.sh` derives the gates from
 `docker.yml` and fails when the Makefile drifts from them.
