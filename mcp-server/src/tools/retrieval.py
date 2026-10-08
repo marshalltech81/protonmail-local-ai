@@ -974,11 +974,13 @@ def register_retrieval_tools(server, db):
         term, body word set and participant, page each to the end, and
         union the rows by claimant_id with the lane that found each
         (multi-lane recipe: docs/mcp-tools.md).
-        Each page uses a fresh index snapshot; new matches ahead of the
-        cursor can be missed. A changed ``total_matches`` signals churn,
-        but the same total does not prove a stable set. Scope coverage to
-        the indexed results observed during the run, not a point-in-time
-        complete mailbox. For large pages, ``fields`` keeps only the named
+        Each page uses a fresh index snapshot, so a match can be missed:
+        one that arrives ahead of the cursor, or one that leaves the
+        filters (e.g. moves folder) while its page is read and returns
+        later. A changed ``total_matches`` signals churn, but matching
+        totals and row counts do not prove nothing was missed. Scope
+        coverage to the indexed results observed during the run, not a
+        point-in-time complete mailbox. For large pages, ``fields`` keeps only the named
         row fields, e.g. ``["subject", "sent_at", "from", "has_attachments"]``.
 
         When a person's exact address is unknown, enumerate name-substring
