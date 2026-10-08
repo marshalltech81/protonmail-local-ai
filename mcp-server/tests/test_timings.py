@@ -408,15 +408,23 @@ class TestNoContentInLogs:
 
 def _fail_sql(db: Database, monkeypatch, *fragments: str) -> None:
     """Make every ``_fetchall`` whose SQL holds one of ``fragments``
-    raise ``OperationalError``, as a missing or corrupt table would."""
+    raise ``OperationalError``, as a missing or corrupt table would; the
+    attachment lanes' ``_lane_rows`` (a caller's snapshot, #1204) too."""
     real = db._fetchall
+    real_lane_rows = db._lane_rows
 
     def fetchall(sql, params=()):
         if any(fragment in sql for fragment in fragments):
             raise sqlite3.OperationalError("no such table")
         return real(sql, params)
 
+    def lane_rows(sql, params, conn):
+        if any(fragment in sql for fragment in fragments):
+            raise sqlite3.OperationalError("no such table")
+        return real_lane_rows(sql, params, conn)
+
     monkeypatch.setattr(db, "_fetchall", fetchall)
+    monkeypatch.setattr(db, "_lane_rows", lane_rows)
 
 
 def _degraded(line: dict) -> dict:

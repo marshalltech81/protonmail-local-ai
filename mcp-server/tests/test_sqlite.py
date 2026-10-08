@@ -4094,13 +4094,13 @@ class TestSearchAttachments:
         """Review round 2: filters ran only after every matching chunk in
         the mailbox was grouped; they now narrow the rows being grouped."""
         captured: list[str] = []
-        real_fetchall = attachments_db._fetchall
+        real_lane_rows = attachments_db._lane_rows
 
-        def spy(sql, params=()):
+        def spy(sql, params, conn):
             captured.append(sql)
-            return real_fetchall(sql, params)
+            return real_lane_rows(sql, params, conn)
 
-        monkeypatch.setattr(attachments_db, "_fetchall", spy)
+        monkeypatch.setattr(attachments_db, "_lane_rows", spy)
         results = attachments_db.search_attachments(query="acme", content_type="application/pdf")
 
         assert {a.attachment_id for a in results} == {"att-quote"}

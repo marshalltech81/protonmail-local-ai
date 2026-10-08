@@ -239,7 +239,8 @@ tool=search_emails outcome=ok total_ms=41.7 stages_ms={'query_embedding': 22.4, 
   `inference_calls` and, on a filtered vector search,
   `thread_vec_expansions` / `chunk_vec_expansions` (re-queries with a
   wider window). The retrieval tools record what they returned (#886):
-  `total_matches` and `returned` (`query_messages`), `messages`
+  `total_matches` and `returned` (`query_messages`), `indeterminate`
+  (`query_messages`, and `search_attachments` with `sender`), `messages`
   (`get_thread`, `get_message`), `threads` (`list_threads`),
   `contacts` (`find_contact`) and `folders` (`list_folders`). They run
   no timed stages, so their `stages_ms` and `config` are empty, as are
@@ -250,7 +251,9 @@ tool=search_emails outcome=ok total_ms=41.7 stages_ms={'query_embedding': 22.4, 
   (the FTS query errored and a LIKE scan ran instead), `like_fallback`
   (the LIKE scan errored too), `chunk_fts` / `attachment_fts`,
   `attachment_filename` / `attachment_text` / `attachment_scan`
-  (`search_attachments`), `attachment_match` (no attachment-first
+  (`search_attachments`), `attachment_indeterminate` (the
+  `search_attachments` `sender` count; reported unavailable),
+  `attachment_match` (no attachment-first
   evidence ordering), `evidence_chunks` (no passages; the thread body
   is used), `recent_chunks` (`summarize_thread` without the latest
   replies), `rerank` (results in RRF order although `config` says
@@ -419,9 +422,9 @@ In an intelligence prompt the passage header's sender is followed by
 checked)`, and the prose `Citations:` list repeats the note.
 `find_contact` is unchanged, and `search_emails` decides its sender
 filters on the thread's recorded senders as before (#1154).
-`search_attachments` `sender` leaves such a message's attachments out,
-and the evidence-scope labels mark its passages `context`
-([in scope or context](#evidence-scope-in-scope-or-context)).
+`search_attachments` `sender` leaves such a message's attachments out
+and counts them as `indeterminate`, and the evidence-scope labels mark
+its passages `context` ([in scope or context](#evidence-scope-in-scope-or-context)).
 
 ## Filter predicates
 
@@ -822,11 +825,24 @@ or display name. A carrying message the leaf cannot decide (its
 attribution](#sender-attribution), or a name or fragment it does not
 match while its display names are not all indexed, [unknown
 values](#filter-predicates)) keeps its attachments out of the
-results, and this tool does not count them ([#1204](https://github.com/marshalltech81/protonmail-local-ai/issues/1204)); right after the upgrade
-that added `sender_ambiguous`, that is all mail indexed before it until
-the reparse drains, and
-`query_messages(sender=..., has_attachments=true)` reports them as
-`indeterminate`. It is applied in
+results; right after the upgrade that added `sender_ambiguous`, that is
+all mail indexed before it until the reparse drains. With a non-blank
+`sender` the response counts them as `indeterminate`
+([#1204](https://github.com/marshalltech81/protonmail-local-ai/issues/1204)):
+the indexed attachments the query and every other filter reach, over
+every lane and not limited by `limit`, whose carrying message the leaf
+leaves undecided, counted as the results would list them (an
+attachment both lanes reach counts once). It covers
+sender uncertainty among indexed candidates only, not attachments
+the query cannot reach or mail not yet indexed. The prose states it on
+every call with `sender`, `0` and the empty reply included (an empty
+reply with a non-zero count reads `No attachments are known to match.`);
+without `sender` the structured field is `null` and the prose omits it.
+When the count fails it is `null` and the prose says `indeterminate:
+unavailable`, never `0`; the server logs a WARNING (the first per
+exception type each minute, then a count) and the call's timing line
+carries `degraded_attachment_indeterminate`. The lanes and the
+count read one snapshot. It is applied in
 each lane's SQL before the lane's limit, so unlike `from_addr` it does
 not depend on a candidate window. Each result's `senders` is still its
 thread's senders, not the carrying message's From. The response does

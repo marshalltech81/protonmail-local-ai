@@ -1128,13 +1128,13 @@ class TestSearchAttachmentsTool:
 
     def test_limit_clamped_at_tool_boundary(self, fake_server, fake_embed, attachments_db):
         captured: dict = {}
-        original = attachments_db.search_attachments
+        original = attachments_db.search_attachments_with_count
 
         def spy(**kwargs):
             captured.update(kwargs)
             return original(**kwargs)
 
-        attachments_db.search_attachments = spy  # type: ignore[assignment]
+        attachments_db.search_attachments_with_count = spy  # type: ignore[method-assign]
         handler = self._handler(fake_server, fake_embed, attachments_db)
         asyncio.run(handler(limit=9999))
         assert captured["limit"] == 50
@@ -1287,7 +1287,7 @@ class TestLocalDbErrorTextWithheld:
     @pytest.mark.parametrize(
         ("tool", "method", "kwargs"),
         [
-            ("search_attachments", "search_attachments", {"query": "invoice"}),
+            ("search_attachments", "search_attachments_with_count", {"query": "invoice"}),
             ("search_emails", "find_contact", {"query": "invoice", "from_name": "alice"}),
         ],
     )
