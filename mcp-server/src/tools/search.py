@@ -1191,6 +1191,7 @@ def register_search_tools(
         files whose filename and MIME type do not match. There is no pagination
         beyond the 50-result cap, so report limited results and unread document text
         as coverage limits; do not claim an exhaustive attachment audit.
+        For a complete list or an exact count, use query_attachments.
         With ``from_addr``, the sender filter runs after a bounded candidate
         scan: even fewer than 50 results (including zero) can omit matches.
         ``sender`` is applied inside the search, before the cap. With

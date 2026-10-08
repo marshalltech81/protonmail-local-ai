@@ -5,6 +5,7 @@ Supports BM25 keyword search, vector similarity search, and hybrid fusion.
 """
 
 import base64
+import hashlib
 import json
 import logging
 import math
@@ -1106,6 +1107,238 @@ def _decode_cursor(cursor: str, digest: str) -> tuple[str, str, int]:
             "as the call that returned it, or restart without a cursor",
         )
     return data["s"], data["m"], data["o"]
+
+
+# Characters of a sender-controlled attachment filename or MIME type a
+# ``query_attachments`` row carries (``tools/outputs.HEADER_CHAR_LIMIT``,
+# which this module cannot import). The value is read as at most
+# ``4 * ATTACHMENT_META_CHARS + 1`` UTF-8 bytes, so a huge filename
+# costs one bounded read per page row. Bytes, not SQL ``substr`` on the
+# text: SQLite's text functions stop at an embedded NUL.
+ATTACHMENT_META_CHARS = 500
+_ATTACHMENT_META_BYTES = 4 * ATTACHMENT_META_CHARS
+
+# The values ``query_attachments``' ``extraction_status`` accepts: the
+# statuses the indexer stores, and ``none`` for an occurrence whose
+# payload and extractor module have no extraction row.
+EXTRACTION_STATUSES = ("success", "empty", "unsupported", "too_large", "failed")
+EXTRACTION_STATUS_FILTERS = (*EXTRACTION_STATUSES, "none")
+
+
+@dataclass
+class AttachmentOccurrenceRecord:
+    """One attachment on one message, as ``query_attachments`` lists it.
+
+    ``filename`` and ``content_type`` hold at most
+    ``ATTACHMENT_META_CHARS`` characters; the ``*_clipped`` flag says
+    the stored value is longer. ``extraction_status`` and the other
+    extraction fields are ``None`` when no extraction row exists for the
+    payload and the occurrence's extractor module.
+    """
+
+    attachment_occurrence_id: str
+    attachment_id: str
+    extractor_module: str
+    claimant_id: str
+    message_id: str
+    thread_id: str
+    filename: str
+    filename_clipped: bool
+    content_type: str
+    content_type_clipped: bool
+    size_bytes: int
+    folder: str
+    sent_at: str
+    occurred_at: str | None
+    effective_at: str
+    source_file: SourceFile | None
+    extraction_status: str | None
+    extractor: str | None
+    extracted_at: str | None
+    ocr_pages_skipped: int | None
+
+
+@dataclass
+class AttachmentPage:
+    """One page of ``Database.query_attachments``.
+
+    ``total_matches`` counts every occurrence the filters definitely
+    match; ``indeterminate`` those they could neither accept nor reject
+    (in neither the count nor the pages); ``status_counts`` splits
+    ``total_matches`` by extraction status, ``none`` for no extraction
+    row. All three and the page come from one read snapshot.
+    """
+
+    total_matches: int
+    indeterminate: int
+    status_counts: dict[str, int]
+    offset: int
+    attachments: list[AttachmentOccurrenceRecord]
+    has_more: bool
+    next_cursor: str | None
+
+
+def _clipped_text(head: bytes) -> tuple[str, bool]:
+    """A value read as its first ``_ATTACHMENT_META_BYTES + 1`` UTF-8
+    bytes, cut to ``ATTACHMENT_META_CHARS`` characters, and whether the
+    stored value is longer. More bytes than the budget means more
+    characters than the cut, since a character is at most four bytes;
+    a character the byte read split is dropped."""
+    if len(head) > _ATTACHMENT_META_BYTES:
+        return head.decode("utf-8", "ignore")[:ATTACHMENT_META_CHARS], True
+    text = head.decode("utf-8", "replace")
+    return text[:ATTACHMENT_META_CHARS], len(text) > ATTACHMENT_META_CHARS
+
+
+def _attachment_clauses(
+    filename: str | None,
+    content_type: str | None,
+    extraction_status: str | None,
+    claimant_id: str | None,
+    thread_id: str | None,
+) -> tuple[list[tuple[str, str]], list[str], list]:
+    """``query_attachments``' own filters as ``(name, value)`` pairs (for
+    the cursor digest), SQL clauses over ``attachments a`` and the LEFT
+    JOINed ``attachment_extractions e``, and their bound values. Blank
+    values are ignored.
+
+    ``filename`` is a literal casefolded substring; the others match
+    exactly. A stored ``extraction_status`` compared with an occurrence
+    that has no extraction row is NULL (unknown: it may be extracted
+    later), so the conjunction counts it as indeterminate; ``none``
+    selects exactly those occurrences. Raises ``InvalidFilterError``
+    for any other status.
+    """
+    filters: list[tuple[str, str]] = []
+    clauses: list[str] = []
+    params: list = []
+    if extraction_status is not None and extraction_status.strip():
+        extraction_status = extraction_status.strip()
+        if extraction_status not in EXTRACTION_STATUS_FILTERS:
+            raise InvalidFilterError(
+                "extraction_status",
+                "extraction_status must be one of " + ", ".join(EXTRACTION_STATUS_FILTERS),
+            )
+    for name, value in (
+        ("filename", filename),
+        ("content_type", content_type),
+        ("extraction_status", extraction_status),
+        ("claimant_id", claimant_id),
+        ("thread_id", thread_id),
+    ):
+        value = _given(value)
+        if value is None:
+            continue
+        filters.append((name, value))
+        if name == "filename":
+            clauses.append("instr(mcp_casefold(a.filename), ?) > 0")
+            params.append(value.casefold())
+        elif name == "extraction_status" and value == "none":
+            clauses.append("e.attachment_id IS NULL")
+        elif name == "extraction_status":
+            clauses.append("e.extraction_status = ?")
+            params.append(value)
+        else:
+            clauses.append(f"a.{name} = ?")
+            params.append(value)
+    return filters, clauses, params
+
+
+def _attachment_digest(leaves: list[Leaf], filters: list[tuple[str, str]]) -> str:
+    """The ``query_attachments`` cursor digest: the tool, the ordering
+    clock, the message leaves and the attachment filters, so a cursor
+    is never read against other predicates or by another tool."""
+    canonical = [
+        "query_attachments",
+        "effective",
+        [[leaf.name, leaf.value] for leaf in leaves],
+        [list(f) for f in filters],
+    ]
+    return hashlib.sha256(json.dumps(canonical).encode()).hexdigest()[:16]
+
+
+def _encode_attachment_cursor(digest: str, last: AttachmentOccurrenceRecord, offset: int) -> str:
+    payload = json.dumps(
+        {
+            "v": 3,
+            "q": digest,
+            "s": last.effective_at,
+            "m": last.claimant_id,
+            "a": last.attachment_occurrence_id,
+            "o": offset,
+        }
+    )
+    return base64.urlsafe_b64encode(payload.encode()).rstrip(b"=").decode()
+
+
+def _decode_attachment_cursor(cursor: str, digest: str) -> tuple[str, str, str, int]:
+    """Return ``(effective_at, claimant_id, attachment_occurrence_id,
+    offset)`` of the last row returned. Version 3 only, so a
+    ``query_messages`` cursor (version 2) is rejected here and this one
+    there. Raises ``InvalidFilterError`` with fixed text, as
+    ``_decode_cursor`` does."""
+    try:
+        raw = base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4))
+        data = json.loads(raw)
+    except ValueError as exc:
+        raise InvalidFilterError("cursor", _INVALID_CURSOR) from exc
+    if not (
+        isinstance(data, dict)
+        and data.get("v") == 3
+        and all(isinstance(data.get(k), str) for k in ("q", "s", "m", "a"))
+        and isinstance(data.get("o"), int)
+        and not isinstance(data["o"], bool)
+        and data["o"] >= 0
+    ):
+        raise InvalidFilterError("cursor", _INVALID_CURSOR)
+    if data["q"] != digest:
+        raise InvalidFilterError(
+            "cursor",
+            "cursor was issued for different filters; pass the same filters "
+            "as the call that returned it, or restart without a cursor",
+        )
+    return data["s"], data["m"], data["a"], data["o"]
+
+
+# ``query_attachments``' join. ``attachments.claimant_id`` references
+# ``message_thread_map``, not ``messages``, but the indexer writes a
+# message's ``messages`` row in the transaction that writes its map row
+# (``upsert_thread``) and ``messages.claimant_id`` is its primary key, so
+# the inner join keeps every occurrence exactly once. The extraction row
+# is the one keyed by the payload and the occurrence's extractor module
+# (#928).
+_ATTACHMENT_FROM = (
+    "FROM attachments a JOIN messages m ON m.claimant_id = a.claimant_id "
+    "LEFT JOIN attachment_extractions e ON e.attachment_id = a.attachment_id "
+    "AND e.extractor_module = a.extractor_module"
+)
+
+
+def _row_to_occurrence(r) -> AttachmentOccurrenceRecord:
+    filename, filename_clipped = _clipped_text(r["filename_head"])
+    content_type, content_type_clipped = _clipped_text(r["content_type_head"])
+    return AttachmentOccurrenceRecord(
+        attachment_occurrence_id=r["attachment_occurrence_id"],
+        attachment_id=r["attachment_id"],
+        extractor_module=r["extractor_module"],
+        claimant_id=r["claimant_id"],
+        message_id=r["message_id"],
+        thread_id=r["thread_id"],
+        filename=filename,
+        filename_clipped=filename_clipped,
+        content_type=content_type,
+        content_type_clipped=content_type_clipped,
+        size_bytes=int(r["size_bytes"]),
+        folder=r["folder"],
+        sent_at=r["sent_at"],
+        occurred_at=r["occurred_at"],
+        effective_at=r["effective_at"],
+        source_file=_row_to_source(r),
+        extraction_status=r["extraction_status"],
+        extractor=r["extractor"],
+        extracted_at=r["extracted_at"],
+        ocr_pages_skipped=r["ocr_pages_skipped"],
+    )
 
 
 def _add_contact(by_email: dict[str, dict], address: str, name: str | None, thread_id: str) -> None:
@@ -3991,6 +4224,149 @@ class Database:
             ),
             address_matches=address_matches,
             indeterminate=indeterminate,
+        )
+
+    def query_attachments(
+        self,
+        *,
+        sender: str | None = None,
+        recipient: str | None = None,
+        participant: str | None = None,
+        folder: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        filename: str | None = None,
+        content_type: str | None = None,
+        extraction_status: str | None = None,
+        claimant_id: str | None = None,
+        thread_id: str | None = None,
+        limit: int = 20,
+        cursor: str | None = None,
+    ) -> AttachmentPage:
+        """Enumerate every attachment occurrence matching all given filters
+        (#796).
+
+        One row per occurrence (one attachment on one message), never
+        folded by payload, newest carrying message first by effective
+        time; ``claimant_id`` then ``attachment_occurrence_id`` break
+        ties, so the keyset cursor is stable. Blank filters are ignored.
+
+        - ``sender`` / ``recipient`` / ``participant`` / ``folder`` /
+          ``date_from`` / ``date_to``: the carrying message, through the
+          ``query_messages`` leaves (``query_messages_leaves``), so a
+          message filter means what it means there, Trash left out
+          without ``folder`` and unknown leaves counted as
+          indeterminate. The clock is effective time only (#1150).
+        - ``filename`` / ``content_type`` / ``extraction_status`` /
+          ``claimant_id`` / ``thread_id``: ``_attachment_clauses``.
+
+        ``total_matches`` and ``status_counts`` come from one grouped
+        count, ``indeterminate`` from a second count run only when a
+        filter can be unknown, and the page from a keyset query that
+        orders keys only and reads the row columns of at most
+        ``limit + 1`` occurrences; all inside one read transaction.
+
+        Raises ``InvalidFilterError`` (a ``ValueError``) for an invalid
+        date, an unknown ``extraction_status``, or a malformed or
+        foreign cursor.
+        """
+        leaves = query_messages_leaves(
+            sender=sender,
+            recipient=recipient,
+            participant=participant,
+            subject=None,
+            text=None,
+            folder=folder,
+            date_from=date_from,
+            date_to=date_to,
+            has_attachments=None,
+            authority_class=None,
+            seen=None,
+            flagged=None,
+        )
+        filters, clauses, clause_params = _attachment_clauses(
+            filename, content_type, extraction_status, claimant_id, thread_id
+        )
+        message_sql, params = compile_leaves(leaves)
+        where_sql = " AND ".join([message_sql, *clauses])
+        params += clause_params
+        digest = _attachment_digest(leaves, filters)
+
+        page_where_sql = where_sql
+        page_params = list(params)
+        offset = 0
+        if cursor:
+            last_at, last_claimant, last_occurrence, offset = _decode_attachment_cursor(
+                cursor, digest
+            )
+            page_where_sql += (
+                " AND (m.effective_at, a.claimant_id, a.attachment_occurrence_id) < (?, ?, ?)"
+            )
+            page_params += [last_at, last_claimant, last_occurrence]
+        # Only a leaf that can be unknown makes the indeterminate count
+        # worth a query; a stored-status comparison is unknown for an
+        # occurrence with no extraction row.
+        may_be_unknown = any(
+            LEAVES[leaf.name].evaluability is Evaluability.UNKNOWN_WHEN_NULL for leaf in leaves
+        ) or any(name == "extraction_status" and value != "none" for name, value in filters)
+
+        with closing(self._connect()) as conn:
+            # One read transaction: the counts and the page come from the
+            # same snapshot even while the indexer commits.
+            conn.execute("BEGIN")
+            status_counts = dict.fromkeys(EXTRACTION_STATUS_FILTERS, 0)
+            for status, n in conn.execute(
+                "SELECT COALESCE(e.extraction_status, 'none') AS status, COUNT(*) "  # nosec B608
+                f"{_ATTACHMENT_FROM} WHERE {where_sql} GROUP BY status",
+                params,
+            ):
+                status_counts[status] = n
+            indeterminate = 0
+            if may_be_unknown:
+                indeterminate = conn.execute(
+                    f"SELECT COUNT(*) {_ATTACHMENT_FROM} WHERE ({where_sql}) IS NULL",  # nosec B608
+                    params,
+                ).fetchone()[0]
+            # Keys first: the ordered, limited phase selects no
+            # sender-controlled column, so a sort over every match never
+            # copies a filename; the row columns are read for the page's
+            # occurrences only.
+            rows = conn.execute(
+                "WITH page AS MATERIALIZED ( "  # nosec B608
+                "SELECT a.attachment_occurrence_id AS occ, m.effective_at AS clock, "
+                f"a.claimant_id AS cid {_ATTACHMENT_FROM} WHERE {page_where_sql} "
+                "ORDER BY clock DESC, cid DESC, occ DESC LIMIT ? ) "
+                "SELECT a.attachment_occurrence_id, a.attachment_id, a.extractor_module, "
+                "a.claimant_id, m.message_id, a.thread_id, "
+                f"substr(CAST(a.filename AS BLOB), 1, {_ATTACHMENT_META_BYTES + 1}) "
+                "AS filename_head, "
+                f"substr(CAST(a.content_type AS BLOB), 1, {_ATTACHMENT_META_BYTES + 1}) "
+                "AS content_type_head, "
+                "a.size_bytes, m.folder, m.sent_at, m.occurred_at, m.effective_at, "
+                f"{_SOURCE_COLUMNS}, e.extraction_status, e.extractor, e.extracted_at, "
+                "e.ocr_pages_skipped "
+                "FROM page JOIN attachments a ON a.attachment_occurrence_id = page.occ "
+                "JOIN messages m ON m.claimant_id = a.claimant_id "
+                "LEFT JOIN attachment_extractions e ON e.attachment_id = a.attachment_id "
+                "AND e.extractor_module = a.extractor_module "
+                "ORDER BY page.clock DESC, page.cid DESC, page.occ DESC",
+                [*page_params, limit + 1],
+            ).fetchall()
+            conn.rollback()
+
+        has_more = len(rows) > limit
+        records = [_row_to_occurrence(r) for r in rows[:limit]]
+        next_offset = offset + len(records)
+        return AttachmentPage(
+            total_matches=sum(status_counts.values()),
+            indeterminate=indeterminate,
+            status_counts=status_counts,
+            offset=offset,
+            attachments=records,
+            has_more=has_more,
+            next_cursor=(
+                _encode_attachment_cursor(digest, records[-1], next_offset) if has_more else None
+            ),
         )
 
     # -------------------------------------------------------------------------

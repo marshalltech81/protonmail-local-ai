@@ -13,7 +13,8 @@ The search, retrieval, and system tools (Groups 1, 2, and 4) publish an
   `get_thread` → `messages[].claimant_id` → `get_message`, and
   `get_evidence` / `search_attachments` carry `attachment_id`. Paging
   state is typed as well (`get_thread.next_offset`,
-  `query_messages.next_cursor` / `has_more` / `total_matches`).
+  `query_messages.next_cursor` / `has_more` / `total_matches`, and the
+  same fields on `query_attachments`).
 
 **Message-ID and claimant ID.** The sender sets a message's Message-ID,
 so two different indexed files can carry the same one (a reused or
@@ -239,8 +240,8 @@ tool=search_emails outcome=ok total_ms=41.7 stages_ms={'query_embedding': 22.4, 
   `inference_calls` and, on a filtered vector search,
   `thread_vec_expansions` / `chunk_vec_expansions` (re-queries with a
   wider window). The retrieval tools record what they returned (#886):
-  `total_matches` and `returned` (`query_messages`), `indeterminate`
-  (`query_messages`, and `search_attachments` with `sender`), `messages`
+  `total_matches` and `returned` (`query_messages`, `query_attachments`), `indeterminate`
+  (`query_messages`, `query_attachments`, and `search_attachments` with `sender`), `messages`
   (`get_thread`, `get_message`), `threads` (`list_threads`),
   `contacts` (`find_contact`) and `folders` (`list_folders`). They run
   no timed stages, so their `stages_ms` and `config` are empty, as are
@@ -322,8 +323,9 @@ before.
   same scope, so a sender whose mail is all in Trash is not chosen for a
   default search.
 - Message tools leave out the messages filed in Trash: `query_messages`
-  without `folder` (pass `folder="Trash"` to list them) and
-  `search_attachments`, which has no folder filter.
+  without `folder` (pass `folder="Trash"` to list them),
+  `query_attachments` likewise for the attachments those messages
+  carry, and `search_attachments`, which has no folder filter.
 - Tools that read one named thread or message (`get_thread`,
   `get_message`, `get_evidence` with `thread_id`, `summarize_thread`
   with a thread ID) and the folder browsers (`list_threads`,
@@ -463,6 +465,11 @@ different filters"), never read against them.
 | `size_min` | bytes | `query_messages` `size_min` | its local file size is at least the value; unknown without a stored size |
 | `size_max` | bytes | `query_messages` `size_max` | its local file size is at most the value; unknown without a stored size |
 | `authority_class` | class name | `authority_class` | its From sender carries the class, outside Spam, and its `sender_ambiguous` is `false`; unknown outside Spam when its `sender_ambiguous` is not `false` ([Sender attribution](#sender-attribution)) |
+
+`query_attachments` builds the same leaves as `query_messages` for its
+`sender`, `recipient`, `participant`, `folder` and date filters and
+decides them on the message carrying each attachment
+([#796](https://github.com/marshalltech81/protonmail-local-ai/issues/796)).
 
 **Unknown values and the `indeterminate` count
 ([#1085](https://github.com/marshalltech81/protonmail-local-ai/issues/1085)).**
@@ -857,6 +864,8 @@ filters and `extracted_only=false`. A text query cannot reveal unextracted
 files whose filename and MIME type do not match. There is no pagination beyond
 the 50-result cap. Report limited results and unread document text as
 coverage limits rather than claiming an exhaustive attachment audit.
+For a complete list or an exact count, use
+[`query_attachments`](#query_attachments).
 With `from_addr`, sender filtering happens after a bounded candidate scan,
 so even fewer than 50 results (including zero) can omit matching attachments
 ([#1196](https://github.com/marshalltech81/protonmail-local-ai/issues/1196)).
@@ -1322,6 +1331,94 @@ reopening across threads and senders. A sent request or delivered advice
 does not prove the action was completed. State the scope and disclose
 unread pages, missing indexed bodies and unavailable attachment text
 instead of claiming full coverage.
+
+### `query_attachments`
+Enumerate **every** attachment occurrence matching exact criteria, with
+a total count
+([#796](https://github.com/marshalltech81/protonmail-local-ai/issues/796)).
+An occurrence is one attachment on one message: the same bytes attached
+to two messages, or twice to one, are separate rows that share an
+`attachment_id`. Rows are not ranked; the newest carrying message comes
+first by effective time (`occurred_at`, else `sent_at`), and claimant
+ID then occurrence ID break ties. Use it for "list every attachment" and
+"how many" questions; [`search_attachments`](#search_attachments) ranks
+by filename and extracted text and stops at 50 results.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `sender` | string | none | From of the carrying message, matched as `query_messages` `sender` |
+| `recipient` | string | none | To or Cc of the carrying message, likewise |
+| `participant` | string | none | Any role of the carrying message, likewise |
+| `folder` | string | none | Exact folder name of the carrying message. Without it, attachments on messages in Trash are left out; pass `"Trash"` to list them ([Trash](#trash-is-left-out-by-default)) |
+| `date_from` | string | none | Inclusive ISO 8601 lower bound on the carrying message's effective time |
+| `date_to` | string | none | Inclusive upper bound; a date-only value covers the whole UTC day. `date_bounds` echoes the UTC instants applied |
+| `filename` | string | none | Unicode caseless substring of the filename, taken literally (`%` and `_` are ordinary characters) |
+| `content_type` | string | none | Exact MIME type, e.g. `application/pdf` |
+| `extraction_status` | string | none | `success`, `empty`, `unsupported`, `too_large`, `failed`, or `none` (no extraction recorded); any other value is an error |
+| `claimant_id` | string | none | Exact claimant ID of the carrying message |
+| `thread_id` | string | none | Exact thread ID |
+| `limit` | int | `20` | Attachments per page; clamped to `[1, 50]` |
+| `cursor` | string | none | `next_cursor` from the previous page of the same query |
+
+All given filters must match; blank filters are ignored. The message
+filters (`sender`, `recipient`, `participant`, `folder`, the dates) are
+the [predicate leaves](#filter-predicates) `query_messages` builds,
+decided on the message carrying each attachment, so they match the same
+messages. There is no `date_basis`: the clock is effective time, as in
+`query_messages`
+([#1150](https://github.com/marshalltech81/protonmail-local-ai/issues/1150)).
+
+**Unknown values.** A filter can leave an occurrence undecided: a
+message filter for the reasons it leaves a message undecided in
+`query_messages` (a carrying message whose sender is ambiguous or not
+yet checked, or whose display names are not all indexed), and an
+`extraction_status` other than `none` on an occurrence with no
+extraction recorded for its payload and extractor module (not run yet,
+or extraction off), since it may still be extracted with that status.
+`none` decides exactly those occurrences. The filters conjoin with
+SQL's three-valued AND, as in `query_messages`: an occurrence one filter
+rejects is rejected even when another cannot decide it. Undecided
+occurrences are in neither `total_matches` nor the pages; the response
+counts them in `indeterminate`, and the prose states it with its causes
+whenever it is not 0 (an empty first page then ends "No attachments are
+known to match.").
+
+**Response contract.** The response states the filter interpretation,
+`total_matches` (over the whole match, not the page), `indeterminate`,
+and `status_counts`: `total_matches` split by extraction status, with
+`none` for occurrences that have no extraction recorded. Anything but
+`success` means no extracted text is available, not that the file says
+nothing relevant. Each row carries the occurrence ID, the payload's
+`attachment_id`, its `extractor_module` (`''` when its label selects no
+extractor), the claimant, Message-ID and thread IDs, the filename and
+MIME type (each cut at 500 characters, with `filename_clipped` /
+`content_type_clipped` set when the stored value is longer), the size,
+the carrying message's folder, `sent_at`, `occurred_at` and
+`source_file`, and the extraction's status, extractor, time and
+`ocr_pages_skipped` (all null when none is recorded). It returns no
+attachment text: read it through [`get_evidence`](#get_evidence) or
+[`ask_mailbox`](#ask_mailbox), and before reading content for many rows
+tell the user the scope and how much will be read. The counts and the
+page are read in one snapshot.
+
+**Paging.** Keyset pagination on descending `(effective_at,
+claimant_id, attachment_occurrence_id)`. A cursor is bound to the tool,
+the filters and the ordering, not to `limit`, so the page size may
+change between pages; a cursor from other filters, from
+`query_messages`, or a malformed one is an error. Each page uses a fresh
+index snapshot, with the caveats of [`query_messages`](#query_messages)
+paging: an attachment indexed or moved (with its message) while paging can be
+missed, and a changed `total_matches` signals churn but matching totals
+do not prove nothing was missed
+([#1218](https://github.com/marshalltech81/protonmail-local-ai/issues/1218)).
+
+**Cost.** Each page runs one grouped count over the match, a second
+count only when a filter can be undecided, and one keyset query that
+orders keys only and reads the row columns (the filename among them) of
+at most `limit + 1` occurrences. On a synthetic index of 75,000
+occurrences a page took about 60 ms unfiltered. The log records only
+`extraction_status`, `limit` and valid ISO dates; filenames, MIME types, IDs,
+addresses, folders and cursors are withheld.
 
 ---
 
