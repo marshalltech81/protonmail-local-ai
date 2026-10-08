@@ -175,6 +175,9 @@ mbsync writes one Maildir per Proton folder (`mbsync/mbsyncrc.template`):
   or `mbsyncstate.lock` would be one of those files, so the channel's
   `Patterns` leave it, and everything below it, out. It is not synced and
   nothing reports it.
+- **File mtime:** `CopyArrivalDate yes`. A file mbsync writes gets the
+  message's IMAP INTERNALDATE as its mtime (#1081); see
+  [Message time](#message-time) for what that is and is not.
 - **Indexer:** a message's folder is the path below `/maildir` to the
   directory holding its `cur`/`new`, with the one leading dot of every
   component after the first removed (`indexer/src/parser.py`
@@ -891,6 +894,27 @@ lag the message whenever Phase 2 failed.
 bookkeeping, not message time, and no tool returns them as a message
 date. Bitemporal modeling (when a claim was made versus when the event
 it describes happened) waits for Phase 5.
+
+*Maildir file mtime.* Since `CopyArrivalDate yes` in
+`mbsync/mbsyncrc.template` (#1081), the mtime of a file mbsync writes
+is the message's IMAP INTERNALDATE as Bridge reports it, the server's
+arrival time that IMAP `SINCE` / `BEFORE` search on (isync's manual:
+IMAP does not guarantee the internal date is the arrival time, but it
+is usually close). The flag rename isync performs for a flag change
+and the entrypoint's post-sync `chmod go+r` move only the file's
+ctime, so the mtime stays; `mbsync/tests/layout_check.sh` check 8
+syncs a message with a known far-side date through the shipped image
+and reads the mtime back after each step. Its far side is a Maildir
+store standing in for Bridge, whose date isync takes from the far
+file's mtime, so the check covers how isync writes and keeps the date,
+not how it parses an IMAP INTERNALDATE or what date Bridge reports
+(#1132). A file synced before the option carries the time
+mbsync wrote it, the first sync for the existing corpus, and nothing
+tells the two apart from the file alone. The indexer does not read
+mtimes yet: `indexed_files.mtime_ns` is identity metadata, written at
+parse time and carried across renames, and no tool returns it.
+Persisting the arrival time as `internal_at`, with a stamp that marks
+pre-option files unavailable, is #1081's remaining work.
 
 **Outputs.** Every per-message and per-passage result returns
 `sent_at` and, beside it, `occurred_at` (null when unknown), in the

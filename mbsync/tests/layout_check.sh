@@ -43,6 +43,13 @@ set -Eeuo pipefail
 #      with the one error line the entrypoint withholds and tolerates;
 #      the rest still syncs and the local copy is kept. Runs before 5 and
 #      6, which switch to stores of their own.
+#   8. The far side's arrival time (#1081) reaches the near file's mtime:
+#      with CopyArrivalDate the far store's date for a message (the file
+#      mtime of a Maildir far side, INTERNALDATE of an IMAP one) is the
+#      mtime of the file isync writes, and it survives the flag rename
+#      isync performs for a far-side flag change and the entrypoint's
+#      post-sync chmod go+r (relax_new_maildir_perms), which both move
+#      only ctime. Runs before 7, on the same stores.
 #
 # Needs Docker. Builds the mbsync image unless MBSYNC_IMAGE names one.
 # Run: bash mbsync/tests/layout_check.sh  (or make test-mbsync-layout)
@@ -283,6 +290,94 @@ if ((ok)) && located "Folders/Kept" "${TAGS[0]#*|}" \
     pass "folders named after isync's own files and the virtual Starred folder are skipped; their parent and Folders/Starred sync"
 else
     fail "folders named after isync's own files and the virtual Starred folder are skipped; their parent and Folders/Starred sync"
+fi
+
+# 8. #1081: the far side's arrival time is copied onto the near file's
+# mtime, and stays there through a flag rename and the entrypoint's
+# chmod go+r. The image's GNU coreutils set and read the times, so the
+# host's touch and stat dialects and clock never enter the comparison.
+readonly ARRIVAL_EPOCH=1577934245 # 2020-01-02T03:04:05Z, long before any sync
+
+# in_image CMD ARG...: run one command from the image over both stores.
+in_image() {
+    docker run --rm --read-only --user "$(id -u):$(id -g)" \
+        --cap-drop ALL --security-opt no-new-privileges:true \
+        -v "$FAR:/far" -v "$NEAR:/maildir" --entrypoint "$1" "$IMAGE" "${@:2}"
+}
+
+# near_in_image TAG: the one near-side file holding the message, as a
+# path inside the image; empty when there is none, which the time checks
+# below then report.
+near_in_image() {
+    local path
+    path="$(grep -rlF "Message-ID: <$1@example.invalid>" "$NEAR" 2>/dev/null \
+        | grep -E '/(cur|new)/[^/]+$' | sed -n 1p)"
+    if [[ -n "$path" ]]; then
+        printf '/maildir%s' "${path#"$NEAR"}"
+    fi
+}
+
+# times PATH: "mtime ctime mode" of a path inside the image.
+times() {
+    in_image stat -c '%Y %Z %a' "$1"
+}
+
+TAGS=()
+deliver INBOX
+arrival_tag="${TAGS[0]#*|}"
+ok=1
+far_name="$(find "$(far_path INBOX)/cur" -type f -name "*${arrival_tag}*" -print -quit)"
+in_image touch -d "@${ARRIVAL_EPOCH}" "/far${far_name#"$FAR"}" || ok=0
+if ! sync_once arrival-first; then
+    ok=0
+    sed 's/^/     /' "$WORK/sync-arrival-first.log"
+fi
+first_path="$(near_in_image "$arrival_tag")"
+read -r mtime ctime mode <<<"$(times "$first_path")"
+if [[ "$mtime" != "$ARRIVAL_EPOCH" ]]; then
+    ok=0
+    printf '     synced file mtime %s, far side arrival time %s\n' "$mtime" "$ARRIVAL_EPOCH"
+fi
+if [[ "$ctime" == "$ARRIVAL_EPOCH" ]]; then
+    ok=0
+    printf '     synced file ctime %s is the arrival time, not the sync time\n' "$ctime"
+fi
+# A flag change on the far side: isync renames the near file.
+far_name="$(find "$(far_path INBOX)/cur" -type f -name "*${arrival_tag}*" -print -quit)"
+mv "$far_name" "${far_name%:2,*}:2,FS"
+if ! sync_once arrival-flagged; then
+    ok=0
+    sed 's/^/     /' "$WORK/sync-arrival-flagged.log"
+fi
+renamed_path="$(near_in_image "$arrival_tag")"
+if [[ "$renamed_path" == "$first_path" || "$renamed_path" != *:2,*F* ]]; then
+    ok=0
+    printf '     the far flag change did not rename the near file (%s)\n' "${renamed_path##*/}"
+fi
+read -r mtime ctime mode <<<"$(times "$renamed_path")"
+if [[ "$mtime" != "$ARRIVAL_EPOCH" ]]; then
+    ok=0
+    printf '     renamed file mtime %s, arrival time %s\n' "$mtime" "$ARRIVAL_EPOCH"
+fi
+# The entrypoint's post-sync permission pass (relax_new_maildir_perms).
+if [[ "$mode" != 600 ]]; then
+    ok=0
+    printf '     isync wrote mode %s, so chmod go+r changes nothing here\n' "$mode"
+fi
+in_image find /maildir -type f ! -perm -044 -exec chmod go+r {} + || ok=0
+read -r mtime ctime mode <<<"$(times "$renamed_path")"
+if [[ "$mtime" != "$ARRIVAL_EPOCH" || "$mode" != 644 ]]; then
+    ok=0
+    printf '     after chmod go+r: mtime %s (arrival time %s), mode %s\n' "$mtime" "$ARRIVAL_EPOCH" "$mode"
+fi
+if [[ "$ctime" == "$ARRIVAL_EPOCH" ]]; then
+    ok=0
+    printf '     ctime %s is the arrival time after chmod\n' "$ctime"
+fi
+if ((ok)); then
+    pass "the far side's arrival time is the near file's mtime, through a flag rename and chmod go+r"
+else
+    fail "the far side's arrival time is the near file's mtime, through a flag rename and chmod go+r"
 fi
 
 # 7. #276: a far folder that disappears after it synced (renamed or
