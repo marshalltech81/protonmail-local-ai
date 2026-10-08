@@ -603,6 +603,9 @@ class TestSearchAttachmentsIndeterminateTool:
         lines = out.content[0].text.splitlines()
         assert lines[0] == "Found 1 attachment(s):"
         assert lines[1].startswith("indeterminate: 2 (")
+        # A full address is never undecided by display names.
+        assert "sender ambiguous or not yet checked" in lines[1]
+        assert "display names" not in lines[1]
         assert "'indeterminate': 2" in self._timing_line(caplog)
 
     def test_count_on_empty_results(self, fake_server, fake_embed, tmp_path):
@@ -615,6 +618,30 @@ class TestSearchAttachmentsIndeterminateTool:
         lines = out.content[0].text.splitlines()
         assert lines[0] == "No attachments are known to match."
         assert lines[1].startswith("indeterminate: 1 (")
+
+    def test_unindexed_display_names_are_counted_and_named(self, fake_server, fake_embed, tmp_path):
+        """#1140 (merged after this count was written) makes a substring
+        ``sender`` that matches nothing unknown while the message's display
+        names are not all indexed. The count includes it, and the fixed
+        text names that cause beside the sender flag."""
+        conn, path = _open_built_db_conn(tmp_path, "names.db")
+        _add(conn, "n1", "t", "2024-01-10T00:00:00+00:00", COLLEAGUE)
+        _add(conn, "n2", "t", "2024-01-11T00:00:00+00:00", COLLEAGUE)
+        conn.execute(
+            "UPDATE messages SET participant_names_complete = 0 WHERE claimant_id = ?",
+            (claimant_of("n1"),),
+        )
+        conn.commit()
+        conn.close()
+        db = Database(str(path))
+        # A full address is always decided; a name fragment is not.
+        assert _counted(db, sender="vendor@example.com").indeterminate == 0
+        assert _counted(db, sender="Vendor").indeterminate == 1
+        out = self._call(fake_server, fake_embed, db, sender="Vendor")
+        assert out.structured_content["indeterminate"] == 1
+        line = out.content[0].text.splitlines()[1]
+        assert "display names not all indexed" in line
+        assert "sender ambiguous or not yet checked" in line
 
     def test_zero_is_stated_with_a_sender(self, fake_server, fake_embed, carrier_db):
         out = self._call(fake_server, fake_embed, carrier_db, sender="nobody@nowhere.test")

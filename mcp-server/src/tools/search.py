@@ -11,7 +11,7 @@ from fastmcp.exceptions import ToolError
 from mcp.types import CallToolResult
 
 from ..lib.embed import embed_query
-from ..lib.predicates import _given, validate_date_range
+from ..lib.predicates import _given, address_match_mode, validate_date_range
 from ..lib.rate_limited_log import ArgumentRejections, RateLimitedLog
 from ..lib.security import log_tool_call, safe_provider_exception_text
 from ..lib.sqlite import (
@@ -1195,9 +1195,11 @@ def register_search_tools(
         scan: even fewer than 50 results (including zero) can omit matches.
         ``sender`` is applied inside the search, before the cap. With
         ``sender``, ``indeterminate`` counts the attachments left out
-        because their carrying message's sender is ambiguous or not yet
-        checked (not limited by ``limit``); report it when it is not 0,
-        and read null as unavailable, never as 0.
+        because ``sender`` could not decide their carrying message (its
+        sender ambiguous or not yet checked, or, for a name or domain
+        fragment, its display names not all indexed; not limited by
+        ``limit``); report it when it is not 0, and read null as
+        unavailable, never as 0.
 
         Args:
             query: Text to match against filename, MIME type, and
@@ -1213,8 +1215,10 @@ def register_search_tools(
                     address exactly, anything else ("@example.com",
                     "Jane") as a case-insensitive substring of the
                     address or display name. Attachments on messages
-                    whose sender is ambiguous or not yet checked are
-                    left out and counted as ``indeterminate``.
+                    it cannot decide (sender ambiguous or not yet
+                    checked; for a fragment, display names not all
+                    indexed) are left out and counted as
+                    ``indeterminate``.
             date_from: ISO 8601 date lower bound on the message
                        carrying the attachment: its delivery date
                        (occurred_at), else its send date (sent_at).
@@ -1313,21 +1317,27 @@ def register_search_tools(
         # never read as complete when carrying messages could not be
         # decided (#1204). Fixed text and a count only.
         indeterminate_line = None
-        if _given(sender):
+        if given_sender := _given(sender):
+            # The causes the leaf can have for this value, as
+            # query_messages names them: a name or domain fragment that
+            # matches nothing is unknown while display names are not all
+            # indexed (#1140); a full address never is.
+            causes = "sender ambiguous or not yet checked"
+            if address_match_mode(given_sender) == "substring":
+                causes += "; display names not all indexed"
             if found.indeterminate is None:
                 indeterminate_line = (
                     "indeterminate: unavailable (the count of attachments whose carrying "
-                    "message's sender is ambiguous or not yet checked failed; such "
-                    "attachments may be left out)"
+                    f"message sender could not decide ({causes}) failed; such attachments "
+                    "may be left out)"
                 )
             else:
                 count("indeterminate", found.indeterminate)
                 indeterminate_line = f"indeterminate: {found.indeterminate}"
                 if found.indeterminate:
                     indeterminate_line += (
-                        " (attachments whose carrying message's sender is ambiguous or not "
-                        "yet checked, so sender could neither accept nor reject them; not in "
-                        "the results)"
+                        " (attachments whose carrying message sender could neither accept "
+                        f"nor reject: {causes}; not in the results)"
                     )
         bounds_line = describe_date_bounds(bounds)
         if not results:

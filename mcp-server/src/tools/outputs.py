@@ -500,9 +500,9 @@ class SearchAttachmentsOutput(_Output):
     indeterminate: int | None = Field(
         default=None,
         description="Only with a sender filter: indexed attachments the other filters and "
-        "the query reach whose carrying message's sender is ambiguous or not yet checked, "
-        "so sender could neither accept nor reject them; left out of results, and not "
-        "limited by limit. Null without sender, and when the count was unavailable (the "
+        "the query reach whose carrying message sender could neither accept nor reject (its "
+        "sender ambiguous or not yet checked; for a name or domain fragment, its display "
+        "names not all indexed); left out of results, and not limited by limit. Null without sender, and when the count was unavailable (the "
         "text says so); never read null as 0. When not 0, report it with the results.",
     )
 
