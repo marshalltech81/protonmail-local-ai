@@ -549,6 +549,29 @@ class TestDateBasisOnTheWire:
         timing = [r.getMessage() for r in caplog.records if r.name == "mcp.timings"]
         assert len(timing) == 1 and "outcome=error" in timing[0]
 
+    def test_explicit_null_is_rejected_but_omitting_defaults(self, messages_db, caplog):
+        # The schema publishes a string; an explicit null is not one, so
+        # it is rejected rather than run on the default clock (Codex
+        # round 6). Omitting the argument still means effective.
+        server = _server(messages_db)
+        with caplog.at_level(logging.INFO):
+            result = _wire(server, "query_messages", {"date_basis": None})
+        assert result.is_error
+        assert "date_basis must be a string" in result.content[0].text
+        warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert warnings == ["rejected invalid argument: query_messages.date_basis"]
+        omitted = _call(server, "query_messages", date_from="2000-01-01")
+        assert omitted["date_bounds"]["basis"] == "effective"
+        assert omitted["total_matches"] == 5
+
+    def test_output_schema_says_the_order_and_bounds_follow_date_basis(self, messages_db):
+        # Codex round 6: the row order and the occurred_at note named a
+        # fixed clock although date_basis chooses it.
+        schema = json.dumps(_tools(_server(messages_db))["query_messages"].output_schema)
+        assert "Newest send date first" not in schema
+        assert "Newest first by the date_basis clock" in schema
+        assert "query_messages' date_basis chooses the clock" in schema
+
     def test_string_values_still_apply(self, messages_db):
         server = _server(messages_db)
         assert _call(server, "query_messages", date_basis=" sent ")["total_matches"] == 5

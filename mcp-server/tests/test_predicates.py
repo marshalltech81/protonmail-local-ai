@@ -1018,3 +1018,11 @@ def test_normalize_date_basis_rejects_a_non_string_with_fixed_text(value):
         normalize_date_basis(value)
     assert info.value.field_name == "date_basis"
     assert str(info.value) == "date_basis must be a string"
+
+
+def test_normalize_date_basis_keeps_none_as_the_default_for_database_callers():
+    """``Database`` callers pass ``None`` for "not given"; only the
+    tool rejects an explicit null (Codex round 6)."""
+    from src.lib.predicates import DEFAULT_DATE_BASIS, normalize_date_basis
+
+    assert normalize_date_basis(None) == DEFAULT_DATE_BASIS == "effective"

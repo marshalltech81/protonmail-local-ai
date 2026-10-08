@@ -175,7 +175,9 @@ class MessageHeaders(_Output):
     occurred_at: str | None = Field(
         description=(
             "Delivery date of the message (the date of its topmost Received: header) in UTC, ISO 8601; null when the header is absent (sent mail) or unparseable. "
-            "Date filters bound occurred_at, else sent_at."
+            "Date filters bound occurred_at, else sent_at, except that query_messages' "
+            "date_basis chooses the clock: effective (the default) is that rule, sent "
+            "bounds sent_at, occurred bounds occurred_at."
         )
     )
     folder: str
@@ -646,7 +648,9 @@ class QueryMessagesOutput(_Output):
         description="Pass with the same filters for the next page; null when has_more is false."
     )
     messages: list[ListedMessage] = Field(
-        description="Newest send date first. With fields, each row holds only those "
+        description="Newest first by the date_basis clock (effective by default: "
+        "occurred_at, else sent_at; sent: sent_at; occurred: occurred_at), as "
+        "date_bounds.basis reports. With fields, each row holds only those "
         "fields plus claimant_id and thread_id."
     )
 

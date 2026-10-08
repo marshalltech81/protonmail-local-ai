@@ -1069,7 +1069,11 @@ def register_retrieval_tools(server, db):
                 )
             projection = frozenset(fields) | {"claimant_id", "thread_id"}
         # Reject a bad date range or an unavailable basis before any
-        # retrieval work.
+        # retrieval work. An explicit null is not the published string:
+        # only an omitted argument means the default (Codex round 6).
+        if date_basis is None:
+            rejections.reject("query_messages", "date_basis")
+            raise ToolError("Error: date_basis must be a string")
         try:
             basis = normalize_date_basis(date_basis)
             bounds = date_bounds(*validate_date_range(date_from, date_to), basis)
