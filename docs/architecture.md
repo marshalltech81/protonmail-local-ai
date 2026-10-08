@@ -1752,18 +1752,24 @@ copies are checked on disk once more, through a folder listing of its
 own: if mbsync restored one since the sweep, the message moves to it,
 its tombstone is cleared and it stays in the thread (logged at INFO
 with a count). These checks share a budget of 256 directory listings
-per reap pass; a check reserves 3 per copy before it runs, so a pass
-stays within it. Messages past the budget stay tombstoned and are
-rebuilt into the thread as survivors (text, chunks and thread vector
-included), so the index stays consistent, while the checked ones are
-reaped; the next pass checks the rest, so a large thread is reaped
-over several passes and never deferred for ever. A message whose own
-file is gone cannot be rebuilt as a survivor, so it is checked first
-and, past the budget, reaped unchecked with its copies unmarked; a copy
-restored after its check is likewise unmarked with the reaped message,
-and the next Maildir walk indexes it again. The pass logs one WARNING
-with the counts left and reaped unchecked, and each partial thread reap
-an INFO line with its counts. A failure of the
+per reap pass. A check reserves its copies' distinct folders (each
+copy's directory and its `new`/`cur` sibling) before it runs and is
+charged what it listed, so a pass stays within the budget; the pass's
+first check always runs, even when it alone needs more (logged at INFO
+with the counts), since its cost is bounded by folders, which mail
+cannot grow. Messages past the budget stay tombstoned and are rebuilt
+into the thread as survivors (text, chunks and thread vector included),
+so the index stays consistent, while the checked ones are reaped; the
+next pass checks the rest, so a large thread is reaped over several
+passes. A message whose own file is gone cannot be rebuilt as a
+survivor, so it is checked first; if the budget leaves it unchecked,
+its thread waits, visible in the blocked-thread count and WARNING,
+until a pass reaches it (an unreadable survivor blocks the same way,
+#1159). A copy restored after its check is unmarked with the reaped
+message, and the next Maildir walk indexes it again. A remap the
+database refuses leaves the message tombstoned for the next pass, with
+a counted INFO line. The pass logs one WARNING with the count left, and
+each partial thread reap an INFO line with its counts. A failure of the
 rename sweep before a periodic rescan is logged at WARNING with its
 type and does not stop that rescan's walk, and its recovery is logged
 like the other recurring steps'. Known limitation (#1141): a copy that

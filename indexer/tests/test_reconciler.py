@@ -843,14 +843,15 @@ class TestByteIdenticalCopies:
         assert rec.sweep()["tombstoned"] == 3
         for path in restored:
             path.with_name(path.name + "T").rename(path)
-        monkeypatch.setattr(reconciler_module, "_LIVE_COPY_RECHECK_LISTINGS", 4)
+        monkeypatch.setattr(reconciler_module, "_LIVE_COPY_RECHECK_LISTINGS", 3)
         listed = self._count_listings(monkeypatch, maildir)
 
         result = rec.reap()
 
-        assert len(listed) <= 4
-        # A check reserves 3 listings per candidate and is charged what it
-        # used (1 here): two fit in 4, the third waits for the next pass.
+        assert len(listed) <= 3
+        # A check reserves its copies' distinct directories (``cur`` and its
+        # ``new`` sibling: 2) and is charged what it listed (1 here): two
+        # fit in 3, the third waits for the next pass.
         assert len(listed) == 2
         assert result["threads_reaped"] == 0
         assert db.get_thread(thread_id) is not None
@@ -939,13 +940,13 @@ class TestByteIdenticalCopies:
         rec.sweep()
         for n in range(3):  # every copy gone for good
             (maildir / f"170000000{n}.K{n}.host:2,ST").unlink()
-        monkeypatch.setattr(reconciler_module, "_LIVE_COPY_RECHECK_LISTINGS", 3)
+        monkeypatch.setattr(reconciler_module, "_LIVE_COPY_RECHECK_LISTINGS", 2)
         listed = self._count_listings(monkeypatch, maildir)
 
         with caplog.at_level(logging.INFO, logger="indexer.reconciler"):
             first = rec.reap()
 
-        assert len(listed) == 1  # one check fits the budget of 3
+        assert len(listed) == 1  # one check fits the budget of 2
         assert first["threads_rebuilt"] == 1
         assert db.count_total_messages() == 2
         assert count_pending_deletions(db) == 2
@@ -989,7 +990,7 @@ class TestByteIdenticalCopies:
         rec.sweep()
         for n in range(3):
             (maildir / f"170000000{n}.K{n}.host:2,ST").unlink()
-        monkeypatch.setattr(reconciler_module, "_LIVE_COPY_RECHECK_LISTINGS", 3)
+        monkeypatch.setattr(reconciler_module, "_LIVE_COPY_RECHECK_LISTINGS", 2)
         survivors_seen: list[list[str]] = []
         real = db.get_chunk_embeddings_for_messages
 
@@ -1049,13 +1050,14 @@ class TestByteIdenticalCopies:
         assert queued == 1
         assert db.get_thread(thread_id) is not None
 
-    def test_unchecked_messages_whose_file_is_gone_are_reaped(
+    def test_a_gone_file_message_past_the_budget_waits_visibly(
         self, db, threader, embedder, maildir, monkeypatch, caplog
     ):
-        """A message whose own file is gone cannot be re-parsed as a
-        survivor, so leaving it unchecked would block the rebuild every
-        pass. Past the budget it is reaped unchecked; its copies are
-        unmarked, so one that is live again is re-indexed by the walk."""
+        """Owner decision, round 9 on #1134: a message whose own file is
+        gone is never reaped unchecked. Past the budget it stays
+        tombstoned; it cannot be rebuilt as a survivor, so its thread waits
+        on the blocked-thread count and WARNING until the budget reaches
+        it. Gone files are checked first."""
         import src.reconciler as reconciler_module
 
         thread_id, _restored = self._thread_of_restorable_copies(db, threader, maildir)
@@ -1064,15 +1066,127 @@ class TestByteIdenticalCopies:
             (maildir / f"170000000{n}.K{n}.host:2,ST").unlink()
             (maildir / f"170000001{n}.M{n}.host:2,ST").unlink()
         rec.sweep()
-        monkeypatch.setattr(reconciler_module, "_LIVE_COPY_RECHECK_LISTINGS", 3)
+        monkeypatch.setattr(reconciler_module, "_LIVE_COPY_RECHECK_LISTINGS", 2)
 
         with caplog.at_level(logging.INFO, logger="indexer.reconciler"):
             result = rec.reap()
 
+        assert result["threads_reaped"] == 0
+        assert result["blocked_threads"] == 1
+        assert count_pending_deletions(db) == 3
+        assert db.get_thread(thread_id) is not None
+        assert "unchecked" not in caplog.text
+        assert any(
+            r.levelno == logging.WARNING and "blocked from reaping" in r.getMessage()
+            for r in caplog.records
+        )
+
+        monkeypatch.setattr(reconciler_module, "_LIVE_COPY_RECHECK_LISTINGS", 256)
+        assert rec.reap()["threads_reaped"] == 1
+
+    def _add_copy_markers(self, db, claimant_id: str, paths: list[Path]) -> None:
+        """Record ``paths`` in ``indexed_files`` as further copies of
+        ``claimant_id`` (same bytes), without files on disk."""
+        content_hash = db._conn.execute(
+            "SELECT content_hash FROM messages WHERE claimant_id = ?", (claimant_id,)
+        ).fetchone()["content_hash"]
+        db._conn.executemany(
+            "INSERT INTO indexed_files (filepath, indexed_at, size, mtime_ns, content_hash) "
+            "VALUES (?, datetime('now'), NULL, NULL, ?)",
+            [(str(p), content_hash) for p in paths],
+        )
+        db._conn.commit()
+
+    def test_a_message_with_many_copies_in_one_folder_is_checked(
+        self, db, threader, embedder, maildir, monkeypatch
+    ):
+        """Codex round 9 on #1134: 3 listings reserved per copy made a
+        message with 86 or more copies cost more than the whole budget,
+        so it was never checked. It reserves its distinct folders."""
+        kept = maildir / "1700000000.K0.host:2,S"
+        mapped = maildir / "1700000001.M0.host:2,S"
+        thread_id = _index_copies(db, threader, kept, mapped, "many1102@example.com")
+        claimant = db.find_message_entry_by_filepath(str(mapped))["claimant_id"]
+        self._add_copy_markers(
+            db, claimant, [maildir / f"17000001{n:02d}.C{n}.host:2,S" for n in range(90)]
+        )
+        kept.unlink()
+        trashed = maildir / "1700000001.M0.host:2,ST"
+        mapped.rename(trashed)
+        rec = Reconciler(db, embedder, _default_config())
+        assert rec.sweep()["tombstoned"] == 1
+        listed = self._count_listings(monkeypatch, maildir)
+
+        result = rec.reap()
+
         assert result["threads_reaped"] == 1
         assert db.get_thread(thread_id) is None
-        warning = next(r for r in caplog.records if "re-check budget" in r.getMessage())
-        assert "2 whose own file is gone reaped unchecked" in warning.getMessage()
+        assert len(listed) == 1  # one folder, listed once for 91 copies
+
+    def test_an_oversized_check_runs_first_in_its_pass_and_logs(
+        self, db, threader, embedder, maildir, monkeypatch, caplog
+    ):
+        """A message whose folders alone exceed the budget is checked as
+        the pass's first check (its cost is bounded by folders, which mail
+        cannot grow), logged at INFO with counts; the next one waits."""
+        import src.reconciler as reconciler_module
+
+        thread_id, _restored = self._thread_of_restorable_copies(db, threader, maildir)
+        rec = Reconciler(db, embedder, _default_config())
+        rec.sweep()
+        for n in range(3):
+            (maildir / f"170000000{n}.K{n}.host:2,ST").unlink()
+        monkeypatch.setattr(reconciler_module, "_LIVE_COPY_RECHECK_LISTINGS", 1)
+        listed = self._count_listings(monkeypatch, maildir)
+
+        with caplog.at_level(logging.INFO, logger="indexer.reconciler"):
+            result = rec.reap()
+
+        assert result["threads_rebuilt"] == 1
+        assert len(listed) == 1
+        assert count_pending_deletions(db) == 2
+        over = [r for r in caplog.records if "over the budget" in r.getMessage()]
+        assert [(r.levelno, r.getMessage()) for r in over] == [
+            (
+                logging.INFO,
+                "reaper: a live-copy check needs 2 directory listing(s), over the "
+                "budget of 1; run as the pass's first check",
+            )
+        ]
+        assert str(maildir) not in caplog.text
+        assert db.get_thread(thread_id) is not None
+
+    def test_a_refused_remap_is_a_retry_not_a_kept_copy(
+        self, db, threader, embedder, maildir, monkeypatch, caplog
+    ):
+        """Codex round 9 on #1134: ``kept`` was counted, and the blocked
+        state cleared, before the remap's result was known."""
+        kept = maildir / "1700000000.M1.host:2,ST"
+        mapped = maildir / "1700000001.M2.host:2,S"
+        thread_id = _index_copies(db, threader, kept, mapped, "refused1102@example.com")
+        trashed = maildir / "1700000001.M2.host:2,ST"
+        mapped.rename(trashed)
+        rec = Reconciler(db, embedder, _default_config())
+        rec.sweep()
+        kept.rename(maildir / "1700000000.M1.host:2,S")  # restored after the sweep
+        rec._blocked_thread_attempts[thread_id] = 2
+        monkeypatch.setattr(db, "remap_to_identical_copy", lambda *_a, **_kw: False)
+
+        with caplog.at_level(logging.INFO, logger="indexer.reconciler"):
+            result = rec.reap()
+
+        assert result["threads_reaped"] == 0
+        assert rec._blocked_thread_attempts.get(thread_id) == 2
+        assert count_pending_deletions(db) == 1
+        assert "live identical copy restored" not in caplog.text
+        retry = [r for r in caplog.records if "refused" in r.getMessage()]
+        assert [(r.levelno, r.getMessage()) for r in retry] == [
+            (
+                logging.INFO,
+                "reaper: 1 remap(s) to a live identical copy refused (the mapping "
+                "or the copy moved); retrying next pass",
+            )
+        ]
 
     def _tombstone_backdated(self, db, path: Path, days: int) -> None:
         entry = db.find_message_entry_by_filepath(str(path))
