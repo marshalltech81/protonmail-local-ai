@@ -1106,7 +1106,9 @@ logs show a `stall guard:` line for a hang. Other messages in the same
 batch are not charged.
 
 `make status` (or the `get_mailbox_status` MCP tool) reports pending,
-retrying, and dead counts and whether the index is current. For the
+retrying, deferred, parked trashed and dead counts and whether the
+index is current (parked trashed and dead jobs do not count against
+it; see [`get_mailbox_status`](mcp-tools.md#get_mailbox_status)). For the
 error class breakdown, inspect the table directly:
 
 ```bash

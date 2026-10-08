@@ -117,6 +117,18 @@ class TestNotCurrentReasons:
             "4 of them already indexed and being reparsed)"
         ]
 
+    def test_parked_trashed_files_do_not_block_current(self):
+        """#1165: a parked trashed file is already indexed and waits only
+        for the reaper, so it is reported, not waited on."""
+        assert _reasons(queue=QueueCounts(pending=0, retrying=0, dead=0, parked_trashed=106)) == []
+
+    def test_deferred_messages_are_waiting(self):
+        """#1165: a deferral (unreadable file, embedder outage) has not
+        been indexed yet, so it keeps the index non-current, named apart
+        from retries."""
+        reasons = _reasons(queue=QueueCounts(pending=1, retrying=0, dead=0, deferred=2))
+        assert reasons == ["3 messages waiting to be indexed (1 pending, 0 retrying, 2 deferred)"]
+
 
 class TestGetMailboxStatusStandalone:
     def test_returns_real_status_from_populated_index(self, seeded_db, monkeypatch):
@@ -134,7 +146,14 @@ class TestGetMailboxStatusStandalone:
         assert status["current"] is True
         assert status["total_threads"] == 3
         assert status["total_messages"] == 3
-        assert status["queue"] == {"pending": 0, "retrying": 0, "dead": 0, "reparse": 0}
+        assert status["queue"] == {
+            "pending": 0,
+            "retrying": 0,
+            "deferred": 0,
+            "parked_trashed": 0,
+            "dead": 0,
+            "reparse": 0,
+        }
         assert "checked_at" in status
 
     def test_empty_index_is_not_current(self, empty_db, monkeypatch):

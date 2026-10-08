@@ -1327,9 +1327,9 @@ class TestStatsAndFolders:
                 ("queued", 0, None),
                 ("queued", 0, None),
                 ("queued", 2, "retryable"),
-                # Deferred during an embedder outage: failed, but no
-                # attempt was spent.
-                ("queued", 0, "operator_action_required"),
+                # Deferred for an embedder configuration error: no
+                # attempt spent, reported apart from retries (#1165).
+                ("queued", 0, "operator_action_required", "x", "embed", "AuthenticationError"),
                 ("dead", 5, "retryable"),
                 # Reparse jobs (#1078) count in their bucket and again
                 # under ``reparse`` while queued; a dead one only as dead.
@@ -1343,7 +1343,14 @@ class TestStatsAndFolders:
         assert stats["total_messages"] == 3
         assert stats["oldest_message"] is not None
         assert stats["newest_message"] is not None
-        assert stats["queue"] == {"pending": 3, "retrying": 3, "dead": 2, "reparse": 2}
+        assert stats["queue"] == {
+            "pending": 3,
+            "retrying": 2,
+            "deferred": 1,
+            "parked_trashed": 0,
+            "dead": 2,
+            "reparse": 2,
+        }
         assert stats["ingestion"] == {
             "sync_completed_at": "2026-09-28T12:00:00+00:00",
             "sync_interval_secs": 60,
@@ -1352,7 +1359,14 @@ class TestStatsAndFolders:
 
     def test_get_mailbox_status_before_the_indexer_reports(self, empty_db: Database):
         stats = empty_db.get_mailbox_status()
-        assert stats["queue"] == {"pending": 0, "retrying": 0, "dead": 0, "reparse": 0}
+        assert stats["queue"] == {
+            "pending": 0,
+            "retrying": 0,
+            "deferred": 0,
+            "parked_trashed": 0,
+            "dead": 0,
+            "reparse": 0,
+        }
         assert stats["ingestion"] is None
         assert stats["conflicting_message_ids"] == 0
         assert stats["extra_claimant_files"] == 0

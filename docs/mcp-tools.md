@@ -2208,11 +2208,11 @@ and what it holds. Call this when asked which version or build is running.
 | Field | Meaning |
 |---|---|
 | `server_version` | MCP server image's source commit, including `-dirty` for local changes; `unknown` when build identity is unavailable. This identifies the server code, not the MCP protocol or SQLite schema version |
-| `current` | `true` only when all three hold: mbsync completed a sync within three sync intervals (never less than 5 minutes), the indexer reported within 10 minutes, and no message is pending or retrying. A sync or indexer timestamp more than 2 minutes ahead of the server clock also makes it `false` |
+| `current` | `true` only when all three hold: mbsync completed a sync within three sync intervals (never less than 5 minutes), the indexer reported within 10 minutes, and no message is pending, retrying or deferred. A sync or indexer timestamp more than 2 minutes ahead of the server clock also makes it `false` |
 | `not_current_reasons` | One line per failed condition; empty when `current` is `true` |
 | `last_sync_at` / `sync_interval_secs` | mbsync's last successful sync from Bridge, and how often it syncs |
 | `indexer_last_seen_at` | When the indexer last reported (at most every 30 s with its health heartbeat, including during the initial index) |
-| `queue` | `pending` (found, not yet failed), `retrying` (failed at least once, including jobs deferred during an embedder outage; will retry), `dead` (failed permanently and incompletely indexed: missing from search, or found only by keyword, until `make requeue-dead`), `reparse` (of the pending and retrying jobs, those re-reading a message already indexed after an upgrade, #1078: searchable meanwhile, but data the upgrade adds is missing until it runs) |
+| `queue` | `pending` (found, not yet failed), `retrying` (failed at least once; will retry), `deferred` (postponed by the indexer without a failure of its own: a file it cannot read yet, an embedder outage or configuration error, or a reparse waiting for a rename; retried without spending attempts), `parked_trashed` (trashed files already indexed, waiting for the reaper to remove them or for the file to be restored, #1165), `dead` (failed permanently and incompletely indexed: missing from search, or found only by keyword, until `make requeue-dead`), `reparse` (of the pending, retrying and deferred jobs, those re-reading a message already indexed after an upgrade, #1078: searchable meanwhile, but data the upgrade adds is missing until it runs). `pending`, `retrying` and `deferred` make `current` false; `parked_trashed` and `dead` do not. A job that had already failed before an embedder outage deferred it counts as `retrying` |
 | `total_threads`, `total_messages`, `oldest_message`, `newest_message` | What the index holds |
 | `conflicting_message_ids` | How many Message-IDs more than one indexed file claims (see "Message-ID and claimant ID" above); 0 when none |
 | `extra_claimant_files` | Files beyond the first claimant of each conflicting Message-ID (two Message-IDs with 2 and 3 claimants give 3) |
@@ -2227,7 +2227,9 @@ answers from the `idx_messages_message` index alone.
 
 Dead messages do not make the index non-current: nothing more happens
 to them without an operator, so they are reported rather than waited
-on. `current` cannot see mail that reached Proton after the last sync,
+on. Nor do parked trashed files (mirror mode only): they are already
+indexed and wait only for the reaper, after
+`INDEXER_DELETION_GRACE_DAYS`. `current` cannot see mail that reached Proton after the last sync,
 or a delivery whose filesystem event the indexer missed (the periodic
 Maildir rescan picks that up within `INDEXER_RECOVERY_SWEEP_INTERVAL_SECS`).
 

@@ -702,13 +702,25 @@ class ListFoldersOutput(_Output):
 class QueueCounts(_Output):
     pending: int = Field(description="Messages found in the Maildir, not yet indexed.")
     retrying: int = Field(description="Messages that failed to index and will be retried.")
+    deferred: int = Field(
+        default=0,
+        description="Messages the indexer postponed without a failure of their own (a file "
+        "it cannot read yet, an embedder outage or configuration error, or a reparse waiting "
+        "for a rename); retried without spending attempts. They make current false.",
+    )
+    parked_trashed: int = Field(
+        default=0,
+        description="Trashed files already indexed and waiting for the reaper to remove "
+        "them (or for the file to be restored). They do not make current false.",
+    )
     dead: int = Field(
         description="Messages that failed permanently and are incompletely indexed: "
         "missing from search, or found only by keyword, until an operator requeues them."
     )
     reparse: int = Field(
         default=0,
-        description="Of the pending and retrying messages, those already indexed and being "
+        description="Of the pending, retrying and deferred messages, those already indexed "
+        "and being "
         "read again after an upgrade (a reparse): search finds them meanwhile, but data the "
         "upgrade adds is missing until the reparse finishes.",
     )
@@ -721,7 +733,7 @@ class MailboxStatusOutput(_Output):
     )
     current: bool = Field(
         description="True only when mail synced from Proton recently, the indexer is "
-        "running, and no message is waiting to be indexed. Mail that reached Proton "
+        "running, and no message is pending, retrying or deferred. Mail that reached Proton "
         "after last_sync_at is not searchable either way."
     )
     not_current_reasons: list[str] = Field(description="Why current is false; empty when true.")

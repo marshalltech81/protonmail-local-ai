@@ -595,7 +595,14 @@ def test_folders_contacts_and_status(messages_db):
     assert status["total_threads"] == 3
     assert status["total_messages"] == 5
     assert status["current"] is False
-    assert status["queue"] == {"pending": 0, "retrying": 0, "dead": 0, "reparse": 0}
+    assert status["queue"] == {
+        "pending": 0,
+        "retrying": 0,
+        "deferred": 0,
+        "parked_trashed": 0,
+        "dead": 0,
+        "reparse": 0,
+    }
 
 
 @pytest.mark.parametrize(

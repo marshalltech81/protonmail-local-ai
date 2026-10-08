@@ -61,8 +61,10 @@ def not_current_reasons(
 
     Current means: mbsync completed a sync recently, the indexer has
     reported recently (it read that sync's stamp after the sync's mail
-    was already queued), and nothing is waiting in the queue. Dead
-    messages are terminal and reported separately, not waited on.
+    was already queued), and nothing is waiting in the queue (pending,
+    retrying or deferred). Dead messages are terminal and parked trashed
+    files are already indexed (#1165): both are reported separately, not
+    waited on.
     """
     reasons = []
     if last_sync_at is None or sync_interval_secs is None:
@@ -86,12 +88,14 @@ def not_current_reasons(
             reasons.append(f"the indexer last reported {_age(-age)} in the future")
         elif age > INDEXER_STALE_SECS:
             reasons.append(f"the indexer last reported {_age(age)} ago")
-    waiting = queue.pending + queue.retrying
+    waiting = queue.pending + queue.retrying + queue.deferred
     if waiting:
+        deferred = f", {queue.deferred:,} deferred"
         reparse = f"; {queue.reparse:,} of them already indexed and being reparsed"
         reasons.append(
             f"{_messages(waiting)} waiting to be indexed "
             f"({queue.pending:,} pending, {queue.retrying:,} retrying"
+            f"{deferred if queue.deferred else ''}"
             f"{reparse if queue.reparse else ''})"
         )
     return reasons
@@ -152,7 +156,8 @@ def _render(out: MailboxStatusOutput) -> str:
     lines += [
         f"Last mail sync: {_when(out.last_sync_at, out.checked_at)}",
         f"Indexer seen:   {_when(out.indexer_last_seen_at, out.checked_at)}",
-        f"Queue:          {q.pending:,} pending, {q.retrying:,} retrying, {q.dead:,} dead",
+        f"Queue:          {q.pending:,} pending, {q.retrying:,} retrying, "
+        f"{q.deferred:,} deferred, {q.parked_trashed:,} parked (trashed), {q.dead:,} dead",
     ]
     if q.reparse:
         one = q.reparse == 1
@@ -161,6 +166,24 @@ def _render(out: MailboxStatusOutput) -> str:
             f"{'is' if one else 'are'} already indexed and being reparsed after an "
             f"upgrade: search finds {'it' if one else 'them'}, but data the upgrade "
             "adds is missing until the reparse finishes."
+        )
+    if q.deferred:
+        one = q.deferred == 1
+        lines.append(
+            f"  {_messages(q.deferred)} {'is' if one else 'are'} deferred "
+            f"without a failure of {'its' if one else 'their'} own (a file the indexer "
+            "cannot read yet, an embedder outage or configuration error, or a reparse "
+            f"waiting for a rename); the indexer retries {'it' if one else 'them'} "
+            "without spending attempts."
+        )
+    if q.parked_trashed:
+        one = q.parked_trashed == 1
+        lines.append(
+            f"  {q.parked_trashed:,} trashed message{'' if one else 's'} "
+            f"{'is' if one else 'are'} already indexed and wait{'s' if one else ''} for "
+            f"the reaper to remove {'it' if one else 'them'} (or for "
+            f"{'its file' if one else 'their files'} to be restored); "
+            f"{'it does' if one else 'they do'} not make the index non-current."
         )
     if q.dead:
         lines.append(
@@ -209,7 +232,8 @@ def register_system_tools(server, db):
         This server answers only from the local index, which mbsync fills
         from Proton every few minutes; it never contacts Proton itself. The
         index is current when mail synced recently, the indexer is running,
-        and no message is waiting to be indexed. When it is not current, the
+        and no message is waiting to be indexed (pending, retrying or
+        deferred). When it is not current, the
         reasons are listed: say so before relying on the results, since
         recent mail may be missing. Mail that reached Proton after the last
         sync is never searchable yet.
@@ -218,8 +242,10 @@ def register_system_tools(server, db):
             server_version (the deployed source commit, with -dirty for
             local changes, or unknown when build identity is unavailable),
             current and the reasons it is false, last sync time, indexer
-            liveness, queue counts (pending, retrying, dead, and how many
-            waiting messages are already indexed and being reparsed), total threads
+            liveness, queue counts (pending, retrying, deferred, parked
+            trashed files that do not count against current, dead, and
+            how many waiting messages are already indexed and being
+            reparsed), total threads
             and messages, the date range, and how many Message-IDs more
             than one file claims (counts only).
         """
