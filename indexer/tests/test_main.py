@@ -3378,6 +3378,348 @@ class TestIngestionStateRecorder:
         assert self._state(db)["sync_completed_at"] == STAMP.completed_at
 
 
+_OVERFLOW_WARNING = (
+    "Maildir watcher: inotify event queue overflowed and dropped events; "
+    "a Maildir walk will queue the mail they announced"
+)
+_OVERFLOW_MARKER = "zqx1108marker"
+
+
+def _recovered_lines(caplog) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if r.getMessage().startswith("Maildir watcher: recovered")]
+
+
+def _overflow_lines(caplog) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if r.getMessage() == _OVERFLOW_WARNING]
+
+
+def _stamp_moved_event(root: Path, completed_at: str = "2026-09-28T12:00:00Z"):
+    from watchdog.events import FileMovedEvent
+
+    return FileMovedEvent(
+        str(root / f".mbsync-last-sync.{completed_at}.60.tmp"),
+        str(root / main.SYNC_STAMP_NAME),
+    )
+
+
+class TestInotifyOverflow:
+    """An inotify queue overflow drops delivery events (#1108). It is
+    logged, the watcher's stamp acknowledgements are held back, and a
+    Maildir walk that started after the latest overflow lowers the fence
+    when it completes."""
+
+    def _acked(self, db, recorder) -> str | None:
+        recorder._last_write = None
+        recorder.maybe_record(now=100.0)
+        return db._conn.execute("SELECT sync_completed_at FROM ingestion_state").fetchone()[0]
+
+    def _setup(self, tmp_path, db, monkeypatch):
+        maildir = tmp_path / "maildir"
+        (maildir / "INBOX" / "cur").mkdir(parents=True)
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        recorder = main._IngestionStateRecorder(db, maildir)
+        monkeypatch.setattr(main, "_ingestion_state", recorder)
+        handler = main.MaildirHandler(db, _make_queue(db), ingestion_state=recorder)
+        return maildir, recorder, handler
+
+    # --- detection ---------------------------------------------------------
+
+    def test_wrapper_counts_overflow_records_and_passes_all_through(
+        self, tmp_path, db, monkeypatch, caplog
+    ):
+        caplog.set_level(logging.INFO)
+        _, recorder, _ = self._setup(tmp_path, db, monkeypatch)
+        records = [
+            (1, 0x100, 0, _OVERFLOW_MARKER.encode()),
+            (-1, main._IN_Q_OVERFLOW, 0, b""),
+            (2, 0x80, 7, b"x"),
+        ]
+        calls: list[bytes] = []
+
+        def parse(buffer):
+            calls.append(buffer)
+            yield from records
+
+        wrapped = main._overflow_aware(parse)
+        assert list(wrapped(b"buf")) == records
+        assert calls == [b"buf"]
+        assert recorder.recovery_pending
+        lines = _overflow_lines(caplog)
+        assert len(lines) == 1 and lines[0].levelno == logging.WARNING
+        assert _OVERFLOW_MARKER not in caplog.text
+
+    def test_no_overflow_record_leaves_nothing_pending(self, tmp_path, db, monkeypatch, caplog):
+        _, recorder, _ = self._setup(tmp_path, db, monkeypatch)
+        wrapped = main._overflow_aware(lambda _b: iter([(1, 0x100, 0, b"a")]))
+        assert list(wrapped(b"")) == [(1, 0x100, 0, b"a")]
+        assert not recorder.recovery_pending
+        assert not _overflow_lines(caplog)
+
+    def test_overflow_warnings_share_the_line_budget(self, tmp_path, db, monkeypatch, caplog):
+        """A crafted burst can overflow the queue again and again; the
+        WARNING goes through the shared limiter, and every overflow is
+        still counted."""
+        from src import extractors
+
+        _, recorder, _ = self._setup(tmp_path, db, monkeypatch)
+        for _ in range(extractors._WARNINGS_PER_WINDOW + 5):
+            recorder.overflow_seen()
+        assert len(_overflow_lines(caplog)) == extractors._WARNINGS_PER_WINDOW
+        assert extractors._LINE_BUDGET.drain(extractors._OTHER_LINES) == 5
+        assert recorder.walk_started() == extractors._WARNINGS_PER_WINDOW + 5
+
+    def _fake_inotify_c(self, monkeypatch):
+        import types
+
+        module = types.ModuleType("watchdog.observers.inotify_c")
+
+        class Inotify:
+            @staticmethod
+            def _parse_event_buffer(buffer):
+                yield (-1, main._IN_Q_OVERFLOW, 0, b"")
+
+        module.Inotify = Inotify  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "watchdog.observers.inotify_c", module)
+        monkeypatch.setattr(main, "_overflow_hook_installed", False)
+        return Inotify
+
+    def test_install_wraps_the_parser_once(self, tmp_path, db, monkeypatch):
+        inotify = self._fake_inotify_c(monkeypatch)
+        _, recorder, _ = self._setup(tmp_path, db, monkeypatch)
+        main._install_inotify_overflow_hook()
+        main._install_inotify_overflow_hook()
+        list(inotify._parse_event_buffer(b""))
+        assert recorder.walk_started() == 1
+
+    def test_install_warns_when_watchdog_has_no_parser_to_wrap(self, monkeypatch, caplog):
+        inotify = self._fake_inotify_c(monkeypatch)
+        monkeypatch.delattr(inotify, "_parse_event_buffer")
+        main._install_inotify_overflow_hook()
+        assert "inotify overflow detection unavailable" in caplog.text
+        assert not main._overflow_hook_installed
+
+    def test_install_is_a_no_op_without_inotify(self, monkeypatch, caplog):
+        from watchdog.utils import UnsupportedLibcError
+
+        def unsupported(name):
+            raise UnsupportedLibcError("no inotify")
+
+        monkeypatch.setattr(main, "_overflow_hook_installed", False)
+        monkeypatch.setattr(main.importlib, "import_module", unsupported)
+        main._install_inotify_overflow_hook()
+        assert not main._overflow_hook_installed
+        assert not caplog.records
+
+    @pytest.mark.skipif(sys.platform != "linux", reason="inotify is Linux only")
+    def test_real_inotify_overflow_is_detected(self, tmp_path, db, monkeypatch, caplog):
+        """The real read path: fill an inotify instance's kernel queue
+        past ``max_queued_events`` without reading, then read it through
+        watchdog's ``read_events``."""
+        import select
+
+        from watchdog.observers import inotify_c
+
+        limit = int(Path("/proc/sys/fs/inotify/max_queued_events").read_text())
+        if limit > 65536:
+            pytest.skip("max_queued_events too large to fill quickly")
+        _, recorder, _ = self._setup(tmp_path, db, monkeypatch)
+        saved = inotify_c.Inotify.__dict__["_parse_event_buffer"]
+        monkeypatch.setattr(main, "_overflow_hook_installed", False)
+        watched = tmp_path / "watched"
+        watched.mkdir()
+        try:
+            main._install_inotify_overflow_hook()
+            ino = inotify_c.Inotify(
+                str(watched).encode(), event_mask=inotify_c.InotifyConstants.IN_CREATE
+            )
+            try:
+                for i in range(limit + 64):
+                    (watched / f"f{i}").touch()
+                reads = 0
+                while not recorder.recovery_pending and reads < limit:
+                    if not select.select([ino.fd], [], [], 5)[0]:
+                        break
+                    ino.read_events()
+                    reads += 1
+            finally:
+                ino.close()
+        finally:
+            setattr(inotify_c.Inotify, "_parse_event_buffer", saved)
+        assert recorder.walk_started() == 1
+        assert len(_overflow_lines(caplog)) == 1
+
+    # --- the fence -----------------------------------------------------------
+
+    def test_stamp_with_no_overflow_is_acknowledged_by_the_watcher(self, tmp_path, db, monkeypatch):
+        maildir, recorder, handler = self._setup(tmp_path, db, monkeypatch)
+        handler.on_moved(_stamp_moved_event(maildir))
+        assert self._acked(db, recorder) == STAMP.completed_at
+
+    def test_stamp_after_overflow_is_held_until_a_walk_completes(
+        self, tmp_path, db, monkeypatch, caplog
+    ):
+        caplog.set_level(logging.INFO)
+        maildir, recorder, handler = self._setup(tmp_path, db, monkeypatch)
+        recorder.overflow_seen()
+        handler.on_moved(_stamp_moved_event(maildir))
+        assert self._acked(db, recorder) is None
+        assert not _recovered_lines(caplog)
+
+        main._run_periodic_rescan(db, _make_queue(db), recorder, skip_trashed=False)
+
+        assert not recorder.recovery_pending
+        # No stamp on disk for the walk to read: the held one is what
+        # gets acknowledged.
+        assert self._acked(db, recorder) == STAMP.completed_at
+        lines = _recovered_lines(caplog)
+        assert len(lines) == 1 and lines[0].levelno == logging.INFO
+        assert "recovered from 1 inotify queue overflow(s)" in lines[0].getMessage()
+
+    def test_stamp_during_the_recovery_walk_is_acknowledged_when_it_completes(
+        self, tmp_path, db, monkeypatch, caplog
+    ):
+        caplog.set_level(logging.INFO)
+        maildir, recorder, handler = self._setup(tmp_path, db, monkeypatch)
+        recorder.overflow_seen()
+        seen_during: list[str | None] = []
+        real_walk = main._enqueue_unindexed_messages
+
+        def walk(*a, **kw):
+            n = real_walk(*a, **kw)
+            handler.on_moved(_stamp_moved_event(maildir, "2026-09-28T12:05:00Z"))
+            seen_during.append(self._acked(db, recorder))
+            return n
+
+        monkeypatch.setattr(main, "_enqueue_unindexed_messages", walk)
+        main._run_periodic_rescan(db, _make_queue(db), recorder, skip_trashed=False)
+
+        assert seen_during == [None]
+        assert self._acked(db, recorder) == "2026-09-28T12:05:00+00:00"
+        assert len(_recovered_lines(caplog)) == 1
+
+    def test_failed_walk_keeps_the_fence(self, tmp_path, db, monkeypatch, caplog):
+        caplog.set_level(logging.INFO)
+        maildir, recorder, handler = self._setup(tmp_path, db, monkeypatch)
+        recorder.overflow_seen()
+        handler.on_moved(_stamp_moved_event(maildir))
+
+        def boom(*_a, **_kw):
+            raise OSError(5, "io", _OVERFLOW_MARKER)
+
+        with monkeypatch.context() as m:
+            m.setattr(main, "_iter_maildir_messages", boom)
+            main._run_periodic_rescan(db, _make_queue(db), recorder, skip_trashed=False)
+
+        assert recorder.recovery_pending
+        assert self._acked(db, recorder) is None
+        assert not _recovered_lines(caplog)
+        assert "periodic Maildir rescan failed: OSError" in caplog.text
+
+        main._run_periodic_rescan(db, _make_queue(db), recorder, skip_trashed=False)
+        assert not recorder.recovery_pending
+        assert self._acked(db, recorder) == STAMP.completed_at
+        assert len(_recovered_lines(caplog)) == 1
+        assert _OVERFLOW_MARKER not in caplog.text
+
+    def test_overflow_during_the_walk_needs_another_walk(self, tmp_path, db, monkeypatch, caplog):
+        caplog.set_level(logging.INFO)
+        maildir, recorder, handler = self._setup(tmp_path, db, monkeypatch)
+        recorder.overflow_seen()
+        real_walk = main._enqueue_unindexed_messages
+        overflowed: list[bool] = []
+
+        def walk(*a, **kw):
+            if not overflowed:
+                overflowed.append(True)
+                recorder.overflow_seen()
+            return real_walk(*a, **kw)
+
+        monkeypatch.setattr(main, "_enqueue_unindexed_messages", walk)
+        main._run_periodic_rescan(db, _make_queue(db), recorder, skip_trashed=False)
+        assert recorder.recovery_pending
+        handler.on_moved(_stamp_moved_event(maildir))
+        assert self._acked(db, recorder) is None
+        assert not _recovered_lines(caplog)
+
+        main._run_periodic_rescan(db, _make_queue(db), recorder, skip_trashed=False)
+        assert not recorder.recovery_pending
+        assert self._acked(db, recorder) == STAMP.completed_at
+        lines = _recovered_lines(caplog)
+        assert len(lines) == 1
+        assert "recovered from 2 inotify queue overflow(s)" in lines[0].getMessage()
+
+    def test_overflow_with_no_stamp_is_recovered(self, tmp_path, db, monkeypatch, caplog):
+        """The walk queues the mail the dropped events announced."""
+        caplog.set_level(logging.INFO)
+        maildir, recorder, _ = self._setup(tmp_path, db, monkeypatch)
+        dropped = maildir / "INBOX" / "cur" / "dropped"
+        dropped.write_bytes(b"Subject: x\r\n\r\nbody\r\n")
+        queue = _make_queue(db)
+        recorder.overflow_seen()
+        assert len(_overflow_lines(caplog)) == 1
+
+        main._run_periodic_rescan(db, queue, recorder, skip_trashed=False)
+
+        assert queue.has_pending_row(str(dropped))
+        assert not recorder.recovery_pending
+        assert self._acked(db, recorder) is None
+        assert len(_recovered_lines(caplog)) == 1
+
+    def test_a_walk_with_nothing_owed_logs_no_recovery(self, tmp_path, db, monkeypatch, caplog):
+        caplog.set_level(logging.INFO)
+        _, recorder, _ = self._setup(tmp_path, db, monkeypatch)
+        main._run_periodic_rescan(db, _make_queue(db), recorder, skip_trashed=False)
+        assert not _recovered_lines(caplog)
+
+    # --- startup -------------------------------------------------------------
+
+    def _initial_index(self, db, recorder, monkeypatch, *, walk=None, drain=None):
+        monkeypatch.setattr(main, "touch_health_file", lambda: None)
+        if walk is not None:
+            monkeypatch.setattr(main, "_enqueue_unindexed_messages", walk)
+        if drain is not None:
+            monkeypatch.setattr(main, "_drain_queue_batched", drain)
+        main.initial_index(
+            db, make_mock_embedder(), Threader(db), _make_queue(db), ingestion_state=recorder
+        )
+
+    def test_initial_walk_covers_an_overflow_before_it(self, tmp_path, db, monkeypatch, caplog):
+        """The watcher starts before the initial walk, so an overflow can
+        land first; the walk then covers it."""
+        caplog.set_level(logging.INFO)
+        _, recorder, _ = self._setup(tmp_path, db, monkeypatch)
+        recorder.overflow_seen()
+        self._initial_index(db, recorder, monkeypatch)
+        assert not recorder.recovery_pending
+        assert len(_recovered_lines(caplog)) == 1
+
+    def test_overflow_during_the_initial_walk_stays_owed(self, tmp_path, db, monkeypatch, caplog):
+        caplog.set_level(logging.INFO)
+        _, recorder, _ = self._setup(tmp_path, db, monkeypatch)
+
+        def walk(*_a, **_kw):
+            recorder.overflow_seen()
+            return 0
+
+        self._initial_index(db, recorder, monkeypatch, walk=walk)
+        assert recorder.recovery_pending
+        assert not _recovered_lines(caplog)
+
+    def test_overflow_during_the_initial_drain_fences_the_watcher(self, tmp_path, db, monkeypatch):
+        maildir, recorder, handler = self._setup(tmp_path, db, monkeypatch)
+
+        def drain(*_a, **_kw):
+            recorder.overflow_seen()
+            handler.on_moved(_stamp_moved_event(maildir))
+            return 0
+
+        self._initial_index(db, recorder, monkeypatch, drain=drain)
+        assert recorder.recovery_pending
+        assert self._acked(db, recorder) is None
+        main._run_periodic_rescan(db, _make_queue(db), recorder, skip_trashed=False)
+        assert self._acked(db, recorder) == STAMP.completed_at
+
+
 class TestRequeueStaleExtractions:
     """Bumping an extractor's version re-queues the messages whose cached
     extraction came from an older version, once, so a fixed extractor
@@ -5369,6 +5711,7 @@ class TestMainStartupAndLoop:
         observer=None,
         health=None,
         sleep=None,
+        walk=None,
     ):
         events: list[str] = []
         self._events = events
@@ -5418,6 +5761,8 @@ class TestMainStartupAndLoop:
                 events.append(f"walk:{reason}:skip_trashed={kw.get('skip_trashed')}") or 0
             ),
         )
+        if walk is not None:
+            monkeypatch.setattr(main, "_enqueue_unindexed_messages", walk)
         if sweep_due:
             monkeypatch.setattr(main, "RECOVERY_SWEEP_INTERVAL_SECS", 0)
         monkeypatch.setattr(
@@ -5719,6 +6064,69 @@ class TestMainStartupAndLoop:
         )
         assert events[rescan - 1] == "sweep_paths"
         assert events.count("sweep_paths") == 2  # startup, then the rescan
+
+    @staticmethod
+    def _overflow_after_initial_index():
+        """A heartbeat stub that reports one inotify overflow once the
+        recorder exists (after ``initial_index``)."""
+        done: list[bool] = []
+
+        def health():
+            if main._ingestion_state is not None and not done:
+                done.append(True)
+                main._ingestion_state.overflow_seen()
+
+        return health
+
+    def test_pending_overflow_runs_a_rescan_on_the_first_tick(self, tmp_path, monkeypatch, caplog):
+        """#1108: an overflow is walked at once, not at the next periodic
+        rescan, and the recovery is logged."""
+        caplog.set_level(logging.INFO)
+        events = self._run_main(
+            tmp_path, monkeypatch, sweep_due=False, health=self._overflow_after_initial_index()
+        )
+
+        assert sum(e.startswith(f"walk:{main.REASON_RESCAN}:") for e in events) == 1
+        assert not main._ingestion_state.recovery_pending
+        assert "recovered from 1 inotify queue overflow(s)" in caplog.text
+
+    def test_no_overflow_runs_no_early_rescan(self, tmp_path, monkeypatch):
+        events = self._run_main(tmp_path, monkeypatch, sweep_due=False)
+        assert not any(e.startswith(f"walk:{main.REASON_RESCAN}:") for e in events)
+
+    @pytest.mark.parametrize(("retry_secs", "attempts"), [(3600, 1), (0, 3)])
+    def test_failed_overflow_rescan_is_retried_after_the_interval(
+        self, tmp_path, monkeypatch, caplog, retry_secs, attempts
+    ):
+        """A walk that fails leaves the recovery owed; it is retried, but
+        at most once per ``OVERFLOW_RESCAN_RETRY_SECS``, so a walk that
+        keeps failing does not run on every tick."""
+        monkeypatch.setattr(main, "OVERFLOW_RESCAN_RETRY_SECS", retry_secs)
+        walks: list[str] = []
+
+        def walk(*_a, **_kw):
+            walks.append("walk")
+            raise OSError(5, "io")
+
+        ticks: list[int] = []
+
+        def sleep(_seconds):
+            ticks.append(1)
+            if len(ticks) == 3:
+                raise KeyboardInterrupt
+
+        self._run_main(
+            tmp_path,
+            monkeypatch,
+            sweep_due=False,
+            health=self._overflow_after_initial_index(),
+            walk=walk,
+            sleep=sleep,
+        )
+
+        assert len(walks) == attempts
+        assert main._ingestion_state.recovery_pending
+        assert caplog.text.count("periodic Maildir rescan failed: OSError") == attempts
 
     def test_drain_failure_log_keeps_mail_out(self, tmp_path, monkeypatch, caplog):
         """The main loop's drain backstop logs through the same

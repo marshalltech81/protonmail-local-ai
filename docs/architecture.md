@@ -2260,8 +2260,26 @@ re-walks the Maildir with the same rules as the startup scan
 (`_enqueue_unindexed_messages`: skip indexed, dead-lettered, and
 already-queued files; enqueue the rest with reason `rescan`). A file
 whose event was missed — restart, event coalescing, a delivery
-while the observer was not running — is therefore indexed
-eventually rather than omitted until the next container restart.
+while the observer was not running, an inotify queue overflow — is
+therefore indexed eventually rather than omitted until the next
+container restart.
+
+An inotify queue overflow is the one miss the indexer can see (#1108).
+When a burst fills the kernel's per-instance event queue
+(`fs.inotify.max_queued_events`), Linux drops the events after it and
+queues one `IN_Q_OVERFLOW` record, which watchdog 6.0.0 skips without
+a word. At startup the indexer wraps watchdog's inotify buffer parser
+(`Inotify._parse_event_buffer`, `_install_inotify_overflow_hook`) so
+each overflow record logs a fixed-text WARNING (shared line budget)
+and adds one to an overflow count in `_IngestionStateRecorder`. The
+main loop then runs the periodic rescan (rename sweep and walk) at
+once, and again at most once per `OVERFLOW_RESCAN_RETRY_SECS` (60 s)
+while the walk fails. Each walk (the startup walk too) takes the
+count before it starts; only a walk that completes with no overflow
+since then clears the recovery, and logs it. Until then the watcher's
+stamp acknowledgements are held back (see "Index currency" below).
+Other platforms' watchdog backends have no inotify queue, and the
+hook is not installed there.
 
 watchdog's dispatcher thread catches only its own empty-queue
 timeout, so an exception escaping a handler (`enqueue` or
@@ -2389,7 +2407,12 @@ is queued:
 - when the watcher handles the stamp's rename. Watchdog dispatches
   events in order, so the sync's delivery events were handled first.
   The sync is read from the temporary file's name, not the stamp's
-  content, which a later sync may already have replaced.
+  content, which a later sync may already have replaced. After an
+  inotify queue overflow this no longer holds, since some delivery
+  events were dropped (#1108): the stamp is held instead, the newest
+  one, and acknowledged when a walk that started after the latest
+  overflow completes. Every delivery the overflow dropped was on disk
+  before that walk began, and later ones reached the watcher in order.
 - when a Maildir walk (startup or the periodic rescan) finishes: the
   stamp read before the walk is acknowledged.
 

@@ -25,6 +25,7 @@ off. See ``src/reconciler.py``.
 """
 
 import hashlib
+import importlib
 import json
 import logging
 import os
@@ -45,6 +46,7 @@ from pathlib import Path
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 from watchdog.observers.api import BaseObserver
+from watchdog.utils import UnsupportedLibcError
 
 from .attachment_indexing import (
     AttachmentWritePlan,
@@ -572,6 +574,12 @@ WAL_CHECKPOINT_INTERVAL_SECS = _int_env("INDEXER_WAL_CHECKPOINT_INTERVAL_SECS", 
 # (``_enqueue_unindexed_messages``).
 RECOVERY_SWEEP_INTERVAL_SECS = _int_env("INDEXER_RECOVERY_SWEEP_INTERVAL_SECS", 1800, minimum=60)
 
+# After an inotify queue overflow (#1108) the main loop re-walks the
+# Maildir at once instead of at the next periodic rescan, and while
+# that walk keeps failing, retries it at most once per this many
+# seconds: each attempt is a full walk.
+OVERFLOW_RESCAN_RETRY_SECS = 60
+
 # Phase 1 seed for new threads and already-zero chunkless ones (the
 # only branch that uses this constant). Phase 1's seed-selection runs a three-case priority
 # chain:
@@ -779,6 +787,16 @@ class _IngestionStateRecorder:
     finishes. A stamp merely present on disk proves nothing — the
     watcher may still be behind on that sync's deliveries.
 
+    An inotify queue overflow breaks the first rule: the kernel dropped
+    events, so the watcher may handle a stamp whose deliveries it never
+    saw (#1108). ``_overflows`` counts the overflows the watcher
+    reported; ``_covered`` is the count at the start of the last Maildir
+    walk that completed. While ``_overflows`` is ahead, a stamp the
+    watcher handles is held (the newest) instead of acknowledged, and a
+    walk that started after the latest overflow acknowledges it when it
+    completes: every delivery the overflow dropped was on disk before
+    that walk began, and the ones after it reached the watcher in order.
+
     Writes at most once per ``interval_secs``; mcp-server's staleness
     thresholds are minutes.
     """
@@ -789,6 +807,13 @@ class _IngestionStateRecorder:
         self.interval_secs = interval_secs
         self._acked: SyncStamp | None = None
         self._last_write: float | None = None
+        # The watcher thread and the main thread both acknowledge and
+        # touch the overflow state.
+        self._lock = threading.Lock()
+        self._overflows = 0
+        self._covered = 0
+        self._reported = 0
+        self._held: SyncStamp | None = None
 
     def read_stamp(self) -> SyncStamp | None:
         """The stamp on disk now, for acknowledging after a walk."""
@@ -799,8 +824,71 @@ class _IngestionStateRecorder:
             return None
 
     def acknowledge(self, stamp: SyncStamp | None) -> None:
-        # Called from the watcher thread and the main thread; keep the
-        # newest so a walk that read an older stamp cannot move it back.
+        """Acknowledge the stamp a completed Maildir walk read before it
+        started."""
+        with self._lock:
+            self._acknowledge(stamp)
+
+    def acknowledge_watched(self, stamp: SyncStamp) -> None:
+        """Acknowledge a stamp the watcher handled, or hold it while an
+        overflow's recovery walk is owed."""
+        with self._lock:
+            if self._overflows > self._covered:
+                if self._held is None or stamp.completed_at > self._held.completed_at:
+                    self._held = stamp
+                return
+            self._acknowledge(stamp)
+
+    @property
+    def recovery_pending(self) -> bool:
+        """An overflow has not yet been covered by a completed walk."""
+        with self._lock:
+            return self._overflows > self._covered
+
+    def overflow_seen(self) -> None:
+        """Called from watchdog's emitter thread for each overflow record."""
+        with self._lock:
+            self._overflows += 1
+        # A burst can overflow the queue again and again: rate limited,
+        # and the recovery line counts every overflow.
+        warn_rate_limited(
+            log,
+            "Maildir watcher: inotify event queue overflowed and dropped events; "
+            "a Maildir walk will queue the mail they announced",
+            attachment=False,
+        )
+
+    def walk_started(self) -> int:
+        """The overflow count a walk starting now covers once it completes."""
+        with self._lock:
+            return self._overflows
+
+    def walk_completed(self, started: int) -> None:
+        """A walk that began at overflow count ``started`` completed.
+
+        Lowers the fence and acknowledges the held stamp when no overflow
+        arrived since the walk began; otherwise another walk is owed.
+        """
+        with self._lock:
+            if started <= self._covered:
+                return
+            self._covered = started
+            if self._overflows > self._covered:
+                return
+            held, self._held = self._held, None
+            self._acknowledge(held)
+            recovered = self._overflows - self._reported
+            self._reported = self._overflows
+        log.info(
+            "Maildir watcher: recovered from %d inotify queue overflow(s); a Maildir walk "
+            "queued the mail their dropped events announced",
+            recovered,
+        )
+
+    def _acknowledge(self, stamp: SyncStamp | None) -> None:
+        # Called with ``_lock`` held, from the watcher thread and the
+        # main thread; keep the newest so a walk that read an older stamp
+        # cannot move it back.
         # Timestamps share one UTC ISO format, so they compare as strings.
         # An acknowledged stamp ahead of our clock (the clock rolled back)
         # yields to any new one; otherwise every later sync would sort
@@ -842,6 +930,53 @@ class _IngestionStateRecorder:
 
 # Set by ``main``; ``touch_health_file`` reports liveness through it.
 _ingestion_state: _IngestionStateRecorder | None = None
+
+
+# inotify(7): the record the kernel queues, with watch descriptor -1,
+# when an instance's queue (``fs.inotify.max_queued_events``) is full
+# and the events after it are dropped.
+_IN_Q_OVERFLOW = 0x4000
+_overflow_hook_installed = False
+
+
+def _overflow_aware(parse):
+    """Wrap watchdog's inotify buffer parser so each overflow record is
+    reported to the ingestion state. Every record passes through
+    unchanged; watchdog itself skips the overflow record without a word."""
+
+    def parse_event_buffer(event_buffer: bytes):
+        for wd, mask, cookie, name in parse(event_buffer):
+            if (wd == -1 or mask & _IN_Q_OVERFLOW) and _ingestion_state is not None:
+                _ingestion_state.overflow_seen()
+            yield wd, mask, cookie, name
+
+    return parse_event_buffer
+
+
+def _install_inotify_overflow_hook() -> None:
+    """Report inotify queue overflows (#1108), Linux only.
+
+    watchdog 6.0.0's ``Inotify.read_events`` parses each buffer through
+    the static ``Inotify._parse_event_buffer``; wrapping it is the one
+    place an overflow record is visible. Other backends (macOS FSEvents)
+    have no inotify queue. Call before the observer starts.
+    """
+    global _overflow_hook_installed
+    if _overflow_hook_installed:
+        return
+    try:
+        inotify_c = importlib.import_module("watchdog.observers.inotify_c")
+    except ImportError, UnsupportedLibcError:
+        return
+    parse = inotify_c.Inotify.__dict__.get("_parse_event_buffer")
+    if not isinstance(parse, staticmethod):
+        log.warning(
+            "Maildir watcher: inotify overflow detection unavailable in this watchdog "
+            "version; mail whose events an overflow drops is queued by the periodic rescan"
+        )
+        return
+    setattr(inotify_c.Inotify, "_parse_event_buffer", staticmethod(_overflow_aware(parse.__func__)))
+    _overflow_hook_installed = True
 
 
 class MaildirHandler(FileSystemEventHandler):
@@ -925,7 +1060,7 @@ class MaildirHandler(FileSystemEventHandler):
                 log.warning("ignoring unrecognized rename onto the mbsync sync stamp")
             else:
                 if self.ingestion_state is not None:
-                    self.ingestion_state.acknowledge(stamp)
+                    self.ingestion_state.acknowledge_watched(stamp)
                 if self.sync_completed is not None:
                     self.sync_completed.set()
             return
@@ -2661,6 +2796,9 @@ def initial_index(
     # 5-attempt × 30s backoff cascade against the same poison-pill
     # payloads — observed to add up to ~30 minutes of wasted embedding
     # service load per dead file per restart.
+    # The watcher is already running: an inotify overflow before this
+    # walk is covered by it (#1108).
+    overflows = ingestion_state.walk_started() if ingestion_state is not None else 0
     stamp = ingestion_state.read_stamp() if ingestion_state is not None else None
     _enqueue_unindexed_messages(
         db,
@@ -2681,6 +2819,7 @@ def initial_index(
     )
     if ingestion_state is not None:
         ingestion_state.acknowledge(stamp)
+        ingestion_state.walk_completed(overflows)
 
     # Recovery sweep — re-enqueue messages stuck on chunkless zero-vector
     # threads from a prior crash mid-batch (queued row that mark_failed /
@@ -2964,16 +3103,21 @@ def _run_periodic_rescan(
     else:
         _streaks[PERIODIC_RENAME_SWEEP].succeeded()
     try:
+        # Taken before the walk: only overflows it started after count as
+        # covered when it completes (#1108).
+        overflows = ingestion_state.walk_started()
         stamp = ingestion_state.read_stamp()
         _enqueue_unindexed_messages(
             db, queue, MAILDIR_PATH, REASON_RESCAN, skip_trashed=skip_trashed, summary_pass="rescan"
         )
         ingestion_state.acknowledge(stamp)
     except Exception as e:
+        # A pending overflow recovery stays owed; the main loop retries.
         _streaks[PERIODIC_RESCAN].failed()
         log.error("periodic Maildir rescan failed: %s", type(e).__name__)
         return
     _streaks[PERIODIC_RESCAN].succeeded()
+    ingestion_state.walk_completed(overflows)
 
 
 def _log_reconciler_config(cfg: ReconcilerConfig) -> None:
@@ -3090,6 +3234,7 @@ def main():
         sync_completed=sync_completed,
         directory_created=directory_created,
     )
+    _install_inotify_overflow_hook()
     observer = Observer()
     folder_watches = FolderWatchRefresher(
         MAILDIR_PATH, observer, handler, directory_created=directory_created
@@ -3146,6 +3291,7 @@ def main():
     last_reconcile = time.monotonic()
     last_recovery_sweep = time.monotonic()
     last_wal_checkpoint = time.monotonic()
+    last_overflow_rescan: float | None = None
     timing_aggregator = TimingAggregator(window=200)
     drained_since_log = 0
     last_summary = time.monotonic()
@@ -3243,6 +3389,18 @@ def main():
                     summary=True,
                 )
                 last_recovery_sweep = now
+
+            # An inotify queue overflow dropped watcher events (#1108):
+            # walk now rather than at the next periodic rescan, and again
+            # until a walk started after the latest overflow completes.
+            if ingestion_state.recovery_pending and (
+                last_overflow_rescan is None
+                or now - last_overflow_rescan >= OVERFLOW_RESCAN_RETRY_SECS
+            ):
+                _run_periodic_rescan(
+                    db, queue, ingestion_state, skip_trashed=reconciler is not None
+                )
+                last_overflow_rescan = now
 
             # WAL checkpoint: keep the WAL file size bounded over a
             # long-running container. SQLite's automatic checkpoint
