@@ -815,7 +815,8 @@ all mail indexed before it until the reparse drains. With a non-blank
 ([#1204](https://github.com/marshalltech81/protonmail-local-ai/issues/1204)):
 the indexed attachments the query and every other filter reach, over
 every lane and not limited by `limit`, whose carrying message the leaf
-leaves undecided (an attachment both lanes reach counts once). It covers
+leaves undecided, counted as the results would list them (an
+attachment both lanes reach counts once). It covers
 sender uncertainty among indexed candidates only, not attachments
 the query cannot reach or mail not yet indexed. The prose states it on
 every call with `sender`, `0` and the empty reply included (an empty

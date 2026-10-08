@@ -147,6 +147,138 @@ class TestAttachmentIndeterminateCount:
         assert len(db.search_attachments(query="copy")) == 2
         assert _counted(db, query="copy", sender="vendor").indeterminate == 2
 
+    @pytest.mark.parametrize(("query", "listed"), [(None, 2), ("ledger", 2), ("bravo", 1)])
+    def test_counts_as_the_results_list_repeated_occurrences(self, tmp_path, query, listed):
+        """One payload carried twice under one filename (Codex round 1):
+        the filename lane and the scan list each occurrence, the text lane
+        one. Decided, the results list ``listed`` rows; undecided, the
+        count is the same number. With both lanes matching, the text row
+        is the filename rows' identity and adds nothing."""
+        path = tmp_path / "repeat.db"
+
+        def build(ambiguous: int | None) -> Database:
+            if path.exists():
+                path.unlink()
+            conn, _ = _open_built_db_conn(tmp_path, "repeat.db")
+            _insert_message(
+                conn,
+                message_id="u1",
+                thread_id="t",
+                sent_at="2024-01-10T00:00:00+00:00",
+                subject="synthetic",
+                from_=[VENDOR],
+                has_attachments=True,
+                attachment_text="bravo ledger",
+                sender_ambiguous=ambiguous,
+            )
+            for occurrence in ("o1", "o2"):
+                _insert_attachment(
+                    conn,
+                    message_id="u1",
+                    thread_id="t",
+                    attachment_id="u1-att",
+                    filename="ledger.pdf",
+                    occurrence_id=occurrence,
+                )
+            _insert_extraction(conn, attachment_id="u1-att", extracted_text="bravo ledger")
+            conn.close()
+            return Database(str(path))
+
+        decided = _counted(build(0), query=query, sender="vendor")
+        assert (len(decided.results), decided.indeterminate) == (listed, 0)
+        undecided = _counted(build(None), query=query, sender="vendor")
+        assert (undecided.results, undecided.indeterminate) == ([], listed)
+
+    @pytest.mark.parametrize("query", [None, "ledger"])
+    def test_without_from_addr_the_count_is_one_scalar(self, undecided_db, query):
+        """Codex round 1: without ``from_addr`` nothing per thread is
+        fetched (no ``senders`` JSON); with it, one row per thread."""
+        connect = undecided_db._connect
+        counts: list[tuple[str, int]] = []
+
+        def traced_connect():
+            conn = connect()
+            real_execute = conn.execute
+
+            class _Conn:
+                def __getattr__(self, name):
+                    return getattr(conn, name)
+
+                def execute(self, sql, params=()):
+                    cursor = real_execute(sql, params)
+                    if "IS NULL)" in sql and "COUNT(*)" in sql:
+                        rows = cursor.fetchall()
+                        counts.append((sql, len(rows)))
+                        return _Rows(rows)
+                    return cursor
+
+            return _Conn()
+
+        class _Rows:
+            def __init__(self, rows):
+                self._rows = rows
+
+            def fetchall(self):
+                return self._rows
+
+            def fetchone(self):
+                return self._rows[0]
+
+        undecided_db._connect = traced_connect  # type: ignore[method-assign]
+        assert _counted(undecided_db, query=query, sender="vendor").indeterminate == 2
+        ((sql, rows),) = counts
+        assert rows == 1
+        assert "senders" not in sql
+        counts.clear()
+        found = _counted(undecided_db, query=query, sender="vendor", from_addr="vendor")
+        assert found.indeterminate == 2
+        ((sql, rows),) = counts
+        assert "t.senders" in sql
+        assert rows == 1  # one thread
+
+    def test_count_work_grows_linearly_with_the_candidates(self, tmp_path):
+        """Both lanes reach every undecided attachment, the worst case for
+        removing the text lane's rows the filename lane already lists.
+        SQLite VM steps for the whole call at 2N candidates stay well under
+        4x those at N: a per-row lookup into the filename candidates was
+        quadratic (Codex round 1 fix)."""
+
+        def steps(n: int) -> tuple[int, int | None]:
+            conn, path = _open_built_db_conn(tmp_path, f"work-{n}.db")
+            for i in range(n):
+                _add(
+                    conn,
+                    f"u{i}",
+                    f"t{i}",
+                    "2024-01-10T00:00:00+00:00",
+                    VENDOR,
+                    text="alpha ledger",
+                    sender_ambiguous=None,
+                )
+            conn.close()
+            db = Database(str(path))
+            connect = db._connect
+            ticks = [0]
+
+            def counted_connect():
+                reader = connect()
+
+                def tick() -> int:
+                    ticks[0] += 1
+                    return 0
+
+                reader.set_progress_handler(tick, 100)
+                return reader
+
+            db._connect = counted_connect  # type: ignore[method-assign]
+            found = _counted(db, query="ledger", sender="vendor", limit=1)
+            return ticks[0], found.indeterminate
+
+        small, small_count = steps(400)
+        large, large_count = steps(800)
+        assert (small_count, large_count) == (400, 800)
+        assert large < 3 * small
+
     @pytest.mark.parametrize("query", [None, "ledger", "bravo"])
     def test_every_other_filter_applies(self, tmp_path, query):
         conn, path = _open_built_db_conn(tmp_path, "filters.db")

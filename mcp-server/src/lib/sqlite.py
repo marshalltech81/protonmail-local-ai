@@ -1984,12 +1984,14 @@ class Database:
         filename lane, the text lane with its anchored occurrence, or the
         filtered scan without a query. Every filter applies except the
         ``sender`` ``EXISTS``, replaced by the leaf ``IS NULL``; the
-        Trash exclusion stays. A candidate is counted once per
-        ``(attachment_id, claimant_id, filename)``, the identity the
-        result merger dedupes by. ``from_addr`` is applied per thread in
-        Python, as the results apply it. Raises ``sqlite3.Error`` or
-        ``ValueError`` (a malformed ``senders`` row) for the caller to
-        report the count unavailable.
+        Trash exclusion stays. Candidates are counted as the result
+        merger lists them: every filename-lane or scan occurrence, plus
+        each text-lane ``(attachment_id, claimant_id, filename)`` no
+        filename-lane candidate already carries. ``from_addr`` is
+        applied per thread in Python, as the results apply it; without
+        it the count is one scalar in SQLite. Raises ``sqlite3.Error``
+        or ``ValueError`` (a malformed ``senders`` row) for the caller
+        to report the count unavailable.
         """
         clauses, params = self._attachment_filter_clauses(
             content_type, date_from, date_to, extracted_only
@@ -2008,19 +2010,30 @@ class Database:
         )
         columns = "a.attachment_id, a.claimant_id, a.filename, a.thread_id"
         if fts_query:
-            # The two lanes' candidates, as each lane selects them: the
-            # text lane's occurrence is its anchor (``_attachment_text_lane``).
-            candidates = (
-                f"SELECT {columns} FROM attachments_fts "  # nosec B608
+            # The filename lane lists every occurrence; the text lane one
+            # anchored occurrence per payload and message
+            # (``_attachment_text_lane``), kept only when the filename
+            # lane does not already carry its identity.
+            # Set operations, not a per-row lookup: a correlated NOT EXISTS
+            # into ``f`` rescanned it for every text candidate (quadratic
+            # on a broad match).
+            ctes = (
+                f"f AS MATERIALIZED ( SELECT {columns} FROM attachments_fts "  # nosec B608
                 "JOIN attachments a ON attachments_fts.rowid = a.fts_rowid "
-                f"{joins}WHERE attachments_fts MATCH ? AND {where} "
-                "UNION "
-                f"SELECT {columns} FROM ( "
+                f"{joins}WHERE attachments_fts MATCH ? AND {where} ), "
+                "x AS MATERIALIZED ( SELECT a.attachment_id, a.claimant_id, a.filename, "
+                "MIN(a.thread_id) AS thread_id FROM ( "
                 "    SELECT rowid AS fts_rowid FROM message_chunks_fts "
                 "    WHERE message_chunks_fts MATCH ? ) h "
                 "JOIN message_chunks c ON c.fts_rowid = h.fts_rowid "
                 f"JOIN attachments a ON a.attachment_occurrence_id = {_TEXT_LANE_ANCHOR} "
-                f"{joins}WHERE c.attachment_id IS NOT NULL AND {where}"
+                f"{joins}WHERE c.attachment_id IS NOT NULL AND {where} "
+                "GROUP BY a.attachment_id, a.claimant_id, a.filename ), "
+                "extra AS ( SELECT attachment_id, claimant_id, filename FROM x "
+                "EXCEPT SELECT attachment_id, claimant_id, filename FROM f ), "
+                "cand AS ( SELECT thread_id FROM f UNION ALL "
+                "SELECT x.thread_id FROM x JOIN extra ON extra.attachment_id = x.attachment_id "
+                "AND extra.claimant_id = x.claimant_id AND extra.filename = x.filename )"
             )
             candidate_params = [
                 fts_query,
@@ -2031,22 +2044,22 @@ class Database:
                 *params,
             ]
         else:
-            candidates = f"SELECT {columns} FROM attachments a {joins}WHERE {where}"  # nosec B608
+            ctes = f"cand AS ( SELECT a.thread_id FROM attachments a {joins}WHERE {where} )"  # nosec B608
             candidate_params = list(params)
-        # UNION and the GROUP BY remove duplicates by the merger's
-        # identity; each is counted under one thread.
-        sql = (
-            "WITH cand AS ( " + candidates + " ), "  # nosec B608
-            "uniq AS ( SELECT MIN(thread_id) AS thread_id FROM cand "
-            "    GROUP BY attachment_id, claimant_id, filename ) "
-            "SELECT uniq.thread_id, t.senders, COUNT(*) AS n FROM uniq "
-            "JOIN threads t ON t.thread_id = uniq.thread_id GROUP BY uniq.thread_id"
-        )
-        rows = conn.execute(sql, candidate_params).fetchall()
         if not from_addr:
-            return sum(r["n"] for r in rows)
+            sql = "WITH " + ctes + " SELECT COUNT(*) FROM cand"  # nosec B608
+            return conn.execute(sql, candidate_params).fetchone()[0]
+        sql = (
+            "WITH " + ctes + " "  # nosec B608
+            "SELECT t.senders, COUNT(*) AS n FROM cand "
+            "JOIN threads t ON t.thread_id = cand.thread_id GROUP BY cand.thread_id"
+        )
         fa = from_addr.lower()
-        return sum(r["n"] for r in rows if _addr_matches(json.loads(r["senders"]), fa))
+        return sum(
+            r["n"]
+            for r in conn.execute(sql, candidate_params).fetchall()
+            if _addr_matches(json.loads(r["senders"]), fa)
+        )
 
     @staticmethod
     def _attachment_filter_clauses(
