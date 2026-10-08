@@ -27,7 +27,12 @@ from typing import Any
 
 import html2text
 
-from .extractors import note_parser_caps_message, resolved_extractor_module, warn_rate_limited
+from .extractors import (
+    note_parser_address_repeats,
+    note_parser_caps_message,
+    resolved_extractor_module,
+    warn_rate_limited,
+)
 from .maildir import parse_flags
 
 log = logging.getLogger("indexer.parser")
@@ -58,11 +63,29 @@ log = logging.getLogger("indexer.parser")
 # * ``address_element`` / ``address_length``: one address-list element
 #   over ``_MAX_ADDRESS_ELEMENT_CHARS``, or an address over
 #   ``_MAX_ADDRESS_CHARS``, is dropped;
+# * ``address_fields``: the scan for From / To / Cc stopped at
+#   ``MAX_ADDRESS_HEADER_FIELDS`` header fields, so any later one is
+#   lost and a second From cannot be ruled out (the sender is ambiguous);
+# * ``address_occurrences`` / ``address_chars``: a From / To / Cc
+#   occurrence past ``MAX_ADDRESS_OCCURRENCES``, or past
+#   ``_MAX_ADDRESS_TOTAL_CHARS`` raw characters in all, loses its
+#   recipients, unread;
+# * ``address_elements`` / ``address_count``: address-list elements past
+#   ``MAX_ADDRESS_ELEMENTS``, or past ``MAX_MESSAGE_ADDRESSES`` kept
+#   addresses, are dropped unparsed (#1144);
 # * ``subject_length``: a decoded subject over ``SUBJECT_MAX_CHARS`` is
 #   cut to the cap (#902);
 # * ``in_reply_to_length`` / ``references_length``: an In-Reply-To, or
 #   a References entry, over ``MESSAGE_ID_MAX_CHARS`` is dropped, so
 #   threading sees the rest (#902).
+#
+# Two names count repeated headers, which lose nothing (#1144) and are
+# logged on their own lines, not the cap line (``PARSE_REPEATS``):
+#
+# * ``address_repeated``: a To or Cc header after the first of its name,
+#   merged into that role (recovered);
+# * ``from_repeated``: a From header after the first, counted and never
+#   parsed: the first is kept and the sender flagged ambiguous.
 PARSE_CAPS: tuple[str, ...] = (
     "attached_depth",
     "attached_fields",
@@ -74,10 +97,18 @@ PARSE_CAPS: tuple[str, ...] = (
     "address_header",
     "address_element",
     "address_length",
+    "address_fields",
+    "address_occurrences",
+    "address_chars",
+    "address_elements",
+    "address_count",
     "subject_length",
     "in_reply_to_length",
     "references_length",
+    "address_repeated",
+    "from_repeated",
 )
+PARSE_REPEATS: tuple[str, ...] = ("address_repeated", "from_repeated")
 
 
 class OversizedMessageError(Exception):
@@ -293,6 +324,15 @@ class Message:
     # UTC (``_parse_received_date``). ``None`` when the header is absent
     # (sent mail) or its date is unparseable; never taken from ``Date:``.
     occurred_at: datetime | None = None
+    # True when the message repeats its From header, or the header scan
+    # stopped with fields left unread, so a second one cannot be ruled
+    # out (#1144). RFC 5322 leaves repeated From headers undefined and
+    # they are a spoofing vector, so ``from_addr`` / ``from_addrs`` are
+    # the first header's only and nothing may trust them as the author:
+    # stored as ``messages.sender_ambiguous``, it keeps the message out
+    # of source authority, and the threader skips the sender-dependent
+    # subject fallback.
+    sender_ambiguous: bool = False
 
     @property
     def effective_date(self) -> datetime:
@@ -493,10 +533,7 @@ def parse_email_bytes(raw: bytes, source: SourceMetadata) -> Message | None:
     # first turns an encoded name with a comma ("=?utf-8?q?Doe=2C_Jane?=")
     # into an unquoted "Doe, Jane <...>" that no longer parses as one
     # address, and a multi-author From would be read as a single address.
-    from_addrs = _parse_addrs(msg.get("From", ""), caps)
-    from_addr = from_addrs[0] if from_addrs else _decode_header(msg.get("From", ""))
-    to_addrs = _parse_addrs(msg.get("To", ""), caps)
-    cc_addrs = _parse_addrs(msg.get("Cc", ""), caps)
+    addresses = _read_address_headers(msg, caps)
     # A raw 8-bit Date header comes back as an ``email.header.Header``,
     # which ``parsedate_to_datetime`` cannot split (#361). A Date header
     # is ASCII by RFC 5322, so drop anything else from its text: a
@@ -508,7 +545,8 @@ def parse_email_bytes(raw: bytes, source: SourceMetadata) -> Message | None:
     occurred_at = _parse_received_date(msg)
 
     body_text, attachments = _extract_body_and_attachments(msg, caps=caps)
-    if caps:
+    lost = [name for name in PARSE_CAPS if caps[name] and name not in PARSE_REPEATS]
+    if lost:
         # Fixed names and counts only, with the Maildir path: the
         # message is indexed with this content missing (#872), so
         # WARNING. Rate limited with the extractors' per-item lines, and
@@ -519,7 +557,30 @@ def parse_email_bytes(raw: bytes, source: SourceMetadata) -> Message | None:
             log,
             "parser work caps dropped content from %s: %s",
             path,
-            ",".join(f"{name}={caps[name]}" for name in PARSE_CAPS if caps[name]),
+            ",".join(f"{name}={caps[name]}" for name in lost),
+        )
+    if caps["address_repeated"] or addresses.sender_ambiguous:
+        note_parser_address_repeats(
+            merged=bool(caps["address_repeated"]), ambiguous=addresses.sender_ambiguous
+        )
+    if caps["from_repeated"]:
+        # Counts and the path only (#1144): the repeated From is a known
+        # spoofing shape, and the flag it sets changes authority and
+        # threading.
+        warn_rate_limited(
+            log,
+            "parser kept the first of %d From headers in %s; sender ambiguous, "
+            "no source authority or subject-fallback threading",
+            caps["from_repeated"] + 1,
+            path,
+        )
+    if caps["address_repeated"]:
+        warn_rate_limited(
+            log,
+            "parser merged %d repeated To/Cc headers in %s",
+            caps["address_repeated"],
+            path,
+            level=logging.INFO,
         )
 
     # Capture file identity. ``size`` is the length of the
@@ -535,10 +596,11 @@ def parse_email_bytes(raw: bytes, source: SourceMetadata) -> Message | None:
         in_reply_to=in_reply_to or None,
         references=references,
         subject=subject,
-        from_addr=from_addr,
-        from_addrs=from_addrs,
-        to_addrs=to_addrs,
-        cc_addrs=cc_addrs,
+        from_addr=addresses.from_addr,
+        from_addrs=addresses.from_addrs,
+        to_addrs=addresses.to_addrs,
+        cc_addrs=addresses.cc_addrs,
+        sender_ambiguous=addresses.sender_ambiguous,
         date=date,
         date_is_fallback=parsed_date is None,
         occurred_at=occurred_at,
@@ -1395,6 +1457,138 @@ _MAX_ADDRESS_ELEMENT_CHARS = 128_000
 # deliverable, and it bounds the fixed-point re-parse below.
 _MAX_ADDRESS_CHARS = 998
 
+# One message's address-header budget (#1144), spent by
+# ``_read_address_headers`` across From, To and Cc together, so
+# repeating a header cannot multiply the work. Each dimension the cost
+# depends on has its own limit, checked before the work it bounds:
+# header fields scanned for the three names; occurrences read; raw
+# characters in all (checked, with the per-value
+# ``_MAX_ADDRESS_HEADER_CHARS``, before an occurrence is fetched,
+# decoded or split, so decoding is linear in at most this much text);
+# elements split and parsed (each element costs at most two
+# ``parseaddr`` calls); and addresses kept, one participant row each.
+# Real mail has one From, To and Cc among a few dozen fields, so these
+# only touch crafted messages; what they drop is counted in
+# ``PARSE_CAPS``.
+MAX_ADDRESS_HEADER_FIELDS = 10_000
+MAX_ADDRESS_OCCURRENCES = 64
+# Three headers at the per-value cap: the most the parser read before
+# repeated headers were.
+_MAX_ADDRESS_TOTAL_CHARS = 3 * _MAX_ADDRESS_HEADER_CHARS
+MAX_ADDRESS_ELEMENTS = 20_000
+MAX_MESSAGE_ADDRESSES = 10_000
+
+
+@dataclass
+class _AddressBudget:
+    """What one message's address headers have spent so far, one
+    counter per ``MAX_ADDRESS_*`` dimension, plus the ``parseaddr``
+    calls made (``parse_calls``) so a test can assert the work done."""
+
+    fields: int = 0
+    occurrences: int = 0
+    chars: int = 0
+    elements: int = 0
+    addresses: int = 0
+    parse_calls: int = 0
+
+
+@dataclass
+class _AddressHeaders:
+    """The From, To and Cc of one message (``_read_address_headers``)."""
+
+    from_addr: str
+    from_addrs: list[str]
+    to_addrs: list[str]
+    cc_addrs: list[str]
+    sender_ambiguous: bool
+
+
+def _read_address_headers(msg: email.message.Message, caps: Counter[str]) -> _AddressHeaders:
+    """Read From, To and Cc under one ``_AddressBudget`` (#1144).
+
+    One pass over the raw header fields (up to
+    ``MAX_ADDRESS_HEADER_FIELDS``) collects every occurrence of the three
+    names, matched case-insensitively as ``Message.get`` does. Every To
+    is merged in order into ``to_addrs``, and every Cc into ``cc_addrs``
+    (RFC 5322 section 4.5.3 combines repeated destination fields). Only
+    the first From is parsed, before any recipient so a crafted header
+    order cannot spend its budget; later From headers are counted, and
+    they, or a scan cut short, make the sender ambiguous. ``from_addr``
+    is the first author, else the first From's decoded text when it
+    holds no parseable address.
+    """
+    budget = _AddressBudget()
+    found: dict[str, list[str]] = {"from": [], "to": [], "cc": []}
+    complete = True
+    for name, raw in msg.raw_items():
+        if budget.fields >= MAX_ADDRESS_HEADER_FIELDS:
+            caps["address_fields"] += 1
+            complete = False
+            break
+        budget.fields += 1
+        occurrences = found.get(name.lower())
+        if occurrences is not None:
+            occurrences.append(raw)
+
+    from_addrs: list[str] = []
+    from_text = ""
+    if found["from"]:
+        value = _address_value(msg, "From", found["from"][0], budget, caps)
+        if value is not None:
+            from_addrs = _parse_addrs(value, caps, budget)
+            if not from_addrs:
+                from_text = _decode_header(value)
+    if len(found["from"]) > 1:
+        caps["from_repeated"] += len(found["from"]) - 1
+
+    recipients: dict[str, list[str]] = {}
+    for role, header in (("to", "To"), ("cc", "Cc")):
+        addrs: list[str] = []
+        for index, raw in enumerate(found[role]):
+            value = _address_value(msg, header, raw, budget, caps)
+            if value is None:
+                continue
+            if index:
+                caps["address_repeated"] += 1
+            addrs.extend(_parse_addrs(value, caps, budget))
+        recipients[role] = addrs
+
+    return _AddressHeaders(
+        from_addr=from_addrs[0] if from_addrs else from_text,
+        from_addrs=from_addrs,
+        to_addrs=recipients["to"],
+        cc_addrs=recipients["cc"],
+        sender_ambiguous=len(found["from"]) > 1 or not complete,
+    )
+
+
+def _address_value(
+    msg: email.message.Message,
+    name: str,
+    raw: str,
+    budget: _AddressBudget,
+    caps: Counter[str],
+) -> str | email.header.Header | None:
+    """One occurrence's value as ``Message.get`` would return it, or
+    ``None`` when the budget refuses it. The occurrence and raw-length
+    limits are checked on the raw text before the policy builds a
+    ``Header`` for an 8-bit value, so nothing over budget is decoded."""
+    if budget.occurrences >= MAX_ADDRESS_OCCURRENCES:
+        caps["address_occurrences"] += 1
+        return None
+    budget.occurrences += 1
+    size = len(raw)
+    if size > _MAX_ADDRESS_HEADER_CHARS:
+        caps["address_header"] += 1
+        return None
+    if budget.chars + size > _MAX_ADDRESS_TOTAL_CHARS:
+        caps["address_chars"] += 1
+        return None
+    budget.chars += size
+    value: str | email.header.Header = msg.policy.header_fetch_parse(name, raw)
+    return value
+
 
 def _protect_encoded_words(text: str) -> tuple[str, Callable[[str], str]]:
     """Replace each encoded-word with an opaque placeholder atom.
@@ -1486,7 +1680,11 @@ def _split_address_list(text: str) -> list[str]:
     return [element.strip() for element in elements if element.strip()]
 
 
-def _parse_addrs(value: str | email.header.Header, caps: Counter[str] | None = None) -> list[str]:
+def _parse_addrs(
+    value: str | email.header.Header,
+    caps: Counter[str] | None = None,
+    budget: _AddressBudget | None = None,
+) -> list[str]:
     """Parse an address header into one parseable string per address.
 
     Raw 8-bit headers (UTF-8 written directly in the header) arrive as
@@ -1497,10 +1695,17 @@ def _parse_addrs(value: str | email.header.Header, caps: Counter[str] | None = N
     fixed, so name content can never become address syntax. Every step
     fails safe: an element that cannot be parsed costs only that
     recipient, never the message. ``caps`` (when given) counts the
-    recipients a work cap dropped, by ``PARSE_CAPS`` name.
+    recipients a work cap dropped, by ``PARSE_CAPS`` name. ``budget``
+    (when given) is the message's ``_AddressBudget``: elements past its
+    element or address limit are dropped unparsed. A message's raw
+    length limits are checked before decoding, by
+    ``_read_address_headers``; the length check here only guards a
+    direct caller.
     """
     if caps is None:
         caps = Counter()
+    if budget is None:
+        budget = _AddressBudget()
     if not value:
         return []
     text = _decode_header(value) if isinstance(value, email.header.Header) else value
@@ -1514,11 +1719,20 @@ def _parse_addrs(value: str | email.header.Header, caps: Counter[str] | None = N
     text = _unfold(text)
     protected, restore = _protect_encoded_words(text)
     addresses = []
-    for element in _split_address_list(protected):
+    elements = _split_address_list(protected)
+    for index, element in enumerate(elements):
+        if budget.elements >= MAX_ADDRESS_ELEMENTS:
+            caps["address_elements"] += len(elements) - index
+            break
+        if budget.addresses >= MAX_MESSAGE_ADDRESSES:
+            caps["address_count"] += len(elements) - index
+            break
+        budget.elements += 1
         if len(element) > _MAX_ADDRESS_ELEMENT_CHARS:
             caps["address_element"] += 1
             continue
         try:
+            budget.parse_calls += 1
             name, addr = email.utils.parseaddr(element)
             if not addr.strip():
                 continue
@@ -1533,6 +1747,7 @@ def _parse_addrs(value: str | email.header.Header, caps: Counter[str] | None = N
             if len(addr) > _MAX_ADDRESS_CHARS:
                 caps["address_length"] += 1
                 continue
+            budget.parse_calls += 1
             if email.utils.parseaddr(addr)[1] != addr:
                 continue
             name = _decode_display_name(restore(name)) if name else ""
@@ -1541,6 +1756,7 @@ def _parse_addrs(value: str | email.header.Header, caps: Counter[str] | None = N
             # e.g. RecursionError from parseaddr on deeply nested comments,
             # whether in the element or re-created by restoring a token.
             continue
+        budget.addresses += 1
         addresses.append(formatted)
     return addresses
 

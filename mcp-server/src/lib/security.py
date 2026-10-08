@@ -149,6 +149,7 @@ QUERY_MESSAGE_FIELDS = (
     "to_count",
     "cc",
     "cc_count",
+    "sender_ambiguous",
     "source_file",
     "thread_id",
     "pending_deletion",

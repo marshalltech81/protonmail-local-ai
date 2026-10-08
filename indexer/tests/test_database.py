@@ -114,11 +114,17 @@ class TestSchema:
         second = Database(db_path)  # second open must not raise
         second.close()
 
-    def test_fresh_install_is_stamped_version_one(self, db):
+    def test_fresh_install_is_stamped_the_current_version(self, db):
         """A fresh install creates the current schema directly and stamps
-        v1 (#928), skipping the migration files."""
-        assert SCHEMA_VERSION == 1
-        assert db._conn.execute("SELECT version FROM schema_version").fetchone()[0] == 1
+        v2 (#1144), skipping the migration files."""
+        assert SCHEMA_VERSION == 2
+        assert db._conn.execute("SELECT version FROM schema_version").fetchone()[0] == 2
+
+    def test_fresh_install_has_a_nullable_sender_ambiguous_column(self, db):
+        """#1144: 0, 1 or NULL (not yet assessed), with no default."""
+        cols = {r["name"]: r for r in db._conn.execute("PRAGMA table_info(messages)")}
+        col = cols["sender_ambiguous"]
+        assert (col["type"], col["notnull"], col["dflt_value"]) == ("INTEGER", 0, None)
 
     def test_fresh_install_keys_the_extraction_cache_by_module(self, db):
         """#928: (content hash, extractor module) is the extraction
@@ -296,12 +302,15 @@ class TestMigrationV1:
         migrated = Database(tmp_path / "v0.db")
         fresh = Database(tmp_path / "fresh.db")
         try:
-            assert migrated._conn.execute("SELECT version FROM schema_version").fetchone()[0] == 1
+            assert (
+                migrated._conn.execute("SELECT version FROM schema_version").fetchone()[0]
+                == SCHEMA_VERSION
+            )
             assert _schema_shape(migrated._conn) == _schema_shape(fresh._conn)
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [1]" in caplog.text
+        assert "applied migrations: [1, 2]" in caplog.text
         assert "SYNTHETIC" not in caplog.text
 
     def test_v0_rows_are_carried_over_under_their_stamps_module(self, tmp_path):
@@ -375,19 +384,22 @@ class TestMigrationV1:
 
         db = Database(path)
         try:
-            assert db._conn.execute("SELECT version FROM schema_version").fetchone()[0] == 1
+            assert (
+                db._conn.execute("SELECT version FROM schema_version").fetchone()[0]
+                == SCHEMA_VERSION
+            )
             assert db.get_attachment_extraction("h-docx", "docx") is not None
         finally:
             db.close()
 
     def test_a_missing_migration_file_fails_closed_at_v0(self, tmp_path, monkeypatch):
-        """Gap detection: code two versions ahead with no ``0002`` file
+        """Gap detection: code a version ahead of the last migration file
         refuses to start and applies nothing."""
         from src import database
 
         path = tmp_path / "v0.db"
         _build_v0_database(path)
-        monkeypatch.setattr(database, "SCHEMA_VERSION", 2)
+        monkeypatch.setattr(database, "SCHEMA_VERSION", SCHEMA_VERSION + 1)
         with pytest.raises(RuntimeError, match="migration sequence broken"):
             Database(path)
         conn = sqlite3.connect(path)
@@ -404,6 +416,90 @@ class TestMigrationV1:
         monkeypatch.setattr(database, "SCHEMA_VERSION", 0)
         with pytest.raises(RuntimeError, match="Downgrade migrations are not supported"):
             Database(tmp_path / "v1.db")
+
+
+def _v1_from_fresh(db: Database) -> None:
+    """Turn a fresh database into the v1 shape: v1 is the current schema
+    without ``messages.sender_ambiguous`` (#1144)."""
+    db._conn.execute("ALTER TABLE messages DROP COLUMN sender_ambiguous")
+    db._conn.execute("UPDATE schema_version SET version = 1")
+    db._conn.commit()
+
+
+class TestMigrationV2:
+    """#1144: v1 -> v2 adds ``messages.sender_ambiguous`` (NULL until a
+    reparse assesses the message) and queues the reparse."""
+
+    def test_v1_database_migrates_to_the_fresh_v2_shape(self, tmp_path, caplog):
+        caplog.set_level("INFO")
+        db = Database(tmp_path / "v1.db")
+        _v1_from_fresh(db)
+        db.close()
+        migrated = Database(tmp_path / "v1.db")
+        fresh = Database(tmp_path / "fresh.db")
+        try:
+            assert migrated._conn.execute("SELECT version FROM schema_version").fetchone()[0] == 2
+            assert _schema_shape(migrated._conn) == _schema_shape(fresh._conn)
+        finally:
+            migrated.close()
+            fresh.close()
+        assert "applied migrations: [2]" in caplog.text
+
+    def test_the_migrated_column_rejects_other_values(self, tmp_path):
+        db = Database(tmp_path / "v1.db")
+        _v1_from_fresh(db)
+        db.close()
+        db = Database(tmp_path / "v1.db")
+        try:
+            msg = make_message(message_id="chk@x")
+            db.upsert_thread(make_thread(messages=[msg]), FAKE_EMBEDDING)
+            with pytest.raises(sqlite3.IntegrityError, match="CHECK"):
+                db._conn.execute("UPDATE messages SET sender_ambiguous = 2")
+        finally:
+            db.close()
+
+
+class TestSenderAmbiguousColumn:
+    """#1144: ``_write_message_record`` writes the parser's flag as 0 / 1
+    on insert and on every update, so a reparse fills a NULL row."""
+
+    @staticmethod
+    def _flag(db, claimant_id):
+        return db._conn.execute(
+            "SELECT sender_ambiguous FROM messages WHERE claimant_id = ?", (claimant_id,)
+        ).fetchone()[0]
+
+    def test_insert_writes_zero_or_one(self, db):
+        plain = make_message(message_id="plain@x")
+        repeated = make_message(message_id="repeated@x")
+        repeated.sender_ambiguous = True
+        db.upsert_thread(make_thread(messages=[plain]), FAKE_EMBEDDING)
+        db.upsert_thread(make_thread(messages=[repeated]), FAKE_EMBEDDING)
+        assert self._flag(db, plain.claimant_id) == 0
+        assert self._flag(db, repeated.claimant_id) == 1
+
+    def test_update_rewrites_the_flag_and_fills_null(self, db):
+        msg = make_message(message_id="up@x")
+        thread = make_thread(messages=[msg])
+        db.upsert_thread(thread, FAKE_EMBEDDING)
+        db._conn.execute("UPDATE messages SET sender_ambiguous = NULL")
+        db._conn.commit()
+        msg.sender_ambiguous = True
+        db.upsert_thread(thread, FAKE_EMBEDDING)
+        assert self._flag(db, msg.claimant_id) == 1
+        msg.sender_ambiguous = False
+        db.upsert_thread(thread, FAKE_EMBEDDING)
+        assert self._flag(db, msg.claimant_id) == 0
+
+    def test_from_rows_are_kept_for_an_ambiguous_sender(self, db):
+        msg = make_message(message_id="keep@x", from_addr="first@example.com")
+        msg.sender_ambiguous = True
+        db.upsert_thread(make_thread(messages=[msg]), FAKE_EMBEDDING)
+        rows = db._conn.execute(
+            "SELECT address FROM message_participants WHERE claimant_id = ? AND role = 'from'",
+            (msg.claimant_id,),
+        ).fetchall()
+        assert [r[0] for r in rows] == ["first@example.com"]
 
 
 class TestIngestionState:
@@ -3598,6 +3694,7 @@ class TestMessagesTable:
             "seen",
             "flagged",
             "replied",
+            "sender_ambiguous",
         }
         cols = {r["name"] for r in db._conn.execute("PRAGMA table_info(message_participants)")}
         assert cols == {"claimant_id", "role", "address", "name"}

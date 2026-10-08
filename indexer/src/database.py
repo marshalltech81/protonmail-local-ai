@@ -96,7 +96,10 @@ def _dedupe_by_canonical(addrs: list[str]) -> list[str]:
 # v1 (#928): ``attachment_extractions`` is keyed by (content hash,
 # extractor module) and each ``attachments`` occurrence names the module
 # whose row it uses (``migrations/0001_extraction_cache_per_module.sql``).
-SCHEMA_VERSION = 1
+# v2 (#1144): ``messages.sender_ambiguous`` records whether the sender
+# attribution is safe, NULL until a reparse assesses the message
+# (``migrations/0002_messages_sender_ambiguous.sql``).
+SCHEMA_VERSION = 2
 SCHEMA_APPLICATION_ID = 0x504D4149  # "PMAI"
 
 # How long a ``reaped_messages`` record outlives the reap. The record
@@ -708,6 +711,12 @@ class Database:
                 seen            INTEGER NOT NULL DEFAULT 0,
                 flagged         INTEGER NOT NULL DEFAULT 0,
                 replied         INTEGER NOT NULL DEFAULT 0,
+                -- #1144: 0 = one From header; 1 = sender attribution unsafe
+                -- (a repeated From, or the header scan stopped before a
+                -- second could be ruled out); NULL = not yet assessed (a
+                -- row from before v2 the reparse has not reached). No
+                -- default; mcp-server reads NULL as "can't tell".
+                sender_ambiguous INTEGER CHECK (sender_ambiguous IN (0, 1)),
                 FOREIGN KEY (claimant_id) REFERENCES message_thread_map(claimant_id)
                     ON DELETE CASCADE
             );
@@ -2581,8 +2590,8 @@ class Database:
             INSERT INTO messages
                 (claimant_id, message_id, thread_id, filepath, folder, subject, sent_at,
                  occurred_at, in_reply_to, references_json, has_attachments, size_bytes,
-                 content_hash, indexed_at, seen, flagged, replied)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 content_hash, indexed_at, seen, flagged, replied, sender_ambiguous)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(claimant_id) DO UPDATE SET
                 thread_id       = excluded.thread_id,
                 filepath        = excluded.filepath,
@@ -2598,7 +2607,8 @@ class Database:
                 indexed_at      = excluded.indexed_at,
                 seen            = excluded.seen,
                 flagged         = excluded.flagged,
-                replied         = excluded.replied
+                replied         = excluded.replied,
+                sender_ambiguous = excluded.sender_ambiguous
             """,
             (
                 msg.claimant_id,
@@ -2618,6 +2628,7 @@ class Database:
                 int(state.seen),
                 int(state.flagged),
                 int(state.replied),
+                int(msg.sender_ambiguous),
             ),
         )
         cur.execute("DELETE FROM message_participants WHERE claimant_id = ?", (msg.claimant_id,))

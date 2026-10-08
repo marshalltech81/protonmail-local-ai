@@ -315,6 +315,9 @@ class ChunkResult:
     ``Name <address>`` (or the bare address), so a prompt can attribute
     the passage to its own author; ``None`` for query paths that do not
     SELECT it or a message with no recorded sender.
+    ``message_sender_ambiguous`` is that message's
+    ``messages.sender_ambiguous`` (``MessageRecord.sender_ambiguous``);
+    ``None`` when not assessed or not SELECTed.
 
     ``kind`` is what the chunk's text is (``message_chunks.kind``, #646):
     ``body``, ``quote``, ``signature``, ``forwarded``, ``calendar`` or
@@ -337,6 +340,7 @@ class ChunkResult:
     message_occurred_at: str | None = None
     source_file: SourceFile | None = None
     message_sender: str | None = None
+    message_sender_ambiguous: bool | None = None
     kind: ChunkKind = "body"
 
 
@@ -368,6 +372,11 @@ def _row_to_chunk_result(r) -> ChunkResult:
         message_occurred_at=(r["message_occurred_at"] if "message_occurred_at" in keys else None),
         source_file=_row_to_source(r),
         message_sender=r["message_sender"] if "message_sender" in keys else None,
+        message_sender_ambiguous=(
+            _optional_flag(r["message_sender_ambiguous"])
+            if "message_sender_ambiguous" in keys
+            else None
+        ),
         kind=r["kind"],
     )
 
@@ -558,6 +567,11 @@ class MessageRecord:
     # The reconciler tombstoned the indexed file (``T``-flagged or
     # missing): it awaits the reaper under mirror retention.
     pending_deletion: bool = False
+    # ``messages.sender_ambiguous`` (#1144): False for one From header,
+    # True when the sender attribution is unsafe (a repeated From, or
+    # the indexer's header scan stopped short), None when not yet
+    # assessed. Only False qualifies for source authority.
+    sender_ambiguous: bool | None = None
 
     @property
     def effective_at(self) -> str:
@@ -578,9 +592,7 @@ _MESSAGE_COLUMNS = (
     "m.message_id, m.claimant_id, m.thread_id, m.subject, m.sent_at, m.occurred_at, "
     "m.folder, "
     "m.has_attachments, m.in_reply_to, m.references_json, m.seen, m.flagged, m.replied, "
-    + _PENDING_DELETION_COLUMN
-    + ", "
-    + _SOURCE_COLUMNS
+    "m.sender_ambiguous, " + _PENDING_DELETION_COLUMN + ", " + _SOURCE_COLUMNS
 )
 
 
@@ -601,7 +613,13 @@ def _row_to_message_record(r) -> MessageRecord:
         flagged=bool(r["flagged"]),
         replied=bool(r["replied"]),
         pending_deletion=bool(r["pending_deletion"]),
+        sender_ambiguous=_optional_flag(r["sender_ambiguous"]),
     )
+
+
+def _optional_flag(value: int | None) -> bool | None:
+    """A nullable 0 / 1 column as ``bool``, keeping NULL as ``None``."""
+    return None if value is None else bool(value)
 
 
 def _attach_participants(conn: sqlite3.Connection, records: list[MessageRecord]) -> None:
@@ -2555,6 +2573,7 @@ class Database:
                 "c.text, c.char_start, c.char_end, c.attachment_id, c.kind, "
                 "m.sent_at AS message_date, "
                 "m.occurred_at AS message_occurred_at, "
+                "m.sender_ambiguous AS message_sender_ambiguous, "
                 "a.filename AS attachment_filename, "
                 "a.content_type AS attachment_mime, "
                 f"{_SOURCE_COLUMNS}, "
@@ -2677,6 +2696,7 @@ class Database:
                 "NULL AS attachment_mime, "
                 "m.sent_at AS message_date, "
                 "m.occurred_at AS message_occurred_at, "
+                "m.sender_ambiguous AS message_sender_ambiguous, "
                 f"{_CHUNK_SENDER_SQL}, "
                 "0.0 AS score "
                 "FROM message_chunks c "

@@ -376,6 +376,42 @@ rebuild then reads as `not found`. A message restored upstream is
 indexed again under the same claimant ID and reads as live. Other
 tools that take a thread ID (`summarize_thread`) are unchanged.
 
+## Sender attribution
+
+RFC 5322 allows one `From` header. A message that repeats it is
+malformed or crafted (two `From` headers that disagree are a known
+spoofing shape), and nothing says which one is the author. The indexer
+keeps the first `From` header as the message's sender and records, per
+message, whether that attribution is safe (#1144). Every message row
+(`get_message`, `get_thread`, `query_messages`) and every passage
+citation (`ask_mailbox`, `summarize_thread`, `extract_from_emails` and
+the experimental tools) carries it as `sender_ambiguous`:
+
+- `false`: one `From` header; the sender is what it says (still the
+  claimed address, not a verified one).
+- `true`: the message repeats `From`, or has more header fields than
+  the indexer reads (10,000), so a second `From` cannot be ruled out.
+  `from` lists the first header's authors only and may not be the
+  author.
+- `null`: not assessed yet. Mail indexed before the upgrade that added
+  the record stays `null` until its queued reparse reaches it; a
+  message whose indexing job is dead-lettered stays `null` until
+  `make requeue-dead`.
+
+Only `false` qualifies for the `authority_class` filters: `true` and
+`null` never match any class, `unclassified` included, because the
+author cannot be told. So right after the upgrade the `authority_class`
+filters match fewer messages, and none at first, until the reparse
+drains (`get_mailbox_status` shows the queue). The `from` rows are kept, so
+the `sender` filters still find the message. The prose of
+`get_message` adds a `Sender:` line, and a `query_messages` row the
+words `sender ambiguous` or `sender not yet checked`, unless the value is `false`.
+In an intelligence prompt the passage header's sender is followed by
+`(unverified: repeated From header)` or `(unverified: sender not yet
+checked)`, and the prose `Citations:` list repeats the note.
+`find_contact` is unchanged, and `search_emails` decides its sender
+filters on the thread's recorded senders as before (#1154).
+
 ## Filter predicates
 
 Every message-level filter is one *leaf* of the predicate module
@@ -404,7 +440,7 @@ different filters"), never read against them.
 | `has_attachments` | bool | `has_attachments` | its own attachment flag equals the value |
 | `seen` | bool | `query_messages` `seen` | its read flag equals the value |
 | `flagged` | bool | `query_messages` `flagged` | its flagged flag equals the value |
-| `authority_class` | class name | `authority_class` | its From sender carries the class, outside Spam |
+| `authority_class` | class name | `authority_class` | its From sender carries the class, outside Spam, and its `sender_ambiguous` is `false` ([Sender attribution](#sender-attribution)) |
 
 **Thread-level evaluation (`search_emails`).** The thread filters are
 decided per leaf, each on its own: one message can satisfy the sender
@@ -442,7 +478,7 @@ contents of a returned thread, follow up with `get_thread` or
 | `has_attachments` | bool | none | Filter by attachment presence |
 | `participant` | string | none | Filter to threads where this person appears in **any** role — From, To, or Cc. Distinct from `from_addr`/`from_name`, which are sender-only. Accepts an address, a domain (`@example.com`), or a name fragment. Blank means no filter; padding is stripped |
 | `limit` | int | `10` | Max threads to return |
-| `authority_class` | string | none | Keep threads with a message whose From sender carries this source-authority class: `counsel`, `management`, `vendor`, `government`, `personal`, `other`, or `unclassified`. Assigned by the operator's rules file (`docs/setup.md`); a filter only, never a ranking weight. Spam-folder messages never count, so a thread matches only through its non-Spam messages. Blank is ignored; any other value is an error |
+| `authority_class` | string | none | Keep threads with a message whose From sender carries this source-authority class: `counsel`, `management`, `vendor`, `government`, `personal`, `other`, or `unclassified`. Assigned by the operator's rules file (`docs/setup.md`); a filter only, never a ranking weight. Spam-folder messages never count, nor do messages whose `sender_ambiguous` is not `false` ([Sender attribution](#sender-attribution)), so a thread matches only through its other messages. Blank is ignored; any other value is an error |
 
 **Resolving `from_name`
 ([#864](https://github.com/marshalltech81/protonmail-local-ai/issues/864)).**
@@ -820,7 +856,9 @@ reaches the calling model, which may be remote. If that exceeds the
 requested or approved scope, ask before the call: a message ID or body
 offset does not prevent the context fallback.
 
-Return one message's own headers — subject, From / To / Cc, send date
+Return one message's own headers — subject, From / To / Cc and
+whether its sender is safe to attribute (`sender_ambiguous`,
+[Sender attribution](#sender-attribution)), send date
 and, when known, delivery date (`occurred_at`) in UTC, folder,
 In-Reply-To, References, attachment flag, [read state](#read-state) — with its thread ID and
 subject, and one page of its indexed body reconstructed from the
@@ -1007,7 +1045,7 @@ questions.
 | `has_attachments` | bool | none | The message's own attachment flag, either way |
 | `seen` | bool | none | `true` for messages read in Proton, `false` for unread ([read state](#read-state)) |
 | `flagged` | bool | none | `true` for flagged (starred) messages, `false` for the rest |
-| `authority_class` | string | none | The source-authority class of the message's From sender (any author, for a multi-author From): `counsel`, `management`, `vendor`, `government`, `personal`, `other`, or `unclassified`; a message in Spam never matches; blank is ignored, any other value is an error |
+| `authority_class` | string | none | The source-authority class of the message's From sender (any author, for a multi-author From): `counsel`, `management`, `vendor`, `government`, `personal`, `other`, or `unclassified`; a message in Spam never matches, nor does one whose `sender_ambiguous` is not `false` ([Sender attribution](#sender-attribution)); blank is ignored, any other value is an error |
 | `limit` | int | `25` | Messages per page; clamped to `[1, 100]` |
 | `cursor` | string | none | `next_cursor` from the previous page of the same query |
 | `fields` | list of strings | none (every field) | Row fields to return; see Field projection below |
@@ -1057,7 +1095,8 @@ and `has_more`; when more remain it includes `next_cursor`. Each
 message carries its send and delivery dates, folder, read state,
 [pending deletion](#pending-deletion), attachment flag, subject,
 From / To / Cc (at most 10 per role, with a count of the rest),
-Message-ID, claimant ID, and Thread ID; the structured output adds In-Reply-To and
+Message-ID, claimant ID, and Thread ID; the structured output adds
+`sender_ambiguous` ([Sender attribution](#sender-attribution)), In-Reply-To and
 up to 10 References. Header values are sender-controlled, so any past
 500 characters is cut with a marker. The count, the page, and its participants are read in one
 snapshot.
@@ -1068,7 +1107,7 @@ fields to return, by their structured-output names (`message_id`,
 `subject`, `sent_at`, `occurred_at`, `folder`, `has_attachments`,
 `seen`, `flagged`, `replied`, `in_reply_to`, `references`,
 `references_count`, `from`, `from_count`, `to`, `to_count`, `cc`,
-`cc_count`, `source_file`, `pending_deletion`); `claimant_id` and
+`cc_count`, `sender_ambiguous`, `source_file`, `pending_deletion`); `claimant_id` and
 `thread_id` are always included, so rows stay addressable. A usual
 minimal set is `["subject", "sent_at", "from", "has_attachments"]`.
 The text form shows only the projected fields it lists (the claimant
@@ -1077,7 +1116,7 @@ and thread IDs always). The envelope (`filters`, `address_matches`,
 `next_cursor`) is unchanged, and so is the cursor: it is built from the
 page's messages before projection, so a projected and an unprojected
 page continue each other. An unknown name is an error that names it,
-and a list of more than 22 names (one per field; repeats add nothing)
+and a list of more than 23 names (one per field; repeats add nothing)
 is an error; the log records only that `fields` was rejected and why,
 in a warning rate-limited to one per reason per minute with a count of
 the repeats. Omitting `fields`
@@ -1496,7 +1535,9 @@ sit inside the `<untrusted_email>` blocks; the instruction to cite
 labels is in the system prompt. A header is at most 512 characters: one
 that would be longer is rebuilt with its claimant ID (keeping its `#`
 suffix), sender, filename and MIME type each cut to 96 characters, so
-a header never crowds its passage out of a thread's share. The sender
+a header never crowds its passage out of a thread's share. A sender
+note ([Sender attribution](#sender-attribution)) is fixed text inside
+the sender's 96 characters: the name is cut further, never the note. The sender
 is read from the index with its display name and address each cut to
 1,000 characters; the structured citation's `sender` is cut at 500.
 
@@ -1576,7 +1617,7 @@ Structured output:
 |---|---|
 | `answer` | The model's answer with its inline labels |
 | `coverage_note` | Server-written notice of prompt-budget omissions/truncation and possible incompleteness; `null` when nothing was left out or cut to fit. This is separate from model prose and citation validation |
-| `citations` | One entry per valid cited label, in first-cited order: `label`, `chunk_id`, `claimant_id`, `message_id`, `thread_id`, `sender`, `sent_at`, `occurred_at`, `source` (`body`, `attachment` or `thread`), `attachment_id`, `attachment_filename`, `char_start`, `char_end` (end of the part shown to the model), `scope` (`in_scope` or `context`, [Evidence scope](#evidence-scope-in-scope-or-context)) |
+| `citations` | One entry per valid cited label, in first-cited order: `label`, `chunk_id`, `claimant_id`, `message_id`, `thread_id`, `sender`, `sender_ambiguous` ([Sender attribution](#sender-attribution); null for `thread`), `sent_at`, `occurred_at`, `source` (`body`, `attachment` or `thread`), `attachment_id`, `attachment_filename`, `char_start`, `char_end` (end of the part shown to the model), `scope` (`in_scope` or `context`, [Evidence scope](#evidence-scope-in-scope-or-context)) |
 | `statements` | The answer cut into statements: `text`, `labels` (the supplied passages it cites) and `status` (`cited`, `unsupported`, `uncertain`, `uncited`, `invalid` for only unknown labels, or `not_checked`) |
 | `quotes` | Each quotation: `text` (cut at 1,000 characters), `statement` (index into `statements`), `status` (`verified`, `misattributed`, `unmatched`, `uncited`, `not_checked`) and `found_in` (labels of the passages it was found in) |
 | `citation_problems` | `[]` when the check passed, else entries `{kind, labels, statements, quotes}`, `kind` one of `unknown_labels`, `no_citations`, `uncited_statements`, `unmatched_quotes`, `misattributed_quotes`, `context_only_citations`; `statements` and `quotes` are indexes into those lists, and `labels` holds the unknown labels or, for `misattributed_quotes`, the passages the quotes were found in, or, for `context_only_citations`, the cited labels |

@@ -1541,6 +1541,7 @@ only, never filenames or text (`make logs`):
   ocr_disabled= empty= cached= pdf_pages_failed=
   pdf_pages_unrecovered= ocr_capped_pdfs= ocr_pages_skipped=
   ocr_capped_images= extractor_caps= parser_caps_messages=
+  parser_recipients_merged_messages= parser_sender_ambiguous_messages=
   warnings_suppressed=`: the attachments of the messages committed since the previous line, by outcome. It is a
   WARNING when any of `failed`, `unsupported`, `too_large`,
   `ocr_disabled`, `pdf_pages_unrecovered`, `ocr_capped_pdfs`,
@@ -1641,12 +1642,48 @@ extractor reads (`.eml`) is not logged.
 | `container_serialize` | A container the serializer refuses (a malformed header), when its payload would be extracted |
 | `body_parts` | Text parts past the 200th, left out of the body: only those that could have been part of it, so an alternative rendering after the one the body uses is not counted |
 | `mime_parts` | Every MIME part past the 10,000th (the message itself and the parts inside attachments count): their text and attachments are not read. Counted once per message |
-| `address_header` | Every recipient of a `From`, `To` or `Cc` header over 256,000 characters |
+| `address_header` | Every recipient of a `From`, `To` or `Cc` header over 256,000 characters (checked before the header is decoded) |
 | `address_element` | One address-list entry over 128,000 characters |
 | `address_length` | One address over 998 characters |
+| `address_fields` | Any `From`, `To` or `Cc` after the message's first 10,000 header fields; the sender is then ambiguous (below). Counted once per message |
+| `address_occurrences` | Every recipient of a `From`, `To` or `Cc` header past the message's 64th such header |
+| `address_chars` | Every recipient of one past 768,000 characters of `From`, `To` and `Cc` in all |
+| `address_elements` | Address-list entries past the message's 20,000th, unparsed |
+| `address_count` | Addresses past the message's 10,000th kept (one participant row each), unparsed |
 
 The caps bound what crafted mail can cost the single indexing worker,
 so they are not configurable. Ordinary mail does not reach them.
+
+### Repeated `From`, `To` or `Cc` headers
+
+A message may repeat an address header (#1144). Nothing is lost for a
+repeated `To` or `Cc`: every occurrence is read, in order, into that
+role, and the message logs one INFO line, `parser merged <n> repeated
+To/Cc headers in <path>`, counted as `parser_recipients_merged_messages`
+in the attachments line. A repeated `From` is not merged: the first
+header is kept as the sender, the others are counted but not read, and
+the message is marked `sender_ambiguous` (as is one whose header scan
+stopped at `address_fields`). It logs one WARNING, `parser kept the first
+of <n> From headers in <path>; sender ambiguous, no source authority or
+subject-fallback threading`, and counts as
+`parser_sender_ambiguous_messages`. Such a message never matches an
+`authority_class` filter and is never joined to a thread by subject
+alone (`In-Reply-To` and `References` still apply);
+`docs/mcp-tools.md`, "Sender attribution", says what clients see. These
+lines share the 20-per-5-minutes limit above, and name only the path
+and counts, never an address.
+
+### `authority_class` filters return nothing after an upgrade
+
+Schema v2 (#1144) records whether each message's sender attribution is
+safe, and only messages recorded as safe match an `authority_class`
+filter. Mail indexed before the upgrade is not assessed until the
+reparse the migration queues reaches it, so straight after the upgrade
+the filters match nothing, and they fill in as the reparse drains. Its
+progress is the `reparse: remaining=...` line and `make status`'s
+`queue.reparse` ([Reparse or rebuild after an upgrade](#reparse-or-rebuild-after-an-upgrade)).
+A message whose indexing job is dead-lettered stays unassessed until
+`make requeue-dead`. Nothing else needs doing.
 
 ## Attachment filename shows `=?utf-8?...?=` text
 

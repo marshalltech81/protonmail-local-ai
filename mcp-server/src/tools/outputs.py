@@ -160,6 +160,16 @@ def thread_summary(t: ThreadResult) -> ThreadSummary:
     )
 
 
+# ``sender_ambiguous`` on a message and on a citation (#1144).
+_SENDER_AMBIGUOUS_DESCRIPTION = (
+    "{subject} sender attribution: false when it has one From header; true when "
+    "it repeats From (or its headers were too many to rule that out), so from "
+    "lists the first From header only and may not be the author; null when the "
+    "indexer has not assessed it yet (mail indexed before the upgrade, until "
+    "its reparse). Only false counts toward the authority_class filters."
+)
+
+
 class MessageHeaders(_Output):
     message_id: str = Field(
         description="RFC 5322 Message-ID. The sender sets it, so two indexed messages "
@@ -192,6 +202,9 @@ class MessageHeaders(_Output):
     to_count: int
     cc: list[Participant]
     cc_count: int
+    sender_ambiguous: bool | None = Field(
+        description=_SENDER_AMBIGUOUS_DESCRIPTION.format(subject="The message's")
+    )
     source_file: Source | None = Field(description=_SOURCE_FILE_DESCRIPTION)
 
 
@@ -241,6 +254,7 @@ def message_headers(m: MessageRecord) -> MessageHeaders:
         to_count=len(m.to),
         cc=listed(m.cc, people),
         cc_count=len(m.cc),
+        sender_ambiguous=m.sender_ambiguous,
         source_file=source(m.source_file),
     )
 
@@ -754,6 +768,11 @@ class Citation(_Output):
     thread_id: str
     sender: str | None = Field(
         description="That message's sender, cut for length; null when none is recorded."
+    )
+    sender_ambiguous: bool | None = Field(
+        default=None,
+        description=_SENDER_AMBIGUOUS_DESCRIPTION.format(subject="That message's")
+        + " Null too for source thread.",
     )
     sent_at: str | None = Field(
         description="That message's own sent date (not the thread's); null when unknown."

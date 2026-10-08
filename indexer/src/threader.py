@@ -270,6 +270,12 @@ class Threader:
         # with this normalized subject may be an unrelated "Invoice" /
         # "Follow up" from a different sender, but an older thread in the
         # same folder can still be a valid match.
+        #
+        # A message with an ambiguous sender (a repeated From, #1144) is
+        # never matched this way: the check trusts its author, and the
+        # parser's line for the message already says the fallback is off.
+        if message.sender_ambiguous:
+            return None
         normalized = _normalize_subject(message.subject)
         if normalized:
             candidate_ids = self.db.find_threads_by_subject(normalized, message.folder)

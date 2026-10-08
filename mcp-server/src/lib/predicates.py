@@ -92,12 +92,21 @@ AUTHORITY_EXCLUDED_FOLDERS = ("Spam",)
 # followed by the excluded folders.
 # Driven from ``idx_entities_authority`` into the participant address
 # index.
+#
+# Only a message whose sender attribution is known safe qualifies
+# (``messages.sender_ambiguous = 0``, #1144): 1 (a repeated From, or a
+# header scan cut short) never does, and neither does NULL, a message
+# the indexer has not assessed yet ("can't tell", owner 2026-10-08).
+# After the v2 upgrade every message is NULL until the queued reparse
+# reaches it, so authority filters match less, then nothing new, until
+# it drains; a dead-lettered message stays NULL.
 _SENDER_CLASS_MESSAGES = (
     # The f-string adds ``?`` placeholders only; the folders are bound.
     "SELECT p.claimant_id FROM entities e "  # nosec B608
     "JOIN message_participants p ON p.address = e.canonical_key AND p.role = 'from' "
     "JOIN messages am ON am.claimant_id = p.claimant_id "
     "WHERE e.kind = 'person' AND e.authority_class = ? "
+    "AND am.sender_ambiguous = 0 "
     f"AND am.folder NOT IN ({','.join('?' * len(AUTHORITY_EXCLUDED_FOLDERS))})"
 )
 

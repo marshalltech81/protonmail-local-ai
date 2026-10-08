@@ -382,6 +382,41 @@ class TestAssignThread:
 
         assert threader.assign_thread(followup).thread_id == "coauth@example.com"
 
+    def test_subject_fallback_is_skipped_for_an_ambiguous_sender(self, db, threader):
+        """#1144: a message repeating its From header has no trustworthy
+        author, so the sender-dependent subject fallback must not run: a
+        forged first From naming a thread's correspondent would otherwise
+        steer the message into that thread."""
+        first = make_message(
+            message_id="amb_orig@example.com",
+            subject="Quarterly figures",
+            from_addr="alice@example.com",
+            to_addrs=["bob@example.com"],
+        )
+        db.upsert_thread(threader.assign_thread(first), [0.0] * EMBEDDING_DIM)
+        followup = make_message(
+            message_id="amb_follow@example.com",
+            subject="Re: Quarterly figures",
+            from_addr="alice@example.com",
+            to_addrs=["bob@example.com"],
+            filepath="/maildir/INBOX/cur/amb_follow",
+            date=datetime(2024, 1, 2, tzinfo=UTC),
+        )
+        followup.sender_ambiguous = True
+        assert threader.assign_thread(followup).thread_id == "amb_follow@example.com"
+        # Header threading does not depend on the sender and still applies.
+        reply = make_message(
+            message_id="amb_reply@example.com",
+            subject="Re: Quarterly figures",
+            from_addr="alice@example.com",
+            to_addrs=["bob@example.com"],
+            in_reply_to="amb_orig@example.com",
+            filepath="/maildir/INBOX/cur/amb_reply",
+            date=datetime(2024, 1, 3, tzinfo=UTC),
+        )
+        reply.sender_ambiguous = True
+        assert threader.assign_thread(reply).thread_id == "amb_orig@example.com"
+
     def test_subject_fallback_ignores_a_shared_sender_alone(self, db, threader):
         """The same owner writing "Meeting" to two different people is
         two conversations."""

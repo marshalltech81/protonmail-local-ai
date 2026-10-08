@@ -91,7 +91,8 @@ class AttachmentOutcomeCounts:
     extractors' per-attempt counts (``extractors.drain_extractor_counts``:
     ``pdf_pages_failed``, ``pdf_pages_unrecovered``, ``ocr_capped_pdfs``,
     ``ocr_pages_skipped``, ``ocr_capped_images``, ``extractor_caps``,
-    ``parser_caps_messages`` and ``warnings_suppressed``). Counts
+    ``parser_caps_messages``, ``parser_recipients_merged_messages``,
+    ``parser_sender_ambiguous_messages`` and ``warnings_suppressed``). Counts
     only: no filename, type or text.
     """
 
@@ -131,6 +132,8 @@ _SUMMARY_FIELDS = (
     "ocr_capped_images",
     "extractor_caps",
     "parser_caps_messages",
+    "parser_recipients_merged_messages",
+    "parser_sender_ambiguous_messages",
     "warnings_suppressed",
 )
 # Counts that mean attachment text is missing from search: the line is

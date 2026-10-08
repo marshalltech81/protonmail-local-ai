@@ -61,6 +61,7 @@ _VERBATIM_FIELDS = (
     "has_attachments",
     "size",
     "date_is_fallback",
+    "sender_ambiguous",
 )
 _DERIVED_FIELDS = (
     "date",

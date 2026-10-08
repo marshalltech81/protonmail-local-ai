@@ -24,6 +24,7 @@ import pytest
 from src.parser import (
     MESSAGE_ID_MAX_CHARS,
     PARSE_CAPS,
+    PARSE_REPEATS,
     SUBJECT_MAX_CHARS,
     OversizedMessageError,
     SourceMetadata,
@@ -3757,8 +3758,10 @@ def _chain_stops_at_the_depth_cap(msg) -> bool:
 
 
 # Each shape fires one cap. ``small_decode_budget`` lowers the decoded-byte
-# budget (64 MB by default) so a small fixture can exhaust it. ``pinned``
-# is the parse result before the caps were logged.
+# budget (64 MB by default) so a small fixture can exhaust it; a dict
+# instead sets those parser limits for the shape (the #1144 address
+# budget, so a few short headers can exhaust it). ``pinned`` is the
+# parse result before the caps were logged.
 _CAP_SHAPES = {
     "attached_depth": (
         _with_attachment(b"Content-Type: message/rfc822\r\n", _nested_rfc822(21), _TXT_FILENAME),
@@ -3881,6 +3884,40 @@ _CAP_SHAPES = {
         "address_length=2",
         lambda msg: msg.to_addrs == ["bob@example.test"],
     ),
+    # #1144: the per-message address budget. ``_CAP_HEAD`` holds four
+    # fields, one of them From.
+    "address_fields": (
+        _addresses(b"SYNTHETIC_HEADER_MARKER@example.test"),
+        {"MAX_ADDRESS_HEADER_FIELDS": 4},
+        "address_fields=1",
+        lambda msg: (
+            msg.to_addrs == [] and msg.from_addr == "sender@example.test" and msg.sender_ambiguous
+        ),
+    ),
+    "address_occurrences": (
+        _addresses(b"bob@example.test\r\nTo: SYNTHETIC_HEADER_MARKER@example.test"),
+        {"MAX_ADDRESS_OCCURRENCES": 2},
+        "address_occurrences=1",
+        lambda msg: msg.to_addrs == ["bob@example.test"] and not msg.sender_ambiguous,
+    ),
+    "address_chars": (
+        _addresses(b"bob@example.test\r\nTo: SYNTHETIC_HEADER_MARKER@example.test"),
+        {"_MAX_ADDRESS_TOTAL_CHARS": 40},
+        "address_chars=1",
+        lambda msg: msg.to_addrs == ["bob@example.test"],
+    ),
+    "address_elements": (
+        _addresses(b"bob@example.test, SYNTHETIC_HEADER_MARKER@example.test, c@example.test"),
+        {"MAX_ADDRESS_ELEMENTS": 2},
+        "address_elements=2",
+        lambda msg: msg.to_addrs == ["bob@example.test"],
+    ),
+    "address_count": (
+        _addresses(b"bob@example.test, SYNTHETIC_HEADER_MARKER@example.test, c@example.test"),
+        {"MAX_MESSAGE_ADDRESSES": 2},
+        "address_count=2",
+        lambda msg: msg.to_addrs == ["bob@example.test"],
+    ),
     # #902: the header caps. The subject is cut to ``SUBJECT_MAX_CHARS``;
     # an In-Reply-To or References entry over ``MESSAGE_ID_MAX_CHARS`` is
     # dropped and threading sees the rest.
@@ -3912,7 +3949,10 @@ def _parse_cap_shape(tmp_path, monkeypatch, shape: str):
     from src import parser
 
     raw, small_decode_budget, _, _ = _CAP_SHAPES[shape]
-    if small_decode_budget:
+    if isinstance(small_decode_budget, dict):
+        for name, limit in small_decode_budget.items():
+            monkeypatch.setattr(parser, name, limit)
+    elif small_decode_budget:
         budget = parser._SerializationBudget
         monkeypatch.setattr(parser, "_SerializationBudget", lambda: budget(decodable=10))
     folder = tmp_path / "INBOX" / "cur"
@@ -4213,7 +4253,9 @@ def test_every_parse_cap_is_counted_at_a_site_and_pinned_by_a_shape():
     source (every ``caps[...] +=`` site names a literal or calls
     ``_nesting_cap``, whose two names are read the same way) and must
     equal ``PARSE_CAPS``, and every name must have a pinned shape in
-    ``_CAP_SHAPES``."""
+    ``_CAP_SHAPES``, except the two ``PARSE_REPEATS`` names, which lose
+    nothing and are logged on their own lines, pinned by
+    ``TestRepeatedAddressHeaders`` (#1144)."""
     import inspect
 
     from src import parser
@@ -4231,7 +4273,8 @@ def test_every_parse_cap_is_counted_at_a_site_and_pinned_by_a_shape():
         name for _, _, line, _ in _CAP_SHAPES.values() for name in re.findall(r"(\w+)=\d+", line)
     }
     assert len(set(PARSE_CAPS)) == len(PARSE_CAPS)
-    assert counted == set(PARSE_CAPS) == shaped
+    assert set(PARSE_REPEATS) <= set(PARSE_CAPS)
+    assert counted == set(PARSE_CAPS) == shaped | set(PARSE_REPEATS)
 
 
 # #996: ordinary multipart shapes, pinned on main before the walk was
@@ -4475,3 +4518,335 @@ def test_walk_cap_keeps_the_first_parts_in_document_order(tmp_path, caplog):
         f"parser work caps dropped content from {path}: "
         f"body_parts={walked_texts - 200},mime_parts=1"
     ]
+
+
+# ---------------------------------------------------------------------------
+# Repeated address headers and the per-message address budget (#1144)
+# ---------------------------------------------------------------------------
+
+_REPEAT_HEAD = (
+    b"Message-ID: <repeat@example.test>\r\nDate: Mon, 28 Sep 2026 12:00:00 +0000\r\n"
+    b"Subject: Repeat\r\n"
+)
+
+
+def _parse_headers(extra: bytes):
+    """Parse a plain message whose headers are ``_REPEAT_HEAD`` plus
+    ``extra`` (CRLF-terminated lines). Returns the Message and its path."""
+    raw = _REPEAT_HEAD + extra + b"Content-Type: text/plain\r\n\r\nBODY\r\n"
+    source = SourceMetadata(
+        folder="INBOX", flags=frozenset(), size=len(raw), mtime_ns=None, path="/m/repeat.eml"
+    )
+    msg = parse_email_bytes(raw, source)
+    assert msg is not None
+    return msg, source.path
+
+
+def _budget_spy(monkeypatch):
+    """Record every ``_AddressBudget`` the parser creates."""
+    from src import parser
+
+    made: list = []
+    real = parser._AddressBudget
+
+    def spy():
+        budget = real()
+        made.append(budget)
+        return budget
+
+    monkeypatch.setattr(parser, "_AddressBudget", spy)
+    return made
+
+
+def _cap_lines(caplog) -> list[str]:
+    return [r.getMessage() for r in caplog.records if "parser work caps" in r.getMessage()]
+
+
+class TestRepeatedAddressHeaders:
+    def test_repeated_to_and_cc_are_merged_in_order_each_role_on_its_own(self, monkeypatch, caplog):
+        caplog.set_level("DEBUG")
+        made = _budget_spy(monkeypatch)
+        msg, path = _parse_headers(
+            b"From: SYNTHETIC_HEADER_MARKER <sender@example.test>\r\n"
+            b"To: a@example.test, SYNTHETIC_HEADER_MARKER <b@example.test>\r\n"
+            b"Cc: c@example.test\r\n"
+            b"To: d@example.test\r\n"
+            b"Cc: e@example.test\r\nTo: f@example.test\r\n"
+        )
+        assert msg.to_addrs == [
+            "a@example.test",
+            "SYNTHETIC_HEADER_MARKER <b@example.test>",
+            "d@example.test",
+            "f@example.test",
+        ]
+        assert msg.cc_addrs == ["c@example.test", "e@example.test"]
+        assert msg.from_addrs == ["SYNTHETIC_HEADER_MARKER <sender@example.test>"]
+        assert msg.sender_ambiguous is False
+        # The work done: every header field scanned once, the six
+        # occurrences parsed, seven elements split, seven addresses kept.
+        (budget,) = made
+        assert (budget.fields, budget.occurrences, budget.elements, budget.addresses) == (
+            10,
+            6,
+            7,
+            7,
+        )
+        lines = [r for r in caplog.records if "repeated" in r.getMessage()]
+        assert [(r.levelname, r.getMessage()) for r in lines] == [
+            ("INFO", f"parser merged 3 repeated To/Cc headers in {path}")
+        ]
+        assert _cap_lines(caplog) == []
+        assert "SYNTHETIC_HEADER_MARKER" not in caplog.text
+
+    def test_single_headers_are_unchanged_and_log_nothing(self, caplog):
+        caplog.set_level("DEBUG")
+        msg, _ = _parse_headers(
+            b"From: a@example.test, b@example.test\r\nTo: c@example.test\r\nCc: d@example.test\r\n"
+        )
+        assert msg.from_addr == "a@example.test"
+        assert msg.from_addrs == ["a@example.test", "b@example.test"]
+        assert (msg.to_addrs, msg.cc_addrs) == (["c@example.test"], ["d@example.test"])
+        # A single From listing several authors is valid and unambiguous.
+        assert msg.sender_ambiguous is False
+        assert "repeated" not in caplog.text
+        assert "From headers" not in caplog.text
+
+    def test_repeated_from_keeps_the_first_and_flags_the_sender(self, monkeypatch, caplog):
+        caplog.set_level("DEBUG")
+        made = _budget_spy(monkeypatch)
+        msg, path = _parse_headers(
+            b"From: First <first@example.test>\r\nTo: bob@example.test\r\n"
+            b"From: SYNTHETIC_HEADER_MARKER <second@example.test>\r\n"
+            b"From: third@example.test\r\n"
+        )
+        assert msg.from_addr == "First <first@example.test>"
+        assert msg.from_addrs == ["First <first@example.test>"]
+        assert msg.to_addrs == ["bob@example.test"]
+        assert msg.sender_ambiguous is True
+        # The later From headers are counted, never parsed.
+        (budget,) = made
+        assert (budget.occurrences, budget.elements, budget.addresses) == (2, 2, 2)
+        lines = [r for r in caplog.records if "From headers" in r.getMessage()]
+        assert [(r.levelname, r.getMessage()) for r in lines] == [
+            (
+                "WARNING",
+                f"parser kept the first of 3 From headers in {path}; sender ambiguous, "
+                "no source authority or subject-fallback threading",
+            )
+        ]
+        assert _cap_lines(caplog) == []
+        assert "SYNTHETIC_HEADER_MARKER" not in caplog.text
+
+    def test_header_names_match_case_insensitively(self):
+        msg, _ = _parse_headers(
+            b"FROM: a@example.test\r\nto: b@example.test\r\nTO: c@example.test\r\n"
+            b"from: d@example.test\r\n"
+        )
+        assert msg.to_addrs == ["b@example.test", "c@example.test"]
+        assert msg.from_addr == "a@example.test"
+        assert msg.sender_ambiguous is True
+
+    def test_occurrences_past_the_budget_are_lost_and_counted(self, monkeypatch, caplog):
+        from src import parser
+
+        caplog.set_level("INFO")
+        made = _budget_spy(monkeypatch)
+        cap = parser.MAX_ADDRESS_OCCURRENCES
+        extra = b"From: sender@example.test\r\n" + b"".join(
+            b"To: r%d@example.test\r\n" % i for i in range(cap + 5)
+        )
+        msg, path = _parse_headers(extra)
+        # From takes one occurrence; To gets the rest of the budget.
+        assert msg.to_addrs == [f"r{i}@example.test" for i in range(cap - 1)]
+        assert msg.from_addr == "sender@example.test"
+        (budget,) = made
+        assert budget.occurrences == cap
+        assert budget.elements == cap
+        assert _cap_lines(caplog) == [
+            f"parser work caps dropped content from {path}: address_occurrences=6"
+        ]
+        assert f"parser merged {cap - 2} repeated To/Cc headers in {path}" in caplog.text
+
+    def test_from_is_parsed_before_recipients_whatever_the_header_order(self):
+        from src import parser
+
+        cap = parser.MAX_ADDRESS_OCCURRENCES
+        extra = b"".join(b"To: r%d@example.test\r\n" % i for i in range(cap + 5))
+        msg, _ = _parse_headers(extra + b"From: sender@example.test\r\n")
+        assert msg.from_addr == "sender@example.test"
+        assert len(msg.to_addrs) == cap - 1
+
+    def test_total_raw_chars_past_the_budget_are_lost_before_any_parse(self, monkeypatch, caplog):
+        from src import parser
+
+        caplog.set_level("INFO")
+        monkeypatch.setattr(parser, "_MAX_ADDRESS_TOTAL_CHARS", 200)
+        made = _budget_spy(monkeypatch)
+        long_to = b"To: " + b"x" * 30 + b"@example.test, SYNTHETIC_HEADER_MARKER@example.test\r\n"
+        msg, path = _parse_headers(b"From: s@example.test\r\n" + long_to * 3)
+        assert len(msg.to_addrs) == 4
+        (budget,) = made
+        # The third To would pass the total: it is neither decoded nor split.
+        assert budget.occurrences == 4
+        assert budget.elements == 1 + 4
+        assert budget.chars <= 200
+        assert _cap_lines(caplog) == [
+            f"parser work caps dropped content from {path}: address_chars=1"
+        ]
+        assert "SYNTHETIC_HEADER_MARKER" not in caplog.text
+
+    def test_an_over_long_8bit_header_is_rejected_before_it_is_decoded(self, monkeypatch):
+        """#1144: ``_parse_addrs`` decoded a raw 8-bit header (an
+        ``email.header.Header``) before its length check, so a header far
+        over the cap was decoded whole and then dropped."""
+        from src import parser
+
+        decoded: list[int] = []
+        real = parser._decode_header
+
+        def counting(value):
+            decoded.append(1)
+            return real(value)
+
+        monkeypatch.setattr(parser, "_decode_header", counting)
+        size = parser._MAX_ADDRESS_HEADER_CHARS + 10
+        to = b"To: " + ("é" * (size // 2)).encode() + b"@example.test\r\n"
+        msg, _ = _parse_headers(b"From: s@example.test\r\n" + to)
+        assert msg.to_addrs == []
+        # The Subject is decoded; the To header never is.
+        assert decoded == [1]
+
+    def test_an_over_long_first_from_leaves_no_fallback_text(self):
+        """The undecodable-From fallback reads the first From only when
+        it is within the per-value cap: an over-long one is never decoded
+        into ``from_addr``."""
+        from src import parser
+
+        size = parser._MAX_ADDRESS_HEADER_CHARS + 10
+        msg, _ = _parse_headers(b"From: SYNTHETIC_HEADER_MARKER" + b"x" * size + b"\r\n")
+        assert msg.from_addr == ""
+        assert msg.from_addrs == []
+
+    def test_unparseable_from_still_falls_back_to_its_decoded_text(self):
+        msg, _ = _parse_headers(b"From: =?utf-8?q?No_Address?= <>\r\nTo: b@example.test\r\n")
+        assert msg.from_addrs == []
+        assert msg.from_addr == "No Address <>"
+        assert msg.sender_ambiguous is False
+
+    def test_elements_past_the_budget_are_lost_and_counted(self, monkeypatch, caplog):
+        from src import parser
+
+        caplog.set_level("INFO")
+        monkeypatch.setattr(parser, "MAX_ADDRESS_ELEMENTS", 5)
+        made = _budget_spy(monkeypatch)
+        msg, path = _parse_headers(
+            b"From: s@example.test\r\nTo: a@x.test, b@x.test, ,c@x.test\r\n"
+            b"To: d@x.test, e@x.test, f@x.test\r\n"
+        )
+        assert msg.to_addrs == ["a@x.test", "b@x.test", "c@x.test", "d@x.test"]
+        (budget,) = made
+        assert budget.elements == 5
+        assert budget.parse_calls <= 2 * 5
+        assert _cap_lines(caplog) == [
+            f"parser work caps dropped content from {path}: address_elements=2"
+        ]
+
+    def test_addresses_past_the_budget_are_lost_and_counted(self, monkeypatch, caplog):
+        from src import parser
+
+        caplog.set_level("INFO")
+        monkeypatch.setattr(parser, "MAX_MESSAGE_ADDRESSES", 3)
+        made = _budget_spy(monkeypatch)
+        msg, path = _parse_headers(
+            b"From: s@example.test\r\nTo: a@x.test, b@x.test\r\nCc: c@x.test, d@x.test\r\n"
+        )
+        assert msg.from_addrs == ["s@example.test"]
+        assert msg.to_addrs == ["a@x.test", "b@x.test"]
+        assert msg.cc_addrs == []
+        (budget,) = made
+        assert budget.addresses == 3
+        # Once the address budget is spent, no element is parsed.
+        assert budget.elements == 3
+        assert _cap_lines(caplog) == [
+            f"parser work caps dropped content from {path}: address_count=2"
+        ]
+
+    def test_fields_past_the_scan_budget_are_lost_and_the_sender_ambiguous(
+        self, monkeypatch, caplog
+    ):
+        """Past the scan budget no later From, To or Cc is seen, so a
+        second From cannot be ruled out: the sender is ambiguous."""
+        from src import parser
+
+        caplog.set_level("INFO")
+        monkeypatch.setattr(parser, "MAX_ADDRESS_HEADER_FIELDS", 6)
+        made = _budget_spy(monkeypatch)
+        msg, path = _parse_headers(
+            b"From: s@example.test\r\nX-A: 1\r\nX-B: 2\r\nTo: late@example.test\r\n"
+        )
+        assert msg.from_addr == "s@example.test"
+        assert msg.to_addrs == []
+        assert msg.sender_ambiguous is True
+        (budget,) = made
+        assert budget.fields == 6
+        assert _cap_lines(caplog) == [
+            f"parser work caps dropped content from {path}: address_fields=1"
+        ]
+
+    def test_a_scan_that_reads_every_field_at_the_limit_is_complete(self, monkeypatch):
+        """The boundary: a message with exactly ``MAX_ADDRESS_HEADER_FIELDS``
+        fields is scanned to the end, so its single From is unambiguous;
+        one more field leaves input unread and makes it ambiguous."""
+        from src import parser
+
+        # _REPEAT_HEAD's three fields, From, and Content-Type.
+        monkeypatch.setattr(parser, "MAX_ADDRESS_HEADER_FIELDS", 5)
+        msg, _ = _parse_headers(b"From: s@example.test\r\n")
+        assert msg.sender_ambiguous is False
+        msg, _ = _parse_headers(b"From: s@example.test\r\nX-A: 1\r\n")
+        assert msg.sender_ambiguous is True
+
+    def test_repeat_lines_are_rate_limited_and_counted(self, monkeypatch, caplog):
+        from src import extractors
+
+        caplog.set_level("INFO")
+        monkeypatch.setattr(extractors._LINE_BUDGET, "limit", 2)
+        extractors.drain_extractor_counts()
+        for _ in range(3):
+            _parse_headers(b"From: a@example.test\r\nFrom: b@example.test\r\n")
+        for _ in range(2):
+            _parse_headers(b"From: a@example.test\r\nTo: b@x.test\r\nTo: c@x.test\r\n")
+        lines = [
+            r
+            for r in caplog.records
+            if "repeated" in r.getMessage() or "From headers" in r.getMessage()
+        ]
+        assert len(lines) == 2
+        counts = extractors.drain_extractor_counts()
+        assert counts["parser_sender_ambiguous_messages"] == 3
+        assert counts["parser_recipients_merged_messages"] == 2
+        assert counts["parser_caps_messages"] == 0
+        assert counts["warnings_suppressed"] == 3
+
+    def test_worst_case_message_parses_within_a_bound(self, monkeypatch):
+        """Every address dimension at its cap at once: many fields, the
+        occurrence budget spent on long headers full of tiny elements.
+        Asserts the work done, not only the time."""
+        import time
+
+        from src import parser
+
+        made = _budget_spy(monkeypatch)
+        element = b"a@b.c,"
+        per_header = parser._MAX_ADDRESS_HEADER_CHARS // len(element)
+        to = b"To: " + element * per_header + b"\r\n"
+        extra = b"X-F: 1\r\n" * 5_000 + b"From: s@example.test\r\n" + to * 70
+        start = time.perf_counter()
+        msg, _ = _parse_headers(extra)
+        elapsed = time.perf_counter() - start
+        (budget,) = made
+        assert len(msg.from_addrs) + len(msg.to_addrs) == parser.MAX_MESSAGE_ADDRESSES
+        assert budget.elements <= parser.MAX_ADDRESS_ELEMENTS
+        assert budget.chars <= parser._MAX_ADDRESS_TOTAL_CHARS
+        assert budget.occurrences <= parser.MAX_ADDRESS_OCCURRENCES
+        assert elapsed < 30
