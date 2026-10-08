@@ -109,7 +109,8 @@ log = logging.getLogger("indexer.extractor.xlsx")
 # measured in the indexer image, child peak RSS and time:
 #
 # * a one-cell workbook: 44 MB and 0.2 s, nearly all of it starting the
-#   child and importing openpyxl;
+#   child and importing openpyxl (0.08 s since the image ships compiled
+#   bytecode, #1230);
 # * 1,000,000 cells, half of them distinct strings (5 MB, stopped at
 #   the cell budget): 91 MB and 5.4 s;
 # * 119 rows of 60,000 duplicate cells (stopped at the node budget):

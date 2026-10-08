@@ -1400,8 +1400,8 @@ is rate limited.
 The limits were measured plainly in the indexer image (child peak RSS
 and time): one-paragraph, one-slide and one-cell files take 44 to
 48 MB and 0.2 s, nearly all of it starting the child and importing the
-library (about 0.2 s per extraction, against about 0.08 s if the image
-kept compiled bytecode); the largest benign cases were a synthetic
+library (about 0.08 s since the image ships compiled bytecode for the
+standard library, the dependencies and `src`, #1230); the largest benign cases were a synthetic
 1,500-page report (220 MB, 0.7 s), 150,000 empty text boxes on one
 slide (273 MB, 1.6 s), 1,000,000 spreadsheet cells (91 MB, 5.4 s), and
 an XLSX shared-string table and stylesheet together just under the

@@ -200,7 +200,8 @@ _MAX_RELS_BYTES = 4 * 1024 * 1024
 # measured in the indexer image, child peak RSS and time:
 #
 # * a one-paragraph document: 45 MB and 0.2 s, nearly all of it
-#   starting the child and importing python-docx;
+#   starting the child and importing python-docx (0.08 s since the
+#   image ships compiled bytecode, #1230);
 # * a synthetic 1,500-page report (60,000 formatted paragraphs and 150
 #   tables, stopped at the text budget): 220 MB and 0.7 s;
 # * 500 pages with 2,000 pictures (30 MB): 148 MB and 0.4 s;
