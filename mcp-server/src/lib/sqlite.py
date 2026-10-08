@@ -1203,7 +1203,7 @@ def _attachment_clauses(
     values are ignored.
 
     ``filename`` is a literal casefolded substring; the others match
-    exactly. A stored ``extraction_status`` compared with an occurrence
+    exactly, ``thread_id`` against the carrying message's thread. A stored ``extraction_status`` compared with an occurrence
     that has no extraction row is NULL (unknown: it may be extracted
     later), so the conjunction counts it as indeterminate; ``none``
     selects exactly those occurrences. Raises ``InvalidFilterError``
@@ -1237,6 +1237,12 @@ def _attachment_clauses(
             clauses.append("e.attachment_id IS NULL")
         elif name == "extraction_status":
             clauses.append("e.extraction_status = ?")
+            params.append(value)
+        elif name == "thread_id":
+            # The carrying message's thread: a reparse that moves a
+            # message updates ``messages.thread_id`` but not an existing
+            # ``attachments.thread_id`` (Codex round 1).
+            clauses.append("m.thread_id = ?")
             params.append(value)
         else:
             clauses.append(f"a.{name} = ?")
@@ -4337,7 +4343,7 @@ class Database:
                 f"a.claimant_id AS cid {_ATTACHMENT_FROM} WHERE {page_where_sql} "
                 "ORDER BY clock DESC, cid DESC, occ DESC LIMIT ? ) "
                 "SELECT a.attachment_occurrence_id, a.attachment_id, a.extractor_module, "
-                "a.claimant_id, m.message_id, a.thread_id, "
+                "a.claimant_id, m.message_id, m.thread_id, "
                 f"substr(CAST(a.filename AS BLOB), 1, {_ATTACHMENT_META_BYTES + 1}) "
                 "AS filename_head, "
                 f"substr(CAST(a.content_type AS BLOB), 1, {_ATTACHMENT_META_BYTES + 1}) "

@@ -1354,7 +1354,7 @@ by filename and extracted text and stops at 50 results.
 | `date_to` | string | none | Inclusive upper bound; a date-only value covers the whole UTC day. `date_bounds` echoes the UTC instants applied |
 | `filename` | string | none | Unicode caseless substring of the filename, taken literally (`%` and `_` are ordinary characters) |
 | `content_type` | string | none | Exact MIME type, e.g. `application/pdf` |
-| `extraction_status` | string | none | `success`, `empty`, `unsupported`, `too_large`, `failed`, or `none` (no extraction recorded); any other value is an error |
+| `extraction_status` | string | none | `success`, `empty`, `unsupported`, `too_large`, `failed`, or `none` (no extraction recorded); blank is ignored, any other value is an error |
 | `claimant_id` | string | none | Exact claimant ID of the carrying message |
 | `thread_id` | string | none | Exact thread ID |
 | `limit` | int | `20` | Attachments per page; clamped to `[1, 50]` |
@@ -1395,11 +1395,20 @@ MIME type (each cut at 500 characters, with `filename_clipped` /
 `content_type_clipped` set when the stored value is longer), the size,
 the carrying message's folder, `sent_at`, `occurred_at` and
 `source_file`, and the extraction's status, extractor, time and
-`ocr_pages_skipped` (all null when none is recorded). It returns no
-attachment text: read it through [`get_evidence`](#get_evidence) or
-[`ask_mailbox`](#ask_mailbox), and before reading content for many rows
-tell the user the scope and how much will be read. The counts and the
-page are read in one snapshot.
+`ocr_pages_skipped` (all null when none is recorded). The counts and
+the page are read in one snapshot.
+
+It returns no attachment text, and no tool reads a listed attachment's
+whole text yet (#796): [`get_evidence`](#get_evidence) and
+[`ask_mailbox`](#ask_mailbox) return ranked, capped passages chosen by
+a query, which can leave the listed attachment out or show another copy
+of the same bytes. Report unread attachment text as a coverage limit.
+
+Rows carry private mail metadata (filenames, IDs, folders) and go to
+the calling model, which may be remote. Start with narrow filters and
+`limit=1` to obtain the count; before paging, tell the user the scope
+and how many rows will be paged, and prefer the smallest sample that
+answers the question.
 
 **Paging.** Keyset pagination on descending `(effective_at,
 claimant_id, attachment_occurrence_id)`. A cursor is bound to the tool,

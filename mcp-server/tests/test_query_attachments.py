@@ -257,6 +257,27 @@ class TestAttachmentFilters:
         assert names("   ") == names(None)
         assert len(names(None)) == 3
 
+    def test_thread_id_is_the_carrying_message_thread(self, tmp_path):
+        """Codex round 1: a reparse that moves a message to another thread
+        updates ``messages.thread_id`` but not an existing
+        ``attachments.thread_id``; the filter and the row follow the
+        message."""
+        conn, path = _open_built_db_conn(tmp_path, "moved.db")
+        _insert_message(conn, message_id="mv@x.test", thread_id="t-new", sent_at=_TIE)
+        _insert_attachment(
+            conn,
+            message_id="mv@x.test",
+            thread_id="t-old",
+            attachment_id="p",
+            filename="f.pdf",
+            occurrence_id="o",
+        )
+        conn.close()
+        db = Database(str(path))
+        [row] = db.query_attachments(thread_id="t-new").attachments
+        assert row.thread_id == "t-new"
+        assert db.query_attachments(thread_id="t-old").total_matches == 0
+
     def test_exact_matches(self, corpus):
         db, _ = corpus
         m5 = claimant_of("m05@example.com")
@@ -604,15 +625,30 @@ class TestTool:
                 bad = await client.call_tool_mcp(
                     "query_attachments", {"extraction_status": "pending"}
                 )
-                return tool, ok, bad
+                # Codex round 1: a client that sends unset strings as ""
+                # gets the blank-filter rule, as for every other filter.
+                blank = await client.call_tool_mcp(
+                    "query_attachments", {"extraction_status": "", "limit": 3}
+                )
+                return tool, ok, bad, blank
 
-        tool, ok, bad = asyncio.run(run())
-        assert tool.input_schema["properties"]["extraction_status"]["anyOf"][0]["enum"] == list(
-            EXTRACTION_STATUS_FILTERS
-        )
+        tool, ok, bad, blank = asyncio.run(run())
+        assert tool.input_schema["properties"]["extraction_status"]["anyOf"][0]["enum"] == [
+            *EXTRACTION_STATUS_FILTERS,
+            "",
+        ]
         assert not ok.is_error
         assert ok.structured_content["returned"] == 3
         assert bad.is_error
+        assert not blank.is_error
+        assert blank.structured_content["filters"] == []
+        assert blank.structured_content["total_matches"] == 60
+        # Codex round 1: the served description asks for a count and a
+        # disclosure before paging metadata, and claims no reader.
+        description = " ".join(tool.description.split())
+        assert "limit=1" in description
+        assert "how many rows you will page" in description
+        assert "No tool reads a listed attachment's whole text yet" in description
 
     def test_prose_row_and_a_page_emptied_by_churn(self, fake_server, tmp_path):
         conn, path = _open_built_db_conn(tmp_path, "prose.db")
@@ -724,7 +760,7 @@ class TestTool:
     def test_schema_enum_and_log_allowlist_are_the_database_statuses(self):
         """The tool's schema enum and the logging allowlist are written
         out; both must be the database's ``EXTRACTION_STATUS_FILTERS``."""
-        assert set(get_args(ExtractionStatusFilter)) == set(EXTRACTION_STATUS_FILTERS)
+        assert set(get_args(ExtractionStatusFilter)) == {*EXTRACTION_STATUS_FILTERS, ""}
         check = _LOGGABLE_TOOL_PARAMS["extraction_status"]
         assert all(check(v) for v in EXTRACTION_STATUS_FILTERS)
         assert not check(MARKER)

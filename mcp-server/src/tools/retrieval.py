@@ -76,8 +76,11 @@ _MAX_ATTACHMENT_QUERY_LIMIT = 50
 
 # query_attachments' ``extraction_status`` values
 # (``lib/sqlite.EXTRACTION_STATUS_FILTERS``, pinned by
-# ``tests/test_query_attachments.py``).
-ExtractionStatusFilter = Literal["success", "empty", "unsupported", "too_large", "failed", "none"]
+# ``tests/test_query_attachments.py``), plus "" so a client that sends
+# an unset string as blank gets the blank-filter rule (Codex round 1).
+ExtractionStatusFilter = Literal[
+    "success", "empty", "unsupported", "too_large", "failed", "none", ""
+]
 
 # A ``size_min`` / ``size_max`` argument (#1085). The published schema
 # states the contract (an integer from 0 to SQLite's INTEGER maximum, or
@@ -1319,10 +1322,17 @@ def register_retrieval_tools(server, db):
         anything but ``success`` means no extracted text is available,
         not that the file is irrelevant.
 
-        This tool lists metadata only, no attachment text. Before reading
-        attachment content (get_evidence, ask_mailbox) for many rows, tell
-        the user the scope and how many you will read: tool results go to
-        the calling model, which may be remote.
+        Start with narrow filters and ``limit=1`` to obtain the count.
+        Rows carry private mail metadata (filenames, IDs, folders)
+        and go to the calling model, which may be remote: before paging,
+        tell the user the scope and how many rows you will page, and
+        prefer the smallest sample that answers the question.
+
+        This tool lists metadata only, no attachment text. No tool reads a
+        listed attachment's whole text yet: get_evidence and ask_mailbox
+        return ranked, capped passages by query, which may leave the
+        listed attachment out or show another copy of the same bytes.
+        Report unread attachment text as a coverage limit.
 
         Paging: when ``has_more`` is true, call again with the SAME
         filters plus ``cursor`` set to ``next_cursor``; ``limit`` may
@@ -1352,7 +1362,8 @@ def register_retrieval_tools(server, db):
                       literally (no wildcards).
             content_type: Exact MIME type, e.g. "application/pdf".
             extraction_status: success, empty, unsupported, too_large,
-                               failed, or none (no extraction recorded).
+                               failed, or none (no extraction recorded);
+                               blank is ignored.
             claimant_id: Exact claimant ID of the carrying message.
             thread_id: Exact thread ID.
             limit: Attachments per page (default 20, clamped to [1, 50]).
