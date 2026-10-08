@@ -968,6 +968,14 @@ removed Bridge container are kept as history.
     behaviour. Omit IMAP UID, KEYWORD, DRAFT and DELETED. The
     assessment behind this is in the issues' bodies (#1077–#1093), not
     in the repository.
+36. **Review-round reduction (2026-10-08, #1162):** three of 19 PRs
+    took 24 of 34 corrective rounds. Each kept discovering its contract
+    during review. AGENTS.md now treats a fix that adds a state or moves
+    a validation boundary as a stop-and-ask design change at any round.
+    It also asks reviewers to report a defect's class with all its
+    siblings, and keeps procedure-style docs to verified claims.
+    Corrective and repeat-class rounds are measured over the next ten
+    PRs (#1163).
 
 ## Notes for Agents
 

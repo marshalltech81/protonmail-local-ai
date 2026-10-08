@@ -631,6 +631,13 @@ under about 80 characters.
   and say whether the choice can change what the tools return.
   Choosing to fix one round does not accept later rounds' findings.
   An agent working the PR stops and reports instead of pushing.
+- A fix that adds a state, mode or queue path, or that moves where
+  input is validated, is a design change at any round (owner,
+  2026-10-08, #1162). Stop and ask before pushing it, and offer cutting
+  scope as the first option. If the owner chooses to keep the change,
+  recheck every obligation that depended on the old boundary at the new
+  one. #1125 moved its validation boundary twice, and #1134's re-check
+  budget starved large threads (#1149); neither fix was a guard.
 - Owner decisions (owner, 2026-10-08): every decision or recommendation
   brought to the owner (a re-scope trigger, a `decision` issue, a
   choice between options) first goes to a two-reviewer panel, Claude
@@ -660,6 +667,23 @@ under about 80 characters.
   lists it. Nothing found stays only in a thread, a PR body or a
   commit message.
 - Merge (squash) only on the owner's explicit go-ahead.
+
+## Review guidelines
+
+For code reviewers (Codex and others) reviewing a PR in this
+repository:
+
+- When you report a defect, name its class (for example: identity
+  namespace, unknown or null value, filter scope, lifecycle phase,
+  validation boundary). In the same finding, list every sibling
+  instance of that class you can find in the diff and the code it
+  touches. Reporting one instance per round turns one fix into
+  several rounds (#1111 fixed a claimant mismatch in one scorer, then
+  in the next one round later).
+- Review a fix round against the obligations it touches, not only the
+  lines it changed. A fix that moves validation or adds a state can
+  break a guarantee elsewhere: rate-limited rejection, withheld log
+  values, eventual progress.
 
 ## Common Commands
 
@@ -928,7 +952,11 @@ Notes:
   hash, registered MCP tools and their annotations) gets a test that
   derives the items from the code and fails on any it does not cover,
   with an explicit, reasoned exclusion list; a finding of the form
-  "the list is missing X" is fixed by adding that test, not only X
+  "the list is missing X" is fixed by adding that test, not only X.
+  The expected set comes from an independent source (the consumer
+  that needs the items, such as the commands a library starts), never
+  from the list under test: a test parametrized from the list itself
+  stays green when both miss an item (#1115)
 - threader changes should verify threading, subject fallback, references, and participant handling
 - database changes should verify schema creation, migration, and upsert/query behavior
 - MCP search changes should verify hybrid/RRF behavior where applicable
@@ -972,6 +1000,14 @@ Update docs when changing:
 - environment variables
 - repository workflows, security reporting flow, or contributor-facing automation
 - operational recovery steps
+
+Documentation that prescribes a procedure (a multi-step recipe, a tool
+description telling a client what to call) or promises a property
+(exhaustive, unique, complete) is reviewed as a specification. Keep it
+to minimal claims you have verified against the schema, the tool
+signature or a real result. When a claim draws a review finding, prefer
+cutting it to qualifying it; #307, #1014 and #1100 each spent five or
+more rounds qualifying claims.
 
 If a change may stale `README.md`, `PLAN.md`, `docs/`, or `AGENTS.md`, update it or proactively suggest the follow-up. Contributor-facing defaults (`CONTRIBUTING.md`, `SECURITY.md`, issue/PR templates) live in the org-level `marshalltech81/.github` repo; flag follow-ups there when a change in this repo makes them stale.
 
