@@ -13,7 +13,8 @@ runner's launcher caps the child's address space and CPU time before
 it starts, and the runner adds a wall-clock timeout; see ``xls_child``
 for the per-sheet budgets, which match the xlsx extractor's. The child
 costs a launcher and a child Python start-up and an xlrd import per
-workbook, about a tenth of a second.
+workbook, about 0.02 s on the fixture workbook since the image ships
+compiled bytecode (0.06 s before, #1230).
 
 Any failure in the child (a limit hit, an xlrd error, a crash) ends it
 with no text; the parent raises a fixed-text error from ``_runner``,

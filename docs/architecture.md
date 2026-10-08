@@ -1287,8 +1287,9 @@ each message whose occurrence of it now selects a module.
   checked before the next sheet loads; 10,000,000 characters. A budget
   that cut the text is logged through the extractor-cap WARNING
   (`xls_sheets`, `xls_expanded_cells`, `xls_text_chars`). The child
-  costs a Python start-up and an xlrd import per workbook, about 0.1 s
-  in the image; a 20 MB workbook of 1,000,000 cells takes about 1.2 s
+  costs a Python start-up and an xlrd import per workbook, about
+  0.02 s in the image on the fixture workbook (0.06 s before the image
+  shipped compiled bytecode, #1230); a 20 MB workbook of 1,000,000 cells takes about 1.2 s
   and 145 MB.
 - **`.ppt`** is read by Apache POI 5.5.1's HSLF reader
   (`SlideShowExtractor`: slide text, placeholders and text boxes alike,
@@ -1399,9 +1400,10 @@ is rate limited.
 
 The limits were measured plainly in the indexer image (child peak RSS
 and time): one-paragraph, one-slide and one-cell files take 44 to
-48 MB and 0.2 s, nearly all of it starting the child and importing the
-library (about 0.08 s since the image ships compiled bytecode for the
-standard library, the dependencies and `src`, #1230); the largest benign cases were a synthetic
+48 MB and about 0.08 s, nearly all of it starting the child and
+importing the library (0.2 s before the image shipped compiled
+bytecode for the standard library, the dependencies and `src`, #1230;
+the limits below were measured then); the largest benign cases were a synthetic
 1,500-page report (220 MB, 0.7 s), 150,000 empty text boxes on one
 slide (273 MB, 1.6 s), 1,000,000 spreadsheet cells (91 MB, 5.4 s), and
 an XLSX shared-string table and stylesheet together just under the
