@@ -559,6 +559,8 @@ def index_identity(db: Any, manifest_path: Path = CORPUS_PATH) -> dict[str, obje
             "SELECT claimant_id, subject FROM messages",
             "SELECT claimant_id, coalesce(name, '') || ' ' || coalesce(address, '') "
             "FROM message_participants",
+            # Every stored display name (#1140), which find_contact reports.
+            "SELECT claimant_id, name FROM message_participant_names",
             "SELECT claimant_id, coalesce(filename, '') || ' ' || coalesce(content_type, '') "
             "FROM attachments",
         )

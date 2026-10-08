@@ -88,26 +88,14 @@ def normalize_authority_class(value: str | None) -> str | None:
 AUTHORITY_EXCLUDED_FOLDERS = ("Spam",)
 
 # Claimants (per-message keys) whose From sender's person entity carries
-# the bound class, outside ``AUTHORITY_EXCLUDED_FOLDERS``. Bind the class
-# followed by the excluded folders.
-# Driven from ``idx_entities_authority`` into the participant address
-# index.
-#
-# Only a message whose sender attribution is known safe qualifies
-# (``messages.sender_ambiguous = 0``, #1144): 1 (a repeated From, or a
-# header scan cut short) never does, and neither does NULL, a message
-# the indexer has not assessed yet ("can't tell", owner 2026-10-08).
-# After the v2 upgrade every message is NULL until the queued reparse
-# reaches it, so authority filters match less, then nothing new, until
-# it drains; a dead-lettered message stays NULL.
+# the bound class. Driven from ``idx_entities_authority`` into the
+# participant address index. ``_compile_authority_class`` decides the
+# excluded folders and the sender flag on the outer message, so this
+# subquery is uncorrelated.
 _SENDER_CLASS_MESSAGES = (
-    # The f-string adds ``?`` placeholders only; the folders are bound.
-    "SELECT p.claimant_id FROM entities e "  # nosec B608
+    "SELECT p.claimant_id FROM entities e "
     "JOIN message_participants p ON p.address = e.canonical_key AND p.role = 'from' "
-    "JOIN messages am ON am.claimant_id = p.claimant_id "
-    "WHERE e.kind = 'person' AND e.authority_class = ? "
-    "AND am.sender_ambiguous = 0 "
-    f"AND am.folder NOT IN ({','.join('?' * len(AUTHORITY_EXCLUDED_FOLDERS))})"
+    "WHERE e.kind = 'person' AND e.authority_class = ?"
 )
 
 
@@ -324,7 +312,8 @@ def address_match_mode(value: str) -> str:
     ``"exact"`` when ``value`` holds a full address (``jane@example.com``,
     ``Jane <jane@example.com>``): canonical equality, an indexed lookup.
     ``"substring"`` otherwise (a domain like ``@example.com`` or a name
-    fragment): case-insensitive substring of the address or display name.
+    fragment): case-insensitive substring of the address or of any one
+    display name it was written with.
     """
     # Nested-comment input that makes parseaddr recurse canonicalizes to
     # "", so it can only be a substring.
@@ -334,7 +323,14 @@ def address_match_mode(value: str) -> str:
 
 def _participant_clause(value: str, roles: tuple[str, ...], params: list) -> str:
     """SQL restricting ``messages m`` to those where ``value`` appears in
-    one of ``roles``; appends the bound values to ``params``."""
+    one of ``roles``; appends the bound values to ``params``.
+
+    An exact address is 1 or 0 for every message. A substring is matched
+    against stored addresses and display names, which hold every name
+    only when ``m.participant_names_complete`` is 1 (#1140): a match is
+    1 whatever the flag, but no match is 0 only under 1, and unknown
+    (NULL) under 0 (the parser's name budget dropped a name) or NULL
+    (not reparsed since the v4 upgrade)."""
     role_sql = ",".join(["?"] * len(roles))
     if address_match_mode(value) == "exact":
         params.extend([canonical_addr(value), *roles])
@@ -343,21 +339,26 @@ def _participant_clause(value: str, roles: tuple[str, ...], params: list) -> str
             f"WHERE address = ? AND role IN ({role_sql}))"
         )
     return (
-        "m.claimant_id IN (SELECT claimant_id FROM message_participants "  # nosec B608
-        f"WHERE {_substring_participant_rows(value, roles, params)})"
+        "CASE WHEN m.claimant_id IN (SELECT p.claimant_id FROM message_participants p "  # nosec B608
+        f"WHERE {_substring_participant_rows(value, roles, params)}) THEN 1 "
+        "WHEN m.participant_names_complete = 1 THEN 0 ELSE NULL END"
     )
 
 
 def _substring_participant_rows(value: str, roles: tuple[str, ...], params: list) -> str:
-    """SQL selecting the ``message_participants`` rows in ``roles`` whose
-    address or display name contains ``value``; appends the bound values
-    to ``params``."""
+    """SQL selecting the ``message_participants p`` rows in ``roles``
+    whose address, or any one display name the message wrote it with
+    (``message_participant_names``, #1140), contains ``value``; appends
+    the bound values to ``params``. Each name is matched on its own, so
+    no match spans two names."""
     role_sql = ",".join(["?"] * len(roles))
     # Addresses are stored lowercased; names fold with ``mcp_casefold``.
     params.extend([*roles, value.strip().lower(), value.strip().casefold()])
     return (
-        f"role IN ({role_sql}) "  # nosec B608
-        "AND (instr(address, ?) > 0 OR instr(mcp_casefold(name), ?) > 0)"
+        f"p.role IN ({role_sql}) "  # nosec B608
+        "AND (instr(p.address, ?) > 0 OR EXISTS (SELECT 1 FROM message_participant_names n "
+        "WHERE n.claimant_id = p.claimant_id AND n.role = p.role AND n.address = p.address "
+        "AND instr(mcp_casefold(n.name), ?) > 0))"
     )
 
 
@@ -376,7 +377,10 @@ class Evaluability(Enum):
     without a parseable topmost ``Received:`` header), or the leaf reads
     it only when another field says it can be trusted (``sender`` and
     the From side of ``participant``, when ``sender_ambiguous`` is not
-    0, #1153). Such a message is
+    0, #1153; ``authority_class`` likewise outside Spam, #1161; a
+    substring ``sender``, ``recipient`` or ``participant`` that matches
+    nothing, when ``participant_names_complete`` is not 1, #1140). Such
+    a message is
     neither matched nor missed: the leaf's SQL yields NULL, so the
     conjunction is unknown (SQL's three-valued AND: false if any leaf is
     false, else unknown), the row is left out of the matches and of
@@ -588,8 +592,22 @@ def _compile_flag(column: str) -> Callable[[bool, list], str]:
 
 
 def _compile_authority_class(value: str, params: list) -> str:
-    params.extend([value, *AUTHORITY_EXCLUDED_FOLDERS])
-    return f"m.claimant_id IN ({_SENDER_CLASS_MESSAGES})"
+    # A message in ``AUTHORITY_EXCLUDED_FOLDERS`` is a decided "no"
+    # whatever its sender flag (#463). Otherwise the From sender decides
+    # the leaf only when its attribution is known safe
+    # (``sender_ambiguous = 0``, #1144): for 1 (a repeated From, or a
+    # header scan cut short) or NULL (not assessed yet) the author cannot
+    # be told, so the leaf is unknown (#1161, owner 2026-10-08). After
+    # the v2 upgrade every message is NULL until the queued reparse
+    # reaches it, so ``query_messages`` counts those as indeterminate
+    # until it drains; a dead-lettered message stays NULL.
+    params.extend([*AUTHORITY_EXCLUDED_FOLDERS, value])
+    return (
+        # The f-string adds ``?`` placeholders only; the values are bound.
+        f"CASE WHEN m.folder IN ({','.join('?' * len(AUTHORITY_EXCLUDED_FOLDERS))}) THEN 0 "
+        f"WHEN m.sender_ambiguous = 0 THEN m.claimant_id IN ({_SENDER_CLASS_MESSAGES}) "
+        "ELSE NULL END"
+    )
 
 
 # Thread tests: how ``search_emails`` decides a leaf on a thread row,
@@ -629,7 +647,7 @@ LEAVES: dict[str, LeafKind] = {
         LeafKind(
             "sender", "address", _compile_sender, Evaluability.UNKNOWN_WHEN_NULL, _sender_test
         ),
-        LeafKind("recipient", "address", _compile_recipient, Evaluability.DECIDED),
+        LeafKind("recipient", "address", _compile_recipient, Evaluability.UNKNOWN_WHEN_NULL),
         LeafKind(
             "participant",
             "address",
@@ -697,7 +715,12 @@ LEAVES: dict[str, LeafKind] = {
             _compile_bound("size_bytes", "<="),
             Evaluability.UNKNOWN_WHEN_NULL,
         ),
-        LeafKind("authority_class", "class", _compile_authority_class, Evaluability.DECIDED),
+        LeafKind(
+            "authority_class",
+            "class",
+            _compile_authority_class,
+            Evaluability.UNKNOWN_WHEN_NULL,
+        ),
     )
 }
 

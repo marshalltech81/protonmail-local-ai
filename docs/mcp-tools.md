@@ -401,9 +401,12 @@ the experimental tools) carries it as `sender_ambiguous`:
 
 Only `false` qualifies for the `authority_class` filters: `true` and
 `null` never match any class, `unclassified` included, because the
-author cannot be told. So right after the upgrade the `authority_class`
-filters match fewer messages, and none at first, until the reparse
-drains (`get_mailbox_status` shows the queue). The `from` rows are kept,
+author cannot be told. `query_messages` counts such a message outside
+Spam as `indeterminate`, not as a miss
+([#1161](https://github.com/marshalltech81/protonmail-local-ai/issues/1161));
+a Spam message stays a decided miss. So right after the upgrade the
+`authority_class` filters match fewer messages, and none at first,
+until the reparse drains (`get_mailbox_status` shows the queue). The `from` rows are kept,
 but `query_messages`' `sender` filter cannot decide such a message: it
 counts it as `indeterminate`, not as a match, and `participant` does
 the same unless the value is in its To or Cc
@@ -456,7 +459,7 @@ different filters"), never read against them.
 | `replied` | bool | `query_messages` `replied` | its answered flag (the Maildir `R` flag) equals the value |
 | `size_min` | bytes | `query_messages` `size_min` | its local file size is at least the value; unknown without a stored size |
 | `size_max` | bytes | `query_messages` `size_max` | its local file size is at most the value; unknown without a stored size |
-| `authority_class` | class name | `authority_class` | its From sender carries the class, outside Spam, and its `sender_ambiguous` is `false` ([Sender attribution](#sender-attribution)) |
+| `authority_class` | class name | `authority_class` | its From sender carries the class, outside Spam, and its `sender_ambiguous` is `false`; unknown outside Spam when its `sender_ambiguous` is not `false` ([Sender attribution](#sender-attribution)) |
 
 **Unknown values and the `indeterminate` count
 ([#1085](https://github.com/marshalltech81/protonmail-local-ai/issues/1085)).**
@@ -466,7 +469,18 @@ file size was not recorded) is neither true nor false of such a
 message, and so is `sender` (and the From side of `participant`) of a
 message whose `sender_ambiguous` is `true` or `null`, whether or not
 its stored From carries the value, since its author cannot be told
-([#1153](https://github.com/marshalltech81/protonmail-local-ai/issues/1153)). The leaves conjoin with SQL's three-valued AND: a message is
+([#1153](https://github.com/marshalltech81/protonmail-local-ai/issues/1153)),
+and `authority_class` of such a message outside Spam
+([#1161](https://github.com/marshalltech81/protonmail-local-ai/issues/1161)).
+A `sender`, `recipient` or `participant` value matched as a substring
+(a name or fragment, not a full address) that matches none of a
+message's stored addresses and display names is unknown, not false,
+when its `participant_names_complete` is not `1`: `0` when the
+indexer's per-message name budget dropped a name, `null` for mail not
+reparsed since the upgrade that added it
+([#1140](https://github.com/marshalltech81/protonmail-local-ai/issues/1140)).
+A match on a stored address or name still decides it, and a full
+address never reads the flag. The leaves conjoin with SQL's three-valued AND: a message is
 a match when every leaf is true, rejected when any leaf is false, and
 otherwise *indeterminate*: left out of the matches and of
 `total_matches`, and counted in the response's `indeterminate` field,
@@ -805,7 +819,9 @@ matches, by the `sender` leaf `query_messages` uses
 exactly, anything else is a case-insensitive substring of the address
 or display name. A carrying message the leaf cannot decide (its
 `sender_ambiguous` is `true` or `null`, [Sender
-attribution](#sender-attribution)) keeps its attachments out of the
+attribution](#sender-attribution), or a name or fragment it does not
+match while its display names are not all indexed, [unknown
+values](#filter-predicates)) keeps its attachments out of the
 results, and this tool does not count them ([#1204](https://github.com/marshalltech81/protonmail-local-ai/issues/1204)); right after the upgrade
 that added `sender_ambiguous`, that is all mail indexed before it until
 the reparse drains, and
@@ -1061,8 +1077,12 @@ you need a different matching contact than that one (then pass it as
 | `limit` | int | `10` | Maximum contacts to return; clamped to `[1, 50]` |
 
 The aggregator matches the query against each `message_participants`
-row's canonical address or display name (Unicode caseless: both sides
-are casefolded, so `STRASSE` matches `Straße`),
+row's canonical address or each display name the message wrote it
+with, one name at a time (a message that writes one address under two
+names keeps both, #1140; Unicode caseless: both sides are casefolded,
+so `STRASSE` matches `Straße`; until the reparse after that upgrade
+reaches a message, only its first names are stored, so `names` and
+the matches cover those),
 then aggregates every row of each matched canonical email (so the same
 contact across many threads collapses to one row, and a match on one
 display name still reports the contact's other names and threads), and
@@ -1107,7 +1127,7 @@ questions.
 | `replied` | bool | none | `true` for messages answered in Proton (the Maildir `R` flag), `false` for the rest |
 | `size_min` | int | none | Inclusive lower bound in bytes on the message's local Maildir file size: not IMAP `RFC822.SIZE` (isync writes LF line endings, so a message is about one byte per line smaller than the server's size). A message whose size is not stored is left out. An integer from 0 to 2^63-1 (SQLite's INTEGER range, stated in the schema as `minimum` / `maximum`), checked strictly, so `"100"` or `true` is an error, not a coerced filter, logged through the rate-limited `rejected invalid argument: query_messages.size_min` warning; `size_min` above `size_max` is an error |
 | `size_max` | int | none | Inclusive upper bound in bytes, likewise |
-| `authority_class` | string | none | The source-authority class of the message's From sender (any author, for a multi-author From): `counsel`, `management`, `vendor`, `government`, `personal`, `other`, or `unclassified`; a message in Spam never matches, nor does one whose `sender_ambiguous` is not `false` ([Sender attribution](#sender-attribution)); blank is ignored, any other value is an error |
+| `authority_class` | string | none | The source-authority class of the message's From sender (any author, for a multi-author From): `counsel`, `management`, `vendor`, `government`, `personal`, `other`, or `unclassified`; a message in Spam never matches, and any other whose `sender_ambiguous` is not `false` is counted as `indeterminate`, not matched ([Sender attribution](#sender-attribution)); blank is ignored, any other value is an error |
 | `limit` | int | `25` | Messages per page; clamped to `[1, 100]` |
 | `cursor` | string | none | `next_cursor` from the previous page of the same query |
 | `fields` | list of strings | none (every field) | Row fields to return; see Field projection below |
@@ -1122,8 +1142,10 @@ unfiltered query is not a mailbox-wide total: Trash takes a separate
 (`jane@example.com`, `Jane <jane@example.com>`) matches by canonical
 equality through the `message_participants(address, role)` index.
 Anything else (`@example.com`, `Jane`) is a case-insensitive substring
-of the address or display name; the display name compares casefolded
-(Unicode caseless). The response names the mode used for
+of the address or of a display name; display names compare casefolded
+(Unicode caseless). Every distinct name a message wrote the address
+with in that role is matched, each on its own, so a value never
+matches across two names (#1140). The response names the mode used for
 each filter.
 
 **Matched addresses.** For each `sender`, `recipient` or `participant`
@@ -1159,18 +1181,27 @@ messages the filters could neither accept nor reject ([unknown
 values](#filter-predicates)); the prose states it whenever it is not
 0, naming the causes the given filters can have (`no stored size` for
 `size_min` / `size_max`; `sender ambiguous or not yet checked` for
-`sender` / `participant`). `total_matches` counts the definite matches:
+`sender` / `participant` / `authority_class`; `display names not all
+indexed (reparse pending, or over the name budget)` for a `sender`,
+`recipient` or `participant` given as a name or fragment). `total_matches` counts the definite matches:
 it is the complete count only when `indeterminate` is 0, so report
 `indeterminate` with any count when it is not. A `sender` filter
 decides only messages whose `sender_ambiguous` is `false`, and a
-`participant` filter decides the others only through To or Cc
+`participant` filter decides the others only through To or Cc; an
+`authority_class` filter decides the others only when they are in Spam
 ([Sender attribution](#sender-attribution)). Right after the upgrade
 that added `sender_ambiguous`, mail indexed before it is `null` until
 its queued reparse runs, so every `sender` filter reports those
 matches as `indeterminate` (and `participant` those it finds only in
-From) until the reparse drains (`get_mailbox_status` `queue.reparse`);
+From, and `authority_class` all of them outside Spam) until the reparse drains (`get_mailbox_status` `queue.reparse`);
 a message whose indexing job is dead-lettered stays indeterminate
-until `make requeue-dead`. Each
+until `make requeue-dead`. Likewise, right after the upgrade that added
+`message_participant_names`
+([#1140](https://github.com/marshalltech81/protonmail-local-ai/issues/1140)),
+every `sender`, `recipient` or `participant` filter given as a name or
+fragment reports each message it does not match as `indeterminate`
+until the reparse drains, since that mail's names past the first are
+not stored yet. Each
 message carries its send and delivery dates, folder, read state,
 [pending deletion](#pending-deletion), attachment flag, subject,
 From / To / Cc (at most 10 per role, with a count of the rest),
@@ -1528,7 +1559,9 @@ metadata, at query time (`Database.message_scope`, no schema change):
   `indeterminate` (a `from_addr` filter, or a `participant` filter not
   met through To or Cc, on a message
   whose `sender_ambiguous` is not `false`, [Sender
-  attribution](#sender-attribution)) is not in scope, so right after
+  attribution](#sender-attribution); a name or fragment that matches
+  nothing on a message whose display names are not all indexed) is not
+  in scope, so right after
   the upgrade that added `sender_ambiguous`, a `from_addr` request
   labels the passages of mail indexed before it `context` until the
   reparse drains.

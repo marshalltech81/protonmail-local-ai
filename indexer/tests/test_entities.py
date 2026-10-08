@@ -136,6 +136,22 @@ class TestEntityPopulation:
         after = [list(map(tuple, rows)) for rows in snapshot()]
         assert before == after
 
+    def test_every_name_one_message_gives_an_address_is_an_alias(self, db):
+        """#1140: a header writing one address under two names, and a
+        later role repeating it under a third, gives three aliases."""
+        msg = make_message(
+            message_id="m1@example.com",
+            from_addr="Jane Roe <jane@northwind.example>",
+            to_addrs=["J. Roe <jane@northwind.example>", "Jane Roe <jane@northwind.example>"],
+            cc_addrs=['"Roe, Jane" <jane@northwind.example>'],
+        )
+        db.upsert_thread(make_thread(messages=[msg], thread_id="t1"), _vec())
+        assert _aliases(db, "person:jane@northwind.example") == {
+            "Jane Roe",
+            "J. Roe",
+            "Roe, Jane",
+        }
+
     def test_unparseable_participants_make_no_entity(self, db):
         msg = make_message(
             message_id="m1@example.com",
@@ -205,6 +221,33 @@ class TestEntityPruningOnReap:
         # The reaped message's display name goes; the survivor's stays.
         assert _aliases(db, "person:jane@northwind.example") == {"Jane Roe"}
         assert _aliases(db, "person:pat@contoso.example") == set()
+
+    def test_a_later_name_is_pruned_only_when_no_survivor_carries_it(self, db):
+        """#1140: an alias the reaped message wrote as an address's
+        second name goes; one a survivor also wrote as a second name
+        stays."""
+        kept = make_message(
+            message_id="k@example.com",
+            from_addr="Jane Roe <jane@northwind.example>",
+            to_addrs=["Sam <sam@contoso.example>", "Samuel <sam@contoso.example>"],
+            filepath="/maildir/INBOX/cur/k",
+        )
+        gone = make_message(
+            message_id="g@example.com",
+            from_addr="Jane Roe <jane@northwind.example>",
+            to_addrs=[
+                "Sam <sam@contoso.example>",
+                "Samuel <sam@contoso.example>",
+                "S. Poe <sam@contoso.example>",
+            ],
+            filepath="/maildir/INBOX/cur/g",
+        )
+        db.upsert_thread(make_thread(messages=[kept, gone], thread_id="t1"), _vec())
+        assert _aliases(db, "person:sam@contoso.example") == {"Sam", "Samuel", "S. Poe"}
+
+        _reap(db, "t1", survivors=[kept], reaped=[gone])
+
+        assert _aliases(db, "person:sam@contoso.example") == {"Sam", "Samuel"}
 
     def test_entity_mentioned_in_another_thread_stays(self, db):
         gone = make_message(

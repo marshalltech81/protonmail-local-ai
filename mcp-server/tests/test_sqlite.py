@@ -5851,3 +5851,213 @@ class TestEffectiveTime:
                 )
             )
         assert "idx_messages_effective" in plan
+
+
+class TestParticipantDisplayNames:
+    """#1140: a message that writes one address under two names stores
+    both (``message_participant_names``); the participant row keeps the
+    first. Name matching, matched-address reporting and find_contact
+    read every name, each on its own."""
+
+    @staticmethod
+    def _db(tmp_path) -> Database:
+        from tests.conftest import _insert_message
+
+        conn, path = _open_built_db_conn(tmp_path, "names.db")
+        _insert_message(
+            conn,
+            message_id="d1",
+            thread_id="t1",
+            sent_at="2024-01-01T09:00:00+00:00",
+            from_=["Ann <ann@one.example>", "Annabel <ANN@one.example>"],
+            to=["Kim <kim@two.example>", "Kimberly <kim@two.example>"],
+        )
+        _insert_message(
+            conn,
+            message_id="d2",
+            thread_id="t2",
+            sent_at="2024-02-01T09:00:00+00:00",
+            from_=["Lee <lee@three.example>"],
+            to=["ann@one.example"],
+        )
+        conn.close()
+        return Database(str(path))
+
+    def test_the_participant_row_keeps_the_first_name(self, tmp_path):
+        db = self._db(tmp_path)
+        page = db.query_messages(sender="ann@one.example")
+        [record] = page.messages
+        assert [(p.name, p.address) for p in record.from_] == [("Ann", "ann@one.example")]
+
+    @pytest.mark.parametrize(
+        ("field", "value", "address"),
+        [
+            ("sender", "annabel", "ann@one.example"),
+            ("recipient", "KIMBERLY", "kim@two.example"),
+            ("participant", "kimberly", "kim@two.example"),
+        ],
+    )
+    def test_a_later_name_matches_and_reports_its_address(self, tmp_path, field, value, address):
+        db = self._db(tmp_path)
+        page = db.query_messages(**{field: value})
+        assert _ids(page) == ["d1"]
+        assert page.total_matches == 1
+        assert page.address_matches[field].addresses == [address]
+
+    def test_no_match_spans_two_names(self, tmp_path):
+        db = self._db(tmp_path)
+        for value in ("ann annabel", "annannabel", "kim kimberly"):
+            page = db.query_messages(participant=value)
+            assert page.total_matches == 0, value
+            assert page.address_matches["participant"].distinct == 0
+
+    def test_find_contact_matches_and_reports_every_name(self, tmp_path):
+        db = self._db(tmp_path)
+        [contact] = db.find_contact("annabel")
+        assert contact["email"] == "ann@one.example"
+        assert contact["names"] == ["Ann", "Annabel"]
+        # The d2 recipient row counts too: every row of the address.
+        assert contact["thread_count"] == 2
+        [contact] = db.find_contact("kimberly")
+        assert contact["names"] == ["Kim", "Kimberly"]
+
+    def test_senders_only_matches_and_reports_a_later_from_name(self, tmp_path):
+        db = self._db(tmp_path)
+        [contact] = db.find_contact("annabel", senders_only=True)
+        assert contact["email"] == "ann@one.example"
+        assert contact["names"] == ["Ann", "Annabel"]
+        assert contact["thread_count"] == 1
+        # A recipient-only name is not a sender match.
+        assert db.find_contact("kimberly", senders_only=True) == []
+
+
+class TestNameCompleteness:
+    """#1140 review round 1: a substring address filter decides a
+    message only when its stored names are complete
+    (``messages.participant_names_complete`` = 1). A match on a stored
+    address or name decides it (1) whatever the flag; no match is a
+    known miss (0) only under 1, and unknown (NULL) under 0 (a name the
+    budget dropped) or NULL (not reparsed since the upgrade). Exact
+    addresses are unaffected."""
+
+    # (message_id, From, To, sender_ambiguous, participant_names_complete)
+    _ROWS = [
+        ("k1", "Ann <ann@one.test>", "Kim <kim@two.test>", 0, 1),
+        ("k0", "Ann <ann@one.test>", "Kim <kim@two.test>", 0, 0),
+        ("kN", "Ann <ann@one.test>", "Kim <kim@two.test>", 0, None),
+        ("a1", "Ann <ann@one.test>", "Kim <kim@two.test>", 1, 1),
+        ("aN", "Ann <ann@one.test>", "Kim <kim@two.test>", None, None),
+    ]
+
+    @classmethod
+    def _db(cls, tmp_path) -> Database:
+        from tests.conftest import _insert_message
+
+        conn, path = _open_built_db_conn(tmp_path, "complete.db")
+        for i, (message_id, from_, to, ambiguous, complete) in enumerate(cls._ROWS):
+            _insert_message(
+                conn,
+                message_id=message_id,
+                thread_id=f"t-{message_id}",
+                sent_at=f"2024-01-{i + 1:02d}T09:00:00+00:00",
+                from_=[from_],
+                to=[to],
+                sender_ambiguous=ambiguous,
+                participant_names_complete=complete,
+            )
+        conn.close()
+        return Database(str(path))
+
+    @staticmethod
+    def _truth(db: Database, leaf) -> dict[str, int | None]:
+        from src.lib.predicates import compile_leaves
+
+        sql, params = compile_leaves([leaf])
+        with closing(db._connect()) as conn:
+            rows = conn.execute(
+                f"SELECT m.message_id, ({sql}) FROM messages m",  # nosec B608
+                params,
+            ).fetchall()
+        return {r[0]: (None if r[1] is None else int(bool(r[1]))) for r in rows}
+
+    @pytest.mark.parametrize(
+        ("name", "value", "expected"),
+        [
+            # A stored name or address match decides, under 1, 0 and NULL.
+            ("recipient", "kim", {"k1": 1, "k0": 1, "kN": 1, "a1": 1, "aN": 1}),
+            ("recipient", "@two.test", {"k1": 1, "k0": 1, "kN": 1, "a1": 1, "aN": 1}),
+            # No match: a known miss only when the names are complete.
+            ("recipient", "zed", {"k1": 0, "k0": None, "kN": None, "a1": 0, "aN": None}),
+            # The sender guard still comes first: an ambiguous or
+            # unassessed sender stays unknown even on a name match.
+            ("sender", "ann", {"k1": 1, "k0": 1, "kN": 1, "a1": None, "aN": None}),
+            ("sender", "zed", {"k1": 0, "k0": None, "kN": None, "a1": None, "aN": None}),
+            # Participant: a recipient match decides whatever the flags.
+            ("participant", "kim", {"k1": 1, "k0": 1, "kN": 1, "a1": 1, "aN": 1}),
+            ("participant", "zed", {"k1": 0, "k0": None, "kN": None, "a1": None, "aN": None}),
+            # Exact addresses never read the flag.
+            ("recipient", "kim@two.test", {"k1": 1, "k0": 1, "kN": 1, "a1": 1, "aN": 1}),
+            ("recipient", "zed@two.test", {"k1": 0, "k0": 0, "kN": 0, "a1": 0, "aN": 0}),
+        ],
+    )
+    def test_leaf_truth_table(self, tmp_path, name, value, expected):
+        from src.lib.predicates import Leaf
+
+        assert self._truth(self._db(tmp_path), Leaf(name, value)) == expected
+
+    def test_recipient_is_registered_as_possibly_unknown(self):
+        from src.lib.predicates import LEAVES, Evaluability
+
+        assert LEAVES["recipient"].evaluability is Evaluability.UNKNOWN_WHEN_NULL
+
+    def test_a_recipient_only_query_counts_the_undecided(self, tmp_path):
+        db = self._db(tmp_path)
+        page = db.query_messages(recipient="zed")
+        # k0, kN and aN: names incomplete or not yet known.
+        assert (page.total_matches, page.indeterminate) == (0, 3)
+        page = db.query_messages(recipient="kim")
+        assert (page.total_matches, page.indeterminate) == (5, 0)
+
+    def test_a_false_leaf_decides_an_unknown_one(self, tmp_path):
+        """SQL's three-valued AND: false and unknown is false, so a
+        message another filter rules out is not counted as undecided."""
+        db = self._db(tmp_path)
+        page = db.query_messages(recipient="zed", subject="no such subject")
+        assert (page.total_matches, page.indeterminate) == (0, 0)
+        page = db.query_messages(recipient="zed", date_to="2024-01-02")
+        # k1 and k0 are in range: k1 is a known miss, k0 undecided.
+        assert (page.total_matches, page.indeterminate) == (0, 1)
+
+    def test_an_exact_address_query_reports_nothing_undecided(self, tmp_path):
+        page = self._db(tmp_path).query_messages(recipient="zed@two.test")
+        assert (page.total_matches, page.indeterminate) == (0, 0)
+
+    @pytest.mark.parametrize(
+        ("filters", "count", "causes"),
+        [
+            (
+                {"recipient": "zed"},
+                3,
+                "display names not all indexed (reparse pending, or over the name budget);",
+            ),
+            (
+                {"sender": "zed", "size_min": 1},
+                4,
+                "sender ambiguous or not yet checked; display names not all indexed "
+                "(reparse pending, or over the name budget); no stored size;",
+            ),
+            # An exact sender cannot be undecided by its names.
+            ({"sender": "ann@one.test"}, 2, "sender ambiguous or not yet checked;"),
+        ],
+    )
+    def test_prose_names_the_names_cause_for_substring_filters_only(
+        self, tmp_path, fake_server, filters, count, causes
+    ):
+        import asyncio
+
+        from src.tools.retrieval import register_retrieval_tools
+
+        register_retrieval_tools(fake_server, self._db(tmp_path))
+        out = asyncio.run(fake_server.tools["query_messages"](**filters))
+        assert out.structured_content["indeterminate"] == count
+        assert f"could neither accept nor reject: {causes} in neither" in out.content[0].text
