@@ -4163,6 +4163,16 @@ _CAP_SHAPES = {
         "address_count=2",
         lambda msg: msg.to_addrs == ["bob@example.test"],
     ),
+    # #1140: display names past the first for a participant spend one
+    # per-message budget; the recipient is kept.
+    "participant_names": (
+        _addresses(b"Bob <bob@example.test>, SYNTHETIC_HEADER_MARKER <bob@example.test>"),
+        {"MAX_EXTRA_PARTICIPANT_NAMES": 0},
+        "participant_names=1",
+        lambda msg: (
+            len(msg.to_addrs) == 2 and msg.participant_names == [("to", "bob@example.test", "Bob")]
+        ),
+    ),
     # #902: the header caps. The subject is cut to ``SUBJECT_MAX_CHARS``;
     # an In-Reply-To or References entry over ``MESSAGE_ID_MAX_CHARS`` is
     # dropped and threading sees the rest.
@@ -5116,4 +5126,133 @@ class TestRepeatedAddressHeaders:
         assert budget.elements <= parser.MAX_ADDRESS_ELEMENTS
         assert budget.chars <= parser._MAX_ADDRESS_TOTAL_CHARS
         assert budget.occurrences <= parser.MAX_ADDRESS_OCCURRENCES
+        assert elapsed < 30
+
+
+# ---------------------------------------------------------------------------
+# Every display name per participant (#1140)
+# ---------------------------------------------------------------------------
+
+
+class TestParticipantNames:
+    """#1140: ``participant_names`` holds every distinct display name
+    each (role, address) was written with, not only the first, so name
+    matching sees all of them. The first name of each (role, address)
+    is always kept; every further one spends a per-message budget."""
+
+    def test_one_address_under_two_names_keeps_both(self):
+        msg, _ = _parse_headers(
+            b"From: sender@example.test\r\n"
+            b"To: Jane Roe <jane@example.test>, J. Roe <JANE@example.test>\r\n"
+        )
+        assert msg.participant_names == [
+            ("to", "jane@example.test", "Jane Roe"),
+            ("to", "jane@example.test", "J. Roe"),
+        ]
+        assert msg.participant_names_complete is True
+
+    def test_each_role_keeps_its_own_names_in_header_order(self):
+        msg, _ = _parse_headers(
+            b"From: Jane Roe <jane@example.test>\r\n"
+            b"To: bob@example.test, Jane (work) <jane@example.test>\r\n"
+            b"Cc: Bob B <bob@example.test>\r\n"
+            b"To: Robert <bob@example.test>\r\n"
+        )
+        assert msg.participant_names == [
+            ("from", "jane@example.test", "Jane Roe"),
+            ("to", "jane@example.test", "Jane (work)"),
+            ("to", "bob@example.test", "Robert"),
+            ("cc", "bob@example.test", "Bob B"),
+        ]
+
+    def test_exact_duplicates_are_stored_once_and_casing_is_kept(self):
+        msg, _ = _parse_headers(
+            b"From: sender@example.test\r\n"
+            b"To: Jane <jane@example.test>, Jane <jane@example.test>, JANE <jane@example.test>,"
+            b" jane@example.test\r\n"
+        )
+        assert msg.participant_names == [
+            ("to", "jane@example.test", "Jane"),
+            ("to", "jane@example.test", "JANE"),
+        ]
+
+    def test_encoded_names_are_decoded(self):
+        msg, _ = _parse_headers(
+            b"From: sender@example.test\r\n"
+            b"To: =?utf-8?q?Jos=C3=A9?= <jose@example.test>, Pepe <jose@example.test>\r\n"
+        )
+        assert [name for _, _, name in msg.participant_names] == ["José", "Pepe"]
+
+    def test_names_past_the_count_budget_are_dropped_and_counted(self, monkeypatch, caplog):
+        from src import extractors, parser
+
+        caplog.set_level("DEBUG")
+        extractors.drain_extractor_counts()
+        monkeypatch.setattr(parser, "MAX_EXTRA_PARTICIPANT_NAMES", 2)
+        others = b", ".join(b"SYNTHETIC_HEADER_MARKER %d <jane@example.test>" % i for i in range(5))
+        msg, path = _parse_headers(
+            b"From: Sam <sam@example.test>\r\n"
+            b"To: Jane <jane@example.test>, " + others + b", Kim <kim@example.test>\r\n"
+        )
+        # Every participant's first name is kept; two further names fit.
+        assert msg.participant_names == [
+            ("from", "sam@example.test", "Sam"),
+            ("to", "jane@example.test", "Jane"),
+            ("to", "jane@example.test", "SYNTHETIC_HEADER_MARKER 0"),
+            ("to", "jane@example.test", "SYNTHETIC_HEADER_MARKER 1"),
+            ("to", "kim@example.test", "Kim"),
+        ]
+        # The message keeps every recipient, and records the loss.
+        assert len(msg.to_addrs) == 7
+        assert msg.participant_names_complete is False
+        assert _cap_lines(caplog) == [
+            f"parser work caps dropped content from {path}: participant_names=3"
+        ]
+        assert extractors.drain_extractor_counts()["parser_caps_messages"] == 1
+        assert "SYNTHETIC_HEADER_MARKER" not in caplog.text
+
+    def test_names_past_the_byte_budget_are_dropped(self, monkeypatch, caplog):
+        from src import parser
+
+        caplog.set_level("DEBUG")
+        # "Jo" (2 bytes) fits; "José" is 5 UTF-8 bytes and does not.
+        monkeypatch.setattr(parser, "MAX_EXTRA_PARTICIPANT_NAME_BYTES", 6)
+        msg, path = _parse_headers(
+            b"From: sender@example.test\r\n"
+            b"To: Jane <j@example.test>, Jo <j@example.test>,"
+            b" =?utf-8?q?Jos=C3=A9?= <j@example.test>, Al <j@example.test>\r\n"
+        )
+        assert [name for _, _, name in msg.participant_names] == ["Jane", "Jo", "Al"]
+        assert msg.participant_names_complete is False
+        assert _cap_lines(caplog) == [
+            f"parser work caps dropped content from {path}: participant_names=1"
+        ]
+
+    def test_worst_case_names_are_bounded(self, monkeypatch):
+        """Every address a message may keep, all one address under
+        distinct names: the stored names stop at the budget, and the
+        name pass costs two ``parseaddr`` calls per kept address."""
+        from src import parser
+
+        calls = {"n": 0}
+        real = parser.email.utils.parseaddr
+
+        def counting(value, *args, **kwargs):
+            calls["n"] += 1
+            return real(value, *args, **kwargs)
+
+        to = b", ".join(b"N%05d <j@x.test>" % i for i in range(parser.MAX_MESSAGE_ADDRESSES))
+        made = _budget_spy(monkeypatch)
+        monkeypatch.setattr(parser.email.utils, "parseaddr", counting)
+        start = time.perf_counter()
+        msg, _ = _parse_headers(b"From: s@example.test\r\nTo: " + to + b"\r\n")
+        elapsed = time.perf_counter() - start
+        (budget,) = made
+        kept = len(msg.from_addrs) + len(msg.to_addrs)
+        assert kept == parser.MAX_MESSAGE_ADDRESSES
+        assert len(msg.participant_names) == 1 + parser.MAX_EXTRA_PARTICIPANT_NAMES
+        # The address parse (``parse_calls``, plus ``_format_address``'s
+        # identity check on each named To address), then two per kept
+        # address for the names.
+        assert calls["n"] == budget.parse_calls + (kept - 1) + 2 * kept
         assert elapsed < 30

@@ -946,6 +946,7 @@ class TestClockSizeAndRepliedLeaves:
             "occurred_to",
             "dated",
             "sender",
+            "recipient",
             "participant",
             "authority_class",
         }

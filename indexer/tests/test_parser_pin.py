@@ -64,6 +64,7 @@ _VERBATIM_FIELDS = (
     "size",
     "date_is_fallback",
     "sender_ambiguous",
+    "participant_names_complete",
 )
 _DERIVED_FIELDS = (
     "date",
@@ -73,6 +74,7 @@ _DERIVED_FIELDS = (
     "attachments",
     "mtime_ns",
     "content_hash",
+    "participant_names",
 )
 
 
@@ -89,6 +91,8 @@ def _record(msg: Message, root: Path) -> dict[str, Any]:
     record["filepath"] = Path(msg.filepath).relative_to(root).as_posix()
     record["mtime_ns_captured"] = msg.mtime_ns is not None
     record["content_hash"] = f"sha256:{msg.content_hash}"
+    # ``(role, address, name)`` rows, as JSON lists (#1140).
+    record["participant_names"] = [list(row) for row in msg.participant_names or []]
     record["attachments"] = [
         {
             "filename": a.filename,

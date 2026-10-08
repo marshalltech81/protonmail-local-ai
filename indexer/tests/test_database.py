@@ -116,9 +116,9 @@ class TestSchema:
 
     def test_fresh_install_is_stamped_the_current_version(self, db):
         """A fresh install creates the current schema directly and stamps
-        v3 (#891), skipping the migration files."""
-        assert SCHEMA_VERSION == 3
-        assert db._conn.execute("SELECT version FROM schema_version").fetchone()[0] == 3
+        v4 (#1140), skipping the migration files."""
+        assert SCHEMA_VERSION == 4
+        assert db._conn.execute("SELECT version FROM schema_version").fetchone()[0] == 4
 
     def test_fresh_install_has_a_nullable_ocr_pages_skipped_column(self, db):
         """#891: a count, NULL when unknown, with no default."""
@@ -316,7 +316,7 @@ class TestMigrationV1:
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [1, 2, 3]" in caplog.text
+        assert "applied migrations: [1, 2, 3, 4]" in caplog.text
         assert "SYNTHETIC" not in caplog.text
 
     def test_v0_rows_are_carried_over_under_their_stamps_module(self, tmp_path):
@@ -434,10 +434,25 @@ def _v1_from_fresh(db: Database) -> None:
 
 
 def _v2_from_fresh(db: Database) -> None:
-    """Turn a fresh database into the v2 shape: v2 is the current schema
+    """Turn a fresh database into the v2 shape: v2 is the v3 schema
     without ``attachment_extractions.ocr_pages_skipped`` (#891)."""
+    _v3_from_fresh(db)
     db._conn.execute("ALTER TABLE attachment_extractions DROP COLUMN ocr_pages_skipped")
     db._conn.execute("UPDATE schema_version SET version = 2")
+    db._conn.commit()
+
+
+def _v3_from_fresh(db: Database) -> None:
+    """Turn a fresh database into the v3 shape: v3 is the current schema
+    without ``message_participant_names`` and
+    ``messages.participant_names_complete``, and with the participant
+    (address, name) index (#1140)."""
+    db._conn.execute("DROP TABLE message_participant_names")
+    db._conn.execute("ALTER TABLE messages DROP COLUMN participant_names_complete")
+    db._conn.execute(
+        "CREATE INDEX idx_message_participants_address_name ON message_participants(address, name)"
+    )
+    db._conn.execute("UPDATE schema_version SET version = 3")
     db._conn.commit()
 
 
@@ -461,7 +476,7 @@ class TestMigrationV2:
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [2, 3]" in caplog.text
+        assert "applied migrations: [2, 3, 4]" in caplog.text
 
     def test_the_migrated_column_rejects_other_values(self, tmp_path):
         db = Database(tmp_path / "v1.db")
@@ -505,16 +520,20 @@ class TestMigrationV3:
         migrated = Database(tmp_path / "v2.db")
         fresh = Database(tmp_path / "fresh.db")
         try:
-            assert migrated._conn.execute("SELECT version FROM schema_version").fetchone()[0] == 3
+            assert migrated._conn.execute("SELECT version FROM schema_version").fetchone()[0] == 4
             assert _schema_shape(migrated._conn) == _schema_shape(fresh._conn)
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [3]" in caplog.text
+        assert "applied migrations: [3, 4]" in caplog.text
         assert "SYNTHETIC" not in caplog.text
 
-    def test_existing_rows_are_unknown_and_nothing_is_queued(self, tmp_path):
+    def test_existing_rows_are_unknown_and_nothing_is_queued(self, tmp_path, monkeypatch):
+        from src import database
+
         self._v2_with_rows(tmp_path / "v2.db")
+        # This migration alone: v4 queues a reparse of its own (#1140).
+        monkeypatch.setattr(database, "SCHEMA_VERSION", 3)
         db = Database(tmp_path / "v2.db")
         try:
             row = db.get_attachment_extraction("h-pdf", "pdf")
@@ -3810,6 +3829,7 @@ class TestMessagesTable:
             "flagged",
             "replied",
             "sender_ambiguous",
+            "participant_names_complete",
         }
         cols = {r["name"] for r in db._conn.execute("PRAGMA table_info(message_participants)")}
         assert cols == {"claimant_id", "role", "address", "name"}
@@ -3885,6 +3905,159 @@ class TestMessagesTable:
         assert {p for p in self._participants(db, "m1@example.com") if p[0] == "to"} == {
             ("to", "bob@example.com", None)
         }
+
+    def _names(self, db, claimant_id):
+        return {
+            (r["role"], r["address"], r["name"])
+            for r in db._conn.execute(
+                "SELECT role, address, name FROM message_participant_names WHERE claimant_id = ?",
+                (claimant_id,),
+            )
+        }
+
+    def test_every_display_name_per_address_and_role_is_stored(self, db):
+        """#1140: one address written under two names, in one header and
+        across roles. The participant row keeps the first name; the names
+        table keeps every distinct one, exact duplicates once."""
+        msg = make_message(
+            message_id="m1@example.com",
+            from_addr="Jane Roe <jane@example.com>",
+            to_addrs=[
+                "bob@example.com",
+                "Bobby <BOB@example.com>",
+                "Robert <bob@example.com>",
+                "Bobby <bob@example.com>",
+                "J. Roe <jane@example.com>",
+            ],
+        )
+        db.upsert_thread(make_thread(messages=[msg], thread_id="t1"), _one_hot(0))
+
+        assert self._participants(db, msg.claimant_id) == {
+            ("from", "jane@example.com", "Jane Roe"),
+            ("to", "bob@example.com", None),
+            ("to", "jane@example.com", "J. Roe"),
+        }
+        assert self._names(db, msg.claimant_id) == {
+            ("from", "jane@example.com", "Jane Roe"),
+            ("to", "bob@example.com", "Bobby"),
+            ("to", "bob@example.com", "Robert"),
+            ("to", "jane@example.com", "J. Roe"),
+        }
+
+    def test_the_parsers_names_are_written_as_given(self, db):
+        """A parsed message carries its budgeted names; the writer stores
+        exactly those rows and derives nothing more."""
+        msg = make_message(
+            message_id="m1@example.com",
+            to_addrs=["Bobby <bob@example.com>", "Robert <bob@example.com>"],
+        )
+        msg.participant_names = [("to", "bob@example.com", "Bobby")]
+        db.upsert_thread(make_thread(messages=[msg], thread_id="t1"), _one_hot(0))
+        assert self._names(db, msg.claimant_id) == {("to", "bob@example.com", "Bobby")}
+
+    def test_names_are_replaced_on_reindex_and_removed_with_the_message(self, db):
+        msg = make_message(
+            message_id="m1@example.com", to_addrs=["A <a@example.com>", "B <a@example.com>"]
+        )
+        db.upsert_thread(make_thread(messages=[msg], thread_id="t1"), _one_hot(0))
+        again = make_message(message_id="m1@example.com", to_addrs=["C <a@example.com>"])
+        db.upsert_thread(make_thread(messages=[again], thread_id="t1"), _one_hot(0))
+        assert self._names(db, msg.claimant_id) == {("to", "a@example.com", "C")}
+
+        _tombstone_thread(db, "t1")
+        db.delete_thread_completely("t1")
+        assert db._conn.execute("SELECT COUNT(*) FROM message_participant_names").fetchone()[0] == 0
+
+    def _complete(self, db, claimant_id):
+        return db._conn.execute(
+            "SELECT participant_names_complete FROM messages WHERE claimant_id = ?",
+            (claimant_id,),
+        ).fetchone()[0]
+
+    @pytest.mark.parametrize(("complete", "stored"), [(True, 1), (False, 0)])
+    def test_the_parsers_completeness_flag_is_stored(self, db, complete, stored):
+        msg = make_message(message_id="m1@example.com", to_addrs=["Bobby <bob@example.com>"])
+        msg.participant_names = [("to", "bob@example.com", "Bobby")]
+        msg.participant_names_complete = complete
+        db.upsert_thread(make_thread(messages=[msg], thread_id="t1"), _one_hot(0))
+        assert self._complete(db, msg.claimant_id) == stored
+
+    @pytest.mark.parametrize(
+        ("budget", "stored", "names"), [(1, 1, {"Bobby", "Robert"}), (0, 0, {"Bobby"})]
+    )
+    def test_the_fallback_path_stores_the_flag_from_its_own_budget(
+        self, db, monkeypatch, budget, stored, names
+    ):
+        """A Message built without parsing derives its names in the
+        writer; the flag comes from that pass's budget."""
+        from src import parser
+
+        monkeypatch.setattr(parser, "MAX_EXTRA_PARTICIPANT_NAMES", budget)
+        msg = make_message(
+            message_id="m1@example.com",
+            to_addrs=["Bobby <bob@example.com>", "Robert <bob@example.com>"],
+        )
+        assert msg.participant_names is None
+        db.upsert_thread(make_thread(messages=[msg], thread_id="t1"), _one_hot(0))
+        assert self._complete(db, msg.claimant_id) == stored
+        assert {n for _, _, n in self._names(db, msg.claimant_id)} == names
+
+    def test_the_replacement_is_atomic(self, db):
+        """A failed name write leaves the earlier flag, participant rows
+        and names in place: they change together or not at all."""
+        msg = make_message(
+            message_id="m1@example.com", to_addrs=["A <a@example.com>", "B <a@example.com>"]
+        )
+        db.upsert_thread(make_thread(messages=[msg], thread_id="t1"), _one_hot(0))
+        before = (
+            self._complete(db, msg.claimant_id),
+            self._participants(db, msg.claimant_id),
+            self._names(db, msg.claimant_id),
+        )
+        db._conn.execute(
+            "CREATE TRIGGER fail_names BEFORE INSERT ON message_participant_names "
+            "BEGIN SELECT RAISE(ABORT, 'injected'); END"
+        )
+        again = make_message(message_id="m1@example.com", to_addrs=["C <c@example.com>"])
+        again.participant_names = [("to", "c@example.com", "C")]
+        again.participant_names_complete = False
+        with pytest.raises(sqlite3.IntegrityError, match="injected"):
+            db.upsert_thread(make_thread(messages=[again], thread_id="t1"), _one_hot(0))
+        after = (
+            self._complete(db, msg.claimant_id),
+            self._participants(db, msg.claimant_id),
+            self._names(db, msg.claimant_id),
+        )
+        assert before == after
+        assert before[0] == 1
+
+    def test_names_schema_contract(self, db):
+        cols = [
+            (r["name"], r["notnull"], r["pk"])
+            for r in db._conn.execute("PRAGMA table_info(message_participant_names)")
+        ]
+        assert cols == [
+            ("claimant_id", 1, 1),
+            ("role", 1, 2),
+            ("address", 1, 3),
+            ("name", 1, 4),
+        ]
+        fks = [
+            (r["table"], r["from"], r["to"], r["on_delete"])
+            for r in db._conn.execute("PRAGMA foreign_key_list(message_participant_names)")
+        ]
+        assert fks == [
+            ("message_participants", "claimant_id", "claimant_id", "CASCADE"),
+            ("message_participants", "role", "role", "CASCADE"),
+            ("message_participants", "address", "address", "CASCADE"),
+        ]
+        index_cols = [
+            r["name"]
+            for r in db._conn.execute(
+                "PRAGMA index_info(idx_message_participant_names_address_name)"
+            )
+        ]
+        assert index_cols == ["address", "name"]
 
     def test_update_filepath_moves_message_locator(self, db):
         msg = make_message(message_id="m1@example.com", filepath="/maildir/INBOX/cur/m1:2,S")

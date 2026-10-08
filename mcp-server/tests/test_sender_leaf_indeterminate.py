@@ -7,8 +7,8 @@ The From role decides ``sender`` only when the flag is 0; otherwise
 the leaf is unknown, so ``query_messages`` leaves the message out of
 the matches and counts it as ``indeterminate``. ``participant`` is the
 recipient match OR that sender expression (SQL three-valued OR): a
-recipient match decides it whatever the flag. ``recipient`` is
-unchanged. All data is synthetic.
+recipient match decides it whatever the flag. ``recipient`` does not
+read ``sender_ambiguous``. All data is synthetic.
 """
 
 import asyncio
@@ -115,7 +115,8 @@ class TestTruthTable:
 def test_evaluability_is_declared():
     assert LEAVES["sender"].evaluability is Evaluability.UNKNOWN_WHEN_NULL
     assert LEAVES["participant"].evaluability is Evaluability.UNKNOWN_WHEN_NULL
-    assert LEAVES["recipient"].evaluability is Evaluability.DECIDED
+    # A substring recipient can be unknown too (#1140).
+    assert LEAVES["recipient"].evaluability is Evaluability.UNKNOWN_WHEN_NULL
 
 
 def _ids(page) -> set[str]:
@@ -184,7 +185,11 @@ class TestTool:
     def test_prose_names_each_cause_the_filters_can_have(self, fake_server, flags_db):
         out = self._call(fake_server, flags_db, participant="jane", size_min=1)
         assert out.structured_content["indeterminate"] == 3
-        assert "sender ambiguous or not yet checked; no stored size;" in out.content[0].text
+        # A name filter can also be undecided by its names (#1140).
+        assert (
+            "sender ambiguous or not yet checked; display names not all indexed "
+            "(reparse pending, or over the name budget); no stored size;"
+        ) in out.content[0].text
 
     def test_a_size_bound_alone_names_only_its_cause(self, fake_server, flags_db):
         with closing(sqlite3.connect(flags_db.path)) as conn:

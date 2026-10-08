@@ -312,7 +312,8 @@ def address_match_mode(value: str) -> str:
     ``"exact"`` when ``value`` holds a full address (``jane@example.com``,
     ``Jane <jane@example.com>``): canonical equality, an indexed lookup.
     ``"substring"`` otherwise (a domain like ``@example.com`` or a name
-    fragment): case-insensitive substring of the address or display name.
+    fragment): case-insensitive substring of the address or of any one
+    display name it was written with.
     """
     # Nested-comment input that makes parseaddr recurse canonicalizes to
     # "", so it can only be a substring.
@@ -322,7 +323,14 @@ def address_match_mode(value: str) -> str:
 
 def _participant_clause(value: str, roles: tuple[str, ...], params: list) -> str:
     """SQL restricting ``messages m`` to those where ``value`` appears in
-    one of ``roles``; appends the bound values to ``params``."""
+    one of ``roles``; appends the bound values to ``params``.
+
+    An exact address is 1 or 0 for every message. A substring is matched
+    against stored addresses and display names, which hold every name
+    only when ``m.participant_names_complete`` is 1 (#1140): a match is
+    1 whatever the flag, but no match is 0 only under 1, and unknown
+    (NULL) under 0 (the parser's name budget dropped a name) or NULL
+    (not reparsed since the v4 upgrade)."""
     role_sql = ",".join(["?"] * len(roles))
     if address_match_mode(value) == "exact":
         params.extend([canonical_addr(value), *roles])
@@ -331,21 +339,26 @@ def _participant_clause(value: str, roles: tuple[str, ...], params: list) -> str
             f"WHERE address = ? AND role IN ({role_sql}))"
         )
     return (
-        "m.claimant_id IN (SELECT claimant_id FROM message_participants "  # nosec B608
-        f"WHERE {_substring_participant_rows(value, roles, params)})"
+        "CASE WHEN m.claimant_id IN (SELECT p.claimant_id FROM message_participants p "  # nosec B608
+        f"WHERE {_substring_participant_rows(value, roles, params)}) THEN 1 "
+        "WHEN m.participant_names_complete = 1 THEN 0 ELSE NULL END"
     )
 
 
 def _substring_participant_rows(value: str, roles: tuple[str, ...], params: list) -> str:
-    """SQL selecting the ``message_participants`` rows in ``roles`` whose
-    address or display name contains ``value``; appends the bound values
-    to ``params``."""
+    """SQL selecting the ``message_participants p`` rows in ``roles``
+    whose address, or any one display name the message wrote it with
+    (``message_participant_names``, #1140), contains ``value``; appends
+    the bound values to ``params``. Each name is matched on its own, so
+    no match spans two names."""
     role_sql = ",".join(["?"] * len(roles))
     # Addresses are stored lowercased; names fold with ``mcp_casefold``.
     params.extend([*roles, value.strip().lower(), value.strip().casefold()])
     return (
-        f"role IN ({role_sql}) "  # nosec B608
-        "AND (instr(address, ?) > 0 OR instr(mcp_casefold(name), ?) > 0)"
+        f"p.role IN ({role_sql}) "  # nosec B608
+        "AND (instr(p.address, ?) > 0 OR EXISTS (SELECT 1 FROM message_participant_names n "
+        "WHERE n.claimant_id = p.claimant_id AND n.role = p.role AND n.address = p.address "
+        "AND instr(mcp_casefold(n.name), ?) > 0))"
     )
 
 
@@ -364,8 +377,10 @@ class Evaluability(Enum):
     without a parseable topmost ``Received:`` header), or the leaf reads
     it only when another field says it can be trusted (``sender`` and
     the From side of ``participant``, when ``sender_ambiguous`` is not
-    0, #1153; ``authority_class`` likewise outside Spam, #1161). Such a
-    message is
+    0, #1153; ``authority_class`` likewise outside Spam, #1161; a
+    substring ``sender``, ``recipient`` or ``participant`` that matches
+    nothing, when ``participant_names_complete`` is not 1, #1140). Such
+    a message is
     neither matched nor missed: the leaf's SQL yields NULL, so the
     conjunction is unknown (SQL's three-valued AND: false if any leaf is
     false, else unknown), the row is left out of the matches and of
@@ -632,7 +647,7 @@ LEAVES: dict[str, LeafKind] = {
         LeafKind(
             "sender", "address", _compile_sender, Evaluability.UNKNOWN_WHEN_NULL, _sender_test
         ),
-        LeafKind("recipient", "address", _compile_recipient, Evaluability.DECIDED),
+        LeafKind("recipient", "address", _compile_recipient, Evaluability.UNKNOWN_WHEN_NULL),
         LeafKind(
             "participant",
             "address",

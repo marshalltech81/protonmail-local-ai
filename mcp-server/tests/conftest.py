@@ -77,7 +77,9 @@ def _build_schema(conn: sqlite3.Connection) -> None:
             seen            INTEGER NOT NULL DEFAULT 0,
             flagged         INTEGER NOT NULL DEFAULT 0,
             replied         INTEGER NOT NULL DEFAULT 0,
-            sender_ambiguous INTEGER CHECK (sender_ambiguous IN (0, 1))
+            sender_ambiguous INTEGER CHECK (sender_ambiguous IN (0, 1)),
+            participant_names_complete INTEGER
+                CHECK (participant_names_complete IN (0, 1))
         );
 
         -- The indexer's ``messages`` indexes, so query plans match.
@@ -98,6 +100,16 @@ def _build_schema(conn: sqlite3.Connection) -> None:
         );
         CREATE INDEX idx_message_participants_address
             ON message_participants(address, role);
+
+        CREATE TABLE message_participant_names (
+            claimant_id TEXT NOT NULL,
+            role        TEXT NOT NULL,
+            address     TEXT NOT NULL,
+            name        TEXT NOT NULL,
+            PRIMARY KEY (claimant_id, role, address, name)
+        );
+        CREATE INDEX idx_message_participant_names_address_name
+            ON message_participant_names(address, name);
 
         CREATE VIRTUAL TABLE threads_fts USING fts5(
             subject, participants, body,
@@ -497,6 +509,7 @@ def _insert_message_record(
     replied: bool = False,
     size_bytes: int | None = 100,
     sender_ambiguous: int | None = 0,
+    participant_names_complete: int | None = 1,
 ) -> None:
     """Insert one ``messages`` row and its ``message_participants``.
 
@@ -509,8 +522,9 @@ def _insert_message_record(
         INSERT INTO messages
             (claimant_id, message_id, thread_id, filepath, folder, subject, sent_at,
              occurred_at, in_reply_to, references_json, has_attachments, size_bytes,
-             content_hash, indexed_at, seen, flagged, replied, sender_ambiguous)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             content_hash, indexed_at, seen, flagged, replied, sender_ambiguous,
+             participant_names_complete)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             claimant_of(message_id, variant),
@@ -531,6 +545,7 @@ def _insert_message_record(
             int(flagged),
             int(replied),
             sender_ambiguous,
+            participant_names_complete,
         ),
     )
     for role, value in participants:
@@ -541,6 +556,13 @@ def _insert_message_record(
             "INSERT OR IGNORE INTO message_participants VALUES (?, ?, ?, ?)",
             (claimant_of(message_id, variant), role, address, name or None),
         )
+        if name:
+            # Every distinct name per (role, address), as the indexer
+            # stores them (#1140); the participant row keeps the first.
+            cur.execute(
+                "INSERT OR IGNORE INTO message_participant_names VALUES (?, ?, ?, ?)",
+                (claimant_of(message_id, variant), role, address, name),
+            )
         _insert_entity(cur, address, name)
 
 
@@ -598,6 +620,7 @@ def _insert_message(
     replied: bool = False,
     size_bytes: int | None = 100,
     sender_ambiguous: int | None = 0,
+    participant_names_complete: int | None = 1,
 ) -> None:
     """Insert one message with full per-message control.
 
@@ -663,6 +686,7 @@ def _insert_message(
         replied=replied,
         size_bytes=size_bytes,
         sender_ambiguous=sender_ambiguous,
+        participant_names_complete=participant_names_complete,
     )
     conn.commit()
     if body is not None:

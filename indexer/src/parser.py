@@ -19,7 +19,7 @@ import quopri
 import re
 import secrets
 from collections import Counter
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -73,6 +73,9 @@ log = logging.getLogger("indexer.parser")
 # * ``address_elements`` / ``address_count``: address-list elements past
 #   ``MAX_ADDRESS_ELEMENTS``, or past ``MAX_MESSAGE_ADDRESSES`` kept
 #   addresses, are dropped unparsed (#1144);
+# * ``participant_names``: a display name past the first for its (role,
+#   address), past the ``MAX_EXTRA_PARTICIPANT_*`` budget, is not stored
+#   (#1140); the address and its first name are kept;
 # * ``subject_length``: a decoded subject over ``SUBJECT_MAX_CHARS`` is
 #   cut to the cap (#902);
 # * ``in_reply_to_length`` / ``references_length``: an In-Reply-To, or
@@ -102,6 +105,7 @@ PARSE_CAPS: tuple[str, ...] = (
     "address_chars",
     "address_elements",
     "address_count",
+    "participant_names",
     "subject_length",
     "in_reply_to_length",
     "references_length",
@@ -333,6 +337,16 @@ class Message:
     # of source authority, and the threader skips the sender-dependent
     # subject fallback.
     sender_ambiguous: bool = False
+    # Every distinct display name per (role, address), as
+    # ``participant_names`` returns them (#1140), stored in
+    # ``message_participant_names``. ``None`` for a Message built without
+    # parsing (only in tests); the writer then derives them itself.
+    participant_names: list[tuple[str, str, str]] | None = None
+    # False when the ``MAX_EXTRA_PARTICIPANT_*`` budget dropped a name
+    # from ``participant_names`` (#1140), stored as
+    # ``messages.participant_names_complete``. Read only with
+    # ``participant_names``.
+    participant_names_complete: bool = True
 
     @property
     def effective_date(self) -> datetime:
@@ -534,6 +548,14 @@ def parse_email_bytes(raw: bytes, source: SourceMetadata) -> Message | None:
     # into an unquoted "Doe, Jane <...>" that no longer parses as one
     # address, and a multi-author From would be read as a single address.
     addresses = _read_address_headers(msg, caps)
+    names = participant_names(
+        (
+            ("from", addresses.from_addrs or [addresses.from_addr]),
+            ("to", addresses.to_addrs),
+            ("cc", addresses.cc_addrs),
+        ),
+        caps,
+    )
     # A raw 8-bit Date header comes back as an ``email.header.Header``,
     # which ``parsedate_to_datetime`` cannot split (#361). A Date header
     # is ASCII by RFC 5322, so drop anything else from its text: a
@@ -603,6 +625,8 @@ def parse_email_bytes(raw: bytes, source: SourceMetadata) -> Message | None:
         to_addrs=addresses.to_addrs,
         cc_addrs=addresses.cc_addrs,
         sender_ambiguous=addresses.sender_ambiguous,
+        participant_names=names,
+        participant_names_complete=not caps["participant_names"],
         date=date,
         date_is_fallback=parsed_date is None,
         occurred_at=occurred_at,
@@ -1414,6 +1438,40 @@ def _format_address(name: str, addr: str) -> str:
     return formatted
 
 
+def canonical_addr(value: str) -> str:
+    """Normalize an address string to a lowercase bare email for matching.
+
+    RFC 2822 ``From`` / ``To`` headers can carry the same person as
+    ``Bob Smith <bob@example.com>``, ``bob@example.com``, or
+    ``"Bob S." <bob@example.com>`` — stable string comparison treats
+    those three as different participants and produces false misses for
+    subject-fallback matching and duplicate entries in participant
+    lists. ``parseaddr`` extracts the bare address; lowercasing makes
+    the match case-insensitive.
+
+    Returns an empty string when no usable email address can be
+    recovered. ``parseaddr`` is permissive and will return a first-token
+    value like ``"just"`` for a header like ``"just a name"`` — rejecting
+    results without an ``@`` keeps malformed entries from becoming their
+    own spurious "participant" and from matching other malformed entries
+    to each other.
+    """
+    if not value:
+        return ""
+    try:
+        _, addr = email.utils.parseaddr(value)
+    except Exception:
+        # parseaddr recurses on nested comments; hostile input (which
+        # reaches here via thread participants and the from_addr
+        # fallback for unparseable From headers) must degrade to
+        # "no address", never abort threading.
+        return ""
+    addr = addr.strip().lower()
+    if "@" not in addr:
+        return ""
+    return addr
+
+
 # One RFC 2047 encoded-word: =?charset?Q|B?text?=. Bounded character
 # classes (no whitespace, no "?") keep the scan linear.
 _ENCODED_WORD_RE = re.compile(r"=\?([^?\s]+)\?([QqBb])\?([^?\s]*)\?=")
@@ -1523,6 +1581,64 @@ MAX_ADDRESS_OCCURRENCES = 64
 _MAX_ADDRESS_TOTAL_CHARS = 3 * _MAX_ADDRESS_HEADER_CHARS
 MAX_ADDRESS_ELEMENTS = 20_000
 MAX_MESSAGE_ADDRESSES = 10_000
+
+# One message's display-name budget (#1140), spent by
+# ``participant_names``. The first display name of each (role, address)
+# is always kept: at most one per ``message_participants`` row, so the
+# address budget above already bounds it. Each
+# further distinct name for the same (role, address) costs one name and
+# its UTF-8 bytes from this budget, across From, To and Cc together, so
+# every stored name row and byte past the participant rows themselves is
+# bounded. Real mail rarely writes one address under two names; names
+# past the budget are dropped and counted as ``participant_names`` in
+# ``PARSE_CAPS``, and the address keeps its first name.
+MAX_EXTRA_PARTICIPANT_NAMES = 1_000
+MAX_EXTRA_PARTICIPANT_NAME_BYTES = 64_000
+
+
+def participant_names(
+    roles: Iterable[tuple[str, Iterable[str]]], caps: Counter[str]
+) -> list[tuple[str, str, str]]:
+    """Every distinct display name per (role, address), as
+    ``(role, address, name)`` rows in header order (#1140).
+
+    ``roles`` is ``(role, address strings)`` in From, To, Cc order, as
+    the participant writer reads them; ``address`` is the
+    ``canonical_addr`` it keys rows by and ``name`` the stripped
+    ``parseaddr`` display name it stores, so a participant row's
+    ``name``, when it has one, is the first name here for its (role,
+    address). Exact duplicates are kept once and
+    casing is kept. Names past the first of a (role, address) spend the
+    ``MAX_EXTRA_PARTICIPANT_*`` budget; each one refused is counted in
+    ``caps["participant_names"]``. Two ``parseaddr`` calls per address.
+    """
+    seen: dict[tuple[str, str], set[str]] = {}
+    rows: list[tuple[str, str, str]] = []
+    extra_names = extra_bytes = 0
+    for role, values in roles:
+        for value in values:
+            address = canonical_addr(value or "")
+            if not address:
+                continue
+            name = email.utils.parseaddr(value)[0].strip()
+            if not name:
+                continue
+            names = seen.setdefault((role, address), set())
+            if name in names:
+                continue
+            if names:
+                size = len(name.encode("utf-8", errors="replace"))
+                if (
+                    extra_names >= MAX_EXTRA_PARTICIPANT_NAMES
+                    or extra_bytes + size > MAX_EXTRA_PARTICIPANT_NAME_BYTES
+                ):
+                    caps["participant_names"] += 1
+                    continue
+                extra_names += 1
+                extra_bytes += size
+            names.add(name)
+            rows.append((role, address, name))
+    return rows
 
 
 @dataclass
