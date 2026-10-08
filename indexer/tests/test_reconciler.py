@@ -829,32 +829,32 @@ class TestByteIdenticalCopies:
             parent = f"chain{n}@example.com"
         return thread_id, restored
 
-    def test_live_copy_check_lists_each_directory_once_per_thread(
+    def test_live_copy_checks_stay_within_the_pass_budget(
         self, db, threader, embedder, maildir, monkeypatch
     ):
-        """Codex round 5 on #1134: the pre-reap check resolved each
-        tombstone's copies with an empty cache, listing the same folder
-        once per tombstone."""
+        """Codex rounds 5 and 8 on #1134: each message's copies are
+        resolved with a listing of its own, and every listing counts
+        against one budget per reap pass, so a pass lists at most
+        ``_LIVE_COPY_RECHECK_LISTINGS`` directories for these checks."""
+        import src.reconciler as reconciler_module
+
         thread_id, restored = self._thread_of_restorable_copies(db, threader, maildir)
         rec = Reconciler(db, embedder, _default_config())
         assert rec.sweep()["tombstoned"] == 3
         for path in restored:
             path.with_name(path.name + "T").rename(path)
-        listed: list[Path] = []
-        real_iterdir = Path.iterdir
+        monkeypatch.setattr(reconciler_module, "_LIVE_COPY_RECHECK_LISTINGS", 4)
+        listed = self._count_listings(monkeypatch, maildir)
 
-        def counting_iterdir(self):
-            if self == maildir:
-                listed.append(self)
-            return real_iterdir(self)
-
-        monkeypatch.setattr(Path, "iterdir", counting_iterdir)
         result = rec.reap()
 
+        assert len(listed) <= 4
+        # A check reserves 3 listings per candidate and is charged what it
+        # used (1 here): two fit in 4, the third waits for the next pass.
+        assert len(listed) == 2
         assert result["threads_reaped"] == 0
-        assert len(listed) == 1
         assert db.get_thread(thread_id) is not None
-        assert count_pending_deletions(db) == 0
+        assert count_pending_deletions(db) == 1
 
     def test_a_kept_thread_is_no_longer_counted_as_blocked(self, db, threader, embedder, maildir):
         """Codex round 5 on #1134: a thread an earlier pass recorded as
@@ -903,12 +903,35 @@ class TestByteIdenticalCopies:
         assert mapped == {str(p) for p in restored}
         assert count_pending_deletions(db) == 0
 
-    def test_the_fresh_recheck_is_bounded_and_defers_the_thread(
+    @staticmethod
+    def _stored_message_ids(db, thread_id: str) -> list[str]:
+        import json
+
+        row = db._conn.execute(
+            "SELECT message_ids FROM threads WHERE thread_id = ?", (thread_id,)
+        ).fetchone()
+        return json.loads(row["message_ids"])
+
+    @staticmethod
+    def _count_listings(monkeypatch, directory: Path) -> list[Path]:
+        listed: list[Path] = []
+        real_iterdir = Path.iterdir
+
+        def counting_iterdir(self):
+            if self == directory:
+                listed.append(self)
+            return real_iterdir(self)
+
+        monkeypatch.setattr(Path, "iterdir", counting_iterdir)
+        return listed
+
+    def test_a_thread_past_the_budget_makes_progress_every_pass(
         self, db, threader, embedder, maildir, monkeypatch, caplog
     ):
-        """The fresh re-checks share a budget of directory listings per
-        thread; once it is spent the thread is left for the next pass
-        rather than reaped on a listing that may be stale."""
+        """Codex round 8 on #1134: a thread needing more re-checks than the
+        budget was deferred whole, and every pass repeated the same checks,
+        so it was never reaped. Now the checked messages are reaped and the
+        unchecked ones stay, whole, in the rebuilt thread for the next pass."""
         import src.reconciler as reconciler_module
 
         thread_id, _restored = self._thread_of_restorable_copies(db, threader, maildir)
@@ -916,29 +939,140 @@ class TestByteIdenticalCopies:
         rec.sweep()
         for n in range(3):  # every copy gone for good
             (maildir / f"170000000{n}.K{n}.host:2,ST").unlink()
-        monkeypatch.setattr(reconciler_module, "_LIVE_COPY_RECHECK_LISTINGS", 1)
-        listed: list[Path] = []
+        monkeypatch.setattr(reconciler_module, "_LIVE_COPY_RECHECK_LISTINGS", 3)
+        listed = self._count_listings(monkeypatch, maildir)
+
+        with caplog.at_level(logging.INFO, logger="indexer.reconciler"):
+            first = rec.reap()
+
+        assert len(listed) == 1  # one check fits the budget of 3
+        assert first["threads_rebuilt"] == 1
+        assert db.count_total_messages() == 2
+        assert count_pending_deletions(db) == 2
+        thread = db.get_thread(thread_id)
+        assert thread is not None
+        assert set(self._stored_message_ids(db, thread_id)) == {
+            r["claimant_id"] for r in db.get_thread_messages(thread_id)
+        }
+        warning = next(r for r in caplog.records if "re-check budget" in r.getMessage())
+        assert warning.levelno == logging.WARNING
+        assert "2 message(s) left for the next pass" in warning.getMessage()
+        partial = next(
+            r
+            for r in caplog.records
+            if "left for the next pass" in r.getMessage() and r.levelno == logging.INFO
+        )
+        assert "reaped 1 of 3" in partial.getMessage()
+        assert _COPY_MARKER not in caplog.text
+        assert str(maildir) not in caplog.text
+
+        listed.clear()
+        assert rec.reap()["threads_rebuilt"] == 1
+        assert len(listed) == 1
+        assert db.count_total_messages() == 1
+        listed.clear()
+        assert rec.reap()["threads_reaped"] == 1
+        assert len(listed) == 1
+        assert db.get_thread(thread_id) is None
+        assert count_pending_deletions(db) == 0
+
+    def test_unchecked_messages_stay_whole_in_the_rebuilt_thread(
+        self, db, threader, embedder, maildir, monkeypatch
+    ):
+        """The panel's consistency requirement: a message left unchecked is
+        a survivor of the rebuild, so its text, chunks and the thread
+        vector are computed with it."""
+        import src.reconciler as reconciler_module
+
+        thread_id, _restored = self._thread_of_restorable_copies(db, threader, maildir)
+        rec = Reconciler(db, embedder, _default_config())
+        rec.sweep()
+        for n in range(3):
+            (maildir / f"170000000{n}.K{n}.host:2,ST").unlink()
+        monkeypatch.setattr(reconciler_module, "_LIVE_COPY_RECHECK_LISTINGS", 3)
+        survivors_seen: list[list[str]] = []
+        real = db.get_chunk_embeddings_for_messages
+
+        def spy(claimant_ids):
+            survivors_seen.append(sorted(claimant_ids))
+            return real(claimant_ids)
+
+        monkeypatch.setattr(db, "get_chunk_embeddings_for_messages", spy)
+        rec.reap()
+
+        remaining = sorted(r["claimant_id"] for r in db.get_thread_messages(thread_id))
+        assert survivors_seen == [remaining]
+        assert len(remaining) == 2
+        assert sorted(self._stored_message_ids(db, thread_id)) == remaining
+
+    def test_restores_around_the_checks(self, db, threader, embedder, maildir, monkeypatch):
+        """A copy restored before its message is checked keeps the message;
+        one restored after its check is unmarked with the reaped message,
+        so the next Maildir walk indexes it again."""
+        from src import main
+        from src.queue import REASON_INITIAL_SCAN, IndexingQueue
+
+        thread_id, restored = self._thread_of_restorable_copies(db, threader, maildir)
+        rec = Reconciler(db, embedder, _default_config())
+        rec.sweep()
+        for n in range(3):
+            (maildir / f"170000000{n}.K{n}.host:2,ST").unlink()
+        saved = {}
+        for n, path in enumerate(restored):
+            mapped = maildir / f"170000001{n}.M{n}.host:2,ST"
+            saved[path] = mapped.read_bytes()
         real_iterdir = Path.iterdir
+        listings: list[int] = []
 
-        def counting_iterdir(self):
+        def iterdir_with_restores(self):
+            listing = list(real_iterdir(self))
             if self == maildir:
-                listed.append(self)
-            return real_iterdir(self)
+                listings.append(1)
+                if len(listings) == 1:
+                    # During the first message's check: its own copy comes
+                    # back too late, the second message's before its check.
+                    restored[0].write_bytes(saved[restored[0]])
+                    restored[1].write_bytes(saved[restored[1]])
+            return iter(listing)
 
-        monkeypatch.setattr(Path, "iterdir", counting_iterdir)
+        monkeypatch.setattr(Path, "iterdir", iterdir_with_restores)
+        rec.reap()
+        monkeypatch.setattr(Path, "iterdir", real_iterdir)
+
+        mapped = {r["filepath"] for r in db.iter_message_map()}
+        assert str(restored[1]) in mapped  # kept through its restored copy
+        assert str(restored[0]) not in mapped  # reaped: restored after its check
+        assert not db.is_indexed(str(restored[0]))
+        queued = main._enqueue_unindexed_messages(
+            db, IndexingQueue(db), maildir.parent.parent, REASON_INITIAL_SCAN, skip_trashed=True
+        )
+        assert queued == 1
+        assert db.get_thread(thread_id) is not None
+
+    def test_unchecked_messages_whose_file_is_gone_are_reaped(
+        self, db, threader, embedder, maildir, monkeypatch, caplog
+    ):
+        """A message whose own file is gone cannot be re-parsed as a
+        survivor, so leaving it unchecked would block the rebuild every
+        pass. Past the budget it is reaped unchecked; its copies are
+        unmarked, so one that is live again is re-indexed by the walk."""
+        import src.reconciler as reconciler_module
+
+        thread_id, _restored = self._thread_of_restorable_copies(db, threader, maildir)
+        rec = Reconciler(db, embedder, _default_config())
+        for n in range(3):
+            (maildir / f"170000000{n}.K{n}.host:2,ST").unlink()
+            (maildir / f"170000001{n}.M{n}.host:2,ST").unlink()
+        rec.sweep()
+        monkeypatch.setattr(reconciler_module, "_LIVE_COPY_RECHECK_LISTINGS", 3)
+
         with caplog.at_level(logging.INFO, logger="indexer.reconciler"):
             result = rec.reap()
 
-        assert result["threads_reaped"] == 0
-        assert db.get_thread(thread_id) is not None
-        # The thread's shared listing, then one fresh re-check: the budget.
-        assert len(listed) == 2
-        line = next(r for r in caplog.records if "re-check budget" in r.getMessage())
-        assert line.levelno == logging.WARNING
-        assert _COPY_MARKER not in caplog.text
-
-        monkeypatch.setattr(reconciler_module, "_LIVE_COPY_RECHECK_LISTINGS", 256)
-        assert rec.reap()["threads_reaped"] == 1
+        assert result["threads_reaped"] == 1
+        assert db.get_thread(thread_id) is None
+        warning = next(r for r in caplog.records if "re-check budget" in r.getMessage())
+        assert "2 whose own file is gone reaped unchecked" in warning.getMessage()
 
     def _tombstone_backdated(self, db, path: Path, days: int) -> None:
         entry = db.find_message_entry_by_filepath(str(path))

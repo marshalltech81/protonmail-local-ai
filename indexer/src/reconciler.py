@@ -60,13 +60,18 @@ _REAP_ABSOLUTE_FLOOR = 10
 # silent retry.
 _BLOCKED_ESCALATION_THRESHOLD = 3
 
-# Directory listings the pre-reap live-copy check may spend per thread
-# re-resolving, with a fresh listing, a message whose copies the
-# thread's shared listing shows as gone or trashed (#1102): that listing
-# can predate mbsync restoring a later message's copy. Past the budget
-# the thread is left for the next pass instead of reaped on a listing
-# that may be stale. A listing of a large folder costs a few ms.
+# Directory listings the pre-reap live-copy check may spend in one reap
+# pass (#1102). Each tombstoned message with identical copies has them
+# resolved through a listing of its own, since a shared one can predate
+# mbsync restoring a copy; a check reserves ``_LISTINGS_PER_CANDIDATE``
+# per candidate before it runs and is charged what it used, so a pass
+# never exceeds the budget. Messages past it are left for the next pass;
+# the checked ones are reaped, so every pass makes progress. A listing
+# of a large folder costs a few ms.
 _LIVE_COPY_RECHECK_LISTINGS = 256
+# ``resolve_current_path`` lists at most the file's directory and its
+# ``new`` / ``cur`` sibling.
+_LISTINGS_PER_CANDIDATE = 3
 
 
 def _is_live(filepath: str | None, listings: dict[Path, dict[str, Path]]) -> bool:
@@ -195,6 +200,11 @@ class Reconciler:
         # episode rather than spamming on every retry. Clears together
         # with the attempt counter when the thread reaps successfully.
         self._escalated_threads: set[str] = set()
+        # The live-copy check's per-pass budget use and what it left
+        # (``_check_live_copies``); reset at the start of each ``reap()``.
+        self._recheck_listings = 0
+        self._left_unchecked = 0
+        self._reaped_unchecked = 0
 
     # -----------------------------------------------------------------
     # Tombstone detection
@@ -390,11 +400,25 @@ class Reconciler:
 
         threads_reaped = 0
         threads_rebuilt = 0
+        # The live-copy check's budget and what it left, for this pass.
+        self._recheck_listings = 0
+        self._left_unchecked = 0
+        self._reaped_unchecked = 0
 
         for thread_id, tombs in grouped.items():
             reaped, rebuilt = self._reap_thread(thread_id, tombs, cutoff, copies)
             threads_reaped += int(reaped)
             threads_rebuilt += int(rebuilt)
+
+        if self._left_unchecked or self._reaped_unchecked:
+            log.warning(
+                "reaper: the live-copy re-check budget (%d directory listings) is "
+                "spent; %d message(s) left for the next pass, %d whose own file is "
+                "gone reaped unchecked",
+                _LIVE_COPY_RECHECK_LISTINGS,
+                self._left_unchecked,
+                self._reaped_unchecked,
+            )
 
         if threads_reaped or threads_rebuilt:
             log.info(
@@ -463,8 +487,10 @@ class Reconciler:
         """Reap one thread. Returns (fully_reaped, rebuilt).
 
         ``copies`` maps a claimant to the other indexed paths holding its
-        bytes. They are checked again just before the reap is written
-        (``_keep_live_copies``) and otherwise unmarked in the reap
+        bytes. They are checked on disk first (``_check_live_copies``):
+        a message with a live copy is kept, one left unchecked by the
+        pass's budget stays a survivor for the next pass, and only the
+        rest are reaped, with their copies unmarked in the reap
         transaction.
 
         ``tombs`` is a snapshot; the database re-checks inside the reap
@@ -475,8 +501,15 @@ class Reconciler:
         # the watcher can rename a tombstoned file (a flag change) after
         # ``tombs`` was read, and a stale snapshot path would let the
         # deleted message be rebuilt into the thread as a survivor.
-        dead_ids = {t["claimant_id"] for t in tombs}
         copies = copies or {}
+        checked = len(tombs)
+        tombs, kept, left = self._check_live_copies(tombs, copies)
+        if kept:
+            # Its reap is cancelled, so the count it held no longer applies.
+            self._clear_blocked(thread_id)
+        if not tombs:
+            return False, False
+        dead_ids = {t["claimant_id"] for t in tombs}
         copy_paths = [p for t in tombs for p in copies.get(t["claimant_id"], [])]
         all_rows = self.db.get_thread_messages(thread_id)
         survivor_rows = [r for r in all_rows if r["claimant_id"] not in dead_ids]
@@ -484,11 +517,6 @@ class Reconciler:
         if not survivor_rows:
             # Whole thread gone. Drop everything; the .eml files stay on
             # disk because the indexer never deletes Maildir files.
-            kept, deferred = self._keep_live_copies(tombs, copies)
-            if kept:
-                self._clear_blocked(thread_id)
-            if kept or deferred:
-                return False, False
             if not self.db.delete_thread_completely(
                 thread_id, grace_cutoff=cutoff, copy_paths=copy_paths
             ):
@@ -624,11 +652,6 @@ class Reconciler:
         # pending_deletions rows inside a single BEGIN IMMEDIATE, so a
         # crash mid-reap cannot leave the thread row and the map
         # disagreeing about which messages belong.
-        kept, deferred = self._keep_live_copies(tombs, copies)
-        if kept:
-            self._clear_blocked(thread_id)
-        if kept or deferred:
-            return False, False
         removed_filepaths = self.db.reap_thread_messages(
             rebuilt_thread,
             embedding,
@@ -647,51 +670,63 @@ class Reconciler:
             len(tombs),
             len(survivors),
         )
+        if left:
+            log.info(
+                "reaper: reaped %d of %d tombstoned message(s) in a thread; "
+                "%d left for the next pass",
+                len(tombs),
+                checked,
+                left,
+            )
         self._clear_blocked(thread_id)
         return False, True
 
-    def _keep_live_copies(self, tombs: list, copies: Mapping[str, list[str]]) -> tuple[int, bool]:
-        """Remap each tombstoned message with a live byte-identical copy to
-        it, clearing its tombstone. Returns how many were kept and whether
-        the check was cut short (#1102); the caller reaps the thread only
-        when neither.
+    def _check_live_copies(
+        self, tombs: list, copies: Mapping[str, list[str]]
+    ) -> tuple[list, int, int]:
+        """Check each tombstoned message's identical copies on disk and
+        return ``(to_reap, kept, left)`` (#1102).
 
         The sweep found no live copy, but mbsync can restore one (drop its
-        ``T`` flag) before the reap. That copy is not the mapped path, so
-        the watcher clears nothing for it. Checked against the disk just
-        before the reap is written; the caller then skips the thread this
-        pass, so the next pass rebuilds it with the kept message among
-        the survivors. A remap the database refuses (the mapping moved
-        meanwhile) also skips the pass. The caller clears the thread's
-        blocked-attempts entry then: the reap it counted is cancelled.
+        ``T`` flag) before the reap, and that copy is not the mapped path,
+        so the watcher clears nothing for it. A message with a live copy
+        is remapped to it, its tombstone cleared, and it stays a survivor;
+        ``kept`` counts those. A remap the database refuses (the mapping
+        moved meanwhile) keeps the message too, for the next pass.
 
-        One directory cache per call, built fresh: the pass's cache may
-        predate the restore. That cache is shared by the thread's messages,
-        so it can predate a later message's copy coming back: a message it
-        shows with no live copy is resolved once more through a listing of
-        its own, within ``_LIVE_COPY_RECHECK_LISTINGS`` per thread. When
-        the budget is spent the check stops and the thread is deferred.
+        Each message's copies are resolved through a listing of its own,
+        charged to the pass's budget (``_LIVE_COPY_RECHECK_LISTINGS``).
+        Past the budget a message is left unchecked: it stays tombstoned
+        and a survivor of this pass's rebuild, whole, and the next pass
+        checks it (``left`` counts those). A message whose own file is gone
+        cannot be re-parsed as a survivor, so it is checked first and,
+        past the budget, reaped unchecked; its copies are unmarked with
+        it, so one that is live again is re-indexed by the next walk.
         """
+        to_reap: list = []
         kept = 0
-        rechecks = 0
-        listings: dict[Path, dict[str, Path]] = {}
-        for tomb in tombs:
+        left = 0
+        # Gone files first: they are the ones that cannot wait.
+        ordered = sorted(tombs, key=lambda t: Path(t["mapped_filepath"] or "").exists())
+        for tomb in ordered:
             candidates = copies.get(tomb["claimant_id"], [])
             if not candidates:
+                to_reap.append(tomb)
                 continue
-            copy = _pick_copy(candidates, listings, live_only=True)
+            reserve = _LISTINGS_PER_CANDIDATE * len(candidates)
+            if self._recheck_listings + reserve > _LIVE_COPY_RECHECK_LISTINGS:
+                if Path(tomb["mapped_filepath"] or "").exists():
+                    left += 1
+                    self._left_unchecked += 1
+                else:
+                    to_reap.append(tomb)
+                    self._reaped_unchecked += 1
+                continue
+            fresh: dict[Path, dict[str, Path]] = {}
+            copy = _pick_copy(candidates, fresh, live_only=True)
+            self._recheck_listings += len(fresh)
             if copy is None:
-                if rechecks >= _LIVE_COPY_RECHECK_LISTINGS:
-                    log.warning(
-                        "reaper: deferred a thread to the next pass; the live-copy "
-                        "re-check budget (%d directory listings) is spent",
-                        _LIVE_COPY_RECHECK_LISTINGS,
-                    )
-                    return kept, True
-                fresh: dict[Path, dict[str, Path]] = {}
-                copy = _pick_copy(candidates, fresh, live_only=True)
-                rechecks += len(fresh)
-            if copy is None:
+                to_reap.append(tomb)
                 continue
             kept += 1
             # Set: ``copies`` only holds claimants that are mapped.
@@ -704,11 +739,10 @@ class Reconciler:
                 self.db.clear_pending_deletion(str(copy))
         if kept:
             log.info(
-                "reaper: kept %d message(s) with a live identical copy restored "
-                "since the sweep; retrying the thread next pass",
+                "reaper: kept %d message(s) with a live identical copy restored since the sweep",
                 kept,
             )
-        return kept, False
+        return to_reap, kept, left
 
     # -----------------------------------------------------------------
     # Helpers
