@@ -25,13 +25,14 @@ COPY src/ ./src/
 
 # -----------------------------------------------------------------------------
 # Stage 2: Legacy .ppt reader (#957) — Apache POI on a trimmed Java runtime
-# The JDK and Maven stay in this stage. Maven fetches the jars pinned in
-# java/pom.xml and fails on a checksum mismatch (--strict-checksums);
+# The JDK and Maven stay in these stages. ppt-tools installs them;
+# ppt-builder has Maven fetch the jars pinned in java/pom.xml, checking
+# every artifact it resolves against java/checksums/checksums.sha256;
 # javac compiles the one-class reader against them; jlink writes a Java
 # runtime with only the modules POI needs. The result is /opt/ppt:
 # jre/ and lib/ (the jars).
 # -----------------------------------------------------------------------------
-FROM python:3.14-slim-trixie@sha256:f85c5697265c178cc6887276c55fe16cf3d14ca35c3df6a5eab3b360534a55d2 AS ppt-builder
+FROM python:3.14-slim-trixie@sha256:f85c5697265c178cc6887276c55fe16cf3d14ca35c3df6a5eab3b360534a55d2 AS ppt-tools
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     openjdk-21-jdk-headless \
@@ -40,18 +41,40 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /build
 COPY java/pom.xml ./
+
+FROM ppt-tools AS ppt-builder
+# Every artifact Maven resolves here (the jars, their POMs and parent
+# POMs, and the dependency plugin with its own tree) must match its
+# SHA-256 line in the committed summary file, and one with no line
+# fails too: Maven Resolver's trusted checksums with failIfMissing
+# (#1117). The check runs on every resolution, from the cache mount as
+# well as from Maven Central; --strict-checksums still checks each
+# download against Central's own checksum file. The summary file is
+# read from the build context, never from the local repository (the
+# resolver's default), so nothing in the mount can vouch for itself.
+#
 # Maven's local repository is a BuildKit cache mount (#1070): a rebuild
 # that reruns this step (a pom.xml bump, a base-image refresh)
 # downloads only what the mount lacks, so a Maven Central outage or
 # rate limit stops it only on a cold mount. A --no-cache build starts
-# from an empty mount and refills it. Every download is still
-# checksum-verified; a jar already in the mount passed that check when
-# it arrived. The mount has its own id, so no other project's build on
-# the same builder fills it or reads it; any build the operator runs
-# there can still write to it, as to every cache mount, so the mount is
-# trusted as far as the builder is. `docker builder prune` empties it.
+# from an empty mount and refills it. The mount has its own id, so no
+# other project's build on the same builder fills it or reads it; any
+# build the operator runs there can still write to it, as to every
+# cache mount, and the check above fails the build on any artifact so
+# written that differs from its committed checksum. `docker builder
+# prune` empties it. After a pom.xml change (a Dependabot bump),
+# `make ppt-checksums` rewrites the summary file from the
+# ppt-checksums stage below.
+COPY java/checksums/checksums.sha256 /build/checksums/
 RUN --mount=type=cache,id=protonmail-local-ai-maven,target=/root/.m2,sharing=locked \
     mvn --batch-mode --no-transfer-progress --strict-checksums \
+    -Daether.artifactResolver.postProcessor.trustedChecksums=true \
+    -Daether.artifactResolver.postProcessor.trustedChecksums.checksumAlgorithms=SHA-256 \
+    -Daether.artifactResolver.postProcessor.trustedChecksums.failIfMissing=true \
+    -Daether.artifactResolver.postProcessor.trustedChecksums.record=false \
+    -Daether.trustedChecksumsSource.summaryFile=true \
+    -Daether.trustedChecksumsSource.summaryFile.basedir=/build/checksums \
+    -Daether.trustedChecksumsSource.summaryFile.originAware=false \
     dependency:copy-dependencies -DoutputDirectory=/opt/ppt/lib
 COPY java/PptText.java ./
 RUN javac --release 21 -d classes -cp '/opt/ppt/lib/*' PptText.java \
@@ -64,6 +87,25 @@ RUN javac --release 21 -d classes -cp '/opt/ppt/lib/*' PptText.java \
 # (.github/workflows/tests.yml) and the runtime copies the same files.
 FROM scratch AS ppt-runtime
 COPY --from=ppt-builder /opt/ppt /opt/ppt
+
+# The summary file's source, built only by `make ppt-checksums` (#1117).
+# The same Maven, with no cache mount and no summary file, downloads
+# every artifact the ppt-builder run above and the Maven step of
+# .github/workflows/security.yml resolve, checks each download against
+# Maven Central's checksum file (--strict-checksums) and records its
+# SHA-256, so an artifact the pom no longer needs drops out.
+FROM ppt-tools AS ppt-checksums-record
+RUN mvn --batch-mode --no-transfer-progress --strict-checksums \
+    -Daether.artifactResolver.postProcessor.trustedChecksums=true \
+    -Daether.artifactResolver.postProcessor.trustedChecksums.checksumAlgorithms=SHA-256 \
+    -Daether.artifactResolver.postProcessor.trustedChecksums.record=true \
+    -Daether.trustedChecksumsSource.summaryFile=true \
+    -Daether.trustedChecksumsSource.summaryFile.basedir=/out \
+    -Daether.trustedChecksumsSource.summaryFile.originAware=false \
+    dependency:copy-dependencies -DoutputDirectory=/tmp/lib dependency:resolve
+
+FROM scratch AS ppt-checksums
+COPY --from=ppt-checksums-record /out/checksums.sha256 /
 
 # -----------------------------------------------------------------------------
 # Stage 3: Runtime — no build toolchain

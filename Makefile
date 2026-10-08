@@ -1,4 +1,4 @@
-.PHONY: build build-nocache up down logs status requeue-dead reparse clean sync sync-indexer sync-mcp test test-indexer test-mcp test-mbsync test-mbsync-tls test-mbsync-layout test-compose test-validate-env test-make-status test-image-pins test-trivy-flags trivy trivy-images restart-indexer backup-index restore-index test-index-backup baseline eval-answers eval-answers-compare typecheck typecheck-indexer typecheck-mcp init-secrets validate-env help
+.PHONY: build build-nocache up down logs status requeue-dead reparse clean sync sync-indexer sync-mcp test test-indexer test-mcp test-mbsync test-mbsync-tls test-mbsync-layout test-compose test-validate-env test-make-status test-image-pins test-trivy-flags test-maven-checksums ppt-checksums trivy trivy-images restart-indexer backup-index restore-index test-index-backup baseline eval-answers eval-answers-compare typecheck typecheck-indexer typecheck-mcp init-secrets validate-env help
 
 # Per-checkout uv cache (#896): a cache shared between checkouts or
 # worktrees running make targets at the same time fails with missing-file
@@ -19,6 +19,7 @@ help:
 	@echo "  validate-env Verify .env values and secret file permissions before startup"
 	@echo "  build        Build all Docker images"
 	@echo "  build-nocache Rebuild all Docker images from scratch (skips BuildKit cache)"
+	@echo "  ppt-checksums Rewrite indexer/java/checksums/checksums.sha256 after an indexer/java/pom.xml change (downloads from Maven Central)"
 	@echo "  up           Start the full stack (mbsync reaches the Bridge app on the host)"
 	@echo "  down         Stop the full stack"
 	@echo "  restart-indexer  Run validate-env, then restart the indexer (after editing config/authority.toml)"
@@ -29,7 +30,7 @@ help:
 	@echo "  requeue-dead Requeue dead-lettered indexing jobs (optional CLASS=retryable|permanent_source_failure|operator_action_required)"
 	@echo "  reparse      Queue every indexed message to be parsed again in place, without embedding calls"
 	@echo "  sync         Sync local uv environments for indexer and mcp-server"
-	@echo "  test         Run indexer, mcp-server, mbsync, Compose, validate-env, make status, index backup, image pin and Trivy flag script tests locally"
+	@echo "  test         Run indexer, mcp-server, mbsync, Compose, validate-env, make status, index backup, image pin, Trivy flag and Maven checksum script tests locally"
 	@echo "  typecheck    Run mypy over the indexer and mcp-server Python services"
 	@echo "  test-indexer Run indexer unit tests only"
 	@echo "  test-mcp     Run mcp-server unit tests only"
@@ -42,6 +43,7 @@ help:
 	@echo "  test-make-status  Run make status tests against a fake docker (no daemon)"
 	@echo "  test-image-pins  Check tls_check.sh pins the python image the indexer and mcp-server Dockerfiles build from, and docker.yml and tests.yml the same BuildKit image"
 	@echo "  test-trivy-flags  Check that make trivy and the Trivy jobs in .github/workflows/security.yml and docker.yml agree (no Trivy install)"
+	@echo "  test-maven-checksums  Check the indexer build and security.yml verify every Maven artifact against the committed checksums, which cover indexer/java/pom.xml (no Maven)"
 	@echo "  trivy        Run the CI Trivy scans locally: dependency scans of indexer/ and mcp-server/, offline misconfig scan of the repository, then the image gates (needs trivy and the built images)"
 	@echo "  trivy-images Run the CI Trivy image gates of .github/workflows/docker.yml on the built indexer, mcp-server and mbsync images (needs trivy, make build)"
 	@echo "  baseline     Run the retrieval regression baseline (UPDATE=1 rewrites the rank snapshot)"
@@ -128,6 +130,18 @@ build:
 #   make build-nocache SERVICES="indexer mcp-server"
 build-nocache:
 	GIT_COMMIT=$(SOURCE_COMMIT) docker compose build --no-cache $(SERVICES)
+
+# Rewrite indexer/java/checksums/checksums.sha256, the SHA-256 of every
+# artifact Maven resolves for the .ppt reader, which the indexer build
+# and the Trivy dependency scan check each artifact against (#1117).
+# Run it after a change to indexer/java/pom.xml (a Dependabot bump) and
+# commit the file with it. It builds the Dockerfile's ppt-checksums
+# stage: the Maven a clean build installs (ppt-tools is rebuilt too, so
+# a cached apt layer cannot record with an older Maven), from an empty
+# repository and never from the layer cache, downloads from Maven
+# Central and records.
+ppt-checksums:
+	docker build --target ppt-checksums --no-cache-filter ppt-tools,ppt-checksums-record --provenance=false --output type=local,dest=indexer/java/checksums indexer
 
 validate-env:
 	./scripts/validate-env.sh
@@ -233,7 +247,7 @@ restore-index:
 	BACKUP="$(BACKUP)" ./scripts/restore-index.sh
 
 # Run unit tests locally using uv
-test: test-indexer test-mcp test-mbsync test-compose test-validate-env test-make-status test-index-backup test-image-pins test-trivy-flags
+test: test-indexer test-mcp test-mbsync test-compose test-validate-env test-make-status test-index-backup test-image-pins test-trivy-flags test-maven-checksums
 
 test-indexer: sync-indexer
 	cd indexer && uv run pytest -q
@@ -268,6 +282,9 @@ test-image-pins:
 
 test-trivy-flags:
 	bash scripts/tests/trivy_flags_test.sh
+
+test-maven-checksums:
+	bash scripts/tests/maven_checksums_test.sh
 
 # The Trivy scans of .github/workflows/security.yml and the image gates
 # of .github/workflows/docker.yml, locally (#1017, #1065): the

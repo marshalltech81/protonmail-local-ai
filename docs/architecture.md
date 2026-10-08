@@ -1187,9 +1187,12 @@ each message whose occurrence of it now selects a module.
   `jdk.unsupported`); both live under `/opt/ppt` in the image. The
   build's `ppt-builder` stage fetches the jars pinned in
   `indexer/java/pom.xml` with Maven (strict checksums on download, into
-  a BuildKit cache mount with its own id that a later rebuild reuses
-  and that trusts every build the operator runs on that builder,
-  #1070), compiles the
+  a BuildKit cache mount with its own id that a later rebuild reuses,
+  #1070; every artifact Maven resolves, from the mount or from Maven
+  Central, must match its SHA-256 in the committed
+  `indexer/java/checksums/checksums.sha256`, or the build fails, so an
+  artifact another build on the same builder wrote to the mount is not
+  used, #1117), compiles the
   reader and writes the runtime; the JDK and Maven stay in that stage,
   and the runtime image grows by about 67 MB (411 to 478 MB). Java runs
   under 512 MiB of address space and 30 s of CPU, and the parent kills
@@ -2444,10 +2447,45 @@ runners (#1047). The dependency scan still resolves it, from a cached
 `~/.m2/repository` keyed on `indexer/java/pom.xml` that the job fills
 with `mvn dependency:resolve` (strict checksums, JDK 21 like the image
 build) before the scan; Trivy reads POMs from that directory before
-asking Maven Central, so a warm cache makes no request (#1069). `make trivy`
+asking Maven Central, so a warm cache makes no request (#1069). The
+resolve checks every jar and POM, restored or downloaded, against the
+same committed SHA-256 summary file as the image build, so a cache
+entry that differs fails the job before the scan reads it (#1117).
+`make trivy`
 runs the same scans locally with the same flags (#1017), skipping the
 per-checkout `.uv-cache` as the workflow does;
 `scripts/tests/trivy_flags_test.sh` fails when the two differ.
+
+### Maven trusted checksums
+
+`indexer/java/checksums/checksums.sha256` lists the SHA-256 of every
+artifact Maven resolves for the `.ppt` reader: the jars `pom.xml` pins,
+their POMs and parent POMs, and `maven-dependency-plugin` with its own
+dependency tree. The `ppt-builder` stage of `indexer/Dockerfile` and
+the Maven step of `.github/workflows/security.yml` run Maven Resolver's
+trusted-checksums check against it (`checksumAlgorithms=SHA-256`,
+`failIfMissing=true`, recording off, the summary file read from the
+checkout rather than the local repository), so an artifact whose
+checksum differs, or that has no line, fails the run whether it came
+from the cache or from Maven Central (#1117). Without it, Maven
+verifies a checksum only when it downloads, and an artifact already in
+the BuildKit cache mount or the restored CI cache would be used as it
+is.
+
+A change to `indexer/java/pom.xml`, a Dependabot bump included, needs
+the file rewritten: run `make ppt-checksums` and commit the result
+with the change. The target builds the Dockerfile's `ppt-checksums`
+stage, which runs the image's own Maven with no cache mount, without
+the layer cache (for `ppt-tools` too, so the JDK and Maven are the
+ones a clean build installs), and with no summary file, so every
+artifact is
+downloaded from Maven Central, checked against Central's checksum
+file (`--strict-checksums`) and recorded; review the diff as you would
+the pom change. The file is written in a stable order, so two runs
+for one `pom.xml` give the same file. `scripts/tests/maven_checksums_test.sh`
+(`make test-maven-checksums`, also in CI) fails when the two Maven
+commands' flags differ from the required set, or when the file lacks
+a jar or POM line for a dependency or plugin `pom.xml` pins.
 
 ### Image scan
 
@@ -2456,8 +2494,8 @@ per-checkout `.uv-cache` as the workflow does;
 on each change to a build input and weekly (#977). Before that build,
 a pull-request run restores the indexer's `ppt-builder` stage from the
 GitHub Actions cache (BuildKit's `gha` backend, #1070), so Maven
-Central is contacted only when `indexer/java/pom.xml` or a layer
-before it changed. Every run on `main` (a push, the weekly schedule, a
+Central is contacted only when `indexer/java/pom.xml`, its checksums
+file or a layer before them changed. Every run on `main` (a push, the weekly schedule, a
 manual dispatch) restores nothing: it builds the stage from the
 current Debian packages (a restored apt layer is never rerun, and
 Trivy cannot see the `jlink` runtime) and writes the cache

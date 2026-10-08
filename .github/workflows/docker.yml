@@ -81,8 +81,9 @@ jobs:
       # export a cache), importing and exporting the cache under its own
       # scope, so the compose build that follows, on the same builder,
       # finds the stage built and Maven does not run unless
-      # indexer/java/pom.xml or a layer before it changed. The step
-      # loads the stage as an image rather than building cache-only:
+      # indexer/java/pom.xml, its checksums file or a layer before them
+      # changed. The step loads the stage as an image rather than
+      # building cache-only:
       # restored layers are lazy references into the cache backend that
       # only the restoring build can fetch, and a later build on the
       # builder silently rebuilds a stage it cannot fetch (seen in CI,

@@ -121,7 +121,10 @@ an image `make up` builds because none exists yet, records `unknown`.
 Besides the Debian and Python packages, the indexer build fetches the
 Java libraries of its legacy `.ppt` reader (Apache POI, pinned in
 `indexer/java/pom.xml`) from Maven Central (`repo.maven.apache.org`),
-so the build host needs to reach it. The downloads stay in a BuildKit
+so the build host needs to reach it. Each one must match its SHA-256
+in the committed `indexer/java/checksums/checksums.sha256`, or the
+build fails (see `docs/troubleshooting.md`, "The indexer build fails
+with a trusted checksum mismatch"). The downloads stay in a BuildKit
 cache mount, so a rebuild that runs the step again (after a
 `pom.xml` change or a base-image refresh) fetches only what the mount
 lacks; `make build-nocache` starts from an empty mount and refills it,

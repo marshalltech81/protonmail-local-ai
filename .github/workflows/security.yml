@@ -17,6 +17,7 @@ on:
       - "**/pyproject.toml"
       - "**/uv.lock"
       - "**/pom.xml"
+      - "indexer/java/checksums/**"
       - "**/Dockerfile"
       - "indexer/src/**"
       - "mcp-server/src/**"
@@ -35,6 +36,7 @@ on:
       - "**/pyproject.toml"
       - "**/uv.lock"
       - "**/pom.xml"
+      - "indexer/java/checksums/**"
       - "**/Dockerfile"
       - "indexer/src/**"
       - "mcp-server/src/**"
@@ -86,7 +88,12 @@ jobs:
       # before the scan: on a warm cache neither Maven nor Trivy fetches
       # anything. The JDK matches the one indexer/Dockerfile builds with
       # (openjdk-21); Maven is preinstalled on the runner. The resolve
-      # verifies checksums like the image build does.
+      # checks every artifact, from the restored cache as well as from
+      # Maven Central, against the committed SHA-256 summary file
+      # indexer/java/checksums/checksums.sha256 with the image build's
+      # flags (#1117; scripts/tests/maven_checksums_test.sh keeps the
+      # two the same), so a cache entry that differs fails the job
+      # instead of reaching the scan.
       - name: Cache the Maven repository
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -103,6 +110,13 @@ jobs:
       - name: Resolve the .ppt reader's POMs into the Maven repository
         run: >-
           mvn --batch-mode --no-transfer-progress --strict-checksums
+          -Daether.artifactResolver.postProcessor.trustedChecksums=true
+          -Daether.artifactResolver.postProcessor.trustedChecksums.checksumAlgorithms=SHA-256
+          -Daether.artifactResolver.postProcessor.trustedChecksums.failIfMissing=true
+          -Daether.artifactResolver.postProcessor.trustedChecksums.record=false
+          -Daether.trustedChecksumsSource.summaryFile=true
+          "-Daether.trustedChecksumsSource.summaryFile.basedir=$GITHUB_WORKSPACE/indexer/java/checksums"
+          -Daether.trustedChecksumsSource.summaryFile.originAware=false
           --file indexer/java/pom.xml dependency:resolve
 
       # Both scans run even when the other fails, so the job reports every
