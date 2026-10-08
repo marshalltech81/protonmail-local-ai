@@ -185,6 +185,12 @@ harness in `tests/eval/` (`tests/retrieval_metrics.py`).
   price together, followed by a message repeating the old pair (t99).
   `test_answer_eval_cases.py` checks every passage of each shape,
   decoys included, reaches the prompt uncut.
+  Threads 100-101 back the late-disposition shape (#975): a 12-message
+  thread whose closing message (t100.11) shares no word with the
+  outcome question, and another site's statement billing the same item
+  code with nothing disputed (t101). Per-thread passage selection
+  leaves t100.11 out of both cases' prompts today (#974), a known gap
+  that `test_answer_eval_cases.py` pins with a strict xfail.
   Adding a thread can lower a recall floor's
   measured value; re-measure and explain it rather than lowering the
   floor silently.

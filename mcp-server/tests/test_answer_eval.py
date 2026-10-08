@@ -230,6 +230,24 @@ class TestCases:
         assert message_id_of("t24.2") == "t24.2@baseline.example"
         assert message_id_of("t24") is None
 
+    @pytest.mark.parametrize("ref", ["t05", "t99.2", "t100", "t100.11"])
+    def test_two_and_three_digit_thread_refs_load(self, tmp_path, ref):
+        """#975: the corpus continues past t99, so a three-digit thread
+        is a ref like any other, in evidence and in a summary's thread."""
+        data = json.loads(CASES_PATH.read_text())
+        row = next(r for r in data["cases"] if r["id"] == "ask-roof-total")
+        row["required_evidence"] = [[ref]]
+        summary = next(r for r in data["cases"] if r["tool"] == "summarize_thread")
+        summary["arguments"]["thread_id"] = thread_id_of(ref)
+        summary["required_evidence"] = [[ref]]
+        for fact in summary["expected_facts"]:
+            fact["sources"] = [ref]
+        path = tmp_path / "cases.json"
+        path.write_text(json.dumps(data))
+        cases = {c.id: c for c in load_cases(path)}
+        assert cases["ask-roof-total"].required_evidence == ((ref,),)
+        assert cases[summary["id"]].arguments["thread_id"] == thread_id_of(ref)
+
     @pytest.mark.parametrize(
         "mutate",
         [
@@ -240,6 +258,11 @@ class TestCases:
             lambda r: r.update(answerable=False),
             lambda r: r.update(required_evidence=[]),
             lambda r: r.update(required_evidence=[["roof-thread"]]),
+            # #975: thread numbers take the corpus form, ``t<NN>`` or
+            # ``t<NNN>`` (``corpus.thread_id``), and no other.
+            lambda r: r.update(required_evidence=[["t5"]]),
+            lambda r: r.update(required_evidence=[["t010.2"]]),
+            lambda r: r.update(required_evidence=[["t1000"]]),
             lambda r: r["criteria"].pop("relevance"),
             lambda r: r["criteria"].update(relevance=False),
             lambda r: r.update(settings={"prompt_tokens": 10}),
@@ -708,7 +731,7 @@ class TestRunner:
         manifest = corpus_manifest()
         assert len(manifest) > 50
         for message_id, entry in manifest.items():
-            assert re.fullmatch(r"t\d{2}\.\d+@baseline\.example", message_id)
+            assert re.fullmatch(r"t(?:\d{2}|[1-9]\d{2})\.\d+@baseline\.example", message_id)
             assert re.fullmatch(r"[0-9a-f]{64}", entry.sha256)
             assert entry.thread_id == thread_id_of(message_id.split("@")[0]) and entry.tokens
 

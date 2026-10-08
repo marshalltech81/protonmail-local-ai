@@ -420,11 +420,13 @@ Cases must never be built from real mail.
 ### Cases
 
 `tests/answer_eval/cases.json` (schema v1, loaded and validated by
-`cases.py`) holds 47 cases over the baseline corpus: 45 for
+`cases.py`) holds 49 cases over the baseline corpus: 47 for
 `ask_mailbox` and two for `summarize_thread` (below). The `ask_mailbox` cases: exact facts
 (including a rate before and a different one after a stated future date
 in one notice, asked for 2027 and for after the change:
-`ask-darkroom-rate-2027` and `ask-darkroom-from-2028`, #911),
+`ask-darkroom-rate-2027` and `ask-darkroom-from-2028`, #911; and
+`ask-dispenser-first-explanation`, the vendor's first explanation in a
+12-message thread whose late closing message contradicts it, #975),
 attachment-only answers, multiple required threads (including
 `ask-tofu-summary`, a summary of the four genuine messages of the
 counting scenario that must not repeat their PINs or link), narrow filters
@@ -438,7 +440,10 @@ attachment, #910), later corrections (and a later message that does not
 change the fact; `ask-armchair-revised` is a revised attachment under
 the same filename, #910; `ask-conservatory-real-price` states the
 price as "not" a value first, and another thread bills that value;
-`ask-trestles-revised` replaces a count and a price together, #911),
+`ask-trestles-revised` replaces a count and a price together, #911;
+`ask-dispenser-hire-outcome` asks for the outcome of a matter raised
+early in a 12-message thread and settled late, in a message that
+shares no word with the question, #975),
 unresolved conflicts (`ask-wall-bill-attachment` is a body and its
 own attachment that disagree, #910), unanswerable questions, an empty result, a
 prompt-budget omission (the case's own `settings.prompt_tokens`), and
@@ -456,7 +461,12 @@ passage of the message satisfies the group: for a case that needs both
 the body and an attachment of one message (`ask-wall-bill-attachment`),
 coverage cannot show that only one was supplied or cited (#1182);
 `make baseline` checks instead that every passage of the #910 and #911 cases'
-shapes reaches the prompt. Held-out membership is
+shapes reaches the prompt. The #975 cases are a known gap (#974): each
+thread's passages are chosen by similarity to the question, so the late
+closing message never reaches either case's prompt, and
+`ask-dispenser-hire-outcome` is listed with the cases that lose evidence
+before the model sees it; `make baseline` pins this with a strict
+xfail that a fix turns into a pass. Held-out membership is
 `is_held_out(id)`, as for the agent scenarios; tune nothing against
 held-out cases.
 
@@ -525,7 +535,7 @@ call, it prints how many calls it will make and to which models (the
 `INFERENCE_MODEL` and `JUDGE_MODEL` settings), for example:
 
 ```text
-Planned provider calls: 47 answer calls to <model> (up to 47 more for citation repairs) and 47 judge calls to <model>; at most 141 provider calls.
+Planned provider calls: 49 answer calls to <model> (up to 49 more for citation repairs) and 49 judge calls to <model>; at most 147 provider calls.
 ```
 
 That is one answer call per selected case, plus a second (a citation

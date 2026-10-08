@@ -807,6 +807,44 @@
       "review": "ai_drafted"
     },
     {
+      "id": "ask-dispenser-hire-outcome",
+      "category": "correction",
+      "tool": "ask_mailbox",
+      "arguments": {"question": "Was the FC-4410 hire charge ever resolved, and what was the outcome?"},
+      "held_out": false,
+      "answerable": true,
+      "expected_handling": "answer",
+      "required_evidence": [["t100.11"]],
+      "expected_facts": [
+        {"id": "f1", "fact": "Ferncastle's route representative said the item was never placed.", "sources": ["t100.11"], "excerpt": "He says that item has not been placed here at all"},
+        {"id": "f2", "fact": "A credit is being reviewed for the months paid.", "sources": ["t100.11"], "excerpt": "Piers is now reviewing a credit for each month we paid"}
+      ],
+      "must_not_assert": [
+        "The mail shows no outcome: the last word from Ferncastle is that the hire charge stands, or nothing more was heard after the site was checked.",
+        "A credit has been issued or paid (it is only being reviewed)."
+      ],
+      "deterministic": {"must_include": [["credit"]], "must_not_include": []},
+      "criteria": {"factual_correctness": true, "citation_support": true, "completeness": true, "temporal_reasoning": true, "conflict_uncertainty": false, "relevance": true},
+      "review": "ai_drafted"
+    },
+    {
+      "id": "ask-dispenser-first-explanation",
+      "category": "exact_fact",
+      "tool": "ask_mailbox",
+      "arguments": {"question": "What did Ferncastle Hygiene first say the FC-4410 entry was for?"},
+      "held_out": true,
+      "answerable": true,
+      "expected_handling": "answer",
+      "required_evidence": [["t100.3"]],
+      "expected_facts": [
+        {"id": "f1", "fact": "Ferncastle first said the FC-4410 entry is for a hand towel dispenser.", "sources": ["t100.3"], "excerpt": "The FC-4410 entry is for the hand towel dispenser our route team installed in your loading bay washroom"}
+      ],
+      "must_not_assert": ["Ferncastle first said the item was never placed (its route representative's later statement)."],
+      "deterministic": {"must_include": [["towel"]], "must_not_include": []},
+      "criteria": {"factual_correctness": true, "citation_support": true, "completeness": true, "temporal_reasoning": true, "conflict_uncertainty": false, "relevance": true},
+      "review": "ai_drafted"
+    },
+    {
       "id": "summarize-pool-bids",
       "category": "exact_fact",
       "tool": "summarize_thread",

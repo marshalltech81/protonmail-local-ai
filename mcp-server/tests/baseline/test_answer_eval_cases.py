@@ -421,6 +421,52 @@ def test_body_shape_reaches_the_answering_model(case_id: str, records: dict[str,
     assert wanted <= supplied, (case_id, sorted(wanted - supplied))
 
 
+# Each #975 late-disposition case's shape: the passage holding its
+# expected facts plus its decoy. The outcome question needs the closing
+# message (t100.11) and has the other site's undisputed statement as its
+# decoy; the first-explanation question needs the early explanation
+# (t100.3) and has the closing message, which contradicts it, as its
+# decoy, so a recency-only answer fails once both are shown.
+_LATE_DISPOSITION_SHAPES = {
+    "ask-dispenser-hire-outcome": {("t100.11", "body"), ("t101.1", "body")},
+    "ask-dispenser-first-explanation": {("t100.3", "body"), ("t100.11", "body")},
+}
+# Known gap (#974, #858): each thread's passages are chosen by vector
+# distance to the question alone, and t100.11 shares no word with
+# either question, so six closer t100 passages take its place. A fix
+# makes the strict xfail below pass and must move these cases out of
+# the known gap.
+_LATE_DISPOSITION_GAP = ("t100.11", "body")
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="#974: the late closing message t100.11 is not selected for the prompt",
+)
+@pytest.mark.parametrize("case_id", sorted(_LATE_DISPOSITION_SHAPES))
+def test_late_disposition_shape_reaches_the_answering_model(
+    case_id: str, records: dict[str, dict]
+) -> None:
+    """#975: a late-disposition case tests the #974 gap only when every
+    passage of its shape reaches the prompt whole."""
+    supplied = _whole_passages(case_id)
+    wanted = {(message_id_of(ref), source) for ref, source in _LATE_DISPOSITION_SHAPES[case_id]}
+    assert wanted <= supplied, (case_id, sorted(wanted - supplied))
+
+
+@pytest.mark.parametrize("case_id", sorted(_LATE_DISPOSITION_SHAPES))
+def test_late_disposition_shape_short_of_the_known_gap(
+    case_id: str, records: dict[str, dict]
+) -> None:
+    """#975: until #974 is fixed, every other passage of the shape still
+    reaches the prompt whole (the decoy is live, the early explanation
+    is shown), and the closing message is the one passage missing."""
+    supplied = _whole_passages(case_id)
+    wanted = {(message_id_of(ref), source) for ref, source in _LATE_DISPOSITION_SHAPES[case_id]}
+    gap = (message_id_of(_LATE_DISPOSITION_GAP[0]), _LATE_DISPOSITION_GAP[1])
+    assert wanted - supplied == {gap}, (case_id, sorted(wanted - supplied))
+
+
 def _whole_passages(case_id: str) -> set[tuple[str | None, str]]:
     """The (message, source) pairs of the passages a case's prompt
     carried uncut."""
@@ -437,7 +483,10 @@ def test_cases_missing_evidence_are_the_known_ones(records: dict[str, dict]) -> 
     The hashed embedder has no semantics, so one natural-language
     question misses its thread; each prompt-budget case loses one source
     to its budget by design (``ask-kayak-tight-budget`` a thread,
-    ``summarize-hall-open-points`` the message past the window, #656). A
+    ``summarize-hall-open-points`` the message past the window, #656).
+    ``ask-dispenser-hire-outcome`` (#975) is the known #974 gap: its
+    thread is retrieved, but per-thread passage selection leaves out the
+    late closing message, which shares no word with the question. A
     change here is a retrieval or prompt assembly change: explain it in
     the PR and update the sets.
     """
@@ -459,6 +508,7 @@ def test_cases_missing_evidence_are_the_known_ones(records: dict[str, dict]) -> 
         "ask-lisbon-dates": ["retrieval"],
         "ask-kayak-tight-budget": ["prompt_assembly"],
         "summarize-hall-open-points": ["prompt_assembly"],
+        "ask-dispenser-hire-outcome": ["prompt_assembly"],
     }
 
 
