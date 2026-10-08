@@ -825,6 +825,52 @@ MESSAGE_ID_CONFLICTS_SQL = """
     FROM (SELECT COUNT(*) AS n FROM messages GROUP BY message_id HAVING COUNT(*) > 1)
 """
 
+# Queue buckets for ``get_mailbox_status`` (#1165), from what the
+# indexer's ``IndexingQueue.defer`` call sites store. A deferral keeps
+# the job's attempts and records a failure class, so it is told apart
+# from a retry by its stage and, where the stage is shared with the
+# normal failure path, by its fixed error text or class:
+#
+# - ``trashed``: an indexed file that is now T-flagged, parked until the
+#   reaper removes it or the file is restored.
+# - ``parse`` with one of ``QUEUE_DEFERRED_PARSE_ERRORS``: a file the
+#   indexer cannot read yet, or a reparse waiting for a rename.
+# - ``embed`` with no attempt spent, or with
+#   ``operator_action_required`` (only a deferral records that class): an
+#   embedder outage or configuration error. A job that had already
+#   failed before an outage deferred it cannot be told from an embed
+#   failure, and stays under ``retrying``.
+#
+# A job requeued by ``make requeue-dead`` keeps its stage and error but
+# has no class, so every deferral rule requires one. ``tests/
+# test_mailbox_status_queue.py`` checks each indexer ``defer`` call site
+# lands outside ``pending`` and ``retrying``.
+QUEUE_DEFERRED_PARSE_ERRORS = (
+    "PermissionError: deferred until mbsync opens the file",
+    "FileNotFoundError: deferred until the rename is recorded",
+)
+QUEUE_BUCKETS_SQL = """
+    SELECT bucket, COUNT(*) AS n, COALESCE(SUM(reason = 'reparse'), 0) AS reparse
+    FROM (
+        SELECT reason, CASE
+            WHEN status = 'dead' THEN 'dead'
+            WHEN status != 'queued' THEN 'other'
+            WHEN last_error_class IS NOT NULL AND last_stage = 'trashed'
+                THEN 'parked_trashed'
+            WHEN last_error_class IS NOT NULL AND last_stage = 'parse'
+                 AND last_error IN (:permission, :rename)
+                THEN 'deferred'
+            WHEN last_error_class IS NOT NULL AND last_stage = 'embed'
+                 AND (attempts = 0 OR last_error_class = 'operator_action_required')
+                THEN 'deferred'
+            WHEN attempts > 0 OR last_error_class IS NOT NULL THEN 'retrying'
+            ELSE 'pending'
+        END AS bucket
+        FROM indexing_jobs
+    )
+    GROUP BY bucket
+"""
+
 
 @dataclass
 class MessageView:
@@ -3345,13 +3391,15 @@ class Database:
         snapshot so the counts and the queue agree.
 
         Queue rows are ``pending`` (not yet failed), ``retrying``
-        (failed at least once, will retry), or ``dead`` (gave up). A job
-        deferred during an embedder outage keeps ``attempts = 0`` but
-        records its failure class, so the class marks it as retrying; a
-        dead job requeued by ``make requeue-dead`` clears both and is
-        pending again. ``reparse`` counts the pending and retrying jobs
-        that re-read an already indexed message (reason ``reparse``,
-        #1078), so a reparse backlog reads as such.
+        (failed at least once, will retry), ``deferred`` (postponed by
+        the indexer without a failure of its own), ``parked_trashed``
+        (an indexed file now trashed, waiting for the reaper) or
+        ``dead`` (gave up); see ``QUEUE_BUCKETS_SQL`` (#1165). A dead
+        job requeued by ``make requeue-dead`` clears its attempts and
+        class and is pending again. ``reparse`` counts the pending,
+        retrying and deferred jobs that re-read an already indexed
+        message (reason ``reparse``, #1078), so a reparse backlog reads
+        as such.
 
         Message-ID conflicts (#455) are counts only: how many Message-IDs
         more than one file claims, and how many files beyond the first
@@ -3367,22 +3415,22 @@ class Database:
             row = conn.execute("SELECT MIN(date_first), MAX(date_last) FROM threads").fetchone()
             stats["oldest_message"] = row[0]
             stats["newest_message"] = row[1]
-            queue = conn.execute(
-                """
-                SELECT
-                    COALESCE(SUM(status = 'queued' AND NOT (attempts > 0 OR last_error_class IS NOT NULL)), 0),
-                    COALESCE(SUM(status = 'queued' AND (attempts > 0 OR last_error_class IS NOT NULL)), 0),
-                    COALESCE(SUM(status = 'dead'), 0),
-                    COALESCE(SUM(status = 'queued' AND reason = 'reparse'), 0)
-                FROM indexing_jobs
-                """
-            ).fetchone()
-            stats["queue"] = {
-                "pending": queue[0],
-                "retrying": queue[1],
-                "dead": queue[2],
-                "reparse": queue[3],
+            permission, rename = QUEUE_DEFERRED_PARSE_ERRORS
+            buckets = {
+                row["bucket"]: (row["n"], row["reparse"])
+                for row in conn.execute(
+                    QUEUE_BUCKETS_SQL,
+                    {"permission": permission, "rename": rename},
+                )
             }
+            stats["queue"] = {
+                name: buckets.get(name, (0, 0))[0]
+                for name in ("pending", "retrying", "deferred", "parked_trashed", "dead")
+            }
+            # Reparse jobs still waiting to be indexed (#1078).
+            stats["queue"]["reparse"] = sum(
+                buckets.get(name, (0, 0))[1] for name in ("pending", "retrying", "deferred")
+            )
             state = conn.execute(
                 "SELECT sync_completed_at, sync_interval_secs, indexer_seen_at FROM ingestion_state"
             ).fetchone()

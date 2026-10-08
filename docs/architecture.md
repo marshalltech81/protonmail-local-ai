@@ -232,7 +232,7 @@ ones (#274):
 | Bridge authenticated | An account is logged in to Bridge and accepts mbsync's `LOGIN` | No dedicated signal. Bridge listens, completes TLS and greets with no account logged in. The first proof is a successful sync; a rejected login is a failed sync in mbsync's log | — |
 | mbsync syncing | mbsync's sync loop is alive | mbsync container health (liveness: a heartbeat touched around every attempt, or a sync or its permission repair running, up to the run's deadline) | That any sync succeeded: the loop is healthy between failed attempts until five consecutive failures exit it and Docker restarts it |
 | Last successful sync | mbsync completed a sync | The success stamp `.mbsync-last-sync.json` at the Maildir root, written by mbsync. `get_mailbox_status` cannot read Maildir; its `last_sync_at` (and the reason `no successful mail sync has been recorded` or `last successful mail sync was ... ago`) is the last sync the indexer has acknowledged, after queuing that sync's mail, so it can lag the stamp | The stamp alone: that the indexer has read it. `last_sync_at`: that the queued mail is indexed yet |
-| Index current | The indexer has acknowledged a recent sync and has no pending or retrying jobs | `get_mailbox_status` `current` and its reasons (see [Index currency](#index-currency)); `make status` prints the same fields | That every message is indexed: dead-lettered jobs (the `dead` count) do not affect `current`, and their messages may be missing from search until `make requeue-dead`. Nor mail that reached Proton after the last sync |
+| Index current | The indexer has acknowledged a recent sync and has no pending, retrying or deferred jobs (parked trashed files do not count) | `get_mailbox_status` `current` and its reasons (see [Index currency](#index-currency)); `make status` prints the same fields | That every message is indexed: dead-lettered jobs (the `dead` count) do not affect `current`, and their messages may be missing from search until `make requeue-dead`. Nor mail that reached Proton after the last sync |
 
 mbsync's own startup checks TLS and the pin with an error that names
 the cause, and its sync results and stamp report the rest. No
@@ -2189,8 +2189,8 @@ while reparse jobs are queued, then one `reparse complete: <n>
 message(s) reparsed since the indexer started, <n> dead-lettered`
 line, at WARNING when any dead-lettered; a reparse drained between two
 heartbeats still gets its completion line. `get_mailbox_status` reports
-the queued reparse jobs as `queue.reparse` (a subset of `pending` and
-`retrying`), names them in the not-current reason, and `make status`
+the queued reparse jobs as `queue.reparse` (a subset of `pending`,
+`retrying` and `deferred`), names them in the not-current reason, and `make status`
 prints a line saying search finds those messages but the data the
 upgrade adds is missing until the reparse finishes.
 

@@ -86,7 +86,9 @@ class TestGetMailboxStatus:
         assert "Current:        no" in text
         for reason in reasons:
             assert f"  - {reason}" in text
-        assert "Queue:          1 pending, 1 retrying, 1 dead" in text
+        assert (
+            "Queue:          1 pending, 1 retrying, 0 deferred, 0 parked (trashed), 1 dead" in text
+        )
         assert "1 message failed permanently and is incompletely indexed" in text
         assert "reparse" not in text
 
@@ -104,11 +106,95 @@ class TestGetMailboxStatus:
         text = _text(out)
         assert out.structured_content["current"] is False
         assert out.structured_content["queue"]["reparse"] == 1
-        assert "Queue:          2 pending, 0 retrying, 0 dead" in text
+        assert (
+            "Queue:          2 pending, 0 retrying, 0 deferred, 0 parked (trashed), 0 dead" in text
+        )
         assert (
             "  1 waiting message is already indexed and being reparsed after an upgrade: "
             "search finds it, but data the upgrade adds is missing until the reparse "
             "finishes." in text
+        )
+
+    def test_parked_trashed_files_leave_the_index_current(self, fake_server, seeded_db):
+        """#1165: trashed files parked until the reaper runs are already
+        indexed; they are counted, not reported as retrying or waiting."""
+        parked = ("queued", 0, "retryable", "x", "trashed", "file is T-flagged; parked")
+        write_ingestion(
+            seeded_db.path,
+            sync_completed_at=_ago(seconds=30),
+            sync_interval_secs=60,
+            indexer_seen_at=_ago(seconds=5),
+            jobs=(parked, parked),
+        )
+        out = asyncio.run(_handler(fake_server, seeded_db)())
+        text = _text(out)
+        queue = out.structured_content["queue"]
+        assert out.structured_content["current"] is True
+        assert (queue["retrying"], queue["parked_trashed"]) == (0, 2)
+        assert (
+            "Queue:          0 pending, 0 retrying, 0 deferred, 2 parked (trashed), 0 dead" in text
+        )
+        assert (
+            "  2 trashed messages are already indexed and wait for the reaper to "
+            "remove them (or for their files to be restored); they do not make the "
+            "index non-current." in text
+        )
+
+    def test_deferred_messages_keep_the_index_not_current(self, fake_server, seeded_db):
+        """#1165: a permission deferral and an embedder-outage deferral
+        are reported as deferred and keep current false."""
+        write_ingestion(
+            seeded_db.path,
+            sync_completed_at=_ago(seconds=30),
+            sync_interval_secs=60,
+            indexer_seen_at=_ago(seconds=5),
+            jobs=(
+                (
+                    "queued",
+                    0,
+                    "retryable",
+                    "x",
+                    "parse",
+                    "PermissionError: deferred until mbsync opens the file",
+                ),
+                ("queued", 0, "retryable", "x", "embed", "APIConnectionError"),
+            ),
+        )
+        out = asyncio.run(_handler(fake_server, seeded_db)())
+        text = _text(out)
+        queue = out.structured_content["queue"]
+        assert out.structured_content["current"] is False
+        assert (queue["retrying"], queue["deferred"]) == (0, 2)
+        assert out.structured_content["not_current_reasons"] == [
+            "2 messages waiting to be indexed (0 pending, 0 retrying, 2 deferred)"
+        ]
+        assert (
+            "  2 messages are deferred without a failure of their own (a file the "
+            "indexer cannot read yet, an embedder outage or configuration error, or a "
+            "reparse waiting for a rename); the indexer retries them without spending "
+            "attempts." in text
+        )
+
+    def test_one_deferred_and_one_parked_message_read_in_the_singular(self, fake_server, seeded_db):
+        write_ingestion(
+            seeded_db.path,
+            sync_completed_at=_ago(seconds=30),
+            sync_interval_secs=60,
+            indexer_seen_at=_ago(seconds=5),
+            jobs=(
+                ("queued", 0, "retryable", "x", "trashed", "file is T-flagged; parked"),
+                ("queued", 0, "operator_action_required", "x", "embed", "AuthenticationError"),
+            ),
+        )
+        text = _text(asyncio.run(_handler(fake_server, seeded_db)()))
+        assert (
+            "  1 message is deferred without a failure of its own (a file the indexer "
+            "cannot read yet, an embedder outage or configuration error, or a reparse "
+            "waiting for a rename); the indexer retries it without spending attempts." in text
+        )
+        assert (
+            "  1 trashed message is already indexed and waits for the reaper to remove "
+            "it (or for its file to be restored); it does not make the index non-current." in text
         )
 
     def test_no_message_id_conflicts(self, fake_server, seeded_db):
