@@ -55,6 +55,14 @@ with ``XlsxEagerPartBudgetError``, which the dispatcher records as
 ``unsupported`` (#931). No text is kept then: a part loaded
 whole cannot be cut the way a worksheet is. The bytes of a worksheet,
 as opposed to its nodes, are bounded by the dispatcher's zip cap.
+
+All of this trusts the member sizes the ZIP central directory
+declares, and a member that understates its size is still decompressed
+whole when it is read. So the whole extraction, budgets included, runs
+in a child process under an address-space and a CPU limit
+(``ooxml``, #1040): ``extract`` starts it, and ``extract_text`` is what
+runs in it. The child reports the budgets that cut the text by name,
+and this module logs them.
 """
 
 from __future__ import annotations
@@ -91,8 +99,43 @@ from openpyxl.xml.constants import (
 from openpyxl.xml.functions import fromstring
 
 from . import warn_extractor_cap
+from .ooxml import run_child
 
 log = logging.getLogger("indexer.extractor.xlsx")
+
+# Address space (``RLIMIT_AS``), CPU seconds (``RLIMIT_CPU``) and
+# wall-clock seconds the extraction's child process may use (#1040),
+# past the CPU limit so a CPU-bound child meets that first. Plainly
+# measured in the indexer image, child peak RSS and time:
+#
+# * a one-cell workbook: 44 MB and 0.2 s, nearly all of it starting the
+#   child and importing openpyxl;
+# * 1,000,000 cells, half of them distinct strings (5 MB, stopped at
+#   the cell budget): 91 MB and 5.4 s;
+# * 119 rows of 60,000 duplicate cells (stopped at the node budget):
+#   115 MB and 3.9 s;
+# * a shared-string table of empty strings and a stylesheet of empty
+#   fonts, together just under the eager-part budget: 508 MB and
+#   10.3 s;
+# * a 0.5 MB workbook whose stylesheet declares a few KB but
+#   decompresses to 512 MiB (#1040): 1,068 MB and 0.5 s.
+#
+# 1 GiB is about twice the eager-part worst case, and the last case
+# fails under it as ``MemoryError``. 30 CPU seconds is about three times
+# the slowest case.
+CHILD_MAX_ADDRESS_SPACE_BYTES = 1024 * 1024 * 1024
+CHILD_MAX_CPU_SECONDS = 30
+CHILD_TIMEOUT_SECONDS = 45.0
+
+# The budgets the child may report as having cut the text, and what
+# each logs.
+_CAP_MESSAGES = {
+    "xlsx_sheet_nodes": "xlsx worksheet XML cut before openpyxl parses it",
+    "xlsx_row_nodes": "xlsx worksheet XML cut before openpyxl parses it",
+    "xlsx_tag_bytes": "xlsx worksheet XML cut before openpyxl parses it",
+    "xlsx_expanded_cells": "xlsx walk stopped at the cell budget",
+    "xlsx_text_chars": "xlsx walk stopped at the text budget",
+}
 
 # XML nodes (elements plus their attributes) in the worksheet parts
 # openpyxl will parse, across the workbook, and in any one row (#432).
@@ -182,16 +225,35 @@ def extract(
     max_pdf_pages: int | None = None,  # noqa: ARG001
     on_progress: Callable[[], None] | None = None,  # noqa: ARG001
 ) -> tuple[str, str]:
-    """Extract text from an XLSX payload. Returns (text, "xlsx")."""
+    """Extract text from an XLSX payload in the child process (``ooxml``,
+    #1040). Returns (text, "xlsx")."""
+    text, caps = run_child(
+        "xlsx",
+        payload,
+        max_address_space_bytes=CHILD_MAX_ADDRESS_SPACE_BYTES,
+        max_cpu_seconds=CHILD_MAX_CPU_SECONDS,
+        timeout_seconds=CHILD_TIMEOUT_SECONDS,
+        caps=frozenset(_CAP_MESSAGES),
+        permanent={"XlsxEagerPartBudgetError": XlsxEagerPartBudgetError},
+    )
+    for cap in caps:
+        warn_extractor_cap(log, cap, _CAP_MESSAGES[cap])
+    return text, "xlsx"
+
+
+def extract_text(payload: bytes) -> tuple[str, list[str]]:
+    """The workbook's text and the names of the budgets that cut it.
+    Runs in the child process (``ooxml_child``)."""
+    caps: list[str] = []
     _check_eager_parts(payload)
     workbook = openpyxl.load_workbook(
-        _bound_worksheets(payload),
+        _bound_worksheets(payload, caps),
         read_only=True,
         data_only=True,
         keep_links=False,
     )
     try:
-        return _serialize(workbook), "xlsx"
+        return _serialize(workbook, caps), caps
     finally:
         workbook.close()
 
@@ -211,9 +273,12 @@ class _EagerBudget:
     part's declared uncompressed size, before anything reads it.
 
     zipfile never returns more than a member's declared size (it stops
-    there and checks the CRC), so the declared size bounds the read. A
-    name stored twice is read from its last entry, which is what
-    ``getinfo`` returns. A part read several times is charged each time.
+    there and checks the CRC), so the declared size bounds what openpyxl
+    parses. It decompresses the member's whole stream first, though, so
+    a member that understates its size is expanded anyway: the child
+    process's address-space limit bounds that (#1040). A name stored
+    twice is read from its last entry, which is what ``getinfo``
+    returns. A part read several times is charged each time.
     """
 
     def __init__(self, archive: zipfile.ZipFile) -> None:
@@ -351,9 +416,10 @@ def _charge_chartsheet(budget: _EagerBudget, target: str) -> None:
                 budget.charge(dep.target)
 
 
-def _bound_worksheets(payload: bytes) -> io.BytesIO:
+def _bound_worksheets(payload: bytes, reported: list[str]) -> io.BytesIO:
     """Return the workbook with every worksheet cut before the row that
     crosses a node budget, or the workbook unchanged when none does.
+    Appends the budgets that cut a worksheet to ``reported``, once each.
 
     The worksheets are found the way openpyxl finds them, through its
     public ``ExcelReader``, and scanned in the order it walks them, one
@@ -391,8 +457,7 @@ def _bound_worksheets(payload: bytes) -> io.BytesIO:
                 cuts[target] = cut
     finally:
         reader.archive.close()
-    for cap in sorted(caps):
-        warn_extractor_cap(log, cap, "xlsx worksheet XML cut before openpyxl parses it")
+    reported.extend(sorted(caps))
     if not cuts:
         return io.BytesIO(payload)
     # Rewrite the archive with the cut worksheets. A name stored twice
@@ -554,7 +619,9 @@ def _scan_worksheet(
     return scan.left_before_unit, (scan.cut_at, closers.encode(encoding))
 
 
-def _serialize(workbook: openpyxl.Workbook) -> str:
+def _serialize(workbook: openpyxl.Workbook, reported: list[str]) -> str:
+    """The workbook's text; appends the budget that ended the walk, if
+    one did, to ``reported``."""
     parts: list[str] = []
     expanded_cells = 0
     chars_left = _MAX_TEXT_CHARS
@@ -620,7 +687,7 @@ def _serialize(workbook: openpyxl.Workbook) -> str:
             break
     # A budget that ended the walk cut the text (#903).
     if expanded_cells > _MAX_EXPANDED_CELLS:
-        warn_extractor_cap(log, "xlsx_expanded_cells", "xlsx walk stopped at the cell budget")
+        reported.append("xlsx_expanded_cells")
     elif cut:
-        warn_extractor_cap(log, "xlsx_text_chars", "xlsx walk stopped at the text budget")
+        reported.append("xlsx_text_chars")
     return "\n\n".join(parts)

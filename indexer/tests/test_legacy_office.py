@@ -304,9 +304,14 @@ class TestEveryToolRunsUnderLimits:
 
     def test_every_run_tool_caller_passes_both_limits(self):
         calls = _run_tool_calls()
-        # Guards the scan: it finds the three extractors (and nothing
+        # Guards the scan: it finds the four callers (and nothing
         # passes limits through ``**kwargs``, which it could not check).
-        assert set(calls) == {"extractors/doc.py", "extractors/xls.py", "extractors/ppt.py"}
+        assert set(calls) == {
+            "extractors/doc.py",
+            "extractors/xls.py",
+            "extractors/ppt.py",
+            "extractors/ooxml.py",
+        }
         for path, nodes in calls.items():
             for node in nodes:
                 keywords = {k.arg for k in node.keywords}

@@ -1509,6 +1509,13 @@ only, never filenames or text (`make logs`):
   password-protected deck is `unsupported` instead, below),
   `ToolNotFoundError` (catdoc or the
   `.ppt` Java runtime missing from the image) or `XlsOutputError`.
+  A DOCX, XLSX or PPTX is extracted in a child process with 1 GiB of
+  address space, 30 s of CPU and a 45 s timeout (#1040): a file that
+  needs more is `MemoryError` (or `XMLSyntaxError`, lxml's name for a
+  failed allocation), `ToolCrashError` or `ToolTimeoutError`, and
+  `OoxmlOutputError` means the child's output was malformed or past its
+  cap. The limits and what they were measured on are in
+  `docs/architecture.md` ("OOXML extraction runs in a child process").
   Many of these at
   once usually means the OCR toolchain or a parser library is
   broken, not the mail. A failed result is cached for 7 days, then

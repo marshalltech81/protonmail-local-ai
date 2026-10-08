@@ -1050,7 +1050,7 @@ class TestXlsxSheetTitleBudget:
         try:
             tracemalloc.start()
             started = time.perf_counter()
-            text = xlsx._serialize(workbook)
+            text = xlsx._serialize(workbook, [])
             elapsed = time.perf_counter() - started
             _, peak = tracemalloc.get_traced_memory()
             tracemalloc.stop()
@@ -1483,7 +1483,7 @@ class TestXlsxRawNodeBudget:
 
         tracemalloc.start()
         try:
-            xlsx.extract(payload)
+            xlsx.extract_text(payload)
             peak = tracemalloc.get_traced_memory()[1]
         finally:
             tracemalloc.stop()
@@ -1598,7 +1598,7 @@ class TestXlsxRawNodeBudget:
 
         text, _ = xlsx.extract(payload)
 
-        assert xlsx._bound_worksheets(payload).getvalue() == payload
+        assert xlsx._bound_worksheets(payload, []).getvalue() == payload
         assert text == f"[Sheet: Sheet]\nfirst\n{long_value}\nthird"
 
     def test_a_row_past_the_row_budget_ends_the_worksheet(self, monkeypatch):
@@ -1641,7 +1641,7 @@ class TestXlsxRawNodeBudget:
         from src.extractors import xlsx
 
         payload = _titled_xlsx([("one", [["first"]] * 50), ("two", [["second"]])])
-        cut = xlsx._bound_worksheets(payload)
+        cut = xlsx._bound_worksheets(payload, [])
         monkeypatch.setattr(xlsx, "_MAX_SHEET_NODES", 300)
 
         text, _ = xlsx.extract(payload)
@@ -1809,7 +1809,7 @@ class TestXlsxRawNodeBudget:
 
         payload = _xlsx_bytes(rows)
 
-        assert xlsx._bound_worksheets(payload).getvalue() == payload
+        assert xlsx._bound_worksheets(payload, []).getvalue() == payload
 
     def test_chartsheets_are_not_scanned(self, monkeypatch):
         """openpyxl reads a chartsheet whole, not as a worksheet, so the
@@ -5585,17 +5585,21 @@ class TestDocxRelationshipChain:
         assert result.status == STATUS_SUCCESS
         assert result.text == _CHAIN_MARKER
 
-    def test_recursion_error_after_the_open_still_escapes(self, monkeypatch):
-        """Only the package open is guarded: a ``RecursionError`` raised
-        while the opened document is walked stays host pressure."""
+    def test_recursion_error_after_the_open_is_the_childs_failure(self, monkeypatch):
+        """Only the package open is guarded, so a ``RecursionError`` raised
+        while the opened document is walked keeps its own type. It is
+        raised in the child process (#1040), where it is that child's
+        failure, not host pressure: a ``failed`` row by type."""
         from src.extractors import docx as docx_extractor
 
         def boom(*_args):
             raise RecursionError
 
         monkeypatch.setattr(docx_extractor, "_block_lines", boom)
-        with pytest.raises(RecursionError):
-            extract(content_type=_DOCX_MIME, filename="a.docx", payload=_docx_bytes(_CHAIN_MARKER))
+        result = extract(
+            content_type=_DOCX_MIME, filename="a.docx", payload=_docx_bytes(_CHAIN_MARKER)
+        )
+        assert (result.status, result.error) == (STATUS_FAILED, "RecursionError")
 
 
 _DOCX_BUDGET_MARKER = "SYNTHETIC_DOCX_BUDGET_MARKER"
@@ -5920,7 +5924,7 @@ class TestDocxPackageBudget:
         from src.extractors import docx as docx_extractor
 
         with pytest.raises(docx_extractor.DocxRelationshipChainError):
-            docx_extractor.extract(_chained_docx(2000))
+            docx_extractor.extract_text(_chained_docx(2000))
 
 
 def _with_members(payload: bytes, members: list[tuple[str, bytes, int]]) -> bytes:
@@ -7455,6 +7459,24 @@ _UNREPORTED_CAPS = {
         "the child is killed (ToolCrashError): a failed row with its rate-limited WARNING, "
         "counted as failed="
     ),
+    "src.extractors.ooxml:_MAX_OUTPUT_BYTES": (
+        "child output past it cannot come from a working child: OoxmlOutputError, a failed row "
+        "with its rate-limited WARNING, counted as failed="
+    ),
+    **{
+        f"src.extractors.{module}:CHILD_MAX_ADDRESS_SPACE_BYTES": (
+            "the child fails (MemoryError, or ToolExitError when it cannot report it): a failed "
+            "row with its rate-limited WARNING, counted as failed="
+        )
+        for module in ("docx", "pptx", "xlsx")
+    },
+    **{
+        f"src.extractors.{module}:CHILD_MAX_CPU_SECONDS": (
+            "the child is killed (ToolCrashError): a failed row with its rate-limited WARNING, "
+            "counted as failed="
+        )
+        for module in ("docx", "pptx", "xlsx")
+    },
     "src.extractors.doc:CHILD_MAX_ADDRESS_SPACE_BYTES": (
         "catdoc fails (ToolExitError): a failed row with its rate-limited WARNING, "
         "counted as failed="
@@ -7480,6 +7502,8 @@ _EXTRACTOR_MODULES = (
     "src.extractors.doc",
     "src.extractors.docx",
     "src.extractors.html",
+    "src.extractors.ooxml",
+    "src.extractors.ooxml_child",
     "src.extractors.image",
     "src.extractors.pdf",
     "src.extractors.ppt",

@@ -529,7 +529,8 @@ class TestDocxWalkBudgets:
         lines = _cap_lines(caplog)
         assert [r.levelname for r in lines] == ["WARNING"]
         assert (
-            "extractor cap docx_blocks: document truncated after 0 lines" in lines[0].getMessage()
+            "extractor cap docx_blocks: document truncated at a walk budget"
+            in lines[0].getMessage()
         )
         assert extractors.drain_extractor_counts()["extractor_caps"] == 1
         assert self._MARKER not in caplog.text

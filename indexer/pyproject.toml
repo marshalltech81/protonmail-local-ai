@@ -80,6 +80,9 @@ pythonpath = ["."]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
+markers = [
+    "real_ooxml_child: start the OOXML extractors' real child process (tests/conftest.py)",
+]
 addopts = "-v --tb=short --cov=src --cov-branch --cov-report=term-missing --cov-fail-under=90"
 filterwarnings = [
     # ``defusedxml`` emits this DeprecationWarning at import time of its

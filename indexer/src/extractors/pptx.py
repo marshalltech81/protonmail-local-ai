@@ -69,6 +69,14 @@ When a budget runs out the text collected so far is returned, as the
 XLSX extractor does: the first budget to run out logs a rate-limited
 WARNING naming it and is counted in the attachments aggregate's
 ``extractor_caps`` (#903).
+
+The pre-open budgets trust the member sizes the ZIP central directory
+declares, and a member that understates its size is still decompressed
+whole when python-pptx reads it. So the whole extraction, budgets
+included, runs in a child process under an address-space and a CPU
+limit (``ooxml``, #1040): ``extract`` starts it, and ``extract_text``
+is what runs in it. The child reports the budget that cut the text by
+name, and this module logs it.
 """
 
 from __future__ import annotations
@@ -93,8 +101,36 @@ from pptx.slide import NotesSlide, Slide
 from pptx.table import Table
 
 from . import over_package_budget, warn_extractor_cap
+from .ooxml import run_child
 
 log = logging.getLogger("indexer.extractor.pptx")
+
+# Address space (``RLIMIT_AS``), CPU seconds (``RLIMIT_CPU``) and
+# wall-clock seconds the extraction's child process may use (#1040),
+# past the CPU limit so a CPU-bound child meets that first. Plainly
+# measured in the indexer image, child peak RSS and time:
+#
+# * a one-slide deck: 48 MB and 0.2 s, nearly all of it starting the
+#   child and importing python-pptx;
+# * 1,000 slides with notes and 200 pictures (26 MB): 135 MB and 0.6 s;
+# * 40 slides with 40 photos (30 MB): 106 MB and 0.3 s;
+# * 150,000 empty text boxes on one slide (stopped at the shape
+#   budget): 273 MB and 1.6 s;
+# * 47 MiB of stored element-dense slide XML, inside the pre-open
+#   budgets: 1,141 MB and 1.5 s;
+# * a 0.5 MB deck whose slide declares a few KB but decompresses to
+#   512 MiB (#1040): 1,071 MB and 0.6 s.
+#
+# 1 GiB is about 3.8 times the largest benign peak; the last two fail
+# under it, as ``XMLSyntaxError`` (lxml reports a failed allocation as
+# one) and ``MemoryError``. The CPU limit is many times the slowest
+# case, as in the XLSX extractor.
+CHILD_MAX_ADDRESS_SPACE_BYTES = 1024 * 1024 * 1024
+CHILD_MAX_CPU_SECONDS = 30
+CHILD_TIMEOUT_SECONDS = 45.0
+
+# The walk budgets the child may report as having cut the text.
+_CAP_NAMES = frozenset({"pptx_slides", "pptx_shapes", "pptx_table_cells", "pptx_text_chars"})
 
 # Slide-list entries read. Far past any real deck; with repeated
 # entries skipped, an entry costs microseconds.
@@ -273,8 +309,25 @@ def extract(
     max_pdf_pages: int | None = None,  # noqa: ARG001
     on_progress: Callable[[], None] | None = None,  # noqa: ARG001
 ) -> tuple[str, str]:
-    """Extract text from a PPTX, PPTM, PPSX, POTX, PPSM or POTM payload.
-    Returns (text, "pptx")."""
+    """Extract text from a PPTX, PPTM, PPSX, POTX, PPSM or POTM payload
+    in the child process (``ooxml``, #1040). Returns (text, "pptx")."""
+    text, caps = run_child(
+        "pptx",
+        payload,
+        max_address_space_bytes=CHILD_MAX_ADDRESS_SPACE_BYTES,
+        max_cpu_seconds=CHILD_MAX_CPU_SECONDS,
+        timeout_seconds=CHILD_TIMEOUT_SECONDS,
+        caps=_CAP_NAMES,
+        permanent={"PptxPackageBudgetError": PptxPackageBudgetError},
+    )
+    for cap in caps:
+        warn_extractor_cap(log, cap, "presentation truncated at a walk budget")
+    return text, "pptx"
+
+
+def extract_text(payload: bytes) -> tuple[str, list[str]]:
+    """The deck's text and the names of the walk budgets that cut it.
+    Runs in the child process (``ooxml_child``)."""
     _check_package(payload)
     try:
         presentation = _open_presentation(payload)
@@ -294,15 +347,7 @@ def extract(
         if not _slide_lines(slide, budget, lines):
             break
 
-    if budget.cut is not None:
-        warn_extractor_cap(
-            log,
-            budget.cut,
-            "presentation truncated after %d lines (slides read %d)",
-            len(lines),
-            len(seen),
-        )
-    return "\n\n".join(lines), "pptx"
+    return "\n\n".join(lines), [budget.cut] if budget.cut is not None else []
 
 
 def _slide_lines(slide: Slide, budget: _Budget, lines: list[str]) -> bool:

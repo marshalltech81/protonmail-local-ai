@@ -1243,7 +1243,8 @@ each message whose occurrence of it now selects a module.
   no slide text from decks current PowerPoint or LibreOffice save
   (#958).
 
-All three run through one subprocess runner (`extractors/_runner.py`).
+All three, and the OOXML extractors' child process below, run through
+one subprocess runner (`extractors/_runner.py`).
 It starts every tool through `extractors/_launcher.py` (`python -I`),
 which lowers its own address space (`RLIMIT_AS`) and CPU time
 (`RLIMIT_CPU`) to the limits the extractor passes, caps glibc at two
@@ -1277,12 +1278,63 @@ The limits on every external program the indexer runs:
 | catdoc (`.doc`) | 64 MiB | 10 s | 60 s |
 | xlrd child (`.xls`) | 512 MiB | 30 s | 45 s |
 | Java with Apache POI (`.ppt`) | 512 MiB | 30 s | 45 s |
+| OOXML child (`.docx`, `.pptx`, `.xlsx` and their variants) | 1 GiB | 30 s | 45 s |
 | Tesseract (images, scanned PDFs) | none | none | `INDEXER_OCR_TIMEOUT_SECONDS` per page |
 | Poppler `pdfinfo` / `pdftoppm` (scanned PDFs) | none | none | the OCR render deadline (see `INDEXER_OCR_TIMEOUT_SECONDS`) |
 
 Tesseract and Poppler are started by pytesseract and pdf2image, not
 through the runner, so they have no memory or CPU limit of their own
 and are bounded only by the container's (#1021).
+
+OOXML extraction runs in a child process (owner decision 2026-10-08,
+#1040). The DOCX and PPTX pre-open package budgets, the XLSX
+eager-part budget and the dispatcher's ZIP guard all trust the member
+sizes the ZIP central directory declares, and on Python 3.14 a member
+read through `zipfile` decompresses the member's whole stream (up to
+2 GiB per read) before it cuts the result to the declared size and
+checks the CRC, which the sender also controls. A member that
+understates its size therefore passes every budget and is still
+expanded: a synthetic 0.5 MB document whose main part declares a few KB
+but decompresses to 512 MiB peaked the indexer at about 1.1 GB. So the
+whole DOCX, PPTX and XLSX extraction, the pre-open budgets, XLSX's
+eager member reads and the walk included, runs in a child Python
+process (`extractors/ooxml_child.py`, started as `python -I` through
+the runner) under 1 GiB of address space and 30 s of CPU, killed after
+45 s; the dispatcher's ZIP guard and OLE2 check, which read only the
+central directory and the first bytes, stay in the indexer. The child
+writes one header line and then the text: the names of the walk
+budgets that cut the text, which the parent checks against the
+format's own list and logs through the extractor-cap WARNING as
+before, or `!` and the type name of the exception the extraction
+raised. A package-budget or eager-part-budget rejection is raised again
+in the parent and recorded `unsupported` as before; any other type
+name (`BadZipFile`, `DocxRelationshipChainError`, ...) is recorded
+`failed` under that name, as it was in process. Output with no header
+line, an unknown cap or type name, text after a type name, bytes that
+are not UTF-8, or output cut at the 48 MiB byte cap is `failed`
+(`OoxmlOutputError`), never cached as text. A `MemoryError` or
+`RecursionError` in the child is the child's limit, not host pressure:
+it is recorded `failed` by type, where in process the dispatcher
+re-raised it; lxml reports a failed allocation as `XMLSyntaxError`, so
+the address-space limit can also surface under that name. A timeout or
+a death by signal (including the CPU limit) is `ToolTimeoutError` or
+`ToolCrashError`, as for the legacy formats, and a failure's WARNING
+is rate limited.
+
+The limits were measured plainly in the indexer image (child peak RSS
+and time): one-paragraph, one-slide and one-cell files take 44 to
+48 MB and 0.2 s, nearly all of it starting the child and importing the
+library (about 0.2 s per extraction, against about 0.08 s if the image
+kept compiled bytecode); the largest benign cases were a synthetic
+1,500-page report (220 MB, 0.7 s), 150,000 empty text boxes on one
+slide (273 MB, 1.6 s), 1,000,000 spreadsheet cells (91 MB, 5.4 s), and
+an XLSX shared-string table and stylesheet together just under the
+eager-part budget (508 MB, 10.3 s). The 512 MiB understated member
+(about 1,070 MB in any of the three formats) and 47 MiB of stored
+element-dense XML inside the DOCX or PPTX package budgets (about
+1,140 MB) fail under the limit. The extractor versions are not bumped
+(`docx@7`, `pptx@3`, `xlsx@6`): a file inside the limits returns the
+same text and status as before, and failures keep their type names.
 
 Binary payloads labelled as text: the text extractor decodes whatever
 it is given, so a PDF, ZIP (or OOXML), OLE2, PNG, JPEG or GIF file sent
@@ -1318,7 +1370,9 @@ opens it, so a crafted `.docx` chaining a few thousand related parts
 re-raises as host pressure. The DOCX extractor catches it around the
 package open only and records the attachment `failed` with
 `DocxRelationshipChainError` (#945); a `RecursionError` anywhere else
-still escapes as host pressure. No row was cached for such a payload
+keeps its own type, and since the extraction runs in a child process
+(#1040, above) it is recorded `failed` by that type rather than
+re-raised as host pressure. No row was cached for such a payload
 before, so the DOCX version is not bumped; a message that was
 dead-lettered by the old behaviour is picked up again by
 `make requeue-dead`.
