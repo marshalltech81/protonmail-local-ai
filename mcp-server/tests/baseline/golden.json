@@ -57,7 +57,8 @@
     {"id": "attach-char-capped", "query": "Corncrake Wheelers towpath viaduct", "required_evidence": [["t89"]], "max_rank": 1, "evidence": "Corncrake Wheelers", "_comment": "#907: a text attachment cut at the build's lowered extracted-characters cap; the query matches text before the cut."},
     {"id": "attach-image-ocr", "query": "kiln yard chalkboard", "required_evidence": [["t90"]], "max_rank": 1, "_comment": "#908: a PNG read by the image OCR extractor; the query uses the body's words, never the OCR'd ones, so a Tesseract difference cannot move the rank (test_ocr_shapes_baseline.py checks the OCR'd text)."},
     {"id": "attach-pdf-ocr-capped", "query": "Dunlin rowing scan", "required_evidence": [["t91"]], "max_rank": 1, "_comment": "#908: a scanned PDF with one page more than the build's lowered OCR page cap; the query uses the body's words, never the OCR'd ones."},
-    {"id": "attach-tiff-ocr-capped", "query": "headland fax pages", "required_evidence": [["t92"]], "max_rank": 1, "_comment": "#1113: a multipage TIFF with one frame more than the build's lowered OCR page cap; the query uses the body's words, never the OCR'd ones."}
+    {"id": "attach-tiff-ocr-capped", "query": "headland fax pages", "required_evidence": [["t92"]], "max_rank": 1, "_comment": "#1113: a multipage TIFF with one frame more than the build's lowered OCR page cap; the query uses the body's words, never the OCR'd ones."},
+    {"id": "conflict-attach-body", "query": "Holloway allotment wall", "required_evidence": [["t93"]], "max_rank": 1, "evidence": "$3,840", "_comment": "#910: the body gives one sum and its attachment another; the evidence is the attachment's."}
   ],
   "enumerate": [
     {"id": "sender", "args": {"sender": "adjuster@keystoneins.example"}, "expect": ["t10.1", "t10.3"]},

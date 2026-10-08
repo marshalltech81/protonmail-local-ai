@@ -160,6 +160,19 @@ can collide an OCR'd word with a vector-only golden query (``TALLY``
 scored 0.21 against ``hatchbak`` and put t92 first for it, #1113), so
 a new OCR'd word is checked against those queries before it is chosen.
 
+Threads 93-95 back three attachment-layer answer-evaluation cases
+(#910), dated March 2026 so the pre-2026 enumerations are undisturbed.
+In t93 the body gives the stonework bill as $3,480 and its attached
+sheet as $3,840, and nothing later settles it; in t94 a second message
+attaches a revised sheet under the first one's filename, with a lower
+amount and a body line saying it replaces the first; in t95 the INBOX
+body gives the lido locker and membership, and a reply filed in Trash
+attaches last year's list with another locker and price. The amounts
+on the sheets, the revised sheet's values and the stale list's values
+are in the attachments only. Their words avoid every golden search
+query's content words, the reserved words above and every
+``unanswerable`` question's ``absent_terms``.
+
 Thread IDs are the root Message-IDs: ``t<NN>.1@baseline.example``.
 """
 
@@ -2437,6 +2450,118 @@ THREADS.update(
                         OCR_CAPPED_TIFF_FILENAME,
                         "image/tiff",
                         (_FIXTURES / OCR_CAPPED_TIFF_FILENAME).read_bytes(),
+                    ),
+                ),
+            ),
+        ],
+    }
+)
+
+
+TAMSIN = "Tamsin Holloway <tamsin@hollowaystonework.example>"
+OTTILIE = "Ottilie Brack <ottilie@kestrelupholstery.example>"
+IMOGEN = "Imogen Sallow <imogen@fernhilllido.example>"
+BARNABY = "Barnaby Quist <barnaby@fernhilllido.example>"
+
+THREADS.update(
+    {
+        # The body and its attachment give different sums, and nothing
+        # later settles which is right (#910).
+        93: [
+            Msg(
+                "INBOX",
+                "Mon, 02 Mar 2026 10:00:00 +0000",
+                TAMSIN,
+                ME,
+                "Dry-stone wall at the allotment",
+                "Hi Sam,\n\nThe bill for rebuilding the dry-stone wall at your "
+                "allotment comes to $3,480, as we agreed on site. The itemised "
+                "sheet is attached.\n\nTamsin Holloway\nHolloway Stonework",
+                attachments=(
+                    Attachment(
+                        "wall-bill.txt",
+                        "text/plain",
+                        "HOLLOWAY STONEWORK\n"
+                        "Dry-stone wall rebuild, west side of the allotment\n"
+                        "Walling stone, four tonnes: $1,640\n"
+                        "Labour, three days: $2,200\n"
+                        "AMOUNT: $3,840\n",
+                    ),
+                ),
+            ),
+        ],
+        # A revised attachment under the same filename replaces the
+        # first one later in the thread (#910).
+        94: [
+            Msg(
+                "INBOX",
+                "Tue, 03 Mar 2026 15:30:00 +0000",
+                OTTILIE,
+                ME,
+                "Wingback armchair",
+                "Hi Sam,\n\nThe sheet for re-covering your wingback armchair in olive "
+                "velvet is attached.\n\nOttilie\nKestrel Upholstery",
+                attachments=(
+                    Attachment(
+                        "armchair-sheet.txt",
+                        "text/plain",
+                        "KESTREL UPHOLSTERY\n"
+                        "Wingback armchair, re-covered in olive velvet\n"
+                        "Velvet, nine metres: $540\n"
+                        "Workmanship: $720\n"
+                        "AMOUNT: $1,260\n",
+                    ),
+                ),
+            ),
+            Msg(
+                "INBOX",
+                "Thu, 05 Mar 2026 09:10:00 +0000",
+                OTTILIE,
+                ME,
+                "Re: Wingback armchair",
+                "Hi Sam,\n\nThis sheet replaces the first one: I had measured the "
+                "armchair for nine metres of velvet, but seven will do.\n\nOttilie",
+                attachments=(
+                    Attachment(
+                        "armchair-sheet.txt",
+                        "text/plain",
+                        "KESTREL UPHOLSTERY\n"
+                        "Wingback armchair, re-covered in olive velvet\n"
+                        "Velvet, seven metres: $420\n"
+                        "Workmanship: $720\n"
+                        "AMOUNT: $1,140\n",
+                    ),
+                ),
+            ),
+        ],
+        # Trash decoy at the attachment layer: the INBOX body holds the
+        # answer, and a reply filed in Trash attaches a stale list (#910).
+        95: [
+            Msg(
+                "INBOX",
+                "Mon, 09 Mar 2026 08:00:00 +0000",
+                IMOGEN,
+                ME,
+                "Your Fernhill Lido locker",
+                "Hi Sam,\n\nWelcome to Fernhill Lido. Your locker is K-27, by the "
+                "sauna, and annual membership is $95.\n\nImogen Sallow\nFernhill Lido",
+            ),
+            Msg(
+                "Trash",
+                "Tue, 10 Mar 2026 12:20:00 +0000",
+                BARNABY,
+                ME,
+                "Re: Your Fernhill Lido locker",
+                "Sam, Imogen,\n\nI found the locker sheet I kept from last year; it "
+                "is attached.\n\nBarnaby",
+                cc=IMOGEN,
+                attachments=(
+                    Attachment(
+                        "lido-lockers.txt",
+                        "text/plain",
+                        "FERNHILL LIDO LOCKERS, LAST YEAR\n"
+                        "Sam Rivera: locker M-58\n"
+                        "Annual membership: $140\n",
                     ),
                 ),
             ),
