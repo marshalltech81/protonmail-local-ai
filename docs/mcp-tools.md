@@ -1114,6 +1114,37 @@ Exhausting a keyword query does not establish exhaustive coverage of a
 topic. Consider alternate wording, read candidate messages, and keep the
 counting unit explicit (messages, threads, or distinct bills/items).
 
+**Multi-lane enumeration.** A call takes one AND of filters, so a
+broad question ("every message about a committee's finances and
+audits") is answered with several exact lanes and their union (#992):
+
+1. Lanes: one `subject` lane per subject term, one `text` lane per body
+   word set, one `participant` (or `sender`) lane per person or domain
+   involved. Every lane carries the same `folder`, date bounds and
+   other predicates the question has, so the union has one scope.
+   Count, disclose and page each lane as the paragraphs above describe.
+2. Union the rows by `claimant_id`, keeping the lane or lanes that
+   found each row.
+3. Report every row in one of three buckets, with its lane: relevant,
+   dropped, or unresolved. Any reading done to sort them follows the
+   disclosure and smallest-sample paragraphs above.
+
+`get_message` and `get_thread` return no attachment text; attachment
+passages come only through [`get_evidence`](#get_evidence), which
+ranks and caps a whole thread's passages. A missing passage therefore
+does not resolve a row, and a row with attachments whose body is not
+relevant stays unresolved, never dropped.
+
+The recipe supports this claim: the rows the lanes returned during the
+run, within their shared scope, subject to the snapshot caveat above.
+It does not show coverage of the topic: a message that uses none of
+the lane terms or participants, or mentions the topic only in an
+attachment (`text` searches bodies only), is not found, and nothing
+shows it is missing (see the keyword-coverage paragraph above and
+#776). Report the lanes, their counts, the union size and the three
+buckets, not "all messages about X". The bounded Boolean filter form
+(#1087) will replace the multi-call shape.
+
 For outstanding-item questions, look for completion, corrections and
 reopening across threads and senders. A sent request or delivered advice
 does not prove the action was completed. State the scope and disclose
