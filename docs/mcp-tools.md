@@ -558,6 +558,17 @@ participants, date range, folder, and a short snippet. To read the
 contents of a returned thread, follow up with `get_thread` or
 `summarize_thread` using the result's `Thread ID`.
 
+For outstanding-item questions, the description gives the same
+verification guidance as [`query_messages`](#query_messages): look for
+completion, corrections, reopening and later guidance across threads
+and senders before calling an item open or closed. A message in Sent
+supports only that it was transmitted. Only a message that explicitly
+acknowledges that transmission supports receipt; a later reply in the
+same thread does not, as it may answer something else. Neither
+establishes that the action was carried out; nor does a sent request or
+delivered advice. Label each finding confirmed, proposed or unverified,
+with message references.
+
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `query` | string | required | Natural language or keyword query |
@@ -1376,9 +1387,17 @@ shows it is missing (see the keyword-coverage paragraph above and
 buckets, not "all messages about X". The bounded Boolean filter form
 (#1087) will replace the multi-call shape.
 
-For outstanding-item questions, look for completion, corrections and
-reopening across threads and senders. A sent request or delivered advice
-does not prove the action was completed. State the scope and disclose
+For outstanding-item questions, look for completion, corrections,
+reopening and later guidance across threads and senders before calling
+an item open or closed. A message in Sent supports only that it was
+transmitted. Only a message that explicitly acknowledges that
+transmission supports receipt; a later reply in the same thread does
+not, as it may answer something else. Neither establishes that the
+action was carried out; nor does a sent request or delivered advice.
+Label each finding confirmed, proposed or unverified, with message
+references. The `search_emails` description carries the same guidance
+([#1237](https://github.com/marshalltech81/protonmail-local-ai/issues/1237)).
+State the scope and disclose
 unread pages, missing indexed bodies and unavailable attachment text
 instead of claiming full coverage.
 
