@@ -2799,20 +2799,26 @@ class TestPdfDigitalExtractor:
         before rendering and does not pass it the timeout. A ``pdfinfo``
         that stalls on a crafted PDF must stop at the OCR timeout, the
         way a hung render does. Runs the real pdf2image against a fake
-        Poppler whose ``pdfinfo`` sleeps."""
+        Poppler whose ``pdfinfo`` sleeps.
+
+        The work done is read from the processes pdf2image starts, not
+        from a marker the fake writes: under CPU load the timeout can
+        kill the fake before its shell writes anything (#1148)."""
         import os
+        import signal
+        import subprocess
         import tempfile
         import time
 
         import pdf2image
+        import pdf2image.pdf2image
         from pdf2image.exceptions import PDFPopplerTimeoutError
         from src.extractors import pdf
 
         bindir = tmp_path / "bin"
         bindir.mkdir()
-        started_marker = tmp_path / "pdfinfo-runs"
         scripts = {
-            "pdfinfo": f"#!/bin/sh\necho run >> '{started_marker}'\nexec sleep 8\n",
+            "pdfinfo": "#!/bin/sh\nexec sleep 30\n",
             "pdftoppm": "#!/bin/sh\necho 'pdftoppm version 24.02.0' >&2\nexit 1\n",
         }
         for name, body in scripts.items():
@@ -2834,14 +2840,27 @@ class TestPdfDigitalExtractor:
             return real_pdfinfo(payload, **kwargs)
 
         monkeypatch.setattr("pdf2image.pdfinfo_from_bytes", spy_pdfinfo)
+        procs: list[subprocess.Popen[bytes]] = []
+        real_popen = pdf2image.pdf2image.Popen
+
+        def recording_popen(command, **kwargs):
+            proc = real_popen(command, **kwargs)
+            procs.append(proc)
+            return proc
+
+        monkeypatch.setattr(pdf2image.pdf2image, "Popen", recording_popen)
 
         started = time.monotonic()
         with pytest.raises(PDFPopplerTimeoutError):
             pdf._extract_ocr(self._blank_pdf(612, 792), pages=[0], ocr_timeout_seconds=1)
-        assert time.monotonic() - started < 5
-        # The page count ran once, under the OCR timeout.
+        # Generous: the fake sleeps 30 s, and the kill below is the proof.
+        assert time.monotonic() - started < 20
+        # The page count ran once, under the OCR timeout, and was killed
+        # rather than left to finish its stall.
         assert timeouts == [1]
-        assert started_marker.read_text().splitlines() == ["run"]
+        pdfinfo_runs = [p for p in procs if os.path.basename(p.args[0]) == "pdfinfo"]
+        assert len(pdfinfo_runs) == 1
+        assert pdfinfo_runs[0].returncode == -signal.SIGKILL
 
     def test_unreadable_page_sizes_fail_before_rendering(self, monkeypatch, tmp_path):
         """If the page sizes cannot be read the raster size is unknown, so
