@@ -1311,11 +1311,19 @@ Queue and maintenance (all INFO unless noted):
   (counted apart from the attachment WARNINGs, so they never make the
   attachments line a WARNING). `queue heartbeat failed: <type>`
   (WARNING) if the counts could not be read.
-- `re-queued <n> message(s) whose attachments were extracted by an
-  older extractor version (...); skipped <n> dead-lettered (run make
-  requeue-dead to refresh them).`, at startup after an extractor
-  change. WARNING when any dead-lettered message was skipped: those
-  keep their old attachment text until you run `make requeue-dead`.
+- `re-queued <n> message(s) (<n> for a missing text-completeness
+  record) whose attachments were extracted by an older extractor
+  version (...); skipped <n> dead-lettered (run make requeue-dead to
+  refresh them).`, at startup after an extractor change, or after OCR is
+  turned on with OCR rows cached before schema v6. WARNING when any
+  dead-lettered message was skipped: those keep their old attachment
+  text until you run `make requeue-dead`.
+- `cleared attachment text completeness on <n> occurrence(s) extracted
+  by an older extractor version (...); each is unknown until its
+  message is processed again.`, at startup after an extractor change
+  (#1242): those attachments' text no longer counts as complete until
+  the re-queued messages are indexed again (dead-lettered ones after
+  `make requeue-dead`).
 - `maintenance pass=rescan ms=<ms> seen=<n> queued=<n>
   skipped_dead=<n>`, after each periodic Maildir rescan, even when it
   queued nothing. `seen` is message files walked, `queued` the ones

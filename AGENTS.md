@@ -248,6 +248,9 @@ Do not make any of the following changes unless the repository owner explicitly 
   extraction cache is otherwise served forever, so the fix would never
   reach mail indexed before it; with the bump, stale rows re-extract and
   the startup sweep re-queues the messages carrying them once.
+  It also clears `attachments.text_complete` on the occurrences the
+  older version wrote, dead-lettered ones included, until their
+  messages are indexed again (#1242).
   Dead-lettered messages are skipped and keep their stale chunks until
   an operator runs `make requeue-dead`. A bump also re-runs that
   module on every cached payload the startup sweep considers (the

@@ -5449,3 +5449,194 @@ class TestParticipantNames:
         # address for the names.
         assert calls["n"] == budget.parse_calls + (kept - 1) + 2 * kept
         assert elapsed < 30
+
+
+# #1242: the container attachments left unserialized, per cap shape (none
+# for a shape that drops no attachment payload). An emptied payload is
+# not the attachment's, so its extracted text never counts as complete.
+_PAYLOAD_LOSS = {
+    "attached_depth": 1,
+    "attached_fields": 1,
+    "attached_depth_decoded": 1,
+    # The 19 nested containers kept empty by design (only the top one is
+    # serialized), plus the one the depth cap stopped.
+    "attached_depth_decode_chain": 20,
+    "transport_decode_base64": 1,
+    "transport_decode_8bit": 1,
+    "decoded_bytes": 1,
+    "container_serialize": 1,
+    "container_serialize_decoded": 1,
+}
+
+
+@pytest.mark.parametrize("shape", sorted(_CAP_SHAPES))
+def test_cap_shape_marks_exactly_the_emptied_payloads(tmp_path, monkeypatch, shape):
+    msg, _ = _parse_cap_shape(tmp_path, monkeypatch, shape)
+    lost = [a for a in msg.attachments if not a.payload_complete]
+    assert len(lost) == _PAYLOAD_LOSS.get(shape, 0)
+    assert all(a.payload == b"" for a in lost)
+
+
+def test_an_attachment_with_its_payload_is_complete(tmp_path):
+    path = tmp_path / "plain.eml"
+    path.write_bytes(_with_attachment(b"Content-Type: text/plain\r\n", b"SYNTHETIC_TEXT"))
+    msg = parse_email(path)
+    assert msg is not None
+    assert [(a.payload, a.payload_complete) for a in msg.attachments] == [(b"SYNTHETIC_TEXT", True)]
+
+
+def test_a_nested_container_left_unserialized_is_incomplete(tmp_path):
+    """Review round 1 on #1286: a container inside an attachment keeps
+    the empty payload by design (only the outermost is serialized), with
+    no cap counted. Under an extractable label (``.txt``) its empty bytes
+    would read as a complete empty text, so it is marked incomplete; the
+    outer container, serialized, is complete."""
+    inner = (
+        b"From: a@example.test\r\n"
+        b'Content-Type: multipart/mixed; boundary="i"\r\n\r\n'
+        b"--i\r\nContent-Type: text/plain\r\n\r\nINNER_BODY\r\n"
+        b"--i\r\nContent-Type: message/rfc822\r\n" + _TXT_FILENAME + b"\r\n"
+        b"From: b@example.test\r\n\r\nSYNTHETIC_TEXT_MARKER\r\n"
+        b"--i--\r\n"
+    )
+    path = tmp_path / "nested.eml"
+    path.write_bytes(_with_attachment(b"Content-Type: message/rfc822\r\n", inner))
+    msg = parse_email(path)
+    assert msg is not None
+    assert [(a.payload != b"", a.payload_complete) for a in msg.attachments] == [
+        (True, True),
+        (False, False),
+    ]
+    assert msg.parse_caps == {}
+
+
+@pytest.mark.parametrize(
+    "body, payload, complete",
+    [
+        # No base64 characters at all: nothing decodes.
+        (b"!!!!", b"", False),
+        # Invalid characters skipped: a partial decode.
+        (b"QUJD!!!!REVG", b"ABCDEF", False),
+        # A truncated quantum: the last bytes are lost.
+        (b"QUJDR", None, False),
+        # Missing padding only: lossless.
+        (b"QUJDREVGSA", b"ABCDEFH", True),
+        # A valid empty payload.
+        (b"", b"", True),
+    ],
+    ids=["no_base64", "invalid_chars", "bad_length", "padding_only", "valid_empty"],
+)
+def test_a_base64_decode_defect_marks_the_payload_incomplete(tmp_path, body, payload, complete):
+    """Review round 2 on #1286: the stdlib decodes malformed base64
+    leniently and records a defect on the part; a payload decoded with an
+    invalid-character or invalid-length defect is not the attachment's
+    bytes, so it is marked incomplete. A padding defect alone loses
+    nothing."""
+    path = tmp_path / "b64.eml"
+    path.write_bytes(
+        _with_attachment(
+            b"Content-Type: text/plain\r\nContent-Transfer-Encoding: base64\r\n",
+            body,
+            _TXT_FILENAME,
+        )
+    )
+    msg = parse_email(path)
+    assert msg is not None
+    [attachment] = msg.attachments
+    if payload is not None:
+        assert attachment.payload == payload
+    assert attachment.payload_complete is complete
+
+
+def test_a_defect_on_a_serialized_container_does_not_matter(tmp_path):
+    """Only a leaf's own decode defects count: a serialized container's
+    payload is its body, whatever defects its subparts carry."""
+    inner = (
+        b"From: a@example.test\r\n"
+        b"Content-Type: text/plain\r\nContent-Transfer-Encoding: base64\r\n\r\n!!!!\r\n"
+    )
+    path = tmp_path / "container.eml"
+    path.write_bytes(_with_attachment(b"Content-Type: message/rfc822\r\n", inner))
+    msg = parse_email(path)
+    assert msg is not None
+    assert [(a.payload != b"", a.payload_complete) for a in msg.attachments] == [(True, True)]
+
+
+class TestContainerTransportDecodeLoss:
+    """Review round 4 on #1286: a base64 attached email decoded leniently
+    (``_decode_transport_form`` keeps today's decoder and bytes) is checked
+    once more through the stdlib leaf decoder, as a diagnostic only; an
+    invalid-character or invalid-length defect marks the container's
+    payload incomplete. Quoted-printable is not checked (#1288)."""
+
+    _INNER = b"From: a@example.test\r\nSubject: s\r\n\r\nSYNTHETIC_TEXT_MARKER body text\r\n"
+
+    def _parse(self, tmp_path, monkeypatch, headers: bytes, body: bytes):
+        from src import parser as parser_module
+
+        calls: list[int] = []
+        real = parser_module._base64_transport_lost
+
+        def counting(data):
+            calls.append(len(data))
+            return real(data)
+
+        monkeypatch.setattr(parser_module, "_base64_transport_lost", counting)
+        path = tmp_path / "t.eml"
+        path.write_bytes(_with_attachment(headers, body))
+        msg = parse_email(path)
+        assert msg is not None
+        return msg, calls
+
+    def test_a_clean_base64_attached_email_is_complete(self, tmp_path, monkeypatch):
+        msg, calls = self._parse(
+            tmp_path, monkeypatch, _BASE64_RFC822, base64.encodebytes(self._INNER)
+        )
+        [attachment] = msg.attachments
+        assert attachment.payload and attachment.payload_complete is True
+        assert len(calls) == 1
+
+    def test_replaced_non_alphabet_characters_make_it_incomplete(self, tmp_path, monkeypatch):
+        encoded = base64.encodebytes(self._INNER)
+        lossy = encoded[:8] + b"!!!!" + encoded[12:]
+        msg, calls = self._parse(tmp_path, monkeypatch, _BASE64_RFC822, lossy)
+        [attachment] = msg.attachments
+        # The returned bytes are today's lenient decode, unchanged.
+        assert attachment.payload != b""
+        assert attachment.payload_complete is False
+        assert len(calls) == 1
+        assert msg.parse_caps == {}
+
+    def test_an_undecodable_transport_keeps_todays_behaviour(self, tmp_path, monkeypatch):
+        msg, calls = self._parse(tmp_path, monkeypatch, _BASE64_RFC822, b"A")
+        [attachment] = msg.attachments
+        assert (attachment.payload, attachment.payload_complete) == (b"", False)
+        assert msg.parse_caps == {"transport_decode": 1}
+        # The diagnostic runs only on a transport that decoded.
+        assert calls == []
+
+    def test_quoted_printable_is_not_checked(self, tmp_path, monkeypatch):
+        import quopri
+
+        msg, calls = self._parse(
+            tmp_path,
+            monkeypatch,
+            b"Content-Type: message/rfc822\r\nContent-Transfer-Encoding: quoted-printable\r\n",
+            quopri.encodestring(self._INNER),
+        )
+        [attachment] = msg.attachments
+        assert attachment.payload and attachment.payload_complete is True
+        assert calls == []
+
+    def test_the_check_runs_behind_the_decodable_budget(self, tmp_path, monkeypatch):
+        """Over ``budget.decodable`` the transport is never decoded, so
+        the diagnostic does not run either."""
+        from src import parser as parser_module
+
+        budget = parser_module._SerializationBudget
+        monkeypatch.setattr(parser_module, "_SerializationBudget", lambda: budget(decodable=10))
+        msg, calls = self._parse(
+            tmp_path, monkeypatch, _BASE64_RFC822, base64.encodebytes(self._INNER)
+        )
+        assert msg.parse_caps == {"decoded_bytes": 1}
+        assert calls == []

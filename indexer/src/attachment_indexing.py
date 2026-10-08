@@ -383,6 +383,49 @@ class AttachmentWritePlan:
     # The scanned PDF pages the OCR cap left unread in that result, or
     # ``None`` when unknown (#891).
     ocr_pages_skipped: int | None = None
+    # Whether the occurrence's text is complete (``occurrence_text_complete``)
+    # and the extractor stamp of the result that applied, written with
+    # its chunks (#1242).
+    text_complete: bool | None = None
+    text_extractor: str | None = None
+
+
+def occurrence_text_complete(
+    *,
+    status: str,
+    extractor: str | None,
+    extraction_complete: bool | None,
+    payload_complete: bool,
+) -> bool | None:
+    """Whether an occurrence's indexed text is all of its text (#1242).
+
+    ``None`` (not assessed) when the result came from an older version of
+    its extractor (``EXTRACTOR_VERSIONS``; the startup sweep clears such
+    occurrences, so publishing one does not restore them), or when the
+    cached result carries no record (cached before schema v6). ``False``
+    for a status that never certifies absence (failed, unsupported, too
+    large, OCR disabled) and for a payload a parse cap emptied. Otherwise
+    the result's own ``text_complete``."""
+    if is_stale_extractor(extractor):
+        return None
+    if status not in {STATUS_SUCCESS, STATUS_EMPTY} or not payload_complete:
+        return False
+    return extraction_complete
+
+
+def completeness_unrecorded(
+    status: str, extractor: str | None, text_complete: object, *, ocr_enabled: bool
+) -> bool:
+    """Whether a cached result is refreshed for want of a completeness
+    record (#1285): a ``success`` or ``empty`` row with none (cached
+    before schema v6). A fresh result always records one, so a refreshed
+    row is served from then on. An ``-ocr`` row is kept while OCR is off,
+    as ``extractors.stale_extractor_module`` keeps a stale one: a refresh
+    could only replace its text with "OCR disabled". The startup sweep
+    re-queues by the same predicate."""
+    if text_complete is not None or status not in {STATUS_SUCCESS, STATUS_EMPTY}:
+        return False
+    return ocr_enabled or not (extractor or "").partition("@")[0].endswith("-ocr")
 
 
 def _resolve_extracted_text(
@@ -397,12 +440,16 @@ def _resolve_extracted_text(
     max_pdf_pages: int | None = None,
     batch_extractions: dict[tuple[str, str], ExtractionResult] | None = None,
     on_progress: Callable[[], None] | None = None,
-) -> tuple[str | None, str, ExtractionResult | None, str | None, bool, int | None]:
+) -> tuple[
+    str | None, str, ExtractionResult | None, str | None, bool, int | None, str | None, bool | None
+]:
     """Return ``(text, status, extraction_to_persist, error, cached,
-    ocr_pages_skipped)``: ``error`` is the extraction error behind
-    ``status``, ``cached`` whether the result was served without
-    extracting and ``ocr_pages_skipped`` the result's OCR-cap count
-    (``None`` when unknown), for the outcome counts.
+    ocr_pages_skipped, extractor, text_complete)``: ``error`` is the
+    extraction error behind ``status``, ``cached`` whether the result was
+    served without extracting and ``ocr_pages_skipped`` the result's
+    OCR-cap count (``None`` when unknown), for the outcome counts;
+    ``extractor`` is the result's stamp and ``text_complete`` whether it
+    lost no text (``None`` when unknown, #1242).
 
     A successful cache hit short-circuits and returns the stored text
     with ``extraction_to_persist=None`` so the apply phase does not
@@ -426,15 +473,31 @@ def _resolve_extracted_text(
     pending = batch_extractions.get(key) if batch_extractions is not None else None
     if pending is not None:
         text = pending.text if pending.status == STATUS_SUCCESS else None
-        return text, pending.status, pending, pending.error, True, pending.ocr_pages_skipped
+        return (
+            text,
+            pending.status,
+            pending,
+            pending.error,
+            True,
+            pending.ocr_pages_skipped,
+            pending.extractor,
+            pending.text_complete,
+        )
 
     cached = db.get_attachment_extraction(attachment.content_hash, module)
     # A row written by an older version of a since-fixed extractor would
     # otherwise be served forever: it is re-extracted, and only by an
     # occurrence that selects its module.
+    # A row with no completeness record is re-extracted once (#1285).
     if (
         cached is not None
         and not is_stale_extractor(cached["extractor"], ocr_enabled=ocr_enabled)
+        and not completeness_unrecorded(
+            cached["extraction_status"],
+            cached["extractor"],
+            cached["text_complete"],
+            ocr_enabled=ocr_enabled,
+        )
         and _cache_hit_short_circuits(cached, attachment, module, ocr_enabled, max_bytes)
     ):
         # Successful hits return the stored text; non-success hits
@@ -449,6 +512,8 @@ def _resolve_extracted_text(
             cached["extraction_error"],
             True,
             cached["ocr_pages_skipped"],
+            cached["extractor"],
+            None if cached["text_complete"] is None else bool(cached["text_complete"]),
         )
 
     result = extract_attachment(
@@ -466,7 +531,16 @@ def _resolve_extracted_text(
     if batch_extractions is not None:
         batch_extractions[key] = result
     text = result.text if result.status == STATUS_SUCCESS else None
-    return text, result.status, result, result.error, False, result.ocr_pages_skipped
+    return (
+        text,
+        result.status,
+        result,
+        result.error,
+        False,
+        result.ocr_pages_skipped,
+        result.extractor,
+        result.text_complete,
+    )
 
 
 def prepare_attachment_writes(
@@ -523,6 +597,8 @@ def prepare_attachment_writes(
         extraction_error,
         cached,
         ocr_pages_skipped,
+        extractor,
+        extraction_complete,
     ) = _resolve_extracted_text(
         attachment=attachment,
         db=db,
@@ -534,6 +610,12 @@ def prepare_attachment_writes(
         max_pdf_pages=max_pdf_pages,
         batch_extractions=batch_extractions,
         on_progress=on_progress,
+    )
+    text_complete = occurrence_text_complete(
+        status=status,
+        extractor=extractor,
+        extraction_complete=extraction_complete,
+        payload_complete=attachment.payload_complete,
     )
 
     if status != STATUS_SUCCESS or not text:
@@ -551,6 +633,8 @@ def prepare_attachment_writes(
             extraction_error=extraction_error,
             cached=cached,
             ocr_pages_skipped=ocr_pages_skipped,
+            text_complete=text_complete,
+            text_extractor=extractor,
         )
 
     # Chunk the extracted text. The chunker takes
@@ -575,6 +659,8 @@ def prepare_attachment_writes(
         extraction_error=extraction_error,
         cached=cached,
         ocr_pages_skipped=ocr_pages_skipped,
+        text_complete=text_complete,
+        text_extractor=extractor,
     )
 
 
@@ -628,7 +714,12 @@ def apply_attachment_writes(
             extracted_text=result.text,
             extraction_error=result.error,
             ocr_pages_skipped=result.ocr_pages_skipped,
+            text_complete=result.text_complete,
         )
+    # Whether the chunks written below hold all of this occurrence's
+    # text (#1242): in the caller's transaction, so it commits and rolls
+    # back with them.
+    db.set_attachment_text_complete(plan.occurrence_id, plan.text_complete, plan.text_extractor)
 
     if not plan.chunks or plan.status != STATUS_SUCCESS:
         # No usable text now: drop chunks an earlier (since-superseded)
