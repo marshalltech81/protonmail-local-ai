@@ -34,6 +34,7 @@ from .extractors import (
     SCANNED_PDF_OCR_DISABLED_ERROR,
 )
 from .maildir import message_state
+from .queue import REPARSE_ENQUEUE_SQL
 from .threader import (
     FTS_SUBJECT_SCAN_CHARS,
     FTS_SUBJECT_SCAN_ROWS,
@@ -2169,6 +2170,14 @@ class Database:
         self._conn.commit()
 
     @_synchronized
+    def queue_enqueue_reparse(self) -> int:
+        """Run ``REPARSE_ENQUEUE_SQL`` (the statement a migration ends
+        with) and return how many jobs it queued."""
+        cur = self._conn.execute(REPARSE_ENQUEUE_SQL)
+        self._conn.commit()
+        return cur.rowcount
+
+    @_synchronized
     def queue_fetch_due_batch(self, status: str, now_iso: str, limit: int) -> list[sqlite3.Row]:
         """Return up to ``limit`` due ``status`` rows ordered by oldest-due first.
 
@@ -2393,6 +2402,7 @@ class Database:
         permission_stage: str,
         permission_deferred_error: str,
         trashed_stage: str,
+        reparse_reason: str,
     ) -> tuple[dict[str, int], str | None]:
         """Rows per heartbeat bucket and the earliest due time among due
         queued rows, in one pass over ``indexing_jobs`` (see
@@ -2408,6 +2418,7 @@ class Database:
                        ELSE 'retrying'
                    END AS bucket,
                    COUNT(*) AS n,
+                   SUM(reason = :reparse) AS reparse,
                    MIN(CASE WHEN status = 'queued' AND next_attempt_at <= :now
                             THEN next_attempt_at END) AS oldest_due
             FROM indexing_jobs
@@ -2418,9 +2429,13 @@ class Database:
                 "perm_stage": permission_stage,
                 "perm_deferred": permission_deferred_error,
                 "now": now_iso,
+                "reparse": reparse_reason,
             },
         ).fetchall()
         counts = {row["bucket"]: int(row["n"]) for row in rows}
+        # Reparse jobs across the buckets (#1078): queued ones, then dead.
+        counts["reparse"] = sum(int(row["reparse"]) for row in rows if row["bucket"] != "dead")
+        counts["reparse_dead"] = sum(int(row["reparse"]) for row in rows if row["bucket"] == "dead")
         due = [row["oldest_due"] for row in rows if row["oldest_due"] is not None]
         return counts, min(due) if due else None
 

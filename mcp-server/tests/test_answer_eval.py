@@ -127,6 +127,7 @@ def _run(
         coverage_note=coverage_note,
         threads=[SimpleNamespace(thread_id=t) for t in threads],
         citations=[SimpleNamespace(label=label) for label in cited],
+        statements=[],
         citation_problems=[SimpleNamespace(kind=k) for k in problems],
         repair_attempted=False,
     )

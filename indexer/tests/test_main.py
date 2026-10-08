@@ -6761,9 +6761,15 @@ class TestStageErrorsKeepMailOutOfLastError:
         """FTS5 query errors quote the bound query string ("no such
         column: <term>"), so sqlite text is not kept."""
         conn = sqlite3.connect(":memory:")
-        conn.execute("CREATE VIRTUAL TABLE f USING fts5(x)")
-        with pytest.raises(sqlite3.OperationalError) as info:
-            conn.execute("SELECT * FROM f WHERE f MATCH ?", (f"{SYNTHETIC_MARKER}: y",))
+        try:
+            conn.execute("CREATE VIRTUAL TABLE f USING fts5(x)")
+            with pytest.raises(sqlite3.OperationalError) as info:
+                conn.execute("SELECT * FROM f WHERE f MATCH ?", (f"{SYNTHETIC_MARKER}: y",))
+        finally:
+            # ``info`` keeps the frame (and ``conn``) alive in a reference
+            # cycle, so an unclosed connection surfaced as a ResourceWarning
+            # under whichever later test the cyclic GC ran in (#1110).
+            conn.close()
         assert SYNTHETIC_MARKER in str(info.value)
 
         assert main._stage_error(info.value) == "OperationalError"

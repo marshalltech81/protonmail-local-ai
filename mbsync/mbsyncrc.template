@@ -71,6 +71,13 @@ SubFolders Legacy
 #   with "/" written as "!", so Folders/A/B and Folders/A!B would collide
 #   (#275).
 # Expunge None — never permanently deletes on either side.
+# CopyArrivalDate yes — a new near file's mtime is the message's IMAP
+#   INTERNALDATE, the arrival time Bridge reports, instead of the time
+#   mbsync wrote the file (#1081). Read-side only: it adds INTERNALDATE
+#   to each FETCH and sets the time on the file isync writes; with Sync
+#   Pull nothing is stored on the far side. Files synced before the
+#   option keep the mtime of their first sync (docs/architecture.md,
+#   "Message time").
 Channel protonmail
 Far :protonmail-remote:
 Near :protonmail-local:
@@ -79,3 +86,4 @@ Create Near
 SyncState *
 Sync Pull
 Expunge None
+CopyArrivalDate yes

@@ -9,12 +9,13 @@ has a query vector. Two layers:
    thread, and every unanswerable case's golden question exists. A case
    cannot rest on a fact the corpus does not hold, and the references
    are checked against the corpus, not against what retrieval returns.
-2. The harness end to end. Every case runs through the real
-   ``ask_mailbox`` handler with a scripted answerer (no network) that
-   writes the case's expected values citing the supplied passages, and a
-   scripted judge. Each run must complete, its captured evidence must
-   match the prompt the model received, a case whose evidence was all
-   supplied must pass every deterministic check, and the prompt-budget
+2. The harness end to end. Every case runs through the real handler
+   of its tool (``ask_mailbox`` or ``summarize_thread``, #656) with a
+   scripted answerer (no network) that writes the case's expected
+   values citing the supplied passages, and a scripted judge. Each run
+   must complete, its captured evidence must match the prompt the model
+   received, a case whose evidence was all
+   supplied must pass every deterministic check, and each prompt-budget
    case must show its evidence omitted by prompt assembly and disclosed
    by the server's coverage note.
 """
@@ -308,6 +309,7 @@ def test_every_case_completes_and_is_judged(records: dict[str, dict]) -> None:
         assert r["status"] == "ok", cid
         assert r["judge"]["status"] == "ok", (cid, r["judge"]["error"])
         assert r["deterministic"]["checks"]["prompt_matches_capture"] == "pass", cid
+        assert r["tool"] == next(c.tool for c in CASES if c.id == cid), cid
 
 
 @pytest.mark.parametrize("case", CASES, ids=lambda c: c.id)
@@ -366,9 +368,11 @@ def test_cases_missing_evidence_are_the_known_ones(records: dict[str, dict]) -> 
     """Which cases lose evidence before the model sees it.
 
     The hashed embedder has no semantics, so one natural-language
-    question misses its thread; the prompt-budget case loses one source
-    to its budget by design. A change here is a retrieval or prompt
-    assembly change: explain it in the PR and update the sets.
+    question misses its thread; each prompt-budget case loses one source
+    to its budget by design (``ask-kayak-tight-budget`` a thread,
+    ``summarize-hall-open-points`` the message past the window, #656). A
+    change here is a retrieval or prompt assembly change: explain it in
+    the PR and update the sets.
     """
 
     def stages(det: dict) -> list[str]:
@@ -387,12 +391,19 @@ def test_cases_missing_evidence_are_the_known_ones(records: dict[str, dict]) -> 
     assert lost == {
         "ask-lisbon-dates": ["retrieval"],
         "ask-kayak-tight-budget": ["prompt_assembly"],
+        "summarize-hall-open-points": ["prompt_assembly"],
     }
 
 
 def test_prompt_budget_case_detects_omitted_evidence(records: dict[str, dict]) -> None:
     budget = [c for c in CASES if c.category == "prompt_budget"]
-    assert budget
+    assert {c.tool for c in budget} == {"ask_mailbox", "summarize_thread"}
+    # Codex round 2 on #656's PR: the summary's thread text (E1) the
+    # window cut short is captured as truncated; the newest message
+    # shown whole is not.
+    passages = _DETAILS["summarize-hall-open-points"]["passages"]
+    assert passages["E1"]["truncated"] is True, passages["E1"]
+    assert all(not p["truncated"] for label, p in passages.items() if label != "E1"), passages
     for case in budget:
         r = records[case.id]
         det = r["deterministic"]

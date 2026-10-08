@@ -1,4 +1,4 @@
-.PHONY: build build-nocache up down logs status requeue-dead clean sync sync-indexer sync-mcp test test-indexer test-mcp test-mbsync test-mbsync-tls test-mbsync-layout test-compose test-validate-env test-make-status test-image-pins test-trivy-flags trivy trivy-images restart-indexer backup-index restore-index test-index-backup baseline eval-answers eval-answers-compare typecheck typecheck-indexer typecheck-mcp init-secrets validate-env help
+.PHONY: build build-nocache up down logs status requeue-dead reparse clean sync sync-indexer sync-mcp test test-indexer test-mcp test-mbsync test-mbsync-tls test-mbsync-layout test-compose test-validate-env test-make-status test-image-pins test-trivy-flags trivy trivy-images restart-indexer backup-index restore-index test-index-backup baseline eval-answers eval-answers-compare typecheck typecheck-indexer typecheck-mcp init-secrets validate-env help
 
 # Per-checkout uv cache (#896): a cache shared between checkouts or
 # worktrees running make targets at the same time fails with missing-file
@@ -27,6 +27,7 @@ help:
 	@echo "  backup-index Copy the live index to BACKUP_DIR=<dir outside the checkout> (mode 700/600), checked with integrity_check"
 	@echo "  restore-index Replace the index with BACKUP=<file from backup-index> (asks first; stops indexer and mcp-server, restarts mcp-server once the indexer verifies the index)"
 	@echo "  requeue-dead Requeue dead-lettered indexing jobs (optional CLASS=retryable|permanent_source_failure|operator_action_required)"
+	@echo "  reparse      Queue every indexed message to be parsed again in place, without embedding calls"
 	@echo "  sync         Sync local uv environments for indexer and mcp-server"
 	@echo "  test         Run indexer, mcp-server, mbsync, Compose, validate-env, make status, index backup, image pin and Trivy flag script tests locally"
 	@echo "  typecheck    Run mypy over the indexer and mcp-server Python services"
@@ -44,7 +45,7 @@ help:
 	@echo "  trivy        Run the CI Trivy scans locally: dependency scans of indexer/ and mcp-server/, offline misconfig scan of the repository, then the image gates (needs trivy and the built images)"
 	@echo "  trivy-images Run the CI Trivy image gates of .github/workflows/docker.yml on the built indexer, mcp-server and mbsync images (needs trivy, make build)"
 	@echo "  baseline     Run the retrieval regression baseline (UPDATE=1 rewrites the rank snapshot)"
-	@echo "  eval-answers Opt-in ask_mailbox answer-quality run on the synthetic corpus (calls INFERENCE_* and JUDGE_* providers)"
+	@echo "  eval-answers Opt-in answer-quality run of the intelligence tools on the synthetic corpus (calls INFERENCE_* and JUDGE_* providers)"
 	@echo "  eval-answers-compare  Compare two answer-evaluation reports (BASELINE=... CANDIDATE=...)"
 	@echo "  clean        Remove all containers and volumes (destructive)"
 	@echo ""
@@ -210,6 +211,12 @@ status:
 requeue-dead:
 	docker exec indexer python -m src.requeue_dead $(if $(CLASS),--class $(CLASS),)
 
+# Queue every indexed message for an in-place reparse (#1078), the same
+# statement a migration that needs one ends with. For recovery; the
+# running indexer drains the jobs without embedding calls.
+reparse:
+	docker exec indexer python -m src.reparse
+
 # Copy the live index while the stack runs (#1005), for example before
 # deploying a schema change. The copy holds the whole mailbox, so it goes
 # only to BACKUP_DIR, which must be outside the checkout; see
@@ -280,7 +287,8 @@ test-trivy-flags:
 # the project: protonmail-local-ai in docker.yml, locally the directory
 # name or COMPOSE_PROJECT_NAME), and fail, naming the image, when one
 # is not built. The gates scan whatever `make build` last produced,
-# not the checkout.
+# not the checkout, and warn (without failing) when an image's
+# revision label is not the checkout's SOURCE_COMMIT (#1103).
 TRIVY ?= trivy
 TRIVY_VERSION := v0.75.0
 TRIVY_SEVERITY := CRITICAL,HIGH
@@ -301,8 +309,11 @@ endef
 # The image gates, as one shell fragment for a recipe that set
 # `status=0` before it and exits with `$$status` after it: take the
 # image names from docker compose, refuse (status 1, no scan) when an
-# image is not built, else scan each image and keep going on a
-# finding.
+# image is not built, else warn about each image whose
+# org.opencontainers.image.revision label is missing or is not
+# SOURCE_COMMIT (always when the checkout is -dirty, since its files
+# may have changed since the build), then scan each image and keep
+# going on a finding. The warning does not change the exit status.
 define trivy-image-scans
 	images=$$(docker compose config --images); \
 	if [ -z "$$images" ]; then echo "docker compose config --images listed no image" >&2; exit 1; fi; \
@@ -311,6 +322,15 @@ define trivy-image-scans
 		docker image inspect "$$image" >/dev/null 2>&1 || { echo "image $$image is not built: run make build first" >&2; built=0; }; \
 	done; \
 	if [ "$$built" -eq 1 ]; then \
+		source='$(SOURCE_COMMIT)'; \
+		for image in $$images; do \
+			revision=$$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$$image"); \
+			if [ -z "$$revision" ]; then \
+				echo "warning: image $$image has no revision label (org.opencontainers.image.revision) and the checkout is $$source; it may be stale: run make build" >&2; \
+			elif [ "$$revision" != "$$source" ] || [ "$${source%-dirty}" != "$$source" ]; then \
+				echo "warning: image $$image has revision label $$revision but the checkout is $$source (a -dirty checkout always differs); it may be stale: run make build" >&2; \
+			fi; \
+		done; \
 		for image in $$images; do \
 			"$(TRIVY)" image --scanners vuln --severity $(TRIVY_SEVERITY) --exit-code 1 --ignore-unfixed --offline-scan=false "$$image" || status=1; \
 		done; \
@@ -343,9 +363,10 @@ baseline: sync-indexer sync-mcp
 	( cd mcp-server && BASELINE_DIR="$$dir/out" uv run pytest -q --no-cov tests/baseline $(if $(filter 1,$(UPDATE)),--update-baseline) ); \
 	status=$$?; rm -rf "$$dir"; exit $$status
 
-# Opt-in answer-quality evaluation of ask_mailbox (#604): builds the
-# synthetic baseline index, runs every case through the real handler with
-# the INFERENCE_* answerer and the optional JUDGE_* judge, and writes a
+# Opt-in answer-quality evaluation of ask_mailbox and summarize_thread
+# (#604, #656): builds the synthetic baseline index,
+# runs every case through the real handler of its tool with the
+# INFERENCE_* answerer and the optional JUDGE_* judge, and writes a
 # mode-600 report under EVAL_OUT (git-ignored by default). It calls the
 # configured providers, so it is never part of `make test` or CI. EVAL_ARGS
 # passes extra flags (e.g. `--case ask-roof-total --detail <path>`);

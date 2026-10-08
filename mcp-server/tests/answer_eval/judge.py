@@ -174,12 +174,16 @@ def build_judge_prompt(
     (#820): fixed server text with counts, never model output, so it
     sits outside the tags and is labelled as the tool's. With it come the
     reference facts the budget left out or cut (``omitted_facts``,
-    ``graders.budget_omitted_facts``), the only ones the note can excuse."""
-    lines = [
-        f"Question: {case.question}",
-        "",
-        f"Expected handling: {_HANDLING_TEXT[case.expected_handling]}",
-    ]
+    ``graders.budget_omitted_facts``), the only ones the note can excuse.
+
+    An ``ask_mailbox`` case opens with its question, exactly as before
+    #656; another tool's case opens with the tool and its task
+    (``Case.question``)."""
+    if case.tool == "ask_mailbox":
+        lines = [f"Question: {case.question}"]
+    else:
+        lines = [f"Task ({case.tool}): {case.question}"]
+    lines += ["", f"Expected handling: {_HANDLING_TEXT[case.expected_handling]}"]
     if case.expected_handling == "disclose_missing":
         note = _fence(coverage_note) if coverage_note else "none"
         lines.append(f"Server coverage note (written by the tool, not the assistant): {note}")
