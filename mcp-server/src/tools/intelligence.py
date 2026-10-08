@@ -2976,9 +2976,10 @@ def register_intelligence_tools(
         Each thread gives at most six passages, ordered by similarity
         to the question, after up to two that lead: when the question
         matches one of its attachments' filename or MIME type, that
-        attachment's first passage, then the nearest passage holding a
-        word of the question. The rest of that attachment follows, then
-        its other attachments, then the body, each by similarity, and
+        attachment's first passage, then the passage holding the rarest
+        words of the question in that thread. The rest of that
+        attachment follows, then its other attachments, then the body,
+        each by similarity, and
         attachments can then fill every slot but the keyword one before
         a body message. A thread with no passages shows its indexed text.
         So passages can stop before a late resolution in a long thread:

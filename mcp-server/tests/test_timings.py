@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 import sqlite_vec
+import src.lib.sqlite as sqlite_module
 from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
 from src.lib.sqlite import Database
@@ -505,7 +506,6 @@ class TestDegradedRetrieval:
         [
             ("vec_distance_l2(v.embedding, ?)", {"degraded_evidence_chunks": 1}),
             ("SELECT a.thread_id, a.attachment_id, bm25", {"degraded_attachment_match": 1}),
-            ("CROSS JOIN message_chunks_fts", {"degraded_keyword_chunks": 1}),
         ],
     )
     def test_get_evidence_lane_failure_marks_the_timing_line(
@@ -516,6 +516,21 @@ class TestDegradedRetrieval:
         register_search_tools(fake_server, chunked_db, fake_embed)
         asyncio.run(fake_server.tools["get_evidence"](query=f"invoice {MARKER}"))
         assert _degraded(_one_line(caplog)) == expected
+        assert MARKER not in caplog.text
+
+    def test_keyword_ranking_failure_marks_the_timing_line(
+        self, caplog, monkeypatch, fake_server, fake_embed, chunked_db
+    ):
+        """The keyword ranking runs on its own scratch connection (#1246)."""
+        caplog.set_level(logging.INFO)
+
+        def scratch():
+            raise sqlite3.OperationalError(f"no such module: fts5 {MARKER}")
+
+        monkeypatch.setattr(sqlite_module, "_scratch_connection", scratch)
+        register_search_tools(fake_server, chunked_db, fake_embed)
+        asyncio.run(fake_server.tools["get_evidence"](query=f"invoice {MARKER}"))
+        assert _degraded(_one_line(caplog)) == {"degraded_keyword_chunks": 1}
         assert MARKER not in caplog.text
 
     def test_recent_chunks_failure_marks_the_timing_line(

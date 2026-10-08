@@ -595,8 +595,8 @@ def register_search_tools(
         Each thread's passages are ordered by similarity to the query,
         after up to two that lead: when the query matches one of its
         attachments' filename or MIME type, that attachment's first
-        passage, then the nearest passage holding a word of the query
-        (each chunk's selected_by says which). The rest of that
+        passage, then the passage holding the rarest words of the query
+        in that thread (each chunk's selected_by says which). The rest of that
         attachment follows, then its other attachments, then the body,
         each by similarity, and attachments can then fill every slot but the
         keyword one (six per thread mailbox-wide, limit with
