@@ -60,18 +60,26 @@ Outcomes:
 
 1. **Every attachment in a defined scope can be listed and read in
    full**, with paging and message and folder filters (#796).
+   **In progress:** every stored occurrence can be listed
+   (`query_attachments`) and its stored text read (`get_attachment`).
+   Open: whether an extraction cap cut the stored text (#1261),
+   per-occurrence text completeness (#1242) and occurrences missing from
+   a message whose attachment manifest is incomplete (#1282).
 2. **A population can be built and counted on the server** through
    bounded Boolean filters, explicit address, body, header and
    attachment predicates, grouped counts and exhaustive thread
    grouping. Incomplete parsing or extraction answers `indeterminate`,
-   never a confident "no" (#1086 first, then #1087, #823).
+   never a confident "no". **In progress:** per-message completeness
+   is done (#1086); next #1242, #1087, #823.
 3. **Source metadata stays evidence:** bounded ordered headers,
    unknown send dates kept unknown, verified arrival time, participant
    and Bcc semantics, authority from the stored sender only when it is
    safe ("Evidence model").
 4. **Retrieval supplies the passage that answers**, not only the right
    thread: the keyword-matched passage, which message matched, and later
-   corrections or closures in the thread (#858, #987, #974).
+   corrections or closures in the thread. **In progress:** the
+   keyword-matched passage is kept, ranked by in-thread word rarity
+   (#858, #1246); open #987, #974.
 5. **Structured extraction runs over a known set and discloses
    coverage:** explicitly selected messages or attachments, with
    omitted or truncated source text reported (#976, #1057).
@@ -81,8 +89,8 @@ Outcomes:
 
 Release gates:
 
-- **Corpus and privacy correctness:** no open P0 or P1 issue. The
-  bounded-work P1s (#1031, #1040) come before further predicate work.
+- **Corpus and privacy correctness:** no open P0 or P1 issue. Met on
+  2026-10-08 (#1031, #1040 fixed); #1236 is an accepted P2 risk.
 - **Measured answer quality:** written pass thresholds for evidence
   recall, supported conclusions, chronology, abstention, exhaustive
   workflows and truncation disclosure, met on the synthetic eval
@@ -113,7 +121,7 @@ containers run beside the Proton Mail Bridge app:
   persistent pin.
 - **indexer** — parses Maildir, threads, embeds through any
   OpenAI-compatible `/v1/embeddings` provider and writes SQLite
-  (schema v4, numbered migrations since the first deployment;
+  (schema v5, numbered migrations since the first deployment;
   4096-dim vectors; per-message records keyed by claimant ID). One
   durable `indexing_jobs` queue drives the initial scan, steady state
   and in-place reparses (#1078), fresh mail ahead of the backlog.
@@ -145,7 +153,7 @@ transient infrastructure failures never cause permanent source
 omission.
 
 Open follow-ups that matter most: bounded work on crafted attachments
-(#1031, #1040, both P1; #1021), threading (#752 replies indexed before
+(#1021, #1236), threading (#752 replies indexed before
 their root stay split; #756 subject fallback, owner picks an option),
 attachment formats without an extractor (#695, #923, #947, #691).
 
@@ -291,7 +299,7 @@ answers real knowledge questions, and identify why failures occur.
    citing tool. **Partly done.** Open: semantic support (#284) and
    long answers left uncited after the repair (#819).
 
-Retrieval gaps on the V1 list: #858, #974, #987.
+Retrieval gaps on the V1 list: #974, #987 (#858 done).
 
 ### Phase 4 — Deterministic knowledge scaffolding
 
@@ -326,9 +334,12 @@ schema change needs a numbered migration.
    unknown, and `query_messages` counts unknown rows as
    `indeterminate`. **Done:** the compiler (#1084), `replied` and size
    (#1085), the sender-ambiguity flag (#1144) with sender and
-   participant leaves answering unknown on it (#1153), and
-   `search_attachments` sender (#1056). **Open, in order:**
-   per-message content evaluability (#1086, before any negation); the
+   participant leaves answering unknown on it (#1153),
+   `search_attachments` sender (#1056), stored display names with
+   their completeness (#1140), and per-message completeness of body,
+   subject, addresses and attachment manifest (#1086), whose address
+   terms `query_attachments` shares. **Open, in order:** per-occurrence
+   attachment-text completeness (#1242, before any negation or #1091); the
    bounded `all` / `any` / `negate` form with a leaf cap that also
    counts `any` groups (empty groups rejected) and three-valued
    evaluation, fixed at two levels so there is no nesting to bound
@@ -457,6 +468,11 @@ can be revisited with an explicit owner decision.
   investment; it is the vendor's app on the host. The stable contract
   is Bridge → mbsync → **Maildir** (product boundary) → indexer, which
   leaves room for other mail connectors later.
+- **Attachment export or download** (decided 2026-10-08, decision 39
+  reversed). Original attachment bytes are fetched from the Proton
+  inbox; the tools serve extracted text only (`query_attachments`,
+  `get_attachment`), with no operator export command and no MCP
+  download.
 - **mypy → pyright migration** — wait for a real trigger.
 
 ## Deferred (not dead — revisit on a real trigger)
@@ -809,8 +825,26 @@ superseded entries keep their number and one line.
     re-serialised form, not the bytes as sent.
     `search_attachments` returns each hit's `attachment_occurrence_id`
     to select from. The MCP server stays read-only with no Maildir
-    access; a download route or resource needs its own decision. This
-    resolves the "attachment download support" deferral.
+    access; a download route or resource needs its own decision.
+    **Reversed by the owner the same day:** no export command is built.
+    The owner retrieves original attachments from the Proton inbox, and
+    the system serves extracted text only (see Not doing).
+
+40. **Attachments, completeness and evidence ranking (2026-10-08):**
+    DOCX, PPTX and XLSX extraction runs in a child process with memory,
+    CPU and wall-clock limits (#1040); per-message extraction launches
+    stay unbounded as an accepted P2 risk until a scheduling design
+    lands (#1236). Attachments are enumerated exhaustively by
+    `query_attachments` and their stored text read by `get_attachment`, whose
+    streaming reader reports an exact `total_chars` on every page;
+    `date_basis` for both listing tools comes with #1150 (#796).
+    Per-message completeness flags keep a leaf from answering a
+    confident "no" on incomplete data: a stored match still answers
+    yes, and finding nothing answers "can't tell" unless the relevant
+    flag says the data is complete, `authority_class` included (#1086). The keyword-matched evidence
+    passage is ranked by in-thread word rarity over a candidate-only
+    in-memory index, never a corpus-wide scan (#858, #1246). The
+    choices behind each are in the issues' decision comments.
 
 ## Notes for Agents
 
