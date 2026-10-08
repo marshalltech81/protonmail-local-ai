@@ -76,7 +76,8 @@ def _build_schema(conn: sqlite3.Connection) -> None:
             indexed_at      TEXT NOT NULL,
             seen            INTEGER NOT NULL DEFAULT 0,
             flagged         INTEGER NOT NULL DEFAULT 0,
-            replied         INTEGER NOT NULL DEFAULT 0
+            replied         INTEGER NOT NULL DEFAULT 0,
+            sender_ambiguous INTEGER CHECK (sender_ambiguous IN (0, 1))
         );
 
         -- The indexer's ``messages`` indexes, so query plans match.
@@ -495,6 +496,7 @@ def _insert_message_record(
     flagged: bool = False,
     replied: bool = False,
     size_bytes: int | None = 100,
+    sender_ambiguous: int | None = 0,
 ) -> None:
     """Insert one ``messages`` row and its ``message_participants``.
 
@@ -507,8 +509,8 @@ def _insert_message_record(
         INSERT INTO messages
             (claimant_id, message_id, thread_id, filepath, folder, subject, sent_at,
              occurred_at, in_reply_to, references_json, has_attachments, size_bytes,
-             content_hash, indexed_at, seen, flagged, replied)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             content_hash, indexed_at, seen, flagged, replied, sender_ambiguous)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             claimant_of(message_id, variant),
@@ -528,6 +530,7 @@ def _insert_message_record(
             int(seen),
             int(flagged),
             int(replied),
+            sender_ambiguous,
         ),
     )
     for role, value in participants:
@@ -594,6 +597,7 @@ def _insert_message(
     flagged: bool = False,
     replied: bool = False,
     size_bytes: int | None = 100,
+    sender_ambiguous: int | None = 0,
 ) -> None:
     """Insert one message with full per-message control.
 
@@ -658,6 +662,7 @@ def _insert_message(
         flagged=flagged,
         replied=replied,
         size_bytes=size_bytes,
+        sender_ambiguous=sender_ambiguous,
     )
     conn.commit()
     if body is not None:

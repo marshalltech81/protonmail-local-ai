@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 from email.utils import parseaddr
 from itertools import islice
 
+from .extractors import warn_rate_limited
 from .parser import NO_SUBJECT, Message
 
 # Reply / forward prefixes the subject normalizer strips before grouping.
@@ -270,18 +271,51 @@ class Threader:
         # with this normalized subject may be an unrelated "Invoice" /
         # "Follow up" from a different sender, but an older thread in the
         # same folder can still be a valid match.
+        #
+        # A message with an ambiguous sender (#1144: a repeated From, or a
+        # header scan that stopped at its field cap before a second From
+        # could be ruled out) is never matched this way, since the check
+        # trusts its author. Ambiguous messages cannot join by subject
+        # alone or supply correspondent evidence for another subject-only
+        # merge. NULL supplies no evidence; assessed messages in mixed
+        # threads can still qualify (``_subject_fallback_accepts``).
+        if message.sender_ambiguous:
+            return None
         normalized = _normalize_subject(message.subject)
         if normalized:
             candidate_ids = self.db.find_threads_by_subject(normalized, message.folder)
+            rejected = 0
             for candidate_id in candidate_ids:
-                if self._subject_fallback_accepts(message, candidate_id):
+                accepted, unproven = self._subject_fallback_accepts(message, candidate_id)
+                if accepted:
+                    self._log_provenance_rejections(rejected, message)
                     return candidate_id
+                rejected += unproven
+            self._log_provenance_rejections(rejected, message)
 
         return None
 
-    def _subject_fallback_accepts(self, message: Message, candidate_id: str) -> bool:
+    @staticmethod
+    def _log_provenance_rejections(rejected: int, message: Message) -> None:
+        """One INFO line per message whose subject fallback turned down
+        candidates only because their correspondents come from no
+        assessed message (#1144): the count and the path, rate limited."""
+        if rejected:
+            warn_rate_limited(
+                log,
+                "subject fallback rejected %d candidate thread(s) without assessed "
+                "correspondents for %s",
+                rejected,
+                message.filepath,
+                level=logging.INFO,
+                attachment=False,
+            )
+
+    def _subject_fallback_accepts(self, message: Message, candidate_id: str) -> tuple[bool, bool]:
         """Gate the subject-only thread merge with a correspondent check +
-        date proximity. Returns True if the fallback is safe.
+        date proximity. Returns whether the fallback is safe, and whether
+        it was refused only for want of assessed evidence (the displayed
+        participants would have passed).
 
         An incoming author and at least one of its other recipients must
         both already be thread participants — the same pair of people
@@ -293,25 +327,35 @@ class Threader:
         Both sides are compared by canonical address so display-name
         variants (``Bob Smith <bob@x>`` vs ``bob@x``) do not cause
         spurious "no participant overlap" results.
+
+        The evidence must come from the thread's messages assessed safe
+        (#1144, ``Database.thread_has_assessed_correspondents``), the
+        author and the recipient each from any such message: a message
+        with an ambiguous or not yet assessed sender supplies none.
         """
         thread = self.db.get_thread(candidate_id)
         if thread is None:
-            return False
+            return False, False
 
-        thread_canonical = {canonical_addr(addr) for addr in thread.participants}
-        thread_canonical.discard("")
+        # The date window first: a candidate it rejects is not counted as
+        # a provenance rejection whatever its evidence.
+        if abs(message.effective_date - thread.date_last) > SUBJECT_FALLBACK_WINDOW:
+            return False, False
+
         authors = {canonical_addr(addr) for addr in _authors(message)}
         authors.discard("")
-        if not authors.intersection(thread_canonical):
-            return False
         recipients = {canonical_addr(addr) for addr in [*message.to_addrs, *message.cc_addrs]}
         recipients.discard("")
         recipients -= authors
-        if not recipients.intersection(thread_canonical):
-            return False
-
-        delta = abs(message.effective_date - thread.date_last)
-        return delta <= SUBJECT_FALLBACK_WINDOW
+        if not self.db.thread_has_assessed_correspondents(
+            candidate_id, sorted(authors), sorted(recipients)
+        ):
+            # Counted as a provenance rejection only when the displayed
+            # participants would have passed the old check.
+            thread_canonical = {canonical_addr(addr) for addr in thread.participants}
+            unproven = bool(authors & thread_canonical) and bool(recipients & thread_canonical)
+            return False, unproven
+        return True, False
 
     @staticmethod
     def _participants(messages: list[Message]) -> list[str]:

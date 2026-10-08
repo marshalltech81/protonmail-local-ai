@@ -532,7 +532,8 @@ class TestCompilerAndDigest:
                 "m.claimant_id IN (SELECT p.claimant_id FROM entities e "
                 "JOIN message_participants p ON p.address = e.canonical_key AND p.role = 'from' "
                 "JOIN messages am ON am.claimant_id = p.claimant_id "
-                "WHERE e.kind = 'person' AND e.authority_class = ? AND am.folder NOT IN (?))",
+                "WHERE e.kind = 'person' AND e.authority_class = ? "
+                "AND am.sender_ambiguous = 0 AND am.folder NOT IN (?))",
             ]
         )
         assert params == [

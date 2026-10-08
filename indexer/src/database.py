@@ -97,7 +97,10 @@ def _dedupe_by_canonical(addrs: list[str]) -> list[str]:
 # v1 (#928): ``attachment_extractions`` is keyed by (content hash,
 # extractor module) and each ``attachments`` occurrence names the module
 # whose row it uses (``migrations/0001_extraction_cache_per_module.sql``).
-SCHEMA_VERSION = 1
+# v2 (#1144): ``messages.sender_ambiguous`` records whether the sender
+# attribution is safe, NULL until a reparse assesses the message
+# (``migrations/0002_messages_sender_ambiguous.sql``).
+SCHEMA_VERSION = 2
 SCHEMA_APPLICATION_ID = 0x504D4149  # "PMAI"
 
 # How long a ``reaped_messages`` record outlives the reap. The record
@@ -709,6 +712,12 @@ class Database:
                 seen            INTEGER NOT NULL DEFAULT 0,
                 flagged         INTEGER NOT NULL DEFAULT 0,
                 replied         INTEGER NOT NULL DEFAULT 0,
+                -- #1144: 0 = one From header; 1 = sender attribution unsafe
+                -- (a repeated From, or the header scan stopped before a
+                -- second could be ruled out); NULL = not yet assessed (a
+                -- row from before v2 the reparse has not reached). No
+                -- default; mcp-server reads NULL as "can't tell".
+                sender_ambiguous INTEGER CHECK (sender_ambiguous IN (0, 1)),
                 FOREIGN KEY (claimant_id) REFERENCES message_thread_map(claimant_id)
                     ON DELETE CASCADE
             );
@@ -2074,6 +2083,32 @@ class Database:
         return row["thread_id"] if row else None
 
     @_synchronized
+    def thread_has_assessed_correspondents(
+        self, thread_id: str, authors: list[str], recipients: list[str]
+    ) -> bool:
+        """Whether ``thread_id`` has a message assessed safe
+        (``sender_ambiguous = 0``) carrying one of ``authors`` and one
+        (possibly another such message) carrying one of ``recipients``,
+        in any role (#1144). Both lists are canonical addresses. The
+        subject fallback trusts only this evidence: an ambiguous message
+        (1) or one not yet assessed (NULL) contributes nothing. Each
+        list is bound as one JSON parameter, so a long recipient list
+        stays under SQLite's variable limit."""
+        if not authors or not recipients:
+            return False
+        leg = (
+            "EXISTS (SELECT 1 FROM message_participants p "
+            "JOIN messages m ON m.claimant_id = p.claimant_id "
+            "WHERE m.thread_id = ? AND m.sender_ambiguous = 0 "
+            "AND p.address IN (SELECT value FROM json_each(?)))"
+        )
+        row = self._conn.execute(
+            f"SELECT {leg} AND {leg}",  # nosec B608 -- constant SQL, values bound
+            (thread_id, json.dumps(authors), thread_id, json.dumps(recipients)),
+        ).fetchone()
+        return bool(row[0])
+
+    @_synchronized
     def find_threads_by_subject(
         self, normalized_subject: str, folder: str, limit: int = 10
     ) -> list[str]:
@@ -2713,8 +2748,8 @@ class Database:
             INSERT INTO messages
                 (claimant_id, message_id, thread_id, filepath, folder, subject, sent_at,
                  occurred_at, in_reply_to, references_json, has_attachments, size_bytes,
-                 content_hash, indexed_at, seen, flagged, replied)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 content_hash, indexed_at, seen, flagged, replied, sender_ambiguous)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(claimant_id) DO UPDATE SET
                 thread_id       = excluded.thread_id,
                 filepath        = excluded.filepath,
@@ -2730,7 +2765,8 @@ class Database:
                 indexed_at      = excluded.indexed_at,
                 seen            = excluded.seen,
                 flagged         = excluded.flagged,
-                replied         = excluded.replied
+                replied         = excluded.replied,
+                sender_ambiguous = excluded.sender_ambiguous
             """,
             (
                 msg.claimant_id,
@@ -2750,6 +2786,7 @@ class Database:
                 int(state.seen),
                 int(state.flagged),
                 int(state.replied),
+                int(msg.sender_ambiguous),
             ),
         )
         cur.execute("DELETE FROM message_participants WHERE claimant_id = ?", (msg.claimant_id,))
