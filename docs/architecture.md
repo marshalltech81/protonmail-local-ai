@@ -1687,11 +1687,17 @@ and the gone path's is not). The remap is refused, and retried once
 after resolving the copy again, when the watcher renamed the copy or
 moved the mapping since the sweep resolved it. The trash rule then
 applies to the copy as to any file, so a `T`-flagged copy is tombstoned
-and a live one clears an earlier tombstone. The always-on startup
-rename sweep does the same remap, so archive mode does not keep the
-gone path, folder and flags. The sweep's INFO line counts these as
-`remapped=N`. Only a message with no surviving copy is tombstoned as
-missing, so removing every copy still reaps it as before, and the reap
+and a live one clears an earlier tombstone. A mapped file that still
+exists but is `T`-flagged is checked the same way, for a live copy
+only, in the same lookup: when one exists the message moves to it
+instead of being tombstoned, so trashing one copy does not reap a
+message whose other copy is live. The rename sweep (`sweep_paths`),
+which runs at startup, before each periodic rescan's Maildir walk and
+on folder-watch recovery, does the same remap for gone files, so
+archive mode does not keep the gone path, folder and flags. The INFO
+lines of both sweeps count these as `remapped=N`. Only a message with
+no surviving copy is tombstoned as missing (and a trashed one with no
+live copy as trashed), so removing every copy still reaps it as before, and the reap
 then unmarks every path with the message's bytes, not only the mapped
 one (looked up once per reap pass, unmarked by path in each thread's
 reap transaction): a copy that comes back after a transient outage is re-indexed by

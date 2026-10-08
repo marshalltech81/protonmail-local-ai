@@ -34,6 +34,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 from .chunker import mean_vector
 from .database import Database
@@ -72,17 +73,20 @@ def _is_live(filepath: str | None, listings: dict[Path, dict[str, Path]]) -> boo
 
 def _remap_to_identical_copies(
     db: Database,
-    gone: list,
+    moves: list[tuple[Any, str, bool]],
     listings: dict[Path, dict[str, Path]],
     maildir_root: Path | None,
 ) -> dict[str, Path]:
-    """Remap each message in ``gone`` (map rows whose file no longer
-    exists) to a byte-identical copy still on disk, and return
+    """Remap messages to a byte-identical copy still on disk, and return
     ``claimant_id -> copy`` for those remapped (#1102).
+
+    ``moves`` holds ``(map row, path it maps to now, live_only)``: a row
+    whose file is gone takes any copy, a row whose file is ``T``-flagged
+    only a live one (moving it to another trashed copy changes nothing).
 
     Byte-identical files share one claimant ID and the mapping holds only
     one of their paths, while ``indexed_files`` holds every path. One
-    lookup covers all of ``gone``. A live copy is preferred to a trashed
+    lookup covers all of ``moves``. A live copy is preferred to a trashed
     one, so a trashed copy that sorts first cannot get the message reaped
     while a live copy remains. The remap moves the locator, folder and
     S/F/R state; it never tombstones or clears anything, so each caller
@@ -93,33 +97,40 @@ def _remap_to_identical_copies(
     resolved once more without the pass's directory cache, which is
     stale for that folder, and the remap retried once.
     """
-    copies = db.find_identical_copies([row["claimant_id"] for row in gone])
+    if not moves:
+        return {}
+    copies = db.find_identical_copies([row["claimant_id"] for row, _, _ in moves])
     remapped: dict[str, Path] = {}
-    for row in gone:
+    for row, from_path, live_only in moves:
         candidates = copies.get(row["claimant_id"], [])
         for cache in (listings, {}):
-            copy = _pick_copy(candidates, cache)
+            copy = _pick_copy(candidates, cache, live_only=live_only)
             if copy is None:
                 break
             dest_folder = _derive_folder(copy, maildir_root)
-            same_folder = dest_folder == _derive_folder(Path(row["filepath"]), maildir_root)
+            same_folder = dest_folder == _derive_folder(Path(from_path), maildir_root)
             if db.remap_to_identical_copy(
-                row["filepath"], str(copy), folder=None if same_folder else dest_folder
+                from_path, str(copy), folder=None if same_folder else dest_folder
             ):
                 remapped[row["claimant_id"]] = copy
                 break
     return remapped
 
 
-def _pick_copy(candidates: list[str], listings: dict[Path, dict[str, Path]]) -> Path | None:
-    """The current path of the first live candidate, else of the first
-    trashed one; ``None`` when no candidate exists on disk."""
+def _pick_copy(
+    candidates: list[str], listings: dict[Path, dict[str, Path]], *, live_only: bool
+) -> Path | None:
+    """The current path of the first live candidate, else (unless
+    ``live_only``) of the first trashed one; ``None`` when none fits."""
     found = [
         current
         for path in candidates
         if (current := resolve_current_path(Path(path), listings)) is not None
     ]
-    return next((p for p in found if not is_trashed(p)), found[0] if found else None)
+    live = next((p for p in found if not is_trashed(p)), None)
+    if live is not None or live_only:
+        return live
+    return found[0] if found else None
 
 
 @dataclass(frozen=True)
@@ -181,17 +192,19 @@ class Reconciler:
         record tombstones for ``T``-flagged files. Returns a small summary
         dict for logging/tests.
 
-        A message whose mapped file is gone is first matched against the
-        other indexed paths with the same bytes (#1102): byte-identical
-        files share one claimant ID, and the mapping holds only one of
-        their paths. When such a copy still exists the message is remapped
-        to it and the usual trash rule applies to the copy; only a message
-        with no surviving copy is tombstoned as missing.
+        A message whose mapped file is gone or ``T``-flagged is first
+        matched against the other indexed paths with the same bytes
+        (#1102): byte-identical files share one claimant ID, and the
+        mapping holds only one of their paths. When such a copy still
+        exists (for a trashed file, a live one) the message is remapped to
+        it and the usual trash rule applies to the copy; only a message
+        with no such copy is tombstoned.
         """
         counts = {"tombstoned": 0, "cleared": 0, "renamed": 0, "missing": 0, "remapped": 0}
 
         listings: dict[Path, dict[str, Path]] = {}
         gone = []
+        trashed: list[tuple[Any, Path]] = []
         for row in self.db.iter_message_map():
             stored = Path(row["filepath"])
             current = resolve_current_path(stored, listings)
@@ -207,10 +220,22 @@ class Reconciler:
                 self.db.update_filepath(row["filepath"], str(current))
                 counts["renamed"] += 1
 
+            if is_trashed(current):
+                # Settled after the walk too: a live copy keeps it.
+                trashed.append((row, current))
+                continue
             self._apply_trash_rule(row, current, counts)
 
-        remapped = _remap_to_identical_copies(self.db, gone, listings, self.maildir_root)
+        remapped = _remap_to_identical_copies(
+            self.db,
+            [(row, row["filepath"], False) for row in gone]
+            + [(row, str(current), True) for row, current in trashed],
+            listings,
+            self.maildir_root,
+        )
         counts["remapped"] = len(remapped)
+        for row, current in trashed:
+            self._apply_trash_rule(row, remapped.get(row["claimant_id"], current), counts)
         for row in gone:
             copy = remapped.get(row["claimant_id"])
             if copy is not None:
@@ -649,7 +674,9 @@ def sweep_paths(db: Database, *, maildir_root: Path | None = None) -> dict:
             db.update_filepath(row["filepath"], str(current), clear_tombstone=restored)
             renamed += 1
 
-    remapped = _remap_to_identical_copies(db, gone, listings, maildir_root)
+    remapped = _remap_to_identical_copies(
+        db, [(row, row["filepath"], False) for row in gone], listings, maildir_root
+    )
     for copy in remapped.values():
         if not is_trashed(copy) and db.has_pending_deletion(str(copy)):
             db.clear_pending_deletion(str(copy))

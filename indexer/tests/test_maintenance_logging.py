@@ -243,6 +243,7 @@ class TestRescanRecovery:
             return 0
 
         monkeypatch.setattr(main, "_enqueue_unindexed_messages", walk)
+        monkeypatch.setattr(main, "sweep_paths", lambda *_a, **_kw: {})
         state = main._IngestionStateRecorder(SimpleNamespace(), tmp_path)  # type: ignore[arg-type]
         main._run_periodic_rescan(None, None, state, skip_trashed=False)  # type: ignore[arg-type]
         clock["t"] += 1800

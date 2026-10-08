@@ -2848,9 +2848,16 @@ def _run_periodic_rescan(
     skip_trashed: bool,
 ) -> None:
     """Re-walk the Maildir so a file whose watchdog event was missed is
-    still queued, then acknowledge the sync stamp read before the walk."""
+    still queued, then acknowledge the sync stamp read before the walk.
+
+    The rename sweep runs first, as at startup: it records renames the
+    watcher missed, so the walk does not re-index them as new mail, and
+    remaps a message whose file is gone to a byte-identical copy (#1102),
+    which the walk skips because the copy is already marked indexed. In
+    archive mode nothing else revisits that while the indexer runs."""
     try:
         stamp = ingestion_state.read_stamp()
+        sweep_paths(db, maildir_root=MAILDIR_PATH)
         _enqueue_unindexed_messages(
             db, queue, MAILDIR_PATH, REASON_RESCAN, skip_trashed=skip_trashed, summary_pass="rescan"
         )

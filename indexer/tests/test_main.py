@@ -5653,6 +5653,19 @@ class TestMainStartupAndLoop:
         row = self._db._conn.execute("SELECT sync_completed_at FROM ingestion_state").fetchone()
         assert row["sync_completed_at"] == STAMP.completed_at
 
+    def test_periodic_rescan_runs_the_rename_sweep_before_its_walk(self, tmp_path, monkeypatch):
+        """Codex round 3 on #1134: in archive mode only the startup and
+        folder-recovery sweeps remapped a message whose file went to a
+        byte-identical copy (#1102); the periodic rescan walked without
+        one, and its walk skips the copy, which is marked indexed."""
+        events = self._run_main(tmp_path, monkeypatch, sweep_due=True)
+
+        rescan = next(
+            i for i, e in enumerate(events) if e.startswith(f"walk:{main.REASON_RESCAN}:")
+        )
+        assert events[rescan - 1] == "sweep_paths"
+        assert events.count("sweep_paths") == 2  # startup, then the rescan
+
     def test_drain_failure_log_keeps_mail_out(self, tmp_path, monkeypatch, caplog):
         """The main loop's drain backstop logs through the same
         classification as ``last_error`` (#257)."""

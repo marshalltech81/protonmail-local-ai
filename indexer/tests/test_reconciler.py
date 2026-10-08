@@ -654,6 +654,45 @@ class TestByteIdenticalCopies:
         assert not db.remap_to_identical_copy(str(mapped), str(maildir / "absent"))
         assert db.find_message_entry_by_filepath(str(mapped)) is not None
 
+    def test_a_trashed_mapped_copy_moves_to_a_live_copy(self, db, threader, embedder, maildir):
+        """Codex round 3 on #1134: a mapped path still on disk but
+        ``T``-flagged skipped the copy lookup, so it was tombstoned and
+        reaped while a byte-identical live copy remained."""
+        kept = maildir / "1700000000.M1.host:2,S"
+        mapped = maildir / "1700000001.M2.host:2,S"
+        thread_id = _index_copies(db, threader, kept, mapped, "trashmapped@example.com")
+        claimant = db.find_message_entry_by_filepath(str(mapped))["claimant_id"]
+        trashed = maildir / "1700000001.M2.host:2,ST"
+        mapped.rename(trashed)
+        rec = Reconciler(db, embedder, _default_config())
+        rec.handle_moved(str(mapped), str(trashed))  # the live tombstone
+        assert db.has_pending_deletion(str(trashed))
+
+        summary = rec.sweep()
+
+        assert summary["remapped"] == 1
+        assert summary["tombstoned"] == 0
+        assert count_pending_deletions(db) == 0
+        assert _message_row(db, claimant)["filepath"] == str(kept)
+        assert rec.reap()["threads_reaped"] == 0
+        assert db.get_thread(thread_id) is not None
+
+    def test_every_copy_trashed_still_tombstones(self, db, threader, embedder, maildir):
+        kept = maildir / "1700000000.M1.host:2,ST"
+        mapped = maildir / "1700000001.M2.host:2,S"
+        thread_id = _index_copies(db, threader, kept, mapped, "alltrashed@example.com")
+        trashed = maildir / "1700000001.M2.host:2,ST"
+        mapped.rename(trashed)
+        rec = Reconciler(db, embedder, _default_config())
+
+        summary = rec.sweep()
+
+        assert summary["remapped"] == 0
+        assert summary["tombstoned"] == 1
+        assert db.has_pending_deletion(str(trashed))
+        assert rec.reap()["threads_reaped"] == 1
+        assert db.get_thread(thread_id) is None
+
     def test_archive_mode_rename_sweep_remaps_to_the_copy(self, db, threader, maildir, caplog):
         """Codex round 1 on #1134: archive mode has no reconciler, so the
         message kept the gone path, folder and flags for ever."""
