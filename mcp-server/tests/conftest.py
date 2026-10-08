@@ -188,6 +188,7 @@ def _build_schema(conn: sqlite3.Connection) -> None:
             extracted_text    TEXT,
             extraction_error  TEXT,
             extracted_at      TEXT NOT NULL,
+            ocr_pages_skipped INTEGER CHECK (ocr_pages_skipped >= 0),
             PRIMARY KEY (attachment_id, extractor_module)
         );
         CREATE TABLE indexing_jobs (

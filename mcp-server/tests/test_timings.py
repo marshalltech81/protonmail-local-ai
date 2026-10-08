@@ -584,9 +584,10 @@ class TestDegradedRetrieval:
         assert all(_degraded(line) == {} for line in lines)
 
 
-# The seven tools #886 gave a completion line.
+# The seven tools #886 gave a completion line, and query_attachments (#796).
 _COMPLETION_TOOLS = (
     "query_messages",
+    "query_attachments",
     "get_message",
     "get_thread",
     "list_threads",
@@ -648,6 +649,12 @@ _SUCCESS_CALLS: dict[str, tuple[dict, dict]] = {
         {"sender": _MARKER_ADDRESS, "text": MARKER, "folder": _MARKER_FOLDER},
         {"total_matches": 1, "indeterminate": 0, "returned": 1},
     ),
+    # The marker message carries no attachment: the filters echo the
+    # marker in the prose, and the counts are taken all the same.
+    "query_attachments": (
+        {"sender": _MARKER_ADDRESS, "filename": MARKER, "folder": _MARKER_FOLDER},
+        {"total_matches": 0, "indeterminate": 0, "returned": 0},
+    ),
     "get_message": ({"message_id": _MARKER_MESSAGE_ID}, {"messages": 1}),
     "get_thread": ({"thread_id": _MARKER_THREAD_ID}, {"messages": 1}),
     "list_threads": ({"folder": _MARKER_FOLDER}, {"threads": 1}),
@@ -659,6 +666,7 @@ _SUCCESS_CALLS: dict[str, tuple[dict, dict]] = {
 # The ``Database`` method each tool reads through, made to fail below.
 _DB_METHODS = {
     "query_messages": "query_messages",
+    "query_attachments": "query_attachments",
     "get_message": "get_message_view",
     "get_thread": "get_thread_page",
     "list_threads": "list_threads",
@@ -671,6 +679,8 @@ _DB_METHODS = {
 # arguments, and the fixed text the tool logs as the cause.
 _CALLER_ERRORS = [
     ("query_messages", {"text": MARKER, "date_from": f"{MARKER}-01"}, "date_from"),
+    ("query_attachments", {"filename": MARKER, "date_from": f"{MARKER}-01"}, "date_from"),
+    ("query_attachments", {"cursor": MARKER}, "query_attachments.cursor"),
     ("get_message", {"message_id": f"missing-{MARKER}"}, "get_message failed: not found"),
     ("get_message", {"message_id": _MARKER_MESSAGE_ID, "offset": -1}, "offset"),
     ("get_message", {"message_id": _MARKER_MESSAGE_ID, "offset": 10**6}, "offset"),

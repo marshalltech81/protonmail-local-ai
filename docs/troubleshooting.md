@@ -1376,7 +1376,8 @@ tool=get_thread outcome=error total_ms=1.9 stages_ms={} counts={} config={}
 - `counts` holds result counts: `returned`, `total_matches` and
   `indeterminate` (messages the filters could neither accept nor
   reject; non-zero means the count is not complete) for
-  `query_messages`, `messages`, `threads`, `contacts`, `folders` for the
+  `query_messages` and `query_attachments` (there: attachment occurrences),
+  `messages`, `threads`, `contacts`, `folders` for the
   other retrieval tools, and the lane and degradation counts of the
   search and intelligence tools.
 - `config` names the rerank and inference modes the call used.

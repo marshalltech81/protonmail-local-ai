@@ -39,6 +39,7 @@ EXPECTED_TITLES = {
     "get_message": "Get Message",
     "list_threads": "List Threads",
     "query_messages": "Query Messages",
+    "query_attachments": "Query Attachments",
     "find_contact": "Find Contact",
     "list_folders": "List Folders",
     "get_mailbox_status": "Get Mailbox Status",

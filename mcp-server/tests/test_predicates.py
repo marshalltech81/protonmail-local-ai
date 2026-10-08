@@ -659,6 +659,8 @@ class TestLogAllowlist:
             "replied",
             "size_min",
             "size_max",
+            # #796: query_attachments' status enum, only as one of its values.
+            "extraction_status",
         }
 
     def test_valid_1085_values_are_logged_and_invalid_ones_withheld(self, caplog):

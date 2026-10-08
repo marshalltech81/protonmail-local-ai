@@ -988,6 +988,7 @@ result qualifies depends on its unit:
 | Evidence passage of a retrieved thread (same tools except `search_emails`, mailbox-wide path) | Its thread qualifies; the passage's own dates may fall outside the range, and `ask_mailbox` and `get_evidence` then label it `context` | Relevance within the thread |
 | Message (`query_messages`) | Its effective time is in the range | Effective time, newest first |
 | Attachment (`search_attachments`) | The carrying message's effective time is in the range | Relevance; with no query, effective time, newest first |
+| Attachment occurrence (`query_attachments`) | The carrying message's effective time is in the range | Effective time, newest first |
 
 Thread admission and message dates agree because both use the
 effective time: a message sent on 31 January and delivered on
