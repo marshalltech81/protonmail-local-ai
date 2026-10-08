@@ -486,9 +486,12 @@ is exactly what this forbids.
   public: describe a case from real mail (including the owner's field
   reports) by its technical shape only. No quoted or paraphrased mail,
   topics, sender or recipient categories, or case narratives; counts
-  the tools already report are fine (owner, 2026-10-08). Fix a leak by
-  deleting and re-posting, since an edit keeps the old text in its
-  history.
+  the tools already report are fine (owner, 2026-10-08). An edit alone
+  is not a fix: the old text stays in the edit history. Delete a leaking
+  comment and re-post it; for an issue or PR description, edit the text
+  and then delete the earlier revisions from its edit history. If a
+  revision cannot be removed, tell the owner. Notifications already sent
+  cannot be recalled.
 
 ### Bound the work per input
 
