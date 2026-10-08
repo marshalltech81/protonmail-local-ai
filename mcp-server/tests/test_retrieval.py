@@ -1496,6 +1496,115 @@ class TestQueryMessages:
         handler = _handlers(fake_server, messages_db)["query_messages"]
         assert "Error" in _error(handler())
 
+    def test_the_response_names_no_clock_choice(self, fake_server, messages_db):
+        # date_basis was split out of #1085 (owner, 2026-10-08): bounds,
+        # order and cursor use effective time, and nothing offers a choice.
+        handler = _handlers(fake_server, messages_db)["query_messages"]
+        out = asyncio.run(handler())
+        assert out.structured_content["date_bounds"] is None
+        out = asyncio.run(handler(date_from="2024-01-01"))
+        assert out.structured_content["date_bounds"] == {
+            "date_from": "2024-01-01T00:00:00+00:00",
+            "date_to": None,
+        }
+        assert "basis" not in _text(out)
+
+    def test_replied_and_size_filters_are_described(self, fake_server, messages_db):
+        handler = _handlers(fake_server, messages_db)["query_messages"]
+        out = asyncio.run(handler(replied=False, size_min=50, size_max=100))
+        text = _text(out)
+        assert "Query: replied=False, size_min=50, size_max=100" in text
+        assert "total_matches: 5" in text  # every fixture row is 100 bytes and unreplied
+        assert out.structured_content["filters"] == [
+            {"filter": "replied", "value": False, "match": "equals"},
+            {"filter": "size_min", "value": 50, "match": "inclusive_bound"},
+            {"filter": "size_max", "value": 100, "match": "inclusive_bound"},
+        ]
+        assert "total_matches: 0" in _text(asyncio.run(handler(size_max=99)))
+        assert "size_min must not be greater than size_max" in _error(
+            handler(size_min=2, size_max=1)
+        )
+
+    def test_indeterminate_is_stated_whenever_non_zero(self, fake_server, tmp_path, caplog):
+        import sqlite3
+
+        import sqlite_vec
+        from src.lib.sqlite import Database
+
+        from tests.conftest import _build_schema, _insert_message
+
+        path = tmp_path / "unknown.db"
+        conn = sqlite3.connect(str(path))
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        _build_schema(conn)
+        # u1 has a size and a delivery time; u2 has neither.
+        _insert_message(
+            conn,
+            message_id="u1",
+            thread_id="t-u",
+            sent_at="2024-01-01T00:00:00+00:00",
+            occurred_at="2024-01-01T01:00:00+00:00",
+            from_=["a@example.com"],
+            size_bytes=200,
+        )
+        _insert_message(
+            conn,
+            message_id="u2",
+            thread_id="t-u",
+            sent_at="2024-01-02T00:00:00+00:00",
+            from_=["a@example.com"],
+            size_bytes=None,
+        )
+        conn.close()
+        handler = _handlers(fake_server, Database(str(path)))["query_messages"]
+        with caplog.at_level("INFO", logger="mcp.timings"):
+            out = asyncio.run(handler(size_min=100))
+        assert out.structured_content["total_matches"] == 1
+        assert out.structured_content["indeterminate"] == 1
+        text = _text(out)
+        assert "total_matches: 1\nindeterminate: 1 (messages the filters could neither" in text
+        assert "in neither total_matches nor the pages)" in text
+        # The timing line says so too (Codex round 3), so the log never
+        # shows a call that could not decide every message as complete.
+        timing = [r.getMessage() for r in caplog.records if r.name == "mcp.timings"]
+        assert len(timing) == 1 and "outcome=ok" in timing[0]
+        assert "'total_matches': 1, 'indeterminate': 1, 'returned': 1" in timing[0]
+        # Zero is in the structured output but not stated in the prose.
+        out = asyncio.run(handler(replied=False))
+        assert out.structured_content["indeterminate"] == 0
+        assert "indeterminate" not in _text(out)
+        # An empty page is not stated as a definite "no match" while some
+        # messages are undecided (Codex round 5): u2 might still match.
+        out = asyncio.run(handler(size_min=10_000))
+        assert (
+            out.structured_content["total_matches"],
+            out.structured_content["indeterminate"],
+        ) == (0, 1)
+        assert _text(out).endswith("No messages are known to match.")
+        assert "No messages match." not in _text(out)
+        # With nothing undecided, the empty page is a definite answer.
+        out = asyncio.run(handler(size_min=10_000, replied=True))
+        assert (
+            out.structured_content["total_matches"],
+            out.structured_content["indeterminate"],
+        ) == (0, 0)
+        assert _text(out).endswith("No messages match.")
+        # A later page that comes back empty (its rows went between
+        # calls) says so, whatever the indeterminate count.
+        first = asyncio.run(handler(replied=False, limit=1))
+        assert first.structured_content["has_more"] is True
+        conn = sqlite3.connect(str(path))
+        conn.execute("DELETE FROM messages")
+        conn.commit()
+        conn.close()
+        later = asyncio.run(
+            handler(replied=False, limit=1, cursor=first.structured_content["next_cursor"])
+        )
+        assert later.structured_content["returned"] == 0
+        assert _text(later).endswith("No further messages.")
+
 
 _ERROR_MARKER = "privatemarkerq7z"
 

@@ -26,8 +26,11 @@ import sqlite_vec
 from . import timings
 from .predicates import (
     ADDRESS_ROLES,
+    DATE_BASES,
     DEFAULT_EXCLUDED_FOLDERS,
     LEAVES,
+    DateBasis,
+    Evaluability,
     InvalidFilterError,
     Leaf,
     _addr_matches,
@@ -39,6 +42,7 @@ from .predicates import (
     leaf_digest,
     message_scope_leaves,
     normalize_authority_class,
+    normalize_date_basis,
     query_messages_leaves,
     search_emails_leaves,
 )
@@ -880,6 +884,12 @@ class MessagePage:
     ``address_matches`` maps each given address filter (``sender``,
     ``recipient``, ``participant``) to the addresses it matched over the
     whole set, read in the same snapshot as ``total_matches``.
+    ``indeterminate`` counts the messages the predicates could neither
+    accept nor reject (#1085): no leaf false, some leaf unknown because
+    its field is NULL (``Evaluability.UNKNOWN_WHEN_NULL``: a size bound
+    on a message without a stored size, a bound or the ordering under
+    ``date_basis=occurred`` on one without a delivery time). They are in
+    neither ``total_matches`` nor the pages.
     """
 
     total_matches: int
@@ -888,6 +898,7 @@ class MessagePage:
     has_more: bool
     next_cursor: str | None
     address_matches: dict[str, AddressMatches] = field(default_factory=dict)
+    indeterminate: int = 0
 
 
 _INVALID_CURSOR = "invalid cursor; restart the query without a cursor"
@@ -936,19 +947,35 @@ def _address_matches(
     )
 
 
-def _encode_cursor(digest: str, last: MessageRecord, offset: int) -> str:
+def _record_clock(record: MessageRecord, basis: DateBasis) -> str:
+    """``record``'s value of the clock ``basis`` names: the keyset
+    position of a page ordered by it. Under a nullable basis the
+    ``dated`` leaf keeps rows without that clock off the page."""
+    clock = {
+        "effective": record.effective_at,
+        "sent": record.sent_at,
+        "occurred": record.occurred_at,
+    }[basis.name]
+    if clock is None:
+        raise ValueError(f"message without a {basis.name} time on a page ordered by it")
+    return clock
+
+
+def _encode_cursor(digest: str, last: MessageRecord, offset: int, basis: DateBasis) -> str:
     payload = json.dumps(
-        {"v": 2, "q": digest, "s": last.effective_at, "m": last.claimant_id, "o": offset}
+        {"v": 2, "q": digest, "s": _record_clock(last, basis), "m": last.claimant_id, "o": offset}
     )
     return base64.urlsafe_b64encode(payload.encode()).rstrip(b"=").decode()
 
 
 def _decode_cursor(cursor: str, digest: str) -> tuple[str, str, int]:
-    """Return ``(effective_at, claimant_id, offset)`` of the last row
-    already returned (version 2; version 1 cursors carried ``sent_at``
-    and are rejected). Raises ``InvalidFilterError`` (a ``ValueError``) on a
-    malformed cursor or one issued for different predicates (keyset positions only mean something within
-    the same filtered ordering)."""
+    """Return ``(clock, claimant_id, offset)`` of the last row already
+    returned, ``clock`` being its value of the ``date_basis`` the page
+    is ordered by (version 2; version 1 cursors carried ``sent_at`` and
+    are rejected). Raises ``InvalidFilterError`` (a ``ValueError``) on a
+    malformed cursor or one issued for different predicates or another
+    basis (``digest``: keyset positions only mean something within the
+    same filtered ordering)."""
     try:
         raw = base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4))
         data = json.loads(raw)
@@ -3488,16 +3515,20 @@ class Database:
         authority_class: str | None = None,
         seen: bool | None = None,
         flagged: bool | None = None,
+        replied: bool | None = None,
+        size_min: int | None = None,
+        size_max: int | None = None,
+        date_basis: str | None = None,
         limit: int = 25,
         cursor: str | None = None,
     ) -> MessagePage:
         """Enumerate every message matching all given predicates.
 
         Unlike the search methods this does not rank: the result is the
-        exact matching set, newest effective time first (``claimant_id``
-        breaks ties), with ``total_matches`` counted over the whole set
-        and keyset pagination through ``cursor``. Blank predicates are
-        ignored.
+        exact matching set, newest first on the clock ``date_basis``
+        names (``claimant_id`` breaks ties), with ``total_matches``
+        counted over the whole set and keyset pagination through
+        ``cursor``. Blank predicates are ignored.
 
         - ``sender`` (From), ``recipient`` (To or Cc), ``participant``
           (any role): see ``address_match_mode``.
@@ -3508,20 +3539,35 @@ class Database:
           stripped quoted replies are not searched).
         - ``folder``: exact folder name. Without it, messages filed in a
           ``DEFAULT_EXCLUDED_FOLDERS`` folder are left out.
-        - ``date_from`` / ``date_to``: inclusive bounds on the effective
-          time (``occurred_at``, else ``sent_at``);
-          date-only values cover the whole UTC day.
+        - ``date_from`` / ``date_to``: inclusive bounds on the clock
+          ``date_basis`` names; date-only values cover the whole UTC day.
+        - ``date_basis`` (#1085): not served by the ``query_messages``
+          tool, which always uses the default (split out of #1085 by the
+          owner, 2026-10-08; the leaves and the cursor clock stay for
+          #1087 and #1150). ``effective`` (default; ``occurred_at``,
+          else ``sent_at``), ``sent`` (``sent_at``) or ``occurred``
+          (``occurred_at``) for the bounds, the order and the cursor. A
+          message without the clock (no delivery time under
+          ``occurred``) is neither a match nor a miss: left out and
+          counted in ``MessagePage.indeterminate``.
+          ``internal`` is a legal value that is unavailable until #1092.
         - ``has_attachments``: the message's own attachment flag.
-        - ``seen`` / ``flagged``: the message's read and flagged state
-          (its Maildir ``S`` / ``F`` flags).
+        - ``seen`` / ``flagged`` / ``replied``: the message's read,
+          flagged and answered state (its Maildir ``S`` / ``F`` / ``R``
+          flags).
+        - ``size_min`` / ``size_max``: inclusive bounds in bytes on the
+          local Maildir file's size; a message whose size is not stored
+          is left out and counted as indeterminate, as above.
         - ``authority_class``: the class the indexer gave the message's
           From sender (``AUTHORITY_CLASSES``); a message in
           ``AUTHORITY_EXCLUDED_FOLDERS`` never matches.
 
         Raises ``ValueError`` for an invalid date, a ``text`` with no
-        words or more than ``_MAX_TEXT_TERMS``, or a malformed / foreign
-        cursor.
+        words or more than ``_MAX_TEXT_TERMS``, an unavailable or
+        unknown ``date_basis``, an invalid or inverted size bound, or a
+        malformed / foreign cursor.
         """
+        basis = DATE_BASES[normalize_date_basis(date_basis)]
         leaves = query_messages_leaves(
             sender=sender,
             recipient=recipient,
@@ -3535,6 +3581,10 @@ class Database:
             authority_class=authority_class,
             seen=seen,
             flagged=flagged,
+            replied=replied,
+            size_min=size_min,
+            size_max=size_max,
+            date_basis=basis.name,
         )
         address_filters = [
             (leaf.name, leaf.value, ADDRESS_ROLES[leaf.name])
@@ -3543,9 +3593,10 @@ class Database:
         ]
         where_sql, params = compile_leaves(leaves)
 
-        # A cursor is only meaningful for the predicates it was issued
-        # under; bind it to a digest of them.
-        digest = leaf_digest(leaves)
+        # A cursor is only meaningful for the predicates and the ordering
+        # it was issued under; bind it to a digest of both.
+        digest = leaf_digest(leaves, basis.name)
+        clock = f"m.{basis.column}"
         page_where_sql = where_sql
         page_params = list(params)
         offset = 0
@@ -3553,7 +3604,8 @@ class Database:
             last_at, last_id, offset = _decode_cursor(cursor, digest)
             # Row-value form: SQLite seeks idx_messages_effective to the
             # cursor; the equivalent OR expansion sorted every earlier row.
-            page_where_sql += " AND (m.effective_at, m.claimant_id) < (?, ?)"
+            # ``sent_at`` and ``occurred_at`` have no index yet (#1123).
+            page_where_sql += f" AND ({clock}, m.claimant_id) < (?, ?)"
             page_params += [last_at, last_id]
 
         with closing(self._connect()) as conn:
@@ -3569,10 +3621,22 @@ class Database:
                 name: _address_matches(conn, value, roles, where_sql, params, total)
                 for name, value, roles in address_filters
             }
+            # Rows the predicate could neither accept nor reject: the
+            # conjunction is NULL when no leaf is false and some leaf is
+            # unknown (its field NULL). Only a leaf that can be unknown
+            # makes the extra count worth a query.
+            indeterminate = 0
+            if any(
+                LEAVES[leaf.name].evaluability is Evaluability.UNKNOWN_WHEN_NULL for leaf in leaves
+            ):
+                indeterminate = conn.execute(
+                    f"SELECT COUNT(*) FROM messages m WHERE ({where_sql}) IS NULL",  # nosec B608
+                    params,
+                ).fetchone()[0]
             rows = conn.execute(
                 f"SELECT {_MESSAGE_COLUMNS} FROM messages m WHERE "  # nosec B608
                 + page_where_sql
-                + " ORDER BY m.effective_at DESC, m.claimant_id DESC LIMIT ?",
+                + f" ORDER BY {clock} DESC, m.claimant_id DESC LIMIT ?",
                 [*page_params, limit + 1],
             ).fetchall()
             has_more = len(rows) > limit
@@ -3586,8 +3650,11 @@ class Database:
             offset=offset,
             messages=records,
             has_more=has_more,
-            next_cursor=_encode_cursor(digest, records[-1], next_offset) if has_more else None,
+            next_cursor=(
+                _encode_cursor(digest, records[-1], next_offset, basis) if has_more else None
+            ),
             address_matches=address_matches,
+            indeterminate=indeterminate,
         )
 
     # -------------------------------------------------------------------------

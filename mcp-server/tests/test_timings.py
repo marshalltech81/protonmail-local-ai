@@ -638,7 +638,7 @@ def _register_completion_tools(server, db) -> None:
 _SUCCESS_CALLS: dict[str, tuple[dict, dict]] = {
     "query_messages": (
         {"sender": _MARKER_ADDRESS, "text": MARKER, "folder": _MARKER_FOLDER},
-        {"total_matches": 1, "returned": 1},
+        {"total_matches": 1, "indeterminate": 0, "returned": 1},
     ),
     "get_message": ({"message_id": _MARKER_MESSAGE_ID}, {"messages": 1}),
     "get_thread": ({"thread_id": _MARKER_THREAD_ID}, {"messages": 1}),

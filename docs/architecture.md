@@ -821,7 +821,8 @@ whole-thread delete, rebuild — cleans them up without separate code.
 
 Every message-level filter the tools accept (`sender`, `recipient`,
 `participant`, `subject`, `text`, `folder`, the effective-time bounds,
-the attachment and read flags, `authority_class`) is a leaf of one
+the attachment, read, flagged and replied flags, the size bounds,
+`authority_class`) is a leaf of one
 predicate module, `mcp-server/src/lib/predicates.py` (#1084): each
 leaf has a name, a value shape, one SQL compiler over a `messages` row
 and an evaluability rule, and adapters build the leaf list for
