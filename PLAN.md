@@ -946,6 +946,18 @@ removed Bridge container are kept as history.
     behaviour. Omit IMAP UID, KEYWORD, DRAFT and DELETED. The
     assessment behind this is in the issues' bodies (#1077–#1093), not
     in the repository.
+36. **Predicate leaves, reparse and sender evidence (2026-10-08):**
+    parser-only backfills run as an in-place reparse through the job
+    queue, queued by the migration that needs it (#1078), with fresh
+    mail interleaved ahead of the backlog (#1142). Explicit leaves
+    take a typed `where: {all: [...]}` form whose #1087 shape is fixed
+    up front; the flat parameters keep their meaning forever (#1088).
+    Bcc counts as a recipient and answers "can't tell" on received
+    mail (#1090). Every display name is stored (#1140). Repeated To and
+    Cc headers merge; a repeated From marks the sender ambiguous and
+    the message loses source authority (#1144, #463). A leaf never
+    answers a confident "no" on incomplete or not-yet-reparsed data.
+    The choices behind each are in the issues' decision comments.
 
 ## Notes for Agents
 

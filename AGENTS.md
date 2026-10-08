@@ -204,6 +204,14 @@ Do not make any of the following changes unless the repository owner explicitly 
   such a change is rebuilt from Maildir. The first deployment was
   2026-10-03, so schema changes now take the `SCHEMA_VERSION` bump and
   migration file described above.
+- A migration that adds per-message data only the parser can produce
+  (it keeps chunk IDs) ends with `queue.REPARSE_ENQUEUE_SQL`, copied
+  verbatim, so existing mail is re-parsed through the job queue with
+  no re-embedding (#1078; `docs/architecture.md` "Reparse in place").
+  Never walk the Maildir inside a migration. Until a message is
+  re-parsed, its new column is unknown, not false: a NULL answers
+  "can't tell" and never qualifies a message for anything (owner,
+  2026-10-08, #1144).
 - Do not change embedding dimensions or model assumptions without verifying schema and context-window implications.
 - Do not change chunk ID derivation away from the deterministic
   `sha256(message_pk || index || text)` shape — re-runs depend on identical
@@ -650,6 +658,13 @@ under about 80 characters.
   only with that issue's link in the reply, and the PR's "Not done"
   lists it. Nothing found stays only in a thread, a PR body or a
   commit message.
+- Owner decisions (owner, 2026-10-08): before bringing the owner a
+  design choice, have Claude (Fable 5.1, high effort) and Codex
+  (GPT-6.1-Sol, high reasoning) each assess it independently and
+  read-only in the repository, then exchange views until they agree
+  or three rounds pass. Verify their file and line claims, and present
+  one recommendation: the most accurate option first, its cost, and
+  where the two disagreed. Never put mailbox content in the brief.
 - Merge (squash) only on the owner's explicit go-ahead.
 
 ## Common Commands
