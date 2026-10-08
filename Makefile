@@ -280,7 +280,8 @@ test-trivy-flags:
 # the project: protonmail-local-ai in docker.yml, locally the directory
 # name or COMPOSE_PROJECT_NAME), and fail, naming the image, when one
 # is not built. The gates scan whatever `make build` last produced,
-# not the checkout.
+# not the checkout, and warn (without failing) when an image's
+# revision label is not the checkout's SOURCE_COMMIT (#1103).
 TRIVY ?= trivy
 TRIVY_VERSION := v0.75.0
 TRIVY_SEVERITY := CRITICAL,HIGH
@@ -301,8 +302,11 @@ endef
 # The image gates, as one shell fragment for a recipe that set
 # `status=0` before it and exits with `$$status` after it: take the
 # image names from docker compose, refuse (status 1, no scan) when an
-# image is not built, else scan each image and keep going on a
-# finding.
+# image is not built, else warn about each image whose
+# org.opencontainers.image.revision label is missing or is not
+# SOURCE_COMMIT (always when the checkout is -dirty, since its files
+# may have changed since the build), then scan each image and keep
+# going on a finding. The warning does not change the exit status.
 define trivy-image-scans
 	images=$$(docker compose config --images); \
 	if [ -z "$$images" ]; then echo "docker compose config --images listed no image" >&2; exit 1; fi; \
@@ -311,6 +315,15 @@ define trivy-image-scans
 		docker image inspect "$$image" >/dev/null 2>&1 || { echo "image $$image is not built: run make build first" >&2; built=0; }; \
 	done; \
 	if [ "$$built" -eq 1 ]; then \
+		source='$(SOURCE_COMMIT)'; \
+		for image in $$images; do \
+			revision=$$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$$image"); \
+			if [ -z "$$revision" ]; then \
+				echo "warning: image $$image has no revision label (org.opencontainers.image.revision) and the checkout is $$source; it may be stale: run make build" >&2; \
+			elif [ "$$revision" != "$$source" ] || [ "$${source%-dirty}" != "$$source" ]; then \
+				echo "warning: image $$image has revision label $$revision but the checkout is $$source (a -dirty checkout always differs); it may be stale: run make build" >&2; \
+			fi; \
+		done; \
 		for image in $$images; do \
 			"$(TRIVY)" image --scanners vuln --severity $(TRIVY_SEVERITY) --exit-code 1 --ignore-unfixed --offline-scan=false "$$image" || status=1; \
 		done; \

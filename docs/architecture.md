@@ -2269,7 +2269,13 @@ images `make build` last produced, as `docker compose config --images`
 lists them (the project name, then `-indexer`, `-mcp-server`,
 `-mbsync`), and fail with a message naming the image when one is not
 built; rebuild before scanning a change,
-since the gates read the image, not the checkout. The full reports
+since the gates read the image, not the checkout. Before scanning,
+they print a warning naming each image whose
+`org.opencontainers.image.revision` label is missing or is not the
+commit `make build` would stamp now (`SOURCE_COMMIT`), with both
+values (#1103); a `-dirty` checkout always warns, because its files may
+have changed since the build. The warning does not fail the target, and
+the scans still run. The full reports
 have no local equivalent: run `trivy image <name>` by hand for every
 severity. `scripts/tests/trivy_flags_test.sh` derives the gates from
 `docker.yml` and fails when the Makefile drifts from them.

@@ -871,7 +871,10 @@ Notes:
   `make trivy-images` runs these alone). The image gates need the
   images `make build` last produced, named as `docker compose build`
   names them, and fail naming the image when one is not built; rebuild
-  first, since they scan the image, not the checkout. The flag values
+  first, since they scan the image, not the checkout (they warn, without
+  failing, when an image's `org.opencontainers.image.revision` label is
+  missing or differs from the checkout's commit, and always on a
+  `-dirty` checkout, #1103). The flag values
   live in the Makefile and the workflows; `make test-trivy-flags` (part
   of `make test`, no Trivy or Docker needed) fails when they differ, so
   a change to one is made in both.
