@@ -1,7 +1,7 @@
 """Run a case's tool and capture what its model received.
 
 The registered handler (``ask_mailbox`` or ``summarize_thread``, #656;
-the experimental ``brief_issue`` or ``check_conclusion``, #1240) runs
+``extract_from_emails``, #1137; the experimental ``brief_issue`` or ``check_conclusion``, #1240) runs
 unchanged: ``register_intelligence_tools`` and
 ``register_experimental_tools`` register them on a stub server exactly
 as ``main.py`` does on FastMCP, and the case's arguments are passed to
@@ -13,19 +13,21 @@ evaluator reimplements neither retrieval nor prompt building.
 Two narrow wrappers capture the run, in memory only:
 
 - ``RecordingInference`` wraps the inference client, the boundary every
-  prompt crosses, and keeps each request's text and the reply. The
-  first request is the prompt after truncation, deduplication, fallback
-  thread text and budgeting; a repair call resends it with a fixed
-  instruction appended, so the evidence available to the final answer
-  is the first request's.
+  prompt crosses, and keeps each request's text and the reply. For the
+  other tools the first request is the prompt after truncation,
+  deduplication, fallback thread text and budgeting; a repair call
+  resends it with a fixed instruction appended, so the evidence
+  available to the final answer is the first request's.
+  ``extract_from_emails`` makes one request per searched thread.
 - ``capture_evidence_maps`` wraps the handlers' evidence builders
   (``intelligence._build_evidence``, also under ``brief``'s own import of
   it, and ``_summarize_context``) to keep
   the label -> passage maps built alongside those prompts (thread,
   message, claimant, chunk); ``adapters.select_passages`` picks the map
   that describes the prompt sent. ``prompt_consistent`` then checks
-  every captured label's header is in the prompt the model actually
-  received, so the map describes that prompt and not a second retrieval.
+  every captured label's header is in a prompt the model actually
+  received (the first; any, for an extraction's per-thread maps), so the
+  map describes those prompts and not a second retrieval.
 
 Nothing here logs mailbox text; the captures stay on the returned
 ``CaseRun`` and reach disk only through an opted-in detail artifact.
@@ -60,6 +62,7 @@ from src.tools.outputs import (
     AskMailboxOutput,
     BriefIssueOutput,
     CheckConclusionOutput,
+    ExtractFromEmailsOutput,
     SummarizeThreadOutput,
 )
 
@@ -72,7 +75,13 @@ from tests.answer_eval.adapters import (
 )
 from tests.answer_eval.cases import Case
 
-ToolOutput = AskMailboxOutput | SummarizeThreadOutput | BriefIssueOutput | CheckConclusionOutput
+ToolOutput = (
+    AskMailboxOutput
+    | SummarizeThreadOutput
+    | ExtractFromEmailsOutput
+    | BriefIssueOutput
+    | CheckConclusionOutput
+)
 
 # Statuses a run can end in. Only ``ok`` has an output to grade.
 RUN_STATUSES = ("ok", "tool_error", "timeout", "invalid_output", "runner_error", "skipped")
@@ -256,8 +265,8 @@ class _ToolServer:
 
 
 # The handlers' evidence builders, each taking an ``evidence_map`` keyword,
-# as the module global each handler looks up: ``ask_mailbox`` builds
-# through ``intelligence._build_evidence``, ``summarize_thread`` through
+# as the module global each handler looks up: ``ask_mailbox`` and
+# ``extract_from_emails`` build through ``intelligence._build_evidence``, ``summarize_thread`` through
 # ``_summarize_context``, and the experimental tools through ``brief``'s
 # own imported name for ``_build_evidence`` (#1240).
 _EVIDENCE_BUILDERS = (
@@ -393,8 +402,12 @@ async def run_case(case: Case, ctx: RunContext) -> CaseRun:
     for label in window_cut_labels(case.tool, maps):
         run.passages[label] = replace(run.passages[label], truncated=True)
     if run.calls:
-        first = run.calls[0].user
-        run.prompt_consistent = all(f"[{label} |" in first for label in run.passages)
+        # An extraction's labels are each in their own thread's request.
+        extract = case.tool == "extract_from_emails"
+        prompts = [c.user for c in run.calls] if extract else [run.calls[0].user]
+        run.prompt_consistent = all(
+            any(f"[{label} |" in prompt for prompt in prompts) for label in run.passages
+        )
     inference_ms = sum(c.ms for c in run.calls)
     run.timings_ms = {
         "answer_total": round(total_ms, 1),

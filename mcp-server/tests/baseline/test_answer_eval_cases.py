@@ -11,7 +11,8 @@ has a query vector. Two layers:
    are checked against the corpus, not against what retrieval returns.
 2. The harness end to end. Every case runs through the real handler
    of its tool (``ask_mailbox`` or ``summarize_thread``, #656, or an
-   experimental tool, #1240) with a
+   experimental tool, #1240; ``extract_from_emails`` cases are checked
+   in layer 1 only until #1287) with a
    scripted answerer (no network) that writes the case's expected
    values citing the supplied passages, and a scripted judge. Each run
    must complete, its captured evidence must match the prompt the model
@@ -51,6 +52,9 @@ from tests.answer_eval.runner import (
 pytestmark = pytest.mark.baseline
 
 CASES = load_cases()
+# Layer 2 leaves out ``extract_from_emails``: the scripted answerer
+# cannot yet return one record per expected item (#1287).
+HARNESS_CASES = [c for c in CASES if c.tool != "extract_from_emails"]
 GOLDEN = json.loads((Path(__file__).parent / "golden.json").read_text(encoding="utf-8"))
 _LABEL = re.compile(r"\[(E\d+) \| message ([^ |]+)")
 
@@ -316,7 +320,7 @@ def _evaluate_all(baseline_dir: Path, baseline_db: Database) -> list[dict]:
     vectors = json.loads((baseline_dir / "query_vectors.json").read_text(encoding="utf-8"))
     records = []
     judge = _StubJudge()
-    for case in CASES:
+    for case in HARNESS_CASES:
         oracle = _OracleAnswerer(case)
         _ORACLE_MISSES[case.id] = oracle.unsupported
         ctx = RunContext(
@@ -341,7 +345,7 @@ def records(baseline_dir: Path, baseline_db: Database) -> dict[str, dict]:
 
 
 def test_every_case_completes_and_is_judged(records: dict[str, dict]) -> None:
-    assert set(records) == {c.id for c in CASES}
+    assert set(records) == {c.id for c in HARNESS_CASES}
     for cid, r in records.items():
         assert r["status"] == "ok", cid
         assert r["judge"]["status"] == "ok", (cid, r["judge"]["error"])
@@ -364,7 +368,7 @@ def test_experimental_smoke_cases_pass_end_to_end(records: dict[str, dict]) -> N
             assert r["deterministic"]["citation_coverage"] == 1.0, case.id
 
 
-@pytest.mark.parametrize("case", CASES, ids=lambda c: c.id)
+@pytest.mark.parametrize("case", HARNESS_CASES, ids=lambda c: c.id)
 def test_supplied_evidence_lets_a_correct_answer_pass(case: Case, records: dict[str, dict]) -> None:
     r = records[case.id]
     det = r["deterministic"]

@@ -8,7 +8,7 @@ split rule is the agent scenarios' (``tests/agent_metrics.is_held_out``):
 membership is fixed by the case ID, so adding cases never moves one.
 
 A case ID starts with its tool's short name (``ask-``, ``summarize-``,
-``brief-``, ``check-``). Per tool (#656): ``ask_mailbox`` needs a
+``extract-``, ``brief-``, ``check-``). Per tool (#656): ``ask_mailbox`` needs a
 ``question``; ``summarize_thread`` needs a baseline ``thread_id`` (a
 direct lookup, so nothing is embedded; a subject-phrase lookup is not a
 case shape yet), and its evidence and fact sources must be in that
@@ -16,7 +16,13 @@ thread. The experimental tools (#1240) need a ``topic``
 (``brief_issue``) or a ``conclusion`` of at most the handler's 2,000
 characters (``check_conclusion``). ``ask_mailbox`` and both experimental
 tools also take the scope filters, whose types are checked here; their
-values are the handler's to validate.
+values are the handler's to validate. ``extract_from_emails`` (#1137)
+needs a ``query`` and a non-empty ``schema`` object declaring no
+provenance field (the handler refuses one before any work); its
+``limit``, when given, is a whole number from 1 to the handler's 50
+(each searched thread is one paid model call), and its filters
+(``folders``, ``date_from``, ``date_to``, ``from_name``,
+``participant``) have the handler's types.
 
 Refs follow the baseline's convention: ``t24`` is the thread rooted at
 ``t24.1@baseline.example`` and ``t24.2`` the message
@@ -32,7 +38,12 @@ from typing import Any, NoReturn, TypeGuard, get_args
 
 from src.lib.inference import MIN_PROMPT_TOKENS
 from src.tools.brief import _MAX_CONCLUSION_CHARS
-from src.tools.intelligence import _MAX_ASK_THREADS
+from src.tools.intelligence import (
+    _MAX_ASK_THREADS,
+    _MAX_EXTRACT_LIMIT,
+    _PROVENANCE_FIELDS,
+    _declared_fields,
+)
 from src.tools.outputs import SummaryStyle
 
 from tests.agent_metrics import is_held_out
@@ -40,12 +51,18 @@ from tests.agent_metrics import is_held_out
 CASES_SCHEMA_VERSION = 1
 CASES_PATH = Path(__file__).with_name("cases.json")
 BASELINE_DOMAIN = "@baseline.example"
-# The tools the evaluation has an adapter for (``adapters.py``):
-# ``extract_from_emails`` is not among them (#1137).
-TOOLS = ("ask_mailbox", "summarize_thread", "brief_issue", "check_conclusion")
+# The tools the evaluation has an adapter for (``adapters.py``).
+TOOLS = (
+    "ask_mailbox",
+    "summarize_thread",
+    "extract_from_emails",
+    "brief_issue",
+    "check_conclusion",
+)
 _ID_PREFIX = {
     "ask_mailbox": "ask",
     "summarize_thread": "summarize",
+    "extract_from_emails": "extract",
     "brief_issue": "brief",
     "check_conclusion": "check",
 }
@@ -53,6 +70,7 @@ _ID_PREFIX = {
 # ``summarize_thread`` takes a thread ID instead and embeds nothing.
 _TEXT_ARGUMENT = {
     "ask_mailbox": "question",
+    "extract_from_emails": "query",
     "brief_issue": "topic",
     "check_conclusion": "conclusion",
 }
@@ -88,10 +106,13 @@ _SCOPE_FILTERS = frozenset({"from_addr", "date_from", "date_to", "folders", "max
 _ARGUMENTS = {
     "ask_mailbox": _SCOPE_FILTERS | {"question"},
     "summarize_thread": frozenset({"thread_id", "style"}),
+    "extract_from_emails": frozenset(
+        {"query", "schema", "folders", "date_from", "date_to", "limit", "from_name", "participant"}
+    ),
     "brief_issue": _SCOPE_FILTERS | {"topic"},
     "check_conclusion": _SCOPE_FILTERS | {"conclusion"},
 }
-_CASE_ID = re.compile(r"(?:ask|summarize|brief|check)-[a-z0-9]+(?:-[a-z0-9]+)*")
+_CASE_ID = re.compile(r"(?:ask|summarize|extract|brief|check)-[a-z0-9]+(?:-[a-z0-9]+)*")
 # A baseline thread number as ``corpus.thread_id`` writes it: two
 # digits, or three past t99 (#975).
 _THREAD_NUMBER = r"t(?:[0-9]{2}|[1-9][0-9]{2})"
@@ -166,21 +187,26 @@ class Case:
     def question(self) -> str:
         """The case's task in words, for the judge prompt and the detail
         record: ``ask_mailbox``'s question, or a fixed sentence naming a
-        summary's thread and style, a brief's topic or the conclusion to
-        check."""
+        summary's thread and style, an extraction's request and fields, a
+        brief's topic or the conclusion to check."""
         if self.tool == "ask_mailbox":
             return str(self.arguments["question"])
         if self.tool == "brief_issue":
             return f"Brief the issue: {self.arguments['topic']}"
         if self.tool == "check_conclusion":
             return f"Check this conclusion against the mailbox: {self.arguments['conclusion']}"
+        if self.tool == "extract_from_emails":
+            fields = ", ".join(sorted(_declared_fields(self.arguments["schema"])))
+            query = self.arguments["query"]
+            return f"Extract records for the request {query!r} with the fields {fields}."
         style = self.arguments.get("style", "brief")
         return f"Summarize the thread {self.arguments['thread_id']} in the {style} style."
 
     @property
     def embedded_query(self) -> str | None:
         """The text the tool embeds for retrieval, which the index build
-        must hold a query vector for: the question, topic or conclusion.
+        must hold a query vector for: the question, extraction query, topic
+        or conclusion.
         ``None`` for a summary, whose thread is looked up by ID."""
         argument = _TEXT_ARGUMENT.get(self.tool)
         return None if argument is None else str(self.arguments[argument])
@@ -215,6 +241,25 @@ def _scope_filters_ok(args: dict[str, Any]) -> bool:
     )
 
 
+def _extract_arguments_ok(args: dict[str, Any]) -> bool:
+    """An extraction's ``schema`` is a non-empty object, its ``limit``,
+    when given, an integer in the handler's range (it would clamp any
+    other value, a task and a call count the case does not state), and
+    its filters have the handler's types."""
+    limit = args.get("limit", 1)
+    return (
+        isinstance(args.get("schema"), dict)
+        and bool(args["schema"])
+        and type(limit) is int
+        and 1 <= limit <= _MAX_EXTRACT_LIMIT
+        and ("folders" not in args or _str_list(args["folders"]))
+        and all(
+            isinstance(args.get(k, ""), str)
+            for k in ("date_from", "date_to", "from_name", "participant")
+        )
+    )
+
+
 def _refs(value: object) -> bool:
     return isinstance(value, list) and _str_list(value) and all(_REF.fullmatch(v) for v in value)
 
@@ -242,7 +287,17 @@ def _parse_case(row: dict[str, Any]) -> Case:
                 cid,
                 f"conclusion must be at most {_MAX_CONCLUSION_CHARS} characters",
             )
-        _require(_scope_filters_ok(args), cid, "scope filter types")
+        if tool == "extract_from_emails":
+            _require(_extract_arguments_ok(args), cid, "schema, limit or filter types")
+            # The handler refuses these names before any work (#329),
+            # which would grade as a tool error rather than a bad case.
+            _require(
+                not set(_PROVENANCE_FIELDS) & _declared_fields(args["schema"]),
+                cid,
+                f"schema must not declare {', '.join(_PROVENANCE_FIELDS)}",
+            )
+        else:
+            _require(_scope_filters_ok(args), cid, "scope filter types")
     else:
         thread_id = args.get("thread_id")
         _require(
