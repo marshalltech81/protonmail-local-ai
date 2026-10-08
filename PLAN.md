@@ -469,8 +469,6 @@ can be revisited with an explicit owner decision.
   consumer needs it)
 - parser/chunk generation coexistence machinery (the pipeline
   manifest preserves stage identity meanwhile)
-- attachment download support (trigger: the read-only action-path
-  decision it was always gated on)
 - replacing the stdlib MIME parser (decided 2026-09-30): Python's
   `email` package never exposes raw part offsets; the one real
   candidate is Stalwart's Rust `mail-parser` via pyo3, an architecture
@@ -801,6 +799,15 @@ superseded entries keep their number and one line.
     P1s come first, #1086 leads the predicate work, reasoning is gated
     by measured answer quality rather than features, and embedder swap
     without code change (#719) is optional. A deployment gate was added.
+39. **Attachment export (2026-10-08, #1217):** original attachment
+    bytes are delivered by an operator command, not through MCP: a
+    one-off, no-network container that reads the Maildir read-only,
+    verifies each file and payload against its stored hashes, and
+    writes only to a destination the owner approves for that run.
+    `search_attachments` returns each hit's `attachment_occurrence_id`
+    to select from. The MCP server stays read-only with no Maildir
+    access; a download route or resource needs its own decision. This
+    resolves the "attachment download support" deferral.
 
 ## Notes for Agents
 
