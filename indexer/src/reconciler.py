@@ -39,7 +39,7 @@ from .chunker import mean_vector
 from .database import Database
 from .embedder import EmbeddingBackend, scrub_embed_error
 from .maildir import is_trashed, resolve_current_path
-from .parser import OversizedMessageError, parse_email
+from .parser import OversizedMessageError, _derive_folder, parse_email
 from .threader import Thread, Threader
 
 log = logging.getLogger("indexer.reconciler")
@@ -128,59 +128,89 @@ class Reconciler:
         """Walk every indexed file, update filepaths after flag renames, and
         record tombstones for ``T``-flagged files. Returns a small summary
         dict for logging/tests.
+
+        A message whose mapped file is gone is first matched against the
+        other indexed paths with the same bytes (#1102): byte-identical
+        files share one claimant ID, and the mapping holds only one of
+        their paths. When such a copy still exists the message is remapped
+        to it and the usual trash rule applies to the copy; only a message
+        with no surviving copy is tombstoned as missing.
         """
-        tombstoned = 0
-        cleared = 0
-        renamed = 0
-        missing = 0
+        counts = {"tombstoned": 0, "cleared": 0, "renamed": 0, "missing": 0, "remapped": 0}
 
         listings: dict[Path, dict[str, Path]] = {}
+        gone = []
         for row in self.db.iter_message_map():
             stored = Path(row["filepath"])
             current = resolve_current_path(stored, listings)
 
             if current is None:
-                # File fully gone — under Expunge None this is unexpected, but
-                # treat it as a tombstone so the index can heal. The reaper
-                # will still wait out the grace window before acting.
-                if self.db.add_pending_deletion(
-                    row["filepath"], row["claimant_id"], row["thread_id"]
-                ):
-                    missing += 1
+                # Settled after the walk, with one lookup for all of them.
+                gone.append(row)
                 continue
 
             if str(current) != row["filepath"]:
                 # mbsync renamed the file for a non-deletion flag change
                 # (e.g. S → SR). Keep the stored path aligned.
                 self.db.update_filepath(row["filepath"], str(current))
-                renamed += 1
+                counts["renamed"] += 1
 
-            current_filepath = str(current)
-            if is_trashed(current):
-                if self.db.add_pending_deletion(
-                    current_filepath, row["claimant_id"], row["thread_id"]
-                ):
-                    tombstoned += 1
-            elif self.db.has_pending_deletion(current_filepath):
-                # mbsync reversed the T flag before the grace window expired —
-                # the message is alive again, clear the tombstone.
-                self.db.clear_pending_deletion(current_filepath)
-                cleared += 1
+            self._apply_trash_rule(row, current, counts)
 
-        if tombstoned or cleared or renamed or missing:
-            log.info(
-                "reconciler sweep: tombstoned=%d cleared=%d renamed=%d missing=%d",
-                tombstoned,
-                cleared,
-                renamed,
-                missing,
+        copies = self.db.find_identical_copies([row["claimant_id"] for row in gone])
+        for row in gone:
+            copy = next(
+                (
+                    found
+                    for path in copies.get(row["claimant_id"], [])
+                    if (found := resolve_current_path(Path(path), listings)) is not None
+                ),
+                None,
             )
-        return {
-            "tombstoned": tombstoned,
-            "cleared": cleared,
-            "renamed": renamed,
-            "missing": missing,
-        }
+            if copy is not None:
+                stored = Path(row["filepath"])
+                dest_folder = _derive_folder(copy, self.maildir_root)
+                self.db.update_filepath(
+                    row["filepath"],
+                    str(copy),
+                    folder=(
+                        dest_folder
+                        if dest_folder != _derive_folder(stored, self.maildir_root)
+                        else None
+                    ),
+                )
+                counts["remapped"] += 1
+                self._apply_trash_rule(row, copy, counts)
+                continue
+            # File fully gone — under Expunge None this is unexpected, but
+            # treat it as a tombstone so the index can heal. The reaper
+            # will still wait out the grace window before acting.
+            if self.db.add_pending_deletion(row["filepath"], row["claimant_id"], row["thread_id"]):
+                counts["missing"] += 1
+
+        if any(counts.values()):
+            log.info(
+                "reconciler sweep: tombstoned=%d cleared=%d renamed=%d missing=%d remapped=%d",
+                counts["tombstoned"],
+                counts["cleared"],
+                counts["renamed"],
+                counts["missing"],
+                counts["remapped"],
+            )
+        return counts
+
+    def _apply_trash_rule(self, row, current: Path, counts: dict[str, int]) -> None:
+        """Tombstone ``current`` when it is ``T``-flagged; clear its
+        tombstone when mbsync reversed the flag within the grace window."""
+        current_filepath = str(current)
+        if is_trashed(current):
+            if self.db.add_pending_deletion(current_filepath, row["claimant_id"], row["thread_id"]):
+                counts["tombstoned"] += 1
+        elif self.db.has_pending_deletion(current_filepath):
+            # mbsync reversed the T flag before the grace window expired —
+            # the message is alive again, clear the tombstone.
+            self.db.clear_pending_deletion(current_filepath)
+            counts["cleared"] += 1
 
     def handle_moved(self, src_path: str, dest_path: str, *, folder: str | None = None) -> None:
         """Live tombstone detection from watchdog ``on_moved`` events.

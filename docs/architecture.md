@@ -1672,6 +1672,22 @@ not carried across a rebuild of the index from Maildir (reaped files
 are not reindexed), so after a rebuild an earlier reap reads as "not
 found".
 
+**Byte-identical copies.** Two files with the same bytes share one
+claimant ID (see *Claimant IDs*), so `message_thread_map` holds only
+the path indexed last, while `indexed_files` holds both (#1102). When the
+sweep finds a message's mapped file gone, it first looks for another
+indexed path with the same `content_hash` that still exists, in one
+query per sweep covering every missing message. If one exists, the
+message is remapped to that copy (its locator, folder and S/F/R state,
+any tombstone or queued job on the old path moving with it, as for a
+rename) instead of being tombstoned as missing; the trash rule then
+applies to the copy as to any file, so a `T`-flagged copy is tombstoned
+and a restored one clears an earlier tombstone. The sweep's INFO line
+counts these as `remapped=N`. Only a message with no surviving copy is
+tombstoned as missing, so removing every copy still reaps it as before.
+Without this, the surviving copy stayed marked indexed after the reap
+and no later walk re-queued it, so mail still on disk left search.
+
 A **mass-delete brake** (`INDEXER_DELETION_MAX_BATCH_PCT`, default 5%) caps
 the fraction of total indexed messages the reaper will touch in a single
 pass. Transient Bridge outages (vault rebuilds, folder renames, auth

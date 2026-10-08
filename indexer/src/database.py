@@ -2435,6 +2435,35 @@ class Database:
         ).fetchall()
 
     @_synchronized
+    def find_identical_copies(self, claimant_ids: list[str]) -> dict[str, list[str]]:
+        """Other indexed paths holding the same bytes as each claimant.
+
+        Byte-identical files share one claimant ID, and the mapping keeps
+        only the last path indexed; ``indexed_files`` keeps every path
+        (#1102). Returns ``claimant_id -> [filepath, ...]`` (path order)
+        for the paths whose ``content_hash`` matches the claimant's and
+        that are not its mapped path. One query, whatever the count: the
+        IDs travel as a single JSON array.
+        """
+        if not claimant_ids:
+            return {}
+        rows = self._conn.execute(
+            "SELECT msg.claimant_id, f.filepath "
+            "FROM messages msg "
+            "JOIN message_thread_map m ON m.claimant_id = msg.claimant_id "
+            "JOIN indexed_files f ON f.content_hash = msg.content_hash "
+            "AND f.filepath != m.filepath "
+            "WHERE msg.claimant_id IN (SELECT value FROM json_each(?)) "
+            "AND msg.content_hash IS NOT NULL "
+            "ORDER BY msg.claimant_id, f.filepath",
+            (json.dumps(claimant_ids),),
+        ).fetchall()
+        copies: dict[str, list[str]] = {}
+        for row in rows:
+            copies.setdefault(row["claimant_id"], []).append(row["filepath"])
+        return copies
+
+    @_synchronized
     def find_message_entry_by_filepath(self, filepath: str) -> sqlite3.Row | None:
         return self._conn.execute(
             "SELECT claimant_id, message_id, thread_id, filepath FROM message_thread_map "

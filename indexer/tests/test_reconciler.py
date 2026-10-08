@@ -251,6 +251,190 @@ class TestSweep:
 
 
 # ---------------------------------------------------------------------------
+# Byte-identical copies (#1102)
+# ---------------------------------------------------------------------------
+
+_COPY_MARKER = "ZQXCOPYMARKER1102"
+
+
+def _index_copies(db, threader, first: Path, second: Path, message_id: str) -> str:
+    """Index ``first`` and a byte-identical copy at ``second``. Both claim
+    one claimant ID, so the mapping keeps only ``second``, the latest."""
+    _write_eml(first, message_id, subject=f"Subject {_COPY_MARKER}", body=_COPY_MARKER)
+    second.parent.mkdir(parents=True, exist_ok=True)
+    second.write_bytes(first.read_bytes())
+    thread_id = _index(first, db, threader)
+    assert _index(second, db, threader) == thread_id
+    assert db.find_message_entry_by_filepath(str(second)) is not None
+    assert db.is_indexed(str(first))
+    return thread_id
+
+
+def _message_row(db, claimant_id: str):
+    return db._conn.execute(
+        "SELECT filepath, folder, replied FROM messages WHERE claimant_id = ?", (claimant_id,)
+    ).fetchone()
+
+
+def _restart(db, embedder, maildir_root: Path) -> int:
+    """What a restart does: the rename sweep, the Maildir walk (returns
+    how many files it queued), then the reconciler sweep and reap."""
+    from src import main
+    from src.queue import REASON_INITIAL_SCAN, IndexingQueue
+
+    sweep_paths(db)
+    queued = main._enqueue_unindexed_messages(
+        db, IndexingQueue(db), maildir_root, REASON_INITIAL_SCAN, skip_trashed=True
+    )
+    rec = Reconciler(db, embedder, _default_config())
+    rec.sweep()
+    rec.reap()
+    return queued
+
+
+class TestByteIdenticalCopies:
+    def test_removing_the_mapped_copy_keeps_the_message_through_the_other(
+        self, db, threader, embedder, maildir, caplog
+    ):
+        """#1102: the sweep only saw the mapped path, tombstoned the
+        claimant as missing and the reaper removed it, while the other
+        copy stayed marked indexed, so a restart never re-queued it."""
+        kept = maildir / "1700000000.M1.host:2,S"
+        mapped = maildir / "1700000001.M2.host:2,S"
+        thread_id = _index_copies(db, threader, kept, mapped, "copy@example.com")
+        claimant = db.find_message_entry_by_filepath(str(mapped))["claimant_id"]
+        mapped.unlink()
+
+        rec = Reconciler(db, embedder, _default_config())
+        with caplog.at_level(logging.INFO, logger="indexer.reconciler"):
+            summary = rec.sweep()
+            reaped = rec.reap()
+
+        # A restart queues nothing (the copy is still marked indexed).
+        assert _restart(db, embedder, maildir.parent.parent) == 0
+        assert db.get_thread(thread_id) is not None
+        assert reaped["threads_reaped"] == 0
+        assert summary["remapped"] == 1
+        assert summary["missing"] == 0
+        assert count_pending_deletions(db) == 0
+        assert db.find_message_entry_by_filepath(str(kept))["claimant_id"] == claimant
+        assert _message_row(db, claimant)["filepath"] == str(kept)
+        assert db.is_indexed(str(kept))
+        assert not db.is_indexed(str(mapped))
+        fts = db._conn.execute(
+            "SELECT 1 FROM threads_fts WHERE threads_fts MATCH ?", (_COPY_MARKER,)
+        ).fetchall()
+        assert fts
+        line = next(r for r in caplog.records if "remapped=1" in r.getMessage())
+        assert line.levelno == logging.INFO
+        assert _COPY_MARKER not in caplog.text
+        assert "copy@example.com" not in caplog.text
+
+    def test_removing_both_copies_still_reaps(self, db, threader, embedder, maildir):
+        kept = maildir / "1700000000.M1.host:2,S"
+        mapped = maildir / "1700000001.M2.host:2,S"
+        thread_id = _index_copies(db, threader, kept, mapped, "both@example.com")
+        kept.unlink()
+        mapped.unlink()
+
+        rec = Reconciler(db, embedder, _default_config())
+        summary = rec.sweep()
+        reaped = rec.reap()
+
+        assert summary["missing"] == 1
+        assert summary.get("remapped", 0) == 0
+        assert reaped["threads_reaped"] == 1
+        assert db.get_thread(thread_id) is None
+        assert db.count_total_messages() == 0
+
+    def test_a_copy_in_another_folder_carries_its_folder(self, db, threader, embedder, maildir):
+        kept = maildir.parent.parent / "Archive" / "cur" / "1700000000.M1.host:2,RS"
+        mapped = maildir / "1700000001.M2.host:2,S"
+        _index_copies(db, threader, kept, mapped, "folder@example.com")
+        claimant = db.find_message_entry_by_filepath(str(mapped))["claimant_id"]
+        assert _message_row(db, claimant)["folder"] == "INBOX"
+        mapped.unlink()
+
+        assert Reconciler(db, embedder, _default_config()).sweep()["remapped"] == 1
+
+        row = _message_row(db, claimant)
+        assert row["filepath"] == str(kept)
+        assert row["folder"] == "Archive"
+        assert row["replied"] == 1
+
+    def test_a_trashed_copy_is_remapped_then_tombstoned_as_today(
+        self, db, threader, embedder, maildir
+    ):
+        """The guard only changes which path the claimant maps to; the
+        trash rule then applies to that path unchanged."""
+        kept = maildir / "1700000000.M1.host:2,ST"
+        mapped = maildir / "1700000001.M2.host:2,S"
+        _index_copies(db, threader, kept, mapped, "trashedcopy@example.com")
+        mapped.unlink()
+
+        summary = Reconciler(db, embedder, _default_config()).sweep()
+
+        assert summary["remapped"] == 1
+        assert summary["tombstoned"] == 1
+        assert db.has_pending_deletion(str(kept))
+
+    def test_a_tombstone_written_before_the_remap_is_cleared(self, db, threader, embedder, maildir):
+        """A missing-file tombstone written before the guard existed (or
+        earlier in the grace window) moves with the remap and is cleared."""
+        kept = maildir / "1700000000.M1.host:2,S"
+        mapped = maildir / "1700000001.M2.host:2,S"
+        thread_id = _index_copies(db, threader, kept, mapped, "earlier@example.com")
+        entry = db.find_message_entry_by_filepath(str(mapped))
+        db.add_pending_deletion(str(mapped), entry["claimant_id"], entry["thread_id"])
+        mapped.unlink()
+
+        rec = Reconciler(db, embedder, _default_config())
+        summary = rec.sweep()
+
+        assert summary["remapped"] == 1
+        assert summary["cleared"] == 1
+        assert count_pending_deletions(db) == 0
+        assert rec.reap()["threads_reaped"] == 0
+        assert db.get_thread(thread_id) is not None
+
+    def test_one_candidate_query_per_sweep(self, db, threader, embedder, maildir):
+        for n in range(3):
+            mapped = maildir / f"170000001{n}.M{n}.host:2,S"
+            _index_copies(
+                db,
+                threader,
+                maildir / f"170000000{n}.K{n}.host:2,S",
+                mapped,
+                f"many{n}@example.com",
+            )
+            mapped.unlink()
+        statements: list[str] = []
+        db._conn.set_trace_callback(statements.append)
+        try:
+            summary = Reconciler(db, embedder, _default_config()).sweep()
+        finally:
+            db._conn.set_trace_callback(None)
+
+        assert summary["remapped"] == 3
+        lookups = [s for s in statements if "content_hash" in s and "indexed_files f" in s]
+        assert len(lookups) == 1, lookups
+
+    def test_no_candidate_query_when_nothing_is_missing(self, db, threader, embedder, maildir):
+        kept = maildir / "1700000000.M1.host:2,S"
+        mapped = maildir / "1700000001.M2.host:2,S"
+        _index_copies(db, threader, kept, mapped, "present@example.com")
+        statements: list[str] = []
+        db._conn.set_trace_callback(statements.append)
+        try:
+            summary = Reconciler(db, embedder, _default_config()).sweep()
+        finally:
+            db._conn.set_trace_callback(None)
+
+        assert summary["remapped"] == 0
+        assert not [s for s in statements if "indexed_files f" in s]
+
+
+# ---------------------------------------------------------------------------
 # sweep_paths — always-on startup rename sweep
 # ---------------------------------------------------------------------------
 
