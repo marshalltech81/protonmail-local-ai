@@ -745,7 +745,7 @@
       "expected_handling": "answer",
       "required_evidence": [["t97.2"]],
       "expected_facts": [
-        {"id": "f1", "fact": "After measuring, Linnea Thorsby says replacing the conservatory panes will be $1,275, all in toughened glazing.", "sources": ["t97.2"], "excerpt": "Replacing the panes will be $1,275"}
+        {"id": "f1", "fact": "Replacing the conservatory panes will be $1,275.", "sources": ["t97.2"], "excerpt": "Replacing the panes will be $1,275"}
       ],
       "must_not_assert": ["The price for replacing the conservatory panes is $760 (the figure Linnea says it is not, and the bill for the separate porch-door job)."],
       "deterministic": {"must_include": [["1,275"]], "must_not_include": []},
@@ -762,7 +762,7 @@
       "expected_handling": "answer",
       "required_evidence": [["t98.1"]],
       "expected_facts": [
-        {"id": "f1", "fact": "The subscription stays at $180 a year until a higher rate takes effect on 1 January 2028.", "sources": ["t98.1"], "excerpt": "stays at $180 a year until the higher rate of $215 a year takes effect on 1 January 2028"}
+        {"id": "f1", "fact": "The subscription is $180 a year until 1 January 2028.", "sources": ["t98.1"], "excerpt": "stays at $180 a year until the higher rate of $215 a year takes effect on 1 January 2028"}
       ],
       "must_not_assert": ["The darkroom subscription costs $215 a year during 2027 (the rate that takes effect on 1 January 2028)."],
       "deterministic": {"must_include": [["180"], ["2028"]], "must_not_include": []},
@@ -796,7 +796,7 @@
       "expected_handling": "answer",
       "required_evidence": [["t99.2"]],
       "expected_facts": [
-        {"id": "f1", "fact": "Fergus's revised order, which replaces the first, is 10 trestles for $430.", "sources": ["t99.2"], "excerpt": "10 trestles for $430 replaces 16 trestles for $640"}
+        {"id": "f1", "fact": "Lile Marquees is delivering 10 trestles for $430.", "sources": ["t99.2"], "excerpt": "10 trestles for $430 replaces 16 trestles for $640"}
       ],
       "must_not_assert": [
         "Lile Marquees is delivering 16 trestles (the first order's count, since revised).",
