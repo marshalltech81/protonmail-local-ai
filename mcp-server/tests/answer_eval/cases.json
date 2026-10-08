@@ -756,7 +756,7 @@
       "id": "ask-darkroom-rate-2027",
       "category": "exact_fact",
       "tool": "ask_mailbox",
-      "arguments": {"question": "What will my darkroom subscription at Fenwick Arts Centre cost during 2027?"},
+      "arguments": {"question": "What will my darkroom subscription at Fenwick Arts Centre cost during 2027, and until when does that rate hold?"},
       "held_out": true,
       "answerable": true,
       "expected_handling": "answer",

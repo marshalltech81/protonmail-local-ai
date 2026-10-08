@@ -45,7 +45,7 @@ from tests.answer_eval.runner import Passage, ProviderBillingError, is_billing_e
 
 # Bump on any change to the rubric, the prompt or the verdict schema:
 # runs graded under different versions are not comparable.
-RUBRIC_VERSION = "ask-rubric-5"
+RUBRIC_VERSION = "ask-rubric-6"
 
 CLAIM_VERDICTS = ("supported", "contradicted", "insufficient_evidence")
 DIMENSION_RESULTS = ("pass", "fail", "not_applicable")
@@ -72,7 +72,8 @@ RUBRIC = {
     "citation_support": "Each cited passage supports the statement it is attached to.",
     "completeness": "Every reference fact, and every source it needs, is represented.",
     "temporal_reasoning": "A later correction is honored; a newer message is not assumed "
-    "authoritative when it does not change the fact.",
+    "authoritative when it does not change the fact; a value with a stated effective date "
+    "applies only from that date.",
     "conflict_uncertainty": "Disagreement between sources is disclosed; missing or omitted "
     "evidence produces an explicit abstention or caveat rather than a guess.",
     "relevance": "The answer addresses the question without unsupported additions.",

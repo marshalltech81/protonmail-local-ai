@@ -765,7 +765,7 @@ the prompt and cited, so a failure is attributed to `retrieval`,
 `prompt_assembly`, `synthesis`, `evaluator_infrastructure` or
 `answer_infrastructure` (several may apply; `unknown` otherwise).
 
-The judge (`judge.py`, rubric `ask-rubric-5`) receives the question
+The judge (`judge.py`, rubric `ask-rubric-6`; `-6` added effective dates to `temporal_reasoning`, #911) receives the question
 (for another tool, the tool and its task; an `ask_mailbox` prompt is
 unchanged by #656, so the rubric version stays),
 expected handling (for `disclose_missing`, with the tool's
