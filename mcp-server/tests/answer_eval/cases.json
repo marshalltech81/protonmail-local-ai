@@ -1,5 +1,5 @@
 {
-  "_comment": "Answer-quality cases for ask_mailbox over the synthetic baseline mailbox (indexer/tests/baseline/corpus.py). Synthetic data only: never add a case built from a real mailbox. Message refs 'tNN.M' mean 'tNN.M@baseline.example'; thread refs 'tNN' mean the thread rooted at 'tNN.1@baseline.example'. required_evidence is a list of groups: every group is required and any one ref inside a group satisfies it. Each expected fact lists the message refs and a short verbatim excerpt of the indexed text that establishes it; make baseline checks each excerpt is in that message's indexed text, so references stay independent of what the system retrieves. deterministic.must_include is a list of groups of acceptable spellings (every group required, any spelling in a group satisfies it, case-insensitive substring of the answer). must_include checks that a value is present, not that the answer asserts it: an answer that names the value only to deny or correct it still passes, so correctness needs the judge. must_not_include lists strings no answer may contain. criteria say which rubric dimensions apply; the judge may not mark an applicable one not_applicable. held_out must equal tests/agent_metrics.py is_held_out(id); never tune against held-out cases. review records that the expected facts were drafted with AI from the synthetic corpus and await owner verification.",
+  "_comment": "Answer-quality cases for ask_mailbox and summarize_thread over the synthetic baseline mailbox (indexer/tests/baseline/corpus.py). A case id starts with its tool's short name (ask-, summarize-); a summarize_thread case names a baseline thread ID directly (nothing is embedded) and its evidence must be in that thread (the per-tool argument rules are in cases.py). Synthetic data only: never add a case built from a real mailbox. Message refs 'tNN.M' mean 'tNN.M@baseline.example'; thread refs 'tNN' mean the thread rooted at 'tNN.1@baseline.example'. required_evidence is a list of groups: every group is required and any one ref inside a group satisfies it. Each expected fact lists the message refs and a short verbatim excerpt of the indexed text that establishes it; make baseline checks each excerpt is in that message's indexed text, so references stay independent of what the system retrieves. deterministic.must_include is a list of groups of acceptable spellings (every group required, any spelling in a group satisfies it, case-insensitive substring of the answer). must_include checks that a value is present, not that the answer asserts it: an answer that names the value only to deny or correct it still passes, so correctness needs the judge. must_not_include lists strings no answer may contain. criteria say which rubric dimensions apply; the judge may not mark an applicable one not_applicable. held_out must equal tests/agent_metrics.py is_held_out(id); never tune against held-out cases. review records that the expected facts were drafted with AI from the synthetic corpus and await owner verification.",
   "schema_version": 1,
   "cases": [
     {
@@ -675,6 +675,47 @@
       ],
       "deterministic": {"must_include": [["B-14"], ["$45"]], "must_not_include": ["C-3", "$70"]},
       "criteria": {"factual_correctness": true, "citation_support": true, "completeness": true, "temporal_reasoning": false, "conflict_uncertainty": false, "relevance": true},
+      "review": "ai_drafted"
+    },
+    {
+      "id": "summarize-pool-bids",
+      "category": "exact_fact",
+      "tool": "summarize_thread",
+      "arguments": {"thread_id": "t05.1@baseline.example", "style": "brief"},
+      "held_out": true,
+      "answerable": true,
+      "expected_handling": "answer",
+      "required_evidence": [["t05"]],
+      "expected_facts": [
+        {"id": "f1", "fact": "Three pool resurfacing bids came in: Bluewater Pools at $38,400, Crestline Aquatics at $44,900 and Tidewater Plaster at $47,250.", "sources": ["t05.1"], "excerpt": "Bluewater Pools at $38,400, Crestline Aquatics at $44,900, and Tidewater Plaster at $47,250"},
+        {"id": "f2", "fact": "The committee will present Bluewater and Crestline to the board.", "sources": ["t05.3"], "excerpt": "present Bluewater and Crestline to the board"}
+      ],
+      "must_not_assert": [
+        "A bid was accepted or a contractor chosen."
+      ],
+      "deterministic": {"must_include": [["Bluewater"], ["Crestline"]], "must_not_include": []},
+      "criteria": {"factual_correctness": true, "citation_support": true, "completeness": true, "temporal_reasoning": false, "conflict_uncertainty": false, "relevance": true},
+      "review": "ai_drafted"
+    },
+    {
+      "id": "summarize-hall-open-points",
+      "category": "prompt_budget",
+      "tool": "summarize_thread",
+      "arguments": {"thread_id": "t62.1@baseline.example", "style": "action-items"},
+      "settings": {"prompt_tokens": 1600},
+      "held_out": false,
+      "answerable": true,
+      "expected_handling": "disclose_missing",
+      "required_evidence": [["t62.53"]],
+      "expected_facts": [
+        {"id": "f1", "fact": "Blair owes the redline of the warranty section and will send it by October 16.", "sources": ["t62.53"], "excerpt": "redline of the warranty section, which I will send by October 16", "values": ["October 16"]},
+        {"id": "f2", "fact": "Blair is waiting on Morgan for the contractor's lien waiver before the final payment can go out.", "sources": ["t62.53"], "excerpt": "waiting on Morgan for the contractor's lien waiver before the final payment", "values": ["lien waiver"]}
+      ],
+      "must_not_assert": [
+        "An open point from the message the window left out (the warranty redline, the lien waiver) stated as an action item without saying the context was incomplete."
+      ],
+      "deterministic": {"must_include": [], "must_not_include": []},
+      "criteria": {"factual_correctness": true, "citation_support": true, "completeness": true, "temporal_reasoning": false, "conflict_uncertainty": true, "relevance": true},
       "review": "ai_drafted"
     }
   ]

@@ -166,7 +166,8 @@ def _run(args: argparse.Namespace) -> int:
     db = Database(str(args.index_dir / "mail.db"))
     index = index_identity(db)  # refuses anything but the synthetic corpus
     vectors = json.loads((args.index_dir / "query_vectors.json").read_text(encoding="utf-8"))
-    if any(c.question not in vectors for c in cases):
+    # A summarize_thread case looks its thread up by ID and embeds nothing.
+    if any(c.embedded_query is not None and c.embedded_query not in vectors for c in cases):
         raise CaseError("some case questions have no query vector; rebuild the index with cases")
 
     answerer = load_layer("INFERENCE", os.environ, args.secrets_dir)

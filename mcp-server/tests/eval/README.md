@@ -246,7 +246,8 @@ separately.
   client's trace exists yet (#283).
 - Whether the answer explains its reading of "TOFU", and how confident
   it sounds, are prose, which the agent scorers do not grade. The
-  answer-quality judge grades only `ask_mailbox` answers.
+  answer-quality judge grades the intelligence tools' own answers
+  (`ask_mailbox`, `summarize_thread`), not an agent's.
 - Incomplete indexing cannot be exercised on the fully built baseline
   index, so whether an answer discloses it is untested.
 
@@ -368,8 +369,9 @@ the reference traces are the only traces scored today.
 
 No live tool-using agent harness exists (#283, #775, #798). Every
 scored trace is scripted, so nothing here measures what a real agent
-does with the tools; `make eval-answers` runs only `ask_mailbox`'s own
-model, not an agent choosing tools.
+does with the tools; `make eval-answers` runs only the intelligence
+tools' own model (`ask_mailbox`, `summarize_thread`), not an agent
+choosing tools.
 
 The smallest extension, proposed and not built:
 
@@ -389,13 +391,15 @@ The smallest extension, proposed and not built:
   by `score_trace`. Recorded traces stay git-ignored, like
   `.answer-eval/`.
 
-## Answer-quality evaluation (`ask_mailbox`, synthetic corpus)
+## Answer-quality evaluation (`ask_mailbox`, `summarize_thread`; synthetic corpus)
 
-`tests/answer_eval/` runs the real `ask_mailbox` handler, captures what
-its model actually received, and grades the answer twice: deterministic
-checks first, then an optional, separately configured AI judge. It is an
-offline development tool (#604): it changes nothing in the server, the
-containers or the tool outputs.
+`tests/answer_eval/` runs the real `ask_mailbox` and `summarize_thread`
+handlers (#656; `extract_from_emails` has no adapter yet, #1137, nor
+have the experimental `brief_issue` and `check_conclusion`, #291), captures what each
+model call actually received, and grades the answer twice:
+deterministic checks first, then an optional, separately configured AI
+judge. It is an offline development tool (#604): it changes nothing in
+the server, the containers or the tool outputs.
 
 **Synthetic data only.** The runner refuses any index that is not the
 committed synthetic corpus: its claimant IDs must be exactly those
@@ -416,7 +420,8 @@ Cases must never be built from real mail.
 ### Cases
 
 `tests/answer_eval/cases.json` (schema v1, loaded and validated by
-`cases.py`) holds 38 cases over the baseline corpus: exact facts,
+`cases.py`) holds 40 cases over the baseline corpus: 38 for
+`ask_mailbox` and two for `summarize_thread` (below). The `ask_mailbox` cases: exact facts,
 attachment-only answers, multiple required threads (including
 `ask-tofu-summary`, a summary of the four genuine messages of the
 counting scenario that must not repeat their PINs or link), narrow filters
@@ -440,12 +445,28 @@ which rubric dimensions apply. Held-out membership is
 `is_held_out(id)`, as for the agent scenarios; tune nothing against
 held-out cases.
 
+**Other tools (#656).** A case's `tool` is `ask_mailbox` or
+`summarize_thread`, and its id starts with the tool's short name
+(`ask-`, `summarize-`). A
+`summarize_thread` case names a baseline thread ID directly and one of
+the tool's four styles (the handler would summarize any other as
+`brief`); nothing is embedded for it, and its evidence and fact
+sources must all be in that thread, the only one the tool reads. The
+same fields apply to every tool: `required_evidence`, `expected_facts`
+with corpus excerpts, `must_include` / `must_not_include` (matched
+against the answer or the summary), expected handling and criteria. The shipped cases:
+`summarize-pool-bids` (a brief summary of a three-message thread),
+`summarize-hall-open-points` (an action-items summary of a 56-message
+thread under a 1,600-token prompt window, `settings.prompt_tokens`, so
+the window leaves out the message holding the two open points: a
+`disclose_missing` case, like `ask-kayak-tight-budget`).
+
 `make baseline` checks every excerpt is in the indexed text of the
 message it cites, so a reference cannot drift from the corpus or rest on
 what retrieval returned, and runs every case through the real handler
-with a scripted answerer and judge. The expected facts were drafted with
-AI from the synthetic corpus and are marked `"review": "ai_drafted"`
-until the owner verifies them.
+of its tool with a scripted answerer and judge. The expected facts were
+drafted with AI from the synthetic corpus and are marked
+`"review": "ai_drafted"` until the owner verifies them.
 
 ### Run
 
@@ -489,7 +510,7 @@ call, it prints how many calls it will make and to which models (the
 `INFERENCE_MODEL` and `JUDGE_MODEL` settings), for example:
 
 ```text
-Planned provider calls: 38 answer calls to <model> (up to 38 more for citation repairs) and 38 judge calls to <model>; at most 114 provider calls.
+Planned provider calls: 40 answer calls to <model> (up to 40 more for citation repairs) and 40 judge calls to <model>; at most 120 provider calls.
 ```
 
 That is one answer call per selected case, plus a second (a citation
@@ -671,8 +692,9 @@ cap below, count launches, not model requests.
   `compare` lists a changed timeout under "Changed between runs" and
   treats the runs as not comparable (#997).
 
-Retrieval uses the baseline's hashed embedder (query vectors precomputed
-at build time) and no reranker, so a run measures prompt assembly,
+Retrieval uses the baseline's hashed embedder (query vectors for the
+case questions precomputed at build time; a summary looks its thread
+up by ID) and no reranker, so a run measures prompt assembly,
 inference and the judge on a frozen corpus and index. The hashed
 embedder has no semantics: one question (`ask-lisbon-dates`) misses
 its thread, which the report attributes to retrieval. A real-model synthetic index is a follow-up.
@@ -682,10 +704,20 @@ its thread, which the report attributes to retrieval. A real-model synthetic ind
 Two narrow wrappers capture each run in memory: the inference client
 (every request and reply, so the evidence is the prompt actually sent
 after truncation, deduplication, fallback thread text and budgeting; a
-repair call resends that prompt with a fixed instruction) and
-`_build_evidence`'s label map (each label's thread, message, claimant
-and chunk). A check confirms every captured label is in the prompt the
-model received.
+repair call resends that prompt with a fixed instruction) and the
+handlers' evidence builders' label maps (`_build_evidence` for
+`ask_mailbox`, `_summarize_context` for `summarize_thread`, whose first
+map is the prompt's: each label's thread, message, claimant and chunk).
+A check confirms every captured label is in the prompt the model
+received.
+
+Every tool is graded through one view of its output (`adapters.py`,
+#656): `ask_mailbox`'s answer as it is; `summarize_thread`'s summary,
+with the one thread summarized as the threads and its window note as
+the coverage note. A summary passage the
+window cut short is captured as truncated, the thread's indexed text
+(E1, which has no chunk offsets) included, by comparing the shown map
+with the one the tool's caps alone would show.
 
 Deterministic checks (`graders.py`), never overridden by the judge:
 answer not cut off, capture consistent, cited labels resolve to
@@ -714,7 +746,9 @@ the prompt and cited, so a failure is attributed to `retrieval`,
 `prompt_assembly`, `synthesis`, `evaluator_infrastructure` or
 `answer_infrastructure` (several may apply; `unknown` otherwise).
 
-The judge (`judge.py`, rubric `ask-rubric-5`) receives the question,
+The judge (`judge.py`, rubric `ask-rubric-5`) receives the question
+(for another tool, the tool and its task; an `ask_mailbox` prompt is
+unchanged by #656, so the rubric version stays),
 expected handling (for `disclose_missing`, with the tool's
 `coverage_note`, labelled as server text and graded together with the
 answer, and the reference facts whose evidence was retrieved but left
@@ -747,8 +781,8 @@ they do not prove immunity.
 
 ### Reports and privacy
 
-The report holds opaque case IDs, categories, check results, fixed
-error categories, counts, rates per split and category, timings and
+The report holds opaque case IDs, categories, tools, check results, fixed
+error categories, counts, rates per split, category and tool, timings and
 safe identity labels: source commit, case-file and index hashes, schema
 and rubric versions, provider mode/model and whether each endpoint is
 host-local, remote or the SDK default, plus a 12-character hash of a
@@ -780,14 +814,16 @@ never fails a run. CI runs only the scripted path (`make baseline` and
 `tests/test_answer_eval.py`), with no provider or credential.
 
 Not yet covered (follow-ups): judge calibration against human labels
-and repeated runs to measure variation, quality thresholds, other
-intelligence tools, a real-model synthetic index, and token usage.
+and repeated runs to measure variation, quality thresholds,
+`extract_from_emails` (#1137), the experimental tools (`brief_issue`,
+`check_conclusion`; #656, #291), a real-model synthetic index, and
+token usage.
 
 ## What this harness does NOT do
 
-- The retrieval harness above does not run `ask_mailbox` or grade LLM
-  answers; the answer-quality evaluation does, on the synthetic corpus
-  only. Prompt-side settings such as `PER_THREAD_CHAR_BUDGET` only
+- The retrieval harness above does not run the intelligence tools or
+  grade LLM answers; the answer-quality evaluation does, on the
+  synthetic corpus only. Prompt-side settings such as `PER_THREAD_CHAR_BUDGET` only
   shape the context sent to the model after retrieval, so retrieval
   scores cannot measure them.
   Retrieval-only is the load-bearing piece — if the right thread shows

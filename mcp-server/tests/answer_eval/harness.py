@@ -59,15 +59,16 @@ async def evaluate(
         elif remaining <= 0:
             judge = JudgeOutcome(status="error", error="judge_runtime_budget_exhausted")
         else:
+            view = run.view
             judge = await judge_answer(
                 judge_client,
                 judge_config,
                 case,
-                run.output.answer,
+                view.answer,
                 run.passages,
                 bool(det.abstained),
-                statements=run.output.statements,
-                coverage_note=run.output.coverage_note,
+                statements=view.statements,
+                coverage_note=view.coverage_note,
                 omitted_facts=budget_omitted_facts(case, run),
                 timeout_secs=min(judge_config.timeout_secs, remaining),
             )
