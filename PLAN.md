@@ -804,6 +804,9 @@ superseded entries keep their number and one line.
     one-off, no-network container that reads the Maildir read-only,
     verifies each file and payload against its stored hashes, and
     writes only to a destination the owner approves for that run.
+    Only leaf attachments are exported: an attached email or other
+    MIME container is refused, because its stored hash covers a
+    re-serialised form, not the bytes as sent.
     `search_attachments` returns each hit's `attachment_occurrence_id`
     to select from. The MCP server stays read-only with no Maildir
     access; a download route or resource needs its own decision. This
