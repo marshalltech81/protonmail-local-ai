@@ -390,6 +390,23 @@ class TestContextTokens:
 
         asyncio.run(check())
 
+    def test_argument_model_rejections_are_logged_through_the_limiter(self, monkeypatch, caplog):
+        """The served server records a call its argument model refuses
+        as ``rejected invalid argument`` and drops fastmcp's own line (#1131)."""
+        from fastmcp import Client
+
+        [(server,)] = self._run_main(monkeypatch, context=4096, max_tokens=1024)
+
+        async def call():
+            async with Client(server) as client:
+                return await client.call_tool_mcp("list_threads", {"limit": "abc"})
+
+        with caplog.at_level(logging.INFO):
+            assert asyncio.run(call()).is_error
+        warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert "rejected invalid argument: list_threads.limit" in warnings
+        assert not any("Invalid arguments for tool" in w for w in warnings)
+
     def test_window_is_not_checked_without_inference(self, monkeypatch, caplog):
         caplog.set_level(logging.INFO)
         assert self._run_main(monkeypatch, context=1, max_tokens=1024, mode="none")

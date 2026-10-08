@@ -84,7 +84,9 @@ class ArgumentRejections(RateLimitedLog):
     call site, and a field outside ``FIELDS`` (the names the
     ``InvalidFilterError`` raisers and the tools' own checks use) is
     counted as ``other`` rather than raising, so a new field can never
-    change what the caller receives.
+    change what the caller receives. ``fields`` replaces ``FIELDS`` for
+    a caller with its own fixed set (the registered tools' parameter
+    names, #1131); ``other`` is always added.
     """
 
     FIELDS = (
@@ -109,10 +111,13 @@ class ArgumentRejections(RateLimitedLog):
         tools: tuple[str, ...],
         interval: float = 60.0,
         clock: Callable[[], float] = time.monotonic,
+        *,
+        fields: tuple[str, ...] = FIELDS,
     ) -> None:
+        self._fields = tuple(dict.fromkeys((*fields, "other")))
         super().__init__(
             logger,
-            tuple(f"{tool}.{field}" for tool in tools for field in self.FIELDS),
+            tuple(f"{tool}.{field}" for tool in tools for field in self._fields),
             interval,
             first_msg="rejected invalid argument: %s",
             summary_msg="rejected invalid arguments in the last %ds: %s",
@@ -120,4 +125,4 @@ class ArgumentRejections(RateLimitedLog):
         )
 
     def reject(self, tool: str, field: str) -> None:
-        self.record(f"{tool}.{field if field in self.FIELDS else 'other'}")
+        self.record(f"{tool}.{field if field in self._fields else 'other'}")
