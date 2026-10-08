@@ -15,9 +15,19 @@ with a reason.
   reports the outer name of a nested fallback (``${A:-${B}}``) and not
   value-less ``environment:`` entries (``- NAME``), so those are not
   covered.
-- The reverse direction (every key is still read) is not checked: it
-  needs the shell scripts and the Makefile scanned, which a text scan
-  does not do reliably (#929).
+- The reverse direction (#929): every ``.env.example`` key must reach a
+  service that reads it. For the indexer and mcp-server, every name in
+  the service's environment as Compose resolves it (``docker compose
+  config --format json`` over every overlay) must be a literal Python
+  read in that service's ``src/`` (``_NOT_READ_BY_PYTHON`` names the
+  exceptions), and a key counts as consumed when it is in such an
+  environment. ``_IDENTITY_SETTINGS`` entries are not reads here: a
+  name hashed for the config identity but no longer used still fails.
+  Keys read only by shell (the mbsync scripts and template) are listed
+  in ``_SHELL_ONLY`` with their reader; each entry must still be in its
+  service's resolved environment and in ``--variables``, but no shell
+  is scanned, so deleting the shell read alone is not caught. A shell
+  or YAML text scan drew a new edge case every review round in #925.
 
 It lives in the indexer suite because CI has no repo-root pytest job; it
 reads the mcp-server's sources by path."""
@@ -123,17 +133,17 @@ def _compose_files(repo: Path) -> list[Path]:
     return sorted({p for pattern in patterns for p in repo.glob(pattern)})
 
 
-def _compose_variables(repo: Path) -> set[str]:
-    """The variables Compose interpolates across every overlay, as Compose
-    itself reports them."""
+def _compose_config_json(repo: Path, *flags: str):
+    """``docker compose config <flags> --format json`` over every overlay,
+    parsed."""
     docker = shutil.which("docker")
     if docker is None:
         if os.environ.get("CI"):
-            pytest.fail("docker is required in CI to list the Compose variables")
+            pytest.fail("docker is required in CI to read the Compose configuration")
         pytest.skip("docker is not installed")
     files = [arg for path in _compose_files(repo) for arg in ("-f", str(path))]
     result = subprocess.run(  # nosec B603 - fixed argv, no shell
-        [docker, "compose", *files, "config", "--variables", "--format", "json"],
+        [docker, "compose", *files, "config", *flags, "--format", "json"],
         cwd=repo,
         capture_output=True,
         text=True,
@@ -141,7 +151,21 @@ def _compose_variables(repo: Path) -> set[str]:
         check=False,
     )
     assert result.returncode == 0, result.stderr
-    return set(json.loads(result.stdout))
+    return json.loads(result.stdout)
+
+
+def _compose_variables(repo: Path) -> set[str]:
+    """The variables Compose interpolates across every overlay, as Compose
+    itself reports them."""
+    return set(_compose_config_json(repo, "--variables"))
+
+
+def _service_environments(repo: Path) -> dict[str, set[str]]:
+    """Each service's environment names as Compose resolves them (every
+    overlay merged, value-less entries and nested defaults included).
+    Names only: the values are never kept."""
+    services = _compose_config_json(repo)["services"]
+    return {name: set(svc.get("environment") or {}) for name, svc in services.items()}
 
 
 # A key line, set (``VAR=``) or commented out (``# VAR=``).
@@ -191,6 +215,94 @@ def _read_names(repo: Path) -> set[str]:
 
 def _undocumented(repo: Path) -> set[str]:
     return _read_names(repo) - _example_keys(repo / ".env.example") - set(_NOT_DOCUMENTED)
+
+
+# --- The reverse direction (#929) --------------------------------------------
+
+_PYTHON_SERVICES = {"indexer": "indexer/src", "mcp-server": "mcp-server/src"}
+
+# Set in a Python service's Compose environment but read outside its
+# ``src/``. Each must still be in that service's resolved environment.
+_NOT_READ_BY_PYTHON = {
+    "indexer": {
+        "HOME": "process plumbing: a fixed Compose value pointing the non-root user's home at its tmpfs, used by the runtime and child tools, not an operator setting",
+    },
+}
+
+# ``.env.example`` keys read only by shell, as (service, reader). Each
+# must still be in that service's resolved environment and in Compose's
+# ``--variables``; the shell read itself is not checked.
+_SHELL_ONLY = {
+    "BRIDGE_USER": ("mbsync", "mbsync/entrypoint.sh, substituted into mbsync/mbsyncrc.template"),
+    "BRIDGE_IMAP_PORT": ("mbsync", "mbsync/entrypoint.sh"),
+    "BRIDGE_CERT_FINGERPRINT": ("mbsync", "mbsync/entrypoint.sh"),
+    "BRIDGE_CERT_PIN_ROTATE": ("mbsync", "mbsync/entrypoint.sh"),
+    "SYNC_INTERVAL": ("mbsync", "mbsync/entrypoint.sh and mbsync/healthcheck.sh"),
+    "SYNC_DEADLINE_SECONDS": ("mbsync", "mbsync/entrypoint.sh and mbsync/healthcheck.sh"),
+}
+
+
+def _service_python_reads(repo: Path, service: str) -> set[str]:
+    """Literal reads in one service's ``src/``; ``_IDENTITY_SETTINGS``
+    entries are deliberately not added."""
+    return _python_env_reads([repo / _PYTHON_SERVICES[service]])
+
+
+def _unread_pass_throughs(repo: Path) -> set[str]:
+    """``service:NAME`` for each name a Python service's resolved
+    environment sets that its ``src/`` does not read: a stale
+    pass-through."""
+    environments = _service_environments(repo)
+    return {
+        f"{service}:{name}"
+        for service in _PYTHON_SERVICES
+        for name in environments[service]
+        - _service_python_reads(repo, service)
+        - set(_NOT_READ_BY_PYTHON.get(service, {}))
+    }
+
+
+def _consumed(repo: Path) -> set[str]:
+    """Names that reach a Python service that reads them."""
+    environments = _service_environments(repo)
+    return {
+        name
+        for service in _PYTHON_SERVICES
+        for name in environments[service] & _service_python_reads(repo, service)
+    }
+
+
+def _dead_keys(repo: Path) -> set[str]:
+    """``.env.example`` keys that no service consumes."""
+    return _example_keys(repo / ".env.example") - _consumed(repo) - set(_SHELL_ONLY)
+
+
+def _stale_shell_only(repo: Path) -> set[str]:
+    """``_SHELL_ONLY`` entries Compose no longer passes to their service,
+    or that a Python service now consumes (so the entry hides nothing)."""
+    environments = _service_environments(repo)
+    variables = _compose_variables(repo)
+    consumed = _consumed(repo)
+    return {
+        name
+        for name, (service, _reader) in _SHELL_ONLY.items()
+        if name not in environments.get(service, set())
+        or name not in variables
+        or name in consumed
+        or name not in _example_keys(repo / ".env.example")
+    }
+
+
+def _stale_not_read_by_python(repo: Path) -> set[str]:
+    """``_NOT_READ_BY_PYTHON`` entries no longer in their service's
+    resolved environment, or now read by its ``src/``."""
+    environments = _service_environments(repo)
+    return {
+        f"{service}:{name}"
+        for service, names in _NOT_READ_BY_PYTHON.items()
+        for name in names
+        if name not in environments[service] or name in _service_python_reads(repo, service)
+    }
 
 
 # --- The checks --------------------------------------------------------------
@@ -329,3 +441,101 @@ def test_a_name_read_only_through_an_identity_tuple_is_caught(repo_copy):
         encoding="utf-8",
     )
     assert _undocumented(repo_copy) == {"TUPLE_ONLY_920"}
+
+
+# --- #929: every .env.example key is still consumed ---------------------------
+
+
+def test_every_python_service_environment_name_is_read_by_that_service():
+    stale = _unread_pass_throughs(_REPO)
+    assert not stale, f"remove the Compose pass-through or add a read: {sorted(stale)}"
+
+
+def test_every_env_example_key_is_consumed():
+    dead = _dead_keys(_REPO)
+    assert not dead, f"remove from .env.example, or name its reader in _SHELL_ONLY: {sorted(dead)}"
+
+
+def test_reverse_check_exclusions_are_still_needed_and_reasoned():
+    assert not _stale_shell_only(_REPO)
+    assert not _stale_not_read_by_python(_REPO)
+    for name, (service, reader) in _SHELL_ONLY.items():
+        assert service not in _PYTHON_SERVICES, name
+        assert reader.strip() and "\n" not in reader, name
+    for names in _NOT_READ_BY_PYTHON.values():
+        for name, reason in names.items():
+            assert reason.strip() and "\n" not in reason, name
+
+
+def test_the_resolved_environments_are_read():
+    # A Compose call that silently returned nothing would pass vacuously.
+    environments = _service_environments(_REPO)
+    assert {"EMBED_MODEL", "HOME"} <= environments["indexer"]
+    assert {"RERANK_CANDIDATES", "MCP_PORT"} <= environments["mcp-server"]
+    assert {"BRIDGE_USER", "SYNC_INTERVAL"} <= environments["mbsync"]
+
+
+@pytest.fixture
+def reverse_copy(repo_copy):
+    assert not _unread_pass_throughs(repo_copy)
+    assert not _dead_keys(repo_copy)
+    assert not _stale_shell_only(repo_copy)
+    assert not _stale_not_read_by_python(repo_copy)
+    return repo_copy
+
+
+def test_a_key_only_in_env_example_is_caught(reverse_copy):
+    example = reverse_copy / ".env.example"
+    example.write_text(
+        example.read_text(encoding="utf-8") + "\n# DEAD_SETTING_929=1\n", encoding="utf-8"
+    )
+    assert _dead_keys(reverse_copy) == {"DEAD_SETTING_929"}
+
+
+def test_a_removed_read_with_its_pass_through_and_identity_entry_left_is_caught(reverse_copy):
+    # The sole operational read goes; the Compose pass-through and the
+    # ``_IDENTITY_SETTINGS`` entry stay, as they would after a careless
+    # removal. The identity entry must not count as a read.
+    main = reverse_copy / "mcp-server" / "src" / "main.py"
+    text = main.read_text(encoding="utf-8")
+    read = 'RERANK_CANDIDATES = _int_env("RERANK_CANDIDATES", 20, minimum=1)'
+    assert text.count(read) == 1 and '    "RERANK_CANDIDATES",\n' in text
+    main.write_text(text.replace(read, "RERANK_CANDIDATES = 20"), encoding="utf-8")
+    assert _unread_pass_throughs(reverse_copy) == {"mcp-server:RERANK_CANDIDATES"}
+    assert _dead_keys(reverse_copy) == {"RERANK_CANDIDATES"}
+
+
+def test_a_name_read_by_the_other_service_only_does_not_count(reverse_copy):
+    # The indexer reads EMBED_BATCH_SIZE; passing it to the mcp-server,
+    # which does not, is a stale pass-through for the mcp-server.
+    (reverse_copy / "docker-compose.extra929.yml").write_text(
+        "services:\n  mcp-server:\n    environment:\n"
+        "      EMBED_BATCH_SIZE: ${EMBED_BATCH_SIZE:-}\n",
+        encoding="utf-8",
+    )
+    assert _unread_pass_throughs(reverse_copy) == {"mcp-server:EMBED_BATCH_SIZE"}
+
+
+def test_a_value_less_environment_entry_is_seen(reverse_copy):
+    (reverse_copy / "docker-compose.extra929.yml").write_text(
+        "services:\n  indexer:\n    environment:\n      - VALUELESS_929\n", encoding="utf-8"
+    )
+    assert _unread_pass_throughs(reverse_copy) == {"indexer:VALUELESS_929"}
+
+
+def test_a_shell_only_entry_dropped_from_compose_is_stale(reverse_copy):
+    compose = reverse_copy / "docker-compose.yml"
+    text = compose.read_text(encoding="utf-8")
+    line = "      BRIDGE_CERT_PIN_ROTATE: ${BRIDGE_CERT_PIN_ROTATE:-false}\n"
+    assert text.count(line) == 1
+    compose.write_text(text.replace(line, ""), encoding="utf-8")
+    assert _stale_shell_only(reverse_copy) == {"BRIDGE_CERT_PIN_ROTATE"}
+
+
+def test_a_not_read_by_python_entry_dropped_from_compose_is_stale(reverse_copy):
+    compose = reverse_copy / "docker-compose.yml"
+    text = compose.read_text(encoding="utf-8")
+    line = "      HOME: /home/indexer\n"
+    assert text.count(line) == 1
+    compose.write_text(text.replace(line, ""), encoding="utf-8")
+    assert _stale_not_read_by_python(reverse_copy) == {"indexer:HOME"}
