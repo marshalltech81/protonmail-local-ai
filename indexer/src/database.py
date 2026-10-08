@@ -1663,13 +1663,15 @@ class Database:
 
     @_synchronized
     def find_unrecorded_completeness_attachments(self) -> list[sqlite3.Row]:
-        """Every attachment occurrence whose cached ``success`` or
-        ``empty`` extraction has no completeness record (#1285), with its
-        message's Maildir filepath, the row's status and extractor stamp
-        and its ``text_complete`` (NULL)."""
+        """The messages with an attachment occurrence whose cached
+        ``success`` or ``empty`` extraction has no completeness record
+        (#1285): one row per Maildir filepath, row status and extractor
+        stamp (not per occurrence, so a message with many attachments
+        costs one row, review round 3 on #1286), with ``text_complete``
+        (NULL)."""
         return self._conn.execute(
             """
-            SELECT m.filepath, e.extraction_status, e.extractor, e.text_complete
+            SELECT DISTINCT m.filepath, e.extraction_status, e.extractor, e.text_complete
             FROM attachment_extractions e
             JOIN attachments a ON a.attachment_id = e.attachment_id
                 AND a.extractor_module = e.extractor_module
