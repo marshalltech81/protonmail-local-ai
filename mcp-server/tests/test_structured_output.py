@@ -410,7 +410,6 @@ class TestDateBoundsEcho:
         assert page["date_bounds"] == {
             "date_from": "2024-01-10T00:00:00+00:00",
             "date_to": None,
-            "basis": "effective",
         }
         assert "m1" in [m["message_id"] for m in page["messages"]]
 
@@ -421,7 +420,6 @@ class TestDateBoundsEcho:
         assert page["date_bounds"] == {
             "date_from": "2024-01-10T10:00:00+00:00",
             "date_to": "2024-01-31T23:59:59.999999+00:00",
-            "basis": "effective",
         }
         assert "m1" not in [m["message_id"] for m in page["messages"]]
         text = _wire(server, "query_messages", args).content[0].text
@@ -445,7 +443,6 @@ class TestDateBoundsEcho:
         assert same_day["date_bounds"] == {
             "date_from": None,
             "date_to": "2024-01-10T23:59:59.999999+00:00",
-            "basis": "effective",
         }
         assert [r["thread_id"] for r in same_day["results"]] == ["t1"]
         args = {"query": "budget", "mode": "keyword", "date_to": "2024-01-10T03:00:00-05:00"}
@@ -470,7 +467,6 @@ class TestDateBoundsEcho:
         assert out["date_bounds"] == {
             "date_from": "2024-01-09T18:30:00+00:00",
             "date_to": None,
-            "basis": "effective",
         }
         text = _wire(server, "search_attachments", args).content[0].text
         assert "Date bounds (UTC): from 2024-01-09T18:30:00+00:00" in text
@@ -525,56 +521,39 @@ class TestSizeBoundsOnTheWire:
             ]
 
 
-class TestDateBasisOnTheWire:
-    """``date_basis`` publishes a string schema, but the raw value
-    reaches the handler, so a non-string is rejected with fixed text
-    through the rate-limited per-field log rather than only FastMCP's
-    argument-model warning (#1085, Codex round 5)."""
+class TestQueryMessagesServedContract:
+    """What a client receives for ``query_messages`` (#1085, Codex
+    round 7): FastMCP serves only the docstring's first section, so the
+    count guidance must be there."""
 
-    def test_schema_is_a_string_defaulting_to_effective(self, messages_db):
-        props = _tools(_server(messages_db))["query_messages"].input_schema["properties"]
-        schema = dict(props["date_basis"])
-        assert schema.pop("description").startswith("Which message clock")
-        assert schema == {"default": "effective", "type": "string"}
+    def test_count_promises_are_conditional_on_indeterminate(self, messages_db):
+        desc = " ".join(_tools(_server(messages_db))["query_messages"].description.split())
+        assert "needs only ``total_matches``." not in desc
+        assert "needs only ``total_matches`` and ``indeterminate``, not the pages" in desc
+        assert "with an exact total count" not in desc
+        assert "the complete matching set" not in desc
+        assert (
+            "``total_matches`` counts the messages the filters definitely match; it is "
+            "the complete count only when ``indeterminate`` is 0" in desc
+        )
+        assert "report ``indeterminate`` with any count" in desc
 
-    @pytest.mark.parametrize("value", [[], 3, True, 1.5, {"basis": "sent"}])
-    def test_non_string_is_rejected_through_the_limiter(self, messages_db, caplog, value):
-        with caplog.at_level(logging.INFO):
-            result = _wire(_server(messages_db), "query_messages", {"date_basis": value})
+    def test_date_basis_is_not_served(self, messages_db):
+        # date_basis was split out of #1085 (owner, 2026-10-08); the
+        # internal clock machinery stays fixed to effective time (#1087).
+        tool = _tools(_server(messages_db))["query_messages"]
+        assert "date_basis" not in tool.input_schema["properties"]
+        for text in (
+            tool.description,
+            json.dumps(tool.input_schema),
+            json.dumps(tool.output_schema),
+        ):
+            assert "date_basis" not in text
+            assert "basis" not in text
+
+    def test_date_basis_argument_is_refused(self, messages_db):
+        result = _wire(_server(messages_db), "query_messages", {"date_basis": "sent"})
         assert result.is_error
-        assert "date_basis must be a string" in result.content[0].text
-        warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
-        assert "rejected invalid argument: query_messages.date_basis" in warnings
-        assert not any("Invalid arguments for tool" in w for w in warnings)
-        timing = [r.getMessage() for r in caplog.records if r.name == "mcp.timings"]
-        assert len(timing) == 1 and "outcome=error" in timing[0]
-
-    def test_explicit_null_is_rejected_but_omitting_defaults(self, messages_db, caplog):
-        # The schema publishes a string; an explicit null is not one, so
-        # it is rejected rather than run on the default clock (Codex
-        # round 6). Omitting the argument still means effective.
-        server = _server(messages_db)
-        with caplog.at_level(logging.INFO):
-            result = _wire(server, "query_messages", {"date_basis": None})
-        assert result.is_error
-        assert "date_basis must be a string" in result.content[0].text
-        warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
-        assert warnings == ["rejected invalid argument: query_messages.date_basis"]
-        omitted = _call(server, "query_messages", date_from="2000-01-01")
-        assert omitted["date_bounds"]["basis"] == "effective"
-        assert omitted["total_matches"] == 5
-
-    def test_output_schema_says_the_order_and_bounds_follow_date_basis(self, messages_db):
-        # Codex round 6: the row order and the occurred_at note named a
-        # fixed clock although date_basis chooses it.
-        schema = json.dumps(_tools(_server(messages_db))["query_messages"].output_schema)
-        assert "Newest send date first" not in schema
-        assert "Newest first by the date_basis clock" in schema
-        assert "query_messages' date_basis chooses the clock" in schema
-
-    def test_string_values_still_apply(self, messages_db):
-        server = _server(messages_db)
-        assert _call(server, "query_messages", date_basis=" sent ")["total_matches"] == 5
 
 
 @pytest.mark.parametrize(

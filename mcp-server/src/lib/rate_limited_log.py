@@ -91,7 +91,6 @@ class ArgumentRejections(RateLimitedLog):
         "date_from",
         "date_to",
         "date_from/date_to",
-        "date_basis",
         "size_min",
         "size_max",
         "size_min/size_max",

@@ -23,7 +23,7 @@ get_message's included (#489).
 """
 
 from datetime import date, datetime
-from typing import Any, Literal, cast
+from typing import Any, Literal
 
 from mcp.types import CallToolResult, TextContent, ToolAnnotations
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -175,9 +175,7 @@ class MessageHeaders(_Output):
     occurred_at: str | None = Field(
         description=(
             "Delivery date of the message (the date of its topmost Received: header) in UTC, ISO 8601; null when the header is absent (sent mail) or unparseable. "
-            "Date filters bound occurred_at, else sent_at, except that query_messages' "
-            "date_basis chooses the clock: effective (the default) is that rule, sent "
-            "bounds sent_at, occurred bounds occurred_at."
+            "Date filters bound occurred_at, else sent_at."
         )
     )
     folder: str
@@ -259,11 +257,6 @@ def listed_message(m: MessageRecord) -> ListedMessage:
 # --- search tools -------------------------------------------------------
 
 
-# The clocks ``query_messages``' ``date_basis`` can choose
-# (``lib/predicates.DATE_BASES``; pinned equal by ``tests/test_predicates``).
-DateBasisName = Literal["effective", "sent", "occurred"]
-
-
 class DateBounds(_Output):
     date_from: str | None = Field(
         description="The inclusive lower bound applied, in UTC (ISO 8601); null when not given."
@@ -271,29 +264,18 @@ class DateBounds(_Output):
     date_to: str | None = Field(
         description="The inclusive upper bound applied, in UTC (ISO 8601); null when not given."
     )
-    basis: DateBasisName = Field(
-        default="effective",
-        description="The message clock the bounds apply to: effective (occurred_at, else "
-        "sent_at), or the sent or occurred clock query_messages' date_basis chose, which "
-        "also orders its page. The search tools always use effective.",
-    )
 
 
-def date_bounds(
-    date_from: str | None, date_to: str | None, basis: str = "effective"
-) -> DateBounds | None:
-    """The UTC bounds a date filter resolved to, on ``basis`` (a
-    ``lib/predicates.DATE_BASES`` name); ``None`` without a date filter
-    under the default basis (a non-default basis is echoed even without
-    bounds, since it orders the page)."""
-    if date_from is None and date_to is None and basis == "effective":
+def date_bounds(date_from: str | None, date_to: str | None) -> DateBounds | None:
+    """The UTC bounds a date filter resolved to, or ``None`` without one."""
+    if date_from is None and date_to is None:
         return None
-    return DateBounds(date_from=date_from, date_to=date_to, basis=cast(DateBasisName, basis))
+    return DateBounds(date_from=date_from, date_to=date_to)
 
 
 def describe_date_bounds(bounds: DateBounds | None) -> str | None:
     """The prose line for ``bounds``, or ``None`` without a date filter."""
-    if bounds is None or (bounds.date_from is None and bounds.date_to is None):
+    if bounds is None:
         return None
     parts = []
     if bounds.date_from:
@@ -306,7 +288,7 @@ def describe_date_bounds(bounds: DateBounds | None) -> str | None:
 _DATE_BOUNDS_DESCRIPTION = (
     "The UTC instants the date filters resolved to: a date-only value is the "
     "whole UTC day, a value with an offset the instant it names. Null without "
-    "a date filter (query_messages: under the default date_basis)."
+    "a date filter."
 )
 
 
@@ -634,12 +616,15 @@ class QueryMessagesOutput(_Output):
         "matched; empty without one."
     )
     date_bounds: DateBounds | None = Field(description=_DATE_BOUNDS_DESCRIPTION)
-    total_matches: int = Field(description="Every matching message, not just this page.")
+    total_matches: int = Field(
+        description="Every message the filters definitely match, not just this page; the "
+        "complete count only when indeterminate is 0."
+    )
     indeterminate: int = Field(
-        description="Messages the filters could neither accept nor reject, in neither "
-        "total_matches nor the pages: a size bound on a message without a stored size, or "
-        "date_basis=occurred on one without a delivery time. 0 when every filter could be "
-        "decided for every message."
+        description="Messages the filters could neither accept nor reject (a size bound on "
+        "a message without a stored size), in neither total_matches nor the pages. 0 when "
+        "every filter could be decided for every message; when not 0, report it with any "
+        "count."
     )
     returned: int
     offset: int = Field(description="Matches returned by earlier pages.")
@@ -648,10 +633,9 @@ class QueryMessagesOutput(_Output):
         description="Pass with the same filters for the next page; null when has_more is false."
     )
     messages: list[ListedMessage] = Field(
-        description="Newest first by the date_basis clock (effective by default: "
-        "occurred_at, else sent_at; sent: sent_at; occurred: occurred_at), as "
-        "date_bounds.basis reports. With fields, each row holds only those "
-        "fields plus claimant_id and thread_id."
+        description="Newest first by delivery date, else send date (occurred_at, else "
+        "sent_at). With fields, each row holds only those fields plus claimant_id and "
+        "thread_id."
     )
 
 

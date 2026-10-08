@@ -994,8 +994,8 @@ def _decode_cursor(cursor: str, digest: str) -> tuple[str, str, int]:
     if data["q"] != digest:
         raise InvalidFilterError(
             "cursor",
-            "cursor was issued for different filters or date_basis; pass the same "
-            "filters as the call that returned it, or restart without a cursor",
+            "cursor was issued for different filters; pass the same filters "
+            "as the call that returned it, or restart without a cursor",
         )
     return data["s"], data["m"], data["o"]
 
@@ -3533,7 +3533,10 @@ class Database:
           ``DEFAULT_EXCLUDED_FOLDERS`` folder are left out.
         - ``date_from`` / ``date_to``: inclusive bounds on the clock
           ``date_basis`` names; date-only values cover the whole UTC day.
-        - ``date_basis`` (#1085): ``effective`` (default; ``occurred_at``,
+        - ``date_basis`` (#1085): not served by the ``query_messages``
+          tool, which always uses the default (split out of #1085 by the
+          owner, 2026-10-08; the leaves and the cursor clock stay for
+          #1087 and #1150). ``effective`` (default; ``occurred_at``,
           else ``sent_at``), ``sent`` (``sent_at``) or ``occurred``
           (``occurred_at``) for the bounds, the order and the cursor. A
           message without the clock (no delivery time under

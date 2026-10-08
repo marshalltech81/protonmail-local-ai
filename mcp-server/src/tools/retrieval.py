@@ -15,10 +15,7 @@ from pydantic import WithJsonSchema
 # Module import: get_thread and get_message have a local named ``count``.
 from ..lib import timings
 from ..lib.predicates import (
-    DATE_BASES,
-    DEFAULT_DATE_BASIS,
     MAX_SIZE_BYTES,
-    normalize_date_basis,
     validate_date_range,
 )
 from ..lib.rate_limited_log import ArgumentRejections, RateLimitedLog
@@ -89,11 +86,6 @@ SizeBound = Annotated[
         }
     ),
 ]
-
-# A ``date_basis`` argument (#1085): published as a string, but passed
-# through raw like ``SizeBound``, so ``normalize_date_basis`` rejects a
-# non-string through the rate-limited per-field log (Codex round 5).
-DateBasisArg = Annotated[Any, WithJsonSchema({"type": "string"})]
 
 # Seconds per window of the rate-limited ``fields`` rejection warning:
 # a client can repeat a rejected projection as fast as it likes.
@@ -292,18 +284,6 @@ def _filter_uses(args: dict) -> list[FilterUse]:
         else:
             uses.append(FilterUse(filter=key, value=value, match="equals"))
     return uses
-
-
-def _describe_date_basis(basis: str) -> str | None:
-    """The prose line naming a non-default ``date_basis`` (#1085), or
-    ``None`` under the default."""
-    if basis == DEFAULT_DATE_BASIS:
-        return None
-    column = DATE_BASES[basis].column
-    line = f"date_basis: {basis} (bounds, order and cursor use {column}"
-    if DATE_BASES[basis].nullable:
-        line += "; messages without a delivery time are left out"
-    return line + ")"
 
 
 def _describe_filters(uses: list[FilterUse]) -> str:
@@ -893,15 +873,20 @@ def register_retrieval_tools(server, db):
         replied: bool | None = None,
         size_min: SizeBound = None,
         size_max: SizeBound = None,
-        date_basis: DateBasisArg = "effective",
         limit: int = 25,
         cursor: str | None = None,
         fields: list[str] | None = None,
     ) -> CallToolResult:
         """
-        Enumerate EVERY message matching exact criteria, with an exact
-        total count. Not ranked, not fuzzy: the complete matching set,
-        newest first, one message per row.
+        Enumerate EVERY message matching exact criteria, with a total
+        count. Not ranked, not fuzzy: every message the filters
+        definitely match, newest first, one message per row.
+        ``total_matches`` counts the messages the filters definitely
+        match; it is the complete count only when ``indeterminate`` is
+        0. ``indeterminate`` counts messages a filter could not decide
+        (a size bound on a message without a stored size); they are in
+        neither ``total_matches`` nor the pages, so report
+        ``indeterminate`` with any count when it is not 0.
 
         Use this for exhaustive or counting questions — "how many
         emails did Jane send me in 2024?", "list every message from
@@ -932,7 +917,8 @@ def register_retrieval_tools(server, db):
         again with the SAME filters plus ``cursor`` set to the returned
         ``next_cursor``. Never report a partial page as the complete
         answer. To examine every match, continue until ``has_more`` is
-        false; a count of these exact criteria needs only ``total_matches``.
+        false; a count of these exact criteria needs only ``total_matches``
+        and ``indeterminate``, not the pages.
         An exhausted keyword query does not prove exhaustive coverage of
         a topic: consider alternate wording, read candidate messages,
         and distinguish messages from threads or distinct bills/items.
@@ -984,12 +970,6 @@ def register_retrieval_tools(server, db):
                      the user's time zone, give an offset
                      ("2026-01-01T00:00:00-05:00"). The response's
                      ``date_bounds`` echoes the UTC instants applied.
-            date_basis: Which message clock the date bounds, the order
-                        and the cursor use: "effective" (default:
-                        delivery date, else send date), "sent" (the
-                        Date header) or "occurred" (delivery date;
-                        messages without one are left out). "internal"
-                        (server arrival time) is not available yet.
             has_attachments: True for messages with attachments, False
                              for messages without.
             authority_class: Messages whose sender the operator's rules
@@ -1017,8 +997,7 @@ def register_retrieval_tools(server, db):
             date, folder, subject, From / To / Cc, Message-ID, Thread
             ID), and paging state. ``indeterminate``, stated whenever
             non-zero, counts messages the filters could neither accept
-            nor reject (no stored size under a size bound, no delivery
-            time under date_basis=occurred); they are in neither
+            nor reject (no stored size under a size bound); they are in neither
             total_matches nor the pages, so a count is complete only
             when it is 0.
         """
@@ -1044,7 +1023,6 @@ def register_retrieval_tools(server, db):
             "query_messages",
             {
                 **args,
-                "date_basis": date_basis,
                 "limit": limit,
                 "cursor": cursor,
                 "fields": fields,
@@ -1068,23 +1046,19 @@ def register_retrieval_tools(server, db):
                     f"valid: {', '.join(QUERY_MESSAGE_FIELDS)}"
                 )
             projection = frozenset(fields) | {"claimant_id", "thread_id"}
-        # Reject a bad date range or an unavailable basis before any
-        # retrieval work. An explicit null is not the published string:
-        # only an omitted argument means the default (Codex round 6).
-        if date_basis is None:
-            rejections.reject("query_messages", "date_basis")
-            raise ToolError("Error: date_basis must be a string")
+        # Reject a bad date range before any retrieval work.
         try:
-            basis = normalize_date_basis(date_basis)
-            bounds = date_bounds(*validate_date_range(date_from, date_to), basis)
+            bounds = date_bounds(*validate_date_range(date_from, date_to))
         except InvalidFilterError as e:
             rejections.reject("query_messages", e.field_name)
             raise ToolError(f"Error: {e}") from e
 
+        # No date_basis: the Database clock machinery (lib/predicates
+        # DATE_BASES, the cursor clock) stays fixed to effective time
+        # here; serving another clock was split out of #1085 (owner,
+        # 2026-10-08) and waits for #1150 (with #1087).
         try:
-            page = await asyncio.to_thread(
-                db.query_messages, **args, date_basis=basis, limit=limit, cursor=cursor
-            )
+            page = await asyncio.to_thread(db.query_messages, **args, limit=limit, cursor=cursor)
         except InvalidFilterError as e:
             # Validation messages quote the offending input (an invalid
             # date echoes its text), which log_tool_call deliberately
@@ -1125,16 +1099,13 @@ def register_retrieval_tools(server, db):
         lines = [f"Query: {_describe_filters(uses)}"]
         if bounds_line := describe_date_bounds(bounds):
             lines.append(bounds_line)
-        if basis_line := _describe_date_basis(basis):
-            lines.append(basis_line)
         lines.append(f"total_matches: {page.total_matches}")
         if page.indeterminate:
             # Stated whenever non-zero, so a count is never read as
             # complete when some messages could not be decided.
             lines.append(
                 f"indeterminate: {page.indeterminate} (messages the filters could neither "
-                "accept nor reject: no stored size, or no delivery time under "
-                "date_basis=occurred; in neither total_matches nor the pages)"
+                "accept nor reject: no stored size; in neither total_matches nor the pages)"
             )
         # Counts only: the addresses themselves are in the structured
         # output (#801).

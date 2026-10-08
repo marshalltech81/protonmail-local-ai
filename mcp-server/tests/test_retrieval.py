@@ -1496,46 +1496,18 @@ class TestQueryMessages:
         handler = _handlers(fake_server, messages_db)["query_messages"]
         assert "Error" in _error(handler())
 
-    def test_internal_date_basis_is_unavailable(self, fake_server, messages_db, caplog):
-        # #1085: a legal value the index cannot serve yet; fixed text
-        # naming #1092, raised before any retrieval work.
-        handler = _handlers(fake_server, messages_db)["query_messages"]
-        with caplog.at_level("DEBUG"):
-            text = _error(handler(date_basis="internal"))
-        assert "date_basis 'internal' is unavailable until #1092" in text
-        assert "rejected invalid argument: query_messages.date_basis" in caplog.text
-
-    def test_date_bounds_echo_the_basis(self, fake_server, messages_db):
-        handler = _handlers(fake_server, messages_db)["query_messages"]
-        out = asyncio.run(handler(date_from="2024-01-01", date_basis="sent"))
-        assert out.structured_content["date_bounds"] == {
-            "date_from": "2024-01-01T00:00:00+00:00",
-            "date_to": None,
-            "basis": "sent",
-        }
-        text = _text(out)
-        assert "Date bounds (UTC): from 2024-01-01T00:00:00+00:00" in text
-        assert "date_basis: sent (bounds, order and cursor use sent_at)" in text
-        # Without bounds the basis is still echoed, since it orders the page.
-        out = asyncio.run(handler(date_basis="occurred"))
-        assert out.structured_content["date_bounds"] == {
-            "date_from": None,
-            "date_to": None,
-            "basis": "occurred",
-        }
-        assert (
-            "date_basis: occurred (bounds, order and cursor use occurred_at; "
-            "messages without a delivery time are left out)"
-        ) in _text(out)
-
-    def test_default_basis_leaves_the_response_unchanged(self, fake_server, messages_db):
+    def test_the_response_names_no_clock_choice(self, fake_server, messages_db):
+        # date_basis was split out of #1085 (owner, 2026-10-08): bounds,
+        # order and cursor use effective time, and nothing offers a choice.
         handler = _handlers(fake_server, messages_db)["query_messages"]
         out = asyncio.run(handler())
         assert out.structured_content["date_bounds"] is None
-        assert "date_basis" not in _text(out)
         out = asyncio.run(handler(date_from="2024-01-01"))
-        assert out.structured_content["date_bounds"]["basis"] == "effective"
-        assert "date_basis" not in _text(out)
+        assert out.structured_content["date_bounds"] == {
+            "date_from": "2024-01-01T00:00:00+00:00",
+            "date_to": None,
+        }
+        assert "basis" not in _text(out)
 
     def test_replied_and_size_filters_are_described(self, fake_server, messages_db):
         handler = _handlers(fake_server, messages_db)["query_messages"]
@@ -1619,15 +1591,6 @@ class TestQueryMessages:
             out.structured_content["indeterminate"],
         ) == (0, 0)
         assert _text(out).endswith("No messages match.")
-        # Under the occurred basis, u2's missing delivery time is unknown too.
-        out = asyncio.run(handler(date_basis="occurred"))
-        assert (
-            out.structured_content["total_matches"],
-            out.structured_content["indeterminate"],
-        ) == (
-            1,
-            1,
-        )
         # A later page that comes back empty (its rows went between
         # calls) says so, whatever the indeterminate count.
         first = asyncio.run(handler(replied=False, limit=1))

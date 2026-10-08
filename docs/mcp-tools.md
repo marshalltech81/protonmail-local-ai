@@ -387,9 +387,8 @@ intelligence tools ([in scope or context](#evidence-scope-in-scope-or-context))
 conjoin their leaves on each message; `search_emails` and the tools
 that share its filters decide each leaf on its own against the thread
 (below). A `query_messages` cursor is bound to a digest of its leaf
-list and of its `date_basis`: passed with other filters, or under
-another basis, it is rejected ("cursor was issued for different filters
-or date_basis"), never read against them.
+list: passed with other filters it is rejected ("cursor was issued for
+different filters"), never read against them.
 
 | Leaf | Value | Built by | Matches a message when |
 |---|---|---|---|
@@ -402,11 +401,11 @@ or date_basis"), never read against them.
 | `not_in_folders` | folder names | the default scope, when no folder is named | it is filed in none of them (`Trash`; [Trash](#trash-is-left-out-by-default)) |
 | `effective_from` | UTC instant | `date_from` | its effective time is at or after the instant |
 | `effective_to` | UTC instant | `date_to` | its effective time is at or before the instant |
-| `sent_from` | UTC instant | `query_messages` `date_from` with `date_basis=sent` | its send date (`sent_at`) is at or after the instant |
-| `sent_to` | UTC instant | `query_messages` `date_to` with `date_basis=sent` | its send date is at or before the instant |
-| `occurred_from` | UTC instant | `query_messages` `date_from` with `date_basis=occurred` | its delivery date (`occurred_at`) is at or after the instant; unknown without one |
-| `occurred_to` | UTC instant | `query_messages` `date_to` with `date_basis=occurred` | its delivery date is at or before the instant; unknown without one |
-| `dated` | clock name | `query_messages` `date_basis=occurred` | it has that clock (a delivery date), so it has a place in a page ordered by it; unknown without one |
+| `sent_from` | UTC instant | no tool yet ([#1150](https://github.com/marshalltech81/protonmail-local-ai/issues/1150)) | its send date (`sent_at`) is at or after the instant |
+| `sent_to` | UTC instant | no tool yet (#1150) | its send date is at or before the instant |
+| `occurred_from` | UTC instant | no tool yet (#1150) | its delivery date (`occurred_at`) is at or after the instant; unknown without one |
+| `occurred_to` | UTC instant | no tool yet (#1150) | its delivery date is at or before the instant; unknown without one |
+| `dated` | clock name | no tool yet (#1150) | it has that clock (a delivery date), so it has a place in a page ordered by it; unknown without one |
 | `has_attachments` | bool | `has_attachments` | its own attachment flag equals the value |
 | `seen` | bool | `query_messages` `seen` | its read flag equals the value |
 | `flagged` | bool | `query_messages` `flagged` | its flagged flag equals the value |
@@ -426,10 +425,8 @@ otherwise *indeterminate*: left out of the matches and of
 `total_matches`, and counted in the response's `indeterminate` field,
 which the prose states whenever it is not 0 (an empty first page then
 ends "No messages are known to match." rather than "No messages
-match."). Under
-`date_basis=occurred` the `dated` leaf makes a message without a
-delivery date indeterminate even without a date bound, since it has no
-place in that ordering. The count is one extra `COUNT(*)` over the
+match."). `total_matches` is then not the complete count: report
+`indeterminate` with it. The count is one extra `COUNT(*)` over the
 same predicate, read in the same snapshot, and runs only when a leaf
 that can be unknown is present; a query of decided leaves only (the
 default) costs nothing more and reports 0.
@@ -560,8 +557,6 @@ drive an unbounded query against the index.
   UTC, null for a bound not given; the field is null without a date
   filter) and in a `Date bounds (UTC):` line of the prose. The tools do
   not parse natural-language dates.
-  `date_bounds` also names its `basis`: `effective` for the search
-  tools, or the clock `query_messages` was told to use (below).
 - A `date_from` later than `date_to` names an empty interval and is
   rejected with an error naming both fields, the same way by every tool
   that takes both bounds. The bounds are compared after UTC
@@ -574,10 +569,7 @@ drive an unbounded query against the index.
   one, so a message sent just before midnight and delivered after it
   falls on the later day, even though its `sent_at` is the earlier one;
   only a message without a delivery date is bounded by its `sent_at`.
-  `query_messages` alone can bound, order and page on one clock
-  instead (`date_basis=sent` or `occurred`;
-  [below](#query_messages)); the search tools always use the effective
-  time. A thread matches when its span, from its messages' earliest to
+  A thread matches when its span, from its messages' earliest to
   latest effective time, overlaps the range, so a thread with messages
   either side of a short range matches it. The tools that hand passages
   to a model (`get_evidence`, `ask_mailbox`, `extract_from_emails`,
@@ -1022,12 +1014,11 @@ that set it (`address:<pattern>` or `domain:<pattern>`, null when
 unclassified).
 
 ### `query_messages`
-Enumerate **every** message matching exact criteria, with an exact
-total. Unlike `search_emails`, which ranks threads by relevance and
-returns the top `limit`, this returns the complete matching set of
-individual messages, newest effective time (`occurred_at`, else
-`sent_at`) first (claimant ID breaks ties; `date_basis` can order by
-the send or delivery date alone),
+Enumerate **every** message matching exact criteria, with a total
+count. Unlike `search_emails`, which ranks threads by relevance and
+returns the top `limit`, this returns every individual message the
+filters definitely match, newest effective time (`occurred_at`, else
+`sent_at`) first (claimant ID breaks ties),
 and pages through it with a cursor. Use it for "all" and "how many"
 questions.
 
@@ -1041,7 +1032,6 @@ questions.
 | `folder` | string | none | Exact folder name. Without it, messages filed in Trash are left out; pass `"Trash"` to list them ([Trash](#trash-is-left-out-by-default)) |
 | `date_from` | string | none | Inclusive ISO 8601 lower bound on the message's effective time (`occurred_at`, else `sent_at`) |
 | `date_to` | string | none | Inclusive upper bound; a date-only value covers the whole UTC day. Give an offset for a local-time bound; `date_bounds` echoes the UTC instants applied ([date bounds](#search_emails)) |
-| `date_basis` | string | `effective` | The message clock the date bounds, the order and the cursor use: `effective` (delivery date, else send date; [Message time](architecture.md#message-time)), `sent` (`sent_at`, the `Date:` header) or `occurred` (`occurred_at`, the delivery date; messages without one are left out, see [unknown values](#filter-predicates)). `internal` (server arrival time) is a legal value that answers "unavailable until [#1092](https://github.com/marshalltech81/protonmail-local-ai/issues/1092)"; any other value, or a non-string (an explicit `null` included; omit the argument for the default), is an error, logged through the rate-limited `rejected invalid argument: query_messages.date_basis` warning. `date_bounds` echoes the basis |
 | `has_attachments` | bool | none | The message's own attachment flag, either way |
 | `seen` | bool | none | `true` for messages read in Proton, `false` for unread ([read state](#read-state)) |
 | `flagged` | bool | none | `true` for flagged (starred) messages, `false` for the rest |
@@ -1098,10 +1088,9 @@ and `has_more`; when more remain it includes `next_cursor`. The
 structured output always carries `indeterminate`, the number of
 messages the filters could neither accept nor reject ([unknown
 values](#filter-predicates)); the prose states it whenever it is not
-0, so a count is complete only when it is. Under a
-non-default `date_basis` the prose adds a `date_basis:` line naming
-the clock in use, and `date_bounds` is returned (with `basis`) even
-without a date bound, since the basis orders the page. Each
+0. `total_matches` counts the definite matches: it is the complete
+count only when `indeterminate` is 0, so report `indeterminate` with
+any count when it is not. Each
 message carries its send and delivery dates, folder, read state,
 [pending deletion](#pending-deletion), attachment flag, subject,
 From / To / Cc (at most 10 per role, with a count of the rest),
@@ -1132,15 +1121,11 @@ the repeats. Omitting `fields`
 returns every field, as before. Because rows can be projected, the
 output schema requires only `claimant_id` and `thread_id` in a row.
 
-**Paging.** Keyset pagination on `(effective_at, claimant_id)`, or on
-the clock `date_basis` names and `claimant_id`: messages
+**Paging.** Keyset pagination on `(effective_at, claimant_id)`: messages
 indexed while a caller pages never shift or duplicate later pages. A
-cursor is bound to the filters and the `date_basis` it was issued for;
-a cursor from another query or basis, or a malformed one, is rejected
-with an error rather than silently restarting. `effective_at` is
-indexed; `sent_at` and `occurred_at` are not yet
-([#1123](https://github.com/marshalltech81/protonmail-local-ai/issues/1123)), so a page under those bases scans the `messages` table
-(about 4 ms per page at 50,000 messages).
+cursor is bound to the filters it was issued for; a cursor from
+another query, or a malformed one, is rejected with an error rather
+than silently restarting.
 
 To examine every match, follow `next_cursor` until `has_more` is false.
 Each page uses a fresh index snapshot; new matches ahead of the cursor can
@@ -1160,8 +1145,10 @@ disclosure, and ask before a content call would exceed the requested or
 approved scope. Filtering the list does not restrict the context returned
 by `get_message` or `get_thread`.
 
-A count of the exact filter criteria needs only `total_matches`; reading
-every page is necessary when classifying or examining each message.
+A count of the exact filter criteria needs only `total_matches` and
+`indeterminate` (the count is complete only when `indeterminate` is 0;
+otherwise report both); reading every page is necessary when
+classifying or examining each message.
 Exhausting a keyword query does not establish exhaustive coverage of a
 topic. Consider alternate wording, read candidate messages, and keep the
 counting unit explicit (messages, threads, or distinct bills/items).

@@ -12,7 +12,6 @@ import re
 import sqlite3
 from contextlib import closing
 from pathlib import Path
-from typing import get_args
 
 import pytest
 from src.lib.predicates import (
@@ -28,7 +27,6 @@ from src.lib.predicates import (
 )
 from src.lib.security import _LOGGABLE_TOOL_PARAMS, log_tool_call
 from src.lib.sqlite import Database, InvalidFilterError, MessageRecord, _record_clock
-from src.tools.outputs import DateBasisName
 
 from tests.conftest import _insert_message, claimant_of, set_authority
 from tests.test_evidence_scope import _finish_threads
@@ -632,8 +630,8 @@ class TestLogAllowlist:
     tool parameter that becomes a leaf is withheld."""
 
     def test_allowlist_is_pinned(self):
-        # #1085 added replied (bool), size_min / size_max (ints) and
-        # date_basis (an enum); each passes only its own check.
+        # #1085 added replied (bool) and size_min / size_max (ints);
+        # each passes only its own check. date_basis is not served.
         assert set(_LOGGABLE_TOOL_PARAMS) == {
             "mode",
             "style",
@@ -659,7 +657,6 @@ class TestLogAllowlist:
             "replied",
             "size_min",
             "size_max",
-            "date_basis",
         }
 
     def test_valid_1085_values_are_logged_and_invalid_ones_withheld(self, caplog):
@@ -668,18 +665,18 @@ class TestLogAllowlist:
             log_tool_call(
                 logger,
                 "query_messages",
-                {"replied": True, "size_min": 1000, "size_max": 2000, "date_basis": "sent"},
+                {"replied": True, "size_min": 1000, "size_max": 2000},
             )
             log_tool_call(
                 logger,
                 "query_messages",
-                {"replied": 1, "size_min": True, "size_max": "2000", "date_basis": _MARKER},
+                {"replied": 1, "size_min": True, "size_max": _MARKER},
             )
         first, second = caplog.messages
         assert "'replied': True" in first and "'size_min': 1000" in first
-        assert "'size_max': 2000" in first and "'date_basis': 'sent'" in first
+        assert "'size_max': 2000" in first
         assert first.endswith("withheld=[]")
-        assert second.endswith("withheld=['date_basis', 'replied', 'size_max', 'size_min']")
+        assert second.endswith("withheld=['replied', 'size_max', 'size_min']")
         assert _MARKER not in caplog.text
 
     def test_marker_through_each_tools_filters_is_withheld(self, caplog):
@@ -977,9 +974,6 @@ class TestClockSizeAndRepliedLeaves:
         leaves = [Leaf("not_in_folders", ("Trash",))]
         assert leaf_digest(leaves) == leaf_digest(leaves, "effective")
         assert len({leaf_digest(leaves, basis) for basis in DATE_BASES}) == len(DATE_BASES)
-
-    def test_output_basis_names_are_the_registered_bases(self):
-        assert set(get_args(DateBasisName)) == set(DATE_BASES)
 
     def test_cursor_position_needs_the_basis_clock(self):
         record = MessageRecord(
