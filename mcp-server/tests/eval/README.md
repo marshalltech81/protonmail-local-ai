@@ -785,14 +785,19 @@ not parse (status `invalid_json` or `truncated`) fails "answer not cut
 off", and they write no coverage note, so a `disclose_missing` case
 cannot pass for them. For `extract_from_emails` (#1137), each record is
 one statement, `field: value [E1]; ...` with the labels its
-server-checked `_evidence` cites (the provenance fields left out), and
-those statements, one per line, are the answer; the tool's `notice` is
-the coverage note, and there is no repair call. No records from a
-complete extraction is the abstention (a flag of the view, so no other
-tool's answer can match it by its words). A notice opening
-`Incomplete:` (some searched thread's reply was cut off, malformed or
-did not match the schema) fails "answer not cut off" with or without
-records, and with no records it is no abstention. A summary passage the
+server-checked `_evidence` cites (the provenance fields and fields with
+no value, `null`, `""`, `[]` or `{}`, left out), and those statements,
+one per line, are the answer; the tool's `notice` is the coverage note,
+and there is no repair call. No statements from a complete extraction
+(no records, or records with no values) is the abstention (a flag of
+the view, so no other tool's answer can match it by its words). A
+notice opening `Incomplete:` (some searched thread's reply was cut off,
+malformed or did not match the schema) fails "answer not cut off" with
+or without records; with no statements it is no abstention, and the
+fixed text "Extraction incomplete: no records" is its one statement, so
+the judge can name it. An extraction's thread-text passages (a thread
+with no matching chunk) are never captured as cut short, as for
+`ask_mailbox` (#1128). A summary passage the
 window cut short is captured as truncated, the thread's indexed text
 (E1, which has no chunk offsets) included, by comparing the shown map
 with the one the tool's caps alone would show.
@@ -829,8 +834,9 @@ the prompt and cited, so a failure is attributed to `retrieval`,
 `answer_infrastructure` (several may apply; `unknown` otherwise).
 For `extract_from_emails`, "records conform" also checks each record's
 shape: the provenance fields the server adds (`_source_thread` and
-`_date` strings, an `_evidence` object) and the schema's declared
-fields and types (the tool's own check). Values are not judged there,
+`_date` strings, an `_evidence` object), the schema's declared
+fields and types (the tool's own check), and an `_evidence` that maps
+only fields with a value to lists of supplied labels. Values are not judged there,
 and a failure is attributed to `answer_infrastructure`; the check is
 not applicable to the other tools.
 

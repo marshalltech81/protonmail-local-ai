@@ -901,7 +901,7 @@ class TestViews:
         view = view_of("extract_from_emails", output)
         assert [s.text for s in view.statements] == [
             'contractor: "Bluewater Pools" [E1]; bid: "$38,400" [E1].',
-            'contractor: "Crestline Aquatics" [E2]; bid: "$44,900" [E2]; note: null.',
+            'contractor: "Crestline Aquatics" [E2]; bid: "$44,900" [E2].',
         ]
         assert [s.labels for s in view.statements] == [["E1"], ["E2"]]
         assert all(s.status == "cited" for s in view.statements)
@@ -915,6 +915,31 @@ class TestViews:
         record = {"bid": "$38,400", "_source_thread": "s", "_date": "d", "_evidence": {}}
         [statement] = view_of("extract_from_emails", _extract_output([record])).statements
         assert statement == AnswerStatement(text='bid: "$38,400".', labels=[], status="uncited")
+
+    @pytest.mark.parametrize("absent", [None, "", [], {}])
+    def test_absent_values_are_not_statements(self, absent):
+        """Codex round 3 on #1273: the values the tool's own citation check
+        treats as no value (``None``, ``""``, ``[]``, ``{}``) need no
+        evidence there, so they are not rendered as uncited claims; a
+        record holding only such values states nothing, and records that
+        all state nothing are no data (an abstention)."""
+        record = {**_pool_record(), "note": absent}
+        [statement] = view_of("extract_from_emails", _extract_output([record])).statements
+        assert statement.text == 'contractor: "Bluewater Pools" [E1]; bid: "$38,400" [E1].'
+        empty = {
+            "contractor": None,
+            "bid": absent,
+            "_source_thread": "s",
+            "_date": "d",
+            "_evidence": {},
+        }
+        view = view_of("extract_from_emails", _extract_output([empty]))
+        assert view.statements == [] and view.answer == NO_RECORDS
+        assert view.abstained is True and view.records == [empty]
+        # False and 0 are values, not absences.
+        falsy = {**empty, "contractor": False, "bid": 0}
+        [statement] = view_of("extract_from_emails", _extract_output([falsy])).statements
+        assert statement.text == "contractor: false; bid: 0."
 
     def test_extract_without_records_is_an_abstention(self):
         """No records and no incomplete notice: the tool found nothing to
@@ -1097,17 +1122,38 @@ class TestGrading:
             {**_pool_record(), "_evidence": ["E1"]},
             {**_pool_record(), "_date": None},
             {**_pool_record(), "_source_thread": 3},
+            # Codex round 3 on #1273: the _evidence mapping's contents, as
+            # the tool writes them: a list of supplied labels per field
+            # that has a value.
+            {**_pool_record(), "_evidence": {"bid": "E1"}},
+            {**_pool_record(), "_evidence": {"bid": [1]}},
+            {**_pool_record(), "_evidence": {"bid": ["E99"]}},
+            {**_pool_record(), "_evidence": {"other": ["E1"]}},
+            {**_pool_record(), "_evidence": {"_date": ["E1"]}},
+            {**_pool_record(), "note": None, "_evidence": {"note": ["E1"]}},
         ],
     )
     def test_extract_record_shape_is_checked(self, record):
-        """Shape only: the provenance fields every record carries and the
+        """Shape only: the provenance fields every record carries, the
         schema's declared fields and types (the tool's own
-        ``_record_conforms``); a breach is the tool's, not the model's."""
+        ``_record_conforms``) and the ``_evidence`` mapping (supplied
+        labels for fields with a value); a breach is the tool's, not the
+        model's."""
         case = CASES[EXTRACT]
         run = _extract_run([record], [_passage("E1", "t05.1")], [("E1", "t05.1")])
         det = grade_run(case, run)
         assert det.checks["records_conform"] == FAIL
         assert "answer_infrastructure" in attribute(case, run, det, False, False)
+
+    def test_extract_evidence_mapping_as_the_tool_writes_it_conforms(self):
+        """An empty mapping (no field cited) and a field cited by several
+        supplied labels both conform; values are not judged here."""
+        case = CASES[EXTRACT]
+        passages = [_passage("E1", "t05.1"), _passage("E2", "t05.1")]
+        for evidence in ({}, {"bid": ["E1", "E2"]}, {"contractor": [], "bid": ["E2"]}):
+            record = {**_pool_record(), "_evidence": evidence}
+            run = _extract_run([record], passages, [("E1", "t05.1")])
+            assert grade_run(case, run).checks["records_conform"] == PASS, evidence
 
     def test_extract_without_records_fails_an_answerable_case(self):
         case = CASES[EXTRACT]

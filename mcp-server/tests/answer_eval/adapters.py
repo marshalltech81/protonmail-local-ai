@@ -28,13 +28,16 @@ of a tool's output that the graders, the judge and the reports read.
   rendered as ``field: value [E1]; ...`` with the labels its
   server-checked ``_evidence`` cites, so the citation checks,
   ``must_include`` and the judge's per-statement claims apply to records
-  as they do to prose. The answer is those statements, one per line.
+  as they do to prose. Fields with no value (``None``, ``""``, ``[]``,
+  ``{}``, which the tool's own check asks no evidence for) are left
+  out, and a record with none states nothing. The answer is those
+  statements, one per line.
   The tool's ``notice`` is the coverage note, and there is no repair
   call. A notice opening ``Incomplete:`` (some searched thread's reply
   was cut off, malformed or nonconforming) makes the view incomplete,
-  with or without records. With no records and a complete extraction
+  with or without records. With no statements and a complete extraction
   the view abstains (the flag, not the text, so no other tool's answer
-  can match it); with no records and an incomplete one it does not.
+  can match it); with none and an incomplete one it does not.
   Field names are the case's own; values are provider output and reach
   only the detail artifact, as answers do.
 """
@@ -158,21 +161,32 @@ def view_of(tool: str, output: Any) -> AnswerView:
     raise KeyError(tool)
 
 
-def _record_statement(record: Mapping[str, Any]) -> AnswerStatement:
+def has_value(value: object) -> bool:
+    """Whether an extracted field holds a value: the tool's citation check
+    (``intelligence._check_records``) skips ``None``, ``""``, ``[]`` and
+    ``{}`` and asks no evidence for them."""
+    return value is not None and value not in ("", [], {})
+
+
+def _record_statement(record: Mapping[str, Any]) -> AnswerStatement | None:
     """One extracted record as a statement: ``field: value [E1]; ...``,
     each value followed by the labels its (server-checked) ``_evidence``
-    entry cites; the provenance fields the server adds are left out."""
+    entry cites. The provenance fields the server adds and fields with
+    no value (``has_value``) are left out; ``None`` for a record that
+    states nothing."""
     evidence = record.get("_evidence")
     cited: Mapping[str, Any] = evidence if isinstance(evidence, Mapping) else {}
     parts: list[str] = []
     labels: list[str] = []
     for name, value in record.items():
-        if name in _PROVENANCE_FIELDS:
+        if name in _PROVENANCE_FIELDS or not has_value(value):
             continue
         own = cited.get(name)
         own_labels = [x for x in own if isinstance(x, str)] if isinstance(own, list) else []
         parts.append(f"{name}: {json.dumps(value, ensure_ascii=False)}" + _cites(own_labels))
         labels += [label for label in own_labels if label not in labels]
+    if not parts:
+        return None
     return AnswerStatement(
         text="; ".join(parts) + ".", labels=labels, status="cited" if labels else "uncited"
     )
@@ -182,7 +196,7 @@ def _extract_view(output: ExtractFromEmailsOutput) -> AnswerView:
     """Records as statements (``_record_statement``), the notice as the
     coverage note; see the module docstring for no records."""
     records = list(output.records)
-    statements = [_record_statement(r) for r in records]
+    statements = [s for s in map(_record_statement, records) if s is not None]
     notice = output.notice
     incomplete = notice is not None and notice.startswith(_INCOMPLETE_PREFIX)
     abstained = not statements and not incomplete

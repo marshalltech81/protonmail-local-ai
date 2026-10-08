@@ -41,6 +41,7 @@ from src.tools.intelligence import (
     _record_conforms,
 )
 
+from tests.answer_eval.adapters import has_value
 from tests.answer_eval.cases import Case, message_id_of, thread_id_of
 from tests.answer_eval.runner import CaseRun, Passage
 
@@ -131,18 +132,29 @@ def is_abstention(answer: str) -> bool:
     return stripped.startswith(_NOT_FOUND_PREFIX) or stripped.startswith(_NO_RESULTS)
 
 
-def _record_shape_ok(record: object, schema: dict) -> bool:
+def _record_shape_ok(record: object, schema: dict, supplied: set[str]) -> bool:
     """Shape only: an object carrying the server's provenance fields
     (``_source_thread`` and ``_date`` strings, an ``_evidence`` object)
     whose declared fields have the schema's types (the tool's own
-    ``_record_conforms``). Values are not judged here."""
-    return (
+    ``_record_conforms``), and whose ``_evidence`` maps only fields with a
+    value (``adapters.has_value``) to lists of supplied labels, as the
+    tool writes it. Values are not judged here."""
+    if not (
         isinstance(record, dict)
         and all(name in record for name in _PROVENANCE_FIELDS)
         and isinstance(record["_source_thread"], str)
         and isinstance(record["_date"], str)
         and isinstance(record["_evidence"], dict)
         and _record_conforms(record, schema)
+    ):
+        return False
+    return all(
+        name in record
+        and name not in _PROVENANCE_FIELDS
+        and has_value(record[name])
+        and isinstance(labels, list)
+        and all(isinstance(label, str) and label in supplied for label in labels)
+        for name, labels in record["_evidence"].items()
     )
 
 
@@ -237,7 +249,8 @@ def grade_run(case: Case, run: CaseRun) -> DeterministicResult:
         checks["records_conform"] = NA
     else:
         schema = case.arguments["schema"]
-        conform = all(_record_shape_ok(r, schema) for r in out.records)
+        labels = set(run.passages)
+        conform = all(_record_shape_ok(r, schema, labels) for r in out.records)
         checks["records_conform"] = PASS if conform else FAIL
     result.citation_problem_kinds = sorted({p.kind for p in out.citation_problems})
     unknown = "unknown_labels" in result.citation_problem_kinds
