@@ -883,10 +883,10 @@ superseded entries keep their number and one line.
     boundaries have one by nature (pull-only sync is one setting;
     keeping mail out of logs is coding discipline plus marker tests),
     and an additional layer is a design decision, never a review finding
-    against a PR that does not touch the boundary. The boundaries, their
-    controls, shared assumptions and accepted limits are documented in
-    `docs/architecture.md` "Trust boundaries" (#1299); it is
-    documentation, not a test.
+    against a PR that does not touch the boundary. The rule applies to
+    every control enforcing a boundary, listed or not; a reference table
+    of the controls, shared assumptions and accepted limits is planned in
+    `docs/architecture.md` (#1299), as documentation, not a test.
 
 ## Notes for Agents
 
