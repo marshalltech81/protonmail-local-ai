@@ -1462,7 +1462,8 @@ only, never filenames or text (`make logs`):
   over the PPTX / DOCX pre-open package budgets (#1032: a deck whose
   XML would decompress past 32 MiB, or with more than 20,000 members
   or 8 MiB of relationship parts; a `.docx` or `.dotx` past 32 MiB,
-  5,000 members or 4 MiB of relationship parts), or a password-protected
+  5,000 members or 4 MiB of relationship parts; either one whose
+  members, media included, declare more than 48 MiB in all, #1033), or a password-protected
   legacy `.ppt` (#983). The file stays
   searchable by filename and type only. A `.docx` or `.dotx` over a
   budget that was recorded `failed` (`DocxPackageBudgetError`) before

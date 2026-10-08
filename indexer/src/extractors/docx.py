@@ -44,7 +44,8 @@ times the number of relationships. A package fails as
 ``DocxPackageBudgetError``, which the dispatcher records ``unsupported``
 since the same bytes always repeat it (#1032), when its members expand
 by more than
-``_MAX_EXPANSION_BYTES`` past their compressed size, number more than
+``_MAX_EXPANSION_BYTES`` past their compressed size, declare more than
+``_MAX_DECLARED_BYTES`` together (#1033), number more than
 ``_MAX_MEMBERS``, or hold more than ``_MAX_RELS_BYTES`` of relationship
 parts. The constants below say what was measured.
 
@@ -87,13 +88,24 @@ _WORD_MAIN_TYPES = frozenset({CT.WML_DOCUMENT_MAIN, WML_TEMPLATE_MAIN})
 # Bytes the package's members may expand by past their compressed size
 # (#946). Plainly timed, opening parses XML at about 7 bytes of memory per
 # byte of text-heavy XML and about 23 per byte of element-dense XML (32 MiB
-# peaked at 241 MiB and 784 MiB), so with the payload's own stored members
-# (``INDEXER_ATTACHMENT_MAX_BYTES``) at most about 64 MiB of XML is parsed
-# at the defaults, not the 200 MB the ZIP guard allows. Pictures are
-# stored already compressed and barely expand; a synthetic 500-page
-# formatted document with 2,000 pictures expanded by 16 MiB. The same
-# figure as the PPTX extractor's.
+# peaked at 241 MiB and 784 MiB). Pictures are stored already compressed
+# and barely expand; a synthetic 500-page formatted document with 2,000
+# pictures expanded by 16 MiB. The same figure as the PPTX extractor's.
 _MAX_EXPANSION_BYTES = 32 * 1024 * 1024
+
+# Bytes all the package's members declare together, stored or compressed
+# (#1033). A member stored uncompressed does not expand, so without this
+# the payload's own stored XML (``INDEXER_ATTACHMENT_MAX_BYTES``) came on
+# top of the expansion above: about 64 MiB of XML at the defaults, and
+# more with a larger payload cap. Plainly timed, opening stored
+# element-dense XML raised peak memory by 722 MiB for 32 MiB, 1,080 MiB
+# for 48 MiB and 1,439 MiB for 64 MiB. Pictures count too: real-shaped
+# synthetic documents near the default 32 MiB payload cap declared
+# 29-35 MiB in all (ten 2.8 MiB photos; 500 pages with 2,000 pictures;
+# 1,500 pages with 300 pictures), so this allows the default payload cap
+# plus 16 MiB, the largest expansion measured above. The same figure as
+# the PPTX extractor's.
+_MAX_DECLARED_BYTES = 48 * 1024 * 1024
 
 # Members in the package (#967). python-docx checks each part it reaches
 # against a list of the parts already visited: plainly timed, 5,000
@@ -114,7 +126,8 @@ _MAX_RELS_BYTES = 4 * 1024 * 1024
 
 class DocxPackageBudgetError(Exception):
     """The package is over a budget checked before python-docx opens it:
-    expansion, member count or relationship bytes. Fixed text."""
+    expansion, declared size, member count or relationship bytes. Fixed
+    text."""
 
     def __init__(self) -> None:
         super().__init__("package over a DOCX pre-open budget")
@@ -142,6 +155,7 @@ def _open_document(payload: bytes) -> DocxDocument:
         max_members=_MAX_MEMBERS,
         max_expansion_bytes=_MAX_EXPANSION_BYTES,
         max_rels_bytes=_MAX_RELS_BYTES,
+        max_declared_bytes=_MAX_DECLARED_BYTES,
     ):
         raise DocxPackageBudgetError()
     try:

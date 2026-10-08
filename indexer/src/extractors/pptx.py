@@ -44,7 +44,8 @@ The work is bounded per extraction, counted as the walk goes:
   ``PptxPackageBudgetError``, which the dispatcher records ``unsupported``
   since the same bytes always repeat it (#1032), when its members expand
   by more than
-  ``_MAX_EXPANSION_BYTES`` past their compressed size, number more than
+  ``_MAX_EXPANSION_BYTES`` past their compressed size, declare more than
+  ``_MAX_DECLARED_BYTES`` together (#1033), number more than
   ``_MAX_MEMBERS``, or hold more than ``_MAX_RELS_BYTES`` of
   relationship parts, all read from the ZIP central directory. python-pptx
   follows the package's relationships recursively, so a long chain of
@@ -125,12 +126,24 @@ _ELEMENT_COST = 8
 # Bytes the package's members may expand by past their compressed size
 # (#936, review round 1). python-pptx parses every XML part whole when it
 # opens a deck: plainly timed, about 15 bytes of memory per byte of XML,
-# so 166 MB of slide XML peaked at 2.5 GB. What it parses is at most the
-# payload (``INDEXER_ATTACHMENT_MAX_BYTES``) plus this, from the ZIP
-# central directory and before python-pptx runs, about 1 GB at the
-# defaults. Pictures and media are stored already compressed and barely
-# expand; a long text-heavy deck's XML expands by a few MB.
+# so 166 MB of slide XML peaked at 2.5 GB. Pictures and media are stored
+# already compressed and barely expand; a long text-heavy deck's XML
+# expands by a few MB.
 _MAX_EXPANSION_BYTES = 32 * 1024 * 1024
+
+# Bytes all the package's members declare together, stored or compressed
+# (#1033). A member stored uncompressed does not expand, so without this
+# the payload's own stored XML (``INDEXER_ATTACHMENT_MAX_BYTES``) came on
+# top of the expansion above: about 64 MiB of XML at the defaults, and
+# more with a larger payload cap. Plainly timed, opening stored
+# element-dense slide XML raised peak memory by 686 MiB for 32 MiB,
+# 1,029 MiB for 48 MiB and 1,371 MiB for 64 MiB, about 21 bytes per byte.
+# Media count too: real-shaped synthetic decks declared 30 MiB (40 slides
+# with 40 photos, near the default 32 MiB payload cap), 32 MiB (an
+# embedded 28 MiB video) and 15 MiB (1,000 slides with notes and 200
+# pictures), so this allows the default payload cap plus 16 MiB. The
+# same figure as the DOCX extractor's.
+_MAX_DECLARED_BYTES = 48 * 1024 * 1024
 
 # Members in the package (review round 2). python-pptx builds a part for
 # every member a relationship names, about 18 microseconds each plainly
@@ -181,7 +194,8 @@ class PptxRelationshipChainError(Exception):
 
 class PptxPackageBudgetError(Exception):
     """The deck's package is over a budget checked before python-pptx
-    opens it: expansion, member count or relationship bytes. Fixed text."""
+    opens it: expansion, declared size, member count or relationship
+    bytes. Fixed text."""
 
     def __init__(self) -> None:
         super().__init__("package over a PPTX pre-open budget")
@@ -195,6 +209,7 @@ def _check_package(payload: bytes) -> None:
         max_members=_MAX_MEMBERS,
         max_expansion_bytes=_MAX_EXPANSION_BYTES,
         max_rels_bytes=_MAX_RELS_BYTES,
+        max_declared_bytes=_MAX_DECLARED_BYTES,
     ):
         raise PptxPackageBudgetError()
 

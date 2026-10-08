@@ -1295,18 +1295,23 @@ the number of relationships. Plainly timed, 20,000 related members took
 32 MiB of element-dense XML peaked at 784 MiB while it opened. So a
 document fails as `DocxPackageBudgetError`, before python-docx reads any
 member, when its members expand by more than 32 MiB past their
-compressed sizes, number more than 5,000, or hold more than 4 MiB of
-relationship (`.rels`) parts. A synthetic 500-page formatted document
-with 2,000 pictures and 10,000 hyperlinks has about 2,000 members,
-16 MiB of expansion and 2.1 MiB of relationships. Pictures are stored
-compressed and barely expand, but members stored uncompressed are not
-counted against the expansion budget, so at the default
-`INDEXER_ATTACHMENT_MAX_BYTES` python-docx can still parse up to about
-64 MiB of XML (#1033). An over-budget document is recorded
+compressed sizes, declare more than 48 MiB together, number more than
+5,000, or hold more than 4 MiB of relationship (`.rels`) parts. A
+synthetic 500-page formatted document with 2,000 pictures and 10,000
+hyperlinks has about 2,000 members, 16 MiB of expansion and 2.1 MiB of
+relationships. The declared total (#1033) counts members stored
+uncompressed, which do not expand, so python-docx parses at most 48 MiB
+of XML whatever `INDEXER_ATTACHMENT_MAX_BYTES` is (plainly timed,
+stored element-dense XML raised peak memory by about 1.1 GB at 48 MiB).
+Pictures count against it too: real-shaped synthetic documents near the
+default 32 MiB payload cap declared 29 to 35 MiB, so 48 MiB is the
+default cap plus the 16 MiB of expansion above. With a raised
+`INDEXER_ATTACHMENT_MAX_BYTES`, a document declaring more than 48 MiB
+(large photos) is recorded `unsupported`. An over-budget document is recorded
 `unsupported` ("document exceeds a pre-open package budget"), not
 `failed`, since the same bytes trip the budget on every run (#1032; see
 *Permanent extractor failures* below). The DOCX version is not bumped,
-neither by the budgets (#1036) nor by the mapping (#1032; PR #1068's
+neither by the budgets (#1036, nor the declared total, #1033) nor by the mapping (#1032; PR #1068's
 bump to `docx@6` was reverted): a bump would re-run every cached
 document once through the walk after the open, which has no budget of
 its own yet (#1031), and re-record an over-budget document that was
@@ -1503,11 +1508,17 @@ python-pptx opens the deck, and by a 32 MiB expansion budget: python-pptx
 parses every XML part whole (about 15 bytes of memory per byte of XML),
 so a deck whose members expand by more than 32 MiB past their
 compressed sizes fails as `PptxPackageBudgetError` before it is
-opened, as does one with more than 20,000 members or more than 8 MiB of
+opened, as does one whose members declare more than 48 MiB together
+(#1033: members stored uncompressed do not expand, and media count too,
+so a deck with a large video past it fails; real-shaped synthetic decks
+near the default 32 MiB payload cap declared about 30 to 32 MiB), one
+with more than 20,000 members or more than 8 MiB of
 relationship (`.rels`) parts, since python-pptx builds a part for every
 related member and walks every relationship as it opens; the dispatcher
 records it `unsupported` ("presentation exceeds a pre-open package
-budget", #1032), not `failed`. It then counts its walk against four budgets
+budget", #1032), not `failed`. The declared total did not bump the
+`pptx` version, so a deck read in full before it keeps its cached text.
+It then counts its walk against four budgets
 per presentation: 5,000 slide-list entries (an entry naming a slide
 already read is skipped, not read again), 100,000 shapes (each group
 and every shape in it, and each notes-page shape), 200,000 table rows
