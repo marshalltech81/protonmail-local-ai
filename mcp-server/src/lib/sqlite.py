@@ -836,8 +836,9 @@ MAX_LISTED_CLAIMANTS = 20
 
 # Message-ID conflicts for ``get_mailbox_status`` (#455): the number of
 # Message-IDs claimed by more than one file, and the files beyond the
-# first claimant of each. Grouping on ``message_id`` walks the
-# ``idx_messages_message`` index alone (a covering scan), not the table.
+# first claimant of each. Grouping on ``message_id`` walks a covering
+# index led by ``message_id`` alone (the planner may pick either such
+# index), not the table.
 MESSAGE_ID_CONFLICTS_SQL = """
     SELECT COUNT(*), COALESCE(SUM(n - 1), 0)
     FROM (SELECT COUNT(*) AS n FROM messages GROUP BY message_id HAVING COUNT(*) > 1)

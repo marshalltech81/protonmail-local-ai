@@ -1370,18 +1370,31 @@ class TestStatsAndFolders:
         assert stats["extra_claimant_files"] == 3
         assert stats["total_messages"] == 6
 
-    def test_message_id_conflict_count_reads_only_the_message_id_index(self, empty_db: Database):
-        """The count must stay cheap on a large mailbox: SQLite walks the
-        ``message_id`` index alone (a covering scan) rather than the
-        ``messages`` table rows."""
+    def test_message_id_conflict_count_uses_a_covering_message_id_index(self, empty_db: Database):
+        """The count must stay cheap on a large mailbox (#455): SQLite walks
+        a covering index led by ``message_id`` rather than the ``messages``
+        table rows, with no temporary sort. Two indexes qualify
+        (``idx_messages_message`` and ``idx_messages_message_effective``)
+        and the planner's choice between them varies with the SQLite
+        version and the table's columns, so the test checks the index's
+        leading column, not its name."""
         from src.lib.sqlite import MESSAGE_ID_CONFLICTS_SQL
 
         with closing(empty_db._connect()) as conn:
             plan = [
                 row[3] for row in conn.execute(f"EXPLAIN QUERY PLAN {MESSAGE_ID_CONFLICTS_SQL}")
             ]
-        message_scans = [step for step in plan if "messages" in step]
-        assert message_scans == ["SCAN messages USING COVERING INDEX idx_messages_message"]
+            message_scans = [step for step in plan if "messages" in step]
+            assert len(message_scans) == 1, plan
+            prefix = "SCAN messages USING COVERING INDEX "
+            assert message_scans[0].startswith(prefix), plan
+            index_name = message_scans[0].removeprefix(prefix)
+            first_column = conn.execute(
+                "SELECT name FROM pragma_index_info(?) WHERE seqno = 0", (index_name,)
+            ).fetchone()
+            assert first_column is not None, index_name
+            assert first_column[0] == "message_id", index_name
+            assert not any("USE TEMP B-TREE" in step for step in plan), plan
 
     def test_list_folders_ranked_by_thread_count(self, seeded_db: Database):
         folders = seeded_db.list_folders()
