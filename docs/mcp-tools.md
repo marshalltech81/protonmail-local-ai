@@ -389,8 +389,9 @@ the experimental tools) carries it as `sender_ambiguous`:
 
 - `false`: one `From` header; the sender is what it says (still the
   claimed address, not a verified one).
-- `true`: the message repeats `From`, or has more header fields than
-  the indexer reads (10,000), so a second `From` cannot be ruled out.
+- `true`: the message repeats `From`, or the indexer's header scan
+  stopped at its field cap (10,000 fields) before a second `From` could
+  be seen, so one cannot be ruled out. The index does not record which.
   `from` lists the first header's authors only and may not be the
   author.
 - `null`: not assessed yet. Mail indexed before the upgrade that added
@@ -407,7 +408,7 @@ the `sender` filters still find the message. The prose of
 `get_message` adds a `Sender:` line, and a `query_messages` row the
 words `sender ambiguous` or `sender not yet checked`, unless the value is `false`.
 In an intelligence prompt the passage header's sender is followed by
-`(unverified: repeated From header)` or `(unverified: sender not yet
+`(unverified: sender attribution unsafe)` or `(unverified: sender not yet
 checked)`, and the prose `Citations:` list repeats the note.
 `find_contact` is unchanged, and `search_emails` decides its sender
 filters on the thread's recorded senders as before (#1154).

@@ -10,6 +10,7 @@ import re
 import time
 from datetime import UTC, datetime
 
+import pytest
 from src import threader
 from src.database import EMBEDDING_DIM  # noqa: F401  -- via reuse
 from src.threader import Thread, Threader, _normalize_subject, canonical_addr
@@ -973,3 +974,180 @@ class TestLongSubjectCap:
 
         reply = self._parse(tmp_path, "b", "Re: " + subject, 2, "fits_b@example.com")
         assert threader.assign_thread(reply).thread_id == "fits_a@example.com"
+
+
+# ---------------------------------------------------------------------------
+# Subject-fallback provenance (#1144, review round 2)
+# ---------------------------------------------------------------------------
+
+_PROV_MARKER = "SYNTHETIC_PROVENANCE_MARKER"
+_REJECTED = "subject fallback rejected"
+
+
+def _msg(mid, *, sender="alice@example.com", to=("bob@example.com",), day=1, ambiguous=False, **kw):
+    msg = make_message(
+        message_id=f"{mid}@example.com",
+        subject=kw.pop("subject", f"Re: {_PROV_MARKER} plan"),
+        from_addr=sender,
+        to_addrs=list(to),
+        filepath=f"/maildir/INBOX/cur/{mid}",
+        date=datetime(2024, 1, day, 12, 0, tzinfo=UTC),
+        **kw,
+    )
+    msg.sender_ambiguous = ambiguous
+    return msg
+
+
+def _index(db, threader, msg):
+    """Thread ``msg`` and persist it, as the indexer does."""
+    thread = threader.assign_thread(msg)
+    db.upsert_thread(thread, [0.0] * EMBEDDING_DIM)
+    return thread.thread_id
+
+
+def _rejections(caplog) -> list[str]:
+    return [r.getMessage() for r in caplog.records if _REJECTED in r.getMessage()]
+
+
+class TestSubjectFallbackProvenance:
+    """Only messages assessed safe (``sender_ambiguous = 0``) supply the
+    correspondent evidence a subject-only merge needs: an ambiguous or
+    unassessed message neither joins by subject nor lets another join."""
+
+    def test_an_ambiguous_first_message_cannot_attract_a_genuine_one(self, db, threader, caplog):
+        caplog.set_level("DEBUG")
+        forged = _index(
+            db, threader, _msg("forged", ambiguous=True, subject=f"{_PROV_MARKER} plan")
+        )
+        genuine = _index(db, threader, _msg("genuine", day=2))
+        assert genuine == "genuine@example.com" != forged
+        assert _rejections(caplog) == [
+            f"{_REJECTED} 1 candidate thread(s) without assessed correspondents for "
+            "/maildir/INBOX/cur/genuine"
+        ]
+        assert [r.levelname for r in caplog.records if _REJECTED in r.getMessage()] == ["INFO"]
+        assert _PROV_MARKER not in caplog.text
+
+    @pytest.mark.parametrize("ambiguous_first", [True, False])
+    @pytest.mark.parametrize("ambiguous_day, genuine_day", [(1, 2), (2, 1)])
+    def test_no_merge_in_either_arrival_or_date_order(
+        self, db, threader, ambiguous_first, ambiguous_day, genuine_day
+    ):
+        ambiguous = _msg("amb", ambiguous=True, day=ambiguous_day)
+        genuine = _msg("gen", day=genuine_day)
+        order = [ambiguous, genuine] if ambiguous_first else [genuine, ambiguous]
+        ids = [_index(db, threader, m) for m in order]
+        assert ids[0] != ids[1]
+
+    def test_a_rejected_newer_candidate_does_not_hide_a_valid_older_one(self, db, threader, caplog):
+        caplog.set_level("INFO")
+        first = _index(db, threader, _msg("g1", subject=f"{_PROV_MARKER} plan", day=1))
+        # An ambiguous message never joins by subject: its own, newer thread.
+        forged = _index(db, threader, _msg("amb", ambiguous=True, day=5))
+        assert forged == "amb@example.com"
+        assert db.find_threads_by_subject(_normalize_subject(f"{_PROV_MARKER} plan"), "INBOX") == [
+            forged,
+            first,
+        ]
+        later = _msg("g2", day=6)
+        thread = threader.assign_thread(later)
+        assert thread.thread_id == first
+        # The displayed participants are built as before.
+        assert thread.participants == ["alice@example.com", "bob@example.com"]
+        assert len(_rejections(caplog)) == 1
+        assert " 1 candidate thread(s) " in _rejections(caplog)[0]
+
+    def test_a_header_linked_ambiguous_reply_supplies_no_correspondent(self, db, threader):
+        root = _index(db, threader, _msg("root", subject=f"{_PROV_MARKER} plan", day=1))
+        # Joined by In-Reply-To, so it shares the thread, but its
+        # correspondents (carol -> dave) carry no evidence.
+        assert (
+            _index(
+                db,
+                threader,
+                _msg(
+                    "reply",
+                    sender="carol@example.com",
+                    to=("dave@example.com",),
+                    ambiguous=True,
+                    in_reply_to="root@example.com",
+                    day=2,
+                ),
+            )
+            == root
+        )
+        stray = _msg("stray", sender="carol@example.com", to=("dave@example.com",), day=3)
+        assert threader.assign_thread(stray).thread_id == "stray@example.com"
+        # Independent support: a genuine carol -> dave reply by header.
+        assert (
+            _index(
+                db,
+                threader,
+                _msg(
+                    "support",
+                    sender="carol@example.com",
+                    to=("dave@example.com",),
+                    in_reply_to="root@example.com",
+                    day=3,
+                ),
+            )
+            == root
+        )
+        assert threader.assign_thread(stray).thread_id == root
+
+    def test_author_and_recipient_may_come_from_different_assessed_messages(self, db, threader):
+        root = _index(db, threader, _msg("r1", subject=f"{_PROV_MARKER} plan", day=1))
+        _index(
+            db,
+            threader,
+            _msg(
+                "r2",
+                sender="erin@example.com",
+                to=("frank@example.com",),
+                in_reply_to="r1@example.com",
+                day=2,
+            ),
+        )
+        # erin is known from r2, bob from r1.
+        mixed = _msg("mixed", sender="erin@example.com", to=("bob@example.com",), day=3)
+        assert threader.assign_thread(mixed).thread_id == root
+
+    def test_unassessed_support_is_rejected_until_assessed(self, db, threader):
+        root = _index(db, threader, _msg("old", subject=f"{_PROV_MARKER} plan", day=1))
+        db._conn.execute("UPDATE messages SET sender_ambiguous = NULL")
+        db._conn.commit()
+        arrival = _msg("new", day=2)
+        assert threader.assign_thread(arrival).thread_id == "new@example.com"
+        db._conn.execute("UPDATE messages SET sender_ambiguous = 0")
+        db._conn.commit()
+        assert threader.assign_thread(arrival).thread_id == root
+
+    def test_a_multi_author_from_still_matches(self, db, threader):
+        first = _msg("ma1", subject=f"{_PROV_MARKER} plan", day=1)
+        first.from_addrs = ["alice@example.com", "grace@example.com"]
+        root = _index(db, threader, first)
+        follow = _msg("ma2", sender="grace@example.com", day=2)
+        assert threader.assign_thread(follow).thread_id == root
+
+    def test_no_line_when_nothing_was_rejected_for_provenance(self, db, threader, caplog):
+        caplog.set_level("DEBUG")
+        _index(db, threader, _msg("p1", subject=f"{_PROV_MARKER} plan", day=1))
+        # Unrelated correspondents: rejected by the ordinary check, not provenance.
+        _index(db, threader, _msg("p2", sender="zed@example.com", to=("yan@example.com",), day=2))
+        assert _rejections(caplog) == []
+        rows = db._conn.execute("SELECT last_error FROM indexing_jobs").fetchall()
+        assert all(_PROV_MARKER not in (r[0] or "") for r in rows)
+
+    def test_the_helper_checks_each_leg_on_its_own(self, db, threader):
+        root = _index(db, threader, _msg("h1", subject=f"{_PROV_MARKER} plan", day=1))
+        assert db.thread_has_assessed_correspondents(
+            root, ["alice@example.com"], ["bob@example.com"]
+        )
+        assert not db.thread_has_assessed_correspondents(root, ["alice@example.com"], [])
+        assert not db.thread_has_assessed_correspondents(root, [], ["bob@example.com"])
+        assert not db.thread_has_assessed_correspondents(
+            root, ["nobody@example.com"], ["bob@example.com"]
+        )
+        assert not db.thread_has_assessed_correspondents(
+            "missing", ["alice@example.com"], ["bob@example.com"]
+        )

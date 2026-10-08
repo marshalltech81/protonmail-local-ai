@@ -1680,6 +1680,19 @@ alone (`In-Reply-To` and `References` still apply);
 lines share the 20-per-5-minutes limit above, and name only the path
 and counts, never an address.
 
+Only messages assessed safe supply the correspondent evidence a
+subject-only merge needs. Until the reparse after the v2 upgrade
+reaches a thread's messages, a new message is not merged into that
+thread by subject alone and keeps its own thread; the line `subject
+fallback rejected <n> candidate thread(s) without assessed
+correspondents for <path>` (INFO, rate limited) counts these. A
+reparse keeps each message's thread, so the split is permanent for a
+thread started in that window, and for a thread whose messages are
+dead-lettered (they stay unassessed). An ambiguous message linked by
+`In-Reply-To` or `References` still joins its thread and can still
+move the thread's last-activity date, and so the order in which
+same-subject candidate threads are tried.
+
 ### `authority_class` filters return nothing after an upgrade
 
 Schema v2 (#1144) records whether each message's sender attribution is

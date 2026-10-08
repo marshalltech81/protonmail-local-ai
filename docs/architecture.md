@@ -1062,7 +1062,15 @@ after the v2 upgrade and fill in as the reparse drains, and a message
 whose job is dead-lettered stays out of them until `make requeue-dead`.
 The `from` participant rows are kept, so sender filters and
 `find_contact` are unchanged; the threader skips the subject fallback
-for a flagged message, since that check trusts its author.
+for a flagged message, since that check trusts its author. Ambiguous
+messages cannot join by subject alone or supply correspondent evidence
+for another subject-only merge. NULL supplies no evidence; assessed
+messages in mixed threads can still qualify: the fallback's
+correspondent check reads the author and another recipient from the
+candidate thread's messages with `sender_ambiguous = 0` only
+(`Database.thread_has_assessed_correspondents`), each from any such
+message, and logs a rate-limited INFO count of candidates it turned
+down for that reason alone.
 
 The indexer loads the file once at startup, before opening the
 database. An absent file classifies nothing; a file that cannot be

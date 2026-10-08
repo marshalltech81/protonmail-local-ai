@@ -2082,6 +2082,32 @@ class Database:
         return row["thread_id"] if row else None
 
     @_synchronized
+    def thread_has_assessed_correspondents(
+        self, thread_id: str, authors: list[str], recipients: list[str]
+    ) -> bool:
+        """Whether ``thread_id`` has a message assessed safe
+        (``sender_ambiguous = 0``) carrying one of ``authors`` and one
+        (possibly another such message) carrying one of ``recipients``,
+        in any role (#1144). Both lists are canonical addresses. The
+        subject fallback trusts only this evidence: an ambiguous message
+        (1) or one not yet assessed (NULL) contributes nothing. Each
+        list is bound as one JSON parameter, so a long recipient list
+        stays under SQLite's variable limit."""
+        if not authors or not recipients:
+            return False
+        leg = (
+            "EXISTS (SELECT 1 FROM message_participants p "
+            "JOIN messages m ON m.claimant_id = p.claimant_id "
+            "WHERE m.thread_id = ? AND m.sender_ambiguous = 0 "
+            "AND p.address IN (SELECT value FROM json_each(?)))"
+        )
+        row = self._conn.execute(
+            f"SELECT {leg} AND {leg}",  # nosec B608 -- constant SQL, values bound
+            (thread_id, json.dumps(authors), thread_id, json.dumps(recipients)),
+        ).fetchone()
+        return bool(row[0])
+
+    @_synchronized
     def find_threads_by_subject(
         self, normalized_subject: str, folder: str, limit: int = 10
     ) -> list[str]:

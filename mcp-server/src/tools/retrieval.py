@@ -136,8 +136,10 @@ def _format_participants(people: list[Participant], limit: int = _MAX_LISTED_PAR
 
 # The prose ``Sender:`` line of a message whose sender attribution is
 # not known safe (#1144), keyed by ``MessageRecord.sender_ambiguous``.
+# True covers a repeated From and a header scan cut short, which the
+# index does not tell apart, so its words name neither.
 _SENDER_CHECK_WORDS = {
-    True: "ambiguous (repeated From header; From lists the first only)",
+    True: "ambiguous (sender attribution unsafe)",
     None: "not yet checked",
 }
 

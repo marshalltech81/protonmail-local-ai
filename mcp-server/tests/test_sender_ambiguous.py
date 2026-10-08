@@ -99,7 +99,7 @@ class TestMessageRows:
         "value, expected, prose",
         [
             (0, False, None),
-            (1, True, "Sender: ambiguous (repeated From header; From lists the first only)"),
+            (1, True, "Sender: ambiguous (sender attribution unsafe)"),
             (None, None, "Sender: not yet checked"),
         ],
     )
@@ -169,7 +169,7 @@ class TestPassages:
         "value, note",
         [
             (False, ""),
-            (True, " (unverified: repeated From header)"),
+            (True, " (unverified: sender attribution unsafe)"),
             (None, " (unverified: sender not yet checked)"),
         ],
     )
@@ -195,7 +195,7 @@ class TestPassages:
         chunk.attachment_mime = "m" * 10_000
         header = _chunk_header(chunk, chunk.char_end, label="E1")
         assert len(header) <= _LABELLED_HEADER_MAX_CHARS
-        assert "… (unverified: repeated From header) | sent" in header
+        assert "… (unverified: sender attribution unsafe) | sent" in header
 
     def test_thread_text_citation_has_no_flag(self):
         citation = _citation(EvidenceRef(label="E1", thread_id="t", chunk=None, char_end=None))
@@ -205,3 +205,22 @@ class TestPassages:
 def test_fixture_dates_are_utc():
     # Guards the parametrized dates above against a local-time reading.
     assert datetime.fromisoformat("2024-03-04T10:30:00+00:00").tzinfo == UTC
+
+
+# Both causes the indexer stores as 1 (#1144): a repeated From, and a
+# header scan stopped at its field cap with no second From seen. The
+# stored value cannot tell them apart, so every label for 1 is neutral.
+_CAUSES = ["repeated_from", "scan_capped"]
+
+
+@pytest.mark.parametrize("cause", _CAUSES)
+def test_both_causes_get_the_reason_neutral_label(fake_server, messages_db, cause):
+    from src.tools.intelligence import sender_check
+
+    _set_flag(messages_db, "message_id = 'm1'", 1)
+    register_retrieval_tools(fake_server, messages_db)
+    out = asyncio.run(fake_server.tools["get_message"](message_id=claimant_of("m1")))
+    labels = [out.content[0].text, sender_check(True)]
+    for label in labels:
+        assert "sender attribution unsafe" in label
+        assert "repeated" not in label

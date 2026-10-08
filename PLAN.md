@@ -65,7 +65,7 @@ The stack runs three containers beside the Proton Mail Bridge app:
   persistent pin.
 - **indexer** — parses Maildir, threads, embeds through any
   OpenAI-compatible `/v1/embeddings` provider, writes SQLite (schema
-  v1 since the per-extractor extraction cache, #928; numbered
+  v2 since `messages.sender_ambiguous`, #1144; numbered
   migrations for any change since the first deployment; 4096-dim L2-normalized vectors; per-message records
   keyed by claimant ID).
   Initial scan and steady state drain one durable `indexing_jobs`

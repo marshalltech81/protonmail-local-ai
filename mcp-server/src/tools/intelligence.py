@@ -2018,11 +2018,12 @@ def _short_id(claimant_id: str) -> str:
 def sender_check(sender_ambiguous: bool | None) -> str:
     """The note after a passage's sender in a prompt or the prose
     citations (#1144): nothing when the message has one From header,
-    otherwise why its sender may not be its author. Fixed text."""
+    otherwise why its sender may not be its author. Fixed text; True
+    covers a repeated From and a header scan cut short alike."""
     if sender_ambiguous is False:
         return ""
     if sender_ambiguous:
-        return " (unverified: repeated From header)"
+        return " (unverified: sender attribution unsafe)"
     return " (unverified: sender not yet checked)"
 
 
