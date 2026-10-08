@@ -1217,7 +1217,7 @@ is still failing.
 | `health file refresh` | `health file refresh failed: <type>` (WARNING) | Per message, embed request and attachment page |
 | `ingestion state recording` | `recording ingestion state failed: <type>` (ERROR) | At most every 30 s, retried on each heartbeat until it succeeds |
 | `Maildir watch refresh` | `Maildir watch refresh failed: <type>` (ERROR) | After each mbsync sync, and every `INDEXER_RECOVERY_SWEEP_INTERVAL_SECS` |
-| `periodic Maildir rescan` | `periodic Maildir rescan failed: <type>` (ERROR) | Every `INDEXER_RECOVERY_SWEEP_INTERVAL_SECS` (30 min) |
+| `periodic Maildir rescan` | `periodic Maildir rescan failed: <type>` (ERROR) | Every `INDEXER_RECOVERY_SWEEP_INTERVAL_SECS` (30 min), and after an inotify queue overflow (below) |
 | `periodic rename sweep` | `periodic rename sweep failed: <type>` (WARNING) | Before each periodic Maildir rescan; the rescan's walk runs either way |
 | `periodic reconciliation` | `periodic reconciliation failed: <type>` (ERROR) | Every `INDEXER_DELETION_SWEEP_INTERVAL_SECS`, with deletion reconciliation on |
 | `reaped-record prune` | `reaped-record prune failed: <type>` (ERROR) | At startup and with each reconciliation interval |
@@ -1241,6 +1241,25 @@ Maildir watcher and walks (#870):
   index as well as the steady-state loop, and the heartbeat is not
   written once the thread is found dead. A restart loop with this
   line means the cause persists: read the traceback above it.
+- `Maildir watcher: inotify event queue overflowed and dropped events;
+  a Maildir walk will queue the mail they announced` (WARNING): a
+  burst of file events (a large folder delivered in one sync) filled
+  the kernel's inotify queue (its length is the Docker host kernel's
+  `fs.inotify.max_queued_events`) and Linux dropped the events after
+  it (#1108). The indexer re-schedules the Maildir watch and runs a
+  Maildir walk (`maintenance pass=rescan` follows) at once, both
+  retried every 60 s while either fails, and until that walk completes
+  `get_mailbox_status` does not count a sync as ingested from the
+  watcher alone. `Maildir watcher: recovered from <n> inotify queue
+  overflow(s); a Maildir walk queued the mail their dropped events
+  announced` (INFO) ends the episode. The WARNING shares the
+  20-per-5-minutes budget (the rest count as `suppressed_lines`); `<n>`
+  counts every overflow. An occasional pair is harmless: the walk
+  queues the mail either way. A
+  `Maildir watcher: inotify overflow detection unavailable` WARNING at
+  startup means the installed watchdog no longer has the parser the
+  indexer wraps; overflows then go unreported and the periodic rescan
+  queues the mail.
 - `Maildir walk: skipped <n> director(ies) it could not read; their
   mail is not indexed until they are readable` (WARNING), after a
   startup or periodic Maildir walk, and `Maildir watch: <n>
