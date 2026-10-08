@@ -624,9 +624,13 @@ of two errors:
   make build-nocache SERVICES=indexer
   ```
 
-  If the rebuild still fails, the artifact Maven Central serves no
-  longer matches the committed checksum: report it as a security
-  issue rather than regenerating the file.
+  `--no-cache` hands the build an empty Maven cache mount on BuildKit
+  0.29 (checked with a tampered jar in the mount). If the same
+  mismatch comes back, empty the builder's whole cache with
+  `docker builder prune` (this also empties other projects' caches on
+  that builder) and rebuild. If it still fails, the artifact Maven
+  Central serves no longer matches the committed checksum: report it
+  as a security issue rather than regenerating the file.
 
 ## Index is empty after startup
 
