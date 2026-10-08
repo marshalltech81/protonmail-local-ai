@@ -25,6 +25,7 @@ from contextlib import closing
 import pytest
 from src.lib.predicates import LEAVES, Evaluability, Leaf, compile_leaves
 from src.lib.sqlite import Database
+from src.tools.outputs import QueryMessagesOutput
 from src.tools.retrieval import register_retrieval_tools
 
 from tests.conftest import _insert_message, set_authority
@@ -157,6 +158,15 @@ class TestTool:
         text = out.content[0].text
         assert "No messages are known to match." in text
         assert "No messages match." not in text
+
+    def test_served_text_states_the_spam_exception(self, fake_server, authority_db):
+        """Codex round 1 on #1207: every client-facing description of
+        an authority filter's indeterminate count says "outside Spam"."""
+        register_retrieval_tools(fake_server, authority_db)
+        doc = " ".join((fake_server.tools["query_messages"].__doc__ or "").split())
+        description = QueryMessagesOutput.model_fields["indeterminate"].description or ""
+        for text in (doc, " ".join(description.split())):
+            assert "authority_class filter on a message outside Spam whose sender" in text
 
     def test_no_marker_reaches_the_log(self, fake_server, authority_db, caplog):
         caplog.set_level(logging.DEBUG)

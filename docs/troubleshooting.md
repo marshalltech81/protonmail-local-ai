@@ -833,7 +833,8 @@ kind of reindex that needs depends on whether search data changes too:
   the extraction cache). Search keeps working throughout; the data the
   release adds is missing for a message until its reparse runs (after
   the release that added `sender_ambiguous`, `query_messages` counts
-  such a message as `indeterminate` under a sender or authority filter,
+  such a message as `indeterminate` under a sender filter, or under an
+  authority filter unless it is in Spam,
   `docs/mcp-tools.md` "Sender attribution"). New
   mail, recovery and re-extraction jobs go ahead of the reparse, which
   still advances at least one message per batch, so the queue
