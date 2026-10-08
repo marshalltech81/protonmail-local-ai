@@ -242,12 +242,27 @@ class TestSlotOrder:
 
 
 _DATE = "2024-01-01T00:00:00+00:00"
+# A sixteen-word question whose every word is in every corpus chunk: the
+# worst case for a ``MATCH`` (#1262).
+_GATE_WORDS = (
+    "what is the status of invoice that we sent to them last week for this order"
+).split()
+_GATE_QUERY = " ".join(_GATE_WORDS) + "?"
+
+
+def _gate_text(i: int) -> str:
+    """About 23 tokens, near real mail's chunk density. Thin chunks (three
+    tokens) leave so few FTS5 segments that a lookup seeking the mailbox
+    index looks flat when it is not (#1262)."""
+    return " ".join(_GATE_WORDS) + f" filler word{i % 97} lorem ipsum dolor sit amet"
 
 
 def _corpus(path: Path, chunks: int, per_thread: int = 10) -> Database:
-    """``chunks`` chunks, every one holding the query word (the worst
-    case for a ``MATCH``), with the indexer's two ``message_chunks``
-    indexes the lookup relies on (``indexer/src/database.py``)."""
+    """``chunks`` chunks with vectors, every one holding every query word,
+    written as the indexer writes them (``indexer/src/database.py``: the
+    same text in ``message_chunks`` and ``message_chunks_fts``, one FTS
+    insert per chunk so the index keeps its automerge segments), with the
+    indexer's two ``message_chunks`` indexes the lookups rely on."""
     conn = _open(path)
     conn.executescript(
         "CREATE INDEX idx_message_chunks_thread ON message_chunks(thread_id);"
@@ -261,64 +276,73 @@ def _corpus(path: Path, chunks: int, per_thread: int = 10) -> Database:
         [(f"t{t}", _DATE, _DATE) for t in range(threads)],
     )
     for i in range(chunks):
-        cur.execute(
-            "INSERT INTO message_chunks_fts (text) VALUES (?)",
-            (f"common filler word{i % 97}",),
-        )
+        text = _gate_text(i)
+        cur.execute("INSERT INTO message_chunks_fts (text) VALUES (?)", (text,))
         cur.execute(
             "INSERT INTO message_chunks (chunk_id, claimant_id, thread_id, chunk_index, text, "
             "char_start, char_end, token_est, chunked_at, fts_rowid, kind) "
-            "VALUES (?, 'm', ?, 0, '', 0, 0, 1, '2024', ?, 'body')",
-            (f"c{i}", f"t{i // per_thread}", cur.lastrowid),
+            "VALUES (?, 'm', ?, ?, ?, 0, ?, 23, '2024', ?, 'body')",
+            (f"c{i}", f"t{i // per_thread}", i % per_thread, text, len(text), cur.lastrowid),
+        )
+        cur.execute(
+            "INSERT INTO message_chunks_vec (chunk_id, embedding) VALUES (?, ?)",
+            (f"c{i}", sqlite_vec.serialize_float32(_near(i % per_thread))),
         )
     conn.commit()
     conn.close()
     return Database(str(path))
 
 
-def _counting(db: Database, monkeypatch) -> list[int]:
-    """Count the SQLite VM steps every connection ``db`` opens runs."""
+def _measure(monkeypatch, fn) -> tuple[int, object]:
+    """``fn``'s result and the SQLite VM steps run on every connection it
+    opens: the mailbox's and any in-memory one."""
     steps = [0]
-    real = db._connect
+    real = sqlite3.connect
 
-    def connect():
-        conn = real()
+    def tick() -> int:
+        steps[0] += 1
+        return 0
 
-        def tick() -> int:
-            steps[0] += 1
-            return 0
-
+    def connect(*args, **kwargs):
+        conn = real(*args, **kwargs)
         conn.set_progress_handler(tick, 1)
         return conn
 
-    monkeypatch.setattr(db, "_connect", connect)
-    return steps
-
-
-def _measure(db: Database, monkeypatch, fn) -> tuple[int, object]:
-    steps = _counting(db, monkeypatch)
-    result = fn()
-    monkeypatch.undo()
+    monkeypatch.setattr(sqlite3, "connect", connect)
+    try:
+        result = fn()
+    finally:
+        monkeypatch.undo()
     return steps[0], result
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason="#1262: the thread-driven message_chunks_fts seek grows with the "
+    "index's segment count; #1246's candidate-only lookup passes",
+)
 def test_lookup_work_stays_flat_while_chunk_lane_grows(tmp_path, monkeypatch):
-    """The acceptance gate: the lookup reads only the surfaced threads'
-    chunks, so its VM steps barely move from 1k to 50k chunks, while the
+    """The acceptance gate (#858, #1262): the evidence lookup reads only the
+    surfaced threads' chunks, so its VM steps, on every connection it uses,
+    barely move from 1k to 50k chunks of realistic density, while the
     corpus-wide chunk lane's grow with the corpus."""
     surfaced = [f"t{2 * i}" for i in range(50)]
     lookup: dict[int, int] = {}
     lane: dict[int, int] = {}
     for size in (1_000, 50_000):
         db = _corpus(tmp_path / f"c{size}.db", size)
-        lookup[size], matched = _measure(
-            db, monkeypatch, lambda db=db: db._keyword_matched_chunks("common", surfaced)
+        lookup[size], grouped = _measure(
+            monkeypatch,
+            lambda db=db: db.get_query_evidence_chunks(
+                _GATE_QUERY, surfaced, _QUERY_VEC, PROMPT_EVIDENCE_CHUNKS_PER_THREAD
+            ),
         )
-        # Work done, not only the result: every surfaced chunk matched.
-        assert set(matched) == set(surfaced)
-        assert all(len(ids) == 10 for ids in matched.values())
+        # Work done, not only the result: every surfaced thread kept a
+        # keyword-matched passage.
+        assert set(grouped) == set(surfaced)
+        assert all(chunks[0].selected_by == "keyword_match" for chunks in grouped.values())
         lane[size], _ = _measure(
-            db, monkeypatch, lambda db=db: db._chunk_keyword_search("common", 50)
+            monkeypatch, lambda db=db: db._chunk_keyword_search(_GATE_QUERY, 50)
         )
     assert lookup[50_000] < 2 * lookup[1_000], lookup
     assert lane[50_000] > 10 * lane[1_000], lane
