@@ -2443,6 +2443,251 @@ class TestDecodeHeader:
         assert calls == words
         assert elapsed < 10
 
+    # #1147: compat32 labels header bytes sent without an encoded-word
+    # (raw 8-bit) ``unknown-8bit``, which no codec is named. Valid UTF-8
+    # under that label decodes exactly and logs nothing; anything else
+    # is decoded with replacement characters and logs one rate-limited
+    # WARNING with fixed text. A genuinely unknown label keeps the #942
+    # line. Each shape: raw header lines, the expected parsed fields, and
+    # the expected (replacement, unknown-label) WARNING counts. The
+    # decoded output of every shape is what ``main`` produced before
+    # #1147; only the log lines changed.
+    RAW_8BIT_MARKER = "RAWMARKER1147"
+    RAW_8BIT_SHAPES: dict[str, tuple[bytes, dict[str, object], tuple[int, int, int]]] = {
+        "subject-raw-utf8": (
+            b"Subject: RAWMARKER1147 caf\xc3\xa9\r\n",
+            {"subject": "RAWMARKER1147 café"},
+            (0, 0, 0),
+        ),
+        # Valid UTF-8 may encode U+FFFD itself: that is not a loss.
+        "subject-raw-utf8-literal-fffd": (
+            b"Subject: RAWMARKER1147 a\xef\xbf\xbdb\r\n",
+            {"subject": "RAWMARKER1147 a\ufffdb"},
+            (0, 0, 0),
+        ),
+        "subject-raw-latin1": (
+            b"Subject: RAWMARKER1147 caf\xe9\r\n",
+            {"subject": "RAWMARKER1147 caf\ufffd"},
+            (1, 0, 0),
+        ),
+        # compat32 returns a raw 8-bit header as one ``unknown-8bit``
+        # chunk, so an encoded-word next to raw bytes stays as sent
+        # (pre-existing on ``main``, pinned here, #1186). Review round 1:
+        # that partial decode logs its own line in Subject and the From
+        # fallback; an address display name decodes the word later, so
+        # it logs nothing.
+        "subject-raw-utf8-and-encoded-word": (
+            b"Subject: RAWMARKER1147 caf\xc3\xa9 =?utf-8?q?na=C3=AFve?=\r\n",
+            {"subject": "RAWMARKER1147 café =?utf-8?q?na=C3=AFve?="},
+            (0, 0, 1),
+        ),
+        "subject-raw-latin1-and-encoded-word": (
+            b"Subject: RAWMARKER1147 caf\xe9 =?utf-8?q?na=C3=AFve?=\r\n",
+            {"subject": "RAWMARKER1147 caf\ufffd =?utf-8?q?na=C3=AFve?="},
+            (1, 0, 1),
+        ),
+        "from-raw-utf8-no-address-and-encoded-word": (
+            b"From: RAWMARKER1147 Jos\xc3\xa9 =?utf-8?q?na=C3=AFve?= <>\r\n",
+            {"from_addrs": [], "from_addr": "RAWMARKER1147 José =?utf-8?q?na=C3=AFve?= <>"},
+            (0, 0, 1),
+        ),
+        "to-raw-utf8-name-and-encoded-word": (
+            b"From: a@example.test\r\n"
+            b"To: RAWMARKER1147 Ren\xc3\xa9e =?utf-8?q?na=C3=AFve?= <b@example.test>\r\n",
+            {"to_addrs": ["RAWMARKER1147 Renée naïve <b@example.test>"]},
+            (0, 0, 0),
+        ),
+        "from-raw-utf8-name-and-encoded-word": (
+            b"From: RAWMARKER1147 Jos\xc3\xa9 =?utf-8?q?na=C3=AFve?= <a@example.test>\r\n",
+            {"from_addrs": ["RAWMARKER1147 José naïve <a@example.test>"]},
+            (0, 0, 0),
+        ),
+        # Text that only looks like the start of one is not an
+        # encoded-word.
+        "subject-raw-utf8-and-encoded-word-prefix": (
+            b"Subject: RAWMARKER1147 caf\xc3\xa9 =?utf-8\r\n",
+            {"subject": "RAWMARKER1147 café =?utf-8"},
+            (0, 0, 0),
+        ),
+        # The label the standard library writes when it re-encodes raw
+        # bytes; it means the same as the compat32 chunk label.
+        "subject-encoded-word-unknown-8bit-utf8": (
+            b"Subject: =?unknown-8bit?q?RAWMARKER1147_caf=C3=A9?=\r\n",
+            {"subject": "RAWMARKER1147 café"},
+            (0, 0, 0),
+        ),
+        "subject-encoded-word-unknown-8bit-upper-utf8": (
+            b"Subject: =?UNKNOWN-8BIT?q?RAWMARKER1147_caf=C3=A9?=\r\n",
+            {"subject": "RAWMARKER1147 café"},
+            (0, 0, 0),
+        ),
+        "subject-encoded-word-unknown-8bit-latin1": (
+            b"Subject: =?unknown-8bit?q?RAWMARKER1147_caf=E9?=\r\n",
+            {"subject": "RAWMARKER1147 caf\ufffd"},
+            (1, 0, 0),
+        ),
+        "subject-encoded-word-unknown-label": (
+            b"Subject: =?x-unknown-1147?q?RAWMARKER1147_caf=C3=A9?=\r\n",
+            {"subject": "RAWMARKER1147 café"},
+            (0, 1, 0),
+        ),
+        "from-raw-utf8-name": (
+            b"From: RAWMARKER1147 Jos\xc3\xa9 <a@example.test>\r\n",
+            {"from_addrs": ["RAWMARKER1147 José <a@example.test>"]},
+            (0, 0, 0),
+        ),
+        "from-raw-latin1-name": (
+            b"From: RAWMARKER1147 Jos\xe9 <a@example.test>\r\n",
+            {"from_addrs": ["RAWMARKER1147 Jos\ufffd <a@example.test>"]},
+            (1, 0, 0),
+        ),
+        # No address: the header is decoded for the address parse and
+        # again for the From fallback, so a loss is counted twice.
+        "from-raw-utf8-no-address": (
+            b"From: RAWMARKER1147 Jos\xc3\xa9 <>\r\n",
+            {"from_addrs": [], "from_addr": "RAWMARKER1147 José <>"},
+            (0, 0, 0),
+        ),
+        "from-raw-latin1-no-address": (
+            b"From: RAWMARKER1147 Jos\xe9 <>\r\n",
+            {"from_addrs": [], "from_addr": "RAWMARKER1147 Jos\ufffd <>"},
+            (2, 0, 0),
+        ),
+        "to-cc-raw-utf8-names": (
+            b"From: a@example.test\r\n"
+            b"To: RAWMARKER1147 Ren\xc3\xa9e <b@example.test>, Z\xc3\xb6e <c@example.test>\r\n"
+            b"Cc: \xc3\x85sa <d@example.test>\r\n",
+            {
+                "to_addrs": ["RAWMARKER1147 Renée <b@example.test>", "Zöe <c@example.test>"],
+                "cc_addrs": ["Åsa <d@example.test>"],
+            },
+            (0, 0, 0),
+        ),
+        "to-cc-raw-latin1-names": (
+            b"From: a@example.test\r\n"
+            b"To: RAWMARKER1147 Ren\xe9e <b@example.test>\r\n"
+            b"Cc: \xc5sa <d@example.test>\r\n",
+            {
+                "to_addrs": ["RAWMARKER1147 Ren\ufffde <b@example.test>"],
+                "cc_addrs": ["\ufffdsa <d@example.test>"],
+            },
+            (2, 0, 0),
+        ),
+    }
+    RAW_8BIT_REPLACED_LINE = (
+        "raw 8-bit header is not UTF-8; decoded 1 header chunk with replacement characters"
+    )
+    RAW_8BIT_KEPT_ENCODED_LINE = (
+        "raw 8-bit header holds encoded-words that were not decoded; kept 1 header as sent"
+    )
+
+    @staticmethod
+    def _write_raw_header_message(tmp_path: Path, headers: bytes) -> Path:
+        if not headers.startswith(b"From:") and b"\r\nFrom:" not in headers:
+            headers = b"From: a@example.test\r\n" + headers
+        if b"Subject:" not in headers:
+            headers += b"Subject: Hello\r\n"
+        folder = tmp_path / "INBOX" / "cur"
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / "raw8bit.eml"
+        path.write_bytes(
+            headers + b"Message-ID: <raw-1147@example.test>\r\n"
+            b"Date: Mon, 01 Jan 2024 12:00:00 +0000\r\n"
+            b"Content-Type: text/plain; charset=utf-8\r\n"
+            b"\r\n"
+            b"Body.\r\n"
+        )
+        return path
+
+    @pytest.mark.parametrize("shape", sorted(RAW_8BIT_SHAPES))
+    def test_raw_8bit_header_catalogue(self, tmp_path, caplog, shape):
+        from src import extractors
+
+        headers, expected, (replaced, unknown_label, kept_encoded) = self.RAW_8BIT_SHAPES[shape]
+        with caplog.at_level(logging.DEBUG):
+            msg = parse_email(self._write_raw_header_message(tmp_path, headers))
+        assert msg is not None
+        for field, value in expected.items():
+            assert getattr(msg, field) == value, field
+        assert msg.body_text == "Body."
+        lines = [(r.levelno, r.getMessage()) for r in caplog.records]
+        assert [line for line in lines if "replacement characters" in line[1]] == [
+            (logging.WARNING, self.RAW_8BIT_REPLACED_LINE)
+        ] * replaced
+        assert [line for line in lines if "not decoded" in line[1]] == [
+            (logging.WARNING, self.RAW_8BIT_KEPT_ENCODED_LINE)
+        ] * kept_encoded
+        assert (
+            self._charset_fallback_warnings(caplog)
+            == [self._charset_fallback_line("LookupError")] * unknown_label
+        )
+        # Nothing was withheld, so a silent shape spent no budget.
+        assert extractors.drain_suppressed_lines() == 0
+        assert self.RAW_8BIT_MARKER not in caplog.text
+
+    def test_raw_8bit_encoded_word_search_is_linear(self, tmp_path, caplog):
+        """Review round 1: the search for a kept encoded-word runs over
+        the whole decoded Subject before the cap. Near-miss prefixes
+        (``=?a=?a...``) each fail after a constant number of steps."""
+        prefixes = 300_000
+        headers = b"Subject: caf\xc3\xa9 " + b"=?a" * prefixes + b"\r\n"
+        start = time.perf_counter()
+        with caplog.at_level(logging.DEBUG):
+            msg = parse_email(self._write_raw_header_message(tmp_path, headers))
+        elapsed = time.perf_counter() - start
+        assert msg is not None
+        assert msg.subject == ("café " + "=?a" * prefixes)[:SUBJECT_MAX_CHARS]
+        assert "not decoded" not in caplog.text
+        assert elapsed < 10
+
+    def test_raw_8bit_replacement_line_is_rate_limited_and_counted(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        from src import extractors
+
+        caplog.set_level("INFO")
+        monkeypatch.setattr(extractors._LINE_BUDGET, "limit", 2)
+        extractors.drain_suppressed_lines()
+        headers = self.RAW_8BIT_SHAPES["subject-raw-latin1"][0]
+        for _ in range(5):
+            msg = parse_email(self._write_raw_header_message(tmp_path, headers))
+            assert msg is not None
+            assert msg.subject == "RAWMARKER1147 caf\ufffd"
+        lines = [r for r in caplog.records if "raw 8-bit header" in r.getMessage()]
+        assert [r.levelname for r in lines] == ["WARNING", "WARNING"]
+        assert extractors.drain_suppressed_lines() == 3
+        assert extractors.drain_extractor_counts()["warnings_suppressed"] == 0
+        assert self.RAW_8BIT_MARKER not in caplog.text
+
+    @pytest.mark.parametrize(
+        ("chunk", "expected_text", "expected_calls"),
+        [
+            (b"caf\xc3\xa9 " * 200_000, "café " * 200_000, 1),
+            (b"caf\xe9 " * 200_000, "caf\ufffd " * 200_000, 2),
+        ],
+        ids=["utf8", "latin1"],
+    )
+    def test_raw_8bit_chunk_is_decoded_at_most_twice(self, chunk, expected_text, expected_calls):
+        """The strict UTF-8 attempt adds at most one linear decode per
+        ``unknown-8bit`` chunk: one call when it succeeds, two when it
+        falls back to replacement."""
+        from src.parser import _decode_header_parts
+
+        calls = 0
+
+        class CountingBytes(bytes):
+            def decode(self, *args, **kwargs):
+                nonlocal calls
+                calls += 1
+                return super().decode(*args, **kwargs)
+
+        start = time.perf_counter()
+        text = _decode_header_parts([(CountingBytes(chunk), "unknown-8bit")])
+        elapsed = time.perf_counter() - start
+        assert calls == expected_calls
+        assert text == expected_text
+        assert elapsed < 10
+
     def test_mixed_plain_and_encoded_text(self):
         assert _decode_header("Re: =?utf-8?q?H=C3=A9llo?= world") == "Re: Héllo world"
 

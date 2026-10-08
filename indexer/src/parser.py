@@ -525,7 +525,7 @@ def parse_email_bytes(raw: bytes, source: SourceMetadata) -> Message | None:
             references.append(ref)
         else:
             caps["references_length"] += 1
-    subject = _decode_header(msg.get("Subject", NO_SUBJECT))
+    subject = _decode_text_header(msg.get("Subject", NO_SUBJECT))
     if len(subject) > SUBJECT_MAX_CHARS:
         caps["subject_length"] += 1
         subject = subject[:SUBJECT_MAX_CHARS]
@@ -1305,6 +1305,26 @@ def _decode_header(value: str | email.header.Header) -> str:
     ).strip()
 
 
+def _decode_text_header(value: str | email.header.Header) -> str:
+    """Decode a header stored as text (Subject, the From fallback).
+
+    compat32 returns a raw 8-bit header as one chunk, so an encoded-word
+    beside the raw bytes stays as sent (#1186); that partial decode logs
+    one rate-limited WARNING with fixed text (#1147 review round 1).
+    Address display names are not decoded here: ``_parse_addrs`` decodes
+    their encoded-words after the address is fixed. The search is one
+    linear pass of ``_ENCODED_WORD_RE``, whose groups stop at ``?``.
+    """
+    text = _decode_header(value)
+    if isinstance(value, email.header.Header) and _ENCODED_WORD_RE.search(text):
+        warn_rate_limited(
+            log,
+            "raw 8-bit header holds encoded-words that were not decoded; kept 1 header as sent",
+            attachment=False,
+        )
+    return text
+
+
 def _decode_header_parts(parts: list[tuple[bytes | str, str | None]]) -> str:
     decoded = []
     for part, charset in parts:
@@ -1327,6 +1347,9 @@ def _decode_header_parts(parts: list[tuple[bytes | str, str | None]]) -> str:
             # per word naming the exception type only (the label and text
             # are mail content).
             encoding = charset or "utf-8"
+            if encoding.lower() == _RAW_8BIT_CHARSET:
+                decoded.append(_decode_raw_8bit(part))
+                continue
             try:
                 decoded.append(part.decode(encoding, errors="replace"))
             except (LookupError, ValueError) as exc:
@@ -1340,6 +1363,27 @@ def _decode_header_parts(parts: list[tuple[bytes | str, str | None]]) -> str:
         else:
             decoded.append(part)
     return " ".join(decoded)
+
+
+# The label compat32 gives header bytes sent without an encoded-word
+# (raw 8-bit), and that the standard library writes when it re-encodes
+# them. No codec has this name, so it is handled here (#1147).
+_RAW_8BIT_CHARSET = "unknown-8bit"
+
+
+def _decode_raw_8bit(part: bytes) -> str:
+    """Decode a raw 8-bit header chunk: exactly and silently when it is
+    valid UTF-8, otherwise as UTF-8 with replacement characters and one
+    rate-limited WARNING, since characters were lost (#1147)."""
+    try:
+        return part.decode("utf-8")
+    except UnicodeDecodeError:
+        warn_rate_limited(
+            log,
+            "raw 8-bit header is not UTF-8; decoded 1 header chunk with replacement characters",
+            attachment=False,
+        )
+        return part.decode("utf-8", errors="replace")
 
 
 # RFC 5322 "specials": a display name containing any of these must be
@@ -1540,7 +1584,7 @@ def _read_address_headers(msg: email.message.Message, caps: Counter[str]) -> _Ad
         if value is not None:
             from_addrs = _parse_addrs(value, caps, budget)
             if not from_addrs:
-                from_text = _decode_header(value)
+                from_text = _decode_text_header(value)
     if len(found["from"]) > 1:
         caps["from_repeated"] += len(found["from"]) - 1
 
