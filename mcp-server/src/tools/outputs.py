@@ -705,6 +705,10 @@ class QueueCounts(_Output):
 
 
 class MailboxStatusOutput(_Output):
+    server_version: str = Field(
+        description="MCP server's deployed source commit, with -dirty for local changes; "
+        "unknown when build identity is unavailable. Not the MCP protocol or database schema version."
+    )
     current: bool = Field(
         description="True only when mail synced from Proton recently, the indexer is "
         "running, and no message is waiting to be indexed. Mail that reached Proton "
