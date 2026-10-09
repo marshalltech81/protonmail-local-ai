@@ -15,8 +15,10 @@ import pytest
 import src.lib.sqlite as sqlite_mod
 from fastmcp.exceptions import ToolError
 from src.lib.predicates import InvalidFilterError
-from src.lib.sqlite import Database
-from src.tools.outputs import GetMessageOutput, ListedMessage
+from src.lib.sqlite import ChunkResult, Database
+from src.tools.brief import _finding_lines, _finding_source
+from src.tools.intelligence import EvidenceRef, _citation, _citation_lines
+from src.tools.outputs import CheckedFinding, GetMessageOutput, ListedMessage
 from src.tools.retrieval import register_retrieval_tools
 
 from tests.conftest import (
@@ -283,3 +285,39 @@ def test_an_ambiguous_message_id_lists_each_claimants_send_date(tmp_path):
     text = str(excinfo.value)
     assert f"{claimant_of('dup')} (sent 2024-03-10T09:00:00+00:00, folder INBOX)" in text
     assert f"{claimant_of('dup', 'b')} (send date unknown (no Date header), folder INBOX)" in text
+
+
+@pytest.mark.parametrize(
+    ("status", "words"),
+    [
+        ("missing", "send date unknown (no Date header)"),
+        ("invalid", "send date unknown (unparseable Date header)"),
+        (None, "send date not yet checked"),
+    ],
+)
+def test_intelligence_prose_says_why_a_date_is_unknown(status, words):
+    """Review round 2: the Citations list (ask_mailbox) and the finding
+    sources (check_conclusion, brief_issue) tell a missing or
+    unparseable header from a date not yet checked."""
+    chunk = ChunkResult(
+        chunk_id="c",
+        message_id="m@example.test",
+        claimant_id="m@example.test#1a2b3c4d",
+        thread_id="t",
+        chunk_index=0,
+        text="text",
+        char_start=0,
+        char_end=4,
+        message_sender="alice@example.test",
+        message_sender_ambiguous=False,
+        message_date=None,
+        message_sent_at_status=status,
+    )
+    ref = EvidenceRef("E1", "t", chunk, 4)
+    [_, line] = _citation_lines([_citation(ref)])
+    assert f"alice@example.test, {words} (thread t" in line
+    finding = CheckedFinding(
+        relation="supports", explanation="x", labels=["E1"], sources=[_finding_source(ref)]
+    )
+    [source_line] = [ln for ln in _finding_lines([finding]) if ln.lstrip().startswith("[E1]")]
+    assert f"alice@example.test, {words}: " in source_line

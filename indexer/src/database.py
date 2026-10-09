@@ -1104,15 +1104,20 @@ class Database:
     @staticmethod
     def _drop_fallback_date_lines(cur: sqlite3.Cursor, thread, body: str) -> str:
         """``body`` without the made-up ``Date:`` line the v7 writer put in
-        it for an undated incoming message (#1080, review round 1).
+        it for an undated incoming message (#1080, review rounds 1-2).
 
         Only a row not yet assessed (``sent_at_status`` NULL, from before
         v8) whose message now parses as undated has one: its stored
-        ``sent_at`` is that fallback, written into the line in the same
-        ISO form. Runs before the message's row is rewritten. Removes at
-        most one line per such message, so a real date line of another
-        message is left alone; one indexed lookup per undated message.
+        ``sent_at`` is that fallback. The writer put it in the header it
+        starts each message's block with, ``From: <from_addr>`` then
+        ``Date: <sent_at>`` on lines of their own, so that pair is what is
+        removed (the ``Date:`` line only), and only when it occurs exactly
+        once: message text is sender-controlled, and a body that repeats
+        the pair leaves the match ambiguous, so the text is kept and the
+        skip logged (counts only). Runs before the message's row is
+        rewritten; one indexed lookup and one scan per undated message.
         """
+        ambiguous = 0
         for msg in thread.messages:
             if msg.date is not None:
                 continue
@@ -1120,8 +1125,19 @@ class Database:
                 "SELECT sent_at FROM messages WHERE claimant_id = ? AND sent_at_status IS NULL",
                 (msg.claimant_id,),
             ).fetchone()
-            if row is not None:
-                body = body.replace(f"\nDate: {row[0]}\n", "\n", 1)
+            if row is None:
+                continue
+            header = f"\nFrom: {msg.from_addr}\nDate: {row[0]}\n"
+            if body.count(header) == 1:
+                body = body.replace(header, f"\nFrom: {msg.from_addr}\n")
+            elif header in body:
+                ambiguous += 1
+        if ambiguous:
+            log.info(
+                "thread text kept the old fallback date line of %d message(s): "
+                "it occurs more than once",
+                ambiguous,
+            )
         return body
 
     @_synchronized

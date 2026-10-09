@@ -324,8 +324,8 @@ def register_search_tools(
                        ``from_addr`` wins.
             date_from: ISO 8601 date lower bound e.g. "2024-01-01".
                        A thread qualifies when its span (its messages'
-                       delivery dates, else send dates) overlaps the
-                       range.
+                       delivery dates, else send dates, else when first
+                       indexed, #1373) overlaps the range.
             date_to: ISO 8601 date upper bound e.g. "2024-12-31".
                      For either bound, a date-only value is a UTC day;
                      for the user's time zone give an offset
@@ -628,7 +628,8 @@ def register_search_tools(
                        person's name, use from_name.
             date_from: ISO 8601 date lower bound, e.g. "2024-01-01".
                        A thread qualifies when its span (its messages'
-                       occurred_at, else sent_at) overlaps the range,
+                       occurred_at, else sent_at, else when first
+                       indexed, #1373) overlaps the range,
                        and any of its passages may be returned; check
                        each chunk's occurred_at and sent_at, which can
                        fall outside the range. Each chunk's scope is
@@ -1242,7 +1243,8 @@ def register_search_tools(
                     ``indeterminate``.
             date_from: ISO 8601 date lower bound on the message
                        carrying the attachment: its delivery date
-                       (occurred_at), else its send date (sent_at).
+                       (occurred_at), else its send date (sent_at), else
+                       when it was first indexed (#1373).
             date_to: ISO 8601 date upper bound, likewise. For
                      either bound, a date-only value is a UTC day; for
                      the user's time zone give an offset

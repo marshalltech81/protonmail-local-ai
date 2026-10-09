@@ -993,7 +993,7 @@ so even fewer than 50 results (including zero) can omit matching attachments
 | `content_type` | string | none | Exact MIME-type filter, e.g. `application/pdf`; blank means no filter |
 | `from_addr` | string | none | Restrict to attachments on threads sent by this address or domain |
 | `sender` | string | none | Restrict to attachments whose carrying message is From this address, domain or name fragment, matched as `query_messages` `sender`; blank means no filter |
-| `date_from` | string | none | ISO 8601 date lower bound on the carrying message's effective time (`occurred_at`, else `sent_at`) |
+| `date_from` | string | none | ISO 8601 date lower bound on the carrying message's effective time (`occurred_at`, else `sent_at`, else the time it was first indexed, [#1373](https://github.com/marshalltech81/protonmail-local-ai/issues/1373)) |
 | `date_to` | string | none | ISO 8601 date upper bound. Date-only bounds are UTC days; give an offset for a local-time bound. `date_bounds` echoes the UTC instants applied, as in `search_emails` |
 | `extracted_only` | bool | `false` | Return only attachments whose text extraction succeeded |
 | `limit` | int | `20` | Max attachments to return; clamped to `[1, 50]` |

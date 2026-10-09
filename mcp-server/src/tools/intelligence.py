@@ -54,6 +54,7 @@ from .outputs import (
     SummarizeThreadOutput,
     SummaryStyle,
     clip,
+    passage_sent_text,
     read_only,
     thread_summary,
     tool_result,
@@ -2675,7 +2676,7 @@ def _citation_lines(citations: list[Citation]) -> list[str]:
             "thread text"
             if c.source == "thread"
             else f"{c.sender or 'unknown sender'}{sender_check(c.sender_ambiguous)}, "
-            f"{(c.sent_at or 'unknown date')[:10]}"
+            f"{passage_sent_text(c.sent_at, c.sent_at_status)}"
             + (f", delivered {c.occurred_at[:10]}" if c.occurred_at else "")
             + (f", attachment {c.attachment_filename}" if c.source == "attachment" else "")
         )
@@ -3029,7 +3030,8 @@ def register_intelligence_tools(
                        name, use ``from_name`` or ``participant``.
             date_from: Optionally scope to emails after this date (ISO 8601)
                        A thread qualifies when its span (its
-                       messages' occurred_at, else sent_at) overlaps
+                       messages' occurred_at, else sent_at, else when first
+                       indexed, #1373) overlaps
                        the range, and any of its passages may be used;
                        each citation's occurred_at and sent_at give
                        that passage's own dates, which can fall
@@ -3625,7 +3627,8 @@ def register_intelligence_tools(
                      "Trash" to include them.
             date_from: Optional date lower bound (ISO 8601).
                        A thread qualifies when its span (its
-                       messages' occurred_at, else sent_at) overlaps
+                       messages' occurred_at, else sent_at, else when first
+                       indexed, #1373) overlaps
                        the range, and any of its passages may be used;
                        each evidence entry's occurred_at and sent_at
                        give that passage's own dates, which can fall

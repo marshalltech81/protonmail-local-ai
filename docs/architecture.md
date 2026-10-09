@@ -1085,7 +1085,9 @@ and no tool returns it: mcp-server selects `sent_at` only when the
 status is `parsed`, so the outputs, prompts, citations and
 `brief_issue`'s as-of date show `sent_at` and its status as null. The
 reparse also removes that time from the thread's FTS text, where the v7
-writer had put it in a `Date:` line. The reparse stores the
+writer had put it in a `Date:` line after the message's `From:` line
+(only when that pair occurs once; a dead-lettered message keeps it until
+`make requeue-dead`, #1379). The reparse stores the
 status, and for an undated row moves the old fallback in `sent_at` to
 `first_indexed_at`, so no message moves in the ordering. Nothing is
 re-embedded: the date is in no chunk.

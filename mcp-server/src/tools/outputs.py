@@ -198,6 +198,12 @@ def sent_text(sent_at: str | None, status: SentAtStatus | None) -> str:
     return sent_at or "send date unknown"
 
 
+def passage_sent_text(sent_at: str | None, status: SentAtStatus | None) -> str:
+    """A passage's send day in the citation prose: the date's first ten
+    characters, else why it is unknown (``sent_text``)."""
+    return sent_at[:10] if sent_at else sent_text(None, status)
+
+
 class MessageHeaders(_Output):
     message_id: str = Field(
         description="RFC 5322 Message-ID. The sender sets it, so two indexed messages "
@@ -423,7 +429,8 @@ class EvidenceChunk(_Output):
     occurred_at: str | None = Field(
         description=(
             "Delivery date of the passage's message (the date of its topmost Received: header) in UTC, ISO 8601; null when the header is absent (sent mail) or unparseable. "
-            "Date filters bound occurred_at, else sent_at."
+            "Date filters bound occurred_at, else sent_at, else the time the message was "
+            "first indexed (thread spans, #1373)."
         )
     )
     char_start: int = Field(description="Start offset of the passage in its source text.")
@@ -527,7 +534,8 @@ class AttachmentHit(_Output):
     occurred_at: str | None = Field(
         description="Delivery date of the message carrying the attachment (the date of its "
         "topmost Received: header) in UTC, ISO 8601; null when absent or unparseable. "
-        "Date filters and the no-query order use occurred_at, else sent_at."
+        "Date filters and the no-query order use occurred_at, else sent_at, else the time "
+        "the message was first indexed (#1373)."
     )
     senders: list[str] = Field(description=f"Thread senders, at most {MAX_LISTED}.")
     sender_count: int

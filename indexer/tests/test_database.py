@@ -826,6 +826,47 @@ class TestUnknownSendDate:
         db.upsert_thread(make_thread(messages=[reparsed], thread_id="t-old"), FAKE_EMBEDDING)
         assert text()[0] == body
 
+    def test_a_repeated_fallback_header_is_left_alone(self, db, caplog):
+        """Review round 2: message text is sender-controlled, so when the
+        old header pair occurs more than once nothing is removed (no
+        sender line can be taken for the generated one), and the skip is
+        logged with a count only."""
+        old = make_message(message_id="old@x", filepath="/maildir/INBOX/cur/old")
+        old.date = datetime(2025, 5, 5, 5, 5, 5, 123456, tzinfo=UTC)
+        header = f"From: {old.from_addr}\nDate: {old.date.isoformat()}\n"
+        echo = make_message(
+            message_id="echo@x",
+            filepath="/maildir/INBOX/cur/echo",
+            body_text=f"SYNTHETIC_ECHO_MARKER\n{header}quoted",
+        )
+        db.upsert_thread(make_thread(messages=[echo, old], thread_id="t-echo"), FAKE_EMBEDDING)
+        db._conn.execute(
+            "UPDATE messages SET sent_at_status = NULL WHERE claimant_id = ?", (old.claimant_id,)
+        )
+        db._conn.commit()
+        before = db._conn.execute(
+            "SELECT body_text FROM threads WHERE thread_id = 't-echo'"
+        ).fetchone()[0]
+        assert before.count(header) == 2
+        reparsed = make_message(message_id="old@x", filepath="/maildir/INBOX/cur/old")
+        reparsed.date = None
+        reparsed.date_status = "missing"
+        caplog.set_level("INFO")
+        db.upsert_thread(make_thread(messages=[reparsed], thread_id="t-echo"), FAKE_EMBEDDING)
+        after = db._conn.execute(
+            "SELECT body_text FROM threads WHERE thread_id = 't-echo'"
+        ).fetchone()[0]
+        assert after == before
+        lines = [r for r in caplog.records if "old fallback date line" in r.getMessage()]
+        assert [(r.levelname, r.getMessage()) for r in lines] == [
+            (
+                "INFO",
+                "thread text kept the old fallback date line of 1 message(s): "
+                "it occurs more than once",
+            )
+        ]
+        assert "SYNTHETIC_ECHO_MARKER" not in caplog.text
+
     @pytest.mark.parametrize(
         ("sent_at", "status"),
         [
