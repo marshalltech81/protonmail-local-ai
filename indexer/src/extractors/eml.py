@@ -4,8 +4,8 @@
 The payload is the attached email: for a ``message/rfc822`` part, its
 serialized form (``parser._serialized_body``), and for an ``.eml`` or
 ``application/eml`` file, its decoded bytes. The text is, for the
-attached email and then each attached email nested in it (depth first,
-in document order):
+attached email and then each ``message/rfc822`` email nested in it,
+attached or inline (depth first, in document order):
 
 * a ``[Attached message, depth N]`` line, for a nested one (the
   attachment itself is depth 1 and has none);
@@ -51,7 +51,12 @@ payload:
 
 Each budget that cut the text is reported to the parent, which logs it
 through ``warn_extractor_cap``, so the result is marked incomplete
-(#1242).
+(#1242). So is a decode that lost bytes: a body text part's
+(``eml_body_decode``), a nested email's base64, and any nested email in
+quoted-printable, whose loss records nothing to detect (#1288). The
+decoders' fallbacks (headers, part filenames, body charsets) replace
+characters rather than drop text: they are counted
+(``eml_*_degraded``, #1314) and do not mark the text incomplete (#1315).
 """
 
 from __future__ import annotations
@@ -68,7 +73,7 @@ from . import (
     CHILD_DEGRADATION_KEYS,
     _runner,
     apply_child_degradation,
-    note_eml_headers_degraded,
+    note_eml_degraded,
     warn_extractor_cap,
 )
 
@@ -120,7 +125,14 @@ _MAX_OUTPUT_BYTES = 4 * _MAX_TEXT_CHARS + 64 * 1024
 
 # The budgets the child may report as having cut the text.
 _CAP_NAMES = frozenset(
-    {"eml_header_chars", "eml_text_chars", "eml_parts", "eml_text_parts", "eml_nested_messages"}
+    {
+        "eml_header_chars",
+        "eml_text_chars",
+        "eml_parts",
+        "eml_text_parts",
+        "eml_nested_messages",
+        "eml_body_decode",
+    }
 )
 
 
@@ -147,7 +159,7 @@ def extract(
         on_progress=on_progress,
     )
     # The child's degradation (#1314): the header-decoding fallbacks
-    # (``eml_headers_degraded``) and anything else recorded there.
+    # (``eml_*_degraded``) and anything else recorded there.
     apply_child_degradation(log, "eml", result.counts)
     for cap in result.caps:
         warn_extractor_cap(log, cap, "attached email text cut at a budget")
@@ -183,9 +195,9 @@ def extract_text(payload: bytes) -> tuple[str, list[str]]:
     # Depth first: a nested email's text follows its parent's body and
     # precedes the parent's next nested email.
     stack: list[tuple[email.message.Message, int]] = [(root, 1)]
-    # Header-decoding fallbacks, whose lines the child cannot log: sent
-    # to the parent as ``eml_headers_degraded`` (#1314).
-    degraded: Counter[str] = Counter()
+    # The decoders' fallbacks, whose lines the child cannot log, are
+    # counted in ``walk.degraded`` and sent to the parent (#1314).
+    degraded = walk.degraded
     while stack and not text.full:
         msg, depth = stack.pop()
         # A section per message: its label and header lines, then its
@@ -201,6 +213,7 @@ def extract_text(payload: bytes) -> tuple[str, list[str]]:
             caps["eml_parts"] = None
         if counted["body_parts"]:
             caps["eml_text_parts"] = None
+
         if body:
             text.add(("\n\n" if text.pieces else "") + body)
         found = walk.nested[start:]
@@ -218,10 +231,16 @@ def extract_text(payload: bytes) -> tuple[str, list[str]]:
             if inner is not None:
                 inner_messages.append(inner)
         stack.extend((inner, depth + 1) for inner in reversed(inner_messages))
+    if walk.decode_lost_parts:
+        caps["eml_body_decode"] = None
     if text.full:
         caps["eml_text_chars"] = None
-    if degraded[parser.HEADER_DEGRADED]:
-        note_eml_headers_degraded(degraded[parser.HEADER_DEGRADED])
+    if degraded.total():
+        note_eml_degraded(
+            headers=degraded[parser.HEADER_DEGRADED],
+            filenames=degraded[parser.FILENAME_DEGRADED],
+            charsets=degraded[parser.CHARSET_DEGRADED],
+        )
     return "".join(text.pieces), list(caps)
 
 
@@ -271,9 +290,12 @@ def _inner_message(
         decoded = parser._decode_transport_form(transport, encoding, content_type)
         if decoded is None:
             return None, True
-        # A lenient base64 decode can drop bytes and still succeed: the
-        # email is rendered, but its text is not whole (Codex round 1).
-        lossy = encoding == "base64" and parser._base64_transport_lost(transport)
+        # A lenient decode can drop bytes and still succeed: the email
+        # is rendered, but its text is not whole. Base64 loss is detected
+        # (review round 1); quoted-printable loss records nothing to
+        # detect, so every quoted-printable nested email counts as lossy
+        # until #1288 detects it (review round 2).
+        lossy = encoding == "quoted-printable" or parser._base64_transport_lost(transport)
         container = decoded
     children = container.get_payload()
     if isinstance(children, list) and children and isinstance(children[0], email.message.Message):

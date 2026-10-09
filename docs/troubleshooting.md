@@ -1595,12 +1595,16 @@ only, never filenames or text (`make logs`):
   reports a plain `success`, with no cap line and no
   `ocr_capped_images` count, although the cached text still lacks the
   unread frames (#1201).
-- `extractor eml degraded in the child: eml_headers_degraded=<n>`
-  (WARNING, rate limited): `n` header-decoding fallbacks in an attached
-  email's headers (an unknown charset, raw 8-bit bytes that are not
-  UTF-8, or encoded-words kept as sent), so some characters are
-  replaced or left encoded. The text is otherwise indexed and not
-  marked incomplete (#922, #1315).
+- `extractor eml degraded in the child: <key>=<n> ...` (WARNING, rate
+  limited): decoding fallbacks in an attached email's text (#922):
+  `eml_headers_degraded` in its headers (an unknown charset, raw 8-bit
+  bytes that are not UTF-8, or encoded-words kept as sent),
+  `eml_filenames_degraded` in its parts' filenames, and
+  `eml_charsets_degraded` in its body text parts' charsets (an unknown
+  label, or bytes the label's codec replaced). Some characters are
+  replaced or left encoded; the text is otherwise indexed and not
+  marked incomplete (#1315). The attachments aggregate line below
+  carries the same three counts.
 - `extractor cap <name>: <fixed text and counts>` (WARNING): a cap
   inside an extractor cut the text it returned (#903). Logged once per
   cap per extraction, and counted as `extractor_caps` in the
@@ -1630,6 +1634,8 @@ only, never filenames or text (`make logs`):
     `.doc`; the rest is not read (#935).
   - `ppt_output_bytes`: the `.ppt` reader wrote more than 8 MiB for a
     legacy `.ppt`; the rest is not read (#957).
+  - `eml_body_decode`: a body text part of an attached email whose
+    base64 decoding lost bytes (#922).
   - `eml_header_chars`, `eml_text_chars`, `eml_parts`, `eml_text_parts`,
     `eml_nested_messages`: an attached email's text (#922) was cut: a
     Subject, From, To, Cc or Date header over 2,000 characters, the
@@ -1637,7 +1643,9 @@ only, never filenames or text (`make logs`):
     shared by the attached email and the emails nested in it, or a
     nested email left out (more than 20 levels deep, past 64 MB of
     transfer-decoded nested emails, or a transfer encoding that does
-    not decode) or read with bytes lost (a malformed base64 encoding).
+    not decode) or read with bytes lost (a malformed base64 encoding,
+    or any quoted-printable one, whose loss cannot be detected yet:
+    #1288).
   - `pptx_slides`, `pptx_shapes`, `pptx_table_cells`,
     `pptx_text_chars`: the walk over a PowerPoint deck stopped at its
     slide budget (5,000 slide-list entries), shape budget (100,000,
@@ -1675,13 +1683,16 @@ only, never filenames or text (`make logs`):
   pdf_pages_unrecovered= ocr_capped_pdfs= ocr_pages_skipped=
   ocr_capped_images= extractor_caps= parser_caps_messages=
   parser_recipients_merged_messages= parser_sender_ambiguous_messages=
+  eml_headers_degraded= eml_filenames_degraded= eml_charsets_degraded=
   warnings_suppressed=`: the attachments of the messages committed since the previous line, by outcome. It is a
   WARNING when any of `failed`, `unsupported`, `too_large`,
   `ocr_disabled`, `pdf_pages_unrecovered`, `ocr_capped_pdfs`,
   `ocr_pages_skipped`, `ocr_capped_images`, `extractor_caps`,
   `parser_caps_messages` or `warnings_suppressed` is above zero (some attachment text is not
   searchable), and INFO otherwise. `pdf_pages_failed` alone does not
-  make it a WARNING (see below).
+  make it a WARNING (see below), nor do the `eml_*_degraded` decoding
+  fallbacks in attached emails, which replace characters rather than
+  lose text (#922; see the `degraded in the child` line above).
   - When it is logged: during the initial index, with the timing summary
     once at least 25 messages have been drained since the last one (each
     batch, at the default `INITIAL_INDEX_BATCH_SIZE=50`), and once at

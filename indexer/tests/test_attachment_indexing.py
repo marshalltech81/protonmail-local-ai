@@ -1369,6 +1369,8 @@ class TestAttachmentOutcomeCounts:
             "parser_recipients_merged_messages": 0,
             "parser_sender_ambiguous_messages": 0,
             "eml_headers_degraded": 0,
+            "eml_filenames_degraded": 0,
+            "eml_charsets_degraded": 0,
             "warnings_suppressed": 0,
         }
 
@@ -1471,6 +1473,9 @@ class TestAttachmentOutcomeCounts:
             "parser_caps_messages": 3,
             "parser_recipients_merged_messages": 1,
             "parser_sender_ambiguous_messages": 2,
+            "eml_headers_degraded": 3,
+            "eml_filenames_degraded": 1,
+            "eml_charsets_degraded": 5,
             "warnings_suppressed": 6,
         }
         assert attachment_indexing.format_attachment_outcomes(counts) == (
@@ -1478,6 +1483,7 @@ class TestAttachmentOutcomeCounts:
             "ocr_disabled=2 empty=0 cached=4 pdf_pages_failed=5 pdf_pages_unrecovered=9 ocr_capped_pdfs=7 "
             "ocr_pages_skipped=8 ocr_capped_images=2 extractor_caps=4 parser_caps_messages=3 "
             "parser_recipients_merged_messages=1 parser_sender_ambiguous_messages=2 "
+            "eml_headers_degraded=3 eml_filenames_degraded=1 eml_charsets_degraded=5 "
             "warnings_suppressed=6"
         )
 
@@ -1503,6 +1509,11 @@ class TestAttachmentOutcomeCounts:
         # no attachment text (its own WARNING is per message) (#1144).
         ("parser_recipients_merged_messages", False),
         ("parser_sender_ambiguous_messages", False),
+        # Decoding fallbacks in attached emails replace characters; they
+        # lose no text (#922, #1315).
+        ("eml_headers_degraded", False),
+        ("eml_filenames_degraded", False),
+        ("eml_charsets_degraded", False),
         ("warnings_suppressed", True),
     ]
 

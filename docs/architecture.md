@@ -1408,8 +1408,8 @@ bounce's machine-readable report) selects none and is recorded
 extractor. The payload is the attached email itself (the parser's
 serialized form of a `message/rfc822` part, or an `.eml` file's
 bytes). Its text is, for the attached email and then each
-`message/rfc822` email nested in it, depth first and in document
-order: a `[Attached message, depth N]` line for a nested one, the
+`message/rfc822` email nested in it, attached or inline, depth first
+and in document order: a `[Attached message, depth N]` line for a nested one, the
 first `Subject`, `From`, `To`, `Cc` and `Date` as labelled lines
 decoded with the parser's header decoder, and the body the parser
 would choose for that message, with no quote stripping. The inner
@@ -1424,13 +1424,19 @@ walked and 200 text parts decoded (the parser's per-message caps), 20
 levels of nesting, 64 MB of transfer-decoded nested emails, 2,000
 characters per header and 10,000,000 characters of text; a budget
 that cut the text is logged through the extractor-cap WARNING
-(`eml_*`) and marks the text incomplete, and so does a nested email
-whose lenient base64 decode lost bytes. A header-decoding fallback (an
-unknown charset, raw 8-bit bytes that are not UTF-8, encoded-words kept
-as sent) is counted as `eml_headers_degraded` and reported by the
-parent's `degraded in the child` line (#1314); it replaces characters
-rather than drops text, so it does not mark the text incomplete
-(#1315). The extraction runs in the
+(`eml_*`) and marks the text incomplete, and so does a decode that
+lost bytes: a body text part's (`eml_body_decode`), a nested email's
+base64 (`eml_nested_messages`), and any nested email in
+quoted-printable, whose loss the standard library records nothing for
+(counted as lossy until #1288 detects it). The decoders' fallbacks are
+counted as `eml_headers_degraded` (a header: an unknown charset, raw
+8-bit bytes that are not UTF-8, encoded-words kept as sent),
+`eml_filenames_degraded` (a part's filename) and
+`eml_charsets_degraded` (a body text part's charset: an unknown label,
+or bytes it replaced), reported by the parent's `degraded in the
+child` line (#1314) and the attachments aggregate; they replace
+characters rather than drop text, so they do not mark the text
+incomplete (#1315). The extraction runs in the
 extractor child (decision 42) under 1 GiB of address space and 60 s of
 CPU, killed after 75 s: the standard library's parse of crafted
 structure (800,000 parts or 4 million header fields at the 32 MB

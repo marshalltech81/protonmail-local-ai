@@ -137,11 +137,15 @@ _extractor_caps = 0
 _parser_caps_messages = 0
 _parser_recipients_merged_messages = 0
 _parser_sender_ambiguous_messages = 0
-# Header-decoding fallbacks (an unknown charset, raw 8-bit bytes that are
-# not UTF-8, encoded-words kept as sent) in an attached email's rendered
-# headers (#922). They replace characters rather than drop text, so they
-# do not mark the text incomplete (#1315 decides that for every surface).
+# Decoding fallbacks in an attached email's text (#922): a header's
+# (an unknown charset, raw 8-bit bytes that are not UTF-8, encoded-words
+# kept as sent), a part filename's, and a body text part's charset (an
+# unknown label, or bytes it replaced). They replace characters rather
+# than drop text, so they do not mark the text incomplete (#1315 decides
+# that for every surface).
 _eml_headers_degraded = 0
+_eml_filenames_degraded = 0
+_eml_charsets_degraded = 0
 
 # At most this many per-attachment WARNINGs per window, shared by every
 # kind (review rounds 1 and 2 on #884): a sender can attach many distinct
@@ -243,12 +247,15 @@ def note_parser_address_repeats(*, merged: bool, ambiguous: bool) -> None:
         _parser_sender_ambiguous_messages += int(ambiguous)
 
 
-def note_eml_headers_degraded(count: int) -> None:
-    """Count ``count`` header-decoding fallbacks in an attached email's
-    rendered headers (#922). Not a text loss (#1315)."""
-    global _eml_headers_degraded
+def note_eml_degraded(*, headers: int, filenames: int, charsets: int) -> None:
+    """Count the decoding fallbacks in an attached email's text (#922):
+    in its headers, its part filenames and its body charsets. Not a text
+    loss (#1315)."""
+    global _eml_headers_degraded, _eml_filenames_degraded, _eml_charsets_degraded
     with _counts_lock:
-        _eml_headers_degraded += count
+        _eml_headers_degraded += headers
+        _eml_filenames_degraded += filenames
+        _eml_charsets_degraded += charsets
 
 
 def drain_extractor_counts() -> dict[str, int]:
@@ -265,7 +272,7 @@ def _drain_counters() -> dict[str, int]:
     global _pdf_pages_failed, _pdf_pages_unrecovered, _ocr_capped_pdfs
     global _ocr_pages_skipped, _ocr_capped_images, _extractor_caps, _parser_caps_messages
     global _parser_recipients_merged_messages, _parser_sender_ambiguous_messages
-    global _eml_headers_degraded
+    global _eml_headers_degraded, _eml_filenames_degraded, _eml_charsets_degraded
     counts = {
         "pdf_pages_failed": _pdf_pages_failed,
         "pdf_pages_unrecovered": _pdf_pages_unrecovered,
@@ -277,12 +284,14 @@ def _drain_counters() -> dict[str, int]:
         "parser_recipients_merged_messages": _parser_recipients_merged_messages,
         "parser_sender_ambiguous_messages": _parser_sender_ambiguous_messages,
         "eml_headers_degraded": _eml_headers_degraded,
+        "eml_filenames_degraded": _eml_filenames_degraded,
+        "eml_charsets_degraded": _eml_charsets_degraded,
     }
     _pdf_pages_failed = _pdf_pages_unrecovered = _ocr_capped_pdfs = 0
     _ocr_pages_skipped = _ocr_capped_images = _extractor_caps = 0
     _parser_caps_messages = 0
     _parser_recipients_merged_messages = _parser_sender_ambiguous_messages = 0
-    _eml_headers_degraded = 0
+    _eml_headers_degraded = _eml_filenames_degraded = _eml_charsets_degraded = 0
     return counts
 
 
@@ -292,7 +301,7 @@ def add_counters(counts: Mapping[str, int]) -> None:
     global _pdf_pages_failed, _pdf_pages_unrecovered, _ocr_capped_pdfs
     global _ocr_pages_skipped, _ocr_capped_images, _extractor_caps, _parser_caps_messages
     global _parser_recipients_merged_messages, _parser_sender_ambiguous_messages
-    global _eml_headers_degraded
+    global _eml_headers_degraded, _eml_filenames_degraded, _eml_charsets_degraded
     with _counts_lock:
         _pdf_pages_failed += counts.get("pdf_pages_failed", 0)
         _pdf_pages_unrecovered += counts.get("pdf_pages_unrecovered", 0)
@@ -304,6 +313,8 @@ def add_counters(counts: Mapping[str, int]) -> None:
         _parser_recipients_merged_messages += counts.get("parser_recipients_merged_messages", 0)
         _parser_sender_ambiguous_messages += counts.get("parser_sender_ambiguous_messages", 0)
         _eml_headers_degraded += counts.get("eml_headers_degraded", 0)
+        _eml_filenames_degraded += counts.get("eml_filenames_degraded", 0)
+        _eml_charsets_degraded += counts.get("eml_charsets_degraded", 0)
 
 
 def drain_counters() -> dict[str, int]:
@@ -338,6 +349,8 @@ CHILD_DEGRADATION_KEYS = frozenset(
         "parser_recipients_merged_messages",
         "parser_sender_ambiguous_messages",
         "eml_headers_degraded",
+        "eml_filenames_degraded",
+        "eml_charsets_degraded",
         CHILD_TEXT_LOST,
         CHILD_OCR_PAGES_SKIPPED,
     }

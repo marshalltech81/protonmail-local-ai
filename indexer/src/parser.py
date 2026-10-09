@@ -779,7 +779,7 @@ def _unfold(text: str) -> str:
     return _FOLD_RE.sub("", text)
 
 
-def _part_filename(part: email.message.Message) -> str | None:
+def _part_filename(part: email.message.Message, degraded: Counter[str] | None = None) -> str | None:
     """``_raw_part_filename`` read from the part's headers unfolded (#688).
 
     The headers are unfolded before ``get_filename()`` decodes them, so a
@@ -788,16 +788,19 @@ def _part_filename(part: email.message.Message) -> str | None:
     Content-Disposition and Content-Type values go on a throwaway message,
     copied raw (``raw_items()``; the compat32 policy stores and fetches
     them unchanged), so the part itself is never modified: attached emails
-    are re-serialized later.
+    are re-serialized later. ``degraded`` (when given) counts the
+    fallbacks below, as for ``_decode_header``.
     """
     headers = email.message.Message()
     for name, value in part.raw_items():
         if name.lower() in ("content-disposition", "content-type"):
             headers[name] = _unfold(value)
-    return _decode_filename_words(_raw_part_filename(headers))
+    return _decode_filename_words(_raw_part_filename(headers, degraded), degraded)
 
 
-def _decode_filename_words(filename: str | None) -> str | None:
+def _decode_filename_words(
+    filename: str | None, degraded: Counter[str] | None = None
+) -> str | None:
     """Decode the RFC 2047 encoded-words the standard library leaves in a
     filename parameter, the same way as Subject (#924).
 
@@ -816,9 +819,11 @@ def _decode_filename_words(filename: str | None) -> str | None:
     if not filename or "=?" not in filename:
         return filename
     try:
-        decoded = _decode_header(filename)
+        decoded = _decode_header(filename, degraded)
         decoded.encode("utf-8")
     except (email.errors.HeaderParseError, ValueError, LookupError) as exc:
+        if degraded is not None:
+            degraded[FILENAME_DEGRADED] += 1
         warn_rate_limited(
             log,
             "attachment filename encoded-words could not be decoded (%s); kept 1 filename as sent",
@@ -828,7 +833,9 @@ def _decode_filename_words(filename: str | None) -> str | None:
     return decoded or filename
 
 
-def _raw_part_filename(part: email.message.Message) -> str | None:
+def _raw_part_filename(
+    part: email.message.Message, degraded: Counter[str] | None = None
+) -> str | None:
     """``part.get_filename()``, falling back to the raw parameter text when
     its charset cannot decode it.
 
@@ -845,6 +852,8 @@ def _raw_part_filename(part: email.message.Message) -> str | None:
     try:
         return part.get_filename()
     except ValueError as exc:
+        if degraded is not None:
+            degraded[FILENAME_DEGRADED] += 1
         log.warning(
             "attachment filename charset could not decode it (%s); using the raw parameter",
             type(exc).__name__,
@@ -1270,14 +1279,20 @@ class BodyWalk:
 
     In such a walk attachments are neither materialized nor walked into
     (the enclosing message's parse indexes them); each ``message/rfc822``
-    attachment part met is added to ``nested``, in document order, for
-    the caller to walk as a message of its own. ``parts_left`` and
-    ``text_parts_left`` are what ``MAX_WALKED_PARTS`` and
-    ``MAX_BODY_TEXT_PARTS`` allow across all the walks together."""
+    part met, an attachment or inline, is added to ``nested``, in
+    document order, for the caller to walk as a message of its own.
+    ``parts_left`` and ``text_parts_left`` are what ``MAX_WALKED_PARTS``
+    and ``MAX_BODY_TEXT_PARTS`` allow across all the walks together.
+    ``degraded`` counts the decoders' fallbacks (``HEADER_DEGRADED``,
+    ``FILENAME_DEGRADED``, ``CHARSET_DEGRADED``), whose lines a caller in
+    the extractor child cannot log; ``decode_lost_parts`` counts the text
+    parts whose transfer decoding lost bytes (``_decode_lost_bytes``)."""
 
     parts_left: int = MAX_WALKED_PARTS
     text_parts_left: int = MAX_BODY_TEXT_PARTS
     nested: list[email.message.Message] = field(default_factory=list)
+    degraded: Counter[str] = field(default_factory=Counter)
+    decode_lost_parts: int = 0
 
 
 def _extract_body_and_attachments(
@@ -1331,12 +1346,17 @@ def _extract_body_and_attachments(
             break
         walked += 1
         ct = part.get_content_type()
-        filename = _part_filename(part)
+        filename = _part_filename(part, None if walk is None else walk.degraded)
         is_attachment = _is_attachment(part, filename)
         decoded: email.message.Message | None = None
-        if is_attachment and walk is not None:
-            if ct == "message/rfc822" and part.is_multipart():
-                walk.nested.append(part)
+        if walk is not None and ct == "message/rfc822" and part.is_multipart():
+            # An attached email, inline or not, is a message of its own
+            # here: its headers and body are rendered as a nested
+            # section, never folded into this body (review round 2).
+            walk.nested.append(part)
+            is_attachment = True
+        elif is_attachment and walk is not None:
+            pass
         elif is_attachment:
             transport_lost: list[bool] = []
             payload, decoded = _attachment_payload(
@@ -1429,7 +1449,14 @@ def _extract_body_and_attachments(
             capped.append((len(nodes) - 1, not is_html))
             continue
         text_parts += 1
-        text = _safe_decode(_decoded_payload(part), part.get_content_charset() or "utf-8")
+        payload = _decoded_payload(part)
+        if walk is not None and _decode_lost_bytes(part):
+            walk.decode_lost_parts += 1
+        text = _safe_decode(
+            payload,
+            part.get_content_charset() or "utf-8",
+            None if walk is None else walk.degraded,
+        )
         node.text = (_html_to_text(text) if is_html else text).strip()
         node.has_text = bool(node.text)
         node.has_plain = node.has_text and not is_html
@@ -1445,12 +1472,20 @@ def _extract_body_and_attachments(
     return body, attachments
 
 
-def _safe_decode(payload: bytes, charset: str) -> str:
+def _safe_decode(payload: bytes, charset: str, degraded: Counter[str] | None = None) -> str:
     """Decode payload bytes, falling back to utf-8 on unknown charsets.
 
     ``UnicodeError`` covers codecs that reject ``errors="replace"``
     (``idna`` raises ``UnicodeError("Unsupported error handling")``).
+    ``degraded`` (when given) counts a fallback or a replacement under
+    ``CHARSET_DEGRADED``: the bytes are decoded strictly first, once more
+    only when that fails.
     """
+    if degraded is not None:
+        try:
+            return payload.decode(charset)
+        except LookupError, UnicodeError:
+            degraded[CHARSET_DEGRADED] += 1
     try:
         return payload.decode(charset, errors="replace")
     except LookupError, UnicodeError:
@@ -1483,8 +1518,13 @@ def _decode_header(value: str | email.header.Header, degraded: Counter[str] | No
     ).strip()
 
 
-# The ``degraded`` key the header decoders count their fallbacks under.
+# The ``degraded`` keys the decoders count their fallbacks under: a
+# header (an encoded-word in a filename included), a part's filename,
+# and a body text part's charset (an unknown label, or bytes the label's
+# codec replaced).
 HEADER_DEGRADED = "header_degraded"
+FILENAME_DEGRADED = "filename_degraded"
+CHARSET_DEGRADED = "charset_degraded"
 
 
 def _decode_text_header(

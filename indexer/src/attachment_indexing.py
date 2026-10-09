@@ -94,7 +94,9 @@ class AttachmentOutcomeCounts:
     ``pdf_pages_failed``, ``pdf_pages_unrecovered``, ``ocr_capped_pdfs``,
     ``ocr_pages_skipped``, ``ocr_capped_images``, ``extractor_caps``,
     ``parser_caps_messages``, ``parser_recipients_merged_messages``,
-    ``parser_sender_ambiguous_messages`` and ``warnings_suppressed``). Counts
+    ``parser_sender_ambiguous_messages``, the attached-email decoding
+    fallbacks ``eml_headers_degraded``, ``eml_filenames_degraded`` and
+    ``eml_charsets_degraded``, and ``warnings_suppressed``). Counts
     only: no filename, type or text.
     """
 
@@ -136,6 +138,11 @@ _SUMMARY_FIELDS = (
     "parser_caps_messages",
     "parser_recipients_merged_messages",
     "parser_sender_ambiguous_messages",
+    # Decoding fallbacks in attached emails' text (#922): characters
+    # replaced, not text lost, so not in ``_DEGRADED_FIELDS`` (#1315).
+    "eml_headers_degraded",
+    "eml_filenames_degraded",
+    "eml_charsets_degraded",
     "warnings_suppressed",
 )
 # Counts that mean attachment text is missing from search: the line is

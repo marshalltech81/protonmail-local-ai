@@ -230,17 +230,18 @@ _HEADER_COUNTED = (
     "eml_headers_degraded, which crosses as an N frame (TestReviewRound1 in "
     "test_eml_extractor); the line is for the in-process parser's callers"
 )
-_FILENAME_UNUSED = (
-    "the eml child only classifies a part as an attachment by its filename and "
-    "never renders it, so a filename fallback changes no eml text; the enclosing "
-    "message's in-process parse logs it for the occurrence"
+_FILENAME_COUNTED = (
+    "the eml child's body walk passes ``degraded``, so each fallback is counted "
+    "into eml_filenames_degraded, which crosses as an N frame (TestReviewRound2 "
+    "in test_eml_extractor): inside a leaf .eml no other walk logs it; the line "
+    "is for the in-process parser's callers"
 )
 _EXCLUDED: dict[tuple[str, str], str] = {
     ("src.parser", "_decode_text_header"): _HEADER_COUNTED,
     ("src.parser", "_decode_header_parts"): _HEADER_COUNTED,
     ("src.parser", "_decode_raw_8bit"): _HEADER_COUNTED,
-    ("src.parser", "_decode_filename_words"): _FILENAME_UNUSED,
-    ("src.parser", "_raw_part_filename"): _FILENAME_UNUSED,
+    ("src.parser", "_decode_filename_words"): _FILENAME_COUNTED,
+    ("src.parser", "_raw_part_filename"): _FILENAME_COUNTED,
 }
 
 

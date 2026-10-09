@@ -4849,10 +4849,10 @@ def test_many_part_message_walk_is_bounded(tmp_path, monkeypatch, caplog):
     visited = 0
     real = parser._part_filename
 
-    def counting(part):
+    def counting(part, *args):
         nonlocal visited
         visited += 1
-        return real(part)
+        return real(part, *args)
 
     monkeypatch.setattr(parser, "_part_filename", counting)
     raw = (

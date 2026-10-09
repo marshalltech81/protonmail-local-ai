@@ -12,6 +12,7 @@ from __future__ import annotations
 import base64
 import email
 import logging
+from collections import Counter
 
 import pytest
 from src import extractors, parser
@@ -264,7 +265,7 @@ class TestBudgets:
     def test_parts_are_shared_across_nested_messages(self, monkeypatch, caplog, _in_process_child):
         walked = []
         real = parser._part_filename
-        monkeypatch.setattr(parser, "_part_filename", lambda p: walked.append(1) or real(p))
+        monkeypatch.setattr(parser, "_part_filename", lambda p, *a: walked.append(1) or real(p, *a))
         monkeypatch.setattr(eml, "_MAX_PARTS", 6)
         nested = _multipart(
             *(b"Content-Type: text/plain\r\n\r\n" + MARKER.encode(),) * 3, boundary=b"N"
@@ -281,7 +282,9 @@ class TestBudgets:
         monkeypatch.setattr(eml, "_MAX_TEXT_PARTS", 2)
         decoded = []
         real = parser._safe_decode
-        monkeypatch.setattr(parser, "_safe_decode", lambda b, c: decoded.append(1) or real(b, c))
+        monkeypatch.setattr(
+            parser, "_safe_decode", lambda b, c, *a: decoded.append(1) or real(b, c, *a)
+        )
         payload = _multipart(
             b"Content-Type: text/plain\r\n\r\none",
             _attached(_text("two")),
@@ -473,3 +476,133 @@ class TestReviewRound1:
         """The counter is optional: the parser's own callers pass none."""
         value = parser.email.header.make_header([(b"caf\xe9", "unknown-8bit")])
         assert parser._decode_text_header(value) == "caf�"
+
+
+class TestReviewRound2:
+    """Codex round 2 on #1311, as the owner decided."""
+
+    def _extract(self, payload: bytes, caplog) -> extractors.ExtractionResult:
+        extractors.drain_extractor_counts()
+        with caplog.at_level(logging.WARNING):
+            result = extract(content_type="message/rfc822", filename="f.eml", payload=payload)
+        assert result.status == STATUS_SUCCESS
+        assert MARKER not in caplog.text
+        return result
+
+    def test_a_lossy_base64_body_part_is_a_cut(self, caplog):
+        """Finding 2: the body-only walk reads ``_decode_lost_bytes``."""
+        encoded = base64.encodebytes(b"intact words " + MARKER.encode() * 4)
+        payload = (
+            HDR
+            + b"Content-Type: text/plain\r\nContent-Transfer-Encoding: base64\r\n\r\n"
+            + encoded[:16]
+            + b"!!!!"
+            + encoded[20:]
+        )
+        result = self._extract(payload, caplog)
+        assert result.text_complete is False
+        assert "extractor cap eml_body_decode:" in caplog.text
+
+    def test_an_intact_base64_body_part_stays_complete(self, caplog):
+        payload = (
+            HDR
+            + b"Content-Type: text/plain\r\nContent-Transfer-Encoding: base64\r\n\r\n"
+            + base64.encodebytes(b"intact words")
+        )
+        result = self._extract(payload, caplog)
+        assert result.text_complete is True
+        assert result.text == "Subject: s\nFrom: a@example.test\n\nintact words"
+
+    def test_the_default_walk_ignores_body_decode_loss(self):
+        """Walk-only: the top-level body path is unchanged (#1315)."""
+        encoded = base64.encodebytes(b"intact words")
+        msg = email.message_from_bytes(
+            b"Content-Type: text/plain\r\nContent-Transfer-Encoding: base64\r\n\r\n"
+            + encoded[:4]
+            + b"!!!!"
+            + encoded[8:]
+        )
+        caps: Counter[str] = Counter()
+        parser._extract_body_and_attachments(msg, caps=caps)
+        assert caps == Counter()
+
+    def test_an_inline_attached_email_is_a_nested_section(self, caplog):
+        """Finding 5: a ``message/rfc822`` part with no filename and no
+        disposition keeps its headers and depth label."""
+        inline = b"Content-Type: message/rfc822\r\n\r\n" + _text("inline body", subject="inner")
+        result = self._extract(_multipart(b"Content-Type: text/plain\r\n\r\nroot", inline), caplog)
+        assert result.text == (
+            "Subject: s\nFrom: a@example.test\n\nroot"
+            "\n\n[Attached message, depth 2]\nSubject: inner\n\ninline body"
+        )
+        assert result.text_complete is True
+
+    def test_the_default_walk_still_folds_an_inline_attached_email(self):
+        msg = email.message_from_bytes(
+            _multipart(
+                b"Content-Type: text/plain\r\n\r\nroot",
+                b"Content-Type: message/rfc822\r\n\r\n" + _text("inline body"),
+            )
+        )
+        body, attachments = parser._extract_body_and_attachments(msg)
+        assert (body, attachments) == ("root\n\ninline body", [])
+
+    def test_a_quoted_printable_nested_email_is_a_cut(self, caplog):
+        """Finding 1: quoted-printable loss records nothing to detect, so
+        every such nested email is counted lossy (until #1288)."""
+        part = (
+            b"Content-Type: message/rfc822\r\nContent-Disposition: attachment\r\n"
+            b"Content-Transfer-Encoding: quoted-printable\r\n\r\n"
+            b"Subject: n\r\n\r\nvisible =\rtail " + MARKER.encode()
+        )
+        result = self._extract(_multipart(part), caplog)
+        assert result.text_complete is False
+        assert result.text is not None and "[Attached message, depth 2]" in result.text
+        assert "extractor cap eml_nested_messages:" in caplog.text
+
+    @staticmethod
+    def _with_named_part(disposition: bytes) -> bytes:
+        return _multipart(
+            b"Content-Type: text/plain\r\n\r\nroot",
+            b"Content-Type: text/plain\r\nContent-Disposition: attachment; "
+            + disposition
+            + b"\r\n\r\n"
+            + MARKER.encode(),
+        )
+
+    def test_a_filename_fallback_is_counted_and_changes_no_text(self, caplog):
+        """Finding 6: counted into ``eml_filenames_degraded``; the part is
+        an attachment either way, so the text is the same."""
+        clean = self._extract(self._with_named_part(b'filename="n.txt"'), caplog)
+        caplog.clear()
+        result = self._extract(self._with_named_part(b"filename*=idna''n.txt"), caplog)
+        assert result.text == clean.text == "Subject: s\nFrom: a@example.test\n\nroot"
+        assert result.text_complete is True
+        assert extractors.drain_extractor_counts()["eml_filenames_degraded"] == 1
+        lines = [
+            r.getMessage() for r in caplog.records if "degraded in the child" in r.getMessage()
+        ]
+        assert lines == ["extractor eml degraded in the child: eml_filenames_degraded=1"]
+
+    def test_a_body_charset_fallback_is_counted_and_keeps_the_text_complete(self, caplog):
+        """Finding 3: visible as ``eml_charsets_degraded``; replacement is
+        not loss (#1315)."""
+        payload = (
+            HDR
+            + b"Content-Type: text/plain; charset=x-unknown-synthetic\r\n\r\ncaf\xe9 "
+            + MARKER.encode()
+        )
+        result = self._extract(payload, caplog)
+        assert result.text_complete is True
+        assert extractors.drain_extractor_counts()["eml_charsets_degraded"] == 1
+        lines = [
+            r.getMessage() for r in caplog.records if "degraded in the child" in r.getMessage()
+        ]
+        assert lines == ["extractor eml degraded in the child: eml_charsets_degraded=1"]
+
+    def test_invalid_bytes_under_a_known_charset_are_counted(self):
+        walk = parser.BodyWalk()
+        msg = email.message_from_bytes(b"Content-Type: text/plain; charset=utf-8\r\n\r\ncaf\xe9")
+        body, _ = parser._extract_body_and_attachments(msg, walk=walk)
+        assert body == "caf�"
+        assert walk.degraded == Counter({parser.CHARSET_DEGRADED: 1})

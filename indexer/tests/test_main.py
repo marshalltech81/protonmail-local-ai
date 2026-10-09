@@ -4435,6 +4435,7 @@ class TestRequeueOcrDisabledExtractions:
                 "pdf_pages_unrecovered=0 ocr_capped_pdfs=0 ocr_pages_skipped=0 ocr_capped_images=0 "
                 "extractor_caps=0 parser_caps_messages=0 "
                 "parser_recipients_merged_messages=0 parser_sender_ambiguous_messages=0 "
+                "eml_headers_degraded=0 eml_filenames_degraded=0 eml_charsets_degraded=0 "
                 "warnings_suppressed=0",
             )
         ]
