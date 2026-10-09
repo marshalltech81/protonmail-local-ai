@@ -1671,6 +1671,10 @@ only, never filenames or text (`make logs`):
     before whitespace is stripped; the rest is not read (#935).
   - `ppt_output_bytes`: the same cap on the `.ppt` reader's output for a
     legacy `.ppt` (#957).
+  - `eml_body_structure`: a part of an attached email declared
+    `multipart/*` that could not be split into parts (no boundary
+    parameter, or a boundary that never appears), so none of its text
+    is read (#922; the same gap for top-level mail is #1348).
   - `eml_body_decode`: a body text part of an attached email whose
     base64 decoding lost bytes, or any quoted-printable one, whose loss
     cannot be detected yet, or one in an encoding not decoded here

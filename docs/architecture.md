@@ -1439,7 +1439,11 @@ in quoted-printable, whose loss the standard library records nothing
 for (counted as lossy until #1288 detects it). A body text part in any
 other encoding that is not identity (uuencode and its aliases, or an
 unknown value) is kept as decoded but counted as `eml_body_decode`
-too, since a malformed one comes back as its transport text. A nested email in any
+too, since a malformed one comes back as its transport text. A part
+declared `multipart/*` that the standard library could not decompose
+(no boundary parameter, or a start boundary that never appears) is
+counted as `eml_body_structure`, since none of its text is read; the
+same gap in the default parser is #1348. A nested email in any
 other transfer encoding (uuencode and its aliases included) is not
 decoded: only its depth label is indexed, and it counts as
 `eml_nested_messages`. The decoders' fallbacks are

@@ -55,7 +55,10 @@ through ``warn_extractor_cap``, so the result is marked incomplete
 (``eml_body_decode``), a nested email's base64, any body text part or
 nested email in quoted-printable, whose loss records nothing to detect
 (#1288), and any body text part in another encoding that is not
-identity (uuencode and its aliases, or an unknown value). A nested email in any other transfer encoding
+identity (uuencode and its aliases, or an unknown value). So is a
+part declared ``multipart/*`` that the standard library left
+undecomposed (no or a missing boundary), whose text is never read
+(``eml_body_structure``). A nested email in any other transfer encoding
 (uuencode and its aliases included) is not decoded: only its label is
 rendered, as an ``eml_nested_messages`` cut. The
 decoders' fallbacks (headers, part filenames, body charsets) replace
@@ -141,6 +144,7 @@ _CAP_NAMES = frozenset(
         "eml_text_parts",
         "eml_nested_messages",
         "eml_body_decode",
+        "eml_body_structure",
     }
 )
 
@@ -254,6 +258,8 @@ def extract_text(payload: bytes) -> tuple[str, list[str]]:
         stack.extend((inner, depth + 1) for inner in reversed(inner_messages))
     if walk.decode_lost_parts:
         caps["eml_body_decode"] = None
+    if walk.structure_lost_parts:
+        caps["eml_body_structure"] = None
     if text.full:
         caps["eml_text_chars"] = None
     if degraded.total():

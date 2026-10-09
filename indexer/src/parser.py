@@ -1335,13 +1335,17 @@ class BodyWalk:
     ``FILENAME_DEGRADED``, ``CHARSET_DEGRADED``), whose lines a caller in
     the extractor child cannot log; ``decode_lost_parts`` counts the text
     parts whose transfer decoding lost bytes (``_decode_lost_bytes``) or
-    may have (any quoted-printable part, #1288)."""
+    may have (any quoted-printable part, #1288), and
+    ``structure_lost_parts`` the parts declared ``multipart/*`` that the
+    standard library could not decompose (no or a missing boundary), whose
+    text is lost."""
 
     parts_left: int = MAX_WALKED_PARTS
     text_parts_left: int = MAX_BODY_TEXT_PARTS
     nested: list[email.message.Message] = field(default_factory=list)
     degraded: Counter[str] = field(default_factory=Counter)
     decode_lost_parts: int = 0
+    structure_lost_parts: int = 0
 
 
 def _extract_body_and_attachments(
@@ -1395,6 +1399,15 @@ def _extract_body_and_attachments(
             break
         walked += 1
         ct = part.get_content_type()
+        if (
+            walk is not None
+            and part.get_content_maintype() == "multipart"
+            and not part.is_multipart()
+        ):
+            # A declared container the parse left as one undecomposed
+            # payload: nothing in it is read (review round 6 on #1311;
+            # the default walk's same gap is #1348).
+            walk.structure_lost_parts += 1
         filename = _part_filename(part, None if walk is None else walk.degraded)
         is_attachment = _is_attachment(part, filename)
         decoded: email.message.Message | None = None

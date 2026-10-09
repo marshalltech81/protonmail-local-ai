@@ -720,3 +720,96 @@ class TestReviewRound5:
             email.message_from_bytes(raw), walk=parser.BodyWalk()
         )
         assert walked == default == "xn--caf-dma"
+
+
+# Review round 6 on #1311: declared multipart containers the standard
+# library could not decompose, at the root, in a sub-part and in a nested
+# email. (payload, cut, text kept). A cut is exactly a part whose declared
+# maintype is multipart that did not parse into parts: its text is lost.
+_SUB = (
+    b'Content-Type: multipart/mixed; boundary="B"\r\n\r\n'
+    b"--B\r\nContent-Type: text/plain\r\n\r\nKEPT\r\n--B\r\n"
+)
+_STRUCTURE_SHAPES = {
+    "root_start_boundary_absent": (
+        b"Content-Type: multipart/mixed; boundary=NEVER\r\n\r\n" + MARKER.encode(),
+        True,
+        "",
+    ),
+    "root_no_boundary_parameter": (
+        b"Content-Type: multipart/mixed\r\n\r\n" + MARKER.encode(),
+        True,
+        "",
+    ),
+    "root_close_boundary_absent": (
+        b'Content-Type: multipart/mixed; boundary="B"\r\n\r\n'
+        b"--B\r\nContent-Type: text/plain\r\n\r\nKEPT TEXT\r\n",
+        False,
+        "KEPT TEXT",
+    ),
+    "root_separator_missing": (
+        b'Content-Type: multipart/mixed; boundary="B"\r\nnot a header line\r\n'
+        b"--B\r\nContent-Type: text/plain\r\n\r\nKEPT TEXT\r\n--B--\r\n",
+        False,
+        "KEPT TEXT",
+    ),
+    "sub_start_boundary_absent": (
+        _SUB
+        + b"Content-Type: multipart/alternative; boundary=NEVER\r\n\r\n"
+        + MARKER.encode()
+        + b"\r\n--B--\r\n",
+        True,
+        "KEPT",
+    ),
+    "sub_alternative_no_boundary_parameter": (
+        _SUB + b"Content-Type: multipart/alternative\r\n\r\n" + MARKER.encode() + b"\r\n--B--\r\n",
+        True,
+        "KEPT",
+    ),
+    "sub_close_boundary_absent": (
+        _SUB + b'Content-Type: multipart/alternative; boundary="C"\r\n\r\n'
+        b"--C\r\nContent-Type: text/plain\r\n\r\nKEPT TEXT\r\n--B--\r\n",
+        False,
+        "KEPT\n\nKEPT TEXT",
+    ),
+    "sub_separator_missing": (
+        _SUB + b'Content-Type: multipart/alternative; boundary="C"\r\nnot a header line\r\n'
+        b"--C\r\nContent-Type: text/plain\r\n\r\nKEPT TEXT\r\n--C--\r\n--B--\r\n",
+        False,
+        "KEPT\n\nKEPT TEXT",
+    ),
+    "nested_email_no_boundary_parameter": (
+        _SUB + b"Content-Type: message/rfc822\r\nContent-Disposition: attachment\r\n\r\n"
+        b"Subject: n\r\nContent-Type: multipart/mixed\r\n\r\n" + MARKER.encode() + b"\r\n--B--\r\n",
+        True,
+        "KEPT\n\n[Attached message, depth 2]\nSubject: n",
+    ),
+}
+
+
+class TestReviewRound6:
+    @pytest.mark.parametrize("shape", sorted(_STRUCTURE_SHAPES))
+    def test_a_container_that_did_not_decompose_is_a_cut(self, shape, caplog):
+        payload, cut, kept = _STRUCTURE_SHAPES[shape]
+        extractors.drain_extractor_counts()
+        with caplog.at_level(logging.WARNING):
+            result = extract(
+                content_type="message/rfc822", filename="f.eml", payload=b"Subject: s\r\n" + payload
+            )
+        assert result.status == STATUS_SUCCESS
+        assert result.text == "Subject: s" + (f"\n\n{kept}" if kept else "")
+        assert result.text_complete is not cut
+        assert ("extractor cap eml_body_structure:" in caplog.text) is cut
+        assert MARKER not in caplog.text
+
+    def test_the_default_walk_counts_nothing(self):
+        msg = email.message_from_bytes(b"Content-Type: multipart/mixed\r\n\r\ntext")
+        caps: Counter[str] = Counter()
+        parser._extract_body_and_attachments(msg, caps=caps)
+        assert caps == Counter()
+
+    def test_the_walk_counts_each_undecomposed_container(self):
+        payload, _, _ = _STRUCTURE_SHAPES["sub_alternative_no_boundary_parameter"]
+        walk = parser.BodyWalk()
+        parser._extract_body_and_attachments(email.message_from_bytes(payload), walk=walk)
+        assert walk.structure_lost_parts == 1
