@@ -29,7 +29,10 @@ The child's result crosses the pipe in the runner's framed protocol
 (``_runner``): the names of the walk budgets that cut the text, each
 checked against the format's own list and logged through
 ``warn_extractor_cap`` by the caller, and the text; or the type name of
-the exception the extraction raised. A type name in the format's
+the exception the extraction raised. The degradation the extraction
+recorded in the child (its text loss and counts) comes back as ``N``
+frames and is re-applied here (``apply_child_degradation``, #1314). A
+type name in the format's
 ``permanent`` map is raised as that class, so the dispatcher records it
 ``unsupported`` as before (#931, #1032); any other is raised as
 ``ChildError``, which the dispatcher records ``failed`` under that type
@@ -49,9 +52,12 @@ lxml reports a failed allocation as ``XMLSyntaxError``.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Mapping
 
-from . import _runner
+from . import CHILD_DEGRADATION_KEYS, _runner, apply_child_degradation
+
+log = logging.getLogger("indexer.extractor.ooxml")
 
 # Bytes of the child's output read: each format's text budget
 # (10,000,000 characters) at UTF-8's worst case of four bytes each,
@@ -85,7 +91,9 @@ def run_child(
         timeout_seconds=timeout_seconds,
         max_output_bytes=_MAX_OUTPUT_BYTES,
         caps=caps,
+        counts=CHILD_DEGRADATION_KEYS,
         permanent=permanent,
         on_progress=on_progress,
     )
+    apply_child_degradation(log, module, result.counts)
     return result.text, result.caps

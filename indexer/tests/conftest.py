@@ -132,6 +132,7 @@ def _ooxml_child_in_process(request, monkeypatch):
     module (``tests/test_ooxml_child.py``)."""
     if request.node.get_closest_marker("real_extractor_child"):
         return
+    from src import extractors
     from src.extractors import OOXML_MODULES, _runner, extractor_child
 
     real = _runner.run_tool
@@ -141,7 +142,14 @@ def _ooxml_child_in_process(request, monkeypatch):
         if argv[-2] != str(_runner._CHILD) or module not in OOXML_MODULES:
             return real(argv, payload, on_output=on_output, **kwargs)
         assert on_output is not None
-        on_output(extractor_child.run(module, payload))
+        # A real child starts with zero counters (#1314): set the test's
+        # aside so the child sends only what this extraction counted.
+        before = extractors.drain_counters()
+        try:
+            output = extractor_child.run(module, payload)
+        finally:
+            extractors.add_counters(before)
+        on_output(output)
         return _runner.ToolOutput(b"", truncated=False)
 
     monkeypatch.setattr(_runner, "run_tool", run_tool)

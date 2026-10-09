@@ -35,7 +35,7 @@ import importlib
 import logging
 import os
 import zipfile
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from threading import Lock, local
 
@@ -240,27 +240,126 @@ def note_parser_address_repeats(*, merged: bool, ambiguous: bool) -> None:
 
 def drain_extractor_counts() -> dict[str, int]:
     """Return the counts above since the last call, and reset them."""
+    with _counts_lock:
+        counts = _drain_counters()
+        counts["warnings_suppressed"] = _LINE_BUDGET.drain(_ATTACHMENT_LINES)
+    return counts
+
+
+def _drain_counters() -> dict[str, int]:
+    """The counters above (not the suppressed lines), reset. The caller
+    holds ``_counts_lock``."""
+    global _pdf_pages_failed, _pdf_pages_unrecovered, _ocr_capped_pdfs
+    global _ocr_pages_skipped, _ocr_capped_images, _extractor_caps, _parser_caps_messages
+    global _parser_recipients_merged_messages, _parser_sender_ambiguous_messages
+    counts = {
+        "pdf_pages_failed": _pdf_pages_failed,
+        "pdf_pages_unrecovered": _pdf_pages_unrecovered,
+        "ocr_capped_pdfs": _ocr_capped_pdfs,
+        "ocr_pages_skipped": _ocr_pages_skipped,
+        "ocr_capped_images": _ocr_capped_images,
+        "extractor_caps": _extractor_caps,
+        "parser_caps_messages": _parser_caps_messages,
+        "parser_recipients_merged_messages": _parser_recipients_merged_messages,
+        "parser_sender_ambiguous_messages": _parser_sender_ambiguous_messages,
+    }
+    _pdf_pages_failed = _pdf_pages_unrecovered = _ocr_capped_pdfs = 0
+    _ocr_pages_skipped = _ocr_capped_images = _extractor_caps = 0
+    _parser_caps_messages = 0
+    _parser_recipients_merged_messages = _parser_sender_ambiguous_messages = 0
+    return counts
+
+
+def add_counters(counts: Mapping[str, int]) -> None:
+    """Add ``counts`` (keys of ``_drain_counters``; others ignored) to
+    the counters above."""
     global _pdf_pages_failed, _pdf_pages_unrecovered, _ocr_capped_pdfs
     global _ocr_pages_skipped, _ocr_capped_images, _extractor_caps, _parser_caps_messages
     global _parser_recipients_merged_messages, _parser_sender_ambiguous_messages
     with _counts_lock:
-        counts = {
-            "pdf_pages_failed": _pdf_pages_failed,
-            "pdf_pages_unrecovered": _pdf_pages_unrecovered,
-            "ocr_capped_pdfs": _ocr_capped_pdfs,
-            "ocr_pages_skipped": _ocr_pages_skipped,
-            "ocr_capped_images": _ocr_capped_images,
-            "extractor_caps": _extractor_caps,
-            "parser_caps_messages": _parser_caps_messages,
-            "parser_recipients_merged_messages": _parser_recipients_merged_messages,
-            "parser_sender_ambiguous_messages": _parser_sender_ambiguous_messages,
-            "warnings_suppressed": _LINE_BUDGET.drain(_ATTACHMENT_LINES),
-        }
-        _pdf_pages_failed = _pdf_pages_unrecovered = _ocr_capped_pdfs = 0
-        _ocr_pages_skipped = _ocr_capped_images = _extractor_caps = 0
-        _parser_caps_messages = 0
-        _parser_recipients_merged_messages = _parser_sender_ambiguous_messages = 0
-    return counts
+        _pdf_pages_failed += counts.get("pdf_pages_failed", 0)
+        _pdf_pages_unrecovered += counts.get("pdf_pages_unrecovered", 0)
+        _ocr_capped_pdfs += counts.get("ocr_capped_pdfs", 0)
+        _ocr_pages_skipped += counts.get("ocr_pages_skipped", 0)
+        _ocr_capped_images += counts.get("ocr_capped_images", 0)
+        _extractor_caps += counts.get("extractor_caps", 0)
+        _parser_caps_messages += counts.get("parser_caps_messages", 0)
+        _parser_recipients_merged_messages += counts.get("parser_recipients_merged_messages", 0)
+        _parser_sender_ambiguous_messages += counts.get("parser_sender_ambiguous_messages", 0)
+
+
+def drain_counters() -> dict[str, int]:
+    """The counters above since the last drain, reset; the suppressed
+    lines are left in place."""
+    with _counts_lock:
+        return _drain_counters()
+
+
+# The degradation an extraction in the extractor child records (#1314),
+# which lives in the child's memory: the counters above, and the
+# attempt's text loss (``note_text_lost``) and OCR pages skipped
+# (``record_ocr_pages_skipped``) under the keys below. The child sends
+# each that is not zero as an ``N <key> <count>`` frame
+# (``child_degradation``) and the parent re-applies them
+# (``apply_child_degradation``). Only these fixed keys and counts
+# cross; never a log line, a format string or its arguments. The
+# child's suppressed-line count is not sent: none of the child's lines
+# reach the log (the runner discards its stderr), so the parent's own
+# line below stands for them.
+CHILD_TEXT_LOST = "text_lost"
+CHILD_OCR_PAGES_SKIPPED = "result_ocr_pages_skipped"
+CHILD_DEGRADATION_KEYS = frozenset(
+    {
+        "pdf_pages_failed",
+        "pdf_pages_unrecovered",
+        "ocr_capped_pdfs",
+        "ocr_pages_skipped",
+        "ocr_capped_images",
+        "extractor_caps",
+        "parser_caps_messages",
+        "parser_recipients_merged_messages",
+        "parser_sender_ambiguous_messages",
+        CHILD_TEXT_LOST,
+        CHILD_OCR_PAGES_SKIPPED,
+    }
+)
+
+
+def reset_attempt() -> None:
+    """Clear the running extraction's text loss and OCR pages skipped,
+    as the dispatcher does before an extractor runs; the child calls it
+    before its extraction."""
+    _attempt.text_lost = False
+    _attempt.ocr_pages_skipped = None
+
+
+def child_degradation() -> dict[str, int]:
+    """In the child, after the extraction: the degradation it recorded,
+    by ``CHILD_DEGRADATION_KEYS`` key, zero counts left out."""
+    state = {key: n for key, n in drain_counters().items() if n}
+    if getattr(_attempt, "text_lost", False):
+        state[CHILD_TEXT_LOST] = 1
+    skipped = getattr(_attempt, "ocr_pages_skipped", None)
+    if skipped is not None:
+        state[CHILD_OCR_PAGES_SKIPPED] = skipped
+    return state
+
+
+def apply_child_degradation(logger: logging.Logger, module: str, counts: Mapping[str, int]) -> None:
+    """In the parent: re-apply the degradation the child reported
+    (``child_degradation``) to the counters and the running extraction,
+    then log it in one rate-limited WARNING naming ``module`` and each
+    key with its count. The counts and the text loss are applied
+    whether or not the line is logged."""
+    if not counts:
+        return
+    add_counters(counts)
+    if counts.get(CHILD_TEXT_LOST):
+        note_text_lost()
+    if CHILD_OCR_PAGES_SKIPPED in counts:
+        record_ocr_pages_skipped(counts[CHILD_OCR_PAGES_SKIPPED])
+    reported = " ".join(f"{key}={counts[key]}" for key in sorted(counts))
+    warn_rate_limited(logger, "extractor %s degraded in the child: %s", module, reported)
 
 
 def drain_suppressed_lines() -> int:
