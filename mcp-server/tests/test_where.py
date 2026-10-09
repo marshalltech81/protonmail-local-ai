@@ -3,9 +3,9 @@
 ``where: {"all": [leaf | {"any": [leaf, ...]}]}`` is one closed leaf
 model: ``leaf`` from the six explicit leaves, ``role`` (required on the
 five address leaves, refused on ``body_words``), ``value``, ``negate``
-and an optional ``id``. The ``any`` groups and ``negate: true`` are in
-the schema but refused with fixed text until #1087; ``all`` of leaves
-runs as a conjunction with the flat parameters. A node cap, per-leaf
+and an optional ``id``. ``all`` runs as a conjunction with the flat
+parameters; the ``any`` groups and ``negate`` are evaluated from #1087
+(``test_where_boolean.py``). A node cap, per-leaf
 value limits and normalization reject through the rate-limited
 per-field path; the cursor digest is versioned and covers the
 expression; each leaf reports in its own result list. All data is
@@ -167,8 +167,8 @@ class TestNormalize:
             )
         )
         assert leaves == [
-            WhereLeaf("where.all[0]", "j", Leaf("address_is", ("from", "jane@example.test"))),
-            WhereLeaf("where.all[1]", None, Leaf("body_words", ("budget", "approved"))),
+            WhereLeaf("where.all[0]", "j", Leaf("address_is", ("from", "jane@example.test")), 0),
+            WhereLeaf("where.all[1]", None, Leaf("body_words", ("budget", "approved")), 1),
         ]
 
     def test_node_cap_counts_leaves_and_any_groups(self, monkeypatch):
@@ -186,15 +186,12 @@ class TestNormalize:
     def test_an_empty_all_is_refused(self):
         assert _reject(_where()) == "where.all must hold at least one leaf"
 
-    def test_any_groups_are_refused_until_1087(self):
-        text = _reject(_where(_leaf("body_words", "a"), {"any": [_leaf("body_words", "b")]}))
-        assert text == (
-            "where.all[1]: any groups are not evaluated yet (#1087); list leaves directly in all"
+    def test_any_groups_and_negate_are_accepted(self):
+        # Evaluated from #1087 (test_where_boolean.py).
+        assert normalize_where(
+            _where(_leaf("body_words", "a"), {"any": [_leaf("body_words", "b")]})
         )
-
-    def test_negate_true_is_refused_and_false_accepted(self):
-        text = _reject(_where(_leaf("body_words", "a", negate=True)))
-        assert text == "where.all[0]: negate is not evaluated yet (#1087)"
+        assert normalize_where(_where(_leaf("body_words", "a", negate=True)))
         assert normalize_where(_where(_leaf("body_words", "a", negate=False)))
 
     @pytest.mark.parametrize("leaf", WHERE_LEAVES)
@@ -517,6 +514,7 @@ class TestTool:
                 "true": 2,
                 "false": 0,
                 "indeterminate": 0,
+                "negate": False,
                 "distinct_addresses": 1,
                 "addresses": ["jane@example.com"],
             }
@@ -579,8 +577,7 @@ class TestTool:
     @pytest.mark.parametrize(
         ("item", "reason"),
         [
-            ({"any": [_leaf("body_words", "a")]}, "any groups are not evaluated yet (#1087)"),
-            (_leaf("body_words", "a", negate=True), "negate is not evaluated yet (#1087)"),
+            ({"any": []}, "an any group holds at least one leaf"),
             (_leaf("address_is", MARKER), "address_is takes a full address"),
             (_leaf("body_words", MARKER * 100), "value is longer than"),
         ],
@@ -733,10 +730,3 @@ def test_a_where_value_sqlite_cannot_encode_is_answered_by_type(fake_server, mes
     assert text == "Error: UnicodeEncodeError"
     assert "query_messages error: UnicodeEncodeError" in caplog.text
     assert MARKER not in caplog.text
-
-
-def test_the_handler_refuses_negate(fake_server, messages_db):
-    handler = _handlers(fake_server, messages_db)["query_messages"]
-    assert "negate is not evaluated" in _error(
-        handler(where=_where(_leaf("body_words", "a", negate=True)))
-    )
