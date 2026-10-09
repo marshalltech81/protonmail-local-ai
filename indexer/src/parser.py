@@ -872,7 +872,9 @@ def _raw_part_filename(part: email.message.Message) -> str | None:
     try:
         return part.get_filename()
     except ValueError as exc:
-        log.warning(
+        # Rate limited (#1330): one crafted message can carry many such parts.
+        warn_rate_limited(
+            log,
             "attachment filename charset could not decode it (%s); using the raw parameter",
             type(exc).__name__,
         )
