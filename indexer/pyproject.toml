@@ -81,7 +81,7 @@ python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
 markers = [
-    "real_extractor_child: start the real extractor child process for the OOXML extractors (tests/conftest.py)",
+    "real_extractor_child: start the real extractor child process for the OOXML and image extractors (tests/conftest.py)",
 ]
 addopts = "-v --tb=short --cov=src --cov-branch --cov-report=term-missing --cov-fail-under=90"
 filterwarnings = [

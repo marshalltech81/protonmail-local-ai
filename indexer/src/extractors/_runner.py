@@ -3,7 +3,7 @@
 Shared by the ``doc`` extractor (catdoc), the ``ppt`` extractor, which
 runs Apache POI in a Java process (#957), and the extractors that run
 in the Python extractor child (``extractor_child.py``: the OOXML
-formats and ``xls``) through ``run_child`` below. Every tool is
+formats, ``xls`` and ``image``) through ``run_child`` below. Every tool is
 attacker-reachable parsing code, so the run is bounded and its output
 is treated as data:
 
@@ -74,7 +74,7 @@ import subprocess  # nosec B404 — argument lists only, no shell
 import sys
 import tempfile
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -82,8 +82,10 @@ from pathlib import Path
 _READ_CHUNK = 64 * 1024
 
 # Where each run's scratch directory is made: the hardened image's
-# writable tmpfs.
-_TMP_DIR = "/tmp"  # nosec B108 — tmpfs in Compose; the directory is mode 700
+# writable tmpfs. Resolved, because Leptonica (Tesseract's image
+# library) rewrites a path under ``/tmp`` on macOS and then cannot read
+# the file; ``/tmp`` is ``/private/tmp`` there. On Linux it stays ``/tmp``.
+_TMP_DIR = os.path.realpath("/tmp")  # nosec B108 — tmpfs in Compose; the directory is mode 700
 
 # The environment a tool runs with: nothing inherited from the indexer
 # (its secrets path, provider settings), and a UTF-8 locale. The run
@@ -339,14 +341,17 @@ def run_child(
     counts: frozenset[str] = frozenset(),
     permanent: Mapping[str, type[Exception]] | None = None,
     on_progress: Callable[[], None] | None = None,
+    options: Sequence[str] = (),
 ) -> ChildResult:
     """Run ``module``'s extraction of ``payload`` in the extractor child
     under the caller's limits, and parse its frames (module docstring).
+    ``options`` are the module's own arguments, fixed text the caller
+    builds from its settings (``image``: the page cap and OCR timeout).
     The wall-clock timeout is past the CPU limit, so a CPU-bound child
     meets that first."""
     frames = _Frames(caps, counts, on_progress)
     output = run_tool(
-        [sys.executable, "-I", str(_CHILD), module],
+        [sys.executable, "-I", str(_CHILD), module, *options],
         payload,
         timeout_seconds=timeout_seconds,
         max_output_bytes=max_output_bytes,

@@ -4002,7 +4002,7 @@ class TestImageExtractor:
         import io
 
         from PIL import Image
-        from src.extractors import image as image_module
+        from src.extractors import image_child as image_module
 
         captured = {}
 
@@ -4018,11 +4018,11 @@ class TestImageExtractor:
         # to load through PIL.
         buf = io.BytesIO()
         Image.new("RGB", (10, 10), color="white").save(buf, format="PNG")
-        text, name = image_module.extract(buf.getvalue())
+        text, caps = image_module.extract_text(buf.getvalue(), "20", "0")
 
         assert captured["called"] is True
         assert "RECEIPT TOTAL" in text
-        assert name == "image-ocr"
+        assert caps == []
 
     def test_exif_orientation_rotates_image_before_ocr(self, monkeypatch):
         """An image with EXIF Orientation=6 (rotated 90° CW for display)
@@ -4033,7 +4033,7 @@ class TestImageExtractor:
         import io
 
         from PIL import Image
-        from src.extractors import image as image_module
+        from src.extractors import image_child as image_module
 
         # Wide source image (40x10). Orientation=6 means "rotate 90° CW
         # for display", so post-transpose the image becomes 10×40.
@@ -4054,7 +4054,7 @@ class TestImageExtractor:
 
         monkeypatch.setattr(image_module.pytesseract, "image_to_string", fake_image_to_string)
 
-        image_module.extract(buf.getvalue())
+        image_module.extract_text(buf.getvalue(), "20", "0")
 
         # Post-rotation the image is 10 wide × 40 tall — assert we did
         # not OCR the unrotated 40×10 source.
@@ -4071,7 +4071,7 @@ class TestImageExtractor:
 
         import pytest
         from PIL import Image
-        from src.extractors import image as image_module
+        from src.extractors import image_child as image_module
 
         # 50×50 = 2500 pixels. Cap at 1500 puts the image at 1.67× the
         # cap — inside the warning band (Error fires only past 2×). The
@@ -4086,7 +4086,7 @@ class TestImageExtractor:
         Image.new("RGB", (50, 50), color="white").save(buf, format="PNG")
 
         with pytest.raises(Image.DecompressionBombWarning):
-            image_module.extract(buf.getvalue())
+            image_module.extract_text(buf.getvalue(), "20", "0")
 
     def test_decompression_bomb_error_propagates(self, monkeypatch):
         """A canvas past 2× the cap must surface PIL's
@@ -4097,7 +4097,7 @@ class TestImageExtractor:
 
         import pytest
         from PIL import Image
-        from src.extractors import image as image_module
+        from src.extractors import image_child as image_module
 
         # 50×50 = 2500 pixels. Cap at 100 → 25× the cap → Error.
         monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 100)
@@ -4106,7 +4106,7 @@ class TestImageExtractor:
         Image.new("RGB", (50, 50), color="white").save(buf, format="PNG")
 
         with pytest.raises(Image.DecompressionBombError):
-            image_module.extract(buf.getvalue())
+            image_module.extract_text(buf.getvalue(), "20", "0")
 
     def test_extract_does_not_mutate_global_max_image_pixels(self, monkeypatch):
         """``extract()`` must not permanently change ``Image.MAX_IMAGE_PIXELS``.
@@ -4122,14 +4122,14 @@ class TestImageExtractor:
         import io
 
         from PIL import Image
-        from src.extractors import image as image_module
+        from src.extractors import image_child as image_module
 
         before = Image.MAX_IMAGE_PIXELS
         monkeypatch.setattr(image_module.pytesseract, "image_to_string", lambda img, **_: "ok")
 
         buf = io.BytesIO()
         Image.new("RGB", (10, 10), color="white").save(buf, format="PNG")
-        image_module.extract(buf.getvalue())
+        image_module.extract_text(buf.getvalue(), "20", "0")
 
         assert Image.MAX_IMAGE_PIXELS == before
 
@@ -4151,7 +4151,7 @@ class TestMultipageTiff:
         return buf.getvalue()
 
     def _ocr_by_color(self, monkeypatch) -> list[str]:
-        from src.extractors import image as image_module
+        from src.extractors import image_child as image_module
 
         seen: list[str] = []
 
@@ -4232,7 +4232,7 @@ class TestMultipageTiff:
         """#485: each OCR'd page refreshes the heartbeat."""
         seen = self._ocr_by_color(monkeypatch)
         events: list[str] = []
-        from src.extractors import image as image_module
+        from src.extractors import image_child as image_module
 
         real_ocr = image_module.pytesseract.image_to_string
 
@@ -4252,10 +4252,11 @@ class TestMultipageTiff:
         assert events == ["ocr", "progress"] * 3
 
     def test_progress_callback_is_optional(self, monkeypatch):
-        from src.extractors import image as image_module
 
         seen = self._ocr_by_color(monkeypatch)
-        text, extractor = image_module.extract(self._frames("TIFF", 2))
+        from src.extractors import image
+
+        text, extractor = image.extract(self._frames("TIFF", 2))
         assert extractor == "image-ocr"
         assert text.split() == ["PAGE_0", "PAGE_1"]
         assert seen == ["PAGE_0", "PAGE_1"]
@@ -4305,7 +4306,7 @@ class TestMultipageTiffOcrCap:
         return bytes(data)
 
     def _ocr(self, monkeypatch) -> list[str]:
-        from src.extractors import image as image_module
+        from src.extractors import image_child as image_module
 
         seen: list[str] = []
 
@@ -4416,17 +4417,22 @@ class TestMultipageTiffOcrCap:
         assert result.text_complete is False
         [line] = self._cap_lines(caplog)
         assert line.levelname == "WARNING"
+        # The probe's exception type stays in the child: only the fixed
+        # cap name crosses the pipe (#1292).
         assert line.getMessage() == (
-            "image OCR capped at 2 frames; the next frame could not be read (TypeError)"
+            "image OCR capped at 2 frames; the next frame could not be read"
         )
         assert extractors.drain_extractor_counts()["ocr_capped_images"] == 1
         assert "SYNTHETIC_FILENAME_MARKER" not in caplog.text
 
     @pytest.mark.parametrize("exc", [MemoryError, RecursionError])
-    def test_host_pressure_in_the_probe_is_not_swallowed(self, monkeypatch, exc):
-        """The dispatcher re-raises these as host pressure; the probe
-        must not turn them into a capped success."""
+    def test_the_childs_limit_in_the_probe_is_a_failed_row(self, monkeypatch, exc):
+        """The probe must not turn these into a capped success. In the
+        extractor child they are its own limit, not host pressure
+        (#1292): reported by type and recorded ``failed``."""
         from PIL import TiffImagePlugin
+        from src import extractors
+        from src.extractors import image_child
 
         self._ocr(monkeypatch)
         real_seek = TiffImagePlugin.TiffImageFile.seek
@@ -4438,7 +4444,10 @@ class TestMultipageTiffOcrCap:
 
         monkeypatch.setattr(TiffImagePlugin.TiffImageFile, "seek", seek)
         with pytest.raises(exc):
-            self._extract(self._frames(3), max_ocr_pages=2)
+            image_child.extract_text(self._frames(3), "2", "0")
+        result = self._extract(self._frames(3), max_ocr_pages=2)
+        assert (result.status, result.error, result.text) == (STATUS_FAILED, exc.__name__, None)
+        assert extractors.drain_extractor_counts()["ocr_capped_images"] == 0
 
     def test_cap_lines_are_rate_limited_and_every_image_counted(self, monkeypatch, caplog):
         from src import extractors
@@ -4940,7 +4949,7 @@ class TestHeicImages:
         from PIL import Image
         from src.extractors import (
             _EXT_DISPATCH,
-            image,  # noqa: F401 - registers the opener
+            image_child,  # noqa: F401 - registers the opener (#1292)
         )
 
         heif = {ext for ext, fmt in Image.registered_extensions().items() if fmt == "HEIF"}
@@ -4949,7 +4958,7 @@ class TestHeicImages:
         assert {ext for ext in heif - sequences if _EXT_DISPATCH.get(ext) != "image"} == set()
 
     def test_heic_photo_is_decoded_and_ocrd(self, monkeypatch):
-        from src.extractors import image as image_module
+        from src.extractors import image_child as image_module
 
         seen: list[tuple[tuple[int, int], tuple[int, int, int]]] = []
 
@@ -4981,7 +4990,7 @@ class TestHeicImages:
         ("make", "content_type"), [(_png, "image/png"), (_heic, "image/heic")], ids=["png", "heic"]
     )
     def test_oversized_payload_is_skipped_before_decoding(self, make, content_type, monkeypatch):
-        from src.extractors import image as image_module
+        from src.extractors import image_child as image_module
 
         monkeypatch.setattr(
             image_module.pytesseract,
@@ -5010,7 +5019,7 @@ class TestHeicImages:
         error. Both reject from the header size, before any HEVC decode."""
         from PIL import Image
         from pillow_heif.as_plugin import HeifImageFile
-        from src.extractors import image as image_module
+        from src.extractors import image_child as image_module
 
         payloads = {"png": _png((50, 50)), "heic": _heic((50, 50))}
         decodes: list[int] = []
@@ -5047,7 +5056,7 @@ class TestHeicImages:
 
         import pillow_heif
         from PIL import Image
-        from src.extractors import image as image_module
+        from src.extractors import image_child as image_module
 
         heif = pillow_heif.from_pillow(Image.new("RGB", (32, 32), "red"))
         for color in ("green", "blue"):
@@ -5071,7 +5080,7 @@ class TestHeicImages:
         """Only the HEIF opener is registered, with thumbnails, depth and
         auxiliary images off, so a photo's extra images cost no decode."""
         import pillow_heif
-        from src.extractors import image  # noqa: F401 - registers the opener
+        from src.extractors import image_child  # noqa: F401 - registers the opener
 
         assert pillow_heif.options.THUMBNAILS is False
         assert pillow_heif.options.DEPTH_IMAGES is False
@@ -7356,6 +7365,30 @@ def _cap_xls_text_chars(monkeypatch):
     assert text == "[Sheet: Summary]\nIt"
 
 
+def _cap_image_text_chars(monkeypatch):
+    """The child's text budget ends the OCR after the page that crossed
+    it: the text is cut to the budget and no further page is read."""
+    import io
+
+    from PIL import Image
+    from src.extractors import image, image_child
+
+    pages: list[int] = []
+
+    def ocr(_img, **_kwargs):
+        pages.append(1)
+        return "abcdefgh"
+
+    monkeypatch.setattr(image_child.pytesseract, "image_to_string", ocr)
+    monkeypatch.setattr(image_child, "_MAX_TEXT_CHARS", 12)
+    frames = [Image.new("L", (8, 8), 255) for _ in range(3)]
+    buf = io.BytesIO()
+    frames[0].save(buf, format="TIFF", save_all=True, append_images=frames[1:])
+    text, _ = image.extract(buf.getvalue())
+    assert text == "abcdefgh\n\nab"
+    assert pages == [1, 1]
+
+
 def _cap_ppt_output_bytes(monkeypatch):
     """The runner returned a cut output: the bytes before the cut are
     kept. That the runner stops reading at the cap and kills the reader
@@ -7475,6 +7508,7 @@ _CAP_TRIGGERS = {
     "eml_parts": _cap_eml_parts,
     "eml_text_parts": _cap_eml_text_parts,
     "eml_nested_messages": _cap_eml_nested_messages,
+    "image_text_chars": _cap_image_text_chars,
 }
 
 # Every cap constant in the extractor modules (``module:NAME``) and every
@@ -7508,6 +7542,7 @@ _REPORTED_CAPS = {
     "src.extractors.eml:_MAX_TEXT_PARTS": "eml_text_parts",
     "src.extractors.eml:_MAX_DEPTH": "eml_nested_messages",
     "src.extractors.eml:_MAX_DECODED_BYTES": "eml_nested_messages",
+    "src.extractors.image:_MAX_TEXT_CHARS": "image_text_chars",
 }
 # ... or the reason it is not reported as an extractor cap.
 _WORKBOOK_FAILS = (
@@ -7561,6 +7596,15 @@ _UNREPORTED_CAPS = {
     "src.extractors.xls:CHILD_MAX_CPU_SECONDS": (
         "the child is killed (ToolCrashError): a failed row with its rate-limited WARNING, "
         "counted as failed="
+    ),
+    "src.extractors.image:_MAX_OUTPUT_BYTES": (
+        "child output past it cannot come from a working child: ChildOutputError, a failed row "
+        "with its rate-limited WARNING, counted as failed="
+    ),
+    "src.extractors.image:CHILD_MAX_ADDRESS_SPACE_BYTES": (
+        "the child or its Tesseract fails (MemoryError, TesseractError, or ToolExitError when "
+        "the child cannot report it): a failed row with its rate-limited WARNING, counted as "
+        "failed="
     ),
     "src.extractors._runner:_MAX_FRAME_LINE": (
         "a longer protocol line cannot come from a working child: ChildOutputError, a failed "
@@ -7617,6 +7661,7 @@ _EXTRACTOR_MODULES = (
     "src.extractors.extractor_child",
     "src.extractors.ooxml",
     "src.extractors.image",
+    "src.extractors.image_child",
     "src.extractors.pdf",
     "src.extractors.ppt",
     "src.extractors.pptx",
