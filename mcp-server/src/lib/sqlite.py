@@ -279,13 +279,17 @@ _SOURCE_COLUMNS = (
 # is reported as: the lowest occurrence of its payload in its message
 # whose extraction succeeded and that passes ``content_type`` (bound
 # twice, ``?`` / ``?``). Shared by the lane and its ``indeterminate``
-# count (#1204) so both anchor alike; see ``_attachment_text_lane``.
+# count (#1204) so both anchor alike; see ``_attachment_text_lane``. An
+# occurrence whose extraction the indexer deferred (#1236) is never the
+# anchor: its chunks may hold an older text, and its status says its text
+# is not indexed yet.
 _TEXT_LANE_ANCHOR = (
     "( SELECT MIN(a2.attachment_occurrence_id) FROM attachments a2 "
     "JOIN attachment_extractions e2 ON e2.attachment_id = a2.attachment_id "
     "  AND e2.extractor_module = a2.extractor_module "
     "  AND e2.extraction_status = 'success' "
     "WHERE a2.attachment_id = c.attachment_id "
+    "  AND a2.extraction_deferred_at IS NULL "
     "  AND a2.claimant_id = c.claimant_id "
     "  AND (? IS NULL OR a2.content_type = ?) )"
 )

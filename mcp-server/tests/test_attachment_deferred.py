@@ -22,6 +22,7 @@ from src.tools.retrieval import register_retrieval_tools
 from tests.conftest import (
     FakeMCPServer,
     _insert_attachment,
+    _insert_chunk,
     _insert_extraction,
     _insert_message,
     claimant_of,
@@ -185,6 +186,61 @@ class TestSearchAttachments:
     def test_extracted_only_leaves_deferred_out(self, db):
         names = {r.filename for r in db.search_attachments(extracted_only=True, limit=50)}
         assert names == {"report-2.txt"}
+
+    def test_text_lane_never_anchors_on_a_deferred_occurrence(self, tmp_path):
+        """Codex round 6 on #1355: chunks a deferred occurrence kept (an
+        older text) are not reported through it, and a copy of the same
+        payload that resolved takes the hit instead."""
+        conn, path = _open_built_db_conn(tmp_path, "deferred-lane.db")
+        _insert_message(
+            conn,
+            message_id="carrier@example.com",
+            thread_id="t1",
+            sent_at="2024-02-01T09:00:00+00:00",
+            has_attachments=True,
+        )
+        rows = (
+            # Deferred alone: its old chunk must not be reported.
+            ("p-old", "occ-a", "alone.txt", "text", True),
+            # The same payload twice: the deferred copy has the lower ID.
+            ("p-pair", "occ-b", "pair.txt", "text", True),
+            ("p-pair", "occ-c", "pair.htm", "html", False),
+        )
+        for payload, occ, name, module, deferred in rows:
+            _insert_attachment(
+                conn,
+                message_id="carrier@example.com",
+                thread_id="t1",
+                attachment_id=payload,
+                filename=name,
+                content_type="text/plain",
+                occurrence_id=f"{claimant_of('carrier@example.com')}:{occ}",
+                extractor_module=module,
+                deferred=deferred,
+            )
+            _insert_extraction(
+                conn,
+                attachment_id=payload,
+                status="success",
+                extracted_text=f"zqoldterm {payload}",
+                extractor=f"{module}@1",
+                extractor_module=module,
+            )
+        for n, payload in enumerate(("p-old", "p-pair")):
+            _insert_chunk(
+                conn,
+                chunk_id=f"chunk-{n}",
+                message_id="carrier@example.com",
+                thread_id="t1",
+                text=f"zqoldterm {payload}",
+                embedding=[0.1, 0.2, 0.3, 0.4],
+                attachment_id=payload,
+                kind="attachment",
+            )
+        conn.commit()
+        conn.close()
+        results = Database(str(path)).search_attachments(query="zqoldterm", limit=50)
+        assert [(r.filename, r.extraction_status) for r in results] == [("pair.htm", "success")]
 
     def test_filename_lane_shows_deferred(self, db):
         [result] = db.search_attachments(query="report-0", limit=50)
