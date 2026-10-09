@@ -564,8 +564,10 @@ is exactly what this forbids.
   choosing it: two `.xls` readers failed that test (#935).
 - A review finding that calls for new parsing of untrusted input, or
   any new mechanism rather than a guard (a check, a cap, a fallback),
-  is a design decision: stop and ask, with "document the limitation"
-  as the first option. Do not build a parser inside a bug fix.
+  is a design decision: stop and ask, recommending the accurate,
+  complete fix and offering "document the limitation" as the
+  alternative ("Accuracy first" below). Do not build a parser inside a
+  bug fix.
 
 ## Change Strategy
 
@@ -679,16 +681,18 @@ under about 80 characters.
   deferred under the cap.
 - Re-scope trigger (owner, 2026-10-07): from the fourth review round
   on, whenever a round finds problems in the code or text the PR
-  added, stop fixing and ask the owner before the next push: cut scope (drop or simplify
-  the part that keeps drawing findings), accept the open findings as
-  stated risks, or keep fixing. Explain each finding in plain terms,
+  added, stop fixing and ask the owner before the next push: keep
+  fixing (the recommendation, "Accuracy first" below), cut scope (drop
+  or simplify the part that keeps drawing findings), or accept the open
+  findings as stated risks. Explain each finding in plain terms,
   and say whether the choice can change what the tools return.
   Choosing to fix one round does not accept later rounds' findings.
   An agent working the PR stops and reports instead of pushing.
 - A fix that adds a state, mode or queue path, or that moves where
   input is validated, is a design change at any round (owner,
-  2026-10-08, #1162). Stop and ask before pushing it, and offer cutting
-  scope as the first option. If the owner chooses to keep the change,
+  2026-10-08, #1162). Stop and ask before pushing it, recommending the
+  accurate, complete change and offering cutting scope as the
+  alternative ("Accuracy first" below). If the owner chooses to keep the change,
   recheck every obligation that depended on the old boundary at the new
   one. #1125 moved its validation boundary twice, and #1134's re-check
   budget starved large threads (#1149); neither fix was a guard.
@@ -713,6 +717,15 @@ under about 80 characters.
   to approve: the option that gives the most accurate outcome first,
   its cost, and any split the panel could not settle. Briefs carry
   code and design only, never mailbox content.
+- Accuracy first (owner, 2026-10-09): the owner always chooses the
+  accurate, complete and correct solution. Recommend it. Never
+  recommend a scope cut, a deferral or accepting a stated risk because
+  a PR has run long or the fix is large: review rounds, size and cost
+  are stated, not reasons to choose. Offer a cut only when it reaches
+  the same end state, or when the accurate fix is blocked, and say
+  which. The stop-and-ask points above still apply; they ask the owner
+  to approve the accurate fix. #1311 round 12 recommended accepting a
+  stated risk, and the owner chose the full fix.
 - File P3 findings as issues rather than fixing them ahead of
   go-live or P1/P2 work. Exception (owner, 2026-10-02): a small P3
   with an agreed fix and no new mechanism may be fixed before go-live.
