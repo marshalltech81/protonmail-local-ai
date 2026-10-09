@@ -1921,7 +1921,11 @@ the encoded-words still do not decode to valid text, the indexer
 keeps the filename as sent and logs, without the filename:
 `attachment filename encoded-words could not be decoded
 (<ExceptionType>); kept 1 filename as sent` (WARNING, under the same
-20-per-5-minutes limit as the lines above).
+20-per-5-minutes limit as the lines above). An RFC 2231 `filename*=`
+value whose charset the codec refuses is kept as the raw parameter
+text and logged as `attachment filename charset could not decode it
+(<ExceptionType>); using the raw parameter` (WARNING, under the same
+limit, #1330).
 
 The fix applies when a message is parsed. Filenames stored by an
 earlier image keep the encoded text until their message is re-indexed;

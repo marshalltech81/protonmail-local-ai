@@ -881,7 +881,9 @@ def _raw_part_filename(
     except ValueError as exc:
         if degraded is not None:
             degraded[FILENAME_DEGRADED] += 1
-        log.warning(
+        # Rate limited (#1330): one crafted message can carry many such parts.
+        warn_rate_limited(
+            log,
             "attachment filename charset could not decode it (%s); using the raw parameter",
             type(exc).__name__,
         )
