@@ -39,6 +39,7 @@ EXPECTED_TITLES = {
     "get_message": "Get Message",
     "list_threads": "List Threads",
     "query_messages": "Query Messages",
+    "aggregate_messages": "Aggregate Messages",
     "query_attachments": "Query Attachments",
     "get_attachment": "Get Attachment",
     "find_contact": "Find Contact",

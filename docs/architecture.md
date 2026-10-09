@@ -1118,6 +1118,7 @@ result qualifies depends on its unit:
 | Thread (`search_emails`; the threads `get_evidence`, `ask_mailbox`, `extract_from_emails`, `brief_issue` and `check_conclusion` retrieve) | Its `[date_first, date_last]` span (effective times) overlaps the range | Relevance |
 | Evidence passage of a retrieved thread (same tools except `search_emails`, mailbox-wide path) | Its thread qualifies; the passage's own dates may fall outside the range, and `ask_mailbox` and `get_evidence` then label it `context` | Relevance within the thread |
 | Message (`query_messages`) | Its effective time is in the range | Effective time, newest first |
+| Message group (`aggregate_messages`) | Counts the messages `query_messages` would return; `year` and `month` groups are the UTC year or month of the effective time | Messages per group, most first |
 | Attachment (`search_attachments`) | The carrying message's effective time is in the range | Relevance; with no query, effective time, newest first |
 | Attachment occurrence (`query_attachments`) | The carrying message's effective time is in the range | Effective time, newest first |
 
@@ -1261,10 +1262,12 @@ over at most 16 labels and 253 characters; a longer or deeper
 sender-supplied domain is unclassified without any lookup.
 
 Authority is metadata, never a ranking weight. The MCP server exposes it
-as an `authority_class` filter on `search_emails` and `query_messages`
-(a message outside Spam matches when one of its From senders carries
-the class; a thread when one of its non-Spam messages does) and on
-`find_contact` results, which stay per contact and ignore folders.
+as an `authority_class` filter on `search_emails`, `query_messages`
+and `aggregate_messages` (a message outside Spam matches when one of
+its From senders carries the class; a thread when one of its non-Spam
+messages does), as an `aggregate_messages` grouping dimension with the
+same rule, and on `find_contact` results, which stay per contact and
+ignore folders.
 Filtering removes results without reordering or rescoring the rest.
 
 ### Operator identity

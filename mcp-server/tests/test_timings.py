@@ -602,10 +602,11 @@ class TestDegradedRetrieval:
         assert all(_degraded(line) == {} for line in lines)
 
 
-# The seven tools #886 gave a completion line, and query_attachments and
-# get_attachment (#796).
+# The seven tools #886 gave a completion line, query_attachments and
+# get_attachment (#796), and aggregate_messages (#823).
 _COMPLETION_TOOLS = (
     "query_messages",
+    "aggregate_messages",
     "query_attachments",
     "get_attachment",
     "get_message",
@@ -687,6 +688,21 @@ _SUCCESS_CALLS: dict[str, tuple[dict, dict]] = {
         {"sender": _MARKER_ADDRESS, "text": MARKER, "folder": _MARKER_FOLDER},
         {"total_matches": 1, "indeterminate": 0, "returned": 1},
     ),
+    "aggregate_messages": (
+        {
+            "group_by": "sender_address",
+            "sender": _MARKER_ADDRESS,
+            "text": MARKER,
+            "folder": _MARKER_FOLDER,
+        },
+        {
+            "total_matches": 1,
+            "indeterminate": 0,
+            "groups": 1,
+            "returned": 1,
+            "incomplete_from_messages": 0,
+        },
+    ),
     "query_attachments": (
         {"sender": _MARKER_ADDRESS, "filename": MARKER, "folder": _MARKER_FOLDER},
         {"total_matches": 1, "indeterminate": 0, "returned": 1},
@@ -703,6 +719,7 @@ _SUCCESS_CALLS: dict[str, tuple[dict, dict]] = {
 # The ``Database`` method each tool reads through, made to fail below.
 _DB_METHODS = {
     "query_messages": "query_messages",
+    "aggregate_messages": "aggregate_messages",
     "query_attachments": "query_attachments",
     "get_attachment": "get_attachment_text",
     "get_message": "get_message_view",
@@ -717,6 +734,12 @@ _DB_METHODS = {
 # arguments, and the fixed text the tool logs as the cause.
 _CALLER_ERRORS = [
     ("query_messages", {"text": MARKER, "date_from": f"{MARKER}-01"}, "date_from"),
+    (
+        "aggregate_messages",
+        {"group_by": "folder", "text": MARKER, "date_from": f"{MARKER}-01"},
+        "date_from",
+    ),
+    ("aggregate_messages", {"group_by": "folder", "cursor": MARKER}, "aggregate_messages.cursor"),
     ("query_attachments", {"filename": MARKER, "date_from": f"{MARKER}-01"}, "date_from"),
     ("query_attachments", {"cursor": MARKER}, "query_attachments.cursor"),
     (
