@@ -174,10 +174,25 @@ class TestCapFrames:
         result = _extract(_tiff(1))
         assert (result.status, result.error) == (STATUS_FAILED, "ChildOutputError")
 
-    def test_a_count_frame_is_malformed_output(self, monkeypatch):
-        stub_child_output(monkeypatch, b"N ocr_capped_images 1\nT 0\n")
+    def test_a_count_outside_the_degradation_keys_is_malformed_output(self, monkeypatch):
+        stub_child_output(monkeypatch, b"N pages 1\nT 0\n")
         result = _extract(_tiff(1))
         assert (result.status, result.error) == (STATUS_FAILED, "ChildOutputError")
+
+    def test_degradation_recorded_in_the_child_is_re_applied(self, monkeypatch, caplog):
+        """What the decode or OCR records through the package helpers in
+        the child crosses as ``N`` frames and is re-applied here (#1314)."""
+        caplog.set_level("DEBUG")
+        stub_child_output(monkeypatch, b"N text_lost 1\nN ocr_capped_images 1\nT 4\ntext")
+        result = _extract(_tiff(1))
+        assert (result.status, result.text, result.text_complete) == (STATUS_SUCCESS, "text", False)
+        assert extractors.drain_extractor_counts()["ocr_capped_images"] == 1
+        [line] = [r for r in caplog.records if "degraded in the child" in r.getMessage()]
+        assert line.levelno == logging.WARNING
+        assert line.getMessage() == (
+            "extractor image degraded in the child: ocr_capped_images=1 text_lost=1"
+        )
+        assert MARKER not in caplog.text
 
 
 class TestProgressFramesInProcess:

@@ -134,6 +134,7 @@ def _ooxml_child_in_process(request, monkeypatch):
     if request.node.get_closest_marker("real_extractor_child"):
         return
     import pytesseract
+    from src import extractors
     from src.extractors import OOXML_MODULES, _runner, extractor_child
 
     # The image child sets pytesseract's command for its process; here
@@ -150,14 +151,19 @@ def _ooxml_child_in_process(request, monkeypatch):
             return real(argv, payload, on_output=on_output, **kwargs)
         assert on_output is not None
         module, *options = argv[argv.index(child) + 1 :]
-        on_output(
-            extractor_child.run(
+        # A real child starts with zero counters (#1314): set the test's
+        # aside so the child sends only what this extraction counted.
+        before = extractors.drain_counters()
+        try:
+            output = extractor_child.run(
                 module,
                 payload,
                 options,
                 lambda: on_output(extractor_child.PROGRESS_FRAME),
             )
-        )
+        finally:
+            extractors.add_counters(before)
+        on_output(output)
         return _runner.ToolOutput(b"", truncated=False)
 
     monkeypatch.setattr(_runner, "run_tool", run_tool)

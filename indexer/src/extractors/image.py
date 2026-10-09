@@ -28,7 +28,13 @@ import logging
 import shutil
 from collections.abc import Callable
 
-from . import note_ocr_capped_image, warn_extractor_cap, warn_rate_limited
+from . import (
+    CHILD_DEGRADATION_KEYS,
+    apply_child_degradation,
+    note_ocr_capped_image,
+    warn_extractor_cap,
+    warn_rate_limited,
+)
 from ._runner import run_child
 
 log = logging.getLogger("indexer.extractor.image")
@@ -143,8 +149,12 @@ def extract(
         timeout_seconds=child_timeout_seconds(max_ocr_pages, timeout),
         max_output_bytes=_MAX_OUTPUT_BYTES,
         caps=_CAPS,
+        counts=CHILD_DEGRADATION_KEYS,
         on_progress=on_progress,
     )
+    # Anything the decode or OCR recorded through the package helpers in
+    # the child (#1314); the image caps below cross as C frames.
+    apply_child_degradation(log, "image", result.counts)
     for cap in result.caps:
         if cap == CAP_TEXT:
             warn_extractor_cap(log, cap, "image OCR text cut at %d chars", _MAX_TEXT_CHARS)

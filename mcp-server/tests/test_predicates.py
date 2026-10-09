@@ -20,6 +20,7 @@ from src.lib.predicates import (
     Evaluability,
     Leaf,
     compile_leaves,
+    inferred_address_leaf,
     leaf_digest,
     message_scope_leaves,
     query_messages_leaves,
@@ -350,6 +351,18 @@ _SAMPLES: dict[str, object] = {
     "class": "counsel",
     "bytes": 1024,
     "basis": "occurred",
+    "role, address": ("visible_participant", "jane@example.test"),
+    "role, text": ("from", "jane"),
+    "role, domain": ("visible_recipient", "example.test"),
+}
+
+# Registered leaves no adapter builds yet, each with its reason. The
+# flat filters compile to ``address_is``, ``address_or_name_contains``
+# and ``body_words`` (``inferred_address_leaf``; ``text``), which the
+# adapter check below counts; these three have no flat filter.
+_NOT_BUILT: dict[str, str] = {
+    name: "an explicit leaf for the where parameter (#1088 PR 2)"
+    for name in ("address_contains", "display_name_contains", "domain_is")
 }
 
 # Leaves deliberately left out of docs/mcp-tools.md, each with its
@@ -449,7 +462,7 @@ class TestLeafRegistry:
 
     def test_registry_is_keyed_by_leaf_name(self):
         assert all(name == kind.name for name, kind in LEAVES.items())
-        assert len(LEAVES) == 21
+        assert len(LEAVES) == 27
 
     @pytest.mark.parametrize("name", sorted(LEAVES))
     def test_leaf_compiles_with_a_rule_and_a_docs_entry(self, name, mixed_db):
@@ -469,7 +482,17 @@ class TestLeafRegistry:
             assert f"| `{name}` |" in _filter_predicates_section(), f"{name}: not documented"
 
     def test_every_leaf_is_built_by_an_adapter(self):
-        assert _every_adapter_leaf_name() == set(LEAVES)
+        names = _every_adapter_leaf_name()
+        # The explicit leaves the flat filters compile to.
+        names |= {
+            inferred_address_leaf(Leaf(flat, value)).name
+            for flat in ("sender", "recipient", "participant")
+            for value in ("a@example.test", "a")
+        }
+        if "text" in names:
+            names.add("body_words")
+        assert names == set(LEAVES) - set(_NOT_BUILT)
+        assert all(_NOT_BUILT.values())
 
     def test_docs_table_names_no_unregistered_leaf(self):
         documented = set(re.findall(r"^\| `([a-z_]+)` \|", _filter_predicates_section(), re.M))
@@ -963,6 +986,13 @@ class TestClockSizeAndRepliedLeaves:
             "subject",
             "text",
             "has_attachments",
+            # #1088: the explicit address and body leaves.
+            "address_is",
+            "address_contains",
+            "display_name_contains",
+            "address_or_name_contains",
+            "domain_is",
+            "body_words",
         }
         for name, kind in LEAVES.items():
             expected = (

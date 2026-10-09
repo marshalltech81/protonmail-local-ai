@@ -19,11 +19,24 @@ and the names of the budgets that cut it.
 
 Output on stdout is the runner's framed protocol (``_runner``): for a
 module in ``REPORTS_PROGRESS``, a ``P`` line written and flushed as each
-page is read; then a ``C <name>`` line per budget, ``T <length>`` and
+page is read; then a ``C <name>`` line per budget, an ``N <key> <count>``
+line per degradation the extraction recorded (#1314), then ``T <length>`` and
 the text as UTF-8; or ``E <type name>`` alone when the extraction
 raised. Only the type name: an exception's message can quote the
 document. A ``MemoryError`` or ``RecursionError`` is reported the same
 way: here it is the child's own limit.
+
+The degradation an extraction records (``note_text_lost``,
+``record_ocr_pages_skipped`` and the counters
+``drain_extractor_counts`` reports, each through the package's
+``note_*`` and ``warn_extractor_cap`` helpers) lives in this process's
+memory, and the lines those helpers log go to the discarded stderr.
+``run`` therefore clears the attempt's state first, as the dispatcher
+does, and after the extraction sends what was recorded as ``N`` frames
+under the package's fixed keys (``CHILD_DEGRADATION_KEYS``); the parent
+re-applies them and logs one line for them
+(``apply_child_degradation``). No log record, format string or
+argument crosses.
 
 Nothing is written to stderr on purpose (the runner discards it). An
 error outside the extraction (the payload file cannot be read, the
@@ -74,12 +87,14 @@ def run(
     ``payload`` with ``options``. A module in ``REPORTS_PROGRESS`` calls
     ``on_progress`` per page, which writes the progress frames."""
     kwargs = {"on_progress": on_progress} if module in REPORTS_PROGRESS else {}
+    package = importlib.import_module(_PACKAGE)
+    package.reset_attempt()
     try:
         extractor = importlib.import_module(f"{_PACKAGE}.{MODULES[module]}")
         text, caps = extractor.extract_text(payload, *options, **kwargs)
     except Exception as exc:  # noqa: BLE001 — reported by type name only
         return error_frame(type(exc).__name__)
-    return result_frames(text, caps)
+    return result_frames(text, caps, package.child_degradation())
 
 
 def error_frame(type_name: str) -> bytes:
@@ -87,11 +102,15 @@ def error_frame(type_name: str) -> bytes:
     return f"E {type_name}\n".encode("ascii", errors="replace")
 
 
-def result_frames(text: str, caps: list[str]) -> bytes:
-    """A frame per cap name, then the text frame. A lone surrogate,
-    which UTF-8 cannot hold, is written as ``?``."""
+def result_frames(text: str, caps: list[str], counts: dict[str, int] | None = None) -> bytes:
+    """A frame per cap name and per count, then the text frame. A lone
+    surrogate, which UTF-8 cannot hold, is written as ``?``."""
     body = text.encode("utf-8", errors="replace")
-    head = "".join(f"C {cap}\n" for cap in caps) + f"T {len(body)}\n"
+    head = (
+        "".join(f"C {cap}\n" for cap in caps)
+        + "".join(f"N {key} {n}\n" for key, n in (counts or {}).items())
+        + f"T {len(body)}\n"
+    )
     return head.encode("ascii") + body
 
 
