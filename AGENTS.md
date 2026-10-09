@@ -213,12 +213,9 @@ Do not make any of the following changes unless the repository owner explicitly 
   `0001`. The initial schema stamps `SCHEMA_APPLICATION_ID` into the
   SQLite header; a database without it predates the renumbering and
   fails closed with rebuild instructions whatever its version.
-  Until the first deployment, schema changes fold into the v0
-  `_apply_initial_schema` with no migration file and no
-  `SCHEMA_VERSION` bump (owner, 2026-10-01); a database built before
-  such a change is rebuilt from Maildir. The first deployment was
-  2026-10-03, so schema changes now take the `SCHEMA_VERSION` bump and
-  migration file described above.
+  Every schema change takes the `SCHEMA_VERSION` bump and migration
+  file described above; the v0-folding period ended at the first
+  deployment (2026-10-03).
 - A migration that adds per-message data only the parser can produce
   (it keeps chunk IDs) ends with `queue.REPARSE_ENQUEUE_SQL`, copied
   verbatim, so existing mail is re-parsed through the job queue with
@@ -665,13 +662,19 @@ under about 80 characters.
   round's findings test-first in one commit for that round (they answer
   the same review, even when they touch different issues), and add a
   "Review round N" section to the PR description.
-- Resolve a thread only once it is fixed or the owner has deferred it;
-  merging is blocked while line threads are open.
+- Resolve a thread only when it is fixed, when the owner has deferred
+  it, or when it is a problem that already existed on `main` and an
+  open issue tracking it is linked from the reply (owner, 2026-10-09).
+  This is the one rule for resolving a thread as deferred; the rules
+  below point at it. Merging is blocked while line threads are open.
 - Cap review at two fix rounds per PR (owner, 2026-10-01). A finding
-  raised in round three or later is verified, filed as its own issue,
-  linked from a reply on its thread, and the thread resolved as
-  deferred; the PR is then ready for the owner's merge go-ahead once
-  CI is green (the go-ahead rule below still applies).
+  raised in round three or later is verified; one that already existed
+  on `main` is filed as its own issue and its thread resolved under the
+  thread rule above. The PR is then ready for the owner's merge
+  go-ahead once CI is green (the go-ahead rule below still applies).
+  The cap only moves problems already on `main` to their own issue,
+  which gets its real priority and is scheduled, so it reaches the
+  same end state; it never leaves a gap the PR added.
 - Exception (owner, 2026-10-05, #751): a verified round-three-or-later
   finding still blocks the merge when it is P0/P1, or when the PR
   itself introduced it (in its first commit or any fix round), at any
@@ -683,15 +686,21 @@ under about 80 characters.
   as introduced by it even when nothing is broken today (owner,
   2026-10-07); only a problem that already existed on `main` may be
   deferred under the cap.
-- Re-scope trigger (owner, 2026-10-07): from the fourth review round
-  on, whenever a round finds problems in the code or text the PR
-  added, stop fixing and ask the owner before the next push: keep
-  fixing (the recommendation, "Accuracy first" below), cut scope (drop
-  or simplify the part that keeps drawing findings), or accept the open
-  findings as stated risks. Explain each finding in plain terms,
-  and say whether the choice can change what the tools return.
-  Choosing to fix one round does not accept later rounds' findings.
-  An agent working the PR stops and reports instead of pushing.
+- An issue filed for a deferred finding, a pre-existing problem or a
+  "Not done" item is labelled by its real severity, `P0`–`P3` as the
+  Issue Conventions set them; there is no P3 default (owner,
+  2026-10-09).
+- Re-scope trigger (owner, 2026-10-07; revised 2026-10-09): from the
+  fourth review round on, keep fixing guard-type findings (a check, a
+  cap, a fallback, a counter) without stopping, and report the round
+  count in the PR description. Stop and ask only for a design change:
+  a new state, mode or queue path, a moved validation point, new
+  parsing of untrusted input, or a change to an approved design. It
+  goes through the panel below to the owner with the accurate fix
+  recommended ("Accuracy first" below). Explain each finding in plain
+  terms, and say whether the choice can change what the tools return.
+  An agent working the PR stops and reports instead of pushing a
+  design change.
 - A fix that adds a state, mode or queue path, or that moves where
   input is validated, is a design change at any round (owner,
   2026-10-08, #1162). Stop and ask before pushing it, recommending the
@@ -707,8 +716,8 @@ under about 80 characters.
   and the `query_attachments` clock were both settled without it and
   needed a retrospective panel.
 - Owner decisions (owner, 2026-10-08): every decision or recommendation
-  brought to the owner (a re-scope trigger, a `decision` issue, a
-  choice between options) first goes to a two-reviewer panel, Claude
+  brought to the owner (a design change, a `decision` issue, a choice
+  between options) first goes to a two-reviewer panel, Claude
   Fable 5.1 and Codex GPT-6.1 Sol, both at high reasoning effort. When
   Fable hits its usage limit, the Claude side falls back to Claude Opus
   5.5 at high effort and the panel continues; when the headless CLI is
@@ -728,12 +737,17 @@ under about 80 characters.
   are stated, not reasons to choose. Offer a cut only when it reaches
   the same end state, or when the accurate fix is blocked, and say
   which. The fix is still the smallest change that is accurate,
-  correct and complete (Priorities, item 5). The stop-and-ask points
-  above still apply; they ask the owner to approve the accurate fix. #1311 round 12 recommended accepting a
-  stated risk, and the owner chose the full fix.
-- File P3 findings as issues rather than fixing them ahead of
-  go-live or P1/P2 work. Exception (owner, 2026-10-02): a small P3
-  with an agreed fix and no new mechanism may be fixed before go-live.
+  correct and complete (Priorities, item 5). Guard-type findings are
+  fixed without stopping; the stop-and-ask points above still apply,
+  and ask the owner to approve the accurate fix. #1311 round 12
+  recommended accepting a stated risk, and the owner chose the full
+  fix.
+- Work in priority order: P1/P2 work first, then P3 issues in turn
+  (owner, 2026-10-09). A P3 problem outside a PR's scope is filed as an
+  issue rather than fixed ahead of P1/P2 work; a finding the PR
+  introduced is fixed in the PR whatever its priority (the exception
+  above). Exception (owner, 2026-10-02): a small P3 with an agreed fix
+  and no new mechanism may be fixed ahead of P1/P2 work.
 - Every item in a PR's "Not done" section that is a real remaining gap
   (a limitation, an unverified claim, a deferred finding, a skipped part
   of the issue, a follow-up the code needs) gets its own GitHub issue
@@ -745,11 +759,10 @@ under about 80 characters.
 - A pre-existing problem found while working (a review finding the PR
   did not introduce, a bug seen while reading code, a flaky or wrong
   test) that is not fixed in that PR gets its own GitHub issue at the
-  time, unless an open issue already tracks it (owner, 2026-10-07). A
-  review thread is resolved as pre-existing, out of scope or deferred
-  only with that issue's link in the reply, and the PR's "Not done"
-  lists it. Nothing found stays only in a thread, a PR body or a
-  commit message.
+  time, unless an open issue already tracks it (owner, 2026-10-07). Its
+  review thread is resolved under the thread rule above, with that
+  issue's link in the reply, and the PR's "Not done" lists it. Nothing
+  found stays only in a thread, a PR body or a commit message.
 - Merge (squash) only on the owner's explicit go-ahead.
 
 ## Review guidelines
@@ -1154,4 +1167,5 @@ docs/          Architecture, setup, troubleshooting, and tool documentation
 
 Preserve privacy, preserve architecture, preserve secret safety, and make the smallest safe change that is accurate, correct and complete.
 
-When unsure, choose the more conservative implementation.
+When unsure, choose the more conservative implementation for privacy,
+secrets and network exposure; never the less accurate or complete one.

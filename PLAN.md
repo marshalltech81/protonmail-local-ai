@@ -674,8 +674,9 @@ superseded entries keep their number and one line.
     - **Message-ID length:** 998 characters; longer takes the
       no-`Message-ID` dead-letter path.
     - **`BRIDGE_USER`** stays in `.env`: an identifier, not a credential.
-    - **P3 policy:** small P3s with an agreed fix and no new mechanism
-      may be fixed before go-live (AGENTS.md).
+    - **P3 policy:** work runs in priority order, P1/P2 first, then
+      P3s in turn; small P3s with an agreed fix and no new mechanism
+      may be fixed ahead of P1/P2 work (AGENTS.md).
 15. **#638 implicit TLS (2026-10-02 night):** mbsync ⇄ Bridge IMAP uses
     implicit TLS, with no STARTTLS or plaintext fallback; an approved,
     owner-gated TLS change.
@@ -684,7 +685,9 @@ superseded entries keep their number and one line.
     identity record went into v0; the claimant suffix grew to 16 hex
     digits.
 17. **Result quality first (2026-10-01):** work targets returned-result
-    quality ahead of edge cases and P3s.
+    quality ahead of edge cases and P3s. (2026-10-09: run-scoped focus;
+    under AGENTS.md "Accuracy first", an edge case inside an issue's
+    scope is fixed, and only unrequested ones are filed.)
 18. **Bridge container removed (2026-10-04, #716):** the official app
     on the host is the only setup; macOS tested, Windows untested,
     Linux unsupported; `BRIDGE_CERT_FINGERPRINT` is always required.
