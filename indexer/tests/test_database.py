@@ -858,13 +858,16 @@ class TestUnknownSendDate:
         ).fetchone()[0]
         assert after == before
         lines = [r for r in caplog.records if "old fallback date line" in r.getMessage()]
+        # Review round 4: it lowers retrieval quality and sender text can
+        # trigger it, so WARNING through the shared rate limiter.
         assert [(r.levelname, r.getMessage()) for r in lines] == [
             (
-                "INFO",
+                "WARNING",
                 "thread text kept the old fallback date line of 1 message(s): "
                 "it occurs more than once",
             )
         ]
+        assert [r.filename for r in lines] == ["rate_limited_log.py"]
         assert "SYNTHETIC_ECHO_MARKER" not in caplog.text
 
     @pytest.mark.parametrize(

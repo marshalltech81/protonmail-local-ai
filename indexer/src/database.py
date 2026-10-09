@@ -35,6 +35,7 @@ from .extractors import (
     NO_EXTRACTOR_ERROR,
     OCR_DISABLED_ERROR,
     SCANNED_PDF_OCR_DISABLED_ERROR,
+    warn_rate_limited,
 )
 from .maildir import message_state
 from .parser import PARSE_CAPS, participant_names
@@ -1114,7 +1115,7 @@ class Database:
         removed (the ``Date:`` line only), and only when it occurs exactly
         once: message text is sender-controlled, and a body that repeats
         the pair leaves the match ambiguous, so the text is kept and the
-        skip logged (counts only). Runs before the message's row is
+        skip logged at WARNING, rate limited (counts only). Runs before the message's row is
         rewritten; one indexed lookup and one scan per undated message.
         """
         ambiguous = 0
@@ -1133,10 +1134,14 @@ class Database:
             elif header in body:
                 ambiguous += 1
         if ambiguous:
-            log.info(
+            # Lowers retrieval quality and sender text can trigger it:
+            # WARNING, rate limited (review round 4).
+            warn_rate_limited(
+                log,
                 "thread text kept the old fallback date line of %d message(s): "
                 "it occurs more than once",
                 ambiguous,
+                attachment=False,
             )
         return body
 
