@@ -837,6 +837,15 @@ against the query the way `ask_mailbox` ranks them
    group by vector distance. With no attachment match, by vector
    distance alone.
 
+Each chunk's `extraction_deferred` is true for an attachment passage
+whose attachment (a copy of the same bytes in the same message) the
+indexer is waiting to extract again
+([#1236](https://github.com/marshalltech81/protonmail-local-ai/issues/1236)):
+its text is what was indexed before, kept until the refresh. The prose
+adds `; retained indexed text; extraction refresh pending` to its
+`Source:` line, and the timing line counts such passages (and listed
+carriers) as `evidence_extraction_deferred`.
+
 Each chunk's `selected_by` says why it qualified: `keyword_match` (its
 text holds a word of the query; this wins when both apply),
 `attachment_match` or `vector`. A word in every chunk of the thread
@@ -896,8 +905,8 @@ With `dedupe_attachments=true`, attachment passages with the same
 thread are returned once, on the earliest carrying message (by delivery date, else
 send date), at the rank of the best-ranked copy. That chunk's
 `carried_by` lists the other carrying messages, earliest first, each
-with its `claimant_id`, `sent_at`, `occurred_at` and `scope`, at most
-10 of them; `carried_by_count` counts them all. The prose adds an
+with its `claimant_id`, `sent_at`, `occurred_at`, `scope` and its own
+`extraction_deferred`, at most 10 of them; `carried_by_count` counts them all. The prose adds an
 `Also carried by:` line naming the same ten and `and N more`. A
 different document under the same filename has a different content
 hash and stays separate, and body passages are untouched. Copies of
@@ -974,8 +983,15 @@ not say which match mode applied or how many distinct addresses
 matched; `query_messages(sender=..., has_attachments=true)` does.
 
 Check `extraction_status`: any value other than `success` (`failed`,
-`unsupported`, `too_large`, `empty` or null) means no extracted text is
-available, not absence of relevant content. To assess coverage,
+`unsupported`, `too_large`, `empty`, `deferred` or null) means no
+extracted text is available, not absence of relevant content.
+`deferred` (#1236) means the indexer will extract the attachment on a
+later pass of its message; it is read from the occurrence, so the
+result has no `text_snippet`, `extracted_only` leaves it out, and the
+timing line counts such results as `attachments_extraction_deferred`. While
+any copy of the same bytes in a message is `deferred`, an
+extracted-text match on them is not returned through any copy, since
+the message's stored text for them may be an older extraction. To assess coverage,
 make a separate call without `query`, with the applicable structured
 filters and `extracted_only=false`. A text query cannot reveal unextracted
 files whose filename and MIME type do not match. There is no pagination beyond
@@ -1914,7 +1930,7 @@ by filename and extracted text and stops at 50 results.
 | `date_to` | string | none | Inclusive upper bound; a date-only value covers the whole UTC day. `date_bounds` echoes the UTC instants applied |
 | `filename` | string | none | Unicode caseless substring of the filename, taken literally (`%` and `_` are ordinary characters) |
 | `content_type` | string | none | Exact MIME type, e.g. `application/pdf` |
-| `extraction_status` | string | none | `success`, `empty`, `unsupported`, `too_large`, `failed`, or `none` (no extraction recorded); blank is ignored, any other value is an error |
+| `extraction_status` | string | none | `success`, `empty`, `unsupported`, `too_large`, `failed`, `deferred` (extraction waits for a later indexer pass, #1236), or `none` (no extraction recorded); blank is ignored, any other value is an error |
 | `claimant_id` | string | none | Exact claimant ID of the carrying message |
 | `thread_id` | string | none | Exact thread ID |
 | `limit` | int | `20` | Attachments per page; clamped to `[1, 50]` |
@@ -1941,7 +1957,10 @@ match as `indeterminate` until the reparse reaches that mail), and an
 `extraction_status` other than `none` on an occurrence with no
 extraction recorded for its payload and extractor module (not run yet,
 or extraction off), since it may still be extracted with that status.
-`none` decides exactly those occurrences. The filters conjoin with
+`none` decides exactly those occurrences. `deferred` is read from the
+occurrence's own mark, so it is always decided, and a deferred
+occurrence matches no other status, whatever its payload's extraction
+row says. The filters conjoin with
 SQL's three-valued AND, as in `query_messages`: an occurrence one filter
 rejects is rejected even when another cannot decide it. Undecided
 occurrences are in neither `total_matches` nor the pages; the response
@@ -1952,7 +1971,8 @@ known to match.").
 **Response contract.** The response states the filter interpretation,
 `total_matches` (over the whole match, not the page), `indeterminate`,
 and `status_counts`: `total_matches` split by extraction status, with
-`none` for occurrences that have no extraction recorded. Anything but
+`deferred` for occurrences the indexer will extract on a later pass
+(#1236) and `none` for occurrences that have no extraction recorded. Anything but
 `success` means no extracted text is available, not that the file says
 nothing relevant. Each row carries the occurrence ID, the payload's
 `attachment_id`, its `extractor_module` (`''` when its label selects no
@@ -1961,8 +1981,9 @@ MIME type (each cut at 500 characters, with `filename_clipped` /
 `content_type_clipped` set when the stored value is longer), the size,
 the carrying message's folder, `sent_at`, `sent_at_status`,
 `occurred_at` and `source_file`, and the extraction's status, extractor, time and
-`ocr_pages_skipped` (all null when none is recorded). The counts and
-the page are read in one snapshot.
+`ocr_pages_skipped` (all null when none is recorded; for a `deferred`
+occurrence the status is `deferred` and the other three are null). The
+counts and the page are read in one snapshot.
 
 It returns no attachment text. To read a listed attachment's stored
 text, pass its `attachment_occurrence_id` to
@@ -2040,6 +2061,7 @@ unread.
 | `failed` | null | `extraction failed` (the stored error is never returned) |
 | `unsupported` | null | `no extractor reads this file type`, or, when OCR was off, `the file needs OCR, which is off (INDEXER_OCR_ENABLED=false)` |
 | `too_large` | null | the file is over the indexer's attachment size limit |
+| `deferred` | null | the indexer deferred this attachment's extraction to a later pass (its per-message extraction budget was reached); its text is not indexed yet |
 | none recorded | null | no extraction is recorded yet (not run yet, or extraction off) |
 
 Report null text as unread text, not as an attachment that says
@@ -2505,7 +2527,7 @@ Structured output:
 |---|---|
 | `answer` | The model's answer with its inline labels |
 | `coverage_note` | Server-written notice of prompt-budget omissions/truncation and possible incompleteness; `null` when nothing was left out or cut to fit. This is separate from model prose and citation validation |
-| `citations` | One entry per valid cited label, in first-cited order: `label`, `chunk_id`, `claimant_id`, `message_id`, `thread_id`, `sender`, `sender_ambiguous` ([Sender attribution](#sender-attribution); null for `thread`), `sent_at`, `occurred_at`, `source` (`body`, `attachment` or `thread`), `attachment_id`, `attachment_filename`, `char_start`, `char_end` (end of the part shown to the model), `scope` (`in_scope` or `context`, [Evidence scope](#evidence-scope-in-scope-or-context)) |
+| `citations` | One entry per valid cited label, in first-cited order: `label`, `chunk_id`, `claimant_id`, `message_id`, `thread_id`, `sender`, `sender_ambiguous` ([Sender attribution](#sender-attribution); null for `thread`), `sent_at`, `occurred_at`, `source` (`body`, `attachment` or `thread`), `attachment_id`, `attachment_filename`, `char_start`, `char_end` (end of the part shown to the model), `scope` (`in_scope` or `context`, [Evidence scope](#evidence-scope-in-scope-or-context)), `extraction_deferred` (the passage is retained indexed text of an attachment whose re-extraction is pending, #1236; its prompt header and prose citation end with `retained indexed text; extraction refresh pending`, and the timing line counts such passages shown as `evidence_extraction_deferred`) |
 | `statements` | The answer cut into statements: `text`, `labels` (the supplied passages it cites) and `status` (`cited`, `unsupported`, `uncertain`, `uncited`, `invalid` for only unknown labels, or `not_checked`) |
 | `quotes` | Each quotation: `text` (cut at 1,000 characters), `statement` (index into `statements`), `status` (`verified`, `misattributed`, `unmatched`, `uncited`, `not_checked`) and `found_in` (labels of the passages it was found in) |
 | `citation_problems` | `[]` when the check passed, else entries `{kind, labels, statements, quotes}`, `kind` one of `unknown_labels`, `no_citations`, `uncited_statements`, `unmatched_quotes`, `misattributed_quotes`, `context_only_citations`; `statements` and `quotes` are indexes into those lists, and `labels` holds the unknown labels or, for `misattributed_quotes`, the passages the quotes were found in, or, for `context_only_citations`, the cited labels |
@@ -2850,7 +2872,7 @@ Structured output:
 | Field | Description |
 |---|---|
 | `records` | The records, as in the first content item, each with `_source_thread`, `_date` and `_evidence` |
-| `citations` | One entry per valid label any record cites, in first-cited order, with the `ask_mailbox` citation fields |
+| `citations` | One entry per valid label any record cites, in first-cited order, with the `ask_mailbox` citation fields, `extraction_deferred` included |
 | `fields` | One entry per field with a value: `record` (index into `records`), `field`, `labels`, `status` (`cited`, `uncited`, `invalid`), `value_check` (`verified`, `misattributed`, `unmatched`, `uncited`, `not_checked`) and `found_in` |
 | `citation_problems` | `[]` when every field cites a supplied passage, else entries `{record, kind, labels, fields}`, `kind` one of `unknown_labels`, `uncited_fields`, `misattributed_values`, `context_only_fields` |
 | `notice` | The incomplete-extraction or evidence note in `content`, or `null` |
@@ -2966,7 +2988,7 @@ Structured output:
 | `brief` | When `ok`: `chronology` (`date`, `date_source`: `sent` / `mentioned` / `unknown`, `actor`, `event`, `labels`; sorted oldest first, undated last), `positions` (`actor`, `position`, `labels`), `decisions` (`decision`, `labels`), `open_questions` (`question`, `labels`), `conflicts` (`description`, `labels`), `insufficient_evidence`; else `null` |
 | `raw_text` | The unparsed reply when `status` is not `ok`, else `null` |
 | `as_of` | Latest sent date (`YYYY-MM-DD`) among the passages supplied; the brief describes the evidence up to then |
-| `citations` | Each valid cited label, first-cited order, in the `ask_mailbox` citation shape (claimant, sender, own sent date, chunk) |
+| `citations` | Each valid cited label, first-cited order, in the `ask_mailbox` citation shape (claimant, sender, own sent date, chunk, `extraction_deferred`) |
 | `quotes` | Each quotation in an entry: `text` (cut at 1,000 characters), `status` (`verified`, `misattributed`, `unmatched`, `uncited` when the entry cites no supplied passage, `not_checked`), `found_in` (labels of the passages it was found in), `section` and `item` (the entry holding it) |
 | `citation_problems` | Entries `{section, item, kind, labels}`, `kind` one of `unknown_labels`, `no_citations`, `too_few_labels`, `insufficient_but_populated`, `empty_but_sufficient` (these two with `section: "brief"`), `unmatched_quotes`, `misattributed_quotes` (`labels`: where the quotes were found); `[]` when every check passed |
 | `repair_attempted` | Whether the one repair call was made |
@@ -3040,7 +3062,8 @@ for `brief_issue`.
 
 The server attaches a `sources` entry to each finding for every valid
 label it cites: the `ask_mailbox` citation fields (claimant, sender,
-own sent date, chunk) plus `excerpt`, the first 300 characters of the
+own sent date, chunk, `extraction_deferred`, whose prose note the
+`Findings:` lines repeat) plus `excerpt`, the first 300 characters of the
 passage text the model was shown, verbatim from the index (longer text
 is cut with a marker). The excerpt is the server's, not the model's, so
 it is not checked.
@@ -3105,7 +3128,7 @@ and what it holds. Call this when asked which version or build is running.
 | `not_current_reasons` | One line per failed condition; empty when `current` is `true` |
 | `last_sync_at` / `sync_interval_secs` | mbsync's last successful sync from Bridge, and how often it syncs |
 | `indexer_last_seen_at` | When the indexer last reported (at most every 30 s with its health heartbeat, including during the initial index) |
-| `queue` | `pending` (found, not yet failed), `retrying` (failed at least once; will retry), `deferred` (postponed by the indexer without a failure of its own: a file it cannot read yet, an embedder outage or configuration error, or a job waiting for a rename; retried without spending attempts), `parked_trashed` (trashed files already indexed, waiting for the reaper to remove them or for the file to be restored, #1165), `dead` (failed permanently and incompletely indexed: missing from search, or found only by keyword, until `make requeue-dead`), `reparse` (of the pending, retrying and deferred jobs, those re-reading a message already indexed after an upgrade, #1078: searchable meanwhile, but data the upgrade adds is missing until it runs). `pending`, `retrying` and `deferred` make `current` false; `parked_trashed` and `dead` do not. A job that had already failed before an embedder outage deferred it counts as `retrying` |
+| `queue` | `pending` (found, not yet failed), `retrying` (failed at least once; will retry), `deferred` (postponed by the indexer without a failure of its own: a file it cannot read yet, an embedder outage or configuration error, or a job waiting for a rename; retried without spending attempts), `extraction_deferred` (messages already indexed whose attachment extraction reached the indexer's per-message budget: the rest of their attachments are extracted on later passes, #1236), `parked_trashed` (trashed files already indexed, waiting for the reaper to remove them or for the file to be restored, #1165), `dead` (failed permanently and incompletely indexed: missing from search, or found only by keyword, until `make requeue-dead`), `reparse` (of the pending, retrying, deferred and extraction_deferred jobs, those re-reading a message already indexed after an upgrade, #1078: searchable meanwhile, but data the upgrade adds is missing until it runs). `pending`, `retrying`, `deferred` and `extraction_deferred` make `current` false; `parked_trashed` and `dead` do not. A job that had already failed before an embedder outage deferred it counts as `retrying` |
 | `total_threads`, `total_messages`, `oldest_message`, `newest_message` | What the index holds |
 | `conflicting_message_ids` | How many Message-IDs more than one indexed file claims (see "Message-ID and claimant ID" above); 0 when none |
 | `extra_claimant_files` | Files beyond the first claimant of each conflicting Message-ID (two Message-IDs with 2 and 3 claimants give 3) |

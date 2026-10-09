@@ -557,6 +557,9 @@ _UNAVAILABLE_REASONS = {
     "too_large": "the file is over the indexer's attachment size limit, so it was not extracted",
     # A success row is read only when it stored text.
     "success": "the extraction succeeded but stored no text",
+    # The occurrence's own deferral mark (#1236), whatever the payload's row says.
+    "deferred": "the indexer deferred this attachment's extraction to a later pass (its "
+    "per-message extraction budget was reached); its text is not indexed yet",
 }
 _OCR_DISABLED_REASON = "the file needs OCR, which is off (INDEXER_OCR_ENABLED=false)"
 
@@ -1813,9 +1816,10 @@ def register_retrieval_tools(server, db):
         no extraction recorded yet); they are in neither
         ``total_matches`` nor the pages, so report it with any count when
         it is not 0. ``status_counts`` splits ``total_matches`` by
-        extraction status; ``none`` means no extraction is recorded, and
-        anything but ``success`` means no extracted text is available,
-        not that the file is irrelevant.
+        extraction status; ``none`` means no extraction is recorded,
+        ``deferred`` that the indexer will extract it on a later pass,
+        and anything but ``success`` means no extracted text is
+        available, not that the file is irrelevant.
 
         Start with narrow filters and ``limit=1`` to obtain the count.
         Rows carry private mail metadata (filenames, IDs, folders)
@@ -1858,8 +1862,10 @@ def register_retrieval_tools(server, db):
                       literally (no wildcards).
             content_type: Exact MIME type, e.g. "application/pdf".
             extraction_status: success, empty, unsupported, too_large,
-                               failed, or none (no extraction recorded);
-                               blank is ignored, anything else an error.
+                               failed, deferred (extraction waits for a
+                               later indexer pass), or none (no
+                               extraction recorded); blank is ignored,
+                               anything else an error.
             claimant_id: Exact claimant ID of the carrying message.
             thread_id: Exact thread ID.
             limit: Attachments per page (default 20, clamped to [1, 50]).
@@ -1930,7 +1936,7 @@ def register_retrieval_tools(server, db):
         if page.indeterminate:
             # Fixed text naming the causes the given filters can have.
             causes = _indeterminate_causes(uses)
-            if (extraction_status or "").strip() not in ("", "none"):
+            if (extraction_status or "").strip() not in ("", "none", "deferred"):
                 causes.append("no extraction recorded yet")
             lines.append(
                 f"indeterminate: {page.indeterminate} (attachments the filters could neither "

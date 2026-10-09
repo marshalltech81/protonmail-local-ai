@@ -120,6 +120,8 @@ def _reset_extractor_warning_budget(monkeypatch):
         monkeypatch.setattr(main, "_reparse_progress", main._ReparseProgress())
         # And the WAL checkpoint's busy streak (#875).
         monkeypatch.setattr(main, "_wal_busy_passes", 0)
+        # And whether the heartbeat saw extraction deferrals (#1236).
+        monkeypatch.setattr(main, "_extraction_deferrals_seen", False)
 
 
 @pytest.fixture(autouse=True)

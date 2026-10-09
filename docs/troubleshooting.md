@@ -1311,7 +1311,8 @@ Maildir watcher and walks (#870):
 Queue and maintenance (all INFO unless noted):
 
 - `queue: pending=<n> retrying=<n> deferred_permission=<n>
-  parked_trashed=<n> dead=<n> oldest_due_age=<s>s; deferrals since last
+  parked_trashed=<n> extraction_deferred=<n> dead=<n>
+  oldest_due_age=<s>s; deferrals since last
   heartbeat: parse=<n> embed=<n> trashed=<n>; suppressed_lines=<n>`,
   every 5 minutes, during the initial index too. `pending` jobs have
   never failed; `retrying` jobs failed or were deferred by an embedder
@@ -1320,7 +1321,15 @@ Queue and maintenance (all INFO unless noted):
   to 24 h, after which a still-unreadable file takes the normal retry
   path and counts as `retrying` until it is dead);
   `parked_trashed` jobs belong to trashed messages waiting for the
-  reaper, which is normal in mirror mode, not a failure. A growing
+  reaper, which is normal in mirror mode, not a failure;
+  `extraction_deferred` jobs are messages whose attachment extraction
+  reached the per-message budget (64 process launches or 5 seconds per
+  pass, `docs/architecture.md` "Per-message extraction budget"),
+  continued on later passes between other mail without spending
+  attempts. Once none remain after some did, the heartbeat logs
+  `attachment extraction caught up: no message is waiting for
+  attachments deferred by the per-message extraction budget` once. A
+  growing
   `oldest_due_age` means due jobs are not being drained (an embedder
   outage pauses draining; see above), except during a reparse, whose
   jobs wait behind newer mail while `reparse: remaining=` falls (see
@@ -1336,10 +1345,20 @@ Queue and maintenance (all INFO unless noted):
 - `re-queued <n> message(s) (<n> for a missing text-completeness
   record) whose attachments were extracted by an older extractor
   version (...); skipped <n> dead-lettered (run make requeue-dead to
-  refresh them).`, at startup after an extractor change, or after OCR is
-  turned on with OCR rows cached before schema v6. WARNING when any
+  refresh them).`, at startup after an extractor change, after OCR is
+  turned on with OCR rows cached before schema v6, or for a message
+  whose deferred attachment extraction has no job left (attachment
+  extraction was switched off while it was being continued; #1236).
+  WARNING when any
   dead-lettered message was skipped: those keep their old attachment
   text until you run `make requeue-dead`.
+- `cleared attachment text completeness on <n> occurrence(s) due a
+  refresh; each is unknown until its message is processed again.`, at
+  startup when the sweep found occurrences to refresh (a result with no
+  extractor whose label now has one, a `too_large` result that now fits,
+  an "OCR disabled" result once OCR is on, a cached result with no
+  completeness record), so a message mid-continuation picks them up
+  (#1236).
 - `cleared attachment text completeness on <n> occurrence(s) extracted
   by an older extractor version (...); each is unknown until its
   message is processed again.`, at startup after an extractor change
@@ -1735,20 +1754,29 @@ only, never filenames or text (`make logs`):
   are counted as `suppressed_lines` on the queue heartbeat, never
   here.
 - `attachments n=<total> success= failed= unsupported= too_large=
-  ocr_disabled= empty= cached= pdf_pages_failed=
+  ocr_disabled= empty= deferred= cached= deferred_messages=
+  deferred_resumed= pdf_pages_failed=
   pdf_pages_unrecovered= ocr_capped_pdfs= ocr_pages_skipped=
   ocr_capped_images= extractor_caps= parser_caps_messages=
   parser_recipients_merged_messages= parser_sender_ambiguous_messages=
   eml_headers_degraded= eml_filenames_degraded= eml_charsets_degraded=
   warnings_suppressed=`: the attachments of the messages committed since the previous line, by outcome. It is a
   WARNING when any of `failed`, `unsupported`, `too_large`,
-  `ocr_disabled`, `pdf_pages_unrecovered`, `ocr_capped_pdfs`,
+  `ocr_disabled`, `deferred`, `deferred_messages`,
+  `pdf_pages_unrecovered`, `ocr_capped_pdfs`,
   `ocr_pages_skipped`, `ocr_capped_images`, `extractor_caps`,
   `parser_caps_messages` or `warnings_suppressed` is above zero (some attachment text is not
   searchable), and INFO otherwise. `pdf_pages_failed` alone does not
   make it a WARNING (see below), nor do the `eml_*_degraded` decoding
   fallbacks in attached emails, which replace characters rather than
   lose text (#922; see the `degraded in the child` line above).
+  `deferred` counts occurrences a pass deferred under the per-message
+  extraction budget (#1236), `deferred_messages` the messages committed
+  with some deferred, and `deferred_resumed` previously deferred
+  occurrences that resolved; a deferred attachment is extracted on a
+  later pass of its message, never dropped. A continuation pass skips
+  the occurrences resolved in earlier passes, so they are not counted
+  again.
   - When it is logged: during the initial index, with the timing summary
     once at least 25 messages have been drained since the last one (each
     batch, at the default `INITIAL_INDEX_BATCH_SIZE=50`), and once at

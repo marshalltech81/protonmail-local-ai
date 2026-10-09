@@ -39,6 +39,7 @@ from ..lib.sqlite import (
 from ..lib.timings import count, rerank_mode, stage, timed_tool
 from ..lib.validation import clamp_int
 from .outputs import (
+    EXTRACTION_DEFERRED_NOTE,
     HEADER_CHAR_LIMIT,
     MAX_FROM_NAME_MATCHES,
     MAX_LISTED,
@@ -1727,6 +1728,7 @@ def _citation(ref: EvidenceRef) -> Citation:
         char_start=chunk.char_start,
         char_end=ref.char_end,
         scope=scope,
+        extraction_deferred=chunk.extraction_deferred,
     )
 
 
@@ -1946,6 +1948,7 @@ class EvidenceCoverage:
     threads_without_evidence: int = 0  # threads whose every passage was left out
     threads_dropped: int = 0  # lower-ranked threads left out whole to fit the window
     threads_trimmed: int = 0  # threads with a passage left out or cut short
+    extraction_deferred: int = 0  # passages shown from a deferred attachment (#1236)
 
 
 # Shortest normalized body passage treated as a quote of an earlier one
@@ -2072,11 +2075,20 @@ def _render_chunk_header(
         if scope:
             prefix += f"{scope} | "
     if chunk.attachment_id is not None:
-        fname = cut(chunk.attachment_filename or "attachment")
+        # The deferral note (#1236) is fixed text and never cut: in the
+        # short form the filename gives up its room, so the header stays
+        # within ``_LABELLED_HEADER_MAX_CHARS``.
+        note = f"; {EXTRACTION_DEFERRED_NOTE}" if chunk.extraction_deferred else ""
+        name = chunk.attachment_filename or "attachment"
+        fname = (
+            _short(name, _LABELLED_FIELD_CHARS - len(note))
+            if short
+            else clip(name, HEADER_CHAR_LIMIT)
+        )
         mime = cut(chunk.attachment_mime or "unknown")
         return (
             f"[{prefix}chunk {chunk.chunk_index} — attachment {fname} ({mime}), "
-            f"chars {chunk.char_start}-{char_end}]"
+            f"chars {chunk.char_start}-{char_end}{note}]"
         )
     return f"[{prefix}chunk {chunk.chunk_index} chars {chunk.char_start}-{char_end}]"
 
@@ -2320,6 +2332,8 @@ def _build_evidence(
             char_end = chunk.char_start + len(text) if chunk else None
             header = _piece_header(chunk, char_end or 0, label, tag)
             parts.append(f"{header}\n{text}" if header else text)
+            if chunk is not None and chunk.extraction_deferred:
+                coverage.extraction_deferred += 1
             if evidence_map is not None and label is not None:
                 # Quotes are checked against the text as the model sees it,
                 # with delimiter tags escaped as ``_untrusted_email_block``
@@ -2553,7 +2567,9 @@ def _reply_cut_limits(stops: Iterable[TruncationReason]) -> list[str]:
 
 def _count_capped_threads(coverage: EvidenceCoverage, evidence_chars: int, threads: int) -> None:
     """Count, on the call's timing line, the threads whose evidence the
-    fixed per-thread cap trimmed (``evidence_capped_threads``).
+    fixed per-thread cap trimmed (``evidence_capped_threads``), and the
+    passages shown from a deferred attachment
+    (``evidence_extraction_deferred``, #1236).
 
     The cap binds when the evidence budget is the full
     ``PER_THREAD_CHAR_BUDGET`` per thread; below that the model window
@@ -2562,6 +2578,10 @@ def _count_capped_threads(coverage: EvidenceCoverage, evidence_chars: int, threa
     """
     if coverage.threads_trimmed and evidence_chars >= PER_THREAD_CHAR_BUDGET * threads:
         count("evidence_capped_threads", coverage.threads_trimmed)
+    # Passages shown from an attachment whose extraction the indexer
+    # deferred (#1236): their text is the retained indexed text.
+    if coverage.extraction_deferred:
+        count("evidence_extraction_deferred", coverage.extraction_deferred)
 
 
 def _warn_token_limits(tool: str, budget: PromptBudget, limits: list[str], **counts: int) -> None:
@@ -2693,6 +2713,7 @@ def _citation_lines(citations: list[Citation]) -> list[str]:
             f"{passage_sent_text(c.sent_at, c.sent_at_status)}"
             + (f", delivered {c.occurred_at[:10]}" if c.occurred_at else "")
             + (f", attachment {c.attachment_filename}" if c.source == "attachment" else "")
+            + (f", {EXTRACTION_DEFERRED_NOTE}" if c.extraction_deferred else "")
         )
         lines.append(f"  [{c.label}] {where} (thread {c.thread_id}, chunk {c.chunk_id})")
     return lines
@@ -3036,6 +3057,11 @@ def register_intelligence_tools(
         thread in them: if that returns nothing, try the next matching
         contact, or pass the name itself as participant (it then matches
         any participant with that name inside the folder scope).
+
+        A passage or citation from an attachment the indexer is waiting to
+        extract again has extraction_deferred=true (prose: "retained
+        indexed text; extraction refresh pending"): its text is what was
+        indexed before. Say so when an answer relies on it.
 
         Args:
             question: Natural language question or topic phrase
@@ -3625,6 +3651,11 @@ def register_intelligence_tools(
         included, so when you also pass ``folders`` its top address may
         have no thread in them: if that returns nothing, try the next
         matching contact, or pass the name itself as participant.
+
+        A passage or citation from an attachment the indexer is waiting to
+        extract again has extraction_deferred=true (prose: "retained
+        indexed text; extraction refresh pending"): its text is what was
+        indexed before. Say so when an answer relies on it.
 
         Args:
             query: What to search for e.g. "invoices", "meeting confirmations"

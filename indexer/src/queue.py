@@ -135,6 +135,18 @@ STAGE_PARSE = "parse"
 STAGE_EMBED = "embed"
 STAGE_TRASHED = "trashed"
 DEFER_STAGES = (STAGE_PARSE, STAGE_EMBED, STAGE_TRASHED)
+# A message whose attachment extraction reached the per-message budget
+# (#1236) is continued at this stage: ``main._phase2c_commit_vectors``
+# defers it, inside the transaction that commits the pass's results, with
+# ``EXTRACTION_DEFERRED_ERROR``, due at once, so it takes its turn behind
+# the rows already due. A claimed row carrying both is a continuation,
+# which extracts only the occurrences still pending. Counted in the queue
+# heartbeat's ``extraction_deferred`` bucket (from the rows) rather than in
+# ``drain_deferrals``, and in the attachments aggregate once committed.
+STAGE_EXTRACT = "extract"
+EXTRACTION_DEFERRED_ERROR = (
+    "attachment extraction deferred: per-message budget reached; continued on a later pass"
+)
 # ``last_error`` of a job deferred because mbsync has not opened the file
 # to the indexer yet (``main._phase1_commit_thread``). Fixed text, and
 # distinct from ``_stage_error``'s rendering of the same
@@ -337,6 +349,14 @@ class IndexingQueue:
         """Refund the ``begin_attempt`` charge: the step returned."""
         self._settle(filepath)
 
+    def release(self, filepath: str) -> None:
+        """Close the in-memory charge of ``filepath`` once a transaction
+        that refunded it in the database committed
+        (``defer(in_transaction=True)``, #1236). No database write."""
+        with self._lock:
+            if self._in_flight is not None and self._in_flight[0] == filepath:
+                self._in_flight = None
+
     def note_progress(self) -> None:
         """Restart the in-flight clock: the step finished one bounded unit
         of work (one attachment), so the stall guard's limit applies per
@@ -512,20 +532,44 @@ class IndexingQueue:
         error: str,
         error_class: str,
         delay_seconds: float,
+        in_transaction: bool = False,
     ) -> None:
         """Postpone a job for an infrastructure failure without spending
         its attempt budget.
 
         Used when the failure says nothing about the message — the
-        embedder is down, rate-limiting, or rejecting credentials. The
-        row stays ``queued`` with ``attempts`` unchanged and becomes due
-        again after ``delay_seconds``, so no outage can dead-letter it.
+        embedder is down, rate-limiting, or rejecting credentials — and
+        to continue a message whose attachment extraction reached the
+        per-message budget (``STAGE_EXTRACT``, #1236). The row stays
+        ``queued`` with ``attempts`` unchanged and becomes due again
+        after ``delay_seconds``, so no outage can dead-letter it.
+
+        ``in_transaction=True``, inside ``db.transaction()`` (#1236): the
+        row's write, with the refund of an open ``begin_attempt`` charge
+        folded into it, commits or rolls back with the caller's
+        (``Database.queue_mark_failed``). The charge stays open in memory,
+        so the stall guard keeps watching the step until the caller calls
+        ``release`` after the commit; after a rollback the row still holds
+        its charge and mark, and ``mark_failed`` settles them as usual.
         """
-        self._settle(filepath)
-        attempts = self.db.queue_get_attempts(filepath)
-        if attempts is None:
-            log.warning("defer: no queue row for %s; nothing to update", filepath)
-            return
+        if in_transaction:
+            row = self.db.queue_get_attempts_and_stage(filepath)
+            if row is None:
+                log.warning("defer: no queue row for %s; nothing to update", filepath)
+                return
+            attempts, last_stage = row
+            with self._lock:
+                charged = self._in_flight is not None and self._in_flight[0] == filepath
+            # The refund ``queue_refund_attempt`` would make.
+            if charged and last_stage == INTERRUPTED_STAGE and attempts > 0:
+                attempts -= 1
+        else:
+            self._settle(filepath)
+            found = self.db.queue_get_attempts(filepath)
+            if found is None:
+                log.warning("defer: no queue row for %s; nothing to update", filepath)
+                return
+            attempts = found
         next_attempt = datetime.now(UTC) + timedelta(seconds=delay_seconds)
         self.db.queue_mark_failed(
             filepath=filepath,
@@ -595,7 +639,10 @@ class IndexingQueue:
         ``parked_trashed`` rows are trashed files waiting to be reaped;
         ``retrying`` is every other queued row (failures, including a
         permission error past its deferral window, embedder deferrals,
-        a row interrupted mid-step). ``reparse`` counts the queued rows
+        a row interrupted mid-step). ``extraction_deferred`` rows are
+        messages continued because their attachment extraction reached
+        the per-message budget (``STAGE_EXTRACT``, #1236). ``reparse``
+        counts the queued rows
         whose reason is ``reparse`` outside ``parked_trashed`` (the ones
         that can drain), ``reparse_parked_trashed`` those parked as
         trashed (#1331) and ``reparse_dead`` the dead ones (#1078).
@@ -609,6 +656,8 @@ class IndexingQueue:
             permission_stage=STAGE_PARSE,
             permission_deferred_error=PERMISSION_DEFERRED_ERROR,
             trashed_stage=STAGE_TRASHED,
+            extract_stage=STAGE_EXTRACT,
+            extraction_deferred_error=EXTRACTION_DEFERRED_ERROR,
             reparse_reason=REASON_REPARSE,
         )
         age = 0
@@ -619,6 +668,7 @@ class IndexingQueue:
             "retrying": counts.get("retrying", 0),
             "deferred_permission": counts.get("deferred_permission", 0),
             "parked_trashed": counts.get("parked_trashed", 0),
+            "extraction_deferred": counts.get("extraction_deferred", 0),
             "dead": counts.get("dead", 0),
             "oldest_due_age": age,
             "reparse": counts["reparse"],

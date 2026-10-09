@@ -1359,6 +1359,8 @@ class TestAttachmentOutcomeCounts:
     def _zero() -> dict[str, int]:
         return dict.fromkeys(attachment_indexing.ATTACHMENT_OUTCOMES, 0) | {
             "cached": 0,
+            "deferred_messages": 0,
+            "deferred_resumed": 0,
             "pdf_pages_failed": 0,
             "pdf_pages_unrecovered": 0,
             "ocr_capped_pdfs": 0,
@@ -1390,6 +1392,7 @@ class TestAttachmentOutcomeCounts:
             "too_large",
             "ocr_disabled",
             "empty",
+            "deferred",
         )
 
     def test_each_outcome_is_counted_once_its_message_commits(self, tmp_path, monkeypatch, caplog):
@@ -1463,7 +1466,10 @@ class TestAttachmentOutcomeCounts:
             "success": 3,
             "failed": 1,
             "ocr_disabled": 2,
+            "deferred": 5,
             "cached": 4,
+            "deferred_messages": 1,
+            "deferred_resumed": 2,
             "pdf_pages_failed": 5,
             "pdf_pages_unrecovered": 9,
             "ocr_capped_pdfs": 7,
@@ -1479,8 +1485,9 @@ class TestAttachmentOutcomeCounts:
             "warnings_suppressed": 6,
         }
         assert attachment_indexing.format_attachment_outcomes(counts) == (
-            "attachments n=6 success=3 failed=1 unsupported=0 too_large=0 "
-            "ocr_disabled=2 empty=0 cached=4 pdf_pages_failed=5 pdf_pages_unrecovered=9 ocr_capped_pdfs=7 "
+            "attachments n=11 success=3 failed=1 unsupported=0 too_large=0 "
+            "ocr_disabled=2 empty=0 deferred=5 cached=4 deferred_messages=1 deferred_resumed=2 "
+            "pdf_pages_failed=5 pdf_pages_unrecovered=9 ocr_capped_pdfs=7 "
             "ocr_pages_skipped=8 ocr_capped_images=2 extractor_caps=4 parser_caps_messages=3 "
             "parser_recipients_merged_messages=1 parser_sender_ambiguous_messages=2 "
             "eml_headers_degraded=3 eml_filenames_degraded=1 eml_charsets_degraded=5 "
@@ -1495,6 +1502,12 @@ class TestAttachmentOutcomeCounts:
         ("unsupported", True),
         ("too_large", True),
         ("ocr_disabled", True),
+        # Text not indexed yet, waiting for a later pass (#1236); the
+        # messages carrying such occurrences count with them, and a
+        # resumed occurrence is the recovery.
+        ("deferred", True),
+        ("deferred_messages", True),
+        ("deferred_resumed", False),
         # A page pypdf cannot read may still be OCR-recovered: a
         # diagnostic count, not lost text (review round 3).
         ("pdf_pages_failed", False),

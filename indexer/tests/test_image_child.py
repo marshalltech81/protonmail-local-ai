@@ -376,6 +376,17 @@ class TestRealChild:
         assert "image OCR capped at 2 of at least 3 frames" in caplog.text
 
     @requires_tesseract
+    def test_the_childs_tesseract_launches_are_counted(self):
+        """#1236 (Codex round 1 on #1355): the child reports the
+        Tesseract processes it started, one per OCR'd frame, and the
+        parent adds them to its own launch count with the child's."""
+        before = _runner.process_launches()
+        result = _extract(_tiff(3), max_ocr_pages=3)
+        assert result.status in (STATUS_SUCCESS, STATUS_EMPTY)
+        # The child itself, then one Tesseract per frame read.
+        assert _runner.process_launches() - before == 1 + 3
+
+    @requires_tesseract
     def test_text_is_the_same_as_in_process(self, monkeypatch):
         """The same Tesseract on the same page: the child's text is the
         in-process extraction's, byte for byte."""

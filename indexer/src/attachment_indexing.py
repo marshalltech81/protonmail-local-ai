@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import time
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -62,13 +63,19 @@ from .extractors import (
 from .extractors import (
     extract as extract_attachment,
 )
+from .extractors._runner import process_launches
 from .parser import Attachment
 
 log = logging.getLogger("indexer.attachments")
 
+# The plan status of an occurrence whose extraction the per-message
+# budget deferred to a later pass (#1236). Never an extraction status:
+# nothing is written to ``attachment_extractions`` for it.
+STATUS_DEFERRED = "deferred"
+
 # Outcomes the periodic attachments aggregate counts (#871): the
 # extraction statuses, with ``unsupported`` for want of OCR split out as
-# ``ocr_disabled``.
+# ``ocr_disabled``, and occurrences deferred to a later pass (#1236).
 ATTACHMENT_OUTCOMES: tuple[str, ...] = (
     STATUS_SUCCESS,
     STATUS_FAILED,
@@ -76,7 +83,51 @@ ATTACHMENT_OUTCOMES: tuple[str, ...] = (
     STATUS_TOO_LARGE,
     "ocr_disabled",
     STATUS_EMPTY,
+    STATUS_DEFERRED,
 )
+
+# The per-message extraction budget (#1236): the work one pass of one
+# message may start on attachments the cache and the batch cannot serve,
+# counted in ``_resolve_extracted_text`` around each dispatch: processes
+# started (``_runner.process_launches``: extractor children, raw tools,
+# and the Poppler and Tesseract processes a scanned PDF starts) and
+# monotonic seconds spent extracting. Once either is reached the
+# message's remaining uncached attachments are deferred, and the message
+# is continued on a later pass behind the rows already due. The first
+# dispatch of a pass is always admitted, so every pass resolves at least
+# one deferred attachment, and an admitted attachment runs to its own
+# bounds, so a pass can end past the budget by one attachment's run.
+# Fixed, positive values, with no off switch (owner, 2026-10-09). Sized
+# from plain timings in the indexer image (docs/architecture.md,
+# "Per-message extraction budget").
+EXTRACTION_TURN_LAUNCHES = 64
+EXTRACTION_TURN_SECONDS = 5.0
+
+
+@dataclass
+class ExtractionBudget:
+    """One message's extraction budget for one pass (#1236)."""
+
+    max_launches: int = EXTRACTION_TURN_LAUNCHES
+    max_seconds: float = EXTRACTION_TURN_SECONDS
+    launches: int = 0
+    seconds: float = 0.0
+    dispatched: int = 0
+    deferred: int = 0
+    clock: Callable[[], float] = time.monotonic
+
+    def exhausted(self) -> bool:
+        """Whether the next uncached attachment is deferred: one has
+        already been dispatched this pass and the launches or the seconds
+        reached their budget."""
+        return self.dispatched > 0 and (
+            self.launches >= self.max_launches or self.seconds >= self.max_seconds
+        )
+
+    def charge(self, launches: int, seconds: float) -> None:
+        self.dispatched += 1
+        self.launches += launches
+        self.seconds += seconds
 
 
 class AttachmentOutcomeCounts:
@@ -104,7 +155,9 @@ class AttachmentOutcomeCounts:
         self._counts: Counter[str] = Counter()
         self._lock = Lock()
 
-    def record(self, status: str, error: str | None, *, cached: bool) -> None:
+    def record(
+        self, status: str, error: str | None, *, cached: bool, resumed: bool = False
+    ) -> None:
         outcome = status
         if status == STATUS_UNSUPPORTED and (error or "").startswith(OCR_DISABLED_ERROR):
             outcome = "ocr_disabled"
@@ -112,13 +165,24 @@ class AttachmentOutcomeCounts:
             self._counts[outcome] += 1
             if cached:
                 self._counts["cached"] += 1
+            if resumed:
+                self._counts["deferred_resumed"] += 1
+
+    def record_deferred_message(self) -> None:
+        """A message committed with attachments deferred to a later pass
+        (#1236)."""
+        with self._lock:
+            self._counts["deferred_messages"] += 1
 
     def drain(self) -> dict[str, int]:
         """Return every outcome's count plus ``cached`` and the extractor
         counts, and reset them."""
         with self._lock:
             counts, self._counts = self._counts, Counter()
-        drained = {name: counts[name] for name in (*ATTACHMENT_OUTCOMES, "cached")}
+        drained = {
+            name: counts[name]
+            for name in (*ATTACHMENT_OUTCOMES, "cached", "deferred_messages", "deferred_resumed")
+        }
         drained.update(drain_extractor_counts())
         return drained
 
@@ -129,6 +193,11 @@ attachment_outcomes = AttachmentOutcomeCounts()
 _SUMMARY_FIELDS = (
     *ATTACHMENT_OUTCOMES,
     "cached",
+    # Messages continued on a later pass because their extraction reached
+    # the per-message budget, and previously deferred occurrences that
+    # resolved (#1236).
+    "deferred_messages",
+    "deferred_resumed",
     "pdf_pages_failed",
     "pdf_pages_unrecovered",
     "ocr_capped_pdfs",
@@ -155,6 +224,9 @@ _DEGRADED_FIELDS = (
     STATUS_UNSUPPORTED,
     STATUS_TOO_LARGE,
     "ocr_disabled",
+    # Text not indexed yet: the occurrence waits for a later pass (#1236).
+    STATUS_DEFERRED,
+    "deferred_messages",
     "pdf_pages_unrecovered",
     "ocr_capped_pdfs",
     "ocr_pages_skipped",
@@ -172,9 +244,18 @@ def record_committed_outcomes(plans: list[AttachmentWritePlan]) -> None:
     cap cut is counted as capped here, as the PDF extractor counts a
     fresh extraction (#891), and logs the same rate-limited WARNING. An
     unknown count (``None``, a row cached before schema v3) counts as
-    nothing."""
+    nothing. An extraction continuation skips the occurrences resolved in
+    earlier passes (#1236), so a message continued over many passes
+    counts each occurrence once per pass that resolves or defers it."""
     for plan in plans:
-        attachment_outcomes.record(plan.status, plan.extraction_error, cached=plan.cached)
+        if plan.resolved_earlier:
+            continue
+        attachment_outcomes.record(
+            plan.status,
+            plan.extraction_error,
+            cached=plan.cached,
+            resumed=plan.was_deferred and not plan.deferred,
+        )
         if plan.cached and plan.ocr_pages_skipped:
             note_ocr_capped(plan.ocr_pages_skipped)
             warn_rate_limited(
@@ -396,6 +477,25 @@ class AttachmentWritePlan:
     # its chunks (#1242).
     text_complete: bool | None = None
     text_extractor: str | None = None
+    # Whether the occurrence carried a deferral mark before this pass
+    # (#1236): one that now resolves is counted as resumed.
+    was_deferred: bool = False
+    # A deferred occurrence whose stored mark already says so (deferred,
+    # ``text_complete`` 0): its apply writes nothing (#1236).
+    mark_unchanged: bool = False
+    # An occurrence resolved in an earlier pass, served from its cached
+    # row as it stands to settle its payload's shared slice (#1236): it
+    # writes no occurrence row and is not counted again; it only adds its
+    # chunks to the slice.
+    resolved_earlier: bool = False
+    # Whether the plan holding this payload's chunk slice deletes stored
+    # chunks it does not write. Off while another occurrence of the
+    # payload in the message is deferred and holds chunks there (#1236).
+    deletes_missing_chunks: bool = True
+
+    @property
+    def deferred(self) -> bool:
+        return self.status == STATUS_DEFERRED
 
 
 def occurrence_text_complete(
@@ -448,6 +548,8 @@ def _resolve_extracted_text(
     max_pdf_pages: int | None = None,
     batch_extractions: dict[tuple[str, str], ExtractionResult] | None = None,
     on_progress: Callable[[], None] | None = None,
+    budget: ExtractionBudget | None = None,
+    serve_cached: bool = False,
 ) -> tuple[
     str | None, str, ExtractionResult | None, str | None, bool, int | None, str | None, bool | None
 ]:
@@ -475,6 +577,16 @@ def _resolve_extracted_text(
     same batch, by that key: those are not committed yet, so the cache
     cannot serve them (#237). A reused one is still returned for
     persisting, since the message that extracted it may fail to commit.
+
+    ``budget`` is the message's extraction budget: once it is exhausted
+    an attachment the cache and the batch cannot serve is not extracted
+    and comes back ``STATUS_DEFERRED``, with nothing to persist; each
+    dispatch is charged its process launches and seconds.
+
+    ``serve_cached`` (an occurrence whose result already applied, re-read
+    so its payload's shared chunk slice can be settled, #1236) serves the
+    cached row as it is, whatever its age or the settings, so finished
+    work is not reopened; with no row it is resolved as usual.
     """
     module = extraction_cache_module(attachment)
     key = (attachment.content_hash, module)
@@ -493,6 +605,18 @@ def _resolve_extracted_text(
         )
 
     cached = db.get_attachment_extraction(attachment.content_hash, module)
+    if serve_cached and cached is not None:
+        text = cached["extracted_text"] if cached["extraction_status"] == STATUS_SUCCESS else None
+        return (
+            text,
+            cached["extraction_status"],
+            None,
+            cached["extraction_error"],
+            True,
+            cached["ocr_pages_skipped"],
+            cached["extractor"],
+            None if cached["text_complete"] is None else bool(cached["text_complete"]),
+        )
     # A row written by an older version of a since-fixed extractor would
     # otherwise be served forever: it is re-extracted, and only by an
     # occurrence that selects its module.
@@ -524,6 +648,12 @@ def _resolve_extracted_text(
             None if cached["text_complete"] is None else bool(cached["text_complete"]),
         )
 
+    if budget is not None and budget.exhausted():
+        budget.deferred += 1
+        return (None, STATUS_DEFERRED, None, None, False, None, None, None)
+
+    launches_before = process_launches()
+    started = budget.clock() if budget is not None else 0.0
     result = extract_attachment(
         content_type=attachment.content_type,
         filename=attachment.filename,
@@ -536,6 +666,8 @@ def _resolve_extracted_text(
         max_pdf_pages=max_pdf_pages,
         on_progress=on_progress,
     )
+    if budget is not None:
+        budget.charge(process_launches() - launches_before, budget.clock() - started)
     if batch_extractions is not None:
         batch_extractions[key] = result
     text = result.text if result.status == STATUS_SUCCESS else None
@@ -568,6 +700,8 @@ def prepare_attachment_writes(
     max_pdf_pages: int | None = None,
     batch_extractions: dict[tuple[str, str], ExtractionResult] | None = None,
     on_progress: Callable[[], None] | None = None,
+    budget: ExtractionBudget | None = None,
+    serve_cached: bool = False,
 ) -> AttachmentWritePlan:
     """Compute everything needed to write one attachment occurrence.
 
@@ -589,7 +723,12 @@ def prepare_attachment_writes(
     can decide whether to retry the message.
 
     ``on_progress`` is passed to the extractor, which calls it after
-    each page it reads (#485).
+    each page it reads (#485). ``budget`` is passed to
+    ``_resolve_extracted_text``: a deferred occurrence's plan has
+    ``STATUS_DEFERRED`` and no chunks, and keeps the chunks stored for
+    it (#1236). With ``serve_cached`` a plan served from its cached row
+    as it stands is ``resolved_earlier``: it only contributes its chunks
+    to its payload's slice.
     """
     occurrence_id = attachment_occurrence_id(
         claimant_id=claimant_id,
@@ -618,13 +757,25 @@ def prepare_attachment_writes(
         max_pdf_pages=max_pdf_pages,
         batch_extractions=batch_extractions,
         on_progress=on_progress,
+        budget=budget,
+        serve_cached=serve_cached,
     )
+    if status == STATUS_DEFERRED:
+        return AttachmentWritePlan(
+            attachment=attachment,
+            occurrence_id=occurrence_id,
+            status=status,
+            extraction_to_persist=None,
+            clears_stale_chunks=False,
+            text_complete=False,
+        )
     text_complete = occurrence_text_complete(
         status=status,
         extractor=extractor,
         extraction_complete=extraction_complete,
         payload_complete=attachment.payload_complete,
     )
+    resolved_earlier = serve_cached and cached and extraction_to_persist is None
 
     if status != STATUS_SUCCESS or not text:
         # No usable text for chunking. Still searchable by filename / MIME
@@ -643,6 +794,7 @@ def prepare_attachment_writes(
             ocr_pages_skipped=ocr_pages_skipped,
             text_complete=text_complete,
             text_extractor=extractor,
+            resolved_earlier=resolved_earlier,
         )
 
     # Chunk the extracted text. The chunker takes
@@ -669,6 +821,7 @@ def prepare_attachment_writes(
         ocr_pages_skipped=ocr_pages_skipped,
         text_complete=text_complete,
         text_extractor=extractor,
+        resolved_earlier=resolved_earlier,
     )
 
 
@@ -700,6 +853,21 @@ def apply_attachment_writes(
       text so any chunk hit lifts the parent thread of the email that
       carried it.
     """
+    if plan.mark_unchanged:
+        # Deferred again; the stored row already records it (#1236).
+        return
+    if not plan.resolved_earlier:
+        _write_occurrence(plan, claimant_id=claimant_id, thread_id=thread_id, db=db)
+    if plan.deferred:
+        return
+    _write_slice(plan, claimant_id=claimant_id, thread_id=thread_id, db=db)
+
+
+def _write_occurrence(
+    plan: AttachmentWritePlan, *, claimant_id: str, thread_id: str, db: Database
+) -> None:
+    """The occurrence's row, its cached result and its completeness (or
+    its deferral mark)."""
     module = extraction_cache_module(plan.attachment)
     db.upsert_attachment(
         claimant_id=claimant_id,
@@ -711,6 +879,11 @@ def apply_attachment_writes(
         occurrence_id=plan.occurrence_id,
         extractor_module=module,
     )
+    if plan.deferred:
+        # Nothing was extracted: no cache row is written, and the chunks
+        # stored for the occurrence stay (#1236).
+        db.mark_attachment_extraction_deferred(plan.occurrence_id)
+        return
 
     if plan.extraction_to_persist is not None:
         result = plan.extraction_to_persist
@@ -729,6 +902,11 @@ def apply_attachment_writes(
     # back with them.
     db.set_attachment_text_complete(plan.occurrence_id, plan.text_complete, plan.text_extractor)
 
+
+def _write_slice(
+    plan: AttachmentWritePlan, *, claimant_id: str, thread_id: str, db: Database
+) -> None:
+    """The payload's chunk slice: the plan's chunks, or clearing it."""
     if not plan.chunks or plan.status != STATUS_SUCCESS:
         # No usable text now: drop chunks an earlier (since-superseded)
         # extraction of this attachment left behind, or they stay
@@ -753,4 +931,5 @@ def apply_attachment_writes(
         chunks=plan.chunks,
         embeddings_by_chunk_id=plan.embeddings_by_chunk_id,
         attachment_id=plan.attachment.content_hash,
+        delete_missing=plan.deletes_missing_chunks,
     )

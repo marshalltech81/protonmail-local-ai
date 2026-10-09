@@ -1529,7 +1529,8 @@ def test_get_evidence_description_states_its_slots_and_chunkless_threads(empty_d
         "A thread with no passages is listed with an empty chunks list "
         "(with max_threads) or left out; read it with get_thread." in doc
     )
-    assert "indexed text" not in doc
+    # Only the fixed note on deferred attachment passages (#1236).
+    assert "indexed text" not in doc.replace("retained indexed text", "")
 
 
 def test_extract_description_points_to_the_population_recipe(empty_db):
