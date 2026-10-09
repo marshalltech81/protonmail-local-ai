@@ -645,19 +645,21 @@ class WhereLeafResult(_Output):
     leaf: str
     true: int = Field(
         description="Of the messages the query does not reject (total_matches plus "
-        "indeterminate), how many this leaf on its own is true of."
+        "indeterminate), how many this leaf on its own is true of, before negate."
     )
     false: int = Field(description="Of the same messages, how many this leaf is false of.")
     indeterminate: int = Field(
         description="Of the same messages, how many this leaf could not decide."
     )
+    negate: bool = Field(description="The leaf's negate, as given.")
     distinct_addresses: int | None = Field(
         description="Address leaves: distinct addresses this leaf matched across every "
-        "match (total_matches only), not just this page. Null for body_words."
+        "match (total_matches only) it is itself true of, not just this page. Null for "
+        "body_words and negated leaves."
     )
     addresses: list[str] | None = Field(
         description=f"Address leaves: the matched addresses, most matching messages first, "
-        f"at most {MAX_LISTED_MATCHED_ADDRESSES}. Null for body_words."
+        f"at most {MAX_LISTED_MATCHED_ADDRESSES}. Null for body_words and negated leaves."
     )
 
 

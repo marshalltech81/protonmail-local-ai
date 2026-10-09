@@ -70,8 +70,8 @@ Outcomes:
    attachment predicates, grouped counts and exhaustive thread
    grouping. Incomplete parsing or extraction answers `indeterminate`,
    never a confident "no". **In progress:** per-message completeness
-   is done (#1086), and explicit leaves through `where` (#1088); next
-   #1087, #823.
+   is done (#1086), explicit leaves through `where` (#1088) and the
+   bounded `any` / `negate` form over them (#1087); next #823.
 3. **Source metadata stays evidence:** bounded ordered headers,
    unknown send dates kept unknown, verified arrival time, participant
    and Bcc semantics, authority from the stored sender only when it is
@@ -340,12 +340,12 @@ schema change needs a numbered migration.
    their completeness (#1140), and per-message completeness of body,
    subject, addresses and attachment manifest (#1086), whose address
    terms `query_attachments` shares, and the explicit address-mode and
-   `body_words` leaves with the `where` form (#1088). **Open, in
-   order:** per-occurrence attachment-text completeness (#1242, before
-   any negation or #1091); the bounded `all` / `any` / `negate` form with a leaf cap
-   that also counts `any` groups (empty groups rejected) and
-   three-valued evaluation, fixed at two levels so there is no nesting
-   to bound (#1087); grouped aggregation as its own tool over the same engine (#823); the
+   `body_words` leaves with the `where` form (#1088), per-occurrence
+   attachment-text completeness (#1242), and the bounded `all` / `any`
+   / `negate` form with a node cap that also counts `any` groups (empty
+   groups rejected) and three-valued evaluation, fixed at two levels so
+   there is no nesting to bound (#1087). **Open, in order:** grouped
+   aggregation as its own tool over the same engine (#823); the
    selectable clock `date_basis` (#1150, depending on #1080 for
    `sent`), counting its own NULL clocks the same way so no basis ever
    drops unknown rows silently; leaves

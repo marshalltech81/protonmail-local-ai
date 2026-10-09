@@ -46,12 +46,14 @@ from .predicates import (
     address_match_mode,
     canonical_addr,
     compile_leaves,
+    compile_where,
     leaf_digest,
     message_scope_leaves,
     normalize_authority_class,
     normalize_date_basis,
     query_messages_leaves,
     search_emails_leaves,
+    where_clauses,
 )
 from .rate_limited_log import RateLimitedLog
 from .reranker import RerankerBackend
@@ -1011,12 +1013,13 @@ class LeafResult:
     """How one ``where`` leaf (#1088) decided the messages the whole
     expression does not reject (its matches plus the indeterminate
     ones; owner, 2026-10-08): ``true`` / ``false`` / ``indeterminate``
-    count them by the leaf's own value (1, 0, NULL), so the three sum
-    to ``total_matches + indeterminate``. For an address leaf,
-    ``distinct`` and ``addresses`` are the distinct addresses its own
-    match selects on the messages the expression returns, the matches
-    only (``AddressMatches``' rule); both ``None`` for
-    ``body_words``."""
+    count them by the leaf's own value (1, 0, NULL), before ``negate``
+    (#1087), so the three sum to ``total_matches + indeterminate``. For
+    a non-negated address leaf, ``distinct`` and ``addresses`` are the
+    distinct addresses its own match selects on the messages the
+    expression returns that the leaf itself is true of, the matches
+    only (``AddressMatches``' rule); both ``None`` for ``body_words``
+    and for a negated leaf, which reports counts only."""
 
     path: str
     id: str | None
@@ -1024,6 +1027,7 @@ class LeafResult:
     true: int
     false: int
     indeterminate: int
+    negate: bool = False
     distinct: int | None = None
     addresses: list[str] | None = None
 
@@ -1122,8 +1126,11 @@ def _leaf_results(
     """Each ``where`` leaf's result (``LeafResult``), on the caller's
     read transaction: one statement that evaluates every leaf's own SQL
     once per message ``where_sql`` does not reject (it is 1 or NULL)
-    for the three counts, plus one grouped query per address leaf for
-    its matched addresses on the messages ``where_sql`` returns."""
+    for the three counts, plus one grouped query per non-negated
+    address leaf for its matched addresses on the messages ``where_sql``
+    returns. In an ``any`` group of two or more leaves a returned
+    message need not satisfy every member, so that query also requires
+    the leaf's own SQL to be 1 (#1087)."""
     params: list = []
     columns = ", ".join(
         f"({LEAVES[w.leaf.name].compile(w.leaf.value, params)}) AS l{i}"
@@ -1140,15 +1147,22 @@ def _leaf_results(
         f"WHERE ({where_sql}) IS NOT 0) SELECT {sums} FROM p",
         [*params, *where_params],
     ).fetchone()
+    grouped = {w.path for clause in where_clauses(where) if len(clause) > 1 for w in clause}
     results = []
     for i, w in enumerate(where):
         true, false, unknown = (int(n) for n in counts[3 * i : 3 * i + 3])
-        result = LeafResult(w.path, w.id, w.leaf.name, true, false, unknown)
-        if w.leaf.name in ADDRESS_LEAF_ROWS:
+        result = LeafResult(w.path, w.id, w.leaf.name, true, false, unknown, w.negate)
+        if w.leaf.name in ADDRESS_LEAF_ROWS and not w.negate:
             role, value = w.leaf.value
             rows_params: list = []
             rows_sql = ADDRESS_LEAF_ROWS[w.leaf.name](value, ROLE_SETS[role], rows_params)
-            matched = _matched_addresses(conn, rows_sql, rows_params, where_sql, where_params)
+            returned_sql, returned_params = where_sql, where_params
+            if w.path in grouped:
+                own_params: list = []
+                own_sql = LEAVES[w.leaf.name].compile(w.leaf.value, own_params)
+                returned_sql = f"({where_sql}) AND ({own_sql}) IS 1"
+                returned_params = [*where_params, *own_params]
+            matched = _matched_addresses(conn, rows_sql, rows_params, returned_sql, returned_params)
             result.distinct, result.addresses = matched.distinct, matched.addresses
         results.append(result)
     return results
@@ -4405,9 +4419,11 @@ class Database:
           ``AUTHORITY_EXCLUDED_FOLDERS`` never matches, and any other
           whose ``sender_ambiguous`` is not 0 is counted as
           indeterminate (#1161).
-        - ``where`` (#1088): the normalized explicit leaves
-          (``normalize_where``), ANDed with the flat predicates; each
-          reports in ``MessagePage.leaf_results`` (``_leaf_results``).
+        - ``where`` (#1088): the normalized explicit expression
+          (``normalize_where``, evaluated by ``compile_where`` with
+          ``any`` and ``negate``, #1087), ANDed with the flat
+          predicates; each leaf reports in ``MessagePage.leaf_results``
+          (``_leaf_results``).
 
         Raises ``ValueError`` for an invalid date, a ``text`` with no
         words or more than ``_MAX_TEXT_TERMS``, an unavailable or
@@ -4439,11 +4455,16 @@ class Database:
             if leaf.name in ADDRESS_ROLES
         ]
         explicit = [w.leaf for w in where]
-        where_sql, params = compile_leaves([*leaves, *explicit])
+        where_sql, params = compile_leaves(leaves)
+        if where:
+            # The ``where`` expression (``compile_where``), ANDed.
+            explicit_sql, explicit_params = compile_where(where)
+            where_sql = f"{where_sql} AND {explicit_sql}"
+            params += explicit_params
 
         # A cursor is only meaningful for the predicates and the ordering
         # it was issued under; bind it to a digest of both.
-        digest = leaf_digest(leaves, basis.name, explicit)
+        digest = leaf_digest(leaves, basis.name, where)
         clock = f"m.{basis.column}"
         page_where_sql = where_sql
         page_params = list(params)
