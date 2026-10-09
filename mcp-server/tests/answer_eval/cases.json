@@ -1,5 +1,5 @@
 {
-  "_comment": "Answer-quality cases for ask_mailbox, summarize_thread, extract_from_emails and the experimental tools over the synthetic baseline mailbox (indexer/tests/baseline/corpus.py). A case id starts with its tool's short name (ask-, summarize-, extract-, brief-, check-); a summarize_thread case names a baseline thread ID directly (nothing is embedded) and its evidence must be in that thread, and an extract_from_emails case gives its query and schema with a small limit, since each searched thread is one paid model call (the per-tool argument rules are in cases.py). Synthetic data only: never add a case built from a real mailbox. Message refs 'tNN.M' mean 'tNN.M@baseline.example'; thread refs 'tNN' mean the thread rooted at 'tNN.1@baseline.example'. required_evidence is a list of groups: every group is required and any one ref inside a group satisfies it. Each expected fact lists the message refs and a short verbatim excerpt of the indexed text that establishes it; make baseline checks each excerpt is in that message's indexed text, so references stay independent of what the system retrieves. deterministic.must_include is a list of groups of acceptable spellings (every group required, any spelling in a group satisfies it, case-insensitive substring of the answer). must_include checks that a value is present, not that the answer asserts it: an answer that names the value only to deny or correct it still passes, so correctness needs the judge. must_not_include lists strings no answer may contain. criteria say which rubric dimensions apply; the judge may not mark an applicable one not_applicable. held_out must equal tests/agent_metrics.py is_held_out(id); never tune against held-out cases. review records that the expected facts were drafted with AI from the synthetic corpus and await owner verification.",
+  "_comment": "Answer-quality cases for ask_mailbox, summarize_thread, extract_from_emails and the experimental tools over the synthetic baseline mailbox (indexer/tests/baseline/corpus.py). A case id starts with its tool's short name (ask-, summarize-, extract-, brief-, check-); a summarize_thread case names a baseline thread ID directly (nothing is embedded) and its evidence must be in that thread, and an extract_from_emails case gives its query and schema with a small limit, since each searched thread is one paid model call (the per-tool argument rules are in cases.py). Synthetic data only: never add a case built from a real mailbox. Message refs 'tNN.M' mean 'tNN.M@baseline.example'; thread refs 'tNN' mean the thread rooted at 'tNN.1@baseline.example'. required_evidence is a list of groups: every group is required and any one ref inside a group satisfies it. Each expected fact lists the message refs and a short verbatim excerpt of the indexed text that establishes it; make baseline checks each excerpt is in that message's indexed text, so references stay independent of what the system retrieves. deterministic.must_include is a list of groups of acceptable spellings (every group required, any spelling in a group satisfies it, case-insensitive substring of the answer). must_include checks that a value is present, not that the answer asserts it: an answer that names the value only to deny or correct it still passes, so correctness needs the judge. must_not_include lists strings no answer may contain. criteria say which rubric dimensions apply; the judge may not mark an applicable one not_applicable. held_out must equal tests/agent_metrics.py is_held_out(id); never tune against held-out cases. review records that the expected facts were drafted with AI from the synthetic corpus and await owner verification. An optional chronology object (#291) holds golden labels: positions (id, the person's accepted names, matched as whole words and never a role, kind, the one message ref stating it, its date and date_source sent, mentioned or relative (dated relative to the message itself, such as 'this morning', so either sent or mentioned is accepted), the whole values that message states for it as groups of accepted spellings, and a verbatim excerpt), changes (from, to, kind) whose two sources an answer must both cite, conflicts whose every side it must cite, in_force (the positions as of as_of, or now when as_of is null) and as_of; every source an answer must cite is also a required_evidence group of its own.",
   "schema_version": 1,
   "cases": [
     {
@@ -1015,6 +1015,285 @@
       "deterministic": {"must_include": [], "must_not_include": []},
       "criteria": {"factual_correctness": false, "citation_support": false, "completeness": false, "temporal_reasoning": false, "conflict_uncertainty": true, "relevance": true},
       "review": "ai_drafted"
+    },
+    {
+      "id": "ask-hedge-price-as-of-march",
+      "category": "correction",
+      "tool": "ask_mailbox",
+      "arguments": {"question": "As of 10 March 2026, what price had I agreed with Wilma Harte for laying the paddock hedge, and did a later message change it?"},
+      "held_out": false,
+      "answerable": true,
+      "expected_handling": "answer",
+      "required_evidence": [["t125.2"], ["t125.3"]],
+      "expected_facts": [
+        {"id": "f1", "fact": "As of 10 March 2026 the mail recorded an agreed price of $1,150: on 4 March Sam agreed to Wilma Harte's $1,150.", "sources": ["t125.2"], "excerpt": "Agreed: $1,150 for laying the paddock hedge"},
+        {"id": "f2", "fact": "On 19 March Wilma Harte corrected the 4 March agreement after the fact: the price they settled on was $1,050, not $1,150.", "sources": ["t125.3"], "excerpt": "the price we settled on when we walked the paddock was $1,050, not $1,150"}
+      ],
+      "must_not_assert": [
+        "No later message changed the agreed price.",
+        "The mail as of 10 March already recorded $1,050 as the agreed price."
+      ],
+      "deterministic": {"must_include": [["1,150"], ["1,050"]], "must_not_include": []},
+      "criteria": {"factual_correctness": true, "citation_support": true, "completeness": true, "temporal_reasoning": true, "conflict_uncertainty": false, "relevance": true},
+      "review": "ai_drafted",
+      "chronology": {
+        "as_of": "2026-03-10",
+        "positions": [
+          {"id": "p1", "actor": ["Wilma Harte", "Wilma", "Harte"], "kind": "proposal", "source": "t125.1", "date": "2026-03-02", "date_source": "sent", "values": [["1,150"]], "excerpt": "I propose $1,150 for the whole run"},
+          {"id": "p2", "actor": ["Sam Rivera", "Sam", "Rivera"], "kind": "approval", "source": "t125.2", "date": "2026-03-04", "date_source": "sent", "values": [["1,150"]], "excerpt": "Agreed: $1,150 for laying the paddock hedge"},
+          {"id": "p3", "actor": ["Wilma Harte", "Wilma", "Harte"], "kind": "correction", "source": "t125.3", "date": "2026-03-19", "date_source": "sent", "values": [["1,050"], ["1,150"]], "excerpt": "the price we settled on when we walked the paddock was $1,050, not $1,150"}
+        ],
+        "changes": [{"from": "p2", "to": "p3", "kind": "correction"}],
+        "in_force": ["p2"]
+      }
+    },
+    {
+      "id": "ask-hedge-status-now",
+      "category": "correction",
+      "tool": "ask_mailbox",
+      "arguments": {"question": "Where does the paddock hedge laying with Wilma Harte stand now, and at what price was it agreed?"},
+      "held_out": false,
+      "answerable": true,
+      "expected_handling": "answer",
+      "required_evidence": [["t125.2"], ["t125.3"], ["t125.4"]],
+      "expected_facts": [
+        {"id": "f1", "fact": "On 4 March Sam agreed to Wilma Harte's $1,150 for laying the paddock hedge.", "sources": ["t125.2"], "excerpt": "Agreed: $1,150 for laying the paddock hedge"},
+        {"id": "f2", "fact": "On 19 March Wilma Harte corrected the agreed price to $1,050, saying $1,150 was a mistake.", "sources": ["t125.3"], "excerpt": "the price we settled on when we walked the paddock was $1,050, not $1,150"},
+        {"id": "f3", "fact": "On 13 April Sam called off the hedge laying for this year because the paddock is flooded.", "sources": ["t125.4"], "excerpt": "I am calling off the hedge laying for this year"}
+      ],
+      "must_not_assert": [
+        "The hedge laying is still going ahead.",
+        "The agreed price stands at $1,150."
+      ],
+      "deterministic": {"must_include": [["1,050"], ["calling off", "called off", "cancelled", "canceled"]], "must_not_include": []},
+      "criteria": {"factual_correctness": true, "citation_support": true, "completeness": true, "temporal_reasoning": true, "conflict_uncertainty": false, "relevance": true},
+      "review": "ai_drafted",
+      "chronology": {
+        "as_of": null,
+        "positions": [
+          {"id": "p1", "actor": ["Wilma Harte", "Wilma", "Harte"], "kind": "proposal", "source": "t125.1", "date": "2026-03-02", "date_source": "sent", "values": [["1,150"]], "excerpt": "I propose $1,150 for the whole run"},
+          {"id": "p2", "actor": ["Sam Rivera", "Sam", "Rivera"], "kind": "approval", "source": "t125.2", "date": "2026-03-04", "date_source": "sent", "values": [["1,150"]], "excerpt": "Agreed: $1,150 for laying the paddock hedge"},
+          {"id": "p3", "actor": ["Wilma Harte", "Wilma", "Harte"], "kind": "correction", "source": "t125.3", "date": "2026-03-19", "date_source": "sent", "values": [["1,050"], ["1,150"]], "excerpt": "the price we settled on when we walked the paddock was $1,050, not $1,150"},
+          {"id": "p4", "actor": ["Sam Rivera", "Sam", "Rivera"], "kind": "cancellation", "source": "t125.4", "date": "2026-04-13", "date_source": "sent", "values": [], "excerpt": "I am calling off the hedge laying for this year"}
+        ],
+        "changes": [{"from": "p2", "to": "p3", "kind": "correction"}, {"from": "p3", "to": "p4", "kind": "cancellation"}],
+        "in_force": ["p3", "p4"]
+      }
+    },
+    {
+      "id": "brief-hedge-agreement",
+      "category": "correction",
+      "tool": "brief_issue",
+      "arguments": {"topic": "the paddock hedge laying agreement with Wilma Harte"},
+      "held_out": false,
+      "answerable": true,
+      "expected_handling": "answer",
+      "required_evidence": [["t125.1"], ["t125.2"], ["t125.3"], ["t125.4"]],
+      "expected_facts": [
+        {"id": "f1", "fact": "On 2 March Wilma Harte proposed $1,150 for laying the paddock hedge.", "sources": ["t125.1"], "excerpt": "I propose $1,150 for the whole run"},
+        {"id": "f2", "fact": "On 4 March Sam agreed to $1,150.", "sources": ["t125.2"], "excerpt": "Agreed: $1,150 for laying the paddock hedge"},
+        {"id": "f3", "fact": "On 19 March Wilma Harte corrected the agreed price to $1,050, saying $1,150 was a mistake.", "sources": ["t125.3"], "excerpt": "the price we settled on when we walked the paddock was $1,050, not $1,150"},
+        {"id": "f4", "fact": "On 13 April Sam called off the hedge laying for this year.", "sources": ["t125.4"], "excerpt": "I am calling off the hedge laying for this year"}
+      ],
+      "must_not_assert": [
+        "The hedge laying is still going ahead.",
+        "The agreed price stands at $1,150."
+      ],
+      "deterministic": {"must_include": [["1,050"]], "must_not_include": []},
+      "criteria": {"factual_correctness": true, "citation_support": true, "completeness": true, "temporal_reasoning": true, "conflict_uncertainty": false, "relevance": true},
+      "review": "ai_drafted",
+      "chronology": {
+        "as_of": null,
+        "positions": [
+          {"id": "p1", "actor": ["Wilma Harte", "Wilma", "Harte"], "kind": "proposal", "source": "t125.1", "date": "2026-03-02", "date_source": "sent", "values": [["1,150"]], "excerpt": "I propose $1,150 for the whole run"},
+          {"id": "p2", "actor": ["Sam Rivera", "Sam", "Rivera"], "kind": "approval", "source": "t125.2", "date": "2026-03-04", "date_source": "sent", "values": [["1,150"]], "excerpt": "Agreed: $1,150 for laying the paddock hedge"},
+          {"id": "p3", "actor": ["Wilma Harte", "Wilma", "Harte"], "kind": "correction", "source": "t125.3", "date": "2026-03-19", "date_source": "sent", "values": [["1,050"], ["1,150"]], "excerpt": "the price we settled on when we walked the paddock was $1,050, not $1,150"},
+          {"id": "p4", "actor": ["Sam Rivera", "Sam", "Rivera"], "kind": "cancellation", "source": "t125.4", "date": "2026-04-13", "date_source": "sent", "values": [], "excerpt": "I am calling off the hedge laying for this year"}
+        ],
+        "changes": [{"from": "p2", "to": "p3", "kind": "correction"}, {"from": "p3", "to": "p4", "kind": "cancellation"}],
+        "in_force": ["p3", "p4"]
+      }
+    },
+    {
+      "id": "ask-dispenser-position-june",
+      "category": "correction",
+      "tool": "ask_mailbox",
+      "arguments": {"question": "What was Ferncastle's position on the FC-4410 hire charge as of 1 June 2026, and did it change after that?"},
+      "held_out": false,
+      "answerable": true,
+      "expected_handling": "answer",
+      "required_evidence": [["t100.8"], ["t100.11"]],
+      "expected_facts": [
+        {"id": "f1", "fact": "As of 1 June 2026 Ferncastle's last word was Piers Oduya's of 20 May: their records list the FC-4410 dispenser on the account, so the hire charge stands for now.", "sources": ["t100.8"], "excerpt": "Our records list the FC-4410 dispenser on your account, so the hire charge stands for now"},
+        {"id": "f2", "fact": "It changed later: on 16 July Della reported that Ferncastle's route representative, Ruben Kestle, said the item was never placed, and that Piers is reviewing a credit.", "sources": ["t100.11"], "excerpt": "He says that item has not been placed here at all"}
+      ],
+      "must_not_assert": [
+        "As of 1 June Ferncastle had already accepted that no dispenser was installed.",
+        "A credit has been issued or paid (it is only being reviewed)."
+      ],
+      "deterministic": {"must_include": [["credit"]], "must_not_include": []},
+      "criteria": {"factual_correctness": true, "citation_support": true, "completeness": true, "temporal_reasoning": true, "conflict_uncertainty": false, "relevance": true},
+      "review": "ai_drafted",
+      "chronology": {
+        "as_of": "2026-06-01",
+        "positions": [
+          {"id": "p1", "actor": ["Piers Oduya", "Piers", "Oduya"], "kind": "statement", "source": "t100.3", "date": "2026-03-10", "date_source": "sent", "values": [], "excerpt": "The FC-4410 entry is for the hand towel dispenser our route team installed"},
+          {"id": "p2", "actor": ["Piers Oduya", "Piers", "Oduya"], "kind": "statement", "source": "t100.8", "date": "2026-05-20", "date_source": "sent", "values": [], "excerpt": "so the hire charge stands for now"},
+          {"id": "p3", "actor": ["Ruben Kestle", "Kestle", "Ruben"], "kind": "disposition", "source": "t100.11", "date": "2026-07-16", "date_source": "relative", "values": [["credit"]], "excerpt": "He says that item has not been placed here at all"}
+        ],
+        "changes": [{"from": "p2", "to": "p3", "kind": "supersession"}],
+        "in_force": ["p2"]
+      }
+    },
+    {
+      "id": "brief-dispenser-hire-charge",
+      "category": "correction",
+      "tool": "brief_issue",
+      "arguments": {"topic": "the FC-4410 dispenser hire charge dispute with Ferncastle Hygiene"},
+      "held_out": true,
+      "answerable": true,
+      "expected_handling": "answer",
+      "required_evidence": [["t100.3"], ["t100.8"], ["t100.11"]],
+      "expected_facts": [
+        {"id": "f1", "fact": "On 10 March Piers Oduya said the FC-4410 entry is for a hand towel dispenser installed in the loading bay washroom.", "sources": ["t100.3"], "excerpt": "The FC-4410 entry is for the hand towel dispenser our route team installed"},
+        {"id": "f2", "fact": "On 20 May Piers said Ferncastle's records list the dispenser, so the hire charge stands for now.", "sources": ["t100.8"], "excerpt": "so the hire charge stands for now"},
+        {"id": "f3", "fact": "On 16 July Della reported that Ferncastle's route representative, Ruben Kestle, said the item was never placed, and that Piers is reviewing a credit.", "sources": ["t100.11"], "excerpt": "He says that item has not been placed here at all"}
+      ],
+      "must_not_assert": [
+        "The charge was confirmed as valid and stands.",
+        "A credit has been issued or paid (it is only being reviewed)."
+      ],
+      "deterministic": {"must_include": [["credit"]], "must_not_include": []},
+      "criteria": {"factual_correctness": true, "citation_support": true, "completeness": true, "temporal_reasoning": true, "conflict_uncertainty": false, "relevance": true},
+      "review": "ai_drafted",
+      "chronology": {
+        "as_of": null,
+        "positions": [
+          {"id": "p1", "actor": ["Piers Oduya", "Piers", "Oduya"], "kind": "statement", "source": "t100.3", "date": "2026-03-10", "date_source": "sent", "values": [], "excerpt": "The FC-4410 entry is for the hand towel dispenser our route team installed"},
+          {"id": "p2", "actor": ["Piers Oduya", "Piers", "Oduya"], "kind": "statement", "source": "t100.8", "date": "2026-05-20", "date_source": "sent", "values": [], "excerpt": "so the hire charge stands for now"},
+          {"id": "p3", "actor": ["Ruben Kestle", "Kestle", "Ruben"], "kind": "disposition", "source": "t100.11", "date": "2026-07-16", "date_source": "relative", "values": [["credit"]], "excerpt": "He says that item has not been placed here at all"}
+        ],
+        "changes": [{"from": "p2", "to": "p3", "kind": "supersession"}],
+        "in_force": ["p3"]
+      }
+    },
+    {
+      "id": "ask-reading-room-deposit",
+      "category": "conflicting_sources",
+      "tool": "ask_mailbox",
+      "arguments": {"question": "How much is the key deposit for the Mossgate Reading Room?"},
+      "held_out": false,
+      "answerable": true,
+      "expected_handling": "disclose_conflict",
+      "required_evidence": [["t126.1"], ["t127.1"]],
+      "expected_facts": [
+        {"id": "f1", "fact": "Hazel Pim, the treasurer, wrote on 7 April that the key deposit is $45, paid once and returned when the key is handed back.", "sources": ["t126.1"], "excerpt": "The key deposit is $45"},
+        {"id": "f2", "fact": "Bram Okoye, the caretaker, wrote on 21 April to bring $60 for the key deposit, the same for every key holder.", "sources": ["t127.1"], "excerpt": "Bring $60 for the key deposit"},
+        {"id": "f3", "fact": "The two disagree and neither message mentions the other, so neither supersedes it; the later message is not authoritative because it is later.", "sources": ["t126.1", "t127.1"], "excerpt": "The key deposit is $45"}
+      ],
+      "must_not_assert": [
+        "The deposit is definitely $60 (Bram's later message does not settle it).",
+        "The deposit is definitely $45."
+      ],
+      "deterministic": {"must_include": [["45"], ["60"]], "must_not_include": []},
+      "criteria": {"factual_correctness": true, "citation_support": true, "completeness": true, "temporal_reasoning": true, "conflict_uncertainty": true, "relevance": true},
+      "review": "ai_drafted",
+      "chronology": {
+        "as_of": null,
+        "positions": [
+          {"id": "p1", "actor": ["Hazel Pim", "Hazel", "Pim"], "kind": "statement", "source": "t126.1", "date": "2026-04-07", "date_source": "sent", "values": [["45"]], "excerpt": "The key deposit is $45"},
+          {"id": "p2", "actor": ["Bram Okoye", "Bram", "Okoye"], "kind": "statement", "source": "t127.1", "date": "2026-04-21", "date_source": "sent", "values": [["60"]], "excerpt": "Bring $60 for the key deposit"}
+        ],
+        "conflicts": [["p1", "p2"]],
+        "in_force": ["p1", "p2"]
+      }
+    },
+    {
+      "id": "brief-reading-room-deposit",
+      "category": "conflicting_sources",
+      "tool": "brief_issue",
+      "arguments": {"topic": "the key deposit for the Mossgate Reading Room"},
+      "held_out": false,
+      "answerable": true,
+      "expected_handling": "disclose_conflict",
+      "required_evidence": [["t126.1"], ["t127.1"]],
+      "expected_facts": [
+        {"id": "f1", "fact": "Hazel Pim, the treasurer, wrote on 7 April that the key deposit is $45, paid once and returned when the key is handed back.", "sources": ["t126.1"], "excerpt": "The key deposit is $45"},
+        {"id": "f2", "fact": "Bram Okoye, the caretaker, wrote on 21 April to bring $60 for the key deposit, the same for every key holder.", "sources": ["t127.1"], "excerpt": "Bring $60 for the key deposit"},
+        {"id": "f3", "fact": "The two disagree and neither message mentions the other, so neither supersedes it; the later message is not authoritative because it is later.", "sources": ["t126.1", "t127.1"], "excerpt": "The key deposit is $45"}
+      ],
+      "must_not_assert": [
+        "The deposit is definitely $60 (Bram's later message does not settle it).",
+        "The deposit is definitely $45."
+      ],
+      "deterministic": {"must_include": [["45"], ["60"]], "must_not_include": []},
+      "criteria": {"factual_correctness": true, "citation_support": true, "completeness": true, "temporal_reasoning": true, "conflict_uncertainty": true, "relevance": true},
+      "review": "ai_drafted",
+      "chronology": {
+        "as_of": null,
+        "positions": [
+          {"id": "p1", "actor": ["Hazel Pim", "Hazel", "Pim"], "kind": "statement", "source": "t126.1", "date": "2026-04-07", "date_source": "sent", "values": [["45"]], "excerpt": "The key deposit is $45"},
+          {"id": "p2", "actor": ["Bram Okoye", "Bram", "Okoye"], "kind": "statement", "source": "t127.1", "date": "2026-04-21", "date_source": "sent", "values": [["60"]], "excerpt": "Bring $60 for the key deposit"}
+        ],
+        "conflicts": [["p1", "p2"]],
+        "in_force": ["p1", "p2"]
+      }
+    },
+    {
+      "id": "ask-footbridge-closure",
+      "category": "exact_fact",
+      "tool": "ask_mailbox",
+      "arguments": {"question": "Until when did the parish clerk say the Ottery footbridge would stay closed, and who will pay for the handrails?"},
+      "held_out": false,
+      "answerable": true,
+      "expected_handling": "answer",
+      "required_evidence": [["t128.1"]],
+      "expected_facts": [
+        {"id": "f1", "fact": "The parish clerk, Nell Garside, wrote on 5 May 2026 that the Ottery footbridge stays closed until 30 June while the handrails are replaced; her words are known only as quoted in Rafe Dunmore's message of 11 May.", "sources": ["t128.1"], "excerpt": "will stay closed until 30 June while the"},
+        {"id": "f2", "fact": "The parish council will pay the $2,300 bill from its reserves.", "sources": ["t128.1"], "excerpt": "The parish council will pay the $2,300 bill"}
+      ],
+      "must_not_assert": [
+        "Rafe Dunmore said or decided that the footbridge stays closed (he only passed on the clerk's words).",
+        "The clerk wrote on 11 May 2026 (her message is dated 5 May; 11 May is when it was quoted)."
+      ],
+      "deterministic": {"must_include": [["30 June", "June 30"], ["2,300"]], "must_not_include": []},
+      "criteria": {"factual_correctness": true, "citation_support": true, "completeness": true, "temporal_reasoning": true, "conflict_uncertainty": false, "relevance": true},
+      "review": "ai_drafted",
+      "chronology": {
+        "as_of": null,
+        "positions": [
+          {"id": "p1", "actor": ["Nell Garside", "Garside", "Nell"], "kind": "statement", "source": "t128.1", "date": "2026-05-05", "date_source": "mentioned", "values": [["30 June", "June 30"], ["2,300"]], "excerpt": "will stay closed until 30 June while the"}
+        ],
+        "in_force": ["p1"]
+      }
+    },
+    {
+      "id": "brief-footbridge-closure",
+      "category": "exact_fact",
+      "tool": "brief_issue",
+      "arguments": {"topic": "the Ottery footbridge closure"},
+      "held_out": false,
+      "answerable": true,
+      "expected_handling": "answer",
+      "required_evidence": [["t128.1"]],
+      "expected_facts": [
+        {"id": "f1", "fact": "The parish clerk, Nell Garside, wrote on 5 May 2026 that the Ottery footbridge stays closed until 30 June while the handrails are replaced; her words are known only as quoted in Rafe Dunmore's message of 11 May.", "sources": ["t128.1"], "excerpt": "will stay closed until 30 June while the"},
+        {"id": "f2", "fact": "The parish council will pay the $2,300 bill from its reserves.", "sources": ["t128.1"], "excerpt": "The parish council will pay the $2,300 bill"}
+      ],
+      "must_not_assert": [
+        "Rafe Dunmore said or decided that the footbridge stays closed (he only passed on the clerk's words).",
+        "The clerk wrote on 11 May 2026 (her message is dated 5 May; 11 May is when it was quoted)."
+      ],
+      "deterministic": {"must_include": [["30 June", "June 30"], ["2,300"]], "must_not_include": []},
+      "criteria": {"factual_correctness": true, "citation_support": true, "completeness": true, "temporal_reasoning": true, "conflict_uncertainty": false, "relevance": true},
+      "review": "ai_drafted",
+      "chronology": {
+        "as_of": null,
+        "positions": [
+          {"id": "p1", "actor": ["Nell Garside", "Garside", "Nell"], "kind": "statement", "source": "t128.1", "date": "2026-05-05", "date_source": "mentioned", "values": [["30 June", "June 30"], ["2,300"]], "excerpt": "will stay closed until 30 June while the"}
+        ],
+        "in_force": ["p1"]
+      }
     }
   ]
 }
