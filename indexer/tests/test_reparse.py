@@ -18,10 +18,14 @@ from src import main, reparse
 from src.database import EMBEDDING_DIM, SCHEMA_VERSION, Database
 from src.migrations import runner
 from src.queue import (
+    ERROR_CLASS_RETRYABLE,
+    PERMISSION_DEFERRED_ERROR,
     REASON_INITIAL_SCAN,
     REASON_ON_CREATED,
     REASON_REPARSE,
     REPARSE_ENQUEUE_SQL,
+    STAGE_PARSE,
+    STAGE_TRASHED,
     IndexingQueue,
 )
 from src.threader import Threader
@@ -598,7 +602,9 @@ class TestReparseVisibility:
         main._maybe_log_queue_heartbeat(queue)
         [line] = _lines(caplog, "reparse")
         assert line.levelno == logging.INFO
-        assert line.getMessage() == ("reparse: remaining=3 reparsed_since_last_heartbeat=0 dead=0")
+        assert line.getMessage() == (
+            "reparse: remaining=3 parked_trashed=0 reparsed_since_last_heartbeat=0 dead=0"
+        )
 
         # Two reparse, one dead-letters.
         queue.mark_dead_terminal(paths[2], stage="parse", error="oversized: too large")
@@ -626,7 +632,7 @@ class TestReparseVisibility:
         queue.enqueue_reparse()
         clock["t"] += main.QUEUE_HEARTBEAT_INTERVAL_SECS
         main._maybe_log_queue_heartbeat(queue)
-        assert len(_lines(caplog, "reparse: remaining=1 ")) == 1
+        assert len(_lines(caplog, "reparse: remaining=1 parked_trashed=0 ")) == 1
         _drain(db, queue, make_mock_embedder(_VECTOR))
         caplog.clear()
         clock["t"] += main.QUEUE_HEARTBEAT_INTERVAL_SECS
@@ -636,6 +642,160 @@ class TestReparseVisibility:
         assert line.getMessage() == (
             "reparse complete: 1 message(s) reparsed since the indexer started, 0 dead-lettered"
         )
+        db.close()
+
+
+class TestParkedTrashedReparse:
+    """#1331: reparse rows parked as trashed never drain, so the
+    heartbeat counts them apart from ``remaining``."""
+
+    @staticmethod
+    def _park(queue: IndexingQueue, path: str) -> None:
+        queue.defer(
+            path,
+            stage=STAGE_TRASHED,
+            error="file is T-flagged; parked until reaped or restored",
+            error_class=ERROR_CLASS_RETRYABLE,
+            delay_seconds=main.TRASHED_DEFER_SECS,
+        )
+
+    def test_counts_split_parked_rows_from_drainable_ones(self, tmp_path):
+        db, queue, paths = _index(tmp_path, ["a", "b", "c", "d", "e"])
+        queue.enqueue_reparse()
+        self._park(queue, paths[0])
+        queue.defer(
+            paths[1],
+            stage=STAGE_PARSE,
+            error=PERMISSION_DEFERRED_ERROR,
+            error_class=ERROR_CLASS_RETRYABLE,
+            delay_seconds=60,
+        )
+        queue.mark_failed(paths[2], stage="parse", error="ValueError")
+        queue.mark_dead_terminal(paths[3], stage="parse", error="oversized: too large")
+        counts = queue.heartbeat_counts()
+        assert (
+            counts["pending"],
+            counts["retrying"],
+            counts["deferred_permission"],
+            counts["parked_trashed"],
+            counts["dead"],
+        ) == (1, 1, 1, 1, 1)
+        # Drainable: pending, retrying, deferred. Parked and dead apart.
+        assert (
+            counts["reparse"],
+            counts["reparse_parked_trashed"],
+            counts["reparse_dead"],
+        ) == (3, 1, 1)
+        db.close()
+
+    def test_completion_fires_with_parked_rows_left_and_only_once(self, tmp_path, caplog, clock):
+        caplog.set_level(logging.INFO)
+        db, queue, paths = _index(tmp_path, ["a", "b", "c"])
+        queue.enqueue_reparse()
+        self._park(queue, paths[0])
+        clock["t"] += main.QUEUE_HEARTBEAT_INTERVAL_SECS
+        main._maybe_log_queue_heartbeat(queue)
+        [line] = _lines(caplog, "reparse")
+        assert line.levelno == logging.INFO
+        assert line.getMessage() == (
+            "reparse: remaining=2 parked_trashed=1 reparsed_since_last_heartbeat=0 dead=0"
+        )
+
+        _drain(db, queue, make_mock_embedder(_VECTOR))
+        # The parked row is not due, so it is still queued.
+        assert queue.heartbeat_counts()["reparse_parked_trashed"] == 1
+        caplog.clear()
+        clock["t"] += main.QUEUE_HEARTBEAT_INTERVAL_SECS
+        main._maybe_log_queue_heartbeat(queue)
+        [line] = _lines(caplog, "reparse")
+        assert line.levelno == logging.INFO
+        assert line.getMessage() == (
+            "reparse complete: 2 message(s) reparsed since the indexer started, "
+            "0 dead-lettered, 1 still parked as trashed (reparsed if restored)"
+        )
+
+        for _ in range(2):
+            caplog.clear()
+            clock["t"] += main.QUEUE_HEARTBEAT_INTERVAL_SECS
+            main._maybe_log_queue_heartbeat(queue)
+            assert _lines(caplog, "reparse") == []
+        assert MARKER not in caplog.text
+        db.close()
+
+    def test_completion_with_parked_and_dead_rows_warns(self, tmp_path, caplog, clock):
+        caplog.set_level(logging.INFO)
+        db, queue, paths = _index(tmp_path, ["a", "b", "c"])
+        queue.enqueue_reparse()
+        self._park(queue, paths[0])
+        queue.mark_dead_terminal(paths[1], stage="parse", error="oversized: too large")
+        clock["t"] += main.QUEUE_HEARTBEAT_INTERVAL_SECS
+        main._maybe_log_queue_heartbeat(queue)
+        [line] = _lines(caplog, "reparse")
+        assert line.getMessage() == (
+            "reparse: remaining=1 parked_trashed=1 reparsed_since_last_heartbeat=0 dead=1"
+        )
+        _drain(db, queue, make_mock_embedder(_VECTOR))
+        caplog.clear()
+        clock["t"] += main.QUEUE_HEARTBEAT_INTERVAL_SECS
+        main._maybe_log_queue_heartbeat(queue)
+        [line] = _lines(caplog, "reparse")
+        assert line.levelno == logging.WARNING
+        assert line.getMessage() == (
+            "reparse complete: 1 message(s) reparsed since the indexer started, "
+            "1 dead-lettered (make requeue-dead retries them), "
+            "1 still parked as trashed (reparsed if restored)"
+        )
+        assert MARKER not in caplog.text
+        db.close()
+
+    def test_a_re_parked_trashed_row_does_not_repeat_the_completion_line(
+        self, tmp_path, caplog, clock
+    ):
+        """Codex review round 1 on #1334: a parked row that comes due
+        while its file is still trashed is claimed and parked again; that
+        claim must not re-arm the completion line."""
+        caplog.set_level(logging.INFO)
+        db, queue, _paths = _index(tmp_path, ["a"])
+        trashed = tmp_path / "INBOX" / "cur" / "t0:2,ST"
+        _write_eml(trashed, "t0@example.com", f"t {MARKER}")
+        queue.enqueue(str(trashed), REASON_INITIAL_SCAN)
+        _drain(db, queue, make_mock_embedder(_VECTOR))
+        queue.enqueue_reparse()
+
+        def drain_skipping_trashed() -> None:
+            main._drain_queue_batched(
+                db,
+                make_mock_embedder(_VECTOR),
+                Threader(db),
+                queue,
+                batch_size=4,
+                timing_aggregator=TimingAggregator(window=4),
+                skip_trashed=True,
+            )
+
+        drain_skipping_trashed()
+        assert queue.heartbeat_counts()["reparse_parked_trashed"] == 1
+        caplog.clear()
+        clock["t"] += main.QUEUE_HEARTBEAT_INTERVAL_SECS
+        main._maybe_log_queue_heartbeat(queue)
+        [line] = _lines(caplog, "reparse")
+        assert line.getMessage() == (
+            "reparse complete: 1 message(s) reparsed since the indexer started, "
+            "0 dead-lettered, 1 still parked as trashed (reparsed if restored)"
+        )
+
+        # The park expires while the file is still trashed: claimed, parked again.
+        db._conn.execute(
+            "UPDATE indexing_jobs SET next_attempt_at = ?", ("2000-01-01T00:00:00+00:00",)
+        )
+        db._conn.commit()
+        drain_skipping_trashed()
+        assert queue.heartbeat_counts()["reparse_parked_trashed"] == 1
+        caplog.clear()
+        clock["t"] += main.QUEUE_HEARTBEAT_INTERVAL_SECS
+        main._maybe_log_queue_heartbeat(queue)
+        assert _lines(caplog, "reparse") == []
+        assert MARKER not in caplog.text
         db.close()
 
 
