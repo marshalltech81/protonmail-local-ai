@@ -17,7 +17,7 @@ from fastmcp.exceptions import ToolError
 from src.lib.predicates import InvalidFilterError
 from src.lib.sqlite import ChunkResult, Database
 from src.tools.brief import _finding_lines, _finding_source
-from src.tools.intelligence import EvidenceRef, _citation, _citation_lines
+from src.tools.intelligence import EvidenceRef, _chunk_header, _citation, _citation_lines
 from src.tools.outputs import CheckedFinding, GetMessageOutput, ListedMessage
 from src.tools.retrieval import register_retrieval_tools
 
@@ -321,3 +321,34 @@ def test_intelligence_prose_says_why_a_date_is_unknown(status, words):
     )
     [source_line] = [ln for ln in _finding_lines([finding]) if ln.lstrip().startswith("[E1]")]
     assert f"alice@example.test, {words}: " in source_line
+
+
+@pytest.mark.parametrize(
+    ("date", "status", "field"),
+    [
+        ("2024-03-10T09:00:00+00:00", "parsed", "| sent 2024-03-10T09:00 |"),
+        (None, "missing", "| sent unknown (no Date header) |"),
+        (None, "invalid", "| sent unknown (unparseable Date header) |"),
+        (None, None, "| sent not yet checked |"),
+    ],
+)
+def test_the_model_sees_why_a_date_is_unknown(date, status, field):
+    """Review round 3: the evidence header the model reads (ask_mailbox,
+    brief_issue, check_conclusion, extract_from_emails) tells a missing
+    or unparseable Date header from one not yet checked, within the
+    header budget."""
+    chunk = ChunkResult(
+        chunk_id="c",
+        message_id="m@example.test",
+        claimant_id="m@example.test#1a2b3c4d",
+        thread_id="t",
+        chunk_index=0,
+        text="text",
+        char_start=0,
+        char_end=4,
+        message_sender="alice@example.test",
+        message_sender_ambiguous=False,
+        message_date=date,
+        message_sent_at_status=status,
+    )
+    assert field in _chunk_header(chunk, 4, label="E1")

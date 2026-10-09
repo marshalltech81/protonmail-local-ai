@@ -1994,6 +1994,12 @@ class EvidenceRef:
 # them cut to ``_LABELLED_FIELD_CHARS``, so with one thread's
 # 2,000-character share a header can never crowd out its passage text.
 _LABELLED_HEADER_MAX_CHARS = 512
+# The ``sent`` field of a passage header without a date, by
+# ``sent_at_status`` (#1080).
+_SENT_UNKNOWN_HEADER = {
+    "missing": "unknown (no Date header)",
+    "invalid": "unknown (unparseable Date header)",
+}
 _LABELLED_FIELD_CHARS = 96
 
 
@@ -2053,7 +2059,15 @@ def _render_chunk_header(
             if short
             else clip(name, HEADER_CHAR_LIMIT)
         ) + note
-        sent = (chunk.message_date or "unknown date")[:16]
+        # Fixed text says why a send date is unknown (#1080); the
+        # database returns no date for one not yet checked.
+        status = chunk.message_sent_at_status
+        if chunk.message_date:
+            sent = chunk.message_date[:16]
+        elif status is None:
+            sent = "not yet checked"
+        else:
+            sent = _SENT_UNKNOWN_HEADER.get(status, "unknown date")
         prefix = f"{label} | message {claimant} | from {sender} | sent {sent} | "
         if scope:
             prefix += f"{scope} | "
