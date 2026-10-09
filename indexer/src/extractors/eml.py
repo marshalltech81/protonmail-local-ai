@@ -52,8 +52,11 @@ payload:
 Each budget that cut the text is reported to the parent, which logs it
 through ``warn_extractor_cap``, so the result is marked incomplete
 (#1242). So is a decode that lost bytes: a body text part's
-(``eml_body_decode``), a nested email's base64, and any nested email in
-quoted-printable, whose loss records nothing to detect (#1288). The
+(``eml_body_decode``), a nested email's base64, and any body text part
+or nested email in quoted-printable, whose loss records nothing to
+detect (#1288). A nested email in any other transfer encoding
+(uuencode and its aliases included) is not decoded: only its label is
+rendered, as an ``eml_nested_messages`` cut. The
 decoders' fallbacks (headers, part filenames, body charsets) replace
 characters rather than drop text: they are counted
 (``eml_*_degraded``, #1314) and do not mark the text incomplete (#1315).
@@ -122,6 +125,11 @@ _MAX_DECODED_BYTES = parser.MAX_DECODED_ATTACHMENT_BYTES
 # Bytes of the child's output read: the text budget at UTF-8's worst
 # case of four bytes a character, plus the frames.
 _MAX_OUTPUT_BYTES = 4 * _MAX_TEXT_CHARS + 64 * 1024
+
+# Transfer encodings a nested email is read in: identity, or decoded as
+# the parser decodes them. Any other (uuencode and its aliases included)
+# is left unread and counted as a cut.
+_READ_ENCODINGS = frozenset({"", "7bit", "8bit", "binary", "base64", "quoted-printable"})
 
 # The budgets the child may report as having cut the text.
 _CAP_NAMES = frozenset(
@@ -194,7 +202,9 @@ def extract_text(payload: bytes) -> tuple[str, list[str]]:
     decodable = [_MAX_DECODED_BYTES]
     # Depth first: a nested email's text follows its parent's body and
     # precedes the parent's next nested email.
-    stack: list[tuple[email.message.Message, int]] = [(root, 1)]
+    # ``None``: a nested email in a transfer encoding no decoder here
+    # reads, shown by its label alone.
+    stack: list[tuple[email.message.Message | None, int]] = [(root, 1)]
     # The decoders' fallbacks, whose lines the child cannot log, are
     # counted in ``walk.degraded`` and sent to the parent (#1314).
     degraded = walk.degraded
@@ -203,9 +213,12 @@ def extract_text(payload: bytes) -> tuple[str, list[str]]:
         # A section per message: its label and header lines, then its
         # body after a blank line; sections apart by a blank line.
         lines = [f"[Attached message, depth {depth}]"] if depth > 1 else []
-        lines.extend(_header_lines(msg, caps, degraded))
+        if msg is not None:
+            lines.extend(_header_lines(msg, caps, degraded))
         if lines:
             text.add(("\n\n" if text.pieces else "") + "\n".join(lines))
+        if msg is None:
+            continue
         counted: Counter[str] = Counter()
         start = len(walk.nested)
         body, _ = parser._extract_body_and_attachments(msg, caps=counted, walk=walk)
@@ -223,8 +236,15 @@ def extract_text(payload: bytes) -> tuple[str, list[str]]:
             continue
         # Decoded in document order, so the decoded-bytes budget goes to
         # the first ones; pushed in reverse, so the first is rendered first.
-        inner_messages: list[email.message.Message] = []
+        inner_messages: list[email.message.Message | None] = []
         for part in found:
+            encoding = str(part.get("Content-Transfer-Encoding", "")).strip().lower()
+            if encoding not in _READ_ENCODINGS:
+                # uuencode and its aliases, or anything else: no decoder,
+                # so the transport text is never indexed (review round 3).
+                caps["eml_nested_messages"] = None
+                inner_messages.append(None)
+                continue
             inner, lost = _inner_message(part, decodable)
             if lost:
                 caps["eml_nested_messages"] = None

@@ -1426,9 +1426,12 @@ characters per header and 10,000,000 characters of text; a budget
 that cut the text is logged through the extractor-cap WARNING
 (`eml_*`) and marks the text incomplete, and so does a decode that
 lost bytes: a body text part's (`eml_body_decode`), a nested email's
-base64 (`eml_nested_messages`), and any nested email in
-quoted-printable, whose loss the standard library records nothing for
-(counted as lossy until #1288 detects it). The decoders' fallbacks are
+base64 (`eml_nested_messages`), and any body text part or nested email
+in quoted-printable, whose loss the standard library records nothing
+for (counted as lossy until #1288 detects it). A nested email in any
+other transfer encoding (uuencode and its aliases included) is not
+decoded: only its depth label is indexed, and it counts as
+`eml_nested_messages`. The decoders' fallbacks are
 counted as `eml_headers_degraded` (a header: an unknown charset, raw
 8-bit bytes that are not UTF-8, encoded-words kept as sent),
 `eml_filenames_degraded` (a part's filename) and

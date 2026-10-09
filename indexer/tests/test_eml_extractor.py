@@ -10,6 +10,7 @@ patched; the rest run the real child.
 from __future__ import annotations
 
 import base64
+import binascii
 import email
 import logging
 from collections import Counter
@@ -606,3 +607,63 @@ class TestReviewRound2:
         body, _ = parser._extract_body_and_attachments(msg, walk=walk)
         assert body == "caf�"
         assert walk.degraded == Counter({parser.CHARSET_DEGRADED: 1})
+
+
+class TestReviewRound3:
+    """Codex round 3 on #1311: guards decided from the declared
+    Content-Transfer-Encoding alone, as the owner decided for round 2."""
+
+    def _extract(self, payload: bytes, caplog) -> extractors.ExtractionResult:
+        extractors.drain_extractor_counts()
+        with caplog.at_level(logging.WARNING):
+            result = extract(content_type="message/rfc822", filename="f.eml", payload=payload)
+        assert result.status == STATUS_SUCCESS
+        assert MARKER not in caplog.text
+        return result
+
+    def test_a_quoted_printable_body_part_is_a_cut(self, caplog):
+        """Finding 1: a quoted-printable body loss records nothing to
+        detect, so the part counts as lossy (until #1288)."""
+        payload = (
+            HDR + b"Content-Type: text/plain\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n"
+            b"visible =\rtail " + MARKER.encode()
+        )
+        result = self._extract(payload, caplog)
+        assert result.text_complete is False
+        assert "extractor cap eml_body_decode:" in caplog.text
+
+    def test_the_default_walk_ignores_a_quoted_printable_body(self):
+        msg = email.message_from_bytes(
+            b"Content-Type: text/plain\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\nok"
+        )
+        caps: Counter[str] = Counter()
+        assert parser._extract_body_and_attachments(msg, caps=caps)[0] == "ok"
+        assert caps == Counter()
+
+    @pytest.mark.parametrize("encoding", [b"x-uuencode", b"uuencode", b"uue", b"x-uue", b"x-other"])
+    def test_a_nested_email_in_an_unhandled_encoding_is_labelled_and_cut(self, encoding, caplog):
+        """Finding 2: no decoder; the encoded transport text is never
+        indexed, the depth label shows the skip, and the text is
+        incomplete."""
+        inner = b"Subject: n\r\n\r\nnested " + MARKER.encode() + b"\r\n"
+        uu = b"begin 644 x\n" + binascii.b2a_uu(inner) + b"`\nend\n"
+        part = (
+            b"Content-Type: message/rfc822\r\nContent-Disposition: attachment\r\n"
+            b"Content-Transfer-Encoding: " + encoding + b"\r\n\r\n" + uu
+        )
+        result = self._extract(_multipart(b"Content-Type: text/plain\r\n\r\nroot", part), caplog)
+        assert result.text == (
+            "Subject: s\nFrom: a@example.test\n\nroot\n\n[Attached message, depth 2]"
+        )
+        assert result.text_complete is False
+        assert "extractor cap eml_nested_messages:" in caplog.text
+
+    @pytest.mark.parametrize("encoding", [b"7bit", b"8bit", b"binary", b"7BIT"])
+    def test_identity_encodings_are_rendered(self, encoding, caplog):
+        part = (
+            b"Content-Type: message/rfc822\r\nContent-Disposition: attachment\r\n"
+            b"Content-Transfer-Encoding: " + encoding + b"\r\n\r\n" + _text("plain nested")
+        )
+        result = self._extract(_multipart(part), caplog)
+        assert result.text_complete is True
+        assert result.text is not None and "plain nested" in result.text

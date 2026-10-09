@@ -1315,7 +1315,8 @@ class BodyWalk:
     ``degraded`` counts the decoders' fallbacks (``HEADER_DEGRADED``,
     ``FILENAME_DEGRADED``, ``CHARSET_DEGRADED``), whose lines a caller in
     the extractor child cannot log; ``decode_lost_parts`` counts the text
-    parts whose transfer decoding lost bytes (``_decode_lost_bytes``)."""
+    parts whose transfer decoding lost bytes (``_decode_lost_bytes``) or
+    may have (any quoted-printable part, #1288)."""
 
     parts_left: int = MAX_WALKED_PARTS
     text_parts_left: int = MAX_BODY_TEXT_PARTS
@@ -1479,7 +1480,13 @@ def _extract_body_and_attachments(
             continue
         text_parts += 1
         payload = _decoded_payload(part)
-        if walk is not None and _decode_lost_bytes(part):
+        # A quoted-printable loss records no defect to read, so in a
+        # body-only walk every quoted-printable text part counts as lossy
+        # until #1288 detects it (review round 3 on #1311).
+        if walk is not None and (
+            _decode_lost_bytes(part)
+            or str(part.get("Content-Transfer-Encoding", "")).strip().lower() == "quoted-printable"
+        ):
             walk.decode_lost_parts += 1
         text = _safe_decode(
             payload,

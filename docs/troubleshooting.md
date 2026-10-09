@@ -1656,7 +1656,8 @@ only, never filenames or text (`make logs`):
   - `ppt_output_bytes`: the same cap on the `.ppt` reader's output for a
     legacy `.ppt` (#957).
   - `eml_body_decode`: a body text part of an attached email whose
-    base64 decoding lost bytes (#922).
+    base64 decoding lost bytes, or any quoted-printable one, whose loss
+    cannot be detected yet (#922, #1288).
   - `eml_header_chars`, `eml_text_chars`, `eml_parts`, `eml_text_parts`,
     `eml_nested_messages`: an attached email's text (#922) was cut: a
     Subject, From, To, Cc or Date header over 2,000 characters, the
@@ -1666,7 +1667,9 @@ only, never filenames or text (`make logs`):
     transfer-decoded nested emails, or a transfer encoding that does
     not decode) or read with bytes lost (a malformed base64 encoding,
     or any quoted-printable one, whose loss cannot be detected yet:
-    #1288).
+    #1288), or left unread because no decoder here reads its transfer
+    encoding (uuencode and its aliases, or any other): only its
+    `[Attached message, depth N]` label is indexed.
   - `pptx_slides`, `pptx_shapes`, `pptx_table_cells`,
     `pptx_text_chars`: the walk over a PowerPoint deck stopped at its
     slide budget (5,000 slide-list entries), shape budget (100,000,
