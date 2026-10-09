@@ -51,6 +51,15 @@ log = logging.getLogger("indexer.parser")
 #   ``MAX_ATTACHED_MESSAGE_FIELDS`` budget;
 # * ``transport_decode``: a transfer-encoded attached email that does
 #   not decode;
+# * ``transport_lossy``: a transfer-encoded attached email that decoded
+#   with bytes lost (base64), or whose loss cannot be detected
+#   (quoted-printable, #1288): its lenient decode is kept, marked
+#   incomplete, and the attachments inside it are walked, though one
+#   whose boundary was lost is missing (review round 13 on #1311);
+# * ``leaf_transport_lossy``: a leaf attachment an extractor reads whose
+#   base64 decode lost bytes, or an email carried as a leaf for the
+#   ``eml`` extractor in any encoding other than identity or base64: its
+#   text is partial, but the parser never walks a leaf for attachments;
 # * ``decoded_bytes``: one past ``MAX_DECODED_ATTACHMENT_BYTES``;
 # * ``container_serialize``: a container the generator refuses;
 # * ``body_parts``: text parts past ``MAX_BODY_TEXT_PARTS`` are left out
@@ -97,6 +106,8 @@ PARSE_CAPS: tuple[str, ...] = (
     "attached_depth",
     "attached_fields",
     "transport_decode",
+    "transport_lossy",
+    "leaf_transport_lossy",
     "decoded_bytes",
     "container_serialize",
     "body_parts",
@@ -130,6 +141,7 @@ ATTACHMENT_LOSS_CAPS: tuple[str, ...] = (
     "attached_depth",
     "attached_fields",
     "transport_decode",
+    "transport_lossy",
     "decoded_bytes",
     "container_serialize",
     "mime_parts",
@@ -303,6 +315,35 @@ def _decode_lost_bytes(part: email.message.Message) -> bool:
     #1286). Quoted-printable and uuencode failures record no defect, so
     they are not detected."""
     return any(isinstance(d, _DECODE_LOSS_DEFECTS) for d in part.defects)
+
+
+# Defects recording a header-block line the parse dropped: a first line
+# starting with whitespace (a continuation with no header before it), or,
+# in a message's own headers, a ``From `` line after the first. A leading
+# ``From `` envelope line, as in an mbox export, is kept as the envelope.
+DROPPED_HEADER_DEFECTS = (
+    email.errors.FirstHeaderLineIsContinuationDefect,
+    email.errors.MisplacedEnvelopeHeaderDefect,
+)
+
+
+def _transport_lines_dropped(container: email.message.Message) -> bool:
+    """Whether the parse dropped a line of ``container``'s transport text
+    from one of its pseudo messages, so ``_transport_text`` cannot hold
+    it: a first line starting with whitespace (a continuation with no
+    header before it) or with ``From `` (taken as the mbox envelope).
+    Reads only what the parse recorded (review round 8 on #1311)."""
+    children = container.get_payload()
+    if not isinstance(children, list):
+        return False
+    return any(
+        child.get_unixfrom() is not None
+        or any(
+            isinstance(d, email.errors.FirstHeaderLineIsContinuationDefect) for d in child.defects
+        )
+        for child in children
+        if isinstance(child, email.message.Message)
+    )
 
 
 def _base64_transport_lost(data: bytes) -> bool:
@@ -806,7 +847,7 @@ def _unfold(text: str) -> str:
     return _FOLD_RE.sub("", text)
 
 
-def _part_filename(part: email.message.Message) -> str | None:
+def _part_filename(part: email.message.Message, degraded: Counter[str] | None = None) -> str | None:
     """``_raw_part_filename`` read from the part's headers unfolded (#688).
 
     The headers are unfolded before ``get_filename()`` decodes them, so a
@@ -815,16 +856,19 @@ def _part_filename(part: email.message.Message) -> str | None:
     Content-Disposition and Content-Type values go on a throwaway message,
     copied raw (``raw_items()``; the compat32 policy stores and fetches
     them unchanged), so the part itself is never modified: attached emails
-    are re-serialized later.
+    are re-serialized later. ``degraded`` (when given) counts the
+    fallbacks below, as for ``_decode_header``.
     """
     headers = email.message.Message()
     for name, value in part.raw_items():
         if name.lower() in ("content-disposition", "content-type"):
             headers[name] = _unfold(value)
-    return _decode_filename_words(_raw_part_filename(headers))
+    return _decode_filename_words(_raw_part_filename(headers, degraded), degraded)
 
 
-def _decode_filename_words(filename: str | None) -> str | None:
+def _decode_filename_words(
+    filename: str | None, degraded: Counter[str] | None = None
+) -> str | None:
     """Decode the RFC 2047 encoded-words the standard library leaves in a
     filename parameter, the same way as Subject (#924).
 
@@ -843,9 +887,11 @@ def _decode_filename_words(filename: str | None) -> str | None:
     if not filename or "=?" not in filename:
         return filename
     try:
-        decoded = _decode_header(filename)
+        decoded = _decode_header(filename, degraded)
         decoded.encode("utf-8")
     except (email.errors.HeaderParseError, ValueError, LookupError) as exc:
+        if degraded is not None:
+            degraded[FILENAME_DEGRADED] += 1
         warn_rate_limited(
             log,
             "attachment filename encoded-words could not be decoded (%s); kept 1 filename as sent",
@@ -855,7 +901,9 @@ def _decode_filename_words(filename: str | None) -> str | None:
     return decoded or filename
 
 
-def _raw_part_filename(part: email.message.Message) -> str | None:
+def _raw_part_filename(
+    part: email.message.Message, degraded: Counter[str] | None = None
+) -> str | None:
     """``part.get_filename()``, falling back to the raw parameter text when
     its charset cannot decode it.
 
@@ -872,6 +920,8 @@ def _raw_part_filename(part: email.message.Message) -> str | None:
     try:
         return part.get_filename()
     except ValueError as exc:
+        if degraded is not None:
+            degraded[FILENAME_DEGRADED] += 1
         # Rate limited (#1330): one crafted message can carry many such parts.
         warn_rate_limited(
             log,
@@ -980,6 +1030,12 @@ def _nesting_exceeds(root: email.message.Message, limit: int, budget: _Serializa
     return False
 
 
+# The Content-Transfer-Encoding values that leave a part's bytes as they
+# are; base64 and quoted-printable are decoded, and any other value on an
+# attached email is not.
+_IDENTITY_ENCODINGS = frozenset({"", "7bit", "8bit", "binary"})
+
+
 def _attachment_payload(
     part: email.message.Message,
     *,
@@ -1024,8 +1080,13 @@ def _attachment_payload(
     would read this attachment's payload).
 
     ``transport_lost`` (when given) gets ``True`` appended when a base64
-    transport decoded but lost bytes (``_base64_transport_lost``); the
-    returned bytes are the lenient decode's either way (#1242).
+    transport decoded but lost bytes (``_base64_transport_lost``), or the
+    transport is quoted-printable, whose loss cannot be detected (#1288),
+    and the loss is counted as ``transport_lossy``; the returned bytes are
+    the lenient decode's either way (#1242). An
+    attached email in any other non-identity transfer encoding (uuencode
+    and its aliases included) keeps the empty payload, counted as
+    ``transport_decode`` when an extractor would read it.
     """
     if not part.is_multipart():
         return _decoded_payload(part), None
@@ -1061,12 +1122,18 @@ def _attachment_payload(
         if decoded is None:
             caps["transport_decode"] += 1
             return b"", None
-        if (
-            transport_lost is not None
-            and encoding == "base64"
-            and _base64_transport_lost(transport)
+        # A quoted-printable loss records nothing to detect, so its bytes
+        # (the lenient decode's) are kept but never certified until
+        # #1288 detects the loss (review round 4 on #1311).
+        if transport_lost is not None and (
+            encoding == "quoted-printable"
+            or _base64_transport_lost(transport)
+            or _transport_lines_dropped(part)
         ):
             transport_lost.append(True)
+            # Counted so the loss is logged, not only flagged (review
+            # round 7 on #1311).
+            caps["transport_lossy"] += 1
         # From here the decoded container is the part: the same depth
         # check, serialization and traversal as an identity-encoded one.
         part = decoded
@@ -1082,6 +1149,14 @@ def _attachment_payload(
             if payload_read:
                 caps["container_serialize"] += 1
             return b"", part
+    if part.get_content_maintype() == "message" and encoding not in _IDENTITY_ENCODINGS:
+        # An attached email in a transfer encoding not decoded here
+        # (uuencode and its aliases, or any other): its parsed form is the
+        # transport text, so no payload is kept and none of it is ever
+        # extracted (review round 4 on #1311). The caller still walks it.
+        if serialize_containers and payload_read:
+            caps["transport_decode"] += 1
+        return b"", None
     if not serialize_containers:
         return b"", None
     # The part's own tree is one level deeper than the email it carries.
@@ -1225,6 +1300,14 @@ class _BodyNode:
     has_text: bool = False
     children: list[int] = field(default_factory=list)
     chosen: int = -1
+    # Body-only walk (``BodyWalk``): whether an alternative or related
+    # container is above this node, and the depth of the attached email
+    # this node belongs to.
+    selected_above: bool = False
+    depth: int = 1
+    # The nearest inline email above (or at) this node that takes part in
+    # an alternative's or related's choice, by node index, or -1.
+    inline_root: int = -1
 
 
 def _selects(node: _BodyNode) -> bool:
@@ -1291,19 +1374,98 @@ def _capped_parts_lost(nodes: list[_BodyNode], capped: list[tuple[int, bool]]) -
     return sum(1 for index, _ in capped if kept[index])
 
 
+@dataclass
+class BodyWalk:
+    """Body-only walks of several messages sharing one budget: the
+    attached-email extractor's (#922), which renders an attached email
+    and the attached emails nested in it.
+
+    In such a walk attachments are neither materialized nor walked into
+    (the enclosing message's parse indexes them); each ``message/rfc822``
+    part met, an attachment or inline, is added to ``nested``, in
+    document order with its depth, already decoded (``decode``, once,
+    where the walk meets it, so the decoded-bytes budget goes in document
+    order), for the caller to render as a message of its own. The
+    exception is an inline one under an alternative or related container
+    (review round 12 on #1311): it takes part in the container's choice
+    like any body part, its decoded email walked into as body, and is
+    rendered in place (``render``) only if chosen. An email past
+    ``max_depth``, or one ``decode`` could not read, is counted in
+    ``nested_lost_parts``; an inline one only when the body could have
+    chosen it. Emails found inside an inline one that was set aside are
+    dropped with it.
+    ``parts_left`` and ``text_parts_left`` are what ``MAX_WALKED_PARTS``
+    and ``MAX_BODY_TEXT_PARTS`` allow across all the walks together.
+    ``degraded`` counts the decoders' fallbacks (``HEADER_DEGRADED``,
+    ``FILENAME_DEGRADED``, ``CHARSET_DEGRADED``), whose lines a caller in
+    the extractor child cannot log; ``decode_lost_parts`` counts the text
+    parts whose transfer decoding lost bytes (``_decode_lost_bytes``) or
+    may have (any quoted-printable part, #1288), and
+    ``structure_lost_parts`` the parts declared ``multipart/*`` that the
+    standard library could not decompose (no or a missing boundary), whose
+    text is lost, and ``header_lost_parts`` the text parts whose header
+    block lost a line to the parse (``DROPPED_HEADER_DEFECTS``). Each
+    counts only parts the body keeps, or would keep had they been read
+    whole."""
+
+    parts_left: int = MAX_WALKED_PARTS
+    text_parts_left: int = MAX_BODY_TEXT_PARTS
+    nested: list[tuple[email.message.Message | None, int]] = field(default_factory=list)
+    degraded: Counter[str] = field(default_factory=Counter)
+    decode_lost_parts: int = 0
+    structure_lost_parts: int = 0
+    header_lost_parts: int = 0
+    nested_lost_parts: int = 0
+    # The depth of the message being walked; the deepest email read; the
+    # caller's decoder of a ``message/rfc822`` part, returning (the email,
+    # or ``None`` when unread; whether text was or may have been lost;
+    # whether an unread one still shows its depth label); and its
+    # renderer of an inline email's label and headers (review round 12).
+    depth: int = 1
+    max_depth: int = MAX_ATTACHED_MESSAGE_DEPTH
+    decode: (
+        Callable[[email.message.Message], tuple[email.message.Message | None, bool, bool]] | None
+    ) = None
+    render: Callable[[email.message.Message, int], str] | None = None
+
+
 def _extract_body_and_attachments(
     msg: email.message.Message,
     caps: Counter[str] | None = None,
+    walk: BodyWalk | None = None,
 ) -> tuple[str, list[Attachment]]:
     """The message's body text and attachments. ``caps`` (when given)
-    counts the content a work cap dropped, by ``PARSE_CAPS`` name."""
+    counts the content a work cap dropped, by ``PARSE_CAPS`` name. With
+    ``walk``, a body-only walk under its shared budget (``BodyWalk``):
+    no attachments are returned."""
     if caps is None:
         caps = Counter()
+    max_parts = MAX_WALKED_PARTS if walk is None else walk.parts_left
+    max_text_parts = MAX_BODY_TEXT_PARTS if walk is None else walk.text_parts_left
     attachments: list[Attachment] = []
     nodes: list[_BodyNode] = []
     text_parts = 0
     # Text parts past MAX_BODY_TEXT_PARTS: (node index, plain or not).
     capped: list[tuple[int, bool]] = []
+    # In a body-only walk, the text parts whose transfer decoding lost or
+    # may have lost bytes, and those whose charset decoding fell back, in
+    # the same form: counted below only if the body could keep them.
+    decode_lossy: list[tuple[int, bool]] = []
+    charset_degraded: list[tuple[int, bool]] = []
+    # And the parts declared ``multipart/*`` the parse left undecomposed,
+    # and the text parts whose header block lost a line to the parse.
+    unsplit: list[tuple[int, bool]] = []
+    header_lost: list[tuple[int, bool]] = []
+    # Body-only walk: the inline emails under an alternative or related,
+    # rendered once the body's choice is known (node, email, depth); the
+    # ones unread or read with bytes lost, counted if the body could keep
+    # them; the other emails found, decoded, with the inline email above
+    # them (inline_root, email or None, lost, label, depth); and the roots
+    # of inline emails, read like a single-part message's root.
+    in_place: list[tuple[int, email.message.Message, int]] = []
+    inline_lost: list[tuple[int, bool]] = []
+    pending: list[tuple[int, email.message.Message | None, bool, bool, int]] = []
+    inline_roots: set[int] = set()
 
     # Depth-first in document order, like ``msg.walk()``, but nothing
     # inside an attachment is a candidate for the body: an attached
@@ -1332,25 +1494,67 @@ def _extract_body_and_attachments(
         if part is None:
             frames.pop()
             continue
-        if walked >= MAX_WALKED_PARTS:
+        if walked >= max_parts:
             caps["mime_parts"] += 1
             break
         walked += 1
         ct = part.get_content_type()
-        filename = _part_filename(part)
+        filename = _part_filename(part, None if walk is None else walk.degraded)
         is_attachment = _is_attachment(part, filename)
         decoded: email.message.Message | None = None
-        if is_attachment:
+        # In a body-only walk, an inline email under an alternative or
+        # related container takes part in its choice (review round 12).
+        inline_email: tuple[email.message.Message | None, bool] | None = None
+        selected_above = parent >= 0 and (nodes[parent].selected_above or _selects(nodes[parent]))
+        node_depth = nodes[parent].depth if parent >= 0 else (1 if walk is None else walk.depth)
+        inline_root = nodes[parent].inline_root if parent >= 0 else -1
+        if walk is not None and ct == "message/rfc822" and part.is_multipart():
+            # Read here, once, in document order (review round 12).
+            inner, email_lost, label = _open_nested(walk, part, node_depth + 1)
+            if not is_attachment and not no_body and selected_above:
+                inline_email = (inner, email_lost)
+                node_depth += 1
+            else:
+                # An attached email, inline or not, is a message of its
+                # own here: its headers and body are rendered as a nested
+                # section, never folded into this body (review round 2).
+                pending.append((inline_root, inner, email_lost, label, node_depth + 1))
+                is_attachment = True
+        elif is_attachment and walk is not None:
+            pass
+        elif is_attachment:
             transport_lost: list[bool] = []
+            module = resolved_extractor_module(ct, filename or "unnamed")
             payload, decoded = _attachment_payload(
                 part,
                 serialize_containers=not in_attachment,
                 budget=budget,
                 caps=caps,
-                payload_read=resolved_extractor_module(ct, filename or "unnamed") is not None,
+                payload_read=module is not None,
                 decode_depth=decode_depth,
                 transport_lost=transport_lost,
             )
+            if (
+                module is not None
+                and not part.is_multipart()
+                and (
+                    _decode_lost_bytes(part)
+                    or (
+                        module == "eml"
+                        and str(part.get("Content-Transfer-Encoding", "")).strip().lower()
+                        not in _IDENTITY_ENCODINGS | {"base64"}
+                    )
+                )
+            ):
+                # A leaf an extractor reads whose base64 decode lost bytes
+                # (round 14), or an email carried as a leaf
+                # (``application/eml``, or named ``.eml``) in a transfer
+                # encoding whose loss is not detected (#1288; round 8):
+                # its decode is kept, never complete, and counted. A leaf
+                # is never walked for attachments, so the manifest stays
+                # whole (review round 13 on #1311).
+                transport_lost.append(True)
+                caps["leaf_transport_lossy"] += 1
             attachments.append(
                 Attachment(
                     filename=filename or "unnamed",
@@ -1366,7 +1570,7 @@ def _extract_body_and_attachments(
                     payload_complete=(
                         bool(payload) and not transport_lost
                         if part.is_multipart()
-                        else not _decode_lost_bytes(part)
+                        else not transport_lost and not _decode_lost_bytes(part)
                     ),
                 )
             )
@@ -1378,9 +1582,39 @@ def _extract_body_and_attachments(
                 alternative=ct == "multipart/alternative",
                 related=ct == "multipart/related",
             )
+            node.selected_above = selected_above
+            node.depth = node_depth
+            node.inline_root = inline_root
             nodes.append(node)
             if parent >= 0 and _selects(nodes[parent]):
                 nodes[parent].children.append(len(nodes) - 1)
+            if inline_email is not None:
+                index = len(nodes) - 1
+                node.inline_root = index
+                inner, email_lost = inline_email
+                if email_lost:
+                    # Unread, or read with bytes lost: counted only if the
+                    # body could keep it.
+                    inline_lost.append((index, True))
+                if inner is None:
+                    continue
+                # Its email is walked into as this node's body; its label
+                # and headers are this node's text if the body keeps it.
+                in_place.append((index, inner, node_depth))
+                inline_roots.add(id(inner))
+                frames.append((iter((inner,)), False, decode_depth, index, False))
+                continue
+            if (
+                walk is not None
+                and part.get_content_maintype() == "multipart"
+                and not part.is_multipart()
+            ):
+                # A declared container the parse left as one undecomposed
+                # payload: nothing in it is read (review round 6 on #1311;
+                # the default walk's same gap is #1348). Counted below
+                # like a lossy text part, only if the body could keep it
+                # (review round 9).
+                unsplit.append((len(nodes) - 1, True))
         elif is_attachment and parent >= 0 and nodes[parent].related:
             # An attachment keeps its position among a related's children
             # as an empty node, so one that is the root makes the related
@@ -1388,6 +1622,8 @@ def _extract_body_and_attachments(
             nodes.append(_BodyNode(parent, alternative=False))
             nodes[parent].children.append(len(nodes) - 1)
         if part.is_multipart():
+            if walk is not None and is_attachment:
+                continue
             # A decoded container stands in for its transport form; its
             # children are one decode deeper.
             if decoded is not None:
@@ -1421,45 +1657,141 @@ def _extract_body_and_attachments(
         # sender's clean plain text); a whitespace-only plain part has no
         # content to prefer (#298).
         is_html = ct == "text/html"
+        root = part is msg or (bool(inline_roots) and id(part) in inline_roots)
         if not is_html and not (
-            ct == "text/plain" or (part is msg and part.get_content_maintype() == "text")
+            ct == "text/plain" or (root and part.get_content_maintype() == "text")
         ):
             continue
-        if text_parts >= MAX_BODY_TEXT_PARTS:
+        if text_parts >= max_text_parts:
             # Counted below, once the body's selection is known.
             capped.append((len(nodes) - 1, not is_html))
             continue
         text_parts += 1
-        text = _safe_decode(_decoded_payload(part), part.get_content_charset() or "utf-8")
+        payload = _decoded_payload(part)
+        # A quoted-printable loss records no defect to read, and a part
+        # in any other encoding not decoded here (uuencode, its aliases,
+        # anything unknown) can come back as its transport text, so in a
+        # body-only walk each counts as lossy until #1288 detects it
+        # (review rounds 3 and 5 on #1311).
+        if walk is not None and (
+            _decode_lost_bytes(part)
+            or str(part.get("Content-Transfer-Encoding", "")).strip().lower()
+            not in _IDENTITY_ENCODINGS | {"base64"}
+        ):
+            decode_lossy.append((len(nodes) - 1, not is_html))
+        if (
+            walk is not None
+            and not root
+            and (
+                any(isinstance(d, DROPPED_HEADER_DEFECTS) for d in part.defects)
+                or part.get_unixfrom() is not None
+            )
+        ):
+            # A part with no blank line after its boundary whose text
+            # starts with whitespace loses that line (review round 11),
+            # and one starting with ``From `` loses it as an mbox
+            # envelope (round 14). A message root's headers and envelope
+            # are checked where its section head is rendered.
+            header_lost.append((len(nodes) - 1, not is_html))
+        fallback: Counter[str] | None = None if walk is None else Counter()
+        text = _safe_decode(payload, part.get_content_charset() or "utf-8", fallback)
+        if fallback:
+            charset_degraded.append((len(nodes) - 1, not is_html))
         node.text = (_html_to_text(text) if is_html else text).strip()
         node.has_text = bool(node.text)
         node.has_plain = node.has_text and not is_html
 
+    if walk is not None:
+        walk.parts_left -= walked
+        walk.text_parts_left -= text_parts
+        kept = _kept_nodes(nodes) if in_place or pending else []
+        for index, inner, depth in in_place:
+            if kept[index] and walk.render is not None:
+                nodes[index].text = walk.render(inner, depth)
+        for under, found, email_lost, label, depth in pending:
+            # Dropped with an inline email set aside above it.
+            if under >= 0 and not kept[under]:
+                continue
+            if email_lost:
+                walk.nested_lost_parts += 1
+            if found is not None or label:
+                walk.nested.append((found, depth))
     body = _assemble_body(nodes)
     if capped:
         lost = _capped_parts_lost(nodes, capped)
         if lost:
             caps["body_parts"] += lost
+    if walk is not None:
+        # Only a part the body keeps, or would keep had its text decoded
+        # whole, changes what is indexed: a loss in an alternative set
+        # aside is not counted (review round 8 on #1311).
+        if decode_lossy:
+            walk.decode_lost_parts += _capped_parts_lost(nodes, decode_lossy)
+        if charset_degraded:
+            walk.degraded[CHARSET_DEGRADED] += _capped_parts_lost(nodes, charset_degraded)
+        if unsplit:
+            walk.structure_lost_parts += _capped_parts_lost(nodes, unsplit)
+        if header_lost:
+            walk.header_lost_parts += _capped_parts_lost(nodes, header_lost)
+        if inline_lost:
+            walk.nested_lost_parts += _capped_parts_lost(nodes, inline_lost)
     return body, attachments
 
 
-def _safe_decode(payload: bytes, charset: str) -> str:
+def _open_nested(
+    walk: BodyWalk, part: email.message.Message, depth: int
+) -> tuple[email.message.Message | None, bool, bool]:
+    """The email a ``message/rfc822`` part met at ``depth`` carries, read
+    by ``walk.decode`` (without one, identity-encoded only), as (email or
+    ``None``, lost, label): past ``walk.max_depth`` it is not read."""
+    if depth > walk.max_depth:
+        return None, True, False
+    if walk.decode is not None:
+        return walk.decode(part)
+    encoding = str(part.get("Content-Transfer-Encoding", "")).strip().lower()
+    payload = part.get_payload()
+    if (
+        encoding in _IDENTITY_ENCODINGS
+        and isinstance(payload, list)
+        and payload
+        and isinstance(payload[0], email.message.Message)
+    ):
+        return payload[0], False, False
+    return None, True, False
+
+
+def _safe_decode(payload: bytes, charset: str, degraded: Counter[str] | None = None) -> str:
     """Decode payload bytes, falling back to utf-8 on unknown charsets.
 
-    ``UnicodeError`` covers codecs that reject ``errors="replace"``
-    (``idna`` raises ``UnicodeError("Unsupported error handling")``).
+    ``ValueError`` covers codecs that reject ``errors="replace"``
+    (``idna`` raises ``UnicodeError("Unsupported error handling")``) and
+    a sender's label holding a NUL, which the codec lookup rejects
+    with a plain ``ValueError`` (review round 14 on #1311).
+    ``degraded`` (when given) counts a fallback or a replacement under
+    ``CHARSET_DEGRADED``. The text returned is always the default path's;
+    a strict decode runs only to detect a replacement, when the lenient
+    one succeeded (review round 5 on #1311: ``idna`` decodes strictly but
+    rejects ``errors="replace"``, so its text is the UTF-8 fallback's).
     """
     try:
-        return payload.decode(charset, errors="replace")
-    except LookupError, UnicodeError:
+        text = payload.decode(charset, errors="replace")
+    except LookupError, ValueError:
+        if degraded is not None:
+            degraded[CHARSET_DEGRADED] += 1
         return payload.decode("utf-8", errors="replace")
+    if degraded is not None:
+        try:
+            payload.decode(charset)
+        except ValueError:
+            degraded[CHARSET_DEGRADED] += 1
+    return text
 
 
 def _clean_id(value: str) -> str:
     return value.strip().strip("<>").strip()
 
 
-def _decode_header(value: str | email.header.Header) -> str:
+def _decode_header(value: str | email.header.Header, degraded: Counter[str] | None = None) -> str:
     """Decode a header value's RFC 2047 encoded-words.
 
     A ``Header`` (raw 8-bit header) already holds decoded chunks. A
@@ -1467,17 +1799,32 @@ def _decode_header(value: str | email.header.Header) -> str:
     is decoded on its own: ``decode_header`` on the whole string rescans
     the rest of the header at every malformed ``=?`` prefix, which is
     quadratic in a hostile Subject.
+
+    ``degraded`` (when given) counts each fallback the decoders below log
+    under ``HEADER_DEGRADED``, for a caller whose log lines do not reach
+    the log (the attached-email extractor's child, #922).
     """
     if isinstance(value, email.header.Header):
-        return _decode_header_parts(email.header.decode_header(value)).strip()
+        return _decode_header_parts(email.header.decode_header(value), degraded).strip()
     if "=?" not in value:
         return value.strip()
     return _decode_encoded_word_runs(
-        value, lambda m: _decode_header_parts(email.header.decode_header(m.group(0)))
+        value, lambda m: _decode_header_parts(email.header.decode_header(m.group(0)), degraded)
     ).strip()
 
 
-def _decode_text_header(value: str | email.header.Header) -> str:
+# The ``degraded`` keys the decoders count their fallbacks under: a
+# header (an encoded-word in a filename included), a part's filename,
+# and a body text part's charset (an unknown label, or bytes the label's
+# codec replaced).
+HEADER_DEGRADED = "header_degraded"
+FILENAME_DEGRADED = "filename_degraded"
+CHARSET_DEGRADED = "charset_degraded"
+
+
+def _decode_text_header(
+    value: str | email.header.Header, degraded: Counter[str] | None = None
+) -> str:
     """Decode a header stored as text (Subject, the From fallback).
 
     compat32 returns a raw 8-bit header as one chunk, so an encoded-word
@@ -1487,8 +1834,10 @@ def _decode_text_header(value: str | email.header.Header) -> str:
     their encoded-words after the address is fixed. The search is one
     linear pass of ``_ENCODED_WORD_RE``, whose groups stop at ``?``.
     """
-    text = _decode_header(value)
+    text = _decode_header(value, degraded)
     if isinstance(value, email.header.Header) and _ENCODED_WORD_RE.search(text):
+        if degraded is not None:
+            degraded[HEADER_DEGRADED] += 1
         warn_rate_limited(
             log,
             "raw 8-bit header holds encoded-words that were not decoded; kept 1 header as sent",
@@ -1497,7 +1846,9 @@ def _decode_text_header(value: str | email.header.Header) -> str:
     return text
 
 
-def _decode_header_parts(parts: list[tuple[bytes | str, str | None]]) -> str:
+def _decode_header_parts(
+    parts: list[tuple[bytes | str, str | None]], degraded: Counter[str] | None = None
+) -> str:
     decoded = []
     for part, charset in parts:
         if isinstance(part, bytes):
@@ -1520,11 +1871,13 @@ def _decode_header_parts(parts: list[tuple[bytes | str, str | None]]) -> str:
             # are mail content).
             encoding = charset or "utf-8"
             if encoding.lower() == _RAW_8BIT_CHARSET:
-                decoded.append(_decode_raw_8bit(part))
+                decoded.append(_decode_raw_8bit(part, degraded))
                 continue
             try:
                 decoded.append(part.decode(encoding, errors="replace"))
             except (LookupError, ValueError) as exc:
+                if degraded is not None:
+                    degraded[HEADER_DEGRADED] += 1
                 warn_rate_limited(
                     log,
                     "header encoded-word charset could not be decoded (%s); decoded 1 word as UTF-8",
@@ -1543,13 +1896,15 @@ def _decode_header_parts(parts: list[tuple[bytes | str, str | None]]) -> str:
 _RAW_8BIT_CHARSET = "unknown-8bit"
 
 
-def _decode_raw_8bit(part: bytes) -> str:
+def _decode_raw_8bit(part: bytes, degraded: Counter[str] | None = None) -> str:
     """Decode a raw 8-bit header chunk: exactly and silently when it is
     valid UTF-8, otherwise as UTF-8 with replacement characters and one
     rate-limited WARNING, since characters were lost (#1147)."""
     try:
         return part.decode("utf-8")
     except UnicodeDecodeError:
+        if degraded is not None:
+            degraded[HEADER_DEGRADED] += 1
         warn_rate_limited(
             log,
             "raw 8-bit header is not UTF-8; decoded 1 header chunk with replacement characters",

@@ -6,6 +6,7 @@ encoded headers, address parsing, date fallback, and folder derivation.
 """
 
 import base64
+import binascii
 import dataclasses
 import email.errors
 import email.utils
@@ -4059,6 +4060,13 @@ def _addresses(to: bytes) -> bytes:
 _INNER_EMAIL = (
     b"From: a@example.test\r\nSubject: SYNTHETIC_HEADER_MARKER\r\n\r\nSYNTHETIC_TEXT_MARKER\r\n"
 )
+
+
+def _uu_lines(data: bytes) -> bytes:
+    """``data`` uuencoded, 45 bytes a line."""
+    return b"".join(binascii.b2a_uu(data[i : i + 45]) for i in range(0, len(data), 45))
+
+
 _LONG_LOCAL = b"SYNTHETIC_HEADER_MARKER" + b"x" * 1000
 _LONG_SUBJECT = b"SYNTHETIC_HEADER_MARKER" + b"s" * 3000
 _LONG_ID = _id_of(999, marker="SYNTHETIC_HEADER_MARKER")
@@ -4073,7 +4081,15 @@ def _only_attachment_is_empty(msg) -> bool:
     return msg.body_text == "PARENT_BODY" and [a.payload for a in msg.attachments] == [b""]
 
 
+def _only_attachment_is_kept(msg) -> bool:
+    return msg.body_text == "PARENT_BODY" and [a.payload != b"" for a in msg.attachments] == [True]
+
+
 _BASE64_RFC822 = b"Content-Type: message/rfc822\r\nContent-Transfer-Encoding: base64\r\n"
+_ENCODED_INNER = base64.encodebytes(_INNER_EMAIL)
+# One base64 quantum replaced by non-alphabet characters: the lenient
+# decode succeeds with bytes lost.
+_LOSSY_BASE64_INNER = _ENCODED_INNER[:8] + b"!!!!" + _ENCODED_INNER[12:]
 
 
 def _base64_chain(levels: int) -> bytes:
@@ -4111,6 +4127,18 @@ def _chain_stops_at_the_depth_cap(msg) -> bool:
 # instead sets those parser limits for the shape (the #1144 address
 # budget, so a few short headers can exhaust it). ``pinned`` is the
 # parse result before the caps were logged.
+def _nested_rfc822_with_note(levels: int) -> bytes:
+    """``levels`` identity-encoded attached emails around a message that
+    carries a ``note.txt`` attachment."""
+    leaf = (
+        b'Content-Type: multipart/mixed; boundary="n"\r\n\r\n'
+        b"--n\r\nContent-Type: text/plain\r\n\r\nSYNTHETIC_TEXT_MARKER\r\n"
+        b'--n\r\nContent-Type: text/plain\r\nContent-Disposition: attachment; filename="note.txt"'
+        b"\r\n\r\nNOTE_BODY\r\n--n--\r\n"
+    )
+    return b"Content-Type: message/rfc822\r\n\r\n" * (levels - 1) + leaf
+
+
 _CAP_SHAPES = {
     "attached_depth": (
         _with_attachment(b"Content-Type: message/rfc822\r\n", _nested_rfc822(21), _TXT_FILENAME),
@@ -4160,6 +4188,49 @@ _CAP_SHAPES = {
         "transport_decode=1",
         _only_attachment_is_empty,
     ),
+    # Review round 4 on #1311: an attached email in a transfer encoding
+    # the parser does not decode (uuencode, its aliases, anything else)
+    # keeps no payload, so its transport text is never extracted.
+    "transport_decode_uuencode": (
+        _with_attachment(
+            b"Content-Type: message/rfc822\r\nContent-Transfer-Encoding: x-uuencode\r\n",
+            b"begin 644 x\n" + _uu_lines(_INNER_EMAIL) + b"`\nend\n",
+        ),
+        False,
+        "transport_decode=1",
+        _only_attachment_is_empty,
+    ),
+    # Review round 7 on #1311: an attached email whose transport decoded
+    # with bytes lost (base64 with an invalid-character defect), or may
+    # have (quoted-printable, #1288), keeps the lenient decode, marked
+    # incomplete, and is counted so the loss is logged.
+    "transport_lossy_base64": (
+        _with_attachment(_BASE64_RFC822, _LOSSY_BASE64_INNER),
+        False,
+        "transport_lossy=1",
+        _only_attachment_is_kept,
+    ),
+    "transport_lossy_quoted_printable": (
+        _with_attachment(
+            b"Content-Type: message/rfc822\r\nContent-Transfer-Encoding: quoted-printable\r\n",
+            quopri.encodestring(_INNER_EMAIL),
+        ),
+        False,
+        "transport_lossy=1",
+        _only_attachment_is_kept,
+    ),
+    # Review round 13 on #1311: an email carried as a leaf for the eml
+    # extractor (round 8) is never walked for attachments, so its lossy
+    # transport loses text only, not attachments: a separate name.
+    "leaf_transport_lossy": (
+        _with_attachment(
+            b"Content-Type: application/eml\r\nContent-Transfer-Encoding: quoted-printable\r\n",
+            quopri.encodestring(_INNER_EMAIL),
+        ),
+        False,
+        "leaf_transport_lossy=1",
+        _only_attachment_is_kept,
+    ),
     "decoded_bytes": (
         _with_attachment(
             b"Content-Type: message/rfc822\r\nContent-Transfer-Encoding: base64\r\n",
@@ -4186,6 +4257,47 @@ _CAP_SHAPES = {
                 b"From: a@example.test\r\nX: SYNTHETIC_HEADER_MARKER\x0brest\r\n\r\nhello"
             ),
             _TXT_FILENAME,
+        ),
+        False,
+        "container_serialize=1",
+        _only_attachment_is_empty,
+    ),
+    # #922: an attached email's payload is read by the ``eml``
+    # extractor, so one a cap emptied loses its text even when it is
+    # named ``.eml`` and the walk still keeps the attachments inside it.
+    "attached_depth_keeps_inner_attachment": (
+        _with_attachment(b"Content-Type: message/rfc822\r\n", _nested_rfc822_with_note(21)),
+        False,
+        "attached_depth=1",
+        lambda msg: (
+            [(a.filename, a.payload) for a in msg.attachments]
+            == [("SYNTHETIC_FILENAME_MARKER.eml", b""), ("note.txt", b"NOTE_BODY")]
+        ),
+    ),
+    "attached_fields_eml": (
+        _with_attachment(
+            b"Content-Type: message/rfc822\r\n",
+            b"From: a@example.test\r\n" + b"X-Field: SYNTHETIC_HEADER_MARKER\r\n" * 20_000,
+        ),
+        False,
+        "attached_fields=1",
+        _only_attachment_is_empty,
+    ),
+    "container_serialize_eml": (
+        _with_attachment(
+            b"Content-Type: message/rfc822\r\n",
+            b"From: a@example.test\r\nX: SYNTHETIC_HEADER_MARKER\x0brest\r\n\r\nhello",
+        ),
+        False,
+        "container_serialize=1",
+        _only_attachment_is_empty,
+    ),
+    "container_serialize_decoded_eml": (
+        _with_attachment(
+            _BASE64_RFC822,
+            base64.encodebytes(
+                b"From: a@example.test\r\nX: SYNTHETIC_HEADER_MARKER\x0brest\r\n\r\nhello"
+            ),
         ),
         False,
         "container_serialize=1",
@@ -4369,9 +4481,20 @@ _CAP_COMPLETENESS: dict[str, set[str]] = {
     "attached_depth_decode_chain": _MANIFEST,
     "transport_decode_base64": _MANIFEST,
     "transport_decode_8bit": _MANIFEST,
+    "transport_decode_uuencode": _MANIFEST,
+    # The attachments inside a lossy attached email may be lost with
+    # their boundaries (review round 13 on #1311); a leaf is never walked
+    # for attachments, so only its own text is partial.
+    "transport_lossy_base64": _MANIFEST,
+    "transport_lossy_quoted_printable": _MANIFEST,
+    "leaf_transport_lossy": set(),
     "decoded_bytes": _MANIFEST,
     "container_serialize": _MANIFEST,
     "container_serialize_decoded": _MANIFEST,
+    "attached_depth_keeps_inner_attachment": _MANIFEST,
+    "attached_fields_eml": _MANIFEST,
+    "container_serialize_eml": _MANIFEST,
+    "container_serialize_decoded_eml": _MANIFEST,
     "body_parts": {"body_complete"},
     "mime_parts": {"body_complete", *_MANIFEST},
     "address_header": {"to_addresses_complete"},
@@ -4580,25 +4703,12 @@ def test_message_within_every_cap_logs_no_cap_line(tmp_path, caplog):
     assert "parser work caps" not in caplog.text
 
 
-def _nested_rfc822_with_note(levels: int) -> bytes:
-    """``levels`` identity-encoded attached emails around a message that
-    carries a ``note.txt`` attachment."""
-    leaf = (
-        b'Content-Type: multipart/mixed; boundary="n"\r\n\r\n'
-        b"--n\r\nContent-Type: text/plain\r\n\r\nSYNTHETIC_TEXT_MARKER\r\n"
-        b'--n\r\nContent-Type: text/plain\r\nContent-Disposition: attachment; filename="note.txt"'
-        b"\r\n\r\nNOTE_BODY\r\n--n--\r\n"
-    )
-    return b"Content-Type: message/rfc822\r\n\r\n" * (levels - 1) + leaf
-
-
-# Review round 1: caps that empty an identity-encoded container's payload
-# lose nothing when no extractor would read that payload (``.eml``): the
-# walk still descends into the container and keeps the attachments inside
-# it. Likewise a decoded container the generator refuses is still walked.
-# Each shape's parse result is pinned (unchanged from before the caps
-# were logged) and no cap line is logged. #902: a header value at its
-# cap is kept whole, so it is not counted either.
+# Review round 1: caps that empty a container's payload lose nothing
+# when no extractor would read that payload. Since #922 every attached
+# email's payload is read (``eml``), so those shapes moved to
+# ``_CAP_SHAPES``. Each shape's parse result is pinned (unchanged from
+# before the caps were logged) and no cap line is logged. #902: a header
+# value at its cap is kept whole, so it is not counted either.
 _NO_LOSS_SHAPES = {
     "subject_at_the_cap": (
         _headers(b"Subject: " + _LONG_SUBJECT[:SUBJECT_MAX_CHARS] + b"\r\n"),
@@ -4611,36 +4721,6 @@ _NO_LOSS_SHAPES = {
     "references_at_the_cap": (
         _headers(f"References: <a@example.test> <{_id_of(998)}>\r\n".encode()),
         lambda msg: msg.references == ["a@example.test", _id_of(998)],
-    ),
-    "identity_depth_keeps_inner_attachment": (
-        _with_attachment(b"Content-Type: message/rfc822\r\n", _nested_rfc822_with_note(21)),
-        lambda msg: (
-            [(a.filename, a.payload) for a in msg.attachments]
-            == [("SYNTHETIC_FILENAME_MARKER.eml", b""), ("note.txt", b"NOTE_BODY")]
-        ),
-    ),
-    "identity_fields": (
-        _with_attachment(
-            b"Content-Type: message/rfc822\r\n",
-            b"From: a@example.test\r\n" + b"X-Field: SYNTHETIC_HEADER_MARKER\r\n" * 20_000,
-        ),
-        _only_attachment_is_empty,
-    ),
-    "identity_serialize": (
-        _with_attachment(
-            b"Content-Type: message/rfc822\r\n",
-            b"From: a@example.test\r\nX: SYNTHETIC_HEADER_MARKER\x0brest\r\n\r\nhello",
-        ),
-        _only_attachment_is_empty,
-    ),
-    "decoded_serialize": (
-        _with_attachment(
-            _BASE64_RFC822,
-            base64.encodebytes(
-                b"From: a@example.test\r\nX: SYNTHETIC_HEADER_MARKER\x0brest\r\n\r\nhello"
-            ),
-        ),
-        _only_attachment_is_empty,
     ),
 }
 
@@ -4939,10 +5019,10 @@ def test_many_part_message_walk_is_bounded(tmp_path, monkeypatch, caplog):
     visited = 0
     real = parser._part_filename
 
-    def counting(part):
+    def counting(part, *args):
         nonlocal visited
         visited += 1
-        return real(part)
+        return real(part, *args)
 
     monkeypatch.setattr(parser, "_part_filename", counting)
     raw = (
@@ -5031,7 +5111,9 @@ def test_attached_container_children_are_queued_lazily(monkeypatch, caplog):
     # The preflight stops once the field budget is spent, and the walk
     # at the part cap: neither takes much past its cap.
     assert _CountingParts.taken <= parser.MAX_ATTACHED_MESSAGE_FIELDS + parser.MAX_WALKED_PARTS
-    assert caps == Counter({"mime_parts": 1})
+    # The bundle is named ``.eml``, which the ``eml`` extractor reads
+    # (#922), so its emptied payload is lost content too.
+    assert caps == Counter({"mime_parts": 1, "attached_fields": 1})
     assert elapsed < 5
 
 
@@ -5256,9 +5338,9 @@ class TestRepeatedAddressHeaders:
         decoded: list[int] = []
         real = parser._decode_header
 
-        def counting(value):
+        def counting(value, degraded=None):
             decoded.append(1)
-            return real(value)
+            return real(value, degraded)
 
         monkeypatch.setattr(parser, "_decode_header", counting)
         size = parser._MAX_ADDRESS_HEADER_CHARS + 10
@@ -5567,9 +5649,17 @@ _PAYLOAD_LOSS = {
     "attached_depth_decode_chain": 20,
     "transport_decode_base64": 1,
     "transport_decode_8bit": 1,
+    "transport_decode_uuencode": 1,
+    "transport_lossy_base64": 1,
+    "transport_lossy_quoted_printable": 1,
+    "leaf_transport_lossy": 1,
     "decoded_bytes": 1,
     "container_serialize": 1,
     "container_serialize_decoded": 1,
+    "attached_depth_keeps_inner_attachment": 1,
+    "attached_fields_eml": 1,
+    "container_serialize_eml": 1,
+    "container_serialize_decoded_eml": 1,
 }
 
 
@@ -5578,7 +5668,9 @@ def test_cap_shape_marks_exactly_the_emptied_payloads(tmp_path, monkeypatch, sha
     msg, _ = _parse_cap_shape(tmp_path, monkeypatch, shape)
     lost = [a for a in msg.attachments if not a.payload_complete]
     assert len(lost) == _PAYLOAD_LOSS.get(shape, 0)
-    assert all(a.payload == b"" for a in lost)
+    # A lossy transport keeps its lenient decode; every other cap empties.
+    kept = "transport_lossy" in shape
+    assert all((a.payload != b"") is kept for a in lost)
 
 
 def test_an_attachment_with_its_payload_is_complete(tmp_path):
@@ -5709,7 +5801,26 @@ class TestContainerTransportDecodeLoss:
         assert attachment.payload != b""
         assert attachment.payload_complete is False
         assert len(calls) == 1
-        assert msg.parse_caps == {}
+        assert msg.parse_caps == {"transport_lossy": 1}
+
+    @pytest.mark.parametrize(
+        "prefix",
+        [b" ", b"\t", b"From QUJD\r\n"],
+        ids=["space", "tab", "envelope_line"],
+    )
+    def test_a_transport_line_the_parse_dropped_makes_it_incomplete(
+        self, tmp_path, monkeypatch, prefix
+    ):
+        """Review round 8 on #1311: a transport line the standard library
+        read as a header continuation with nothing before it, or as the
+        ``From `` envelope line, is dropped from the pseudo message, so
+        the rebuilt transport decodes cleanly without it."""
+        msg, _ = self._parse(
+            tmp_path, monkeypatch, _BASE64_RFC822, prefix + base64.encodebytes(self._INNER)
+        )
+        [attachment] = msg.attachments
+        assert attachment.payload_complete is False
+        assert msg.parse_caps == {"transport_lossy": 1}
 
     def test_an_undecodable_transport_keeps_todays_behaviour(self, tmp_path, monkeypatch):
         msg, calls = self._parse(tmp_path, monkeypatch, _BASE64_RFC822, b"A")
@@ -5719,7 +5830,10 @@ class TestContainerTransportDecodeLoss:
         # The diagnostic runs only on a transport that decoded.
         assert calls == []
 
-    def test_quoted_printable_is_not_checked(self, tmp_path, monkeypatch):
+    def test_quoted_printable_is_not_checked_and_never_complete(self, tmp_path, monkeypatch):
+        """The base64 diagnostic does not run; a quoted-printable loss
+        records nothing to detect, so the payload is never certified
+        (review round 4 on #1311, until #1288)."""
         import quopri
 
         msg, calls = self._parse(
@@ -5729,8 +5843,9 @@ class TestContainerTransportDecodeLoss:
             quopri.encodestring(self._INNER),
         )
         [attachment] = msg.attachments
-        assert attachment.payload and attachment.payload_complete is True
+        assert attachment.payload and attachment.payload_complete is False
         assert calls == []
+        assert msg.parse_caps == {"transport_lossy": 1}
 
     def test_the_check_runs_behind_the_decodable_budget(self, tmp_path, monkeypatch):
         """Over ``budget.decodable`` the transport is never decoded, so
@@ -5744,3 +5859,221 @@ class TestContainerTransportDecodeLoss:
         )
         assert msg.parse_caps == {"decoded_bytes": 1}
         assert calls == []
+
+
+class TestContainerTransportEncodings:
+    """Review round 4 on #1311 (owner decision): an attached email's
+    declared Content-Transfer-Encoding decides whether its payload can be
+    certified. Identity and base64 (whose loss is detected) are unchanged;
+    quoted-printable keeps its lenient decode but is never complete (its
+    loss records nothing, #1288); any other encoding keeps no payload."""
+
+    @staticmethod
+    def _attachment(tmp_path, headers: bytes, body: bytes):
+        path = tmp_path / "m.eml"
+        path.write_bytes(_with_attachment(b"Content-Type: message/rfc822\r\n" + headers, body))
+        msg = parse_email(path)
+        assert msg is not None
+        (attachment,) = msg.attachments
+        return msg, attachment
+
+    @pytest.mark.parametrize("encoding", [b"x-uuencode", b"uuencode", b"uue", b"x-uue", b"x-other"])
+    def test_an_unhandled_encoding_keeps_no_payload(self, tmp_path, caplog, encoding):
+        caplog.set_level("DEBUG")
+        uu = b"begin 644 x\n" + _uu_lines(_INNER_EMAIL) + b"`\nend\n"
+        msg, attachment = self._attachment(
+            tmp_path, b"Content-Transfer-Encoding: " + encoding + b"\r\n", uu
+        )
+        assert (attachment.payload, attachment.payload_complete) == (b"", False)
+        assert msg.parse_caps == {"transport_decode": 1}
+        assert msg.attachments_manifest_complete is False
+        assert "SYNTHETIC_TEXT_MARKER" not in caplog.text
+
+    @pytest.mark.parametrize(
+        ("body", "kept"),
+        [
+            (_INNER_EMAIL, b"SYNTHETIC_TEXT_MARKER"),
+            (b"From: a@example.test\r\n\r\nvisible =\rtail SYNTHETIC_TEXT_MARKER", b"visible"),
+        ],
+        ids=["clean", "malformed"],
+    )
+    def test_quoted_printable_keeps_its_bytes_and_is_never_complete(self, tmp_path, body, kept):
+        msg, attachment = self._attachment(
+            tmp_path, b"Content-Transfer-Encoding: quoted-printable\r\n", body
+        )
+        assert kept in attachment.payload
+        assert attachment.payload_complete is False
+        assert msg.parse_caps == {"transport_lossy": 1}
+
+    @pytest.mark.parametrize(
+        ("headers", "body"),
+        [
+            (b"", _INNER_EMAIL),
+            (b"Content-Transfer-Encoding: 7bit\r\n", _INNER_EMAIL),
+            (b"Content-Transfer-Encoding: 8bit\r\n", _INNER_EMAIL),
+            (b"Content-Transfer-Encoding: binary\r\n", _INNER_EMAIL),
+            (b"Content-Transfer-Encoding: base64\r\n", base64.encodebytes(_INNER_EMAIL)),
+        ],
+        ids=["none", "7bit", "8bit", "binary", "base64"],
+    )
+    def test_identity_and_base64_are_unchanged(self, tmp_path, headers, body):
+        msg, attachment = self._attachment(tmp_path, headers, body)
+        assert b"SYNTHETIC_TEXT_MARKER" in attachment.payload
+        assert attachment.payload_complete is True
+        assert msg.parse_caps == {}
+
+
+@pytest.mark.parametrize(
+    ("headers", "counted"),
+    [
+        (b"Content-Type: application/eml\r\n", True),
+        (b"Content-Type: text/plain\r\n", True),
+        (b"Content-Type: application/x-unknown-synthetic\r\n", False),
+    ],
+    ids=["eml", "extracted_text", "no_extractor"],
+)
+def test_a_lossy_base64_leaf_an_extractor_reads_is_counted(tmp_path, caplog, headers, counted):
+    """Review round 14 on #1311: a leaf whose base64 decode lost bytes was
+    marked incomplete but not counted, so nothing logged it. Counted when
+    an extractor would read the payload; the attachment list is whole."""
+    caplog.set_level("DEBUG")
+    encoded = base64.encodebytes(_INNER_EMAIL)
+    path = tmp_path / "m.eml"
+    path.write_bytes(
+        _with_attachment(
+            headers + b"Content-Transfer-Encoding: base64\r\n",
+            encoded[:8] + b"!!!!" + encoded[12:],
+            b'Content-Disposition: attachment; filename="f.bin"\r\n'
+            if not counted
+            else _CAP_FILENAME
+            if b"eml" in headers
+            else _TXT_FILENAME,
+        )
+    )
+    msg = parse_email(path)
+    assert msg is not None
+    [attachment] = msg.attachments
+    assert attachment.payload_complete is False
+    assert msg.parse_caps == ({"leaf_transport_lossy": 1} if counted else {})
+    assert msg.attachments_manifest_complete is True
+    assert "SYNTHETIC_TEXT_MARKER" not in caplog.text
+
+
+def test_a_nul_in_a_body_charset_does_not_fail_the_parse(tmp_path):
+    """Review round 14 on #1311: ``bytes.decode`` raises ``ValueError``
+    on a codec name holding a NUL, which failed the whole message; it
+    falls back to UTF-8 like an unknown label."""
+    path = tmp_path / "m.eml"
+    path.write_bytes(
+        _CAP_HEAD + b'Content-Type: text/plain; charset="utf-8\x00x"\r\n\r\nbody words'
+    )
+    msg = parse_email(path)
+    assert msg is not None
+    assert msg.body_text == "body words"
+
+
+def test_a_lossy_attached_email_clears_the_attachment_manifest(tmp_path):
+    """Review round 13 on #1311: a base64 quantum replaced where a nested
+    attachment's boundary sits loses that attachment from the decoded
+    tree, so the message's attachment list is not complete."""
+    inner = (
+        b'From: a@example.test\r\nContent-Type: multipart/mixed; boundary="IN"\r\n\r\n'
+        b"--IN\r\nContent-Type: text/plain\r\n\r\nbody\r\n"
+        b'--IN\r\nContent-Type: text/plain\r\nContent-Disposition: attachment; filename="n.txt"'
+        b"\r\n\r\nNESTED\r\n--IN--\r\n"
+    )
+    encoded = base64.b64encode(inner)
+    quantum = (inner.index(b"--IN\r\nContent-Type: text/plain\r\nContent-Disposition") // 3) * 4
+    lossy = encoded[:quantum] + b"!!!!" + encoded[quantum + 4 :]
+    path = tmp_path / "m.eml"
+    path.write_bytes(_with_attachment(_BASE64_RFC822, lossy))
+    msg = parse_email(path)
+    assert msg is not None
+    assert [a.filename for a in msg.attachments] == ["SYNTHETIC_FILENAME_MARKER.eml"]
+    assert msg.parse_caps == {"transport_lossy": 1}
+    assert msg.attachments_manifest_complete is False
+
+
+class TestLeafEmlTransportEncodings:
+    """Review round 8 on #1311: an email carried as a leaf part the
+    ``eml`` extractor reads (``application/eml``, or any type named
+    ``.eml``) follows the round-4 rule for ``message/*``: identity and
+    base64 (whose loss is detected) are unchanged; any other encoding
+    keeps its decode but is never complete and is counted as
+    ``transport_lossy``. Leaves for other extractors are #1288."""
+
+    _QP_MALFORMED = b"From: a@example.test\r\n\r\nvisible =\rtail SYNTHETIC_TEXT_MARKER"
+    _UU = b"begin 644 x\n" + _uu_lines(_INNER_EMAIL) + b"`\nend\n"
+
+    @staticmethod
+    def _attachment(tmp_path, caplog, headers: bytes, body: bytes, disposition=_CAP_FILENAME):
+        caplog.set_level("DEBUG")
+        path = tmp_path / "m.eml"
+        path.write_bytes(_with_attachment(headers, body, disposition))
+        msg = parse_email(path)
+        assert msg is not None
+        (attachment,) = msg.attachments
+        assert "SYNTHETIC_TEXT_MARKER" not in caplog.text
+        return msg, attachment
+
+    @pytest.mark.parametrize(
+        ("content_type", "encoding", "body"),
+        [
+            (b"application/eml", b"quoted-printable", quopri.encodestring(_INNER_EMAIL)),
+            (b"application/eml", b"quoted-printable", _QP_MALFORMED),
+            (b"application/octet-stream", b"quoted-printable", _QP_MALFORMED),
+            (b"application/eml", b"x-uuencode", _UU),
+            (b"application/octet-stream", b"uue", _UU),
+            (b"application/eml", b"x-other", _INNER_EMAIL),
+        ],
+        ids=["qp_clean", "qp_malformed", "qp_named_eml", "uuencode", "uue_named_eml", "unknown"],
+    )
+    def test_an_undetectable_encoding_is_never_complete(
+        self, tmp_path, caplog, content_type, encoding, body
+    ):
+        msg, attachment = self._attachment(
+            tmp_path,
+            caplog,
+            b"Content-Type: "
+            + content_type
+            + b"\r\nContent-Transfer-Encoding: "
+            + encoding
+            + b"\r\n",
+            body,
+        )
+        assert attachment.payload != b""
+        assert attachment.payload_complete is False
+        assert msg.parse_caps == {"leaf_transport_lossy": 1}
+        assert msg.attachments_manifest_complete is True
+
+    @pytest.mark.parametrize(
+        ("encoding", "body"),
+        [
+            (b"", _INNER_EMAIL),
+            (b"7bit", _INNER_EMAIL),
+            (b"8bit", _INNER_EMAIL),
+            (b"binary", _INNER_EMAIL),
+            (b"base64", base64.encodebytes(_INNER_EMAIL)),
+        ],
+        ids=["none", "7bit", "8bit", "binary", "base64"],
+    )
+    def test_identity_and_base64_are_unchanged(self, tmp_path, caplog, encoding, body):
+        headers = b"Content-Type: application/eml\r\n"
+        if encoding:
+            headers += b"Content-Transfer-Encoding: " + encoding + b"\r\n"
+        msg, attachment = self._attachment(tmp_path, caplog, headers, body)
+        assert b"SYNTHETIC_TEXT_MARKER" in attachment.payload
+        assert attachment.payload_complete is True
+        assert msg.parse_caps == {}
+
+    def test_a_leaf_for_another_extractor_is_unchanged(self, tmp_path, caplog):
+        """Still #1288: a quoted-printable ``.txt`` is not checked."""
+        msg, attachment = self._attachment(
+            tmp_path,
+            caplog,
+            b"Content-Type: text/plain\r\nContent-Transfer-Encoding: quoted-printable\r\n",
+            self._QP_MALFORMED,
+            _TXT_FILENAME,
+        )
+        assert attachment.payload_complete is True
+        assert msg.parse_caps == {}

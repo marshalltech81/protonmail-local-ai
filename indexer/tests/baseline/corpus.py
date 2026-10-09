@@ -109,7 +109,8 @@ so the bytes are identical on every platform and the extracted words
 are in the raw payload; a JSON attachment no extractor handles (t84,
 ``unsupported``); a whitespace-only text attachment (t85, ``empty``);
 an attached email (``message/rfc822``) carrying its own attachment
-(t86), whose inner body is neither attachment text nor the outer body;
+(t86), whose headers and body are its attachment text (#922), never the
+outer body, and whose own attachment is extracted on its own;
 and a text attachment with an RFC 2231 encoded non-ASCII filename
 (t87). Their words avoid every golden search query's words, the
 reserved words above and every ``unanswerable`` question's

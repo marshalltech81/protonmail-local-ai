@@ -58,6 +58,7 @@ MODULES = {
     "pptx": "pptx",
     "xlsx": "xlsx",
     "xls": "xls_child",
+    "eml": "eml",
     "image": "image_child",
 }
 

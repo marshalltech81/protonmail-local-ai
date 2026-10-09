@@ -3249,6 +3249,9 @@ class TestPdfPageLevelOcr:
             "parser_caps_messages": 0,
             "parser_recipients_merged_messages": 0,
             "parser_sender_ambiguous_messages": 0,
+            "eml_headers_degraded": 0,
+            "eml_filenames_degraded": 0,
+            "eml_charsets_degraded": 0,
             "warnings_suppressed": 3,
         }
 
@@ -4660,6 +4663,9 @@ class TestMailContentStaysOutOfLogsAndErrors:
             "parser_caps_messages": 0,
             "parser_recipients_merged_messages": 0,
             "parser_sender_ambiguous_messages": 0,
+            "eml_headers_degraded": 0,
+            "eml_filenames_degraded": 0,
+            "eml_charsets_degraded": 0,
             "warnings_suppressed": 0,
         }
         assert extractors.drain_extractor_counts()["pdf_pages_failed"] == 0
@@ -7412,6 +7418,67 @@ def _cap_ppt_output_bytes(monkeypatch):
     assert text.startswith(_CAP_MARKER)
 
 
+def _run_eml_in_process(monkeypatch, payload: bytes, **budgets) -> str:
+    """Run the eml child's extraction in this process (its budgets
+    patched) through the real parent, as for xls."""
+    from src.extractors import _runner, eml, extractor_child
+
+    for name, value in budgets.items():
+        monkeypatch.setattr(eml, name, value)
+
+    def run_tool(_argv, child_payload, *, on_output, **_kwargs):
+        on_output(extractor_child.run("eml", child_payload))
+        return _runner.ToolOutput(b"", truncated=False)
+
+    monkeypatch.setattr(_runner, "run_tool", run_tool)
+    text, _ = eml.extract(payload)
+    return text
+
+
+_EML_HEAD = b"Subject: s\r\n"
+
+
+def _eml_nested(*inner: bytes) -> bytes:
+    parts = b"".join(
+        b"--E\r\nContent-Type: message/rfc822\r\nContent-Disposition: attachment\r\n\r\n"
+        + i
+        + b"\r\n"
+        for i in inner
+    )
+    return _EML_HEAD + b'Content-Type: multipart/mixed; boundary="E"\r\n\r\n' + parts + b"--E--\r\n"
+
+
+def _cap_eml_header_chars(monkeypatch):
+    payload = b"Subject: " + _CAP_MARKER.encode() + b"\r\n\r\nbody\r\n"
+    text = _run_eml_in_process(monkeypatch, payload, _MAX_HEADER_CHARS=9)
+    assert text == "Subject: SYNTHETIC\n\nbody"
+
+
+def _cap_eml_text_chars(monkeypatch):
+    payload = _EML_HEAD + b"\r\n" + _CAP_MARKER.encode()
+    text = _run_eml_in_process(monkeypatch, payload, _MAX_TEXT_CHARS=len("Subject: s"))
+    assert text == "Subject: s"
+
+
+def _cap_eml_parts(monkeypatch):
+    payload = _eml_nested(b"Subject: n\r\n\r\n" + _CAP_MARKER.encode())
+    # The root and its one child: the nested email's root is past it.
+    text = _run_eml_in_process(monkeypatch, payload, _MAX_PARTS=2)
+    assert text == "Subject: s\n\n[Attached message, depth 2]\nSubject: n"
+
+
+def _cap_eml_text_parts(monkeypatch):
+    payload = _eml_nested(b"Subject: n\r\n\r\n" + _CAP_MARKER.encode())
+    text = _run_eml_in_process(monkeypatch, payload, _MAX_TEXT_PARTS=0)
+    assert text == "Subject: s\n\n[Attached message, depth 2]\nSubject: n"
+
+
+def _cap_eml_nested_messages(monkeypatch):
+    payload = _eml_nested(b"Subject: n\r\n\r\n" + _CAP_MARKER.encode())
+    text = _run_eml_in_process(monkeypatch, payload, _MAX_DEPTH=1)
+    assert text == "Subject: s"
+
+
 # Each reported cap, and an extraction that crosses it with its output
 # pinned (what the code returned before #903) and the work it did.
 _CAP_TRIGGERS = {
@@ -7436,6 +7503,11 @@ _CAP_TRIGGERS = {
     "xls_sheets": _cap_xls_sheets,
     "xls_expanded_cells": _cap_xls_expanded_cells,
     "xls_text_chars": _cap_xls_text_chars,
+    "eml_header_chars": _cap_eml_header_chars,
+    "eml_text_chars": _cap_eml_text_chars,
+    "eml_parts": _cap_eml_parts,
+    "eml_text_parts": _cap_eml_text_parts,
+    "eml_nested_messages": _cap_eml_nested_messages,
     "image_text_chars": _cap_image_text_chars,
 }
 
@@ -7464,6 +7536,12 @@ _REPORTED_CAPS = {
     "src.extractors.xls_child:_MAX_SHEETS": "xls_sheets",
     "src.extractors.xls_child:_MAX_EXPANDED_CELLS": "xls_expanded_cells",
     "src.extractors.xls_child:_MAX_TEXT_CHARS": "xls_text_chars",
+    "src.extractors.eml:_MAX_HEADER_CHARS": "eml_header_chars",
+    "src.extractors.eml:_MAX_TEXT_CHARS": "eml_text_chars",
+    "src.extractors.eml:_MAX_PARTS": "eml_parts",
+    "src.extractors.eml:_MAX_TEXT_PARTS": "eml_text_parts",
+    "src.extractors.eml:_MAX_DEPTH": "eml_nested_messages",
+    "src.extractors.eml:_MAX_DECODED_BYTES": "eml_nested_messages",
     "src.extractors.image:_MAX_TEXT_CHARS": "image_text_chars",
 }
 # ... or the reason it is not reported as an extractor cap.
@@ -7532,6 +7610,10 @@ _UNREPORTED_CAPS = {
         "a longer protocol line cannot come from a working child: ChildOutputError, a failed "
         "row with its rate-limited WARNING, counted as failed="
     ),
+    "src.extractors.eml:_MAX_OUTPUT_BYTES": (
+        "child output past it cannot come from a working child: ChildOutputError, a failed row "
+        "with its rate-limited WARNING, counted as failed="
+    ),
     "src.extractors.ooxml:_MAX_OUTPUT_BYTES": (
         "child output past it cannot come from a working child: ChildOutputError, a failed row "
         "with its rate-limited WARNING, counted as failed="
@@ -7541,14 +7623,14 @@ _UNREPORTED_CAPS = {
             "the child fails (MemoryError, or ToolExitError when it cannot report it): a failed "
             "row with its rate-limited WARNING, counted as failed="
         )
-        for module in ("docx", "pptx", "xlsx")
+        for module in ("docx", "pptx", "xlsx", "eml")
     },
     **{
         f"src.extractors.{module}:CHILD_MAX_CPU_SECONDS": (
             "the child is killed (ToolCrashError): a failed row with its rate-limited WARNING, "
             "counted as failed="
         )
-        for module in ("docx", "pptx", "xlsx")
+        for module in ("docx", "pptx", "xlsx", "eml")
     },
     "src.extractors.doc:CHILD_MAX_ADDRESS_SPACE_BYTES": (
         "catdoc fails (ToolExitError): a failed row with its rate-limited WARNING, "
@@ -7574,6 +7656,7 @@ _EXTRACTOR_MODULES = (
     "src.extractors._runner",
     "src.extractors.doc",
     "src.extractors.docx",
+    "src.extractors.eml",
     "src.extractors.html",
     "src.extractors.extractor_child",
     "src.extractors.ooxml",

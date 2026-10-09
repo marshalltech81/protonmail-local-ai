@@ -851,7 +851,7 @@ semantics, `0` a known loss, `NULL` not assessed, with no default:
 |---|---|---|
 | `subject_complete` | the subject was cut (`subject_length`) | phase 1, with the row |
 | `from_addresses_complete`, `to_addresses_complete`, `cc_addresses_complete` | an `address_*` parser cap fired while that role's headers were read, or an entry yielded no storable address (`address_unparsed`); all three when the header scan stopped (`address_fields`); From also for a repeated `From`, whose later headers are not parsed | phase 1, with the row |
-| `attachments_manifest_complete` | a cap stopped the walk or left an attached email unwalked (`attached_depth`, `attached_fields`, `transport_decode`, `decoded_bytes`, `container_serialize`, `mime_parts`) | phase 1, with the row |
+| `attachments_manifest_complete` | a cap stopped the walk or left an attached email unwalked (`attached_depth`, `attached_fields`, `transport_decode`, `transport_lossy`, `decoded_bytes`, `container_serialize`, `mime_parts`) | phase 1, with the row |
 | `body_complete` | text parts were left out of the body (`body_parts`, `mime_parts`) | phase 2c, in the transaction that commits the body chunks |
 
 `_write_message_record` writes the phase-1 columns from the parse and
@@ -890,8 +890,31 @@ writes the occurrence's chunks, so they roll back with them.
   leniently, the same text is decoded once more through the stdlib leaf
   decoder only to read those defects (one linear pass behind the
   decodable-bytes budget; the bytes kept are the lenient decode's).
+  It also counts as lost when the parse dropped a line of the
+  transport text it rebuilds from (a first line starting with
+  whitespace, read as a header continuation, or with `From `, read as
+  the mbox envelope; review round 8 on #1311).
+  An attached email's loss found this way is also counted as the
+  `transport_lossy` parse cap, so it is logged (review round 7 on
+  #1311); a leaf attachment's is not.
   Quoted-printable and uuencode failures record no defect and are not
-  detected (#1288).
+  detected (#1288), so a quoted-printable attached email (`message/*`)
+  keeps its lenient decode but is always `0` (also counted as
+  `transport_lossy`), and one in any other
+  transfer encoding that is not identity or base64 (uuencode and its
+  aliases, or an unknown value) keeps the empty payload, counted as the
+  `transport_decode` parse cap when an extractor reads the attachment:
+  none of its transport text is extracted, its result is the `empty`
+  one an unserialized container gets, and the message's
+  `attachments_manifest_complete` is cleared (review round 4 on #1311).
+  An email carried as a leaf part the `eml` extractor reads
+  (`application/eml`, or any type named `.eml`) in any encoding other
+  than identity or base64 keeps its decode but is always `0`, counted
+  as `leaf_transport_lossy` (review round 8 on #1311), which leaves the
+  attachment list complete, since a leaf is never walked for
+  attachments. An attached email's `transport_lossy` clears it: a
+  nested attachment whose boundary was lost is missing (round 13). Any other leaf
+  attachment in those encodings is unchanged.
 - For a `success` or `empty` result, the result's own
   `text_complete`, which the dispatcher sets: `0` when the attempt lost
   text (any `extractor_caps` cap, the `max_extracted_chars` cut, the
@@ -1404,8 +1427,85 @@ each message whose occurrence of it now selects a module.
   no slide text from decks current PowerPoint or LibreOffice save
   (#958).
 
-All three, and the extractor child below (OOXML and images), run through
-one subprocess runner (`extractors/_runner.py`).
+Attached emails (#922): `message/rfc822`, `application/eml` and
+`.eml` select the `eml` extractor; `message/delivery-status` (a
+bounce's machine-readable report) selects none and is recorded
+`unsupported` ("no extractor"), unless its file name selects an
+extractor. The payload is the attached email itself (the parser's
+serialized form of a `message/rfc822` part, or an `.eml` file's
+bytes). Its text is, for the attached email and then each
+`message/rfc822` email nested in it, attached or inline, depth first
+and in document order: a `[Attached message, depth N]` line for a nested one, the
+first `Subject`, `From`, `To`, `Cc` and `Date` as labelled lines
+decoded with the parser's header decoder, and the body the parser
+would choose for that message, with no quote stripping. The inner
+`From` is a claim inside a claim: it is searchable attachment text
+only, never a participant, an authority input or a direction (#1235).
+Each nested email is read once, where the walk meets it, so the
+64 MB decoded-bytes budget goes in document order. An inline nested
+email under a `multipart/alternative` or `multipart/related` takes
+part in that container's choice by its real content, as the default
+parser's body does: it is rendered (label, headers, body) where it
+sits only when chosen, and not at all when set aside, together with
+any email inside it. One that could not be read (past the depth cap,
+in an encoding no decoder reads, or not decodable) counts as
+`eml_nested_messages` only when the body could have chosen it (review
+round 12 on #1311).
+The email's own attachments are not extracted here: inside a
+`message/rfc822` part the parser records each as an occurrence of its
+own. A nested `.eml` or `application/eml` file is such a leaf
+attachment; the attachments inside an `.eml` file are not walked by
+the parser at all. Every message of one payload shares one budget: 10,000 parts
+walked and 200 text parts decoded (the parser's per-message caps), 20
+levels of nesting, 64 MB of transfer-decoded nested emails, 2,000
+characters per header and 10,000,000 characters of text; a budget
+that cut the text is logged through the extractor-cap WARNING
+(`eml_*`) and marks the text incomplete, and so does a decode that
+lost bytes: a body text part's (`eml_body_decode`), a nested email's
+base64 (`eml_nested_messages`), and any body text part or nested email
+in quoted-printable, whose loss the standard library records nothing
+for (counted as lossy until #1288 detects it). A body text part in any
+other encoding that is not identity (uuencode and its aliases, or an
+unknown value) is kept as decoded but counted as `eml_body_decode`
+too, since a malformed one comes back as its transport text. A body
+text part counts only when the body keeps it, or would have kept it
+had it decoded whole: a loss in an alternative rendering set aside is
+not counted, and neither is its charset fallback (review round 8). A
+nested email's base64 also counts as lossy when the parse dropped a
+line of its transport text (a first line starting with whitespace or
+`From `). A part
+declared `multipart/*` that the standard library could not decompose
+(no boundary parameter, or a start boundary that never appears) is
+counted as `eml_body_structure`, since none of its text is read, when
+the body could keep it (not an alternative set aside, nor an
+attachment); the same gap in the default parser is #1348. A message
+header line the parse dropped (a first line starting with whitespace,
+or a `From ` line after the first; a leading `From ` envelope line is
+not counted) is counted as `eml_header_lines`, and so is the first
+line of a body text part the body keeps, when the part has no blank
+line after its boundary and that line starts with whitespace. A nested email in any
+other transfer encoding (uuencode and its aliases included) is not
+decoded: only its depth label is indexed, and it counts as
+`eml_nested_messages`. The decoders' fallbacks are
+counted as `eml_headers_degraded` (a header: an unknown charset, raw
+8-bit bytes that are not UTF-8, encoded-words kept as sent),
+`eml_filenames_degraded` (a part's filename) and
+`eml_charsets_degraded` (a body text part's charset: an unknown label,
+or bytes it replaced), reported by the parent's `degraded in the
+child` line (#1314) and the attachments aggregate; they replace
+characters rather than drop text, so they do not mark the text
+incomplete (#1315). The extraction runs in the
+extractor child (decision 42) under 1 GiB of address space and 60 s of
+CPU, killed after 75 s: the standard library's parse of crafted
+structure (800,000 parts or 4 million header fields at the 32 MB
+`INDEXER_ATTACHMENT_MAX_BYTES` default) peaked at 688 to 995 MB and
+took 3 to 5 s in the image, and html2text on 32 MB of HTML took 18 to
+24 s; a 27 MB email with ten attachments took 0.3 s and 226 MB. A
+payload nested past Python's recursion limit (about 1,000 levels) is
+recorded `failed` as `RecursionError`.
+
+All three, and the extractor child below (OOXML, images and attached
+emails), run through one subprocess runner (`extractors/_runner.py`).
 It starts every tool through `extractors/_launcher.py` (`python -I`),
 which lowers its own address space (`RLIMIT_AS`) and CPU time
 (`RLIMIT_CPU`) to the limits the extractor passes, caps glibc at two
@@ -1441,7 +1541,7 @@ reserved encrypted-deck status is the one exception, below) records
 log or `last_error`.
 
 The Python extractor child (`extractors/extractor_child.py
-<module>`, for the OOXML formats, `.xls` and images) reports its result in a
+<module>`, for the OOXML formats, `.xls`, images and attached emails) reports its result in a
 framed protocol the runner parses as it arrives (#1291): `P` lines for
 progress, passed to the dispatcher's progress callback as they are
 read so a long extraction can refresh the heartbeat; a `C <name>` line
@@ -1477,6 +1577,7 @@ The limits on every external program the indexer runs:
 | extractor child, xlrd (`.xls`) | 512 MiB | 30 s | 45 s |
 | Java with Apache POI (`.ppt`) | 512 MiB | 30 s | 45 s |
 | extractor child, OOXML (`.docx`, `.pptx`, `.xlsx` and their variants) | 1 GiB | 30 s | 45 s |
+| extractor child, attached emails (`message/rfc822`, `application/eml`, `.eml`) | 1 GiB | 60 s | 75 s |
 | extractor child, PIL and Tesseract (images), each process | 1 GiB | 4 × `INDEXER_OCR_TIMEOUT_SECONDS` + 30 s (270 s) | pages × (OCR timeout + 10 s) + 30 s (1,430 s) |
 | Tesseract (scanned PDFs) | none | none | `INDEXER_OCR_TIMEOUT_SECONDS` per page |
 | Poppler `pdfinfo` / `pdftoppm` (scanned PDFs) | none | none | the OCR render deadline (see `INDEXER_OCR_TIMEOUT_SECONDS`) |

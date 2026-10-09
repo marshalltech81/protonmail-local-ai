@@ -221,10 +221,28 @@ _LOG_METHODS = frozenset(
 )
 
 # Line-only sites the child runs that are acceptable, keyed by
-# (module, function), each with its reason. None today: the child
-# extractors return the names of the budgets that cut their text, which
-# the parent logs through ``warn_extractor_cap``.
-_EXCLUDED: dict[tuple[str, str], str] = {}
+# (module, function), each with its reason. The child extractors return
+# the names of the budgets that cut their text, which the parent logs
+# through ``warn_extractor_cap``. The ``eml`` child (#922) reaches the
+# parser's header decoders and part-filename helpers.
+_HEADER_COUNTED = (
+    "the eml child passes ``degraded``, so each fallback is counted into "
+    "eml_headers_degraded, which crosses as an N frame (TestReviewRound1 in "
+    "test_eml_extractor); the line is for the in-process parser's callers"
+)
+_FILENAME_COUNTED = (
+    "the eml child's body walk passes ``degraded``, so each fallback is counted "
+    "into eml_filenames_degraded, which crosses as an N frame (TestReviewRound2 "
+    "in test_eml_extractor): inside a leaf .eml no other walk logs it; the line "
+    "is for the in-process parser's callers"
+)
+_EXCLUDED: dict[tuple[str, str], str] = {
+    ("src.parser", "_decode_text_header"): _HEADER_COUNTED,
+    ("src.parser", "_decode_header_parts"): _HEADER_COUNTED,
+    ("src.parser", "_decode_raw_8bit"): _HEADER_COUNTED,
+    ("src.parser", "_decode_filename_words"): _FILENAME_COUNTED,
+    ("src.parser", "_raw_part_filename"): _FILENAME_COUNTED,
+}
 
 
 def _is_reporter(name: str) -> bool:

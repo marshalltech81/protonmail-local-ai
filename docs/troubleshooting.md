@@ -1627,6 +1627,16 @@ only, never filenames or text (`make logs`):
   reports a plain `success`, with no cap line and no
   `ocr_capped_images` count, although the cached text still lacks the
   unread frames (#1201).
+- `extractor eml degraded in the child: <key>=<n> ...` (WARNING, rate
+  limited): decoding fallbacks in an attached email's text (#922):
+  `eml_headers_degraded` in its headers (an unknown charset, raw 8-bit
+  bytes that are not UTF-8, or encoded-words kept as sent),
+  `eml_filenames_degraded` in its parts' filenames, and
+  `eml_charsets_degraded` in its body text parts' charsets (an unknown
+  label, or bytes the label's codec replaced; only parts the body keeps). Some characters are
+  replaced or left encoded; the text is otherwise indexed and not
+  marked incomplete (#1315). The attachments aggregate line below
+  carries the same three counts.
 - `extractor cap <name>: <fixed text and counts>` (WARNING): a cap
   inside an extractor cut the text it returned (#903). Logged once per
   cap per extraction, and counted as `extractor_caps` in the
@@ -1661,6 +1671,37 @@ only, never filenames or text (`make logs`):
     before whitespace is stripped; the rest is not read (#935).
   - `ppt_output_bytes`: the same cap on the `.ppt` reader's output for a
     legacy `.ppt` (#957).
+  - `eml_body_structure`: a part of an attached email declared
+    `multipart/*` that could not be split into parts (no boundary
+    parameter, or a boundary that never appears), so none of its text
+    is read, when the body could keep it (#922; the same gap for
+    top-level mail is #1348).
+  - `eml_header_lines`: a header line of an attached email (or of an
+    email nested in it) that the standard library's parser dropped: a
+    first line starting with whitespace, or a `From ` line after the
+    first, so its text is not indexed (#922); or the first line of a
+    body text part with no blank line after its boundary that starts
+    with whitespace, when the body keeps that part. A leading `From `
+    envelope line, as in an mbox export, is not counted.
+  - `eml_body_decode`: a body text part of an attached email whose
+    base64 decoding lost bytes, or any quoted-printable one, whose loss
+    cannot be detected yet, or one in an encoding not decoded here
+    (uuencode and its aliases, or an unknown value), which can come back
+    as its transport text (#922, #1288). Only a part the body keeps (or
+    would keep, had it decoded whole) counts; an alternative rendering
+    set aside does not.
+  - `eml_header_chars`, `eml_text_chars`, `eml_parts`, `eml_text_parts`,
+    `eml_nested_messages`: an attached email's text (#922) was cut: a
+    Subject, From, To, Cc or Date header over 2,000 characters, the
+    10,000,000-character text budget, the 10,000 parts or 200 text parts
+    shared by the attached email and the emails nested in it, or a
+    nested email left out (more than 20 levels deep, past 64 MB of
+    transfer-decoded nested emails, or a transfer encoding that does
+    not decode) or read with bytes lost (a malformed base64 encoding,
+    or any quoted-printable one, whose loss cannot be detected yet:
+    #1288), or left unread because no decoder here reads its transfer
+    encoding (uuencode and its aliases, or any other): only its
+    `[Attached message, depth N]` label is indexed.
   - `pptx_slides`, `pptx_shapes`, `pptx_table_cells`,
     `pptx_text_chars`: the walk over a PowerPoint deck stopped at its
     slide budget (5,000 slide-list entries), shape budget (100,000,
@@ -1698,13 +1739,16 @@ only, never filenames or text (`make logs`):
   pdf_pages_unrecovered= ocr_capped_pdfs= ocr_pages_skipped=
   ocr_capped_images= extractor_caps= parser_caps_messages=
   parser_recipients_merged_messages= parser_sender_ambiguous_messages=
+  eml_headers_degraded= eml_filenames_degraded= eml_charsets_degraded=
   warnings_suppressed=`: the attachments of the messages committed since the previous line, by outcome. It is a
   WARNING when any of `failed`, `unsupported`, `too_large`,
   `ocr_disabled`, `pdf_pages_unrecovered`, `ocr_capped_pdfs`,
   `ocr_pages_skipped`, `ocr_capped_images`, `extractor_caps`,
   `parser_caps_messages` or `warnings_suppressed` is above zero (some attachment text is not
   searchable), and INFO otherwise. `pdf_pages_failed` alone does not
-  make it a WARNING (see below).
+  make it a WARNING (see below), nor do the `eml_*_degraded` decoding
+  fallbacks in attached emails, which replace characters rather than
+  lose text (#922; see the `degraded in the child` line above).
   - When it is logged: during the initial index, with the timing summary
     once at least 25 messages have been drained since the last one (each
     batch, at the default `INITIAL_INDEX_BATCH_SIZE=50`), and once at
@@ -1786,18 +1830,24 @@ something searchable is lost:
 
 - The attachments inside a base64 or quoted-printable attached email
   are not read.
+- A base64 or quoted-printable attached email is decoded with bytes
+  lost, or possibly lost (`transport_lossy`).
 - The container's own payload is emptied while an extractor would have
-  read it, for example a delivery report named `status.txt`.
+  read it: an attached email, whose text the `eml` extractor reads
+  (#922), or for example a delivery report named `status.txt`.
 
 An attached email sent without a transfer encoding is still walked, so
-the attachments inside it are kept, and emptying a payload that no
-extractor reads (`.eml`) is not logged.
+the attachments inside it are kept even when its own payload is
+emptied; emptying a payload that no extractor reads (a delivery report
+with no extractor's file name) is not logged.
 
 | Cap | What was dropped |
 |---|---|
 | `attached_depth` | An attached email nested more than 20 levels deep (or 20 transfer-encoded levels) |
 | `attached_fields` | The same, once the message's attached emails exceed the per-message part and header budget |
-| `transport_decode` | A base64 or quoted-printable attached email that does not decode: the attachments inside it are not read |
+| `transport_decode` | A base64 or quoted-printable attached email that does not decode: the attachments inside it are not read; or an attached email in another transfer encoding (uuencode and its aliases, or an unknown value), whose transport text is not extracted |
+| `transport_lossy` | A base64 attached email whose transport decoded with bytes lost, or any quoted-printable one, whose loss cannot be detected yet (#1288): its decoded text is kept and indexed but marked incomplete, and the attachments inside it are read, though one whose boundary was lost is missing, so the attachment list is incomplete |
+| `leaf_transport_lossy` | An attachment an extractor reads whose base64 decoding lost bytes, or an `application/eml` or `.eml` attachment in any transfer encoding other than base64 or none (quoted-printable, uuencode): its text is kept but marked incomplete. The attachments inside it are never read by the parser, so the attachment list is not affected |
 | `decoded_bytes` | The same, past 64 MB of decoded attached emails per message |
 | `container_serialize` | A container the serializer refuses (a malformed header), when its payload would be extracted |
 | `body_parts` | Text parts past the 200th, left out of the body: only those that could have been part of it, so an alternative rendering after the one the body uses is not counted |
@@ -1821,7 +1871,7 @@ and counts only) and whether the content its filters read is complete
 (#1086): the subject (`subject_length`), each address role (the
 `address_*` caps that fired while that header was read, a repeated
 `From`, or `address_fields` for all three), the attachment list
-(`attached_*`, `transport_decode`, `decoded_bytes`,
+(`attached_*`, `transport_decode`, `transport_lossy`, `decoded_bytes`,
 `container_serialize`, `mime_parts`) and the body (`body_parts`,
 `mime_parts`). A filter that finds nothing in content a cap cut reports
 the message as `indeterminate` in `query_messages`, not as a miss
