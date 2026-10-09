@@ -315,7 +315,8 @@ def _cache_hit_short_circuits(
     * ``STATUS_TOO_LARGE`` — while the payload still exceeds
       ``max_bytes``. Once the operator raises the cap far enough for it
       to fit, the row is stale and the payload is extracted (#693);
-      ``too_large_fits`` is the same predicate for the startup sweep.
+      the startup sweep runs ``too_large_fits``' comparison in SQL
+      (``Database.find_fitting_too_large_attachment_filepaths``).
     * ``STATUS_UNSUPPORTED`` — while ``_unsupported_still_holds`` for
       the row's module: re-run once OCR is re-enabled.
     * ``STATUS_FAILED`` — re-run if the cached row is older than

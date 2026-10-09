@@ -12,7 +12,7 @@ import struct
 import threading
 import weakref
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from contextlib import contextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from email.utils import parseaddr
@@ -174,6 +174,11 @@ EMBEDDING_DIM = 4096
 # lookup. The connection's ``SQLITE_LIMIT_VARIABLE_NUMBER`` depends on
 # the SQLite build, so lookups over an unbounded ID list batch under it.
 _IN_CLAUSE_BATCH_SIZE = 500
+
+# Rows the startup extraction sweep reads at a time from each of its
+# per-occurrence queries (#1289), so its memory follows the messages it
+# re-queues, not the attachment occurrences it inspects.
+SWEEP_FETCH_ROWS = 1000
 
 # Participants per message that get entity and alias writes (From first,
 # then To, then Cc). Later participants still get ``message_participants``
@@ -1722,12 +1727,34 @@ class Database:
             """
         ).fetchall()
 
+    def _stream_filepaths(
+        self, sql: str, params: Sequence[object], qualifies: Callable[[sqlite3.Row], bool]
+    ) -> set[str]:
+        """The filepaths of the rows ``sql`` returns for which
+        ``qualifies`` holds, read ``SWEEP_FETCH_ROWS`` rows at a time
+        (#1289). A message can carry thousands of occurrences with
+        sender-chosen labels and sizes, so only the qualifying filepaths
+        are kept, never the rows. Callers hold the database lock for the
+        whole read; the cursor is closed before they return."""
+        cursor = self._conn.execute(sql, params)
+        filepaths: set[str] = set()
+        try:
+            while rows := cursor.fetchmany(SWEEP_FETCH_ROWS):
+                filepaths.update(row["filepath"] for row in rows if qualifies(row))
+        finally:
+            cursor.close()
+        return filepaths
+
     @_synchronized
-    def find_ocr_disabled_attachments(self) -> list[sqlite3.Row]:
-        """Every attachment occurrence whose cached extraction is an "OCR
-        disabled" result, with its message's Maildir filepath, filename,
-        MIME type, the cached error and the row's extractor module."""
-        return self._conn.execute(
+    def find_ocr_disabled_attachment_filepaths(
+        self, qualifies: Callable[[sqlite3.Row], bool]
+    ) -> set[str]:
+        """The Maildir filepaths of the messages with an attachment
+        occurrence whose cached extraction is an "OCR disabled" result
+        and for which ``qualifies`` holds. ``qualifies`` gets one row per
+        occurrence with the filepath, filename, MIME type, the cached
+        error and the row's extractor module."""
+        return self._stream_filepaths(
             """
             SELECT m.filepath, a.filename, a.content_type, e.extraction_error,
                    e.extractor_module
@@ -1737,19 +1764,22 @@ class Database:
             JOIN message_thread_map m ON m.claimant_id = a.claimant_id
             WHERE e.extraction_status = 'unsupported'
               AND e.extraction_error IN (?, ?)
-            ORDER BY m.filepath
             """,
             (OCR_DISABLED_ERROR, SCANNED_PDF_OCR_DISABLED_ERROR),
-        ).fetchall()
+            qualifies,
+        )
 
     @_synchronized
-    def find_no_extractor_attachments(self) -> list[sqlite3.Row]:
-        """Every attachment occurrence whose cached extraction is the
-        "no extractor for this content type or filename extension"
-        result, or the OLE2 result recorded when no extractor read an OLE2
-        payload (#694, #935), with the same columns as
-        ``find_ocr_disabled_attachments``."""
-        return self._conn.execute(
+    def find_no_extractor_attachment_filepaths(
+        self, qualifies: Callable[[sqlite3.Row], bool]
+    ) -> set[str]:
+        """The Maildir filepaths of the messages with an attachment
+        occurrence whose cached extraction is the "no extractor for this
+        content type or filename extension" result, or the OLE2 result
+        recorded when no extractor read an OLE2 payload (#694, #935), and
+        for which ``qualifies`` holds, with the same row columns as
+        ``find_ocr_disabled_attachment_filepaths``."""
+        return self._stream_filepaths(
             """
             SELECT m.filepath, a.filename, a.content_type, e.extraction_error,
                    e.extractor_module
@@ -1759,28 +1789,32 @@ class Database:
             JOIN message_thread_map m ON m.claimant_id = a.claimant_id
             WHERE e.extraction_status = 'unsupported'
               AND e.extraction_error IN (?, ?)
-            ORDER BY m.filepath
             """,
             (NO_EXTRACTOR_ERROR, LEGACY_OLE2_ERROR),
-        ).fetchall()
+            qualifies,
+        )
 
     @_synchronized
-    def find_too_large_attachments(self) -> list[sqlite3.Row]:
-        """Every attachment occurrence whose cached extraction is
-        ``too_large``, with its message's Maildir filepath and the
-        payload's size in bytes. The row is keyed by content hash, so
-        every occurrence using it carries the same size."""
-        return self._conn.execute(
+    def find_fitting_too_large_attachment_filepaths(self, max_bytes: int) -> set[str]:
+        """The Maildir filepaths of the messages with an attachment
+        occurrence whose cached extraction is ``too_large`` and whose
+        payload now fits under ``max_bytes``: the comparison
+        ``attachment_indexing.too_large_fits`` makes, run in SQL. The row
+        is keyed by content hash, so every occurrence using it carries
+        the same size."""
+        return self._stream_filepaths(
             """
-            SELECT m.filepath, a.size_bytes
+            SELECT m.filepath
             FROM attachment_extractions e
             JOIN attachments a ON a.attachment_id = e.attachment_id
                 AND a.extractor_module = e.extractor_module
             JOIN message_thread_map m ON m.claimant_id = a.claimant_id
             WHERE e.extraction_status = 'too_large'
-            ORDER BY m.filepath
-            """
-        ).fetchall()
+              AND a.size_bytes <= ?
+            """,
+            (max_bytes,),
+            lambda _row: True,
+        )
 
     @_synchronized
     def get_attachment_extraction(
