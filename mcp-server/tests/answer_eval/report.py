@@ -19,7 +19,12 @@ from statistics import fmean
 from typing import Any
 
 from tests.answer_eval.cases import DIMENSIONS, Case
-from tests.answer_eval.graders import DeterministicResult, budget_omitted_facts
+from tests.answer_eval.graders import (
+    CHRONOLOGY_CHECKS,
+    DeterministicResult,
+    budget_omitted_facts,
+    chronology_checks_for,
+)
 from tests.answer_eval.judge import CLAIM_VERDICTS, JudgeOutcome
 from tests.answer_eval.runner import CaseRun
 
@@ -50,6 +55,7 @@ def case_record(
         "required_groups": len(case.required_evidence),
         "facts_expected": len(case.expected_facts),
         "applicable_dimensions": [d for d in DIMENSIONS if case.criteria[d]],
+        "chronology_checks": chronology_checks_for(case),
         "review": case.review,
         "status": run.status,
         "error": run.error,
@@ -148,6 +154,23 @@ def _coverage(records: list[dict[str, Any]], stage: str) -> float | None:
     return _mean(values)
 
 
+def _chronology_rates(records: list[dict[str, Any]]) -> dict[str, float | None]:
+    """Each chronology check's pass rate (#291) over the cases it applies
+    to: missing correction or conflict evidence (``chronology_cited``),
+    citation attribution of stated values (``values_attributed``), and
+    event dates and actors (``chronology_dated``). A case that did not
+    complete counts as failing; ``None`` when no case applies."""
+    rates: dict[str, float | None] = {}
+    for name in CHRONOLOGY_CHECKS:
+        applicable = [r for r in records if name in r["chronology_checks"]]
+        passed = sum(
+            r["status"] == "ok" and r["deterministic"]["checks"].get(name) == "pass"
+            for r in applicable
+        )
+        rates[name] = _rate(passed, len(applicable))
+    return rates
+
+
 def aggregate(records: list[dict[str, Any]], judge_configured: bool) -> dict[str, Any]:
     n = len(records)
     done = [r for r in records if r["status"] == "ok"]
@@ -173,6 +196,7 @@ def aggregate(records: list[dict[str, Any]], judge_configured: bool) -> dict[str
                 not d["abstained"] and d["checks"].get("abstention") == "fail" for d in det
             ),
         },
+        "chronology": _chronology_rates(records),
         "answer_ms_mean": _mean([r["timings_ms"]["answer_total"] for r in done]),
     }
     if not judge_configured:
@@ -314,6 +338,13 @@ def render_summary(report: dict[str, Any]) -> str:
             f"{_fmt(a['prompt_evidence_coverage'])} | citation coverage "
             f"{_fmt(a['citation_evidence_coverage'])}"
         )
+        chron = a["chronology"]
+        if any(v is not None for v in chron.values()):
+            lines.append(
+                f"{'':8} chronology cited {_fmt(chron['chronology_cited'])} | values "
+                f"attributed {_fmt(chron['values_attributed'])} | events dated "
+                f"{_fmt(chron['chronology_dated'])}"
+            )
         if a["judge"]:
             j = a["judge"]
             lines.append(

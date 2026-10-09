@@ -24,6 +24,14 @@ provenance field (the handler refuses one before any work); its
 (``folders``, ``date_from``, ``date_to``, ``from_name``,
 ``participant``) have the handler's types.
 
+An answerable case may carry golden ``chronology`` labels (#291): the
+positions it rests on (actor, kind, the one message that states each,
+its date and whether that is the sent date or a date the message
+mentions, and the values it states), the changes between them, the
+conflicts neither side of which supersedes the other, and the positions
+in force as of the date the question asks about. Every source an answer
+must cite is also a required evidence group of its own.
+
 Refs follow the baseline's convention: ``t24`` is the thread rooted at
 ``t24.1@baseline.example`` and ``t24.2`` the message
 ``t24.2@baseline.example``. They are resolved against the built index
@@ -33,6 +41,7 @@ Refs follow the baseline's convention: ``t24`` is the thread rooted at
 import json
 import re
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 from typing import Any, NoReturn, TypeGuard, get_args
 
@@ -123,6 +132,18 @@ _THREAD_ID = re.compile(_THREAD_NUMBER + r"\.1" + re.escape(BASELINE_DOMAIN))
 _SUMMARY_STYLES = frozenset(get_args(SummaryStyle))
 CASE_ID_MAX_LEN = 64
 _FACT_ID = re.compile(r"f[1-9][0-9]*")
+# Chronology labels (#291).
+_POSITION_ID = re.compile(r"p[1-9][0-9]*")
+POSITION_KINDS = frozenset(
+    {"proposal", "approval", "correction", "cancellation", "statement", "disposition"}
+)
+CHANGE_KINDS = frozenset({"correction", "cancellation", "supersession"})
+# Where a position's date comes from, in ``brief_issue``'s own terms.
+DATE_SOURCES = frozenset({"sent", "mentioned"})
+_CHRONOLOGY_KEYS = frozenset({"as_of", "positions", "changes", "conflicts", "in_force"})
+_POSITION_KEYS = frozenset(
+    {"id", "actor", "kind", "source", "date", "date_source", "values", "excerpt"}
+)
 _REF = re.compile(_THREAD_NUMBER + r"(?:\.[1-9][0-9]*)?")
 
 
@@ -164,6 +185,61 @@ class Fact:
 
 
 @dataclass(frozen=True)
+class Position:
+    """One golden position or event of a chronology case (#291): who held
+    or did it (``actor``, the accepted names), what kind of step it is,
+    the one message that states it, the date the source supports for it
+    (its sent date, or a date it mentions) and the whole values that
+    message states for it (``values``, which pair a value in an answer
+    with the message it must cite). ``excerpt`` is verbatim from the
+    source's indexed text."""
+
+    id: str
+    actor: tuple[str, ...]
+    kind: str
+    source: str
+    date: str
+    date_source: str
+    values: tuple[str, ...]
+    excerpt: str
+
+
+@dataclass(frozen=True)
+class Change:
+    """A later position that corrects, cancels or supersedes an earlier
+    one. An answer must cite both sides' sources."""
+
+    before: str
+    after: str
+    kind: str
+
+
+@dataclass(frozen=True)
+class Chronology:
+    """A case's golden chronology labels (#291): its positions, the
+    changes between them, the positions that disagree with neither
+    superseding the other, and those in force as of ``as_of`` (the date
+    the question asks about; ``None`` asks about now)."""
+
+    as_of: str | None
+    positions: tuple[Position, ...]
+    changes: tuple[Change, ...]
+    conflicts: tuple[tuple[str, ...], ...]
+    in_force: tuple[str, ...]
+
+    def position(self, pid: str) -> Position:
+        return next(p for p in self.positions if p.id == pid)
+
+    def must_cite(self) -> list[str]:
+        """The source refs an answer must cite: each position in force,
+        both sides of every change and every side of every conflict."""
+        ids = [*self.in_force]
+        ids += [i for c in self.changes for i in (c.before, c.after)]
+        ids += [i for group in self.conflicts for i in group]
+        return list(dict.fromkeys(self.position(i).source for i in ids))
+
+
+@dataclass(frozen=True)
 class Case:
     id: str
     category: str
@@ -181,6 +257,7 @@ class Case:
     review: str
     prompt_tokens: int | None = None
     golden_unanswerable: str | None = None
+    chronology: Chronology | None = None
     raw: dict[str, Any] = field(default_factory=dict, compare=False, repr=False)
 
     @property
@@ -262,6 +339,92 @@ def _extract_arguments_ok(args: dict[str, Any]) -> bool:
 
 def _refs(value: object) -> bool:
     return isinstance(value, list) and _str_list(value) and all(_REF.fullmatch(v) for v in value)
+
+
+def _iso_date(value: object) -> bool:
+    if not (isinstance(value, str) and re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value)):
+        return False
+    try:
+        date.fromisoformat(value)
+    except ValueError:
+        return False
+    return True
+
+
+def _parse_chronology(cid: str, raw: object, groups: list[list[str]]) -> Chronology:
+    """Golden chronology labels (#291). Every source an answer must cite
+    is also a required evidence group of its own, so a miss is attributed
+    to retrieval, prompt assembly or synthesis like any other group."""
+    if not (isinstance(raw, dict) and set(raw) <= _CHRONOLOGY_KEYS and "positions" in raw):
+        _fail(cid, "chronology keys")
+    as_of = raw.get("as_of")
+    _require(as_of is None or _iso_date(as_of), cid, "chronology as_of")
+    rows = raw["positions"]
+    _require(isinstance(rows, list) and bool(rows), cid, "chronology positions")
+    positions = []
+    for p in rows:
+        if not (isinstance(p, dict) and set(p) == _POSITION_KEYS):
+            _fail(cid, "position keys")
+        _require(bool(_POSITION_ID.fullmatch(str(p["id"]))), cid, "position id")
+        _require(_str_list(p["actor"]) and bool(p["actor"]), cid, "position actor")
+        _require(p["kind"] in POSITION_KINDS, cid, "position kind")
+        source = p["source"]
+        _require(_refs([source]) and "." in source, cid, "position source must be a message")
+        _require(_iso_date(p["date"]), cid, "position date")
+        _require(p["date_source"] in DATE_SOURCES, cid, "position date_source")
+        _require(isinstance(p["values"], list) and _str_list(p["values"]), cid, "position values")
+        _require(
+            isinstance(p["excerpt"], str) and bool(p["excerpt"].strip()), cid, "position excerpt"
+        )
+        positions.append(
+            Position(
+                p["id"],
+                tuple(p["actor"]),
+                p["kind"],
+                source,
+                p["date"],
+                p["date_source"],
+                tuple(p["values"]),
+                p["excerpt"],
+            )
+        )
+    ids = [p.id for p in positions]
+    _require(len(set(ids)) == len(ids), cid, "duplicate position ids")
+    changes = []
+    for c in raw.get("changes", []):
+        if not (isinstance(c, dict) and set(c) == {"from", "to", "kind"}):
+            _fail(cid, "change keys")
+        _require(
+            c["from"] in ids and c["to"] in ids and c["from"] != c["to"], cid, "change positions"
+        )
+        _require(c["kind"] in CHANGE_KINDS, cid, "change kind")
+        changes.append(Change(c["from"], c["to"], c["kind"]))
+    conflicts = raw.get("conflicts", [])
+    _require(
+        isinstance(conflicts, list)
+        and all(
+            isinstance(g, list) and len(set(g)) == len(g) >= 2 and set(g) <= set(ids)
+            for g in conflicts
+        ),
+        cid,
+        "conflicts must list two or more position ids",
+    )
+    in_force = raw.get("in_force", [])
+    _require(isinstance(in_force, list) and set(in_force) <= set(ids), cid, "in_force position ids")
+    chronology = Chronology(
+        as_of,
+        tuple(positions),
+        tuple(changes),
+        tuple(tuple(g) for g in conflicts),
+        tuple(in_force),
+    )
+    _require(bool(chronology.must_cite()), cid, "chronology must ask an answer to cite something")
+    _require(
+        all([ref] in groups for ref in chronology.must_cite()),
+        cid,
+        "every source an answer must cite is a required_evidence group of its own",
+    )
+    return chronology
 
 
 def _parse_case(row: dict[str, Any]) -> Case:
@@ -377,6 +540,10 @@ def _parse_case(row: dict[str, Any]) -> Case:
         )
     golden = row.get("golden_unanswerable")
     _require(golden is None or (isinstance(golden, str) and not answerable), cid, "golden")
+    chronology = None
+    if "chronology" in row:
+        _require(answerable, cid, "only answerable cases have a chronology")
+        chronology = _parse_chronology(cid, row["chronology"], groups)
 
     return Case(
         id=cid,
@@ -395,6 +562,7 @@ def _parse_case(row: dict[str, Any]) -> Case:
         review=row["review"],
         prompt_tokens=prompt_tokens,
         golden_unanswerable=golden,
+        chronology=chronology,
         raw=row,
     )
 

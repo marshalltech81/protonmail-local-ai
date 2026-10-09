@@ -29,6 +29,7 @@ import re
 import shutil
 import sqlite3
 from contextlib import closing
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -39,7 +40,7 @@ from src.lib.sqlite import Database
 from tests.answer_eval import __main__ as cli
 from tests.answer_eval.cases import DIMENSIONS, Case, load_cases, message_id_of, thread_id_of
 from tests.answer_eval.config import LayerConfig
-from tests.answer_eval.graders import _fold, _mentions
+from tests.answer_eval.graders import _fold, _mentions, chronology_checks_for
 from tests.answer_eval.harness import evaluate
 from tests.answer_eval.runner import (
     NonSyntheticIndexError,
@@ -102,6 +103,38 @@ def test_case_references_resolve(case: Case, indexed_text: dict[str, str]) -> No
             assert _ref_message(ref) in indexed_text, f"{case.id}: {ref} is not indexed"
     if case.golden_unanswerable:
         assert case.golden_unanswerable in {u["id"] for u in GOLDEN["unanswerable"]}
+
+
+@pytest.fixture(scope="module")
+def sent_dates(baseline_db: Database) -> dict[str, str]:
+    """Each indexed message's sent date (``YYYY-MM-DD``, UTC), by Message-ID."""
+    with closing(baseline_db._connect()) as conn:
+        rows = conn.execute("SELECT message_id, sent_at FROM messages").fetchall()
+    return {message_id: sent_at[:10] for message_id, sent_at in rows}
+
+
+CHRONOLOGY_CASES = [c for c in CASES if c.chronology is not None]
+
+
+@pytest.mark.parametrize("case", CHRONOLOGY_CASES, ids=lambda c: c.id)
+def test_chronology_labels_resolve(
+    case: Case, indexed_text: dict[str, str], sent_dates: dict[str, str]
+) -> None:
+    """#291: each labelled position's excerpt is in its source's indexed
+    text, every value it lists is stated there, and a position dated by
+    its message is dated with that message's sent date, so the labels
+    rest on the corpus, not on what an answer cites. A mentioned date
+    differs from the sent date, or it would be labelled ``sent``."""
+    assert case.chronology is not None
+    for p in case.chronology.positions:
+        message = _ref_message(p.source)
+        text = indexed_text.get(message, "")
+        assert " ".join(p.excerpt.split()) in text, (case.id, p.id)
+        assert all(_mentions(_fold(text), v) for v in p.values), (case.id, p.id)
+        if p.date_source == "sent":
+            assert sent_dates[message] == p.date, (case.id, p.id)
+        else:
+            assert sent_dates[message] != p.date, (case.id, p.id)
 
 
 def test_index_is_recognized_as_synthetic(baseline_db: Database) -> None:
@@ -175,55 +208,103 @@ def test_tampered_index_is_refused(baseline_dir: Path, tmp_path: Path, tamper: s
         index_identity(Database(str(copy)))
 
 
+_HEADER = re.compile(r"\[(E\d+) \| message ([^ |]+) \| from (.*?) \| sent ([0-9-]{10})")
+# How a scripted answer can go wrong on a chronology case (#291):
+# leave out every passage of a correcting (or cancelling) message, cite
+# a corrected value to the superseded message (a citation that resolves
+# and passes the tool's checks), keep only the newest side of a
+# conflict, or date each event by its message's sent date and give it
+# to the message's sender.
+MUTATIONS = ("omit_correction", "cite_superseded", "newest_only", "sender_dated")
+
+
+@dataclass
+class _Item:
+    """One statement of a scripted answer; a chronology entry when it
+    carries a date."""
+
+    text: str
+    labels: list[str]
+    date: str | None = None
+    date_source: str | None = None
+    actor: str | None = None
+    values: bool = False  # states a position's value
+    conflict: bool = False
+
+
 class _OracleAnswerer:
     """Writes each case's expected values, citing the passages that hold them.
 
     It reads the labelled headers of the prompt it receives, as a model
     would, so it can only cite what prompt assembly actually supplied.
+    A chronology case (#291) also gets one statement per labelled
+    position whose source was supplied, and a conflict entry per
+    conflict; ``mutation`` (one of ``MUTATIONS``) rewrites that answer
+    into a known failure.
     """
 
     mode = "anthropic"
     base_url = ""
 
-    def __init__(self, case: Case) -> None:
+    def __init__(self, case: Case, mutation: str | None = None) -> None:
         self.case = case
+        self.mutation = mutation
         self.unsupported: list[list[str]] = []
 
     async def complete(self, system: str, user: str) -> str:
         """Prose for ``ask_mailbox`` and ``summarize_thread``; for the
         experimental tools (#1240) the same sentences as the JSON reply
-        their prompts ask for, each sentence one entry citing its label."""
-        text = self._prose(user)
+        their prompts ask for, each sentence one entry citing its label
+        (a dated one a chronology entry, a conflict a conflicts entry)."""
+        items = self._items(user)
         if self.case.tool not in ("brief_issue", "check_conclusion"):
-            return text
-        abstained = text.startswith("Not found")
-        entries = [
-            (s.split(" [")[0], re.findall(r"\[(E\d+)\]", s))
-            for s in ([] if abstained else re.split(r"(?<=\.) ", text))
-        ]
+            if not items:
+                return "Not found in the provided emails: no passage holds the answer."
+            return " ".join(f"{i.text} {''.join(f'[{x}]' for x in i.labels)}." for i in items)
+        abstained = not items
+        # A value no passage states is cited as "[unsupported]" in prose,
+        # and with no label in an entry.
+        for i in items:
+            i.labels = [x for x in i.labels if x.startswith("E")]
         if self.case.tool == "brief_issue":
-            decisions = [{"decision": t, "labels": labels} for t, labels in entries]
+            dated = [i for i in items if i.date is not None]
             return json.dumps(
                 {
-                    "chronology": [],
+                    "chronology": [
+                        {
+                            "date": i.date,
+                            "date_source": i.date_source,
+                            "actor": i.actor,
+                            "event": i.text,
+                            "labels": i.labels,
+                        }
+                        for i in dated
+                    ],
                     "positions": [],
-                    "decisions": decisions,
+                    "decisions": [
+                        {"decision": i.text, "labels": i.labels}
+                        for i in items
+                        if i.date is None and not i.conflict
+                    ],
                     "open_questions": [],
-                    "conflicts": [],
+                    "conflicts": [
+                        {"description": i.text, "labels": i.labels} for i in items if i.conflict
+                    ],
                     "insufficient_evidence": abstained,
                 }
             )
         findings = [
-            {"relation": "supports", "explanation": t, "labels": labels} for t, labels in entries
+            {"relation": "supports", "explanation": i.text, "labels": i.labels} for i in items
         ]
         verdict = "The passages do not address it." if abstained else "Supported."
         return json.dumps(
             {"verdict_summary": verdict, "findings": findings, "insufficient_evidence": abstained}
         )
 
-    def _prose(self, user: str) -> str:
+    def _items(self, user: str) -> list[_Item]:
+        """The answer's statements; none means it abstains."""
         if not self.case.answerable:
-            return "Not found in the provided emails: nothing in them answers this."
+            return []
         labels = dict(_LABEL.findall(user))  # label -> claimant ID
         blocks = re.split(r"(?=\[E\d+ \|)", user)
         # Each passage's text without its header, whose message ID and
@@ -231,12 +312,16 @@ class _OracleAnswerer:
         passages = {
             b.split(" |", 1)[0][1:]: _fold(b.split("]", 1)[1]) for b in blocks if b.startswith("[E")
         }
-        sentences = []
+
+        def label_of(ref: str) -> str | None:
+            wanted = _ref_message(ref)
+            return next((lbl for lbl, c in labels.items() if c.split("#")[0] == wanted), None)
+
+        items = []
         for group in self.case.required_evidence:
-            wanted = {_ref_message(r) for r in group}
-            hit = next((lbl for lbl, c in labels.items() if c.split("#")[0] in wanted), None)
+            hit = next(filter(None, map(label_of, group)), None)
             if hit:
-                sentences.append(f"This passage bears on the question [{hit}].")
+                items.append(_Item("This passage bears on the question", [hit]))
         for group in self.case.must_include:
             # The first alternative some passage states, so the group's
             # order (e.g. "4 chaperones" before the source's "chaperone
@@ -250,11 +335,64 @@ class _OracleAnswerer:
             value, hit = next(found, (group[0], None))
             if hit is None:
                 self.unsupported.append(group)
-            mark = f"[{hit}]" if hit else "[unsupported]"
-            sentences.append(f"The value is {value} {mark}.")
-        if not any("[E" in s for s in sentences):
-            return "Not found in the provided emails: no passage holds the answer."
-        return " ".join(sentences)
+            items.append(_Item(f"The value is {value}", [hit] if hit else ["unsupported"]))
+        chron = self.case.chronology
+        if chron is not None:
+            items += self._chronology_items(chron, label_of)
+            items = self._mutate(items, chron, label_of, _HEADER.findall(user))
+        if not any(lbl.startswith("E") for i in items for lbl in i.labels):
+            return []
+        return items
+
+    def _chronology_items(self, chron, label_of) -> list[_Item]:
+        """One dated statement per position whose source was supplied,
+        and one per conflict citing every supplied side."""
+        items = []
+        for p in chron.positions:
+            label = label_of(p.source)
+            if label is None:
+                continue
+            what = " and ".join(p.values) or p.kind
+            items.append(
+                _Item(
+                    f"{p.actor[0]}, {p.kind}: {what}",
+                    [label],
+                    p.date,
+                    p.date_source,
+                    p.actor[0],
+                    values=bool(p.values),
+                )
+            )
+        for group in chron.conflicts:
+            sides = [x for x in (label_of(chron.position(i).source) for i in group) if x]
+            items.append(_Item("These passages disagree", sides, conflict=True))
+        return items
+
+    def _mutate(self, items: list[_Item], chron, label_of, headers) -> list[_Item]:
+        """The whole answer rewritten by ``self.mutation`` (``MUTATIONS``)."""
+        senders = {lbl: (sender, sent) for lbl, _, sender, sent in headers}
+        mutation = self.mutation
+        if mutation == "omit_correction":
+            later = {label_of(chron.position(c.after).source) for c in chron.changes}
+            items = [i for i in items if not later & set(i.labels)]
+        elif mutation == "cite_superseded":
+            for change in chron.changes:
+                after = label_of(chron.position(change.after).source)
+                before = label_of(chron.position(change.before).source)
+                for i in items:
+                    if i.values and i.labels == [after] and before:
+                        i.labels = [before]
+        elif mutation == "newest_only":
+            for group in chron.conflicts:
+                sides = sorted((chron.position(i) for i in group), key=lambda p: p.date)
+                older = {label_of(p.source) for p in sides[:-1]}
+                items = [i for i in items if not older & set(i.labels)]
+        elif mutation == "sender_dated":
+            for i in items:
+                if i.date is not None:
+                    i.actor, i.date = senders[i.labels[0]]
+                    i.date_source = "sent"
+        return items
 
 
 class _StubJudge:
@@ -316,26 +454,35 @@ _ORACLE_MISSES: dict[str, list[list[str]]] = {}
 _DETAILS: dict[str, dict] = {}
 
 
-def _evaluate_all(baseline_dir: Path, baseline_db: Database) -> list[dict]:
+def _evaluate(
+    baseline_dir: Path, baseline_db: Database, case: Case, mutation: str | None = None
+) -> tuple[dict, dict, _OracleAnswerer]:
+    """One case through its real handler with the scripted answerer
+    (rewritten by ``mutation``, if any) and the stub judge."""
     vectors = json.loads((baseline_dir / "query_vectors.json").read_text(encoding="utf-8"))
-    records = []
+    oracle = _OracleAnswerer(case, mutation)
+    ctx = RunContext(
+        db=baseline_db,
+        embed_client=PrecomputedEmbedder(vectors),
+        inference_client=oracle,
+        prompt_budget=PromptBudget(),
+        expected_embed_dim=baseline_db.get_embedding_dim(),
+    )
     judge = _StubJudge()
+    judge.case = case
+    rows, details = asyncio.run(
+        evaluate([case], ctx, judge_client=judge, judge_config=_judge_config())
+    )
+    return rows[0], details[0], oracle
+
+
+def _evaluate_all(baseline_dir: Path, baseline_db: Database) -> list[dict]:
+    records = []
     for case in HARNESS_CASES:
-        oracle = _OracleAnswerer(case)
+        record, detail, oracle = _evaluate(baseline_dir, baseline_db, case)
         _ORACLE_MISSES[case.id] = oracle.unsupported
-        ctx = RunContext(
-            db=baseline_db,
-            embed_client=PrecomputedEmbedder(vectors),
-            inference_client=oracle,
-            prompt_budget=PromptBudget(),
-            expected_embed_dim=baseline_db.get_embedding_dim(),
-        )
-        judge.case = case
-        rows, details = asyncio.run(
-            evaluate([case], ctx, judge_client=judge, judge_config=_judge_config())
-        )
-        records += rows
-        _DETAILS[case.id] = details[0]
+        records.append(record)
+        _DETAILS[case.id] = detail
     return records
 
 
@@ -356,8 +503,13 @@ def test_every_case_completes_and_is_judged(records: dict[str, dict]) -> None:
 def test_experimental_smoke_cases_pass_end_to_end(records: dict[str, dict]) -> None:
     """#1240: each experimental tool's smoke cases run through the real
     handler, pass every deterministic check on the first reply, and the
-    abstention cases abstain through the tool's own flag."""
-    smoke = [c for c in CASES if c.tool in ("brief_issue", "check_conclusion")]
+    abstention cases abstain through the tool's own flag. #291's
+    chronology cases count too, except those in the #974 gap."""
+    smoke = [
+        c
+        for c in CASES
+        if c.tool in ("brief_issue", "check_conclusion") and c.id not in _CHRONOLOGY_GAP
+    ]
     assert {c.tool for c in smoke} == {"brief_issue", "check_conclusion"}
     for case in smoke:
         r = records[case.id]
@@ -366,6 +518,77 @@ def test_experimental_smoke_cases_pass_end_to_end(records: dict[str, dict]) -> N
         assert r["deterministic"]["abstained"] is (not case.answerable), case.id
         if case.answerable:
             assert r["deterministic"]["citation_coverage"] == 1.0, case.id
+
+
+@pytest.mark.parametrize("case", CHRONOLOGY_CASES, ids=lambda c: c.id)
+def test_chronology_checks_grade_every_labelled_case(case: Case, records: dict[str, dict]) -> None:
+    """#291: every applicable chronology check runs on each labelled case
+    and passes where all its evidence reached the prompt; where some did
+    not (the #974 gap), the answer cannot cite the lost source, and
+    ``chronology_cited`` says so."""
+    det = records[case.id]["deterministic"]
+    applicable = chronology_checks_for(case)
+    assert applicable and all(det["checks"][name] != "not_applicable" for name in applicable)
+    if det["prompt_coverage"] == 1.0:
+        assert case.id not in _CHRONOLOGY_GAP
+        assert all(det["checks"][name] == "pass" for name in applicable), det["checks"]
+    else:
+        assert case.id in _CHRONOLOGY_GAP
+        assert det["checks"]["chronology_cited"] == "fail", det["checks"]
+
+
+# Each mutation of a correct scripted answer (``MUTATIONS``) and the
+# chronology check that must catch it, per case (#291): an omitted
+# correction or cancellation, a corrected value cited to the superseded
+# message, a conflict reduced to its newest side, and a quoted position
+# dated and attributed by the message that quoted it.
+_MUTATION_CATCHES = {
+    ("ask-hedge-price-as-of-march", "omit_correction"): "chronology_cited",
+    ("ask-hedge-price-as-of-march", "cite_superseded"): "values_attributed",
+    ("ask-hedge-status-now", "omit_correction"): "chronology_cited",
+    ("ask-hedge-status-now", "cite_superseded"): "values_attributed",
+    ("brief-hedge-agreement", "omit_correction"): "chronology_cited",
+    ("brief-hedge-agreement", "cite_superseded"): "values_attributed",
+    ("ask-reading-room-deposit", "newest_only"): "chronology_cited",
+    ("brief-reading-room-deposit", "newest_only"): "chronology_cited",
+    ("brief-footbridge-closure", "sender_dated"): "chronology_dated",
+}
+
+
+def test_every_mutation_and_chronology_shape_is_exercised() -> None:
+    """Each mutation is tried on some case, and every labelled case whose
+    evidence the scripted run supplies has a mutation of its own."""
+    assert {m for _, m in _MUTATION_CATCHES} == set(MUTATIONS)
+    mutated = {cid for cid, _ in _MUTATION_CATCHES}
+    assert mutated <= {c.id for c in CHRONOLOGY_CASES}
+    assert {c.id for c in CHRONOLOGY_CASES} - mutated == set(_CHRONOLOGY_GAP) | {
+        "ask-footbridge-closure"
+    }
+
+
+@pytest.mark.parametrize(("case_id", "mutation"), sorted(_MUTATION_CATCHES))
+def test_mutated_answer_is_caught(
+    case_id: str,
+    mutation: str,
+    baseline_dir: Path,
+    baseline_db: Database,
+    records: dict[str, dict],
+) -> None:
+    """#291: the correct scripted answer passes every check; the mutated
+    one fails the check named for it. A citation moved to the superseded
+    message still resolves to a supplied passage and passes the tool's
+    own citation checks: only the chronology labels catch it."""
+    case = next(c for c in CASES if c.id == case_id)
+    check = _MUTATION_CATCHES[(case_id, mutation)]
+    assert records[case_id]["deterministic"]["checks"][check] == "pass"
+    record, _, _ = _evaluate(baseline_dir, baseline_db, case, mutation)
+    checks = record["deterministic"]["checks"]
+    assert record["status"] == "ok", record["error"]
+    assert checks[check] == "fail", checks
+    if mutation == "cite_superseded":
+        assert checks["citations_resolve"] == "pass", checks
+        assert checks["citation_checks"] == "pass", checks
+        assert checks["chronology_cited"] == "pass", checks
 
 
 @pytest.mark.parametrize("case", HARNESS_CASES, ids=lambda c: c.id)
@@ -486,6 +709,10 @@ def test_body_shape_reaches_the_answering_model(case_id: str, records: dict[str,
 _LATE_DISPOSITION_SHAPES = {
     "ask-dispenser-hire-outcome": {("t100.11", "body"), ("t101.1", "body")},
     "ask-dispenser-first-explanation": {("t100.3", "body"), ("t100.11", "body")},
+    # #291: the position as of 1 June and the disposition that changed
+    # it; the brief's three positions.
+    "ask-dispenser-position-june": {("t100.8", "body"), ("t100.11", "body")},
+    "brief-dispenser-hire-charge": {("t100.3", "body"), ("t100.8", "body"), ("t100.11", "body")},
 }
 # Known gap (#974, #858): each thread's passages are chosen by vector
 # distance to the question alone, and t100.11 shares no word with
@@ -493,6 +720,8 @@ _LATE_DISPOSITION_SHAPES = {
 # makes the strict xfail below pass and must move these cases out of
 # the known gap.
 _LATE_DISPOSITION_GAP = ("t100.11", "body")
+# #291's #975-shaped chronology cases, which lose t100.11 to the same gap.
+_CHRONOLOGY_GAP = ("ask-dispenser-position-june", "brief-dispenser-hire-charge")
 
 
 @pytest.mark.xfail(
@@ -565,6 +794,9 @@ def test_cases_missing_evidence_are_the_known_ones(records: dict[str, dict]) -> 
         "ask-kayak-tight-budget": ["prompt_assembly"],
         "summarize-hall-open-points": ["prompt_assembly"],
         "ask-dispenser-hire-outcome": ["prompt_assembly"],
+        # #291's #975-shaped chronology cases, in the same #974 gap.
+        "ask-dispenser-position-june": ["prompt_assembly"],
+        "brief-dispenser-hire-charge": ["prompt_assembly"],
     }
 
 
