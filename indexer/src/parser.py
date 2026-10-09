@@ -1295,6 +1295,14 @@ class _BodyNode:
     has_text: bool = False
     children: list[int] = field(default_factory=list)
     chosen: int = -1
+    # Body-only walk (``BodyWalk``): whether an alternative or related
+    # container is above this node, and the depth of the attached email
+    # this node belongs to.
+    selected_above: bool = False
+    depth: int = 1
+    # The nearest inline email above (or at) this node that takes part in
+    # an alternative's or related's choice, by node index, or -1.
+    inline_root: int = -1
 
 
 def _selects(node: _BodyNode) -> bool:
@@ -1370,7 +1378,17 @@ class BodyWalk:
     In such a walk attachments are neither materialized nor walked into
     (the enclosing message's parse indexes them); each ``message/rfc822``
     part met, an attachment or inline, is added to ``nested``, in
-    document order, for the caller to walk as a message of its own.
+    document order with its depth, already decoded (``decode``, once,
+    where the walk meets it, so the decoded-bytes budget goes in document
+    order), for the caller to render as a message of its own. The
+    exception is an inline one under an alternative or related container
+    (review round 12 on #1311): it takes part in the container's choice
+    like any body part, its decoded email walked into as body, and is
+    rendered in place (``render``) only if chosen. An email past
+    ``max_depth``, or one ``decode`` could not read, is counted in
+    ``nested_lost_parts``; an inline one only when the body could have
+    chosen it. Emails found inside an inline one that was set aside are
+    dropped with it.
     ``parts_left`` and ``text_parts_left`` are what ``MAX_WALKED_PARTS``
     and ``MAX_BODY_TEXT_PARTS`` allow across all the walks together.
     ``degraded`` counts the decoders' fallbacks (``HEADER_DEGRADED``,
@@ -1387,11 +1405,23 @@ class BodyWalk:
 
     parts_left: int = MAX_WALKED_PARTS
     text_parts_left: int = MAX_BODY_TEXT_PARTS
-    nested: list[email.message.Message] = field(default_factory=list)
+    nested: list[tuple[email.message.Message | None, int]] = field(default_factory=list)
     degraded: Counter[str] = field(default_factory=Counter)
     decode_lost_parts: int = 0
     structure_lost_parts: int = 0
     header_lost_parts: int = 0
+    nested_lost_parts: int = 0
+    # The depth of the message being walked; the deepest email read; the
+    # caller's decoder of a ``message/rfc822`` part, returning (the email,
+    # or ``None`` when unread; whether text was or may have been lost;
+    # whether an unread one still shows its depth label); and its
+    # renderer of an inline email's label and headers (review round 12).
+    depth: int = 1
+    max_depth: int = MAX_ATTACHED_MESSAGE_DEPTH
+    decode: (
+        Callable[[email.message.Message], tuple[email.message.Message | None, bool, bool]] | None
+    ) = None
+    render: Callable[[email.message.Message, int], str] | None = None
 
 
 def _extract_body_and_attachments(
@@ -1421,6 +1451,16 @@ def _extract_body_and_attachments(
     # and the text parts whose header block lost a line to the parse.
     unsplit: list[tuple[int, bool]] = []
     header_lost: list[tuple[int, bool]] = []
+    # Body-only walk: the inline emails under an alternative or related,
+    # rendered once the body's choice is known (node, email, depth); the
+    # ones unread or read with bytes lost, counted if the body could keep
+    # them; the other emails found, decoded, with the inline email above
+    # them (inline_root, email or None, lost, label, depth); and the roots
+    # of inline emails, read like a single-part message's root.
+    in_place: list[tuple[int, email.message.Message, int]] = []
+    inline_lost: list[tuple[int, bool]] = []
+    pending: list[tuple[int, email.message.Message | None, bool, bool, int]] = []
+    inline_roots: set[int] = set()
 
     # Depth-first in document order, like ``msg.walk()``, but nothing
     # inside an attachment is a candidate for the body: an attached
@@ -1457,12 +1497,24 @@ def _extract_body_and_attachments(
         filename = _part_filename(part, None if walk is None else walk.degraded)
         is_attachment = _is_attachment(part, filename)
         decoded: email.message.Message | None = None
+        # In a body-only walk, an inline email under an alternative or
+        # related container takes part in its choice (review round 12).
+        inline_email: tuple[email.message.Message | None, bool] | None = None
+        selected_above = parent >= 0 and (nodes[parent].selected_above or _selects(nodes[parent]))
+        node_depth = nodes[parent].depth if parent >= 0 else (1 if walk is None else walk.depth)
+        inline_root = nodes[parent].inline_root if parent >= 0 else -1
         if walk is not None and ct == "message/rfc822" and part.is_multipart():
-            # An attached email, inline or not, is a message of its own
-            # here: its headers and body are rendered as a nested
-            # section, never folded into this body (review round 2).
-            walk.nested.append(part)
-            is_attachment = True
+            # Read here, once, in document order (review round 12).
+            inner, email_lost, label = _open_nested(walk, part, node_depth + 1)
+            if not is_attachment and not no_body and selected_above:
+                inline_email = (inner, email_lost)
+                node_depth += 1
+            else:
+                # An attached email, inline or not, is a message of its
+                # own here: its headers and body are rendered as a nested
+                # section, never folded into this body (review round 2).
+                pending.append((inline_root, inner, email_lost, label, node_depth + 1))
+                is_attachment = True
         elif is_attachment and walk is not None:
             pass
         elif is_attachment:
@@ -1517,9 +1569,28 @@ def _extract_body_and_attachments(
                 alternative=ct == "multipart/alternative",
                 related=ct == "multipart/related",
             )
+            node.selected_above = selected_above
+            node.depth = node_depth
+            node.inline_root = inline_root
             nodes.append(node)
             if parent >= 0 and _selects(nodes[parent]):
                 nodes[parent].children.append(len(nodes) - 1)
+            if inline_email is not None:
+                index = len(nodes) - 1
+                node.inline_root = index
+                inner, email_lost = inline_email
+                if email_lost:
+                    # Unread, or read with bytes lost: counted only if the
+                    # body could keep it.
+                    inline_lost.append((index, True))
+                if inner is None:
+                    continue
+                # Its email is walked into as this node's body; its label
+                # and headers are this node's text if the body keeps it.
+                in_place.append((index, inner, node_depth))
+                inline_roots.add(id(inner))
+                frames.append((iter((inner,)), False, decode_depth, index, False))
+                continue
             if (
                 walk is not None
                 and part.get_content_maintype() == "multipart"
@@ -1573,8 +1644,9 @@ def _extract_body_and_attachments(
         # sender's clean plain text); a whitespace-only plain part has no
         # content to prefer (#298).
         is_html = ct == "text/html"
+        root = part is msg or (bool(inline_roots) and id(part) in inline_roots)
         if not is_html and not (
-            ct == "text/plain" or (part is msg and part.get_content_maintype() == "text")
+            ct == "text/plain" or (root and part.get_content_maintype() == "text")
         ):
             continue
         if text_parts >= max_text_parts:
@@ -1614,6 +1686,18 @@ def _extract_body_and_attachments(
     if walk is not None:
         walk.parts_left -= walked
         walk.text_parts_left -= text_parts
+        kept = _kept_nodes(nodes) if in_place or pending else []
+        for index, inner, depth in in_place:
+            if kept[index] and walk.render is not None:
+                nodes[index].text = walk.render(inner, depth)
+        for under, found, email_lost, label, depth in pending:
+            # Dropped with an inline email set aside above it.
+            if under >= 0 and not kept[under]:
+                continue
+            if email_lost:
+                walk.nested_lost_parts += 1
+            if found is not None or label:
+                walk.nested.append((found, depth))
     body = _assemble_body(nodes)
     if capped:
         lost = _capped_parts_lost(nodes, capped)
@@ -1631,7 +1715,31 @@ def _extract_body_and_attachments(
             walk.structure_lost_parts += _capped_parts_lost(nodes, unsplit)
         if header_lost:
             walk.header_lost_parts += _capped_parts_lost(nodes, header_lost)
+        if inline_lost:
+            walk.nested_lost_parts += _capped_parts_lost(nodes, inline_lost)
     return body, attachments
+
+
+def _open_nested(
+    walk: BodyWalk, part: email.message.Message, depth: int
+) -> tuple[email.message.Message | None, bool, bool]:
+    """The email a ``message/rfc822`` part met at ``depth`` carries, read
+    by ``walk.decode`` (without one, identity-encoded only), as (email or
+    ``None``, lost, label): past ``walk.max_depth`` it is not read."""
+    if depth > walk.max_depth:
+        return None, True, False
+    if walk.decode is not None:
+        return walk.decode(part)
+    encoding = str(part.get("Content-Transfer-Encoding", "")).strip().lower()
+    payload = part.get_payload()
+    if (
+        encoding in _IDENTITY_ENCODINGS
+        and isinstance(payload, list)
+        and payload
+        and isinstance(payload[0], email.message.Message)
+    ):
+        return payload[0], False, False
+    return None, True, False
 
 
 def _safe_decode(payload: bytes, charset: str, degraded: Counter[str] | None = None) -> str:

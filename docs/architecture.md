@@ -1438,6 +1438,16 @@ decoded with the parser's header decoder, and the body the parser
 would choose for that message, with no quote stripping. The inner
 `From` is a claim inside a claim: it is searchable attachment text
 only, never a participant, an authority input or a direction (#1235).
+Each nested email is read once, where the walk meets it, so the
+64 MB decoded-bytes budget goes in document order. An inline nested
+email under a `multipart/alternative` or `multipart/related` takes
+part in that container's choice by its real content, as the default
+parser's body does: it is rendered (label, headers, body) where it
+sits only when chosen, and not at all when set aside, together with
+any email inside it. One that could not be read (past the depth cap,
+in an encoding no decoder reads, or not decodable) counts as
+`eml_nested_messages` only when the body could have chosen it (review
+round 12 on #1311).
 The email's own attachments are not extracted here: inside a
 `message/rfc822` part the parser records each as an occurrence of its
 own. A nested `.eml` or `application/eml` file is such a leaf

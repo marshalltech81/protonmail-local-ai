@@ -15,6 +15,10 @@ attached or inline (depth first, in document order):
 * its body, chosen exactly as the parser chooses a message's body
   (``parser._extract_body_and_attachments``), without quote stripping.
 
+An inline nested email under a ``multipart/alternative`` or
+``multipart/related`` takes part in that container's choice: it is
+rendered where it sits only when chosen (``parser.BodyWalk``).
+
 The inner From is a claim inside a claim (#1235): it is searchable
 attachment text only, never a participant, an authority input or a
 direction. Attachments of these emails are not extracted here: inside
@@ -219,22 +223,26 @@ def extract_text(payload: bytes) -> tuple[str, list[str]]:
     # The decoders' fallbacks, whose lines the child cannot log, are
     # counted in ``walk.degraded`` and sent to the parent (#1314).
     degraded = walk.degraded
+    # The walk reads each nested email where it meets it, in document
+    # order under one decoded-bytes budget, and renders an inline one the
+    # body chose under an alternative or related in place, with the same
+    # label and headers (review round 12).
+    walk.max_depth = _MAX_DEPTH
+    walk.decode = lambda part: _read_nested(part, decodable)
+    walk.render = lambda inner, depth: _section_head(inner, depth, caps, degraded)
     while stack and not text.full:
         msg, depth = stack.pop()
         # A section per message: its label and header lines, then its
         # body after a blank line; sections apart by a blank line.
-        lines = [f"[Attached message, depth {depth}]"] if depth > 1 else []
-        if msg is not None:
-            lines.extend(_header_lines(msg, caps, degraded))
-        if lines:
-            text.add(("\n\n" if text.pieces else "") + "\n".join(lines))
         if msg is None:
+            text.add(("\n\n" if text.pieces else "") + f"[Attached message, depth {depth}]")
             continue
-        if any(isinstance(d, parser.DROPPED_HEADER_DEFECTS) for d in msg.defects):
-            # The dropped line's text is not indexed (review round 10).
-            caps["eml_header_lines"] = None
+        head = _section_head(msg, depth, caps, degraded)
+        if head:
+            text.add(("\n\n" if text.pieces else "") + head)
         counted: Counter[str] = Counter()
         start = len(walk.nested)
+        walk.depth = depth
         body, _ = parser._extract_body_and_attachments(msg, caps=counted, walk=walk)
         if counted["mime_parts"]:
             caps["eml_parts"] = None
@@ -243,34 +251,19 @@ def extract_text(payload: bytes) -> tuple[str, list[str]]:
 
         if body:
             text.add(("\n\n" if text.pieces else "") + body)
+        # Already read by the walk; pushed in reverse, so the first is
+        # rendered first.
         found = walk.nested[start:]
         del walk.nested[start:]
-        if found and depth + 1 > _MAX_DEPTH:
-            caps["eml_nested_messages"] = None
-            continue
-        # Decoded in document order, so the decoded-bytes budget goes to
-        # the first ones; pushed in reverse, so the first is rendered first.
-        inner_messages: list[email.message.Message | None] = []
-        for part in found:
-            encoding = str(part.get("Content-Transfer-Encoding", "")).strip().lower()
-            if encoding not in _READ_ENCODINGS:
-                # uuencode and its aliases, or anything else: no decoder,
-                # so the transport text is never indexed (review round 3).
-                caps["eml_nested_messages"] = None
-                inner_messages.append(None)
-                continue
-            inner, lost = _inner_message(part, decodable)
-            if lost:
-                caps["eml_nested_messages"] = None
-            if inner is not None:
-                inner_messages.append(inner)
-        stack.extend((inner, depth + 1) for inner in reversed(inner_messages))
+        stack.extend(reversed(found))
     if walk.decode_lost_parts:
         caps["eml_body_decode"] = None
     if walk.structure_lost_parts:
         caps["eml_body_structure"] = None
     if walk.header_lost_parts:
         caps["eml_header_lines"] = None
+    if walk.nested_lost_parts:
+        caps["eml_nested_messages"] = None
     if text.full:
         caps["eml_text_chars"] = None
     if degraded.total():
@@ -280,6 +273,19 @@ def extract_text(payload: bytes) -> tuple[str, list[str]]:
             charsets=degraded[parser.CHARSET_DEGRADED],
         )
     return "".join(text.pieces), list(caps)
+
+
+def _section_head(
+    msg: email.message.Message, depth: int, caps: dict[str, None], degraded: Counter[str]
+) -> str:
+    """A message's section head: its depth label (below the root) and
+    header lines. A header line the parse dropped is reported (review
+    round 10), since its text is not indexed."""
+    if any(isinstance(d, parser.DROPPED_HEADER_DEFECTS) for d in msg.defects):
+        caps["eml_header_lines"] = None
+    lines = [f"[Attached message, depth {depth}]"] if depth > 1 else []
+    lines.extend(_header_lines(msg, caps, degraded))
+    return "\n".join(lines)
 
 
 def _header_lines(
@@ -303,6 +309,21 @@ def _header_lines(
         if value:
             lines.append(f"{name}: {value}")
     return lines
+
+
+def _read_nested(
+    part: email.message.Message, decodable: list[int]
+) -> tuple[email.message.Message | None, bool, bool]:
+    """``BodyWalk.decode``: the email a nested ``message/rfc822`` part
+    carries (``_inner_message``), whether text was or may have been lost,
+    and whether an unread one still shows its depth label: one in
+    uuencode, its aliases or anything else has no decoder, so its
+    transport text is never indexed (review round 3)."""
+    encoding = str(part.get("Content-Transfer-Encoding", "")).strip().lower()
+    if encoding not in _READ_ENCODINGS:
+        return None, True, True
+    inner, lost = _inner_message(part, decodable)
+    return inner, lost, False
 
 
 def _inner_message(

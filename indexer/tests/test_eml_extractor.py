@@ -27,6 +27,7 @@ from src.extractors import (
     extract,
     extractor_child,
 )
+from src.extractors import eml as eml_module
 
 MARKER = "SYNTHETIC_EML_MARKER"
 HDR = b"Subject: s\r\nFrom: a@example.test\r\n"
@@ -1015,3 +1016,257 @@ class TestReviewRound11:
         result = self._extract(_alternative(_PLAIN, html), caplog)
         assert result.text_complete is True
         assert "eml_header_lines" not in caplog.text
+
+
+def _related(first: bytes, second: bytes) -> bytes:
+    return (
+        HDR + b'Content-Type: multipart/related; boundary="R"\r\n\r\n'
+        b"--R\r\n" + first + b"\r\n--R\r\n" + second + b"\r\n--R--\r\n"
+    )
+
+
+def _inline(inner: bytes) -> bytes:
+    return b"Content-Type: message/rfc822\r\n\r\n" + inner
+
+
+_HEAD = "Subject: s\nFrom: a@example.test"
+_NESTED = "\n\n[Attached message, depth 2]\nSubject: inner\n\ninner words"
+_INNER_PLAIN = _text("inner words", subject="inner")
+_INNER_HTML = b"Subject: inner\r\nContent-Type: text/html\r\n\r\n<p>inner html</p>"
+
+
+class TestReviewRound12:
+    """An inline attached email under a ``multipart/alternative`` or
+    ``multipart/related`` takes part in that container's choice, as the
+    default walk's body does: rendered (label, headers, body) where it
+    sits only when chosen, nothing when set aside. Attachments and inline
+    emails under ``mixed`` alone are rendered as before."""
+
+    def _text_of(self, payload: bytes, caplog) -> str:
+        with caplog.at_level(logging.WARNING):
+            result = extract(content_type="message/rfc822", filename="f.eml", payload=payload)
+        assert result.status == STATUS_SUCCESS
+        assert result.text is not None
+        return result.text
+
+    @pytest.mark.parametrize(
+        ("payload", "expected"),
+        [
+            (_alternative(_inline(_INNER_PLAIN), _HTML), _HEAD + _NESTED),
+            (_alternative(_HTML, _inline(_INNER_PLAIN)), _HEAD + _NESTED),
+            (_alternative(_PLAIN, _inline(_INNER_PLAIN)), _HEAD + "\n\nplain words"),
+            (_alternative(_inline(_INNER_HTML), _PLAIN), _HEAD + "\n\nplain words"),
+            (
+                _alternative(_inline(b"Subject: inner\r\n\r\n   "), _HTML),
+                _HEAD + "\n\nhtml words",
+            ),
+            (_related(_inline(_INNER_PLAIN), _HTML), _HEAD + _NESTED),
+            (_related(_HTML, _inline(_INNER_PLAIN)), _HEAD + "\n\nhtml words"),
+            (
+                _alternative(
+                    b'Content-Type: multipart/mixed; boundary="M"\r\n\r\n--M\r\n'
+                    + _inline(_INNER_PLAIN)
+                    + b"\r\n--M--",
+                    _HTML,
+                ),
+                _HEAD + _NESTED,
+            ),
+        ],
+        ids=[
+            "alt_message_first",
+            "alt_message_second",
+            "alt_plain_wins",
+            "alt_html_only_message_loses",
+            "alt_blank_message_loses",
+            "related_root",
+            "related_resource",
+            "alt_through_mixed",
+        ],
+    )
+    def test_selection_decides(self, caplog, payload, expected):
+        assert self._text_of(payload, caplog) == expected
+
+    def test_a_nested_inline_email_in_a_chosen_one_is_one_deeper(self, caplog):
+        mid = (
+            b'Subject: mid\r\nContent-Type: multipart/alternative; boundary="X"\r\n\r\n'
+            b"--X\r\n" + _inline(_INNER_PLAIN) + b"\r\n--X\r\n" + _HTML + b"\r\n--X--\r\n"
+        )
+        assert self._text_of(_alternative(_inline(mid), _HTML), caplog) == (
+            _HEAD
+            + "\n\n[Attached message, depth 2]\nSubject: mid"
+            + "\n\n[Attached message, depth 3]\nSubject: inner\n\ninner words"
+        )
+
+    def test_an_attachment_under_an_alternative_is_rendered_as_before(self, caplog):
+        attached = (
+            b"Content-Type: message/rfc822\r\nContent-Disposition: attachment\r\n\r\n"
+            + _INNER_PLAIN
+        )
+        assert self._text_of(_alternative(_PLAIN, attached), caplog) == (
+            _HEAD + "\n\nplain words" + _NESTED
+        )
+
+    @pytest.mark.parametrize(
+        ("first", "second", "expected"),
+        [
+            ("message", "html", _HEAD + _NESTED),
+            ("plain", "message", _HEAD + "\n\nplain words"),
+        ],
+    )
+    def test_a_transfer_encoded_inline_email_is_queued_only_when_chosen(
+        self, caplog, first, second, expected
+    ):
+        """Its text cannot be read during the walk, so it is assumed to
+        carry plain text and is rendered as a section only if chosen."""
+        encoded = (
+            b"Content-Type: message/rfc822\r\nContent-Transfer-Encoding: base64\r\n\r\n"
+            + base64.encodebytes(_INNER_PLAIN)
+        )
+        parts = {"message": encoded, "html": _HTML, "plain": _PLAIN}
+        assert self._text_of(_alternative(parts[first], parts[second]), caplog) == expected
+
+    def test_a_chosen_inline_email_reports_its_dropped_header_line(self, caplog):
+        inner = b" Lost: x\r\n" + _INNER_PLAIN
+        with caplog.at_level(logging.WARNING):
+            result = extract(
+                content_type="message/rfc822",
+                filename="f.eml",
+                payload=_alternative(_inline(inner), _HTML),
+            )
+        assert result.text_complete is False
+        assert "extractor cap eml_header_lines:" in caplog.text
+
+    def test_a_set_aside_inline_email_reports_nothing(self, caplog):
+        inner = b" Lost: x\r\n" + _INNER_PLAIN
+        with caplog.at_level(logging.WARNING):
+            result = extract(
+                content_type="message/rfc822",
+                filename="f.eml",
+                payload=_alternative(_PLAIN, _inline(inner)),
+            )
+        assert result.text_complete is True
+        assert "eml_header_lines" not in caplog.text
+
+
+def _b64_email(inner: bytes, *, disposition: bytes = b"") -> bytes:
+    return (
+        b"Content-Type: message/rfc822\r\nContent-Transfer-Encoding: base64\r\n"
+        + disposition
+        + b"\r\n"
+        + base64.encodebytes(inner)
+    )
+
+
+class TestReviewRound12Rework:
+    """The panel's design for round 12: every nested email is read once,
+    where the walk meets it, in document order; an inline candidate is
+    chosen by its real content; unread or lossy candidates are reported
+    only when the body could have kept them; emails inside a candidate
+    set aside are dropped with it."""
+
+    def _run(self, payload: bytes, caplog, monkeypatch=None, calls=None):
+        if monkeypatch is not None and calls is not None:
+            real = eml_module._inner_message
+            monkeypatch.setattr(
+                eml_module,
+                "_inner_message",
+                lambda part, decodable: calls.append(decodable[0]) or real(part, decodable),
+            )
+        with caplog.at_level(logging.WARNING):
+            result = extract(content_type="message/rfc822", filename="f.eml", payload=payload)
+        assert result.status == STATUS_SUCCESS
+        assert result.text is not None
+        return result
+
+    def test_each_email_is_read_once(self, caplog, monkeypatch, _in_process_child):
+        calls: list[int] = []
+        payload = _multipart(
+            _alternative(_b64_email(_INNER_PLAIN), _HTML).replace(HDR, b""),
+            _b64_email(
+                _text("attached words", subject="att"),
+                disposition=b"Content-Disposition: attachment\r\n",
+            ),
+        )
+        result = self._run(payload, caplog, monkeypatch, calls)
+        assert len(calls) == 2
+        assert "inner words" in result.text and "attached words" in result.text
+        assert "html words" not in result.text
+
+    def test_a_base64_html_only_candidate_does_not_beat_a_plain_sibling(self, caplog):
+        html_only = b"Subject: inner\r\nContent-Type: text/html\r\n\r\n<p>inner html</p>"
+        result = self._run(_alternative(_b64_email(html_only), _PLAIN), caplog)
+        assert result.text == _HEAD + "\n\nplain words"
+
+    @pytest.mark.parametrize(
+        ("first", "second", "cut"),
+        [("candidate", "html", True), ("plain", "candidate", False)],
+    )
+    @pytest.mark.parametrize(
+        "candidate",
+        [
+            b"Content-Type: message/rfc822\r\nContent-Transfer-Encoding: x-uuencode\r\n\r\n"
+            b"begin 644 x\n`\nend\n",
+            b"Content-Type: message/rfc822\r\nContent-Transfer-Encoding: base64\r\n\r\nA",
+        ],
+        ids=["unsupported_encoding", "undecodable"],
+    )
+    def test_an_unread_candidate_is_cut_only_if_it_could_be_chosen(
+        self, caplog, candidate, first, second, cut
+    ):
+        parts = {"candidate": candidate, "html": _HTML, "plain": _PLAIN}
+        result = self._run(_alternative(parts[first], parts[second]), caplog)
+        assert "[Attached message" not in result.text
+        assert result.text_complete is (not cut)
+        assert ("extractor cap eml_nested_messages:" in caplog.text) is cut
+
+    @pytest.mark.parametrize("attachment_first", [True, False])
+    def test_the_byte_budget_goes_in_document_order(
+        self, caplog, monkeypatch, _in_process_child, attachment_first
+    ):
+        attached = _b64_email(
+            _text("attached words", subject="att"),
+            disposition=b"Content-Disposition: attachment\r\n",
+        )
+        candidate = _alternative(_b64_email(_INNER_PLAIN), _HTML).replace(HDR, b"")
+        first, second = (attached, candidate) if attachment_first else (candidate, attached)
+        one = len(base64.encodebytes(_text("attached words", subject="att")))
+        monkeypatch.setattr(eml_module, "_MAX_DECODED_BYTES", one + 8)
+        result = self._run(_multipart(first, second), caplog)
+        assert ("attached words" in result.text) is attachment_first
+        assert ("inner words" in result.text) is (not attachment_first)
+        assert "extractor cap eml_nested_messages:" in caplog.text
+
+    def test_a_candidate_past_the_depth_cap_is_not_read(
+        self, caplog, monkeypatch, _in_process_child
+    ):
+        monkeypatch.setattr(eml_module, "_MAX_DEPTH", 2)
+        deep = (
+            b'Subject: mid\r\nContent-Type: multipart/alternative; boundary="X"\r\n\r\n'
+            b"--X\r\n" + _inline(_INNER_PLAIN) + b"\r\n--X\r\n" + _HTML + b"\r\n--X--\r\n"
+        )
+        result = self._run(_alternative(_inline(deep), _HTML), caplog)
+        assert "depth 3" not in result.text and "inner words" not in result.text
+        assert "[Attached message, depth 2]\nSubject: mid" in result.text
+        assert "extractor cap eml_nested_messages:" in caplog.text
+
+    def test_an_email_inside_a_candidate_set_aside_is_dropped(
+        self, caplog, monkeypatch, _in_process_child
+    ):
+        calls: list[int] = []
+        holder = _multipart(
+            _PLAIN,
+            b"Content-Type: message/rfc822\r\nContent-Disposition: attachment\r\n\r\n"
+            + _text("hidden words", subject="hidden"),
+            headers=b"Subject: holder\r\n",
+        )
+        result = self._run(_alternative(_PLAIN, _inline(holder)), caplog, monkeypatch, calls)
+        assert result.text == _HEAD + "\n\nplain words"
+        assert result.text_complete is True
+
+    def test_a_single_part_candidate_root_is_read_like_a_message_root(self, caplog):
+        calendar = b"Subject: inner\r\nContent-Type: text/calendar\r\n\r\nBEGIN:VCALENDAR"
+        result = self._run(_alternative(_inline(calendar), _HTML), caplog)
+        assert (
+            result.text
+            == _HEAD + "\n\n[Attached message, depth 2]\nSubject: inner\n\nBEGIN:VCALENDAR"
+        )
