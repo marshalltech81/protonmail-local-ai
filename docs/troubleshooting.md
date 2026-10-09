@@ -1620,10 +1620,12 @@ only, never filenames or text (`make logs`):
   - `xls_sheets`, `xls_expanded_cells`, `xls_text_chars`: the same walk
     over a legacy `.xls` stopped at 1,024 sheets or at the cell or text
     budget above (#935).
-  - `doc_output_bytes`: catdoc wrote more than 8 MiB for a legacy
-    `.doc`; the rest is not read (#935).
-  - `ppt_output_bytes`: the `.ppt` reader wrote more than 8 MiB for a
-    legacy `.ppt`; the rest is not read (#957).
+  - `doc_output_bytes`: catdoc wrote more for a legacy `.doc` than
+    four bytes per character of `INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS`,
+    or than 40 MiB when that is larger or disabled (#1308), counted
+    before whitespace is stripped; the rest is not read (#935).
+  - `ppt_output_bytes`: the same cap on the `.ppt` reader's output for a
+    legacy `.ppt` (#957).
   - `pptx_slides`, `pptx_shapes`, `pptx_table_cells`,
     `pptx_text_chars`: the walk over a PowerPoint deck stopped at its
     slide budget (5,000 slide-list entries), shape budget (100,000,

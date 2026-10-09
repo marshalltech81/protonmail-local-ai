@@ -7,8 +7,10 @@ OLE2 (an OOXML file mislabelled as ``.doc``) still goes to ``docx``.
 
 The text comes from ``catdoc`` (Debian's ``catdoc`` package), run by
 ``_runner.run_tool``: no shell, address-space and CPU limits set before
-catdoc starts (#995), a wall-clock timeout, its output read up to
-``_MAX_OUTPUT_BYTES`` and its stderr discarded. ``-d utf-8`` fixes
+catdoc starts (#995), a wall-clock timeout, its output read up to four
+bytes per character of the dispatcher's ``max_extracted_chars``, never
+past ``_MAX_OUTPUT_BYTES`` (``_runner.raw_output_cap``, #1308), and its
+stderr discarded. ``-d utf-8`` fixes
 the output charset whatever the locale, and ``-w`` turns off catdoc's
 line wrapping so a paragraph stays one line for the chunker. Output past
 the byte cap is not indexed: the text before it is kept and the cap is
@@ -22,7 +24,7 @@ import shutil
 from collections.abc import Callable
 
 from . import warn_extractor_cap
-from ._runner import ToolNotFoundError, run_tool
+from ._runner import ToolNotFoundError, raw_output_cap, run_tool
 
 log = logging.getLogger("indexer.extractor.doc")
 
@@ -45,10 +47,12 @@ CHILD_MAX_CPU_SECONDS = 10
 # milliseconds, so this is reached only by a tool that hangs.
 TOOL_TIMEOUT_SECONDS = 60.0
 
-# Bytes of a tool's output read, about four times the dispatcher's
-# default ``max_extracted_chars`` (2,000,000) of mostly one-byte UTF-8,
-# so the dispatcher's cap still decides the stored length.
-_MAX_OUTPUT_BYTES = 8 * 1024 * 1024
+# The most bytes of a tool's output read, whatever the dispatcher's
+# ``max_extracted_chars`` (``_runner.raw_output_cap``, #1308): the other
+# extractors' 10,000,000-character text budget at four bytes a
+# character. An extraction's peak in the indexer is about five bytes per
+# output byte (measured there), so about 200 MiB at this ceiling.
+_MAX_OUTPUT_BYTES = 40 * 1024 * 1024
 
 
 def extract(
@@ -59,13 +63,31 @@ def extract(
     ocr_timeout_seconds: float | None = None,  # noqa: ARG001
     max_pdf_pages: int | None = None,  # noqa: ARG001
     on_progress: Callable[[], None] | None = None,  # noqa: ARG001
+    max_extracted_chars: int | None = None,
 ) -> tuple[str, str]:
     """Extract text from a legacy ``.doc`` payload. Returns (text, "doc")."""
-    return catdoc_text("catdoc", ["-d", "utf-8", "-w"], payload, suffix=".doc", module="doc"), "doc"
+    text = catdoc_text(
+        "catdoc",
+        ["-d", "utf-8", "-w"],
+        payload,
+        suffix=".doc",
+        module="doc",
+        max_output_bytes=raw_output_cap(max_extracted_chars, ceiling=_MAX_OUTPUT_BYTES),
+    )
+    return text, "doc"
 
 
-def catdoc_text(tool: str, options: list[str], payload: bytes, *, suffix: str, module: str) -> str:
-    """Run one of catdoc's tools on ``payload`` and return its text."""
+def catdoc_text(
+    tool: str,
+    options: list[str],
+    payload: bytes,
+    *,
+    suffix: str,
+    module: str,
+    max_output_bytes: int,
+) -> str:
+    """Run one of catdoc's tools on ``payload`` and return its text, read
+    up to ``max_output_bytes``."""
     binary = shutil.which(tool)
     if binary is None:
         raise ToolNotFoundError
@@ -73,7 +95,7 @@ def catdoc_text(tool: str, options: list[str], payload: bytes, *, suffix: str, m
         [binary, *options],
         payload,
         timeout_seconds=TOOL_TIMEOUT_SECONDS,
-        max_output_bytes=_MAX_OUTPUT_BYTES,
+        max_output_bytes=max_output_bytes,
         max_address_space_bytes=CHILD_MAX_ADDRESS_SPACE_BYTES,
         max_cpu_seconds=CHILD_MAX_CPU_SECONDS,
         suffix=suffix,
@@ -84,7 +106,7 @@ def catdoc_text(tool: str, options: list[str], payload: bytes, *, suffix: str, m
             f"{module}_output_bytes",
             "%s output cut at %d bytes",
             tool,
-            _MAX_OUTPUT_BYTES,
+            max_output_bytes,
         )
     # A cut can split a UTF-8 sequence; catdoc writes valid UTF-8 otherwise.
     return output.data.decode("utf-8", errors="replace")

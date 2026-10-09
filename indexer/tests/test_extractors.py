@@ -5185,7 +5185,7 @@ class TestLegacyOfficeLabels:
         for content_type, filename, _ in _LEGACY_LABELS:
             result = extract(content_type=content_type, filename=filename, payload=payload)
             assert result.status == STATUS_SUCCESS, (content_type, filename)
-            assert result.extractor == f"{calls[-1]}@1"
+            assert result.extractor == f"{calls[-1]}@{extractors.EXTRACTOR_VERSIONS[calls[-1]]}"
         assert calls == ["doc", "doc", "xls", "xls"]
 
     def test_ole2_check_reads_only_the_signature(self, monkeypatch):

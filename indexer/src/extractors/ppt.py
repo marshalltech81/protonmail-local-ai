@@ -15,9 +15,11 @@ reads no slide text from decks current PowerPoint or LibreOffice save
 The JVM is run by ``_runner.run_tool``, whose launcher (``_launcher.py``,
 ``sys.executable -I``) caps its own address space and CPU time and caps
 glibc's malloc arenas, then ``execv``s Java: no shell, a minimal environment,
-a wall-clock timeout, stdout read up to ``_MAX_OUTPUT_BYTES`` and stderr
-discarded (POI's errors and Log4j's "no provider" line can quote the
-deck or are noise). Output past the byte cap is not indexed: the text
+a wall-clock timeout, stdout read up to four bytes per character of the
+dispatcher's ``max_extracted_chars``, never past ``_MAX_OUTPUT_BYTES``
+(``_runner.raw_output_cap``, #1308), and stderr discarded (POI's
+errors and Log4j's "no provider" line can quote the deck or are
+noise). Output past the byte cap is not indexed: the text
 before it is kept and the cap is reported through
 ``warn_extractor_cap``. A password-protected deck makes the reader exit
 with ``ENCRYPTED_EXIT_STATUS`` (POI's encrypted-file exception, matched
@@ -39,7 +41,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from . import warn_extractor_cap
-from ._runner import ToolExitError, ToolNotFoundError, run_tool
+from ._runner import ToolExitError, ToolNotFoundError, raw_output_cap, run_tool
 
 log = logging.getLogger("indexer.extractor.ppt")
 
@@ -74,10 +76,10 @@ class PptEncryptedError(Exception):
 # run meets that limit first.
 PPT_TIMEOUT_SECONDS = 45.0
 
-# Bytes of output read, about four times the dispatcher's default
-# ``max_extracted_chars`` (2,000,000) of mostly one-byte UTF-8, so the
-# dispatcher's cap still decides the stored length.
-_MAX_OUTPUT_BYTES = 8 * 1024 * 1024
+# The most bytes of output read, whatever the dispatcher's
+# ``max_extracted_chars``: the same ceiling as ``doc._MAX_OUTPUT_BYTES``,
+# for the same reason (#1308).
+_MAX_OUTPUT_BYTES = 40 * 1024 * 1024
 
 # JVM options. The heap, code cache, class space and metaspace sizes,
 # the serial collector, C1-only compilation and no class-data sharing
@@ -116,11 +118,13 @@ def extract(
     ocr_timeout_seconds: float | None = None,  # noqa: ARG001
     max_pdf_pages: int | None = None,  # noqa: ARG001
     on_progress: Callable[[], None] | None = None,  # noqa: ARG001
+    max_extracted_chars: int | None = None,
 ) -> tuple[str, str]:
     """Extract text from a legacy ``.ppt`` payload. Returns (text, "ppt")."""
     java = PPT_HOME / "jre" / "bin" / "java"
     if not java.is_file():
         raise ToolNotFoundError
+    max_output_bytes = raw_output_cap(max_extracted_chars, ceiling=_MAX_OUTPUT_BYTES)
     try:
         output = run_tool(
             [
@@ -132,7 +136,7 @@ def extract(
             ],
             payload,
             timeout_seconds=PPT_TIMEOUT_SECONDS,
-            max_output_bytes=_MAX_OUTPUT_BYTES,
+            max_output_bytes=max_output_bytes,
             max_address_space_bytes=CHILD_MAX_ADDRESS_SPACE_BYTES,
             max_cpu_seconds=CHILD_MAX_CPU_SECONDS,
             suffix=".ppt",
@@ -146,7 +150,7 @@ def extract(
             log,
             "ppt_output_bytes",
             "ppt output cut at %d bytes",
-            _MAX_OUTPUT_BYTES,
+            max_output_bytes,
         )
     # A cut can split a UTF-8 sequence; the reader writes valid UTF-8 otherwise.
     return output.data.decode("utf-8", errors="replace"), "ppt"
