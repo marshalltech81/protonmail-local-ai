@@ -119,7 +119,8 @@ ZIP_MAX_UNCOMPRESSED_BYTES = 200 * 1024 * 1024
 # * the budget's ``line`` bucket: the repeated indexer lines that share
 #   the rate limit (embed retries and recoveries, health-file and
 #   ingestion-state failures, #873, and the parser's repeated-header
-#   lines: merged To/Cc and ambiguous From, #1144), withheld. Counted
+#   lines: merged To/Cc and ambiguous From, #1144, and the queue's
+#   per-message terminal, retry and dead-letter lines, #1320), withheld. Counted
 #   apart from the attachment WARNINGs, and reported on the queue
 #   heartbeat as ``suppressed_lines``, because a suppressed embed or
 #   repeated-header line says nothing about attachment text (Codex

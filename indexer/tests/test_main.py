@@ -5539,6 +5539,48 @@ class TestEnqueueUnindexedMessages:
         assert marker not in caplog.text
         assert db._conn.execute("SELECT COUNT(*) FROM threads").fetchone()[0] == 0
 
+    def test_a_burst_of_unindexable_mail_logs_a_bounded_number_of_terminal_lines(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """Each crafted message dead-letters with one ``terminal:``
+        WARNING; past the shared line budget the rest are counted in the
+        heartbeat's ``suppressed_lines`` instead of logged (#1320)."""
+        from src import extractors
+
+        maildir, inbox, db, queue = self._setup(tmp_path, monkeypatch)
+        monkeypatch.setattr(main, "touch_health_file", lambda: None)
+        marker = "TERMINALBURST1320MARKER"
+        limit = extractors._WARNINGS_PER_WINDOW
+        total = limit + 9
+        for i in range(total):
+            (inbox / f"no-id-{i:03d}.eml").write_text(
+                f"From: alice@example.com\r\nSubject: {marker}\r\n\r\n{marker}\r\n",
+                encoding="utf-8",
+            )
+        with caplog.at_level(logging.DEBUG):
+            main.initial_index(db, make_mock_embedder(), Threader(db), queue)
+            monkeypatch.setattr(main, "_last_queue_heartbeat", None)
+            main._maybe_log_queue_heartbeat(queue)
+
+        terminal = [r for r in caplog.records if r.getMessage().startswith("terminal: ")]
+        assert len(terminal) == limit
+        assert {r.levelno for r in terminal} == {logging.WARNING}
+        heartbeats = [
+            r.getMessage() for r in caplog.records if r.getMessage().startswith("queue: ")
+        ]
+        assert heartbeats
+        assert f"dead={total} " in heartbeats[-1]
+        suppressed = sum(int(h.rsplit("suppressed_lines=", 1)[1]) for h in heartbeats)
+        assert suppressed == total - limit
+        assert queue.stats()["dead"] == total
+        errors = [
+            r["last_error"]
+            for r in db._conn.execute("SELECT last_error FROM indexing_jobs").fetchall()
+        ]
+        assert len(errors) == total
+        assert all(marker not in e for e in errors)
+        assert marker not in caplog.text
+
 
 def _job_reasons(db: Database) -> dict[str, str]:
     return {

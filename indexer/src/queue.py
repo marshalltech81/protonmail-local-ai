@@ -63,6 +63,12 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 
+from .extractors import warn_rate_limited
+
+# The per-message ``terminal:``, ``retry:`` and ``dead-letter:`` lines
+# share the indexer's rate limit (#1320): crafted mail can trigger them
+# once per delivered message. Withheld lines are counted in the queue
+# heartbeat's ``suppressed_lines``; the rows record every transition.
 log = logging.getLogger("indexer.queue")
 
 STATUS_QUEUED = "queued"
@@ -315,7 +321,13 @@ class IndexingQueue:
             error_class=ERROR_CLASS_RETRYABLE,
             now_iso=_now_iso(),
         ):
-            log.error("dead-letter: %s interrupted mid-processing on every attempt", filepath)
+            warn_rate_limited(
+                log,
+                "dead-letter: %s interrupted mid-processing on every attempt",
+                filepath,
+                level=logging.ERROR,
+                attachment=False,
+            )
             return False
         with self._lock:
             self._in_flight = (filepath, time.monotonic())
@@ -420,11 +432,13 @@ class IndexingQueue:
             error_class=ERROR_CLASS_PERMANENT,
             now_iso=_now_iso(),
         )
-        log.warning(
+        warn_rate_limited(
+            log,
             "terminal: %s stage=%s error=%s",
             filepath,
             stage,
             _truncate_error(error),
+            attachment=False,
         )
 
     def mark_failed(self, filepath: str, *, stage: str, error: str) -> None:
@@ -453,12 +467,15 @@ class IndexingQueue:
                 error_class=ERROR_CLASS_RETRYABLE,
                 now_iso=_now_iso(),
             )
-            log.error(
+            warn_rate_limited(
+                log,
                 "dead-letter: %s after %d attempts at stage=%s error=%s",
                 filepath,
                 new_attempts,
                 stage,
                 _truncate_error(error),
+                level=logging.ERROR,
+                attachment=False,
             )
             return
         backoff_seconds = min(
@@ -475,7 +492,8 @@ class IndexingQueue:
             now_iso=_now_iso(),
             next_attempt_iso=next_attempt.isoformat(),
         )
-        log.warning(
+        warn_rate_limited(
+            log,
             "retry: %s attempt %d/%d at stage=%s next_in=%ds error=%s",
             filepath,
             new_attempts,
@@ -483,6 +501,7 @@ class IndexingQueue:
             stage,
             backoff_seconds,
             _truncate_error(error),
+            attachment=False,
         )
 
     def defer(
