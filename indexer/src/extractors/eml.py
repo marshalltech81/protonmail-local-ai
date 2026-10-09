@@ -64,7 +64,13 @@ from collections import Counter
 from collections.abc import Callable
 
 from .. import parser
-from . import _runner, warn_extractor_cap
+from . import (
+    CHILD_DEGRADATION_KEYS,
+    _runner,
+    apply_child_degradation,
+    note_eml_headers_degraded,
+    warn_extractor_cap,
+)
 
 log = logging.getLogger("indexer.extractor.eml")
 
@@ -137,8 +143,12 @@ def extract(
         timeout_seconds=CHILD_TIMEOUT_SECONDS,
         max_output_bytes=_MAX_OUTPUT_BYTES,
         caps=_CAP_NAMES,
+        counts=CHILD_DEGRADATION_KEYS,
         on_progress=on_progress,
     )
+    # The child's degradation (#1314): the header-decoding fallbacks
+    # (``eml_headers_degraded``) and anything else recorded there.
+    apply_child_degradation(log, "eml", result.counts)
     for cap in result.caps:
         warn_extractor_cap(log, cap, "attached email text cut at a budget")
     return result.text, "eml"
@@ -173,12 +183,15 @@ def extract_text(payload: bytes) -> tuple[str, list[str]]:
     # Depth first: a nested email's text follows its parent's body and
     # precedes the parent's next nested email.
     stack: list[tuple[email.message.Message, int]] = [(root, 1)]
+    # Header-decoding fallbacks, whose lines the child cannot log: sent
+    # to the parent as ``eml_headers_degraded`` (#1314).
+    degraded: Counter[str] = Counter()
     while stack and not text.full:
         msg, depth = stack.pop()
         # A section per message: its label and header lines, then its
         # body after a blank line; sections apart by a blank line.
         lines = [f"[Attached message, depth {depth}]"] if depth > 1 else []
-        lines.extend(_header_lines(msg, caps))
+        lines.extend(_header_lines(msg, caps, degraded))
         if lines:
             text.add(("\n\n" if text.pieces else "") + "\n".join(lines))
         counted: Counter[str] = Counter()
@@ -207,11 +220,16 @@ def extract_text(payload: bytes) -> tuple[str, list[str]]:
         stack.extend((inner, depth + 1) for inner in reversed(inner_messages))
     if text.full:
         caps["eml_text_chars"] = None
+    if degraded[parser.HEADER_DEGRADED]:
+        note_eml_headers_degraded(degraded[parser.HEADER_DEGRADED])
     return "".join(text.pieces), list(caps)
 
 
-def _header_lines(msg: email.message.Message, caps: dict[str, None]) -> list[str]:
-    """``msg``'s labelled header lines."""
+def _header_lines(
+    msg: email.message.Message, caps: dict[str, None], degraded: Counter[str]
+) -> list[str]:
+    """``msg``'s labelled header lines; the decoders' fallbacks are
+    counted in ``degraded``."""
     lines: list[str] = []
     for name in HEADERS:
         raw = msg.get(name)
@@ -221,7 +239,7 @@ def _header_lines(msg: email.message.Message, caps: dict[str, None]) -> list[str
             # Cut before decoding, so a crafted header costs one slice.
             raw = raw[:_MAX_HEADER_CHARS]
             caps["eml_header_chars"] = None
-        value = parser._decode_text_header(raw)
+        value = parser._decode_text_header(raw, degraded)
         if len(value) > _MAX_HEADER_CHARS:
             value = value[:_MAX_HEADER_CHARS]
             caps["eml_header_chars"] = None
@@ -234,10 +252,12 @@ def _inner_message(
     part: email.message.Message, decodable: list[int]
 ) -> tuple[email.message.Message | None, bool]:
     """The email a nested ``message/rfc822`` part carries, and whether
-    one was there but could not be read. A transfer-encoded part (not
+    one was there but could not be read, or was read with bytes lost
+    (a lenient base64 decode). A transfer-encoded part (not
     allowed by RFC 2046, but sent) is decoded as the parser decodes it,
     charging ``decodable``."""
     container = part
+    lossy = False
     encoding = str(part.get("Content-Transfer-Encoding", "")).strip().lower()
     if encoding in ("base64", "quoted-printable"):
         try:
@@ -251,8 +271,11 @@ def _inner_message(
         decoded = parser._decode_transport_form(transport, encoding, content_type)
         if decoded is None:
             return None, True
+        # A lenient base64 decode can drop bytes and still succeed: the
+        # email is rendered, but its text is not whole (Codex round 1).
+        lossy = encoding == "base64" and parser._base64_transport_lost(transport)
         container = decoded
     children = container.get_payload()
     if isinstance(children, list) and children and isinstance(children[0], email.message.Message):
-        return children[0], False
-    return None, False
+        return children[0], lossy
+    return None, lossy

@@ -5168,9 +5168,9 @@ class TestRepeatedAddressHeaders:
         decoded: list[int] = []
         real = parser._decode_header
 
-        def counting(value):
+        def counting(value, degraded=None):
             decoded.append(1)
-            return real(value)
+            return real(value, degraded)
 
         monkeypatch.setattr(parser, "_decode_header", counting)
         size = parser._MAX_ADDRESS_HEADER_CHARS + 10

@@ -3249,6 +3249,7 @@ class TestPdfPageLevelOcr:
             "parser_caps_messages": 0,
             "parser_recipients_merged_messages": 0,
             "parser_sender_ambiguous_messages": 0,
+            "eml_headers_degraded": 0,
             "warnings_suppressed": 3,
         }
 
@@ -4651,6 +4652,7 @@ class TestMailContentStaysOutOfLogsAndErrors:
             "parser_caps_messages": 0,
             "parser_recipients_merged_messages": 0,
             "parser_sender_ambiguous_messages": 0,
+            "eml_headers_degraded": 0,
             "warnings_suppressed": 0,
         }
         assert extractors.drain_extractor_counts()["pdf_pages_failed"] == 0

@@ -1461,7 +1461,7 @@ def _clean_id(value: str) -> str:
     return value.strip().strip("<>").strip()
 
 
-def _decode_header(value: str | email.header.Header) -> str:
+def _decode_header(value: str | email.header.Header, degraded: Counter[str] | None = None) -> str:
     """Decode a header value's RFC 2047 encoded-words.
 
     A ``Header`` (raw 8-bit header) already holds decoded chunks. A
@@ -1469,17 +1469,27 @@ def _decode_header(value: str | email.header.Header) -> str:
     is decoded on its own: ``decode_header`` on the whole string rescans
     the rest of the header at every malformed ``=?`` prefix, which is
     quadratic in a hostile Subject.
+
+    ``degraded`` (when given) counts each fallback the decoders below log
+    under ``HEADER_DEGRADED``, for a caller whose log lines do not reach
+    the log (the attached-email extractor's child, #922).
     """
     if isinstance(value, email.header.Header):
-        return _decode_header_parts(email.header.decode_header(value)).strip()
+        return _decode_header_parts(email.header.decode_header(value), degraded).strip()
     if "=?" not in value:
         return value.strip()
     return _decode_encoded_word_runs(
-        value, lambda m: _decode_header_parts(email.header.decode_header(m.group(0)))
+        value, lambda m: _decode_header_parts(email.header.decode_header(m.group(0)), degraded)
     ).strip()
 
 
-def _decode_text_header(value: str | email.header.Header) -> str:
+# The ``degraded`` key the header decoders count their fallbacks under.
+HEADER_DEGRADED = "header_degraded"
+
+
+def _decode_text_header(
+    value: str | email.header.Header, degraded: Counter[str] | None = None
+) -> str:
     """Decode a header stored as text (Subject, the From fallback).
 
     compat32 returns a raw 8-bit header as one chunk, so an encoded-word
@@ -1489,8 +1499,10 @@ def _decode_text_header(value: str | email.header.Header) -> str:
     their encoded-words after the address is fixed. The search is one
     linear pass of ``_ENCODED_WORD_RE``, whose groups stop at ``?``.
     """
-    text = _decode_header(value)
+    text = _decode_header(value, degraded)
     if isinstance(value, email.header.Header) and _ENCODED_WORD_RE.search(text):
+        if degraded is not None:
+            degraded[HEADER_DEGRADED] += 1
         warn_rate_limited(
             log,
             "raw 8-bit header holds encoded-words that were not decoded; kept 1 header as sent",
@@ -1499,7 +1511,9 @@ def _decode_text_header(value: str | email.header.Header) -> str:
     return text
 
 
-def _decode_header_parts(parts: list[tuple[bytes | str, str | None]]) -> str:
+def _decode_header_parts(
+    parts: list[tuple[bytes | str, str | None]], degraded: Counter[str] | None = None
+) -> str:
     decoded = []
     for part, charset in parts:
         if isinstance(part, bytes):
@@ -1522,11 +1536,13 @@ def _decode_header_parts(parts: list[tuple[bytes | str, str | None]]) -> str:
             # are mail content).
             encoding = charset or "utf-8"
             if encoding.lower() == _RAW_8BIT_CHARSET:
-                decoded.append(_decode_raw_8bit(part))
+                decoded.append(_decode_raw_8bit(part, degraded))
                 continue
             try:
                 decoded.append(part.decode(encoding, errors="replace"))
             except (LookupError, ValueError) as exc:
+                if degraded is not None:
+                    degraded[HEADER_DEGRADED] += 1
                 warn_rate_limited(
                     log,
                     "header encoded-word charset could not be decoded (%s); decoded 1 word as UTF-8",
@@ -1545,13 +1561,15 @@ def _decode_header_parts(parts: list[tuple[bytes | str, str | None]]) -> str:
 _RAW_8BIT_CHARSET = "unknown-8bit"
 
 
-def _decode_raw_8bit(part: bytes) -> str:
+def _decode_raw_8bit(part: bytes, degraded: Counter[str] | None = None) -> str:
     """Decode a raw 8-bit header chunk: exactly and silently when it is
     valid UTF-8, otherwise as UTF-8 with replacement characters and one
     rate-limited WARNING, since characters were lost (#1147)."""
     try:
         return part.decode("utf-8")
     except UnicodeDecodeError:
+        if degraded is not None:
+            degraded[HEADER_DEGRADED] += 1
         warn_rate_limited(
             log,
             "raw 8-bit header is not UTF-8; decoded 1 header chunk with replacement characters",

@@ -388,3 +388,88 @@ class TestBodyOnlyWalk:
         # The root, its text part and the bundle; none of the bundle's 50.
         assert walk.parts_left == parser.MAX_WALKED_PARTS - 3
         assert walk.text_parts_left == parser.MAX_BODY_TEXT_PARTS - 1
+
+
+class TestReviewRound1:
+    """Codex round 1 on #1311."""
+
+    def test_a_lossy_base64_nested_email_is_rendered_and_cut(
+        self, monkeypatch, caplog, _in_process_child
+    ):
+        """A nested email whose base64 drops a quantum still decodes and
+        is rendered, but the text is not whole: an ``eml_nested_messages``
+        cap, so the result is incomplete."""
+        checked = []
+        real = parser._base64_transport_lost
+        monkeypatch.setattr(
+            parser, "_base64_transport_lost", lambda data: checked.append(1) or real(data)
+        )
+        encoded = base64.encodebytes(_text("intact words " + MARKER * 3))
+        lossy = encoded[:40] + b"!!!!" + encoded[44:]
+        part = (
+            b"Content-Type: message/rfc822\r\nContent-Disposition: attachment\r\n"
+            b"Content-Transfer-Encoding: base64\r\n\r\n" + lossy
+        )
+        with caplog.at_level(logging.WARNING):
+            result = extract(
+                content_type="message/rfc822",
+                filename="f.eml",
+                payload=_multipart(b"Content-Type: text/plain\r\n\r\nroot", part),
+            )
+        assert checked == [1]
+        assert result.status == STATUS_SUCCESS
+        assert result.text_complete is False
+        assert result.text is not None and "[Attached message, depth 2]" in result.text
+        assert "extractor cap eml_nested_messages:" in caplog.text
+        assert MARKER not in caplog.text
+
+    def test_an_intact_base64_nested_email_stays_complete(self, _in_process_child):
+        part = _attached(_text("intact"), encoding=b"base64")
+        result = extract(content_type="message/rfc822", filename="f.eml", payload=_multipart(part))
+        assert result.text_complete is True
+        assert result.text is not None and "intact" in result.text
+
+    @staticmethod
+    def _degraded_headers() -> bytes:
+        # A raw 8-bit Subject that is not UTF-8, an encoded-word in an
+        # unknown charset, and a raw 8-bit To holding an encoded-word.
+        return (
+            b"Subject: caf\xe9 " + MARKER.encode() + b"\r\n"
+            b"From: =?x-unknown-synthetic?q?" + MARKER.encode() + b"?= <a@example.test>\r\n"
+            b"To: caf\xc3\xa9 =?utf-8?q?" + MARKER.encode() + b"?= <b@example.test>\r\n"
+            b"\r\nbody\r\n"
+        )
+
+    def test_header_fallbacks_are_counted_in_the_child(self):
+        """In the child the decoders' lines go nowhere: each fallback is
+        counted into ``eml_headers_degraded`` instead."""
+        from src.extractors import child_degradation, eml, reset_attempt
+
+        extractors.drain_counters()
+        reset_attempt()
+        text, caps = eml.extract_text(self._degraded_headers())
+        assert caps == []
+        assert child_degradation() == {"eml_headers_degraded": 3}
+        assert "body" in text
+
+    def test_the_parent_logs_the_count_and_keeps_the_text_complete(self, caplog):
+        """Through the real child: one rate-limited parent line with the
+        fixed key and count; replacement is not loss (#1315)."""
+        extractors.drain_extractor_counts()
+        with caplog.at_level(logging.WARNING):
+            result = extract(
+                content_type="message/rfc822", filename="f.eml", payload=self._degraded_headers()
+            )
+        assert result.status == STATUS_SUCCESS
+        assert result.text_complete is True
+        lines = [r for r in caplog.records if "degraded in the child" in r.getMessage()]
+        assert [(r.levelname, r.getMessage()) for r in lines] == [
+            ("WARNING", "extractor eml degraded in the child: eml_headers_degraded=3")
+        ]
+        assert extractors.drain_extractor_counts()["eml_headers_degraded"] == 3
+        assert MARKER not in caplog.text
+
+    def test_other_callers_count_nothing(self):
+        """The counter is optional: the parser's own callers pass none."""
+        value = parser.email.header.make_header([(b"caf\xe9", "unknown-8bit")])
+        assert parser._decode_text_header(value) == "caf�"

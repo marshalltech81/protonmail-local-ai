@@ -1424,7 +1424,13 @@ walked and 200 text parts decoded (the parser's per-message caps), 20
 levels of nesting, 64 MB of transfer-decoded nested emails, 2,000
 characters per header and 10,000,000 characters of text; a budget
 that cut the text is logged through the extractor-cap WARNING
-(`eml_*`) and marks the text incomplete. The extraction runs in the
+(`eml_*`) and marks the text incomplete, and so does a nested email
+whose lenient base64 decode lost bytes. A header-decoding fallback (an
+unknown charset, raw 8-bit bytes that are not UTF-8, encoded-words kept
+as sent) is counted as `eml_headers_degraded` and reported by the
+parent's `degraded in the child` line (#1314); it replaces characters
+rather than drops text, so it does not mark the text incomplete
+(#1315). The extraction runs in the
 extractor child (decision 42) under 1 GiB of address space and 60 s of
 CPU, killed after 75 s: the standard library's parse of crafted
 structure (800,000 parts or 4 million header fields at the 32 MB

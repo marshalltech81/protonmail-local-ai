@@ -1595,6 +1595,12 @@ only, never filenames or text (`make logs`):
   reports a plain `success`, with no cap line and no
   `ocr_capped_images` count, although the cached text still lacks the
   unread frames (#1201).
+- `extractor eml degraded in the child: eml_headers_degraded=<n>`
+  (WARNING, rate limited): `n` header-decoding fallbacks in an attached
+  email's headers (an unknown charset, raw 8-bit bytes that are not
+  UTF-8, or encoded-words kept as sent), so some characters are
+  replaced or left encoded. The text is otherwise indexed and not
+  marked incomplete (#922, #1315).
 - `extractor cap <name>: <fixed text and counts>` (WARNING): a cap
   inside an extractor cut the text it returned (#903). Logged once per
   cap per extraction, and counted as `extractor_caps` in the
@@ -1631,7 +1637,7 @@ only, never filenames or text (`make logs`):
     shared by the attached email and the emails nested in it, or a
     nested email left out (more than 20 levels deep, past 64 MB of
     transfer-decoded nested emails, or a transfer encoding that does
-    not decode).
+    not decode) or read with bytes lost (a malformed base64 encoding).
   - `pptx_slides`, `pptx_shapes`, `pptx_table_cells`,
     `pptx_text_chars`: the walk over a PowerPoint deck stopped at its
     slide budget (5,000 slide-list entries), shape budget (100,000,

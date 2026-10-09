@@ -1368,6 +1368,7 @@ class TestAttachmentOutcomeCounts:
             "parser_caps_messages": 0,
             "parser_recipients_merged_messages": 0,
             "parser_sender_ambiguous_messages": 0,
+            "eml_headers_degraded": 0,
             "warnings_suppressed": 0,
         }
 
