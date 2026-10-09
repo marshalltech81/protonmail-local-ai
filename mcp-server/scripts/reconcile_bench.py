@@ -19,7 +19,7 @@ is the server's own (``Database._connect``: ``mode=ro`` and
 Trash is left out), so the scan is the one the server would run.
 Timings are plain ``time.perf_counter`` differences, never a
 profiler (AGENTS.md "Bound the work per input"). Each measured phase
-runs in a fresh child process so its peak RSS (``ru_maxrss``) is its
+runs in a fresh child process so its peak RSS (``VmHWM``) is its
 own.
 
 Run it inside the mcp-server image (docs/mcp-tools.md, "Certifying a
@@ -140,6 +140,9 @@ CREATE TABLE pending_deletions (
 -- Writer ballast for the WAL phase: stands for the chunk and vector
 -- rows an indexer commit writes.
 CREATE TABLE bench_ballast (id INTEGER PRIMARY KEY, payload BLOB NOT NULL);
+-- The wall-clock time of each writer commit, to count the commits that
+-- overlap a round's transaction.
+CREATE TABLE bench_commits (at REAL NOT NULL);
 """
 
 # Longest Message-ID the indexer accepts (indexer/src/parser.py
@@ -175,13 +178,81 @@ def _folder(i: int) -> str:
     return "Trash" if r == 0 else "Sent" if r < 3 else "Archive" if r < 8 else "INBOX"
 
 
-def build(db_path: Path, messages: int, per_message: int, identity: str, records: str) -> dict:
+# The parser's per-message address cap (indexer/src/parser.py
+# ``MAX_MESSAGE_ADDRESSES``): at most this many participant rows.
+MAX_MESSAGE_ADDRESSES = 10_000
+# A four-byte character: the most UTF-8 bytes a character-clipped field
+# can carry per character.
+_WIDE = "\U0001f600"
+
+
+def _shape(i: int, identity: str, records: str, references: int) -> dict:
+    """The response-record fields of message ``i`` for one ``records``
+    shape (``build``)."""
+    if records == "worst":
+        wide = _WIDE * 501
+        people = [
+            (role, f"{p:02d}{role}" + _WIDE * (501 - 2 - len(role)), wide)
+            for role in ("from", "to", "cc")
+            for p in range(11)
+        ]
+        return {
+            "subject": _WIDE * 2000,
+            "in_reply_to": wide,
+            "references": [wide] * 11,
+            "people": people,
+            "file_name": f"{i:012d}" + "f" * (255 - 12),
+            "filename": wide,
+            "content_type": wide,
+        }
+    previous = message_id(i - 1, identity)
+    base = {
+        "subject": f"Synthetic subject {i}",
+        "in_reply_to": previous,
+        "file_name": f"{i}.bench:2,S",
+        "filename": "file.pdf",
+        "content_type": "application/pdf",
+    }
+    if records == "cardinality":
+        counts = (("from", 1), ("to", 4_999), ("cc", MAX_MESSAGE_ADDRESSES - 5_000))
+        return {
+            **base,
+            "references": [f"r{n}@x.example" for n in range(references)],
+            "people": [
+                (role, f"{role}{p}@x.example", None) for role, n in counts for p in range(n)
+            ],
+        }
+    return {
+        **base,
+        "references": [previous],
+        "people": [
+            ("from", f"from0.{i % 500}{_DOMAIN}", "Person 0"),
+            ("to", f"to0.{i % 500}{_DOMAIN}", "Person 0"),
+            ("to", f"to1.{i % 500}{_DOMAIN}", "Person 1"),
+            ("cc", f"cc0.{i % 500}{_DOMAIN}", None),
+        ],
+    }
+
+
+def build(
+    db_path: Path,
+    messages: int,
+    per_message: int,
+    identity: str,
+    records: str,
+    references: int = 0,
+) -> dict:
     """Write the synthetic index: ``messages`` rows in shuffled insert
     order, threads of four, ``per_message`` attachment occurrences each.
-    ``records`` ``worst`` fills every field a response record carries to
-    past its clip (a 2000-character subject, 11 participants per role
-    and 11 references of 501 characters, a 255-byte file name)."""
-    worst = records == "worst"
+
+    ``records`` sets the response-record fields: ``typical``; ``worst``,
+    every character-clipped field past its clip in four-byte characters
+    (a 2000-character subject, 11 participants per role, 11 references,
+    In-Reply-To, filename and MIME type of 501 characters, a 255-byte
+    file name); or ``cardinality``, the most rows a record can carry
+    (``MAX_MESSAGE_ADDRESSES`` participants, the parser's cap, and
+    ``references`` References entries, which the parser does not cap by
+    count)."""
     rng = random.Random(1218)
     order = list(range(messages))
     rng.shuffle(order)
@@ -190,29 +261,28 @@ def build(db_path: Path, messages: int, per_message: int, identity: str, records
         conn.executescript(_SCHEMA)
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
-        long = "y" * 501
-        for start in range(0, messages, 2000):
+        batch = 2000 if records != "cardinality" else 20
+        for start in range(0, messages, batch):
             msg_rows, part_rows, att_rows, ext_rows = [], [], [], []
-            for i in order[start : start + 2000]:
+            for i in order[start : start + batch]:
                 mid = message_id(i, identity)
                 cid = claimant_of(mid)
                 tid = message_id(i - i % 4, identity)
                 folder = _folder(i)
                 at = f"20{10 + i % 15:02d}-{1 + i % 12:02d}-{1 + i % 28:02d}T{i % 24:02d}:{i % 60:02d}:00+00:00"
-                name = f"{i:012d}" + "f" * (255 - 12) if worst else f"{i}.bench:2,S"
-                refs = [long] * 11 if worst else [message_id(i - 1, identity)]
+                shape = _shape(i, identity, records, references)
                 msg_rows.append(
                     (
                         cid,
                         mid,
                         tid,
-                        f"/maildir/{folder}/cur/{name}",
+                        f"/maildir/{folder}/cur/{shape['file_name']}",
                         folder,
-                        "s" * 2000 if worst else f"Synthetic subject {i}",
+                        shape["subject"],
                         at,
                         at,
-                        long if worst else message_id(i - 1, identity),
-                        json.dumps(refs),
+                        shape["in_reply_to"],
+                        json.dumps(shape["references"]),
                         1 if per_message else 0,
                         4096 + i,
                         hashlib.sha256(mid.encode()).hexdigest(),
@@ -221,27 +291,21 @@ def build(db_path: Path, messages: int, per_message: int, identity: str, records
                         0,
                     )
                 )
-                for role, n in (("from", 11 if worst else 1), ("to", 11 if worst else 2)):
-                    for p in range(n):
-                        address = (
-                            f"{p:02d}{role}" + "a" * (501 - 6 - len(_DOMAIN)) + _DOMAIN
-                            if worst
-                            else f"{role}{p}.{i % 500}{_DOMAIN}"
-                        )
-                        part_rows.append((cid, role, address, long if worst else f"Person {p}"))
-                for p in range(11 if worst else 1):
-                    address = (
-                        f"{p:02d}cc" + "a" * (501 - 4 - len(_DOMAIN)) + _DOMAIN
-                        if worst
-                        else f"cc{p}.{i % 500}{_DOMAIN}"
-                    )
-                    part_rows.append((cid, "cc", address, long if worst else None))
+                part_rows += [(cid, role, address, name) for role, address, name in shape["people"]]
                 for k in range(per_message):
                     payload = hashlib.sha256(f"{i}:{k}".encode()).hexdigest()
                     occurrence = hashlib.sha256(f"{cid}\0{payload}\0{k}".encode()).hexdigest()
-                    filename = ("n" * 2001 if worst else f"file{k}") + ".pdf"
                     att_rows.append(
-                        (occurrence, cid, payload, tid, filename, "application/pdf", 1000 + k, at)
+                        (
+                            occurrence,
+                            cid,
+                            payload,
+                            tid,
+                            shape["filename"],
+                            shape["content_type"],
+                            1000 + k,
+                            at,
+                        )
                     )
                     ext_rows.append((payload, at))
             conn.executemany(
@@ -316,7 +380,19 @@ def _ro(db_path: str) -> sqlite3.Connection:
 
 
 def _rss_kib() -> int:
-    """Peak RSS so far in KiB (``ru_maxrss`` is bytes on macOS)."""
+    """This process's peak RSS so far in KiB.
+
+    On Linux, ``VmHWM`` from ``/proc/self/status``: ``ru_maxrss`` keeps
+    the parent's peak across ``exec``, so a child launched by a parent
+    that once held a large corpus would report the parent's figure.
+    Elsewhere ``ru_maxrss`` (bytes on macOS)."""
+    try:
+        with open("/proc/self/status") as status:
+            for line in status:
+                if line.startswith("VmHWM:"):
+                    return int(line.split()[1])
+    except OSError:
+        pass
     peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     return peak // 1024 if sys.platform == "darwin" else peak
 
@@ -397,14 +473,19 @@ def phase_certificate(db_path: str, kind: str, method: str) -> dict:
     }
 
 
-def _materialize(conn: sqlite3.Connection, kind: str, missing: list[str]) -> list[dict]:
+def _materialize(
+    conn: sqlite3.Connection, kind: str, missing: list[str]
+) -> tuple[list[dict], dict[str, int]]:
     """The response records of ``missing``, read on ``conn`` (the
-    round's transaction) and serialized as the query tools do."""
+    round's transaction) and serialized as the query tools do, with the
+    participant rows and References entries read for them: the server's
+    readers load every one before the output clips each list."""
     from src.lib import sqlite as db
     from src.tools.outputs import listed_message
     from src.tools.retrieval import _listed_attachment
 
     out: list[dict] = []
+    read = {"participant_rows": 0, "references": 0}
     for start in range(0, len(missing), 500):
         chunk = missing[start : start + 500]
         marks = ",".join("?" * len(chunk))
@@ -416,6 +497,8 @@ def _materialize(conn: sqlite3.Connection, kind: str, missing: list[str]) -> lis
             ).fetchall()
             records = [db._row_to_message_record(r) for r in rows]
             db._attach_participants(conn, records)
+            read["participant_rows"] += sum(len(r.from_) + len(r.to) + len(r.cc) for r in records)
+            read["references"] += sum(len(r.references) for r in records)
             out += [listed_message(r).model_dump(mode="json", by_alias=True) for r in records]
         else:
             rows = conn.execute(
@@ -428,13 +511,17 @@ def _materialize(conn: sqlite3.Connection, kind: str, missing: list[str]) -> lis
                 _listed_attachment(db._row_to_occurrence(r)).model_dump(mode="json", by_alias=True)
                 for r in rows
             ]
-    return out
+    return out, read
 
 
-def phase_reconcile(db_path: str, kind: str, k: int, request: str) -> dict:
+def phase_reconcile(db_path: str, kind: str, k: int, request: str, hold_s: float = 0.0) -> dict:
     """One reconcile round: parse the uploaded hashes, then in one read
     transaction count, scan, certify, diff on hashes and materialize at
-    most ``k`` missing records (lowest identities first)."""
+    most ``k`` missing records (lowest identities first).
+
+    ``hold_s`` keeps the transaction open that much longer after the
+    round's work, outside every timing: only the smoke test's WAL check
+    uses it, so a tiny corpus still overlaps the writer."""
     _import_serializers()
     count_sql, scan, params = scan_sql(kind)
     t0 = time.perf_counter()
@@ -462,8 +549,10 @@ def phase_reconcile(db_path: str, kind: str, k: int, request: str) -> dict:
                     missing.append(row[0])
         extras = sorted(client - server)
         t_diff = time.perf_counter()
-        records = _materialize(conn, kind, missing)
+        records, read = _materialize(conn, kind, missing)
         t_records = time.perf_counter()
+        if hold_s:
+            time.sleep(hold_s)
         conn.rollback()
         ended_at = time.time()
     response = {
@@ -481,6 +570,7 @@ def phase_reconcile(db_path: str, kind: str, k: int, request: str) -> dict:
         "scanned": len(server),
         "missing_total": missing_total,
         "returned": len(records),
+        **read,
         "extras": len(extras),
         "response_bytes": len(body),
         "record_bytes_max": max(
@@ -522,6 +612,7 @@ def phase_writer(db_path: str, stop: str, commit_bytes: int, interval: float) ->
                 "INSERT INTO bench_ballast (payload) VALUES (randomblob(?))", (commit_bytes,)
             )
             conn.execute("DELETE FROM bench_ballast WHERE id <= ?", (cur.lastrowid - 64,))
+            conn.execute("INSERT INTO bench_commits (at) VALUES (?)", (time.time(),))
             conn.execute("COMMIT")
             commits += 1
             if interval:
@@ -575,7 +666,13 @@ def write_request(db_path: str, kind: str, missing: int, extras: int, out: Path)
 
 
 def run_wal(
-    db_path: str, kind: str, k: int, request: str, commit_bytes: int, interval: float
+    db_path: str,
+    kind: str,
+    k: int,
+    request: str,
+    commit_bytes: int,
+    interval: float,
+    hold_s: float = 0.0,
 ) -> dict:
     """WAL growth while one reconcile round holds its snapshot under a
     concurrent writer, and whether a TRUNCATE checkpoint then reclaims
@@ -589,10 +686,6 @@ def run_wal(
             return wal.stat().st_size
         except FileNotFoundError:
             return 0
-
-    def ballast_top() -> int:
-        with closing(sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)) as c:
-            return c.execute("SELECT COALESCE(MAX(id), 0) FROM bench_ballast").fetchone()[0]
 
     with closing(sqlite3.connect(db_path, timeout=30)) as conn:
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
@@ -619,11 +712,12 @@ def run_wal(
     while time.perf_counter() < deadline:
         warm_max = max(warm_max, size())
         time.sleep(0.01)
-    top0 = ballast_top()
     result: dict = {}
 
     def reader() -> None:
-        result.update(_child("reconcile", db_path=db_path, kind=kind, k=k, request=request))
+        result.update(
+            _child("reconcile", db_path=db_path, kind=kind, k=k, request=request, hold_s=hold_s)
+        )
 
     t = threading.Thread(target=reader)
     samples: list[tuple[float, int]] = []
@@ -631,16 +725,19 @@ def run_wal(
     while t.is_alive():
         samples.append((time.time(), size()))
         time.sleep(0.005)
-    top1 = ballast_top()
-    # The WAL when the round's transaction began, and its largest size
-    # from then until 0.1 s after it ended (a retained frame shows up
-    # by the next commit).
+    # The WAL when the round's transaction began, its largest size
+    # while the transaction was open, and the writer commits that
+    # landed in that interval.
     start, end = result["started_at"], result["ended_at"]
     at_start = max((s for when, s in samples if when <= start), default=0)
-    in_window = [s for when, s in samples if start <= when <= end + 0.1]
+    in_window = [s for when, s in samples if start <= when <= end]
     stop.touch()
     writer_out = json.loads(writer.communicate(timeout=60)[0])
     stop.unlink()
+    with closing(sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)) as conn:
+        overlapping = conn.execute(
+            "SELECT COUNT(*) FROM bench_commits WHERE at > ? AND at < ?", (start, end)
+        ).fetchone()[0]
     with closing(sqlite3.connect(db_path, timeout=30)) as conn:
         busy, log_pages, ckpt_pages = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
     return {
@@ -649,7 +746,7 @@ def run_wal(
         "wal_steady_max_bytes": warm_max,
         "wal_at_transaction_start_bytes": at_start,
         "wal_max_during_transaction_bytes": max(in_window, default=0),
-        "commits_during_reader": top1 - top0,
+        "commits_during_transaction": overlapping,
         "writer_commits_total": writer_out["commits"],
         "reader_transaction_s": round(result["transaction_s"], 3),
         "checkpoint_after": {"busy": busy, "log_pages": log_pages, "checkpointed": ckpt_pages},
@@ -673,7 +770,9 @@ def run(args: argparse.Namespace) -> dict:
             "sqlite": sqlite3.sqlite_version,
             "python": sys.version.split()[0],
         },
-        "build": build(db_path, args.messages, args.per_message, args.identity, args.records),
+        "build": build(
+            db_path, args.messages, args.per_message, args.identity, args.records, args.references
+        ),
     }
     db = str(db_path)
     report["idle_rss_kib"] = _child("idle", db_path=db)["rss_kib"]
@@ -726,6 +825,8 @@ def run(args: argparse.Namespace) -> dict:
             r0 = runs[0]
             rounds[str(k)] = {
                 "returned": r0["returned"],
+                "participant_rows": r0["participant_rows"],
+                "references": r0["references"],
                 "extras": r0["extras"],
                 "missing_total": r0["missing_total"],
                 "response_bytes": r0["response_bytes"],
@@ -751,6 +852,7 @@ def run(args: argparse.Namespace) -> dict:
                     str(work / f"request-{kind}.json"),
                     args.writer_commit_bytes,
                     interval,
+                    args.wal_hold,
                 ),
             }
             for kind in ("messages", "occurrences")
@@ -776,7 +878,13 @@ def main(argv: list[str] | None = None) -> dict:
     p.add_argument("--messages", type=int, default=50_000)
     p.add_argument("--per-message", type=int, default=3, help="attachment occurrences per message")
     p.add_argument("--identity", choices=("typical", "ascii998", "utf8x4"), default="typical")
-    p.add_argument("--records", choices=("typical", "worst"), default="typical")
+    p.add_argument("--records", choices=("typical", "worst", "cardinality"), default="typical")
+    p.add_argument(
+        "--references",
+        type=int,
+        default=100_000,
+        help="References entries per message (cardinality)",
+    )
     p.add_argument(
         "--k", type=lambda s: [int(x) for x in s.split(",")], default=[100, 500, 1000, 2000, 5000]
     )
@@ -789,6 +897,12 @@ def main(argv: list[str] | None = None) -> dict:
     p.add_argument("--writer-commit-bytes", type=int, default=128 * 1024)
     p.add_argument(
         "--writer-interval", type=lambda s: [float(x) for x in s.split(",")], default=[0.0, 0.1]
+    )
+    p.add_argument(
+        "--wal-hold",
+        type=float,
+        default=0.0,
+        help="seconds the WAL round keeps its transaction open after its work (smoke test only)",
     )
     report = run(p.parse_args(argv))
     print(json.dumps(report, indent=2))

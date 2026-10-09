@@ -55,7 +55,38 @@ def report(bench, tmp_path_factory):
             "1",
             "--wal",
             "--writer-interval",
-            "0.01",
+            "0.005",
+            # Keeps the tiny round's transaction open long enough for
+            # the writer to commit inside it.
+            "--wal-hold",
+            "1.0",
+        ]
+    )
+
+
+@pytest.fixture(scope="module")
+def cardinality(bench, tmp_path_factory):
+    work = tmp_path_factory.mktemp("cardinality")
+    return bench.main(
+        [
+            "--workdir",
+            str(work),
+            "--messages",
+            "40",
+            "--per-message",
+            "1",
+            "--records",
+            "cardinality",
+            "--references",
+            "1000",
+            "--k",
+            "3,10",
+            "--missing",
+            "10",
+            "--extras",
+            "0",
+            "--repeat",
+            "1",
         ]
     )
 
@@ -87,11 +118,42 @@ def test_reconcile_round_returns_at_most_k_missing_records(report):
             assert round_["rounds_to_repair"] == math.ceil(30 / int(k))
             assert round_["rounds_from_empty"] == math.ceil(members / int(k))
             assert round_["response_bytes"] > round_["returned"] * 1000
+            # Every extra comes back as a 64-character hash.
+            assert round_["response_bytes"] > 66 * round_["extras"]
+
+
+def test_worst_records_carry_four_byte_fields_past_their_clips(report):
+    # 33 participants, each a name and an address of 500 kept characters
+    # of four bytes; an occurrence's filename and MIME type likewise.
+    messages = report["reconcile"]["messages"]["k"]["10"]
+    assert messages["record_bytes_max"] > 33 * 2 * 500 * 4
+    assert messages["participant_rows"] == 10 * 33
+    assert messages["references"] == 10 * 11
+    occurrences = report["reconcile"]["occurrences"]["k"]["10"]
+    assert occurrences["record_bytes_max"] > 2 * 500 * 4
+    assert occurrences["participant_rows"] == occurrences["references"] == 0
+
+
+def test_cardinality_records_read_every_stored_row(bench, cardinality):
+    # The record readers load every participant row and References entry
+    # before the output clips them, so a round's work is K times the
+    # stored cardinality, not K times the listed one.
+    for k, round_ in cardinality["reconcile"]["messages"]["k"].items():
+        assert round_["returned"] == int(k)
+        assert round_["participant_rows"] == int(k) * bench.MAX_MESSAGE_ADDRESSES
+        assert round_["references"] == int(k) * 1000
 
 
 def test_wal_is_reclaimed_after_the_round(report):
     assert [w["kind"] for w in report["wal"]] == ["messages", "occurrences"]
     for wal in report["wal"]:
-        assert wal["commits_during_reader"] > 0
+        commits = wal["commits_during_transaction"]
+        assert commits > 0
+        # Every frame committed while the round held its snapshot stays
+        # in the WAL, beyond what the steady state can reuse.
+        assert (
+            wal["wal_max_during_transaction_bytes"]
+            >= commits * wal["commit_bytes"] - wal["wal_steady_max_bytes"]
+        )
         assert wal["checkpoint_after"]["busy"] == 0
         assert wal["wal_after_checkpoint_bytes"] == 0
