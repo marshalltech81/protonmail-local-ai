@@ -384,7 +384,9 @@ class TestPipeline:
         now["t"] += main.QUEUE_HEARTBEAT_INTERVAL_SECS
         main._maybe_log_queue_heartbeat(queue)
         [line] = [r for r in caplog.records if r.getMessage().startswith("reparse")]
-        assert line.getMessage() == "reparse: remaining=3 reparsed_since_last_heartbeat=3 dead=0"
+        assert line.getMessage() == (
+            "reparse: remaining=3 parked_trashed=0 reparsed_since_last_heartbeat=3 dead=0"
+        )
         assert MARKER not in caplog.text
         db.close()
 
