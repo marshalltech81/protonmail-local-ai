@@ -9,6 +9,9 @@ from contextlib import closing
 from pathlib import Path
 
 import pytest
+import sqlite_vec
+
+from tests.conftest import _build_schema
 
 _SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "reconcile_bench.py"
 
@@ -233,3 +236,42 @@ def test_occurrence_rounds_read_rows_with_extracted_text(cardinality):
     for round_ in cardinality["reconcile"]["occurrences"]["stream"].values():
         assert round_["returned"] > 0
         assert round_["record_bytes_max"] < 4 * 100 * 4
+
+
+def test_failed_phase_reports_its_stderr(bench, tmp_path):
+    # A child that fails names its own error, so a CI failure shows the
+    # cause rather than a bare exit status.
+    with pytest.raises(RuntimeError, match="FileNotFoundError"):
+        bench._child(
+            "filtered", db_path=str(tmp_path / "none" / "x.db"), kind="messages", filters={}
+        )
+
+
+def _columns(script, table: str) -> set[str]:
+    with closing(sqlite3.connect(":memory:")) as conn:
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        script(conn)
+        return {r[1] for r in conn.execute(f"PRAGMA table_xinfo({table})")}
+
+
+@pytest.mark.parametrize(
+    "table",
+    [
+        "messages",
+        "message_participants",
+        "message_participant_names",
+        "attachments",
+        "attachment_extractions",
+        "pending_deletions",
+        "entities",
+    ],
+)
+def test_benchmark_schema_carries_the_readers_columns(bench, table):
+    # The benchmark mirrors the indexer's tables. The server's test schema
+    # (conftest) is the independent record of the columns its readers
+    # select, so a column added there and not here fails here, before a
+    # benchmark query does (#1374 added two the benchmark lacked).
+    expected = _columns(_build_schema, table)
+    assert expected, table
+    assert expected <= _columns(lambda conn: conn.executescript(bench._SCHEMA), table)

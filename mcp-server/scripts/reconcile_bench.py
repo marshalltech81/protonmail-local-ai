@@ -70,15 +70,18 @@ CREATE TABLE messages (
     filepath        TEXT NOT NULL,
     folder          TEXT NOT NULL,
     subject         TEXT NOT NULL,
-    sent_at         TEXT NOT NULL,
+    sent_at         TEXT,
+    sent_at_status  TEXT CHECK (sent_at_status IN ('parsed', 'missing', 'invalid')),
     occurred_at     TEXT,
-    effective_at    TEXT GENERATED ALWAYS AS (COALESCE(occurred_at, sent_at)) VIRTUAL,
+    effective_at    TEXT GENERATED ALWAYS AS
+                    (COALESCE(occurred_at, sent_at, first_indexed_at)) VIRTUAL,
     in_reply_to     TEXT,
     references_json TEXT NOT NULL,
     has_attachments INTEGER NOT NULL,
     size_bytes      INTEGER,
     content_hash    TEXT,
     indexed_at      TEXT NOT NULL,
+    first_indexed_at TEXT NOT NULL,
     seen            INTEGER NOT NULL DEFAULT 0,
     flagged         INTEGER NOT NULL DEFAULT 0,
     replied         INTEGER NOT NULL DEFAULT 0,
@@ -353,6 +356,7 @@ def build(
                         4096 + i,
                         hashlib.sha256(mid.encode()).hexdigest(),
                         at,
+                        at,
                         i % 2,
                         0,
                     )
@@ -386,11 +390,13 @@ def build(
             conn.executemany(
                 "INSERT INTO messages (claimant_id, message_id, thread_id, filepath, folder, "
                 "subject, sent_at, occurred_at, in_reply_to, references_json, has_attachments, "
-                "size_bytes, content_hash, indexed_at, seen, sender_ambiguous, "
+                "size_bytes, content_hash, indexed_at, first_indexed_at, sent_at_status, "
+                "seen, sender_ambiguous, "
                 "participant_names_complete, subject_complete, from_addresses_complete, "
                 "to_addresses_complete, cc_addresses_complete, attachments_manifest_complete, "
                 "body_complete) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, 1, 1, 1, 1, 1)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'parsed', ?, ?, "
+                "1, 1, 1, 1, 1, 1, 1)",
                 msg_rows,
             )
             conn.executemany("INSERT INTO message_participants VALUES (?, ?, ?, ?)", part_rows)
@@ -744,8 +750,8 @@ OCCURRENCE_FILTERS: tuple[dict, ...] = (
 def phase_filtered(db_path: str, kind: str, filters: dict) -> dict:
     """One production page of the query under ``filters``
     (``Database.query_messages`` or ``query_attachments`` with
-    ``limit=1``: its counts and first row), then the certificate (stream)
-    over the same predicate, each timed on its own."""
+    ``limit=1``: its counts and first row), then the certificate over
+    the same predicate by each scan method, each timed on its own."""
     from src.lib.sqlite import Database
 
     _import_serializers()
@@ -757,12 +763,16 @@ def phase_filtered(db_path: str, kind: str, filters: dict) -> dict:
         page = db.query_attachments(limit=1, **filters)
     page_s = time.perf_counter() - t0
     cert = phase_certificate(db_path, kind, "stream", filters)
+    collected = phase_certificate(db_path, kind, "collect", filters)
+    if collected["digest"] != cert["digest"]:
+        raise ValueError("stream and collect certificates differ")
     return {
         "page_total": page.total_matches,
         "count": cert["count"],
         "scanned": cert["scanned"],
         "page_s": page_s,
         "certificate_s": cert["total_s"],
+        "certificate_collect_s": collected["total_s"],
         "rss_kib": _rss_kib(),
     }
 
@@ -834,13 +844,18 @@ def phase_writer(db_path: str, stop: str, commit_bytes: int, interval: float) ->
 
 
 def _child(phase: str, **kwargs) -> dict:
-    """Run ``phase`` in a fresh interpreter and return its JSON."""
+    """Run ``phase`` in a fresh interpreter and return its JSON. A failed
+    child raises with the last 4,000 characters of its stderr, so the
+    cause shows where the benchmark ran (its output is synthetic)."""
     out = subprocess.run(
         [sys.executable, __file__, "_phase", phase, json.dumps(kwargs)],
-        check=True,
         capture_output=True,
         text=True,
     )
+    if out.returncode != 0:
+        raise RuntimeError(
+            f"benchmark phase {phase} exited with status {out.returncode}:\n{out.stderr[-4000:]}"
+        )
     return json.loads(out.stdout)
 
 
@@ -1102,6 +1117,7 @@ def _filtered_runs(db: str, kind: str, filters: dict, repeat: int) -> dict:
         "count": runs[0]["count"],
         "page_s": _median(runs, "page_s"),
         "certificate_s": _median(runs, "certificate_s"),
+        "certificate_collect_s": _median(runs, "certificate_collect_s"),
         "rss_kib": max(r["rss_kib"] for r in runs),
     }
 
