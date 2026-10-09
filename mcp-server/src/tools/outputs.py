@@ -175,8 +175,8 @@ _SENDER_AMBIGUOUS_DESCRIPTION = (
 SENT_AT_STATUS_DESCRIPTION = (
     "Why sent_at is what it is: parsed (from the Date: header), missing (no Date: "
     "header) or invalid (one that does not parse); null when the indexer has not "
-    "assessed it yet (mail indexed before the upgrade, until its reparse), when "
-    "sent_at may be the time the older indexer first read the file."
+    "assessed it yet (mail indexed before the upgrade, until its reparse), and "
+    "sent_at is then null too."
 )
 
 
@@ -189,12 +189,13 @@ _UNKNOWN_SENT_WORDS = {
 
 def sent_text(sent_at: str | None, status: SentAtStatus | None) -> str:
     """A message's send date in prose (#1080): the date when parsed, why
-    it is unknown when not, and a date not yet assessed marked as such."""
+    it is unknown when not. The database returns no date for a row not
+    yet assessed, so none is shown for it."""
     if status in _UNKNOWN_SENT_WORDS:
         return _UNKNOWN_SENT_WORDS[status]
-    if sent_at is None:
-        return "send date unknown"
-    return sent_at if status == "parsed" else f"{sent_at} (send date not yet checked)"
+    if status is None:
+        return "send date not yet checked"
+    return sent_at or "send date unknown"
 
 
 class MessageHeaders(_Output):

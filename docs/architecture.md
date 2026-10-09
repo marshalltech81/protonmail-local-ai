@@ -1081,7 +1081,11 @@ drop would delete them by cascade), keeps every existing value, sets
 row's `indexed_at`, and queues the reparse. Until a row is re-parsed
 its `sent_at` may be that made-up time, so no date bound and no `sent`
 order reads it (indeterminate) unless the row has an `occurred_at`,
-and the outputs show the status as null. The reparse stores the
+and no tool returns it: mcp-server selects `sent_at` only when the
+status is `parsed`, so the outputs, prompts, citations and
+`brief_issue`'s as-of date show `sent_at` and its status as null. The
+reparse also removes that time from the thread's FTS text, where the v7
+writer had put it in a `Date:` line. The reparse stores the
 status, and for an undated row moves the old fallback in `sent_at` to
 `first_indexed_at`, so no message moves in the ordering. Nothing is
 re-embedded: the date is in no chunk.
@@ -1141,13 +1145,13 @@ pre-option files unavailable, is #1081's remaining work.
 
 **Outputs.** Every per-message and per-passage result returns
 `sent_at`, `sent_at_status` and `occurred_at` (a date null when
-unknown, the status null when not yet assessed), in the stored string
+unknown, and `sent_at` with its status null when not yet assessed), in the stored string
 form: message headers (`get_message`, `get_thread`, `query_messages`),
 attachment occurrences (`query_attachments`), evidence chunks
 (`get_evidence`), citations (`ask_mailbox`, `brief_issue`,
 `check_conclusion`, `extract_from_emails`) and attachment hits
 (`search_attachments`, the carrying message's times). The prose says
-why a send date is unknown, and marks one not yet assessed; no output
+why a send date is unknown, or that it is not yet checked; no output
 shows `first_indexed_at`. Thread results carry `date_first` /
 `date_last`; an attachment hit also carries its thread's `date_last`.
 `get_mailbox_status` reports the oldest and newest thread dates in the

@@ -35,7 +35,9 @@ from .predicates import (
     DEFAULT_EXCLUDED_FOLDERS,
     EFFECTIVE_EVIDENCE_SQL,
     LEAVES,
+    QUERY_DIGEST_FORMAT,
     ROLE_SETS,
+    SENT_CLOCK_SQL,
     DateBasis,
     Evaluability,
     InvalidFilterError,
@@ -356,7 +358,8 @@ class ChunkResult:
     filename/MIME provenance the text is opaque and the source
     attachment cannot be cited.
 
-    ``message_date`` is the ``sent_at`` of the chunk's ``messages`` row,
+    ``message_date`` is the parsed ``sent_at`` of the chunk's ``messages`` row
+    (``_SENT_AT_COLUMN``),
     ``message_sent_at_status`` its ``sent_at_status`` (#1080) and
     ``message_occurred_at`` its ``occurred_at`` (chunks store no
     date of their own, #575), carried so ``get_evidence`` can show
@@ -637,7 +640,8 @@ class MessageRecord:
     # The parsed ``Date:`` header; None when it is missing or
     # unparseable (#1080), as ``sent_at_status`` says: ``parsed``,
     # ``missing``, ``invalid``, or None when not yet assessed (a row
-    # from before the upgrade, until its reparse).
+    # from before the upgrade, until its reparse; ``_SENT_AT_COLUMN``
+    # withholds its stored value).
     sent_at: str | None
     folder: str
     has_attachments: bool
@@ -677,8 +681,15 @@ _PENDING_DELETION_COLUMN = (
     "AND p.claimant_id = m.claimant_id) AS pending_deletion"
 )
 
+# A message's ``sent_at`` as every query here returns it: only a
+# parsed one (#1080). A row not yet assessed (from before schema v8,
+# until its reparse) may hold the v7 indexer's made-up fallback, so it
+# never leaves the database layer as a date; its NULL status says why.
+_SENT_AT_COLUMN = f"{SENT_CLOCK_SQL} AS sent_at"
+
 _MESSAGE_COLUMNS = (
-    "m.message_id, m.claimant_id, m.thread_id, m.subject, m.sent_at, m.sent_at_status, "
+    "m.message_id, m.claimant_id, m.thread_id, m.subject, "
+    f"{_SENT_AT_COLUMN}, m.sent_at_status, "
     "m.occurred_at, m.effective_at, m.folder, "
     "m.has_attachments, m.in_reply_to, m.references_json, m.seen, m.flagged, m.replied, "
     "m.sender_ambiguous, " + _PENDING_DELETION_COLUMN + ", " + _SOURCE_COLUMNS
@@ -1547,6 +1558,8 @@ def _attachment_digest(leaves: list[Leaf], filters: list[tuple[str, str]]) -> st
     is never read against other predicates or by another tool."""
     canonical = [
         "query_attachments",
+        # The leaves' meaning (#1080 changed the date bounds').
+        QUERY_DIGEST_FORMAT,
         "effective",
         [[leaf.name, leaf.value] for leaf in leaves],
         [list(f) for f in filters],
@@ -1618,7 +1631,8 @@ _OCCURRENCE_COLUMNS = (
     f"substr(CAST(a.filename AS BLOB), 1, {_ATTACHMENT_META_BYTES + 1}) AS filename_head, "
     f"substr(CAST(a.content_type AS BLOB), 1, {_ATTACHMENT_META_BYTES + 1}) "
     "AS content_type_head, "
-    "a.size_bytes, m.folder, m.sent_at, m.sent_at_status, m.occurred_at, m.effective_at, "
+    f"a.size_bytes, m.folder, {_SENT_AT_COLUMN}, m.sent_at_status, m.occurred_at, "
+    "m.effective_at, "
     f"{_SOURCE_COLUMNS}, e.extraction_status, e.extractor, e.extracted_at, "
     "e.ocr_pages_skipped"
 )
@@ -2819,7 +2833,8 @@ class Database:
             "SELECT a.attachment_id, COALESCE(m.message_id, a.claimant_id) AS message_id, "
             "a.claimant_id, a.thread_id, a.filename, "
             "a.content_type, a.size_bytes, t.subject, t.display_subject, "
-            "t.folder, t.date_last, m.sent_at, m.sent_at_status, m.occurred_at, t.senders, "
+            f"t.folder, t.date_last, {_SENT_AT_COLUMN}, m.sent_at_status, m.occurred_at, "
+            "t.senders, "
             "e.extraction_status, "
             "substr(e.extracted_text, 1, 240) AS text_snippet, "
             f"{_SOURCE_COLUMNS}, "
@@ -2895,7 +2910,8 @@ class Database:
             "SELECT a.attachment_id, COALESCE(m.message_id, a.claimant_id) AS message_id, "
             "a.claimant_id, a.thread_id, a.filename, "
             "a.content_type, a.size_bytes, t.subject, t.display_subject, "
-            "t.folder, t.date_last, m.sent_at, m.sent_at_status, m.occurred_at, t.senders, "
+            f"t.folder, t.date_last, {_SENT_AT_COLUMN}, m.sent_at_status, m.occurred_at, "
+            "t.senders, "
             "e.extraction_status, "
             "substr(e.extracted_text, 1, 240) AS text_snippet, "
             f"{_SOURCE_COLUMNS}, "
@@ -2941,7 +2957,8 @@ class Database:
             "SELECT a.attachment_id, COALESCE(m.message_id, a.claimant_id) AS message_id, "
             "a.claimant_id, a.thread_id, a.filename, "
             "a.content_type, a.size_bytes, t.subject, t.display_subject, "
-            "t.folder, t.date_last, m.sent_at, m.sent_at_status, m.occurred_at, t.senders, "
+            f"t.folder, t.date_last, {_SENT_AT_COLUMN}, m.sent_at_status, m.occurred_at, "
+            "t.senders, "
             "e.extraction_status, "
             "substr(e.extracted_text, 1, 240) AS text_snippet, "
             f"{_SOURCE_COLUMNS}, "
@@ -3587,7 +3604,8 @@ class Database:
                 "SELECT c.chunk_id, COALESCE(m.message_id, c.claimant_id) AS message_id, "
                 "c.claimant_id, c.thread_id, c.chunk_index, "
                 "c.text, c.char_start, c.char_end, c.attachment_id, c.kind, "
-                "m.sent_at AS message_date, m.sent_at_status AS message_sent_at_status, "
+                f"{SENT_CLOCK_SQL} AS message_date, "
+                "m.sent_at_status AS message_sent_at_status, "
                 "m.occurred_at AS message_occurred_at, "
                 "m.sender_ambiguous AS message_sender_ambiguous, "
                 "a.filename AS attachment_filename, "
@@ -3720,7 +3738,8 @@ class Database:
                 "c.text, c.char_start, c.char_end, c.attachment_id, c.kind, "
                 "NULL AS attachment_filename, "
                 "NULL AS attachment_mime, "
-                "m.sent_at AS message_date, m.sent_at_status AS message_sent_at_status, "
+                f"{SENT_CLOCK_SQL} AS message_date, "
+                "m.sent_at_status AS message_sent_at_status, "
                 "m.occurred_at AS message_occurred_at, "
                 "m.sender_ambiguous AS message_sender_ambiguous, "
                 f"{_CHUNK_SENDER_SQL}, "

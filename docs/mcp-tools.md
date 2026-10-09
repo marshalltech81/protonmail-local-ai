@@ -1457,8 +1457,8 @@ after the upgrade that made an unknown send date NULL (#1080), a
 date as `indeterminate` until the reparse reaches it. Each
 message carries its send and delivery dates (`sent_at` null when the
 `Date:` header is missing or unparseable, never a substitute, with
-`sent_at_status`: `parsed`, `missing`, `invalid`, or null before the
-reparse; the prose says which), folder, read state,
+`sent_at_status`: `parsed`, `missing`, `invalid`, or null, with
+`sent_at` null too, before the reparse; the prose says which), folder, read state,
 [pending deletion](#pending-deletion), attachment flag, subject,
 From / To / Cc (at most 10 per role, with a count of the rest),
 Message-ID, claimant ID, and Thread ID; the structured output adds

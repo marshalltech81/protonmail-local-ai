@@ -1101,6 +1101,29 @@ class Database:
             return existing["body_text"]
         return thread.build_body_text()
 
+    @staticmethod
+    def _drop_fallback_date_lines(cur: sqlite3.Cursor, thread, body: str) -> str:
+        """``body`` without the made-up ``Date:`` line the v7 writer put in
+        it for an undated incoming message (#1080, review round 1).
+
+        Only a row not yet assessed (``sent_at_status`` NULL, from before
+        v8) whose message now parses as undated has one: its stored
+        ``sent_at`` is that fallback, written into the line in the same
+        ISO form. Runs before the message's row is rewritten. Removes at
+        most one line per such message, so a real date line of another
+        message is left alone; one indexed lookup per undated message.
+        """
+        for msg in thread.messages:
+            if msg.date is not None:
+                continue
+            row = cur.execute(
+                "SELECT sent_at FROM messages WHERE claimant_id = ? AND sent_at_status IS NULL",
+                (msg.claimant_id,),
+            ).fetchone()
+            if row is not None:
+                body = body.replace(f"\nDate: {row[0]}\n", "\n", 1)
+        return body
+
     @_synchronized
     def upsert_thread(self, thread, embedding: list[float]):
         """Insert or update a thread in all three indexes.
@@ -1216,7 +1239,7 @@ class Database:
                 merged_date_first = thread.date_first.isoformat()
                 merged_display_subject = incoming_display_subject
 
-            body = self._compute_body(thread, existing)
+            body = self._drop_fallback_date_lines(cur, thread, self._compute_body(thread, existing))
 
             participants_json = json.dumps(merged_participants)
             senders_json = json.dumps(merged_senders)

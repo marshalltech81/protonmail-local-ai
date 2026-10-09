@@ -547,6 +547,30 @@ class TestUnknownDateMigration:
         spans = db._conn.execute(
             "SELECT thread_id, date_first, date_last FROM threads ORDER BY thread_id"
         ).fetchall()
+
+        def date_lines() -> set[bool]:
+            # Whether each undated message's v7 fallback is in its thread text.
+            return {
+                f"Date: {v7[path][0]}"
+                in db._conn.execute(
+                    "SELECT t.body_text FROM threads t JOIN messages m "
+                    "ON m.thread_id = t.thread_id WHERE m.filepath = ?",
+                    (path,),
+                ).fetchone()[0]
+                for path in undated.values()
+            }
+
+        # The v7 writer also put that fallback in the thread text.
+        for path in undated.values():
+            db._conn.execute(
+                "UPDATE threads SET body_text = replace(body_text, "
+                "'From: alice@example.com' || char(10), "
+                "'From: alice@example.com' || char(10) || 'Date: ' || ? || char(10)) "
+                "WHERE thread_id = (SELECT thread_id FROM messages WHERE filepath = ?)",
+                (v7[path][0], path),
+            )
+        db._conn.commit()
+        assert date_lines() == {True}
         db.close()
 
         db = Database(tmp_path / "mail.db")
@@ -575,6 +599,7 @@ class TestUnknownDateMigration:
             ).fetchall()
             == spans
         )
+        assert date_lines() == {False}
         assert (
             db._conn.execute("SELECT chunk_id FROM message_chunks ORDER BY chunk_id").fetchall()
             == chunks_before

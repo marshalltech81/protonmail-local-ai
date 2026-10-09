@@ -12,7 +12,9 @@ import asyncio
 import logging
 
 import pytest
+import src.lib.sqlite as sqlite_mod
 from fastmcp.exceptions import ToolError
+from src.lib.predicates import InvalidFilterError
 from src.lib.sqlite import Database
 from src.tools.outputs import GetMessageOutput, ListedMessage
 from src.tools.retrieval import register_retrieval_tools
@@ -80,6 +82,12 @@ def dates_db(tmp_path) -> Database:
     return Database(str(path))
 
 
+def _shown(sent: str | None, status: str | None) -> str | None:
+    """The send date a tool returns: only a parsed one (review round 1:
+    a row not yet assessed may hold the v7 fallback, so it is withheld)."""
+    return sent if status == "parsed" else None
+
+
 def _ids(records) -> list[str]:
     return [r.message_id for r in records]
 
@@ -132,7 +140,7 @@ class TestQueryMessages:
         by_id = {m.message_id: m for m in dates_db.query_messages().messages}
         for message_id, (sent, status, _occurred, first) in _ROWS.items():
             record = by_id[message_id]
-            assert (record.sent_at, record.sent_at_status) == (sent, status)
+            assert (record.sent_at, record.sent_at_status) == (_shown(sent, status), status)
         assert by_id["undated"].effective_at == _ROWS["undated"][3]
 
 
@@ -155,15 +163,17 @@ class TestTools:
         for message_id, (sent, status, _occurred, _first) in _ROWS.items():
             ListedMessage.model_validate(rows[message_id])
             assert (rows[message_id]["sent_at"], rows[message_id]["sent_at_status"]) == (
-                sent,
+                _shown(sent, status),
                 status,
             )
         text = out.content[0].text
         assert "send date unknown (no Date header)" in text
         assert "send date unknown (unparseable Date header)" in text
-        assert "2024-03-20T09:00:00+00:00 (send date not yet checked)" in text
-        for _sent, _status, _occurred, first in _ROWS.values():
+        assert "send date not yet checked" in text
+        for sent, status, _occurred, first in _ROWS.values():
             assert first not in text
+            if status is None:
+                assert sent not in text
 
     def test_the_status_can_be_projected(self, dates_db):
         out = self._call(dates_db, "query_messages", fields=["sent_at_status"])
@@ -176,7 +186,7 @@ class TestTools:
         [
             ("undated", "send date unknown (no Date header)"),
             ("undated_out", "send date unknown (unparseable Date header)"),
-            ("unchecked", "2024-03-20T09:00:00+00:00 (send date not yet checked)"),
+            ("unchecked", "send date not yet checked"),
             ("dated", "2024-03-10T09:00:00+00:00"),
         ],
     )
@@ -185,9 +195,11 @@ class TestTools:
         GetMessageOutput.model_validate(out.structured_content)
         sent, status, _occurred, first = _ROWS[message_id]
         message = out.structured_content["message"]
-        assert (message["sent_at"], message["sent_at_status"]) == (sent, status)
+        assert (message["sent_at"], message["sent_at_status"]) == (_shown(sent, status), status)
         assert f"Sent: {words}\n" in out.content[0].text
         assert first not in out.content[0].text
+        if status is None:
+            assert sent not in out.content[0].text
 
     def test_query_attachments_counts_an_undated_carrier_indeterminate(self, dates_db):
         out = self._call(dates_db, "query_attachments", **_MARCH)
@@ -236,9 +248,27 @@ def test_message_scope_never_places_an_undated_message_in_range(dates_db):
     }
 
 
-def test_evidence_passages_carry_the_status(dates_db):
-    chunks = dates_db.get_recent_chunks_for_thread("t-undated")
-    assert [(c.message_date, c.message_sent_at_status) for c in chunks] == [(None, "missing")]
+@pytest.mark.parametrize("message_id", ["dated", "undated", "unchecked", "unchecked_delivered"])
+def test_evidence_passages_carry_only_a_parsed_send_date(dates_db, message_id):
+    """Review round 1: every consumer of a passage's date (the prompt
+    headers, citations, brief_issue's as_of) reads ``message_date``, so
+    a send date not yet assessed never reaches it."""
+    sent, status, occurred, _first = _ROWS[message_id]
+    chunks = dates_db.get_recent_chunks_for_thread(f"t-{message_id}")
+    assert [(c.message_date, c.message_sent_at_status, c.message_occurred_at) for c in chunks] == [
+        (_shown(sent, status), status, occurred)
+    ]
+
+
+def test_a_cursor_from_before_the_date_change_is_foreign(dates_db, monkeypatch):
+    """Review round 1: query_attachments' cursor digest covers
+    ``QUERY_DIGEST_FORMAT``, so a page issued under the old date
+    semantics is not resumed under the new ones."""
+    first = dates_db.query_attachments(limit=1, **_MARCH)
+    assert first.next_cursor
+    monkeypatch.setattr(sqlite_mod, "QUERY_DIGEST_FORMAT", 2)
+    with pytest.raises(InvalidFilterError, match="issued for different filters"):
+        dates_db.query_attachments(limit=1, cursor=first.next_cursor, **_MARCH)
 
 
 def test_an_ambiguous_message_id_lists_each_claimants_send_date(tmp_path):

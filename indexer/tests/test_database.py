@@ -786,6 +786,46 @@ class TestUnknownSendDate:
         assert "Date:" not in body
         assert _FIRST.isoformat() not in body
 
+    def test_the_reparse_drops_an_old_fallback_from_the_thread_text(self, db):
+        """Review round 1: the v7 writer put an undated message's made-up
+        date in its thread's FTS body. The reparse of that message (its
+        row not yet assessed) removes that line, and only that one; a
+        real date line, of another message, stays."""
+        dated = make_message(message_id="real@x", filepath="/maildir/INBOX/cur/real")
+        old = make_message(message_id="old@x", filepath="/maildir/INBOX/cur/old")
+        old.date = datetime(2025, 5, 5, 5, 5, 5, 123456, tzinfo=UTC)
+        db.upsert_thread(make_thread(messages=[dated, old], thread_id="t-old"), FAKE_EMBEDDING)
+        db._conn.execute(
+            "UPDATE messages SET sent_at_status = NULL WHERE claimant_id = ?", (old.claimant_id,)
+        )
+        db._conn.commit()
+        fallback = f"Date: {old.date.isoformat()}"
+        real = f"Date: {dated.date.isoformat()}"
+
+        def text() -> tuple[str, list]:
+            body = db._conn.execute(
+                "SELECT body_text FROM threads WHERE thread_id = 't-old'"
+            ).fetchone()[0]
+            hits = db._conn.execute(
+                "SELECT rowid FROM threads_fts WHERE threads_fts MATCH ?", ('"123456"',)
+            ).fetchall()
+            return body, hits
+
+        body, hits = text()
+        assert fallback in body and real in body and hits
+        reparsed = make_message(message_id="old@x", filepath="/maildir/INBOX/cur/old")
+        reparsed.date = None
+        reparsed.date_status = "missing"
+        db.keep_persisted_first_indexed_at(reparsed)
+        db.upsert_thread(make_thread(messages=[reparsed], thread_id="t-old"), FAKE_EMBEDDING)
+        body, hits = text()
+        assert fallback not in body
+        assert real in body
+        assert hits == []
+        # A later pass (the row is assessed now) leaves the text alone.
+        db.upsert_thread(make_thread(messages=[reparsed], thread_id="t-old"), FAKE_EMBEDDING)
+        assert text()[0] == body
+
     @pytest.mark.parametrize(
         ("sent_at", "status"),
         [
