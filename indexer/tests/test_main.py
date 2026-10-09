@@ -1186,6 +1186,87 @@ class TestDrainQueueRetryAndDeadLetter:
         queue = IndexingQueue(db, max_attempts=1, base_backoff_seconds=0)
         assert queue.is_dead(str(dest)) is True
 
+    def test_too_deeply_nested_message_dead_letters_terminally(self, tmp_path, monkeypatch, caplog):
+        # A message nested past the stdlib parser's recursion limit fails
+        # the same way on every attempt, so it is dead-lettered on the
+        # first one with fixed text, not retried on backoff (#1296).
+        caplog.set_level(logging.DEBUG)
+        marker = "NESTMARK-1296-synthetic"
+        dest = tmp_path / "INBOX" / "cur" / "nested.eml"
+        dest.parent.mkdir(parents=True)
+        raw = f"Message-ID: <inner@example.test>\nSubject: {marker}\n\n{marker}\n".encode()
+        for i in range(1000):
+            raw = (
+                f"Message-ID: <wrap{i}@example.test>\nSubject: {marker}\n"
+                "Content-Type: message/rfc822\n\n"
+            ).encode() + raw
+        dest.write_bytes(raw)
+
+        calls = 0
+        real_parse = main.parse_email
+
+        def _counting_parse(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            return real_parse(*args, **kwargs)
+
+        monkeypatch.setattr(main, "parse_email", _counting_parse)
+        db = Database(tmp_path / "mail.db")
+        threader = Threader(db)
+        embedder = make_mock_embedder()
+        queue = _make_queue(db)
+        queue.enqueue(str(dest), REASON_INITIAL_SCAN)
+
+        for _ in range(3):
+            _drain(queue, db, embedder, threader)
+            _make_due(db)
+
+        assert calls == 1
+        assert queue.stats() == {"queued": 0, "dead": 1}
+        row = db._conn.execute(
+            "SELECT status, attempts, last_stage, last_error, last_error_class "
+            "FROM indexing_jobs WHERE filepath = ?",
+            (str(dest),),
+        ).fetchone()
+        assert row["status"] == "dead"
+        assert row["attempts"] == 1
+        assert row["last_stage"] == "parse"
+        assert row["last_error"] == main.MESSAGE_NESTING_DEAD_ERROR
+        assert row["last_error_class"] == "permanent_source_failure"
+        assert not embedder.embed.called
+        assert marker not in caplog.text
+        assert marker not in row["last_error"]
+        terminal = [r for r in caplog.records if r.getMessage().startswith("terminal: ")]
+        assert len(terminal) == 1
+        assert terminal[0].levelno == logging.WARNING
+
+    def test_recursion_error_after_the_stdlib_parse_keeps_retrying(self, tmp_path, monkeypatch):
+        # Only the stdlib message parse is terminal: a ``RecursionError``
+        # from elsewhere in the parse stage still retries (#1296).
+        dest = tmp_path / "INBOX" / "cur" / "msg.eml"
+        _write_eml(dest, "recursion@example.com")
+
+        def _boom(*_args, **_kwargs):
+            raise RecursionError("synthetic")
+
+        monkeypatch.setattr(parser, "_read_address_headers", _boom)
+        db = Database(tmp_path / "mail.db")
+        threader = Threader(db)
+        queue = _make_queue(db)
+        queue.enqueue(str(dest), REASON_INITIAL_SCAN)
+
+        _drain(queue, db, make_mock_embedder(), threader, max_passes=1)
+
+        row = db._conn.execute(
+            "SELECT status, attempts, last_error, last_error_class "
+            "FROM indexing_jobs WHERE filepath = ?",
+            (str(dest),),
+        ).fetchone()
+        assert row["status"] == "queued"
+        assert row["attempts"] == 1
+        assert row["last_error"] == "RecursionError"
+        assert row["last_error_class"] == "retryable"
+
     def test_unreadable_file_routes_to_retry_not_terminal_success(self, tmp_path):
         # Models the mbsync 0600→0644 chmod race: the watchdog enqueues a
         # newly-delivered file before mbsync's post-sync chmod hook makes
