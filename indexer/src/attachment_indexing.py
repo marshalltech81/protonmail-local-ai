@@ -248,6 +248,8 @@ def record_committed_outcomes(plans: list[AttachmentWritePlan]) -> None:
     earlier passes (#1236), so a message continued over many passes
     counts each occurrence once per pass that resolves or defers it."""
     for plan in plans:
+        if plan.resolved_earlier:
+            continue
         attachment_outcomes.record(
             plan.status,
             plan.extraction_error,
@@ -481,6 +483,11 @@ class AttachmentWritePlan:
     # A deferred occurrence whose stored mark already says so (deferred,
     # ``text_complete`` 0): its apply writes nothing (#1236).
     mark_unchanged: bool = False
+    # An occurrence resolved in an earlier pass, served from its cached
+    # row as it stands to settle its payload's shared slice (#1236): it
+    # writes no occurrence row and is not counted again; it only adds its
+    # chunks to the slice.
+    resolved_earlier: bool = False
     # Whether the plan holding this payload's chunk slice deletes stored
     # chunks it does not write. Off while another occurrence of the
     # payload in the message is deferred and holds chunks there (#1236).
@@ -542,6 +549,7 @@ def _resolve_extracted_text(
     batch_extractions: dict[tuple[str, str], ExtractionResult] | None = None,
     on_progress: Callable[[], None] | None = None,
     budget: ExtractionBudget | None = None,
+    serve_cached: bool = False,
 ) -> tuple[
     str | None, str, ExtractionResult | None, str | None, bool, int | None, str | None, bool | None
 ]:
@@ -574,6 +582,11 @@ def _resolve_extracted_text(
     an attachment the cache and the batch cannot serve is not extracted
     and comes back ``STATUS_DEFERRED``, with nothing to persist; each
     dispatch is charged its process launches and seconds.
+
+    ``serve_cached`` (an occurrence whose result already applied, re-read
+    so its payload's shared chunk slice can be settled, #1236) serves the
+    cached row as it is, whatever its age or the settings, so finished
+    work is not reopened; with no row it is resolved as usual.
     """
     module = extraction_cache_module(attachment)
     key = (attachment.content_hash, module)
@@ -592,6 +605,18 @@ def _resolve_extracted_text(
         )
 
     cached = db.get_attachment_extraction(attachment.content_hash, module)
+    if serve_cached and cached is not None:
+        text = cached["extracted_text"] if cached["extraction_status"] == STATUS_SUCCESS else None
+        return (
+            text,
+            cached["extraction_status"],
+            None,
+            cached["extraction_error"],
+            True,
+            cached["ocr_pages_skipped"],
+            cached["extractor"],
+            None if cached["text_complete"] is None else bool(cached["text_complete"]),
+        )
     # A row written by an older version of a since-fixed extractor would
     # otherwise be served forever: it is re-extracted, and only by an
     # occurrence that selects its module.
@@ -676,6 +701,7 @@ def prepare_attachment_writes(
     batch_extractions: dict[tuple[str, str], ExtractionResult] | None = None,
     on_progress: Callable[[], None] | None = None,
     budget: ExtractionBudget | None = None,
+    serve_cached: bool = False,
 ) -> AttachmentWritePlan:
     """Compute everything needed to write one attachment occurrence.
 
@@ -700,7 +726,9 @@ def prepare_attachment_writes(
     each page it reads (#485). ``budget`` is passed to
     ``_resolve_extracted_text``: a deferred occurrence's plan has
     ``STATUS_DEFERRED`` and no chunks, and keeps the chunks stored for
-    it (#1236).
+    it (#1236). With ``serve_cached`` a plan served from its cached row
+    as it stands is ``resolved_earlier``: it only contributes its chunks
+    to its payload's slice.
     """
     occurrence_id = attachment_occurrence_id(
         claimant_id=claimant_id,
@@ -730,6 +758,7 @@ def prepare_attachment_writes(
         batch_extractions=batch_extractions,
         on_progress=on_progress,
         budget=budget,
+        serve_cached=serve_cached,
     )
     if status == STATUS_DEFERRED:
         return AttachmentWritePlan(
@@ -746,6 +775,7 @@ def prepare_attachment_writes(
         extraction_complete=extraction_complete,
         payload_complete=attachment.payload_complete,
     )
+    resolved_earlier = serve_cached and cached and extraction_to_persist is None
 
     if status != STATUS_SUCCESS or not text:
         # No usable text for chunking. Still searchable by filename / MIME
@@ -764,6 +794,7 @@ def prepare_attachment_writes(
             ocr_pages_skipped=ocr_pages_skipped,
             text_complete=text_complete,
             text_extractor=extractor,
+            resolved_earlier=resolved_earlier,
         )
 
     # Chunk the extracted text. The chunker takes
@@ -790,6 +821,7 @@ def prepare_attachment_writes(
         ocr_pages_skipped=ocr_pages_skipped,
         text_complete=text_complete,
         text_extractor=extractor,
+        resolved_earlier=resolved_earlier,
     )
 
 
@@ -824,6 +856,18 @@ def apply_attachment_writes(
     if plan.mark_unchanged:
         # Deferred again; the stored row already records it (#1236).
         return
+    if not plan.resolved_earlier:
+        _write_occurrence(plan, claimant_id=claimant_id, thread_id=thread_id, db=db)
+    if plan.deferred:
+        return
+    _write_slice(plan, claimant_id=claimant_id, thread_id=thread_id, db=db)
+
+
+def _write_occurrence(
+    plan: AttachmentWritePlan, *, claimant_id: str, thread_id: str, db: Database
+) -> None:
+    """The occurrence's row, its cached result and its completeness (or
+    its deferral mark)."""
     module = extraction_cache_module(plan.attachment)
     db.upsert_attachment(
         claimant_id=claimant_id,
@@ -858,6 +902,11 @@ def apply_attachment_writes(
     # back with them.
     db.set_attachment_text_complete(plan.occurrence_id, plan.text_complete, plan.text_extractor)
 
+
+def _write_slice(
+    plan: AttachmentWritePlan, *, claimant_id: str, thread_id: str, db: Database
+) -> None:
+    """The payload's chunk slice: the plan's chunks, or clearing it."""
     if not plan.chunks or plan.status != STATUS_SUCCESS:
         # No usable text now: drop chunks an earlier (since-superseded)
         # extraction of this attachment left behind, or they stay

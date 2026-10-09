@@ -2042,8 +2042,13 @@ in the seconds.
   read, chunking, chunk-ID read or write, whatever its cached row's age,
   so an expired `failed` row is not re-run and a message always gets
   closer to done. Its committed chunks stay, and its payload's shared
-  slice is neither replaced nor cleared that pass (a full pass settles
-  it). A pending occurrence gets one cache read per pass, and one
+  slice is neither replaced nor cleared while another copy of the same
+  bytes is pending. In the pass where a copy resolves and none is
+  deferred, the payload settles: each copy resolved earlier is read once
+  per extractor module from its cached row as it stands, and the slice
+  is rewritten from every copy's current text, so chunks kept for a
+  since-refreshed copy do not survive. A payload settles once, so this
+  stays linear. A pending occurrence gets one cache read per pass, and one
   deferred again with its mark already written is not rewritten. Every
   pass still recomputes the thread vector from all of the thread's
   chunk vectors in its commit. An `EXTRACTOR_VERSIONS`

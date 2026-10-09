@@ -56,6 +56,7 @@ from .attachment_indexing import (
     attachment_outcomes,
     attachment_outcomes_degraded,
     completeness_unrecorded,
+    extraction_cache_module,
     format_attachment_outcomes,
     prepare_attachment_writes,
     record_committed_outcomes,
@@ -110,6 +111,7 @@ from .maildir import (
     read_sync_stamp,
 )
 from .parser import (
+    Attachment,
     Message,
     MessageNestingError,
     OversizedMessageError,
@@ -1768,8 +1770,51 @@ def _phase2a_collect_chunks(
         # plan writes every text's chunks, so none replaces another.
         slice_holder: dict[str, int] = {}
         # Payloads with an occurrence a continuation skipped as resolved
-        # (#1236): their stored chunks stay.
-        kept_payloads: set[str] = set()
+        # (#1236), with those occurrences: their stored chunks stay
+        # unless the payload settles this pass (below).
+        kept: dict[str, list[tuple[int, Attachment]]] = {}
+
+        def add_plan(plan: AttachmentWritePlan, attachment: Attachment) -> None:
+            """Queue a plan's new chunks for embedding, merging a second
+            text of the same payload into the plan that holds its slice."""
+            # A deferred plan writes no chunks and clears none, so its
+            # slice's stored IDs are not read.
+            stored_attach_ids = (
+                set()
+                if plan.deferred
+                else db.get_chunk_ids_for_message(
+                    msg.claimant_id, attachment_id=attachment.content_hash
+                )
+            )
+            holder = slice_holder.get(attachment.content_hash)
+            if plan.chunks and holder is not None:
+                target = attach_plans[holder]
+                known = {c.chunk_id for c in target.chunks}
+                extra = [c for c in plan.chunks if c.chunk_id not in known]
+                target.chunks.extend(extra)
+                for c in extra:
+                    if c.chunk_id in stored_attach_ids:
+                        continue
+                    if c.chunk_id not in queued_attach_offsets:
+                        queued_attach_offsets[c.chunk_id] = len(all_texts)
+                        all_texts.append(c.text)
+                    attach_new_chunks[holder].append(c)
+                    attach_offsets[holder].append(queued_attach_offsets[c.chunk_id])
+                plan.chunks = []
+            elif plan.chunks:
+                slice_holder[attachment.content_hash] = len(attach_plans)
+            plan_new = [c for c in plan.chunks if c.chunk_id not in stored_attach_ids]
+            plan_offsets: list[int] = []
+            for c in plan_new:
+                if c.chunk_id not in queued_attach_offsets:
+                    queued_attach_offsets[c.chunk_id] = len(all_texts)
+                    all_texts.append(c.text)
+                plan_offsets.append(queued_attach_offsets[c.chunk_id])
+            attach_plans.append(plan)
+            attach_new_chunks.append(plan_new)
+            attach_offsets.append(plan_offsets)
+            attach_stored_ids.append(stored_attach_ids)
+
         if INDEXER_ATTACHMENT_EXTRACTION_ENABLED and msg.attachments:
             cap = (
                 INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS
@@ -1782,7 +1827,8 @@ def _phase2a_collect_chunks(
             # already applied (``text_complete`` recorded, no deferral
             # mark) is skipped outright: no cache read, chunking, chunk
             # ID read or write; its chunks stay as committed, and the
-            # slice of its payload is protected below.
+            # slice of its payload is protected below, until the pass that
+            # settles the payload.
             budget = ExtractionBudget()
             continuation = (
                 state.row["last_stage"] == STAGE_EXTRACT
@@ -1804,7 +1850,9 @@ def _phase2a_collect_chunks(
                     (None, False),
                 )
                 if continuation and text_complete is not None and not was_deferred:
-                    kept_payloads.add(attachment.content_hash)
+                    kept.setdefault(attachment.content_hash, []).append(
+                        (occurrence_index, attachment)
+                    )
                     continue
                 # The plan comes back with empty embeddings_by_chunk_id;
                 # the stored-ID diff below picks its new chunks and
@@ -1835,43 +1883,48 @@ def _phase2a_collect_chunks(
                 # Deferred again, with its mark already as written: nothing
                 # to write for it this pass.
                 plan.mark_unchanged = plan.deferred and was_deferred and text_complete == 0
-                # A deferred plan writes no chunks and clears none, so its
-                # slice's stored IDs are not read.
-                stored_attach_ids = (
-                    set()
-                    if plan.deferred
-                    else db.get_chunk_ids_for_message(
-                        msg.claimant_id, attachment_id=attachment.content_hash
+                add_plan(plan, attachment)
+            # A payload settles in the pass where a copy of it resolves and
+            # none is deferred: its slice is then rewritten from every
+            # copy's current text, so chunks an earlier pass kept for a
+            # since-refreshed copy do not outlive it (Codex round 4 on
+            # #1355). Each copy resolved earlier is read once per module,
+            # from its cached row as it stands, and only adds its chunks;
+            # a payload settles once, so this work stays linear.
+            deferred_now = {plan.attachment.content_hash for plan in attach_plans if plan.deferred}
+            resolved_now = {
+                plan.attachment.content_hash for plan in attach_plans if not plan.deferred
+            }
+            for content_hash in sorted((resolved_now - deferred_now) & kept.keys()):
+                served_modules: set[str] = set()
+                for occurrence_index, attachment in kept.pop(content_hash):
+                    module = extraction_cache_module(attachment)
+                    if module in served_modules:
+                        continue
+                    served_modules.add(module)
+                    plan = prepare_attachment_writes(
+                        attachment=attachment,
+                        claimant_id=msg.claimant_id,
+                        db=db,
+                        chunk_target_tokens=CHUNK_TARGET_TOKENS,
+                        chunk_max_tokens=CHUNK_MAX_TOKENS,
+                        chunk_overlap_tokens=CHUNK_OVERLAP_TOKENS,
+                        ocr_enabled=INDEXER_OCR_ENABLED,
+                        max_bytes=INDEXER_ATTACHMENT_MAX_BYTES,
+                        max_ocr_pages=INDEXER_OCR_MAX_PAGES,
+                        ocr_timeout_seconds=INDEXER_OCR_TIMEOUT_SECONDS or None,
+                        max_pdf_pages=INDEXER_PDF_MAX_DIGITAL_PAGES or None,
+                        occurrence_index=occurrence_index,
+                        max_extracted_chars=cap,
+                        batch_extractions=batch_extractions,
+                        on_progress=_extraction_heartbeat,
+                        budget=budget,
+                        serve_cached=True,
                     )
-                )
-                holder = slice_holder.get(attachment.content_hash)
-                if plan.chunks and holder is not None:
-                    target = attach_plans[holder]
-                    known = {c.chunk_id for c in target.chunks}
-                    extra = [c for c in plan.chunks if c.chunk_id not in known]
-                    target.chunks.extend(extra)
-                    for c in extra:
-                        if c.chunk_id in stored_attach_ids:
-                            continue
-                        if c.chunk_id not in queued_attach_offsets:
-                            queued_attach_offsets[c.chunk_id] = len(all_texts)
-                            all_texts.append(c.text)
-                        attach_new_chunks[holder].append(c)
-                        attach_offsets[holder].append(queued_attach_offsets[c.chunk_id])
-                    plan.chunks = []
-                elif plan.chunks:
-                    slice_holder[attachment.content_hash] = len(attach_plans)
-                plan_new = [c for c in plan.chunks if c.chunk_id not in stored_attach_ids]
-                plan_offsets: list[int] = []
-                for c in plan_new:
-                    if c.chunk_id not in queued_attach_offsets:
-                        queued_attach_offsets[c.chunk_id] = len(all_texts)
-                        all_texts.append(c.text)
-                    plan_offsets.append(queued_attach_offsets[c.chunk_id])
-                attach_plans.append(plan)
-                attach_new_chunks.append(plan_new)
-                attach_offsets.append(plan_offsets)
-                attach_stored_ids.append(stored_attach_ids)
+                    # With its cached row gone (its label now selects
+                    # another module) the copy is resolved as usual, and
+                    # may be deferred: the payload then stays protected.
+                    add_plan(plan, attachment)
         # A plan without text clears its attachment's chunk slice in
         # Phase 2c, unless another copy of the same bytes in this message
         # fills it: that copy counted the stored chunks as kept and
@@ -1881,7 +1934,7 @@ def _phase2a_collect_chunks(
         # nothing clears that slice this pass, and the plan that fills it
         # only adds to it.
         filled = {plan.attachment.content_hash for plan in attach_plans if plan.chunks}
-        protected_payloads = kept_payloads | {
+        protected_payloads = set(kept) | {
             plan.attachment.content_hash for plan in attach_plans if plan.deferred
         }
         for plan, stored_attach_ids in zip(attach_plans, attach_stored_ids):

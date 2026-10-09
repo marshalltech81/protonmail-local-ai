@@ -700,17 +700,56 @@ class TestContinuation:
         p.drain()
         assert p.deferred() == 1
         assert p.attachment_chunks() == both
-        # The deferred copy now fails too. The continuation skips the
-        # copy resolved last pass and keeps its payload's slice as it
-        # stands (owner, 2026-10-09: no work on resolved occurrences)...
-        p.drain()
-        assert p.job(path) is None
-        assert p.attachment_chunks() == both
-        # ...and the next full pass, with nothing deferred, clears it.
-        p.queue.enqueue(path, REASON_INITIAL_SCAN)
+        # The deferred copy now fails too: the payload settles, every copy
+        # is textless, and the slice is cleared.
         p.drain()
         assert p.job(path) is None
         assert p.attachment_chunks() == set()
+
+    def test_a_settled_payload_drops_chunks_of_refreshed_copies(self, tmp_path, monkeypatch):
+        """Codex round 4 on #1355: after a refresh both copies' texts
+        change; one resolves while the other is deferred (the old chunks
+        are kept), and the pass that resolves the second rewrites the
+        slice from both current texts, so no pre-refresh chunk survives."""
+        payload = b"<p>shared payload</p>"
+        attachments = [
+            (payload, "text/plain", "a.txt"),
+            (payload, "text/html", "b.html"),
+        ]
+        extractor = LaunchingExtractor()
+        p = Pipeline(tmp_path, monkeypatch, extractor, launches=5)
+        path = p.add("refresh", attachments)
+        p.drain()
+        old = p.attachment_chunks()
+        assert len(old) == 2
+        # A refresh: new texts, the cached results and completeness stale.
+        refreshed = LaunchingExtractor()
+        real_call = refreshed.__call__
+
+        def v2(**kwargs):
+            result = real_call(**kwargs)
+            from dataclasses import replace
+
+            return replace(result, text=result.text + " refreshed version two")
+
+        monkeypatch.setattr(attachment_indexing, "extract_attachment", v2)
+        p.db._conn.execute("DELETE FROM attachment_extractions")
+        p.db._conn.execute("UPDATE attachments SET text_complete = NULL")
+        p.db._conn.commit()
+        monkeypatch.setattr(
+            main, "ExtractionBudget", functools.partial(ExtractionBudget, max_launches=1)
+        )
+        p.queue.enqueue(path, REASON_INITIAL_SCAN)
+        p.drain()
+        assert p.deferred() == 1
+        middle = p.attachment_chunks()
+        assert old <= middle and len(middle) == 3
+        p.drain()
+        assert p.job(path) is None
+        final = p.attachment_chunks()
+        assert len(final) == 2
+        assert not final & old
+        assert len(refreshed.calls) == 2
 
 
 class WorkCounter:
