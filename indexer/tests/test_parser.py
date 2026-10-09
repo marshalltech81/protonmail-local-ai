@@ -3786,6 +3786,50 @@ def test_undecodable_filename_is_not_logged(tmp_path, caplog):
     assert marker not in caplog.text
 
 
+def test_undecodable_filename_warning_is_rate_limited(tmp_path, caplog):
+    """#1330: the raw-parameter fallback line goes through the shared
+    line budget. A message with more such parts than the budget logs
+    the budget's worth of the same fixed WARNING and counts the rest in
+    the attachments aggregate's ``warnings_suppressed``."""
+    from src import extractors
+
+    extractors.drain_extractor_counts()
+    marker = "FNAMEMARKER1330"
+    limit = extractors._WARNINGS_PER_WINDOW
+    extra = 3
+    parts = b"".join(
+        b"--b\r\n"
+        b"Content-Type: application/pdf\r\n"
+        b"Content-Disposition: attachment; filename*=idna''"
+        + f"{marker}{i}.pdf".encode()
+        + b"\r\n\r\nx\r\n"
+        for i in range(limit + extra)
+    )
+    folder = tmp_path / "INBOX" / "cur"
+    folder.mkdir(parents=True)
+    path = folder / "m.eml"
+    path.write_bytes(
+        b"From: sender@example.test\r\n"
+        b"Message-ID: <fname1330@example.test>\r\n"
+        b"Date: Mon, 01 Jan 2024 12:00:00 +0000\r\n"
+        b"MIME-Version: 1.0\r\n"
+        b'Content-Type: multipart/mixed; boundary="b"\r\n'
+        b"\r\n" + parts + b"--b--\r\n"
+    )
+    with caplog.at_level(logging.DEBUG):
+        msg = parse_email(path)
+    assert msg is not None
+    assert len(msg.attachments) == limit + extra
+    warnings = [r for r in caplog.records if "filename" in r.getMessage()]
+    assert len(warnings) == limit
+    assert {r.levelno for r in warnings} == {logging.WARNING}
+    assert {r.getMessage() for r in warnings} == {
+        "attachment filename charset could not decode it (UnicodeError); using the raw parameter"
+    }
+    assert extractors.drain_extractor_counts()["warnings_suppressed"] == extra
+    assert marker not in caplog.text
+
+
 @pytest.mark.parametrize(
     ("charset", "text", "exc_name"),
     [
