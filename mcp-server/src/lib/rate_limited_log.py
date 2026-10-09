@@ -102,6 +102,7 @@ class ArgumentRejections(RateLimitedLog):
         "offset",
         "filter_type",
         "query",
+        "where",
         "other",
     )
 

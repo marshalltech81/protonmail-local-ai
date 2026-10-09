@@ -639,11 +639,32 @@ class AddressFilterMatch(_Output):
     )
 
 
+class WhereLeafResult(_Output):
+    path: str = Field(description="The leaf's place in the request, e.g. where.all[1].")
+    id: str | None = Field(description="The leaf's id as given; null without one.")
+    leaf: str
+    true: int = Field(description="Matches this leaf is true of.")
+    false: int = Field(description="Matches this leaf is false of.")
+    indeterminate: int = Field(description="Matches this leaf could not decide.")
+    distinct_addresses: int | None = Field(
+        description="Address leaves: distinct addresses this leaf matched across every "
+        "match, not just this page. Null for body_words."
+    )
+    addresses: list[str] | None = Field(
+        description=f"Address leaves: the matched addresses, most matching messages first, "
+        f"at most {MAX_LISTED_MATCHED_ADDRESSES}. Null for body_words."
+    )
+
+
 class QueryMessagesOutput(_Output):
     filters: list[FilterUse] = Field(description="How each given filter was applied; empty: none.")
     address_matches: list[AddressFilterMatch] = Field(
         description="Per sender / recipient / participant filter given, the addresses it "
         "matched; empty without one."
+    )
+    leaf_results: list[WhereLeafResult] = Field(
+        description="Per where leaf, in request order, how it decided the matches; empty "
+        "without where."
     )
     date_bounds: DateBounds | None = Field(description=_DATE_BOUNDS_DESCRIPTION)
     total_matches: int = Field(
