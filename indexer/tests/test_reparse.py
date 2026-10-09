@@ -748,6 +748,56 @@ class TestParkedTrashedReparse:
         assert MARKER not in caplog.text
         db.close()
 
+    def test_a_re_parked_trashed_row_does_not_repeat_the_completion_line(
+        self, tmp_path, caplog, clock
+    ):
+        """Codex review round 1 on #1334: a parked row that comes due
+        while its file is still trashed is claimed and parked again; that
+        claim must not re-arm the completion line."""
+        caplog.set_level(logging.INFO)
+        db, queue, _paths = _index(tmp_path, ["a"])
+        trashed = tmp_path / "INBOX" / "cur" / "t0:2,ST"
+        _write_eml(trashed, "t0@example.com", f"t {MARKER}")
+        queue.enqueue(str(trashed), REASON_INITIAL_SCAN)
+        _drain(db, queue, make_mock_embedder(_VECTOR))
+        queue.enqueue_reparse()
+
+        def drain_skipping_trashed() -> None:
+            main._drain_queue_batched(
+                db,
+                make_mock_embedder(_VECTOR),
+                Threader(db),
+                queue,
+                batch_size=4,
+                timing_aggregator=TimingAggregator(window=4),
+                skip_trashed=True,
+            )
+
+        drain_skipping_trashed()
+        assert queue.heartbeat_counts()["reparse_parked_trashed"] == 1
+        caplog.clear()
+        clock["t"] += main.QUEUE_HEARTBEAT_INTERVAL_SECS
+        main._maybe_log_queue_heartbeat(queue)
+        [line] = _lines(caplog, "reparse")
+        assert line.getMessage() == (
+            "reparse complete: 1 message(s) reparsed since the indexer started, "
+            "0 dead-lettered, 1 still parked as trashed (reparsed if restored)"
+        )
+
+        # The park expires while the file is still trashed: claimed, parked again.
+        db._conn.execute(
+            "UPDATE indexing_jobs SET next_attempt_at = ?", ("2000-01-01T00:00:00+00:00",)
+        )
+        db._conn.commit()
+        drain_skipping_trashed()
+        assert queue.heartbeat_counts()["reparse_parked_trashed"] == 1
+        caplog.clear()
+        clock["t"] += main.QUEUE_HEARTBEAT_INTERVAL_SECS
+        main._maybe_log_queue_heartbeat(queue)
+        assert _lines(caplog, "reparse") == []
+        assert MARKER not in caplog.text
+        db.close()
+
 
 class TestReparseCommand:
     def test_queues_and_reports_counts(self, tmp_path, monkeypatch, capsys):

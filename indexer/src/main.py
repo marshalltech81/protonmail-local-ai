@@ -2292,10 +2292,6 @@ def _drain_queue_batched(
         rows = queue.claim_batch(batch_size)
         if not rows:
             break
-        # A reparse the heartbeat never saw queued (drained between two
-        # heartbeats) still gets its completion line (Codex round 1 on #1143).
-        if any(row["reason"] == REASON_REPARSE for row in rows):
-            _reparse_progress.active = True
         # A row still marked ``interrupted`` was mid-step when the
         # indexer died. An out-of-memory kill can come from the whole
         # batch's footprint rather than that message, and a restart
@@ -2319,6 +2315,12 @@ def _drain_queue_batched(
                         delay_seconds=TRASHED_DEFER_SECS,
                     )
                 continue
+            # A reparse the heartbeat never saw queued (drained between two
+            # heartbeats) still gets its completion line (Codex round 1 on
+            # #1143). Set past the trash check: a trashed row parked again
+            # must not re-arm it (#1331).
+            if row["reason"] == REASON_REPARSE:
+                _reparse_progress.active = True
             # Parse and extraction are the steps hostile input can crash
             # or hang, so each runs with its message charged one attempt
             # (see ``IndexingQueue.begin_attempt``). The refund is not in
