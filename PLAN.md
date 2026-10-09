@@ -674,9 +674,10 @@ superseded entries keep their number and one line.
     - **Message-ID length:** 998 characters; longer takes the
       no-`Message-ID` dead-letter path.
     - **`BRIDGE_USER`** stays in `.env`: an identifier, not a credential.
-    - **P3 policy:** work runs in priority order, P1/P2 first, then
-      P3s in turn; small P3s with an agreed fix and no new mechanism
-      may be fixed ahead of P1/P2 work (AGENTS.md).
+    - **P3 policy:** small P3s with an agreed fix and no new mechanism
+      may be fixed before go-live (AGENTS.md). (2026-10-09: superseded
+      by priority order, P0 first, then P1/P2, then P3s in turn; small
+      P3s may still be fixed ahead of P1/P2 work. AGENTS.md.)
 15. **#638 implicit TLS (2026-10-02 night):** mbsync ⇄ Bridge IMAP uses
     implicit TLS, with no STARTTLS or plaintext fallback; an approved,
     owner-gated TLS change.

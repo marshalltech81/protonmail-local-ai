@@ -664,14 +664,16 @@ under about 80 characters.
   "Review round N" section to the PR description.
 - Resolve a thread only when it is fixed, when the owner has deferred
   it (a deferral is offered only as "Accuracy first" allows), or when
-  it is a problem that already existed on `main` and an open issue
-  tracking it is linked from the reply (owner, 2026-10-09).
+  it is a P2/P3 problem that already existed on `main` and an open
+  issue tracking it is linked from the reply (owner, 2026-10-09). A
+  P0/P1 finding blocks the merge until it is fixed or the owner defers
+  it (the exception below).
   This is the one rule for resolving a thread as deferred; the rules
   below point at it. Merging is blocked while line threads are open.
 - Cap review at two fix rounds per PR (owner, 2026-10-01). A finding
-  raised in round three or later is verified; one that already existed
-  on `main` is filed as its own issue and its thread resolved under the
-  thread rule above. The PR is then ready for the owner's merge
+  raised in round three or later is verified; a P2/P3 one that already
+  existed on `main` is filed as its own issue and its thread resolved
+  under the thread rule above. The PR is then ready for the owner's merge
   go-ahead once CI is green (the go-ahead rule below still applies).
   The cap only moves problems already on `main` to their own issue,
   which gets its real priority and is scheduled, so it reaches the
@@ -745,8 +747,8 @@ under about 80 characters.
   and ask the owner to approve the accurate fix. #1311 round 12
   recommended accepting a stated risk, and the owner chose the full
   fix.
-- Work in priority order: P1/P2 work first, then P3 issues in turn
-  (owner, 2026-10-09). A P3 problem outside a PR's scope is filed as an
+- Work in priority order: P0 first (it preempts all other work), then
+  P1/P2, then P3 issues in turn (owner, 2026-10-09). A P3 problem outside a PR's scope is filed as an
   issue rather than fixed ahead of P1/P2 work; a finding the PR
   introduced is fixed in the PR whatever its priority (the exception
   above). Exception (owner, 2026-10-02): a small P3 with an agreed fix
