@@ -229,8 +229,9 @@ question; instead it lists:
 full-read message holds a forbidden value only past its first
 `get_message` page (read with the real tool), that every forbidden value
 is in an expected message's body, and that `query_messages(text=...)`
-for each of "tofu", "PIN" and "verification" lists at least one decoy
-while the three together reach every genuine message.
+for each of the row's `trap_terms` ("tofu", "PIN" and "verification")
+lists at least one decoy while together they reach every genuine
+message.
 `tests/test_agent_eval.py` mutates the reference trace into each
 observed mistake (keyword matches counted, a decoy cited, a message
 counted twice, a long body read to page 1 only, a wrong or missing
@@ -250,6 +251,69 @@ separately.
   (`ask_mailbox`, `summarize_thread` and the experimental tools), not an agent's.
 - Incomplete indexing cannot be exercised on the fully built baseline
   index, so whether an answer discloses it is untested.
+
+### Counting family (#1256)
+
+A synthetic family of counting cases (part A of #776): apiary visit
+notices from an invented beekeepers' association, corpus threads
+102-112. Its ground truth is `counting_family.json`, written by hand
+from the corpus text and never from what search returns. The file
+classifies every family message by the shape it stands for:
+
+- direct notices, and one in other wording (no "apiary", "visit" or
+  "notice");
+- unrelated mail sharing the keywords (a coworking space called the
+  Hive, a garden centre's apiary corner);
+- a reply to a notice and a forward of one;
+- repeated notices for one visit: a reminder, and a duplicate delivery
+  (two files claiming one Message-ID with different bytes, so two
+  claimant IDs; the corpus builder's `duplicate_of`);
+- a request and the notice confirming it;
+- a look-alike of another type (a visit report);
+- a message in two categories (a report on one visit and notice of the
+  next);
+- a notice filed in Trash.
+
+Each message names the visit (the underlying item) it gives notice of
+or reports on, so the notices give three different numbers: 5 visits,
+6 messages, 7 claimants. Two scenarios count them:
+`apiary-visit-notices` (dev) and `hive-visit-reports` (held out, by
+`is_held_out`; never used to tune anything). Each lists its expected
+messages outside Trash, its Trash messages, its number of distinct
+items and its `trap_terms`. `tests/test_counting_family.py` checks,
+without an index, that each scenario's sets follow from the
+classification and that every shape is present. The file's `lookups`
+are exact `query_messages` calls with every matching message, listed
+once per claimant.
+
+`make baseline` checks that every family message is indexed in its
+thread and folder once per delivery, that each scenario's trap terms
+list decoys while reaching every expected message, and that the real
+`query_messages` tool counts each lookup exactly. It pages each to
+`has_more: false` with page sizes 1, 2, 3 and the default, and checks
+that no row repeats across pages, that `total_matches` is the size of
+the pages' union, and that `indeterminate` is 0. For each lookup that
+lists the duplicate delivery, it also ends a page between the pair's
+two claimants and checks that one lands on each page. It also checks that
+the overlapping "apiary" and "hive" lookups union by claimant ID (keyed
+by Message-ID, the duplicate delivery would merge), that Trash is
+counted only with `folder="Trash"`, and that date-only bounds cover
+their whole first and last days.
+
+**What this family does not prove.**
+
+- It has no scorer or reference trace of its own yet: grading an
+  agent's counting unit, classification, precision and recall and
+  confidence on it is #1257, and the multi-turn form is #1258. The
+  scenarios are not in `agent_scenarios.json` until then.
+- The server checks show that exact lookups count exactly. They do not
+  show that a set of keyword lookups covers a topic: the other-wording
+  notice is missed by an "apiary" lookup, and only reading tells a
+  notice from a reply, forward, request or report.
+- Paging is exercised with small explicit limits. No family lookup
+  matches more than the default 25 rows.
+- The index is built once from files that do not change, so paging
+  while the index changes is not exercised.
 
 ### Outstanding items (`outstanding_items`, #798)
 
