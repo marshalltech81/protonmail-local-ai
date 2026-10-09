@@ -1846,7 +1846,8 @@ with no extractor's file name) is not logged.
 | `attached_depth` | An attached email nested more than 20 levels deep (or 20 transfer-encoded levels) |
 | `attached_fields` | The same, once the message's attached emails exceed the per-message part and header budget |
 | `transport_decode` | A base64 or quoted-printable attached email that does not decode: the attachments inside it are not read; or an attached email in another transfer encoding (uuencode and its aliases, or an unknown value), whose transport text is not extracted |
-| `transport_lossy` | A base64 attached email whose transport decoded with bytes lost, or any quoted-printable one, whose loss cannot be detected yet (#1288): its decoded text is kept and indexed but marked incomplete, and the attachments inside it are read. Also an `application/eml` or `.eml` attachment in any transfer encoding other than base64 or none (quoted-printable, uuencode): its text is kept but marked incomplete |
+| `transport_lossy` | A base64 attached email whose transport decoded with bytes lost, or any quoted-printable one, whose loss cannot be detected yet (#1288): its decoded text is kept and indexed but marked incomplete, and the attachments inside it are read, though one whose boundary was lost is missing, so the attachment list is incomplete |
+| `leaf_transport_lossy` | An `application/eml` or `.eml` attachment in any transfer encoding other than base64 or none (quoted-printable, uuencode): its text is kept but marked incomplete. The attachments inside it are never read by the parser, so the attachment list is not affected |
 | `decoded_bytes` | The same, past 64 MB of decoded attached emails per message |
 | `container_serialize` | A container the serializer refuses (a malformed header), when its payload would be extracted |
 | `body_parts` | Text parts past the 200th, left out of the body: only those that could have been part of it, so an alternative rendering after the one the body uses is not counted |
@@ -1870,7 +1871,7 @@ and counts only) and whether the content its filters read is complete
 (#1086): the subject (`subject_length`), each address role (the
 `address_*` caps that fired while that header was read, a repeated
 `From`, or `address_fields` for all three), the attachment list
-(`attached_*`, `transport_decode`, `decoded_bytes`,
+(`attached_*`, `transport_decode`, `transport_lossy`, `decoded_bytes`,
 `container_serialize`, `mime_parts`) and the body (`body_parts`,
 `mime_parts`). A filter that finds nothing in content a cap cut reports
 the message as `indeterminate` in `query_messages`, not as a miss

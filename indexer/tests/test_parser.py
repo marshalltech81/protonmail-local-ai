@@ -4219,6 +4219,18 @@ _CAP_SHAPES = {
         "transport_lossy=1",
         _only_attachment_is_kept,
     ),
+    # Review round 13 on #1311: an email carried as a leaf for the eml
+    # extractor (round 8) is never walked for attachments, so its lossy
+    # transport loses text only, not attachments: a separate name.
+    "leaf_transport_lossy": (
+        _with_attachment(
+            b"Content-Type: application/eml\r\nContent-Transfer-Encoding: quoted-printable\r\n",
+            quopri.encodestring(_INNER_EMAIL),
+        ),
+        False,
+        "leaf_transport_lossy=1",
+        _only_attachment_is_kept,
+    ),
     "decoded_bytes": (
         _with_attachment(
             b"Content-Type: message/rfc822\r\nContent-Transfer-Encoding: base64\r\n",
@@ -4470,10 +4482,12 @@ _CAP_COMPLETENESS: dict[str, set[str]] = {
     "transport_decode_base64": _MANIFEST,
     "transport_decode_8bit": _MANIFEST,
     "transport_decode_uuencode": _MANIFEST,
-    # The attachment is listed; only its text is partial, which the
-    # occurrence's ``payload_complete`` records.
-    "transport_lossy_base64": set(),
-    "transport_lossy_quoted_printable": set(),
+    # The attachments inside a lossy attached email may be lost with
+    # their boundaries (review round 13 on #1311); a leaf is never walked
+    # for attachments, so only its own text is partial.
+    "transport_lossy_base64": _MANIFEST,
+    "transport_lossy_quoted_printable": _MANIFEST,
+    "leaf_transport_lossy": set(),
     "decoded_bytes": _MANIFEST,
     "container_serialize": _MANIFEST,
     "container_serialize_decoded": _MANIFEST,
@@ -5638,6 +5652,7 @@ _PAYLOAD_LOSS = {
     "transport_decode_uuencode": 1,
     "transport_lossy_base64": 1,
     "transport_lossy_quoted_printable": 1,
+    "leaf_transport_lossy": 1,
     "decoded_bytes": 1,
     "container_serialize": 1,
     "container_serialize_decoded": 1,
@@ -5654,7 +5669,7 @@ def test_cap_shape_marks_exactly_the_emptied_payloads(tmp_path, monkeypatch, sha
     lost = [a for a in msg.attachments if not a.payload_complete]
     assert len(lost) == _PAYLOAD_LOSS.get(shape, 0)
     # A lossy transport keeps its lenient decode; every other cap empties.
-    kept = shape.startswith("transport_lossy_")
+    kept = "transport_lossy" in shape
     assert all((a.payload != b"") is kept for a in lost)
 
 
@@ -5908,6 +5923,28 @@ class TestContainerTransportEncodings:
         assert msg.parse_caps == {}
 
 
+def test_a_lossy_attached_email_clears_the_attachment_manifest(tmp_path):
+    """Review round 13 on #1311: a base64 quantum replaced where a nested
+    attachment's boundary sits loses that attachment from the decoded
+    tree, so the message's attachment list is not complete."""
+    inner = (
+        b'From: a@example.test\r\nContent-Type: multipart/mixed; boundary="IN"\r\n\r\n'
+        b"--IN\r\nContent-Type: text/plain\r\n\r\nbody\r\n"
+        b'--IN\r\nContent-Type: text/plain\r\nContent-Disposition: attachment; filename="n.txt"'
+        b"\r\n\r\nNESTED\r\n--IN--\r\n"
+    )
+    encoded = base64.b64encode(inner)
+    quantum = (inner.index(b"--IN\r\nContent-Type: text/plain\r\nContent-Disposition") // 3) * 4
+    lossy = encoded[:quantum] + b"!!!!" + encoded[quantum + 4 :]
+    path = tmp_path / "m.eml"
+    path.write_bytes(_with_attachment(_BASE64_RFC822, lossy))
+    msg = parse_email(path)
+    assert msg is not None
+    assert [a.filename for a in msg.attachments] == ["SYNTHETIC_FILENAME_MARKER.eml"]
+    assert msg.parse_caps == {"transport_lossy": 1}
+    assert msg.attachments_manifest_complete is False
+
+
 class TestLeafEmlTransportEncodings:
     """Review round 8 on #1311: an email carried as a leaf part the
     ``eml`` extractor reads (``application/eml``, or any type named
@@ -5957,7 +5994,7 @@ class TestLeafEmlTransportEncodings:
         )
         assert attachment.payload != b""
         assert attachment.payload_complete is False
-        assert msg.parse_caps == {"transport_lossy": 1}
+        assert msg.parse_caps == {"leaf_transport_lossy": 1}
         assert msg.attachments_manifest_complete is True
 
     @pytest.mark.parametrize(

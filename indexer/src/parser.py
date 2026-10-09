@@ -54,9 +54,11 @@ log = logging.getLogger("indexer.parser")
 # * ``transport_lossy``: a transfer-encoded attached email that decoded
 #   with bytes lost (base64), or whose loss cannot be detected
 #   (quoted-printable, #1288): its lenient decode is kept, marked
-#   incomplete, and the attachments inside it are walked; also an email
-#   carried as a leaf for the ``eml`` extractor in any encoding other
-#   than identity or base64;
+#   incomplete, and the attachments inside it are walked, though one
+#   whose boundary was lost is missing (review round 13 on #1311);
+# * ``leaf_transport_lossy``: an email carried as a leaf for the ``eml``
+#   extractor in any encoding other than identity or base64: its text
+#   is partial, but the parser never walks a leaf for attachments;
 # * ``decoded_bytes``: one past ``MAX_DECODED_ATTACHMENT_BYTES``;
 # * ``container_serialize``: a container the generator refuses;
 # * ``body_parts``: text parts past ``MAX_BODY_TEXT_PARTS`` are left out
@@ -104,6 +106,7 @@ PARSE_CAPS: tuple[str, ...] = (
     "attached_fields",
     "transport_decode",
     "transport_lossy",
+    "leaf_transport_lossy",
     "decoded_bytes",
     "container_serialize",
     "body_parts",
@@ -137,6 +140,7 @@ ATTACHMENT_LOSS_CAPS: tuple[str, ...] = (
     "attached_depth",
     "attached_fields",
     "transport_decode",
+    "transport_lossy",
     "decoded_bytes",
     "container_serialize",
     "mime_parts",
@@ -1539,9 +1543,10 @@ def _extract_body_and_attachments(
                 # named ``.eml``) follows the rule for ``message/*``: a
                 # transfer encoding whose loss is not detected (#1288)
                 # keeps its decode, never complete, and is counted
-                # (review round 8 on #1311).
+                # (review round 8 on #1311). Never walked for
+                # attachments, so the manifest stays whole (round 13).
                 transport_lost.append(True)
-                caps["transport_lossy"] += 1
+                caps["leaf_transport_lossy"] += 1
             attachments.append(
                 Attachment(
                     filename=filename or "unnamed",
