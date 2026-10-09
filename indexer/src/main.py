@@ -66,7 +66,6 @@ from .chunker import (
     MessageChunk,
     chunk_segments,
     estimate_tokens,
-    mean_vector,
     truncate_to_tokens,
 )
 from .database import EMBEDDING_DIM, SCHEMA_VERSION, CompletenessClearing, Database
@@ -690,6 +689,8 @@ PERIODIC_RESCAN = "periodic Maildir rescan"
 PERIODIC_RENAME_SWEEP = "periodic rename sweep"
 WAL_CHECKPOINT = "wal checkpoint"
 REAPED_RECORD_PRUNE = "reaped-record prune"
+VECTOR_SUMS_BACKFILL = "thread vector sums backfill"
+VECTOR_SUMS_CHECK = "thread vector sums check"
 RECOVERY_COMPONENTS = frozenset(
     {
         HEALTH_FILE_REFRESH,
@@ -700,8 +701,24 @@ RECOVERY_COMPONENTS = frozenset(
         PERIODIC_RENAME_SWEEP,
         WAL_CHECKPOINT,
         REAPED_RECORD_PRUNE,
+        VECTOR_SUMS_BACKFILL,
+        VECTOR_SUMS_CHECK,
     }
 )
+
+# Thread vector sums (#1356). Each main-loop tick the backfill fills the
+# sums of threads from before v10 that no write has touched yet, and each
+# reconciliation interval the check recomputes the sums of the next
+# filled threads and repairs any that differ. A batch takes at most
+# ``VECTOR_SUMS_BATCH_THREADS`` threads and stops once
+# ``VECTOR_SUMS_BATCH_ROWS`` chunk vectors were read (a thread is always
+# read whole).
+VECTOR_SUMS_BATCH_THREADS = 50
+VECTOR_SUMS_BATCH_ROWS = 2000
+# Whether the backfill found every thread filled; set once per process.
+_vector_sums_backfill_done = False
+# Where the check resumes: the last thread it checked (None: the start).
+_vector_sums_check_cursor: str | None = None
 
 
 class _FailureStreak:
@@ -1518,8 +1535,9 @@ def _phase1_commit_thread(
     """Phase 1 of the batched indexer for one message.
 
     Parse → thread → ``upsert_thread`` with a seed vector chosen from
-    a three-case priority chain: ``mean`` of the thread's existing
-    chunk vectors when it has any; the prior non-zero ``threads_vec``
+    a three-case priority chain: the mean of the thread's existing
+    chunk vectors when it has any, derived from the thread's stored
+    chunk-vector sum (#1356); the prior non-zero ``threads_vec``
     row when the thread is chunkless (subject-fallback threads);
     otherwise the placeholder zero, for a new thread or a chunkless one
     whose stored vector is still zero (a retry after a crash between
@@ -1619,7 +1637,8 @@ def _phase1_commit_thread(
 
     t0 = time.perf_counter()
     # Seed the Phase 1 thread vector. Three cases, in priority order:
-    #   1. Thread has chunk vectors — use their mean. This is the
+    #   1. Thread has chunk vectors — use their mean, derived from the
+    #      thread's stored sum without reading them (#1356). This is the
     #      canonical seed for already-indexed threads with content.
     #   2. No chunk vectors but a prior threads_vec row exists with
     #      a non-zero embedding — preserve that. Covers chunkless
@@ -1632,14 +1651,13 @@ def _phase1_commit_thread(
     #      zero-vector row from a prior crashed batch. Use the
     #      placeholder zero; Phase 2c will replace it with either
     #      mean-of-new-chunks or the subject fallback.
-    # ``get_phase1_seed_state`` short-circuits with empty/None for
+    # ``get_phase1_seed_state`` short-circuits with None/None for
     # brand-new threads via a cheap PK existence check, so the bulk
-    # case during an initial scan does one PK lookup instead of two
-    # empty reads.
-    existing_chunk_embs, prior_vec = db.get_phase1_seed_state(thread.thread_id)
+    # case during an initial scan does one PK lookup.
+    chunk_mean, prior_vec = db.get_phase1_seed_state(thread.thread_id)
     kept_prior_vector = False
-    if existing_chunk_embs:
-        seed_vector = mean_vector(existing_chunk_embs)
+    if chunk_mean is not None:
+        seed_vector = chunk_mean
     elif prior_vec is not None and any(v != 0.0 for v in prior_vec):
         seed_vector = prior_vec
         kept_prior_vector = True
@@ -1990,9 +2008,8 @@ def _phase2a_collect_chunks(
         # the fallback only takes effect when nothing else committed.
         #
         # ``thread_has_chunks`` is a single-row existence check —
-        # avoids the per-message blob-unpack churn that
-        # ``get_thread_chunk_embeddings`` would impose on chatty
-        # threads where this gate fires for every chunkless arrival.
+        # it reads no chunk vector on chatty threads where this gate
+        # fires for every chunkless arrival.
         has_new_chunks = bool(new_body) or any(plan_new for plan_new in attach_new_chunks)
         # A reparse changes no chunk text or embedding input (that would
         # be a rebuild; docs/architecture.md, "Reparse in place"), so a
@@ -2111,7 +2128,9 @@ def _phase2c_commit_vectors(
             # mirror the old ``_seed_thread_embedding`` logic:
             #   1. Thread now has chunks (this message contributed
             #      some, or earlier messages already had them) → use
-            #      the mean of those chunk vectors.
+            #      the mean of those chunk vectors, derived from the
+            #      thread's chunk-vector sum, which the writes above
+            #      updated in this transaction (#1356).
             #   2. No chunks anywhere on the thread, but Phase 2a
             #      reserved a subject-fallback slot in the embed batch
             #      (blank-body, no-attachment-chunks message — would
@@ -2120,9 +2139,9 @@ def _phase2c_commit_vectors(
             #   3. Neither — leave the placeholder zero in place.
             #      Should not occur in practice; if it does, the next
             #      message on the thread will overwrite via case 1.
-            chunk_embs = db.get_thread_chunk_embeddings(thread.thread_id)
-            if chunk_embs:
-                db.replace_thread_vector(thread.thread_id, mean_vector(chunk_embs))
+            chunk_mean = db.thread_chunk_mean(thread.thread_id)
+            if chunk_mean is not None:
+                db.replace_thread_vector(thread.thread_id, chunk_mean)
             elif state.subject_fallback_offset is not None:
                 db.replace_thread_vector(thread.thread_id, vectors[state.subject_fallback_offset])
             for occurrence_id in state.obsolete_deferrals:
@@ -3333,6 +3352,71 @@ def _run_wal_maintenance(db: Database) -> None:
     _log_storage(db)
 
 
+def _run_vector_sums_backfill(db: Database) -> None:
+    """One bounded batch of the thread vector sums backfill (#1356), an
+    INFO count per batch that filled something, and one line once every
+    thread has its sums. Progress is the rows themselves, so a restart
+    resumes it; a failure is logged by type and retried next tick."""
+    global _vector_sums_backfill_done
+    if _vector_sums_backfill_done:
+        return
+    started = _monotonic()
+    try:
+        filled, rows, remaining = db.fill_missing_thread_vector_sums(
+            max_threads=VECTOR_SUMS_BATCH_THREADS, max_rows=VECTOR_SUMS_BATCH_ROWS
+        )
+    except Exception as e:
+        _streaks[VECTOR_SUMS_BACKFILL].failed()
+        log.error("thread vector sums backfill failed: %s", type(e).__name__)
+        return
+    _streaks[VECTOR_SUMS_BACKFILL].succeeded()
+    if filled:
+        log.info(
+            "thread vector sums backfill: filled=%d vectors_read=%d remaining=%d ms=%d",
+            filled,
+            rows,
+            remaining,
+            (_monotonic() - started) * 1000,
+        )
+    if not remaining:
+        _vector_sums_backfill_done = True
+        log.info("thread vector sums backfill: every thread is filled")
+
+
+def _run_vector_sums_check(db: Database) -> None:
+    """One bounded batch of the thread vector sums check (#1356): the
+    next filled threads' sums recomputed exactly and any that differ
+    repaired, with the thread vector, in one transaction each. One INFO
+    line per batch; a WARNING when a sum was repaired, which means a
+    write missed its sum."""
+    global _vector_sums_check_cursor
+    started = _monotonic()
+    try:
+        checked, repaired, rows, cursor = db.reconcile_thread_vector_sums_batch(
+            after=_vector_sums_check_cursor,
+            max_threads=VECTOR_SUMS_BATCH_THREADS,
+            max_rows=VECTOR_SUMS_BATCH_ROWS,
+        )
+    except Exception as e:
+        _streaks[VECTOR_SUMS_CHECK].failed()
+        log.error("thread vector sums check failed: %s", type(e).__name__)
+        return
+    _streaks[VECTOR_SUMS_CHECK].succeeded()
+    _vector_sums_check_cursor = cursor
+    log.info(
+        "maintenance pass=thread_vector_sums_check ms=%d checked=%d repaired=%d vectors_read=%d",
+        (_monotonic() - started) * 1000,
+        checked,
+        repaired,
+        rows,
+    )
+    if repaired:
+        log.warning(
+            "thread vector sums: repaired %d thread(s) whose running sum differed from a recompute",
+            repaired,
+        )
+
+
 def _run_watch_refresh(
     folder_watches: FolderWatchRefresher,
     db: Database,
@@ -3690,9 +3774,12 @@ def main():
                 sync_completed.clear()
                 _run_watch_refresh(folder_watches, db, queue, skip_trashed=reconciler is not None)
 
+            _run_vector_sums_backfill(db)
+
             now = time.monotonic()
             if now - last_reconcile >= reconciler_config.sweep_interval_secs:
                 _run_periodic_reconcile(reconciler, db)
+                _run_vector_sums_check(db)
                 last_reconcile = now
 
             # Recovery sweep: re-enqueue messages on chunkless

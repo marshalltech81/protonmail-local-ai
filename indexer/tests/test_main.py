@@ -2867,7 +2867,7 @@ class TestBatchedInitialIndex:
         assert thread_id is not None
         # Sanity: thread is chunkless but its vector is the subject
         # fallback, not zero.
-        assert not db.get_thread_chunk_embeddings(thread_id), (
+        assert not db.thread_has_chunks(thread_id), (
             "blank-body message must not leave chunks on the thread"
         )
         row = db._conn.execute(

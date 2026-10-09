@@ -1257,6 +1257,8 @@ is still failing.
 | `periodic reconciliation` | `periodic reconciliation failed: <type>` (ERROR) | Every `INDEXER_DELETION_SWEEP_INTERVAL_SECS`, with deletion reconciliation on |
 | `reaped-record prune` | `reaped-record prune failed: <type>` (ERROR) | At startup and with each reconciliation interval |
 | `wal checkpoint` | `wal checkpoint failed: <type>` (ERROR) | At startup and every `INDEXER_WAL_CHECKPOINT_INTERVAL_SECS` (10 min) |
+| `thread vector sums backfill` | `thread vector sums backfill failed: <type>` (ERROR) | Each main-loop tick until every thread's sums are filled (#1356) |
+| `thread vector sums check` | `thread vector sums check failed: <type>` (ERROR) | With each reconciliation interval (#1356) |
 
 The health-file and ingestion-state failures can repeat many times a
 second, so they share the same 20-per-5-minutes budget as the embed
@@ -1379,6 +1381,23 @@ Queue and maintenance (all INFO unless noted):
 - `maintenance pass=watch_refresh ms=<ms> watches=<n>`, after each
   periodic Maildir watch refresh; `watches` is the number of
   directories readable when the watch was last scheduled.
+- `thread vector sums backfill: filled=<n> vectors_read=<n>
+  remaining=<n> ms=<ms>`, after each main-loop batch of the backfill
+  that fills the chunk-vector sums of threads indexed before schema
+  v10 (#1356; `docs/architecture.md`, "Thread vector sums"), and
+  `thread vector sums backfill: every thread is filled` once per start
+  when none is left. `remaining` counts the threads still to fill;
+  a thread touched by indexing or the reaper first is filled then.
+- `maintenance pass=thread_vector_sums_check ms=<ms> checked=<n>
+  repaired=<n> vectors_read=<n>`, after each reconciliation interval's
+  check of the next threads' sums. `thread vector sums: repaired <n>
+  thread(s) whose running sum differed from a recompute` (WARNING)
+  means a write missed its sum; the thread's sum and vector were
+  recomputed from its chunks in the same pass, so search is correct
+  again, but the cause is a bug worth reporting with the log lines
+  around it. `thread vector sums: an unreadable row is recomputed` or
+  `a running sum disagreed with its chunks and is recomputed`
+  (WARNING) report the same repair when a write finds it.
 
 WAL and storage, after each WAL maintenance pass (at startup and every
 `INDEXER_WAL_CHECKPOINT_INTERVAL_SECS`, 10 minutes by default):

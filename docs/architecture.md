@@ -587,7 +587,8 @@ The indexer writes a thread in two phases. **Phase 1** commits the
 thread row, `message_thread_map` entry, and `indexed_files` row in a
 single `upsert_thread` call, with a seed thread vector chosen from a
 three-case priority chain (chunks-mean of any pre-existing chunks,
-preserved non-zero prior `threads_vec` row, or a placeholder zero).
+derived from the thread's chunk-vector sum, preserved non-zero prior
+`threads_vec` row, or a placeholder zero).
 Threading state is durable at this point so the next message in the
 batch sees this thread when computing its own assignment. **Phase 2c**
 then commits the body chunks (`message_chunks` + `message_chunks_fts`
@@ -611,6 +612,66 @@ seed for a brand-new thread before Phase 2c lands real chunk embeddings
 — is preserved unchanged; dividing by zero would NaN-poison the row.
 The storage invariant is end-to-end so cosine ranking does not depend
 on per-row magnitude.
+
+### Thread vector sums
+
+A thread's vector is the mean of its chunk vectors, and it is derived
+without reading them (#1356). `thread_vector_sums` keeps, per thread,
+the exact sum `S` of the stored chunk vectors (the `message_chunks`
+rows with that `thread_id` that have a `message_chunks_vec` row) and
+their count. Each component is an integer in units of 2⁻¹⁴⁹, the
+smallest float32 subnormal: every stored float32 value is a whole
+number of those units, so the sums are exact and never drift, whatever
+order the writes come in (`indexer/src/vector_sums.py`).
+
+- **Updates.** Every write of chunk vectors applies `S += new − old` and
+  the count change in its own transaction: `replace_message_chunks`
+  (a slice's inserted and deleted chunks; a deleted chunk counts
+  against its own row's thread) and `_delete_chunks_for_message` (a
+  reap's removed messages). Deleting a whole thread drops its row. A
+  new thread starts with an empty sum. Moving a message to another
+  thread in `message_thread_map` does not move its chunk rows, so it
+  changes no sum. A write that changes no chunk reads no vector.
+- **Derived vector.** One rule, used by Phase 1, Phase 2c, the reaper
+  and the check: each component of the mean, `S_i / (count · 2¹⁴⁹)`,
+  is the exact quotient rounded once to float64 (ties to even), then
+  the vector is L2-normalized in float64 and stored as float32 (round
+  to nearest, ties to even). A thread with no chunk vectors keeps its
+  chunkless fallback (the prior vector or the subject embedding).
+  Phase 1's seed, Phase 2c's mean and the reaper's survivor mean read
+  no chunk vector of the thread; the reaper subtracts the reaped
+  messages' vectors and derives the survivors' mean in the reap
+  transaction.
+- **Inline fill.** A thread from before schema v10 has no row. The first
+  write or read that touches it computes its sum and count from its
+  chunk vectors in that transaction: one thread-wide read in the
+  thread's lifetime.
+- **Backfill.** Each main-loop tick fills up to 50 threads without a
+  row, stopping once 2,000 chunk vectors were read (a thread is read
+  whole), one transaction per thread. Progress is the rows themselves,
+  so an interrupted sweep resumes. Each batch that fills something logs
+  `thread vector sums backfill: filled=<n> vectors_read=<n>
+  remaining=<n>`, and the sweep logs once when every thread is filled.
+- **Check.** Every reconciliation interval
+  (`INDEXER_DELETION_SWEEP_INTERVAL_SECS`, in archive mode too), the
+  next filled threads (same bounds, in `thread_id` order, wrapping) are
+  recomputed exactly from their chunk vectors and compared with the
+  stored row. One that differs (or cannot be read) is repaired, with
+  its thread vector, in one transaction, and a WARNING counts the
+  repairs: a repair means some write missed its sum.
+- **Encoding** (`encoding_version` 1). An all-zero sum is the empty
+  blob; otherwise each component is `varint(k)`, `varint(n)` and `n`
+  bytes of `m` (signed big-endian), where the component is `m · 2ᵏ`
+  with `m` odd. Measured in the indexer image (Linux) on synthetic
+  unit vectors, plain timing: a row is about 22 KB for one vector,
+  27 KB for 100 and 29.5 KB for 1,000 or the part cap's 9,990 (a
+  stored thread vector is 16 KB), so the table adds about 1.4–1.8 times
+  the size of `threads_vec`. Converting one stored vector takes
+  0.2 ms, adding it 0.1 ms, and encoding, decoding or deriving the
+  thread vector under 1 ms each. On a 9,990-chunk thread a
+  continuation pass's slice write and thread mean took 4.8 ms, against
+  2.8 s for one thread-wide read and mean before (each pass did two);
+  the one-time inline fill of such a thread took 5.3 s.
 
 The stored `body_text` on `threads` still feeds FTS5 over the full
 accumulated thread content (users legitimately search quoted text and
@@ -2093,8 +2154,9 @@ in the seconds.
   since-refreshed copy do not survive. A payload settles once, so this
   stays linear. A pending occurrence gets one cache read per pass, and one
   deferred again with its mark already written is not rewritten. Every
-  pass still recomputes the thread vector from all of the thread's
-  chunk vectors in its commit. An `EXTRACTOR_VERSIONS`
+  pass updates the thread vector in its commit from the thread's
+  chunk-vector sum (see *Thread vector sums*), reading no chunk vector
+  of the thread. An `EXTRACTOR_VERSIONS`
   bump clears `text_complete` on exactly its occurrences, which makes
   them pending again. The startup sweep does the same for every other
   refresh class: it clears `text_complete` to NULL as it finds them, in
@@ -2154,9 +2216,10 @@ attachments still finishes in one pass.
 
 The budget spreads a large message's work over passes, with other mail
 between them, and each continuation pass replays part of the message:
-it parses the whole file, reads each pending occurrence's cache row once,
-chunks the body and reads every chunk vector of the thread twice (the
-Phase 1 seed and the Phase 2c mean). The whole path, budgeted against
+it parses the whole file, reads each pending occurrence's cache row once
+and chunks the body. Before #1356 it also read every chunk vector of
+the thread twice (the Phase 1 seed and the Phase 2c mean); the table
+below was measured then. The whole path, budgeted against
 unbudgeted (one pass), measured in the indexer image with the real
 extractors, a stub embedder (embedding cost excluded), synthetic
 messages with realistic text (one chunk of about 40 or 430 words per
@@ -2168,11 +2231,13 @@ part) and plain timing:
 | 8,500 attached-email parts, 45.2 MB (near the 50 MB parse cap) | 549 s | 889 s | 133 | 1.62 | 6.6 s, 0.43 s, under 0.01 s, 8,514 rows (1.2 s) |
 | 400 one-page scanned PDFs, 24.6 MB (OCR, five launches each) | 199 s | 229 s | 40 | 1.15 | 5.7 s, 0.21 s, under 0.01 s, 420 rows (0.02 s) |
 
-Resolved occurrences cost a pass nothing; what remains is the re-parse,
-one cache read per pending occurrence and the thread-wide vector reads,
-which grow with the parts already resolved (up to about 20,000 rows on
-the last pass at the part cap). Removing them (staged payloads and an
-exact incremental thread vector) is #1356.
+Resolved occurrences cost a pass nothing. The thread-wide vector reads,
+which grew with the parts already resolved (up to about 20,000 rows on
+the last pass at the part cap), are gone (#1356, *Thread vector sums*):
+a continuation pass at the part cap now spends about 5 ms on its
+thread vector instead of about 2.8 s per read. What remains is the
+re-parse and one cache read per pending occurrence; removing them
+(staged payloads) is the rest of #1356.
 
 ### Cascade on message removal
 
@@ -2331,6 +2396,7 @@ already indexed without embedding calls (see *Reparse in place*).
 | Version | Migration | Change |
 |---|---|---|
 | 0 | (initial schema) | First deployed schema (2026-10-03). |
+| 10 | `0010_thread_vector_sums.sql` | `thread_vector_sums` (#1356; see *Thread vector sums*): each thread's exact chunk-vector sum and count, so the thread vector is derived without reading every chunk vector. The migration writes no row: the first write that touches a thread fills its row, and the backfill sweep fills the rest in bounded batches. Nothing is re-parsed or re-embedded. |
 | 9 | `0009_attachment_extraction_deferral.sql` | `attachments.extraction_deferred_at` (#1236; see *Per-message extraction budget*): when the budget deferred the occurrence's extraction to a later pass, NULL otherwise, with the partial index `idx_attachments_deferred` on `(claimant_id, attachment_id)` over the deferred rows (the MCP server's per-chunk flag reads it). No message was deferred before it, so every row starts NULL and no reparse is queued. |
 | 8 | `0008_unknown_sent_dates.sql` | Unknown send dates (#1080; see *Message time*): `messages` is rebuilt with a nullable `sent_at`, `sent_at_status` (`parsed` / `missing` / `invalid`, NULL until assessed) and `first_indexed_at`, and `effective_at` becomes `COALESCE(occurred_at, sent_at, first_indexed_at)`. Every existing value is kept, the participant rows are copied aside and back in the same transaction, and the migration queues a reparse, which stores an unknown date as NULL and moves the old fallback to `first_indexed_at` without embedding calls. Until the reparse reaches a message without a delivery date, a date bound counts it as indeterminate. |
 | 7 | `0007_operator_identity.sql` | `operator_addresses` and `operator_identity` (#824; see *Operator identity*), seeded `unconfigured` with no addresses until the indexer's next start loads `config/identity.toml`. No per-message column, so no reparse is queued. |
@@ -2607,7 +2673,8 @@ headers.
 
 - **Phase 1 (per message)**: parse → thread → `upsert_thread` with a
   seed thread vector chosen by a three-case priority chain:
-  1. Thread has chunk vectors → `mean(chunks)`. Canonical seed for
+  1. Thread has chunk vectors → their mean, derived from the thread's
+     chunk-vector sum (see *Thread vector sums*). Canonical seed for
      already-indexed threads with content.
   2. No chunks but a prior `threads_vec` row exists with a non-zero
      embedding → preserve that. Covers chunkless threads whose vector
