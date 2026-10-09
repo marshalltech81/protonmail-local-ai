@@ -1550,11 +1550,16 @@ no longer imports pytesseract or pillow-heif for images. A
 be read) crosses as a `C` frame, and the parent logs and counts it as
 before (`ocr_capped_images`); the probe's exception type stays in the
 child. Any other degradation recorded in the child crosses as `N`
-frames like every child module's (#1314). The child's text is cut at 10,000,000 characters
-(`image_text_chars`, an extractor cap) so its output, read whole by the
-parent, has a fixed bound (40 MiB plus 1 MiB of frames); the indexer
-keeps at most `INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS` (2,000,000 by
-default) anyway. An error in the child (`DecompressionBombError`,
+frames like every child module's (#1314). The child strips the
+joined text, as the dispatcher does, and then cuts it at 10,000,000
+characters (`image_text_chars`, an extractor cap) so its output, read
+whole by the parent, has a fixed bound (40 MiB plus 1 MiB of frames);
+the indexer keeps at most `INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS`
+(2,000,000 by default) anyway.
+The version stays `image@3` (owner exception, 2026-10-08): a row cached
+before this change may hold more text when the stripped OCR output
+exceeds 10,000,000 characters and the character cap is off or above
+10,000,000. An error in the child (`DecompressionBombError`,
 `TesseractError`, `RuntimeError` for a Tesseract timeout, its own
 `MemoryError` or `RecursionError`) is recorded `failed` under its type
 name; in process a `MemoryError` or `RecursionError` was host

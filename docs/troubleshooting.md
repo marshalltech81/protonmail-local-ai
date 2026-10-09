@@ -1649,9 +1649,9 @@ only, never filenames or text (`make logs`):
   - `xls_sheets`, `xls_expanded_cells`, `xls_text_chars`: the same walk
     over a legacy `.xls` stopped at 1,024 sheets or at the cell or text
     budget above (#935).
-  - `image_text_chars`: an image's OCR text passed 10,000,000
-    characters; the text is cut there and no later TIFF frame is read
-    (#1292).
+  - `image_text_chars`: an image's OCR text, stripped of leading and
+    trailing whitespace, passed 10,000,000 characters; the text is cut
+    there and no later TIFF frame is read (#1292).
   - `doc_output_bytes`: catdoc wrote more for a legacy `.doc` than
     four bytes per character of `INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS`,
     or than 40 MiB when that is larger or disabled (#1308), counted

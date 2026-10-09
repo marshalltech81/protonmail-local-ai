@@ -195,6 +195,120 @@ class TestCapFrames:
         assert MARKER not in caplog.text
 
 
+def _main_text(pages: list[str], max_extracted_chars: int | None) -> str | None:
+    """What main's in-process path stored for these OCR pages: the
+    extractor joined them, the dispatcher stripped and cut the result."""
+    cleaned = "\n\n".join(pages).strip()
+    if not cleaned:
+        return None
+    return cleaned if max_extracted_chars is None else cleaned[:max_extracted_chars]
+
+
+def _stub_pages(monkeypatch, pages: list[str]) -> list[int]:
+    """Make Tesseract return ``pages`` in order; returns its call log."""
+    from src.extractors import image_child
+
+    calls: list[int] = []
+
+    def ocr(*_a, **_k):
+        calls.append(1)
+        return pages[len(calls) - 1]
+
+    monkeypatch.setattr(image_child.pytesseract, "image_to_string", ocr)
+    return calls
+
+
+# OCR page outputs: whitespace runs at either end and inside, pages that
+# are only whitespace, empty pages between separators, and outputs over
+# the child's budget (patched to 40 characters below), with and without
+# whitespace that stripping removes.
+_BUDGET = 40
+_SHAPES = {
+    "plain": ["abc"],
+    "leading-whitespace": ["   \n\n abc"],
+    "trailing-whitespace": ["abc \n\n  "],
+    "interior-runs": ["a   b", "\n\n\n", "c"],
+    "whitespace-only-pages": [" ", "\n", "x", "  "],
+    "all-whitespace": ["  ", "\n"],
+    "empty-pages-between-separators": ["a", "", "b"],
+    "raw-over-stripped-under": [" " * 100 + "abc", "def" + " " * 100],
+    "whitespace-page-after-text-over-raw": ["abc", " " * 100, "def"],
+    "exactly-the-budget": ["x" * _BUDGET],
+    "over-in-one-page": ["   " + "x" * 50],
+    "over-across-pages": ["x" * 30, "y" * 30, "z" * 30],
+    "over-after-whitespace-pages": [" " * 50, "x" * 30, " " * 50, "y" * 30],
+}
+
+
+class TestTextBudgetAfterStrip:
+    """Owner decision 2026-10-08 on #1325: the child strips the joined
+    OCR text, as the dispatcher does, before its 10,000,000-character
+    budget applies, so any image whose stripped text is within the
+    budget stores what main stored, whatever
+    ``INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS`` is; past it the text is
+    the stripped text cut at the budget, reported as a cap."""
+
+    @pytest.fixture(autouse=True)
+    def _fresh_counts(self):
+        extractors.drain_extractor_counts()
+
+    @pytest.mark.parametrize(
+        "cap", [None, 10, _BUDGET, 2_000_000], ids=["off", "low", "at", "default"]
+    )
+    @pytest.mark.parametrize("shape", sorted(_SHAPES))
+    def test_text_is_strip_then_cut(self, shape, cap, monkeypatch):
+        from src.extractors import image_child
+
+        pages = _SHAPES[shape]
+        monkeypatch.setattr(image_child, "_MAX_TEXT_CHARS", _BUDGET)
+        calls = _stub_pages(monkeypatch, pages)
+        result = _extract(_tiff(len(pages)), max_ocr_pages=0, max_extracted_chars=cap)
+
+        stripped = "\n\n".join(pages).strip()
+        # The child cuts the stripped text at its budget; the dispatcher
+        # strips the result again and applies its own cap.
+        reference = stripped[:_BUDGET].strip() or None
+        if reference is not None and cap is not None:
+            reference = reference[:cap]
+        assert result.text == reference
+        over = len(stripped) > _BUDGET
+        if not over:
+            assert result.text == _main_text(pages, cap)
+        assert result.text_complete is (not over and (cap is None or len(stripped) <= cap))
+        counts = extractors.drain_extractor_counts()
+        assert counts["extractor_caps"] == int(over) + int(
+            cap is not None and len(stripped[:_BUDGET].strip()) > cap
+        )
+        # OCR stops after the page whose stripped prefix passed the
+        # budget; otherwise every page is read.
+        prefix = [
+            i for i in range(1, len(pages) + 1) if len("\n\n".join(pages[:i]).strip()) > _BUDGET
+        ]
+        assert len(calls) == (prefix[0] if prefix else len(pages))
+
+    def test_whitespace_past_the_real_budget_is_not_a_cut(self, monkeypatch, caplog):
+        """12,000,000 characters of OCR output whose stripped text is
+        short: identical to main, no cap, with the real budget."""
+        caplog.set_level("DEBUG")
+        pages = [" " * 6_000_000 + "a", "b" + " " * 6_000_000]
+        _stub_pages(monkeypatch, pages)
+        result = _extract(_tiff(2), max_ocr_pages=0, max_extracted_chars=None)
+        assert result.text == _main_text(pages, None) == "a\n\nb"
+        assert result.text_complete is True
+        assert "extractor cap" not in caplog.text
+
+    def test_text_past_the_real_budget_is_cut_and_reported(self, monkeypatch, caplog):
+        caplog.set_level("DEBUG")
+        pages = [" " + "x" * 6_000_000, "y" * 6_000_000, "z"]
+        calls = _stub_pages(monkeypatch, pages)
+        result = _extract(_tiff(3), max_ocr_pages=0, max_extracted_chars=None)
+        assert result.text == ("x" * 6_000_000 + "\n\n" + "y" * 6_000_000)[:10_000_000]
+        assert result.text_complete is False
+        assert len(calls) == 2
+        [line] = [r for r in caplog.records if "extractor cap image_text_chars" in r.getMessage()]
+        assert line.levelno == logging.WARNING
+
+
 class TestProgressFramesInProcess:
     def test_a_progress_frame_follows_each_page(self, monkeypatch):
         """The in-process child writes each frame as the page finishes, as

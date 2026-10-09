@@ -102,7 +102,7 @@ def extract_text(
         if timeout > 0:
             tesseract_kwargs["timeout"] = timeout
         texts: list[str] = []
-        length = 0
+        stripped = _StrippedLength()
         page = 0
         while True:
             # ``exif_transpose`` reads the EXIF Orientation tag and rotates
@@ -110,23 +110,58 @@ def extract_text(
             text = pytesseract.image_to_string(ImageOps.exif_transpose(image), **tesseract_kwargs)
             if on_progress is not None:
                 on_progress()
-            length += len(text) + (len(_SEPARATOR) if texts else 0)
+            if texts:
+                stripped.add(_SEPARATOR)
+            stripped.add(text)
             texts.append(text)
             page += 1
-            if length > _MAX_TEXT_CHARS:
-                return _SEPARATOR.join(texts)[:_MAX_TEXT_CHARS], [CAP_TEXT]
+            if stripped.length > _MAX_TEXT_CHARS:
+                return _joined(texts)[:_MAX_TEXT_CHARS], [CAP_TEXT]
             if image.format != "TIFF":
                 break
             if page_cap > 0 and page >= page_cap:
                 cap = _probe_past_cap(image, page)
-                return _SEPARATOR.join(texts), [] if cap is None else [cap]
+                return _joined(texts), [] if cap is None else [cap]
             # Seek page by page rather than read ``n_frames``: that walks
             # every image directory in the file before any cap applies.
             try:
                 image.seek(page)
             except EOFError:
                 break
-    return _SEPARATOR.join(texts), []
+    return _joined(texts), []
+
+
+def _joined(texts: list[str]) -> str:
+    """The pages' text as the indexer stores it: joined, then stripped,
+    as the dispatcher strips every result. Stripping before the budget
+    cuts keeps the result equal to the in-process extraction's whenever
+    the stripped text fits the budget (owner decision 2026-10-08, #1325)."""
+    return _SEPARATOR.join(texts).strip()
+
+
+class _StrippedLength:
+    """The length the joined text so far has once stripped, kept as text
+    arrives at the cost of one scan of each piece: from the first
+    non-whitespace character to the end of the last. Text past the
+    budget in it is past the budget in the final stripped text too,
+    whatever later pages add."""
+
+    def __init__(self) -> None:
+        self._offset = 0
+        self._first: int | None = None
+        self._end = 0
+
+    def add(self, text: str) -> None:
+        body = text.strip()
+        if body:
+            if self._first is None:
+                self._first = self._offset + len(text) - len(text.lstrip())
+            self._end = self._offset + len(text.rstrip())
+        self._offset += len(text)
+
+    @property
+    def length(self) -> int:
+        return 0 if self._first is None else self._end - self._first
 
 
 def _probe_past_cap(image: Image.Image, pages_read: int) -> str | None:
