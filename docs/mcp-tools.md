@@ -1304,15 +1304,21 @@ through the flat parameters' inferred mode:
   format version. A cursor issued for another expression, or before
   the version was added, is refused as "issued for different filters".
 - **`leaf_results`:** one entry per `where` leaf, in request order:
-  its `path`, its `id` (or `null`), its `leaf`, how many of the
-  messages the whole expression returns it is `true`, `false` and
-  `indeterminate` of, and for an address leaf `distinct_addresses` and
-  at most 10 `addresses` its own match selects on those messages, most
-  matching messages first (`null` for `body_words`). `address_matches`
-  still reports the flat `sender`, `recipient` and `participant`
-  filters only. The leaf counts take one more statement over the
-  result set, reading each leaf once, and each address leaf one
-  grouped query.
+  its `path`, its `id` (or `null`), its `leaf`, and how many of the
+  messages the query does not reject (`total_matches` plus
+  `indeterminate`, over the whole query, not the page) the leaf on its
+  own is `true`, `false` and `indeterminate` of; the three sum to
+  `total_matches + indeterminate`, so a leaf's `indeterminate` shows
+  which leaf left messages undecided. An address leaf also reports
+  `distinct_addresses` and at most 10 `addresses` its own match selects
+  on the messages the query returns, most matching messages first
+  (`null` for `body_words`). The two populations differ on purpose:
+  the counts are diagnostics that include undecided candidates, while
+  the addresses are mail content and come from returned messages only.
+  `address_matches` still reports the flat `sender`, `recipient` and
+  `participant` filters only. The counts take one more statement,
+  which evaluates each leaf once per message not rejected, and each
+  address leaf takes one grouped query.
 
 **Address matching.** A value that is a full address
 (`jane@example.com`, `Jane <jane@example.com>`) matches by canonical

@@ -1009,11 +1009,14 @@ class AddressMatches:
 @dataclass
 class LeafResult:
     """How one ``where`` leaf (#1088) decided the messages the whole
-    expression returns: ``true`` / ``false`` / ``indeterminate`` count
-    them by the leaf's own value (1, 0, NULL). For an address leaf,
+    expression does not reject (its matches plus the indeterminate
+    ones; owner, 2026-10-08): ``true`` / ``false`` / ``indeterminate``
+    count them by the leaf's own value (1, 0, NULL), so the three sum
+    to ``total_matches + indeterminate``. For an address leaf,
     ``distinct`` and ``addresses`` are the distinct addresses its own
-    match selects on those messages (``AddressMatches``' rule); both
-    ``None`` for ``body_words``."""
+    match selects on the messages the expression returns, the matches
+    only (``AddressMatches``' rule); both ``None`` for
+    ``body_words``."""
 
     path: str
     id: str | None
@@ -1116,11 +1119,11 @@ def _matched_addresses(
 def _leaf_results(
     conn: sqlite3.Connection, where: Sequence[WhereLeaf], where_sql: str, where_params: list
 ) -> list[LeafResult]:
-    """Each ``where`` leaf's result over the messages ``where_sql``
-    selects (the whole expression's matches), on the caller's read
-    transaction: one statement that reads every leaf's own SQL once for
-    the three counts, plus one grouped query per address leaf for its
-    matched addresses."""
+    """Each ``where`` leaf's result (``LeafResult``), on the caller's
+    read transaction: one statement that evaluates every leaf's own SQL
+    once per message ``where_sql`` does not reject (it is 1 or NULL)
+    for the three counts, plus one grouped query per address leaf for
+    its matched addresses on the messages ``where_sql`` returns."""
     params: list = []
     columns = ", ".join(
         f"({LEAVES[w.leaf.name].compile(w.leaf.value, params)}) AS l{i}"
@@ -1129,8 +1132,12 @@ def _leaf_results(
     sums = ", ".join(
         f"TOTAL(l{i} IS 1), TOTAL(l{i} IS 0), TOTAL(l{i} IS NULL)" for i in range(len(where))
     )
+    # The CTE is materialized so each leaf is evaluated once per message
+    # of P: a plain subquery is flattened into the aggregates, which
+    # then evaluate each leaf once per aggregate that reads it.
     counts = conn.execute(
-        f"SELECT {sums} FROM (SELECT {columns} FROM messages m WHERE {where_sql})",  # nosec B608
+        f"WITH p AS MATERIALIZED (SELECT {columns} FROM messages m "  # nosec B608
+        f"WHERE ({where_sql}) IS NOT 0) SELECT {sums} FROM p",
         [*params, *where_params],
     ).fetchone()
     results = []

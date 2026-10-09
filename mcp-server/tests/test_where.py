@@ -40,8 +40,11 @@ from src.lib.predicates import (
 from src.lib.sqlite import Database
 from src.tools.retrieval import register_retrieval_tools
 
+from tests.conftest import _insert_message
+from tests.test_evidence_scope import _finish_threads
 from tests.test_explicit_leaves import db as explicit_db  # noqa: F401 (fixture)
 from tests.test_retrieval import _error, _handlers, _text
+from tests.test_sqlite import _open_built_db_conn
 from tests.test_structured_output import _call, _tools, _wire
 
 MARKER = "SYNTHETIC_WHERE_MARKER"
@@ -310,6 +313,51 @@ class TestDatabase:
         assert (words.true, words.false, words.indeterminate) == (1, 0, 0)
         assert words.distinct is None and words.addresses is None
 
+    def test_counts_cover_the_messages_the_expression_does_not_reject(
+        self,
+        explicit_db,  # noqa: F811
+    ):
+        # Owner decision 2026-10-08 (Option B): the counts cover P, the
+        # matches plus the indeterminate messages. "toN" (To addresses
+        # not assessed, body complete) is left undecided by the address
+        # leaf alone; the body leaf is true of it.
+        page = explicit_db.query_messages(
+            where=normalize_where(
+                _where(
+                    _leaf("address_is", "sam@mail.one.test", role="to", id="to"),
+                    _leaf("body_words", "lunch", id="body"),
+                )
+            ),
+            limit=50,
+        )
+        assert _claimants(page) == ["subto"]
+        assert (page.total_matches, page.indeterminate) == (1, 1)
+        to, body = page.leaf_results
+        assert (to.true, to.false, to.indeterminate) == (1, 0, 1)
+        assert (body.true, body.false, body.indeterminate) == (2, 0, 0)
+        for r in page.leaf_results:
+            assert r.true + r.false + r.indeterminate == page.total_matches + page.indeterminate
+        # Matched addresses come from the returned messages only.
+        assert (to.distinct, to.addresses) == (1, ["sam@mail.one.test"])
+
+    @pytest.mark.parametrize(
+        "items",
+        [
+            [_leaf("display_name_contains", "roe")],
+            [_leaf("address_or_name_contains", "one.test", role="visible_recipient")],
+            [_leaf("domain_is", "one.test"), _leaf("body_words", "budget")],
+            [_leaf("address_contains", "o", role="cc"), _leaf("body_words", "lunch soon")],
+        ],
+    )
+    def test_each_leaf_counts_sum_to_matches_plus_indeterminate(
+        self,
+        explicit_db,  # noqa: F811
+        items,
+    ):
+        page = explicit_db.query_messages(where=normalize_where(_where(*items)), limit=1)
+        for r in page.leaf_results:
+            assert r.true + r.false + r.indeterminate == page.total_matches + page.indeterminate
+
     def test_no_where_no_leaf_results(self, messages_db):
         assert messages_db.query_messages(sender="jane@example.com").leaf_results == []
 
@@ -399,7 +447,7 @@ class TestDatabase:
             _leaf("body_words", "budget"),
         ]
         messages_db.query_messages(where=normalize_where(_where(*items)), limit=1)
-        counts = [s for s in statements if s.startswith("SELECT TOTAL(")]
+        counts = [s for s in statements if "TOTAL(" in s]
         addresses = [s for s in statements if "GROUP BY p.address" in s]
         assert len(counts) == 1
         assert counts[0].count(" AS l") == len(items)
@@ -556,6 +604,83 @@ class TestTool:
         assert MARKER not in caplog.text
         assert MARKER.lower() not in caplog.text
         assert "withheld=['where']" in caplog.text
+
+
+def _corpus(tmp_path, size: int) -> Database:
+    """``size`` synthetic messages: half match both probe leaves, a
+    quarter leave the address leaf undecided (To not assessed), a
+    quarter are rejected (another recipient, To complete)."""
+    conn, path = _open_built_db_conn(tmp_path, f"work-{size}.db")
+    for i in range(size):
+        kind = i % 4
+        _insert_message(
+            conn,
+            message_id=f"w{i}",
+            thread_id=f"t{i}",
+            sent_at=f"2024-01-01T{i // 60 % 24:02d}:{i % 60:02d}:00+00:00",
+            body="budget approved",
+            from_=["a@one.test"],
+            to=["b@two.test" if kind < 2 else "c@three.test"],
+            completeness={"to_addresses_complete": None} if kind == 2 else {},
+        )
+    _finish_threads(conn)
+    conn.close()
+    return Database(str(path))
+
+
+def _probe_leaf_statement(db, monkeypatch, items) -> tuple[dict[str, int], object]:
+    """Each leaf's evaluations inside the leaf-count statement, counted
+    by wrapping its compiled SQL in a non-deterministic SQL function."""
+    statements: list[str] = []
+    calls: dict[tuple[int, str], int] = {}
+    connect = db._connect
+
+    def probe(tag, value):
+        key = (len(statements) - 1, tag)
+        calls[key] = calls.get(key, 0) + 1
+        return value
+
+    def traced():
+        conn = connect()
+        conn.create_function("mcp_probe", 2, probe)
+        # FTS5 runs its own statements ("-- ..."); count against the
+        # top-level statement that started them.
+        conn.set_trace_callback(lambda s: None if s.startswith("-- ") else statements.append(s))
+        return conn
+
+    monkeypatch.setattr(db, "_connect", traced)
+    for name in WHERE_LEAVES:
+        kind = predicates.LEAVES[name]
+
+        def spy(value, params, _original=kind.compile, _name=name):
+            return f"mcp_probe('{_name}', ({_original(value, params)}))"
+
+        monkeypatch.setitem(
+            predicates.LEAVES,
+            name,
+            predicates.LeafKind(kind.name, kind.param, spy, kind.evaluability),
+        )
+    page = db.query_messages(where=normalize_where(_where(*items)), limit=1)
+    [index] = [i for i, s in enumerate(statements) if "TOTAL(" in s]
+    return {tag: n for (i, tag), n in calls.items() if i == index}, page
+
+
+@pytest.mark.parametrize("size", [40, 400])
+def test_leaf_counts_evaluate_each_leaf_a_bounded_number_of_times_per_row(
+    tmp_path, monkeypatch, size
+):
+    # Owner, 2026-10-08: measure the per-row leaf evaluation of the
+    # leaf-count statement (SQLite may flatten the projection into the
+    # aggregates) at two sizes; it must be linear in rows × leaves.
+    db = _corpus(tmp_path, size)
+    items = [_leaf("address_is", "b@two.test", role="to"), _leaf("body_words", "budget")]
+    calls, page = _probe_leaf_statement(db, monkeypatch, items)
+    p = page.total_matches + page.indeterminate
+    assert (page.total_matches, page.indeterminate) == (size // 2, size // 4)
+    # The filter reads each leaf at most once per message scanned, and
+    # the projection once per message of P.
+    assert calls["address_is"] <= size + p
+    assert calls["body_words"] <= size + p
 
 
 def test_database_is_unchanged_without_where(messages_db: Database):

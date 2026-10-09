@@ -799,10 +799,12 @@ superseded entries keep their number and one line.
     mail interleaved ahead of the backlog (#1142). Explicit leaves
     take a typed `where: {all: [...]}` form whose #1087 shape is fixed
     up front; the flat parameters keep their meaning forever (#1088).
-    Each `where` leaf reports its matched addresses as the addresses
-    that leaf's own SQL selects on the messages the whole expression
-    returns; under OR and NOT (#1087) the same rule holds, and a negated
-    leaf reports counts only.
+    Each `where` leaf reports true / false / indeterminate counts of
+    its own value over the messages the whole expression does not
+    reject (matches plus indeterminate), and its matched addresses as
+    the addresses that leaf's own SQL selects on the messages the
+    expression returns; under OR and NOT (#1087) the same rules hold,
+    and a negated leaf reports counts only.
     Bcc counts as a recipient and answers "can't tell" on received
     mail (#1090). Every display name is stored (#1140). Repeated To and
     Cc headers merge; a repeated From marks the sender ambiguous and

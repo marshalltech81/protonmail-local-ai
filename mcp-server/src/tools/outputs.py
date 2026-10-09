@@ -643,12 +643,17 @@ class WhereLeafResult(_Output):
     path: str = Field(description="The leaf's place in the request, e.g. where.all[1].")
     id: str | None = Field(description="The leaf's id as given; null without one.")
     leaf: str
-    true: int = Field(description="Matches this leaf is true of.")
-    false: int = Field(description="Matches this leaf is false of.")
-    indeterminate: int = Field(description="Matches this leaf could not decide.")
+    true: int = Field(
+        description="Of the messages the query does not reject (total_matches plus "
+        "indeterminate), how many this leaf on its own is true of."
+    )
+    false: int = Field(description="Of the same messages, how many this leaf is false of.")
+    indeterminate: int = Field(
+        description="Of the same messages, how many this leaf could not decide."
+    )
     distinct_addresses: int | None = Field(
         description="Address leaves: distinct addresses this leaf matched across every "
-        "match, not just this page. Null for body_words."
+        "match (total_matches only), not just this page. Null for body_words."
     )
     addresses: list[str] | None = Field(
         description=f"Address leaves: the matched addresses, most matching messages first, "
