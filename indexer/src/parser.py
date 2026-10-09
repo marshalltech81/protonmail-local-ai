@@ -56,9 +56,10 @@ log = logging.getLogger("indexer.parser")
 #   (quoted-printable, #1288): its lenient decode is kept, marked
 #   incomplete, and the attachments inside it are walked, though one
 #   whose boundary was lost is missing (review round 13 on #1311);
-# * ``leaf_transport_lossy``: an email carried as a leaf for the ``eml``
-#   extractor in any encoding other than identity or base64: its text
-#   is partial, but the parser never walks a leaf for attachments;
+# * ``leaf_transport_lossy``: a leaf attachment an extractor reads whose
+#   base64 decode lost bytes, or an email carried as a leaf for the
+#   ``eml`` extractor in any encoding other than identity or base64: its
+#   text is partial, but the parser never walks a leaf for attachments;
 # * ``decoded_bytes``: one past ``MAX_DECODED_ATTACHMENT_BYTES``;
 # * ``container_serialize``: a container the generator refuses;
 # * ``body_parts``: text parts past ``MAX_BODY_TEXT_PARTS`` are left out
@@ -1534,17 +1535,24 @@ def _extract_body_and_attachments(
                 transport_lost=transport_lost,
             )
             if (
-                module == "eml"
+                module is not None
                 and not part.is_multipart()
-                and str(part.get("Content-Transfer-Encoding", "")).strip().lower()
-                not in _IDENTITY_ENCODINGS | {"base64"}
+                and (
+                    _decode_lost_bytes(part)
+                    or (
+                        module == "eml"
+                        and str(part.get("Content-Transfer-Encoding", "")).strip().lower()
+                        not in _IDENTITY_ENCODINGS | {"base64"}
+                    )
+                )
             ):
-                # An email carried as a leaf (``application/eml``, or
-                # named ``.eml``) follows the rule for ``message/*``: a
-                # transfer encoding whose loss is not detected (#1288)
-                # keeps its decode, never complete, and is counted
-                # (review round 8 on #1311). Never walked for
-                # attachments, so the manifest stays whole (round 13).
+                # A leaf an extractor reads whose base64 decode lost bytes
+                # (round 14), or an email carried as a leaf
+                # (``application/eml``, or named ``.eml``) in a transfer
+                # encoding whose loss is not detected (#1288; round 8):
+                # its decode is kept, never complete, and counted. A leaf
+                # is never walked for attachments, so the manifest stays
+                # whole (review round 13 on #1311).
                 transport_lost.append(True)
                 caps["leaf_transport_lossy"] += 1
             attachments.append(
@@ -1673,12 +1681,17 @@ def _extract_body_and_attachments(
             decode_lossy.append((len(nodes) - 1, not is_html))
         if (
             walk is not None
-            and part is not msg
-            and any(isinstance(d, DROPPED_HEADER_DEFECTS) for d in part.defects)
+            and not root
+            and (
+                any(isinstance(d, DROPPED_HEADER_DEFECTS) for d in part.defects)
+                or part.get_unixfrom() is not None
+            )
         ):
             # A part with no blank line after its boundary whose text
-            # starts with whitespace loses that line (review round 11;
-            # the message's own headers are checked by the caller).
+            # starts with whitespace loses that line (review round 11),
+            # and one starting with ``From `` loses it as an mbox
+            # envelope (round 14). A message root's headers and envelope
+            # are checked where its section head is rendered.
             header_lost.append((len(nodes) - 1, not is_html))
         fallback: Counter[str] | None = None if walk is None else Counter()
         text = _safe_decode(payload, part.get_content_charset() or "utf-8", fallback)
@@ -1750,8 +1763,10 @@ def _open_nested(
 def _safe_decode(payload: bytes, charset: str, degraded: Counter[str] | None = None) -> str:
     """Decode payload bytes, falling back to utf-8 on unknown charsets.
 
-    ``UnicodeError`` covers codecs that reject ``errors="replace"``
-    (``idna`` raises ``UnicodeError("Unsupported error handling")``).
+    ``ValueError`` covers codecs that reject ``errors="replace"``
+    (``idna`` raises ``UnicodeError("Unsupported error handling")``) and
+    a sender's label holding a NUL, which the codec lookup rejects
+    with a plain ``ValueError`` (review round 14 on #1311).
     ``degraded`` (when given) counts a fallback or a replacement under
     ``CHARSET_DEGRADED``. The text returned is always the default path's;
     a strict decode runs only to detect a replacement, when the lenient
@@ -1760,14 +1775,14 @@ def _safe_decode(payload: bytes, charset: str, degraded: Counter[str] | None = N
     """
     try:
         text = payload.decode(charset, errors="replace")
-    except LookupError, UnicodeError:
+    except LookupError, ValueError:
         if degraded is not None:
             degraded[CHARSET_DEGRADED] += 1
         return payload.decode("utf-8", errors="replace")
     if degraded is not None:
         try:
             payload.decode(charset)
-        except UnicodeError:
+        except ValueError:
             degraded[CHARSET_DEGRADED] += 1
     return text
 

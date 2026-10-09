@@ -1270,3 +1270,35 @@ class TestReviewRound12Rework:
             result.text
             == _HEAD + "\n\n[Attached message, depth 2]\nSubject: inner\n\nBEGIN:VCALENDAR"
         )
+
+
+class TestReviewRound14:
+    def _extract(self, payload: bytes, caplog) -> extractors.ExtractionResult:
+        extractors.drain_extractor_counts()
+        with caplog.at_level(logging.WARNING):
+            result = extract(content_type="message/rfc822", filename="f.eml", payload=payload)
+        assert result.status == STATUS_SUCCESS
+        assert result.text is not None
+        assert MARKER not in caplog.text
+        return result
+
+    def test_a_kept_part_whose_first_line_became_an_envelope_is_a_cut(self, caplog):
+        """A body part that starts with ``From `` before any header loses
+        that line to the parse as an mbox envelope."""
+        part = b"From " + MARKER.encode() + b"\r\nContent-Type: text/plain\r\n\r\nkept words"
+        result = self._extract(_multipart(part), caplog)
+        assert MARKER not in result.text
+        assert result.text_complete is False
+        assert "extractor cap eml_header_lines:" in caplog.text
+
+    def test_such_a_part_set_aside_is_not_counted(self, caplog):
+        html = b"From " + MARKER.encode() + b"\r\nContent-Type: text/html\r\n\r\n<p>x</p>"
+        result = self._extract(_alternative(_PLAIN, html), caplog)
+        assert result.text_complete is True
+        assert "eml_header_lines" not in caplog.text
+
+    def test_a_nul_in_a_body_charset_falls_back(self, caplog):
+        payload = HDR + b'Content-Type: text/plain; charset="utf-8\x00x"\r\n\r\nbody words'
+        result = self._extract(payload, caplog)
+        assert result.text == "Subject: s\nFrom: a@example.test\n\nbody words"
+        assert extractors.drain_extractor_counts()["eml_charsets_degraded"] == 1

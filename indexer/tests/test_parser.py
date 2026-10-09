@@ -5923,6 +5923,55 @@ class TestContainerTransportEncodings:
         assert msg.parse_caps == {}
 
 
+@pytest.mark.parametrize(
+    ("headers", "counted"),
+    [
+        (b"Content-Type: application/eml\r\n", True),
+        (b"Content-Type: text/plain\r\n", True),
+        (b"Content-Type: application/x-unknown-synthetic\r\n", False),
+    ],
+    ids=["eml", "extracted_text", "no_extractor"],
+)
+def test_a_lossy_base64_leaf_an_extractor_reads_is_counted(tmp_path, caplog, headers, counted):
+    """Review round 14 on #1311: a leaf whose base64 decode lost bytes was
+    marked incomplete but not counted, so nothing logged it. Counted when
+    an extractor would read the payload; the attachment list is whole."""
+    caplog.set_level("DEBUG")
+    encoded = base64.encodebytes(_INNER_EMAIL)
+    path = tmp_path / "m.eml"
+    path.write_bytes(
+        _with_attachment(
+            headers + b"Content-Transfer-Encoding: base64\r\n",
+            encoded[:8] + b"!!!!" + encoded[12:],
+            b'Content-Disposition: attachment; filename="f.bin"\r\n'
+            if not counted
+            else _CAP_FILENAME
+            if b"eml" in headers
+            else _TXT_FILENAME,
+        )
+    )
+    msg = parse_email(path)
+    assert msg is not None
+    [attachment] = msg.attachments
+    assert attachment.payload_complete is False
+    assert msg.parse_caps == ({"leaf_transport_lossy": 1} if counted else {})
+    assert msg.attachments_manifest_complete is True
+    assert "SYNTHETIC_TEXT_MARKER" not in caplog.text
+
+
+def test_a_nul_in_a_body_charset_does_not_fail_the_parse(tmp_path):
+    """Review round 14 on #1311: ``bytes.decode`` raises ``ValueError``
+    on a codec name holding a NUL, which failed the whole message; it
+    falls back to UTF-8 like an unknown label."""
+    path = tmp_path / "m.eml"
+    path.write_bytes(
+        _CAP_HEAD + b'Content-Type: text/plain; charset="utf-8\x00x"\r\n\r\nbody words'
+    )
+    msg = parse_email(path)
+    assert msg is not None
+    assert msg.body_text == "body words"
+
+
 def test_a_lossy_attached_email_clears_the_attachment_manifest(tmp_path):
     """Review round 13 on #1311: a base64 quantum replaced where a nested
     attachment's boundary sits loses that attachment from the decoded
