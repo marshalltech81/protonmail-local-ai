@@ -358,6 +358,9 @@ class TestChildSide:
             b"C a\nC b\nT 7\n" + "Zürich".encode()
         )
         assert extractor_child.result_frames("", []) == b"T 0\n"
+        assert extractor_child.result_frames("", ["a"], {"text_lost": 1, "extractor_caps": 2}) == (
+            b"C a\nN text_lost 1\nN extractor_caps 2\nT 0\n"
+        )
         # A lone surrogate cannot be UTF-8: replaced, never a broken body.
         assert extractor_child.result_frames("\ud800", []) == b"T 1\n?"
 
@@ -379,6 +382,10 @@ class TestChildSide:
         )
         mod = _module(extractor_child.MODULES[module])
         text, caps = mod.extract_text(payload)
-        frames = _runner._Frames(frozenset(_cap_names(module)), frozenset(), None)
+        # A real child starts with zero counters.
+        extractors.drain_counters()
+        frames = _runner._Frames(
+            frozenset(_cap_names(module)), extractors.CHILD_DEGRADATION_KEYS, None
+        )
         frames.feed(extractor_child.run(module, payload))
         assert frames.result() == _runner.ChildResult(text, caps, {})
