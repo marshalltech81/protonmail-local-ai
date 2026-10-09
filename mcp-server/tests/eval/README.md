@@ -326,7 +326,11 @@ a two-part question answered, a closure in another thread from
 management, a reopened matter, answers below a signature delimiter, an
 attachment-only due date, a disputed status, a revised due date, a
 phone call with no recorded outcome, an identity decoy, a prompt
-injection) plus the paging, cap, extraction and date boundaries. The
+injection) plus the paging, cap, extraction and date boundaries, and
+in threads 120-124 the claim cases: a document prepared but never sent,
+a transmission shown only by a message in Sent, a receipt explicitly
+acknowledged with later guidance in a different thread from a different
+sender, and a later same-thread reply about something else. The
 held-out variant `marina-counsel-follow-ups` (threads 66-74) asks the
 same about Sasha Ortiz and Emery Vance with different names, wording,
 thread structure and evidence placement.
@@ -344,6 +348,25 @@ actions, each naming its ground-truth `action` with `owner`, `status`,
 `complete` (a claim that nothing was left unread) and `limitations`
 (messages it could not read). Matching a live answer's prose to action
 IDs is a labelling step this harness does not automate.
+
+Per-claim labels (owner decision on #798, 2026-10-08). An action's
+truth may hold `claims`, mapping each claim kind the question or the
+mail makes relevant (`sent`, `received`, `done`) to its supported label
+(`confirmed`, `proposed` or `unverified`) and its proof set: the
+message in Sent for `sent`, only an explicit acknowledgement of that
+transmission for `received`, the completion evidence for `done`, and
+nothing when the label is `unverified`. A kind left out is
+inapplicable. Items and excluded entries may list `claims`
+(`{kind, label, cited}`, `label` null when the prose asserts the claim
+without labelling it). With no claims map in the scenario, every claim
+metric is n/a. Otherwise: claim recall (truth claims emitted, once per
+action and kind), claim precision (emitted claims whose action and kind
+the truth holds, over all emitted, so padding costs precision whatever
+its label), claim labels present and correct (over the matched claims;
+two claims on one action and kind with different labels both count as
+wrong), and confirmed claims supported (every `confirmed` or unlabelled
+claim cites a source from its kind's proof set that the trace read).
+Claim citations join the citation set the checks below read.
 
 Scores (`tests/agent_metrics.py`): action recall and precision (a
 duplicate item for one action, an item for a closed action or one
@@ -389,8 +412,14 @@ date cited, a wrong owner, a closure because the letter went out, the
 injection followed, the decoy merged, a quoted request counted twice,
 the adopted policy counted as outstanding, completeness claimed despite
 the failed extraction, a long message read to page 1, and citations
-kept after the body reads or the attachment passage are dropped. Each
-is caught.
+kept after the body reads or the attachment passage are dropped; and
+for the claims, sent scored as done, receipt inferred from a
+same-thread reply, the prepared consent treated as sent, an unlabelled
+completion, `done: confirmed` on an excluded entry, every claim
+labelled `unverified`, every action padded with three `unverified`
+claims, the unverified receipts left out, conflicting labels on one
+kind, the decoy cited only inside a claim, and the towing amendment
+left with Blair after its handover in another thread. Each is caught.
 
 Layer A, `tests/baseline/test_outstanding_items_baseline.py`, runs in
 `make baseline` and checks on the built index which layers hold each
@@ -398,7 +427,9 @@ decisive passage (see `tests/baseline/README.md`).
 
 **What this case does not prove.** The reference traces are scripted
 from the real tools' output on the built index; they show the scorers
-catch these mistakes, not that any agent avoids them. Two planted facts
+catch these mistakes, not that any agent avoids them; whether a live
+client labels its claims is left to the live run (#1269) and blind
+annotation of its answers (#1270). Two planted facts
 are unreachable through every tool today, and the traces disclose them
 as limitations instead of finding them: Blair's answers below the
 `-- ` signature delimiter (t54.2) and Sasha's update inside a forward

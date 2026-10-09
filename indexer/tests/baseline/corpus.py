@@ -215,6 +215,18 @@ Their words avoid every golden search query's content words, the
 reserved words above and every ``unanswerable`` question's
 ``absent_terms``.
 
+Threads 120-124 add the claim cases to the dev outstanding-items
+scenario ``counsel-outstanding`` (#798), dated June to September 2026.
+In t120 management says a consent is prepared and ready for Jordan to
+send, and no message in Sent carries it; in t121 Jordan's transmission
+to Avery is shown only by a message in Sent; in t122 Blair explicitly
+acknowledges Jordan's transmission (t122.4), and t123, a different
+thread from a different sender, hands the drafting to Avery with a new
+date; in t124 Blair's later reply in the same thread is about
+something else, so it is no acknowledgement. Their words avoid every
+golden search query's words and their stems, the reserved words above
+and every ``unanswerable`` question's ``absent_terms``.
+
 Thread IDs are the root Message-IDs: ``t<NN>.1@baseline.example``.
 """
 
@@ -3055,6 +3067,152 @@ THREADS.update(
                 ME,
                 "Apiary visit notice: Sorrel Bank",
                 _visit_notice("Sorrel Bank", "Tuesday 23 June", "10:00 and 12:00"),
+            ),
+        ],
+    }
+)
+
+
+# --- Outstanding-items claim cases (#798, threads 120-124) ------------------
+
+THREADS.update(
+    {
+        # A document prepared but never sent: no message in Sent carries it.
+        120: [
+            Msg(
+                "INBOX",
+                ny(2026, 8, 25, 10),
+                BLAIR,
+                JORDAN,
+                "Northfield snow-clearing agreement",
+                "Jordan,\n\nBefore I countersign the Northfield Snow Services agreement "
+                "for the winter, I need the directors' signed written consent authorizing "
+                "it. Send it to me when you have it, and I will countersign within two "
+                "business days.\n\nBlair",
+                cc=MORGAN,
+            ),
+            Msg(
+                "INBOX",
+                ny(2026, 9, 2, 15),
+                MORGAN,
+                JORDAN,
+                "Re: Northfield snow-clearing agreement",
+                "Jordan,\n\nAll five directors have signed the written consent for the "
+                "Northfield agreement. I have prepared it as one PDF in the shared "
+                "drive, ready for you to send to Blair.\n\nMorgan",
+            ),
+        ],
+        # Transmission shown only by a message in Sent; counsel never
+        # acknowledges it.
+        121: [
+            Msg(
+                "INBOX",
+                ny(2026, 7, 14, 11),
+                AVERY,
+                JORDAN,
+                "Balcony railing guarantee",
+                "Jordan,\n\nTo decide whether the association can make Tillman Ironworks "
+                "replace the loose balcony railings at its own expense, I need the Tillman "
+                "guarantee and the site photos Morgan took in June. Send me both and I "
+                "will give you my advice within ten days of getting them.\n\nAvery",
+            ),
+            Msg(
+                "Sent",
+                ny(2026, 7, 16, 8),
+                JORDAN,
+                AVERY,
+                "Re: Balcony railing guarantee",
+                "Avery,\n\nThe Tillman guarantee and Morgan's June site photos are now "
+                "in the shared drive folder you set up for the railings.\n\nJordan",
+            ),
+        ],
+        # Jordan's part sent and explicitly acknowledged (t122.4); the
+        # drafting is later handed to another attorney in another thread
+        # (t123.1).
+        122: [
+            Msg(
+                "Sent",
+                ny(2026, 6, 8),
+                JORDAN,
+                BLAIR,
+                "Towing policy for the visitor spaces",
+                "Blair,\n\nThe directors want the towing policy to cover the visitor "
+                "spaces. Can you draft the amendment?\n\nJordan",
+            ),
+            Msg(
+                "INBOX",
+                ny(2026, 6, 10, 14),
+                BLAIR,
+                JORDAN,
+                "Re: Towing policy for the visitor spaces",
+                "Jordan,\n\nYes. Send me photos of the current signs at each visitor "
+                "space, and I will draft the amendment within two weeks of getting "
+                "them.\n\nBlair",
+            ),
+            Msg(
+                "Sent",
+                ny(2026, 6, 15),
+                JORDAN,
+                BLAIR,
+                "Re: Towing policy for the visitor spaces",
+                "Blair,\n\nThe photos of the signs at all six visitor spaces are in the "
+                "shared drive folder for the towing policy.\n\nJordan",
+            ),
+            Msg(
+                "INBOX",
+                ny(2026, 6, 16, 9),
+                BLAIR,
+                JORDAN,
+                "Re: Towing policy for the visitor spaces",
+                "Jordan,\n\nI have the six sign photos, thank you. I will begin the "
+                "amendment.\n\nBlair",
+            ),
+        ],
+        # Later guidance in a different thread, from a different sender.
+        123: [
+            Msg(
+                "INBOX",
+                ny(2026, 9, 21, 16),
+                AVERY,
+                JORDAN,
+                "Visitor parking rules",
+                "Jordan,\n\nBlair is away until December, so I took over the "
+                "towing amendment for the visitor spaces, with Blair's notes. You will "
+                "get my draft by October 20.\n\nAvery",
+                cc=BLAIR,
+            ),
+        ],
+        # An unrelated later reply in the same thread, which is no
+        # acknowledgement of the transmission before it.
+        124: [
+            Msg(
+                "INBOX",
+                ny(2026, 8, 4, 10),
+                BLAIR,
+                JORDAN,
+                "Saint Brendan's overflow parking lease",
+                "Jordan,\n\nThe overflow parking lease with Saint Brendan's ends in "
+                "November. Send me the signed copy of the current lease so I can review "
+                "the renewal terms before you negotiate.\n\nBlair",
+            ),
+            Msg(
+                "Sent",
+                ny(2026, 8, 6, 8),
+                JORDAN,
+                BLAIR,
+                "Re: Saint Brendan's overflow parking lease",
+                "Blair,\n\nThe signed copy of the current Saint Brendan's lease is in the "
+                "shared drive folder for parking.\n\nJordan",
+            ),
+            Msg(
+                "INBOX",
+                ny(2026, 8, 20, 12),
+                BLAIR,
+                JORDAN,
+                "Re: Saint Brendan's overflow parking lease",
+                "Jordan,\n\nA scheduling note while I have you: our office is closed on "
+                "September 7 for the holiday, and anything urgent that week should go to "
+                "Quinn Avila.\n\nBlair",
             ),
         ],
     }

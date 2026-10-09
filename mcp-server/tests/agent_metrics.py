@@ -51,8 +51,10 @@ synthetic mailbox) and a trace of the calls an agent made, score
   accuracy, supported closures and deadlines, conclusion citation
   support and required evidence coverage (both counting only sources a
   result returned the content of, ``_content_reads``), forbidden sources
-  avoided and
-  completeness-claim truthfulness (``_score_outstanding``).
+  avoided,
+  completeness-claim truthfulness, and, where the truth holds per-claim
+  labels, claim recall, precision, labels present and correct, and
+  confirmed claims supported (``_score_outstanding``, ``_score_claims``).
 
 Nothing here judges whether the answer's prose is right: answer quality
 is graded by hand (``tests/eval/README.md``). A valid citation shows
@@ -76,7 +78,7 @@ import hashlib
 import json
 import re
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -137,6 +139,21 @@ def is_held_out(scenario_id: str) -> bool:
 
 
 @dataclass(frozen=True)
+class ClaimTruth:
+    """The supported label of one claim kind on an action (#798).
+
+    ``label`` is ``confirmed``, ``proposed`` or ``unverified``.
+    ``sources`` is the kind's proof set: for ``sent`` the message in
+    Sent, for ``received`` only an explicit acknowledgement of that
+    transmission, for ``done`` the completion evidence; empty when the
+    label is ``unverified``.
+    """
+
+    label: str
+    sources: list[str]
+
+
+@dataclass(frozen=True)
 class OutstandingAction:
     """One next action in an outstanding-items ground truth (#798).
 
@@ -148,7 +165,10 @@ class OutstandingAction:
     later message replaced, which never supports it. ``known_loss`` names
     the issue under which the tools cannot return the action's evidence;
     such an action counts as found when the answer lists it or names one
-    of its sources among its limitations.
+    of its sources among its limitations. ``claims`` maps each claim
+    kind (``sent``, ``received``, ``done``) the question or the mail
+    makes relevant to its truth; a kind it omits is inapplicable, and
+    ``None`` means the action has no claims map.
     """
 
     id: str
@@ -158,6 +178,7 @@ class OutstandingAction:
     required_sources: list[str]
     superseded_sources: list[str] = field(default_factory=list)
     known_loss: str | None = None
+    claims: dict[str, ClaimTruth] | None = None
 
     @property
     def outstanding(self) -> bool:
@@ -249,6 +270,11 @@ class AgentScore:
     forbidden_sources_avoided: bool | None = None
     citations_consistent: bool | None = None
     completeness_claim_truthful: bool | None = None
+    claim_recall: float | None = None
+    claim_precision: float | None = None
+    claim_labels_present: float | None = None
+    claim_labels_correct: float | None = None
+    confirmed_claims_supported: bool | None = None
 
     @property
     def failures(self) -> list[str]:
@@ -267,6 +293,7 @@ class AgentScore:
             "forbidden_sources_avoided",
             "completeness_claim_truthful",
             "citations_consistent",
+            "confirmed_claims_supported",
         ):
             if getattr(self, name) is False:
                 failed.append(name)
@@ -283,6 +310,10 @@ class AgentScore:
             "status_accuracy",
             "conclusion_citation_support",
             "required_evidence_coverage",
+            "claim_recall",
+            "claim_precision",
+            "claim_labels_present",
+            "claim_labels_correct",
         ):
             value = getattr(self, name)
             if value is not None and value < 1.0:
@@ -529,8 +560,9 @@ def _score_outstanding(
     ``action`` and the IDs it ``cited``; items also give ``owner``,
     ``status`` and ``due``. ``complete`` is the answer's claim that
     nothing was left unread, and ``limitations`` names the messages it
-    could not read. A cited or named ID counts as the message a tool
-    result returned it with; anything else names nothing.
+    could not read. Each entry may list ``claims`` (``_score_claims``).
+    A cited or named ID counts as the message a tool result returned it
+    with; anything else names nothing.
     """
     by_id = {a.id: a for a in truth.actions}
     outstanding = [a for a in truth.actions if a.outstanding]
@@ -615,7 +647,12 @@ def _score_outstanding(
     else:
         truthful = blockers <= limitations
 
+    claims: dict[str, Any] = {}
+    if any(a.claims is not None for a in truth.actions):
+        claims = _score_claims(truth, conclusions, source_read)
+
     return {
+        **claims,
         "action_recall": len(found) / len(outstanding) if outstanding else 1.0,
         "action_precision": len(first_item) / len(items) if items else None,
         "owner_accuracy": (
@@ -637,6 +674,87 @@ def _score_outstanding(
     }
 
 
+def _claims_of(entry: dict) -> list:
+    """A conclusion's ``claims`` list (empty when absent or not a list)."""
+    claims = entry.get("claims", [])
+    return claims if isinstance(claims, list) else []
+
+
+def _citations_of(entry: dict) -> list[str]:
+    """A conclusion's own citations: its ``cited`` list and every one of
+    its claims' ``cited`` lists, so a claim's citations join the union."""
+    cited = list(entry.get("cited", []))
+    for claim in _claims_of(entry):
+        own = claim.get("cited") if isinstance(claim, dict) else None
+        cited += [c for c in own if isinstance(c, str)] if isinstance(own, list) else []
+    return cited
+
+
+def _score_claims(
+    truth: OutstandingTruth,
+    conclusions: list[dict],
+    source_read: Callable[[str, set[str]], bool],
+) -> dict[str, Any]:
+    """The claim scores of the answer's ``conclusions`` (items and
+    excluded entries), each of which may list ``claims``: ``{kind, label,
+    cited}``, ``label`` ``None`` when the prose asserts the claim without
+    labelling it. A claim is keyed by its conclusion's ``action`` and its
+    ``kind``; a malformed one keys nothing the truth holds.
+
+    - ``claim_recall``: truth claims some emitted claim keys, each once;
+    - ``claim_precision``: emitted claims whose key the truth holds, over
+      all emitted claims, so padding costs precision whatever its label;
+    - ``claim_labels_present`` and ``claim_labels_correct``: over the
+      matched claims, a missing label kept apart from a wrong one; two
+      claims on one key with different labels conflict and are both wrong;
+    - ``confirmed_claims_supported``: every ``confirmed`` or unlabelled
+      claim cites a source from its key's proof set that a result
+      returned the content of (``source_read``).
+    """
+    expected = {
+        (a.id, kind): claim for a in truth.actions for kind, claim in (a.claims or {}).items()
+    }
+    # (key, label, cited) per emitted claim; a value of the wrong type is
+    # kept as a string no truth holds, so it matches nothing.
+    emitted: list[tuple[tuple[str, str], str | None, list[str]]] = []
+    for entry in conclusions:
+        for claim in _claims_of(entry):
+            claim = claim if isinstance(claim, dict) else {}
+            kind, label, cited = claim.get("kind"), claim.get("label"), claim.get("cited")
+            emitted.append(
+                (
+                    (str(entry.get("action", "")), kind if isinstance(kind, str) else "?"),
+                    label if label is None or isinstance(label, str) else "?",
+                    [c for c in cited if isinstance(c, str)] if isinstance(cited, list) else [],
+                )
+            )
+    matched = [(key, label) for key, label, _ in emitted if key in expected]
+    labels: dict[tuple[str, str], set[str | None]] = defaultdict(set)
+    for key, label in matched:
+        labels[key].add(label)
+
+    def supported(key: tuple[str, str], cited: list[str]) -> bool:
+        proof = set(expected[key].sources) if key in expected else set()
+        return any(source_read(c, proof) for c in cited)
+
+    return {
+        "claim_recall": len({key for key, _ in matched}) / len(expected) if expected else 1.0,
+        "claim_precision": len(matched) / len(emitted) if emitted else None,
+        "claim_labels_present": (
+            sum(label is not None for _, label in matched) / len(matched) if matched else None
+        ),
+        "claim_labels_correct": (
+            sum(len(labels[key]) == 1 and label == expected[key].label for key, label in matched)
+            / len(matched)
+            if matched
+            else None
+        ),
+        "confirmed_claims_supported": all(
+            supported(key, cited) for key, label, cited in emitted if label in ("confirmed", None)
+        ),
+    }
+
+
 def score_trace(scenario: Scenario, trace: dict) -> AgentScore:
     """Score one trace against its scenario."""
     if trace.get("scenario") != scenario.id:
@@ -645,16 +763,17 @@ def score_trace(scenario: Scenario, trace: dict) -> AgentScore:
     answer: dict = trace.get("answer", {})
     cited: list[str] = answer.get("cited", [])
     # An outstanding-items answer cites in two places: the top-level list
-    # and each conclusion's own list. Invariant: the two are one set, and
-    # every citation metric reads that set (their union), so a citation
-    # in only one place is both a ``citations_consistent`` failure and
-    # still scored (validity, forbidden sources).
+    # and each conclusion's own lists (its ``cited`` and its claims').
+    # Invariant: the two are one set, and every citation metric reads that
+    # set (their union), so a citation in only one place is both a
+    # ``citations_consistent`` failure and still scored (validity,
+    # forbidden sources).
     citations_consistent: bool | None = None
     if scenario.outstanding is not None:
         own = [
             c
             for entry in answer.get("items", []) + answer.get("excluded", [])
-            for c in entry.get("cited", [])
+            for c in _citations_of(entry)
         ]
         citations_consistent = set(cited) == set(own)
         cited = list(dict.fromkeys(cited + own))
@@ -839,6 +958,11 @@ def _aggregates(scores: Sequence[AgentScore]) -> list[str]:
         f"Forbidden sources avoided: {_rate(present('forbidden_sources_avoided'))}",
         f"Completeness claim truthful: {_rate(present('completeness_claim_truthful'))}",
         f"Citations consistent: {_rate(present('citations_consistent'))}",
+        f"Claim recall:        {_mean(present('claim_recall'))}",
+        f"Claim precision:     {_mean(present('claim_precision'))}",
+        f"Claim labels present: {_mean(present('claim_labels_present'))}",
+        f"Claim labels correct: {_mean(present('claim_labels_correct'))}",
+        f"Confirmed claims supported: {_rate(present('confirmed_claims_supported'))}",
         f"Extra calls:         {sum(s.extra_calls for s in scores)}",
         f"Repeated calls:      {sum(s.repeated_calls for s in scores)}",
         f"Clean:               {_rate([not s.failures for s in scores])}",
@@ -1023,6 +1147,8 @@ OWNERS = frozenset(
     }
 )
 STATUSES = frozenset({"open", "waiting", "disputed", "unknown", "closed"})
+CLAIM_KINDS = frozenset({"sent", "received", "done"})
+CLAIM_LABELS = frozenset({"confirmed", "proposed", "unverified"})
 _ISO_DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 
 
@@ -1060,6 +1186,26 @@ def _load_outstanding(sid: str, path: Path) -> tuple[OutstandingTruth, list[str]
         required = ids(row["required_sources"], f"{aid} required_sources")
         if not required:
             raise ValueError(f"{sid}: {aid} needs a required source")
+        claims: dict[str, ClaimTruth] | None = None
+        if "claims" in row:
+            if not isinstance(row["claims"], dict):
+                raise ValueError(f"{sid}: {aid} claims must map a kind to its truth")
+            claims = {}
+            for kind, claim in row["claims"].items():
+                if (
+                    kind not in CLAIM_KINDS
+                    or not isinstance(claim, dict)
+                    or not isinstance(claim.get("label"), str)
+                    or claim["label"] not in CLAIM_LABELS
+                ):
+                    raise ValueError(f"{sid}: {aid} has an unknown claim kind or label")
+                sources = ids(claim.get("sources"), f"{aid} {kind} sources")
+                # Only an unverified claim has no proof.
+                if (claim["label"] == "unverified") is bool(sources):
+                    raise ValueError(
+                        f"{sid}: {aid} {kind} needs sources unless unverified, and none then"
+                    )
+                claims[kind] = ClaimTruth(label=claim["label"], sources=sources)
         actions.append(
             OutstandingAction(
                 id=aid,
@@ -1069,6 +1215,7 @@ def _load_outstanding(sid: str, path: Path) -> tuple[OutstandingTruth, list[str]
                 required_sources=required,
                 superseded_sources=ids(row.get("superseded_sources", []), f"{aid} superseded"),
                 known_loss=row.get("known_loss"),
+                claims=claims,
             )
         )
     if len({a.id for a in actions}) != len(actions):

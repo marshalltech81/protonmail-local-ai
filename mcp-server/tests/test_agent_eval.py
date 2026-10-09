@@ -385,8 +385,13 @@ def _item(answer: dict, action: str) -> dict:
 
 
 def _recite(answer: dict) -> None:
-    """Restate ``cited`` as every conclusion's citations, as the trace does."""
-    answer["cited"] = [c for e in answer["items"] + answer["excluded"] for c in e["cited"]]
+    """Restate ``cited`` as every conclusion's citations, its claims'
+    included, as the trace does."""
+    answer["cited"] = [
+        c
+        for e in answer["items"] + answer["excluded"]
+        for c in e["cited"] + [c for claim in e.get("claims", []) for c in claim["cited"]]
+    ]
 
 
 def _skip_second_blair_page(trace: dict) -> None:
@@ -494,6 +499,95 @@ def _decoy_cited_only_at_top_level(trace: dict) -> None:
     trace["answer"]["cited"].append(decoy["claimant_id"])
 
 
+# Per-claim labels (#798, owner decision 2026-10-08): the claim cases are
+# t120 (prepared, never sent), t121 (sent, shown only in Sent), t122/t123
+# (receipt acknowledged; later guidance in another thread from another
+# sender) and t124 (a later same-thread reply that acknowledges nothing).
+def _claim(answer: dict, action: str, kind: str) -> dict:
+    entries = [e for e in answer["items"] + answer["excluded"] if e["action"] == action]
+    (found,) = [c for e in entries for c in e.get("claims", []) if c["kind"] == kind]
+    return found
+
+
+def _sent_scored_as_done(trace: dict) -> None:
+    _claim(trace["answer"], "c2-railing-advice", "sent")["kind"] = "done"
+
+
+def _receipt_from_a_same_thread_reply(trace: dict) -> None:
+    claim = _claim(trace["answer"], "c4-lease-review", "received")
+    claim.update(label="confirmed", cited=[f"t124.3{_D}#00012403"])
+    _recite(trace["answer"])
+
+
+def _prepared_consent_as_sent(trace: dict) -> None:
+    claim = _claim(trace["answer"], "c1-snow-consent", "sent")
+    claim.update(label="confirmed", cited=[f"t120.2{_D}#00012002"])
+    _recite(trace["answer"])
+
+
+def _unlabelled_completion(trace: dict) -> None:
+    item = _item(trace["answer"], "c2-railing-advice")
+    item["claims"].append({"kind": "done", "label": None, "cited": [f"t121.2{_D}#00012102"]})
+
+
+def _done_confirmed_on_an_excluded_entry(trace: dict) -> None:
+    answer = trace["answer"]
+    item = _item(answer, "c2-railing-advice")
+    answer["items"].remove(item)
+    answer["excluded"].append(
+        {
+            "action": item["action"],
+            "status": "closed",
+            "cited": item["cited"],
+            "claims": [{"kind": "done", "label": "confirmed", "cited": [f"t121.2{_D}#00012102"]}],
+        }
+    )
+
+
+def _blanket_unverified(trace: dict) -> None:
+    for entry in trace["answer"]["items"] + trace["answer"]["excluded"]:
+        for claim in entry.get("claims", []):
+            claim.update(label="unverified", cited=[])
+    _recite(trace["answer"])
+
+
+def _pad_every_action(trace: dict) -> None:
+    for entry in trace["answer"]["items"] + trace["answer"]["excluded"]:
+        entry.setdefault("claims", []).extend(
+            {"kind": kind, "label": "unverified", "cited": []}
+            for kind in ("sent", "received", "done")
+        )
+
+
+def _omit_the_unverified_receipts(trace: dict) -> None:
+    for entry in trace["answer"]["items"]:
+        entry["claims"] = [c for c in entry.get("claims", []) if c["kind"] != "received"]
+
+
+def _conflicting_labels(trace: dict) -> None:
+    item = _item(trace["answer"], "c2-railing-advice")
+    item["claims"].append({"kind": "sent", "label": "unverified", "cited": []})
+
+
+def _decoy_cited_only_in_a_claim(trace: dict) -> None:
+    decoy = {"message_id": f"t60.1{_D}", "claimant_id": f"t60.1{_D}#00006001"}
+    trace["calls"].append(
+        {
+            "tool": "query_messages",
+            "arguments": {"participant": "Avery Cole", "limit": 100},
+            "result": {"has_more": False, "next_cursor": None, "messages": [decoy]},
+        }
+    )
+    _claim(trace["answer"], "c2-railing-advice", "sent")["cited"].append(decoy["claimant_id"])
+
+
+def _towing_left_with_blair(trace: dict) -> None:
+    # Misses the handover to Avery in another thread from another sender.
+    item = _item(trace["answer"], "c3-towing-amendment")
+    item.update(owner="blair_reed", due=None, cited=[f"t122.4{_D}#00012204"])
+    _recite(trace["answer"])
+
+
 def _drop_tool_calls(*tools: str) -> Callable[[dict], None]:
     """Drop every call to ``tools``, keeping the answer's citations."""
 
@@ -552,6 +646,47 @@ _OUTSTANDING_FAILURES: list[tuple[str, Callable[[dict], None], list[str]]] = [
         _decoy_cited_only_at_top_level,
         ["citations_consistent", "forbidden_sources_avoided"],
     ),
+    # Per-claim labels (#798): sent, received and done are claimed
+    # separately, each with its supported label and proof.
+    (
+        "scores-sent-as-done",
+        _sent_scored_as_done,
+        ["claim_recall", "claim_precision", "confirmed_claims_supported"],
+    ),
+    (
+        "infers-receipt-from-a-same-thread-reply",
+        _receipt_from_a_same_thread_reply,
+        ["claim_labels_correct", "confirmed_claims_supported"],
+    ),
+    (
+        "treats-the-prepared-consent-as-sent",
+        _prepared_consent_as_sent,
+        ["claim_labels_correct", "confirmed_claims_supported"],
+    ),
+    (
+        "claims-completion-without-a-label",
+        _unlabelled_completion,
+        ["claim_precision", "confirmed_claims_supported"],
+    ),
+    (
+        "confirms-done-on-an-excluded-entry",
+        _done_confirmed_on_an_excluded_entry,
+        ["closures_supported", "claim_precision", "confirmed_claims_supported"],
+    ),
+    ("labels-every-claim-unverified", _blanket_unverified, ["claim_labels_correct"]),
+    ("pads-every-action-with-unverified-claims", _pad_every_action, ["claim_precision"]),
+    ("omits-the-unverified-receipts", _omit_the_unverified_receipts, ["claim_recall"]),
+    ("conflicting-labels-on-one-kind", _conflicting_labels, ["claim_labels_correct"]),
+    (
+        "cites-the-decoy-only-inside-a-claim",
+        _decoy_cited_only_in_a_claim,
+        ["citations_consistent", "forbidden_sources_avoided"],
+    ),
+    (
+        "leaves-the-towing-amendment-with-blair",
+        _towing_left_with_blair,
+        ["owner_accuracy", "conclusion_citation_support"],
+    ),
 ]
 
 
@@ -567,6 +702,17 @@ def test_outstanding_failures_are_caught(
     change(trace)
     score = score_trace(SCENARIOS["counsel-outstanding"], trace)
     assert set(failures) <= set(score.failures), score.failures
+
+
+def test_the_reference_trace_scores_its_claims() -> None:
+    """The claim metrics are scored, not left ``None``, and are full."""
+    trace = TRACE_BY_SCENARIO["counsel-outstanding"]
+    score = score_trace(SCENARIOS["counsel-outstanding"], trace)
+    assert score.claim_recall == 1.0
+    assert score.claim_precision == 1.0
+    assert score.claim_labels_present == 1.0
+    assert score.claim_labels_correct == 1.0
+    assert score.confirmed_claims_supported is True
 
 
 def test_the_held_out_variant_catches_a_false_closure() -> None:
@@ -843,6 +989,51 @@ class TestLoadScenarios:
     ) -> None:
         with pytest.raises(ValueError, match=row.get("id", "s3")):
             self._outstanding(tmp_path, action, **row)
+
+    def test_claims_are_read_per_kind(self, tmp_path: Path) -> None:
+        claims = {
+            "sent": {"label": "confirmed", "sources": ["t58.3"]},
+            "received": {"label": "unverified", "sources": []},
+        }
+        (s,) = self._outstanding(tmp_path, {"claims": claims})
+        assert s.outstanding is not None
+        (action,) = s.outstanding.actions
+        assert action.claims is not None
+        assert action.claims["sent"].label == "confirmed"
+        assert action.claims["sent"].sources == ["t58.3@baseline.example"]
+        assert action.claims["received"].sources == []
+        # No claims key: the action has no claims map.
+        (s,) = self._outstanding(tmp_path)
+        assert s.outstanding is not None and s.outstanding.actions[0].claims is None
+
+    @pytest.mark.parametrize(
+        "claims",
+        [
+            {"opened": {"label": "confirmed", "sources": ["t58.3"]}},
+            {"sent": {"label": "likely", "sources": ["t58.3"]}},
+            {"sent": {"label": "unverified", "sources": ["t58.3"]}},
+            {"sent": {"label": "confirmed", "sources": []}},
+            {"sent": {"label": "proposed", "sources": []}},
+            {"sent": {"label": "confirmed", "sources": ["t58"]}},
+            {"sent": {"label": "confirmed"}},
+            {"sent": "confirmed"},
+            ["sent"],
+        ],
+        ids=[
+            "unknown-kind",
+            "unknown-label",
+            "unverified-with-sources",
+            "confirmed-without-sources",
+            "proposed-without-sources",
+            "thread-ref-source",
+            "no-sources",
+            "not-a-mapping",
+            "a-list",
+        ],
+    )
+    def test_bad_claims_are_rejected(self, tmp_path: Path, claims: object) -> None:
+        with pytest.raises(ValueError, match="s3"):
+            self._outstanding(tmp_path, {"claims": claims})
 
     def test_duplicate_ids_are_rejected(self, tmp_path: Path) -> None:
         with pytest.raises(ValueError, match="s3"):
