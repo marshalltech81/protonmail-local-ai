@@ -41,7 +41,11 @@ When making changes, follow these priorities in order:
 2. Do not weaken secret handling.
 3. Do not broaden network exposure.
 4. Preserve the current architecture unless a change is explicitly required.
-5. Prefer the smallest safe change over broad refactors.
+5. Prefer the smallest safe change over broad refactors: the smallest
+   change that is accurate, correct and complete (owner, 2026-10-09).
+   Accuracy and completeness set what must be solved; "smallest"
+   applies within that. Cut what the issue did not ask for, never a
+   known gap in what it did ("Accuracy first").
 6. Keep runtime images minimal and non-root.
 7. Preserve thread-level indexing and hybrid search behavior.
 
@@ -723,8 +727,9 @@ under about 80 characters.
   a PR has run long or the fix is large: review rounds, size and cost
   are stated, not reasons to choose. Offer a cut only when it reaches
   the same end state, or when the accurate fix is blocked, and say
-  which. The stop-and-ask points above still apply; they ask the owner
-  to approve the accurate fix. #1311 round 12 recommended accepting a
+  which. The fix is still the smallest change that is accurate,
+  correct and complete (Priorities, item 5). The stop-and-ask points
+  above still apply; they ask the owner to approve the accurate fix. #1311 round 12 recommended accepting a
   stated risk, and the owner chose the full fix.
 - File P3 findings as issues rather than fixing them ahead of
   go-live or P1/P2 work. Exception (owner, 2026-10-02): a small P3
@@ -1147,6 +1152,6 @@ docs/          Architecture, setup, troubleshooting, and tool documentation
 
 ## Bottom Line
 
-Preserve privacy, preserve architecture, preserve secret safety, and make the smallest safe change.
+Preserve privacy, preserve architecture, preserve secret safety, and make the smallest safe change that is accurate, correct and complete.
 
 When unsure, choose the more conservative implementation.
