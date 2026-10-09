@@ -4415,6 +4415,19 @@ class TestRequeueOcrDisabledExtractions:
         return db, queue, paths
 
     @staticmethod
+    def _ocr_disabled_rows(db) -> list[dict]:
+        """Every "OCR disabled" occurrence row the sweep query reads,
+        collected through its predicate (#1289)."""
+        rows: list[dict] = []
+
+        def collect(row) -> bool:
+            rows.append(dict(row))
+            return True
+
+        db.find_ocr_disabled_attachment_filepaths(collect)
+        return rows
+
+    @staticmethod
     def _queued(db) -> dict[str, str]:
         rows = db._conn.execute(
             "SELECT filepath, reason FROM indexing_jobs WHERE status = 'queued'"
@@ -4438,7 +4451,7 @@ class TestRequeueOcrDisabledExtractions:
                 "scan": (self._scanned_pdf(), "application/pdf", "scan.pdf"),
             },
         )
-        rows = db.find_ocr_disabled_attachments()
+        rows = self._ocr_disabled_rows(db)
         assert sorted((r["filepath"], r["extraction_error"]) for r in rows) == sorted(
             [
                 (paths["photo"], OCR_DISABLED_ERROR),
@@ -4470,7 +4483,7 @@ class TestRequeueOcrDisabledExtractions:
         monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
         self._drain(db, queue)
         assert extractor.call_count == 2
-        assert db.find_ocr_disabled_attachments() == []
+        assert self._ocr_disabled_rows(db) == []
 
         # The next startup finds nothing left to re-run.
         assert main._requeue_stale_extractions(db, queue) == 0
@@ -4551,7 +4564,7 @@ class TestRequeueOcrDisabledExtractions:
                 "blob": (self._png(), "application/octet-stream", "blob.bin"),
             },
         )
-        assert [r["filename"] for r in db.find_ocr_disabled_attachments()] == ["photo.png"]
+        assert [r["filename"] for r in self._ocr_disabled_rows(db)] == ["photo.png"]
         queue.enqueue(paths["photo"], REASON_INITIAL_SCAN)
         for _ in range(queue.max_attempts):
             queue.mark_failed(paths["photo"], stage="embed", error="x")

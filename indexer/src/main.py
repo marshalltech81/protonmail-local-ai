@@ -58,7 +58,6 @@ from .attachment_indexing import (
     prepare_attachment_writes,
     record_committed_outcomes,
     reprocess_reruns_extraction,
-    too_large_fits,
 )
 from .chunker import (
     MessageChunk,
@@ -2584,6 +2583,14 @@ def _clear_stale_text_completeness(db: Database) -> int:
     return cleared
 
 
+def _occurrence_reruns_extraction(row: sqlite3.Row) -> bool:
+    """``reprocess_reruns_extraction`` for one sweep row: an occurrence's
+    cached error, row module, MIME type and filename."""
+    return reprocess_reruns_extraction(
+        row["extraction_error"], row["extractor_module"], row["content_type"], row["filename"]
+    )
+
+
 def _requeue_stale_extractions(db: Database, queue: IndexingQueue) -> int:
     """Re-queue messages whose cached attachment extraction came from an
     older version of an extractor (see ``extractors.EXTRACTOR_VERSIONS``),
@@ -2633,18 +2640,8 @@ def _requeue_stale_extractions(db: Database, queue: IndexingQueue) -> int:
     # For a "no extractor" or OLE2 row the predicate is only "this
     # occurrence now selects another module"; the OCR setting plays no
     # part in it.
-    filepaths.update(
-        row["filepath"]
-        for row in db.find_no_extractor_attachments()
-        if reprocess_reruns_extraction(
-            row["extraction_error"], row["extractor_module"], row["content_type"], row["filename"]
-        )
-    )
-    filepaths.update(
-        row["filepath"]
-        for row in db.find_too_large_attachments()
-        if too_large_fits(row["size_bytes"], INDEXER_ATTACHMENT_MAX_BYTES)
-    )
+    filepaths.update(db.find_no_extractor_attachment_filepaths(_occurrence_reruns_extraction))
+    filepaths.update(db.find_fitting_too_large_attachment_filepaths(INDEXER_ATTACHMENT_MAX_BYTES))
     # A cached result with no completeness record (#1285): the reparse
     # the v6 migration queued covers most; this catches the ``-ocr`` rows
     # kept while OCR was off, once it is on.
@@ -2660,16 +2657,7 @@ def _requeue_stale_extractions(db: Database, queue: IndexingQueue) -> int:
     }
     filepaths.update(unrecorded)
     if INDEXER_OCR_ENABLED:
-        filepaths.update(
-            row["filepath"]
-            for row in db.find_ocr_disabled_attachments()
-            if reprocess_reruns_extraction(
-                row["extraction_error"],
-                row["extractor_module"],
-                row["content_type"],
-                row["filename"],
-            )
-        )
+        filepaths.update(db.find_ocr_disabled_attachment_filepaths(_occurrence_reruns_extraction))
     re_enqueued = 0
     re_enqueued_unrecorded = 0
     skipped_dead = 0

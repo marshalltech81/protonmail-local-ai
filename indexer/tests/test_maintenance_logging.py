@@ -530,8 +530,8 @@ class TestReextractSweepDeadSkips:
         monkeypatch.setattr(main, "is_stale_extractor", lambda *_a, **_kw: True)
         monkeypatch.setattr(db, "get_extractor_names", lambda: ["pdf@1"])
         monkeypatch.setattr(db, "find_filepaths_with_extractors", lambda _names: paths)
-        monkeypatch.setattr(db, "find_no_extractor_attachments", lambda: [])
-        monkeypatch.setattr(db, "find_too_large_attachments", lambda: [])
+        monkeypatch.setattr(db, "find_no_extractor_attachment_filepaths", lambda _q: set())
+        monkeypatch.setattr(db, "find_fitting_too_large_attachment_filepaths", lambda _m: set())
 
     def test_dead_lettered_files_are_counted(self, tmp_path, monkeypatch, caplog):
         caplog.set_level(logging.INFO)
