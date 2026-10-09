@@ -785,11 +785,25 @@ class TestParseRecursion:
 
     _SOURCE = SourceMetadata(folder="INBOX", flags=frozenset(), size=0, mtime_ns=None, path="p")
 
-    def test_deep_nesting_raises_fixed_text_error(self, caplog):
+    def test_deep_nesting_raises_fixed_text_error(self, caplog, monkeypatch):
         caplog.set_level(logging.DEBUG)
         raw = nested_rfc822(1000)
+        calls = 0
+        real_parse = email.message_from_bytes
+
+        def _counting_parse(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            return real_parse(*args, **kwargs)
+
+        monkeypatch.setattr(email, "message_from_bytes", _counting_parse)
+        t0 = time.perf_counter()
         with pytest.raises(MessageNestingError) as info:
             parse_email_bytes(raw, self._SOURCE)
+        # Measured plain at about 3 ms; the bound only catches a parse
+        # that does far more work before giving up.
+        assert time.perf_counter() - t0 < 2.0
+        assert calls == 1
         assert str(info.value) == MessageNestingError.TEXT
         assert _NESTING_MARKER not in str(info.value)
         assert _NESTING_MARKER not in caplog.text
