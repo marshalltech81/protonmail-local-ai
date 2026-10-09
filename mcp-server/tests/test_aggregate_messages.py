@@ -510,6 +510,16 @@ class TestTool:
         # The whole description reaches the client (#1011).
         for phrase in ("Trash", "indeterminate", "null", "Each page"):
             assert phrase in tool.description, phrase
+        # Review round 1: paging sends addresses and names to the
+        # calling model, so the description asks for disclosure first
+        # and the smallest page, as query_messages' does.
+        description = " ".join(tool.description.split())
+        for phrase in (
+            "tell the user how many groups (total_groups)",
+            "which may be remote",
+            "Prefer the smallest page",
+        ):
+            assert phrase in description, phrase
         schema = tool.input_schema
         assert schema["properties"]["group_by"]["enum"] == list(AGGREGATE_DIMENSIONS)
         assert "group_by" in schema["required"]
@@ -595,6 +605,23 @@ class TestTool:
         [line] = [r.getMessage() for r in caplog.records if r.name == "mcp.timings"]
         assert "outcome=ok" in line
         assert "'total_matches': 1" in line and "'groups': 1" in line
+
+    def test_a_long_group_value_is_returned_whole(self, fake_server, tmp_path):
+        # Review round 1: the value is the group's identity, used as an
+        # exact address_is / folder follow-up, so it is never cut. The
+        # parser stores addresses up to 998 characters.
+        address = "a" * 700 + "@long.test"
+        conn, path = _open_built_db_conn(tmp_path, "long.db")
+        _insert_message(
+            conn,
+            message_id="m-long",
+            thread_id="t-long",
+            sent_at="2024-01-10T09:00:00+00:00",
+            from_=[address],
+        )
+        conn.close()
+        out = _call(_server(Database(str(path))), "aggregate_messages", group_by="sender_address")
+        assert [g["value"] for g in out["groups"]] == [address]
 
     def test_a_database_error_is_returned_by_type(self, fake_server, agg_db, monkeypatch, caplog):
         def boom(**_):

@@ -1573,8 +1573,10 @@ messages), `first_at` / `last_at` (their earliest and latest effective
 time), `with_attachments` (those with an attachment), `indeterminate`
 (messages in the group the filters could not decide, never counted in
 `messages`) and, for `sender_address`, `display_name` (the display name
-on the group's latest match that has one). A group whose messages are
-all undecided is listed with `messages` 0.
+on the group's latest match that has one, cut at 500 characters with a
+marker). A group whose messages are all undecided is listed with
+`messages` 0. The group value is never cut, so it can be passed back
+as the group's own filter.
 
 The group with value `null` holds the messages with no value on the
 dimension. For the sender dimensions: a message whose
@@ -1587,8 +1589,12 @@ and `month` have one value per message, so their groups sum to
 `total_matches` and their `indeterminate` values to the call's.
 
 Groups come most messages first, then by value, with the `null` group
-last among ties. `total_groups` counts them all; when `has_more` is
-true, call again with the same filters and `group_by` plus `cursor`.
+last among ties. `total_groups` counts them all. Group values and
+display names go to the calling model, which may be remote, so the
+tool description asks the client to tell the user how many groups it
+will read before paging past the first page, and to prefer the
+smallest page that answers (the top groups for a "top N" question).
+To page, call again with the same filters and `group_by` plus `cursor`.
 The cursor is bound to the filters and the dimension, as
 `query_messages`' is. Each page recounts, so mail indexed between
 pages can move a group to another page. One SQL statement answers a

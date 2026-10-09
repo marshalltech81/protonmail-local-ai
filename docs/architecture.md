@@ -1254,10 +1254,12 @@ over at most 16 labels and 253 characters; a longer or deeper
 sender-supplied domain is unclassified without any lookup.
 
 Authority is metadata, never a ranking weight. The MCP server exposes it
-as an `authority_class` filter on `search_emails` and `query_messages`
-(a message outside Spam matches when one of its From senders carries
-the class; a thread when one of its non-Spam messages does) and on
-`find_contact` results, which stay per contact and ignore folders.
+as an `authority_class` filter on `search_emails`, `query_messages`
+and `aggregate_messages` (a message outside Spam matches when one of
+its From senders carries the class; a thread when one of its non-Spam
+messages does), as an `aggregate_messages` grouping dimension with the
+same rule, and on `find_contact` results, which stay per contact and
+ignore folders.
 Filtering removes results without reordering or rescoring the rest.
 
 ### Operator identity

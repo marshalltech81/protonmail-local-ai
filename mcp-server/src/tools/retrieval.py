@@ -1574,8 +1574,12 @@ def register_retrieval_tools(server, db):
         also Spam and senders with no class. A message with several
         From addresses counts in each of their groups.
 
-        Groups are ordered by messages descending, then value. When
-        ``has_more`` is true, call again with the SAME filters and
+        Groups are ordered by messages descending, then value. Group
+        values and display names go to the calling model, which may be
+        remote: before paging past the first page, tell the user how
+        many groups (total_groups) you will read. Prefer the smallest
+        page that answers the question (the top groups for a "top N"
+        question). To page, call again with the SAME filters and
         group_by plus ``cursor`` set to ``next_cursor``. Each page
         recounts, so mail indexed between pages can shift groups.
 
@@ -1666,7 +1670,9 @@ def register_retrieval_tools(server, db):
             next_cursor=page.next_cursor,
             groups=[
                 MessageGroupRow(
-                    value=None if g.value is None else clip(g.value, HEADER_CHAR_LIMIT),
+                    # Never cut: the value is the group's identity and
+                    # the exact follow-up filter (review round 1).
+                    value=g.value,
                     messages=g.messages,
                     threads=g.threads,
                     first_at=g.first_at,
