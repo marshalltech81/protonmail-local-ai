@@ -110,6 +110,29 @@ _MAX_FRAME_LINE = 128
 _TYPE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,99}")
 _COUNT = re.compile(r"[0-9]{1,18}")
 
+# Processes this interpreter has started (#1236): every
+# ``subprocess.Popen``, counted from the audit event it raises, so the
+# count covers the tools started here and the ones a library starts in
+# process (Poppler's ``pdfinfo`` and ``pdftoppm`` and Tesseract for a
+# scanned PDF), whichever library version starts them. The per-message
+# extraction budget (``attachment_indexing.ExtractionBudget``) reads it
+# around each dispatch. Only the ingestion worker starts processes.
+_launches = 0
+
+
+def _count_launch(event: str, _args: tuple) -> None:
+    global _launches
+    if event == "subprocess.Popen":
+        _launches += 1
+
+
+sys.addaudithook(_count_launch)
+
+
+def process_launches() -> int:
+    """Processes started by this interpreter so far (``_launches``)."""
+    return _launches
+
 
 class ToolNotFoundError(Exception):
     """The tool's binary is not installed in this image."""

@@ -50,7 +50,9 @@ from watchdog.utils import UnsupportedLibcError
 
 from .attachment_indexing import (
     AttachmentWritePlan,
+    ExtractionBudget,
     apply_attachment_writes,
+    attachment_occurrence_id,
     attachment_outcomes,
     attachment_outcomes_degraded,
     completeness_unrecorded,
@@ -118,6 +120,7 @@ from .parser import (
 from .queue import (
     ERROR_CLASS_OPERATOR,
     ERROR_CLASS_RETRYABLE,
+    EXTRACTION_DEFERRED_ERROR,
     INTERRUPTED_STAGE,
     PERMISSION_DEFERRED_ERROR,
     REASON_INITIAL_SCAN,
@@ -128,6 +131,7 @@ from .queue import (
     REASON_REPARSE,
     REASON_RESCAN,
     STAGE_EMBED,
+    STAGE_EXTRACT,
     STAGE_PARSE,
     STAGE_TRASHED,
     IndexingQueue,
@@ -1218,6 +1222,28 @@ class _ReparseProgress:
 
 _reparse_progress = _ReparseProgress()
 
+# Whether the last queue heartbeat saw messages continued for deferred
+# attachment extraction (#1236), so the heartbeat that first sees none
+# logs one recovery line.
+_extraction_deferrals_seen = False
+
+
+def _log_extraction_deferral_recovery(extraction_deferred: int) -> None:
+    """With the queue heartbeat: one INFO line once no message waits for
+    deferred attachment extraction after some did (#1236). The deferrals
+    themselves are counted in the attachments line (WARNING) and in the
+    heartbeat's ``extraction_deferred`` bucket. Counts only."""
+    global _extraction_deferrals_seen
+    if extraction_deferred:
+        _extraction_deferrals_seen = True
+        return
+    if _extraction_deferrals_seen:
+        _extraction_deferrals_seen = False
+        log.info(
+            "attachment extraction caught up: no message is waiting for attachments "
+            "deferred by the per-message extraction budget"
+        )
+
 
 def _log_reparse_progress(remaining: int, parked_trashed: int, dead: int) -> None:
     """With the queue heartbeat: one progress line per interval while
@@ -1286,13 +1312,15 @@ def _maybe_log_queue_heartbeat(queue: IndexingQueue) -> None:
     # rate limit withheld since the last heartbeat; the attachment
     # WARNINGs it withheld are in the attachments line instead.
     log.info(
-        "queue: pending=%d retrying=%d deferred_permission=%d parked_trashed=%d dead=%d "
+        "queue: pending=%d retrying=%d deferred_permission=%d parked_trashed=%d "
+        "extraction_deferred=%d dead=%d "
         "oldest_due_age=%ds; deferrals since last heartbeat: parse=%d embed=%d trashed=%d; "
         "suppressed_lines=%d",
         c["pending"],
         c["retrying"],
         c["deferred_permission"],
         c["parked_trashed"],
+        c["extraction_deferred"],
         c["dead"],
         c["oldest_due_age"],
         d[STAGE_PARSE],
@@ -1301,6 +1329,7 @@ def _maybe_log_queue_heartbeat(queue: IndexingQueue) -> None:
         drain_suppressed_lines(),
     )
     _log_reparse_progress(c["reparse"], c["reparse_parked_trashed"], c["reparse_dead"])
+    _log_extraction_deferral_recovery(c["extraction_deferred"])
 
 
 def _steady_state_summary_due(
@@ -1430,6 +1459,10 @@ class _BatchedMsg:
     # thread has no chunks). A reparse then reuses it instead of
     # embedding the subject fallback again (#1078).
     kept_prior_vector: bool = False
+    # Attachments whose extraction the per-message budget deferred this
+    # pass (#1236): Phase 2c then continues the message instead of
+    # marking it succeeded.
+    deferred_attachments: int = 0
     parse_ms: float = 0.0
     thread_ms: float = 0.0
     phase1_ms: float = 0.0
@@ -1732,11 +1765,30 @@ def _phase2a_collect_chunks(
                 if INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS > 0
                 else None
             )
+            # The per-message extraction budget for this pass (#1236).
+            # A continuation (a job deferred at the extract stage) only
+            # resolves the occurrences still pending: one whose result
+            # already applied is served from the cache as it stands.
+            budget = ExtractionBudget()
+            continuation = (
+                state.row["last_stage"] == STAGE_EXTRACT
+                and state.row["last_error"] == EXTRACTION_DEFERRED_ERROR
+            )
+            occurrence_states = db.get_attachment_occurrence_states(msg.claimant_id)
             for occurrence_index, attachment in enumerate(msg.attachments):
                 # Each attachment's extraction is separately bounded
                 # (byte caps, OCR page cap and timeouts), so it is the
                 # unit the stall guard's limit applies to.
                 progress()
+                completed, was_deferred = occurrence_states.get(
+                    attachment_occurrence_id(
+                        claimant_id=msg.claimant_id,
+                        content_hash=attachment.content_hash,
+                        filename=attachment.filename,
+                        occurrence_index=occurrence_index,
+                    ),
+                    (False, False),
+                )
                 # The plan comes back with empty embeddings_by_chunk_id;
                 # the stored-ID diff below picks its new chunks and
                 # Phase 2c fills it from the batched embed result.
@@ -1760,7 +1812,10 @@ def _phase2a_collect_chunks(
                     # restart the stall guard's clock, which stays per
                     # attachment.
                     on_progress=_extraction_heartbeat,
+                    budget=budget,
+                    completed=continuation and completed,
                 )
+                plan.was_deferred = was_deferred
                 stored_attach_ids = db.get_chunk_ids_for_message(
                     msg.claimant_id, attachment_id=attachment.content_hash
                 )
@@ -1796,11 +1851,22 @@ def _phase2a_collect_chunks(
         # Phase 2c, unless another copy of the same bytes in this message
         # fills it: that copy counted the stored chunks as kept and
         # embedded none of them, so it could not restore a cleared slice.
+        # A deferred occurrence keeps the chunks stored for its payload
+        # (#1236): nothing clears that slice this pass, and the plan that
+        # fills it only adds to it.
         filled = {plan.attachment.content_hash for plan in attach_plans if plan.chunks}
+        deferred_payloads = {plan.attachment.content_hash for plan in attach_plans if plan.deferred}
         for plan, stored_attach_ids in zip(attach_plans, attach_stored_ids):
             if plan.chunks:
+                if plan.attachment.content_hash in deferred_payloads:
+                    plan.deletes_missing_chunks = False
                 continue
-            if plan.attachment.content_hash in filled:
+            if plan.deferred:
+                continue
+            if (
+                plan.attachment.content_hash in filled
+                or plan.attachment.content_hash in deferred_payloads
+            ):
                 plan.clears_stale_chunks = False
             else:
                 clears_chunks = clears_chunks or bool(stored_attach_ids)
@@ -1883,6 +1949,7 @@ def _phase2a_collect_chunks(
     state.attach_plans = attach_plans
     state.attach_new_chunks = attach_new_chunks
     state.attach_offsets = attach_offsets
+    state.deferred_attachments = sum(plan.deferred for plan in attach_plans)
     state.chunk_ms = (time.perf_counter() - t0) * 1000
     return True, None
 
@@ -1891,6 +1958,7 @@ def _phase2c_commit_vectors(
     state: _BatchedMsg,
     db: Database,
     vectors: list[list[float]],
+    queue: IndexingQueue,
 ) -> tuple[bool, str | None]:
     """Phase 2c: per-message DB transaction for body + attachments + thread vec.
 
@@ -1898,9 +1966,22 @@ def _phase2c_commit_vectors(
     captured in Phase 2a, then writes everything inside one
     ``with db.transaction()`` block so chunks/vectors/thread-vector
     either all land or all roll back for this message.
+
+    A message with attachments deferred by the per-message extraction
+    budget (#1236) is continued in that same transaction: ``queue.defer``
+    at ``STAGE_EXTRACT``, due at once, so the results, the deferral marks
+    and the continuation commit or roll back together. The caller does
+    not mark it succeeded (``state.deferred_attachments``).
     """
     msg = state.msg
     thread = state.thread
+    filepath = state.row["filepath"]
+    continues = state.deferred_attachments > 0
+    if continues:
+        # The refund commits on its own, so it is made before the
+        # transaction; a failure inside it is then charged once, by
+        # ``mark_failed``.
+        queue.end_attempt(filepath)
 
     body_embs = {
         c.chunk_id: vectors[i] for c, i in zip(state.new_body_chunks, state.new_body_offsets)
@@ -1949,11 +2030,21 @@ def _phase2c_commit_vectors(
                 db.replace_thread_vector(thread.thread_id, mean_vector(chunk_embs))
             elif state.subject_fallback_offset is not None:
                 db.replace_thread_vector(thread.thread_id, vectors[state.subject_fallback_offset])
+            if continues:
+                queue.defer(
+                    filepath,
+                    stage=STAGE_EXTRACT,
+                    error=EXTRACTION_DEFERRED_ERROR,
+                    error_class=ERROR_CLASS_RETRYABLE,
+                    delay_seconds=0,
+                )
     except Exception as e:
         return False, _stage_error(e)
     # Counted once committed, so a message prepared again after an
     # embedder outage is counted once (review round 1 on #884).
     record_committed_outcomes(state.attach_plans)
+    if continues:
+        attachment_outcomes.record_deferred_message()
     return True, None
 
 
@@ -2429,12 +2520,16 @@ def _drain_queue_batched(
         # ---- Phase 2c: per-message vector commits ----
         for entry in survivors:
             t0 = time.perf_counter()
-            ok, err = _phase2c_commit_vectors(entry, db, vectors)
+            ok, err = _phase2c_commit_vectors(entry, db, vectors, queue)
             db_write_ms = (time.perf_counter() - t0) * 1000
             if ok:
-                queue.mark_succeeded(entry.row["filepath"])
-                if entry.row["reason"] == REASON_REPARSE:
-                    _reparse_progress.reparsed += 1
+                # A message with deferred attachments was continued in
+                # its Phase 2c transaction (#1236); it is done only once
+                # a pass defers nothing.
+                if not entry.deferred_attachments:
+                    queue.mark_succeeded(entry.row["filepath"])
+                    if entry.row["reason"] == REASON_REPARSE:
+                        _reparse_progress.reparsed += 1
                 # ``db_write_ms`` aggregates BOTH DB-write phases:
                 # Phase 1's ``upsert_thread`` (recorded as
                 # ``entry.phase1_ms``) plus the Phase 2c per-message
@@ -2630,7 +2725,12 @@ def _requeue_stale_extractions(db: Database, queue: IndexingQueue) -> int:
     (#693). A ``success`` or ``empty`` row with no completeness record
     (cached before schema v6) is re-extracted on reprocess, so its
     messages are re-queued too, except an ``-ocr`` row while OCR is off
-    (``completeness_unrecorded``, #1285).
+    (``completeness_unrecorded``, #1285). A message carrying an
+    occurrence whose extraction the per-message budget deferred (#1236)
+    and no queued job (its continuation was lost: a pass with extraction
+    switched off marked it succeeded) is re-queued, so a deferral is
+    never left behind; a queued continuation is left as it is, and the
+    sweep never clears a deferral mark.
     Like the zero-vector recovery sweep, files already queued or
     dead-lettered are left alone. Skipped when attachment extraction is
     disabled, since the drain would not re-stamp the rows.
@@ -2670,6 +2770,7 @@ def _requeue_stale_extractions(db: Database, queue: IndexingQueue) -> int:
         )
     }
     filepaths.update(unrecorded)
+    filepaths.update(db.find_deferred_extraction_filepaths())
     if INDEXER_OCR_ENABLED:
         filepaths.update(db.find_ocr_disabled_attachment_filepaths(_occurrence_reruns_extraction))
     re_enqueued = 0
@@ -2690,8 +2791,9 @@ def _requeue_stale_extractions(db: Database, queue: IndexingQueue) -> int:
             logging.WARNING if skipped_dead else logging.INFO,
             "re-queued %d message(s) (%d for a missing text-completeness record) whose "
             "attachments were extracted by an older extractor version (%s), skipped "
-            "while OCR was off, had no extractor, or now fit under "
-            "INDEXER_ATTACHMENT_MAX_BYTES; skipped %d dead-lettered "
+            "while OCR was off, had no extractor, now fit under "
+            "INDEXER_ATTACHMENT_MAX_BYTES, or were deferred by the per-message extraction "
+            "budget; skipped %d dead-lettered "
             "(run make requeue-dead to refresh them).",
             re_enqueued,
             re_enqueued_unrecorded,

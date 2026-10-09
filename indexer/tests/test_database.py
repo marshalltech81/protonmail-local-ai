@@ -117,9 +117,9 @@ class TestSchema:
 
     def test_fresh_install_is_stamped_the_current_version(self, db):
         """A fresh install creates the current schema directly and stamps
-        v7 (#824), skipping the migration files."""
-        assert SCHEMA_VERSION == 7
-        assert db._conn.execute("SELECT version FROM schema_version").fetchone()[0] == 7
+        v8 (#1236), skipping the migration files."""
+        assert SCHEMA_VERSION == 8
+        assert db._conn.execute("SELECT version FROM schema_version").fetchone()[0] == 8
 
     def test_fresh_install_has_a_nullable_ocr_pages_skipped_column(self, db):
         """#891: a count, NULL when unknown, with no default."""
@@ -317,7 +317,7 @@ class TestMigrationV1:
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [1, 2, 3, 4, 5, 6, 7]" in caplog.text
+        assert "applied migrations: [1, 2, 3, 4, 5, 6, 7, 8]" in caplog.text
         assert "SYNTHETIC" not in caplog.text
 
     def test_v0_rows_are_carried_over_under_their_stamps_module(self, tmp_path):
@@ -489,9 +489,18 @@ _V6_COLUMNS = (
 )
 
 
+def _v7_from_fresh(db: Database) -> None:
+    """Turn a fresh database into the v7 shape: v7 is the current schema
+    without the occurrence's extraction deferral mark (#1236)."""
+    db._conn.execute("ALTER TABLE attachments DROP COLUMN extraction_deferred_at")
+    db._conn.execute("UPDATE schema_version SET version = 7")
+    db._conn.commit()
+
+
 def _v6_from_fresh(db: Database) -> None:
-    """Turn a fresh database into the v6 shape: v6 is the current schema
+    """Turn a fresh database into the v6 shape: v6 is the v7 schema
     without the operator identity tables (#824)."""
+    _v7_from_fresh(db)
     db._conn.execute("DROP TABLE operator_addresses")
     db._conn.execute("DROP TABLE operator_identity")
     db._conn.execute("UPDATE schema_version SET version = 6")
@@ -556,7 +565,6 @@ class TestMigrationV6:
             assert (
                 migrated._conn.execute("SELECT version FROM schema_version").fetchone()[0]
                 == SCHEMA_VERSION
-                == 7
             )
             assert _schema_shape(migrated._conn) == _schema_shape(fresh._conn)
             occurrence = migrated._conn.execute(
@@ -578,7 +586,7 @@ class TestMigrationV6:
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [6, 7]" in caplog.text
+        assert "applied migrations: [6, 7, 8]" in caplog.text
         assert "SYNTHETIC_V6_MARKER" not in caplog.text
 
     @pytest.mark.parametrize("table, column", [c for c in _V6_COLUMNS if c[1] == "text_complete"])
@@ -594,6 +602,45 @@ class TestMigrationV6:
         cols = {r["name"]: r for r in db._conn.execute(f"PRAGMA table_info({table})")}
         assert cols[column]["dflt_value"] is None
         assert cols[column]["notnull"] == 0
+
+
+class TestMigrationV8:
+    """#1236: v7 -> v8 adds the occurrence's extraction deferral mark,
+    NULL on every existing row, with no reparse."""
+
+    def test_v7_database_migrates_to_the_fresh_v8_shape(self, tmp_path, caplog):
+        caplog.set_level("INFO")
+        db = Database(tmp_path / "v7.db")
+        msg = make_message(message_id="old@x")
+        db.upsert_thread(make_thread(messages=[msg]), FAKE_EMBEDDING)
+        _store_occurrence(db, claimant_id=msg.claimant_id, occurrence="occ-1", attachment_id="h1")
+        db._conn.commit()
+        _v7_from_fresh(db)
+        db.close()
+        migrated = Database(tmp_path / "v7.db")
+        fresh = Database(tmp_path / "fresh.db")
+        try:
+            assert (
+                migrated._conn.execute("SELECT version FROM schema_version").fetchone()[0]
+                == SCHEMA_VERSION
+                == 8
+            )
+            assert _schema_shape(migrated._conn) == _schema_shape(fresh._conn)
+            assert [
+                tuple(r)
+                for r in migrated._conn.execute("SELECT extraction_deferred_at FROM attachments")
+            ] == [(None,)]
+            cols = {r["name"]: r for r in migrated._conn.execute("PRAGMA table_info(attachments)")}
+            col = cols["extraction_deferred_at"]
+            assert (col["type"], col["notnull"], col["dflt_value"]) == ("TEXT", 0, None)
+            assert migrated._conn.execute("SELECT COUNT(*) FROM indexing_jobs").fetchone()[0] == 0
+            assert migrated.get_attachment_occurrence_states(msg.claimant_id) == {
+                "occ-1": (False, False)
+            }
+        finally:
+            migrated.close()
+            fresh.close()
+        assert "applied migrations: [8]" in caplog.text
 
 
 class TestMigrationV7:
@@ -613,7 +660,6 @@ class TestMigrationV7:
             assert (
                 migrated._conn.execute("SELECT version FROM schema_version").fetchone()[0]
                 == SCHEMA_VERSION
-                == 7
             )
             assert _schema_shape(migrated._conn) == _schema_shape(fresh._conn)
             query = "SELECT id, state, address_count, address_digest FROM operator_identity"
@@ -630,7 +676,7 @@ class TestMigrationV7:
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [7]" in caplog.text
+        assert "applied migrations: [7, 8]" in caplog.text
 
 
 class TestAttachmentTextCompleteness:
@@ -737,7 +783,7 @@ class TestMigrationV5:
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [5, 6, 7]" in caplog.text
+        assert "applied migrations: [5, 6, 7, 8]" in caplog.text
 
     @pytest.mark.parametrize("column", [c for c in _V5_COLUMNS if c != "caps_json"])
     def test_the_flag_columns_reject_other_values(self, db, column):
@@ -867,7 +913,7 @@ class TestMigrationV2:
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [2, 3, 4, 5, 6, 7]" in caplog.text
+        assert "applied migrations: [2, 3, 4, 5, 6, 7, 8]" in caplog.text
 
     def test_the_migrated_column_rejects_other_values(self, tmp_path):
         db = Database(tmp_path / "v1.db")
@@ -919,7 +965,7 @@ class TestMigrationV3:
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [3, 4, 5, 6, 7]" in caplog.text
+        assert "applied migrations: [3, 4, 5, 6, 7, 8]" in caplog.text
         assert "SYNTHETIC" not in caplog.text
 
     def test_existing_rows_are_unknown_and_nothing_is_queued(self, tmp_path, monkeypatch):

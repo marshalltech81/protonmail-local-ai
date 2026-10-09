@@ -173,7 +173,10 @@ def _build_schema(conn: sqlite3.Connection) -> None:
             size_bytes                INTEGER NOT NULL,
             seen_at                   TEXT NOT NULL,
             fts_rowid                 INTEGER,
-            extractor_module          TEXT NOT NULL DEFAULT ''
+            extractor_module          TEXT NOT NULL DEFAULT '',
+            -- The indexer's per-message budget deferred this occurrence's
+            -- extraction to a later pass (#1236); NULL otherwise.
+            extraction_deferred_at    TEXT
         );
 
         CREATE VIRTUAL TABLE attachments_fts USING fts5(
@@ -379,7 +382,10 @@ def _insert_attachment(
     occurrence_id: str | None = None,
     variant: str = "",
     extractor_module: str = "pdf",
+    deferred: bool = False,
 ) -> None:
+    """``deferred`` marks the occurrence as the indexer's extraction
+    budget leaves it: deferred to a later pass (#1236)."""
     claimant = claimant_of(message_id, variant)
     occurrence_id = occurrence_id or f"{claimant}:{attachment_id}:{filename}"
     cur = conn.cursor()
@@ -392,8 +398,9 @@ def _insert_attachment(
         """
         INSERT INTO attachments
             (attachment_occurrence_id, claimant_id, attachment_id, thread_id, filename,
-             content_type, size_bytes, seen_at, fts_rowid, extractor_module)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             content_type, size_bytes, seen_at, fts_rowid, extractor_module,
+             extraction_deferred_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             occurrence_id,
@@ -406,6 +413,7 @@ def _insert_attachment(
             "2024-01-01T00:00:00+00:00",
             fts_rowid,
             extractor_module,
+            "2024-01-02T00:00:00+00:00" if deferred else None,
         ),
     )
     conn.commit()

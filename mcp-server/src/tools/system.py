@@ -62,7 +62,8 @@ def not_current_reasons(
     Current means: mbsync completed a sync recently, the indexer has
     reported recently (it read that sync's stamp after the sync's mail
     was already queued), and nothing is waiting in the queue (pending,
-    retrying or deferred). Dead messages are terminal and parked trashed
+    retrying, deferred, or continued for deferred attachment extraction,
+    #1236). Dead messages are terminal and parked trashed
     files are already indexed (#1165): both are reported separately, not
     waited on.
     """
@@ -88,14 +89,16 @@ def not_current_reasons(
             reasons.append(f"the indexer last reported {_age(-age)} in the future")
         elif age > INDEXER_STALE_SECS:
             reasons.append(f"the indexer last reported {_age(age)} ago")
-    waiting = queue.pending + queue.retrying + queue.deferred
+    waiting = queue.pending + queue.retrying + queue.deferred + queue.extraction_deferred
     if waiting:
         deferred = f", {queue.deferred:,} deferred"
+        extraction = f", {queue.extraction_deferred:,} with attachment extraction deferred"
         reparse = f"; {queue.reparse:,} of them already indexed and being reparsed"
         reasons.append(
             f"{_messages(waiting)} waiting to be indexed "
             f"({queue.pending:,} pending, {queue.retrying:,} retrying"
             f"{deferred if queue.deferred else ''}"
+            f"{extraction if queue.extraction_deferred else ''}"
             f"{reparse if queue.reparse else ''})"
         )
     return reasons
@@ -157,7 +160,8 @@ def _render(out: MailboxStatusOutput) -> str:
         f"Last mail sync: {_when(out.last_sync_at, out.checked_at)}",
         f"Indexer seen:   {_when(out.indexer_last_seen_at, out.checked_at)}",
         f"Queue:          {q.pending:,} pending, {q.retrying:,} retrying, "
-        f"{q.deferred:,} deferred, {q.parked_trashed:,} parked (trashed), {q.dead:,} dead",
+        f"{q.deferred:,} deferred, {q.extraction_deferred:,} extraction deferred, "
+        f"{q.parked_trashed:,} parked (trashed), {q.dead:,} dead",
     ]
     if q.reparse:
         one = q.reparse == 1
@@ -175,6 +179,14 @@ def _render(out: MailboxStatusOutput) -> str:
             "cannot read yet, an embedder outage or configuration error, or a job "
             f"waiting for a rename); the indexer retries {'it' if one else 'them'} "
             "without spending attempts."
+        )
+    if q.extraction_deferred:
+        one = q.extraction_deferred == 1
+        lines.append(
+            f"  {_messages(q.extraction_deferred)} {'is' if one else 'are'} already indexed, "
+            f"but {'its' if one else 'their'} attachment extraction reached the indexer's "
+            "per-message budget: the remaining attachments are extracted on later passes, "
+            "and their text is missing from search until then."
         )
     if q.parked_trashed:
         one = q.parked_trashed == 1

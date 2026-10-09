@@ -929,6 +929,10 @@ MESSAGE_ID_CONFLICTS_SQL = """
 #   embedder outage or configuration error. A job that had already
 #   failed before an outage deferred it cannot be told from an embed
 #   failure, and stays under ``retrying``.
+# - ``extract`` with ``QUEUE_EXTRACTION_DEFERRED_ERROR``: a message whose
+#   attachment extraction reached the indexer's per-message budget,
+#   continued on a later pass (#1236). Its own bucket,
+#   ``extraction_deferred``.
 #
 # A job requeued by ``make requeue-dead`` keeps its stage and error but
 # has no class, so every deferral rule requires one. ``tests/
@@ -937,6 +941,12 @@ MESSAGE_ID_CONFLICTS_SQL = """
 QUEUE_DEFERRED_PARSE_ERRORS = (
     "PermissionError: deferred until mbsync opens the file",
     "FileNotFoundError: deferred until the rename is recorded",
+)
+# ``indexer/src/queue.py`` ``EXTRACTION_DEFERRED_ERROR``, which this
+# service cannot import; ``tests/test_mailbox_status_queue.py`` reads the
+# indexer's own call sites.
+QUEUE_EXTRACTION_DEFERRED_ERROR = (
+    "attachment extraction deferred: per-message budget reached; continued on a later pass"
 )
 QUEUE_BUCKETS_SQL = """
     SELECT bucket, COUNT(*) AS n, COALESCE(SUM(reason = 'reparse'), 0) AS reparse
@@ -952,6 +962,9 @@ QUEUE_BUCKETS_SQL = """
             WHEN last_error_class IS NOT NULL AND last_stage = 'embed'
                  AND (attempts = 0 OR last_error_class = 'operator_action_required')
                 THEN 'deferred'
+            WHEN last_error_class IS NOT NULL AND last_stage = 'extract'
+                 AND last_error = :extraction
+                THEN 'extraction_deferred'
             WHEN attempts > 0 OR last_error_class IS NOT NULL THEN 'retrying'
             ELSE 'pending'
         END AS bucket
@@ -1394,7 +1407,26 @@ _ATTACHMENT_META_BYTES = 4 * ATTACHMENT_META_CHARS
 # statuses the indexer stores, and ``none`` for an occurrence whose
 # payload and extractor module have no extraction row.
 EXTRACTION_STATUSES = ("success", "empty", "unsupported", "too_large", "failed")
-EXTRACTION_STATUS_FILTERS = (*EXTRACTION_STATUSES, "none")
+# An occurrence whose extraction the indexer's per-message budget
+# deferred to a later pass (#1236) reads ``deferred``, from the
+# occurrence's own mark, whatever the payload's row says: that row may be
+# an older result, or another occurrence's, and its text is not indexed
+# for this one.
+EXTRACTION_DEFERRED = "deferred"
+EXTRACTION_STATUS_FILTERS = (*EXTRACTION_STATUSES, EXTRACTION_DEFERRED, "none")
+
+# An occurrence's extraction status over ``attachments a`` and the LEFT
+# JOINed ``attachment_extractions e``: the deferral mark first (#1236),
+# then the payload row's status (NULL without one). The extraction
+# columns that describe the payload row are NULL for a deferred one.
+OCCURRENCE_STATUS_SQL = (
+    "CASE WHEN a.extraction_deferred_at IS NOT NULL THEN 'deferred' ELSE e.extraction_status END"
+)
+
+
+def _unless_deferred(column: str) -> str:
+    """``e.<column>``, NULL for a deferred occurrence (#1236)."""
+    return f"CASE WHEN a.extraction_deferred_at IS NULL THEN e.{column} END"
 
 
 @dataclass
@@ -1478,8 +1510,9 @@ def _attachment_clauses(
     exactly, ``thread_id`` against the carrying message's thread. A stored ``extraction_status`` compared with an occurrence
     that has no extraction row is NULL (unknown: it may be extracted
     later), so the conjunction counts it as indeterminate; ``none``
-    selects exactly those occurrences. Raises ``InvalidFilterError``
-    for any other status.
+    selects exactly those occurrences. ``deferred`` selects the
+    occurrences the indexer deferred (#1236), which match no other
+    status. Raises ``InvalidFilterError`` for any other status.
     """
     filters: list[tuple[str, str]] = []
     clauses: list[str] = []
@@ -1506,9 +1539,11 @@ def _attachment_clauses(
             clauses.append("instr(mcp_casefold(a.filename), ?) > 0")
             params.append(value.casefold())
         elif name == "extraction_status" and value == "none":
-            clauses.append("e.attachment_id IS NULL")
+            clauses.append("(a.extraction_deferred_at IS NULL AND e.attachment_id IS NULL)")
+        elif name == "extraction_status" and value == EXTRACTION_DEFERRED:
+            clauses.append("a.extraction_deferred_at IS NOT NULL")
         elif name == "extraction_status":
-            clauses.append("e.extraction_status = ?")
+            clauses.append("(a.extraction_deferred_at IS NULL AND e.extraction_status = ?)")
             params.append(value)
         elif name == "thread_id":
             # The carrying message's thread: a reparse that moves a
@@ -1600,8 +1635,10 @@ _OCCURRENCE_COLUMNS = (
     f"substr(CAST(a.content_type AS BLOB), 1, {_ATTACHMENT_META_BYTES + 1}) "
     "AS content_type_head, "
     "a.size_bytes, m.folder, m.sent_at, m.occurred_at, m.effective_at, "
-    f"{_SOURCE_COLUMNS}, e.extraction_status, e.extractor, e.extracted_at, "
-    "e.ocr_pages_skipped"
+    f"{_SOURCE_COLUMNS}, {OCCURRENCE_STATUS_SQL} AS extraction_status, "
+    f"{_unless_deferred('extractor')} AS extractor, "
+    f"{_unless_deferred('extracted_at')} AS extracted_at, "
+    f"{_unless_deferred('ocr_pages_skipped')} AS ocr_pages_skipped"
 )
 
 # The indexer's fixed ``extraction_error`` texts for an ``unsupported``
@@ -2763,8 +2800,9 @@ class Database:
         if extracted_only:
             # ``e`` is LEFT JOINed, so this also drops attachments with no
             # extraction row at all (status reads NULL) — the intent of
-            # "only attachments whose text I could actually read".
-            clauses.append("e.extraction_status = 'success'")
+            # "only attachments whose text I could actually read". A
+            # deferred occurrence's text is not indexed yet (#1236).
+            clauses.append(f"{OCCURRENCE_STATUS_SQL} = 'success'")
         if sender:
             # The carrying message's From through the ``sender`` leaf
             # ``query_messages`` compiles (#1056), so both tools share
@@ -2800,8 +2838,8 @@ class Database:
             "a.claimant_id, a.thread_id, a.filename, "
             "a.content_type, a.size_bytes, t.subject, t.display_subject, "
             "t.folder, t.date_last, m.sent_at, m.occurred_at, t.senders, "
-            "e.extraction_status, "
-            "substr(e.extracted_text, 1, 240) AS text_snippet, "
+            f"{OCCURRENCE_STATUS_SQL} AS extraction_status, "
+            f"substr({_unless_deferred('extracted_text')}, 1, 240) AS text_snippet, "
             f"{_SOURCE_COLUMNS}, "
             "bm25(attachments_fts) AS score "
             "FROM attachments_fts "
@@ -2876,8 +2914,8 @@ class Database:
             "a.claimant_id, a.thread_id, a.filename, "
             "a.content_type, a.size_bytes, t.subject, t.display_subject, "
             "t.folder, t.date_last, m.sent_at, m.occurred_at, t.senders, "
-            "e.extraction_status, "
-            "substr(e.extracted_text, 1, 240) AS text_snippet, "
+            f"{OCCURRENCE_STATUS_SQL} AS extraction_status, "
+            f"substr({_unless_deferred('extracted_text')}, 1, 240) AS text_snippet, "
             f"{_SOURCE_COLUMNS}, "
             "best.score AS score "
             "FROM best "
@@ -2922,8 +2960,8 @@ class Database:
             "a.claimant_id, a.thread_id, a.filename, "
             "a.content_type, a.size_bytes, t.subject, t.display_subject, "
             "t.folder, t.date_last, m.sent_at, m.occurred_at, t.senders, "
-            "e.extraction_status, "
-            "substr(e.extracted_text, 1, 240) AS text_snippet, "
+            f"{OCCURRENCE_STATUS_SQL} AS extraction_status, "
+            f"substr({_unless_deferred('extracted_text')}, 1, 240) AS text_snippet, "
             f"{_SOURCE_COLUMNS}, "
             "0.0 AS score "
             "FROM attachments a "
@@ -4350,12 +4388,14 @@ class Database:
 
         Queue rows are ``pending`` (not yet failed), ``retrying``
         (failed at least once, will retry), ``deferred`` (postponed by
-        the indexer without a failure of its own), ``parked_trashed``
+        the indexer without a failure of its own), ``extraction_deferred``
+        (continued on a later pass because its attachment extraction
+        reached the per-message budget, #1236), ``parked_trashed``
         (an indexed file now trashed, waiting for the reaper) or
         ``dead`` (gave up); see ``QUEUE_BUCKETS_SQL`` (#1165). A dead
         job requeued by ``make requeue-dead`` clears its attempts and
         class and is pending again. ``reparse`` counts the pending,
-        retrying and deferred jobs that re-read an already indexed
+        retrying and both kinds of deferred jobs that re-read an already indexed
         message (reason ``reparse``, #1078), so a reparse backlog reads
         as such.
 
@@ -4378,16 +4418,28 @@ class Database:
                 row["bucket"]: (row["n"], row["reparse"])
                 for row in conn.execute(
                     QUEUE_BUCKETS_SQL,
-                    {"permission": permission, "rename": rename},
+                    {
+                        "permission": permission,
+                        "rename": rename,
+                        "extraction": QUEUE_EXTRACTION_DEFERRED_ERROR,
+                    },
                 )
             }
             stats["queue"] = {
                 name: buckets.get(name, (0, 0))[0]
-                for name in ("pending", "retrying", "deferred", "parked_trashed", "dead")
+                for name in (
+                    "pending",
+                    "retrying",
+                    "deferred",
+                    "extraction_deferred",
+                    "parked_trashed",
+                    "dead",
+                )
             }
             # Reparse jobs still waiting to be indexed (#1078).
             stats["queue"]["reparse"] = sum(
-                buckets.get(name, (0, 0))[1] for name in ("pending", "retrying", "deferred")
+                buckets.get(name, (0, 0))[1]
+                for name in ("pending", "retrying", "deferred", "extraction_deferred")
             )
             state = conn.execute(
                 "SELECT sync_completed_at, sync_interval_secs, indexer_seen_at FROM ingestion_state"
@@ -4916,10 +4968,14 @@ class Database:
             page_params += [last_at, last_claimant, last_occurrence]
         # Only a leaf that can be unknown makes the indeterminate count
         # worth a query; a stored-status comparison is unknown for an
-        # occurrence with no extraction row.
+        # occurrence with no extraction row (the deferral mark is always
+        # known).
         may_be_unknown = any(
             LEAVES[leaf.name].evaluability is Evaluability.UNKNOWN_WHEN_NULL for leaf in leaves
-        ) or any(name == "extraction_status" and value != "none" for name, value in filters)
+        ) or any(
+            name == "extraction_status" and value not in ("none", EXTRACTION_DEFERRED)
+            for name, value in filters
+        )
 
         with closing(self._connect()) as conn:
             # One read transaction: the counts and the page come from the
@@ -4927,7 +4983,8 @@ class Database:
             conn.execute("BEGIN")
             status_counts = dict.fromkeys(EXTRACTION_STATUS_FILTERS, 0)
             for status, n in conn.execute(
-                "SELECT COALESCE(e.extraction_status, 'none') AS status, COUNT(*) "  # nosec B608
+                f"SELECT COALESCE({OCCURRENCE_STATUS_SQL}, 'none') AS status, "  # nosec B608
+                "COUNT(*) "
                 f"{_ATTACHMENT_FROM} WHERE {where_sql} GROUP BY status",
                 params,
             ):

@@ -135,6 +135,18 @@ STAGE_PARSE = "parse"
 STAGE_EMBED = "embed"
 STAGE_TRASHED = "trashed"
 DEFER_STAGES = (STAGE_PARSE, STAGE_EMBED, STAGE_TRASHED)
+# A message whose attachment extraction reached the per-message budget
+# (#1236) is continued at this stage: ``main._phase2c_commit_vectors``
+# defers it, inside the transaction that commits the pass's results, with
+# ``EXTRACTION_DEFERRED_ERROR``, due at once, so it takes its turn behind
+# the rows already due. A claimed row carrying both is a continuation,
+# which extracts only the occurrences still pending. Counted in the queue
+# heartbeat's ``extraction_deferred`` bucket (from the rows) rather than in
+# ``drain_deferrals``, and in the attachments aggregate once committed.
+STAGE_EXTRACT = "extract"
+EXTRACTION_DEFERRED_ERROR = (
+    "attachment extraction deferred: per-message budget reached; continued on a later pass"
+)
 # ``last_error`` of a job deferred because mbsync has not opened the file
 # to the indexer yet (``main._phase1_commit_thread``). Fixed text, and
 # distinct from ``_stage_error``'s rendering of the same
@@ -517,9 +529,16 @@ class IndexingQueue:
         its attempt budget.
 
         Used when the failure says nothing about the message — the
-        embedder is down, rate-limiting, or rejecting credentials. The
-        row stays ``queued`` with ``attempts`` unchanged and becomes due
-        again after ``delay_seconds``, so no outage can dead-letter it.
+        embedder is down, rate-limiting, or rejecting credentials — and
+        to continue a message whose attachment extraction reached the
+        per-message budget (``STAGE_EXTRACT``, #1236). The row stays
+        ``queued`` with ``attempts`` unchanged and becomes due again
+        after ``delay_seconds``, so no outage can dead-letter it.
+
+        Inside ``db.transaction()`` the row's write commits or rolls back
+        with the caller's (``Database.queue_mark_failed``); the caller
+        then refunds any charge first (``end_attempt``), since the refund
+        commits on its own.
         """
         self._settle(filepath)
         attempts = self.db.queue_get_attempts(filepath)
@@ -595,7 +614,10 @@ class IndexingQueue:
         ``parked_trashed`` rows are trashed files waiting to be reaped;
         ``retrying`` is every other queued row (failures, including a
         permission error past its deferral window, embedder deferrals,
-        a row interrupted mid-step). ``reparse`` counts the queued rows
+        a row interrupted mid-step). ``extraction_deferred`` rows are
+        messages continued because their attachment extraction reached
+        the per-message budget (``STAGE_EXTRACT``, #1236). ``reparse``
+        counts the queued rows
         whose reason is ``reparse`` outside ``parked_trashed`` (the ones
         that can drain), ``reparse_parked_trashed`` those parked as
         trashed (#1331) and ``reparse_dead`` the dead ones (#1078).
@@ -609,6 +631,8 @@ class IndexingQueue:
             permission_stage=STAGE_PARSE,
             permission_deferred_error=PERMISSION_DEFERRED_ERROR,
             trashed_stage=STAGE_TRASHED,
+            extract_stage=STAGE_EXTRACT,
+            extraction_deferred_error=EXTRACTION_DEFERRED_ERROR,
             reparse_reason=REASON_REPARSE,
         )
         age = 0
@@ -619,6 +643,7 @@ class IndexingQueue:
             "retrying": counts.get("retrying", 0),
             "deferred_permission": counts.get("deferred_permission", 0),
             "parked_trashed": counts.get("parked_trashed", 0),
+            "extraction_deferred": counts.get("extraction_deferred", 0),
             "dead": counts.get("dead", 0),
             "oldest_due_age": age,
             "reparse": counts["reparse"],

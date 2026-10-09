@@ -264,8 +264,9 @@ def test_sweep_enqueue_counts_exclusions_and_log_line(mailbox, monkeypatch, capl
     assert lines[0].getMessage() == (
         "re-queued 3 message(s) (0 for a missing text-completeness record) whose "
         "attachments were extracted by an older extractor version (none), skipped "
-        "while OCR was off, had no extractor, or now fit under "
-        "INDEXER_ATTACHMENT_MAX_BYTES; skipped 1 dead-lettered "
+        "while OCR was off, had no extractor, now fit under "
+        "INDEXER_ATTACHMENT_MAX_BYTES, or were deferred by the per-message extraction "
+        "budget; skipped 1 dead-lettered "
         "(run make requeue-dead to refresh them)."
     )
     assert MARKER not in caplog.text

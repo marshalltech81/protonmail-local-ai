@@ -138,7 +138,10 @@ def _dedupe_by_canonical(addrs: list[str]) -> list[str]:
 # state, address count and digest, replaced at every indexer start; no
 # per-message column and no reparse
 # (``migrations/0007_operator_identity.sql``).
-SCHEMA_VERSION = 7
+# v8 (#1236): ``attachments.extraction_deferred_at`` marks an occurrence
+# whose extraction the per-message budget deferred to a later pass, NULL
+# otherwise; no reparse (``migrations/0008_attachment_extraction_deferral.sql``).
+SCHEMA_VERSION = 8
 SCHEMA_APPLICATION_ID = 0x504D4149  # "PMAI"
 
 # How long a ``reaped_messages`` record outlives the reap. The record
@@ -673,6 +676,13 @@ class Database:
                 -- ``EXTRACTOR_VERSIONS`` bump clears it at startup.
                 text_complete             INTEGER CHECK (text_complete IN (0, 1)),
                 text_extractor            TEXT,
+                -- When the per-message extraction budget deferred this
+                -- occurrence's extraction to a later pass of its message
+                -- (#1236), NULL otherwise. A deferred occurrence has
+                -- ``text_complete`` 0, keeps the chunks it had and has
+                -- no ``attachment_extractions`` row written for it;
+                -- the pass that extracts it clears the mark.
+                extraction_deferred_at    TEXT,
                 FOREIGN KEY (claimant_id) REFERENCES message_thread_map(claimant_id)
                     ON DELETE CASCADE,
                 FOREIGN KEY (thread_id) REFERENCES threads(thread_id)
@@ -1387,6 +1397,7 @@ class Database:
         chunks,
         embeddings_by_chunk_id: dict[str, list[float]],
         attachment_id: str | None = None,
+        delete_missing: bool = True,
     ) -> dict[str, int]:
         """Idempotently sync the chunk rows for one slice of a message.
 
@@ -1416,6 +1427,10 @@ class Database:
         passage's dates from its ``messages`` row (``sent_at``,
         ``occurred_at``), so a re-dated message whose chunks were not
         rewritten never shows a stale date (#575).
+
+        ``delete_missing=False`` only adds: stored chunks missing from
+        ``chunks`` are kept. For an attachment slice that an occurrence
+        whose extraction was deferred also holds chunks in (#1236).
 
         All inserts / deletes across ``message_chunks``,
         ``message_chunks_fts`` and ``message_chunks_vec`` happen inside
@@ -1452,7 +1467,7 @@ class Database:
                 if row["fts_rowid"] is not None
             }
 
-            to_delete = existing_ids - incoming_ids
+            to_delete = existing_ids - incoming_ids if delete_missing else set()
             to_insert = [c for c in chunks if c.chunk_id not in existing_ids]
 
             for chunk_id in to_delete:
@@ -1626,20 +1641,62 @@ class Database:
 
         Called in phase 2c inside the transaction that commits the
         occurrence's chunks (``apply_attachment_writes``), so it rolls
-        back with them and always describes the committed chunks."""
+        back with them and always describes the committed chunks. The
+        occurrence's result applied, so any deferral mark is cleared
+        (#1236)."""
         cur = self._conn.cursor()
         started = False
         try:
             started = self._begin_if_needed(cur)
             cur.execute(
-                "UPDATE attachments SET text_complete = ?, text_extractor = ? "
-                "WHERE attachment_occurrence_id = ?",
+                "UPDATE attachments SET text_complete = ?, text_extractor = ?, "
+                "extraction_deferred_at = NULL WHERE attachment_occurrence_id = ?",
                 (None if complete is None else int(complete), text_extractor, occurrence_id),
             )
             self._commit_if_started(started)
         except Exception:
             self._rollback_if_started(started)
             raise
+
+    @_synchronized
+    def mark_attachment_extraction_deferred(self, occurrence_id: str) -> None:
+        """Mark an occurrence whose extraction the per-message budget
+        deferred to a later pass (#1236): ``text_complete`` 0, since its
+        chunks may not hold its text, and ``extraction_deferred_at`` now.
+        ``text_extractor`` keeps the stamp of the result its chunks came
+        from. In phase 2c's transaction, like ``set_attachment_text_complete``."""
+        cur = self._conn.cursor()
+        started = False
+        try:
+            started = self._begin_if_needed(cur)
+            cur.execute(
+                "UPDATE attachments SET text_complete = 0, extraction_deferred_at = ? "
+                "WHERE attachment_occurrence_id = ?",
+                (datetime.now(UTC).isoformat(), occurrence_id),
+            )
+            self._commit_if_started(started)
+        except Exception:
+            self._rollback_if_started(started)
+            raise
+
+    @_synchronized
+    def get_attachment_occurrence_states(self, claimant_id: str) -> dict[str, tuple[bool, bool]]:
+        """Each stored attachment occurrence of a message, by occurrence
+        ID: ``(completed, deferred)`` (#1236). ``completed`` is a recorded
+        ``text_complete`` with no deferral mark: work an extraction
+        continuation does not reopen. ``deferred`` is a deferral mark."""
+        rows = self._conn.execute(
+            "SELECT attachment_occurrence_id, text_complete, extraction_deferred_at "
+            "FROM attachments WHERE claimant_id = ?",
+            (claimant_id,),
+        ).fetchall()
+        return {
+            r["attachment_occurrence_id"]: (
+                r["text_complete"] is not None and r["extraction_deferred_at"] is None,
+                r["extraction_deferred_at"] is not None,
+            )
+            for r in rows
+        }
 
     @_synchronized
     def get_assessed_text_extractors(self) -> list[str]:
@@ -1813,6 +1870,24 @@ class Database:
               AND a.size_bytes <= ?
             """,
             (max_bytes,),
+            lambda _row: True,
+        )
+
+    @_synchronized
+    def find_deferred_extraction_filepaths(self) -> set[str]:
+        """The Maildir filepaths of the messages with an attachment
+        occurrence whose extraction the per-message budget deferred
+        (#1236), so the startup sweep can re-queue one whose continuation
+        was lost (a pass with attachment extraction switched off marks
+        the message succeeded and leaves the mark)."""
+        return self._stream_filepaths(
+            """
+            SELECT m.filepath
+            FROM attachments a
+            JOIN message_thread_map m ON m.claimant_id = a.claimant_id
+            WHERE a.extraction_deferred_at IS NOT NULL
+            """,
+            (),
             lambda _row: True,
         )
 
@@ -2632,7 +2707,11 @@ class Database:
             """,
             (attempts, last_stage, last_error, error_class, now_iso, next_attempt_iso, filepath),
         )
-        self._conn.commit()
+        # Inside ``transaction()`` the write commits or rolls back with
+        # the caller's: an extraction continuation commits with the
+        # pass's results (#1236).
+        if self._transaction_depth == 0:
+            self._conn.commit()
 
     @_synchronized
     def queue_mark_dead(
@@ -2713,6 +2792,8 @@ class Database:
         permission_stage: str,
         permission_deferred_error: str,
         trashed_stage: str,
+        extract_stage: str,
+        extraction_deferred_error: str,
         reparse_reason: str,
     ) -> tuple[dict[str, int], str | None]:
         """Rows per heartbeat bucket and the earliest due time among due
@@ -2725,6 +2806,8 @@ class Database:
                        WHEN last_stage = :trashed THEN 'parked_trashed'
                        WHEN last_stage = :perm_stage AND last_error = :perm_deferred
                            THEN 'deferred_permission'
+                       WHEN last_stage = :extract_stage AND last_error = :extract_deferred
+                           THEN 'extraction_deferred'
                        WHEN last_error IS NULL THEN 'pending'
                        ELSE 'retrying'
                    END AS bucket,
@@ -2739,6 +2822,8 @@ class Database:
                 "trashed": trashed_stage,
                 "perm_stage": permission_stage,
                 "perm_deferred": permission_deferred_error,
+                "extract_stage": extract_stage,
+                "extract_deferred": extraction_deferred_error,
                 "now": now_iso,
                 "reparse": reparse_reason,
             },

@@ -203,9 +203,11 @@ _LOGGABLE_TOOL_PARAMS: dict[str, Callable[[Any], bool]] = {
     "replied": _is_bool,
     "size_min": _int_in(0, MAX_SIZE_BYTES),
     "size_max": _int_in(0, MAX_SIZE_BYTES),
-    # ``query_attachments``' status filter (#796): the stored statuses
-    # plus ``none`` (``lib/sqlite.EXTRACTION_STATUS_FILTERS``).
-    "extraction_status": _one_of("success", "empty", "unsupported", "too_large", "failed", "none"),
+    # ``query_attachments``' status filter (#796): the stored statuses,
+    # ``deferred`` (#1236) and ``none`` (``lib/sqlite.EXTRACTION_STATUS_FILTERS``).
+    "extraction_status": _one_of(
+        "success", "empty", "unsupported", "too_large", "failed", "deferred", "none"
+    ),
     # ``aggregate_messages``' dimension (#823; ``lib/sqlite.AGGREGATE_DIMENSIONS``).
     "group_by": _one_of(
         "sender_address", "sender_domain", "folder", "year", "month", "authority_class"

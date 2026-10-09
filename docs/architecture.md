@@ -1993,6 +1993,102 @@ whole and follows the package's relationships recursively when it
 opens a deck; a crafted chain of related parts too long to follow
 fails as `PptxRelationshipChainError` rather than as host pressure.
 
+### Per-message extraction budget (#1236)
+
+Every attachment the cache and the batch cannot serve is extracted in
+a process of its own (the extractor child, catdoc, the POI JVM, and the
+Poppler and Tesseract processes a scanned PDF starts), and the
+extraction cache is keyed by content hash, so a message with thousands
+of distinct small parts would otherwise hold the single ingestion
+worker for one launch each, with the stall guard's clock restarted per
+attachment. One pass of one message is therefore given a budget,
+counted in `_resolve_extracted_text` after the cache lookup and before
+each dispatch: **64 process launches** and **5 seconds** of extraction
+(`EXTRACTION_TURN_LAUNCHES`, `EXTRACTION_TURN_SECONDS` in
+`indexer/src/attachment_indexing.py`; fixed, always positive, no off
+switch). Launches are every `subprocess.Popen` the indexer process
+starts, counted from Python's `subprocess.Popen` audit event, so a
+library's own processes count too.
+
+- **Turn, not ceiling.** The first dispatch of a pass is always
+  admitted, so each pass resolves at least one attachment. An admitted
+  attachment runs to its own bounds (the extractor's timeouts and
+  limits), so a pass can end past the budget by one attachment's run.
+  For the tiny payloads measured below that overrun was at most 0.25 s
+  (a one-page scanned PDF, five launches); its upper bound is the
+  slowest extractor's own timeout.
+- **Deferral, never loss.** Past the budget, each remaining uncached
+  attachment is deferred: its occurrence gets
+  `attachments.extraction_deferred_at` and `text_complete = 0`, keeps
+  the chunks it had, and nothing is written to `attachment_extractions`
+  for it. While one copy of a payload is deferred, no write in that
+  message deletes chunks from the payload's shared slice.
+- **Continuation.** The message is not marked succeeded: Phase 2c
+  continues it with `queue.defer` at stage `extract`
+  (`EXTRACTION_DEFERRED_ERROR`), due at once and keeping its reason (a
+  reparse stays a reparse), in the same transaction as the pass's
+  results, deferral marks, chunks and vectors, so they commit or roll
+  back together. A rolled-back pass leaves no mark and no continuation,
+  and is charged as an ordinary `db_write` failure. The continuation
+  sorts behind the jobs already due, so continued messages and new mail
+  take turns. It spends no attempt; a failure in a later pass does.
+- **Progress.** A continuation (a claimed job still carrying the
+  `extract` stage and its fixed text) resolves only the pending
+  occurrences: no recorded `text_complete`, or a deferral mark. An
+  occurrence whose result already applied is served its cached row as
+  it stands, whatever its age, so an expired `failed` row is not re-run
+  and a message always gets closer to done. An `EXTRACTOR_VERSIONS`
+  bump clears `text_complete` on exactly its occurrences, which makes
+  them pending again; the startup sweeps keep the deferral marks, leave
+  a queued continuation as it is, and re-queue a message that carries a
+  mark but has no job (a pass with attachment extraction switched off
+  marks it succeeded). New
+  intent to index the file (a watcher event, a startup re-queue) resets
+  the job, and that pass resolves every occurrence by the usual cache
+  rules, under the same budget. A pass interrupted by a crash is
+  replayed the same way.
+- **Visibility.** The attachments line counts `deferred` occurrences,
+  `deferred_messages` and `deferred_resumed` (a WARNING while any are
+  deferred); a continuation pass does not count again the occurrences
+  served from earlier passes. The queue heartbeat counts continued jobs
+  in `extraction_deferred`, and logs `attachment extraction caught up`
+  once when none remain. `get_mailbox_status` reports them as
+  `extraction_deferred` (they keep the index non-current);
+  `query_attachments` and `search_attachments` report the occurrence as
+  `deferred` from its own mark, not the payload's row, and
+  `get_attachment` gives a fixed reason and no text.
+
+**How the values were chosen.** Plain `time.perf_counter` timings in
+the indexer image (Linux, `docker build indexer`), synthetic payloads
+only, 20 distinct payloads per format through `extractors.extract`,
+one untimed warm-up each:
+
+| Payload | Median | Max | Launches |
+|---|---|---|---|
+| DOCX / XLSX / PPTX, valid, one line | 0.080–0.082 s | 0.097–0.102 s | 1 |
+| DOCX, ZIP that is not a package (failed) | 0.073 s | 0.104 s | 1 |
+| `.doc`, OLE2 prefix and noise (catdoc, failed) | 0.006 s | 0.006 s | 1 |
+| `.xls`, OLE2 prefix and noise (xlrd child, failed) | 0.060 s | 0.072 s | 1 |
+| `.ppt`, OLE2 prefix and noise (POI JVM, failed) | 0.106 s | 0.130 s | 1 |
+| `message/rfc822`, one line (eml child) | 0.060 s | 0.073 s | 1 |
+| PNG, OCR on (image child) | 0.106 s | 0.124 s | 1 |
+| scanned PDF, one page, OCR on | 0.213 s | 0.247 s | 5 |
+
+A continuation pass of a message whose occurrences have all resolved
+but one (the checkpoint: parse, cache reads, chunk diff, attachment
+writes and the deferral, timed with a no-op extractor) took 0.08 s at
+1 part, 0.12 s at 100, 0.50 s at 1,000 and 5.0 s at 9,990 parts
+(1.8 MB). 5 seconds of extraction per turn is about what the largest
+message spends re-reading itself, so even then a pass spends at least
+as long extracting as checkpointing; 64 launches is about 5 seconds of
+the cheapest child launches (0.06–0.08 s), so the launch count binds
+for floods of tiny parts and the seconds for slow ones. A message with
+up to 64 child-format attachments still finishes in one pass. The
+budget spreads the work and adds a checkpoint per pass: from these
+figures, a 9,990-part message of distinct child-format parts needs about
+156 passes of about 10 s each, with other mail between them, where it
+held the worker for about 13 minutes in one pass before.
+
 ### Cascade on message removal
 
 When a message is reaped, `_delete_attachments_for_message` drops its
@@ -2150,6 +2246,7 @@ already indexed without embedding calls (see *Reparse in place*).
 | Version | Migration | Change |
 |---|---|---|
 | 0 | (initial schema) | First deployed schema (2026-10-03). |
+| 8 | `0008_attachment_extraction_deferral.sql` | `attachments.extraction_deferred_at` (#1236; see *Per-message extraction budget*): when the budget deferred the occurrence's extraction to a later pass, NULL otherwise. No message was deferred before it, so every row starts NULL and no reparse is queued. |
 | 7 | `0007_operator_identity.sql` | `operator_addresses` and `operator_identity` (#824; see *Operator identity*), seeded `unconfigured` with no addresses until the indexer's next start loads `config/identity.toml`. No per-message column, so no reparse is queued. |
 | 6 | `0006_attachment_text_complete.sql` | Attachment text completeness (#1242): `attachments.text_complete` (0 / 1, NULL until assessed, no default) and `attachments.text_extractor`, and `attachment_extractions.text_complete` (NULL when unknown). Every existing row starts NULL and the migration queues a reparse (see *Reparse in place*), which re-extracts each cached `success` or `empty` result once, since none has a record yet (#1285). |
 | 5 | `0005_message_completeness.sql` | Per-message completeness on `messages` (#1086): `subject_complete`, `from_addresses_complete`, `to_addresses_complete`, `cc_addresses_complete`, `attachments_manifest_complete`, `body_complete` (0 / 1, NULL until assessed, no default) and `caps_json`. Every existing row starts NULL and the migration queues a reparse, which fills them without embedding calls; a dead-lettered job keeps its message NULL until `make requeue-dead`. Until the reparse reaches a message, a subject, text, attachment, address or authority filter that does not match it counts it as indeterminate. |
@@ -3108,7 +3205,7 @@ covers is docs only.
 
 | Boundary and threat | Controls in place | Shared assumptions | Accepted limitations and pending decisions | Locked by |
 | --- | --- | --- | --- | --- |
-| **Untrusted mail and attachments.** A crafted message or attachment stalls or exhausts the indexer, runs code in it, or puts mail content into logs. | A message over `INDEXER_PARSE_MAX_BYTES` is dead-lettered before it is parsed, after reading at most the cap plus one byte (`indexer/src/parser.py`, `indexer/src/main.py`). The `doc` and `ppt` tools and the `xls`, `docx`, `pptx`, `xlsx` and `image` extractors run in a child started by `indexer/src/extractors/_runner.py` (`run_tool`, `run_child`): `_launcher.py` sets `RLIMIT_AS` and `RLIMIT_CPU` before the tool loads, with a wall-clock timeout, an output cap, a kill of the whole process group and a parent-owned scratch directory. Per-message rows are keyed by the claimant ID (`parser.py` `claimant_id`). In `docker-compose.yml` the indexer mounts Maildir `:ro` and has `mem_limit: 6g`; every service has a read-only root filesystem, `cap_drop: ALL` and `no-new-privileges`. mcp-server has no Maildir mount and opens the index `?mode=ro` with `PRAGMA query_only` (`mcp-server/src/lib/sqlite.py`). Log text goes through `log_tool_call` and its `_LOGGABLE_TOOL_PARAMS` allowlist (`mcp-server/src/lib/security.py`), `scrub_embed_error` (`indexer/src/embedder.py`) and `_stage_error` (`indexer/src/main.py`). | A child's limits are sized from a plain measurement of the tool in the image, so a tool upgrade can outgrow them. Process separation is not filesystem or network confinement (PLAN.md decision 42, #698). | `pdf` and `html` (with body HTML conversion) still run in-process until #1293 and #1294; `text` stays in-process by decision 42. The stdlib message parse stays in-process (decision 42). `INDEXER_PARSE_MAX_BYTES=0` turns the message size cap off. Keeping mail out of logs is coding discipline plus marker tests: nothing stops a new log call from quoting mail. mbsync and mcp-server have no memory limit until #1300. | `indexer/tests/test_legacy_office.py` (`TestRunTool`, `TestEveryToolRunsUnderLimits`); `indexer/tests/test_image_child.py`; `indexer/tests/test_main.py` `test_oversized_file_dead_letters_not_terminal_success`; `scripts/tests/compose_test.sh` (hardening and the read-only `/maildir` on every overlay combination); Semgrep `compose-service-missing-read-only`, `compose-service-missing-no-new-privileges`, `compose-service-missing-cap-drop-all`, `compose-root-user`; `mcp-server/tests/test_sqlite.py` `test_write_attempt_raises` (the `?mode=ro` open; `PRAGMA query_only` is docs only); synthetic-marker tests in both suites, such as `mcp-server/tests/test_provider_error_privacy.py`. |
+| **Untrusted mail and attachments.** A crafted message or attachment stalls or exhausts the indexer, runs code in it, or puts mail content into logs. | A message over `INDEXER_PARSE_MAX_BYTES` is dead-lettered before it is parsed, after reading at most the cap plus one byte (`indexer/src/parser.py`, `indexer/src/main.py`). The `doc` and `ppt` tools and the `xls`, `docx`, `pptx`, `xlsx` and `image` extractors run in a child started by `indexer/src/extractors/_runner.py` (`run_tool`, `run_child`): `_launcher.py` sets `RLIMIT_AS` and `RLIMIT_CPU` before the tool loads, with a wall-clock timeout, an output cap, a kill of the whole process group and a parent-owned scratch directory. One pass of one message may start at most a budget of extraction processes and seconds on attachments the cache cannot serve; the rest are deferred to later passes, between other mail (`indexer/src/attachment_indexing.py` `ExtractionBudget`, #1236). Per-message rows are keyed by the claimant ID (`parser.py` `claimant_id`). In `docker-compose.yml` the indexer mounts Maildir `:ro` and has `mem_limit: 6g`; every service has a read-only root filesystem, `cap_drop: ALL` and `no-new-privileges`. mcp-server has no Maildir mount and opens the index `?mode=ro` with `PRAGMA query_only` (`mcp-server/src/lib/sqlite.py`). Log text goes through `log_tool_call` and its `_LOGGABLE_TOOL_PARAMS` allowlist (`mcp-server/src/lib/security.py`), `scrub_embed_error` (`indexer/src/embedder.py`) and `_stage_error` (`indexer/src/main.py`). | A child's limits are sized from a plain measurement of the tool in the image, so a tool upgrade can outgrow them. Process separation is not filesystem or network confinement (PLAN.md decision 42, #698). | `pdf` and `html` (with body HTML conversion) still run in-process until #1293 and #1294; `text` stays in-process by decision 42. The stdlib message parse stays in-process (decision 42). `INDEXER_PARSE_MAX_BYTES=0` turns the message size cap off. Keeping mail out of logs is coding discipline plus marker tests: nothing stops a new log call from quoting mail. mbsync and mcp-server have no memory limit until #1300. | `indexer/tests/test_legacy_office.py` (`TestRunTool`, `TestEveryToolRunsUnderLimits`); `indexer/tests/test_image_child.py`; `indexer/tests/test_extraction_budget.py`; `indexer/tests/test_main.py` `test_oversized_file_dead_letters_not_terminal_success`; `scripts/tests/compose_test.sh` (hardening and the read-only `/maildir` on every overlay combination); Semgrep `compose-service-missing-read-only`, `compose-service-missing-no-new-privileges`, `compose-service-missing-cap-drop-all`, `compose-root-user`; `mcp-server/tests/test_sqlite.py` `test_write_attempt_raises` (the `?mode=ro` open; `PRAGMA query_only` is docs only); synthetic-marker tests in both suites, such as `mcp-server/tests/test_provider_error_privacy.py`. |
 | **Secrets.** The Bridge password, provider API keys or the MCP token reach the repository, `docker inspect`, a log, or another local account. | Each secret is a Docker secret read from `.secrets/` (the `secrets` section of `docker-compose.yml`). `scripts/validate-env.sh`, which `make up` runs first, requires mode 600 on every secret file (`require_mode_600`) and rejects the API keys and `MCP_AUTH_TOKEN` in `.env` (`reject_secret_in_env`). `.gitignore` excludes `.env`, `.secrets/` and `*.pem`; the `detect-secrets` pre-commit hook also runs in CI (`lint.yml`). Clients get the token from a file, never an argument (`scripts/mcp-auth-headers.sh`; `mcp-server/src/stdio_adapter.py` refuses a group- or other-readable file). | Every secret rests on the operator's account and mode 600 on the host's disk: processes running as the operator are trusted (see [Endpoint authentication](#endpoint-authentication)). | Secrets are stored unencrypted on the host's disk. A plain `docker compose up` skips `validate-env.sh`. | `scripts/tests/validate_env_test.sh` (`loose_secret_mode_fails`, `loose_mcp_token_mode_fails`, `api_key_in_env_fails`, `mcp_token_in_env_fails`); `mcp-server/tests/test_stdio_adapter.py` `test_group_or_other_access_fails_closed`; `mcp-server/tests/test_http_transport.py` `test_tokens_stay_out_of_the_log`; Semgrep `shell-xtrace-enabled`. The `.gitignore` entries and the `detect-secrets` hook are docs only. <!-- pragma: allowlist secret --> |
 | **Network exposure.** Another machine, another local account or a web page reaches the MCP endpoint, or a container other than mbsync logs in to Bridge. | Only `mcp-server` publishes a port, `127.0.0.1:${MCP_PORT:-3000}` (`docker-compose.yml`). mbsync alone joins `bridge-net` and alone mounts the `bridge_pass` secret. No service shares the host's network namespace. `mcp-server/src/main.py`: `_HostOriginGuard` rejects a bad Host (421) or Origin (403), and `_StaticBearerTokenVerifier` checks the bearer token with `hmac.compare_digest` before any session exists. `docker-compose.hardened.yml` makes `app-net` internal. | The loopback bind keeps other machines out; the token is what stops other local accounts. | The bearer token is the only caller-authentication control against another local account, and it does not separate code running as the operator. `app-net` is not internal by default, so the indexer and mcp-server can reach remote providers. No network control limits Bridge's port to mbsync: on macOS `host.docker.internal` reaches the host's loopback from any container, so only the Bridge password, which mbsync alone mounts, keeps the others from logging in. | `scripts/tests/compose_test.sh` (ports and `bridge-net` membership on every overlay combination); Semgrep `compose-port-on-other-service`, `compose-port-not-loopback`, `compose-bridge-net-member`, `compose-host-namespace`; `mcp-server/tests/test_http_transport.py` (`test_missing_token_is_unauthorized`, `test_wrong_token_is_unauthorized`, `test_empty_token_fails_closed`, `test_compare_is_constant_time`, `test_streamable_http_rejects_other_host`, `test_streamable_http_rejects_other_origin`). |
 | **Bridge TLS.** Another listener on the Bridge app's loopback port (another local account while the app is down) receives the Bridge password, or the connection falls back to plaintext. | `mbsync/entrypoint.sh` `extract_bridge_cert` connects over implicit TLS only, with no STARTTLS or plaintext fallback, and checks the certificate against the required `BRIDGE_CERT_FINGERPRINT` (`verify_expected_fingerprint`) and then the pin in `mbsync-state` (`verify_cert_pin`) on every start, before the first sync sends the password. With `BRIDGE_CERT_PIN_ROTATE=true` a changed certificate that matches the fingerprint replaces the pin instead of failing. The certificate lives on tmpfs at `/tmp/mbsync/bridge-cert.pem`, which isync uses as `CertificateFile` with `TLSType IMAPS` (`mbsync/mbsyncrc.template`). `validate-env.sh` refuses a missing or malformed fingerprint. The template is pull-only: `Sync Pull`, `Expunge None`. | The fingerprint check, the pin and isync's `CertificateFile` all check the certificate extracted at start. On first boot or during a rotation the pin is written from that certificate, so a fingerprint taken from the wrong certificate passes all three; after that, the pin also refuses a certificate other than the pinned one. | Pull-only sync is one configuration control, the template's settings. isync's own validity and host name checks run on each sync, not at startup. `BRIDGE_CERT_PIN_ROTATE=true` stays in effect until mbsync is recreated with it false, and while it does the pin check does not stop a certificate change; the fingerprint check still does. | `mbsync/tests/entrypoint_test.sh` (`mismatch_is_refused_without_rotation`, `first_boot_with_another_expected_fingerprint_is_refused_unpinned`, `missing_expected_fingerprint_is_refused_at_startup`, `config_keeps_sync_safety`); `mbsync/tests/tls_check.sh`; `mbsync/tests/layout_check.sh`; `scripts/tests/validate_env_test.sh` `missing_bridge_cert_fingerprint_fails`; Semgrep `shell-tls-verification-disabled`. |

@@ -20,6 +20,9 @@ INDEXER_SRC = Path(__file__).resolve().parents[2] / "indexer" / "src"
 
 PERMISSION_DEFERRED = "PermissionError: deferred until mbsync opens the file"
 RENAME_DEFERRED = "FileNotFoundError: deferred until the rename is recorded"
+EXTRACTION_DEFERRED = (
+    "attachment extraction deferred: per-message budget reached; continued on a later pass"
+)
 
 
 def _queue(db: Database, *jobs: tuple) -> dict:
@@ -44,6 +47,10 @@ def test_one_job_of_each_kind_lands_in_its_bucket(empty_db: Database):
         ("queued", 0, "operator_action_required", "x", "embed", "AuthenticationError"),
         # Reparse waiting for the watcher to record a rename.
         ("queued", 0, "retryable", "reparse", "parse", RENAME_DEFERRED),
+        # Attachment extraction past the per-message budget (#1236),
+        # continued on a later pass; one with attempts already spent.
+        ("queued", 0, "retryable", "x", "extract", EXTRACTION_DEFERRED),
+        ("queued", 2, "retryable", "reparse", "extract", EXTRACTION_DEFERRED),
         # Gave up.
         ("dead", 5, "retryable", "x", "parse", "ValueError"),
     )
@@ -51,9 +58,10 @@ def test_one_job_of_each_kind_lands_in_its_bucket(empty_db: Database):
         "pending": 1,
         "retrying": 1,
         "deferred": 4,
+        "extraction_deferred": 2,
         "parked_trashed": 1,
         "dead": 1,
-        "reparse": 1,
+        "reparse": 2,
     }
 
 
@@ -95,9 +103,11 @@ def test_requeued_dead_job_is_pending_whatever_its_last_stage(empty_db: Database
         ("queued", 0, None, "x", "embed", "APIConnectionError"),
         ("queued", 0, None, "x", "parse", PERMISSION_DEFERRED),
         ("queued", 0, None, "x", "trashed", "file is T-flagged; parked"),
+        ("queued", 0, None, "x", "extract", EXTRACTION_DEFERRED),
     )
-    assert queue["pending"] == 3
+    assert queue["pending"] == 4
     assert queue["deferred"] == queue["parked_trashed"] == queue["retrying"] == 0
+    assert queue["extraction_deferred"] == 0
 
 
 def test_reparse_counts_waiting_jobs_only(empty_db: Database):
@@ -190,4 +200,15 @@ def test_every_indexer_deferral_is_reported_as_deferred(empty_db: Database, site
     jobs = tuple(("queued", 0, cls, "x", site["stage"], error) for cls in classes)
     queue = _queue(empty_db, *jobs)
     assert queue["pending"] == queue["retrying"] == 0, site
-    assert queue["deferred"] + queue["parked_trashed"] == len(jobs), site
+    assert queue["deferred"] + queue["parked_trashed"] + queue["extraction_deferred"] == len(
+        jobs
+    ), site
+
+
+def test_the_extraction_deferral_text_matches_the_indexer():
+    """Status matches the indexer's fixed text; it cannot import it."""
+    from src.lib.sqlite import QUEUE_EXTRACTION_DEFERRED_ERROR
+
+    indexer = _module_strings(INDEXER_SRC / "queue.py")
+    assert indexer["EXTRACTION_DEFERRED_ERROR"] == QUEUE_EXTRACTION_DEFERRED_ERROR
+    assert indexer["STAGE_EXTRACT"] == "extract"
