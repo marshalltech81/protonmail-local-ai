@@ -331,35 +331,79 @@ ROLE_COMPLETE_COLUMNS = {
 }
 
 
-def _participant_clause(value: str, roles: tuple[str, ...], params: list) -> str:
-    """SQL deciding whether ``value`` appears in one of ``roles`` of
+def _role_clause(mode: str, value: str, roles: tuple[str, ...], params: list) -> str:
+    """SQL deciding whether the address leaf ``mode`` (an
+    ``_ADDRESS_MODES`` key) finds ``value`` in one of ``roles`` of
     ``messages m``; appends the bound values to ``params``.
 
     A stored match is 1. No match is 0 only when every role's stored
     addresses are complete (``ROLE_COMPLETE_COLUMNS`` all 1, #1086) and,
-    for a substring, every display name is stored
+    for a mode that reads display names, every display name is stored
     (``m.participant_names_complete`` 1, #1140); otherwise it is unknown
     (NULL): a cap or an unparseable element lost an address, the name
     budget dropped a name, or the message is not assessed yet (not
-    reparsed since the upgrade that added the flag). An exact address is
-    matched by canonical equality, a substring against stored addresses
-    and display names."""
-    role_sql = ",".join(["?"] * len(roles))
+    reparsed since the upgrade that added the flag)."""
+    match_sql, reads_names = _ADDRESS_MODES[mode]
     complete = [f"m.{ROLE_COMPLETE_COLUMNS[role]} = 1" for role in roles]
-    if address_match_mode(value) == "exact":
-        params.extend([canonical_addr(value), *roles])
-        match = (
-            "m.claimant_id IN (SELECT claimant_id FROM message_participants "  # nosec B608
-            f"WHERE address = ? AND role IN ({role_sql}))"
-        )
-    else:
-        match = (
-            "m.claimant_id IN (SELECT p.claimant_id FROM message_participants p "  # nosec B608
-            f"WHERE {_substring_participant_rows(value, roles, params)})"
-        )
+    if reads_names:
         complete.append("m.participant_names_complete = 1")
+    match = match_sql(value, roles, params)
     # The column names are constants; the values are bound.
     return f"CASE WHEN {match} THEN 1 WHEN {' AND '.join(complete)} THEN 0 ELSE NULL END"
+
+
+def _address_is_match(value: str, roles: tuple[str, ...], params: list) -> str:
+    # Canonical equality, an indexed lookup. A value with no full address
+    # canonicalizes to "" and matches nothing.
+    role_sql = ",".join(["?"] * len(roles))
+    params.extend([canonical_addr(value), *roles])
+    return (
+        "m.claimant_id IN (SELECT claimant_id FROM message_participants "  # nosec B608
+        f"WHERE address = ? AND role IN ({role_sql}))"
+    )
+
+
+def _rows_match(rows: Callable[[str, tuple[str, ...], list], str]) -> Callable[..., str]:
+    """The match of a mode that selects ``message_participants p`` rows."""
+
+    def match(value: str, roles: tuple[str, ...], params: list) -> str:
+        return (
+            "m.claimant_id IN (SELECT p.claimant_id FROM message_participants p "  # nosec B608
+            f"WHERE {rows(value, roles, params)})"
+        )
+
+    return match
+
+
+def _address_rows(value: str, roles: tuple[str, ...], params: list) -> str:
+    # Addresses are stored lowercased.
+    role_sql = ",".join(["?"] * len(roles))
+    params.extend([*roles, value.strip().lower()])
+    return f"p.role IN ({role_sql}) AND instr(p.address, ?) > 0"
+
+
+def _name_rows(value: str, roles: tuple[str, ...], params: list) -> str:
+    # Each display name the message wrote the address with (#1140) is
+    # matched on its own, so no match spans two names.
+    role_sql = ",".join(["?"] * len(roles))
+    params.extend([*roles, value.strip().casefold()])
+    return (
+        f"p.role IN ({role_sql}) "  # nosec B608
+        "AND EXISTS (SELECT 1 FROM message_participant_names n "
+        "WHERE n.claimant_id = p.claimant_id AND n.role = p.role AND n.address = p.address "
+        "AND instr(mcp_casefold(n.name), ?) > 0)"
+    )
+
+
+def _domain_rows(value: str, roles: tuple[str, ...], params: list) -> str:
+    # The stored (canonical, lowercased) address ends in "@" plus the
+    # domain: its exact domain, never a suffix such as a subdomain. The
+    # value's validation and normalization are settled with the ``where``
+    # parameter (#1088); here it is only stripped and lowercased.
+    role_sql = ",".join(["?"] * len(roles))
+    suffix = "@" + value.strip().lower()
+    params.extend([*roles, -len(suffix), suffix])
+    return f"p.role IN ({role_sql}) AND substr(p.address, ?) = ?"
 
 
 def _substring_participant_rows(value: str, roles: tuple[str, ...], params: list) -> str:
@@ -523,35 +567,93 @@ def normalize_size_bound(name: str, value: Any) -> int | None:
     return value
 
 
-# Roles each address leaf searches in ``message_participants``.
+# The explicit address leaves (#1088): name -> (match SQL builder,
+# whether it reads display names, so needs them complete to say no).
+_ADDRESS_MODES: dict[str, tuple[Callable[[str, tuple[str, ...], list], str], bool]] = {
+    # Canonical equality with a full address.
+    "address_is": (_address_is_match, False),
+    # Caseless substring of the stored address only.
+    "address_contains": (_rows_match(_address_rows), False),
+    # Caseless (casefolded) substring of one stored display name only.
+    "display_name_contains": (_rows_match(_name_rows), True),
+    # Either: the inferred substring mode of the flat filters.
+    "address_or_name_contains": (_rows_match(_substring_participant_rows), True),
+    # The exact domain of the stored address.
+    "domain_is": (_rows_match(_domain_rows), False),
+}
+
+# The stored ``message_participants`` roles each explicit address
+# leaf's role names (#1088). ``visible_participant`` (From, To or Cc)
+# is internal: it is what the flat ``participant`` filter compiles to.
+# The Bcc-inclusive ``recipient`` and ``any`` arrive with Bcc (#1090).
+ROLE_SETS: dict[str, tuple[str, ...]] = {
+    "from": ("from",),
+    "to": ("to",),
+    "cc": ("cc",),
+    "visible_recipient": ("to", "cc"),
+    "visible_participant": ("from", "to", "cc"),
+}
+
+# The role each flat address filter compiles to; the flat filters keep
+# their visible meaning permanently (#1088).
+_FLAT_ADDRESS_ROLES = {
+    "sender": "from",
+    "recipient": "visible_recipient",
+    "participant": "visible_participant",
+}
+
+# Roles each flat address leaf searches in ``message_participants``.
 ADDRESS_ROLES: dict[str, tuple[str, ...]] = {
-    "sender": ("from",),
-    "recipient": ("to", "cc"),
-    "participant": ("from", "to", "cc"),
+    name: ROLE_SETS[role] for name, role in _FLAT_ADDRESS_ROLES.items()
 }
 
 
-def _compile_sender(value: str, params: list) -> str:
-    # The From role decides the leaf only when the message's sender
-    # attribution is known safe (``sender_ambiguous = 0``, #1144). For 1
-    # (a repeated From, or a header scan cut short) or NULL (not
-    # assessed yet) the author cannot be told, so the leaf is unknown
-    # whether or not the stored From carries the value (#1153).
-    return (
-        "CASE WHEN m.sender_ambiguous = 0 THEN "
-        f"{_participant_clause(value, ADDRESS_ROLES['sender'], params)} ELSE NULL END"
-    )
+def inferred_address_leaf(leaf: Leaf) -> Leaf:
+    """The explicit leaf a flat ``sender`` / ``recipient`` /
+    ``participant`` leaf compiles to: ``address_is`` for a full address,
+    otherwise ``address_or_name_contains`` (``address_match_mode``),
+    on the flat filter's role."""
+    mode = "address_is" if address_match_mode(leaf.value) == "exact" else "address_or_name_contains"
+    return Leaf(mode, (_FLAT_ADDRESS_ROLES[leaf.name], leaf.value))
 
 
-def _compile_recipient(value: str, params: list) -> str:
-    return _participant_clause(value, ADDRESS_ROLES["recipient"], params)
+def _compile_address(mode: str) -> Callable[[tuple[str, str], list], str]:
+    """The compiler of the explicit address leaf ``mode``, whose value is
+    ``(role, value)`` with ``role`` a ``ROLE_SETS`` key."""
+
+    def compile(role_value: tuple[str, str], params: list) -> str:
+        role, value = role_value
+        roles = ROLE_SETS[role]
+        if "from" not in roles:
+            return _role_clause(mode, value, roles, params)
+        # The From role decides the leaf only when the message's sender
+        # attribution is known safe (``sender_ambiguous = 0``, #1144).
+        # For 1 (a repeated From, or a header scan cut short) or NULL (not
+        # assessed yet) the author cannot be told, so the From side is
+        # unknown whether or not the stored From carries the value
+        # (#1153).
+        others = tuple(r for r in roles if r != "from")
+        other_sql = _role_clause(mode, value, others, params) if others else ""
+        from_sql = (
+            "CASE WHEN m.sender_ambiguous = 0 THEN "
+            f"{_role_clause(mode, value, ('from',), params)} ELSE NULL END"
+        )
+        # SQL's three-valued OR: a match in another role decides the leaf
+        # whatever the sender flag; otherwise the From side answers.
+        return f"({other_sql} OR {from_sql})" if others else from_sql
+
+    return compile
 
 
-def _compile_participant(value: str, params: list) -> str:
-    # SQL's three-valued OR: a To or Cc match decides the leaf whatever
-    # the sender flag; otherwise the From side answers as ``sender`` does.
-    recipient = _compile_recipient(value, params)
-    return f"({recipient} OR {_compile_sender(value, params)})"
+def _compile_inferred(name: str) -> Callable[[str, list], str]:
+    """The compiler of the flat address leaf ``name``: its inferred
+    explicit leaf's (``inferred_address_leaf``)."""
+
+    def compile(value: str, params: list) -> str:
+        explicit = inferred_address_leaf(Leaf(name, value))
+        return LEAVES[explicit.name].compile(explicit.value, params)
+
+    return compile
 
 
 def _decided_by(match: str, complete: str) -> str:
@@ -569,7 +671,7 @@ def _compile_subject(value: str, params: list) -> str:
     return _decided_by("instr(mcp_casefold(m.subject), ?) > 0", "subject_complete")
 
 
-def _compile_text(terms: tuple[str, ...], params: list) -> str:
+def _compile_body_words(terms: tuple[str, ...], params: list) -> str:
     # One subquery per word, so the words may fall in different chunks
     # of the same message. Each is a quoted FTS phrase; unicode61 never
     # keeps a quote inside a token, but doubling any (FTS5 string
@@ -695,19 +797,41 @@ def _has_attachments_test(state: bool) -> Callable[[Any], bool]:
 LEAVES: dict[str, LeafKind] = {
     kind.name: kind
     for kind in (
+        # The flat address filters, in their inferred mode
+        # (``inferred_address_leaf``).
         LeafKind(
-            "sender", "address", _compile_sender, Evaluability.UNKNOWN_WHEN_NULL, _sender_test
+            "sender",
+            "address",
+            _compile_inferred("sender"),
+            Evaluability.UNKNOWN_WHEN_NULL,
+            _sender_test,
         ),
-        LeafKind("recipient", "address", _compile_recipient, Evaluability.UNKNOWN_WHEN_NULL),
+        LeafKind(
+            "recipient", "address", _compile_inferred("recipient"), Evaluability.UNKNOWN_WHEN_NULL
+        ),
         LeafKind(
             "participant",
             "address",
-            _compile_participant,
+            _compile_inferred("participant"),
             Evaluability.UNKNOWN_WHEN_NULL,
             _participant_test,
         ),
+        # The explicit address leaves (#1088): a ``ROLE_SETS`` role and a
+        # value.
+        *(
+            LeafKind(mode, param, _compile_address(mode), Evaluability.UNKNOWN_WHEN_NULL)
+            for mode, param in (
+                ("address_is", "role, address"),
+                ("address_contains", "role, text"),
+                ("display_name_contains", "role, text"),
+                ("address_or_name_contains", "role, text"),
+                ("domain_is", "role, domain"),
+            )
+        ),
         LeafKind("subject", "text", _compile_subject, Evaluability.UNKNOWN_WHEN_NULL),
-        LeafKind("text", "words", _compile_text, Evaluability.UNKNOWN_WHEN_NULL),
+        # ``text`` is the flat filter's name for ``body_words`` (#1088).
+        LeafKind("text", "words", _compile_body_words, Evaluability.UNKNOWN_WHEN_NULL),
+        LeafKind("body_words", "words", _compile_body_words, Evaluability.UNKNOWN_WHEN_NULL),
         LeafKind("folder", "folders", _compile_folder, Evaluability.DECIDED),
         LeafKind("not_in_folders", "folders", _compile_not_in_folders, Evaluability.DECIDED),
         LeafKind(
