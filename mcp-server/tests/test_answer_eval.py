@@ -36,7 +36,7 @@ from src.tools.outputs import AnswerStatement
 
 from tests.agent_metrics import is_held_out
 from tests.answer_eval import __main__ as cli
-from tests.answer_eval.adapters import planned_calls
+from tests.answer_eval.adapters import EntryStatement, planned_calls
 from tests.answer_eval.cases import (
     CASES_PATH,
     CATEGORIES,
@@ -48,7 +48,15 @@ from tests.answer_eval.cases import (
 )
 from tests.answer_eval.cli_judge import CliJudgeError
 from tests.answer_eval.config import ConfigError, LayerConfig, load_layer
-from tests.answer_eval.graders import FAIL, NA, PASS, attribute, budget_omitted_facts, grade_run
+from tests.answer_eval.graders import (
+    CHRONOLOGY_CHECKS,
+    FAIL,
+    NA,
+    PASS,
+    attribute,
+    budget_omitted_facts,
+    grade_run,
+)
 from tests.answer_eval.harness import evaluate
 from tests.answer_eval.judge import (
     JUDGE_SYSTEM,
@@ -121,6 +129,7 @@ def _run(
     status: str = "ok",
     consistent: bool = True,
     coverage_note: str | None = None,
+    statements: list | None = None,
 ) -> CaseRun:
     threads = retrieved if retrieved is not None else sorted({p.thread_id for p in passages})
     output = SimpleNamespace(
@@ -128,7 +137,7 @@ def _run(
         coverage_note=coverage_note,
         threads=[SimpleNamespace(thread_id=t) for t in threads],
         citations=[SimpleNamespace(label=label) for label in cited],
-        statements=[],
+        statements=statements or [],
         citation_problems=[SimpleNamespace(kind=k) for k in problems],
         repair_attempted=False,
     )
@@ -281,6 +290,66 @@ class TestCases:
         path.write_text(json.dumps(data))
         with pytest.raises(CaseError):
             load_cases(path)
+
+    @pytest.mark.parametrize(
+        "mutate",
+        [
+            lambda r: r["chronology"].update(extra=1),
+            lambda r: r["chronology"].update(positions=[]),
+            lambda r: r["chronology"].update(as_of="10 March"),
+            lambda r: r["chronology"].update(as_of="2026-02-30"),
+            lambda r: r["chronology"]["positions"][0].update(id="x1"),
+            lambda r: r["chronology"]["positions"][1].update(id="p1"),
+            lambda r: r["chronology"]["positions"][0].update(actor=[]),
+            lambda r: r["chronology"]["positions"][0].update(kind="vibe"),
+            # A position is stated by one message, never a whole thread.
+            lambda r: r["chronology"]["positions"][0].update(source="t125"),
+            lambda r: r["chronology"]["positions"][0].update(date="2026-13-01"),
+            lambda r: r["chronology"]["positions"][0].update(date_source="unknown"),
+            lambda r: r["chronology"]["positions"][0].update(values=[""]),
+            lambda r: r["chronology"]["positions"][0].update(values=["1,150"]),
+            lambda r: r["chronology"]["positions"][0].update(values=[[]]),
+            lambda r: r["chronology"]["positions"][0].update(values=[["1,150", ""]]),
+            lambda r: r["chronology"]["positions"][0].update(excerpt=" "),
+            lambda r: r["chronology"]["positions"][0].pop("excerpt"),
+            lambda r: r["chronology"].update(
+                changes=[{"from": "p2", "to": "p9", "kind": "correction"}]
+            ),
+            lambda r: r["chronology"].update(
+                changes=[{"from": "p2", "to": "p2", "kind": "correction"}]
+            ),
+            lambda r: r["chronology"].update(changes=[{"from": "p2", "to": "p3", "kind": "vibe"}]),
+            lambda r: r["chronology"].update(conflicts=[["p1"]]),
+            lambda r: r["chronology"].update(conflicts=[["p1", "p1"]]),
+            lambda r: r["chronology"].update(in_force=["p9"]),
+            lambda r: r["chronology"].update(changes=[], in_force=[]),
+            # Every source an answer must cite is a required group of its own.
+            lambda r: r.update(required_evidence=[["t125.2", "t125.3"]]),
+            lambda r: r.update(required_evidence=[["t125.2"]]),
+            lambda r: r.update(
+                answerable=False,
+                expected_handling="abstain",
+                required_evidence=[],
+                expected_facts=[],
+            ),
+        ],
+    )
+    def test_chronology_label_breaches_are_rejected(self, tmp_path, mutate):
+        """#291: golden chronology labels are validated like the rest of a case."""
+        data = json.loads(CASES_PATH.read_text())
+        row = next(r for r in data["cases"] if r["id"] == "ask-hedge-price-as-of-march")
+        mutate(row)
+        path = tmp_path / "cases.json"
+        path.write_text(json.dumps(data))
+        with pytest.raises(CaseError):
+            load_cases(path)
+
+    def test_chronology_labels_load(self):
+        chron = CASES["ask-hedge-status-now"].chronology
+        assert chron is not None and chron.as_of is None
+        assert [p.id for p in chron.positions] == ["p1", "p2", "p3", "p4"]
+        assert chron.must_cite() == ["t125.3", "t125.4", "t125.2"]
+        assert CASES["ask-recital-date"].chronology is None
 
     def test_schema_version_and_duplicates_are_rejected(self, tmp_path):
         data = json.loads(CASES_PATH.read_text())
@@ -1267,6 +1336,221 @@ class TestDeterministicGraders:
         det = grade_run(case, run)
         assert not det.passed and det.checks == {}
         assert attribute(case, run, det, False, False) == ["answer_infrastructure"]
+
+
+class TestChronologyGraders:
+    """#291: the golden chronology labels catch an omitted correction, a
+    conflict reduced to one side, a value cited to a message that does
+    not state it, and an event dated or attributed by the wrong message."""
+
+    HEDGE = [_passage("E1", "t125.2"), _passage("E2", "t125.3")]
+
+    def _hedge(self, statements: list[AnswerStatement]) -> CaseRun:
+        cited = list(dict.fromkeys(label for s in statements for label in s.labels))
+        answer = " ".join(s.text for s in statements)
+        return _run(answer, self.HEDGE, cited, statements=statements)
+
+    def test_correct_chronology_passes(self):
+        case = CASES["ask-hedge-price-as-of-march"]
+        run = self._hedge(
+            [
+                _statement("As of 10 March the agreed price was $1,150 [E1].", ["E1"]),
+                _statement("On 19 March Wilma corrected it to $1,050, not $1,150 [E2].", ["E2"]),
+            ]
+        )
+        det = grade_run(case, run)
+        assert det.passed, det.checks
+        assert det.checks["chronology_cited"] == PASS
+        assert det.checks["values_attributed"] == PASS
+        assert det.checks["chronology_dated"] == NA  # prose: the judge grades dates
+
+    def test_omitted_correction_fails(self):
+        case = CASES["ask-hedge-price-as-of-march"]
+        run = self._hedge([_statement("The agreed price is $1,150 [E1].", ["E1"])])
+        det = grade_run(case, run)
+        assert det.checks["chronology_cited"] == FAIL
+        assert det.checks["citations_resolve"] == PASS
+
+    def test_valid_looking_citation_for_the_wrong_message_fails(self):
+        """Every citation resolves to a supplied passage and the tool's
+        checks pass; the corrected value is cited to the superseded
+        message, which never states it."""
+        case = CASES["ask-hedge-price-as-of-march"]
+        run = self._hedge(
+            [
+                _statement("The agreed price was corrected to $1,050 [E1].", ["E1"]),
+                _statement("A later message bears on this [E2].", ["E2"]),
+            ]
+        )
+        det = grade_run(case, run)
+        assert det.checks["chronology_cited"] == PASS
+        assert det.checks["citations_resolve"] == PASS
+        assert det.checks["citation_checks"] == PASS
+        assert det.checks["values_attributed"] == FAIL
+        assert "synthesis" in attribute(case, run, det, False, False)
+
+    def test_value_stated_without_any_citation_fails(self):
+        case = CASES["ask-hedge-price-as-of-march"]
+        run = self._hedge(
+            [
+                _statement("The agreed price is $1,050.", []),
+                _statement("See [E1] and [E2].", ["E1", "E2"]),
+            ]
+        )
+        assert grade_run(case, run).checks["values_attributed"] == FAIL
+
+    def test_conflict_reduced_to_the_newest_side_fails(self):
+        case = CASES["ask-reading-room-deposit"]
+        passages = [_passage("E1", "t126.1"), _passage("E2", "t127.1")]
+        newest = [_statement("The key deposit is $60 [E2].", ["E2"])]
+        det = grade_run(case, _run(newest[0].text, passages, ["E2"], statements=newest))
+        assert det.checks["chronology_cited"] == FAIL
+        both = [
+            _statement("Hazel says $45 [E1].", ["E1"]),
+            _statement("Bram says $60 [E2].", ["E2"]),
+        ]
+        det = grade_run(
+            case, _run(" ".join(s.text for s in both), passages, ["E1", "E2"], statements=both)
+        )
+        assert det.checks["chronology_cited"] == PASS
+        assert det.checks["values_attributed"] == PASS
+
+    @staticmethod
+    def _event(date, date_source, actor, labels):
+        return EntryStatement(
+            f"{date} ({date_source}) {actor}: closed until 30 June [E1]",
+            labels,
+            "cited",
+            "chronology",
+            0,
+            date=date,
+            date_source=date_source,
+            actor=actor,
+        )
+
+    @pytest.mark.parametrize(
+        ("date", "date_source", "actor", "expected"),
+        [
+            ("2026-05-05", "mentioned", "Nell Garside, parish clerk", PASS),
+            # Dated and attributed by the message that quoted her.
+            ("2026-05-11", "sent", "Rafe Dunmore", FAIL),
+            ("2026-05-05", "mentioned", "Rafe Dunmore", FAIL),
+            ("2026-05-11", "sent", "Nell Garside", FAIL),
+            ("2026-05-05", "sent", "Nell Garside", FAIL),
+        ],
+    )
+    def test_brief_events_keep_their_date_and_actor(self, date, date_source, actor, expected):
+        case = CASES["brief-footbridge-closure"]
+        event = self._event(date, date_source, actor, ["E1"])
+        run = _run(event.text, [_passage("E1", "t128.1")], ["E1"], statements=[event])
+        assert grade_run(case, run).checks["chronology_dated"] == expected
+
+    @pytest.mark.parametrize(
+        "actor",
+        [
+            # Review round 1: a role alias inside the relayer's own
+            # description, and a name that only contains an accepted one.
+            "Rafe Dunmore relaying the parish clerk",
+            "Nellie Garsideson",
+        ],
+    )
+    def test_brief_event_actor_is_a_whole_name(self, actor):
+        case = CASES["brief-footbridge-closure"]
+        event = self._event("2026-05-05", "mentioned", actor, ["E1"])
+        run = _run(event.text, [_passage("E1", "t128.1")], ["E1"], statements=[event])
+        assert grade_run(case, run).checks["chronology_dated"] == FAIL
+
+    @pytest.mark.parametrize("date_source", ["sent", "mentioned"])
+    def test_relative_date_accepts_either_source(self, date_source):
+        """Review round 1: "phoned me this morning" dates the call by the
+        message itself, so either date source is right."""
+        case = CASES["brief-dispenser-hire-charge"]
+        event = self._event("2026-07-16", date_source, "Ruben Kestle", ["E1"])
+        run = _run(event.text, [_passage("E1", "t100.11")], ["E1"], statements=[event])
+        assert grade_run(case, run).checks["chronology_dated"] == PASS
+        wrong = self._event("2026-07-17", date_source, "Ruben Kestle", ["E1"])
+        run = _run(wrong.text, [_passage("E1", "t100.11")], ["E1"], statements=[wrong])
+        assert grade_run(case, run).checks["chronology_dated"] == FAIL
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            # Review round 1: another rendering of a labelled value is
+            # still that value, so its citation is still checked.
+            ("Hazel Pim gives 60 dollars [E1].", FAIL),
+            ("Hazel Pim gives USD 60 [E1].", FAIL),
+            ("Hazel Pim gives 45 dollars [E1].", PASS),
+        ],
+    )
+    def test_value_renderings_are_attributed(self, text, expected):
+        case = CASES["ask-reading-room-deposit"]
+        passages = [_passage("E1", "t126.1"), _passage("E2", "t127.1")]
+        statements = [_statement(text, ["E1"]), _statement("Bram Okoye [E2].", ["E2"])]
+        run = _run(text, passages, ["E1", "E2"], statements=statements)
+        assert grade_run(case, run).checks["values_attributed"] == expected
+
+    def test_date_value_spellings_are_attributed(self):
+        case = CASES["ask-footbridge-closure"]
+        passages = [_passage("E1", "t128.1"), _passage("E2", "t127.1")]
+        for text, label, expected in (
+            ("Closed until June 30 [E2].", "E2", FAIL),
+            ("Closed until June 30 [E1].", "E1", PASS),
+        ):
+            statements = [_statement(text, [label]), _statement("See [E1].", ["E1"])]
+            run = _run(text, passages, ["E1", "E2"], statements=statements)
+            assert grade_run(case, run).checks["values_attributed"] == expected, text
+
+    def test_brief_event_lost_before_the_prompt_is_left_to_the_evidence_groups(self):
+        """A position whose source never reached the prompt is not graded
+        on its date: the evidence groups attribute that loss."""
+        case = CASES["brief-hedge-agreement"]
+        events = [
+            self._event("2026-03-02", "sent", "Wilma Harte", ["E1"]),
+        ]
+        run = _run("x", [_passage("E1", "t125.1")], ["E1"], statements=events)
+        det = grade_run(case, run)
+        assert det.checks["chronology_dated"] == PASS
+        assert det.checks["chronology_cited"] == FAIL
+        assert det.checks["required_evidence_cited"] == FAIL
+
+    def test_cases_without_labels_skip_the_chronology_checks(self):
+        case = CASES["ask-recital-date"]
+        det = grade_run(case, _run("August 11 [E1].", [_passage("E1", "t24.2")], ["E1"]))
+        assert all(det.checks[name] == NA for name in CHRONOLOGY_CHECKS)
+
+    def test_report_rates_count_failed_runs_against_the_labels(self):
+        """Each chronology check's rate is over the cases it applies to,
+        and a case that did not complete counts as failing."""
+        from tests.answer_eval.judge import JudgeOutcome
+        from tests.answer_eval.report import case_record
+
+        case = CASES["ask-hedge-price-as-of-march"]
+        good = self._hedge(
+            [
+                _statement("It was $1,150 [E1].", ["E1"]),
+                _statement("Corrected to $1,050 [E2].", ["E2"]),
+            ]
+        )
+        failed = _run("", [], [], status="timeout")
+        records = [
+            case_record(case, run, grade_run(case, run), JudgeOutcome(status="not_run"), [])
+            for run in (good, failed)
+        ]
+        other = CASES["ask-recital-date"]
+        plain = _run("August 11 [E1].", [_passage("E1", "t24.2")], ["E1"])
+        records.append(
+            case_record(other, plain, grade_run(other, plain), JudgeOutcome(status="not_run"), [])
+        )
+        assert records[0]["chronology_checks"] == ["chronology_cited", "values_attributed"]
+        assert records[2]["chronology_checks"] == []
+        rates = build_report(_identity(judge=None), records, False)["aggregates"]["all"]
+        assert rates["chronology"] == {
+            "chronology_cited": 0.5,
+            "values_attributed": 0.5,
+            "chronology_dated": None,
+        }
+        summary = render_summary(build_report(_identity(judge=None), records, False))
+        assert "chronology cited 0.500" in summary
 
 
 # ------------------------------------------------------------------ judge

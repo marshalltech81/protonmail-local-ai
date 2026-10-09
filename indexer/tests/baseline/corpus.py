@@ -228,6 +228,20 @@ something else, so it is no acknowledgement. Their words avoid every
 golden search query's words and their stems, the reserved words above
 and every ``unanswerable`` question's ``absent_terms``.
 
+Threads 125-128 back the chronology answer-evaluation cases (#291),
+dated March to May 2026. In t125 a hedge layer proposes a price
+(t125.1), Sam agrees to it (t125.2), she then corrects the agreed
+price after the fact (t125.3: the price settled was $1,050, not the
+$1,150 both earlier messages state) and Sam calls the work off
+(t125.4). In t126 and t127 a treasurer and a caretaker give different
+key deposits ($45 and $60), and neither message mentions the other. In
+t128 a neighbour's reply has no text of its own, only the quoted words
+of a parish clerk whose message is not in the mailbox, dated by its
+reply header, so the quoted text is what gets indexed. The golden
+labels are in ``mcp-server/tests/answer_eval/cases.json``. Their words
+avoid every golden search query's content words, the reserved words
+above and every ``unanswerable`` question's ``absent_terms``.
+
 Thread IDs are the root Message-IDs: ``t<NN>.1@baseline.example``.
 """
 
@@ -3214,6 +3228,102 @@ THREADS.update(
                 "Jordan,\n\nA scheduling note while I have you: our office is closed on "
                 "September 7 for the holiday, and anything urgent that week should go to "
                 "Quinn Avila.\n\nBlair",
+            ),
+        ],
+    }
+)
+
+
+WILMA = "Wilma Harte <wilma@hartehedgecraft.example>"
+HAZEL = "Hazel Pim <treasurer@mossgatereadingroom.example>"
+BRAM = "Bram Okoye <caretaker@mossgatereadingroom.example>"
+RAFE = "Rafe Dunmore <rafe@dunmorecottage.example>"
+
+THREADS.update(
+    {
+        # Proposal, agreement, a retrospective correction of the agreed
+        # price and a cancellation, in one thread (#291).
+        125: [
+            Msg(
+                "INBOX",
+                "Mon, 2 Mar 2026 09:00:00 +0000",
+                WILMA,
+                ME,
+                "Laying the paddock hedge",
+                "Sam,\n\nThanks for walking the paddock with me. For laying the hawthorn "
+                "hedge along the paddock, I propose $1,150 for the whole run, with my team "
+                "on site in the week of 23 March.\n\nWilma Harte\nHarte Hedgecraft",
+            ),
+            Msg(
+                "Sent",
+                "Wed, 4 Mar 2026 18:30:00 +0000",
+                ME,
+                WILMA,
+                "Re: Laying the paddock hedge",
+                "Wilma,\n\nAgreed: $1,150 for laying the paddock hedge, in the week of 23 "
+                "March. Please go ahead and book your team.\n\nSam",
+            ),
+            Msg(
+                "INBOX",
+                "Thu, 19 Mar 2026 08:15:00 +0000",
+                WILMA,
+                ME,
+                "Re: Laying the paddock hedge",
+                "Sam,\n\nA correction to what we agreed on 4 March. My email gave the wrong "
+                "figure: the price we settled on when we walked the paddock was $1,050, not "
+                "$1,150, and that is what I will invoice. Everything else stands.\n\nWilma",
+            ),
+            Msg(
+                "Sent",
+                "Mon, 13 Apr 2026 17:45:00 +0000",
+                ME,
+                WILMA,
+                "Re: Laying the paddock hedge",
+                "Wilma,\n\nThe paddock is flooded and will not dry out before nesting "
+                "season, so I am calling off the hedge laying for this year. Please do not "
+                "send your team. I would like to talk again in October.\n\nSam",
+            ),
+        ],
+        # Two people state different deposits, in two threads, and neither
+        # message mentions the other (#291).
+        126: [
+            Msg(
+                "INBOX",
+                "Tue, 7 Apr 2026 10:00:00 +0000",
+                HAZEL,
+                ME,
+                "Mossgate Reading Room key",
+                "Hello Sam,\n\nWelcome as a key holder for the Mossgate Reading Room. The "
+                "key deposit is $45, paid once and returned when you hand the key "
+                "back.\n\nHazel Pim\nTreasurer, Mossgate Reading Room",
+            ),
+        ],
+        127: [
+            Msg(
+                "INBOX",
+                "Tue, 21 Apr 2026 16:20:00 +0000",
+                BRAM,
+                ME,
+                "Reading room key collection",
+                "Sam,\n\nYour key for the reading room is ready to collect from the porch "
+                "cupboard on Saturday. Bring $60 for the key deposit; it is the same for "
+                "every key holder.\n\nBram Okoye\nCaretaker, Mossgate Reading Room",
+            ),
+        ],
+        # A position stated only in quoted history: the clerk's own message
+        # is not in the mailbox, and the reply that quotes it has no text
+        # of its own, so its quote is what gets indexed (#291).
+        128: [
+            Msg(
+                "INBOX",
+                "Mon, 11 May 2026 19:05:00 +0000",
+                RAFE,
+                ME,
+                "Re: Ottery footbridge closure",
+                "On Tue, 5 May 2026 at 10:12, Nell Garside <clerk@otteryparish.example> "
+                "wrote:\n> The Ottery footbridge will stay closed until 30 June while the\n"
+                "> handrails are replaced. The parish council will pay the $2,300 bill\n"
+                "> from its reserves.\n",
             ),
         ],
     }
