@@ -475,8 +475,14 @@ different filters"), never read against them.
 | `sender` | address, domain or name fragment | `query_messages` `sender`; `search_attachments` `sender`, on the carrying message; `search_emails` `from_addr` and the tools that share it | its From role carries the value ([address matching](#query_messages)); unknown when its `sender_ambiguous` is not `false` ([Sender attribution](#sender-attribution)), or when it does not and its From addresses are not complete ([unknown values](#filter-predicates)) |
 | `recipient` | address, domain or name fragment | `query_messages` `recipient` | its To or Cc role carries the value; unknown when neither does and either role's addresses are not complete |
 | `participant` | address, domain or name fragment | `participant` on `query_messages`, `search_emails` and the tools that share it | its To or Cc role carries the value, or its From role does as for `sender` (SQL three-valued OR: unknown when To and Cc do not and `sender` is unknown) |
+| `address_is` | role, full address | `sender`, `recipient` and `participant` given a full address | an address in the role equals the value's canonical address |
+| `address_contains` | role, text | no tool yet ([#1088](https://github.com/marshalltech81/protonmail-local-ai/issues/1088)) | an address in the role contains the text, lowercased; display names are not read |
+| `display_name_contains` | role, text | no tool yet (#1088) | a display name written for an address in the role contains the text, casefolded, each name on its own; also unknown when its `participant_names_complete` is not `1` and none does |
+| `address_or_name_contains` | role, text | `sender`, `recipient` and `participant` given anything else (a domain such as `@example.com`, a name or a fragment) | an address in the role, or a display name written for it, contains the text; also unknown when its `participant_names_complete` is not `1` and none does |
+| `domain_is` | role, domain | no tool yet (#1088) | an address in the role has exactly that domain, lowercased; a subdomain does not match |
 | `subject` | text | `query_messages` `subject` | its own subject contains the text, casefolded; unknown when it does not and the stored subject was cut or not checked |
-| `text` | words | `query_messages` `text` | every word occurs in its indexed body (FTS, stemmed; at most 16 words); unknown when one does not and the indexed body is not complete |
+| `text` | words | `query_messages` `text` | as `body_words`, which it compiles to |
+| `body_words` | words | `query_messages` `text` | every word occurs in its indexed body (FTS, stemmed; at most 16 words); unknown when one does not and the indexed body is not complete |
 | `folder` | folder names | `query_messages` `folder`; `search_emails` `folders` | it is filed in one of them |
 | `not_in_folders` | folder names | the default scope, when no folder is named | it is filed in none of them (`Trash`; [Trash](#trash-is-left-out-by-default)) |
 | `effective_from` | UTC instant | `date_from` | its effective time is at or after the instant |
@@ -493,6 +499,21 @@ different filters"), never read against them.
 | `size_min` | bytes | `query_messages` `size_min` | its local file size is at least the value; unknown without a stored size |
 | `size_max` | bytes | `query_messages` `size_max` | its local file size is at most the value; unknown without a stored size |
 | `authority_class` | class name | `authority_class` | its From sender carries the class, outside Spam, and its `sender_ambiguous` is `false`; unknown outside Spam when its `sender_ambiguous` is not `false` ([Sender attribution](#sender-attribution)), or when no stored From address carries the class and its From addresses are not complete |
+
+**Explicit address leaves
+([#1088](https://github.com/marshalltech81/protonmail-local-ai/issues/1088)).**
+The five address leaves each take a role: `from`, `to`, `cc` or
+`visible_recipient` (To or Cc), plus the internal From, To or Cc set
+that `participant` uses; the Bcc-inclusive roles arrive with Bcc
+([#1090](https://github.com/marshalltech81/protonmail-local-ai/issues/1090)).
+In every role, finding nothing is false only when the role's addresses
+are complete, and the From role decides only when `sender_ambiguous`
+is `false`, as for `sender`. `sender` (role `from`), `recipient`
+(`visible_recipient`) and `participant` compile to `address_is` or
+`address_or_name_contains` by the value's shape, and `text` to
+`body_words`, with the same SQL as before, so their results do not
+change. No tool takes the explicit leaves yet; the `where` parameter
+that will is #1088's second part.
 
 `query_attachments` builds the same leaves as `query_messages` for its
 `sender`, `recipient`, `participant`, `folder` and date filters and

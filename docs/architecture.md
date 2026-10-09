@@ -1473,7 +1473,16 @@ read so a long extraction can refresh the heartbeat; a `C <name>` line
 per budget that cut the text, checked against the extractor's own
 list; `N <name> <count>` for a count the extractor allows; and then
 either `E <type name>` (the extraction raised) or `T <length>` and
-exactly that many bytes of UTF-8 text, with nothing after. Output
+exactly that many bytes of UTF-8 text, with nothing after. The
+degradation an extraction records in the child (its text loss, OCR
+pages skipped and the extractor counters) lives in the child's memory,
+and the lines it logs go to the discarded stderr, so after a
+successful extraction the child sends each non-zero value as an `N`
+line under a fixed key (#1314); the parent adds the counts to its own,
+marks the result's text incomplete when the child lost text, and logs
+one rate-limited WARNING, `extractor <module> degraded in the child:`
+followed by each key and its count. No log line, format string or
+argument from the child crosses. Output
 that breaks this (an unknown frame or name, a short or long text,
 bytes after the last frame, no result frame) or that the byte cap cut
 is recorded `failed` as `ChildOutputError`, never cached as text. The

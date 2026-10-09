@@ -25,7 +25,9 @@ recorded by type name as a ``failed`` row. Output past
 ``_MAX_OUTPUT_BYTES`` cannot come from a working child, whose text
 budget is smaller, so it fails the workbook too
 (``ChildOutputError``). The budgets the child reports as having cut
-the text are logged here through ``warn_extractor_cap``.
+the text are logged here through ``warn_extractor_cap``, and the
+degradation it recorded in the child is re-applied here
+(``apply_child_degradation``, #1314).
 """
 
 from __future__ import annotations
@@ -33,7 +35,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 
-from . import warn_extractor_cap
+from . import CHILD_DEGRADATION_KEYS, apply_child_degradation, warn_extractor_cap
 from ._runner import run_child
 
 log = logging.getLogger("indexer.extractor.xls")
@@ -94,8 +96,10 @@ def extract(
         timeout_seconds=XLS_TIMEOUT_SECONDS,
         max_output_bytes=_MAX_OUTPUT_BYTES,
         caps=frozenset(_CAP_MESSAGES),
+        counts=CHILD_DEGRADATION_KEYS,
         on_progress=on_progress,
     )
+    apply_child_degradation(log, "xls", result.counts)
     for cap in result.caps:
         warn_extractor_cap(log, cap, _CAP_MESSAGES[cap])
     return result.text, "xls"
