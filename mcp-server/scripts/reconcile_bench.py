@@ -15,8 +15,10 @@ code exists:
 Every value is generated here; no mail is read. The mailbox connection
 is the server's own (``Database._connect``: ``mode=ro`` and
 ``query_only``) and the predicate SQL is the server's
-(``query_messages_leaves`` and ``compile_leaves`` with no filters, so
-Trash is left out), so the scan is the one the server would run.
+(``query_messages_leaves`` and ``compile_leaves``; unfiltered, Trash
+is left out), so the scan is the one the server would run. ``--filtered``
+also times filtered predicates (participant, subject, body text,
+authority, dates) against one production page of the same query.
 Timings are plain ``time.perf_counter`` differences, never a
 profiler (AGENTS.md "Bound the work per input"). Each measured phase
 runs in a fresh child process so its peak RSS (``VmHWM``) is its
@@ -24,8 +26,10 @@ own.
 
 Run it inside the mcp-server image (docs/mcp-tools.md, "Certifying a
 paged run: sizing"). The tables mirror the indexer's ``messages``,
-``message_participants``, ``attachments``, ``attachment_extractions``
-and ``pending_deletions`` with their indexes; other tables are left
+``message_participants``, ``message_participant_names``,
+``message_chunks`` and ``message_chunks_fts``, ``entities``,
+``attachments``, ``attachment_extractions`` and ``pending_deletions``
+with the indexes the measured statements use; other tables are left
 out because no measured statement reads them.
 """
 
@@ -45,6 +49,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Iterable
 from contextlib import closing
 from pathlib import Path
 
@@ -101,6 +106,39 @@ CREATE TABLE message_participants (
     PRIMARY KEY (claimant_id, role, address)
 );
 CREATE INDEX idx_message_participants_address ON message_participants(address, role);
+CREATE TABLE message_participant_names (
+    claimant_id TEXT NOT NULL,
+    role        TEXT NOT NULL,
+    address     TEXT NOT NULL,
+    name        TEXT NOT NULL,
+    PRIMARY KEY (claimant_id, role, address, name)
+);
+CREATE INDEX idx_message_participant_names_address_name
+    ON message_participant_names(address, name);
+CREATE TABLE message_chunks (
+    chunk_id      TEXT PRIMARY KEY,
+    claimant_id   TEXT NOT NULL,
+    thread_id     TEXT NOT NULL,
+    chunk_index   INTEGER NOT NULL,
+    text          TEXT NOT NULL,
+    fts_rowid     INTEGER,
+    attachment_id TEXT,
+    kind          TEXT NOT NULL
+);
+CREATE INDEX idx_message_chunks_claimant ON message_chunks(claimant_id);
+CREATE INDEX idx_message_chunks_fts_rowid ON message_chunks(fts_rowid);
+CREATE VIRTUAL TABLE message_chunks_fts USING fts5(
+    text, content='', contentless_delete=1, tokenize='porter unicode61'
+);
+CREATE TABLE entities (
+    entity_id       TEXT PRIMARY KEY,
+    kind            TEXT NOT NULL,
+    canonical_key   TEXT NOT NULL,
+    organization_id TEXT,
+    authority_class TEXT NOT NULL DEFAULT 'unclassified',
+    authority_rule  TEXT
+);
+CREATE INDEX idx_entities_authority ON entities(authority_class);
 CREATE TABLE attachments (
     attachment_occurrence_id TEXT PRIMARY KEY,
     claimant_id               TEXT NOT NULL,
@@ -241,6 +279,7 @@ def build(
     identity: str,
     records: str,
     references: int = 0,
+    extracted_chars: int = 0,
 ) -> dict:
     """Write the synthetic index: ``messages`` rows in shuffled insert
     order, threads of four, ``per_message`` attachment occurrences each.
@@ -252,7 +291,16 @@ def build(
     file name); or ``cardinality``, the most rows a record can carry
     (``MAX_MESSAGE_ADDRESSES`` participants, the parser's cap, and
     ``references`` References entries, which the parser does not cap by
-    count)."""
+    count).
+
+    Every message gets one body chunk (``synthetic body alpha<i % 50>
+    gamma<i>``), its display names in ``message_participant_names``,
+    completeness flags of 1 so every filter decides, and each From
+    address a person entity (every fifth address in order ``vendor``, the rest
+    ``unclassified``). ``extracted_chars`` above 0 stores that many
+    four-byte characters of extracted text on every extraction row
+    (the indexer's default cap is 2,000,000 characters); 0 leaves it
+    NULL."""
     rng = random.Random(1218)
     order = list(range(messages))
     rng.shuffle(order)
@@ -261,9 +309,11 @@ def build(
         conn.executescript(_SCHEMA)
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
-        batch = 2000 if records != "cardinality" else 20
+        batch = 2000 if records != "cardinality" and not extracted_chars else 10
+        text = _WIDE * extracted_chars if extracted_chars else None
         for start in range(0, messages, batch):
             msg_rows, part_rows, att_rows, ext_rows = [], [], [], []
+            name_rows, chunk_rows, fts_rows = [], [], []
             for i in order[start : start + batch]:
                 mid = message_id(i, identity)
                 cid = claimant_of(mid)
@@ -292,6 +342,14 @@ def build(
                     )
                 )
                 part_rows += [(cid, role, address, name) for role, address, name in shape["people"]]
+                name_rows += [
+                    (cid, role, address, name)
+                    for role, address, name in shape["people"]
+                    if name is not None
+                ]
+                body = f"synthetic body alpha{i % 50} gamma{i}"
+                fts_rows.append((i + 1, body))
+                chunk_rows.append((f"{cid}:0", cid, tid, 0, body, i + 1, None, "body"))
                 for k in range(per_message):
                     payload = hashlib.sha256(f"{i}:{k}".encode()).hexdigest()
                     occurrence = hashlib.sha256(f"{cid}\0{payload}\0{k}".encode()).hexdigest()
@@ -307,15 +365,23 @@ def build(
                             at,
                         )
                     )
-                    ext_rows.append((payload, at))
+                    ext_rows.append((payload, text, at))
             conn.executemany(
                 "INSERT INTO messages (claimant_id, message_id, thread_id, filepath, folder, "
                 "subject, sent_at, occurred_at, in_reply_to, references_json, has_attachments, "
-                "size_bytes, content_hash, indexed_at, seen, sender_ambiguous) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "size_bytes, content_hash, indexed_at, seen, sender_ambiguous, "
+                "participant_names_complete, subject_complete, from_addresses_complete, "
+                "to_addresses_complete, cc_addresses_complete, attachments_manifest_complete, "
+                "body_complete) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, 1, 1, 1, 1, 1)",
                 msg_rows,
             )
             conn.executemany("INSERT INTO message_participants VALUES (?, ?, ?, ?)", part_rows)
+            conn.executemany("INSERT INTO message_participant_names VALUES (?, ?, ?, ?)", name_rows)
+            conn.executemany("INSERT INTO message_chunks_fts (rowid, text) VALUES (?, ?)", fts_rows)
+            conn.executemany(
+                "INSERT INTO message_chunks VALUES (?, ?, ?, ?, ?, ?, ?, ?)", chunk_rows
+            )
             conn.executemany(
                 "INSERT INTO attachments (attachment_occurrence_id, claimant_id, attachment_id, "
                 "thread_id, filename, content_type, size_bytes, seen_at, extractor_module) "
@@ -324,10 +390,19 @@ def build(
             )
             conn.executemany(
                 "INSERT INTO attachment_extractions (attachment_id, extractor_module, "
-                "extraction_status, extractor, extracted_at) VALUES (?, 'pdf', 'success', 'pdf', ?)",
+                "extraction_status, extractor, extracted_text, extracted_at) "
+                "VALUES (?, 'pdf', 'success', 'pdf', ?, ?)",
                 ext_rows,
             )
             conn.commit()
+        conn.execute(
+            "INSERT INTO entities (entity_id, kind, canonical_key, authority_class) "
+            "SELECT 'e:' || address, 'person', address, "
+            "CASE WHEN n % 5 = 0 THEN 'vendor' ELSE 'unclassified' END "
+            "FROM (SELECT address, row_number() OVER (ORDER BY address) AS n "
+            "FROM (SELECT DISTINCT address FROM message_participants WHERE role = 'from'))"
+        )
+        conn.commit()
         conn.execute("ANALYZE")
         conn.commit()
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
@@ -337,9 +412,11 @@ def build(
 # --- the measured statements -------------------------------------------
 
 
-def scan_sql(kind: str) -> tuple[str, str, list]:
-    """The count and identity-scan statements for ``kind`` with no
-    filters, from the server's own predicate compiler."""
+def scan_sql(kind: str, filters: dict | None = None) -> tuple[str, str, list]:
+    """The count and identity-scan statements for ``kind`` under
+    ``filters`` (``query_messages`` keyword arguments; none by default),
+    from the server's own predicate compiler, as ``query_messages`` and
+    ``query_attachments`` build them."""
     from src.lib.predicates import compile_leaves, query_messages_leaves
     from src.lib.sqlite import _ATTACHMENT_FROM
 
@@ -359,7 +436,7 @@ def scan_sql(kind: str) -> tuple[str, str, list]:
             "flagged",
         )
     )
-    where_sql, params = compile_leaves(query_messages_leaves(**none))
+    where_sql, params = compile_leaves(query_messages_leaves(**{**none, **(filters or {})}))
     if kind == "messages":
         frm, ident = "FROM messages m", "m.claimant_id"
     else:
@@ -416,13 +493,13 @@ def phase_idle(db_path: str) -> dict:
     return {"rss_kib": _rss_kib()}
 
 
-def phase_certificate(db_path: str, kind: str, method: str) -> dict:
+def phase_certificate(db_path: str, kind: str, method: str, filters: dict | None = None) -> dict:
     """COUNT, then every matching identity scanned, sorted by UTF-8
     bytes, de-duplicated and hashed (length-prefixed), in one read
     transaction. ``stream`` lets SQLite order the scan; ``collect``
     fetches every identity and sorts in Python."""
     _import_serializers()
-    count_sql, scan, params = scan_sql(kind)
+    count_sql, scan, params = scan_sql(kind, filters)
     t0 = time.perf_counter()
     with closing(_ro(db_path)) as conn:
         conn.execute("BEGIN")
@@ -514,10 +591,40 @@ def _materialize(
     return out, read
 
 
-def phase_reconcile(db_path: str, kind: str, k: int, request: str, hold_s: float = 0.0) -> dict:
-    """One reconcile round: parse the uploaded hashes, then in one read
-    transaction count, scan, certify, diff on hashes and materialize at
-    most ``k`` missing records (lowest identities first).
+def unpack_hashes(body: bytes) -> list[bytes]:
+    """The digests of a packed upload: one JSON string of base64 over
+    the concatenated 32-byte digests, so the element count is the
+    decoded length over 32, known before any per-digest object exists."""
+    raw = base64.b64decode(json.loads(body)["hashes"], validate=True)
+    if len(raw) % 32:
+        raise ValueError("packed upload is not a whole number of digests")
+    return [raw[i : i + 32] for i in range(0, len(raw), 32)]
+
+
+def _sorted_identities(
+    conn: sqlite3.Connection, scan: str, params: list, method: str
+) -> Iterable[str]:
+    """The scan's identities in UTF-8 byte order: ordered by SQLite
+    (``stream``) or fetched whole and sorted here (``collect``)."""
+    if method == "stream":
+        return (row[0] for row in conn.execute(scan + " ORDER BY 1", params))
+    ids = [row[0] for row in conn.execute(scan, params)]
+    ids.sort(key=str.encode)
+    return ids
+
+
+def phase_reconcile(
+    db_path: str,
+    kind: str,
+    k: int,
+    request: str,
+    hold_s: float = 0.0,
+    method: str = "stream",
+) -> dict:
+    """One reconcile round: parse the packed upload, then in one read
+    transaction count, scan (``method``, as ``phase_certificate``),
+    certify, diff on hashes and materialize at most ``k`` missing
+    records (lowest identities first).
 
     ``hold_s`` keeps the transaction open that much longer after the
     round's work, outside every timing: only the smoke test's WAL check
@@ -525,9 +632,7 @@ def phase_reconcile(db_path: str, kind: str, k: int, request: str, hold_s: float
     _import_serializers()
     count_sql, scan, params = scan_sql(kind)
     t0 = time.perf_counter()
-    hashes = json.loads(Path(request).read_bytes())["hashes"]
-    client = {bytes.fromhex(h) for h in hashes}
-    del hashes
+    client = set(unpack_hashes(Path(request).read_bytes()))
     t_parse = time.perf_counter()
     with closing(_ro(db_path)) as conn:
         conn.execute("BEGIN")
@@ -538,15 +643,15 @@ def phase_reconcile(db_path: str, kind: str, k: int, request: str, hold_s: float
         server: set[bytes] = set()
         missing: list[str] = []
         missing_total = 0
-        for row in conn.execute(scan + " ORDER BY 1", params):
-            b = row[0].encode()
+        for identity in _sorted_identities(conn, scan, params, method):
+            b = identity.encode()
             digest.update(len(b).to_bytes(8, "big") + b)
             h = identity_hash(b)
             server.add(h)
             if h not in client:
                 missing_total += 1
                 if len(missing) < k:
-                    missing.append(row[0])
+                    missing.append(identity)
         extras = sorted(client - server)
         t_diff = time.perf_counter()
         records, read = _materialize(conn, kind, missing)
@@ -589,6 +694,90 @@ def phase_reconcile(db_path: str, kind: str, k: int, request: str, hold_s: float
         "ended_at": ended_at,
         "rss_kib": _rss_kib(),
     }
+
+
+# Filtered predicates the server compiles to different access paths:
+# participant substring (address and display-name scan), exact sender,
+# subject substring (casefold of every subject), body words (FTS5),
+# authority class (entity join) and a date range. ``nobody`` matches
+# nothing, so its scan visits every participant and name for no result.
+MESSAGE_FILTERS: tuple[dict, ...] = (
+    {"participant": "nobody"},
+    {"participant": "from0.7"},
+    {"sender": "from0.7@bench.example"},
+    {"subject": "subject 4242"},
+    {"text": "gamma4242"},
+    {"text": "alpha7"},
+    {"authority_class": "vendor"},
+    {"date_from": "2015-01-01", "date_to": "2015-12-31"},
+)
+# ``query_attachments`` takes the message leaves except subject, body
+# text and authority.
+OCCURRENCE_FILTERS: tuple[dict, ...] = (
+    {"participant": "nobody"},
+    {"participant": "from0.7"},
+    {"date_from": "2015-01-01", "date_to": "2015-12-31"},
+)
+
+
+def phase_filtered(db_path: str, kind: str, filters: dict) -> dict:
+    """One production page of the query under ``filters``
+    (``Database.query_messages`` or ``query_attachments`` with
+    ``limit=1``: its counts and first row), then the certificate (stream)
+    over the same predicate, each timed on its own."""
+    from src.lib.sqlite import Database
+
+    _import_serializers()
+    db = Database(db_path)
+    t0 = time.perf_counter()
+    if kind == "messages":
+        page = db.query_messages(limit=1, **filters)
+    else:
+        page = db.query_attachments(limit=1, **filters)
+    page_s = time.perf_counter() - t0
+    cert = phase_certificate(db_path, kind, "stream", filters)
+    return {
+        "page_total": page.total_matches,
+        "count": cert["count"],
+        "scanned": cert["scanned"],
+        "page_s": page_s,
+        "certificate_s": cert["total_s"],
+        "rss_kib": _rss_kib(),
+    }
+
+
+def write_request_shape(out: Path, shape: str, n: int) -> int:
+    """A synthetic upload of ``n`` digests in ``shape``, or for
+    ``short_array`` as many two-character strings as fit in the byte
+    size of ``n`` hex digests; returns its size in bytes."""
+    if shape == "packed":
+        digests = b"".join(hashlib.sha256(str(i).encode()).digest() for i in range(n))
+        body = json.dumps({"hashes": base64.b64encode(digests).decode()}).encode()
+    elif shape == "hex_array":
+        body = json.dumps(
+            {"hashes": [hashlib.sha256(str(i).encode()).hexdigest() for i in range(n)]},
+            separators=(",", ":"),
+        ).encode()
+    else:
+        budget = 67 * n + 12
+        body = ('{"hashes":[' + ",".join(['"00"'] * ((budget - 13) // 5)) + "]}").encode()
+    out.write_bytes(body)
+    return len(body)
+
+
+def phase_request_shape(path: str, shape: str) -> dict:
+    """Parse one synthetic upload as the server would: the packed
+    string decoded and split, an array parsed by ``json.loads`` (the
+    elements exist before any can be checked). Timed with the file read
+    excluded; peak RSS includes the body, as a server holds it."""
+    body = Path(path).read_bytes()
+    t0 = time.perf_counter()
+    if shape == "packed":
+        digests = unpack_hashes(body)
+    else:
+        digests = json.loads(body)["hashes"]
+    parse_s = time.perf_counter() - t0
+    return {"elements": len(digests), "parse_s": parse_s, "rss_kib": _rss_kib()}
 
 
 def phase_writer(db_path: str, stop: str, commit_bytes: int, interval: float) -> dict:
@@ -651,16 +840,18 @@ def write_request(db_path: str, kind: str, missing: int, extras: int, out: Path)
     skip = set(range(0, len(ids), step)[:missing]) if missing else set()
     held = [identity_hash(b) for n, b in enumerate(ids) if n not in skip]
     held += [hashlib.sha256(f"extra:{n}".encode()).digest() for n in range(extras)]
-    body = json.dumps({"hashes": [h.hex() for h in held]}, separators=(",", ":")).encode()
-    out.write_bytes(body)
+    hex_body = json.dumps({"hashes": [h.hex() for h in held]}, separators=(",", ":")).encode()
     b64 = json.dumps(
         {"hashes": [base64.b64encode(h).decode() for h in held]}, separators=(",", ":")
     ).encode()
+    packed = json.dumps({"hashes": base64.b64encode(b"".join(held)).decode()}).encode()
+    out.write_bytes(packed)
     return {
         "members": len(ids),
         "uploaded": len(held),
-        "request_bytes_hex": len(body),
+        "request_bytes_hex": len(hex_body),
         "request_bytes_base64": len(b64),
+        "request_bytes_packed": len(packed),
         "max_identity_bytes": max((len(b) for b in ids), default=0),
     }
 
@@ -765,6 +956,11 @@ def run_wal(
         "wal_at_transaction_start_bytes": at_start,
         "wal_max_during_transaction_bytes": max(in_window, default=0),
         "commits_during_transaction": overlapping,
+        # WAL growth over the transaction per overlapping commit: the
+        # bytes one such commit leaves retained.
+        "wal_bytes_per_commit": (
+            (max(in_window, default=0) - at_start) // overlapping if overlapping else None
+        ),
         "writer_commits_total": writer_out["commits"],
         "reader_transaction_s": round(result["transaction_s"], 3),
         "checkpoint_after": {"busy": busy, "log_pages": log_pages, "checkpointed": ckpt_pages},
@@ -789,7 +985,13 @@ def run(args: argparse.Namespace) -> dict:
             "python": sys.version.split()[0],
         },
         "build": build(
-            db_path, args.messages, args.per_message, args.identity, args.records, args.references
+            db_path,
+            args.messages,
+            args.per_message,
+            args.identity,
+            args.records,
+            args.references,
+            args.extracted_chars,
         ),
     }
     db = str(db_path)
@@ -830,35 +1032,25 @@ def run(args: argparse.Namespace) -> dict:
             != report["certificate"][f"{kind}/collect"]["digest"]
         ):
             raise SystemExit(f"{kind}: SQL order and byte order digests differ")
+    if args.filtered:
+        report["filtered"] = {
+            kind: [
+                {"filters": f, **_filtered_runs(db, kind, f, args.repeat)}
+                for f in (MESSAGE_FILTERS if kind == "messages" else OCCURRENCE_FILTERS)
+            ]
+            for kind in ("messages", "occurrences")
+        }
+    if args.request_shapes:
+        report["request_shapes"] = run_request_shapes(work, args.request_shapes)
     report["reconcile"] = {}
     for kind in ("messages", "occurrences"):
         request = work / f"request-{kind}.json"
         req = write_request(db, kind, args.missing, args.extras, request)
-        rounds = {}
-        for k in args.k:
-            runs = [
-                _child("reconcile", db_path=db, kind=kind, k=k, request=str(request))
-                for _ in range(args.repeat)
-            ]
-            r0 = runs[0]
-            rounds[str(k)] = {
-                "returned": r0["returned"],
-                "participant_rows": r0["participant_rows"],
-                "references": r0["references"],
-                "extras": r0["extras"],
-                "missing_total": r0["missing_total"],
-                "response_bytes": r0["response_bytes"],
-                "record_bytes_max": r0["record_bytes_max"],
-                "rounds_to_repair": math.ceil(r0["missing_total"] / k),
-                "rounds_from_empty": math.ceil(req["members"] / k),
-                "parse_s": _median(runs, "parse_s"),
-                "diff_s": _median(runs, "diff_s"),
-                "records_s": _median(runs, "records_s"),
-                "transaction_s": _median(runs, "transaction_s"),
-                "total_s": _median(runs, "total_s"),
-                "rss_kib": max(r["rss_kib"] for r in runs),
-            }
-        report["reconcile"][kind] = {"request": req, "k": rounds}
+        report["reconcile"][kind] = {"request": req}
+        for method in ("stream", "collect"):
+            report["reconcile"][kind][method] = _reconcile_runs(
+                db, kind, request, req, method, args
+            )
     if args.wal:
         report["wal"] = [
             {
@@ -868,15 +1060,71 @@ def run(args: argparse.Namespace) -> dict:
                     kind,
                     max(args.k),
                     str(work / f"request-{kind}.json"),
-                    args.writer_commit_bytes,
+                    commit_bytes,
                     interval,
                     args.wal_hold,
                 ),
             }
             for kind in ("messages", "occurrences")
+            for commit_bytes in args.writer_commit_bytes
             for interval in args.writer_interval
         ]
     return report
+
+
+def _filtered_runs(db: str, kind: str, filters: dict, repeat: int) -> dict:
+    runs = [_child("filtered", db_path=db, kind=kind, filters=filters) for _ in range(repeat)]
+    if any(r["scanned"] != r["count"] for r in runs):
+        raise SystemExit(f"{kind} {filters}: scanned and counted sets differ")
+    return {
+        "page_total": runs[0]["page_total"],
+        "count": runs[0]["count"],
+        "page_s": _median(runs, "page_s"),
+        "certificate_s": _median(runs, "certificate_s"),
+        "rss_kib": max(r["rss_kib"] for r in runs),
+    }
+
+
+def run_request_shapes(work: Path, n: int) -> dict:
+    """Parse cost and peak RSS of each upload shape at ``n`` digests."""
+    out = {}
+    for shape in ("packed", "hex_array", "short_array"):
+        path = work / f"shape-{shape}.json"
+        size = write_request_shape(path, shape, n)
+        result = _child("request_shape", path=str(path), shape=shape)
+        out[shape] = {"bytes": size, **result}
+        path.unlink()
+    return out
+
+
+def _reconcile_runs(
+    db: str, kind: str, request: Path, req: dict, method: str, args: argparse.Namespace
+) -> dict:
+    rounds = {}
+    for k in args.k:
+        runs = [
+            _child("reconcile", db_path=db, kind=kind, k=k, request=str(request), method=method)
+            for _ in range(args.repeat)
+        ]
+        r0 = runs[0]
+        rounds[str(k)] = {
+            "returned": r0["returned"],
+            "participant_rows": r0["participant_rows"],
+            "references": r0["references"],
+            "extras": r0["extras"],
+            "missing_total": r0["missing_total"],
+            "response_bytes": r0["response_bytes"],
+            "record_bytes_max": r0["record_bytes_max"],
+            "rounds_to_repair": math.ceil(r0["missing_total"] / k),
+            "rounds_from_empty": math.ceil(req["members"] / k),
+            "parse_s": _median(runs, "parse_s"),
+            "diff_s": _median(runs, "diff_s"),
+            "records_s": _median(runs, "records_s"),
+            "transaction_s": _median(runs, "transaction_s"),
+            "total_s": _median(runs, "total_s"),
+            "rss_kib": max(r["rss_kib"] for r in runs),
+        }
+    return rounds
 
 
 def main(argv: list[str] | None = None) -> dict:
@@ -886,6 +1134,8 @@ def main(argv: list[str] | None = None) -> dict:
             "idle": phase_idle,
             "certificate": phase_certificate,
             "reconcile": phase_reconcile,
+            "filtered": phase_filtered,
+            "request_shape": phase_request_shape,
             "writer": phase_writer,
         }
         out = phases[argv[1]](**json.loads(argv[2]))
@@ -912,7 +1162,24 @@ def main(argv: list[str] | None = None) -> dict:
     )
     p.add_argument("--repeat", type=int, default=3)
     p.add_argument("--wal", action="store_true", help="also measure WAL growth under a writer")
-    p.add_argument("--writer-commit-bytes", type=int, default=128 * 1024)
+    p.add_argument(
+        "--writer-commit-bytes",
+        type=lambda s: [int(x) for x in s.split(",")],
+        default=[128 * 1024],
+    )
+    p.add_argument("--filtered", action="store_true", help="also time filtered predicates")
+    p.add_argument(
+        "--extracted-chars",
+        type=int,
+        default=0,
+        help="four-byte characters of extracted text per extraction row (0: none)",
+    )
+    p.add_argument(
+        "--request-shapes",
+        type=int,
+        default=0,
+        help="also time parsing each upload shape at this many digests (0: skip)",
+    )
     p.add_argument(
         "--writer-interval", type=lambda s: [float(x) for x in s.split(",")], default=[0.0, 0.1]
     )

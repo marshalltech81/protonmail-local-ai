@@ -63,6 +63,9 @@ def report(bench, tmp_path_factory):
             # the writer to commit inside it.
             "--wal-hold",
             "1.0",
+            "--filtered",
+            "--request-shapes",
+            "1000",
         ]
     )
 
@@ -90,6 +93,8 @@ def cardinality(bench, tmp_path_factory):
             "0",
             "--repeat",
             "1",
+            "--extracted-chars",
+            "100",
         ]
     )
 
@@ -112,9 +117,16 @@ def test_reconcile_round_returns_at_most_k_missing_records(report):
         result = report["reconcile"][kind]
         assert result["request"]["members"] == members
         assert result["request"]["uploaded"] == members - 30 + 4
+        uploaded = members - 30 + 4
         # Hex: 64 characters plus quotes and a comma per hash.
-        assert result["request"]["request_bytes_hex"] == 13 + 67 * (members - 30 + 4) - 1
-        for k, round_ in result["k"].items():
+        assert result["request"]["request_bytes_hex"] == 13 + 67 * uploaded - 1
+        # Packed: one base64 string over 32 bytes a digest.
+        assert result["request"]["request_bytes_packed"] == 14 + 4 * math.ceil(32 * uploaded / 3)
+        for k, round_ in result["stream"].items():
+            # The collect path returns the same round.
+            collect = result["collect"][k]
+            for key in ("returned", "extras", "missing_total", "response_bytes"):
+                assert collect[key] == round_[key]
             assert round_["missing_total"] == 30
             assert round_["returned"] == min(int(k), 30)
             assert round_["extras"] == 4
@@ -128,11 +140,11 @@ def test_reconcile_round_returns_at_most_k_missing_records(report):
 def test_worst_records_carry_four_byte_fields_past_their_clips(report):
     # 33 participants, each a name and an address of 500 kept characters
     # of four bytes; an occurrence's filename and MIME type likewise.
-    messages = report["reconcile"]["messages"]["k"]["10"]
+    messages = report["reconcile"]["messages"]["stream"]["10"]
     assert messages["record_bytes_max"] > 33 * 2 * 500 * 4
     assert messages["participant_rows"] == 10 * 33
     assert messages["references"] == 10 * 11
-    occurrences = report["reconcile"]["occurrences"]["k"]["10"]
+    occurrences = report["reconcile"]["occurrences"]["stream"]["10"]
     assert occurrences["record_bytes_max"] > 2 * 500 * 4
     assert occurrences["participant_rows"] == occurrences["references"] == 0
 
@@ -141,7 +153,7 @@ def test_cardinality_records_read_every_stored_row(bench, cardinality):
     # The record readers load every participant row and References entry
     # before the output clips them, so a round's work is K times the
     # stored cardinality, not K times the listed one.
-    for k, round_ in cardinality["reconcile"]["messages"]["k"].items():
+    for k, round_ in cardinality["reconcile"]["messages"]["stream"].items():
         assert round_["returned"] == int(k)
         assert round_["participant_rows"] == int(k) * bench.MAX_MESSAGE_ADDRESSES
         assert round_["references"] == int(k) * 1000
@@ -179,3 +191,42 @@ def test_failed_round_stops_the_writer(bench, tmp_path):
     time.sleep(0.5)
     assert commits() == after
     assert not (tmp_path / "failed.db.stop").exists()
+
+
+def test_filtered_certificate_counts_what_a_page_counts(report):
+    # The certificate and one production page agree on every filtered
+    # set, including the empty one whose scan finds nothing.
+    for kind in ("messages", "occurrences"):
+        rows = report["filtered"][kind]
+        assert rows
+        for row in rows:
+            assert row["count"] == row["page_total"]
+        nobody = next(r for r in rows if r["filters"] == {"participant": "nobody"})
+        assert nobody["count"] == 0
+    texts = {r["filters"].get("text"): r["count"] for r in report["filtered"]["messages"]}
+    # gamma<i> is message i's own word, and the corpus has no message
+    # 4242; alpha7 is in every fiftieth body.
+    assert texts["gamma4242"] == 0
+    assert texts["alpha7"] > 0
+    vendor = next(
+        r for r in report["filtered"]["messages"] if r["filters"] == {"authority_class": "vendor"}
+    )
+    assert vendor["count"] > 0
+
+
+def test_request_shapes_count_their_elements(report):
+    shapes = report["request_shapes"]
+    assert shapes["packed"]["elements"] == shapes["hex_array"]["elements"] == 1000
+    # The same byte budget as the hex array holds five times the
+    # elements as two-character strings, all parsed before any check.
+    assert shapes["short_array"]["bytes"] <= shapes["hex_array"]["bytes"]
+    assert shapes["short_array"]["elements"] == (67 * 1000 + 12 - 13) // 5
+    assert shapes["packed"]["bytes"] < shapes["hex_array"]["bytes"]
+
+
+def test_occurrence_rounds_read_rows_with_extracted_text(cardinality):
+    # Every extraction row carries 100 four-byte characters of text the
+    # round never returns: a record still costs well under its text.
+    for round_ in cardinality["reconcile"]["occurrences"]["stream"].values():
+        assert round_["returned"] > 0
+        assert round_["record_bytes_max"] < 4 * 100 * 4
