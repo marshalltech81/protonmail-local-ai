@@ -52,9 +52,10 @@ payload:
 Each budget that cut the text is reported to the parent, which logs it
 through ``warn_extractor_cap``, so the result is marked incomplete
 (#1242). So is a decode that lost bytes: a body text part's
-(``eml_body_decode``), a nested email's base64, and any body text part
-or nested email in quoted-printable, whose loss records nothing to
-detect (#1288). A nested email in any other transfer encoding
+(``eml_body_decode``), a nested email's base64, any body text part or
+nested email in quoted-printable, whose loss records nothing to detect
+(#1288), and any body text part in another encoding that is not
+identity (uuencode and its aliases, or an unknown value). A nested email in any other transfer encoding
 (uuencode and its aliases included) is not decoded: only its label is
 rendered, as an ``eml_nested_messages`` cut. The
 decoders' fallbacks (headers, part filenames, body charsets) replace

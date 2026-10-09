@@ -1660,7 +1660,9 @@ only, never filenames or text (`make logs`):
     legacy `.ppt` (#957).
   - `eml_body_decode`: a body text part of an attached email whose
     base64 decoding lost bytes, or any quoted-printable one, whose loss
-    cannot be detected yet (#922, #1288).
+    cannot be detected yet, or one in an encoding not decoded here
+    (uuencode and its aliases, or an unknown value), which can come back
+    as its transport text (#922, #1288).
   - `eml_header_chars`, `eml_text_chars`, `eml_parts`, `eml_text_parts`,
     `eml_nested_messages`: an attached email's text (#922) was cut: a
     Subject, From, To, Cc or Date header over 2,000 characters, the

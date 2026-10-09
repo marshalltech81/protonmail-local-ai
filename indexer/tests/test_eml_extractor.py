@@ -667,3 +667,56 @@ class TestReviewRound3:
         result = self._extract(_multipart(part), caplog)
         assert result.text_complete is True
         assert result.text is not None and "plain nested" in result.text
+
+
+class TestReviewRound5:
+    """Codex round 5 on #1311, as the owner decided."""
+
+    @pytest.mark.parametrize("encoding", [b"x-uuencode", b"uuencode", b"uue", b"x-uue", b"x-other"])
+    def test_a_body_part_in_an_unhandled_encoding_is_a_cut(self, encoding, caplog):
+        """Finding 1: a malformed envelope comes back as transport text,
+        so the part's text is kept but the result is incomplete."""
+        payload = (
+            HDR
+            + b"Content-Type: text/plain\r\nContent-Transfer-Encoding: "
+            + encoding
+            + b"\r\n\r\nbegin not-an-envelope "
+            + MARKER.encode()
+        )
+        extractors.drain_extractor_counts()
+        with caplog.at_level(logging.WARNING):
+            result = extract(content_type="message/rfc822", filename="f.eml", payload=payload)
+        assert result.status == STATUS_SUCCESS
+        assert result.text_complete is False
+        assert result.text is not None and "not-an-envelope" in result.text
+        assert "extractor cap eml_body_decode:" in caplog.text
+        assert MARKER not in caplog.text
+
+    def test_a_codec_that_rejects_replace_decodes_as_the_default_path(self):
+        """Finding 3: ``idna`` decodes strictly but rejects
+        ``errors="replace"``; the walk returns the default path's text
+        (its UTF-8 fallback) and counts the fallback."""
+        degraded: Counter[str] = Counter()
+        assert parser._safe_decode(b"xn--caf-dma", "idna", degraded) == parser._safe_decode(
+            b"xn--caf-dma", "idna"
+        )
+        assert parser._safe_decode(b"xn--caf-dma", "idna") == "xn--caf-dma"
+        assert degraded == Counter({parser.CHARSET_DEGRADED: 1})
+
+    def test_a_replacement_is_counted(self):
+        degraded: Counter[str] = Counter()
+        assert parser._safe_decode(b"caf\xe9", "utf-8", degraded) == "caf�"
+        assert degraded == Counter({parser.CHARSET_DEGRADED: 1})
+
+    def test_a_clean_decode_is_not_counted(self):
+        degraded: Counter[str] = Counter()
+        assert parser._safe_decode("café".encode("latin-1"), "latin-1", degraded) == "café"
+        assert degraded == Counter()
+
+    def test_the_walk_body_matches_the_default_body(self):
+        raw = b"Content-Type: text/plain; charset=idna\r\n\r\nxn--caf-dma"
+        default, _ = parser._extract_body_and_attachments(email.message_from_bytes(raw))
+        walked, _ = parser._extract_body_and_attachments(
+            email.message_from_bytes(raw), walk=parser.BodyWalk()
+        )
+        assert walked == default == "xn--caf-dma"

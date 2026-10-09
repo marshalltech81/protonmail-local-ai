@@ -1436,7 +1436,10 @@ that cut the text is logged through the extractor-cap WARNING
 lost bytes: a body text part's (`eml_body_decode`), a nested email's
 base64 (`eml_nested_messages`), and any body text part or nested email
 in quoted-printable, whose loss the standard library records nothing
-for (counted as lossy until #1288 detects it). A nested email in any
+for (counted as lossy until #1288 detects it). A body text part in any
+other encoding that is not identity (uuencode and its aliases, or an
+unknown value) is kept as decoded but counted as `eml_body_decode`
+too, since a malformed one comes back as its transport text. A nested email in any
 other transfer encoding (uuencode and its aliases included) is not
 decoded: only its depth label is indexed, and it counts as
 `eml_nested_messages`. The decoders' fallbacks are

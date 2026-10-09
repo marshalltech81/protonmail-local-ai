@@ -1499,12 +1499,15 @@ def _extract_body_and_attachments(
             continue
         text_parts += 1
         payload = _decoded_payload(part)
-        # A quoted-printable loss records no defect to read, so in a
-        # body-only walk every quoted-printable text part counts as lossy
-        # until #1288 detects it (review round 3 on #1311).
+        # A quoted-printable loss records no defect to read, and a part
+        # in any other encoding not decoded here (uuencode, its aliases,
+        # anything unknown) can come back as its transport text, so in a
+        # body-only walk each counts as lossy until #1288 detects it
+        # (review rounds 3 and 5 on #1311).
         if walk is not None and (
             _decode_lost_bytes(part)
-            or str(part.get("Content-Transfer-Encoding", "")).strip().lower() == "quoted-printable"
+            or str(part.get("Content-Transfer-Encoding", "")).strip().lower()
+            not in _IDENTITY_ENCODINGS | {"base64"}
         ):
             walk.decode_lost_parts += 1
         text = _safe_decode(
@@ -1533,18 +1536,23 @@ def _safe_decode(payload: bytes, charset: str, degraded: Counter[str] | None = N
     ``UnicodeError`` covers codecs that reject ``errors="replace"``
     (``idna`` raises ``UnicodeError("Unsupported error handling")``).
     ``degraded`` (when given) counts a fallback or a replacement under
-    ``CHARSET_DEGRADED``: the bytes are decoded strictly first, once more
-    only when that fails.
+    ``CHARSET_DEGRADED``. The text returned is always the default path's;
+    a strict decode runs only to detect a replacement, when the lenient
+    one succeeded (review round 5 on #1311: ``idna`` decodes strictly but
+    rejects ``errors="replace"``, so its text is the UTF-8 fallback's).
     """
+    try:
+        text = payload.decode(charset, errors="replace")
+    except LookupError, UnicodeError:
+        if degraded is not None:
+            degraded[CHARSET_DEGRADED] += 1
+        return payload.decode("utf-8", errors="replace")
     if degraded is not None:
         try:
-            return payload.decode(charset)
-        except LookupError, UnicodeError:
+            payload.decode(charset)
+        except UnicodeError:
             degraded[CHARSET_DEGRADED] += 1
-    try:
-        return payload.decode(charset, errors="replace")
-    except LookupError, UnicodeError:
-        return payload.decode("utf-8", errors="replace")
+    return text
 
 
 def _clean_id(value: str) -> str:
