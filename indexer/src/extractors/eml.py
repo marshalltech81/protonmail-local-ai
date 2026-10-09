@@ -60,7 +60,9 @@ only when the body keeps that part, and a nested email whose transport
 text lost a line to the parse. So is a
 part declared ``multipart/*`` that the standard library left
 undecomposed (no or a missing boundary), whose text is never read,
-when the body could keep it (``eml_body_structure``). A nested email in any other transfer encoding
+when the body could keep it (``eml_body_structure``), and so is a
+message header line the parse dropped: a first line starting with
+whitespace or a ``From `` line after the first (``eml_header_lines``). A nested email in any other transfer encoding
 (uuencode and its aliases included) is not decoded: only its label is
 rendered, as an ``eml_nested_messages`` cut. The
 decoders' fallbacks (headers, part filenames, body charsets) replace
@@ -147,7 +149,17 @@ _CAP_NAMES = frozenset(
         "eml_nested_messages",
         "eml_body_decode",
         "eml_body_structure",
+        "eml_header_lines",
     }
+)
+
+# Defects recording a header-block line the parse dropped: a first line
+# starting with whitespace (a continuation with no header before it), or
+# a ``From `` line after the first. A leading ``From `` envelope line, as
+# in an mbox export, is kept as the envelope and not counted.
+_DROPPED_HEADER_DEFECTS = (
+    email.errors.FirstHeaderLineIsContinuationDefect,
+    email.errors.MisplacedEnvelopeHeaderDefect,
 )
 
 
@@ -226,6 +238,9 @@ def extract_text(payload: bytes) -> tuple[str, list[str]]:
             text.add(("\n\n" if text.pieces else "") + "\n".join(lines))
         if msg is None:
             continue
+        if any(isinstance(d, _DROPPED_HEADER_DEFECTS) for d in msg.defects):
+            # The dropped line's text is not indexed (review round 10).
+            caps["eml_header_lines"] = None
         counted: Counter[str] = Counter()
         start = len(walk.nested)
         body, _ = parser._extract_body_and_attachments(msg, caps=counted, walk=walk)

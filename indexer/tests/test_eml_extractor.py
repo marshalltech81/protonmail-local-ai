@@ -942,3 +942,43 @@ class TestReviewRound9:
         result = self._extract(_multipart(_PLAIN, unsplit), caplog)
         assert result.text_complete is True
         assert "eml_body_structure" not in caplog.text
+
+
+class TestReviewRound10:
+    """A header line the parse dropped (a first line starting with
+    whitespace, or a ``From `` line after the first) is lost text, at the
+    root and in a nested email: ``eml_header_lines``. A leading ``From ``
+    envelope line, as in an mbox export, is not."""
+
+    def _extract(self, payload: bytes, caplog) -> extractors.ExtractionResult:
+        with caplog.at_level(logging.WARNING):
+            result = extract(content_type="message/rfc822", filename="f.eml", payload=payload)
+        assert result.status == STATUS_SUCCESS
+        assert MARKER not in caplog.text
+        return result
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            b" Subject: " + MARKER.encode() + b"\r\n" + _text("body words"),
+            b"\tX: " + MARKER.encode() + b"\r\n" + _text("body words"),
+            b"Subject: s\r\nFrom " + MARKER.encode() + b"\r\nContent-Type: text/plain\r\n\r\nbody",
+            _multipart(
+                _PLAIN,
+                _attached(b" Subject: " + MARKER.encode() + b"\r\n" + _text("inner words")),
+            ),
+        ],
+        ids=["root_space", "root_tab", "root_misplaced_envelope", "nested_space"],
+    )
+    def test_a_dropped_header_line_is_a_cut(self, caplog, payload):
+        result = self._extract(payload, caplog)
+        assert result.text is not None and MARKER not in result.text
+        assert result.text_complete is False
+        assert "extractor cap eml_header_lines:" in caplog.text
+
+    def test_a_leading_envelope_line_is_not(self, caplog):
+        result = self._extract(
+            b"From a@example.test Mon Oct  5 10:00:00 2026\r\n" + _text("w"), caplog
+        )
+        assert result.text_complete is True
+        assert "eml_header_lines" not in caplog.text

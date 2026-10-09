@@ -1676,6 +1676,11 @@ only, never filenames or text (`make logs`):
     parameter, or a boundary that never appears), so none of its text
     is read, when the body could keep it (#922; the same gap for
     top-level mail is #1348).
+  - `eml_header_lines`: a header line of an attached email (or of an
+    email nested in it) that the standard library's parser dropped: a
+    first line starting with whitespace, or a `From ` line after the
+    first, so its text is not indexed (#922). A leading `From `
+    envelope line, as in an mbox export, is not counted.
   - `eml_body_decode`: a body text part of an attached email whose
     base64 decoding lost bytes, or any quoted-printable one, whose loss
     cannot be detected yet, or one in an encoding not decoded here
