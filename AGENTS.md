@@ -754,9 +754,10 @@ under about 80 characters.
   of the issue, a follow-up the code needs) gets its own GitHub issue
   before the PR is reported ready, unless an open issue already tracks
   it; write that issue's number next to the item (owner, 2026-10-07).
-  Skipping part of what the issue asked for needs the owner's approval
-  first ("Accuracy first", owner, 2026-10-09); the issue then tracks
-  it.
+  Skipping part of what the issue asked for is allowed only when the
+  skip reaches the same end state or the accurate fix is blocked, and
+  needs the owner's approval first ("Accuracy first", owner,
+  2026-10-09); the issue then tracks it.
   Items that only explain a choice (no docs changed because none apply,
   a check not run because nothing it covers changed) need none. The
   issue holds fixed text, options and links, never mailbox content.
