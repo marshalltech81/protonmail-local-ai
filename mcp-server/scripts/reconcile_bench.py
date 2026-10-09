@@ -707,33 +707,51 @@ def run_wal(
         stdout=subprocess.PIPE,
         text=True,
     )
-    warm_max = 0
-    deadline = time.perf_counter() + 3
-    while time.perf_counter() < deadline:
-        warm_max = max(warm_max, size())
-        time.sleep(0.01)
-    result: dict = {}
+    # Whatever happens below, the writer is stopped and reaped before
+    # this returns or raises: left running, it commits until the disk
+    # fills.
+    try:
+        warm_max = 0
+        deadline = time.perf_counter() + 3
+        while time.perf_counter() < deadline:
+            warm_max = max(warm_max, size())
+            time.sleep(0.01)
+        result: dict = {}
+        failure: list[BaseException] = []
 
-    def reader() -> None:
-        result.update(
-            _child("reconcile", db_path=db_path, kind=kind, k=k, request=request, hold_s=hold_s)
-        )
+        def reader() -> None:
+            try:
+                result.update(
+                    _child(
+                        "reconcile", db_path=db_path, kind=kind, k=k, request=request, hold_s=hold_s
+                    )
+                )
+            except BaseException as exc:  # re-raised below, after the writer stops
+                failure.append(exc)
 
-    t = threading.Thread(target=reader)
-    samples: list[tuple[float, int]] = []
-    t.start()
-    while t.is_alive():
-        samples.append((time.time(), size()))
-        time.sleep(0.005)
+        t = threading.Thread(target=reader)
+        samples: list[tuple[float, int]] = []
+        t.start()
+        while t.is_alive():
+            samples.append((time.time(), size()))
+            time.sleep(0.005)
+        if failure:
+            raise RuntimeError("reconcile round failed") from failure[0]
+    finally:
+        stop.touch()
+        try:
+            out, _ = writer.communicate(timeout=60)
+        except subprocess.TimeoutExpired:
+            writer.kill()
+            out, _ = writer.communicate()
+        stop.unlink()
+    writer_out = json.loads(out)
     # The WAL when the round's transaction began, its largest size
     # while the transaction was open, and the writer commits that
     # landed in that interval.
     start, end = result["started_at"], result["ended_at"]
     at_start = max((s for when, s in samples if when <= start), default=0)
     in_window = [s for when, s in samples if start <= when <= end]
-    stop.touch()
-    writer_out = json.loads(writer.communicate(timeout=60)[0])
-    stop.unlink()
     with closing(sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)) as conn:
         overlapping = conn.execute(
             "SELECT COUNT(*) FROM bench_commits WHERE at > ? AND at < ?", (start, end)

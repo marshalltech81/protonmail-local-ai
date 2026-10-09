@@ -3,6 +3,9 @@ runnable and its measurements honest, at a size that runs in seconds."""
 
 import importlib.util
 import math
+import sqlite3
+import time
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -157,3 +160,22 @@ def test_wal_is_reclaimed_after_the_round(report):
         )
         assert wal["checkpoint_after"]["busy"] == 0
         assert wal["wal_after_checkpoint_bytes"] == 0
+
+
+def test_failed_round_stops_the_writer(bench, tmp_path):
+    # A reader that fails (here: its request file is missing) must not
+    # leave the unthrottled writer committing after run_wal returns.
+    db = tmp_path / "failed.db"
+    bench.build(db, 20, 1, "typical", "typical")
+
+    def commits() -> int:
+        with closing(sqlite3.connect(db)) as conn:
+            return conn.execute("SELECT COUNT(*) FROM bench_commits").fetchone()[0]
+
+    with pytest.raises(RuntimeError, match="reconcile round failed"):
+        bench.run_wal(str(db), "messages", 5, str(tmp_path / "missing.json"), 4096, 0.0)
+    after = commits()
+    assert after > 0
+    time.sleep(0.5)
+    assert commits() == after
+    assert not (tmp_path / "failed.db.stop").exists()
