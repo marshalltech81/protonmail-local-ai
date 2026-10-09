@@ -312,6 +312,16 @@ def _decode_lost_bytes(part: email.message.Message) -> bool:
     return any(isinstance(d, _DECODE_LOSS_DEFECTS) for d in part.defects)
 
 
+# Defects recording a header-block line the parse dropped: a first line
+# starting with whitespace (a continuation with no header before it), or,
+# in a message's own headers, a ``From `` line after the first. A leading
+# ``From `` envelope line, as in an mbox export, is kept as the envelope.
+DROPPED_HEADER_DEFECTS = (
+    email.errors.FirstHeaderLineIsContinuationDefect,
+    email.errors.MisplacedEnvelopeHeaderDefect,
+)
+
+
 def _transport_lines_dropped(container: email.message.Message) -> bool:
     """Whether the parse dropped a line of ``container``'s transport text
     from one of its pseudo messages, so ``_transport_text`` cannot hold
@@ -1370,7 +1380,10 @@ class BodyWalk:
     may have (any quoted-printable part, #1288), and
     ``structure_lost_parts`` the parts declared ``multipart/*`` that the
     standard library could not decompose (no or a missing boundary), whose
-    text is lost."""
+    text is lost, and ``header_lost_parts`` the text parts whose header
+    block lost a line to the parse (``DROPPED_HEADER_DEFECTS``). Each
+    counts only parts the body keeps, or would keep had they been read
+    whole."""
 
     parts_left: int = MAX_WALKED_PARTS
     text_parts_left: int = MAX_BODY_TEXT_PARTS
@@ -1378,6 +1391,7 @@ class BodyWalk:
     degraded: Counter[str] = field(default_factory=Counter)
     decode_lost_parts: int = 0
     structure_lost_parts: int = 0
+    header_lost_parts: int = 0
 
 
 def _extract_body_and_attachments(
@@ -1403,8 +1417,10 @@ def _extract_body_and_attachments(
     # the same form: counted below only if the body could keep them.
     decode_lossy: list[tuple[int, bool]] = []
     charset_degraded: list[tuple[int, bool]] = []
-    # And the parts declared ``multipart/*`` the parse left undecomposed.
+    # And the parts declared ``multipart/*`` the parse left undecomposed,
+    # and the text parts whose header block lost a line to the parse.
     unsplit: list[tuple[int, bool]] = []
+    header_lost: list[tuple[int, bool]] = []
 
     # Depth-first in document order, like ``msg.walk()``, but nothing
     # inside an attachment is a candidate for the body: an attached
@@ -1578,6 +1594,15 @@ def _extract_body_and_attachments(
             not in _IDENTITY_ENCODINGS | {"base64"}
         ):
             decode_lossy.append((len(nodes) - 1, not is_html))
+        if (
+            walk is not None
+            and part is not msg
+            and any(isinstance(d, DROPPED_HEADER_DEFECTS) for d in part.defects)
+        ):
+            # A part with no blank line after its boundary whose text
+            # starts with whitespace loses that line (review round 11;
+            # the message's own headers are checked by the caller).
+            header_lost.append((len(nodes) - 1, not is_html))
         fallback: Counter[str] | None = None if walk is None else Counter()
         text = _safe_decode(payload, part.get_content_charset() or "utf-8", fallback)
         if fallback:
@@ -1604,6 +1629,8 @@ def _extract_body_and_attachments(
             walk.degraded[CHARSET_DEGRADED] += _capped_parts_lost(nodes, charset_degraded)
         if unsplit:
             walk.structure_lost_parts += _capped_parts_lost(nodes, unsplit)
+        if header_lost:
+            walk.header_lost_parts += _capped_parts_lost(nodes, header_lost)
     return body, attachments
 
 

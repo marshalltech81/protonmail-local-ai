@@ -982,3 +982,36 @@ class TestReviewRound10:
         )
         assert result.text_complete is True
         assert "eml_header_lines" not in caplog.text
+
+
+class TestReviewRound11:
+    """A body text part whose own header block lost a line to the parse
+    (a part with no blank line after its boundary, whose text starts with
+    whitespace; a ``From `` line there stays in the body) counts as
+    ``eml_header_lines`` when the body could keep that part."""
+
+    _DROPPED = b" " + MARKER.encode() + b" words\r\nContent-Type: text/plain\r\n\r\nkept words"
+
+    def _extract(self, payload: bytes, caplog) -> extractors.ExtractionResult:
+        with caplog.at_level(logging.WARNING):
+            result = extract(content_type="message/rfc822", filename="f.eml", payload=payload)
+        assert result.status == STATUS_SUCCESS
+        assert MARKER not in caplog.text
+        return result
+
+    @pytest.mark.parametrize(
+        "part",
+        [_DROPPED, b"\t" + _DROPPED[1:]],
+        ids=["space", "tab"],
+    )
+    def test_a_selected_part_that_lost_a_line_is_a_cut(self, caplog, part):
+        result = self._extract(_multipart(part), caplog)
+        assert result.text is not None and MARKER not in result.text
+        assert result.text_complete is False
+        assert "extractor cap eml_header_lines:" in caplog.text
+
+    def test_an_alternative_set_aside_is_not_counted(self, caplog):
+        html = b" " + MARKER.encode() + b"\r\nContent-Type: text/html\r\n\r\n<p>html</p>"
+        result = self._extract(_alternative(_PLAIN, html), caplog)
+        assert result.text_complete is True
+        assert "eml_header_lines" not in caplog.text

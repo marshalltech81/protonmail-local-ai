@@ -1468,7 +1468,9 @@ the body could keep it (not an alternative set aside, nor an
 attachment); the same gap in the default parser is #1348. A message
 header line the parse dropped (a first line starting with whitespace,
 or a `From ` line after the first; a leading `From ` envelope line is
-not counted) is counted as `eml_header_lines`. A nested email in any
+not counted) is counted as `eml_header_lines`, and so is the first
+line of a body text part the body keeps, when the part has no blank
+line after its boundary and that line starts with whitespace. A nested email in any
 other transfer encoding (uuencode and its aliases included) is not
 decoded: only its depth label is indexed, and it counts as
 `eml_nested_messages`. The decoders' fallbacks are
