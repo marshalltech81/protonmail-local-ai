@@ -250,6 +250,44 @@ class TestBudgetAtDispatch:
         assert len(extractor.calls) == 2  # the setup extraction and ``first``
 
 
+class TestChildReportedLaunches:
+    """Codex round 1 on #1355: processes an extractor child starts are
+    reported in an ``N launches`` frame and added to the parent's count,
+    on the error path too, and never reach the caller's counts."""
+
+    @staticmethod
+    def _fake_child(tmp_path, monkeypatch, frames: str) -> None:
+        script = tmp_path / "fake_child.py"
+        script.write_text(f"import sys\nsys.stdout.write({frames!r})\n")
+        monkeypatch.setattr(_runner, "_CHILD", script)
+
+    def _run(self):
+        return _runner.run_child(
+            "xls",
+            b"payload",
+            max_address_space_bytes=4 * 1024 * 1024 * 1024,
+            max_cpu_seconds=10,
+            timeout_seconds=30,
+            max_output_bytes=1024,
+            caps=frozenset(),
+            counts=frozenset({"text_lost"}),
+        )
+
+    def test_a_result_adds_the_reported_launches(self, tmp_path, monkeypatch):
+        self._fake_child(tmp_path, monkeypatch, "N launches 3\nN text_lost 1\nT 2\nok")
+        before = _runner.process_launches()
+        result = self._run()
+        assert (result.text, result.counts) == ("ok", {"text_lost": 1})
+        assert _runner.process_launches() - before == 1 + 3
+
+    def test_an_error_adds_the_reported_launches(self, tmp_path, monkeypatch):
+        self._fake_child(tmp_path, monkeypatch, "N launches 2\nE ValueError\n")
+        before = _runner.process_launches()
+        with pytest.raises(_runner.ChildError):
+            self._run()
+        assert _runner.process_launches() - before == 1 + 2
+
+
 # --- the occurrence's deferral mark ---------------------------------------
 
 
@@ -756,6 +794,29 @@ class TestVisibility:
         assert MARKER not in caplog.text
         errors = [r[0] for r in p.db._conn.execute("SELECT last_error FROM indexing_jobs")]
         assert not any(MARKER in (e or "") for e in errors)
+
+    def test_recovery_is_logged_when_the_deferral_ends_between_heartbeats(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """Codex round 1 on #1355: a message deferred and finished between
+        two heartbeats still gets its recovery line."""
+        caplog.set_level(logging.INFO)
+        extractor = LaunchingExtractor()
+        p = Pipeline(tmp_path, monkeypatch, extractor, launches=2)
+        path = p.add("quick", _parts("quick", 3))
+        while p.job(path) is not None:
+            p.drain()
+        # The first drain's heartbeat saw the job pending, never deferred.
+        heartbeats = [r.getMessage() for r in caplog.records if r.getMessage().startswith("queue:")]
+        assert len(heartbeats) == 1 and " extraction_deferred=0 " in heartbeats[0]
+        monkeypatch.setattr(main, "_last_queue_heartbeat", None)
+        main._maybe_log_queue_heartbeat(p.queue)
+        recovered = [
+            r
+            for r in caplog.records
+            if r.getMessage().startswith("attachment extraction caught up")
+        ]
+        assert [r.levelno for r in recovered] == [logging.INFO]
 
 
 # --- database pieces --------------------------------------------------------

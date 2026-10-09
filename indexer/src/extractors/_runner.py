@@ -49,7 +49,10 @@ here as it arrives. Every frame but the text is one ASCII line:
   so a long extraction can refresh the indexer's heartbeat;
 * ``C <name>``: a budget that cut the text, one of the caller's
   ``caps``;
-* ``N <name> <count>``: a count, one of the caller's ``counts``;
+* ``N <name> <count>``: a count, one of the caller's ``counts``, or
+  ``N launches <count>``, the processes the child itself started
+  (Tesseract for an image), added to this interpreter's
+  ``process_launches`` (#1236);
 * ``E <type name>``: the extraction raised; nothing may follow;
 * ``T <length>`` and then exactly ``length`` bytes of UTF-8 text;
   nothing may follow.
@@ -114,10 +117,17 @@ _COUNT = re.compile(r"[0-9]{1,18}")
 # ``subprocess.Popen``, counted from the audit event it raises, so the
 # count covers the tools started here and the ones a library starts in
 # process (Poppler's ``pdfinfo`` and ``pdftoppm`` and Tesseract for a
-# scanned PDF), whichever library version starts them. The per-message
-# extraction budget (``attachment_indexing.ExtractionBudget``) reads it
-# around each dispatch. Only the ingestion worker starts processes.
+# scanned PDF), whichever library version starts them, plus the
+# processes an extractor child reports it started (``CHILD_LAUNCHES``:
+# Tesseract per image frame). The per-message extraction budget
+# (``attachment_indexing.ExtractionBudget``) reads it around each
+# dispatch. Only the ingestion worker starts processes. A child killed
+# before it reports (a timeout, a crash) adds only its own launch; its
+# run still counts against the budget's seconds.
 _launches = 0
+
+# The count frame an extractor child sends with the processes it started.
+CHILD_LAUNCHES = "launches"
 
 
 def _count_launch(event: str, _args: tuple) -> None:
@@ -372,17 +382,22 @@ def run_child(
     builds from its settings (``image``: the page cap and OCR timeout).
     The wall-clock timeout is past the CPU limit, so a CPU-bound child
     meets that first."""
-    frames = _Frames(caps, counts, on_progress)
-    output = run_tool(
-        [sys.executable, "-I", str(_CHILD), module, *options],
-        payload,
-        timeout_seconds=timeout_seconds,
-        max_output_bytes=max_output_bytes,
-        max_address_space_bytes=max_address_space_bytes,
-        max_cpu_seconds=max_cpu_seconds,
-        suffix=f".{module}",
-        on_output=frames.feed,
-    )
+    global _launches
+    frames = _Frames(caps, counts | {CHILD_LAUNCHES}, on_progress)
+    try:
+        output = run_tool(
+            [sys.executable, "-I", str(_CHILD), module, *options],
+            payload,
+            timeout_seconds=timeout_seconds,
+            max_output_bytes=max_output_bytes,
+            max_address_space_bytes=max_address_space_bytes,
+            max_cpu_seconds=max_cpu_seconds,
+            suffix=f".{module}",
+            on_output=frames.feed,
+        )
+    finally:
+        # The processes the child started, whatever its result (#1236).
+        _launches += frames.take_launches()
     if output.truncated:
         raise ChildOutputError
     error = frames.error()
@@ -475,6 +490,11 @@ class _Frames:
     def error(self) -> str | None:
         """The type name of an ``E`` frame, if the child sent one."""
         return self._error
+
+    def take_launches(self) -> int:
+        """The ``N launches`` count the child sent (0 when none), removed
+        from the counts the caller gets."""
+        return self._counts.pop(CHILD_LAUNCHES, 0)
 
     def result(self) -> ChildResult:
         """The text frame's result; raises ``ChildOutputError`` when the

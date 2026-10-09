@@ -2008,7 +2008,10 @@ each dispatch: **64 process launches** and **5 seconds** of extraction
 `indexer/src/attachment_indexing.py`; fixed, always positive, no off
 switch). Launches are every `subprocess.Popen` the indexer process
 starts, counted from Python's `subprocess.Popen` audit event, so a
-library's own processes count too.
+library's own processes count too, plus the ones an extractor child
+reports it started (`N launches`: Tesseract per image frame). A child
+killed before it reports adds only its own launch; its run still counts
+in the seconds.
 
 - **Turn, not ceiling.** The first dispatch of a pass is always
   admitted, so each pass resolves at least one attachment. An admitted

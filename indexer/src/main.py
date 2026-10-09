@@ -1222,10 +1222,18 @@ class _ReparseProgress:
 
 _reparse_progress = _ReparseProgress()
 
-# Whether the last queue heartbeat saw messages continued for deferred
-# attachment extraction (#1236), so the heartbeat that first sees none
-# logs one recovery line.
+# Whether a message has been continued for deferred attachment extraction
+# (#1236) since the last recovery line: set when a deferral commits and
+# when a heartbeat sees one queued, so the heartbeat that first sees none
+# logs one recovery line even when the deferral and its last
+# continuation fall between two heartbeats (Codex round 1 on #1355).
 _extraction_deferrals_seen = False
+
+
+def _note_extraction_deferral() -> None:
+    """A message's deferral committed (#1236)."""
+    global _extraction_deferrals_seen
+    _extraction_deferrals_seen = True
 
 
 def _log_extraction_deferral_recovery(extraction_deferred: int) -> None:
@@ -2045,6 +2053,7 @@ def _phase2c_commit_vectors(
     record_committed_outcomes(state.attach_plans)
     if continues:
         attachment_outcomes.record_deferred_message()
+        _note_extraction_deferral()
     return True, None
 
 

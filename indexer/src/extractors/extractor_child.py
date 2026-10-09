@@ -19,10 +19,12 @@ and the names of the budgets that cut it.
 
 Output on stdout is the runner's framed protocol (``_runner``): for a
 module in ``REPORTS_PROGRESS``, a ``P`` line written and flushed as each
-page is read; then a ``C <name>`` line per budget, an ``N <key> <count>``
-line per degradation the extraction recorded (#1314), then ``T <length>`` and
-the text as UTF-8; or ``E <type name>`` alone when the extraction
-raised. Only the type name: an exception's message can quote the
+page is read; then ``N launches <count>``, the processes this child
+started (Tesseract per image frame, counted from the same audit event
+as in the indexer, #1236); then a ``C <name>`` line per budget, an
+``N <key> <count>`` line per degradation the extraction recorded
+(#1314), then ``T <length>`` and the text as UTF-8; or ``E <type name>``
+after the launch count when the extraction raised. Only the type name: an exception's message can quote the
 document. A ``MemoryError`` or ``RecursionError`` is reported the same
 way: here it is the child's own limit.
 
@@ -98,6 +100,11 @@ def run(
     return result_frames(text, caps, package.child_degradation())
 
 
+def launches_frame(launches: int) -> bytes:
+    """The count frame for the processes this child started (#1236)."""
+    return f"N launches {launches}\n".encode("ascii")
+
+
 def error_frame(type_name: str) -> bytes:
     """The frame for an extraction that raised ``type_name``."""
     return f"E {type_name}\n".encode("ascii", errors="replace")
@@ -128,7 +135,12 @@ def main(argv: list[str]) -> int:  # pragma: no cover — runs only in the child
     sys.path.insert(0, str(_ROOT))
     with open(argv[-1], "rb") as handle:
         payload = handle.read()
-    sys.stdout.buffer.write(run(argv[1], payload, argv[2:-1], _write_progress))
+    # Imported first, so its audit hook counts every process run starts.
+    runner = importlib.import_module(f"{_PACKAGE}._runner")
+    before = runner.process_launches()
+    result = run(argv[1], payload, argv[2:-1], _write_progress)
+    launches = runner.process_launches() - before
+    sys.stdout.buffer.write(launches_frame(launches) + result)
     sys.stdout.buffer.flush()
     return 0
 
