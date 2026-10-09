@@ -1814,7 +1814,7 @@ with no extractor's file name) is not logged.
 |---|---|
 | `attached_depth` | An attached email nested more than 20 levels deep (or 20 transfer-encoded levels) |
 | `attached_fields` | The same, once the message's attached emails exceed the per-message part and header budget |
-| `transport_decode` | A base64 or quoted-printable attached email that does not decode: the attachments inside it are not read |
+| `transport_decode` | A base64 or quoted-printable attached email that does not decode: the attachments inside it are not read; or an attached email in another transfer encoding (uuencode and its aliases, or an unknown value), whose transport text is not extracted |
 | `decoded_bytes` | The same, past 64 MB of decoded attached emails per message |
 | `container_serialize` | A container the serializer refuses (a malformed header), when its payload would be extracted |
 | `body_parts` | Text parts past the 200th, left out of the body: only those that could have been part of it, so an alternative rendering after the one the body uses is not counted |

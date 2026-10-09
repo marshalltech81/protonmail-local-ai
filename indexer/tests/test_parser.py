@@ -6,6 +6,7 @@ encoded headers, address parsing, date fallback, and folder derivation.
 """
 
 import base64
+import binascii
 import dataclasses
 import email.errors
 import email.utils
@@ -4059,6 +4060,13 @@ def _addresses(to: bytes) -> bytes:
 _INNER_EMAIL = (
     b"From: a@example.test\r\nSubject: SYNTHETIC_HEADER_MARKER\r\n\r\nSYNTHETIC_TEXT_MARKER\r\n"
 )
+
+
+def _uu_lines(data: bytes) -> bytes:
+    """``data`` uuencoded, 45 bytes a line."""
+    return b"".join(binascii.b2a_uu(data[i : i + 45]) for i in range(0, len(data), 45))
+
+
 _LONG_LOCAL = b"SYNTHETIC_HEADER_MARKER" + b"x" * 1000
 _LONG_SUBJECT = b"SYNTHETIC_HEADER_MARKER" + b"s" * 3000
 _LONG_ID = _id_of(999, marker="SYNTHETIC_HEADER_MARKER")
@@ -4167,6 +4175,18 @@ _CAP_SHAPES = {
         _with_attachment(
             b"Content-Type: message/rfc822\r\nContent-Transfer-Encoding: quoted-printable\r\n",
             b"From: a@example.test\r\nSubject: SYNTHETIC_HEADER_MARKER caf\xc3\xa9\r\n\r\nhello",
+        ),
+        False,
+        "transport_decode=1",
+        _only_attachment_is_empty,
+    ),
+    # Review round 4 on #1311: an attached email in a transfer encoding
+    # the parser does not decode (uuencode, its aliases, anything else)
+    # keeps no payload, so its transport text is never extracted.
+    "transport_decode_uuencode": (
+        _with_attachment(
+            b"Content-Type: message/rfc822\r\nContent-Transfer-Encoding: x-uuencode\r\n",
+            b"begin 644 x\n" + _uu_lines(_INNER_EMAIL) + b"`\nend\n",
         ),
         False,
         "transport_decode=1",
@@ -4422,6 +4442,7 @@ _CAP_COMPLETENESS: dict[str, set[str]] = {
     "attached_depth_decode_chain": _MANIFEST,
     "transport_decode_base64": _MANIFEST,
     "transport_decode_8bit": _MANIFEST,
+    "transport_decode_uuencode": _MANIFEST,
     "decoded_bytes": _MANIFEST,
     "container_serialize": _MANIFEST,
     "container_serialize_decoded": _MANIFEST,
@@ -5583,6 +5604,7 @@ _PAYLOAD_LOSS = {
     "attached_depth_decode_chain": 20,
     "transport_decode_base64": 1,
     "transport_decode_8bit": 1,
+    "transport_decode_uuencode": 1,
     "decoded_bytes": 1,
     "container_serialize": 1,
     "container_serialize_decoded": 1,
@@ -5739,7 +5761,10 @@ class TestContainerTransportDecodeLoss:
         # The diagnostic runs only on a transport that decoded.
         assert calls == []
 
-    def test_quoted_printable_is_not_checked(self, tmp_path, monkeypatch):
+    def test_quoted_printable_is_not_checked_and_never_complete(self, tmp_path, monkeypatch):
+        """The base64 diagnostic does not run; a quoted-printable loss
+        records nothing to detect, so the payload is never certified
+        (review round 4 on #1311, until #1288)."""
         import quopri
 
         msg, calls = self._parse(
@@ -5749,7 +5774,7 @@ class TestContainerTransportDecodeLoss:
             quopri.encodestring(self._INNER),
         )
         [attachment] = msg.attachments
-        assert attachment.payload and attachment.payload_complete is True
+        assert attachment.payload and attachment.payload_complete is False
         assert calls == []
 
     def test_the_check_runs_behind_the_decodable_budget(self, tmp_path, monkeypatch):
@@ -5764,3 +5789,65 @@ class TestContainerTransportDecodeLoss:
         )
         assert msg.parse_caps == {"decoded_bytes": 1}
         assert calls == []
+
+
+class TestContainerTransportEncodings:
+    """Review round 4 on #1311 (owner decision): an attached email's
+    declared Content-Transfer-Encoding decides whether its payload can be
+    certified. Identity and base64 (whose loss is detected) are unchanged;
+    quoted-printable keeps its lenient decode but is never complete (its
+    loss records nothing, #1288); any other encoding keeps no payload."""
+
+    @staticmethod
+    def _attachment(tmp_path, headers: bytes, body: bytes):
+        path = tmp_path / "m.eml"
+        path.write_bytes(_with_attachment(b"Content-Type: message/rfc822\r\n" + headers, body))
+        msg = parse_email(path)
+        assert msg is not None
+        (attachment,) = msg.attachments
+        return msg, attachment
+
+    @pytest.mark.parametrize("encoding", [b"x-uuencode", b"uuencode", b"uue", b"x-uue", b"x-other"])
+    def test_an_unhandled_encoding_keeps_no_payload(self, tmp_path, caplog, encoding):
+        caplog.set_level("DEBUG")
+        uu = b"begin 644 x\n" + _uu_lines(_INNER_EMAIL) + b"`\nend\n"
+        msg, attachment = self._attachment(
+            tmp_path, b"Content-Transfer-Encoding: " + encoding + b"\r\n", uu
+        )
+        assert (attachment.payload, attachment.payload_complete) == (b"", False)
+        assert msg.parse_caps == {"transport_decode": 1}
+        assert msg.attachments_manifest_complete is False
+        assert "SYNTHETIC_TEXT_MARKER" not in caplog.text
+
+    @pytest.mark.parametrize(
+        ("body", "kept"),
+        [
+            (_INNER_EMAIL, b"SYNTHETIC_TEXT_MARKER"),
+            (b"From: a@example.test\r\n\r\nvisible =\rtail SYNTHETIC_TEXT_MARKER", b"visible"),
+        ],
+        ids=["clean", "malformed"],
+    )
+    def test_quoted_printable_keeps_its_bytes_and_is_never_complete(self, tmp_path, body, kept):
+        msg, attachment = self._attachment(
+            tmp_path, b"Content-Transfer-Encoding: quoted-printable\r\n", body
+        )
+        assert kept in attachment.payload
+        assert attachment.payload_complete is False
+        assert msg.parse_caps == {}
+
+    @pytest.mark.parametrize(
+        ("headers", "body"),
+        [
+            (b"", _INNER_EMAIL),
+            (b"Content-Transfer-Encoding: 7bit\r\n", _INNER_EMAIL),
+            (b"Content-Transfer-Encoding: 8bit\r\n", _INNER_EMAIL),
+            (b"Content-Transfer-Encoding: binary\r\n", _INNER_EMAIL),
+            (b"Content-Transfer-Encoding: base64\r\n", base64.encodebytes(_INNER_EMAIL)),
+        ],
+        ids=["none", "7bit", "8bit", "binary", "base64"],
+    )
+    def test_identity_and_base64_are_unchanged(self, tmp_path, headers, body):
+        msg, attachment = self._attachment(tmp_path, headers, body)
+        assert b"SYNTHETIC_TEXT_MARKER" in attachment.payload
+        assert attachment.payload_complete is True
+        assert msg.parse_caps == {}

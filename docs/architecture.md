@@ -891,7 +891,15 @@ writes the occurrence's chunks, so they roll back with them.
   decoder only to read those defects (one linear pass behind the
   decodable-bytes budget; the bytes kept are the lenient decode's).
   Quoted-printable and uuencode failures record no defect and are not
-  detected (#1288).
+  detected (#1288), so a quoted-printable attached email (`message/*`)
+  keeps its lenient decode but is always `0`, and one in any other
+  transfer encoding that is not identity or base64 (uuencode and its
+  aliases, or an unknown value) keeps the empty payload, counted as the
+  `transport_decode` parse cap when an extractor reads the attachment:
+  none of its transport text is extracted, its result is the `empty`
+  one an unserialized container gets, and the message's
+  `attachments_manifest_complete` is cleared (review round 4 on #1311).
+  A leaf attachment in those encodings is unchanged.
 - For a `success` or `empty` result, the result's own
   `text_complete`, which the dispatcher sets: `0` when the attempt lost
   text (any `extractor_caps` cap, the `max_extracted_chars` cut, the

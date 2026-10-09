@@ -989,6 +989,12 @@ def _nesting_exceeds(root: email.message.Message, limit: int, budget: _Serializa
     return False
 
 
+# The Content-Transfer-Encoding values that leave a part's bytes as they
+# are; base64 and quoted-printable are decoded, and any other value on an
+# attached email is not.
+_IDENTITY_ENCODINGS = frozenset({"", "7bit", "8bit", "binary"})
+
+
 def _attachment_payload(
     part: email.message.Message,
     *,
@@ -1033,8 +1039,12 @@ def _attachment_payload(
     would read this attachment's payload).
 
     ``transport_lost`` (when given) gets ``True`` appended when a base64
-    transport decoded but lost bytes (``_base64_transport_lost``); the
-    returned bytes are the lenient decode's either way (#1242).
+    transport decoded but lost bytes (``_base64_transport_lost``), or the
+    transport is quoted-printable, whose loss cannot be detected (#1288);
+    the returned bytes are the lenient decode's either way (#1242). An
+    attached email in any other non-identity transfer encoding (uuencode
+    and its aliases included) keeps the empty payload, counted as
+    ``transport_decode`` when an extractor would read it.
     """
     if not part.is_multipart():
         return _decoded_payload(part), None
@@ -1070,10 +1080,11 @@ def _attachment_payload(
         if decoded is None:
             caps["transport_decode"] += 1
             return b"", None
-        if (
-            transport_lost is not None
-            and encoding == "base64"
-            and _base64_transport_lost(transport)
+        # A quoted-printable loss records nothing to detect, so its bytes
+        # (the lenient decode's) are kept but never certified until
+        # #1288 detects the loss (review round 4 on #1311).
+        if transport_lost is not None and (
+            encoding == "quoted-printable" or _base64_transport_lost(transport)
         ):
             transport_lost.append(True)
         # From here the decoded container is the part: the same depth
@@ -1091,6 +1102,14 @@ def _attachment_payload(
             if payload_read:
                 caps["container_serialize"] += 1
             return b"", part
+    if part.get_content_maintype() == "message" and encoding not in _IDENTITY_ENCODINGS:
+        # An attached email in a transfer encoding not decoded here
+        # (uuencode and its aliases, or any other): its parsed form is the
+        # transport text, so no payload is kept and none of it is ever
+        # extracted (review round 4 on #1311). The caller still walks it.
+        if serialize_containers and payload_read:
+            caps["transport_decode"] += 1
+        return b"", None
     if not serialize_containers:
         return b"", None
     # The part's own tree is one level deeper than the email it carries.
