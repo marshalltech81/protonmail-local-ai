@@ -4943,7 +4943,7 @@ class TestHeicImages:
         from PIL import Image
         from src.extractors import (
             _EXT_DISPATCH,
-            image,  # noqa: F401 - registers the opener
+            image_child,  # noqa: F401 - registers the opener (#1292)
         )
 
         heif = {ext for ext, fmt in Image.registered_extensions().items() if fmt == "HEIF"}
