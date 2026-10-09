@@ -219,15 +219,18 @@ def _chronology_checks(case: Case, run: CaseRun) -> dict[str, str]:
       it must (each position in force, both sides of every change, every
       side of every conflict), so an omitted correction or a conflict
       reduced to its newest side fails.
-    - ``values_attributed``: a statement that states a labelled value
-      cites a passage of a message whose position states that value. A
+    - ``values_attributed``: a statement that states a labelled value, in
+      any of its accepted spellings (a bare number also matches "$45" and
+      "45 dollars"), cites a passage of a message whose position states
+      that value. A
       citation that resolves to a supplied passage but not to the
       message holding the value (an unsupported but valid-looking
       citation) fails here, though every citation check passes.
     - ``chronology_dated`` (``brief_issue`` only): every position whose
       source reached the prompt has a chronology entry citing that
       source, with the position's date and date source and one of its
-      actor's names, so an event dated by a later message's sent date, or
+      actor's names as whole words, so an event dated by a later
+      message's sent date, or
       attributed to the sender who only relayed it, fails. A source lost
       before the prompt is the evidence groups' to report.
 
@@ -248,10 +251,11 @@ def _chronology_checks(case: Case, run: CaseRun) -> dict[str, str]:
     must = chron.must_cite()
     out["chronology_cited"] = PASS if all(message_id_of(r) in cited for r in must) else FAIL
 
+    # Each accepted spelling of a value, with the messages that state it.
     owners: dict[str, set[str | None]] = {}
     for p in chron.positions:
-        for value in p.values:
-            owners.setdefault(value, set()).add(message_id_of(p.source))
+        for spelling in (s for group in p.values for s in group):
+            owners.setdefault(spelling, set()).add(message_id_of(p.source))
     attributed = True
     for statement in view.statements:
         text = _fold(statement.text)
@@ -269,13 +273,14 @@ def _chronology_checks(case: Case, run: CaseRun) -> dict[str, str]:
         ]
 
         def dated(p: Position) -> bool:
+            # A name counts only as whole words (``_mentions``), so
+            # "Harte" is not found inside a longer name.
             source = message_id_of(p.source)
-            names = [_fold(n) for n in p.actor]
             return any(
                 source in messages(list(e.labels))
                 and e.date == p.date
-                and e.date_source == p.date_source
-                and any(n in _fold(e.actor or "") for n in names)
+                and e.date_source in p.date_sources()
+                and any(_mentions(_fold(e.actor or ""), n) for n in p.actor)
                 for e in entries
             )
 

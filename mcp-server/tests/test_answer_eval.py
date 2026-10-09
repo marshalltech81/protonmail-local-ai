@@ -307,6 +307,9 @@ class TestCases:
             lambda r: r["chronology"]["positions"][0].update(date="2026-13-01"),
             lambda r: r["chronology"]["positions"][0].update(date_source="unknown"),
             lambda r: r["chronology"]["positions"][0].update(values=[""]),
+            lambda r: r["chronology"]["positions"][0].update(values=["1,150"]),
+            lambda r: r["chronology"]["positions"][0].update(values=[[]]),
+            lambda r: r["chronology"]["positions"][0].update(values=[["1,150", ""]]),
             lambda r: r["chronology"]["positions"][0].update(excerpt=" "),
             lambda r: r["chronology"]["positions"][0].pop("excerpt"),
             lambda r: r["chronology"].update(
@@ -1441,6 +1444,61 @@ class TestChronologyGraders:
         event = self._event(date, date_source, actor, ["E1"])
         run = _run(event.text, [_passage("E1", "t128.1")], ["E1"], statements=[event])
         assert grade_run(case, run).checks["chronology_dated"] == expected
+
+    @pytest.mark.parametrize(
+        "actor",
+        [
+            # Review round 1: a role alias inside the relayer's own
+            # description, and a name that only contains an accepted one.
+            "Rafe Dunmore relaying the parish clerk",
+            "Nellie Garsideson",
+        ],
+    )
+    def test_brief_event_actor_is_a_whole_name(self, actor):
+        case = CASES["brief-footbridge-closure"]
+        event = self._event("2026-05-05", "mentioned", actor, ["E1"])
+        run = _run(event.text, [_passage("E1", "t128.1")], ["E1"], statements=[event])
+        assert grade_run(case, run).checks["chronology_dated"] == FAIL
+
+    @pytest.mark.parametrize("date_source", ["sent", "mentioned"])
+    def test_relative_date_accepts_either_source(self, date_source):
+        """Review round 1: "phoned me this morning" dates the call by the
+        message itself, so either date source is right."""
+        case = CASES["brief-dispenser-hire-charge"]
+        event = self._event("2026-07-16", date_source, "Ruben Kestle", ["E1"])
+        run = _run(event.text, [_passage("E1", "t100.11")], ["E1"], statements=[event])
+        assert grade_run(case, run).checks["chronology_dated"] == PASS
+        wrong = self._event("2026-07-17", date_source, "Ruben Kestle", ["E1"])
+        run = _run(wrong.text, [_passage("E1", "t100.11")], ["E1"], statements=[wrong])
+        assert grade_run(case, run).checks["chronology_dated"] == FAIL
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            # Review round 1: another rendering of a labelled value is
+            # still that value, so its citation is still checked.
+            ("Hazel Pim gives 60 dollars [E1].", FAIL),
+            ("Hazel Pim gives USD 60 [E1].", FAIL),
+            ("Hazel Pim gives 45 dollars [E1].", PASS),
+        ],
+    )
+    def test_value_renderings_are_attributed(self, text, expected):
+        case = CASES["ask-reading-room-deposit"]
+        passages = [_passage("E1", "t126.1"), _passage("E2", "t127.1")]
+        statements = [_statement(text, ["E1"]), _statement("Bram Okoye [E2].", ["E2"])]
+        run = _run(text, passages, ["E1", "E2"], statements=statements)
+        assert grade_run(case, run).checks["values_attributed"] == expected
+
+    def test_date_value_spellings_are_attributed(self):
+        case = CASES["ask-footbridge-closure"]
+        passages = [_passage("E1", "t128.1"), _passage("E2", "t127.1")]
+        for text, label, expected in (
+            ("Closed until June 30 [E2].", "E2", FAIL),
+            ("Closed until June 30 [E1].", "E1", PASS),
+        ):
+            statements = [_statement(text, [label]), _statement("See [E1].", ["E1"])]
+            run = _run(text, passages, ["E1", "E2"], statements=statements)
+            assert grade_run(case, run).checks["values_attributed"] == expected, text
 
     def test_brief_event_lost_before_the_prompt_is_left_to_the_evidence_groups(self):
         """A position whose source never reached the prompt is not graded

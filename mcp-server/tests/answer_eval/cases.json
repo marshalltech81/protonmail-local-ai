@@ -1,5 +1,5 @@
 {
-  "_comment": "Answer-quality cases for ask_mailbox, summarize_thread, extract_from_emails and the experimental tools over the synthetic baseline mailbox (indexer/tests/baseline/corpus.py). A case id starts with its tool's short name (ask-, summarize-, extract-, brief-, check-); a summarize_thread case names a baseline thread ID directly (nothing is embedded) and its evidence must be in that thread, and an extract_from_emails case gives its query and schema with a small limit, since each searched thread is one paid model call (the per-tool argument rules are in cases.py). Synthetic data only: never add a case built from a real mailbox. Message refs 'tNN.M' mean 'tNN.M@baseline.example'; thread refs 'tNN' mean the thread rooted at 'tNN.1@baseline.example'. required_evidence is a list of groups: every group is required and any one ref inside a group satisfies it. Each expected fact lists the message refs and a short verbatim excerpt of the indexed text that establishes it; make baseline checks each excerpt is in that message's indexed text, so references stay independent of what the system retrieves. deterministic.must_include is a list of groups of acceptable spellings (every group required, any spelling in a group satisfies it, case-insensitive substring of the answer). must_include checks that a value is present, not that the answer asserts it: an answer that names the value only to deny or correct it still passes, so correctness needs the judge. must_not_include lists strings no answer may contain. criteria say which rubric dimensions apply; the judge may not mark an applicable one not_applicable. held_out must equal tests/agent_metrics.py is_held_out(id); never tune against held-out cases. review records that the expected facts were drafted with AI from the synthetic corpus and await owner verification. An optional chronology object (#291) holds golden labels: positions (id, accepted actor names, kind, the one message ref stating it, its date and date_source sent or mentioned, the whole values that message states for it, and a verbatim excerpt), changes (from, to, kind) whose two sources an answer must both cite, conflicts whose every side it must cite, in_force (the positions as of as_of, or now when as_of is null) and as_of; every source an answer must cite is also a required_evidence group of its own.",
+  "_comment": "Answer-quality cases for ask_mailbox, summarize_thread, extract_from_emails and the experimental tools over the synthetic baseline mailbox (indexer/tests/baseline/corpus.py). A case id starts with its tool's short name (ask-, summarize-, extract-, brief-, check-); a summarize_thread case names a baseline thread ID directly (nothing is embedded) and its evidence must be in that thread, and an extract_from_emails case gives its query and schema with a small limit, since each searched thread is one paid model call (the per-tool argument rules are in cases.py). Synthetic data only: never add a case built from a real mailbox. Message refs 'tNN.M' mean 'tNN.M@baseline.example'; thread refs 'tNN' mean the thread rooted at 'tNN.1@baseline.example'. required_evidence is a list of groups: every group is required and any one ref inside a group satisfies it. Each expected fact lists the message refs and a short verbatim excerpt of the indexed text that establishes it; make baseline checks each excerpt is in that message's indexed text, so references stay independent of what the system retrieves. deterministic.must_include is a list of groups of acceptable spellings (every group required, any spelling in a group satisfies it, case-insensitive substring of the answer). must_include checks that a value is present, not that the answer asserts it: an answer that names the value only to deny or correct it still passes, so correctness needs the judge. must_not_include lists strings no answer may contain. criteria say which rubric dimensions apply; the judge may not mark an applicable one not_applicable. held_out must equal tests/agent_metrics.py is_held_out(id); never tune against held-out cases. review records that the expected facts were drafted with AI from the synthetic corpus and await owner verification. An optional chronology object (#291) holds golden labels: positions (id, the person's accepted names, matched as whole words and never a role, kind, the one message ref stating it, its date and date_source sent, mentioned or relative (dated relative to the message itself, such as 'this morning', so either sent or mentioned is accepted), the whole values that message states for it as groups of accepted spellings, and a verbatim excerpt), changes (from, to, kind) whose two sources an answer must both cite, conflicts whose every side it must cite, in_force (the positions as of as_of, or now when as_of is null) and as_of; every source an answer must cite is also a required_evidence group of its own.",
   "schema_version": 1,
   "cases": [
     {
@@ -1039,9 +1039,9 @@
       "chronology": {
         "as_of": "2026-03-10",
         "positions": [
-          {"id": "p1", "actor": ["Wilma Harte", "Wilma", "Harte"], "kind": "proposal", "source": "t125.1", "date": "2026-03-02", "date_source": "sent", "values": ["1,150"], "excerpt": "I propose $1,150 for the whole run"},
-          {"id": "p2", "actor": ["Sam Rivera", "Sam", "Rivera"], "kind": "approval", "source": "t125.2", "date": "2026-03-04", "date_source": "sent", "values": ["1,150"], "excerpt": "Agreed: $1,150 for laying the paddock hedge"},
-          {"id": "p3", "actor": ["Wilma Harte", "Wilma", "Harte"], "kind": "correction", "source": "t125.3", "date": "2026-03-19", "date_source": "sent", "values": ["1,050", "1,150"], "excerpt": "the price we settled on when we walked the paddock was $1,050, not $1,150"}
+          {"id": "p1", "actor": ["Wilma Harte", "Wilma", "Harte"], "kind": "proposal", "source": "t125.1", "date": "2026-03-02", "date_source": "sent", "values": [["1,150"]], "excerpt": "I propose $1,150 for the whole run"},
+          {"id": "p2", "actor": ["Sam Rivera", "Sam", "Rivera"], "kind": "approval", "source": "t125.2", "date": "2026-03-04", "date_source": "sent", "values": [["1,150"]], "excerpt": "Agreed: $1,150 for laying the paddock hedge"},
+          {"id": "p3", "actor": ["Wilma Harte", "Wilma", "Harte"], "kind": "correction", "source": "t125.3", "date": "2026-03-19", "date_source": "sent", "values": [["1,050"], ["1,150"]], "excerpt": "the price we settled on when we walked the paddock was $1,050, not $1,150"}
         ],
         "changes": [{"from": "p2", "to": "p3", "kind": "correction"}],
         "in_force": ["p2"]
@@ -1071,9 +1071,9 @@
       "chronology": {
         "as_of": null,
         "positions": [
-          {"id": "p1", "actor": ["Wilma Harte", "Wilma", "Harte"], "kind": "proposal", "source": "t125.1", "date": "2026-03-02", "date_source": "sent", "values": ["1,150"], "excerpt": "I propose $1,150 for the whole run"},
-          {"id": "p2", "actor": ["Sam Rivera", "Sam", "Rivera"], "kind": "approval", "source": "t125.2", "date": "2026-03-04", "date_source": "sent", "values": ["1,150"], "excerpt": "Agreed: $1,150 for laying the paddock hedge"},
-          {"id": "p3", "actor": ["Wilma Harte", "Wilma", "Harte"], "kind": "correction", "source": "t125.3", "date": "2026-03-19", "date_source": "sent", "values": ["1,050", "1,150"], "excerpt": "the price we settled on when we walked the paddock was $1,050, not $1,150"},
+          {"id": "p1", "actor": ["Wilma Harte", "Wilma", "Harte"], "kind": "proposal", "source": "t125.1", "date": "2026-03-02", "date_source": "sent", "values": [["1,150"]], "excerpt": "I propose $1,150 for the whole run"},
+          {"id": "p2", "actor": ["Sam Rivera", "Sam", "Rivera"], "kind": "approval", "source": "t125.2", "date": "2026-03-04", "date_source": "sent", "values": [["1,150"]], "excerpt": "Agreed: $1,150 for laying the paddock hedge"},
+          {"id": "p3", "actor": ["Wilma Harte", "Wilma", "Harte"], "kind": "correction", "source": "t125.3", "date": "2026-03-19", "date_source": "sent", "values": [["1,050"], ["1,150"]], "excerpt": "the price we settled on when we walked the paddock was $1,050, not $1,150"},
           {"id": "p4", "actor": ["Sam Rivera", "Sam", "Rivera"], "kind": "cancellation", "source": "t125.4", "date": "2026-04-13", "date_source": "sent", "values": [], "excerpt": "I am calling off the hedge laying for this year"}
         ],
         "changes": [{"from": "p2", "to": "p3", "kind": "correction"}, {"from": "p3", "to": "p4", "kind": "cancellation"}],
@@ -1105,9 +1105,9 @@
       "chronology": {
         "as_of": null,
         "positions": [
-          {"id": "p1", "actor": ["Wilma Harte", "Wilma", "Harte"], "kind": "proposal", "source": "t125.1", "date": "2026-03-02", "date_source": "sent", "values": ["1,150"], "excerpt": "I propose $1,150 for the whole run"},
-          {"id": "p2", "actor": ["Sam Rivera", "Sam", "Rivera"], "kind": "approval", "source": "t125.2", "date": "2026-03-04", "date_source": "sent", "values": ["1,150"], "excerpt": "Agreed: $1,150 for laying the paddock hedge"},
-          {"id": "p3", "actor": ["Wilma Harte", "Wilma", "Harte"], "kind": "correction", "source": "t125.3", "date": "2026-03-19", "date_source": "sent", "values": ["1,050", "1,150"], "excerpt": "the price we settled on when we walked the paddock was $1,050, not $1,150"},
+          {"id": "p1", "actor": ["Wilma Harte", "Wilma", "Harte"], "kind": "proposal", "source": "t125.1", "date": "2026-03-02", "date_source": "sent", "values": [["1,150"]], "excerpt": "I propose $1,150 for the whole run"},
+          {"id": "p2", "actor": ["Sam Rivera", "Sam", "Rivera"], "kind": "approval", "source": "t125.2", "date": "2026-03-04", "date_source": "sent", "values": [["1,150"]], "excerpt": "Agreed: $1,150 for laying the paddock hedge"},
+          {"id": "p3", "actor": ["Wilma Harte", "Wilma", "Harte"], "kind": "correction", "source": "t125.3", "date": "2026-03-19", "date_source": "sent", "values": [["1,050"], ["1,150"]], "excerpt": "the price we settled on when we walked the paddock was $1,050, not $1,150"},
           {"id": "p4", "actor": ["Sam Rivera", "Sam", "Rivera"], "kind": "cancellation", "source": "t125.4", "date": "2026-04-13", "date_source": "sent", "values": [], "excerpt": "I am calling off the hedge laying for this year"}
         ],
         "changes": [{"from": "p2", "to": "p3", "kind": "correction"}, {"from": "p3", "to": "p4", "kind": "cancellation"}],
@@ -1139,7 +1139,7 @@
         "positions": [
           {"id": "p1", "actor": ["Piers Oduya", "Piers", "Oduya"], "kind": "statement", "source": "t100.3", "date": "2026-03-10", "date_source": "sent", "values": [], "excerpt": "The FC-4410 entry is for the hand towel dispenser our route team installed"},
           {"id": "p2", "actor": ["Piers Oduya", "Piers", "Oduya"], "kind": "statement", "source": "t100.8", "date": "2026-05-20", "date_source": "sent", "values": [], "excerpt": "so the hire charge stands for now"},
-          {"id": "p3", "actor": ["Ruben Kestle", "Kestle", "route representative"], "kind": "disposition", "source": "t100.11", "date": "2026-07-16", "date_source": "sent", "values": ["credit"], "excerpt": "He says that item has not been placed here at all"}
+          {"id": "p3", "actor": ["Ruben Kestle", "Kestle", "Ruben"], "kind": "disposition", "source": "t100.11", "date": "2026-07-16", "date_source": "relative", "values": [["credit"]], "excerpt": "He says that item has not been placed here at all"}
         ],
         "changes": [{"from": "p2", "to": "p3", "kind": "supersession"}],
         "in_force": ["p2"]
@@ -1171,7 +1171,7 @@
         "positions": [
           {"id": "p1", "actor": ["Piers Oduya", "Piers", "Oduya"], "kind": "statement", "source": "t100.3", "date": "2026-03-10", "date_source": "sent", "values": [], "excerpt": "The FC-4410 entry is for the hand towel dispenser our route team installed"},
           {"id": "p2", "actor": ["Piers Oduya", "Piers", "Oduya"], "kind": "statement", "source": "t100.8", "date": "2026-05-20", "date_source": "sent", "values": [], "excerpt": "so the hire charge stands for now"},
-          {"id": "p3", "actor": ["Ruben Kestle", "Kestle", "route representative"], "kind": "disposition", "source": "t100.11", "date": "2026-07-16", "date_source": "sent", "values": ["credit"], "excerpt": "He says that item has not been placed here at all"}
+          {"id": "p3", "actor": ["Ruben Kestle", "Kestle", "Ruben"], "kind": "disposition", "source": "t100.11", "date": "2026-07-16", "date_source": "relative", "values": [["credit"]], "excerpt": "He says that item has not been placed here at all"}
         ],
         "changes": [{"from": "p2", "to": "p3", "kind": "supersession"}],
         "in_force": ["p3"]
@@ -1201,8 +1201,8 @@
       "chronology": {
         "as_of": null,
         "positions": [
-          {"id": "p1", "actor": ["Hazel Pim", "Hazel", "Pim", "treasurer"], "kind": "statement", "source": "t126.1", "date": "2026-04-07", "date_source": "sent", "values": ["$45"], "excerpt": "The key deposit is $45"},
-          {"id": "p2", "actor": ["Bram Okoye", "Bram", "Okoye", "caretaker"], "kind": "statement", "source": "t127.1", "date": "2026-04-21", "date_source": "sent", "values": ["$60"], "excerpt": "Bring $60 for the key deposit"}
+          {"id": "p1", "actor": ["Hazel Pim", "Hazel", "Pim"], "kind": "statement", "source": "t126.1", "date": "2026-04-07", "date_source": "sent", "values": [["45"]], "excerpt": "The key deposit is $45"},
+          {"id": "p2", "actor": ["Bram Okoye", "Bram", "Okoye"], "kind": "statement", "source": "t127.1", "date": "2026-04-21", "date_source": "sent", "values": [["60"]], "excerpt": "Bring $60 for the key deposit"}
         ],
         "conflicts": [["p1", "p2"]],
         "in_force": ["p1", "p2"]
@@ -1232,8 +1232,8 @@
       "chronology": {
         "as_of": null,
         "positions": [
-          {"id": "p1", "actor": ["Hazel Pim", "Hazel", "Pim", "treasurer"], "kind": "statement", "source": "t126.1", "date": "2026-04-07", "date_source": "sent", "values": ["$45"], "excerpt": "The key deposit is $45"},
-          {"id": "p2", "actor": ["Bram Okoye", "Bram", "Okoye", "caretaker"], "kind": "statement", "source": "t127.1", "date": "2026-04-21", "date_source": "sent", "values": ["$60"], "excerpt": "Bring $60 for the key deposit"}
+          {"id": "p1", "actor": ["Hazel Pim", "Hazel", "Pim"], "kind": "statement", "source": "t126.1", "date": "2026-04-07", "date_source": "sent", "values": [["45"]], "excerpt": "The key deposit is $45"},
+          {"id": "p2", "actor": ["Bram Okoye", "Bram", "Okoye"], "kind": "statement", "source": "t127.1", "date": "2026-04-21", "date_source": "sent", "values": [["60"]], "excerpt": "Bring $60 for the key deposit"}
         ],
         "conflicts": [["p1", "p2"]],
         "in_force": ["p1", "p2"]
@@ -1262,7 +1262,7 @@
       "chronology": {
         "as_of": null,
         "positions": [
-          {"id": "p1", "actor": ["Nell Garside", "Garside", "Nell", "clerk"], "kind": "statement", "source": "t128.1", "date": "2026-05-05", "date_source": "mentioned", "values": ["30 June", "2,300"], "excerpt": "will stay closed until 30 June while the"}
+          {"id": "p1", "actor": ["Nell Garside", "Garside", "Nell"], "kind": "statement", "source": "t128.1", "date": "2026-05-05", "date_source": "mentioned", "values": [["30 June", "June 30"], ["2,300"]], "excerpt": "will stay closed until 30 June while the"}
         ],
         "in_force": ["p1"]
       }
@@ -1290,7 +1290,7 @@
       "chronology": {
         "as_of": null,
         "positions": [
-          {"id": "p1", "actor": ["Nell Garside", "Garside", "Nell", "clerk"], "kind": "statement", "source": "t128.1", "date": "2026-05-05", "date_source": "mentioned", "values": ["30 June", "2,300"], "excerpt": "will stay closed until 30 June while the"}
+          {"id": "p1", "actor": ["Nell Garside", "Garside", "Nell"], "kind": "statement", "source": "t128.1", "date": "2026-05-05", "date_source": "mentioned", "values": [["30 June", "June 30"], ["2,300"]], "excerpt": "will stay closed until 30 June while the"}
         ],
         "in_force": ["p1"]
       }

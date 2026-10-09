@@ -25,9 +25,10 @@ provenance field (the handler refuses one before any work); its
 ``participant``) have the handler's types.
 
 An answerable case may carry golden ``chronology`` labels (#291): the
-positions it rests on (actor, kind, the one message that states each,
-its date and whether that is the sent date or a date the message
-mentions, and the values it states), the changes between them, the
+positions it rests on (the person's names, kind, the one message that
+states each, its date and whether that is the sent date, a date the
+message mentions or one relative to it, and the values it states, as
+groups of accepted spellings), the changes between them, the
 conflicts neither side of which supersedes the other, and the positions
 in force as of the date the question asks about. Every source an answer
 must cite is also a required evidence group of its own.
@@ -138,8 +139,11 @@ POSITION_KINDS = frozenset(
     {"proposal", "approval", "correction", "cancellation", "statement", "disposition"}
 )
 CHANGE_KINDS = frozenset({"correction", "cancellation", "supersession"})
-# Where a position's date comes from, in ``brief_issue``'s own terms.
-DATE_SOURCES = frozenset({"sent", "mentioned"})
+# Where a position's date comes from, in ``brief_issue``'s own terms,
+# plus ``relative``: the message dates the event relative to itself
+# ("this morning"), so the date is its sent date and an answer may call
+# it either (``Position.date_sources``).
+DATE_SOURCES = frozenset({"sent", "mentioned", "relative"})
 _CHRONOLOGY_KEYS = frozenset({"as_of", "positions", "changes", "conflicts", "in_force"})
 _POSITION_KEYS = frozenset(
     {"id", "actor", "kind", "source", "date", "date_source", "values", "excerpt"}
@@ -187,12 +191,17 @@ class Fact:
 @dataclass(frozen=True)
 class Position:
     """One golden position or event of a chronology case (#291): who held
-    or did it (``actor``, the accepted names), what kind of step it is,
-    the one message that states it, the date the source supports for it
-    (its sent date, or a date it mentions) and the whole values that
-    message states for it (``values``, which pair a value in an answer
-    with the message it must cite). ``excerpt`` is verbatim from the
-    source's indexed text."""
+    or did it (``actor``, the person's accepted names, each matched as
+    whole words; never a role such as "clerk", which a relayer's
+    description can contain too), what kind of step it is, the one
+    message that states it, the date the source supports for it and
+    where that date comes from (``date_source``: ``sent``, ``mentioned``
+    or ``relative``, for an event the message dates relative to itself,
+    such as "this morning", where an answer may give either source), and
+    the whole values that message states for it (``values``: groups of
+    accepted spellings, such as "30 June" and "June 30", which pair a
+    value in an answer with the message it must cite). ``excerpt`` is
+    verbatim from the source's indexed text."""
 
     id: str
     actor: tuple[str, ...]
@@ -200,8 +209,14 @@ class Position:
     source: str
     date: str
     date_source: str
-    values: tuple[str, ...]
+    values: tuple[tuple[str, ...], ...]
     excerpt: str
+
+    def date_sources(self) -> frozenset[str]:
+        """The date sources an answer may give for this position."""
+        if self.date_source == "relative":
+            return frozenset({"sent", "mentioned"})
+        return frozenset({self.date_source})
 
 
 @dataclass(frozen=True)
@@ -372,7 +387,11 @@ def _parse_chronology(cid: str, raw: object, groups: list[list[str]]) -> Chronol
         _require(_refs([source]) and "." in source, cid, "position source must be a message")
         _require(_iso_date(p["date"]), cid, "position date")
         _require(p["date_source"] in DATE_SOURCES, cid, "position date_source")
-        _require(isinstance(p["values"], list) and _str_list(p["values"]), cid, "position values")
+        _require(
+            isinstance(p["values"], list) and all(_str_list(g) and g for g in p["values"]),
+            cid,
+            "position values must be groups of spellings",
+        )
         _require(
             isinstance(p["excerpt"], str) and bool(p["excerpt"].strip()), cid, "position excerpt"
         )
@@ -384,7 +403,7 @@ def _parse_chronology(cid: str, raw: object, groups: list[list[str]]) -> Chronol
                 source,
                 p["date"],
                 p["date_source"],
-                tuple(p["values"]),
+                tuple(tuple(g) for g in p["values"]),
                 p["excerpt"],
             )
         )

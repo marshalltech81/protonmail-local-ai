@@ -631,11 +631,16 @@ labels (schema in `cases.py`), over corpus threads 125-128 and the
 | Different people holding conflicting positions, neither superseding (t126, t127) | `ask-reading-room-deposit` | `brief-reading-room-deposit` |
 | A position stated only in quoted history, dated by its reply header (t128) | `ask-footbridge-closure` | `brief-footbridge-closure` |
 
-Each position names its accepted actor names, its kind (proposal,
-approval, correction, cancellation, statement or disposition), the one
-message stating it, its date and whether that is the message's sent
-date or a date it mentions, and the whole values the message states for
-it. Changes name the earlier and later position; conflicts list
+Each position names the person's accepted names (names only, never a
+role such as "clerk", which a relayer's description can contain too),
+its kind (proposal, approval, correction, cancellation, statement or
+disposition), the one message stating it, its date and whether that is
+the message's sent date (`sent`), a date it mentions (`mentioned`) or a
+date relative to the message itself such as "this morning"
+(`relative`: the sent date, and an answer may give either source), and
+the whole values the message states for it, as groups of accepted
+spellings ("30 June" or "June 30"; a bare number such as `60` also
+matches "$60" and "60 dollars"). Changes name the earlier and later position; conflicts list
 positions that disagree with neither superseding the other; `in_force`
 lists the positions that hold as of `as_of` (or now). Every source an
 answer must cite is also a required evidence group of its own, so a
@@ -654,7 +659,7 @@ any group. Three deterministic checks read the labels:
 - `chronology_dated` (`brief_issue` only, the one tool that dates and
   attributes each event): every position whose source reached the
   prompt has a chronology entry citing that source with the position's
-  date, date source and an accepted actor name. The quoted position
+  date, date source and an accepted name as whole words. The quoted position
   dated by the quoting message's sent date, or attributed to the
   neighbour who relayed it, fails.
 
@@ -669,8 +674,10 @@ position given to its relayer, an as-of answer that reads the later
 correction back in), so the rubric is unchanged.
 
 `make baseline` checks every label against the built index (each
-position's excerpt and values in its source's indexed text, a `sent`
-date equal to the message's sent date and a `mentioned` one different),
+position's excerpt and a spelling of each value in its source's
+indexed text, a `sent` or `relative` date equal to the message's sent
+date, and a `mentioned` one different and written in the source's
+text),
 runs every chronology case with the scripted answerer, and mutates the
 correct scripted answer into each failure above (an omitted correction,
 a corrected value cited to the superseded message, a conflict reduced
@@ -701,7 +708,8 @@ make eval-answers EVAL_MAX_CALLS=27 EVAL_ARGS="--case ask-hedge-price-as-of-marc
   (#1370).
 - A delayed delivery (a receiving time different from the sent date)
   is not a case either: the runner's synthetic-index check requires
-  every `occurred_at` to be null, as for the outstanding-items cases.
+  every `occurred_at` to be null, as for the outstanding-items cases
+  (#1372).
 - Quoted history is retrievable only because t128's reply has no text
   of its own; when a reply has its own text, the quote is never chunked
   and no tool can return it (#795).

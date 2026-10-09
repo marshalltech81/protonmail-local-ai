@@ -30,6 +30,7 @@ import shutil
 import sqlite3
 from contextlib import closing
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -121,20 +122,31 @@ def test_chronology_labels_resolve(
     case: Case, indexed_text: dict[str, str], sent_dates: dict[str, str]
 ) -> None:
     """#291: each labelled position's excerpt is in its source's indexed
-    text, every value it lists is stated there, and a position dated by
-    its message is dated with that message's sent date, so the labels
-    rest on the corpus, not on what an answer cites. A mentioned date
-    differs from the sent date, or it would be labelled ``sent``."""
+    text, every value it lists is stated there in one of its spellings,
+    and a position dated by its message (``sent``, or ``relative`` for
+    "this morning") is dated with that message's sent date, so the
+    labels rest on the corpus, not on what an answer cites. A mentioned
+    date differs from the sent date, or it would be labelled ``sent``,
+    and is written in the source's text (review round 1)."""
     assert case.chronology is not None
     for p in case.chronology.positions:
         message = _ref_message(p.source)
         text = indexed_text.get(message, "")
+        folded = _fold(text)
         assert " ".join(p.excerpt.split()) in text, (case.id, p.id)
-        assert all(_mentions(_fold(text), v) for v in p.values), (case.id, p.id)
-        if p.date_source == "sent":
+        for group in p.values:
+            assert any(_mentions(folded, v) for v in group), (case.id, p.id, group)
+        if p.date_source in ("sent", "relative"):
             assert sent_dates[message] == p.date, (case.id, p.id)
         else:
             assert sent_dates[message] != p.date, (case.id, p.id)
+            day = date.fromisoformat(p.date)
+            written = (
+                f"{day.day} {day:%B} {day.year}",
+                f"{day:%B} {day.day}, {day.year}",
+                day.isoformat(),
+            )
+            assert any(_fold(w) in folded for w in written), (case.id, p.id)
 
 
 def test_index_is_recognized_as_synthetic(baseline_db: Database) -> None:
@@ -352,13 +364,13 @@ class _OracleAnswerer:
             label = label_of(p.source)
             if label is None:
                 continue
-            what = " and ".join(p.values) or p.kind
+            what = " and ".join(group[0] for group in p.values) or p.kind
             items.append(
                 _Item(
                     f"{p.actor[0]}, {p.kind}: {what}",
                     [label],
                     p.date,
-                    p.date_source,
+                    "sent" if p.date_source == "relative" else p.date_source,
                     p.actor[0],
                     values=bool(p.values),
                 )
