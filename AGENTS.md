@@ -663,8 +663,9 @@ under about 80 characters.
   the same review, even when they touch different issues), and add a
   "Review round N" section to the PR description.
 - Resolve a thread only when it is fixed, when the owner has deferred
-  it, or when it is a problem that already existed on `main` and an
-  open issue tracking it is linked from the reply (owner, 2026-10-09).
+  it (a deferral is offered only as "Accuracy first" allows), or when
+  it is a problem that already existed on `main` and an open issue
+  tracking it is linked from the reply (owner, 2026-10-09).
   This is the one rule for resolving a thread as deferred; the rules
   below point at it. Merging is blocked while line threads are open.
 - Cap review at two fix rounds per PR (owner, 2026-10-01). A finding
@@ -678,9 +679,10 @@ under about 80 characters.
 - Exception (owner, 2026-10-05, #751): a verified round-three-or-later
   finding still blocks the merge when it is P0/P1, or when the PR
   itself introduced it (in its first commit or any fix round), at any
-  severity. Fix it in the PR, revert the change that caused it, or have
-  the owner accept it explicitly as a stated risk, recorded in the PR
-  description and a linked issue. A P2/P3 finding the PR did not
+  severity. Fix it in the PR. Reverting the change that caused it, or
+  the owner accepting it explicitly as a stated risk (recorded in the
+  PR description and a linked issue), is offered only when it reaches
+  the same end state or the accurate fix is blocked ("Accuracy first"). A P2/P3 finding the PR did not
   introduce keeps the cap. Record which applied in the "Review round N"
   section. A gap or bug in code, tests or docs that the PR adds counts
   as introduced by it even when nothing is broken today (owner,
