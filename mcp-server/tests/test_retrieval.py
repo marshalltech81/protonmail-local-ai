@@ -1064,8 +1064,10 @@ class TestGetMessageIndexWalk:
             )
             conn.executemany(
                 "INSERT INTO messages (claimant_id, message_id, thread_id, filepath, folder, "
-                "subject, sent_at, references_json, has_attachments, indexed_at) "
-                "VALUES (?, ?, 't1', ?, 'INBOX', 's', ?, '[]', 0, '2024-01-01')",
+                "subject, sent_at, sent_at_status, references_json, has_attachments, indexed_at, "
+                "first_indexed_at) "
+                "VALUES (?, ?, 't1', ?, 'INBOX', 's', ?, 'parsed', '[]', 0, '2024-01-01', "
+                "'2024-01-01')",
                 (
                     (f"{self.MESSAGE_ID}#{i:08x}", self.MESSAGE_ID, f"/f{i}", f"2023-{i % 9 + 1}")
                     for i in range(count)

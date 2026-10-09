@@ -49,6 +49,7 @@ from .outputs import (
     describe_date_bounds,
     read_only,
     reaped_source,
+    sent_text,
     thread_summary,
     tool_result,
 )
@@ -146,7 +147,8 @@ def _collapse_attachment_copies(chunks: list) -> tuple[list, dict[str, list]]:
 def _msg_date(chunk) -> str:
     """A passage's message date for the prose: its send day, plus its
     delivery day when known."""
-    msg_date = (chunk.message_date or "")[:10] or "unknown date"
+    sent = chunk.message_date[:10] if chunk.message_date else None
+    msg_date = sent_text(sent, chunk.message_sent_at_status)
     if chunk.message_occurred_at:
         msg_date += f" (delivered {chunk.message_occurred_at[:10]})"
     return msg_date
@@ -323,8 +325,8 @@ def register_search_tools(
                        ``from_addr`` wins.
             date_from: ISO 8601 date lower bound e.g. "2024-01-01".
                        A thread qualifies when its span (its messages'
-                       delivery dates, else send dates) overlaps the
-                       range.
+                       delivery dates, else send dates, else when first
+                       indexed, #1373) overlaps the range.
             date_to: ISO 8601 date upper bound e.g. "2024-12-31".
                      For either bound, a date-only value is a UTC day;
                      for the user's time zone give an offset
@@ -632,7 +634,8 @@ def register_search_tools(
                        person's name, use from_name.
             date_from: ISO 8601 date lower bound, e.g. "2024-01-01".
                        A thread qualifies when its span (its messages'
-                       occurred_at, else sent_at) overlaps the range,
+                       occurred_at, else sent_at, else when first
+                       indexed, #1373) overlaps the range,
                        and any of its passages may be returned; check
                        each chunk's occurred_at and sent_at, which can
                        fall outside the range. Each chunk's scope is
@@ -1061,6 +1064,7 @@ def register_search_tools(
                             attachment_filename=_clip_optional(c.attachment_filename),
                             attachment_mime=_clip_optional(c.attachment_mime),
                             sent_at=c.message_date,
+                            sent_at_status=c.message_sent_at_status,
                             occurred_at=c.message_occurred_at,
                             char_start=c.char_start,
                             char_end=c.char_end,
@@ -1076,6 +1080,7 @@ def register_search_tools(
                                     EvidenceCarrier(
                                         claimant_id=o.claimant_id,
                                         sent_at=o.message_date,
+                                        sent_at_status=o.message_sent_at_status,
                                         occurred_at=o.message_occurred_at,
                                         scope=_chunk_scope(o, labels),
                                         extraction_deferred=o.extraction_deferred,
@@ -1265,7 +1270,8 @@ def register_search_tools(
                     ``indeterminate``.
             date_from: ISO 8601 date lower bound on the message
                        carrying the attachment: its delivery date
-                       (occurred_at), else its send date (sent_at).
+                       (occurred_at), else its send date (sent_at), else
+                       when it was first indexed (#1373).
             date_to: ISO 8601 date upper bound, likewise. For
                      either bound, a date-only value is a UTC day; for
                      the user's time zone give an offset
@@ -1346,6 +1352,7 @@ def register_search_tools(
                     folder=a.folder,
                     date_last=a.date_last,
                     sent_at=a.sent_at,
+                    sent_at_status=a.sent_at_status,
                     occurred_at=a.occurred_at,
                     senders=[clip(s, HEADER_CHAR_LIMIT) for s in a.senders[:MAX_LISTED]],
                     sender_count=len(a.senders),
@@ -1416,7 +1423,8 @@ def register_search_tools(
                 f"    Thread ID: {a.thread_id} | Message-ID: {a.message_id} "
                 f"| Claimant ID: {a.claimant_id}"
             )
-            lines.append(f"    Sent: {(a.sent_at or '')[:10] or 'unknown date'}")
+            sent = a.sent_at[:10] if a.sent_at else None
+            lines.append(f"    Sent: {sent_text(sent, a.sent_at_status)}")
             if a.occurred_at:
                 lines.append(f"    Delivered: {a.occurred_at[:10]}")
             if a.senders:

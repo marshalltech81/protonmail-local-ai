@@ -65,15 +65,18 @@ def _build_schema(conn: sqlite3.Connection) -> None:
             filepath        TEXT NOT NULL,
             folder          TEXT NOT NULL,
             subject         TEXT NOT NULL,
-            sent_at         TEXT NOT NULL,
+            sent_at         TEXT,
+            sent_at_status  TEXT CHECK (sent_at_status IN ('parsed', 'missing', 'invalid')),
             occurred_at     TEXT,
-            effective_at    TEXT GENERATED ALWAYS AS (COALESCE(occurred_at, sent_at)) VIRTUAL,
+            effective_at    TEXT GENERATED ALWAYS AS
+                            (COALESCE(occurred_at, sent_at, first_indexed_at)) VIRTUAL,
             in_reply_to     TEXT,
             references_json TEXT NOT NULL,
             has_attachments INTEGER NOT NULL,
             size_bytes      INTEGER,
             content_hash    TEXT,
             indexed_at      TEXT NOT NULL,
+            first_indexed_at TEXT NOT NULL,
             seen            INTEGER NOT NULL DEFAULT 0,
             flagged         INTEGER NOT NULL DEFAULT 0,
             replied         INTEGER NOT NULL DEFAULT 0,
@@ -519,6 +522,11 @@ COMPLETE: dict[str, int | None] = {
 }
 
 
+# ``first_indexed_at`` of a test message: the ordering position of one
+# with no send or delivery date (#1080).
+FIRST_INDEXED_AT = "2024-06-01T00:00:00+00:00"
+
+
 def _insert_message_record(
     cur: sqlite3.Cursor,
     *,
@@ -526,7 +534,7 @@ def _insert_message_record(
     thread_id: str,
     folder: str,
     subject: str,
-    sent_at: str,
+    sent_at: str | None,
     has_attachments: bool,
     participants: list[tuple[str, str]],
     in_reply_to: str | None = None,
@@ -540,8 +548,14 @@ def _insert_message_record(
     sender_ambiguous: int | None = 0,
     participant_names_complete: int | None = 1,
     completeness: dict[str, int | None] | None = None,
+    sent_at_status: str | None = "",
+    first_indexed_at: str = FIRST_INDEXED_AT,
 ) -> None:
     """Insert one ``messages`` row and its ``message_participants``.
+
+    ``sent_at`` None is an unknown send date (#1080); ``sent_at_status``
+    defaults to ``parsed`` with a date and ``missing`` without one, and
+    None is a row not yet assessed.
 
     ``participants`` is ``(role, display string)`` pairs; addresses are
     canonicalized and names split out the way the indexer writes them.
@@ -550,14 +564,16 @@ def _insert_message_record(
     otherwise all 1 (complete) with no caps.
     """
     flags = {**COMPLETE, **(completeness or {})}
+    if sent_at_status == "":
+        sent_at_status = "parsed" if sent_at is not None else "missing"
     cur.execute(
         f"""
         INSERT INTO messages
             (claimant_id, message_id, thread_id, filepath, folder, subject, sent_at,
-             occurred_at, in_reply_to, references_json, has_attachments, size_bytes,
-             content_hash, indexed_at, seen, flagged, replied, sender_ambiguous,
-             participant_names_complete, {", ".join(flags)}, caps_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+             sent_at_status, occurred_at, in_reply_to, references_json, has_attachments,
+             size_bytes, content_hash, indexed_at, first_indexed_at, seen, flagged, replied,
+             sender_ambiguous, participant_names_complete, {", ".join(flags)}, caps_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                 {", ".join("?" * len(flags))}, '{{}}')
         """,  # nosec B608
         (
@@ -568,6 +584,7 @@ def _insert_message_record(
             folder,
             subject,
             sent_at,
+            sent_at_status,
             occurred_at,
             in_reply_to,
             json.dumps(references or []),
@@ -575,6 +592,7 @@ def _insert_message_record(
             size_bytes,
             source_sha256(message_id, variant),
             "2024-01-01T00:00:00+00:00",
+            first_indexed_at,
             int(seen),
             int(flagged),
             int(replied),
@@ -637,7 +655,7 @@ def _insert_message(
     *,
     message_id: str,
     thread_id: str,
-    sent_at: str,
+    sent_at: str | None,
     subject: str = "subject",
     folder: str = "INBOX",
     from_: list[str] | None = None,
@@ -657,6 +675,8 @@ def _insert_message(
     sender_ambiguous: int | None = 0,
     participant_names_complete: int | None = 1,
     completeness: dict[str, int | None] | None = None,
+    sent_at_status: str | None = "",
+    first_indexed_at: str = FIRST_INDEXED_AT,
 ) -> None:
     """Insert one message with full per-message control.
 
@@ -666,7 +686,8 @@ def _insert_message(
     and an attachment chunk respectively. A non-empty ``variant`` makes
     it another claimant of an already inserted ``message_id`` (#217).
     The thread row, when created here, spans the message's effective
-    time (``occurred_at`` else ``sent_at``), as the indexer derives it.
+    time (``occurred_at`` else ``sent_at`` else ``first_indexed_at``),
+    as the indexer derives it.
     """
     cur = conn.cursor()
     cur.execute(
@@ -676,7 +697,13 @@ def _insert_message(
             date_first, date_last, message_ids
         ) VALUES (?, ?, '[]', '[]', ?, ?, ?, '[]')
         """,
-        (thread_id, subject, folder, occurred_at or sent_at, occurred_at or sent_at),
+        (
+            thread_id,
+            subject,
+            folder,
+            occurred_at or sent_at or first_indexed_at,
+            occurred_at or sent_at or first_indexed_at,
+        ),
     )
     # Like the indexer, the thread's ``senders`` JSON records only each
     # message's primary author (``from_addr``, the first From entry, even
@@ -724,6 +751,8 @@ def _insert_message(
         sender_ambiguous=sender_ambiguous,
         participant_names_complete=participant_names_complete,
         completeness=completeness,
+        sent_at_status=sent_at_status,
+        first_indexed_at=first_indexed_at,
     )
     conn.commit()
     if body is not None:

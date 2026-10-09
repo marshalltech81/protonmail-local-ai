@@ -62,7 +62,7 @@ _VERBATIM_FIELDS = (
     "folder",
     "has_attachments",
     "size",
-    "date_is_fallback",
+    "date_status",
     "sender_ambiguous",
     "participant_names_complete",
     "subject_complete",
@@ -83,6 +83,9 @@ _DERIVED_FIELDS = (
     "content_hash",
     "participant_names",
 )
+# Not recorded: the parse time (#1080), a clock reading rather than a
+# property of the bytes.
+_UNPINNED_FIELDS = ("first_indexed_at",)
 
 
 def _digest(data: bytes) -> str:
@@ -91,7 +94,7 @@ def _digest(data: bytes) -> str:
 
 def _record(msg: Message, root: Path) -> dict[str, Any]:
     record: dict[str, Any] = {name: getattr(msg, name) for name in _VERBATIM_FIELDS}
-    record["date"] = None if msg.date_is_fallback else msg.date.isoformat()
+    record["date"] = msg.date.isoformat() if msg.date else None
     record["occurred_at"] = msg.occurred_at.isoformat() if msg.occurred_at else None
     record["body_text_length"] = len(msg.body_text)
     record["body_text"] = _digest(msg.body_text.encode("utf-8"))
@@ -199,7 +202,8 @@ def _catalogue(tmp_path: Path) -> dict[str, dict[str, Any]]:
 
 def test_every_message_field_is_recorded():
     """A ``Message`` field this pin does not cover is a gap in it."""
-    assert set(_VERBATIM_FIELDS) | set(_DERIVED_FIELDS) == {f.name for f in fields(Message)}
+    covered = set(_VERBATIM_FIELDS) | set(_DERIVED_FIELDS) | set(_UNPINNED_FIELDS)
+    assert covered == {f.name for f in fields(Message)}
 
 
 def test_parse_email_output_is_pinned(tmp_path):

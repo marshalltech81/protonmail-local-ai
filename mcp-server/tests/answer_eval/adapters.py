@@ -44,7 +44,7 @@ of a tool's output that the graders, the judge and the reports read.
 
 import json
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from src.lib.validation import clamp_int
@@ -107,6 +107,11 @@ class EntryStatement:
     section: str  # a brief's section; ``verdict`` or ``findings`` for a check
     item: int  # 0-based index within the section
     stance: str | None = None  # a finding's relation, as the model gave it
+    # A brief's chronology entry: its date, date source and actor as the
+    # model gave them, which the chronology labels check (#291).
+    date: str | None = None
+    date_source: str | None = None
+    actor: str | None = None
 
 
 @dataclass
@@ -269,7 +274,8 @@ def _brief_view(output: BriefIssueOutput) -> AnswerView:
     statements: list[EntryStatement] = []
     for i, e in enumerate(brief.chronology):
         text = f"{e.date or 'undated'} ({e.date_source}) {e.actor}: {e.event}"
-        statements.append(_entry(text, e.labels, known, "chronology", i))
+        entry = _entry(text, e.labels, known, "chronology", i)
+        statements.append(replace(entry, date=e.date, date_source=e.date_source, actor=e.actor))
     for i, p in enumerate(brief.positions):
         statements.append(_entry(f"{p.actor}: {p.position}", p.labels, known, "positions", i))
     for i, d in enumerate(brief.decisions):

@@ -41,8 +41,8 @@ from src.tools.intelligence import (
     _record_conforms,
 )
 
-from tests.answer_eval.adapters import has_value
-from tests.answer_eval.cases import Case, message_id_of, thread_id_of
+from tests.answer_eval.adapters import EntryStatement, has_value
+from tests.answer_eval.cases import Case, Position, message_id_of, thread_id_of
 from tests.answer_eval.runner import CaseRun, Passage
 
 PASS, FAIL, NA = "pass", "fail", "not_applicable"
@@ -59,6 +59,11 @@ SYNTHESIS_CHECKS = (
     "expected_values",
     "forbidden_values",
     "abstention",
+    # ``chronology_cited`` is not here: each source it needs is a
+    # required evidence group of its own, so the group's stages say
+    # where a miss happened (#291).
+    "values_attributed",
+    "chronology_dated",
 )
 
 
@@ -194,6 +199,97 @@ def budget_omitted_facts(case: Case, run: CaseRun) -> list[str]:
     ]
 
 
+CHRONOLOGY_CHECKS = ("chronology_cited", "values_attributed", "chronology_dated")
+
+
+def chronology_checks_for(case: Case) -> list[str]:
+    """The chronology checks that apply to ``case`` (#291): none without
+    golden labels; ``chronology_dated`` only for ``brief_issue``, the one
+    tool whose output gives each event a date and an actor."""
+    if case.chronology is None:
+        return []
+    names = ["chronology_cited", "values_attributed"]
+    return names + (["chronology_dated"] if case.tool == "brief_issue" else [])
+
+
+def _chronology_checks(case: Case, run: CaseRun) -> dict[str, str]:
+    """Grade an answer against the case's golden chronology (#291).
+
+    - ``chronology_cited``: the answer cites every source the labels say
+      it must (each position in force, both sides of every change, every
+      side of every conflict), so an omitted correction or a conflict
+      reduced to its newest side fails.
+    - ``values_attributed``: a statement that states a labelled value, in
+      any of its accepted spellings (a bare number also matches "$45" and
+      "45 dollars"), cites a passage of a message whose position states
+      that value. A
+      citation that resolves to a supplied passage but not to the
+      message holding the value (an unsupported but valid-looking
+      citation) fails here, though every citation check passes.
+    - ``chronology_dated`` (``brief_issue`` only): every position whose
+      source reached the prompt has a chronology entry citing that
+      source, with the position's date and date source and one of its
+      actor's names as whole words, so an event dated by a later
+      message's sent date, or
+      attributed to the sender who only relayed it, fails. A source lost
+      before the prompt is the evidence groups' to report.
+
+    The checks read which messages are cited, never whether a statement
+    asserts or denies a value: that, and dates in prose, are the judge's.
+    """
+    applicable = chronology_checks_for(case)
+    out = dict.fromkeys(CHRONOLOGY_CHECKS, NA)
+    chron = case.chronology
+    if chron is None:
+        return out
+    view = run.view
+
+    def messages(labels: list[str]) -> set[str | None]:
+        return {run.passages[label].message_id for label in labels if label in run.passages}
+
+    cited = messages([c.label for c in view.citations])
+    must = chron.must_cite()
+    out["chronology_cited"] = PASS if all(message_id_of(r) in cited for r in must) else FAIL
+
+    # Each accepted spelling of a value, with the messages that state it.
+    owners: dict[str, set[str | None]] = {}
+    for p in chron.positions:
+        for spelling in (s for group in p.values for s in group):
+            owners.setdefault(spelling, set()).add(message_id_of(p.source))
+    attributed = True
+    for statement in view.statements:
+        text = _fold(statement.text)
+        own = messages(list(statement.labels))
+        for value, sources in owners.items():
+            if _mentions(text, value) and not own & sources:
+                attributed = False
+    out["values_attributed"] = PASS if attributed else FAIL
+
+    if "chronology_dated" in applicable:
+        entries = [
+            s
+            for s in view.statements
+            if isinstance(s, EntryStatement) and s.section == "chronology"
+        ]
+
+        def dated(p: Position) -> bool:
+            # A name counts only as whole words (``_mentions``), so
+            # "Harte" is not found inside a longer name.
+            source = message_id_of(p.source)
+            return any(
+                source in messages(list(e.labels))
+                and e.date == p.date
+                and e.date_source in p.date_sources()
+                and any(_mentions(_fold(e.actor or ""), n) for n in p.actor)
+                for e in entries
+            )
+
+        supplied = {p.message_id for p in run.passages.values()}
+        shown = [p for p in chron.positions if message_id_of(p.source) in supplied]
+        out["chronology_dated"] = PASS if all(dated(p) for p in shown) else FAIL
+    return out
+
+
 def grade_run(case: Case, run: CaseRun) -> DeterministicResult:
     """Grade one completed run; a run that did not complete gets no checks
     (its status already counts it as an error)."""
@@ -302,6 +398,8 @@ def grade_run(case: Case, run: CaseRun) -> DeterministicResult:
         checks["forbidden_values"] = FAIL if leaked else PASS
     else:
         checks["forbidden_values"] = NA
+
+    checks.update(_chronology_checks(case, run))
 
     result.abstained = abstained
     if case.answerable:

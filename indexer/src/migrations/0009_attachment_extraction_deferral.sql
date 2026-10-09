@@ -1,4 +1,4 @@
--- v7 -> v8 (#1236): mark an attachment occurrence whose extraction the
+-- v8 -> v9 (#1236): mark an attachment occurrence whose extraction the
 -- per-message extraction budget deferred to a later pass of its message.
 
 -- NULL = not deferred. A deferred occurrence has ``text_complete`` 0,

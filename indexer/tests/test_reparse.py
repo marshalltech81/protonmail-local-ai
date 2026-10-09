@@ -32,6 +32,7 @@ from src.threader import Threader
 from src.timings import TimingAggregator
 
 from tests.conftest import make_mock_embedder
+from tests.test_database import _v7_from_fresh
 
 MARKER = "SYNTHETIC_REPARSE_MARKER"
 _VECTOR = [1.0] + [0.0] * (EMBEDDING_DIM - 1)
@@ -492,6 +493,114 @@ class TestCompletenessMigration:
         assert embedder.embed.call_count == 0
         # A chunkless body is complete: there was nothing to lose.
         assert _completeness(db) == {live: _COMPLETE, chunkless: _COMPLETE, dead: unknown}
+        assert (
+            db._conn.execute("SELECT chunk_id FROM message_chunks ORDER BY chunk_id").fetchall()
+            == chunks_before
+        )
+        assert MARKER not in caplog.text
+        db.close()
+
+
+class TestUnknownDateMigration:
+    """#1080: the real v7 -> v8 migration leaves every message's send
+    date status NULL (not assessed) and queues the reparse, which stores
+    a missing or unparseable Date as unknown with its status, keeps the
+    old fallback as ``first_indexed_at`` so no message moves in the
+    ordering, and makes no embedding call; a dead-lettered job keeps its
+    message unassessed."""
+
+    @staticmethod
+    def _dates(db: Database) -> dict[str, tuple]:
+        return {
+            r["filepath"]: tuple(r)[1:]
+            for r in db._conn.execute(
+                "SELECT filepath, sent_at, sent_at_status, effective_at FROM messages"
+            )
+        }
+
+    def test_backfill_through_the_reparse(self, tmp_path, caplog):
+        caplog.set_level(logging.DEBUG)
+        db, queue, paths = _index(tmp_path, ["one", "two"])
+        dated, dead = paths
+        undated = {}
+        for name, header in (("missing", ""), ("invalid", f"Date: {MARKER}\r\n")):
+            path = tmp_path / "INBOX" / "cur" / f"{name}:2,S"
+            _write_eml(path, f"{name}@example.com", f"{name} {MARKER}")
+            raw = path.read_bytes()
+            dated_header = b"Date: Mon, 01 Jan 2024 12:00:00 +0000\r\n"
+            assert dated_header in raw
+            path.write_bytes(raw.replace(dated_header, header.encode()))
+            queue.enqueue(str(path), REASON_ON_CREATED)
+            undated[name] = str(path)
+        _drain(db, queue, make_mock_embedder(_VECTOR))
+        queue.enqueue(dead, REASON_INITIAL_SCAN)
+        queue.mark_dead_terminal(dead, stage="parse", error="oversized: too large")
+        chunks_before = db._conn.execute(
+            "SELECT chunk_id FROM message_chunks ORDER BY chunk_id"
+        ).fetchall()
+        _v7_from_fresh(db)
+        # As the v7 indexer stored them: a made-up sent_at for the undated.
+        v7 = {
+            r["filepath"]: (r["sent_at"], None, r["effective_at"])
+            for r in db._conn.execute("SELECT filepath, sent_at, effective_at FROM messages")
+        }
+        assert all(sent is not None for sent, _status, _at in v7.values())
+        spans = db._conn.execute(
+            "SELECT thread_id, date_first, date_last FROM threads ORDER BY thread_id"
+        ).fetchall()
+
+        def date_lines() -> set[bool]:
+            # Whether each undated message's v7 fallback is in its thread text.
+            return {
+                f"Date: {v7[path][0]}"
+                in db._conn.execute(
+                    "SELECT t.body_text FROM threads t JOIN messages m "
+                    "ON m.thread_id = t.thread_id WHERE m.filepath = ?",
+                    (path,),
+                ).fetchone()[0]
+                for path in undated.values()
+            }
+
+        # The v7 writer also put that fallback in the thread text.
+        for path in undated.values():
+            db._conn.execute(
+                "UPDATE threads SET body_text = replace(body_text, "
+                "'From: alice@example.com' || char(10), "
+                "'From: alice@example.com' || char(10) || 'Date: ' || ? || char(10)) "
+                "WHERE thread_id = (SELECT thread_id FROM messages WHERE filepath = ?)",
+                (v7[path][0], path),
+            )
+        db._conn.commit()
+        assert date_lines() == {True}
+        db.close()
+
+        db = Database(tmp_path / "mail.db")
+        queue = IndexingQueue(db, max_attempts=3, base_backoff_seconds=0)
+        assert {fp: d[1] for fp, d in self._dates(db).items()} == dict.fromkeys(v7)
+        assert {fp: (r["reason"], r["status"]) for fp, r in _jobs(db).items()} == {
+            dated: (REASON_REPARSE, "queued"),
+            undated["missing"]: (REASON_REPARSE, "queued"),
+            undated["invalid"]: (REASON_REPARSE, "queued"),
+            dead: (REASON_INITIAL_SCAN, "dead"),
+        }
+
+        embedder = make_mock_embedder(_VECTOR)
+        assert _drain(db, queue, embedder) == 3
+        assert embedder.embed_batch.call_count == 0
+        assert embedder.embed.call_count == 0
+        after = self._dates(db)
+        assert after[dated] == (v7[dated][0], "parsed", v7[dated][2])
+        for status, path in undated.items():
+            # Unknown, and ordered where the old fallback put it.
+            assert after[path] == (None, status, v7[path][2])
+        assert after[dead] == (v7[dead][0], None, v7[dead][2])
+        assert (
+            db._conn.execute(
+                "SELECT thread_id, date_first, date_last FROM threads ORDER BY thread_id"
+            ).fetchall()
+            == spans
+        )
+        assert date_lines() == {False}
         assert (
             db._conn.execute("SELECT chunk_id FROM message_chunks ORDER BY chunk_id").fetchall()
             == chunks_before

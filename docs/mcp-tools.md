@@ -491,13 +491,13 @@ different filters"), never read against them.
 | `body_words` | words | `query_messages` `text` and `where` | every word occurs in its indexed body (FTS, stemmed; at most 16 words); unknown when one does not and the indexed body is not complete |
 | `folder` | folder names | `query_messages` `folder`; `search_emails` `folders` | it is filed in one of them |
 | `not_in_folders` | folder names | the default scope, when no folder is named | it is filed in none of them (`Trash`; [Trash](#trash-is-left-out-by-default)) |
-| `effective_from` | UTC instant | `date_from` | its effective time is at or after the instant |
-| `effective_to` | UTC instant | `date_to` | its effective time is at or before the instant |
-| `sent_from` | UTC instant | no tool yet ([#1150](https://github.com/marshalltech81/protonmail-local-ai/issues/1150)) | its send date (`sent_at`) is at or after the instant |
-| `sent_to` | UTC instant | no tool yet (#1150) | its send date is at or before the instant |
+| `effective_from` | UTC instant | `date_from` | its effective time is at or after the instant; unknown without a delivery date or a parsed send date |
+| `effective_to` | UTC instant | `date_to` | its effective time is at or before the instant; unknown likewise |
+| `sent_from` | UTC instant | no tool yet ([#1150](https://github.com/marshalltech81/protonmail-local-ai/issues/1150)) | its send date (`sent_at`) is at or after the instant; unknown without a parsed one |
+| `sent_to` | UTC instant | no tool yet (#1150) | its send date is at or before the instant; unknown without a parsed one |
 | `occurred_from` | UTC instant | no tool yet (#1150) | its delivery date (`occurred_at`) is at or after the instant; unknown without one |
 | `occurred_to` | UTC instant | no tool yet (#1150) | its delivery date is at or before the instant; unknown without one |
-| `dated` | clock name | no tool yet (#1150) | it has that clock (a delivery date), so it has a place in a page ordered by it; unknown without one |
+| `dated` | clock name | no tool yet (#1150) | it has that clock (a delivery date, or a parsed send date), so it has a place in a page ordered by it; unknown without one |
 | `has_attachments` | bool | `has_attachments` | its own attachment flag equals the value; unknown when it stores no attachment and its attachment list is not complete |
 | `seen` | bool | `query_messages` `seen` | its read flag equals the value |
 | `flagged` | bool | `query_messages` `flagged` | its flagged flag equals the value |
@@ -531,7 +531,13 @@ decides them on the message carrying each attachment
 A leaf over a field the index can hold as NULL (`occurred_at` for a
 message without a parseable delivery date, `size_bytes` for one whose
 file size was not recorded) is neither true nor false of such a
-message, and so is `sender` (and the From side of `participant`) of a
+message. A date bound reads only a date the message carries
+([#1080](https://github.com/marshalltech81/protonmail-local-ai/issues/1080)):
+under `date_from` / `date_to` a message with no delivery date and no
+parsed send date (a missing or unparseable `Date:` header) is unknown,
+whatever time it was first indexed, and so is one without a delivery
+date whose send date is not yet checked (`sent_at_status` null: mail
+indexed before the upgrade, until its reparse). So is `sender` (and the From side of `participant`) of a
 message whose `sender_ambiguous` is `true` or `null`, whether or not
 its stored From carries the value, since its author cannot be told
 ([#1153](https://github.com/marshalltech81/protonmail-local-ai/issues/1153)),
@@ -728,15 +734,22 @@ drive an unbounded query against the index.
   one, so a message sent just before midnight and delivered after it
   falls on the later day, even though its `sent_at` is the earlier one;
   only a message without a delivery date is bounded by its `sent_at`.
+  A message with neither is ordered by the time it was first indexed,
+  which is not a date it carries: `query_messages`, `aggregate_messages`
+  and `query_attachments` count it as `indeterminate` under a bound, and
+  the evidence tools label its passages `context`.
   A thread matches when its span, from its messages' earliest to
   latest effective time, overlaps the range, so a thread with messages
-  either side of a short range matches it. The tools that hand passages
+  either side of a short range matches it. A thread's span still
+  includes the first-indexed time of such a message, and so does
+  `search_attachments`' date bound ([#1373](https://github.com/marshalltech81/protonmail-local-ai/issues/1373)). The tools that hand passages
   to a model (`get_evidence`, `ask_mailbox`, `extract_from_emails`,
   `brief_issue`, `check_conclusion`) retrieve threads the same way, and
   any passage of a matching thread may be shown, including passages
   from messages outside the range. Each passage carries its own
-  message's `sent_at` and `occurred_at` (null when unknown), so its
-  dates stay visible; see [Message time](architecture.md#message-time).
+  message's `sent_at`, `sent_at_status` and `occurred_at` (a date null
+  when unknown), so its dates stay visible; see
+  [Message time](architecture.md#message-time).
 
 ---
 
@@ -753,8 +766,9 @@ name), its parent thread, Message-ID and claimant ID, the source
 `calendar` is reserved; quote, signature and forwarded passages come
 only from messages with no text of their own, and the prose names
 them as `Source: message body (<kind>)`), its
-message's send and delivery dates (`sent_at` and `occurred_at`, the
-same values and format as that message's headers), and the passage's
+message's send and delivery dates (`sent_at`, `sent_at_status` and
+`occurred_at`, the same values and format as that message's headers),
+and the passage's
 character offsets. With `date_from` / `date_to`, threads are selected
 by span as in `search_emails`, and their passages can come from
 messages outside the range; check each chunk's `occurred_at` and
@@ -994,7 +1008,7 @@ so even fewer than 50 results (including zero) can omit matching attachments
 | `content_type` | string | none | Exact MIME-type filter, e.g. `application/pdf`; blank means no filter |
 | `from_addr` | string | none | Restrict to attachments on threads sent by this address or domain |
 | `sender` | string | none | Restrict to attachments whose carrying message is From this address, domain or name fragment, matched as `query_messages` `sender`; blank means no filter |
-| `date_from` | string | none | ISO 8601 date lower bound on the carrying message's effective time (`occurred_at`, else `sent_at`) |
+| `date_from` | string | none | ISO 8601 date lower bound on the carrying message's effective time (`occurred_at`, else `sent_at`, else the time it was first indexed, [#1373](https://github.com/marshalltech81/protonmail-local-ai/issues/1373)) |
 | `date_to` | string | none | ISO 8601 date upper bound. Date-only bounds are UTC days; give an offset for a local-time bound. `date_bounds` echoes the UTC instants applied, as in `search_emails` |
 | `extracted_only` | bool | `false` | Return only attachments whose text extraction succeeded |
 | `limit` | int | `20` | Max attachments to return; clamped to `[1, 50]` |
@@ -1252,7 +1266,8 @@ Enumerate **every** message matching exact criteria, with a total
 count. Unlike `search_emails`, which ranks threads by relevance and
 returns the top `limit`, this returns every individual message the
 filters definitely match, newest effective time (`occurred_at`, else
-`sent_at`) first (claimant ID breaks ties),
+`sent_at`, else the time it was first indexed) first (claimant ID
+breaks ties),
 and pages through it with a cursor. Use it for "all" and "how many"
 questions.
 
@@ -1428,7 +1443,8 @@ names not all indexed (reparse pending, or over the name budget)` for a
 `subject cut to the stored length, or not yet checked` for `subject`;
 `body not fully indexed (a parse cap, indexing not finished, or reparse
 pending)` for `text`; `attachment list incomplete (a parse cap), or not
-yet checked` for `has_attachments`). `total_matches` counts the definite matches:
+yet checked` for `has_attachments`; `no delivery date and no parseable
+Date header, or not yet checked` for `date_from` / `date_to`). `total_matches` counts the definite matches:
 it is the complete count only when `indeterminate` is 0, so report
 `indeterminate` with any count when it is not. A `sender` filter
 decides only messages whose `sender_ambiguous` is `false`, and a
@@ -1450,8 +1466,14 @@ not stored yet. And right after the upgrade that added the per-message
 completeness flags (#1086), every `subject`, `text`,
 `has_attachments`, address or `authority_class` filter reports each
 message it does not match as `indeterminate` until the reparse
-reaches it ([stored content](#filter-predicates)). Each
-message carries its send and delivery dates, folder, read state,
+reaches it ([stored content](#filter-predicates)). Likewise, right
+after the upgrade that made an unknown send date NULL (#1080), a
+`date_from` / `date_to` bound reports each message without a delivery
+date as `indeterminate` until the reparse reaches it. Each
+message carries its send and delivery dates (`sent_at` null when the
+`Date:` header is missing or unparseable, never a substitute, with
+`sent_at_status`: `parsed`, `missing`, `invalid`, or null, with
+`sent_at` null too, before the reparse; the prose says which), folder, read state,
 [pending deletion](#pending-deletion), attachment flag, subject,
 From / To / Cc (at most 10 per role, with a count of the rest),
 Message-ID, claimant ID, and Thread ID; the structured output adds
@@ -1463,7 +1485,7 @@ snapshot.
 **Field projection.** A corpus-building pass that pages through
 hundreds of rows rarely needs every field. `fields` lists the row
 fields to return, by their structured-output names (`message_id`,
-`subject`, `sent_at`, `occurred_at`, `folder`, `has_attachments`,
+`subject`, `sent_at`, `sent_at_status`, `occurred_at`, `folder`, `has_attachments`,
 `seen`, `flagged`, `replied`, `in_reply_to`, `references`,
 `references_count`, `from`, `from_count`, `to`, `to_count`, `cc`,
 `cc_count`, `sender_ambiguous`, `source_file`, `pending_deletion`); `claimant_id` and
@@ -1590,13 +1612,14 @@ filters, and a group's `messages` is the `total_matches` of
 | `sender_address` | a From address | a `where` `address_is` leaf, role `from` |
 | `sender_domain` | the domain of a From address | a `where` `domain_is` leaf, role `from` |
 | `folder` | the folder | `folder` |
-| `year` | `YYYY` of the effective time (`occurred_at`, else `sent_at`), UTC | `date_from` / `date_to` spanning that UTC year |
-| `month` | `YYYY-MM` of the effective time, UTC | `date_from` / `date_to` spanning that UTC month |
+| `year` | `YYYY` of the effective time (`occurred_at`, else `sent_at`), UTC; no value without either (or with a send date not yet checked), never the time a message was first indexed | `date_from` / `date_to` spanning that UTC year |
+| `month` | `YYYY-MM` of the effective time, UTC; no value likewise | `date_from` / `date_to` spanning that UTC month |
 | `authority_class` | the class of a From address | `authority_class` |
 
 Per group: `messages`, `threads` (distinct threads of those
 messages), `first_at` / `last_at` (their earliest and latest effective
-time), `with_attachments` (those with an attachment), `indeterminate`
+time, from the messages with a delivery or checked send date),
+`with_attachments` (those with an attachment), `indeterminate`
 (messages in the group the filters could not decide, never counted in
 `messages`) and, for `sender_address`, `display_name` (the display name
 on the group's latest match that has one, cut at 500 characters with a
@@ -1656,8 +1679,8 @@ a total count
 An occurrence is one attachment on one message: the same bytes attached
 to two messages, or twice to one, are separate rows that share an
 `attachment_id`. Rows are not ranked; the newest carrying message comes
-first by effective time (`occurred_at`, else `sent_at`), and claimant
-ID then occurrence ID break ties. Use it for "list every attachment" and
+first by effective time (`occurred_at`, else `sent_at`, else the time
+it was first indexed), and claimant ID then occurrence ID break ties. Use it for "list every attachment" and
 "how many" questions; [`search_attachments`](#search_attachments) ranks
 by filename and extracted text and stops at 50 results.
 
@@ -1690,8 +1713,9 @@ message filter for the reasons it leaves a message undecided in
 `query_messages` (a carrying message whose sender is ambiguous or not
 yet checked, whose stored addresses for the filtered role were cut by a
 parse limit or are not checked yet, [stored
-content](#filter-predicates), or whose display names are not all
-indexed; right after the upgrade that added the completeness flags,
+content](#filter-predicates), whose display names are not all
+indexed, or, under a date bound, with no delivery date and no checked
+send date; right after the upgrade that added the completeness flags,
 #1086, every address filter reports each attachment on mail it does not
 match as `indeterminate` until the reparse reaches that mail), and an
 `extraction_status` other than `none` on an occurrence with no
@@ -1719,8 +1743,8 @@ nothing relevant. Each row carries the occurrence ID, the payload's
 extractor), the claimant, Message-ID and thread IDs, the filename and
 MIME type (each cut at 500 characters, with `filename_clipped` /
 `content_type_clipped` set when the stored value is longer), the size,
-the carrying message's folder, `sent_at`, `occurred_at` and
-`source_file`, and the extraction's status, extractor, time and
+the carrying message's folder, `sent_at`, `sent_at_status`,
+`occurred_at` and `source_file`, and the extraction's status, extractor, time and
 `ocr_pages_skipped` (all null when none is recorded; for a `deferred`
 occurrence the status is `deferred` and the other three are null). The
 counts and the page are read in one snapshot.
