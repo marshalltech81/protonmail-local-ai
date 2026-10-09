@@ -47,6 +47,7 @@ from .threader import (
     Thread,
     canonical_addr,
     fts_subject_text,
+    message_date_line,
 )
 
 log = logging.getLogger("indexer.database")
@@ -138,7 +139,12 @@ def _dedupe_by_canonical(addrs: list[str]) -> list[str]:
 # state, address count and digest, replaced at every indexer start; no
 # per-message column and no reparse
 # (``migrations/0007_operator_identity.sql``).
-SCHEMA_VERSION = 7
+# v8 (#1080): ``messages.sent_at`` is NULL for a missing or unparseable
+# Date header, with ``sent_at_status`` (``parsed`` / ``missing`` /
+# ``invalid``, NULL until a reparse assesses the row), and
+# ``first_indexed_at`` is the last fallback of ``effective_at``; the
+# table is rebuilt (``migrations/0008_unknown_sent_dates.sql``).
+SCHEMA_VERSION = 8
 SCHEMA_APPLICATION_ID = 0x504D4149  # "PMAI"
 
 # How long a ``reaped_messages`` record outlives the reap. The record
@@ -745,11 +751,18 @@ class Database:
             -- locator and content hash) behind exact enumeration and
             -- provenance. Cascades from ``message_thread_map`` so every
             -- existing message / thread removal path cleans it up.
-            -- ``sent_at`` is the parsed ``Date:`` header; ``occurred_at``
-            -- the date of the topmost ``Received:`` header, NULL when
-            -- absent or unparseable. ``effective_at`` is the message's
-            -- effective time, which every date filter, thread span and
-            -- time ordering uses (docs/architecture.md "Message time").
+            -- ``sent_at`` is the parsed ``Date:`` header, NULL when it is
+            -- absent or unparseable, with ``sent_at_status`` saying which
+            -- (#1080; NULL status = not yet assessed, a row from before
+            -- v8 the reparse has not reached, whose ``sent_at`` may be a
+            -- made-up fallback). ``occurred_at`` is the date of the
+            -- topmost ``Received:`` header, NULL when absent or
+            -- unparseable. ``first_indexed_at`` is when the indexer first
+            -- stored the message, kept across reprocessing.
+            -- ``effective_at`` is the message's effective time, which
+            -- thread spans and time ordering use; its last fallback,
+            -- ``first_indexed_at``, is an ordering position, not
+            -- evidence of a date (docs/architecture.md "Message time").
             CREATE TABLE messages (
                 claimant_id     TEXT PRIMARY KEY,
                 message_id      TEXT NOT NULL,
@@ -757,16 +770,18 @@ class Database:
                 filepath        TEXT NOT NULL,
                 folder          TEXT NOT NULL,
                 subject         TEXT NOT NULL,
-                sent_at         TEXT NOT NULL,
+                sent_at         TEXT,
+                sent_at_status  TEXT CHECK (sent_at_status IN ('parsed', 'missing', 'invalid')),
                 occurred_at     TEXT,
-                effective_at    TEXT GENERATED ALWAYS AS (COALESCE(occurred_at, sent_at))
-                                VIRTUAL,
+                effective_at    TEXT GENERATED ALWAYS AS
+                                (COALESCE(occurred_at, sent_at, first_indexed_at)) VIRTUAL,
                 in_reply_to     TEXT,
                 references_json TEXT NOT NULL,
                 has_attachments INTEGER NOT NULL,
                 size_bytes      INTEGER,
                 content_hash    TEXT,
                 indexed_at      TEXT NOT NULL,
+                first_indexed_at TEXT NOT NULL,
                 -- Maildir S / F / R flags of ``filepath`` (maildir.message_state),
                 -- written with it on every insert and rename.
                 seen            INTEGER NOT NULL DEFAULT 0,
@@ -810,6 +825,10 @@ class Database:
                 -- object of fixed names to integers, never content;
                 -- NULL before v5's reparse.
                 caps_json TEXT,
+                -- A send date is stored exactly when it was parsed, and a
+                -- row not yet assessed keeps the one it had before v8.
+                CHECK ((sent_at_status = 'parsed') = (sent_at IS NOT NULL)),
+                CHECK (sent_at_status IS NOT NULL OR sent_at IS NOT NULL),
                 FOREIGN KEY (claimant_id) REFERENCES message_thread_map(claimant_id)
                     ON DELETE CASCADE
             );
@@ -1071,7 +1090,7 @@ class Database:
                 # body coverage as a thread that arrived as a sequence of
                 # replies.
                 new_content = "\n".join(
-                    f"From: {m.from_addr}\nDate: {m.date.isoformat()}\n"
+                    f"From: {m.from_addr}\n{message_date_line(m)}"
                     f"{m.body_text[:PER_MESSAGE_BODY_CAP_CHARS]}"
                     for m in new_messages
                 )
@@ -2907,23 +2926,27 @@ class Database:
         ).fetchone()
 
     @_synchronized
-    def get_message_sent_at(self, claimant_id: str) -> datetime | None:
-        """The ``messages.sent_at`` already stored for ``claimant_id``, if any."""
-        row = self._conn.execute(
-            "SELECT sent_at FROM messages WHERE claimant_id = ?", (claimant_id,)
-        ).fetchone()
-        return datetime.fromisoformat(row["sent_at"]) if row else None
+    def keep_persisted_first_indexed_at(self, msg) -> None:
+        """Give ``msg`` the ``first_indexed_at`` stored for it, if any.
 
-    def keep_persisted_fallback_date(self, msg) -> None:
-        """Give a fallback-dated ``msg`` the date first persisted for it.
-
-        The parser dates a message with a missing or unparseable Date
-        header at the current time, so every reprocess (a rename seen
-        while the indexer was down, a retry, a reap rebuild) would
-        otherwise re-date it (#297). A real header date is left alone.
+        The parser sets it to the parse time, so every reprocess (a
+        rename seen while the indexer was down, a retry, a reap rebuild)
+        would otherwise move the ordering position of a message with no
+        send or delivery date (#297), and its thread's span with it.
+        Mirrors what ``_write_message_record`` stores on conflict: for a
+        row not yet assessed (before v8) that is now undated, the old
+        ``sent_at``, which held the time it was first indexed (#1080).
         """
-        if msg.date_is_fallback:
-            msg.date = self.get_message_sent_at(msg.claimant_id) or msg.date
+        row = self._conn.execute(
+            "SELECT sent_at, sent_at_status, first_indexed_at FROM messages WHERE claimant_id = ?",
+            (msg.claimant_id,),
+        ).fetchone()
+        if row is None:
+            return
+        if row["sent_at_status"] is None and msg.date is None:
+            msg.first_indexed_at = datetime.fromisoformat(row["sent_at"])
+        else:
+            msg.first_indexed_at = datetime.fromisoformat(row["first_indexed_at"])
 
     @_synchronized
     def count_total_messages(self) -> int:
@@ -3039,19 +3062,28 @@ class Database:
             """
             INSERT INTO messages
                 (claimant_id, message_id, thread_id, filepath, folder, subject, sent_at,
-                 occurred_at, in_reply_to, references_json, has_attachments, size_bytes,
-                 content_hash, indexed_at, seen, flagged, replied, sender_ambiguous,
-                 participant_names_complete, subject_complete, from_addresses_complete,
-                 to_addresses_complete, cc_addresses_complete,
+                 sent_at_status, occurred_at, in_reply_to, references_json, has_attachments,
+                 size_bytes, content_hash, indexed_at, first_indexed_at, seen, flagged,
+                 replied, sender_ambiguous, participant_names_complete, subject_complete,
+                 from_addresses_complete, to_addresses_complete, cc_addresses_complete,
                  attachments_manifest_complete, body_complete, caps_json)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    NULL, ?)
+                    ?, ?, NULL, ?)
             ON CONFLICT(claimant_id) DO UPDATE SET
                 thread_id       = excluded.thread_id,
                 filepath        = excluded.filepath,
                 folder          = excluded.folder,
                 subject         = excluded.subject,
                 sent_at         = excluded.sent_at,
+                sent_at_status  = excluded.sent_at_status,
+                -- Kept from the first insert (#297). A row from before
+                -- v8 (status not yet assessed) that is now undated held
+                -- that time in ``sent_at``, the old parser's fallback
+                -- (#1080); ``keep_persisted_first_indexed_at`` mirrors
+                -- this for the in-memory message.
+                first_indexed_at = CASE
+                    WHEN messages.sent_at_status IS NULL AND excluded.sent_at IS NULL
+                    THEN messages.sent_at ELSE messages.first_indexed_at END,
                 occurred_at     = excluded.occurred_at,
                 in_reply_to     = excluded.in_reply_to,
                 references_json = excluded.references_json,
@@ -3080,7 +3112,8 @@ class Database:
                 msg.filepath,
                 msg.folder,
                 msg.subject,
-                msg.date.isoformat(),
+                msg.date.isoformat() if msg.date is not None else None,
+                msg.date_status,
                 msg.occurred_at.isoformat() if msg.occurred_at is not None else None,
                 msg.in_reply_to,
                 json.dumps(msg.references),
@@ -3088,6 +3121,7 @@ class Database:
                 msg.size,
                 msg.content_hash,
                 datetime.now(UTC).isoformat(),
+                msg.first_indexed_at.isoformat(),
                 int(state.seen),
                 int(state.flagged),
                 int(state.replied),

@@ -22,6 +22,7 @@
               "scope": "in_scope",
               "selected_by": "keyword_match",
               "sent_at": "2025-09-25T09:00:00+00:00",
+              "sent_at_status": "parsed",
               "source": "body",
               "source_file": {
                 "indexed_at": "2024-01-01T00:00:00Z",
@@ -57,6 +58,7 @@
               "scope": "in_scope",
               "selected_by": "vector",
               "sent_at": "2025-09-10T09:00:00+00:00",
+              "sent_at_status": "parsed",
               "source": "body",
               "source_file": {
                 "indexed_at": "2024-01-01T00:00:00Z",
@@ -84,6 +86,7 @@
               "scope": "context",
               "selected_by": "vector",
               "sent_at": "2025-09-20T09:00:00+00:00",
+              "sent_at_status": "parsed",
               "source": "body",
               "source_file": {
                 "indexed_at": "2024-01-01T00:00:00Z",
@@ -111,6 +114,7 @@
               "scope": "in_scope",
               "selected_by": "vector",
               "sent_at": "2025-09-10T09:00:00+00:00",
+              "sent_at_status": "parsed",
               "source": "body",
               "source_file": {
                 "indexed_at": "2024-01-01T00:00:00Z",
@@ -138,6 +142,7 @@
               "scope": "in_scope",
               "selected_by": "vector",
               "sent_at": "2025-09-10T09:00:00+00:00",
+              "sent_at_status": "parsed",
               "source": "attachment",
               "source_file": {
                 "indexed_at": "2024-01-01T00:00:00Z",
@@ -165,6 +170,7 @@
               "scope": "in_scope",
               "selected_by": "vector",
               "sent_at": "2025-09-10T09:00:00+00:00",
+              "sent_at_status": "parsed",
               "source": "attachment",
               "source_file": {
                 "indexed_at": "2024-01-01T00:00:00Z",
@@ -210,6 +216,7 @@
               "scope": "in_scope",
               "selected_by": "keyword_match",
               "sent_at": "2025-09-25T09:00:00+00:00",
+              "sent_at_status": "parsed",
               "source": "body",
               "source_file": {
                 "indexed_at": "2024-01-01T00:00:00Z",
@@ -245,6 +252,7 @@
               "scope": "in_scope",
               "selected_by": "vector",
               "sent_at": "2025-09-10T09:00:00+00:00",
+              "sent_at_status": "parsed",
               "source": "body",
               "source_file": {
                 "indexed_at": "2024-01-01T00:00:00Z",
@@ -272,6 +280,7 @@
               "scope": "context",
               "selected_by": "vector",
               "sent_at": "2025-09-20T09:00:00+00:00",
+              "sent_at_status": "parsed",
               "source": "body",
               "source_file": {
                 "indexed_at": "2024-01-01T00:00:00Z",
@@ -299,6 +308,7 @@
               "scope": "in_scope",
               "selected_by": "vector",
               "sent_at": "2025-09-10T09:00:00+00:00",
+              "sent_at_status": "parsed",
               "source": "body",
               "source_file": {
                 "indexed_at": "2024-01-01T00:00:00Z",
@@ -326,6 +336,7 @@
               "scope": "in_scope",
               "selected_by": "vector",
               "sent_at": "2025-09-10T09:00:00+00:00",
+              "sent_at_status": "parsed",
               "source": "attachment",
               "source_file": {
                 "indexed_at": "2024-01-01T00:00:00Z",
@@ -353,6 +364,7 @@
               "scope": "in_scope",
               "selected_by": "vector",
               "sent_at": "2025-09-10T09:00:00+00:00",
+              "sent_at_status": "parsed",
               "source": "attachment",
               "source_file": {
                 "indexed_at": "2024-01-01T00:00:00Z",
@@ -398,6 +410,7 @@
               "scope": "in_scope",
               "selected_by": "vector",
               "sent_at": "2025-09-10T09:00:00+00:00",
+              "sent_at_status": "parsed",
               "source": "body",
               "source_file": {
                 "indexed_at": "2024-01-01T00:00:00Z",
@@ -425,6 +438,7 @@
               "scope": "in_scope",
               "selected_by": "vector",
               "sent_at": "2025-09-20T09:00:00+00:00",
+              "sent_at_status": "parsed",
               "source": "body",
               "source_file": {
                 "indexed_at": "2024-01-01T00:00:00Z",
@@ -452,6 +466,7 @@
               "scope": "in_scope",
               "selected_by": "vector",
               "sent_at": "2025-09-10T09:00:00+00:00",
+              "sent_at_status": "parsed",
               "source": "body",
               "source_file": {
                 "indexed_at": "2024-01-01T00:00:00Z",
@@ -479,6 +494,7 @@
               "scope": "in_scope",
               "selected_by": "vector",
               "sent_at": "2025-09-10T09:00:00+00:00",
+              "sent_at_status": "parsed",
               "source": "attachment",
               "source_file": {
                 "indexed_at": "2024-01-01T00:00:00Z",
@@ -506,6 +522,7 @@
               "scope": "in_scope",
               "selected_by": "vector",
               "sent_at": "2025-09-10T09:00:00+00:00",
+              "sent_at_status": "parsed",
               "source": "attachment",
               "source_file": {
                 "indexed_at": "2024-01-01T00:00:00Z",
@@ -551,6 +568,7 @@
               "scope": "in_scope",
               "selected_by": "keyword_match",
               "sent_at": "2025-09-25T09:00:00+00:00",
+              "sent_at_status": "parsed",
               "source": "body",
               "source_file": {
                 "indexed_at": "2024-01-01T00:00:00Z",
@@ -589,6 +607,7 @@
               "scope": "in_scope",
               "selected_by": "vector",
               "sent_at": "2025-09-10T09:00:00+00:00",
+              "sent_at_status": "parsed",
               "source": "body",
               "source_file": {
                 "indexed_at": "2024-01-01T00:00:00Z",
@@ -616,6 +635,7 @@
               "scope": "in_scope",
               "selected_by": "vector",
               "sent_at": "2025-09-20T09:00:00+00:00",
+              "sent_at_status": "parsed",
               "source": "body",
               "source_file": {
                 "indexed_at": "2024-01-01T00:00:00Z",
@@ -643,6 +663,7 @@
               "scope": "in_scope",
               "selected_by": "vector",
               "sent_at": "2025-09-10T09:00:00+00:00",
+              "sent_at_status": "parsed",
               "source": "body",
               "source_file": {
                 "indexed_at": "2024-01-01T00:00:00Z",
@@ -670,6 +691,7 @@
               "scope": "in_scope",
               "selected_by": "vector",
               "sent_at": "2025-09-10T09:00:00+00:00",
+              "sent_at_status": "parsed",
               "source": "attachment",
               "source_file": {
                 "indexed_at": "2024-01-01T00:00:00Z",
@@ -697,6 +719,7 @@
               "scope": "in_scope",
               "selected_by": "vector",
               "sent_at": "2025-09-10T09:00:00+00:00",
+              "sent_at_status": "parsed",
               "source": "attachment",
               "source_file": {
                 "indexed_at": "2024-01-01T00:00:00Z",

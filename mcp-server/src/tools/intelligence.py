@@ -1714,6 +1714,7 @@ def _citation(ref: EvidenceRef) -> Citation:
         sender=clip(chunk.message_sender, HEADER_CHAR_LIMIT) if chunk.message_sender else None,
         sender_ambiguous=chunk.message_sender_ambiguous,
         sent_at=chunk.message_date,
+        sent_at_status=chunk.message_sent_at_status,
         occurred_at=chunk.message_occurred_at,
         source="body" if chunk.attachment_id is None else "attachment",
         attachment_id=chunk.attachment_id,

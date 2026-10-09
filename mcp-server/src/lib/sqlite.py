@@ -33,12 +33,14 @@ from .predicates import (
     AUTHORITY_EXCLUDED_FOLDERS,
     DATE_BASES,
     DEFAULT_EXCLUDED_FOLDERS,
+    EFFECTIVE_EVIDENCE_SQL,
     LEAVES,
     ROLE_SETS,
     DateBasis,
     Evaluability,
     InvalidFilterError,
     Leaf,
+    SentAtStatus,
     WhereLeaf,
     _addr_matches,
     _given,
@@ -354,12 +356,15 @@ class ChunkResult:
     filename/MIME provenance the text is opaque and the source
     attachment cannot be cited.
 
-    ``message_date`` is the ``sent_at`` of the chunk's ``messages`` row
-    and ``message_occurred_at`` its ``occurred_at`` (chunks store no
+    ``message_date`` is the ``sent_at`` of the chunk's ``messages`` row,
+    ``message_sent_at_status`` its ``sent_at_status`` (#1080) and
+    ``message_occurred_at`` its ``occurred_at`` (chunks store no
     date of their own, #575), carried so ``get_evidence`` can show
     *when* a cited passage was sent and delivered. Left ``None`` for
-    query paths that do not SELECT them (and ``message_occurred_at``
-    for a message with no readable top ``Received:`` header).
+    query paths that do not SELECT them (``message_date`` also for a
+    message without a parseable ``Date:`` header, and
+    ``message_occurred_at`` for one with no readable top ``Received:``
+    header).
 
     ``source_file`` is the raw file of the chunk's message (for an
     attachment chunk, the message that carries the attachment); ``None``
@@ -397,6 +402,7 @@ class ChunkResult:
     attachment_filename: str | None = None
     attachment_mime: str | None = None
     message_date: str | None = None
+    message_sent_at_status: SentAtStatus | None = None
     message_occurred_at: str | None = None
     source_file: SourceFile | None = None
     message_sender: str | None = None
@@ -430,6 +436,9 @@ def _row_to_chunk_result(r) -> ChunkResult:
         attachment_filename=(r["attachment_filename"] if "attachment_filename" in keys else None),
         attachment_mime=r["attachment_mime"] if "attachment_mime" in keys else None,
         message_date=r["message_date"] if "message_date" in keys else None,
+        message_sent_at_status=(
+            r["message_sent_at_status"] if "message_sent_at_status" in keys else None
+        ),
         message_occurred_at=(r["message_occurred_at"] if "message_occurred_at" in keys else None),
         source_file=_row_to_source(r),
         message_sender=r["message_sender"] if "message_sender" in keys else None,
@@ -543,9 +552,11 @@ class AttachmentResult:
     subject: str
     folder: str
     date_last: datetime
-    # The carrying message's ``sent_at`` and ``occurred_at``; None when
-    # it has no messages row (``occurred_at`` also when it is unknown).
+    # The carrying message's ``sent_at``, ``sent_at_status`` and
+    # ``occurred_at``; None when it has no messages row (a date also
+    # when it is unknown, the status also before it is assessed, #1080).
     sent_at: str | None = None
+    sent_at_status: SentAtStatus | None = None
     occurred_at: str | None = None
     senders: list[str] = field(default_factory=list)
     extraction_status: str | None = None
@@ -590,6 +601,7 @@ def _row_to_attachment_result(r) -> AttachmentResult:
         folder=r["folder"],
         date_last=datetime.fromisoformat(r["date_last"]),
         sent_at=r["sent_at"],
+        sent_at_status=r["sent_at_status"],
         occurred_at=r["occurred_at"],
         senders=json.loads(r["senders"]),
         extraction_status=r["extraction_status"],
@@ -622,9 +634,17 @@ class MessageRecord:
     claimant_id: str
     thread_id: str
     subject: str
-    sent_at: str
+    # The parsed ``Date:`` header; None when it is missing or
+    # unparseable (#1080), as ``sent_at_status`` says: ``parsed``,
+    # ``missing``, ``invalid``, or None when not yet assessed (a row
+    # from before the upgrade, until its reparse).
+    sent_at: str | None
     folder: str
     has_attachments: bool
+    # ``messages.effective_at``: ``occurred_at``, else ``sent_at``, else
+    # ``first_indexed_at``, the ordering position of an undated message.
+    effective_at: str
+    sent_at_status: SentAtStatus | None = None
     in_reply_to: str | None = None
     references: list[str] = field(default_factory=list)
     from_: list[Participant] = field(default_factory=list)
@@ -647,11 +667,6 @@ class MessageRecord:
     # assessed. Only False qualifies for source authority.
     sender_ambiguous: bool | None = None
 
-    @property
-    def effective_at(self) -> str:
-        """``messages.effective_at``: ``occurred_at``, else ``sent_at``."""
-        return self.occurred_at if self.occurred_at is not None else self.sent_at
-
 
 # Whether the reconciler tombstoned the message (#794). A tombstone
 # counts only on the message's current file: one left under an old path
@@ -663,8 +678,8 @@ _PENDING_DELETION_COLUMN = (
 )
 
 _MESSAGE_COLUMNS = (
-    "m.message_id, m.claimant_id, m.thread_id, m.subject, m.sent_at, m.occurred_at, "
-    "m.folder, "
+    "m.message_id, m.claimant_id, m.thread_id, m.subject, m.sent_at, m.sent_at_status, "
+    "m.occurred_at, m.effective_at, m.folder, "
     "m.has_attachments, m.in_reply_to, m.references_json, m.seen, m.flagged, m.replied, "
     "m.sender_ambiguous, " + _PENDING_DELETION_COLUMN + ", " + _SOURCE_COLUMNS
 )
@@ -677,7 +692,9 @@ def _row_to_message_record(r) -> MessageRecord:
         thread_id=r["thread_id"],
         subject=r["subject"],
         sent_at=r["sent_at"],
+        sent_at_status=r["sent_at_status"],
         occurred_at=r["occurred_at"],
+        effective_at=r["effective_at"],
         folder=r["folder"],
         has_attachments=bool(r["has_attachments"]),
         in_reply_to=r["in_reply_to"],
@@ -1420,7 +1437,9 @@ class AttachmentOccurrenceRecord:
     content_type_clipped: bool
     size_bytes: int
     folder: str
-    sent_at: str
+    # The carrying message's dates; see ``MessageRecord``.
+    sent_at: str | None
+    sent_at_status: SentAtStatus | None
     occurred_at: str | None
     effective_at: str
     source_file: SourceFile | None
@@ -1599,7 +1618,7 @@ _OCCURRENCE_COLUMNS = (
     f"substr(CAST(a.filename AS BLOB), 1, {_ATTACHMENT_META_BYTES + 1}) AS filename_head, "
     f"substr(CAST(a.content_type AS BLOB), 1, {_ATTACHMENT_META_BYTES + 1}) "
     "AS content_type_head, "
-    "a.size_bytes, m.folder, m.sent_at, m.occurred_at, m.effective_at, "
+    "a.size_bytes, m.folder, m.sent_at, m.sent_at_status, m.occurred_at, m.effective_at, "
     f"{_SOURCE_COLUMNS}, e.extraction_status, e.extractor, e.extracted_at, "
     "e.ocr_pages_skipped"
 )
@@ -1697,6 +1716,7 @@ def _row_to_occurrence(r) -> AttachmentOccurrenceRecord:
         size_bytes=int(r["size_bytes"]),
         folder=r["folder"],
         sent_at=r["sent_at"],
+        sent_at_status=r["sent_at_status"],
         occurred_at=r["occurred_at"],
         effective_at=r["effective_at"],
         source_file=_row_to_source(r),
@@ -2799,7 +2819,7 @@ class Database:
             "SELECT a.attachment_id, COALESCE(m.message_id, a.claimant_id) AS message_id, "
             "a.claimant_id, a.thread_id, a.filename, "
             "a.content_type, a.size_bytes, t.subject, t.display_subject, "
-            "t.folder, t.date_last, m.sent_at, m.occurred_at, t.senders, "
+            "t.folder, t.date_last, m.sent_at, m.sent_at_status, m.occurred_at, t.senders, "
             "e.extraction_status, "
             "substr(e.extracted_text, 1, 240) AS text_snippet, "
             f"{_SOURCE_COLUMNS}, "
@@ -2875,7 +2895,7 @@ class Database:
             "SELECT a.attachment_id, COALESCE(m.message_id, a.claimant_id) AS message_id, "
             "a.claimant_id, a.thread_id, a.filename, "
             "a.content_type, a.size_bytes, t.subject, t.display_subject, "
-            "t.folder, t.date_last, m.sent_at, m.occurred_at, t.senders, "
+            "t.folder, t.date_last, m.sent_at, m.sent_at_status, m.occurred_at, t.senders, "
             "e.extraction_status, "
             "substr(e.extracted_text, 1, 240) AS text_snippet, "
             f"{_SOURCE_COLUMNS}, "
@@ -2921,7 +2941,7 @@ class Database:
             "SELECT a.attachment_id, COALESCE(m.message_id, a.claimant_id) AS message_id, "
             "a.claimant_id, a.thread_id, a.filename, "
             "a.content_type, a.size_bytes, t.subject, t.display_subject, "
-            "t.folder, t.date_last, m.sent_at, m.occurred_at, t.senders, "
+            "t.folder, t.date_last, m.sent_at, m.sent_at_status, m.occurred_at, t.senders, "
             "e.extraction_status, "
             "substr(e.extracted_text, 1, 240) AS text_snippet, "
             f"{_SOURCE_COLUMNS}, "
@@ -3567,7 +3587,7 @@ class Database:
                 "SELECT c.chunk_id, COALESCE(m.message_id, c.claimant_id) AS message_id, "
                 "c.claimant_id, c.thread_id, c.chunk_index, "
                 "c.text, c.char_start, c.char_end, c.attachment_id, c.kind, "
-                "m.sent_at AS message_date, "
+                "m.sent_at AS message_date, m.sent_at_status AS message_sent_at_status, "
                 "m.occurred_at AS message_occurred_at, "
                 "m.sender_ambiguous AS message_sender_ambiguous, "
                 "a.filename AS attachment_filename, "
@@ -3700,7 +3720,7 @@ class Database:
                 "c.text, c.char_start, c.char_end, c.attachment_id, c.kind, "
                 "NULL AS attachment_filename, "
                 "NULL AS attachment_mime, "
-                "m.sent_at AS message_date, "
+                "m.sent_at AS message_date, m.sent_at_status AS message_sent_at_status, "
                 "m.occurred_at AS message_occurred_at, "
                 "m.sender_ambiguous AS message_sender_ambiguous, "
                 f"{_CHUNK_SENDER_SQL}, "
@@ -4620,7 +4640,7 @@ class Database:
         # A cursor is only meaningful for the predicates and the ordering
         # it was issued under; bind it to a digest of both.
         digest = leaf_digest(leaves, basis.name, where)
-        clock = f"m.{basis.column}"
+        clock = basis.clock
         page_where_sql = where_sql
         page_params = list(params)
         offset = 0
@@ -4785,7 +4805,7 @@ class Database:
         # group still carries the totals.
         sql = (
             "WITH e AS MATERIALIZED (SELECT m.claimant_id AS cid, m.thread_id AS tid, "  # nosec B608
-            "m.effective_at AS at, m.has_attachments AS att, m.folder AS folder, "
+            f"{EFFECTIVE_EVIDENCE_SQL} AS at, m.has_attachments AS att, m.folder AS folder, "
             "m.sender_ambiguous AS sa, m.from_addresses_complete AS fc, "
             f"({expr}) AS ok FROM messages m WHERE ({expr}) IS NOT 0), "
             f"k AS ({_GROUP_ROWS[group_by]}), "

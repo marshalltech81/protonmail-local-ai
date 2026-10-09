@@ -72,6 +72,7 @@ from .outputs import (
     query_messages_output_schema,
     read_only,
     reaped_source,
+    sent_text,
     source,
     thread_summary,
     tool_result,
@@ -93,6 +94,10 @@ _NO_VALUE_LABELS = {
     "sender_address": "(no attributable sender)",
     "sender_domain": "(no attributable sender)",
     "authority_class": "(no class: Spam, no attributable sender, or no classified sender)",
+    # #1080: no delivery date and no parseable Date header, or a send
+    # date not yet checked; never grouped by when it was indexed.
+    "year": "(no known date)",
+    "month": "(no known date)",
 }
 
 # query_attachments' ``extraction_status``: one of
@@ -213,7 +218,7 @@ def _header_lines(m: MessageRecord) -> list[str]:
             headers.append((label, _format_participants(people)))
     if m.sender_ambiguous is not False:
         headers.append(("Sender", _SENDER_CHECK_WORDS[m.sender_ambiguous]))
-    headers.append(("Sent", m.sent_at))
+    headers.append(("Sent", sent_text(m.sent_at, m.sent_at_status)))
     if m.occurred_at:
         headers.append(("Delivered", m.occurred_at))
     headers.append(("Folder", clip(m.folder, HEADER_CHAR_LIMIT)))
@@ -312,8 +317,8 @@ def _listed_lines(i: int, m: MessageRecord, fields: frozenset[str] | None) -> li
         return fields is None or name in fields
 
     head = []
-    if shown("sent_at"):
-        head.append(m.sent_at)
+    if shown("sent_at") or shown("sent_at_status"):
+        head.append(sent_text(m.sent_at, m.sent_at_status))
     if m.occurred_at and shown("occurred_at"):
         head.append(f"delivered {m.occurred_at}")
     if shown("folder"):
@@ -389,6 +394,11 @@ _INDETERMINATE_CAUSES: tuple[tuple[str, frozenset[str], str], ...] = (
         "attachment list incomplete (a parse cap), or not yet checked",
     ),
     ("size", frozenset({"size_min", "size_max"}), "no stored size"),
+    (
+        "date",
+        frozenset({"date_from", "date_to"}),
+        "no delivery date and no parseable Date header, or not yet checked",
+    ),
 )
 
 
@@ -506,6 +516,7 @@ def _listed_attachment(a: AttachmentOccurrenceRecord) -> ListedAttachment:
         size_bytes=a.size_bytes,
         folder=a.folder,
         sent_at=a.sent_at,
+        sent_at_status=a.sent_at_status,
         occurred_at=a.occurred_at,
         source_file=source(a.source_file),
         extraction_status=a.extraction_status,
@@ -517,7 +528,7 @@ def _listed_attachment(a: AttachmentOccurrenceRecord) -> ListedAttachment:
 
 def _attachment_lines(i: int, a: AttachmentOccurrenceRecord) -> list[str]:
     """Row ``i`` of a query_attachments page in prose."""
-    head = [a.sent_at]
+    head = [sent_text(a.sent_at, a.sent_at_status)]
     if a.occurred_at:
         head.append(f"delivered {a.occurred_at}")
     head.append(clip(a.folder, HEADER_CHAR_LIMIT))
@@ -894,7 +905,9 @@ def register_retrieval_tools(server, db):
                 )
                 # Never pick one: either claimant may be the reused ID.
                 listed = "; ".join(
-                    f"{c.claimant_id} (sent {c.sent_at}, folder {c.folder})" for c in view.claimants
+                    f"{c.claimant_id} ({'sent ' if c.sent_at else ''}"
+                    f"{sent_text(c.sent_at, c.sent_at_status)}, folder {c.folder})"
+                    for c in view.claimants
                 )
                 count = (
                     f"more than {len(view.claimants)}"
@@ -1278,7 +1291,8 @@ def register_retrieval_tools(server, db):
                     to list them.
             date_from: ISO 8601 lower bound, inclusive, on the
                        message's time: its delivery date (occurred_at),
-                       else its send date (sent_at).
+                       else its send date (sent_at). A message with
+                       neither is indeterminate.
             date_to: ISO 8601 upper bound, inclusive; a date-only value
                      covers the whole day (UTC). For either bound in
                      the user's time zone, give an offset
@@ -1595,7 +1609,8 @@ def register_retrieval_tools(server, db):
         Args:
             group_by: sender_address, sender_domain, folder, year,
                       month or authority_class (dates are the effective
-                      time, occurred_at else sent_at, in UTC).
+                      time, occurred_at else sent_at, in UTC; null
+                      without either).
             sender: As in query_messages.
             recipient: As in query_messages.
             participant: As in query_messages.
@@ -1835,7 +1850,7 @@ def register_retrieval_tools(server, db):
                     list_folders); pass "Trash" to list Trash.
             date_from: ISO 8601 lower bound, inclusive, on the carrying
                        message's delivery date (occurred_at), else its
-                       send date (sent_at).
+                       send date (sent_at); indeterminate without either.
             date_to: ISO 8601 upper bound, inclusive; a date-only value
                      covers the whole UTC day. ``date_bounds`` echoes the
                      UTC instants applied.

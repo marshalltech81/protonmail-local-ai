@@ -1564,7 +1564,7 @@ def _phase1_commit_thread(
     try:
         # Before threading, so the thread range, messages row and chunk
         # dates all see the same date.
-        db.keep_persisted_fallback_date(msg)
+        db.keep_persisted_first_indexed_at(msg)
         thread = threader.assign_thread(msg)
     except Exception as e:
         queue.mark_failed(filepath, stage="thread", error=_stage_error(e))

@@ -426,7 +426,8 @@ indexer; mbsync is not replaced (Deferred).
    #825 to normalization; prerequisite for #463 options 2 and 3.
 4. **Unknown dates stay unknown** — nullable `sent_at` with a status;
    `effective_at` remains the ordering fallback, documented as not
-   evidence (#1080).
+   evidence (#1080). **Done** (schema v8); thread spans and
+   `search_attachments` still read the fallback (#1373).
 5. **Arrival time** — `CopyArrivalDate yes` is on in the mbsync
    template, with a layout test proving the mtime equals the server's
    INTERNALDATE; `internal_at` with an `unavailable` status for files

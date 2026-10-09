@@ -96,6 +96,13 @@ PER_MESSAGE_BODY_CAP_CHARS = 2000
 log = logging.getLogger("indexer.threader")
 
 
+def message_date_line(msg: Message) -> str:
+    """The ``Date:`` line a message contributes to its thread's FTS body,
+    or nothing when its send date is unknown (#1080): no made-up date
+    is indexed as text."""
+    return f"Date: {msg.date.isoformat()}\n" if msg.date is not None else ""
+
+
 @dataclass
 class Thread:
     thread_id: str
@@ -125,7 +132,8 @@ class Thread:
         ]
         for msg in self.messages:
             parts.append(f"From: {msg.from_addr}")
-            parts.append(f"Date: {msg.date.isoformat()}")
+            if msg.date is not None:
+                parts.append(f"Date: {msg.date.isoformat()}")
             # Cap per-message body so the joined string stays bounded
             # before the thread-level truncation below. Shared with
             # ``Database._compute_body`` via ``PER_MESSAGE_BODY_CAP_CHARS``

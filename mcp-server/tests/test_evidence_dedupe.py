@@ -146,6 +146,7 @@ def _carrier(message_id: str, scope: str = "in_scope") -> dict:
     return {
         "claimant_id": claimant_of(message_id),
         "sent_at": _SENT[message_id][0],
+        "sent_at_status": "parsed",
         "occurred_at": None,
         "scope": scope,
     }

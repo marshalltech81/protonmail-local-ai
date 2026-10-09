@@ -24,6 +24,7 @@ from src.database import (
     SCHEMA_VERSION,
     Database,
 )
+from src.migrations import runner
 
 from tests.conftest import count_pending_deletions, make_message, make_thread
 
@@ -118,8 +119,8 @@ class TestSchema:
     def test_fresh_install_is_stamped_the_current_version(self, db):
         """A fresh install creates the current schema directly and stamps
         v7 (#824), skipping the migration files."""
-        assert SCHEMA_VERSION == 7
-        assert db._conn.execute("SELECT version FROM schema_version").fetchone()[0] == 7
+        assert SCHEMA_VERSION == 8
+        assert db._conn.execute("SELECT version FROM schema_version").fetchone()[0] == 8
 
     def test_fresh_install_has_a_nullable_ocr_pages_skipped_column(self, db):
         """#891: a count, NULL when unknown, with no default."""
@@ -317,7 +318,7 @@ class TestMigrationV1:
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [1, 2, 3, 4, 5, 6, 7]" in caplog.text
+        assert "applied migrations: [1, 2, 3, 4, 5, 6, 7, 8]" in caplog.text
         assert "SYNTHETIC" not in caplog.text
 
     def test_v0_rows_are_carried_over_under_their_stamps_module(self, tmp_path):
@@ -489,9 +490,90 @@ _V6_COLUMNS = (
 )
 
 
+# The v7 ``messages`` table (#1080 changed it in v8): ``sent_at`` NOT
+# NULL, no ``sent_at_status`` or ``first_indexed_at``, and
+# ``effective_at`` over the two dates only.
+_V7_MESSAGES = """
+CREATE TABLE messages (
+    claimant_id     TEXT PRIMARY KEY,
+    message_id      TEXT NOT NULL,
+    thread_id       TEXT NOT NULL,
+    filepath        TEXT NOT NULL,
+    folder          TEXT NOT NULL,
+    subject         TEXT NOT NULL,
+    sent_at         TEXT NOT NULL,
+    occurred_at     TEXT,
+    effective_at    TEXT GENERATED ALWAYS AS (COALESCE(occurred_at, sent_at)) VIRTUAL,
+    in_reply_to     TEXT,
+    references_json TEXT NOT NULL,
+    has_attachments INTEGER NOT NULL,
+    size_bytes      INTEGER,
+    content_hash    TEXT,
+    indexed_at      TEXT NOT NULL,
+    seen            INTEGER NOT NULL DEFAULT 0,
+    flagged         INTEGER NOT NULL DEFAULT 0,
+    replied         INTEGER NOT NULL DEFAULT 0,
+    sender_ambiguous INTEGER CHECK (sender_ambiguous IN (0, 1)),
+    participant_names_complete INTEGER CHECK (participant_names_complete IN (0, 1)),
+    subject_complete INTEGER CHECK (subject_complete IN (0, 1)),
+    from_addresses_complete INTEGER CHECK (from_addresses_complete IN (0, 1)),
+    to_addresses_complete INTEGER CHECK (to_addresses_complete IN (0, 1)),
+    cc_addresses_complete INTEGER CHECK (cc_addresses_complete IN (0, 1)),
+    attachments_manifest_complete INTEGER CHECK (attachments_manifest_complete IN (0, 1)),
+    body_complete INTEGER CHECK (body_complete IN (0, 1)),
+    caps_json TEXT,
+    FOREIGN KEY (claimant_id) REFERENCES message_thread_map(claimant_id) ON DELETE CASCADE
+)
+"""
+_V7_MESSAGE_COLUMNS = (
+    "claimant_id, message_id, thread_id, filepath, folder, subject, sent_at, occurred_at, "
+    "in_reply_to, references_json, has_attachments, size_bytes, content_hash, indexed_at, "
+    "seen, flagged, replied, sender_ambiguous, participant_names_complete, subject_complete, "
+    "from_addresses_complete, to_addresses_complete, cc_addresses_complete, "
+    "attachments_manifest_complete, body_complete, caps_json"
+)
+_MESSAGE_INDEXES = (
+    "CREATE INDEX idx_messages_message ON messages(message_id, claimant_id)",
+    "CREATE INDEX idx_messages_message_effective ON messages(message_id, effective_at, claimant_id)",
+    "CREATE INDEX idx_messages_thread_effective ON messages(thread_id, effective_at)",
+    "CREATE INDEX idx_messages_folder_effective ON messages(folder, effective_at)",
+    "CREATE INDEX idx_messages_effective ON messages(effective_at)",
+    "CREATE INDEX idx_messages_filepath ON messages(filepath)",
+)
+
+
+def _v7_from_fresh(db: Database) -> None:
+    """Turn a fresh database into the v7 shape: v7 is the current schema
+    with the v7 ``messages`` table (#1080). Its rows are kept; an
+    undated one takes its ``first_indexed_at`` as ``sent_at``, as the
+    v7 parser stored its fallback. Foreign keys are off for the rebuild
+    (outside a transaction, which the migration cannot do), so nothing
+    cascades."""
+    conn = db._conn
+    conn.commit()
+    conn.execute("PRAGMA foreign_keys = OFF")
+    # New table first and renamed last: renaming the old one would point
+    # the participants' foreign key at it.
+    conn.execute(_V7_MESSAGES.replace("CREATE TABLE messages", "CREATE TABLE messages_v7", 1))
+    conn.execute(
+        f"INSERT INTO messages_v7 ({_V7_MESSAGE_COLUMNS}) "  # nosec B608 - fixed test columns
+        + "SELECT "
+        + _V7_MESSAGE_COLUMNS.replace("sent_at,", "COALESCE(sent_at, first_indexed_at),", 1)
+        + " FROM messages"
+    )
+    conn.execute("DROP TABLE messages")
+    conn.execute("ALTER TABLE messages_v7 RENAME TO messages")
+    for statement in _MESSAGE_INDEXES:
+        conn.execute(statement)
+    conn.execute("UPDATE schema_version SET version = 7")
+    conn.commit()
+    conn.execute("PRAGMA foreign_keys = ON")
+
+
 def _v6_from_fresh(db: Database) -> None:
-    """Turn a fresh database into the v6 shape: v6 is the current schema
+    """Turn a fresh database into the v6 shape: v6 is the v7 schema
     without the operator identity tables (#824)."""
+    _v7_from_fresh(db)
     db._conn.execute("DROP TABLE operator_addresses")
     db._conn.execute("DROP TABLE operator_identity")
     db._conn.execute("UPDATE schema_version SET version = 6")
@@ -556,7 +638,7 @@ class TestMigrationV6:
             assert (
                 migrated._conn.execute("SELECT version FROM schema_version").fetchone()[0]
                 == SCHEMA_VERSION
-                == 7
+                == 8
             )
             assert _schema_shape(migrated._conn) == _schema_shape(fresh._conn)
             occurrence = migrated._conn.execute(
@@ -578,7 +660,7 @@ class TestMigrationV6:
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [6, 7]" in caplog.text
+        assert "applied migrations: [6, 7, 8]" in caplog.text
         assert "SYNTHETIC_V6_MARKER" not in caplog.text
 
     @pytest.mark.parametrize("table, column", [c for c in _V6_COLUMNS if c[1] == "text_complete"])
@@ -594,6 +676,280 @@ class TestMigrationV6:
         cols = {r["name"]: r for r in db._conn.execute(f"PRAGMA table_info({table})")}
         assert cols[column]["dflt_value"] is None
         assert cols[column]["notnull"] == 0
+
+
+_FIRST = datetime(2026, 1, 1, tzinfo=UTC)
+_LATER = datetime(2026, 9, 30, tzinfo=UTC)
+
+
+def _undated(message_id: str, status: str = "missing", **kwargs):
+    """A message whose Date header was missing or unparseable (#1080)."""
+    msg = make_message(message_id=message_id, filepath=f"/maildir/INBOX/cur/{message_id}", **kwargs)
+    msg.date = None
+    msg.date_status = status
+    msg.first_indexed_at = _FIRST
+    return msg
+
+
+def _dates(db: Database, claimant_id: str) -> tuple:
+    return tuple(
+        db._conn.execute(
+            "SELECT sent_at, sent_at_status, first_indexed_at, effective_at FROM messages "
+            "WHERE claimant_id = ?",
+            (claimant_id,),
+        ).fetchone()
+    )
+
+
+class TestUnknownSendDate:
+    """#1080: a message without a usable Date header is stored with
+    ``sent_at`` NULL and its status; ``first_indexed_at`` is kept from
+    the first insert and is the last fallback of ``effective_at``."""
+
+    @pytest.mark.parametrize("status", ["missing", "invalid"])
+    def test_undated_message_is_stored_unknown(self, db, status):
+        msg = _undated("u@x", status)
+        db.upsert_thread(make_thread(messages=[msg], thread_id="t-u"), FAKE_EMBEDDING)
+        first = _FIRST.isoformat()
+        assert _dates(db, msg.claimant_id) == (None, status, first, first)
+        span = db._conn.execute(
+            "SELECT date_first, date_last FROM threads WHERE thread_id = 't-u'"
+        ).fetchone()
+        assert tuple(span) == (first, first)
+
+    def test_a_dated_message_records_its_status_and_first_index_time(self, db):
+        msg = make_message(message_id="d@x")
+        msg.first_indexed_at = _FIRST
+        db.upsert_thread(make_thread(messages=[msg]), FAKE_EMBEDDING)
+        sent = msg.date.isoformat()
+        assert _dates(db, msg.claimant_id) == (sent, "parsed", _FIRST.isoformat(), sent)
+
+    def test_a_delivery_date_still_comes_first(self, db):
+        received = datetime(2024, 1, 5, 6, 0, tzinfo=UTC)
+        msg = _undated("r@x", occurred_at=received)
+        db.upsert_thread(make_thread(messages=[msg]), FAKE_EMBEDDING)
+        assert _dates(db, msg.claimant_id)[3] == received.isoformat()
+
+    def test_first_indexed_at_survives_reprocessing(self, db):
+        msg = _undated("keep@x")
+        db.upsert_thread(make_thread(messages=[msg], thread_id="t-keep"), FAKE_EMBEDDING)
+        # A later parse of the same file reads the stored time back, and
+        # the writer keeps it even when handed another.
+        again = _undated("keep@x")
+        again.first_indexed_at = _LATER
+        db.keep_persisted_first_indexed_at(again)
+        assert again.first_indexed_at == _FIRST
+        again.first_indexed_at = _LATER
+        db.upsert_thread(make_thread(messages=[again], thread_id="t-keep"), FAKE_EMBEDDING)
+        assert _dates(db, msg.claimant_id)[2:] == (_FIRST.isoformat(), _FIRST.isoformat())
+
+    def test_a_new_message_keeps_its_parse_time(self, db):
+        msg = _undated("new@x")
+        db.keep_persisted_first_indexed_at(msg)
+        assert msg.first_indexed_at == _FIRST
+
+    @pytest.mark.parametrize("dated", [False, True])
+    def test_a_row_from_before_v8_carries_its_old_fallback(self, db, dated):
+        """The v7 parser stored the time it first read an undated file in
+        ``sent_at``; the migration leaves the status NULL. The reparse
+        of such a row keeps that time as ``first_indexed_at`` and stores
+        the send date as unknown; a dated row keeps its own."""
+        msg = make_message(message_id="old@x")
+        db.upsert_thread(make_thread(messages=[msg]), FAKE_EMBEDDING)
+        old_fallback = "2025-05-05T05:05:05+00:00"
+        db._conn.execute(
+            "UPDATE messages SET sent_at = ?, sent_at_status = NULL, first_indexed_at = ?",
+            (old_fallback, _LATER.isoformat()),
+        )
+        db._conn.commit()
+        reparsed = make_message(message_id="old@x")
+        if not dated:
+            reparsed.date = None
+            reparsed.date_status = "missing"
+        db.keep_persisted_first_indexed_at(reparsed)
+        expected = _LATER if dated else datetime.fromisoformat(old_fallback)
+        assert reparsed.first_indexed_at == expected
+        db.upsert_thread(make_thread(messages=[reparsed]), FAKE_EMBEDDING)
+        sent = reparsed.date.isoformat() if reparsed.date is not None else None
+        status = "parsed" if dated else "missing"
+        effective = sent if dated else old_fallback
+        assert _dates(db, msg.claimant_id) == (sent, status, expected.isoformat(), effective)
+
+    def test_no_date_line_reaches_the_thread_text(self, db):
+        msg = _undated("text@x")
+        db.upsert_thread(make_thread(messages=[msg], thread_id="t-text"), FAKE_EMBEDDING)
+        reply = _undated("reply@x")
+        db.upsert_thread(make_thread(messages=[reply], thread_id="t-text"), FAKE_EMBEDDING)
+        body = db._conn.execute(
+            "SELECT body_text FROM threads WHERE thread_id = 't-text'"
+        ).fetchone()[0]
+        assert "Date:" not in body
+        assert _FIRST.isoformat() not in body
+
+    @pytest.mark.parametrize(
+        ("sent_at", "status"),
+        [
+            (None, "parsed"),
+            ("2024-01-01T00:00:00+00:00", "missing"),
+            ("2024-01-01T00:00:00+00:00", "invalid"),
+            ("2024-01-01T00:00:00+00:00", "other"),
+            (None, None),
+        ],
+    )
+    def test_the_table_refuses_an_inconsistent_date(self, db, sent_at, status):
+        msg = make_message(message_id="chk@x")
+        db.upsert_thread(make_thread(messages=[msg]), FAKE_EMBEDDING)
+        with pytest.raises(sqlite3.IntegrityError, match="CHECK"):
+            db._conn.execute(
+                "UPDATE messages SET sent_at = ?, sent_at_status = ?", (sent_at, status)
+            )
+
+    def test_a_row_not_yet_assessed_keeps_its_date(self, db):
+        msg = make_message(message_id="pre@x")
+        db.upsert_thread(make_thread(messages=[msg]), FAKE_EMBEDDING)
+        db._conn.execute("UPDATE messages SET sent_at_status = NULL")
+        assert _dates(db, msg.claimant_id)[:2] == (msg.date.isoformat(), None)
+
+
+class TestMigrationV8:
+    """#1080: v7 -> v8 rebuilds ``messages`` with a nullable ``sent_at``,
+    ``sent_at_status`` (NULL, not assessed, on every existing row) and
+    ``first_indexed_at``, keeps every row of it and of the participant
+    tables, and queues the reparse."""
+
+    _ROW = (
+        "SELECT claimant_id, message_id, thread_id, filepath, folder, subject, sent_at, "
+        "occurred_at, effective_at, in_reply_to, references_json, has_attachments, size_bytes, "
+        "content_hash, indexed_at, seen, flagged, replied, sender_ambiguous, "
+        "participant_names_complete, caps_json FROM messages ORDER BY claimant_id"
+    )
+    _PARTICIPANTS = "SELECT * FROM message_participants ORDER BY 1, 2, 3"
+    _NAMES = "SELECT * FROM message_participant_names ORDER BY 1, 2, 3, 4"
+
+    @staticmethod
+    def _rows(conn, sql) -> list[tuple]:
+        return [tuple(r) for r in conn.execute(sql)]
+
+    def test_v7_database_migrates_to_the_fresh_v8_shape(self, tmp_path, caplog):
+        caplog.set_level("INFO")
+        db = Database(tmp_path / "v7.db")
+        dated = make_message(
+            message_id="dated@x",
+            subject="SYNTHETIC_V8_MARKER",
+            from_addr='"Alice A" <alice@example.com>',
+            to_addrs=['"Bob B" <bob@example.com>', '"Bobby" <bob@example.com>'],
+            cc_addrs=["carol@example.com"],
+        )
+        delivered = make_message(
+            message_id="delivered@x",
+            filepath="/maildir/INBOX/cur/delivered",
+            occurred_at=datetime(2024, 1, 5, 6, 0, tzinfo=UTC),
+        )
+        undated = _undated("undated@x")
+        db.upsert_thread(make_thread(messages=[dated]), FAKE_EMBEDDING)
+        db.upsert_thread(make_thread(messages=[delivered], thread_id="t-d"), FAKE_EMBEDDING)
+        db.upsert_thread(make_thread(messages=[undated], thread_id="t-u"), FAKE_EMBEDDING)
+        _v7_from_fresh(db)
+        before = self._rows(db._conn, self._ROW)
+        participants = self._rows(db._conn, self._PARTICIPANTS)
+        names = self._rows(db._conn, self._NAMES)
+        assert len(participants) == 7
+        assert ("dated@x", "to", "bob@example.com", "Bobby") in [
+            (r[0].split("#")[0], *r[1:]) for r in names
+        ]
+        # The v7 fallback: the undated row's sent_at is its first index time.
+        assert (
+            db._conn.execute(
+                "SELECT sent_at FROM messages WHERE claimant_id = ?", (undated.claimant_id,)
+            ).fetchone()[0]
+            == _FIRST.isoformat()
+        )
+        db.close()
+
+        migrated = Database(tmp_path / "v7.db")
+        fresh = Database(tmp_path / "fresh.db")
+        try:
+            conn = migrated._conn
+            assert conn.execute("SELECT version FROM schema_version").fetchone()[0] == 8
+            assert _schema_shape(conn) == _schema_shape(fresh._conn)
+            # Every row and value kept, effective_at included.
+            assert self._rows(conn, self._ROW) == before
+            assert self._rows(conn, self._PARTICIPANTS) == participants
+            assert self._rows(conn, self._NAMES) == names
+            # Not assessed until the reparse; the last index time stands in.
+            assert (
+                self._rows(
+                    conn, "SELECT sent_at_status, first_indexed_at = indexed_at FROM messages"
+                )
+                == [(None, 1)] * 3
+            )
+            assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+            assert conn.execute("SELECT name FROM sqlite_temp_master").fetchall() == []
+            jobs = conn.execute("SELECT reason, status FROM indexing_jobs").fetchall()
+            assert [tuple(r) for r in jobs] == [("reparse", "queued")] * 3
+            # The rebuilt table computes the new fallback ...
+            conn.execute(
+                "UPDATE messages SET sent_at = NULL, sent_at_status = 'missing', "
+                "first_indexed_at = '2026-02-02T00:00:00+00:00' WHERE claimant_id = ?",
+                (undated.claimant_id,),
+            )
+            assert (
+                conn.execute(
+                    "SELECT effective_at FROM messages WHERE claimant_id = ?",
+                    (undated.claimant_id,),
+                ).fetchone()[0]
+                == "2026-02-02T00:00:00+00:00"
+            )
+            # ... and a removal still cascades to the participant rows.
+            conn.execute(
+                "DELETE FROM message_thread_map WHERE claimant_id = ?", (dated.claimant_id,)
+            )
+            assert (
+                conn.execute(
+                    "SELECT COUNT(*) FROM message_participant_names WHERE claimant_id = ?",
+                    (dated.claimant_id,),
+                ).fetchone()[0]
+                == 0
+            )
+            conn.rollback()
+        finally:
+            migrated.close()
+            fresh.close()
+        assert "applied migrations: [8]" in caplog.text
+        assert "SYNTHETIC_V8_MARKER" not in caplog.text
+
+    def test_a_failed_rebuild_leaves_v7_intact(self, tmp_path):
+        """The rebuild runs in the migration's one transaction: a failure
+        part way rolls back to the v7 table with its participants."""
+        db = Database(tmp_path / "v7.db")
+        msg = make_message(message_id="keep@x", cc_addrs=["carol@example.com"])
+        db.upsert_thread(make_thread(messages=[msg]), FAKE_EMBEDDING)
+        _v7_from_fresh(db)
+        participants = self._rows(db._conn, self._PARTICIPANTS)
+        db.close()
+        migrations = tmp_path / "migrations"
+        migrations.mkdir()
+        real = Path(__file__).resolve().parents[1] / "src" / "migrations"
+        sql = (real / "0008_unknown_sent_dates.sql").read_text(encoding="utf-8")
+        # Fail after the drop and before the participants are written back.
+        broken = sql.replace(
+            "INSERT INTO message_participants SELECT",
+            "SELECT no_such_column FROM messages;\nINSERT INTO message_participants SELECT",
+        )
+        assert broken != sql
+        (migrations / "0008_unknown_sent_dates.sql").write_text(broken, encoding="utf-8")
+        conn = sqlite3.connect(tmp_path / "v7.db")
+        conn.execute("PRAGMA foreign_keys = ON")
+        with pytest.raises(sqlite3.OperationalError):
+            runner.apply_pending(
+                conn, current_version=7, target_version=8, migration_dir=migrations
+            )
+        assert conn.execute("SELECT version FROM schema_version").fetchone()[0] == 7
+        cols = {r[1]: r[3] for r in conn.execute("PRAGMA table_info(messages)")}
+        assert "sent_at_status" not in cols
+        assert cols["sent_at"] == 1
+        assert self._rows(conn, self._PARTICIPANTS) == participants
+        conn.close()
 
 
 class TestMigrationV7:
@@ -613,7 +969,7 @@ class TestMigrationV7:
             assert (
                 migrated._conn.execute("SELECT version FROM schema_version").fetchone()[0]
                 == SCHEMA_VERSION
-                == 7
+                == 8
             )
             assert _schema_shape(migrated._conn) == _schema_shape(fresh._conn)
             query = "SELECT id, state, address_count, address_digest FROM operator_identity"
@@ -626,11 +982,13 @@ class TestMigrationV7:
             assert (
                 migrated._conn.execute("SELECT COUNT(*) FROM operator_addresses").fetchone()[0] == 0
             )
-            assert migrated._conn.execute("SELECT COUNT(*) FROM indexing_jobs").fetchone()[0] == 0
+            # v7 queues nothing; the one job is v8's reparse (#1080).
+            jobs = migrated._conn.execute("SELECT reason, status FROM indexing_jobs").fetchall()
+            assert [tuple(r) for r in jobs] == [("reparse", "queued")]
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [7]" in caplog.text
+        assert "applied migrations: [7, 8]" in caplog.text
 
 
 class TestAttachmentTextCompleteness:
@@ -737,7 +1095,7 @@ class TestMigrationV5:
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [5, 6, 7]" in caplog.text
+        assert "applied migrations: [5, 6, 7, 8]" in caplog.text
 
     @pytest.mark.parametrize("column", [c for c in _V5_COLUMNS if c != "caps_json"])
     def test_the_flag_columns_reject_other_values(self, db, column):
@@ -867,7 +1225,7 @@ class TestMigrationV2:
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [2, 3, 4, 5, 6, 7]" in caplog.text
+        assert "applied migrations: [2, 3, 4, 5, 6, 7, 8]" in caplog.text
 
     def test_the_migrated_column_rejects_other_values(self, tmp_path):
         db = Database(tmp_path / "v1.db")
@@ -919,7 +1277,7 @@ class TestMigrationV3:
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [3, 4, 5, 6, 7]" in caplog.text
+        assert "applied migrations: [3, 4, 5, 6, 7, 8]" in caplog.text
         assert "SYNTHETIC" not in caplog.text
 
     def test_existing_rows_are_unknown_and_nothing_is_queued(self, tmp_path, monkeypatch):
@@ -2780,8 +3138,10 @@ class TestMessageDateOnChunks:
         row = db._conn.execute(
             "SELECT date_first, date_last FROM threads WHERE thread_id = 't-redate'"
         ).fetchone()
-        sent_at = db.get_message_sent_at(msg.claimant_id)
-        assert sent_at == jun
+        sent_at = db._conn.execute(
+            "SELECT sent_at FROM messages WHERE claimant_id = ?", (msg.claimant_id,)
+        ).fetchone()[0]
+        assert sent_at == jun.isoformat()
         assert (row["date_first"], row["date_last"]) == (jun.isoformat(), jun.isoformat())
 
 
@@ -4216,6 +4576,7 @@ class TestMessagesTable:
             "folder",
             "subject",
             "sent_at",
+            "sent_at_status",
             "occurred_at",
             "in_reply_to",
             "references_json",
@@ -4223,6 +4584,7 @@ class TestMessagesTable:
             "size_bytes",
             "content_hash",
             "indexed_at",
+            "first_indexed_at",
             "seen",
             "flagged",
             "replied",

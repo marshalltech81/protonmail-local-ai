@@ -23,7 +23,7 @@ from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import html2text
 
@@ -36,6 +36,9 @@ from .extractors import (
 from .maildir import parse_flags
 
 log = logging.getLogger("indexer.parser")
+
+# ``Message.date_status`` / ``messages.sent_at_status`` (#1080).
+type DateStatus = Literal["parsed", "missing", "invalid"]
 
 # The per-message work caps that drop content, by the fixed name the
 # parse logs them under (#872), in log order. Each counts the parts,
@@ -430,7 +433,7 @@ class Message:
     from_addr: str
     to_addrs: list[str]
     cc_addrs: list[str]
-    date: datetime
+    date: datetime | None
     body_text: str
     folder: str
     filepath: str
@@ -448,11 +451,19 @@ class Message:
     size: int | None = None
     mtime_ns: int | None = None
     content_hash: str | None = None
-    # True when ``date`` is the parser's current-time fallback for a
-    # missing or unparseable Date header. Reprocessing keeps the date
-    # already persisted for the message instead (#297), so an undated
-    # message is not re-dated every time it is parsed.
-    date_is_fallback: bool = False
+    # Why ``date`` (the send date, ``messages.sent_at``) is what it is
+    # (#1080): ``parsed`` from the Date header, ``missing`` with no Date
+    # header, ``invalid`` with one that does not parse. ``date`` is None
+    # unless ``parsed``: an unknown send date is never fabricated.
+    date_status: DateStatus = "parsed"
+    # The ordering fallback of a message with neither a send nor a
+    # delivery date (``messages.first_indexed_at``): the parse time,
+    # which the writer replaces with the time stored for the message
+    # when it was first indexed (``Database.keep_persisted_first_indexed_at``),
+    # so reprocessing does not move it (#297). Not evidence of when the
+    # message was sent or delivered, nor part of the parse result, so
+    # two parses of one file compare equal.
+    first_indexed_at: datetime = field(default_factory=lambda: datetime.now(UTC), compare=False)
     # Delivery time: the date of the topmost ``Received:`` header, in
     # UTC (``_parse_received_date``). ``None`` when the header is absent
     # (sent mail) or its date is unparseable; never taken from ``Date:``.
@@ -497,12 +508,18 @@ class Message:
 
     @property
     def effective_date(self) -> datetime:
-        """The message's effective time: ``occurred_at``, else ``date``.
+        """The message's effective time: ``occurred_at``, else ``date``,
+        else ``first_indexed_at`` (#1080).
 
-        Date filters and thread spans use it, matching the
-        ``messages.effective_at`` column.
+        Thread spans and time ordering use it, matching the
+        ``messages.effective_at`` column. The last fallback is an
+        ordering position, not a date the message carries.
         """
-        return self.occurred_at if self.occurred_at is not None else self.date
+        if self.occurred_at is not None:
+            return self.occurred_at
+        if self.date is not None:
+            return self.date
+        return self.first_indexed_at
 
     @property
     def claimant_id(self) -> str:
@@ -718,9 +735,24 @@ def parse_email_bytes(raw: bytes, source: SourceMetadata) -> Message | None:
     # is ASCII by RFC 5322, so drop anything else from its text: a
     # stray byte glued to the zone ("+0500\xe9") would otherwise hide
     # the offset and the time would be read as UTC.
-    date_text = str(msg.get("Date", "")).encode("ascii", "ignore").decode("ascii")
-    parsed_date = _parse_date(date_text)
-    date = parsed_date if parsed_date is not None else datetime.now(UTC)
+    date_header = msg.get("Date")
+    date = None
+    date_status: DateStatus = "missing"
+    if date_header is not None:
+        date_text = str(date_header).encode("ascii", "ignore").decode("ascii")
+        date = _parse_date(date_text)
+        date_status = "invalid" if date is None else "parsed"
+    if date is None:
+        # The send date is stored as unknown (#1080), never as a made-up
+        # time. The reason and the path only: the header is mail content
+        # (#257). Rate limited, as any mail can carry it.
+        warn_rate_limited(
+            log,
+            "Date header %s in %s; send date stored as unknown",
+            date_status,
+            path,
+            attachment=False,
+        )
     occurred_at = _parse_received_date(msg)
 
     body_text, attachments = _extract_body_and_attachments(msg, caps=caps)
@@ -792,7 +824,8 @@ def parse_email_bytes(raw: bytes, source: SourceMetadata) -> Message | None:
         body_complete=not any(caps[name] for name in BODY_LOSS_CAPS),
         parse_caps={name: caps[name] for name in PARSE_CAPS if caps[name]},
         date=date,
-        date_is_fallback=parsed_date is None,
+        date_status=date_status,
+        first_indexed_at=datetime.now(UTC),
         occurred_at=occurred_at,
         body_text=body_text,
         folder=source.folder,
@@ -2554,27 +2587,19 @@ def _parse_date(value: str) -> datetime | None:
     sorts and compares message dates, which raises ``TypeError`` when naive
     and aware values are mixed — so every parsed date is forced to UTC here.
 
-    Unparseable headers return ``None``; ``parse_email`` then falls back
-    to the current UTC time so threading doesn't crash, but that
-    fabricates a date — log at WARNING so an operator notices a corrupt
-    mailbox before the fabricated dates dominate "recent" sorts. The
-    header value itself is attacker-controlled mail content and is never
+    Unparseable headers return ``None``; ``parse_email`` then stores the
+    send date as unknown (``invalid``, #1080) and logs it. The header
+    value itself is attacker-controlled mail content and is never
     logged (#257).
     """
     try:
         from email.utils import parsedate_to_datetime
 
         dt = parsedate_to_datetime(value)
-    except TypeError:
-        # Older Python releases occasionally raise TypeError on malformed
-        # dates; ``parsedate_to_datetime`` proper raises ValueError below.
-        log.warning("Date header raised TypeError on parse; using now()")
-        return None
-    except ValueError:
-        # ``parsedate_to_datetime`` raises ValueError on unparseable headers
-        # (empty string, single-token gibberish, malformed timezone);
-        # ``parse_email`` substitutes current UTC so threader doesn't crash.
-        log.warning("unparseable Date header; using now()")
+    except TypeError, ValueError:
+        # ``parsedate_to_datetime`` raises ValueError on unparseable
+        # headers (empty string, single-token gibberish, malformed
+        # timezone); older Python releases occasionally raised TypeError.
         return None
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=UTC)
@@ -2583,5 +2608,4 @@ def _parse_date(value: str) -> datetime | None:
     except OverflowError:
         # A date near year 9999 with a negative offset parses but
         # passes the largest datetime once converted to UTC.
-        log.warning("Date header outside the UTC range; using now()")
         return None

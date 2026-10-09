@@ -136,6 +136,7 @@ QUERY_MESSAGE_FIELDS = (
     "claimant_id",
     "subject",
     "sent_at",
+    "sent_at_status",
     "occurred_at",
     "folder",
     "has_attachments",
