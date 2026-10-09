@@ -1705,7 +1705,7 @@ class TestLegacyOle2CacheRows:
             self._store_v0_row(db, attachment)
             extractor = MagicMock(
                 return_value=ExtractionResult(
-                    status=STATUS_SUCCESS, extractor="doc@1", text="words", error=None
+                    status=STATUS_SUCCESS, extractor="doc@2", text="words", error=None
                 )
             )
             monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
@@ -1800,7 +1800,7 @@ class TestLegacyOle2CacheRows:
         row = db.get_attachment_extraction(attachment.content_hash, _module(attachment))
         assert (row["extraction_status"], row["extractor"], row["extraction_error"]) == (
             STATUS_SUCCESS,
-            "doc@1",
+            "doc@2",
             None,
         )
         again = prepare_attachment_writes(db=db, **_kwargs(attachment))
@@ -2133,7 +2133,7 @@ def _ppt_encrypted_case(monkeypatch) -> tuple[bytes, str, str]:
         raise ppt.PptEncryptedError
 
     monkeypatch.setitem(extractors._IMPORT_CACHE, "ppt", encrypted)
-    return _OLE2_MAGIC + b"SYNTHETIC_TEXT_MARKER" + bytes(64), ENCRYPTED_PPT_ERROR, "ppt@1"
+    return _OLE2_MAGIC + b"SYNTHETIC_TEXT_MARKER" + bytes(64), ENCRYPTED_PPT_ERROR, "ppt@2"
 
 
 class TestPermanentFailureCacheRows:
@@ -2352,7 +2352,8 @@ class TestPermanentFailureCacheRows:
         wrote for an encrypted deck before the fix is honoured for 7 days
         like any ``failed`` row; the first occurrence processed after
         that re-runs the reader once and records ``unsupported``, which
-        is then served for good."""
+        is then served for good. The row carries the current version:
+        ``ppt@1`` rows are stale since #1308 and re-run at once."""
         from src.extractors import is_stale_extractor
 
         payload, error, extractor_name = _ppt_encrypted_case(monkeypatch)
@@ -2366,7 +2367,7 @@ class TestPermanentFailureCacheRows:
             "INSERT INTO attachment_extractions "
             "(attachment_id, extractor_module, extraction_status, extractor, extracted_text, "
             "extraction_error, extracted_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (attachment.content_hash, "ppt", STATUS_FAILED, "ppt@1", None, "ToolExitError", stamp),
+            (attachment.content_hash, "ppt", STATUS_FAILED, "ppt@2", None, "ToolExitError", stamp),
         )
         db._conn.commit()
         calls = MagicMock(wraps=attachment_indexing.extract_attachment)
@@ -2697,7 +2698,7 @@ def test_cached_no_extractor_row_for_a_ppt_is_re_extracted(tmp_path, monkeypatch
         assert persisted is not None
         assert (persisted.status, persisted.extractor, persisted.text) == (
             STATUS_SUCCESS,
-            "ppt@1",
+            "ppt@2",
             "SYNTHETIC_PPT_FACT",
         )
         _embed_new_chunks(

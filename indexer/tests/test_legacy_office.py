@@ -475,7 +475,7 @@ class TestDocExtractor:
             payload=DOC_FIXTURE.read_bytes(),
         )
         assert result.status == STATUS_SUCCESS
-        assert result.extractor == "doc@1"
+        assert result.extractor == "doc@2"
         assert result.text is not None
         assert "The COBALT-LANTERN ledger code is 4471." in result.text
         assert "Café crème at the Zürich office, naïve résumé." in result.text
@@ -934,7 +934,7 @@ class TestPptRealReader:
         """The deck PowerPoint 16 saved keeps all slide text in drawing
         records, which catppt never read (#958)."""
         result = _ppt(PPT_FIXTURE.read_bytes())
-        assert (result.status, result.extractor) == (STATUS_SUCCESS, "ppt@1")
+        assert (result.status, result.extractor) == (STATUS_SUCCESS, "ppt@2")
         text = result.text or ""
         assert "Synthetic legacy slide deck" in text
         assert "The AMBER-KESTREL project code is 5129." in text
@@ -983,7 +983,7 @@ class TestPptRealReader:
         result = _ppt(payload)
         assert (result.status, result.extractor, result.text, result.error) == (
             STATUS_UNSUPPORTED,
-            "ppt@1",
+            "ppt@2",
             None,
             ENCRYPTED_PPT_ERROR,
         )
@@ -1093,7 +1093,7 @@ class TestPptExtractor:
         )
         assert (result.status, result.extractor, result.text, result.error) == (
             STATUS_UNSUPPORTED,
-            "ppt@1",
+            "ppt@2",
             None,
             ENCRYPTED_PPT_ERROR,
         )
@@ -1200,7 +1200,7 @@ class TestPptExtractor:
         )
         assert (result.status, result.extractor, result.text) == (
             STATUS_SUCCESS,
-            "ppt@1",
+            "ppt@2",
             "slide words",
         )
 
@@ -1268,3 +1268,225 @@ def test_cut_raw_tool_output_is_incomplete_text(tmp_path, monkeypatch, module, t
     assert result.status == STATUS_SUCCESS
     assert len(result.text or "") == (100 if truncated else 25)
     assert result.text_complete is not truncated
+
+
+# ---------------------------------------------------------------------------
+# The raw tools' output byte cap follows the configured text cap (#1308)
+# ---------------------------------------------------------------------------
+
+_FOUR_BYTE_CHAR = "\U0001f600"
+
+
+class TestRawOutputCap:
+    """The ``doc`` and ``ppt`` output byte cap is four bytes per character
+    of the configured ``max_extracted_chars`` (UTF-8's worst case), never
+    above the measured ceiling, which also applies when the character cap
+    is disabled (``None``)."""
+
+    @pytest.mark.parametrize(
+        ("max_chars", "ceiling", "expected"),
+        [
+            (None, 1000, 1000),
+            (1, 1000, 4),
+            (249, 1000, 996),
+            (250, 1000, 1000),
+            (251, 1000, 1000),
+            (10**15, 1000, 1000),
+            (2_000_000, 40 * 1024 * 1024, 8_000_000),
+        ],
+        ids=["disabled", "one", "below", "exact", "above", "oversized", "default"],
+    )
+    def test_cap_is_four_bytes_a_character_up_to_the_ceiling(self, max_chars, ceiling, expected):
+        from src.extractors._runner import raw_output_cap
+
+        assert raw_output_cap(max_chars, ceiling=ceiling) == expected
+
+    def test_both_ceilings_are_the_measured_value(self):
+        """40 MiB: the other extractors' 10,000,000-character text budget
+        at four bytes a character, which the parent's measured peak (about
+        five bytes per output byte, ``_runner.raw_output_cap``) keeps near
+        200 MiB."""
+        from src.extractors import doc, ppt
+
+        assert doc._MAX_OUTPUT_BYTES == ppt._MAX_OUTPUT_BYTES == 40 * 1024 * 1024
+
+    def test_only_doc_and_ppt_take_the_configured_cap(self):
+        """The dispatcher passes ``max_extracted_chars`` to the raw-tool
+        extractors only; every other extractor's signature is unchanged."""
+        import importlib
+        import inspect
+
+        modules = ("doc", "docx", "html", "image", "pdf", "ppt", "pptx", "text", "xls", "xlsx")
+        takes = {
+            name
+            for name in modules
+            if "max_extracted_chars"
+            in inspect.signature(
+                importlib.import_module(f"src.extractors.{name}").extract
+            ).parameters
+        }
+        assert takes == {"doc", "ppt"}
+
+
+def _raw_tool(tmp_path: Path, monkeypatch, module: str, body: str):
+    """Install ``body`` as ``module``'s tool and spy on its runs, each
+    recorded as ``(max_output_bytes, bytes returned)``. Returns the MIME
+    type and the runs."""
+    from src.extractors import doc, ppt
+
+    if module == "doc":
+        tool = _fake_tool(tmp_path, body)
+        monkeypatch.setattr(doc.shutil, "which", lambda _name: tool)
+        mime = "application/msword"
+    else:
+        monkeypatch.setattr(ppt, "PPT_HOME", _fake_ppt_home(tmp_path, body))
+        mime = _PPT_MIME
+    target = doc if module == "doc" else ppt
+    real = target.run_tool
+    runs: list[tuple[int, int]] = []
+
+    def spy(*args, **kwargs):
+        output = real(*args, **kwargs)
+        runs.append((kwargs["max_output_bytes"], len(output.data)))
+        return output
+
+    monkeypatch.setattr(target, "run_tool", spy)
+    return mime, runs
+
+
+def _cap_lines(caplog) -> list[str]:
+    """The cap named by each extractor-cap line."""
+    return [
+        r.getMessage().split(":")[0]
+        for r in caplog.records
+        if r.name.startswith("indexer.extractor") and "extractor cap" in r.getMessage()
+    ]
+
+
+@pytest.mark.parametrize("module", ["doc", "ppt"])
+class TestRawOutputCapThroughTheDispatcher:
+    """End to end: the configured cap reaches the tool's run, the bytes
+    read stop at it, and a cut is reported and marks the text incomplete
+    (#1242)."""
+
+    @pytest.fixture(autouse=True)
+    def _fresh(self, caplog):
+        caplog.set_level("DEBUG")
+        extractors.drain_extractor_counts()
+
+    @staticmethod
+    def _extract(mime, module, max_chars):
+        return extract(
+            content_type=mime,
+            filename=f"a.{module}",
+            payload=_OLE2_MAGIC,
+            max_extracted_chars=max_chars,
+        )
+
+    def test_four_byte_text_at_the_exact_cap_is_whole(self, tmp_path, monkeypatch, caplog, module):
+        """``n`` four-byte characters are ``4n`` bytes: exactly the cap,
+        read whole, nothing cut."""
+        n = 50
+        body = (_FOUR_BYTE_CHAR * n).encode()
+        mime, runs = _raw_tool(tmp_path, monkeypatch, module, f"sys.stdout.buffer.write({body!r})")
+        result = self._extract(mime, module, n)
+        assert runs == [(4 * n, 4 * n)]
+        assert result.status == STATUS_SUCCESS
+        assert result.text == _FOUR_BYTE_CHAR * n
+        assert result.text_complete is True
+        assert _cap_lines(caplog) == []
+        assert extractors.drain_extractor_counts()["extractor_caps"] == 0
+
+    def test_four_byte_text_one_byte_past_the_cap_is_cut(
+        self, tmp_path, monkeypatch, caplog, module
+    ):
+        """``4n + 1`` bytes: the output is cut at ``4n``, the ``n`` whole
+        characters before it are kept, and the cut is one WARNING naming
+        the module's cap."""
+        n = 50
+        body = (_FOUR_BYTE_CHAR * n + MARKER).encode()
+        mime, runs = _raw_tool(tmp_path, monkeypatch, module, f"sys.stdout.buffer.write({body!r})")
+        result = self._extract(mime, module, n)
+        assert runs == [(4 * n, 4 * n)]
+        assert result.status == STATUS_SUCCESS
+        assert result.text == _FOUR_BYTE_CHAR * n
+        assert result.text_complete is False
+        assert _cap_lines(caplog) == [f"extractor cap {module}_output_bytes"]
+        assert extractors.drain_extractor_counts()["extractor_caps"] == 1
+        assert MARKER not in caplog.text
+
+    def test_ascii_text_at_the_cap_is_read_whole_and_cut_by_characters(
+        self, tmp_path, monkeypatch, caplog, module
+    ):
+        """``4n`` one-byte characters fit the byte cap; the dispatcher's
+        character cap then keeps ``n`` of them."""
+        n = 50
+        mime, runs = _raw_tool(
+            tmp_path,
+            monkeypatch,
+            module,
+            f"sys.stdout.write({MARKER!r} + 'a' * {4 * n - len(MARKER)})",
+        )
+        result = self._extract(mime, module, n)
+        assert runs == [(4 * n, 4 * n)]
+        assert result.text == (MARKER + "a" * (4 * n))[:n]
+        assert result.text_complete is False
+        assert _cap_lines(caplog) == ["extractor cap extracted_chars"]
+        assert MARKER not in caplog.text
+
+    def test_ascii_text_past_the_cap_is_cut_by_bytes_then_characters(
+        self, tmp_path, monkeypatch, caplog, module
+    ):
+        n = 50
+        mime, runs = _raw_tool(
+            tmp_path, monkeypatch, module, f"sys.stdout.write({MARKER!r} + 'a' * {4 * n})"
+        )
+        result = self._extract(mime, module, n)
+        assert runs == [(4 * n, 4 * n)]
+        assert result.text == (MARKER + "a" * (4 * n))[:n]
+        assert result.text_complete is False
+        assert _cap_lines(caplog) == [
+            f"extractor cap {module}_output_bytes",
+            "extractor cap extracted_chars",
+        ]
+        assert MARKER not in caplog.text
+
+    @pytest.mark.parametrize("max_chars", [None, 10**12], ids=["disabled", "oversized"])
+    def test_disabled_or_oversized_setting_reads_up_to_the_ceiling(
+        self, tmp_path, monkeypatch, caplog, module, max_chars
+    ):
+        """No character cap, or one past the ceiling: the ceiling bounds
+        the bytes read, and a tool writing 16 MiB is killed at it."""
+        from src.extractors import doc, ppt
+
+        monkeypatch.setattr(doc if module == "doc" else ppt, "_MAX_OUTPUT_BYTES", 1000)
+        finished = tmp_path / "finished"
+        mime, runs = _raw_tool(
+            tmp_path,
+            monkeypatch,
+            module,
+            f"sys.stdout.write({MARKER!r})\n"
+            "for _ in range(256):\n    sys.stdout.write('b' * 65536)\n"
+            "sys.stdout.flush()\n"
+            f"open({str(finished)!r}, 'w').close()",
+        )
+        result = self._extract(mime, module, max_chars)
+        assert runs == [(1000, 1000)]
+        assert not finished.exists()
+        assert len(result.text or "") == 1000
+        assert result.text_complete is False
+        assert _cap_lines(caplog) == [f"extractor cap {module}_output_bytes"]
+        assert extractors.drain_extractor_counts()["extractor_caps"] == 1
+        assert MARKER not in caplog.text
+
+
+def test_raw_tool_versions_are_bumped_for_the_derived_cap():
+    """#1308: the same bytes can now yield different text, so rows the
+    previous versions wrote are re-extracted once."""
+    from src.extractors import EXTRACTOR_VERSIONS, is_stale_extractor
+
+    assert (EXTRACTOR_VERSIONS["doc"], EXTRACTOR_VERSIONS["ppt"]) == (2, 2)
+    assert is_stale_extractor("doc@1")
+    assert is_stale_extractor("ppt@1")
+    assert not is_stale_extractor("doc@2")
+    assert not is_stale_extractor("ppt@2")

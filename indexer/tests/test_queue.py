@@ -5,9 +5,11 @@ semantics for previously-failed rows, and the ``claim_batch`` ordering
 against the ``next_attempt_at`` backoff column.
 """
 
+import logging
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from src import extractors, rate_limited_log
 from src.database import Database
 from src.queue import (
     DEFAULT_BASE_BACKOFF_SECONDS,
@@ -734,3 +736,104 @@ class TestInFlightAttempts:
 
         assert [_row(db, p)["attempts"] for p in ("/m/a", "/m/b")] == [0, 1]
         assert all(_row(db, p)["last_stage"] == "interrupted" for p in ("/m/a", "/m/b"))
+
+
+def _lines(caplog, prefix: str) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if r.getMessage().startswith(prefix)]
+
+
+class TestPerItemLinesShareTheRateLimit:
+    """The ``terminal:``, ``retry:`` and ``dead-letter:`` lines are per
+    message, and crafted mail can trigger them repeatedly (#1320), so
+    they go through the shared line budget: the first lines of a window
+    keep their level and text, the rest are counted for the heartbeat's
+    ``suppressed_lines``, and the queue rows still record every one."""
+
+    LIMIT = extractors._WARNINGS_PER_WINDOW
+
+    def test_terminal_burst_is_bounded_and_counted(self, tmp_path, caplog):
+        caplog.set_level(logging.DEBUG)
+        db = Database(tmp_path / "q.db")
+        q = _queue(db)
+        paths = [f"/m/terminal-{i}" for i in range(self.LIMIT + 7)]
+        for path in paths:
+            q.enqueue(path, REASON_INITIAL_SCAN)
+            q.mark_dead_terminal(path, stage="parse", error="unindexable: fixed text")
+
+        lines = _lines(caplog, "terminal: ")
+        assert len(lines) == self.LIMIT
+        assert {r.levelno for r in lines} == {logging.WARNING}
+        assert lines[0].getMessage() == (
+            f"terminal: {paths[0]} stage=parse error=unindexable: fixed text"
+        )
+        assert extractors.drain_suppressed_lines() == 7
+        assert q.stats()["dead"] == self.LIMIT + 7
+
+    def test_retry_burst_is_bounded_and_counted(self, tmp_path, caplog):
+        caplog.set_level(logging.DEBUG)
+        db = Database(tmp_path / "q.db")
+        q = _queue(db, max_attempts=3)
+        for i in range(self.LIMIT + 4):
+            q.enqueue(f"/m/retry-{i}", REASON_INITIAL_SCAN)
+            q.mark_failed(f"/m/retry-{i}", stage="parse", error="ValueError")
+
+        lines = _lines(caplog, "retry: ")
+        assert len(lines) == self.LIMIT
+        assert {r.levelno for r in lines} == {logging.WARNING}
+        assert extractors.drain_suppressed_lines() == 4
+        assert q.stats() == {"queued": self.LIMIT + 4, "dead": 0}
+
+    def test_dead_letter_burst_is_bounded_and_keeps_error_level(self, tmp_path, caplog):
+        caplog.set_level(logging.DEBUG)
+        db = Database(tmp_path / "q.db")
+        q = _queue(db, max_attempts=1)
+        for i in range(self.LIMIT + 2):
+            q.enqueue(f"/m/dead-{i}", REASON_INITIAL_SCAN)
+            q.mark_failed(f"/m/dead-{i}", stage="parse", error="ValueError")
+
+        lines = _lines(caplog, "dead-letter: ")
+        assert len(lines) == self.LIMIT
+        assert {r.levelno for r in lines} == {logging.ERROR}
+        assert extractors.drain_suppressed_lines() == 2
+        assert q.stats()["dead"] == self.LIMIT + 2
+
+    def test_interrupted_dead_letter_shares_the_budget(self, tmp_path, caplog):
+        caplog.set_level(logging.DEBUG)
+        db = Database(tmp_path / "q.db")
+        for i in range(self.LIMIT + 3):
+            path = f"/m/killer-{i}"
+            _queue(db, max_attempts=1).enqueue(path, REASON_INITIAL_SCAN)
+            assert _queue(db, max_attempts=1).begin_attempt(path)  # process dies here
+            assert not _queue(db, max_attempts=1).begin_attempt(path)
+
+        lines = _lines(caplog, "dead-letter: ")
+        assert len(lines) == self.LIMIT
+        assert {r.levelno for r in lines} == {logging.ERROR}
+        assert extractors.drain_suppressed_lines() == 3
+        assert _dead_rows(db) == self.LIMIT + 3
+
+    def test_a_new_window_logs_again(self, tmp_path, caplog, monkeypatch):
+        clock = {"t": 1000.0}
+        monkeypatch.setattr(rate_limited_log.time, "monotonic", lambda: clock["t"])
+        caplog.set_level(logging.DEBUG)
+        db = Database(tmp_path / "q.db")
+        q = _queue(db)
+        for i in range(self.LIMIT + 1):
+            q.enqueue(f"/m/a-{i}", REASON_INITIAL_SCAN)
+            q.mark_dead_terminal(f"/m/a-{i}", stage="parse", error="fixed")
+        assert len(_lines(caplog, "terminal: ")) == self.LIMIT
+
+        clock["t"] += extractors._WARNING_WINDOW_SECS
+        q.enqueue("/m/next-window", REASON_INITIAL_SCAN)
+        q.mark_dead_terminal("/m/next-window", stage="parse", error="fixed")
+
+        lines = _lines(caplog, "terminal: ")
+        assert len(lines) == self.LIMIT + 1
+        assert lines[-1].getMessage().startswith("terminal: /m/next-window ")
+        assert extractors.drain_suppressed_lines() == 1
+
+
+def _dead_rows(db: Database) -> int:
+    return db._conn.execute(
+        "SELECT COUNT(*) FROM indexing_jobs WHERE status = ?", (STATUS_DEAD,)
+    ).fetchone()[0]

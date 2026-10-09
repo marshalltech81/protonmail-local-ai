@@ -17,8 +17,12 @@ from pydantic import Field, WithJsonSchema
 # Module import: get_thread and get_message have a local named ``count``.
 from ..lib import timings
 from ..lib.predicates import (
+    ADDRESS_LEAF_READS_NAMES,
     ADDRESS_ROLES,
     MAX_SIZE_BYTES,
+    Where,
+    WhereLeaf,
+    normalize_where,
     validate_date_range,
 )
 from ..lib.rate_limited_log import ArgumentRejections, RateLimitedLog
@@ -56,6 +60,7 @@ from .outputs import (
     QueryMessagesOutput,
     ReapedMessage,
     ThreadMessage,
+    WhereLeafResult,
     clip,
     date_bounds,
     describe_date_bounds,
@@ -375,20 +380,56 @@ _INDETERMINATE_CAUSES: tuple[tuple[str, frozenset[str], str], ...] = (
 )
 
 
-def _indeterminate_cause_entries(uses: list[FilterUse]) -> list[tuple[str, str]]:
-    """The ``(key, text)`` causes the given filters can have, in order."""
+def _where_cause_keys(where: list[WhereLeaf]) -> set[str]:
+    """The ``_INDETERMINATE_CAUSES`` keys the ``where`` leaves can have:
+    ``body_words`` an incomplete body; an address leaf an incomplete
+    address list, plus an ambiguous sender on the From role and
+    incomplete display names when it reads them."""
+    keys = set()
+    for w in where:
+        if w.leaf.name == "body_words":
+            keys.add("body")
+            continue
+        role, _ = w.leaf.value
+        keys.add("address_list")
+        if role == "from":
+            keys.add("sender_ambiguous")
+        if ADDRESS_LEAF_READS_NAMES[w.leaf.name]:
+            keys.add(_NAMES_CAUSE)
+    return keys
+
+
+def _indeterminate_cause_entries(
+    uses: list[FilterUse], where: list[WhereLeaf] | None = None
+) -> list[tuple[str, str]]:
+    """The ``(key, text)`` causes the given filters and ``where`` leaves
+    can have, in order."""
     given = {u.filter for u in uses}
     substring = {u.filter for u in uses if u.match == "substring"}
+    explicit = _where_cause_keys(where or [])
     return [
         (key, cause)
         for key, names, cause in _INDETERMINATE_CAUSES
-        if (substring if key == _NAMES_CAUSE else given).intersection(names)
+        if key in explicit or (substring if key == _NAMES_CAUSE else given).intersection(names)
     ]
 
 
-def _indeterminate_causes(uses: list[FilterUse]) -> list[str]:
+def _indeterminate_causes(uses: list[FilterUse], where: list[WhereLeaf] | None = None) -> list[str]:
     """The fixed-text causes the given filters can have, in order."""
-    return [cause for _, cause in _indeterminate_cause_entries(uses)]
+    return [cause for _, cause in _indeterminate_cause_entries(uses, where)]
+
+
+def _describe_where(where: list[WhereLeaf]) -> list[str]:
+    """Each ``where`` leaf as applied (normalized), with its path."""
+    parts = []
+    for w in where:
+        if w.leaf.name == "body_words":
+            words = ", ".join(repr(t) for t in w.leaf.value)
+            parts.append(f"{w.path} body_words({words})")
+        else:
+            role, value = w.leaf.value
+            parts.append(f"{w.path} {w.leaf.name}({role}, {value!r})")
+    return parts
 
 
 def _filter_uses(args: dict) -> list[FilterUse]:
@@ -1083,6 +1124,7 @@ def register_retrieval_tools(server, db):
         replied: bool | None = None,
         size_min: SizeBound = None,
         size_max: SizeBound = None,
+        where: Where | None = None,
         limit: int = 25,
         cursor: str | None = None,
         fields: list[str] | None = None,
@@ -1241,6 +1283,22 @@ def register_retrieval_tools(server, db):
                       the server's RFC822.SIZE); messages without a
                       stored size are left out.
             size_max: Inclusive upper bound in bytes, likewise.
+            where: Explicit leaves, ANDed with the other filters:
+                   {"all": [{"leaf": ..., "role": ..., "value": ...,
+                   "id": ...}, ...]}. address_is: a full address,
+                   exactly. address_contains: a case-insensitive
+                   substring of the address only.
+                   display_name_contains: of one display name only.
+                   address_or_name_contains: of either (how
+                   ``sender`` matches a name). domain_is: the
+                   address's exact domain; a subdomain does not
+                   match. body_words: like ``text``. Roles: from, to,
+                   cc, visible_recipient (To or Cc). ``role`` is
+                   required on the five address leaves and refused,
+                   null included, on ``body_words``. At most 16 leaves;
+                   ``any`` groups and ``negate: true`` are refused for
+                   now. Each leaf reports in ``leaf_results``, labelled
+                   by its path and optional unique ``id``.
             limit: Messages per page (default 25, clamped to [1, 100]).
             cursor: ``next_cursor`` from the previous page of the same query.
             fields: Row fields to return; claimant_id and thread_id are
@@ -1283,6 +1341,7 @@ def register_retrieval_tools(server, db):
             "query_messages",
             {
                 **args,
+                "where": where,
                 "limit": limit,
                 "cursor": cursor,
                 "fields": fields,
@@ -1318,7 +1377,13 @@ def register_retrieval_tools(server, db):
         # here; serving another clock was split out of #1085 (owner,
         # 2026-10-08) and waits for #1150 (with #1087).
         try:
-            page = await asyncio.to_thread(db.query_messages, **args, limit=limit, cursor=cursor)
+            # where is normalized before any query, inside this boundary:
+            # tokenizing body_words can raise on text SQLite cannot
+            # encode, answered by type below (Codex round 1).
+            where_leaves = normalize_where(where) if where is not None else []
+            page = await asyncio.to_thread(
+                db.query_messages, **args, where=where_leaves, limit=limit, cursor=cursor
+            )
         except InvalidFilterError as e:
             # Validation messages quote the offending input (an invalid
             # date echoes its text), which log_tool_call deliberately
@@ -1340,7 +1405,7 @@ def register_retrieval_tools(server, db):
         if page.indeterminate:
             # Why, by fixed key, so the line alone tells a reader which
             # stored state left messages undecided (#1086).
-            for key, _ in _indeterminate_cause_entries(uses):
+            for key, _ in _indeterminate_cause_entries(uses, where_leaves):
                 timings.count(f"indeterminate_cause_{key}", 1)
         output = QueryMessagesOutput(
             filters=uses,
@@ -1352,6 +1417,23 @@ def register_retrieval_tools(server, db):
                 )
                 for name, match in page.address_matches.items()
             ],
+            leaf_results=[
+                WhereLeafResult(
+                    path=r.path,
+                    id=r.id,
+                    leaf=r.leaf,
+                    true=r.true,
+                    false=r.false,
+                    indeterminate=r.indeterminate,
+                    distinct_addresses=r.distinct,
+                    addresses=(
+                        None
+                        if r.addresses is None
+                        else [clip(a, HEADER_CHAR_LIMIT) for a in r.addresses]
+                    ),
+                )
+                for r in page.leaf_results
+            ],
             date_bounds=bounds,
             total_matches=page.total_matches,
             indeterminate=page.indeterminate,
@@ -1361,7 +1443,8 @@ def register_retrieval_tools(server, db):
             next_cursor=page.next_cursor,
             messages=[listed_message(m) for m in page.messages],
         )
-        lines = [f"Query: {_describe_filters(uses)}"]
+        parts = [_describe_filters(uses, none=""), *_describe_where(where_leaves)]
+        lines = [f"Query: {', '.join(p for p in parts if p) or _describe_filters([])}"]
         if bounds_line := describe_date_bounds(bounds):
             lines.append(bounds_line)
         lines.append(f"total_matches: {page.total_matches}")
@@ -1369,7 +1452,7 @@ def register_retrieval_tools(server, db):
             # Stated whenever non-zero, so a count is never read as
             # complete when some messages could not be decided. Fixed
             # text naming the causes the given filters can have.
-            causes = _indeterminate_causes(uses)
+            causes = _indeterminate_causes(uses, where_leaves)
             lines.append(
                 f"indeterminate: {page.indeterminate} (messages the filters could neither "
                 f"accept nor reject: {'; '.join(causes)}; in neither total_matches nor "
@@ -1382,6 +1465,13 @@ def register_retrieval_tools(server, db):
             line = f"{name} matched {match.distinct} distinct {noun} across all matches"
             if match.distinct > 1:
                 line += " (possibly different people; filter by one exact address to separate them)"
+            lines.append(line)
+        for r in page.leaf_results:
+            label = r.path if r.id is None else f"{r.path} (id {r.id!r})"
+            line = f"{label}: true {r.true}, false {r.false}, indeterminate {r.indeterminate}"
+            if r.distinct is not None:
+                noun = "address" if r.distinct == 1 else "addresses"
+                line += f"; {r.distinct} distinct {noun}"
             lines.append(line)
         if not page.messages:
             lines.append("returned: 0")

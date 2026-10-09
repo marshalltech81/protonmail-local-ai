@@ -168,6 +168,23 @@ class OversizedMessageError(Exception):
         self.cap = cap
 
 
+class MessageNestingError(Exception):
+    """Raised when the stdlib email parser hits the recursion limit.
+
+    ``email.message_from_bytes`` recurses once per nested
+    ``message/rfc822`` (or multipart) level, so a small crafted message
+    nested about a thousand levels deep raises ``RecursionError`` on
+    every attempt. The worker dead-letters it terminally
+    (``mark_dead_terminal``) instead of retrying the same failure (#1296).
+    The text is fixed: it never quotes the message.
+    """
+
+    TEXT = "message nested too deeply for the email parser"
+
+    def __init__(self) -> None:
+        super().__init__(self.TEXT)
+
+
 # Hard ceiling on the size of a single ``.eml`` we will read into
 # memory. Bridge inbound usually caps at ~25 MB, but a malicious /
 # corrupt Maildir file with no such bound would otherwise let a
@@ -588,7 +605,11 @@ def parse_email_bytes(raw: bytes, source: SourceMetadata) -> Message | None:
     Returns ``None`` for a message without a usable Message-ID (none, or
     one over ``MESSAGE_ID_MAX_CHARS``), which the worker dead-letters.
 
-    Content-pathology errors (a malformed MIME structure ``email`` cannot
+    Raises ``MessageNestingError`` when the stdlib parse itself hits the
+    recursion limit (a message nested too deeply), which the worker
+    dead-letters terminally.
+
+    Other content-pathology errors (a malformed MIME structure ``email`` cannot
     decompose, an html2text blowup, anything raised by the body /
     attachment walker that is not already caught locally) propagate.
     The previous bare ``except Exception`` collapsed those into the same
@@ -599,7 +620,13 @@ def parse_email_bytes(raw: bytes, source: SourceMetadata) -> Message | None:
     of a quietly shrinking index.
     """
     path = source.path
-    msg = email.message_from_bytes(raw)
+    try:
+        msg = email.message_from_bytes(raw)
+    except RecursionError:
+        # Deterministic for these bytes, so retrying cannot help (#1296).
+        # Only this call is the boundary: a ``RecursionError`` from the
+        # walk below keeps the ordinary retry path.
+        raise MessageNestingError() from None
 
     message_id = _clean_id(msg.get("Message-ID", ""))
     if not message_id:
