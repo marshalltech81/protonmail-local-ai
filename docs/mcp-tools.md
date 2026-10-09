@@ -1625,24 +1625,29 @@ system's page cache.
 **Filtered queries.** A certificate evaluates the query's own
 predicate, so its cost follows that predicate, not the size of the
 matching set. Each filter was timed as one production page of the same
-query (`limit=1`, with its counts) and as a certificate:
+query (`limit=1`, with its counts) and as a certificate. Every message
+has a 40-word body chunk (5,000 distinct filler words), so the body-word
+filters run over an FTS index at the density of real mail:
 
 | Filter (50,000 messages, typical IDs) | Matches | Page | Certificate |
 |---|---|---|---|
-| `participant` substring matching nothing | 0 | 0.55 s | 0.29 s |
-| `participant` substring of an address | 1,100 | 0.54 s | 0.31 s |
+| `participant` substring matching nothing | 0 | 0.57 s | 0.32 s |
+| `participant` substring of an address | 1,100 | 0.54 s | 0.32 s |
 | `sender` exact address | 100 | 0.04 s | 0.06 s |
 | `subject` substring | 10 | 0.06 s | 0.07 s |
-| `text` (one rare word / one common word) | 1 / 1,000 | 0.07 s / 0.05 s | 0.05 s / 0.07 s |
-| `authority_class` | 9,500 | 0.09 s | 0.11 s |
-| date range (one year) | 2,500 | 0.004 s | 0.007 s |
-| Occurrences, `participant` substring matching nothing | 0 | 0.44 s | 0.71 s |
+| `text` (one rare word / one common word) | 1 / 1,000 | 0.06 s / 0.05 s | 0.05 s / 0.07 s |
+| `authority_class` | 9,500 | 0.10 s | 0.12 s |
+| date range (one year) | 2,500 | 0.005 s | 0.007 s |
+| Occurrences, `participant` substring matching nothing | 0 | 0.43 s | 0.70 s |
 
 With 998-ASCII IDs the participant substring took 8.3 s for a message
 page and 4.1 s for its certificate, and 6.2 s and 6.7 s for
-occurrences; at 200,000 messages 2.4 s and 1.3 s, and 1.9 s and 4.0 s.
-Across every filter and corpus a certificate cost at most 1.9 times one
-page of the same message query and 2.2 times one occurrence page. The
+occurrences; at 200,000 messages 2.3 s and 1.2 s, and 1.8 s and 3.5 s,
+and the body-word filters 0.34 s and 0.28 s (rare word) and 0.23 s and
+0.35 s (common word). Across every filter and corpus a certificate cost
+at most 2.1 times one page of the same query, messages or occurrences
+(the 998-ASCII figures above are from 4-word bodies; the 40-word runs
+were at 50,000 and 200,000 messages with typical IDs). The
 set caps below bound the scan, hash and response, not this predicate
 cost, which every page of the same query already pays.
 
@@ -1768,8 +1773,8 @@ retries on its next pass.
   and collect for occurrences, whose IDs are a fixed 64 bytes: the full
   collect round was 1.6 to 11 times faster on occurrences, for up to
   69 MiB more peak RSS at the caps measured.
-- **Filtered queries:** no further cap. A certificate costs at most
-  about twice one page of the same query in these runs; the predicate
+- **Filtered queries:** no further cap. A certificate cost at most
+  2.1 times one page of the same query in these runs; the predicate
   cost itself is the query's, as it is for paging.
 
 ### `aggregate_messages`

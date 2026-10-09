@@ -212,6 +212,9 @@ def test_filtered_certificate_counts_what_a_page_counts(report):
         r for r in report["filtered"]["messages"] if r["filters"] == {"authority_class": "vendor"}
     )
     assert vendor["count"] > 0
+    # Body chunks carry at least the 20 tokens real mail does, so the
+    # text filters run over a realistic FTS index.
+    assert report["build"]["body_tokens_min"] >= 20
 
 
 def test_request_shapes_count_their_elements(report):

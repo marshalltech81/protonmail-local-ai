@@ -272,6 +272,21 @@ def _shape(i: int, identity: str, records: str, references: int) -> dict:
     }
 
 
+# Words per synthetic body chunk: at least the 20 tokens a chunk of real
+# mail carries (AGENTS.md: sparse chunks hid FTS5 segment growth, #1262).
+BODY_TOKENS = 40
+# Distinct filler words, so the FTS index carries a realistic vocabulary.
+_VOCABULARY = 5000
+
+
+def _body(i: int) -> str:
+    """Message ``i``'s body chunk: ``alpha<i % 50>`` (in every fiftieth
+    body), ``gamma<i>`` (in this body only) and filler words drawn from
+    ``_VOCABULARY``, ``BODY_TOKENS`` words in all."""
+    filler = [f"w{(i * 7919 + j * 104729) % _VOCABULARY}" for j in range(BODY_TOKENS - 2)]
+    return " ".join([f"alpha{i % 50}", f"gamma{i}", *filler])
+
+
 def build(
     db_path: Path,
     messages: int,
@@ -293,8 +308,8 @@ def build(
     ``references`` References entries, which the parser does not cap by
     count).
 
-    Every message gets one body chunk (``synthetic body alpha<i % 50>
-    gamma<i>``), its display names in ``message_participant_names``,
+    Every message gets one body chunk of ``BODY_TOKENS`` words
+    (``_body``), its display names in ``message_participant_names``,
     completeness flags of 1 so every filter decides, and each From
     address a person entity (every fifth address in order ``vendor``, the rest
     ``unclassified``). ``extracted_chars`` above 0 stores that many
@@ -311,6 +326,7 @@ def build(
         conn.execute("PRAGMA synchronous=NORMAL")
         batch = 2000 if records != "cardinality" and not extracted_chars else 10
         text = _WIDE * extracted_chars if extracted_chars else None
+        min_tokens = BODY_TOKENS
         for start in range(0, messages, batch):
             msg_rows, part_rows, att_rows, ext_rows = [], [], [], []
             name_rows, chunk_rows, fts_rows = [], [], []
@@ -347,7 +363,8 @@ def build(
                     for role, address, name in shape["people"]
                     if name is not None
                 ]
-                body = f"synthetic body alpha{i % 50} gamma{i}"
+                body = _body(i)
+                min_tokens = min(min_tokens, len(body.split()))
                 fts_rows.append((i + 1, body))
                 chunk_rows.append((f"{cid}:0", cid, tid, 0, body, i + 1, None, "body"))
                 for k in range(per_message):
@@ -406,7 +423,11 @@ def build(
         conn.execute("ANALYZE")
         conn.commit()
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-    return {"build_s": round(time.perf_counter() - t0, 2), "db_bytes": db_path.stat().st_size}
+    return {
+        "build_s": round(time.perf_counter() - t0, 2),
+        "db_bytes": db_path.stat().st_size,
+        "body_tokens_min": min_tokens,
+    }
 
 
 # --- the measured statements -------------------------------------------
