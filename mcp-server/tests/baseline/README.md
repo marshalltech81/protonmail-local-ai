@@ -134,8 +134,11 @@ harness in `tests/eval/` (`tests/retrieval_metrics.py`).
   boilerplate, security advice). Threads 46-74 back the
   outstanding-items scenarios (#798): an owners' association's
   correspondence with its attorneys in 2026 (dev, 46-65) and a marina
-  co-op's (held out, 66-74). Because they add 2026 sent mail and
-  attachments, the `folder-sent` and `has-attachments` enumerations
+  co-op's (held out, 66-74); threads 120-124 add the dev scenario's
+  claim cases (a document prepared but never sent, a transmission shown
+  only in Sent, an acknowledged receipt with later guidance in another
+  thread, an unrelated same-thread reply). Because they add 2026 sent mail
+  and attachments, the `folder-sent` and `has-attachments` enumerations
   are bounded to before 2026. Threads 75-77 back the answer
   evaluation's evidence-scope decoys (#755): in each, a filter selects
   the thread and another of its messages holds a different answer
