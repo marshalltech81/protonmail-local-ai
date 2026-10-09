@@ -55,7 +55,9 @@ through ``warn_extractor_cap``, so the result is marked incomplete
 (``eml_body_decode``), a nested email's base64, any body text part or
 nested email in quoted-printable, whose loss records nothing to detect
 (#1288), and any body text part in another encoding that is not
-identity (uuencode and its aliases, or an unknown value). So is a
+identity (uuencode and its aliases, or an unknown value), each counted
+only when the body keeps that part, and a nested email whose transport
+text lost a line to the parse. So is a
 part declared ``multipart/*`` that the standard library left
 undecomposed (no or a missing boundary), whose text is never read
 (``eml_body_structure``). A nested email in any other transfer encoding
@@ -322,7 +324,12 @@ def _inner_message(
         # (review round 1); quoted-printable loss records nothing to
         # detect, so every quoted-printable nested email counts as lossy
         # until #1288 detects it (review round 2).
-        lossy = encoding == "quoted-printable" or parser._base64_transport_lost(transport)
+        # A transport line the parse dropped is lost too (review round 8).
+        lossy = (
+            encoding == "quoted-printable"
+            or parser._base64_transport_lost(transport)
+            or parser._transport_lines_dropped(part)
+        )
         container = decoded
     children = container.get_payload()
     if isinstance(children, list) and children and isinstance(children[0], email.message.Message):

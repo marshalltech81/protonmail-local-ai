@@ -890,6 +890,10 @@ writes the occurrence's chunks, so they roll back with them.
   leniently, the same text is decoded once more through the stdlib leaf
   decoder only to read those defects (one linear pass behind the
   decodable-bytes budget; the bytes kept are the lenient decode's).
+  It also counts as lost when the parse dropped a line of the
+  transport text it rebuilds from (a first line starting with
+  whitespace, read as a header continuation, or with `From `, read as
+  the mbox envelope; review round 8 on #1311).
   An attached email's loss found this way is also counted as the
   `transport_lossy` parse cap, so it is logged (review round 7 on
   #1311); a leaf attachment's is not.
@@ -903,7 +907,11 @@ writes the occurrence's chunks, so they roll back with them.
   none of its transport text is extracted, its result is the `empty`
   one an unserialized container gets, and the message's
   `attachments_manifest_complete` is cleared (review round 4 on #1311).
-  A leaf attachment in those encodings is unchanged.
+  An email carried as a leaf part the `eml` extractor reads
+  (`application/eml`, or any type named `.eml`) in any encoding other
+  than identity or base64 keeps its decode but is always `0`, counted
+  as `transport_lossy` (review round 8 on #1311). Any other leaf
+  attachment in those encodings is unchanged.
 - For a `success` or `empty` result, the result's own
   `text_complete`, which the dispatcher sets: `0` when the attempt lost
   text (any `extractor_caps` cap, the `max_extracted_chars` cut, the
@@ -1446,7 +1454,13 @@ in quoted-printable, whose loss the standard library records nothing
 for (counted as lossy until #1288 detects it). A body text part in any
 other encoding that is not identity (uuencode and its aliases, or an
 unknown value) is kept as decoded but counted as `eml_body_decode`
-too, since a malformed one comes back as its transport text. A part
+too, since a malformed one comes back as its transport text. A body
+text part counts only when the body keeps it, or would have kept it
+had it decoded whole: a loss in an alternative rendering set aside is
+not counted, and neither is its charset fallback (review round 8). A
+nested email's base64 also counts as lossy when the parse dropped a
+line of its transport text (a first line starting with whitespace or
+`From `). A part
 declared `multipart/*` that the standard library could not decompose
 (no boundary parameter, or a start boundary that never appears) is
 counted as `eml_body_structure`, since none of its text is read; the

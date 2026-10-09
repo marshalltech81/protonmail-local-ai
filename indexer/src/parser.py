@@ -54,7 +54,9 @@ log = logging.getLogger("indexer.parser")
 # * ``transport_lossy``: a transfer-encoded attached email that decoded
 #   with bytes lost (base64), or whose loss cannot be detected
 #   (quoted-printable, #1288): its lenient decode is kept, marked
-#   incomplete, and the attachments inside it are walked;
+#   incomplete, and the attachments inside it are walked; also an email
+#   carried as a leaf for the ``eml`` extractor in any encoding other
+#   than identity or base64;
 # * ``decoded_bytes``: one past ``MAX_DECODED_ATTACHMENT_BYTES``;
 # * ``container_serialize``: a container the generator refuses;
 # * ``body_parts``: text parts past ``MAX_BODY_TEXT_PARTS`` are left out
@@ -308,6 +310,25 @@ def _decode_lost_bytes(part: email.message.Message) -> bool:
     #1286). Quoted-printable and uuencode failures record no defect, so
     they are not detected."""
     return any(isinstance(d, _DECODE_LOSS_DEFECTS) for d in part.defects)
+
+
+def _transport_lines_dropped(container: email.message.Message) -> bool:
+    """Whether the parse dropped a line of ``container``'s transport text
+    from one of its pseudo messages, so ``_transport_text`` cannot hold
+    it: a first line starting with whitespace (a continuation with no
+    header before it) or with ``From `` (taken as the mbox envelope).
+    Reads only what the parse recorded (review round 8 on #1311)."""
+    children = container.get_payload()
+    if not isinstance(children, list):
+        return False
+    return any(
+        child.get_unixfrom() is not None
+        or any(
+            isinstance(d, email.errors.FirstHeaderLineIsContinuationDefect) for d in child.defects
+        )
+        for child in children
+        if isinstance(child, email.message.Message)
+    )
 
 
 def _base64_transport_lost(data: bytes) -> bool:
@@ -1090,7 +1111,9 @@ def _attachment_payload(
         # (the lenient decode's) are kept but never certified until
         # #1288 detects the loss (review round 4 on #1311).
         if transport_lost is not None and (
-            encoding == "quoted-printable" or _base64_transport_lost(transport)
+            encoding == "quoted-printable"
+            or _base64_transport_lost(transport)
+            or _transport_lines_dropped(part)
         ):
             transport_lost.append(True)
             # Counted so the loss is logged, not only flagged (review
@@ -1375,6 +1398,11 @@ def _extract_body_and_attachments(
     text_parts = 0
     # Text parts past MAX_BODY_TEXT_PARTS: (node index, plain or not).
     capped: list[tuple[int, bool]] = []
+    # In a body-only walk, the text parts whose transfer decoding lost or
+    # may have lost bytes, and those whose charset decoding fell back, in
+    # the same form: counted below only if the body could keep them.
+    decode_lossy: list[tuple[int, bool]] = []
+    charset_degraded: list[tuple[int, bool]] = []
 
     # Depth-first in document order, like ``msg.walk()``, but nothing
     # inside an attachment is a candidate for the body: an attached
@@ -1430,15 +1458,29 @@ def _extract_body_and_attachments(
             pass
         elif is_attachment:
             transport_lost: list[bool] = []
+            module = resolved_extractor_module(ct, filename or "unnamed")
             payload, decoded = _attachment_payload(
                 part,
                 serialize_containers=not in_attachment,
                 budget=budget,
                 caps=caps,
-                payload_read=resolved_extractor_module(ct, filename or "unnamed") is not None,
+                payload_read=module is not None,
                 decode_depth=decode_depth,
                 transport_lost=transport_lost,
             )
+            if (
+                module == "eml"
+                and not part.is_multipart()
+                and str(part.get("Content-Transfer-Encoding", "")).strip().lower()
+                not in _IDENTITY_ENCODINGS | {"base64"}
+            ):
+                # An email carried as a leaf (``application/eml``, or
+                # named ``.eml``) follows the rule for ``message/*``: a
+                # transfer encoding whose loss is not detected (#1288)
+                # keeps its decode, never complete, and is counted
+                # (review round 8 on #1311).
+                transport_lost.append(True)
+                caps["transport_lossy"] += 1
             attachments.append(
                 Attachment(
                     filename=filename or "unnamed",
@@ -1454,7 +1496,7 @@ def _extract_body_and_attachments(
                     payload_complete=(
                         bool(payload) and not transport_lost
                         if part.is_multipart()
-                        else not _decode_lost_bytes(part)
+                        else not transport_lost and not _decode_lost_bytes(part)
                     ),
                 )
             )
@@ -1531,12 +1573,11 @@ def _extract_body_and_attachments(
             or str(part.get("Content-Transfer-Encoding", "")).strip().lower()
             not in _IDENTITY_ENCODINGS | {"base64"}
         ):
-            walk.decode_lost_parts += 1
-        text = _safe_decode(
-            payload,
-            part.get_content_charset() or "utf-8",
-            None if walk is None else walk.degraded,
-        )
+            decode_lossy.append((len(nodes) - 1, not is_html))
+        fallback: Counter[str] | None = None if walk is None else Counter()
+        text = _safe_decode(payload, part.get_content_charset() or "utf-8", fallback)
+        if fallback:
+            charset_degraded.append((len(nodes) - 1, not is_html))
         node.text = (_html_to_text(text) if is_html else text).strip()
         node.has_text = bool(node.text)
         node.has_plain = node.has_text and not is_html
@@ -1549,6 +1590,14 @@ def _extract_body_and_attachments(
         lost = _capped_parts_lost(nodes, capped)
         if lost:
             caps["body_parts"] += lost
+    if walk is not None:
+        # Only a part the body keeps, or would keep had its text decoded
+        # whole, changes what is indexed: a loss in an alternative set
+        # aside is not counted (review round 8 on #1311).
+        if decode_lossy:
+            walk.decode_lost_parts += _capped_parts_lost(nodes, decode_lossy)
+        if charset_degraded:
+            walk.degraded[CHARSET_DEGRADED] += _capped_parts_lost(nodes, charset_degraded)
     return body, attachments
 
 

@@ -813,3 +813,94 @@ class TestReviewRound6:
         walk = parser.BodyWalk()
         parser._extract_body_and_attachments(email.message_from_bytes(payload), walk=walk)
         assert walk.structure_lost_parts == 1
+
+
+# Review round 8 on #1311.
+def _alternative(plain: bytes, html: bytes) -> bytes:
+    """An attached email whose body is a ``multipart/alternative`` of
+    the two given parts (headers included)."""
+    return (
+        HDR + b'Content-Type: multipart/alternative; boundary="A"\r\n\r\n'
+        b"--A\r\n" + plain + b"\r\n--A\r\n" + html + b"\r\n--A--\r\n"
+    )
+
+
+_PLAIN = b"Content-Type: text/plain\r\n\r\nplain words"
+_HTML = b"Content-Type: text/html\r\n\r\n<p>html words</p>"
+_B64_HTML = base64.encodebytes(b"<p>html words " + MARKER.encode() * 4 + b"</p>")
+_LOSSY_HTML = (
+    b"Content-Type: text/html\r\nContent-Transfer-Encoding: base64\r\n\r\n"
+    + _B64_HTML[:16]
+    + b"!!!!"
+    + _B64_HTML[20:]
+)
+_B64_PLAIN = base64.encodebytes(b"plain words " + MARKER.encode() * 4)
+_LOSSY_PLAIN = (
+    b"Content-Type: text/plain\r\nContent-Transfer-Encoding: base64\r\n\r\n"
+    + _B64_PLAIN[:16]
+    + b"!!!!"
+    + _B64_PLAIN[20:]
+)
+
+
+class TestReviewRound8:
+    def _extract(self, payload: bytes, caplog) -> extractors.ExtractionResult:
+        extractors.drain_extractor_counts()
+        with caplog.at_level(logging.WARNING):
+            result = extract(content_type="message/rfc822", filename="f.eml", payload=payload)
+        assert result.status == STATUS_SUCCESS
+        assert MARKER not in caplog.text
+        return result
+
+    @pytest.mark.parametrize(
+        "html",
+        [
+            _LOSSY_HTML,
+            b"Content-Type: text/html\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n"
+            b"<p>html =\rwords</p>",
+            b"Content-Type: text/html; charset=x-unknown-synthetic\r\n\r\n<p>caf\xe9</p>",
+        ],
+        ids=["lossy_base64", "quoted_printable", "charset_fallback"],
+    )
+    def test_loss_in_an_unselected_alternative_is_not_counted(self, caplog, html):
+        """The body keeps only the clean plain part, so a loss or fallback
+        in the HTML rendering it set aside changes nothing indexed."""
+        result = self._extract(_alternative(_PLAIN, html), caplog)
+        assert result.text == "Subject: s\nFrom: a@example.test\n\nplain words"
+        assert result.text_complete is True
+        assert "eml_body_decode" not in caplog.text
+        assert extractors.drain_extractor_counts()["eml_charsets_degraded"] == 0
+
+    def test_loss_in_the_selected_alternative_is_counted(self, caplog):
+        result = self._extract(_alternative(_LOSSY_PLAIN, _HTML), caplog)
+        assert result.text_complete is False
+        assert "extractor cap eml_body_decode:" in caplog.text
+
+    def test_a_lossy_part_left_blank_still_counts_if_it_would_be_kept(self, caplog):
+        """A plain part whose lossy decode left no text is set aside for
+        the HTML, but the sender's plain text would have been kept."""
+        blank = b"Content-Type: text/plain\r\nContent-Transfer-Encoding: base64\r\n\r\n!!!!"
+        result = self._extract(_alternative(blank, _HTML), caplog)
+        assert result.text == "Subject: s\nFrom: a@example.test\n\nhtml words"
+        assert result.text_complete is False
+        assert "extractor cap eml_body_decode:" in caplog.text
+
+    def test_a_selected_charset_fallback_is_still_counted(self, caplog):
+        plain = b"Content-Type: text/plain; charset=x-unknown-synthetic\r\n\r\ncaf\xe9"
+        self._extract(_alternative(plain, _HTML), caplog)
+        assert extractors.drain_extractor_counts()["eml_charsets_degraded"] == 1
+
+    def test_a_dropped_first_transport_line_cuts_the_nested_email(self, caplog, _in_process_child):
+        """Security finding: a base64 transport whose first line starts
+        with whitespace is read by the standard library as a header
+        continuation with no header before it and dropped; the rest
+        decodes cleanly, so the nested email is cut."""
+        encoded = base64.encodebytes(_text("intact words " + MARKER * 3))
+        assert encoded.count(b"\n") > 1
+        part = (
+            b"Content-Type: message/rfc822\r\nContent-Disposition: attachment\r\n"
+            b"Content-Transfer-Encoding: base64\r\n\r\n " + encoded
+        )
+        result = self._extract(_multipart(b"Content-Type: text/plain\r\n\r\nroot", part), caplog)
+        assert result.text_complete is False
+        assert "extractor cap eml_nested_messages:" in caplog.text

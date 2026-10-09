@@ -5788,6 +5788,25 @@ class TestContainerTransportDecodeLoss:
         assert len(calls) == 1
         assert msg.parse_caps == {"transport_lossy": 1}
 
+    @pytest.mark.parametrize(
+        "prefix",
+        [b" ", b"\t", b"From QUJD\r\n"],
+        ids=["space", "tab", "envelope_line"],
+    )
+    def test_a_transport_line_the_parse_dropped_makes_it_incomplete(
+        self, tmp_path, monkeypatch, prefix
+    ):
+        """Review round 8 on #1311: a transport line the standard library
+        read as a header continuation with nothing before it, or as the
+        ``From `` envelope line, is dropped from the pseudo message, so
+        the rebuilt transport decodes cleanly without it."""
+        msg, _ = self._parse(
+            tmp_path, monkeypatch, _BASE64_RFC822, prefix + base64.encodebytes(self._INNER)
+        )
+        [attachment] = msg.attachments
+        assert attachment.payload_complete is False
+        assert msg.parse_caps == {"transport_lossy": 1}
+
     def test_an_undecodable_transport_keeps_todays_behaviour(self, tmp_path, monkeypatch):
         msg, calls = self._parse(tmp_path, monkeypatch, _BASE64_RFC822, b"A")
         [attachment] = msg.attachments
@@ -5885,5 +5904,90 @@ class TestContainerTransportEncodings:
     def test_identity_and_base64_are_unchanged(self, tmp_path, headers, body):
         msg, attachment = self._attachment(tmp_path, headers, body)
         assert b"SYNTHETIC_TEXT_MARKER" in attachment.payload
+        assert attachment.payload_complete is True
+        assert msg.parse_caps == {}
+
+
+class TestLeafEmlTransportEncodings:
+    """Review round 8 on #1311: an email carried as a leaf part the
+    ``eml`` extractor reads (``application/eml``, or any type named
+    ``.eml``) follows the round-4 rule for ``message/*``: identity and
+    base64 (whose loss is detected) are unchanged; any other encoding
+    keeps its decode but is never complete and is counted as
+    ``transport_lossy``. Leaves for other extractors are #1288."""
+
+    _QP_MALFORMED = b"From: a@example.test\r\n\r\nvisible =\rtail SYNTHETIC_TEXT_MARKER"
+    _UU = b"begin 644 x\n" + _uu_lines(_INNER_EMAIL) + b"`\nend\n"
+
+    @staticmethod
+    def _attachment(tmp_path, caplog, headers: bytes, body: bytes, disposition=_CAP_FILENAME):
+        caplog.set_level("DEBUG")
+        path = tmp_path / "m.eml"
+        path.write_bytes(_with_attachment(headers, body, disposition))
+        msg = parse_email(path)
+        assert msg is not None
+        (attachment,) = msg.attachments
+        assert "SYNTHETIC_TEXT_MARKER" not in caplog.text
+        return msg, attachment
+
+    @pytest.mark.parametrize(
+        ("content_type", "encoding", "body"),
+        [
+            (b"application/eml", b"quoted-printable", quopri.encodestring(_INNER_EMAIL)),
+            (b"application/eml", b"quoted-printable", _QP_MALFORMED),
+            (b"application/octet-stream", b"quoted-printable", _QP_MALFORMED),
+            (b"application/eml", b"x-uuencode", _UU),
+            (b"application/octet-stream", b"uue", _UU),
+            (b"application/eml", b"x-other", _INNER_EMAIL),
+        ],
+        ids=["qp_clean", "qp_malformed", "qp_named_eml", "uuencode", "uue_named_eml", "unknown"],
+    )
+    def test_an_undetectable_encoding_is_never_complete(
+        self, tmp_path, caplog, content_type, encoding, body
+    ):
+        msg, attachment = self._attachment(
+            tmp_path,
+            caplog,
+            b"Content-Type: "
+            + content_type
+            + b"\r\nContent-Transfer-Encoding: "
+            + encoding
+            + b"\r\n",
+            body,
+        )
+        assert attachment.payload != b""
+        assert attachment.payload_complete is False
+        assert msg.parse_caps == {"transport_lossy": 1}
+        assert msg.attachments_manifest_complete is True
+
+    @pytest.mark.parametrize(
+        ("encoding", "body"),
+        [
+            (b"", _INNER_EMAIL),
+            (b"7bit", _INNER_EMAIL),
+            (b"8bit", _INNER_EMAIL),
+            (b"binary", _INNER_EMAIL),
+            (b"base64", base64.encodebytes(_INNER_EMAIL)),
+        ],
+        ids=["none", "7bit", "8bit", "binary", "base64"],
+    )
+    def test_identity_and_base64_are_unchanged(self, tmp_path, caplog, encoding, body):
+        headers = b"Content-Type: application/eml\r\n"
+        if encoding:
+            headers += b"Content-Transfer-Encoding: " + encoding + b"\r\n"
+        msg, attachment = self._attachment(tmp_path, caplog, headers, body)
+        assert b"SYNTHETIC_TEXT_MARKER" in attachment.payload
+        assert attachment.payload_complete is True
+        assert msg.parse_caps == {}
+
+    def test_a_leaf_for_another_extractor_is_unchanged(self, tmp_path, caplog):
+        """Still #1288: a quoted-printable ``.txt`` is not checked."""
+        msg, attachment = self._attachment(
+            tmp_path,
+            caplog,
+            b"Content-Type: text/plain\r\nContent-Transfer-Encoding: quoted-printable\r\n",
+            self._QP_MALFORMED,
+            _TXT_FILENAME,
+        )
         assert attachment.payload_complete is True
         assert msg.parse_caps == {}
