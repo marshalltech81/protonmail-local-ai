@@ -566,9 +566,9 @@ is exactly what this forbids.
 - A review finding that calls for new parsing of untrusted input, or
   any new mechanism rather than a guard (a check, a cap, a fallback),
   is a design decision: stop and ask, recommending the accurate,
-  complete fix and offering "document the limitation" as the
-  alternative ("Accuracy first" below). Do not build a parser inside a
-  bug fix.
+  complete fix. Offer "document the limitation" as an alternative only
+  when it reaches the same end state or the accurate fix is blocked
+  ("Accuracy first" below). Do not build a parser inside a bug fix.
 
 ## Change Strategy
 
@@ -704,8 +704,9 @@ under about 80 characters.
 - A fix that adds a state, mode or queue path, or that moves where
   input is validated, is a design change at any round (owner,
   2026-10-08, #1162). Stop and ask before pushing it, recommending the
-  accurate, complete change and offering cutting scope as the
-  alternative ("Accuracy first" below). If the owner chooses to keep the change,
+  accurate, complete change. Offer cutting scope as an alternative only
+  when it reaches the same end state or the accurate change is blocked
+  ("Accuracy first" below). If the owner chooses to keep the change,
   recheck every obligation that depended on the old boundary at the new
   one. #1125 moved its validation boundary twice, and #1134's re-check
   budget starved large threads (#1149); neither fix was a guard.
@@ -753,6 +754,9 @@ under about 80 characters.
   of the issue, a follow-up the code needs) gets its own GitHub issue
   before the PR is reported ready, unless an open issue already tracks
   it; write that issue's number next to the item (owner, 2026-10-07).
+  Skipping part of what the issue asked for needs the owner's approval
+  first ("Accuracy first", owner, 2026-10-09); the issue then tracks
+  it.
   Items that only explain a choice (no docs changed because none apply,
   a check not run because nothing it covers changed) need none. The
   issue holds fixed text, options and links, never mailbox content.
