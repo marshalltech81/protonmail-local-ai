@@ -743,6 +743,15 @@ class AggregateMessagesOutput(_Output):
         "counts them; in no group's messages. When not 0, report it with any count."
     )
     total_groups: int = Field(description="Every group, not just this page's.")
+    incomplete_from_messages: int | None = Field(
+        default=None,
+        description="sender_address, sender_domain and authority_class only (absent "
+        "otherwise): messages the filters do not reject whose sender is attributable but "
+        "whose stored From list is not known to be complete, each counted once over the "
+        "whole result; further sender groups or memberships may be missing for them. It "
+        "counts messages, not missing addresses, and includes a message with no stored "
+        "From address (also in the null group). authority_class leaves out Spam.",
+    )
     returned: int
     offset: int = Field(description="Groups returned by earlier pages.")
     has_more: bool

@@ -245,7 +245,8 @@ tool=search_emails outcome=ok total_ms=41.7 stages_ms={'query_embedding': 22.4, 
   wider window). The retrieval tools record what they returned (#886):
   `total_matches` and `returned` (`query_messages`, `query_attachments`,
   `aggregate_messages`, whose `returned` counts groups), `groups`
-  (`aggregate_messages`: every group, not just the page), `indeterminate`
+  (`aggregate_messages`: every group, not just the page),
+  `incomplete_from_messages` (`aggregate_messages` sender dimensions), `indeterminate`
   (`query_messages`, `query_attachments`, `aggregate_messages`, and
   `search_attachments` with `sender`), and, when `query_messages`',
   `aggregate_messages`' or `query_attachments`' `indeterminate` is not 0, one
@@ -1589,7 +1590,26 @@ also a message in Spam or one whose From addresses have no class. A
 message with several From addresses counts in the group of each, so
 those groups can sum to more than `total_matches`; `folder`, `year`
 and `month` have one value per message, so their groups sum to
-`total_matches` and their `indeterminate` values to the call's.
+`total_matches` and their `indeterminate` values to the call's. A
+group's `indeterminate` covers the supplied filters only, not the
+group's own value: a message whose membership in a sender group cannot
+be decided is not in it.
+
+`incomplete_from_messages` (for `sender_address`, `sender_domain` and
+`authority_class`; absent for the other dimensions) counts the
+messages the filters do not reject (matched or undecided) whose sender
+is attributable (`sender_ambiguous` is `false`) but whose stored From
+list is not known to be complete: a From address was lost to a parse
+cap or could not be parsed, or the message is not reparsed yet. Each
+is counted once over the whole result, the same on every page. For
+these messages further sender groups or memberships may be missing;
+the groups shown, `total_matches` and `indeterminate` are unchanged,
+and a group's `messages` still equals `query_messages`' count for
+`sender=<value>`. It counts messages, not missing addresses, and
+includes a message with no stored From address, which is also in the
+`null` group. For `authority_class` it leaves out Spam, where no class
+matches. The prose states it when not 0, and the timing line carries
+it.
 
 Groups come most messages first, then by value, with the `null` group
 last among ties. `total_groups` counts them all. Group values and

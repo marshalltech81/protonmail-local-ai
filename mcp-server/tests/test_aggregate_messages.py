@@ -333,6 +333,113 @@ class TestGroups:
         assert {g.value: g.messages for g in months} == {"2024-01": 2, "2024-02": 2}
 
 
+@pytest.fixture
+def from_db(tmp_path) -> Database:
+    """Review round 3: messages whose stored From list is or is not
+    complete, by ``from_addresses_complete`` (0 a known loss, NULL not
+    reparsed yet)."""
+    conn, path = _open_built_db_conn(tmp_path, "from.db")
+    rows = [
+        # (id, folder, From, from_addresses_complete, sender_ambiguous, subject_complete)
+        ("c1", "INBOX", ["ann@one.test"], 1, 0, 1),  # complete
+        ("i1", "INBOX", ["bob@two.test"], 0, 0, 1),  # incomplete
+        ("n1", "INBOX", ["cy@two.test"], None, 0, 1),  # not reparsed
+        ("m1", "INBOX", ["ann@one.test", "bob@two.test"], 0, 0, 1),  # two authors
+        ("a1", "INBOX", ["dee@three.test"], 0, 1, 1),  # ambiguous: null group already
+        ("s1", "Spam", ["eve@three.test"], 0, 0, 1),  # Spam: no class either way
+        ("e1", "INBOX", [], 0, 0, 1),  # no stored From row
+        ("u1", "INBOX", ["fay@four.test"], 0, 0, None),  # undecided under a subject filter
+        ("x1", "Archive", ["gil@four.test"], 0, 0, 1),  # filtered out by folder
+    ]
+    for mid, folder, from_, from_complete, ambiguous, subject_complete in rows:
+        _insert_message(
+            conn,
+            message_id=mid,
+            thread_id=f"t-{mid}",
+            folder=folder,
+            sent_at="2024-01-10T09:00:00+00:00",
+            subject="report" if subject_complete else "other",
+            from_=from_,
+            sender_ambiguous=ambiguous,
+            completeness={
+                "from_addresses_complete": from_complete,
+                "subject_complete": subject_complete,
+            },
+        )
+    conn.close()
+    return Database(str(path))
+
+
+class TestIncompleteFromLists:
+    """``incomplete_from_messages``: messages the filters do not reject
+    whose sender is safe but whose stored From list is not known to be
+    complete, so further sender groups or memberships may be missing."""
+
+    @pytest.mark.parametrize("group_by", ["sender_address", "sender_domain"])
+    def test_sender_dimensions_count_each_message_once(self, from_db, group_by):
+        page = from_db.aggregate_messages(group_by=group_by, folder="INBOX")
+        # i1, n1 (NULL counts), m1 once despite two authors, e1 (no From
+        # row: also in the null group), u1; not c1 (complete), a1
+        # (ambiguous), x1 (filtered out).
+        assert page.incomplete_from_messages == 5
+
+    def test_authority_class_leaves_spam_out(self, from_db):
+        assert from_db.aggregate_messages(group_by="sender_address").incomplete_from_messages == 7
+        assert from_db.aggregate_messages(group_by="authority_class").incomplete_from_messages == 6
+
+    def test_an_undecided_message_is_in_the_population(self, from_db):
+        page = from_db.aggregate_messages(
+            group_by="sender_address", folder="INBOX", subject="report"
+        )
+        # u1's subject is not checked yet: undecided, still counted.
+        assert page.indeterminate == 1
+        assert page.incomplete_from_messages == 5
+
+    @pytest.mark.parametrize("group_by", ["folder", "year", "month"])
+    def test_absent_for_dimensions_without_a_sender(self, from_db, group_by):
+        assert from_db.aggregate_messages(group_by=group_by).incomplete_from_messages is None
+
+    def test_the_count_is_the_same_on_every_page(self, from_db):
+        counts, cursor = [], None
+        while True:
+            page = from_db.aggregate_messages(group_by="sender_address", limit=1, cursor=cursor)
+            counts.append(page.incomplete_from_messages)
+            if not page.has_more:
+                break
+            cursor = page.next_cursor
+        assert len(counts) > 2 and set(counts) == {7}
+
+    def test_known_groups_still_equal_query_messages(self, from_db):
+        page = from_db.aggregate_messages(group_by="sender_address", limit=100)
+        for g in page.groups:
+            if g.value is not None:
+                assert g.messages == from_db.query_messages(sender=g.value).total_matches
+
+    def test_tool_output_prose_and_log(self, fake_server, from_db, caplog):
+        handler = _handlers(fake_server, from_db)["aggregate_messages"]
+        with caplog.at_level(logging.DEBUG):
+            out = asyncio.run(handler(group_by="sender_address", subject=MARKER))
+            folders = asyncio.run(handler(group_by="folder"))
+        assert out.structured_content["incomplete_from_messages"] == 1  # u1, undecided
+        assert "incomplete_from_messages" not in folders.structured_content
+        text = _text(asyncio.run(handler(group_by="sender_domain")))
+        assert (
+            "7 messages have an incomplete From list; further sender groups or "
+            "memberships may be missing." in text
+        )
+        assert "incomplete From list" not in _text(folders)
+        lines = [r.getMessage() for r in caplog.records if r.name == "mcp.timings"]
+        assert "'incomplete_from_messages': 1" in lines[0]
+        assert "incomplete_from_messages" not in lines[1]
+        assert MARKER not in caplog.text
+
+    def test_served_schema_validates_with_and_without_the_field(self, from_db):
+        out = _call(_server(from_db), "aggregate_messages", group_by="authority_class")
+        assert out["incomplete_from_messages"] == 6
+        out = _call(_server(from_db), "aggregate_messages", group_by="month")
+        assert "incomplete_from_messages" not in out
+
+
 class TestTrash:
     def test_trash_is_left_out_by_default_and_counted_when_named(self, agg_db):
         groups, page = _all_groups(agg_db, "folder")

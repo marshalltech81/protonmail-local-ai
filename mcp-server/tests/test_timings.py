@@ -695,7 +695,13 @@ _SUCCESS_CALLS: dict[str, tuple[dict, dict]] = {
             "text": MARKER,
             "folder": _MARKER_FOLDER,
         },
-        {"total_matches": 1, "indeterminate": 0, "groups": 1, "returned": 1},
+        {
+            "total_matches": 1,
+            "indeterminate": 0,
+            "groups": 1,
+            "returned": 1,
+            "incomplete_from_messages": 0,
+        },
     ),
     "query_attachments": (
         {"sender": _MARKER_ADDRESS, "filename": MARKER, "folder": _MARKER_FOLDER},

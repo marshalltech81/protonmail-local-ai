@@ -550,6 +550,15 @@ _UNAVAILABLE_REASONS = {
 _OCR_DISABLED_REASON = "the file needs OCR, which is off (INDEXER_OCR_ENABLED=false)"
 
 
+def _aggregate_result(text: str, output: AggregateMessagesOutput) -> CallToolResult:
+    """``tool_result`` without ``incomplete_from_messages`` for a
+    dimension that does not read the From list (it is ``None`` there)."""
+    result = tool_result(text, output)
+    if output.incomplete_from_messages is None and result.structured_content is not None:
+        result.structured_content.pop("incomplete_from_messages", None)
+    return result
+
+
 def _unavailable_reason(status: str | None, ocr_disabled: bool) -> str:
     """The fixed reason ``get_attachment`` gives for returning no text."""
     if ocr_disabled:
@@ -1653,6 +1662,8 @@ def register_retrieval_tools(server, db):
         timings.count("indeterminate", page.indeterminate)
         timings.count("groups", page.total_groups)
         timings.count("returned", len(page.groups))
+        if page.incomplete_from_messages is not None:
+            timings.count("incomplete_from_messages", page.incomplete_from_messages)
         uses = _filter_uses(args)
         if page.indeterminate:
             for key, _ in _indeterminate_cause_entries(uses, where_leaves):
@@ -1664,6 +1675,7 @@ def register_retrieval_tools(server, db):
             total_matches=page.total_matches,
             indeterminate=page.indeterminate,
             total_groups=page.total_groups,
+            incomplete_from_messages=page.incomplete_from_messages,
             returned=len(page.groups),
             offset=page.offset,
             has_more=page.has_more,
@@ -1700,6 +1712,11 @@ def register_retrieval_tools(server, db):
                 f"indeterminate: {page.indeterminate} (messages the filters could neither "
                 f"accept nor reject: {'; '.join(causes)}; in no group's message count)"
             )
+        if page.incomplete_from_messages:
+            lines.append(
+                f"{page.incomplete_from_messages} messages have an incomplete From list; "
+                "further sender groups or memberships may be missing."
+            )
         if not page.groups:
             lines.append(f"groups: {page.total_groups} (returned 0)")
             if page.offset:
@@ -1708,7 +1725,7 @@ def register_retrieval_tools(server, db):
                 lines.append("No messages are known to match.")
             else:
                 lines.append("No messages match.")
-            return tool_result("\n".join(lines), output)
+            return _aggregate_result("\n".join(lines), output)
 
         first, last = page.offset + 1, page.offset + len(page.groups)
         lines.append(f"groups: {page.total_groups} (returned {first}-{last})")
@@ -1732,7 +1749,7 @@ def register_retrieval_tools(server, db):
             if row.display_name is not None:
                 line += f", display name {row.display_name!r}"
             lines.append(line)
-        return tool_result("\n".join(lines), output)
+        return _aggregate_result("\n".join(lines), output)
 
     @server.tool(
         output_schema=QueryAttachmentsOutput.model_json_schema(),

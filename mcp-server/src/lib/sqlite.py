@@ -1072,6 +1072,10 @@ _FOREIGN_CURSOR = (
     "as the call that returned it, or restart without a cursor"
 )
 
+# The ``aggregate_messages`` dimensions read from the From list, which
+# report ``GroupPage.incomplete_from_messages``.
+_SENDER_DIMENSIONS = ("sender_address", "sender_domain", "authority_class")
+
 # ``aggregate_messages``' dimensions (#823), in the order the tool's
 # schema lists them.
 AGGREGATE_DIMENSIONS = (
@@ -1119,6 +1123,14 @@ class GroupPage:
     groups: list[MessageGroup]
     has_more: bool
     next_cursor: str | None
+    # Sender dimensions only (``None`` otherwise): the messages the
+    # filters do not reject whose sender is safe (``sender_ambiguous``
+    # 0) but whose From list is not known complete
+    # (``from_addresses_complete`` not 1), each once, across the whole
+    # result; ``authority_class`` leaves out
+    # ``AUTHORITY_EXCLUDED_FOLDERS``. It includes a message with no
+    # stored From row, which is also in the null group.
+    incomplete_from_messages: int | None = None
 
 
 def _sql_casefold(value):
@@ -4751,6 +4763,21 @@ class Database:
         digest = _aggregate_digest(group_by, leaves, where)
         offset = _decode_aggregate_cursor(cursor, digest) if cursor else 0
         rows_params = list(AUTHORITY_EXCLUDED_FOLDERS) if group_by == "authority_class" else []
+        # Review round 3 (owner, 2026-10-08): for a sender dimension,
+        # the messages not rejected whose sender is safe but whose From
+        # list is not known complete (0 a known loss, NULL not reparsed),
+        # once each, before a message is spread over its groups: further
+        # sender groups or memberships may be missing for them. Spam has
+        # no class either way, so authority_class leaves it out.
+        incomplete_sql, incomplete_params = "NULL", []
+        if group_by in _SENDER_DIMENSIONS:
+            incomplete_sql = "TOTAL(sa = 0 AND fc IS NOT 1"
+            if group_by == "authority_class":
+                incomplete_sql += (
+                    f" AND folder NOT IN ({','.join('?' * len(AUTHORITY_EXCLUDED_FOLDERS))})"
+                )
+                incomplete_params = list(AUTHORITY_EXCLUDED_FOLDERS)
+            incomplete_sql += ")"
         # ``e`` is materialized so the expression is evaluated once per
         # message it does not reject for ``ok``, not once per aggregate
         # that reads it; ``g`` because the page and the group count both
@@ -4759,7 +4786,8 @@ class Database:
         sql = (
             "WITH e AS MATERIALIZED (SELECT m.claimant_id AS cid, m.thread_id AS tid, "  # nosec B608
             "m.effective_at AS at, m.has_attachments AS att, m.folder AS folder, "
-            f"m.sender_ambiguous AS sa, ({expr}) AS ok FROM messages m WHERE ({expr}) IS NOT 0), "
+            "m.sender_ambiguous AS sa, m.from_addresses_complete AS fc, "
+            f"({expr}) AS ok FROM messages m WHERE ({expr}) IS NOT 0), "
             f"k AS ({_GROUP_ROWS[group_by]}), "
             "g AS MATERIALIZED (SELECT value, TOTAL(ok IS 1) AS n, "
             "COUNT(DISTINCT CASE WHEN ok IS 1 THEN tid END) AS threads, "
@@ -4768,16 +4796,17 @@ class Database:
             "TOTAL(ok IS 1 AND att = 1) AS with_att, TOTAL(ok IS NULL) AS undecided, "
             "MAX(CASE WHEN ok IS 1 THEN name END) AS name FROM k GROUP BY value), "
             "t AS (SELECT TOTAL(ok IS 1) AS matches, TOTAL(ok IS NULL) AS undecided, "
-            "(SELECT COUNT(*) FROM g) AS ngroups FROM e) "
+            f"(SELECT COUNT(*) FROM g) AS ngroups, {incomplete_sql} AS incomplete FROM e) "
             "SELECT t.matches, t.undecided, t.ngroups, pg.value, pg.n, pg.threads, "
-            "pg.first_at, pg.last_at, pg.with_att, pg.undecided, pg.name "
+            "pg.first_at, pg.last_at, pg.with_att, pg.undecided, pg.name, t.incomplete "
             "FROM t LEFT JOIN (SELECT * FROM g ORDER BY n DESC, value IS NULL, value "
             "LIMIT ? OFFSET ?) pg ON 1 ORDER BY pg.n DESC, pg.value IS NULL, pg.value"
         )
-        params = [*expr_params, *expr_params, *rows_params, limit + 1, offset]
+        params = [*expr_params, *expr_params, *rows_params, *incomplete_params, limit + 1, offset]
         with closing(self._connect()) as conn:
             rows = conn.execute(sql, params).fetchall()
         matches, undecided, total_groups = (int(n) for n in rows[0][:3])
+        incomplete = None if rows[0][11] is None else int(rows[0][11])
         groups = [
             MessageGroup(
                 value=r[3],
@@ -4801,6 +4830,7 @@ class Database:
             total_groups=total_groups,
             offset=offset,
             groups=groups,
+            incomplete_from_messages=incomplete,
             has_more=has_more,
             next_cursor=(
                 _encode_aggregate_cursor(digest, offset + len(groups)) if has_more else None
