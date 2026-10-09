@@ -30,6 +30,7 @@ from . import timings
 from .predicates import (
     ADDRESS_LEAF_ROWS,
     ADDRESS_ROLES,
+    AUTHORITY_EXCLUDED_FOLDERS,
     DATE_BASES,
     DEFAULT_EXCLUDED_FOLDERS,
     LEAVES,
@@ -1066,6 +1067,58 @@ class MessagePage:
 
 
 _INVALID_CURSOR = "invalid cursor; restart the query without a cursor"
+_FOREIGN_CURSOR = (
+    "cursor was issued for different filters; pass the same filters "
+    "as the call that returned it, or restart without a cursor"
+)
+
+# ``aggregate_messages``' dimensions (#823), in the order the tool's
+# schema lists them.
+AGGREGATE_DIMENSIONS = (
+    "sender_address",
+    "sender_domain",
+    "folder",
+    "year",
+    "month",
+    "authority_class",
+)
+
+
+@dataclass
+class MessageGroup:
+    """One ``aggregate_messages`` group: the messages the filters match
+    whose ``value`` on the dimension is this one (``None``: no value,
+    see ``Database.aggregate_messages``), and how many it leaves
+    undecided. The thread count, dates and attachment count cover the
+    matches only; ``first_at`` / ``last_at`` (effective time) and
+    ``display_name`` are ``None`` without a match."""
+
+    value: str | None
+    messages: int
+    threads: int
+    first_at: str | None
+    last_at: str | None
+    with_attachments: int
+    indeterminate: int
+    display_name: str | None = None
+
+
+@dataclass
+class GroupPage:
+    """One page of ``aggregate_messages`` groups, most messages first.
+    ``total_matches`` and ``indeterminate`` count messages over the
+    whole filtered set, as ``MessagePage`` does; ``total_groups``
+    counts every group, not just this page's; ``offset`` is how many
+    groups earlier pages returned."""
+
+    group_by: str
+    total_matches: int
+    indeterminate: int
+    total_groups: int
+    offset: int
+    groups: list[MessageGroup]
+    has_more: bool
+    next_cursor: str | None
 
 
 def _sql_casefold(value):
@@ -1168,6 +1221,18 @@ def _leaf_results(
     return results
 
 
+def _message_expression(leaves: Sequence[Leaf], where: Sequence[WhereLeaf]) -> tuple[str, list]:
+    """The SQL over ``messages m`` that the flat ``leaves`` and the
+    ``where`` expression (``compile_where``) decide together, ANDed,
+    with its bound values: 1, 0 or NULL (undecided) per message."""
+    where_sql, params = compile_leaves(leaves)
+    if where:
+        explicit_sql, explicit_params = compile_where(where)
+        where_sql = f"{where_sql} AND {explicit_sql}"
+        params += explicit_params
+    return where_sql, params
+
+
 def _record_clock(record: MessageRecord, basis: DateBasis) -> str:
     """``record``'s value of the clock ``basis`` names: the keyset
     position of a page ordered by it. Under a nullable basis the
@@ -1213,12 +1278,90 @@ def _decode_cursor(cursor: str, digest: str) -> tuple[str, str, int]:
     ):
         raise InvalidFilterError("cursor", _INVALID_CURSOR)
     if data["q"] != digest:
-        raise InvalidFilterError(
-            "cursor",
-            "cursor was issued for different filters; pass the same filters "
-            "as the call that returned it, or restart without a cursor",
-        )
+        raise InvalidFilterError("cursor", _FOREIGN_CURSOR)
     return data["s"], data["m"], data["o"]
+
+
+def _aggregate_digest(group_by: str, leaves: Sequence[Leaf], where: Sequence[WhereLeaf]) -> str:
+    """The ``aggregate_messages`` cursor digest: the tool, the dimension
+    and ``query_messages``' digest of the same filters (``leaf_digest``),
+    so a cursor only pages the grouping it was issued for."""
+    canonical = ["aggregate_messages", group_by, leaf_digest(leaves, where=where)]
+    return hashlib.sha256(json.dumps(canonical).encode()).hexdigest()[:16]
+
+
+def _encode_aggregate_cursor(digest: str, offset: int) -> str:
+    payload = json.dumps({"v": 1, "t": "aggregate", "q": digest, "o": offset})
+    return base64.urlsafe_b64encode(payload.encode()).rstrip(b"=").decode()
+
+
+def _decode_aggregate_cursor(cursor: str, digest: str) -> int:
+    """The number of groups earlier pages returned. Raises
+    ``InvalidFilterError`` on a malformed cursor, another tool's, or one
+    issued for different filters or another dimension."""
+    try:
+        raw = base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4))
+        data = json.loads(raw)
+    except ValueError as exc:
+        raise InvalidFilterError("cursor", _INVALID_CURSOR) from exc
+    if not (
+        isinstance(data, dict)
+        and data.get("v") == 1
+        and data.get("t") == "aggregate"
+        and isinstance(data.get("q"), str)
+        and type(data.get("o")) is int
+        and data["o"] >= 0
+    ):
+        raise InvalidFilterError("cursor", _INVALID_CURSOR)
+    if data["q"] != digest:
+        raise InvalidFilterError("cursor", _FOREIGN_CURSOR)
+    return data["o"]
+
+
+# The From rows ``aggregate_messages`` groups a message by: only when
+# its sender attribution is known safe (``sender_ambiguous = 0``), as
+# the sender leaves decide the From role (#1153). ``e`` is the
+# statement's message set.
+_SAFE_FROM_ROWS = (
+    "LEFT JOIN message_participants p ON p.claimant_id = e.cid AND p.role = 'from' AND e.sa = 0"
+)
+
+# Per dimension, the rows ``(e.*, value, name)`` the groups are counted
+# over: one per message, or one per distinct value of a message with
+# several (two From addresses), and one with ``value`` NULL for a
+# message with none. Each value is the one the matching
+# ``query_messages`` filter decides on: ``address_is`` / ``domain_is``
+# on the From role, ``folder``, a date range on the effective time
+# (stored UTC ISO 8601, so the year and month are its prefix) and
+# ``authority_class`` (its person entity's class, never in
+# ``AUTHORITY_EXCLUDED_FOLDERS``). ``name`` is the sender's display
+# name on the group's latest match that has one. The SQL is constant
+# except the excluded folders' placeholders, bound in order.
+_GROUP_ROWS: dict[str, str] = {
+    "sender_address": (
+        "SELECT e.*, p.address AS value, FIRST_VALUE(p.name) OVER ("  # nosec B608
+        "PARTITION BY p.address ORDER BY e.ok IS 1 DESC, p.name IS NULL, e.at DESC, e.cid DESC"
+        f") AS name FROM e {_SAFE_FROM_ROWS}"
+    ),
+    # The text after the last "@" (``rtrim`` strips every trailing
+    # character but "@"), the suffix ``domain_is`` compares.
+    "sender_domain": (
+        "SELECT DISTINCT e.*, substr(p.address, "  # nosec B608
+        "length(rtrim(p.address, replace(p.address, '@', ''))) + 1) AS value, "
+        f"NULL AS name FROM e {_SAFE_FROM_ROWS}"
+    ),
+    "folder": "SELECT e.*, e.folder AS value, NULL AS name FROM e",
+    "year": "SELECT e.*, substr(e.at, 1, 4) AS value, NULL AS name FROM e",
+    "month": "SELECT e.*, substr(e.at, 1, 7) AS value, NULL AS name FROM e",
+    "authority_class": (
+        "SELECT DISTINCT e.*, c.class AS value, NULL AS name FROM e LEFT JOIN ("  # nosec B608
+        "SELECT p.claimant_id AS cid, n.authority_class AS class FROM message_participants p "
+        "JOIN entities n ON n.entity_id = 'person:' || p.address "
+        "AND n.kind = 'person' AND n.canonical_key = p.address WHERE p.role = 'from'"
+        ") c ON c.cid = e.cid AND e.sa = 0 "
+        f"AND e.folder NOT IN ({','.join('?' * len(AUTHORITY_EXCLUDED_FOLDERS))})"
+    ),
+}
 
 
 # Characters of a sender-controlled attachment filename or MIME type a
@@ -4455,12 +4598,7 @@ class Database:
             if leaf.name in ADDRESS_ROLES
         ]
         explicit = [w.leaf for w in where]
-        where_sql, params = compile_leaves(leaves)
-        if where:
-            # The ``where`` expression (``compile_where``), ANDed.
-            explicit_sql, explicit_params = compile_where(where)
-            where_sql = f"{where_sql} AND {explicit_sql}"
-            params += explicit_params
+        where_sql, params = _message_expression(leaves, where)
 
         # A cursor is only meaningful for the predicates and the ordering
         # it was issued under; bind it to a digest of both.
@@ -4527,6 +4665,141 @@ class Database:
             address_matches=address_matches,
             indeterminate=indeterminate,
             leaf_results=leaf_results,
+        )
+
+    def aggregate_messages(
+        self,
+        *,
+        group_by: str,
+        sender: str | None = None,
+        recipient: str | None = None,
+        participant: str | None = None,
+        subject: str | None = None,
+        text: str | None = None,
+        folder: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        has_attachments: bool | None = None,
+        authority_class: str | None = None,
+        seen: bool | None = None,
+        flagged: bool | None = None,
+        replied: bool | None = None,
+        size_min: int | None = None,
+        size_max: int | None = None,
+        where: Sequence[WhereLeaf] = (),
+        limit: int = 25,
+        cursor: str | None = None,
+    ) -> GroupPage:
+        """Count the messages ``query_messages`` would match under the
+        same filters, grouped by one ``AGGREGATE_DIMENSIONS`` value
+        (#823), most messages first (then by value, the no-value group
+        last), paged by offset through ``cursor``.
+
+        The filters compile to ``query_messages``' expression
+        (``_message_expression``), so a group's ``messages`` is that
+        tool's ``total_matches`` under the same filters plus the
+        group's own: ``where`` ``address_is`` / ``domain_is`` on the
+        From role, ``folder``, a date range spanning the UTC year or
+        month (effective time), or ``authority_class``. A message the
+        expression leaves undecided is counted in its group's
+        ``indeterminate``, never its ``messages``. A message with no
+        value on the dimension is in the group whose value is ``None``:
+        for the sender dimensions one whose ``sender_ambiguous`` is not
+        0 or with no stored From address; for ``authority_class`` also
+        one in ``AUTHORITY_EXCLUDED_FOLDERS`` or with no classified
+        From address. A message with several From addresses counts in
+        each of their groups, so those groups can sum to more than
+        ``total_matches``.
+
+        Bounded work: one statement in one read snapshot. It evaluates
+        the expression once per message to filter and once more per
+        message it does not reject, then groups those rows; ``limit``
+        caps the groups returned, not the rows grouped.
+
+        Raises ``ValueError`` for an unknown ``group_by`` and for what
+        ``query_messages`` rejects (``InvalidFilterError``), including
+        a malformed cursor or one issued for other filters or another
+        dimension.
+        """
+        if group_by not in _GROUP_ROWS:
+            raise InvalidFilterError(
+                "group_by", f"group_by must be one of {', '.join(AGGREGATE_DIMENSIONS)}"
+            )
+        leaves = query_messages_leaves(
+            sender=sender,
+            recipient=recipient,
+            participant=participant,
+            subject=subject,
+            text=text,
+            folder=folder,
+            date_from=date_from,
+            date_to=date_to,
+            has_attachments=has_attachments,
+            authority_class=authority_class,
+            seen=seen,
+            flagged=flagged,
+            replied=replied,
+            size_min=size_min,
+            size_max=size_max,
+        )
+        expr, expr_params = _message_expression(leaves, where)
+        digest = _aggregate_digest(group_by, leaves, where)
+        offset = _decode_aggregate_cursor(cursor, digest) if cursor else 0
+        rows_params = list(AUTHORITY_EXCLUDED_FOLDERS) if group_by == "authority_class" else []
+        # ``e`` is materialized so the expression is evaluated once per
+        # message it does not reject for ``ok``, not once per aggregate
+        # that reads it; ``g`` because the page and the group count both
+        # read it. One row always comes back, so a page past the last
+        # group still carries the totals.
+        sql = (
+            "WITH e AS MATERIALIZED (SELECT m.claimant_id AS cid, m.thread_id AS tid, "  # nosec B608
+            "m.effective_at AS at, m.has_attachments AS att, m.folder AS folder, "
+            f"m.sender_ambiguous AS sa, ({expr}) AS ok FROM messages m WHERE ({expr}) IS NOT 0), "
+            f"k AS ({_GROUP_ROWS[group_by]}), "
+            "g AS MATERIALIZED (SELECT value, TOTAL(ok IS 1) AS n, "
+            "COUNT(DISTINCT CASE WHEN ok IS 1 THEN tid END) AS threads, "
+            "MIN(CASE WHEN ok IS 1 THEN at END) AS first_at, "
+            "MAX(CASE WHEN ok IS 1 THEN at END) AS last_at, "
+            "TOTAL(ok IS 1 AND att = 1) AS with_att, TOTAL(ok IS NULL) AS undecided, "
+            "MAX(CASE WHEN ok IS 1 THEN name END) AS name FROM k GROUP BY value), "
+            "t AS (SELECT TOTAL(ok IS 1) AS matches, TOTAL(ok IS NULL) AS undecided, "
+            "(SELECT COUNT(*) FROM g) AS ngroups FROM e) "
+            "SELECT t.matches, t.undecided, t.ngroups, pg.value, pg.n, pg.threads, "
+            "pg.first_at, pg.last_at, pg.with_att, pg.undecided, pg.name "
+            "FROM t LEFT JOIN (SELECT * FROM g ORDER BY n DESC, value IS NULL, value "
+            "LIMIT ? OFFSET ?) pg ON 1 ORDER BY pg.n DESC, pg.value IS NULL, pg.value"
+        )
+        params = [*expr_params, *expr_params, *rows_params, limit + 1, offset]
+        with closing(self._connect()) as conn:
+            rows = conn.execute(sql, params).fetchall()
+        matches, undecided, total_groups = (int(n) for n in rows[0][:3])
+        groups = [
+            MessageGroup(
+                value=r[3],
+                messages=int(r[4]),
+                threads=r[5],
+                first_at=r[6],
+                last_at=r[7],
+                with_attachments=int(r[8]),
+                indeterminate=int(r[9]),
+                display_name=r[10],
+            )
+            for r in rows
+            if r[4] is not None
+        ]
+        has_more = len(groups) > limit
+        groups = groups[:limit]
+        return GroupPage(
+            group_by=group_by,
+            total_matches=matches,
+            indeterminate=undecided,
+            total_groups=total_groups,
+            offset=offset,
+            groups=groups,
+            has_more=has_more,
+            next_cursor=(
+                _encode_aggregate_cursor(digest, offset + len(groups)) if has_more else None
+            ),
         )
 
     def query_attachments(

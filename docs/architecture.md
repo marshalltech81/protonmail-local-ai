@@ -1110,6 +1110,7 @@ result qualifies depends on its unit:
 | Thread (`search_emails`; the threads `get_evidence`, `ask_mailbox`, `extract_from_emails`, `brief_issue` and `check_conclusion` retrieve) | Its `[date_first, date_last]` span (effective times) overlaps the range | Relevance |
 | Evidence passage of a retrieved thread (same tools except `search_emails`, mailbox-wide path) | Its thread qualifies; the passage's own dates may fall outside the range, and `ask_mailbox` and `get_evidence` then label it `context` | Relevance within the thread |
 | Message (`query_messages`) | Its effective time is in the range | Effective time, newest first |
+| Message group (`aggregate_messages`) | Counts the messages `query_messages` would return; `year` and `month` groups are the UTC year or month of the effective time | Messages per group, most first |
 | Attachment (`search_attachments`) | The carrying message's effective time is in the range | Relevance; with no query, effective time, newest first |
 | Attachment occurrence (`query_attachments`) | The carrying message's effective time is in the range | Effective time, newest first |
 

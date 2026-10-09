@@ -8,7 +8,7 @@ import logging
 import time
 import unicodedata
 from collections.abc import Callable
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastmcp.exceptions import ToolError
 from mcp.types import CallToolResult
@@ -46,6 +46,7 @@ from .outputs import (
     HEADER_CHAR_LIMIT,
     MAX_LISTED,
     AddressFilterMatch,
+    AggregateMessagesOutput,
     Contact,
     FilterUse,
     FindContactOutput,
@@ -56,6 +57,7 @@ from .outputs import (
     ListedAttachment,
     ListFoldersOutput,
     ListThreadsOutput,
+    MessageGroupRow,
     QueryAttachmentsOutput,
     QueryMessagesOutput,
     ReapedMessage,
@@ -82,6 +84,16 @@ log = logging.getLogger("mcp.tools.retrieval")
 _MAX_QUERY_LIMIT = 100
 # query_attachments' ceiling, search_attachments' cap (#796).
 _MAX_ATTACHMENT_QUERY_LIMIT = 50
+# aggregate_messages' group cap: groups per page (#823).
+_MAX_AGGREGATE_GROUPS = 100
+# How aggregate_messages' prose names the group of messages with no
+# value on the dimension (``Database.aggregate_messages``); folder, year
+# and month have a value for every message.
+_NO_VALUE_LABELS = {
+    "sender_address": "(no attributable sender)",
+    "sender_domain": "(no attributable sender)",
+    "authority_class": "(no class: Spam, no attributable sender, or no classified sender)",
+}
 
 # query_attachments' ``extraction_status``: one of
 # ``lib/sqlite.EXTRACTION_STATUS_FILTERS``, or blank, with surrounding
@@ -561,6 +573,7 @@ def register_retrieval_tools(server, db):
             "get_message",
             "list_threads",
             "query_messages",
+            "aggregate_messages",
             "query_attachments",
             "get_attachment",
             "find_contact",
@@ -1509,6 +1522,211 @@ def register_retrieval_tools(server, db):
             lines.append("")
 
         return _projected(tool_result("\n".join(lines), output), projection)
+
+    @server.tool(
+        output_schema=AggregateMessagesOutput.model_json_schema(),
+        annotations=read_only("Aggregate Messages"),
+    )
+    @timings.timed_tool("aggregate_messages")
+    async def aggregate_messages(
+        group_by: Literal[
+            "sender_address", "sender_domain", "folder", "year", "month", "authority_class"
+        ],
+        sender: str | None = None,
+        recipient: str | None = None,
+        participant: str | None = None,
+        subject: str | None = None,
+        text: str | None = None,
+        folder: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        has_attachments: bool | None = None,
+        authority_class: str | None = None,
+        seen: bool | None = None,
+        flagged: bool | None = None,
+        replied: bool | None = None,
+        size_min: SizeBound = None,
+        size_max: SizeBound = None,
+        where: Where | None = None,
+        limit: int = 25,
+        cursor: str | None = None,
+    ) -> CallToolResult:
+        """
+        Count the messages query_messages would match, grouped by one
+        dimension, without listing them: per group the message count,
+        distinct threads, first and last date, messages with
+        attachments and, for a sender address, a display name. Use it
+        for volume questions ("top senders", "mail per month", "which
+        folders") instead of paging query_messages and counting.
+
+        Takes exactly query_messages' filters, with the same meaning,
+        so a group's ``messages`` equals query_messages' total_matches
+        for the same filters plus the group's own (sender address or
+        domain as a where address_is / domain_is leaf on from, folder,
+        the UTC year or month as a date range, or authority_class).
+        Messages in Trash are left out unless ``folder="Trash"``.
+        ``indeterminate`` counts messages the filters could not decide,
+        as query_messages does; they are in a group's
+        ``indeterminate``, never its ``messages``, so report it when not
+        0. The group with a null value holds messages with no value on
+        the dimension: no attributable sender (ambiguous, not yet
+        checked, or no stored From address), and for authority_class
+        also Spam and senders with no class. A message with several
+        From addresses counts in each of their groups.
+
+        Groups are ordered by messages descending, then value. When
+        ``has_more`` is true, call again with the SAME filters and
+        group_by plus ``cursor`` set to ``next_cursor``. Each page
+        recounts, so mail indexed between pages can shift groups.
+
+        Args:
+            group_by: sender_address, sender_domain, folder, year,
+                      month or authority_class (dates are the effective
+                      time, occurred_at else sent_at, in UTC).
+            sender: As in query_messages.
+            recipient: As in query_messages.
+            participant: As in query_messages.
+            subject: As in query_messages.
+            text: As in query_messages.
+            folder: As in query_messages; without it Trash is left out.
+            date_from: As in query_messages.
+            date_to: As in query_messages.
+            has_attachments: As in query_messages.
+            authority_class: As in query_messages.
+            seen: As in query_messages.
+            flagged: As in query_messages.
+            replied: As in query_messages.
+            size_min: As in query_messages.
+            size_max: As in query_messages.
+            where: As in query_messages (all / any / negate).
+            limit: Groups per page (default 25, clamped to [1, 100]).
+            cursor: ``next_cursor`` from the previous page of the same call.
+        """
+        args = {
+            "sender": sender,
+            "recipient": recipient,
+            "participant": participant,
+            "subject": subject,
+            "text": text,
+            "folder": folder,
+            "date_from": date_from,
+            "date_to": date_to,
+            "has_attachments": has_attachments,
+            "authority_class": authority_class,
+            "seen": seen,
+            "flagged": flagged,
+            "replied": replied,
+            "size_min": size_min,
+            "size_max": size_max,
+        }
+        log_tool_call(
+            log,
+            "aggregate_messages",
+            {"group_by": group_by, **args, "where": where, "limit": limit, "cursor": cursor},
+        )
+        limit = clamp_int(limit, default=25, minimum=1, maximum=_MAX_AGGREGATE_GROUPS)
+        try:
+            bounds = date_bounds(*validate_date_range(date_from, date_to))
+            where_leaves = normalize_where(where) if where is not None else []
+            page = await asyncio.to_thread(
+                db.aggregate_messages,
+                group_by=group_by,
+                **args,
+                where=where_leaves,
+                limit=limit,
+                cursor=cursor,
+            )
+        except InvalidFilterError as e:
+            # The message may quote the rejected value: to the caller
+            # only; the log names the field (as query_messages does).
+            rejections.reject("aggregate_messages", e.field_name)
+            raise ToolError(f"Error: {e}") from e
+        except Exception as e:
+            log.error("aggregate_messages error: %s", type(e).__name__)
+            raise ToolError(f"Error: {type(e).__name__}") from e
+
+        timings.count("total_matches", page.total_matches)
+        timings.count("indeterminate", page.indeterminate)
+        timings.count("groups", page.total_groups)
+        timings.count("returned", len(page.groups))
+        uses = _filter_uses(args)
+        if page.indeterminate:
+            for key, _ in _indeterminate_cause_entries(uses, where_leaves):
+                timings.count(f"indeterminate_cause_{key}", 1)
+        output = AggregateMessagesOutput(
+            group_by=page.group_by,
+            filters=uses,
+            date_bounds=bounds,
+            total_matches=page.total_matches,
+            indeterminate=page.indeterminate,
+            total_groups=page.total_groups,
+            returned=len(page.groups),
+            offset=page.offset,
+            has_more=page.has_more,
+            next_cursor=page.next_cursor,
+            groups=[
+                MessageGroupRow(
+                    value=None if g.value is None else clip(g.value, HEADER_CHAR_LIMIT),
+                    messages=g.messages,
+                    threads=g.threads,
+                    first_at=g.first_at,
+                    last_at=g.last_at,
+                    with_attachments=g.with_attachments,
+                    indeterminate=g.indeterminate,
+                    display_name=(
+                        None if g.display_name is None else clip(g.display_name, HEADER_CHAR_LIMIT)
+                    ),
+                )
+                for g in page.groups
+            ],
+        )
+        parts = [_describe_filters(uses, none=""), *_describe_where(where_leaves)]
+        lines = [
+            f"group_by: {page.group_by}",
+            f"Query: {', '.join(p for p in parts if p) or _describe_filters([])}",
+        ]
+        if bounds_line := describe_date_bounds(bounds):
+            lines.append(bounds_line)
+        lines.append(f"total_matches: {page.total_matches}")
+        if page.indeterminate:
+            causes = _indeterminate_causes(uses, where_leaves)
+            lines.append(
+                f"indeterminate: {page.indeterminate} (messages the filters could neither "
+                f"accept nor reject: {'; '.join(causes)}; in no group's message count)"
+            )
+        if not page.groups:
+            lines.append(f"groups: {page.total_groups} (returned 0)")
+            if page.offset:
+                lines.append("No further groups.")
+            elif page.indeterminate:
+                lines.append("No messages are known to match.")
+            else:
+                lines.append("No messages match.")
+            return tool_result("\n".join(lines), output)
+
+        first, last = page.offset + 1, page.offset + len(page.groups)
+        lines.append(f"groups: {page.total_groups} (returned {first}-{last})")
+        lines.append(f"has_more: {'true' if page.has_more else 'false'}")
+        if page.next_cursor:
+            lines.append(f"next_cursor: {page.next_cursor}")
+            lines.append(
+                "(Call again with the same filters, group_by and this cursor for the next page.)"
+            )
+        lines.append("")
+        for i, row in enumerate(output.groups, first):
+            label = row.value if row.value is not None else _NO_VALUE_LABELS[page.group_by]
+            line = (
+                f"{i}. {label}: {row.messages} messages, {row.threads} threads, "
+                f"{row.with_attachments} with attachments"
+            )
+            if row.first_at:
+                line += f", {row.first_at} to {row.last_at}"
+            if row.indeterminate:
+                line += f", indeterminate {row.indeterminate}"
+            if row.display_name is not None:
+                line += f", display name {row.display_name!r}"
+            lines.append(line)
+        return tool_result("\n".join(lines), output)
 
     @server.tool(
         output_schema=QueryAttachmentsOutput.model_json_schema(),

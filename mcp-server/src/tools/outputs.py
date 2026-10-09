@@ -708,6 +708,53 @@ def query_messages_output_schema() -> dict[str, Any]:
     return schema
 
 
+class MessageGroupRow(_Output):
+    value: str | None = Field(
+        description="The group's address, domain, folder, year (YYYY), month (YYYY-MM) or "
+        "authority class; null for the messages with no value on the dimension."
+    )
+    messages: int = Field(description="Messages the filters definitely match in this group.")
+    threads: int = Field(description="Distinct threads of those messages.")
+    first_at: str | None = Field(
+        description="Earliest effective time (occurred_at, else sent_at) of those messages; "
+        "null without one."
+    )
+    last_at: str | None = Field(description="Latest effective time; null without one.")
+    with_attachments: int = Field(description="Of those messages, how many have an attachment.")
+    indeterminate: int = Field(
+        description="Messages in this group the filters could neither accept nor reject; "
+        "not in messages."
+    )
+    display_name: str | None = Field(
+        description="sender_address only: the display name on the group's latest match "
+        "that has one; null otherwise."
+    )
+
+
+class AggregateMessagesOutput(_Output):
+    group_by: str
+    filters: list[FilterUse] = Field(description="How each given filter was applied; empty: none.")
+    date_bounds: DateBounds | None = Field(description=_DATE_BOUNDS_DESCRIPTION)
+    total_matches: int = Field(
+        description="Messages the filters definitely match, as query_messages counts them."
+    )
+    indeterminate: int = Field(
+        description="Messages the filters could neither accept nor reject, as query_messages "
+        "counts them; in no group's messages. When not 0, report it with any count."
+    )
+    total_groups: int = Field(description="Every group, not just this page's.")
+    returned: int
+    offset: int = Field(description="Groups returned by earlier pages.")
+    has_more: bool
+    next_cursor: str | None = Field(
+        description="Pass with the same filters and group_by for the next page; null when "
+        "has_more is false."
+    )
+    groups: list[MessageGroupRow] = Field(
+        description="Most messages first, then by value; the null-value group last among ties."
+    )
+
+
 class ListedAttachment(_Output):
     attachment_occurrence_id: str = Field(
         description="This occurrence: one attachment on one message. Unique per row."
