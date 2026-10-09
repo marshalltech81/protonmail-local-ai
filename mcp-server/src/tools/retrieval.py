@@ -1365,10 +1365,9 @@ def register_retrieval_tools(server, db):
                     f"valid: {', '.join(QUERY_MESSAGE_FIELDS)}"
                 )
             projection = frozenset(fields) | {"claimant_id", "thread_id"}
-        # Reject a bad date range or where before any retrieval work.
+        # Reject a bad date range before any retrieval work.
         try:
             bounds = date_bounds(*validate_date_range(date_from, date_to))
-            where_leaves = normalize_where(where) if where is not None else []
         except InvalidFilterError as e:
             rejections.reject("query_messages", e.field_name)
             raise ToolError(f"Error: {e}") from e
@@ -1378,6 +1377,10 @@ def register_retrieval_tools(server, db):
         # here; serving another clock was split out of #1085 (owner,
         # 2026-10-08) and waits for #1150 (with #1087).
         try:
+            # where is normalized before any query, inside this boundary:
+            # tokenizing body_words can raise on text SQLite cannot
+            # encode, answered by type below (Codex round 1).
+            where_leaves = normalize_where(where) if where is not None else []
             page = await asyncio.to_thread(
                 db.query_messages, **args, where=where_leaves, limit=limit, cursor=cursor
             )

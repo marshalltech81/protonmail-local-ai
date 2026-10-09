@@ -618,7 +618,13 @@ def _corpus(tmp_path, size: int) -> Database:
             message_id=f"w{i}",
             thread_id=f"t{i}",
             sent_at=f"2024-01-01T{i // 60 % 24:02d}:{i % 60:02d}:00+00:00",
-            body="budget approved",
+            # Realistic density (#1262): over 20 tokens per chunk, with
+            # words that vary per message so the FTS index grows.
+            body=(
+                f"the quarterly budget approved by the committee covers travel, "
+                f"equipment and training for team{i} through the end of year "
+                f"{2000 + i % 30}, reference item{i} batch{i % 7} and review{i % 13}"
+            ),
             from_=["a@one.test"],
             to=["b@two.test" if kind < 2 else "c@three.test"],
             completeness={"to_addresses_complete": None} if kind == 2 else {},
@@ -688,6 +694,18 @@ def test_database_is_unchanged_without_where(messages_db: Database):
     page = messages_db.query_messages(sender="jane@example.com", limit=50)
     assert _claimants(page) == ["m5", "m3", "m1"]
     assert page.leaf_results == []
+
+
+def test_a_where_value_sqlite_cannot_encode_is_answered_by_type(fake_server, messages_db, caplog):
+    # Codex round 1: an unpaired surrogate reaches the FTS tokenizer
+    # while where is normalized; the handler's error boundary answers
+    # and logs it by type, as it does for the flat text filter.
+    handler = _handlers(fake_server, messages_db)["query_messages"]
+    with caplog.at_level(logging.INFO):
+        text = _error(handler(where=_where(_leaf("body_words", f"{MARKER} \ud800"))))
+    assert text == "Error: UnicodeEncodeError"
+    assert "query_messages error: UnicodeEncodeError" in caplog.text
+    assert MARKER not in caplog.text
 
 
 def test_the_handler_refuses_negate(fake_server, messages_db):
