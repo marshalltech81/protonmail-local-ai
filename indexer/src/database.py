@@ -1680,11 +1680,13 @@ class Database:
             raise
 
     @_synchronized
-    def get_attachment_occurrence_states(self, claimant_id: str) -> dict[str, tuple[bool, bool]]:
+    def get_attachment_occurrence_states(
+        self, claimant_id: str
+    ) -> dict[str, tuple[int | None, bool]]:
         """Each stored attachment occurrence of a message, by occurrence
-        ID: ``(completed, deferred)`` (#1236). ``completed`` is a recorded
-        ``text_complete`` with no deferral mark: work an extraction
-        continuation does not reopen. ``deferred`` is a deferral mark."""
+        ID: ``(text_complete, deferred)`` (#1236). A recorded
+        ``text_complete`` with no deferral mark is work an extraction
+        continuation does not reopen; ``deferred`` is a deferral mark."""
         rows = self._conn.execute(
             "SELECT attachment_occurrence_id, text_complete, extraction_deferred_at "
             "FROM attachments WHERE claimant_id = ?",
@@ -1692,7 +1694,7 @@ class Database:
         ).fetchall()
         return {
             r["attachment_occurrence_id"]: (
-                r["text_complete"] is not None and r["extraction_deferred_at"] is None,
+                r["text_complete"],
                 r["extraction_deferred_at"] is not None,
             )
             for r in rows

@@ -2038,9 +2038,15 @@ in the seconds.
 - **Progress.** A continuation (a claimed job still carrying the
   `extract` stage and its fixed text) resolves only the pending
   occurrences: no recorded `text_complete`, or a deferral mark. An
-  occurrence whose result already applied is served its cached row as
-  it stands, whatever its age, so an expired `failed` row is not re-run
-  and a message always gets closer to done. An `EXTRACTOR_VERSIONS`
+  occurrence whose result already applied is skipped outright: no cache
+  read, chunking, chunk-ID read or write, whatever its cached row's age,
+  so an expired `failed` row is not re-run and a message always gets
+  closer to done. Its committed chunks stay, and its payload's shared
+  slice is neither replaced nor cleared that pass (a full pass settles
+  it). A pending occurrence gets one cache read per pass, and one
+  deferred again with its mark already written is not rewritten. Every
+  pass still recomputes the thread vector from all of the thread's
+  chunk vectors in its commit. An `EXTRACTOR_VERSIONS`
   bump clears `text_complete` on exactly its occurrences, which makes
   them pending again; the startup sweeps keep the deferral marks, leave
   a queued continuation as it is, and re-queue a message that carries a
@@ -2053,7 +2059,7 @@ in the seconds.
 - **Visibility.** The attachments line counts `deferred` occurrences,
   `deferred_messages` and `deferred_resumed` (a WARNING while any are
   deferred); a continuation pass does not count again the occurrences
-  served from earlier passes. The queue heartbeat counts continued jobs
+  resolved in earlier passes. The queue heartbeat counts continued jobs
   in `extraction_deferred`, and logs `attachment extraction caught up`
   once when none remain. `get_mailbox_status` reports them as
   `extraction_deferred` (they keep the index non-current);
@@ -2077,20 +2083,32 @@ one untimed warm-up each:
 | PNG, OCR on (image child) | 0.106 s | 0.124 s | 1 |
 | scanned PDF, one page, OCR on | 0.213 s | 0.247 s | 5 |
 
-A continuation pass of a message whose occurrences have all resolved
-but one (the checkpoint: parse, cache reads, chunk diff, attachment
-writes and the deferral, timed with a no-op extractor) took 0.08 s at
-1 part, 0.12 s at 100, 0.50 s at 1,000 and 5.0 s at 9,990 parts
-(1.8 MB). 5 seconds of extraction per turn is about what the largest
-message spends re-reading itself, so even then a pass spends at least
-as long extracting as checkpointing; 64 launches is about 5 seconds of
-the cheapest child launches (0.06–0.08 s), so the launch count binds
-for floods of tiny parts and the seconds for slow ones. A message with
-up to 64 child-format attachments still finishes in one pass. The
-budget spreads the work and adds a checkpoint per pass: from these
-figures, a 9,990-part message of distinct child-format parts needs about
-156 passes of about 10 s each, with other mail between them, where it
-held the worker for about 13 minutes in one pass before.
+64 launches is about 5 seconds of the cheapest child launches
+(0.06–0.08 s), so the launch count binds for floods of tiny parts and
+the seconds for slow ones. A message with up to 64 child-format
+attachments still finishes in one pass.
+
+The budget spreads a large message's work over passes, with other mail
+between them, and each continuation pass replays part of the message:
+it parses the whole file, reads each pending occurrence's cache row once,
+chunks the body and reads every chunk vector of the thread twice (the
+Phase 1 seed and the Phase 2c mean). The whole path, budgeted against
+unbudgeted (one pass), measured in the indexer image with the real
+extractors, a stub embedder (embedding cost excluded), synthetic
+messages with realistic text (one chunk of about 40 or 430 words per
+part) and plain timing:
+
+| Message | Unbudgeted | Budgeted | Passes | Budgeted ÷ unbudgeted | Per continuation pass (median): wall, parse, body chunking, thread-vector rows read (time) |
+|---|---|---|---|---|---|
+| 9,990 attached-email parts, 8.4 MB (one child launch each) | 646 s | 1,042 s | 157 | 1.61 | 6.6 s, 0.19 s, under 0.01 s, 10,050 rows (1.4 s) |
+| 8,500 attached-email parts, 45.2 MB (near the 50 MB parse cap) | 549 s | 889 s | 133 | 1.62 | 6.6 s, 0.43 s, under 0.01 s, 8,514 rows (1.2 s) |
+| 400 one-page scanned PDFs, 24.6 MB (OCR, five launches each) | 199 s | 229 s | 40 | 1.15 | 5.7 s, 0.21 s, under 0.01 s, 420 rows (0.02 s) |
+
+Resolved occurrences cost a pass nothing; what remains is the re-parse,
+one cache read per pending occurrence and the thread-wide vector reads,
+which grow with the parts already resolved (up to about 20,000 rows on
+the last pass at the part cap). Removing them (staged payloads and an
+exact incremental thread vector) is #1356.
 
 ### Cascade on message removal
 

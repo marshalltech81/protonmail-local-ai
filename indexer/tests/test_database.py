@@ -635,7 +635,7 @@ class TestMigrationV8:
             assert (col["type"], col["notnull"], col["dflt_value"]) == ("TEXT", 0, None)
             assert migrated._conn.execute("SELECT COUNT(*) FROM indexing_jobs").fetchone()[0] == 0
             assert migrated.get_attachment_occurrence_states(msg.claimant_id) == {
-                "occ-1": (False, False)
+                "occ-1": (None, False)
             }
         finally:
             migrated.close()

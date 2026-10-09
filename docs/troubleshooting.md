@@ -1767,8 +1767,9 @@ only, never filenames or text (`make logs`):
   extraction budget (#1236), `deferred_messages` the messages committed
   with some deferred, and `deferred_resumed` previously deferred
   occurrences that resolved; a deferred attachment is extracted on a
-  later pass of its message, never dropped. Occurrences a continuation
-  pass serves from earlier passes are not counted again.
+  later pass of its message, never dropped. A continuation pass skips
+  the occurrences resolved in earlier passes, so they are not counted
+  again.
   - When it is logged: during the initial index, with the timing summary
     once at least 25 messages have been drained since the last one (each
     batch, at the default `INITIAL_INDEX_BATCH_SIZE=50`), and once at

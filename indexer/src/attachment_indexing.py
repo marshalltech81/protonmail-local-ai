@@ -244,13 +244,10 @@ def record_committed_outcomes(plans: list[AttachmentWritePlan]) -> None:
     cap cut is counted as capped here, as the PDF extractor counts a
     fresh extraction (#891), and logs the same rate-limited WARNING. An
     unknown count (``None``, a row cached before schema v3) counts as
-    nothing. An extraction continuation's occurrence whose result applied
-    in an earlier pass (``counted_earlier``, #1236) was counted then, so
-    a message continued over many passes counts each occurrence once per
-    pass that resolves or defers it."""
+    nothing. An extraction continuation skips the occurrences resolved in
+    earlier passes (#1236), so a message continued over many passes
+    counts each occurrence once per pass that resolves or defers it."""
     for plan in plans:
-        if plan.counted_earlier:
-            continue
         attachment_outcomes.record(
             plan.status,
             plan.extraction_error,
@@ -481,10 +478,9 @@ class AttachmentWritePlan:
     # Whether the occurrence carried a deferral mark before this pass
     # (#1236): one that now resolves is counted as resumed.
     was_deferred: bool = False
-    # An extraction continuation's occurrence whose result applied in an
-    # earlier pass, served from its cached row as it stands: not counted
-    # again (``record_committed_outcomes``, #1236).
-    counted_earlier: bool = False
+    # A deferred occurrence whose stored mark already says so (deferred,
+    # ``text_complete`` 0): its apply writes nothing (#1236).
+    mark_unchanged: bool = False
     # Whether the plan holding this payload's chunk slice deletes stored
     # chunks it does not write. Off while another occurrence of the
     # payload in the message is deferred and holds chunks there (#1236).
@@ -546,7 +542,6 @@ def _resolve_extracted_text(
     batch_extractions: dict[tuple[str, str], ExtractionResult] | None = None,
     on_progress: Callable[[], None] | None = None,
     budget: ExtractionBudget | None = None,
-    completed: bool = False,
 ) -> tuple[
     str | None, str, ExtractionResult | None, str | None, bool, int | None, str | None, bool | None
 ]:
@@ -575,10 +570,6 @@ def _resolve_extracted_text(
     cannot serve them (#237). A reused one is still returned for
     persisting, since the message that extracted it may fail to commit.
 
-    ``completed`` (an extraction continuation's occurrence whose result
-    already applied, #1236) serves the cached row as it is, whatever its
-    age or the settings, so a continuation never reopens finished work;
-    only when the row is gone is the occurrence resolved as usual.
     ``budget`` is the message's extraction budget: once it is exhausted
     an attachment the cache and the batch cannot serve is not extracted
     and comes back ``STATUS_DEFERRED``, with nothing to persist; each
@@ -601,18 +592,6 @@ def _resolve_extracted_text(
         )
 
     cached = db.get_attachment_extraction(attachment.content_hash, module)
-    if completed and cached is not None:
-        text = cached["extracted_text"] if cached["extraction_status"] == STATUS_SUCCESS else None
-        return (
-            text,
-            cached["extraction_status"],
-            None,
-            cached["extraction_error"],
-            True,
-            cached["ocr_pages_skipped"],
-            cached["extractor"],
-            None if cached["text_complete"] is None else bool(cached["text_complete"]),
-        )
     # A row written by an older version of a since-fixed extractor would
     # otherwise be served forever: it is re-extracted, and only by an
     # occurrence that selects its module.
@@ -697,7 +676,6 @@ def prepare_attachment_writes(
     batch_extractions: dict[tuple[str, str], ExtractionResult] | None = None,
     on_progress: Callable[[], None] | None = None,
     budget: ExtractionBudget | None = None,
-    completed: bool = False,
 ) -> AttachmentWritePlan:
     """Compute everything needed to write one attachment occurrence.
 
@@ -719,8 +697,8 @@ def prepare_attachment_writes(
     can decide whether to retry the message.
 
     ``on_progress`` is passed to the extractor, which calls it after
-    each page it reads (#485). ``budget`` and ``completed`` are passed
-    to ``_resolve_extracted_text``: a deferred occurrence's plan has
+    each page it reads (#485). ``budget`` is passed to
+    ``_resolve_extracted_text``: a deferred occurrence's plan has
     ``STATUS_DEFERRED`` and no chunks, and keeps the chunks stored for
     it (#1236).
     """
@@ -752,7 +730,6 @@ def prepare_attachment_writes(
         batch_extractions=batch_extractions,
         on_progress=on_progress,
         budget=budget,
-        completed=completed,
     )
     if status == STATUS_DEFERRED:
         return AttachmentWritePlan(
@@ -769,8 +746,6 @@ def prepare_attachment_writes(
         extraction_complete=extraction_complete,
         payload_complete=attachment.payload_complete,
     )
-    # Served by the ``completed`` path: the cached row, nothing to persist.
-    counted_earlier = completed and cached and extraction_to_persist is None
 
     if status != STATUS_SUCCESS or not text:
         # No usable text for chunking. Still searchable by filename / MIME
@@ -789,7 +764,6 @@ def prepare_attachment_writes(
             ocr_pages_skipped=ocr_pages_skipped,
             text_complete=text_complete,
             text_extractor=extractor,
-            counted_earlier=counted_earlier,
         )
 
     # Chunk the extracted text. The chunker takes
@@ -816,7 +790,6 @@ def prepare_attachment_writes(
         ocr_pages_skipped=ocr_pages_skipped,
         text_complete=text_complete,
         text_extractor=extractor,
-        counted_earlier=counted_earlier,
     )
 
 
@@ -848,6 +821,9 @@ def apply_attachment_writes(
       text so any chunk hit lifts the parent thread of the email that
       carried it.
     """
+    if plan.mark_unchanged:
+        # Deferred again; the stored row already records it (#1236).
+        return
     module = extraction_cache_module(plan.attachment)
     db.upsert_attachment(
         claimant_id=claimant_id,

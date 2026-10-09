@@ -100,7 +100,13 @@ class LaunchingExtractor:
         return ExtractionResult(
             status=STATUS_SUCCESS,
             extractor=stamp,
-            text=f"words of {payload.decode()} under {content_type} {MARKER}",
+            # At least 20 tokens a chunk, the density real mail has
+            # (AGENTS.md, work-growth gates).
+            text=(
+                f"words of {payload.decode()} under {content_type} {MARKER} "
+                "the quarterly synthetic figures show steady growth across every "
+                "region with costs held flat and margins improving over the year"
+            ),
             error=None,
             text_complete=True,
         )
@@ -694,11 +700,209 @@ class TestContinuation:
         p.drain()
         assert p.deferred() == 1
         assert p.attachment_chunks() == both
-        # The deferred copy now fails too: nothing holds text, the slice
-        # is cleared.
+        # The deferred copy now fails too. The continuation skips the
+        # copy resolved last pass and keeps its payload's slice as it
+        # stands (owner, 2026-10-09: no work on resolved occurrences)...
+        p.drain()
+        assert p.job(path) is None
+        assert p.attachment_chunks() == both
+        # ...and the next full pass, with nothing deferred, clears it.
+        p.queue.enqueue(path, REASON_INITIAL_SCAN)
         p.drain()
         assert p.job(path) is None
         assert p.attachment_chunks() == set()
+
+
+class WorkCounter:
+    """Counts, per drain pass, the work a pass does: message parses and
+    body chunkings, attachment cache reads (split by whether the
+    occurrence had already resolved), attachment chunkings, slice chunk-ID
+    reads, attachment row writes, deferral-mark writes and slice writes,
+    and the thread-vector rows read (Phase 1 seed and Phase 2c mean)."""
+
+    KEYS = (
+        "parses",
+        "body_chunkings",
+        "cache_reads",
+        "cache_reads_resolved",
+        "attachment_chunkings",
+        "slice_id_reads",
+        "attachment_upserts",
+        "completeness_writes",
+        "mark_writes",
+        "slice_writes",
+        "vector_rows",
+    )
+
+    def __init__(self, monkeypatch):
+        from collections import Counter
+
+        self.counts: Counter[str] = Counter()
+        self.resolved_hashes: set[str] = set()
+
+        def wrap(owner, name, key, *, rows=False, when=None):
+            real = getattr(owner, name)
+
+            def counted(*args, **kwargs):
+                result = real(*args, **kwargs)
+                if when is None or when(args, kwargs):
+                    self.counts[key] += len(result) if rows else 1
+                return result
+
+            monkeypatch.setattr(owner, name, counted)
+
+        wrap(main, "parse_email", "parses")
+        wrap(main, "chunk_segments", "body_chunkings")
+        wrap(attachment_indexing, "chunk_message", "attachment_chunkings")
+        wrap(Database, "get_attachment_extraction", "cache_reads")
+        wrap(
+            Database,
+            "get_attachment_extraction",
+            "cache_reads_resolved",
+            when=lambda a, k: a[1] in self.resolved_hashes,
+        )
+        wrap(
+            Database,
+            "get_chunk_ids_for_message",
+            "slice_id_reads",
+            when=lambda a, k: k.get("attachment_id") is not None,
+        )
+        wrap(Database, "upsert_attachment", "attachment_upserts")
+        wrap(Database, "set_attachment_text_complete", "completeness_writes")
+        wrap(Database, "mark_attachment_extraction_deferred", "mark_writes")
+        wrap(
+            Database,
+            "replace_message_chunks",
+            "slice_writes",
+            when=lambda a, k: k.get("attachment_id") is not None,
+        )
+        wrap(Database, "get_thread_chunk_embeddings", "vector_rows", rows=True)
+        real_seed = Database.get_phase1_seed_state
+
+        def seed(db_self, thread_id):
+            embs, prior = real_seed(db_self, thread_id)
+            self.counts["vector_rows"] += len(embs)
+            return embs, prior
+
+        monkeypatch.setattr(Database, "get_phase1_seed_state", seed)
+
+    def take(self, db) -> dict[str, int]:
+        """This pass's counts; then remember which payloads have resolved
+        (``text_complete`` recorded, no mark) for the next pass."""
+        counts = {key: self.counts[key] for key in self.KEYS}
+        self.counts.clear()
+        self.resolved_hashes = {
+            r[0]
+            for r in db._conn.execute(
+                "SELECT attachment_id FROM attachments "
+                "WHERE text_complete IS NOT NULL AND extraction_deferred_at IS NULL"
+            )
+        }
+        return counts
+
+
+class TestWorkPerPass:
+    def test_each_pass_does_no_work_on_resolved_occurrences(self, tmp_path, monkeypatch):
+        extractor = LaunchingExtractor()
+        p = Pipeline(tmp_path, monkeypatch, extractor, launches=3)
+        work = WorkCounter(monkeypatch)
+        p.add("work", _parts("work", 7))
+        passes = []
+        while p.queue.stats()["queued"]:
+            p.drain()
+            passes.append(work.take(p.db))
+        # Thread chunk rows after each pass: the body chunk plus the
+        # attachments resolved so far (one chunk each).
+        assert passes == [
+            # A full pass: every occurrence probed, three resolved, four
+            # deferred and marked.
+            dict(parses=1, body_chunkings=1, cache_reads=7, cache_reads_resolved=0,
+                 attachment_chunkings=3, slice_id_reads=3, attachment_upserts=7,
+                 completeness_writes=3, mark_writes=4, slice_writes=3, vector_rows=0 + 4),
+            # Continuations: the resolved occurrences are not touched; the
+            # pending ones are probed once; re-deferred marks are not
+            # rewritten.
+            dict(parses=1, body_chunkings=1, cache_reads=4, cache_reads_resolved=0,
+                 attachment_chunkings=3, slice_id_reads=3, attachment_upserts=3,
+                 completeness_writes=3, mark_writes=0, slice_writes=3, vector_rows=4 + 7),
+            dict(parses=1, body_chunkings=1, cache_reads=1, cache_reads_resolved=0,
+                 attachment_chunkings=1, slice_id_reads=1, attachment_upserts=1,
+                 completeness_writes=1, mark_writes=0, slice_writes=1, vector_rows=7 + 8),
+        ]  # fmt: skip
+        # The thread vector is the mean of every chunk after each pass.
+        assert len(extractor.calls) == 7
+
+    @pytest.mark.parametrize("parts, launches", [(12, 3), (48, 3)])
+    def test_resolution_work_grows_with_parts_not_passes(
+        self, tmp_path, monkeypatch, parts, launches
+    ):
+        """Work-growth gate at realistic density: every occurrence is
+        chunked, read for its slice IDs, upserted and given its
+        completeness exactly once over the whole continuation, and no
+        resolved occurrence is read from the cache again, so these totals
+        are linear in the parts at any pass count. Before round 3 a
+        continuation re-served every resolved occurrence each pass, which
+        is quadratic here (48 parts in 16 passes)."""
+        extractor = LaunchingExtractor()
+        p = Pipeline(tmp_path, monkeypatch, extractor, launches=launches)
+        work = WorkCounter(monkeypatch)
+        p.add("gate", _parts("gate", parts))
+        totals: dict[str, int] = dict.fromkeys(WorkCounter.KEYS, 0)
+        passes = 0
+        while p.queue.stats()["queued"]:
+            p.drain()
+            passes += 1
+            for key, n in work.take(p.db).items():
+                totals[key] += n
+        assert passes == -(-parts // launches)
+        assert totals["cache_reads_resolved"] == 0
+        for key in (
+            "attachment_chunkings",
+            "slice_id_reads",
+            "completeness_writes",
+            "slice_writes",
+        ):
+            assert totals[key] == parts, key
+        # First-time rows plus each resolution's row.
+        assert totals["attachment_upserts"] == parts + (parts - launches)
+        assert totals["mark_writes"] == parts - launches
+        # Per pass: one parse and one body chunking.
+        assert totals["parses"] == totals["body_chunkings"] == passes
+
+    def test_rename_between_passes_continues_on_the_new_path(self, tmp_path, monkeypatch):
+        extractor = LaunchingExtractor()
+        p = Pipeline(tmp_path, monkeypatch, extractor, launches=2)
+        path = p.add("moving", _parts("moving", 4))
+        p.drain()
+        new_path = path.replace("moving.eml", "moving.eml:2,S")
+        Path(path).rename(new_path)
+
+        class Event:
+            src_path, dest_path, is_directory = path, new_path, False
+
+        main.MaildirHandler(p.db, p.queue).on_moved(Event())
+        assert p.job(path) is None
+        assert p.job(new_path)["last_stage"] == STAGE_EXTRACT
+        p.drain()
+        assert p.job(new_path) is None
+        assert sorted(extractor.calls) == sorted(b for b, _, _ in _parts("moving", 4))
+        assert p.deferred() == 0
+
+    def test_a_deleted_file_does_no_extraction(self, tmp_path, monkeypatch):
+        extractor = LaunchingExtractor()
+        p = Pipeline(tmp_path, monkeypatch, extractor, launches=2)
+        work = WorkCounter(monkeypatch)
+        path = p.add("gone", _parts("gone", 4))
+        p.drain()
+        work.take(p.db)
+        Path(path).unlink()
+        p.drain()
+        counts = work.take(p.db)
+        assert counts["cache_reads"] == counts["attachment_chunkings"] == 0
+        assert len(extractor.calls) == 2
+        # Waits once for a rename the watcher may record, without an attempt.
+        assert p.job(path)["last_stage"] == "parse"
+        assert p.job(path)["attempts"] == 0
 
 
 class TestFairness:
@@ -866,8 +1070,8 @@ class TestDatabase:
         db.set_attachment_text_complete("occ-a", True, "text@3")
         db.mark_attachment_extraction_deferred("occ-b")
         assert db.get_attachment_occurrence_states("msg@x") == {
-            "occ-a": (True, False),
-            "occ-b": (False, True),
-            "occ-c": (False, False),
+            "occ-a": (1, False),
+            "occ-b": (0, True),
+            "occ-c": (None, False),
         }
         db.close()

@@ -1767,6 +1767,9 @@ def _phase2a_collect_chunks(
         # different texts (#928), but share one chunk slice: the first
         # plan writes every text's chunks, so none replaces another.
         slice_holder: dict[str, int] = {}
+        # Payloads with an occurrence a continuation skipped as resolved
+        # (#1236): their stored chunks stay.
+        kept_payloads: set[str] = set()
         if INDEXER_ATTACHMENT_EXTRACTION_ENABLED and msg.attachments:
             cap = (
                 INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS
@@ -1775,8 +1778,11 @@ def _phase2a_collect_chunks(
             )
             # The per-message extraction budget for this pass (#1236).
             # A continuation (a job deferred at the extract stage) only
-            # resolves the occurrences still pending: one whose result
-            # already applied is served from the cache as it stands.
+            # resolves the occurrences still pending. One whose result
+            # already applied (``text_complete`` recorded, no deferral
+            # mark) is skipped outright: no cache read, chunking, chunk
+            # ID read or write; its chunks stay as committed, and the
+            # slice of its payload is protected below.
             budget = ExtractionBudget()
             continuation = (
                 state.row["last_stage"] == STAGE_EXTRACT
@@ -1788,15 +1794,18 @@ def _phase2a_collect_chunks(
                 # (byte caps, OCR page cap and timeouts), so it is the
                 # unit the stall guard's limit applies to.
                 progress()
-                completed, was_deferred = occurrence_states.get(
+                text_complete, was_deferred = occurrence_states.get(
                     attachment_occurrence_id(
                         claimant_id=msg.claimant_id,
                         content_hash=attachment.content_hash,
                         filename=attachment.filename,
                         occurrence_index=occurrence_index,
                     ),
-                    (False, False),
+                    (None, False),
                 )
+                if continuation and text_complete is not None and not was_deferred:
+                    kept_payloads.add(attachment.content_hash)
+                    continue
                 # The plan comes back with empty embeddings_by_chunk_id;
                 # the stored-ID diff below picks its new chunks and
                 # Phase 2c fills it from the batched embed result.
@@ -1821,11 +1830,19 @@ def _phase2a_collect_chunks(
                     # attachment.
                     on_progress=_extraction_heartbeat,
                     budget=budget,
-                    completed=continuation and completed,
                 )
                 plan.was_deferred = was_deferred
-                stored_attach_ids = db.get_chunk_ids_for_message(
-                    msg.claimant_id, attachment_id=attachment.content_hash
+                # Deferred again, with its mark already as written: nothing
+                # to write for it this pass.
+                plan.mark_unchanged = plan.deferred and was_deferred and text_complete == 0
+                # A deferred plan writes no chunks and clears none, so its
+                # slice's stored IDs are not read.
+                stored_attach_ids = (
+                    set()
+                    if plan.deferred
+                    else db.get_chunk_ids_for_message(
+                        msg.claimant_id, attachment_id=attachment.content_hash
+                    )
                 )
                 holder = slice_holder.get(attachment.content_hash)
                 if plan.chunks and holder is not None:
@@ -1859,21 +1876,24 @@ def _phase2a_collect_chunks(
         # Phase 2c, unless another copy of the same bytes in this message
         # fills it: that copy counted the stored chunks as kept and
         # embedded none of them, so it could not restore a cleared slice.
-        # A deferred occurrence keeps the chunks stored for its payload
-        # (#1236): nothing clears that slice this pass, and the plan that
-        # fills it only adds to it.
+        # A deferred occurrence, and one a continuation skipped as
+        # resolved, keeps the chunks stored for its payload (#1236):
+        # nothing clears that slice this pass, and the plan that fills it
+        # only adds to it.
         filled = {plan.attachment.content_hash for plan in attach_plans if plan.chunks}
-        deferred_payloads = {plan.attachment.content_hash for plan in attach_plans if plan.deferred}
+        protected_payloads = kept_payloads | {
+            plan.attachment.content_hash for plan in attach_plans if plan.deferred
+        }
         for plan, stored_attach_ids in zip(attach_plans, attach_stored_ids):
             if plan.chunks:
-                if plan.attachment.content_hash in deferred_payloads:
+                if plan.attachment.content_hash in protected_payloads:
                     plan.deletes_missing_chunks = False
                 continue
             if plan.deferred:
                 continue
             if (
                 plan.attachment.content_hash in filled
-                or plan.attachment.content_hash in deferred_payloads
+                or plan.attachment.content_hash in protected_payloads
             ):
                 plan.clears_stale_chunks = False
             else:
