@@ -1403,6 +1403,8 @@ def _extract_body_and_attachments(
     # the same form: counted below only if the body could keep them.
     decode_lossy: list[tuple[int, bool]] = []
     charset_degraded: list[tuple[int, bool]] = []
+    # And the parts declared ``multipart/*`` the parse left undecomposed.
+    unsplit: list[tuple[int, bool]] = []
 
     # Depth-first in document order, like ``msg.walk()``, but nothing
     # inside an attachment is a candidate for the body: an attached
@@ -1436,15 +1438,6 @@ def _extract_body_and_attachments(
             break
         walked += 1
         ct = part.get_content_type()
-        if (
-            walk is not None
-            and part.get_content_maintype() == "multipart"
-            and not part.is_multipart()
-        ):
-            # A declared container the parse left as one undecomposed
-            # payload: nothing in it is read (review round 6 on #1311;
-            # the default walk's same gap is #1348).
-            walk.structure_lost_parts += 1
         filename = _part_filename(part, None if walk is None else walk.degraded)
         is_attachment = _is_attachment(part, filename)
         decoded: email.message.Message | None = None
@@ -1511,6 +1504,17 @@ def _extract_body_and_attachments(
             nodes.append(node)
             if parent >= 0 and _selects(nodes[parent]):
                 nodes[parent].children.append(len(nodes) - 1)
+            if (
+                walk is not None
+                and part.get_content_maintype() == "multipart"
+                and not part.is_multipart()
+            ):
+                # A declared container the parse left as one undecomposed
+                # payload: nothing in it is read (review round 6 on #1311;
+                # the default walk's same gap is #1348). Counted below
+                # like a lossy text part, only if the body could keep it
+                # (review round 9).
+                unsplit.append((len(nodes) - 1, True))
         elif is_attachment and parent >= 0 and nodes[parent].related:
             # An attachment keeps its position among a related's children
             # as an empty node, so one that is the root makes the related
@@ -1598,6 +1602,8 @@ def _extract_body_and_attachments(
             walk.decode_lost_parts += _capped_parts_lost(nodes, decode_lossy)
         if charset_degraded:
             walk.degraded[CHARSET_DEGRADED] += _capped_parts_lost(nodes, charset_degraded)
+        if unsplit:
+            walk.structure_lost_parts += _capped_parts_lost(nodes, unsplit)
     return body, attachments
 
 

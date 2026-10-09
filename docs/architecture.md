@@ -1463,8 +1463,9 @@ line of its transport text (a first line starting with whitespace or
 `From `). A part
 declared `multipart/*` that the standard library could not decompose
 (no boundary parameter, or a start boundary that never appears) is
-counted as `eml_body_structure`, since none of its text is read; the
-same gap in the default parser is #1348. A nested email in any
+counted as `eml_body_structure`, since none of its text is read, when
+the body could keep it (not an alternative set aside, nor an
+attachment); the same gap in the default parser is #1348. A nested email in any
 other transfer encoding (uuencode and its aliases included) is not
 decoded: only its depth label is indexed, and it counts as
 `eml_nested_messages`. The decoders' fallbacks are

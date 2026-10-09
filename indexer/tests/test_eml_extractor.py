@@ -904,3 +904,41 @@ class TestReviewRound8:
         result = self._extract(_multipart(b"Content-Type: text/plain\r\n\r\nroot", part), caplog)
         assert result.text_complete is False
         assert "extractor cap eml_nested_messages:" in caplog.text
+
+
+_UNSPLIT = b"Content-Type: multipart/related\r\n\r\n" + MARKER.encode()
+
+
+class TestReviewRound9:
+    """An undecomposed ``multipart/*`` part counts as
+    ``eml_body_structure`` only when the body could keep it, by the same
+    selection as round 8's decode counts."""
+
+    def _extract(self, payload: bytes, caplog) -> extractors.ExtractionResult:
+        with caplog.at_level(logging.WARNING):
+            result = extract(content_type="message/rfc822", filename="f.eml", payload=payload)
+        assert result.status == STATUS_SUCCESS
+        assert MARKER not in caplog.text
+        return result
+
+    def test_an_alternative_set_aside_is_not_counted(self, caplog):
+        result = self._extract(_alternative(_PLAIN, _UNSPLIT), caplog)
+        assert result.text == "Subject: s\nFrom: a@example.test\n\nplain words"
+        assert result.text_complete is True
+        assert "eml_body_structure" not in caplog.text
+
+    def test_an_alternative_the_body_could_keep_is_counted(self, caplog):
+        """Had it split, its text could have been the plain rendering the
+        body prefers over the HTML."""
+        result = self._extract(_alternative(_UNSPLIT, _HTML), caplog)
+        assert result.text_complete is False
+        assert "extractor cap eml_body_structure:" in caplog.text
+
+    def test_an_attachment_the_walk_skips_is_not_counted(self, caplog):
+        unsplit = (
+            b"Content-Type: multipart/mixed\r\nContent-Disposition: attachment\r\n\r\n"
+            + MARKER.encode()
+        )
+        result = self._extract(_multipart(_PLAIN, unsplit), caplog)
+        assert result.text_complete is True
+        assert "eml_body_structure" not in caplog.text

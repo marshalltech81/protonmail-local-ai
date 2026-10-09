@@ -1674,7 +1674,8 @@ only, never filenames or text (`make logs`):
   - `eml_body_structure`: a part of an attached email declared
     `multipart/*` that could not be split into parts (no boundary
     parameter, or a boundary that never appears), so none of its text
-    is read (#922; the same gap for top-level mail is #1348).
+    is read, when the body could keep it (#922; the same gap for
+    top-level mail is #1348).
   - `eml_body_decode`: a body text part of an attached email whose
     base64 decoding lost bytes, or any quoted-printable one, whose loss
     cannot be detected yet, or one in an encoding not decoded here

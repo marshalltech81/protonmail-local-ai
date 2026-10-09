@@ -59,8 +59,8 @@ identity (uuencode and its aliases, or an unknown value), each counted
 only when the body keeps that part, and a nested email whose transport
 text lost a line to the parse. So is a
 part declared ``multipart/*`` that the standard library left
-undecomposed (no or a missing boundary), whose text is never read
-(``eml_body_structure``). A nested email in any other transfer encoding
+undecomposed (no or a missing boundary), whose text is never read,
+when the body could keep it (``eml_body_structure``). A nested email in any other transfer encoding
 (uuencode and its aliases included) is not decoded: only its label is
 rendered, as an ``eml_nested_messages`` cut. The
 decoders' fallbacks (headers, part filenames, body charsets) replace
