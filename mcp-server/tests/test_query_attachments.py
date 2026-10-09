@@ -331,6 +331,7 @@ class TestExtractionStatus:
             "empty": 4,
             "unsupported": 4,
             "too_large": 4,
+            "deferred": 0,
             "none": 20,
         }
         assert sum(page.status_counts.values()) == page.total_matches
@@ -348,6 +349,7 @@ class TestExtractionStatus:
             "empty": 0,
             "unsupported": 0,
             "too_large": 0,
+            "deferred": 0,
             "none": 20,
         }
 

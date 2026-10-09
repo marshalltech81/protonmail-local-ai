@@ -87,7 +87,8 @@ class TestGetMailboxStatus:
         for reason in reasons:
             assert f"  - {reason}" in text
         assert (
-            "Queue:          1 pending, 1 retrying, 0 deferred, 0 parked (trashed), 1 dead" in text
+            "Queue:          1 pending, 1 retrying, 0 deferred, 0 extraction deferred, "
+            "0 parked (trashed), 1 dead" in text
         )
         assert "1 message failed permanently and is incompletely indexed" in text
         assert "reparse" not in text
@@ -107,12 +108,54 @@ class TestGetMailboxStatus:
         assert out.structured_content["current"] is False
         assert out.structured_content["queue"]["reparse"] == 1
         assert (
-            "Queue:          2 pending, 0 retrying, 0 deferred, 0 parked (trashed), 0 dead" in text
+            "Queue:          2 pending, 0 retrying, 0 deferred, 0 extraction deferred, "
+            "0 parked (trashed), 0 dead" in text
         )
         assert (
             "  1 waiting message is already indexed and being reparsed after an upgrade: "
             "search finds it, but data the upgrade adds is missing until the reparse "
             "finishes." in text
+        )
+
+    def test_deferred_attachment_extraction_keeps_the_index_non_current(
+        self, fake_server, seeded_db
+    ):
+        """#1236: a message continued because its attachment extraction
+        reached the indexer's per-message budget is waiting, in its own
+        bucket."""
+        continued = (
+            "queued",
+            0,
+            "retryable",
+            "x",
+            "extract",
+            "attachment extraction deferred: per-message budget reached; continued on a later pass",
+        )
+        write_ingestion(
+            seeded_db.path,
+            sync_completed_at=_ago(seconds=30),
+            sync_interval_secs=60,
+            indexer_seen_at=_ago(seconds=5),
+            jobs=(continued,),
+        )
+        out = asyncio.run(_handler(fake_server, seeded_db)())
+        text = _text(out)
+        queue = out.structured_content["queue"]
+        assert out.structured_content["current"] is False
+        assert (queue["extraction_deferred"], queue["retrying"], queue["deferred"]) == (1, 0, 0)
+        assert out.structured_content["not_current_reasons"] == [
+            "1 message waiting to be indexed (0 pending, 0 retrying, "
+            "1 with attachment extraction deferred)"
+        ]
+        assert (
+            "Queue:          0 pending, 0 retrying, 0 deferred, 1 extraction deferred, "
+            "0 parked (trashed), 0 dead" in text
+        )
+        assert (
+            "  1 message is already indexed, but its attachment extraction reached the "
+            "indexer's per-message budget: the remaining attachments are extracted on later "
+            "passes; until then search has only text indexed for them earlier (flagged as "
+            "retained indexed text), or none." in text
         )
 
     def test_parked_trashed_files_leave_the_index_current(self, fake_server, seeded_db):
@@ -132,7 +175,8 @@ class TestGetMailboxStatus:
         assert out.structured_content["current"] is True
         assert (queue["retrying"], queue["parked_trashed"]) == (0, 2)
         assert (
-            "Queue:          0 pending, 0 retrying, 0 deferred, 2 parked (trashed), 0 dead" in text
+            "Queue:          0 pending, 0 retrying, 0 deferred, 0 extraction deferred, "
+            "2 parked (trashed), 0 dead" in text
         )
         assert (
             "  2 trashed messages are already indexed and wait for the reaper to "

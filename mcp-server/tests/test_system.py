@@ -150,6 +150,7 @@ class TestGetMailboxStatusStandalone:
             "pending": 0,
             "retrying": 0,
             "deferred": 0,
+            "extraction_deferred": 0,
             "parked_trashed": 0,
             "dead": 0,
             "reparse": 0,

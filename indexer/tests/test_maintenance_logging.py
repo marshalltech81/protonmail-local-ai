@@ -20,9 +20,11 @@ from src.database import Database
 from src.folder_watch import FolderWatchRefresher
 from src.queue import (
     ERROR_CLASS_RETRYABLE,
+    EXTRACTION_DEFERRED_ERROR,
     PERMISSION_DEFERRED_ERROR,
     REASON_INITIAL_SCAN,
     STAGE_EMBED,
+    STAGE_EXTRACT,
     STAGE_PARSE,
     STAGE_TRASHED,
     IndexingQueue,
@@ -361,7 +363,8 @@ def _seed_queue(tmp_path) -> tuple[Database, IndexingQueue, datetime]:
     """One row in each heartbeat bucket, paths carrying the marker:
     two never tried (one due two minutes ago), one retrying, one
     retrying a permission error past its deferral window, one deferred
-    for permissions, one parked trashed file, one dead."""
+    for permissions, one parked trashed file, one continued for deferred
+    attachment extraction (#1236), one dead."""
     db = Database(tmp_path / "mail.db")
     queue = IndexingQueue(db, max_attempts=3, base_backoff_seconds=0)
     now = datetime.now(UTC)
@@ -392,6 +395,14 @@ def _seed_queue(tmp_path) -> tuple[Database, IndexingQueue, datetime]:
         error_class=ERROR_CLASS_RETRYABLE,
         delay_seconds=3600,
     )
+    queue.enqueue(path % "extract", REASON_INITIAL_SCAN)
+    queue.defer(
+        path % "extract",
+        stage=STAGE_EXTRACT,
+        error=EXTRACTION_DEFERRED_ERROR,
+        error_class=ERROR_CLASS_RETRYABLE,
+        delay_seconds=3600,
+    )
     queue.enqueue(path % "dead", REASON_INITIAL_SCAN)
     queue.mark_dead_terminal(path % "dead", stage="parse", error="too large")
     return db, queue, now
@@ -406,6 +417,7 @@ class TestQueueHeartbeatCounts:
             "retrying": 2,
             "deferred_permission": 1,
             "parked_trashed": 1,
+            "extraction_deferred": 1,
             "dead": 1,
             "oldest_due_age": 125,
             "reparse": 0,
@@ -422,6 +434,7 @@ class TestQueueHeartbeatCounts:
             "retrying": 0,
             "deferred_permission": 0,
             "parked_trashed": 0,
+            "extraction_deferred": 0,
             "dead": 0,
             "oldest_due_age": 0,
             "reparse": 0,
@@ -458,7 +471,8 @@ class TestQueueHeartbeatLine:
         assert len(lines) == 1
         assert lines[0].levelno == logging.INFO
         assert re.fullmatch(
-            r"queue: pending=2 retrying=2 deferred_permission=1 parked_trashed=1 dead=1 "
+            r"queue: pending=2 retrying=2 deferred_permission=1 parked_trashed=1 "
+            r"extraction_deferred=1 dead=1 "
             r"oldest_due_age=1\d\ds; deferrals since last heartbeat: parse=1 embed=0 trashed=1; "
             r"suppressed_lines=0",
             lines[0].getMessage(),
@@ -544,8 +558,8 @@ class TestReextractSweepDeadSkips:
         monkeypatch.setattr(main, "is_stale_extractor", lambda *_a, **_kw: True)
         monkeypatch.setattr(db, "get_extractor_names", lambda: ["pdf@1"])
         monkeypatch.setattr(db, "find_filepaths_with_extractors", lambda _names: paths)
-        monkeypatch.setattr(db, "find_no_extractor_attachment_filepaths", lambda _q: set())
-        monkeypatch.setattr(db, "find_fitting_too_large_attachment_filepaths", lambda _m: set())
+        monkeypatch.setattr(db, "find_no_extractor_attachment_filepaths", lambda _q, _a: set())
+        monkeypatch.setattr(db, "find_fitting_too_large_attachment_filepaths", lambda _m, _a: set())
 
     def test_dead_lettered_files_are_counted(self, tmp_path, monkeypatch, caplog):
         caplog.set_level(logging.INFO)

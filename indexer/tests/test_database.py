@@ -118,9 +118,9 @@ class TestSchema:
 
     def test_fresh_install_is_stamped_the_current_version(self, db):
         """A fresh install creates the current schema directly and stamps
-        v7 (#824), skipping the migration files."""
-        assert SCHEMA_VERSION == 8
-        assert db._conn.execute("SELECT version FROM schema_version").fetchone()[0] == 8
+        v9 (#1236), skipping the migration files."""
+        assert SCHEMA_VERSION == 9
+        assert db._conn.execute("SELECT version FROM schema_version").fetchone()[0] == 9
 
     def test_fresh_install_has_a_nullable_ocr_pages_skipped_column(self, db):
         """#891: a count, NULL when unknown, with no default."""
@@ -318,7 +318,7 @@ class TestMigrationV1:
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [1, 2, 3, 4, 5, 6, 7, 8]" in caplog.text
+        assert "applied migrations: [1, 2, 3, 4, 5, 6, 7, 8, 9]" in caplog.text
         assert "SYNTHETIC" not in caplog.text
 
     def test_v0_rows_are_carried_over_under_their_stamps_module(self, tmp_path):
@@ -542,6 +542,15 @@ _MESSAGE_INDEXES = (
 )
 
 
+def _v8_from_fresh(db: Database) -> None:
+    """Turn a fresh database into the v8 shape: v8 is the current schema
+    without the occurrence's extraction deferral mark (#1236)."""
+    db._conn.execute("DROP INDEX idx_attachments_deferred")
+    db._conn.execute("ALTER TABLE attachments DROP COLUMN extraction_deferred_at")
+    db._conn.execute("UPDATE schema_version SET version = 8")
+    db._conn.commit()
+
+
 def _v7_from_fresh(db: Database) -> None:
     """Turn a fresh database into the v7 shape: v7 is the current schema
     with the v7 ``messages`` table (#1080). Its rows are kept; an
@@ -549,6 +558,7 @@ def _v7_from_fresh(db: Database) -> None:
     v7 parser stored its fallback. Foreign keys are off for the rebuild
     (outside a transaction, which the migration cannot do), so nothing
     cascades."""
+    _v8_from_fresh(db)
     conn = db._conn
     conn.commit()
     conn.execute("PRAGMA foreign_keys = OFF")
@@ -638,7 +648,6 @@ class TestMigrationV6:
             assert (
                 migrated._conn.execute("SELECT version FROM schema_version").fetchone()[0]
                 == SCHEMA_VERSION
-                == 8
             )
             assert _schema_shape(migrated._conn) == _schema_shape(fresh._conn)
             occurrence = migrated._conn.execute(
@@ -660,7 +669,7 @@ class TestMigrationV6:
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [6, 7, 8]" in caplog.text
+        assert "applied migrations: [6, 7, 8, 9]" in caplog.text
         assert "SYNTHETIC_V6_MARKER" not in caplog.text
 
     @pytest.mark.parametrize("table, column", [c for c in _V6_COLUMNS if c[1] == "text_complete"])
@@ -895,6 +904,45 @@ class TestUnknownSendDate:
         assert _dates(db, msg.claimant_id)[:2] == (msg.date.isoformat(), None)
 
 
+class TestMigrationV9:
+    """#1236: v8 -> v9 adds the occurrence's extraction deferral mark,
+    NULL on every existing row, with no reparse."""
+
+    def test_v8_database_migrates_to_the_fresh_v9_shape(self, tmp_path, caplog):
+        caplog.set_level("INFO")
+        db = Database(tmp_path / "v8.db")
+        msg = make_message(message_id="old@x")
+        db.upsert_thread(make_thread(messages=[msg]), FAKE_EMBEDDING)
+        _store_occurrence(db, claimant_id=msg.claimant_id, occurrence="occ-1", attachment_id="h1")
+        db._conn.commit()
+        _v8_from_fresh(db)
+        db.close()
+        migrated = Database(tmp_path / "v8.db")
+        fresh = Database(tmp_path / "fresh.db")
+        try:
+            assert (
+                migrated._conn.execute("SELECT version FROM schema_version").fetchone()[0]
+                == SCHEMA_VERSION
+                == 9
+            )
+            assert _schema_shape(migrated._conn) == _schema_shape(fresh._conn)
+            assert [
+                tuple(r)
+                for r in migrated._conn.execute("SELECT extraction_deferred_at FROM attachments")
+            ] == [(None,)]
+            cols = {r["name"]: r for r in migrated._conn.execute("PRAGMA table_info(attachments)")}
+            col = cols["extraction_deferred_at"]
+            assert (col["type"], col["notnull"], col["dflt_value"]) == ("TEXT", 0, None)
+            assert migrated._conn.execute("SELECT COUNT(*) FROM indexing_jobs").fetchone()[0] == 0
+            assert migrated.get_attachment_occurrence_states(msg.claimant_id) == {
+                "occ-1": (None, False)
+            }
+        finally:
+            migrated.close()
+            fresh.close()
+        assert "applied migrations: [9]" in caplog.text
+
+
 class TestMigrationV8:
     """#1080: v7 -> v8 rebuilds ``messages`` with a nullable ``sent_at``,
     ``sent_at_status`` (NULL, not assessed, on every existing row) and
@@ -954,7 +1002,9 @@ class TestMigrationV8:
         fresh = Database(tmp_path / "fresh.db")
         try:
             conn = migrated._conn
-            assert conn.execute("SELECT version FROM schema_version").fetchone()[0] == 8
+            assert (
+                conn.execute("SELECT version FROM schema_version").fetchone()[0] == SCHEMA_VERSION
+            )
             assert _schema_shape(conn) == _schema_shape(fresh._conn)
             # Every row and value kept, effective_at included.
             assert self._rows(conn, self._ROW) == before
@@ -999,7 +1049,7 @@ class TestMigrationV8:
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [8]" in caplog.text
+        assert "applied migrations: [8, 9]" in caplog.text
         assert "SYNTHETIC_V8_MARKER" not in caplog.text
 
     def test_a_failed_rebuild_leaves_v7_intact(self, tmp_path):
@@ -1053,7 +1103,6 @@ class TestMigrationV7:
             assert (
                 migrated._conn.execute("SELECT version FROM schema_version").fetchone()[0]
                 == SCHEMA_VERSION
-                == 8
             )
             assert _schema_shape(migrated._conn) == _schema_shape(fresh._conn)
             query = "SELECT id, state, address_count, address_digest FROM operator_identity"
@@ -1072,7 +1121,7 @@ class TestMigrationV7:
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [7, 8]" in caplog.text
+        assert "applied migrations: [7, 8, 9]" in caplog.text
 
 
 class TestAttachmentTextCompleteness:
@@ -1120,19 +1169,35 @@ class TestAttachmentTextCompleteness:
         )
         assert db.get_attachment_extraction("h2", "text")["text_complete"] == stored
 
-    def test_unrecorded_rows_come_back_once_per_file_and_stamp(self, db):
+    def test_unrecorded_rows_come_back_once_per_file(self, db):
         """Review round 3 on #1286: a message with many unrecorded
-        occurrences yields one row per (file, status, stamp), not one per
-        occurrence, so the startup sweep's fetch is bounded by files."""
+        occurrences yields one filepath, not one entry per occurrence, so
+        the startup sweep keeps memory bounded by files; only occurrences
+        with a record of their own are named for clearing (#1236)."""
         msg = make_message(message_id="many@x")
         db.upsert_thread(make_thread(messages=[msg]), FAKE_EMBEDDING)
         for i in range(200):
             _store_occurrence(
                 db, claimant_id=msg.claimant_id, occurrence=f"occ-{i}", attachment_id=f"h{i}"
             )
+        db._conn.execute(
+            "UPDATE attachments SET text_complete = 0 WHERE attachment_occurrence_id = 'occ-7'"
+        )
         db._conn.commit()
-        rows = db.find_unrecorded_completeness_attachments()
-        assert [tuple(r) for r in rows] == [(msg.filepath, "success", "text@3", None)]
+        seen: list[tuple] = []
+        from src.database import CompletenessClearing
+
+        assessed = CompletenessClearing(db)
+
+        def qualifies(row) -> bool:
+            seen.append((row["extraction_status"], row["extractor"], row["text_complete"]))
+            return True
+
+        assert db.find_unrecorded_completeness_occurrences(qualifies, assessed) == {msg.filepath}
+        assessed.flush()
+        assert set(seen) == {("success", "text@3", None)}
+        assert assessed.cleared == 1
+        assert db.get_attachment_occurrence_states(msg.claimant_id)["occ-7"] == (None, False)
 
     def test_clear_nulls_only_the_named_stamps(self, db):
         self._setup(db)
@@ -1179,7 +1244,7 @@ class TestMigrationV5:
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [5, 6, 7, 8]" in caplog.text
+        assert "applied migrations: [5, 6, 7, 8, 9]" in caplog.text
 
     @pytest.mark.parametrize("column", [c for c in _V5_COLUMNS if c != "caps_json"])
     def test_the_flag_columns_reject_other_values(self, db, column):
@@ -1309,7 +1374,7 @@ class TestMigrationV2:
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [2, 3, 4, 5, 6, 7, 8]" in caplog.text
+        assert "applied migrations: [2, 3, 4, 5, 6, 7, 8, 9]" in caplog.text
 
     def test_the_migrated_column_rejects_other_values(self, tmp_path):
         db = Database(tmp_path / "v1.db")
@@ -1361,7 +1426,7 @@ class TestMigrationV3:
         finally:
             migrated.close()
             fresh.close()
-        assert "applied migrations: [3, 4, 5, 6, 7, 8]" in caplog.text
+        assert "applied migrations: [3, 4, 5, 6, 7, 8, 9]" in caplog.text
         assert "SYNTHETIC" not in caplog.text
 
     def test_existing_rows_are_unknown_and_nothing_is_queued(self, tmp_path, monkeypatch):

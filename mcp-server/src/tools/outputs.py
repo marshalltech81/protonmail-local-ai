@@ -391,12 +391,28 @@ _SCOPE_DESCRIPTION = (
 )
 
 
+# The fixed note on a passage whose attachment's extraction the indexer
+# deferred (#1236): the text shown is what was indexed before, and a
+# refresh is pending.
+EXTRACTION_DEFERRED_NOTE = "retained indexed text; extraction refresh pending"
+
+_EXTRACTION_DEFERRED_DESCRIPTION = (
+    "True for an attachment passage whose attachment (a copy of the same file in the "
+    "same message) is waiting for the indexer to extract it again: the text is what was "
+    "indexed before, kept until the refresh. False otherwise."
+)
+
+
 class EvidenceCarrier(_Output):
     claimant_id: str = Field(description="A later message carrying the same attachment.")
     sent_at: str | None
     sent_at_status: SentAtStatus | None
     occurred_at: str | None
     scope: EvidenceScope = Field(description="That message's scope label.")
+    extraction_deferred: bool = Field(
+        default=False,
+        description="That message's copy: " + _EXTRACTION_DEFERRED_DESCRIPTION,
+    )
 
 
 class EvidenceChunk(_Output):
@@ -451,6 +467,7 @@ class EvidenceChunk(_Output):
         "carrying the attachment); null when none is recorded."
     )
     scope: EvidenceScope = Field(description=_SCOPE_DESCRIPTION)
+    extraction_deferred: bool = Field(default=False, description=_EXTRACTION_DEFERRED_DESCRIPTION)
     carried_by: list[EvidenceCarrier] | None = Field(
         default=None,
         exclude_if=lambda v: v is None,
@@ -539,7 +556,10 @@ class AttachmentHit(_Output):
     )
     senders: list[str] = Field(description=f"Thread senders, at most {MAX_LISTED}.")
     sender_count: int
-    extraction_status: str | None = Field(description="Null when no extraction has run.")
+    extraction_status: str | None = Field(
+        description="Null when no extraction has run; deferred when the indexer will "
+        "extract it on a later pass."
+    )
     text_snippet: str
     source_file: Source | None = Field(
         description="The raw file of the message carrying the attachment; null when "
@@ -854,9 +874,10 @@ class ListedAttachment(_Output):
         "none is recorded."
     )
     extraction_status: str | None = Field(
-        description="success, empty, unsupported, too_large or failed; null when no "
-        "extraction is recorded for the payload and extractor_module (not yet run, or "
-        "extraction off)."
+        description="success, empty, unsupported, too_large or failed; deferred when the "
+        "indexer will extract this attachment on a later pass (its text is not indexed yet); "
+        "null when no extraction is recorded for the payload and extractor_module (not yet "
+        "run, or extraction off)."
     )
     extractor: str | None = Field(description="The extractor that ran; null without one.")
     extracted_at: str | None = Field(description="When the extraction ran; null without one.")
@@ -883,7 +904,8 @@ class QueryAttachmentsOutput(_Output):
     )
     status_counts: dict[str, int] = Field(
         description="total_matches split by extraction status over every match, not just "
-        "this page; none counts occurrences with no extraction recorded."
+        "this page; deferred counts occurrences the indexer will extract on a later pass; "
+        "none counts occurrences with no extraction recorded."
     )
     returned: int
     offset: int = Field(description="Matches returned by earlier pages.")
@@ -983,6 +1005,13 @@ class QueueCounts(_Output):
         "it cannot read yet, an embedder outage or configuration error, or a job waiting "
         "for a rename); retried without spending attempts. They make current false.",
     )
+    extraction_deferred: int = Field(
+        default=0,
+        description="Messages already indexed whose attachment extraction reached the "
+        "indexer's per-message budget: the rest of their attachments are extracted on later "
+        "passes; until then search has only text indexed for them earlier (flagged "
+        "extraction_deferred), or none. They make current false.",
+    )
     parked_trashed: int = Field(
         default=0,
         description="Trashed files already indexed and waiting for the reaper to remove "
@@ -994,7 +1023,8 @@ class QueueCounts(_Output):
     )
     reparse: int = Field(
         default=0,
-        description="Of the pending, retrying and deferred messages, those already indexed "
+        description="Of the pending, retrying, deferred and extraction_deferred messages, "
+        "those already indexed "
         "and being "
         "read again after an upgrade (a reparse): search finds them meanwhile, but data the "
         "upgrade adds is missing until the reparse finishes.",
@@ -1008,7 +1038,8 @@ class MailboxStatusOutput(_Output):
     )
     current: bool = Field(
         description="True only when mail synced from Proton recently, the indexer is "
-        "running, and no message is pending, retrying or deferred. Mail that reached Proton "
+        "running, and no message is pending, retrying, deferred or extraction_deferred. "
+        "Mail that reached Proton "
         "after last_sync_at is not searchable either way."
     )
     not_current_reasons: list[str] = Field(description="Why current is false; empty when true.")
@@ -1082,6 +1113,7 @@ class Citation(_Output):
             "Null for tools that do not label passages.",
         ),
     )
+    extraction_deferred: bool = Field(default=False, description=_EXTRACTION_DEFERRED_DESCRIPTION)
 
 
 class CitationProblem(_Output):

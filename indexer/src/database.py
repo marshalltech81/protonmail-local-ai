@@ -145,7 +145,10 @@ def _dedupe_by_canonical(addrs: list[str]) -> list[str]:
 # ``invalid``, NULL until a reparse assesses the row), and
 # ``first_indexed_at`` is the last fallback of ``effective_at``; the
 # table is rebuilt (``migrations/0008_unknown_sent_dates.sql``).
-SCHEMA_VERSION = 8
+# v9 (#1236): ``attachments.extraction_deferred_at`` marks an occurrence
+# whose extraction the per-message budget deferred to a later pass, NULL
+# otherwise; no reparse (``migrations/0009_attachment_extraction_deferral.sql``).
+SCHEMA_VERSION = 9
 SCHEMA_APPLICATION_ID = 0x504D4149  # "PMAI"
 
 # How long a ``reaped_messages`` record outlives the reap. The record
@@ -192,6 +195,30 @@ SWEEP_FETCH_ROWS = 1000
 # rows, just no new entities, so one crafted message cannot drive an
 # unbounded number of entity writes.
 MAX_ENTITY_PARTICIPANTS_PER_MESSAGE = 200
+
+
+class CompletenessClearing:
+    """Clears ``attachments.text_complete`` on the occurrences the startup
+    sweep finds due a refresh, as it finds them (#1236): at most
+    ``SWEEP_FETCH_ROWS`` IDs are held, and each full batch is cleared in
+    its own transaction, so memory stays bounded whatever the number of
+    occurrences. ``cleared`` counts the rows changed. An ID seen twice
+    (two refresh classes) changes nothing the second time."""
+
+    def __init__(self, db: Database) -> None:
+        self._db = db
+        self._pending: list[str] = []
+        self.cleared = 0
+
+    def add(self, occurrence_id: str) -> None:
+        self._pending.append(occurrence_id)
+        if len(self._pending) >= SWEEP_FETCH_ROWS:
+            self.flush()
+
+    def flush(self) -> None:
+        if self._pending:
+            batch, self._pending = self._pending, []
+            self.cleared += self._db._clear_text_complete_batch(batch)
 
 
 class SQLiteTooOldError(RuntimeError):
@@ -680,6 +707,13 @@ class Database:
                 -- ``EXTRACTOR_VERSIONS`` bump clears it at startup.
                 text_complete             INTEGER CHECK (text_complete IN (0, 1)),
                 text_extractor            TEXT,
+                -- When the per-message extraction budget deferred this
+                -- occurrence's extraction to a later pass of its message
+                -- (#1236), NULL otherwise. A deferred occurrence has
+                -- ``text_complete`` 0, keeps the chunks it had and has
+                -- no ``attachment_extractions`` row written for it;
+                -- the pass that extracts it clears the mark.
+                extraction_deferred_at    TEXT,
                 FOREIGN KEY (claimant_id) REFERENCES message_thread_map(claimant_id)
                     ON DELETE CASCADE,
                 FOREIGN KEY (thread_id) REFERENCES threads(thread_id)
@@ -692,6 +726,11 @@ class Database:
             -- Hybrid-search attachment lane joins ``attachments`` back from
             -- ``attachments_fts`` on ``fts_rowid``.
             CREATE INDEX idx_attachments_fts_rowid ON attachments(fts_rowid);
+            -- A chunk's payload has a deferred copy in its message (#1236):
+            -- read once per chunk by the MCP server's evidence lanes, so
+            -- partial and composite, and small (deferred rows only).
+            CREATE INDEX idx_attachments_deferred ON attachments(claimant_id, attachment_id)
+                WHERE extraction_deferred_at IS NOT NULL;
 
             -- One row per payload and extractor module (#928): the same
             -- bytes under labels that pick different extractors get
@@ -1450,6 +1489,7 @@ class Database:
         chunks,
         embeddings_by_chunk_id: dict[str, list[float]],
         attachment_id: str | None = None,
+        delete_missing: bool = True,
     ) -> dict[str, int]:
         """Idempotently sync the chunk rows for one slice of a message.
 
@@ -1479,6 +1519,10 @@ class Database:
         passage's dates from its ``messages`` row (``sent_at``,
         ``occurred_at``), so a re-dated message whose chunks were not
         rewritten never shows a stale date (#575).
+
+        ``delete_missing=False`` only adds: stored chunks missing from
+        ``chunks`` are kept. For an attachment slice that an occurrence
+        whose extraction was deferred also holds chunks in (#1236).
 
         All inserts / deletes across ``message_chunks``,
         ``message_chunks_fts`` and ``message_chunks_vec`` happen inside
@@ -1515,7 +1559,7 @@ class Database:
                 if row["fts_rowid"] is not None
             }
 
-            to_delete = existing_ids - incoming_ids
+            to_delete = existing_ids - incoming_ids if delete_missing else set()
             to_insert = [c for c in chunks if c.chunk_id not in existing_ids]
 
             for chunk_id in to_delete:
@@ -1689,20 +1733,83 @@ class Database:
 
         Called in phase 2c inside the transaction that commits the
         occurrence's chunks (``apply_attachment_writes``), so it rolls
-        back with them and always describes the committed chunks."""
+        back with them and always describes the committed chunks. The
+        occurrence's result applied, so any deferral mark is cleared
+        (#1236)."""
         cur = self._conn.cursor()
         started = False
         try:
             started = self._begin_if_needed(cur)
             cur.execute(
-                "UPDATE attachments SET text_complete = ?, text_extractor = ? "
-                "WHERE attachment_occurrence_id = ?",
+                "UPDATE attachments SET text_complete = ?, text_extractor = ?, "
+                "extraction_deferred_at = NULL WHERE attachment_occurrence_id = ?",
                 (None if complete is None else int(complete), text_extractor, occurrence_id),
             )
             self._commit_if_started(started)
         except Exception:
             self._rollback_if_started(started)
             raise
+
+    @_synchronized
+    def mark_attachment_extraction_deferred(self, occurrence_id: str) -> None:
+        """Mark an occurrence whose extraction the per-message budget
+        deferred to a later pass (#1236): ``text_complete`` 0, since its
+        chunks may not hold its text, and ``extraction_deferred_at`` now.
+        ``text_extractor`` keeps the stamp of the result its chunks came
+        from. In phase 2c's transaction, like ``set_attachment_text_complete``."""
+        cur = self._conn.cursor()
+        started = False
+        try:
+            started = self._begin_if_needed(cur)
+            cur.execute(
+                "UPDATE attachments SET text_complete = 0, extraction_deferred_at = ? "
+                "WHERE attachment_occurrence_id = ?",
+                (datetime.now(UTC).isoformat(), occurrence_id),
+            )
+            self._commit_if_started(started)
+        except Exception:
+            self._rollback_if_started(started)
+            raise
+
+    @_synchronized
+    def clear_attachment_extraction_deferral(self, occurrence_id: str) -> None:
+        """Clear the deferral mark of an occurrence its message no longer
+        has (a parser change dropped it, #1236), so it neither reads as
+        deferred nor re-queues its message. In phase 2c's transaction."""
+        cur = self._conn.cursor()
+        started = False
+        try:
+            started = self._begin_if_needed(cur)
+            cur.execute(
+                "UPDATE attachments SET extraction_deferred_at = NULL "
+                "WHERE attachment_occurrence_id = ?",
+                (occurrence_id,),
+            )
+            self._commit_if_started(started)
+        except Exception:
+            self._rollback_if_started(started)
+            raise
+
+    @_synchronized
+    def get_attachment_occurrence_states(
+        self, claimant_id: str
+    ) -> dict[str, tuple[int | None, bool]]:
+        """Each stored attachment occurrence of a message, by occurrence
+        ID: ``(text_complete, deferred)`` (#1236). A recorded
+        ``text_complete`` with no deferral mark is work an extraction
+        continuation does not reopen; ``deferred`` is a deferral mark."""
+        rows = self._conn.execute(
+            "SELECT attachment_occurrence_id, text_complete, extraction_deferred_at "
+            "FROM attachments WHERE claimant_id = ?",
+            (claimant_id,),
+        ).fetchall()
+        return {
+            r["attachment_occurrence_id"]: (
+                r["text_complete"],
+                r["extraction_deferred_at"] is not None,
+            )
+            for r in rows
+        }
 
     @_synchronized
     def get_assessed_text_extractors(self) -> list[str]:
@@ -1769,48 +1876,97 @@ class Database:
         ).fetchall()
         return [r["filepath"] for r in rows]
 
-    @_synchronized
-    def find_unrecorded_completeness_attachments(self) -> list[sqlite3.Row]:
-        """The messages with an attachment occurrence whose cached
-        ``success`` or ``empty`` extraction has no completeness record
-        (#1285): one row per Maildir filepath, row status and extractor
-        stamp (not per occurrence, so a message with many attachments
-        costs one row, review round 3 on #1286), with ``text_complete``
-        (NULL)."""
-        return self._conn.execute(
-            """
-            SELECT DISTINCT m.filepath, e.extraction_status, e.extractor, e.text_complete
-            FROM attachment_extractions e
-            JOIN attachments a ON a.attachment_id = e.attachment_id
-                AND a.extractor_module = e.extractor_module
-            JOIN message_thread_map m ON m.claimant_id = a.claimant_id
-            WHERE e.text_complete IS NULL
-              AND e.extraction_status IN ('success', 'empty')
-            ORDER BY m.filepath
-            """
-        ).fetchall()
-
     def _stream_filepaths(
-        self, sql: str, params: Sequence[object], qualifies: Callable[[sqlite3.Row], bool]
+        self,
+        sql: str,
+        params: Sequence[object],
+        qualifies: Callable[[sqlite3.Row], bool],
+        assessed: CompletenessClearing | None = None,
     ) -> set[str]:
         """The filepaths of the rows ``sql`` returns for which
         ``qualifies`` holds, read ``SWEEP_FETCH_ROWS`` rows at a time
         (#1289). A message can carry thousands of occurrences with
         sender-chosen labels and sizes, so only the qualifying filepaths
         are kept, never the rows. Callers hold the database lock for the
-        whole read; the cursor is closed before they return."""
+        whole read; the cursor is closed before they return.
+
+        With ``assessed``, a qualifying row whose occurrence still has a
+        ``text_complete`` record (``occurrence_complete``) has it cleared
+        through ``assessed``, batch by batch as the rows stream: its text
+        is due a refresh (#1236). The column cleared is neither filtered
+        nor indexed by these queries, so the open read is unaffected."""
         cursor = self._conn.execute(sql, params)
         filepaths: set[str] = set()
         try:
             while rows := cursor.fetchmany(SWEEP_FETCH_ROWS):
-                filepaths.update(row["filepath"] for row in rows if qualifies(row))
+                for row in rows:
+                    if not qualifies(row):
+                        continue
+                    filepaths.add(row["filepath"])
+                    if assessed is not None and row["occurrence_complete"] is not None:
+                        assessed.add(row["occurrence_id"])
         finally:
             cursor.close()
         return filepaths
 
     @_synchronized
+    def find_unrecorded_completeness_occurrences(
+        self, qualifies: Callable[[sqlite3.Row], bool], assessed: CompletenessClearing | None = None
+    ) -> set[str]:
+        """The filepaths of the messages with an occurrence whose cached
+        ``success`` or ``empty`` result has no completeness record (#1285)
+        and for which ``qualifies`` holds (it gets the row's status, stamp
+        and cached ``text_complete``), read ``SWEEP_FETCH_ROWS`` rows at a
+        time and keeping filepaths only, so a message with many such
+        occurrences costs one entry (review round 3 on #1286). Each such
+        occurrence that still has a record of its own (a parse cap can
+        set 0 beside a cached row with none) has it cleared through
+        ``assessed`` (#1236)."""
+        return self._stream_filepaths(
+            """
+            SELECT m.filepath, e.extraction_status, e.extractor, e.text_complete,
+                   a.attachment_occurrence_id AS occurrence_id,
+                   a.text_complete AS occurrence_complete
+            FROM attachment_extractions e
+            JOIN attachments a ON a.attachment_id = e.attachment_id
+                AND a.extractor_module = e.extractor_module
+            JOIN message_thread_map m ON m.claimant_id = a.claimant_id
+            WHERE e.text_complete IS NULL
+              AND e.extraction_status IN ('success', 'empty')
+            """,
+            (),
+            qualifies,
+            assessed,
+        )
+
+    @_synchronized
+    def _clear_text_complete_batch(self, occurrence_ids: list[str]) -> int:
+        """Set ``text_complete`` to NULL on the named occurrences in one
+        transaction (``CompletenessClearing``, #1236). A failed batch rolls
+        back alone; the batches before it stay, and a restart clears the
+        rest, since a cleared occurrence is not found again. Deferral
+        marks and queue rows are untouched."""
+        cur = self._conn.cursor()
+        started = False
+        try:
+            started = self._begin_if_needed(cur)
+            cur.execute(
+                "UPDATE attachments SET text_complete = NULL WHERE text_complete IS NOT NULL "
+                "AND attachment_occurrence_id IN (SELECT value FROM json_each(?))",
+                (json.dumps(occurrence_ids),),
+            )
+            changed = cur.rowcount
+            self._commit_if_started(started)
+        except Exception:
+            self._rollback_if_started(started)
+            raise
+        return changed
+
+    @_synchronized
     def find_ocr_disabled_attachment_filepaths(
-        self, qualifies: Callable[[sqlite3.Row], bool]
+        self,
+        qualifies: Callable[[sqlite3.Row], bool],
+        assessed: CompletenessClearing | None = None,
     ) -> set[str]:
         """The Maildir filepaths of the messages with an attachment
         occurrence whose cached extraction is an "OCR disabled" result
@@ -1820,7 +1976,8 @@ class Database:
         return self._stream_filepaths(
             """
             SELECT m.filepath, a.filename, a.content_type, e.extraction_error,
-                   e.extractor_module
+                   e.extractor_module, a.attachment_occurrence_id AS occurrence_id,
+                   a.text_complete AS occurrence_complete
             FROM attachment_extractions e
             JOIN attachments a ON a.attachment_id = e.attachment_id
                 AND a.extractor_module = e.extractor_module
@@ -1830,11 +1987,14 @@ class Database:
             """,
             (OCR_DISABLED_ERROR, SCANNED_PDF_OCR_DISABLED_ERROR),
             qualifies,
+            assessed,
         )
 
     @_synchronized
     def find_no_extractor_attachment_filepaths(
-        self, qualifies: Callable[[sqlite3.Row], bool]
+        self,
+        qualifies: Callable[[sqlite3.Row], bool],
+        assessed: CompletenessClearing | None = None,
     ) -> set[str]:
         """The Maildir filepaths of the messages with an attachment
         occurrence whose cached extraction is the "no extractor for this
@@ -1845,7 +2005,8 @@ class Database:
         return self._stream_filepaths(
             """
             SELECT m.filepath, a.filename, a.content_type, e.extraction_error,
-                   e.extractor_module
+                   e.extractor_module, a.attachment_occurrence_id AS occurrence_id,
+                   a.text_complete AS occurrence_complete
             FROM attachment_extractions e
             JOIN attachments a ON a.attachment_id = e.attachment_id
                 AND a.extractor_module = e.extractor_module
@@ -1855,10 +2016,13 @@ class Database:
             """,
             (NO_EXTRACTOR_ERROR, LEGACY_OLE2_ERROR),
             qualifies,
+            assessed,
         )
 
     @_synchronized
-    def find_fitting_too_large_attachment_filepaths(self, max_bytes: int) -> set[str]:
+    def find_fitting_too_large_attachment_filepaths(
+        self, max_bytes: int, assessed: CompletenessClearing | None = None
+    ) -> set[str]:
         """The Maildir filepaths of the messages with an attachment
         occurrence whose cached extraction is ``too_large`` and whose
         payload now fits under ``max_bytes``: the comparison
@@ -1867,7 +2031,8 @@ class Database:
         the same size."""
         return self._stream_filepaths(
             """
-            SELECT m.filepath
+            SELECT m.filepath, a.attachment_occurrence_id AS occurrence_id,
+                   a.text_complete AS occurrence_complete
             FROM attachment_extractions e
             JOIN attachments a ON a.attachment_id = e.attachment_id
                 AND a.extractor_module = e.extractor_module
@@ -1876,6 +2041,25 @@ class Database:
               AND a.size_bytes <= ?
             """,
             (max_bytes,),
+            lambda _row: True,
+            assessed,
+        )
+
+    @_synchronized
+    def find_deferred_extraction_filepaths(self) -> set[str]:
+        """The Maildir filepaths of the messages with an attachment
+        occurrence whose extraction the per-message budget deferred
+        (#1236), so the startup sweep can re-queue one whose continuation
+        was lost (a pass with attachment extraction switched off marks
+        the message succeeded and leaves the mark)."""
+        return self._stream_filepaths(
+            """
+            SELECT m.filepath
+            FROM attachments a
+            JOIN message_thread_map m ON m.claimant_id = a.claimant_id
+            WHERE a.extraction_deferred_at IS NOT NULL
+            """,
+            (),
             lambda _row: True,
         )
 
@@ -2578,6 +2762,14 @@ class Database:
         self._conn.commit()
 
     @_synchronized
+    def queue_get_attempts_and_stage(self, filepath: str) -> tuple[int, str | None] | None:
+        """A job's attempts and last stage, or ``None`` with no row."""
+        row = self._conn.execute(
+            "SELECT attempts, last_stage FROM indexing_jobs WHERE filepath = ?", (filepath,)
+        ).fetchone()
+        return (int(row["attempts"]), row["last_stage"]) if row else None
+
+    @_synchronized
     def queue_get_attempts(self, filepath: str) -> int | None:
         row = self._conn.execute(
             "SELECT attempts FROM indexing_jobs WHERE filepath = ?", (filepath,)
@@ -2695,7 +2887,11 @@ class Database:
             """,
             (attempts, last_stage, last_error, error_class, now_iso, next_attempt_iso, filepath),
         )
-        self._conn.commit()
+        # Inside ``transaction()`` the write commits or rolls back with
+        # the caller's: an extraction continuation commits with the
+        # pass's results (#1236).
+        if self._transaction_depth == 0:
+            self._conn.commit()
 
     @_synchronized
     def queue_mark_dead(
@@ -2776,6 +2972,8 @@ class Database:
         permission_stage: str,
         permission_deferred_error: str,
         trashed_stage: str,
+        extract_stage: str,
+        extraction_deferred_error: str,
         reparse_reason: str,
     ) -> tuple[dict[str, int], str | None]:
         """Rows per heartbeat bucket and the earliest due time among due
@@ -2788,6 +2986,8 @@ class Database:
                        WHEN last_stage = :trashed THEN 'parked_trashed'
                        WHEN last_stage = :perm_stage AND last_error = :perm_deferred
                            THEN 'deferred_permission'
+                       WHEN last_stage = :extract_stage AND last_error = :extract_deferred
+                           THEN 'extraction_deferred'
                        WHEN last_error IS NULL THEN 'pending'
                        ELSE 'retrying'
                    END AS bucket,
@@ -2802,6 +3002,8 @@ class Database:
                 "trashed": trashed_stage,
                 "perm_stage": permission_stage,
                 "perm_deferred": permission_deferred_error,
+                "extract_stage": extract_stage,
+                "extract_deferred": extraction_deferred_error,
                 "now": now_iso,
                 "reparse": reparse_reason,
             },
