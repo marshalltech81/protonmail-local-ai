@@ -4757,7 +4757,7 @@ class TestRequeueLegacyOle2Rows:
         extractor = MagicMock(
             return_value=ExtractionResult(
                 status=STATUS_SUCCESS,
-                extractor="doc@1",
+                extractor="doc@2",
                 text="legacy words",
                 error=None,
                 text_complete=True,
@@ -4956,7 +4956,7 @@ class TestLegacyPptThroughThePipeline:
         extractor = MagicMock(
             return_value=ExtractionResult(
                 status=STATUS_SUCCESS,
-                extractor="ppt@1",
+                extractor="ppt@2",
                 text="slide words",
                 error=None,
                 text_complete=True,
@@ -5001,7 +5001,7 @@ class TestLegacyPptThroughThePipeline:
         row = db._conn.execute(
             "SELECT extraction_status, extractor, extraction_error FROM attachment_extractions"
         ).fetchone()
-        assert tuple(row) == ("failed", "ppt@1", "ToolExitError")
+        assert tuple(row) == ("failed", "ppt@2", "ToolExitError")
         # The message is indexed (its job row is gone) and no job row
         # holds the marker.
         assert db._conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 1
@@ -5045,7 +5045,7 @@ class TestLegacyPptThroughThePipeline:
         rows = db._conn.execute(
             "SELECT extraction_status, extractor, extraction_error FROM attachment_extractions"
         ).fetchall()
-        assert [tuple(r) for r in rows] == [("unsupported", "ppt@1", ENCRYPTED_PPT_ERROR)] * 2
+        assert [tuple(r) for r in rows] == [("unsupported", "ppt@2", ENCRYPTED_PPT_ERROR)] * 2
         assert db._conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 2
         jobs = db._conn.execute("SELECT last_error FROM indexing_jobs").fetchall()
         assert all(marker not in (r["last_error"] or "") for r in jobs)

@@ -541,12 +541,20 @@ class ExtractionResult:
 # their type names, and the files the limits now fail are crafted
 # (measured in each module), so a bump would only re-run every cached
 # OOXML row through a child to change none of them.
+# doc 2, ppt 2: the raw tool's output byte cap follows the configured
+# ``max_extracted_chars`` (four bytes a character, up to a 40 MiB
+# ceiling) instead of a fixed 8 MiB (#1308), so the same bytes can
+# yield more text (a raised or disabled character cap) or less (a
+# lowered one). The bump re-runs every cached ``.doc`` and ``.ppt`` row
+# once: catdoc in milliseconds, the ``.ppt`` reader at one JVM start
+# (0.15 to 0.35 s) per deck. ``ppt`` rows recorded ``failed`` for an
+# encrypted deck before #983 convert to ``unsupported`` on that re-run.
 EXTRACTOR_VERSIONS: dict[str, int] = {
-    "doc": 1,
+    "doc": 2,
     "docx": 7,
     "image": 3,
     "pdf": 5,
-    "ppt": 1,
+    "ppt": 2,
     "pptx": 3,
     "text": 3,
     "xls": 1,
@@ -917,6 +925,11 @@ def extract(
     # Known zero for a PDF unless its OCR cap records a count; unknown for
     # every other module (#891).
     _attempt.ocr_pages_skipped = 0 if module_name == "pdf" else None
+    # The raw-tool extractors size their output byte cap from the
+    # character cap (#1308); no other extractor takes it.
+    raw_tool_options = (
+        {"max_extracted_chars": max_extracted_chars} if module_name in ("doc", "ppt") else {}
+    )
     try:
         text, extractor_name = extractor_fn(
             payload,
@@ -925,6 +938,7 @@ def extract(
             ocr_timeout_seconds=ocr_timeout_seconds,
             max_pdf_pages=max_pdf_pages,
             on_progress=on_progress,
+            **raw_tool_options,
         )
     except MemoryError, RecursionError:
         # Resource-exhaustion errors are not "the extractor failed on

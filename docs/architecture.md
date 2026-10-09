@@ -1420,10 +1420,16 @@ everything in it once the group is dead, so a killed tool leaks no
 files. The tool gets an argument list with no shell, no stdin and an
 environment of `LC_ALL=C.UTF-8` and `TMPDIR` only; its stderr is
 discarded, since it can quote the document; and its stdout is read
-incrementally up to a byte cap (8 MiB for catdoc and for the `.ppt`
-reader, whose text past the cap is not indexed, is reported as
-`doc_output_bytes` / `ppt_output_bytes` and leaves the attachment's
-text marked incomplete). A timeout, a death by signal (a crash, or the
+incrementally up to a byte cap. For catdoc and the `.ppt` reader the
+cap is four bytes per character of `INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS`
+(UTF-8's worst case, so the character cap decides the stored length),
+never more than 40 MiB, which is also the cap when the character cap is
+disabled (#1308). It bounds the tool's raw output, before surrounding
+whitespace is stripped. The 40 MiB ceiling bounds the indexer's own
+memory: an extraction holds about five bytes per output byte at its
+peak (measured in the image), so about 200 MiB. Text past the cap is
+not indexed, is reported as `doc_output_bytes` / `ppt_output_bytes` and
+leaves the attachment's text marked incomplete. A timeout, a death by signal (a crash, or the
 CPU limit) or a non-zero exit (a tool that fails an allocation under
 the address-space limit exits with an error; the `.ppt` reader's
 reserved encrypted-deck status is the one exception, below) records
@@ -1709,8 +1715,10 @@ bump to `docx@7` with the walk budgets (#1031; see the DOCX budget
 paragraph above) refreshes those rows the same way. `ppt` was not bumped (#983): the deck's text is
 the same (none) either way, and a bump would re-run every cached deck
 at the next start to reclassify the encrypted ones, so an encrypted
-deck recorded `failed` (`ToolExitError`) before the mapping converts
-the same way, on its first re-run more than 7 days on. Each logs a
+deck recorded `failed` (`ToolExitError`) before the mapping converted
+the same way, on its first re-run more than 7 days on, until the bump
+to `ppt@2` for the derived output cap (#1308) re-ran every cached deck
+once. Each logs a
 rate-limited WARNING
 (`extractor <module> declined ...; recorded unsupported, not retried`).
 A pypdf limit hit inside one page's text extraction (a `/ToUnicode`
@@ -1789,7 +1797,7 @@ scanned pages are not re-read when OCR is turned on later.
 | `INDEXER_OCR_MAX_PAGES` | `20` | Cap pages OCR'd per PDF or multipage TIFF |
 | `INDEXER_OCR_TIMEOUT_SECONDS` | `60` | Per-page Tesseract timeout — bounds runaway OCR on a crafted high-noise image — and the deadline for rendering a scanned PDF's pages with Poppler. pdf2image's own page count before each render takes no timeout, so the indexer first times one bounded page count: one over half the deadline is an OCR timeout, and each render's timeout holds back that time. A page count much slower on pdf2image's call than on the timed one can still overrun (#868). Set `0` to disable both. |
 | `INDEXER_PDF_MAX_DIGITAL_PAGES` | `500` | Cap pages walked by the digital pypdf path — protects against text-only PDFs with thousands of pages. Set `0` to disable. A PDF cut here logs the `pdf_digital_pages` extractor-cap WARNING (#903). |
-| `INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS` | `2000000` (~500 pages) | Truncate extracted text before persisting in `attachment_extractions`. Bounds SQLite row size for very long OCR'd PDFs. Set to `0` to disable. The XLSX extractor also stops at 10,000,000 characters of its own, whatever this is set to, so shared strings repeated across many cells cannot expand without limit (#294). Text cut by either logs an extractor-cap WARNING (`extracted_chars`, `xlsx_text_chars`) and counts in the attachments line's `extractor_caps` (#903). |
+| `INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS` | `2000000` (~500 pages) | Truncate extracted text before persisting in `attachment_extractions`. Bounds SQLite row size for very long OCR'd PDFs. Set to `0` to disable. The XLSX extractor also stops at 10,000,000 characters of its own, whatever this is set to, so shared strings repeated across many cells cannot expand without limit (#294). The legacy `.doc` and `.ppt` tools' output is read up to four bytes per character of this cap, never past 40 MiB, whatever it is set to (#1308). Text cut by either logs an extractor-cap WARNING (`extracted_chars`, `xlsx_text_chars`) and counts in the attachments line's `extractor_caps` (#903). |
 
 The XLSX extractor has fixed budgets of its own besides these. It cuts
 worksheets at an XML node budget (#432). The parts openpyxl loads whole
