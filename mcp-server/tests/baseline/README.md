@@ -204,6 +204,14 @@ harness in `tests/eval/` (`tests/retrieval_metrics.py`).
   code with nothing disputed (t101). Per-thread passage selection
   leaves t100.11 out of both cases' prompts today (#974), a known gap
   that `test_answer_eval_cases.py` pins with a strict xfail.
+  Threads 102-112 back the synthetic counting family (#1256): apiary
+  visit notices with decoys of every shape #776 lists, a duplicate
+  delivery (two files claiming one Message-ID, written with the
+  builder's `duplicate_of`) and a notice in Trash. Their ground truth
+  is `tests/eval/counting_family.json`, and
+  `test_counting_family_baseline.py` pages the real `query_messages`
+  tool through its lookups (`tests/eval/README.md`, "Counting
+  family").
   Adding a thread can lower a recall floor's
   measured value; re-measure and explain it rather than lowering the
   floor silently.

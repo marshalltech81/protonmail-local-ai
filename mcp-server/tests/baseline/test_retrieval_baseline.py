@@ -52,6 +52,7 @@ _HERE = Path(__file__).parent
 GOLDEN = json.loads((_HERE / "golden.json").read_text(encoding="utf-8"))
 SNAPSHOT_PATH = _HERE / "snapshot.json"
 AGENT_SCENARIOS_PATH = _HERE.parent / "eval" / "agent_scenarios.json"
+COUNTING_FAMILY_PATH = _HERE.parent / "eval" / "counting_family.json"
 SNAPSHOT_DEPTH = 10
 _DOMAIN = "@baseline.example"
 
@@ -250,6 +251,7 @@ def test_unanswerable_golden(baseline_dir: Path, u: dict) -> None:
 
 AGENT_SCENARIOS = json.loads(AGENT_SCENARIOS_PATH.read_text(encoding="utf-8"))["scenarios"]
 COUNTING_SCENARIOS = [s for s in AGENT_SCENARIOS if s.get("expected_answer_messages")]
+COUNTING_FAMILY = json.loads(COUNTING_FAMILY_PATH.read_text(encoding="utf-8"))
 
 
 def test_agent_required_citations_exist(baseline_db: Database) -> None:
@@ -314,16 +316,29 @@ def test_agent_forbidden_text_is_in_the_answer_messages(baseline_db: Database, s
         assert value in bodies, value
 
 
-# The words an agent would look up for the counting scenario; each must
-# list at least one decoy, or the scenario's exact-set check tests nothing.
-_COUNTING_TRAPS = {"tofu-count": ["tofu", "PIN", "verification"]}
+# Every counting scenario's answer set and the words an agent would look
+# up for it (``trap_terms``): the agent scenarios' rows, and the synthetic
+# counting family's ground truth (#1256).
+COUNTING_TRAPS = [
+    (s["id"], s["expected_answer_messages"], s.get("trap_terms", [])) for s in COUNTING_SCENARIOS
+] + [
+    (sid, s["expected_messages"], s.get("trap_terms", []))
+    for sid, s in COUNTING_FAMILY["scenarios"].items()
+]
 
 
-@pytest.mark.parametrize("s", COUNTING_SCENARIOS, ids=lambda s: s["id"])
-def test_agent_counting_trap_is_real(baseline_db: Database, s: dict) -> None:
-    expected = set(s["expected_answer_messages"])
+@pytest.mark.parametrize(
+    ("sid", "answer", "trap_terms"), COUNTING_TRAPS, ids=[t[0] for t in COUNTING_TRAPS]
+)
+def test_agent_counting_trap_is_real(
+    baseline_db: Database, sid: str, answer: list[str], trap_terms: list[str]
+) -> None:
+    """Each trap term must list at least one decoy, or the scenario's
+    exact-set check tests nothing."""
+    assert trap_terms, f"{sid} lists no trap_terms"
+    expected = set(answer)
     listed: set[str] = set()
-    for word in _COUNTING_TRAPS[s["id"]]:
+    for word in trap_terms:
         page = baseline_db.query_messages(text=word, limit=100)
         found = {_message_ref(m.message_id) for m in page.messages}
         assert found - expected, f"{word!r} lists no decoy"
