@@ -58,7 +58,6 @@ from .attachment_indexing import (
     prepare_attachment_writes,
     record_committed_outcomes,
     reprocess_reruns_extraction,
-    too_large_fits,
 )
 from .chunker import (
     MessageChunk,
@@ -110,6 +109,7 @@ from .maildir import (
 )
 from .parser import (
     Message,
+    MessageNestingError,
     OversizedMessageError,
     _derive_folder,
     message_sort_time,
@@ -1270,7 +1270,8 @@ def _maybe_log_queue_heartbeat(queue: IndexingQueue) -> None:
         return
     d = queue.drain_deferrals()
     # ``suppressed_lines``: repeated indexer lines (embed retries and
-    # recoveries, health-file and ingestion-state failures) the shared
+    # recoveries, health-file and ingestion-state failures, the queue's
+    # terminal, retry and dead-letter lines) the shared
     # rate limit withheld since the last heartbeat; the attachment
     # WARNINGs it withheld are in the attachments line instead.
     log.info(
@@ -1440,6 +1441,10 @@ PERMISSION_DEFER_WINDOW_SECS = 24 * 60 * 60
 # server's status, so it never changes.
 RENAME_DEFER_SECS = 60
 RENAME_DEFERRED_ERROR = "FileNotFoundError: deferred until the rename is recorded"
+# ``last_error`` for a message the stdlib parser cannot parse without
+# hitting the recursion limit (#1296). Fixed text, like the oversized and
+# no-Message-ID dead letters.
+MESSAGE_NESTING_DEAD_ERROR = f"unindexable: {MessageNestingError.TEXT}"
 
 
 def _enqueued_within(row: sqlite3.Row, seconds: int) -> bool:
@@ -1520,6 +1525,13 @@ def _phase1_commit_thread(
         # ``is_dead`` gate then skips the file thereafter, and operators
         # see the entry in ``queue.stats()['dead']``.
         queue.mark_dead_terminal(filepath, stage="parse", error=f"oversized: {e}")
+        return None
+    except MessageNestingError:
+        # The same bytes hit the same recursion limit on every attempt,
+        # so retrying only repeats the failure: dead-letter on the first
+        # one, as for an oversized file (#1296). ``make requeue-dead``
+        # cannot help while the file is unchanged.
+        queue.mark_dead_terminal(filepath, stage="parse", error=MESSAGE_NESTING_DEAD_ERROR)
         return None
     except Exception as e:
         queue.mark_failed(filepath, stage="parse", error=_stage_error(e))
@@ -2572,6 +2584,14 @@ def _clear_stale_text_completeness(db: Database) -> int:
     return cleared
 
 
+def _occurrence_reruns_extraction(row: sqlite3.Row) -> bool:
+    """``reprocess_reruns_extraction`` for one sweep row: an occurrence's
+    cached error, row module, MIME type and filename."""
+    return reprocess_reruns_extraction(
+        row["extraction_error"], row["extractor_module"], row["content_type"], row["filename"]
+    )
+
+
 def _requeue_stale_extractions(db: Database, queue: IndexingQueue) -> int:
     """Re-queue messages whose cached attachment extraction came from an
     older version of an extractor (see ``extractors.EXTRACTOR_VERSIONS``),
@@ -2621,18 +2641,8 @@ def _requeue_stale_extractions(db: Database, queue: IndexingQueue) -> int:
     # For a "no extractor" or OLE2 row the predicate is only "this
     # occurrence now selects another module"; the OCR setting plays no
     # part in it.
-    filepaths.update(
-        row["filepath"]
-        for row in db.find_no_extractor_attachments()
-        if reprocess_reruns_extraction(
-            row["extraction_error"], row["extractor_module"], row["content_type"], row["filename"]
-        )
-    )
-    filepaths.update(
-        row["filepath"]
-        for row in db.find_too_large_attachments()
-        if too_large_fits(row["size_bytes"], INDEXER_ATTACHMENT_MAX_BYTES)
-    )
+    filepaths.update(db.find_no_extractor_attachment_filepaths(_occurrence_reruns_extraction))
+    filepaths.update(db.find_fitting_too_large_attachment_filepaths(INDEXER_ATTACHMENT_MAX_BYTES))
     # A cached result with no completeness record (#1285): the reparse
     # the v6 migration queued covers most; this catches the ``-ocr`` rows
     # kept while OCR was off, once it is on.
@@ -2648,16 +2658,7 @@ def _requeue_stale_extractions(db: Database, queue: IndexingQueue) -> int:
     }
     filepaths.update(unrecorded)
     if INDEXER_OCR_ENABLED:
-        filepaths.update(
-            row["filepath"]
-            for row in db.find_ocr_disabled_attachments()
-            if reprocess_reruns_extraction(
-                row["extraction_error"],
-                row["extractor_module"],
-                row["content_type"],
-                row["filename"],
-            )
-        )
+        filepaths.update(db.find_ocr_disabled_attachment_filepaths(_occurrence_reruns_extraction))
     re_enqueued = 0
     re_enqueued_unrecorded = 0
     skipped_dead = 0

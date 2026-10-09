@@ -1186,6 +1186,87 @@ class TestDrainQueueRetryAndDeadLetter:
         queue = IndexingQueue(db, max_attempts=1, base_backoff_seconds=0)
         assert queue.is_dead(str(dest)) is True
 
+    def test_too_deeply_nested_message_dead_letters_terminally(self, tmp_path, monkeypatch, caplog):
+        # A message nested past the stdlib parser's recursion limit fails
+        # the same way on every attempt, so it is dead-lettered on the
+        # first one with fixed text, not retried on backoff (#1296).
+        caplog.set_level(logging.DEBUG)
+        marker = "NESTMARK-1296-synthetic"
+        dest = tmp_path / "INBOX" / "cur" / "nested.eml"
+        dest.parent.mkdir(parents=True)
+        raw = f"Message-ID: <inner@example.test>\nSubject: {marker}\n\n{marker}\n".encode()
+        for i in range(1000):
+            raw = (
+                f"Message-ID: <wrap{i}@example.test>\nSubject: {marker}\n"
+                "Content-Type: message/rfc822\n\n"
+            ).encode() + raw
+        dest.write_bytes(raw)
+
+        calls = 0
+        real_parse = main.parse_email
+
+        def _counting_parse(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            return real_parse(*args, **kwargs)
+
+        monkeypatch.setattr(main, "parse_email", _counting_parse)
+        db = Database(tmp_path / "mail.db")
+        threader = Threader(db)
+        embedder = make_mock_embedder()
+        queue = _make_queue(db)
+        queue.enqueue(str(dest), REASON_INITIAL_SCAN)
+
+        for _ in range(3):
+            _drain(queue, db, embedder, threader)
+            _make_due(db)
+
+        assert calls == 1
+        assert queue.stats() == {"queued": 0, "dead": 1}
+        row = db._conn.execute(
+            "SELECT status, attempts, last_stage, last_error, last_error_class "
+            "FROM indexing_jobs WHERE filepath = ?",
+            (str(dest),),
+        ).fetchone()
+        assert row["status"] == "dead"
+        assert row["attempts"] == 1
+        assert row["last_stage"] == "parse"
+        assert row["last_error"] == main.MESSAGE_NESTING_DEAD_ERROR
+        assert row["last_error_class"] == "permanent_source_failure"
+        assert not embedder.embed.called
+        assert marker not in caplog.text
+        assert marker not in row["last_error"]
+        terminal = [r for r in caplog.records if r.getMessage().startswith("terminal: ")]
+        assert len(terminal) == 1
+        assert terminal[0].levelno == logging.WARNING
+
+    def test_recursion_error_after_the_stdlib_parse_keeps_retrying(self, tmp_path, monkeypatch):
+        # Only the stdlib message parse is terminal: a ``RecursionError``
+        # from elsewhere in the parse stage still retries (#1296).
+        dest = tmp_path / "INBOX" / "cur" / "msg.eml"
+        _write_eml(dest, "recursion@example.com")
+
+        def _boom(*_args, **_kwargs):
+            raise RecursionError("synthetic")
+
+        monkeypatch.setattr(parser, "_read_address_headers", _boom)
+        db = Database(tmp_path / "mail.db")
+        threader = Threader(db)
+        queue = _make_queue(db)
+        queue.enqueue(str(dest), REASON_INITIAL_SCAN)
+
+        _drain(queue, db, make_mock_embedder(), threader, max_passes=1)
+
+        row = db._conn.execute(
+            "SELECT status, attempts, last_error, last_error_class "
+            "FROM indexing_jobs WHERE filepath = ?",
+            (str(dest),),
+        ).fetchone()
+        assert row["status"] == "queued"
+        assert row["attempts"] == 1
+        assert row["last_error"] == "RecursionError"
+        assert row["last_error_class"] == "retryable"
+
     def test_unreadable_file_routes_to_retry_not_terminal_success(self, tmp_path):
         # Models the mbsync 0600→0644 chmod race: the watchdog enqueues a
         # newly-delivered file before mbsync's post-sync chmod hook makes
@@ -4334,6 +4415,19 @@ class TestRequeueOcrDisabledExtractions:
         return db, queue, paths
 
     @staticmethod
+    def _ocr_disabled_rows(db) -> list[dict]:
+        """Every "OCR disabled" occurrence row the sweep query reads,
+        collected through its predicate (#1289)."""
+        rows: list[dict] = []
+
+        def collect(row) -> bool:
+            rows.append(dict(row))
+            return True
+
+        db.find_ocr_disabled_attachment_filepaths(collect)
+        return rows
+
+    @staticmethod
     def _queued(db) -> dict[str, str]:
         rows = db._conn.execute(
             "SELECT filepath, reason FROM indexing_jobs WHERE status = 'queued'"
@@ -4357,7 +4451,7 @@ class TestRequeueOcrDisabledExtractions:
                 "scan": (self._scanned_pdf(), "application/pdf", "scan.pdf"),
             },
         )
-        rows = db.find_ocr_disabled_attachments()
+        rows = self._ocr_disabled_rows(db)
         assert sorted((r["filepath"], r["extraction_error"]) for r in rows) == sorted(
             [
                 (paths["photo"], OCR_DISABLED_ERROR),
@@ -4389,7 +4483,7 @@ class TestRequeueOcrDisabledExtractions:
         monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
         self._drain(db, queue)
         assert extractor.call_count == 2
-        assert db.find_ocr_disabled_attachments() == []
+        assert self._ocr_disabled_rows(db) == []
 
         # The next startup finds nothing left to re-run.
         assert main._requeue_stale_extractions(db, queue) == 0
@@ -4470,7 +4564,7 @@ class TestRequeueOcrDisabledExtractions:
                 "blob": (self._png(), "application/octet-stream", "blob.bin"),
             },
         )
-        assert [r["filename"] for r in db.find_ocr_disabled_attachments()] == ["photo.png"]
+        assert [r["filename"] for r in self._ocr_disabled_rows(db)] == ["photo.png"]
         queue.enqueue(paths["photo"], REASON_INITIAL_SCAN)
         for _ in range(queue.max_attempts):
             queue.mark_failed(paths["photo"], stage="embed", error="x")
@@ -4663,7 +4757,7 @@ class TestRequeueLegacyOle2Rows:
         extractor = MagicMock(
             return_value=ExtractionResult(
                 status=STATUS_SUCCESS,
-                extractor="doc@1",
+                extractor="doc@2",
                 text="legacy words",
                 error=None,
                 text_complete=True,
@@ -4862,7 +4956,7 @@ class TestLegacyPptThroughThePipeline:
         extractor = MagicMock(
             return_value=ExtractionResult(
                 status=STATUS_SUCCESS,
-                extractor="ppt@1",
+                extractor="ppt@2",
                 text="slide words",
                 error=None,
                 text_complete=True,
@@ -4907,7 +5001,7 @@ class TestLegacyPptThroughThePipeline:
         row = db._conn.execute(
             "SELECT extraction_status, extractor, extraction_error FROM attachment_extractions"
         ).fetchone()
-        assert tuple(row) == ("failed", "ppt@1", "ToolExitError")
+        assert tuple(row) == ("failed", "ppt@2", "ToolExitError")
         # The message is indexed (its job row is gone) and no job row
         # holds the marker.
         assert db._conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 1
@@ -4951,7 +5045,7 @@ class TestLegacyPptThroughThePipeline:
         rows = db._conn.execute(
             "SELECT extraction_status, extractor, extraction_error FROM attachment_extractions"
         ).fetchall()
-        assert [tuple(r) for r in rows] == [("unsupported", "ppt@1", ENCRYPTED_PPT_ERROR)] * 2
+        assert [tuple(r) for r in rows] == [("unsupported", "ppt@2", ENCRYPTED_PPT_ERROR)] * 2
         assert db._conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 2
         jobs = db._conn.execute("SELECT last_error FROM indexing_jobs").fetchall()
         assert all(marker not in (r["last_error"] or "") for r in jobs)
@@ -5457,6 +5551,48 @@ class TestEnqueueUnindexedMessages:
         assert row["last_error"] == "unindexable: no Message-ID or one over 998 characters"
         assert marker not in caplog.text
         assert db._conn.execute("SELECT COUNT(*) FROM threads").fetchone()[0] == 0
+
+    def test_a_burst_of_unindexable_mail_logs_a_bounded_number_of_terminal_lines(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """Each crafted message dead-letters with one ``terminal:``
+        WARNING; past the shared line budget the rest are counted in the
+        heartbeat's ``suppressed_lines`` instead of logged (#1320)."""
+        from src import extractors
+
+        maildir, inbox, db, queue = self._setup(tmp_path, monkeypatch)
+        monkeypatch.setattr(main, "touch_health_file", lambda: None)
+        marker = "TERMINALBURST1320MARKER"
+        limit = extractors._WARNINGS_PER_WINDOW
+        total = limit + 9
+        for i in range(total):
+            (inbox / f"no-id-{i:03d}.eml").write_text(
+                f"From: alice@example.com\r\nSubject: {marker}\r\n\r\n{marker}\r\n",
+                encoding="utf-8",
+            )
+        with caplog.at_level(logging.DEBUG):
+            main.initial_index(db, make_mock_embedder(), Threader(db), queue)
+            monkeypatch.setattr(main, "_last_queue_heartbeat", None)
+            main._maybe_log_queue_heartbeat(queue)
+
+        terminal = [r for r in caplog.records if r.getMessage().startswith("terminal: ")]
+        assert len(terminal) == limit
+        assert {r.levelno for r in terminal} == {logging.WARNING}
+        heartbeats = [
+            r.getMessage() for r in caplog.records if r.getMessage().startswith("queue: ")
+        ]
+        assert heartbeats
+        assert f"dead={total} " in heartbeats[-1]
+        suppressed = sum(int(h.rsplit("suppressed_lines=", 1)[1]) for h in heartbeats)
+        assert suppressed == total - limit
+        assert queue.stats()["dead"] == total
+        errors = [
+            r["last_error"]
+            for r in db._conn.execute("SELECT last_error FROM indexing_jobs").fetchall()
+        ]
+        assert len(errors) == total
+        assert all(marker not in e for e in errors)
+        assert marker not in caplog.text
 
 
 def _job_reasons(db: Database) -> dict[str, str]:

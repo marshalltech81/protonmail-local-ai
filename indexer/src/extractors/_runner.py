@@ -178,6 +178,26 @@ class ChildResult:
     counts: dict[str, int]
 
 
+def raw_output_cap(max_extracted_chars: int | None, *, ceiling: int) -> int:
+    """The output byte cap of a raw tool (``doc``, ``ppt``) for the
+    dispatcher's configured character cap (#1308): four bytes a character,
+    UTF-8's worst case, so the character cap decides the stored length,
+    never above ``ceiling``, which also applies when the character cap is
+    disabled (``None``). The cap bounds the tool's raw output, before the
+    dispatcher strips surrounding whitespace.
+
+    The ceiling bounds the indexer's own memory, since the output is read
+    into it: measured plainly in the indexer image through the
+    dispatcher, an extraction holds about five bytes per output byte at
+    its peak (the read chunks and their join, then the decoded text, four
+    bytes a character once one character is outside the Basic
+    Multilingual Plane), linear from 8 to 256 MiB of output.
+    """
+    if max_extracted_chars is None:
+        return ceiling
+    return min(4 * max_extracted_chars, ceiling)
+
+
 def run_tool(
     argv: list[str],
     payload: bytes,

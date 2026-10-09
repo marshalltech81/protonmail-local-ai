@@ -1170,8 +1170,17 @@ Every failed row records a `last_error_class`:
 | Class | Meaning |
 |---|---|
 | `retryable` | May succeed on a later attempt; `dead` means the attempt budget ran out |
-| `permanent_source_failure` | This file can never be indexed under the current config (oversized, no `Message-ID` or one over 998 characters, input the embedder rejects) — dead-lettered immediately |
+| `permanent_source_failure` | This file can never be indexed under the current config (oversized, no `Message-ID` or one over 998 characters, nested too deeply for the email parser, input the embedder rejects) — dead-lettered immediately |
 | `operator_action_required` | The embedder rejected a health probe (bad key or model); jobs stay `queued` until you fix the config |
+
+Each transition logs one line naming the file: `terminal: <path>
+stage=<stage> error=<error>` (WARNING) for a `permanent_source_failure`,
+`retry: <path> attempt <n>/<max> ...` (WARNING) for a scheduled retry,
+and `dead-letter: <path> ...` (ERROR) when the attempt budget runs out.
+They share the indexer's 20-per-5-minutes line budget, so a stream of
+crafted mail cannot flood the log; lines past it are counted as
+`suppressed_lines` on the queue heartbeat, and the table above (or the
+heartbeat's `dead=` count) still holds every row.
 
 Once the cause of a dead-letter is fixed, requeue with a fresh budget
 while the stack is running:
@@ -1185,6 +1194,15 @@ The same applies after an upgrade that fixes a parser crash: the
 startup scan and periodic recovery skip dead rows, so mail that
 dead-lettered on the old version (for example an 8-bit `Date` header
 before #361) stays unindexed until you requeue it.
+
+A message whose MIME structure is nested too deeply for Python's email
+parser (around a thousand nested `message/rfc822` levels) dead-letters
+on its first attempt with `last_stage` `parse` and `last_error`
+`unindexable: message nested too deeply for the email parser`, and the
+log shows one `terminal: <path> stage=parse` WARNING (counted in
+`suppressed_lines` instead when the line budget is spent). No setting changes
+this, so `make requeue-dead` only parses it again and dead-letters it
+again; the message stays out of the index.
 
 ## Indexer health in the log
 
@@ -1306,8 +1324,9 @@ Queue and maintenance (all INFO unless noted):
   [Reparse or rebuild after an upgrade](#reparse-or-rebuild-after-an-upgrade)).
   The deferral counts are `defer`
   calls since the previous heartbeat, by stage. `suppressed_lines` is
-  how many embed retry and recovery, health-file and ingestion-state
-  lines the shared rate limit withheld since the previous heartbeat
+  how many embed retry and recovery, health-file, ingestion-state and
+  queue `terminal:` / `retry:` / `dead-letter:` lines the shared rate
+  limit withheld since the previous heartbeat
   (counted apart from the attachment WARNINGs, so they never make the
   attachments line a WARNING). `queue heartbeat failed: <type>`
   (WARNING) if the counts could not be read.
@@ -1633,10 +1652,12 @@ only, never filenames or text (`make logs`):
   - `image_text_chars`: an image's OCR text passed 10,000,000
     characters; the text is cut there and no later TIFF frame is read
     (#1292).
-  - `doc_output_bytes`: catdoc wrote more than 8 MiB for a legacy
-    `.doc`; the rest is not read (#935).
-  - `ppt_output_bytes`: the `.ppt` reader wrote more than 8 MiB for a
-    legacy `.ppt`; the rest is not read (#957).
+  - `doc_output_bytes`: catdoc wrote more for a legacy `.doc` than
+    four bytes per character of `INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS`,
+    or than 40 MiB when that is larger or disabled (#1308), counted
+    before whitespace is stripped; the rest is not read (#935).
+  - `ppt_output_bytes`: the same cap on the `.ppt` reader's output for a
+    legacy `.ppt` (#957).
   - `pptx_slides`, `pptx_shapes`, `pptx_table_cells`,
     `pptx_text_chars`: the walk over a PowerPoint deck stopped at its
     slide budget (5,000 slide-list entries), shape budget (100,000,
