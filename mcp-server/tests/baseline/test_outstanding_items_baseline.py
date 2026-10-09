@@ -364,3 +364,24 @@ def test_attachment_only_evidence_is_not_in_the_body_tools(tools: dict) -> None:
     assert _listed(_query_all(tools, text="stipulated dismissal")) == []
     (page,) = _message_pages(tools, _mid("t55.1"))
     assert "June 12" not in page["body"]
+
+
+def test_only_sent_shows_a_transmission_and_none_shows_the_prepared_consent(
+    tools: dict,
+) -> None:
+    """The claim cases (#798): Jordan's railing transmission to Avery is
+    listed by a Sent lookup and nowhere else in its thread, while the
+    consent management prepared for Jordan to send is in no Sent message."""
+    sent_to_avery = _listed(_query_all(tools, folder="Sent", participant=AVERY))
+    assert "t121.2" in sent_to_avery and "t121.1" not in sent_to_avery
+    assert sorted(_listed(_query_all(tools, text="written consent"))) == ["t120.1", "t120.2"]
+    assert _listed(_query_all(tools, folder="Sent", text="written consent")) == []
+
+
+def test_later_guidance_is_in_another_thread(tools: dict) -> None:
+    """Avery's handover of the towing amendment is not in the thread where
+    Blair took it on, so reading that thread alone misses it."""
+    (towing,) = _thread_pages(tools, _mid("t122.1"))
+    assert _mid("t123.1") not in [m["message_id"] for m in towing["messages"]]
+    (handover,) = _thread_pages(tools, _mid("t123.1"))
+    assert [m["message_id"] for m in handover["messages"]] == [_mid("t123.1")]

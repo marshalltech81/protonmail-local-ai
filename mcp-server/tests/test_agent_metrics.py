@@ -6,10 +6,14 @@ exists to catch. IDs are synthetic.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from tests.agent_metrics import (
     _MESSAGE_REF,
+    AgentScore,
+    ClaimTruth,
     OutstandingAction,
     OutstandingTruth,
     Scenario,
@@ -1165,7 +1169,11 @@ def _outstanding_trace(
     """A listing of ``listed`` (default ``_LISTED``) and a get_thread read
     of ``read`` (default: whatever was listed), then ``answer``."""
     answer = _outstanding_answer() if answer is None else answer
-    answer["cited"] = [c for entry in answer["items"] + answer["excluded"] for c in entry["cited"]]
+    answer["cited"] = [
+        c
+        for entry in answer["items"] + answer["excluded"]
+        for c in entry["cited"] + [c for claim in entry.get("claims", []) for c in claim["cited"]]
+    ]
     listed = _LISTED if listed is None else listed
     page = _page(
         [f"{m}@x.example" for m in listed],
@@ -1545,6 +1553,198 @@ class TestOutstandingCitationSets:
     def test_none_for_other_scenarios(self) -> None:
         score = score_trace(_scenario(), _trace([_search(["a.1@x.example"])]))
         assert score.citations_consistent is None
+
+
+# Per-claim labels (#798, owner decision 2026-10-08). open-1 has a
+# transmission in Sent (s.1) and no acknowledgement; closed-1's
+# completion is c.1.
+_CLAIM_METRICS = (
+    "claim_recall",
+    "claim_precision",
+    "claim_labels_present",
+    "claim_labels_correct",
+    "confirmed_claims_supported",
+)
+
+
+def _claims_truth() -> OutstandingTruth:
+    open_1, closed_1, *rest = _truth().actions
+    return _truth(
+        actions=[
+            replace(
+                open_1,
+                claims={
+                    "sent": ClaimTruth("confirmed", ["s.1@x.example"]),
+                    "received": ClaimTruth("unverified", []),
+                },
+            ),
+            replace(closed_1, claims={"done": ClaimTruth("confirmed", ["c.1@x.example"])}),
+            *rest,
+        ]
+    )
+
+
+def _claims_answer() -> dict:
+    answer = _outstanding_answer()
+    answer["items"][0]["claims"] = [
+        {"kind": "sent", "label": "confirmed", "cited": [_claim("s.1@x.example")]},
+        {"kind": "received", "label": "unverified", "cited": []},
+    ]
+    answer["excluded"][0]["claims"] = [
+        {"kind": "done", "label": "confirmed", "cited": [_claim("c.1@x.example")]},
+    ]
+    return answer
+
+
+def _claims_score(answer: dict, read: list[str] | None = None) -> AgentScore:
+    scenario = _outstanding(outstanding=_claims_truth())
+    return score_trace(scenario, _outstanding_trace(answer, listed=[*_LISTED, "s.1"], read=read))
+
+
+class TestOutstandingClaims:
+    """``claims`` on items and excluded entries, scored against each
+    action's ``claims`` truth: recall and precision by (action, kind),
+    labels present and correct, and confirmed claims supported."""
+
+    def test_the_reference_claims_score_clean(self) -> None:
+        score = _claims_score(_claims_answer())
+        assert score.claim_recall == 1.0
+        assert score.claim_precision == 1.0
+        assert score.claim_labels_present == 1.0
+        assert score.claim_labels_correct == 1.0
+        assert score.confirmed_claims_supported is True
+        assert score.failures == []
+
+    def test_none_without_a_claims_map(self) -> None:
+        # The answer's claims are not scored when the truth has none.
+        trace = _outstanding_trace(_claims_answer(), listed=[*_LISTED, "s.1"])
+        score = score_trace(_outstanding(), trace)
+        assert all(getattr(score, name) is None for name in _CLAIM_METRICS)
+        assert score.failures == []
+
+    def test_none_for_other_scenarios(self) -> None:
+        score = score_trace(_scenario(), _trace([_search(["a.1@x.example"])]))
+        assert all(getattr(score, name) is None for name in _CLAIM_METRICS)
+
+    def test_a_missing_claim_lowers_recall(self) -> None:
+        answer = _claims_answer()
+        del answer["excluded"][0]["claims"]
+        score = _claims_score(answer)
+        assert score.claim_recall == 2 / 3
+        assert score.claim_precision == 1.0
+        assert "claim_recall" in score.failures
+
+    def test_recall_is_deduplicated_by_action_and_kind(self) -> None:
+        answer = _claims_answer()
+        answer["items"][0]["claims"].append(dict(answer["items"][0]["claims"][0]))
+        del answer["excluded"][0]["claims"]
+        score = _claims_score(answer)
+        assert score.claim_recall == 2 / 3
+        # The repeat is on a kind the truth has, so it is not padding.
+        assert score.claim_precision == 1.0
+        assert score.claim_labels_correct == 1.0
+
+    @pytest.mark.parametrize("label", ["unverified", "proposed", None])
+    def test_a_claim_on_an_inapplicable_kind_lowers_precision_whatever_its_label(
+        self, label: str | None
+    ) -> None:
+        answer = _claims_answer()
+        answer["items"][0]["claims"].append({"kind": "done", "label": label, "cited": []})
+        score = _claims_score(answer)
+        assert score.claim_precision == 3 / 4
+        assert score.claim_recall == 1.0
+        assert "claim_precision" in score.failures
+
+    def test_a_claim_on_an_action_without_claims_lowers_precision(self) -> None:
+        answer = _claims_answer()
+        answer["items"][1]["claims"] = [{"kind": "sent", "label": "unverified", "cited": []}]
+        assert _claims_score(answer).claim_precision == 3 / 4
+
+    def test_a_missing_label_is_kept_apart_from_a_wrong_one(self) -> None:
+        answer = _claims_answer()
+        answer["items"][0]["claims"][1]["label"] = None
+        score = _claims_score(answer)
+        assert score.claim_labels_present == 2 / 3
+        assert score.claim_labels_correct == 2 / 3
+        assert {"claim_labels_present", "claim_labels_correct"} <= set(score.failures)
+        answer = _claims_answer()
+        answer["items"][0]["claims"][1]["label"] = "proposed"
+        score = _claims_score(answer)
+        assert score.claim_labels_present == 1.0
+        assert score.claim_labels_correct == 2 / 3
+
+    def test_conflicting_labels_on_one_kind_are_both_wrong(self) -> None:
+        answer = _claims_answer()
+        answer["items"][0]["claims"].append({"kind": "sent", "label": "unverified", "cited": []})
+        score = _claims_score(answer)
+        assert score.claim_labels_correct == 2 / 4
+        assert score.claim_recall == 1.0
+        assert score.claim_precision == 1.0
+        assert "claim_labels_correct" in score.failures
+
+    def test_a_conflict_across_items_and_excluded_entries_counts(self) -> None:
+        answer = _claims_answer()
+        answer["excluded"].append(
+            {
+                "action": "closed-1",
+                "status": "closed",
+                "cited": [],
+                "claims": [{"kind": "done", "label": "unverified", "cited": []}],
+            }
+        )
+        assert _claims_score(answer).claim_labels_correct == 2 / 4
+
+    def test_a_confirmed_claim_needs_a_read_of_a_source_of_its_kind(self) -> None:
+        # Cites the right message, but no result returned its content.
+        score = _claims_score(_claims_answer(), read=list(_LISTED))
+        assert score.confirmed_claims_supported is False
+        assert "confirmed_claims_supported" in score.failures
+        # Cites a message that was read, but not one of the kind's proof set.
+        answer = _claims_answer()
+        answer["items"][0]["claims"][0]["cited"] = [_claim("a.2@x.example")]
+        assert _claims_score(answer).confirmed_claims_supported is False
+
+    def test_a_confirmed_claim_on_an_unverified_kind_is_unsupported(self) -> None:
+        # Receipt inferred from a later message: the truth has no proof.
+        answer = _claims_answer()
+        answer["items"][0]["claims"][1].update(label="confirmed", cited=[_claim("a.2@x.example")])
+        score = _claims_score(answer)
+        assert score.confirmed_claims_supported is False
+        assert score.claim_labels_correct == 2 / 3
+
+    def test_an_unlabelled_claim_is_held_to_the_confirmed_rule(self) -> None:
+        answer = _claims_answer()
+        answer["items"][0]["claims"][1].update(label=None, cited=[_claim("a.2@x.example")])
+        assert _claims_score(answer).confirmed_claims_supported is False
+        # Unverified and proposed claims need no proof.
+        answer = _claims_answer()
+        answer["items"][0]["claims"][0].update(label="proposed", cited=[])
+        score = _claims_score(answer)
+        assert score.confirmed_claims_supported is True
+        assert score.claim_labels_correct == 2 / 3
+
+    def test_claim_citations_join_the_citation_union(self) -> None:
+        answer = _claims_answer()
+        answer["items"][0]["claims"][0]["cited"].append(_claim("x.1@x.example"))
+        trace = _outstanding_trace(answer, listed=[*_LISTED, "s.1"])
+        trace["answer"]["cited"].remove(_claim("x.1@x.example"))
+        score = score_trace(_outstanding(outstanding=_claims_truth()), trace)
+        assert score.forbidden_sources_avoided is False
+        assert score.citations_consistent is False
+
+    def test_a_malformed_claim_counts_as_padding(self) -> None:
+        trace = _outstanding_trace(_claims_answer(), listed=[*_LISTED, "s.1"])
+        trace["answer"]["items"][0]["claims"] += [{"label": "confirmed"}, "sent"]
+        score = score_trace(_outstanding(outstanding=_claims_truth()), trace)
+        assert score.claim_precision == 3 / 5
+        assert score.confirmed_claims_supported is False
+
+    def test_summary_reports_the_claim_aggregates(self) -> None:
+        out = summarize([_claims_score(_claims_answer())])
+        assert "Claim recall:        100.00% (mean over 1)" in out
+        assert "Confirmed claims supported: 100.00% (1/1)" in out
+        clean = summarize([score_trace(_scenario(), _trace([_search(["a.1@x.example"])]))])
+        assert "Claim recall:        n/a" in clean
 
 
 class TestMessageRefs:

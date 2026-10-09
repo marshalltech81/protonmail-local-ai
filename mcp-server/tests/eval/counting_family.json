@@ -1,0 +1,59 @@
+{
+  "_comment": "Ground truth for the synthetic counting family (#1256, part A of #776): apiary visit notices from the invented Brackenmoor Beekeepers, corpus threads 102-112 (indexer/tests/baseline/corpus.py). Written by hand from the corpus text, never from what search returns. messages classifies every family message: shape is the #776 shape it stands for; notice and report name the distinct visit (the underlying item) the message gives notice of or reports on; deliveries counts the Maildir files that claim the message's Message-ID (2 for the duplicate delivery, so two claimant IDs); folder is set when it is not INBOX or Sent's default scope (Trash). A scenario's expected_messages are the messages of its category outside Trash, trash_messages those in Trash, expected_items the distinct items among expected_messages; trap_terms are the words an agent would look up, each of which must list a decoy while together they reach every expected message. lookups are exact query_messages calls with every matching message ref, repeated once per claimant; make baseline pages each to the end. held_out must equal tests/agent_metrics.py is_held_out(id); held-out scenarios are never used to tune anything. Synthetic data only.",
+  "messages": {
+    "t102.1": {"shape": "direct", "notice": "wexcombe-04-14"},
+    "t102.2": {"shape": "reply"},
+    "t103.1": {"shape": "duplicate_delivery", "notice": "millrace-04-28", "deliveries": 2},
+    "t104.1": {"shape": "repeat", "notice": "millrace-04-28"},
+    "t105.1": {"shape": "other_wording", "notice": "sorrel-bank-05-08"},
+    "t106.1": {"shape": "request"},
+    "t106.2": {"shape": "confirmation", "notice": "wexcombe-06-02"},
+    "t107.1": {"shape": "forward"},
+    "t108.1": {"shape": "look_alike", "report": "wexcombe-04-14"},
+    "t109.1": {"shape": "two_categories", "notice": "millrace-06-16", "report": "millrace-04-28"},
+    "t110.1": {"shape": "shared_keywords"},
+    "t111.1": {"shape": "shared_keywords"},
+    "t112.1": {"shape": "direct", "notice": "sorrel-bank-06-23", "folder": "Trash"}
+  },
+  "scenarios": {
+    "apiary-visit-notices": {
+      "category": "notice",
+      "question": "How many apiary visit notices did I get, and for which visits?",
+      "expected_messages": ["t102.1", "t103.1", "t104.1", "t105.1", "t106.2", "t109.1"],
+      "trash_messages": ["t112.1"],
+      "expected_items": 5,
+      "trap_terms": ["apiary", "visit", "hive", "notice"]
+    },
+    "hive-visit-reports": {
+      "category": "report",
+      "question": "Did the hive warden send any visit reports, and for which visits?",
+      "expected_messages": ["t108.1", "t109.1"],
+      "trash_messages": [],
+      "expected_items": 2,
+      "trap_terms": ["report", "visit", "apiary"],
+      "held_out": true
+    }
+  },
+  "lookups": [
+    {
+      "args": {"text": "apiary"},
+      "expect": ["t102.1", "t102.2", "t103.1", "t103.1", "t104.1", "t106.1", "t106.2", "t107.1", "t108.1", "t109.1", "t111.1"]
+    },
+    {
+      "args": {"text": "hive"},
+      "expect": ["t102.1", "t103.1", "t103.1", "t104.1", "t105.1", "t106.1", "t106.2", "t107.1", "t108.1", "t109.1", "t110.1", "t111.1"]
+    },
+    {
+      "args": {"text": "apiary", "folder": "Trash"},
+      "expect": ["t112.1"]
+    },
+    {
+      "args": {"text": "hive", "folder": "Trash"},
+      "expect": ["t112.1"]
+    },
+    {
+      "args": {"text": "apiary", "date_from": "2026-04-07", "date_to": "2026-04-29"},
+      "expect": ["t102.1", "t102.2", "t103.1", "t103.1", "t104.1", "t107.1", "t108.1", "t109.1"]
+    }
+  ]
+}

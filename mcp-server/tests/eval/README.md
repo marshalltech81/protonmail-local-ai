@@ -229,8 +229,9 @@ question; instead it lists:
 full-read message holds a forbidden value only past its first
 `get_message` page (read with the real tool), that every forbidden value
 is in an expected message's body, and that `query_messages(text=...)`
-for each of "tofu", "PIN" and "verification" lists at least one decoy
-while the three together reach every genuine message.
+for each of the row's `trap_terms` ("tofu", "PIN" and "verification")
+lists at least one decoy while together they reach every genuine
+message.
 `tests/test_agent_eval.py` mutates the reference trace into each
 observed mistake (keyword matches counted, a decoy cited, a message
 counted twice, a long body read to page 1 only, a wrong or missing
@@ -251,6 +252,69 @@ separately.
 - Incomplete indexing cannot be exercised on the fully built baseline
   index, so whether an answer discloses it is untested.
 
+### Counting family (#1256)
+
+A synthetic family of counting cases (part A of #776): apiary visit
+notices from an invented beekeepers' association, corpus threads
+102-112. Its ground truth is `counting_family.json`, written by hand
+from the corpus text and never from what search returns. The file
+classifies every family message by the shape it stands for:
+
+- direct notices, and one in other wording (no "apiary", "visit" or
+  "notice");
+- unrelated mail sharing the keywords (a coworking space called the
+  Hive, a garden centre's apiary corner);
+- a reply to a notice and a forward of one;
+- repeated notices for one visit: a reminder, and a duplicate delivery
+  (two files claiming one Message-ID with different bytes, so two
+  claimant IDs; the corpus builder's `duplicate_of`);
+- a request and the notice confirming it;
+- a look-alike of another type (a visit report);
+- a message in two categories (a report on one visit and notice of the
+  next);
+- a notice filed in Trash.
+
+Each message names the visit (the underlying item) it gives notice of
+or reports on, so the notices give three different numbers: 5 visits,
+6 messages, 7 claimants. Two scenarios count them:
+`apiary-visit-notices` (dev) and `hive-visit-reports` (held out, by
+`is_held_out`; never used to tune anything). Each lists its expected
+messages outside Trash, its Trash messages, its number of distinct
+items and its `trap_terms`. `tests/test_counting_family.py` checks,
+without an index, that each scenario's sets follow from the
+classification and that every shape is present. The file's `lookups`
+are exact `query_messages` calls with every matching message, listed
+once per claimant.
+
+`make baseline` checks that every family message is indexed in its
+thread and folder once per delivery, that each scenario's trap terms
+list decoys while reaching every expected message, and that the real
+`query_messages` tool counts each lookup exactly. It pages each to
+`has_more: false` with page sizes 1, 2, 3 and the default, and checks
+that no row repeats across pages, that `total_matches` is the size of
+the pages' union, and that `indeterminate` is 0. For each lookup that
+lists the duplicate delivery, it also ends a page between the pair's
+two claimants and checks that one lands on each page. It also checks that
+the overlapping "apiary" and "hive" lookups union by claimant ID (keyed
+by Message-ID, the duplicate delivery would merge), that Trash is
+counted only with `folder="Trash"`, and that date-only bounds cover
+their whole first and last days.
+
+**What this family does not prove.**
+
+- It has no scorer or reference trace of its own yet: grading an
+  agent's counting unit, classification, precision and recall and
+  confidence on it is #1257, and the multi-turn form is #1258. The
+  scenarios are not in `agent_scenarios.json` until then.
+- The server checks show that exact lookups count exactly. They do not
+  show that a set of keyword lookups covers a topic: the other-wording
+  notice is missed by an "apiary" lookup, and only reading tells a
+  notice from a reply, forward, request or report.
+- Paging is exercised with small explicit limits. No family lookup
+  matches more than the default 25 rows.
+- The index is built once from files that do not change, so paging
+  while the index changes is not exercised.
+
 ### Outstanding items (`outstanding_items`, #798)
 
 "What outstanding items do Avery Cole or Blair Reed owe me, including
@@ -262,7 +326,11 @@ a two-part question answered, a closure in another thread from
 management, a reopened matter, answers below a signature delimiter, an
 attachment-only due date, a disputed status, a revised due date, a
 phone call with no recorded outcome, an identity decoy, a prompt
-injection) plus the paging, cap, extraction and date boundaries. The
+injection) plus the paging, cap, extraction and date boundaries, and
+in threads 120-124 the claim cases: a document prepared but never sent,
+a transmission shown only by a message in Sent, a receipt explicitly
+acknowledged with later guidance in a different thread from a different
+sender, and a later same-thread reply about something else. The
 held-out variant `marina-counsel-follow-ups` (threads 66-74) asks the
 same about Sasha Ortiz and Emery Vance with different names, wording,
 thread structure and evidence placement.
@@ -280,6 +348,25 @@ actions, each naming its ground-truth `action` with `owner`, `status`,
 `complete` (a claim that nothing was left unread) and `limitations`
 (messages it could not read). Matching a live answer's prose to action
 IDs is a labelling step this harness does not automate.
+
+Per-claim labels (owner decision on #798, 2026-10-08). An action's
+truth may hold `claims`, mapping each claim kind the question or the
+mail makes relevant (`sent`, `received`, `done`) to its supported label
+(`confirmed`, `proposed` or `unverified`) and its proof set: the
+message in Sent for `sent`, only an explicit acknowledgement of that
+transmission for `received`, the completion evidence for `done`, and
+nothing when the label is `unverified`. A kind left out is
+inapplicable. Items and excluded entries may list `claims`
+(`{kind, label, cited}`, `label` null when the prose asserts the claim
+without labelling it). With no claims map in the scenario, every claim
+metric is n/a. Otherwise: claim recall (truth claims emitted, once per
+action and kind), claim precision (emitted claims whose action and kind
+the truth holds, over all emitted, so padding costs precision whatever
+its label), claim labels present and correct (over the matched claims;
+two claims on one action and kind with different labels both count as
+wrong), and confirmed claims supported (every `confirmed` or unlabelled
+claim cites a source from its kind's proof set that the trace read).
+Claim citations join the citation set the checks below read.
 
 Scores (`tests/agent_metrics.py`): action recall and precision (a
 duplicate item for one action, an item for a closed action or one
@@ -325,8 +412,14 @@ date cited, a wrong owner, a closure because the letter went out, the
 injection followed, the decoy merged, a quoted request counted twice,
 the adopted policy counted as outstanding, completeness claimed despite
 the failed extraction, a long message read to page 1, and citations
-kept after the body reads or the attachment passage are dropped. Each
-is caught.
+kept after the body reads or the attachment passage are dropped; and
+for the claims, sent scored as done, receipt inferred from a
+same-thread reply, the prepared consent treated as sent, an unlabelled
+completion, `done: confirmed` on an excluded entry, every claim
+labelled `unverified`, every action padded with three `unverified`
+claims, the unverified receipts left out, conflicting labels on one
+kind, the decoy cited only inside a claim, and the towing amendment
+left with Blair after its handover in another thread. Each is caught.
 
 Layer A, `tests/baseline/test_outstanding_items_baseline.py`, runs in
 `make baseline` and checks on the built index which layers hold each
@@ -334,7 +427,9 @@ decisive passage (see `tests/baseline/README.md`).
 
 **What this case does not prove.** The reference traces are scripted
 from the real tools' output on the built index; they show the scorers
-catch these mistakes, not that any agent avoids them. Two planted facts
+catch these mistakes, not that any agent avoids them; whether a live
+client labels its claims is left to the live run (#1269) and blind
+annotation of its answers (#1270). Two planted facts
 are unreachable through every tool today, and the traces disclose them
 as limitations instead of finding them: Blair's answers below the
 `-- ` signature delimiter (t54.2) and Sasha's update inside a forward
