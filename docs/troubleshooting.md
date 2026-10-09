@@ -1170,7 +1170,7 @@ Every failed row records a `last_error_class`:
 | Class | Meaning |
 |---|---|
 | `retryable` | May succeed on a later attempt; `dead` means the attempt budget ran out |
-| `permanent_source_failure` | This file can never be indexed under the current config (oversized, no `Message-ID` or one over 998 characters, input the embedder rejects) — dead-lettered immediately |
+| `permanent_source_failure` | This file can never be indexed under the current config (oversized, no `Message-ID` or one over 998 characters, nested too deeply for the email parser, input the embedder rejects) — dead-lettered immediately |
 | `operator_action_required` | The embedder rejected a health probe (bad key or model); jobs stay `queued` until you fix the config |
 
 Once the cause of a dead-letter is fixed, requeue with a fresh budget
@@ -1185,6 +1185,14 @@ The same applies after an upgrade that fixes a parser crash: the
 startup scan and periodic recovery skip dead rows, so mail that
 dead-lettered on the old version (for example an 8-bit `Date` header
 before #361) stays unindexed until you requeue it.
+
+A message whose MIME structure is nested too deeply for Python's email
+parser (around a thousand nested `message/rfc822` levels) dead-letters
+on its first attempt with `last_stage` `parse` and `last_error`
+`unindexable: message nested too deeply for the email parser`, and the
+log shows one `terminal: <path> stage=parse` WARNING. No setting changes
+this, so `make requeue-dead` only parses it again and dead-letters it
+again; the message stays out of the index.
 
 ## Indexer health in the log
 

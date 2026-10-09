@@ -110,6 +110,7 @@ from .maildir import (
 )
 from .parser import (
     Message,
+    MessageNestingError,
     OversizedMessageError,
     _derive_folder,
     message_sort_time,
@@ -1440,6 +1441,10 @@ PERMISSION_DEFER_WINDOW_SECS = 24 * 60 * 60
 # server's status, so it never changes.
 RENAME_DEFER_SECS = 60
 RENAME_DEFERRED_ERROR = "FileNotFoundError: deferred until the rename is recorded"
+# ``last_error`` for a message the stdlib parser cannot parse without
+# hitting the recursion limit (#1296). Fixed text, like the oversized and
+# no-Message-ID dead letters.
+MESSAGE_NESTING_DEAD_ERROR = f"unindexable: {MessageNestingError.TEXT}"
 
 
 def _enqueued_within(row: sqlite3.Row, seconds: int) -> bool:
@@ -1520,6 +1525,13 @@ def _phase1_commit_thread(
         # ``is_dead`` gate then skips the file thereafter, and operators
         # see the entry in ``queue.stats()['dead']``.
         queue.mark_dead_terminal(filepath, stage="parse", error=f"oversized: {e}")
+        return None
+    except MessageNestingError:
+        # The same bytes hit the same recursion limit on every attempt,
+        # so retrying only repeats the failure: dead-letter on the first
+        # one, as for an oversized file (#1296). ``make requeue-dead``
+        # cannot help while the file is unchanged.
+        queue.mark_dead_terminal(filepath, stage="parse", error=MESSAGE_NESTING_DEAD_ERROR)
         return None
     except Exception as e:
         queue.mark_failed(filepath, stage="parse", error=_stage_error(e))

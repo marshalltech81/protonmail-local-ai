@@ -26,6 +26,7 @@ from src.parser import (
     PARSE_CAPS,
     PARSE_REPEATS,
     SUBJECT_MAX_CHARS,
+    MessageNestingError,
     OversizedMessageError,
     SourceMetadata,
     _clean_id,
@@ -759,6 +760,51 @@ class TestParseEmailBytes:
                 ),
             )
         ]
+
+
+_NESTING_MARKER = "NESTMARK-1296-synthetic"
+
+
+def nested_rfc822(depth: int) -> bytes:
+    """A synthetic message wrapped in ``depth`` ``message/rfc822``
+    layers, with a marker in every layer's Subject (#1296)."""
+    raw = (
+        f"Message-ID: <inner@example.test>\nSubject: {_NESTING_MARKER}\n\n{_NESTING_MARKER}\n"
+    ).encode()
+    for i in range(depth):
+        raw = (
+            f"Message-ID: <wrap{i}@example.test>\nSubject: {_NESTING_MARKER}\n"
+            "Content-Type: message/rfc822\n\n"
+        ).encode() + raw
+    return raw
+
+
+class TestParseRecursion:
+    """A message nested deeper than the stdlib parser's recursion limit
+    raises a fixed-text ``MessageNestingError`` (#1296)."""
+
+    _SOURCE = SourceMetadata(folder="INBOX", flags=frozenset(), size=0, mtime_ns=None, path="p")
+
+    def test_deep_nesting_raises_fixed_text_error(self, caplog):
+        caplog.set_level(logging.DEBUG)
+        raw = nested_rfc822(1000)
+        with pytest.raises(MessageNestingError) as info:
+            parse_email_bytes(raw, self._SOURCE)
+        assert str(info.value) == MessageNestingError.TEXT
+        assert _NESTING_MARKER not in str(info.value)
+        assert _NESTING_MARKER not in caplog.text
+
+    def test_recursion_error_after_the_stdlib_parse_propagates(self, monkeypatch):
+        """Only the stdlib parse is the boundary: a ``RecursionError``
+        from the parser's own walk keeps today's handling."""
+        from src import parser
+
+        def _boom(*_args, **_kwargs):
+            raise RecursionError("synthetic")
+
+        monkeypatch.setattr(parser, "_read_address_headers", _boom)
+        with pytest.raises(RecursionError):
+            parse_email_bytes(_SPLIT_RAW, self._SOURCE)
 
 
 class TestClaimantId:

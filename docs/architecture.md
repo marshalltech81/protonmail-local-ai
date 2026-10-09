@@ -2402,7 +2402,14 @@ parser, codec and library messages can quote the mail being indexed. An
 and sizes) and the embedder's fixed-text `EmbedResponseError` keep their
 message. The embed stage records `scrub_embed_error` instead: an SDK
 status error as its type and status code, a connection or timeout error
-and `EmbedResponseError` in full, and anything else as its type name. When
+and `EmbedResponseError` in full, and anything else as its type name. A
+message the standard library's email parser cannot parse within the
+recursion limit (around a thousand nested `message/rfc822` levels) fails
+the same way on every attempt, so it is dead-lettered on the first one,
+like an oversized file, with `permanent_source_failure` and the fixed text
+`unindexable: message nested too deeply for the email parser` (#1296); a
+`RecursionError` raised anywhere else in the parse stage is retried as
+before. When
 `attempts` reaches `INDEXER_MAX_ATTEMPTS` (default 5), the row
 transitions to `status = 'dead'` — it stays in the table for operator
 visibility and stops being claimed. Watchdog rename / create events
