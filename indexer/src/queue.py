@@ -349,16 +349,6 @@ class IndexingQueue:
         """Refund the ``begin_attempt`` charge: the step returned."""
         self._settle(filepath)
 
-    def end_continuation(self, filepath: str) -> bool:
-        """Turn a queued extraction continuation (``STAGE_EXTRACT`` with
-        ``EXTRACTION_DEFERRED_ERROR``) into a plain queued job, keeping its
-        reason, attempts and due time, so its next pass resolves every
-        occurrence by the usual cache rules (#1236). Returns whether the
-        row was one."""
-        return self.db.queue_end_continuation(
-            filepath=filepath, stage=STAGE_EXTRACT, error=EXTRACTION_DEFERRED_ERROR
-        )
-
     def release(self, filepath: str) -> None:
         """Close the in-memory charge of ``filepath`` once a transaction
         that refunded it in the database committed

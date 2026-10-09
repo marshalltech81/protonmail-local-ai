@@ -410,6 +410,21 @@ class ChunkResult:
     message_sender_ambiguous: bool | None = None
     kind: ChunkKind = "body"
     selected_by: SelectedBy = "vector"
+    # An attachment chunk of a payload with a copy in the same message
+    # whose extraction the indexer deferred (#1236): the retained indexed
+    # text of an earlier extraction, refresh pending. False for body chunks
+    # and for query paths that do not SELECT it.
+    extraction_deferred: bool = False
+
+
+# Whether a chunk ``c`` belongs to a payload slice the indexer is still
+# refreshing (#1236): any occurrence of its payload in its message is
+# deferred. False for a body chunk. Selected as ``extraction_deferred``.
+_CHUNK_DEFERRED_SQL = (
+    "EXISTS (SELECT 1 FROM attachments ad WHERE ad.claimant_id = c.claimant_id "
+    "AND ad.attachment_id = c.attachment_id AND ad.extraction_deferred_at IS NOT NULL) "
+    "AS extraction_deferred"
+)
 
 
 def _row_to_chunk_result(r) -> ChunkResult:
@@ -446,6 +461,9 @@ def _row_to_chunk_result(r) -> ChunkResult:
             else None
         ),
         kind=r["kind"],
+        extraction_deferred=bool(r["extraction_deferred"])
+        if "extraction_deferred" in keys
+        else False,
     )
 
 
@@ -3441,29 +3459,28 @@ class Database:
             # filename attribution. Picking the lowest occurrence id
             # gives a stable, deterministic choice and eliminates the
             # multiplication.
+            # Composed from constants only; every value is a bound parameter.
             rows = self._fetchall(
-                """
-                SELECT
-                    c.chunk_id, COALESCE(m.message_id, c.claimant_id) AS message_id,
-                    c.claimant_id, c.thread_id, c.chunk_index,
-                    c.text, c.char_start, c.char_end, c.attachment_id, c.kind,
-                    a.filename AS attachment_filename,
-                    a.content_type AS attachment_mime,
-                    v.distance AS score
-                FROM message_chunks_vec v
-                JOIN message_chunks c ON c.chunk_id = v.chunk_id
-                LEFT JOIN messages m ON m.claimant_id = c.claimant_id
-                LEFT JOIN attachments a
-                    ON a.attachment_occurrence_id = (
-                        SELECT MIN(a2.attachment_occurrence_id)
-                        FROM attachments a2
-                        WHERE a2.attachment_id = c.attachment_id
-                          AND a2.claimant_id = c.claimant_id
-                    )
-                WHERE v.embedding MATCH ?
-                  AND k = ?
-                ORDER BY v.distance
-                """,
+                "SELECT c.chunk_id, COALESCE(m.message_id, c.claimant_id) AS message_id, "
+                "c.claimant_id, c.thread_id, c.chunk_index, "
+                "c.text, c.char_start, c.char_end, c.attachment_id, c.kind, "
+                "a.filename AS attachment_filename, "
+                "a.content_type AS attachment_mime, "
+                "v.distance AS score, "
+                f"{_CHUNK_DEFERRED_SQL} "  # nosec B608
+                "FROM message_chunks_vec v "
+                "JOIN message_chunks c ON c.chunk_id = v.chunk_id "
+                "LEFT JOIN messages m ON m.claimant_id = c.claimant_id "
+                "LEFT JOIN attachments a "
+                "  ON a.attachment_occurrence_id = ( "
+                "    SELECT MIN(a2.attachment_occurrence_id) "
+                "    FROM attachments a2 "
+                "    WHERE a2.attachment_id = c.attachment_id "
+                "      AND a2.claimant_id = c.claimant_id "
+                "  ) "
+                "WHERE v.embedding MATCH ? "
+                "  AND k = ? "
+                "ORDER BY v.distance",
                 (serialized, min(limit, _SQLITE_VEC_MAX_K)),
             )
             return [_row_to_chunk_result(r) for r in rows if _has_valid_distance(r)]
@@ -3619,6 +3636,7 @@ class Database:
                 "a.content_type AS attachment_mime, "
                 f"{_SOURCE_COLUMNS}, "
                 f"{_CHUNK_SENDER_SQL}, "
+                f"{_CHUNK_DEFERRED_SQL}, "
                 "vec_distance_l2(v.embedding, ?) AS score "
                 "FROM message_chunks c "
                 "JOIN message_chunks_vec v ON c.chunk_id = v.chunk_id "

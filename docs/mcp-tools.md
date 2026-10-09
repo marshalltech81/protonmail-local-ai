@@ -823,6 +823,15 @@ against the query the way `ask_mailbox` ranks them
    group by vector distance. With no attachment match, by vector
    distance alone.
 
+Each chunk's `extraction_deferred` is true for an attachment passage
+whose attachment (a copy of the same bytes in the same message) the
+indexer is waiting to extract again
+([#1236](https://github.com/marshalltech81/protonmail-local-ai/issues/1236)):
+its text is what was indexed before, kept until the refresh. The prose
+adds `; retained indexed text; extraction refresh pending` to its
+`Source:` line, and the timing line counts such passages (and listed
+carriers) as `evidence_extraction_deferred`.
+
 Each chunk's `selected_by` says why it qualified: `keyword_match` (its
 text holds a word of the query; this wins when both apply),
 `attachment_match` or `vector`. A word in every chunk of the thread
@@ -882,8 +891,8 @@ With `dedupe_attachments=true`, attachment passages with the same
 thread are returned once, on the earliest carrying message (by delivery date, else
 send date), at the rank of the best-ranked copy. That chunk's
 `carried_by` lists the other carrying messages, earliest first, each
-with its `claimant_id`, `sent_at`, `occurred_at` and `scope`, at most
-10 of them; `carried_by_count` counts them all. The prose adds an
+with its `claimant_id`, `sent_at`, `occurred_at`, `scope` and its own
+`extraction_deferred`, at most 10 of them; `carried_by_count` counts them all. The prose adds an
 `Also carried by:` line naming the same ten and `and N more`. A
 different document under the same filename has a different content
 hash and stays separate, and body passages are untouched. Copies of
@@ -2258,7 +2267,7 @@ Structured output:
 |---|---|
 | `answer` | The model's answer with its inline labels |
 | `coverage_note` | Server-written notice of prompt-budget omissions/truncation and possible incompleteness; `null` when nothing was left out or cut to fit. This is separate from model prose and citation validation |
-| `citations` | One entry per valid cited label, in first-cited order: `label`, `chunk_id`, `claimant_id`, `message_id`, `thread_id`, `sender`, `sender_ambiguous` ([Sender attribution](#sender-attribution); null for `thread`), `sent_at`, `occurred_at`, `source` (`body`, `attachment` or `thread`), `attachment_id`, `attachment_filename`, `char_start`, `char_end` (end of the part shown to the model), `scope` (`in_scope` or `context`, [Evidence scope](#evidence-scope-in-scope-or-context)) |
+| `citations` | One entry per valid cited label, in first-cited order: `label`, `chunk_id`, `claimant_id`, `message_id`, `thread_id`, `sender`, `sender_ambiguous` ([Sender attribution](#sender-attribution); null for `thread`), `sent_at`, `occurred_at`, `source` (`body`, `attachment` or `thread`), `attachment_id`, `attachment_filename`, `char_start`, `char_end` (end of the part shown to the model), `scope` (`in_scope` or `context`, [Evidence scope](#evidence-scope-in-scope-or-context)), `extraction_deferred` (the passage is retained indexed text of an attachment whose re-extraction is pending, #1236; its prompt header and prose citation end with `retained indexed text; extraction refresh pending`, and the timing line counts such passages shown as `evidence_extraction_deferred`) |
 | `statements` | The answer cut into statements: `text`, `labels` (the supplied passages it cites) and `status` (`cited`, `unsupported`, `uncertain`, `uncited`, `invalid` for only unknown labels, or `not_checked`) |
 | `quotes` | Each quotation: `text` (cut at 1,000 characters), `statement` (index into `statements`), `status` (`verified`, `misattributed`, `unmatched`, `uncited`, `not_checked`) and `found_in` (labels of the passages it was found in) |
 | `citation_problems` | `[]` when the check passed, else entries `{kind, labels, statements, quotes}`, `kind` one of `unknown_labels`, `no_citations`, `uncited_statements`, `unmatched_quotes`, `misattributed_quotes`, `context_only_citations`; `statements` and `quotes` are indexes into those lists, and `labels` holds the unknown labels or, for `misattributed_quotes`, the passages the quotes were found in, or, for `context_only_citations`, the cited labels |
@@ -2603,7 +2612,7 @@ Structured output:
 | Field | Description |
 |---|---|
 | `records` | The records, as in the first content item, each with `_source_thread`, `_date` and `_evidence` |
-| `citations` | One entry per valid label any record cites, in first-cited order, with the `ask_mailbox` citation fields |
+| `citations` | One entry per valid label any record cites, in first-cited order, with the `ask_mailbox` citation fields, `extraction_deferred` included |
 | `fields` | One entry per field with a value: `record` (index into `records`), `field`, `labels`, `status` (`cited`, `uncited`, `invalid`), `value_check` (`verified`, `misattributed`, `unmatched`, `uncited`, `not_checked`) and `found_in` |
 | `citation_problems` | `[]` when every field cites a supplied passage, else entries `{record, kind, labels, fields}`, `kind` one of `unknown_labels`, `uncited_fields`, `misattributed_values`, `context_only_fields` |
 | `notice` | The incomplete-extraction or evidence note in `content`, or `null` |
@@ -2719,7 +2728,7 @@ Structured output:
 | `brief` | When `ok`: `chronology` (`date`, `date_source`: `sent` / `mentioned` / `unknown`, `actor`, `event`, `labels`; sorted oldest first, undated last), `positions` (`actor`, `position`, `labels`), `decisions` (`decision`, `labels`), `open_questions` (`question`, `labels`), `conflicts` (`description`, `labels`), `insufficient_evidence`; else `null` |
 | `raw_text` | The unparsed reply when `status` is not `ok`, else `null` |
 | `as_of` | Latest sent date (`YYYY-MM-DD`) among the passages supplied; the brief describes the evidence up to then |
-| `citations` | Each valid cited label, first-cited order, in the `ask_mailbox` citation shape (claimant, sender, own sent date, chunk) |
+| `citations` | Each valid cited label, first-cited order, in the `ask_mailbox` citation shape (claimant, sender, own sent date, chunk, `extraction_deferred`) |
 | `quotes` | Each quotation in an entry: `text` (cut at 1,000 characters), `status` (`verified`, `misattributed`, `unmatched`, `uncited` when the entry cites no supplied passage, `not_checked`), `found_in` (labels of the passages it was found in), `section` and `item` (the entry holding it) |
 | `citation_problems` | Entries `{section, item, kind, labels}`, `kind` one of `unknown_labels`, `no_citations`, `too_few_labels`, `insufficient_but_populated`, `empty_but_sufficient` (these two with `section: "brief"`), `unmatched_quotes`, `misattributed_quotes` (`labels`: where the quotes were found); `[]` when every check passed |
 | `repair_attempted` | Whether the one repair call was made |
@@ -2793,7 +2802,8 @@ for `brief_issue`.
 
 The server attaches a `sources` entry to each finding for every valid
 label it cites: the `ask_mailbox` citation fields (claimant, sender,
-own sent date, chunk) plus `excerpt`, the first 300 characters of the
+own sent date, chunk, `extraction_deferred`, whose prose note the
+`Findings:` lines repeat) plus `excerpt`, the first 300 characters of the
 passage text the model was shown, verbatim from the index (longer text
 is cut with a marker). The excerpt is the server's, not the model's, so
 it is not checked.

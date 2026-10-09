@@ -142,12 +142,13 @@ def _chunks(out) -> list[dict]:
     return thread["chunks"]
 
 
-def _carrier(message_id: str, scope: str = "in_scope") -> dict:
+def _carrier(message_id: str, scope: str = "in_scope", deferred: bool = False) -> dict:
     return {
         "claimant_id": claimant_of(message_id),
         "sent_at": _SENT[message_id][0],
         "occurred_at": None,
         "scope": scope,
+        "extraction_deferred": deferred,
     }
 
 

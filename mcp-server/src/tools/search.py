@@ -33,6 +33,7 @@ from .intelligence import (
     select_ask_threads,
 )
 from .outputs import (
+    EXTRACTION_DEFERRED_NOTE,
     HEADER_CHAR_LIMIT,
     MAX_LISTED,
     AttachmentHit,
@@ -609,6 +610,11 @@ def register_search_tools(
         that attachment first, or read the thread's later messages
         with get_thread or get_message.
 
+        A passage or citation from an attachment the indexer is waiting to
+        extract again has extraction_deferred=true (prose: "retained
+        indexed text; extraction refresh pending"): its text is what was
+        indexed before. Say so when an answer relies on it.
+
         Args:
             query: The question or topic to gather evidence for.
             thread_id: Optional opaque thread ID to scope evidence to
@@ -1007,6 +1013,21 @@ def register_search_tools(
                 notes.append(
                     f"dedupe_attachments collapsed {collapsed} repeated attachment passage(s)."
                 )
+        # Passages, and listed carriers, from an attachment whose
+        # extraction the indexer deferred (#1236).
+        count(
+            "evidence_extraction_deferred",
+            sum(
+                c.extraction_deferred
+                + (
+                    sum(o.extraction_deferred for o in carried.get(c.chunk_id, [])[:MAX_LISTED])
+                    if dedupe_attachments
+                    else 0
+                )
+                for *_, chunks in groups
+                for c in chunks
+            ),
+        )
         searched_by_source = source_filter is not None and not thread_id
         if searched_by_source:
             count("evidence_threads_source_emptied", source_emptied)
@@ -1049,6 +1070,7 @@ def register_search_tools(
                             selected_by=c.selected_by,
                             source_file=source_ref(c.source_file),
                             scope=_chunk_scope(c, labels),
+                            extraction_deferred=c.extraction_deferred,
                             carried_by=(
                                 [
                                     EvidenceCarrier(
@@ -1056,6 +1078,7 @@ def register_search_tools(
                                         sent_at=o.message_date,
                                         occurred_at=o.message_occurred_at,
                                         scope=_chunk_scope(o, labels),
+                                        extraction_deferred=o.extraction_deferred,
                                     )
                                     for o in carried.get(c.chunk_id, [])[:MAX_LISTED]
                                 ]
@@ -1123,14 +1146,18 @@ def register_search_tools(
                 if chunk.attachment_id is not None:
                     fname = clip(chunk.attachment_filename or "attachment", HEADER_CHAR_LIMIT)
                     mime = clip(chunk.attachment_mime or "unknown", HEADER_CHAR_LIMIT)
-                    lines.append(f'        Source: attachment "{fname}" ({mime})')
+                    note = f"; {EXTRACTION_DEFERRED_NOTE}" if chunk.extraction_deferred else ""
+                    lines.append(f'        Source: attachment "{fname}" ({mime}){note}')
                     others = carried.get(chunk.chunk_id, [])
                     if others:
                         unlisted = len(others) - MAX_LISTED
                         lines.append(
                             "        Also carried by: "
                             + ", ".join(
-                                f"msg {o.claimant_id} ({_msg_date(o)})" for o in others[:MAX_LISTED]
+                                f"msg {o.claimant_id} ({_msg_date(o)}"
+                                + (f"; {EXTRACTION_DEFERRED_NOTE}" if o.extraction_deferred else "")
+                                + ")"
+                                for o in others[:MAX_LISTED]
                             )
                             + (f", and {unlisted} more" if unlisted > 0 else "")
                         )

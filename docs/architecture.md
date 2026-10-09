@@ -2058,12 +2058,17 @@ in the seconds.
   pass still recomputes the thread vector from all of the thread's
   chunk vectors in its commit. An `EXTRACTOR_VERSIONS`
   bump clears `text_complete` on exactly its occurrences, which makes
-  them pending again; the startup sweeps keep the deferral marks, turn a
-  queued continuation of a message they would refresh (a stale or
-  missing extractor result, a `too_large` result that now fits, OCR
-  turned on) into a full pass with the same reason and attempts, leave
-  any other queued continuation as it is, and re-queue a message that
-  carries a mark but has no job (a pass with attachment extraction switched off
+  them pending again. The startup sweep does the same for every other
+  refresh class: it clears `text_complete` to NULL, in bounded batches
+  of one transaction each, on the occurrences of a `no extractor` or
+  OLE2 result their label now routes to a module, a `too_large` result
+  that now fits, an "OCR disabled" result once OCR is on, and a cached
+  result with no completeness record (whatever the occurrence's own
+  record). A queued continuation then resolves them as pending; its row
+  (stage, error, attempts, due time) and the deferral marks are left
+  as they are, and an unrelated resolved occurrence (an expired
+  `failed` row) is still not reopened. The sweep also re-queues a
+  message that carries a mark but has no job (a pass with attachment extraction switched off
   marks it succeeded). New
   intent to index the file (a watcher event, a startup re-queue) resets
   the job, and that pass resolves every occurrence by the usual cache
@@ -2077,8 +2082,15 @@ in the seconds.
   once when none remain. `get_mailbox_status` reports them as
   `extraction_deferred` (they keep the index non-current);
   `query_attachments` and `search_attachments` report the occurrence as
-  `deferred` from its own mark, not the payload's row, and
-  `get_attachment` gives a fixed reason and no text.
+  `deferred` from its own mark, not the payload's row (and the
+  extracted-text lane reports no copy of a payload while one is
+  deferred), and `get_attachment` gives a fixed reason and no text.
+  The chunks kept meanwhile stay in the evidence that `ask_mailbox`,
+  `get_evidence`, `extract_from_emails`, `brief_issue` and
+  `check_conclusion` read, flagged `extraction_deferred` on each
+  passage, carrier and citation, with the fixed note "retained indexed
+  text; extraction refresh pending" in the prompt headers and prose,
+  and counted on each tool's timing line (owner, 2026-10-09).
 
 **How the values were chosen.** Plain `time.perf_counter` timings in
 the indexer image (Linux, `docker build indexer`), synthetic payloads

@@ -351,11 +351,27 @@ _SCOPE_DESCRIPTION = (
 )
 
 
+# The fixed note on a passage whose attachment's extraction the indexer
+# deferred (#1236): the text shown is what was indexed before, and a
+# refresh is pending.
+EXTRACTION_DEFERRED_NOTE = "retained indexed text; extraction refresh pending"
+
+_EXTRACTION_DEFERRED_DESCRIPTION = (
+    "True for an attachment passage whose attachment (a copy of the same file in the "
+    "same message) is waiting for the indexer to extract it again: the text is what was "
+    "indexed before, kept until the refresh. False otherwise."
+)
+
+
 class EvidenceCarrier(_Output):
     claimant_id: str = Field(description="A later message carrying the same attachment.")
     sent_at: str | None
     occurred_at: str | None
     scope: EvidenceScope = Field(description="That message's scope label.")
+    extraction_deferred: bool = Field(
+        default=False,
+        description="That message's copy: " + _EXTRACTION_DEFERRED_DESCRIPTION,
+    )
 
 
 class EvidenceChunk(_Output):
@@ -408,6 +424,7 @@ class EvidenceChunk(_Output):
         "carrying the attachment); null when none is recorded."
     )
     scope: EvidenceScope = Field(description=_SCOPE_DESCRIPTION)
+    extraction_deferred: bool = Field(default=False, description=_EXTRACTION_DEFERRED_DESCRIPTION)
     carried_by: list[EvidenceCarrier] | None = Field(
         default=None,
         exclude_if=lambda v: v is None,
@@ -940,7 +957,8 @@ class QueueCounts(_Output):
         default=0,
         description="Messages already indexed whose attachment extraction reached the "
         "indexer's per-message budget: the rest of their attachments are extracted on later "
-        "passes, and until then their text is missing from search. They make current false.",
+        "passes; until then search has only text indexed for them earlier (flagged "
+        "extraction_deferred), or none. They make current false.",
     )
     parked_trashed: int = Field(
         default=0,
@@ -1040,6 +1058,7 @@ class Citation(_Output):
             "Null for tools that do not label passages.",
         ),
     )
+    extraction_deferred: bool = Field(default=False, description=_EXTRACTION_DEFERRED_DESCRIPTION)
 
 
 class CitationProblem(_Output):

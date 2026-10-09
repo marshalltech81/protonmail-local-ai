@@ -1352,6 +1352,13 @@ Queue and maintenance (all INFO unless noted):
   WARNING when any
   dead-lettered message was skipped: those keep their old attachment
   text until you run `make requeue-dead`.
+- `cleared attachment text completeness on <n> occurrence(s) due a
+  refresh; each is unknown until its message is processed again.`, at
+  startup when the sweep found occurrences to refresh (a result with no
+  extractor whose label now has one, a `too_large` result that now fits,
+  an "OCR disabled" result once OCR is on, a cached result with no
+  completeness record), so a message mid-continuation picks them up
+  (#1236).
 - `cleared attachment text completeness on <n> occurrence(s) extracted
   by an older extractor version (...); each is unknown until its
   message is processed again.`, at startup after an extractor change

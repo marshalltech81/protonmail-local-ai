@@ -724,19 +724,31 @@ class TestAttachmentTextCompleteness:
         )
         assert db.get_attachment_extraction("h2", "text")["text_complete"] == stored
 
-    def test_unrecorded_rows_come_back_once_per_file_and_stamp(self, db):
+    def test_unrecorded_rows_come_back_once_per_file(self, db):
         """Review round 3 on #1286: a message with many unrecorded
-        occurrences yields one row per (file, status, stamp), not one per
-        occurrence, so the startup sweep's fetch is bounded by files."""
+        occurrences yields one filepath, not one entry per occurrence, so
+        the startup sweep keeps memory bounded by files; only occurrences
+        with a record of their own are named for clearing (#1236)."""
         msg = make_message(message_id="many@x")
         db.upsert_thread(make_thread(messages=[msg]), FAKE_EMBEDDING)
         for i in range(200):
             _store_occurrence(
                 db, claimant_id=msg.claimant_id, occurrence=f"occ-{i}", attachment_id=f"h{i}"
             )
+        db._conn.execute(
+            "UPDATE attachments SET text_complete = 0 WHERE attachment_occurrence_id = 'occ-7'"
+        )
         db._conn.commit()
-        rows = db.find_unrecorded_completeness_attachments()
-        assert [tuple(r) for r in rows] == [(msg.filepath, "success", "text@3", None)]
+        seen: list[tuple] = []
+        assessed: list[str] = []
+
+        def qualifies(row) -> bool:
+            seen.append((row["extraction_status"], row["extractor"], row["text_complete"]))
+            return True
+
+        assert db.find_unrecorded_completeness_occurrences(qualifies, assessed) == {msg.filepath}
+        assert set(seen) == {("success", "text@3", None)}
+        assert assessed == ["occ-7"]
 
     def test_clear_nulls_only_the_named_stamps(self, db):
         self._setup(db)

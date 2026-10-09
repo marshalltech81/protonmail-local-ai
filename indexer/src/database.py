@@ -1784,48 +1784,103 @@ class Database:
         ).fetchall()
         return [r["filepath"] for r in rows]
 
-    @_synchronized
-    def find_unrecorded_completeness_attachments(self) -> list[sqlite3.Row]:
-        """The messages with an attachment occurrence whose cached
-        ``success`` or ``empty`` extraction has no completeness record
-        (#1285): one row per Maildir filepath, row status and extractor
-        stamp (not per occurrence, so a message with many attachments
-        costs one row, review round 3 on #1286), with ``text_complete``
-        (NULL)."""
-        return self._conn.execute(
-            """
-            SELECT DISTINCT m.filepath, e.extraction_status, e.extractor, e.text_complete
-            FROM attachment_extractions e
-            JOIN attachments a ON a.attachment_id = e.attachment_id
-                AND a.extractor_module = e.extractor_module
-            JOIN message_thread_map m ON m.claimant_id = a.claimant_id
-            WHERE e.text_complete IS NULL
-              AND e.extraction_status IN ('success', 'empty')
-            ORDER BY m.filepath
-            """
-        ).fetchall()
-
     def _stream_filepaths(
-        self, sql: str, params: Sequence[object], qualifies: Callable[[sqlite3.Row], bool]
+        self,
+        sql: str,
+        params: Sequence[object],
+        qualifies: Callable[[sqlite3.Row], bool],
+        assessed: list[str] | None = None,
     ) -> set[str]:
         """The filepaths of the rows ``sql`` returns for which
         ``qualifies`` holds, read ``SWEEP_FETCH_ROWS`` rows at a time
         (#1289). A message can carry thousands of occurrences with
         sender-chosen labels and sizes, so only the qualifying filepaths
         are kept, never the rows. Callers hold the database lock for the
-        whole read; the cursor is closed before they return."""
+        whole read; the cursor is closed before they return.
+
+        With ``assessed``, a qualifying row whose occurrence still has a
+        ``text_complete`` record (``occurrence_complete``) adds its
+        ``occurrence_id`` to it: its text is due a refresh, so the
+        startup sweep clears the record (#1236)."""
         cursor = self._conn.execute(sql, params)
         filepaths: set[str] = set()
         try:
             while rows := cursor.fetchmany(SWEEP_FETCH_ROWS):
-                filepaths.update(row["filepath"] for row in rows if qualifies(row))
+                for row in rows:
+                    if not qualifies(row):
+                        continue
+                    filepaths.add(row["filepath"])
+                    if assessed is not None and row["occurrence_complete"] is not None:
+                        assessed.append(row["occurrence_id"])
         finally:
             cursor.close()
         return filepaths
 
     @_synchronized
+    def find_unrecorded_completeness_occurrences(
+        self, qualifies: Callable[[sqlite3.Row], bool], assessed: list[str]
+    ) -> set[str]:
+        """The filepaths of the messages with an occurrence whose cached
+        ``success`` or ``empty`` result has no completeness record (#1285)
+        and for which ``qualifies`` holds (it gets the row's status, stamp
+        and cached ``text_complete``), read ``SWEEP_FETCH_ROWS`` rows at a
+        time and keeping filepaths only, so a message with many such
+        occurrences costs one entry (review round 3 on #1286). Each such
+        occurrence that still has a record of its own (a parse cap can
+        set 0 beside a cached row with none) is added to ``assessed``
+        (#1236)."""
+        return self._stream_filepaths(
+            """
+            SELECT m.filepath, e.extraction_status, e.extractor, e.text_complete,
+                   a.attachment_occurrence_id AS occurrence_id,
+                   a.text_complete AS occurrence_complete
+            FROM attachment_extractions e
+            JOIN attachments a ON a.attachment_id = e.attachment_id
+                AND a.extractor_module = e.extractor_module
+            JOIN message_thread_map m ON m.claimant_id = a.claimant_id
+            WHERE e.text_complete IS NULL
+              AND e.extraction_status IN ('success', 'empty')
+            """,
+            (),
+            qualifies,
+            assessed,
+        )
+
+    def clear_text_complete_for_occurrences(self, occurrence_ids: list[str]) -> int:
+        """Set ``text_complete`` to NULL on each named occurrence, in
+        batches of ``SWEEP_FETCH_ROWS``, each its own transaction, and
+        return how many changed (#1236). A failed batch rolls back alone;
+        the batches before it stay, and a restart clears the rest, since a
+        cleared occurrence is not named again. Deferral marks and queue
+        rows are untouched."""
+        changed = 0
+        for start in range(0, len(occurrence_ids), SWEEP_FETCH_ROWS):
+            changed += self._clear_text_complete_batch(
+                occurrence_ids[start : start + SWEEP_FETCH_ROWS]
+            )
+        return changed
+
+    @_synchronized
+    def _clear_text_complete_batch(self, occurrence_ids: list[str]) -> int:
+        cur = self._conn.cursor()
+        started = False
+        try:
+            started = self._begin_if_needed(cur)
+            cur.execute(
+                "UPDATE attachments SET text_complete = NULL WHERE text_complete IS NOT NULL "
+                "AND attachment_occurrence_id IN (SELECT value FROM json_each(?))",
+                (json.dumps(occurrence_ids),),
+            )
+            changed = cur.rowcount
+            self._commit_if_started(started)
+        except Exception:
+            self._rollback_if_started(started)
+            raise
+        return changed
+
+    @_synchronized
     def find_ocr_disabled_attachment_filepaths(
-        self, qualifies: Callable[[sqlite3.Row], bool]
+        self, qualifies: Callable[[sqlite3.Row], bool], assessed: list[str] | None = None
     ) -> set[str]:
         """The Maildir filepaths of the messages with an attachment
         occurrence whose cached extraction is an "OCR disabled" result
@@ -1835,7 +1890,8 @@ class Database:
         return self._stream_filepaths(
             """
             SELECT m.filepath, a.filename, a.content_type, e.extraction_error,
-                   e.extractor_module
+                   e.extractor_module, a.attachment_occurrence_id AS occurrence_id,
+                   a.text_complete AS occurrence_complete
             FROM attachment_extractions e
             JOIN attachments a ON a.attachment_id = e.attachment_id
                 AND a.extractor_module = e.extractor_module
@@ -1845,11 +1901,12 @@ class Database:
             """,
             (OCR_DISABLED_ERROR, SCANNED_PDF_OCR_DISABLED_ERROR),
             qualifies,
+            assessed,
         )
 
     @_synchronized
     def find_no_extractor_attachment_filepaths(
-        self, qualifies: Callable[[sqlite3.Row], bool]
+        self, qualifies: Callable[[sqlite3.Row], bool], assessed: list[str] | None = None
     ) -> set[str]:
         """The Maildir filepaths of the messages with an attachment
         occurrence whose cached extraction is the "no extractor for this
@@ -1860,7 +1917,8 @@ class Database:
         return self._stream_filepaths(
             """
             SELECT m.filepath, a.filename, a.content_type, e.extraction_error,
-                   e.extractor_module
+                   e.extractor_module, a.attachment_occurrence_id AS occurrence_id,
+                   a.text_complete AS occurrence_complete
             FROM attachment_extractions e
             JOIN attachments a ON a.attachment_id = e.attachment_id
                 AND a.extractor_module = e.extractor_module
@@ -1870,10 +1928,13 @@ class Database:
             """,
             (NO_EXTRACTOR_ERROR, LEGACY_OLE2_ERROR),
             qualifies,
+            assessed,
         )
 
     @_synchronized
-    def find_fitting_too_large_attachment_filepaths(self, max_bytes: int) -> set[str]:
+    def find_fitting_too_large_attachment_filepaths(
+        self, max_bytes: int, assessed: list[str] | None = None
+    ) -> set[str]:
         """The Maildir filepaths of the messages with an attachment
         occurrence whose cached extraction is ``too_large`` and whose
         payload now fits under ``max_bytes``: the comparison
@@ -1882,7 +1943,8 @@ class Database:
         the same size."""
         return self._stream_filepaths(
             """
-            SELECT m.filepath
+            SELECT m.filepath, a.attachment_occurrence_id AS occurrence_id,
+                   a.text_complete AS occurrence_complete
             FROM attachment_extractions e
             JOIN attachments a ON a.attachment_id = e.attachment_id
                 AND a.extractor_module = e.extractor_module
@@ -1892,6 +1954,7 @@ class Database:
             """,
             (max_bytes,),
             lambda _row: True,
+            assessed,
         )
 
     @_synchronized
@@ -2609,21 +2672,6 @@ class Database:
     def queue_delete(self, filepath: str) -> None:
         self._conn.execute("DELETE FROM indexing_jobs WHERE filepath = ?", (filepath,))
         self._conn.commit()
-
-    @_synchronized
-    def queue_end_continuation(self, *, filepath: str, stage: str, error: str) -> bool:
-        """Clear a queued row's continuation stage and text (and the class
-        the deferral recorded); True when the row carried them."""
-        changed = self._conn.execute(
-            """
-            UPDATE indexing_jobs
-            SET last_stage = NULL, last_error = NULL, last_error_class = NULL
-            WHERE filepath = ? AND status = 'queued' AND last_stage = ? AND last_error = ?
-            """,
-            (filepath, stage, error),
-        ).rowcount
-        self._conn.commit()
-        return bool(changed)
 
     @_synchronized
     def queue_get_attempts_and_stage(self, filepath: str) -> tuple[int, str | None] | None:

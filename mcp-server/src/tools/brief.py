@@ -79,6 +79,7 @@ from .intelligence import (
     _warn_token_limits,
 )
 from .outputs import (
+    EXTRACTION_DEFERRED_NOTE,
     MAX_CONCLUSION_FINDINGS,
     Brief,
     BriefCitationProblem,
@@ -734,6 +735,7 @@ def _finding_lines(findings: list[CheckedFinding]) -> list[str]:
                 else f"{s.sender or 'unknown sender'}, {(s.sent_at or 'unknown date')[:10]}"
                 + (f", delivered {s.occurred_at[:10]}" if s.occurred_at else "")
                 + (f", attachment {s.attachment_filename}" if s.source == "attachment" else "")
+                + (f", {EXTRACTION_DEFERRED_NOTE}" if s.extraction_deferred else "")
             )
             lines.append(f'      [{s.label}] {where}: "{s.excerpt}"')
     return lines
@@ -906,6 +908,11 @@ def register_experimental_tools(
         Use ask_mailbox for a direct answer to a question; use this when
         the user wants the history of an issue: who proposed, approved,
         changed or disputed what, and when.
+
+        A passage or citation from an attachment the indexer is waiting to
+        extract again has extraction_deferred=true (prose: "retained
+        indexed text; extraction refresh pending"): its text is what was
+        indexed before. Say so when an answer relies on it.
 
         Args:
             topic: The issue to brief, as the user phrased it
@@ -1177,6 +1184,11 @@ def register_experimental_tools(
 
         Use ask_mailbox for an open question; use this when the user has a
         specific statement to verify.
+
+        A passage or citation from an attachment the indexer is waiting to
+        extract again has extraction_deferred=true (prose: "retained
+        indexed text; extraction refresh pending"): its text is what was
+        indexed before. Say so when an answer relies on it.
 
         Args:
             conclusion: The statement to check, at most 2000 characters

@@ -2836,9 +2836,12 @@ def _requeue_stale_extractions(db: Database, queue: IndexingQueue) -> int:
     never left behind; a queued continuation is left as it is, and the
     sweep never clears a deferral mark.
     Like the zero-vector recovery sweep, files already queued or
-    dead-lettered are left alone, except that a queued extraction
-    continuation of a message to refresh becomes a full pass
-    (``IndexingQueue.end_continuation``), so the refresh is not skipped. Skipped when attachment extraction is
+    dead-lettered are left alone. Every occurrence of these refresh
+    classes that has a ``text_complete`` record has it cleared to NULL,
+    in bounded batches (#1236): a queued extraction continuation, which
+    resolves only pending occurrences, then refreshes it too, with its
+    queue row (stage, error, attempts, due time) and deferral marks
+    untouched. Skipped when attachment extraction is
     disabled, since the drain would not re-stamp the rows.
     Returns the number of files re-queued.
 
@@ -2857,41 +2860,52 @@ def _requeue_stale_extractions(db: Database, queue: IndexingQueue) -> int:
         if is_stale_extractor(name, ocr_enabled=INDEXER_OCR_ENABLED)
     ]
     filepaths = set(db.find_filepaths_with_extractors(stale))
+    # The occurrences of every refresh class below that still have a
+    # text-completeness record: it is cleared (``assessed``), so an
+    # extraction continuation already queued for the message, which the
+    # loop below leaves alone, resolves them as pending (#1236).
+    assessed: list[str] = []
     # For a "no extractor" or OLE2 row the predicate is only "this
     # occurrence now selects another module"; the OCR setting plays no
     # part in it.
-    filepaths.update(db.find_no_extractor_attachment_filepaths(_occurrence_reruns_extraction))
-    filepaths.update(db.find_fitting_too_large_attachment_filepaths(INDEXER_ATTACHMENT_MAX_BYTES))
+    filepaths.update(
+        db.find_no_extractor_attachment_filepaths(_occurrence_reruns_extraction, assessed)
+    )
+    filepaths.update(
+        db.find_fitting_too_large_attachment_filepaths(INDEXER_ATTACHMENT_MAX_BYTES, assessed)
+    )
     # A cached result with no completeness record (#1285): the reparse
     # the v6 migration queued covers most; this catches the ``-ocr`` rows
     # kept while OCR was off, once it is on.
-    unrecorded = {
-        row["filepath"]
-        for row in db.find_unrecorded_completeness_attachments()
-        if completeness_unrecorded(
+    # The occurrence's own record counts too: one a parse cap emptied
+    # has 0 beside a cached row with none.
+    unrecorded = db.find_unrecorded_completeness_occurrences(
+        lambda row: completeness_unrecorded(
             row["extraction_status"],
             row["extractor"],
             row["text_complete"],
             ocr_enabled=INDEXER_OCR_ENABLED,
-        )
-    }
+        ),
+        assessed,
+    )
     filepaths.update(unrecorded)
     if INDEXER_OCR_ENABLED:
-        filepaths.update(db.find_ocr_disabled_attachment_filepaths(_occurrence_reruns_extraction))
-    # A message to refresh may already be queued as an extraction
-    # continuation, which does not reopen resolved occurrences: it is
-    # turned into a full pass instead (Codex round 8 on #1355). One found
-    # only for its deferral marks needs no full pass.
-    refresh = set(filepaths)
+        filepaths.update(
+            db.find_ocr_disabled_attachment_filepaths(_occurrence_reruns_extraction, assessed)
+        )
+    cleared = db.clear_text_complete_for_occurrences(sorted(set(assessed)))
+    if cleared:
+        log.info(
+            "cleared attachment text completeness on %d occurrence(s) due a refresh; each "
+            "is unknown until its message is processed again.",
+            cleared,
+        )
     filepaths.update(db.find_deferred_extraction_filepaths())
     re_enqueued = 0
     re_enqueued_unrecorded = 0
     skipped_dead = 0
     for filepath in sorted(filepaths):
         if queue.has_pending_row(filepath):
-            if filepath in refresh and queue.end_continuation(filepath):
-                re_enqueued += 1
-                re_enqueued_unrecorded += filepath in unrecorded
             continue
         if queue.is_dead(filepath):
             skipped_dead += 1

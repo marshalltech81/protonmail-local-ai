@@ -185,8 +185,9 @@ def _render(out: MailboxStatusOutput) -> str:
         lines.append(
             f"  {_messages(q.extraction_deferred)} {'is' if one else 'are'} already indexed, "
             f"but {'its' if one else 'their'} attachment extraction reached the indexer's "
-            "per-message budget: the remaining attachments are extracted on later passes, "
-            "and their text is missing from search until then."
+            "per-message budget: the remaining attachments are extracted on later passes; "
+            "until then search has only text indexed for them earlier (flagged as retained "
+            "indexed text), or none."
         )
     if q.parked_trashed:
         one = q.parked_trashed == 1

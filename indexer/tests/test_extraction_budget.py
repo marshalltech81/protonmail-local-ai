@@ -16,6 +16,7 @@ tests assert are the processes this interpreter actually started.
 from __future__ import annotations
 
 import functools
+import hashlib
 import logging
 import shutil
 import sqlite3
@@ -713,39 +714,78 @@ class TestContinuation:
         assert p.deferred() == 0
         assert sorted(extractor.calls) == sorted(b for b, _, _ in _parts("lost", 4))
 
-    def test_a_refresh_turns_a_queued_continuation_into_a_full_pass(self, tmp_path, monkeypatch):
-        """Codex round 8 on #1355: a resolved occurrence the startup sweep
-        would refresh (here a ``too_large`` result that now fits) is not
-        skipped because its message is mid-continuation: the job becomes a
-        full pass, keeping its reason and attempts."""
-        from src.extractors import STATUS_TOO_LARGE
+    @pytest.mark.parametrize("refresh", ["too_large", "ocr_disabled", "no_extractor", "unrecorded"])
+    def test_a_refresh_reaches_a_queued_continuation(self, tmp_path, monkeypatch, refresh):
+        """Owner decision 2026-10-09 (round 8 rework): an occurrence of a
+        refresh class on a message mid-continuation has its completeness
+        cleared by the startup sweep, so the continuation re-extracts it,
+        while a resolved occurrence beside it whose failed row merely
+        expired is not touched. The queue row and the deferral marks stay
+        exactly as they were."""
+        from src.extractors import (
+            NO_EXTRACTOR_ERROR,
+            OCR_DISABLED_ERROR,
+            STATUS_TOO_LARGE,
+            STATUS_UNSUPPORTED,
+        )
 
-        parts = _parts("refit", 4)
-        extractor = LaunchingExtractor()
+        parts = _parts(f"refresh-{refresh}", 4)
+        target, expired = parts[0][0], parts[1][0]
+        extractor = LaunchingExtractor(fail={expired})
         real_call = extractor.__call__
-        first_time = {parts[0][0]}
+        first = {target}
 
-        def sometimes_too_large(**kwargs):
-            if kwargs["payload"] in first_time:
-                first_time.discard(kwargs["payload"])
+        def first_result(**kwargs):
+            if kwargs["payload"] in first and refresh != "unrecorded":
+                first.discard(kwargs["payload"])
+                _launch_one_process(kwargs["payload"])
                 extractor.calls.append(kwargs["payload"])
-                return ExtractionResult(
-                    status=STATUS_TOO_LARGE, extractor=None, text=None, error="cap"
-                )
+                status, error = {
+                    "too_large": (STATUS_TOO_LARGE, "cap"),
+                    "ocr_disabled": (STATUS_UNSUPPORTED, OCR_DISABLED_ERROR),
+                    "no_extractor": (STATUS_UNSUPPORTED, NO_EXTRACTOR_ERROR),
+                }[refresh]
+                return ExtractionResult(status=status, extractor=None, text=None, error=error)
             return real_call(**kwargs)
 
         p = Pipeline(tmp_path, monkeypatch, extractor, launches=2)
-        monkeypatch.setattr(attachment_indexing, "extract_attachment", sometimes_too_large)
-        path = p.add("refit", parts, reason=REASON_REPARSE)
+        monkeypatch.setattr(attachment_indexing, "extract_attachment", first_result)
+        path = p.add(f"refresh-{refresh}", parts, reason=REASON_REPARSE)
         p.drain()
-        assert p.job(path)["last_stage"] == STAGE_EXTRACT
-        assert main._requeue_stale_extractions(p.db, p.queue) == 1
-        job = p.job(path)
-        assert (job["reason"], job["attempts"], job["last_stage"]) == (REASON_REPARSE, 0, None)
+        assert p.deferred() == 2
+        old = (datetime.now(UTC) - timedelta(days=60)).isoformat()
+        p.db._conn.execute("UPDATE attachment_extractions SET extracted_at = ?", (old,))
+        if refresh == "unrecorded":
+            # A cached result with no completeness record, beside an
+            # occurrence a parse cap set to 0.
+            target_hash = hashlib.sha256(target).hexdigest()
+            p.db._conn.execute(
+                "UPDATE attachment_extractions SET text_complete = NULL WHERE attachment_id = ?",
+                (target_hash,),
+            )
+            p.db._conn.execute(
+                "UPDATE attachments SET text_complete = 0 WHERE attachment_id = ?",
+                (target_hash,),
+            )
+        p.db._conn.commit()
+        scheduling = (
+            "SELECT reason, status, attempts, last_stage, last_error, last_error_class, "
+            "next_attempt_at FROM indexing_jobs"
+        )
+        marks = (
+            "SELECT attachment_occurrence_id, extraction_deferred_at FROM attachments ORDER BY 1"
+        )
+        before = [tuple(r) for r in p.db._conn.execute(scheduling)]
+        marks_before = [tuple(r) for r in p.db._conn.execute(marks)]
+        assert main._requeue_stale_extractions(p.db, p.queue) == 0
+        assert [tuple(r) for r in p.db._conn.execute(scheduling)] == before
+        assert [tuple(r) for r in p.db._conn.execute(marks)] == marks_before
+        assert p.occurrences().count((None, 0)) == 1
         while p.job(path) is not None:
             p.drain()
-        # The once too-large part was extracted again, now fitting.
-        assert extractor.calls.count(parts[0][0]) == 2
+        # The refreshed part twice, every other part once: the expired
+        # failure was not re-run.
+        assert sorted(extractor.calls) == sorted([b for b, _, _ in parts] + [target])
         assert p.deferred() == 0
 
     def test_the_sweep_leaves_a_queued_continuation_alone(self, tmp_path, monkeypatch):
@@ -1179,6 +1219,49 @@ class TestVisibility:
 
 
 class TestDatabase:
+    def test_refresh_clearing_commits_in_batches_and_resumes(self, tmp_path, monkeypatch):
+        from src import database
+
+        db = _setup_db(tmp_path)
+        ids = [f"occ-{i}" for i in range(5)]
+        for occurrence in ids:
+            db.upsert_attachment(
+                claimant_id="msg@x",
+                thread_id="thread-x",
+                attachment_id=f"h-{occurrence}",
+                filename="f.txt",
+                content_type="text/plain",
+                size_bytes=1,
+                occurrence_id=occurrence,
+                extractor_module="text",
+            )
+            db.set_attachment_text_complete(occurrence, True, "text@3")
+        db.mark_attachment_extraction_deferred("occ-4")
+        monkeypatch.setattr(database, "SWEEP_FETCH_ROWS", 2)
+        real = Database._clear_text_complete_batch
+        calls = []
+
+        def second_fails(db_self, batch):
+            calls.append(list(batch))
+            if len(calls) == 2:
+                raise sqlite3.OperationalError("synthetic failure")
+            return real(db_self, batch)
+
+        monkeypatch.setattr(Database, "_clear_text_complete_batch", second_fails)
+        with pytest.raises(sqlite3.OperationalError):
+            db.clear_text_complete_for_occurrences(ids)
+        states = db.get_attachment_occurrence_states("msg@x")
+        # The first batch committed; the failing one and those after it did not.
+        assert [states[i][0] for i in ids] == [None, None, 1, 1, 0]
+        monkeypatch.setattr(Database, "_clear_text_complete_batch", real)
+        # A restart names only what still has a record.
+        assert db.clear_text_complete_for_occurrences(ids[2:]) == 3
+        states = db.get_attachment_occurrence_states("msg@x")
+        assert [states[i][0] for i in ids] == [None] * 5
+        # The deferral mark stays.
+        assert states["occ-4"][1] is True
+        db.close()
+
     def test_queue_write_commits_with_the_outer_transaction(self, tmp_path):
         db = Database(tmp_path / "mail.db")
         queue = IndexingQueue(db)

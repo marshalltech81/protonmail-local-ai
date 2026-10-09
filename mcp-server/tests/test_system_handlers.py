@@ -154,7 +154,8 @@ class TestGetMailboxStatus:
         assert (
             "  1 message is already indexed, but its attachment extraction reached the "
             "indexer's per-message budget: the remaining attachments are extracted on later "
-            "passes, and their text is missing from search until then." in text
+            "passes; until then search has only text indexed for them earlier (flagged as "
+            "retained indexed text), or none." in text
         )
 
     def test_parked_trashed_files_leave_the_index_current(self, fake_server, seeded_db):
