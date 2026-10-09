@@ -539,8 +539,10 @@ can be revisited with an explicit owner decision.
   the embed endpoint needs a rebuild (#719); an embedder outage at
   startup stops the server (#661)
 - audio/video and calendar attachments are not extracted (#695)
-- the OCR path's external tools have a timeout only, without memory
-  or CPU limits, and pdf2image runs a second, untimed `pdfinfo` (#1021)
+- the scanned-PDF OCR path's external tools have a timeout only,
+  without memory or CPU limits, and pdf2image runs a second, untimed
+  `pdfinfo` (#1021, #1293); image OCR runs in the limited extractor
+  child (#1292)
 - draft/forwarded state is not indexed
 - the indexer never deletes Maildir files, so a reaped message's
   `.eml` stays on disk (#728); mirror reaping is not yet validated

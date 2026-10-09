@@ -1533,11 +1533,20 @@ only, never filenames or text (`make logs`):
   rejects is failed under xlrd's own type name (`CompDocError`,
   `XLRDError`, ...), and one that needs more than its 512 MiB is
   `MemoryError` (#1291).
+  An image is decoded and OCR'd in a child process (#1292): a
+  decompression bomb is `DecompressionBombError` (or
+  `DecompressionBombWarning` between the pixel cap and twice it), a
+  Tesseract failure `TesseractError` and a Tesseract timeout
+  `RuntimeError`; an image whose decode or Tesseract needs more than
+  the child's 1 GiB is `MemoryError` or `TesseractError`, and one that
+  runs past the child's CPU or wall-clock limit `ToolCrashError` or
+  `ToolTimeoutError` (limits in `docs/architecture.md`, "Image
+  extraction runs in the extractor child").
   A DOCX, XLSX or PPTX is extracted in a child process with 1 GiB of
   address space, 30 s of CPU and a 45 s timeout (#1040): a file that
   needs more is `MemoryError` (or `XMLSyntaxError`, lxml's name for a
   failed allocation), `ToolCrashError` or `ToolTimeoutError`. For a
-  `.xls`, `.docx`, `.xlsx` or `.pptx`, `ChildOutputError` means the
+  `.xls`, `.docx`, `.xlsx`, `.pptx` or an image, `ChildOutputError` means the
   extractor child's output broke its protocol or passed its byte cap
   (#1291). The limits and what they were measured on are in
   `docs/architecture.md` ("OOXML extraction runs in a child process").
@@ -1587,8 +1596,9 @@ only, never filenames or text (`make logs`):
   frames past the cap are not read. The indexer looks one frame past
   the cap rather than count every frame, so the total is reported as
   "at least". `image OCR capped at <N> frames; the next frame could not
-  be read (<ExceptionType>)` is the same cap when that frame directory
-  is corrupt; the frames already read are still indexed. Each is
+  be read` is the same cap when that frame directory is corrupt; the
+  frames already read are still indexed. (Before #1292 it named the
+  exception type; the type now stays in the extractor child.) Each is
   counted as `ocr_capped_images` in the attachments line below. The
   same caching applies, but unlike the PDF cap the cached result does
   not record the image cap: a later message served the cached TIFF
@@ -1620,6 +1630,9 @@ only, never filenames or text (`make logs`):
   - `xls_sheets`, `xls_expanded_cells`, `xls_text_chars`: the same walk
     over a legacy `.xls` stopped at 1,024 sheets or at the cell or text
     budget above (#935).
+  - `image_text_chars`: an image's OCR text passed 10,000,000
+    characters; the text is cut there and no later TIFF frame is read
+    (#1292).
   - `doc_output_bytes`: catdoc wrote more than 8 MiB for a legacy
     `.doc`; the rest is not read (#935).
   - `ppt_output_bytes`: the `.ppt` reader wrote more than 8 MiB for a

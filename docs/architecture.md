@@ -1401,7 +1401,7 @@ each message whose occurrence of it now selects a module.
   no slide text from decks current PowerPoint or LibreOffice save
   (#958).
 
-All three, and the OOXML extractors' child process below, run through
+All three, and the extractor child below (OOXML and images), run through
 one subprocess runner (`extractors/_runner.py`).
 It starts every tool through `extractors/_launcher.py` (`python -I`),
 which lowers its own address space (`RLIMIT_AS`) and CPU time
@@ -1432,7 +1432,7 @@ reserved encrypted-deck status is the one exception, below) records
 log or `last_error`.
 
 The Python extractor child (`extractors/extractor_child.py
-<module>`, for the OOXML formats and `.xls`) reports its result in a
+<module>`, for the OOXML formats, `.xls` and images) reports its result in a
 framed protocol the runner parses as it arrives (#1291): `P` lines for
 progress, passed to the dispatcher's progress callback as they are
 read so a long extraction can refresh the heartbeat; a `C <name>` line
@@ -1459,12 +1459,14 @@ The limits on every external program the indexer runs:
 | extractor child, xlrd (`.xls`) | 512 MiB | 30 s | 45 s |
 | Java with Apache POI (`.ppt`) | 512 MiB | 30 s | 45 s |
 | extractor child, OOXML (`.docx`, `.pptx`, `.xlsx` and their variants) | 1 GiB | 30 s | 45 s |
-| Tesseract (images, scanned PDFs) | none | none | `INDEXER_OCR_TIMEOUT_SECONDS` per page |
+| extractor child, PIL and Tesseract (images), each process | 1 GiB | 4 × `INDEXER_OCR_TIMEOUT_SECONDS` + 30 s (270 s) | pages × (OCR timeout + 10 s) + 30 s (1,430 s) |
+| Tesseract (scanned PDFs) | none | none | `INDEXER_OCR_TIMEOUT_SECONDS` per page |
 | Poppler `pdfinfo` / `pdftoppm` (scanned PDFs) | none | none | the OCR render deadline (see `INDEXER_OCR_TIMEOUT_SECONDS`) |
 
-Tesseract and Poppler are started by pytesseract and pdf2image, not
-through the runner, so they have no memory or CPU limit of their own
-and are bounded only by the container's (#1021).
+For a scanned PDF, Tesseract and Poppler are started by pytesseract and
+pdf2image in the indexer, not through the runner, so they have no
+memory or CPU limit of their own and are bounded only by the
+container's (#1021, until #1293).
 
 OOXML extraction runs in a child process (owner decision 2026-10-08,
 #1040). The DOCX and PPTX pre-open package budgets, the XLSX
@@ -1516,6 +1518,49 @@ element-dense XML inside the DOCX or PPTX package budgets (about
 1,140 MB) fail under the limit. The extractor versions are not bumped
 (`docx@7`, `pptx@3`, `xlsx@6`): a file inside the limits returns the
 same text and status as before, and failures keep their type names.
+
+Image extraction runs in the extractor child (PLAN.md decision 42,
+#1292): `image.py` starts `extractor_child.py image <pages> <OCR
+timeout>`, whose `image_child.py` decodes the image with Pillow (and
+pillow-heif) and runs Tesseract through pytesseract, as the indexer did
+before. Each Tesseract is a process the child starts, so it inherits
+the child's limits (each process has its own) and is killed with the
+child's process group when the run ends; pytesseract's temporary files
+go to the run's scratch directory, which the runner removes. The child
+imports the extractors package, so the 30,000,000-pixel cap and the
+decompression-bomb handling apply there as before; the indexer itself
+no longer imports pytesseract or pillow-heif for images. A
+`P` frame after each OCR'd page refreshes the heartbeat; the frame cap
+(`ocr_frames`, or `ocr_frames_unreadable` when the probe frame cannot
+be read) crosses as a `C` frame, and the parent logs and counts it as
+before (`ocr_capped_images`); the probe's exception type stays in the
+child. The child's text is cut at 10,000,000 characters
+(`image_text_chars`, an extractor cap) so its output, read whole by the
+parent, has a fixed bound (40 MiB plus 1 MiB of frames); the indexer
+keeps at most `INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS` (2,000,000 by
+default) anyway. An error in the child (`DecompressionBombError`,
+`TesseractError`, `RuntimeError` for a Tesseract timeout, its own
+`MemoryError` or `RecursionError`) is recorded `failed` under its type
+name; in process a `MemoryError` or `RecursionError` was host
+pressure.
+
+The limits were measured plainly in the indexer image (Tesseract 5.5.0,
+which runs up to four OpenMP threads), as the smallest address-space
+limit under which the extraction still succeeds, on synthetic images at
+the pixel cap: a photo-like page with 3,000 words of text, as JPEG and
+as HEIC, 441 MiB and 8 s; an all-white 30,000,000-pixel RGBA PNG of
+126 KB, 441 MiB (the child's own decode) and 1 s; random noise,
+606 MiB and 6 s. 1 GiB is 1.7 times the largest. A page of dense text
+that needs more than the 60 s OCR timeout fails on the timeout under
+the limit as without it (364 MB peak). CPU time counts every thread, so
+each process may use four times the OCR timeout plus 30 s of CPU, and
+the timeout fires first; with the timeout off (`0`) the 60 s default's
+limit applies. The wall clock allows every page its OCR timeout (with
+none, the CPU limit) plus 10 s, plus 30 s: a 21-frame TIFF of text
+pages at the cap took 140 s for its 20 pages. Starting the child adds
+about 0.09 s per image (0.23 s against 0.14 s in process for a small
+screenshot). The text is byte-identical to the in-process extraction,
+so `image@3` is not bumped.
 
 Binary payloads labelled as text: the text extractor decodes whatever
 it is given, so a PDF, ZIP (or OOXML), OLE2, PNG, JPEG or GIF file sent

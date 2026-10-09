@@ -401,8 +401,10 @@ def _run_tool_calls() -> dict[str, list[ast.Call]]:
 # External programs the indexer starts without ``run_tool``, so without
 # its address-space and CPU limits, and why. Each has a timeout only.
 _TOOLS_OUTSIDE_RUN_TOOL = {
-    # pytesseract runs Tesseract with ``INDEXER_OCR_TIMEOUT_SECONDS``.
-    "extractors/image.py": "Tesseract through pytesseract (#1021)",
+    # Runs only in the extractor child, which ``image.py`` starts through
+    # ``run_child``: each Tesseract inherits the child's limits and dies
+    # with its process group (#1292).
+    "extractors/image_child.py": "Tesseract through pytesseract, in the extractor child (#1292)",
     # pdf2image runs pdfinfo and pdftoppm, and pytesseract Tesseract,
     # under the OCR timeout.
     "extractors/pdf.py": "pdfinfo, pdftoppm and Tesseract through pdf2image and pytesseract (#1021)",
@@ -423,6 +425,7 @@ class TestEveryToolRunsUnderLimits:
             "extractors/_runner.py",
             "extractors/doc.py",
             "extractors/docx.py",
+            "extractors/image.py",
             "extractors/ooxml.py",
             "extractors/ppt.py",
             "extractors/pptx.py",
@@ -434,6 +437,24 @@ class TestEveryToolRunsUnderLimits:
                 keywords = {k.arg for k in node.keywords}
                 assert None not in keywords, path
                 assert {"max_address_space_bytes", "max_cpu_seconds"} <= keywords, path
+
+    def test_the_indexer_never_loads_the_image_child(self):
+        """``image_child`` starts Tesseract; only the extractor child may
+        import it (#1292). Importing the image extractor and running the
+        dispatcher's imports loads neither it nor pytesseract."""
+        code = (
+            "import sys; import src.extractors, src.extractors.image; "
+            "print(sorted(m for m in ('src.extractors.image_child', 'pytesseract') "
+            "if m in sys.modules))"
+        )
+        out = subprocess.run(
+            [sys.executable, "-c", code],
+            cwd=Path(extractors.__file__).parents[2],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert out.stdout.strip() == "[]"
 
     def test_no_other_module_starts_a_program(self):
         src = Path(extractors.__file__).parents[1]

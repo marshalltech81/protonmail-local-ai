@@ -1,7 +1,7 @@
 """The extractor child's framed protocol (#1291).
 
-Every extractor that runs in the extractor child (the OOXML formats and
-``xls``) reports its result through the same frames, parsed by
+Every extractor that runs in the extractor child (the OOXML formats,
+``xls`` and ``image``) reports its result through the same frames, parsed by
 ``_runner.run_child`` (``src/extractors/_runner.py`` documents them).
 Output that breaks the protocol, or that the runner cut at its byte
 cap, is a ``failed`` row and never text; progress frames reach the
@@ -13,6 +13,7 @@ synthetic.
 from __future__ import annotations
 
 import logging
+import shutil
 import sys
 from pathlib import Path
 
@@ -49,12 +50,31 @@ _MIME = {
     "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
     "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     "xls": "application/vnd.ms-excel",
+    "image": "image/png",
 }
 # Every module the dispatcher runs in the extractor child.
 _MODULES = tuple(_MIME)
+# The modules whose caps are all logged as extractor caps (the image
+# extractor's frame caps are logged and counted as OCR-capped images,
+# ``tests/test_image_child.py``).
+_EXTRACTOR_CAP_MODULES = tuple(m for m in _MODULES if m != "image")
+# The options each module's extractor passes the child.
+_OPTIONS = {"image": ["20", "0", shutil.which("tesseract") or "tesseract"]}
+
+
+def _png() -> bytes:
+    import io
+
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.new("RGB", (8, 8), "white").save(buf, format="PNG")
+    return buf.getvalue()
 
 
 def _payload(module: str) -> bytes:
+    if module == "image":
+        return _png()
     return _OLE2_MAGIC if module == "xls" else _ooxml_payload(module)
 
 
@@ -70,7 +90,8 @@ def _module(module: str):
 
 def _cap_names(module: str) -> list[str]:
     mod = _module(module)
-    return sorted(getattr(mod, "_CAP_NAMES", None) or mod._CAP_MESSAGES)
+    names = getattr(mod, "_CAP_NAMES", None) or getattr(mod, "_CAPS", None)
+    return sorted(names or mod._CAP_MESSAGES)
 
 
 def stub_child_output(monkeypatch, data: bytes, *, truncated: bool = False) -> list[dict]:
@@ -175,7 +196,9 @@ class TestMalformedOutput:
 
 
 class TestFrames:
-    @pytest.mark.parametrize(("module", "cap"), [(m, c) for m in _MODULES for c in _cap_names(m)])
+    @pytest.mark.parametrize(
+        ("module", "cap"), [(m, c) for m in _EXTRACTOR_CAP_MODULES for c in _cap_names(m)]
+    )
     def test_each_cap_name_is_accepted_logged_and_counted(self, module, cap, monkeypatch, caplog):
         extractors.drain_extractor_counts()
         caplog.set_level("DEBUG")
@@ -241,6 +264,9 @@ class TestFrames:
             ("xlsx", "RecursionError"),
             ("xls", "CompDocError"),
             ("xls", "MemoryError"),
+            ("image", "DecompressionBombError"),
+            ("image", "TesseractError"),
+            ("image", "MemoryError"),
         ],
     )
     def test_any_other_type_is_failed_by_that_name(self, module, type_name, monkeypatch, caplog):
@@ -248,7 +274,8 @@ class TestFrames:
         stub_child_output(monkeypatch, f"E {type_name}\n".encode())
         result = _extract(module)
         assert (result.status, result.error) == (STATUS_FAILED, type_name)
-        assert f"extractor {module} failed (dispatch_via=mime): {type_name}" in caplog.text
+        via = "mime-image" if module == "image" else "mime"
+        assert f"extractor {module} failed (dispatch_via={via}): {type_name}" in caplog.text
 
     @pytest.mark.parametrize("module", _MODULES)
     @pytest.mark.parametrize("error", [ToolTimeoutError, ToolCrashError, ToolExitError])
@@ -279,17 +306,24 @@ class TestFrames:
         calls = stub_child_output(monkeypatch, b"T 0\n")
         _extract(module)
         mod = _module(module)
-        output_cap = (
-            mod._MAX_OUTPUT_BYTES if module == "xls" else _module("ooxml")._MAX_OUTPUT_BYTES
-        )
-        timeout = mod.XLS_TIMEOUT_SECONDS if module == "xls" else mod.CHILD_TIMEOUT_SECONDS
+        if module == "image":
+            output_cap = mod._MAX_OUTPUT_BYTES
+            timeout = mod.child_timeout_seconds(20, None)
+            cpu = mod.child_cpu_seconds(None)
+        else:
+            output_cap = (
+                mod._MAX_OUTPUT_BYTES if module == "xls" else _module("ooxml")._MAX_OUTPUT_BYTES
+            )
+            timeout = mod.XLS_TIMEOUT_SECONDS if module == "xls" else mod.CHILD_TIMEOUT_SECONDS
+            cpu = mod.CHILD_MAX_CPU_SECONDS
+        child = [sys.executable, "-I", str(_runner._CHILD), module, *_OPTIONS.get(module, [])]
         assert calls == [
             {
-                "argv": [sys.executable, "-I", str(_runner._CHILD), module],
+                "argv": child,
                 "timeout_seconds": timeout,
                 "max_output_bytes": output_cap,
                 "max_address_space_bytes": mod.CHILD_MAX_ADDRESS_SPACE_BYTES,
-                "max_cpu_seconds": mod.CHILD_MAX_CPU_SECONDS,
+                "max_cpu_seconds": cpu,
                 "suffix": f".{module}",
             }
         ]
@@ -347,11 +381,13 @@ class TestChildSide:
         """Host-pressure types too: in the child they are its own limit."""
         mod = _module(extractor_child.MODULES[module])
 
-        def boom(_payload):
+        def boom(_payload, *_options, **_kwargs):
             raise error(MARKER)
 
         monkeypatch.setattr(mod, "extract_text", boom)
-        assert extractor_child.run(module, b"x") == f"E {error.__name__}\n".encode()
+        assert extractor_child.run(module, b"x", _OPTIONS.get(module, ())) == (
+            f"E {error.__name__}\n".encode()
+        )
 
     def test_result_frames(self):
         assert extractor_child.result_frames("Zürich", ["a", "b"]) == (
@@ -364,21 +400,30 @@ class TestChildSide:
     def test_the_child_runs_every_module_the_dispatcher_sends_it(self):
         """The modules whose extractors call ``run_child`` and the child's
         list agree, and each listed module has the extraction entry."""
-        assert set(extractor_child.MODULES) == OOXML_MODULES | {"xls"}
+        assert set(extractor_child.MODULES) == OOXML_MODULES | {"xls", "image"}
         for name in extractor_child.MODULES.values():
             assert callable(_module(name).extract_text)
 
     @pytest.mark.parametrize("module", _MODULES)
-    def test_frames_round_trip_through_the_parser(self, module):
+    def test_frames_round_trip_through_the_parser(self, module, monkeypatch):
         """What the child writes for a real extraction parses back to the
         same text and caps."""
-        payload = (
-            (Path(__file__).parent / "fixtures" / "extractors" / "legacy.xls").read_bytes()
-            if module == "xls"
-            else _ooxml_payload(module, f"{MARKER} Café")
-        )
+        if module == "image":
+            from src.extractors import image_child
+
+            monkeypatch.setattr(
+                image_child.pytesseract, "image_to_string", lambda *_a, **_k: f"{MARKER} Café"
+            )
+            payload = _png()
+        elif module == "xls":
+            payload = (
+                Path(__file__).parent / "fixtures" / "extractors" / "legacy.xls"
+            ).read_bytes()
+        else:
+            payload = _ooxml_payload(module, f"{MARKER} Café")
+        options = _OPTIONS.get(module, ())
         mod = _module(extractor_child.MODULES[module])
-        text, caps = mod.extract_text(payload)
+        text, caps = mod.extract_text(payload, *options)
         frames = _runner._Frames(frozenset(_cap_names(module)), frozenset(), None)
-        frames.feed(extractor_child.run(module, payload))
+        frames.feed(extractor_child.run(module, payload, options))
         assert frames.result() == _runner.ChildResult(text, caps, {})
