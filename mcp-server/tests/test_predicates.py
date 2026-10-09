@@ -16,7 +16,9 @@ from pathlib import Path
 import pytest
 from src.lib.predicates import (
     DATE_BASES,
+    EFFECTIVE_EVIDENCE_SQL,
     LEAVES,
+    SENT_CLOCK_SQL,
     Evaluability,
     Leaf,
     compile_leaves,
@@ -470,7 +472,16 @@ class TestLeafRegistry:
         assert kind.param in _SAMPLES, f"{name}: no sample for parameter shape {kind.param!r}"
         params: list = []
         sql = kind.compile(_SAMPLES[kind.param], params)
-        assert sql.startswith(("m.", "NULLIF(m.", "CASE WHEN ", "(CASE WHEN m."))
+        assert sql.startswith(
+            (
+                "m.",
+                "NULLIF(m.",
+                "NULLIF((CASE WHEN m.",
+                "CASE WHEN ",
+                "(CASE WHEN m.",
+                "(COALESCE(m.",
+            )
+        )
         assert sql.count("?") == len(params)
         # The fragment runs as written against the schema.
         with closing(mixed_db._connect()) as conn:
@@ -517,7 +528,7 @@ class TestCompilerAndDigest:
         sql, params = compile_leaves(
             [Leaf("folder", ("INBOX",)), Leaf("seen", False), Leaf("effective_from", "2024-01-01")]
         )
-        assert sql == "m.folder IN (?) AND m.seen = ? AND m.effective_at >= ?"
+        assert sql == f"m.folder IN (?) AND m.seen = ? AND ({EFFECTIVE_EVIDENCE_SQL}) >= ?"
         assert params == ["INBOX", 0, "2024-01-01"]
 
     def test_query_messages_sql_is_the_old_where_clause(self):
@@ -555,7 +566,8 @@ class TestCompilerAndDigest:
                 f"CASE WHEN ({body_word} AND {body_word}) THEN 1 "
                 "WHEN m.body_complete = 1 THEN 0 ELSE NULL END",
                 "m.folder NOT IN (?)",
-                "m.effective_at >= ?",
+                # #1080: a date the message carries, else unknown.
+                f"({EFFECTIVE_EVIDENCE_SQL}) >= ?",
                 "CASE WHEN m.has_attachments = 1 OR m.attachments_manifest_complete = 1 "
                 "THEN m.has_attachments = ? ELSE NULL END",
                 "m.flagged = ?",
@@ -970,8 +982,8 @@ class TestClockSizeAndRepliedLeaves:
             ]
         )
         assert sql == (
-            "NULLIF(m.occurred_at IS NOT NULL, 0) AND m.sent_at >= ? AND m.occurred_at <= ? "
-            "AND m.replied = ? AND m.size_bytes >= ? AND m.size_bytes <= ?"
+            f"NULLIF(m.occurred_at IS NOT NULL, 0) AND ({SENT_CLOCK_SQL}) >= ? "
+            "AND m.occurred_at <= ? AND m.replied = ? AND m.size_bytes >= ? AND m.size_bytes <= ?"
         )
         assert params == ["2024-01-01T00:00:00+00:00", "2024-12-31T23:59:59.999999+00:00", 1, 1, 2]
         unknown_when_null = {
@@ -980,6 +992,11 @@ class TestClockSizeAndRepliedLeaves:
             "occurred_from",
             "occurred_to",
             "dated",
+            # #1080: a message without that date.
+            "effective_from",
+            "effective_to",
+            "sent_from",
+            "sent_to",
             "sender",
             "recipient",
             "participant",
@@ -1010,6 +1027,7 @@ class TestClockSizeAndRepliedLeaves:
             **{**base, "date_from": "2024-01-01", "date_basis": "sent"}
         ) == [
             Leaf("not_in_folders", ("Trash",)),
+            Leaf("dated", "sent"),
             Leaf("sent_from", "2024-01-01T00:00:00+00:00"),
         ]
         assert query_messages_leaves(
@@ -1040,8 +1058,10 @@ class TestClockSizeAndRepliedLeaves:
             thread_id="t",
             subject="s",
             sent_at="2024-01-10T09:00:00+00:00",
+            sent_at_status="parsed",
             folder="INBOX",
             has_attachments=False,
+            effective_at="2024-01-10T09:00:00+00:00",
         )
         assert _record_clock(record, DATE_BASES["sent"]) == "2024-01-10T09:00:00+00:00"
         assert _record_clock(record, DATE_BASES["effective"]) == "2024-01-10T09:00:00+00:00"

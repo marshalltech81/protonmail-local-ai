@@ -92,6 +92,7 @@ from .outputs import (
     ConclusionQuoteCheck,
     FindingSource,
     clip,
+    passage_sent_text,
     read_only,
     thread_summary,
     tool_result,
@@ -731,7 +732,8 @@ def _finding_lines(findings: list[CheckedFinding]) -> list[str]:
             where = (
                 "thread text"
                 if s.source == "thread"
-                else f"{s.sender or 'unknown sender'}, {(s.sent_at or 'unknown date')[:10]}"
+                else f"{s.sender or 'unknown sender'}, "
+                f"{passage_sent_text(s.sent_at, s.sent_at_status)}"
                 + (f", delivered {s.occurred_at[:10]}" if s.occurred_at else "")
                 + (f", attachment {s.attachment_filename}" if s.source == "attachment" else "")
             )
@@ -917,7 +919,8 @@ def register_experimental_tools(
                        a name)
             date_from: Optionally scope to emails after this date (ISO 8601)
                        A thread qualifies when its span (its
-                       messages' occurred_at, else sent_at) overlaps
+                       messages' occurred_at, else sent_at, else when first
+                       indexed, #1373) overlaps
                        the range, and any of its passages may be used;
                        each citation's occurred_at and sent_at give
                        that passage's own dates, which can fall
@@ -1188,7 +1191,8 @@ def register_experimental_tools(
                        a name)
             date_from: Optionally scope to emails after this date (ISO 8601)
                        A thread qualifies when its span (its
-                       messages' occurred_at, else sent_at) overlaps
+                       messages' occurred_at, else sent_at, else when first
+                       indexed, #1373) overlaps
                        the range, and any of its passages may be used;
                        each citation's occurred_at and sent_at give
                        that passage's own dates, which can fall

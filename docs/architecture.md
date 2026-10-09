@@ -794,10 +794,10 @@ longer find that message's thread.
 
 Each indexed message gets one row — its own
 subject (cut to `SUBJECT_MAX_CHARS`, 2,000 decoded characters, at parse
-time, #541), `sent_at` (`Date:` header; a missing or unparseable header is
-dated at first index and that date is kept when the message is
-reprocessed or its thread rebuilt), `occurred_at` (the top `Received:`
-header's date, or NULL; see Message time), folder, `in_reply_to` /
+time, #541), `sent_at` (`Date:` header, NULL when it is missing or
+unparseable) with `sent_at_status`, `occurred_at` (the top `Received:`
+header's date, or NULL), `first_indexed_at` (see Message time), folder,
+`in_reply_to` /
 references, attachment flag, read state, and its source: `filepath` (the Maildir
 locator, kept current across flag renames; when a rename crosses
 folders the new `folder` is written in the same transaction, so a failed
@@ -1030,7 +1030,13 @@ fields.
 converted to UTC and stored as an ISO 8601 string
 (`2024-03-05T12:00:00+00:00`). A header without a zone (`-0000`) is
 read as UTC. It is the sender's claim, not a delivery time: a sender
-can backdate or future-date it.
+can backdate or future-date it. **`sent_at_status`** says what the
+header gave (#1080): `parsed`, `missing` (no `Date:` header) or
+`invalid` (one that does not parse, an empty one included). `sent_at`
+is NULL unless `parsed`: an unknown send date is stored as unknown,
+never as another time, and a table CHECK holds the two together. The
+parser logs each unknown date at WARNING (rate limited) with the
+reason and the file's path, never the header text.
 
 **`occurred_at`** is the delivery time: the date of the topmost
 `Received:` header, which the last receiving server adds (expected to
@@ -1048,25 +1054,51 @@ than that reads as unparseable. Errors the email package or the codecs
 raise on the header degrade to NULL, and the header text is never
 logged.
 
-**Effective time** is `COALESCE(occurred_at, sent_at)`, stored as the
-virtual generated column `messages.effective_at` (indexed on its own
-and with `thread_id`, `folder` and `message_id`).
+**Effective time** is `COALESCE(occurred_at, sent_at, first_indexed_at)`,
+stored as the virtual generated column `messages.effective_at`
+(indexed on its own and with `thread_id`, `folder` and `message_id`).
 
-*Undated mail.* A missing or unparseable `Date:` header is dated at
-the time the indexer first parses the file, and that first persisted
-`sent_at` is kept when the message is reprocessed or its thread
-rebuilt (`Database.keep_persisted_fallback_date`, #297). A delivered
-undated message's effective time is its `occurred_at`, read from the
-file every time; only undated mail without a readable `Received:`
-date (undated sent mail) is dated again at rebuild time when the index
-is rebuilt from empty.
+*Undated mail.* `first_indexed_at` is when the indexer first stored
+the message. It is kept when the message is reprocessed or its thread
+rebuilt (`_write_message_record` keeps the stored value on conflict;
+`Database.keep_persisted_first_indexed_at` gives the in-memory message
+the same value before threading, #297). It is the effective time only
+of a message with neither date, and there it is an ordering and display
+fallback, not evidence: it orders the message among the rest, places it
+in its thread's span, and no date bound reads it. A date bound is
+unknown (indeterminate) for such a message, and for one whose
+`sent_at_status` is still NULL with no `occurred_at` (below). Only
+undated mail without a readable `Received:` date (undated sent mail)
+falls back to it; when the index is rebuilt from empty, it is the
+rebuild time.
+
+*Rows from before schema v8.* The v7 indexer stored the time it first
+parsed an undated file in `sent_at`. Migration 0008 rebuilds
+`messages` (SQLite cannot drop a NOT NULL or change a generated column
+in place; the participant rows are copied aside and back, since the
+drop would delete them by cascade), keeps every existing value, sets
+`sent_at_status` NULL (not assessed) and `first_indexed_at` to the
+row's `indexed_at`, and queues the reparse. Until a row is re-parsed
+its `sent_at` may be that made-up time, so no date bound and no `sent`
+order reads it (indeterminate) unless the row has an `occurred_at`,
+and no tool returns it: mcp-server selects `sent_at` only when the
+status is `parsed`, so the outputs, prompts, citations and
+`brief_issue`'s as-of date show `sent_at` and its status as null. The
+reparse also removes that time from the thread's FTS text, where the v7
+writer had put it in a `Date:` line after the message's `From:` line
+(only when that pair occurs once; a dead-lettered message keeps it until
+`make requeue-dead`, #1379). The reparse stores the
+status, and for an undated row moves the old fallback in `sent_at` to
+`first_indexed_at`, so no message moves in the ordering. Nothing is
+re-embedded: the date is in no chunk.
 
 Where the times are stored:
 
 | Stored as | What it holds |
 |---|---|
-| `messages.sent_at` / `messages.occurred_at` | The message's own times (authoritative) |
-| `messages.effective_at` | `COALESCE(occurred_at, sent_at)`, generated, never written |
+| `messages.sent_at` / `messages.occurred_at` | The message's own times (authoritative), NULL when unknown; `sent_at_status` says why for `sent_at` |
+| `messages.first_indexed_at` | When the indexer first stored the message: the ordering fallback of an undated message, not evidence |
+| `messages.effective_at` | `COALESCE(occurred_at, sent_at, first_indexed_at)`, generated, never written |
 | `threads.date_first` / `date_last` | The earliest and latest effective time among the thread's messages, recomputed from its `messages` rows on every upsert so a re-dated message moves the range; the reap rebuild derives them from the survivors the same way |
 
 A chunk stores no date of its own (#575): a passage's dates, body and
@@ -1075,10 +1107,10 @@ through the claimant ID. A reprocess commits a re-dated message in
 Phase 1, before its chunks are rewritten, so a stored chunk copy could
 lag the message whenever Phase 2 failed.
 
-`messages.indexed_at`, `message_chunks.chunked_at`,
-`attachments.seen_at` and `indexed_files.indexed_at` are indexer
-bookkeeping, not message time, and no tool returns them as a message
-date. Bitemporal modeling (when a claim was made versus when the event
+`messages.indexed_at`, `messages.first_indexed_at`,
+`message_chunks.chunked_at`, `attachments.seen_at` and
+`indexed_files.indexed_at` are indexer bookkeeping, not message time,
+and no tool returns them as a message date. Bitemporal modeling (when a claim was made versus when the event
 it describes happened) waits for Phase 5.
 
 *Maildir file mtime.* Since `CopyArrivalDate yes` in
@@ -1114,12 +1146,15 @@ Persisting the arrival time as `internal_at`, with a stamp that marks
 pre-option files unavailable, is #1081's remaining work.
 
 **Outputs.** Every per-message and per-passage result returns
-`sent_at` and, beside it, `occurred_at` (null when unknown), in the
-stored string form: message headers (`get_message`, `get_thread`,
-`query_messages`), evidence chunks (`get_evidence`), citations
-(`ask_mailbox`, `brief_issue`, `check_conclusion`,
-`extract_from_emails`) and attachment hits (`search_attachments`, the
-carrying message's times). Thread results carry `date_first` /
+`sent_at`, `sent_at_status` and `occurred_at` (a date null when
+unknown, and `sent_at` with its status null when not yet assessed), in the stored string
+form: message headers (`get_message`, `get_thread`, `query_messages`),
+attachment occurrences (`query_attachments`), evidence chunks
+(`get_evidence`), citations (`ask_mailbox`, `brief_issue`,
+`check_conclusion`, `extract_from_emails`) and attachment hits
+(`search_attachments`, the carrying message's times). The prose says
+why a send date is unknown, or that it is not yet checked; no output
+shows `first_indexed_at`. Thread results carry `date_first` /
 `date_last`; an attachment hit also carries its thread's `date_last`.
 `get_mailbox_status` reports the oldest and newest thread dates in the
 index.
@@ -1132,15 +1167,18 @@ result qualifies depends on its unit:
 |---|---|---|
 | Thread (`search_emails`; the threads `get_evidence`, `ask_mailbox`, `extract_from_emails`, `brief_issue` and `check_conclusion` retrieve) | Its `[date_first, date_last]` span (effective times) overlaps the range | Relevance |
 | Evidence passage of a retrieved thread (same tools except `search_emails`, mailbox-wide path) | Its thread qualifies; the passage's own dates may fall outside the range, and `ask_mailbox` and `get_evidence` then label it `context` | Relevance within the thread |
-| Message (`query_messages`) | Its effective time is in the range | Effective time, newest first |
-| Message group (`aggregate_messages`) | Counts the messages `query_messages` would return; `year` and `month` groups are the UTC year or month of the effective time | Messages per group, most first |
+| Message (`query_messages`) | Its effective time is in the range; indeterminate without a delivery or assessed send date | Effective time, newest first |
+| Message group (`aggregate_messages`) | Counts the messages `query_messages` would return; `year` and `month` groups are the UTC year or month of the delivery date, else the assessed send date, and the no-value group without either | Messages per group, most first |
 | Attachment (`search_attachments`) | The carrying message's effective time is in the range | Relevance; with no query, effective time, newest first |
-| Attachment occurrence (`query_attachments`) | The carrying message's effective time is in the range | Effective time, newest first |
+| Attachment occurrence (`query_attachments`) | The carrying message's effective time is in the range; indeterminate as for `query_messages` | Effective time, newest first |
 
 Thread admission and message dates agree because both use the
 effective time: a message sent on 31 January and delivered on
 1 February is in a February range under every tool, and its thread's
-span starts on 1 February.
+span starts on 1 February. They differ for a message with neither
+date: the per-message filters count it as indeterminate, but a
+thread's span and `search_attachments`' bound still read its
+`first_indexed_at` (#1373).
 
 So a date range selects whole threads (owner decision, 2026-10-02,
 replacing #561's per-passage scoping): any passage of a thread whose
@@ -2150,6 +2188,7 @@ already indexed without embedding calls (see *Reparse in place*).
 | Version | Migration | Change |
 |---|---|---|
 | 0 | (initial schema) | First deployed schema (2026-10-03). |
+| 8 | `0008_unknown_sent_dates.sql` | Unknown send dates (#1080; see *Message time*): `messages` is rebuilt with a nullable `sent_at`, `sent_at_status` (`parsed` / `missing` / `invalid`, NULL until assessed) and `first_indexed_at`, and `effective_at` becomes `COALESCE(occurred_at, sent_at, first_indexed_at)`. Every existing value is kept, the participant rows are copied aside and back in the same transaction, and the migration queues a reparse, which stores an unknown date as NULL and moves the old fallback to `first_indexed_at` without embedding calls. Until the reparse reaches a message without a delivery date, a date bound counts it as indeterminate. |
 | 7 | `0007_operator_identity.sql` | `operator_addresses` and `operator_identity` (#824; see *Operator identity*), seeded `unconfigured` with no addresses until the indexer's next start loads `config/identity.toml`. No per-message column, so no reparse is queued. |
 | 6 | `0006_attachment_text_complete.sql` | Attachment text completeness (#1242): `attachments.text_complete` (0 / 1, NULL until assessed, no default) and `attachments.text_extractor`, and `attachment_extractions.text_complete` (NULL when unknown). Every existing row starts NULL and the migration queues a reparse (see *Reparse in place*), which re-extracts each cached `success` or `empty` result once, since none has a record yet (#1285). |
 | 5 | `0005_message_completeness.sql` | Per-message completeness on `messages` (#1086): `subject_complete`, `from_addresses_complete`, `to_addresses_complete`, `cc_addresses_complete`, `attachments_manifest_complete`, `body_complete` (0 / 1, NULL until assessed, no default) and `caps_json`. Every existing row starts NULL and the migration queues a reparse, which fills them without embedding calls; a dead-lettered job keeps its message NULL until `make requeue-dead`. Until the reparse reaches a message, a subject, text, attachment, address or authority filter that does not match it counts it as indeterminate. |
@@ -2694,6 +2733,15 @@ file no longer on disk, for an `-ocr` row while OCR is off (the sweep
 re-queues them once it is on), and for mail reparsed while
 `INDEXER_ATTACHMENT_EXTRACTION_ENABLED` was off (phase 2 writes no
 attachment rows then; run `make reparse` after enabling it).
+
+The v8 migration (`0008_unknown_sent_dates.sql`, #1080) rebuilds
+`messages` with `sent_at_status` `NULL` on every row and queues the
+reparse (see *Message time*). Phase 1 of each job stores the send date
+as parsed, or NULL with `missing` / `invalid`, and for an undated row
+keeps the old fallback as `first_indexed_at`, so its effective time and
+its thread's span do not move. Until the reparse reaches a message
+without a delivery date (or, for a dead-lettered one, until
+`make requeue-dead`), every date bound reports it as indeterminate.
 
 The migration that adds such data triggers the reparse itself: after
 its DDL it ends with `REPARSE_ENQUEUE_SQL` (`indexer/src/queue.py`),

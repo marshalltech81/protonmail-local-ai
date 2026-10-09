@@ -439,7 +439,9 @@ class Evaluability(Enum):
     message, so it is true or false of each message, never unknown.
     ``UNKNOWN_WHEN_NULL``: the field can be NULL (``size_bytes`` for a
     message whose file size was not recorded, ``occurred_at`` for one
-    without a parseable topmost ``Received:`` header), or the leaf reads
+    without a parseable topmost ``Received:`` header, the send date of
+    one without a parseable ``Date:`` header or not yet assessed, and
+    the effective time of one with neither date, #1080), or the leaf reads
     it only when another field says it can be trusted (``sender`` and
     the From side of ``participant``, when ``sender_ambiguous`` is not
     0, #1153; ``authority_class`` likewise outside Spam, #1161; a
@@ -491,17 +493,38 @@ class LeafKind:
     thread_test: Callable[[Any], Callable[[Any], bool]] | None = None
 
 
+# ``messages.sent_at_status`` (#1080): why ``sent_at`` is what it is.
+SentAtStatus = Literal["parsed", "missing", "invalid"]
+
+# A message's send date as evidence (#1080): its ``sent_at`` only once
+# the indexer has parsed it from the ``Date:`` header. NULL for a
+# missing or unparseable header, and for a row not yet assessed (from
+# before schema v8, until its reparse), whose stored value may be a
+# made-up fallback.
+SENT_CLOCK_SQL = "CASE WHEN m.sent_at_status = 'parsed' THEN m.sent_at END"
+# A message's effective time as evidence: its delivery date, else its
+# send date. NULL when it has neither: ``messages.effective_at`` then
+# holds ``first_indexed_at``, an ordering position that no date bound
+# reads (#1080).
+EFFECTIVE_EVIDENCE_SQL = f"COALESCE(m.occurred_at, {SENT_CLOCK_SQL})"
+
+
 @dataclass(frozen=True)
 class DateBasis:
     """One clock of ``messages`` that ``query_messages``' date bounds,
     order and cursor run on (#1085; ``docs/architecture.md`` "Message
-    time"). ``from_leaf`` / ``to_leaf`` name its bound leaves.
-    ``nullable`` says the clock can be NULL; the adapter then adds the
+    time"). ``clock`` is the SQL value of the order and cursor,
+    ``bound`` the SQL value its bound leaves ``from_leaf`` / ``to_leaf``
+    compare, NULL (unknown) where the message carries no such date.
+    ``nullable`` says ``clock`` can be NULL; the adapter then adds the
     ``dated`` leaf so every row of the page has a place in the ordering.
+    The effective clock is never NULL (``effective_at`` falls back to
+    ``first_indexed_at``), but its bound is (#1080).
     """
 
     name: str
-    column: str
+    clock: str
+    bound: str
     from_leaf: str
     to_leaf: str
     nullable: bool
@@ -512,9 +535,18 @@ DEFAULT_DATE_BASIS = "effective"
 DATE_BASES: dict[str, DateBasis] = {
     basis.name: basis
     for basis in (
-        DateBasis("effective", "effective_at", "effective_from", "effective_to", False),
-        DateBasis("sent", "sent_at", "sent_from", "sent_to", False),
-        DateBasis("occurred", "occurred_at", "occurred_from", "occurred_to", True),
+        DateBasis(
+            "effective",
+            "m.effective_at",
+            EFFECTIVE_EVIDENCE_SQL,
+            "effective_from",
+            "effective_to",
+            False,
+        ),
+        DateBasis("sent", SENT_CLOCK_SQL, SENT_CLOCK_SQL, "sent_from", "sent_to", True),
+        DateBasis(
+            "occurred", "m.occurred_at", "m.occurred_at", "occurred_from", "occurred_to", True
+        ),
     )
 }
 
@@ -719,14 +751,22 @@ def _compile_not_in_folders(folders: tuple[str, ...], params: list) -> str:
     return f"m.folder NOT IN ({','.join('?' * len(folders))})"
 
 
-def _compile_bound(column: str, op: str) -> Callable[[Any, list], str]:
+def _operand(value_sql: str) -> str:
+    """``value_sql`` safe as one operand: a column as it is, any other
+    expression in parentheses."""
+    column = value_sql.removeprefix("m.")
+    return value_sql if column != value_sql and column.isidentifier() else f"({value_sql})"
+
+
+def _compile_bound(value_sql: str, op: str) -> Callable[[Any, list], str]:
     """The compiler for an inclusive bound (``op`` is ``>=`` or ``<=``)
-    on a clock or size column of ``messages``. A NULL column compares
-    as unknown, so the row is left out (``Evaluability``)."""
+    on a clock or size value of ``messages m`` (``value_sql``). A NULL
+    value compares as unknown, so the row is left out
+    (``Evaluability``)."""
 
     def compile(value: Any, params: list) -> str:
         params.append(value)
-        return f"m.{column} {op} ?"
+        return f"{_operand(value_sql)} {op} ?"
 
     return compile
 
@@ -735,7 +775,7 @@ def _compile_dated(basis: str, params: list) -> str:
     # 1 when the clock is stored, NULL (unknown) when it is not, so the
     # conjunction is unknown, not false, for a row the basis cannot place
     # and ``indeterminate`` counts it (``Database.query_messages``).
-    return f"NULLIF(m.{DATE_BASES[basis].column} IS NOT NULL, 0)"
+    return f"NULLIF({_operand(DATE_BASES[basis].clock)} IS NOT NULL, 0)"
 
 
 def _compile_has_attachments(state: bool, params: list) -> str:
@@ -855,36 +895,49 @@ LEAVES: dict[str, LeafKind] = {
         LeafKind("body_words", "words", _compile_body_words, Evaluability.UNKNOWN_WHEN_NULL),
         LeafKind("folder", "folders", _compile_folder, Evaluability.DECIDED),
         LeafKind("not_in_folders", "folders", _compile_not_in_folders, Evaluability.DECIDED),
+        # A message with neither a delivery nor a send date is unknown
+        # under an effective-time bound, never placed by the time it was
+        # first indexed (#1080).
         LeafKind(
             "effective_from",
             "instant",
-            _compile_bound("effective_at", ">="),
-            Evaluability.DECIDED,
+            _compile_bound(EFFECTIVE_EVIDENCE_SQL, ">="),
+            Evaluability.UNKNOWN_WHEN_NULL,
             _effective_from_test,
         ),
         LeafKind(
             "effective_to",
             "instant",
-            _compile_bound("effective_at", "<="),
-            Evaluability.DECIDED,
+            _compile_bound(EFFECTIVE_EVIDENCE_SQL, "<="),
+            Evaluability.UNKNOWN_WHEN_NULL,
             _effective_to_test,
         ),
         # The other clocks of ``query_messages``' ``date_basis`` (#1085).
-        # ``sent_at`` is stored for every message; ``occurred_at`` is
-        # NULL without a delivery time, so the ``dated`` leaf keeps such
-        # rows out of a page ordered by it.
-        LeafKind("sent_from", "instant", _compile_bound("sent_at", ">="), Evaluability.DECIDED),
-        LeafKind("sent_to", "instant", _compile_bound("sent_at", "<="), Evaluability.DECIDED),
+        # Each is NULL without its date (a send date also until it is
+        # assessed, #1080), so the ``dated`` leaf keeps such rows out of
+        # a page ordered by it.
+        LeafKind(
+            "sent_from",
+            "instant",
+            _compile_bound(SENT_CLOCK_SQL, ">="),
+            Evaluability.UNKNOWN_WHEN_NULL,
+        ),
+        LeafKind(
+            "sent_to",
+            "instant",
+            _compile_bound(SENT_CLOCK_SQL, "<="),
+            Evaluability.UNKNOWN_WHEN_NULL,
+        ),
         LeafKind(
             "occurred_from",
             "instant",
-            _compile_bound("occurred_at", ">="),
+            _compile_bound("m.occurred_at", ">="),
             Evaluability.UNKNOWN_WHEN_NULL,
         ),
         LeafKind(
             "occurred_to",
             "instant",
-            _compile_bound("occurred_at", "<="),
+            _compile_bound("m.occurred_at", "<="),
             Evaluability.UNKNOWN_WHEN_NULL,
         ),
         LeafKind("dated", "basis", _compile_dated, Evaluability.UNKNOWN_WHEN_NULL),
@@ -902,13 +955,13 @@ LEAVES: dict[str, LeafKind] = {
         LeafKind(
             "size_min",
             "bytes",
-            _compile_bound("size_bytes", ">="),
+            _compile_bound("m.size_bytes", ">="),
             Evaluability.UNKNOWN_WHEN_NULL,
         ),
         LeafKind(
             "size_max",
             "bytes",
-            _compile_bound("size_bytes", "<="),
+            _compile_bound("m.size_bytes", "<="),
             Evaluability.UNKNOWN_WHEN_NULL,
         ),
         LeafKind(
@@ -933,8 +986,9 @@ def compile_leaves(leaves: Sequence[Leaf]) -> tuple[str, list]:
 # covers, or to the meaning of an expression it covers, bumps it, so a
 # cursor issued before is foreign. Cursors from before the version
 # existed (#1088) are foreign too. 2: the ``where`` clauses in canonical
-# form, with ``any`` and ``negate`` evaluated (#1087).
-QUERY_DIGEST_FORMAT = 2
+# form, with ``any`` and ``negate`` evaluated (#1087). 3: a date bound
+# and the ``sent`` order read only dates the message carries (#1080).
+QUERY_DIGEST_FORMAT = 3
 
 
 def leaf_digest(

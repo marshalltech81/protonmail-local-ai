@@ -1452,7 +1452,10 @@ def test_evidence_tool_descriptions_state_the_date_contract(tool, seeded_db):
 
     params = _wire_tools(_server(seeded_db))[tool]["inputSchema"]["properties"]
     doc = " ".join(params["date_from"]["description"].split())
-    assert "span (its messages' occurred_at, else sent_at) overlaps the range" in doc
+    assert (
+        "span (its messages' occurred_at, else sent_at, else when first indexed, #1373) "
+        "overlaps the range"
+    ) in doc
     assert "occurred_at and sent_at" in doc
 
 

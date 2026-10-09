@@ -2221,25 +2221,27 @@ class TestReprocessKeepsThreadMembership:
         assert listing_b == [thread_b]
 
 
-def _message_dates(db: Database, message_id: str) -> tuple[str, tuple[str, str]]:
-    """``(messages.sent_at, (date_first, date_last))``."""
-    sent_at = db._conn.execute(
-        "SELECT sent_at FROM messages WHERE message_id = ?", (message_id,)
-    ).fetchone()["sent_at"]
+def _message_dates(db: Database, message_id: str) -> tuple:
+    """``(messages.sent_at, sent_at_status, first_indexed_at,
+    (date_first, date_last))``."""
+    row = db._conn.execute(
+        "SELECT sent_at, sent_at_status, first_indexed_at FROM messages WHERE message_id = ?",
+        (message_id,),
+    ).fetchone()
     thread = db._conn.execute(
         "SELECT date_first, date_last FROM threads WHERE thread_id = ?",
         (db.find_thread_by_message_id(message_id),),
     ).fetchone()
-    return sent_at, (thread["date_first"], thread["date_last"])
+    return (*tuple(row), (thread["date_first"], thread["date_last"]))
 
 
 class TestReprocessKeepsFirstDate:
-    """#297, first half: the parser falls back to the current time for a
-    missing or unparseable Date header, so reprocessing an undated
-    message (a rename seen while the indexer was down, a retry) used to
-    re-date its ``messages`` row and widen its thread's range while the
-    retained chunks kept the first date. The first persisted date wins
-    for a fallback date; a real header date is still taken as parsed."""
+    """#297, #1080: a missing or unparseable Date header is stored as an
+    unknown send date, and the message is ordered by the time it was
+    first indexed (``first_indexed_at``). Reprocessing an undated
+    message (a rename seen while the indexer was down, a retry) must
+    not move that time or widen its thread's range; a real header date
+    is still taken as parsed."""
 
     _FIRST = datetime(2026, 1, 1, tzinfo=UTC)
     _LATER = datetime(2026, 9, 30, tzinfo=UTC)
@@ -2263,7 +2265,13 @@ class TestReprocessKeepsFirstDate:
         self._index(db, threader, renamed)
 
         header = "2024-01-01T12:00:00+00:00"
-        assert _message_dates(db, "dated@example.com") == (header, (header, header))
+        first = self._FIRST.isoformat()
+        assert _message_dates(db, "dated@example.com") == (
+            header,
+            "parsed",
+            first,
+            (header, header),
+        )
 
     def test_changed_header_date_is_its_own_claimant(self, tmp_path, monkeypatch):
         """Only a fallback date defers to the stored one, and only for the
@@ -2291,7 +2299,7 @@ class TestReprocessKeepsFirstDate:
         }
 
     @pytest.mark.parametrize("date", [None, "not-a-date"], ids=["missing", "malformed"])
-    def test_undated_message_keeps_first_date_on_reprocess(self, tmp_path, monkeypatch, date):
+    def test_undated_message_keeps_first_index_time_on_reprocess(self, tmp_path, monkeypatch, date):
         db = Database(tmp_path / "mail.db")
         threader = Threader(db)
         path = tmp_path / "INBOX" / "cur" / "u:2,S"
@@ -2305,7 +2313,8 @@ class TestReprocessKeepsFirstDate:
         self._index(db, threader, renamed)
 
         first = self._FIRST.isoformat()
-        assert _message_dates(db, "undated@example.com") == (first, (first, first))
+        status = "missing" if date is None else "invalid"
+        assert _message_dates(db, "undated@example.com") == (None, status, first, (first, first))
 
     @pytest.mark.parametrize(
         ("received", "expected_span"),
@@ -2356,13 +2365,13 @@ class TestReprocessKeepsFirstDate:
         assert db.find_thread_by_message_id("reply@example.com") is None
         first = self._FIRST.isoformat()
         span = expected_span or first
-        assert _message_dates(db, "root@example.com") == (first, (span, span))
+        assert _message_dates(db, "root@example.com") == (None, "missing", first, (span, span))
 
     @pytest.mark.parametrize("date", [None, "not-a-date"], ids=["missing", "malformed"])
     def test_undated_delivered_message_dates_agree_on_reprocess(self, tmp_path, monkeypatch, date):
         """#297 regression: an undated or malformed-date message with a
         top Received header, indexed and reprocessed under two clocks,
-        keeps one ``sent_at`` and one ``occurred_at``; its thread span
+        keeps an unknown ``sent_at`` and one ``occurred_at``; its thread span
         is its effective time, and its chunks carry no date of their
         own (#575), so every passage reads that same message row."""
         db = Database(tmp_path / "mail.db")
@@ -2388,11 +2397,11 @@ class TestReprocessKeepsFirstDate:
             ("delivered@example.com",),
         ).fetchone()
         assert (row["sent_at"], row["occurred_at"], row["effective_at"]) == (
-            self._FIRST.isoformat(),
+            None,
             occurred,
             occurred,
         )
-        assert _message_dates(db, "delivered@example.com")[1] == (occurred, occurred)
+        assert _message_dates(db, "delivered@example.com")[3] == (occurred, occurred)
         chunk_columns = {r["name"] for r in db._conn.execute("PRAGMA table_info(message_chunks)")}
         assert not {c for c in chunk_columns if "date" in c or c.endswith("_at")} - {"chunked_at"}
         passage_dates = {

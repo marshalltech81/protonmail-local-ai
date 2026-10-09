@@ -54,6 +54,7 @@ from .outputs import (
     SummarizeThreadOutput,
     SummaryStyle,
     clip,
+    passage_sent_text,
     read_only,
     thread_summary,
     tool_result,
@@ -1714,6 +1715,7 @@ def _citation(ref: EvidenceRef) -> Citation:
         sender=clip(chunk.message_sender, HEADER_CHAR_LIMIT) if chunk.message_sender else None,
         sender_ambiguous=chunk.message_sender_ambiguous,
         sent_at=chunk.message_date,
+        sent_at_status=chunk.message_sent_at_status,
         occurred_at=chunk.message_occurred_at,
         source="body" if chunk.attachment_id is None else "attachment",
         attachment_id=chunk.attachment_id,
@@ -1992,6 +1994,12 @@ class EvidenceRef:
 # them cut to ``_LABELLED_FIELD_CHARS``, so with one thread's
 # 2,000-character share a header can never crowd out its passage text.
 _LABELLED_HEADER_MAX_CHARS = 512
+# The ``sent`` field of a passage header without a date, by
+# ``sent_at_status`` (#1080).
+_SENT_UNKNOWN_HEADER = {
+    "missing": "unknown (no Date header)",
+    "invalid": "unknown (unparseable Date header)",
+}
 _LABELLED_FIELD_CHARS = 96
 
 
@@ -2051,7 +2059,15 @@ def _render_chunk_header(
             if short
             else clip(name, HEADER_CHAR_LIMIT)
         ) + note
-        sent = (chunk.message_date or "unknown date")[:16]
+        # Fixed text says why a send date is unknown (#1080); the
+        # database returns no date for one not yet checked.
+        status = chunk.message_sent_at_status
+        if chunk.message_date:
+            sent = chunk.message_date[:16]
+        elif status is None:
+            sent = "not yet checked"
+        else:
+            sent = _SENT_UNKNOWN_HEADER.get(status, "unknown date")
         prefix = f"{label} | message {claimant} | from {sender} | sent {sent} | "
         if scope:
             prefix += f"{scope} | "
@@ -2674,7 +2690,7 @@ def _citation_lines(citations: list[Citation]) -> list[str]:
             "thread text"
             if c.source == "thread"
             else f"{c.sender or 'unknown sender'}{sender_check(c.sender_ambiguous)}, "
-            f"{(c.sent_at or 'unknown date')[:10]}"
+            f"{passage_sent_text(c.sent_at, c.sent_at_status)}"
             + (f", delivered {c.occurred_at[:10]}" if c.occurred_at else "")
             + (f", attachment {c.attachment_filename}" if c.source == "attachment" else "")
         )
@@ -3028,7 +3044,8 @@ def register_intelligence_tools(
                        name, use ``from_name`` or ``participant``.
             date_from: Optionally scope to emails after this date (ISO 8601)
                        A thread qualifies when its span (its
-                       messages' occurred_at, else sent_at) overlaps
+                       messages' occurred_at, else sent_at, else when first
+                       indexed, #1373) overlaps
                        the range, and any of its passages may be used;
                        each citation's occurred_at and sent_at give
                        that passage's own dates, which can fall
@@ -3624,7 +3641,8 @@ def register_intelligence_tools(
                      "Trash" to include them.
             date_from: Optional date lower bound (ISO 8601).
                        A thread qualifies when its span (its
-                       messages' occurred_at, else sent_at) overlaps
+                       messages' occurred_at, else sent_at, else when first
+                       indexed, #1373) overlaps
                        the range, and any of its passages may be used;
                        each evidence entry's occurred_at and sent_at
                        give that passage's own dates, which can fall
