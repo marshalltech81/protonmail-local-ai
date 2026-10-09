@@ -24,6 +24,8 @@ the authority and folder constants) belong to the leaves and live here
 with them; ``lib/sqlite`` imports what its other queries share.
 """
 
+from __future__ import annotations
+
 import hashlib
 import json
 import sqlite3
@@ -33,7 +35,9 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, time
 from email.utils import parseaddr
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class InvalidFilterError(ValueError):
@@ -582,6 +586,23 @@ _ADDRESS_MODES: dict[str, tuple[Callable[[str, tuple[str, ...], list], str], boo
     "domain_is": (_rows_match(_domain_rows), False),
 }
 
+
+def _address_is_rows(value: str, roles: tuple[str, ...], params: list) -> str:
+    role_sql = ",".join(["?"] * len(roles))
+    params.extend([*roles, canonical_addr(value)])
+    return f"p.role IN ({role_sql}) AND p.address = ?"
+
+
+# The ``message_participants p`` rows each explicit address leaf's match
+# selects: where its matched addresses come from (``where`` leaf results).
+ADDRESS_LEAF_ROWS: dict[str, Callable[[str, tuple[str, ...], list], str]] = {
+    "address_is": _address_is_rows,
+    "address_contains": _address_rows,
+    "display_name_contains": _name_rows,
+    "address_or_name_contains": _substring_participant_rows,
+    "domain_is": _domain_rows,
+}
+
 # The stored ``message_participants`` roles each explicit address
 # leaf's role names (#1088). ``visible_participant`` (From, To or Cc)
 # is internal: it is what the flat ``participant`` filter compiles to.
@@ -908,16 +929,207 @@ def compile_leaves(leaves: Sequence[Leaf]) -> tuple[str, list]:
     return sql or "1", params
 
 
-def leaf_digest(leaves: Sequence[Leaf], date_basis: str = DEFAULT_DATE_BASIS) -> str:
-    """A short digest of the leaf list, in order, and of the
-    ``date_basis`` the page is ordered by, binding a keyset cursor to
-    the predicates and the ordering it was issued under
-    (``Database.query_messages``). The same leaves under another basis
-    are another keyset (#1085). A cursor whose digest differs is
-    rejected as foreign, never read against other predicates or
-    another clock."""
-    canonical = [[leaf.name, leaf.value] for leaf in leaves]
-    return hashlib.sha256(json.dumps([date_basis, canonical]).encode()).hexdigest()[:16]
+# The format of ``leaf_digest``'s input. A change to what the digest
+# covers, or to the meaning of an expression it covers (#1087's Boolean
+# evaluation), bumps it, so a cursor issued before is foreign. Cursors
+# from before the version existed (#1088) are foreign too.
+QUERY_DIGEST_FORMAT = 1
+
+
+def leaf_digest(
+    leaves: Sequence[Leaf],
+    date_basis: str = DEFAULT_DATE_BASIS,
+    where: Sequence[Leaf] = (),
+) -> str:
+    """A short digest of the flat leaf list and the normalized ``where``
+    leaves (``normalize_where``), each in order and kept apart so a
+    flat filter and the explicit leaf it compiles to stay distinct, of
+    the ``date_basis`` the page is ordered by and of
+    ``QUERY_DIGEST_FORMAT``. It binds a keyset cursor to the predicates
+    and the ordering it was issued under (``Database.query_messages``).
+    The same leaves under another basis are another keyset (#1085). A
+    cursor whose digest differs is rejected as foreign, never read
+    against other predicates or another clock."""
+    flat = [[leaf.name, leaf.value] for leaf in leaves]
+    explicit = [[leaf.name, leaf.value] for leaf in where]
+    payload = [QUERY_DIGEST_FORMAT, date_basis, flat, explicit]
+    return hashlib.sha256(json.dumps(payload).encode()).hexdigest()[:16]
+
+
+# ---------------------------------------------------------------------------
+# where: the explicit leaves of ``query_messages`` (#1088)
+# ---------------------------------------------------------------------------
+
+# The leaves ``where`` accepts; the five address leaves take a role.
+WHERE_ADDRESS_LEAVES = (
+    "address_is",
+    "address_contains",
+    "display_name_contains",
+    "address_or_name_contains",
+    "domain_is",
+)
+WHERE_LEAVES = (*WHERE_ADDRESS_LEAVES, "body_words")
+# The ``ROLE_SETS`` roles a caller names. ``visible_participant`` stays
+# internal (the flat ``participant``); the Bcc-inclusive ``recipient``
+# and ``any`` arrive with #1090.
+WHERE_ROLES = ("from", "to", "cc", "visible_recipient")
+
+# Every leaf and every ``any`` group counts one node.
+MAX_WHERE_NODES = 16
+# The longest value each leaf takes, checked before it is normalized.
+MAX_WHERE_VALUE_CHARS = {
+    "address_is": 320,
+    "address_contains": 320,
+    "display_name_contains": 320,
+    "address_or_name_contains": 320,
+    "domain_is": 255,
+    "body_words": 1000,
+}
+MAX_WHERE_ID_CHARS = 64
+
+# Whether each explicit address leaf reads display names (so needs them
+# all stored to answer no, #1140).
+ADDRESS_LEAF_READS_NAMES = {mode: reads for mode, (_, reads) in _ADDRESS_MODES.items()}
+
+WhereLeafName = Literal[
+    "address_is",
+    "address_contains",
+    "display_name_contains",
+    "address_or_name_contains",
+    "domain_is",
+    "body_words",
+]
+WhereRole = Literal["from", "to", "cc", "visible_recipient"]
+
+
+# The ``where`` argument models. They carry no docstrings: FastMCP
+# serves a model's docstring as schema text wherever the model appears,
+# and it inlines the leaf model twice (#818).
+
+
+class WhereLeafItem(BaseModel):
+    # One leaf: ``role`` on the five address leaves only.
+    model_config = ConfigDict(extra="forbid")
+
+    leaf: WhereLeafName
+    role: WhereRole | None = None
+    value: str
+    negate: bool = False
+    id: str | None = None
+
+    @model_validator(mode="after")
+    def _role_fits_the_leaf(self) -> WhereLeafItem:
+        if self.leaf in WHERE_ADDRESS_LEAVES:
+            if self.role is None:
+                raise ValueError("role is required on an address leaf")
+        elif "role" in self.model_fields_set:
+            raise ValueError("role is not accepted on body_words")
+        return self
+
+
+class WhereAnyGroup(BaseModel):
+    # An ``any`` group of leaves, evaluated from #1087.
+    model_config = ConfigDict(extra="forbid")
+
+    # Capped here too, so an oversized list is refused before its items
+    # are built; ``normalize_where`` counts the nodes of both together.
+    any: list[WhereLeafItem] = Field(max_length=MAX_WHERE_NODES)
+
+
+class Where(BaseModel):
+    # Every item of ``all`` must hold.
+    model_config = ConfigDict(extra="forbid")
+
+    all: list[WhereLeafItem | WhereAnyGroup] = Field(max_length=MAX_WHERE_NODES)
+
+
+@dataclass(frozen=True)
+class WhereLeaf:
+    """A normalized ``where`` leaf: its request ``path``, the caller's
+    ``id`` and the ``Leaf`` it compiles to."""
+
+    path: str
+    id: str | None
+    leaf: Leaf
+
+
+def _where_value(path: str, item: WhereLeafItem) -> Any:
+    """``item``'s normalized ``Leaf`` value. Raises
+    ``InvalidFilterError`` (fixed text) for a value over its leaf's
+    limit, a blank one, a non-address ``address_is``, an invalid
+    ``domain_is`` or a ``body_words`` without words or with too many."""
+    name, value = item.leaf, item.value
+    limit = MAX_WHERE_VALUE_CHARS[name]
+    if len(value) > limit:
+        raise InvalidFilterError("where", f"{path}: {name} value is longer than {limit} characters")
+    value = value.strip()
+    if not value:
+        raise InvalidFilterError("where", f"{path}: {name} value is empty")
+    if name == "body_words":
+        terms = _text_terms(value)
+        if not terms:
+            raise InvalidFilterError("where", f"{path}: body_words value holds no word")
+        if len(terms) > _MAX_TEXT_TERMS:
+            raise InvalidFilterError(
+                "where", f"{path}: body_words holds at most {_MAX_TEXT_TERMS} words"
+            )
+        return tuple(terms)
+    if name == "address_is":
+        if address_match_mode(value) != "exact":
+            raise InvalidFilterError(
+                "where", f"{path}: address_is takes a full address (name@example.com)"
+            )
+        value = canonical_addr(value)
+    elif name == "domain_is":
+        # The domain of a stored (lowercased) address: no "@", no
+        # whitespace, no empty label.
+        value = value.lower().removeprefix("@")
+        if "@" in value or any(c.isspace() for c in value) or "" in value.split("."):
+            raise InvalidFilterError("where", f"{path}: domain_is takes a domain (example.com)")
+    return (item.role, value)
+
+
+def normalize_where(where: Where) -> list[WhereLeaf]:
+    """``where``'s leaves, validated and normalized, in order.
+
+    The node cap is checked first, so an oversized expression is refused
+    before any value is read. Then, with fixed text, an empty ``all``, an
+    ``any`` group or ``negate: true`` (both evaluated from #1087, never
+    ignored), each value (``_where_value``) and each ``id`` (non-blank,
+    at most ``MAX_WHERE_ID_CHARS``, unique). Every rejection is an
+    ``InvalidFilterError`` on the field ``where``.
+    """
+    nodes = sum(1 + len(item.any) if isinstance(item, WhereAnyGroup) else 1 for item in where.all)
+    if nodes > MAX_WHERE_NODES:
+        raise InvalidFilterError(
+            "where",
+            f"where holds at most {MAX_WHERE_NODES} nodes (each leaf and each any group counts one)",
+        )
+    if not where.all:
+        raise InvalidFilterError("where", "where.all must hold at least one leaf")
+    leaves: list[WhereLeaf] = []
+    ids: set[str] = set()
+    for i, item in enumerate(where.all):
+        path = f"where.all[{i}]"
+        if isinstance(item, WhereAnyGroup):
+            raise InvalidFilterError(
+                "where",
+                f"{path}: any groups are not evaluated yet (#1087); list leaves directly in all",
+            )
+        if item.negate:
+            raise InvalidFilterError("where", f"{path}: negate is not evaluated yet (#1087)")
+        if item.id is not None:
+            if len(item.id) > MAX_WHERE_ID_CHARS:
+                raise InvalidFilterError(
+                    "where", f"{path}: id is longer than {MAX_WHERE_ID_CHARS} characters"
+                )
+            if not item.id.strip():
+                raise InvalidFilterError("where", f"{path}: id is empty")
+            if item.id in ids:
+                raise InvalidFilterError("where", f"{path}: id repeats an earlier leaf's id")
+            ids.add(item.id)
+        leaves.append(WhereLeaf(path, item.id, Leaf(item.leaf, _where_value(path, item))))
+    return leaves
 
 
 # ---------------------------------------------------------------------------

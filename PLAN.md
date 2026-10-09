@@ -70,7 +70,8 @@ Outcomes:
    attachment predicates, grouped counts and exhaustive thread
    grouping. Incomplete parsing or extraction answers `indeterminate`,
    never a confident "no". **In progress:** per-message completeness
-   is done (#1086); next #1088, #1087, #823.
+   is done (#1086), and explicit leaves through `where` (#1088); next
+   #1087, #823.
 3. **Source metadata stays evidence:** bounded ordered headers,
    unknown send dates kept unknown, verified arrival time, participant
    and Bcc semantics, authority from the stored sender only when it is
@@ -338,10 +339,10 @@ schema change needs a numbered migration.
    `search_attachments` sender (#1056), stored display names with
    their completeness (#1140), and per-message completeness of body,
    subject, addresses and attachment manifest (#1086), whose address
-   terms `query_attachments` shares. **Open, in order:** per-occurrence
-   attachment-text completeness (#1242, before any negation or #1091);
-   explicit address-mode and `body_words` leaves with the `where` form
-   (#1088); the bounded `all` / `any` / `negate` form with a leaf cap
+   terms `query_attachments` shares, and the explicit address-mode and
+   `body_words` leaves with the `where` form (#1088). **Open, in
+   order:** per-occurrence attachment-text completeness (#1242, before
+   any negation or #1091); the bounded `all` / `any` / `negate` form with a leaf cap
    that also counts `any` groups (empty groups rejected) and
    three-valued evaluation, fixed at two levels so there is no nesting
    to bound (#1087); grouped aggregation as its own tool over the same engine (#823); the
@@ -798,6 +799,12 @@ superseded entries keep their number and one line.
     mail interleaved ahead of the backlog (#1142). Explicit leaves
     take a typed `where: {all: [...]}` form whose #1087 shape is fixed
     up front; the flat parameters keep their meaning forever (#1088).
+    Each `where` leaf reports true / false / indeterminate counts of
+    its own value over the messages the whole expression does not
+    reject (matches plus indeterminate), and its matched addresses as
+    the addresses that leaf's own SQL selects on the messages the
+    expression returns; under OR and NOT (#1087) the same rules hold,
+    and a negated leaf reports counts only.
     Bcc counts as a recipient and answers "can't tell" on received
     mail (#1090). Every display name is stored (#1140). Repeated To and
     Cc headers merge; a repeated From marks the sender ambiguous and

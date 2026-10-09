@@ -14,6 +14,7 @@ import re
 import sqlite3
 import struct
 import unicodedata
+from collections.abc import Sequence
 from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -27,14 +28,17 @@ import sqlite_vec
 
 from . import timings
 from .predicates import (
+    ADDRESS_LEAF_ROWS,
     ADDRESS_ROLES,
     DATE_BASES,
     DEFAULT_EXCLUDED_FOLDERS,
     LEAVES,
+    ROLE_SETS,
     DateBasis,
     Evaluability,
     InvalidFilterError,
     Leaf,
+    WhereLeaf,
     _addr_matches,
     _given,
     _normalize_date_range,
@@ -1003,6 +1007,28 @@ class AddressMatches:
 
 
 @dataclass
+class LeafResult:
+    """How one ``where`` leaf (#1088) decided the messages the whole
+    expression does not reject (its matches plus the indeterminate
+    ones; owner, 2026-10-08): ``true`` / ``false`` / ``indeterminate``
+    count them by the leaf's own value (1, 0, NULL), so the three sum
+    to ``total_matches + indeterminate``. For an address leaf,
+    ``distinct`` and ``addresses`` are the distinct addresses its own
+    match selects on the messages the expression returns, the matches
+    only (``AddressMatches``' rule); both ``None`` for
+    ``body_words``."""
+
+    path: str
+    id: str | None
+    leaf: str
+    true: int
+    false: int
+    indeterminate: int
+    distinct: int | None = None
+    addresses: list[str] | None = None
+
+
+@dataclass
 class MessagePage:
     """One page of an exhaustive enumeration.
 
@@ -1021,7 +1047,8 @@ class MessagePage:
     ``date_basis=occurred`` on one without a delivery time, a subject,
     text, attachment or address filter that finds nothing in stored
     content whose ``messages.*_complete`` flag is not 1, #1086). They are
-    in neither ``total_matches`` nor the pages.
+    in neither ``total_matches`` nor the pages. ``leaf_results`` holds
+    one ``LeafResult`` per ``where`` leaf, in request order.
     """
 
     total_matches: int
@@ -1031,6 +1058,7 @@ class MessagePage:
     next_cursor: str | None
     address_matches: dict[str, AddressMatches] = field(default_factory=dict)
     indeterminate: int = 0
+    leaf_results: list[LeafResult] = field(default_factory=list)
 
 
 _INVALID_CURSOR = "invalid cursor; restart the query without a cursor"
@@ -1066,6 +1094,15 @@ def _address_matches(
         return AddressMatches(distinct=len(addresses), addresses=addresses)
     params: list = []
     rows_sql = _substring_participant_rows(value, roles, params)
+    return _matched_addresses(conn, rows_sql, params, where_sql, where_params)
+
+
+def _matched_addresses(
+    conn: sqlite3.Connection, rows_sql: str, params: list, where_sql: str, where_params: list
+) -> AddressMatches:
+    """The distinct addresses of the ``message_participants p`` rows
+    ``rows_sql`` selects on the messages ``where_sql`` selects, most
+    matching messages first: one grouped query."""
     rows = conn.execute(
         "SELECT address, COUNT(*) OVER () FROM ("  # nosec B608
         "SELECT p.address AS address, COUNT(DISTINCT p.claimant_id) AS n "
@@ -1077,6 +1114,44 @@ def _address_matches(
     return AddressMatches(
         distinct=rows[0][1] if rows else 0, addresses=[address for address, _ in rows]
     )
+
+
+def _leaf_results(
+    conn: sqlite3.Connection, where: Sequence[WhereLeaf], where_sql: str, where_params: list
+) -> list[LeafResult]:
+    """Each ``where`` leaf's result (``LeafResult``), on the caller's
+    read transaction: one statement that evaluates every leaf's own SQL
+    once per message ``where_sql`` does not reject (it is 1 or NULL)
+    for the three counts, plus one grouped query per address leaf for
+    its matched addresses on the messages ``where_sql`` returns."""
+    params: list = []
+    columns = ", ".join(
+        f"({LEAVES[w.leaf.name].compile(w.leaf.value, params)}) AS l{i}"
+        for i, w in enumerate(where)
+    )
+    sums = ", ".join(
+        f"TOTAL(l{i} IS 1), TOTAL(l{i} IS 0), TOTAL(l{i} IS NULL)" for i in range(len(where))
+    )
+    # The CTE is materialized so each leaf is evaluated once per message
+    # of P: a plain subquery is flattened into the aggregates, which
+    # then evaluate each leaf once per aggregate that reads it.
+    counts = conn.execute(
+        f"WITH p AS MATERIALIZED (SELECT {columns} FROM messages m "  # nosec B608
+        f"WHERE ({where_sql}) IS NOT 0) SELECT {sums} FROM p",
+        [*params, *where_params],
+    ).fetchone()
+    results = []
+    for i, w in enumerate(where):
+        true, false, unknown = (int(n) for n in counts[3 * i : 3 * i + 3])
+        result = LeafResult(w.path, w.id, w.leaf.name, true, false, unknown)
+        if w.leaf.name in ADDRESS_LEAF_ROWS:
+            role, value = w.leaf.value
+            rows_params: list = []
+            rows_sql = ADDRESS_LEAF_ROWS[w.leaf.name](value, ROLE_SETS[role], rows_params)
+            matched = _matched_addresses(conn, rows_sql, rows_params, where_sql, where_params)
+            result.distinct, result.addresses = matched.distinct, matched.addresses
+        results.append(result)
+    return results
 
 
 def _record_clock(record: MessageRecord, basis: DateBasis) -> str:
@@ -4277,6 +4352,7 @@ class Database:
         size_min: int | None = None,
         size_max: int | None = None,
         date_basis: str | None = None,
+        where: Sequence[WhereLeaf] = (),
         limit: int = 25,
         cursor: str | None = None,
     ) -> MessagePage:
@@ -4329,6 +4405,9 @@ class Database:
           ``AUTHORITY_EXCLUDED_FOLDERS`` never matches, and any other
           whose ``sender_ambiguous`` is not 0 is counted as
           indeterminate (#1161).
+        - ``where`` (#1088): the normalized explicit leaves
+          (``normalize_where``), ANDed with the flat predicates; each
+          reports in ``MessagePage.leaf_results`` (``_leaf_results``).
 
         Raises ``ValueError`` for an invalid date, a ``text`` with no
         words or more than ``_MAX_TEXT_TERMS``, an unavailable or
@@ -4359,11 +4438,12 @@ class Database:
             for leaf in leaves
             if leaf.name in ADDRESS_ROLES
         ]
-        where_sql, params = compile_leaves(leaves)
+        explicit = [w.leaf for w in where]
+        where_sql, params = compile_leaves([*leaves, *explicit])
 
         # A cursor is only meaningful for the predicates and the ordering
         # it was issued under; bind it to a digest of both.
-        digest = leaf_digest(leaves, basis.name)
+        digest = leaf_digest(leaves, basis.name, explicit)
         clock = f"m.{basis.column}"
         page_where_sql = where_sql
         page_params = list(params)
@@ -4395,12 +4475,14 @@ class Database:
             # makes the extra count worth a query.
             indeterminate = 0
             if any(
-                LEAVES[leaf.name].evaluability is Evaluability.UNKNOWN_WHEN_NULL for leaf in leaves
+                LEAVES[leaf.name].evaluability is Evaluability.UNKNOWN_WHEN_NULL
+                for leaf in [*leaves, *explicit]
             ):
                 indeterminate = conn.execute(
                     f"SELECT COUNT(*) FROM messages m WHERE ({where_sql}) IS NULL",  # nosec B608
                     params,
                 ).fetchone()[0]
+            leaf_results = _leaf_results(conn, where, where_sql, params) if where else []
             rows = conn.execute(
                 f"SELECT {_MESSAGE_COLUMNS} FROM messages m WHERE "  # nosec B608
                 + page_where_sql
@@ -4423,6 +4505,7 @@ class Database:
             ),
             address_matches=address_matches,
             indeterminate=indeterminate,
+            leaf_results=leaf_results,
         )
 
     def query_attachments(
