@@ -2744,9 +2744,15 @@ class Database:
             },
         ).fetchall()
         counts = {row["bucket"]: int(row["n"]) for row in rows}
-        # Reparse jobs across the buckets (#1078): queued ones, then dead.
-        counts["reparse"] = sum(int(row["reparse"]) for row in rows if row["bucket"] != "dead")
-        counts["reparse_dead"] = sum(int(row["reparse"]) for row in rows if row["bucket"] == "dead")
+        # Reparse jobs across the buckets (#1078): the queued ones that can
+        # drain, the ones parked as trashed (they drain only if restored,
+        # #1331), then dead.
+        reparse = {row["bucket"]: int(row["reparse"]) for row in rows}
+        counts["reparse"] = sum(
+            n for bucket, n in reparse.items() if bucket not in ("dead", "parked_trashed")
+        )
+        counts["reparse_parked_trashed"] = reparse.get("parked_trashed", 0)
+        counts["reparse_dead"] = reparse.get("dead", 0)
         due = [row["oldest_due"] for row in rows if row["oldest_due"] is not None]
         return counts, min(due) if due else None
 

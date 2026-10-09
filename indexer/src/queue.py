@@ -595,9 +595,11 @@ class IndexingQueue:
         ``parked_trashed`` rows are trashed files waiting to be reaped;
         ``retrying`` is every other queued row (failures, including a
         permission error past its deferral window, embedder deferrals,
-        a row interrupted mid-step). ``reparse`` counts the queued rows,
-        in any of those buckets, whose reason is ``reparse`` and
-        ``reparse_dead`` the dead ones (#1078). ``oldest_due_age``
+        a row interrupted mid-step). ``reparse`` counts the queued rows
+        whose reason is ``reparse`` outside ``parked_trashed`` (the ones
+        that can drain), ``reparse_parked_trashed`` those parked as
+        trashed (#1331) and ``reparse_dead`` the dead ones (#1078).
+        ``oldest_due_age``
         is how long, in seconds, the longest-waiting due row has been due
         (0 when none is due): it grows while draining is stalled.
         """
@@ -620,6 +622,7 @@ class IndexingQueue:
             "dead": counts.get("dead", 0),
             "oldest_due_age": age,
             "reparse": counts["reparse"],
+            "reparse_parked_trashed": counts["reparse_parked_trashed"],
             "reparse_dead": counts["reparse_dead"],
         }
 

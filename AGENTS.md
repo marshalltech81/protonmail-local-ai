@@ -53,8 +53,8 @@ another control covers the same threat. Doing so is a design change:
 stop and ask. A boundary that lacks a further control is an issue under
 the existing rules, never a finding against a PR that does not touch it.
 There is no minimum number of controls (PLAN.md decision 43). The rule
-does not depend on a list: a reference table of each boundary's
-controls is planned in `docs/architecture.md` (#1299).
+does not depend on a list: `docs/architecture.md` "Trust Boundaries"
+is a reference table of each boundary's controls.
 
 ## Read This Before Editing
 

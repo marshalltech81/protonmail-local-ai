@@ -1242,7 +1242,7 @@ questions.
 | `replied` | bool | none | `true` for messages answered in Proton (the Maildir `R` flag), `false` for the rest |
 | `size_min` | int | none | Inclusive lower bound in bytes on the message's local Maildir file size: not IMAP `RFC822.SIZE` (isync writes LF line endings, so a message is about one byte per line smaller than the server's size). A message whose size is not stored is left out. An integer from 0 to 2^63-1 (SQLite's INTEGER range, stated in the schema as `minimum` / `maximum`), checked strictly, so `"100"` or `true` is an error, not a coerced filter, logged through the rate-limited `rejected invalid argument: query_messages.size_min` warning; `size_min` above `size_max` is an error |
 | `size_max` | int | none | Inclusive upper bound in bytes, likewise |
-| `where` | object | none | Explicit leaves, ANDed with the other filters ([below](#where-explicit-leaves)) |
+| `where` | object | none | Explicit leaves, with `any` groups and `negate`, ANDed with the other filters ([below](#where-explicit-leaves)) |
 | `authority_class` | string | none | The source-authority class of the message's From sender (any author, for a multi-author From): `counsel`, `management`, `vendor`, `government`, `personal`, `other`, or `unclassified`; a message in Spam never matches, and any other whose `sender_ambiguous` is not `false`, or whose From addresses are not complete with none of the class stored, is counted as `indeterminate`, not matched ([Sender attribution](#sender-attribution)); blank is ignored, any other value is an error |
 | `limit` | int | `25` | Messages per page; clamped to `[1, 100]` |
 | `cursor` | string | none | `next_cursor` from the previous page of the same query |
@@ -1275,16 +1275,34 @@ through the flat parameters' inferred mode:
   parameters' names (`sender`, `text`, ...) and the internal
   `visible_participant` role are not accepted. Unknown keys are
   refused.
-- **Evaluation:** every leaf of `all` must hold, together with the flat
+- **Boolean form** ([#1087](https://github.com/marshalltech81/protonmail-local-ai/issues/1087)):
+  an item of `all` is a leaf or an `{"any": [leaf, ...]}` group, and a
+  leaf may carry `"negate": true`. Nothing nests below an `any` group,
+  so this is a bounded form (an AND of ORs of possibly negated leaves),
+  not arbitrary Boolean algebra. From a sender at either of two
+  domains, about a budget, not yet confirmed:
+
+  ```json
+  {"all": [
+    {"any": [
+      {"leaf": "domain_is", "role": "from", "value": "example.com"},
+      {"leaf": "domain_is", "role": "from", "value": "example.org"}
+    ]},
+    {"leaf": "body_words", "value": "budget"},
+    {"leaf": "body_words", "value": "confirmed", "negate": true}
+  ]}
+  ```
+
+- **Evaluation:** every item of `all` must hold, together with the flat
   parameters and the default Trash exclusion. Each leaf is three-valued
-  as in the [table above](#filter-predicates); a message no leaf
-  rules out but some leaf cannot decide counts in `indeterminate`, and
-  the prose names that leaf's causes.
-- **Not evaluated yet:** the schema also accepts `{"any": [leaf, ...]}`
-  items and `"negate": true`, so the input shape stays fixed when
-  [#1087](https://github.com/marshalltech81/protonmail-local-ai/issues/1087)
-  evaluates them; until then a call using either is refused, never run
-  with it ignored.
+  (true, false or unknown) as in the [table above](#filter-predicates),
+  and so is the expression: `all` is false if any item is false, else
+  unknown if any is unknown; `any` is true if any leaf is true, else
+  unknown if any is unknown; `negate` swaps true and false and keeps
+  unknown, so a leaf that cannot decide never becomes a confident
+  "no" (or "yes") by negation. A message the expression leaves unknown
+  counts in `indeterminate`, and the prose names its leaves' causes.
+  A one-leaf `any` group means its leaf.
 - **Values:** stripped; an empty one is refused. `address_is` takes a
   full address (`Jane <Jane@Example.com>` is applied as
   `jane@example.com`); `domain_is` is lowercased with one leading `@`
@@ -1293,32 +1311,42 @@ through the flat parameters' inferred mode:
   A value may hold at most 320 characters (`domain_is` 255,
   `body_words` 1000).
 - **Limits:** at most 16 nodes, each leaf and each `any` group
-  counting one; `all` must not be empty. The schema also caps each `all` and `any` list at 16 items (`maxItems`), so a longer list is refused before its items are read. An `id` is optional, at most
+  counting one; neither `all` nor an `any` group may be empty. The schema also caps each `all` and `any` list at 16 items (`maxItems`), so a longer list is refused before its items are read. An `id` is optional, at most
   64 characters, not blank and unique within the call.
-- **Rejections:** fixed text naming the leaf's path (`where.all[1]`),
+- **Rejections:** fixed text naming the leaf's path (`where.all[1]`,
+  or `where.all[1].any[0]` inside a group),
   logged only as the rate-limited `rejected invalid argument:
   query_messages.where` warning; argument values are not logged.
-- **Cursor:** the digest a cursor carries covers the flat leaves and
-  the normalized `where` leaves, kept apart (so `sender=` and
-  `address_is` on `from` are different queries), in order, plus a
-  format version. A cursor issued for another expression, or before
-  the version was added, is refused as "issued for different filters".
-- **`leaf_results`:** one entry per `where` leaf, in request order:
-  its `path`, its `id` (or `null`), its `leaf`, and how many of the
-  messages the query does not reject (`total_matches` plus
-  `indeterminate`, over the whole query, not the page) the leaf on its
-  own is `true`, `false` and `indeterminate` of; the three sum to
+- **Cursor:** the digest a cursor carries covers the flat leaves in
+  order and the normalized `where` expression, kept apart (so `sender=`
+  and `address_is` on `from` are different queries), plus a format
+  version (2 since #1087). The expression is taken in canonical form:
+  the items of `all` in order, the leaves of each `any` group (with
+  their `negate`) in any order, so reordering a group keeps a cursor
+  valid; grouping and negation change it. A cursor issued for another
+  expression, or under an earlier format, is refused as "issued for
+  different filters".
+- **`leaf_results`:** one entry per `where` leaf (group members
+  included), in request order: its `path`, its `id` (or `null`), its
+  `leaf`, its `negate`, and how many of the messages the query does not
+  reject (`total_matches` plus `indeterminate`, over the whole query,
+  not the page) the leaf's own value, before `negate`, is `true`,
+  `false` and `indeterminate` of; the three sum to
   `total_matches + indeterminate`, so a leaf's `indeterminate` shows
-  which leaf left messages undecided. An address leaf also reports
-  `distinct_addresses` and at most 10 `addresses` its own match selects
-  on the messages the query returns, most matching messages first
-  (`null` for `body_words`). The two populations differ on purpose:
+  which leaf left messages undecided. A negated leaf's value after
+  `negate` is its `false` count as true and its `true` count as false.
+  A non-negated address leaf also reports `distinct_addresses` and at
+  most 10 `addresses` its own match selects on the messages the query
+  returns that the leaf itself is true of (under `any` a returned
+  message need not satisfy every member), most matching messages first;
+  both are `null` for `body_words` and for a negated leaf, which
+  reports counts only. The two populations differ on purpose:
   the counts are diagnostics that include undecided candidates, while
   the addresses are mail content and come from returned messages only.
   `address_matches` still reports the flat `sender`, `recipient` and
   `participant` filters only. The counts take one more statement,
   which evaluates each leaf once per message not rejected, and each
-  address leaf takes one grouped query.
+  non-negated address leaf takes one grouped query.
 
 **Address matching.** A value that is a full address
 (`jane@example.com`, `Jane <jane@example.com>`) matches by canonical
@@ -1489,8 +1517,9 @@ the lane terms or participants, or mentions the topic only in an
 attachment (`text` searches bodies only), is not found, and nothing
 shows it is missing (see the keyword-coverage paragraph above and
 #776). Report the lanes, their counts, the union size and the three
-buckets, not "all messages about X". The bounded Boolean filter form
-(#1087) will replace the multi-call shape.
+buckets, not "all messages about X". The address and `body_words`
+lanes can also run as one query, with a `where` `any` group
+([#1087](#where-explicit-leaves)); subject has no `where` leaf yet.
 
 For outstanding-item questions, look for completion, corrections,
 reopening and later guidance across threads and senders before calling
