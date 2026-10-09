@@ -2590,11 +2590,14 @@ needs no schema change of its own: `reason` is free text with no
 `CHECK` constraint.
 
 Visibility: with the queue heartbeat (every 5 min) the indexer logs
-`reparse: remaining=<n> reparsed_since_last_heartbeat=<n> dead=<n>`
-while reparse jobs are queued, then one `reparse complete: <n>
-message(s) reparsed since the indexer started, <n> dead-lettered`
-line, at WARNING when any dead-lettered; a reparse drained between two
-heartbeats still gets its completion line. `get_mailbox_status` reports
+`reparse: remaining=<n> parked_trashed=<n> reparsed_since_last_heartbeat=<n> dead=<n>`
+while reparse jobs that can drain are queued, then one `reparse
+complete: <n> message(s) reparsed since the indexer started, <n>
+dead-lettered` line, at WARNING when any dead-lettered; a reparse
+drained between two heartbeats still gets its completion line.
+`remaining` leaves out reparse jobs parked as trashed: they drain only
+if the file is restored, so they are counted in `parked_trashed`
+instead, and the completion line notes any still parked (#1331). `get_mailbox_status` reports
 the queued reparse jobs as `queue.reparse` (a subset of `pending`,
 `retrying` and `deferred`), names them in the not-current reason, and `make status`
 prints a line saying search finds those messages but the data the

@@ -850,8 +850,11 @@ kind of reindex that needs depends on whether search data changes too:
   still advances at least one message per batch, so the queue
   heartbeat's `oldest_due_age` grows while it runs without meaning
   draining has stalled. Progress is in the log every five
-  minutes (`reparse: remaining=... reparsed_since_last_heartbeat=...
-  dead=...`), then one `reparse complete: ...` line; `make status`
+  minutes (`reparse: remaining=... parked_trashed=...
+  reparsed_since_last_heartbeat=... dead=...`), then one `reparse
+  complete: ...` line once no job that can drain is left; jobs for
+  messages in Trash are counted in `parked_trashed`, not `remaining`,
+  and drain only if the message is restored; `make status`
   shows the remaining count (`queue.reparse`). A message that fails to
   parse dead-letters like any other; fix the cause, then
   `make requeue-dead`.
