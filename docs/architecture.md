@@ -890,9 +890,13 @@ writes the occurrence's chunks, so they roll back with them.
   leniently, the same text is decoded once more through the stdlib leaf
   decoder only to read those defects (one linear pass behind the
   decodable-bytes budget; the bytes kept are the lenient decode's).
+  An attached email's loss found this way is also counted as the
+  `transport_lossy` parse cap, so it is logged (review round 7 on
+  #1311); a leaf attachment's is not.
   Quoted-printable and uuencode failures record no defect and are not
   detected (#1288), so a quoted-printable attached email (`message/*`)
-  keeps its lenient decode but is always `0`, and one in any other
+  keeps its lenient decode but is always `0` (also counted as
+  `transport_lossy`), and one in any other
   transfer encoding that is not identity or base64 (uuencode and its
   aliases, or an unknown value) keeps the empty payload, counted as the
   `transport_decode` parse cap when an extractor reads the attachment:

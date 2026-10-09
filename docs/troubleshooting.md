@@ -1820,6 +1820,8 @@ something searchable is lost:
 
 - The attachments inside a base64 or quoted-printable attached email
   are not read.
+- A base64 or quoted-printable attached email is decoded with bytes
+  lost, or possibly lost (`transport_lossy`).
 - The container's own payload is emptied while an extractor would have
   read it: an attached email, whose text the `eml` extractor reads
   (#922), or for example a delivery report named `status.txt`.
@@ -1834,6 +1836,7 @@ with no extractor's file name) is not logged.
 | `attached_depth` | An attached email nested more than 20 levels deep (or 20 transfer-encoded levels) |
 | `attached_fields` | The same, once the message's attached emails exceed the per-message part and header budget |
 | `transport_decode` | A base64 or quoted-printable attached email that does not decode: the attachments inside it are not read; or an attached email in another transfer encoding (uuencode and its aliases, or an unknown value), whose transport text is not extracted |
+| `transport_lossy` | A base64 attached email whose transport decoded with bytes lost, or any quoted-printable one, whose loss cannot be detected yet (#1288): its decoded text is kept and indexed but marked incomplete, and the attachments inside it are read |
 | `decoded_bytes` | The same, past 64 MB of decoded attached emails per message |
 | `container_serialize` | A container the serializer refuses (a malformed header), when its payload would be extracted |
 | `body_parts` | Text parts past the 200th, left out of the body: only those that could have been part of it, so an alternative rendering after the one the body uses is not counted |

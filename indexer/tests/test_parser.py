@@ -4081,7 +4081,15 @@ def _only_attachment_is_empty(msg) -> bool:
     return msg.body_text == "PARENT_BODY" and [a.payload for a in msg.attachments] == [b""]
 
 
+def _only_attachment_is_kept(msg) -> bool:
+    return msg.body_text == "PARENT_BODY" and [a.payload != b"" for a in msg.attachments] == [True]
+
+
 _BASE64_RFC822 = b"Content-Type: message/rfc822\r\nContent-Transfer-Encoding: base64\r\n"
+_ENCODED_INNER = base64.encodebytes(_INNER_EMAIL)
+# One base64 quantum replaced by non-alphabet characters: the lenient
+# decode succeeds with bytes lost.
+_LOSSY_BASE64_INNER = _ENCODED_INNER[:8] + b"!!!!" + _ENCODED_INNER[12:]
 
 
 def _base64_chain(levels: int) -> bytes:
@@ -4191,6 +4199,25 @@ _CAP_SHAPES = {
         False,
         "transport_decode=1",
         _only_attachment_is_empty,
+    ),
+    # Review round 7 on #1311: an attached email whose transport decoded
+    # with bytes lost (base64 with an invalid-character defect), or may
+    # have (quoted-printable, #1288), keeps the lenient decode, marked
+    # incomplete, and is counted so the loss is logged.
+    "transport_lossy_base64": (
+        _with_attachment(_BASE64_RFC822, _LOSSY_BASE64_INNER),
+        False,
+        "transport_lossy=1",
+        _only_attachment_is_kept,
+    ),
+    "transport_lossy_quoted_printable": (
+        _with_attachment(
+            b"Content-Type: message/rfc822\r\nContent-Transfer-Encoding: quoted-printable\r\n",
+            quopri.encodestring(_INNER_EMAIL),
+        ),
+        False,
+        "transport_lossy=1",
+        _only_attachment_is_kept,
     ),
     "decoded_bytes": (
         _with_attachment(
@@ -4443,6 +4470,10 @@ _CAP_COMPLETENESS: dict[str, set[str]] = {
     "transport_decode_base64": _MANIFEST,
     "transport_decode_8bit": _MANIFEST,
     "transport_decode_uuencode": _MANIFEST,
+    # The attachment is listed; only its text is partial, which the
+    # occurrence's ``payload_complete`` records.
+    "transport_lossy_base64": set(),
+    "transport_lossy_quoted_printable": set(),
     "decoded_bytes": _MANIFEST,
     "container_serialize": _MANIFEST,
     "container_serialize_decoded": _MANIFEST,
@@ -5605,6 +5636,8 @@ _PAYLOAD_LOSS = {
     "transport_decode_base64": 1,
     "transport_decode_8bit": 1,
     "transport_decode_uuencode": 1,
+    "transport_lossy_base64": 1,
+    "transport_lossy_quoted_printable": 1,
     "decoded_bytes": 1,
     "container_serialize": 1,
     "container_serialize_decoded": 1,
@@ -5620,7 +5653,9 @@ def test_cap_shape_marks_exactly_the_emptied_payloads(tmp_path, monkeypatch, sha
     msg, _ = _parse_cap_shape(tmp_path, monkeypatch, shape)
     lost = [a for a in msg.attachments if not a.payload_complete]
     assert len(lost) == _PAYLOAD_LOSS.get(shape, 0)
-    assert all(a.payload == b"" for a in lost)
+    # A lossy transport keeps its lenient decode; every other cap empties.
+    kept = shape.startswith("transport_lossy_")
+    assert all((a.payload != b"") is kept for a in lost)
 
 
 def test_an_attachment_with_its_payload_is_complete(tmp_path):
@@ -5751,7 +5786,7 @@ class TestContainerTransportDecodeLoss:
         assert attachment.payload != b""
         assert attachment.payload_complete is False
         assert len(calls) == 1
-        assert msg.parse_caps == {}
+        assert msg.parse_caps == {"transport_lossy": 1}
 
     def test_an_undecodable_transport_keeps_todays_behaviour(self, tmp_path, monkeypatch):
         msg, calls = self._parse(tmp_path, monkeypatch, _BASE64_RFC822, b"A")
@@ -5776,6 +5811,7 @@ class TestContainerTransportDecodeLoss:
         [attachment] = msg.attachments
         assert attachment.payload and attachment.payload_complete is False
         assert calls == []
+        assert msg.parse_caps == {"transport_lossy": 1}
 
     def test_the_check_runs_behind_the_decodable_budget(self, tmp_path, monkeypatch):
         """Over ``budget.decodable`` the transport is never decoded, so
@@ -5833,7 +5869,7 @@ class TestContainerTransportEncodings:
         )
         assert kept in attachment.payload
         assert attachment.payload_complete is False
-        assert msg.parse_caps == {}
+        assert msg.parse_caps == {"transport_lossy": 1}
 
     @pytest.mark.parametrize(
         ("headers", "body"),

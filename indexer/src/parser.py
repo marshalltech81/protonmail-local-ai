@@ -51,6 +51,10 @@ log = logging.getLogger("indexer.parser")
 #   ``MAX_ATTACHED_MESSAGE_FIELDS`` budget;
 # * ``transport_decode``: a transfer-encoded attached email that does
 #   not decode;
+# * ``transport_lossy``: a transfer-encoded attached email that decoded
+#   with bytes lost (base64), or whose loss cannot be detected
+#   (quoted-printable, #1288): its lenient decode is kept, marked
+#   incomplete, and the attachments inside it are walked;
 # * ``decoded_bytes``: one past ``MAX_DECODED_ATTACHMENT_BYTES``;
 # * ``container_serialize``: a container the generator refuses;
 # * ``body_parts``: text parts past ``MAX_BODY_TEXT_PARTS`` are left out
@@ -97,6 +101,7 @@ PARSE_CAPS: tuple[str, ...] = (
     "attached_depth",
     "attached_fields",
     "transport_decode",
+    "transport_lossy",
     "decoded_bytes",
     "container_serialize",
     "body_parts",
@@ -1040,8 +1045,9 @@ def _attachment_payload(
 
     ``transport_lost`` (when given) gets ``True`` appended when a base64
     transport decoded but lost bytes (``_base64_transport_lost``), or the
-    transport is quoted-printable, whose loss cannot be detected (#1288);
-    the returned bytes are the lenient decode's either way (#1242). An
+    transport is quoted-printable, whose loss cannot be detected (#1288),
+    and the loss is counted as ``transport_lossy``; the returned bytes are
+    the lenient decode's either way (#1242). An
     attached email in any other non-identity transfer encoding (uuencode
     and its aliases included) keeps the empty payload, counted as
     ``transport_decode`` when an extractor would read it.
@@ -1087,6 +1093,9 @@ def _attachment_payload(
             encoding == "quoted-printable" or _base64_transport_lost(transport)
         ):
             transport_lost.append(True)
+            # Counted so the loss is logged, not only flagged (review
+            # round 7 on #1311).
+            caps["transport_lossy"] += 1
         # From here the decoded container is the part: the same depth
         # check, serialization and traversal as an identity-encoded one.
         part = decoded
