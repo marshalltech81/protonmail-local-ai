@@ -541,6 +541,12 @@ class ExtractionResult:
 # their type names, and the files the limits now fail are crafted
 # (measured in each module), so a bump would only re-run every cached
 # OOXML row through a child to change none of them.
+# image 3 still: moved to the limited child (#1292) with a
+# 10,000,000-char budget applied after stripping; output identical to
+# the in-process path whenever stripped OCR text is <= 10M chars; above
+# that only with a raised OCR page limit or crafted input — owner
+# exception, 2026-10-08, no bump (bumping would reset completeness and
+# re-OCR with new failure modes).
 # doc 2, ppt 2: the raw tool's output byte cap follows the configured
 # ``max_extracted_chars`` (four bytes a character, up to a 40 MiB
 # ceiling) instead of a fixed 8 MiB (#1308), so the same bytes can

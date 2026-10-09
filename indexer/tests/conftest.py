@@ -124,29 +124,43 @@ def _reset_extractor_warning_budget(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _ooxml_child_in_process(request, monkeypatch):
-    """Run the extractor child (#1040, #1291) in this process for the
-    OOXML extractors, through the same frames and parsing, so a test can
-    patch a walk's budgets or count its calls. The ``xls`` extractor
-    starts the real child, as before. A test marked
-    ``real_extractor_child`` starts the real child process for every
-    module (``tests/test_ooxml_child.py``)."""
+    """Run the extractor child (#1040, #1291, #1292) in this process for
+    the OOXML and image extractors, through the same frames and parsing
+    (progress frames as each page is read), so a test can patch a walk's
+    budgets, stub Tesseract or count calls. The ``xls`` extractor starts
+    the real child, as before. A test marked ``real_extractor_child``
+    starts the real child process for every module
+    (``tests/test_ooxml_child.py``, ``tests/test_image_child.py``)."""
     if request.node.get_closest_marker("real_extractor_child"):
         return
+    import pytesseract
     from src import extractors
     from src.extractors import OOXML_MODULES, _runner, extractor_child
 
+    # The image child sets pytesseract's command for its process; here
+    # that is the test process, so restore it after each test.
+    monkeypatch.setattr(
+        pytesseract.pytesseract, "tesseract_cmd", pytesseract.pytesseract.tesseract_cmd
+    )
     real = _runner.run_tool
+    in_process = OOXML_MODULES | {"image"}
 
     def run_tool(argv, payload, *, on_output=None, **kwargs):
-        module = argv[-1]
-        if argv[-2] != str(_runner._CHILD) or module not in OOXML_MODULES:
+        child = str(_runner._CHILD)
+        if child not in argv or argv[argv.index(child) + 1] not in in_process:
             return real(argv, payload, on_output=on_output, **kwargs)
         assert on_output is not None
+        module, *options = argv[argv.index(child) + 1 :]
         # A real child starts with zero counters (#1314): set the test's
         # aside so the child sends only what this extraction counted.
         before = extractors.drain_counters()
         try:
-            output = extractor_child.run(module, payload)
+            output = extractor_child.run(
+                module,
+                payload,
+                options,
+                lambda: on_output(extractor_child.PROGRESS_FRAME),
+            )
         finally:
             extractors.add_counters(before)
         on_output(output)

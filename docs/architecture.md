@@ -1401,7 +1401,7 @@ each message whose occurrence of it now selects a module.
   no slide text from decks current PowerPoint or LibreOffice save
   (#958).
 
-All three, and the OOXML extractors' child process below, run through
+All three, and the extractor child below (OOXML and images), run through
 one subprocess runner (`extractors/_runner.py`).
 It starts every tool through `extractors/_launcher.py` (`python -I`),
 which lowers its own address space (`RLIMIT_AS`) and CPU time
@@ -1438,7 +1438,7 @@ reserved encrypted-deck status is the one exception, below) records
 log or `last_error`.
 
 The Python extractor child (`extractors/extractor_child.py
-<module>`, for the OOXML formats and `.xls`) reports its result in a
+<module>`, for the OOXML formats, `.xls` and images) reports its result in a
 framed protocol the runner parses as it arrives (#1291): `P` lines for
 progress, passed to the dispatcher's progress callback as they are
 read so a long extraction can refresh the heartbeat; a `C <name>` line
@@ -1474,12 +1474,14 @@ The limits on every external program the indexer runs:
 | extractor child, xlrd (`.xls`) | 512 MiB | 30 s | 45 s |
 | Java with Apache POI (`.ppt`) | 512 MiB | 30 s | 45 s |
 | extractor child, OOXML (`.docx`, `.pptx`, `.xlsx` and their variants) | 1 GiB | 30 s | 45 s |
-| Tesseract (images, scanned PDFs) | none | none | `INDEXER_OCR_TIMEOUT_SECONDS` per page |
+| extractor child, PIL and Tesseract (images), each process | 1 GiB | 4 × `INDEXER_OCR_TIMEOUT_SECONDS` + 30 s (270 s) | pages × (OCR timeout + 10 s) + 30 s (1,430 s) |
+| Tesseract (scanned PDFs) | none | none | `INDEXER_OCR_TIMEOUT_SECONDS` per page |
 | Poppler `pdfinfo` / `pdftoppm` (scanned PDFs) | none | none | the OCR render deadline (see `INDEXER_OCR_TIMEOUT_SECONDS`) |
 
-Tesseract and Poppler are started by pytesseract and pdf2image, not
-through the runner, so they have no memory or CPU limit of their own
-and are bounded only by the container's (#1021).
+For a scanned PDF, Tesseract and Poppler are started by pytesseract and
+pdf2image in the indexer, not through the runner, so they have no
+memory or CPU limit of their own and are bounded only by the
+container's (#1021, until #1293).
 
 OOXML extraction runs in a child process (owner decision 2026-10-08,
 #1040). The DOCX and PPTX pre-open package budgets, the XLSX
@@ -1531,6 +1533,55 @@ element-dense XML inside the DOCX or PPTX package budgets (about
 1,140 MB) fail under the limit. The extractor versions are not bumped
 (`docx@7`, `pptx@3`, `xlsx@6`): a file inside the limits returns the
 same text and status as before, and failures keep their type names.
+
+Image extraction runs in the extractor child (PLAN.md decision 42,
+#1292): `image.py` starts `extractor_child.py image <pages> <OCR
+timeout>`, whose `image_child.py` decodes the image with Pillow (and
+pillow-heif) and runs Tesseract through pytesseract, as the indexer did
+before. Each Tesseract is a process the child starts, so it inherits
+the child's limits (each process has its own) and is killed with the
+child's process group when the run ends; pytesseract's temporary files
+go to the run's scratch directory, which the runner removes. The child
+imports the extractors package, so the 30,000,000-pixel cap and the
+decompression-bomb handling apply there as before; the indexer itself
+no longer imports pytesseract or pillow-heif for images. A
+`P` frame after each OCR'd page refreshes the heartbeat; the frame cap
+(`ocr_frames`, or `ocr_frames_unreadable` when the probe frame cannot
+be read) crosses as a `C` frame, and the parent logs and counts it as
+before (`ocr_capped_images`); the probe's exception type stays in the
+child. Any other degradation recorded in the child crosses as `N`
+frames like every child module's (#1314). The child strips the
+joined text, as the dispatcher does, and then cuts it at 10,000,000
+characters (`image_text_chars`, an extractor cap) so its output, read
+whole by the parent, has a fixed bound (40 MiB plus 1 MiB of frames);
+the indexer keeps at most `INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS`
+(2,000,000 by default) anyway.
+The version stays `image@3` (owner exception, 2026-10-08): a row cached
+before this change may hold more text when the stripped OCR output
+exceeds 10,000,000 characters and the character cap is off or above
+10,000,000. An error in the child (`DecompressionBombError`,
+`TesseractError`, `RuntimeError` for a Tesseract timeout, its own
+`MemoryError` or `RecursionError`) is recorded `failed` under its type
+name; in process a `MemoryError` or `RecursionError` was host
+pressure.
+
+The limits were measured plainly in the indexer image (Tesseract 5.5.0,
+which runs up to four OpenMP threads), as the smallest address-space
+limit under which the extraction still succeeds, on synthetic images at
+the pixel cap: a photo-like page with 3,000 words of text, as JPEG and
+as HEIC, 441 MiB and 8 s; an all-white 30,000,000-pixel RGBA PNG of
+126 KB, 441 MiB (the child's own decode) and 1 s; random noise,
+606 MiB and 6 s. 1 GiB is 1.7 times the largest. A page of dense text
+that needs more than the 60 s OCR timeout fails on the timeout under
+the limit as without it (364 MB peak). CPU time counts every thread, so
+each process may use four times the OCR timeout plus 30 s of CPU, and
+the timeout fires first; with the timeout off (`0`) the 60 s default's
+limit applies. The wall clock allows every page its OCR timeout (with
+none, the CPU limit) plus 10 s, plus 30 s: a 21-frame TIFF of text
+pages at the cap took 140 s for its 20 pages. Starting the child adds
+about 0.09 s per image (0.23 s against 0.14 s in process for a small
+screenshot). The text is byte-identical to the in-process extraction,
+so `image@3` is not bumped.
 
 Binary payloads labelled as text: the text extractor decodes whatever
 it is given, so a PDF, ZIP (or OOXML), OLE2, PNG, JPEG or GIF file sent
@@ -1795,7 +1846,7 @@ scanned pages are not re-read when OCR is turned on later.
 | `INDEXER_OCR_ENABLED` | `true` | Disables all OCR paths (image + PDF fallback) |
 | `INDEXER_ATTACHMENT_MAX_BYTES` | `33554432` (32 MiB) | Skip very large attachments — bounds CPU/memory for huge zips. Sized for the 10–30 MB scanned PDFs common in real mail; an `.eml` under the default `INDEXER_PARSE_MAX_BYTES` (50 MB) carries at most ~36 MB of base64-encoded attachment. Raising it re-queues, once at startup, the messages whose attachments were cached `too_large` and now fit |
 | `INDEXER_OCR_MAX_PAGES` | `20` | Cap pages OCR'd per PDF or multipage TIFF |
-| `INDEXER_OCR_TIMEOUT_SECONDS` | `60` | Per-page Tesseract timeout — bounds runaway OCR on a crafted high-noise image — and the deadline for rendering a scanned PDF's pages with Poppler. pdf2image's own page count before each render takes no timeout, so the indexer first times one bounded page count: one over half the deadline is an OCR timeout, and each render's timeout holds back that time. A page count much slower on pdf2image's call than on the timed one can still overrun (#868). Set `0` to disable both. |
+| `INDEXER_OCR_TIMEOUT_SECONDS` | `60` | Per-page Tesseract timeout — bounds runaway OCR on a crafted high-noise image — and the deadline for rendering a scanned PDF's pages with Poppler. pdf2image's own page count before each render takes no timeout, so the indexer first times one bounded page count: one over half the deadline is an OCR timeout, and each render's timeout holds back that time. A page count much slower on pdf2image's call than on the timed one can still overrun (#868). Set `0` to disable both. Image OCR also runs under a CPU limit per process of 4 × this value + 30 s (270 s with `0` or the default), which `0` does not lift (#1292). |
 | `INDEXER_PDF_MAX_DIGITAL_PAGES` | `500` | Cap pages walked by the digital pypdf path — protects against text-only PDFs with thousands of pages. Set `0` to disable. A PDF cut here logs the `pdf_digital_pages` extractor-cap WARNING (#903). |
 | `INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS` | `2000000` (~500 pages) | Truncate extracted text before persisting in `attachment_extractions`. Bounds SQLite row size for very long OCR'd PDFs. Set to `0` to disable. The XLSX extractor also stops at 10,000,000 characters of its own, whatever this is set to, so shared strings repeated across many cells cannot expand without limit (#294). The legacy `.doc` and `.ppt` tools' output is read up to four bytes per character of this cap, never past 40 MiB, whatever it is set to (#1308). Text cut by either logs an extractor-cap WARNING (`extracted_chars`, `xlsx_text_chars`) and counts in the attachments line's `extractor_caps` (#903). |
 
@@ -2953,7 +3004,7 @@ covers is docs only.
 
 | Boundary and threat | Controls in place | Shared assumptions | Accepted limitations and pending decisions | Locked by |
 | --- | --- | --- | --- | --- |
-| **Untrusted mail and attachments.** A crafted message or attachment stalls or exhausts the indexer, runs code in it, or puts mail content into logs. | A message over `INDEXER_PARSE_MAX_BYTES` is dead-lettered before it is parsed, after reading at most the cap plus one byte (`indexer/src/parser.py`, `indexer/src/main.py`). The `doc` and `ppt` tools and the `xls`, `docx`, `pptx` and `xlsx` extractors run in a child started by `indexer/src/extractors/_runner.py` (`run_tool`, `run_child`): `_launcher.py` sets `RLIMIT_AS` and `RLIMIT_CPU` before the tool loads, with a wall-clock timeout, an output cap, a kill of the whole process group and a parent-owned scratch directory. Per-message rows are keyed by the claimant ID (`parser.py` `claimant_id`). In `docker-compose.yml` the indexer mounts Maildir `:ro` and has `mem_limit: 6g`; every service has a read-only root filesystem, `cap_drop: ALL` and `no-new-privileges`. mcp-server has no Maildir mount and opens the index `?mode=ro` with `PRAGMA query_only` (`mcp-server/src/lib/sqlite.py`). Log text goes through `log_tool_call` and its `_LOGGABLE_TOOL_PARAMS` allowlist (`mcp-server/src/lib/security.py`), `scrub_embed_error` (`indexer/src/embedder.py`) and `_stage_error` (`indexer/src/main.py`). | A child's limits are sized from a plain measurement of the tool in the image, so a tool upgrade can outgrow them. Process separation is not filesystem or network confinement (PLAN.md decision 42, #698). | `pdf` and `html` (with body HTML conversion) still run in-process until #1293 and #1294, and `image` until #1292 merges; `text` stays in-process by decision 42. The stdlib message parse stays in-process (decision 42). `INDEXER_PARSE_MAX_BYTES=0` turns the message size cap off. Keeping mail out of logs is coding discipline plus marker tests: nothing stops a new log call from quoting mail. mbsync and mcp-server have no memory limit until #1300. | `indexer/tests/test_legacy_office.py` (`TestRunTool`, `TestEveryToolRunsUnderLimits`); `indexer/tests/test_main.py` `test_oversized_file_dead_letters_not_terminal_success`; `scripts/tests/compose_test.sh` (hardening and the read-only `/maildir` on every overlay combination); Semgrep `compose-service-missing-read-only`, `compose-service-missing-no-new-privileges`, `compose-service-missing-cap-drop-all`, `compose-root-user`; `mcp-server/tests/test_sqlite.py` `test_write_attempt_raises` (the `?mode=ro` open; `PRAGMA query_only` is docs only); synthetic-marker tests in both suites, such as `mcp-server/tests/test_provider_error_privacy.py`. |
+| **Untrusted mail and attachments.** A crafted message or attachment stalls or exhausts the indexer, runs code in it, or puts mail content into logs. | A message over `INDEXER_PARSE_MAX_BYTES` is dead-lettered before it is parsed, after reading at most the cap plus one byte (`indexer/src/parser.py`, `indexer/src/main.py`). The `doc` and `ppt` tools and the `xls`, `docx`, `pptx`, `xlsx` and `image` extractors run in a child started by `indexer/src/extractors/_runner.py` (`run_tool`, `run_child`): `_launcher.py` sets `RLIMIT_AS` and `RLIMIT_CPU` before the tool loads, with a wall-clock timeout, an output cap, a kill of the whole process group and a parent-owned scratch directory. Per-message rows are keyed by the claimant ID (`parser.py` `claimant_id`). In `docker-compose.yml` the indexer mounts Maildir `:ro` and has `mem_limit: 6g`; every service has a read-only root filesystem, `cap_drop: ALL` and `no-new-privileges`. mcp-server has no Maildir mount and opens the index `?mode=ro` with `PRAGMA query_only` (`mcp-server/src/lib/sqlite.py`). Log text goes through `log_tool_call` and its `_LOGGABLE_TOOL_PARAMS` allowlist (`mcp-server/src/lib/security.py`), `scrub_embed_error` (`indexer/src/embedder.py`) and `_stage_error` (`indexer/src/main.py`). | A child's limits are sized from a plain measurement of the tool in the image, so a tool upgrade can outgrow them. Process separation is not filesystem or network confinement (PLAN.md decision 42, #698). | `pdf` and `html` (with body HTML conversion) still run in-process until #1293 and #1294; `text` stays in-process by decision 42. The stdlib message parse stays in-process (decision 42). `INDEXER_PARSE_MAX_BYTES=0` turns the message size cap off. Keeping mail out of logs is coding discipline plus marker tests: nothing stops a new log call from quoting mail. mbsync and mcp-server have no memory limit until #1300. | `indexer/tests/test_legacy_office.py` (`TestRunTool`, `TestEveryToolRunsUnderLimits`); `indexer/tests/test_image_child.py`; `indexer/tests/test_main.py` `test_oversized_file_dead_letters_not_terminal_success`; `scripts/tests/compose_test.sh` (hardening and the read-only `/maildir` on every overlay combination); Semgrep `compose-service-missing-read-only`, `compose-service-missing-no-new-privileges`, `compose-service-missing-cap-drop-all`, `compose-root-user`; `mcp-server/tests/test_sqlite.py` `test_write_attempt_raises` (the `?mode=ro` open; `PRAGMA query_only` is docs only); synthetic-marker tests in both suites, such as `mcp-server/tests/test_provider_error_privacy.py`. |
 | **Secrets.** The Bridge password, provider API keys or the MCP token reach the repository, `docker inspect`, a log, or another local account. | Each secret is a Docker secret read from `.secrets/` (the `secrets` section of `docker-compose.yml`). `scripts/validate-env.sh`, which `make up` runs first, requires mode 600 on every secret file (`require_mode_600`) and rejects the API keys and `MCP_AUTH_TOKEN` in `.env` (`reject_secret_in_env`). `.gitignore` excludes `.env`, `.secrets/` and `*.pem`; the `detect-secrets` pre-commit hook also runs in CI (`lint.yml`). Clients get the token from a file, never an argument (`scripts/mcp-auth-headers.sh`; `mcp-server/src/stdio_adapter.py` refuses a group- or other-readable file). | Every secret rests on the operator's account and mode 600 on the host's disk: processes running as the operator are trusted (see [Endpoint authentication](#endpoint-authentication)). | Secrets are stored unencrypted on the host's disk. A plain `docker compose up` skips `validate-env.sh`. | `scripts/tests/validate_env_test.sh` (`loose_secret_mode_fails`, `loose_mcp_token_mode_fails`, `api_key_in_env_fails`, `mcp_token_in_env_fails`); `mcp-server/tests/test_stdio_adapter.py` `test_group_or_other_access_fails_closed`; `mcp-server/tests/test_http_transport.py` `test_tokens_stay_out_of_the_log`; Semgrep `shell-xtrace-enabled`. The `.gitignore` entries and the `detect-secrets` hook are docs only. <!-- pragma: allowlist secret --> |
 | **Network exposure.** Another machine, another local account or a web page reaches the MCP endpoint, or a container other than mbsync logs in to Bridge. | Only `mcp-server` publishes a port, `127.0.0.1:${MCP_PORT:-3000}` (`docker-compose.yml`). mbsync alone joins `bridge-net` and alone mounts the `bridge_pass` secret. No service shares the host's network namespace. `mcp-server/src/main.py`: `_HostOriginGuard` rejects a bad Host (421) or Origin (403), and `_StaticBearerTokenVerifier` checks the bearer token with `hmac.compare_digest` before any session exists. `docker-compose.hardened.yml` makes `app-net` internal. | The loopback bind keeps other machines out; the token is what stops other local accounts. | The bearer token is the only caller-authentication control against another local account, and it does not separate code running as the operator. `app-net` is not internal by default, so the indexer and mcp-server can reach remote providers. No network control limits Bridge's port to mbsync: on macOS `host.docker.internal` reaches the host's loopback from any container, so only the Bridge password, which mbsync alone mounts, keeps the others from logging in. | `scripts/tests/compose_test.sh` (ports and `bridge-net` membership on every overlay combination); Semgrep `compose-port-on-other-service`, `compose-port-not-loopback`, `compose-bridge-net-member`, `compose-host-namespace`; `mcp-server/tests/test_http_transport.py` (`test_missing_token_is_unauthorized`, `test_wrong_token_is_unauthorized`, `test_empty_token_fails_closed`, `test_compare_is_constant_time`, `test_streamable_http_rejects_other_host`, `test_streamable_http_rejects_other_origin`). |
 | **Bridge TLS.** Another listener on the Bridge app's loopback port (another local account while the app is down) receives the Bridge password, or the connection falls back to plaintext. | `mbsync/entrypoint.sh` `extract_bridge_cert` connects over implicit TLS only, with no STARTTLS or plaintext fallback, and checks the certificate against the required `BRIDGE_CERT_FINGERPRINT` (`verify_expected_fingerprint`) and then the pin in `mbsync-state` (`verify_cert_pin`) on every start, before the first sync sends the password. With `BRIDGE_CERT_PIN_ROTATE=true` a changed certificate that matches the fingerprint replaces the pin instead of failing. The certificate lives on tmpfs at `/tmp/mbsync/bridge-cert.pem`, which isync uses as `CertificateFile` with `TLSType IMAPS` (`mbsync/mbsyncrc.template`). `validate-env.sh` refuses a missing or malformed fingerprint. The template is pull-only: `Sync Pull`, `Expunge None`. | The fingerprint check, the pin and isync's `CertificateFile` all check the certificate extracted at start. On first boot or during a rotation the pin is written from that certificate, so a fingerprint taken from the wrong certificate passes all three; after that, the pin also refuses a certificate other than the pinned one. | Pull-only sync is one configuration control, the template's settings. isync's own validity and host name checks run on each sync, not at startup. `BRIDGE_CERT_PIN_ROTATE=true` stays in effect until mbsync is recreated with it false, and while it does the pin check does not stop a certificate change; the fingerprint check still does. | `mbsync/tests/entrypoint_test.sh` (`mismatch_is_refused_without_rotation`, `first_boot_with_another_expected_fingerprint_is_refused_unpinned`, `missing_expected_fingerprint_is_refused_at_startup`, `config_keeps_sync_safety`); `mbsync/tests/tls_check.sh`; `mbsync/tests/layout_check.sh`; `scripts/tests/validate_env_test.sh` `missing_bridge_cert_fingerprint_fails`; Semgrep `shell-tls-verification-disabled`. |
