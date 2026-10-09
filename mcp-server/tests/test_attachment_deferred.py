@@ -183,6 +183,23 @@ class TestSearchAttachments:
         assert by_name["report-2.txt"].extraction_status == "success"
         assert MARKER in by_name["report-2.txt"].text_snippet
 
+    def test_the_timing_line_counts_deferred_results(self, db, caplog):
+        """Codex round 11 on #1355: a deferred result has no preview, so
+        the call's timing line counts such results."""
+        from src.tools.search import register_search_tools
+
+        from tests.conftest import FakeEmbedClient, FakeMCPServer
+        from tests.test_timings import _one_line
+
+        caplog.set_level(logging.INFO)
+        server = FakeMCPServer()
+        register_search_tools(server, db, FakeEmbedClient())
+        asyncio.run(server.tools["search_attachments"](limit=50))
+        counts = _one_line(caplog)["counts"]
+        assert counts["results"] == 5
+        assert counts["attachments_extraction_deferred"] == 2
+        assert MARKER not in caplog.text
+
     def test_extracted_only_leaves_deferred_out(self, db):
         names = {r.filename for r in db.search_attachments(extracted_only=True, limit=50)}
         assert names == {"report-2.txt"}

@@ -545,6 +545,7 @@ _MESSAGE_INDEXES = (
 def _v8_from_fresh(db: Database) -> None:
     """Turn a fresh database into the v8 shape: v8 is the current schema
     without the occurrence's extraction deferral mark (#1236)."""
+    db._conn.execute("DROP INDEX idx_attachments_deferred")
     db._conn.execute("ALTER TABLE attachments DROP COLUMN extraction_deferred_at")
     db._conn.execute("UPDATE schema_version SET version = 8")
     db._conn.commit()
@@ -1184,15 +1185,19 @@ class TestAttachmentTextCompleteness:
         )
         db._conn.commit()
         seen: list[tuple] = []
-        assessed: list[str] = []
+        from src.database import CompletenessClearing
+
+        assessed = CompletenessClearing(db)
 
         def qualifies(row) -> bool:
             seen.append((row["extraction_status"], row["extractor"], row["text_complete"]))
             return True
 
         assert db.find_unrecorded_completeness_occurrences(qualifies, assessed) == {msg.filepath}
+        assessed.flush()
         assert set(seen) == {("success", "text@3", None)}
-        assert assessed == ["occ-7"]
+        assert assessed.cleared == 1
+        assert db.get_attachment_occurrence_states(msg.claimant_id)["occ-7"] == (None, False)
 
     def test_clear_nulls_only_the_named_stamps(self, db):
         self._setup(db)

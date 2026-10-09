@@ -434,6 +434,7 @@ _V5_COLUMNS = (
 def _drop_v5_columns(db: Database) -> None:
     """The v4 shape's missing columns: v5's and v6's (#1242), v7's
     tables (#824) and v8's column (#1236)."""
+    db._conn.execute("DROP INDEX idx_attachments_deferred")
     db._conn.execute("ALTER TABLE attachments DROP COLUMN extraction_deferred_at")
     db._conn.execute("DROP TABLE operator_addresses")
     db._conn.execute("DROP TABLE operator_identity")

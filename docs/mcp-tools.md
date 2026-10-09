@@ -987,7 +987,8 @@ Check `extraction_status`: any value other than `success` (`failed`,
 extracted text is available, not absence of relevant content.
 `deferred` (#1236) means the indexer will extract the attachment on a
 later pass of its message; it is read from the occurrence, so the
-result has no `text_snippet` and `extracted_only` leaves it out. While
+result has no `text_snippet`, `extracted_only` leaves it out, and the
+timing line counts such results as `attachments_extraction_deferred`. While
 any copy of the same bytes in a message is `deferred`, an
 extracted-text match on them is not returned through any copy, since
 the message's stored text for them may be an older extraction. To assess coverage,

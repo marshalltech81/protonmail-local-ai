@@ -1220,7 +1220,11 @@ class TestVisibility:
 
 class TestDatabase:
     def test_refresh_clearing_commits_in_batches_and_resumes(self, tmp_path, monkeypatch):
+        """Codex round 11 on #1355: the sweep clears as it finds, never
+        holding more than one batch of IDs; a failed batch rolls back
+        alone and a restart finishes the rest."""
         from src import database
+        from src.database import CompletenessClearing
 
         db = _setup_db(tmp_path)
         ids = [f"occ-{i}" for i in range(5)]
@@ -1248,14 +1252,23 @@ class TestDatabase:
             return real(db_self, batch)
 
         monkeypatch.setattr(Database, "_clear_text_complete_batch", second_fails)
+        clearing = CompletenessClearing(db)
         with pytest.raises(sqlite3.OperationalError):
-            db.clear_text_complete_for_occurrences(ids)
+            for occurrence in ids:
+                clearing.add(occurrence)
+            clearing.flush()
+        # Never more than one batch held.
+        assert [len(batch) for batch in calls] == [2, 2]
         states = db.get_attachment_occurrence_states("msg@x")
         # The first batch committed; the failing one and those after it did not.
         assert [states[i][0] for i in ids] == [None, None, 1, 1, 0]
         monkeypatch.setattr(Database, "_clear_text_complete_batch", real)
-        # A restart names only what still has a record.
-        assert db.clear_text_complete_for_occurrences(ids[2:]) == 3
+        # A restart finds only what still has a record.
+        again = CompletenessClearing(db)
+        for occurrence in ids[2:]:
+            again.add(occurrence)
+        again.flush()
+        assert again.cleared == 3
         states = db.get_attachment_occurrence_states("msg@x")
         assert [states[i][0] for i in ids] == [None] * 5
         # The deferral mark stays.

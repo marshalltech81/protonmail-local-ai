@@ -7,3 +7,9 @@
 -- has been deferred before this version, so every existing row stays
 -- NULL and nothing is re-parsed.
 ALTER TABLE attachments ADD COLUMN extraction_deferred_at TEXT;
+
+-- The MCP server asks, once per chunk it reads, whether the chunk's
+-- payload has a deferred copy in its message: a partial composite index
+-- over the deferred rows only.
+CREATE INDEX idx_attachments_deferred ON attachments(claimant_id, attachment_id)
+    WHERE extraction_deferred_at IS NOT NULL;

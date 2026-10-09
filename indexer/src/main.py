@@ -69,7 +69,7 @@ from .chunker import (
     mean_vector,
     truncate_to_tokens,
 )
-from .database import EMBEDDING_DIM, SCHEMA_VERSION, Database
+from .database import EMBEDDING_DIM, SCHEMA_VERSION, CompletenessClearing, Database
 from .embed_identity import (
     CalibrationRequestError,
     EmbedderDimensionError,
@@ -2861,10 +2861,11 @@ def _requeue_stale_extractions(db: Database, queue: IndexingQueue) -> int:
     ]
     filepaths = set(db.find_filepaths_with_extractors(stale))
     # The occurrences of every refresh class below that still have a
-    # text-completeness record: it is cleared (``assessed``), so an
-    # extraction continuation already queued for the message, which the
-    # loop below leaves alone, resolves them as pending (#1236).
-    assessed: list[str] = []
+    # text-completeness record: it is cleared as they stream
+    # (``assessed``), so an extraction continuation already queued for the
+    # message, which the loop below leaves alone, resolves them as
+    # pending (#1236).
+    assessed = CompletenessClearing(db)
     # For a "no extractor" or OLE2 row the predicate is only "this
     # occurrence now selects another module"; the OCR setting plays no
     # part in it.
@@ -2893,12 +2894,12 @@ def _requeue_stale_extractions(db: Database, queue: IndexingQueue) -> int:
         filepaths.update(
             db.find_ocr_disabled_attachment_filepaths(_occurrence_reruns_extraction, assessed)
         )
-    cleared = db.clear_text_complete_for_occurrences(sorted(set(assessed)))
-    if cleared:
+    assessed.flush()
+    if assessed.cleared:
         log.info(
             "cleared attachment text completeness on %d occurrence(s) due a refresh; each "
             "is unknown until its message is processed again.",
-            cleared,
+            assessed.cleared,
         )
     filepaths.update(db.find_deferred_extraction_filepaths())
     re_enqueued = 0

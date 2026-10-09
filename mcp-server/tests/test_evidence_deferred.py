@@ -106,6 +106,76 @@ class TestGetEvidence:
         assert "'evidence_extraction_deferred': 0" in _timing(caplog)
 
 
+def _steps_for_flags(tmp_path, parts: int, *, drop_index: bool = False) -> int:
+    """SQLite VM steps (progress-handler calls every 100) to compute the
+    deferral flag of every chunk of one message with ``parts`` distinct
+    attachments, each with one chunk, one in ten deferred."""
+    from src.lib.sqlite import _CHUNK_DEFERRED_SQL
+
+    from tests.conftest import _insert_attachment, _insert_chunk, _insert_message
+    from tests.test_sqlite import _open_built_db_conn
+
+    conn, _ = _open_built_db_conn(tmp_path, f"steps-{parts}-{drop_index}.db")
+    _insert_message(
+        conn,
+        message_id="m@x",
+        thread_id="t",
+        sent_at="2025-01-01T00:00:00+00:00",
+        has_attachments=True,
+    )
+    for i in range(parts):
+        _insert_attachment(
+            conn,
+            message_id="m@x",
+            thread_id="t",
+            attachment_id=f"p{i}",
+            filename=f"f{i}.txt",
+            occurrence_id=f"occ{i}",
+            deferred=i % 10 == 0,
+        )
+        _insert_chunk(
+            conn,
+            chunk_id=f"c{i}",
+            message_id="m@x",
+            thread_id="t",
+            text="synthetic",
+            embedding=[0.1, 0.2, 0.3, 0.4],
+            attachment_id=f"p{i}",
+            kind="attachment",
+        )
+    if drop_index:
+        conn.execute("DROP INDEX idx_attachments_deferred")
+    conn.commit()
+    steps = [0]
+
+    def tick() -> int:
+        steps[0] += 1
+        return 0
+
+    conn.set_progress_handler(tick, 100)
+    rows = conn.execute(f"SELECT {_CHUNK_DEFERRED_SQL} FROM message_chunks c").fetchall()
+    conn.close()
+    assert sum(r[0] for r in rows) == parts // 10
+    return steps[0]
+
+
+class TestFlagCost:
+    def test_the_per_chunk_flag_grows_linearly(self, tmp_path):
+        """Codex round 11 on #1355: the flag's EXISTS runs once per chunk;
+        the partial composite index keeps each probe constant, so the
+        work grows with the chunks, not with chunks times attachments."""
+        small = _steps_for_flags(tmp_path, 300)
+        large = _steps_for_flags(tmp_path, 1200)
+        assert large < 6 * small
+
+    def test_without_the_index_it_grows_quadratically(self, tmp_path):
+        """The gate fails on the known-bad shape: without the index each
+        probe scans the message's attachments."""
+        small = _steps_for_flags(tmp_path, 300, drop_index=True)
+        large = _steps_for_flags(tmp_path, 1200, drop_index=True)
+        assert large > 10 * small
+
+
 class TestQueryPaths:
     def test_the_vector_lane_flags_a_deferred_payload(self, deferred_db):
         chunks = deferred_db._chunk_vector_search([1.0, 0.0, 0.0, 0.0], 20)

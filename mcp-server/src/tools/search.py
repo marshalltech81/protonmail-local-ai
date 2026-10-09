@@ -1323,6 +1323,12 @@ def register_search_tools(
                 )
             results = found.results
             count("results", len(results))
+            # Results whose attachment's extraction the indexer deferred
+            # (#1236): no extracted-text preview, refresh pending.
+            count(
+                "attachments_extraction_deferred",
+                sum(r.extraction_status == "deferred" for r in results),
+            )
         except InvalidFilterError as e:
             # The message quotes the rejected value, which log_tool_call
             # withheld. Return it to the caller; log only the field name.

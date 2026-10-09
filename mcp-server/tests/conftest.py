@@ -181,6 +181,9 @@ def _build_schema(conn: sqlite3.Connection) -> None:
             -- extraction to a later pass (#1236); NULL otherwise.
             extraction_deferred_at    TEXT
         );
+        -- The indexer's partial index over deferred occurrences (#1236).
+        CREATE INDEX idx_attachments_deferred ON attachments(claimant_id, attachment_id)
+            WHERE extraction_deferred_at IS NOT NULL;
 
         CREATE VIRTUAL TABLE attachments_fts USING fts5(
             filename,

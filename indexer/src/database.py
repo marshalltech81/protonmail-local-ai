@@ -197,6 +197,30 @@ SWEEP_FETCH_ROWS = 1000
 MAX_ENTITY_PARTICIPANTS_PER_MESSAGE = 200
 
 
+class CompletenessClearing:
+    """Clears ``attachments.text_complete`` on the occurrences the startup
+    sweep finds due a refresh, as it finds them (#1236): at most
+    ``SWEEP_FETCH_ROWS`` IDs are held, and each full batch is cleared in
+    its own transaction, so memory stays bounded whatever the number of
+    occurrences. ``cleared`` counts the rows changed. An ID seen twice
+    (two refresh classes) changes nothing the second time."""
+
+    def __init__(self, db: Database) -> None:
+        self._db = db
+        self._pending: list[str] = []
+        self.cleared = 0
+
+    def add(self, occurrence_id: str) -> None:
+        self._pending.append(occurrence_id)
+        if len(self._pending) >= SWEEP_FETCH_ROWS:
+            self.flush()
+
+    def flush(self) -> None:
+        if self._pending:
+            batch, self._pending = self._pending, []
+            self.cleared += self._db._clear_text_complete_batch(batch)
+
+
 class SQLiteTooOldError(RuntimeError):
     """Raised when the runtime SQLite library is older than required."""
 
@@ -702,6 +726,11 @@ class Database:
             -- Hybrid-search attachment lane joins ``attachments`` back from
             -- ``attachments_fts`` on ``fts_rowid``.
             CREATE INDEX idx_attachments_fts_rowid ON attachments(fts_rowid);
+            -- A chunk's payload has a deferred copy in its message (#1236):
+            -- read once per chunk by the MCP server's evidence lanes, so
+            -- partial and composite, and small (deferred rows only).
+            CREATE INDEX idx_attachments_deferred ON attachments(claimant_id, attachment_id)
+                WHERE extraction_deferred_at IS NOT NULL;
 
             -- One row per payload and extractor module (#928): the same
             -- bytes under labels that pick different extractors get
@@ -1852,7 +1881,7 @@ class Database:
         sql: str,
         params: Sequence[object],
         qualifies: Callable[[sqlite3.Row], bool],
-        assessed: list[str] | None = None,
+        assessed: CompletenessClearing | None = None,
     ) -> set[str]:
         """The filepaths of the rows ``sql`` returns for which
         ``qualifies`` holds, read ``SWEEP_FETCH_ROWS`` rows at a time
@@ -1862,9 +1891,10 @@ class Database:
         whole read; the cursor is closed before they return.
 
         With ``assessed``, a qualifying row whose occurrence still has a
-        ``text_complete`` record (``occurrence_complete``) adds its
-        ``occurrence_id`` to it: its text is due a refresh, so the
-        startup sweep clears the record (#1236)."""
+        ``text_complete`` record (``occurrence_complete``) has it cleared
+        through ``assessed``, batch by batch as the rows stream: its text
+        is due a refresh (#1236). The column cleared is neither filtered
+        nor indexed by these queries, so the open read is unaffected."""
         cursor = self._conn.execute(sql, params)
         filepaths: set[str] = set()
         try:
@@ -1874,14 +1904,14 @@ class Database:
                         continue
                     filepaths.add(row["filepath"])
                     if assessed is not None and row["occurrence_complete"] is not None:
-                        assessed.append(row["occurrence_id"])
+                        assessed.add(row["occurrence_id"])
         finally:
             cursor.close()
         return filepaths
 
     @_synchronized
     def find_unrecorded_completeness_occurrences(
-        self, qualifies: Callable[[sqlite3.Row], bool], assessed: list[str]
+        self, qualifies: Callable[[sqlite3.Row], bool], assessed: CompletenessClearing | None = None
     ) -> set[str]:
         """The filepaths of the messages with an occurrence whose cached
         ``success`` or ``empty`` result has no completeness record (#1285)
@@ -1890,8 +1920,8 @@ class Database:
         time and keeping filepaths only, so a message with many such
         occurrences costs one entry (review round 3 on #1286). Each such
         occurrence that still has a record of its own (a parse cap can
-        set 0 beside a cached row with none) is added to ``assessed``
-        (#1236)."""
+        set 0 beside a cached row with none) has it cleared through
+        ``assessed`` (#1236)."""
         return self._stream_filepaths(
             """
             SELECT m.filepath, e.extraction_status, e.extractor, e.text_complete,
@@ -1909,22 +1939,13 @@ class Database:
             assessed,
         )
 
-    def clear_text_complete_for_occurrences(self, occurrence_ids: list[str]) -> int:
-        """Set ``text_complete`` to NULL on each named occurrence, in
-        batches of ``SWEEP_FETCH_ROWS``, each its own transaction, and
-        return how many changed (#1236). A failed batch rolls back alone;
-        the batches before it stay, and a restart clears the rest, since a
-        cleared occurrence is not named again. Deferral marks and queue
-        rows are untouched."""
-        changed = 0
-        for start in range(0, len(occurrence_ids), SWEEP_FETCH_ROWS):
-            changed += self._clear_text_complete_batch(
-                occurrence_ids[start : start + SWEEP_FETCH_ROWS]
-            )
-        return changed
-
     @_synchronized
     def _clear_text_complete_batch(self, occurrence_ids: list[str]) -> int:
+        """Set ``text_complete`` to NULL on the named occurrences in one
+        transaction (``CompletenessClearing``, #1236). A failed batch rolls
+        back alone; the batches before it stay, and a restart clears the
+        rest, since a cleared occurrence is not found again. Deferral
+        marks and queue rows are untouched."""
         cur = self._conn.cursor()
         started = False
         try:
@@ -1943,7 +1964,9 @@ class Database:
 
     @_synchronized
     def find_ocr_disabled_attachment_filepaths(
-        self, qualifies: Callable[[sqlite3.Row], bool], assessed: list[str] | None = None
+        self,
+        qualifies: Callable[[sqlite3.Row], bool],
+        assessed: CompletenessClearing | None = None,
     ) -> set[str]:
         """The Maildir filepaths of the messages with an attachment
         occurrence whose cached extraction is an "OCR disabled" result
@@ -1969,7 +1992,9 @@ class Database:
 
     @_synchronized
     def find_no_extractor_attachment_filepaths(
-        self, qualifies: Callable[[sqlite3.Row], bool], assessed: list[str] | None = None
+        self,
+        qualifies: Callable[[sqlite3.Row], bool],
+        assessed: CompletenessClearing | None = None,
     ) -> set[str]:
         """The Maildir filepaths of the messages with an attachment
         occurrence whose cached extraction is the "no extractor for this
@@ -1996,7 +2021,7 @@ class Database:
 
     @_synchronized
     def find_fitting_too_large_attachment_filepaths(
-        self, max_bytes: int, assessed: list[str] | None = None
+        self, max_bytes: int, assessed: CompletenessClearing | None = None
     ) -> set[str]:
         """The Maildir filepaths of the messages with an attachment
         occurrence whose cached extraction is ``too_large`` and whose
