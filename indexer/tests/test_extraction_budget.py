@@ -560,6 +560,63 @@ class TestContinuation:
         assert p.deferred() == 2
         assert p.job(path)["last_stage"] == STAGE_EXTRACT
 
+    def test_a_lone_survivors_charge_holds_until_the_continuation_commits(
+        self, tmp_path, monkeypatch
+    ):
+        """Codex round 5 on #1355: a crash inside Phase 2c of a continued
+        lone survivor must leave it charged and marked, and the stall
+        guard must still be watching it; the refund commits with the
+        continuation."""
+        extractor = LaunchingExtractor()
+        p = Pipeline(tmp_path, monkeypatch, extractor, launches=1)
+        path = p.add("lone", _parts("lone", 3))
+        seen = []
+        real = Database.replace_thread_vector
+
+        def inside_commit(db_self, *args, **kwargs):
+            # What a crash here would leave: the last committed row.
+            other = sqlite3.connect(tmp_path / "mail.db")
+            try:
+                seen.append(
+                    other.execute(
+                        "SELECT attempts, last_stage FROM indexing_jobs WHERE filepath = ?",
+                        (path,),
+                    ).fetchone()
+                )
+            finally:
+                other.close()
+            seen.append(p.queue._in_flight is not None and p.queue._in_flight[0] == path)
+            return real(db_self, *args, **kwargs)
+
+        monkeypatch.setattr(Database, "replace_thread_vector", inside_commit)
+        p.drain(batch_size=1)
+        assert seen == [(1, "interrupted"), True]
+        job = p.job(path)
+        assert (job["attempts"], job["last_stage"]) == (0, STAGE_EXTRACT)
+        assert p.queue._in_flight is None
+
+    def test_a_deferral_the_parse_no_longer_has_is_cleared(self, tmp_path, monkeypatch):
+        """Codex round 5 on #1355: when a parser change drops a deferred
+        occurrence, its mark is cleared, so it neither reads as deferred
+        nor re-queues the message at every start."""
+        extractor = LaunchingExtractor()
+        p = Pipeline(tmp_path, monkeypatch, extractor, launches=1)
+        path = p.add("dropped", _parts("dropped", 3))
+        p.drain()
+        assert p.deferred() == 2
+        real_parse = main.parse_email
+
+        def without_last_part(*args, **kwargs):
+            msg = real_parse(*args, **kwargs)
+            msg.attachments = msg.attachments[:-1]
+            return msg
+
+        monkeypatch.setattr(main, "parse_email", without_last_part)
+        p.drain()
+        assert p.job(path) is None
+        assert p.deferred() == 0
+        assert main._requeue_stale_extractions(p.db, p.queue) == 0
+
     def test_a_reparse_continuation_keeps_its_scheduling_class(self, tmp_path, monkeypatch):
         extractor = LaunchingExtractor()
         p = Pipeline(tmp_path, monkeypatch, extractor, launches=1)

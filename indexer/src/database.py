@@ -1680,6 +1680,25 @@ class Database:
             raise
 
     @_synchronized
+    def clear_attachment_extraction_deferral(self, occurrence_id: str) -> None:
+        """Clear the deferral mark of an occurrence its message no longer
+        has (a parser change dropped it, #1236), so it neither reads as
+        deferred nor re-queues its message. In phase 2c's transaction."""
+        cur = self._conn.cursor()
+        started = False
+        try:
+            started = self._begin_if_needed(cur)
+            cur.execute(
+                "UPDATE attachments SET extraction_deferred_at = NULL "
+                "WHERE attachment_occurrence_id = ?",
+                (occurrence_id,),
+            )
+            self._commit_if_started(started)
+        except Exception:
+            self._rollback_if_started(started)
+            raise
+
+    @_synchronized
     def get_attachment_occurrence_states(
         self, claimant_id: str
     ) -> dict[str, tuple[int | None, bool]]:
@@ -2590,6 +2609,14 @@ class Database:
     def queue_delete(self, filepath: str) -> None:
         self._conn.execute("DELETE FROM indexing_jobs WHERE filepath = ?", (filepath,))
         self._conn.commit()
+
+    @_synchronized
+    def queue_get_attempts_and_stage(self, filepath: str) -> tuple[int, str | None] | None:
+        """A job's attempts and last stage, or ``None`` with no row."""
+        row = self._conn.execute(
+            "SELECT attempts, last_stage FROM indexing_jobs WHERE filepath = ?", (filepath,)
+        ).fetchone()
+        return (int(row["attempts"]), row["last_stage"]) if row else None
 
     @_synchronized
     def queue_get_attempts(self, filepath: str) -> int | None:

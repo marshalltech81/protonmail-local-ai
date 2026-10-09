@@ -1473,6 +1473,9 @@ class _BatchedMsg:
     # pass (#1236): Phase 2c then continues the message instead of
     # marking it succeeded.
     deferred_attachments: int = 0
+    # Occurrences with a deferral mark this parse no longer has (a parser
+    # change dropped them): Phase 2c clears the marks (#1236).
+    obsolete_deferrals: list[str] = field(default_factory=list)
     parse_ms: float = 0.0
     thread_ms: float = 0.0
     phase1_ms: float = 0.0
@@ -1835,20 +1838,20 @@ def _phase2a_collect_chunks(
                 and state.row["last_error"] == EXTRACTION_DEFERRED_ERROR
             )
             occurrence_states = db.get_attachment_occurrence_states(msg.claimant_id)
+            parsed_occurrences: set[str] = set()
             for occurrence_index, attachment in enumerate(msg.attachments):
                 # Each attachment's extraction is separately bounded
                 # (byte caps, OCR page cap and timeouts), so it is the
                 # unit the stall guard's limit applies to.
                 progress()
-                text_complete, was_deferred = occurrence_states.get(
-                    attachment_occurrence_id(
-                        claimant_id=msg.claimant_id,
-                        content_hash=attachment.content_hash,
-                        filename=attachment.filename,
-                        occurrence_index=occurrence_index,
-                    ),
-                    (None, False),
+                occurrence_id = attachment_occurrence_id(
+                    claimant_id=msg.claimant_id,
+                    content_hash=attachment.content_hash,
+                    filename=attachment.filename,
+                    occurrence_index=occurrence_index,
                 )
+                parsed_occurrences.add(occurrence_id)
+                text_complete, was_deferred = occurrence_states.get(occurrence_id, (None, False))
                 if continuation and text_complete is not None and not was_deferred:
                     kept.setdefault(attachment.content_hash, []).append(
                         (occurrence_index, attachment)
@@ -1891,6 +1894,11 @@ def _phase2a_collect_chunks(
             # #1355). Each copy resolved earlier is read once per module,
             # from its cached row as it stands, and only adds its chunks;
             # a payload settles once, so this work stays linear.
+            state.obsolete_deferrals = sorted(
+                occurrence_id
+                for occurrence_id, (_, deferred) in occurrence_states.items()
+                if deferred and occurrence_id not in parsed_occurrences
+            )
             deferred_now = {plan.attachment.content_hash for plan in attach_plans if plan.deferred}
             resolved_now = {
                 plan.attachment.content_hash for plan in attach_plans if not plan.deferred
@@ -2058,11 +2066,6 @@ def _phase2c_commit_vectors(
     thread = state.thread
     filepath = state.row["filepath"]
     continues = state.deferred_attachments > 0
-    if continues:
-        # The refund commits on its own, so it is made before the
-        # transaction; a failure inside it is then charged once, by
-        # ``mark_failed``.
-        queue.end_attempt(filepath)
 
     body_embs = {
         c.chunk_id: vectors[i] for c, i in zip(state.new_body_chunks, state.new_body_offsets)
@@ -2111,16 +2114,24 @@ def _phase2c_commit_vectors(
                 db.replace_thread_vector(thread.thread_id, mean_vector(chunk_embs))
             elif state.subject_fallback_offset is not None:
                 db.replace_thread_vector(thread.thread_id, vectors[state.subject_fallback_offset])
+            for occurrence_id in state.obsolete_deferrals:
+                db.clear_attachment_extraction_deferral(occurrence_id)
             if continues:
+                # The refund of a lone survivor's charge is part of this
+                # transaction, and the charge stays watched until it
+                # commits (Codex round 5 on #1355).
                 queue.defer(
                     filepath,
                     stage=STAGE_EXTRACT,
                     error=EXTRACTION_DEFERRED_ERROR,
                     error_class=ERROR_CLASS_RETRYABLE,
                     delay_seconds=0,
+                    in_transaction=True,
                 )
     except Exception as e:
         return False, _stage_error(e)
+    if continues:
+        queue.release(filepath)
     # Counted once committed, so a message prepared again after an
     # embedder outage is counted once (review round 1 on #884).
     record_committed_outcomes(state.attach_plans)

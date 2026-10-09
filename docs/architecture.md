@@ -2031,8 +2031,13 @@ in the seconds.
   (`EXTRACTION_DEFERRED_ERROR`), due at once and keeping its reason (a
   reparse stays a reparse), in the same transaction as the pass's
   results, deferral marks, chunks and vectors, so they commit or roll
-  back together. A rolled-back pass leaves no mark and no continuation,
-  and is charged as an ordinary `db_write` failure. The continuation
+  back together. A lone survivor's attempt charge is refunded in that
+  same transaction and stays watched by the stall guard until it
+  commits, so a crash there leaves the message charged and marked
+  `interrupted`. A rolled-back pass leaves no mark and no continuation,
+  and is charged as an ordinary `db_write` failure. A deferral mark on an
+  occurrence the message's current parse no longer has (a parser change
+  dropped it) is cleared in the pass's commit. The continuation
   sorts behind the jobs already due, so continued messages and new mail
   take turns. It spends no attempt; a failure in a later pass does.
 - **Progress.** A continuation (a claimed job still carrying the

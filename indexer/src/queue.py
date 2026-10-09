@@ -349,6 +349,14 @@ class IndexingQueue:
         """Refund the ``begin_attempt`` charge: the step returned."""
         self._settle(filepath)
 
+    def release(self, filepath: str) -> None:
+        """Close the in-memory charge of ``filepath`` once a transaction
+        that refunded it in the database committed
+        (``defer(in_transaction=True)``, #1236). No database write."""
+        with self._lock:
+            if self._in_flight is not None and self._in_flight[0] == filepath:
+                self._in_flight = None
+
     def note_progress(self) -> None:
         """Restart the in-flight clock: the step finished one bounded unit
         of work (one attachment), so the stall guard's limit applies per
@@ -524,6 +532,7 @@ class IndexingQueue:
         error: str,
         error_class: str,
         delay_seconds: float,
+        in_transaction: bool = False,
     ) -> None:
         """Postpone a job for an infrastructure failure without spending
         its attempt budget.
@@ -535,16 +544,32 @@ class IndexingQueue:
         ``queued`` with ``attempts`` unchanged and becomes due again
         after ``delay_seconds``, so no outage can dead-letter it.
 
-        Inside ``db.transaction()`` the row's write commits or rolls back
-        with the caller's (``Database.queue_mark_failed``); the caller
-        then refunds any charge first (``end_attempt``), since the refund
-        commits on its own.
+        ``in_transaction=True``, inside ``db.transaction()`` (#1236): the
+        row's write, with the refund of an open ``begin_attempt`` charge
+        folded into it, commits or rolls back with the caller's
+        (``Database.queue_mark_failed``). The charge stays open in memory,
+        so the stall guard keeps watching the step until the caller calls
+        ``release`` after the commit; after a rollback the row still holds
+        its charge and mark, and ``mark_failed`` settles them as usual.
         """
-        self._settle(filepath)
-        attempts = self.db.queue_get_attempts(filepath)
-        if attempts is None:
-            log.warning("defer: no queue row for %s; nothing to update", filepath)
-            return
+        if in_transaction:
+            row = self.db.queue_get_attempts_and_stage(filepath)
+            if row is None:
+                log.warning("defer: no queue row for %s; nothing to update", filepath)
+                return
+            attempts, last_stage = row
+            with self._lock:
+                charged = self._in_flight is not None and self._in_flight[0] == filepath
+            # The refund ``queue_refund_attempt`` would make.
+            if charged and last_stage == INTERRUPTED_STAGE and attempts > 0:
+                attempts -= 1
+        else:
+            self._settle(filepath)
+            found = self.db.queue_get_attempts(filepath)
+            if found is None:
+                log.warning("defer: no queue row for %s; nothing to update", filepath)
+                return
+            attempts = found
         next_attempt = datetime.now(UTC) + timedelta(seconds=delay_seconds)
         self.db.queue_mark_failed(
             filepath=filepath,
