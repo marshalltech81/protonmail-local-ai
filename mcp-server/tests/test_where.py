@@ -115,6 +115,23 @@ class TestModel:
         with pytest.raises(ValidationError):
             Where.model_validate(where)
 
+    @pytest.mark.parametrize(
+        "where",
+        [
+            {"all": [{"leaf": "body_words"}] * 10_000},
+            {"all": [{"any": [{"leaf": "body_words"}] * 10_000}]},
+        ],
+    )
+    def test_lists_are_capped_before_their_items_are_built(self, where):
+        # Codex round 2: an oversized all or any list is refused by the
+        # argument model without validating every item (each item here
+        # lacks its value, so a built item would add an error).
+        with pytest.raises(ValidationError) as exc:
+            Where.model_validate(where)
+        errors = exc.value.errors()
+        assert len(errors) <= MAX_WHERE_NODES + 1
+        assert any(e["type"] == "too_long" for e in errors)
+
     def test_leaf_list_and_roles_are_the_decided_ones(self):
         assert WHERE_LEAVES == (
             "address_is",
@@ -634,11 +651,13 @@ def _corpus(tmp_path, size: int) -> Database:
     return Database(str(path))
 
 
-def _probe_leaf_statement(db, monkeypatch, items) -> tuple[dict[str, int], object]:
+def _probe_leaf_statement(db, monkeypatch, items) -> tuple[dict[str, int], object, int, int]:
     """Each leaf's evaluations inside the leaf-count statement, counted
-    by wrapping its compiled SQL in a non-deterministic SQL function."""
+    by wrapping its compiled SQL in a non-deterministic SQL function,
+    plus the connections the call opened and its top-level statements."""
     statements: list[str] = []
     calls: dict[tuple[int, str], int] = {}
+    connections: list[object] = []
     connect = db._connect
 
     def probe(tag, value):
@@ -648,6 +667,7 @@ def _probe_leaf_statement(db, monkeypatch, items) -> tuple[dict[str, int], objec
 
     def traced():
         conn = connect()
+        connections.append(conn)
         conn.create_function("mcp_probe", 2, probe)
         # FTS5 runs its own statements ("-- ..."); count against the
         # top-level statement that started them.
@@ -668,25 +688,32 @@ def _probe_leaf_statement(db, monkeypatch, items) -> tuple[dict[str, int], objec
         )
     page = db.query_messages(where=normalize_where(_where(*items)), limit=1)
     [index] = [i for i, s in enumerate(statements) if "TOTAL(" in s]
-    return {tag: n for (i, tag), n in calls.items() if i == index}, page
+    leaf_calls = {tag: n for (i, tag), n in calls.items() if i == index}
+    return leaf_calls, page, len(connections), len(statements)
 
 
-@pytest.mark.parametrize("size", [40, 400])
-def test_leaf_counts_evaluate_each_leaf_a_bounded_number_of_times_per_row(
-    tmp_path, monkeypatch, size
-):
+def test_leaf_counts_evaluate_each_leaf_a_bounded_number_of_times_per_row(tmp_path, monkeypatch):
     # Owner, 2026-10-08: measure the per-row leaf evaluation of the
     # leaf-count statement (SQLite may flatten the projection into the
-    # aggregates) at two sizes; it must be linear in rows × leaves.
-    db = _corpus(tmp_path, size)
+    # aggregates) at two sizes; it must be linear in rows × leaves, on
+    # one connection and a fixed number of statements (Codex round 2).
     items = [_leaf("address_is", "b@two.test", role="to"), _leaf("body_words", "budget")]
-    calls, page = _probe_leaf_statement(db, monkeypatch, items)
-    p = page.total_matches + page.indeterminate
-    assert (page.total_matches, page.indeterminate) == (size // 2, size // 4)
-    # The filter reads each leaf at most once per message scanned, and
-    # the projection once per message of P.
-    assert calls["address_is"] <= size + p
-    assert calls["body_words"] <= size + p
+    shape = []
+    for size in (40, 400):
+        with monkeypatch.context() as patch:
+            calls, page, connections, statements = _probe_leaf_statement(
+                _corpus(tmp_path, size), patch, items
+            )
+        p = page.total_matches + page.indeterminate
+        assert (page.total_matches, page.indeterminate) == (size // 2, size // 4)
+        # The filter reads each leaf at most once per message scanned,
+        # and the projection once per message of P.
+        assert calls["address_is"] <= size + p
+        assert calls["body_words"] <= size + p
+        shape.append((connections, statements))
+    # One read connection, and the same statements at both sizes.
+    assert shape[0] == shape[1]
+    assert shape[0][0] == 1
 
 
 def test_database_is_unchanged_without_where(messages_db: Database):

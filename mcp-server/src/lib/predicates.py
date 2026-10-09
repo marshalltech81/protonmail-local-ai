@@ -37,7 +37,7 @@ from email.utils import parseaddr
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class InvalidFilterError(ValueError):
@@ -1031,14 +1031,16 @@ class WhereAnyGroup(BaseModel):
     # An ``any`` group of leaves, evaluated from #1087.
     model_config = ConfigDict(extra="forbid")
 
-    any: list[WhereLeafItem]
+    # Capped here too, so an oversized list is refused before its items
+    # are built; ``normalize_where`` counts the nodes of both together.
+    any: list[WhereLeafItem] = Field(max_length=MAX_WHERE_NODES)
 
 
 class Where(BaseModel):
     # Every item of ``all`` must hold.
     model_config = ConfigDict(extra="forbid")
 
-    all: list[WhereLeafItem | WhereAnyGroup]
+    all: list[WhereLeafItem | WhereAnyGroup] = Field(max_length=MAX_WHERE_NODES)
 
 
 @dataclass(frozen=True)

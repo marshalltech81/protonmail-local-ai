@@ -1293,7 +1293,7 @@ through the flat parameters' inferred mode:
   A value may hold at most 320 characters (`domain_is` 255,
   `body_words` 1000).
 - **Limits:** at most 16 nodes, each leaf and each `any` group
-  counting one; `all` must not be empty. An `id` is optional, at most
+  counting one; `all` must not be empty. The schema also caps each `all` and `any` list at 16 items (`maxItems`), so a longer list is refused before its items are read. An `id` is optional, at most
   64 characters, not blank and unique within the call.
 - **Rejections:** fixed text naming the leaf's path (`where.all[1]`),
   logged only as the rate-limited `rejected invalid argument:
