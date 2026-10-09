@@ -199,6 +199,22 @@ miss. t101 bills the same item code to another site, undisputed. Their
 words avoid every golden search query's content words, the reserved
 words above and every ``unanswerable`` question's ``absent_terms``.
 
+Threads 102-112 back the synthetic counting family (#1256): apiary
+visit notices from the invented Brackenmoor Beekeepers, dated April to
+June 2026. Direct notices (t102.1, t103.1, t112.1, the last filed in
+Trash), one in other wording without "apiary", "visit" or "notice"
+(t105), a second notice for one visit (t104), a duplicate delivery
+(t103's second file, ``duplicate_of``: the same Message-ID with a
+mailing-list footer), a request and the notice confirming it (t106), a
+reply and a forward (t102.2, t107), a report on a visit (t108), a
+report that also gives notice of the next visit (t109), and unrelated
+mail sharing the keywords (t110, t111). The ground truth is in
+``mcp-server/tests/eval/counting_family.json``; keep "apiary" and
+"hive" out of every other thread, since its lookups list every match.
+Their words avoid every golden search query's content words, the
+reserved words above and every ``unanswerable`` question's
+``absent_terms``.
+
 Thread IDs are the root Message-IDs: ``t<NN>.1@baseline.example``.
 """
 
@@ -206,7 +222,7 @@ import email.policy
 import email.utils
 import io
 import zipfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from pathlib import Path
@@ -239,6 +255,12 @@ class Msg:
     body: str
     cc: str = ""
     attachments: tuple[Attachment, ...] = field(default_factory=tuple)
+    # A duplicate delivery (#1256): the 0-based index of an earlier
+    # message of the same thread whose Message-ID, In-Reply-To and
+    # References this file repeats. Its bytes must differ, so the index
+    # holds two claimants of one Message-ID. Keep it last in its thread,
+    # so no later message's derived ID skips its position.
+    duplicate_of: int | None = None
 
 
 def thread_id(n: int) -> str:
@@ -2847,13 +2869,208 @@ THREADS.update(
 )
 
 
+WARDEN = "Brackenmoor Beekeepers <warden@brackenmoorbees.example>"
+KIT = "Kit Marlow <kit@marlowcottage.example>"
+HIVE_COWORKING = "The Hive Coworking <hello@hivecowork.example>"
+THORNWICK = "Thornwick Garden Centre <news@thornwickgarden.example>"
+
+
+def _visit_notice(apiary: str, day: str, hours: str) -> str:
+    return (
+        f"Hello Sam,\n\nThis is notice that the hive warden will visit your {apiary} "
+        f"apiary on {day} between {hours}. Please keep the gate unlocked and the "
+        "hives clear of netting.\n\nBrackenmoor Beekeepers"
+    )
+
+
+_WEXCOMBE_NOTICE = _visit_notice("Wexcombe", "Tuesday 14 April", "10:00 and 12:00")
+_MILLRACE_NOTICE = Msg(
+    "INBOX",
+    "Tue, 21 Apr 2026 08:30:00 +0000",
+    WARDEN,
+    ME,
+    "Apiary visit notice: Millrace",
+    _visit_notice("Millrace", "Tuesday 28 April", "13:00 and 15:00"),
+)
+
+THREADS.update(
+    {
+        # The counting family (#1256): apiary visit notices. The ground
+        # truth, written from this text, is in
+        # mcp-server/tests/eval/counting_family.json.
+        # A direct notice, and Sam's reply to it.
+        102: [
+            Msg(
+                "INBOX",
+                "Tue, 7 Apr 2026 08:30:00 +0000",
+                WARDEN,
+                ME,
+                "Apiary visit notice: Wexcombe",
+                _WEXCOMBE_NOTICE,
+            ),
+            Msg(
+                "Sent",
+                "Tue, 7 Apr 2026 12:05:00 +0000",
+                ME,
+                WARDEN,
+                "Re: Apiary visit notice: Wexcombe",
+                "Thanks. The apiary gate will be unlocked on the 14th, and I will be "
+                "there from ten.\n\nSam",
+            ),
+        ],
+        # A direct notice delivered twice: the second file adds the
+        # mailing-list footer, so it is a second claimant of one Message-ID.
+        103: [
+            _MILLRACE_NOTICE,
+            replace(
+                _MILLRACE_NOTICE,
+                body=_MILLRACE_NOTICE.body
+                + "\n\nYou receive this as a member of the Brackenmoor Beekeepers "
+                "mailing list.",
+                duplicate_of=0,
+            ),
+        ],
+        # A second notice for the same Millrace visit.
+        104: [
+            Msg(
+                "INBOX",
+                "Mon, 27 Apr 2026 07:45:00 +0000",
+                WARDEN,
+                ME,
+                "Reminder: apiary visit notice: Millrace",
+                "Hello Sam,\n\nA reminder of our earlier notice: the hive warden will "
+                "visit your Millrace apiary tomorrow, Tuesday 28 April, between 13:00 "
+                "and 15:00.\n\nBrackenmoor Beekeepers",
+            ),
+        ],
+        # The same type in other words: no "apiary", "visit" or "notice".
+        105: [
+            Msg(
+                "INBOX",
+                "Fri, 1 May 2026 09:10:00 +0000",
+                WARDEN,
+                ME,
+                "The warden is calling at Sorrel Bank",
+                "Hello Sam,\n\nOur hive warden will call at your Sorrel Bank colonies on "
+                "Friday 8 May, late morning, to check the hives before the main flow. No "
+                "need to be there.\n\nBrackenmoor Beekeepers",
+            ),
+        ],
+        # A request, and the notice that confirms it.
+        106: [
+            Msg(
+                "Sent",
+                "Mon, 18 May 2026 19:20:00 +0000",
+                ME,
+                WARDEN,
+                "Request: apiary visit for Wexcombe",
+                "Hello,\n\nOne colony at my Wexcombe apiary looks weak, and I would like "
+                "the hive warden to visit in early June if possible.\n\nSam Rivera",
+            ),
+            Msg(
+                "INBOX",
+                "Wed, 20 May 2026 08:15:00 +0000",
+                WARDEN,
+                ME,
+                "Re: Request: apiary visit for Wexcombe",
+                "Hello Sam,\n\nConfirmed: the hive warden will visit your Wexcombe apiary "
+                "on Tuesday 2 June between 09:30 and 11:00 to look at the weak "
+                "colony.\n\nBrackenmoor Beekeepers",
+            ),
+        ],
+        # Sam forwards the first notice.
+        107: [
+            Msg(
+                "Sent",
+                "Wed, 8 Apr 2026 18:00:00 +0000",
+                ME,
+                KIT,
+                "Fwd: Apiary visit notice: Wexcombe",
+                "Kit,\n\nForwarding the apiary visit notice below, so you know the warden "
+                "will be at the hives next Tuesday; best to keep the dog in.\n\nSam\n\n"
+                "---------- Forwarded message ---------\n"
+                f"From: {WARDEN}\n"
+                "Subject: Apiary visit notice: Wexcombe\n\n" + _WEXCOMBE_NOTICE,
+            ),
+        ],
+        # A look-alike of another type: a report on a visit, no notice.
+        108: [
+            Msg(
+                "INBOX",
+                "Wed, 15 Apr 2026 16:40:00 +0000",
+                WARDEN,
+                ME,
+                "Apiary visit report: Wexcombe",
+                "Hello Sam,\n\nReport from yesterday's visit to your Wexcombe apiary: six "
+                "hives checked, laying queens seen in all six, no signs of foulbrood. "
+                "Nothing further is needed.\n\nBrackenmoor Beekeepers",
+            ),
+        ],
+        # Two categories: a report on one visit and notice of the next.
+        109: [
+            Msg(
+                "INBOX",
+                "Wed, 29 Apr 2026 17:05:00 +0000",
+                WARDEN,
+                ME,
+                "Apiary visit report: Millrace, and the next visit",
+                "Hello Sam,\n\nReport from yesterday's visit to your Millrace apiary: four "
+                "hives checked, one queenless colony united with its neighbour, no signs "
+                "of foulbrood.\n\nThis is also notice that the hive warden will visit "
+                "Millrace again on Tuesday 16 June between 13:00 and 15:00 to check the "
+                "united colony.\n\nBrackenmoor Beekeepers",
+            ),
+        ],
+        # Unrelated mail sharing the keywords.
+        110: [
+            Msg(
+                "INBOX",
+                "Thu, 9 Apr 2026 10:00:00 +0000",
+                HIVE_COWORKING,
+                ME,
+                "Notice: the Hive closes early on Friday",
+                "Hi Sam,\n\nNotice to members: the Hive closes at 15:00 this Friday for "
+                "floor sanding. Visit the front desk if you need weekend access.\n\nThe "
+                "Hive Coworking",
+            ),
+        ],
+        111: [
+            Msg(
+                "INBOX",
+                "Sat, 2 May 2026 08:00:00 +0000",
+                THORNWICK,
+                ME,
+                "Thornwick news: visit our apiary corner",
+                "Hello Sam,\n\nVisit our apiary corner this month: a glass observation "
+                "hive, local honey and beginner talks every Saturday morning.\n\n"
+                "Thornwick Garden Centre",
+            ),
+        ],
+        # A direct notice filed in Trash, outside the default scope.
+        112: [
+            Msg(
+                "Trash",
+                "Tue, 9 Jun 2026 08:30:00 +0000",
+                WARDEN,
+                ME,
+                "Apiary visit notice: Sorrel Bank",
+                _visit_notice("Sorrel Bank", "Tuesday 23 June", "10:00 and 12:00"),
+            ),
+        ],
+    }
+)
+
+
 def build_message(n: int, index: int, msg: Msg) -> bytes:
     """Serialise message ``index`` (0-based) of thread ``n``.
 
     Replies carry ``In-Reply-To`` (previous message) and ``References``
     (all earlier messages). The MIME boundary is fixed so output is
-    byte-identical across runs.
+    byte-identical across runs. A ``duplicate_of`` message takes the
+    headers of the message it duplicates.
     """
+    if msg.duplicate_of is not None:
+        index = msg.duplicate_of
     ids = [f"t{n:02d}.{i + 1}@{DOMAIN}" for i in range(index + 1)]
     em = EmailMessage(policy=email.policy.SMTP)
     em["Message-ID"] = f"<{ids[-1]}>"

@@ -5,6 +5,8 @@ these keep the indexer-side inputs deterministic and the build clean.
 """
 
 import ast
+import email
+import email.policy
 import inspect
 import io
 import json
@@ -33,6 +35,7 @@ from tests.baseline.corpus import (
     CAPPED_ATTACHMENT_MAX_CHARS,
     CAPPED_OCR_MAX_PAGES,
     CHAR_CAPPED_FILENAME,
+    DOMAIN,
     OCR_CAPPED_PDF_FILENAME,
     OCR_CAPPED_TIFF_FILENAME,
     OCR_IMAGE_FILENAME,
@@ -230,6 +233,36 @@ class TestCorpus:
         count = write_maildir(tmp_path)
         assert count == sum(len(msgs) for msgs in THREADS.values())
         assert len(_read_tree(tmp_path)) == count
+
+    def test_duplicate_delivery_repeats_its_message_id_with_other_bytes(self, tmp_path):
+        """#1256: a ``duplicate_of`` message is a second file claiming an
+        earlier message's Message-ID, threading headers included, with
+        different bytes, so the index holds two claimants of one ID."""
+        write_maildir(tmp_path)
+        files_by_id: dict[str, list[bytes]] = {}
+        for raw in _read_tree(tmp_path).values():
+            msg = email.message_from_bytes(raw, policy=email.policy.default)
+            files_by_id.setdefault(str(msg["Message-ID"]), []).append(raw)
+        repeated = {mid for mid, files in files_by_id.items() if len(files) > 1}
+        expected = {
+            f"<t{n:02d}.{m.duplicate_of + 1}@{DOMAIN}>"
+            for n, msgs in THREADS.items()
+            for m in msgs
+            if m.duplicate_of is not None
+        }
+        assert expected
+        assert repeated == expected
+        for mid in repeated:
+            files = files_by_id[mid]
+            assert len(set(files)) == len(files), mid
+            headers = {
+                tuple(
+                    str(email.message_from_bytes(raw, policy=email.policy.default)[h])
+                    for h in ("In-Reply-To", "References", "Subject", "Date")
+                )
+                for raw in files
+            }
+            assert len(headers) == 1, mid
 
 
 class TestHashEmbedder:
