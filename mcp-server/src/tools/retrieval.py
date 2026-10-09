@@ -420,15 +420,17 @@ def _indeterminate_causes(uses: list[FilterUse], where: list[WhereLeaf] | None =
 
 
 def _describe_where(where: list[WhereLeaf]) -> list[str]:
-    """Each ``where`` leaf as applied (normalized), with its path."""
+    """Each ``where`` leaf as applied (normalized), with its path and
+    ``not`` before a negated leaf; the path names its ``any`` group."""
     parts = []
     for w in where:
+        prefix = f"{w.path} {'not ' if w.negate else ''}"
         if w.leaf.name == "body_words":
             words = ", ".join(repr(t) for t in w.leaf.value)
-            parts.append(f"{w.path} body_words({words})")
+            parts.append(f"{prefix}body_words({words})")
         else:
             role, value = w.leaf.value
-            parts.append(f"{w.path} {w.leaf.name}({role}, {value!r})")
+            parts.append(f"{prefix}{w.leaf.name}({role}, {value!r})")
     return parts
 
 
@@ -1295,10 +1297,16 @@ def register_retrieval_tools(server, db):
                    match. body_words: like ``text``. Roles: from, to,
                    cc, visible_recipient (To or Cc). ``role`` is
                    required on the five address leaves and refused,
-                   null included, on ``body_words``. At most 16 leaves;
-                   ``any`` groups and ``negate: true`` are refused for
-                   now. Each leaf reports in ``leaf_results``, labelled
-                   by its path and optional unique ``id``.
+                   null included, on ``body_words``. An ``all`` item
+                   may be {"any": [leaf, ...]}, true when one leaf is;
+                   ``negate: true`` inverts a leaf. A message no item
+                   rejects but some leaf cannot decide is
+                   indeterminate. At most 16 nodes (each leaf and any
+                   group). Each leaf reports in ``leaf_results``,
+                   labelled by its path and optional unique ``id``:
+                   its own value before negate over the messages not
+                   rejected, and the addresses it is itself true of on
+                   returned messages; a negated leaf lists none.
             limit: Messages per page (default 25, clamped to [1, 100]).
             cursor: ``next_cursor`` from the previous page of the same query.
             fields: Row fields to return; claimant_id and thread_id are
@@ -1425,6 +1433,7 @@ def register_retrieval_tools(server, db):
                     true=r.true,
                     false=r.false,
                     indeterminate=r.indeterminate,
+                    negate=r.negate,
                     distinct_addresses=r.distinct,
                     addresses=(
                         None
@@ -1468,6 +1477,8 @@ def register_retrieval_tools(server, db):
             lines.append(line)
         for r in page.leaf_results:
             label = r.path if r.id is None else f"{r.path} (id {r.id!r})"
+            if r.negate:
+                label += " (negated)"
             line = f"{label}: true {r.true}, false {r.false}, indeterminate {r.indeterminate}"
             if r.distinct is not None:
                 noun = "address" if r.distinct == 1 else "addresses"

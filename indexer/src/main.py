@@ -1218,15 +1218,18 @@ class _ReparseProgress:
 _reparse_progress = _ReparseProgress()
 
 
-def _log_reparse_progress(remaining: int, dead: int) -> None:
+def _log_reparse_progress(remaining: int, parked_trashed: int, dead: int) -> None:
     """With the queue heartbeat: one progress line per interval while
-    reparse jobs are queued, then one completion line (WARNING when some
-    dead-lettered). Counts and fixed text only."""
+    reparse jobs that can drain are queued, then one completion line
+    (WARNING when some dead-lettered). Jobs parked as trashed drain only
+    if the file is restored, so they are counted apart and do not hold
+    back the completion line (#1331). Counts and fixed text only."""
     p = _reparse_progress
     if remaining:
         log.info(
-            "reparse: remaining=%d reparsed_since_last_heartbeat=%d dead=%d",
+            "reparse: remaining=%d parked_trashed=%d reparsed_since_last_heartbeat=%d dead=%d",
             remaining,
+            parked_trashed,
             p.reparsed - p.logged,
             dead,
         )
@@ -1237,17 +1240,24 @@ def _log_reparse_progress(remaining: int, dead: int) -> None:
         return
     p.active = False
     p.logged = p.reparsed
+    parked = (
+        f", {parked_trashed} still parked as trashed (reparsed if restored)"
+        if parked_trashed
+        else ""
+    )
     if dead:
         log.warning(
             "reparse complete: %d message(s) reparsed since the indexer started, "
-            "%d dead-lettered (make requeue-dead retries them)",
+            "%d dead-lettered (make requeue-dead retries them)%s",
             p.reparsed,
             dead,
+            parked,
         )
     else:
         log.info(
-            "reparse complete: %d message(s) reparsed since the indexer started, 0 dead-lettered",
+            "reparse complete: %d message(s) reparsed since the indexer started, 0 dead-lettered%s",
             p.reparsed,
+            parked,
         )
 
 
@@ -1289,7 +1299,7 @@ def _maybe_log_queue_heartbeat(queue: IndexingQueue) -> None:
         d[STAGE_TRASHED],
         drain_suppressed_lines(),
     )
-    _log_reparse_progress(c["reparse"], c["reparse_dead"])
+    _log_reparse_progress(c["reparse"], c["reparse_parked_trashed"], c["reparse_dead"])
 
 
 def _steady_state_summary_due(
@@ -2282,10 +2292,6 @@ def _drain_queue_batched(
         rows = queue.claim_batch(batch_size)
         if not rows:
             break
-        # A reparse the heartbeat never saw queued (drained between two
-        # heartbeats) still gets its completion line (Codex round 1 on #1143).
-        if any(row["reason"] == REASON_REPARSE for row in rows):
-            _reparse_progress.active = True
         # A row still marked ``interrupted`` was mid-step when the
         # indexer died. An out-of-memory kill can come from the whole
         # batch's footprint rather than that message, and a restart
@@ -2309,6 +2315,12 @@ def _drain_queue_batched(
                         delay_seconds=TRASHED_DEFER_SECS,
                     )
                 continue
+            # A reparse the heartbeat never saw queued (drained between two
+            # heartbeats) still gets its completion line (Codex round 1 on
+            # #1143). Set past the trash check: a trashed row parked again
+            # must not re-arm it (#1331).
+            if row["reason"] == REASON_REPARSE:
+                _reparse_progress.active = True
             # Parse and extraction are the steps hostile input can crash
             # or hang, so each runs with its message charged one attempt
             # (see ``IndexingQueue.begin_attempt``). The refund is not in

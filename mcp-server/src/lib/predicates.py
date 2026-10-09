@@ -930,28 +930,39 @@ def compile_leaves(leaves: Sequence[Leaf]) -> tuple[str, list]:
 
 
 # The format of ``leaf_digest``'s input. A change to what the digest
-# covers, or to the meaning of an expression it covers (#1087's Boolean
-# evaluation), bumps it, so a cursor issued before is foreign. Cursors
-# from before the version existed (#1088) are foreign too.
-QUERY_DIGEST_FORMAT = 1
+# covers, or to the meaning of an expression it covers, bumps it, so a
+# cursor issued before is foreign. Cursors from before the version
+# existed (#1088) are foreign too. 2: the ``where`` clauses in canonical
+# form, with ``any`` and ``negate`` evaluated (#1087).
+QUERY_DIGEST_FORMAT = 2
 
 
 def leaf_digest(
     leaves: Sequence[Leaf],
     date_basis: str = DEFAULT_DATE_BASIS,
-    where: Sequence[Leaf] = (),
+    where: Sequence[WhereLeaf] = (),
 ) -> str:
-    """A short digest of the flat leaf list and the normalized ``where``
-    leaves (``normalize_where``), each in order and kept apart so a
-    flat filter and the explicit leaf it compiles to stay distinct, of
-    the ``date_basis`` the page is ordered by and of
-    ``QUERY_DIGEST_FORMAT``. It binds a keyset cursor to the predicates
+    """A short digest of the flat leaf list in order, of the normalized
+    ``where`` expression (``normalize_where``) in canonical form, kept
+    apart so a flat filter and the explicit leaf it compiles to stay
+    distinct, of the ``date_basis`` the page is ordered by and of
+    ``QUERY_DIGEST_FORMAT``. The canonical form keeps the order of
+    ``all``'s clauses, each clause's leaves (name, value, ``negate``)
+    sorted, so the leaf order within an ``any`` group does not change
+    the digest; paths and ids, which do not change the matches, are
+    left out. It binds a keyset cursor to the predicates
     and the ordering it was issued under (``Database.query_messages``).
     The same leaves under another basis are another keyset (#1085). A
     cursor whose digest differs is rejected as foreign, never read
     against other predicates or another clock."""
     flat = [[leaf.name, leaf.value] for leaf in leaves]
-    explicit = [[leaf.name, leaf.value] for leaf in where]
+    explicit = [
+        sorted(
+            ([w.leaf.name, w.leaf.value, w.negate] for w in clause),
+            key=json.dumps,
+        )
+        for clause in where_clauses(where)
+    ]
     payload = [QUERY_DIGEST_FORMAT, date_basis, flat, explicit]
     return hashlib.sha256(json.dumps(payload).encode()).hexdigest()[:16]
 
@@ -1028,7 +1039,7 @@ class WhereLeafItem(BaseModel):
 
 
 class WhereAnyGroup(BaseModel):
-    # An ``any`` group of leaves, evaluated from #1087.
+    # An ``any`` group of leaves (#1087).
     model_config = ConfigDict(extra="forbid")
 
     # Capped here too, so an oversized list is refused before its items
@@ -1046,11 +1057,45 @@ class Where(BaseModel):
 @dataclass(frozen=True)
 class WhereLeaf:
     """A normalized ``where`` leaf: its request ``path``, the caller's
-    ``id`` and the ``Leaf`` it compiles to."""
+    ``id``, the ``Leaf`` it compiles to, the index of its ``all``
+    clause (a bare leaf, or the ``any`` group holding it) and whether
+    it is negated."""
 
     path: str
     id: str | None
     leaf: Leaf
+    clause: int
+    negate: bool = False
+
+
+def where_clauses(where: Sequence[WhereLeaf]) -> list[list[WhereLeaf]]:
+    """``where``'s leaves grouped by ``all`` clause, in order: the
+    leaves of one clause are ORed, the clauses ANDed."""
+    clauses: dict[int, list[WhereLeaf]] = {}
+    for w in where:
+        clauses.setdefault(w.clause, []).append(w)
+    return list(clauses.values())
+
+
+def compile_where(where: Sequence[WhereLeaf]) -> tuple[str, list]:
+    """The SQL predicate over ``messages m`` of the ``where``
+    expression, with its bound values: each leaf compiled once,
+    ``NOT`` for a negated leaf, ``OR`` within an ``all`` clause and
+    ``AND`` between clauses (#1087). Every leaf's SQL is 1, 0 or NULL
+    (unknown, ``Evaluability``), and SQL's three-valued operators give
+    the decided semantics: ``AND`` is false if any clause is false,
+    else unknown if any is unknown; ``OR`` is true if any leaf is true,
+    else unknown if any is unknown; ``NOT`` swaps 1 and 0 and keeps
+    NULL. ``"1"`` for no leaves."""
+    params: list = []
+    clauses = []
+    for clause in where_clauses(where):
+        terms = [
+            f"{'NOT ' if w.negate else ''}({LEAVES[w.leaf.name].compile(w.leaf.value, params)})"
+            for w in clause
+        ]
+        clauses.append(terms[0] if len(terms) == 1 else f"({' OR '.join(terms)})")
+    return " AND ".join(clauses) or "1", params
 
 
 def _where_value(path: str, item: WhereLeafItem) -> Any:
@@ -1093,11 +1138,12 @@ def normalize_where(where: Where) -> list[WhereLeaf]:
     """``where``'s leaves, validated and normalized, in order.
 
     The node cap is checked first, so an oversized expression is refused
-    before any value is read. Then, with fixed text, an empty ``all``, an
-    ``any`` group or ``negate: true`` (both evaluated from #1087, never
-    ignored), each value (``_where_value``) and each ``id`` (non-blank,
-    at most ``MAX_WHERE_ID_CHARS``, unique). Every rejection is an
-    ``InvalidFilterError`` on the field ``where``.
+    before any value is read. Then, with fixed text, an empty ``all`` or
+    an empty ``any`` group, each value (``_where_value``) and each ``id``
+    (non-blank, at most ``MAX_WHERE_ID_CHARS``, unique across the
+    expression). Every rejection is an ``InvalidFilterError`` on the
+    field ``where``. A leaf of an ``any`` group has the path
+    ``where.all[i].any[j]``.
     """
     nodes = sum(1 + len(item.any) if isinstance(item, WhereAnyGroup) else 1 for item in where.all)
     if nodes > MAX_WHERE_NODES:
@@ -1112,23 +1158,26 @@ def normalize_where(where: Where) -> list[WhereLeaf]:
     for i, item in enumerate(where.all):
         path = f"where.all[{i}]"
         if isinstance(item, WhereAnyGroup):
-            raise InvalidFilterError(
-                "where",
-                f"{path}: any groups are not evaluated yet (#1087); list leaves directly in all",
-            )
-        if item.negate:
-            raise InvalidFilterError("where", f"{path}: negate is not evaluated yet (#1087)")
-        if item.id is not None:
-            if len(item.id) > MAX_WHERE_ID_CHARS:
-                raise InvalidFilterError(
-                    "where", f"{path}: id is longer than {MAX_WHERE_ID_CHARS} characters"
-                )
-            if not item.id.strip():
-                raise InvalidFilterError("where", f"{path}: id is empty")
-            if item.id in ids:
-                raise InvalidFilterError("where", f"{path}: id repeats an earlier leaf's id")
-            ids.add(item.id)
-        leaves.append(WhereLeaf(path, item.id, Leaf(item.leaf, _where_value(path, item))))
+            if not item.any:
+                raise InvalidFilterError("where", f"{path}: an any group holds at least one leaf")
+            members = [(f"{path}.any[{j}]", leaf) for j, leaf in enumerate(item.any)]
+        else:
+            members = [(path, item)]
+        for leaf_path, leaf in members:
+            if leaf.id is not None:
+                if len(leaf.id) > MAX_WHERE_ID_CHARS:
+                    raise InvalidFilterError(
+                        "where", f"{leaf_path}: id is longer than {MAX_WHERE_ID_CHARS} characters"
+                    )
+                if not leaf.id.strip():
+                    raise InvalidFilterError("where", f"{leaf_path}: id is empty")
+                if leaf.id in ids:
+                    raise InvalidFilterError(
+                        "where", f"{leaf_path}: id repeats an earlier leaf's id"
+                    )
+                ids.add(leaf.id)
+            value = _where_value(leaf_path, leaf)
+            leaves.append(WhereLeaf(leaf_path, leaf.id, Leaf(leaf.leaf, value), i, leaf.negate))
     return leaves
 
 
