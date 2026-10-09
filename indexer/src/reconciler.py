@@ -595,7 +595,7 @@ class Reconciler:
                     attempts,
                 )
                 return False, False
-            self.db.keep_persisted_fallback_date(msg)
+            self.db.keep_persisted_first_indexed_at(msg)
             survivors.append(msg)
 
         # Note: ``survivors`` is always non-empty here. ``survivor_rows``

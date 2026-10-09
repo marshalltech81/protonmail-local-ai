@@ -207,6 +207,13 @@ harness in `tests/eval/` (`tests/retrieval_metrics.py`).
   code with nothing disputed (t101). Per-thread passage selection
   leaves t100.11 out of both cases' prompts today (#974), a known gap
   that `test_answer_eval_cases.py` pins with a strict xfail.
+  Threads 125-128 back the chronology cases (#291): an agreement
+  corrected after the fact and then called off (t125), two people
+  giving different key deposits in two threads (t126, t127), and a
+  position stated only in quoted history (t128).
+  `test_answer_eval_cases.py` checks each case's golden chronology
+  labels against the indexed text and sent dates, and that each
+  mutation of a correct scripted answer is caught.
   Threads 102-112 back the synthetic counting family (#1256): apiary
   visit notices with decoys of every shape #776 lists, a duplicate
   delivery (two files claiming one Message-ID, written with the

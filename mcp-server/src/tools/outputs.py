@@ -29,6 +29,7 @@ from mcp.types import CallToolResult, TextContent, ToolAnnotations
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ..lib.inference import TruncationReason
+from ..lib.predicates import SentAtStatus
 from ..lib.sqlite import (
     MAX_LISTED_CLAIMANTS,
     MAX_LISTED_MATCHED_ADDRESSES,
@@ -170,6 +171,39 @@ _SENDER_AMBIGUOUS_DESCRIPTION = (
 )
 
 
+# ``sent_at_status`` wherever a message's own dates are shown (#1080).
+SENT_AT_STATUS_DESCRIPTION = (
+    "Why sent_at is what it is: parsed (from the Date: header), missing (no Date: "
+    "header) or invalid (one that does not parse); null when the indexer has not "
+    "assessed it yet (mail indexed before the upgrade, until its reparse), and "
+    "sent_at is then null too."
+)
+
+
+# The prose for an unknown send date, by ``sent_at_status``.
+_UNKNOWN_SENT_WORDS = {
+    "missing": "send date unknown (no Date header)",
+    "invalid": "send date unknown (unparseable Date header)",
+}
+
+
+def sent_text(sent_at: str | None, status: SentAtStatus | None) -> str:
+    """A message's send date in prose (#1080): the date when parsed, why
+    it is unknown when not. The database returns no date for a row not
+    yet assessed, so none is shown for it."""
+    if status in _UNKNOWN_SENT_WORDS:
+        return _UNKNOWN_SENT_WORDS[status]
+    if status is None:
+        return "send date not yet checked"
+    return sent_at or "send date unknown"
+
+
+def passage_sent_text(sent_at: str | None, status: SentAtStatus | None) -> str:
+    """A passage's send day in the citation prose: the date's first ten
+    characters, else why it is unknown (``sent_text``)."""
+    return sent_at[:10] if sent_at else sent_text(None, status)
+
+
 class MessageHeaders(_Output):
     message_id: str = Field(
         description="RFC 5322 Message-ID. The sender sets it, so two indexed messages "
@@ -181,11 +215,16 @@ class MessageHeaders(_Output):
         "different files that claim the same Message-ID. Pass it to get_message."
     )
     subject: str
-    sent_at: str = Field(description="Send date (the sender's Date: header) in UTC, ISO 8601.")
+    sent_at: str | None = Field(
+        description="Send date (the sender's Date: header) in UTC, ISO 8601; null when "
+        "that header is missing or unparseable, never a substitute."
+    )
+    sent_at_status: SentAtStatus | None = Field(description=SENT_AT_STATUS_DESCRIPTION)
     occurred_at: str | None = Field(
         description=(
             "Delivery date of the message (the date of its topmost Received: header) in UTC, ISO 8601; null when the header is absent (sent mail) or unparseable. "
-            "Date filters bound occurred_at, else sent_at."
+            "Date filters bound occurred_at, else sent_at; a message with neither is "
+            "indeterminate under them."
         )
     )
     folder: str
@@ -239,6 +278,7 @@ def message_headers(m: MessageRecord) -> MessageHeaders:
         claimant_id=m.claimant_id,
         subject=clip(m.subject, chars),
         sent_at=m.sent_at,
+        sent_at_status=m.sent_at_status,
         occurred_at=m.occurred_at,
         folder=m.folder,
         has_attachments=m.has_attachments,
@@ -354,6 +394,7 @@ _SCOPE_DESCRIPTION = (
 class EvidenceCarrier(_Output):
     claimant_id: str = Field(description="A later message carrying the same attachment.")
     sent_at: str | None
+    sent_at_status: SentAtStatus | None
     occurred_at: str | None
     scope: EvidenceScope = Field(description="That message's scope label.")
 
@@ -384,10 +425,12 @@ class EvidenceChunk(_Output):
         description="Send date of the passage's message (its Date: header) in UTC, ISO 8601; "
         "null when unknown."
     )
+    sent_at_status: SentAtStatus | None = Field(description=SENT_AT_STATUS_DESCRIPTION)
     occurred_at: str | None = Field(
         description=(
             "Delivery date of the passage's message (the date of its topmost Received: header) in UTC, ISO 8601; null when the header is absent (sent mail) or unparseable. "
-            "Date filters bound occurred_at, else sent_at."
+            "Date filters bound occurred_at, else sent_at, else the time the message was "
+            "first indexed (thread spans, #1373)."
         )
     )
     char_start: int = Field(description="Start offset of the passage in its source text.")
@@ -487,10 +530,12 @@ class AttachmentHit(_Output):
         description="Send date of the message carrying the attachment (its Date: header) "
         "in UTC, ISO 8601. Null when unknown."
     )
+    sent_at_status: SentAtStatus | None = Field(description=SENT_AT_STATUS_DESCRIPTION)
     occurred_at: str | None = Field(
         description="Delivery date of the message carrying the attachment (the date of its "
         "topmost Received: header) in UTC, ISO 8601; null when absent or unparseable. "
-        "Date filters and the no-query order use occurred_at, else sent_at."
+        "Date filters and the no-query order use occurred_at, else sent_at, else the time "
+        "the message was first indexed (#1373)."
     )
     senders: list[str] = Field(description=f"Thread senders, at most {MAX_LISTED}.")
     sender_count: int
@@ -680,7 +725,9 @@ class QueryMessagesOutput(_Output):
     )
     indeterminate: int = Field(
         description="Messages the filters could neither accept nor reject (a size bound on "
-        "a message without a stored size; a sender or participant filter, or an "
+        "a message without a stored size; a date bound on one without that date: no "
+        "delivery or parsed send date for effective, no parsed send date for sent; a "
+        "sender or participant filter, or an "
         "authority_class filter on a message outside Spam whose sender is ambiguous or not yet "
         "checked), in neither total_matches nor the pages. 0 when "
         "every filter could be decided for every message; when not 0, report it with any "
@@ -694,8 +741,8 @@ class QueryMessagesOutput(_Output):
     )
     messages: list[ListedMessage] = Field(
         description="Newest first by delivery date, else send date (occurred_at, else "
-        "sent_at). With fields, each row holds only those fields plus claimant_id and "
-        "thread_id."
+        "sent_at; an undated message by the time it was first indexed). With fields, each "
+        "row holds only those fields plus claimant_id and thread_id."
     )
 
 
@@ -717,7 +764,8 @@ class MessageGroupRow(_Output):
     threads: int = Field(description="Distinct threads of those messages.")
     first_at: str | None = Field(
         description="Earliest effective time (occurred_at, else sent_at) of those messages; "
-        "null without one."
+        "null without one. Year and month group by it too: an undated message is in the "
+        "null group."
     )
     last_at: str | None = Field(description="Latest effective time; null without one.")
     with_attachments: int = Field(description="Of those messages, how many have an attachment.")
@@ -791,13 +839,15 @@ class ListedAttachment(_Output):
     content_type_clipped: bool = Field(description="True when the stored MIME type is longer.")
     size_bytes: int
     folder: str = Field(description="Folder of the message carrying the attachment.")
-    sent_at: str = Field(
-        description="Send date of the carrying message (its Date: header) in UTC, ISO 8601."
+    sent_at: str | None = Field(
+        description="Send date of the carrying message (its Date: header) in UTC, ISO 8601; "
+        "null when that header is missing or unparseable."
     )
+    sent_at_status: SentAtStatus | None = Field(description=SENT_AT_STATUS_DESCRIPTION)
     occurred_at: str | None = Field(
         description="Delivery date of the carrying message (its topmost Received: header) in "
         "UTC, ISO 8601; null when absent or unparseable. Rows are ordered by occurred_at, "
-        "else sent_at."
+        "else sent_at, else the time the message was first indexed."
     )
     source_file: Source | None = Field(
         description="The raw file of the message carrying the attachment; null when "
@@ -823,7 +873,8 @@ class QueryAttachmentsOutput(_Output):
         "page; the complete count only when indeterminate is 0."
     )
     indeterminate: int = Field(
-        description="Occurrences the filters could neither accept nor reject (a sender or "
+        description="Occurrences the filters could neither accept nor reject (a date bound "
+        "on a carrying message with no delivery or parsed send date; a sender or "
         "participant filter on a carrying message whose sender is ambiguous or not yet "
         "checked; a name or fragment address filter on one whose display names are not all "
         "indexed; an extraction_status other than none on an occurrence with no extraction "
@@ -842,7 +893,8 @@ class QueryAttachmentsOutput(_Output):
     )
     attachments: list[ListedAttachment] = Field(
         description="Newest carrying message first by delivery date, else send date "
-        "(occurred_at, else sent_at); claimant_id then attachment_occurrence_id break ties."
+        "(occurred_at, else sent_at, else the time it was first indexed); claimant_id then "
+        "attachment_occurrence_id break ties."
     )
 
 
@@ -1007,6 +1059,9 @@ class Citation(_Output):
     )
     sent_at: str | None = Field(
         description="That message's own sent date (not the thread's); null when unknown."
+    )
+    sent_at_status: SentAtStatus | None = Field(
+        default=None, description=SENT_AT_STATUS_DESCRIPTION + " Null too for source thread."
     )
     occurred_at: str | None = Field(
         description="That message's own delivery date (its topmost Received: header); "

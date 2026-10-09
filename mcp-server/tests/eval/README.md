@@ -519,9 +519,11 @@ Cases must never be built from real mail.
 ### Cases
 
 `tests/answer_eval/cases.json` (schema v1, loaded and validated by
-`cases.py`) holds 56 cases over the baseline corpus: 47 for
+`cases.py`) holds 65 cases over the baseline corpus: 52 for
 `ask_mailbox`, two for `summarize_thread`, three smoke cases for
-`extract_from_emails` and two for each experimental tool (below). The `ask_mailbox` cases: exact facts
+`extract_from_emails`, six for `brief_issue` and two for
+`check_conclusion` (below). Nine of them carry chronology labels
+(#291, "Chronology cases" below). The `ask_mailbox` cases: exact facts
 (including a rate before and a different one after a stated future date
 in one notice, asked for 2027 and for after the change:
 `ask-darkroom-rate-2027` and `ask-darkroom-from-2028`, #911; and
@@ -611,12 +613,109 @@ a filter of the wrong type. Each tool embeds its topic or conclusion,
 so the index build embeds it too. The evaluation registers both tools
 on its own in-process server whatever `MCP_EXPERIMENTAL_TOOLS` says,
 and reads no such setting: nothing needs enabling for a run, and the
-server's setting is unchanged. The shipped cases are smoke cases, enough
-to prove the path end to end; the measurement cases are #291's:
-`brief-pool-bids` (the bids and the shortlist across two messages),
-`brief-cabin-wifi` (an unanswerable topic), `check-roof-total` (a
-conclusion an attachment supports) and `check-electrician-quote` (one
-the mailbox does not address).
+server's setting is unchanged. Four are smoke cases, enough to prove
+the path end to end: `brief-pool-bids` (the bids and the shortlist
+across two messages), `brief-cabin-wifi` (an unanswerable topic),
+`check-roof-total` (a conclusion an attachment supports) and
+`check-electrician-quote` (one the mailbox does not address). The other
+four `brief_issue` cases are #291's chronology cases.
+
+**Chronology cases (#291).** Nine cases carry golden `chronology`
+labels (schema in `cases.py`), over corpus threads 125-128 and the
+#975 thread t100:
+
+| Shape | `ask_mailbox` | `brief_issue` |
+|---|---|---|
+| An agreement corrected after the fact, then called off (t125: proposal, agreement, retrospective correction, cancellation) | `ask-hedge-price-as-of-march` (as of a date before the correction), `ask-hedge-status-now` | `brief-hedge-agreement` |
+| The settling disposition later in the same thread (#975, t100) | `ask-dispenser-position-june` (as of a date before it) | `brief-dispenser-hire-charge` (held out) |
+| Different people holding conflicting positions, neither superseding (t126, t127) | `ask-reading-room-deposit` | `brief-reading-room-deposit` |
+| A position stated only in quoted history, dated by its reply header (t128) | `ask-footbridge-closure` | `brief-footbridge-closure` |
+
+Each position names the person's accepted names (names only, never a
+role such as "clerk", which a relayer's description can contain too),
+its kind (proposal, approval, correction, cancellation, statement or
+disposition), the one message stating it, its date and whether that is
+the message's sent date (`sent`), a date it mentions (`mentioned`) or a
+date relative to the message itself such as "this morning"
+(`relative`: the sent date, and an answer may give either source), and
+the whole values the message states for it, as groups of accepted
+spellings ("30 June" or "June 30"; a bare number such as `60` also
+matches "$60" and "60 dollars"). Changes name the earlier and later position; conflicts list
+positions that disagree with neither superseding the other; `in_force`
+lists the positions that hold as of `as_of` (or now). Every source an
+answer must cite is also a required evidence group of its own, so a
+miss is attributed to retrieval, prompt assembly or synthesis as for
+any group. Three deterministic checks read the labels:
+
+- `chronology_cited`: the answer cites every position in force, both
+  sides of every change and every side of every conflict. An omitted
+  correction or cancellation, or a conflict reduced to its newest side,
+  fails.
+- `values_attributed`: a statement that states a labelled value cites
+  a passage of a message whose position states that value. A
+  corrected value cited to the superseded message resolves to a
+  supplied passage and passes the tool's citation checks, but fails
+  here.
+- `chronology_dated` (`brief_issue` only, the one tool that dates and
+  attributes each event): every position whose source reached the
+  prompt has a chronology entry citing that source with the position's
+  date, date source and an accepted name as whole words. The quoted position
+  dated by the quoting message's sent date, or attributed to the
+  neighbour who relayed it, fails.
+
+The report gives each check's pass rate over the cases it applies to
+(`aggregates.*.chronology`; a case that did not complete counts as
+failing), and the summary prints them. They measure missing correction
+and conflict evidence, citation attribution and event dating; answer
+support and abstention are the judge's groundedness and the abstention
+check, as for every case. The expected facts and `must_not_assert` carry
+the same positions for the judge (newest-overrides answers, a relayed
+position given to its relayer, an as-of answer that reads the later
+correction back in), so the rubric is unchanged.
+
+`make baseline` checks every label against the built index (each
+position's excerpt and a spelling of each value in its source's
+indexed text, a `sent` or `relative` date equal to the message's sent
+date, and a `mentioned` one different and written in the source's
+text),
+runs every chronology case with the scripted answerer, and mutates the
+correct scripted answer into each failure above (an omitted correction,
+a corrected value cited to the superseded message, a conflict reduced
+to its newest side, a quoted position dated and attributed by the
+quoting message); each mutation must fail its check while the correct
+answer passes. The two t100 cases are in the #974 gap (the disposition
+t100.11 never reaches the prompt), pinned with the other #975 cases.
+
+To measure the tools on them, run only these cases (paid; never in CI;
+at most 27 provider calls with a judge, nine answers, up to nine
+repairs and nine judge calls):
+
+```bash
+make eval-answers EVAL_MAX_CALLS=27 EVAL_ARGS="--case ask-hedge-price-as-of-march \
+  --case ask-hedge-status-now --case brief-hedge-agreement \
+  --case ask-dispenser-position-june --case brief-dispenser-hire-charge \
+  --case ask-reading-room-deposit --case brief-reading-room-deposit \
+  --case ask-footbridge-closure --case brief-footbridge-closure"
+```
+
+**What these cases do not prove.**
+
+- No paid baseline run has been recorded yet (#1369), so nothing
+  here says how well either tool does on them.
+- Undated mail is not a case: the indexer stamps a message without a
+  `Date:` header with the time it indexes it, so the corpus cannot hold
+  a reproducible undated message until #1080 keeps that date unknown
+  (#1370).
+- A delayed delivery (a receiving time different from the sent date)
+  is not a case either: the runner's synthetic-index check requires
+  every `occurred_at` to be null, as for the outstanding-items cases
+  (#1372).
+- Quoted history is retrievable only because t128's reply has no text
+  of its own; when a reply has its own text, the quote is never chunked
+  and no tool can return it (#795).
+- `ask_mailbox` answers in prose, so its dates and actors are graded by
+  the judge only; the deterministic checks read which messages it
+  cites, never whether a statement asserts or denies a value.
 
 `make baseline` checks every excerpt is in the indexed text of the
 message it cites, so a reference cannot drift from the corpus or rest on
@@ -1013,7 +1112,7 @@ never fails a run. CI runs only the scripted path (`make baseline` and
 
 Not yet covered (follow-ups): judge calibration against human labels
 and repeated runs to measure variation, quality thresholds,
-measurement cases for the experimental tools (#291), a real-model
+recorded runs of the chronology cases (#1369), a real-model
 synthetic index, and token usage.
 
 ## What this harness does NOT do

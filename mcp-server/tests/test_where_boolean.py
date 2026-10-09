@@ -325,7 +325,7 @@ def _digest(*items: dict) -> str:
 
 class TestDigest:
     def test_format_version_is_bumped(self):
-        assert QUERY_DIGEST_FORMAT == 2
+        assert QUERY_DIGEST_FORMAT == 3
 
     def test_leaf_order_within_any_does_not_matter(self):
         c = _leaf("domain_is", "one.test", role="cc", id="c")

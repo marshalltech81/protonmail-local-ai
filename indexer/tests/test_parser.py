@@ -2,7 +2,7 @@
 Tests for src/parser.py.
 
 Covers: plain text, HTML, multipart, attachments, inline Content-Disposition,
-encoded headers, address parsing, date fallback, and folder derivation.
+encoded headers, address parsing, unknown dates, and folder derivation.
 """
 
 import base64
@@ -22,6 +22,7 @@ from email.message import EmailMessage
 from pathlib import Path
 
 import pytest
+from src import parser as parser_module
 from src.parser import (
     MESSAGE_ID_MAX_CHARS,
     PARSE_CAPS,
@@ -138,7 +139,7 @@ class TestParseEmail:
         assert msg.in_reply_to == "msg1@example.com"
         assert msg.references == ["msg0@example.com", "msg1@example.com"]
 
-    def test_invalid_date_falls_back_to_now(self, tmp_path):
+    def test_invalid_date_is_unknown(self, tmp_path):
         path = write_eml(
             tmp_path,
             """
@@ -154,22 +155,23 @@ class TestParseEmail:
         )
         msg = parse_email(path)
         assert msg is not None
-        assert isinstance(msg.date, datetime)
-        # Fallback uses timezone.utc
-        assert msg.date.tzinfo is not None
+        # Never the current time (#1080): the send date is unknown.
+        assert (msg.date, msg.date_status) == (None, "invalid")
 
     @pytest.mark.parametrize(
-        ("date_header", "fallback"),
+        ("date_header", "status"),
         [
-            ("", True),
-            ("Date: not-a-date\n", True),
-            ("Date: Mon, 01 Jan 2024 12:00:00 +0000\n", False),
+            ("", "missing"),
+            ("Date: not-a-date\n", "invalid"),
+            ("Date: \n", "invalid"),
+            ("Date: Mon, 01 Jan 2024 12:00:00 +0000\n", "parsed"),
         ],
-        ids=["missing", "malformed", "valid"],
+        ids=["missing", "malformed", "empty", "valid"],
     )
-    def test_fallback_date_is_flagged(self, tmp_path, date_header, fallback):
-        """#297: callers keep an already-persisted date only when the
-        parser fabricated this one, so the fallback must be visible."""
+    def test_date_status(self, tmp_path, date_header, status):
+        """#1080: a missing or unparseable Date header leaves the send
+        date unknown (``None``) with its reason; nothing is fabricated.
+        A present but empty header is unparseable, not missing."""
         path = tmp_path / "INBOX" / "cur" / "flag.eml"
         path.parent.mkdir(parents=True)
         path.write_text(
@@ -179,17 +181,52 @@ class TestParseEmail:
         )
         msg = parse_email(path)
         assert msg is not None
-        assert msg.date_is_fallback is fallback
+        assert msg.date_status == status
+        if status == "parsed":
+            assert msg.date == datetime(2024, 1, 1, 12, 0, tzinfo=UTC)
+        else:
+            assert msg.date is None
+
+    @pytest.mark.parametrize("header", [None, "Date: SYNTHETIC-DATE-MARKER-257"])
+    def test_undated_message_orders_by_its_parse_time(self, tmp_path, monkeypatch, header):
+        """#1080: without a send or delivery date, the effective time is
+        the first indexing time (``first_indexed_at``, the parse time
+        until the writer keeps a stored one): an ordering fallback, not
+        a send date."""
+        when = datetime(2026, 3, 4, 5, 6, tzinfo=UTC)
+
+        class _Clock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return when
+
+        monkeypatch.setattr(parser_module, "datetime", _Clock)
+        path = tmp_path / "INBOX" / "cur" / "undated.eml"
+        path.parent.mkdir(parents=True)
+        path.write_text(
+            "From: alice@example.com\nSubject: s\nMessage-ID: <undated@example.com>\n"
+            + (f"{header}\n" if header else "")
+            + "\nBody.\n",
+            encoding="utf-8",
+        )
+        msg = parse_email(path)
+        assert msg is not None
+        assert msg.date is None
+        assert msg.first_indexed_at == when
+        assert msg.effective_date == when
 
     @pytest.mark.parametrize(
-        "branch",
-        ["unparseable", "type_error"],
+        ("branch", "status"),
+        [("missing", "missing"), ("unparseable", "invalid"), ("type_error", "invalid")],
     )
-    def test_fallback_date_value_not_logged(self, tmp_path, monkeypatch, caplog, branch):
-        """#257: the Date header is attacker-controlled mail content, so no
-        fallback branch may log it. ``parsedate_to_datetime`` on 3.14
-        raises only ``ValueError`` for a ``str``; the ``TypeError`` branch
-        is reached by stubbing it."""
+    def test_unknown_date_is_logged_without_the_header(
+        self, tmp_path, monkeypatch, caplog, branch, status
+    ):
+        """#257, #1080: the Date header is attacker-controlled mail
+        content, so the WARNING that reports an unknown send date names
+        the reason and the path only. ``parsedate_to_datetime`` on 3.14
+        raises only ``ValueError`` for a ``str``; the ``TypeError``
+        branch is reached by stubbing it."""
         marker = "SYNTHETIC-DATE-MARKER-257"
         if branch == "type_error":
 
@@ -201,29 +238,33 @@ class TestParseEmail:
         path.parent.mkdir(parents=True)
         path.write_bytes(
             b"From: alice@example.com\nSubject: s\nMessage-ID: <marker@example.com>\n"
-            + f"Date: {marker}\n\nBody.\n".encode()
+            + (b"" if branch == "missing" else f"Date: {marker}\n".encode())
+            + b"\nBody.\n"
         )
         with caplog.at_level(logging.DEBUG):
             msg = parse_email(path)
         assert msg is not None
-        assert msg.date_is_fallback is True
-        assert any("date header" in r.getMessage().lower() for r in caplog.records)
+        assert (msg.date, msg.date_status) == (None, status)
+        lines = [r for r in caplog.records if "send date stored as unknown" in r.getMessage()]
+        assert [(r.levelno, r.getMessage()) for r in lines] == [
+            (logging.WARNING, f"Date header {status} in {path}; send date stored as unknown")
+        ]
         assert marker not in caplog.text
 
     @pytest.mark.parametrize(
-        ("date_bytes", "fallback"),
+        ("date_bytes", "status"),
         [
-            (b"Mon, 1 Jan 2024 10:00:00 +0000 \xe9", False),
-            (b"Mon, 1 Jan 2024 10:00:00 +0000\xe9", False),
-            (b"Mon, 1 Jan 2024 15:00:00 +0500\xe9", False),
-            (b"Mon, 1 Jan 2024 07:00:00 -0300\xe9\xe9", False),
-            (b"\xe9\xe9 not a date", True),
+            (b"Mon, 1 Jan 2024 10:00:00 +0000 \xe9", "parsed"),
+            (b"Mon, 1 Jan 2024 10:00:00 +0000\xe9", "parsed"),
+            (b"Mon, 1 Jan 2024 15:00:00 +0500\xe9", "parsed"),
+            (b"Mon, 1 Jan 2024 07:00:00 -0300\xe9\xe9", "parsed"),
+            (b"\xe9\xe9 not a date", "invalid"),
         ],
     )
-    def test_8bit_date_header_does_not_crash(self, tmp_path, date_bytes, fallback):
+    def test_8bit_date_header_does_not_crash(self, tmp_path, date_bytes, status):
         """#361: a raw 8-bit Date header comes back from the parser as an
         ``email.header.Header``, which ``parsedate_to_datetime`` cannot
-        split; it must parse like the text it holds, or fall back."""
+        split; it must parse like the text it holds, or be unknown."""
         path = tmp_path / "INBOX" / "cur" / "eightbit.eml"
         path.parent.mkdir(parents=True)
         path.write_bytes(
@@ -234,14 +275,16 @@ class TestParseEmail:
         )
         msg = parse_email(path)
         assert msg is not None
-        assert msg.date_is_fallback is fallback
-        if not fallback:
+        assert msg.date_status == status
+        if status == "parsed":
             assert msg.date == datetime(2024, 1, 1, 10, 0, tzinfo=UTC)
+        else:
+            assert msg.date is None
 
-    def test_date_overflowing_utc_falls_back(self, tmp_path):
+    def test_date_overflowing_utc_is_invalid(self, tmp_path):
         """Review round 2: a Date header whose UTC conversion passes year
-        9999 is treated as unparseable (fallback date, flagged) instead
-        of failing the parse and dead-lettering the message."""
+        9999 is treated as unparseable (an unknown send date) instead of
+        failing the parse and dead-lettering the message."""
         path = tmp_path / "INBOX" / "cur" / "overflow.eml"
         path.parent.mkdir(parents=True)
         path.write_bytes(
@@ -250,7 +293,7 @@ class TestParseEmail:
         )
         msg = parse_email(path)
         assert msg is not None
-        assert msg.date_is_fallback is True
+        assert (msg.date, msg.date_status) == (None, "invalid")
 
     def test_date_minus_zero_normalized_to_aware_utc(self, tmp_path):
         """RFC 2822 ``-0000`` means "local time, offset unknown".
@@ -1067,7 +1110,7 @@ class TestOccurredAt:
         msg = parse_email(path)
         assert msg is not None
         assert msg.occurred_at is None
-        assert msg.date_is_fallback is False
+        assert msg.date_status == "parsed"
 
     def test_folded_long_received_header(self, tmp_path):
         clauses = b"".join(b"\r\n\t(via hop-%d.example.net; id %d)" % (i, i) for i in range(200))
