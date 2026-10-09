@@ -1933,6 +1933,17 @@ def _phase2a_collect_chunks(
                     # another module) the copy is resolved as usual, and
                     # may be deferred: the payload then stays protected.
                     add_plan(plan, attachment)
+        elif INDEXER_ATTACHMENT_EXTRACTION_ENABLED:
+            # The parse has no attachments (a parser change may have
+            # dropped them all): any stored deferral mark is obsolete
+            # (Codex round 7 on #1355).
+            state.obsolete_deferrals = sorted(
+                occurrence_id
+                for occurrence_id, (_, deferred) in db.get_attachment_occurrence_states(
+                    msg.claimant_id
+                ).items()
+                if deferred
+            )
         # A plan without text clears its attachment's chunk slice in
         # Phase 2c, unless another copy of the same bytes in this message
         # fills it: that copy counted the stored chunks as kept and

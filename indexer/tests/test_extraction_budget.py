@@ -617,6 +617,27 @@ class TestContinuation:
         assert p.deferred() == 0
         assert main._requeue_stale_extractions(p.db, p.queue) == 0
 
+    def test_deferrals_are_cleared_when_the_parse_has_no_attachments(self, tmp_path, monkeypatch):
+        """Codex round 7 on #1355: a parser change that drops every
+        attachment clears every deferral mark of the message."""
+        extractor = LaunchingExtractor()
+        p = Pipeline(tmp_path, monkeypatch, extractor, launches=1)
+        path = p.add("emptied", _parts("emptied", 3))
+        p.drain()
+        assert p.deferred() == 2
+        real_parse = main.parse_email
+
+        def without_attachments(*args, **kwargs):
+            msg = real_parse(*args, **kwargs)
+            msg.attachments = []
+            return msg
+
+        monkeypatch.setattr(main, "parse_email", without_attachments)
+        p.drain()
+        assert p.job(path) is None
+        assert p.deferred() == 0
+        assert main._requeue_stale_extractions(p.db, p.queue) == 0
+
     def test_a_reparse_continuation_keeps_its_scheduling_class(self, tmp_path, monkeypatch):
         extractor = LaunchingExtractor()
         p = Pipeline(tmp_path, monkeypatch, extractor, launches=1)
