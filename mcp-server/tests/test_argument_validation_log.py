@@ -85,8 +85,12 @@ def _required_values(schema: dict) -> dict:
     rejected field in a call is the one under test."""
     values = {}
     for name in schema.get("required", []):
-        kind = schema["properties"][name].get("type")
-        values[name] = {"vendor": "string"} if kind == "object" else "synthetic"
+        prop = schema["properties"][name]
+        if "enum" in prop:
+            # A closed set (aggregate_messages' group_by): one member.
+            values[name] = prop["enum"][0]
+            continue
+        values[name] = {"vendor": "string"} if prop.get("type") == "object" else "synthetic"
     return values
 
 
@@ -164,7 +168,11 @@ def test_every_typed_parameter_of_every_tool_is_rejected_through_the_limiter(
     counts = dict(item.split("=") for item in summary.split(": ", 1)[1].split())
     # Handler-checked parameters (``size_min`` / ``size_max``) are
     # counted by the handler's own limiter, not this one.
-    handler_checked = {"query_messages.size_min", "query_messages.size_max"}
+    handler_checked = {
+        f"{tool}.{name}"
+        for tool in ("query_messages", "aggregate_messages")
+        for name in ("size_min", "size_max")
+    }
     assert counts == {key: "3" for key in keys - handler_checked}
     assert MARKER not in caplog.text
 

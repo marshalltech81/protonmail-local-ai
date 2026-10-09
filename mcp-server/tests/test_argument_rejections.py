@@ -112,6 +112,8 @@ _REJECTED_CALLS = [
     ("search_attachments", {"query": "invoice", **_BAD_DATE}, "date_from"),
     ("query_messages", {"text": MARKER, **_BAD_DATE}, "date_from"),
     ("query_messages", {"cursor": MARKER}, "cursor"),
+    ("aggregate_messages", {"group_by": "folder", "text": MARKER, **_BAD_DATE}, "date_from"),
+    ("aggregate_messages", {"group_by": "folder", "cursor": MARKER}, "cursor"),
     ("query_attachments", {"filename": MARKER, **_BAD_DATE}, "date_from"),
     ("query_attachments", {"cursor": MARKER}, "cursor"),
     ("get_attachment", {"attachment_occurrence_id": MARKER, "offset": -1}, "offset"),

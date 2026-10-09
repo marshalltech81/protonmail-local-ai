@@ -54,8 +54,9 @@ values past 500 characters (subjects, display names, addresses, reply
 headers, participant and sender strings, attachment filenames and MIME
 types) are cut with a marker. Every tool applies the same cut in its
 prose, the intelligence tools apply it to the headers they send to the
-model, and `get_thread` also cuts bodies. IDs are never cut, since a shortened ID
-would not chain; `get_thread` states the thread ID once rather than on
+model, and `get_thread` also cuts bodies. IDs and `aggregate_messages`
+group values (an address, domain or folder) are never cut, since a
+shortened one would not chain; `get_thread` states the thread ID once rather than on
 every message row. `get_message` bounds headers the same way and pages
 the body by character offset, so every page is bounded and the pages
 together hold the whole body.
@@ -242,9 +243,13 @@ tool=search_emails outcome=ok total_ms=41.7 stages_ms={'query_embedding': 22.4, 
   `inference_calls` and, on a filtered vector search,
   `thread_vec_expansions` / `chunk_vec_expansions` (re-queries with a
   wider window). The retrieval tools record what they returned (#886):
-  `total_matches` and `returned` (`query_messages`, `query_attachments`), `indeterminate`
-  (`query_messages`, `query_attachments`, and `search_attachments` with `sender`), and, when
-  `query_messages`' or `query_attachments`' `indeterminate` is not 0, one
+  `total_matches` and `returned` (`query_messages`, `query_attachments`,
+  `aggregate_messages`, whose `returned` counts groups), `groups`
+  (`aggregate_messages`: every group, not just the page),
+  `incomplete_from_messages` (`aggregate_messages` sender dimensions), `indeterminate`
+  (`query_messages`, `query_attachments`, `aggregate_messages`, and
+  `search_attachments` with `sender`), and, when `query_messages`',
+  `aggregate_messages`' or `query_attachments`' `indeterminate` is not 0, one
   `indeterminate_cause_<cause>` count of 1 per cause its filters can
   have (`sender_ambiguous`, `address_list`, `display_names`, `subject`,
   `body`, `attachment_list`, `size`; [Response
@@ -341,7 +346,8 @@ before.
   same scope, so a sender whose mail is all in Trash is not chosen for a
   default search.
 - Message tools leave out the messages filed in Trash: `query_messages`
-  without `folder` (pass `folder="Trash"` to list them),
+  and `aggregate_messages` without `folder` (pass `folder="Trash"` to
+  list or count them),
   `query_attachments` likewise for the attachments those messages
   carry, and `search_attachments`, which has no folder filter.
 - Tools that read one named thread, message or attachment
@@ -1534,6 +1540,90 @@ references. The `search_emails` description carries the same guidance
 State the scope and disclose
 unread pages, missing indexed bodies and unavailable attachment text
 instead of claiming full coverage.
+
+### `aggregate_messages`
+Count the messages [`query_messages`](#query_messages) would match,
+grouped by one dimension, without listing them
+([#823](https://github.com/marshalltech81/protonmail-local-ai/issues/823)).
+Use it for volume questions (top senders, mail per month, mail per
+folder) instead of paging `query_messages` and counting on the client.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `group_by` | string | required | `sender_address`, `sender_domain`, `folder`, `year`, `month` or `authority_class` |
+| every `query_messages` filter | | none | `sender`, `recipient`, `participant`, `subject`, `text`, `folder`, `date_from`, `date_to`, `has_attachments`, `authority_class`, `seen`, `flagged`, `replied`, `size_min`, `size_max` and `where`, with the same schema and meaning; Trash is left out unless `folder="Trash"` ([Trash](#trash-is-left-out-by-default)) |
+| `limit` | int | `25` | Groups per page; clamped to `[1, 100]` |
+| `cursor` | string | none | `next_cursor` from the previous page of the same call |
+
+The filters compile to the same expression as `query_messages`
+([Filter predicates](#filter-predicates)), so `total_matches` and
+`indeterminate` are the counts `query_messages` returns for the same
+filters, and a group's `messages` is the `total_matches` of
+`query_messages` for the same filters plus the group's own:
+
+| `group_by` | Group value | The group's own filter |
+|---|---|---|
+| `sender_address` | a From address | a `where` `address_is` leaf, role `from` |
+| `sender_domain` | the domain of a From address | a `where` `domain_is` leaf, role `from` |
+| `folder` | the folder | `folder` |
+| `year` | `YYYY` of the effective time (`occurred_at`, else `sent_at`), UTC | `date_from` / `date_to` spanning that UTC year |
+| `month` | `YYYY-MM` of the effective time, UTC | `date_from` / `date_to` spanning that UTC month |
+| `authority_class` | the class of a From address | `authority_class` |
+
+Per group: `messages`, `threads` (distinct threads of those
+messages), `first_at` / `last_at` (their earliest and latest effective
+time), `with_attachments` (those with an attachment), `indeterminate`
+(messages in the group the filters could not decide, never counted in
+`messages`) and, for `sender_address`, `display_name` (the display name
+on the group's latest match that has one, cut at 500 characters with a
+marker). A group whose messages are all undecided is listed with
+`messages` 0. The group value is never cut. `where` takes an address
+of at most 320 characters and a domain of at most 255; a longer
+sender address can be passed as `sender` instead, which matches a full
+address exactly.
+
+The group with value `null` holds the messages with no value on the
+dimension. For the sender dimensions: a message whose
+`sender_ambiguous` is not `false`, or with no stored From address
+([Sender attribution](#sender-attribution)). For `authority_class`,
+also a message in Spam or one whose From addresses have no class. A
+message with several From addresses counts in the group of each, so
+those groups can sum to more than `total_matches`; `folder`, `year`
+and `month` have one value per message, so their groups sum to
+`total_matches` and their `indeterminate` values to the call's. A
+group's `indeterminate` covers the supplied filters only, not the
+group's own value: a message whose membership in a sender group cannot
+be decided is not in it.
+
+`incomplete_from_messages` (for `sender_address`, `sender_domain` and
+`authority_class`; absent for the other dimensions) counts the
+messages the filters do not reject (matched or undecided) whose sender
+is attributable (`sender_ambiguous` is `false`) but whose stored From
+list is not known to be complete: a From address was lost to a parse
+cap or could not be parsed, or the message is not reparsed yet. Each
+is counted once over the whole result, the same on every page. For
+these messages further sender groups or memberships may be missing;
+the groups shown, `total_matches` and `indeterminate` are unchanged,
+and a group's `messages` still equals `query_messages`' count for
+`sender=<value>`. It counts messages, not missing addresses, and
+includes a message with no stored From address, which is also in the
+`null` group. For `authority_class` it leaves out Spam, where no class
+matches. The prose states it when not 0, and the timing line carries
+it.
+
+Groups come most messages first, then by value, with the `null` group
+last among ties. `total_groups` counts them all. Group values and
+display names go to the calling model, which may be remote, so the
+tool description asks the client to tell the user how many groups it
+will read before paging past the first page, and to prefer the
+smallest page that answers (the top groups for a "top N" question).
+To page, call again with the same filters and `group_by` plus `cursor`.
+The cursor is bound to the filters and the dimension, as
+`query_messages`' is. Each page recounts, so mail indexed between
+pages can move a group to another page. One SQL statement answers a
+call: it evaluates the filters once per message to select them and
+once more per message they do not reject, then groups those rows;
+`limit` caps the groups returned, not the messages grouped.
 
 ### `query_attachments`
 Enumerate **every** attachment occurrence matching exact criteria, with

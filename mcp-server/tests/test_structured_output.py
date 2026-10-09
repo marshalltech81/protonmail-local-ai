@@ -49,6 +49,7 @@ STRUCTURED_TOOLS = {
     "list_folders": "folders",
     "find_contact": "contacts",
     "query_messages": "total_matches",
+    "aggregate_messages": "groups",
     "get_mailbox_status": "current",
 }
 

@@ -454,8 +454,9 @@ same `-f` files).
 You can tag senders with a source-authority class (`counsel`,
 `management`, `vendor`, `government`, `personal`, `other`) from a
 rules file you write. The classes become filterable metadata
-(`authority_class` on `search_emails` and `query_messages`, and the
-class plus the rule that set it on `find_contact`); they never change
+(`authority_class` on `search_emails`, `query_messages` and
+`aggregate_messages`, which also groups by it, and the class plus the
+rule that set it on `find_contact`); they never change
 ranking. Nothing is classified by a model.
 
 ```bash
