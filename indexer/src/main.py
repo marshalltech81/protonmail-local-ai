@@ -1270,7 +1270,8 @@ def _maybe_log_queue_heartbeat(queue: IndexingQueue) -> None:
         return
     d = queue.drain_deferrals()
     # ``suppressed_lines``: repeated indexer lines (embed retries and
-    # recoveries, health-file and ingestion-state failures) the shared
+    # recoveries, health-file and ingestion-state failures, the queue's
+    # terminal, retry and dead-letter lines) the shared
     # rate limit withheld since the last heartbeat; the attachment
     # WARNINGs it withheld are in the attachments line instead.
     log.info(

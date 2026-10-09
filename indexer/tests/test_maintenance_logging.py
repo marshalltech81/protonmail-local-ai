@@ -471,12 +471,24 @@ class TestQueueHeartbeatLine:
         db.close()
 
     def test_reports_suppressed_indexer_lines_since_the_last_heartbeat(
-        self, tmp_path, caplog, clock
+        self, tmp_path, caplog, clock, monkeypatch
     ):
         caplog.set_level(logging.INFO)
         from src import extractors
+        from src.rate_limited_log import LineBudget
 
         db, queue, _now = _seed_queue(tmp_path)
+        # The seeding's own retry and dead-letter lines spend the shared
+        # budget (#1320); start this test's burst on a fresh one.
+        monkeypatch.setattr(
+            extractors,
+            "_LINE_BUDGET",
+            LineBudget(
+                limit=extractors._WARNINGS_PER_WINDOW,
+                window_secs=extractors._WARNING_WINDOW_SECS,
+                buckets=(extractors._ATTACHMENT_LINES, extractors._OTHER_LINES),
+            ),
+        )
         for _ in range(extractors._WARNINGS_PER_WINDOW + 3):
             extractors.warn_rate_limited(main.log, "synthetic repeated line", attachment=False)
         caplog.clear()
