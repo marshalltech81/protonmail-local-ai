@@ -2836,7 +2836,9 @@ def _requeue_stale_extractions(db: Database, queue: IndexingQueue) -> int:
     never left behind; a queued continuation is left as it is, and the
     sweep never clears a deferral mark.
     Like the zero-vector recovery sweep, files already queued or
-    dead-lettered are left alone. Skipped when attachment extraction is
+    dead-lettered are left alone, except that a queued extraction
+    continuation of a message to refresh becomes a full pass
+    (``IndexingQueue.end_continuation``), so the refresh is not skipped. Skipped when attachment extraction is
     disabled, since the drain would not re-stamp the rows.
     Returns the number of files re-queued.
 
@@ -2874,14 +2876,22 @@ def _requeue_stale_extractions(db: Database, queue: IndexingQueue) -> int:
         )
     }
     filepaths.update(unrecorded)
-    filepaths.update(db.find_deferred_extraction_filepaths())
     if INDEXER_OCR_ENABLED:
         filepaths.update(db.find_ocr_disabled_attachment_filepaths(_occurrence_reruns_extraction))
+    # A message to refresh may already be queued as an extraction
+    # continuation, which does not reopen resolved occurrences: it is
+    # turned into a full pass instead (Codex round 8 on #1355). One found
+    # only for its deferral marks needs no full pass.
+    refresh = set(filepaths)
+    filepaths.update(db.find_deferred_extraction_filepaths())
     re_enqueued = 0
     re_enqueued_unrecorded = 0
     skipped_dead = 0
     for filepath in sorted(filepaths):
         if queue.has_pending_row(filepath):
+            if filepath in refresh and queue.end_continuation(filepath):
+                re_enqueued += 1
+                re_enqueued_unrecorded += filepath in unrecorded
             continue
         if queue.is_dead(filepath):
             skipped_dead += 1

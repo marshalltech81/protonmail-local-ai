@@ -2058,9 +2058,12 @@ in the seconds.
   pass still recomputes the thread vector from all of the thread's
   chunk vectors in its commit. An `EXTRACTOR_VERSIONS`
   bump clears `text_complete` on exactly its occurrences, which makes
-  them pending again; the startup sweeps keep the deferral marks, leave
-  a queued continuation as it is, and re-queue a message that carries a
-  mark but has no job (a pass with attachment extraction switched off
+  them pending again; the startup sweeps keep the deferral marks, turn a
+  queued continuation of a message they would refresh (a stale or
+  missing extractor result, a `too_large` result that now fits, OCR
+  turned on) into a full pass with the same reason and attempts, leave
+  any other queued continuation as it is, and re-queue a message that
+  carries a mark but has no job (a pass with attachment extraction switched off
   marks it succeeded). New
   intent to index the file (a watcher event, a startup re-queue) resets
   the job, and that pass resolves every occurrence by the usual cache

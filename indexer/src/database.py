@@ -2611,6 +2611,21 @@ class Database:
         self._conn.commit()
 
     @_synchronized
+    def queue_end_continuation(self, *, filepath: str, stage: str, error: str) -> bool:
+        """Clear a queued row's continuation stage and text (and the class
+        the deferral recorded); True when the row carried them."""
+        changed = self._conn.execute(
+            """
+            UPDATE indexing_jobs
+            SET last_stage = NULL, last_error = NULL, last_error_class = NULL
+            WHERE filepath = ? AND status = 'queued' AND last_stage = ? AND last_error = ?
+            """,
+            (filepath, stage, error),
+        ).rowcount
+        self._conn.commit()
+        return bool(changed)
+
+    @_synchronized
     def queue_get_attempts_and_stage(self, filepath: str) -> tuple[int, str | None] | None:
         """A job's attempts and last stage, or ``None`` with no row."""
         row = self._conn.execute(

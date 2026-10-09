@@ -187,10 +187,12 @@ class TestSearchAttachments:
         names = {r.filename for r in db.search_attachments(extracted_only=True, limit=50)}
         assert names == {"report-2.txt"}
 
-    def test_text_lane_never_anchors_on_a_deferred_occurrence(self, tmp_path):
-        """Codex round 6 on #1355: chunks a deferred occurrence kept (an
-        older text) are not reported through it, and a copy of the same
-        payload that resolved takes the hit instead."""
+    def test_text_lane_reports_no_payload_with_a_deferred_copy(self, tmp_path):
+        """Codex rounds 6 and 8 on #1355: while any copy of a payload in a
+        message is deferred, the message's chunk slice for it is kept whole
+        and can hold an older text, so a hit on it is reported through no
+        copy, the deferred one or a resolved one. A payload with no
+        deferred copy is reported as before."""
         conn, path = _open_built_db_conn(tmp_path, "deferred-lane.db")
         _insert_message(
             conn,
@@ -205,6 +207,8 @@ class TestSearchAttachments:
             # The same payload twice: the deferred copy has the lower ID.
             ("p-pair", "occ-b", "pair.txt", "text", True),
             ("p-pair", "occ-c", "pair.htm", "html", False),
+            # Nothing deferred.
+            ("p-done", "occ-d", "done.txt", "text", False),
         )
         for payload, occ, name, module, deferred in rows:
             _insert_attachment(
@@ -226,7 +230,7 @@ class TestSearchAttachments:
                 extractor=f"{module}@1",
                 extractor_module=module,
             )
-        for n, payload in enumerate(("p-old", "p-pair")):
+        for n, payload in enumerate(("p-old", "p-pair", "p-done")):
             _insert_chunk(
                 conn,
                 chunk_id=f"chunk-{n}",
@@ -240,7 +244,7 @@ class TestSearchAttachments:
         conn.commit()
         conn.close()
         results = Database(str(path)).search_attachments(query="zqoldterm", limit=50)
-        assert [(r.filename, r.extraction_status) for r in results] == [("pair.htm", "success")]
+        assert [(r.filename, r.extraction_status) for r in results] == [("done.txt", "success")]
 
     def test_filename_lane_shows_deferred(self, db):
         [result] = db.search_attachments(query="report-0", limit=50)

@@ -713,6 +713,41 @@ class TestContinuation:
         assert p.deferred() == 0
         assert sorted(extractor.calls) == sorted(b for b, _, _ in _parts("lost", 4))
 
+    def test_a_refresh_turns_a_queued_continuation_into_a_full_pass(self, tmp_path, monkeypatch):
+        """Codex round 8 on #1355: a resolved occurrence the startup sweep
+        would refresh (here a ``too_large`` result that now fits) is not
+        skipped because its message is mid-continuation: the job becomes a
+        full pass, keeping its reason and attempts."""
+        from src.extractors import STATUS_TOO_LARGE
+
+        parts = _parts("refit", 4)
+        extractor = LaunchingExtractor()
+        real_call = extractor.__call__
+        first_time = {parts[0][0]}
+
+        def sometimes_too_large(**kwargs):
+            if kwargs["payload"] in first_time:
+                first_time.discard(kwargs["payload"])
+                extractor.calls.append(kwargs["payload"])
+                return ExtractionResult(
+                    status=STATUS_TOO_LARGE, extractor=None, text=None, error="cap"
+                )
+            return real_call(**kwargs)
+
+        p = Pipeline(tmp_path, monkeypatch, extractor, launches=2)
+        monkeypatch.setattr(attachment_indexing, "extract_attachment", sometimes_too_large)
+        path = p.add("refit", parts, reason=REASON_REPARSE)
+        p.drain()
+        assert p.job(path)["last_stage"] == STAGE_EXTRACT
+        assert main._requeue_stale_extractions(p.db, p.queue) == 1
+        job = p.job(path)
+        assert (job["reason"], job["attempts"], job["last_stage"]) == (REASON_REPARSE, 0, None)
+        while p.job(path) is not None:
+            p.drain()
+        # The once too-large part was extracted again, now fitting.
+        assert extractor.calls.count(parts[0][0]) == 2
+        assert p.deferred() == 0
+
     def test_the_sweep_leaves_a_queued_continuation_alone(self, tmp_path, monkeypatch):
         extractor = LaunchingExtractor()
         p = Pipeline(tmp_path, monkeypatch, extractor, launches=2)
