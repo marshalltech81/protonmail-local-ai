@@ -1338,10 +1338,15 @@ _SAFE_FROM_ROWS = (
 # name on the group's latest match that has one. The SQL is constant
 # except the excluded folders' placeholders, bound in order.
 _GROUP_ROWS: dict[str, str] = {
+    # The participant row keeps the first name the message wrote the
+    # address with, NULL when that one had none; every name is in
+    # ``message_participant_names`` (#1140), whose least is the fallback.
     "sender_address": (
-        "SELECT e.*, p.address AS value, FIRST_VALUE(p.name) OVER ("  # nosec B608
-        "PARTITION BY p.address ORDER BY e.ok IS 1 DESC, p.name IS NULL, e.at DESC, e.cid DESC"
-        f") AS name FROM e {_SAFE_FROM_ROWS}"
+        "SELECT *, FIRST_VALUE(nm) OVER ("  # nosec B608
+        "PARTITION BY value ORDER BY ok IS 1 DESC, nm IS NULL, at DESC, cid DESC"
+        ") AS name FROM (SELECT e.*, p.address AS value, COALESCE(p.name, ("
+        "SELECT MIN(n.name) FROM message_participant_names n WHERE n.claimant_id = p.claimant_id "
+        f"AND n.role = 'from' AND n.address = p.address)) AS nm FROM e {_SAFE_FROM_ROWS})"
     ),
     # The text after the last "@" (``rtrim`` strips every trailing
     # character but "@"), the suffix ``domain_is`` compares.

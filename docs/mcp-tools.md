@@ -54,8 +54,9 @@ values past 500 characters (subjects, display names, addresses, reply
 headers, participant and sender strings, attachment filenames and MIME
 types) are cut with a marker. Every tool applies the same cut in its
 prose, the intelligence tools apply it to the headers they send to the
-model, and `get_thread` also cuts bodies. IDs are never cut, since a shortened ID
-would not chain; `get_thread` states the thread ID once rather than on
+model, and `get_thread` also cuts bodies. IDs and `aggregate_messages`
+group values (an address, domain or folder) are never cut, since a
+shortened one would not chain; `get_thread` states the thread ID once rather than on
 every message row. `get_message` bounds headers the same way and pages
 the body by character offset, so every page is bounded and the pages
 together hold the whole body.
@@ -1575,8 +1576,10 @@ time), `with_attachments` (those with an attachment), `indeterminate`
 `messages`) and, for `sender_address`, `display_name` (the display name
 on the group's latest match that has one, cut at 500 characters with a
 marker). A group whose messages are all undecided is listed with
-`messages` 0. The group value is never cut, so it can be passed back
-as the group's own filter.
+`messages` 0. The group value is never cut. `where` takes an address
+of at most 320 characters and a domain of at most 255; a longer
+sender address can be passed as `sender` instead, which matches a full
+address exactly.
 
 The group with value `null` holds the messages with no value on the
 dimension. For the sender dimensions: a message whose

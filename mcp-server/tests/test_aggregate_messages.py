@@ -253,6 +253,29 @@ class TestGroups:
         assert by[None].display_name is None
         assert by["ann@one.test"].threads == 2
 
+    def test_the_display_name_comes_from_every_stored_name(self, tmp_path):
+        # Review round 2: a From address written first without a name and
+        # again with one keeps no name on its participant row; the name
+        # is in message_participant_names (#1140).
+        conn, path = _open_built_db_conn(tmp_path, "names.db")
+        _insert_message(
+            conn,
+            message_id="m-old",
+            thread_id="t1",
+            sent_at="2024-01-01T09:00:00+00:00",
+            from_=["Old Name <ann@one.test>"],
+        )
+        _insert_message(
+            conn,
+            message_id="m-new",
+            thread_id="t2",
+            sent_at="2024-02-01T09:00:00+00:00",
+            from_=["ann@one.test", "Late Name <ann@one.test>"],
+        )
+        conn.close()
+        [group] = Database(str(path)).aggregate_messages(group_by="sender_address").groups
+        assert group.display_name == "Late Name"
+
     def test_ambiguous_or_unchecked_senders_are_in_the_no_value_group(self, agg_db):
         groups, _ = _all_groups(agg_db, "sender_domain")
         by = {g.value: g.messages for g in groups}
@@ -622,6 +645,9 @@ class TestTool:
         conn.close()
         out = _call(_server(Database(str(path))), "aggregate_messages", group_by="sender_address")
         assert [g["value"] for g in out["groups"]] == [address]
+        # Review round 2: the flat sender filter is the follow-up for an
+        # address longer than where's 320-character address_is limit.
+        assert Database(str(path)).query_messages(sender=address).total_matches == 1
 
     def test_a_database_error_is_returned_by_type(self, fake_server, agg_db, monkeypatch, caplog):
         def boom(**_):
