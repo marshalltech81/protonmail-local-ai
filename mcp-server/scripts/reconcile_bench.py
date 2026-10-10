@@ -187,6 +187,9 @@ CREATE TABLE attachment_extractions (
     extracted_at       TEXT NOT NULL,
     ocr_pages_skipped  INTEGER CHECK (ocr_pages_skipped >= 0),
     text_complete      INTEGER CHECK (text_complete IN (0, 1)),
+    ocr_pages_cap      INTEGER CHECK (ocr_pages_cap >= 0),
+    digital_pages_cap  INTEGER CHECK (digital_pages_cap >= 0),
+    extracted_chars_cap INTEGER CHECK (extracted_chars_cap >= 0),
     PRIMARY KEY (attachment_id, extractor_module)
 );
 CREATE TABLE pending_deletions (
@@ -224,7 +227,7 @@ def message_id(i: int, identity: str) -> str:
     ``utf8x4`` (998 four-byte characters, a stress shape the parser
     cannot produce, #1424)."""
     if identity == "typical":
-        return f"{hashlib.sha256(str(i).encode()).hexdigest()[:32]}.{i}{_DOMAIN}"
+        return f"{hashlib.sha256(str(i).encode()).hexdigest()[:32]}.{i:010d}{_DOMAIN}"
     if identity == "ascii998":
         head = f"{i:010d}"
         return head + "x" * (MESSAGE_ID_MAX_CHARS - len(head) - len(_DOMAIN)) + _DOMAIN
@@ -337,7 +340,7 @@ def _shape(i: int, identity: str, records: str, references: int) -> dict:
             "folder": "/".join([_WIDE * 63] * 14),
         }
     base = {
-        "subject": f"Synthetic subject {i}",
+        "subject": f"Synthetic subject {i:010d}",
         "in_reply_to": parent,
         "host": "bench",
         "filename": "file.pdf",
@@ -369,10 +372,10 @@ def _shape(i: int, identity: str, records: str, references: int) -> dict:
         **base,
         "references": [parent] if parent else [],
         "people": [
-            ("from", f"from0.{i % 500}{_DOMAIN}", "Person 0"),
-            ("to", f"to0.{i % 500}{_DOMAIN}", "Person 0"),
-            ("to", f"to1.{i % 500}{_DOMAIN}", "Person 1"),
-            ("cc", f"cc0.{i % 500}{_DOMAIN}", None),
+            ("from", f"from0.{i % 500:03d}{_DOMAIN}", "Person 0"),
+            ("to", f"to0.{i % 500:03d}{_DOMAIN}", "Person 0"),
+            ("to", f"to1.{i % 500:03d}{_DOMAIN}", "Person 1"),
+            ("cc", f"cc0.{i % 500:03d}{_DOMAIN}", None),
         ],
     }
 
@@ -414,14 +417,14 @@ def _paragraph(i: int, chunk: int, words: int) -> str:
     """Body chunk ``chunk`` of message ``i``: for chunk 0 ``alpha<i % 50>``
     (in every fiftieth body) and ``gamma<i>`` (in this body only), then
     filler words, ``words`` words in all."""
-    lead = [f"alpha{i % 50}", f"gamma{i}"] if chunk == 0 else []
+    lead = [f"alpha{i % 50:02d}", f"gamma{i:010d}"] if chunk == 0 else []
     return " ".join([*lead, *_filler(i, words - len(lead), chunk * words)])
 
 
 def attachment_text(i: int, k: int) -> str:
     """The text of message ``i``'s ``k``-th payload, as its extractor
     returns it."""
-    return " ".join([f"doc{i}", f"part{k}", *_filler(i + k, ATTACHMENT_WORDS - 2, 7)])
+    return " ".join([f"doc{i:010d}", f"part{k:04d}", *_filler(i + k, ATTACHMENT_WORDS - 2, 7)])
 
 
 def token_estimate(text: str) -> int:
@@ -524,7 +527,7 @@ def render_eml(
     text_part = "Content-Type: text/plain; charset=us-ascii\nContent-Transfer-Encoding: 7bit\n"
     if not per_message:
         return ("\n".join(head) + "\n" + text_part + "\n" + body).encode()
-    boundary = f"bench-{i}"
+    boundary = f"bench-{i:010d}"
     parts = [text_part + "\n" + body]
     for k in range(per_message):
         payload = base64.encodebytes(pdf_payload(attachment_text(i, k))).decode()
@@ -721,7 +724,8 @@ def build(
                 conn.execute(
                     "INSERT INTO attachment_extractions (attachment_id, extractor_module, "
                     "extraction_status, extractor, extracted_text, extracted_at, "
-                    "ocr_pages_skipped, text_complete) VALUES (?, ?, 'success', ?, ?, ?, 0, 1)",
+                    "ocr_pages_skipped, text_complete, ocr_pages_cap, digital_pages_cap, "
+                    "extracted_chars_cap) VALUES (?, ?, 'success', ?, ?, ?, 0, 1, 0, 0, 0)",
                     (attachment_id, PDF_MODULE, PDF_EXTRACTOR, stress_text or text, now),
                 )
                 if not stress_text:
@@ -1141,11 +1145,11 @@ def _wl(leaf: str, value: str, negate: bool = False, role: str = "from") -> dict
 _WHERE_LEAVES: list[dict] = [
     _wl("address_contains", "nobody", True, "to"),
     _wl("display_name_contains", "nobody", True, "cc"),
-    _wl("address_or_name_contains", "from0.7", True, "visible_recipient"),
+    _wl("address_or_name_contains", "from0.007", True, "visible_recipient"),
     _wl("domain_is", "bench.example", False, "from"),
-    _wl("address_is", "to1.3@bench.example", True, "to"),
-    _wl("body_words", "gamma4242", True),
-    _wl("body_words", "alpha7"),
+    _wl("address_is", "to1.003@bench.example", True, "to"),
+    _wl("body_words", "gamma0000004242", True),
+    _wl("body_words", "alpha07"),
     _wl("address_contains", "cc0", False, "cc"),
     _wl("address_contains", "from0", role="from"),
     _wl("display_name_contains", "person", False, "to"),
@@ -1166,11 +1170,11 @@ MESSAGE_FILTERS: tuple[dict, ...] = (
     {"where": {"all": [{"leaf": "body_words", "value": _TERMS}]}},
     {"where": {"all": [{"leaf": "body_words", "value": _TERMS, "negate": True}]}},
     {"participant": "nobody"},
-    {"participant": "from0.7"},
-    {"sender": "from0.7@bench.example"},
-    {"subject": "subject 4242"},
-    {"text": "gamma4242"},
-    {"text": "alpha7"},
+    {"participant": "from0.007"},
+    {"sender": "from0.007@bench.example"},
+    {"subject": "subject 0000004242"},
+    {"text": "gamma0000004242"},
+    {"text": "alpha07"},
     {"authority_class": "vendor"},
     {"date_from": "2015-01-01", "date_to": "2015-12-31"},
     # Explicit ``where`` expressions (``query_messages`` only): the node
@@ -1185,7 +1189,7 @@ MESSAGE_FILTERS: tuple[dict, ...] = (
 # claimant and thread (``thread_id`` is filled in per corpus).
 OCCURRENCE_FILTERS: tuple[dict, ...] = (
     {"participant": "nobody"},
-    {"participant": "from0.7"},
+    {"participant": "from0.007"},
     {"date_from": "2015-01-01", "date_to": "2015-12-31"},
     {"filename": "nomatch"},
     {"filename": "file"},
@@ -1804,7 +1808,16 @@ ARGS: tuple[Arg, ...] = (
         help="stress: four-byte characters on every extraction row instead of its text (0: none)",
     ),
     Arg("chunks", "int", 1, 1, help="body chunks per message"),
-    Arg("chunk_tokens", "int", BODY_TOKENS, 2, CHUNK_MAX_TOKENS // 5, help="words per body chunk"),
+    Arg(
+        "chunk_tokens",
+        "int",
+        BODY_TOKENS,
+        2,
+        # The longest first paragraph within CHUNK_MAX_TOKENS: 14 tokens
+        # of lead words, then five a filler word.
+        (CHUNK_MAX_TOKENS - 14) // 5 + 2,
+        help="words per body chunk",
+    ),
     Arg("k", "ints", [100, 500, 1000, 2000, 5000], 1, help="records per round"),
     Arg(
         "missing",
@@ -1913,22 +1926,31 @@ def _worst(messages: int) -> int:
     return len(range(1, messages, 50))
 
 
+# Every number a message's text carries from ``i`` or ``k`` is
+# zero-padded, so its file size and its paragraphs' token counts depend
+# only on ``i`` modulo this period (thread position, folder and the
+# ``mixed`` worst-case slot): the first ``SHAPE_PERIOD`` messages hold
+# every size and count the corpus has (``test_shapes_repeat_with_the_period``).
+SHAPE_PERIOD = 100
+
+
 def _paragraph_tokens(args: argparse.Namespace) -> list[int]:
-    """The token estimate of every distinct body paragraph shape: chunk
-    0 depends on the digits of ``i`` and ``i % 50``, so the first, the
-    last and the first two-digit ``i % 50`` message cover its range."""
-    probes = {0, args.messages - 1, min(10, args.messages - 1)}
-    shapes = [_paragraph(i, 0, args.chunk_tokens) for i in probes]
-    if args.chunks > 1:
-        shapes.append(_paragraph(0, 1, args.chunk_tokens))
-    return [token_estimate(text) for text in shapes]
+    """The token estimate of every body paragraph of the corpus."""
+    return [
+        token_estimate(_paragraph(i, c, args.chunk_tokens))
+        for i in range(min(args.messages, SHAPE_PERIOD))
+        for c in range(min(args.chunks, 2))
+    ]
 
 
 def _largest_file(args: argparse.Namespace) -> int:
-    """The largest Maildir file of the corpus: message 1 (worst-case
-    under ``mixed``) and the last (its widest IDs)."""
-    return max(
-        len(
+    """The largest Maildir file of the corpus, exactly: every size occurs
+    in the first ``SHAPE_PERIOD`` messages, and every attachment part of
+    a message has one size, so ``n`` parts cost ``n - 1`` times the
+    second part's bytes more than one."""
+
+    def size(i: int, parts: int) -> int:
+        return len(
             render_eml(
                 i,
                 args.identity,
@@ -1936,11 +1958,18 @@ def _largest_file(args: argparse.Namespace) -> int:
                 args.references,
                 args.chunks,
                 args.chunk_tokens,
-                args.per_message,
+                parts,
             )
         )
-        for i in {min(1, args.messages - 1), args.messages - 1}
-    )
+
+    largest = 0
+    for i in range(min(args.messages, SHAPE_PERIOD)):
+        if args.per_message < 2:
+            largest = max(largest, size(i, args.per_message))
+        else:
+            one, two = size(i, 1), size(i, 2)
+            largest = max(largest, one + (args.per_message - 1) * (two - one))
+    return largest
 
 
 def _missing_problem(args: argparse.Namespace) -> str | None:
@@ -2007,6 +2036,14 @@ _RULES: tuple = (
     (
         lambda a: a.missing_from == "worst" and a.missing and a.records != "mixed",
         lambda a: "--missing-from worst with --missing needs --records mixed",
+    ),
+    (
+        lambda a: a.missing_from == "worst" and not a.missing and not a.all_extras,
+        lambda a: "--missing-from worst with --missing 0 leaves nothing out",
+    ),
+    (
+        lambda a: a.extracted_chars and not a.per_message,
+        lambda a: "--extracted-chars needs --per-message of at least 1 (no extraction rows)",
     ),
     (lambda a: not a.all_extras, _missing_problem),
     (

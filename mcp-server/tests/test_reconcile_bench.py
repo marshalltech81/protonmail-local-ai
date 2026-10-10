@@ -218,9 +218,9 @@ def test_filtered_certificate_counts_what_a_page_counts(report):
         assert nobody["count"] == 0
     texts = {r["filters"].get("text"): r["count"] for r in report["filtered"]["messages"]}
     # gamma<i> is message i's own word, and the corpus has no message
-    # 4242; alpha7 is in every fiftieth body.
-    assert texts["gamma4242"] == 0
-    assert texts["alpha7"] > 0
+    # 4242; alpha07 is in every fiftieth body.
+    assert texts["gamma0000004242"] == 0
+    assert texts["alpha07"] > 0
     vendor = next(
         r for r in report["filtered"]["messages"] if r["filters"] == {"authority_class": "vendor"}
     )
@@ -564,7 +564,7 @@ def test_filtered_run_rotates_page_and_certificates(bench, tmp_path, monkeypatch
 
     monkeypatch.setattr(bench, "phase_certificate", cert)
     monkeypatch.setattr(server_sqlite.Database, "query_messages", page)
-    bench.phase_filtered(str(db), "messages", {"participant": "from0.7"}, rotate)
+    bench.phase_filtered(str(db), "messages", {"participant": "from0.007"}, rotate)
     assert order == expected
 
 
@@ -909,7 +909,9 @@ def test_absent_and_zero_are_resolved_as_the_table_says(bench, changes, name, ab
         ({"--filtered": None, "--chunk-tokens": "19"}, "at least 20"),
         ({"--filtered": None, "--extracted-chars": "5"}, "excludes --extracted-chars"),
         ({"--chunks": "2"}, "one chunk per paragraph"),
-        ({"--chunk-tokens": "300", "--messages": str(2**30)}, "one chunk per paragraph"),
+        ({"--chunks": "2", "--chunk-tokens": "199"}, "one chunk per paragraph"),
+        ({"--extracted-chars": "5", "--per-message": "0", "--missing": "0"}, "--per-message"),
+        ({"--records": "mixed", "--missing-from": "worst", "--missing": "0"}, "leaves nothing"),
         ({"--writer-commit-bytes": "5"}, "need --wal"),
         ({"--writer-interval": "0.5"}, "need --wal"),
         ({"--wal-hold": "1"}, "need --wal"),
@@ -986,3 +988,32 @@ def test_worst_replies_name_their_parent_last_and_one_sender(bench, tmp_path):
         if i % 4:
             assert json.loads(refs)[-1] == bench.message_id(i - 1, "ascii998")
         assert tid == bench.message_id(i - i % 4, "ascii998")
+
+
+@pytest.mark.parametrize(
+    "records", ["typical", "worst", "mixed", "cardinality", "cardinality_names"]
+)
+@pytest.mark.parametrize("identity", ["typical", "ascii998", "ascii998common", "utf8x4"])
+def test_shapes_repeat_with_the_period(bench, identity, records):
+    # The pre-build checks read the first SHAPE_PERIOD messages only:
+    # every later message has the size and token counts of its residue.
+    period = bench.SHAPE_PERIOD
+    for i in [*range(period, 2 * period), 2**30 - 1, 10**9 + 7]:
+        j = i % period
+        for parts in (0, 2):
+            assert len(bench.render_eml(i, identity, records, 3, 2, 210, parts)) == len(
+                bench.render_eml(j, identity, records, 3, 2, 210, parts)
+            )
+        for c in (0, 1):
+            assert bench.token_estimate(bench._paragraph(i, c, 210)) == bench.token_estimate(
+                bench._paragraph(j, c, 210)
+            )
+
+
+def test_file_size_check_is_exact_for_many_parts(bench):
+    # n parts cost n - 1 times the second part's bytes more than one.
+    args = bench.parse_args(_argv({"--per-message": "7", "--messages": "120"}))
+    assert bench._largest_file(args) == max(
+        len(bench.render_eml(i, "typical", "typical", 0, 1, bench.BODY_TOKENS, 7))
+        for i in range(120)
+    )

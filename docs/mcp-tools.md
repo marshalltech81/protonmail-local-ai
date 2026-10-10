@@ -1903,15 +1903,17 @@ bytes. The indexer's own truncating checkpoint (every 10 minutes)
 cannot finish while a round holds its snapshot; it logs busy and
 retries on its next pass.
 
-In the runs before the final cap-sized one the WAL windows were timed
-from the end of the `COUNT` scan; commits during that scan were retained
-but not counted, so those overlapping-commit counts are slightly low
-(the WAL sizes are sampled every 5 ms, so a maximum can miss the frames of
-the last commits before the window closed and is a lower bound; the
-benchmark now also reads the size as the window closes; the size read and
-the commit count share no boundary, so `wal_bytes_per_commit` can be off by
-one commit at each end of the window). The final
-cap-sized run takes the snapshot first.
+The WAL figures above were taken with the earlier method: the runs
+before the final cap-sized one timed the window from the end of the
+`COUNT` scan, and every run sampled the WAL size every 5 ms and read it
+again as the window closed, with no boundary shared with the commit
+count, so a maximum could miss the last commits' frames and
+`wal_bytes_per_commit` could be off by a commit or more at each end. The
+benchmark now takes both sizes and the count from the writer's own
+record after each commit (`wal_window`), split at the window's two
+timestamps; the only remaining bias is that a window's first commits
+can reuse WAL space freed before the snapshot, which lowers growth per
+commit by at most the starting size over the commit count.
 
 The writer of the runs before the final cap-sized one also inserted one
 row into a table per commit, to time the commits; it is removed. The
