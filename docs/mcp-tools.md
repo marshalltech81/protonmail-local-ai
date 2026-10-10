@@ -1786,13 +1786,41 @@ missing members all worst-case records: a 100-record message round took
 1.1 to 1.2 s and peaked at 181 MiB streamed (537 MiB collected); 1,000
 message records (159 MB) took 1.8 to 5.2 s at 757 MiB; a 1,000-record
 occurrence round (17.7 MB) took 10.7 s streamed (197 MiB) and 6.3 s
-collected (216 MiB). That occurrence round is slower than the analyzed
-475,000-occurrence run above (4.0 to 4.5 s collected, with 998 ASCII
-IDs), so the time at 600,000 occurrences is not extrapolated: the
-cap-sized combined run (200,000 messages, 600,000 occurrences, 600,000
-extras) has not been measured. Its build is expected to take about 25 minutes and
-45 GB (scaled from the 60,000-message build), and the limits below hold only until it is
-([#1376](https://github.com/marshalltech81/protonmail-local-ai/pull/1376)).
+collected (216 MiB). That run is not a guide to larger sets, so it was repeated at the
+caps ([#1395](https://github.com/marshalltech81/protonmail-local-ai/issues/1395)):
+200,000 messages and 600,000 occurrences built (a 44.9 GB database,
+2,469 s to build), 190,000 messages and 570,000 occurrences matching
+(5 % are in Trash), four-byte IDs, one message in fifty with worst-case
+records, uploads of exactly 200,000 and 600,000 digests (11,000 and
+31,000 of them extras), 1,000 missing members, all worst-case records,
+median of three runs.
+
+| Cap-sized | Certificate scan, stream / collect | Round, K = 100, stream / collect | Round, K = 1,000, stream / collect |
+|---|---|---|---|
+| Messages | 88.8 s, 85 MiB / 29.0 s, 823 MiB | 54.6 s, 224 MiB / 28.4 s, 1.56 GiB | 73.9 s, 799 MiB / 44.3 s, 1.56 GiB |
+| Occurrences | 817.8 s, 84 MiB / 224.6 s, 152 MiB | 353.8 s, 220 MiB / 163.7 s, 287 MiB | 351.7 s, 277 MiB / 169.1 s, 353 MiB |
+
+The responses were 16.6 MB (100 message records), 160 MB (1,000
+message records) and 19.1 MB (1,000 occurrence records). Under an
+unthrottled writer a message round (67 to 77 s) grew the WAL by 3.6 GB
+at 11,366 overlapping commits, and by 223 MB at ten commits a second;
+an occurrence round (344 to 365 s) by 5.7 GB at 17,897 commits, and by
+1.0 GB at ten a second. After each round the truncating checkpoint
+returned busy 0 and left the WAL at 0 bytes.
+
+What the figures show: memory is not the ceiling (799 MiB at most with
+the scan method proposed below, stream for messages and collect for
+occurrences; the collected message scan, not proposed, reached
+1.56 GiB). Time is. A round at the caps holds one read snapshot for 55
+to 74 s on messages and 164 to 169 s on occurrences with the proposed
+scan method (28 to 44 s and 352 s with the other). The indexer's
+truncating checkpoint cannot finish for that long, and the WAL holds
+every frame written meanwhile (1.0 GB over a 365 s streamed occurrence
+round at ten commits a second). The cap of 600,000 occurrences
+therefore implies a snapshot of about three minutes per round on this
+corpus shape, and 200,000 messages one of about a minute; whether that
+is acceptable, or the caps should be lower, is an owner decision.
+Nothing here measures a larger set.
 
 **WAL under a concurrent writer.** A second process committed, in a
 loop, eight message updates plus a ballast blob per transaction while
@@ -1844,7 +1872,8 @@ retries on its next pass.
 - **Scan method:** stream for messages (flat RSS whatever the ID width)
   and collect for occurrences, whose IDs are a fixed 64 bytes: the full
   collect round was 1.6 to 2.4 times faster on occurrences, for at most
-  69 MiB more peak RSS at the caps measured, and a collected
+  76 MiB more peak RSS at the caps measured (2.1 times faster at the
+  cap-sized run), and a collected
   certificate stayed under one page's cost for every filter, where a
   streamed one reached 7.6 times.
 - **Filtered queries:** no further cap. With that scan method a
