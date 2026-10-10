@@ -367,14 +367,17 @@ def build(
     order, threads of four, ``per_message`` attachment occurrences each.
 
     ``records`` sets the response-record fields: ``typical``; ``worst``,
-    every character-clipped field past its clip in four-byte characters
-    (a 2000-character subject, 11 participants per role, 11 references,
-    In-Reply-To, filename and MIME type of 501 characters, a 255-byte
-    file name); or ``cardinality``, the most rows a record can carry
-    (``MAX_MESSAGE_ADDRESSES`` address occurrences, the parser's cap, of which
-    ``MAX_EXTRA_PARTICIPANT_NAMES`` repeat one address with further names, and
-    ``references`` References entries, which the parser does not cap by
-    count).
+    every character-clipped field past its clip with what the parser can
+    store (four-byte characters in the subject, display names and
+    filename; ASCII addresses with an ``@``, IDs and MIME type; 11
+    participants per role and 11 references; a nested Maildir path);
+    ``mixed``, one message in fifty ``worst``; ``cardinality``, the most
+    rows a record can carry (``MAX_MESSAGE_ADDRESSES`` uniquely named
+    addresses, the parser's cap, and ``references`` References entries,
+    which the parser does not cap by count); or ``cardinality_names``,
+    the same cap spent on ``MAX_MESSAGE_ADDRESSES`` minus
+    ``MAX_EXTRA_PARTICIPANT_NAMES`` unique addresses plus that many
+    repeats of one address carrying further names.
 
     Every message gets ``chunks`` body chunks of ``chunk_tokens`` words
     each (``_body``; the parser splits a large message into roughly
@@ -805,11 +808,11 @@ def phase_reconcile(
     with closing(_ro(db_path)) as conn:
         conn.execute("BEGIN")
         # BEGIN is deferred: the first statement takes the snapshot when
-        # it starts, so a trivial read takes it, and the wall clock the
+        # it starts, so a trivial read takes it, and the monotonic clock the
         # WAL phase lines up with its samples is read right after,
         # before the COUNT scan.
         conn.execute("SELECT 1 FROM messages LIMIT 1").fetchone()
-        started_at = time.time()
+        started_at = time.monotonic()
         count = conn.execute(count_sql, params).fetchone()[0]
         digest = hashlib.sha256(CERT_DOMAIN)
         server: set[bytes] = set()
@@ -842,7 +845,7 @@ def phase_reconcile(
             time.sleep(hold_s)
         # Still inside the transaction: its frames are retained until the
         # rollback.
-        ended_at = time.time()
+        ended_at = time.monotonic()
         conn.rollback()
     response = {
         "complete": missing_total <= k,
@@ -1061,7 +1064,7 @@ def phase_writer(db_path: str, stop: str, commit_bytes: int, interval: float) ->
             conn.execute("COMMIT")
             # Stamped after the commit: a commit is in a round's window
             # only once it is durable.
-            times.append(time.time())
+            times.append(time.monotonic())
             commits += 1
             if interval:
                 time.sleep(interval)
@@ -1237,7 +1240,7 @@ def run_wal(
         samples: list[tuple[float, int]] = []
         t.start()
         while t.is_alive():
-            samples.append((time.time(), size()))
+            samples.append((time.monotonic(), size()))
             time.sleep(0.005)
         if failure:
             raise RuntimeError("reconcile round failed") from failure[0]
@@ -1537,6 +1540,8 @@ def _require_balanced_repeat(args: argparse.Namespace) -> None:
         raise SystemExit(
             "--filtered needs --chunk-tokens of at least 20 (sparse chunks hide FTS5 growth)"
         )
+    if args.extracted_chars < 0 or args.request_shapes < 0:
+        raise SystemExit("--extracted-chars and --request-shapes must not be negative")
     if args.references < 0:
         raise SystemExit("--references must not be negative")
     if args.chunks < 1 or args.chunk_tokens < 1:

@@ -540,9 +540,11 @@ def test_round_window_starts_after_the_snapshot_and_ends_before_the_rollback(ben
     src = inspect.getsource(bench.phase_reconcile)
     # The deferred BEGIN takes its snapshot at the COUNT; the writer's
     # commits are retained until the rollback.
-    assert src.index('"SELECT 1 FROM messages LIMIT 1"') < src.index("started_at = time.time()")
-    assert src.index("started_at = time.time()") < src.index("count = conn.execute")
-    assert src.index("ended_at = time.time()") < src.index("conn.rollback()")
+    assert src.index('"SELECT 1 FROM messages LIMIT 1"') < src.index(
+        "started_at = time.monotonic()"
+    )
+    assert src.index("started_at = time.monotonic()") < src.index("count = conn.execute")
+    assert src.index("ended_at = time.monotonic()") < src.index("conn.rollback()")
 
 
 def test_wal_commits_are_stamped_by_the_writer_after_they_commit(report):
@@ -747,6 +749,8 @@ def _ns(**kw):
         "chunk_tokens": 40,
         "chunks": 1,
         "references": 0,
+        "extracted_chars": 0,
+        "request_shapes": 0,
         "wal": False,
         "writer_commit_bytes": [131072],
     }
@@ -830,3 +834,18 @@ def test_alternate_names_trade_participants_within_the_address_budget(bench, tmp
 def test_negative_references_are_refused_before_building(bench):
     with pytest.raises(SystemExit):
         bench._require_balanced_repeat(_ns(references=-1))
+
+
+@pytest.mark.parametrize("kw", [{"extracted_chars": -1}, {"request_shapes": -1}])
+def test_negative_workload_sizes_are_refused_before_building(bench, kw):
+    with pytest.raises(SystemExit):
+        bench._require_balanced_repeat(_ns(**kw))
+
+
+def test_wal_windows_use_the_monotonic_clock(bench):
+    import inspect
+
+    for fn in (bench.phase_reconcile, bench.phase_writer, bench.run_wal):
+        src = inspect.getsource(fn)
+        assert "time.time()" not in src
+    assert "time.monotonic()" in inspect.getsource(bench.phase_writer)
