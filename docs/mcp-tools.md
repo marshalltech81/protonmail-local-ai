@@ -1769,10 +1769,10 @@ streamed, 156 MiB collected), 2,000 are 34.1 MB (207 / 210 MiB) and
 
 **Full Maildir paths.** The benchmark's worst-case records carry the
 unclipped folder and source path (nested folders of 252 bytes to about
-3.5 KB), which the cap-sized run above predates: with them a worst-case
-message record is 166.0 KB (158.9 KB before) and an occurrence record
-24.1 KB (17.1 KB before), 7.1 KB more each, so 1,000 records are 7.1 MB
-more than the cap-sized responses above. That run was not repeated.
+3.5 KB), which the tables of record sizes above predate: with them a worst-case
+message record is 7.1 KB larger and an occurrence record 7.1 KB larger
+(measured on 4-byte IDs: 158.9 to 166.0 KB and 17.1 to 24.1 KB). The
+cap-sized run above includes them.
 
 **Rows behind a record.** The server's record readers load every
 participant row and every References entry of a message before the
@@ -1799,80 +1799,59 @@ digests (27.4 MB and 31.5 MB; 600,000 of them extras) took 0.09 to
 0.12 s to parse, returned 40.3 to 41.4 MB and peaked at 354 to
 400 MiB.
 
-**Combined worst case, without planner statistics.** The figures above
-were taken on a synthetic index that had been `ANALYZE`d; neither the
-indexer nor the server runs `ANALYZE` or `PRAGMA optimize`, so a
-deployed index has no `sqlite_stat1` and the benchmark no longer builds
-one (`--records mixed` and `--upload-total` build the combined shape).
-On 60,000 messages with four-byte IDs (4,009 bytes) and 180,000
-occurrences, one message in fifty carrying worst-case records, an
-upload filled to 60,000 and 180,000 digests with extras, and the
-missing members all worst-case records: a 100-record message round took
-1.1 to 1.2 s and peaked at 181 MiB streamed (537 MiB collected); 1,000
-message records (159 MB) took 1.8 to 5.2 s at 757 MiB; a 1,000-record
-occurrence round (17.7 MB) took 10.7 s streamed (197 MiB) and 6.3 s
-collected (216 MiB). That run is not a guide to larger sets, so it was repeated at the
-caps
-([#1395](https://github.com/marshalltech81/protonmail-local-ai/issues/1395)),
-with the largest accepted upload: 200,000 messages and 600,000
-occurrences built (a 44.9 GB database, 2,208 s to build), 190,000
-messages and 570,000 occurrences matching (5 % are in Trash), four-byte
-IDs (4,009 bytes), one message in fifty with worst-case records, and an
-upload of exactly 200,000 and 600,000 digests that holds no member (all
-200,000 and 600,000 are extras the server does not hold), so every
-member is missing and each round returns K worst-case records
-(`--all-extras`). Two runs of each step, the scan method that runs first
-alternating; the figure is the median of the two, which for two is
-their mean, so a cold and a warm run are blended.
+**Combined worst case at the caps, without planner statistics.** The
+figures above were taken on a synthetic index that had been `ANALYZE`d;
+neither the indexer nor the server runs `ANALYZE` or `PRAGMA optimize`,
+so a deployed index has no `sqlite_stat1` and the benchmark no longer
+builds one. The run below
+([#1395](https://github.com/marshalltech81/protonmail-local-ai/issues/1395))
+builds 200,000 messages and 600,000 occurrences (a 28.7 GB database,
+1,790 s to build) with the longest claimant ID the parser can produce
+(`ascii998`, 1,015 bytes), one message in fifty with worst-case records
+and full nested Maildir paths. 190,000 messages and 570,000 occurrences
+match (5 % are in Trash). The upload is the largest accepted: exactly
+200,000 and 600,000 digests that hold no member, all extras the server
+does not hold (`--all-extras`), so every member is missing and each
+round returns K worst-case records and all the extras. Two runs of each
+step, with the scan method and K order alternating; each figure is the
+median of the two, which for two is their mean.
 
-| Cap-sized | Certificate (count and scan), stream / collect | Round, K = 100, stream / collect | Round, K = 1,000, stream / collect |
+| Cap-sized | Certificate, stream / collect | Round, K = 100, stream / collect | Round, K = 1,000, stream / collect |
 |---|---|---|---|
-| Messages | 33.5 s, 84 MiB / 12.4 s, 823 MiB | 36.1 s, 322 MiB / 20.9 s, 1.58 GiB | 7.6 s, 903 MiB / 11.2 s, 1.58 GiB |
-| Occurrences | 302.7 s, 84 MiB / 160.4 s, 128 MiB | 298.7 s, 498 MiB / 160.4 s, 521 MiB | 296.9 s, 561 MiB / 164.0 s, 548 MiB |
+| Messages | 13.2 s, 84 MiB / 3.5 s, 281 MiB | 1.4 s, 310 MiB / 0.8 s, 503 MiB | 3.0 s, 849 MiB / 1.2 s, 853 MiB |
+| Occurrences | 96.8 s, 84 MiB / 79.7 s, 152 MiB | 49.4 s, 522 MiB / 47.1 s, 522 MiB | 70.8 s, 574 MiB / 42.5 s, 574 MiB |
 
-The responses were 29.3 MB (100 message records), 172 MB (1,000
-message records), 41.9 MB (100 occurrence records) and 57.3 MB (1,000
-occurrence records), each with the extras (67 bytes each as hex).
-Under a concurrent writer at ten commits a second a streamed round
-(48 to 62 s on messages, 287 to 296 s on occurrences) grew the WAL by
-186 MB on messages and 859 MB on occurrences; unthrottled, by 5.2 GB
-(16,231 commits) and 21.0 GB (65,877 commits). After each round the
-truncating checkpoint returned busy 0 and left the WAL at 0 bytes.
+The responses were 29.1 MB (100 message records), 170 MB (1,000 message
+records), 41.7 MB (100 occurrence records) and 55.3 MB (1,000
+occurrence records), each with the extras (67 bytes each as hex). Under
+a concurrent writer (a streamed round) at ten commits a second the WAL
+grew by 56 MB over an 18.5 s message round and 425 MB over a 141 s
+occurrence round; unthrottled, by 3.6 GB (11,291 commits, 17.5 s) and
+25.4 GB (80,461 commits, 176 s). The rounds under a writer last longer
+than the same rounds alone. After each round the truncating checkpoint
+returned busy 0 and left the WAL at 0 bytes.
 
-Stream against collect, with the scan-method order balanced: collect
-was faster by 1.7 to 2.7 times on messages at K = 100 and in the
-certificate, and by 1.8 to 1.9 times on occurrences; at K = 1,000 on
-messages stream was faster (7.6 s against 11.2 s). A cap-sized run
-taken with stream always first put collect at 2.2 times on occurrence
-rounds and 3.6 on the occurrence certificate; balanced they are 1.8 to
-1.9 and 1.9.
-
-**K is not compared.** In this run K ran ascending within each repeat,
-so the first K (100) of each scan method was read on a colder page
-cache than the later K (1,000), and the times of one K are not
-comparable with another's. Each round time above is labelled with its
-K. The K = 100 time is the conservative one for how long a round holds
-its snapshot; nothing here claims how K changes it. The benchmark now
-alternates K ascending and descending across repeats, which balances
-only with `--repeat` of at least 2, and this run predates it.
-
-What the figures show, for one round at a time: time, not memory, is
-the ceiling. Memory peaked at 903 MiB with the scan method proposed
-below (stream for messages, collect for occurrences; the collected
-message scan, not proposed, reached 1.58 GiB). Concurrent rounds were
-not measured
+What the figures show, for one round at a time: memory peaked at 853
+MiB (a message round of 1,000 records; the extras and the records
+dominate, not the scan), and time is the larger limit for occurrences.
+A round at the caps holds one read snapshot for 0.8 to 3.0 s on
+messages and 42 to 71 s on occurrences, longer under a writer (141 s at
+ten commits a second), and the indexer's truncating checkpoint cannot
+finish meanwhile. Concurrent rounds were not measured
 ([#1423](https://github.com/marshalltech81/protonmail-local-ai/issues/1423)).
-A round at the caps holds one read snapshot for 7.6 s (K = 1,000) to
-36 s (K = 100) on messages and 160 to 164 s on occurrences with the
-proposed scan method (11 to 21 s and 297 to 299 s with the other).
-The indexer's
-truncating checkpoint cannot finish for that long, and the WAL holds
-every frame written meanwhile (0.86 GB over a 287 s streamed
-occurrence round at ten commits a second). A cap of 600,000 occurrences
-therefore implies a snapshot of nearly three minutes per round on this
-corpus shape; whether that snapshot time is acceptable, or the caps
-should be lower, is an owner decision. Nothing here measures a larger
-set.
+Whether those snapshot times are acceptable, or the caps should be
+lower, is an owner decision; nothing here measures a larger set.
+
+Stream against collect, order balanced: collect was faster in every row
+but one tie, by 3.8 times on the message certificate and 1.8 to 2.5
+times on message rounds, and by 1.2 times on the occurrence certificate
+and 1.05 to 1.7 times on occurrence rounds. Peak RSS was higher for
+collect on the message certificate (281 MiB against 84) and at K = 100
+(503 against 310 MiB), and equal elsewhere. An earlier run on a
+4,009-byte ID shape, which the parser cannot produce (#1424), showed
+collect 1.8 to 1.9 times faster on occurrences and made streaming
+messages look necessary (collected message rounds peaked at 1.58 GiB);
+with the reachable width it does not.
 
 **Method notes.** Each scan method runs as its own process, but the page
 cache is the host's, so a method that always ran second would inherit
@@ -1881,7 +1860,7 @@ which method runs first at each repeat (and in the filtered runs), and
 reports in `first_runs` how often each ran first. The tables before
 "Combined worst case" were taken with stream first, so their
 collect-over-stream speedups may be overstated; the cap-sized run
-below was taken in alternating order and is not affected.
+above was taken in alternating order and is not affected.
 The benchmark refuses a `--repeat` that cannot balance the orders (one,
 or a multiple of two, or of six with `--filtered`); the cap-sized run used
 two. The collect scan time covers fetching, ordering and hashing, as the
@@ -1910,19 +1889,20 @@ bytes. The indexer's own truncating checkpoint (every 10 minutes)
 cannot finish while a round holds its snapshot; it logs busy and
 retries on its next pass.
 
-The WAL windows were timed from the end of the `COUNT` scan until the
-benchmark took its snapshot at the first statement; commits during that
-scan were retained but not counted, so the recorded overlapping-commit
-counts are slightly low (the WAL sizes are measured directly).
+In the runs before the final cap-sized one the WAL windows were timed
+from the end of the `COUNT` scan; commits during that scan were retained
+but not counted, so those overlapping-commit counts are slightly low
+(the WAL sizes are measured directly). The final cap-sized run takes the
+snapshot first.
 
-The writer of the cap-sized runs (above and below) also inserted one
+The writer of the runs before the final cap-sized one also inserted one
 row into a table per commit, to time the commits; it is removed. The
 same small configuration (20,000 messages, an unthrottled writer, about
 17,000 commits per round) with and without it left 319.1 KB (messages)
 and 319.2 KB (occurrences) of WAL per overlapping commit with the
 insert and 315.0 KB and 315.1 KB without, 1.3 % less: about one 4 KB
-page per commit. Discount the cap-sized WAL figures by that much; they
-were not repeated.
+page per commit. Discount those WAL figures by that much; the final cap-sized
+run has no such insert.
 
 **Proposed limits, from these figures.**
 
@@ -1934,8 +1914,9 @@ were not repeated.
   On the largest records measured, with few extras, that is 15.9 MB and
   17.1 MB per response at a peak RSS of 167 MiB and 156 MiB; with the
   largest accepted upload (all extras, 200,000 and 600,000 of them) the
-  cap-sized run measured 29.3 MB and 322 MiB for 100 message records
-  and 57.3 MB and 548 MiB for 1,000 occurrence records. A typical
+  cap-sized run measured 29.1 MB and 310 MiB for 100 message records
+  and 55.3 MB and 574 MiB for 1,000 occurrence records (a round of
+  1,000 message records: 170 MB, 849 MiB). A typical
   response is 0.1 MB and 1.0 MB. A larger K would need a byte budget
   per response alongside it to keep the worst case bounded, which the
   approved design does not include.
@@ -1945,7 +1926,8 @@ were not repeated.
   the verdict is not certified with a fixed reason. After a paged run
   that missed a few members it is one round; a repair from nothing at
   47,500 messages is 475 rounds (under a minute streamed with typical
-  IDs, about 5 minutes with four-byte ones), and at 142,500 occurrences
+  IDs, about 5 minutes with 4,009-byte ones, which the parser cannot
+  produce), and at 142,500 occurrences
   143 rounds (about a minute collected).
 - **Request size:** a packed upload as above, 43 bytes per digest. At
   most 200,000 messages (8.5 MB) and 600,000 occurrences (25.6 MB) per
@@ -1955,14 +1937,17 @@ were not repeated.
   refused before it is parsed. Extras number at most the uploaded
   digests, so they add at most 67 bytes each as hex (43 packed) to a
   response.
-- **Scan method:** stream for messages (flat RSS whatever the ID width)
-  and collect for occurrences, whose IDs are a fixed 64 bytes: the full
-  collect round was 1.6 to 2.4 times faster on occurrences, for at most
-  23 MiB more peak RSS at the cap-sized run (1.8 to 1.9 times
-  faster there, order balanced), and a collected
-  certificate cost at most 1.06 times one page in the balanced filtered
-  runs, where a streamed one reached 2.8 times (7.6 times in the earlier
-  runs, stream first).
+- **Scan method:** collect, for both kinds. At the caps with the
+  longest reachable ID (1,015 bytes), order balanced, collect was
+  faster than stream in every cap-sized row but one tie (3.8 times on
+  the message certificate, 1.8 to 2.5 on message rounds, 1.2 and 1.05
+  to 1.7 on occurrences), for at most 193 MiB more peak RSS (281
+  against 84 MiB on the message certificate, 503 against 310 MiB at
+  K = 100, equal elsewhere). A collected certificate cost at most 1.06
+  times one page in the balanced filtered runs, where a streamed one
+  reached 2.8 times (7.6 times in the earlier runs, stream first).
+  Streaming messages was proposed on a 4,009-byte ID shape the parser
+  cannot produce.
 - **Filtered queries:** no bound is proposed or claimed. The work of
   a filtered predicate per message is not bounded by the message-count
   cap (a message can carry the parser's maximum of chunks, participant
