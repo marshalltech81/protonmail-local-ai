@@ -913,6 +913,7 @@ def test_absent_and_zero_are_resolved_as_the_table_says(bench, changes, name, ab
         ({"--extracted-chars": "5", "--per-message": "0", "--missing": "0"}, "--per-message"),
         ({"--records": "mixed", "--missing-from": "worst", "--missing": "0"}, "leaves nothing"),
         ({"--writer-commit-bytes": "5"}, "need --wal"),
+        ({"--wal": None, "--messages": "7", "--missing": "0", "--per-message": "0"}, "8 messages"),
         ({"--writer-interval": "0.5"}, "need --wal"),
         ({"--wal-hold": "1"}, "need --wal"),
         ({"--repeat": "3"}, "cannot balance"),
@@ -1017,3 +1018,33 @@ def test_file_size_check_is_exact_for_many_parts(bench):
         len(bench.render_eml(i, "typical", "typical", 0, 1, bench.BODY_TOKENS, 7))
         for i in range(120)
     )
+
+
+def test_writer_flips_eight_distinct_messages_a_commit(bench, tmp_path):
+    db = tmp_path / "eight.db"
+    bench.build(db, 8, 0, "typical", "typical")
+
+    def seen() -> list[int]:
+        with closing(sqlite3.connect(db)) as conn:
+            return [r[0] for r in conn.execute("SELECT seen FROM messages ORDER BY rowid")]
+
+    built = seen()
+    stop = tmp_path / "stop"
+    import threading
+
+    timer = threading.Timer(0.3, stop.touch)
+    timer.start()
+    out = bench.phase_writer(str(db), str(stop), 16, 0.01)
+    timer.join()
+    assert out["commits"] > 0
+    # Every commit flips all eight messages, so an even count leaves
+    # each seen flag as built and an odd one inverts all eight.
+    expected = [1 - x for x in built] if out["commits"] % 2 else built
+    assert seen() == expected
+
+
+def test_round_parse_time_excludes_the_request_file_read(bench):
+    import inspect
+
+    src = inspect.getsource(bench.phase_reconcile)
+    assert src.index("read_bytes()") < src.index("t0 = time.perf_counter()")

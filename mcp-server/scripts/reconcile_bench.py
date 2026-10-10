@@ -1049,8 +1049,11 @@ def phase_reconcile(
     worst-case records."""
     _import_serializers()
     count_sql, scan, params = scan_sql(kind)
+    # The server holds the request body before it parses it: the file
+    # read is outside every timing.
+    request_body = Path(request).read_bytes()
     t0 = time.perf_counter()
-    client = set(unpack_hashes(Path(request).read_bytes()))
+    client = set(unpack_hashes(request_body))
     t_parse = time.perf_counter()
     with closing(_ro(db_path)) as conn:
         conn.execute("BEGIN")
@@ -1305,11 +1308,14 @@ def phase_writer(db_path: str, stop: str, commit_bytes: int, interval: float) ->
         top = conn.execute("SELECT MAX(rowid) FROM messages").fetchone()[0]
         while not os.path.exists(stop):
             conn.execute("BEGIN IMMEDIATE")
-            rowids = [rng.randint(1, top) for _ in range(8)]
-            conn.execute(
+            # Eight distinct messages (``check_args`` requires eight).
+            rowids = rng.sample(range(1, top + 1), 8)
+            flipped = conn.execute(
                 "UPDATE messages SET seen = 1 - seen WHERE rowid IN (?, ?, ?, ?, ?, ?, ?, ?)",
                 rowids,
-            )
+            ).rowcount
+            if flipped != 8:
+                raise RuntimeError(f"writer updated {flipped} messages, not 8")
             cur = conn.execute(
                 "INSERT INTO bench_ballast (payload) VALUES (randomblob(?))", (commit_bytes,)
             )
@@ -1879,7 +1885,8 @@ ARGS: tuple[Arg, ...] = (
         "writer_commit_bytes",
         "ints",
         None,
-        0,
+        # randomblob() makes at least one byte.
+        1,
         MAX_BLOB,
         absent="131072 with --wal",
         help="ballast bytes per writer commit (--wal only)",
@@ -2059,6 +2066,10 @@ _RULES: tuple = (
         lambda a: "--filtered excludes --extracted-chars (its attachment chunks are not built)",
     ),
     (lambda a: True, _chunk_problem),
+    (
+        lambda a: a.wal and a.messages < 8,
+        lambda a: "--wal needs at least 8 messages (each writer commit updates eight)",
+    ),
     (
         lambda a: not a.wal and a.explicit_wal,
         lambda a: "--writer-commit-bytes, --writer-interval and --wal-hold need --wal",
