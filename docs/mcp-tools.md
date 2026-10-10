@@ -1816,21 +1816,28 @@ Under a concurrent writer at ten commits a second a streamed round
 (16,231 commits) and 21.0 GB (65,877 commits). After each round the
 truncating checkpoint returned busy 0 and left the WAL at 0 bytes.
 
-Stream against collect, with the order balanced: collect was faster on
-every row but one, by 1.7 to 2.7 times on messages at K = 100 and in the
-certificate, and by 1.8 to 1.9 times on occurrences. At K = 1,000 on
-messages stream was faster (7.6 s against 11.2 s): the stream and
-collect times of the same round differ more between a cold and a warm
-cache than between the methods, so the message-round times above are
-not a stable ranking. A cap-sized run taken with stream
-always first put collect at 2.2 times on occurrence rounds and 3.6 on
-the occurrence certificate; balanced they are 1.8 to 1.9 and 1.9.
+Stream against collect, with the scan-method order balanced: collect
+was faster by 1.7 to 2.7 times on messages at K = 100 and in the
+certificate, and by 1.8 to 1.9 times on occurrences; at K = 1,000 on
+messages stream was faster (7.6 s against 11.2 s). A cap-sized run
+taken with stream always first put collect at 2.2 times on occurrence
+rounds and 3.6 on the occurrence certificate; balanced they are 1.8 to
+1.9 and 1.9.
+
+**K is not compared.** In this run K ran ascending within each repeat,
+so the first K (100) of each scan method was read on a colder page
+cache than the later K (1,000), and the times of one K are not
+comparable with another's. Each round time above is labelled with its
+K. The K = 100 time is the conservative one for how long a round holds
+its snapshot; nothing here claims how K changes it. The benchmark now
+alternates K ascending and descending across repeats, which balances
+only with `--repeat` of at least 2, and this run predates it.
 
 What the figures show: memory is not the ceiling (at most 903 MiB with
 the scan method proposed below, stream for messages and collect for
 occurrences; the collected message scan, not proposed, reached
 1.58 GiB). Time is. A round at the caps holds one read snapshot for 7.6
-to 36 s on messages and 160 to 164 s on occurrences with the proposed
+s (K = 1,000) to 36 s (K = 100) on messages and 160 to 164 s on occurrences with the proposed
 scan method (11 to 21 s and 297 to 299 s with the other). The indexer's
 truncating checkpoint cannot finish for that long, and the WAL holds
 every frame written meanwhile (0.86 GB over a 287 s streamed
@@ -1872,6 +1879,15 @@ bytes. The indexer's own truncating checkpoint (every 10 minutes)
 cannot finish while a round holds its snapshot; it logs busy and
 retries on its next pass.
 
+The writer of the cap-sized runs (above and below) also inserted one
+row into a table per commit, to time the commits; it is removed. The
+same small configuration (20,000 messages, an unthrottled writer, about
+17,000 commits per round) with and without it left 319.1 KB (messages)
+and 319.2 KB (occurrences) of WAL per overlapping commit with the
+insert and 315.0 KB and 315.1 KB without, 1.3 % less: about one 4 KB
+page per commit. Discount the cap-sized WAL figures by that much; they
+were not repeated.
+
 **Proposed limits, from these figures.**
 
 - **Prerequisites:** bound each record's read (#1377, #1381) before
@@ -1879,8 +1895,7 @@ retries on its next pass.
 - **K:** 100 message records and 1,000 occurrence records per round.
   On the largest records measured that is 15.9 MB and 17.1 MB per
   response at a peak RSS of 167 MiB and 156 MiB; a typical response is
-  0.1 MB and 1.0 MB. The scan, not K, dominates a round on typical
-  records, so a larger K saves little time; it would need a byte budget
+  0.1 MB and 1.0 MB. A larger K would need a byte budget
   per response alongside it to keep the worst case bounded, which the
   approved design does not include.
 - **Retry bound:** at most ceil(M / K) + 3 rounds per run, where M is

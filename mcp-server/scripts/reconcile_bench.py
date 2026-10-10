@@ -184,9 +184,6 @@ CREATE TABLE pending_deletions (
 -- Writer ballast for the WAL phase: stands for the chunk and vector
 -- rows an indexer commit writes.
 CREATE TABLE bench_ballast (id INTEGER PRIMARY KEY, payload BLOB NOT NULL);
--- The wall-clock time of each writer commit, to count the commits that
--- overlap a round's transaction.
-CREATE TABLE bench_commits (at REAL NOT NULL);
 -- Message and occurrence identities whose records are worst-case
 -- (``--records mixed``), for an upload that leaves exactly those out.
 CREATE TABLE bench_worst (identity TEXT PRIMARY KEY);
@@ -988,7 +985,6 @@ def phase_writer(db_path: str, stop: str, commit_bytes: int, interval: float) ->
                 "INSERT INTO bench_ballast (payload) VALUES (randomblob(?))", (commit_bytes,)
             )
             conn.execute("DELETE FROM bench_ballast WHERE id <= ?", (cur.lastrowid - 64,))
-            conn.execute("INSERT INTO bench_commits (at) VALUES (?)", (time.time(),))
             conn.execute("COMMIT")
             # Stamped after the commit: a commit is in a round's window
             # only once it is durable.
@@ -1046,13 +1042,17 @@ def write_request(
     if missing_from == "worst":
         with closing(_ro(db_path)) as conn:
             worst = {row[0].encode() for row in conn.execute("SELECT identity FROM bench_worst")}
-        available = [n for n, b in enumerate(ids) if b in worst]
-        if len(available) < missing and not all_extras:
-            raise ValueError(
-                f"--missing-from worst: {len(available)} worst-case {kind} match, "
-                f"--missing asks for {missing}; build more with --messages or lower --missing"
-            )
-        skip = set(available[:missing])
+        candidates = [n for n, b in enumerate(ids) if b in worst]
+    else:
+        candidates = list(range(len(ids)))
+    # Every mode leaves out exactly ``missing`` members or refuses.
+    if len(candidates) < missing and not all_extras:
+        raise ValueError(
+            f"--missing-from {missing_from}: {len(candidates)} {kind} can be left out, "
+            f"--missing asks for {missing}; build more with --messages or lower --missing"
+        )
+    if missing_from == "worst":
+        skip = set(candidates[:missing])
     else:
         step = max(1, len(ids) // missing) if missing else 0
         skip = set(range(0, len(ids), step)[:missing]) if missing else set()
@@ -1368,22 +1368,36 @@ def _alternating(repeat: int, call) -> dict[str, list[dict]]:
     return runs
 
 
+def _balanced_k(repeat: int, ks: list[int], call) -> dict[int, dict[str, list[dict]]]:
+    """``call(k, method)`` ``repeat`` times for each K and scan method.
+    The page cache is the host's and persists across runs, so the order
+    alternates each repeat: K ascending, then descending, and within a K
+    the method that runs first swaps too."""
+    runs: dict[int, dict[str, list[dict]]] = {k: {"stream": [], "collect": []} for k in ks}
+    for n in range(repeat):
+        for k in ks if n % 2 == 0 else list(reversed(ks)):
+            for method in ("stream", "collect") if n % 2 == 0 else ("collect", "stream"):
+                runs[k][method].append(call(k, method))
+    return runs
+
+
 def _reconcile_runs(db: str, kind: str, request: Path, req: dict, args: argparse.Namespace) -> dict:
     out: dict = {"stream": {}, "collect": {}}
+    by_k = _balanced_k(
+        args.repeat,
+        args.k,
+        lambda k, m: _child(
+            "reconcile",
+            db_path=db,
+            kind=kind,
+            k=k,
+            request=str(request),
+            method=m,
+            worst_first=args.all_extras,
+        ),
+    )
     for k in args.k:
-        by_method = _alternating(
-            args.repeat,
-            lambda m, k=k: _child(
-                "reconcile",
-                db_path=db,
-                kind=kind,
-                k=k,
-                request=str(request),
-                method=m,
-                worst_first=args.all_extras,
-            ),
-        )
-        for method, runs in by_method.items():
+        for method, runs in by_k[k].items():
             r0 = runs[0]
             out[method][str(k)] = {
                 "returned": r0["returned"],

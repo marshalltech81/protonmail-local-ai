@@ -185,8 +185,9 @@ def test_failed_round_stops_the_writer(bench, tmp_path):
     bench.build(db, 20, 1, "typical", "typical")
 
     def commits() -> int:
+        # The ballast rowid grows by one with every writer commit.
         with closing(sqlite3.connect(db)) as conn:
-            return conn.execute("SELECT COUNT(*) FROM bench_commits").fetchone()[0]
+            return conn.execute("SELECT COALESCE(MAX(id), 0) FROM bench_ballast").fetchone()[0]
 
     with pytest.raises(RuntimeError, match="reconcile round failed"):
         bench.run_wal(str(db), "messages", 5, str(tmp_path / "missing.json"), 4096, 0.0)
@@ -540,5 +541,43 @@ def test_wal_commits_are_stamped_by_the_writer_after_they_commit(report):
 def test_missing_worst_beyond_the_worst_members_is_rejected(bench, tmp_path):
     db = tmp_path / "few.db"
     bench.build(db, 60, 1, "typical", "mixed")  # one worst message in fifty
-    with pytest.raises(ValueError, match="--missing-from worst: .* match, --missing asks for 50"):
+    with pytest.raises(
+        ValueError, match="--missing-from worst: .* can be left out, --missing asks for 50"
+    ):
         bench.write_request(str(db), "messages", 50, 0, tmp_path / "r.json", "worst")
+
+
+def test_writer_commits_carry_no_instrumentation_row(bench, tmp_path):
+    db = tmp_path / "plain2.db"
+    bench.build(db, 20, 1, "typical", "typical")
+    with closing(sqlite3.connect(db)) as conn:
+        names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master")}
+    assert "bench_commits" not in names
+
+
+def test_k_and_method_order_alternate_across_repeats(bench):
+    order = []
+
+    def call(k, method):
+        order.append((k, method))
+        return {}
+
+    bench._balanced_k(2, [100, 1000], call)
+    assert order == [
+        (100, "stream"),
+        (100, "collect"),
+        (1000, "stream"),
+        (1000, "collect"),
+        (1000, "collect"),
+        (1000, "stream"),
+        (100, "collect"),
+        (100, "stream"),
+    ]
+
+
+@pytest.mark.parametrize("mode", ["spread", "worst"])
+def test_missing_beyond_the_available_members_is_rejected_in_every_mode(bench, tmp_path, mode):
+    db = tmp_path / f"short-{mode}.db"
+    bench.build(db, 60, 1, "typical", "mixed")
+    with pytest.raises(ValueError, match=f"--missing-from {mode}: .* can be left out"):
+        bench.write_request(str(db), "messages", 500, 0, tmp_path / "r.json", mode)
